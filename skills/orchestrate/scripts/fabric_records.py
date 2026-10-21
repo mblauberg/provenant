@@ -278,10 +278,12 @@ def write_route_health(row, *, path=None, at=None):
     status = row.get("status", "failed")
     if status == "failed" and row.get("evidence", {}).get("signature") == "empty_output":
         status = "empty_output"
-    if status not in {"ok", "quarantined", "failed", "empty_output", "cancelled", "rate_limited", "usage_limited"}:
+    if status not in {"ok", "quarantined", "failed", "empty_output", "cancelled", "rate_limited", "usage_limited", "permission_blocked"}:
         status = "failed"
     key = f"{adapter}|{model}|{task_class}"
     entry = {"status": status, "task_class": task_class, "at": timestamp(at), "run_id": row.get("run_id", "")}
+    if status == "ok" and row.get("evidence", {}).get("signature") == "exit_after_output":
+        entry["warning"] = "exit_after_output"
     with locked(path.with_name("route-health.lock")):
         try:
             if path.is_symlink():

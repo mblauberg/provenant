@@ -28,7 +28,7 @@ import tempfile
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, NoReturn
 
 # The shared library sits one level above this skill. Resolving it from the
 # skill rather than from a repository root two levels further up keeps the
@@ -54,7 +54,7 @@ CANCEL_MARKER_NAME = "cancel.request"
 BRANCH_TYPES = "feat|fix|refactor|perf|test|docs|chore|ci|build"
 BRANCH_PATTERN = re.compile(rf"^(?:(?:{BRANCH_TYPES}|proto)/[a-z][a-z0-9]*-[a-z0-9]+(?:-[a-z0-9]+){{1,4}}|land/[0-9]{{8}}-[a-z0-9]+(?:-[a-z0-9]+)*)$")
 
-from _shared.bounded_process import stop_process_group
+from _shared.bounded_process import BudgetArgumentParser, stop_process_group
 from layout import run_workspace, run_root, contains_run
 import provider_exec
 import memory_admission
@@ -1461,7 +1461,7 @@ def preflight_tasks(tasks: list[dict[str, Any]], workspace_root: Path | None = N
                         [str(workspace / Path(item).expanduser()) for item in task.get("add_dirs") or []],
                         workspace_root=workspace)
                 except (OSError, subprocess.SubprocessError) as exc:
-                    raise PreflightError("secret_scan_unavailable", "Make dispatch inputs readable for the secret scan.") from exc
+                    raise PreflightError("secret_scan_unavailable", f"Make dispatch inputs readable for the secret scan: {exc}") from exc
                 if scan.budget_exceeded and not task.get("allow_secrets", False):
                     raise PreflightError("secret_scan_budget_exceeded", scan.fix())
                 if scan.findings and not task.get("allow_secrets", False):
@@ -1661,7 +1661,7 @@ def contract_row(args,run_dir,number,attempt_dir,plan,started_at):
         "pgid":None,"pgid_started_at":None,"session_id":plan.get("session_id"),"retryable":False,"reset_at":None,"retry_after":None,"fix":None,
         "evidence":{"exit":None,"signal":None,"signature":None,"excerpt":""},"question":None,
         "applied":plan.get("applied",{"sandbox":None,"network":None,"add_dirs":[],"guarantee":"prompt_only"}),
-        "warnings":list(plan.get("warnings",[])) + list(getattr(getattr(args, "_secret_scan", None), "warnings", [])) + list(getattr(args, "_branch_warnings", [])),"provenance":provenance,
+        "warnings":list(plan.get("warnings",[])) + list(getattr(getattr(args, "_secret_scan", None), "warnings", [])) + list(getattr(args, "_branch_warnings", [])) + list(getattr(args, "_resume_warnings", [])),"provenance":provenance,
         "secret_scan":{"allow_secrets":getattr(args,"allow_secrets",False),
                        "finding_names":getattr(getattr(args,"_secret_scan",None),"names",lambda:[])()},
         "timing":{"phases":getattr(args,"_phase_timings",{}).copy()},
@@ -1698,7 +1698,8 @@ def terminal_contract(args,run_dir,legacy,adapter,number,attempt_dir):
         row["provenance"]["pick_reason"]=reason
     row["warnings"] = list(dict.fromkeys(
         list(row.get("warnings", [])) + list(getattr(getattr(args, "_secret_scan", None), "warnings", []))
-        + list(getattr(args, "_memory_warnings", [])) + list(getattr(args, "_branch_warnings", []))))
+        + list(getattr(args, "_memory_warnings", [])) + list(getattr(args, "_branch_warnings", []))
+        + list(getattr(args, "_resume_warnings", []))))
     row["timing"]["queued_seconds"] = getattr(args, "_queued_seconds", 0.0)
     if legacy.get("process_error", "").startswith("Set .agents/fabric-policy.json memory_floor_percent"):
         row["fix"] = legacy["process_error"]
@@ -1777,7 +1778,22 @@ def prepare_resume(args):
         args.provider_cwd = supplied_cwd
     args.workspace_root=Path(previous.get("workspace_root") or (previous.get("workspace") or {}).get("root") or Path.cwd()).expanduser().resolve()
     args.sandbox=previous["applied"]["sandbox"];args.network=None if previous["applied"]["network"] is None else str(previous["applied"]["network"]).lower()
-    args.add_dirs=previous["applied"]["add_dirs"];args.resume_session=previous["session_id"]
+    applied_add_dirs = previous["applied"].get("add_dirs") or []
+    valid_add_dirs = []
+    missing_add_dirs = []
+    for item in applied_add_dirs:
+        p = Path(item).expanduser()
+        target = p if p.is_absolute() else (args.workspace_root / p)
+        if target.exists():
+            valid_add_dirs.append(item)
+        else:
+            missing_add_dirs.append(item)
+    args.add_dirs = valid_add_dirs
+    if missing_add_dirs:
+        args._resume_warnings = getattr(args, "_resume_warnings", []) + [
+            f"dropped missing recorded add_dir: {item}" for item in missing_add_dirs
+        ]
+    args.resume_session=previous["session_id"]
     args.read_roots=previous.get("read_roots") or []
     # A read root was canonical when granted; a directory since swapped for a link is not that grant.
     bound=[*args.read_roots,*([args.provider_cwd] if args.read_roots and args.provider_cwd else [])]
@@ -1929,8 +1945,8 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
         secret_scan_result = secret_scan.scan_inputs(
             prompt_bytes or b"", str(args.prompt_file) if args.prompt_file else "<prompt>", args.add_dirs,
             workspace_root=workspace)
-    except (OSError, subprocess.SubprocessError):
-        return fail(run_dir, "secret_scan_unavailable", "Make dispatch inputs readable for the secret scan.")
+    except (OSError, subprocess.SubprocessError) as exc:
+        return fail(run_dir, "secret_scan_unavailable", f"Make dispatch inputs readable for the secret scan: {exc}")
     if secret_scan_result.budget_exceeded and not getattr(args, "allow_secrets", False):
         print(json.dumps({"status": "rejected", "error": "secret_scan_budget_exceeded", "fix": secret_scan_result.fix()}))
         return 2
@@ -2886,7 +2902,7 @@ def _fabric_hosts_owner():
 
 
 def parser() -> argparse.ArgumentParser:
-    root = argparse.ArgumentParser(description=__doc__)
+    root = BudgetArgumentParser(command_name="dispatch", description=__doc__)
     root.add_argument("--run-dir", type=Path, required=True)
     root.add_argument("--task-id")
     root.add_argument("--host")

@@ -669,6 +669,7 @@ async function legacyStatus(
                 [
                   run.status?.id,
                   run.status?.task_id,
+                  run.status?.task_alias,
                   run.status?.batch_id,
                   run.owner?.task_id,
                   run.owner?.batch_id,
@@ -1092,7 +1093,7 @@ export async function statusRows(
         // prunes a pointer; the source reaper's eligibility (resumable runs,
         // failed-run retention, liveness) governs, and its removal of the run
         // directory is what retires the pointer.
-        if (Number.isFinite(finished) && !includeHistory && finished <= Date.now() - 86400000) continue;
+        if (!ids?.length && Number.isFinite(finished) && !includeHistory && finished <= Date.now() - 86400000) continue;
         const taskIds = Array.isArray(metadata.task_ids) ? metadata.task_ids : [];
         const routes = Array.isArray(metadata.routes) ? metadata.routes : [];
         const recorded = v1Rows(runDir);
@@ -1152,7 +1153,11 @@ export async function statusRows(
     if (ids?.length) {
       for (const id of ids) {
         const exact = v1.filter((row) => [row.run_id, row.run_dir, basename(row.run_dir)].includes(id));
-        const matches = exact.length ? exact : v1.filter((row) => [row.batch_id, row.task_id, row.id].includes(id));
+        const named = v1.filter((row) => [row.batch_id, row.task_id, row.id].includes(id));
+        const matches = exact.length ? exact : named.length ? named : v1.filter((row) => {
+          const metadata = readJson(join(row.run_dir, "dispatch-status.json"));
+          return metadata?.task_alias === id && metadata.task_id === row.task_id;
+        });
         if (matches.length) {
           const newest = matches.reduce((best, row) => (Date.parse(row.started_at) > Date.parse(best.started_at) ? row : best)); // tasks keep batch order
           rows.push(...matches.filter((row) => row.run_dir === newest.run_dir));
@@ -1203,14 +1208,16 @@ export async function statusRows(
 export async function federatedStatusRows(
   workspace: string, ids?: string[], waitSeconds = 0, until: "any" | "all" = "all",
   signal?: AbortSignal, detail: "brief" | "full" = "brief", includeLedger = true, limit: number | null = 20,
+  includeHistory = false,
+  includePointers = false,
 ): Promise<StatusResult> {
   if (!Number.isInteger(waitSeconds) || waitSeconds < 0 || waitSeconds > 55)
     return { status: "rejected", error: "wait_invalid", fix: "Pass wait_seconds from 0 to 55." };
   const deadline = Date.now() + waitSeconds * 1000;
-  const request = { ids, wait_seconds: 0, until, detail, limit };
+  const request = { ids, wait_seconds: 0, until, detail, limit, include_history: includeHistory, include_pointers: includePointers };
   for (;;) {
     const remote = await federatedLane("status", workspace, request, signal);
-    if (!remote) return statusRows(workspace, request.ids, waitSeconds, until, signal, detail, includeLedger, limit);
+    if (!remote) return statusRows(workspace, request.ids, waitSeconds, until, signal, detail, includeLedger, limit, includeHistory, includePointers);
     const done = (row: Record<string, any>) => row.reachability !== "unreachable" && ["terminal", "input_required"].includes(row.state);
     const rows = remote.runs ?? [];
     if (remote.status !== "ok" || !waitSeconds || Date.now() >= deadline || !rows.length || (until === "any" ? rows.some(done) : rows.every(done))) return remote as StatusResult;
@@ -1225,7 +1232,7 @@ export async function fabricStatus(
   waitSeconds = 0,
   signal?: AbortSignal,
 ): Promise<Record<string, any>> {
-  const result = await federatedStatusRows(workspace, id ? [id] : undefined, waitSeconds, "all", signal);
+  const result = await federatedStatusRows(workspace, id ? [id] : undefined, waitSeconds, "all", signal, "brief", true, 20, false, true);
   if (id && result.runs?.length === 1) return result.runs[0]!;
   return result;
 }
@@ -1236,7 +1243,7 @@ export async function fabricOutput(
 ) {
   const remote = await federatedLane("output", workspace, input);
   if (remote) return remote;
-  const result = await statusRows(workspace, [input.id]);
+  const result = await statusRows(workspace, [input.id], 0, "all", undefined, "brief", false, null, false, true);
   if (!result.runs) return result;
   if (result.runs.length !== 1)
     return { status: "rejected", error: "output_ambiguous", fix: "Pass a task id for batch output." };

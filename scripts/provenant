@@ -81,52 +81,152 @@ def resolve_product_root(instance_root: Path | None = None) -> Path:
 
 
 def usage() -> None:
-    print("usage: provenant <help|root|route|routes|capabilities|worktree|clean|check|gate|telemetry|stats|fabric|hosts|peer|lanes|events|dispatch|batch|run> [arguments...]", file=sys.stderr)
+    print("usage: provenant <help|root|route|routes|capabilities|worktree|clean|check|gate|telemetry|stats|quota|fabric|hosts|peer|lanes|events|dispatch|batch|run> [arguments...]", file=sys.stderr)
 
 
 def help_text() -> None:
     print(
         """usage: provenant <command> [arguments...]
 
-Thin front door; each command delegates to its existing owner:
-  root           print the resolved product checkout
-  route ...      scripts/model-route ... (low-level resolver; capability-bound
-                 aliases need a fresh snapshot, normally supplied by dispatch);
-                 `route reset [adapter[/model]]` clears cooldowns
-  routes [--json] [--health]
-                 each global route pool with live availability; --health adds
-                 task-class routes and recent health (same as `help routes`)
-  capabilities ...
-                 skills/orchestrate/scripts/capabilities.py ...
+Thin front door delegating to owners:
+  root           print resolved product checkout
+  route ...      scripts/model-route ...
+  routes ...     scripts/model-route routes
+  capabilities   skills/orchestrate/scripts/capabilities.py
   worktree ...   scripts/worktree ...
-  clean ...      scripts/clean.py ... (dry run by default; --apply --plan <digest>
-                 deletes the approved rows that are still eligible)
+  clean ...      scripts/clean.py ...
   check ...      scripts/check-harness ...
-  gate           scripts/gate (the MAINTAINING.md verification list with
-                 per-step pass/fail output)
+  gate           scripts/gate
   fabric ...     runtime/fabric/bin/fabric ...
-  hosts list [--json] [host…]    configured local host and SSH peers
-  hosts doctor [--json] [host…]  local and peer diagnostics; offline peers get
-                                typed rows without failing the command
-  peer           fixed versioned JSON entrypoint on stdin/stdout (SSH)
-  lanes [--json] [id…]  lane state; use an id to see rows past the 20-row cap
-  lanes --wait [id…]    wait for a lane to finish or need input
-  events --follow       foreground/streaming Fabric task and inbox event stream
-  telemetry ingest|sources [--json]  local metadata-only usage ledger
-  stats [--since ISO-DATE] [--json]  usage, costs and outcomes
+  hosts ...      scripts/fabric-hosts ...
+  peer           scripts/fabric-hosts (SSH)
+  lanes ...      runtime/fabric/bin/fabric lanes
+  events ...     runtime/fabric/bin/fabric events
+  telemetry ...  scripts/provenant-telemetry
+  stats ...      scripts/provenant-telemetry stats
+  quota ...      scripts/provenant-quota
   dispatch ...   skills/orchestrate/scripts/dispatch_run.py ...
   batch ...      skills/orchestrate/scripts/batch_run.py ...
-  run ...        skills/orchestrate/scripts/run_controls.py ...
+  run ...        skills/orchestrate/scripts/run_controls.py
 
-`provenant run cancel` writes one cooperative cancellation request for an
-exact attempt or batch and waits boundedly for owner-written evidence.
-
-Fabric derives who you are from the working directory, so run it from the
-project you mean. `provenant fabric --help` lists its commands.
-Hosts use per-user <instance-root>/.agent-fabric/hosts.json (default ~/.agents).
-With no peers configured, host checks stay local. Every supported MCP chair
-can use fabric_hosts with action=list|doctor and optional hosts selectors."""
+Use `provenant help <command>` for detail."""
     )
+
+
+COMMAND_DETAILS: dict[str, str] = {
+    "root": (
+        "usage: provenant root\n\n"
+        "Print the resolved product checkout."
+    ),
+    "route": (
+        "usage: provenant route ...\n\n"
+        "Delegates to scripts/model-route ...\n"
+        "Low-level resolver; capability-bound aliases need a fresh snapshot,\n"
+        "normally supplied by dispatch.\n"
+        "`route reset [adapter[/model]]` clears cooldowns."
+    ),
+    "routes": (
+        "usage: provenant routes [--json] [--health]\n\n"
+        "Delegates to scripts/model-route routes ...\n"
+        "Each global route pool with live availability; --health adds\n"
+        "task-class routes and recent health."
+    ),
+    "capabilities": (
+        "usage: provenant capabilities ...\n\n"
+        "Delegates to skills/orchestrate/scripts/capabilities.py ...\n"
+        "Inspect provider and adapter capabilities."
+    ),
+    "worktree": (
+        "usage: provenant worktree ...\n\n"
+        "Delegates to scripts/worktree ...\n"
+        "Create, list and remove managed Git worktrees."
+    ),
+    "clean": (
+        "usage: provenant clean ...\n\n"
+        "Delegates to scripts/clean.py ...\n"
+        "Dry run by default; --apply --plan <digest> deletes the approved rows\n"
+        "that are still eligible."
+    ),
+    "check": (
+        "usage: provenant check ...\n\n"
+        "Delegates to scripts/check-harness ...\n"
+        "Run harness static, format and repository policy checks."
+    ),
+    "gate": (
+        "usage: provenant gate\n\n"
+        "Delegates to scripts/gate.\n"
+        "The MAINTAINING.md verification list with per-step pass/fail output."
+    ),
+    "fabric": (
+        "usage: provenant fabric ...\n\n"
+        "Delegates to runtime/fabric/bin/fabric ...\n"
+        "Fabric derives who you are from the working directory, so run it from the\n"
+        "project you mean. `provenant fabric --help` lists its commands."
+    ),
+    "hosts": (
+        "usage: provenant hosts list|doctor [--json] [host…]\n\n"
+        "Delegates to scripts/fabric-hosts.\n"
+        "  hosts list [--json] [host…]    configured local host and SSH peers\n"
+        "  hosts doctor [--json] [host…]  local and peer diagnostics; offline peers get\n"
+        "                                typed rows without failing the command\n\n"
+        "Hosts use per-user <instance-root>/.agent-fabric/hosts.json (default ~/.agents).\n"
+        "With no peers configured, host checks stay local. Every supported MCP chair\n"
+        "can use fabric_hosts with action=list|doctor and optional hosts selectors."
+    ),
+    "peer": (
+        "usage: provenant peer\n\n"
+        "Delegates to scripts/fabric-hosts peer.\n"
+        "Fixed versioned JSON entrypoint on stdin/stdout (SSH)."
+    ),
+    "lanes": (
+        "usage: provenant lanes [--json] [--all] [id…]\n"
+        "       provenant lanes --wait [--all] [--timeout N] [id…]\n\n"
+        "Delegates to runtime/fabric/bin/fabric lanes ...\n"
+        "Default shows active lanes plus the 5 most recent terminal ones;\n"
+        "use --all to list all lanes.\n"
+        "`lanes --wait` waits for a lane to finish or need input."
+    ),
+    "events": (
+        "usage: provenant events --follow\n\n"
+        "Delegates to runtime/fabric/bin/fabric events ...\n"
+        "Foreground/streaming Fabric task and inbox event stream."
+    ),
+    "telemetry": (
+        "usage: provenant telemetry ingest|sources [--json]\n\n"
+        "Delegates to scripts/provenant-telemetry.\n"
+        "Local metadata-only usage ledger."
+    ),
+    "stats": (
+        "usage: provenant stats [--since ISO-DATE] [--json]\n\n"
+        "Delegates to scripts/provenant-telemetry.\n"
+        "Usage, costs and outcomes."
+    ),
+    "quota": (
+        "usage: provenant quota [--refresh] [--json] | credit list | credit <provider> [--account L] add|use\n\n"
+        "Delegates to scripts/provenant-quota.\n"
+        "Provider-reported quota windows and pace per account; PROVENANT_QUOTA=0 disables fetching."
+    ),
+    "dispatch": (
+        "usage: provenant dispatch ...\n\n"
+        "Delegates to skills/orchestrate/scripts/dispatch_run.py ...\n"
+        "Own a durable run of provider attempts, including fallback and session resume."
+    ),
+    "batch": (
+        "usage: provenant batch ...\n\n"
+        "Delegates to skills/orchestrate/scripts/batch_run.py ...\n"
+        "Run a fixed, bounded set of ordinary dispatch attempts."
+    ),
+    "run": (
+        "usage: provenant run ...\n\n"
+        "Delegates to skills/orchestrate/scripts/run_controls.py ...\n"
+        "`provenant run cancel` writes one cooperative cancellation request for an\n"
+        "exact attempt or batch and waits boundedly for owner-written evidence."
+    ),
+    "help": (
+        "usage: provenant help [command]\n\n"
+        "Print general help, or detail for a specific command."
+    ),
+}
 
 
 def execute(
@@ -315,11 +415,14 @@ def main(arguments: list[str]) -> int:
     elif command == "help" and command_arguments == ["routes"]:
         command, command_arguments = "route", ["routes", "--health"]
     elif command in {"help", "-h", "--help"}:
-        if command_arguments:
-            usage()
-            return 2
-        help_text()
-        return 0
+        if not command_arguments:
+            help_text()
+            return 0
+        if len(command_arguments) == 1 and command_arguments[0] in COMMAND_DETAILS:
+            print(COMMAND_DETAILS[command_arguments[0]])
+            return 0
+        usage()
+        return 2
 
     if command == "root":
         if command_arguments:
@@ -341,6 +444,7 @@ def main(arguments: list[str]) -> int:
     owners = {
         "telemetry": "scripts/provenant-telemetry",
         "stats": "scripts/provenant-telemetry",
+        "quota": "scripts/provenant-quota",
         "peer": "scripts/fabric-hosts",
         "hosts": "scripts/fabric-hosts",
         "route": "scripts/model-route",

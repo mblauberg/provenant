@@ -463,7 +463,7 @@ register(
     if (result.host) return runView(withWarnings(result, waitResult.warnings), input.detail);
     const runId = result.id ?? (input.session ? result.run_id : undefined);
     if (!runId) return withWarnings(result, waitResult.warnings);
-    const observed = await statusRows(who.project, [String(runId)], 0, "all", signal, input.detail);
+    const observed = await statusRows(who.project, [String(runId)], 0, "all", signal, input.detail, true, 20, false, true);
     if ((input.resume || input.session) && result.task_id) observed.runs = observed.runs?.filter((row) => row.task_id === result.task_id);
     acknowledgeRuns(observed);
     if (observed.runs?.length === 1) {
@@ -504,7 +504,7 @@ register(
   async ({ ids, id, wait_seconds, until, detail, tail_chars, fields }, { signal }) => {
     const waitResult = boundedWait(wait_seconds);
     if (waitResult.error) return waitResult.error;
-    const result = await statusRows(who.project, ids ?? (id ? [id] : undefined), waitResult.value, until, signal, detail);
+    const result = await statusRows(who.project, ids ?? (id ? [id] : undefined), waitResult.value, until, signal, detail, true, 20, false, true);
     acknowledgeRuns(result);
     const view = detail === "full"
       ? fullView(runView(withWarnings(result, waitResult.warnings), detail), fields)

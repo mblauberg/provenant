@@ -50,6 +50,8 @@ CONFINED_STATE = {
         # ~/.opencode is the install script's home and OpenCode v2's legacy global config directory;
         # its config discovery stats it at startup and fails with a 500 when that is denied.
         "read": (".config/opencode", ".opencode"),
+        # Discovery lstats these names in the cwd and every ancestor even with Claude compatibility off.
+        "ancestor_metadata": (".claude", ".codex"),
     },
     "claude": {
         "read_write": (".claude", ".claude.json*", ".cache/claude", ".npm"),
@@ -496,6 +498,11 @@ def os_confinement_profile(plan, search_path=None):
     add_dirs = [Path(path) for path in plan.get("applied", {}).get("add_dirs", [])]
     run_dir = Path(plan["run_dir"]) if plan.get("run_dir") else None
     state_writes = _state_paths(home, state.get("read_write", ()))
+    cwd_path = Path(plan["cwd"]).resolve()
+    discovery_metadata = [ancestor / name for ancestor in (cwd_path, *cwd_path.parents)
+                          for name in state.get("ancestor_metadata", ())]
+    # Literal metadata grants must follow protected-path denies, without following a leaf symlink.
+    metadata_grant = _sbpl_rule("allow", "file-read-metadata", discovery_metadata, literal=True, keep_leaf=True)
     if plan.get("mode") == "worktree_write":
         cwd = Path(plan["cwd"])
         git_dirs = {}
@@ -562,7 +569,7 @@ def os_confinement_profile(plan, search_path=None):
         profile += _state_write_guards(home, state)
         profile += _sbpl_rule("deny", "file-write*", plan.get("protected_paths", []))
         profile += _sbpl_rule("deny", "file-read*", plan.get("protected_paths", []))
-        return profile
+        return profile + metadata_grant
     configured_xdg = Path(os.environ.get("XDG_CONFIG_HOME", "")).expanduser()
     xdg_config_home = configured_xdg if configured_xdg.is_absolute() else home / ".config"
     git_config_files = [home / ".gitconfig", xdg_config_home / "git/config"]
@@ -615,6 +622,7 @@ def os_confinement_profile(plan, search_path=None):
                                                 (*EXTRA_DENIED_READS, *state.get("read_denied", ()))])
         + (_claude_session_reads(home, plan) if plan.get("adapter") == "claude" else "")
         + _sbpl_rule("deny", "file-read*", plan.get("protected_paths", []))
+        + metadata_grant
     )
 
 
@@ -1488,6 +1496,7 @@ def parse_output(adapter, stdout, stderr="", exit_code=0, *, at=None):
         "terminal": False,
         "question": None,
     }
+    continues_turn = getattr(config, "continues_turn", lambda event: False)
     events, plain, parts, errors = [], [], [], []
     retry_errors = []
     duplicate_json = False
@@ -1528,6 +1537,9 @@ def parse_output(adapter, stdout, stderr="", exit_code=0, *, at=None):
         errors.append("invalid agy envelope")
     for event in events:
         kind = event.get("type") or ""
+        if continues_turn(event):
+            parts.clear()
+            result["terminal"] = False
         if not kind and isinstance(event.get("event"), str):
             kind = event["event"]  # agy names the event kind `event`
         if adapter == "kiro" and event.get("jsonrpc") == "2.0":
@@ -1699,11 +1711,9 @@ def parse_output(adapter, stdout, stderr="", exit_code=0, *, at=None):
         else "".join(plain)
     )
     errors.extend(retry_errors)
-    failure_text = (
-        "\n".join(errors)
-        if errors
-        else stderr
-    )
+    diagnostic_hook = getattr(config, "diagnostics", None)
+    diagnostics, warning_line = diagnostic_hook(stderr) if diagnostic_hook else (stderr, "")
+    failure_text = "\n".join(errors) if errors else diagnostics
     result["failure_text"] = failure_text
     # Permission denials in diagnostics invalidate a claimed success (Agy does this).
     denial = adapter == "agy" and re.search(PERMISSION_DENIAL_PATTERN, stderr, re.I)
@@ -1721,7 +1731,8 @@ def parse_output(adapter, stdout, stderr="", exit_code=0, *, at=None):
         status = status or (
             "timed_out" if "print-timeout" in failure_text else "failed"
         )
-        result["excerpt"] = failure_text.strip()[:200]
+        result["excerpt"] = ("\n".join(errors).strip() or warning_line or failure_text.strip() or (
+            getattr(config, "EMPTY_FAILURE", "").format(exit_code=exit_code)))[:200]
     elif partial:
         status = "partial"
         result["signature"] = "print_timeout"
@@ -1731,6 +1742,11 @@ def parse_output(adapter, stdout, stderr="", exit_code=0, *, at=None):
         status = "failed"
         result["signature"] = "empty_output"
         result["excerpt"] = ("no assistant text: " + stdout.strip())[:200]
+    if (getattr(config, "EXIT_AFTER_OUTPUT", False) and status == "failed" and result["signature"] is None and exit_code == 1
+            and parts and result["text"].strip() and not errors):
+        status = "ok"
+        result["signature"] = "exit_after_output"
+        result["excerpt"] = (warning_line or f"provider exited {exit_code} after final assistant output")[:200]
     if status == "ok":
         question = re.search(
             r"```(?:[^\n`]*\n)?\s*QUESTION:\s*((?:(?!```).)*?)\s*```\s*\Z", result["text"], re.S
@@ -2917,6 +2933,8 @@ def execute(
     import selectors
     import threading
 
+    adapter_config = profile(plan["adapter"])
+    continues_turn = getattr(adapter_config, "continues_turn", lambda event: False)
     output_path = Path(output_path)
     events_path = Path(events_path or output_path.parent / "events.jsonl")
     stderr_path = Path(stderr_path or output_path.parent / "stderr.log")
@@ -3008,25 +3026,9 @@ def execute(
             ANTHROPIC_AUTH_TOKEN=environment.get(route["endpoint_token_env"], ""),
             ANTHROPIC_API_KEY="",
         )
-    if plan["adapter"] == "opencode":
-        bash_permission = {"*": "allow"} if plan["mode"] == "worktree_write" else {
-            "*": "deny",
-            "provenant-no-shell": "allow",
-        }
-        permission = {
-            "edit": {"*": "allow" if plan["mode"] == "worktree_write" else "deny"},
-            "bash": bash_permission,
-            "question": "deny",
-            "external_directory": {"*": "deny"},
-            "webfetch": "deny" if plan.get("network_requested") is False else "allow",
-        }
-        # The sentinel matches no real command and exists only so Zen declares bash.
-        environment["OPENCODE_CONFIG_CONTENT"] = json.dumps({"permission": permission})
-        # v2 scans ~/.claude for Claude Code skills and CLAUDE.md, which the confinement profile
-        # denies (startup fails with EPERM) and which holds the owner's private instructions.
-        # Autoupdate and the filewatcher have no place in a supervised, sandboxed run.
-        environment.update(OPENCODE_DISABLE_CLAUDE_CODE="1", OPENCODE_DISABLE_CLAUDE_CODE_SKILLS="1",
-                           OPENCODE_DISABLE_AUTOUPDATE="1", OPENCODE_DISABLE_FILEWATCHER="1")
+    adapter_environment = getattr(adapter_config, "environment", None)
+    if adapter_environment:
+        environment.update(adapter_environment(plan))
     warning_text = "\n".join(plan["warnings"])
     if warning_text:
         print(warning_text, file=sys.stderr, flush=True)
@@ -3102,6 +3104,10 @@ def execute(
             if not isinstance(event, dict):
                 continue
             meter.observe(event)
+            if continues_turn(event):
+                text_chunks.clear()
+                text_size = 0
+                terminal_at = None
             parsed_line = parse_output(plan["adapter"], line.decode(errors="replace"))
             for key in ("session_id", "observed_model", "reset_at", "retry_after"):
                 if parsed_line.get(key) is not None:
@@ -3399,7 +3405,9 @@ def execute(
         # state observed before the diagnostic tail rolled over.
         if terminal_text is not None or text_chunks:
             text = terminal_text if terminal_text is not None else b"\n".join(text_chunks).decode(errors="replace")
-            recovered = parse_output(plan["adapter"], json.dumps({"type": "result", "result": text}), stderr,
+            text_event = getattr(adapter_config, "text_event", lambda text: {"type": "result", "result": text})
+            recovered_event = text_event(text)
+            recovered = parse_output(plan["adapter"], json.dumps(recovered_event), stderr,
                                      0 if terminal_grace_break and terminal_at is not None and exit_code is not None and exit_code < 0 else (exit_code or 0))
             for key in ("text", "status", "question", "signature", "excerpt"):
                 parsed[key] = recovered[key]
@@ -3443,6 +3451,8 @@ def execute(
     parsed["session_id"] = session
     observed, source = _observed_model(plan, parsed, environment)
     warnings = list(plan["warnings"])
+    if parsed["signature"] == "exit_after_output":
+        warnings.append(parsed["excerpt"])
     reported = {}
     if plan["adapter"] == "claude":
         # init.model is the request; Claude may answer with another model.
@@ -3600,7 +3610,9 @@ def execute(
             parsed["excerpt"] = "provider error: " + parsed["excerpt"]
     output = (
         parsed["text"]
-        if status in {"ok", "input_required", "partial", "quarantined"} or quarantine and parsed["status"] == "ok"
+        if (status in {"ok", "input_required", "partial", "quarantined"}
+            or quarantine and parsed["status"] == "ok"
+            or plan["adapter"] == "opencode" and terminal_at is not None and parsed["text"].strip())
         else (parsed["text"] + "\n" if parsed["text"] else "")
         + stderr
         + ("\n" + parsed["excerpt"] if parsed["excerpt"] else "")
@@ -3690,7 +3702,8 @@ def execute(
         **({"landable": False, "quarantine": quarantine} if quarantine else {}),
         "reason": parsed["excerpt"],
         "exit": 0
-        if status in {"ok", "input_required", "quarantined"} and terminal_at is not None
+        if status in {"ok", "input_required", "quarantined"}
+        and (terminal_at is not None or parsed["signature"] == "exit_after_output")
         else exit_code,
         "output_path": output_value,
         "output_digest": digest_value,

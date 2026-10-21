@@ -7,7 +7,7 @@ import time
 import pytest
 
 from skills._shared import bounded_process
-from skills._shared.bounded_process import run_bounded
+from skills._shared.bounded_process import BudgetArgumentParser, run_bounded
 
 
 # Timeout tests have to outlive interpreter startup. A deadline tuned to an idle
@@ -272,3 +272,23 @@ def test_output_limit_does_not_read_the_whole_spool_into_memory():
     assert truncated is True
     assert output.startswith("HEAD")
     assert output.endswith("TAIL")
+
+
+def test_budget_argument_parser_emits_one_line_error_with_explicit_command(capsys):
+    parser = BudgetArgumentParser(command_name="custom-cmd")
+    parser.add_argument("--required-arg", required=True)
+
+    with pytest.raises(SystemExit) as exc:
+        parser.parse_args(["--required-arg", "val", "--unknown"])
+    assert exc.value.code == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == "error: unrecognized arguments: --unknown; fix: provenant help custom-cmd\n"
+
+    with pytest.raises(SystemExit) as exc:
+        parser.parse_args([])
+    assert exc.value.code == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == "error: the following arguments are required: --required-arg; fix: pass --required-arg\n"
+

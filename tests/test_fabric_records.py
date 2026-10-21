@@ -148,6 +148,22 @@ def test_route_health_tracks_recent_outcomes_and_expires_stale_cooldowns(tmp_pat
     assert item["cooling_until"] == ""
 
 
+@pytest.mark.parametrize("status,signature", [("permission_blocked", "permission_blocked"), ("ok", "exit_after_output")])
+def test_route_health_keeps_sandbox_failures_and_output_warnings_neutral(tmp_path, status, signature):
+    row = json.loads((FIX / "attempt.json").read_text())
+    row.update(status=status, task_class="review")
+    row["evidence"]["signature"] = signature
+    path = tmp_path / "health.json"
+    at = datetime(2026, 9, 24, tzinfo=UTC)
+    records().write_route_health(row, path=path, at=at)
+    health = records().read_route_health(path, cooldowns_path=tmp_path / "cooldowns.json", at=at)
+    item = next(iter(health.values()))
+    assert item["recent_failures"] == 0
+    assert item["recent"][0]["status"] == status
+    if signature == "exit_after_output":
+        assert item["recent"][0]["warning"] == signature
+
+
 def test_malformed_catalogue_keeps_cooldown_identity_and_warns(tmp_path, monkeypatch):
     from skills.orchestrate.scripts import exec_routing
     monkeypatch.setattr(exec_routing, 'snapshot', lambda: {'adapters': {'codex': {'models': [{}]}}})

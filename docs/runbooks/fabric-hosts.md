@@ -467,3 +467,23 @@ The real-sshd test is opt-in through `PROVENANT_SSHD_TESTS=1`. Run it outside a
 sandbox that prevents sshd from starting, with `/usr/sbin/sshd` available, to
 verify the documented `command=` restriction. A skipped test leaves that
 acceptance criterion pending; the loopback shim does not prove it.
+
+
+## Telemetry summaries
+
+`provenant stats --hosts all` or `--hosts <host…>` reads local and peer usage
+aggregates through the existing SSH transport. The read-only `telemetry.stats`
+verb takes `params: {"schema_version": 1, "since": "2026-10-21"}`; `since` is
+optional. Its result uses `provenant.telemetry.summary.v1` and contains aggregate
+session/model/day groups, never raw ledger events or credentials. Peers must
+have an ingested schema-4 ledger; the read never creates or migrates it. Request
+and response bounds and configured SSH deadlines apply. Older, offline or
+malformed peers produce typed partial host rows without failing stats. With no
+peers, the command stays local.
+
+Ledger rows and quota snapshots carry the configured `local_host`, with the
+hostname as telemetry's fallback. Quota is account-scoped and already includes
+use from every host. When peers report the same provider/account label, stats
+uses its freshest cached quota observation. It never sums quota percentages or
+writes peer snapshots into the local route state. See [telemetry](telemetry.md)
+for account configuration, credential handling, routing and coverage limits.
