@@ -3064,6 +3064,40 @@ def tool_cache_environment(plan, cache, inherited):
     return environment
 
 
+# agy rewrites its bin/agentapi shim before running a command and puts bin/ on that command's
+# PATH, so a later unconfined agy session or sidecar would run whatever a lane left there (#1055).
+# A confined lane gets a HOME of links to the real entries, with its own antigravity-cli/bin; the
+# sandbox still judges every access through a link at the real path, and the live bin/ stays
+# read-only. agy signs in from the login Keychain, so its token files are not linked: a refresh
+# renamed over a link would land here and leave the real file stale.
+AGY_PRIVATE_BIN = Path(".gemini/antigravity-cli/bin")
+AGY_UNLINKED = ("agentapi", "antigravity-oauth-token", "mcp_oauth_tokens.json", "oauth_creds.json")
+
+
+def _remove_entry(path):
+    if path.is_symlink() or path.is_file():
+        path.unlink()
+    elif path.exists():
+        shutil.rmtree(path)  # Unlinks links without following them.
+
+
+def stage_agy_home(plan, private_tmp):
+    """The confined agy lane's HOME, rebuilt every attempt so nothing a lane planted survives."""
+    if plan["adapter"] != "agy" or plan["applied"].get("confinement") != "sandbox-exec":
+        return None
+    overlay = private_tmp / "agy-home"
+    _remove_entry(overlay)
+    source, target = Path.home(), overlay
+    for part in (*AGY_PRIVATE_BIN.parts, None):
+        target.mkdir(mode=0o700)
+        for name in sorted(os.listdir(source)) if source.is_dir() else ():
+            if name != part and not name.startswith(AGY_UNLINKED):
+                (target / name).symlink_to(source / name)
+        if part is not None:
+            source, target = source / part, target / part
+    return overlay
+
+
 def stage_ps_shim(private_tmp):
     """Copy the ps shim into the attempt's temp, which every sandbox lets the lane read.
 
@@ -3334,6 +3368,8 @@ def execute(
     try:
         _prepare_codex_capability_home(plan, environment)
         _prepare_codex_state_dir(plan)
+        if agy_home := stage_agy_home(plan, private_tmp):
+            environment["HOME"] = str(agy_home)
         if plan["adapter"] != "codex" and "browser" in plan["applied"].get("capabilities", []):
             environment["MAC_CHROMIUM_TMPDIR"] = str(private_tmp)  # Chrome's default temp is outside the boundary.
         if plan["stdin_policy"] == "prompt":
@@ -3758,6 +3794,10 @@ def execute(
             created_instructions.rmdir()  # Only the empty directory this attempt added.
         except OSError:
             pass
+    try:
+        _remove_entry(private_tmp / "agy-home")
+    except OSError:
+        pass
     if instruction_changes:
         warnings.append(("instruction assurance unavailable: " if unverifiable else
                          "lane changed " + INSTRUCTION_DIR + "/ beyond its start and integration branch: ")

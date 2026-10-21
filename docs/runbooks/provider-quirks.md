@@ -41,6 +41,26 @@ in `skills/orchestrate`; this page records the traps.
 - Large or code-heavy prompts have hung with zero output, and `--print-timeout`
   is not honoured. Send compact per-region prompts and wrap the call in an
   external watchdog. Treat agy output as advisory until checked independently.
+- agy rewrites `~/.gemini/antigravity-cli/bin/agentapi` (a 58-byte shim that
+  execs agy) before it runs a command, puts that `bin/` on the command's PATH,
+  and fails the command when the write is refused (#1055). Its app data
+  directory is `$HOME/.gemini/antigravity-cli`. No environment variable moves
+  it: this build has no `AGY_CONFIG_DIR`, and setting `ANTIGRAVITY_APP_DATA_DIR`,
+  `JETSKI_APP_DATA_DIR`, `ANTIGRAVITY_EXECUTABLE_DATA_DIR`,
+  `ANTIGRAVITY_GEMINI_DIR` or `ANTIGRAVITY_PLUGIN_SHIM_DIR` did not move the
+  shim (2026-10-22). A confined lane therefore runs with a per-attempt `HOME`
+  of links to the real entries. Only `antigravity-cli/bin` is the lane's own
+  directory, where agy writes its shim. The real `bin/` keeps no write grant.
+  The sandbox judges every access through a link at the real path. The overlay
+  is rebuilt before and removed after each attempt. agy signs in from the
+  login Keychain: with the token files left out of the overlay, it still
+  authenticated under `sandbox-exec`. An empty `HOME` fails with
+  `authentication failed or timed out`. On 2026-10-22 a confined read-only
+  lane ran `git rev-parse --short HEAD` and returned the right commit. The live
+  shim's SHA-256 and mtime were the same before and after the run. agy copies its embedded `webm_encoder`
+  into `bin/` when that file is missing, but accepts a link to the real one.
+  Write-and-restore of the live shim was rejected: it left a window in which a
+  lane's bytes could run unconfined.
 - Quota errors name the reset window and may cover one hosted-model pool:
   read the window rather than retrying, and switch to another available pool.
   Probe quota with the model the real lane will use.

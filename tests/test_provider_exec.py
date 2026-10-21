@@ -896,7 +896,8 @@ PROVIDER_STATE_CASES = (
     ("agy", (".gemini/config/mcp_config.json", ".gemini/config/plugins/attack.js",
              ".gemini/config/skills/attack/SKILL.md", ".gemini/antigravity-cli/settings.json",
              ".gemini/antigravity-cli/plugins/attack.js", ".gemini/antigravity-cli/skills/attack/SKILL.md",
-             ".gemini/antigravity-cli/bin/attack", ".gemini/antigravity-cli/builtin/skills/attack.md",
+             ".gemini/antigravity-cli/bin/attack", ".gemini/antigravity-cli/bin/agentapi",
+             ".gemini/antigravity-cli/builtin/skills/attack.md",
              ".gemini/antigravity-cli/mcp/server/instructions.md",
              ".gemini/antigravity-cli/cache/marketplaces/attack.js", ".gemini/config/projects/probe.json",
              ".gemini/config/sidecars/attack.json"),
@@ -1142,6 +1143,101 @@ def test_agy_prepares_fresh_state_and_allows_atomic_runtime_rewrites(monkeypatch
         denied.parent.mkdir(parents=True, exist_ok=True)
         assert subprocess.run([*command, f"printf bad > {shlex.quote(str(denied))}"],
                               capture_output=True, text=True).returncode != 0
+
+
+def agy_home_fixture(mod, monkeypatch, tmp_path):
+    home = (tmp_path / "home").resolve()
+    root = home / ".gemini/antigravity-cli"
+    for relative in (".gitconfig", ".gemini/config/settings.json", ".gemini/oauth_creds.json",
+                     ".gemini/antigravity-cli/settings.json", ".gemini/antigravity-cli/antigravity-oauth-token",
+                     ".gemini/antigravity-cli/mcp_oauth_tokens.json", ".gemini/antigravity-cli/conversations/c.pb",
+                     ".gemini/antigravity-cli/bin/agentapi", ".gemini/antigravity-cli/bin/webm_encoder"):
+        (home / relative).parent.mkdir(parents=True, exist_ok=True)
+        (home / relative).write_text("original\n", encoding="utf-8")
+    monkeypatch.setattr(mod.Path, "home", lambda: home)
+    return home, root
+
+
+def test_confined_agy_home_links_everything_but_its_bin_shim_and_token_files(monkeypatch, tmp_path):
+    mod = supervisor()
+    home, root = agy_home_fixture(mod, monkeypatch, tmp_path)
+    private_tmp = tmp_path / "attempt/tmp"
+    private_tmp.mkdir(parents=True)
+    plan = {"adapter": "agy", "applied": {"confinement": "sandbox-exec"}}
+    overlay = mod.stage_agy_home(plan, private_tmp)
+    assert overlay == private_tmp / "agy-home"
+    lane_root = overlay / ".gemini/antigravity-cli"
+    for directory in (overlay, overlay / ".gemini", lane_root, lane_root / "bin"):
+        assert directory.is_dir() and not directory.is_symlink(), directory
+    for relative in (".gitconfig", ".gemini/config", ".gemini/antigravity-cli/settings.json",
+                     ".gemini/antigravity-cli/conversations", ".gemini/antigravity-cli/bin/webm_encoder"):
+        assert (overlay / relative).readlink() == home / relative, relative
+    for relative in (".gemini/oauth_creds.json", ".gemini/antigravity-cli/antigravity-oauth-token",
+                     ".gemini/antigravity-cli/mcp_oauth_tokens.json", ".gemini/antigravity-cli/bin/agentapi"):
+        assert not (overlay / relative).exists() and not (overlay / relative).is_symlink(), relative
+
+    # A lane may change its own overlay; the next attempt starts from the real home again.
+    (lane_root / "bin/agentapi").write_text("planted\n", encoding="utf-8")
+    (lane_root / "settings.json").unlink()
+    (lane_root / "settings.json").write_text("planted\n", encoding="utf-8")
+    assert mod.stage_agy_home(plan, private_tmp) == overlay
+    assert not (lane_root / "bin/agentapi").exists()
+    assert (lane_root / "settings.json").readlink() == root / "settings.json"
+    assert (root / "bin/agentapi").read_text() == "original\n"
+
+    assert mod.stage_agy_home({**plan, "adapter": "claude"}, private_tmp) is None
+    assert mod.stage_agy_home({"adapter": "agy", "applied": {"confinement": "none"}}, private_tmp) is None
+
+
+def test_confined_agy_writes_its_shim_in_the_overlay_and_never_the_live_bin(monkeypatch, tmp_path):
+    mod = supervisor()
+    _, root = agy_home_fixture(mod, monkeypatch, tmp_path)
+    sandbox_exec = mod._sandbox_exec_path()
+    if not sandbox_exec:
+        pytest.skip("sandbox-exec is unavailable or disabled")
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    run_dir = tmp_path / "attempt"
+    (run_dir / "tmp").mkdir(parents=True)
+    plan = {"adapter": "agy", "mode": "read_only", "cwd": str(workspace), "workspace_root": str(workspace),
+            "run_dir": str(run_dir), "applied": {"confinement": "sandbox-exec", "add_dirs": []}}
+    profile = mod.os_confinement_profile(plan)
+    overlay = mod.stage_agy_home(plan, run_dir / "tmp")
+
+    def run(script):
+        return subprocess.run([sandbox_exec, "-p", profile, "/bin/sh", "-c", script],
+                              capture_output=True, text=True, check=False,
+                              env={**os.environ, "HOME": str(overlay)})
+
+    probe = run("true")
+    if probe.returncode and "sandbox_apply" in probe.stderr:
+        pytest.skip("sandbox_apply is refused in this test environment")
+    shim = '#!/bin/sh\nexec "/usr/local/bin/agy" agentapi "$@"\n'
+    assert run(f'printf {shlex.quote(shim)} > "$HOME/.gemini/antigravity-cli/bin/agentapi"').returncode == 0
+    assert (overlay / ".gemini/antigravity-cli/bin/agentapi").read_text() == shim
+    # Every link is judged at its real path: state stays writable, config and the live bin do not.
+    assert run('printf new > "$HOME/.gemini/antigravity-cli/conversations/c.pb"').returncode == 0
+    assert (root / "conversations/c.pb").read_text() == "new"
+    for relative in ("settings.json", "bin/webm_encoder"):
+        assert run(f'printf bad > "$HOME/.gemini/antigravity-cli/{relative}"').returncode != 0, relative
+        assert (root / relative).read_text() == "original\n"
+    assert run(f"printf bad > {shlex.quote(str(root / 'bin/agentapi'))}").returncode != 0
+    assert (root / "bin/agentapi").read_text() == "original\n"
+
+
+def test_agy_attempt_runs_with_the_overlay_home_and_removes_it(monkeypatch, tmp_path):
+    mod = supervisor()
+    agy_home_fixture(mod, monkeypatch, tmp_path)
+    attempt = tmp_path / "attempt"
+    attempt.mkdir()
+    plan = fixture_plan(tmp_path, "import json, os; print(json.dumps({'status': 'SUCCESS', "
+                        "'response': os.environ['HOME']}))", "agy", run_dir=attempt)
+    plan["applied"]["confinement"] = "sandbox-exec"
+    monkeypatch.setattr(mod, "confinement_command", lambda plan, command, search_path=None: command)
+    record = mod.execute(plan, attempt / "result.md")
+    assert record["status"] == "ok", record
+    assert (attempt / "result.md").read_text() == str(attempt / "tmp/agy-home")
+    assert not (attempt / "tmp/agy-home").exists()
 
 
 @pytest.mark.parametrize("adapter,project", [
