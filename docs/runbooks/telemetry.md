@@ -235,9 +235,9 @@ Deficit is shown in `provenant routes` and JSON only; it does not lower weights.
 OpenCode has no usage or limits endpoint, and its Go documentation states
 per-model dollar limits (5 hour 20%, weekly 50%, monthly 100% of a monthly cap)
 without reset times, so Provenant assumes no windows. The opencode provider
-is a local estimate: it sums paid `opencode-go` spend on this machine (`opencode
-stats --json --models --days 7|30`; the 5 hour window reads `opencode.db`
-read-only) and divides by limits you configure. Free zen models are ignored,
+is a local estimate: it sums paid `opencode-go` message cost on this machine from
+`opencode.db` (opened read-only, by message timestamp over rolling 5 hour, 7 day and
+30 day windows) and divides by limits you configure. Free zen models are ignored,
 other hosts' use is not counted, and reset times are not reported. Without
 `limits`, windows are unreported.
 
