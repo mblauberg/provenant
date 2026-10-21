@@ -1457,3 +1457,86 @@ def test_a_full_two_second_range_splits_before_it_is_called_saturated(tmp_path, 
         db.execute("INSERT INTO meta VALUES ('changes_sync', ?)", (json.dumps(state),))
         added, pending, incomplete = owner.sync(telemetry, db)
         assert (added, pending, incomplete) == (8, 0, 0)
+
+
+def test_lane_attempts_in_different_projects_with_the_same_run_ids_stay_distinct(tmp_path):
+    """Regression: the receipt's own location is part of a lane.attempt's identity."""
+    other = tmp_path / 'other-project'
+    registry = tmp_path / 'state/fabric.sqlite3'
+    registry.parent.mkdir(parents=True, exist_ok=True)
+    with sqlite3.connect(registry) as db:
+        db.execute('CREATE TABLE agents (project TEXT)')
+        db.execute('INSERT INTO agents VALUES (?)', (str(other),))
+    for project in (tmp_path, other):
+        receipt(project, 'run-same', 1, status='ok', provenance=route('codex', 'gpt-6.1-sol'))
+    for _ in range(2):
+        assert cli(tmp_path, 'telemetry', 'ingest').returncode == 0
+    with sqlite3.connect(tmp_path / 'state/telemetry.sqlite3') as db:
+        refs = [row[0] for row in db.execute("SELECT source_ref FROM events WHERE kind='lane.attempt'")]
+        assert len(refs) == 2 and len(set(refs)) == 2
+        db.execute("DELETE FROM meta WHERE key='event_ids'")  # a later re-key keeps both
+    assert cli(tmp_path, 'telemetry', 'ingest').returncode == 0
+    with sqlite3.connect(tmp_path / 'state/telemetry.sqlite3') as db:
+        assert db.execute("SELECT COUNT(*) FROM events WHERE kind='lane.attempt'").fetchone()[0] == 2
+
+
+def test_identical_collector_records_on_one_line_keep_their_multiplicity(tmp_path):
+    """Regression: each record's position on its collector line is part of its identity."""
+    point = {'asDouble': 5.0, 'timeUnixNano': '1792544400000000000',
+             'attributes': otlp_attributes(type='user', session__id='chair')}
+    otel = tmp_path / 'state/otel/metrics-20261021.ndjson'
+    jsonl(otel, otlp_line('metrics', {'resourceMetrics': [{'resource': {'attributes': []}, 'scopeMetrics': [
+        {'metrics': [{'name': 'claude_code.active_time.total',
+                      'sum': {'aggregationTemporality': 1, 'dataPoints': [point, point, point]}}]}]}]}))
+    assert cli(tmp_path, 'telemetry', 'ingest').returncode == 0
+    database = tmp_path / 'state/telemetry.sqlite3'
+    with sqlite3.connect(database) as db:
+        assert db.execute("SELECT COUNT(*) FROM events WHERE kind='otel.metric'").fetchone()[0] == 3
+        # An earlier build stored refs without the record position; the re-key restores it in order.
+        db.execute("UPDATE events SET source_ref=substr(source_ref, 1, instr(source_ref, '#') - 1), "
+                   "event_id='legacy-' || rowid WHERE kind='otel.metric'")
+        db.execute("DELETE FROM meta WHERE key='event_ids'")
+        db.execute("DELETE FROM cursors WHERE source='otel'")
+    assert cli(tmp_path, 'telemetry', 'ingest').returncode == 0
+    with sqlite3.connect(database) as db:
+        assert db.execute("SELECT COUNT(*) FROM events WHERE kind='otel.metric'").fetchone()[0] == 3
+
+
+CONCURRENT_UPGRADE = """
+import importlib.util, sys, time
+spec = importlib.util.spec_from_file_location('upgrade', sys.argv[1])
+telemetry = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(telemetry)
+original, slept = telemetry.event_key, []
+def slow(row):
+    if not slept:  # widen the window between reading old rows and re-keying them
+        slept.append(1)
+        time.sleep(1.0)
+    return original(row)
+telemetry.event_key = slow
+telemetry.connect().close()
+"""
+
+
+def test_concurrent_upgrades_re_key_events_once_without_losing_rows(tmp_path):
+    """Regression: two processes opening an old ledger together must not delete each other's re-keyed rows."""
+    receipt(tmp_path, 'run-c', 1, status='ok', provenance=route('codex', 'gpt-6.1-sol'))
+    write_json(tmp_path / 'state/cooldowns.json', {'cooldowns': {'codex/gpt-6.1-sol': {
+        'adapter': 'codex', 'model': 'gpt-6.1-sol', 'account': 'work', 'status': 'usage_limited',
+        'recorded_at': '2026-10-21T01:00:00Z', 'cooling_until': '2026-10-21T05:00:00Z'}}})
+    assert cli(tmp_path, 'telemetry', 'ingest').returncode == 0
+    database = tmp_path / 'state/telemetry.sqlite3'
+    with sqlite3.connect(database) as db:
+        truth = sorted(db.execute('SELECT kind, COUNT(*) FROM events GROUP BY kind'))
+        db.execute("UPDATE events SET event_id='legacy-' || rowid")
+        db.execute("DELETE FROM meta WHERE key='event_ids'")
+    script = tmp_path / 'upgrade.py'
+    script.write_text(CONCURRENT_UPGRADE)
+    env = environment(tmp_path)
+    workers = [subprocess.Popen([sys.executable, str(script), str(ROOT / 'scripts/telemetry.py')], env=env,
+                                cwd=tmp_path, stderr=subprocess.PIPE, text=True) for _ in range(2)]
+    for worker in workers:
+        _, stderr = worker.communicate(timeout=60)
+        assert worker.returncode == 0, stderr
+    with sqlite3.connect(database) as db:
+        assert sorted(db.execute('SELECT kind, COUNT(*) FROM events GROUP BY kind')) == truth

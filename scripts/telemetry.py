@@ -138,11 +138,7 @@ def connect():
         # Version 4 reads route, task class and timing from receipts; re-read them in place.
         db.execute("DELETE FROM cursors WHERE source='fabric'")
     db.execute('PRAGMA user_version = 4')
-    if db.execute("SELECT 1 FROM meta WHERE key='event_ids'").fetchone() is None:
-        # Earlier builds keyed events by host label or ledger id; derive every ID from its row.
-        rekey_events(db)
-        db.execute("DELETE FROM meta WHERE key='ledger_id'")
-        db.execute("INSERT OR IGNORE INTO meta VALUES ('event_ids', 'row')")
+    migrate_event_ids(db)
     if db.execute("SELECT 1 FROM meta WHERE key='events_backfill'").fetchone() is None:
         # Events are additive tables (no version bump, so peers still read this ledger).
         # Re-read the small receipt and snapshot documents once so they backfill events.
@@ -251,11 +247,36 @@ def event_key(row):
     attrs = json.loads(row['attrs']) if isinstance(row['attrs'], str) else row['attrs']
     if row['kind'] == 'session.start':
         parts = (attrs.get('source'), row['session'])
-    elif row['kind'] == 'lane.attempt':
-        parts = (row['run_id'], row['task_id'], attrs.get('attempt'))
-    else:  # snapshot and collector records: their source plus the record's own content
+    elif row['kind'] == 'lane.attempt':  # the receipt itself, so projects sharing run ids stay apart
+        parts = (os.path.realpath(row['source_ref']),)
+    else:  # snapshot and collector records (`path@offset#record`): their source plus their content
         parts = (row['source_ref'], row['ts'], *(row[name] for name in EVENT_FIELDS), attrs)
     return identity('event', row['kind'], *parts)
+
+
+EVENT_IDS = 'row-v2'  # meta marker: every event ID is `event_key` of its row
+
+
+def migrate_event_ids(db):
+    """Re-key events from earlier builds once, under a write lock so concurrent openers cannot race."""
+    marker = "SELECT value FROM meta WHERE key='event_ids'"
+    if (db.execute(marker).fetchone() or [None])[0] == EVENT_IDS:
+        return
+    db.commit()
+    db.execute('BEGIN IMMEDIATE')
+    if (db.execute(marker).fetchone() or [None])[0] != EVENT_IDS:  # another opener may have finished
+        # Collector refs from earlier builds lack the record position; rows of one line were
+        # written in record order, so their rowid order restores it.
+        position = Counter()
+        for row in db.execute("SELECT rowid, source_ref FROM events WHERE kind LIKE 'otel.%' "
+                              "AND source_ref NOT LIKE '%#%' ORDER BY rowid").fetchall():
+            position[row['source_ref']] += 1
+            db.execute('UPDATE events SET source_ref=? WHERE rowid=?',
+                       (f"{row['source_ref']}#{position[row['source_ref']]}", row['rowid']))
+        rekey_events(db)
+        db.execute("DELETE FROM meta WHERE key='ledger_id'")
+        db.execute("INSERT OR REPLACE INTO meta VALUES ('event_ids', ?)", (EVENT_IDS,))
+    db.commit()
 
 
 def rekey_events(db):
@@ -362,6 +383,7 @@ def otel_record(db, row, state, path, offset):
     """One collector line becomes metadata events: log records by name, metric points by value."""
     body, signal = row.get('body') or {}, row.get('signal')
     resources = body.get('resourceLogs' if signal == 'logs' else 'resourceMetrics' if signal == 'metrics' else '') or ()
+    index = 0  # each record's position on its line, so identical records keep their multiplicity
     for resource in resources:
         context = otel_attributes((resource.get('resource') or {}).get('attributes'))
         linked = {'run_id': context.get('provenant.run_id'), 'lane': context.get('provenant.lane'),
@@ -371,6 +393,7 @@ def otel_record(db, row, state, path, offset):
                 points = ([record] if signal == 'logs' else
                           ((record.get('sum') or record.get('gauge') or {}).get('dataPoints') or ()))
                 for point in points:
+                    index += 1
                     attributes = otel_attributes(point.get('attributes'))
                     kept = {key: value for key, value in attributes.items()
                             if key in OTEL_STRINGS or isinstance(value, (int, float))}
@@ -382,7 +405,7 @@ def otel_record(db, row, state, path, offset):
                         kept.update(name=record.get('name'), value=float(value) if value is not None else None,
                                     temporality=(record.get('sum') or {}).get('aggregationTemporality'))
                     put_event(db, kind, otel_stamp(point.get('timeUnixNano'), row.get('received_at')),
-                              f'{path}@{offset}', attrs=kept, session=attributes.get('session.id'),
+                              f'{path}@{offset}#{index}', attrs=kept, session=attributes.get('session.id'),
                               model=attributes.get('model') if isinstance(attributes.get('model'), str) else None,
                               **linked)
 

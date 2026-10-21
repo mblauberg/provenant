@@ -121,12 +121,13 @@ attrs, source_ref)`. `kind` is a free string, so a new kind needs no migration;
 `EVENT_KINDS` in `scripts/telemetry.py` names the known ones. `source_ref`
 points back to the receipt, snapshot, transcript or collector line
 (`path@offset`). An event's ID derives from fields stored in its own row,
-never the host name: source and session for `session.start`; run, task and
-attempt for `lane.attempt`; otherwise `source_ref`, time, linked fields and
-attributes. Re-ingest therefore adds nothing, even after a `local_host` rename,
-and opening a ledger from an earlier build re-keys its events once, keeping the
-earliest of any duplicates. Two records on one collector line with identical
-time and metadata count once.
+never the host name: source and session for `session.start`; the receipt's
+resolved path for `lane.attempt`, so projects sharing run ids stay apart;
+otherwise `source_ref`, time, linked fields and attributes. Collector refs are
+`path@offset#record`, so identical records on one line keep their count.
+Re-ingest therefore adds nothing, even after a `local_host` rename. Opening a
+ledger from an earlier build re-keys its events once under a write lock,
+keeping the earliest of any duplicates, so concurrent openers cannot race.
 
 | Kind | From |
 |---|---|
