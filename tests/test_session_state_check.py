@@ -488,3 +488,22 @@ def test_install_hook_adds_compact_entry_beside_another_matcher(tmp_path):
 
     entries = json.loads(settings.read_text(encoding="utf-8"))["hooks"]["SessionStart"]
     assert [entry["matcher"] for entry in entries] == ["startup", "compact"]
+
+
+def test_hook_never_exits_status_2_on_unrecognized_arguments(tmp_path):
+    result = run_check(tmp_path, "--hook", "--unrecognized-argument")
+    assert result.returncode == 0
+    assert "Checkpoint check: warning:" in result.stdout
+    assert "unrecognized arguments: --unrecognized-argument" in result.stdout
+
+
+def test_hook_never_exits_status_2_on_invalid_argument_values(tmp_path):
+    result = run_check(tmp_path, "--hook", "--max-age-minutes", "not-a-number")
+    assert result.returncode == 0
+    assert "Checkpoint check: warning:" in result.stdout
+    assert "invalid float value" in result.stdout
+
+
+def test_cli_without_hook_exits_status_2_on_invalid_arguments(tmp_path):
+    result = run_check(tmp_path, "--unrecognized-argument")
+    assert result.returncode == 2
