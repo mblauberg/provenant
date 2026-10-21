@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 import argparse
-from collections import deque
+from collections import deque, namedtuple
 import ctypes
 import functools
 import hashlib
@@ -3080,49 +3080,93 @@ AGY_RENAMED_STATE = ("history.jsonl", "jetbox_summaries_proto.pb", "jetski_state
 AGY_STATE_COPY_MAX = 64 * 1024 * 1024
 
 
+# The staged overlay: its path for HOME, plus the attempt tmp it was made in, held open from
+# staging so cleanup never resolves a path the lane could have replaced.
+AgyHome = namedtuple("AgyHome", "path tmp_fd name")
+DIRECTORY_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+
+
+def _open_canonical_dir(path):
+    """Open an absolute, canonical directory from / without following a link at any component."""
+    fd = os.open("/", os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        for part in Path(path).parts[1:]:
+            child = os.open(part, DIRECTORY_FLAGS, dir_fd=fd)
+            os.close(fd)
+            fd = child
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
+
+
+def _link_overlay(fd, source, parts):
+    """Link source's entries into the open directory fd, descending into a real copy of parts[0]."""
+    part = parts[0] if parts else None
+    for name in sorted(os.listdir(source)) if source.is_dir() else ():
+        if name != part and not name.startswith(AGY_UNLINKED):
+            os.symlink(source / name, name, dir_fd=fd)
+    if part is None:
+        return
+    os.mkdir(part, 0o700, dir_fd=fd)
+    child = os.open(part, DIRECTORY_FLAGS, dir_fd=fd)
+    try:
+        _link_overlay(child, source / part, parts[1:])
+    finally:
+        os.close(child)
+
+
 def stage_agy_home(plan, private_tmp):
     """The confined agy lane's HOME: a fresh overlay of links per attempt, made after its state
     directories so each of them is a link too."""
     if plan["adapter"] != "agy" or plan["applied"].get("confinement") != "sandbox-exec":
         return None
     _prepare_state_directories(plan)
-    overlay = Path(tempfile.mkdtemp(prefix="agy-home-", dir=private_tmp))
-    source, target = Path.home(), overlay
-    for part in (*AGY_PRIVATE_BIN.parts, None):
-        for name in sorted(os.listdir(source)) if source.is_dir() else ():
-            if name != part and not name.startswith(AGY_UNLINKED):
-                (target / name).symlink_to(source / name)
-        if part is not None:
-            source, target = source / part, target / part
-            target.mkdir(mode=0o700)
-    return overlay
-
-
-def _copy_back_state(source_dir, real_dir, name):
-    """Install a renamed state file from the overlay at its real path; never follows a link."""
+    tmp_fd = _open_canonical_dir(private_tmp)
+    name = "agy-home-" + uuid.uuid4().hex[:12]
     try:
-        fd = os.open(source_dir / name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        os.mkdir(name, 0o700, dir_fd=tmp_fd)
+        overlay = os.open(name, DIRECTORY_FLAGS, dir_fd=tmp_fd)
+        try:
+            _link_overlay(overlay, Path.home(), AGY_PRIVATE_BIN.parts)
+        finally:
+            os.close(overlay)
+    except BaseException:
+        attempt_storage.remove_at(tmp_fd, name)
+        os.close(tmp_fd)
+        raise
+    return AgyHome(Path(private_tmp) / name, tmp_fd, name)
+
+
+def _read_overlay_state(lane_fd, name):
+    """A renamed state file's bytes, or (None, problem); never follows a link."""
+    try:
+        fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=lane_fd)
     except FileNotFoundError:
-        return None
+        return None, None
     except OSError as exc:
-        return None if (source_dir / name).is_symlink() else f"{name}: {exc}"
+        linked = stat.S_ISLNK(os.stat(name, dir_fd=lane_fd, follow_symlinks=False).st_mode)
+        return None, None if linked else f"{name}: {exc}"
     try:
-        info = os.fstat(fd)
-        if not stat.S_ISREG(info.st_mode):
-            return f"{name}: not a regular file"
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return None, f"{name}: not a regular file"
         data = os.read(fd, AGY_STATE_COPY_MAX + 1)
         if len(data) > AGY_STATE_COPY_MAX:
-            return f"{name}: larger than {AGY_STATE_COPY_MAX} bytes"
+            return None, f"{name}: larger than {AGY_STATE_COPY_MAX} bytes"
+        return data, None
     finally:
         os.close(fd)
-    directory = os.open(real_dir, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+
+
+def _install_state(directory, name, data):
+    """Replace name in the open real directory by a staged file renamed over it."""
     staged = f".{name}.provenant-{uuid.uuid4().hex}"
     try:
-        try:
-            current = os.stat(name, dir_fd=directory, follow_symlinks=False)
-            mode = stat.S_IMODE(current.st_mode) & 0o666 if stat.S_ISREG(current.st_mode) else 0o600
-        except FileNotFoundError:
-            mode = 0o600
+        current = os.stat(name, dir_fd=directory, follow_symlinks=False)
+        mode = stat.S_IMODE(current.st_mode) & 0o666 if stat.S_ISREG(current.st_mode) else 0o600
+    except FileNotFoundError:
+        mode = 0o600
+    try:
         out = os.open(staged, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=directory)
         try:
             os.fchmod(out, mode)
@@ -3133,31 +3177,48 @@ def _copy_back_state(source_dir, real_dir, name):
         finally:
             os.close(out)
         os.replace(staged, name, src_dir_fd=directory, dst_dir_fd=directory)
-    except OSError as exc:
+    except OSError:
         try:
             os.unlink(staged, dir_fd=directory)
         except OSError:
             pass
-        return f"{name}: {exc}"
-    finally:
-        os.close(directory)
-    return None
+        raise
 
 
-def finish_agy_home(plan, private_tmp, overlay):
-    """Copy renamed state back to the real home, then remove the overlay. Returns warnings."""
+def finish_agy_home(plan, home):
+    """Copy renamed state back to the real home, then remove the overlay. Returns warnings.
+
+    Every step starts from a directory held open since staging or opened from / without following
+    a link, so a lane that swapped tmp, the overlay or an ancestor cannot redirect a read, write
+    or delete."""
     problems = []
-    real_dir = _provider_state(plan)["resolved_home"] / "antigravity-cli"
-    for name in AGY_RENAMED_STATE:
+    try:
+        fds = []
         try:
-            problem = _copy_back_state(overlay / ".gemini/antigravity-cli", real_dir, name)
+            fds.append(os.open(home.name, DIRECTORY_FLAGS, dir_fd=home.tmp_fd))
+            for part in AGY_PRIVATE_BIN.parts[:-1]:
+                fds.append(os.open(part, DIRECTORY_FLAGS, dir_fd=fds[-1]))
+            fds.append(_open_canonical_dir(_provider_state(plan)["resolved_home"] / "antigravity-cli"))
+            lane_fd, real_fd = fds[-2], fds[-1]
+            for name in AGY_RENAMED_STATE:
+                try:
+                    data, problem = _read_overlay_state(lane_fd, name)
+                    if data is not None:
+                        _install_state(real_fd, name, data)
+                except OSError as exc:
+                    problem = f"{name}: {exc}"
+                if problem:
+                    problems.append("agy state not copied back: " + problem)
         except OSError as exc:
-            problem = f"{name}: {exc}"
-        if problem:
-            problems.append("agy state not copied back: " + problem)
-    left = attempt_storage.remove_tree(private_tmp, overlay)
-    if left:
-        problems.append("agy home overlay not removed: " + ", ".join(left))
+            problems.append(f"agy state not copied back: {exc}")
+        finally:
+            for fd in fds:
+                os.close(fd)
+        left = attempt_storage.remove_at(home.tmp_fd, home.name)
+        if left:
+            problems.append("agy home overlay not removed: " + ", ".join(left))
+    finally:
+        os.close(home.tmp_fd)
     return problems
 
 
@@ -3434,7 +3495,7 @@ def execute(
         _prepare_codex_state_dir(plan)
         agy_home = stage_agy_home(plan, private_tmp)
         if agy_home:
-            environment["HOME"] = str(agy_home)
+            environment["HOME"] = str(agy_home.path)
         if plan["adapter"] != "codex" and "browser" in plan["applied"].get("capabilities", []):
             environment["MAC_CHROMIUM_TMPDIR"] = str(private_tmp)  # Chrome's default temp is outside the boundary.
         if plan["stdin_policy"] == "prompt":
@@ -3627,7 +3688,7 @@ def execute(
             if subreaper:
                 _release_subreaper()
             if agy_home:
-                agy_home_warnings = finish_agy_home(plan, private_tmp, agy_home)
+                agy_home_warnings = finish_agy_home(plan, agy_home)
     exit_code = process.returncode if process else None
     if cancel_signal and not forced:
         forced = "interrupted"  # EOF can precede the loop's signal check.

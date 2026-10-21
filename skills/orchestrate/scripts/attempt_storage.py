@@ -76,6 +76,21 @@ def _rm_at(parent_fd: int, name: str, dev: int, rel: str, left: list[str]) -> No
         os.rmdir(name, dir_fd=parent_fd)
 
 
+def remove_at(parent_fd: int, name: str) -> list[str]:
+    """Remove ``name`` below an open, trusted directory: links are unlinked, never entered.
+
+    Returns the paths left in place, relative to the directory; an empty list means it is gone.
+    """
+    left: list[str] = []
+    try:
+        _rm_at(parent_fd, name, os.fstat(parent_fd).st_dev, name, left)
+    except FileNotFoundError:
+        pass
+    except OSError:
+        left.append(name)
+    return left
+
+
 def remove_tree(anchor: Path, path: Path) -> list[str]:
     """Remove ``path`` (below the trusted ``anchor``) without following any link.
 
