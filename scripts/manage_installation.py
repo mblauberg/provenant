@@ -89,14 +89,6 @@ def _catalogues(
     return managed, custom
 
 
-def _catalogue(
-    source: Path,
-    custom_source: Path | None = None,
-) -> dict[str, Path]:
-    managed, custom = _catalogues(source, custom_source)
-    return {**managed, **custom}
-
-
 def _same_link(destination: Path, source: Path) -> bool:
     if not destination.is_symlink():
         return False

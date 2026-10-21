@@ -225,6 +225,14 @@ function shellQuote(value: string): string {
   return `'${value.replaceAll("'", `'"'"'`)}'`;
 }
 
+function hostInstance(): string {
+  const instance = join(temporaryDirectory, "host-instance");
+  mkdirSync(join(instance, ".agent-fabric"), { recursive: true });
+  writeFileSync(join(instance, ".agent-fabric/hosts.json"), JSON.stringify({ schema_version: 1,
+    local_host: "laptop", peers: { peer: { ssh_destination: "peer" } } }));
+  return instance;
+}
+
 /** A product root whose dispatch owners are the lifecycle fixture. */
 function buildProduct(root: string): string {
   const fake = join(root, "product");
@@ -1760,6 +1768,8 @@ describe("native-first routing", () => {
   it("atomically refuses a mixed batch, naming its offending task, with zero placements", async () => {
     const placed = join(temporaryDirectory, "batch-placed");
     const hostOwner = join(product, "scripts/fabric-hosts");
+    const env = poolEnvironment();
+    env.AGENT_FABRIC_INSTANCE_ROOT = hostInstance();
     writeFileSync(hostOwner, `#!/bin/sh\ntouch ${shellQuote(placed)}\nprintf '%s\\n' '{"status":"ok","host":"peer"}'\n`);
     chmodSync(hostOwner, 0o755);
     vi.stubEnv("AGENT_FABRIC_PRODUCT_ROOT", product);
@@ -1769,7 +1779,7 @@ describe("native-first routing", () => {
         { id: "safe", adapter: "codex", prompt: "p" },
         { id: "forbidden", adapter: "claude", model: "haiku", prompt: "p" },
         { adapter: "codex", prompt: "p" },
-      ] }, claudeSeat(), new AbortController().signal, { ...poolEnvironment(), PROVENANT_HOST_LOCAL_ONLY: "" });
+      ] }, claudeSeat(), new AbortController().signal, { ...env, PROVENANT_HOST_LOCAL_ONLY: "" });
       expect(result).toMatchObject({ status: "rejected", error: "native_seat_model" });
       const rows = result.tasks as Record<string, unknown>[];
       expect(rows.map((row) => row.task_id)).toEqual(["safe", "forbidden", "task-3"]);
@@ -1786,6 +1796,7 @@ describe("native-first routing", () => {
   it("refuses a qualified session's explicit own-seat route before placement", async () => {
     const placed = join(temporaryDirectory, "session-placed");
     const hostOwner = join(product, "scripts/fabric-hosts");
+    vi.stubEnv("AGENT_FABRIC_INSTANCE_ROOT", hostInstance());
     writeFileSync(hostOwner, `#!/bin/sh\ntouch ${shellQuote(placed)}\nprintf '%s\\n' '{"status":"ok","host":"peer"}'\n`);
     chmodSync(hostOwner, 0o755);
     const store = new Store(databasePath(ownerEnvironment));
@@ -1807,7 +1818,7 @@ describe("native-first routing", () => {
   });
 
   it("refuses an explicit own-seat Claude route before any peer placement, and lets an inherited continuation through", async () => {
-    const seat = claudeSeat(), env = { ...poolEnvironment(), PROVENANT_HOST_LOCAL_ONLY: "" };
+    const seat = claudeSeat(), env = { ...poolEnvironment(), AGENT_FABRIC_INSTANCE_ROOT: hostInstance(), PROVENANT_HOST_LOCAL_ONLY: "" };
     const signal = new AbortController().signal;
     const refused = (done: any) => expect(done).toMatchObject({ status: "rejected", error: "native_seat_model" });
     refused(await dispatchConfiguredProvider({ host: "peer", adapter: "claude", model: "haiku", prompt: "p" } as any, seat, signal, env));

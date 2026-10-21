@@ -180,28 +180,6 @@ def command_evidence_observation(
     return api["mutate_run"](args.run_dir, apply)
 
 
-def parse_utc(value: Any, field: str, error_type: type[ValueError]):
-    if not isinstance(value, str) or not value.endswith("Z"):
-        raise error_type(f"{field} must be an ISO UTC timestamp")
-    try:
-        return api_datetime().fromisoformat(value[:-1])
-    except ValueError as exc:
-        raise error_type(f"{field} must be an ISO UTC timestamp") from exc
-
-
-def api_datetime():
-    from datetime import datetime
-
-    return datetime
-
-
-def artifact_map(run: dict[str, Any]) -> dict[str, dict[str, Any]]:
-    return {
-        item["id"]: item for item in run.get("artifacts", [])
-        if isinstance(item, dict) and isinstance(item.get("id"), str)
-    }
-
-
 def command_review_add(args: Any, api: dict[str, Any]) -> dict[str, Any]:
     require_identifier = api["require_identifier"]
     receipt_error = api["ReceiptError"]

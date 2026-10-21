@@ -40,8 +40,6 @@ import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "nod
 
 export const OWNER_RECORD_NAME = "dispatch-owner.json";
 export const PROVIDER_RECORD_NAME = "dispatch-provider.json";
-export const RUN_DIRECTORY_PREFIX = "mcp-";
-export const RUN_ROOT_NAME = ".agent-run";
 /** A week: long enough to read yesterday's evidence, short enough to bound growth. */
 export const DEFAULT_RETENTION_HOURS = 168;
 /** Long enough for a cooperative owner to publish evidence, short enough to end. */

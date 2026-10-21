@@ -36,7 +36,7 @@ it.each(["codex", "agy", "claude"])("exposes host list and peer doctor through t
       env: { ...process.env as Record<string, string>, HOME: root,
         AGENT_FABRIC_INSTANCE_ROOT: instance, AGENT_FABRIC_PRODUCT_ROOT: resolve(import.meta.dirname, "../../.."),
         AGENT_FABRIC_STATE_DIRECTORY: join(root, "state"), AGENT_FABRIC_SEAT: seat,
-        AGENT_FABRIC_SSH_PROGRAM: ssh, HARNESS_PYTHON: python },
+        AGENT_FABRIC_SSH_PROGRAM: ssh, HARNESS_PYTHON: python, PROVENANT_HOST_LOCAL_ONLY: "0" },
       stderr: "pipe",
     }));
     expect((await client.listTools()).tools.map((tool) => tool.name)).toContain("fabric_hosts");
