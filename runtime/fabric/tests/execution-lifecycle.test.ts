@@ -168,6 +168,8 @@ describe("Fabric input corrections", () => {
     const implied = normaliseRoute({ adapter: "agy", model: "gemini-3.8-flash-high" }, identity, snapshot);
     expect(implied).toMatchObject({ model: "gemini-3.8-flash", effort: "high" });
     expect(implied.warnings ?? []).toEqual([]);
+    expect(normaliseRoute({ adapter: "agy", model: "Gemini-3.8-Flash-HIGH" }, identity, snapshot))
+      .toMatchObject({ model: "gemini-3.8-flash", effort: "high" });
 
     const explicit = normaliseRoute({ adapter: "agy", model: "gemini-3.8-flash-high", effort: "medium" }, identity, snapshot);
     expect(explicit).toMatchObject({ model: "gemini-3.8-flash", effort: "medium" });

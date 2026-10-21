@@ -207,12 +207,14 @@ function correctSelector(selector: string | undefined, catalogue: CatalogueSnaps
     ...(entry.model_details ?? []).flatMap((model) => [model.id, ...(Array.isArray(model.names) ? model.names : [])]),
   ]).filter((item): item is string => typeof item === "string"))];
   let impliedEffort: string | undefined;
+  const requested = selector.toLowerCase();
   for (const entry of entries) {
     for (const model of entry.model_details ?? []) {
       if (typeof model.id !== "string" || model.effort_transport !== "model-suffix" ||
           typeof model.suffix !== "object" || model.suffix === null || Array.isArray(model.suffix)) continue;
       const suffix = Object.entries(model.suffix as Record<string, unknown>)
-        .find(([, value]) => typeof value === "string" && selector === `${model.id}${value}`);
+        .find(([, value]) => typeof value === "string" &&
+          requested === `${model.id}${value}`.toLowerCase());
       if (suffix) {
         selector = model.id;
         impliedEffort = suffix[0];
