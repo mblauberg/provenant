@@ -36,6 +36,7 @@ import {
   terminateRecordedRun,
 } from "../src/run-registry.js";
 import type { Identity } from "../src/identity.js";
+import { scratchRoot } from "./helpers/temp-root.js";
 
 const testDirectory = dirname(fileURLToPath(import.meta.url));
 const repositoryRoot = resolve(testDirectory, "../../..");
@@ -147,6 +148,40 @@ describe("Fabric input corrections", () => {
       .toThrow(expect.objectContaining({ code: "adapter_required" }));
   });
 
+  it("resolves documented model aliases without correction warnings", () => {
+    const snapshot = catalogueSnapshot(repositoryRoot);
+    for (const alias of ["glm-free", "deepseek-free", "sol", "luna"]) {
+      const route = normaliseRoute({ alias }, identity, snapshot);
+      expect(route.model, alias).toBeDefined();
+      expect((route.warnings ?? []).filter((warning) => !warning.startsWith("NATIVE:")), alias).toEqual([]);
+    }
+    const typo = normaliseRoute({ adapter: "codex", model: "gpt-6-lunx" }, identity, snapshot);
+    expect(typo.model).toBe("gpt-6-luna");
+    expect(typo.warnings).toContain("corrected model gpt-6-lunx to gpt-6-luna");
+  });
+
+  it("resolves catalogue model suffixes and carries or defers their effort", () => {
+    const snapshot = { adapters: [{ name: "agy", models: ["gemini-3.8-flash", "plain-model"], aliases: {},
+      model_details: [
+        { id: "gemini-3.8-flash", efforts: ["low", "medium", "high"], effort_transport: "model-suffix",
+          suffix: { low: "-low", medium: "-medium", high: "-high" } },
+        { id: "plain-model", efforts: ["high"], effort_transport: "flag" },
+      ] }] } as any;
+    const implied = normaliseRoute({ adapter: "agy", model: "gemini-3.8-flash-high" }, identity, snapshot);
+    expect(implied).toMatchObject({ model: "gemini-3.8-flash", effort: "high" });
+    expect(implied.warnings ?? []).toEqual([]);
+    expect(normaliseRoute({ adapter: "agy", model: "Gemini-3.8-Flash-HIGH" }, identity, snapshot))
+      .toMatchObject({ model: "gemini-3.8-flash", effort: "high" });
+
+    const explicit = normaliseRoute({ adapter: "agy", model: "gemini-3.8-flash-high", effort: "medium" }, identity, snapshot);
+    expect(explicit).toMatchObject({ model: "gemini-3.8-flash", effort: "medium" });
+    expect(explicit.warnings).toContain("effort high in model ignored: effort medium was named");
+
+    const unsupported = normaliseRoute({ adapter: "agy", model: "plain-model-high" }, identity, snapshot);
+    expect(unsupported.model).toBe("plain-model-high");
+    expect(unsupported.effort).toBeUndefined();
+  });
+
   it("passes version-free family names through for model_route.py to resolve to the latest model", () => {
     const entry = (latest: boolean) => ({ name: "codex", latest_aliases: latest, aliases: {},
       models: ["gpt-6.1-sol", "gpt-6-luna"],
@@ -176,7 +211,7 @@ describe("Fabric input corrections", () => {
   });
 
   it("resolves relative read-only cwd against the caller directory", () => {
-    const base = mkdtempSync(join(tmpdir(), "fabric-cwd-"));
+    const base = scratchRoot("fabric-cwd-");
     const child = join(base, "child");
     mkdirSync(child);
     expect(workingIdentity({ cwd: "child" }, { ...identity, project: base, cwd: base }).cwd).toBe(realpathSync(child));
@@ -184,7 +219,7 @@ describe("Fabric input corrections", () => {
   });
 
   it("names the working route when a cwd is outside every registered project", () => {
-    const base = mkdtempSync(join(tmpdir(), "fabric-unregistered-"));
+    const base = scratchRoot("fabric-unregistered-");
     try {
       expect(() => workingIdentity({ cwd: base }, { ...identity, registeredProjects: [identity.project] }))
         .toThrow(expect.objectContaining({ code: "cwd_unavailable",
@@ -195,8 +230,8 @@ describe("Fabric input corrections", () => {
   });
 
   it("grants a read root only for another registered project", () => {
-    const other = realpathSync(mkdtempSync(join(tmpdir(), "fabric-read-root-")));
-    const stray = realpathSync(mkdtempSync(join(tmpdir(), "fabric-stray-")));
+    const other = realpathSync(scratchRoot("fabric-read-root-"));
+    const stray = realpathSync(scratchRoot("fabric-stray-"));
     try {
       mkdirSync(join(other, "src"));
       const caller = { ...identity, registeredProjects: [identity.project, other] };
@@ -213,7 +248,7 @@ describe("Fabric input corrections", () => {
   });
 
   it("accepts read-only cwd under another registered project", () => {
-    const base = mkdtempSync(join(tmpdir(), "fabric-other-project-"));
+    const base = scratchRoot("fabric-other-project-");
     const child = join(base, "child");
     mkdirSync(child);
     const caller = { ...identity, registeredProjects: [identity.project, base] };
@@ -331,7 +366,7 @@ async function startSleepingRun(prompt: string): Promise<Record<string, unknown>
 
 beforeEach(() => {
   // Canonical, as dispatch writes projects: macOS tmpdir is a /var -> /private/var symlink.
-  temporaryDirectory = realpathSync(mkdtempSync(join(tmpdir(), "fabric-lifecycle-")));
+  temporaryDirectory = realpathSync(scratchRoot("fabric-lifecycle-"));
   workspace = join(temporaryDirectory, "workspace");
   mkdirSync(workspace, { recursive: true });
   product = buildProduct(temporaryDirectory);

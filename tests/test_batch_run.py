@@ -1393,3 +1393,17 @@ def test_batch_rejects_invalid_fallback_before_launch(tmp_path, monkeypatch, fal
     mod = load_module()
     with pytest.raises(mod.BatchInputError, match='fallback'):
         mod.load_manifest(manifest)
+
+
+def test_batch_usage_error_is_one_line_and_exits_2():
+    result = subprocess.run([str(BATCH), "--run-dir", "/tmp", "--manifest", "/tmp/m.json", "--bad-arg"], capture_output=True, text=True)
+    assert result.returncode == 2
+    assert result.stdout == ""
+    assert result.stderr == "error: unrecognized arguments: --bad-arg; fix: provenant help batch\n"
+
+    missing = subprocess.run([str(BATCH)], capture_output=True, text=True)
+    assert missing.returncode == 2
+    assert missing.stdout == ""
+    assert missing.stderr.startswith("error: the following arguments are required: ")
+    assert "; fix: pass " in missing.stderr
+    assert len(missing.stderr.splitlines()) == 1

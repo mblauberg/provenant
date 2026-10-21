@@ -42,7 +42,8 @@ import {
   unlinkSync,
   writeFileSync,
 } from "node:fs";
-import { basename, dirname, isAbsolute, join, resolve } from "node:path";
+import { tmpdir } from "node:os";
+import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { promisify } from "node:util";
 
 import { catalogueSnapshot, type CatalogueSnapshot } from "./catalogue.js";
@@ -209,7 +210,51 @@ export async function pythonOwner(root: string, identity: Identity, env: NodeJS.
   }
 }
 
-function createRunDirectory(identity: Identity, kind: "dispatch" | "batch"): string {
+function realPath(path: string): string {
+  const absolute = resolve(path);
+  let candidate = absolute;
+  const missing: string[] = [];
+  while (true) {
+    try {
+      return resolve(realpathSync.native(candidate), ...missing);
+    } catch {
+      const parent = dirname(candidate);
+      if (parent === candidate) return absolute;
+      missing.unshift(basename(candidate));
+      candidate = parent;
+    }
+  }
+}
+
+/**
+ * Fixture attempts are test scaffolding. They may only land in a run root under
+ * the OS temp dir or a throwaway .agent-run/scratch tree, and never in a
+ * .agent-run tree that itself sits in temp (a lane's TMPDIR; issue #1002).
+ */
+export function assertFixtureRunRoot(
+  agentRun: string,
+  routes: readonly { model?: unknown; cli_version?: unknown }[],
+  temp: string = tmpdir(),
+): void {
+  if (!routes.some((route) => route.model === "fixture" || route.cli_version === "fixture")) return;
+  const root = realPath(agentRun);
+  // The OS temp dir, and the fixed /tmp that test helpers fall back to when TMPDIR sits in a .agent-run tree.
+  const tempRoots = [...new Set([temp, "/tmp"].map(realPath))];
+  const acceptableTempRoots = tempRoots.filter((tempRoot) => !tempRoot.split(sep).includes(".agent-run"));
+  const underTemp = acceptableTempRoots.some((tempRoot) => root.startsWith(tempRoot + sep));
+  if (underTemp || underScratch(root)) return;
+  throw new Error(
+    `fixture run refused: ${root} is not under an acceptable temp root (${acceptableTempRoots.join(" or ")}) or a .agent-run/scratch tree; fixture attempts must not write into a project .agent-run (issue #1002)`,
+  );
+}
+
+/** True when root sits strictly inside a `.agent-run/scratch` directory, which `provenant clean` expires. */
+function underScratch(root: string): boolean {
+  const parts = root.split(sep);
+  return parts.some((part, index) => part === ".agent-run" && parts[index + 1] === "scratch" && index + 2 < parts.length);
+}
+
+function createRunDirectory(identity: Identity, kind: "dispatch" | "batch", routes: readonly { model?: unknown; cli_version?: unknown }[]): string {
   const agentRun = runRoot(identity.cwd);
   mkdirSync(agentRun, { recursive: true, mode: 0o700 });
   if (lstatSync(agentRun).isSymbolicLink()) throw new Error("run root must not be a symlink");
@@ -272,11 +317,13 @@ async function initialiseRun(
   root: string,
   signal: AbortSignal,
   kind: "dispatch" | "batch" = "dispatch",
+  routes: readonly { model?: unknown; cli_version?: unknown }[] = [],
 ): Promise<string> {
+  assertFixtureRunRoot(runRoot(identity.cwd), routes);
   const owner = executableOwner(root, "skills/orchestrate/scripts/run_dir_init.sh");
   await maintainRunRoot(identity, env);
   signal.throwIfAborted();
-  const runDir = createRunDirectory(identity, kind);
+  const runDir = createRunDirectory(identity, kind, routes);
   try {
     await execFileAsync(owner, [runDir, "--owner-logs"], {
       cwd: identity.cwd,
@@ -762,6 +809,7 @@ async function dispatchConfiguredProviderUnchecked(
     ...(input.prompt_file === undefined ? {} : { prompt_file: ownerPromptPath(identity, input.prompt_file) }) };
   const policy = dispatchDefaults(identity.cwd);
   const route = applyDispatchDefaults(normaliseRoute(input, identity, catalogue, ownSeatGuard), policy.defaults);
+  assertFixtureRunRoot(runRoot(workspaceIdentity.cwd), [route]);
   route.warnings = [...new Set([...(initialRoute.warnings ?? []), ...(route.warnings ?? []), ...poolWarnings, ...policy.warnings])];
   validatePrompt(input.prompt, input.prompt_file);
   const roots = [...new Set([...readRoots(identity, input.cwd, input.prompt_file), ...(input.read_roots ?? [])])];
@@ -797,7 +845,7 @@ async function dispatchConfiguredProviderUnchecked(
   signal.throwIfAborted();
   if (checked.status === "rejected") return { status: "rejected", error: checked.error, fix: checked.fix };
   const validateMs = performance.now() - validateStarted - snapshotMs;
-  const initStarted = performance.now(), runDir = await initialiseRun(workspaceIdentity, env, root, signal);
+  const initStarted = performance.now(), runDir = await initialiseRun(workspaceIdentity, env, root, signal, "dispatch", [route]);
   const initMs = performance.now() - initStarted;
   if (signal.aborted) rmSync(runDir, { recursive: true, force: true });
   signal.throwIfAborted();
@@ -983,6 +1031,7 @@ async function dispatchConfiguredBatchUnchecked(
     }
   });
   if (tasks.length === 0) return { status: "rejected", error: errors[0]!.error, fix: errors[0]!.fix, tasks: errors.map((row) => ({ ...row, status: "rejected", state: "terminal" })) };
+  assertFixtureRunRoot(runRoot(identity.cwd), tasks);
   const owner = executableOwner(root, "skills/orchestrate/scripts/batch_run.py");
   const controls = executableOwner(root, "skills/orchestrate/scripts/run_controls.py");
   const python = await pythonOwner(root, identity, env);
@@ -1006,7 +1055,7 @@ async function dispatchConfiguredBatchUnchecked(
     checked = await preflight(python, executableOwner(root, "skills/orchestrate/scripts/dispatch_run.py"), tasks, identity, env, signal);
     if (checked.status === "rejected") return rejected(new InputError(String(checked.error ?? "preflight_unavailable"), String(checked.fix ?? "Check task preflight inputs.")));
   }
-  const runDir = await initialiseRun(identity, env, root, signal, "batch");
+  const runDir = await initialiseRun(identity, env, root, signal, "batch", tasks);
   if (signal.aborted) rmSync(runDir, { recursive: true, force: true });
   signal.throwIfAborted();
   const manifestPath = stagingPath(runDir, "task-manifest.json");

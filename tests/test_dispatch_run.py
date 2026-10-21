@@ -4284,3 +4284,18 @@ def test_preflight_types_an_opencode_below_v2_as_unsupported_cli_version(monkeyp
     assert result["status"] == "rejected"
     assert result["error"] == "unsupported_cli_version"
     assert "upgrade OpenCode to v2" in result["fix"]
+
+
+def test_dispatch_usage_error_is_one_line_and_exits_2():
+    dispatch_script = ROOT / "skills/orchestrate/scripts/dispatch_run.py"
+    result = subprocess.run([sys.executable, str(dispatch_script), "--run-dir", "/tmp", "--prompt-stdin", "--bad-arg"], capture_output=True, text=True)
+    assert result.returncode == 2
+    assert result.stdout == ""
+    assert result.stderr == "error: unrecognized arguments: --bad-arg; fix: provenant help dispatch\n"
+
+    missing = subprocess.run([sys.executable, str(dispatch_script)], capture_output=True, text=True)
+    assert missing.returncode == 2
+    assert missing.stdout == ""
+    assert missing.stderr.startswith("error: the following arguments are required: ")
+    assert "; fix: pass " in missing.stderr
+    assert len(missing.stderr.splitlines()) == 1

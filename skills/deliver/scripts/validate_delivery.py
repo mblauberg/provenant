@@ -34,7 +34,7 @@ from delivery_validation_evidence import _validate_evidence
 from delivery_validation_shape import _validate_checkpoint, _validate_intent_design
 from delivery_validation_measures import _validate_measures_assurance
 from delivery_validation_reviews import _validate_reviews
-from delivery_validation_security import _validate_gates_observation, _validate_high_stakes, _validate_security
+from delivery_validation_security import _validate_acceptance, _validate_gates_observation, _validate_high_stakes, _validate_security
 
 def validate(
     run: Any,
@@ -111,7 +111,8 @@ def validate(
     if run["risk_override"].get("status") == "approved":
         override_evidence = evidence.get(run["risk_override"].get("evidence"))
         fail(not override_evidence or override_evidence.get("kind") != "human" or override_evidence.get("status") != "pass" or override_evidence.get("gate") != "risk-override", "risk override must link matching passing human evidence")
-    if approved_reached:
+    _validate_acceptance(run, evidence, profile, artifacts)
+    if approved_reached or acceptance_reached:
         _validate_intent_design(run, artifacts, evidence)
     corrections = _list(run.get("human_corrections"), "human_corrections")
     for index, raw in enumerate(corrections):
@@ -135,7 +136,7 @@ def validate(
                 if item.get("kind") == kind and item.get("status") == "pass"
             }
             missing = sorted(set(profile_evidence[kind]) - covered)
-            fail(bool(missing), f"human acceptance lacks passing {kind} evidence for {missing}")
+            fail(bool(missing), f"delivery acceptance lacks passing {kind} evidence for {missing}")
         review_ids = {item.get("evidence_id") for item in run["reviews"] if item.get("status") == "pass" and item.get("role") in REVIEW_ROLES}
         fail(not review_ids <= set(evidence), "a passing review must cite declared evidence")
     _validate_security(run, registry, profile, artifacts, evidence, required=acceptance_reached, product_root=root)
