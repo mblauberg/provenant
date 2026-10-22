@@ -28,9 +28,11 @@ LIMIT_WINDOWS = {'weekly': 'seven_day', 'monthly': 'thirty_day'}
 # Both stores hold assistant turns: v1 `message` and v2 `session_message` (opencode 2.0.30+).
 # v2 also holds copies of migrated v1 rows (same id), which must count once.
 STORES = (
-    ('message', "json_extract(data,'$.providerID')", ' AND id NOT IN (SELECT id FROM session_message)'),
+    ('message', "json_extract(data,'$.providerID')", ''),
     ('session_message', "json_extract(data,'$.model.providerID')", " AND type='assistant'"),
 )
+SEEN_IN_V2 = ' AND id NOT IN (SELECT id FROM session_message)'
+
 
 
 def default_identity():
@@ -70,7 +72,10 @@ def spend(db, now, providers, starts):
                     for _ in WINDOWS)
     marks = ','.join('?' * len(providers))
     totals, readable = [0.0] * len(WINDOWS), False
+    has_v2 = db.execute("SELECT 1 FROM sqlite_master WHERE name='session_message'").fetchone()
     for table, provider, extra in STORES:
+        if table == 'message' and has_v2:
+            extra = SEEN_IN_V2
         try:
             row = db.execute(f'SELECT {sums} FROM {table} WHERE time_created BETWEEN ? AND ?{extra} '
                              f'AND {provider} IN ({marks})',
@@ -97,7 +102,8 @@ def limit_errors(db, now, providers):
         marks = ','.join('?' * len(providers))
         accepted = db.execute("SELECT MAX(time_created) FROM session_message WHERE type='assistant' "
                               "AND json_extract(data,'$.error') IS NULL AND json_extract(data,'$.cost')>0 "
-                              f"AND json_extract(data,'$.model.providerID') IN ({marks})", providers).fetchone()[0] or 0
+                              f"AND time_created BETWEEN ? AND ? AND json_extract(data,'$.model.providerID') IN ({marks})",
+                              (oldest, int(now.timestamp() * 1000), *providers)).fetchone()[0] or 0
     except sqlite3.Error:
         return {}
     latest = {}
@@ -106,8 +112,9 @@ def limit_errors(db, now, providers):
             body = json.loads(body)
             if body['error']['type'] != 'GoUsageLimitError':
                 continue
-            name = str((body.get('metadata') or {}).get('limitName') or '').lower()
-        except (TypeError, ValueError, KeyError):
+            metadata = body.get('metadata')
+            name = str(metadata.get('limitName') or '').lower() if isinstance(metadata, dict) else ''
+        except (AttributeError, TypeError, ValueError, KeyError):
             continue
         if created > accepted:
             latest[LIMIT_WINDOWS.get(name, 'five_hour')] = created

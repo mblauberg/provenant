@@ -406,6 +406,31 @@ def test_opencode_anchor_sums_the_current_cycle_and_a_limit_error_expires_at_the
     assert opencode_rows(quota, old)[0]['seven_day']['used_percent'] == 0
 
 
+def test_opencode_future_success_does_not_clear_a_limit_error(quota, tmp_path):
+    account = opencode_account(quota, tmp_path, v2=((day, LIMIT_ERROR, 'opencode-go'),
+                                                    (-day, 1.0, 'opencode-go')))
+    assert opencode_rows(quota, account)[0]['seven_day']['used_percent'] == 100
+
+
+@pytest.mark.parametrize('body', ['{"error":{"type":"GoUsageLimitError"},"metadata":1}', '[1]', 'null', '{"error":3}'])
+def test_opencode_malformed_error_bodies_never_abort_the_reading(quota, tmp_path, body):
+    account = opencode_account(quota, tmp_path, v2=((hour, body, 'opencode-go'), (hour, 1.6, 'opencode-go')))
+    windows, fetched = opencode_rows(quota, account)
+    assert windows['five_hour']['used_percent'] == pytest.approx(1.6 / 6.4 * 100)
+    assert fetched['unreported'] == []
+
+
+def test_opencode_legacy_only_store_still_reports_spend(quota, tmp_path):
+    home = tmp_path / 'oc'
+    home.mkdir()
+    with sqlite3.connect(home / 'opencode.db') as db:
+        db.execute('CREATE TABLE message (id text, time_created integer, data text)')
+        db.execute('INSERT INTO message VALUES (?,?,?)', ('x', int((NOW - hour).timestamp() * 1000),
+                                                          json.dumps({'providerID': 'opencode-go', 'cost': 3.2})))
+    windows, fetched = opencode_rows(quota, quota.Account('opencode', 'go', home, True))
+    assert windows['thirty_day']['used_percent'] == pytest.approx(10.0) and fetched['unreported'] == []
+
+
 def test_opencode_unreadable_store_is_unreported_never_zero(quota, tmp_path):
     windows, fetched = opencode_rows(quota, quota.Account('opencode', 'go', tmp_path / 'missing', True))
     assert windows == {} and fetched['unreported'] == ['five_hour', 'seven_day', 'thirty_day']
