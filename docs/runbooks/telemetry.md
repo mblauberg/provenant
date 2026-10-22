@@ -281,9 +281,27 @@ A balance that the latest reading does not report is unknown, never usable.
 4. Register a fake module and mock all process/network boundaries in tests.
    Add the account to config and verify it appears in `provenant quota`.
 
-OpenCode's native SQLite source supplies usage tokens and reported cost, not a
-verified account quota endpoint. Its Go subscription documentation describes
-limits, but Provenant does not turn those descriptions into assumed windows.
+OpenCode has no usage or limits endpoint and documents no reset semantics.
+Go limits are plan-wide dollar amounts (5 hour 20%, weekly 50%, monthly 100% of
+the monthly amount). The opencode provider is a local estimate: it sums paid
+`opencode-go` cost from both `opencode.db` message stores (v1 `message`, v2
+`session_message`; read-only, rolling windows by message timestamp) against a
+monthly cap calibrated from the Go dashboard, not documented: $32 for Go, which is
+assumed when no `plan` is set (the source says so). Set `limits.monthly_usd` to
+override it or to cover another plan, which is otherwise unreported. The estimate
+is partial: other hosts using the same account are not counted, so it
+undercounts. A recent `GoUsageLimitError` in the store is authoritative: that
+window reads 100% until its estimated reset (the error time plus the window).
+Set `limits.cycle_anchor` (ISO datetime of the subscription cycle start) to use fixed
+weekly (every 7 days) and monthly (same day each month, clamped to short months)
+cycles instead of rolling ones: spend is summed within the current cycle, resets
+are the next boundary, and an error expires at it. The 5 hour window always rolls.
+Free zen models are ignored. Only message tables are read, never credentials.
+
+```json
+"opencode": {"go": {"plan": "Go", "limits": {"monthly_usd": 32}}}
+```
+
 agy has receipt-only usage and no registered quota reader. Configured agy
 accounts therefore appear as unreported. The inspected Cursor reference uses
 its SQLite store for authentication, then obtains allowance from the endpoint;
