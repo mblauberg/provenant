@@ -2776,11 +2776,11 @@ def test_writer_branch_name_warns_in_receipt_without_refusing(tmp_path: Path) ->
 def test_default_suite_blocks_provider_clis(_provider_cli_stub_dir: Path) -> None:
     for executable in ("claude", "codex", "herdr", "pi", "agy", "cursor-agent", "copilot", "kiro-cli", "opencode"):
         path = shutil.which(executable)
-        assert path is not None
-        assert Path(path).parent == _provider_cli_stub_dir
+        assert path is not None, executable
+        assert Path(path).parent == _provider_cli_stub_dir, executable
         result = subprocess.run([path], text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        assert result.returncode == 97
-        assert "blocked real provider CLI" in result.stderr
+        assert result.returncode == 97, executable
+        assert "blocked real provider CLI" in result.stderr, executable
 
 
 def test_primary_checkout_writer_is_rejected(tmp_path: Path) -> None:
@@ -3687,14 +3687,6 @@ else:
     assert json.loads((run_dir / 'RUN_RECEIPT.json').read_text())['status'] == 'ok'
 
 
-def backdate_worktree(worktree: Path) -> None:
-    """Make fixture content older than the launch freshness window."""
-    old = time.time() - 5
-    for path in [worktree, *worktree.rglob('*')]:
-        if path.is_file() or path.is_dir():
-            os.utime(path, (old, old))
-
-
 def real_owner_fixture(tmp_path, monkeypatch, code):
     """Exercise cf_dispatch --plan-only and the production supervisor, no owner stub."""
     disable_memory_admission_floor(tmp_path)
@@ -4039,7 +4031,7 @@ def test_writer_startup_timeout_falls_back_only_over_an_untouched_worktree(tmp_p
     exclude = exclude if exclude.is_absolute() else worktree / exclude
     exclude.parent.mkdir(parents=True, exist_ok=True)
     exclude.write_text('config/installation.json\nlocal-config/\nnode_modules/\npkg/\n.pytest_cache/\n')
-    backdate_worktree(worktree)
+    time.sleep(1.2)  # ctime must predate the launch tolerance; utime cannot set it
     isolate_fabric_plan_env(monkeypatch, tmp_path)
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv('CF_DISPATCH_STARTUP_SECONDS', '1')
@@ -4859,7 +4851,7 @@ print(json.dumps({{"type":"result", "result":"DONE"}}))
 '''
     run, prompt, command = real_owner_fixture(tmp_path, monkeypatch, code)
     worktree = make_worktree(tmp_path)
-    backdate_worktree(worktree)
+    time.sleep(1.2)
     isolate_fabric_plan_env(monkeypatch, tmp_path)
     monkeypatch.setenv("AGENT_FABRIC_STATE_ROOT", str(tmp_path / "state"))
     monkeypatch.chdir(tmp_path)
@@ -4881,7 +4873,7 @@ def test_rate_limit_wait_observes_cancellation_and_intervening_writer_edits(tmp_
     run, prompt, command = real_owner_fixture(tmp_path, monkeypatch, code)
     worktree = make_worktree(tmp_path) if action == "edit" else None
     if worktree:
-        backdate_worktree(worktree)
+        time.sleep(1.2)
         command += ["--access-mode", "worktree_write", "--worktree", str(worktree)]
     isolate_fabric_plan_env(monkeypatch, tmp_path)
     monkeypatch.setenv("AGENT_FABRIC_STATE_ROOT", str(tmp_path / "state"))
@@ -4942,7 +4934,7 @@ print(json.dumps({{"type":"result", "result":"DONE"}}))
     run, prompt, command = real_owner_fixture(tmp_path, monkeypatch, code)
     worktree = make_worktree(tmp_path)
     (tmp_path / ".agents/fabric-policy.json").write_text(json.dumps({"memory_floor_percent": {"worktree_write":10}}))
-    backdate_worktree(worktree)
+    time.sleep(1.2)
     isolate_fabric_plan_env(monkeypatch, tmp_path)
     monkeypatch.setenv("AGENT_FABRIC_STATE_ROOT", str(tmp_path / "state"))
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
