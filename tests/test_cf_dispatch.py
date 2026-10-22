@@ -2450,6 +2450,7 @@ def test_non_git_fallback_routes_via_product_root_model_route():
             SCRIPTS,
             product / "skills" / "orchestrate" / "scripts",
         )
+        shutil.copytree(PRODUCT_ROOT / "skills" / "_shared", product / "skills" / "_shared")
         shutil.copytree(PRODUCT_ROOT / "config", product / "config")
         (product / "scripts").mkdir()
         for name in (

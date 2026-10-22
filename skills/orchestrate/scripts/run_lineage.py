@@ -16,7 +16,12 @@ from datetime import UTC, datetime
 
 import process_info
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-from _shared.custody import atomic_write_contained, open_contained_regular, read_contained_regular
+from _shared.custody import (
+    OwnedFileError,
+    atomic_write_contained,
+    open_contained_regular,
+    read_contained_regular,
+)
 
 
 PARENT_ENV = "PROVENANT_PARENT_ATTEMPT"
@@ -85,7 +90,44 @@ def ensure_nested_owner(run_dir, kind, *, batch_child=False):
     CLIs inherit the provider's group and have neither. Changing os.environ
     alone is insufficient: OS process-environment probes read the exec image.
     """
-    if batch_child or parent_attempt() is None:
+    if batch_child:
+        run_dir = Path(run_dir).resolve()
+
+        def validate_batch_owner():
+            try:
+                record = _read(run_dir, "dispatch-owner.json")
+            except OwnedFileError as exc:
+                if isinstance(exc.__cause__, FileNotFoundError):
+                    raise FileNotFoundError("batch run owner is missing") from exc
+                raise
+            token = os.environ.get("PROVENANT_RUN_TOKEN")
+            if (record.get("schema_version") != 1
+                    or record.get("kind") not in {"dispatch", "batch"}
+                    or record.get("run_dir") != str(run_dir)
+                    or not isinstance(record.get("run_token"), str)
+                    or not record["run_token"]
+                    or (token and record["run_token"] != token)):
+                raise ValueError("batch run owner identity is invalid")
+
+        try:
+            validate_batch_owner()
+            return
+        except FileNotFoundError:
+            # A standalone batch child can initialise an owner. A nested child
+            # must use the batch parent's already-published owner identity.
+            if parent_attempt() is not None or os.environ.get("PROVENANT_RUN_TOKEN"):
+                raise ValueError("nested batch run owner is missing")
+        custody = acquire_owner_custody(run_dir)
+        try:
+            try:
+                validate_batch_owner()
+            except FileNotFoundError:
+                record_owner(run_dir, kind)
+                validate_batch_owner()
+        finally:
+            custody.close()
+        return
+    if parent_attempt() is None:
         return
     run_dir = Path(run_dir).resolve()
     if os.environ.get("PROVENANT_RUN_DIR") == str(run_dir) and os.environ.get("PROVENANT_RUN_TOKEN"):

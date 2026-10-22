@@ -675,7 +675,7 @@ def reconcile_manifest(run_dir: Path, custody=None) -> None:
                     and row.get("status") in {"interrupted", "lost"} and row.get("task_id") == directory.parent.name
                     and directory.name == f"attempt-{row.get('attempt', 0):03d}"):
                 recoverable.add(directory)
-        except (OSError, ValueError, OwnedFileError):
+        except (OSError, OwnedFileError):
             pass
     attempt_dirs = [directory for directory in attempt_dirs if directory not in recoverable]
     for attempt_dir in attempt_dirs:
@@ -1292,7 +1292,7 @@ def _copy_git_evidence(
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         try:
             unlink_contained_regular(run_dir, destination_relative, label="Git evidence packet")
-        except (OSError, OwnedFileError):
+        except (OSError, ValueError, OwnedFileError):
             pass
         raise AttemptEvidenceError("Git evidence packet has an invalid JSON header") from exc
     except BaseException:
@@ -3007,7 +3007,10 @@ def dispatch(args: argparse.Namespace) -> int:
     # Publish under custody before re-exec and before peer placement consumes stdin.
     run_dir = args.run_dir.resolve()
     if contains_run(run_dir, Path.cwd()) and (run_dir / "MANIFEST.md").is_file():
-        run_lineage.ensure_nested_owner(run_dir, "dispatch", batch_child=args.batch_child)
+        try:
+            run_lineage.ensure_nested_owner(run_dir, "dispatch", batch_child=args.batch_child)
+        except (OSError, ValueError):
+            return fail(run_dir, "run_custody_busy", "another dispatch, batch or finalizer owns the run")
     try:
         export_knob_overrides(args)
     except harness_profile.ProfileError as exc:

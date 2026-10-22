@@ -1591,6 +1591,7 @@ def test_dispatch_owner_keeps_lifecycle_risk_separate_from_model_override(tmp_pa
 
 
 def test_batch_child_defers_shared_manifest_append(tmp_path: Path, monkeypatch) -> None:
+    disable_memory_admission_floor(tmp_path)
     run_dir = make_run(tmp_path, "batch-child")
     prompt = tmp_path / "prompt.md"
     prompt.write_text("batch child\n", encoding="utf-8")
@@ -2452,6 +2453,7 @@ def test_reentry_reconciles_missing_manifest_rows_and_retry_lineage(tmp_path: Pa
 
 
 def test_attempt_number_and_retry_lineage_continue_past_999(tmp_path: Path, monkeypatch) -> None:
+    disable_memory_admission_floor(tmp_path)
     run_dir = make_run(tmp_path, "long-retry")
     prompt = tmp_path / "prompt.md"
     prompt.write_text("long retry\n", encoding="utf-8")

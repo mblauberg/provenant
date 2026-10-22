@@ -30,6 +30,7 @@ from datetime import UTC, datetime, timedelta
 from dataclasses import dataclass
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from adapters import profile
 from adapters import claude as claude_adapter
 from output_custody import install, verify, CustodyError
