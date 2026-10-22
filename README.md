@@ -108,7 +108,8 @@ skill fails the install rather than shadowing it. If a client still exposes the
 product catalogue as one directory-level link, the first install carrying a
 custom skill converts that directory into per-entry links. A single-platform install changes
 only that primary. Every install also writes a managed copy of the thin
-`provenant` command in
+`provenant` command (a small Rust binary when `cargo` is available, otherwise the
+Python stub; see [`docs/runbooks/front-door.md`](docs/runbooks/front-door.md)) in
 `${PROVENANT_BIN_DIR:-$HOME/.local/bin}`; it warns when that directory is not
 on `PATH`, and never edits shell startup files. During an upgrade, the installer
 also retires prior managed Claude custom-agent links recorded by the old

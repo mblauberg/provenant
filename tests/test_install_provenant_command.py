@@ -211,3 +211,67 @@ def test_snapshot_maps_a_racing_delete_to_a_collision(tmp_path, monkeypatch):
         pass
     else:
         raise AssertionError("racing delete was not mapped to a collision")
+
+
+# --- A compiled front door goes through the same managed-file rule (ADR 0027) ---
+
+
+def compiled_front_door(path: Path, digest: str = "a" * 64) -> Path:
+    """Bytes that are not text: NULs, 0xff, a long line, then the identity as its own lines."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(
+        b"\x7fELF\x00\x01\xff\xfe" * 64
+        + b"\n"
+        + load_helper().MANAGED_MARKER
+        + b"\nprovenant-front-door source-sha256="
+        + digest.encode()
+        + b"\n\x00\x00trailing"
+    )
+    path.chmod(0o755)
+    return path
+
+
+def test_binary_source_replaces_the_managed_template_and_back(tmp_path):
+    binary = compiled_front_door(tmp_path / "build/provenant")
+    destination = tmp_path / "bin/provenant"
+    destination.parent.mkdir()
+    destination.write_bytes(SOURCE.read_bytes())
+
+    assert invoke("classify", "--source", str(binary), "--destination", str(destination)).stdout == "managed-file\n"
+    published = invoke(
+        "publish", "--source", str(binary), "--destination", str(destination), "--expected", "managed-file"
+    )
+    assert published.stdout == "updated\n", published.stderr
+    assert destination.read_bytes() == binary.read_bytes()
+    assert os.access(destination, os.X_OK) and (destination.stat().st_mode & 0o777) == 0o755
+
+    # Rollback: the template is the source now, and the installed binary is managed.
+    assert invoke("classify", "--source", str(SOURCE), "--destination", str(destination)).stdout == "managed-file\n"
+    rolled = invoke(
+        "publish", "--source", str(SOURCE), "--destination", str(destination), "--expected", "managed-file"
+    )
+    assert rolled.stdout == "updated\n", rolled.stderr
+    assert destination.read_bytes() == SOURCE.read_bytes()
+
+
+def test_identical_binary_is_existing_and_a_rebuilt_one_is_managed(tmp_path):
+    binary = compiled_front_door(tmp_path / "build/provenant")
+    destination = tmp_path / "bin/provenant"
+    destination.parent.mkdir()
+    destination.write_bytes(binary.read_bytes())
+    rebuilt = compiled_front_door(tmp_path / "rebuilt/provenant", digest="b" * 64)
+
+    assert invoke("classify", "--source", str(binary), "--destination", str(destination)).stdout == "existing\n"
+    assert invoke("classify", "--source", str(rebuilt), "--destination", str(destination)).stdout == "managed-file\n"
+
+
+def test_unmarked_binary_is_a_foreign_collision(tmp_path):
+    binary = compiled_front_door(tmp_path / "build/provenant")
+    destination = tmp_path / "bin/provenant"
+    destination.parent.mkdir()
+    destination.write_bytes(b"\x7fELF\x00 someone else's binary, no marker\n")
+
+    result = invoke("classify", "--source", str(binary), "--destination", str(destination))
+
+    assert result.returncode == 3
+    assert "provenant command collision=" in result.stderr

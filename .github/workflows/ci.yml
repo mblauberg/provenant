@@ -52,6 +52,7 @@ jobs:
       fabric: ${{ github.event_name != 'pull_request' && 'true' || steps.filter.outputs.fabric }}
       split-root: ${{ github.event_name != 'pull_request' && 'true' || steps.filter.outputs.split-root }}
       workflows: ${{ github.event_name != 'pull_request' && 'true' || steps.filter.outputs.workflows }}
+      rust: ${{ github.event_name != 'pull_request' && 'true' || steps.filter.outputs.rust }}
     steps:
       - name: Filter changed paths
         id: filter
@@ -131,6 +132,17 @@ jobs:
               - 'tests/test_instance_installation.py'
               - 'tests/test_check_provenant_install.py'
               - 'docs/worktrees.md'
+            rust:
+              - *ci-contract
+              - 'tools/front-door/**'
+              - 'tests/front_door_parity/**'
+              - 'scripts/provenant'
+              - 'scripts/provenant.template'
+              - 'scripts/check_target.py'
+              - 'scripts/lib/front_door_build.py'
+              - 'scripts/lib/product_root_resolver.py'
+              - 'scripts/lib/stale_checkout.py'
+              - 'scripts/worktree.py'
             workflows:
               - '.github/workflows/**'
               - '.github/actions/**'
@@ -301,6 +313,51 @@ jobs:
       - name: Run workspace checks under split roots
         run: npm run check
 
+  rust:
+    name: Rust front door
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    needs: detect-changes
+    if: needs.detect-changes.outputs.rust == 'true'
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # The runner image ships rustup; the toolchain is pinned here and in
+      # tools/front-door/rust-toolchain.toml (ADR 0027).
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install 1.94.1 --profile minimal --component rustfmt --component clippy
+      - name: Set up uv and Python
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          python-version: "3.12"
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+      - name: Install locked harness test dependencies
+        run: uv sync --locked --only-group test
+      - name: Check formatting
+        working-directory: tools/front-door
+        run: cargo fmt --check
+      - name: Lint
+        working-directory: tools/front-door
+        run: cargo clippy --all-targets --locked -- -D warnings
+      - name: Run unit tests
+        working-directory: tools/front-door
+        run: cargo test --locked
+      - name: Build release binary
+        working-directory: tools/front-door
+        run: |
+          PROVENANT_FD_SOURCE_SHA256="$(python3 ../../scripts/lib/front_door_build.py digest .)" \
+            cargo build --release --locked
+      - name: Run the parity suite against the binary
+        env:
+          PROVENANT_PARITY_IMPL: rust
+          PROVENANT_FRONT_DOOR_BIN: ${{ github.workspace }}/tools/front-door/target/release/provenant
+        run: .venv/bin/python -m pytest tests/front_door_parity -q
+
   zizmor:
     name: Workflow security lint
     runs-on: ubuntu-latest
@@ -337,6 +394,7 @@ jobs:
       - harness
       - fabric
       - split-root
+      - rust
       - zizmor
     if: always()
     steps:
