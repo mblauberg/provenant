@@ -1770,3 +1770,198 @@ def test_a_transcript_swapped_for_a_link_after_discovery_is_never_read(tmp_path,
     jsonl(transcript, claude_turn('s', 'REPLACED'))
     telemetry.ingest(db)
     assert db.execute("SELECT COUNT(*) FROM usage WHERE source='claude'").fetchone()[0] == 0
+
+
+# Golden check for the SQL-grouped `stats`: the row-by-row implementation it replaced is kept
+# here as the oracle and both must report the same for one ledger.
+LEGACY_STATS = '''
+def legacy_stats(db, since=None, prices=None, *, summary=False, until=None):
+    """Ledger report for [since, until); either bound may be omitted."""
+    free_patterns = {}
+    if prices is None:
+        prices, free_patterns = load_prices()
+    boundary = since_time(since) if since else None
+    end = since_time(until) if until else None
+    def included(row):
+        if not boundary and not end:
+            return True
+        stamp = since_time(row['timestamp']) if row['timestamp'] is not None else None
+        return stamp is not None and (not boundary or stamp >= boundary) and (not end or stamp < end)
+    adapters = catalogue()
+    excluded = Counter()
+    selected, unattributed = [], []
+    # A day of margin keeps offset timestamps; `included` applies the exact bounds.
+    query, parameters = 'SELECT * FROM usage', ()
+    if boundary:
+        query, parameters = query + ' WHERE timestamp >= ?', ((boundary - timedelta(days=1)).date().isoformat(),)
+    for item in db.execute(query, parameters):
+        row = dict(item)
+        if not included(row):
+            continue
+        row['model_raw'] = row['model']
+        row['model'] = normalise_model(row['adapter'], row['provider'], row['model'], adapters)
+        reason = classify(row)
+        if reason == 'test_fixture':
+            excluded[reason] += 1
+            continue
+        if reason == 'unattributed':
+            unattributed.append(row)
+        selected.append(row)
+    attributed = [row for row in selected if classify(row) is None]
+    native = {(row['adapter'], row['session']) for row in attributed if row['source'] != 'fabric' and row['session']}
+    usage = [row for row in attributed if row['source'] != 'fabric' or (row['adapter'], row['session']) not in native]
+    for row in usage:
+        row['day'] = since_time(row['timestamp']).date().isoformat() if row['timestamp'] else None
+    latest = {}
+    attempts = Counter()
+    for row in selected:
+        if row['source'] != 'fabric':
+            continue
+        attempts[(row['status'], row['error_class'])] += 1
+        key = (row['repository'], row['run_id'], row['task_id'])
+        if key not in latest or (row['attempt'] or 0) > (latest[key]['attempt'] or 0):
+            latest[key] = row
+    lanes = Counter((row['status'], row['error_class']) for row in latest.values())
+    limits = Counter()
+    last_limits = {}
+    def remember_limit(row):
+        key = (row['host'], row['provider'], row['account'])
+        stamp = row.get('timestamp')
+        if stamp and (key not in last_limits or since_time(stamp) > since_time(last_limits[key])):
+            last_limits[key] = stamp
+    receipt_outcomes = set()
+    for row in selected:
+        if row['source'] == 'fabric' and row['status'] in {'rate_limited', 'usage_limited'}:
+            remember_limit(row)
+            run = row['run_id']
+            receipt_outcomes.add((row['adapter'], row['model_raw'], run, row['status']))
+            day = since_time(row['timestamp']).date().isoformat() if row['timestamp'] else None
+            limits[(day, row['provider'], row['account'], row['status'])] += 1
+    seen = set()
+    for item in db.execute('SELECT * FROM observations ORDER BY source'):
+        row = dict(item)
+        if not included(row) or row['status'] not in {'rate_limited', 'usage_limited'}:
+            continue
+        remember_limit(row)
+        if (row['adapter'], row['model'], row['run_id'], row['status']) in receipt_outcomes:
+            continue
+        day = since_time(row['timestamp']).date().isoformat() if row['timestamp'] else None
+        key = (row['adapter'], row['model'], row['run_id'] or row['timestamp'], row['status'], day)
+        if key not in seen:
+            seen.add(key)
+            limits[(day, row['provider'], row['account'], row['status'])] += 1
+    windows = {}
+    for item in db.execute('SELECT * FROM observations WHERE used_percent IS NOT NULL ORDER BY timestamp'):
+        row = dict(item)
+        if included(row):
+            windows[(row['provider'], row['account'], row['window'])] = row
+    missing = Counter()
+    for row in unattributed:
+        group = missing.setdefault((row['source'], row['adapter']), {'rows': 0, 'input_tokens': 0, 'statuses': Counter()})
+        group['rows'] += 1
+        group['input_tokens'] += row['input_tokens'] or 0
+        if row['status']:
+            group['statuses'][row['status']] += 1
+    report = {'schema_version': 2, 'since': since, 'host': host_id(),
+            'usage': aggregate(usage, ('provider', 'adapter', 'model'), prices, free_patterns),
+            'usage_per_day': aggregate(usage, ('day', 'provider', 'adapter', 'account'), prices, free_patterns),
+            'outcomes': outcomes([row for row in attributed if row['source'] == 'fabric']),
+            # One overall group each, for before/after comparison; percentiles are never averaged.
+            'lane_totals': outcomes([{**row, **dict.fromkeys(OUTCOME_KEYS)}
+                                     for row in attributed if row['source'] == 'fabric']),
+            'usage_totals': combine((unit(row, (), prices, free_patterns) for row in usage), ()),
+            'lanes': [{'status': status, 'error_class': error, 'lanes': count}
+                      for (status, error), count in sorted(lanes.items(), key=str)],
+            'attempts': [{'status': status, 'error_class': error, 'attempts': count}
+                         for (status, error), count in sorted(attempts.items(), key=str)],
+            'limits_per_day': [dict(zip(('day','provider','account','status','events'), (*key, count)))
+                               for key, count in sorted(limits.items(), key=str)],
+            'last_limit_events': [dict(host=host, provider=provider, account=account, timestamp=stamp,
+                                       age_seconds=max(0, round((since_time(now()) - since_time(stamp)).total_seconds())))
+                                  for (host, provider, account), stamp in sorted(last_limits.items(), key=str)],
+            'quota_observations': sorted(windows.values(), key=lambda row: tuple(str(row[k] or '') for k in ('provider', 'account', 'window'))),
+            'excluded_rows': dict(excluded),
+            'unattributed': [{'source': source, 'adapter': adapter, 'rows': group['rows'],
+                              'input_tokens': group['input_tokens'], 'statuses': dict(sorted(group['statuses'].items()))}
+                             for (source, adapter), group in sorted(missing.items(), key=lambda item: str(item[0]))],
+            'receipt_usage_rows_excluded': len(attributed) - len(usage),
+            'pending_source_rebuilds': [row[0] for row in db.execute('SELECT source FROM rebuilds ORDER BY source')]}
+    if summary:
+        keys = ('host', 'source', 'session', 'day', 'provider', 'adapter', 'account', 'model')
+        report['session_usage'] = combine((unit(row, keys, prices, free_patterns) for row in usage), keys)
+    return report
+'''
+
+
+def load_telemetry(tmp_path, monkeypatch):
+    import importlib.util
+    monkeypatch.setenv('AGENT_FABRIC_STATE_ROOT', str(tmp_path / 'state'))
+    monkeypatch.setenv('HOME', str(tmp_path / 'home'))
+    spec = importlib.util.spec_from_file_location('telemetry_golden', ROOT / 'scripts/telemetry.py')
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    exec(LEGACY_STATS, vars(module))
+    return module
+
+
+def fixture_ledger(db):
+    import random
+    rng = random.Random(7)
+    models = [('claude', 'anthropic', 'claude-opus-4-8'), ('claude', 'anthropic', 'opus'),
+              ('codex', 'openai', 'gpt-5.5'), ('codex', 'openai', 'gpt-5.5-high'),
+              ('opencode', 'opencode', 'free'), ('claude', 'anthropic', '<synthetic>'),
+              ('claude', 'anthropic', 'fixture'), ('codex', 'openai', 'nonexistent-model'),
+              ('claude', 'anthropic', 'unpriced-model'), (None, None, None), ('claude', 'anthropic', ' ')]
+    stamps = ['2026-10-19T23:59:59Z', '2026-10-20T00:00:00Z', '2026-10-20T13:00:00.250Z',
+              '2026-10-20T23:30:00-05:00', '2026-10-21T08:00:00+10:00', '2026-10-21T12:00:00+00:00',
+              '2026-10-21T23:59:59Z', '2026-10-22T00:00:00Z', '2026-10-23T09:00:00Z', '2026-10-21 12:00:00', None]
+    tokens = (None, 0, 5, 1200)
+    rows = []
+    for index in range(600):
+        source = rng.choice(['claude', 'codex', 'opencode', 'fabric', 'fabric'])
+        adapter, provider, model = rng.choice(models)
+        rows.append({'source': source, 'event_id': f'e{index}', 'host': rng.choice(['h1', 'h2']),
+                     'session': rng.choice([None, 's1', 's2', 's3']), 'run_id': f'r{rng.randrange(8)}',
+                     'task_id': f't{rng.randrange(3)}', 'attempt': rng.choice([None, 1, 2, 3]),
+                     'repository': 'repo', 'adapter': adapter, 'provider': provider, 'model': model,
+                     'effort': rng.choice([None, 'high']), 'account': rng.choice([None, 'a', 'b']),
+                     'timestamp': rng.choice(stamps),
+                     **{field: rng.choice(tokens) for field in (
+                         'input_tokens', 'cache_read_tokens', 'cache_write_tokens', 'output_tokens', 'reasoning_tokens')},
+                     'reported_cost': rng.choice([None, None, 0.25, 1.5]),
+                     'status': rng.choice([None, 'ok', 'succeeded', 'failed', 'rate_limited', 'usage_limited']),
+                     'error_class': rng.choice([None, 'timeout']), 'task_class': rng.choice([None, 'code']),
+                     'route': rng.choice([None, 'x']), 'duration_ms': rng.choice([None, 900, 4000]),
+                     'provider_ms': rng.choice([None, 700, 3000])})
+    for row in rows:
+        db.execute(f"INSERT INTO usage({','.join(row)}) VALUES ({','.join('?' for _ in row)})", tuple(row.values()))
+    db.commit()
+
+
+def same_report(left, right, path='report'):
+    if isinstance(left, dict):
+        assert left.keys() == right.keys(), path
+        for key in left:
+            same_report(left[key], right[key], f'{path}/{key}')
+    elif isinstance(left, list):
+        assert len(left) == len(right), path
+        for index, (a, b) in enumerate(zip(left, right)):
+            same_report(a, b, f'{path}[{index}]')
+    elif isinstance(left, float) or isinstance(right, float):
+        # SQL sums a group at once; Python adds row by row. They agree to float rounding.
+        assert left is not None and right is not None and abs(left - right) <= 1e-9 * max(1, abs(left)), path
+    else:
+        assert left == right and type(left) is type(right), path
+
+
+def test_sql_grouped_stats_match_the_row_by_row_oracle(tmp_path, monkeypatch):
+    telemetry = load_telemetry(tmp_path, monkeypatch)
+    with telemetry.connect() as db:
+        fixture_ledger(db)
+        for kwargs in ({}, {'summary': True}, {'since': '2026-10-20'}, {'since': '2026-10-20T12:00:00Z'},
+                       {'until': '2026-10-22'}, {'since': '2026-10-20', 'until': '2026-10-22T06:00:00+00:00'},
+                       {'since': '2026-10-21T00:00:00+10:00', 'summary': True}):
+            new = telemetry.stats(db, **kwargs)
+            old = telemetry.legacy_stats(db, **kwargs)
+            assert new['usage'] and new['unattributed'] and new['excluded_rows'], kwargs
+            same_report(old, new)
