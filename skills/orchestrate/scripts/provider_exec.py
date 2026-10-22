@@ -38,6 +38,7 @@ import fabric_policy
 import layout
 import context_usage
 import process_info
+import run_lineage
 from trusted_git import owner_location, prepare_writer_ref, writer_git_writes, writer_read_only
 
 
@@ -3469,10 +3470,14 @@ def _run_attempt(
         PWD=plan["cwd"],
     )
     environment.pop("PROVENANT_PARENT_ATTEMPT", None)
+    environment.pop("PROVENANT_PARENT_RUN_TOKEN", None)
     environment.pop("PROVENANT_PARENT_REMOTE", None)
     environment.pop("PROVENANT_HOST_LOCAL_ONLY", None)
     if plan.get("attempt_identity"):
         environment["PROVENANT_PARENT_ATTEMPT"] = json.dumps(plan["attempt_identity"])
+        parent_token = plan.get("_lineage_token") or control_environment.get("PROVENANT_RUN_TOKEN")
+        if parent_token:
+            environment["PROVENANT_PARENT_RUN_TOKEN"] = parent_token
     attempt_marker = uuid.uuid4().hex
     environment["PROVENANT_ATTEMPT_MARKER"] = attempt_marker
     instruction_start = None
@@ -3877,6 +3882,9 @@ def _run_attempt(
                 _release_subreaper()
             if agy_home:
                 agy_home_warnings = finish_agy_home(plan, tmp_fd, agy_home)
+    if (forced in {"cancelled", "interrupted"} or cancel_signal) and plan.get("attempt_identity"):
+        parent = plan["attempt_identity"]
+        run_lineage.cancel_children(Path(parent["run_dir"]), parent["task_id"], parent["attempt"])
     exit_code = process.returncode if process else None
     if cancel_signal and not forced:
         forced = "interrupted"  # EOF can precede the loop's signal check.

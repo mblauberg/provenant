@@ -5048,18 +5048,23 @@ def test_nested_attempt_retains_parent_in_receipt_and_index(tmp_path, monkeypatc
     assert entry['parent'] == parent
 
 
+def lineage_parent_environment(parent):
+    (Path(parent['run_dir']) / 'dispatch-owner.json').write_text(json.dumps({'run_token': 'parent-token'}))
+    return {'PROVENANT_PARENT_ATTEMPT': json.dumps(parent), 'PROVENANT_PARENT_RUN_TOKEN': 'parent-token'}
+
+
 @pytest.mark.parametrize('kind', ['dispatch', 'batch'])
 @pytest.mark.parametrize('parent_state', ['running', 'terminal'])
 def test_nested_cli_publishes_matching_owner_and_bidirectional_lineage(tmp_path, kind, parent_state):
     mod = load_dispatch_module()
-    parent_dir = tmp_path / 'parent'
+    parent_dir = make_run(tmp_path, 'runs/parent')
     parent = {'run_id': 'mcp-parent', 'task_id': 'writer', 'attempt': 2, 'run_dir': str(parent_dir)}
     parent_path = parent_dir / 'tasks/writer/attempt-002/attempt.json'
     parent_path.parent.mkdir(parents=True)
     parent_path.write_text(json.dumps({**parent, 'schema': 'fabric.attempt.v1', 'state': parent_state}))
     (parent_dir / 'dispatch/tasks/writer/attempt-002/tmp/children').mkdir(parents=True)
     disable_memory_admission_floor(tmp_path)
-    run = make_run(tmp_path, 'nested')
+    run = make_run(tmp_path, 'runs/nested')
     prompt = tmp_path / 'prompt.md'
     prompt.write_text('Reply OK')
     adapter = tmp_path / 'adapter'
@@ -5069,10 +5074,16 @@ def test_nested_cli_publishes_matching_owner_and_bidirectional_lineage(tmp_path,
                                               'prompt': 'Reply OK'}]}))
     wrapper = tmp_path / 'nested.py'
     # A fresh image starts with the lane's environment, just like provenant's CLI.
-    wrapper.write_text(f'''import sys,json,pathlib
+    wrapper.write_text(f'''import os,sys,json,pathlib
 sys.path.insert(0, {str(SCRIPT.parent)!r})
 import dispatch_run as dispatch
 import batch_run as batch
+real_setsid = os.setsid
+def detach():
+    real_setsid()
+    row = dispatch.provider_exec._process_snapshot()[os.getpid()]
+    pathlib.Path({str(tmp_path / 'detach-verified')!r}).write_text(str(dispatch.provider_exec._is_nested_fabric_owner(row)))
+os.setsid = detach
 dispatch.CF_DISPATCH = pathlib.Path({str(adapter)!r})
 batch.DISPATCH_RUN = pathlib.Path({str(wrapper)!r})
 if '--batch-child' in sys.argv or {kind!r} == 'dispatch':
@@ -5085,7 +5096,7 @@ raise SystemExit(batch.batch(batch.parser().parse_args()))
     argv = (['--run-dir', str(run), '--task-id', 'child', '--adapter', 'codex', '--model', 'fixture',
              '--prompt-file', str(prompt)] if kind == 'dispatch' else
             ['--run-dir', str(run), '--manifest', str(manifest)])
-    env = {**os.environ, 'PROVENANT_PARENT_ATTEMPT': json.dumps(parent), 'PROVENANT_HOST_LOCAL_ONLY': '1'}
+    env = {**os.environ, **lineage_parent_environment(parent), 'PROVENANT_HOST_LOCAL_ONLY': '1'}
     for key in ('PROVENANT_RUN_DIR', 'PROVENANT_RUN_TOKEN', 'PROVENANT_RUN_ID'):
         env.pop(key, None)
     result = subprocess.run([sys.executable, str(wrapper), *argv], cwd=tmp_path,
@@ -5098,6 +5109,7 @@ raise SystemExit(batch.batch(batch.parser().parse_args()))
         assert 'Traceback' not in result.stderr
         return
     assert result.returncode == 0, result.stdout + result.stderr
+    assert (tmp_path / 'detach-verified').read_text() == 'True'
     owner_path = run / 'dispatch-owner.json'
     assert owner_path.exists(), 'direct nested CLI did not publish a verifiable owner'
     owner = json.loads(owner_path.read_text())
@@ -5123,14 +5135,19 @@ raise SystemExit(batch.batch(batch.parser().parse_args()))
 def test_nested_failure_is_named_without_replacing_parent_provider_status(
         tmp_path, monkeypatch, provider_status, child_status, reason):
     mod = load_dispatch_module()
-    parent = {'run_id': 'mcp-parent', 'task_id': 'writer', 'attempt': 1, 'run_dir': str(tmp_path)}
-    parent_path = tmp_path / 'tasks/writer/attempt-001/attempt.json'
+    parent_dir = make_run(tmp_path, 'runs/parent')
+    parent = {'run_id': 'mcp-parent', 'task_id': 'writer', 'attempt': 1, 'run_dir': str(parent_dir)}
+    parent_path = parent_dir / 'tasks/writer/attempt-001/attempt.json'
     parent_path.parent.mkdir(parents=True)
     parent_path.write_text(json.dumps({**parent, 'state': 'running'}))
-    (tmp_path / 'dispatch/tasks/writer/attempt-001/tmp/children').mkdir(parents=True)
-    child_dir = make_run(tmp_path, 'child')
+    (parent_dir / 'dispatch/tasks/writer/attempt-001/tmp/children').mkdir(parents=True)
+    child_dir = make_run(tmp_path, 'runs/child')
+    (child_dir / 'dispatch-owner.json').write_text(json.dumps({
+        'schema_version': 1, 'kind': 'dispatch', 'run_dir': str(child_dir),
+        'run_token': 'child-token', 'parent': parent}))
     with monkeypatch.context() as patch:
-        patch.setenv('PROVENANT_PARENT_ATTEMPT', json.dumps(parent))
+        for key, value in lineage_parent_environment(parent).items():
+            patch.setenv(key, value)
         mod.run_lineage.register_run(child_dir, 'mcp-child')
     child_path = child_dir / 'tasks/junior/attempt-001/attempt.json'
     child_path.parent.mkdir(parents=True)
@@ -5143,6 +5160,7 @@ def test_nested_failure_is_named_without_replacing_parent_provider_status(
     elif child_status == 'reaped':
         child_path.unlink()
         (child_dir / 'dispatch-owner.json').write_text(json.dumps({
+            **json.loads((child_dir / 'dispatch-owner.json').read_text()),
             'owner_pid': os.getpid(), 'owner_started_at': 'previous process with this PID'}))
     elif child_status == 'unpublished':
         child_path.unlink()
@@ -5155,7 +5173,7 @@ def test_nested_failure_is_named_without_replacing_parent_provider_status(
               'outcome': provider_status, 'status': provider_status, 'result': 'result.md',
               'attempt_path': 'dispatch/tasks/writer/attempt-001/attempt.json', 'requested_route': {}}
     adapter = {'status': provider_status, 'error': None if provider_status == 'ok' else 'provider_exit'}
-    row = mod.terminal_contract(args, tmp_path, legacy, adapter, 1, parent_path.parent)
+    row = mod.terminal_contract(args, parent_dir, legacy, adapter, 1, parent_path.parent)
     assert row['status'] == provider_status
     assert row['children'][0]['status'] == {'unreadable': 'lost', 'invalidshape': 'lost', 'unpublished': 'failed', 'reaped': 'lost'}.get(child_status, child_status)
     assert 'mcp-child' in (row.get('error') or '') and reason in row['error']
@@ -5167,18 +5185,19 @@ def test_nested_failure_is_named_without_replacing_parent_provider_status(
 def test_parent_cleanup_spares_real_direct_nested_cli(tmp_path, stop):
     mod = load_dispatch_module()
     disable_memory_admission_floor(tmp_path)
-    parent_dir = make_run(tmp_path, 'parent')
+    parent_dir = make_run(tmp_path, 'runs/parent')
     parent = {'run_id': 'mcp-parent', 'task_id': 'writer', 'attempt': 1, 'run_dir': str(parent_dir)}
     parent_path = parent_dir / 'tasks/writer/attempt-001/attempt.json'
     parent_path.parent.mkdir(parents=True)
     parent_path.write_text(json.dumps({**parent, 'state': 'running'}))
-    child_dir = make_run(tmp_path, 'child')
+    lineage_parent_environment(parent)
+    child_dir = make_run(tmp_path, 'runs/child')
     prompt = tmp_path / 'prompt.md'
     prompt.write_text('Reply OK')
     adapter = tmp_path / 'adapter'
     write_success_adapter(adapter)
     ready = tmp_path / 'child-ready'
-    adapter.write_text(adapter.read_text().replace('while [', f'touch {str(ready)!r}\nsleep 2\nwhile [', 1))
+    adapter.write_text(adapter.read_text().replace('while [', f'touch {str(ready)!r}\nsleep {30 if stop == 'cancelled' else 2}\nwhile [', 1))
     wrapper = tmp_path / 'nested.py'
     wrapper.write_text(f'''import sys,pathlib
 sys.path.insert(0, {str(SCRIPT.parent)!r})
@@ -5193,9 +5212,8 @@ child = subprocess.Popen({argv!r}, env={{**os.environ, 'PROVENANT_HOST_LOCAL_ONL
     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 pathlib.Path('nested.pid').write_text(str(child.pid))
 deadline = time.monotonic() + 8
-while not pathlib.Path({str(ready)!r}).exists() and time.monotonic() < deadline:
+while (not pathlib.Path({str(child_dir / 'dispatch-owner.json')!r}).is_file() or not pathlib.Path({str(ready)!r}).exists()) and time.monotonic() < deadline:
     time.sleep(.02)
-time.sleep(.2)
 print(json.dumps({{'type':'item.completed','item':{{'type':'agent_message','text':'DONE'}}}}), flush=True)
 if {stop!r} == 'normal':
     print(json.dumps({{'type':'turn.completed'}}), flush=True)
@@ -5217,7 +5235,8 @@ else:
     plan.update(argv=[sys.executable, '-u', '-c', code], attempt_identity=parent, grace_seconds=.1)
     try:
         record = mod.provider_exec.execute(plan, tmp_path / 'result.md',
-            cancelled=lambda: stop == 'cancelled' and ready.exists())
+            cancelled=lambda: stop == 'cancelled' and ready.exists() and (child_dir / 'dispatch-owner.json').is_file(),
+            env={**os.environ, 'PROVENANT_RUN_TOKEN': 'parent-token'})
         assert record['status'] == ('ok' if stop == 'normal' else 'cancelled')
         assert record.get('spared', 0) >= 1
         assert record['reaped'] == []
@@ -5228,7 +5247,7 @@ else:
             if child_path.exists() and json.loads(child_path.read_text()).get('state') == 'terminal':
                 break
             time.sleep(.05)
-        assert json.loads(child_path.read_text())['status'] == 'ok'
+        assert json.loads(child_path.read_text())['status'] == ('cancelled' if stop == 'cancelled' else 'ok')
         assert owner['owner_pid'] == owner['owner_pgid']
     finally:
         # Observe the owner's exit too: its first terminal row precedes final cleanup.
@@ -5250,14 +5269,19 @@ else:
 
 def test_nested_registration_writes_only_the_parent_attempt_private_tmp(tmp_path, monkeypatch):
     mod = load_dispatch_module()
-    parent = {'run_id': 'mcp-parent', 'task_id': 'writer', 'attempt': 1, 'run_dir': str(tmp_path)}
-    parent_path = tmp_path / 'tasks/writer/attempt-001/attempt.json'
+    parent_dir = make_run(tmp_path, 'runs/parent')
+    parent = {'run_id': 'mcp-parent', 'task_id': 'writer', 'attempt': 1, 'run_dir': str(parent_dir)}
+    parent_path = parent_dir / 'tasks/writer/attempt-001/attempt.json'
     parent_path.parent.mkdir(parents=True)
     parent_path.write_text(json.dumps({**parent, 'state': 'running'}))
-    private_tmp = tmp_path / 'dispatch/tasks/writer/attempt-001/tmp'
+    private_tmp = parent_dir / 'dispatch/tasks/writer/attempt-001/tmp'
     (private_tmp / 'children').mkdir(parents=True)
-    child_dir = make_run(tmp_path, 'child')
-    monkeypatch.setenv('PROVENANT_PARENT_ATTEMPT', json.dumps(parent))
+    child_dir = make_run(tmp_path, 'runs/child')
+    (child_dir / 'dispatch-owner.json').write_text(json.dumps({
+        'schema_version': 1, 'kind': 'dispatch', 'run_dir': str(child_dir),
+        'run_token': 'child-token', 'parent': parent}))
+    for key, value in lineage_parent_environment(parent).items():
+        monkeypatch.setenv(key, value)
     parent_path.parent.chmod(0o500)
     try:
         mod.run_lineage.register_run(child_dir, 'mcp-child')
@@ -5266,7 +5290,8 @@ def test_nested_registration_writes_only_the_parent_attempt_private_tmp(tmp_path
         parent_path.parent.chmod(0o700)
 
 
-def test_busy_nested_cli_preserves_the_active_owner_record(tmp_path):
+@pytest.mark.parametrize('spoof_fd', [False, True])
+def test_busy_nested_cli_preserves_the_active_owner_record(tmp_path, spoof_fd):
     mod = load_dispatch_module()
     run = make_run(tmp_path, 'busy-child')
     owner_path = run / 'dispatch-owner.json'
@@ -5274,21 +5299,28 @@ def test_busy_nested_cli_preserves_the_active_owner_record(tmp_path):
     before = owner_path.read_bytes()
     parent = {'run_id': 'mcp-parent', 'task_id': 'writer', 'attempt': 1, 'run_dir': str(tmp_path)}
     custody = mod.acquire_run_custody(run)
+    fd = os.open(run / 'MANIFEST.md', os.O_RDWR)
+    environment = {**os.environ, **lineage_parent_environment(parent), 'PROVENANT_HOST_LOCAL_ONLY': '1'}
+    if spoof_fd:
+        environment.update(PROVENANT_NESTED_CUSTODY_FD=str(fd), PROVENANT_RUN_DIR=str(run),
+                           PROVENANT_RUN_TOKEN='spoofed-token')
     try:
         result = subprocess.run([sys.executable, str(SCRIPT), '--run-dir', str(run), '--prompt-stdin',
             '--adapter', 'codex', '--model', 'fixture'], input='hello', cwd=tmp_path,
-            env={**os.environ, 'PROVENANT_PARENT_ATTEMPT': json.dumps(parent), 'PROVENANT_HOST_LOCAL_ONLY': '1'},
+            env=environment, pass_fds=(fd,),
             text=True, capture_output=True, timeout=10)
         assert json.loads(result.stdout)['status'] == 'run_custody_busy'
         assert owner_path.read_bytes() == before
     finally:
+        os.close(fd)
         custody.close()
 
 
-def test_terminal_publication_includes_child_registered_while_waiting_for_custody(tmp_path, monkeypatch):
+@pytest.mark.parametrize('terminal_status', ['ok', 'cancelled'])
+def test_terminal_publication_includes_child_registered_while_waiting_for_custody(tmp_path, monkeypatch, terminal_status):
     import threading
     mod = load_dispatch_module()
-    parent_dir = make_run(tmp_path, 'parent')
+    parent_dir = make_run(tmp_path, 'runs/parent')
     args = SimpleNamespace(tool='codex', alias='senior', model='fixture', effort='low',
                            task_id='writer', access_mode='read_only', worktree=None)
     path = parent_dir / 'tasks/writer/attempt-001/attempt.json'
@@ -5296,8 +5328,13 @@ def test_terminal_publication_includes_child_registered_while_waiting_for_custod
                            {'run_id': 'mcp-parent'}, '2026-10-22T00:00:00Z')
     mod.publish_contract(parent_dir, row)
     (parent_dir / 'dispatch/tasks/writer/attempt-001/tmp/children').mkdir(parents=True)
-    child_dir = make_run(tmp_path, 'child')
+    child_dir = make_run(tmp_path, 'runs/child')
+    child_process = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'], start_new_session=True)
     parent = {'run_id': 'mcp-parent', 'task_id': 'writer', 'attempt': 1, 'run_dir': str(parent_dir)}
+    (child_dir / 'dispatch-owner.json').write_text(json.dumps({
+        'schema_version': 1, 'kind': 'dispatch', 'run_dir': str(child_dir),
+        'run_token': 'child-token', 'parent': parent, 'owner_pid': child_process.pid,
+        'owner_pgid': child_process.pid, 'owner_started_at': mod.process_info.start_time(child_process.pid)}))
     waiting = threading.Event()
     real_flock = mod.fcntl.flock
     failures = []
@@ -5309,7 +5346,7 @@ def test_terminal_publication_includes_child_registered_while_waiting_for_custod
 
     def publish():
         try:
-            mod.publish_contract(parent_dir, {**row, 'state': 'terminal', 'status': 'ok',
+            mod.publish_contract(parent_dir, {**row, 'state': 'terminal', 'status': terminal_status,
                                                'ended_at': '2026-10-22T00:00:01Z'})
         except BaseException as exc:
             failures.append(exc)
@@ -5320,18 +5357,25 @@ def test_terminal_publication_includes_child_registered_while_waiting_for_custod
         thread.start()
         assert waiting.wait(3), failures
         with monkeypatch.context() as patch:
-            patch.setenv('PROVENANT_PARENT_ATTEMPT', json.dumps(parent))
+            for key, value in lineage_parent_environment(parent).items():
+                patch.setenv(key, value)
             mod.run_lineage.register_run(child_dir, 'mcp-child')
-    thread.join(timeout=3)
+    thread.join(timeout=8)
     assert not thread.is_alive() and not failures
     terminal = json.loads(path.read_text())
     assert terminal['state'] == 'terminal'
-    assert [child['run_id'] for child in terminal['children']] == ['mcp-child']
+    try:
+        assert [child['run_id'] for child in terminal['children']] == ['mcp-child']
+        if terminal_status == 'cancelled':
+            assert child_process.poll() is not None, 'late registered child survived parent cancellation'
+    finally:
+        child_process.terminate()
+        child_process.wait(timeout=3)
 
 
 def test_remote_nested_dispatch_records_source_child_and_refreshes_failure(tmp_path, monkeypatch):
     mod = load_dispatch_module()
-    parent_dir = make_run(tmp_path, 'parent')
+    parent_dir = make_run(tmp_path, 'runs/parent')
     parent = {'run_id': 'mcp-parent', 'task_id': 'writer', 'attempt': 1, 'run_dir': str(parent_dir)}
     parent_path = parent_dir / 'tasks/writer/attempt-001/attempt.json'
     parent_path.parent.mkdir(parents=True)
@@ -5356,7 +5400,7 @@ raise SystemExit(dispatch.dispatch(dispatch.parser().parse_args()))
 ''')
     result = subprocess.run([sys.executable, str(wrapper), '--run-dir', str(child_dir), '--adapter', 'codex',
         '--model', 'fixture', '--prompt-stdin'], input='hello', cwd=tmp_path, text=True, capture_output=True,
-        env={**os.environ, 'PROVENANT_PARENT_ATTEMPT': json.dumps(parent), 'PROVENANT_HOST_LOCAL_ONLY': '0'}, timeout=10)
+        env={**os.environ, **lineage_parent_environment(parent), 'PROVENANT_HOST_LOCAL_ONLY': '0'}, timeout=10)
     assert result.returncode == 0, result.stdout + result.stderr
     request = json.loads(request_path.read_text())
     assert request['prompt'] == 'hello'
@@ -5385,9 +5429,74 @@ raise SystemExit(dispatch.dispatch(dispatch.parser().parse_args()))
 
 def test_peer_child_retains_parent_without_writing_the_source_host(tmp_path, monkeypatch):
     mod = load_dispatch_module()
-    child_dir = make_run(tmp_path, 'child')
+    child_dir = make_run(tmp_path, 'runs/child')
     parent = {'run_id': 'mcp-parent', 'task_id': 'writer', 'attempt': 1, 'run_dir': '/unavailable-source/run'}
     monkeypatch.setenv('PROVENANT_PARENT_ATTEMPT', json.dumps(parent))
     monkeypatch.setenv('PROVENANT_PARENT_REMOTE', '1')
     mod.run_lineage.register_run(child_dir, 'mcp-child')
     assert json.loads((child_dir / 'RUN_RECEIPT.json').read_text())['parent'] == parent
+
+
+@pytest.mark.parametrize('forgery', ['outside', 'symlink', 'missing_owner', 'wrong_token'])
+def test_lineage_ignores_unverified_child_paths(tmp_path, monkeypatch, capsys, forgery):
+    mod = load_dispatch_module()
+    parent_dir = make_run(tmp_path, 'runs/parent')
+    parent = {'run_id': 'mcp-parent', 'task_id': 'writer', 'attempt': 1, 'run_dir': str(parent_dir)}
+    journal = parent_dir / 'dispatch/tasks/writer/attempt-001/tmp/children'
+    journal.mkdir(parents=True)
+    outside = tmp_path / 'private'
+    outside.mkdir()
+    child_dir = tmp_path / '.agent-run/runs/child'
+    child_dir.parent.mkdir(parents=True, exist_ok=True)
+    if forgery == 'outside':
+        child_dir = outside
+    elif forgery == 'symlink':
+        child_dir.symlink_to(outside, target_is_directory=True)
+    else:
+        child_dir.mkdir()
+    (child_dir / 'RUN_RECEIPT.json').write_text(json.dumps({'status': 'failed', 'terminal_reason': 'PRIVATE_SENTINEL', 'parent': parent}))
+    (child_dir / 'MANIFEST.md').write_text('# Run')
+    if forgery != 'missing_owner':
+        (child_dir / 'dispatch-owner.json').write_text(json.dumps({
+            'schema_version': 1, 'kind': 'dispatch', 'run_dir': str(child_dir),
+            'run_token': 'owner-token', 'parent': parent}))
+    (journal / 'forged.json').write_text(json.dumps({
+        'run_id': 'mcp-child', 'run_dir': str(child_dir),
+        'run_token': 'forged-token' if forgery == 'wrong_token' else 'owner-token'}))
+    opened = []
+    real_open = os.open
+    def observed_open(path, *args, **kwargs):
+        opened.append(str(path))
+        return real_open(path, *args, **kwargs)
+    monkeypatch.setattr(os, 'open', observed_open)
+    assert mod.run_lineage.children(parent_dir, 'writer', 1) == []
+    assert not any(path.endswith('RUN_RECEIPT.json') or path.endswith('attempt.json') for path in opened)
+    assert 'ignored unverified lineage journal entry' in capsys.readouterr().err
+
+
+@pytest.mark.parametrize('token', [None, 'other-lane-token', 'parent-token'])
+def test_nested_registration_requires_parent_run_token(tmp_path, monkeypatch, token):
+    mod = load_dispatch_module()
+    parent_dir = make_run(tmp_path, 'runs/parent')
+    parent = {'run_id': 'mcp-parent', 'task_id': 'writer', 'attempt': 1, 'run_dir': str(parent_dir)}
+    path = parent_dir / 'tasks/writer/attempt-001/attempt.json'
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps({**parent, 'state': 'running'}))
+    (parent_dir / 'dispatch-owner.json').write_text(json.dumps({'run_token': 'parent-token'}))
+    journal = parent_dir / 'dispatch/tasks/writer/attempt-001/tmp/children'
+    journal.mkdir(parents=True)
+    child_dir = make_run(tmp_path, 'runs/child')
+    (child_dir / 'dispatch-owner.json').write_text(json.dumps({'run_token': 'child-token'}))
+    monkeypatch.setenv('PROVENANT_PARENT_ATTEMPT', json.dumps(parent))
+    monkeypatch.delenv('PROVENANT_PARENT_RUN_TOKEN', raising=False)
+    if token is not None:
+        monkeypatch.setenv('PROVENANT_PARENT_RUN_TOKEN', token)
+    if token == 'parent-token':
+        mod.run_lineage.register_run(child_dir, 'mcp-child')
+        assert list(journal.glob('*.json'))
+    else:
+        before = (child_dir / 'RUN_RECEIPT.json').read_bytes()
+        with pytest.raises(ValueError, match='parent run token'):
+            mod.run_lineage.register_run(child_dir, 'mcp-child')
+        assert not list(journal.glob('*.json'))
+        assert (child_dir / 'RUN_RECEIPT.json').read_bytes() == before

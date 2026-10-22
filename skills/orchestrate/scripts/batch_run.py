@@ -359,11 +359,7 @@ def _acquire_batch_lock(run_dir: Path):
     try:
         ensure_owned_directory(run_dir, dispatch_dir)
         ensure_owned_directory(run_dir, dispatch_dir / "batches")
-        fd, _relative, _target = open_contained_regular(
-            run_dir, "MANIFEST.md", os.O_RDWR | os.O_APPEND, label="MANIFEST.md"
-        )
-        stream = os.fdopen(fd, "a+", encoding="utf-8")
-        fcntl.flock(stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        stream = run_lineage.acquire_owner_custody(run_dir)
         return stream
     except (OSError, AttemptEvidenceError, OwnedFileError) as exc:
         if "stream" in locals():
@@ -876,7 +872,7 @@ def batch(args: argparse.Namespace) -> int:
     try:
         try:
             run_dir = _validate_run_dir(args.run_dir)
-            run_lineage.record_owner(run_dir)
+            run_lineage.record_owner(run_dir, "batch")
             run_lineage.register_run(run_dir, run_identity(run_dir))
             reconcile_manifest(run_dir, batch_lock)
             # The batch lock is the append handle; do not reopen MANIFEST.md.

@@ -8238,12 +8238,14 @@ def test_opencode_spent_free_allowance_records_provider_reason(tmp_path, body_st
 
 
 def test_provider_exports_its_exact_attempt_for_nested_dispatch(tmp_path, monkeypatch):
+    monkeypatch.setenv('PROVENANT_RUN_TOKEN', 'parent-run-token')
+    monkeypatch.setenv('PROVENANT_PARENT_RUN_TOKEN', 'previous-lane-token')
     monkeypatch.setenv('PROVENANT_HOST_LOCAL_ONLY', '1')
     monkeypatch.setenv('PROVENANT_PARENT_REMOTE', '1')
     code = """import json,os
 print(json.dumps({'type':'item.completed','item':{'type':'agent_message',
     'text':json.dumps({key: os.environ.get(key) for key in
-        ('PROVENANT_PARENT_ATTEMPT','PROVENANT_HOST_LOCAL_ONLY','PROVENANT_PARENT_REMOTE')})}}), flush=True)
+        ('PROVENANT_PARENT_ATTEMPT','PROVENANT_PARENT_RUN_TOKEN','PROVENANT_HOST_LOCAL_ONLY','PROVENANT_PARENT_REMOTE')})}}), flush=True)
 print(json.dumps({'type':'turn.completed'}), flush=True)
 """
     plan = fixture_plan(tmp_path, code)
@@ -8253,5 +8255,6 @@ print(json.dumps({'type':'turn.completed'}), flush=True)
     assert record['status'] == 'ok'
     observed = json.loads((tmp_path / 'result.md').read_text())
     assert json.loads(observed['PROVENANT_PARENT_ATTEMPT']) == parent
+    assert observed['PROVENANT_PARENT_RUN_TOKEN'] == 'parent-run-token'
     assert observed['PROVENANT_HOST_LOCAL_ONLY'] is None
     assert observed['PROVENANT_PARENT_REMOTE'] is None

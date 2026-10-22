@@ -115,22 +115,29 @@ owner exits: reaping it blindly could collect another thread's child.
 
 Nested dispatch and batch are supported from worker lanes. The provider gets
 `PROVENANT_PARENT_ATTEMPT`, containing the owning `run_id`, `task_id`, numeric
-`attempt` and absolute `run_dir`. Child run receipts and attempt rows retain
+`attempt` and absolute `run_dir`. `PROVENANT_PARENT_RUN_TOKEN` binds local
+registration to that run's owner token. Child run receipts and attempt rows retain
 this object as `parent`; the parent attempt lists child run and task identities
 in `children`. Registration uses a journal in the parent's private attempt
 `tmp/children`, so a sandboxed worker need not write the parent's canonical
 receipt. The owner copies the journal into its attempt before pruning temp
-files and serialises registration with terminal publication.
+files and serialises registration with terminal publication. Local journal
+entries must identify a real run under the runs root with a matching owner token
+before the owner reads their receipts. Invalid entries are ignored with a diagnostic.
 
-A direct nested CLI re-executes in its own process group with a fresh run token
-in its initial environment, then publishes `dispatch-owner.json` under run
-custody. It remains a foreground command. This supplies the same PID, start
-time and token evidence used to spare Fabric-launched owners. A busy caller
+A direct nested CLI acquires run custody and publishes `dispatch-owner.json`
+before re-executing with a fresh run token in its initial environment. It carries
+the custody lock through exec, then detaches into its own process group only once
+its published identity is verifiable. It remains a foreground command. This
+supplies the same PID, start time and token evidence used to spare Fabric-launched owners. A busy caller
 cannot replace the active owner's record. Child failures and missing terminal
 evidence are named in the parent's `error`; they do not change the status
 implied by the parent's own provider exit. Child entries are observations at
-publication time, so a child still running when its parent ends stays running
-in that retained snapshot.
+publication time, so a child still running when its parent ends normally stays
+running in that retained snapshot. Parent cancellation cancels recorded local
+children with a bounded grace period and descendant cleanup. The final cancellation
+scan holds journal custody through terminal publication so late registrations
+cannot escape it.
 Peer placement carries the parent identity as transport metadata. The receiving
 owner retains it without writing the source host's files; the source records
 the qualified child identity and refreshes its status before publishing the

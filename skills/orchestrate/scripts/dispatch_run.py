@@ -502,16 +502,7 @@ def ensure_manifest_appendable(run_dir: Path) -> None:
 
 def acquire_run_custody(run_dir: Path):
     """Acquire the shared manifest lock without creating a new run artifact."""
-    fd, _relative, _target = open_contained_regular(
-        run_dir, "MANIFEST.md", os.O_RDWR | os.O_APPEND, label="MANIFEST.md"
-    )
-    stream = os.fdopen(fd, "a+", encoding="utf-8")
-    try:
-        fcntl.flock(stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except OSError:
-        stream.close()
-        raise
-    return stream
+    return run_lineage.acquire_owner_custody(run_dir)
 
 
 @contextmanager
@@ -1779,6 +1770,9 @@ def publish_contract(run_dir,row):
     ensure_owned_directory(run_dir,path.parent)
     with attempt_custody(run_dir, path):
         with run_lineage.journal_custody(run_dir, row["task_id"], row["attempt"]):
+            if row["state"] == "terminal" and row["status"] in {"cancelled", "interrupted"}:
+                # Registration waits on this same journal lock and will see terminal state.
+                run_lineage.cancel_children(run_dir, row["task_id"], row["attempt"])
             children = run_lineage.children(run_dir, row["task_id"], row["attempt"])
             if children:
                 row["children"] = children
@@ -2379,6 +2373,7 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
                     args.resume_warning=context_usage.resume_warning(previous_row,plan["adapter"],
                         context_usage.effective_ceiling(plan["applied"]),args.resume,task_id=advice_task)
                     if args.resume_warning: plan["warnings"].insert(0,args.resume_warning)
+                plan["_lineage_token"] = run_lineage.owner_token(run_dir)
                 plan["attempt_identity"] = {"run_id": run_identity(run_dir, run_receipt),
                     "task_id": args.task_id, "attempt": attempt_number, "run_dir": str(run_dir)}
                 active = contract_row(args,run_dir,attempt_number,attempt_dir,plan,started_at)
@@ -2547,6 +2542,7 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
                     for name in list(provider_environment):
                         if name.startswith(("PROVENANT_RUN_", "PROVENANT_PREFLIGHT_")):
                             provider_environment.pop(name)
+                    provider_environment[run_lineage.PARENT_TOKEN_ENV] = run_lineage.owner_token(run_dir)
                     provider_environment[run_lineage.PARENT_ENV] = json.dumps({
                         "run_id": run_identity(run_dir, run_receipt), "task_id": args.task_id,
                         "attempt": attempt_number, "run_dir": str(run_dir)})
@@ -2870,7 +2866,6 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
     for action in (lambda: write_cooldown(row),lambda: write_route_health(row),lambda: append_index(row,run_dir,root=run_workspace(run_dir, Path.cwd())/".agent-run")):
         try: action()
         except (OSError,ValueError) as exc: row["warnings"].append("terminal index unavailable: "+str(exc))
-    publish_contract(run_dir,row)
     # Include the first durable terminal publication; rewrite only its timing.
     row["timing"]["phases"]["finalize"] = round((time.monotonic() - finalize_started) * 1000, 3)
     publish_contract(run_dir,row)
@@ -3009,8 +3004,7 @@ def cleanup_settled_reader(args) -> None:
 
 def dispatch(args: argparse.Namespace) -> int:
     """Run one attempt while serialising standalone run-ledger mutation."""
-    # Re-exec before peer placement can consume a stdin prompt. Identity is
-    # published later, under custody, so a busy caller cannot replace its owner.
+    # Publish under custody before re-exec and before peer placement consumes stdin.
     run_dir = args.run_dir.resolve()
     if contains_run(run_dir, Path.cwd()) and (run_dir / "MANIFEST.md").is_file():
         run_lineage.ensure_nested_owner(run_dir, "dispatch", batch_child=args.batch_child)
