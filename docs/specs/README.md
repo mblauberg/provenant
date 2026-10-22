@@ -26,3 +26,4 @@ described. Fabric is now small enough to be its own documentation: see
 - [Harness operating model: routing, cache, quota and telemetry](harness/operating-model.md)
 - [Harness profiles: cost and quality knobs](harness/profiles.md)
 - [Switching and comparing profiles](../runbooks/harness-profiles.md)
+- [Held-out replay bench for harness changes](harness/replay-bench.md)
