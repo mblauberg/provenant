@@ -146,6 +146,50 @@ class PeerContracts(unittest.TestCase):
                                 *([response_rows[1]] if extra == ['unrelated-alias'] else []), response_rows[2]]
                         self.assertEqual(result['runs'], expected + other_rows)
 
+    def test_scoped_batch_selector_uses_run_dir_for_linked_worktree_peer(self):
+        import fabric_hosts as hosts
+        import fabric_lanes
+        from types import SimpleNamespace
+
+        with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, {
+                'HOME': directory, 'AGENT_FABRIC_INSTANCE_ROOT': directory}):
+            project = 'Repos/project'
+            repository = Path(directory) / project
+            repository.mkdir(parents=True)
+            subprocess.run(['git', 'init', '-q', str(repository)], check=True)
+            subprocess.run(['git', '-C', str(repository), 'config', 'user.name', 'Fixture'], check=True)
+            subprocess.run(['git', '-C', str(repository), 'config', 'user.email', 'fixture@example.invalid'], check=True)
+            subprocess.run(['git', '-C', str(repository), 'commit', '-q', '--allow-empty', '-m', 'fixture'], check=True)
+            worktree = repository / '.worktrees/peer'
+            subprocess.run(['git', '-C', str(repository), 'worktree', 'add', '-q', '--detach', str(worktree), 'HEAD'], check=True)
+            run_dir = repository / '.agent-run/runs/shared-run'
+            run_dir.mkdir(parents=True)
+            (run_dir / 'dispatch-status.json').write_text(json.dumps({'batch_id': 'shared-batch'}))
+
+            owner = fabric_lanes.LaneFederation(hosts)
+            operation = 'scoped-operation'
+            (owner.root / 'operations').mkdir(parents=True)
+            with owner.database() as db:
+                db.execute('INSERT INTO operations VALUES (?,?,NULL)',
+                    (operation, json.dumps({'project': project, 'verb': 'dispatch'})))
+            (owner.root / 'operations' / f'{operation}.json').write_text(json.dumps(
+                {'runId': 'shared-run-id', 'taskId': 'batch-task', 'attempt': 1}))
+            product = Path(directory) / 'product'
+            loader = product / 'runtime/fabric/node_modules/tsx/dist/loader.mjs'
+            loader.parent.mkdir(parents=True)
+            loader.touch()
+            row = {'run_id': 'shared-run-id', 'task_id': 'batch-task', 'attempt': 1,
+                'run_path': 'runs/shared-run', 'run_dir': str(run_dir)}
+            bounded = hosts._load_module('provenant_bounded_process', ROOT / 'skills/_shared/bounded_process.py')
+            with patch.object(hosts, 'PRODUCT_ROOT', product), \
+                    patch.object(hosts, 'project_directory', return_value=worktree), \
+                    patch.object(bounded, 'run_bounded', return_value=SimpleNamespace(
+                        timed_out=False, stdout_truncated=False, returncode=0,
+                        stdout=json.dumps({'status': 'ok', 'runs': [row]}).encode())):
+                result = owner.worker('lanes', project, {'ids': [operation, 'shared-batch']})
+
+            self.assertEqual(result['runs'], [row])
+
     def peer(self, request, **env):
         with tempfile.TemporaryDirectory() as directory:
             environment = {**os.environ, 'HOME': directory,
