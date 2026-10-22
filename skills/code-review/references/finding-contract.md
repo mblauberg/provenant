@@ -36,7 +36,10 @@ severity.
 
 ## Disposition
 
-At adjudication, the chair records each finding as `confirmed`, `false_positive`, `reviewer_bias`, or `duplicate` with `delivery_receipt.py finding`; duplicate findings also name `--duplicate-of`.
+At adjudication, the chair records each finding as `confirmed`,
+`false_positive`, `reviewer_bias` or `duplicate` with
+`delivery_receipt.py finding`; duplicate findings also name
+`--duplicate-of`.
 
 ## Output
 

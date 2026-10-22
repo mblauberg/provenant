@@ -359,14 +359,16 @@ def event_key(row):
         parts = (attrs.get('source'), row['session'])
     elif row['kind'] == 'lane.attempt':  # the receipt itself, so projects sharing run ids stay apart
         parts = (os.path.realpath(row['source_ref']),)
-    elif row['kind'] in {'repair.cycle', 'review.finding', 'session.compaction'}:
+    elif row['kind'] == 'session.compaction':
+        parts = ((row['session'], row['ts']) if row['session'] and row['ts'] else (row['source_ref'],))
+    elif row['kind'] in {'repair.cycle', 'review.finding'}:
         parts = (row['source_ref'],)
     else:  # snapshot and collector records (`path@offset#record`): their source plus their content
         parts = (row['source_ref'], row['ts'], *(row[name] for name in EVENT_FIELDS), attrs)
     return identity('event', row['kind'], *parts)
 
 
-EVENT_IDS = 'row-v2'  # meta marker: every event ID is `event_key` of its row
+EVENT_IDS = 'row-v3'  # meta marker: every event ID is `event_key` of its row
 
 
 def migrate_event_ids(db):
@@ -403,16 +405,14 @@ def rekey_events(db):
             db.execute('UPDATE events SET event_id=? WHERE rowid=?', (key, row['rowid']))
 
 
-def put_event(db, kind, ts, source_ref, attrs=None, *, refresh=False, **fields):
+def put_event(db, kind, ts, source_ref, attrs=None, **fields):
     """Append one metadata event; its stored fields identify it, so re-ingest never duplicates it."""
     values = {'host': host_id(), 'kind': kind, 'ts': ts, 'source_ref': source_ref,
               'attrs': json.dumps({k: v for k, v in (attrs or {}).items() if v is not None}, sort_keys=True),
               **{name: fields.get(name) for name in EVENT_FIELDS}}
     values = {'event_id': event_key(values), **values}
-    conflict = ('ON CONFLICT(event_id) DO UPDATE SET attrs=json_patch(events.attrs,excluded.attrs)'
-                if refresh else 'ON CONFLICT(event_id) DO NOTHING')
-    db.execute(f"INSERT INTO events({','.join(values)}) VALUES ({','.join('?' for _ in values)}) {conflict}",
-               list(values.values()))
+    db.execute(f"INSERT OR IGNORE INTO events({','.join(values)}) "
+               f"VALUES ({','.join('?' for _ in values)})", list(values.values()))
 
 
 # A reading's state per window; a row is appended only when one of these changes.
@@ -657,10 +657,10 @@ def readonly(path):
     return sqlite3.connect(path.resolve().as_uri() + '?mode=ro', uri=True)
 
 
-def fabric_paths():
-    projects = {Path.cwd()}
-    registry = Path(os.environ.get('AGENT_FABRIC_STATE_DIRECTORY',
-                    str(Path.home() / '.local/state/agent-harness/fabric'))) / 'fabric.sqlite3'
+@cache
+def _fabric_roots(cwd, registry):
+    projects = {Path(cwd)}
+    registry = Path(registry) / 'fabric.sqlite3'
     if registry.is_file():
         with readonly(registry) as source:
             projects.update(Path(row[0]) for row in source.execute('SELECT DISTINCT project FROM agents'))
@@ -675,7 +675,18 @@ def fabric_paths():
             root = project
         roots.add(root / '.agent-run')
         roots.add(project / '.agent-run')
-    return sorted({path for root in roots for path in root.glob('runs/**/attempt.json')})
+    return sorted(roots)
+
+
+def fabric_roots():
+    """Shared project and common-checkout artifact roots for Fabric-owned files."""
+    registry = os.environ.get('AGENT_FABRIC_STATE_DIRECTORY',
+                              str(Path.home() / '.local/state/agent-harness/fabric'))
+    return _fabric_roots(str(Path.cwd()), registry)
+
+
+def fabric_paths():
+    return sorted({path for root in fabric_roots() for path in root.glob('runs/**/attempt.json')})
 
 
 # Native sources: the provider whose CLI identity directories hold them, and their place inside one.
@@ -886,7 +897,7 @@ def ingest_document(db, source, path):
                              **({'parent': parent} if parent else {}),
                              **({'children': [{key: child.get(key) for key in ('run_id', 'task_id', 'attempt', 'status')}
                                               for child in row['children']]} if row.get('children') else {})},
-                      harness_rev=provenance.get('harness_rev'), refresh=True, **fields)
+                      harness_rev=provenance.get('harness_rev'), **fields)
     else:
         entries = row.get('routes', {}) if source == 'route_health' else row.get('cooldowns', {})
         for entry in entries.values():
@@ -1657,6 +1668,8 @@ def render_stats(report, detail=False):
     last_limits = [(row['provider'] or '-', row['account'] or 'unattributed', row['timestamp'], f"{row['age_seconds']}s ago")
                    for row in report.get('last_limit_events', [])]
     sections = [('Lanes', [(row['status'], row['error_class'] or '-', row['lanes']) for row in report['lanes']]),
+                ('Compactions per lane', [(row['lane'], row['compactions'], row.get('host', '-'))
+                                          for row in report.get('compactions_per_lane', [])]),
                 ('Limit events', [(row['day'] or '-', row['provider'] or '-', row['status'], row['events'])
                                   for row in report['limits_per_day'][-14:]]),
                 ('Last limit events', last_limits if detail else last_limits[:ROW_LIMIT])]

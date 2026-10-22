@@ -78,6 +78,36 @@ def test_finding_rejects_unknown_disposition(tmp_path):
     assert "invalid choice" in result.stderr
 
 
+def test_finding_requires_duplicate_target_for_duplicate_disposition(tmp_path):
+    run_dir = initialise(tmp_path)
+    result = run_cli(tmp_path, "finding", "--run-dir", str(run_dir), "--review", "review-1",
+                     "--finding", "finding-1", "--disposition", "duplicate")
+    assert result.returncode != 0
+    assert "duplicate disposition requires --duplicate-of" in result.stderr
+    assert not (run_dir / "findings.jsonl").exists()
+
+
+def test_finding_rejects_duplicate_target_for_other_disposition(tmp_path):
+    run_dir = initialise(tmp_path)
+    result = run_cli(tmp_path, "finding", "--run-dir", str(run_dir), "--review", "review-1",
+                     "--finding", "finding-1", "--disposition", "confirmed",
+                     "--duplicate-of", "finding-0")
+    assert result.returncode != 0
+    assert "--duplicate-of requires duplicate disposition" in result.stderr
+    assert not (run_dir / "findings.jsonl").exists()
+
+
+@pytest.mark.parametrize(("option", "value"), [
+    ("--reviewer-family", "bad family"), ("--model", "bad model"), ("--reviewer-id", "bad reviewer"),
+])
+def test_finding_validates_optional_reviewer_identifiers(tmp_path, option, value):
+    run_dir = initialise(tmp_path)
+    result = run_cli(tmp_path, "finding", "--run-dir", str(run_dir), "--review", "review-1",
+                     "--finding", "finding-1", "--disposition", "confirmed", option, value)
+    assert result.returncode != 0
+    assert "bounded stable identifier" in result.stderr
+
+
 def test_finding_records_dispositions_with_review_lineage(tmp_path):
     run_dir = initialise(tmp_path)
     receipt_path = run_dir / "RUN.json"

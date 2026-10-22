@@ -46,7 +46,8 @@ cleanup authority; release, observation and deletion guards remain separate.
 
 ## Repair budget
 
-Record each repair with `delivery_receipt.py repair --reason ... --failing CHECK_ID` for every gate that failed before the cycle. The shared
+Record each repair with `delivery_receipt.py repair --reason ...
+--failing CHECK_ID` for every gate that failed before the cycle. The shared
 risk-tier ceiling is two cycles for `routine`, four for `substantial`, and five
 for `crucial` or `terminal`. `validate_delivery.py` enforces
 `repair_cycles`. The ceiling is a guardrail, not a target: stop and return

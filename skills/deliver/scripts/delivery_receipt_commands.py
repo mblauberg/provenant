@@ -447,6 +447,10 @@ def command_repair(args: Any, api: dict[str, Any]) -> dict[str, Any]:
 def command_finding(args: Any, api: dict[str, Any]) -> dict[str, Any]:
     api["require_identifier"](args.review, "review id")
     api["require_identifier"](args.finding, "finding id")
+    for value, field in ((args.reviewer_family, "reviewer-family"), (args.model, "model"),
+                         (args.reviewer_id, "reviewer-id")):
+        if value is not None:
+            api["require_identifier"](value, field)
     if args.duplicate_of:
         api["require_identifier"](args.duplicate_of, "duplicate-of finding id")
     if args.disposition == "duplicate" and not args.duplicate_of:

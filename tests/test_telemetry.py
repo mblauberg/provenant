@@ -135,12 +135,20 @@ def test_provider_compaction_rows_store_only_metadata(tmp_path):
     home = Path(env['HOME'])
     claude = home / '.claude/projects/project/session.jsonl'
     codex = home / '.codex/sessions/2026/rollout-test.jsonl'
-    jsonl(claude,
-          {'type': 'system', 'subtype': 'compact_boundary', 'sessionId': 'claude-session',
-           'timestamp': '2026-10-22T00:00:00Z',
-           'compactMetadata': {'trigger': 'auto', 'preTokens': 100, 'postTokens': 20}},
-          {'type': 'assistant', 'sessionId': 'claude-session', 'timestamp': '2026-10-22T00:01:00Z',
-           'message': {'id': 'message', 'model': 'claude-test', 'usage': {'input_tokens': 1, 'output_tokens': 1}}})
+    claude_rows = [
+        {'type': 'system', 'subtype': 'compact_boundary', 'sessionId': 'claude-session',
+         'timestamp': '2026-10-22T00:00:00Z',
+         'compactMetadata': {'trigger': 'auto', 'preTokens': 100, 'postTokens': 20}},
+        *[{'type': 'assistant', 'sessionId': 'claude-session', 'timestamp': f'2026-10-22T00:0{index}:00Z',
+           'message': {'id': f'message-{index}', 'model': 'claude-test',
+                       'usage': {'input_tokens': 1, 'output_tokens': 1}}}
+          for index in range(1, 4)],
+    ]
+    jsonl(claude, *claude_rows)
+    duplicate_claude = home / '.claude-michael/projects/project/session.jsonl'
+    jsonl(duplicate_claude, *claude_rows)
+    write_json(home / '.agents/config/telemetry.json', {'accounts': {'claude': {
+        'michael': {'identity_dir': str(home / '.claude-michael')}}}})
     jsonl(codex,
           {'type': 'session_meta', 'payload': {'id': 'codex-session'}},
           {'type': 'compacted', 'timestamp': '2026-10-22T00:02:00Z',
@@ -156,10 +164,12 @@ def test_provider_compaction_rows_store_only_metadata(tmp_path):
     assert 'never store' not in json.dumps(rows)
     with sqlite3.connect(tmp_path / 'state/telemetry.sqlite3') as db:
         db.execute("UPDATE usage SET lane='lane-a' WHERE session='claude-session'")
+        assert db.execute("SELECT COUNT(*) FROM usage WHERE session='claude-session'").fetchone()[0] == 3
     summary = json.loads(cli(tmp_path, 'telemetry', 'stats', '--json').stdout)
     bounded = json.loads(cli(tmp_path, 'telemetry', 'stats', '--json', '--since', '2026-10-22T00:01:00Z').stdout)
     assert summary['compactions_per_lane'] == [{'lane': 'lane-a', 'compactions': 1}]
     assert bounded['compactions_per_lane'] == []
+    assert 'Compactions per lane:' in cli(tmp_path, 'telemetry', 'stats').stdout
 
 
 def test_delivery_discovery_follows_linked_worktree_git_common_dir(tmp_path):
@@ -1853,22 +1863,14 @@ def test_transcript_names_that_link_elsewhere_are_never_opened(tmp_path):
 
 
 def test_lane_events_carry_the_harness_profile_when_the_receipt_has_one(tmp_path):
-    path = receipt(tmp_path, 'run-p', 1, status='ok', provenance=route('codex', 'gpt-6.1-sol'),
-                   profile={'preset': 'thorough', 'digest': 'd1', 'knobs': {'reviewers': 3}})
+    receipt(tmp_path, 'run-p', 1, status='ok', provenance=route('codex', 'gpt-6.1-sol'),
+            profile={'preset': 'thorough', 'digest': 'd1', 'knobs': {'reviewers': 3}})
     receipt(tmp_path, 'run-q', 1, status='ok', provenance=route('codex', 'gpt-6.1-sol'))
     assert cli(tmp_path, 'telemetry', 'ingest').returncode == 0
     with sqlite3.connect(tmp_path / 'state/telemetry.sqlite3') as db:
         rows = dict(db.execute("SELECT run_id, attrs FROM events WHERE kind='lane.attempt'").fetchall())
     assert (json.loads(rows['run-p'])['profile'], json.loads(rows['run-p'])['profile_digest']) == ('thorough', 'd1')
     assert 'profile' not in json.loads(rows['run-q'])  # absent means the default (balanced) profile
-    updated = json.loads(path.read_text())
-    updated['profile']['digest'] = 'd2'
-    write_json(path, updated)
-    assert cli(tmp_path, 'telemetry', 'ingest').returncode == 0
-    with sqlite3.connect(tmp_path / 'state/telemetry.sqlite3') as db:
-        events = db.execute("SELECT COUNT(*), attrs FROM events WHERE kind='lane.attempt' AND run_id='run-p'").fetchone()
-    assert events[0] == 1
-    assert json.loads(events[1])['profile_digest'] == 'd2'
 
 
 def test_a_message_in_several_identity_dirs_keeps_one_owner_across_ingest_and_relabelling(tmp_path):
@@ -2326,9 +2328,11 @@ def test_host_merge_rounds_costs_once_after_summing(tmp_path, monkeypatch):
         return {**row, 'known_cost_usd': 4e-7, 'missing_cost_rows': 0, 'host': 'h1', 'source': 'codex', 'session': session,
                 'provider': 'openai', 'adapter': 'codex', 'model': 'gpt-5.5', 'day': '2026-10-21', 'account': None}
     summary = {'host': 'h1', 'session_usage': [group('a'), group('b')], 'excluded_rows': {},
-               'receipt_usage_rows_excluded': 0, 'pending_source_rebuilds': []}
+               'receipt_usage_rows_excluded': 0, 'pending_source_rebuilds': [],
+               'compactions_per_lane': [{'lane': 'lane-a', 'compactions': 2}]}
     monkeypatch.setattr(telemetry, 'quota_owner', lambda: types.SimpleNamespace(report=lambda values: {}))
     merged = hosts.merge(telemetry, [summary], [{'host': 'h1', 'status': 'ok'}], None)
     assert merged['usage'][0]['estimated_cost_usd'] == 1e-6
     assert merged['usage'][0]['reported_cost_usd'] == 1e-6
     assert merged['usage_per_day'][0]['estimated_cost_usd'] == 1e-6
+    assert merged['compactions_per_lane'] == [{'lane': 'lane-a', 'compactions': 2, 'host': 'h1'}]

@@ -5,28 +5,11 @@ from __future__ import annotations
 from collections import Counter
 import hashlib
 import json
-import os
 from pathlib import Path
-import subprocess
 
 
 def paths(telemetry):
-    projects = {Path.cwd()}
-    registry = Path(os.environ.get('AGENT_FABRIC_STATE_DIRECTORY', str(telemetry.state_root()))) / 'fabric.sqlite3'
-    if registry.is_file():
-        with telemetry.readonly(registry) as source:
-            projects.update(Path(row[0]) for row in source.execute('SELECT DISTINCT project FROM agents'))
-    roots = set()
-    for project in projects:
-        try:
-            result = subprocess.run(['git', '-C', str(project), 'rev-parse', '--path-format=absolute',
-                                     '--git-common-dir'], capture_output=True, text=True, timeout=5,
-                                    env={key: value for key, value in os.environ.items() if not key.startswith('GIT_')})
-            root = Path(result.stdout.strip()).parent if result.returncode == 0 else project
-        except (OSError, subprocess.SubprocessError):
-            root = project
-        roots.update((root / '.agent-run', project / '.agent-run'))
-    return sorted(path for root in roots for name in ('repairs.jsonl', 'findings.jsonl')
+    return sorted(path for root in telemetry.fabric_roots() for name in ('repairs.jsonl', 'findings.jsonl')
                   for path in root.glob(f'runs/**/{name}')
                   if path.is_file() and not path.is_symlink())
 
@@ -64,7 +47,7 @@ def prepare(db, path):
 
 def record(telemetry, db, row, state, path, offset):
     """Parse one delivery sidecar row using the ledger's JSONL cursor."""
-    source_ref = f'{path}#{offset}'
+    source_ref = f'{Path(path).resolve()}#{offset}'
     if path.name == 'repairs.jsonl':
         cycle = row.get('cycle')
         failing = sorted(set(item for item in row.get('failing_before', []) if isinstance(item, str)))
@@ -118,10 +101,10 @@ def report(telemetry, db, since=None, until=None):
     boundary = telemetry.since_time(since) if since else None
     end = telemetry.since_time(until) if until else None
     counts = Counter()
-    rows = db.execute("SELECT usage.lane, events.ts FROM events JOIN usage "
+    rows = db.execute("SELECT DISTINCT usage.lane, events.event_id, events.ts FROM events JOIN usage "
                       "ON usage.session=events.session WHERE events.kind='session.compaction' "
                       "AND usage.lane IS NOT NULL")
-    for lane, stamp in rows:
+    for lane, _event_id, stamp in rows:
         if boundary or end:
             if stamp is None:
                 continue
