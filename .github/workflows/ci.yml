@@ -73,10 +73,22 @@ jobs:
             echo "Artifact lookup failed; running Python shards."
             exit 0
           fi
-          if printf '%s' "$artifacts" | jq -e --arg name "$name" \
-            '[.artifacts[]? | select(.name == $name and .expired == false)] | length > 0' >/dev/null; then
-            echo "passed-tree=true" >> "$GITHUB_OUTPUT"
-          fi
+          # Trust a marker only from a successful ci.yml run on this repository's
+          # own branches: a fork PR runs its own workflow file and could upload
+          # any artifact name without testing anything.
+          runs="$(printf '%s' "$artifacts" | jq -r --arg name "$name" \
+            '.artifacts[]? | select(.name == $name and .expired == false
+              and .workflow_run.head_repository_id == .workflow_run.repository_id)
+              | .workflow_run.id')"
+          for run in $runs; do
+            if gh api "repos/$REPO/actions/runs/$run" | jq -e --arg repo "$REPO" \
+              '.path == ".github/workflows/ci.yml" and .conclusion == "success"
+                and .head_repository.full_name == $repo' >/dev/null 2>&1; then
+              echo "Python shards passed in run $run on this tree; skipping them."
+              echo "passed-tree=true" >> "$GITHUB_OUTPUT"
+              break
+            fi
+          done
       # Docs-only classification. A change is docs-only when every changed
       # path (including rename sources) is a Markdown file under docs/ that no
       # test reads for its content. The carved-out documents are read by
