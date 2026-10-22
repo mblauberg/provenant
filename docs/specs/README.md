@@ -18,6 +18,11 @@ described. Fabric is now small enough to be its own documentation: see
 - [Fabric across the user's own hosts](fabric-hosts.md)
 - [Host setup and diagnostics](../runbooks/fabric-hosts.md)
 
+## Observability
+
+- [Observability layer and native macOS console](observability-console.md)
+- [Console and menu bar design](observability-console-design.md)
+
 ## Harness
 
 - [Adaptive agent harness lifecycle](harness/lifecycle.md)
