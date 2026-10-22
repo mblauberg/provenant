@@ -194,9 +194,15 @@ describe("landing lease CLI", () => {
     const head = git(linked, "rev-parse", "HEAD");
     const noOrigin = fabric(linked, "alice", "landing-push", "land", "1", "main");
     expect(noOrigin.code).toBe(1);
+    // A pre-push hook that prints must not corrupt the JSON on stdout.
+    const hooks = join(root, "hooks");
+    mkdirSync(hooks);
+    writeFileSync(join(hooks, "pre-push"), "#!/bin/sh\necho hook says hi\n", { mode: 0o755 });
+    git(primary, "config", "core.hooksPath", hooks);
     const pushed = fabric(linked, "alice", "landing-push", "land", "1", "main", "--remote", "upstream", "--json");
     expect(pushed.code, pushed.err).toBe(0);
-    expect(pushed.json).toMatchObject({ pushed: "main", previous_sha: base, generation: 1 });
+    expect(pushed.json, pushed.out).toMatchObject({ pushed: "main", previous_sha: base, generation: 1 });
+    expect(pushed.err).toContain("hook says hi");
     expect(git(bare, "rev-parse", "refs/heads/main")).toBe(head);
     expect(fabric(primary, "alice", "landing-status", "--json").json).toEqual({ lease: null });
   });

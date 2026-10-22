@@ -161,13 +161,15 @@ if (isLandingVerb(command)) {
 }
 let landingLabel: string | undefined;
 let landingRemote = "origin";
+let landingJson = false;
 try {
   landingLabel = command === "landing-push" ? flag("label") : undefined;
   if (command === "landing-push") {
     landingRemote = flag("remote") ?? landingRemote;
     if (!validRemote(landingRemote)) throw new Error(`invalid remote name: ${landingRemote}`);
-    // Its output is always JSON; accept the flag so every lease verb takes it.
-    if (argv.includes("--json")) argv.splice(argv.indexOf("--json"), 1);
+    // With --json, stdout carries only the result; Git and hook output go to stderr.
+    landingJson = argv.includes("--json");
+    if (landingJson) argv.splice(argv.indexOf("--json"), 1);
   }
 } catch (error) {
   console.error(`fabric: ${error instanceof Error ? error.message : String(error)}`);
@@ -646,7 +648,8 @@ try {
       { ...gitOptions, stdio: ["ignore", "ignore", "inherit"], timeout: 30_000 });
     const pushed = store.withLandingPush(who, session, generation, remote, () =>
       execFileSync("git", ["push", `--force-with-lease=refs/heads/${branch}:${remote}`,
-        landingRemote, `${head}:refs/heads/${branch}`], { ...gitOptions, stdio: "inherit", timeout: 120_000 }));
+        landingRemote, `${head}:refs/heads/${branch}`],
+      { ...gitOptions, stdio: landingJson ? ["inherit", 2, "inherit"] : "inherit", timeout: 120_000 }));
     show({ pushed: branch, previous_sha: remote, generation,
       ...(pushed.releaseWarning ? { release_warning: pushed.releaseWarning } : {}) });
     break;

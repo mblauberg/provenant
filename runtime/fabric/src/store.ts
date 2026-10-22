@@ -450,10 +450,15 @@ export class Store {
     if (!this.tryReleaseLanding(who, session, generation).released) throw new Error(STALE_LANDING);
   }
 
-  /** Release only the caller's own live, idle lease, and say why when it cannot. */
-  tryReleaseLanding(who: Identity, session: string, generation: number, now = Date.now()): LandingRelease {
+  /**
+   * Release only the caller's own live, idle lease, and say why when it cannot.
+   * Time is read after the write lock is held, so a release that waited past
+   * expiry is refused.
+   */
+  tryReleaseLanding(who: Identity, session: string, generation: number, at?: number): LandingRelease {
     const owner = holder(who, session);
     return this.#db.transaction((): LandingRelease => {
+      const now = at ?? Date.now();
       const row = this.#db.prepare(`SELECT holder, generation, expires_at, pushing_until, released_at FROM landing_leases
         WHERE project = ?`).get(who.project) as
         { holder: string; generation: number; expires_at: number; pushing_until: number | null; released_at: number | null } | undefined;

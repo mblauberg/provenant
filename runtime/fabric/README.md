@@ -623,7 +623,8 @@ command waits at most two minutes for Git; its persisted hold lasts another
 thirty seconds. A push orphaned by a crash is fenced by the remote SHA, not by
 the hold. If the push succeeds but release fails, it reports `pushed` with a
 `release_warning`. Renew or release an aborted lease as appropriate.
-`landing-push --remote R` pushes to a remote other than `origin`.
+`landing-push --remote R` pushes to a remote other than `origin`. With
+`--json`, Git and hook output go to stderr, so stdout holds only the result.
 
 Scripts use the same lease from a shell, without an MCP connection:
 
