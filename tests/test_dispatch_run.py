@@ -650,6 +650,35 @@ def test_terminal_attempt_carries_nested_owner_spared_count(tmp_path: Path) -> N
     assert row["spared"] == 2
 
 
+def test_terminal_attempt_does_not_promote_an_invalid_success_receipt(tmp_path):
+    module = load_dispatch_module()
+    args = SimpleNamespace(tool="codex", alias="", model="fixture", effort="high",
+                           task_id="task-1", access_mode="read_only", worktree=None, _last_plan={})
+    legacy = {"started_at": "2026-09-23T00:00:00Z", "finished_at": "2026-09-23T00:00:01Z",
+              "outcome": "ok", "status": "failed", "result": {"path": "result.md"},
+              "attempt_path": "tasks/task-1/attempt-001", "requested_route": {}}
+    row = module.terminal_contract(args, tmp_path, legacy, {"status": "ok", "exit": None},
+                                   1, tmp_path / "tasks/task-1/attempt-001")
+    assert row["status"] == "failed"
+    assert row["error_class"] == "provider_error"
+
+
+def test_terminal_attempt_retains_partial_transport_failure(tmp_path):
+    module = load_dispatch_module()
+    args = SimpleNamespace(tool="codex", alias="", model="fixture", effort="high",
+                           task_id="task-1", access_mode="read_only", worktree=None, _last_plan={})
+    legacy = {"started_at": "2026-09-23T00:00:00Z", "finished_at": "2026-09-23T00:00:01Z",
+              "outcome": "failed", "status": "failed", "result": {"path": "result.md"},
+              "attempt_path": "tasks/task-1/attempt-001", "requested_route": {}}
+    adapter = {"status": "failed", "result_partial": True, "evidence": {"signature": "provider_transport"}}
+    row = module.terminal_contract(args, tmp_path, legacy, adapter, 1, tmp_path / "tasks/task-1/attempt-001")
+    assert row["state"] == "terminal"
+    assert row["status"] == "failed"
+    assert row["error_class"] == "transient"
+    assert row["result_partial"] is True
+    assert "partial result" in module.render_digest(row)
+
+
 @pytest.mark.parametrize("adapter_status,legacy_status,signature,source,expected", [
     ("failed", "failed", None, "observed", "provider_error"),
     ("ok", "timed_out", None, "observed", "timeout"),

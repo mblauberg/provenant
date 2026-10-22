@@ -19,6 +19,8 @@ export interface RunRead {
   source_project?: string;
   state: string;
   status: string | null;
+  error_class?: string;
+  result_partial?: true;
   landable?: false;
   quarantine?: Record<string, unknown>;
   route: string | null;
@@ -115,6 +117,8 @@ function publicRun(row: Record<string, any>, localRoot: string): RunRead {
     ...(typeof row.source_project === "string" ? { source_project: row.source_project } : {}),
     state: String(row.state ?? "unknown"),
     status: typeof row.status === "string" ? row.status : null,
+    ...(typeof row.error_class === "string" ? { error_class: row.error_class } : {}),
+    ...(row.result_partial === true ? { result_partial: true as const } : {}),
     ...(row.landable === false ? { landable: false as const, quarantine: row.quarantine } : {}),
     route: typeof adapter === "string" && typeof model === "string"
       ? `${adapter}/${model}${typeof effort === "string" && effort ? `@${effort}` : ""}` : null,

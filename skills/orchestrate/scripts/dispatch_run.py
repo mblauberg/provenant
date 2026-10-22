@@ -1777,11 +1777,12 @@ def terminal_contract(args,run_dir,legacy,adapter,number,attempt_dir):
     if legacy["outcome"] in {"result_invalid_path","result_integrity_error","adapter_receipt_invalid","manifest_write_error","terminal_envelope_invalid"}: status="failed"
     elif legacy["status"] in {"cancelled","timed_out"}: status=legacy["status"]
     elif legacy["status"]=="blocked": status="input_required"
+    elif status == "ok" and legacy["status"] == "failed": status="failed"
     elif status=="quarantined" and legacy["status"]=="failed": status="failed"
     refusal=route_refusal(adapter,args.tool)
     if refusal: status=refusal["status"]
     if status not in TERMINAL_STATUSES: status="failed"
-    for field in ("reason","session_id","retryable","reset_at","retry_after","fix","error","evidence","applied","context","usage_source","warnings","reaped","spared","provenance","pgid","pgid_started_at","last_progress_at","landable","quarantine"):
+    for field in ("reason","session_id","retryable","reset_at","retry_after","fix","error","evidence","applied","context","usage_source","warnings","reaped","spared","provenance","pgid","pgid_started_at","last_progress_at","landable","quarantine","result_partial"):
         if field in adapter: row[field]=adapter[field]
     if row.get("task_class") and isinstance(row.get("provenance"), dict):
         row["provenance"]["requested"] = {**(row["provenance"].get("requested") or {}), "task_class": row["task_class"]}
@@ -2745,6 +2746,7 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
         **attempt_scope(args, attempt_number),
         "usage_source": adapter.get("usage_source") or provider_exec.context_usage.usage_source(adapter.get("context") or {}),
         "error_class": provider_exec.error_class(status, (adapter.get("evidence") or {}).get("signature")),
+        **({"result_partial": True} if adapter.get("result_partial") else {}),
         **({"landable": False, "quarantine": adapter.get("quarantine")} if adapter_status == "quarantined" else {}),
         "run_id": run_dir.name,
         "task_id": args.task_id,

@@ -2374,6 +2374,61 @@ def fixture_plan(tmp_path, code, adapter="codex", **controls):
     return plan
 
 
+@pytest.mark.parametrize("rollover", [False, True])
+@pytest.mark.parametrize("ending", ["reconnect", "transport", "exit", "signal", "recovered"])
+def test_codex_progress_requires_a_successful_terminal_result(tmp_path, monkeypatch, rollover, ending):
+    module = supervisor()
+    monkeypatch.setattr(module, "MAX_EVENTS_BYTES", 2048 if rollover else 20 * 1024 * 1024)
+    events = [{"type": "item.completed", "item": {"type": "agent_message", "text": "Review in progress"}}]
+    if ending in {"reconnect", "recovered"}:
+        events.extend({"type": "error", "message": f"Reconnecting... {i}/5 (failed to load workspace requirements)"}
+                      for i in range(1, 6))
+    if ending == "transport":
+        events.append({"type": "turn.failed", "error": {"message": "stream disconnected before completion"}})
+    # Put the progress and errors outside the retained head/tail when rolling over.
+    events.extend({"type": "telemetry", "data": "x" * 100} for _ in range(1000))
+    if ending == "recovered":
+        events.extend([
+            {"type": "item.completed", "item": {"type": "agent_message", "text": "Final review"}},
+            {"type": "turn.completed"},
+        ])
+    code = "import os, signal\nprint(" + repr("\n".join(map(json.dumps, events))) + ", flush=True)\n"
+    if ending == "signal":
+        code += "os.kill(os.getpid(), signal.SIGKILL)\n"
+    output = tmp_path / "result.md"
+    record = module.execute(fixture_plan(tmp_path, code), output)
+    if ending == "recovered":
+        assert record["status"] == "ok"
+        assert record["error_class"] == "none"
+        assert not record.get("result_partial", False)
+        assert "Final review" in output.read_text()
+    else:
+        assert record["status"] == "failed", record
+        assert record["error_class"] == ("transient" if ending in {"reconnect", "transport"} else "provider_error")
+        assert record["result_partial"] is True
+        assert "Review in progress" in output.read_text()
+        assert not record["certification_eligible"]
+
+
+def test_codex_terminal_result_in_rolled_output_survives_later_signal(tmp_path, monkeypatch):
+    module = supervisor()
+    monkeypatch.setattr(module, "MAX_EVENTS_BYTES", 2048)
+    padding = [{"type": "telemetry", "data": "x" * 100}] * 1000
+    events = padding + [
+        {"type": "item.completed", "item": {"type": "agent_message", "text": "Final review"}},
+        {"type": "turn.completed"},
+    ] + padding
+    code = ("import os, signal\nprint(" + repr("\n".join(map(json.dumps, events))) + ", flush=True)\n"
+            "os.kill(os.getpid(), signal.SIGKILL)\n")
+    output = tmp_path / "result.md"
+    plan = fixture_plan(tmp_path, code)
+    plan["grace_seconds"] = 10
+    record = module.execute(plan, output)
+    assert record["status"] == "interrupted"
+    assert not record.get("result_partial", False)
+    assert "Final review" in output.read_text()
+
+
 @pytest.mark.parametrize("exit_code", [0, 1])
 def test_opencode_usage_survives_provider_exit(tmp_path, exit_code):
     events = [
@@ -4363,7 +4418,7 @@ def test_shared_host_group_change_then_missing_census_never_allows_group_signal(
 @pytest.mark.parametrize("terminal_event", [False, True])
 @pytest.mark.parametrize("controller", [None, "orphan_reaper", "cancel_requested"],
                          ids=["unknown-sender", "orphan-reaper", "markerless-cancel"])
-def test_external_provider_sigterm_reports_interrupted_even_after_terminal_event(tmp_path, terminal_event, controller):
+def test_external_provider_sigterm_without_a_result_fails_unless_cancelled(tmp_path, terminal_event, controller):
     module = supervisor()
     events = [{"type": "ready"}] + ([{"type": "turn.completed"}] if terminal_event else [])
     code = "import os,time\nos.write(1, " + repr(("\n".join(map(json.dumps, events)) + "\n").encode()) + ")\ntime.sleep(60)\n"
@@ -4385,7 +4440,7 @@ def test_external_provider_sigterm_reports_interrupted_even_after_terminal_event
                             on_start=provider.append, on_progress=interrupt,
                             env={**os.environ, "PROVENANT_RUN_DIR": str(tmp_path),
                                  "PROVENANT_RUN_TOKEN": "fixture-control"})
-    assert record["status"] == ("cancelled" if controller == "cancel_requested" else "interrupted"), record
+    assert record["status"] == ("cancelled" if controller == "cancel_requested" else "failed"), record
     assert record["exit"] == -signal.SIGTERM
     assert record["evidence"]["signal"] == signal.SIGTERM
     assert record["evidence"]["signal_name"] == "SIGTERM"
@@ -4422,7 +4477,7 @@ def test_signal_receipt_does_not_attribute_mismatching_or_linked_control_telemet
     record = module.execute(fixture_plan(tmp_path, "import time\nprint('ready', flush=True)\ntime.sleep(60)"),
                             tmp_path / "result.md", on_start=provider.append, on_progress=interrupt,
                             env={**os.environ, "PROVENANT_RUN_DIR": str(tmp_path), "PROVENANT_RUN_TOKEN": "current"})
-    assert record["status"] == "interrupted"
+    assert record["status"] == "failed"
     assert record["evidence"]["termination_source"] == "external_signal"
     assert record["evidence"]["signal_requester_pid"] is None
 
@@ -4440,8 +4495,11 @@ def test_supervisor_signal_is_interrupted_without_a_cancel_request(tmp_path):
 def test_markerless_cancel_keeps_cancelled_when_provider_flushes_and_exits_zero(tmp_path):
     module = supervisor()
     provider = []
+    ready = tmp_path / "provider-ready"
 
     def interrupt(_timestamp):
+        if not ready.exists():
+            return
         (tmp_path / "termination-request.json").write_text(json.dumps({
             "run_token": "graceful", "signal": "SIGTERM", "source": "cancel_requested",
             "sender_pid": os.getpid(), "provider_pid": provider[0].pid, "requested_at": module.now(),
@@ -4449,7 +4507,8 @@ def test_markerless_cancel_keeps_cancelled_when_provider_flushes_and_exits_zero(
         os.kill(os.getpid(), signal.SIGTERM)  # This execute() owns the installed signal handler.
         os.kill(provider[0].pid, signal.SIGTERM)
 
-    code = "import signal,time\nsignal.signal(signal.SIGTERM, lambda *_: exit(0))\nprint('ready', flush=True)\ntime.sleep(60)"
+    code = ("import signal,time\nsignal.signal(signal.SIGTERM, lambda *_: exit(0))\n"
+            f"open({str(ready)!r}, 'w').close()\nprint('ready', flush=True)\ntime.sleep(60)")
     record = module.execute(fixture_plan(tmp_path, code), tmp_path / "result.md",
                             on_start=provider.append, on_progress=interrupt,
                             env={**os.environ, "PROVENANT_RUN_DIR": str(tmp_path), "PROVENANT_RUN_TOKEN": "graceful"})
@@ -5934,13 +5993,14 @@ def test_signalled_writer_checks_instructions_with_spared_descendants(tmp_path, 
     monkeypatch.setattr(module._Descendants, "stop", stop_sparing_a_process)
     _, lane = instruction_lane(tmp_path)
     provider, signalled = [], []
+    ready = tmp_path / "provider-ready"
 
     def interrupt(_timestamp):
-        if not signalled:
+        if ready.exists() and not signalled:
             signalled.append(True)
             os.kill(provider[0].pid, signal.SIGTERM)
 
-    record = lane_attempt(tmp_path, lane, edit + "import time\nprint('ready', flush=True)\ntime.sleep(60)\n",
+    record = lane_attempt(tmp_path, lane, edit + f"open({str(ready)!r}, 'w').close()\nimport time\nprint('ready', flush=True)\ntime.sleep(60)\n",
                           on_start=provider.append, on_progress=interrupt)
     assert record["spared"] == 1
     assert record["evidence"]["signal"] == signal.SIGTERM
@@ -5948,7 +6008,7 @@ def test_signalled_writer_checks_instructions_with_spared_descendants(tmp_path, 
         assert record["status"] == "failed"
         assert record["error"] == "protected_instructions_changed"
     else:
-        assert record["status"] == "interrupted", record
+        assert record["status"] == "failed", record
         assert "error" not in record
     assert not any("left running" in warning for warning in record["warnings"])
 
