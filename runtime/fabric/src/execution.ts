@@ -1182,6 +1182,13 @@ export function rejectOwnSeatClaude(input: Record<string, any>, identity: Identi
   }
 }
 
+function rejectNestedSandboxDispatch(env: NodeJS.ProcessEnv): void {
+  if (env.CODEX_SANDBOX && env.PROVENANT_PARENT_ATTEMPT) {
+    throw new InputError("nested_dispatch_unavailable",
+      "Nested Fabric dispatch is unavailable inside a sandboxed Codex lane; dispatch reviewers from the chair.");
+  }
+}
+
 export async function dispatchConfiguredProvider(
   input: DispatchInput,
   identity: Identity,
@@ -1190,6 +1197,7 @@ export async function dispatchConfiguredProvider(
   launch: LaunchObserver = {},
 ): Promise<Record<string, unknown>> {
   try {
+    rejectNestedSandboxDispatch(env);
     rejectOwnSeatClaude(input, identity, env, launch);
     const remote = env.PROVENANT_HOST_LOCAL_ONLY === "1" ? undefined : await federatedLane("dispatch", identity.cwd, input as Record<string, unknown>, signal);
     if (remote) return remote;
@@ -1218,6 +1226,7 @@ export async function dispatchConfiguredBatch(
 ): Promise<Record<string, unknown>> {
   try {
     try {
+      rejectNestedSandboxDispatch(env);
       rejectOwnSeatClaude(input as unknown as Record<string, any>, identity, env, launch);
     } catch (error) {
       // Refused before placement: every task of the batch is reported, as for any rejected batch.
