@@ -8,7 +8,7 @@ import { execFileSync, spawn } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { isAbsolute, join, relative, resolve } from "node:path";
 
-import { activeCooldowns, catalogueSnapshot } from "../catalogue.js";
+import { catalogueSnapshot } from "../catalogue.js";
 import { cancelConfiguredRun, dispatchConfiguredProvider, hostOwnersInThemselves, productRoot } from "../execution.js";
 import { databasePath, runRoot, withoutGitRedirects, type Identity } from "../identity.js";
 import {
@@ -346,12 +346,11 @@ class Owner {
     const order = (row: Attempt) => this.#nodes.get(row.node_id)!;
     ready.sort((a, b) => (this.#plan.height[b.node_id]! - this.#plan.height[a.node_id]!) ||
       (TIER_ORDER[order(a).tier] - TIER_ORDER[order(b).tier]) || a.node_id.localeCompare(b.node_id));
-    const cooling = (() => { try { return activeCooldowns(this.#env); } catch { return []; } })();
+    // Routes are explicit: a cooling route is dispatch's to warn about, never a reason to hold a node silently.
     const hand = this.#handOccupancy();
     for (const row of ready) {
       const node = order(row);
-      const cooled = cooling.some((entry) => entry.adapter === node.pool.adapter && (entry.model === node.pool.model || entry.model === "*"));
-      const cap = cooled ? 0 : this.#defaults.pool_caps[node.pool.adapter] ?? this.#defaults.pool_caps.default ?? 1;
+      const cap = this.#defaults.pool_caps[node.pool.adapter] ?? this.#defaults.pool_caps.default ?? 1;
       const reserved = this.#store.reserve(row, {
         maxWidth: this.#plan.max_width, cap, handOccupancy: hand.get(`${node.pool.adapter}\u0000${node.pool.model}`) ?? 0,
         ...(node.worktree ? { writer: { path: node.worktree.path, gitDir: node.worktree.gitDir, token: newToken(),

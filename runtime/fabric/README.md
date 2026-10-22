@@ -73,7 +73,7 @@ The next dispatch reaps a run only when its host is gone and its owner or
 provider still runs: an owner that exited and left its provider behind, or a
 run whose MCP host was killed with SIGKILL.
 
-Nineteen tools are registered by default:
+Twenty tools are registered by default:
 
 | Tool | Purpose |
 | --- | --- |
@@ -84,6 +84,7 @@ Nineteen tools are registered by default:
 | `fabric_runs` | Versioned run and lane list with root-relative paths |
 | `fabric_events` | Cursor-based terminal, input-required and inbox events |
 | `fabric_cancel` | Cancel the owner and provider group |
+| `fabric_fetch` | Fetch one terminal remote writer and import its commits |
 | `fabric_output` | Bounded result, stderr, events or receipt slice |
 | `fabric_hosts` | `action: list` or `doctor`, optional `hosts`; same SSH surface for every chair |
 | `fabric_adapters` | Compact catalogue, CLI availability and guarantees; `models` lists live ids |

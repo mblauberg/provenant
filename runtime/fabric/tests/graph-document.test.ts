@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -111,5 +111,13 @@ describe("graph document validation", () => {
     expect(id).toMatch(/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u);
     expect(attemptTaskId({ ...key, restart: 1 })).not.toBe(id);
     expect(attemptTaskId({ ...key })).toBe(id);
+  });
+
+  it("keeps the live free-route acceptance graph valid against the catalogue", () => {
+    const document = JSON.parse(readFileSync(join(repositoryRoot, "runtime/fabric/tests/fixtures/graph-live-free.json"), "utf8"));
+    const result = validateGraph({ ...document, graph_id: "g-0a1b2c", revision: 1 }, identity, catalogue);
+    expect(result.faults).toEqual([]);
+    expect(result.plan!.nodes.map((node) => [node.id, node.pool.adapter, node.authority.mode])).toEqual([
+      ["registry", "opencode", "read_only"], ["lease", "opencode", "read_only"], ["synth", "opencode", "read_only"]]);
   });
 });
