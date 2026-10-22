@@ -2551,6 +2551,34 @@ class LaneLoopbackContracts(unittest.TestCase):
             if 'next_run' in locals():
                 self.client('cancel', id=next_run['id'], operation_id='cleanup-retry-refused-writer')
 
+    def test_clean_peer_writer_worktree_fast_forwards_to_advanced_transported_base(self):
+        self.set_peer_response_deadline(30)
+        git, base, local = self.writer_fixture()
+        request = dict(host='workshop', adapter='codex', model='fixture', prompt='fixture only',
+            mode='worktree_write', worktree=str(local), task_id='writer')
+        first = self.client('dispatch', **request, operation_id='writer-before-fast-forward')
+        self.assertEqual(first['status'], 'running', first)
+        remote = self.peer_workspace / '.worktrees/feat-writer'
+        try:
+            self.wait_writer(first['id'])
+            self.assertEqual(git(remote, 'rev-parse', 'HEAD'), base)
+            (local / 'code.txt').write_text('advanced transported base\n')
+            git(local, 'add', 'code.txt')
+            git(local, 'commit', '-qm', 'advance transported base')
+            advanced = git(local, 'rev-parse', 'HEAD')
+
+            next_run = self.client('dispatch', **request, operation_id='writer-fast-forward')
+            self.assertEqual(next_run['status'], 'running', next_run)
+            self.assertEqual(git(remote, 'rev-parse', 'HEAD'), advanced)
+            self.assertEqual(git(remote, 'symbolic-ref', '--short', 'HEAD'), 'feat/writer')
+            self.assertEqual((remote / 'code.txt').read_text(), 'advanced transported base\n')
+            self.assertEqual(git(remote, 'status', '--porcelain'), '')
+            self.wait_writer(next_run['id'])
+        finally:
+            self.client('cancel', id=first['id'], operation_id='cleanup-writer-before-fast-forward')
+            if 'next_run' in locals() and next_run.get('id'):
+                self.client('cancel', id=next_run['id'], operation_id='cleanup-writer-fast-forward')
+
     def test_chair_refuses_changed_verification_bindings_and_forged_bundle_head(self):
         import copy
         import hashlib
