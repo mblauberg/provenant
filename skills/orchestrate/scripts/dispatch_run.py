@@ -2393,8 +2393,10 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
                     plan["argv"] = provider_exec.profile(args.tool).argv(plan)
                 cooling=exec_routing.cooling(args.tool,plan["model"], account=plan.get("account"))
                 if cooling:
+                    pacing = getattr(args, "_rate_limit_retry", None)
                     if (args.model and getattr(args, "fallback_from", None)
-                            and not getattr(args, "_rate_limit_retry", None)):
+                            and (not pacing or datetime.fromisoformat(cooling["cooling_until"].replace("Z", "+00:00"))
+                                 > datetime.fromisoformat(pacing["until"].replace("Z", "+00:00")))):
                         plan["cooldown_blocked"] = cooling
                     elif args.model:
                         plan["warnings"].append("explicit model is cooling until "+cooling["cooling_until"])
@@ -3002,6 +3004,10 @@ def execute_attempt_sequence(args,custody=None):
             if remaining <= 0:
                 break
             current = getattr(args, "_last_plan", plan)
+            retry_account = current.get("account")
+            if (current["adapter"] == "claude" and explicit_account is None
+                    and exec_routing.claude_account_needs_reselection(retry_account)):
+                retry_account = None
             key = (current["adapter"], exec_routing.registered_model(current["adapter"], current["model"]))
             cooling = exec_routing.cooling(*key, account=current.get("account"))
             policy = pacing_policy()
@@ -3013,6 +3019,8 @@ def execute_attempt_sequence(args,custody=None):
                 args._rate_limit_task_class = previous.get("task_class", "")
                 retried.add(key)
                 candidate = {"adapter": current["adapter"], "model": current["model"], "effort": current.get("effort")}
+                if current["adapter"] == "claude":
+                    candidate["account"] = explicit_account if explicit_account is not None else retry_account
                 args._rate_limit_retry = {"until": (datetime.now(UTC) + timedelta(seconds=delay)).isoformat(),
                                           "deadline": deadline, "row": previous,
                                           "writer_start": getattr(args, "_writer_start", None)}
@@ -3024,16 +3032,16 @@ def execute_attempt_sequence(args,custody=None):
                         continue
                     # Reuse the selected identity for automatic same-provider fallback.
                     # An explicitly pinned Claude account is checked by its candidate plan.
-                    account = current.get("account") if route[0] == current["adapter"] else None
+                    account = retry_account if route[0] == current["adapter"] else None
                     check_cooling = (route[0] != "claude" or
-                                     (current["adapter"] == "claude" and explicit_account is None))
+                                     (account is not None and explicit_account is None))
                     if check_cooling and exec_routing.cooling(*route, account=account):
                         continue
                     attempted.add(route)
                     candidate = dict(item)
-                    if route[0] == "claude" and account is not None:
+                    if route[0] == "claude":
                         # Model fallback retains the identity whose cooldown we checked.
-                        candidate["account"] = account
+                        candidate["account"] = explicit_account if explicit_account is not None else account
                     break
                 if candidate is None:
                     break

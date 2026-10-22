@@ -1310,7 +1310,9 @@ def build_plan(
         try:
             candidates = quota.accounts('claude')
             entries = quota.configured().get('claude', {})
-        except ValueError:
+        except ValueError as exc:
+            if account is not None:
+                raise ValueError('invalid Claude account configuration; cannot honour explicit --account') from exc
             candidates, entries, account = [], {}, None
             account_warnings.append('invalid Claude account configuration; using ambient default identity')
         if account is None and not resume_session and not claude_adapter.uses_api_key(route):

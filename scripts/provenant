@@ -277,8 +277,9 @@ COMMAND_DETAILS: dict[str, str] = {
         "Delegates to skills/orchestrate/scripts/dispatch_run.py ...\n"
         "Own a durable run of provider attempts, including fallback and session resume.\n\n"
         "Claude lanes accept --account LABEL from accounts.claude in telemetry.json.\n"
-        "Without it, cached quota favours short-window room and expiring weekly reserve;\n"
-        "without usable cached quota, the default Claude config directory is retained."
+        "Without it, cached quota excludes exhausted five-hour or seven-day windows and\n"
+        "favours expiring weekly reserve. When all eligible accounts lack usable cached quota,\n"
+        "labels sort alphabetically. If all configured accounts are exhausted, the lane refuses."
     ),
     "batch": (
         "usage: provenant batch ...\n\n"

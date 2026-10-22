@@ -1959,7 +1959,7 @@ def test_claude_parse_loads_quota_schedule_itself_when_it_is_not_registered(monk
 
 @pytest.mark.parametrize('short,weekly,expected', [
     ((10, 20), (10, 35), 'pro'),  # More allowance would expire unused on Pro.
-    ((100, 20), (10, 35), 'max'),  # Short-window room wins over weekly reserve.
+    ((100, 20), (10, 35), 'max'),  # An exhausted short window excludes weekly reserve.
     ((10, 20), (70, 35), 'max'),  # A weekly deficit is skipped.
     ((10, 20), (100, 35), 'max'),
     ((10, 100), (70, 35), 'pro'),  # An exhausted short window is never chosen.
@@ -1978,8 +1978,19 @@ def test_choose_claude_account_from_cached_windows(quota, short, weekly, expecte
 
 @pytest.mark.parametrize('values,expected', [({}, None), ({'pro': None}, 'pro'),
     ({'pro': {'status': 'error', 'windows': []}}, 'pro')])
-def test_choose_claude_account_without_usable_cache_keeps_default(quota, values, expected):
+def test_choose_claude_account_without_usable_cache_uses_stable_labels(quota, values, expected):
     assert quota.choose_claude_account(values, NOW) == expected
+
+
+@pytest.mark.parametrize('reading', [None, {'status': 'error', 'windows': []}])
+def test_uncached_multiple_claude_accounts_match_the_dispatch_help(quota, reading):
+    values = {'pro': reading, 'max': reading, 'default': reading}
+    assert quota.choose_claude_account(values, NOW) == 'default'
+    values.pop('default')
+    assert quota.choose_claude_account(values, NOW) == 'max'
+    help_text = subprocess.check_output([str(ROOT / 'scripts/provenant'), 'help', 'dispatch'], text=True)
+    assert 'When all eligible accounts lack usable cached quota,' in help_text
+    assert 'labels sort alphabetically.' in help_text
 
 
 @pytest.mark.parametrize('selected,exhausted', [('pro', True), ('max', False)])

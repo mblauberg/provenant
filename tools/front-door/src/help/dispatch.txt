@@ -4,5 +4,6 @@ Delegates to skills/orchestrate/scripts/dispatch_run.py ...
 Own a durable run of provider attempts, including fallback and session resume.
 
 Claude lanes accept --account LABEL from accounts.claude in telemetry.json.
-Without it, cached quota favours short-window room and expiring weekly reserve;
-without usable cached quota, the default Claude config directory is retained.
+Without it, cached quota excludes exhausted five-hour or seven-day windows and
+favours expiring weekly reserve. When all eligible accounts lack usable cached quota,
+labels sort alphabetically. If all configured accounts are exhausted, the lane refuses.
