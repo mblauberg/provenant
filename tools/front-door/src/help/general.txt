@@ -1,0 +1,26 @@
+usage: provenant <command> [arguments...]
+
+Thin front door to owners:
+  root           print resolved product checkout
+  route ...      scripts/model-route ...
+  routes ...     scripts/model-route routes
+  capabilities   skills/orchestrate/scripts/capabilities.py
+  worktree ...   scripts/worktree ...
+  clean|reap ... scripts/clean.py|reap.py
+  lint ...       scripts/provenant_lint.py ...
+  check ...      scripts/check-harness ...
+  gate           scripts/gate
+  fabric ...     runtime/fabric/bin/fabric ...
+  lease ...      runtime/fabric/bin/fabric landing-*
+  hosts|peer     scripts/fabric-hosts
+  lanes|events   runtime/fabric/bin/fabric lanes|events
+  telemetry ...  scripts/provenant-telemetry
+  stats|retro    scripts/provenant-telemetry
+  quota ...      scripts/provenant-quota
+  profile ...    scripts/provenant-profile
+  dispatch ...   skills/orchestrate/scripts/dispatch_run.py ...
+  batch ...      skills/orchestrate/scripts/batch_run.py ...
+  run ...        skills/orchestrate/scripts/run_controls.py
+  pr ...         scripts/provenant-pr
+
+`provenant help <command>` for detail.
