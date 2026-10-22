@@ -1,4 +1,5 @@
 import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, rmdirSync, symlinkSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
@@ -26,7 +27,7 @@ describe("assertFixtureRunRoot", () => {
   });
 
   it("resolves a symlinked run root before checking the temp boundary", () => {
-    const tempRoot = mkdtempSync(join("/tmp", "fabric-fixture-link-"));
+    const tempRoot = mkdtempSync(join(tmpdir(), "fabric-fixture-link-"));
     const projectRunParent = join(process.cwd(), ".agent-run");
     const projectRunParentExisted = existsSync(projectRunParent);
     const projectRunRoot = join(projectRunParent, `fixture-link-${Date.now()}`);
@@ -53,6 +54,20 @@ describe("assertFixtureRunRoot", () => {
   it("allows a fixture run under the fixed system temp path", () => {
     expect(() => assertFixtureRunRoot(`${realpathSync("/tmp")}/fabric-lean-1/workspace/.agent-run`, [{ model: "fixture" }], temp))
       .not.toThrow();
+  });
+
+  it("allows a fixture run under FABRIC_TEST_TMPDIR", () => {
+    const saved = process.env.FABRIC_TEST_TMPDIR;
+    const explicit = realpathSync(mkdtempSync(join(tmpdir(), "fabric-explicit-root-")));
+    process.env.FABRIC_TEST_TMPDIR = explicit;
+    try {
+      expect(() => assertFixtureRunRoot(`${explicit}/fabric-lean-1/workspace/.agent-run`, [{ model: "fixture" }], temp))
+        .not.toThrow();
+    } finally {
+      if (saved === undefined) delete process.env.FABRIC_TEST_TMPDIR;
+      else process.env.FABRIC_TEST_TMPDIR = saved;
+      rmSync(explicit, { recursive: true, force: true });
+    }
   });
 
   it("allows a fixture run inside a project's throwaway .agent-run/scratch tree", () => {

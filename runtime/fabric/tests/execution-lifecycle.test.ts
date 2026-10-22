@@ -36,6 +36,7 @@ import {
   terminateRecordedRun,
 } from "../src/run-registry.js";
 import type { Identity } from "../src/identity.js";
+import { describeLeaks, reapFixtureProcesses } from "./helpers/fixture-processes.js";
 import { scratchRoot } from "./helpers/temp-root.js";
 
 const testDirectory = dirname(fileURLToPath(import.meta.url));
@@ -391,8 +392,15 @@ afterEach(async () => {
       process.kill(pid, "SIGKILL");
     } catch { /* already gone */ }
   }
-  await waitFor(() => pids.every((pid) => !alive(pid)), "execution processes to exit before fixture cleanup");
-  rmSync(temporaryDirectory, { recursive: true, force: true });
+  try {
+    await waitFor(() => pids.every((pid) => !alive(pid)), "execution processes to exit before fixture cleanup");
+    // Any child still naming this fixture tree was never tracked by its test.
+    const leaked = await reapFixtureProcesses(temporaryDirectory);
+    expect(leaked, describeLeaks(leaked)).toEqual([]);
+  } finally {
+    await reapFixtureProcesses(temporaryDirectory, 0);
+    rmSync(temporaryDirectory, { recursive: true, force: true });
+  }
 });
 
 describe("owner records", () => {

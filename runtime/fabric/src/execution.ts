@@ -238,8 +238,9 @@ export function assertFixtureRunRoot(
 ): void {
   if (!routes.some((route) => route.model === "fixture" || route.cli_version === "fixture")) return;
   const root = realPath(agentRun);
-  // The OS temp dir, and the fixed /tmp that test helpers fall back to when TMPDIR sits in a .agent-run tree.
-  const tempRoots = [...new Set([temp, "/tmp"].map(realPath))];
+  // The OS temp dir, and the roots that test helpers fall back to when TMPDIR sits in a .agent-run tree.
+  const fallbacks = [process.env.FABRIC_TEST_TMPDIR, "/tmp"].filter((path): path is string => !!path);
+  const tempRoots = [...new Set([temp, ...fallbacks].map(realPath))];
   const acceptableTempRoots = tempRoots.filter((tempRoot) => !tempRoot.split(sep).includes(".agent-run"));
   const underTemp = acceptableTempRoots.some((tempRoot) => root.startsWith(tempRoot + sep));
   if (underTemp || underScratch(root)) return;
