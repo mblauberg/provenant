@@ -1,6 +1,5 @@
 """Explicit attempt ancestry shared by dispatch, batch and provider boundaries."""
 
-import errno
 import fcntl
 import hashlib
 import json
@@ -85,6 +84,26 @@ def fields(run_dir=None):
     return {"parent": parent} if parent else {}
 
 
+def _inherited_owner_custody(run_dir):
+    inherited = os.environ.pop(CUSTODY_ENV, None)
+    if inherited is None:
+        return None
+    fd = int(inherited)
+    try:
+        check, _, _ = open_contained_regular(run_dir, "MANIFEST.md", os.O_RDWR | os.O_APPEND, label="MANIFEST.md")
+        try:
+            if (os.fstat(fd).st_dev, os.fstat(fd).st_ino) != (os.fstat(check).st_dev, os.fstat(check).st_ino):
+                raise ValueError("nested run custody identity changed")
+        finally:
+            os.close(check)
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        os.set_inheritable(fd, False)
+        return os.fdopen(fd, "a+", encoding="utf-8")
+    except (OSError, ValueError):
+        os.close(fd)
+        raise
+
+
 def ensure_nested_owner(run_dir, kind, *, batch_child=False):
     """Re-exec direct nested CLIs with an initial environment the reaper can read.
 
@@ -122,18 +141,11 @@ def ensure_nested_owner(run_dir, kind, *, batch_child=False):
                 # Only batch owners may lend their already-held custody.
                 if record["kind"] != "batch":
                     raise ValueError("shared run custody requires a batch owner")
-                fd, _, _ = open_contained_regular(run_dir, "MANIFEST.md", os.O_RDWR | os.O_APPEND, label="MANIFEST.md")
-                try:
-                    try:
-                        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                    except OSError as exc:
-                        if exc.errno != errno.EWOULDBLOCK:
-                            raise
-                    else:
-                        fcntl.flock(fd, fcntl.LOCK_UN)
-                        raise ValueError("batch run owner does not hold custody")
-                finally:
-                    os.close(fd)
+                custody = _inherited_owner_custody(run_dir)
+                if custody is None:
+                    raise ValueError("batch run owner did not pass custody")
+                # Close our reference without unlocking the batch's descriptor.
+                custody.close()
             return record
 
         try:
@@ -157,22 +169,12 @@ def ensure_nested_owner(run_dir, kind, *, batch_child=False):
         return
     run_dir = Path(run_dir).resolve()
     if _same_run(os.environ.get("PROVENANT_RUN_DIR"), run_dir) and os.environ.get("PROVENANT_RUN_TOKEN"):
-        inherited = os.environ.pop(CUSTODY_ENV, None)
-        if inherited is not None:
-            fd = int(inherited)
-            check, _, _ = open_contained_regular(run_dir, "MANIFEST.md", os.O_RDWR | os.O_APPEND, label="MANIFEST.md")
-            try:
-                if (os.fstat(fd).st_dev, os.fstat(fd).st_ino) != (os.fstat(check).st_dev, os.fstat(check).st_ino):
-                    raise ValueError("nested run custody identity changed")
-            finally:
-                os.close(check)
-            try:
-                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except OSError:
-                os.close(fd)
-                return  # Let the ordinary entry point report busy custody.
-            os.set_inheritable(fd, False)
-            _nested_custody[str(run_dir)] = os.fdopen(fd, "a+", encoding="utf-8")
+        try:
+            custody = _inherited_owner_custody(run_dir)
+        except OSError:
+            return  # Let the ordinary entry point report busy custody.
+        if custody is not None:
+            _nested_custody[str(run_dir)] = custody
             # The exec image and published owner now agree before detaching.
             if os.getpgrp() != os.getpid():
                 os.setsid()
