@@ -3,7 +3,8 @@
 
 The gate walks every commit in `tip ^base` through the owner's common Git directory. A commit
 may change a protected path only to the version the base already has, or be reachable from a
-tip the chair released after review. Fabric landing passes the landing lease's remote SHA as
+tip the chair released after review, or match that tip's complete protected tree while its
+reviewed content has not yet landed. Fabric landing passes the landing lease's remote SHA as
 the base; claims and manual consumption default to the primary checkout's HEAD. Writers can
 write only their own branch ref and the object store: never the primary branch, its upstream
 or the release records here.
@@ -87,11 +88,16 @@ def check(common, tip, base="HEAD"):
     but only where a released commit in the range introduced that version, as a landing train's
     --no-ff merge of a released tip does. Older versions, such as an outside parent's or a stale
     branch's, never count, so a merge cannot revert a protected path.
+
+    A commit may also match one released tip's complete protected tree. That tip must not be
+    an ancestor of the base, and its protected tree must differ from the base's, so an old
+    release cannot vouch for restoring content the base has already moved past.
     """
     tip, base = commit(common, tip), commit(common, base)
     tips = released(common)
     covered = set(git(common, "rev-list", "--ignore-missing", *tips, "^" + base).split()) if tips else set()
     trees, held = {}, []
+    reviewed_trees = None
     # Each judged, unheld range commit maps to the protected paths whose version a released commit introduced.
     vouched = {}
 
@@ -110,6 +116,13 @@ def check(common, tip, base="HEAD"):
         inherited = set().union(*(vouched[parent] for parent in inside)) - changed
         if sha in covered or not changed:
             vouched[sha] = inherited | (changed if sha in covered else set())
+            continue
+        if reviewed_trees is None:
+            # Membership in covered excludes missing tips and tips already in the base's history.
+            reviewed_trees = [entries(tip) for tip in tips
+                              if tip in covered and entries(tip) != entries(base)]
+        if entries(sha) in reviewed_trees:
+            vouched[sha] = inherited | changed
             continue
         # The base's version is trusted, as a merge or rebase from the base takes it.
         taken = {name for name in changed if len(parents) > 1 and any(
