@@ -5575,6 +5575,8 @@ def test_cancel_cascade_still_cancels_genuine_child(cancel_cascade, ignore_term)
     mod, parent_dir, child_dir, row = cancel_cascade
     code = f'''import json,os,pathlib,signal,time
 def cancelled(signum, frame):
+    # Cascade TERMs can arrive twice; a nested call would truncate the receipt.
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
     receipt = pathlib.Path({str(child_dir / 'RUN_RECEIPT.json')!r})
     receipt.write_text(json.dumps({{**json.loads(receipt.read_text()), 'status': 'cancelled'}}))
     signal.signal(signal.SIGTERM, signal.SIG_DFL)
@@ -5655,6 +5657,8 @@ sys.path.insert(0, {str(SCRIPT.parent)!r})
 import process_info
 directory = pathlib.Path({str(child_dir)!r})
 def cancelled(signum, frame):
+    # Cascade TERMs can arrive twice; a nested call would truncate the receipt.
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
     receipt = directory / 'RUN_RECEIPT.json'
     receipt.write_text(json.dumps({{**json.loads(receipt.read_text()), 'status': 'cancelled'}}))
     raise SystemExit(0)
