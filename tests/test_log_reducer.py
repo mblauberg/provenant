@@ -206,3 +206,24 @@ tests/test_sample.py:5: AssertionError
 
     assert result["reduced"] is True
     assert block.rstrip() in result["text"]
+
+
+def test_evidence_blocks_do_not_swallow_unrelated_output():
+    failure = """_________________________________ test_x __________________________________
+
+    def test_x():
+>       assert compute() == 2
+E       assert 1 == 2
+
+tests/test_sample.py:5: AssertionError
+"""
+    tail = ("routine tail " + "y" * 90 + "\n") * 200
+    passing = "============ 412 passed in 9.31s ============\n\n" + ("    detail " + "z" * 90 + "\n\n") * 200
+
+    failed = log_reducer.reduce_text(failure + tail, command="pytest", exit_status=1)
+    passed = log_reducer.reduce_text(passing, command="pytest", exit_status=0)
+
+    assert failure.rstrip() in failed["text"]
+    assert "routine tail" not in failed["text"]
+    assert "412 passed" in passed["text"]
+    assert "detail" not in passed["text"]

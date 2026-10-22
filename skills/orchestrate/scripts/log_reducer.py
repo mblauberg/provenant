@@ -16,13 +16,26 @@ ALLOWED_COMMANDS = frozenset({"pytest", "vitest", "gh run view --log-failed", "t
 MIN_BYTES = 4096
 _EVIDENCE = re.compile(
     r"(?:\bFAIL(?:ED|URE|URES|ING)?\b|\bERROR\b|\b[A-Za-z_]*Error\b|\bEXCEPTION\b|\bTRACEBACK\b|"
-    r"\bASSERT(?:ION)?\b|\bPANIC\b|\b\d+\s+(?:passed|failed|skipped|errors?)\b|"
+    r"\bASSERT(?:ION)?\b|\bPANIC\b)",
+    re.IGNORECASE,
+)
+# Counts and totals are kept as single lines; they never open a block.
+_COUNT = re.compile(
+    r"(?:\b\d+\s+(?:passed|failed|skipped|errors?)\b|"
     r"\b\d+\s+tests?\b|\b(?:total|count|tests?)\s*[:=]\s*\d+)",
     re.IGNORECASE,
 )
 _ANSI = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 _TEST_HEADER = re.compile(r"^\s*_{3,}.*_{3,}\s*$")
-_TEST_SUMMARY = re.compile(r"^\s*={3,}.*short test summary info.*={3,}\s*$", re.IGNORECASE)
+# A pytest failure section ends at a section rule, a captured-output rule, or
+# after its final location line (`path:N: ErrorName`, not `path:N: in func`).
+_SECTION_END = re.compile(r"^\s*(?:={3,}.*={3,}|-{3,}\s*Captured\b.*)\s*$")
+_SECTION_LAST = re.compile(r"^\S+:\d+: (?!in )\S+")
+
+
+def _is_continuation(line: str) -> bool:
+    """Indented detail or a diff, source or location marker line."""
+    return line[:1].isspace() or line.startswith(("E ", ">", "-", "+", "❯"))
 
 
 def _quotes_are_ordered_source_lines(source: str, quotes: list[str]) -> bool:
@@ -62,40 +75,34 @@ def reduce_text(
         index for index, line in enumerate(clean_lines)
         if _EVIDENCE.search(line) or _TEST_HEADER.match(line)
     }
-    if not starts:
+    counts = {index for index, line in enumerate(clean_lines) if _COUNT.search(line)}
+    if not starts and not counts:
         return receipt
 
-    evidence: set[int] = set()
+    evidence: set[int] = set(counts)
     for start in sorted(starts):
         evidence.add(start)
         if _TEST_HEADER.match(clean_lines[start]):
             index = start + 1
             while index < len(lines) and not (
                 _TEST_HEADER.match(clean_lines[index])
-                or _TEST_SUMMARY.match(clean_lines[index])
+                or _SECTION_END.match(clean_lines[index])
             ):
                 evidence.add(index)
+                if _SECTION_LAST.match(clean_lines[index]):
+                    break
                 index += 1
             continue
+        # Other blocks run on through continuation lines, bridging blank lines.
         index = start + 1
         while index < len(lines) and index not in starts:
-            if not lines[index].strip():
-                next_index = index + 1
-                while next_index < len(lines) and not lines[next_index].strip():
-                    next_index += 1
-                if next_index == len(lines):
-                    break
-                continuation = clean_lines[next_index]
-                if not (
-                    continuation[:1].isspace()
-                    or continuation.lstrip().startswith(("E", ">", "-", "+", "❯"))
-                ):
-                    break
-                evidence.update(range(index, next_index))
-                index = next_index
-                continue
-            evidence.add(index)
-            index += 1
+            next_index = index
+            while next_index < len(lines) and not lines[next_index].strip():
+                next_index += 1
+            if next_index == len(lines) or not _is_continuation(clean_lines[next_index]):
+                break
+            evidence.update(range(index, next_index + 1))
+            index = next_index + 1
 
     output: list[str] = []
     spans: list[dict[str, int]] = []
