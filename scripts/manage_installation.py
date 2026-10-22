@@ -69,7 +69,7 @@ def _catalogues(
     source: Path,
     custom_source: Path | None = None,
     *,
-    allowed_collisions: set[str] | None = None,
+    allowed_collisions: dict[str, Path] | None = None,
 ) -> tuple[dict[str, Path], dict[str, Path]]:
     """Every directory a per-entry installation owns: skills, library skills and
     shared libraries.
@@ -95,7 +95,11 @@ def _catalogues(
     )
     collisions = sorted(set(managed) & set(custom))
     for name in collisions:
-        if allowed_collisions and name in allowed_collisions:
+        if (
+            allowed_collisions
+            and name in allowed_collisions
+            and custom[name] == allowed_collisions[name].resolve()
+        ):
             custom.pop(name)
     collisions = sorted(set(managed) & set(custom))
     if collisions:
@@ -509,13 +513,28 @@ def execute(
         }
     if action == "check-legacy-agy":
         target = Path(target)
+        source = Path(source).resolve()
+        current_catalogue, _ = _catalogues(source)
         items = []
         if target.is_dir():
             for destination in sorted(target.iterdir()):
                 if not destination.is_symlink():
                     continue
-                state = "dangling" if not destination.exists() else "foreign"
-                items.append({"name": destination.name, "state": state})
+                if not destination.exists():
+                    state = "dangling"
+                else:
+                    try:
+                        resolves_to_current = destination.resolve() in current_catalogue.values()
+                    except (OSError, RuntimeError):
+                        resolves_to_current = False
+                    state = "current" if resolves_to_current else "foreign"
+                if state != "current":
+                    items.append({"name": destination.name, "state": state})
+        legacy_manifest_path = target.parent / manifest_io.MANIFEST_NAME
+        if legacy_manifest_path.exists():
+            legacy_manifest = _load_manifest(target)
+            for name in sorted(set(legacy_manifest["managed"]) - set(current_catalogue)):
+                items.append({"name": name, "state": "retired"})
         return {
             "schema_version": 1,
             "action": action,
@@ -557,20 +576,19 @@ def execute(
         )
     target = Path(target).resolve()
     manifest = _load_manifest(target)
-    recorded_links = {
+    recorded_custom_links = {
         name
         for name, entry in manifest["custom"].items()
         if _same_link(target / name, Path(entry["source_target"]))
     }
-    recorded_links.update(
-        name
-        for name, entry in manifest["managed"].items()
-        if _same_link(target / name, Path(entry["source_target"]))
-    )
+    recorded_custom_links = {
+        name: Path(manifest["custom"][name]["source_target"])
+        for name in recorded_custom_links
+    }
     managed_catalogue, custom_catalogue = _catalogues(
         source,
         custom_source,
-        allowed_collisions=recorded_links,
+        allowed_collisions=recorded_custom_links,
     )
     if action in {"preflight", "install", "reconcile"}:
         _retire_legacy_agents(target, apply=False)
@@ -633,11 +651,14 @@ def execute(
     target.mkdir(parents=True, exist_ok=True)
     changed: list[str] = []
     migrated: list[str] = []
+    migration_sources: dict[str, str] = {}
     if action in {"install", "reconcile"}:
         for item in items:
             name, state = item["name"], item["state"]
             if state in {"missing", "stale", "custom-to-managed"}:
                 destination = target / name
+                if state == "custom-to-managed":
+                    migration_sources[name] = manifest["custom"][name]["source_target"]
                 _replace_link(destination, managed_catalogue[name])
                 history = list(manifest["managed"].get(name, {}).get("history", []))
                 manifest["managed"][name] = _entry(
@@ -706,6 +727,7 @@ def execute(
         ),
         "changed": changed,
         "migrated": migrated,
+        "migration_sources": migration_sources,
     }
 
 
@@ -749,7 +771,10 @@ def main(argv: list[str] | None = None) -> int:
             print(f"warning: unmanaged skill links outside catalogue: {detail}", file=sys.stderr)
     if args.action == "check-legacy-agy":
         for item in result["items"]:
-            print(f"legacy agy skill stale={item['name']} ({item['state']})")
+            if item["state"] == "retired":
+                print(f"legacy agy skill retired={item['name']} (no longer in product)")
+            else:
+                print(f"legacy agy skill stale={item['name']} ({item['state']})")
         return 1 if result["items"] else 0
     if args.action == "check" and not result["ok"]:
         print(json.dumps(result, indent=2))
@@ -797,7 +822,11 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if args.action == "install":
             for name in result.get("migrated", []):
-                print(f"skills migrated=custom-to-managed name={name}")
+                source = result["migration_sources"][name]
+                print(
+                    f"skills migrated=custom-to-managed name={name} "
+                    f"remove={source}"
+                )
         linked = len(result["changed"])
         existing = sum(
             item["state"] in {"managed", "unmanaged", "custom"}

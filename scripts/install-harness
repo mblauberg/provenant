@@ -19,12 +19,12 @@ PRE_PUSH_HOOK=""
 OTEL_COLLECTOR=""
 
 usage() {
-  echo "usage: install-harness --check | install-harness --platform <claude|codex|opencode|agy|cursor|kiro|all> [--mcp-clients <primary|all>] [--refresh-routing] [--lane-safety-hooks|--no-lane-safety-hooks] [--pre-push-hook|--no-pre-push-hook] [--otel-collector|--uninstall-otel-collector]" >&2
+  echo "usage: install-harness --check-legacy-skills | install-harness --platform <claude|codex|opencode|agy|cursor|kiro|all> [--mcp-clients <primary|all>] [--refresh-routing] [--lane-safety-hooks|--no-lane-safety-hooks] [--pre-push-hook|--no-pre-push-hook] [--otel-collector|--uninstall-otel-collector]" >&2
 }
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --check)
+    --check-legacy-skills)
       CHECK=1
       shift
       ;;

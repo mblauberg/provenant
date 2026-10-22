@@ -261,6 +261,45 @@ def test_source_name_collision_aborts_before_link_or_receipt_mutation(tmp_path):
     assert not manifest_for(target).exists()
 
 
+def test_new_custom_skill_cannot_shadow_an_installed_managed_skill(tmp_path):
+    target = tmp_path / "skills"
+    source = tmp_path / "product/skills"
+    managed_review = source / "review"
+    managed_review.mkdir(parents=True)
+    (managed_review / "SKILL.md").write_text(
+        "---\nname: review\ndescription: Managed review skill.\n---\n"
+    )
+    custom_source = tmp_path / "custom-skills"
+    custom_source.mkdir()
+    first = subprocess.run(
+        [sys.executable, str(MANAGER), "install", "--source", str(source),
+         "--target", str(target)],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert first.returncode == 0, first.stderr
+
+    custom_review = custom_source / "review"
+    custom_review.mkdir()
+    (custom_review / "SKILL.md").write_text(
+        "---\nname: review\ndescription: New custom copy.\n---\n"
+    )
+
+    for action in ("install", "preflight", "check"):
+        result = subprocess.run(
+            [sys.executable, str(MANAGER), action, "--source", str(source),
+             "--target", str(target), "--custom-source", str(custom_source)],
+            cwd=ROOT,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        assert result.returncode == 3, f"{action}: {result.stdout}\n{result.stderr}"
+        assert "skill source name collision" in result.stderr
+
+
 def test_recorded_link_can_rebind_after_product_relocation(tmp_path):
     old_source = tmp_path / "old-product/skills"
     new_source = tmp_path / "new-product/skills"
