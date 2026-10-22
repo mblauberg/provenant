@@ -1756,11 +1756,22 @@ def test_transcript_names_that_link_elsewhere_are_never_opened(tmp_path):
 
 def test_lane_events_carry_the_harness_profile_when_the_receipt_has_one(tmp_path):
     receipt(tmp_path, 'run-p', 1, status='ok', provenance=route('codex', 'gpt-6.1-sol'),
-            profile={'preset': 'thorough', 'digest': 'd1', 'knobs': {'reviewers': 3}})
+            profile={'preset': 'thorough', 'digest': 'd1', 'knobs': {'reviewers': 3},
+                     'risk_tier': 'substantial', 'floored': ['reviewers']})
     receipt(tmp_path, 'run-q', 1, status='ok', provenance=route('codex', 'gpt-6.1-sol'))
+    receipt(tmp_path, 'run-r', status='ok', profile={'preset': 'thorough', 'digest': 'd1',
+                                                  'knobs': {'reviewers': 3}})
+    receipt(tmp_path, 'broken', status='ok', profile={'digest': 'd2'})
     assert cli(tmp_path, 'telemetry', 'ingest').returncode == 0
     with sqlite3.connect(tmp_path / 'state/telemetry.sqlite3') as db:
         rows = dict(db.execute("SELECT run_id, attrs FROM events WHERE kind='lane.attempt'").fetchall())
+        stamps = db.execute('SELECT digest, preset, knobs, first_seen FROM harness_stamps').fetchall()
+    assert len(stamps) == 1
+    assert stamps[0][:2] == ('d1', 'thorough')
+    assert json.loads(stamps[0][2]) == {'reviewers': 3}
+    assert stamps[0][3] == '2026-10-21T01:00:00Z'
+    assert json.loads(rows['run-p'])['risk_tier'] == 'substantial'
+    assert json.loads(rows['run-p'])['floored'] == ['reviewers']
     assert (json.loads(rows['run-p'])['profile'], json.loads(rows['run-p'])['profile_digest']) == ('thorough', 'd1')
     assert 'profile' not in json.loads(rows['run-q'])  # absent means the default (balanced) profile
 
@@ -2226,3 +2237,92 @@ def test_host_merge_rounds_costs_once_after_summing(tmp_path, monkeypatch):
     assert merged['usage'][0]['estimated_cost_usd'] == 1e-6
     assert merged['usage'][0]['reported_cost_usd'] == 1e-6
     assert merged['usage_per_day'][0]['estimated_cost_usd'] == 1e-6
+
+
+def test_receipt_models_stay_distinct_and_native_models_are_observed(tmp_path):
+    receipt(tmp_path, 'observed', status='ok', provenance={
+        'requested': {'adapter': 'claude', 'model': 'opus'},
+        'resolved_model': 'claude-opus-x', 'observed_model': 'claude-sonnet-y'})
+    receipt(tmp_path, 'resolved', status='ok', provenance={
+        'requested': {'adapter': 'claude', 'model': 'opus'}, 'resolved_model': 'claude-opus-x'})
+    jsonl(tmp_path / 'home/.claude/projects/repo/s.jsonl', {
+        'type': 'assistant', 'sessionId': 's', 'timestamp': '2026-10-21T01:00:00Z',
+        'message': {'id': 'm', 'model': 'claude-native', 'usage': {'input_tokens': 7}}})
+    jsonl(tmp_path / 'home/.codex/sessions/day/rollout-models.jsonl',
+          {'type': 'session_meta', 'payload': {'id': 'c'}},
+          {'type': 'turn_context', 'payload': {'model': 'codex-native'}},
+          {'type': 'event_msg', 'payload': {'type': 'token_count',
+           'info': {'total_token_usage': {'input_tokens': 5}}}})
+    assert cli(tmp_path, 'telemetry', 'ingest').returncode == 0
+    with sqlite3.connect(tmp_path / 'state/telemetry.sqlite3') as db:
+        assert db.execute('SELECT run_id, requested_model, resolved_model, observed_model, model '
+                          "FROM usage WHERE source='fabric' ORDER BY run_id").fetchall() == [
+            ('observed', 'opus', 'claude-opus-x', 'claude-sonnet-y', 'claude-sonnet-y'),
+            ('resolved', 'opus', 'claude-opus-x', None, 'claude-opus-x')]
+        assert db.execute('SELECT source, requested_model, resolved_model, observed_model, model '
+                          "FROM usage WHERE source!='fabric' ORDER BY source").fetchall() == [
+            ('claude', None, None, 'claude-native', 'claude-native'),
+            ('codex', None, None, 'codex-native', 'codex-native')]
+        assert db.execute('PRAGMA user_version').fetchone() == (4,)
+
+
+def test_receipt_fields_refresh_without_replacing_event_history(tmp_path):
+    path = receipt(tmp_path, 'run-refresh', status='ok', empty_patch=True,
+                   retry_of='attempt-001', escalation_reason='gate_failed',
+                   profile={'preset': 'thorough', 'digest': 'd1', 'knobs': {},
+                            'risk_tier': 'substantial', 'floored': []})
+    receipt(tmp_path, 'changed', status='ok', empty_patch=False, retry_of='attempt-001')
+    receipt(tmp_path, 'unknown', status='ok')
+    assert cli(tmp_path, 'telemetry', 'ingest').returncode == 0
+    ledger = tmp_path / 'state/telemetry.sqlite3'
+    with sqlite3.connect(ledger) as db:
+        rows = {run: json.loads(attrs) for run, attrs in db.execute(
+            "SELECT run_id, attrs FROM events WHERE kind='lane.attempt'")}
+        assert rows['run-refresh']['empty_patch'] is True
+        assert rows['changed']['empty_patch'] is False
+        assert 'empty_patch' not in rows['unknown']
+        assert rows['run-refresh']['retry_of'] == 'attempt-001'
+        assert rows['run-refresh']['escalation_reason'] == 'gate_failed'
+        assert rows['run-refresh']['escalated_from'] == 'run-refresh/lane/1'
+        assert 'escalated_from' not in rows['changed']
+        before = db.execute("SELECT event_id,ts FROM events WHERE run_id='run-refresh'").fetchone()
+        # Simulate an older event with existing history but no new receipt attrs.
+        db.execute("UPDATE events SET attrs=? WHERE run_id='run-refresh'", ('{"retained":true}',))
+        db.execute("DELETE FROM cursors WHERE source='fabric'")
+    assert cli(tmp_path, 'telemetry', 'ingest').returncode == 0
+    with sqlite3.connect(ledger) as db:
+        event_id, ts, attrs = db.execute(
+            "SELECT event_id,ts,attrs FROM events WHERE run_id='run-refresh'").fetchone()
+        assert (event_id, ts) == before
+        assert json.loads(attrs) == {**rows['run-refresh'], 'retained': True}
+        assert db.execute("SELECT COUNT(*) FROM events WHERE kind='lane.attempt'").fetchone() == (3,)
+
+
+def test_model_split_migration_rereads_only_surviving_receipts_once(tmp_path):
+    kept = receipt(tmp_path, 'kept', status='ok', provenance=route('claude', 'opus'),
+                   empty_patch=True, profile={'preset': 'balanced', 'digest': 'd1', 'knobs': {}})
+    pruned = receipt(tmp_path, 'pruned', status='ok', provenance=route('claude', 'sonnet'))
+    assert cli(tmp_path, 'telemetry', 'ingest').returncode == 0
+    pruned.unlink()
+    ledger = tmp_path / 'state/telemetry.sqlite3'
+    with sqlite3.connect(ledger) as db:
+        for column in ('requested_model', 'resolved_model', 'observed_model'):
+            db.execute(f'ALTER TABLE usage DROP COLUMN {column}')
+        db.execute("DELETE FROM meta WHERE key='model_split'")
+        db.execute('DELETE FROM harness_stamps')
+        db.execute("UPDATE events SET attrs='{}'")
+    assert cli(tmp_path, 'telemetry', 'ingest').returncode == 0
+    with sqlite3.connect(ledger) as db:
+        assert db.execute('SELECT run_id, requested_model, resolved_model, observed_model, model '
+                          'FROM usage ORDER BY run_id').fetchall() == [
+            ('kept', 'opus', 'opus', None, 'opus'), ('pruned', None, None, None, 'sonnet')]
+        assert json.loads(db.execute("SELECT attrs FROM events WHERE run_id='kept'").fetchone()[0])['empty_patch'] is True
+        assert db.execute('SELECT COUNT(*) FROM harness_stamps').fetchone() == (1,)
+        assert db.execute('PRAGMA user_version').fetchone() == (4,)
+        cursor = db.execute("SELECT * FROM cursors WHERE path=?", (str(kept),)).fetchone()
+        # A one-time migration must not keep resetting the Fabric cursor on connect.
+        db.execute("UPDATE usage SET requested_model='sentinel' WHERE run_id='kept'")
+    assert cli(tmp_path, 'telemetry', 'ingest').returncode == 0
+    with sqlite3.connect(ledger) as db:
+        assert db.execute("SELECT requested_model FROM usage WHERE run_id='kept'").fetchone() == ('sentinel',)
+        assert db.execute("SELECT * FROM cursors WHERE path=?", (str(kept),)).fetchone() == cursor

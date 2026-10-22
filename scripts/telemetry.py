@@ -181,6 +181,8 @@ def connect():
             change_id TEXT PRIMARY KEY, kind TEXT NOT NULL, pr INTEGER, merge_commit TEXT,
             merged_at TEXT NOT NULL, title TEXT, labels TEXT NOT NULL DEFAULT '[]',
             added_at TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS harness_stamps (
+            digest TEXT PRIMARY KEY, preset TEXT, knobs TEXT NOT NULL, first_seen TEXT);
     ''')
     observation_columns = {row[1] for row in db.execute('PRAGMA table_info(observations)')}
     if 'origin_path' not in observation_columns:
@@ -189,7 +191,8 @@ def connect():
     for name, kind in (('run_id', 'TEXT'), ('task_id', 'TEXT'), ('attempt', 'INTEGER'),
                        ('task_class', 'TEXT'), ('route', 'TEXT'), ('duration_ms', 'INTEGER'),
                        ('provider_ms', 'INTEGER'), ('parent_run_id', 'TEXT'),
-                       ('parent_task_id', 'TEXT'), ('parent_attempt', 'INTEGER')):
+                       ('parent_task_id', 'TEXT'), ('parent_attempt', 'INTEGER'),
+                       ('requested_model', 'TEXT'), ('resolved_model', 'TEXT'), ('observed_model', 'TEXT')):
         if name not in usage_columns:
             db.execute(f'ALTER TABLE usage ADD COLUMN {name} {kind}')
     if version in (1, 2):
@@ -203,6 +206,10 @@ def connect():
         # Version 4 reads route, task class and timing from receipts; re-read them in place.
         db.execute("DELETE FROM cursors WHERE source='fabric'")
     db.execute('PRAGMA user_version = 4')
+    if db.execute("SELECT 1 FROM meta WHERE key='model_split'").fetchone() is None:
+        # Re-read surviving receipts; pruned receipts keep unknown model components.
+        db.execute("DELETE FROM cursors WHERE source='fabric'")
+        db.execute("INSERT OR IGNORE INTO meta VALUES ('model_split', ?)", (now(),))
     migrate_event_ids(db)
     if db.execute("SELECT 1 FROM meta WHERE key='events_backfill'").fetchone() is None:
         # Events are additive tables (no version bump, so peers still read this ledger).
@@ -293,7 +300,7 @@ def claude_record(db, row, state, path, offset, account=None, owner=None):
     reasoning = number((usage.get('output_tokens_details') or {}).get('thinking_tokens'))
     output = number(usage.get('output_tokens'))
     put_usage(db, 'claude', message['id'], origin_path=path, owner=owner, session=row.get('sessionId'),
-              adapter='claude', provider='anthropic', model=message.get('model'),
+              adapter='claude', provider='anthropic', model=message.get('model'), observed_model=message.get('model'),
               effort=row.get('perTurnEffort'), account=account or row.get('account'),
               repository=row.get('cwd'), revision=row.get('gitRevision'), timestamp=row.get('timestamp'),
               input_tokens=number(usage.get('input_tokens')),
@@ -393,14 +400,16 @@ def rekey_events(db):
             db.execute('UPDATE events SET event_id=? WHERE rowid=?', (key, row['rowid']))
 
 
-def put_event(db, kind, ts, source_ref, attrs=None, **fields):
-    """Append one metadata event; its stored fields identify it, so re-ingest never duplicates it."""
+def put_event(db, kind, ts, source_ref, attrs=None, refresh=False, **fields):
+    """Append one metadata event, optionally merging refreshed attrs into its existing history."""
     values = {'host': host_id(), 'kind': kind, 'ts': ts, 'source_ref': source_ref,
               'attrs': json.dumps({k: v for k, v in (attrs or {}).items() if v is not None}, sort_keys=True),
               **{name: fields.get(name) for name in EVENT_FIELDS}}
     values = {'event_id': event_key(values), **values}
-    db.execute(f"INSERT OR IGNORE INTO events({','.join(values)}) "
-               f"VALUES ({','.join('?' for _ in values)})", list(values.values()))
+    conflict = ('ON CONFLICT(event_id) DO UPDATE SET attrs=json_patch(events.attrs, excluded.attrs)'
+                if refresh else 'ON CONFLICT(event_id) DO NOTHING')
+    db.execute(f"INSERT INTO events({','.join(values)}) "
+               f"VALUES ({','.join('?' for _ in values)}) {conflict}", list(values.values()))
 
 
 # A reading's state per window; a row is appended only when one of these changes.
@@ -481,7 +490,7 @@ def codex_record(db, row, state, path, offset, account=None, owner=None):
             reasoning = delta.get('reasoning_output_tokens')
             input_count, output = delta.get('input_tokens'), delta.get('output_tokens')
             put_usage(db, 'codex', event_id, origin_path=path, owner=owner, **meta, adapter='codex', provider='openai',
-                      timestamp=timestamp,
+                      timestamp=timestamp, observed_model=meta.get('model'),
                       input_tokens=max(0, input_count - (cached or 0) - (written or 0)) if input_count is not None else None,
                       cache_read_tokens=cached, cache_write_tokens=written,
                       output_tokens=max(0, output - (reasoning or 0)) if output is not None else None,
@@ -838,6 +847,8 @@ def ingest_document(db, source, path):
                       graph_node=row.get('graph_node'), adapter=adapter,
                       provider=provenance.get('provider') or PROVIDERS.get(adapter, adapter),
                       model=provenance.get('observed_model') or provenance.get('resolved_model') or requested.get('model'),
+                      requested_model=requested.get('model'), resolved_model=provenance.get('resolved_model'),
+                      observed_model=provenance.get('observed_model'),
                       effort=provenance.get('effort_applied') or requested.get('effort'),
                       account=row.get('account') or provenance.get('account'),
                       repository=row.get('workspace_root') or row.get('cwd'),
@@ -852,13 +863,23 @@ def ingest_document(db, source, path):
                       provider_ms=round(provider_ms) if provider_ms is not None else None)
         put_usage(db, source, identity(str(path.resolve())), origin_path=path, **fields)
         if row.get('ended_at') and fields['status'] not in (None, 'running'):
-            # First terminal sighting only: an attempt's outcome is appended once.
             profile = row.get('profile') if isinstance(row.get('profile'), dict) else {}
-            put_event(db, 'lane.attempt', fields['timestamp'], str(path),
+            retry_of = row.get('retry_of')
+            escalated_from = (f"{fields['run_id']}/{fields['task_id']}/{int(retry_of.removeprefix('attempt-'))}"
+                              if row.get('escalation_reason') and isinstance(retry_of, str)
+                              and re.fullmatch(r'attempt-\d+', retry_of) else None)
+            if profile.get('digest') and isinstance(profile.get('knobs'), dict):
+                db.execute('INSERT INTO harness_stamps(digest,preset,knobs,first_seen) VALUES (?,?,?,?) '
+                           'ON CONFLICT(digest) DO UPDATE SET first_seen=MIN(harness_stamps.first_seen,excluded.first_seen)',
+                           (profile['digest'], profile.get('preset'), json.dumps(profile['knobs'], sort_keys=True), fields['timestamp']))
+            put_event(db, 'lane.attempt', fields['timestamp'], str(path), refresh=True,
                       # A receipt without a profile ran the default (balanced) harness profile.
                       attrs={**{key: fields[key] for key in ('adapter', 'effort', 'attempt', 'status', 'error_class',
                                                              'task_class', 'route', 'duration_ms')},
                              'profile': profile.get('preset'), 'profile_digest': profile.get('digest'),
+                             'risk_tier': profile.get('risk_tier'), 'floored': profile.get('floored'),
+                             'empty_patch': row.get('empty_patch'), 'retry_of': retry_of,
+                             'escalation_reason': row.get('escalation_reason'), 'escalated_from': escalated_from,
                              **({'parent': parent} if parent else {}),
                              **({'children': [{key: child.get(key) for key in ('run_id', 'task_id', 'attempt', 'status')}
                                               for child in row['children']]} if row.get('children') else {})},

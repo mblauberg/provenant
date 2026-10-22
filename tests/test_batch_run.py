@@ -911,6 +911,10 @@ def test_batch_rejects_secret_task_but_runs_valid_task_without_retaining_prompt_
 
 def test_retry_creates_new_attempt_without_replacing_attempt_one(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
+    policy_dir = tmp_path / '.agents'
+    policy_dir.mkdir()
+    (policy_dir / 'fabric-policy.json').write_text(
+        json.dumps({'memory_floor_percent': {'read_only': 0}}), encoding='utf-8')
     run_dir = make_run(tmp_path, 'retry')
     bin_dir = tmp_path / 'bin'
     bin_dir.mkdir()
@@ -933,11 +937,16 @@ def test_retry_creates_new_attempt_without_replacing_attempt_one(tmp_path, monke
         'adapter': 'codex', 'alias': 'senior', 'role': 'worker'}])
     assert module.batch(args(module, run_dir, first_manifest, 1)) == 0, attempt_diagnostics(run_dir)
     second_manifest = task_manifest(tmp_path, [{'id': 'retry', 'prompt_file': str(prompt),
-        'adapter': 'codex', 'alias': 'senior', 'role': 'worker', 'retry_of': 'attempt-001'}])
+        'adapter': 'codex', 'alias': 'senior', 'role': 'worker', 'retry_of': 'attempt-001', 'escalation_reason': 'gate_failed'}])
     assert module.batch(args(module, run_dir, second_manifest, 1)) == 0
     first = run_dir / 'dispatch/tasks/retry/attempt-001/attempt.json'
     second = run_dir / 'dispatch/tasks/retry/attempt-002/attempt.json'
     assert first.is_file() and second.is_file() and first.read_bytes() != second.read_bytes()
+    canonical = json.loads((run_dir / 'tasks/retry/attempt-002/attempt.json').read_text())
+    assert canonical['retry_of'] == 'attempt-001'
+    assert canonical['escalation_reason'] == 'gate_failed'
+    original = json.loads((run_dir / 'tasks/retry/attempt-001/attempt.json').read_text())
+    assert original['retry_of'] is None and original['escalation_reason'] is None
 
 
 def test_batch_continues_after_mixed_success_failure_empty_and_timeout(tmp_path, monkeypatch):
@@ -1421,3 +1430,16 @@ def test_batch_usage_error_is_one_line_and_exits_2():
     assert missing.stderr.startswith("error: the following arguments are required: ")
     assert "; fix: pass " in missing.stderr
     assert len(missing.stderr.splitlines()) == 1
+
+
+@pytest.mark.parametrize('lineage', [
+    {'escalation_reason': 'gate_failed'},
+    {'retry_of': 'attempt-001', 'escalation_reason': 'free text'},
+    {'retry_of': 'attempt-001', 'escalation_reason': ['capability']},
+])
+def test_batch_refuses_invalid_escalation_before_launch(tmp_path, monkeypatch, lineage):
+    monkeypatch.chdir(tmp_path)
+    module = load_module()
+    manifest = task_manifest(tmp_path, [{**task(tmp_path, 'escalate'), **lineage}])
+    with pytest.raises(module.BatchInputError, match='escalation_reason'):
+        module.load_manifest(manifest)

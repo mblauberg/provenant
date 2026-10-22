@@ -6465,3 +6465,48 @@ def test_record_owner_inherits_token_only_for_the_same_run(tmp_path, monkeypatch
     token = json.loads((run / 'dispatch-owner.json').read_text())['run_token']
     assert bool(token)
     assert (token == 'inherited-token') is same_run
+
+
+@pytest.mark.parametrize('change', ['none', 'file', 'commit', 'dirty', 'read_only'])
+def test_finished_writer_records_whether_worktree_is_unchanged(tmp_path, monkeypatch, change):
+    code = 'import json,sys\nfrom pathlib import Path\nsys.stdin.read()\n'
+    if change == 'file':
+        code += 'Path("new.txt").write_text("done")\n'
+    elif change == 'commit':
+        code += ('import subprocess\nsubprocess.run(["git", "-c", "user.name=Test", "-c", '
+                 '"user.email=test@example.invalid", "commit", "--allow-empty", "-qm", "work"], check=True)\n')
+    code += 'print(json.dumps({"type":"result","result":"DONE"}))\n'
+    run, _prompt, command = real_owner_fixture(tmp_path, monkeypatch, code)
+    worktree = make_worktree(tmp_path)
+    if change == 'dirty':
+        (worktree / 'preexisting.txt').write_text('already here')
+    isolate_fabric_plan_env(monkeypatch, tmp_path)
+    monkeypatch.chdir(tmp_path)
+    mod = load_dispatch_module()
+    extra = [] if change == 'read_only' else ['--access-mode', 'worktree_write', '--worktree', str(worktree)]
+    args = mod.parser().parse_args(command[2:] + extra)
+    assert mod.dispatch(args) == 0
+    row = json.loads(next(run.glob('tasks/*/attempt-*/attempt.json')).read_text())
+    assert row['status'] == 'ok'
+    if change == 'read_only':
+        assert 'empty_patch' not in row
+    else:
+        assert row['empty_patch'] is (change == 'none')
+
+
+def test_worktree_unchanged_is_unknown_when_git_cannot_say(tmp_path):
+    mod = load_dispatch_module()
+    assert mod.worktree_unchanged(None, str(tmp_path)) is None
+    assert mod.worktree_unchanged(('old-head', b''), str(tmp_path)) is None
+
+
+def test_dispatch_refuses_escalation_without_retry(tmp_path, monkeypatch, capsys):
+    run, _prompt, command = real_owner_fixture(
+        tmp_path, monkeypatch, 'raise SystemExit("provider must not launch")\n')
+    isolate_fabric_plan_env(monkeypatch, tmp_path)
+    monkeypatch.chdir(tmp_path)
+    mod = load_dispatch_module()
+    args = mod.parser().parse_args(command[2:] + ['--escalation-reason', 'capability'])
+    assert mod.dispatch(args) == 2
+    assert json.loads(capsys.readouterr().out)['error'] == 'escalation_reason_invalid'
+    assert not list(run.glob('tasks/*/attempt-*/attempt.json'))
