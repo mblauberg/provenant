@@ -1009,11 +1009,13 @@ def resolve_ordinary(args: argparse.Namespace, catalog: dict[str, Any]) -> int:
     if adapter_name == "opencode" and "#" in requested:
         # `provider/model#variant`: the variant is OpenCode's own effort knob, sent as given.
         requested, _, variant = requested.partition("#")
+        retired_variant = False
         if variant == "max":  # retired: same mapping as --effort max
             variant = "xhigh"
-            args.max_remapped = True
+            retired_variant = True
         if variant and not args.effort:
             args.effort = variant
+            args.max_remapped = retired_variant
             args.explicit_variant = True
             explicit = True
         elif variant and args.effort == variant:
