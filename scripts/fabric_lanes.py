@@ -734,6 +734,9 @@ class LaneFederation:
         if unmapped:
             raise self.h.HostError('invalid_project_path',
                 f'cwd {unmapped} is not inside a project registered in hosts.json; cannot place it on {host}')
+        if request.get('knobs'):
+            raise self.h.HostError('knob_remote_unsupported', '--knob applies only to lanes placed on this host; '
+                                   'set the knob in ' + host + "'s profile, or place the lane locally with --host " + self.config.local_host)
         clean = {key: value.rsplit('@', 1)[0] if key in {'id', 'resume', 'handoff', 'session'} and isinstance(value, str) and '@' in value else value
             for key, value in request.items() if key != 'host'}
         identifier = self.operation_id(clean)

@@ -56,6 +56,7 @@ BRANCH_TYPES = "feat|fix|refactor|perf|test|docs|chore|ci|build"
 BRANCH_PATTERN = re.compile(rf"^(?:(?:{BRANCH_TYPES}|proto)/[a-z][a-z0-9]*-[a-z0-9]+(?:-[a-z0-9]+){{1,4}}|land/[0-9]{{8}}-[a-z0-9]+(?:-[a-z0-9]+)*)$")
 
 from _shared.bounded_process import BudgetArgumentParser, stop_process_group
+from _shared import harness_profile
 from layout import run_workspace, run_root, contains_run
 import provider_exec
 import memory_admission
@@ -1413,6 +1414,9 @@ def routing_environment() -> dict[str, str]:
     """Keep discovery and worker routing on the same instance/product fallback."""
     env = os.environ.copy()
     instance = Path(env.get("AGENT_FABRIC_INSTANCE_ROOT") or Path.home() / ".agents").expanduser()
+    # Routing may fall back to the product catalogue; the user's profile file stays the one receipts stamp.
+    if not env.get(harness_profile.PROFILE_ROOT_ENV):  # empty counts as unset, as in user_path
+        env[harness_profile.PROFILE_ROOT_ENV] = str(instance)
     try:
         (instance / "config/model-routing.json").lstat()
     except FileNotFoundError:
@@ -1687,6 +1691,38 @@ def attempt_scope(args, number):
     return scopes[key]
 
 
+def export_knob_overrides(args: argparse.Namespace) -> None:
+    """Validate `--knob` overrides and export them, with the risk tier, so the routing subprocesses resolve the same profile."""
+    assignments = getattr(args, "knobs", None) or []
+    args._knob_overrides = {}
+    if assignments:  # an explicit override must be valid; a missing registry rejects it too
+        args._knob_overrides = harness_profile.parse_assignments(harness_profile.load_registry(), assignments)
+        for item in assignments:
+            name, _, raw = item.partition("=")
+            os.environ[harness_profile.env_name(name.strip())] = raw.strip()
+    if args.risk_tier:
+        try:
+            tiers = harness_profile.load_registry().tier_order
+        except harness_profile.ProfileError:
+            tiers = ()
+        if args.risk_tier in tiers:
+            os.environ[harness_profile.RISK_TIER_ENV] = args.risk_tier
+
+
+def profile_resolution(args: argparse.Namespace) -> dict[str, Any]:
+    """The attempt's harness-profile stamp, resolved once; a broken profile falls back to defaults and says why."""
+    if getattr(args, "_profile_stamp", None) is None:
+        resolution, error = harness_profile.lenient(
+            task_class=getattr(args, "task_class", None), risk_tier=getattr(args, "risk_tier", None),
+            dispatch=getattr(args, "_knob_overrides", None))
+        args._profile_stamp = resolution.stamp() if resolution else {"preset": None, "digest": None, "error": error}
+    return args._profile_stamp
+
+
+def profile_knob(args: argparse.Namespace, name: str, fallback: Any = None) -> Any:
+    return profile_resolution(args).get("knobs", {}).get(name, fallback)
+
+
 def contract_row(args,run_dir,number,attempt_dir,plan,started_at):
     route=plan.get("route",{})
     model=plan.get("model") or route.get("resolved_model") or args.model or ""
@@ -1710,7 +1746,7 @@ def contract_row(args,run_dir,number,attempt_dir,plan,started_at):
         if note not in plan.setdefault('warnings', []):
             plan['warnings'].append(note)
     return {"schema":"fabric.attempt.v1", **attempt_scope(args,number), **({'placement_fallback': placement} if placement else {}),"run_id":plan.get("run_id") or run_identity(run_dir),"task_id":args.task_id,"task_class":task_class,
-        **({"batch_id":args.batch_id} if getattr(args,"batch_id",None) else {}),
+        **({"batch_id":args.batch_id} if getattr(args,"batch_id",None) else {}),"profile":profile_resolution(args),
         "attempt":number,"state":"running","status":None,"usage_source":"missing","mode":args.access_mode,"cwd":plan.get("cwd") or str(Path.cwd().resolve()),
         "workspace_root":plan.get("workspace_root") or str(Path(getattr(args,"workspace_root",None) or Path.cwd()).resolve()),
         **({"read_roots":[str(root) for root in args.read_roots]} if getattr(args,"read_roots",None) else {}),
@@ -2314,8 +2350,9 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
                         else:
                             plan["warnings"].append("all alias candidates cooling")
                             plan["cooldown_blocked"]=cooling
-                if args.context_ceiling is not None:
-                    context_usage.apply_ceiling(plan,args.context_ceiling,provider_exec.profile(plan["adapter"]).argv)
+                ceiling = args.context_ceiling if args.context_ceiling is not None else profile_knob(args, "context.ceiling_tokens")
+                if ceiling is not None:
+                    context_usage.apply_ceiling(plan,ceiling,provider_exec.profile(plan["adapter"]).argv)
                 if getattr(args,"resume_advice",None) and plan.get("resume_session"):
                     previous_row,advice_task=args.resume_advice
                     args.resume_warning=context_usage.resume_warning(previous_row,plan["adapter"],
@@ -2938,6 +2975,11 @@ def cleanup_settled_reader(args) -> None:
 
 def dispatch(args: argparse.Namespace) -> int:
     """Run one attempt while serialising standalone run-ledger mutation."""
+    try:
+        export_knob_overrides(args)
+    except harness_profile.ProfileError as exc:
+        print(json.dumps({'status': 'rejected', 'error': 'invalid_knob', 'fix': str(exc)}))
+        return 1
     if os.environ.get('PROVENANT_HOST_LOCAL_ONLY') != '1':
         hosts = _fabric_hosts_owner()
         try:
@@ -2960,7 +3002,7 @@ def dispatch(args: argparse.Namespace) -> int:
                 'sandbox': args.sandbox, 'network': None if args.network is None else args.network == 'true',
                 'capabilities': args.capabilities, 'add_dirs': args.add_dirs,
                 'allow_secrets': args.allow_secrets, 'confidential': args.confidential,
-                'wait_seconds': 0,
+                'knobs': getattr(args, 'knobs', None) or None, 'wait_seconds': 0,
             }.items() if value is not None and value != []}
             if args.prompt_stdin:
                 request['prompt'] = sys.stdin.buffer.read().decode('utf-8')
@@ -2969,7 +3011,7 @@ def dispatch(args: argparse.Namespace) -> int:
             if args.resume:
                 request = {key: value for key, value in request.items() if key in {
                     'host', 'operation_id', 'resume', 'task_id', 'prompt', 'prompt_file',
-                    'context_ceiling', 'timeout_seconds', 'allow_secrets', 'wait_seconds'}}
+                    'context_ceiling', 'timeout_seconds', 'allow_secrets', 'wait_seconds', 'knobs'}}
                 if args.resume_attempt is not None:
                     request['resume_attempt'] = args.resume_attempt
                 if args.require_session:
@@ -3091,6 +3133,8 @@ def parser() -> argparse.ArgumentParser:
     root.add_argument("--resume-attempt", type=int, help="resume from this attempt instead of the latest")
     root.add_argument("--require-session", help="continue exactly this provider session; never relaunch a new one")
     root.add_argument("--context-ceiling", type=float, help="auto-compaction threshold in tokens, clamped to 100k-1M")
+    root.add_argument("--knob", dest="knobs", action="append", default=[], metavar="NAME=VALUE",
+                      help="harness-profile override for this dispatch; repeatable (provenant profile list)")
     root.add_argument("--sandbox", choices=("read-only","workspace-write","full"))
     root.add_argument("--network", choices=("true","false"))
     root.add_argument("--capabilities", type=provider_exec.parse_capabilities_argument)

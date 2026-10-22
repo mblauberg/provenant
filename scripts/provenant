@@ -81,7 +81,7 @@ def resolve_product_root(instance_root: Path | None = None) -> Path:
 
 
 def usage() -> None:
-    print("usage: provenant <help|root|route|routes|capabilities|worktree|clean|check|gate|telemetry|stats|quota|fabric|hosts|peer|lanes|events|dispatch|batch|run> [arguments...]", file=sys.stderr)
+    print("usage: provenant <help|root|route|routes|capabilities|worktree|clean|check|gate|telemetry|stats|quota|profile|fabric|hosts|peer|lanes|events|dispatch|batch|run> [arguments...]", file=sys.stderr)
 
 
 def help_text() -> None:
@@ -98,13 +98,13 @@ Thin front door delegating to owners:
   check ...      scripts/check-harness ...
   gate           scripts/gate
   fabric ...     runtime/fabric/bin/fabric ...
-  hosts ...      scripts/fabric-hosts ...
-  peer           scripts/fabric-hosts (SSH)
+  hosts|peer     scripts/fabric-hosts ...
   lanes ...      runtime/fabric/bin/fabric lanes
   events ...     runtime/fabric/bin/fabric events
   telemetry ...  scripts/provenant-telemetry
   stats ...      scripts/provenant-telemetry stats
   quota ...      scripts/provenant-quota
+  profile ...    scripts/provenant-profile
   dispatch ...   skills/orchestrate/scripts/dispatch_run.py ...
   batch ...      skills/orchestrate/scripts/batch_run.py ...
   run ...        skills/orchestrate/scripts/run_controls.py
@@ -210,6 +210,15 @@ COMMAND_DETAILS: dict[str, str] = {
         "       | credit list | credit <provider> [--account L] add|use\n\n"
         "Delegates to scripts/provenant-quota.\n"
         "Provider-reported quota windows and pace per account; PROVENANT_QUOTA=0 disables fetching."
+    ),
+    "profile": (
+        "usage: provenant profile list | show [--resolved] [--task-class X] [--risk-tier T]\n"
+        "       provenant profile use <preset> | set <knob>=<value> | reset <knob> [--project] [--task-class X]\n"
+        "       provenant profile diff <presetA> <presetB>\n\n"
+        "Delegates to scripts/provenant-profile.\n"
+        "Cost/quality knobs and presets (economy, balanced, rigorous) from\n"
+        "config/harness-knobs.json; balanced is today's behaviour. Writes the user file,\n"
+        "or with --project the checkout's .agents/harness-profile.json."
     ),
     "dispatch": (
         "usage: provenant dispatch ...\n\n"
@@ -450,6 +459,7 @@ def main(arguments: list[str]) -> int:
         "telemetry": "scripts/provenant-telemetry",
         "stats": "scripts/provenant-telemetry",
         "quota": "scripts/provenant-quota",
+        "profile": "scripts/provenant-profile",
         "peer": "scripts/fabric-hosts",
         "hosts": "scripts/fabric-hosts",
         "route": "scripts/model-route",

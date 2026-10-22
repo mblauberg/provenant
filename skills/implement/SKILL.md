@@ -57,7 +57,8 @@ reconciliation run.
    repeat verification and re-review only the repair delta. A gate that still
    fails takes the step 2 escalation, within the `deliver` receipt contract's
    scaled budget. Every gate still passes before merge. Return evidence to
-   user or `scope` on drift.
+   user or `scope` on drift. `review.rereview_scope` and the other `review.*`
+   knobs in `provenant profile show --resolved` adjust this step.
 6. Update owned docs for behavioural, architectural, operational or decision
    change. For substantial+ apply `session`: refresh recovery checkpoint,
    audit context, graduate durable findings and classify retained/ephemeral

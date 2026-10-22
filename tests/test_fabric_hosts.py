@@ -1156,6 +1156,19 @@ class LaneLoopbackContracts(unittest.TestCase):
         self.assertTrue(result['code_transport_prelaunch_failure'])
         self.assertEqual(list(outside.iterdir()), [])
 
+    def test_knob_overrides_are_refused_for_a_remote_lane_and_kept_for_a_local_one(self):
+        import fabric_hosts as hosts
+        request = {'mode': 'read_only', 'prompt': 'review', 'knobs': ['effort.shift=1']}
+        with patch.dict(os.environ, self.env):
+            owner = hosts.lane_owner()
+            with self.assertRaises(hosts.HostError) as error:
+                owner.client_call('dispatch', str(self.workspace), {**request, 'operation_id': 'knob-remote'})
+            self.assertEqual(error.exception.code, 'knob_remote_unsupported')
+            self.assertIn('--host laptop', str(error.exception))
+            local = owner.client_call('dispatch', str(self.workspace), {**request, 'host': 'laptop'})
+            self.assertTrue(local['local'])
+            self.assertEqual(local['input']['knobs'], ['effort.shift=1'])
+
     def test_reader_cwd_outside_checkout_returns_typed_failure_and_retires_preparation(self):
         import fabric_hosts as hosts
         self.writer_fixture()
