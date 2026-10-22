@@ -91,7 +91,7 @@ const USAGE = `fabric <command>
                               bounded output from the owning host
   dispatch --prompt-file F [--adapter A] [--alias NAME | --model M] [--effort E] [--account LABEL]
            [--mode MODE] [--worktree W | --cwd D] [--id ID] [--wait]
-           [--host H] [--operation-id ID] [--resume ID | --handoff ID]
+           [--host H] [--operation-id ID] [--delivery-run-id ID] [--resume ID | --handoff ID]
   dispatch --prompt-file F --route junior|senior|principal|design|writing
                               top model of a global pool; --adapter narrows it
   dispatch --prompt-file F --route R --rotate    cycle the pool per project
@@ -478,7 +478,7 @@ if (command === "dispatch") {
     const values = new Map<string, string>();
     const switches = new Set<string>();
     const allowed = new Set(["--adapter", "--alias", "--model", "--effort", "--account", "--mode", "--worktree", "--cwd", "--prompt-file", "--id", "--tasks",
-      "--route", "--council", "--models", "--session", "--host", "--operation-id", "--resume", "--handoff"]);
+      "--route", "--council", "--models", "--session", "--host", "--operation-id", "--resume", "--handoff", "--delivery-run-id"]);
     for (let index = 0; index < options.length; index += 1) {
       const option = options[index]!;
       if (["--wait", "--rotate", "--confidential", "--fresh"].includes(option)) {
@@ -497,6 +497,7 @@ if (command === "dispatch") {
     if (subcommand !== undefined && !subcommand.startsWith("--"))
       throw new Error(`unknown dispatch subcommand: ${subcommand}`);
     const route: RouteInput = {
+      ...(read("delivery-run-id") === undefined ? {} : { delivery_run_id: read("delivery-run-id") }),
       ...(read("host") === undefined ? {} : { host: read("host") }),
       ...(read("operation-id") === undefined ? {} : { operation_id: read("operation-id") }),
       ...(read("adapter") === undefined ? {} : { adapter: read("adapter") }),

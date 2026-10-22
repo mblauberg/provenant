@@ -36,6 +36,7 @@ def write_attempt(
     result: str | None = "result\n",
     question: dict[str, str] | None = None,
     observed_exit: bool = True,
+    delivery_run_id: str | None = None,
 ) -> Path:
     attempt_dir = run_dir / "dispatch/tasks" / task_id / attempt_id
     attempt_dir.mkdir(parents=True)
@@ -94,6 +95,8 @@ def write_attempt(
     }
     if question is not None:
         record["question"] = question
+    if delivery_run_id is not None:
+        record["delivery_run_id"] = delivery_run_id
     attempt_path = attempt_dir / "attempt.json"
     record["attempt_path"] = str(attempt_path.relative_to(run_dir))
     attempt_path.write_text(json.dumps(record, sort_keys=True) + "\n", encoding="utf-8")
@@ -1129,6 +1132,49 @@ def test_reduce_requires_explicit_successes_and_names_batch_omissions(tmp_path: 
     assert "Summarise the evidence." in reducer_text
     assert "--prompt-stdin" in delegated
     assert "--task-id" in delegated and delegated[delegated.index("--task-id") + 1] == "reducer"
+
+
+@pytest.mark.parametrize(("second_delivery", "expected_delivery"), [
+    ("delivery:1202", "delivery:1202"), ("delivery:other", None), (None, None),
+])
+def test_reduce_forwards_delivery_run_id_only_when_selected_attempts_agree(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, second_delivery: str | None, expected_delivery: str | None,
+) -> None:
+    run_dir = make_run(tmp_path)
+    first = write_attempt(run_dir, task_id="one", delivery_run_id="delivery:1202")
+    second = write_attempt(run_dir, task_id="two", delivery_run_id=second_delivery)
+    summary = run_dir / "dispatch/batches/batch-001/summary.json"
+    summary.parent.mkdir(parents=True)
+    summary.write_text(json.dumps({
+        "schema_version": 1, "record_type": "dispatch-batch", "batch_id": "batch-001",
+        "tasks": [{"task_id": task, "status": "ok", "attempt_path": str(attempt.relative_to(run_dir)),
+                   "result_path": str(attempt.parent / "result.md").replace(str(run_dir) + "/", "")}
+                  for task, attempt in (("one", first), ("two", second))],
+    }) + "\n", encoding="utf-8")
+    prompt = tmp_path / "reduce.md"
+    prompt.write_text("reduce", encoding="utf-8")
+    fake = tmp_path / "dispatch-run"
+    captured = tmp_path / "captured.json"
+    fake.write_text(f"#!/usr/bin/env python3\nimport json,sys\njson.dump(sys.argv[1:],open({str(captured)!r},'w'))\n", encoding="utf-8")
+    fake.chmod(fake.stat().st_mode | stat.S_IXUSR)
+    spec = importlib.util.spec_from_file_location("run_controls_reduce_delivery", SCRIPT)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    monkeypatch.setattr(module, "DISPATCH_RUN", fake)
+    monkeypatch.chdir(tmp_path)
+    args = module.parser().parse_args([
+        "reduce", "--run-dir", str(run_dir), "--task-id", "reducer", "--prompt-file", str(prompt),
+        "--batch-id", "batch-001", "--input", "one/attempt-001", "--input", "two/attempt-001",
+        "--adapter", "codex", "--alias", "junior",
+    ])
+
+    assert module.run(args) == 0
+    delegated = json.loads(captured.read_text(encoding="utf-8"))
+    if expected_delivery is None:
+        assert "--delivery-run-id" not in delegated
+    else:
+        assert delegated[delegated.index("--delivery-run-id") + 1] == expected_delivery
 
 
 def test_reduce_does_not_conflate_repeated_task_across_batch_summaries(tmp_path: Path) -> None:

@@ -953,12 +953,12 @@ function normaliseTask(
   };
 }
 
-function batchDefaults(input: BatchInput): Record<string, any> {
+export function batchDefaults(input: BatchInput): Record<string, any> {
   return withoutEmptySelectors(Object.fromEntries(Object.entries(input).filter(([key]) =>
-    ["adapter", "alias", "model", "effort", "account", "mode", "worktree", "cwd", "network", "sandbox", "capabilities", "add_dirs", "fallback", "timeout_seconds", "context_ceiling", "allow_secrets", "confidential", ...POOL_FIELDS].includes(key))));
+    ["adapter", "alias", "model", "effort", "account", "mode", "worktree", "cwd", "network", "sandbox", "capabilities", "add_dirs", "fallback", "timeout_seconds", "context_ceiling", "allow_secrets", "confidential", "delivery_run_id", ...POOL_FIELDS].includes(key))));
 }
 
-function mergeBatchTask(defaults: Record<string, any>, input: BatchTaskInput, index: number): BatchTaskInput {
+export function mergeBatchTask(defaults: Record<string, any>, input: BatchTaskInput, index: number): BatchTaskInput {
   const task = withoutEmptySelectors(input);
   // A task's selector replaces a default pool; its pool replaces a default selector.
   const own = usesPool(task) ? Object.fromEntries(Object.entries(defaults).filter(([key]) => !["alias", "model"].includes(key)))

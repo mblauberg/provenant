@@ -290,6 +290,11 @@ export function inheritedConfidential(input: RouteInput, requested: { confidenti
   return input.confidential === undefined && requested.confidential === true ? { confidential: true } : {};
 }
 
+export function inheritedDeliveryRunId(input: RouteInput, previous: Record<string, any>): { delivery_run_id?: string } {
+  return input.delivery_run_id === undefined && typeof previous.delivery_run_id === "string"
+    ? { delivery_run_id: previous.delivery_run_id } : {};
+}
+
 export async function handoffDispatch(
   input: DispatchInput,
   identity: Identity,
@@ -339,6 +344,7 @@ export async function handoffDispatch(
       ...(previous.mode === "read_only" && pin.readOnlyCwd !== undefined && rest.cwd === undefined
         ? { cwd: pin.readOnlyCwd } : {}),
       ...inheritedConfidential(rest, requested),
+      ...inheritedDeliveryRunId(rest, previous),
       prompt: brief + prompt,
       prompt_file: undefined,
     }, identity, signal, env, { ...pin, continuation: inherit });

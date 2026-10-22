@@ -688,7 +688,8 @@ def _dispatch_command(run_dir: Path, task_id: str, prompt: Path | None, route: d
     command.extend((f"--{selector.replace('_', '-')}", value))
     for key, flag in (("orchestrator_family", "--orchestrator-family"), ("risk_tier", "--risk-tier"),
                       ("model_override_tier", "--model-override-tier"),
-                      ("reviewer_id", "--reviewer-id"), ("effort", "--effort")):
+                      ("reviewer_id", "--reviewer-id"), ("effort", "--effort"),
+                      ("delivery_run_id", "--delivery-run-id")):
         if route.get(key):
             command.extend((flag, str(route[key])))
     if retry_of:
@@ -1050,6 +1051,9 @@ def _reduce(args: argparse.Namespace) -> int:
                   "", "## Operator prompt", "", prompt_bytes.decode("utf-8", errors="replace")])
     route = {"adapter": args.adapter, "role": args.role, "intent": "ordinary",
              "orchestrator_family": args.orchestrator_family or ""}
+    delivery_ids = [record.get("delivery_run_id") for record, _, _ in selected]
+    if delivery_ids and isinstance(delivery_ids[0], str) and all(value == delivery_ids[0] for value in delivery_ids):
+        route["delivery_run_id"] = delivery_ids[0]
     for key in ("alias", "task_class", "model"):
         value = getattr(args, key)
         if value:

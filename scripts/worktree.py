@@ -722,7 +722,10 @@ def create(args: argparse.Namespace) -> dict[str, object]:
     elif args.existing_branch is not None:
         command.extend([str(target), args.existing_branch])
     else:
-        command.extend(["-b", args.new_branch, str(target), args.start_point])
+        # Lane branches track no upstream: the start point is often a
+        # remote-tracking ref, and a bare push under push.default=upstream
+        # would land on the remote's branch instead of the new branch.
+        command.extend(["--no-track", "-b", args.new_branch, str(target), args.start_point])
     branch_ref = 'refs/heads/' + args.new_branch if args.new_branch and not args.existing_branch and args.detach is None else None
     absent = branch_ref and git(root, 'show-ref', '--verify', '--quiet', branch_ref, check=False).returncode == 1
     base = git(root, 'rev-parse', '--verify', args.start_point + '^{commit}').stdout.strip() if absent else None
