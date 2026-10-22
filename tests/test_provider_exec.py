@@ -2783,9 +2783,11 @@ def test_browser_tmp_cleanup_trouble_warns_without_discarding_the_result(monkeyp
     plan = mod.build_plan("claude", {"resolved_model": "fixture"}, "hello", workspace_root=tmp_path,
                           mode="worktree_write", worktree=lane, capabilities=["browser"], run_dir=attempt)
     plan["applied"]["confinement"] = "none"
-    # The lane swaps its directory for another one; cleanup must leave it and only warn.
+    # The lane swaps its directory for another one; cleanup must leave it and only warn. The new
+    # directory is made while the old one exists, as tmpfs may otherwise reuse its inode.
     plan["argv"] = [sys.executable, "-u", "-c", "import json, os; from pathlib import Path; "
-                    "root=Path(os.environ['MAC_CHROMIUM_TMPDIR']); root.rmdir(); root.mkdir(); "
+                    "root=Path(os.environ['MAC_CHROMIUM_TMPDIR']); aside=root.rename(str(root) + '-old'); "
+                    "root.mkdir(); aside.rmdir(); "
                     "print(json.dumps({'type':'result','result':'done'}))"]
     record = mod.execute(plan, attempt / "result.md", env=dict(os.environ))
     temporary = Path(record["applied"]["browser_tmpdir"])
