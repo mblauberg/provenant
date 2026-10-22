@@ -238,6 +238,18 @@ def _opencode_discovery_grantable(path, *, directory=False):
     return target.is_file() and target.name in OPENCODE_INSTRUCTION_FILES
 
 
+@functools.lru_cache(maxsize=1)
+def _fabric_hosts_owner():
+    name = "provenant_provider_hosts"
+    if name not in sys.modules:
+        spec = importlib.util.spec_from_file_location(
+            name, Path(__file__).resolve().parents[3] / "scripts/fabric_hosts.py")
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[name] = module
+        spec.loader.exec_module(module)
+    return sys.modules[name]
+
+
 def _jsonc_loads(text):
     # The one JSONC reader lives in the product's scripts/lib; a skill reaches it by path.
     spec = importlib.util.spec_from_file_location(
@@ -556,6 +568,8 @@ def os_confinement_profile(plan, search_path=None):
     state = _provider_state(plan)
     add_dirs = [Path(path) for path in plan.get("applied", {}).get("add_dirs", [])]
     run_dir = Path(plan["run_dir"]) if plan.get("run_dir") else None
+    browser_tmp = plan.get("applied", {}).get("browser_tmpdir")
+    attempt_paths = [*([run_dir] if run_dir else []), *([Path(browser_tmp)] if browser_tmp else [])]
     state_writes = _state_paths(home, state.get("read_write", ()))
     cwd_path = Path(plan["cwd"]).resolve()
     discovery_metadata = [ancestor / name for ancestor in (cwd_path, *cwd_path.parents)
@@ -576,7 +590,7 @@ def os_confinement_profile(plan, search_path=None):
             git_denied = [location.common]
             git_allowed, literal_files = writer_git_writes(location.private, location.common, plan.get("lane_ref"))
             read_only = writer_read_only(cwd, location.private, location.common)
-        allowed = [cwd, *add_dirs, *([run_dir] if run_dir else []), Path("/dev")]
+        allowed = [cwd, *add_dirs, *attempt_paths, Path("/dev")]
         shared_paths = plan["applied"].get("shared_write_paths", {})
         locks_dir = plan.get("applied", {}).get("locks_dir")
         if locks_dir and _real_dir_chain(Path(locks_dir)):
@@ -617,7 +631,7 @@ def os_confinement_profile(plan, search_path=None):
                                             selector="global-name-prefix")
             profile += "(deny network-outbound (remote unix-socket))\n"
             profile += _sbpl_unix_socket_allow(
-                [cwd, *add_dirs, *([run_dir] if run_dir else []), codex_home]
+                [cwd, *add_dirs, *attempt_paths, codex_home]
             )
         profile += _state_write_guards(home, state)
         profile += _provider_config_write_denies(home)
@@ -648,13 +662,13 @@ def os_confinement_profile(plan, search_path=None):
     launcher_links, install_directories = _adapter_binary_reads(plan, search_path)
     return (
         "(version 1)\n(allow default)\n(deny file-write*)\n"
-        + _sbpl_rule("allow", "file-write*", [*([run_dir] if run_dir else []), Path("/dev")])
+        + _sbpl_rule("allow", "file-write*", [*attempt_paths, Path("/dev")])
         + "".join(rule for rule, _ in _state_write_grants(home, state, ("read_write",)))
         + _state_write_guards(home, state)
         + _sbpl_rule("deny", "file-read-data", [home, Path("/private/tmp")])
         + _sbpl_rule("deny", "file-read-data", [root, *add_dirs])
         + _sbpl_rule("allow", "file-read-data", [*discovery_dirs, *discovery_files], literal=True)
-        + _sbpl_rule("allow", "file-read-data", [*([run_dir] if run_dir else [])])
+        + _sbpl_rule("allow", "file-read-data", attempt_paths)
         + _sbpl_rule("allow", "file-read-data", state_writes, canonical=True)
         + _sbpl_rule("allow", "file-read-data", _state_read_paths(home, reads))
         + _sbpl_rule("allow", "file-read-data", [home / path for path in state.get("read_literal", ())],
@@ -1435,13 +1449,14 @@ def build_plan(
         if locks_dir is None:
             warnings.append("project locks directory is not grantable: a link or non-directory is in the way")
     attempt_dir = Path(run_dir or cwd).expanduser().resolve()
+    browser_tmp = str(_fabric_hosts_owner().browser_temporary_directory(attempt_dir)) if "browser" in capabilities else None
     codex_home = attempt_dir.parent / "codex-home" if capabilities and adapter == "codex" else None
     codex_auth_path = None
     if codex_home is not None:
         source_codex_home = Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex").expanduser().resolve()
         codex_auth_path = source_codex_home / "auth.json"
     if confinement == "sandbox-exec":
-        writable_paths = [str(attempt_dir), "/dev"]
+        writable_paths = [str(attempt_dir), *([browser_tmp] if browser_tmp else []), "/dev"]
         if mode == "worktree_write":
             writable_paths = [cwd, *directories, *shared_write_paths, *([locks_dir] if locks_dir else []), *writable_paths, *git_writes]
         if codex_home is not None:
@@ -1539,6 +1554,7 @@ def build_plan(
             "confinement": confinement,
             "write_boundary": write_boundary,
             "capabilities": capabilities,
+            **({"browser_tmpdir": browser_tmp} if browser_tmp else {}),
             "protected_paths": [str(path) for path in guarded],
         },
         **({"codex_home": str(codex_home), "codex_auth_path": str(codex_auth_path)}
@@ -2791,7 +2807,7 @@ def _prepare_codex_capability_home(plan, environment):
             boundary.append(str(lane_home))
     environment["CODEX_HOME"] = str(lane_home)
     if "browser" in capabilities:
-        environment["MAC_CHROMIUM_TMPDIR"] = str(Path(plan["run_dir"]) / "tmp")
+        environment["MAC_CHROMIUM_TMPDIR"] = plan["applied"]["browser_tmpdir"]
     else:
         environment.pop("MAC_CHROMIUM_TMPDIR", None)
 
@@ -3671,15 +3687,20 @@ def _run_attempt(
     input_file = None
     workspace = None
     agy_home, agy_home_warnings = None, []
+    browser_tmp, browser_tmp_identity = None, None
     selector = selectors.DefaultSelector()
     try:
+        if "browser" in plan["applied"].get("capabilities", []):
+            browser_tmp = _fabric_hosts_owner().browser_temporary_directory(plan["run_dir"], create=True)
+            browser_tmp_identity = browser_tmp.lstat()
+            plan["applied"]["browser_tmpdir"] = str(browser_tmp)
         _prepare_codex_capability_home(plan, environment)
         _prepare_codex_state_dir(plan)
         agy_home = stage_agy_home(plan, tmp_fd, private_tmp)
         if agy_home:
             environment["HOME"] = str(agy_home.path)
         if plan["adapter"] != "codex" and "browser" in plan["applied"].get("capabilities", []):
-            environment["MAC_CHROMIUM_TMPDIR"] = str(private_tmp)  # Chrome's default temp is outside the boundary.
+            environment["MAC_CHROMIUM_TMPDIR"] = str(browser_tmp)
         if plan["stdin_policy"] == "prompt":
             input_file = _unlinked_file(tmp_fd)
             input_file.write(plan["prompt"].encode())
@@ -3867,10 +3888,21 @@ def _run_attempt(
             for sig, handler in old_handlers.items():
                 signal.signal(sig, handler)
         finally:
-            if subreaper:
-                _release_subreaper()
-            if agy_home:
-                agy_home_warnings = finish_agy_home(plan, tmp_fd, agy_home)
+            try:
+                if subreaper:
+                    _release_subreaper()
+                if agy_home:
+                    agy_home_warnings = finish_agy_home(plan, tmp_fd, agy_home)
+            finally:
+                if browser_tmp is not None and browser_tmp_identity is not None:
+                    try:
+                        current = browser_tmp.lstat()
+                    except FileNotFoundError:
+                        pass  # The lane already removed its temp directory.
+                    else:
+                        if (current.st_dev, current.st_ino) != (browser_tmp_identity.st_dev, browser_tmp_identity.st_ino):
+                            raise PermissionError(f"Browser temporary directory was replaced: {browser_tmp}")
+                        shutil.rmtree(browser_tmp)
     exit_code = process.returncode if process else None
     if cancel_signal and not forced:
         forced = "interrupted"  # EOF can precede the loop's signal check.
