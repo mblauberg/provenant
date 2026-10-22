@@ -204,9 +204,13 @@ def connect():
                        ('task_class', 'TEXT'), ('route', 'TEXT'), ('duration_ms', 'INTEGER'),
                        ('provider_ms', 'INTEGER'), ('parent_run_id', 'TEXT'),
                        ('parent_task_id', 'TEXT'), ('parent_attempt', 'INTEGER'),
-                       ('requested_model', 'TEXT'), ('resolved_model', 'TEXT'), ('observed_model', 'TEXT')):
+                       ('requested_model', 'TEXT'), ('resolved_model', 'TEXT'), ('observed_model', 'TEXT'),
+                       ('delivery_run_id', 'TEXT')):
         if name not in usage_columns:
             db.execute(f'ALTER TABLE usage ADD COLUMN {name} {kind}')
+    if db.execute("SELECT 1 FROM meta WHERE key='delivery_link_backfill'").fetchone() is None:
+        db.execute("DELETE FROM cursors WHERE source='fabric'")
+        db.execute("INSERT OR IGNORE INTO meta VALUES ('delivery_link_backfill', ?)", (now(),))
     if version in (1, 2):
         for source in SOURCES:
             paths = [row[0] for row in db.execute('SELECT path FROM cursors WHERE source=?', (source,))]
@@ -905,6 +909,7 @@ def ingest_document(db, source, path):
             if output is not None and adapter in {'codex', 'claude', 'cursor'}:
                 output = max(0, output - (reasoning or 0))
         fields = dict(session=row.get('session_id'), run_id=row.get('run_id'),
+                      delivery_run_id=row.get('delivery_run_id'),
                       parent_run_id=parent.get('run_id'), parent_task_id=parent.get('task_id'),
                       parent_attempt=parent.get('attempt'),
                       task_id=row.get('task_id'), attempt=row.get('attempt'), lane='/'.join(str(row.get(k, '')) for k in ('run_id','task_id','attempt')),

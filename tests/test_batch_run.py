@@ -520,6 +520,10 @@ def test_real_dispatch_children_defer_manifest_race_and_preserve_route_identity(
     module = load_module()
     module.DISPATCH_RUN = BATCH.parent / 'dispatch_run.py'
     manifest = task_manifest(tmp_path, [task(tmp_path, f'task-{i}', sleep='0') for i in range(8)])
+    document = json.loads(manifest.read_text())
+    document['delivery_run_id'] = 'delivery:batch'
+    document['tasks'][0]['delivery_run_id'] = 'delivery:override'
+    manifest.write_text(json.dumps(document))
 
     assert module.batch(args(module, run_dir, manifest, 4)) == 0, attempt_diagnostics(run_dir)
     summary = json.loads((run_dir / 'dispatch/batches/batch-001/summary.json').read_text())
@@ -528,6 +532,7 @@ def test_real_dispatch_children_defer_manifest_race_and_preserve_route_identity(
     for entry in summary['tasks']:
         row = json.loads((run_dir / f"tasks/{entry['task_id']}/attempt-001/attempt.json").read_text())
         assert row['batch_id'] == summary['batch_id']
+        assert row['delivery_run_id'] == ('delivery:override' if entry['task_id'] == 'task-0' else 'delivery:batch')
     lines = (run_dir / 'MANIFEST.md').read_text(encoding='utf-8').splitlines()
     assert sum('dispatch-' + f'task-{i}' in line for i in range(8) for line in lines) >= 8
     finalized = subprocess.run([str(FINALIZE), str(run_dir), '--status', 'failed',
@@ -1034,6 +1039,19 @@ def test_batch_rejects_duplicate_or_malformed_task_schema(tmp_path, bad_tasks):
     module = load_module()
     manifest = task_manifest(tmp_path, bad_tasks)
     with pytest.raises(module.BatchInputError):
+        module.load_manifest(manifest)
+
+
+@pytest.mark.parametrize('scope', ['batch', 'task'])
+@pytest.mark.parametrize('value', ['../delivery', 'x' * 129, None])
+def test_batch_rejects_invalid_delivery_id_before_launch(tmp_path, scope, value):
+    module = load_module()
+    manifest = task_manifest(tmp_path, [task(tmp_path, 'writer')])
+    document = json.loads(manifest.read_text())
+    target = document if scope == 'batch' else document['tasks'][0]
+    target['delivery_run_id'] = value
+    manifest.write_text(json.dumps(document))
+    with pytest.raises(module.BatchInputError, match='delivery_run_id'):
         module.load_manifest(manifest)
 
 

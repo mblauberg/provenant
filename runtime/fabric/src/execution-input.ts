@@ -69,6 +69,8 @@ export const ACCESS_MODES = ["read_only", "worktree_write"] as const;
 export type AccessMode = (typeof ACCESS_MODES)[number];
 export const DISPATCH_CAPABILITIES = ["postgres", "browser"] as const;
 export type DispatchCapability = (typeof DISPATCH_CAPABILITIES)[number];
+// RUN.json's identifier rule, with an absolute end (JS `$` also permits a final newline).
+export const DELIVERY_RUN_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}(?![\s\S])/u;
 
 /**
  * The whole routing surface: who runs it, which route, and how much access it
@@ -76,6 +78,7 @@ export type DispatchCapability = (typeof DISPATCH_CAPABILITIES)[number];
  * always dispatches ordinary work and cannot honour them.
  */
 export interface RouteInput {
+  delivery_run_id?: string;
   intent?: "ordinary" | "assurance";
   orchestrator_family?: string;
   role?: string;
@@ -143,6 +146,7 @@ export interface BatchInput extends RouteInput {
 }
 
 export interface NormalisedRoute {
+  delivery_run_id?: string;
   task_class?: string;
   adapter: string;
   alias?: string;
@@ -293,6 +297,9 @@ export function namesExplicitRoute(input: RouteInput): boolean {
  * pool or task-class picks reach the seat's own adapter without it and only warn.
  */
 export function normaliseRoute(input: RouteInput, identity: Identity, catalogue: CatalogueSnapshot, ownSeatGuard = false): NormalisedRoute {
+  if (input.delivery_run_id !== undefined &&
+      (typeof input.delivery_run_id !== "string" || !DELIVERY_RUN_ID.test(input.delivery_run_id)))
+    throw new InputError("invalid_delivery_run_id", "delivery_run_id must match the RUN.json run_id identifier rule (1-128 characters).");
   input = { ...input, model: input.model || undefined, alias: input.alias || undefined };
   const warnings: string[] = [];
   // `adapter/model@effort` is the models-list spelling; accept it in model too.
@@ -399,7 +406,7 @@ export function normaliseRoute(input: RouteInput, identity: Identity, catalogue:
     ...(warnings.length ? { warnings } : {}),
     ...(input.capabilities?.length ? { capabilities: [...input.capabilities].sort() } : {}),
     ...Object.fromEntries(
-      ["cwd", "network", "sandbox", "add_dirs", "fallback", "context_ceiling", "allow_secrets", "confidential", "pick_reason", "task_class", "orchestrator_family", "risk_tier", "model_override_tier", "reviewer_id", "preface"]
+      ["cwd", "network", "sandbox", "add_dirs", "fallback", "context_ceiling", "allow_secrets", "confidential", "pick_reason", "task_class", "orchestrator_family", "risk_tier", "model_override_tier", "reviewer_id", "preface", "delivery_run_id"]
         .filter((key) => input[key as keyof RouteInput] !== undefined)
         .map((key) => [key, input[key as keyof RouteInput]]),
     ),

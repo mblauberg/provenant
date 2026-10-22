@@ -56,6 +56,7 @@ from dispatch_run import (
     remove_cancellation_marker,
     prompt_temp_roots,
     run_identity,
+    delivery_run_id,
 )
 import run_lineage
 from attempt_evidence import AttemptEvidenceError as SharedAttemptEvidenceError, canonical_success_status, validate_successful_attempt
@@ -231,9 +232,21 @@ def _load_manifest(
     seen: set[str] = set()
     claimed_worktrees: set[Path] = set()
     loaded: list[dict[str, Any]] = []
+    if 'delivery_run_id' in value:
+        try:
+            delivery_run_id(value['delivery_run_id'])
+        except ValueError as exc:
+            raise BatchInputError(str(exc)) from exc
     for index, task in enumerate(tasks):
         if not isinstance(task, dict):
             raise BatchInputError(f"task {index} must be an object")
+        if 'delivery_run_id' not in task and 'delivery_run_id' in value:
+            task = {**task, 'delivery_run_id': value['delivery_run_id']}
+        if 'delivery_run_id' in task:
+            try:
+                delivery_run_id(task['delivery_run_id'])
+            except ValueError as exc:
+                raise BatchInputError(f"task {index}: {exc}") from exc
         task_id = task.get("id")
         if not isinstance(task_id, str) or not TASK_ID_RE.fullmatch(task_id):
             raise BatchInputError(f"task {index} has an invalid id")
@@ -415,6 +428,7 @@ def _command(task: dict[str, Any], run_dir: Path) -> list[str]:
                        ("account", "--account"), ("effort", "--effort"), ("retry_of", "--retry-of"),
                        ("escalation_reason", "--escalation-reason"),
                        ("pick_reason", "--pick-reason"),
+                       ("delivery_run_id", "--delivery-run-id"),
                        ("access_mode", "--access-mode"), ("worktree", "--worktree")):
         if task.get(name):
             command.extend((flag, str(task[name])))

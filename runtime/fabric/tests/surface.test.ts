@@ -6,10 +6,66 @@ import { resolve, join } from "node:path";
 import { createRequire } from "node:module";
 import { execFileSync, spawnSync } from "node:child_process";
 import { afterEach, expect, it } from "vitest";
+import { z } from "zod";
+import { toolSchemas } from "../src/tool-schemas.js";
+import { catalogueSnapshot } from "../src/catalogue.js";
+import { normaliseRoute, routeArguments } from "../src/execution-input.js";
+import { batchDefaults, mergeBatchTask } from "../src/execution.js";
+import { inheritedDeliveryRunId } from "../src/resume.js";
 import { scratchRoot } from "./helpers/temp-root.js";
 
 const fixturePidLogs = new Set<string>();
 const fixtureRoots = new Set<string>();
+it("accepts delivery_run_id in dispatch and batch schemas and the CLI flag", () => {
+  const root = scratchRoot("fabric-delivery-link-");
+  fixtureRoots.add(root);
+  const schema = z.object(toolSchemas.fabric_dispatch);
+  expect(schema.parse({ delivery_run_id: "delivery:1202", tasks: [
+    { id: "reviewer", prompt: "review", delivery_run_id: "delivery:review" },
+  ] })).toMatchObject({ delivery_run_id: "delivery:1202", tasks: [{ delivery_run_id: "delivery:review" }] });
+  for (const id of ["../delivery", "_delivery", "x".repeat(129), "delivery\n", ""])
+    expect(schema.safeParse({ delivery_run_id: id }).success).toBe(false);
+  const product = resolve(import.meta.dirname, "../../..");
+  const route = normaliseRoute({ adapter: "codex", model: "gpt-6-luna", delivery_run_id: "delivery:1202" },
+    { project: root, cwd: root, agentId: "delivery-test", provider: "agent" },
+    catalogueSnapshot(product, { AGENT_FABRIC_INSTANCE_ROOT: root }));
+  const args = routeArguments(route);
+  expect(args[args.indexOf("--delivery-run-id") + 1]).toBe("delivery:1202");
+  const prompt = join(root, "prompt.md");
+  writeFileSync(prompt, "review");
+  const loader = createRequire(import.meta.url).resolve("tsx");
+  const cli = spawnSync(process.execPath, ["--import", loader, resolve(import.meta.dirname, "../src/cli.ts"),
+    "dispatch", "--adapter", "codex", "--model", "gpt-6-luna", "--prompt-file", prompt,
+    "--delivery-run-id", "../invalid"], { cwd: root, encoding: "utf8", env: {
+      ...process.env, AGENT_FABRIC_PRODUCT_ROOT: product, AGENT_FABRIC_INSTANCE_ROOT: root,
+    } });
+  expect(cli.status).toBe(1);
+  expect(cli.stdout).toContain("invalid_delivery_run_id");
+});
+
+it("inherits a handoff delivery id only when the caller omits it", () => {
+  expect(inheritedDeliveryRunId({}, { delivery_run_id: "delivery:1202" }))
+    .toEqual({ delivery_run_id: "delivery:1202" });
+  expect(inheritedDeliveryRunId({ delivery_run_id: "delivery:other" }, { delivery_run_id: "delivery:1202" }))
+    .toEqual({});
+});
+
+it("describes delivery_run_id as the served delivery receipt id", () => {
+  expect(toolSchemas.fabric_dispatch.delivery_run_id.meta()?.description)
+    .toBe("RUN.json run_id of the delivery this lane serves; retries inherit it");
+});
+
+it("merges a batch delivery id into each task, preserving task overrides", () => {
+  const defaults = batchDefaults({ delivery_run_id: "delivery:1202", tasks: [] } as any);
+  expect([
+    mergeBatchTask(defaults, { id: "one", prompt: "first" }, 0),
+    mergeBatchTask(defaults, { id: "two", prompt: "second", delivery_run_id: "delivery:other" }, 1),
+  ]).toEqual([
+    expect.objectContaining({ id: "one", delivery_run_id: "delivery:1202" }),
+    expect.objectContaining({ id: "two", delivery_run_id: "delivery:other" }),
+  ]);
+});
+
 afterEach(async () => {
   const active = new Set<number>();
   for (const log of fixturePidLogs) {
@@ -548,6 +604,7 @@ it("runs the linked-worktree MCP flow with fixture owners only", async () => {
       .toMatchObject({ chair: "chair-seat" });
     const batch = await call("dispatch", {
       adapter: "codex",
+      delivery_run_id: "delivery:batch",
       capabilities: ["browser"],
       tasks: [
         { id: "one", prompt: "first" },
@@ -557,8 +614,10 @@ it("runs the linked-worktree MCP flow with fixture owners only", async () => {
     });
     expect((batch.structuredContent as any).runs).toHaveLength(2);
     expect((batch.structuredContent as any).runs[0].applied.capabilities).toEqual(["browser"]);
-    expect(JSON.parse(readFileSync(join((batch.structuredContent as any).runs[0].run_dir, "_owner", "one-args-1.json"), "utf8")))
-      .toEqual(expect.arrayContaining(["--capabilities", '["browser"]']));
+    for (const run of (batch.structuredContent as any).runs) {
+      expect(JSON.parse(readFileSync(join(run.run_dir, "_owner", `${run.task_id}-args-1.json`), "utf8")))
+        .toEqual(expect.arrayContaining(["--capabilities", '["browser"]', "--delivery-run-id", "delivery:batch"]));
+    }
     expect((batch.content as any[])[0].text).toMatch(/^batch mcp-.* 2 tasks: 2 ok/u);
     const partialBatch = await call("dispatch", { adapter: "codex", tasks: [
       { id: "valid", prompt: "still runs" },
