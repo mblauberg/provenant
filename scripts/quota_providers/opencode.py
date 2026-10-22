@@ -31,7 +31,13 @@ STORES = (
     ('message', "json_extract(data,'$.providerID')", ''),
     ('session_message', "json_extract(data,'$.model.providerID')", " AND type='assistant'"),
 )
-SEEN_IN_V2 = ' AND id NOT IN (SELECT id FROM session_message)'
+# A per-row primary-key probe; `NOT IN (SELECT id ...)` would read every v2 id first.
+SEEN_IN_V2 = ' AND NOT EXISTS (SELECT 1 FROM session_message AS v2 WHERE v2.id=message.id)'
+# v1 `message` has no time index, only (session_id, time_created, id). Each of its session ids,
+# read from that index alone, gives a time-range search, so no message body outside the window
+# is read. The message times stay the filter: a session's own time_updated can be older than its
+# messages.
+SESSION_RANGES = ' AND session_id IN (SELECT DISTINCT session_id FROM message)'
 
 
 
@@ -46,17 +52,18 @@ def add_months(anchor, count):
     return anchor.replace(year=year, month=month + 1, day=min(anchor.day, monthrange(year, month + 1)[1]))
 
 
-def cycles(now, anchor):
+def cycles(now, anchor, weekly=None):
     """(name, start, end, minutes) per window; end is None while a window rolls.
 
     With a subscription anchor the weekly and monthly windows are fixed cycles from it; the
-    5 hour window always rolls.
+    weekly cycle may have its own anchor. The 5 hour window always rolls.
     """
     rolling = [(name, now - timedelta(minutes=minutes), None, minutes) for name, minutes, _ in WINDOWS]
     if anchor is None:
         return rolling
-    weeks = (now - anchor) // timedelta(days=7)
-    week = anchor + timedelta(days=7 * weeks)
+    weekly = weekly or anchor
+    weeks = (now - weekly) // timedelta(days=7)
+    week = weekly + timedelta(days=7 * weeks)
     count = (now.year - anchor.year) * 12 + now.month - anchor.month
     count -= add_months(anchor, count) > now
     month = add_months(anchor, count)
@@ -72,10 +79,12 @@ def spend(db, now, providers, starts):
                     for _ in WINDOWS)
     marks = ','.join('?' * len(providers))
     totals, readable = [0.0] * len(WINDOWS), False
-    has_v2 = db.execute("SELECT 1 FROM sqlite_master WHERE name='session_message'").fetchone()
+    names = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     for table, provider, extra in STORES:
-        if table == 'message' and has_v2:
-            extra = SEEN_IN_V2
+        if table == 'message':
+            columns = {row[1] for row in db.execute('PRAGMA table_info(message)')}
+            extra = SESSION_RANGES if 'session_id' in columns else ''
+            extra += SEEN_IN_V2 if 'session_message' in names else ''
         try:
             row = db.execute(f'SELECT {sums} FROM {table} WHERE time_created BETWEEN ? AND ?{extra} '
                              f'AND {provider} IN ({marks})',
@@ -130,9 +139,9 @@ def monthly_cap(account):
     return cap if cap > 0 else None
 
 
-def anchor_of(account, io):
+def anchor_of(account, io, key='cycle_anchor'):
     limits = account.options.get('limits')
-    anchor = io.parse_time(limits.get('cycle_anchor')) if isinstance(limits, dict) else None
+    anchor = io.parse_time(limits.get(key)) if isinstance(limits, dict) else None
     return anchor.astimezone(UTC) if anchor else None
 
 
@@ -140,7 +149,7 @@ def fetch(account, io, now):
     database = account.identity_dir / 'opencode.db'
     providers = tuple(account.options.get('providers') or PAID)
     anchor = anchor_of(account, io)
-    frames = cycles(now, anchor)
+    frames = cycles(now, anchor, anchor_of(account, io, 'weekly_anchor'))
     try:
         with closing(sqlite3.connect(database.resolve().as_uri() + '?mode=ro', uri=True)) as db:
             spent = spend(db, now, providers, [start for _, start, _, _ in frames])

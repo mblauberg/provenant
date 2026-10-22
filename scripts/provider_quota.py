@@ -30,16 +30,23 @@ import sys
 import tempfile
 from time import monotonic
 from urllib.error import HTTPError, URLError
-from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 
-class _NoRedirect(HTTPRedirectHandler):
-    def redirect_request(self, request, response, code, message, headers, target):
-        return None
+_OPENER = []
 
 
-# Authenticated quota requests must stay at the provider's exact endpoint.
-urlopen = build_opener(_NoRedirect()).open
+def urlopen(request, timeout):
+    """Open without following redirects: authenticated quota requests stay at the provider's endpoint.
+
+    urllib.request loads on first use, so a tick with nothing due never pays for it."""
+    if not _OPENER:
+        from urllib.request import HTTPRedirectHandler, build_opener
+
+        class NoRedirect(HTTPRedirectHandler):
+            def redirect_request(self, request, response, code, message, headers, target):
+                return None
+        _OPENER.append(build_opener(NoRedirect()).open)
+    return _OPENER[0](request, timeout=timeout)
 
 
 SCHEMA = 'provenant.quota.v1'
@@ -79,6 +86,17 @@ if identity is None:
     _identity_spec.loader.exec_module(identity)
 LABEL = identity.LABEL
 DISABLED = {'0', 'false', 'no', 'off'}
+schedule = sys.modules.get('quota_schedule')
+if schedule is None:
+    _schedule_spec = importlib.util.spec_from_file_location('quota_schedule', HERE / 'quota_schedule.py')
+    schedule = importlib.util.module_from_spec(_schedule_spec)
+    sys.modules['quota_schedule'] = schedule
+    _schedule_spec.loader.exec_module(schedule)
+RETRY_AFTER_CAP = 86400
+TRACE_RETENTION_DAYS = 30
+TRACE_TEXT = 200
+# Anything token-shaped is scrubbed from trace text: bearer values, addresses and long opaque runs.
+SECRETISH = re.compile(r'(?i)bearer\s+\S+|[\w.+-]+@[\w-]+\.[\w.-]+|[A-Za-z0-9_\-+/=.]{24,}')
 
 PIPE, DEVNULL, TimeoutExpired = subprocess.PIPE, subprocess.DEVNULL, subprocess.TimeoutExpired
 run_process = subprocess.run
@@ -87,7 +105,18 @@ executable = shutil.which
 
 
 class Unavailable(Exception):
-    """A provider could not report quota. The message is fixed text, never a credential."""
+    """A provider could not report quota. The message is fixed text, never a credential.
+
+    `kind` is one of quota_schedule.ERROR_KINDS and sets the backoff; `retry_after` is the
+    provider's own wait in seconds, `retry_at` its deadline when it named a date, and `status`
+    the HTTP status, when known."""
+
+    def __init__(self, message, kind='other', retry_after=None, status=None, retry_at=None):
+        super().__init__(message)
+        self.kind = kind if kind in schedule.ERROR_KINDS else 'other'
+        self.retry_after = retry_after
+        self.status = status
+        self.retry_at = retry_at
 
 
 # A non-secret label, the CLI identity directory, and whether that is the CLI's default.
@@ -136,6 +165,10 @@ class _Io:
     @staticmethod
     def ledger_windows(adapter, now):
         return ledger_windows(adapter, now)
+
+    @staticmethod
+    def memo(name, account, seconds, produce):
+        return memo(name, account, seconds, produce)
 
 
 IO = _Io()
@@ -285,20 +318,24 @@ def accounts():
 # Provider I/O for quota modules -------------------------------------------------------------
 
 def http_json(url, headers):
+    from urllib.request import Request
     request = Request(url, headers=headers, method='GET')
     try:
         with urlopen(request, timeout=HTTP_TIMEOUT) as response:
             raw = response.read(MAX_RESPONSE_BYTES + 1)
     except HTTPError as exc:
         code = exc.code
+        header = exc.headers.get('Retry-After') if exc.headers else None
+        wait, deadline = retry_after(header), retry_deadline(header)
         exc.close()
         if code in (401, 403):
-            raise Unavailable('provider authentication needs a refresh') from None
+            raise Unavailable('provider authentication needs a refresh', 'auth', status=code) from None
         if code == 429:
-            raise Unavailable('provider quota service is rate limited') from None
-        raise Unavailable(f'provider quota request failed (HTTP {code})') from None
+            raise Unavailable('provider quota service is rate limited', 'rate_limited', wait, code, deadline) from None
+        raise Unavailable(f'provider quota request failed (HTTP {code})',
+                          'network' if code >= 500 else 'other', wait, code, deadline) from None
     except (URLError, TimeoutError, OSError):
-        raise Unavailable('provider quota request could not connect') from None
+        raise Unavailable('provider quota request could not connect', 'network') from None
     if len(raw) > MAX_RESPONSE_BYTES:
         raise Unavailable('provider quota response was too large')
     try:
@@ -307,6 +344,57 @@ def http_json(url, headers):
         raise Unavailable('provider returned an invalid quota response') from None
     if not isinstance(value, dict):
         raise Unavailable('provider returned an invalid quota response')
+    return value
+
+
+def retry_after(value, now=None):
+    """Seconds from a Retry-After header (seconds or an HTTP date), capped at a day; None if unusable."""
+    if not isinstance(value, str) or not value.strip():
+        return None
+    seconds = number(value.strip())
+    if seconds is None:
+        from email.utils import parsedate_to_datetime
+        try:
+            moment = parsedate_to_datetime(value.strip())
+        except (TypeError, ValueError, IndexError):
+            return None
+        moment = moment if moment.tzinfo else moment.replace(tzinfo=UTC)
+        seconds = (moment - (now or utcnow())).total_seconds()
+    return round(min(RETRY_AFTER_CAP, max(0.0, seconds)), 1)
+
+
+def retry_deadline(value):
+    """The moment a Retry-After HTTP date names, kept absolute; None for a wait in seconds."""
+    if not isinstance(value, str) or not value.strip() or number(value.strip()) is not None:
+        return None
+    from email.utils import parsedate_to_datetime
+    try:
+        moment = parsedate_to_datetime(value.strip())
+    except (TypeError, ValueError, IndexError):
+        return None
+    return moment if moment.tzinfo else moment.replace(tzinfo=UTC)
+
+
+def memo(name, account, seconds, produce):
+    """A small non-secret value kept per identity until it is `seconds` old or the identity's activity
+    changes. An empty value is never kept."""
+    stamp = schedule.activity(account.provider, account.identity_dir)
+    digest = hashlib.sha256(str(Path(account.identity_dir).expanduser()).encode()).hexdigest()[:16]
+    path = state_root() / 'quota/memo' / f'{name}-{digest}.json'
+    moment = utcnow().timestamp()
+    try:
+        kept = json.loads(path.read_text())
+        if (isinstance(kept, dict) and kept.get('stamp') == stamp and
+                0 <= moment - (number(kept.get('at')) or 0) < seconds):
+            return kept['value']
+    except (OSError, ValueError, KeyError):
+        pass
+    value = produce()
+    if value:
+        try:
+            atomic_json(path, {'value': value, 'at': moment, 'stamp': stamp})
+        except OSError:
+            pass
     return value
 
 
@@ -439,13 +527,24 @@ def load_snapshot(provider_name, label, identity_dir=None):
     return value if isinstance(value, dict) and value.get('schema') == SCHEMA and value.get('host') == telemetry_host() else None
 
 
+def open_private(path, mode='a'):
+    """Open for appending, or reading with mode 'r', never through a symlink; created 0600."""
+    flags = os.O_RDONLY if mode == 'r' else os.O_WRONLY | os.O_CREAT | os.O_APPEND
+    return os.fdopen(os.open(path, flags | os.O_NOFOLLOW, 0o600), mode)
+
+
 @contextmanager
-def locked(path):
+def locked(path, blocking=True):
+    """Hold an exclusive lock on `path`; without `blocking`, yield False if another holder has it."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open('a') as stream:
-        fcntl.flock(stream, fcntl.LOCK_EX)
+    with open_private(path) as stream:
         try:
-            yield
+            fcntl.flock(stream, fcntl.LOCK_EX | (0 if blocking else fcntl.LOCK_NB))
+        except BlockingIOError:
+            yield False
+            return
+        try:
+            yield True
         finally:
             fcntl.flock(stream, fcntl.LOCK_UN)
 
@@ -548,33 +647,63 @@ def fetch(account, now):
     return module.fetch(account, IO, now)
 
 
-def refresh(account, now=None, force=False):
-    """The account's snapshot, fetched at most once per cache period unless forced."""
+def account_id(account):
+    return f'{account.provider}/{account.label}'
+
+
+def scheduled(account, previous, now, trigger='timer', power='ac', ignore_backoff=False):
+    """(schedule block, due) for one account from its cached snapshot. Never fetches.
+
+    With `quota.schedule.enabled` false, the account is due once its last attempt is older than
+    `cache_seconds`, exactly as before the schedule existed."""
+    config, notes = schedule.resolve(account.provider, account.options.get('quota'), settings())
+    if config['enabled']:
+        return schedule.plan(provider=account.provider, account_id=account_id(account), snapshot=previous,
+                             now=now, config=config, trigger=trigger, power=power, ignore_backoff=ignore_backoff,
+                             activity_at=schedule.activity(account.provider, account.identity_dir, now), notes=notes)
+    attempted = parse_time((previous or {}).get('attempted_at'))
+    due = not previous or not attempted or (now - attempted).total_seconds() >= cache_seconds()
+    state = (previous or {}).get('fetch') or {}
+    return {'next_due_at': iso(attempted + timedelta(seconds=cache_seconds()) if attempted else now),
+            'reason': 'cache_seconds', 'ttl_seconds': cache_seconds(), 'trigger': state.get('trigger'),
+            'failures': state.get('failures') or 0, 'backoff_until': None, 'error_kind': state.get('error_kind'),
+            'last_duration_ms': state.get('last_duration_ms'), 'source_kind': 'fetch' if attempted else None,
+            **({'notes': notes} if notes else {})}, due and trigger != 'power'
+
+
+def cached(account, previous, block=None):
+    return {**previous, 'active': account.active, 'priority': account.priority,
+            'plan': account.plan or previous.get('plan'), **({'schedule': block} if block else {})}
+
+
+def refresh(account, now=None, force=False, trigger='timer', power='ac', ignore_backoff=False):
+    """The account's snapshot, fetched only when its schedule says it is due, unless forced."""
     if not enabled():
         return _refresh(account, now, force)
     with locked(cache_path(account.provider, account.label, identity_dir=account.identity_dir).with_suffix('.lock')):
-        return _refresh(account, now, force)
+        return _refresh(account, now, force, trigger, power, ignore_backoff)
 
 
-def _refresh(account, now=None, force=False):
+def _refresh(account, now=None, force=False, trigger='timer', power='ac', ignore_backoff=False):
     now = now or utcnow()
     if not enabled():
         previous = load_snapshot(account.provider, account.label, account.identity_dir) or blank(account, 'disabled')
-        return {**previous, 'active': account.active, 'priority': account.priority,
-                'plan': account.plan or previous.get('plan')}
+        return cached(account, previous)
     if provider(account.provider) is None:
         return blank(account, 'unreported', f'no quota source is registered for {account.provider}')
     previous = load_snapshot(account.provider, account.label, account.identity_dir)
-    attempted = parse_time((previous or {}).get('attempted_at'))
-    if previous and not force and attempted and (now - attempted).total_seconds() < cache_seconds():
-        return {**previous, 'active': account.active, 'priority': account.priority,
-                'plan': account.plan or previous.get('plan')}
+    block, due = scheduled(account, previous, now, trigger, power, ignore_backoff)
+    if previous and not force and not due:
+        return cached(account, previous, block)
+    started, kind, wait, deadline = monotonic(), None, None, None
     try:
         result = fetch(account, now)
     except Unavailable as exc:
-        error = str(exc)
+        # Provider text is fixed, but nothing token-shaped may reach the snapshot either.
+        error, kind, wait = SECRETISH.sub('[redacted]', str(exc)), exc.kind, exc.retry_after
+        deadline = exc.retry_at
     except Exception as exc:  # A provider module bug must not break quota or routing.
-        error = f'quota source failed ({type(exc).__name__})'
+        error, kind = f'quota source failed ({type(exc).__name__})', 'other'
     else:
         windows, unreported = [], [str(name) for name in result.get('unreported') or []]
         for raw in result.get('windows') or []:
@@ -598,14 +727,143 @@ def _refresh(account, now=None, force=False):
                  'source': result.get('source'), 'windows': windows, 'unreported': unreported,
                  'credits': result.get('credits') if isinstance(result.get('credits'), dict) else None,
                  **{key: extra for key, extra in extras.items() if extra}}
+        value['fetch'] = fetch_state(account, previous, now, trigger, monotonic() - started)
         record_events(previous, value)
         save_snapshot(value, account.identity_dir)
-        return value
+        trace(value, trigger, value['status'], None, value['fetch']['last_duration_ms'], None, None)
+        return {**value, 'schedule': scheduled(account, value, now, trigger, power)[0]}
     value = {**(previous or blank(account, 'unavailable')), 'attempted_at': iso(now), 'error': error,
              'status': 'stale' if previous and previous.get('windows') else 'unavailable',
-             'active': account.active, 'priority': account.priority}
+             'active': account.active, 'priority': account.priority,
+             'fetch': fetch_state(account, previous, now, trigger, monotonic() - started, kind, wait, deadline)}
     save_snapshot(value, account.identity_dir)
-    return value
+    trace(value, trigger, 'error', kind, value['fetch']['last_duration_ms'], wait, error)
+    return {**value, 'schedule': scheduled(account, value, now, trigger, power)[0]}
+
+
+def fetch_state(account, previous, now, trigger, elapsed, kind=None, wait=None, deadline=None):
+    """What the schedule needs from this attempt; a failure extends the account's backoff.
+
+    The backoff runs from when the attempt finished, so a slow request never shortens a
+    provider's Retry-After; a Retry-After date stays the deadline it named, capped at a day."""
+    state = {'trigger': trigger, 'source_kind': 'fetch', 'last_duration_ms': round(elapsed * 1000),
+             'failures': 0, 'error_kind': None, 'backoff_until': None, 'retry_after_s': None}
+    if kind is None:
+        return state
+    before = (previous or {}).get('fetch') or {}
+    failures = int(number(before.get('failures')) or 0) + 1
+    config, _ = schedule.resolve(account.provider, account.options.get('quota'), settings())
+    finished = now + timedelta(seconds=elapsed)
+    seconds = schedule.backoff_seconds(kind, failures, None if deadline else wait, config, account_id(account))
+    until = finished + timedelta(seconds=seconds)
+    if deadline:
+        until = max(until, min(deadline, finished + timedelta(seconds=RETRY_AFTER_CAP)))
+    return {**state, 'failures': failures, 'error_kind': kind, 'retry_after_s': wait, 'backoff_until': iso(until)}
+
+
+# Fetch trace ---------------------------------------------------------------------------------
+
+def quota_dir():
+    return state_root() / 'quota'
+
+
+def scrub(text):
+    """Trace text without anything token-shaped, at most TRACE_TEXT characters."""
+    return SECRETISH.sub('[redacted]', str(text))[:TRACE_TEXT] if text else None
+
+
+def trace(value, trigger, outcome, kind, duration_ms, wait, error):
+    """Append one line per fetch attempt to fetches.jsonl. Never a credential or a raw body."""
+    line = {'at': value.get('attempted_at'), 'provider': value.get('provider'), 'account': value.get('account'),
+            'trigger': trigger, 'outcome': outcome, 'error_kind': kind, 'duration_ms': duration_ms,
+            'retry_after_s': wait, 'error': scrub(error)}
+    path = quota_dir() / 'fetches.jsonl'
+    try:
+        with locked(path.with_suffix('.lock')), open_private(path) as stream:
+            stream.write(json.dumps(line, sort_keys=True) + '\n')
+        # Every writer prunes, so `quota` and `quota --refresh` stay bounded too; gated daily.
+        prune_trace(parse_time(line['at']) or utcnow())
+    except OSError:
+        pass  # The trace is advisory; a quota reading never fails on it.
+
+
+def trace_lines(since=None):
+    try:
+        with open_private(quota_dir() / 'fetches.jsonl', 'r') as stream:
+            text = stream.read()
+    except OSError:
+        return []
+    rows = []
+    for raw in text.splitlines():
+        try:
+            row = json.loads(raw)
+        except ValueError:
+            continue
+        moment = parse_time(row.get('at')) if isinstance(row, dict) else None
+        if moment and (since is None or moment >= since):
+            rows.append(row)
+    return rows
+
+
+def prune_trace(now, retention_days=None):
+    """Drop trace lines older than `quota.trace.retention_days`, at most once a day."""
+    if retention_days is None:
+        configured = (settings().get('trace') or {}) if isinstance(settings().get('trace'), dict) else {}
+        retention_days = number(configured.get('retention_days'))
+        retention_days = retention_days if retention_days and retention_days > 0 else TRACE_RETENTION_DAYS
+    path, marker = quota_dir() / 'fetches.jsonl', quota_dir() / 'fetches.pruned'
+    try:
+        if now.timestamp() - marker.stat().st_mtime < 86400:
+            return False
+    except OSError:
+        pass
+    with locked(path.with_suffix('.lock')):
+        kept = trace_lines(now - timedelta(days=retention_days))
+        # Exclusive 0600 temporaries replace the trace and the marker; a planted name is never followed.
+        if path.exists() or path.is_symlink():
+            replace_private(path, ''.join(json.dumps(row, sort_keys=True) + '\n' for row in kept))
+        replace_private(marker, '', now.timestamp())
+    return True
+
+
+def replace_private(path, text, mtime=None):
+    descriptor, name = tempfile.mkstemp(dir=path.parent, prefix=path.name + '.')
+    try:
+        with os.fdopen(descriptor, 'w') as stream:
+            stream.write(text)
+        if mtime is not None:
+            os.utime(name, (mtime, mtime))
+        os.replace(name, path)
+    finally:
+        Path(name).unlink(missing_ok=True)
+
+
+def percentile(values, share):
+    values = sorted(values)
+    return values[min(len(values) - 1, int(share * len(values)))] if values else None
+
+
+def trace_summary(since):
+    groups = {}
+    for row in trace_lines(since):
+        group = groups.setdefault((str(row.get('provider')), str(row.get('account'))), {
+            'provider': row.get('provider'), 'account': row.get('account'), 'fetches': 0, 'ok': 0,
+            'failures': {}, 'durations': [], 'last_at': None})
+        group['fetches'] += 1
+        if row.get('outcome') == 'error':
+            kind = row.get('error_kind') or 'other'
+            group['failures'][kind] = group['failures'].get(kind, 0) + 1
+        else:
+            group['ok'] += 1
+        if number(row.get('duration_ms')) is not None:
+            group['durations'].append(row['duration_ms'])
+        group['last_at'] = max(group['last_at'] or '', row.get('at') or '') or None
+    accounts = []
+    for _, group in sorted(groups.items()):
+        durations = group.pop('durations')
+        accounts.append({**group, 'p50_ms': percentile(durations, 0.5), 'max_ms': max(durations, default=None)})
+    return {'since': iso(since), 'fetches': sum(row['fetches'] for row in accounts),
+            'failures': sum(sum(row['failures'].values()) for row in accounts), 'accounts': accounts}
 
 
 # Pace, credits and the report ---------------------------------------------------------------
@@ -806,7 +1064,8 @@ def describe(value, banked, now):
                               'unused_percent': longest['pace']['headroom_percent'],
                               'expiring_headroom_percent': longest['pace']['expiring_headroom_percent']}
                              if longest else None} | optional_credits(value, banked) | (
-        {'drawing_credits': True, 'credit_burn_per_hour': rate} if drawing else {})
+        {'drawing_credits': True, 'credit_burn_per_hour': rate} if drawing else {}) | (
+        {'schedule': value['schedule']} if isinstance(value.get('schedule'), dict) else {})
 
 
 def optional_credits(value, banked):
@@ -818,7 +1077,7 @@ def optional_credits(value, banked):
     return {key: extra for key, extra in extras.items() if extra}
 
 
-def report(values, now=None):
+def report(values, now=None, refreshing=()):
     now = now or utcnow()
     banked = credits()
     rows = [describe(value, banked.get((value.get('provider'), value.get('account'), telemetry_host())), now)
@@ -833,15 +1092,101 @@ def report(values, now=None):
         spare = row['state'] == 'credit_only' and credits_policy() == 'last_resort'
         return (row['state'] == 'exhausted', spare, row['priority'] if row['priority'] is not None else 100,
                 (longest or {}).get('reset_at') or '9999', row['account'])
+    due = [row['schedule']['next_due_at'] for row in rows if row.get('schedule', {}).get('next_due_at')]
     return {'schema': REPORT_SCHEMA, 'generated_at': iso(now), 'host': telemetry_host(), 'enabled': enabled(),
+            'next_due_at': min(due, key=parse_time) if due else None, 'refreshing': sorted(refreshing),
             'providers': registered(), 'accounts': rows,
             'placement_preference': {name: [row['account'] for row in sorted(group, key=order)]
                                      for name, group in sorted(preference.items())}}
 
 
 def gather(now=None, force=False):
-    now = now or utcnow()
+    """Every account, each fetched if due. Without `now`, each attempt is timed when it starts."""
     return [refresh(account, now, force) for account in accounts()]
+
+
+# Tick: fetch only the due accounts and keep report.json current -------------------------------
+
+def report_path():
+    return quota_dir() / 'report.json'
+
+
+def current_report():
+    try:
+        value = json.loads(report_path().read_text())
+    except (OSError, ValueError):
+        return None
+    return value if isinstance(value, dict) and value.get('schema') == REPORT_SCHEMA else None
+
+
+def plans(now, trigger='timer', power='ac', ignore_backoff=False):
+    """(account, cached value, due) per account, from cached snapshots only."""
+    rows = []
+    for account in accounts():
+        previous = load_snapshot(account.provider, account.label, account.identity_dir)
+        # Phase 4 hook: passive readers (rollouts, refusals, cooldowns) would update `previous` here.
+        if not enabled() or provider(account.provider) is None:
+            rows.append((account, _refresh(account, now), False))
+            continue
+        block, due = scheduled(account, previous, now, trigger, power, ignore_backoff)
+        rows.append((account, cached(account, previous or blank(account, 'unavailable'), block), due))
+    return rows
+
+
+def tick(trigger='timer', power='ac', ignore_backoff=False):
+    """Fetch the due accounts under a non-blocking refresh lock. None means another tick holds it."""
+    with locked(quota_dir() / 'refresh.lock', blocking=False) as held:
+        return _tick(trigger, power, ignore_backoff) if held else None
+
+
+def _tick(trigger, power, ignore_backoff):
+    now = utcnow()
+    rows = plans(now, trigger, power, ignore_backoff)
+    values = {account_id(account): value for account, value, _ in rows}
+    due = [account for account, _, is_due in rows if is_due]
+    if not due:
+        value = report(list(values.values()), now)
+        written = current_report()
+        # The fast path writes only when the earliest due time moved, or no report exists yet.
+        if written is None or written.get('next_due_at') != value['next_due_at']:
+            atomic_json(report_path(), value)
+        return value
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    import threading
+    guard, refreshing, kinds = threading.Lock(), {account_id(account) for account in due}, []
+
+    def publish():
+        atomic_json(report_path(), report(list(values.values()), utcnow(), refreshing))
+
+    def run(account):
+        try:
+            value = refresh(account, None, False, trigger, power, ignore_backoff)
+        except (OSError, ValueError):
+            value = values[account_id(account)]
+        with guard:
+            values[account_id(account)] = value
+            refreshing.discard(account_id(account))
+            kinds.append((value.get('fetch') or {}).get('error_kind'))
+            publish()
+
+    with guard:
+        publish()
+    config, _ = schedule.resolve('', None, settings())
+    solo = [account for account in due if schedule.resolve(account.provider, account.options.get('quota'),
+                                                            settings())[0]['solo']]
+    try:
+        with ThreadPoolExecutor(max_workers=config['max_parallel']) as pool:
+            for future in as_completed([pool.submit(run, account) for account in due if account not in solo]):
+                future.result()
+        for account in solo:  # An expensive solo provider never runs alongside another fetch.
+            run(account)
+    finally:  # Even after a crash, readers never see a fetch left marked as running.
+        with guard:
+            value = report(list(values.values()), utcnow())
+            if kinds and len(kinds) == len(due) and all(kind == 'network' for kind in kinds):
+                value['offline'] = True  # every fetch failed to connect
+            atomic_json(report_path(), value)
+    return value
 
 
 # Routing input -------------------------------------------------------------------------------
@@ -1003,8 +1348,99 @@ def render(value, verbose=False):
     print('\n'.join(lines))
 
 
+def since_time(text, now):
+    """`24h`, `30m`, `7d` or an ISO time."""
+    match = re.fullmatch(r'(\d+)\s*([mhd])', str(text).strip().lower())
+    if match:
+        return now - timedelta(minutes=int(match[1]) * {'m': 1, 'h': 60, 'd': 1440}[match[2]])
+    moment = parse_time(text)
+    if moment is None:
+        raise ValueError(f'--since {text!r} is not a duration such as 24h or an ISO time')
+    return moment
+
+
+def schedule_main(argv):
+    parser = argparse.ArgumentParser(prog='provenant quota schedule',
+                                     description='Each account\'s schedule from cached readings. Never fetches.')
+    parser.add_argument('--json', action='store_true')
+    args = parser.parse_args(argv)
+    rows = [{'provider': account.provider, 'account': account.label, 'schedule': value.get('schedule')}
+            for account, value, _ in plans(utcnow())]
+    if args.json:
+        print(json.dumps(rows, indent=2))
+        return 0
+    lines = _telemetry().table(('provider', 'account', 'next due', 'reason', 'ttl', 'failures', 'error'), [
+        (row['provider'], row['account'], (block.get('next_due_at') or '-')[:19].replace('T', ' '),
+         block.get('reason') or '-', duration(block.get('ttl_seconds')), str(block.get('failures') or 0),
+         block.get('error_kind') or '-') for row in rows for block in [row['schedule'] or {}]])
+    print('\n'.join(lines))
+    return 0
+
+
+def trace_main(argv):
+    parser = argparse.ArgumentParser(prog='provenant quota trace', description='Summarise recorded fetch attempts.')
+    parser.add_argument('--since', default='24h')
+    parser.add_argument('--json', action='store_true')
+    args = parser.parse_args(argv)
+    try:
+        value = trace_summary(since_time(args.since, utcnow()))
+    except ValueError as exc:
+        parser.error(str(exc))
+    if args.json:
+        print(json.dumps(value, indent=2))
+        return 0
+    lines = [f"Quota fetches since {value['since']}: {value['fetches']} ({value['failures']} failed)"]
+    lines += _telemetry().table(('provider', 'account', 'fetches', 'failures', 'p50', 'max', 'last'), [
+        (row['provider'], row['account'], str(row['fetches']),
+         ', '.join(f'{kind} {count}' for kind, count in sorted(row['failures'].items())) or '-',
+         f"{row['p50_ms']}ms" if row['p50_ms'] is not None else '-',
+         f"{row['max_ms']}ms" if row['max_ms'] is not None else '-', (row['last_at'] or '-')[:19].replace('T', ' '))
+        for row in value['accounts']])
+    print('\n'.join(lines))
+    return 0
+
+
+def tick_main(argv):
+    parser = argparse.ArgumentParser(prog='provenant quota tick',
+                                     description='Fetch only the accounts that are due and write report.json.')
+    parser.add_argument('--trigger', choices=schedule.TRIGGERS, default='timer')
+    parser.add_argument('--power', choices=schedule.POWER, default='ac', help='supplied by the caller')
+    parser.add_argument('--json', action='store_true')
+    parser.add_argument('--ignore-backoff', action='store_true')
+    args = parser.parse_args(argv)
+    try:
+        value = tick(args.trigger, args.power, args.ignore_backoff)
+        # Another tick holds the lock: show what it last wrote and leave the fetching to it.
+        value = value or current_report() or report([row for _, row, _ in plans(utcnow())])
+    except (OSError, ValueError) as exc:
+        print(f'quota: {exc}', file=sys.stderr)
+        return 1
+    if args.json:
+        print(json.dumps(value, indent=2))
+        return 0
+    for row in value['accounts']:
+        block = row.get('schedule') or {}
+        print(f"{row['provider']}/{row['account']}: {row['status']}; next {block.get('next_due_at') or '-'} "
+              f"({block.get('reason') or '-'})")
+    return 0
+
+
 def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
+    if argv[:1] == ['tick']:
+        return tick_main(argv[1:])
+    if argv[:1] == ['schedule']:
+        return schedule_main(argv[1:])
+    if argv[:1] == ['trace']:
+        return trace_main(argv[1:])
+    if argv[:1] == ['path']:
+        parser = argparse.ArgumentParser(prog='provenant quota path')
+        parser.add_argument('--json', action='store_true')
+        args = parser.parse_args(argv[1:])
+        paths = {'state_dir': str(quota_dir()), 'report': str(report_path()),
+                 'trace': str(quota_dir() / 'fetches.jsonl'), 'lock': str(quota_dir() / 'refresh.lock')}
+        print(json.dumps(paths, indent=2) if args.json else paths['state_dir'])
+        return 0
     if argv[:2] == ['credit', 'list']:
         parser = argparse.ArgumentParser(prog='provenant quota credit list')
         parser.add_argument('--json', action='store_true')

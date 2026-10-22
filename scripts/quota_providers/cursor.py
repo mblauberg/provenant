@@ -24,7 +24,8 @@ def default_identity():
 
 def session(database, now, io=None):
     """The access token and user id from Cursor's state database, opened read-only."""
-    unavailable = io.Unavailable if io else ValueError
+    def unavailable(message):  # every local-session failure is a sign-in problem
+        return io.Unavailable(message, 'auth') if io else ValueError(message)
     try:
         with closing(sqlite3.connect(database.resolve().as_uri() + '?mode=ro', uri=True)) as db:
             row = db.execute("SELECT value FROM ItemTable WHERE key='cursorAuth/accessToken' LIMIT 1").fetchone()

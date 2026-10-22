@@ -27,7 +27,7 @@ def app_server(account, io, timeout=None):
     timeout = timeout or io.PROCESS_TIMEOUT
     executable = io.executable('codex')
     if not executable:
-        raise io.Unavailable('Codex CLI is not installed')
+        raise io.Unavailable('Codex CLI is not installed', 'missing')
     try:
         process = io.open_process([executable, '-s', 'read-only', '-a', 'never', 'app-server'],
                                   stdin=io.PIPE, stdout=io.PIPE, stderr=io.DEVNULL, text=True, bufsize=1,
