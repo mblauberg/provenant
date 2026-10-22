@@ -21,6 +21,7 @@ import {
 } from "./execution-input.js";
 export { ACCESS_MODES, DISPATCH_ADAPTERS } from "./execution-input.js";
 export type { AccessMode, RouteInput, DispatchInput, BatchInput, BatchTaskInput } from "./execution-input.js";
+import { recordSeatRun } from "./seat-index.js";
 import { compactRoute, basePaths, compactDispatch, compactBatch, type OwnerCompletion } from "./owner-output.js";
 import { execFileSync, execFile, spawn, type ChildProcess } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
@@ -451,6 +452,8 @@ export function startOwner(
     host_started_at: launcherStartedAt(),
   };
   writeFileSync(statusPath, JSON.stringify(metadata) + "\n", { mode: 0o600 });
+  // The seat keeps the association once this host and launcher are gone.
+  recordSeatRun(runDir, env);
   // The pointer is only a discovery index: an unwritable target run root must
   // not fail the dispatch. The lane then stays visible from its source project.
   try {

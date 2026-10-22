@@ -12,8 +12,8 @@
 import { digest, quarantineAction } from "./surface.js";
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
-import { databasePath, identify, withoutGitRedirects } from "./identity.js";
+import { join, resolve } from "node:path";
+import { databasePath, identify, runRoot, withoutGitRedirects } from "./identity.js";
 import {
   dispatchConfiguredBatch, dispatchConfiguredProvider, hostOwnersInThemselves, productRoot, pythonOwner,
   type BatchInput, type DispatchInput,
@@ -25,6 +25,8 @@ import {
 import { inspectDatabase, Store } from "./store.js";
 import { waitForLanes } from "./lane-wait.js";
 import { readEvents, readRuns } from "./run-reader.js";
+import { laneIdle } from "./lane-watch.js";
+import { ancestorPids, laneReader, seatRunDirectories } from "./seat-lanes.js";
 import { reconcileSession, sessionDispatch, sessionName, sessionView } from "./sessions.js";
 
 const USAGE = `fabric <command>
@@ -208,18 +210,25 @@ if (command === "lanes") {
     const store = new Store(databasePath());
     store.announce(laneWho);
     let code: number;
+    const seatAncestors = ancestorPids();
+    const watcher = laneIdle(() => [laneWho.project, ...(project === undefined ? seatRunDirectories(seatAncestors).keys() : [])]
+      .map((dir) => join(runRoot(dir), "runs")));
+    const reader = laneReader({ who: laneWho, ids: watched, deps: { ancestors: seatAncestors,
+      ...(project === undefined ? {} : { ancestors: new Set<number>() }) } });
     try {
       // The registered project, not the raw cwd, owns the runs; the normal
       // retention window bounds the scan, and no row cap may hide a completion.
       code = await waitForLanes({
         who: laneWho, store, all, timeoutSeconds,
-        read: () => readRuns(laneWho.project, watched, 0, undefined, null),
+        read: reader, refresh: reader.refresh, stale: reader.stale,
         write: (text) => new Promise((resolveWrite, reject) =>
           process.stdout.write(text, (error) => (error ? reject(error) : resolveWrite()))),
         fail: (text) => console.error(text),
         sleep: (ms) => new Promise((resolveSleep) => setTimeout(resolveSleep, ms)),
+        idle: watcher.idle,
       });
     } finally {
+      watcher.close();
       store.close();
     }
     process.exit(code);
