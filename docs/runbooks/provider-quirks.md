@@ -41,6 +41,41 @@ in `skills/orchestrate`; this page records the traps.
 - Large or code-heavy prompts have hung with zero output, and `--print-timeout`
   is not honoured. Send compact per-region prompts and wrap the call in an
   external watchdog. Treat agy output as advisory until checked independently.
+- agy rewrites `~/.gemini/antigravity-cli/bin/agentapi` (a 58-byte shim that
+  execs agy) before it runs a command, puts that `bin/` on the command's PATH,
+  and fails the command when the write is refused (#1055). Its app data
+  directory is `$HOME/.gemini/antigravity-cli`. No environment variable moves
+  it: this build has no `AGY_CONFIG_DIR`, and setting `ANTIGRAVITY_APP_DATA_DIR`,
+  `JETSKI_APP_DATA_DIR`, `ANTIGRAVITY_EXECUTABLE_DATA_DIR`,
+  `ANTIGRAVITY_GEMINI_DIR` or `ANTIGRAVITY_PLUGIN_SHIM_DIR` did not move the
+  shim (2026-10-22). A confined lane therefore runs with a per-attempt `HOME`
+  of links to the real entries. Only `antigravity-cli/bin` is the lane's own
+  directory, where agy writes its shim. The real `bin/` keeps no write grant.
+  The sandbox judges every access through a link at the real path. Each
+  attempt stages a fresh overlay after preparing agy's state directories, so
+  each of them is a link. agy rewrites some top-level state by temp-and-rename,
+  which replaces the overlay's link rather than the real file. After the
+  attempt the harness copies those granted files back, but never a link, a
+  token file, a hard link or an oversized file. Finishers take turns on a
+  lock file, `.provenant-copy-back.lock`, in the real state directory, waiting
+  at most 10 seconds. A real file another session changed since staging is
+  kept, with a warning. `history.jsonl` gets only the lines the lane appended,
+  and only when the real file is a single-link file. Staging creates an empty `conversation_summaries.db` when
+  there is none, so SQLite writes through the link rather than into the
+  overlay. The harness then removes the overlay. Every supervisor step in the
+  attempt `tmp` (its cache, the `ps` shim, the prompt and output staging files,
+  and the overlay) and in the real state directory walks with `O_NOFOLLOW`
+  from `/` or from the `tmp` opened once per attempt, including a same-attempt
+  effort retry. A lane that swaps any of them for a link cannot redirect a
+  supervisor read, write or delete. agy signs in from the
+  login Keychain: with the token files left out of the overlay, it still
+  authenticated under `sandbox-exec`. An empty `HOME` fails with
+  `authentication failed or timed out`. On 2026-10-22 a confined read-only
+  lane ran `git rev-parse --short HEAD` and returned the right commit. The live
+  shim's SHA-256 and mtime were the same before and after the run. agy copies its embedded `webm_encoder`
+  into `bin/` when that file is missing, but accepts a link to the real one.
+  Write-and-restore of the live shim was rejected: it left a window in which a
+  lane's bytes could run unconfined.
 - Quota errors name the reset window and may cover one hosted-model pool:
   read the window rather than retrying, and switch to another available pool.
   Probe quota with the model the real lane will use.

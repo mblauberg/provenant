@@ -4,8 +4,9 @@
 from __future__ import annotations
 
 import argparse
-from collections import deque
+from collections import deque, namedtuple
 import ctypes
+import fcntl
 import functools
 import hashlib
 import json
@@ -30,6 +31,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from adapters import profile
 from adapters import claude as claude_adapter
 from output_custody import install, verify, CustodyError
+import attempt_storage
 import fabric_policy
 import layout
 import context_usage
@@ -1094,6 +1096,75 @@ def _adapter_binary_reads(plan, search_path=None):
     return links, [install]
 
 
+# A lane can replace any entry it may write with a link, including run_dir/tmp and the overlay
+# within it. The supervisor runs unconfined, so it reaches those entries only by walking open
+# directories with O_NOFOLLOW from a root the lane cannot write.
+DIRECTORY_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+
+
+def _open_canonical_dir(path):
+    """Open an absolute, canonical directory from / without following a link at any component."""
+    fd = os.open("/", os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        for part in Path(path).parts[1:]:
+            child = os.open(part, DIRECTORY_FLAGS, dir_fd=fd)
+            os.close(fd)
+            fd = child
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
+
+
+def _private_dir(parent_fd, name):
+    """Open name below parent_fd as a 0o700 directory, replacing a link or file left there."""
+    try:
+        os.mkdir(name, 0o700, dir_fd=parent_fd)
+    except FileExistsError:
+        if not stat.S_ISDIR(os.stat(name, dir_fd=parent_fd, follow_symlinks=False).st_mode):
+            os.unlink(name, dir_fd=parent_fd)
+            os.mkdir(name, 0o700, dir_fd=parent_fd)
+    fd = os.open(name, DIRECTORY_FLAGS, dir_fd=parent_fd)
+    os.fchmod(fd, 0o700)  # mkdir leaves an existing directory's mode as it was
+    return fd
+
+
+def _write_new(directory_fd, name, data, mode):
+    """Create name below an open directory; never through an entry that is already there."""
+    fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=directory_fd)
+    try:
+        os.fchmod(fd, mode)
+        view = memoryview(data)
+        while view:
+            view = view[os.write(fd, view):]
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def _unlinked_file(tmp_fd):
+    """A read-write file made in the open attempt tmp and unlinked at once, so no path names it."""
+    name = f".provenant-{uuid.uuid4().hex}"
+    fd = os.open(name, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=tmp_fd)
+    os.unlink(name, dir_fd=tmp_fd)
+    return os.fdopen(fd, "w+b")
+
+
+def _open_attempt_tmp(attempt_dir):
+    """Open the attempt's tmp from /, held for the whole attempt and any retry of it.
+
+    Only the attempt directory's parent is resolved: the lane may write the attempt directory
+    and everything in it.
+    """
+    attempt_dir = Path(attempt_dir).parent.resolve() / Path(attempt_dir).name
+    attempt_dir.mkdir(parents=True, exist_ok=True)
+    attempt_fd = _open_canonical_dir(attempt_dir)
+    try:
+        return _private_dir(attempt_fd, "tmp")
+    finally:
+        os.close(attempt_fd)
+
+
 def _prepare_state_directories(plan):
     """Bootstrap runtime directories and the actual project root before confinement.
 
@@ -1105,16 +1176,24 @@ def _prepare_state_directories(plan):
     prepare = state.get("prepare_dirs")
     for directory in prepare(root, plan) if prepare else ():
         root.mkdir(parents=True, exist_ok=True)
-        current = root
-        for part in ("", *directory.relative_to(root).parts):
-            current = current / part
-            try:
-                current.mkdir()
-            except FileExistsError:
-                pass
-            if not stat.S_ISDIR(current.lstat().st_mode):
-                raise PermissionError(f"provider state directory must be a real directory: {current}; "
-                                      "fix: replace the link or file with a directory")
+        current, fd = root, None
+        try:
+            fd = _open_canonical_dir(root)
+            for part in directory.relative_to(root).parts:
+                current = current / part
+                try:
+                    os.mkdir(part, dir_fd=fd)
+                except FileExistsError:
+                    pass
+                child = os.open(part, DIRECTORY_FLAGS, dir_fd=fd)
+                os.close(fd)
+                fd = child
+        except OSError as exc:
+            raise PermissionError(f"provider state directory must be a real directory: {current}; "
+                                  "fix: replace the link or file with a directory") from exc
+        finally:
+            if fd is not None:
+                os.close(fd)
 
 
 def confinement_command(plan, command, search_path=None):
@@ -3094,23 +3173,273 @@ def tool_cache_environment(plan, cache, inherited):
     return environment
 
 
-def stage_ps_shim(private_tmp):
+# agy rewrites its bin/agentapi shim before running a command and puts bin/ on that command's
+# PATH, so a later unconfined agy session or sidecar would run whatever a lane left there (#1055).
+# A confined lane gets a HOME of links to the real entries, with its own antigravity-cli/bin; the
+# sandbox still judges every access through a link at the real path, and the live bin/ stays
+# read-only. agy signs in from the login Keychain, so its token files are neither linked nor
+# copied back: a refresh renamed over a link would land in the overlay.
+AGY_PRIVATE_BIN = Path(".gemini/antigravity-cli/bin")
+AGY_UNLINKED = ("agentapi", "antigravity-oauth-token", "mcp_oauth_tokens.json", "oauth_creds.json")
+# Granted top-level state agy rewrites by temp-and-rename, which replaces the overlay's link rather
+# than the real file. SQLite resolves its link and keeps its journals beside the real database.
+AGY_RENAMED_STATE = ("history.jsonl", "jetbox_summaries_proto.pb", "jetski_state.pbtxt",
+                     "last_check.timestamp", "installation_id")
+AGY_STATE_COPY_MAX = 64 * 1024 * 1024
+AGY_DATABASE = "conversation_summaries.db"
+AGY_COPY_BACK_LOCK = ".provenant-copy-back.lock"
+AGY_COPY_BACK_WAIT = 10
+
+
+# The staged overlay: its path for HOME, its name in the attempt tmp, and the identity of each
+# real renamed-state file at staging, so copy-back never overwrites another session's update.
+AgyHome = namedtuple("AgyHome", "path name before")
+
+
+def _identity(directory_fd, name):
+    try:
+        found = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        return None
+    return found.st_dev, found.st_ino, found.st_size, found.st_mtime_ns
+
+
+def _link_overlay(fd, source, source_fd, parts):
+    """Link source's entries into the open directory fd, descending into a real copy of parts[0].
+
+    source_fd is the real directory opened without following links, or None when it is missing.
+    """
+    part = parts[0] if parts else None
+    for name in sorted(os.listdir(source_fd)) if source_fd is not None else ():
+        if name != part and not name.startswith(AGY_UNLINKED):
+            os.symlink(source / name, name, dir_fd=fd)
+    if part is None:
+        return
+    os.mkdir(part, 0o700, dir_fd=fd)
+    child = os.open(part, DIRECTORY_FLAGS, dir_fd=fd)
+    child_source = None
+    try:
+        try:
+            child_source = os.open(part, DIRECTORY_FLAGS, dir_fd=source_fd) if source_fd is not None else None
+        except FileNotFoundError:
+            pass
+        _link_overlay(child, source / part, child_source, parts[1:])
+    finally:
+        for descriptor in (child, child_source):
+            if descriptor is not None:
+                os.close(descriptor)
+
+
+def stage_agy_home(plan, tmp_fd, private_tmp):
+    """The confined agy lane's HOME: a fresh overlay of links per attempt in the open attempt tmp,
+    made after its state directories so each of them is a link too."""
+    if plan["adapter"] != "agy" or plan["applied"].get("confinement") != "sandbox-exec":
+        return None
+    _prepare_state_directories(plan)
+    real_fd = _open_canonical_dir(_provider_state(plan)["resolved_home"] / "antigravity-cli")
+    try:
+        # SQLite resolves a link to its database; with no database to link, it would make one in
+        # the overlay that cleanup then discards. An empty file is a valid empty database.
+        try:
+            os.close(os.open(AGY_DATABASE, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600,
+                             dir_fd=real_fd))
+        except FileExistsError:
+            pass
+        before = {name: _identity(real_fd, name) for name in AGY_RENAMED_STATE}
+    finally:
+        os.close(real_fd)
+    name = "agy-home-" + uuid.uuid4().hex[:12]
+    os.mkdir(name, 0o700, dir_fd=tmp_fd)
+    home = _open_canonical_dir(Path.home().resolve())
+    overlay = None
+    try:
+        overlay = os.open(name, DIRECTORY_FLAGS, dir_fd=tmp_fd)
+        _link_overlay(overlay, Path.home(), home, AGY_PRIVATE_BIN.parts)
+    except BaseException:
+        attempt_storage.remove_at(tmp_fd, name)
+        raise
+    finally:
+        for descriptor in (home, overlay):
+            if descriptor is not None:
+                os.close(descriptor)
+    return AgyHome(Path(private_tmp) / name, name, before)
+
+
+def _read_overlay_state(lane_fd, name):
+    """A renamed state file's bytes, or (None, problem); never follows a link."""
+    try:
+        fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=lane_fd)
+    except FileNotFoundError:
+        return None, None
+    except OSError as exc:
+        linked = stat.S_ISLNK(os.stat(name, dir_fd=lane_fd, follow_symlinks=False).st_mode)
+        return None, None if linked else f"{name}: {exc}"
+    try:
+        found = os.fstat(fd)
+        if not stat.S_ISREG(found.st_mode):
+            return None, f"{name}: not a regular file"
+        if found.st_nlink != 1:  # a hard link would copy back another file's bytes
+            return None, f"{name}: not a single-link regular file"
+        chunks, size = [], 0
+        while size <= AGY_STATE_COPY_MAX and (chunk := os.read(fd, 1024 * 1024)):
+            chunks.append(chunk)
+            size += len(chunk)
+        if max(size, found.st_size) > AGY_STATE_COPY_MAX:
+            return None, f"{name}: larger than {AGY_STATE_COPY_MAX} bytes"
+        if size != found.st_size:
+            return None, f"{name}: changed while being read"
+        return b"".join(chunks), None
+    finally:
+        os.close(fd)
+
+
+def _install_state(directory, name, data):
+    """Replace name in the open real directory by a staged file renamed over it."""
+    staged = f".{name}.provenant-{uuid.uuid4().hex}"
+    try:
+        current = os.stat(name, dir_fd=directory, follow_symlinks=False)
+        mode = stat.S_IMODE(current.st_mode) & 0o666 if stat.S_ISREG(current.st_mode) else 0o600
+    except FileNotFoundError:
+        mode = 0o600
+    try:
+        _write_new(directory, staged, data, mode)
+        os.replace(staged, name, src_dir_fd=directory, dst_dir_fd=directory)
+    except OSError:
+        try:
+            os.unlink(staged, dir_fd=directory)
+        except OSError:
+            pass
+        raise
+
+
+def _append_history(directory, data, before):
+    """Append only the lines the lane added to history.jsonl since staging; others may append too."""
+    flags = os.O_RDWR | os.O_APPEND | os.O_NOFOLLOW | (os.O_CREAT if before is None else 0)
+    try:
+        fd = os.open("history.jsonl", flags, 0o600, dir_fd=directory)
+    except FileNotFoundError:
+        return "history.jsonl: removed since staging"
+    try:
+        found = os.fstat(fd)
+        start = 0 if before is None else before[2]
+        if not stat.S_ISREG(found.st_mode) or found.st_nlink != 1:
+            return "history.jsonl: not a single-link regular file"
+        if before is not None and ((found.st_dev, found.st_ino) != before[:2] or found.st_size < start):
+            return "history.jsonl: replaced since staging"
+        if start > len(data):  # never read a staged size the copy itself does not reach
+            return "history.jsonl: shorter than at staging"
+        for offset in range(0, start, 1024 * 1024):
+            chunk = data[offset:min(start, offset + 1024 * 1024)]
+            if os.pread(fd, len(chunk), offset) != chunk:
+                return "history.jsonl: rewritten rather than appended"
+        view = memoryview(data)[start:]
+        while view:
+            view = view[os.write(fd, view):]
+        return None
+    finally:
+        os.close(fd)
+
+
+def finish_agy_home(plan, tmp_fd, home):
+    """Copy renamed state back to the real home, then remove the overlay. Returns warnings.
+
+    Every step starts from the attempt tmp held open since before staging or from a directory
+    opened from / without following a link, so a lane that swapped tmp, the overlay or an
+    ancestor cannot redirect a read, write or delete. A real file another session changed since
+    staging is kept, with a warning.
+    """
+    problems = []
+    fds = []
+    try:
+        fds.append(os.open(home.name, DIRECTORY_FLAGS, dir_fd=tmp_fd))
+        for part in AGY_PRIVATE_BIN.parts[:-1]:
+            fds.append(os.open(part, DIRECTORY_FLAGS, dir_fd=fds[-1]))
+        fds.append(_open_canonical_dir(_provider_state(plan)["resolved_home"] / "antigravity-cli"))
+        lane_fd, real_fd = fds[-2], fds[-1]
+        # Concurrent finishers take turns, so each compares and installs against the last install.
+        # A confined lane may read, and so lock, the file too: wait a bounded time, never forever.
+        fds.append(os.open(AGY_COPY_BACK_LOCK, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600, dir_fd=real_fd))
+        deadline = time.monotonic() + AGY_COPY_BACK_WAIT
+        while True:
+            try:
+                fcntl.flock(fds[-1], fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() > deadline:
+                    raise OSError(f"{AGY_COPY_BACK_LOCK} stayed locked for {AGY_COPY_BACK_WAIT}s") from None
+                time.sleep(0.05)
+        for name in AGY_RENAMED_STATE:
+            try:
+                data, problem = _read_overlay_state(lane_fd, name)
+                if data is None:
+                    pass
+                elif name == "history.jsonl":
+                    problem = _append_history(real_fd, data, home.before[name])
+                elif _identity(real_fd, name) != home.before[name]:
+                    problem = f"{name}: changed by another session since staging; kept it"
+                else:
+                    _install_state(real_fd, name, data)
+            except OSError as exc:
+                problem = f"{name}: {exc}"
+            if problem:
+                problems.append("agy state not copied back: " + problem)
+    except OSError as exc:
+        problems.append(f"agy state not copied back: {exc}")
+    finally:
+        for fd in fds:
+            os.close(fd)
+    left = attempt_storage.remove_at(tmp_fd, home.name)
+    if left:
+        problems.append("agy home overlay not removed: " + ", ".join(left))
+    return problems
+
+
+def needs_ps_shim(plan):
+    """macOS refuses to exec the setuid /bin/ps inside any sandbox, native or sandbox-exec."""
+    return sys.platform == "darwin" and (
+        (plan["adapter"] == "codex" and plan["applied"]["sandbox"] != "full")
+        or plan["applied"].get("confinement") == "sandbox-exec")
+
+
+def stage_ps_shim(tmp_fd, private_tmp):
     """Copy the ps shim into the attempt's temp, which every sandbox lets the lane read.
 
-    The product checkout may sit below a denied home or outside a read-only lane's cwd.
+    The product checkout may sit below a denied home or outside a read-only lane's cwd. A retry
+    reuses the attempt tmp, so whatever the earlier lane left at the shim is removed, never
+    written through.
     """
     source = Path(__file__).resolve().parent
-    stage = private_tmp / "provenant-shim"
-    (stage / "bin").mkdir(parents=True, exist_ok=True)
-    shutil.copyfile(source / "process_info.py", stage / "process_info.py")
-    shutil.copyfile(source / "bin" / "ps", stage / "bin" / "ps")
-    os.chmod(stage / "bin" / "ps", 0o755)
-    return stage / "bin"
+    left = attempt_storage.remove_at(tmp_fd, "provenant-shim")
+    if left:
+        raise OSError(f"ps shim left by an earlier try was not removed: {', '.join(left)}")
+    os.mkdir("provenant-shim", 0o700, dir_fd=tmp_fd)
+    stage = os.open("provenant-shim", DIRECTORY_FLAGS, dir_fd=tmp_fd)
+    try:
+        _write_new(stage, "process_info.py", (source / "process_info.py").read_bytes(), 0o644)
+        os.mkdir("bin", 0o700, dir_fd=stage)
+        shim_bin = os.open("bin", DIRECTORY_FLAGS, dir_fd=stage)
+        try:
+            _write_new(shim_bin, "ps", (source / "bin" / "ps").read_bytes(), 0o755)
+        finally:
+            os.close(shim_bin)
+    finally:
+        os.close(stage)
+    return Path(private_tmp) / "provenant-shim" / "bin"
 
 
-def execute(
+def execute(plan, output_path, **options):
+    """Run exactly one attempt. The caller owns fallback, resume, and run publication."""
+    tmp_fd = _open_attempt_tmp(plan["run_dir"])
+    try:
+        return _run_attempt(plan, output_path, tmp_fd, **options)
+    finally:
+        os.close(tmp_fd)
+
+
+def _run_attempt(
     plan,
     output_path,
+    tmp_fd,
     *,
     events_path=None,
     stderr_path=None,
@@ -3170,12 +3499,9 @@ def execute(
         # Running a skill's script must not leave bytecode behind for the check to report.
         environment["PYTHONDONTWRITEBYTECODE"] = "1"
     environment["CLAUDE_CODE_DISABLE_WORKFLOWS"] = "1"
-    attempt_dir = Path(plan["run_dir"])
-    private_tmp = attempt_dir / "tmp"
+    private_tmp = Path(plan["run_dir"]) / "tmp"
     private_cache = private_tmp / "cache"
-    for private in (private_tmp, private_cache):
-        private.mkdir(parents=True, exist_ok=True, mode=0o700)
-        private.chmod(0o700)  # mkdir leaves an existing directory's mode as it was
+    os.close(_private_dir(tmp_fd, "cache"))
     # Tool caches follow XDG_CACHE_HOME; Corepack is set too, so an inherited COREPACK_HOME
     # outside the writable roots cannot leak into child pnpm or yarn calls. zsh ignores TMPDIR
     # and writes here-documents under TMPPREFIX (default /tmp/zsh), outside a confined lane's writes.
@@ -3192,16 +3518,12 @@ def execute(
         for index, (key, value) in enumerate(WRITER_GIT_CONFIG):
             environment[f"GIT_CONFIG_KEY_{index}"] = key
             environment[f"GIT_CONFIG_VALUE_{index}"] = value
-    # macOS refuses to exec the setuid /bin/ps inside any sandbox, native or sandbox-exec.
-    if sys.platform == "darwin" and (
-            (plan["adapter"] == "codex" and plan["applied"]["sandbox"] != "full")
-            or plan["applied"].get("confinement") == "sandbox-exec"):
-        shim_dir = str(stage_ps_shim(private_tmp))
+    if needs_ps_shim(plan):
+        shim_dir = str(stage_ps_shim(tmp_fd, private_tmp))
         environment["PATH"] = shim_dir + os.pathsep + environment.get("PATH", os.defpath)
     if plan["adapter"] == "claude":
         private_claude_tmp = private_tmp / "claude"
-        private_claude_tmp.mkdir(parents=True, exist_ok=True, mode=0o700)
-        private_claude_tmp.chmod(0o700)
+        os.close(_private_dir(tmp_fd, "claude"))
         environment["CLAUDE_TMPDIR"] = str(private_claude_tmp)
         # Otherwise Claude Code opens /tmp/claude-<uid>, which the read-only profile denies.
         environment["CLAUDE_CODE_TMPDIR"] = str(private_claude_tmp)
@@ -3360,14 +3682,18 @@ def execute(
             signal.signal(sig, handle_signal)
     input_file = None
     workspace = None
+    agy_home, agy_home_warnings = None, []
     selector = selectors.DefaultSelector()
     try:
         _prepare_codex_capability_home(plan, environment)
         _prepare_codex_state_dir(plan)
+        agy_home = stage_agy_home(plan, tmp_fd, private_tmp)
+        if agy_home:
+            environment["HOME"] = str(agy_home.path)
         if plan["adapter"] != "codex" and "browser" in plan["applied"].get("capabilities", []):
             environment["MAC_CHROMIUM_TMPDIR"] = str(private_tmp)  # Chrome's default temp is outside the boundary.
         if plan["stdin_policy"] == "prompt":
-            input_file = tempfile.TemporaryFile(dir=private_tmp)
+            input_file = _unlinked_file(tmp_fd)
             input_file.write(plan["prompt"].encode())
             input_file.seek(0)
             stdin = input_file
@@ -3555,6 +3881,8 @@ def execute(
         finally:
             if subreaper:
                 _release_subreaper()
+            if agy_home:
+                agy_home_warnings = finish_agy_home(plan, tmp_fd, agy_home)
     exit_code = process.returncode if process else None
     if cancel_signal and not forced:
         forced = "interrupted"  # EOF can precede the loop's signal check.
@@ -3640,7 +3968,7 @@ def execute(
     session = parsed["session_id"] or plan["resume_session"] or plan["session_id"]
     parsed["session_id"] = session
     observed, source = _observed_model(plan, parsed, environment)
-    warnings = list(plan["warnings"])
+    warnings = [*plan["warnings"], *agy_home_warnings]
     if parsed["signature"] == "exit_after_output":
         warnings.append(parsed["excerpt"])
     reported = {}
@@ -3810,10 +4138,10 @@ def execute(
     digest_value = ""
     output_value = ""
     try:
-        with tempfile.NamedTemporaryFile(dir=private_tmp) as staged:
+        with _unlinked_file(tmp_fd) as staged:
             staged.write(output.encode())
             staged.flush()
-            digest_value, device, inode = install(staged.name, str(output_path))
+            digest_value, device, inode = install(staged.fileno(), str(output_path))
             verify(str(output_path), digest_value, device, inode)
         output_value = str(output_path)
     except (OSError, CustodyError):

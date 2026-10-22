@@ -9,6 +9,7 @@ import shutil
 import re
 import signal
 import socket
+import stat
 import subprocess
 import ctypes
 import sys
@@ -896,7 +897,8 @@ PROVIDER_STATE_CASES = (
     ("agy", (".gemini/config/mcp_config.json", ".gemini/config/plugins/attack.js",
              ".gemini/config/skills/attack/SKILL.md", ".gemini/antigravity-cli/settings.json",
              ".gemini/antigravity-cli/plugins/attack.js", ".gemini/antigravity-cli/skills/attack/SKILL.md",
-             ".gemini/antigravity-cli/bin/attack", ".gemini/antigravity-cli/builtin/skills/attack.md",
+             ".gemini/antigravity-cli/bin/attack", ".gemini/antigravity-cli/bin/agentapi",
+             ".gemini/antigravity-cli/builtin/skills/attack.md",
              ".gemini/antigravity-cli/mcp/server/instructions.md",
              ".gemini/antigravity-cli/cache/marketplaces/attack.js", ".gemini/config/projects/probe.json",
              ".gemini/config/sidecars/attack.json"),
@@ -1142,6 +1144,495 @@ def test_agy_prepares_fresh_state_and_allows_atomic_runtime_rewrites(monkeypatch
         denied.parent.mkdir(parents=True, exist_ok=True)
         assert subprocess.run([*command, f"printf bad > {shlex.quote(str(denied))}"],
                               capture_output=True, text=True).returncode != 0
+
+
+AGY_TOKENS = (".gemini/oauth_creds.json", ".gemini/antigravity-cli/antigravity-oauth-token",
+              ".gemini/antigravity-cli/mcp_oauth_tokens.json")
+
+
+def agy_home_fixture(mod, monkeypatch, tmp_path):
+    home = (tmp_path / "home").resolve()
+    root = home / ".gemini/antigravity-cli"
+    for relative in (".gitconfig", ".gemini/config/settings.json", *AGY_TOKENS,
+                     ".gemini/antigravity-cli/settings.json", ".gemini/antigravity-cli/conversations/c.pb",
+                     ".gemini/antigravity-cli/jetski_state.pbtxt", ".gemini/antigravity-cli/history.jsonl",
+                     ".gemini/antigravity-cli/bin/agentapi", ".gemini/antigravity-cli/bin/webm_encoder"):
+        (home / relative).parent.mkdir(parents=True, exist_ok=True)
+        (home / relative).write_text("original\n", encoding="utf-8")
+    monkeypatch.setattr(mod.Path, "home", lambda: home)
+    return home, root
+
+
+def stage_agy(mod, plan, private_tmp):
+    """Stage as execute does, in the attempt tmp opened once without following a link."""
+    tmp_fd = mod._open_canonical_dir(private_tmp)
+    return mod.stage_agy_home(plan, tmp_fd, private_tmp), tmp_fd
+
+
+def agy_plan(**extra):
+    return {"adapter": "agy", "mode": "read_only", "applied": {"confinement": "sandbox-exec", "add_dirs": []},
+            **extra}
+
+
+def test_confined_agy_home_links_everything_but_its_bin_shim_and_token_files(monkeypatch, tmp_path):
+    mod = supervisor()
+    home, root = agy_home_fixture(mod, monkeypatch, tmp_path)
+    private_tmp = tmp_path / "attempt/tmp"
+    private_tmp.mkdir(parents=True)
+    plan = agy_plan()
+    overlay = stage_agy(mod, plan, private_tmp)[0].path
+    assert overlay.parent == private_tmp and overlay.name.startswith("agy-home-")
+    lane_root = overlay / ".gemini/antigravity-cli"
+    for directory in (overlay, overlay / ".gemini", lane_root, lane_root / "bin"):
+        assert directory.is_dir() and not directory.is_symlink(), directory
+    # State directories are prepared before staging, so each is a link and nothing is lost at cleanup.
+    for relative in (".gitconfig", ".gemini/config", ".gemini/antigravity-cli/settings.json",
+                     ".gemini/antigravity-cli/conversations", ".gemini/antigravity-cli/brain",
+                     ".gemini/antigravity-cli/updater", ".gemini/antigravity-cli/bin/webm_encoder"):
+        assert (overlay / relative).readlink() == home / relative, relative
+    for relative in (*AGY_TOKENS, ".gemini/antigravity-cli/bin/agentapi"):
+        assert not (overlay / relative).exists() and not (overlay / relative).is_symlink(), relative
+
+    # Each attempt stages a fresh overlay, whatever a lane or a failed cleanup left in the last one.
+    (lane_root / "bin/agentapi").write_text("planted\n", encoding="utf-8")
+    (lane_root / "settings.json").unlink()
+    (lane_root / "settings.json").write_text("planted\n", encoding="utf-8")
+    os.mkfifo(private_tmp / "agy-home")
+    again = stage_agy(mod, plan, private_tmp)[0].path
+    assert again != overlay
+    assert not (again / ".gemini/antigravity-cli/bin/agentapi").exists()
+    assert (again / ".gemini/antigravity-cli/settings.json").readlink() == root / "settings.json"
+    assert (root / "bin/agentapi").read_text() == "original\n"
+
+    assert stage_agy(mod, {**plan, "adapter": "claude"}, private_tmp)[0] is None
+    assert stage_agy(mod, agy_plan(applied={"confinement": "none"}), private_tmp)[0] is None
+
+
+def test_agy_home_keeps_dangling_links_and_tolerates_a_missing_bin(monkeypatch, tmp_path):
+    mod = supervisor()
+    home = (tmp_path / "home").resolve()
+    home.mkdir()
+    (home / ".dangling").symlink_to(home / "absent")
+    monkeypatch.setattr(mod.Path, "home", lambda: home)
+    private_tmp = tmp_path / "tmp"
+    private_tmp.mkdir()
+    overlay = stage_agy(mod, agy_plan(), private_tmp)[0].path
+    assert (overlay / ".dangling").readlink() == home / ".dangling"
+    assert not (home / ".gemini/antigravity-cli/bin").exists()
+    assert list((overlay / ".gemini/antigravity-cli/bin").iterdir()) == []
+    assert (overlay / ".gemini/antigravity-cli/conversations").readlink() == home / ".gemini/antigravity-cli/conversations"
+
+
+def test_agy_home_copies_back_renamed_state_but_never_tokens_links_or_oversized_files(monkeypatch, tmp_path):
+    mod = supervisor()
+    agy_state = mod.CONFINED_STATE["agy"]
+    granted = {entry.removesuffix("*") for entry in (*agy_state["read_write"], *agy_state["write_literal"])}
+    # Only state the profile already lets the lane write is ever copied back.
+    assert {f".gemini/antigravity-cli/{name}" for name in mod.AGY_RENAMED_STATE} <= granted
+    _, root = agy_home_fixture(mod, monkeypatch, tmp_path)
+    (root / "jetski_state.pbtxt").chmod(0o644)
+    private_tmp = tmp_path / "tmp"
+    private_tmp.mkdir()
+    outside = tmp_path / "outside"
+    outside.write_text("outside\n", encoding="utf-8")
+    plan = agy_plan()
+    staged, tmp_fd = stage_agy(mod, plan, private_tmp)
+    overlay = staged.path
+    lane_root = overlay / ".gemini/antigravity-cli"
+    # agy writes a temp file and renames it over the overlay's link.
+    for name, text in (("jetski_state.pbtxt", "renamed\n"), ("antigravity-oauth-token", "token\n")):
+        (lane_root / (name + ".tmp")).write_text(text, encoding="utf-8")
+        os.replace(lane_root / (name + ".tmp"), lane_root / name)
+    (lane_root / "history.jsonl").unlink()
+    (lane_root / "history.jsonl").symlink_to(outside)  # a link is never followed or installed
+    os.mkfifo(lane_root / "last_check.timestamp")  # nor a FIFO, which must not block the copy
+    (lane_root / "installation_id").write_text("x" * 65, encoding="utf-8")
+    monkeypatch.setattr(mod, "AGY_STATE_COPY_MAX", 64)
+    (lane_root / "locked").mkdir()
+    (lane_root / "locked/file").write_text("x", encoding="utf-8")
+    (lane_root / "locked").chmod(0o500)
+
+    warnings = mod.finish_agy_home(plan, tmp_fd, staged)
+    assert (root / "jetski_state.pbtxt").read_text() == "renamed\n"
+    assert stat.S_IMODE((root / "jetski_state.pbtxt").stat().st_mode) == 0o644
+    assert not (root / "jetski_state.pbtxt").is_symlink()
+    assert (root / "antigravity-oauth-token").read_text() == "original\n"
+    assert (root / "history.jsonl").read_text() == "original\n" and outside.read_text() == "outside\n"
+    assert not (root / "last_check.timestamp").exists()
+    assert not (root / "installation_id").exists()
+    assert sorted(warnings) == ["agy state not copied back: installation_id: larger than 64 bytes",
+                                "agy state not copied back: last_check.timestamp: not a regular file"]
+    assert not overlay.exists()  # read-only directories and FIFOs included
+    assert sorted(path.name for path in root.iterdir() if path.name.startswith(".")) == [mod.AGY_COPY_BACK_LOCK]
+
+
+def test_confined_agy_writes_its_shim_in_the_overlay_and_never_the_live_bin(monkeypatch, tmp_path):
+    """Verified on a Mac only: CI runs Ubuntu, which has no sandbox-exec, so this skips there."""
+    mod = supervisor()
+    _, root = agy_home_fixture(mod, monkeypatch, tmp_path)
+    sandbox_exec = mod._sandbox_exec_path()
+    if not sandbox_exec:
+        pytest.skip("sandbox-exec is unavailable or disabled")
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    run_dir = tmp_path / "attempt"
+    (run_dir / "tmp").mkdir(parents=True)
+    plan = agy_plan(cwd=str(workspace), workspace_root=str(workspace), run_dir=str(run_dir))
+    profile = mod.os_confinement_profile(plan)
+    overlay = stage_agy(mod, plan, run_dir / "tmp")[0].path
+
+    def run(script):
+        return subprocess.run([sandbox_exec, "-p", profile, "/bin/sh", "-c", script],
+                              capture_output=True, text=True, check=False,
+                              env={**os.environ, "HOME": str(overlay)})
+
+    probe = run("true")
+    if probe.returncode and "sandbox_apply" in probe.stderr:
+        pytest.skip("sandbox_apply is refused in this test environment")
+    shim = '#!/bin/sh\nexec "/usr/local/bin/agy" agentapi "$@"\n'
+    assert run(f'printf {shlex.quote(shim)} > "$HOME/.gemini/antigravity-cli/bin/agentapi"').returncode == 0
+    assert (overlay / ".gemini/antigravity-cli/bin/agentapi").read_text() == shim
+    # Every link is judged at its real path: state stays writable, config and the live bin do not.
+    assert run('printf new > "$HOME/.gemini/antigravity-cli/conversations/c.pb"').returncode == 0
+    assert (root / "conversations/c.pb").read_text() == "new"
+    for relative in ("settings.json", "bin/webm_encoder"):
+        assert run(f'printf bad > "$HOME/.gemini/antigravity-cli/{relative}"').returncode != 0, relative
+        assert (root / relative).read_text() == "original\n"
+    assert run(f"printf bad > {shlex.quote(str(root / 'bin/agentapi'))}").returncode != 0
+    assert (root / "bin/agentapi").read_text() == "original\n"
+
+
+def test_attempt_tmp_replaces_a_planted_link_and_refuses_a_linked_attempt(monkeypatch, tmp_path):
+    mod = supervisor()
+    agy_home_fixture(mod, monkeypatch, tmp_path)
+    victim = tmp_path / "victim/tmp"
+    victim.mkdir(parents=True)
+    attempt = tmp_path / "attempt"
+    attempt.mkdir()
+    (attempt / "tmp").symlink_to(victim)
+    tmp_fd = mod._open_attempt_tmp(attempt)
+    staged = mod.stage_agy_home(agy_plan(), tmp_fd, attempt / "tmp")
+    assert (attempt / "tmp").is_dir() and not (attempt / "tmp").is_symlink()
+    assert stat.S_IMODE((attempt / "tmp").stat().st_mode) == 0o700
+    assert staged.path.is_dir() and list(victim.iterdir()) == []
+    os.close(tmp_fd)
+    linked = tmp_path / "linked-attempt"
+    linked.symlink_to(attempt)
+    with pytest.raises(OSError):
+        mod._open_attempt_tmp(linked)
+
+
+def _plant_victim_overlay(victim, name):
+    lane_root = victim / name / ".gemini/antigravity-cli"
+    lane_root.mkdir(parents=True)
+    (lane_root / "jetski_state.pbtxt").write_text("victim\n", encoding="utf-8")
+    return lane_root
+
+
+def _rename_into(lane_root, name, text):
+    (lane_root / (name + ".tmp")).write_text(text, encoding="utf-8")
+    os.replace(lane_root / (name + ".tmp"), lane_root / name)
+
+
+def test_agy_home_cleanup_never_follows_a_tmp_or_overlay_swapped_for_a_link(monkeypatch, tmp_path):
+    """A lane that swaps tmp for another attempt's tmp cannot redirect copy-back or removal."""
+    mod = supervisor()
+    _, root = agy_home_fixture(mod, monkeypatch, tmp_path)
+    attempt = tmp_path / "attempt"
+    (attempt / "tmp").mkdir(parents=True)
+    plan = agy_plan()
+    staged, tmp_fd = stage_agy(mod, plan, attempt / "tmp")
+    _rename_into(staged.path / ".gemini/antigravity-cli", "jetski_state.pbtxt", "lane\n")
+    victim = tmp_path / "other-attempt/tmp"
+    victim_root = _plant_victim_overlay(victim, staged.name)
+    (attempt / "tmp").rename(attempt / "moved")
+    (attempt / "tmp").symlink_to(victim)
+
+    assert mod.finish_agy_home(plan, tmp_fd, staged) == []
+    assert (root / "jetski_state.pbtxt").read_text() == "lane\n"
+    assert (victim_root / "jetski_state.pbtxt").read_text() == "victim\n"
+    assert list((attempt / "moved").iterdir()) == []
+
+    # The same holds for a link planted inside the overlay itself.
+    staged = mod.stage_agy_home(plan, tmp_fd, attempt / "moved")
+    victim_root = _plant_victim_overlay(victim, "planted")
+    shutil.rmtree(staged.path / ".gemini")
+    (staged.path / ".gemini").symlink_to(victim / "planted/.gemini")
+    warnings = mod.finish_agy_home(plan, tmp_fd, staged)
+    assert len(warnings) == 1 and warnings[0].startswith("agy state not copied back: "), warnings
+    assert (root / "jetski_state.pbtxt").read_text() == "lane\n"
+    assert (victim_root / "jetski_state.pbtxt").read_text() == "victim\n"
+    assert list((attempt / "moved").iterdir()) == []
+
+
+@pytest.mark.parametrize("swapped", [".gemini", ".gemini/antigravity-cli"])
+def test_agy_home_copy_back_never_follows_a_real_state_parent_swapped_for_a_link(monkeypatch, tmp_path, swapped):
+    mod = supervisor()
+    home, _ = agy_home_fixture(mod, monkeypatch, tmp_path)
+    private_tmp = tmp_path / "tmp"
+    private_tmp.mkdir()
+    plan = agy_plan()
+    staged, tmp_fd = stage_agy(mod, plan, private_tmp)
+    _rename_into(staged.path / ".gemini/antigravity-cli", "jetski_state.pbtxt", "lane\n")
+    elsewhere = tmp_path / "elsewhere"
+    (elsewhere / "antigravity-cli").mkdir(parents=True)
+    (home / swapped).rename(tmp_path / "moved")
+    (home / swapped).symlink_to(elsewhere if swapped == ".gemini" else elsewhere / "antigravity-cli")
+
+    warnings = mod.finish_agy_home(plan, tmp_fd, staged)
+    assert len(warnings) == 1 and warnings[0].startswith("agy state not copied back: "), warnings
+    assert list((elsewhere / "antigravity-cli").iterdir()) == []
+    assert list(private_tmp.iterdir()) == []
+
+
+def test_agy_copy_back_keeps_a_real_file_changed_since_staging_and_appends_history(monkeypatch, tmp_path):
+    mod = supervisor()
+    _, root = agy_home_fixture(mod, monkeypatch, tmp_path)
+    (root / "history.jsonl").write_text('{"n": 1}\n', encoding="utf-8")
+    private_tmp = tmp_path / "tmp"
+    private_tmp.mkdir()
+    plan = agy_plan()
+    staged, tmp_fd = stage_agy(mod, plan, private_tmp)
+    lane_root = staged.path / ".gemini/antigravity-cli"
+    _rename_into(lane_root, "jetski_state.pbtxt", "lane\n")
+    _rename_into(lane_root, "history.jsonl", '{"n": 1}\n{"lane": 1}\n')
+    _rename_into(lane_root, "installation_id", "lane\n")
+    # Another session finishes first: it rewrites jetski_state and appends to history.
+    (root / "jetski_state.pbtxt.new").write_text("other\n", encoding="utf-8")
+    os.replace(root / "jetski_state.pbtxt.new", root / "jetski_state.pbtxt")
+    with (root / "history.jsonl").open("a", encoding="utf-8") as history:
+        history.write('{"other": 1}\n')
+
+    warnings = mod.finish_agy_home(plan, tmp_fd, staged)
+    kept = "jetski_state.pbtxt: changed by another session since staging; kept it"
+    assert warnings == ["agy state not copied back: " + kept]
+    assert (root / "jetski_state.pbtxt").read_text() == "other\n"
+    assert (root / "history.jsonl").read_text() == '{"n": 1}\n{"other": 1}\n{"lane": 1}\n'
+    assert (root / "installation_id").read_text() == "lane\n"  # absent at staging and still absent
+
+    # A lane that truncated or rewrote history adds nothing.
+    staged = mod.stage_agy_home(plan, tmp_fd, private_tmp)
+    _rename_into(staged.path / ".gemini/antigravity-cli", "history.jsonl", '{"forged": 1}\n')
+    assert mod.finish_agy_home(plan, tmp_fd, staged) == [
+        "agy state not copied back: history.jsonl: shorter than at staging"]
+    assert (root / "history.jsonl").read_text() == '{"n": 1}\n{"other": 1}\n{"lane": 1}\n'
+
+
+def test_agy_history_copy_back_never_reads_a_sparse_staged_size(monkeypatch, tmp_path):
+    """A first lane enlarges the real history sparsely before a retry stages; the copy stays bounded."""
+    mod = supervisor()
+    _, root = agy_home_fixture(mod, monkeypatch, tmp_path)
+    with (root / "history.jsonl").open("r+b") as history:
+        history.truncate(1 << 30)
+    private_tmp = tmp_path / "tmp"
+    private_tmp.mkdir()
+    plan = agy_plan()
+    staged, tmp_fd = stage_agy(mod, plan, private_tmp)
+    _rename_into(staged.path / ".gemini/antigravity-cli", "history.jsonl", '{"lane": 1}\n')
+    real_pread, requested = os.pread, []
+
+    def bounded(fd, size, offset):
+        requested.append(size)
+        assert size <= 1024 * 1024, size
+        return real_pread(fd, size, offset)
+
+    monkeypatch.setattr(os, "pread", bounded)
+    warnings = mod.finish_agy_home(plan, tmp_fd, staged)
+    monkeypatch.undo()
+    assert warnings == ["agy state not copied back: history.jsonl: shorter than at staging"], warnings
+    assert (root / "history.jsonl").stat().st_size == 1 << 30
+
+
+def test_agy_copy_back_refuses_hardlinked_sources_and_history_targets(monkeypatch, tmp_path):
+    mod = supervisor()
+    _, root = agy_home_fixture(mod, monkeypatch, tmp_path)
+    (root / "history.jsonl").write_text('{"n": 1}\n', encoding="utf-8")
+    alias = tmp_path / "alias.jsonl"
+    os.link(root / "history.jsonl", alias)  # writing through the real name would also change this
+    secret = tmp_path / "secret"
+    secret.write_text("secret\n", encoding="utf-8")
+    private_tmp = tmp_path / "tmp"
+    private_tmp.mkdir()
+    plan = agy_plan()
+    staged, tmp_fd = stage_agy(mod, plan, private_tmp)
+    lane_root = staged.path / ".gemini/antigravity-cli"
+    (lane_root / "jetski_state.pbtxt").unlink()
+    os.link(secret, lane_root / "jetski_state.pbtxt")
+    _rename_into(lane_root, "history.jsonl", '{"n": 1}\n{"lane": 1}\n')
+
+    warnings = mod.finish_agy_home(plan, tmp_fd, staged)
+    assert sorted(warnings) == ["agy state not copied back: history.jsonl: not a single-link regular file",
+                                "agy state not copied back: jetski_state.pbtxt: not a single-link regular file"]
+    assert (root / "jetski_state.pbtxt").read_text() == "original\n"
+    assert alias.read_text() == '{"n": 1}\n' and secret.read_text() == "secret\n"
+
+
+def test_overlapping_agy_finishers_never_both_install(monkeypatch, tmp_path):
+    """Two attempts staged from the same real state finish at once: the first wins, the second warns."""
+    import threading
+    mod = supervisor()
+    _, root = agy_home_fixture(mod, monkeypatch, tmp_path)
+    plan = agy_plan()
+    finishers = []
+    for name in ("first", "second"):
+        private_tmp = tmp_path / name
+        private_tmp.mkdir()
+        staged, tmp_fd = stage_agy(mod, plan, private_tmp)
+        _rename_into(staged.path / ".gemini/antigravity-cli", "jetski_state.pbtxt", name + "\n")
+        finishers.append((staged, tmp_fd))
+    results = {}
+    second = threading.Thread(target=lambda: results.update(second=mod.finish_agy_home(plan, *reversed(finishers[1]))))
+    real_install = mod._install_state
+
+    def install_while_the_second_finishes(directory, name, data):
+        if not second.is_alive() and "second" not in results:
+            second.start()
+            second.join(0.5)  # without a lock the second finisher checks and installs here
+        return real_install(directory, name, data)
+
+    monkeypatch.setattr(mod, "_install_state", install_while_the_second_finishes)
+    results["first"] = mod.finish_agy_home(plan, *reversed(finishers[0]))
+    second.join()
+    assert results["first"] == []
+    kept = "jetski_state.pbtxt: changed by another session since staging; kept it"
+    assert results["second"] == ["agy state not copied back: " + kept]
+    assert (root / "jetski_state.pbtxt").read_text() == "first\n"
+
+    # A lane holding the lock delays copy-back only for a bounded time.
+    import fcntl
+    staged, tmp_fd = stage_agy(mod, plan, tmp_path / "first")
+    _rename_into(staged.path / ".gemini/antigravity-cli", "jetski_state.pbtxt", "held\n")
+    monkeypatch.setattr(mod, "AGY_COPY_BACK_WAIT", 0.2)
+    with open(root / mod.AGY_COPY_BACK_LOCK, "rb") as held:
+        fcntl.flock(held, fcntl.LOCK_EX)
+        warnings = mod.finish_agy_home(plan, tmp_fd, staged)
+    assert len(warnings) == 1 and "stayed locked" in warnings[0], warnings
+    assert (root / "jetski_state.pbtxt").read_text() == "first\n" and not staged.path.exists()
+
+
+def test_agy_staging_creates_an_empty_database_so_sqlite_writes_through_the_link(monkeypatch, tmp_path):
+    import sqlite3
+    mod = supervisor()
+    _, root = agy_home_fixture(mod, monkeypatch, tmp_path)
+    private_tmp = tmp_path / "tmp"
+    private_tmp.mkdir()
+    plan = agy_plan()
+    staged, tmp_fd = stage_agy(mod, plan, private_tmp)
+    database = staged.path / ".gemini/antigravity-cli" / mod.AGY_DATABASE
+    assert database.readlink() == root / mod.AGY_DATABASE
+    with sqlite3.connect(database) as connection:
+        connection.execute("create table t (v)")
+        connection.execute("insert into t values (1)")
+    connection.close()
+    assert mod.finish_agy_home(plan, tmp_fd, staged) == []
+    with sqlite3.connect(root / mod.AGY_DATABASE) as connection:
+        assert connection.execute("select v from t").fetchall() == [(1,)]
+    connection.close()
+    # An existing database is left as it is.
+    before = (root / mod.AGY_DATABASE).read_bytes()
+    mod.finish_agy_home(plan, tmp_fd, mod.stage_agy_home(plan, tmp_fd, private_tmp))
+    assert (root / mod.AGY_DATABASE).read_bytes() == before
+
+
+RETRY_LANE = """
+import os, pathlib, sys
+tmp = pathlib.Path(os.environ["TMPDIR"])
+victim = pathlib.Path(sys.argv[1])
+shim = tmp / "provenant-shim"
+for name in ("bin/ps", "process_info.py"):
+    (shim / name).unlink()
+    (shim / name).symlink_to(victim / "agentapi")
+(tmp / "cache").rename(tmp / "cache-moved")
+(tmp / "cache").symlink_to(victim)
+sys.stderr.write("--effort is not supported for model fixture\\n")
+sys.exit(1)
+"""
+
+SWAP_LANE = """
+import json, os, pathlib, sys
+tmp = pathlib.Path(os.environ["TMPDIR"])
+tmp.rename(tmp.with_name("tmp-moved"))
+tmp.symlink_to(sys.argv[1])
+print(json.dumps({"type": "item.completed", "item": {"type": "agent_message", "text": "done"}}), flush=True)
+print(json.dumps({"type": "turn.completed"}), flush=True)
+"""
+
+
+def test_effort_retry_never_writes_through_links_the_first_lane_planted(monkeypatch, tmp_path):
+    """A lane forges an unsupported-effort diagnostic, so the same attempt runs again in its tmp."""
+    mod = supervisor()
+    dispatch_run = importlib.import_module("skills.orchestrate.scripts.dispatch_run")
+    monkeypatch.setattr(mod, "needs_ps_shim", lambda plan: True)
+    victim = tmp_path / "live-bin"
+    victim.mkdir(mode=0o755)
+    (victim / "agentapi").write_text("live shim\n", encoding="utf-8")
+    attempt = tmp_path / "attempt"
+    plan = fixture_plan(tmp_path, RETRY_LANE, run_dir=attempt)
+    plan["argv"].append(str(victim))
+    plan["effort"] = plan["route"]["effort"] = "high"
+    plan["route"]["supported_efforts"] = ["low", "high"]
+
+    record = mod.execute(plan, attempt / "result.md")
+    retry = dispatch_run.effort_retry_plan(plan, record)
+    assert retry is not None, record
+    retry["argv"] = plan["argv"]
+    mod.execute(retry, attempt / "result.md")
+
+    assert (victim / "agentapi").read_text() == "live shim\n"
+    assert sorted(path.name for path in victim.iterdir()) == ["agentapi"]
+    assert stat.S_IMODE(victim.stat().st_mode) == 0o755  # the planted cache link was not chmodded
+
+
+def test_output_is_staged_in_the_held_tmp_after_the_lane_swaps_it(tmp_path):
+    mod = supervisor()
+    victim = tmp_path / "victim"
+    victim.mkdir()
+    attempt = tmp_path / "attempt"
+    victim.chmod(0o500)  # a write that followed the swapped tmp would fail here
+    plan = fixture_plan(tmp_path, SWAP_LANE, run_dir=attempt)
+    plan["argv"].append(str(victim))
+    record = mod.execute(plan, attempt / "result.md")
+    assert record["status"] == "ok", record
+    assert "done" in (attempt / "result.md").read_text()
+    assert (attempt / "tmp").is_symlink() and list(victim.iterdir()) == []
+    assert [path.name for path in (attempt / "tmp-moved").iterdir() if path.name.startswith(".provenant")] == []
+
+
+AGY_LANE = """
+import json, os, pathlib
+home = pathlib.Path(os.environ["HOME"])
+lane = home / ".gemini/antigravity-cli"
+(lane / "jetski_state.pbtxt.tmp").write_text("lane\\n")
+os.replace(lane / "jetski_state.pbtxt.tmp", lane / "jetski_state.pbtxt")
+print(json.dumps({"status": "SUCCESS", "response": json.dumps(
+    [str(home), (lane / "brain").is_symlink(), (lane / "conversations").is_symlink()])}))
+"""
+
+
+def test_agy_attempt_stages_after_state_preparation_and_cleans_up(monkeypatch, tmp_path):
+    """Runs the real confinement_command; a pass-through stand-in replaces sandbox-exec itself."""
+    mod = supervisor()
+    home, root = agy_home_fixture(mod, monkeypatch, tmp_path)
+    shutil.rmtree(root / "conversations")
+    passthrough = tmp_path / "sandbox-exec"
+    passthrough.write_text('#!/bin/sh\nshift 2\nexec "$@"\n', encoding="utf-8")
+    passthrough.chmod(0o755)
+    monkeypatch.setattr(mod, "_sandbox_exec_path", lambda: str(passthrough))
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    attempt = tmp_path / "attempt"
+    attempt.mkdir()
+    plan = fixture_plan(workspace, AGY_LANE, "agy", run_dir=attempt)
+    plan["applied"]["confinement"] = "sandbox-exec"
+    record = mod.execute(plan, attempt / "result.md")
+    assert record["status"] == "ok", record
+    lane_home, brain_linked, conversations_linked = json.loads((attempt / "result.md").read_text())
+    assert Path(lane_home).parent == attempt / "tmp" and Path(lane_home).name.startswith("agy-home-")
+    assert brain_linked and conversations_linked
+    assert (root / "conversations").is_dir() and not (root / "conversations").is_symlink()
+    assert (root / "jetski_state.pbtxt").read_text() == "lane\n"
+    assert not Path(lane_home).exists()
+    assert home.is_dir()
 
 
 @pytest.mark.parametrize("adapter,project", [
