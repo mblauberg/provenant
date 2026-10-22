@@ -1825,6 +1825,40 @@ def test_a_transcript_swapped_for_a_link_after_discovery_is_never_read(tmp_path,
     assert db.execute("SELECT COUNT(*) FROM usage WHERE source='claude'").fetchone()[0] == 0
 
 
+def test_nested_lineage_reaches_usage_events_and_parent_stats(tmp_path):
+    project = tmp_path / 'project'
+    project.mkdir()
+    state = tmp_path / 'state'
+    state.mkdir()
+    with sqlite3.connect(state / 'fabric.sqlite3') as db:
+        db.execute('CREATE TABLE agents(project TEXT)')
+        db.execute('INSERT INTO agents VALUES (?)', (str(project),))
+    parent = {'run_id': 'mcp-parent', 'task_id': 'writer', 'attempt': 2, 'run_dir': str(project)}
+    path = project / '.agent-run/runs/20261022-1000-dispatch-child-abc/tasks/junior/attempt-001/attempt.json'
+    write_json(path, {'schema': 'fabric.attempt.v1', 'run_id': 'mcp-child', 'task_id': 'junior',
+                     'attempt': 1, 'parent': parent, 'children': [{'run_id': 'mcp-grandchild', 'task_id': 'bulk',
+                         'attempt': 1, 'status': 'failed', 'error': 'PRIVATE_CHILD_ERROR'}],
+                     'status': 'ok', 'state': 'terminal',
+                     'cwd': str(project), 'ended_at': '2026-10-22T01:00:00Z',
+                     'provenance': {'requested': {'adapter': 'codex'}, 'resolved_model': 'gpt-6.1-sol'},
+                     'usage': {'input_tokens': 10, 'cache_read_tokens': 0, 'cache_write_tokens': 0,
+                               'output_tokens': 5, 'reasoning_tokens': 0}})
+    result = cli(tmp_path, 'telemetry', 'ingest')
+    assert result.returncode == 0, result.stderr
+    with sqlite3.connect(state / 'telemetry.sqlite3') as db:
+        assert db.execute('SELECT parent_run_id,parent_task_id,parent_attempt FROM usage').fetchall() == [
+            ('mcp-parent', 'writer', 2)]
+        attrs = json.loads(db.execute("SELECT attrs FROM events WHERE kind='lane.attempt'").fetchone()[0])
+        assert attrs['parent'] == parent
+        assert attrs['children'] == [{'run_id': 'mcp-grandchild', 'task_id': 'bulk', 'attempt': 1, 'status': 'failed'}]
+        assert 'PRIVATE_CHILD_ERROR' not in '\n'.join(db.iterdump())
+    result = cli(tmp_path, 'stats', '--json')
+    assert result.returncode == 0, result.stderr
+    groups = json.loads(result.stdout)['usage_by_parent']
+    assert [(row['parent_run_id'], row['parent_task_id'], row['parent_attempt'], row['output_tokens'])
+            for row in groups] == [('mcp-parent', 'writer', 2, 5)]
+
+
 def test_rows_under_earlier_host_defaults_merge_into_one_host_without_a_rewrite(tmp_path, monkeypatch):
     """Raw-hostname and 'local' rows from earlier versions read as this host; the ledger keeps them."""
     use_environment(tmp_path, monkeypatch)
@@ -1979,6 +2013,8 @@ def test_a_renamed_host_never_rewrites_the_ledger_even_when_its_old_id_is_now_a_
     assert report['host'] == 'studio'
     assert sorted((row['host'], row['rows'], row['input_tokens']) for row in report['session_usage']) == [
         ('box', 1, 10), ('studio', 1, 10)]
+
+
 # Golden check for the SQL-grouped `stats`: the row-by-row implementation it replaced is kept
 # here as the oracle and both must report the same for one ledger.
 def legacy_stats(db, since=None, prices=None, *, summary=False, until=None):
@@ -2071,6 +2107,8 @@ def legacy_stats(db, since=None, prices=None, *, summary=False, until=None):
     report = {'schema_version': 2, 'since': since, 'host': host_id(),
             'usage': aggregate(usage, ('provider', 'adapter', 'model'), prices, free_patterns),
             'usage_per_day': aggregate(usage, ('day', 'provider', 'adapter', 'account'), prices, free_patterns),
+            'usage_by_parent': aggregate([row for row in attributed if row['source'] == 'fabric' and row.get('parent_run_id')],
+                                         ('parent_run_id', 'parent_task_id', 'parent_attempt'), prices, free_patterns),
             'outcomes': outcomes([row for row in attributed if row['source'] == 'fabric']),
             # One overall group each, for before/after comparison; percentiles are never averaged.
             'lane_totals': outcomes([{**row, **dict.fromkeys(OUTCOME_KEYS)}

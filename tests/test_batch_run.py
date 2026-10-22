@@ -1240,6 +1240,41 @@ def test_standalone_dispatch_is_blocked_by_batch_custody(tmp_path, monkeypatch):
         lock.close()
 
 
+@pytest.mark.parametrize('token', ['owner-token', None])
+def test_batch_child_flag_cannot_bypass_unrelated_run_custody(tmp_path, monkeypatch, token):
+    policy = tmp_path / '.agents/fabric-policy.json'
+    policy.parent.mkdir()
+    policy.write_text('{"memory_floor_percent":{"read_only":0,"worktree_write":0}}')
+    monkeypatch.chdir(tmp_path)
+    run_dir = make_run(tmp_path, 'unrelated-child')
+    prompt = tmp_path / 'prompt.md'
+    prompt.write_text('blocked\n', encoding='utf-8')
+    module = load_module()
+    lock = module._acquire_batch_lock(run_dir)
+    # This live owner is not the process launching the dispatch. Even knowing
+    # its token and asking for --batch-child must not grant shared custody.
+    (run_dir / 'dispatch-owner.json').write_text(json.dumps({
+        'schema_version': 1, 'kind': 'batch', 'run_dir': str(run_dir),
+        'run_token': 'owner-token', 'owner_pid': os.getppid(),
+        'owner_started_at': module.run_lineage.process_info.start_time(os.getppid()),
+    }))
+    env = {**os.environ, 'PROVENANT_HOST_LOCAL_ONLY': '1'}
+    env.pop('PROVENANT_RUN_TOKEN', None)
+    if token is not None:
+        env['PROVENANT_RUN_TOKEN'] = token
+    try:
+        blocked = subprocess.run([
+            str(BATCH.parent / 'dispatch_run.py'), '--batch-child',
+            '--run-dir', str(run_dir), '--task-id', 'blocked', '--adapter', 'codex',
+            '--prompt-file', str(prompt), '--alias', 'junior', '--role', 'worker',
+        ], cwd=tmp_path, env=env, capture_output=True, text=True, timeout=10)
+        assert blocked.returncode == 2
+        assert json.loads(blocked.stdout)['status'] == 'run_custody_busy'
+        assert not (run_dir / 'tasks/blocked').exists()
+    finally:
+        lock.close()
+
+
 @pytest.mark.parametrize('_run', range(3))
 def test_batch_cancellation_reaps_active_dispatches(tmp_path, monkeypatch, _run):
     monkeypatch.chdir(tmp_path)
@@ -1358,6 +1393,9 @@ def test_batch_rejects_a_worktree_without_the_writer_access_mode(tmp_path, monke
 
 
 def test_real_batch_passes_each_task_cwd_and_absolute_prompt(tmp_path, monkeypatch):
+    policy = tmp_path / '.agents/fabric-policy.json'
+    policy.parent.mkdir()
+    policy.write_text('{"memory_floor_percent":{"read_only":0,"worktree_write":0}}')
     bindir = tmp_path / 'bin'
     bindir.mkdir()
     write_executable(bindir / 'claude', '''#!/usr/bin/env python3
