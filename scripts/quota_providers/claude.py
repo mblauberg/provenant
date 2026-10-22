@@ -67,7 +67,8 @@ def credentials(account, state, io, now):
             raw = stream.read(io.MAX_RESPONSE_BYTES + 1)
     except OSError:
         pass
-    if raw is None and state.get('loggedIn'):
+    # Only macOS has the Keychain; elsewhere Claude Code keeps the record in `.credentials.json`.
+    if raw is None and state.get('loggedIn') and sys.platform == 'darwin':
         try:
             result = io.run_process(['/usr/bin/security', 'find-generic-password', '-s',
                                      keychain_service(account.identity_dir), '-w'],

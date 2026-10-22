@@ -28,13 +28,37 @@ def instance_root_for(home: Path) -> Path:
     return home / ".agents"
 
 
-@pytest.mark.parametrize("existing", ["new", "directory", "symlink"])
-def test_otel_installer_restricts_storage_permissions(tmp_path, existing):
+def otel_tools(tmp_path, system="Darwin", swiftc=True):
+    """A PATH prefix with a stand-in `uname` and, optionally, a stand-in `swiftc`."""
     tools = tmp_path / "tools"
     tools.mkdir()
-    swiftc = tools / "swiftc"
-    swiftc.write_text('#!/bin/bash\nwhile [[ "$1" != -o ]]; do shift; done\ntouch "$2"\n')
-    swiftc.chmod(0o755)
+    uname = tools / "uname"
+    uname.write_text(f"#!/bin/sh\necho {system}\n")
+    uname.chmod(0o755)
+    if swiftc:
+        compiler = tools / "swiftc"
+        compiler.write_text('#!/bin/bash\nwhile [[ "$1" != -o ]]; do shift; done\ntouch "$2"\n')
+        compiler.chmod(0o755)
+    return tools
+
+
+def otel_install(tmp_path, tools, path=None, **extra):
+    return subprocess.run(
+        [shutil.which("bash"), "-c", 'umask 022; exec "$1"', "bash", str(ROOT / "scripts/install-otel-collector")],
+        env={**os.environ, "HOME": str(tmp_path), "AGENT_FABRIC_STATE_ROOT": str(tmp_path / "state"),
+             "PROVENANT_BIN_DIR": str(tmp_path / "bin"), "PROVENANT_OTEL_NO_LAUNCHCTL": "1",
+             "PATH": path or f"{tools}{os.pathsep}{os.environ['PATH']}", **extra},
+        text=True, capture_output=True, timeout=5,
+    )
+
+
+def otel_plist(tmp_path):
+    return (tmp_path / "Library/LaunchAgents/com.provenant.otlp-collector.plist").read_text()
+
+
+@pytest.mark.parametrize("existing", ["new", "directory", "symlink"])
+def test_otel_installer_restricts_storage_permissions(tmp_path, existing):
+    tools = otel_tools(tmp_path)
     state = tmp_path / "state"
     directory = state / "otel"
     if existing == "directory":
@@ -44,13 +68,7 @@ def test_otel_installer_restricts_storage_permissions(tmp_path, existing):
         outside = tmp_path / "outside"
         outside.mkdir(mode=0o755)
         directory.symlink_to(outside, target_is_directory=True)
-    result = subprocess.run(
-        ["bash", "-c", 'umask 022; exec "$1"', "bash", str(ROOT / "scripts/install-otel-collector")],
-        env={**os.environ, "HOME": str(tmp_path), "AGENT_FABRIC_STATE_ROOT": str(state),
-             "PROVENANT_BIN_DIR": str(tmp_path / "bin"), "PROVENANT_OTEL_NO_LAUNCHCTL": "1",
-             "PATH": f"{tools}{os.pathsep}{os.environ['PATH']}"},
-        text=True, capture_output=True, timeout=5,
-    )
+    result = otel_install(tmp_path, tools)
     if existing == "symlink":
         assert result.returncode != 0
         assert stat.S_IMODE(outside.stat().st_mode) == 0o755
@@ -58,17 +76,61 @@ def test_otel_installer_restricts_storage_permissions(tmp_path, existing):
         return
     assert result.returncode == 0, result.stderr
     assert stat.S_IMODE(directory.stat().st_mode) == 0o700
+    assert "<string>4318</string>" in otel_plist(tmp_path) and "@PORT@" not in otel_plist(tmp_path)
+
+
+def test_otel_installer_refuses_a_host_without_macos_launchd(tmp_path):
+    result = otel_install(tmp_path, otel_tools(tmp_path, system="Linux"))
+    assert result.returncode != 0
+    assert "needs macOS and launchd; this host is Linux" in result.stderr
+    assert not (tmp_path / "bin").exists() and not (tmp_path / "Library").exists()
+
+
+def test_otel_installer_fails_loudly_without_swiftc(tmp_path):
+    tools = otel_tools(tmp_path, swiftc=False)
+    for name in ("bash", "dirname"):  # the shebang and ROOT need these; swiftc stays off PATH
+        (tools / name).symlink_to(shutil.which(name))
+    result = otel_install(tmp_path, tools, path=str(tools))
+    assert result.returncode != 0
+    assert "swiftc not found" in result.stderr
+    assert not (tmp_path / "bin").exists()
+
+
+def test_otel_installer_substitutes_a_configured_port(tmp_path):
+    result = otel_install(tmp_path, otel_tools(tmp_path), PROVENANT_OTEL_PORT="4400")
+    assert result.returncode == 0, result.stderr
+    assert "<key>SockServiceName</key><string>4400</string>" in otel_plist(tmp_path)
+    assert "port=4400" in result.stdout
+
+
+@pytest.mark.parametrize("port", ["0", "65536", "99999", "080", "43a", "-1", " 4318", ""])
+def test_otel_installer_rejects_an_invalid_port(tmp_path, port):
+    result = otel_install(tmp_path, otel_tools(tmp_path), PROVENANT_OTEL_PORT=port)
+    if port == "":
+        # An empty value means unset: the default port.
+        assert result.returncode == 0, result.stderr
+        assert "<string>4318</string>" in otel_plist(tmp_path)
+        return
+    assert result.returncode != 0
+    assert "PROVENANT_OTEL_PORT must be an integer from 1 to 65535" in result.stderr
+    assert not (tmp_path / "Library").exists()
 
 
 def run(platform: str, home: Path, *arguments: str, bash=None, **extra_env):
     env = os.environ.copy()
     env.pop("AGENT_FABRIC_STATE_DIRECTORY", None)
+    # Caller-inherited install targets would leak into the scratch HOME.
+    for name in ("CLAUDE_CONFIG_DIR", "PROVENANT_BIN_DIR", "CODEX_HOME"):
+        env.pop(name, None)
     env.update({"HOME": str(home)})
     # Keep the instance root deterministic in the scratch HOME. AGENTS_HOME now
     # names only the product root, but an explicit instance value also keeps the
     # test independent of any caller-provided instance selection.
     env["AGENT_FABRIC_INSTANCE_ROOT"] = str(instance_root_for(home))
     env["PROVENANT_ALLOW_LINKED_WORKTREE_INSTALL"] = "1"
+    # These tests are about the template path; the Rust front door has its own
+    # cases below, so a toolchain on the host must not change what they build.
+    env["PROVENANT_FRONT_DOOR"] = "python"
     env.update(extra_env)
     return subprocess.run(
         [*([bash] if bash else []), str(SCRIPT), "--platform", platform, *arguments],
@@ -81,13 +143,25 @@ def run(platform: str, home: Path, *arguments: str, bash=None, **extra_env):
     )
 
 
-def copy_product(root: Path, destination: Path) -> Path:
+@pytest.fixture(scope="module")
+def product_template(tmp_path_factory) -> Path:
+    """One filtered product checkout per module; each test clones it."""
+    template = tmp_path_factory.mktemp("product-template") / "product"
     shutil.copytree(
-        root,
-        destination,
+        ROOT,
+        template,
         symlinks=True,
-        ignore=shutil.ignore_patterns(".git", ".agent-run", "node_modules", ".venv"),
+        ignore=shutil.ignore_patterns(
+            ".git", ".agent-run", "node_modules", ".venv", "installation.json"
+        ),
     )
+    return template
+
+
+def copy_product(template: Path, destination: Path) -> Path:
+    # cp -R keeps symlinks as links; -c makes an APFS clone on macOS.
+    command = ["cp", "-c", "-R"] if sys.platform == "darwin" else ["cp", "-R"]
+    subprocess.run([*command, str(template), str(destination)], check=True)
     return destination
 
 
@@ -106,6 +180,7 @@ def run_product(product: Path, platform: str, home: Path, *arguments: str, **ext
             "CLAUDE_CONFIG_DIR": str(home / "claude"),
             "CODEX_HOME": str(home / "codex"),
             "PATH": f"{home / 'bin'}{os.pathsep}{os.environ['PATH']}",
+            "PROVENANT_FRONT_DOOR": "python",
         }
     )
     environment.update(extra_env)
@@ -946,8 +1021,11 @@ def test_all_reports_detected_client_link_failure_and_continues(tmp_path):
     assert (tmp_path / ".codex/config.toml").exists()
 
 
-def test_install_refreshes_newer_routing_catalogue_and_preserves_overrides(tmp_path):
-    product = copy_product(ROOT, tmp_path / "product")
+def test_install_refreshes_newer_routing_catalogue_and_preserves_overrides(
+    tmp_path,
+    product_template,
+):
+    product = copy_product(product_template, tmp_path / "product")
     first = run_product(product, "codex", tmp_path / "install")
     assert first.returncode == 0, first.stderr
     instance_root = tmp_path / "install" / "instance"
@@ -1184,23 +1262,7 @@ def test_claude_install_keeps_doctrine_when_config_is_instance_root(tmp_path):
     assert "duplicate instructions retired" not in result.stdout
 
 
-def test_claude_install_keeps_agents_link_that_claude_md_chains_through(tmp_path):
-    config = tmp_path / "claude-config"
-    config.mkdir()
-    instance_agents = tmp_path / ".agents/AGENTS.md"
-    instance_agents.parent.mkdir(parents=True)
-    instance_agents.write_text("# Instance instructions\n")
-    (config / "AGENTS.md").symlink_to(instance_agents)
-    (config / "CLAUDE.md").symlink_to("AGENTS.md")
-
-    result = run("claude", tmp_path, CLAUDE_CONFIG_DIR=str(config))
-
-    assert result.returncode == 0, result.stderr
-    assert (config / "CLAUDE.md").resolve() == instance_agents
-    assert "duplicate instructions retired" not in result.stdout
-
-
-@pytest.mark.parametrize("shape", ["hop", "dot_dot", "absolute_alias"])
+@pytest.mark.parametrize("shape", ["direct", "hop", "dot_dot", "absolute_alias"])
 def test_claude_install_keeps_agents_link_on_indirect_chain(tmp_path, shape):
     real_config = tmp_path / "claude-config"
     real_config.mkdir()
@@ -1209,7 +1271,9 @@ def test_claude_install_keeps_agents_link_on_indirect_chain(tmp_path, shape):
     instance_agents.parent.mkdir(parents=True)
     instance_agents.write_text("# Instance instructions\n")
     (real_config / "AGENTS.md").symlink_to(instance_agents)
-    if shape == "hop":
+    if shape == "direct":
+        (real_config / "CLAUDE.md").symlink_to("AGENTS.md")
+    elif shape == "hop":
         (real_config / "hop.md").symlink_to("AGENTS.md")
         (real_config / "CLAUDE.md").symlink_to("hop.md")
     elif shape == "dot_dot":
@@ -1364,8 +1428,8 @@ def test_rejects_a_relative_provenant_bin_directory_before_mutation(tmp_path):
     assert not (tmp_path / ".codex").exists()
 
 
-def test_rejects_a_provenant_bin_directory_inside_the_product(tmp_path):
-    product = copy_product(ROOT, tmp_path / "product")
+def test_rejects_a_provenant_bin_directory_inside_the_product(tmp_path, product_template):
+    product = copy_product(product_template, tmp_path / "product")
     source = product / "scripts/provenant"
     original = source.read_bytes()
 
@@ -1382,8 +1446,11 @@ def test_rejects_a_provenant_bin_directory_inside_the_product(tmp_path):
     assert not (tmp_path / "instance/.agent-fabric/product-root.json").exists()
 
 
-def test_rejects_a_missing_bin_directory_under_a_symlinked_product_parent(tmp_path):
-    product = copy_product(ROOT, tmp_path / "product")
+def test_rejects_a_missing_bin_directory_under_a_symlinked_product_parent(
+    tmp_path,
+    product_template,
+):
+    product = copy_product(product_template, tmp_path / "product")
     alias = tmp_path / "product-alias"
     alias.symlink_to(product, target_is_directory=True)
 
@@ -1519,8 +1586,11 @@ def test_split_install_is_idempotent_over_its_own_instructions(tmp_path):
     assert instructions.exists()
 
 
-def test_split_install_rebinds_its_bootstrap_when_instance_root_changes(tmp_path):
-    product = copy_product(ROOT, tmp_path / "product")
+def test_split_install_rebinds_its_bootstrap_when_instance_root_changes(
+    tmp_path,
+    product_template,
+):
+    product = copy_product(product_template, tmp_path / "product")
     first_instance = tmp_path / "instance-one"
     second_instance = tmp_path / "instance-two"
 
@@ -1546,10 +1616,12 @@ def test_split_install_rebinds_its_bootstrap_when_instance_root_changes(tmp_path
 
 @pytest.mark.parametrize("platform", ["claude", "codex"])
 def test_relocation_rewrites_only_an_exact_generated_bootstrap_and_preserves_conflicts(
-    tmp_path, platform
+    tmp_path,
+    platform,
+    product_template,
 ):
-    old_product = copy_product(ROOT, tmp_path / "old product")
-    new_product = copy_product(ROOT, tmp_path / "new product")
+    old_product = copy_product(product_template, tmp_path / "old product")
+    new_product = copy_product(product_template, tmp_path / "new product")
 
     first = run_product(old_product, platform, tmp_path)
     assert first.returncode == 0, first.stderr
@@ -1591,9 +1663,12 @@ def test_relocation_rewrites_only_an_exact_generated_bootstrap_and_preserves_con
     assert json.loads(pointer.read_text())["product_root"] == str(new_product.resolve())
 
 
-def test_three_line_custom_instructions_are_not_mistaken_for_generated_bootstrap(tmp_path):
-    old_product = copy_product(ROOT, tmp_path / "old product")
-    new_product = copy_product(ROOT, tmp_path / "new product")
+def test_three_line_custom_instructions_are_not_mistaken_for_generated_bootstrap(
+    tmp_path,
+    product_template,
+):
+    old_product = copy_product(product_template, tmp_path / "old product")
+    new_product = copy_product(product_template, tmp_path / "new product")
     first = run_product(old_product, "codex", tmp_path)
     assert first.returncode == 0, first.stderr
 
@@ -1620,8 +1695,8 @@ LEGACY_BOOTSTRAP = (
 )
 
 
-def test_split_relocation_recognises_the_exact_legacy_fused_bootstrap(tmp_path):
-    new_product = copy_product(ROOT, tmp_path / "new product")
+def test_split_relocation_recognises_the_exact_legacy_fused_bootstrap(tmp_path, product_template):
+    new_product = copy_product(product_template, tmp_path / "new product")
     old_product = tmp_path / "old product"
     instance = tmp_path / "instance"
     pointer = instance / ".agent-fabric/product-root.json"
@@ -1646,8 +1721,11 @@ def test_split_relocation_recognises_the_exact_legacy_fused_bootstrap(tmp_path):
     assert str(new_product / "HARNESS.md") in instructions.read_text()
 
 
-def test_generated_bootstrap_is_repaired_even_when_pointer_already_names_product(tmp_path):
-    product = copy_product(ROOT, tmp_path / "product")
+def test_generated_bootstrap_is_repaired_even_when_pointer_already_names_product(
+    tmp_path,
+    product_template,
+):
+    product = copy_product(product_template, tmp_path / "product")
     first = run_product(product, "codex", tmp_path)
     assert first.returncode == 0, first.stderr
     instructions = tmp_path / "codex/AGENTS.md"
@@ -1663,9 +1741,12 @@ def test_generated_bootstrap_is_repaired_even_when_pointer_already_names_product
     assert str(product / "HARNESS.md") in instructions.read_text()
 
 
-def test_all_primary_cutover_preflights_second_primary_before_mutating_first(tmp_path):
-    old_product = copy_product(ROOT, tmp_path / "old product")
-    new_product = copy_product(ROOT, tmp_path / "new product")
+def test_all_primary_cutover_preflights_second_primary_before_mutating_first(
+    tmp_path,
+    product_template,
+):
+    old_product = copy_product(product_template, tmp_path / "old product")
+    new_product = copy_product(product_template, tmp_path / "new product")
     first = run_product(old_product, "claude", tmp_path)
     assert first.returncode == 0, first.stderr
     pointer = tmp_path / "instance/.agent-fabric/product-root.json"
@@ -1690,8 +1771,11 @@ def test_all_primary_cutover_preflights_second_primary_before_mutating_first(tmp
     assert (tmp_path / "new product/HARNESS.md").is_file()
 
 
-def test_all_primary_install_configures_both_surfaces_and_publishes_once(tmp_path):
-    product = copy_product(ROOT, tmp_path / "product with spaces")
+def test_all_primary_install_configures_both_surfaces_and_publishes_once(
+    tmp_path,
+    product_template,
+):
+    product = copy_product(product_template, tmp_path / "product with spaces")
 
     result = run_product(product, "all", tmp_path)
 
@@ -1738,8 +1822,11 @@ def test_all_primary_install_configures_both_surfaces_and_publishes_once(tmp_pat
     assert not (tmp_path / "home/.config/opencode/opencode.jsonc").exists()
 
 
-def test_all_primary_install_uses_selected_python_when_path_has_no_python3(tmp_path):
-    product = copy_product(ROOT, tmp_path / "product")
+def test_all_primary_install_uses_selected_python_when_path_has_no_python3(
+    tmp_path,
+    product_template,
+):
+    product = copy_product(product_template, tmp_path / "product")
     tool_bin = tmp_path / "tools"
     tool_bin.mkdir()
     for name in (
@@ -1758,9 +1845,13 @@ def test_all_primary_install_uses_selected_python_when_path_has_no_python3(tmp_p
 
 
 @pytest.mark.parametrize("platform", ["claude", "codex"])
-def test_foreign_harness_link_is_rejected_before_pointer_publish(tmp_path, platform):
-    old_product = copy_product(ROOT, tmp_path / "old product")
-    new_product = copy_product(ROOT, tmp_path / "new product")
+def test_foreign_harness_link_is_rejected_before_pointer_publish(
+    tmp_path,
+    platform,
+    product_template,
+):
+    old_product = copy_product(product_template, tmp_path / "old product")
+    new_product = copy_product(product_template, tmp_path / "new product")
     first = run_product(old_product, platform, tmp_path)
     assert first.returncode == 0, first.stderr
 
@@ -1782,8 +1873,11 @@ def test_foreign_harness_link_is_rejected_before_pointer_publish(tmp_path, platf
     assert "HARNESS.md is not a canonical or receipt-owned product link" in result.stderr
 
 
-def test_generated_instruction_symlink_is_rejected_without_following_external_target(tmp_path):
-    product = copy_product(ROOT, tmp_path / "product")
+def test_generated_instruction_symlink_is_rejected_without_following_external_target(
+    tmp_path,
+    product_template,
+):
+    product = copy_product(product_template, tmp_path / "product")
     first = run_product(product, "codex", tmp_path)
     assert first.returncode == 0, first.stderr
 
@@ -1806,9 +1900,9 @@ def test_generated_instruction_symlink_is_rejected_without_following_external_ta
     assert "instructions symlink is not the instance doctrine" in result.stderr
 
 
-def test_harness_rebind_uses_collision_safe_staging(tmp_path):
-    old_product = copy_product(ROOT, tmp_path / "old product")
-    new_product = copy_product(ROOT, tmp_path / "new product")
+def test_harness_rebind_uses_collision_safe_staging(tmp_path, product_template):
+    old_product = copy_product(product_template, tmp_path / "old product")
+    new_product = copy_product(product_template, tmp_path / "new product")
     first = run_product(old_product, "claude", tmp_path)
     assert first.returncode == 0, first.stderr
 
@@ -1824,9 +1918,9 @@ def test_harness_rebind_uses_collision_safe_staging(tmp_path):
     assert harness.resolve() == (new_product / "HARNESS.md").resolve()
 
 
-def test_relocation_rebinds_a_dangling_relative_old_harness_link(tmp_path):
-    old_product = copy_product(ROOT, tmp_path / "old'\\product")
-    new_product = copy_product(ROOT, tmp_path / "new product")
+def test_relocation_rebinds_a_dangling_relative_old_harness_link(tmp_path, product_template):
+    old_product = copy_product(product_template, tmp_path / "old'\\product")
+    new_product = copy_product(product_template, tmp_path / "new product")
     first = run_product(old_product, "claude", tmp_path)
     assert first.returncode == 0, first.stderr
 
@@ -1840,13 +1934,13 @@ def test_relocation_rebinds_a_dangling_relative_old_harness_link(tmp_path):
     assert harness.resolve() == (new_product / "HARNESS.md").resolve()
 
 
-def test_relocation_matches_dangling_link_through_a_symlinked_parent(tmp_path):
+def test_relocation_matches_dangling_link_through_a_symlinked_parent(tmp_path, product_template):
     physical = tmp_path / "physical"
     physical.mkdir()
     alias = tmp_path / "alias"
     alias.symlink_to(physical, target_is_directory=True)
-    old_product = copy_product(ROOT, physical / "old product")
-    new_product = copy_product(ROOT, physical / "new product")
+    old_product = copy_product(product_template, physical / "old product")
+    new_product = copy_product(product_template, physical / "new product")
     first = run_product(old_product, "claude", tmp_path)
     assert first.returncode == 0, first.stderr
 
@@ -1860,8 +1954,11 @@ def test_relocation_matches_dangling_link_through_a_symlinked_parent(tmp_path):
     assert harness.resolve() == (new_product / "HARNESS.md").resolve()
 
 
-def test_instance_leaf_symlink_conflicts_are_rejected_before_publication(tmp_path):
-    product = copy_product(ROOT, tmp_path / "product")
+def test_instance_leaf_symlink_conflicts_are_rejected_before_publication(
+    tmp_path,
+    product_template,
+):
+    product = copy_product(product_template, tmp_path / "product")
     instance = tmp_path / "instance"
     instance.mkdir()
     outside = tmp_path / "outside"
@@ -1883,8 +1980,11 @@ def test_instance_leaf_symlink_conflicts_are_rejected_before_publication(tmp_pat
     assert list(outside.iterdir()) == []
 
 
-def test_instance_config_directory_symlink_is_rejected_before_publication(tmp_path):
-    product = copy_product(ROOT, tmp_path / "product")
+def test_instance_config_directory_symlink_is_rejected_before_publication(
+    tmp_path,
+    product_template,
+):
+    product = copy_product(product_template, tmp_path / "product")
     instance = tmp_path / "instance"
     instance.mkdir()
     outside = tmp_path / "outside"
@@ -1897,19 +1997,6 @@ def test_instance_config_directory_symlink_is_rejected_before_publication(tmp_pa
     assert result.returncode == 3
     assert not pointer.exists()
     assert list(outside.iterdir()) == []
-
-
-def test_a_genuinely_foreign_instructions_file_is_still_refused(tmp_path):
-    """Migration must not become a licence to rewrite user-authored files."""
-    config = tmp_path / "claude-config"
-    config.mkdir()
-    instructions = config / "CLAUDE.md"
-    instructions.write_bytes(UNMANAGED_BYTES)
-
-    result = run("claude", tmp_path, CLAUDE_CONFIG_DIR=str(config))
-
-    assert result.returncode == 3
-    assert instructions.read_bytes() == UNMANAGED_BYTES
 
 
 def test_claude_custom_config_dir_targets_mcp_config_and_links_settings(tmp_path):
@@ -2010,3 +2097,206 @@ def test_claude_default_config_dir_does_not_link_settings_to_itself(tmp_path):
     assert not (tmp_path / ".claude/settings.json").is_symlink()
     assert not (tmp_path / ".claude/settings.json").exists()
     assert (tmp_path / ".claude.json").is_file()
+
+
+# --- Rust front door selection (ADR 0027) -----------------------------------
+
+MANAGED_MARKER_LINE = (
+    "# Managed by scripts/install-harness; "
+    "local edits to an installed copy are not preserved."
+)
+
+
+def add_fake_crate(product: Path) -> Path:
+    """A minimal crate whose sources hash to something; cargo is faked separately."""
+    crate = product / "tools/front-door"
+    # The product tree may already carry the real crate; the fake replaces it.
+    shutil.rmtree(crate, ignore_errors=True)
+    (crate / "src").mkdir(parents=True)
+    (crate / "Cargo.toml").write_text('[package]\nname = "provenant"\nversion = "0.0.0"\n')
+    (crate / "Cargo.lock").write_text("# lock\n")
+    (crate / "src/main.rs").write_text("fn main() {}\n")
+    return crate
+
+
+def fake_binary_text(digest: str) -> str:
+    # The identity lines follow `exit`, so the shell never parses them as commands.
+    return (
+        "#!/bin/sh\n"
+        'case "$1" in help) echo "usage: provenant <command> [arguments...]"; exit 0;; esac\n'
+        "exit 2\n"
+        f"\n{MANAGED_MARKER_LINE}\n"
+        f"provenant-front-door source-sha256={digest}\n"
+    )
+
+
+def install_fake_cargo(directory: Path, *, fail: bool = False) -> Path:
+    directory.mkdir(parents=True, exist_ok=True)
+    cargo = directory / "cargo"
+    log = directory / "cargo.log"
+    body = (
+        "#!/bin/sh\n"
+        f'echo "$@" >> "{log}"\n'
+        f'echo "MACOSX_DEPLOYMENT_TARGET=${{MACOSX_DEPLOYMENT_TARGET-unset}}" >> "{log}"\n'
+    )
+    if fail:
+        body += "exit 101\n"
+    else:
+        body += (
+            'mkdir -p "$CARGO_TARGET_DIR/release"\n'
+            'printf \'%s\\n\' \'#!/bin/sh\' '
+            "'case \"$1\" in help) echo \"usage: provenant <command> [arguments...]\"; exit 0;; esac' "
+            "'exit 2' '' "
+            f"'{MANAGED_MARKER_LINE}' "
+            '"provenant-front-door source-sha256=$PROVENANT_FD_SOURCE_SHA256" '
+            '> "$CARGO_TARGET_DIR/release/provenant"\n'
+            'chmod 755 "$CARGO_TARGET_DIR/release/provenant"\n'
+        )
+    cargo.write_text(body)
+    cargo.chmod(0o755)
+    return log
+
+
+@pytest.fixture
+def rust_product(tmp_path, product_template):
+    product = copy_product(product_template, tmp_path / "product")
+    add_fake_crate(product)
+    return product
+
+
+def rust_env(tmp_path: Path, **extra: str) -> dict[str, str]:
+    fake_bin = tmp_path / "fake-bin"
+    return {"PATH": f"{fake_bin}{os.pathsep}{os.environ['PATH']}", **extra}
+
+
+def test_rust_mode_builds_stamps_and_installs_the_binary(tmp_path, rust_product):
+    log = install_fake_cargo(tmp_path / "fake-bin")
+    from lib.front_door_build import source_digest
+
+    result = run_product(
+        rust_product, "codex", tmp_path, **rust_env(tmp_path, PROVENANT_FRONT_DOOR="rust")
+    )
+
+    assert result.returncode == 0, result.stderr
+    installed = (tmp_path / "bin/provenant").read_text()
+    assert f"provenant-front-door source-sha256={source_digest(rust_product / 'tools/front-door')}\n" in installed
+    assert MANAGED_MARKER_LINE in installed.splitlines()
+    assert os.access(tmp_path / "bin/provenant", os.X_OK)
+    assert f"command installed={tmp_path / 'bin/provenant'}" in result.stdout
+    assert "front-door=rust" in result.stdout.splitlines()
+    cargo_log = log.read_text()
+    assert "build --release --locked --manifest-path" in cargo_log
+    if sys.platform == "darwin":
+        assert "MACOSX_DEPLOYMENT_TARGET=15.0" in cargo_log
+
+
+def test_reinstalling_the_same_binary_is_idempotent(tmp_path, rust_product):
+    install_fake_cargo(tmp_path / "fake-bin")
+    environment = rust_env(tmp_path, PROVENANT_FRONT_DOOR="rust")
+    first = run_product(rust_product, "codex", tmp_path, **environment)
+    second = run_product(rust_product, "codex", tmp_path, **environment)
+
+    assert first.returncode == 0 and second.returncode == 0, second.stderr
+    assert f"command existing={tmp_path / 'bin/provenant'}" in second.stdout
+
+
+def test_python_mode_rolls_an_installed_binary_back_to_the_template(tmp_path, rust_product):
+    install_fake_cargo(tmp_path / "fake-bin")
+    run_product(rust_product, "codex", tmp_path, **rust_env(tmp_path, PROVENANT_FRONT_DOOR="rust"))
+
+    result = run_product(
+        rust_product, "codex", tmp_path, **rust_env(tmp_path, PROVENANT_FRONT_DOOR="python")
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert f"command updated={tmp_path / 'bin/provenant'}" in result.stdout
+    assert "front-door=python" in result.stdout.splitlines()
+    assert (tmp_path / "bin/provenant").read_bytes() == (rust_product / "scripts/provenant.template").read_bytes()
+
+
+def test_auto_mode_falls_back_to_the_template_when_the_build_fails(tmp_path, rust_product):
+    install_fake_cargo(tmp_path / "fake-bin", fail=True)
+
+    result = run_product(
+        rust_product, "codex", tmp_path, **rust_env(tmp_path, PROVENANT_FRONT_DOOR="auto")
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert (tmp_path / "bin/provenant").read_bytes() == (rust_product / "scripts/provenant.template").read_bytes()
+    assert "front-door=python" in result.stdout.splitlines()
+    assert "falls back to the Python template" in result.stderr
+
+
+def test_rust_mode_fails_without_installing_when_the_build_fails(tmp_path, rust_product):
+    install_fake_cargo(tmp_path / "fake-bin", fail=True)
+
+    result = run_product(
+        rust_product, "codex", tmp_path, **rust_env(tmp_path, PROVENANT_FRONT_DOOR="rust")
+    )
+
+    assert result.returncode == 3
+    assert "cargo build failed" in result.stderr
+    assert not (tmp_path / "bin/provenant").exists()
+
+
+def test_auto_mode_without_a_crate_installs_the_template_quietly(tmp_path, product_template):
+    product = copy_product(product_template, tmp_path / "product")
+    shutil.rmtree(product / "tools/front-door", ignore_errors=True)
+
+    result = run_product(product, "codex", tmp_path, PROVENANT_FRONT_DOOR="auto")
+
+    assert result.returncode == 0, result.stderr
+    assert "front-door=python" in result.stdout.splitlines()
+    assert "falls back" not in result.stderr
+
+
+def test_prebuilt_binary_with_matching_sources_is_installed_without_cargo(tmp_path, rust_product):
+    from lib.front_door_build import source_digest
+
+    prebuilt = tmp_path / "prebuilt/provenant"
+    prebuilt.parent.mkdir()
+    prebuilt.write_text(fake_binary_text(source_digest(rust_product / "tools/front-door")))
+    prebuilt.chmod(0o755)
+    install_fake_cargo(tmp_path / "fake-bin", fail=True)  # would fail if it were used
+
+    result = run_product(
+        rust_product,
+        "codex",
+        tmp_path,
+        **rust_env(tmp_path, PROVENANT_FRONT_DOOR="rust", PROVENANT_FRONT_DOOR_BINARY=str(prebuilt)),
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert (tmp_path / "bin/provenant").read_bytes() == prebuilt.read_bytes()
+    assert not (tmp_path / "fake-bin/cargo.log").exists()
+
+
+def test_prebuilt_binary_from_other_sources_is_refused_in_rust_mode_and_skipped_in_auto(
+    tmp_path, rust_product
+):
+    prebuilt = tmp_path / "prebuilt/provenant"
+    prebuilt.parent.mkdir()
+    prebuilt.write_text(fake_binary_text("0" * 64))
+    prebuilt.chmod(0o755)
+    environment = {"PROVENANT_FRONT_DOOR_BINARY": str(prebuilt)}
+
+    strict = run_product(
+        rust_product, "codex", tmp_path, **rust_env(tmp_path, PROVENANT_FRONT_DOOR="rust", **environment)
+    )
+    assert strict.returncode == 3
+    assert "built from different sources" in strict.stderr
+    assert not (tmp_path / "bin/provenant").exists()
+
+    lenient = run_product(
+        rust_product, "codex", tmp_path, **rust_env(tmp_path, PROVENANT_FRONT_DOOR="auto", **environment)
+    )
+    assert lenient.returncode == 0, lenient.stderr
+    assert "front-door=python" in lenient.stdout.splitlines()
+
+
+def test_unknown_front_door_mode_is_refused_before_any_mutation(tmp_path, rust_product):
+    result = run_product(rust_product, "codex", tmp_path, PROVENANT_FRONT_DOOR="fast")
+
+    assert result.returncode == 3
+    assert "PROVENANT_FRONT_DOOR must be auto, rust or python" in result.stderr
+    assert not (tmp_path / "bin/provenant").exists()

@@ -28,7 +28,7 @@ swift build -c release
 nohup .build/release/quota-menubar >/dev/null 2>&1 &
 ```
 
-On its first refresh the app asks a zsh login shell for the path to `provenant` and for your `PATH`, caches both, and from then on runs `provenant` directly with that `PATH`. If the cached path stops working, it resolves it again. Each run happens off the main thread, at most one at a time, and stops after 60 seconds.
+On its first refresh the app asks your login shell (`$SHELL`, else the account's shell; zsh, bash and fish all work) for the path to `provenant` and for your `PATH`, caches both, and from then on runs `provenant` directly with that `PATH`. If the shell does not find it, the app uses `~/.local/bin/provenant` when that exists; otherwise the menu shows that `provenant` was not found. If the cached path stops working, it resolves it again. Each run happens off the main thread, at most one at a time, and stops after 60 seconds.
 
 The CLI decides what to fetch. The app runs `provenant quota tick --trigger <why> --power ac|battery|low --json`, and the CLI fetches only the accounts that are due and writes `report.json` as each one finishes. The app watches the quota state directory and reloads `report.json` when it changes, so a tick run by anything else shows up too. It runs a tick:
 

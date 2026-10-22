@@ -743,10 +743,17 @@ def test_ledger_rows_carry_the_configured_host_id_without_duplicates(tmp_path):
                  'message': {'id': 'two', 'model': 'claude-opus-5-5', 'usage': {'input_tokens': 7}}})
     assert cli(tmp_path, 'telemetry', 'ingest').returncode == 0
     with sqlite3.connect(tmp_path / 'state/telemetry.sqlite3') as db:
-        assert db.execute('SELECT DISTINCT host FROM usage').fetchall() == [('studio',)]
-        assert db.execute('SELECT COUNT(*) FROM usage').fetchone()[0] == 3
-        assert db.execute('SELECT DISTINCT host FROM usage_files').fetchall() == [('studio',)]
-        assert db.execute('SELECT DISTINCT host FROM quota_events').fetchall() == [('studio',)]
+        # A rename never rewrites the ledger: earlier rows keep their id and read as this host.
+        assert sorted(db.execute('SELECT host, COUNT(*) FROM usage GROUP BY host')) == [('runner-ci', 2), ('studio', 1)]
+        assert db.execute('SELECT DISTINCT host FROM quota_events').fetchall() == [('runner-ci',)]
+    result = subprocess.run([str(ROOT / 'scripts/provenant'), 'peer'],
+                            input=json.dumps({'protocol_version': 1, 'verb': 'telemetry.stats',
+                                              'params': {'schema_version': 1}}),
+                            env=environment(tmp_path), capture_output=True, text=True)
+    summary = json.loads(result.stdout)['result']
+    assert summary['host'] == 'studio'
+    sessions = [row for row in summary['session_usage'] if row['source'] == 'claude']
+    assert [(row['host'], row['rows'], row['input_tokens']) for row in sessions] == [('studio', 2, 14)]
 
 
 def test_host_id_prefers_the_instance_config_over_home_and_hostname(tmp_path, monkeypatch):
@@ -756,7 +763,7 @@ def test_host_id_prefers_the_instance_config_over_home_and_hostname(tmp_path, mo
     spec.loader.exec_module(telemetry)
     monkeypatch.setenv('HOME', str(tmp_path / 'home'))
     monkeypatch.setenv('AGENT_FABRIC_INSTANCE_ROOT', str(tmp_path / 'instance'))
-    monkeypatch.setattr(telemetry.socket, 'gethostname', lambda: 'runner-ci')
+    monkeypatch.setattr(__import__('socket'), 'gethostname', lambda: 'runner-ci')
     write_json(tmp_path / 'home/.agents/.agent-fabric/hosts.json',
                {'schema_version': 1, 'local_host': 'home-host'})
     write_json(tmp_path / 'instance/.agent-fabric/hosts.json',
@@ -1835,6 +1842,164 @@ def test_nested_lineage_reaches_usage_events_and_parent_stats(tmp_path):
     groups = json.loads(result.stdout)['usage_by_parent']
     assert [(row['parent_run_id'], row['parent_task_id'], row['parent_attempt'], row['output_tokens'])
             for row in groups] == [('mcp-parent', 'writer', 2, 5)]
+
+
+def test_rows_under_earlier_host_defaults_merge_into_one_host_without_a_rewrite(tmp_path, monkeypatch):
+    """Raw-hostname and 'local' rows from earlier versions read as this host; the ledger keeps them."""
+    use_environment(tmp_path, monkeypatch)
+    monkeypatch.setattr(__import__('socket'), 'gethostname', lambda: 'Anes-MacBook-Pro.local')
+    telemetry = load_script('telemetry_host_aliases', 'telemetry.py')
+    session = tmp_path / 'home/.claude/projects/repo/session.jsonl'
+    def message(name):
+        return {'type': 'assistant', 'sessionId': 'chair', 'timestamp': '2026-10-21T01:00:00Z',
+                'message': {'id': name, 'model': 'claude-test', 'usage': {'input_tokens': 10, 'output_tokens': 1}}}
+    jsonl(session, message('raw'), message('fallback'))
+    with telemetry.connect() as db:
+        telemetry.ingest(db)
+    database = tmp_path / 'state/telemetry.sqlite3'
+    # Stand in for rows written by earlier versions: the raw hostname, and fabric's old 'local'.
+    with sqlite3.connect(database) as db:
+        for table in ('usage', 'usage_files'):
+            db.execute(f"UPDATE {table} SET host='Anes-MacBook-Pro.local' WHERE event_id LIKE '%raw%'")
+            db.execute(f"UPDATE {table} SET host='local' WHERE event_id LIKE '%fallback%'")
+        db.execute("UPDATE meta SET value='Anes-MacBook-Pro.local' WHERE key='host_id'")
+    jsonl(session, message('slug'))
+    with telemetry.connect() as db:
+        telemetry.ingest(db)
+        db.row_factory = sqlite3.Row
+        report = telemetry.stats(db, summary=True)
+    with sqlite3.connect(database) as db:
+        stored = sorted(db.execute('SELECT host, COUNT(*) FROM usage GROUP BY host'))
+    assert stored == [('Anes-MacBook-Pro.local', 1), ('anes-macbook-pro', 1), ('local', 1)]
+    assert report['host'] == 'anes-macbook-pro'
+    groups = report['session_usage']
+    assert [(row['host'], row['session'], row['rows'], row['input_tokens']) for row in groups] == [
+        ('anes-macbook-pro', 'chair', 3, 30)]
+
+
+def test_long_lived_telemetry_refreshes_peer_aliases_after_hosts_config_changes(tmp_path, monkeypatch):
+    use_environment(tmp_path, monkeypatch)
+    monkeypatch.setattr(__import__('socket'), 'gethostname', lambda: 'Box.local')
+    config = tmp_path / 'home/.agents/.agent-fabric/hosts.json'
+    write_json(config, {'schema_version': 1, 'local_host': 'studio', 'peers': {}})
+    telemetry = load_script('telemetry_live_peer_aliases', 'telemetry.py')
+    jsonl(tmp_path / 'home/.claude/projects/repo/s.jsonl',
+          {'type': 'assistant', 'sessionId': 'chair', 'timestamp': '2026-10-21T01:00:00Z',
+           'message': {'id': 'one', 'model': 'claude-test', 'usage': {'input_tokens': 10}}})
+    with telemetry.connect() as db:
+        telemetry.ingest(db)
+        db.execute("UPDATE usage SET host='box'")
+        db.execute("UPDATE usage_files SET host='box'")
+        db.row_factory = sqlite3.Row
+        before = telemetry.stats(db, summary=True)
+        assert [(row['host'], row['rows']) for row in before['session_usage']] == [('studio', 1)]
+        write_json(config, {'schema_version': 1, 'local_host': 'studio',
+                            'peers': {'box': {'ssh_destination': 'box'}}})
+        after = telemetry.stats(db, summary=True)
+    assert [(row['host'], row['rows']) for row in after['session_usage']] == [('box', 1)]
+
+
+def ssh_tripwire(tmp_path):
+    marker = tmp_path / 'ssh-called'
+    shim = tmp_path / 'ssh-tripwire'
+    shim.write_text(f'#!/bin/sh\necho called > {marker}\necho "ssh must not run" >&2\nexit 99\n')
+    shim.chmod(0o755)
+    return shim, marker
+
+
+def test_stats_hosts_all_with_no_peers_stays_local_and_never_reaches_ssh(tmp_path):
+    jsonl(tmp_path / 'home/.claude/projects/repo/s.jsonl',
+          {'type': 'assistant', 'sessionId': 's', 'timestamp': '2026-10-21T01:00:00Z',
+           'message': {'id': 'one', 'model': 'claude-test', 'usage': {'input_tokens': 7}}})
+    shim, marker = ssh_tripwire(tmp_path)
+    config = tmp_path / 'home/.agents/.agent-fabric/hosts.json'
+    for setup in (None, {'schema_version': 1, 'local_host': 'solo', 'peers': {}}):
+        if setup:
+            write_json(config, setup)
+        assert cli(tmp_path, 'telemetry', 'ingest').returncode == 0
+        env = {**environment(tmp_path), 'AGENT_FABRIC_SSH_PROGRAM': str(shim)}
+        result = subprocess.run([str(ROOT / 'scripts/provenant'), 'telemetry', 'stats', '--hosts', 'all', '--json'],
+                                env=env, capture_output=True, text=True)
+        assert result.returncode == 0, result.stdout + result.stderr
+        report = json.loads(result.stdout)
+        expected = 'solo' if setup else load_script('telemetry_zero_peer', 'host_identity.py').host_id(config)
+        assert report['partial'] is False
+        assert report['hosts'] == [{'host': expected, 'status': 'ok'}]
+        assert report['usage'][0]['input_tokens'] == 7
+        assert not marker.exists()
+
+
+def test_stats_hosts_all_merges_three_hosts(tmp_path, monkeypatch):
+    jsonl(tmp_path / 'home/.claude/projects/repo/s.jsonl',
+          {'type': 'assistant', 'sessionId': 'shared', 'timestamp': '2026-10-21T01:00:00Z',
+           'message': {'id': 'one', 'model': 'claude-test', 'usage': {'input_tokens': 10, 'output_tokens': 2}}})
+    write_json(tmp_path / 'home/.agents/.agent-fabric/hosts.json', {'schema_version': 1, 'local_host': 'a', 'peers': {
+        'b': {'ssh_destination': 'b'}, 'c': {'ssh_destination': 'c'}}})
+    assert cli(tmp_path, 'telemetry', 'ingest').returncode == 0
+    use_environment(tmp_path, monkeypatch)
+    telemetry = load_script('telemetry_three_hosts', 'telemetry.py')
+    shim = tmp_path / 'ssh-fixture'
+    with sqlite3.connect(tmp_path / 'state/telemetry.sqlite3') as db:
+        db.row_factory = sqlite3.Row
+        for name in ('b', 'c'):
+            # Each peer reports the same session ID; the merge keys sessions by host.
+            Path(f'{shim}.{name}.json').write_text(json.dumps(telemetry.peer_summary(db, host=name)))
+    shim.write_text('''#!/usr/bin/env python3
+import json, sys
+request = json.load(sys.stdin)
+name = sys.argv[-2]
+if request['verb'] == 'hello':
+    print(json.dumps({'protocol_version': 1, 'ok': True, 'result': {'protocol_version': 1, 'host': name}}))
+else:
+    print(json.dumps({'protocol_version': 1, 'ok': True, 'result': json.load(open(f'{__file__}.{name}.json'))}))
+''')
+    shim.chmod(0o755)
+    env = {**environment(tmp_path), 'AGENT_FABRIC_SSH_PROGRAM': str(shim)}
+    result = subprocess.run([str(ROOT / 'scripts/provenant'), 'telemetry', 'stats', '--hosts', 'all', '--json'],
+                            env=env, capture_output=True, text=True)
+    assert result.returncode == 0, result.stdout + result.stderr
+    report = json.loads(result.stdout)
+    assert report['partial'] is False
+    assert report['hosts'] == [{'host': host, 'status': 'ok'} for host in ('a', 'b', 'c')]
+    assert report['host'] == 'a, b, c'
+    assert report['usage'][0]['input_tokens'] == 30 and report['usage'][0]['output_tokens'] == 6
+
+
+def test_a_renamed_host_never_rewrites_the_ledger_even_when_its_old_id_is_now_a_peer(tmp_path, monkeypatch):
+    """This ledger once wrote as `box`; `box` is now a peer and this host is `studio`."""
+    use_environment(tmp_path, monkeypatch)
+    config = tmp_path / 'home/.agents/.agent-fabric/hosts.json'
+    write_json(config, {'schema_version': 1, 'local_host': 'box'})
+    jsonl(tmp_path / 'home/.claude/projects/repo/s.jsonl',
+          {'type': 'assistant', 'sessionId': 'chair', 'timestamp': '2026-10-21T01:00:00Z',
+           'message': {'id': 'one', 'model': 'claude-test', 'usage': {'input_tokens': 10, 'output_tokens': 1}}})
+    telemetry = load_script('telemetry_rename_box', 'telemetry.py')
+    with telemetry.connect() as db:
+        telemetry.ingest(db)
+    database = tmp_path / 'state/telemetry.sqlite3'
+    tables = ('usage', 'usage_files', 'observations', 'quota_events', 'quota_series', 'events')
+    with sqlite3.connect(database) as db:
+        # The same event also stored under the new id, as a re-read after the rename would.
+        db.execute("INSERT INTO usage SELECT source,event_id,'studio',"
+                   + ','.join(column for (_, column, *_) in db.execute('PRAGMA table_info(usage)')
+                              if column not in {'source', 'event_id', 'host'})
+                   + " FROM usage WHERE host='box'")
+        before = {table: sorted(db.execute(f'SELECT * FROM {table}')) for table in tables}
+    assert len(before['usage']) == 2
+    write_json(config, {'schema_version': 1, 'local_host': 'studio', 'peers': {'box': {'ssh_destination': 'box'}}})
+    telemetry = load_script('telemetry_rename_studio', 'telemetry.py')
+    with telemetry.connect() as db:
+        telemetry.ingest(db)
+        db.row_factory = sqlite3.Row
+        report = telemetry.stats(db, summary=True)
+    assert telemetry.same_host('box') == 'box'
+    with sqlite3.connect(database) as db:
+        assert {table: sorted(db.execute(f'SELECT * FROM {table}')) for table in tables} == before
+    assert report['host'] == 'studio'
+    assert sorted((row['host'], row['rows'], row['input_tokens']) for row in report['session_usage']) == [
+        ('box', 1, 10), ('studio', 1, 10)]
+
+
 # Golden check for the SQL-grouped `stats`: the row-by-row implementation it replaced is kept
 # here as the oracle and both must report the same for one ledger.
 def legacy_stats(db, since=None, prices=None, *, summary=False, until=None):

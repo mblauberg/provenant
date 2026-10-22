@@ -100,7 +100,8 @@ provenant_bin="${PROVENANT_BIN_DIR:-$HOME/.local/bin}/provenant"
 if [ -L "$provenant_bin" ]; then
   realpath "$provenant_bin"
 elif [ -f "$provenant_bin" ]; then
-  grep -F "$old" "$provenant_bin" || true
+  # -a: the command may be a compiled binary (ADR 0027); search it as text.
+  grep -aF "$old" "$provenant_bin" || true
 else
   echo "missing Provenant command: $provenant_bin"
 fi

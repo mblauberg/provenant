@@ -181,7 +181,18 @@ finalisation nor a moved local ref can land an instruction change:
   the owner's common Git directory with `diff-tree --root -m`, so merge
   resolutions count. A commit may change a protected path only to the version
   the base already holds, as a merge or rebase from the base does, or be
-  reachable from a tip the chair released. Anything else fails with
+  reachable from a tip the chair released. A merge may also take a protected
+  path's version from a parent in the range that is not held, but only where a
+  released commit in the range introduced that version. A landing train's
+  `--no-ff` merge of a released tip, and later merges on top of it, therefore
+  pass. A merge cannot revert a protected path to an older version taken from a
+  parent outside the range or from a stale branch, and a resolution no parent
+  holds is held. One exception remains: a released commit vouches for the
+  parent content it merges, so a later unreleased merge in the range can
+  restore that stale content, and the gate passes it. A release is therefore
+  a review of the whole released tip, parents included. A release record that
+  is malformed fails every range, protected-clean ones included, rather than
+  only ranges that change protected paths. Anything else fails with
   `protected_instructions_changed` and names the held commits; the branch is
   left as it is. Fabric `landing-push` passes the landing lease's remote SHA as
   the base, never a local ref. `scripts/worktree verify-claim` and a manual
@@ -191,7 +202,9 @@ finalisation nor a moved local ref can land an instruction change:
 
 The invariant is: nothing lands on the integration branch unless every commit in
 `<leased remote SHA>..<tip>` leaves protected paths unchanged from the leased
-version or is reachable from an audited chair release of a reviewed tip;
+version, is reachable from an audited chair release of a reviewed tip, or is a
+merge that takes each protected path from the leased version or from a released
+change in the range;
 writers can write only their own branch ref. The gate reads the object store,
 which writers can add packs to, so it trusts object content; it disables
 replace refs, commit graphs, the multi-pack index and lazy fetch, and refuses
@@ -323,7 +336,7 @@ reading credential contents:
 |---|---|
 | claude | `CLAUDE_CONFIG_DIR`, else `~/.claude` |
 | codex | `CODEX_HOME`, else `~/.codex` |
-| agy | OS user's `~/Library/Keychains/login.keychain-db`, independent of HOME and `AGY_CONFIG_DIR`; a second account requires a second host |
+| agy | On macOS the OS user's `~/Library/Keychains/login.keychain-db`, independent of HOME and `AGY_CONFIG_DIR`; elsewhere `~/.gemini/antigravity-cli`; a second account requires a second host |
 | cursor | `~/Library/Application Support/Cursor/User/globalStorage` on macOS, else `~/.config/Cursor/User/globalStorage` |
 | opencode | `$XDG_DATA_HOME/opencode`, else `~/.local/share/opencode` (the authentication store, not `OPENCODE_CONFIG_DIR`) |
 | kiro | `~/.kiro` |
