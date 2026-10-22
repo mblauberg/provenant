@@ -172,8 +172,9 @@ jobs:
   harness:
     name: Python checks and tests
     runs-on: ubuntu-latest
-    # Measured max 19.0 min over 80 green runs (median 16.1) when pytest ran
-    # serially; pytest was ~97% of it. It now runs under pytest-xdist.
+    # Serial pytest measured max 19.0 min over 80 green runs (median 16.1),
+    # ~97% of the job. Under pytest-xdist (-n auto, 4 vCPUs) the job takes
+    # about 7 min (pytest itself about 6 min); see the --durations=30 output.
     timeout-minutes: 30
     permissions:
       contents: read
