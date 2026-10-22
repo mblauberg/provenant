@@ -1205,24 +1205,49 @@ def test_prompt_agent_product_cannot_self_declare_stochastic_evaluation_unnecess
         module.validate(candidate, ROOT)
 
 
+@pytest.mark.parametrize("source", ["profile-registry", "project-policy"])
 @pytest.mark.parametrize(
     "classified_types",
     ["prompt", [], ["prompt", 7], ["prompt", "prompt"], ["not-a-profile-artifact"]],
 )
-def test_profile_registry_rejects_malformed_stochastic_artifact_classification(
-    tmp_path, classified_types,
+def test_policy_rejects_malformed_stochastic_artifact_classification(
+    tmp_path, source, classified_types,
 ):
-    module = load(POLICY_VALIDATOR_PATH, "delivery_policy_validation")
-    registry = json.loads((ROOT / "config" / "delivery-profiles.json").read_text())
-    registry["profiles"]["agent-product"]["stochastic_policy"][
-        "required_for_artifact_types"
-    ] = classified_types
-    config = tmp_path / "config"
-    config.mkdir()
-    (config / "delivery-profiles.json").write_text(json.dumps(registry))
+    if source == "profile-registry":
+        module = load(POLICY_VALIDATOR_PATH, "delivery_policy_validation")
+        registry = json.loads((ROOT / "config" / "delivery-profiles.json").read_text())
+        registry["profiles"]["agent-product"]["stochastic_policy"][
+            "required_for_artifact_types"
+        ] = classified_types
+        config = tmp_path / "config"
+        config.mkdir()
+        (config / "delivery-profiles.json").write_text(json.dumps(registry))
 
-    with pytest.raises(ValueError, match="required_for_artifact_types"):
-        module.load_profiles(tmp_path, invalid_type=ValueError)
+        with pytest.raises(ValueError, match="required_for_artifact_types"):
+            module.load_profiles(tmp_path, invalid_type=ValueError)
+        return
+
+    module = load_validator()
+    registry = json.loads((ROOT / "config" / "delivery-profiles.json").read_text())
+    custom = copy.deepcopy(registry["profiles"]["agent-product"])
+    custom["stochastic_policy"]["required_for_artifact_types"] = classified_types
+    overlay_path = tmp_path / "delivery-policy.json"
+    raw = json.dumps({"schema_version": 1, "profiles": {"custom-agent-product": custom}}).encode()
+    overlay_path.write_bytes(raw)
+    candidate = fixture("agent-product")
+    candidate["profile"] = "custom-agent-product"
+    candidate["project_policy"] = {
+        "path": "delivery-policy.json",
+        "digest": "sha256:" + hashlib.sha256(raw).hexdigest(),
+    }
+
+    with pytest.raises(module.Invalid, match="required_for_artifact_types"):
+        module.validate(
+            candidate,
+            ROOT,
+            workspace_root=tmp_path,
+            project_policy_path=overlay_path,
+        )
 
 
 def test_stochastic_binding_anchors_plan_before_execution_then_completes(tmp_path):
@@ -1493,36 +1518,6 @@ def test_project_policy_can_only_add_a_digest_bound_profile_or_gate(tmp_path):
     candidate["profile"] = "evidence-brief"
     candidate["project_policy"] = {"path": "delivery-policy.json", "digest": "sha256:" + hashlib.sha256(raw).hexdigest()}
     module.validate(candidate, ROOT, workspace_root=tmp_path, project_policy_path=overlay_path)
-
-
-@pytest.mark.parametrize(
-    "classified_types",
-    ["prompt", [], ["prompt", 7], ["prompt", "prompt"], ["not-a-profile-artifact"]],
-)
-def test_project_policy_rejects_malformed_stochastic_artifact_classification(
-    tmp_path, classified_types,
-):
-    module = load_validator()
-    registry = json.loads((ROOT / "config" / "delivery-profiles.json").read_text())
-    custom = copy.deepcopy(registry["profiles"]["agent-product"])
-    custom["stochastic_policy"]["required_for_artifact_types"] = classified_types
-    overlay_path = tmp_path / "delivery-policy.json"
-    raw = json.dumps({"schema_version": 1, "profiles": {"custom-agent-product": custom}}).encode()
-    overlay_path.write_bytes(raw)
-    candidate = fixture("agent-product")
-    candidate["profile"] = "custom-agent-product"
-    candidate["project_policy"] = {
-        "path": "delivery-policy.json",
-        "digest": "sha256:" + hashlib.sha256(raw).hexdigest(),
-    }
-
-    with pytest.raises(module.Invalid, match="required_for_artifact_types"):
-        module.validate(
-            candidate,
-            ROOT,
-            workspace_root=tmp_path,
-            project_policy_path=overlay_path,
-        )
 
 
 def test_project_defined_technical_profile_cannot_bypass_artifact_security(tmp_path):

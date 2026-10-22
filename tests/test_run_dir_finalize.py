@@ -1103,14 +1103,12 @@ def test_finalisation_fails_if_canonical_receipt_inode_is_replaced(tmp_path, mon
     assert json.loads(receipt.read_text())["status"] == "active"
 
 
-@pytest.mark.parametrize("tier", ["principal", "principal"])
+@pytest.mark.parametrize("tier", ["principal", "senior"])
 def test_review_tier_accepts_tier_names(tier):
     plan = substantial_plan()
     plan["reviews"][3]["tier"] = tier
-    assert not any("tier is invalid" in e or "principal strength" in e for e in run_dir_finalize._validate_review_plan(plan))
-
-
-def test_review_tier_senior_does_not_require_principal_strength():
-    plan = substantial_plan()
-    plan["reviews"][3]["tier"] = "senior"
-    assert run_dir_finalize._validate_review_plan(plan) == []
+    errors = run_dir_finalize._validate_review_plan(plan)
+    if tier == "senior":
+        assert errors == []
+    else:
+        assert not any("tier is invalid" in error or "principal strength" in error for error in errors)
