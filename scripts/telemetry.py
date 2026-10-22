@@ -941,8 +941,6 @@ def ingest_document(db, source, path):
                       attrs={**{key: fields[key] for key in ('adapter', 'effort', 'attempt', 'status', 'error_class',
                                                              'task_class', 'route', 'duration_ms')},
                              'profile': profile.get('preset'), 'profile_digest': profile.get('digest'),
-                             'workspace_root': (row.get('workspace') or {}).get('root') or row.get('workspace_root'),
-                             'started_at': row.get('started_at'),
                              'risk_tier': profile.get('risk_tier'), 'floored': profile.get('floored'),
                              'empty_patch': row.get('empty_patch'), 'retry_of': retry_of,
                              'escalation_reason': row.get('escalation_reason'), 'escalated_from': escalated_from,
