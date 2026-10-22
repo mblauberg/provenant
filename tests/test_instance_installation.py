@@ -654,15 +654,15 @@ def test_a_missing_product_template_is_a_conflict_not_a_silent_skip(tmp_path):
     assert "product template is missing: config/model-routing.json" in result.stderr
 
 
-def test_the_repository_ships_a_valid_fused_desired_state():
-    """This checkout is itself a fused instance, so its desired state must load."""
-    if (ROOT / ".git").is_file():
-        pytest.skip("linked worktrees do not carry the fused instance's state")
-    document = instance.load_desired_state(ROOT)
+def test_a_fused_product_loads_its_seeded_desired_state(tmp_path):
+    """A fused product's desired state loads without depending on checkout state."""
+    product = build_product(tmp_path)
+    seed(product, product)
+    document = instance.load_desired_state(product)
 
     assert document is not None
     assert document["mode"] == "fused"
-    assert document["product"]["version"] == instance.product_version(ROOT)
+    assert document["product"]["version"] == instance.product_version(product)
 
 
 def test_install_harness_seeding_leaves_a_seeded_instance_untouched(tmp_path):
