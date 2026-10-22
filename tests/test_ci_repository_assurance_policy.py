@@ -63,6 +63,7 @@ LOCAL_ACTION = re.compile(r"^\./\.github/actions/[a-z0-9-]+$")
 JOB_PERMISSIONS = {
     "detect-changes": {"pull-requests": "read"},
     "harness": {"contents": "read"},
+    "docs": {"contents": "read"},
     "fabric": {"contents": "read"},
     "split-root": {"contents": "read"},
     "zizmor": {"contents": "read"},
@@ -163,13 +164,15 @@ def _assert_exact_on_key(text: str) -> None:
 def _assert_trigger_semantics(document: dict[str, object]) -> None:
     _assert_exact_on_key(WORKFLOW.read_text(encoding="utf-8"))
     on = _triggers(document)
-    assert set(on) == {"push", "pull_request"}
+    assert set(on) == {"push", "pull_request", "merge_group"}
     # pull_request must fire on every PR: no paths, paths-ignore, branches or
     # types restriction may narrow it (null or empty config only).
     pull_request = on["pull_request"]
     assert pull_request is None or pull_request == {}, pull_request
     # push is restricted to the default branch and carries no other keys.
     assert on["push"] == {"branches": ["main"]}
+    # merge_group must fire for every queue entry so the required check reports.
+    assert on["merge_group"] == {"types": ["checks_requested"]}
 
 
 def _setup_action() -> dict[str, object]:
@@ -277,10 +280,14 @@ def test_every_tracked_path_matches_at_least_one_build_filter() -> None:
     filters = _change_filters(document)
     outputs = _job(document, "detect-changes").get("outputs")
     assert isinstance(outputs, dict)
-    assert set(outputs) == {"harness", "fabric", "split-root", "workflows"}
+    assert set(outputs) == {"harness", "docs", "fabric", "split-root", "workflows"}
+    # `docs` is computed from the pull request's file list, not a path filter:
+    # it only narrows what a `harness`-matching change runs, so coverage is
+    # still proven by the filters below.
     patterns = [
         pattern
         for output in outputs
+        if output != "docs"
         for pattern in _flatten_patterns(filters[output])
     ]
     tracked = subprocess.run(
@@ -494,7 +501,7 @@ def test_harness_python_test_dependencies_install_locked_and_cached() -> None:
         re.split(r"[<>=~!\[; ]", requirement, maxsplit=1)[0]
         for requirement in pyproject["dependency-groups"]["test"]
     }
-    assert declared == {"pytest", "pyyaml"}
+    assert declared == {"pytest", "pytest-xdist", "pyyaml"}
 
     lock_text = (ROOT / "uv.lock").read_text(encoding="utf-8")
     locked = set(re.findall(r'(?m)^name = "([^"]+)"$', lock_text))

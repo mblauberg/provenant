@@ -10,6 +10,10 @@ Report a finding only when all are present:
 4. an actionable remedy or validation route;
 5. confidence high enough to survive an adversarial reread.
 
+A claim that something does not exist, is missing or is unused cites the
+search, file:line or doc that shows it. Without that evidence it is
+`needs-evidence`, and the chair reruns the check before it counts as a blocker.
+
 Label provenance:
 
 - `introduced`: caused by the reviewed change;

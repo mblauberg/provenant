@@ -251,7 +251,7 @@ independence are separate things: ordinary dispatch records that it makes no
 independence claim, and the Fabric MCP execution tools reject an assurance
 selector as a typed input error, so a review leg that must carry an
 independence claim runs the assurance path in
-`skills/orchestrate/scripts/cf_dispatch.sh` ([ADR
+`skills/orchestrate/scripts/cf_dispatch.py` ([ADR
 0021](adr/0021-configured-workspace-dispatch-boundaries.md), [ADR
 0022](adr/0022-thin-fabric-mcp-execution-facade.md)).
 
@@ -313,8 +313,8 @@ The router separates policy from execution:
 - adapter scripts execute the resolved route;
 - receipts record requested and actual identity, effort and substitutions.
 
-`flagship`, `workhorse` and `scout` are capability aliases, not permanent jobs
-for a vendor. Opus is the default Claude flagship. The catalogue may configure
+`principal`, `senior` and `junior` are capability aliases, not permanent jobs
+for a vendor. Opus is the default Claude principal. The catalogue may configure
 one bounded override occupant per risk tier. Each configured occupant is
 reserved for that tier's roles, alias and effort ceiling. Runtime discovery,
 not this document, determines effort support and current availability.

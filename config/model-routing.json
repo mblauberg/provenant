@@ -4,6 +4,12 @@
   "context": {
     "ceiling_tokens": 300000
   },
+  "rate_limit_pacing": {
+    "base_delay_seconds": 30,
+    "cap_seconds": 900,
+    "jitter_fraction": 0.2,
+    "minimum_budget_seconds": 30
+  },
   "routes": {
     "principal": [
       {
@@ -133,19 +139,13 @@
     ]
   },
   "route_synonyms": {
-    "flagship": "principal",
     "top": "principal",
     "critical-review": "principal",
     "decision": "principal",
     "orchestration": "principal",
-    "workhorse": "senior",
-    "strong": "senior",
     "mid": "senior",
-    "review": "senior",
     "second-opinion": "senior",
     "implementation": "senior",
-    "bulk": "junior",
-    "scout": "junior",
     "legwork": "junior",
     "lens": "junior",
     "mechanical": "junior",
@@ -156,7 +156,7 @@
   "model_traits": {},
   "task_class_routes": {
     "mechanical": {
-      "alias": "scout",
+      "alias": "junior",
       "effort": "low",
       "role": "worker",
       "models": {
@@ -172,7 +172,7 @@
       }
     },
     "legwork": {
-      "alias": "workhorse",
+      "alias": "senior",
       "effort": "medium",
       "role": "worker",
       "models": {
@@ -188,7 +188,7 @@
       }
     },
     "critical-review": {
-      "alias": "flagship",
+      "alias": "principal",
       "effort": "high",
       "role": "critical-review",
       "models": {
@@ -204,7 +204,7 @@
       }
     },
     "orchestration": {
-      "alias": "flagship",
+      "alias": "principal",
       "effort": "high",
       "role": "orchestrator",
       "models": {
@@ -220,7 +220,7 @@
       }
     },
     "implementation": {
-      "alias": "workhorse",
+      "alias": "senior",
       "effort": "high",
       "role": "worker",
       "models": {
@@ -238,7 +238,7 @@
       }
     },
     "ui-taste": {
-      "alias": "flagship",
+      "alias": "principal",
       "effort": "high",
       "role": "worker",
       "models": {
@@ -255,7 +255,7 @@
       }
     },
     "screenshots": {
-      "alias": "workhorse",
+      "alias": "senior",
       "effort": "high",
       "role": "worker",
       "models": {
@@ -271,7 +271,7 @@
       }
     },
     "review": {
-      "alias": "flagship",
+      "alias": "principal",
       "effort": "high",
       "role": "reviewer",
       "models": {
@@ -289,7 +289,7 @@
       }
     },
     "second-opinion": {
-      "alias": "flagship",
+      "alias": "principal",
       "effort": "high",
       "role": "reviewer",
       "models": {
@@ -307,7 +307,7 @@
       }
     },
     "research": {
-      "alias": "workhorse",
+      "alias": "senior",
       "effort": "medium",
       "role": "worker",
       "models": {
@@ -324,7 +324,7 @@
       }
     },
     "bulk": {
-      "alias": "scout",
+      "alias": "junior",
       "effort": "low",
       "role": "worker",
       "models": {
@@ -343,20 +343,20 @@
   "families": {
     "anthropic": {
       "aliases": {
-        "flagship": [
+        "principal": [
           "opus"
         ],
-        "workhorse": [
+        "senior": [
           "sonnet",
           "opus"
         ],
-        "scout": [
+        "junior": [
           "haiku"
         ]
       },
       "role_overrides": {
         "critical-review": {
-          "flagship": [
+          "principal": [
             "opus"
           ]
         }
@@ -367,7 +367,7 @@
             "synthesis",
             "adjudication"
           ],
-          "alias": "flagship",
+          "alias": "principal",
           "models": [
             "claude-fable-5-1"
           ],
@@ -379,7 +379,7 @@
             "synthesis",
             "adjudication"
           ],
-          "alias": "flagship",
+          "alias": "principal",
           "models": [
             "claude-fable-5-1"
           ],
@@ -390,31 +390,31 @@
     },
     "openai": {
       "aliases": {
-        "flagship": [
+        "principal": [
           "gpt-6-astra"
         ],
-        "workhorse": [
+        "senior": [
           "gpt-6.1-sol",
           "gpt-6-luna"
         ],
-        "scout": [
+        "junior": [
           "gpt-6-luna"
         ]
       },
       "role_overrides": {},
       "role_effort_defaults": {
         "lead": {
-          "flagship": "xhigh"
+          "principal": "xhigh"
         },
         "orchestrator": {
-          "flagship": "xhigh"
+          "principal": "xhigh"
         },
         "critical-review": {
-          "flagship": "xhigh"
+          "principal": "xhigh"
         },
         "worker": {
-          "workhorse": "high",
-          "scout": "high"
+          "senior": "high",
+          "junior": "high"
         }
       },
       "ultra_eligible_roles": [
@@ -422,7 +422,6 @@
         "orchestrator"
       ],
       "effort_fallback_order": [
-        "max",
         "xhigh",
         "high",
         "medium",
@@ -431,13 +430,13 @@
     },
     "google": {
       "aliases": {
-        "flagship": [
+        "principal": [
           "gemini-3.8-flash"
         ],
-        "workhorse": [
+        "senior": [
           "gemini-3.8-flash"
         ],
-        "scout": [
+        "junior": [
           "gemini-3.8-flash"
         ]
       },
@@ -462,10 +461,6 @@
           "low",
           "medium",
           "high"
-        ],
-        "gemini-3.1-pro": [
-          "low",
-          "high"
         ]
       }
     }
@@ -489,8 +484,7 @@
             "low",
             "medium",
             "high",
-            "xhigh",
-            "max"
+            "xhigh"
           ],
           "default": false
         },
@@ -504,8 +498,7 @@
           "efforts": [
             "medium",
             "high",
-            "xhigh",
-            "max"
+            "xhigh"
           ],
           "default": true
         },
@@ -562,7 +555,6 @@
             "medium",
             "high",
             "xhigh",
-            "max",
             "ultra"
           ]
         },
@@ -576,7 +568,6 @@
             "medium",
             "high",
             "xhigh",
-            "max",
             "ultra"
           ],
           "default": true
@@ -590,8 +581,7 @@
             "low",
             "medium",
             "high",
-            "xhigh",
-            "max"
+            "xhigh"
           ]
         }
       ]
@@ -657,13 +647,13 @@
         }
       ],
       "aliases": {
-        "flagship": [
+        "principal": [
           "auto"
         ],
-        "workhorse": [
+        "senior": [
           "auto"
         ],
-        "scout": [
+        "junior": [
           "auto"
         ]
       }
@@ -721,13 +711,13 @@
         }
       ],
       "aliases": {
-        "flagship": [
+        "principal": [
           "gemini-3.8-flash"
         ],
-        "workhorse": [
+        "senior": [
           "gemini-3.8-flash"
         ],
-        "scout": [
+        "junior": [
           "gemini-3.8-flash"
         ]
       }
@@ -815,12 +805,12 @@
         }
       ],
       "aliases": {
-        "workhorse": [
+        "senior": [
           "opencode/deepseek-v4.1-flash-free",
           "opencode/glm-5.3-flash-free",
           "opencode-go/deepseek-v4.1-flash"
         ],
-        "scout": [
+        "junior": [
           "opencode/deepseek-v4.1-flash-free",
           "opencode/glm-5.3-flash-free"
         ]

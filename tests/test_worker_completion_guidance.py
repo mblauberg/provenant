@@ -9,7 +9,7 @@ import os
 ROOT = Path(__file__).resolve().parents[1]
 
 
-DETACHED_HELPER = ROOT / "skills/orchestrate/scripts/run_worker_detached.sh"
+DETACHED_HELPER = ROOT / "skills/orchestrate/scripts/run_worker_detached.py"
 
 
 def _helper_command(run_dir, worker_code):
@@ -56,21 +56,33 @@ def test_detached_helper_records_child_and_validates_reentry(tmp_path):
 def test_detached_helper_same_run_dir_allows_only_one_provider(tmp_path):
     run_dir = tmp_path / "same"
     launches = tmp_path / "launches"
+    release = tmp_path / "release"
+    # The winner holds the run dir until the test releases it, so the loser is refused
+    # whatever the host load; a fixed sleep would let the winner exit before the loser starts.
     worker_code = (
-        "import sys, time; "
-        "open(sys.argv[1], 'a').write('x'); "
-        "time.sleep(.15); sys.exit(7)"
+        "import os, sys, time\n"
+        "open(sys.argv[1], 'a').write('x')\n"
+        "while not os.path.exists(sys.argv[2]):\n"
+        "    time.sleep(.01)\n"
+        "sys.exit(7)\n"
     )
     processes = [
         subprocess.Popen(
-            _helper_command(run_dir, worker_code) + [str(launches)],
+            _helper_command(run_dir, worker_code) + [str(launches), str(release)],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.PIPE,
             text=True,
         )
         for _ in (1, 2)
     ]
-    statuses = [process.wait(timeout=5) for process in processes]
+    deadline = time.monotonic() + 30
+    try:
+        while not any(process.poll() is not None for process in processes):
+            assert time.monotonic() < deadline, "neither provider launch was refused"
+            time.sleep(0.01)
+    finally:
+        release.write_text("go")  # never leave the winner running when the wait fails
+    statuses = [process.wait(timeout=10) for process in processes]
 
     assert sorted(statuses) == [2, 7]
     assert launches.read_text() == "x"
@@ -78,7 +90,7 @@ def test_detached_helper_same_run_dir_allows_only_one_provider(tmp_path):
     assert marker["exit"] == "7"
 
 
-def test_detached_helper_forwards_stdin_to_provider(tmp_path):
+def test_detached_helper_uses_dev_null_for_worker_stdin(tmp_path):
     run_dir = tmp_path / "stdin"
     worker_code = "import sys; value = sys.stdin.read(); print(value, end=''); sys.exit(0)"
     result = subprocess.run(
@@ -89,7 +101,7 @@ def test_detached_helper_forwards_stdin_to_provider(tmp_path):
     )
 
     assert result.returncode == 0
-    assert (run_dir / "transcript.txt").read_text() == "brief from stdin\n"
+    assert (run_dir / "transcript.txt").read_text() == ""
 
 
 def test_detached_helper_propagates_signal_exit(tmp_path):
@@ -122,14 +134,18 @@ def test_detached_helper_rejects_invalid_setup_before_launch(tmp_path):
 def test_detached_helper_validation_reports_startup(tmp_path):
     run_dir = tmp_path / "starting"
     run_dir.mkdir()
-    wrapper = subprocess.Popen(["sleep", "1"])
-    (run_dir / "wrapper.pid").write_text(f"{wrapper.pid}\n")
-    result = subprocess.run(
-        [str(DETACHED_HELPER), "--validate", "--run-dir", str(run_dir)],
-        capture_output=True,
-        text=True,
-    )
-    wrapper.wait(timeout=5)
+    wrapper = subprocess.Popen(["sleep", "60"])
+    try:
+        (run_dir / "wrapper.pid").write_text(f"{wrapper.pid}\n")
+        result = subprocess.run(
+            [str(DETACHED_HELPER), "--validate", "--run-dir", str(run_dir)],
+            capture_output=True,
+            text=True,
+        )
+    finally:
+        # Stop the wrapper explicitly: a fixed 1 s sleep could expire before validation ran.
+        wrapper.kill()
+        wrapper.wait(timeout=5)
 
     assert result.returncode == 1
     stale = subprocess.run(
@@ -174,3 +190,85 @@ def test_detached_helper_validation_rejects_malformed_marker(tmp_path):
 
     assert validation.returncode != 0
     assert "marker" in validation.stderr
+
+
+def test_detached_helper_cli_errors_are_stable(tmp_path):
+    missing_value = subprocess.run(
+        [str(DETACHED_HELPER), "--run-dir"], capture_output=True, text=True
+    )
+    assert (missing_value.returncode, missing_value.stderr) == (2, "--run-dir needs a value\n")
+
+    missing_command = subprocess.run(
+        [str(DETACHED_HELPER), "--run-dir", str(tmp_path / "empty"), "--"],
+        capture_output=True,
+        text=True,
+    )
+    assert (missing_command.returncode, missing_command.stderr) == (
+        2,
+        "worker command is required after --\n",
+    )
+
+    unknown = subprocess.run(
+        [str(DETACHED_HELPER), "--wat"], capture_output=True, text=True
+    )
+    assert (unknown.returncode, unknown.stderr) == (2, "unknown argument: --wat\n")
+
+
+def test_detached_helper_merges_worker_output_and_records_private_files(tmp_path):
+    run_dir = tmp_path / "run"
+    result = subprocess.run(
+        _helper_command(run_dir, "import sys; print('out'); print('err', file=sys.stderr)"),
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0
+    assert (run_dir / "transcript.txt").read_text().splitlines() == ["err", "out"]
+    for name in ("wrapper.pid", "worker.pid", "transcript.txt", "done"):
+        assert (run_dir / name).stat().st_mode & 0o777 == 0o644
+
+
+def test_detached_helper_worker_survives_wrapper_exit(tmp_path):
+    run_dir = tmp_path / "run"
+    marker = tmp_path / "worker-finished"
+    worker_code = (
+        "import pathlib, sys, time; time.sleep(.4); "
+        "pathlib.Path(sys.argv[1]).write_text('finished')"
+    )
+    wrapper = subprocess.Popen(
+        _helper_command(run_dir, worker_code) + [str(marker)],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    deadline = time.monotonic() + 5
+    while not (run_dir / "worker.pid").exists() and time.monotonic() < deadline:
+        time.sleep(0.01)
+    worker_pid = int((run_dir / "worker.pid").read_text())
+    wrapper.terminate()
+    wrapper.wait(timeout=5)
+    deadline = time.monotonic() + 5
+    while not marker.exists() and time.monotonic() < deadline:
+        time.sleep(0.02)
+
+    assert marker.read_text() == "finished"
+    assert worker_pid != wrapper.pid
+
+
+def test_detached_helper_preserves_missing_worker_diagnostic_and_exit(tmp_path):
+    run_dir = tmp_path / "missing"
+    missing_command = tmp_path / "no-such-worker"
+    result = subprocess.run(
+        [str(DETACHED_HELPER), "--run-dir", str(run_dir), "--", str(missing_command)],
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 127
+    assert result.stdout == ""
+    assert result.stderr == ""
+    assert (run_dir / "transcript.txt").read_text() == (
+        f"{DETACHED_HELPER}: line 172: {missing_command}: No such file or directory\n"
+    )
+    marker = dict(line.split("=", 1) for line in (run_dir / "done").read_text().splitlines())
+    assert marker["exit"] == "127"

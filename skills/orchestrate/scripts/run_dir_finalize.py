@@ -43,8 +43,8 @@ STATUSES = {"draft", "verified", "superseded", "retired"}
 RETENTION = {"capsule", "evidence", "ephemeral"}
 # A review tier may use the tier name or the adapter alias it maps to.
 REVIEW_TIERS = {
-    "scout": "scout", "workhorse": "workhorse", "flagship": "flagship",
-    "junior": "scout", "senior": "workhorse", "principal": "flagship",
+    "junior": "junior", "senior": "senior", "principal": "principal",
+    "junior": "junior", "senior": "senior", "principal": "principal",
 }
 SCAFFOLD = {
     "MANIFEST.md",
@@ -73,6 +73,27 @@ REQUIRED_GATES = {
     "Final claims have source/test/file anchors",
     "Context hygiene classified: durable outputs retained; owned ephemeral payload archived/removed",
 }
+
+
+def _is_scaffold(run_dir: Path, path: Path) -> bool:
+    relative = path.relative_to(run_dir).as_posix()
+    if relative in SCAFFOLD:
+        return True
+    # Keep empty custody files on their original inode, like MANIFEST.md's
+    # flock. Unlinking them could split publishers across different locks.
+    if not re.fullmatch(r"(?:dispatch/)?tasks/[A-Za-z0-9][A-Za-z0-9._-]{0,63}/"
+                        r"attempt-(?:\d{3}|[1-9]\d{3,})/attempt\.lock", relative):
+        return False
+    try:
+        fd, _relative, _target = open_contained_regular(
+            run_dir, relative, os.O_RDONLY | os.O_NONBLOCK, label="attempt custody"
+        )
+        try:
+            return os.fstat(fd).st_size == 0
+        finally:
+            os.close(fd)
+    except (OSError, OwnedFileError):
+        return False
 
 
 def _inside(root: Path, candidate: Path) -> bool:
@@ -336,8 +357,8 @@ def _validate_review_plan(raw: object, run_dir: Path | None = None) -> list[str]
                             errors.append(f"receipt review_plan.reviews[{index}].route_receipt identity does not match")
                         if isinstance(route_value, dict):
                             route_alias = route_value.get("route_alias", route_value.get("alias"))
-                            if REVIEW_TIERS.get(review["tier"]) == "flagship" and route_alias != "flagship":
-                                errors.append(f"receipt review_plan.reviews[{index}].route_receipt does not prove flagship strength")
+                            if REVIEW_TIERS.get(review["tier"]) == "principal" and route_alias != "principal":
+                                errors.append(f"receipt review_plan.reviews[{index}].route_receipt does not prove principal strength")
                             transcript_available = bool(
                                 evidence_bytes is not None and evidence_bytes
                             )
@@ -823,7 +844,7 @@ def validate(run_dir: Path, terminal_status: str, reason: str | None,
     payloads = {
         path.relative_to(run_dir).as_posix()
         for path in run_dir.rglob("*")
-        if path.is_file() and path.relative_to(run_dir).as_posix() not in SCAFFOLD
+        if path.is_file() and not _is_scaffold(run_dir, path)
     }
     if terminal_status == "ok":
         errors.extend(_validate_dispatch_evidence(run_dir))
@@ -1002,7 +1023,7 @@ def main(argv: list[str] | None = None) -> int:
             path.relative_to(args.run_dir).as_posix()
             for path in args.run_dir.rglob("*")
             if path.is_file()
-            and path.relative_to(args.run_dir).as_posix() not in SCAFFOLD
+            and not _is_scaffold(args.run_dir, path)
             and path.relative_to(args.run_dir).as_posix() not in listed
         )
         for rel in unclassified:

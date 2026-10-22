@@ -267,7 +267,9 @@ def load_route_cases(skill_dir: Path, valid_skills: set[str]) -> list[dict]:
 
 def skill_errors() -> list[str]:
     errors: list[str] = []
-    skill_files = sorted((ROOT / "skills").glob("*/SKILL.md"))
+    skill_files = sorted(
+        path for base in ("skills", "library") for path in (ROOT / base).glob("*/SKILL.md")
+    )
     valid_skills = {skill.parent.name for skill in skill_files}
     for skill in skill_files:
         text = skill.read_text()
@@ -310,7 +312,9 @@ def skill_errors() -> list[str]:
 
 def openai_sidecar_errors() -> list[str]:
     errors: list[str] = []
-    for path in sorted((ROOT / "skills").glob("*/agents/openai.yaml")):
+    for path in sorted(
+        path for base in ("skills", "library") for path in (ROOT / base).glob("*/agents/openai.yaml")
+    ):
         skill = path.parents[1].name
         try:
             data = yaml.safe_load(path.read_text())

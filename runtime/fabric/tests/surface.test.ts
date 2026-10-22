@@ -1,11 +1,12 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { resolve, join } from "node:path";
 import { createRequire } from "node:module";
 import { execFileSync, spawnSync } from "node:child_process";
 import { afterEach, expect, it } from "vitest";
+import { scratchRoot } from "./helpers/temp-root.js";
 
 const fixturePidLogs = new Set<string>();
 const fixtureRoots = new Set<string>();
@@ -113,7 +114,8 @@ it("reads adapter cooldowns from the configured state root and explicit override
   const root = mkdtempSync(join(tmpdir(), "fabric-cooldowns-"));
   const oldRoot = process.env.AGENT_FABRIC_STATE_ROOT;
   const oldPath = process.env.FABRIC_COOLDOWNS_PATH;
-  const snapshot = { adapters: [{ name: "codex", models: ["gpt-6.1-sol"], aliases: { workhorse: ["gpt-6.1-sol"] } }], endpoints: {} } as any;
+  const oldInstance = process.env.AGENT_FABRIC_INSTANCE_ROOT;
+  const snapshot = { adapters: [{ name: "codex", models: ["gpt-6.1-sol"], aliases: { senior: ["gpt-6.1-sol"] } }], endpoints: {} } as any;
   try {
     writeFileSync(join(root, "cooldowns.json"), JSON.stringify({ cooldowns: { one: {
       adapter: "codex", model: "gpt-6.1-sol", cooling_until: "2999-01-01T00:00:00Z",
@@ -127,11 +129,39 @@ it("reads adapter cooldowns from the configured state root and explicit override
     } } }));
     process.env.FABRIC_COOLDOWNS_PATH = override;
     expect(adapterView(snapshot).digest).toContain("cooling:");
+    const instance = join(root, "instance");
+    mkdirSync(join(instance, "config"), { recursive: true });
+    mkdirSync(join(instance, ".agent-fabric"));
+    const config = join(instance, "config", "telemetry.json");
+    const account = (label: string) => writeFileSync(config, JSON.stringify({ accounts: { codex: {
+      [label]: { identity_dir: process.env.CODEX_HOME || join(homedir(), ".codex") },
+    } } }));
+    account("a");
+    writeFileSync(join(instance, ".agent-fabric", "hosts.json"), JSON.stringify({ local_host: "host-a" }));
+    process.env.AGENT_FABRIC_INSTANCE_ROOT = instance;
+    writeFileSync(override, JSON.stringify({ schema: "fabric.cooldowns.v1", cooldowns: {
+      active: { adapter: "codex", model: "active-model", account: "a", host: "host-a", cooling_until: "2999-01-01T00:00:00Z" },
+      account: { adapter: "codex", model: "other-account", account: "b", host: "host-a", cooling_until: "2999-01-01T00:00:00Z" },
+      host: { adapter: "codex", model: "other-host", account: "a", host: "host-b", cooling_until: "2999-01-01T00:00:00Z" },
+      unknown: { adapter: "codex", model: "unknown-account", account: null, host: "host-a", cooling_until: "2999-01-01T00:00:00Z" },
+    } }));
+    const active = adapterView(snapshot).digest;
+    expect(active).toContain("cooling: active-model until");
+    expect(active).not.toContain("other-account");
+    expect(active).not.toContain("other-host");
+    expect(active).not.toContain("unknown-account");
+    account("b");
+    expect(adapterView(snapshot).digest).toContain("cooling: other-account until");
+    expect(adapterView(snapshot).digest).not.toContain("active-model");
+    account("a");
+    expect(adapterView(snapshot).digest).toContain("cooling: active-model until");
   } finally {
     if (oldRoot === undefined) delete process.env.AGENT_FABRIC_STATE_ROOT;
     else process.env.AGENT_FABRIC_STATE_ROOT = oldRoot;
     if (oldPath === undefined) delete process.env.FABRIC_COOLDOWNS_PATH;
     else process.env.FABRIC_COOLDOWNS_PATH = oldPath;
+    if (oldInstance === undefined) delete process.env.AGENT_FABRIC_INSTANCE_ROOT;
+    else process.env.AGENT_FABRIC_INSTANCE_ROOT = oldInstance;
     rmSync(root, { recursive: true, force: true });
   }
 });
@@ -194,7 +224,7 @@ it("gives v2 fixture processes a bounded self-exit deadline", () => {
 });
 
 it("keeps brief dispatch replies small and clamps wait on its own fixture server", async () => {
-  const root = mkdtempSync(join(tmpdir(), "fabric-brief-dispatch-"));
+  const root = scratchRoot("fabric-brief-dispatch-");
   const ownerPidLog = join(root, "fixture-pids.jsonl");
   fixturePidLogs.add(ownerPidLog);
   fixtureRoots.add(root);
@@ -250,7 +280,7 @@ it("keeps brief dispatch replies small and clamps wait on its own fixture server
 
 it("budgets the whole injected handoff text, not only the result tail", async () => {
   const { handoffBrief, HANDOFF_BYTES } = await import("../src/resume.js");
-  const runDir = mkdtempSync(join(tmpdir(), "fabric-handoff-"));
+  const runDir = scratchRoot("fabric-handoff-");
   try {
     const row = (result: string) => {
       writeFileSync(join(runDir, "result.md"), result);
@@ -357,7 +387,7 @@ it("exposes only the current tools", async () => {
 it("runs the linked-worktree MCP flow with fixture owners only", async () => {
   const { mkdirSync, writeFileSync, chmodSync, copyFileSync, readFileSync, existsSync, realpathSync } = await import("node:fs");
   const { execFileSync } = await import("node:child_process");
-  const root = mkdtempSync(join(tmpdir(), "fabric-v2-"));
+  const root = scratchRoot("fabric-v2-");
   const ownerPidLog = join(root, "fixture-pids.jsonl");
   const preflightLog = join(root, "fixture-preflight.jsonl");
   fixturePidLogs.add(ownerPidLog);
@@ -571,7 +601,7 @@ it("runs the linked-worktree MCP flow with fixture owners only", async () => {
     mkdirSync(join(linked, "nested-batch"));
     writeFileSync(join(linked, "batch.md"), "first");
     const routed = await call("dispatch", {
-      adapter: "claude", alias: "workhorse", model: "claude-opus-5-5", effort: "high", timeout_seconds: 4321,
+      adapter: "claude", alias: "senior", model: "claude-opus-5-5", effort: "high", timeout_seconds: 4321,
       tasks: [{ id: "default", prompt_file: "batch.md", cwd: "nested-batch" },
         { id: "override", prompt: "second", adapter: "codex", model: "sol", timeout_seconds: 123 }],
       wait_seconds: 5, detail: "full",
@@ -791,7 +821,7 @@ it("runs the linked-worktree MCP flow with fixture owners only", async () => {
 it("reports stale running server sources with a restart fix", async () => {
   const { serverBuild } = await import("../src/surface.js");
   const { mkdirSync, writeFileSync } = await import("node:fs");
-  const root = mkdtempSync(join(tmpdir(), "fabric-build-"));
+  const root = scratchRoot("fabric-build-");
   try {
     mkdirSync(join(root, "src"));
     writeFileSync(join(root, "package.json"), JSON.stringify({ version: "test" }));
@@ -809,7 +839,7 @@ it("reports stale running server sources with a restart fix", async () => {
 
 it('keeps terminal status readable when the notice database cannot open', async () => {
  const {mkdirSync,writeFileSync,readFileSync}=await import('node:fs');
- const root=mkdtempSync(join(tmpdir(),'fabric-status-store-')),state=join(root,'not-a-directory');
+ const root=scratchRoot('fabric-status-store-'),state=join(root,'not-a-directory');
  const path=join(root,'.agent-run/runs/20260923-1012-dispatch-fixture-a81f3c/tasks/task-1/attempt-001');mkdirSync(path,{recursive:true});
  writeFileSync(join(path,'attempt.json'),readFileSync(join(import.meta.dirname,'fixtures/attempt.json')));writeFileSync(state,'file');
  const client=new Client({name:'status-store',version:'1'});
@@ -841,7 +871,7 @@ it("shows quarantined output with its review action in status and lanes", async 
 it("keeps each quarantine review action in a completed batch digest", async () => {
   const { compactBatch } = await import("../src/owner-output.js");
   const { digest } = await import("../src/surface.js");
-  const runDir = mkdtempSync(join(tmpdir(), "fabric-quarantined-batch-"));
+  const runDir = scratchRoot("fabric-quarantined-batch-");
   fixtureRoots.add(runDir);
   const stdoutPath = join(runDir, "stdout.json");
   const row = { status: "quarantined", task_id: "review", landable: false,

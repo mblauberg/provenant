@@ -63,6 +63,9 @@ def test_otel_installer_restricts_storage_permissions(tmp_path, existing):
 def run(platform: str, home: Path, *arguments: str, bash=None, **extra_env):
     env = os.environ.copy()
     env.pop("AGENT_FABRIC_STATE_DIRECTORY", None)
+    # Caller-inherited install targets would leak into the scratch HOME.
+    for name in ("CLAUDE_CONFIG_DIR", "PROVENANT_BIN_DIR", "CODEX_HOME"):
+        env.pop(name, None)
     env.update({"HOME": str(home)})
     # Keep the instance root deterministic in the scratch HOME. AGENTS_HOME now
     # names only the product root, but an explicit instance value also keeps the
@@ -81,13 +84,23 @@ def run(platform: str, home: Path, *arguments: str, bash=None, **extra_env):
     )
 
 
-def copy_product(root: Path, destination: Path) -> Path:
+@pytest.fixture(scope="module")
+def product_template(tmp_path_factory) -> Path:
+    """One filtered product checkout per module; each test clones it."""
+    template = tmp_path_factory.mktemp("product-template") / "product"
     shutil.copytree(
-        root,
-        destination,
+        ROOT,
+        template,
         symlinks=True,
         ignore=shutil.ignore_patterns(".git", ".agent-run", "node_modules", ".venv"),
     )
+    return template
+
+
+def copy_product(template: Path, destination: Path) -> Path:
+    # cp -R keeps symlinks as links; -c makes an APFS clone on macOS.
+    command = ["cp", "-c", "-R"] if sys.platform == "darwin" else ["cp", "-R"]
+    subprocess.run([*command, str(template), str(destination)], check=True)
     return destination
 
 
@@ -161,7 +174,11 @@ def run_workflow_installer(target: Path):
 
 
 def expected_skills():
-    return {path.parent.name for path in (ROOT / "skills").glob("*/SKILL.md")}
+    return {
+        path.parent.name
+        for base in ("skills", "library")
+        for path in (ROOT / base).glob("*/SKILL.md")
+    }
 
 
 def expected_installed_entries():
@@ -204,7 +221,11 @@ def test_installs_claude_skills_and_global_instructions_idempotently(tmp_path):
     # stays product-shipped (ADR 0019).
     assert str(instance_root_for(tmp_path) / "AGENTS.md") in content
     assert str(ROOT / "HARNESS.md") in content
-    registration = json.loads((tmp_path / ".claude.json").read_text())["mcpServers"]["fabric"]
+    registration = json.loads((config / ".claude.json").read_text())["mcpServers"]["fabric"]
+    assert not (tmp_path / ".claude.json").exists()
+    assert not (config / "settings.json").exists()
+    assert not (config / "settings.json").is_symlink()
+    assert not (tmp_path / ".claude/settings.json").exists()
     assert registration["command"] == str(command)
     assert registration["env"] == {
         "AGENT_FABRIC_CLIENT_LABEL": "claude",
@@ -221,6 +242,8 @@ def test_installs_claude_skills_and_global_instructions_idempotently(tmp_path):
     )
     assert second.returncode == 0, second.stderr
     assert instructions.exists()
+    assert not (config / "settings.json").exists()
+    assert not (config / "settings.json").is_symlink()
 
 
 def test_installs_codex_skills_and_global_instructions(tmp_path):
@@ -406,7 +429,9 @@ def test_accepts_canonical_directory_links_for_claude_surfaces(tmp_path):
     result = run("claude", tmp_path, CLAUDE_CONFIG_DIR=str(config))
 
     assert result.returncode == 0, result.stderr
-    assert (config / "skills").resolve() == (ROOT / "skills").resolve()
+    # The personal library sits beside skills/, so the skills link converts to
+    # per-entry links; the workflows link is left as a directory link.
+    assert (config / "skills").is_dir() and not (config / "skills").is_symlink()
     assert (config / "workflows").resolve() == (ROOT / "workflows").resolve()
 
 
@@ -466,7 +491,7 @@ def test_claude_directory_link_layout_converts_to_project_custom_skills(tmp_path
     assert "local-skill" not in manifest["managed"]
 
 
-def test_claude_directory_link_layout_survives_an_install_without_custom_skills(
+def test_claude_directory_link_layout_converts_to_carry_the_library(
     tmp_path,
 ):
     config = tmp_path / "claude-config"
@@ -476,9 +501,9 @@ def test_claude_directory_link_layout_survives_an_install_without_custom_skills(
     result = run("claude", tmp_path, CLAUDE_CONFIG_DIR=str(config))
 
     assert result.returncode == 0, result.stderr
-    assert (config / "skills").is_symlink()
-    assert (config / "skills").resolve() == (ROOT / "skills").resolve()
-    assert not (config / ".agent-harness-installation.json").exists()
+    assert (config / "skills").is_dir() and not (config / "skills").is_symlink()
+    assert (config / "skills" / "tanstack-query").is_symlink()
+    assert (config / ".agent-harness-installation.json").exists()
 
 
 def test_claude_workflow_upgrade_relinks_a_previously_managed_file(tmp_path):
@@ -934,8 +959,11 @@ def test_all_reports_detected_client_link_failure_and_continues(tmp_path):
     assert (tmp_path / ".codex/config.toml").exists()
 
 
-def test_install_refreshes_newer_routing_catalogue_and_preserves_overrides(tmp_path):
-    product = copy_product(ROOT, tmp_path / "product")
+def test_install_refreshes_newer_routing_catalogue_and_preserves_overrides(
+    tmp_path,
+    product_template,
+):
+    product = copy_product(product_template, tmp_path / "product")
     first = run_product(product, "codex", tmp_path / "install")
     assert first.returncode == 0, first.stderr
     instance_root = tmp_path / "install" / "instance"
@@ -1172,23 +1200,7 @@ def test_claude_install_keeps_doctrine_when_config_is_instance_root(tmp_path):
     assert "duplicate instructions retired" not in result.stdout
 
 
-def test_claude_install_keeps_agents_link_that_claude_md_chains_through(tmp_path):
-    config = tmp_path / "claude-config"
-    config.mkdir()
-    instance_agents = tmp_path / ".agents/AGENTS.md"
-    instance_agents.parent.mkdir(parents=True)
-    instance_agents.write_text("# Instance instructions\n")
-    (config / "AGENTS.md").symlink_to(instance_agents)
-    (config / "CLAUDE.md").symlink_to("AGENTS.md")
-
-    result = run("claude", tmp_path, CLAUDE_CONFIG_DIR=str(config))
-
-    assert result.returncode == 0, result.stderr
-    assert (config / "CLAUDE.md").resolve() == instance_agents
-    assert "duplicate instructions retired" not in result.stdout
-
-
-@pytest.mark.parametrize("shape", ["hop", "dot_dot", "absolute_alias"])
+@pytest.mark.parametrize("shape", ["direct", "hop", "dot_dot", "absolute_alias"])
 def test_claude_install_keeps_agents_link_on_indirect_chain(tmp_path, shape):
     real_config = tmp_path / "claude-config"
     real_config.mkdir()
@@ -1197,7 +1209,9 @@ def test_claude_install_keeps_agents_link_on_indirect_chain(tmp_path, shape):
     instance_agents.parent.mkdir(parents=True)
     instance_agents.write_text("# Instance instructions\n")
     (real_config / "AGENTS.md").symlink_to(instance_agents)
-    if shape == "hop":
+    if shape == "direct":
+        (real_config / "CLAUDE.md").symlink_to("AGENTS.md")
+    elif shape == "hop":
         (real_config / "hop.md").symlink_to("AGENTS.md")
         (real_config / "CLAUDE.md").symlink_to("hop.md")
     elif shape == "dot_dot":
@@ -1352,8 +1366,8 @@ def test_rejects_a_relative_provenant_bin_directory_before_mutation(tmp_path):
     assert not (tmp_path / ".codex").exists()
 
 
-def test_rejects_a_provenant_bin_directory_inside_the_product(tmp_path):
-    product = copy_product(ROOT, tmp_path / "product")
+def test_rejects_a_provenant_bin_directory_inside_the_product(tmp_path, product_template):
+    product = copy_product(product_template, tmp_path / "product")
     source = product / "scripts/provenant"
     original = source.read_bytes()
 
@@ -1370,8 +1384,11 @@ def test_rejects_a_provenant_bin_directory_inside_the_product(tmp_path):
     assert not (tmp_path / "instance/.agent-fabric/product-root.json").exists()
 
 
-def test_rejects_a_missing_bin_directory_under_a_symlinked_product_parent(tmp_path):
-    product = copy_product(ROOT, tmp_path / "product")
+def test_rejects_a_missing_bin_directory_under_a_symlinked_product_parent(
+    tmp_path,
+    product_template,
+):
+    product = copy_product(product_template, tmp_path / "product")
     alias = tmp_path / "product-alias"
     alias.symlink_to(product, target_is_directory=True)
 
@@ -1507,8 +1524,11 @@ def test_split_install_is_idempotent_over_its_own_instructions(tmp_path):
     assert instructions.exists()
 
 
-def test_split_install_rebinds_its_bootstrap_when_instance_root_changes(tmp_path):
-    product = copy_product(ROOT, tmp_path / "product")
+def test_split_install_rebinds_its_bootstrap_when_instance_root_changes(
+    tmp_path,
+    product_template,
+):
+    product = copy_product(product_template, tmp_path / "product")
     first_instance = tmp_path / "instance-one"
     second_instance = tmp_path / "instance-two"
 
@@ -1534,10 +1554,12 @@ def test_split_install_rebinds_its_bootstrap_when_instance_root_changes(tmp_path
 
 @pytest.mark.parametrize("platform", ["claude", "codex"])
 def test_relocation_rewrites_only_an_exact_generated_bootstrap_and_preserves_conflicts(
-    tmp_path, platform
+    tmp_path,
+    platform,
+    product_template,
 ):
-    old_product = copy_product(ROOT, tmp_path / "old product")
-    new_product = copy_product(ROOT, tmp_path / "new product")
+    old_product = copy_product(product_template, tmp_path / "old product")
+    new_product = copy_product(product_template, tmp_path / "new product")
 
     first = run_product(old_product, platform, tmp_path)
     assert first.returncode == 0, first.stderr
@@ -1579,9 +1601,12 @@ def test_relocation_rewrites_only_an_exact_generated_bootstrap_and_preserves_con
     assert json.loads(pointer.read_text())["product_root"] == str(new_product.resolve())
 
 
-def test_three_line_custom_instructions_are_not_mistaken_for_generated_bootstrap(tmp_path):
-    old_product = copy_product(ROOT, tmp_path / "old product")
-    new_product = copy_product(ROOT, tmp_path / "new product")
+def test_three_line_custom_instructions_are_not_mistaken_for_generated_bootstrap(
+    tmp_path,
+    product_template,
+):
+    old_product = copy_product(product_template, tmp_path / "old product")
+    new_product = copy_product(product_template, tmp_path / "new product")
     first = run_product(old_product, "codex", tmp_path)
     assert first.returncode == 0, first.stderr
 
@@ -1608,8 +1633,8 @@ LEGACY_BOOTSTRAP = (
 )
 
 
-def test_split_relocation_recognises_the_exact_legacy_fused_bootstrap(tmp_path):
-    new_product = copy_product(ROOT, tmp_path / "new product")
+def test_split_relocation_recognises_the_exact_legacy_fused_bootstrap(tmp_path, product_template):
+    new_product = copy_product(product_template, tmp_path / "new product")
     old_product = tmp_path / "old product"
     instance = tmp_path / "instance"
     pointer = instance / ".agent-fabric/product-root.json"
@@ -1634,8 +1659,11 @@ def test_split_relocation_recognises_the_exact_legacy_fused_bootstrap(tmp_path):
     assert str(new_product / "HARNESS.md") in instructions.read_text()
 
 
-def test_generated_bootstrap_is_repaired_even_when_pointer_already_names_product(tmp_path):
-    product = copy_product(ROOT, tmp_path / "product")
+def test_generated_bootstrap_is_repaired_even_when_pointer_already_names_product(
+    tmp_path,
+    product_template,
+):
+    product = copy_product(product_template, tmp_path / "product")
     first = run_product(product, "codex", tmp_path)
     assert first.returncode == 0, first.stderr
     instructions = tmp_path / "codex/AGENTS.md"
@@ -1651,9 +1679,12 @@ def test_generated_bootstrap_is_repaired_even_when_pointer_already_names_product
     assert str(product / "HARNESS.md") in instructions.read_text()
 
 
-def test_all_primary_cutover_preflights_second_primary_before_mutating_first(tmp_path):
-    old_product = copy_product(ROOT, tmp_path / "old product")
-    new_product = copy_product(ROOT, tmp_path / "new product")
+def test_all_primary_cutover_preflights_second_primary_before_mutating_first(
+    tmp_path,
+    product_template,
+):
+    old_product = copy_product(product_template, tmp_path / "old product")
+    new_product = copy_product(product_template, tmp_path / "new product")
     first = run_product(old_product, "claude", tmp_path)
     assert first.returncode == 0, first.stderr
     pointer = tmp_path / "instance/.agent-fabric/product-root.json"
@@ -1678,8 +1709,11 @@ def test_all_primary_cutover_preflights_second_primary_before_mutating_first(tmp
     assert (tmp_path / "new product/HARNESS.md").is_file()
 
 
-def test_all_primary_install_configures_both_surfaces_and_publishes_once(tmp_path):
-    product = copy_product(ROOT, tmp_path / "product with spaces")
+def test_all_primary_install_configures_both_surfaces_and_publishes_once(
+    tmp_path,
+    product_template,
+):
+    product = copy_product(product_template, tmp_path / "product with spaces")
 
     result = run_product(product, "all", tmp_path)
 
@@ -1691,7 +1725,10 @@ def test_all_primary_install_configures_both_surfaces_and_publishes_once(tmp_pat
     assert (tmp_path / "claude/CLAUDE.md").read_text().find(str(product / "HARNESS.md")) >= 0
     assert (tmp_path / "codex/AGENTS.md").read_text().find(str(product / "HARNESS.md")) >= 0
 
-    claude_mcp = json.loads((tmp_path / "home/.claude.json").read_text())
+    claude_mcp = json.loads((tmp_path / "claude/.claude.json").read_text())
+    assert not (tmp_path / "home/.claude.json").exists()
+    assert not (tmp_path / "claude/settings.json").exists()
+    assert not (tmp_path / "claude/settings.json").is_symlink()
     codex_config = tomllib.loads((tmp_path / "codex/config.toml").read_text())
     assert claude_mcp["mcpServers"]["fabric"]["command"] == str(tmp_path / "bin/provenant")
     assert codex_config["mcp_servers"]["fabric"]["command"] == str(tmp_path / "bin/provenant")
@@ -1723,8 +1760,11 @@ def test_all_primary_install_configures_both_surfaces_and_publishes_once(tmp_pat
     assert not (tmp_path / "home/.config/opencode/opencode.jsonc").exists()
 
 
-def test_all_primary_install_uses_selected_python_when_path_has_no_python3(tmp_path):
-    product = copy_product(ROOT, tmp_path / "product")
+def test_all_primary_install_uses_selected_python_when_path_has_no_python3(
+    tmp_path,
+    product_template,
+):
+    product = copy_product(product_template, tmp_path / "product")
     tool_bin = tmp_path / "tools"
     tool_bin.mkdir()
     for name in (
@@ -1743,9 +1783,13 @@ def test_all_primary_install_uses_selected_python_when_path_has_no_python3(tmp_p
 
 
 @pytest.mark.parametrize("platform", ["claude", "codex"])
-def test_foreign_harness_link_is_rejected_before_pointer_publish(tmp_path, platform):
-    old_product = copy_product(ROOT, tmp_path / "old product")
-    new_product = copy_product(ROOT, tmp_path / "new product")
+def test_foreign_harness_link_is_rejected_before_pointer_publish(
+    tmp_path,
+    platform,
+    product_template,
+):
+    old_product = copy_product(product_template, tmp_path / "old product")
+    new_product = copy_product(product_template, tmp_path / "new product")
     first = run_product(old_product, platform, tmp_path)
     assert first.returncode == 0, first.stderr
 
@@ -1767,8 +1811,11 @@ def test_foreign_harness_link_is_rejected_before_pointer_publish(tmp_path, platf
     assert "HARNESS.md is not a canonical or receipt-owned product link" in result.stderr
 
 
-def test_generated_instruction_symlink_is_rejected_without_following_external_target(tmp_path):
-    product = copy_product(ROOT, tmp_path / "product")
+def test_generated_instruction_symlink_is_rejected_without_following_external_target(
+    tmp_path,
+    product_template,
+):
+    product = copy_product(product_template, tmp_path / "product")
     first = run_product(product, "codex", tmp_path)
     assert first.returncode == 0, first.stderr
 
@@ -1791,9 +1838,9 @@ def test_generated_instruction_symlink_is_rejected_without_following_external_ta
     assert "instructions symlink is not the instance doctrine" in result.stderr
 
 
-def test_harness_rebind_uses_collision_safe_staging(tmp_path):
-    old_product = copy_product(ROOT, tmp_path / "old product")
-    new_product = copy_product(ROOT, tmp_path / "new product")
+def test_harness_rebind_uses_collision_safe_staging(tmp_path, product_template):
+    old_product = copy_product(product_template, tmp_path / "old product")
+    new_product = copy_product(product_template, tmp_path / "new product")
     first = run_product(old_product, "claude", tmp_path)
     assert first.returncode == 0, first.stderr
 
@@ -1809,9 +1856,9 @@ def test_harness_rebind_uses_collision_safe_staging(tmp_path):
     assert harness.resolve() == (new_product / "HARNESS.md").resolve()
 
 
-def test_relocation_rebinds_a_dangling_relative_old_harness_link(tmp_path):
-    old_product = copy_product(ROOT, tmp_path / "old'\\product")
-    new_product = copy_product(ROOT, tmp_path / "new product")
+def test_relocation_rebinds_a_dangling_relative_old_harness_link(tmp_path, product_template):
+    old_product = copy_product(product_template, tmp_path / "old'\\product")
+    new_product = copy_product(product_template, tmp_path / "new product")
     first = run_product(old_product, "claude", tmp_path)
     assert first.returncode == 0, first.stderr
 
@@ -1825,13 +1872,13 @@ def test_relocation_rebinds_a_dangling_relative_old_harness_link(tmp_path):
     assert harness.resolve() == (new_product / "HARNESS.md").resolve()
 
 
-def test_relocation_matches_dangling_link_through_a_symlinked_parent(tmp_path):
+def test_relocation_matches_dangling_link_through_a_symlinked_parent(tmp_path, product_template):
     physical = tmp_path / "physical"
     physical.mkdir()
     alias = tmp_path / "alias"
     alias.symlink_to(physical, target_is_directory=True)
-    old_product = copy_product(ROOT, physical / "old product")
-    new_product = copy_product(ROOT, physical / "new product")
+    old_product = copy_product(product_template, physical / "old product")
+    new_product = copy_product(product_template, physical / "new product")
     first = run_product(old_product, "claude", tmp_path)
     assert first.returncode == 0, first.stderr
 
@@ -1845,8 +1892,11 @@ def test_relocation_matches_dangling_link_through_a_symlinked_parent(tmp_path):
     assert harness.resolve() == (new_product / "HARNESS.md").resolve()
 
 
-def test_instance_leaf_symlink_conflicts_are_rejected_before_publication(tmp_path):
-    product = copy_product(ROOT, tmp_path / "product")
+def test_instance_leaf_symlink_conflicts_are_rejected_before_publication(
+    tmp_path,
+    product_template,
+):
+    product = copy_product(product_template, tmp_path / "product")
     instance = tmp_path / "instance"
     instance.mkdir()
     outside = tmp_path / "outside"
@@ -1868,8 +1918,11 @@ def test_instance_leaf_symlink_conflicts_are_rejected_before_publication(tmp_pat
     assert list(outside.iterdir()) == []
 
 
-def test_instance_config_directory_symlink_is_rejected_before_publication(tmp_path):
-    product = copy_product(ROOT, tmp_path / "product")
+def test_instance_config_directory_symlink_is_rejected_before_publication(
+    tmp_path,
+    product_template,
+):
+    product = copy_product(product_template, tmp_path / "product")
     instance = tmp_path / "instance"
     instance.mkdir()
     outside = tmp_path / "outside"
@@ -1884,14 +1937,101 @@ def test_instance_config_directory_symlink_is_rejected_before_publication(tmp_pa
     assert list(outside.iterdir()) == []
 
 
-def test_a_genuinely_foreign_instructions_file_is_still_refused(tmp_path):
-    """Migration must not become a licence to rewrite user-authored files."""
+def test_claude_custom_config_dir_targets_mcp_config_and_links_settings(tmp_path):
     config = tmp_path / "claude-config"
-    config.mkdir()
-    instructions = config / "CLAUDE.md"
-    instructions.write_bytes(UNMANAGED_BYTES)
+    default_settings = tmp_path / ".claude/settings.json"
+    default_settings.parent.mkdir(parents=True, exist_ok=True)
+    default_settings.write_text('{"autoCompactWindow": 200000}\n')
 
     result = run("claude", tmp_path, CLAUDE_CONFIG_DIR=str(config))
 
+    assert result.returncode == 0, result.stderr
+    assert (config / ".claude.json").is_file()
+    assert not (tmp_path / ".claude.json").exists()
+    assert (config / "settings.json").is_symlink()
+    assert os.readlink(config / "settings.json") == str(default_settings)
+    assert (config / "settings.json").read_text() == '{"autoCompactWindow": 200000}\n'
+
+
+def test_claude_custom_config_dir_skips_settings_link_when_default_does_not_exist(tmp_path):
+    config = tmp_path / "claude-config"
+
+    result = run("claude", tmp_path, CLAUDE_CONFIG_DIR=str(config))
+
+    assert result.returncode == 0, result.stderr
+    assert not (config / "settings.json").exists()
+    assert not (config / "settings.json").is_symlink()
+    assert "claude settings link skipped: target is not a regular file:" in result.stdout
+
+
+def test_claude_relative_config_dir_is_rejected(tmp_path):
+    result = run("claude", tmp_path, CLAUDE_CONFIG_DIR="relative/claude")
+
     assert result.returncode == 3
-    assert instructions.read_bytes() == UNMANAGED_BYTES
+    assert "CLAUDE_CONFIG_DIR must be absolute" in result.stderr
+
+
+def test_claude_config_dir_with_trailing_slash_matching_default_does_not_link(tmp_path):
+    default_dir = tmp_path / ".claude"
+    default_settings = default_dir / "settings.json"
+    default_settings.parent.mkdir(parents=True, exist_ok=True)
+    default_settings.write_text('{"env": "default"}\n')
+
+    result = run("claude", tmp_path, CLAUDE_CONFIG_DIR=f"{default_dir}/")
+
+    assert result.returncode == 0, result.stderr
+    assert not (default_dir / "settings.json").is_symlink()
+
+
+def test_claude_custom_config_dir_with_trailing_slash_links_settings(tmp_path):
+    config = tmp_path / "claude-config"
+    default_settings = tmp_path / ".claude/settings.json"
+    default_settings.parent.mkdir(parents=True, exist_ok=True)
+    default_settings.write_text('{"autoCompactWindow": 200000}\n')
+
+    result = run("claude", tmp_path, CLAUDE_CONFIG_DIR=f"{config}/")
+
+    assert result.returncode == 0, result.stderr
+    assert (config / "settings.json").is_symlink()
+    assert os.readlink(config / "settings.json") == str(default_settings)
+
+
+def test_claude_custom_config_dir_preserves_existing_settings_and_never_overwrites(tmp_path):
+    config = tmp_path / "claude-config"
+    config.mkdir()
+    settings = config / "settings.json"
+    settings.write_text('{"user": "preserved"}\n')
+
+    result = run("claude", tmp_path, CLAUDE_CONFIG_DIR=str(config))
+
+    assert result.returncode == 0, result.stderr
+    assert not settings.is_symlink()
+    assert settings.read_text() == '{"user": "preserved"}\n'
+
+
+def test_claude_custom_config_dir_respects_explicit_claude_mcp_config(tmp_path):
+    config = tmp_path / "claude-config"
+    explicit_mcp = tmp_path / "custom-claude-mcp.json"
+
+    result = run(
+        "claude",
+        tmp_path,
+        CLAUDE_CONFIG_DIR=str(config),
+        CLAUDE_MCP_CONFIG=str(explicit_mcp),
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert explicit_mcp.is_file()
+    assert not (config / ".claude.json").exists()
+    assert not (tmp_path / ".claude.json").exists()
+    registration = json.loads(explicit_mcp.read_text())["mcpServers"]["fabric"]
+    assert registration["env"]["AGENT_FABRIC_CLIENT_LABEL"] == "claude"
+
+
+def test_claude_default_config_dir_does_not_link_settings_to_itself(tmp_path):
+    result = run("claude", tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    assert not (tmp_path / ".claude/settings.json").is_symlink()
+    assert not (tmp_path / ".claude/settings.json").exists()
+    assert (tmp_path / ".claude.json").is_file()

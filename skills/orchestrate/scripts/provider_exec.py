@@ -4,10 +4,12 @@
 from __future__ import annotations
 
 import argparse
-from collections import deque
+from collections import deque, namedtuple
 import ctypes
+import fcntl
 import functools
 import hashlib
+import importlib.util
 import json
 import logging
 import math
@@ -23,6 +25,7 @@ import tempfile
 import threading
 import time
 import uuid
+import unicodedata
 from datetime import UTC, datetime, timedelta
 from dataclasses import dataclass
 
@@ -30,51 +33,112 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from adapters import profile
 from adapters import claude as claude_adapter
 from output_custody import install, verify, CustodyError
+import attempt_storage
 import fabric_policy
 import layout
 import context_usage
 import process_info
+from trusted_git import owner_location, prepare_writer_ref, writer_git_writes, writer_read_only
 
 
-# Home-relative paths a confined provider needs for its own state and sign-in,
-# found by probing each CLI under a deny-home profile (2026-09-24). A "*" suffix
-# also covers siblings sharing the prefix, such as an atomic-rewrite temp file.
+# Home-relative paths a confined provider needs for its own state and sign-in.
+# Initial probes (2026-09-24) were narrowed using name-only layouts for #927:
+# executable/configuration trees stay read-only even alongside mutable state.
+# A "*" suffix covers atomic-rewrite siblings, without granting their children.
+# npm/uv/Corepack caches are redirected into each attempt; never let a lane
+# poison ~/.npm's reusable packages (_cacache, _npx, _prebuilds or _tuf).
+# Keep the Claude startup/config file and all rewrite siblings read-only in every lane.
+READ_ONLY_PROVIDER_CONFIG = (".claude.json",)
+
+NPM_STATE_WRITES = (".npm/_logs",)
+NPM_STATE_FILES = (".npm/_update-notifier-last-checked",)
+AGY_STATE_DIRS = ("annotations", "brain", "conversations", "crashes", "implicit", "knowledge", "log",
+                  "plugin_data", "presence", "scratch")
 CONFINED_STATE = {
     "agy": {
-        "read_write": (".gemini/antigravity-cli", ".gemini/config", ".gemini/oauth_creds.json*"),
+        "home": ".gemini",
+        "read_write": tuple(f".gemini/antigravity-cli/{name}" for name in (*AGY_STATE_DIRS,
+            "antigravity-oauth-token*", "mcp_oauth_tokens.json*",
+            "history.jsonl*")) + (".gemini/oauth_creds.json*",),
+        "write_literal": tuple(f".gemini/antigravity-cli/{name}" for name in (
+            "conversation_summaries.db", "conversation_summaries.db-wal", "conversation_summaries.db-shm",
+            "conversation_summaries.db-journal", "jetbox_summaries_proto.pb", "jetski_state.pbtxt",
+            "last_check.timestamp", "installation_id", "updater/update.lock", "updater/update_status.json",
+            "cache/CHANGELOG.md", "cache/conversation_metadata.json", "cache/default_project_id.txt",
+            "cache/last_conversations.json", "cache/onboarding.json", "cache/projects.json")),
+        "atomic_siblings": True,
+        "prepare_dirs": lambda root, plan: tuple(root / "antigravity-cli" / name
+                                                 for name in (*AGY_STATE_DIRS, "cache", "updater")),
+        # config/projects holds project permission overrides and must also stay read-only.
+        # sidecars schedule unsandboxed commands and are configuration, never runtime state.
+        # plugin_data and the protobuf/knowledge state still need live write evidence.
+        # In particular bin/, builtin/, mcp/, plugins/, skills/ and cache/marketplaces/ are not state grants.
+        "no_symlinks": (".gemini",),
         # Without the keychain file agy falls back to an interactive sign-in and times out.
-        "read": ("Library/Keychains/login.keychain-db",),
+        "read": (".gemini/antigravity-cli", ".gemini/config", ".gemini/oauth_creds.json*",
+                 "Library/Keychains/login.keychain-db"),
     },
     "opencode": {
         "read_write": (".local/share/opencode", ".local/state/opencode", ".cache/opencode"),
         # ~/.opencode is the install script's home and OpenCode v2's legacy global config directory;
         # its config discovery stats it at startup and fails with a 500 when that is denied.
         "read": (".config/opencode", ".opencode"),
+        # Discovery lstats these names in the cwd and every ancestor even with Claude compatibility off.
+        "ancestor_metadata": (".claude", ".codex"),
     },
     "claude": {
-        "read_write": (".claude", ".claude.json*", ".cache/claude", ".npm"),
+        "home": ".claude",
+        "read_write": tuple(f".claude/{name}" for name in (
+            ".credentials.json*", "cache", "debug", "feedback", "file-history", "ide", "jobs",
+            "paste-cache", "sessions", "state", "teams", "telemetry", "uploads",
+            "history.jsonl*", "stats-cache.json*", "mcp-needs-auth-cache.json*", "gh-pr-status-cache.json*",
+            "statusline-lanes.json*")) + (".cache/claude", *NPM_STATE_WRITES),
+        "write_literal": NPM_STATE_FILES,
+        # Project roots also contain auto-loaded memory. Only UUID transcripts/session trees are state;
+        # no root creation/rename grant that could transplant a crafted directory containing memory.
+        "write_regex": (r"projects/[^/]+/[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}"
+                        r"-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}(\.jsonl[^/]*|(/.*)?)",),
+        "prepare_dirs": lambda root, plan: (root / "projects" / _claude_project_dir(root, plan["cwd"]).name,),
+        # Shell snapshots and session-env can be sourced by later shells and stay read-only.
+        # The absent ~/.cache/claude and jobs/ide/state/teams need smoke evidence when quota returns.
+        "no_symlinks": (".claude", ".cache/claude", ".npm"),
+        "read": (".claude", ".claude.json", ".cache/claude", ".npm"),
         # Claude Code keeps its OAuth sign-in in the login keychain; a read-only lane is signed out
         # without it. Only OAuth lanes get it: bare and endpoint lanes sign in with a key.
         "oauth_read": ("Library/Keychains/login.keychain-db",),
     },
     "cursor": {
-        "read_write": (".cursor", ".cache/cursor", ".npm"),
+        "home": ".cursor",
+        "read_write": tuple(f".cursor/{name}" for name in (
+            "chats", "ai-tracking", "plans", "agent-cli-state.json*", "ide_state.json*",
+            "prompt_history.json*", "statsig-cache.json*")) + (".cache/cursor", *NPM_STATE_WRITES),
+        "write_literal": NPM_STATE_FILES,
+        # A project also holds workspace trust, MCP approvals and rules. Its root stays read-only.
+        "write_regex": (r"projects/[^/]+/(agent-transcripts|canvases|terminals)(/.*)?",
+                        r"projects/[^/]+/(worker\.log|worker\.sock|mcp-auth\.json[^/]*|mcp-cache\.json[^/]*)"),
+        "prepare_dirs": lambda root, plan: (root / "projects" /
+                                           re.sub(r"[^A-Za-z0-9]+", "-", str(Path(plan["cwd"]).resolve())).strip("-"),),
+        # cli-config.json, argv.json, mcp.json, hooks and extensions are configuration. The absent
+        # ~/.cache/cursor and projects/plans/ai-tracking need smoke evidence when quota returns.
+        "no_symlinks": (".cursor", ".cache/cursor", ".npm"),
         # cursor-agent keeps its sign-in in the login keychain; a read-only lane is signed out without it.
-        "read": ("Library/Keychains/login.keychain-db",),
+        "read": (".cursor", ".cache/cursor", ".npm", "Library/Keychains/login.keychain-db"),
     },
     "kiro": {
+        "home": ".kiro",
         # kiro-cli keeps its sign-in and refreshed tokens in data.sqlite3, guarded by .refresh.lock,
         # which it opens for writing before reading the token. The rest of its support directory holds
         # shell hooks the user's shell sources and binaries it runs, so stays read-only.
-        "read_write": (".kiro", ".cache/kiro", ".npm"),
+        "read_write": (".cache/kiro", *NPM_STATE_WRITES),
         # SQLite creates and removes these sidecars; each is one file at its own name.
         "write_literal": tuple(f"Library/Application Support/kiro-cli/data.sqlite3-{suffix}"
-                               for suffix in ("wal", "shm", "journal")),
+                               for suffix in ("wal", "shm", "journal")) + NPM_STATE_FILES,
         # Rewritten in place only: a lane cannot swap either for a link its unconfined CLI would follow.
         "write_in_place": ("Library/Application Support/kiro-cli/data.sqlite3",
                            "Library/Application Support/kiro-cli/.refresh.lock"),
         "no_links": ("Library/Application Support/kiro-cli",),
-        "read": ("Library/Application Support/kiro-cli",),
+        "no_symlinks": (".kiro", ".cache/kiro", ".npm"),
+        "read": (".kiro", ".cache/kiro", "Library/Application Support/kiro-cli", ".npm"),
         # Its prompt history spans every project.
         "read_denied": ("Library/Application Support/kiro-cli/history",),
         # Its engine finds its app bundle through the launcher links in ~/.local/bin.
@@ -110,13 +174,10 @@ CODEX_BROWSER_MACH_PORT_PREFIXES = (
 CODEX_POSTGRES_IPC_OPERATIONS = ("ipc-sysv-shm", "ipc-sysv-sem")
 CAPABILITY_VALUES = frozenset({"postgres", "browser"})
 EXTRA_DENIED_READS = (".claude/projects", ".codex/sessions")
-# Every writer's Git write boundary: its private worktree Git directory plus these common paths.
-# The rest of the common directory (hooks, config, info, other worktrees) runs code or holds state
-# for every checkout, so it stays read-only. Codex writers also keep GIT_PRIVATE_READ_ONLY.
-GIT_COMMON_WRITE_DIRS = ("objects", "refs", "logs")
-# Git rewrites packed-refs through the lock and a .new file renamed over it.
-GIT_COMMON_WRITE_FILES = ("packed-refs", "packed-refs.lock", "packed-refs.new")
-GIT_PRIVATE_READ_ONLY = ("config.worktree", "commondir", "gitdir")
+# Every writer's Git write boundary is trusted_git.writer_git_writes: its private worktree Git
+# directory, the object store and its own branch ref. The rest of the common directory (hooks,
+# config, info, other refs and worktrees) runs code or holds state for every checkout, so it
+# stays read-only.
 # Automatic gc and rerere write gc.pid, gc.log and rr-cache in the read-only common directory.
 WRITER_GIT_CONFIG = (("gc.auto", "0"), ("maintenance.auto", "false"), ("rerere.enabled", "false"))
 # Repository agent instructions and skills. Codex protects them inside a writable root.
@@ -130,6 +191,20 @@ INSTRUCTION_BYTES_LIMIT = 256 * 1024 * 1024
 
 def now():
     return datetime.now(UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+
+@functools.cache
+def harness_revision():
+    """Installed Provenant revision for lane provenance; None outside a Git checkout."""
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(Path(__file__).resolve().parents[3]), "rev-parse", "HEAD"],
+            capture_output=True, text=True, timeout=2, stdin=subprocess.DEVNULL,
+            env={key: value for key, value in os.environ.items() if not key.startswith("GIT_")},
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return result.stdout.strip() or None if result.returncode == 0 else None
 
 
 # Home-relative credential stores. No lane reads them, whatever else its profile grants.
@@ -163,37 +238,13 @@ def _opencode_discovery_grantable(path, *, directory=False):
     return target.is_file() and target.name in OPENCODE_INSTRUCTION_FILES
 
 
-def _strip_jsonc(text):
-    # Drops comments and trailing commas outside strings, so the result parses as JSON.
-    out, i, quoted, comma = [], 0, False, None
-    while i < len(text):
-        char = text[i]
-        if quoted:
-            out.append(char)
-            if char == "\\" and i + 1 < len(text):
-                out.append(text[i + 1])
-                i += 1
-            elif char == '"':
-                quoted = False
-        elif text.startswith("//", i):
-            i = text.find("\n", i)
-            if i < 0:
-                break
-            continue
-        elif text.startswith("/*", i):
-            end = text.find("*/", i + 2)
-            i = len(text) if end < 0 else end + 2
-            continue
-        elif char.isspace():
-            out.append(char)
-        else:
-            if char in "}]" and comma is not None:
-                out[comma] = ""
-            comma = len(out) if char == "," else None
-            quoted = char == '"'
-            out.append(char)
-        i += 1
-    return "".join(out)
+def _jsonc_loads(text):
+    # The one JSONC reader lives in the product's scripts/lib; a skill reaches it by path.
+    spec = importlib.util.spec_from_file_location(
+        "provenant_jsonc", Path(__file__).resolve().parents[3] / "scripts/lib/jsonc.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.parse_jsonc(text)[0]
 
 
 def _opencode_configured_instructions(home, config_home):
@@ -203,7 +254,7 @@ def _opencode_configured_instructions(home, config_home):
     for config in (config_home / "opencode/opencode.json", config_home / "opencode/opencode.jsonc",
                    home / ".opencode/opencode.json", home / ".opencode/opencode.jsonc"):
         try:
-            entries = json.loads(_strip_jsonc(config.read_text(encoding="utf-8"))).get("instructions", [])
+            entries = _jsonc_loads(config.read_text(encoding="utf-8")).get("instructions", [])
         except (OSError, ValueError, AttributeError):
             continue
         for entry in entries if isinstance(entries, list) else []:
@@ -348,10 +399,19 @@ def _sbpl_filter(path, *, keep_leaf=False, canonical=False):
     text = str(path)
     if text.endswith("*"):
         pattern = text[:-1]
-        regex_metacharacters = set(r'.^$*+?()[]{}|\\"')
-        pattern = "".join("\\" + char if char in regex_metacharacters else char for char in pattern)
+        pattern = _sbpl_regex_escape(pattern)
         return '(regex #"^' + pattern + '[^/]*$")'
     return "(subpath " + _sbpl_string(path, keep_leaf=keep_leaf, canonical=canonical) + ")"
+
+
+def _sbpl_expand_counts(pattern: str) -> str:
+    """Spell out `[class]{n}`: Seatbelt regex has no counted repetition and silently matches nothing."""
+    return re.sub(r"(\[[^\]]+\])\{(\d+)\}", lambda match: match.group(1) * int(match.group(2)), pattern)
+
+
+def _sbpl_regex_escape(value):
+    regex_metacharacters = set(r'.^$*+?()[]{}|\\"')
+    return "".join("\\" + char if char in regex_metacharacters else char for char in value)
 
 
 def _sbpl_rule(action, operations, paths, *, literal=False, keep_leaf=False, canonical=False):
@@ -488,56 +548,56 @@ def codex_writer_shared_paths(cwd, safe_path):
 def os_confinement_profile(plan, search_path=None):
     """Apply the provider's read and write boundary to this attempt.
 
+    Seatbelt checks file-write* on both ends of a hard link, so the write rules also bound `ln`.
     SBPL applies the last matching rule, so each later rule narrows or widens the one before.
     """
     root = Path(plan.get("workspace_root") or plan["cwd"]).expanduser().resolve()
     home = Path.home().resolve()
-    state = CONFINED_STATE.get(plan.get("adapter"), {})
+    state = _provider_state(plan)
     add_dirs = [Path(path) for path in plan.get("applied", {}).get("add_dirs", [])]
     run_dir = Path(plan["run_dir"]) if plan.get("run_dir") else None
     state_writes = _state_paths(home, state.get("read_write", ()))
+    cwd_path = Path(plan["cwd"]).resolve()
+    discovery_metadata = [ancestor / name for ancestor in (cwd_path, *cwd_path.parents)
+                          for name in state.get("ancestor_metadata", ())]
+    # Discovery's realPath opens each of these directories, not only lstats them, and a live lane still died with
+    # EPERM on metadata alone (#1012). Grant the directory itself (names, never children) after protected-path
+    # denies, literal and without following a leaf symlink, so descendants stay unreadable.
+    metadata_grant = _sbpl_rule("allow", "file-read-data file-read-metadata", discovery_metadata,
+                                literal=True, keep_leaf=True)
     if plan.get("mode") == "worktree_write":
         cwd = Path(plan["cwd"])
-        git_dirs = {}
-        for flag in ("--absolute-git-dir", "--git-common-dir"):
-            result = subprocess.run(["git", "-C", str(cwd), "rev-parse", "--path-format=absolute", flag],
-                                    capture_output=True, text=True, timeout=5)
-            if result.returncode == 0 and result.stdout.strip():
-                git_dirs[flag] = Path(result.stdout.strip()).resolve()
-        private = git_dirs.get("--absolute-git-dir")
-        common = git_dirs.get("--git-common-dir")
+        # Only an owner-recorded linked worktree gets Git grants; any other Git directory in cwd
+        # is already writable as part of it.
+        git_denied, git_allowed, literal_files, read_only = [], [], [], []
+        if plan.get("trusted_git"):
+            location = owner_location(cwd, common=plan["trusted_git"]["common"])
+            location.validate()
+            git_denied = [location.common]
+            git_allowed, literal_files = writer_git_writes(location.private, location.common, plan.get("lane_ref"))
+            read_only = writer_read_only(cwd, location.private, location.common)
         allowed = [cwd, *add_dirs, *([run_dir] if run_dir else []), Path("/dev")]
         shared_paths = plan["applied"].get("shared_write_paths", {})
         locks_dir = plan.get("applied", {}).get("locks_dir")
         if locks_dir and _real_dir_chain(Path(locks_dir)):
             allowed.append(Path(locks_dir))
-        git_allowed = []
-        if private is not None and private != common:
-            git_allowed.append(private)
-        if common is not None:
-            git_allowed.extend(common / path for path in GIT_COMMON_WRITE_DIRS)
-        literal_files = ([common / path for path in GIT_COMMON_WRITE_FILES]
-                         if common is not None else [])
         capabilities = plan.get("applied", {}).get("capabilities", [])
         profile = (
             "(version 1)\n(allow default)\n(deny file-write*)\n"
             + _sbpl_rule("allow", "file-write*", allowed)
-            + _sbpl_rule("allow", "file-write*", state_writes, canonical=True)
-            + _sbpl_rule("deny", "file-write*", [common] if common is not None else [])
+            + "".join(rule for rule, _ in _state_write_grants(home, state, ("read_write",)))
+            + _sbpl_rule("deny", "file-write*", git_denied)
             + _sbpl_rule("allow", "file-write*", git_allowed, keep_leaf=True)
-            + _sbpl_rule("allow", "file-write*", literal_files, literal=True, keep_leaf=True)
+            # Owner-resolved lexical paths: a link planted in logs/ or refs/ cannot move these grants.
+            + _sbpl_rule("allow", "file-write*", literal_files, literal=True, canonical=True)
         )
         for path, literal in shared_paths.items():
             profile += _sbpl_rule("allow", "file-write*", [Path(path)], literal=literal, keep_leaf=True)
         profile += _state_write_guards(home, {"no_links": [path for path, literal in shared_paths.items() if literal]})
+        profile += _sbpl_rule("deny", "file-write*", read_only, keep_leaf=True)
         if plan.get("adapter") == "codex" and capabilities:
             codex_home = Path(plan["codex_home"])
             auth_path = Path(plan["codex_auth_path"])
-            # Codex's native sandbox keeps these read-only, so a capability lane keeps them too.
-            profile += _sbpl_rule("deny", "file-write*", [cwd / ".git"])
-            if private is not None and private != common:
-                for name in GIT_PRIVATE_READ_ONLY:
-                    profile += _sbpl_rule("deny", "file-write*", [private / name], literal=True)
             profile += _sbpl_rule("allow", "file-write*", [codex_home])
             # Quote without resolving, and allow in-place rewrites only, so the lane cannot swap the
             # entry for a link that would move the next attempt's grant.
@@ -560,9 +620,10 @@ def os_confinement_profile(plan, search_path=None):
                 [cwd, *add_dirs, *([run_dir] if run_dir else []), codex_home]
             )
         profile += _state_write_guards(home, state)
+        profile += _provider_config_write_denies(home)
         profile += _sbpl_rule("deny", "file-write*", plan.get("protected_paths", []))
         profile += _sbpl_rule("deny", "file-read*", plan.get("protected_paths", []))
-        return profile
+        return profile + metadata_grant
     configured_xdg = Path(os.environ.get("XDG_CONFIG_HOME", "")).expanduser()
     xdg_config_home = configured_xdg if configured_xdg.is_absolute() else home / ".config"
     git_config_files = [home / ".gitconfig", xdg_config_home / "git/config"]
@@ -588,7 +649,7 @@ def os_confinement_profile(plan, search_path=None):
     return (
         "(version 1)\n(allow default)\n(deny file-write*)\n"
         + _sbpl_rule("allow", "file-write*", [*([run_dir] if run_dir else []), Path("/dev")])
-        + _sbpl_rule("allow", "file-write*", state_writes, canonical=True)
+        + "".join(rule for rule, _ in _state_write_grants(home, state, ("read_write",)))
         + _state_write_guards(home, state)
         + _sbpl_rule("deny", "file-read-data", [home, Path("/private/tmp")])
         + _sbpl_rule("deny", "file-read-data", [root, *add_dirs])
@@ -614,8 +675,31 @@ def os_confinement_profile(plan, search_path=None):
         + _sbpl_rule("deny", "file-read-data", [home / path for path in
                                                 (*EXTRA_DENIED_READS, *state.get("read_denied", ()))])
         + (_claude_session_reads(home, plan) if plan.get("adapter") == "claude" else "")
+        + _provider_config_write_denies(home)
         + _sbpl_rule("deny", "file-read*", plan.get("protected_paths", []))
+        + metadata_grant
     )
+
+
+def _provider_state(plan):
+    """Resolve the provider home once, sharing it between preparation and every state rule.
+
+    A user's home-level dotfiles link is supported; mutable entries below it still cannot move
+    a grant through a link. Keep regexes relative to this same canonical provider home.
+    """
+    state = dict(CONFINED_STATE.get(plan.get("adapter"), {}))
+    relative = state.get("home")
+    if relative:
+        root = Path(plan.setdefault("provider_home", str((Path.home() / relative).resolve())))
+        if root != Path.home().resolve() / relative and credential_path(root):
+            raise PermissionError(f"provider home resolves into a credential store: {root}")
+        state["resolved_home"] = root
+        for key in ("read_write", "write_literal", "write_in_place", "read", "oauth_read",
+                    "read_literal", "read_denied", "no_links", "no_symlinks"):
+            state[key] = tuple(str(root / Path(entry).relative_to(relative))
+                               if Path(entry).is_relative_to(relative) else entry
+                               for entry in state.get(key, ()))
+    return state
 
 
 def _state_paths(home, entries):
@@ -641,17 +725,55 @@ def _state_read_paths(home, entries):
     return [path for path in paths if not (path.is_symlink() and credential_path(path.resolve()))]
 
 
+def _provider_config_write_denies(home):
+    paths = []
+    for relative in READ_ONLY_PROVIDER_CONFIG:
+        path = home / relative
+        # Deny both the link name (including replacement siblings) and its normal read target.
+        paths.extend((str(path) + "*", str(path.resolve()) + "*"))
+    return _sbpl_rule("deny", "file-write*", dict.fromkeys(paths))
+
+
+def _state_write_grants(home, state, keys=("read_write", "write_literal", "write_in_place", "write_regex")):
+    """The profile rules and receipt descriptions of the same canonical provider grants."""
+    grants = []
+    for key in keys:
+        if key == "write_regex":
+            root = state.get("resolved_home", home)
+            paths = ["^" + _sbpl_regex_escape(str(root)) + "/" + _sbpl_expand_counts(pattern) + "$"
+                     for pattern in state.get(key, ())]
+        else:
+            paths = _state_paths(home, state.get(key, ()))
+            if key == "write_literal" and state.get("atomic_siblings"):
+                paths = [*paths, *(str(path) + "*" for path in paths)]
+        for path in paths:
+            value = str(path)
+            regex = key == "write_regex" or value.endswith("*")
+            if key != "write_regex" and value.endswith("*"):
+                value = "^" + _sbpl_regex_escape(value[:-1]) + "[^/]*$"
+            if regex:
+                rule = f'(allow file-write* (regex #"{value}"))\n'
+                description = "regex:" + value
+            else:
+                rule = _sbpl_rule("allow", "file-write*", [path], literal=key != "read_write", canonical=True)
+                description = value
+            grants.append((rule, description))
+    return grants
+
+
 def _state_write_guards(home, state):
     """Rewrite-in-place grants, and no links a lane could plant for the provider's unconfined CLI."""
     in_place = _state_paths(home, state.get("write_in_place", ()))
-    rules = _sbpl_rule("allow", "file-write*", _state_paths(home, state.get("write_literal", ())),
-                       literal=True, canonical=True)
-    rules += _sbpl_rule("allow", "file-write*", in_place, literal=True, canonical=True)
+    rules = "".join(rule for rule, _ in _state_write_grants(
+        home, state, ("write_literal", "write_in_place", "write_regex")))
     rules += _sbpl_rule("deny", "file-write-create file-write-unlink", in_place, literal=True, canonical=True)
     for path in state.get("no_links", ()):
         # Nor a directory or FIFO at a file grant, which would hold or block what the CLI opens.
         rules += (f"(deny file-write-create (require-all {_sbpl_filter(home / path)} (require-any "
                   "(vnode-type SYMLINK) (vnode-type DIRECTORY) (vnode-type FIFO))))\n")
+    for path in state.get("no_symlinks", ()):
+        # Session/cache trees need new directories, unlike the fixed-file Kiro support grants.
+        rules += f"(deny file-write-create (require-all {_sbpl_filter(home / path)} (vnode-type SYMLINK)))\n"
     return rules
 
 
@@ -685,7 +807,8 @@ def _claude_session_reads(home, plan):
                 if session and re.fullmatch(CLAUDE_SESSION_ID, str(session))]
     if not sessions:
         return ""
-    directory = _claude_project_dir(home, plan["cwd"])
+    root = _provider_state(plan).get("resolved_home", home / ".claude")
+    directory = root / "projects" / _claude_project_dir(home, plan["cwd"]).name
     return "(allow file-read-data " + " ".join(
         f"(literal {_sbpl_quote(directory / (session + '.jsonl'))}) (subpath {_sbpl_quote(directory / session)})"
         for session in sessions
@@ -957,12 +1080,113 @@ def _adapter_binary_reads(plan, search_path=None):
     return links, [install]
 
 
+# A lane can replace any entry it may write with a link, including run_dir/tmp and the overlay
+# within it. The supervisor runs unconfined, so it reaches those entries only by walking open
+# directories with O_NOFOLLOW from a root the lane cannot write.
+DIRECTORY_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+
+
+def _open_canonical_dir(path):
+    """Open an absolute, canonical directory from / without following a link at any component."""
+    fd = os.open("/", os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        for part in Path(path).parts[1:]:
+            child = os.open(part, DIRECTORY_FLAGS, dir_fd=fd)
+            os.close(fd)
+            fd = child
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
+
+
+def _private_dir(parent_fd, name):
+    """Open name below parent_fd as a 0o700 directory, replacing a link or file left there."""
+    try:
+        os.mkdir(name, 0o700, dir_fd=parent_fd)
+    except FileExistsError:
+        if not stat.S_ISDIR(os.stat(name, dir_fd=parent_fd, follow_symlinks=False).st_mode):
+            os.unlink(name, dir_fd=parent_fd)
+            os.mkdir(name, 0o700, dir_fd=parent_fd)
+    fd = os.open(name, DIRECTORY_FLAGS, dir_fd=parent_fd)
+    os.fchmod(fd, 0o700)  # mkdir leaves an existing directory's mode as it was
+    return fd
+
+
+def _write_new(directory_fd, name, data, mode):
+    """Create name below an open directory; never through an entry that is already there."""
+    fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=directory_fd)
+    try:
+        os.fchmod(fd, mode)
+        view = memoryview(data)
+        while view:
+            view = view[os.write(fd, view):]
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def _unlinked_file(tmp_fd):
+    """A read-write file made in the open attempt tmp and unlinked at once, so no path names it."""
+    name = f".provenant-{uuid.uuid4().hex}"
+    fd = os.open(name, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=tmp_fd)
+    os.unlink(name, dir_fd=tmp_fd)
+    return os.fdopen(fd, "w+b")
+
+
+def _open_attempt_tmp(attempt_dir):
+    """Open the attempt's tmp from /, held for the whole attempt and any retry of it.
+
+    Only the attempt directory's parent is resolved: the lane may write the attempt directory
+    and everything in it.
+    """
+    attempt_dir = Path(attempt_dir).parent.resolve() / Path(attempt_dir).name
+    attempt_dir.mkdir(parents=True, exist_ok=True)
+    attempt_fd = _open_canonical_dir(attempt_dir)
+    try:
+        return _private_dir(attempt_fd, "tmp")
+    finally:
+        os.close(attempt_fd)
+
+
+def _prepare_state_directories(plan):
+    """Bootstrap runtime directories and the actual project root before confinement.
+
+    Granting root creation would also permit transplanting hooks or trust/MCP settings there.
+    The provider home is already canonical; refuse links below it and leave existing files alone.
+    """
+    state = _provider_state(plan)
+    root = state.get("resolved_home", Path.home().resolve())
+    prepare = state.get("prepare_dirs")
+    for directory in prepare(root, plan) if prepare else ():
+        root.mkdir(parents=True, exist_ok=True)
+        current, fd = root, None
+        try:
+            fd = _open_canonical_dir(root)
+            for part in directory.relative_to(root).parts:
+                current = current / part
+                try:
+                    os.mkdir(part, dir_fd=fd)
+                except FileExistsError:
+                    pass
+                child = os.open(part, DIRECTORY_FLAGS, dir_fd=fd)
+                os.close(fd)
+                fd = child
+        except OSError as exc:
+            raise PermissionError(f"provider state directory must be a real directory: {current}; "
+                                  "fix: replace the link or file with a directory") from exc
+        finally:
+            if fd is not None:
+                os.close(fd)
+
+
 def confinement_command(plan, command, search_path=None):
     if plan.get("applied", {}).get("confinement") != "sandbox-exec":
         return list(command)
     sandbox_exec = _sandbox_exec_path()
     if not sandbox_exec:
         raise RuntimeError("sandbox-exec is unavailable for a confined provider launch")
+    _prepare_state_directories(plan)
     return [sandbox_exec, "-p", os_confinement_profile(plan, search_path), *command]
 
 
@@ -1043,18 +1267,19 @@ def build_plan(
     cwd = str(selected_cwd)
     git_common = None
     git_private = None
+    git_writes = []
     if mode == "worktree_write" and worktree is not None:
-        git_dirs = []
-        for flag in ("--absolute-git-dir", "--git-common-dir"):
-            result = subprocess.run(["git", "-C", cwd, "rev-parse", "--path-format=absolute", flag],
-                                    capture_output=True, text=True, timeout=5)
-            if result.returncode != 0 or not result.stdout.strip():
-                raise ValueError("worktree_write requires a linked worktree; fix: create a linked worktree")
-            git_dirs.append(Path(result.stdout.strip()).resolve())
-        if git_dirs[0] == git_dirs[1]:
+        location = owner_location(cwd, common=metadata.pop("common_git_dir", None))
+        location.validate()
+        if location.private == location.common:
             raise ValueError("worktree_write requires a linked worktree; fix: create a linked worktree")
-        git_private = git_dirs[0]
-        git_common = git_dirs[1]
+        git_private, git_common = location.private, location.common
+        metadata["trusted_git"] = location.record()
+        metadata["lane_ref"] = location.writer_ref()
+        if metadata["lane_ref"]:
+            prepare_writer_ref(git_common, metadata["lane_ref"])
+        git_dirs, git_files = writer_git_writes(git_private, git_common, metadata["lane_ref"])
+        git_writes = [str(path) for path in (*git_dirs, *git_files)]
     guarded = check_protected_inputs(route, workspace_root, cwd, worktree=worktree,
                                      prompt_file=original_prompt_file, add_dirs=add_dirs,
                                      read_roots=read_roots)
@@ -1216,15 +1441,9 @@ def build_plan(
         source_codex_home = Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex").expanduser().resolve()
         codex_auth_path = source_codex_home / "auth.json"
     if confinement == "sandbox-exec":
-        state = CONFINED_STATE.get(adapter, {})
-        writable_paths = [str(attempt_dir), *(str(Path.home() / path) for path in
-                           (*state.get("read_write", ()), *state.get("write_literal", ()),
-                            *state.get("write_in_place", ()))), "/dev"]
+        writable_paths = [str(attempt_dir), "/dev"]
         if mode == "worktree_write":
-            git_paths = ([str(git_private), *(str(git_common / path) for path in
-                           GIT_COMMON_WRITE_DIRS + GIT_COMMON_WRITE_FILES)]
-                         if git_private is not None else [])
-            writable_paths = [cwd, *directories, *shared_write_paths, *([locks_dir] if locks_dir else []), *writable_paths, *git_paths]
+            writable_paths = [cwd, *directories, *shared_write_paths, *([locks_dir] if locks_dir else []), *writable_paths, *git_writes]
         if codex_home is not None:
             writable_paths.extend((str(codex_home), str(codex_auth_path)))
         write_boundary = {"kind": "sandbox-exec", "writable_paths": writable_paths}
@@ -1240,12 +1459,9 @@ def build_plan(
                           **({locks_dir: "write"} if locks_dir else {})}
             if git_private is not None:
                 filesystem[str(git_common)] = "read"
-                for path in (git_private, *(git_common / name for name in
-                                            GIT_COMMON_WRITE_DIRS + GIT_COMMON_WRITE_FILES)):
-                    filesystem[str(path)] = "write"
-                for name in GIT_PRIVATE_READ_ONLY:
-                    filesystem[str(git_private / name)] = "read"
-                filesystem[str(Path(cwd, ".git"))] = "read"
+                filesystem.update(dict.fromkeys(git_writes, "write"))
+                for path in writer_read_only(cwd, git_private, git_common):
+                    filesystem[str(path)] = "read"
             write_boundary["filesystem"] = filesystem
     else:
         write_boundary = {"kind": "none", "writable_paths": None}
@@ -1331,6 +1547,10 @@ def build_plan(
         or os.environ.get("CF_DISPATCH_AGY_SANDBOX", "0") == "1",
         **metadata,
     }
+    if confinement == "sandbox-exec":
+        state = _provider_state(plan)
+        write_boundary["writable_paths"].extend(
+            description for _, description in _state_write_grants(Path.home().resolve(), state))
     context_usage.apply_ceiling(plan, context_ceiling)
     if hasattr(config, "config_policy"):
         plan["applied"]["config"] = config.config_policy(plan)
@@ -1357,18 +1577,19 @@ SIGNATURES = (
     ),
     (
         "usage_limited",
-        r"you.ve hit your (?:usage|session|weekly) limit|usage limit|session limit|weekly limit|individual quota reached|insufficient_quota|quota exceeded|RESOURCE_EXHAUSTED|exhausted your capacity",
+        r"you.ve hit your (?:usage|session|weekly) limit|usage limit|session limit|weekly limit|individual quota reached|insufficient_quota|FreeUsageLimitError|exhausted your capacity",
     ),
     (
         "auth_required",
         r"authentication required|please sign in|please(?: run)? login|not logged in|not authenticated|unauthenticated|unauthorized|login expired|\b401\b",
     ),
-    ("rate_limited", r"rate.?limit|too many requests|overloaded|\b(?:429|529)\b"),
+    ("rate_limited", r"rate.?limit|too many requests|overloaded|\b(?:429|529)\b|per[ -](?:minute|second)"),
     (
         "model_unavailable",
         r"model[^\n]*(?:unavailable|not available|not found|unsupported|does not exist)|unknown model",
     ),
     ("permission_blocked", r"\b403\b|forbidden"),
+    ("provider_transport", r"reconnecting|stream disconnected|failed to load workspace requirements|transport (?:error|fail)|connection (?:reset|closed)|error sending request"),
 )
 
 
@@ -1381,12 +1602,14 @@ def error_class(status, signature=None):
         "auth_required": "auth", "model_unavailable": "model_unavailable",
         "timed_out": "timeout", "startup_timeout": "timeout", "stalled": "timeout",
         "permission_blocked": "sandbox_denied",
+        "lost": "provider_error", "cancelled": "cancelled",
     }
     signatures = {
         **classes, "quota_exhausted": "usage_limited", "auth_expired": "auth",
         "pinned_model_substitution": "model_unavailable", "empty_output": "empty_output",
         "print_timeout": "timeout", "idle_watchdog": "timeout", "startup_watchdog": "timeout",
         "wall_clock": "timeout",
+        "provider_transport": "transient",
     }
     return classes.get(status) or signatures.get(signature) or (
         "provider_error" if status in {"failed", "rejected", "tool_missing", "output_identity_invalid", "output_write_error"}
@@ -1472,6 +1695,19 @@ def reset_time(text, events, at=None):
     return None
 
 
+def quota_window_is_short(failure_text):
+    """True when the quota phrase names a minute or second window and no longer one."""
+    start = re.search(r"quota exceeded", failure_text, re.I)
+    start = start or re.search(r"RESOURCE_EXHAUSTED", failure_text)
+    # Bounded to the sentence or JSON string; a quoted metric name does not end it.
+    phrase = re.split(r'\.\s|\n|"\s*[,}\]]', failure_text[start.start():][:240], maxsplit=1)[0] if start else ""
+    long_window = (re.search(r"per[ -](?:day|hour)\b|/\s*(?:day|hr|hour)\b", phrase, re.I)
+                   or re.search(r"Per(?:Day|Hour)(?![a-z])", failure_text))
+    short_window = (re.search(r"per[ -](?:minute|second)\b|/\s*(?:min(?:ute)?|sec(?:ond)?)\b", phrase, re.I)
+                    or re.search(r"Per(?:Minute|Second)(?![a-z])", failure_text))
+    return bool(short_window and not long_window)
+
+
 def parse_output(adapter, stdout, stderr="", exit_code=0, *, at=None):
     """Interpret structured failures before diagnostic signatures; never classify answer prose."""
     config = profile(adapter)
@@ -1487,6 +1723,7 @@ def parse_output(adapter, stdout, stderr="", exit_code=0, *, at=None):
         "terminal": False,
         "question": None,
     }
+    continues_turn = getattr(config, "continues_turn", lambda event: False)
     events, plain, parts, errors = [], [], [], []
     retry_errors = []
     duplicate_json = False
@@ -1501,6 +1738,7 @@ def parse_output(adapter, stdout, stderr="", exit_code=0, *, at=None):
         return value
 
     terminal_text = None
+    provider_message = None
     partial = False
     try:
         whole = json.loads(stdout, object_pairs_hook=no_duplicates)
@@ -1527,6 +1765,9 @@ def parse_output(adapter, stdout, stderr="", exit_code=0, *, at=None):
         errors.append("invalid agy envelope")
     for event in events:
         kind = event.get("type") or ""
+        if continues_turn(event):
+            parts.clear()
+            result["terminal"] = False
         if not kind and isinstance(event.get("event"), str):
             kind = event["event"]  # agy names the event kind `event`
         if adapter == "kiro" and event.get("jsonrpc") == "2.0":
@@ -1585,6 +1826,7 @@ def parse_output(adapter, stdout, stderr="", exit_code=0, *, at=None):
             "error",
             "turn.failed",
             "api_retry",
+            "provider.quota",
             "AGY_ERROR",
         } or bool(event.get("is_error"))
         if kind == "rate_limit_event":
@@ -1596,9 +1838,21 @@ def parse_output(adapter, stdout, stderr="", exit_code=0, *, at=None):
             if error_event:
                 errors.append("usage limit " + json.dumps(event))
         if error_event:
+            # v2 may encode the response body as a JSON string. Keep its message,
+            # rather than a truncated envelope, as the actionable failure reason.
+            for item in _objects(event):
+                body = item.get("body")
+                if isinstance(body, str):
+                    try:
+                        body = json.loads(body)
+                    except ValueError:
+                        body = None
+                for detail in _objects(body if isinstance(body, dict) else item):
+                    if isinstance(detail.get("message"), str):
+                        provider_message = detail["message"]
             error_text = json.dumps(event, ensure_ascii=False)
-            if not (adapter == "codex" and "reconnecting" in error_text.lower()):
-                (retry_errors if kind == "api_retry" else errors).append(error_text)
+            retry = kind == "api_retry" or (adapter == "codex" and kind == "error" and "reconnecting" in error_text.lower())
+            (retry_errors if retry else errors).append(error_text)
         if event.get("denied_actions") is not None and not isinstance(
             event["denied_actions"], list
         ):
@@ -1616,6 +1870,8 @@ def parse_output(adapter, stdout, stderr="", exit_code=0, *, at=None):
                 terminal_text = text
         if kind in {"turn.completed", "turn.failed", "session.completed", "done"}:
             result["terminal"] = True
+        if adapter == "codex" and kind == "turn.completed":
+            retry_errors.clear()
         if kind == "assistant":
             content = (
                 event.get("message", {}).get("content", [])
@@ -1698,11 +1954,9 @@ def parse_output(adapter, stdout, stderr="", exit_code=0, *, at=None):
         else "".join(plain)
     )
     errors.extend(retry_errors)
-    failure_text = (
-        "\n".join(errors)
-        if errors
-        else stderr
-    )
+    diagnostic_hook = getattr(config, "diagnostics", None)
+    diagnostics, warning_line = diagnostic_hook(stderr) if diagnostic_hook else (stderr, "")
+    failure_text = "\n".join(errors) if errors else diagnostics
     result["failure_text"] = failure_text
     # Permission denials in diagnostics invalidate a claimed success (Agy does this).
     denial = adapter == "agy" and re.search(PERMISSION_DENIAL_PATTERN, stderr, re.I)
@@ -1712,24 +1966,37 @@ def parse_output(adapter, stdout, stderr="", exit_code=0, *, at=None):
     status = None
     if errors or exit_code != 0 or denial:
         signatures = (SIGNATURES[0], *config.SIGNATURES, *SIGNATURES[1:])
+        if re.search(r"RESOURCE_EXHAUSTED|quota exceeded", failure_text, re.I):
+            quota = "rate_limited" if quota_window_is_short(failure_text) else "usage_limited"
+            signatures = (signatures[0], (quota, r"RESOURCE_EXHAUSTED|quota exceeded"), *signatures[1:])
         for name, pattern in signatures:
             if re.search(pattern, failure_text, re.I):
-                status = "rejected" if name == "invalid_input" else name
+                status = "rejected" if name == "invalid_input" else "failed" if name == "provider_transport" else name
                 result["signature"] = name
                 break
         status = status or (
             "timed_out" if "print-timeout" in failure_text else "failed"
         )
-        result["excerpt"] = failure_text.strip()[:200]
+        result["excerpt"] = (provider_message or "\n".join(errors).strip() or warning_line or failure_text.strip() or (
+            getattr(config, "EMPTY_FAILURE", "").format(exit_code=exit_code)))[:200]
     elif partial:
         status = "partial"
         result["signature"] = "print_timeout"
+    elif adapter == "codex" and parts and not result["terminal"]:
+        status = "failed"
+        result["signature"] = "provider_incomplete"
+        result["excerpt"] = "provider exited without a terminal result"
     elif result["text"].strip():
         status = "ok"
     else:
         status = "failed"
         result["signature"] = "empty_output"
         result["excerpt"] = ("no assistant text: " + stdout.strip())[:200]
+    if (getattr(config, "EXIT_AFTER_OUTPUT", False) and status == "failed" and result["signature"] is None and exit_code == 1
+            and parts and result["text"].strip() and not errors):
+        status = "ok"
+        result["signature"] = "exit_after_output"
+        result["excerpt"] = (warning_line or f"provider exited {exit_code} after final assistant output")[:200]
     if status == "ok":
         question = re.search(
             r"```(?:[^\n`]*\n)?\s*QUESTION:\s*((?:(?!```).)*?)\s*```\s*\Z", result["text"], re.S
@@ -1936,6 +2203,17 @@ def _signal_name(signum):
         return f"SIG{signum}"  # Intermediate realtime signals have no enum member.
 
 
+def termination_request_matches(request, *, run_token, provider_pid, started_at, signals):
+    """Bind controller intent and time; None opts out of provider PID binding."""
+    return (isinstance(request, dict) and bool(run_token) and request.get("run_token") == run_token
+            and (provider_pid is None or request.get("provider_pid") == provider_pid)
+            and request.get("signal") in signals
+            and request.get("source") in {"run_control", "orphan_reaper", "cancel_requested"}
+            and isinstance(started_at, str) and isinstance(request.get("requested_at"), str)
+            and started_at <= request["requested_at"] <= now()
+            and type(request.get("sender_pid")) is int and request["sender_pid"] > 1)
+
+
 def _termination_request(environment, process, exit_code, started_at, supervisor_signal=None):
     """Optional controller telemetry; waitpid itself never exposes the sender."""
     directory, token = environment.get("PROVENANT_RUN_DIR"), environment.get("PROVENANT_RUN_TOKEN")
@@ -1949,13 +2227,8 @@ def _termination_request(environment, process, exit_code, started_at, supervisor
             if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
                 return {}
             request = json.loads(stream.read(65537))
-        if (isinstance(request, dict) and request.get("run_token") == token
-                and request.get("provider_pid") == process.pid
-                and request.get("signal") == _signal_name(signum)
-                and request.get("source") in {"run_control", "orphan_reaper", "cancel_requested"}
-                and isinstance(request.get("requested_at"), str)
-                and started_at <= request["requested_at"] <= now()
-                and type(request.get("sender_pid")) is int and request["sender_pid"] > 1):
+        if termination_request_matches(request, run_token=token, provider_pid=process.pid,
+                                       started_at=started_at, signals={_signal_name(signum)}):
             return {"termination_source": request["source"], "signal_requester_pid": request["sender_pid"],
                     "signal_requested_at": request["requested_at"]}
     except (OSError, ValueError):
@@ -2547,7 +2820,7 @@ def _instruction_path(path):
     # A tree may spell the directory in any case, and a case-insensitive checkout writes it to
     # .agents. The spelling is kept, so a variant is a new path rather than shadowing the original.
     # An entry named .agents itself (a link, file or submodule) counts as well.
-    return path if path.partition("/")[0].casefold() == INSTRUCTION_DIR else None
+    return path if unicodedata.normalize("NFC", path.partition("/")[0]).casefold() == INSTRUCTION_DIR else None
 
 
 def _instruction_entries(cwd, listing, *, index=False):
@@ -2887,23 +3160,273 @@ def tool_cache_environment(plan, cache, inherited):
     return environment
 
 
-def stage_ps_shim(private_tmp):
+# agy rewrites its bin/agentapi shim before running a command and puts bin/ on that command's
+# PATH, so a later unconfined agy session or sidecar would run whatever a lane left there (#1055).
+# A confined lane gets a HOME of links to the real entries, with its own antigravity-cli/bin; the
+# sandbox still judges every access through a link at the real path, and the live bin/ stays
+# read-only. agy signs in from the login Keychain, so its token files are neither linked nor
+# copied back: a refresh renamed over a link would land in the overlay.
+AGY_PRIVATE_BIN = Path(".gemini/antigravity-cli/bin")
+AGY_UNLINKED = ("agentapi", "antigravity-oauth-token", "mcp_oauth_tokens.json", "oauth_creds.json")
+# Granted top-level state agy rewrites by temp-and-rename, which replaces the overlay's link rather
+# than the real file. SQLite resolves its link and keeps its journals beside the real database.
+AGY_RENAMED_STATE = ("history.jsonl", "jetbox_summaries_proto.pb", "jetski_state.pbtxt",
+                     "last_check.timestamp", "installation_id")
+AGY_STATE_COPY_MAX = 64 * 1024 * 1024
+AGY_DATABASE = "conversation_summaries.db"
+AGY_COPY_BACK_LOCK = ".provenant-copy-back.lock"
+AGY_COPY_BACK_WAIT = 10
+
+
+# The staged overlay: its path for HOME, its name in the attempt tmp, and the identity of each
+# real renamed-state file at staging, so copy-back never overwrites another session's update.
+AgyHome = namedtuple("AgyHome", "path name before")
+
+
+def _identity(directory_fd, name):
+    try:
+        found = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        return None
+    return found.st_dev, found.st_ino, found.st_size, found.st_mtime_ns
+
+
+def _link_overlay(fd, source, source_fd, parts):
+    """Link source's entries into the open directory fd, descending into a real copy of parts[0].
+
+    source_fd is the real directory opened without following links, or None when it is missing.
+    """
+    part = parts[0] if parts else None
+    for name in sorted(os.listdir(source_fd)) if source_fd is not None else ():
+        if name != part and not name.startswith(AGY_UNLINKED):
+            os.symlink(source / name, name, dir_fd=fd)
+    if part is None:
+        return
+    os.mkdir(part, 0o700, dir_fd=fd)
+    child = os.open(part, DIRECTORY_FLAGS, dir_fd=fd)
+    child_source = None
+    try:
+        try:
+            child_source = os.open(part, DIRECTORY_FLAGS, dir_fd=source_fd) if source_fd is not None else None
+        except FileNotFoundError:
+            pass
+        _link_overlay(child, source / part, child_source, parts[1:])
+    finally:
+        for descriptor in (child, child_source):
+            if descriptor is not None:
+                os.close(descriptor)
+
+
+def stage_agy_home(plan, tmp_fd, private_tmp):
+    """The confined agy lane's HOME: a fresh overlay of links per attempt in the open attempt tmp,
+    made after its state directories so each of them is a link too."""
+    if plan["adapter"] != "agy" or plan["applied"].get("confinement") != "sandbox-exec":
+        return None
+    _prepare_state_directories(plan)
+    real_fd = _open_canonical_dir(_provider_state(plan)["resolved_home"] / "antigravity-cli")
+    try:
+        # SQLite resolves a link to its database; with no database to link, it would make one in
+        # the overlay that cleanup then discards. An empty file is a valid empty database.
+        try:
+            os.close(os.open(AGY_DATABASE, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600,
+                             dir_fd=real_fd))
+        except FileExistsError:
+            pass
+        before = {name: _identity(real_fd, name) for name in AGY_RENAMED_STATE}
+    finally:
+        os.close(real_fd)
+    name = "agy-home-" + uuid.uuid4().hex[:12]
+    os.mkdir(name, 0o700, dir_fd=tmp_fd)
+    home = _open_canonical_dir(Path.home().resolve())
+    overlay = None
+    try:
+        overlay = os.open(name, DIRECTORY_FLAGS, dir_fd=tmp_fd)
+        _link_overlay(overlay, Path.home(), home, AGY_PRIVATE_BIN.parts)
+    except BaseException:
+        attempt_storage.remove_at(tmp_fd, name)
+        raise
+    finally:
+        for descriptor in (home, overlay):
+            if descriptor is not None:
+                os.close(descriptor)
+    return AgyHome(Path(private_tmp) / name, name, before)
+
+
+def _read_overlay_state(lane_fd, name):
+    """A renamed state file's bytes, or (None, problem); never follows a link."""
+    try:
+        fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=lane_fd)
+    except FileNotFoundError:
+        return None, None
+    except OSError as exc:
+        linked = stat.S_ISLNK(os.stat(name, dir_fd=lane_fd, follow_symlinks=False).st_mode)
+        return None, None if linked else f"{name}: {exc}"
+    try:
+        found = os.fstat(fd)
+        if not stat.S_ISREG(found.st_mode):
+            return None, f"{name}: not a regular file"
+        if found.st_nlink != 1:  # a hard link would copy back another file's bytes
+            return None, f"{name}: not a single-link regular file"
+        chunks, size = [], 0
+        while size <= AGY_STATE_COPY_MAX and (chunk := os.read(fd, 1024 * 1024)):
+            chunks.append(chunk)
+            size += len(chunk)
+        if max(size, found.st_size) > AGY_STATE_COPY_MAX:
+            return None, f"{name}: larger than {AGY_STATE_COPY_MAX} bytes"
+        if size != found.st_size:
+            return None, f"{name}: changed while being read"
+        return b"".join(chunks), None
+    finally:
+        os.close(fd)
+
+
+def _install_state(directory, name, data):
+    """Replace name in the open real directory by a staged file renamed over it."""
+    staged = f".{name}.provenant-{uuid.uuid4().hex}"
+    try:
+        current = os.stat(name, dir_fd=directory, follow_symlinks=False)
+        mode = stat.S_IMODE(current.st_mode) & 0o666 if stat.S_ISREG(current.st_mode) else 0o600
+    except FileNotFoundError:
+        mode = 0o600
+    try:
+        _write_new(directory, staged, data, mode)
+        os.replace(staged, name, src_dir_fd=directory, dst_dir_fd=directory)
+    except OSError:
+        try:
+            os.unlink(staged, dir_fd=directory)
+        except OSError:
+            pass
+        raise
+
+
+def _append_history(directory, data, before):
+    """Append only the lines the lane added to history.jsonl since staging; others may append too."""
+    flags = os.O_RDWR | os.O_APPEND | os.O_NOFOLLOW | (os.O_CREAT if before is None else 0)
+    try:
+        fd = os.open("history.jsonl", flags, 0o600, dir_fd=directory)
+    except FileNotFoundError:
+        return "history.jsonl: removed since staging"
+    try:
+        found = os.fstat(fd)
+        start = 0 if before is None else before[2]
+        if not stat.S_ISREG(found.st_mode) or found.st_nlink != 1:
+            return "history.jsonl: not a single-link regular file"
+        if before is not None and ((found.st_dev, found.st_ino) != before[:2] or found.st_size < start):
+            return "history.jsonl: replaced since staging"
+        if start > len(data):  # never read a staged size the copy itself does not reach
+            return "history.jsonl: shorter than at staging"
+        for offset in range(0, start, 1024 * 1024):
+            chunk = data[offset:min(start, offset + 1024 * 1024)]
+            if os.pread(fd, len(chunk), offset) != chunk:
+                return "history.jsonl: rewritten rather than appended"
+        view = memoryview(data)[start:]
+        while view:
+            view = view[os.write(fd, view):]
+        return None
+    finally:
+        os.close(fd)
+
+
+def finish_agy_home(plan, tmp_fd, home):
+    """Copy renamed state back to the real home, then remove the overlay. Returns warnings.
+
+    Every step starts from the attempt tmp held open since before staging or from a directory
+    opened from / without following a link, so a lane that swapped tmp, the overlay or an
+    ancestor cannot redirect a read, write or delete. A real file another session changed since
+    staging is kept, with a warning.
+    """
+    problems = []
+    fds = []
+    try:
+        fds.append(os.open(home.name, DIRECTORY_FLAGS, dir_fd=tmp_fd))
+        for part in AGY_PRIVATE_BIN.parts[:-1]:
+            fds.append(os.open(part, DIRECTORY_FLAGS, dir_fd=fds[-1]))
+        fds.append(_open_canonical_dir(_provider_state(plan)["resolved_home"] / "antigravity-cli"))
+        lane_fd, real_fd = fds[-2], fds[-1]
+        # Concurrent finishers take turns, so each compares and installs against the last install.
+        # A confined lane may read, and so lock, the file too: wait a bounded time, never forever.
+        fds.append(os.open(AGY_COPY_BACK_LOCK, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600, dir_fd=real_fd))
+        deadline = time.monotonic() + AGY_COPY_BACK_WAIT
+        while True:
+            try:
+                fcntl.flock(fds[-1], fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() > deadline:
+                    raise OSError(f"{AGY_COPY_BACK_LOCK} stayed locked for {AGY_COPY_BACK_WAIT}s") from None
+                time.sleep(0.05)
+        for name in AGY_RENAMED_STATE:
+            try:
+                data, problem = _read_overlay_state(lane_fd, name)
+                if data is None:
+                    pass
+                elif name == "history.jsonl":
+                    problem = _append_history(real_fd, data, home.before[name])
+                elif _identity(real_fd, name) != home.before[name]:
+                    problem = f"{name}: changed by another session since staging; kept it"
+                else:
+                    _install_state(real_fd, name, data)
+            except OSError as exc:
+                problem = f"{name}: {exc}"
+            if problem:
+                problems.append("agy state not copied back: " + problem)
+    except OSError as exc:
+        problems.append(f"agy state not copied back: {exc}")
+    finally:
+        for fd in fds:
+            os.close(fd)
+    left = attempt_storage.remove_at(tmp_fd, home.name)
+    if left:
+        problems.append("agy home overlay not removed: " + ", ".join(left))
+    return problems
+
+
+def needs_ps_shim(plan):
+    """macOS refuses to exec the setuid /bin/ps inside any sandbox, native or sandbox-exec."""
+    return sys.platform == "darwin" and (
+        (plan["adapter"] == "codex" and plan["applied"]["sandbox"] != "full")
+        or plan["applied"].get("confinement") == "sandbox-exec")
+
+
+def stage_ps_shim(tmp_fd, private_tmp):
     """Copy the ps shim into the attempt's temp, which every sandbox lets the lane read.
 
-    The product checkout may sit below a denied home or outside a read-only lane's cwd.
+    The product checkout may sit below a denied home or outside a read-only lane's cwd. A retry
+    reuses the attempt tmp, so whatever the earlier lane left at the shim is removed, never
+    written through.
     """
     source = Path(__file__).resolve().parent
-    stage = private_tmp / "provenant-shim"
-    (stage / "bin").mkdir(parents=True, exist_ok=True)
-    shutil.copyfile(source / "process_info.py", stage / "process_info.py")
-    shutil.copyfile(source / "bin" / "ps", stage / "bin" / "ps")
-    os.chmod(stage / "bin" / "ps", 0o755)
-    return stage / "bin"
+    left = attempt_storage.remove_at(tmp_fd, "provenant-shim")
+    if left:
+        raise OSError(f"ps shim left by an earlier try was not removed: {', '.join(left)}")
+    os.mkdir("provenant-shim", 0o700, dir_fd=tmp_fd)
+    stage = os.open("provenant-shim", DIRECTORY_FLAGS, dir_fd=tmp_fd)
+    try:
+        _write_new(stage, "process_info.py", (source / "process_info.py").read_bytes(), 0o644)
+        os.mkdir("bin", 0o700, dir_fd=stage)
+        shim_bin = os.open("bin", DIRECTORY_FLAGS, dir_fd=stage)
+        try:
+            _write_new(shim_bin, "ps", (source / "bin" / "ps").read_bytes(), 0o755)
+        finally:
+            os.close(shim_bin)
+    finally:
+        os.close(stage)
+    return Path(private_tmp) / "provenant-shim" / "bin"
 
 
-def execute(
+def execute(plan, output_path, **options):
+    """Run exactly one attempt. The caller owns fallback, resume, and run publication."""
+    tmp_fd = _open_attempt_tmp(plan["run_dir"])
+    try:
+        return _run_attempt(plan, output_path, tmp_fd, **options)
+    finally:
+        os.close(tmp_fd)
+
+
+def _run_attempt(
     plan,
     output_path,
+    tmp_fd,
     *,
     events_path=None,
     stderr_path=None,
@@ -2916,6 +3439,8 @@ def execute(
     import selectors
     import threading
 
+    adapter_config = profile(plan["adapter"])
+    continues_turn = getattr(adapter_config, "continues_turn", lambda event: False)
     output_path = Path(output_path)
     events_path = Path(events_path or output_path.parent / "events.jsonl")
     stderr_path = Path(stderr_path or output_path.parent / "stderr.log")
@@ -2961,12 +3486,9 @@ def execute(
         # Running a skill's script must not leave bytecode behind for the check to report.
         environment["PYTHONDONTWRITEBYTECODE"] = "1"
     environment["CLAUDE_CODE_DISABLE_WORKFLOWS"] = "1"
-    attempt_dir = Path(plan["run_dir"])
-    private_tmp = attempt_dir / "tmp"
+    private_tmp = Path(plan["run_dir"]) / "tmp"
     private_cache = private_tmp / "cache"
-    for private in (private_tmp, private_cache):
-        private.mkdir(parents=True, exist_ok=True, mode=0o700)
-        private.chmod(0o700)  # mkdir leaves an existing directory's mode as it was
+    os.close(_private_dir(tmp_fd, "cache"))
     # Tool caches follow XDG_CACHE_HOME; Corepack is set too, so an inherited COREPACK_HOME
     # outside the writable roots cannot leak into child pnpm or yarn calls. zsh ignores TMPDIR
     # and writes here-documents under TMPPREFIX (default /tmp/zsh), outside a confined lane's writes.
@@ -2983,16 +3505,12 @@ def execute(
         for index, (key, value) in enumerate(WRITER_GIT_CONFIG):
             environment[f"GIT_CONFIG_KEY_{index}"] = key
             environment[f"GIT_CONFIG_VALUE_{index}"] = value
-    # macOS refuses to exec the setuid /bin/ps inside any sandbox, native or sandbox-exec.
-    if sys.platform == "darwin" and (
-            (plan["adapter"] == "codex" and plan["applied"]["sandbox"] != "full")
-            or plan["applied"].get("confinement") == "sandbox-exec"):
-        shim_dir = str(stage_ps_shim(private_tmp))
+    if needs_ps_shim(plan):
+        shim_dir = str(stage_ps_shim(tmp_fd, private_tmp))
         environment["PATH"] = shim_dir + os.pathsep + environment.get("PATH", os.defpath)
     if plan["adapter"] == "claude":
         private_claude_tmp = private_tmp / "claude"
-        private_claude_tmp.mkdir(parents=True, exist_ok=True, mode=0o700)
-        private_claude_tmp.chmod(0o700)
+        os.close(_private_dir(tmp_fd, "claude"))
         environment["CLAUDE_TMPDIR"] = str(private_claude_tmp)
         # Otherwise Claude Code opens /tmp/claude-<uid>, which the read-only profile denies.
         environment["CLAUDE_CODE_TMPDIR"] = str(private_claude_tmp)
@@ -3007,25 +3525,9 @@ def execute(
             ANTHROPIC_AUTH_TOKEN=environment.get(route["endpoint_token_env"], ""),
             ANTHROPIC_API_KEY="",
         )
-    if plan["adapter"] == "opencode":
-        bash_permission = {"*": "allow"} if plan["mode"] == "worktree_write" else {
-            "*": "deny",
-            "provenant-no-shell": "allow",
-        }
-        permission = {
-            "edit": {"*": "allow" if plan["mode"] == "worktree_write" else "deny"},
-            "bash": bash_permission,
-            "question": "deny",
-            "external_directory": {"*": "deny"},
-            "webfetch": "deny" if plan.get("network_requested") is False else "allow",
-        }
-        # The sentinel matches no real command and exists only so Zen declares bash.
-        environment["OPENCODE_CONFIG_CONTENT"] = json.dumps({"permission": permission})
-        # v2 scans ~/.claude for Claude Code skills and CLAUDE.md, which the confinement profile
-        # denies (startup fails with EPERM) and which holds the owner's private instructions.
-        # Autoupdate and the filewatcher have no place in a supervised, sandboxed run.
-        environment.update(OPENCODE_DISABLE_CLAUDE_CODE="1", OPENCODE_DISABLE_CLAUDE_CODE_SKILLS="1",
-                           OPENCODE_DISABLE_AUTOUPDATE="1", OPENCODE_DISABLE_FILEWATCHER="1")
+    adapter_environment = getattr(adapter_config, "environment", None)
+    if adapter_environment:
+        environment.update(adapter_environment(plan))
     warning_text = "\n".join(plan["warnings"])
     if warning_text:
         print(warning_text, file=sys.stderr, flush=True)
@@ -3101,6 +3603,10 @@ def execute(
             if not isinstance(event, dict):
                 continue
             meter.observe(event)
+            if continues_turn(event):
+                text_chunks.clear()
+                text_size = 0
+                terminal_at = None
             parsed_line = parse_output(plan["adapter"], line.decode(errors="replace"))
             for key in ("session_id", "observed_model", "reset_at", "retry_after"):
                 if parsed_line.get(key) is not None:
@@ -3122,13 +3628,14 @@ def execute(
                 # A resumed Claude session settles leftover background tasks with
                 # an empty result before its real turn; later activity reopens it.
                 terminal_at = None
-            if parsed_line["status"] not in {"ok", "input_required"} and parsed_line["signature"] != "empty_output":
+            if parsed_line["status"] not in {"ok", "input_required"} and parsed_line["signature"] not in {"empty_output", "provider_incomplete"}:
                 failure = {key: parsed_line[key] for key in ("status", "signature", "excerpt", "reset_at", "retry_after")}
-                if event.get("type") == "api_retry":
+                if event.get("type") == "api_retry" or (plan["adapter"] == "codex" and event.get("type") == "error" and "reconnecting" in line.decode(errors="replace").lower()):
                     retry_failure = failure
                 else:
                     semantic_failures[parsed_line["status"]] = failure
-            elif event.get("type") == "result" and event.get("is_error") is False:
+            elif (event.get("type") == "result" and event.get("is_error") is False
+                  or plan["adapter"] == "codex" and event.get("type") == "turn.completed"):
                 retry_failure = None
             if parsed_line["text"]:
                 encoded = parsed_line["text"].encode()
@@ -3163,14 +3670,18 @@ def execute(
             signal.signal(sig, handle_signal)
     input_file = None
     workspace = None
+    agy_home, agy_home_warnings = None, []
     selector = selectors.DefaultSelector()
     try:
         _prepare_codex_capability_home(plan, environment)
         _prepare_codex_state_dir(plan)
+        agy_home = stage_agy_home(plan, tmp_fd, private_tmp)
+        if agy_home:
+            environment["HOME"] = str(agy_home.path)
         if plan["adapter"] != "codex" and "browser" in plan["applied"].get("capabilities", []):
             environment["MAC_CHROMIUM_TMPDIR"] = str(private_tmp)  # Chrome's default temp is outside the boundary.
         if plan["stdin_policy"] == "prompt":
-            input_file = tempfile.TemporaryFile(dir=private_tmp)
+            input_file = _unlinked_file(tmp_fd)
             input_file.write(plan["prompt"].encode())
             input_file.seek(0)
             stdin = input_file
@@ -3358,6 +3869,8 @@ def execute(
         finally:
             if subreaper:
                 _release_subreaper()
+            if agy_home:
+                agy_home_warnings = finish_agy_home(plan, tmp_fd, agy_home)
     exit_code = process.returncode if process else None
     if cancel_signal and not forced:
         forced = "interrupted"  # EOF can precede the loop's signal check.
@@ -3381,16 +3894,16 @@ def execute(
     )
     raw.close()
     diagnostics.close()
+    # Read terminal semantics before attributing a signal death below. The raw
+    # exit code remains in the receipt, including supervisor grace cleanup.
+    parse_exit = exit_code if exit_code is not None else 1
+    if terminal_at is not None and not forced and parse_exit < 0:
+        parse_exit = 0
     parsed = parse_output(
         plan["adapter"],
         stdout,
         stderr,
-        0
-        if terminal_grace_break and terminal_at is not None
-        and not forced
-        and exit_code is not None
-        and exit_code < 0
-        else (exit_code if exit_code is not None else 1),
+        parse_exit,
     )
     parsed.update(semantic)
     if raw.total > MAX_EVENTS_BYTES:
@@ -3398,8 +3911,15 @@ def execute(
         # state observed before the diagnostic tail rolled over.
         if terminal_text is not None or text_chunks:
             text = terminal_text if terminal_text is not None else b"\n".join(text_chunks).decode(errors="replace")
-            recovered = parse_output(plan["adapter"], json.dumps({"type": "result", "result": text}), stderr,
-                                     0 if terminal_grace_break and terminal_at is not None and exit_code is not None and exit_code < 0 else (exit_code or 0))
+            text_event = getattr(adapter_config, "text_event", lambda text: {"type": "result", "result": text})
+            recovered_event = text_event(text)
+            recovered_events = [recovered_event]
+            if plan["adapter"] == "codex":
+                recovered_events = [{"type": "item.completed", "item": {"type": "agent_message", "text": text}}]
+                if terminal_at is not None:
+                    recovered_events.append({"type": "turn.completed"})
+            recovered = parse_output(plan["adapter"], "\n".join(map(json.dumps, recovered_events)), stderr,
+                                     parse_exit)
             for key in ("text", "status", "question", "signature", "excerpt"):
                 parsed[key] = recovered[key]
         failures = dict(semantic_failures)
@@ -3411,6 +3931,7 @@ def execute(
             parsed.update(selected)
     if live_failure and forced == live_failure["status"]:
         parsed.update({key: live_failure[key] for key in ("status", "signature", "excerpt", "reset_at", "retry_after")})
+    valid_terminal = terminal_at is not None and parsed["status"] in {"ok", "input_required"} and bool(parsed["text"].strip())
     if plan["adapter"] == "opencode" and parsed["status"] == "usage_limited":
         parsed["signature"] = "quota_exhausted"
         if not parsed["reset_at"] and re.search(r"monthly usage limit", parsed.get("failure_text") or parsed["excerpt"], re.I):
@@ -3427,12 +3948,12 @@ def execute(
             "interrupted": "supervisor_signal",
         }.get(forced, parsed["signature"])
     elif provider_exit_before_cleanup is not None and provider_exit_before_cleanup < 0:
-        parsed["status"] = "interrupted"
+        parsed["status"] = "interrupted" if valid_terminal else "failed"
         parsed["signature"] = "provider_signal"
         source = termination_request.get("termination_source", "sender unknown")
         parsed["excerpt"] = f"provider terminated by {_signal_name(-provider_exit_before_cleanup)}; {source}"
     if (termination_request.get("termination_source") == "cancel_requested"
-            and parsed["status"] == "interrupted"):
+            and parsed["status"] in {"interrupted", "failed"}):
         parsed["status"] = "cancelled"
         parsed["signature"] = "cancel_requested"
     if plan.get("cooldown_blocked"):
@@ -3441,7 +3962,9 @@ def execute(
     session = parsed["session_id"] or plan["resume_session"] or plan["session_id"]
     parsed["session_id"] = session
     observed, source = _observed_model(plan, parsed, environment)
-    warnings = list(plan["warnings"])
+    warnings = [*plan["warnings"], *agy_home_warnings]
+    if parsed["signature"] == "exit_after_output":
+        warnings.append(parsed["excerpt"])
     reported = {}
     if plan["adapter"] == "claude":
         # init.model is the request; Claude may answer with another model.
@@ -3521,6 +4044,7 @@ def execute(
         "effort_observed_source": effort_source,
         "cli_version": route.get("cli_version"),
         "fallback_from": plan.get("fallback_from"),
+        "harness_rev": harness_revision(),
         "notes": notes,
         "line": line,
     }
@@ -3536,7 +4060,7 @@ def execute(
             instruction_changes = [f"{INSTRUCTION_DIR} (unverifiable: {exc})"]
     # A signal death must retain actual instruction edits as failures rather
     # than repairing a partial attempt and disguising its changed instructions.
-    instruction_policy = ("deny" if status == "interrupted" or
+    instruction_policy = ("deny" if status == "interrupted" or parsed["signature"] == "provider_signal" or
                           (status == "cancelled" and termination_request)
                           else plan.get("instruction_policy", "quarantine"))
     # Assurance failure blocks landing, independently of a usable provider result.
@@ -3599,7 +4123,9 @@ def execute(
             parsed["excerpt"] = "provider error: " + parsed["excerpt"]
     output = (
         parsed["text"]
-        if status in {"ok", "input_required", "partial", "quarantined"} or quarantine and parsed["status"] == "ok"
+        if (status in {"ok", "input_required", "partial", "quarantined"}
+            or quarantine and parsed["status"] == "ok"
+            or plan["adapter"] == "opencode" and terminal_at is not None and parsed["text"].strip())
         else (parsed["text"] + "\n" if parsed["text"] else "")
         + stderr
         + ("\n" + parsed["excerpt"] if parsed["excerpt"] else "")
@@ -3607,10 +4133,10 @@ def execute(
     digest_value = ""
     output_value = ""
     try:
-        with tempfile.NamedTemporaryFile(dir=private_tmp) as staged:
+        with _unlinked_file(tmp_fd) as staged:
             staged.write(output.encode())
             staged.flush()
-            digest_value, device, inode = install(staged.name, str(output_path))
+            digest_value, device, inode = install(staged.fileno(), str(output_path))
             verify(str(output_path), digest_value, device, inode)
         output_value = str(output_path)
     except (OSError, CustodyError):
@@ -3684,12 +4210,14 @@ def execute(
         "resolved_model": plan["model"],
         "effort": plan["effort"],
         "status": status,
+        **({"result_partial": True} if status not in {"ok", "input_required", "quarantined"} and not valid_terminal and parsed["text"].strip() else {}),
         **({"error": "invalid_input"} if status == "rejected" and parsed["signature"] == "invalid_input" else {}),
         **({"error": parsed["signature"]} if instruction_changes else {}),
         **({"landable": False, "quarantine": quarantine} if quarantine else {}),
         "reason": parsed["excerpt"],
         "exit": 0
-        if status in {"ok", "input_required", "quarantined"} and terminal_at is not None
+        if status in {"ok", "input_required", "quarantined"}
+        and (terminal_at is not None or parsed["signature"] == "exit_after_output")
         else exit_code,
         "output_path": output_value,
         "output_digest": digest_value,

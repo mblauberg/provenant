@@ -19,23 +19,23 @@
 //   0 Bootstrap   — one agent makes the run dir + discovers repo conventions (recon.json).
 //   1 Scan        — bounded fan-out of cheap finders over the slice -> candidate list.
 //   2 Review      — per candidate: parallel Claude reviewer + cross-family reviewer
-//                   (cf_dispatch.sh -> codex) at a DIFFERENT angle. Cross-family is a
+//                   (cf_dispatch.py -> codex) at a DIFFERENT angle. Cross-family is a
 //                   first-class parallel worker here, not a final gate.
-//   3 Adjudicate  — flagship synthesis risk-tags every candidate, splits low vs high.
+//   3 Adjudicate  — principal synthesis risk-tags every candidate, splits low vs high.
 //   4 Apply       — ONE serial applier lands low-risk after objective checks; high-risk
 //                   stays as patches + recommendation. Final readiness report.
 //
 // Model-tier routing (role -> tier; per the orchestrate skill's routing doctrine, express as
 // role -> tier, never a dated model ID):
-//   bootstrap/recon resolves routes; finders -> scout; candidate review -> flagship;
-//   cross-family driver -> scout; adjudication -> flagship; serial applier -> workhorse.
+//   bootstrap/recon resolves routes; finders -> junior; candidate review -> principal;
+//   cross-family driver -> junior; adjudication -> principal; serial applier -> senior.
 // Bootstrap resolves durable aliases through the global router; every later stage receives
 // the concrete model for its role.
-// Cross-family routing: cf_dispatch.sh with --orchestrator-family claude and a codex-first
-// --chain (exec -s read-only, enforced). codex refuses non-git dirs and cf_dispatch.sh does
+// Cross-family routing: cf_dispatch.py with --orchestrator-family claude and a codex-first
+// --chain (exec -s read-only, enforced). codex refuses non-git dirs and cf_dispatch.py does
 // NOT forward --skip-git-repo-check, so when recon.gitCwd is set the agent cd's into it
 // before dispatch; when it is null the agent relies on the chain failing over to cursor
-// (which has no git requirement). Fail-over codex -> cursor -> agy (advisory scout) is
+// (which has no git requirement). Fail-over codex -> cursor -> agy (advisory junior) is
 // expressed in --chain; on total failure record CROSS-FAMILY-NOT-RUN. Per the orchestrate
 // skill's direct-cli-fallback disclosure guidance, the slice
 // content is disclosed to the external provider, so the host data policy is checked first.
@@ -87,10 +87,10 @@ const RECON_SCHEMA = {
     notes: { type: 'string', description: 'Headline recon notes for the manifest' },
     modelRoutes: {
       type: 'object', additionalProperties: false,
-      required: ['flagship', 'criticalReviewer', 'workhorse', 'scout'],
+      required: ['principal', 'criticalReviewer', 'senior', 'junior'],
       properties: {
-        flagship: { type: 'string' }, criticalReviewer: { type: 'string' },
-        workhorse: { type: 'string' }, scout: { type: 'string' },
+        principal: { type: 'string' }, criticalReviewer: { type: 'string' },
+        senior: { type: 'string' }, junior: { type: 'string' },
       },
     },
   },
@@ -233,7 +233,7 @@ const ARCH_DOCTRINE =
   'never auto-apply a cross-file refactor.'
 
 const cfDispatch =
-  '"$(provenant root)/skills/orchestrate/scripts/cf_dispatch.sh"'
+  '"$(provenant root)/skills/orchestrate/scripts/cf_dispatch.py"'
 
 // ---------------------------------------------------------------------------
 // Workflow body.
@@ -289,7 +289,7 @@ const recon = await agent(
     '   - whether the slice is inside a git repo (for cross-family dispatch cwd). codex refuses non-git dirs and cf_dispatch does NOT forward a git-skip flag, so if a nearby git dir exists set gitCwd to it (the cf reviewer will cd there); only if NO git dir is reachable set gitCwd=null (codex then fails closed and the chain fails over to cursor).',
     '   - expand the protected-paths list with CONCRETE globs for this repo (these become recon.protectedPaths, the load-bearing per-repo protected list).',
     `Read the approved scope and risk policy; return effectiveRisk and requiresUserAcceptance. Explicit input: risk=${__args.risk || 'unspecified'}, requiresUserAcceptance=${__args.requiresUserAcceptance === true}. If unavailable, do not claim verified acceptance metadata.`,
-    '3. Resolve concrete Claude models with `provenant route resolve` for flagship/lead, flagship/critical-review, workhorse/worker, and scout/scout. Return resolved_model values in modelRoutes.',
+    '3. Resolve concrete Claude models with `provenant route resolve` for principal/lead, principal/critical-review, senior/worker, and junior/junior. Return resolved_model values in modelRoutes.',
     '',
     NEVER_AUTOEDIT,
     'Record findings in the run-dir MANIFEST.md and traces/. ' + WORKER_CONTRACT,
@@ -349,7 +349,7 @@ const scanResults = await parallel(
         `Write full detail to ${runDir}/findings/${f.id}.md. ` + WORKER_CONTRACT,
         'Return the structured scan object.',
       ].filter(Boolean).join('\n'),
-      { label: `scan:${f.id}`, phase: 'Scan', schema: SCAN_SCHEMA, model: models.scout },
+      { label: `scan:${f.id}`, phase: 'Scan', schema: SCAN_SCHEMA, model: models.junior },
     ),
   ),
 )
@@ -436,7 +436,7 @@ const reviewStage = (cand, _orig, _i) => parallel([
         WORKER_CONTRACT,
         'Return the structured cross-family record.',
       ].join('\n'),
-      { label: `cf-review:${cand.id}`, phase: 'Review', schema: CF_REVIEW_SCHEMA, model: models.scout },
+      { label: `cf-review:${cand.id}`, phase: 'Review', schema: CF_REVIEW_SCHEMA, model: models.junior },
     ),
   ])
 
@@ -460,8 +460,8 @@ for (let i = 0; i < candidates.length; i++) {
   pairs.push({ candidate: candidates[i], claudeReview, cfReview })
 }
 
-// --- Phase 3: Adjudicate (flagship synthesis; needs ALL reviews together) -----
-// Flagship synthesis/adjudication. Single agent so
+// --- Phase 3: Adjudicate (principal synthesis; needs ALL reviews together) -----
+// Principal synthesis/adjudication. Single agent so
 // dedupe/compare is consistent; it splits auto-apply (low + objective-checkable) vs escalate.
 phase('Adjudicate')
 const adjudication = await agent(
@@ -496,7 +496,7 @@ const adjudication = await agent(
     `Write full reasoning to ${runDir}/SYNTHESIS.md. ` + WORKER_CONTRACT,
     'Return the structured adjudication object.',
   ].join('\n'),
-  { label: 'adjudicate', phase: 'Adjudicate', schema: ADJ_SCHEMA, model: models.flagship },
+  { label: 'adjudicate', phase: 'Adjudicate', schema: ADJ_SCHEMA, model: models.principal },
 )
 
 if (!adjudication || !Array.isArray(adjudication.decisions)) {
@@ -519,7 +519,7 @@ const escalate = adjudication.decisions
 log(`Adjudicated: ${autoApply.length} auto-apply (low-risk, gated), ${escalate.length} escalate (high-risk), ${adjudication.decisions.length - autoApply.length - escalate.length} drop.`)
 
 // --- Phase 4: Apply (ONE serial applier; objective checks gate each edit) -----
-// Workhorse serial applier; exact reverse patches preserve unrelated dirty-tree changes.
+// senior serial applier; exact reverse patches preserve unrelated dirty-tree changes.
 // SINGLE agent = the only writer, so concurrent-write hazard on a non-git tree cannot occur.
 // It applies low-risk patches one at a time, runs the objective checks, reverts on failure via
 // the exact reverse patch, and leaves high-risk patches untouched as escalation output. It
@@ -545,7 +545,7 @@ const applyResult = await agent(
     `Write the full ledger + red/amber/green readiness + the escalation recommendations to ${runDir}/POLISH_REPORT.md and update MANIFEST.md. ` + WORKER_CONTRACT,
     'Return the structured apply object.',
   ].join('\n'),
-  { label: 'serial-applier', phase: 'Apply', schema: APPLY_SCHEMA, model: models.workhorse },
+  { label: 'serial-applier', phase: 'Apply', schema: APPLY_SCHEMA, model: models.senior },
 )
 
 const out = {

@@ -12,6 +12,7 @@ import signal
 import stat
 import subprocess
 import sys
+import threading
 import textwrap
 import time
 from pathlib import Path
@@ -121,6 +122,307 @@ def load_secret_scan_module():
     import importlib
     load_dispatch_module()
     return importlib.import_module('secret_scan')
+
+
+def test_reap_attempt_after_group_sigkill_is_terminal_and_idempotent(tmp_path):
+    mod = load_dispatch_module()
+    run = make_run(tmp_path, "killed")
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"], start_new_session=True)
+    try:
+        started = mod.process_info.start_time(child.pid)
+        assert started
+        path = run / "tasks/task-1/attempt-001/attempt.json"
+        path.parent.mkdir(parents=True)
+        row = json.loads((ROOT / "tests/fixtures/fabric-v1/attempt.json").read_text())
+        row.update(state="running", status=None, pgid=child.pid, pgid_started_at=started)
+        path.write_text(json.dumps(row))
+        os.killpg(child.pid, signal.SIGKILL)
+        child.wait(timeout=5)
+        mod.reap_attempts(run)
+        lost = json.loads(path.read_text())
+        assert lost["state"] == "terminal"
+        assert lost["status"] == "lost"
+        assert lost["error_class"] == "provider_error"
+        assert lost["ended_at"]
+        assert lost["evidence"]["signature"] == "pgid_gone"
+        before = path.read_bytes()
+        mod.reap_attempts(run)
+        assert path.read_bytes() == before
+    finally:
+        if child.poll() is None:
+            os.killpg(child.pid, signal.SIGKILL)
+            child.wait(timeout=5)
+
+
+@pytest.mark.parametrize("identity,live,stale,expected", [
+    ("matching", True, True, "running"),
+    ("reused", True, False, "terminal"),
+    ("unknown", True, True, "running"),
+    (None, True, True, "running"),
+    (None, False, False, "running"),
+    (None, False, True, "terminal"),
+])
+def test_reap_attempt_identity_and_legacy_progress(tmp_path, monkeypatch, identity, live, stale, expected):
+    mod = load_dispatch_module()
+    run = make_run(tmp_path, "identity")
+    path = run / "tasks/task-1/attempt-001/attempt.json"
+    path.parent.mkdir(parents=True)
+    row = json.loads((ROOT / "tests/fixtures/fabric-v1/attempt.json").read_text())
+    row.update(state="running", status=None, pgid=123456,
+               last_progress_at="2000-01-01T00:00:00Z" if stale else mod.now())
+    if identity is not None:
+        row["pgid_started_at"] = "recorded"
+    path.write_text(json.dumps(row))
+    def killpg(pgid, sig):
+        assert (pgid, sig) == (123456, 0)
+        if not live:
+            raise ProcessLookupError()
+    monkeypatch.setattr(mod.os, "killpg", killpg)
+    monkeypatch.setattr(mod.process_info, "start_time", lambda pid: None if identity == "unknown" else "different" if identity == "reused" else "recorded")
+    mod.reap_attempts(run)
+    result = json.loads(path.read_text())
+    assert result["state"] == expected
+    if expected == "terminal":
+        assert result["status"] == "lost"
+        assert result["evidence"]["signature"] == ("pgid_reused" if live else "pgid_gone")
+
+
+def test_reap_attempt_never_touches_live_owner(tmp_path):
+    mod = load_dispatch_module()
+    run = make_run(tmp_path, "owned")
+    path = run / "tasks/task-1/attempt-001/attempt.json"
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps({"state": "running", "pgid": 99999999, "pgid_started_at": "gone"}))
+    before = path.read_bytes()
+    with mod.acquire_run_custody(run):
+        mod.reap_attempts(run)
+    assert path.read_bytes() == before
+
+
+def test_reap_attempt_skips_malformed_records_and_continues(tmp_path):
+    run = make_run(tmp_path, "runs/malformed")
+    valid = make_run(tmp_path, "runs/valid")
+    row = json.loads((ROOT / "tests/fixtures/fabric-v1/attempt.json").read_text())
+    row.update(state="running", status=None, pgid=99999999, pgid_started_at="gone")
+    for task, record in (("a-bad", []), ("b-progress", {**row, "pgid_started_at": None, "last_progress_at": None}),
+                         ("c-valid", row)):
+        path = run / f"tasks/{task}/attempt-001/attempt.json"
+        path.parent.mkdir(parents=True)
+        path.write_text(json.dumps(record))
+    valid_path = valid / "tasks/task-1/attempt-001/attempt.json"
+    valid_path.parent.mkdir(parents=True)
+    valid_path.write_text(json.dumps(row))
+    result = subprocess.run([sys.executable, str(SCRIPT), "--reap-attempts"],
+                            input=json.dumps([str(run), str(valid)]), capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout) == [str(run), str(valid)]
+    assert json.loads((run / "tasks/c-valid/attempt-001/attempt.json").read_text())["status"] == "lost"
+    assert json.loads(valid_path.read_text())["status"] == "lost"
+
+
+def test_reap_attempt_preserves_terminal_publication_after_snapshot(tmp_path, monkeypatch):
+    mod = load_dispatch_module()
+    run = make_run(tmp_path, "publish-race")
+    path = run / "tasks/task-1/attempt-001/attempt.json"
+    path.parent.mkdir(parents=True)
+    row = json.loads((ROOT / "tests/fixtures/fabric-v1/attempt.json").read_text())
+    row.update(state="running", status=None, pgid=99999999, pgid_started_at="gone")
+    path.write_text(json.dumps(row))
+    terminal = {**row, "state": "terminal", "status": "ok", "ended_at": mod.now()}
+    def gone(pgid, sig):
+        path.write_text(json.dumps(terminal))
+        raise ProcessLookupError()
+    monkeypatch.setattr(mod.os, "killpg", gone)
+    assert mod.reap_attempts(run) == []
+    assert json.loads(path.read_text()) == terminal
+
+
+def test_attempt_publication_waits_for_custody(tmp_path):
+    mod = load_dispatch_module()
+    run = make_run(tmp_path, "publication-custody")
+    path = run / "tasks/task-1/attempt-001/attempt.json"
+    path.parent.mkdir(parents=True)
+    row = json.loads((ROOT / "tests/fixtures/fabric-v1/attempt.json").read_text())
+    row["paths"]["receipt"] = str(path.relative_to(run))
+    payload = json.dumps(row)
+    code = """
+import importlib.util, json, pathlib, sys
+spec = importlib.util.spec_from_file_location("dispatch_publisher", sys.argv[1])
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+print("ready", flush=True)
+mod.publish_contract(pathlib.Path(sys.argv[2]), json.loads(sys.argv[3]))
+"""
+    child = None
+    try:
+        with mod.attempt_custody(run, path):
+            child = subprocess.Popen([sys.executable, "-c", code, str(SCRIPT), str(run), payload],
+                                     stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            assert child.stdout.readline().strip() == "ready"
+            with pytest.raises(subprocess.TimeoutExpired):
+                child.communicate(timeout=0.1)
+            assert not path.exists()
+        stdout, stderr = child.communicate(timeout=5)
+        assert child.returncode == 0, stderr
+        assert json.loads(path.read_text())["state"] == "terminal"
+    finally:
+        if child is not None and child.poll() is None:
+            child.kill()
+            child.communicate(timeout=5)
+
+
+def test_reap_attempt_skips_busy_publisher_and_releases_run_custody(tmp_path):
+    mod = load_dispatch_module()
+    run = make_run(tmp_path, "busy-publisher")
+    paths = []
+    for task in ("busy", "free"):
+        path = run / f"tasks/{task}/attempt-001/attempt.json"
+        path.parent.mkdir(parents=True)
+        row = json.loads((ROOT / "tests/fixtures/fabric-v1/attempt.json").read_text())
+        row.update(state="running", status=None, task_id=task, pgid=99999999, pgid_started_at="gone")
+        path.write_text(json.dumps(row))
+        paths.append(path)
+    busy, free = paths
+    code = """
+import importlib.util, json, pathlib, sys
+spec = importlib.util.spec_from_file_location("dispatch_reaper", sys.argv[1])
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+print(json.dumps(mod.reap_attempts(pathlib.Path(sys.argv[2]))))
+"""
+    with mod.attempt_custody(run, busy):
+        result = subprocess.run([sys.executable, "-c", code, str(SCRIPT), str(run)],
+                                capture_output=True, text=True, timeout=3)
+        assert result.returncode == 0, result.stderr
+        assert json.loads(result.stdout) == [str(free)]
+        assert json.loads(busy.read_text())["state"] == "running"
+        assert json.loads(free.read_text())["status"] == "lost"
+        with mod.acquire_run_custody(run):
+            pass
+    assert mod.reap_attempts(run) == [str(busy)]
+
+
+@pytest.mark.parametrize("evidence,expected", [
+    ("closure", "interrupted"), ("cancelled-closure", "cancelled"),
+    ("marker", "cancelled"), ("batch-marker", "cancelled"),
+    ("batch-closure", "interrupted"), ("completed-batch", "lost"),
+    ("request", "interrupted"), ("cancel-request", "cancelled"),
+    ("other-pid", "interrupted"), ("stale-time", "lost"), ("future-time", "lost"),
+    ("stale-token", "lost"), ("no-token", "lost"),
+])
+def test_reap_attempt_stop_evidence(tmp_path, evidence, expected):
+    mod = load_dispatch_module()
+    run = make_run(tmp_path, "stop-evidence")
+    path = run / "tasks/task-1/attempt-001/attempt.json"
+    path.parent.mkdir(parents=True)
+    row = json.loads((ROOT / "tests/fixtures/fabric-v1/attempt.json").read_text())
+    row.update(state="running", status=None, pgid=99999999, pgid_started_at="gone")
+    owner = {"owner_pid": 99999999, "run_token": "current", "status": "running"}
+    if evidence in {"closure", "cancelled-closure", "batch-closure"}:
+        owner.update(status="cancelled" if evidence == "cancelled-closure" else "interrupted", finished_at=mod.now())
+    if evidence == "no-token":
+        owner.pop("run_token")
+    (run / "dispatch-status.json").write_text(json.dumps(owner))
+    if evidence == "marker":
+        directory = run / "dispatch/tasks/task-1/attempt-001"
+        directory.mkdir(parents=True)
+        (directory / "cancel.request").touch()
+    if evidence in {"batch-marker", "batch-closure", "completed-batch"}:
+        row["batch_id"] = "batch-001"
+        directory = run / "dispatch/batches/batch-001"
+        directory.mkdir(parents=True)
+        (directory / "cancel.request").touch()
+        if evidence == "completed-batch":
+            (directory / "summary.json").write_text(json.dumps({"status": "completed"}))
+    if evidence in {"request", "cancel-request", "other-pid", "stale-time", "future-time", "stale-token", "no-token"}:
+        request = {"run_token": "current", "provider_pid": row["pgid"], "signal": "SIGTERM",
+                   "source": "cancel_requested" if evidence == "cancel-request" else "orphan_reaper",
+                   "sender_pid": os.getpid(), "requested_at": mod.now()}
+        if evidence == "other-pid": request["provider_pid"] = 99999998
+        if evidence == "stale-time": request["requested_at"] = "2000-01-01T00:00:00Z"
+        if evidence == "future-time": request["requested_at"] = "2999-01-01T00:00:00Z"
+        if evidence == "stale-token": request["run_token"] = "previous"
+        (run / "termination-request.json").write_text(json.dumps(request))
+    path.write_text(json.dumps(row))
+    assert mod.reap_attempts(run) == [str(path)]
+    result = json.loads(path.read_text())
+    assert result["status"] == expected
+    assert result["retryable"] is (expected == "lost")
+    if expected == "cancelled":
+        assert result["error_class"] == "cancelled"
+
+
+@pytest.mark.parametrize("provider_pid", [None, 99999000])
+@pytest.mark.parametrize("stale", [False, True])
+def test_reap_attempt_run_cancel_applies_to_every_batch_child(tmp_path, provider_pid, stale):
+    mod = load_dispatch_module()
+    run = make_run(tmp_path, "batch-run-cancel")
+    (run / "dispatch-status.json").write_text(json.dumps({
+        "owner_pid": 99999999, "run_token": "current", "status": "running",
+    }))
+    paths = []
+    for index in range(8):
+        path = run / f"tasks/task-{index}/attempt-001/attempt.json"
+        path.parent.mkdir(parents=True)
+        row = json.loads((ROOT / "tests/fixtures/fabric-v1/attempt.json").read_text())
+        row.update(state="running", status=None, pgid=99999000 + index, pgid_started_at="gone",
+                   started_at="2001-01-01T00:00:00Z", task_id=f"task-{index}", batch_id="batch-001")
+        path.write_text(json.dumps(row))
+        paths.append(path)
+    (run / "termination-request.json").write_text(json.dumps({
+        "run_token": "current", "provider_pid": provider_pid, "signal": "SIGTERM",
+        "source": "cancel_requested", "sender_pid": os.getpid(),
+        "requested_at": "2000-01-01T00:00:00Z" if stale else mod.now(),
+    }))
+    assert set(mod.reap_attempts(run)) == {str(path) for path in paths}
+    for path in paths:
+        result = json.loads(path.read_text())
+        assert result["status"] == ("lost" if stale else "cancelled")
+        assert result["retryable"] is stale
+        assert result["error_class"] == ("provider_error" if stale else "cancelled")
+
+
+@pytest.mark.parametrize("evidence", ["closure", "marker", "request"])
+def test_reap_attempt_refreshes_stop_evidence_after_snapshot(tmp_path, monkeypatch, evidence):
+    mod = load_dispatch_module()
+    run = make_run(tmp_path, "stop-race")
+    path = run / "tasks/task-1/attempt-001/attempt.json"
+    path.parent.mkdir(parents=True)
+    row = json.loads((ROOT / "tests/fixtures/fabric-v1/attempt.json").read_text())
+    row.update(state="running", status=None, pgid=99999999, pgid_started_at="gone")
+    path.write_text(json.dumps(row))
+    owner = {"owner_pid": 99999999, "run_token": "current", "status": "running"}
+    (run / "dispatch-status.json").write_text(json.dumps(owner))
+    def gone(pgid, sig):
+        if evidence == "closure":
+            (run / "dispatch-status.json").write_text(json.dumps({**owner, "status": "interrupted", "finished_at": mod.now()}))
+        elif evidence == "request":
+            (run / "termination-request.json").write_text(json.dumps({
+                "run_token": "current", "provider_pid": pgid, "signal": "SIGTERM", "source": "run_control",
+                "sender_pid": os.getpid(), "requested_at": mod.now(),
+            }))
+        else:
+            directory = run / "dispatch/tasks/task-1/attempt-001"
+            directory.mkdir(parents=True)
+            (directory / "cancel.request").touch()
+        raise ProcessLookupError()
+    monkeypatch.setattr(mod.os, "killpg", gone)
+    mod.reap_attempts(run)
+    assert json.loads(path.read_text())["status"] == ("cancelled" if evidence == "marker" else "interrupted")
+
+
+@pytest.mark.parametrize("live", [False, True])
+def test_reap_attempt_owners_without_run_token(tmp_path, monkeypatch, live):
+    mod = load_dispatch_module()
+    run = make_run(tmp_path, "legacy-owner")
+    path = run / "tasks/task-1/attempt-001/attempt.json"
+    path.parent.mkdir(parents=True)
+    row = json.loads((ROOT / "tests/fixtures/fabric-v1/attempt.json").read_text())
+    row.update(state="running", status=None, pgid=99999999, pgid_started_at="gone")
+    path.write_text(json.dumps(row))
+    (run / "dispatch-owner.json").write_text(json.dumps({"owner_pid": os.getpid() if live else 99999999}))
+    mod.reap_attempts(run)
+    assert json.loads(path.read_text())["state"] == ("running" if live else "terminal")
 
 
 @pytest.mark.parametrize('name,positive,placeholder', [
@@ -277,7 +579,7 @@ def test_preflight_honours_policy_secret_scan_exclusions(tmp_path, monkeypatch):
     fixtures = tmp_path / 'shared' / 'fixtures'
     fixtures.mkdir(parents=True)
     (fixtures / 'key.txt').write_text('rk_live_' + 'a' * 24)
-    task = {'id': 'task-1', 'adapter': 'claude', 'alias': 'workhorse',
+    task = {'id': 'task-1', 'adapter': 'claude', 'alias': 'senior',
             'prompt': 'review shared files', 'add_dirs': [str(tmp_path / 'shared')]}
     module = load_dispatch_module()
     assert module.preflight_tasks([task], tmp_path)['status'] == 'validated'
@@ -337,7 +639,7 @@ def test_secret_scan_avoids_generic_credential_words_and_unprefixed_jwt():
 
 def test_terminal_attempt_carries_nested_owner_spared_count(tmp_path: Path) -> None:
     module = load_dispatch_module()
-    args = SimpleNamespace(tool="codex", alias="workhorse", model="fixture", effort="low",
+    args = SimpleNamespace(tool="codex", alias="senior", model="fixture", effort="low",
                            task_id="task-1", access_mode="read_only", worktree=None,
                            _last_plan={})
     legacy = {"started_at": "2026-09-23T00:00:00Z", "finished_at": "2026-09-23T00:00:01Z",
@@ -347,6 +649,35 @@ def test_terminal_attempt_carries_nested_owner_spared_count(tmp_path: Path) -> N
                                    {"status": "ok", "spared": 2}, 1,
                                    tmp_path / "tasks/task-1/attempt-001")
     assert row["spared"] == 2
+
+
+def test_terminal_attempt_does_not_promote_an_invalid_success_receipt(tmp_path):
+    module = load_dispatch_module()
+    args = SimpleNamespace(tool="codex", alias="", model="fixture", effort="high",
+                           task_id="task-1", access_mode="read_only", worktree=None, _last_plan={})
+    legacy = {"started_at": "2026-09-23T00:00:00Z", "finished_at": "2026-09-23T00:00:01Z",
+              "outcome": "ok", "status": "failed", "result": {"path": "result.md"},
+              "attempt_path": "tasks/task-1/attempt-001", "requested_route": {}}
+    row = module.terminal_contract(args, tmp_path, legacy, {"status": "ok", "exit": None},
+                                   1, tmp_path / "tasks/task-1/attempt-001")
+    assert row["status"] == "failed"
+    assert row["error_class"] == "provider_error"
+
+
+def test_terminal_attempt_retains_partial_transport_failure(tmp_path):
+    module = load_dispatch_module()
+    args = SimpleNamespace(tool="codex", alias="", model="fixture", effort="high",
+                           task_id="task-1", access_mode="read_only", worktree=None, _last_plan={})
+    legacy = {"started_at": "2026-09-23T00:00:00Z", "finished_at": "2026-09-23T00:00:01Z",
+              "outcome": "failed", "status": "failed", "result": {"path": "result.md"},
+              "attempt_path": "tasks/task-1/attempt-001", "requested_route": {}}
+    adapter = {"status": "failed", "result_partial": True, "evidence": {"signature": "provider_transport"}}
+    row = module.terminal_contract(args, tmp_path, legacy, adapter, 1, tmp_path / "tasks/task-1/attempt-001")
+    assert row["state"] == "terminal"
+    assert row["status"] == "failed"
+    assert row["error_class"] == "transient"
+    assert row["result_partial"] is True
+    assert "partial result" in module.render_digest(row)
 
 
 @pytest.mark.parametrize("adapter_status,legacy_status,signature,source,expected", [
@@ -445,6 +776,61 @@ def test_prepare_resume_restores_previous_workspace_root(tmp_path: Path):
     assert args.capabilities == ["browser", "postgres"]
 
 
+def test_prepare_resume_drops_missing_add_dir_with_warning(tmp_path: Path):
+    module = load_dispatch_module()
+    run_dir = make_run(tmp_path, "resume-add-dirs")
+    attempt_dir = run_dir / "tasks/task-1/attempt-001"
+    attempt_dir.mkdir(parents=True)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    existing_dir = workspace / "existing"
+    existing_dir.mkdir()
+    removed_dir = workspace / "removed"
+    previous = {
+        "run_id": "resume-me", "task_id": "task-1", "attempt": 1, "state": "terminal",
+        "status": "ok", "mode": "read_only", "cwd": str(workspace), "worktree": None,
+        "workspace": {"root": str(workspace)}, "session_id": "saved-session",
+        "read_roots": [],
+        "provenance": {"requested": {"adapter": "codex"}, "resolved_model": "fixture", "effort_applied": ""},
+        "applied": {"sandbox": "read-only", "network": None, "add_dirs": [str(existing_dir), str(removed_dir)],
+                    "capabilities": []},
+        "paths": {"events": None}, "requested_route": {},
+    }
+    (attempt_dir / "attempt.json").write_text(json.dumps(previous), encoding="utf-8")
+    args = SimpleNamespace(
+        run_dir=run_dir, resume="resume-me", task_id=None, tool=None, model=None, effort=None,
+        access_mode=None, worktree=None, provider_cwd=None, sandbox=None, network=None,
+        add_dirs=[], resume_session=None, fallback=None, context_ceiling=None,
+        intent="ordinary", orchestrator_family="", role="worker", risk_tier="",
+        model_override_tier="", reviewer_id="", preface=True,
+    )
+
+    module.prepare_resume(args)
+
+    assert args.add_dirs == [str(existing_dir)]
+    assert any("removed" in w for w in getattr(args, "_resume_warnings", []))
+
+
+def test_secret_scan_unavailable_fix_includes_failing_path_and_reason(tmp_path: Path):
+    module = load_dispatch_module()
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    unreadable_dir = workspace / "unreadable"
+    unreadable_dir.mkdir()
+    unreadable_dir.chmod(0)
+    try:
+        tasks = [{
+            "id": "task-1", "adapter": "codex", "model": "fixture",
+            "prompt": "hello", "add_dirs": [str(unreadable_dir)],
+        }]
+        res = module.preflight_tasks(tasks, workspace_root=workspace)
+        assert res["status"] == "rejected"
+        assert res["error"] == "secret_scan_unavailable"
+        assert str(unreadable_dir) in res["fix"]
+    finally:
+        unreadable_dir.chmod(0o755)
+
+
 def test_ordinary_single_dispatch_records_one_attempt_and_route_identity(tmp_path: Path) -> None:
     run_dir = make_run(tmp_path, "one")
     receipt_before = (run_dir / "RUN_RECEIPT.json").read_bytes()
@@ -481,7 +867,7 @@ def test_ordinary_single_dispatch_records_one_attempt_and_route_identity(tmp_pat
             "--orchestrator-family",
             "openai",
             "--alias",
-            "workhorse",
+            "senior",
             "--role",
             "worker",
         ],
@@ -544,7 +930,7 @@ exit 99
         module.CF_DISPATCH = adapter
     args = module.parser().parse_args([
         "--run-dir", str(run_dir), "--task-id", "bad-floor", "--adapter", "codex",
-        "--prompt-file", str(prompt), "--alias", "workhorse", "--role", "worker",
+        "--prompt-file", str(prompt), "--alias", "senior", "--role", "worker",
     ])
     assert module.dispatch(args) == 1
     attempt = json.loads((run_dir / "dispatch/tasks/bad-floor/attempt-001/attempt.json").read_text())
@@ -588,7 +974,7 @@ exit 99
         module.CF_DISPATCH = adapter
     args = module.parser().parse_args([
         "--run-dir", str(run_dir), "--task-id", "memory-expiry", "--adapter", "codex",
-        "--prompt-file", str(prompt), "--alias", "workhorse", "--role", "worker",
+        "--prompt-file", str(prompt), "--alias", "senior", "--role", "worker",
         "--timeout-seconds", "0.01",
     ])
     assert module.dispatch(args) == 1
@@ -634,7 +1020,7 @@ exit 99
     monkeypatch.chdir(tmp_path)
     args = module.parser().parse_args([
         "--run-dir", str(run_dir), "--task-id", "queue-wiring", "--adapter", "codex",
-        "--prompt-file", str(prompt), "--alias", "workhorse", "--role", "worker",
+        "--prompt-file", str(prompt), "--alias", "senior", "--role", "worker",
         "--timeout-seconds", "0.01",
     ])
     assert module.dispatch(args) == 1
@@ -701,7 +1087,7 @@ def test_batch_preflight_does_not_invent_an_explicit_alias_for_model_routes(tmp_
     monkeypatch.setattr(module.subprocess, "run", resolve)
     result = module.preflight_tasks([
         {"id": "model-only", "adapter": "codex", "model": "gpt-6-luna", "prompt": "hi"},
-        {"id": "explicit-both", "adapter": "codex", "alias": "workhorse", "model": "gpt-6-luna", "prompt": "hi"},
+        {"id": "explicit-both", "adapter": "codex", "alias": "senior", "model": "gpt-6-luna", "prompt": "hi"},
     ])
 
     model_only, explicit_both = result["routes"]
@@ -717,7 +1103,7 @@ def test_batch_preflight_does_not_invent_an_explicit_alias_for_model_routes(tmp_
 def test_explicit_model_receipt_does_not_record_an_implied_alias(tmp_path):
     mod = load_dispatch_module()
     args = SimpleNamespace(
-        tool="opencode", alias="flagship", model="mimo", alias_supplied=False, effort=None,
+        tool="opencode", alias="principal", model="mimo", alias_supplied=False, effort=None,
         task_id="dispatch-001", access_mode="read_only", worktree=None,
         _phase_timings={}, reviewer_id=None, risk_tier=None,
         model_override_tier=None,
@@ -729,7 +1115,7 @@ def test_explicit_model_receipt_does_not_record_an_implied_alias(tmp_path):
 def test_config_fallback_detail_is_persisted_in_the_attempt_record(tmp_path, monkeypatch):
     mod = load_dispatch_module()
     args = SimpleNamespace(
-        tool="opencode", alias="workhorse", model="gpt-6-luna", alias_supplied=True,
+        tool="opencode", alias="senior", model="gpt-6-luna", alias_supplied=True,
         effort=None, task_id="dispatch-001", access_mode="read_only", worktree=None,
         _phase_timings={}, reviewer_id=None, risk_tier=None,
         model_override_tier=None,
@@ -745,13 +1131,13 @@ def test_config_fallback_detail_is_persisted_in_the_attempt_record(tmp_path, mon
 def test_explicit_model_and_alias_are_both_recorded_in_receipt(tmp_path):
     mod = load_dispatch_module()
     args = SimpleNamespace(
-        tool="opencode", alias="workhorse", model="gpt-6-luna", alias_supplied=True,
+        tool="opencode", alias="senior", model="gpt-6-luna", alias_supplied=True,
         effort=None, task_id="dispatch-001", access_mode="read_only", worktree=None,
         _phase_timings={}, reviewer_id=None, risk_tier=None,
         model_override_tier=None,
     )
     row = mod.contract_row(args, tmp_path, 1, tmp_path / "attempt", {}, "now")
-    assert row["provenance"]["requested"]["alias"] == "workhorse"
+    assert row["provenance"]["requested"]["alias"] == "senior"
 
 
 def test_workspace_identity_keeps_root_and_records_provider_cwd(tmp_path):
@@ -838,7 +1224,7 @@ else:
     monkeypatch.setenv("CF_DISPATCH_AGY_ADD_DIR", str(tmp_path / "unrelated"))
     args = module.parser().parse_args([
         "--run-dir", str(run_dir), "--task-id", "agy", "--adapter", "agy",
-        "--prompt-file", str(prompt), "--alias", "workhorse", "--role", "reviewer",
+        "--prompt-file", str(prompt), "--alias", "senior", "--role", "reviewer",
         "--git-evidence", str(source),
     ])
 
@@ -889,7 +1275,7 @@ def test_agy_git_evidence_retains_denial_without_accepting_result(tmp_path: Path
     monkeypatch.chdir(tmp_path)
     args = module.parser().parse_args([
         "--run-dir", str(run_dir), "--task-id", "deny", "--adapter", "agy",
-        "--prompt-file", str(prompt), "--alias", "workhorse", "--role", "reviewer",
+        "--prompt-file", str(prompt), "--alias", "senior", "--role", "reviewer",
         "--git-evidence", str(source),
     ])
 
@@ -912,7 +1298,7 @@ def test_agy_git_evidence_rejects_symlink_source(tmp_path: Path, monkeypatch) ->
     monkeypatch.chdir(tmp_path)
     args = module.parser().parse_args([
         "--run-dir", str(run_dir), "--task-id", "symlink", "--adapter", "agy",
-        "--prompt-file", str(prompt), "--alias", "workhorse", "--role", "reviewer",
+        "--prompt-file", str(prompt), "--alias", "senior", "--role", "reviewer",
         "--git-evidence", str(alias),
     ])
 
@@ -930,7 +1316,7 @@ def test_valid_worker_question_envelope_is_retained_as_blocked_attempt(tmp_path:
     monkeypatch.setattr(module, "CF_DISPATCH", adapter)
     args = module.parser().parse_args([
         "--run-dir", str(run_dir), "--task-id", "question", "--adapter", "codex",
-        "--prompt-file", str(prompt), "--alias", "workhorse", "--role", "worker",
+        "--prompt-file", str(prompt), "--alias", "senior", "--role", "worker",
     ])
     monkeypatch.chdir(tmp_path)
 
@@ -975,7 +1361,7 @@ def test_worker_question_detection_is_exact_and_fail_closed(
     monkeypatch.setattr(module, "CF_DISPATCH", adapter)
     args = module.parser().parse_args([
         "--run-dir", str(run_dir), "--task-id", "case", "--adapter", "codex",
-        "--prompt-file", str(prompt), "--alias", "workhorse", "--role", "worker",
+        "--prompt-file", str(prompt), "--alias", "senior", "--role", "worker",
     ])
     monkeypatch.chdir(tmp_path)
 
@@ -1005,7 +1391,7 @@ def test_quarantined_lane_gets_the_same_question_and_envelope_checks(tmp_path: P
     monkeypatch.setattr(module, "CF_DISPATCH", adapter)
     args = module.parser().parse_args([
         "--run-dir", str(run_dir), "--task-id", "case", "--adapter", "codex",
-        "--prompt-file", str(prompt), "--alias", "workhorse", "--role", "worker",
+        "--prompt-file", str(prompt), "--alias", "senior", "--role", "worker",
     ])
     monkeypatch.chdir(tmp_path)
     module.dispatch(args)
@@ -1024,7 +1410,7 @@ def test_valid_worker_question_cannot_override_nonzero_provider_exit(tmp_path: P
     monkeypatch.setattr(module, "CF_DISPATCH", adapter)
     args = module.parser().parse_args([
         "--run-dir", str(run_dir), "--task-id", "case", "--adapter", "codex",
-        "--prompt-file", str(prompt), "--alias", "workhorse", "--role", "worker",
+        "--prompt-file", str(prompt), "--alias", "senior", "--role", "worker",
     ])
     monkeypatch.chdir(tmp_path)
 
@@ -1051,7 +1437,7 @@ def test_worker_question_prompt_size_is_bounded(tmp_path: Path, monkeypatch) -> 
     monkeypatch.setattr(module, "CF_DISPATCH", adapter)
     args = module.parser().parse_args([
         "--run-dir", str(run_dir), "--task-id", "case", "--adapter", "codex",
-        "--prompt-file", str(prompt), "--alias", "workhorse", "--role", "worker",
+        "--prompt-file", str(prompt), "--alias", "senior", "--role", "worker",
     ])
     monkeypatch.chdir(tmp_path)
 
@@ -1096,7 +1482,7 @@ def test_valid_maximum_astral_worker_question_envelope_is_blocked(tmp_path: Path
     monkeypatch.setattr(module, "CF_DISPATCH", adapter)
     args = module.parser().parse_args([
         "--run-dir", str(run_dir), "--task-id", "case", "--adapter", "codex",
-        "--prompt-file", str(prompt), "--alias", "workhorse", "--role", "worker",
+        "--prompt-file", str(prompt), "--alias", "senior", "--role", "worker",
     ])
     monkeypatch.chdir(tmp_path)
 
@@ -1126,7 +1512,7 @@ def test_dispatch_fails_when_terminal_candidate_cannot_be_safely_reopened(
     monkeypatch.setattr(module.os, "open", refuse_result_open)
     args = module.parser().parse_args([
         "--run-dir", str(run_dir), "--task-id", "case", "--adapter", "codex",
-        "--prompt-file", str(prompt), "--alias", "workhorse", "--role", "worker",
+        "--prompt-file", str(prompt), "--alias", "senior", "--role", "worker",
     ])
     monkeypatch.chdir(tmp_path)
 
@@ -1155,7 +1541,7 @@ def test_ordinary_dispatch_without_lead_family_is_not_certification(tmp_path: Pa
     env["PATH"] = f"{bin_dir}:{ROOT / 'scripts'}:{env['PATH']}"
     result = subprocess.run(
         [str(SCRIPT), "--run-dir", str(run_dir), "--task-id", "no-family",
-         "--adapter", "codex", "--prompt-file", str(prompt), "--alias", "workhorse", "--role", "worker"],
+         "--adapter", "codex", "--prompt-file", str(prompt), "--alias", "senior", "--role", "worker"],
         cwd=tmp_path, env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
     )
     assert result.returncode == 0, result.stderr + result.stdout
@@ -1214,7 +1600,7 @@ def test_batch_child_defers_shared_manifest_append(tmp_path: Path, monkeypatch) 
     monkeypatch.setattr(module, "CF_DISPATCH", adapter)
     args = module.parser().parse_args([
         "--run-dir", str(run_dir), "--task-id", "deferred", "--adapter", "codex",
-        "--prompt-file", str(prompt), "--alias", "scout", "--role", "worker",
+        "--prompt-file", str(prompt), "--alias", "junior", "--role", "worker",
         "--risk-tier", "substantial", "--reviewer-id", "reviewer-1", "--effort", "high", "--batch-child",
     ])
     monkeypatch.chdir(tmp_path)
@@ -1235,7 +1621,7 @@ def test_prompt_stdin_is_retained_by_dispatch_owner(tmp_path: Path, monkeypatch)
     monkeypatch.setattr(module, "CF_DISPATCH", adapter)
     args = module.parser().parse_args([
         "--run-dir", str(run_dir), "--task-id", "stdin-task", "--adapter", "codex",
-        "--prompt-stdin", "--alias", "scout", "--role", "worker",
+        "--prompt-stdin", "--alias", "junior", "--role", "worker",
     ])
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(sys, "stdin", io.TextIOWrapper(io.BytesIO(b"stdin prompt\n")))
@@ -1322,7 +1708,7 @@ def test_nonzero_provider_exit_is_recorded_without_substitution(tmp_path: Path) 
             str(SCRIPT),
             "--run-dir", str(run_dir), "--task-id", "provider-failure",
             "--adapter", "codex", "--prompt-file", str(prompt),
-            "--alias", "workhorse", "--role", "worker",
+            "--alias", "senior", "--role", "worker",
         ], cwd=tmp_path, env=env, text=True,
         stdout=subprocess.PIPE, stderr=subprocess.PIPE,
     )
@@ -1355,7 +1741,7 @@ def test_malformed_adapter_receipt_is_fail_closed(tmp_path: Path, monkeypatch) -
     monkeypatch.setattr(module, "CF_DISPATCH", adapter)
     args = module.parser().parse_args([
         "--run-dir", str(run_dir), "--task-id", "malformed", "--adapter", "codex",
-        "--prompt-file", str(prompt), "--alias", "workhorse", "--role", "worker",
+        "--prompt-file", str(prompt), "--alias", "senior", "--role", "worker",
     ])
     monkeypatch.chdir(tmp_path)
     assert module.dispatch(args) == 1
@@ -1384,7 +1770,7 @@ def test_incomplete_success_receipt_is_fail_closed(tmp_path: Path, monkeypatch) 
     monkeypatch.setattr(module, "CF_DISPATCH", adapter)
     args = module.parser().parse_args([
         "--run-dir", str(run_dir), "--task-id", "incomplete-success", "--adapter", "codex",
-        "--prompt-file", str(prompt), "--alias", "workhorse", "--role", "worker",
+        "--prompt-file", str(prompt), "--alias", "senior", "--role", "worker",
     ])
     monkeypatch.chdir(tmp_path)
 
@@ -1407,7 +1793,7 @@ def test_reentry_rejects_tampered_success_adapter_receipt(tmp_path: Path, monkey
     monkeypatch.chdir(tmp_path)
     args = module.parser().parse_args([
         "--run-dir", str(run_dir), "--task-id", "reentry", "--adapter", "codex",
-        "--prompt-file", str(prompt), "--alias", "workhorse", "--role", "worker",
+        "--prompt-file", str(prompt), "--alias", "senior", "--role", "worker",
     ])
     assert module.dispatch(args) == 0
     attempt = run_dir / "dispatch/tasks/reentry/attempt-001/attempt.json"
@@ -1438,7 +1824,7 @@ def test_reentry_rejects_non_integer_zero_exit(tmp_path: Path, monkeypatch, exit
     monkeypatch.chdir(tmp_path)
     args = module.parser().parse_args([
         "--run-dir", str(run_dir), "--task-id", "reentry", "--adapter", "codex",
-        "--prompt-file", str(prompt), "--alias", "workhorse", "--role", "worker",
+        "--prompt-file", str(prompt), "--alias", "senior", "--role", "worker",
     ])
     assert module.dispatch(args) == 0
     attempt = run_dir / "dispatch/tasks/reentry/attempt-001/attempt.json"
@@ -1474,7 +1860,7 @@ def test_typed_adapter_auth_and_missing_tool_outcomes_are_preserved(tmp_path: Pa
         monkeypatch.setattr(module, "CF_DISPATCH", adapter)
         args = module.parser().parse_args([
             "--run-dir", str(run_dir), "--task-id", name, "--adapter", "codex",
-            "--prompt-file", str(prompt), "--alias", "workhorse", "--role", "worker",
+            "--prompt-file", str(prompt), "--alias", "senior", "--role", "worker",
         ])
         monkeypatch.chdir(tmp_path)
         assert module.dispatch(args) == 1
@@ -1502,7 +1888,7 @@ def test_timeout_records_reaped_exit(tmp_path: Path) -> None:
         """,
     )
     env = os.environ.copy()
-    env["PROVENANT_PREFLIGHT_ROUTES"] = json.dumps({"timeout": {"adapter": "codex", "alias": "workhorse", "resolved_model": "gpt-6-luna", "effort": "high"}})
+    env["PROVENANT_PREFLIGHT_ROUTES"] = json.dumps({"timeout": {"adapter": "codex", "alias": "senior", "resolved_model": "gpt-6-luna", "effort": "high"}})
     env["PATH"] = f"{bin_dir}:{ROOT / 'scripts'}:{env['PATH']}"
     result = subprocess.run(
         [str(SCRIPT), "--run-dir", str(run_dir), "--task-id", "timeout", "--adapter", "codex",
@@ -1545,7 +1931,7 @@ def test_sigterm_interrupts_and_reaps_provider_group(tmp_path: Path) -> None:
     process = subprocess.Popen(
         [str(SCRIPT), "--run-dir", str(run_dir), "--task-id", "cancel",
          "--adapter", "codex", "--prompt-file", str(prompt),
-         "--alias", "workhorse", "--role", "worker", "--timeout", "30"],
+         "--alias", "senior", "--role", "worker", "--timeout", "30"],
         cwd=tmp_path, env=env, text=True,
         stdout=subprocess.PIPE, stderr=subprocess.PIPE,
     )
@@ -1595,7 +1981,7 @@ def test_late_signal_after_provider_exit_preserves_attempt_publication(tmp_path:
     """), encoding="utf-8")
     result = subprocess.run([
         sys.executable, str(driver), "--run-dir", str(run_dir), "--task-id", "late",
-        "--adapter", "codex", "--prompt-file", str(prompt), "--alias", "workhorse", "--role", "worker",
+        "--adapter", "codex", "--prompt-file", str(prompt), "--alias", "senior", "--role", "worker",
     ], cwd=tmp_path, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 
     assert result.returncode == 0, result.stderr + result.stdout
@@ -1645,7 +2031,7 @@ def test_signal_during_popen_return_reaps_provider_and_publishes_cancelled_attem
     """), encoding="utf-8")
     result = subprocess.run([
         sys.executable, str(driver), "--run-dir", str(run_dir), "--task-id", "window",
-        "--adapter", "codex", "--prompt-file", str(prompt), "--alias", "workhorse", "--role", "worker",
+        "--adapter", "codex", "--prompt-file", str(prompt), "--alias", "senior", "--role", "worker",
     ], cwd=tmp_path, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=10)
 
     assert result.returncode == 1, result.stderr + result.stdout
@@ -1684,7 +2070,7 @@ def test_external_task_cancel_reaps_only_owned_provider_group(tmp_path: Path) ->
     env["PATH"] = f"{bin_dir}:{ROOT / 'scripts'}:{env['PATH']}"
     dispatch = subprocess.Popen(
         [str(SCRIPT), "--run-dir", str(run_dir), "--task-id", "cancel-me", "--adapter", "codex",
-         "--prompt-file", str(prompt), "--alias", "workhorse", "--role", "worker", "--timeout", "30"],
+         "--prompt-file", str(prompt), "--alias", "senior", "--role", "worker", "--timeout", "30"],
         cwd=tmp_path, env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
     )
     deadline = time.monotonic() + 5
@@ -1732,7 +2118,7 @@ def test_batch_marker_prelaunch_cancellation_has_no_provider_pid(tmp_path: Path,
     monkeypatch.setattr(module, "CF_DISPATCH", adapter)
     args = module.parser().parse_args([
         "--run-dir", str(run_dir), "--task-id", "prelaunch", "--adapter", "codex",
-        "--prompt-file", str(prompt), "--alias", "workhorse", "--role", "worker",
+        "--prompt-file", str(prompt), "--alias", "senior", "--role", "worker",
         "--batch-child", "--batch-id", "batch-001",
     ])
     monkeypatch.chdir(tmp_path)
@@ -1757,7 +2143,7 @@ def test_stale_marker_on_prior_attempt_does_not_cancel_next_attempt(tmp_path: Pa
     monkeypatch.chdir(tmp_path)
     args = module.parser().parse_args([
         "--run-dir", str(run_dir), "--task-id", "stale", "--adapter", "codex",
-        "--prompt-file", str(prompt), "--alias", "workhorse", "--role", "worker",
+        "--prompt-file", str(prompt), "--alias", "senior", "--role", "worker",
     ])
     assert module.dispatch(args) == 0
     stale = run_dir / "dispatch/tasks/stale/attempt-001/cancel.request"
@@ -1787,7 +2173,7 @@ def test_attempt_rows_are_accepted_by_existing_finalizer(tmp_path: Path) -> None
     env["PATH"] = f"{bin_dir}:{ROOT / 'scripts'}:{env['PATH']}"
     result = subprocess.run(
         [str(SCRIPT), "--run-dir", str(run_dir), "--task-id", "finalizer", "--adapter", "codex",
-         "--prompt-file", str(prompt), "--alias", "workhorse", "--role", "worker"],
+         "--prompt-file", str(prompt), "--alias", "senior", "--role", "worker"],
         cwd=tmp_path, env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
     )
     assert result.returncode == 0, result.stderr + result.stdout
@@ -1801,7 +2187,7 @@ def test_attempt_rows_are_accepted_by_existing_finalizer(tmp_path: Path) -> None
     rejected = subprocess.run(
         [str(SCRIPT), "--run-dir", str(run_dir), "--task-id", "after-close",
          "--adapter", "codex", "--prompt-file", str(prompt),
-         "--alias", "workhorse", "--role", "worker"],
+         "--alias", "senior", "--role", "worker"],
         cwd=tmp_path, env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
     )
     assert rejected.returncode == 2
@@ -1822,7 +2208,7 @@ def test_counterfeit_active_receipt_is_rejected_before_launch(tmp_path: Path, mo
     monkeypatch.setattr(module, "CF_DISPATCH", adapter)
     args = module.parser().parse_args([
         "--run-dir", str(run_dir), "--task-id", "blocked", "--adapter", "codex",
-        "--prompt-file", str(prompt), "--alias", "workhorse", "--role", "worker",
+        "--prompt-file", str(prompt), "--alias", "senior", "--role", "worker",
     ])
     monkeypatch.chdir(tmp_path)
 
@@ -1839,7 +2225,7 @@ def test_hard_linked_prompt_is_rejected_before_provider_launch(tmp_path: Path, m
     module = load_dispatch_module()
     args = module.parser().parse_args([
         "--run-dir", str(run_dir), "--task-id", "hardlink", "--adapter", "codex",
-        "--prompt-file", str(linked), "--alias", "workhorse", "--role", "worker",
+        "--prompt-file", str(linked), "--alias", "senior", "--role", "worker",
     ])
     monkeypatch.chdir(tmp_path)
     assert module.dispatch(args) == 2
@@ -1902,7 +2288,7 @@ def test_hard_linked_prompt_reports_typed_custody_error(tmp_path: Path, monkeypa
     module = load_dispatch_module()
     args = module.parser().parse_args([
         "--run-dir", str(run_dir), "--task-id", "hardlink-typed", "--adapter", "codex",
-        "--prompt-file", str(linked), "--alias", "workhorse", "--role", "worker",
+        "--prompt-file", str(linked), "--alias", "senior", "--role", "worker",
     ])
     monkeypatch.chdir(tmp_path)
     assert module.dispatch(args) == 2
@@ -1917,7 +2303,7 @@ def test_missing_run_receipt_reports_missing_custody(tmp_path: Path, monkeypatch
     module = load_dispatch_module()
     args = module.parser().parse_args([
         "--run-dir", str(run_dir), "--task-id", "missing-receipt", "--adapter", "codex",
-        "--prompt-file", str(prompt), "--alias", "workhorse", "--role", "worker",
+        "--prompt-file", str(prompt), "--alias", "senior", "--role", "worker",
     ])
     monkeypatch.chdir(tmp_path)
     assert module.dispatch(args) == 2
@@ -1942,7 +2328,7 @@ def test_remote_long_attempt_path_rejects_only_browser_before_launch(tmp_path, m
     monkeypatch.chdir(workspace)
     args = module.parser().parse_args([
         '--run-dir', str(run_dir), '--task-id', 'browser', '--adapter', 'claude',
-        '--prompt-file', str(prompt), '--alias', 'workhorse', '--role', 'worker',
+        '--prompt-file', str(prompt), '--alias', 'senior', '--role', 'worker',
         '--capabilities', '["browser"]' if browser else '[]',
     ])
     assert module.dispatch(args) == (2 if browser else 0)
@@ -1959,7 +2345,7 @@ def test_nonfinite_or_nonpositive_timeout_is_rejected() -> None:
         try:
             module.parser().parse_args([
                 "--run-dir", "/tmp", "--adapter", "codex", "--prompt-file", "/tmp/prompt",
-                "--alias", "workhorse", "--role", "worker", "--timeout", value,
+                "--alias", "senior", "--role", "worker", "--timeout", value,
             ])
         except SystemExit as exc:
             assert exc.code == 2
@@ -1979,7 +2365,7 @@ def test_manifest_appendability_failure_is_typed_before_launch(tmp_path: Path, m
     monkeypatch.setattr(module, "ensure_manifest_appendable", refuse)
     args = module.parser().parse_args([
         "--run-dir", str(run_dir), "--task-id", "manifest-readonly", "--adapter", "codex",
-        "--prompt-file", str(prompt), "--alias", "workhorse", "--role", "worker",
+        "--prompt-file", str(prompt), "--alias", "senior", "--role", "worker",
     ])
     monkeypatch.chdir(tmp_path)
     assert module.dispatch(args) == 2
@@ -2000,7 +2386,7 @@ def test_read_only_manifest_is_rejected_before_launch(tmp_path: Path, monkeypatc
             module = load_dispatch_module()
             args = module.parser().parse_args([
                 "--run-dir", str(run_dir), "--task-id", "manifest-mode", "--adapter", "codex",
-                "--prompt-file", str(prompt), "--alias", "workhorse", "--role", "worker",
+                "--prompt-file", str(prompt), "--alias", "senior", "--role", "worker",
             ])
             monkeypatch.chdir(tmp_path)
             assert module.dispatch(args) == 2
@@ -2022,7 +2408,7 @@ def test_manifest_append_failure_retains_terminal_attempt(tmp_path: Path, monkey
     monkeypatch.setattr(module, "append_manifest", lambda *_: (_ for _ in ()).throw(OSError("append failed")))
     args = module.parser().parse_args([
         "--run-dir", str(run_dir), "--task-id", "manifest-write", "--adapter", "codex",
-        "--prompt-file", str(prompt), "--alias", "workhorse", "--role", "worker",
+        "--prompt-file", str(prompt), "--alias", "senior", "--role", "worker",
     ])
     monkeypatch.chdir(tmp_path)
     assert module.dispatch(args) == 1
@@ -2044,7 +2430,7 @@ def test_reentry_reconciles_missing_manifest_rows_and_retry_lineage(tmp_path: Pa
     module.CF_DISPATCH = adapter
     args = module.parser().parse_args([
         "--run-dir", str(run_dir), "--task-id", "reconcile", "--adapter", "codex",
-        "--prompt-file", str(prompt), "--alias", "workhorse", "--role", "worker",
+        "--prompt-file", str(prompt), "--alias", "senior", "--role", "worker",
     ])
     monkeypatch.chdir(tmp_path)
     assert module.dispatch(args) == 0
@@ -2055,7 +2441,7 @@ def test_reentry_reconciles_missing_manifest_rows_and_retry_lineage(tmp_path: Pa
     ) + "\n", encoding="utf-8")
     retry_args = module.parser().parse_args([
         "--run-dir", str(run_dir), "--task-id", "reconcile", "--adapter", "codex",
-        "--prompt-file", str(prompt), "--alias", "workhorse", "--role", "worker",
+        "--prompt-file", str(prompt), "--alias", "senior", "--role", "worker",
         "--retry-of", "attempt-001",
     ])
     assert module.dispatch(retry_args) == 0
@@ -2080,7 +2466,7 @@ def test_attempt_number_and_retry_lineage_continue_past_999(tmp_path: Path, monk
     (task_dir / "attempt-1000/attempt.json").write_text("{}\n", encoding="utf-8")
     retry_args = module.parser().parse_args([
         "--run-dir", str(run_dir), "--task-id", "long-retry", "--adapter", "codex",
-        "--prompt-file", str(prompt), "--alias", "workhorse", "--role", "worker",
+        "--prompt-file", str(prompt), "--alias", "senior", "--role", "worker",
         "--retry-of", "attempt-1000", "--batch-child",
     ])
     monkeypatch.chdir(tmp_path)
@@ -2101,7 +2487,7 @@ def test_reentry_does_not_verify_missing_attempt_evidence(tmp_path: Path, monkey
     module.CF_DISPATCH = adapter
     args = module.parser().parse_args([
         "--run-dir", str(run_dir), "--task-id", "missing", "--adapter", "codex",
-        "--prompt-file", str(prompt), "--alias", "workhorse", "--role", "worker",
+        "--prompt-file", str(prompt), "--alias", "senior", "--role", "worker",
     ])
     monkeypatch.chdir(tmp_path)
     assert module.dispatch(args) == 0
@@ -2115,7 +2501,7 @@ def test_reentry_does_not_verify_missing_attempt_evidence(tmp_path: Path, monkey
 
     blocked = module.parser().parse_args([
         "--run-dir", str(run_dir), "--task-id", "next", "--adapter", "codex",
-        "--prompt-file", str(prompt), "--alias", "workhorse", "--role", "worker",
+        "--prompt-file", str(prompt), "--alias", "senior", "--role", "worker",
     ])
     assert module.dispatch(blocked) == 2
     assert "dispatch-missing-attempt-001" not in manifest.read_text(encoding="utf-8")
@@ -2137,7 +2523,7 @@ def test_reentry_fails_closed_for_malformed_attempt_record(tmp_path: Path, monke
     module.CF_DISPATCH = adapter
     args = module.parser().parse_args([
         "--run-dir", str(run_dir), "--task-id", "next", "--adapter", "codex",
-        "--prompt-file", str(prompt), "--alias", "workhorse", "--role", "worker",
+        "--prompt-file", str(prompt), "--alias", "senior", "--role", "worker",
     ])
     monkeypatch.chdir(tmp_path)
 
@@ -2170,7 +2556,7 @@ def test_reentry_rejects_retained_paths_that_escape_the_run(tmp_path: Path, monk
     module.CF_DISPATCH = adapter
     args = module.parser().parse_args([
         "--run-dir", str(run_dir), "--task-id", "next", "--adapter", "codex",
-        "--prompt-file", str(prompt), "--alias", "workhorse", "--role", "worker",
+        "--prompt-file", str(prompt), "--alias", "senior", "--role", "worker",
     ])
     monkeypatch.chdir(tmp_path)
 
@@ -2192,7 +2578,7 @@ def test_reentry_rejects_orphan_attempt_directory(tmp_path: Path, monkeypatch) -
     monkeypatch.setattr(module, "CF_DISPATCH", adapter)
     args = module.parser().parse_args([
         "--run-dir", str(run_dir), "--task-id", "next", "--adapter", "codex",
-        "--prompt-file", str(prompt), "--alias", "workhorse", "--role", "worker",
+        "--prompt-file", str(prompt), "--alias", "senior", "--role", "worker",
     ])
     monkeypatch.chdir(tmp_path)
 
@@ -2221,7 +2607,7 @@ def test_result_symlink_is_rejected_without_hashing_target(tmp_path: Path, monke
     monkeypatch.setattr(module, "CF_DISPATCH", adapter)
     args = module.parser().parse_args([
         "--run-dir", str(run_dir), "--task-id", "symlink", "--adapter", "codex",
-        "--prompt-file", str(prompt), "--alias", "workhorse", "--role", "worker",
+        "--prompt-file", str(prompt), "--alias", "senior", "--role", "worker",
     ])
     monkeypatch.chdir(tmp_path)
 
@@ -2263,7 +2649,7 @@ def test_attempt_records_available_git_base_identity(tmp_path: Path, monkeypatch
     monkeypatch.setattr(module, "CF_DISPATCH", adapter)
     args = module.parser().parse_args([
         "--run-dir", str(run_dir), "--task-id", "identity", "--adapter", "codex",
-        "--prompt-file", str(prompt), "--alias", "workhorse", "--role", "worker",
+        "--prompt-file", str(prompt), "--alias", "senior", "--role", "worker",
     ])
     monkeypatch.chdir(workspace)
 
@@ -2299,7 +2685,7 @@ def test_new_attempt_rejects_preexisting_directory_symlink(
     monkeypatch.setattr(module, "CF_DISPATCH", adapter)
     args = module.parser().parse_args([
         "--run-dir", str(run_dir), "--task-id", "escaped", "--adapter", "codex",
-        "--prompt-file", str(prompt), "--alias", "workhorse", "--role", "worker",
+        "--prompt-file", str(prompt), "--alias", "senior", "--role", "worker",
     ])
     monkeypatch.chdir(tmp_path)
 
@@ -2337,7 +2723,7 @@ def run_writer_dispatch(
     return subprocess.run(
         [str(SCRIPT), "--run-dir", str(run_dir), "--task-id", task_id, "--adapter", adapter,
          "--prompt-file", str(prompt), "--orchestrator-family", "openai",
-         *([] if adapter == "opencode" else ["--alias", "workhorse"]),
+         *([] if adapter == "opencode" else ["--alias", "senior"]),
          "--role", "worker", *extra],
         cwd=tmp_path, env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
     )
@@ -2436,7 +2822,7 @@ def test_worktree_writer_route_reaches_the_adapter_and_the_attempt_record(tmp_pa
     env["PATH"] = f"{bin_dir}:{ROOT / 'scripts'}:{env['PATH']}"
     result = subprocess.run(
         [str(SCRIPT), "--run-dir", str(run_dir), "--task-id", "task-1", "--adapter", "claude",
-         "--prompt-file", str(prompt), "--orchestrator-family", "openai", "--alias", "workhorse",
+         "--prompt-file", str(prompt), "--orchestrator-family", "openai", "--alias", "senior",
          "--role", "worker", "--access-mode", "worktree_write", "--worktree", str(worktree)],
         cwd=tmp_path, env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
     )
@@ -2473,7 +2859,7 @@ def test_read_only_route_is_the_default_and_refuses_a_worktree(tmp_path: Path) -
     module = load_dispatch_module()
     parsed = module.parser().parse_args([
         "--run-dir", str(run_dir), "--adapter", "claude", "--prompt-file", str(prompt),
-        "--alias", "workhorse", "--role", "worker",
+        "--alias", "senior", "--role", "worker",
     ])
     assert parsed.access_mode == "read_only"
     assert parsed.worktree is None
@@ -2535,7 +2921,7 @@ def test_provider_deadline_is_passed_below_the_owner_deadline(tmp_path: Path) ->
     prompt.write_text("Reply exactly OK\n", encoding="utf-8")
     args = module.parser().parse_args([
         "--run-dir", str(tmp_path), "--task-id", "deadline", "--adapter", "agy",
-        "--prompt-file", str(prompt), "--alias", "workhorse", "--role", "worker",
+        "--prompt-file", str(prompt), "--alias", "senior", "--role", "worker",
         "--timeout", "900",
     ])
     command = module.build_command(args, prompt, tmp_path / "result.md")
@@ -2637,7 +3023,7 @@ def test_claude_arm_short_timeout_reports_a_timeout_not_a_receipt_failure(tmp_pa
     env["PATH"] = f"{bin_dir}:{ROOT / 'scripts'}:{env['PATH']}"
     result = subprocess.run(
         [str(SCRIPT), "--run-dir", str(run_dir), "--task-id", "claudetimeout", "--adapter", "claude",
-         "--prompt-file", str(prompt), "--alias", "workhorse", "--role", "worker",
+         "--prompt-file", str(prompt), "--alias", "senior", "--role", "worker",
          "--intent", "ordinary", "--timeout", "2"],
         cwd=tmp_path, env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
     )
@@ -2679,7 +3065,7 @@ def test_result_missing_past_the_provider_deadline_is_a_timeout_not_a_result_fai
     monkeypatch.setattr(module, "CF_DISPATCH", adapter)
     args = module.parser().parse_args([
         "--run-dir", str(run_dir), "--task-id", "deadlinenet", "--adapter", "claude",
-        "--prompt-file", str(prompt), "--alias", "workhorse", "--role", "worker",
+        "--prompt-file", str(prompt), "--alias", "senior", "--role", "worker",
         "--timeout", "2",
     ])
     monkeypatch.chdir(tmp_path)
@@ -2698,8 +3084,8 @@ def test_front_door_preflight_rejects_all_invalid_tasks_without_run(tmp_path):
     result = subprocess.run(
         [sys.executable, str(SCRIPT), '--preflight-json'], cwd=tmp_path,
         input=json.dumps({'tasks': [
-            {'id': 'missing', 'adapter': 'claude', 'alias': 'workhorse', 'prompt_file': 'absent.md'},
-            {'id': 'broker', 'adapter': 'opencode', 'alias': 'workhorse', 'prompt': 'hello'},
+            {'id': 'missing', 'adapter': 'claude', 'alias': 'senior', 'prompt_file': 'absent.md'},
+            {'id': 'broker', 'adapter': 'opencode', 'alias': 'senior', 'prompt': 'hello'},
         ]}), text=True, capture_output=True,
         env={**os.environ, 'AGENT_FABRIC_INSTANCE_ROOT': str(ROOT)},
     )
@@ -2799,7 +3185,7 @@ def test_preflight_secret_file_rejects_and_explicit_override_accepts(tmp_path, m
     module = load_dispatch_module()
     prompt = tmp_path / 'prompt.md'
     prompt.write_text('hello\n' + 'AKIA' + 'A' * 16)
-    task = {'id': 'task-1', 'adapter': 'claude', 'alias': 'workhorse', 'prompt_file': str(prompt)}
+    task = {'id': 'task-1', 'adapter': 'claude', 'alias': 'senior', 'prompt_file': str(prompt)}
     rejected = module.preflight_tasks([task])
     assert rejected['error'] == 'secret_detected'
     assert f'{prompt}:2' in rejected['fix']
@@ -2817,7 +3203,7 @@ def test_preflight_accepts_a_prompt_file_only_inside_a_read_root(tmp_path, monke
     monkeypatch.setattr(module, "prompt_temp_roots", lambda: ())
     prompt = other / 'brief.md'
     prompt.write_text('read the other project')
-    task = {'id': 'task-1', 'adapter': 'claude', 'alias': 'workhorse', 'prompt_file': str(prompt)}
+    task = {'id': 'task-1', 'adapter': 'claude', 'alias': 'senior', 'prompt_file': str(prompt)}
 
     rejected = module.preflight_tasks([task], workspace)
     assert rejected['error'] == 'prompt_path_forbidden'
@@ -2837,7 +3223,7 @@ def test_preflight_accepts_temp_prompts_and_retains_secret_and_link_checks(tmp_p
     module = load_dispatch_module()
     prompt = scratch / 'brief.md'
     prompt.write_text('hello')
-    task = {'id': 'task-1', 'adapter': 'claude', 'alias': 'workhorse', 'prompt_file': str(prompt)}
+    task = {'id': 'task-1', 'adapter': 'claude', 'alias': 'senior', 'prompt_file': str(prompt)}
     assert module.preflight_tasks([task], workspace)['status'] == 'validated'
     prompt.write_text('AKIA' + 'A' * 16)
     assert module.preflight_tasks([task], workspace)['error'] == 'secret_detected'
@@ -2863,7 +3249,7 @@ def test_preflight_scans_a_read_root_prompt_for_secrets(tmp_path, monkeypatch):
     module = load_dispatch_module()
     prompt = other / 'brief.md'
     prompt.write_text('hello\n' + 'AKIA' + 'A' * 16)
-    task = {'id': 'task-1', 'adapter': 'claude', 'alias': 'workhorse', 'prompt_file': str(prompt),
+    task = {'id': 'task-1', 'adapter': 'claude', 'alias': 'senior', 'prompt_file': str(prompt),
             'read_roots': [str(other)]}
     assert module.preflight_tasks([task], workspace)['error'] == 'secret_detected'
 
@@ -2880,7 +3266,7 @@ def test_preflight_refuses_a_credential_store_prompt_in_any_root(tmp_path, monke
     auth.write_text('{"tokens": {"opaque": "value"}}')
     local = workspace / 'notes' / 'auth.json'
     local.write_text('{"opaque": "value"}')
-    task = {'id': 'task-1', 'adapter': 'claude', 'alias': 'workhorse'}
+    task = {'id': 'task-1', 'adapter': 'claude', 'alias': 'senior'}
     for prompt, roots in ((auth, [str(other)]), (local, [])):
         result = module.preflight_tasks([{**task, 'prompt_file': str(prompt), 'read_roots': roots}], workspace)
         assert result['error'] == 'credential_or_auth_store_denied', prompt
@@ -2988,7 +3374,7 @@ def test_preflight_secret_in_add_dirs_rejects_and_override_accepts(tmp_path, mon
     directory = tmp_path / 'shared'
     directory.mkdir()
     (directory / 'source.txt').write_text('rk_live_' + 'a' * 24)
-    task = {'id': 'task-1', 'adapter': 'claude', 'alias': 'workhorse',
+    task = {'id': 'task-1', 'adapter': 'claude', 'alias': 'senior',
             'prompt': 'review shared files', 'add_dirs': [str(directory)]}
     module = load_dispatch_module()
     rejected = module.preflight_tasks([task])
@@ -3005,7 +3391,7 @@ def test_preflight_and_dispatch_refuse_scan_budget_overrun_unless_overridden(tmp
     directory = tmp_path / 'shared'
     directory.mkdir()
     (directory / 'source.txt').write_text('ordinary content')
-    task = {'id': 'task-1', 'adapter': 'claude', 'alias': 'workhorse',
+    task = {'id': 'task-1', 'adapter': 'claude', 'alias': 'senior',
             'prompt': 'review shared files', 'add_dirs': [str(directory)]}
     module = load_dispatch_module()
 
@@ -3022,7 +3408,7 @@ def test_preflight_and_dispatch_refuse_scan_budget_overrun_unless_overridden(tmp
     prompt = tmp_path / 'prompt.md'
     prompt.write_text('review shared files')
     args = module.parser().parse_args(['--run-dir', str(run_dir), '--adapter', 'codex',
-        '--prompt-file', str(prompt), '--alias', 'workhorse', '--role', 'worker',
+        '--prompt-file', str(prompt), '--alias', 'senior', '--role', 'worker',
         '--add-dir', str(directory)])
     assert module.dispatch(args) == 2
     refused = json.loads(capsys.readouterr().out.splitlines()[-1])
@@ -3040,13 +3426,13 @@ def test_stale_instance_routing_uses_fresh_product_and_warns(tmp_path, monkeypat
     (instance / 'config').mkdir(parents=True)
     (instance / 'config/model-routing.json').write_text(
         json.dumps({'catalog_date': '2000-01-01', 'adapters': {},
-                    'families': {'anthropic': {'aliases': {'workhorse': ['claude-stale']}}}}))
+                    'families': {'anthropic': {'aliases': {'senior': ['claude-stale']}}}}))
     monkeypatch.setenv('AGENT_FABRIC_INSTANCE_ROOT', str(instance))
     monkeypatch.setenv('AGENT_FABRIC_PRODUCT_ROOT', str(ROOT))
     module = load_dispatch_module()
 
     result = module.preflight_tasks([{
-        'id': 'fresh-route', 'adapter': 'claude', 'alias': 'workhorse', 'prompt': 'review this',
+        'id': 'fresh-route', 'adapter': 'claude', 'alias': 'senior', 'prompt': 'review this',
     }])
 
     assert result['status'] == 'validated'
@@ -3087,7 +3473,7 @@ def test_direct_dispatch_rejects_before_prompt_staging_and_override_records_find
     prompt = tmp_path / 'prompt.md'
     prompt.write_text('hello\n' + 'AKIA' + 'A' * 16)
     args = module.parser().parse_args(['--run-dir', str(run_dir), '--adapter', 'codex',
-        '--prompt-file', str(prompt), '--alias', 'workhorse', '--role', 'worker'])
+        '--prompt-file', str(prompt), '--alias', 'senior', '--role', 'worker'])
     assert module.dispatch(args) == 2
     rejected = json.loads(capsys.readouterr().out.splitlines()[-1])
     assert rejected['status'] == 'rejected' and rejected['error'] == 'secret_detected'
@@ -3111,7 +3497,7 @@ def test_mcp_owner_closes_receipt(tmp_path, monkeypatch, capsys):
     prompt = tmp_path / 'prompt.md'
     prompt.write_text('hello')
     args = module.parser().parse_args(['--run-dir', str(run_dir), '--adapter', 'codex',
-        '--prompt-file', str(prompt), '--alias', 'workhorse', '--role', 'worker'])
+        '--prompt-file', str(prompt), '--alias', 'senior', '--role', 'worker'])
     assert module.dispatch(args) == 0
     terminal = json.loads(capsys.readouterr().out.splitlines()[-1])
     assert terminal['schema'] == 'fabric.attempt.v1'
@@ -3139,7 +3525,7 @@ def test_mcp_batch_cancelled_before_dispatch_closes_receipt(tmp_path, monkeypatc
 def test_front_door_mode_timeout_defaults(tmp_path, mode, timeout):
     module = load_dispatch_module()
     args = module.parser().parse_args(['--run-dir', str(tmp_path), '--adapter', 'codex',
-        '--prompt-stdin', '--alias', 'workhorse', '--role', 'worker', '--access-mode', mode])
+        '--prompt-stdin', '--alias', 'senior', '--role', 'worker', '--access-mode', mode])
     module.dispatch(args)
     assert args.timeout_seconds == timeout
 
@@ -3214,14 +3600,14 @@ else:
     worktree = make_worktree(tmp_path) if mode == 'worktree_write' else None
     if owner == 'dispatch':
         command = [str(SCRIPT), '--run-dir', str(run_dir), '--adapter', 'codex',
-                   '--prompt-file', str(prompt), '--alias', 'workhorse', '--role', 'worker']
+                   '--prompt-file', str(prompt), '--alias', 'senior', '--role', 'worker']
         if worktree is not None:
             command += ['--access-mode', mode, '--worktree', str(worktree)]
     else:
         manifest = tmp_path / 'tasks.json'
         manifest.write_text(json.dumps({'schema_version': 1, 'tasks': [
             {'id': 'isolated', 'adapter': 'codex', 'prompt_file': str(prompt),
-             'alias': 'workhorse', 'role': 'worker', 'access_mode': mode,
+             'alias': 'senior', 'role': 'worker', 'access_mode': mode,
              **({'worktree': str(worktree)} if worktree is not None else {})}]}))
         command = [str(SCRIPT.with_name('batch_run.py')), '--run-dir', str(run_dir), '--manifest', str(manifest)]
     result = subprocess.run(command, cwd=tmp_path, env=env, capture_output=True, text=True, timeout=30)
@@ -3450,6 +3836,10 @@ time.sleep(30)
             time.sleep(.02)
         assert (worktree / 'provider-pids').exists()
         mod = load_dispatch_module()
+        if stop != 'timeout':
+            active = json.loads((run / 'tasks/dispatch-001/attempt-001/attempt.json').read_text())
+            assert active['pgid_started_at']
+            assert active['pgid_started_at'] == mod.process_info.start_time(active['pgid'])
         with pytest.raises(mod.WorktreeLeaseError):
             mod.acquire_worktree_lease(worktree)
         if stop == 'SIGTERM':
@@ -3507,7 +3897,7 @@ def test_fallback_reentry_does_not_charge_front_door_phases_again(tmp_path, monk
     run, prompt, command = real_owner_fixture(
         tmp_path, monkeypatch,
         'import sys,json\nsys.stdin.read()\n'
-        'if any("opus" in item for item in sys.argv): print("rate limit", file=sys.stderr); sys.exit(1)\n'
+        'if any("opus" in item for item in sys.argv): print("model unavailable", file=sys.stderr); sys.exit(1)\n'
         'print(json.dumps({"type":"result","result":"DONE"}))\n',
     )
     isolate_fabric_plan_env(monkeypatch)
@@ -3746,7 +4136,7 @@ def test_fabric_fast_plan_delegates_valid_shell_only_options(tmp_path, monkeypat
 
 
 def test_fabric_fast_plan_delegates_missing_tmpdir(tmp_path, monkeypatch):
-    """cf_dispatch.sh rejects a TMPDIR that is not a directory; the fast path must not accept it."""
+    """cf_dispatch.py rejects a TMPDIR that is not a directory; the fast path must not accept it."""
     run, prompt, command = real_owner_fixture(tmp_path, monkeypatch, 'import sys\nsys.stdin.read()\n')
     isolate_fabric_plan_env(monkeypatch)
     monkeypatch.chdir(tmp_path)
@@ -3760,8 +4150,8 @@ def test_fabric_fast_plan_delegates_missing_tmpdir(tmp_path, monkeypatch):
 def test_fabric_fast_plan_guard_covers_shell_environment_reads():
     import re
     mod = load_dispatch_module()
-    shell = (ROOT / 'skills/orchestrate/scripts/cf_dispatch.sh').read_text()
-    read_names = set(re.findall(r'\$\{?(CF_DISPATCH_[A-Z0-9_]+)', shell))
+    shell = (ROOT / 'skills/orchestrate/scripts/cf_dispatch.py').read_text()
+    read_names = set(re.findall(r'"(CF_DISPATCH_[A-Z0-9_]+)"', shell))
     assert read_names == mod.FAST_PLAN_SHELL_ENV_READS
 
 
@@ -3779,14 +4169,15 @@ def test_fabric_fast_route_validation_matches_shell_rejections(raw):
 
 
 def test_fabric_fast_route_validation_tracks_shell_fields():
-    import re
+    import importlib.util
     mod = load_dispatch_module()
-    shell = (ROOT / 'skills/orchestrate/scripts/cf_dispatch.sh').read_text()
-    parser = shell.split('parse_route_json() {', 1)[1].split("PY\n", 1)[0]
-    required = parser.split('for key in (', 1)[1].split(')', 1)[0]
-    fields = parser.split('keys = (', 1)[1].split(')', 1)[0]
-    assert set(re.findall(r'"([a-z_]+)"', required)) == set(mod.FAST_PLAN_ROUTE_REQUIRED)
-    assert set(re.findall(r'"([a-z_]+)"', fields)) == set(mod.FAST_PLAN_ROUTE_FIELDS)
+    path = ROOT / 'skills/orchestrate/scripts/cf_dispatch.py'
+    spec = importlib.util.spec_from_file_location('cf_dispatch_under_test', path)
+    dispatcher = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = dispatcher
+    spec.loader.exec_module(dispatcher)
+    assert set(dispatcher.ROUTE_REQUIRED_FIELDS) == set(mod.FAST_PLAN_ROUTE_REQUIRED)
+    assert set(dispatcher.ROUTE_FIELDS) == set(mod.FAST_PLAN_ROUTE_FIELDS)
 
 
 @pytest.mark.parametrize('failure', [
@@ -3852,7 +4243,7 @@ def test_fabric_fast_plan_preserves_shell_prompt_rejections(tmp_path, monkeypatc
     assert mod.fast_fabric_plan(args, prompt, run / 'result.md', tmp_path) is None
 
 
-@pytest.mark.parametrize('previous_status', ['interrupted', 'timed_out', 'cancelled', 'stalled'])
+@pytest.mark.parametrize('previous_status', ['interrupted', 'timed_out', 'cancelled', 'stalled', 'lost'])
 def test_interrupted_attempt_resumes_from_nested_cwd_with_absolute_caller_prompt(tmp_path, monkeypatch, previous_status):
     code = '''import sys,json,os
 prompt = sys.stdin.read()
@@ -3872,7 +4263,7 @@ print(json.dumps({"type":"result","result":os.getcwd()}))
     # before the owner could publish its legacy terminal evidence.
     row.update(status=previous_status, state='terminal')
     path.write_text(json.dumps(row))
-    if previous_status == 'interrupted':
+    if previous_status in {'interrupted', 'lost'}:
         legacy_path = run / row['legacy_attempt_path']
         legacy_path.unlink()
         legacy_path.with_name('attempt.sha256').unlink()
@@ -3974,12 +4365,19 @@ print(json.dumps({'type':'result','result':'RESUMED ' + session}))
     assert row['session_id'] == 'saved-session'
 
 
-def test_incomplete_writer_without_claude_session_returns_typed_fix(tmp_path):
+@pytest.mark.parametrize(('status', 'signature'), [
+    ('timed_out', 'wall_clock'),
+    ('interrupted', 'supervisor_signal'),
+    ('failed', 'provider_signal'),
+    ('failed', 'provider_incomplete'),
+])
+def test_incomplete_writer_without_claude_session_returns_typed_fix(tmp_path, status, signature):
     mod = load_dispatch_module()
     run = Path(subprocess.check_output([str(INIT), '--kind', 'dispatch'], cwd=tmp_path, text=True).strip())
     row = json.loads((ROOT / 'tests/fixtures/fabric-v1/attempt.json').read_text())
-    row.update(run_id=run.name, status='timed_out', mode='worktree_write', cwd=str(tmp_path),
+    row.update(run_id=run.name, status=status, mode='worktree_write', cwd=str(tmp_path),
                worktree=str(tmp_path), session_id='generated-but-unobserved')
+    row['evidence']['signature'] = signature
     row['provenance']['requested']['adapter'] = 'claude'
     path = run / 'tasks/task-1/attempt-001/attempt.json'
     path.parent.mkdir(parents=True)
@@ -3992,6 +4390,52 @@ def test_incomplete_writer_without_claude_session_returns_typed_fix(tmp_path):
     response = json.loads(result.stdout)
     assert response['status'] == 'rejected'
     assert 'review worktree' in response['message'].lower()
+
+
+@pytest.mark.parametrize('observed_session', [False, True])
+def test_claude_signal_dead_writer_resume_never_relaunches_over_partial_edits(tmp_path, monkeypatch, observed_session):
+    code = '''import json,os,signal,sys
+from pathlib import Path
+sys.stdin.read()
+with Path('launches.txt').open('a') as stream:
+ stream.write('launch\\n')
+if '--resume' in sys.argv:
+ print('No conversation found with session ID', file=sys.stderr)
+ sys.exit(1)
+if Path('partial.txt').exists():
+ print(json.dumps({'type':'result','result':'FRESH OVER PARTIAL EDITS'}))
+ sys.exit(0)
+Path('partial.txt').write_text('unfinished edit')
+'''
+    if observed_session:
+        code += "print(json.dumps({'type':'system','subtype':'init','session_id':'writer-session','model':'opus'}), flush=True)\n"
+    code += 'os.kill(os.getpid(), signal.SIGTERM)\n'
+    run, prompt, command = real_owner_fixture(tmp_path, monkeypatch, code)
+    worktree = make_worktree(tmp_path)
+    first = subprocess.run([*command, '--access-mode', 'worktree_write', '--worktree', str(worktree)],
+                           cwd=tmp_path, capture_output=True, text=True, timeout=30)
+    assert first.returncode != 0, first.stdout + first.stderr
+    previous = json.loads((run / 'tasks/dispatch-001/attempt-001/attempt.json').read_text())
+    assert previous['status'] == 'failed'
+    assert previous['evidence']['signature'] == 'provider_signal'
+    assert previous['evidence']['signal'] == signal.SIGTERM
+
+    resumed = subprocess.run([sys.executable, str(SCRIPT), '--run-dir', str(run),
+                              '--resume', previous['run_id'], '--prompt-file', str(prompt)],
+                             cwd=tmp_path, capture_output=True, text=True, timeout=30)
+    assert resumed.returncode != 0, resumed.stdout + resumed.stderr
+    if observed_session:
+        row = json.loads((run / 'tasks/dispatch-001/attempt-002/attempt.json').read_text())
+        assert row['status'] == 'rejected'
+        assert row['evidence']['signature'] == 'resume_session_missing'
+        assert 'resumed_by_relaunch' not in row['provenance']['notes']
+    else:
+        response = json.loads(resumed.stdout)
+        assert response['status'] == 'rejected'
+        assert 'review worktree' in response['message'].lower()
+        assert not (run / 'tasks/dispatch-001/attempt-002').exists()
+    assert (worktree / 'partial.txt').read_text() == 'unfinished edit'
+    assert (worktree / 'launches.txt').read_text().splitlines() == ['launch'] * (2 if observed_session else 1)
 
 
 def test_planner_stopped_by_signal_is_interrupted_not_rejected():
@@ -4064,7 +4508,7 @@ def _run_fake_codex(tmp_path: Path, name: str, body: str, extra_env: dict[str, s
     env.update(extra_env or {})
     result = subprocess.run(
         [str(SCRIPT), "--run-dir", str(run_dir), "--task-id", "task-1", "--adapter", "codex",
-         "--prompt-file", str(prompt), "--orchestrator-family", "openai", "--alias", "workhorse",
+         "--prompt-file", str(prompt), "--orchestrator-family", "openai", "--alias", "senior",
          "--role", "worker"],
         cwd=tmp_path, env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     return run_dir / "dispatch/tasks/task-1/attempt-001", result
@@ -4100,7 +4544,7 @@ def test_cli_dispatch_to_an_explicit_peer_still_rejects_with_invalid_hosts_confi
     prompt.write_text("hi\n")
     result = subprocess.run(
         [str(SCRIPT), "--run-dir", str(run_dir), "--task-id", "task-1", "--adapter", "codex", "--host", "there",
-         "--prompt-file", str(prompt), "--orchestrator-family", "openai", "--alias", "workhorse", "--role", "worker"],
+         "--prompt-file", str(prompt), "--orchestrator-family", "openai", "--alias", "senior", "--role", "worker"],
         cwd=tmp_path, env={**os.environ, **env}, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     assert result.returncode == 1
     assert json.loads(result.stdout)["error"] == "unknown_host"
@@ -4180,7 +4624,7 @@ def test_dispatch_retains_quarantined_result_without_clean_success(tmp_path, mon
     monkeypatch.chdir(tmp_path)
     args = module.parser().parse_args([
         '--run-dir', str(run_dir), '--task-id', 'review', '--adapter', 'codex',
-        '--prompt-file', str(prompt), '--alias', 'scout', '--role', 'worker'])
+        '--prompt-file', str(prompt), '--alias', 'junior', '--role', 'worker'])
     assert module.dispatch(args) == 1
     record = json.loads((run_dir / 'dispatch/tasks/review/attempt-001/attempt.json').read_text())
     assert record['status'] == ('failed' if invalid_digest else 'quarantined')
@@ -4199,7 +4643,7 @@ def test_dispatch_retains_quarantined_result_without_clean_success(tmp_path, mon
         import batch_run
         claimed = {**record, 'attempt_digest': module.digest(run_dir / record['attempt_path'])}
         child = batch_run._validate_child_record(
-            {'id': 'review', 'adapter': 'codex', 'alias': 'scout', 'role': 'worker'}, claimed, run_dir, 1)
+            {'id': 'review', 'adapter': 'codex', 'alias': 'junior', 'role': 'worker'}, claimed, run_dir, 1)
         assert child['status'] == 'quarantined'
         assert child['landable'] is False
         assert child['quarantine'] == record['quarantine']
@@ -4229,3 +4673,361 @@ def test_preflight_types_an_opencode_below_v2_as_unsupported_cli_version(monkeyp
     assert result["status"] == "rejected"
     assert result["error"] == "unsupported_cli_version"
     assert "upgrade OpenCode to v2" in result["fix"]
+
+
+def test_dispatch_usage_error_is_one_line_and_exits_2():
+    dispatch_script = ROOT / "skills/orchestrate/scripts/dispatch_run.py"
+    result = subprocess.run([sys.executable, str(dispatch_script), "--run-dir", "/tmp", "--prompt-stdin", "--bad-arg"], capture_output=True, text=True)
+    assert result.returncode == 2
+    assert result.stdout == ""
+    assert result.stderr == "error: unrecognized arguments: --bad-arg; fix: provenant help dispatch\n"
+
+    missing = subprocess.run([sys.executable, str(dispatch_script)], capture_output=True, text=True)
+    assert missing.returncode == 2
+    assert missing.stdout == ""
+    assert missing.stderr.startswith("error: the following arguments are required: ")
+    assert "; fix: pass " in missing.stderr
+    assert len(missing.stderr.splitlines()) == 1
+
+
+@pytest.mark.parametrize("selector", ["explicit", "task_class"])
+@pytest.mark.parametrize("persistent", [False, True])
+def test_rate_limit_retries_same_model_once_with_fallback_off(tmp_path, monkeypatch, persistent, selector):
+    launches = tmp_path / "launches"
+    code = f'''import json,sys
+from pathlib import Path
+if sys.argv[1:3] == ["auth", "status"]:
+    print(json.dumps({{"loggedIn":True, "authMethod":"claude.ai", "subscriptionType":"pro"}}))
+    sys.exit(0)
+if "Reply exactly OK." in sys.argv:
+    print(json.dumps({{"type":"result", "subtype":"success", "is_error":False, "result":"OK", "modelUsage":{{"claude-haiku-5-5":{{}}}}}}))
+    sys.exit(0)
+sys.stdin.read()
+path = Path({str(launches)!r})
+count = int(path.read_text()) + 1 if path.exists() else 1
+path.write_text(str(count))
+if count == 1 or {persistent!r}:
+    print(json.dumps({{"type":"result", "is_error":True, "result":"rate limit", "retry_after":0.05}}))
+    sys.exit(1)
+print(json.dumps({{"type":"result", "result":"DONE"}}))
+'''
+    run, prompt, command = real_owner_fixture(tmp_path, monkeypatch, code)
+    if selector == "task_class":
+        model_index = command.index("--model")
+        del command[model_index:model_index + 2]
+        command += ["--task-class", "mechanical", "--role", "worker"]
+    isolate_fabric_plan_env(monkeypatch)
+    monkeypatch.setenv("AGENT_FABRIC_STATE_ROOT", str(tmp_path / "state"))
+    monkeypatch.chdir(tmp_path)
+    configure_fast_pacing(tmp_path, monkeypatch)
+    mod = load_dispatch_module()
+    args = mod.parser().parse_args(command[2:])
+    args.timeout_seconds = 10
+    assert mod.dispatch(args) == (1 if persistent else 0)
+    attempts = [json.loads(path.read_text()) for path in sorted(run.glob("tasks/*/attempt-*/attempt.json"))]
+    assert [row["status"] for row in attempts] == ["rate_limited", "rate_limited" if persistent else "ok"]
+    assert launches.read_text() == "2"
+    expected_model = "claude-haiku-5-5" if selector == "task_class" else "claude-opus-5-5"
+    assert {row["provenance"]["resolved_model"] for row in attempts} == {expected_model}
+    if selector == "task_class":
+        assert all(row["task_class"] == "mechanical" for row in attempts)
+        assert all(row["provenance"]["requested"]["task_class"] == "mechanical" for row in attempts)
+    legacy = json.loads(next(run.glob("dispatch/tasks/*/attempt-002/attempt.json")).read_text())
+    assert legacy["retry_of"] == "attempt-001"
+    assert attempts[1]["provenance"]["fallback_from"]["status"] == "rate_limited"
+    health = mod.exec_routing._model_route_module()._fabric_records().read_route_health()
+    assert all(row["recent_failures"] == 0 for row in health.values())
+
+
+def test_rate_limit_does_not_retry_when_cooldown_exceeds_timeout(tmp_path, monkeypatch):
+    code = 'import json,sys\nsys.stdin.read()\nprint(json.dumps({"type":"result", "is_error":True, "result":"rate limit", "retry_after":60}))\nsys.exit(1)\n'
+    run, prompt, command = real_owner_fixture(tmp_path, monkeypatch, code)
+    isolate_fabric_plan_env(monkeypatch)
+    monkeypatch.setenv("AGENT_FABRIC_STATE_ROOT", str(tmp_path / "state"))
+    monkeypatch.chdir(tmp_path)
+    configure_fast_pacing(tmp_path, monkeypatch)
+    mod = load_dispatch_module()
+    args = mod.parser().parse_args(command[2:])
+    args.timeout_seconds = 5
+    assert mod.dispatch(args) == 1
+    attempts = [json.loads(path.read_text()) for path in run.glob("tasks/*/attempt-*/attempt.json")]
+    assert [row["status"] for row in attempts] == ["rate_limited"]
+
+
+@pytest.mark.parametrize("edits", [None, "partial.txt"])
+def test_rate_limited_writer_retries_only_if_unchanged(tmp_path, monkeypatch, edits):
+    launches = tmp_path / "launches"
+    code = f'''import json,sys
+from pathlib import Path
+sys.stdin.read()
+path = Path({str(launches)!r})
+count = int(path.read_text()) + 1 if path.exists() else 1
+path.write_text(str(count))
+if count == 1:
+    if {edits!r}:
+        Path({edits!r}).write_text("half done")
+    print(json.dumps({{"type":"result", "is_error":True, "result":"rate limit", "retry_after":0.05}}))
+    sys.exit(1)
+print(json.dumps({{"type":"result", "result":"DONE"}}))
+'''
+    run, prompt, command = real_owner_fixture(tmp_path, monkeypatch, code)
+    worktree = make_worktree(tmp_path)
+    time.sleep(1.2)
+    isolate_fabric_plan_env(monkeypatch)
+    monkeypatch.setenv("AGENT_FABRIC_STATE_ROOT", str(tmp_path / "state"))
+    monkeypatch.chdir(tmp_path)
+    configure_fast_pacing(tmp_path, monkeypatch)
+    mod = load_dispatch_module()
+    args = mod.parser().parse_args(command[2:] + ["--access-mode", "worktree_write", "--worktree", str(worktree)])
+    args.timeout_seconds = 10
+    assert mod.dispatch(args) == (1 if edits else 0)
+    attempts = [json.loads(path.read_text()) for path in sorted(run.glob("tasks/*/attempt-*/attempt.json"))]
+    assert [row["status"] for row in attempts] == (["rate_limited"] if edits else ["rate_limited", "ok"])
+    if edits:
+        assert attempts[0]["retryable"] is False
+        assert (worktree / edits).read_text() == "half done"
+
+
+@pytest.mark.parametrize("action", ["cancel", "edit"])
+def test_rate_limit_wait_observes_cancellation_and_intervening_writer_edits(tmp_path, monkeypatch, action):
+    code = 'import json,sys\nsys.stdin.read()\nprint(json.dumps({"type":"result", "is_error":True, "result":"rate limit", "retry_after":2}))\nsys.exit(1)\n'
+    run, prompt, command = real_owner_fixture(tmp_path, monkeypatch, code)
+    worktree = make_worktree(tmp_path) if action == "edit" else None
+    if worktree:
+        time.sleep(1.2)
+        command += ["--access-mode", "worktree_write", "--worktree", str(worktree)]
+    isolate_fabric_plan_env(monkeypatch)
+    monkeypatch.setenv("AGENT_FABRIC_STATE_ROOT", str(tmp_path / "state"))
+    monkeypatch.chdir(tmp_path)
+    configure_fast_pacing(tmp_path, monkeypatch)
+    mod = load_dispatch_module()
+    sleep = time.sleep
+    acted = []
+    stores_before = {}
+    test_thread = threading.get_ident()
+    def during_wait(seconds):
+        # time.sleep is patched process-wide; under pytest-xdist the execnet
+        # threads call it too, so only the dispatching thread may act.
+        if threading.get_ident() != test_thread:
+            return sleep(seconds)
+        queued = list(run.glob("tasks/*/attempt-002/attempt.json"))
+        if queued and not acted and json.loads(queued[0].read_text()).get("queue_reason") == "rate_limit":
+            # Record first: the lease retry below can itself call the patched
+            # sleep, which must not re-enter this branch.
+            acted.append(action)
+            if action == "cancel":
+                (run / "dispatch/tasks" / queued[0].relative_to(run / "tasks").parent / "cancel.request").touch()
+            else:
+                with pytest.raises(mod.WorktreeLeaseError):
+                    mod.acquire_worktree_lease(worktree)
+                for store in (tmp_path / "cooldowns.json", tmp_path / "state/route-health.json"):
+                    stores_before[store] = store.read_bytes()
+                (worktree / "intervening.txt").write_text("another edit")
+        sleep(seconds)
+    monkeypatch.setattr(mod.time, "sleep", during_wait)
+    args = mod.parser().parse_args(command[2:])
+    args.timeout_seconds = 10
+    assert mod.dispatch(args) == 1
+    attempts = [json.loads(path.read_text()) for path in sorted(run.glob("tasks/*/attempt-*/attempt.json"))]
+    assert acted == [action]
+    assert [row["status"] for row in attempts] == ["rate_limited", "cancelled" if action == "cancel" else "writer_changed"]
+    assert attempts[1]["pgid"] is None
+    if action == "edit":
+        assert attempts[1]["retryable"] is False
+        assert (worktree / "intervening.txt").read_text() == "another edit"
+        assert all(path.read_bytes() == content for path, content in stores_before.items())
+
+
+def test_rate_limit_retry_rechecks_writer_after_memory_admission(tmp_path, monkeypatch):
+    launches = tmp_path / "launches"
+    code = f'''import json,sys
+from pathlib import Path
+sys.stdin.read()
+path = Path({str(launches)!r})
+count = int(path.read_text()) + 1 if path.exists() else 1
+path.write_text(str(count))
+if count == 1:
+    print(json.dumps({{"type":"result", "is_error":True, "result":"rate limit", "retry_after":0.05}}))
+    sys.exit(1)
+print(json.dumps({{"type":"result", "result":"DONE"}}))
+'''
+    run, prompt, command = real_owner_fixture(tmp_path, monkeypatch, code)
+    worktree = make_worktree(tmp_path)
+    (tmp_path / ".agents/fabric-policy.json").write_text(json.dumps({"memory_floor_percent": {"worktree_write":10}}))
+    time.sleep(1.2)
+    isolate_fabric_plan_env(monkeypatch)
+    monkeypatch.setenv("AGENT_FABRIC_STATE_ROOT", str(tmp_path / "state"))
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    monkeypatch.chdir(tmp_path)
+    configure_fast_pacing(tmp_path, monkeypatch)
+    mod = load_dispatch_module()
+    edited = []
+    def probe():
+        if list(run.glob("tasks/*/attempt-002/attempt.json")) and not edited:
+            (worktree / "during-admission.txt").write_text("another edit")
+            edited.append(True)
+        return 100, 100
+    monkeypatch.setattr(mod.memory_admission, "available_memory_mb", probe)
+    args = mod.parser().parse_args(command[2:] + ["--access-mode", "worktree_write", "--worktree", str(worktree)])
+    args.timeout_seconds = 10
+    assert mod.dispatch(args) == 1
+    assert edited == [True]
+    assert launches.read_text() == "1"
+    attempts = [json.loads(path.read_text()) for path in sorted(run.glob("tasks/*/attempt-*/attempt.json"))]
+    assert [row["status"] for row in attempts] == ["rate_limited", "writer_changed"]
+    assert attempts[1]["retryable"] is False
+    assert attempts[1]["pgid"] is None
+
+
+def configure_fast_pacing(tmp_path, monkeypatch, **overrides):
+    config = tmp_path / ".agents/config/model-routing.json"
+    config.parent.mkdir(parents=True, exist_ok=True)
+    policy = {"base_delay_seconds": 0.05, "cap_seconds": 0.1,
+              "jitter_fraction": 0, "minimum_budget_seconds": 0.1, **overrides}
+    config.write_text(json.dumps({"rate_limit_pacing": policy}))
+    monkeypatch.setenv("AGENT_FABRIC_INSTANCE_ROOT", str(tmp_path / ".agents"))
+
+
+@pytest.mark.parametrize("retry_after", [None, 0.2])
+def test_missing_cooldown_still_waits_before_retry(tmp_path, monkeypatch, retry_after):
+    launches = tmp_path / "launches"
+    code = f'''import json,sys,time
+from pathlib import Path
+sys.stdin.read()
+path = Path({str(launches)!r})
+with path.open("a") as stream:
+    stream.write(str(time.monotonic()) + "\\n")
+print(json.dumps({{"type":"result", "is_error":True, "result":"rate limit", "retry_after":{retry_after!r}}}))
+sys.exit(1)
+'''
+    run, prompt, command = real_owner_fixture(tmp_path, monkeypatch, code)
+    isolate_fabric_plan_env(monkeypatch)
+    configure_fast_pacing(tmp_path, monkeypatch, base_delay_seconds=0.1)
+    monkeypatch.chdir(tmp_path)
+    mod = load_dispatch_module()
+    records = sys.modules[mod.write_cooldown.__module__]
+    original = records.store_open
+    def no_lock(path, flags, create_parents=False):
+        if Path(path).name == "cooldowns.lock":
+            raise PermissionError("state unavailable")
+        return original(path, flags, create_parents)
+    monkeypatch.setattr(records, "store_open", no_lock)
+    args = mod.parser().parse_args(command[2:])
+    args.timeout_seconds = 5
+    assert mod.dispatch(args) == 1
+    times = list(map(float, launches.read_text().splitlines()))
+    assert len(times) == 2
+    assert times[1] - times[0] >= (retry_after or 0.1)
+
+
+def test_rate_limit_reserves_run_budget_after_the_delay(tmp_path, monkeypatch):
+    code = 'import json,sys; sys.stdin.read(); print(json.dumps({"type":"result", "is_error":True, "result":"rate limit", "retry_after":0.2})); sys.exit(1)'
+    run, prompt, command = real_owner_fixture(tmp_path, monkeypatch, code)
+    isolate_fabric_plan_env(monkeypatch)
+    configure_fast_pacing(tmp_path, monkeypatch, minimum_budget_seconds=10)
+    monkeypatch.chdir(tmp_path)
+    mod = load_dispatch_module()
+    args = mod.parser().parse_args(command[2:])
+    args.timeout_seconds = 10
+    assert mod.dispatch(args) == 1
+    assert len(list(run.glob("tasks/*/attempt-*/attempt.json"))) == 1
+
+
+@pytest.mark.parametrize("fallback", ["false", '[{"adapter":"claude","model":"claude-opus-5-5"}]', '[{"adapter":"claude","model":"opus"}]'])
+def test_usage_limit_never_retries_the_same_model(tmp_path, monkeypatch, fallback):
+    code = 'import json,sys; sys.stdin.read(); print(json.dumps({"type":"result", "is_error":True, "result":"429 RESOURCE_EXHAUSTED: Quota exceeded per day"})); sys.exit(1)'
+    run, prompt, command = real_owner_fixture(tmp_path, monkeypatch, code)
+    command[command.index("--fallback") + 1] = fallback
+    isolate_fabric_plan_env(monkeypatch)
+    configure_fast_pacing(tmp_path, monkeypatch)
+    monkeypatch.chdir(tmp_path)
+    mod = load_dispatch_module()
+    args = mod.parser().parse_args(command[2:])
+    args.timeout_seconds = 10
+    records = sys.modules[mod.write_cooldown.__module__]
+    original = records.store_open
+    def no_cooldown_lock(path, flags, create_parents=False):
+        if Path(path).name == "cooldowns.lock":
+            raise PermissionError("state unavailable")
+        return original(path, flags, create_parents)
+    monkeypatch.setattr(records, "store_open", no_cooldown_lock)
+    assert mod.dispatch(args) == 1
+    rows = [json.loads(path.read_text()) for path in run.glob("tasks/*/attempt-*/attempt.json")]
+    assert [row["status"] for row in rows] == ["usage_limited"]
+    assert "Quota exceeded per day" in rows[0]["reason"]
+
+
+def test_pacing_jitter_is_added_to_the_wait_without_shortening_it(monkeypatch):
+    mod = load_dispatch_module()
+    monkeypatch.setattr(mod.random, "uniform", lambda low, high: high)
+    policy = {"base_delay_seconds": 30, "jitter_fraction": 0.2}
+    assert mod.rate_limit_delay({}, None, policy) == 36
+    assert mod.rate_limit_delay({"retry_after": 60}, None, policy) == 72
+
+
+def test_agy_retry_rebuilds_argv_timeout_after_the_wait(tmp_path, monkeypatch):
+    launches = tmp_path / "argv-timeouts"
+    code = f'''import json,sys
+from pathlib import Path
+path = Path({str(launches)!r})
+count = len(path.read_text().splitlines()) if path.exists() else 0
+with path.open("a") as stream:
+    stream.write(sys.argv[sys.argv.index("--print-timeout") + 1] + "\\n")
+if count == 0:
+    print(json.dumps({{"type":"error", "message":"429 rate limit", "retry_after":1.3}}))
+    sys.exit(1)
+print(json.dumps({{"status":"SUCCESS", "response":"DONE"}}))
+'''
+    run, prompt, command = real_owner_fixture(tmp_path, monkeypatch, code)
+    write_executable(tmp_path / "provider-bin/agy", "#!/usr/bin/env python3\n" + code)
+    command[command.index("--adapter") + 1] = "agy"
+    command[command.index("--model") + 1] = "gemini-3.8-flash"
+    isolate_fabric_plan_env(monkeypatch)
+    configure_fast_pacing(tmp_path, monkeypatch)
+    monkeypatch.chdir(tmp_path)
+    mod = load_dispatch_module()
+    args = mod.parser().parse_args(command[2:])
+    args.timeout_seconds = 10
+    assert mod.dispatch(args) == 0
+    first, second = [int(value.removesuffix("s")) for value in launches.read_text().splitlines()]
+    assert second < first
+
+
+def _sequence_fixture(monkeypatch, plan, rows, alternatives):
+    mod = load_dispatch_module()
+    args = SimpleNamespace(fallback=False, resume=False, timeout_seconds=1000, confidential=False)
+    launches = []
+
+    def fake_dispatch(args, custody=None):
+        launches.append((getattr(args, "tool", None), getattr(args, "model", None)))
+        args._last_row = rows[len(launches) - 1] if len(launches) <= len(rows) else {**rows[-1], "retryable": False}
+        args._last_plan = plan
+        return 0
+
+    row = {"retryable": True, "attempt": 1, "task_class": "",
+           "provenance": {"line": "Route: claude/claude-opus-5-5 (x)"}}
+    rows[:] = [{**row, **item} for item in rows]
+    monkeypatch.setattr(mod, "_dispatch", fake_dispatch)
+    monkeypatch.setattr(mod.exec_routing, "candidates", lambda *a, **k: alternatives)
+    monkeypatch.setattr(mod.exec_routing, "cooling", lambda *a: None)
+    monkeypatch.setattr(mod, "pacing_policy", lambda: {"base_delay_seconds": 30, "cap_seconds": 900,
+                                                       "jitter_fraction": 0, "minimum_budget_seconds": 30})
+    return mod, args, launches
+
+
+def test_fallback_skips_the_route_of_an_effort_suffixed_plan_model(monkeypatch):
+    plan = {"adapter": "claude", "model": "claude-opus-5-5@high"}
+    rows = [{"status": "usage_limited"}]
+    alternatives = [{"adapter": "claude", "model": "claude-opus-5-5"}]
+    mod, args, launches = _sequence_fixture(monkeypatch, plan, rows, alternatives)
+    mod.execute_attempt_sequence(args)
+    assert len(launches) == 1
+
+
+def test_paced_retry_tolerates_a_row_with_null_evidence(monkeypatch):
+    plan = {"adapter": "claude", "model": "claude-opus-5-5"}
+    rows = [{"status": "rate_limited", "evidence": None, "retry_after": 1}]
+    mod, args, launches = _sequence_fixture(monkeypatch, plan, rows, [])
+    mod.execute_attempt_sequence(args)
+    assert len(launches) == 2
+    assert launches[1][1] == "claude-opus-5-5"

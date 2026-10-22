@@ -84,13 +84,18 @@ def validate_existing_leaf(parent_fd: int, leaf: str) -> None:
         raise CustodyError("output destination is not a regular file")
 
 
-def install(source: str, destination: str) -> tuple[str, int, int]:
+def install(source: str | int, destination: str) -> tuple[str, int, int]:
+    """Install the bytes of source, a path or an open file descriptor read from its start."""
     parent_fd = source_fd = temporary_fd = installed_fd = None
     temporary_name = ""
     try:
         parent_fd, leaf = open_parent(destination)
         validate_existing_leaf(parent_fd, leaf)
-        source_fd = os.open(source, os.O_RDONLY | os.O_NOFOLLOW)
+        if isinstance(source, int):
+            source_fd = os.dup(source)
+            os.lseek(source_fd, 0, os.SEEK_SET)
+        else:
+            source_fd = os.open(source, os.O_RDONLY | os.O_NOFOLLOW)
         if not stat.S_ISREG(os.fstat(source_fd).st_mode):
             raise CustodyError("dispatch output source is not a regular file")
 

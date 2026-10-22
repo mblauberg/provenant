@@ -64,17 +64,17 @@ TRUSTED_CAPABILITY_SOURCES = {
     "agy models": "agy",
 }
 TASK_CLASS_POLICY = {
-    "mechanical": {"minimum_alias": "scout", "minimum_effort": "low", "role": "worker"},
-    "legwork": {"minimum_alias": "workhorse", "minimum_effort": "medium", "role": "worker"},
-    "implementation": {"minimum_alias": "workhorse", "minimum_effort": "high", "role": "worker"},
-    "ui-taste": {"minimum_alias": "flagship", "minimum_effort": "high", "role": "worker"},
-    "screenshots": {"minimum_alias": "workhorse", "minimum_effort": "high", "role": "worker"},
-    "review": {"minimum_alias": "flagship", "minimum_effort": "high", "role": "reviewer"},
-    "second-opinion": {"minimum_alias": "flagship", "minimum_effort": "high", "role": "reviewer"},
-    "research": {"minimum_alias": "workhorse", "minimum_effort": "medium", "role": "worker"},
-    "bulk": {"minimum_alias": "scout", "minimum_effort": "low", "role": "worker"},
-    "critical-review": {"minimum_alias": "flagship", "minimum_effort": "high", "role": "critical-review"},
-    "orchestration": {"minimum_alias": "flagship", "minimum_effort": "high", "role": "orchestrator"},
+    "mechanical": {"minimum_alias": "junior", "minimum_effort": "low", "role": "worker"},
+    "legwork": {"minimum_alias": "senior", "minimum_effort": "medium", "role": "worker"},
+    "implementation": {"minimum_alias": "senior", "minimum_effort": "high", "role": "worker"},
+    "ui-taste": {"minimum_alias": "principal", "minimum_effort": "high", "role": "worker"},
+    "screenshots": {"minimum_alias": "senior", "minimum_effort": "high", "role": "worker"},
+    "review": {"minimum_alias": "principal", "minimum_effort": "high", "role": "reviewer"},
+    "second-opinion": {"minimum_alias": "principal", "minimum_effort": "high", "role": "reviewer"},
+    "research": {"minimum_alias": "senior", "minimum_effort": "medium", "role": "worker"},
+    "bulk": {"minimum_alias": "junior", "minimum_effort": "low", "role": "worker"},
+    "critical-review": {"minimum_alias": "principal", "minimum_effort": "high", "role": "critical-review"},
+    "orchestration": {"minimum_alias": "principal", "minimum_effort": "high", "role": "orchestrator"},
 }
 
 # Path-loading avoids depending on `scripts/` being on `sys.path`. Tests reload
@@ -114,9 +114,37 @@ if _pools is None:
     _pools_spec.loader.exec_module(_pools)
 
 EFFORT_ORDER = _catalog_validation.EFFORT_ORDER
+# The effort ladder `effort.shift` steps along. `ultra` is opt-in only, so a shift never reaches it.
+SHIFT_LADDER = tuple(name for name in EFFORT_ORDER if name != "ultra")
+
+
+def _harness_profile() -> Any:
+    """The shared profile resolver, loaded by path on first use and only for task-class routes."""
+    module = sys.modules.get("provenant_harness_profile")
+    if module is None:
+        spec = importlib.util.spec_from_file_location(
+            "provenant_harness_profile", Path(__file__).resolve().parents[1] / "skills/_shared/harness_profile.py")
+        assert spec is not None and spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
+        sys.modules["provenant_harness_profile"] = module
+        spec.loader.exec_module(module)
+    return module
+
+
+def shifted_task_class_effort(task_class: str, effort: str, minimum: str, entries: list[dict[str, Any]]) -> tuple[str, int]:
+    """Apply the profile's `effort.shift` one step, or keep `effort` when the step leaves policy or a model's efforts."""
+    shift = _harness_profile().value("effort.shift", 0, task_class=task_class)
+    if not shift or effort not in SHIFT_LADDER:
+        return effort, 0
+    target = SHIFT_LADDER.index(effort) + shift
+    if not 0 <= target < len(SHIFT_LADDER):
+        return effort, 0
+    candidate = SHIFT_LADDER[target]
+    if (EFFORT_ORDER[candidate] < EFFORT_ORDER[minimum]
+            or any(candidate not in entry.get("efforts", []) for entry in entries)):
+        return effort, 0
+    return candidate, shift
 ALIAS_ORDER = _catalog_validation.ALIAS_ORDER
-# The route-pool tier names, accepted wherever an adapter's own alias is asked for.
-TIER_ALIASES = _pools.TIER_ALIASES
 infer_family = _catalog_validation.infer_family
 matching_model_families = _catalog_validation.matching_model_families
 model_slug_for_family = _catalog_validation.model_slug_for_family
@@ -256,9 +284,32 @@ def _apply_free_pattern(adapter: dict[str, Any]) -> None:
                 entry.setdefault("warning", FREE_TIER_WARNING)
 
 
+_EFFORT_VALUE_KEYS = {"effort", "default_effort", "maximum_effort", "minimum_effort"}
+
+
+def _reject_max(value: Any, path: str = "", key: str = "", container: str = "") -> None:
+    """Refuse a catalogue (usually an old instance overlay) that still offers the retired `max` effort."""
+    if isinstance(value, dict):
+        for name, item in value.items():
+            _reject_max(item, f"{path}.{name}" if path else name, name, key)
+        return
+    is_max = lambda item: isinstance(item, str) and item.strip().lower() == "max"  # noqa: E731
+    if isinstance(value, list):
+        if key in {*_EFFORT_LIST_KEYS, "effort"} or container == "per_model_efforts":
+            if any(is_max(item) for item in value):
+                raise _pools.RenamedNameError(f"catalogue {path}: effort 'max' was retired; fix: use xhigh")
+            return
+        for index, item in enumerate(value):
+            _reject_max(item, f"{path}[{index}]", key, container)
+        return
+    if is_max(value) and (key in _EFFORT_VALUE_KEYS or "role_effort_defaults" in path.split(".")):
+        raise _pools.RenamedNameError(f"catalogue {path}: effort 'max' was retired; fix: use xhigh")
+
+
 def catalogue_snapshot(path: Path | None = None) -> dict[str, Any]:
     product = path or PRODUCT_CATALOG_PATH
     base = json.loads(product.read_text())
+    _pools.reject_renamed(base, "catalogue")
     drift: list[str] = []
     sources = [str(product)]
     stale_routing = False
@@ -295,11 +346,14 @@ def catalogue_snapshot(path: Path | None = None) -> dict[str, Any]:
                 if stale_routing:
                     drift.append("instance catalogue is older than product routing; ignored until refreshed")
                 else:
-                    base = _merge_catalog(base, _pools.migrate_legacy_routes(overlay, drift), "", drift)
+                    base = _merge_catalog(base, _pools.reject_renamed(overlay), "", drift)
             else:
                 drift.append("instance catalogue: malformed overlay dropped; fix: use a JSON object")
+        except _pools.RenamedNameError:
+            raise
         except (OSError, ValueError):
             drift.append("instance catalogue: unreadable overlay dropped; fix: refresh routing")
+    _reject_max(base)
     for entry in base.get("adapters", {}).values():
         _apply_free_pattern(entry)
     models = [dict(model, adapter=adapter) for adapter, entry in base.get("adapters", {}).items()
@@ -553,17 +607,46 @@ def _canonical_model(adapter: str, model: str, catalog: dict[str, Any]) -> str:
     return match["id"] if match else model
 
 
-def _cooldowns(catalog: dict[str, Any]) -> dict[str, Any]:
-    path = _state_root() / "cooldowns.json"
+_QUOTA_PATH = Path(__file__).resolve().parent / "provider_quota.py"
+_quota: Any = None
+
+
+def _provider_quota() -> Any:
+    """The provider quota module, loaded once; None when it cannot load, so routing never fails on it."""
+    global _quota
+    if _quota is None:
+        try:
+            spec = importlib.util.spec_from_file_location("provenant_provider_quota", _QUOTA_PATH)
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            _quota = module
+        except Exception:  # noqa: BLE001 - quota is advisory input to routing
+            _quota = False
+    return _quota or None
+
+
+def _with_quota(records: dict[str, Any]) -> dict[str, Any]:
+    """Cool exhausted providers until reset and drop usage cooldowns a newer quota reading contradicts."""
+    quota = _provider_quota()
     try:
-        data = json.loads(path.read_text())
-    except (OSError, ValueError):
+        return quota.apply_to_cooldowns(records) if quota else records
+    except Exception:  # noqa: BLE001 - quota is advisory input to routing
+        return records
+
+
+def _quota_states() -> dict[str, Any]:
+    """Cached pace state per route adapter, for `provenant routes`; never fetches."""
+    quota = _provider_quota()
+    try:
+        states = quota.route_states() if quota else {}
+    except Exception:  # noqa: BLE001 - quota is advisory input to routing
         return {}
-    if not isinstance(data, dict):
-        return {}
-    records = data.get("cooldowns", data)
-    if not isinstance(records, dict):
-        return {}
+    return {state["adapter"]: state for state in states.values() if state.get("adapter")}
+
+
+def _cooldowns(catalog: dict[str, Any]) -> dict[str, Any]:
+    records = _fabric_records().read_cooldowns()
+    records = _with_quota(records)
     normalised: dict[str, Any] = {}
     for key, record in records.items():
         if not isinstance(key, str) or "/" not in key:
@@ -817,11 +900,16 @@ def _kiro_probe_metadata(adapter: str) -> dict[str, Any]:
 
 
 def _cooling(adapter: str, model: str, cooldowns: dict[str, Any], catalog: dict[str, Any]) -> str:
-    for key in (f"{adapter}/{_canonical_model(adapter, model, catalog)}", f"{adapter}/*"):
+    canonical = _canonical_model(adapter, model, catalog)
+    for key in (f"{adapter}/{canonical}", f"{adapter}/*"):
         item = cooldowns.get(key)
         if not isinstance(item, dict):
             continue
         until = item.get("cooling_until")
+        covers = item.get("covers")
+        # A plan's quota cooldown covers only the models billed to that plan.
+        if covers and not any(canonical.startswith(prefix) for prefix in covers):
+            continue
         try:
             if datetime.fromisoformat(str(until).replace("Z", "+00:00")) > datetime.now(timezone.utc):
                 return str(until)
@@ -845,10 +933,10 @@ def _fallback_candidates(
     current = _canonical_model(adapter_name, model, catalog)
     candidates = [(adapter_name, candidate) for candidate in own]
     if adapter_name != "opencode":
-        # OpenCode has no flagship tier, so a flagship route falls back to its workhorse list.
+        # OpenCode has no principal tier, so a principal route falls back to its senior list.
         opencode_tiers = catalog["adapters"].get("opencode", {}).get("aliases", {})
         candidates += [("opencode", candidate) for candidate in
-                       opencode_tiers.get(tier) or opencode_tiers.get("workhorse", [])]
+                       opencode_tiers.get(tier) or opencode_tiers.get("senior", [])]
     if fallback == "any":
         candidates += [("opencode", item["id"]) for item in
                        catalog["adapters"].get("opencode", {}).get("models", [])]
@@ -929,6 +1017,25 @@ def _resolve_opencode_name(requested: str, live: list[str]) -> tuple[str | None,
                                  "fix: run `opencode models` and pass a full provider/model id"}
 
 
+_EFFORT_LIST_KEYS = {"efforts", "effort_fallback_order", "supported_efforts"}
+
+
+def _without_max(value: Any) -> Any:
+    """Drop `max` from provider-reported effort lists: no model is routed at it."""
+    if isinstance(value, dict):
+        return {key: ([item for item in item_list if not (isinstance(item, str) and item.lower() == "max")]
+                      if key in _EFFORT_LIST_KEYS and isinstance(item_list, list) else _without_max(item_list))
+                for key, item_list in value.items()}
+    if isinstance(value, list):
+        return [_without_max(item) for item in value]
+    return value
+
+
+def _max_retired(subject: str = "effort") -> dict[str, Any]:
+    return {"schema_version": 1, "status": "invalid_effort",
+            "message": f"{subject} 'max' was retired; fix: use xhigh"}
+
+
 def resolve_ordinary(args: argparse.Namespace, catalog: dict[str, Any]) -> int:
     requested = args.model or (args.alias if args.alias not in ALIAS_ORDER else "")
     adapter_name = args.adapter or (_owner_adapter(requested, catalog) if requested else "codex")
@@ -951,10 +1058,10 @@ def resolve_ordinary(args: argparse.Namespace, catalog: dict[str, Any]) -> int:
     if args.model and args.alias and args.alias != args.model and getattr(args, "alias_supplied", True):
         notes.append("alias and model both supplied; model won")
     if not requested:
-        candidates = adapter.get("aliases", {}).get(args.alias or "workhorse", [])
+        candidates = adapter.get("aliases", {}).get(args.alias or "senior", [])
         if not candidates:
             fixed = adapter.get("fixed_model_family")
-            candidates = catalog.get("families", {}).get(fixed, {}).get("aliases", {}).get(args.alias or "workhorse", [])
+            candidates = catalog.get("families", {}).get(fixed, {}).get("aliases", {}).get(args.alias or "senior", [])
         requested = candidates[0] if candidates else adapter.get("default_model", "")
         if not candidates and requested and args.alias in ALIAS_ORDER:
             warnings.append(f"{adapter_name} has no {args.alias} tier; using adapter default {requested}")
@@ -965,6 +1072,8 @@ def resolve_ordinary(args: argparse.Namespace, catalog: dict[str, Any]) -> int:
     if adapter_name == "opencode" and "#" in requested:
         # `provider/model#variant`: the variant is OpenCode's own effort knob, sent as given.
         requested, _, variant = requested.partition("#")
+        if variant.lower() == "max":
+            return emit(_max_retired("opencode variant"), 2)
         if variant and not args.effort:
             args.effort = variant
             args.explicit_variant = True
@@ -1003,7 +1112,7 @@ def resolve_ordinary(args: argparse.Namespace, catalog: dict[str, Any]) -> int:
     if not aliases and adapter.get("fixed_model_family"):
         aliases = catalog.get("families", {}).get(adapter["fixed_model_family"], {}).get("aliases", {})
     tier = args.alias if args.alias in ALIAS_ORDER else next(
-        (name for name, candidates in aliases.items() if model in candidates), "workhorse"
+        (name for name, candidates in aliases.items() if model in candidates), "senior"
     )
     # `auto` is the provider's own chooser; a provider prefix is not a new model.
     provider_auto = requested.casefold() == "auto"
@@ -1107,14 +1216,16 @@ def resolve_ordinary(args: argparse.Namespace, catalog: dict[str, Any]) -> int:
                  "endpoint_provider": adapter.get("endpoint_provider", adapter_name), "provider": provider,
                  "adapter_enabled": True, "compatibility_adapter": compatibility["compatibility_adapter"] if compatibility else "",
                  "model_selection": "alias" if not explicit else "explicit",
-                 "requested_effort": args.effort or "", "effort": effort if effort != "default" else "",
+                 "requested_effort": args.effort or "",
+                 "effort": effort if effort != "default" else "",
                  "effort_applied": effort if effort != "default" else "",
                  "supported_efforts": list(supported),
                  "effort_note": next((note for note in notes if "effort" in note or "unsupported" in note), ""),
                  "effort_source": "explicit" if args.effort else "model-default" if (registered or {}).get("default_effort") else "adapter-default",
                  "effort_capability_source": "registry" if supported else "provider-unverified" if unverified_effort
                  else "registry-no-effort-control" if registered else "adapter-no-effort-control",
-                 "effort_substitution": next((note for note in notes if "unsupported" in note or "effort control" in note), ""),
+                 "effort_substitution": next(
+                     (note for note in notes if "unsupported" in note or "effort control" in note), ""),
                  "substitution": "", "fallback_model": "",
                  "notes": notes, "warnings": warnings, "fallback_candidates": fallback,
                  "plan_cap_usd": cap, "trains_on_prompts": training_model,
@@ -1400,7 +1511,7 @@ def resolve_effort(
 
     ultra_eligible = (
         openai_codex
-        and args.alias == "flagship"
+        and args.alias == "principal"
         and args.role in family_config.get("ultra_eligible_roles", [])
     )
     if requested_effort == "ultra" and not ultra_eligible:
@@ -1439,8 +1550,8 @@ def resolve_effort(
 
     if args.effort_transport == "model-id":
         normalized_model = re.sub(r"(?:^|[-_])extra[-_]high(?=$|[-_])", "-xhigh", model.lower())
-        matches = re.findall(r"(?:^|[-_])(low|medium|high|xhigh|max|ultra)(?=$|[-_])", normalized_model)
-        parenthetical = re.search(r"\((low|medium|high|xhigh|max|ultra)\)\s*$", normalized_model)
+        matches = re.findall(r"(?:^|[-_])(low|medium|high|xhigh|ultra)(?=$|[-_])", normalized_model)
+        parenthetical = re.search(r"\((low|medium|high|xhigh|ultra)\)\s*$", normalized_model)
         derived = matches[-1] if matches else (parenthetical.group(1) if parenthetical else "")
         if args.effort and derived and args.effort != derived:
             return None, "", "adapter_effort_mismatch", "model-id"
@@ -1498,7 +1609,7 @@ def resolve_effort(
         return None, "", "no_effort_available", capability_source
     if (
         args.task_class_effort
-        and EFFORT_ORDER[fallback] < EFFORT_ORDER[args.task_class_effort]
+        and EFFORT_ORDER[fallback] < EFFORT_ORDER[getattr(args, "task_class_effort_floor", "") or args.task_class_effort]
     ):
         return None, "", "task_class_effort_below_floor", capability_source
     substitution = f"{requested_effort} unavailable (runtime/model capability); used {fallback}"
@@ -1509,6 +1620,7 @@ def resolve(args: argparse.Namespace, catalog: dict[str, Any]) -> int:
     capability_models, capability_error = load_capabilities(
         args.capabilities_file, args.adapter, catalog
     )
+    capability_models = _without_max(capability_models)
     args.capability_models = capability_models
     adapter = catalog["adapters"].get(args.adapter)
     endpoint_profile = getattr(args, "endpoint_profile", {})
@@ -1543,7 +1655,7 @@ def resolve(args: argparse.Namespace, catalog: dict[str, Any]) -> int:
         requested_effort, effort_source = task_class_effort, "task-class"
     else:
         requested_effort = args.effort or model_override_effort or role_effort or {
-            "flagship": "high", "workhorse": "medium", "scout": "low"
+            "principal": "high", "senior": "medium", "junior": "low"
         }[args.alias]
         effort_source = (
             "explicit" if args.effort else
@@ -1564,6 +1676,8 @@ def resolve(args: argparse.Namespace, catalog: dict[str, Any]) -> int:
     if args.task_class:
         base.update({"task_class": args.task_class, "route_source": "task-class",
                      "configured_models": getattr(args, "task_class_configured_models", [])})
+        if getattr(args, "task_class_effort_shift", 0):
+            base["effort_shift"] = args.task_class_effort_shift
     elif args.model_override_tier:
         override_models = args.model_override.get("models", [])
         override_roles = args.model_override.get("roles", [])
@@ -2196,12 +2310,18 @@ def parser() -> argparse.ArgumentParser:
     routes = commands.add_parser(
         "routes", help="print each route pool with live availability",
         description="Print every global route pool (junior, senior, principal, design, writing) with each model's weight, "
-                    "effort band, caveats and live availability.")
+                    "effort band, caveats and live availability. By default available models print in full and the "
+                    "unavailable or cooling ones collapse to a per-pool count line; `--all` lists every entry.")
+    routes.add_argument("--all", action="store_true",
+                        help="print every pool entry, including unavailable and cooling models")
     routes.add_argument("--json", action="store_true", help="print one fabric.routes.v1 JSON document")
     routes.add_argument("--health", action="store_true",
                         help="also print task-class routes and recent route health (the `route health` view)")
+    cooldowns = commands.add_parser("cooldowns", help="show cooldowns for the selected accounts on this host")
+    cooldowns.add_argument("--json", action="store_true")
     reset = commands.add_parser("reset", help="clear cooldowns: all, one adapter, or adapter/model")
     reset.add_argument("selector", nargs="?", help="adapter or adapter/model; omit to clear every cooldown")
+    reset.add_argument("--account", help="clear only this account on this host")
     reset.add_argument("--json", action="store_true")
     pick = commands.add_parser("pick", help="pick models from route pools; JSON requests on stdin")
     pick.add_argument("--seed", type=int, help=argparse.SUPPRESS)
@@ -2216,7 +2336,8 @@ def _router() -> Any:
 
 
 def _fabric_records() -> Any:
-    path = PRODUCT_ROOT / "skills" / "orchestrate" / "scripts" / "fabric_records.py"
+    # Load code beside this router, even when its catalogue comes from an overlay.
+    path = Path(__file__).resolve().parents[1] / "skills" / "orchestrate" / "scripts" / "fabric_records.py"
     spec = importlib.util.spec_from_file_location(
         "provenant_fabric_records", path, submodule_search_locations=[str(path.parent)]
     )
@@ -2254,10 +2375,44 @@ def route_pick(requests: Any, seed: int | None = None) -> dict[str, Any]:
 
 
 def main(argv: list[str] | None = None) -> int:
+    try:
+        return _main(argv)
+    except _pools.RenamedNameError as exc:
+        print(f"model-route: {exc}", file=sys.stderr)
+        return 2
+
+
+def _main(argv: list[str] | None = None) -> int:
+    argv = list(sys.argv[1:] if argv is None else argv)
     argument_parser = parser()
+    subcommands = next(action.choices for action in argument_parser._actions
+                       if isinstance(action, argparse._SubParsersAction))
+    if argv and not argv[0].startswith("-") and argv[0] not in subcommands:
+        result = route_pick([{"route": argv[0]}])
+        pick_result = result.get("results", [{}])[0]
+        if pick_result.get("status") == "ok":
+            picks = pick_result.get("picks", [])
+            quota_states = _quota_states()
+            for pick in picks:
+                quota = quota_states.get(pick["adapter"])
+                if quota:
+                    pick["quota"] = {key: quota[key] for key in
+                                      ("account", "state", "summary", "observed_at") if key in quota}
+                    if quota.get("state") in ("deficit", "credit_only"):
+                        pick_result.setdefault("warnings", []).append(
+                            f"{pick['adapter']} quota: {quota['summary']}"
+                        )
+        print(json.dumps(result, sort_keys=True))
+        return 0 if pick_result.get("status") == "ok" else 2
     args = argument_parser.parse_args(argv)
-    if isinstance(getattr(args, "alias", None), str) and args.alias.casefold() in TIER_ALIASES:
-        args.alias = TIER_ALIASES[args.alias.casefold()]
+    renamed = _pools.RENAMED_TIERS.get(str(getattr(args, "alias", "") or "").casefold())
+    if renamed:
+        print(f"model-route: alias '{args.alias}' was renamed to '{renamed}'; fix: pass {renamed}", file=sys.stderr)
+        return 2
+    if isinstance(getattr(args, "alias", None), str) and args.alias.casefold() in ALIAS_ORDER:
+        args.alias = args.alias.casefold()
+    if str(getattr(args, "effort", "") or "").casefold() == "max" and args.command in {"resolve", "select"}:
+        return emit(_max_retired(), 2)
     if args.command == "select":
         return _preferences.select(args, TASK_CLASS_POLICY, ALIAS_ORDER, EFFORT_ORDER)
     if args.command == "snapshot":
@@ -2278,14 +2433,18 @@ def main(argv: list[str] | None = None) -> int:
         if args.json:
             print(json.dumps(document, sort_keys=True))
         else:
-            print(_pools.render(document))
+            print(_pools.render(document, full=args.all))
             if args.health:
                 print("\ntask-class routes and recent health (route health --json):")
                 print(json.dumps(document["health"], indent=2, sort_keys=True))
         return 0
+    if args.command == "cooldowns":
+        record = {"schema": "fabric.cooldowns.active.v1", "cooldowns": _fabric_records().read_cooldowns()}
+        print(json.dumps(record, sort_keys=True) if args.json else json.dumps(record, indent=2, sort_keys=True))
+        return 0
     if args.command == "reset":
         try:
-            removed = _fabric_records().clear_cooldowns(args.selector)
+            removed = _fabric_records().clear_cooldowns(args.selector, account=args.account)
         except ValueError as exc:
             print(f"model-route reset: {exc}", file=sys.stderr)
             return 2
@@ -2307,6 +2466,8 @@ def main(argv: list[str] | None = None) -> int:
         return code
     snapshot = catalogue_snapshot(Path(args.catalog) if args.catalog else None)
     catalog = snapshot["catalogue"]
+    if getattr(args, "available_effort", None):
+        args.available_effort = _without_max({"efforts": list(args.available_effort)})["efforts"]
     global ROUTE_WARNINGS
     ROUTE_WARNINGS = ([
         "routing catalogue was stale; resolved against the fresh product snapshot; "
@@ -2316,7 +2477,7 @@ def main(argv: list[str] | None = None) -> int:
         # cf_dispatch defaults an alias beside a named model; that is not the caller's.
         args.alias_supplied = bool(args.alias) and os.environ.get("FABRIC_ALIAS_IMPLIED") != "1"
         if args.endpoint and args.model and not args.alias:
-            args.alias = "workhorse"
+            args.alias = "senior"
         ordinary_name = args.alias and args.alias not in ALIAS_ORDER
         ordinary_model = args.model and not args.alias
         ordinary_unknown = args.model and args.alias and not infer_family(args.model, catalog)
@@ -2366,6 +2527,8 @@ def main(argv: list[str] | None = None) -> int:
             return emit(record, code)
 
         args.task_class_effort = ""
+        args.task_class_effort_floor = ""
+        args.task_class_effort_shift = 0
         args.model_override = {}
         args.endpoint_profile = {}
         if not args.alias and not args.task_class:
@@ -2488,7 +2651,7 @@ def main(argv: list[str] | None = None) -> int:
                     or any(not isinstance(model, str) or not model.strip() for model in configured_models)
                     or len(set(configured_models)) != len(configured_models)):
                 return reject("task_class_config_invalid", alias=route_alias, effort=route_effort)
-            resolved_models = []
+            resolved_models, resolved_entries = [], []
             for configured_model in configured_models:
                 entry, _ = _registered_match(args.adapter, configured_model, catalog)
                 if (entry is None or configured_model != entry["id"]
@@ -2496,6 +2659,7 @@ def main(argv: list[str] | None = None) -> int:
                         or route_effort not in entry.get("efforts", [])):
                     return reject("task_class_config_invalid", alias=route_alias, effort=route_effort)
                 resolved_models.append(entry["id"])
+                resolved_entries.append(entry)
             args.task_class_configured_models = list(resolved_models)
             if args.task_class in {"review", "critical-review", "second-opinion"}:
                 failed_models = _recent_failed_task_class_models(args.adapter, args.task_class)
@@ -2505,8 +2669,11 @@ def main(argv: list[str] | None = None) -> int:
                     resolved_models = [alternate] if alternate else []
             args.task_class_models = resolved_models
             args.alias = route_alias
-            args.task_class_effort = route_effort
-        elif args.alias not in {"flagship", "workhorse", "scout"}:
+            args.task_class_effort, args.task_class_effort_shift = shifted_task_class_effort(
+                args.task_class, route_effort, policy["minimum_effort"], resolved_entries)
+            # A runtime fallback may not go below the lower of the configured and shifted effort.
+            args.task_class_effort_floor = min(route_effort, args.task_class_effort, key=EFFORT_ORDER.__getitem__)
+        elif args.alias not in {"principal", "senior", "junior"}:
             return reject("unknown_alias")
         if args.effort and args.effort not in EFFORT_ORDER:
             if args.require_distinct or args.model_override_tier or args.task_class:

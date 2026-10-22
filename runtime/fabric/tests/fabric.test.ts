@@ -161,6 +161,29 @@ describe("work ownership", () => {
     } finally { db.close(); }
   });
 
+  it("refuses a release that waits on the write lock past expiry", async () => {
+    const store = openStore(), who = agent("alice"), sha = "a".repeat(40);
+    announce(store, "alice");
+    const lease = store.acquireLanding(who, "session-a", sha, 2);
+    const holdUntil = lease.expiresAtMs + 300;
+    const betterSqlite = createRequire(import.meta.url).resolve("better-sqlite3");
+    const holder = spawn(process.execPath, ["-e", `
+      const Database = require(${JSON.stringify(betterSqlite)});
+      const db = new Database(${JSON.stringify(databasePath)});
+      db.exec("BEGIN IMMEDIATE");
+      console.log("locked");
+      while (Date.now() < ${holdUntil}) {}
+      db.exec("COMMIT");
+      db.close();`], { stdio: ["ignore", "pipe", "inherit"] });
+    const exited = new Promise((done) => holder.on("exit", done));
+    await new Promise<void>((done) => holder.stdout!.once("data", () => done()));
+    expect(Date.now()).toBeLessThan(lease.expiresAtMs);
+    expect(store.tryReleaseLanding(who, "session-a", lease.generation)).toEqual({ released: false, reason: "expired" });
+    expect(Date.now()).toBeGreaterThanOrEqual(holdUntil);
+    await exited;
+    expect(() => store.releaseLanding(who, "session-a", lease.generation)).toThrow(/stale/);
+  });
+
   it("reports a completed push when lease release fails", () => {
     const store = openStore(), who = agent("alice"), sha = "a".repeat(40);
     announce(store, "alice");
@@ -290,7 +313,7 @@ describe("work ownership", () => {
     }
   }, 15_000);
 
-  it("pushes the leased head from the cwd repository despite Git redirects", () => {
+  it.each(["none", "benign", "protected", "released"])("checks the leased head despite Git redirects (late commit: %s)", (late) => {
     const work = join(temporaryDirectory, "landing-work"), bare = join(temporaryDirectory, "landing-remote.git");
     mkdirSync(work);
     const git = (cwd: string, ...args: string[]) => execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
@@ -306,16 +329,36 @@ describe("work ownership", () => {
     const base = git(work, "rev-parse", "HEAD");
     writeFileSync(join(work, "claim.txt"), "second\n");
     git(work, "commit", "-am", "second");
+    if (late !== "none") {
+      const target = late === "benign" ? "claim.txt" : ".agents/late.md";
+      if (late !== "benign") mkdirSync(join(work, ".agents"));
+      writeFileSync(join(work, target), "late edit\n");
+      git(work, "add", target);
+      git(work, "commit", "-m", "late commit");
+    }
     const head = git(work, "rev-parse", "HEAD");
+    if (late === "released") {
+      execFileSync(process.env.HARNESS_PYTHON ?? "python3", [join(repositoryRoot, "skills/orchestrate/scripts/lane_protection.py"),
+        "--cwd", work, "--release", "--tip", head, "--actor", "chair", "--reason", "reviewed"]);
+    }
     const store = openStore();
     const who = identify({ AGENT_FABRIC_SEAT: "codex", AGENT_FABRIC_LABEL: "cli-reviewer" }, work);
     store.announce(who);
     const lease = store.acquireLanding(who, "landing-session", base, 60);
     const pushed = runCli(["landing-push", "landing-session", String(lease.generation), "main", "--label", "cli-reviewer"],
-      temporaryDirectory, { GIT_DIR: bare, AGENT_FABRIC_SEAT: "agent", AGENT_FABRIC_LABEL: "other-seat", GIT_NAMESPACE: "shadow" }, work);
-    expect(pushed.status, pushed.stderr).toBe(0);
-    expect(git(bare, "rev-parse", "refs/heads/main")).toBe(head);
-    expect(store.landingLease(who.project)).toBeNull();
+      temporaryDirectory, { GIT_DIR: bare, AGENT_FABRIC_SEAT: "agent", AGENT_FABRIC_LABEL: "other-seat", GIT_NAMESPACE: "shadow",
+        AGENT_FABRIC_PRODUCT_ROOT: repositoryRoot }, work);
+    if (late === "protected") {
+      expect(pushed.status).toBe(1);
+      expect(pushed.stderr).toContain("protected_instructions_changed");
+      expect(git(bare, "rev-parse", "refs/heads/main")).toBe(base);
+      expect(git(work, "rev-parse", "HEAD")).toBe(head);
+      expect(store.landingLease(who.project)).not.toBeNull();
+    } else {
+      expect(pushed.status, pushed.stderr).toBe(0);
+      expect(git(bare, "rev-parse", "refs/heads/main")).toBe(head);
+      expect(store.landingLease(who.project)).toBeNull();
+    }
   });
 
   it("removes Git configuration redirects from landing commands", () => {
@@ -356,7 +399,8 @@ function statSnapshot(path: string) {
 it("shows help for every CLI command before validating arguments or opening the store", () => {
   const commands = ["whoami", "send", "inbox", "ack", "note", "tasks", "task", "claim", "done",
     "activity", "watch", "status", "doctor", "dispatch", "adapters", "lanes", "events",
-    "work-claims", "landing-wait", "landing-push", "session", "cancel", "output", "fetch"];
+    "work-claims", "landing-wait", "landing-push", "landing-acquire", "landing-verify", "landing-release",
+    "landing-status", "session", "cancel", "output", "fetch"];
   for (const command of commands) {
     for (const help of ["--help", "-h"]) {
       const result = spawnSync(resolve(repositoryRoot, "runtime/fabric/bin/fabric"), [command, help], {

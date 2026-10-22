@@ -1,11 +1,11 @@
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { expect, it } from "vitest";
 import { OWNER_RECORD_NAME, terminateRecordedRun, type RecordedRun } from "../src/run-registry.js";
+import { scratchRoot } from "./helpers/temp-root.js";
 
 it("closing a run whose directory was already removed resolves instead of rejecting", async () => {
-  const root = mkdtempSync(join(tmpdir(), "fabric-closure-"));
+  const root = scratchRoot("fabric-closure-");
   const runDir = join(root, "removed-run");
   rmSync(root, { recursive: true, force: true });
   const run = {
@@ -19,7 +19,7 @@ it("closing a run whose directory was already removed resolves instead of reject
 });
 
 it("a closure write that fails for another reason keeps the owner record", async () => {
-  const root = mkdtempSync(join(tmpdir(), "fabric-closure-"));
+  const root = scratchRoot("fabric-closure-");
   const runDir = join(root, "blocked-run");
   mkdirSync(runDir);
   writeFileSync(join(runDir, OWNER_RECORD_NAME), "{}\n");

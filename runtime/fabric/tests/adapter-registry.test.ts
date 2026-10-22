@@ -1,6 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { cpSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -11,6 +10,7 @@ import { DISPATCH_ADAPTERS, dispatchConfiguredBatch, dispatchConfiguredProvider 
 import { catalogueSnapshot } from "../src/catalogue.js";
 import { normaliseRoute } from "../src/execution-input.js";
 import type { Identity } from "../src/identity.js";
+import { scratchRoot } from "./helpers/temp-root.js";
 
 const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
 const catalogue = JSON.parse(
@@ -22,14 +22,14 @@ const compatibility = parseYaml(
   dispatch_registry?: Record<string, { dispatch?: string; write_modes?: string[] }>;
 };
 const dispatcher = readFileSync(
-  join(repositoryRoot, "skills", "orchestrate", "scripts", "cf_dispatch.sh"),
+  join(repositoryRoot, "skills", "orchestrate", "scripts", "cf_dispatch.py"),
   "utf8",
 );
 
 function shellList(name: string): string[] {
-  const match = new RegExp(`^${name}="([^"]*)"$`, "mu").exec(dispatcher);
-  if (match === null) throw new Error(`cf_dispatch.sh declares no ${name}`);
-  return match[1]!.split(/\s+/u).filter((entry) => entry.length > 0).sort();
+  const match = new RegExp(`^${name} = \\(([^)]*)\\)$`, "mu").exec(dispatcher);
+  if (match === null) throw new Error(`cf_dispatch.py declares no ${name}`);
+  return [...match[1]!.matchAll(/"([^"]+)"/gu)].map((entry) => entry[1]!).sort();
 }
 
 function registryAdapters(state: string): string[] {
@@ -124,7 +124,7 @@ describe("adapter rejection", () => {
   let identity: Identity;
 
   beforeEach(() => {
-    workspace = mkdtempSync(join(tmpdir(), "fabric-adapter-"));
+    workspace = scratchRoot("fabric-adapter-");
     identity = { project: workspace, cwd: workspace, agentId: "test-agent", provider: "claude" };
   });
 
@@ -210,13 +210,13 @@ describe("adapter rejection", () => {
 
 describe("instance catalogue", () => {
   it("deep merges live instance aliases and preserves the product on malformed overlay", () => {
-    const root = mkdtempSync(join(tmpdir(), "fabric-catalogue-"));
+    const root = scratchRoot("fabric-catalogue-");
     try {
       mkdirSync(join(root, "config"));
       const path = join(root, "config", "model-routing.json");
       const routing = JSON.parse(readFileSync(join(repositoryRoot, "config", "model-routing.json"), "utf8"));
-      const expectedCodexModel = routing.families.openai.aliases.workhorse[0];
-      routing.families.openai.aliases.workhorse = ["custom-luna"];
+      const expectedCodexModel = routing.families.openai.aliases.senior[0];
+      routing.families.openai.aliases.senior = ["custom-luna"];
       const expectedOpenCodeModel = routing.adapters.opencode.models[0].id;
       writeFileSync(path, JSON.stringify(routing));
       const env = { AGENT_FABRIC_INSTANCE_ROOT: root };

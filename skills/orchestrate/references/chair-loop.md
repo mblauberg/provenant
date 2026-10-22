@@ -16,7 +16,7 @@ wake, in this order:
    requests, free memory. Evidence wins; correct the state file.
 2. **Land** what is ready under the repository's merge workflow, then prune.
 3. **Review** finished lanes; adjudicate returned reviews.
-   A `quarantined` lane kept its result but not its `.agents/` edits: review the listed `protected.patch`, apply it deliberately in a worktree if adopted; `landable: false` is advisory, so the chair must hold the lane. A `failed` lane with a restore fix still carries the edits: restore `.agents/` to the start commit first.
+   A `quarantined` lane kept its result but not its `.agents/` edits: review the listed `protected.patch`, apply it deliberately in a worktree if adopted. Its history still holds the edit commit, so claim verification and Fabric landing refuse it until the chair rewrites the lane without that commit or releases the reviewed tip (see `orchestrate`). A `failed` lane with a restore fix still carries the edits: restore `.agents/` to the start commit first.
 4. **Refill** from the frontier up to the resource budget.
 5. **Tracker:** make issues and the board match what started and landed, when
    tracker writes are authorised — following `tracker`'s filing, linking and
@@ -74,8 +74,9 @@ After dispatch, keep one `provenant lanes --wait` running in the background.
 Without `--all` it exits at the first finisher, so the chair acts on each lane
 as it lands and re-arms; the next wait reports any lane that finished in
 between. Add `--all --timeout N` only to hold the report until a whole fan-out
-is terminal. Do not start one wait per lane. `provenant lanes` is
-the source of truth after compaction or restart. Use `provenant events --follow`
+is terminal. Add `--summary` for a bounded one-line-per-lane report. Read one lane's status and result tail with `provenant run show <run-id|task-id> --tail N`. For CI, `provenant pr checks <pr> --wait` exits 0 green, 1 failed, 4 when the required set is unreadable (not success), 124 on timeout. Do not start one wait per lane. `provenant lanes` is
+the source of truth after compaction or restart (by default showing active
+lanes plus the 5 most recent terminal ones, with `--all` listing all lanes). Use `provenant events --follow`
 only for foreground streaming; it replays retained events without a cursor and
 does not exit on its own.
 

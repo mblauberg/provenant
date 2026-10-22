@@ -115,7 +115,7 @@ def route_receipt(
         "catalog_model": "",
         "model_family": family,
         "provider_family": family,
-        "route_alias": "flagship",
+        "route_alias": "principal",
         "cross_family": False,
         "certification_eligible": True,
     }
@@ -913,30 +913,30 @@ def test_validator_rechecks_cross_family_route_lineage_regardless_of_role(tmp_pa
         validator.validate(receipt, ROOT, workspace_root=tmp_path, verify_hashes=True)
 
 
-@pytest.mark.parametrize("provider_family", [None, "", "   "])
-def test_review_add_requires_non_blank_route_provider_family(tmp_path, provider_family):
+@pytest.mark.parametrize(
+    ("role", "provider_family", "cross_family", "error"),
+    [
+        pytest.param("targeted", "anthropic", False, "cross-family route receipt", id="targeted-needs-cross-family-proof"),
+        pytest.param("other-primary", "anthropic", False, "cross-family route receipt", id="other-primary-needs-cross-family-proof"),
+        pytest.param("distinct-family", "anthropic", False, "cross-family route receipt", id="distinct-family-needs-cross-family-proof"),
+        pytest.param("targeted", None, True, "identity does not match", id="missing-provider-family"),
+        pytest.param("targeted", "", True, "identity does not match", id="empty-provider-family"),
+        pytest.param("targeted", "   ", True, "identity does not match", id="blank-provider-family"),
+    ],
+)
+def test_review_add_rejects_invalid_cross_family_route_for_any_role(
+    tmp_path, role, provider_family, cross_family, error,
+):
     run_dir = initialise(tmp_path)
     (tmp_path / "review.md").write_text("# Review\n\nClean.\n")
     route = route_receipt(family="anthropic")
-    route.update({"provider_family": provider_family, "cross_family": True})
+    route.update({"provider_family": provider_family, "cross_family": cross_family})
     (tmp_path / "route.json").write_text(json.dumps(route))
-
-    rejected = run_cli(tmp_path, *review_args(run_dir, family="anthropic"))
-
-    assert rejected.returncode != 0
-    assert "identity does not match" in rejected.stderr
-
-
-@pytest.mark.parametrize("role", ["targeted", "other-primary", "distinct-family"])
-def test_review_add_checks_cross_family_route_regardless_of_role(tmp_path, role):
-    run_dir = initialise(tmp_path)
-    (tmp_path / "review.md").write_text("# Review\n\nClean.\n")
-    (tmp_path / "route.json").write_text(json.dumps(route_receipt(family="anthropic")))
 
     rejected = run_cli(tmp_path, *review_args(run_dir, role=role, family="anthropic"))
 
     assert rejected.returncode != 0
-    assert "cross-family route receipt" in rejected.stderr
+    assert error in rejected.stderr
     assert json.loads((run_dir / "RUN.json").read_text())["reviews"] == []
 
 

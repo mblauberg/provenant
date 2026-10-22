@@ -61,7 +61,7 @@ def test_routing_drift_names_product_keys_and_ignores_instance_additions(tmp_pat
     source = product / "config/model-routing.json"
     source.write_text(json.dumps({
         "catalog_date": "2026-09-23", "task_class_routes": {"review": {"alias": "new"}},
-        "families": {"openai": {"aliases": {"scout": ["new", "old"]}}},
+        "families": {"openai": {"aliases": {"junior": ["new", "old"]}}},
         "adapters": {"opencode": {"endpoint_provider": "opencode"}},
         "endpoints": {"new": {"base_url": "https://example.invalid"}},
         "model_patterns": [{"pattern": "new", "family": "openai"}],
@@ -72,7 +72,7 @@ def test_routing_drift_names_product_keys_and_ignores_instance_additions(tmp_pat
     old = json.loads(target.read_text())
     old["catalog_date"] = "2026-09-01"
     old["task_class_routes"]["review"]["alias"] = "old"
-    old["families"]["openai"]["aliases"]["scout"] = ["old", "custom"]
+    old["families"]["openai"]["aliases"]["junior"] = ["old", "custom"]
     old["adapters"]["opencode"]["endpoint_provider"] = "codex"
     old["endpoints"]["new"]["base_url"] = "https://old.invalid"
     old["endpoints"]["custom"] = {"base_url": "https://custom.invalid"}
@@ -86,7 +86,7 @@ def test_routing_drift_names_product_keys_and_ignores_instance_additions(tmp_pat
     changed = json.loads(source.read_text())
     changed["catalog_date"] = "2026-09-24"
     changed["task_class_routes"]["review"]["alias"] = "latest"
-    changed["families"]["openai"]["aliases"]["scout"] = ["latest"]
+    changed["families"]["openai"]["aliases"]["junior"] = ["latest"]
     changed["adapters"]["opencode"]["endpoint_provider"] = "latest"
     changed["endpoints"]["new"]["base_url"] = "https://latest.invalid"
     changed["model_patterns"] = [{"pattern": "latest", "family": "openai"}]
@@ -95,7 +95,7 @@ def test_routing_drift_names_product_keys_and_ignores_instance_additions(tmp_pat
     drift = json.loads(result.stdout)["routing_drift"]
     assert "catalog_date" in drift
     assert "task_class_routes.review.alias" in drift
-    assert "families.openai.aliases.scout" in drift
+    assert "families.openai.aliases.junior" in drift
     assert "adapters.opencode.endpoint_provider" in drift
     assert "endpoints.new.base_url" in drift
     assert "endpoints.custom" not in " ".join(drift)
@@ -113,7 +113,7 @@ def test_explicit_routing_refresh_backs_up_and_preserves_instance_additions(tmp_
     product = build_product(tmp_path)
     source = product / "config/model-routing.json"
     source.write_text(json.dumps({
-        "catalog_date": "2026-09-23", "families": {"openai": {"aliases": {"scout": ["new"]}}},
+        "catalog_date": "2026-09-23", "families": {"openai": {"aliases": {"junior": ["new"]}}},
         "adapters": {"opencode": {"endpoint_provider": "opencode"}},
         "endpoints": {"new": {"base_url": "https://new.invalid"}},
         "model_patterns": [{"pattern": "new", "family": "openai"}],
@@ -122,7 +122,7 @@ def test_explicit_routing_refresh_backs_up_and_preserves_instance_additions(tmp_
     seed(product, instance_root)
     target = instance_root / "config/model-routing.json"
     old = json.loads(target.read_text())
-    old["families"]["openai"]["aliases"]["scout"] = ["old", "custom"]
+    old["families"]["openai"]["aliases"]["junior"] = ["old", "custom"]
     old["adapters"]["custom"] = {"endpoint_provider": "custom"}
     old["endpoints"]["custom"] = {"base_url": "https://custom.invalid"}
     old["model_patterns"].append({"pattern": "custom", "family": "custom"})
@@ -130,17 +130,17 @@ def test_explicit_routing_refresh_backs_up_and_preserves_instance_additions(tmp_
     before = target.read_bytes()
 
     product_catalogue = json.loads(source.read_text())
-    product_catalogue["families"]["openai"]["aliases"]["scout"] = ["new", "next"]
+    product_catalogue["families"]["openai"]["aliases"]["junior"] = ["new", "next"]
     source.write_text(json.dumps(product_catalogue))
 
     result = run("refresh-routing", product, instance_root)
     assert result.returncode == 0, result.stderr
     updated = json.loads(target.read_text())
-    assert updated["families"]["openai"]["aliases"]["scout"] == ["new", "next"]
+    assert updated["families"]["openai"]["aliases"]["junior"] == ["new", "next"]
     assert updated["adapters"]["custom"] == old["adapters"]["custom"]
     assert updated["endpoints"]["custom"] == old["endpoints"]["custom"]
     assert updated["model_patterns"][-1] == old["model_patterns"][-1]
-    assert "families.openai.aliases.scout" in json.loads(result.stdout)["routing"]["conflicts"]
+    assert "families.openai.aliases.junior" in json.loads(result.stdout)["routing"]["conflicts"]
     backups = list(target.parent.glob("model-routing.json.bak-*"))
     assert len(backups) == 1
     assert backups[0].read_bytes() == before
@@ -152,7 +152,7 @@ def test_refresh_removes_retired_product_keys_and_preserves_unchanged_instance_e
     source = product / "config/model-routing.json"
     source.write_text(json.dumps({
         "schema_version": 1,
-        "families": {"openai": {"aliases": {"scout": ["old", "kept"]}}},
+        "families": {"openai": {"aliases": {"junior": ["old", "kept"]}}},
         "adapters": {"retired": {"model_patterns": ["old"]}, "kept": {"field": "product"}},
         "model_patterns": [{"pattern": "old"}, {"pattern": "kept"}],
     }))
@@ -161,7 +161,7 @@ def test_refresh_removes_retired_product_keys_and_preserves_unchanged_instance_e
     target = root / "config/model-routing.json"
     installed = json.loads(target.read_text())
     installed["adapters"]["kept"]["field"] = "user"
-    installed["families"]["openai"]["aliases"]["scout"] = ["kept", "old"]
+    installed["families"]["openai"]["aliases"]["junior"] = ["kept", "old"]
     target.write_text(json.dumps(installed))
     new_product = json.loads(source.read_text())
     del new_product["adapters"]["retired"]
@@ -180,7 +180,7 @@ def test_refresh_removes_retired_product_keys_and_preserves_unchanged_instance_e
     assert "retired" not in merged["adapters"]
     assert merged["model_patterns"] == [{"pattern": "kept"}]
     assert merged["adapters"]["kept"]["field"] == "user"
-    assert merged["families"]["openai"]["aliases"]["scout"] == ["kept", "old"]
+    assert merged["families"]["openai"]["aliases"]["junior"] == ["kept", "old"]
     assert merged["schema_version"] == 2
     assert "schema_version" in result.stdout
     assert "backup=" in result.stdout
@@ -793,3 +793,134 @@ def test_a_symlinked_pointer_directory_is_refused_by_the_seeder(tmp_path):
     assert "escapes the instance root" in result.stderr
     assert "Traceback" not in result.stderr
     assert list(outside.iterdir()) == []
+
+
+OLD_NAMES = {"junior": "scout", "senior": "workhorse", "principal": "flagship"}
+
+
+def legacy_copy(document):
+    """The shipped catalogue in the shape of an old install: adapter aliases and synonyms under the retired names."""
+    document = json.loads(json.dumps(document))
+    for section in ("families", "adapters"):
+        for entry in document.get(section, {}).values():
+            entry["aliases"] = {OLD_NAMES.get(key, key): value for key, value in entry.get("aliases", {}).items()}
+            for key in ("role_overrides", "role_effort_defaults"):
+                entry[key] = {role: {OLD_NAMES.get(a, a): value for a, value in roles.items()}
+                              for role, roles in entry.get(key, {}).items()}
+            for override in entry.get("risk_tier_overrides", {}).values():
+                override["alias"] = OLD_NAMES.get(override.get("alias"), override.get("alias"))
+    for route in document["task_class_routes"].values():
+        route["alias"] = OLD_NAMES.get(route["alias"], route["alias"])
+    document["route_synonyms"].update({"flagship": "principal", "workhorse": "senior", "strong": "senior",
+                                       "review": "senior", "bulk": "junior", "scout": "junior"})
+    return document
+
+
+@pytest.mark.parametrize("with_base", [False, True])
+def test_refresh_migrates_retired_tier_names_and_the_router_accepts_the_result(tmp_path, with_base):
+    product = tmp_path / "product"
+    (product / "config").mkdir(parents=True)
+    shipped = json.loads((ROOT / "config" / "model-routing.json").read_text())
+    (product / "config" / "model-routing.json").write_text(json.dumps(shipped))
+    (product / "config" / "model-preferences.json").write_text("{}\n")
+    (product / "AGENTS.md").write_text("# doctrine\n")
+    (product / "package.json").write_text(json.dumps({"version": "1.2.3"}) + "\n")
+    root = tmp_path / "instance"
+    seed(product, root)
+    legacy = legacy_copy(shipped)
+    legacy["families"]["openai"]["aliases"]["flagship"] = ["custom-astra"]
+    target = root / "config/model-routing.json"
+    target.write_text(json.dumps(legacy))
+    base = root / "config/.model-routing.base.json"
+    if with_base:
+        base.write_text(json.dumps(legacy_copy(shipped)))
+    else:
+        base.unlink()
+
+    result = run("refresh-routing", product, root, "--summary")
+
+    assert result.returncode == 0, result.stderr
+    assert "routing migrated retired tier name=families.openai.aliases.flagship -> principal" in result.stdout
+    refreshed = json.loads(target.read_text())
+    assert refreshed["families"]["openai"]["aliases"]["principal"] == ["custom-astra"], "the edit is kept"
+    assert "flagship" not in json.dumps(refreshed) and "scout" not in json.dumps(refreshed)
+    env = {**os.environ, "AGENT_FABRIC_PRODUCT_ROOT": str(ROOT), "AGENT_FABRIC_INSTANCE_ROOT": str(root),
+           "AGENT_FABRIC_STATE_ROOT": str(tmp_path / "state")}
+    routes = subprocess.run([sys.executable, str(ROOT / "scripts" / "model_route.py"), "routes", "--json"],
+                            text=True, capture_output=True, env=env, check=False)
+    assert routes.returncode == 0, routes.stderr
+    assert instance.routing_drift(product, root) == []
+
+
+def _legacy_instance(tmp_path, with_base, edit):
+    product = tmp_path / "product"
+    (product / "config").mkdir(parents=True)
+    shipped = json.loads((ROOT / "config" / "model-routing.json").read_text())
+    (product / "config" / "model-routing.json").write_text(json.dumps(shipped))
+    (product / "config" / "model-preferences.json").write_text("{}\n")
+    (product / "AGENTS.md").write_text("# doctrine\n")
+    (product / "package.json").write_text(json.dumps({"version": "1.2.3"}) + "\n")
+    root = tmp_path / "instance"
+    seed(product, root)
+    legacy = legacy_copy(shipped)
+    edit(legacy)
+    target = root / "config/model-routing.json"
+    target.write_text(json.dumps(legacy))
+    base = root / "config/.model-routing.base.json"
+    if with_base:
+        base.write_text(json.dumps(legacy_copy(shipped)))
+    else:
+        base.unlink()
+    return product, root, target
+
+
+@pytest.mark.parametrize("with_base", [False, True])
+def test_refresh_stops_when_old_and_new_keys_hold_different_values(tmp_path, with_base):
+    def edit(doc):
+        aliases = doc["families"]["openai"]["aliases"]
+        aliases["flagship"] = ["gpt-6-luna"]
+        aliases["principal"] = ["gpt-6-astra"]
+    product, root, target = _legacy_instance(tmp_path, with_base, edit)
+    before = target.read_bytes()
+
+    result = run("refresh-routing", product, root, "--summary")
+
+    assert result.returncode != 0
+    message = result.stdout + result.stderr
+    assert "flagship" in message and "principal" in message
+    assert "gpt-6-luna" in message and "gpt-6-astra" in message
+    assert "kept" not in message
+    assert target.read_bytes() == before
+
+
+def test_refresh_merges_old_and_new_keys_quietly_when_values_are_equal(tmp_path):
+    def edit(doc):
+        aliases = doc["families"]["openai"]["aliases"]
+        aliases["flagship"] = ["gpt-6-astra"]
+        aliases["principal"] = ["gpt-6-astra"]
+    product, root, target = _legacy_instance(tmp_path, False, edit)
+
+    result = run("refresh-routing", product, root, "--summary")
+
+    assert result.returncode == 0, result.stderr
+    assert json.loads(target.read_text())["families"]["openai"]["aliases"]["principal"] == ["gpt-6-astra"]
+
+
+def test_refresh_without_a_base_moves_edited_route_pools_to_the_new_name(tmp_path):
+    edited = {}
+
+    def edit(doc):
+        pool = doc["routes"].pop("senior")
+        pool.append({"model": "custom-extra", "weight": "high"})
+        pool[0]["weight"] = "off"
+        doc["routes"]["workhorse"] = pool
+        edited["pool"] = json.loads(json.dumps(pool))
+    product, root, target = _legacy_instance(tmp_path, False, edit)
+
+    result = run("refresh-routing", product, root, "--summary")
+
+    assert result.returncode == 0, result.stderr
+    refreshed = json.loads(target.read_text())
+    assert "workhorse" not in refreshed["routes"]
+    assert refreshed["routes"]["senior"] == edited["pool"], "the user's pool edits move with the name"
+    assert instance.routing_drift(product, root) == []

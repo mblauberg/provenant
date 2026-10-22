@@ -23,7 +23,7 @@ import time
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, wait
 from pathlib import Path
-from typing import Any
+from typing import Any, NoReturn
 
 # Two import roots, both derived from this file so the repo and an installed
 # instance behave the same: the shared library one level above this skill, and
@@ -34,7 +34,8 @@ from typing import Any
 SCRIPT_ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(SCRIPT_ROOT.parents[1]))
 sys.path.insert(0, str(SCRIPT_ROOT))
-from _shared.bounded_process import stop_process_group
+from _shared.bounded_process import BudgetArgumentParser, stop_process_group
+from _shared import harness_profile
 from layout import contains_run
 from dispatch_run import (
     close_mcp_run,
@@ -801,7 +802,9 @@ def batch(args: argparse.Namespace) -> int:
             raise BatchInputError(f"concurrency must be between 1 and {MAX_CONCURRENCY}")
         run_dir = _validate_run_dir(args.run_dir)
         tasks, _source_manifest, source_bytes = _load_manifest(args.manifest, args.concurrency, run_dir)
-        args.concurrency = min(args.concurrency, len(tasks))
+        # The profile's lanes.max_concurrency caps, and never raises, the requested width.
+        cap = harness_profile.value("lanes.max_concurrency", MAX_CONCURRENCY)
+        args.concurrency = min(args.concurrency, len(tasks), cap)
         if not DISPATCH_RUN.is_file() or not os.access(DISPATCH_RUN, os.X_OK):
             raise BatchInputError(f"dispatch owner is unavailable: {DISPATCH_RUN}")
     except BatchInputError as exc:
@@ -839,8 +842,8 @@ def batch(args: argparse.Namespace) -> int:
                 error, fix = "secret_detected", scan.fix()
             else:
                 continue
-        except OSError:
-            error, fix = "secret_scan_unavailable", "Make task inputs readable for the secret scan."
+        except (OSError, subprocess.SubprocessError) as exc:
+            error, fix = "secret_scan_unavailable", f"Make task inputs readable for the secret scan: {exc}"
         if error:
             rejected[task["id"]] = {
                 "task_id": task["id"], "status": "rejected", "outcome": "preflight_rejected",
@@ -889,9 +892,10 @@ def batch(args: argparse.Namespace) -> int:
 
 
 def parser() -> argparse.ArgumentParser:
-    root = argparse.ArgumentParser(
+    root = BudgetArgumentParser(
+        command_name="batch",
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""Manifest schema v1: {\"schema_version\":1,\"tasks\":[{\"id\":\"task-1\",\"prompt_file\":\"prompt.md\",\"adapter\":\"codex\",\"alias\":\"scout\",\"role\":\"worker\"}]}.
+        epilog="""Manifest schema v1: {\"schema_version\":1,\"tasks\":[{\"id\":\"task-1\",\"prompt_file\":\"prompt.md\",\"adapter\":\"codex\",\"alias\":\"junior\",\"role\":\"worker\"}]}.
 Each task uses ordinary intent and exactly one of prompt_file/prompt plus one
 route selector (alias, task_class or model). Tasks default to read_only access;
 a task may set access_mode worktree_write with a worktree it owns exclusively, and

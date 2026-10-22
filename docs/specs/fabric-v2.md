@@ -24,7 +24,7 @@ A named session is an alias over that resume path ([ADR 0022](../adr/0022-thin-f
 
 Dispatch scans prompt text, prompt files and eligible regular files in `add_dirs` before provider launch. A high-signal secret finding rejects with `error: secret_detected` and a one-line removal or `allow_secrets: true` fix. The boolean override applies at the top level or per task, and an attempt records the override and finding names. Directory scans read each file whole and skip Git-ignored files, `.git`, `node_modules` and other vendored or build directories, binary files (a NUL in the first 8,000 bytes), and directories listed under `secret_scan_exclude` in `<workspace_root>/.agents/fabric-policy.json` (each with a warning); an entry must resolve, links included, inside the workspace root. A scan the budget cannot finish never passes in part: past 10,000 files or 64 MiB the dispatch rejects with `secret_scan_budget_exceeded`, naming the deepest subtree holding at least half the scanned bytes, else the largest top-level one. The same policy's `dispatch_defaults` may set `add_dirs`, positive `timeout_seconds` and boolean `network` (Codex routes only); an explicit dispatch, batch or task field wins, and an invalid key warns and is ignored.
 
-A run has `queued`, `running` and attempt-terminal states. Terminal statuses are `ok`, `quarantined`, `partial`, `failed`, `usage_limited`, `rate_limited`, `auth_required`, `model_unavailable`, `permission_blocked`, `stalled`, `startup_timeout`, `timed_out`, `cancelled`, `interrupted`, `rejected`, `tool_missing`, and `input_required`. A provider that writes nothing to stdout within `CF_DISPATCH_STARTUP_SECONDS` (default 300) of launch ends as `startup_timeout` with signature `startup_watchdog`, and its process tree is stopped; stderr banners do not count as output, and time queued for memory admission comes before launch. It is retryable, except for a `worktree_write` attempt that was not provably untouched. Such an attempt falls back only when the worktree was clean at launch (`git status --porcelain`) and, at the timeout, has the same HEAD and status. A bounded walk must also find no file or directory, ignored ones included, whose mtime or ctime is at or after one second before launch. The walk skips `.git`, `.agent-run`, `node_modules`, `.venv`, `__pycache__`, `.pytest_cache`, `dist` and `build`. It counts as changed at 200,000 entries, 5 seconds, or an unreadable directory. Otherwise the receipt says to inspect the worktree instead of falling back. Structured provider events take precedence over text signatures. Fallback creates another attempt under the same run id. Alias routes default to fallback through allowed paid non-training routes; an explicit model defaults to no fallback. Free or prompt-training routes require explicit opt-in.
+A run has `queued`, `running` and attempt-terminal states. Terminal statuses are `ok`, `quarantined`, `partial`, `failed`, `usage_limited`, `rate_limited`, `auth_required`, `model_unavailable`, `permission_blocked`, `stalled`, `startup_timeout`, `writer_changed`, `timed_out`, `cancelled`, `interrupted`, `rejected`, `tool_missing`, and `input_required`. A provider that writes nothing to stdout within `CF_DISPATCH_STARTUP_SECONDS` (default 300) of launch ends as `startup_timeout` with signature `startup_watchdog`, and its process tree is stopped; stderr banners do not count as output, and time queued for memory admission comes before launch. It is retryable, except for a `worktree_write` attempt that was not provably untouched. Such an attempt falls back only when the worktree was clean at launch (`git status --porcelain`) and, at the timeout, has the same HEAD and status. A bounded walk must also find no file or directory, ignored ones included, whose mtime or ctime is at or after one second before launch. The walk skips `.git`, `.agent-run`, `node_modules`, `.venv`, `__pycache__`, `.pytest_cache`, `dist` and `build`. It counts as changed at 200,000 entries, 5 seconds, or an unreadable directory. Otherwise the receipt says to inspect the worktree instead of falling back. Structured provider events take precedence over text signatures. Fallback creates another attempt under the same run id. Alias routes default to fallback through allowed paid non-training routes; an explicit model defaults to no fallback. Free or prompt-training routes require explicit opt-in.
 
 Before each new attempt starts its provider, the owner compares available host memory with total physical RAM: free, inactive and speculative pages from macOS `vm_stat` using its reported page size against `sysctl -n hw.memsize`, or Linux `MemAvailable` against `MemTotal`. The default floors are 10% for `worktree_write` and 5% for `read_only`; `<workspace_root>/.agents/fabric-policy.json` may set either value under `memory_floor_percent` to a number from 0 to 100, with 0 disabling that mode's floor. Below the floor, the attempt remains `queued` and is checked every 15 seconds. Owners serialise this decision with a per-user host lock at `$XDG_STATE_HOME/provenant/admission.lock` (default `~/.local/state/provenant/admission.lock`), held until 20 seconds after provider start or attempt end; lock creation failure admits with a warning, while a failed or unknown probe holds and retries. Within a project, queued attempts are admitted in order of queue entry: each queued receipt publishes its `queued_since` time, floor and owner identity, and an attempt yields only to an earlier live waiter whose floor the current reading meets. Waiters republish at least once per poll. Ordering is best effort and liveness wins: a receipt holds no place when its owner has exited, its process start time no longer matches (for example after a reboot), or it has not been republished for three polls (a zombie, suspended or stuck owner) or is dated more than a few seconds ahead of the clock. Receipts are scanned only while the host lock is not held. `fabric_status` and `fabric status` show available percentage, floor and elapsed/total wait, which is bounded by that attempt's `timeout_seconds`. On expiry, the attempt fails with error code `memory_unavailable` and a fix. Queued time does not count against execution timeout; cancellation remains available. The parent also excludes published queued time from its child-owner watchdog. An invalid floor records a failed attempt with a one-line fix. Admission only affects new attempts and does not stop running providers.
 
@@ -67,7 +67,7 @@ On macOS, Codex providers in `read-only` and `workspace-write`, and every provid
 
 A resume reads the prior attempt's context. It adds a digest warning when that context exceeds the effective ceiling (the point in force, else the requested ceiling), or when the size is unknown and the adapter has no ceiling control, for example `! resuming a ~620k-token session; fresh: fabric_dispatch{prompt, handoff:"<run id>"}`. The resume still runs. `handoff: <run id>` (with `task_id` for a batch task) is the cheaper alternative. It starts a fresh run whose prompt is prefixed with the prior task's route line and its result tail, at most 8,000 bytes in total. If the call names no adapter, alias or model, the handoff reuses the prior adapter, model and effort, and a prior writer's mode and worktree. The prior task must be terminal.
 
-Host liveness probes treat permission denial and unavailable start times as unknown, so they exclude orphan reaping. Only a missing process or a verified identity mismatch proves host loss. Signal control verifies each recorded process and its actual group, then signals only the owner and provider PIDs; their owner handles descendants. A partial process census cannot authorise controller group signals. Before signalling, it writes `termination-request.json` with the run token, target provider, source, signal and requester PID. An unexpected provider signal death reports `interrupted` with its numeric signal and name; matching controller telemetry supplies the termination source and requester. The actual OS signal sender remains unknown. Watchdog, cancellation and terminal-grace cleanup keep their own outcomes.
+Host liveness probes treat permission denial and unavailable start times as unknown, so they exclude orphan reaping. Only a missing process or a verified identity mismatch proves host loss. Signal control verifies each recorded process and its actual group, then signals only the owner and provider PIDs; their owner handles descendants. A partial process census cannot authorise controller group signals. Before signalling, it writes `termination-request.json` with the run token, target provider, source, signal and requester PID. An unexpected provider signal death without a valid terminal result reports `failed`; a signal after a valid terminal result retains `interrupted`. Both retain the numeric signal and name; matching controller telemetry supplies the termination source and requester. The actual OS signal sender remains unknown. Watchdog, cancellation and terminal-grace cleanup keep their own outcomes.
 
 A terminal digest appends a compact marker to its Route line: `ctx 212k/1M` when observed, `ctx ~19k` when estimated, `ctx 8%` from a percentage, and nothing when unknown. The stored provenance line stays unmarked for trailers and the index. Brief status rows omit `context`; `detail: "full"` includes it.
 
@@ -80,11 +80,11 @@ An owner writes `fabric.attempt.v1` at `tasks/<id>/attempt-NNN/attempt.json` and
 
 Every attempt has `usage_source`: `observed` when token counters were read from the provider stream, `estimated` when usage was estimated, or `missing` when no token counters were reported. Current adapters do not estimate token usage; `estimated` is reserved for an estimator and preserved when supplied by an adapter. A context percentage alone is `missing` usage. This field is independent of `context.source`: Codex/Cursor turn totals are observed usage even when their context size is estimated. The meter result is retained on unsuccessful attempts, including non-zero provider exits.
 
-Terminal adapter, dispatch and Fabric attempt receipts also record `error_class`, derived only from that receipt's final status and existing evidence signature. The fixed vocabulary is `none`, `rate_limited`, `usage_limited`, `auth`, `model_unavailable`, `timeout`, `empty_output`, `sandbox_denied`, `provider_error`, and `unknown`. Successful and input-required statuses map to `none`; named failure statuses take precedence over signatures. Signatures refine generic outcomes (for example `failed` + `empty_output`). Stalls and startup deadlines map to `timeout`; permission blocks map to `sandbox_denied`. Generic failures, rejected requests and missing tools map to `provider_error`; cancellation, interruption, quarantine and unrecognised outcomes default to `unknown`. This telemetry field does not affect routing, retries or health.
+Terminal adapter, dispatch and Fabric attempt receipts also record `error_class`, derived only from that receipt's final status and existing evidence signature. The fixed vocabulary is `none`, `rate_limited`, `usage_limited`, `auth`, `model_unavailable`, `timeout`, `empty_output`, `sandbox_denied`, `provider_error`, `transient`, `cancelled`, and `unknown`. Successful and input-required statuses map to `none`; named failure statuses take precedence over signatures. Signatures refine generic outcomes (for example `failed` + `empty_output`). Stalls and startup deadlines map to `timeout`; permission blocks map to `sandbox_denied`. Generic failures, rejected requests and missing tools map to `provider_error`; cancellations map to `cancelled`; interruption, quarantine and unrecognised outcomes default to `unknown`. Transport and exhausted reconnect failures map to `transient`. Codex progress text without a terminal result is a failure. Retained incomplete output carries `result_partial: true` in adapter and attempt receipts, lane rows and brief status responses; lane waits label it partial. A successful terminal event clears preceding reconnect errors. This telemetry field does not affect routing, retries or health.
 
 `timing.phases` records milliseconds for available dispatch phases: TypeScript validation and catalogue snapshot, run directory setup, owner startup and attempt setup, route planning, provider spawn, provider execution and finalisation. A direct Python owner has no TypeScript phase measurements. The writer watchdog scans at most 2,000 entries per probe, checks a 25 ms budget between entries and retains its scan position; a full cycle on a large tree may take several one-second probes. Stall detection waits for a complete scan covering the idle interval so a late file is not missed.
 
-Provenance records requested route, resolved and observed model, observation source, identity (`observed`, `resolved`, `unknown`), provider, transport, family, requested and applied effort, CLI version, fallback origin, notes and the generated line. `effort_applied` is the effort sent to the provider, clamped to the model's supported list. It is empty when none was sent: the model has no effort control (the catalogue gives it no `efforts` list, or `effort_transport: "none"`), or nothing was requested and there is no alias default. It never repeats an unsent request or guesses a provider default. The one exception is an effort the provider itself reports: with none sent, Codex's rollout `turn_context` fills it and `effort_observed_source` names that source; otherwise `effort_observed_source` is null. An ignored request stays in `effort_requested` and adds the note `effort <x> ignored: <model> has no effort control`, shown once among the digest warnings. A terminal digest and status row carry `Route: adapter/model@effort (provider; identity)`, with no `@effort` suffix when applied is empty; the retained index stores that line after run pruning. The proposed `provenant route <run-id>` index lookup is not yet wired: the current command invokes the model catalogue router. Until it is, copy the line from the digest or status row and use `Agent-Route: adapter/model@effort` for the commit trailer. Never infer a model from a worker self-report. Read-only Claude runs use `--permission-mode default` with `--tools Read,Grep,Glob`; they no longer use plan mode. Claude's observed model is the one on the assistant messages that answered (`claude:assistant.message.model`), else a lone `result.modelUsage` key, and `system.init.model` only when neither exists. Provenance keeps this comparison because Claude can still substitute under other invocations. For a substituted model, the family comes from catalogue patterns only when exactly one family matches; absent or ambiguous matches stay `unknown`, and substitutions cannot set `cross_family` or `certification_eligible`. Claude Code 2.1.280 in plan mode reports `claude-haiku-4-5` in init but `claude-sonnet-5` (1M) answers; Opus stays Opus, and a writer's explicit Haiku 4.5 answers as Haiku 4.5 (200k). The attempt records `init_model` and `answered_models` and warns `claude answered as <x>; init reported <y>`. If several models answered, the final top-level one goes on the Route line. Native Claude subagents use the Agent tool model parameter and record `claude/<model>@<effort> (anthropic; resolved)`.
+Provenance records requested route, resolved and observed model, observation source, identity (`observed`, `resolved`, `unknown`), provider, transport, family, requested and applied effort, CLI version, fallback origin, the installed Provenant revision (`harness_rev`, null outside a Git checkout), notes and the generated line. `effort_applied` is the effort sent to the provider, clamped to the model's supported list. It is empty when none was sent: the model has no effort control (the catalogue gives it no `efforts` list, or `effort_transport: "none"`), or nothing was requested and there is no alias default. It never repeats an unsent request or guesses a provider default. The one exception is an effort the provider itself reports: with none sent, Codex's rollout `turn_context` fills it and `effort_observed_source` names that source; otherwise `effort_observed_source` is null. An ignored request stays in `effort_requested` and adds the note `effort <x> ignored: <model> has no effort control`, shown once among the digest warnings. A terminal digest and status row carry `Route: adapter/model@effort (provider; identity)`, with no `@effort` suffix when applied is empty; the retained index stores that line after run pruning. The proposed `provenant route <run-id>` index lookup is not yet wired: the current command invokes the model catalogue router. Until it is, copy the line from the digest or status row and use `Agent-Route: adapter/model@effort` for the commit trailer. Never infer a model from a worker self-report. Read-only Claude runs use `--permission-mode default` with `--tools Read,Grep,Glob`; they no longer use plan mode. Claude's observed model is the one on the assistant messages that answered (`claude:assistant.message.model`), else a lone `result.modelUsage` key, and `system.init.model` only when neither exists. Provenance keeps this comparison because Claude can still substitute under other invocations. For a substituted model, the family comes from catalogue patterns only when exactly one family matches; absent or ambiguous matches stay `unknown`, and substitutions cannot set `cross_family` or `certification_eligible`. Claude Code 2.1.280 in plan mode reports `claude-haiku-4-5` in init but `claude-sonnet-5` (1M) answers; Opus stays Opus, and a writer's explicit Haiku 4.5 answers as Haiku 4.5 (200k). The attempt records `init_model` and `answered_models` and warns `claude answered as <x>; init reported <y>`. If several models answered, the final top-level one goes on the Route line. Native Claude subagents use the Agent tool model parameter and record `claude/<model>@<effort> (anthropic; resolved)`.
 
 ## Layout and retention
 
@@ -158,12 +158,66 @@ quarantine, with `fix: instruction edits remain on the lane branch; restore
 retained and listed. A `quarantined` lane retains the result, sets
 `landable: false` and `retryable: false`, and records `quarantine` with the
 reason, patch paths, whether restoration succeeded and any patch capture error.
-`landable: false` is an advisory marker for the chair, not enforced landing. It
-is never `ok` for landing, certification or session success. Digests, status and
+`landable: false` is never `ok` for landing, certification or session success.
+Digests, status and
 lanes show the result and a review action; chairs review the quarantine and
 verify the branch diff before landing any application work. Proposed instruction
 edits belong outside `.agents/` for separate chair review, as the default writer
 brief states (omitted when the policy is `allow`).
+
+The per-attempt check above is an early warning. Two owner-side controls
+enforce the hold, so neither a surviving provider child committing after
+finalisation nor a moved local ref can land an instruction change:
+
+- **Writer ref grants.** A writer's Git may write its private worktree
+  directory, the object store and only its own branch: `refs/heads/<branch>`,
+  its `.lock` and its reflog. The owner reads the branch from the worktree's
+  HEAD and refuses one that the primary checkout or another worktree holds; a
+  detached writer gets no shared ref. No writer can move the primary branch, its
+  upstream, a tag, `packed-refs` or another checkout's branch. Every boundary,
+  native and sandbox-exec, also keeps `.git`, the private `commondir`, `gitdir`
+  and `config.worktree`, and the common `objects/info` read-only.
+- **Range gate.** `lane_protection.py` walks every commit in `tip ^base` through
+  the owner's common Git directory with `diff-tree --root -m`, so merge
+  resolutions count. A commit may change a protected path only to the version
+  the base already holds, as a merge or rebase from the base does, or be
+  reachable from a tip the chair released. Anything else fails with
+  `protected_instructions_changed` and names the held commits; the branch is
+  left as it is. Fabric `landing-push` passes the landing lease's remote SHA as
+  the base, never a local ref. `scripts/worktree verify-claim` and a manual
+  check use the primary checkout's HEAD, which no writer can move. The gate
+  needs no per-attempt record, so chair, human and never-dispatched worktrees
+  go through the same check.
+
+The invariant is: nothing lands on the integration branch unless every commit in
+`<leased remote SHA>..<tip>` leaves protected paths unchanged from the leased
+version or is reachable from an audited chair release of a reviewed tip;
+writers can write only their own branch ref. The gate reads the object store,
+which writers can add packs to, so it trusts object content; it disables
+replace refs, commit graphs, the multi-pack index and lazy fetch, and refuses
+alternate object stores. Path classification normalises to NFC before
+casefolding: casefold covers APFS case folding, but not Unicode normalisation
+by itself.
+
+A quarantine restores the files in a new commit, so the edit stays in the
+lane's history and the gate holds it. After reviewing the exact commits, a
+chair outside a writer either rewrites the lane without them or releases the
+reviewed tip:
+
+```sh
+python3 "$(provenant root)/skills/orchestrate/scripts/lane_protection.py" \
+  --cwd <lane-worktree> --release --tip <reviewed-sha> \
+  --actor <chair> --reason '<review decision>'
+```
+
+Release requires the full SHA, refuses when the checkout's HEAD has moved
+past it, and writes an immutable record of the tip, actor, reason, worktree
+and time under the common directory's `provenant-instruction-checks/releases/`.
+It covers the tip and its ancestors, never a later commit. The record is an
+audit trail, not authorisation: anyone who can write the owner's common
+directory could add one. No writer boundary grants that directory, and the
+command refuses to run under a writer attempt's marker, so release stays
+chair-side.
 
 `protected.patch` is retained even for an index-only change (empty disk patch)
 or an unverifiable check (a comment explaining that the diff is unavailable).
@@ -171,10 +225,10 @@ If that marker cannot be installed, patches are listed as unavailable with a
 capture error; no patch is claimed as complete in that case. The check
 reports `protected_instructions_unverifiable` separately from actual changes.
 A failed or signal-interrupted provider is never promoted to `quarantined`.
-Signal-interrupted attempts retain their changed files without restoration and
+Signal-killed attempts (`failed` without a terminal result, otherwise `interrupted`, or `cancelled` on explicit cancellation) retain their changed files without restoration and
 fail for actual instruction edits, preserving the provider exit and signal.
-An unknown value warns and quarantines. The check trusts local refs, which the lane can
-move. It also reports a clean three-way merge into a skill the branch already
+An unknown value warns and quarantines. The per-attempt check reads local refs; only
+the owner can move them. It also reports a clean three-way merge into a skill the branch already
 changed, a refresh overtaken by a newer integration-branch change to the same
 file, a refresh under line-ending conversion, and any refresh in a repository
 that tracks a case variant such as `.Agents/`. A separately authorised review
@@ -260,8 +314,43 @@ covers `.git-credentials`, `.pypirc`, `.pgpass`, `.vault-token`,
 `.password-store`, `.boto`, `.s3cfg`, `.terraform.d`, Cargo and Gem credentials,
 `.config/git/credentials`, `.config/hub` and `.config/op`.
 
-An `ok` attempt clears the cooldown for the model that answered, using the
-resolved model when the provider reports no model. It also clears the adapter's
+Every attempt records top-level `account` and `host` before provider startup;
+terminal records retain that scope. Quota and cooldown routing share
+`scripts/provider_identity.py`. Account identity comes from paths, without
+reading credential contents:
+
+| Adapter | Selected identity source |
+|---|---|
+| claude | `CLAUDE_CONFIG_DIR`, else `~/.claude` |
+| codex | `CODEX_HOME`, else `~/.codex` |
+| agy | OS user's `~/Library/Keychains/login.keychain-db`, independent of HOME and `AGY_CONFIG_DIR`; a second account requires a second host |
+| cursor | `~/Library/Application Support/Cursor/User/globalStorage` on macOS, else `~/.config/Cursor/User/globalStorage` |
+| opencode | `$XDG_DATA_HOME/opencode`, else `~/.local/share/opencode` (the authentication store, not `OPENCODE_CONFIG_DIR`) |
+| kiro | `~/.kiro` |
+| copilot | `~/.copilot` |
+
+A selected path matching an enabled configured
+`telemetry.accounts.<provider>.<label>.identity_dir` resolves to `<label>`.
+Otherwise the provider's default directory resolves to `default`, and another
+resolved path to `path-<sha256 prefix>`. Paths, emails and tokens are never used
+as account keys. An unresolved identity is `null` and matches only `null`.
+For inspection and reset commands, see [model routing](../runbooks/model-routing.md).
+Host is the telemetry host id (`local_host` in `.agent-fabric/hosts.json`, else
+hostname). Neither account nor host acts as a wildcard.
+
+`fabric.cooldowns.v1` entries carry `adapter`, `model`, `account` and `host`.
+Storage keys are JSON-encoded `[adapter, account, host, model]` tuples, allowing
+live scopes to coexist; readers expose only the active scope as `adapter/model`
+keys. Exact model entries precede `*` within that scope. Reads prune expired
+entries and retain other accounts and hosts. Under `cooldowns.lock`, a legacy
+entry without `host` and with a null account migrates once to the provider's
+default identity on this host, even if an alternate identity is selected.
+A new explicit null scope is never migrated. Cached quota adds and reconciles
+cooldowns only for its matching account and host.
+
+An `ok` attempt clears the cooldown for the model that answered in that
+attempt's account and host, using the resolved model when the provider reports
+no model. It also clears the adapter's
 account-wide `*` cooldown when the attempt started after that entry was recorded
 (never for per-model adapters `agy` and `opencode`). Other model cooldowns remain
 intact; `provenant route reset` clears them explicitly. OpenCode runs with error logs on stderr so a quota

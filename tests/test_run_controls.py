@@ -75,7 +75,7 @@ def write_attempt(
         "status": status,
         "outcome": "ok" if status in {"ok", "succeeded"} else status,
         "requested_route": {
-            "intent": "ordinary", "adapter": "codex", "alias": "scout",
+            "intent": "ordinary", "adapter": "codex", "alias": "junior",
             "task_class": "", "model": "", "role": "worker", "orchestrator_family": "openai",
             "risk_tier": "substantial", "model_override_tier": "",
             "reviewer_id": "reviewer-1", "effort": "high",
@@ -351,7 +351,7 @@ def test_cancel_after_natural_completion_reports_already_terminal(tmp_path: Path
     monkeypatch.chdir(tmp_path)
     args = dispatch.parser().parse_args([
         "--run-dir", str(run_dir), "--task-id", "natural", "--adapter", "codex",
-        "--prompt-file", str(prompt), "--alias", "workhorse", "--role", "worker",
+        "--prompt-file", str(prompt), "--alias", "senior", "--role", "worker",
     ])
     assert dispatch.dispatch(args) == 0
 
@@ -404,6 +404,35 @@ def test_cancel_waits_through_attempt_sidecar_gap(tmp_path: Path) -> None:
         publisher.join()
     assert record is not None
     assert record["status"] == "failed"
+
+
+def test_attempt_terminal_tolerates_receipt_renamed_before_its_digest_sidecar(tmp_path: Path) -> None:
+    run_dir = make_run(tmp_path)
+    attempt = write_attempt(run_dir, status="failed", result=None)
+    sidecar = attempt.with_name("attempt.sha256")
+    fresh = sidecar.read_bytes()
+    sidecar.write_bytes(b"sha256:" + b"0" * 64 + b"  attempt.json\n")  # previous receipt's digest
+    module_spec = importlib.util.spec_from_file_location("run_controls_stale_sidecar", SCRIPT)
+    assert module_spec and module_spec.loader
+    module = importlib.util.module_from_spec(module_spec)
+    module_spec.loader.exec_module(module)
+
+    def publish_sidecar() -> None:
+        time.sleep(0.1)
+        sidecar.write_bytes(fresh)
+
+    publisher = threading.Thread(target=publish_sidecar)
+    publisher.start()
+    try:
+        record = module._attempt_terminal(run_dir, "task-1", "attempt-001")
+    finally:
+        publisher.join()
+    assert record is not None and record["status"] == "failed"
+
+    sidecar.write_bytes(b"sha256:" + b"0" * 64 + b"  attempt.json\n")
+    module.DIGEST_SETTLE_SECONDS = 0.1
+    with pytest.raises(module.ControlError, match="attempt evidence is invalid"):
+        module._attempt_terminal(run_dir, "task-1", "attempt-001")
 
 
 def test_cancel_waits_through_late_summary_bundle_completion(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -637,7 +666,7 @@ def test_same_route_retry_runs_full_provider_free_chain_and_retains_risk_and_pro
             str(ROOT / "skills/orchestrate/scripts/dispatch_run.py"),
             "--run-dir", str(run_dir), "--task-id", "retry-chain",
             "--adapter", "codex", "--prompt-file", str(prompt),
-            "--alias", "workhorse", "--role", "worker",
+            "--alias", "senior", "--role", "worker",
             "--risk-tier", "substantial",
         ],
         cwd=tmp_path, env=env, text=True,
@@ -656,7 +685,7 @@ def test_same_route_retry_runs_full_provider_free_chain_and_retains_risk_and_pro
     )
     assert attempt["status"] == "ok"
     assert attempt["retry_of"] == "attempt-001"
-    assert attempt["requested_route"]["alias"] == "workhorse"
+    assert attempt["requested_route"]["alias"] == "senior"
     assert attempt["requested_route"]["risk_tier"] == "substantial"
     assert attempt["route"]["risk_tier"] == "substantial"
     assert attempt["route"]["model_override_tier"] == ""
@@ -736,7 +765,7 @@ def test_inspect_displays_real_worker_question_and_canonical_continuation(tmp_pa
     write_dispatch_wrapper(dispatch, adapter)
     result = subprocess.run([
         str(dispatch), "--run-dir", str(run_dir), "--task-id", "question", "--adapter", "codex",
-        "--prompt-file", str(prompt), "--alias", "scout", "--role", "worker",
+        "--prompt-file", str(prompt), "--alias", "junior", "--role", "worker",
     ], cwd=tmp_path, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     assert result.returncode == 1, result.stderr + result.stdout
 
@@ -1065,7 +1094,7 @@ def test_reduce_requires_explicit_successes_and_names_batch_omissions(tmp_path: 
     monkeypatch.chdir(tmp_path)
     args = module.parser().parse_args([
         "reduce", "--run-dir", str(run_dir), "--task-id", "reducer", "--prompt-file", str(prompt),
-        "--batch-id", "batch-001", "--input", "one/attempt-001", "--adapter", "codex", "--alias", "scout",
+        "--batch-id", "batch-001", "--input", "one/attempt-001", "--adapter", "codex", "--alias", "junior",
     ])
 
     assert module.run(args) == 0
@@ -1097,7 +1126,7 @@ def test_reduce_does_not_conflate_repeated_task_across_batch_summaries(tmp_path:
 
     result = invoke("run", "reduce", "--run-dir", str(run_dir), "--task-id", "reducer",
                     "--prompt-file", str(prompt), "--batch-id", "batch-001",
-                    "--input", "same/attempt-002", "--adapter", "codex", "--alias", "scout", cwd=tmp_path)
+                    "--input", "same/attempt-002", "--adapter", "codex", "--alias", "junior", cwd=tmp_path)
 
     assert result.returncode == 2
     assert "selected batch" in json.loads(result.stdout)["message"]
@@ -1142,7 +1171,7 @@ def test_retry_and_reduce_use_real_dispatch_owner_and_retain_new_attempts(tmp_pa
     monkeypatch.chdir(reduce_root)
     reduce_args = module.parser().parse_args([
         "reduce", "--run-dir", str(reduce_run), "--task-id", "reducer", "--prompt-file", str(prompt),
-        "--batch-id", "batch-001", "--input", "source/attempt-001", "--adapter", "codex", "--alias", "scout",
+        "--batch-id", "batch-001", "--input", "source/attempt-001", "--adapter", "codex", "--alias", "junior",
     ])
     assert module.run(reduce_args) == 0
     reducer_attempt = reduce_run / "dispatch/tasks/reducer/attempt-001"
@@ -1154,7 +1183,7 @@ def test_retry_and_reduce_use_real_dispatch_owner_and_retain_new_attempts(tmp_pa
     monkeypatch.chdir(reduce_run)
     same_dir_args = module.parser().parse_args([
         "reduce", "--run-dir", str(reduce_run), "--task-id", "reducer2", "--prompt-file", str(operator_prompt),
-        "--batch-id", "batch-001", "--input", "source/attempt-001", "--adapter", "codex", "--alias", "scout",
+        "--batch-id", "batch-001", "--input", "source/attempt-001", "--adapter", "codex", "--alias", "junior",
     ])
     assert module.run(same_dir_args) == 0
     assert (reduce_run / "dispatch/tasks/reducer2/attempt-001/prompt.md").is_file()
@@ -1171,7 +1200,7 @@ def test_reduce_rejects_credential_or_auth_prompt_before_read(tmp_path: Path, na
 
     result = invoke("run", "reduce", "--run-dir", str(run_dir), "--task-id", "reducer",
                     "--prompt-file", str(prompt), "--batch-id", "batch-001",
-                    "--input", "one/attempt-001", "--adapter", "codex", "--alias", "scout", cwd=tmp_path)
+                    "--input", "one/attempt-001", "--adapter", "codex", "--alias", "junior", cwd=tmp_path)
 
     assert result.returncode == 2
     assert "credential or authentication" in json.loads(result.stdout)["message"]
@@ -1187,7 +1216,48 @@ def test_reduce_rejects_original_prompt_symlink_before_resolving(tmp_path: Path)
 
     result = invoke("run", "reduce", "--run-dir", str(run_dir), "--task-id", "reducer",
                     "--prompt-file", str(supplied), "--batch-id", "batch-001",
-                    "--input", "one/attempt-001", "--adapter", "codex", "--alias", "scout", cwd=tmp_path)
+                    "--input", "one/attempt-001", "--adapter", "codex", "--alias", "junior", cwd=tmp_path)
 
     assert result.returncode == 2
     assert "must not be a symlink" in json.loads(result.stdout)["message"]
+
+
+def make_listed_run(tmp_path: Path) -> Path:
+    name = "20261022-1200-dispatch-task-1-abc123"
+    return Path(subprocess.check_output([str(INIT), str(tmp_path / ".agent-run" / "runs" / name)], text=True).strip())
+
+
+def test_show_resolves_task_id_and_bounds_the_result_tail(tmp_path: Path) -> None:
+    run_dir = make_listed_run(tmp_path)
+    write_attempt(run_dir, result="".join(f"line {number}\n" for number in range(100)))
+    shown = invoke("run", "show", "task-1", "--tail", "3", cwd=tmp_path)
+    assert shown.returncode == 0, shown.stderr
+    assert shown.stdout.splitlines()[-3:] == ["line 97", "line 98", "line 99"]
+    assert "task task-1 attempt-001 status ok" in shown.stdout
+    as_json = invoke("run", "show", f"mcp-{run_dir.name[-6:]}", "--tail", "2", "--json", cwd=tmp_path)
+    data = json.loads(as_json.stdout)
+    assert data["run_id"] == run_dir.name and data["tasks"][0]["result_tail"] == ["line 98", "line 99"]
+    assert data["tasks"][0]["result_clipped"] is True
+
+
+def test_show_rejects_unknown_reference(tmp_path: Path) -> None:
+    make_listed_run(tmp_path)
+    assert invoke("run", "show", "missing", cwd=tmp_path).returncode == 2
+
+
+def test_show_does_not_follow_symlinks_out_of_the_run(tmp_path: Path) -> None:
+    run_dir = make_listed_run(tmp_path)
+    attempt_dir = write_attempt(run_dir).parent
+    secret = tmp_path / "outside.txt"
+    secret.write_text("TOPSECRET\n", encoding="utf-8")
+    (attempt_dir / "result.md").unlink()
+    (attempt_dir / "result.md").symlink_to(secret)
+    shown = invoke("run", "show", "task-1", cwd=tmp_path)
+    assert "TOPSECRET" not in shown.stdout and "result unavailable" in shown.stdout
+    outside = tmp_path / "outside-attempt"
+    outside.mkdir()
+    (outside / "result.md").write_text("TOPSECRET\n", encoding="utf-8")
+    (run_dir / "dispatch/tasks/task-2").mkdir()
+    (run_dir / "dispatch/tasks/task-2/attempt-001").symlink_to(outside)
+    shown = invoke("run", "show", "task-1", "--task-id", "task-2", cwd=tmp_path)
+    assert "TOPSECRET" not in shown.stdout and "TOPSECRET" not in shown.stderr

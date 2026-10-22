@@ -18,10 +18,10 @@
 //                         {claim} arg this yields exactly one claim.
 //   3. Cross-verify     : PER CLAIM, fan out BOTH a same-family Claude skeptic AND a
 //                         cross-family worker (codex enforced read-only, optional
-//                         cursor) that shell out to cf_dispatch.sh. Cross-family is a
+//                         cursor) that shell out to cf_dispatch.py. Cross-family is a
 //                         first-class parallel worker here, not a final gate. Each
 //                         returns a normalised verdict with anchors.
-//   4. Synthesis        : one flagship agent reduces per-claim verdicts into one
+//   4. Synthesis        : one principal agent reduces per-claim verdicts into one
 //                         report, reconciles disagreement (objective anchors outrank
 //                         opinion; default to "unsupported" on uncertainty), and
 //                         records CROSS-FAMILY-NOT-RUN reasons where the cross-family
@@ -29,10 +29,10 @@
 //                         nothing.
 //
 // MODEL-TIER ROUTING (role -> tier; never hard-code a dated model id)
-//   bootstrap resolves routes; decomposition -> workhorse; skeptic -> flagship.
-//   cross-family dispatch agent-> scout: drives Bash + normalises CLI JSON
+//   bootstrap resolves routes; decomposition -> senior; skeptic -> principal.
+//   cross-family dispatch agent-> junior: drives Bash + normalises CLI JSON
 //                                                     (codex -> cursor; agy advisory only).
-//   final synthesis/adjudicate -> flagship: owns the call, no majority-voting
+//   final synthesis/adjudicate -> principal: owns the call, no majority-voting
 //                                                     of weak findings into truth.
 //   Bootstrap resolves durable aliases through the global model router; every later
 //   stage receives the concrete model for its role.
@@ -75,10 +75,10 @@ const BOOTSTRAP_SCHEMA = {
     notes: { type: 'string', description: 'Anything surprising during staging (missing file, binary, truncation).' },
     modelRoutes: {
       type: 'object', additionalProperties: false,
-      required: ['flagship', 'criticalReviewer', 'workhorse', 'scout'],
+      required: ['principal', 'criticalReviewer', 'senior', 'junior'],
       properties: {
-        flagship: { type: 'string' }, criticalReviewer: { type: 'string' },
-        workhorse: { type: 'string' }, scout: { type: 'string' },
+        principal: { type: 'string' }, criticalReviewer: { type: 'string' },
+        senior: { type: 'string' }, junior: { type: 'string' },
       },
     },
   },
@@ -135,7 +135,7 @@ const VERDICT_SCHEMA = {
       },
     },
     crossFamily: { type: 'boolean', description: 'true only when produced by a different model family with an enforced/oauth_safe_mode read-only guarantee.' },
-    readOnlyGuarantee: { type: 'string', enum: ['enforced', 'oauth_safe_mode', 'best_effort', 'none', 'unknown'], description: 'Mirrors cf_dispatch.sh read_only_guarantee for cross-family; "enforced" for the Claude skeptic.' },
+    readOnlyGuarantee: { type: 'string', enum: ['enforced', 'oauth_safe_mode', 'best_effort', 'none', 'unknown'], description: 'Mirrors cf_dispatch.py read_only_guarantee for cross-family; "enforced" for the Claude skeptic.' },
     notRunReason: { type: 'string', description: 'If verdict=unable due to cross-family failure, the CROSS-FAMILY-NOT-RUN reason from the dispatcher record.' },
     reasoning: { type: 'string', description: 'One or two lines on how the anchors settle the claim.' },
   },
@@ -164,7 +164,7 @@ const REPORT_SCHEMA = {
         },
       },
     },
-    crossFamilyStatus: { type: 'string', description: 'One of: "enforced" | "oauth_safe_mode" | "CROSS-FAMILY-NOT-RUN: <reason>" (agy is disabled here, so no advisory scout-only status is produced).' },
+    crossFamilyStatus: { type: 'string', description: 'One of: "enforced" | "oauth_safe_mode" | "CROSS-FAMILY-NOT-RUN: <reason>" (agy is disabled here, so no advisory junior-only status is produced).' },
     escalations: { type: 'array', items: { type: 'string' }, description: 'High-risk or split claims a human should adjudicate (this workflow applies nothing).' },
   },
 }
@@ -222,7 +222,7 @@ function bootstrapPrompt() {
     '   Do not hard-code any project layout — discover this at runtime.',
     '',
     '3. Resolve concrete Claude models with `provenant route resolve` for:',
-    '   flagship/lead, flagship/critical-review, workhorse/worker, scout/scout. Return resolved_model values in modelRoutes.',
+    '   principal/lead, principal/critical-review, senior/worker, junior/junior. Return resolved_model values in modelRoutes.',
     '',
     'Return ONLY the structured object. Do not paste file contents.',
   ].join('\n')
@@ -264,7 +264,7 @@ function claudeSkepticPrompt(boot, claim) {
   ].join('\n')
 }
 
-// Cross-family worker — first-class parallel worker. Shells out to cf_dispatch.sh.
+// Cross-family worker — first-class parallel worker. Shells out to cf_dispatch.py.
 // Attacks a DIFFERENT angle from the Claude skeptic (independent evidence hunt) and
 // returns the dispatcher's normalised guarantees verbatim.
 function crossFamilyPrompt(boot, claim, idx) {
@@ -277,7 +277,7 @@ function crossFamilyPrompt(boot, claim, idx) {
   const gitCwd = boot.gitCwd || ''
   const cwdClause = gitCwd
     ? `Set your shell cwd to the git repo at ${gitCwd} before dispatch (codex refuses untrusted non-git dirs). Lead chain: try ${lead} first, then ${second}.`
-    : `No git repo was found at bootstrap, so codex is unusable here (cf_dispatch.sh exposes NO --skip-git-repo-check flag — it runs codex exec -s read-only). Lead with cursor (which does not require a git repo); only attempt codex if you can set cwd inside some nested git repo. If neither cross-family tool can run, record CROSS-FAMILY-NOT-RUN.`
+    : `No git repo was found at bootstrap, so codex is unusable here (cf_dispatch.py exposes NO --skip-git-repo-check flag — it runs codex exec -s read-only). Lead with cursor (which does not require a git repo); only attempt codex if you can set cwd inside some nested git repo. If neither cross-family tool can run, record CROSS-FAMILY-NOT-RUN.`
   const chain = gitCwd ? `${lead} ${second}` : `cursor ${lead === 'cursor' ? second : lead}`
   return [
     'You drive a CROSS-FAMILY verifier via Bash. You do not judge the claim yourself; you run a different model family on it and normalise its answer. READ-ONLY throughout.',
@@ -298,7 +298,7 @@ function crossFamilyPrompt(boot, claim, idx) {
     `  ${cwdClause}`,
     '  Before using cursor in the chain, run cursor-agent --list-models and export CF_DISPATCH_CURSOR_MODEL to a current model from a family distinct from Claude and OpenAI. The dispatcher fails closed if it cannot prove the provider family.',
     `  Use the --chain form so it fails over automatically:`,
-    `    ${SKILL_SCRIPTS}/cf_dispatch.sh --orchestrator-family claude --chain "${chain}" \\`,
+    `    ${SKILL_SCRIPTS}/cf_dispatch.py --orchestrator-family claude --chain "${chain}" \\`,
     `      --prompt-file <abs path to ${claim.id}.prompt.txt> --out <abs path to crossfamily/${claim.id}.out.txt>`,
     '  (codex runs `exec -s read-only` enforced; cursor runs `--mode plan`. Never use claude as the cross-family tool — same family. agy is advisory-only and disabled unless CF_DISPATCH_ENABLE_AGY=1; do not enable it here.)',
     '  The dispatcher prints a JSON record (adapter, provider_family, status, exit, output_path, read_only_guarantee, cross_family). Capture it.',
@@ -313,7 +313,7 @@ function crossFamilyPrompt(boot, claim, idx) {
 
 function synthesisPrompt(boot, decomposed, verdictRows) {
   return [
-    'You are the flagship synthesiser. Reduce per-claim verdicts into one verdict report. READ-ONLY: write only the report inside the run dir; edit no source.',
+    'You are the principal synthesiser. Reduce per-claim verdicts into one verdict report. READ-ONLY: write only the report inside the run dir; edit no source.',
     '',
     `Run dir: ${boot.runDir}`,
     `Target (${boot.targetKind}): ${boot.targetPath}`,
@@ -328,7 +328,7 @@ function synthesisPrompt(boot, decomposed, verdictRows) {
     '  - Default to unsupported/inconclusive on uncertainty. Do NOT majority-vote weak findings into truth.',
     '',
     'Roll up an overall verdict (supported/unsupported/mixed/inconclusive).',
-    'Set crossFamilyStatus to the strongest guarantee actually achieved across claims ("enforced" or "oauth_safe_mode"), or "CROSS-FAMILY-NOT-RUN: <reason>" if the cross-family leg failed (or was data-policy-blocked) for every claim. Do NOT emit "scout-only" — agy is disabled in this workflow, so no advisory route exists.',
+    'Set crossFamilyStatus to the strongest guarantee actually achieved across claims ("enforced" or "oauth_safe_mode"), or "CROSS-FAMILY-NOT-RUN: <reason>" if the cross-family leg failed (or was data-policy-blocked) for every claim. Do NOT emit "junior-only" — agy is disabled in this workflow, so no advisory route exists.',
     'List escalations: every high-risk claim and every split/inconclusive/single-voter claim a human should adjudicate. This workflow applies nothing; downstream mutation is a separate approved step.',
     '',
     'Verdict rows (JSON, one or two per claim):',
@@ -343,7 +343,7 @@ function synthesisPrompt(boot, decomposed, verdictRows) {
 // hunting evidence for a file that does not exist.
 function missingTargetReportPrompt(boot) {
   return [
-    'You are the flagship synthesiser. The verification target could NOT be staged, so no claims were decomposed and no verifiers ran. Emit a minimal inconclusive report. READ-ONLY: write only inside the run dir.',
+    'You are the principal synthesiser. The verification target could NOT be staged, so no claims were decomposed and no verifiers ran. Emit a minimal inconclusive report. READ-ONLY: write only inside the run dir.',
     '',
     `Run dir: ${boot.runDir}`,
     `Intended target (${boot.targetKind}): ${boot.targetPath}`,
@@ -380,7 +380,7 @@ if (boot && boot.runDir && boot.targetAvailable === false) {
     label: 'cross-verify:synthesis',
     phase: 'Synthesis',
     schema: REPORT_SCHEMA,
-    model: boot.modelRoutes.flagship,
+    model: boot.modelRoutes.principal,
   })
   if (report) {
     log(`cross-verify: overall=${report.overall}; cross-family=${report.crossFamilyStatus}; report at ${report.reportPath}.`)
@@ -397,7 +397,7 @@ if (boot && boot.runDir && boot.targetAvailable === false) {
     label: 'cross-verify:decompose',
     phase: 'Decompose',
     schema: DECOMPOSE_SCHEMA,
-    model: models.workhorse,
+    model: models.senior,
   })
 
   const claims = (decomposed && Array.isArray(decomposed.claims)) ? decomposed.claims : []
@@ -425,7 +425,7 @@ if (boot && boot.runDir && boot.targetAvailable === false) {
         label: `cross-verify:cf:${claim.id}`,
         phase: 'Cross-verify',
         schema: VERDICT_SCHEMA,
-        model: models.scout,
+        model: models.junior,
       }),
     ]),
   )
@@ -434,14 +434,14 @@ if (boot && boot.runDir && boot.targetAvailable === false) {
   const flatVerdicts = verdictRows.flat().filter(Boolean)
   log(`cross-verify: collected ${flatVerdicts.length} verdict(s) from ${claims.length} claim(s).`)
 
-  // Phase 4 — Synthesis (flagship tier: adjudicate, record CROSS-FAMILY-NOT-RUN, escalate).
+  // Phase 4 — Synthesis (principal tier: adjudicate, record CROSS-FAMILY-NOT-RUN, escalate).
   // Normalise decomposed to a guaranteed {claims:[...]} shape so synthesisPrompt never reads
   // .claims off undefined (decompose may have died or returned a partial object).
   const decomposedSafe = { claims }
   phase('Synthesis')
   const report = await agent(
     synthesisPrompt(boot, decomposedSafe, flatVerdicts),
-    { label: 'cross-verify:synthesis', phase: 'Synthesis', schema: REPORT_SCHEMA, model: models.flagship },
+    { label: 'cross-verify:synthesis', phase: 'Synthesis', schema: REPORT_SCHEMA, model: models.principal },
   )
 
   if (report) {

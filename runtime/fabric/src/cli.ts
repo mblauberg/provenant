@@ -12,18 +12,22 @@
 import { digest, quarantineAction } from "./surface.js";
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
-import { databasePath, identify, withoutGitRedirects } from "./identity.js";
+import { join, resolve } from "node:path";
+import { databasePath, identify, runRoot, withoutGitRedirects } from "./identity.js";
 import {
-  dispatchConfiguredBatch, dispatchConfiguredProvider, hostOwnersInThemselves, type BatchInput, type DispatchInput,
+  dispatchConfiguredBatch, dispatchConfiguredProvider, hostOwnersInThemselves, productRoot, pythonOwner,
+  type BatchInput, type DispatchInput,
 } from "./execution.js";
 import type { RouteInput } from "./execution-input.js";
 import {
   federatedStatusRows as statusRows, fabricStatus, findRecordedRun, listRecordedRuns, retentionHours, terminateRecordedRun,
 } from "./run-registry.js";
-import { inspectDatabase, Store } from "./store.js";
+import { inspectDatabase, isSQLiteContention, Store } from "./store.js";
 import { waitForLanes } from "./lane-wait.js";
+import { isLandingVerb, landingCommand, UsageError, validBranch, validRemote } from "./landing-cli.js";
 import { readEvents, readRuns } from "./run-reader.js";
+import { laneIdle } from "./lane-watch.js";
+import { ancestorPids, laneReader, seatRunDirectories } from "./seat-lanes.js";
 import { reconcileSession, sessionDispatch, sessionName, sessionView } from "./sessions.js";
 
 const USAGE = `fabric <command>
@@ -46,13 +50,22 @@ const USAGE = `fabric <command>
   claim <task-id>             atomically claim an open, unowned task
   work-claims                 active work claims and landing lease
   landing-wait [--timeout N]  block until the landing lease changes or frees (default 900s; exit 124 on timeout)
-  landing-push <session> <generation> <branch> [--label <seat>]  verify lease and remote SHA, then push HEAD
+  landing-push <session> <generation> <branch> [--label <seat>] [--remote R]
+                              verify lease and remote SHA, then push HEAD (remote default origin)
+  landing-acquire <session> (--expected-sha SHA | --branch B [--remote R]) [--seconds N] [--label L] [--json]
+                              take the landing lease; exit 3 while another holder's is live
+  landing-verify <session> <generation> [--expected-sha SHA] [--branch B [--remote R]] [--label L] [--json]
+                              check holder and generation, and optionally the remote tip
+  landing-release <session> <generation> [--label L] [--json]
+                              release your lease; released:false with a reason if not held
+  landing-status [--json]     the live landing lease, or none
   done <task-id>              close a task
   activity [--after-seq N]    list activity, optionally after a cursor
            [--limit N]
   watch [ids…] [--interval N] print run state changes; exit when all terminal
-  lanes [--json] [id…]       run states; use an id to see rows past the 20-row cap
-  lanes --wait [--all] [--timeout N] [id…]
+  lanes [--json] [--all] [id…]
+                              run states; default shows active and recent terminal lanes (--all lists all)
+  lanes --wait [--all] [--summary] [--timeout N] [id…]
                               wait for a lane to finish or need input; --all waits
                               for every listed lane; exit 124 on timeout
   lanes --project <path> …   read another project's lanes (default: from the cwd)
@@ -89,7 +102,8 @@ const USAGE = `fabric <command>
   session list | inspect <name> | forget <name>
 
 Identity comes from the working directory and AGENT_FABRIC_LABEL (or
-landing-push --label for that command). Registered
+--label on the landing-* commands). Landing commands exit 0 ok, 1 refused or
+stale, 2 usage, 3 held by another holder or a push in progress. Registered
 worktrees share one repository project while retaining their own cwd. There is
 nothing to install, trust or provision.`;
 
@@ -98,7 +112,8 @@ const command = argv[0] ?? "whoami";
 const commands = new Set([
   "whoami", "send", "inbox", "ack", "note", "tasks", "task", "claim", "done",
   "activity", "watch", "status", "doctor", "dispatch", "adapters", "lanes", "events",
-  "work-claims", "landing-wait", "landing-push", "session", "cancel", "output", "fetch",
+  "work-claims", "landing-wait", "landing-push", "landing-acquire", "landing-verify", "landing-release",
+  "landing-status", "session", "cancel", "output", "fetch",
 ]);
 
 if (command === "--help" || command === "-h" || command === "help") {
@@ -131,9 +146,33 @@ const flag = (name: string): string | undefined => {
   argv.splice(at, 2);
   return value;
 };
+/** Write the whole line before exiting: stdout is asynchronous on a macOS pipe. */
+const finish = async (code: number, line: string, stream: NodeJS.WriteStream = process.stdout): Promise<never> => {
+  await new Promise<void>((done) => stream.write(`${line}\n`, () => done()));
+  process.exit(code);
+};
+if (isLandingVerb(command)) {
+  try {
+    const outcome = landingCommand(command, argv.slice(1), process.env, () => new Store(databasePath()));
+    if (outcome.json) await finish(outcome.code, JSON.stringify(outcome.result));
+    await finish(outcome.code, outcome.line, outcome.code === 0 ? process.stdout : process.stderr);
+  } catch (error) {
+    await finish(error instanceof UsageError ? 2 : 1,
+      `fabric: ${error instanceof Error ? error.message : String(error)}`, process.stderr);
+  }
+}
 let landingLabel: string | undefined;
+let landingRemote = "origin";
+let landingJson = false;
 try {
   landingLabel = command === "landing-push" ? flag("label") : undefined;
+  if (command === "landing-push") {
+    landingRemote = flag("remote") ?? landingRemote;
+    if (!validRemote(landingRemote)) throw new Error(`invalid remote name: ${landingRemote}`);
+    // With --json, stdout carries only the result; Git and hook output go to stderr.
+    landingJson = argv.includes("--json");
+    if (landingJson) argv.splice(argv.indexOf("--json"), 1);
+  }
 } catch (error) {
   console.error(`fabric: ${error instanceof Error ? error.message : String(error)}`);
   process.exit(2);
@@ -194,11 +233,12 @@ if (command === "lanes") {
   const wait = args.includes("--wait");
   const all = args.includes("--all");
   const timeoutSeconds = timeout === undefined ? undefined : Number(timeout);
-  const ids = args.filter((value) => !["--json", "--wait", "--all"].includes(value));
-  if (["--json", "--wait", "--all"].some((name) => args.filter((value) => value === name).length > 1) ||
-      (json && wait) || ((all || timeout !== undefined) && !wait) || ids.some((value) => value.startsWith("--")) ||
+  const summary = args.includes("--summary");
+  const ids = args.filter((value) => !["--json", "--wait", "--all", "--summary"].includes(value));
+  if (["--json", "--wait", "--all", "--summary"].some((name) => args.filter((value) => value === name).length > 1) ||
+      (json && wait) || (summary && !wait) || (timeout !== undefined && !wait) || ids.some((value) => value.startsWith("--")) ||
       (timeoutSeconds !== undefined && !(timeoutSeconds >= 0))) {
-    console.error("fabric: usage: fabric lanes [--json] [--project P] [id…] | lanes --wait [--all] [--timeout N] [id…]");
+    console.error("fabric: usage: fabric lanes [--json] [--all] [--project P] [id…] | lanes --wait [--all] [--summary] [--timeout N] [id…]");
     process.exit(2);
   }
   if (wait) {
@@ -206,23 +246,53 @@ if (command === "lanes") {
     const store = new Store(databasePath());
     store.announce(laneWho);
     let code: number;
+    const seatAncestors = ancestorPids();
+    const watcher = laneIdle(() => [laneWho.project, ...(project === undefined ? seatRunDirectories(seatAncestors).keys() : [])]
+      .map((dir) => join(runRoot(dir), "runs")));
+    const reader = laneReader({ who: laneWho, ids: watched, deps: { ancestors: seatAncestors,
+      ...(project === undefined ? {} : { ancestors: new Set<number>() }) } });
+    const held: string[] = [];
+    // With --summary, lanes are acknowledged only once printed, so a lane cut by the cap is reported next wait.
+    let toMark: Parameters<Store["markLanesSeen"]>[1] = [];
+    const waitStore = summary ? {
+      unseenLanes: (who: Parameters<Store["unseenLanes"]>[0], rows: Parameters<Store["unseenLanes"]>[1]) => store.unseenLanes(who, rows),
+      markLanesSeen: (_who: Parameters<Store["markLanesSeen"]>[0], rows: Parameters<Store["markLanesSeen"]>[1]) => { toMark = rows; },
+    } : store;
     try {
       // The registered project, not the raw cwd, owns the runs; the normal
       // retention window bounds the scan, and no row cap may hide a completion.
       code = await waitForLanes({
-        who: laneWho, store, all, timeoutSeconds,
-        read: () => readRuns(laneWho.project, watched, 0, undefined, null),
-        write: (text) => new Promise((resolveWrite, reject) =>
+        who: laneWho, store: waitStore, all, timeoutSeconds,
+        read: reader, refresh: reader.refresh, stale: reader.stale,
+        write: (text) => summary ? Promise.resolve(void held.push(text)) : new Promise((resolveWrite, reject) =>
           process.stdout.write(text, (error) => (error ? reject(error) : resolveWrite()))),
         fail: (text) => console.error(text),
         sleep: (ms) => new Promise((resolveSleep) => setTimeout(resolveSleep, ms)),
+        idle: watcher.idle,
       });
+      if (summary) {
+        // One bounded line per lane, rather than the full listing; the lane lines come first.
+        const lines = held.join("").split("\n").filter(Boolean);
+        const laneLines = Math.min(toMark.length, lines.length);
+        const cap = 20;
+        const clip = (line: string) => line.length > 160 ? `${line.slice(0, 159)}…` : line;
+        const shown = lines.slice(0, Math.min(laneLines, cap)).map(clip);
+        if (laneLines > cap) shown.push(`+${laneLines - cap} more; run lanes --wait again`);
+        shown.push(...lines.slice(laneLines).map(clip));
+        if (shown.length) console.log(shown.join("\n"));
+        try {
+          store.markLanesSeen(laneWho, toMark.slice(0, cap));
+        } catch (error) {
+          if (!isSQLiteContention(error)) throw error;
+        }
+      }
     } finally {
+      watcher.close();
       store.close();
     }
     process.exit(code);
   }
-  const result = await readRuns(laneWho.project, ids.length ? ids : undefined);
+  const result = await readRuns(laneWho.project, ids.length ? ids : undefined, 0, undefined, (all || !json) ? null : undefined);
   if (json) {
     console.log(JSON.stringify(result, null, 2));
   } else if (result.status === "ok") {
@@ -233,17 +303,36 @@ if (command === "lanes") {
       return seconds < 60 ? `${seconds}s` : seconds < 3600
         ? `${Math.floor(seconds / 60)}m` : `${Math.floor(seconds / 3600)}h`;
     };
-    const rows = [...result.runs].sort((a, b) => {
-      const active = (row: typeof a) => row.state === "running" ? 0 : 1;
-      return active(a) - active(b) || Date.parse(b.started_at ?? "") - Date.parse(a.started_at ?? "");
-    });
+    const active = (row: (typeof result.runs)[number]) => row.state !== "terminal";
+    const needsAttention = (row: (typeof result.runs)[number]) =>
+      row.status === "quarantined" ||
+      row.status === "input_required" ||
+      row.state === "input_required" ||
+      row.landable === false ||
+      Boolean(row.quarantine) ||
+      (typeof row.status === "string" && row.status.includes("review"));
+    const activeRows = result.runs.filter(active);
+    const terminalRows = result.runs.filter((row) => !active(row));
+    terminalRows.sort((a, b) => Date.parse(b.started_at ?? "") - Date.parse(a.started_at ?? ""));
+    activeRows.sort((a, b) => Date.parse(b.started_at ?? "") - Date.parse(a.started_at ?? ""));
+
+    let rows: typeof result.runs;
+    let omitted = 0;
+    if (ids.length || all) {
+      rows = [...activeRows, ...terminalRows];
+    } else {
+      const shownTerminal = terminalRows.filter((row, index) => index < 5 || needsAttention(row));
+      omitted = terminalRows.length - shownTerminal.length;
+      rows = [...activeRows, ...shownTerminal];
+    }
+
     if (!rows.length)
       console.log(`no lanes for project ${laneWho.project}` +
         (laneWho.cwd === laneWho.project ? "" : ` (cwd ${laneWho.cwd} resolves to it; --project reads another)`));
     for (const row of rows)
       console.log(`${row.status ?? row.state}  ${row.id}  ${row.route ?? "-"}  ${age(row.started_at)}${row.status === "quarantined" ? ` · ${quarantineAction(row)}` : ""}`);
-    if (result.omitted)
-      console.log(`${result.omitted} lanes omitted; use provenant lanes ID to see a lane past the 20-row cap`);
+    if (omitted > 0)
+      console.log(`${omitted} more; use --all`);
   } else {
     console.log(JSON.stringify(result));
   }
@@ -574,21 +663,26 @@ try {
 
   case "landing-push": {
     const session = argv[1], generation = Number(argv[2]), branch = argv[3];
-    if (argv.length !== 4 || !session || !Number.isSafeInteger(generation) || generation < 1 ||
-      !branch || !/^[A-Za-z0-9][A-Za-z0-9._/-]*$/u.test(branch) || branch.includes("..") || branch.endsWith("/"))
-      throw new Error("usage: fabric landing-push <session> <generation> <branch> [--label <seat>]");
+    if (argv.length !== 4 || !session || !Number.isSafeInteger(generation) || generation < 1 || !branch || !validBranch(branch))
+      throw new UsageError("usage: fabric landing-push <session> <generation> <branch> [--label <seat>] [--remote R]");
     const lease = store.landingLease(who.project);
     if (!lease) throw new Error("stale landing lease");
     store.verifyLanding(who, session, generation, lease.expectedSha);
     const gitOptions = { cwd: who.cwd, env: withoutGitRedirects(process.env) };
-    const remote = execFileSync("git", ["ls-remote", "--heads", "origin", `refs/heads/${branch}`],
+    const remote = execFileSync("git", ["ls-remote", "--heads", landingRemote, `refs/heads/${branch}`],
       { ...gitOptions, encoding: "utf8" }).trim().split(/\s+/u)[0];
     if (remote !== lease.expectedSha) throw new Error("remote integration SHA changed; acquire a new landing lease");
     const head = execFileSync("git", ["rev-parse", "HEAD"], { ...gitOptions, encoding: "utf8" }).trim();
     execFileSync("git", ["merge-base", "--is-ancestor", remote, head], gitOptions);
+    const root = productRoot(process.env);
+    execFileSync(await pythonOwner(root, who, process.env),
+      [resolve(root, "skills/orchestrate/scripts/lane_protection.py"),
+        "--common-dir", resolve(who.project, ".git"), "--tip", head, "--base", lease.expectedSha],
+      { ...gitOptions, stdio: ["ignore", "ignore", "inherit"], timeout: 30_000 });
     const pushed = store.withLandingPush(who, session, generation, remote, () =>
       execFileSync("git", ["push", `--force-with-lease=refs/heads/${branch}:${remote}`,
-        "origin", `${head}:refs/heads/${branch}`], { ...gitOptions, stdio: "inherit", timeout: 120_000 }));
+        landingRemote, `${head}:refs/heads/${branch}`],
+      { ...gitOptions, stdio: landingJson ? ["inherit", 2, "inherit"] : "inherit", timeout: 120_000 }));
     show({ pushed: branch, previous_sha: remote, generation,
       ...(pushed.releaseWarning ? { release_warning: pushed.releaseWarning } : {}) });
     break;
@@ -718,7 +812,7 @@ try {
     if(ids.some(id=>id.startsWith("--"))) throw new Error("usage: fabric watch [ids…] [--interval N]");
     const seen=new Map<string,string>();
     for(;;) {
-      const result=await statusRows(who.project,ids.length ? ids : undefined);
+      const result=await statusRows(who.project,ids.length ? ids : undefined, 0, "all", undefined, "brief", true, 20, false, true);
       if(!result.runs) throw new Error(digest(result));
       for(const row of result.runs) {
         const key=`${row.run_id}:${row.task_id}`;
@@ -760,7 +854,7 @@ try {
   }
 } catch (error) {
   console.error(`fabric: ${error instanceof Error ? error.message : String(error)}`);
-  process.exitCode = 1;
+  process.exitCode = error instanceof UsageError ? 2 : 1;
 } finally {
   store?.close();
 }

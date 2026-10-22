@@ -1,3 +1,4 @@
+import { actAsMcpServer } from "./seat-index.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { setTimeout as delay } from "node:timers/promises";
@@ -5,7 +6,7 @@ import { z } from "zod";
 
 import { federatedLane, fabricHosts, releaseHostChecks } from "./hosts.js";
 import { CommitShaError, databasePath, identify, resolveCommitSha } from "./identity.js";
-import { federatedStatusRows as statusRows, fabricOutput, resultTail } from "./run-registry.js";
+import { federatedStatusRows as statusRows, fabricOutput, resultTail, reapAttemptRuns } from "./run-registry.js";
 import { reply, digest, serverBuild, mailboxView, adapterView, runView, fullView, lanesDigest, cancelDigest } from "./surface.js";
 import { catalogueSnapshot, liveModels, resetCooldowns } from "./catalogue.js";
 import { handoffDispatch, resumeConfiguredProvider } from "./resume.js";
@@ -31,6 +32,7 @@ const MAX_WAIT_SECONDS = MAX_EXECUTION_WAIT_SECONDS;
  * class of error that reports "the daemon is unavailable" while the daemon is
  * running. If the file cannot be opened the caller is told which file and why.
  */
+actAsMcpServer();
 const who = identify();
 let store: Store | undefined;
 const initialiseStore = (busyTimeoutMs = 5000): Store => {
@@ -166,7 +168,7 @@ const route = {
   fallback: z
     .union([z.boolean(), z.literal("any"), z.array(z.union([z.string(), z.record(z.string(), z.unknown())]))])
     .optional(),
-  route: z.string().optional().meta({ description: "Tier pool: junior (laid-out work, cheap lenses), senior (judgement, review, delegation) or principal (critical decisions); or design or writing. Old names map on: bulk/scout to junior, workhorse/strong/review to senior, flagship to principal. adapter narrows the pool; an explicit model wins over route. Prefer naming a model (deepseek-free, glm-free, sonnet, sol) when you know what you want." }),
+  route: z.string().optional().meta({ description: "Tier pool: junior (laid-out work, cheap lenses), senior (judgement, review, delegation) or principal (critical decisions); or design or writing. adapter narrows the pool; an explicit model wins over route. Prefer naming a model (deepseek-free, glm-free, sonnet, sol) when you know what you want." }),
   rotate: z.boolean().optional().meta({ description: "Cycle the route's pool per project instead of taking its top model; ignored with council." }),
   council: z.number().int().min(1).max(8).optional().meta({ description: "Run 1-8 members from the route as one batch, families spread first; members repeat when fewer are available." }),
   models: z.array(z.string()).min(1).max(8).optional().meta({ description: "Ad-hoc council of adapter/model[@effort] entries; bypasses route and adapter." }),
@@ -463,7 +465,7 @@ register(
     if (result.host) return runView(withWarnings(result, waitResult.warnings), input.detail);
     const runId = result.id ?? (input.session ? result.run_id : undefined);
     if (!runId) return withWarnings(result, waitResult.warnings);
-    const observed = await statusRows(who.project, [String(runId)], 0, "all", signal, input.detail);
+    const observed = await statusRows(who.project, [String(runId)], 0, "all", signal, input.detail, true, 20, false, true);
     if ((input.resume || input.session) && result.task_id) observed.runs = observed.runs?.filter((row) => row.task_id === result.task_id);
     acknowledgeRuns(observed);
     if (observed.runs?.length === 1) {
@@ -504,7 +506,7 @@ register(
   async ({ ids, id, wait_seconds, until, detail, tail_chars, fields }, { signal }) => {
     const waitResult = boundedWait(wait_seconds);
     if (waitResult.error) return waitResult.error;
-    const result = await statusRows(who.project, ids ?? (id ? [id] : undefined), waitResult.value, until, signal, detail);
+    const result = await statusRows(who.project, ids ?? (id ? [id] : undefined), waitResult.value, until, signal, detail, true, 20, false, true);
     acknowledgeRuns(result);
     const view = detail === "full"
       ? fullView(runView(withWarnings(result, waitResult.warnings), detail), fields)
@@ -744,4 +746,5 @@ transport.send = async (message) => {
 process.stdin.once("end", () => {
   void transport.close();
 });
+await reapAttemptRuns(who.cwd);
 await server.connect(transport);

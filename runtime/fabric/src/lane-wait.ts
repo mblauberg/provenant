@@ -12,6 +12,17 @@ export interface LaneWaitDependencies {
   fail: (text: string) => void;
   sleep: (ms: number) => Promise<void>;
   pollMs?: number;
+  /**
+   * Hold between reads until something may have changed or `ms` passes.
+   * Absent, the wait sleeps a fixed `pollMs`.
+   */
+  idle?: (ms: number) => Promise<void>;
+  /** Read everything, peers included; settles a decision made on a stale peer reading. */
+  refresh?: () => Promise<RunReadResponse>;
+  /** True while the last read reused earlier peer rows. */
+  stale?: () => boolean;
+  /** Longest idle between reads when `idle` is set. */
+  fallbackMs?: number;
   /** Hold the report until every listed lane is finished or needs input. */
   all?: boolean;
   /** Stop waiting after this long; the wait then exits 124. */
@@ -37,6 +48,11 @@ export async function waitForLanes(deps: LaneWaitDependencies): Promise<number> 
     return 1;
   }
   for (;;) {
+    // Neither "none running" nor a timeout may rest on peer rows from before the last minute.
+    if (deps.stale?.() && deps.refresh && (now() >= deadline || current.runs.every(done))) {
+      const fresh = await deps.refresh();
+      if (fresh.status === "ok") current = fresh;
+    }
     const completed = current.runs.filter(done);
     const attempts: LaneAttempt[] = completed.map((row) => ({
       runId: row.run_id, taskId: laneTaskId(row), attempt: row.attempt,
@@ -81,7 +97,8 @@ export async function waitForLanes(deps: LaneWaitDependencies): Promise<number> 
       await write(timeout());
       return 124;
     }
-    await sleep(deps.pollMs ?? 2000);
+    if (deps.idle) await deps.idle(Math.max(0, Math.min(deps.fallbackMs ?? 30_000, deadline - now())));
+    else await sleep(deps.pollMs ?? 2000);
     const next = await deps.read();
     if (next.status === "ok") current = next;
   }

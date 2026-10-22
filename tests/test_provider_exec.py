@@ -9,6 +9,7 @@ import shutil
 import re
 import signal
 import socket
+import stat
 import subprocess
 import ctypes
 import sys
@@ -36,13 +37,13 @@ def test_plan_only_resolves_without_launch(tmp_path):
     }
     result = subprocess.run(
         [
-            str(SCRIPTS / "cf_dispatch.sh"),
+            str(SCRIPTS / "cf_dispatch.py"),
             "--intent",
             "ordinary",
             "--tool",
             "claude",
             "--alias",
-            "workhorse",
+            "senior",
             "--prompt",
             "Hello",
             "--plan-only",
@@ -179,12 +180,14 @@ def test_read_only_state_link_into_a_credential_store_is_not_granted(monkeypatch
     assert f'(subpath "{home / ".config/opencode"}")' in profile
 
 
-def test_strip_jsonc_keeps_comment_and_comma_text_inside_strings():
+def test_jsonc_reader_keeps_comment_and_comma_text_inside_strings():
     supervisor = importlib.import_module("skills.orchestrate.scripts.provider_exec")
     text = '{"a": "x,}y // not a comment /* nor this */", "b": [1, 2, /* c */ ], // tail\n}'
-    assert supervisor.json.loads(supervisor._strip_jsonc(text)) == {
+    assert supervisor._jsonc_loads(text) == {
         "a": "x,}y // not a comment /* nor this */", "b": [1, 2],
     }
+    with pytest.raises(ValueError):
+        supervisor._jsonc_loads('{"a": 1} /* unterminated')
 
 
 def test_opencode_read_only_discovery_skips_symlinks_to_credentials(monkeypatch, tmp_path):
@@ -213,17 +216,16 @@ def test_opencode_read_only_discovery_skips_symlinks_to_credentials(monkeypatch,
 @pytest.mark.parametrize("adapter", ["agy", "claude", "cursor", "opencode", "kiro"])
 def test_writer_confinement_allows_owned_paths_and_add_dirs(monkeypatch, tmp_path, adapter):
     mod = supervisor()
-    worktree = tmp_path / "worktree"
+    primary, worktree = linked_worktree(tmp_path)
     attempt = tmp_path / "run" / "attempt"
-    common = tmp_path / "common.git"
-    private = tmp_path / "linked.git"
+    common = primary / ".git"
+    private = common / "worktrees/lane"
     add_dir = tmp_path / "extra"
-    for path in (worktree, attempt, common, private, add_dir):
+    for path in (attempt, add_dir):
         path.mkdir(parents=True)
-    dirs = iter((private, common))
-    monkeypatch.setattr(mod.subprocess, "run", lambda *a, **k: SimpleNamespace(returncode=0, stdout=str(next(dirs))))
     plan = {"adapter": adapter, "mode": "worktree_write", "cwd": str(worktree),
-            "workspace_root": str(worktree), "run_dir": str(attempt),
+            "workspace_root": str(worktree), "run_dir": str(attempt), "lane_ref": "refs/heads/lane",
+            "trusted_git": {"common": str(common)},
             "applied": {"confinement": "sandbox-exec", "add_dirs": [str(add_dir)]}}
     profile = mod.os_confinement_profile(plan)
     assert "(deny file-write*)" in profile
@@ -232,15 +234,20 @@ def test_writer_confinement_allows_owned_paths_and_add_dirs(monkeypatch, tmp_pat
     for path in (worktree, add_dir, attempt, private, Path("/dev")):
         assert f'(subpath "{path}")' in allow
     assert f'(subpath "{common}")' not in allow
-    for path in (common / "objects", common / "refs", common / "logs"):
-        assert f'(subpath "{path}")' in profile
-    for path in (common / "packed-refs", common / "packed-refs.lock", common / "packed-refs.new"):
-        assert f'(literal "{path}")' in profile
-    for path in (common / "config", common / "hooks", common / "HEAD", common / "index"):
+    assert f'(subpath "{common / "objects"}")' in allow
+    for path in (common / "refs/heads/lane", common / "refs/heads/lane.lock", common / "logs/refs/heads/lane"):
+        assert f'(literal "{path}")' in allow
+    # Writers move only their own branch; the primary branch, upstreams and tags stay owner-only.
+    for path in (common / "config", common / "hooks", common / "HEAD", common / "index", common / "refs",
+                 common / "logs", common / "packed-refs", common / "refs/heads/main"):
         assert f'(subpath "{path}")' not in profile
         assert f'(literal "{path}")' not in profile
     for path in (Path.home() / ".cache", Path.home() / "Library/Caches", Path("/private/tmp")):
         assert f'(subpath "{path}")' not in profile
+    deny = "\n".join(line for line in profile.splitlines() if line.startswith("(deny file-write* "))
+    for path in (worktree / ".git", private / "commondir", private / "gitdir", private / "config.worktree",
+                 common / "objects/info"):
+        assert f'(subpath "{path}")' in deny
     for state_path in mod.CONFINED_STATE[adapter]["read_write"]:
         assert mod._sbpl_filter(Path.home() / state_path) in profile
     assert f'(subpath "{tmp_path}")' not in profile
@@ -358,12 +365,10 @@ def test_read_only_plan_gets_no_locks_grant(monkeypatch, tmp_path):
 
 def test_writer_protected_path_inside_add_dir_keeps_read_and_write_denied(monkeypatch, tmp_path):
     mod = supervisor()
-    worktree = tmp_path / "worktree"
+    _primary, worktree = linked_worktree(tmp_path)
     add_dir = tmp_path / "extra"
     protected = add_dir / "private"
-    worktree.mkdir()
     protected.mkdir(parents=True)
-    monkeypatch.setattr(mod.subprocess, "run", lambda *a, **k: SimpleNamespace(returncode=1, stdout=""))
     plan = {"adapter": "agy", "mode": "worktree_write", "cwd": str(worktree),
             "workspace_root": str(worktree), "protected_paths": [str(protected)],
             "applied": {"confinement": "sandbox-exec", "add_dirs": [str(add_dir)]}}
@@ -883,6 +888,818 @@ def test_adapter_binary_in_a_plain_bin_directory_grants_the_file_alone(monkeypat
     assert directories == []
 
 
+PROVIDER_STATE_CASES = (
+    ("claude", (".claude/settings.json", ".claude/settings.local.json", ".claude/hooks/attack.sh",
+                ".claude/skills/attack/SKILL.md", ".claude/agents/attack.md", ".claude/plugins/attack.js",
+                ".claude/CLAUDE.md", ".claude/shell-snapshots/attack.sh",
+                ".claude/projects/probe/memory/MEMORY.md", ".claude/projects/probe/settings.json",
+                ".claude.json", ".claude.json.tmp", ".claude.json.backup"),
+     (".claude/projects/probe/12345678-1234-1234-1234-123456789abc.jsonl",
+      ".claude/projects/probe/12345678-1234-1234-1234-123456789abc/subagents/agent.jsonl",
+      ".claude/sessions/probe.json", ".claude/history.jsonl",
+      ".claude/.credentials.json", ".claude/.credentials.json.tmp", ".claude/debug/probe.log")),
+    ("agy", (".gemini/config/mcp_config.json", ".gemini/config/plugins/attack.js",
+             ".gemini/config/skills/attack/SKILL.md", ".gemini/antigravity-cli/settings.json",
+             ".gemini/antigravity-cli/plugins/attack.js", ".gemini/antigravity-cli/skills/attack/SKILL.md",
+             ".gemini/antigravity-cli/bin/attack", ".gemini/antigravity-cli/bin/agentapi",
+             ".gemini/antigravity-cli/builtin/skills/attack.md",
+             ".gemini/antigravity-cli/mcp/server/instructions.md",
+             ".gemini/antigravity-cli/cache/marketplaces/attack.js", ".gemini/config/projects/probe.json",
+             ".gemini/config/sidecars/attack.json"),
+     (".gemini/oauth_creds.json", ".gemini/oauth_creds.json.tmp",
+      ".gemini/antigravity-cli/antigravity-oauth-token", ".gemini/antigravity-cli/mcp_oauth_tokens.json",
+      ".gemini/antigravity-cli/conversations/probe.pb", ".gemini/antigravity-cli/presence/probe.lock",
+      ".gemini/antigravity-cli/conversation_summaries.db-wal")),
+    ("cursor", (".cursor/hooks.json", ".cursor/extensions/attack.js", ".cursor/settings.json",
+                ".cursor/cli-config.json", ".cursor/argv.json", ".cursor/mcp.json",
+                ".cursor/agents/attack.md", ".cursor/plugins/attack.js", ".cursor/skills/attack/SKILL.md",
+                ".cursor/projects/probe/.workspace-trusted", ".cursor/projects/probe/repo.json",
+                ".cursor/projects/probe/mcp-approvals.json", ".cursor/projects/probe/mcp-disabled.json",
+                ".cursor/projects/probe/mcps/server/instructions.md", ".cursor/projects/probe/rules/attack.md"),
+     (".cursor/chats/probe/session.db", ".cursor/agent-cli-state.json", ".cursor/prompt_history.json",
+      ".cursor/ai-tracking/ai-code-tracking.db-wal", ".cursor/projects/probe/agent-transcripts/probe.txt",
+      ".cursor/projects/probe/worker.log", ".cursor/projects/probe/mcp-auth.json")),
+    ("kiro", (".kiro/settings/mcp.json", ".kiro/settings/cli.json", ".kiro/agents/attack.json",
+              ".kiro/steering/attack.md"),
+     (".cache/kiro/probe.log",)),
+)
+
+
+@pytest.mark.parametrize("mode", ["read_only", "worktree_write"])
+@pytest.mark.parametrize("adapter,protected,writable", PROVIDER_STATE_CASES)
+@pytest.mark.parametrize("sandboxed", [False, True], ids=["profile", "sandbox-exec"])
+def test_provider_state_keeps_config_read_only_and_runtime_state_writable(monkeypatch, tmp_path, mode,
+                                                                        adapter, protected, writable, sandboxed):
+    mod = supervisor()
+    home = (tmp_path / "home").resolve()
+    workspace = home / "repo"
+    workspace.mkdir(parents=True)
+    subprocess.run(["git", "init", "-q", str(workspace)], check=True)
+    monkeypatch.setattr(mod.Path, "home", lambda: home)
+    for relative in (*protected, *writable):
+        path = home / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("original\n", encoding="utf-8")
+    profile = mod.os_confinement_profile({
+        "adapter": adapter, "mode": mode, "workspace_root": str(workspace), "cwd": str(workspace),
+        "applied": {"confinement": "sandbox-exec", "add_dirs": []},
+    })
+    assert "(deny file-write*)" in profile
+    writes = "\n".join(line for line in profile.splitlines() if line.startswith("(allow file-write* "))
+    # Check every allow, including ancestor grants and atomic-rewrite regexes, not just exact names.
+    def granted(relative):
+        path = str(home / relative)
+        for kind, value in re.findall(r'\((subpath|literal|regex) #?"([^"]*)"\)', writes):
+            if kind == "regex" and re.search(value, path):
+                return True
+            if kind == "literal" and path == value:
+                return True
+            if kind == "subpath" and (path == value or path.startswith(value + "/")):
+                return True
+        return False
+
+    for relative in protected:
+        assert not granted(relative), relative
+    for relative in writable:
+        assert granted(relative), relative
+    if adapter in {"claude", "cursor"}:
+        assert not granted(f".{adapter}/projects/absent-project")
+    root = {"agy": ".gemini", "claude": ".claude", "cursor": ".cursor", "kiro": ".kiro"}[adapter]
+    link_guard = f'(deny file-write-create (require-all (subpath "{home / root}")'
+    assert any(line.startswith(link_guard) and "(vnode-type SYMLINK)" in line for line in profile.splitlines())
+
+    if not sandboxed:
+        return
+    sandbox_exec = mod._sandbox_exec_path()
+    if not sandbox_exec:
+        pytest.skip("sandbox-exec is unavailable or disabled")
+
+    def run(script):
+        return subprocess.run([sandbox_exec, "-p", profile, "/bin/sh", "-c", script],
+                              capture_output=True, text=True)
+
+    probe = run("true")
+    if probe.returncode and "sandbox_apply" in probe.stderr:
+        pytest.skip("sandbox_apply is refused in this test environment")
+    assert probe.returncode == 0, probe.stderr
+    for relative in protected:
+        path = shlex.quote(str(home / relative))
+        assert run(f"printf hijack > {path}").returncode != 0, relative
+        assert run(f"rm -f {path}").returncode != 0, relative
+        assert (home / relative).read_text() == "original\n"
+    for relative in writable:
+        path = shlex.quote(str(home / relative))
+        assert run(f"printf refreshed > {path}").returncode == 0, relative
+        link = shlex.quote(str(home / (relative + ".link")))
+        assert run(f"ln -s {shlex.quote(str(home / protected[0]))} {link}").returncode != 0, relative
+    # New session directories must still be creatable; the file-only Kiro guard would forbid these.
+    sessions = {"claude": ".claude/projects/probe/12345678-1234-1234-1234-123456789abc",
+                "agy": ".gemini/antigravity-cli/conversations", "cursor": ".cursor/chats/probe",
+                "kiro": ".cache/kiro"}
+    directory = home / sessions[adapter] / "new-session"
+    assert run(f"mkdir {shlex.quote(str(directory))}").returncode == 0
+    link = directory / "link"
+    assert run(f"ln -s {shlex.quote(str(home / protected[0]))} {shlex.quote(str(link))}").returncode != 0
+    if adapter in {"claude", "cursor"}:
+        destination = home / f".{adapter}/projects/absent-project"
+        assert run(f"mv {shlex.quote(str(directory))} {shlex.quote(str(destination))}").returncode != 0
+
+
+@pytest.mark.parametrize("mode", ["read_only", "worktree_write"])
+@pytest.mark.parametrize("adapter,config", [
+    ("claude", ".claude/settings.json"), ("agy", ".gemini/config/mcp_config.json"),
+    ("cursor", ".cursor/cli-config.json"), ("kiro", ".kiro/settings/mcp.json"),
+    ("opencode", ".config/opencode/opencode.json"), ("claude", ".claude.json"),
+    ("claude", ".ssh/synthetic"),
+])
+def test_file_link_cannot_cross_protected_provider_state(monkeypatch, tmp_path,
+                                                                         adapter, config, mode):
+    mod = supervisor()
+    sandbox_exec = mod._sandbox_exec_path()
+    if not sandbox_exec:
+        pytest.skip("sandbox-exec is unavailable or disabled")
+    home = (tmp_path / "home").resolve()
+    workspace = home / "repo"
+    workspace.mkdir(parents=True)
+    subprocess.run(["git", "init", "-q", str(workspace)], check=True)
+    protected = home / config
+    protected.parent.mkdir(parents=True, exist_ok=True)
+    protected.write_text("original\n")
+    attempt = home / "attempt"
+    attempt.mkdir()
+    monkeypatch.setattr(mod.Path, "home", lambda: home)
+    plan = {"adapter": adapter, "mode": mode, "cwd": str(workspace), "workspace_root": str(workspace),
+            "run_dir": str(attempt), "applied": {"confinement": "sandbox-exec", "add_dirs": []}}
+    command = mod.confinement_command(plan, ["/bin/sh", "-c"])
+    probe = subprocess.run([*command, f"printf ok > {shlex.quote(str(attempt / 'probe'))}"],
+                           check=False, capture_output=True, text=True)
+    assert probe.returncode == 0, probe.stderr
+    # Write rules check both link ends, so links inside writable roots (local git clones) still work.
+    inside = attempt / "probe-link"
+    result = subprocess.run([*command, f"ln {shlex.quote(str(attempt / 'probe'))} {shlex.quote(str(inside))}"],
+                            check=False, capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    link = attempt / "x"
+    result = subprocess.run([*command, f"ln {shlex.quote(str(protected))} {shlex.quote(str(link))}"],
+                            check=False, capture_output=True, text=True)
+    assert result.returncode != 0, result.stderr
+    assert not link.exists()
+    destination = protected.parent / "new-link"
+    result = subprocess.run([*command, f"ln {shlex.quote(str(attempt / 'probe'))} {shlex.quote(str(destination))}"],
+                            check=False, capture_output=True, text=True)
+    assert result.returncode != 0, result.stderr
+    assert not destination.exists()
+    assert protected.read_text() == "original\n"
+
+
+@pytest.mark.parametrize("sandboxed", [False, True], ids=["preparation", "sandbox-exec"])
+@pytest.mark.parametrize("adapter", ["claude", "cursor", "agy", "kiro"])
+def test_provider_state_symlink_home_and_cwd_alias_use_canonical_paths(monkeypatch, tmp_path, adapter, sandboxed):
+    mod = supervisor()
+    home = (tmp_path / "home").resolve()
+    home.mkdir()
+    target = (tmp_path / "dotfiles" / adapter).resolve()
+    target.mkdir(parents=True)
+    relative_home = ".gemini" if adapter == "agy" else f".{adapter}"
+    (home / relative_home).symlink_to(target, target_is_directory=True)
+    workspace = (tmp_path / "real-project").resolve()
+    workspace.mkdir()
+    alias = tmp_path / "project-alias"
+    alias.symlink_to(workspace, target_is_directory=True)
+    monkeypatch.setattr(mod.Path, "home", lambda: home)
+    sandbox_exec = mod._sandbox_exec_path() if sandboxed else None
+    if sandboxed and not sandbox_exec:
+        pytest.skip("sandbox-exec is unavailable or disabled")
+    # Preparation and canonical paths can be checked even in a nested sandbox.
+    monkeypatch.setattr(mod, "_sandbox_exec_path", lambda: sandbox_exec or "/usr/bin/sandbox-exec")
+    plan = {"adapter": adapter, "mode": "read_only", "cwd": str(alias), "workspace_root": str(workspace),
+            "applied": {"confinement": "sandbox-exec", "add_dirs": []}}
+    command = mod.confinement_command(plan, ["/bin/sh", "-c"])
+    slug = (mod._claude_project_dir(home, workspace).name if adapter == "claude" else
+            re.sub(r"[^A-Za-z0-9]+", "-", str(workspace)).strip("-"))
+    project = (target if adapter == "kiro" else target / "antigravity-cli/scratch" if adapter == "agy" else
+               target / "projects" / slug)
+    assert project.is_dir()
+    # The exact same canonical root anchors the regex, not just directory preparation.
+    patterns = re.findall(r'\(allow file-write\* \(regex #"([^"]+)"\)\)', command[2])
+    if adapter == "kiro":
+        assert f'(allow file-read-data (subpath "{target}")' in command[2]
+        assert f'(subpath "{home / ".kiro"}")' not in command[2]
+        if sandbox_exec:
+            (target / "synthetic").write_text("ok")
+            result = subprocess.run([*command, f"cat {shlex.quote(str(target / 'synthetic'))}"],
+                                    check=False, capture_output=True, text=True)
+            assert result.returncode == 0, result.stderr
+            assert result.stdout == "ok"
+            assert subprocess.run([*command, f"printf bad > {shlex.quote(str(target / 'settings.json'))}"],
+                                  check=False, capture_output=True, text=True).returncode != 0
+        return
+    state = (project / "12345678-1234-1234-1234-123456789abc.jsonl" if adapter == "claude" else
+             project / "worker.log")
+    if adapter == "agy":
+        assert f'(allow file-write* (subpath "{target / "antigravity-cli/annotations"}")' in command[2]
+    else:
+        assert any(re.fullmatch(pattern, str(state)) for pattern in patterns)
+    if not sandbox_exec:
+        return
+    result = subprocess.run([*command, f"printf ok > {shlex.quote(str(state))}"], check=False, capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    assert state.read_text() == "ok"
+    denied = target / {"claude": "settings.json", "cursor": "cli-config.json", "agy": "config/mcp_config.json"}[adapter]
+    denied.parent.mkdir(parents=True, exist_ok=True)
+    assert subprocess.run([*command, f"printf bad > {shlex.quote(str(denied))}"],
+                          check=False, capture_output=True, text=True).returncode != 0
+
+
+@pytest.mark.parametrize("sandboxed", [False, True], ids=["preparation", "sandbox-exec"])
+@pytest.mark.parametrize("relative", ["cache/projects.json", "updater/update_status.json"])
+def test_agy_prepares_fresh_state_and_allows_atomic_runtime_rewrites(monkeypatch, tmp_path, relative, sandboxed):
+    mod = supervisor()
+    home = (tmp_path / "home").resolve()
+    home.mkdir()
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    monkeypatch.setattr(mod.Path, "home", lambda: home)
+    sandbox_exec = mod._sandbox_exec_path() if sandboxed else None
+    if sandboxed and not sandbox_exec:
+        pytest.skip("sandbox-exec is unavailable or disabled")
+    monkeypatch.setattr(mod, "_sandbox_exec_path", lambda: sandbox_exec or "/usr/bin/sandbox-exec")
+    plan = {"adapter": "agy", "mode": "read_only", "cwd": str(workspace), "workspace_root": str(workspace),
+            "applied": {"confinement": "sandbox-exec", "add_dirs": []}}
+    command = mod.confinement_command(plan, ["/bin/sh", "-c"])
+    root = home / ".gemini/antigravity-cli"
+    for name in ("updater", "scratch", "cache", "conversations", "presence"):
+        assert (root / name).is_dir(), name
+    path = root / relative
+    siblings = re.findall(r'\(allow file-write\* .*', command[2])
+    assert any(re.search(pattern, str(path) + ".tmp") for rule in siblings
+               for pattern in re.findall(r'\(regex #"([^"]+)"\)', rule))
+    if not sandbox_exec:
+        return
+    result = subprocess.run([*command, f"printf new > {shlex.quote(str(path) + '.tmp')} && "
+                                      f"mv {shlex.quote(str(path) + '.tmp')} {shlex.quote(str(path))}"],
+                            capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    assert path.read_text() == "new"
+    result = subprocess.run([*command, f"mkdir {shlex.quote(str(root / 'scratch/new-session'))}"],
+                            capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    for denied in (root / "cache/marketplaces/attack.json", home / ".gemini/config/sidecars/attack.json"):
+        denied.parent.mkdir(parents=True, exist_ok=True)
+        assert subprocess.run([*command, f"printf bad > {shlex.quote(str(denied))}"],
+                              capture_output=True, text=True).returncode != 0
+
+
+AGY_TOKENS = (".gemini/oauth_creds.json", ".gemini/antigravity-cli/antigravity-oauth-token",
+              ".gemini/antigravity-cli/mcp_oauth_tokens.json")
+
+
+def agy_home_fixture(mod, monkeypatch, tmp_path):
+    home = (tmp_path / "home").resolve()
+    root = home / ".gemini/antigravity-cli"
+    for relative in (".gitconfig", ".gemini/config/settings.json", *AGY_TOKENS,
+                     ".gemini/antigravity-cli/settings.json", ".gemini/antigravity-cli/conversations/c.pb",
+                     ".gemini/antigravity-cli/jetski_state.pbtxt", ".gemini/antigravity-cli/history.jsonl",
+                     ".gemini/antigravity-cli/bin/agentapi", ".gemini/antigravity-cli/bin/webm_encoder"):
+        (home / relative).parent.mkdir(parents=True, exist_ok=True)
+        (home / relative).write_text("original\n", encoding="utf-8")
+    monkeypatch.setattr(mod.Path, "home", lambda: home)
+    return home, root
+
+
+def stage_agy(mod, plan, private_tmp):
+    """Stage as execute does, in the attempt tmp opened once without following a link."""
+    tmp_fd = mod._open_canonical_dir(private_tmp)
+    return mod.stage_agy_home(plan, tmp_fd, private_tmp), tmp_fd
+
+
+def agy_plan(**extra):
+    return {"adapter": "agy", "mode": "read_only", "applied": {"confinement": "sandbox-exec", "add_dirs": []},
+            **extra}
+
+
+def test_confined_agy_home_links_everything_but_its_bin_shim_and_token_files(monkeypatch, tmp_path):
+    mod = supervisor()
+    home, root = agy_home_fixture(mod, monkeypatch, tmp_path)
+    private_tmp = tmp_path / "attempt/tmp"
+    private_tmp.mkdir(parents=True)
+    plan = agy_plan()
+    overlay = stage_agy(mod, plan, private_tmp)[0].path
+    assert overlay.parent == private_tmp and overlay.name.startswith("agy-home-")
+    lane_root = overlay / ".gemini/antigravity-cli"
+    for directory in (overlay, overlay / ".gemini", lane_root, lane_root / "bin"):
+        assert directory.is_dir() and not directory.is_symlink(), directory
+    # State directories are prepared before staging, so each is a link and nothing is lost at cleanup.
+    for relative in (".gitconfig", ".gemini/config", ".gemini/antigravity-cli/settings.json",
+                     ".gemini/antigravity-cli/conversations", ".gemini/antigravity-cli/brain",
+                     ".gemini/antigravity-cli/updater", ".gemini/antigravity-cli/bin/webm_encoder"):
+        assert (overlay / relative).readlink() == home / relative, relative
+    for relative in (*AGY_TOKENS, ".gemini/antigravity-cli/bin/agentapi"):
+        assert not (overlay / relative).exists() and not (overlay / relative).is_symlink(), relative
+
+    # Each attempt stages a fresh overlay, whatever a lane or a failed cleanup left in the last one.
+    (lane_root / "bin/agentapi").write_text("planted\n", encoding="utf-8")
+    (lane_root / "settings.json").unlink()
+    (lane_root / "settings.json").write_text("planted\n", encoding="utf-8")
+    os.mkfifo(private_tmp / "agy-home")
+    again = stage_agy(mod, plan, private_tmp)[0].path
+    assert again != overlay
+    assert not (again / ".gemini/antigravity-cli/bin/agentapi").exists()
+    assert (again / ".gemini/antigravity-cli/settings.json").readlink() == root / "settings.json"
+    assert (root / "bin/agentapi").read_text() == "original\n"
+
+    assert stage_agy(mod, {**plan, "adapter": "claude"}, private_tmp)[0] is None
+    assert stage_agy(mod, agy_plan(applied={"confinement": "none"}), private_tmp)[0] is None
+
+
+def test_agy_home_keeps_dangling_links_and_tolerates_a_missing_bin(monkeypatch, tmp_path):
+    mod = supervisor()
+    home = (tmp_path / "home").resolve()
+    home.mkdir()
+    (home / ".dangling").symlink_to(home / "absent")
+    monkeypatch.setattr(mod.Path, "home", lambda: home)
+    private_tmp = tmp_path / "tmp"
+    private_tmp.mkdir()
+    overlay = stage_agy(mod, agy_plan(), private_tmp)[0].path
+    assert (overlay / ".dangling").readlink() == home / ".dangling"
+    assert not (home / ".gemini/antigravity-cli/bin").exists()
+    assert list((overlay / ".gemini/antigravity-cli/bin").iterdir()) == []
+    assert (overlay / ".gemini/antigravity-cli/conversations").readlink() == home / ".gemini/antigravity-cli/conversations"
+
+
+def test_agy_home_copies_back_renamed_state_but_never_tokens_links_or_oversized_files(monkeypatch, tmp_path):
+    mod = supervisor()
+    agy_state = mod.CONFINED_STATE["agy"]
+    granted = {entry.removesuffix("*") for entry in (*agy_state["read_write"], *agy_state["write_literal"])}
+    # Only state the profile already lets the lane write is ever copied back.
+    assert {f".gemini/antigravity-cli/{name}" for name in mod.AGY_RENAMED_STATE} <= granted
+    _, root = agy_home_fixture(mod, monkeypatch, tmp_path)
+    (root / "jetski_state.pbtxt").chmod(0o644)
+    private_tmp = tmp_path / "tmp"
+    private_tmp.mkdir()
+    outside = tmp_path / "outside"
+    outside.write_text("outside\n", encoding="utf-8")
+    plan = agy_plan()
+    staged, tmp_fd = stage_agy(mod, plan, private_tmp)
+    overlay = staged.path
+    lane_root = overlay / ".gemini/antigravity-cli"
+    # agy writes a temp file and renames it over the overlay's link.
+    for name, text in (("jetski_state.pbtxt", "renamed\n"), ("antigravity-oauth-token", "token\n")):
+        (lane_root / (name + ".tmp")).write_text(text, encoding="utf-8")
+        os.replace(lane_root / (name + ".tmp"), lane_root / name)
+    (lane_root / "history.jsonl").unlink()
+    (lane_root / "history.jsonl").symlink_to(outside)  # a link is never followed or installed
+    os.mkfifo(lane_root / "last_check.timestamp")  # nor a FIFO, which must not block the copy
+    (lane_root / "installation_id").write_text("x" * 65, encoding="utf-8")
+    monkeypatch.setattr(mod, "AGY_STATE_COPY_MAX", 64)
+    (lane_root / "locked").mkdir()
+    (lane_root / "locked/file").write_text("x", encoding="utf-8")
+    (lane_root / "locked").chmod(0o500)
+
+    warnings = mod.finish_agy_home(plan, tmp_fd, staged)
+    assert (root / "jetski_state.pbtxt").read_text() == "renamed\n"
+    assert stat.S_IMODE((root / "jetski_state.pbtxt").stat().st_mode) == 0o644
+    assert not (root / "jetski_state.pbtxt").is_symlink()
+    assert (root / "antigravity-oauth-token").read_text() == "original\n"
+    assert (root / "history.jsonl").read_text() == "original\n" and outside.read_text() == "outside\n"
+    assert not (root / "last_check.timestamp").exists()
+    assert not (root / "installation_id").exists()
+    assert sorted(warnings) == ["agy state not copied back: installation_id: larger than 64 bytes",
+                                "agy state not copied back: last_check.timestamp: not a regular file"]
+    assert not overlay.exists()  # read-only directories and FIFOs included
+    assert sorted(path.name for path in root.iterdir() if path.name.startswith(".")) == [mod.AGY_COPY_BACK_LOCK]
+
+
+def test_confined_agy_writes_its_shim_in_the_overlay_and_never_the_live_bin(monkeypatch, tmp_path):
+    """Verified on a Mac only: CI runs Ubuntu, which has no sandbox-exec, so this skips there."""
+    mod = supervisor()
+    _, root = agy_home_fixture(mod, monkeypatch, tmp_path)
+    sandbox_exec = mod._sandbox_exec_path()
+    if not sandbox_exec:
+        pytest.skip("sandbox-exec is unavailable or disabled")
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    run_dir = tmp_path / "attempt"
+    (run_dir / "tmp").mkdir(parents=True)
+    plan = agy_plan(cwd=str(workspace), workspace_root=str(workspace), run_dir=str(run_dir))
+    profile = mod.os_confinement_profile(plan)
+    overlay = stage_agy(mod, plan, run_dir / "tmp")[0].path
+
+    def run(script):
+        return subprocess.run([sandbox_exec, "-p", profile, "/bin/sh", "-c", script],
+                              capture_output=True, text=True, check=False,
+                              env={**os.environ, "HOME": str(overlay)})
+
+    probe = run("true")
+    if probe.returncode and "sandbox_apply" in probe.stderr:
+        pytest.skip("sandbox_apply is refused in this test environment")
+    shim = '#!/bin/sh\nexec "/usr/local/bin/agy" agentapi "$@"\n'
+    assert run(f'printf {shlex.quote(shim)} > "$HOME/.gemini/antigravity-cli/bin/agentapi"').returncode == 0
+    assert (overlay / ".gemini/antigravity-cli/bin/agentapi").read_text() == shim
+    # Every link is judged at its real path: state stays writable, config and the live bin do not.
+    assert run('printf new > "$HOME/.gemini/antigravity-cli/conversations/c.pb"').returncode == 0
+    assert (root / "conversations/c.pb").read_text() == "new"
+    for relative in ("settings.json", "bin/webm_encoder"):
+        assert run(f'printf bad > "$HOME/.gemini/antigravity-cli/{relative}"').returncode != 0, relative
+        assert (root / relative).read_text() == "original\n"
+    assert run(f"printf bad > {shlex.quote(str(root / 'bin/agentapi'))}").returncode != 0
+    assert (root / "bin/agentapi").read_text() == "original\n"
+
+
+def test_attempt_tmp_replaces_a_planted_link_and_refuses_a_linked_attempt(monkeypatch, tmp_path):
+    mod = supervisor()
+    agy_home_fixture(mod, monkeypatch, tmp_path)
+    victim = tmp_path / "victim/tmp"
+    victim.mkdir(parents=True)
+    attempt = tmp_path / "attempt"
+    attempt.mkdir()
+    (attempt / "tmp").symlink_to(victim)
+    tmp_fd = mod._open_attempt_tmp(attempt)
+    staged = mod.stage_agy_home(agy_plan(), tmp_fd, attempt / "tmp")
+    assert (attempt / "tmp").is_dir() and not (attempt / "tmp").is_symlink()
+    assert stat.S_IMODE((attempt / "tmp").stat().st_mode) == 0o700
+    assert staged.path.is_dir() and list(victim.iterdir()) == []
+    os.close(tmp_fd)
+    linked = tmp_path / "linked-attempt"
+    linked.symlink_to(attempt)
+    with pytest.raises(OSError):
+        mod._open_attempt_tmp(linked)
+
+
+def _plant_victim_overlay(victim, name):
+    lane_root = victim / name / ".gemini/antigravity-cli"
+    lane_root.mkdir(parents=True)
+    (lane_root / "jetski_state.pbtxt").write_text("victim\n", encoding="utf-8")
+    return lane_root
+
+
+def _rename_into(lane_root, name, text):
+    (lane_root / (name + ".tmp")).write_text(text, encoding="utf-8")
+    os.replace(lane_root / (name + ".tmp"), lane_root / name)
+
+
+def test_agy_home_cleanup_never_follows_a_tmp_or_overlay_swapped_for_a_link(monkeypatch, tmp_path):
+    """A lane that swaps tmp for another attempt's tmp cannot redirect copy-back or removal."""
+    mod = supervisor()
+    _, root = agy_home_fixture(mod, monkeypatch, tmp_path)
+    attempt = tmp_path / "attempt"
+    (attempt / "tmp").mkdir(parents=True)
+    plan = agy_plan()
+    staged, tmp_fd = stage_agy(mod, plan, attempt / "tmp")
+    _rename_into(staged.path / ".gemini/antigravity-cli", "jetski_state.pbtxt", "lane\n")
+    victim = tmp_path / "other-attempt/tmp"
+    victim_root = _plant_victim_overlay(victim, staged.name)
+    (attempt / "tmp").rename(attempt / "moved")
+    (attempt / "tmp").symlink_to(victim)
+
+    assert mod.finish_agy_home(plan, tmp_fd, staged) == []
+    assert (root / "jetski_state.pbtxt").read_text() == "lane\n"
+    assert (victim_root / "jetski_state.pbtxt").read_text() == "victim\n"
+    assert list((attempt / "moved").iterdir()) == []
+
+    # The same holds for a link planted inside the overlay itself.
+    staged = mod.stage_agy_home(plan, tmp_fd, attempt / "moved")
+    victim_root = _plant_victim_overlay(victim, "planted")
+    shutil.rmtree(staged.path / ".gemini")
+    (staged.path / ".gemini").symlink_to(victim / "planted/.gemini")
+    warnings = mod.finish_agy_home(plan, tmp_fd, staged)
+    assert len(warnings) == 1 and warnings[0].startswith("agy state not copied back: "), warnings
+    assert (root / "jetski_state.pbtxt").read_text() == "lane\n"
+    assert (victim_root / "jetski_state.pbtxt").read_text() == "victim\n"
+    assert list((attempt / "moved").iterdir()) == []
+
+
+@pytest.mark.parametrize("swapped", [".gemini", ".gemini/antigravity-cli"])
+def test_agy_home_copy_back_never_follows_a_real_state_parent_swapped_for_a_link(monkeypatch, tmp_path, swapped):
+    mod = supervisor()
+    home, _ = agy_home_fixture(mod, monkeypatch, tmp_path)
+    private_tmp = tmp_path / "tmp"
+    private_tmp.mkdir()
+    plan = agy_plan()
+    staged, tmp_fd = stage_agy(mod, plan, private_tmp)
+    _rename_into(staged.path / ".gemini/antigravity-cli", "jetski_state.pbtxt", "lane\n")
+    elsewhere = tmp_path / "elsewhere"
+    (elsewhere / "antigravity-cli").mkdir(parents=True)
+    (home / swapped).rename(tmp_path / "moved")
+    (home / swapped).symlink_to(elsewhere if swapped == ".gemini" else elsewhere / "antigravity-cli")
+
+    warnings = mod.finish_agy_home(plan, tmp_fd, staged)
+    assert len(warnings) == 1 and warnings[0].startswith("agy state not copied back: "), warnings
+    assert list((elsewhere / "antigravity-cli").iterdir()) == []
+    assert list(private_tmp.iterdir()) == []
+
+
+def test_agy_copy_back_keeps_a_real_file_changed_since_staging_and_appends_history(monkeypatch, tmp_path):
+    mod = supervisor()
+    _, root = agy_home_fixture(mod, monkeypatch, tmp_path)
+    (root / "history.jsonl").write_text('{"n": 1}\n', encoding="utf-8")
+    private_tmp = tmp_path / "tmp"
+    private_tmp.mkdir()
+    plan = agy_plan()
+    staged, tmp_fd = stage_agy(mod, plan, private_tmp)
+    lane_root = staged.path / ".gemini/antigravity-cli"
+    _rename_into(lane_root, "jetski_state.pbtxt", "lane\n")
+    _rename_into(lane_root, "history.jsonl", '{"n": 1}\n{"lane": 1}\n')
+    _rename_into(lane_root, "installation_id", "lane\n")
+    # Another session finishes first: it rewrites jetski_state and appends to history.
+    (root / "jetski_state.pbtxt.new").write_text("other\n", encoding="utf-8")
+    os.replace(root / "jetski_state.pbtxt.new", root / "jetski_state.pbtxt")
+    with (root / "history.jsonl").open("a", encoding="utf-8") as history:
+        history.write('{"other": 1}\n')
+
+    warnings = mod.finish_agy_home(plan, tmp_fd, staged)
+    kept = "jetski_state.pbtxt: changed by another session since staging; kept it"
+    assert warnings == ["agy state not copied back: " + kept]
+    assert (root / "jetski_state.pbtxt").read_text() == "other\n"
+    assert (root / "history.jsonl").read_text() == '{"n": 1}\n{"other": 1}\n{"lane": 1}\n'
+    assert (root / "installation_id").read_text() == "lane\n"  # absent at staging and still absent
+
+    # A lane that truncated or rewrote history adds nothing.
+    staged = mod.stage_agy_home(plan, tmp_fd, private_tmp)
+    _rename_into(staged.path / ".gemini/antigravity-cli", "history.jsonl", '{"forged": 1}\n')
+    assert mod.finish_agy_home(plan, tmp_fd, staged) == [
+        "agy state not copied back: history.jsonl: shorter than at staging"]
+    assert (root / "history.jsonl").read_text() == '{"n": 1}\n{"other": 1}\n{"lane": 1}\n'
+
+
+def test_agy_history_copy_back_never_reads_a_sparse_staged_size(monkeypatch, tmp_path):
+    """A first lane enlarges the real history sparsely before a retry stages; the copy stays bounded."""
+    mod = supervisor()
+    _, root = agy_home_fixture(mod, monkeypatch, tmp_path)
+    with (root / "history.jsonl").open("r+b") as history:
+        history.truncate(1 << 30)
+    private_tmp = tmp_path / "tmp"
+    private_tmp.mkdir()
+    plan = agy_plan()
+    staged, tmp_fd = stage_agy(mod, plan, private_tmp)
+    _rename_into(staged.path / ".gemini/antigravity-cli", "history.jsonl", '{"lane": 1}\n')
+    real_pread, requested = os.pread, []
+
+    def bounded(fd, size, offset):
+        requested.append(size)
+        assert size <= 1024 * 1024, size
+        return real_pread(fd, size, offset)
+
+    monkeypatch.setattr(os, "pread", bounded)
+    warnings = mod.finish_agy_home(plan, tmp_fd, staged)
+    monkeypatch.undo()
+    assert warnings == ["agy state not copied back: history.jsonl: shorter than at staging"], warnings
+    assert (root / "history.jsonl").stat().st_size == 1 << 30
+
+
+def test_agy_copy_back_refuses_hardlinked_sources_and_history_targets(monkeypatch, tmp_path):
+    mod = supervisor()
+    _, root = agy_home_fixture(mod, monkeypatch, tmp_path)
+    (root / "history.jsonl").write_text('{"n": 1}\n', encoding="utf-8")
+    alias = tmp_path / "alias.jsonl"
+    os.link(root / "history.jsonl", alias)  # writing through the real name would also change this
+    secret = tmp_path / "secret"
+    secret.write_text("secret\n", encoding="utf-8")
+    private_tmp = tmp_path / "tmp"
+    private_tmp.mkdir()
+    plan = agy_plan()
+    staged, tmp_fd = stage_agy(mod, plan, private_tmp)
+    lane_root = staged.path / ".gemini/antigravity-cli"
+    (lane_root / "jetski_state.pbtxt").unlink()
+    os.link(secret, lane_root / "jetski_state.pbtxt")
+    _rename_into(lane_root, "history.jsonl", '{"n": 1}\n{"lane": 1}\n')
+
+    warnings = mod.finish_agy_home(plan, tmp_fd, staged)
+    assert sorted(warnings) == ["agy state not copied back: history.jsonl: not a single-link regular file",
+                                "agy state not copied back: jetski_state.pbtxt: not a single-link regular file"]
+    assert (root / "jetski_state.pbtxt").read_text() == "original\n"
+    assert alias.read_text() == '{"n": 1}\n' and secret.read_text() == "secret\n"
+
+
+def test_overlapping_agy_finishers_never_both_install(monkeypatch, tmp_path):
+    """Two attempts staged from the same real state finish at once: the first wins, the second warns."""
+    import threading
+    mod = supervisor()
+    _, root = agy_home_fixture(mod, monkeypatch, tmp_path)
+    plan = agy_plan()
+    finishers = []
+    for name in ("first", "second"):
+        private_tmp = tmp_path / name
+        private_tmp.mkdir()
+        staged, tmp_fd = stage_agy(mod, plan, private_tmp)
+        _rename_into(staged.path / ".gemini/antigravity-cli", "jetski_state.pbtxt", name + "\n")
+        finishers.append((staged, tmp_fd))
+    results = {}
+    second = threading.Thread(target=lambda: results.update(second=mod.finish_agy_home(plan, *reversed(finishers[1]))))
+    real_install = mod._install_state
+
+    def install_while_the_second_finishes(directory, name, data):
+        if not second.is_alive() and "second" not in results:
+            second.start()
+            second.join(0.5)  # without a lock the second finisher checks and installs here
+        return real_install(directory, name, data)
+
+    monkeypatch.setattr(mod, "_install_state", install_while_the_second_finishes)
+    results["first"] = mod.finish_agy_home(plan, *reversed(finishers[0]))
+    second.join()
+    assert results["first"] == []
+    kept = "jetski_state.pbtxt: changed by another session since staging; kept it"
+    assert results["second"] == ["agy state not copied back: " + kept]
+    assert (root / "jetski_state.pbtxt").read_text() == "first\n"
+
+    # A lane holding the lock delays copy-back only for a bounded time.
+    import fcntl
+    staged, tmp_fd = stage_agy(mod, plan, tmp_path / "first")
+    _rename_into(staged.path / ".gemini/antigravity-cli", "jetski_state.pbtxt", "held\n")
+    monkeypatch.setattr(mod, "AGY_COPY_BACK_WAIT", 0.2)
+    with open(root / mod.AGY_COPY_BACK_LOCK, "rb") as held:
+        fcntl.flock(held, fcntl.LOCK_EX)
+        warnings = mod.finish_agy_home(plan, tmp_fd, staged)
+    assert len(warnings) == 1 and "stayed locked" in warnings[0], warnings
+    assert (root / "jetski_state.pbtxt").read_text() == "first\n" and not staged.path.exists()
+
+
+def test_agy_staging_creates_an_empty_database_so_sqlite_writes_through_the_link(monkeypatch, tmp_path):
+    import sqlite3
+    mod = supervisor()
+    _, root = agy_home_fixture(mod, monkeypatch, tmp_path)
+    private_tmp = tmp_path / "tmp"
+    private_tmp.mkdir()
+    plan = agy_plan()
+    staged, tmp_fd = stage_agy(mod, plan, private_tmp)
+    database = staged.path / ".gemini/antigravity-cli" / mod.AGY_DATABASE
+    assert database.readlink() == root / mod.AGY_DATABASE
+    with sqlite3.connect(database) as connection:
+        connection.execute("create table t (v)")
+        connection.execute("insert into t values (1)")
+    connection.close()
+    assert mod.finish_agy_home(plan, tmp_fd, staged) == []
+    with sqlite3.connect(root / mod.AGY_DATABASE) as connection:
+        assert connection.execute("select v from t").fetchall() == [(1,)]
+    connection.close()
+    # An existing database is left as it is.
+    before = (root / mod.AGY_DATABASE).read_bytes()
+    mod.finish_agy_home(plan, tmp_fd, mod.stage_agy_home(plan, tmp_fd, private_tmp))
+    assert (root / mod.AGY_DATABASE).read_bytes() == before
+
+
+RETRY_LANE = """
+import os, pathlib, sys
+tmp = pathlib.Path(os.environ["TMPDIR"])
+victim = pathlib.Path(sys.argv[1])
+shim = tmp / "provenant-shim"
+for name in ("bin/ps", "process_info.py"):
+    (shim / name).unlink()
+    (shim / name).symlink_to(victim / "agentapi")
+(tmp / "cache").rename(tmp / "cache-moved")
+(tmp / "cache").symlink_to(victim)
+sys.stderr.write("--effort is not supported for model fixture\\n")
+sys.exit(1)
+"""
+
+SWAP_LANE = """
+import json, os, pathlib, sys
+tmp = pathlib.Path(os.environ["TMPDIR"])
+tmp.rename(tmp.with_name("tmp-moved"))
+tmp.symlink_to(sys.argv[1])
+print(json.dumps({"type": "item.completed", "item": {"type": "agent_message", "text": "done"}}), flush=True)
+print(json.dumps({"type": "turn.completed"}), flush=True)
+"""
+
+
+def test_effort_retry_never_writes_through_links_the_first_lane_planted(monkeypatch, tmp_path):
+    """A lane forges an unsupported-effort diagnostic, so the same attempt runs again in its tmp."""
+    mod = supervisor()
+    dispatch_run = importlib.import_module("skills.orchestrate.scripts.dispatch_run")
+    monkeypatch.setattr(mod, "needs_ps_shim", lambda plan: True)
+    victim = tmp_path / "live-bin"
+    victim.mkdir(mode=0o755)
+    (victim / "agentapi").write_text("live shim\n", encoding="utf-8")
+    attempt = tmp_path / "attempt"
+    plan = fixture_plan(tmp_path, RETRY_LANE, run_dir=attempt)
+    plan["argv"].append(str(victim))
+    plan["effort"] = plan["route"]["effort"] = "high"
+    plan["route"]["supported_efforts"] = ["low", "high"]
+
+    record = mod.execute(plan, attempt / "result.md")
+    retry = dispatch_run.effort_retry_plan(plan, record)
+    assert retry is not None, record
+    retry["argv"] = plan["argv"]
+    mod.execute(retry, attempt / "result.md")
+
+    assert (victim / "agentapi").read_text() == "live shim\n"
+    assert sorted(path.name for path in victim.iterdir()) == ["agentapi"]
+    assert stat.S_IMODE(victim.stat().st_mode) == 0o755  # the planted cache link was not chmodded
+
+
+def test_output_is_staged_in_the_held_tmp_after_the_lane_swaps_it(tmp_path):
+    mod = supervisor()
+    victim = tmp_path / "victim"
+    victim.mkdir()
+    attempt = tmp_path / "attempt"
+    victim.chmod(0o500)  # a write that followed the swapped tmp would fail here
+    plan = fixture_plan(tmp_path, SWAP_LANE, run_dir=attempt)
+    plan["argv"].append(str(victim))
+    record = mod.execute(plan, attempt / "result.md")
+    assert record["status"] == "ok", record
+    assert "done" in (attempt / "result.md").read_text()
+    assert (attempt / "tmp").is_symlink() and list(victim.iterdir()) == []
+    assert [path.name for path in (attempt / "tmp-moved").iterdir() if path.name.startswith(".provenant")] == []
+
+
+AGY_LANE = """
+import json, os, pathlib
+home = pathlib.Path(os.environ["HOME"])
+lane = home / ".gemini/antigravity-cli"
+(lane / "jetski_state.pbtxt.tmp").write_text("lane\\n")
+os.replace(lane / "jetski_state.pbtxt.tmp", lane / "jetski_state.pbtxt")
+print(json.dumps({"status": "SUCCESS", "response": json.dumps(
+    [str(home), (lane / "brain").is_symlink(), (lane / "conversations").is_symlink()])}))
+"""
+
+
+def test_agy_attempt_stages_after_state_preparation_and_cleans_up(monkeypatch, tmp_path):
+    """Runs the real confinement_command; a pass-through stand-in replaces sandbox-exec itself."""
+    mod = supervisor()
+    home, root = agy_home_fixture(mod, monkeypatch, tmp_path)
+    shutil.rmtree(root / "conversations")
+    passthrough = tmp_path / "sandbox-exec"
+    passthrough.write_text('#!/bin/sh\nshift 2\nexec "$@"\n', encoding="utf-8")
+    passthrough.chmod(0o755)
+    monkeypatch.setattr(mod, "_sandbox_exec_path", lambda: str(passthrough))
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    attempt = tmp_path / "attempt"
+    attempt.mkdir()
+    plan = fixture_plan(workspace, AGY_LANE, "agy", run_dir=attempt)
+    plan["applied"]["confinement"] = "sandbox-exec"
+    record = mod.execute(plan, attempt / "result.md")
+    assert record["status"] == "ok", record
+    lane_home, brain_linked, conversations_linked = json.loads((attempt / "result.md").read_text())
+    assert Path(lane_home).parent == attempt / "tmp" and Path(lane_home).name.startswith("agy-home-")
+    assert brain_linked and conversations_linked
+    assert (root / "conversations").is_dir() and not (root / "conversations").is_symlink()
+    assert (root / "jetski_state.pbtxt").read_text() == "lane\n"
+    assert not Path(lane_home).exists()
+    assert home.is_dir()
+
+
+@pytest.mark.parametrize("adapter,project", [
+    ("claude", "-srv-new-workspace"), ("cursor", "srv-new-workspace"),
+])
+def test_confined_launch_prepares_only_the_actual_project_root(monkeypatch, tmp_path, adapter, project):
+    mod = supervisor()
+    home = (tmp_path / "home").resolve()
+    home.mkdir()
+    monkeypatch.setattr(mod.Path, "home", lambda: home)
+    monkeypatch.setattr(mod, "_sandbox_exec_path", lambda: "/usr/bin/sandbox-exec")
+    plan = {"adapter": adapter, "mode": "read_only", "workspace_root": "/srv/new-workspace",
+            "cwd": "/srv/new-workspace", "applied": {"confinement": "sandbox-exec", "add_dirs": []}}
+    project_root = home / f".{adapter}/projects" / project
+    assert not project_root.exists()
+    command = mod.confinement_command(plan, ["provider"])
+    assert command[:2] == ["/usr/bin/sandbox-exec", "-p"]
+    assert project_root.is_dir()
+    assert list(project_root.iterdir()) == []
+    assert f'(subpath "{project_root}")' not in command[2]
+    assert [p.name for p in project_root.parent.iterdir()] == [project]
+
+
+@pytest.mark.parametrize("adapter", ["claude", "cursor"])
+def test_project_root_preparation_refuses_symlink_ancestors(monkeypatch, tmp_path, adapter):
+    mod = supervisor()
+    home = (tmp_path / "home").resolve()
+    provider = home / f".{adapter}"
+    provider.mkdir(parents=True)
+    target = tmp_path / "config"
+    target.mkdir()
+    (provider / "projects").symlink_to(target, target_is_directory=True)
+    monkeypatch.setattr(mod.Path, "home", lambda: home)
+    monkeypatch.setattr(mod, "_sandbox_exec_path", lambda: "/usr/bin/sandbox-exec")
+    plan = {"adapter": adapter, "cwd": "/srv/new-workspace", "applied": {"confinement": "sandbox-exec"}}
+    with pytest.raises(PermissionError, match="provider state directory must be a real directory"):
+        mod.confinement_command(plan, ["provider"])
+    assert list(target.iterdir()) == []
+
+
+@pytest.mark.parametrize("mode", ["read_only", "worktree_write"])
+@pytest.mark.parametrize("adapter", ["claude", "cursor", "kiro"])
+def test_shared_npm_state_cannot_poison_reused_packages(monkeypatch, tmp_path, adapter, mode):
+    mod = supervisor()
+    home = (tmp_path / "home").resolve()
+    workspace = home / "repo"
+    workspace.mkdir(parents=True)
+    subprocess.run(["git", "init", "-q", str(workspace)], check=True)
+    monkeypatch.setattr(mod.Path, "home", lambda: home)
+    profile = mod.os_confinement_profile({
+        "adapter": adapter, "mode": mode, "workspace_root": str(workspace), "cwd": str(workspace),
+        "applied": {"confinement": "sandbox-exec", "add_dirs": []},
+    })
+    writes = "\n".join(line for line in profile.splitlines() if line.startswith("(allow file-write* "))
+    assert f'(subpath "{home / ".npm"}")' not in writes
+    for name in ("_cacache", "_npx", "_prebuilds", "_tuf"):
+        assert f'(subpath "{home / ".npm" / name}")' not in writes
+    assert f'(subpath "{home / ".npm/_logs"}")' in writes
+    assert f'(literal "{home / ".npm/_update-notifier-last-checked"}")' in writes
+    assert any(line.startswith(f'(deny file-write-create (require-all (subpath "{home / ".npm"}")')
+               and "(vnode-type SYMLINK)" in line for line in profile.splitlines())
+
+
 KIRO_SUPPORT = "Library/Application Support/kiro-cli"
 # Files in Kiro's support directory that the user's shell sources or that Kiro executes.
 KIRO_EXECUTABLES = ("shell/zshrc.pre.zsh", "shell/bashrc.post.bash", "node", "bun", "tui.js",
@@ -1044,7 +1861,8 @@ def test_read_only_transcript_denies_follow_every_state_allow(monkeypatch, tmp_p
     denied = [f'(subpath "{home / path}")' for path in mod.EXTRA_DENIED_READS]
     last_deny = max(index for index, line in enumerate(lines)
                     if line.startswith("(deny file-read-data ") and all(rule in line for rule in denied))
-    later = [line for line in lines[last_deny + 1:] if line.startswith("(allow file-read")]
+    later = [line for line in lines[last_deny + 1:]
+             if line.startswith("(allow file-read") and not line.startswith("(allow file-read-data file-read-metadata ")]
     # Only a Claude lane's own session transcript reopens, so that it can resume.
     own = home / ".claude/projects" / re.sub(r"[^A-Za-z0-9]", "-", str(workspace.resolve()))
     session = own / plan["session_id"]
@@ -1184,7 +2002,7 @@ def test_sandbox_exec_profile_denies_home_reads_and_writes_but_keeps_provider_st
         pytest.skip("sandbox_apply is refused in this test environment")
     assert probe.stdout == "note\n"
     config = run(
-        f"git -C '{cwd}' config --global user.name && git -C '{cwd}' config --global user.email"
+        f"git -C '{cwd}' config user.name && git -C '{cwd}' config user.email"
     )
     assert config.returncode == 0, config.stderr
     assert config.stdout.splitlines() == ["home-config", "xdg-config@example.invalid"]
@@ -1556,6 +2374,69 @@ def fixture_plan(tmp_path, code, adapter="codex", **controls):
     return plan
 
 
+@pytest.mark.parametrize("rollover", [False, True])
+@pytest.mark.parametrize("ending", ["reconnect", "transport", "exit", "signal", "recovered"])
+def test_codex_progress_requires_a_successful_terminal_result(tmp_path, monkeypatch, rollover, ending):
+    module = supervisor()
+    monkeypatch.setattr(module, "MAX_EVENTS_BYTES", 2048 if rollover else 20 * 1024 * 1024)
+    events = [{"type": "item.completed", "item": {"type": "agent_message", "text": "Review in progress"}}]
+    if ending in {"reconnect", "recovered"}:
+        events.extend({"type": "error", "message": f"Reconnecting... {i}/5 (failed to load workspace requirements)"}
+                      for i in range(1, 6))
+    if ending == "transport":
+        events.append({"type": "turn.failed", "error": {"message": "stream disconnected before completion"}})
+    # Put the progress and errors outside the retained head/tail when rolling over.
+    events.extend({"type": "telemetry", "data": "x" * 100} for _ in range(1000))
+    if ending == "recovered":
+        events.extend([
+            {"type": "item.completed", "item": {"type": "agent_message", "text": "Final review"}},
+            {"type": "turn.completed"},
+        ])
+    # Keep the large event stream out of argv: Linux limits each exec argument.
+    events_path = tmp_path / "provider-events.jsonl"
+    events_path.write_text("\n".join(map(json.dumps, events)))
+    code = ("import os, signal\nfrom pathlib import Path\n"
+            f"print(Path({str(events_path)!r}).read_text(), flush=True)\n")
+    if ending == "signal":
+        code += "os.kill(os.getpid(), signal.SIGKILL)\n"
+    output = tmp_path / "result.md"
+    record = module.execute(fixture_plan(tmp_path, code), output)
+    if ending == "recovered":
+        assert record["status"] == "ok"
+        assert record["error_class"] == "none"
+        assert not record.get("result_partial", False)
+        assert "Final review" in output.read_text()
+    else:
+        assert record["status"] == "failed", record
+        assert record["error_class"] == ("transient" if ending in {"reconnect", "transport"} else "provider_error")
+        assert record["result_partial"] is True
+        assert "Review in progress" in output.read_text()
+        assert not record["certification_eligible"]
+
+
+def test_codex_terminal_result_in_rolled_output_survives_later_signal(tmp_path, monkeypatch):
+    module = supervisor()
+    monkeypatch.setattr(module, "MAX_EVENTS_BYTES", 2048)
+    padding = [{"type": "telemetry", "data": "x" * 100}] * 1000
+    events = padding + [
+        {"type": "item.completed", "item": {"type": "agent_message", "text": "Final review"}},
+        {"type": "turn.completed"},
+    ] + padding
+    # Preserve capture rollover without exceeding Linux's per-argument exec limit.
+    events_path = tmp_path / "provider-events.jsonl"
+    events_path.write_text("\n".join(map(json.dumps, events)))
+    code = ("import os, signal\nfrom pathlib import Path\n"
+            f"print(Path({str(events_path)!r}).read_text(), flush=True)\n"
+            "os.kill(os.getpid(), signal.SIGKILL)\n")
+    output = tmp_path / "result.md"
+    plan = fixture_plan(tmp_path, code)
+    plan["grace_seconds"] = 10
+    record = module.execute(plan, output)
+    assert record["status"] == "interrupted"
+    assert not record.get("result_partial", False)
+    assert "Final review" in output.read_text()
+
+
 @pytest.mark.parametrize("exit_code", [0, 1])
 def test_opencode_usage_survives_provider_exit(tmp_path, exit_code):
     events = [
@@ -1565,13 +2446,148 @@ def test_opencode_usage_survives_provider_exit(tmp_path, exit_code):
     ]
     code = "import sys; print(" + repr("\n".join(json.dumps(event) for event in events)) + "); sys.exit(" + str(exit_code) + ")"
     record = supervisor().execute(fixture_plan(tmp_path, code, "opencode"), tmp_path / "result.md")
-    assert record["status"] == ("ok" if exit_code == 0 else "failed")
+    assert record["status"] == "ok"
     assert record["evidence"]["exit"] == exit_code
-    assert record["error_class"] == ("none" if exit_code == 0 else "provider_error")
+    assert record["error_class"] == "none"
+    assert (tmp_path / "result.md").read_text() == "Full answer"
+    assert record["usage_source"] == "observed"
+    if exit_code:
+        assert record["evidence"]["signature"] == "exit_after_output"
+        assert record["reason"] == "provider exited 1 after final assistant output"
+        assert record["reason"] in record["warnings"]
     assert {key: record["context"][key] for key in ("input_tokens", "output_tokens", "cached_input_tokens",
                                                   "cache_write_tokens", "reasoning_tokens")} == {
         "input_tokens": 1080610, "output_tokens": 5493, "cached_input_tokens": 1009536,
         "cache_write_tokens": 0, "reasoning_tokens": 7838}
+
+
+@pytest.mark.parametrize("logs,reason", [
+    (["INFO starting", "WARN fabric MCP unavailable", "ERROR shutting down", "ERROR later"], "ERROR shutting down"),
+    (["WARN first", "WARN later"], "WARN first"),
+    (["timestamp=x level=INFO starting", "timestamp=x level=ERROR message=shutdown"],
+     "timestamp=x level=ERROR message=shutdown"),
+    (["INFO rate limit configuration loaded"], "provider exited 1 after final assistant output"),
+])
+def test_opencode_exit_after_output_reason_skips_info(tmp_path, logs, reason):
+    event = {"type": "text", "part": {"text": "Final answer"}}
+    code = ("import json, sys\nprint(" + repr(json.dumps(event)) + ")\n"
+            + "print(" + repr("\n".join(logs)) + ", file=sys.stderr)\nsys.exit(1)\n")
+    record = supervisor().execute(fixture_plan(tmp_path, code, "opencode"), tmp_path / "result.md")
+    assert record["status"] == "ok"
+    assert record["evidence"]["signature"] == "exit_after_output"
+    assert record["reason"] == reason
+    assert (tmp_path / "result.md").read_text() == "Final answer"
+
+
+@pytest.mark.parametrize("rollover", [False, True])
+def test_opencode_sandbox_denial_after_text_remains_a_failure(tmp_path, monkeypatch, rollover):
+    monkeypatch.setattr(supervisor(), "MAX_EVENTS_BYTES", 2048 if rollover else 20 * 1024 * 1024)
+    events = [
+        *[{"type": "telemetry", "data": "x" * 100} for _ in range(100)],
+        {"type": "text", "part": {"text": "Working narration"}},
+    ]
+    denial = "ERROR ConfigDiscovery.discover: EPERM: operation not permitted"
+    code = ("import sys; print(" + repr("\n".join(map(json.dumps, events)))
+            + "); print(" + repr(denial) + ", file=sys.stderr); sys.exit(1)")
+    record = supervisor().execute(fixture_plan(tmp_path, code, "opencode"), tmp_path / "result.md")
+    assert record["status"] == "permission_blocked"
+    assert record["error_class"] == "sandbox_denied"
+    assert record["reason"] == denial
+
+
+@pytest.mark.parametrize("rollover", [False, True])
+def test_opencode_exit_after_output_keeps_final_step_text(tmp_path, monkeypatch, rollover):
+    mod = supervisor()
+    monkeypatch.setattr(mod, "MAX_EVENTS_BYTES", 2048 if rollover else 20 * 1024 * 1024)
+    events = [
+        {"type": "step_start", "part": {}},
+        {"type": "text", "part": {"text": "Working narration"}},
+        {"type": "tool_use", "part": {"tool": "read"}},
+        *[{"type": "telemetry", "data": "x" * 100} for _ in range(100)],
+        {"type": "step_start", "part": {}},
+        {"type": "text", "part": {"text": "Final answer"}},
+        {"type": "step_finish", "part": {"reason": "stop"}},
+    ]
+    code = "import sys; print(" + repr("\n".join(map(json.dumps, events))) + "); sys.exit(1)"
+    record = mod.execute(fixture_plan(tmp_path, code, "opencode"), tmp_path / "result.md")
+    assert record["status"] == "ok"
+    assert record["evidence"]["signature"] == "exit_after_output"
+    assert record["evidence"]["exit"] == 1
+    assert (tmp_path / "result.md").read_text() == "Final answer"
+
+
+@pytest.mark.parametrize("later_event", [
+    {"type": "tool_use", "part": {"tool": "read"}},
+    {"type": "step_start", "part": {}},
+    {"type": "error", "error": {"message": "backend failed"}},
+    {"type": "step_finish", "part": {"reason": "tool-calls"}},
+])
+def test_opencode_intermediate_output_does_not_mask_a_failure(tmp_path, later_event):
+    events = [{"type": "text", "part": {"text": "Working narration"}}, later_event]
+    code = "import sys; print(" + repr("\n".join(map(json.dumps, events))) + "); sys.exit(1)"
+    record = supervisor().execute(fixture_plan(tmp_path, code, "opencode"), tmp_path / "result.md")
+    assert record["status"] == "failed"
+    assert record["evidence"]["signature"] != "exit_after_output"
+
+
+@pytest.mark.parametrize("log", ["INFO cli starting", "[INFO] cli starting", "2026-10-21T14:00:00Z INFO cli starting"])
+def test_opencode_failure_reason_skips_info_only_stderr(tmp_path, log):
+    code = "import sys; print(" + repr(log) + ", file=sys.stderr); sys.exit(1)"
+    record = supervisor().execute(fixture_plan(tmp_path, code, "opencode"), tmp_path / "result.md")
+    assert record["status"] == "failed"
+    assert record["reason"] == "provider exited 1 without final assistant output"
+
+
+@pytest.mark.parametrize("rollover", [False, True])
+def test_opencode_final_text_is_preserved_beside_a_structured_failure(tmp_path, monkeypatch, rollover):
+    monkeypatch.setattr(supervisor(), "MAX_EVENTS_BYTES", 2048 if rollover else 20 * 1024 * 1024)
+    events = [
+        {"type": "error", "error": {"message": "shutdown failed"}},
+        *[{"type": "telemetry", "data": "x" * 100} for _ in range(100)],
+        {"type": "text", "part": {"text": "Final answer"}},
+        {"type": "step_finish", "part": {"reason": "stop"}},
+        *[{"type": "telemetry", "data": "x" * 100} for _ in range(100)],
+    ]
+    code = ("import sys; print(" + repr("\n".join(map(json.dumps, events)))
+            + "); print('ERROR shutdown failed', file=sys.stderr); sys.exit(1)")
+    record = supervisor().execute(fixture_plan(tmp_path, code, "opencode"), tmp_path / "result.md")
+    assert record["status"] == "failed"
+    assert (tmp_path / "result.md").read_text() == "Final answer"
+
+
+@pytest.mark.parametrize("structured_error", [False, True])
+def test_opencode_discovery_eperm_is_sandbox_denied(tmp_path, structured_error):
+    denial = "ERROR ConfigDiscovery.discover: EPERM: operation not permitted, lstat '/repo/.claude'"
+    event = {"type": "error", "error": {"message": "provider failed"}}
+    code = "import sys; print(" + repr(denial) + ", file=sys.stderr); "
+    if structured_error:
+        code += "print(" + repr(json.dumps(event)) + "); "
+    code += "sys.exit(1)"
+    record = supervisor().execute(fixture_plan(tmp_path, code, "opencode"), tmp_path / "result.md")
+    assert record["status"] == ("failed" if structured_error else "permission_blocked")
+    assert record["error_class"] == ("provider_error" if structured_error else "sandbox_denied")
+    assert record["reason"] == ("provider failed" if structured_error else denial)
+
+
+@pytest.mark.parametrize("message,status", [
+    ("429 too many requests", "rate_limited"),
+    ("Individual quota reached", "usage_limited"),
+    ("401 unauthorized", "auth_required"),
+])
+@pytest.mark.parametrize("rollover", [False, True])
+def test_opencode_structured_failure_wins_over_incidental_eperm(tmp_path, monkeypatch, message, status, rollover):
+    monkeypatch.setattr(supervisor(), "MAX_EVENTS_BYTES", 2048 if rollover else 20 * 1024 * 1024)
+    events = [
+        {"type": "error", "error": {"message": message}},
+        *[{"type": "telemetry", "data": "x" * 100} for _ in range(100)],
+        {"type": "text", "part": {"text": "Conversation before shutdown"}},
+    ]
+    code = ("import sys; print(" + repr("\n".join(map(json.dumps, events)))
+            + "); print(" + repr("WARN MCP offline\nERROR discovery EPERM") + ", file=sys.stderr); sys.exit(1)")
+    record = supervisor().execute(fixture_plan(tmp_path, code, "opencode"), tmp_path / "result.md")
+    assert record["status"] == status
+    assert record["error_class"] == ("auth" if status == "auth_required" else status)
+    assert record["reason"] == message
 
 
 @pytest.mark.parametrize("adapter,events,expected", [
@@ -1601,7 +2617,7 @@ def test_receipt_usage_source_tracks_token_evidence_not_context_estimates(tmp_pa
     ("failed", "model_unavailable", "model_unavailable"), ("failed", "wall_clock", "timeout"),
     ("failed", "permission_blocked", "sandbox_denied"), ("failed", None, "provider_error"),
     ("rejected", "invalid_input", "provider_error"), ("tool_missing", None, "provider_error"),
-    ("cancelled", "cancel_requested", "unknown"), ("interrupted", "provider_signal", "unknown"),
+    ("cancelled", "cancel_requested", "cancelled"), ("interrupted", "provider_signal", "unknown"),
     ("partial", "output_truncated", "unknown"), ("quarantined", None, "unknown"),
     ("future_status", "future_signature", "unknown"),
 ])
@@ -1779,11 +2795,13 @@ def test_codex_capability_profile_keeps_git_narrow_and_grants_only_selected_feat
     assert expected_socket_allow in profile
 
     assert f'(deny file-write* (subpath "{common}")' in profile
-    for path in (common / "objects", common / "refs", common / "logs"):
-        assert f'(subpath "{path}")' in profile
-        assert str(path) in plan["applied"]["write_boundary"]["writable_paths"]
-    for path in (common / "packed-refs", common / "packed-refs.lock", common / "packed-refs.new"):
+    assert f'(subpath "{common / "objects"}")' in profile
+    for path in (common / "refs/heads/lane", common / "refs/heads/lane.lock", common / "logs/refs/heads/lane"):
         assert f'(literal "{path}")' in profile
+    for path in (common / "objects", common / "refs/heads/lane", common / "logs/refs/heads/lane"):
+        assert str(path) in plan["applied"]["write_boundary"]["writable_paths"]
+    for path in (common / "refs", common / "logs", common / "packed-refs"):
+        assert str(path) not in plan["applied"]["write_boundary"]["writable_paths"]
     assert f'(allow file-write* (subpath "{common}")' not in profile
     assert f'(subpath "{attempt.parent / "codex-home"}")' in profile
     assert f'(literal "{(home / "auth.json").resolve()}")' in profile
@@ -1800,9 +2818,13 @@ def test_codex_capability_profile_keeps_git_narrow_and_grants_only_selected_feat
     private = Path(git(lane, "rev-parse", "--path-format=absolute", "--absolute-git-dir").strip())
     assert str(private) in plan["applied"]["write_boundary"]["writable_paths"]
     assert f'(allow file-write* (subpath "{private}")' in profile
-    assert f'(deny file-write* (subpath "{lane / ".git"}"))' in profile
-    for name in ("config.worktree", "commondir", "gitdir"):
-        assert f'(deny file-write* (literal "{private / name}"))' in profile
+    read_only = [lane / ".git", *(private / name for name in ("config.worktree", "commondir", "gitdir"))]
+
+    def denied(text):
+        return "\n".join(line for line in text.splitlines() if line.startswith("(deny file-write* "))
+
+    for path in read_only:
+        assert f'(subpath "{path}")' in denied(profile)
 
     for adapter in ("codex", "claude"):
         without_capabilities = mod.build_plan(
@@ -1811,7 +2833,9 @@ def test_codex_capability_profile_keeps_git_narrow_and_grants_only_selected_feat
         )
         other_profile = mod.os_confinement_profile(without_capabilities)
         assert "(remote unix-socket" not in other_profile
-        assert f'(deny file-write* (subpath "{lane / ".git"}"))' not in other_profile
+        # Every writer keeps the Git discovery files read-only, not only capability lanes.
+        for path in read_only:
+            assert f'(subpath "{path}")' in denied(other_profile)
         for name in ("config.worktree", "commondir", "gitdir"):
             assert f'(deny file-write* (literal "{private / name}"))' not in other_profile
 
@@ -2252,20 +3276,27 @@ def test_a_linked_git_entry_never_moves_the_writable_git_grant(monkeypatch, tmp_
     common = Path(git(lane, "rev-parse", "--path-format=absolute", "--git-common-dir").strip()).resolve()
     outside = (tmp_path / "outside").resolve()
     outside.mkdir()
+    run_dir = tmp_path / "runs/task/attempt-001"
+    run_dir.mkdir(parents=True)
+
+    def plan_lane():
+        return mod.build_plan(
+            "codex", {}, "hello", workspace_root=tmp_path, mode="worktree_write",
+            worktree=lane, sandbox="workspace-write", network=True,
+            capabilities=["postgres"], run_dir=run_dir,
+        )
+
+    plan = plan_lane()
     shutil.rmtree(common / "logs", ignore_errors=True)
     (common / "logs").symlink_to(outside, target_is_directory=True)
     (common / "packed-refs").unlink(missing_ok=True)
     (common / "packed-refs").symlink_to(outside / "packed")
-    run_dir = tmp_path / "runs/task/attempt-001"
-    run_dir.mkdir(parents=True)
-    plan = mod.build_plan(
-        "codex", {}, "hello", workspace_root=tmp_path, mode="worktree_write",
-        worktree=lane, sandbox="workspace-write", network=True,
-        capabilities=["postgres"], run_dir=run_dir,
-    )
+    # Planning never creates the writer's ref directories through a link.
+    with pytest.raises(ValueError, match="is a link"):
+        plan_lane()
     profile = mod.os_confinement_profile(plan)
     assert str(outside) not in profile
-    assert f'(subpath "{common / "logs"}")' in profile
+    assert f'(literal "{common / "logs/refs/heads/lane"}")' in profile
     script = f"""
 for path in ({str(common / "logs" / "probe")!r}, {str(common / "packed-refs")!r}):
     try:
@@ -2531,6 +3562,24 @@ def test_opencode_run_disables_foreign_instruction_discovery(tmp_path):
     code = "import json, os; print(json.dumps({'type':'result','result':os.environ.get('OPENCODE_DISABLE_CLAUDE_CODE','') + os.environ.get('OPENCODE_DISABLE_AUTOUPDATE','')}))"
     supervisor().execute(fixture_plan(tmp_path, code, "opencode"), tmp_path / "result.md")
     assert (tmp_path / "result.md").read_text() == "11"
+
+
+@pytest.mark.parametrize("confined", [False, True])
+def test_opencode_disables_fabric_mcp_only_in_sandboxed_lanes(tmp_path, monkeypatch, confined):
+    code = "import os, json; print(json.dumps({'type':'result','result':os.environ['OPENCODE_CONFIG_CONTENT']}))"
+    plan = fixture_plan(tmp_path, code, "opencode")
+    if confined:
+        launcher = tmp_path / "sandbox-exec"
+        launcher.write_text('#!/bin/sh\nshift 2\nexec "$@"\n')
+        launcher.chmod(0o755)
+        monkeypatch.setattr(supervisor(), "_sandbox_exec_path", lambda: str(launcher))
+        plan["applied"]["confinement"] = "sandbox-exec"
+    record = supervisor().execute(plan, tmp_path / "result.md")
+    assert record["status"] == "ok"
+    config = json.loads((tmp_path / "result.md").read_text())
+    assert config.get("mcp") == ({"servers": {"fabric": {"type": "local", "command": ["provenant"], "disabled": True}}}
+                                 if confined else None)
+    assert config["permission"]["edit"]["*"] == "deny"
 
 
 def test_opencode_free_tier_refusal_is_model_unavailable(tmp_path):
@@ -3377,7 +4426,7 @@ def test_shared_host_group_change_then_missing_census_never_allows_group_signal(
 @pytest.mark.parametrize("terminal_event", [False, True])
 @pytest.mark.parametrize("controller", [None, "orphan_reaper", "cancel_requested"],
                          ids=["unknown-sender", "orphan-reaper", "markerless-cancel"])
-def test_external_provider_sigterm_reports_interrupted_even_after_terminal_event(tmp_path, terminal_event, controller):
+def test_external_provider_sigterm_without_a_result_fails_unless_cancelled(tmp_path, terminal_event, controller):
     module = supervisor()
     events = [{"type": "ready"}] + ([{"type": "turn.completed"}] if terminal_event else [])
     code = "import os,time\nos.write(1, " + repr(("\n".join(map(json.dumps, events)) + "\n").encode()) + ")\ntime.sleep(60)\n"
@@ -3399,7 +4448,7 @@ def test_external_provider_sigterm_reports_interrupted_even_after_terminal_event
                             on_start=provider.append, on_progress=interrupt,
                             env={**os.environ, "PROVENANT_RUN_DIR": str(tmp_path),
                                  "PROVENANT_RUN_TOKEN": "fixture-control"})
-    assert record["status"] == ("cancelled" if controller == "cancel_requested" else "interrupted"), record
+    assert record["status"] == ("cancelled" if controller == "cancel_requested" else "failed"), record
     assert record["exit"] == -signal.SIGTERM
     assert record["evidence"]["signal"] == signal.SIGTERM
     assert record["evidence"]["signal_name"] == "SIGTERM"
@@ -3410,17 +4459,20 @@ def test_external_provider_sigterm_reports_interrupted_even_after_terminal_event
     assert "error" not in record
 
 
-@pytest.mark.parametrize("invalid", ["run_token", "provider_pid", "signal", "requested_at", "symlink"])
+@pytest.mark.parametrize("invalid", ["run_token", "provider_pid", "null_pid", "signal", "requested_at", "symlink"])
 def test_signal_receipt_does_not_attribute_mismatching_or_linked_control_telemetry(tmp_path, invalid):
     module = supervisor()
     provider = []
 
     def interrupt(_timestamp):
+        if provider[0].poll() is not None or (tmp_path / "termination-request.json").is_symlink():
+            return  # on_progress fires per output chunk or CPU change; symlink_to would raise on a repeat.
         request = {"run_token": "current", "signal": "SIGTERM", "source": "orphan_reaper",
                    "sender_pid": os.getpid(), "provider_pid": provider[0].pid, "requested_at": module.now()}
         if invalid != "symlink":
-            request[invalid] = {"run_token": "earlier", "provider_pid": -1, "signal": "SIGKILL",
-                                "requested_at": "2000-01-01T00:00:00Z"}[invalid]
+            request["provider_pid" if invalid == "null_pid" else invalid] = {
+                "run_token": "earlier", "provider_pid": -1, "null_pid": None, "signal": "SIGKILL",
+                "requested_at": "2000-01-01T00:00:00Z"}[invalid]
         path = tmp_path / "termination-request.json"
         if invalid == "symlink":
             target = tmp_path / "outside-request.json"
@@ -3433,7 +4485,7 @@ def test_signal_receipt_does_not_attribute_mismatching_or_linked_control_telemet
     record = module.execute(fixture_plan(tmp_path, "import time\nprint('ready', flush=True)\ntime.sleep(60)"),
                             tmp_path / "result.md", on_start=provider.append, on_progress=interrupt,
                             env={**os.environ, "PROVENANT_RUN_DIR": str(tmp_path), "PROVENANT_RUN_TOKEN": "current"})
-    assert record["status"] == "interrupted"
+    assert record["status"] == "failed"
     assert record["evidence"]["termination_source"] == "external_signal"
     assert record["evidence"]["signal_requester_pid"] is None
 
@@ -3451,8 +4503,11 @@ def test_supervisor_signal_is_interrupted_without_a_cancel_request(tmp_path):
 def test_markerless_cancel_keeps_cancelled_when_provider_flushes_and_exits_zero(tmp_path):
     module = supervisor()
     provider = []
+    ready = tmp_path / "provider-ready"
 
     def interrupt(_timestamp):
+        if not ready.exists():
+            return
         (tmp_path / "termination-request.json").write_text(json.dumps({
             "run_token": "graceful", "signal": "SIGTERM", "source": "cancel_requested",
             "sender_pid": os.getpid(), "provider_pid": provider[0].pid, "requested_at": module.now(),
@@ -3460,7 +4515,8 @@ def test_markerless_cancel_keeps_cancelled_when_provider_flushes_and_exits_zero(
         os.kill(os.getpid(), signal.SIGTERM)  # This execute() owns the installed signal handler.
         os.kill(provider[0].pid, signal.SIGTERM)
 
-    code = "import signal,time\nsignal.signal(signal.SIGTERM, lambda *_: exit(0))\nprint('ready', flush=True)\ntime.sleep(60)"
+    code = ("import signal,time\nsignal.signal(signal.SIGTERM, lambda *_: exit(0))\n"
+            f"open({str(ready)!r}, 'w').close()\nprint('ready', flush=True)\ntime.sleep(60)")
     record = module.execute(fixture_plan(tmp_path, code), tmp_path / "result.md",
                             on_start=provider.append, on_progress=interrupt,
                             env={**os.environ, "PROVENANT_RUN_DIR": str(tmp_path), "PROVENANT_RUN_TOKEN": "graceful"})
@@ -4122,7 +5178,7 @@ else:
             "--tool",
             adapter,
             "--alias",
-            "workhorse",
+            "senior",
             "--role",
             "worker",
             "--prompt-file",
@@ -4191,7 +5247,7 @@ def test_fallback_training_requires_explicit_opt_in(tmp_path):
     plan = fixture_plan(tmp_path, "")
     plan["requested_model"] = None
     plan["route"].update(
-        alias="workhorse",
+        alias="senior",
         candidates=["fixture", "paid", "training", "opencode/free-free"],
     )
     catalogue = {"models": {"training": {"trains_on_prompts": True}}, "adapters": {}}
@@ -4206,6 +5262,10 @@ def test_fallback_training_requires_explicit_opt_in(tmp_path):
 
 @pytest.mark.parametrize("explicit", [False, True])
 def test_usage_limit_falls_back_as_attempt_two(tmp_path, explicit):
+    # This checks routing, independently of the host's memory probe.
+    policy = tmp_path / ".agents/fabric-policy.json"
+    policy.parent.mkdir(parents=True, exist_ok=True)
+    policy.write_text(json.dumps({"memory_floor_percent": {"read_only": 0}}))
     bindir = tmp_path / "bin"
     bindir.mkdir()
     cli = bindir / "claude"
@@ -4247,7 +5307,7 @@ sys.exit(1 if 'TARGET_MODEL' in model else 0)
             "--tool",
             "claude",
             "--model" if explicit else "--alias",
-            "opus" if explicit else "workhorse",
+            "opus" if explicit else "senior",
             "--fallback", "true",
             "--prompt-file",
             str(prompt),
@@ -4266,9 +5326,14 @@ sys.exit(1 if 'TARGET_MODEL' in model else 0)
     assert [row["status"] for row in rows] == ["usage_limited", "ok"]
     assert len({row["run_id"] for row in rows}) == 1
     assert rows[1]["provenance"]["fallback_from"]["status"] == "usage_limited"
+    assert rows[0]["provenance"]["resolved_model"] != rows[1]["provenance"]["resolved_model"]
     assert json.loads((run / "RUN_RECEIPT.json").read_text())["status"] == "ok"
     cooldowns = json.loads((tmp_path / "cooldowns.json").read_text())["cooldowns"]
-    assert cooldowns["claude/*"]["source_run"] == rows[0]["run_id"]
+    (key, cooldown), = cooldowns.items()
+    assert json.loads(key) == ["claude", rows[0]["account"], rows[0]["host"], "*"]
+    assert (cooldown["account"], cooldown["host"]) == (rows[0]["account"], rows[0]["host"])
+    assert cooldown["status"] == "usage_limited"
+    assert cooldown["source_run"] == rows[0]["run_id"]
 
 
 def test_codex_observed_model_comes_from_rollout_turn_context(tmp_path):
@@ -4474,12 +5539,15 @@ def test_codex_writer_gets_the_wrapped_writer_git_boundary(tmp_path, resume):
     assert plan["applied"]["write_boundary"]["filesystem"] == {str(path): access for path, access in table.items()}
     for granted in (private, private / "index", private / "index.lock", private / "HEAD",
                     private / "ORIG_HEAD", private / "logs/HEAD",
-                    common / "objects", common / "refs/heads/lane", common / "logs/refs/heads/lane",
-                    common / "packed-refs", common / "packed-refs.lock", common / "packed-refs.new"):
+                    common / "objects", common / "refs/heads/lane", common / "refs/heads/lane.lock",
+                    common / "logs/refs/heads/lane"):
         assert codex_access(table, granted) == "write", granted
     for denied in (common, common / "hooks", common / "hooks/pre-commit", common / "config",
                    common / "info/exclude", common / "worktrees", sibling, sibling / "HEAD",
-                   private / "config.worktree", private / "commondir", private / "gitdir", lane / ".git"):
+                   private / "config.worktree", private / "commondir", private / "gitdir", lane / ".git",
+                   common / "objects/info", common / "objects/info/alternates", common / "refs/heads/main",
+                   common / "refs/remotes/origin/main", common / "refs/tags/v1", common / "packed-refs",
+                   common / "logs/refs/heads/main"):
         assert codex_access(table, denied) == "read", denied
         assert not any(denied == root or denied.is_relative_to(root) for root in add_dirs), denied
     assert table[lane.resolve() / ".git"] == "read"
@@ -4568,7 +5636,7 @@ def instruction_lane(tmp_path):
     (repo / "app.txt").write_text("app\n")
     git(repo, "add", ".")
     git(repo, "commit", "-q", "-m", "initial")
-    lane = tmp_path / "lane"
+    lane = repo / ".worktrees/lane"
     git(repo, "worktree", "add", "-q", "-b", "lane", str(lane))
     (lane / "app.txt").write_text("lane\n")
     git(lane, "commit", "-q", "-am", "lane work")
@@ -4933,13 +6001,14 @@ def test_signalled_writer_checks_instructions_with_spared_descendants(tmp_path, 
     monkeypatch.setattr(module._Descendants, "stop", stop_sparing_a_process)
     _, lane = instruction_lane(tmp_path)
     provider, signalled = [], []
+    ready = tmp_path / "provider-ready"
 
     def interrupt(_timestamp):
-        if not signalled:
+        if ready.exists() and not signalled:
             signalled.append(True)
             os.kill(provider[0].pid, signal.SIGTERM)
 
-    record = lane_attempt(tmp_path, lane, edit + "import time\nprint('ready', flush=True)\ntime.sleep(60)\n",
+    record = lane_attempt(tmp_path, lane, edit + f"open({str(ready)!r}, 'w').close()\nimport time\nprint('ready', flush=True)\ntime.sleep(60)\n",
                           on_start=provider.append, on_progress=interrupt)
     assert record["spared"] == 1
     assert record["evidence"]["signal"] == signal.SIGTERM
@@ -4947,7 +6016,7 @@ def test_signalled_writer_checks_instructions_with_spared_descendants(tmp_path, 
         assert record["status"] == "failed"
         assert record["error"] == "protected_instructions_changed"
     else:
-        assert record["status"] == "interrupted", record
+        assert record["status"] == "failed", record
         assert "error" not in record
     assert not any("left running" in warning for warning in record["warnings"])
 
@@ -4985,7 +6054,7 @@ def test_plan_only_honors_read_only_cwd_inside_workspace(tmp_path):
     }
     result = subprocess.run(
         [
-            str(SCRIPTS / "cf_dispatch.sh"),
+            str(SCRIPTS / "cf_dispatch.py"),
             "--tool",
             "claude",
             "--intent",
@@ -5102,7 +6171,8 @@ def test_opencode_v2_single_text_event_without_step_events_is_ok():
     assert supervisor().parse_output("opencode", json.dumps(event) + "\n", "", 0)["status"] == "ok"
 
 
-@pytest.mark.parametrize("stdout", ["", json.dumps({"type": "step_start", "sessionID": "s", "part": {}}) + "\n"])
+@pytest.mark.parametrize("stdout", ["", json.dumps({"type": "step_start", "sessionID": "s", "part": {}}) + "\n",
+                                    json.dumps({"type": "step_finish", "part": None}) + "\n"])
 def test_opencode_exit_zero_without_assistant_text_is_empty_output(stdout):
     parsed = supervisor().parse_output("opencode", stdout, "", 0)
     assert (parsed["status"], parsed["signature"]) == ("failed", "empty_output")
@@ -5772,7 +6842,7 @@ def first_instruction_lane(tmp_path):
     (repo / "app.txt").write_text("app\n")
     git(repo, "add", ".")
     git(repo, "commit", "-q", "-m", "initial")
-    lane = tmp_path / "lane"
+    lane = repo / ".worktrees/lane"
     git(repo, "worktree", "add", "-q", "-b", "lane", str(lane))
     (repo / SKILL).parent.mkdir(parents=True)
     (repo / SKILL).write_text("v1\n")
@@ -5927,6 +6997,71 @@ def test_opencode_read_only_profile_reads_project_config_above_its_cwd(tmp_path)
     assert cat(repo / "secret.txt").returncode != 0
     # A link under a config name cannot carry the grant to another file.
     assert cat(repo / "opencode.jsonc").returncode != 0
+
+
+@pytest.mark.parametrize("mode", ["read_only", "worktree_write"])
+def test_opencode_discovery_grants_only_ancestor_directory_metadata(tmp_path, mode):
+    repo, cwd = linked_worktree(tmp_path)
+    plan = {"adapter": "opencode", "mode": mode, "workspace_root": str(cwd), "cwd": str(cwd),
+            "applied": {"confinement": "sandbox-exec", "add_dirs": []}}
+    plan["protected_paths"] = [str(repo / name) for name in (".claude", ".codex")]
+    profile = supervisor().os_confinement_profile(plan)
+    deny_at = profile.rindex('(deny file-read*')
+    for ancestor in (cwd, *cwd.parents):
+        for name in (".claude", ".codex"):
+            grant = f'(literal "{ancestor / name}")'
+            assert any(line.startswith("(allow file-read-data file-read-metadata ") and grant in line
+                       for line in profile[deny_at:].splitlines())
+    assert not any(line.startswith("(allow file-read-data file-read-metadata ") and '(subpath ' in line
+                   for line in profile[deny_at:].splitlines())
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="sandbox-exec is macOS-only")
+@pytest.mark.parametrize("mode", ["read_only", "worktree_write"])
+@pytest.mark.parametrize("symlink", [False, True])
+def test_opencode_discovery_lstats_denied_ancestor_without_reading_contents(tmp_path, monkeypatch, mode, symlink):
+    mod = supervisor()
+    # The profile denies reads under HOME; a uv/pyenv interpreter lives there, so point HOME elsewhere.
+    monkeypatch.setattr(mod.Path, "home", lambda: tmp_path / "home")
+    sandbox_exec = mod._sandbox_exec_path()
+    if not sandbox_exec:
+        pytest.skip("sandbox-exec is unavailable or disabled")
+    repo, cwd = linked_worktree(tmp_path)
+    plan = {"adapter": "opencode", "mode": mode, "workspace_root": str(cwd), "cwd": str(cwd),
+            "applied": {"confinement": "sandbox-exec", "add_dirs": []}}
+    protected = [repo / name for name in (".claude", ".codex")]
+    targets = [repo / ("private-" + path.name) for path in protected] if symlink else protected
+    for directory, target in zip(protected, targets):
+        target.mkdir()
+        (target / "secret.txt").write_text("private")
+        if symlink:
+            directory.symlink_to(target, target_is_directory=True)
+    plan["protected_paths"] = list(map(str, targets))
+    # OpenCode's realPath opens the directory itself (a bare lstat grant still returns EPERM live, #1012):
+    # a real directory must open, while a planted link must not carry the grant to its target.
+    script = """import os, sys
+opens = sys.argv[1] == 'open'
+for path in sys.argv[2:]:
+    os.lstat(path)
+    if opens:
+        os.close(os.open(path, os.O_RDONLY))
+    for operation in (lambda: open(path + '/secret.txt').read(), lambda: os.stat(path + '/secret.txt')):
+        try:
+            operation()
+        except PermissionError:
+            continue
+        raise AssertionError('protected content or descendant metadata became readable')
+print('metadata only')
+"""
+    # The system interpreter stays readable under the profile; a uv or venv one lives under the denied HOME.
+    interpreter = "/usr/bin/python3" if os.access("/usr/bin/python3", os.X_OK) else sys.executable
+    result = subprocess.run([sandbox_exec, "-p", mod.os_confinement_profile(plan), interpreter,
+                             "-c", script, "link" if symlink else "open", *map(str, protected)], cwd=cwd,
+                            capture_output=True, text=True, timeout=10)
+    if result.returncode and "sandbox_apply" in result.stderr:
+        pytest.skip("sandbox_apply is refused in this test environment")
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "metadata only"
 
 
 @pytest.mark.live_provider
@@ -6674,7 +7809,9 @@ def test_explicit_model_runs_despite_a_cooldown_with_a_warning(tmp_path):
     (tmp_path / "cooldowns.json").write_text(json.dumps({"schema": "fabric.cooldowns.v1", "cooldowns": {
         "claude/*": {"adapter": "claude", "model": "*", "account": None, "status": "usage_limited",
                      "cooling_until": until, "source_run": "r", "recorded_at": until, "signature": "quota_exhausted"}}}))
-    env = {**os.environ, "PROVENANT_NO_OS_CONFINEMENT": "1", "PATH": str(bindir) + ":" + os.environ["PATH"],
+    # An account-less cooldown belongs to the default identity, so the lane must not select another one.
+    env = {**{k: v for k, v in os.environ.items() if k != "CLAUDE_CONFIG_DIR"},
+           "PROVENANT_NO_OS_CONFINEMENT": "1", "PATH": str(bindir) + ":" + os.environ["PATH"],
            "AGENT_FABRIC_PRODUCT_ROOT": str(ROOT), "AGENT_FABRIC_INSTANCE_ROOT": str(ROOT),
            "FABRIC_COOLDOWNS_PATH": str(tmp_path / "cooldowns.json")}
     run = Path(subprocess.check_output([str(SCRIPTS / "run_dir_init.sh"), "--kind", "dispatch"],
@@ -6697,12 +7834,12 @@ def test_opencode_v2_structured_error_log_lines_are_fatal_and_info_is_not():
     assert re.match(quiet, "timestamp=x level=WARN message=y")
 
 
-def test_opencode_v2_free_quota_event_is_rate_limited():
+def test_opencode_v2_free_quota_event_is_usage_limited():
     event = {"type": "error", "sessionID": "ses_1", "error": {
         "type": "provider.quota", "message": "Rate limit exceeded. Please try again later.", "status": 429,
         "response": {"body": json.dumps({"type": "error", "error": {"type": "FreeUsageLimitError"}})}}}
     parsed = supervisor().parse_output("opencode", json.dumps(event) + "\n", "", 1)
-    assert parsed["status"] == "rate_limited"
+    assert parsed["status"] == "usage_limited"
 
 
 def test_opencode_v1_cli_is_a_typed_refusal_on_the_provider_exec_cli(tmp_path, monkeypatch, capsys):
@@ -6724,3 +7861,379 @@ def test_codex_toml_overrides_spell_non_bmp_names_as_toml():
         "\U0001F600": {"enabled": False}, "dot.name": {"enabled": False},
     }
 
+
+@pytest.mark.parametrize("adapter", ["claude", "cursor", "agy", "kiro"])
+def test_provider_state_symlink_home_into_credential_store_is_refused(monkeypatch, tmp_path, adapter):
+    mod = supervisor()
+    home = (tmp_path / "home").resolve()
+    (home / ".ssh").mkdir(parents=True)
+    relative = ".gemini" if adapter == "agy" else f".{adapter}"
+    (home / relative).symlink_to(home / ".ssh", target_is_directory=True)
+    monkeypatch.setattr(mod.Path, "home", lambda: home)
+    plan = {"adapter": adapter, "mode": "read_only", "cwd": str(tmp_path),
+            "applied": {"confinement": "sandbox-exec", "add_dirs": []}}
+    with pytest.raises(PermissionError, match="credential store"):
+        mod.os_confinement_profile(plan)
+    monkeypatch.setattr(mod, "_sandbox_exec_path", lambda: "/usr/bin/sandbox-exec")
+    with pytest.raises(PermissionError, match="credential store"):
+        mod.confinement_command(plan, ["/usr/bin/true"])
+    assert list((home / ".ssh").iterdir()) == []
+
+
+@pytest.mark.parametrize("adapter", ["claude", "cursor", "agy", "kiro", "opencode", "codex"])
+@pytest.mark.parametrize("mode", ["read_only", "worktree_write"])
+@pytest.mark.parametrize("layout", ["existing", "absent", "symlink"])
+@pytest.mark.parametrize("sandboxed", [False, True], ids=["profile", "sandbox-exec"])
+def test_claude_json_is_read_only_to_every_lane(monkeypatch, tmp_path, adapter, mode, layout, sandboxed):
+    mod = supervisor()
+    home = (tmp_path / "home").resolve()
+    workspace = home / "repo"
+    workspace.mkdir(parents=True)
+    monkeypatch.setattr(mod.Path, "home", lambda: home)
+    config = home / ".claude.json"
+    target = home / "dotfiles/claude-config.json" if layout == "symlink" else config
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if layout != "absent":
+        target.write_text("synthetic config")
+    if layout == "symlink":
+        config.symlink_to(target)
+    plan = {"adapter": adapter, "mode": mode, "cwd": str(workspace), "run_dir": str(workspace),
+            "applied": {"confinement": "sandbox-exec", "add_dirs": []}}
+    profile = mod.os_confinement_profile(plan)
+    # A final deny also protects config when a broad writable root encompasses home or its target.
+    for path in {config, target}:
+        path_filter = mod._sbpl_filter(str(path) + "*")
+        rule = next(line for line in profile.splitlines()
+                    if line.startswith("(deny file-write* ") and path_filter in line)
+        assert profile.rfind(rule) > profile.rfind("(allow file-write*")
+    if adapter == "claude" and mode == "read_only" and layout == "symlink":
+        assert any(line.startswith("(allow file-read-data ") and mod._sbpl_filter(target) in line
+                   for line in profile.splitlines())
+    if not sandboxed:
+        return
+    sandbox_exec = mod._sandbox_exec_path()
+    if not sandbox_exec:
+        pytest.skip("sandbox-exec is unavailable or disabled")
+    command = [sandbox_exec, "-p", profile, "/bin/sh", "-c"]
+    for path in {config, target}:
+        for suffix in ("", ".tmp", ".backup"):
+            result = subprocess.run([*command, f"printf bad > {shlex.quote(str(path) + suffix)}"],
+                                    check=False, capture_output=True, text=True)
+            assert result.returncode != 0, (path, suffix)
+        source = workspace / "replacement"
+        source.write_text("replacement")
+        assert subprocess.run([*command, f"mv {shlex.quote(str(source))} {shlex.quote(str(path))}"],
+                              check=False, capture_output=True, text=True).returncode != 0
+    if layout != "absent":
+        assert target.read_text() == "synthetic config"
+        if adapter == "claude":
+            read = subprocess.run([*command, f"cat {shlex.quote(str(config))}"], check=False, capture_output=True, text=True)
+            assert read.returncode == 0, read.stderr
+            assert read.stdout == "synthetic config"
+
+
+@pytest.mark.parametrize("adapter", ["claude", "cursor", "agy", "kiro"])
+def test_receipt_provider_state_grants_match_profile_with_symlink_home(monkeypatch, tmp_path, adapter):
+    mod = supervisor()
+    home = (tmp_path / "home").resolve()
+    home.mkdir()
+    target = (tmp_path / "dotfiles" / adapter).resolve()
+    target.mkdir(parents=True)
+    relative = ".gemini" if adapter == "agy" else f".{adapter}"
+    (home / relative).symlink_to(target, target_is_directory=True)
+    monkeypatch.setattr(mod.Path, "home", lambda: home)
+    monkeypatch.setattr(mod, "_sandbox_exec_path", lambda: "/usr/bin/sandbox-exec")
+    monkeypatch.setattr(mod, "_require_kiro_engine", lambda: None)
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    plan = mod.build_plan(adapter, {}, "hello", cwd=workspace, run_dir=tmp_path / "attempt")
+    profile = mod.os_confinement_profile(plan)
+    grants = plan["applied"]["write_boundary"]["writable_paths"]
+    assert not any(str(home / relative) in path for path in grants)
+    if adapter in {"claude", "cursor", "agy"}:
+        assert any(str(target) in path for path in grants)
+    for line in profile.splitlines():
+        if not line.startswith("(allow file-write* "):
+            continue
+        for kind, value in re.findall(r'\((subpath|literal|regex) #?"([^"\n]+)"\)', line):
+            if kind == "regex":
+                assert "regex:" + value in grants, value
+            else:
+                assert value in grants, value
+
+
+@pytest.mark.parametrize("adapter", ["claude", "cursor", "agy", "kiro"])
+def test_provider_state_accepts_normal_provider_under_symlink_home(monkeypatch, tmp_path, adapter):
+    mod = supervisor()
+    home = (tmp_path / "real-home").resolve()
+    home.mkdir()
+    alias = tmp_path / "home-alias"
+    alias.symlink_to(home, target_is_directory=True)
+    monkeypatch.setattr(mod.Path, "home", lambda: alias)
+    plan = {"adapter": adapter, "mode": "read_only", "cwd": str(tmp_path),
+            "applied": {"confinement": "sandbox-exec", "add_dirs": []}}
+    assert mod.os_confinement_profile(plan).startswith("(version 1)")
+    relative = ".gemini" if adapter == "agy" else f".{adapter}"
+    assert plan["provider_home"] == str(home / relative)
+
+
+def protection(cwd, *extra):
+    return subprocess.run([sys.executable, str(SCRIPTS / "lane_protection.py"), "--cwd", str(cwd), *extra],
+                          capture_output=True, text=True, timeout=30)
+
+
+def landing(repo, tip, base):
+    """Fabric's landing gate: the leased remote SHA is the base, never a local ref."""
+    return protection(repo, "--common-dir", str(repo / ".git"), "--tip", tip, "--base", base)
+
+
+def side_commit(cwd, parent, content, path=SKILL):
+    """A plumbing commit on parent with path replaced, leaving HEAD and the index alone."""
+    environment = {**os.environ, "GIT_INDEX_FILE": str(Path(cwd) / ".side-index")}
+
+    def run(*args, stdin=""):
+        return subprocess.run(["git", "-C", str(cwd), *GIT_FIXTURE, *args], check=True, capture_output=True,
+                              text=True, env=environment, input=stdin).stdout.strip()
+
+    run("read-tree", parent)
+    blob = run("hash-object", "-w", "--stdin", stdin=content)
+    run("update-index", "--add", "--cacheinfo", f"100644,{blob},{path}")
+    tree = run("write-tree")
+    os.unlink(Path(cwd) / ".side-index")
+    return run("commit-tree", tree, "-p", parent, "-m", "side")
+
+
+def head_of(cwd, rev="HEAD"):
+    return git(cwd, "rev-parse", rev).strip()
+
+
+@pytest.mark.parametrize("ref", ["refs/heads/main", "refs/remotes/origin/main"])
+def test_landing_refuses_protected_commits_laundered_through_a_moved_integration_ref(tmp_path, ref):
+    repo, lane = instruction_lane(tmp_path)
+    leased = head_of(repo, "main")
+    # Writers can no longer move these refs; the gate must not rely on that either.
+    poison = side_commit(lane, leased, "POISON\n")
+    git(repo, "update-ref", ref, poison)
+    git(lane, "merge", "-q", "--no-edit", ref)
+    tip = head_of(lane)
+    refused = landing(repo, tip, leased)
+    assert refused.returncode == 1
+    assert refused.stderr.startswith("protected_instructions_changed: unreleased commits")
+    assert poison in refused.stderr and "quarantine" not in refused.stderr
+    assert refused.stderr.count("protected_instructions_changed") == 1
+    # A commit on the primary branch itself is checked the same way.
+    assert landing(repo, poison, leased).returncode == 1
+
+
+def test_landing_checks_the_landed_history_not_the_lane_branch(tmp_path):
+    repo, lane = instruction_lane(tmp_path)
+    leased = head_of(repo, "main")
+    # The lane branch is rewritten onto main with a protected change, then consumed.
+    git(lane, "reset", "-q", "--hard", side_commit(lane, leased, "POISON\n"))
+    git(repo, "merge", "-q", "--no-ff", "-m", "consume lane", "lane")
+    tip = head_of(repo)
+    git(lane, "reset", "-q", "--hard", leased)  # The child then resets its branch.
+    assert landing(repo, tip, leased).returncode == 1
+
+
+def test_merging_the_trusted_base_into_a_lane_passes_but_rolling_it_back_does_not(tmp_path):
+    repo, lane = instruction_lane(tmp_path)
+    leased = head_of(repo, "main")
+    # The chair refreshes the lane from main, which carries a trusted skill change.
+    git(lane, "merge", "-q", "--no-edit", "main")
+    assert landing(repo, head_of(lane), leased).returncode == 0
+    checked = protection(lane)
+    assert checked.returncode == 0, checked.stderr
+    assert checked.stdout.strip() == head_of(lane)
+    (lane / SKILL).write_text("v1\n")
+    git(lane, "commit", "-q", "-am", "roll the skill back")
+    assert landing(repo, head_of(lane), leased).returncode == 1
+
+
+def test_a_registered_worktree_that_was_never_dispatched_lands_without_any_record(tmp_path):
+    repo, lane = instruction_lane(tmp_path)
+    assert not (repo / ".git/provenant-instruction-checks").exists()
+    checked = protection(lane)
+    assert checked.returncode == 0, checked.stderr
+    assert landing(repo, head_of(lane), head_of(repo, "main")).returncode == 0
+
+
+@pytest.mark.parametrize("history", ["revert", "evil-merge", "case-variant"])
+def test_landing_refuses_each_commit_that_changes_instructions(tmp_path, history):
+    repo, lane = instruction_lane(tmp_path)
+    git(lane, "merge", "-q", "--no-edit", "main")
+    leased = head_of(repo, "main")
+    if history == "revert":
+        (lane / SKILL).write_text("lane\n")
+        git(lane, "commit", "-q", "-am", "edit")
+        git(lane, "revert", "--no-edit", "HEAD")
+    elif history == "evil-merge":
+        # Neither parent changes the skill; only the merge resolution does.
+        git(lane, "branch", "-q", "side", side_commit(lane, head_of(lane), "side\n", path="side.txt"))
+        git(lane, "merge", "-q", "--no-ff", "--no-commit", "side")
+        (lane / SKILL).write_text("merged\n")
+        git(lane, "commit", "-q", "-am", "merge side")
+    else:
+        git(lane, "reset", "-q", "--hard", side_commit(lane, head_of(lane), "x\n", path=".AGENTS/x.md"))
+    assert landing(repo, head_of(lane), leased).returncode == 1
+
+
+def test_release_requires_the_reviewed_tip_and_covers_nothing_after_it(tmp_path, monkeypatch):
+    monkeypatch.delenv("PROVENANT_ATTEMPT_MARKER", raising=False)
+    repo, lane = instruction_lane(tmp_path)
+    leased = head_of(repo, "main")
+    git(lane, "merge", "-q", "--no-edit", "main")
+    (lane / SKILL).write_text("chair reviewed\n")
+    git(lane, "commit", "-q", "-am", "reviewed edit")
+    reviewed = head_of(lane)
+    assert landing(repo, reviewed, leased).returncode == 1
+    missing = protection(lane, "--release", "--actor", "chair", "--reason", "ok")
+    assert missing.returncode == 1 and "--tip" in missing.stderr
+    # A detached child races the chair with one more protected commit.
+    (lane / SKILL).write_text("UNREVIEWED\n")
+    git(lane, "commit", "-q", "-am", "race")
+    raced = head_of(lane)
+    moved = protection(lane, "--release", "--tip", reviewed, "--actor", "chair", "--reason", "ok")
+    assert moved.returncode == 1 and "not the reviewed tip" in moved.stderr
+    git(lane, "reset", "-q", "--hard", reviewed)
+    released = protection(lane, "--release", "--tip", reviewed, "--actor", "chair", "--reason", "decision 7")
+    assert released.returncode == 0, released.stderr
+    [record] = (repo / ".git/provenant-instruction-checks/releases").glob("*.json")
+    audit = json.loads(record.read_text())
+    assert audit["tip"] == reviewed and audit["actor"] == "chair" and audit["reason"] == "decision 7"
+    assert audit["worktree"] == str(lane.resolve())
+    assert landing(repo, reviewed, leased).returncode == 0
+    assert landing(repo, raced, leased).returncode == 1
+    inside = subprocess.run([sys.executable, str(SCRIPTS / "lane_protection.py"), "--cwd", str(lane), "--release",
+                             "--tip", reviewed, "--actor", "chair", "--reason", "ok"], capture_output=True, text=True,
+                            env={**os.environ, "PROVENANT_ATTEMPT_MARKER": "1"})
+    assert inside.returncode == 1
+
+
+def test_a_writer_cannot_take_a_branch_another_checkout_holds(tmp_path):
+    _, lane = instruction_lane(tmp_path)
+    git(lane, "symbolic-ref", "HEAD", "refs/heads/main")
+    with pytest.raises(ValueError, match="checked out by another worktree"):
+        supervisor().build_plan("claude", {}, "hello", workspace_root=tmp_path, mode="worktree_write", worktree=lane)
+    git(lane, "checkout", "-q", "--detach", "lane")
+    plan = supervisor().build_plan("claude", {}, "hello", workspace_root=tmp_path, mode="worktree_write", worktree=lane)
+    assert plan["lane_ref"] is None
+    # Without sandbox-exec (Linux CI) there is no path boundary: writable_paths is None.
+    assert not any("/refs/" in path for path in plan["applied"]["write_boundary"]["writable_paths"] or [])
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="sandbox-exec is macOS-only")
+@pytest.mark.parametrize("missing", ["packed-ref", "reflog"])
+def test_a_sandboxed_writer_commits_on_a_nested_branch_without_its_ref_directories(tmp_path, missing):
+    mod = supervisor()
+    sandbox_exec = mod._sandbox_exec_path()
+    if not sandbox_exec:
+        pytest.skip("sandbox-exec is unavailable or disabled")
+    repo, lane = instruction_lane(tmp_path)
+    git(lane, "switch", "-q", "-c", "fix/nested")
+    common = repo.resolve() / ".git"
+    if missing == "packed-ref":
+        git(repo, "pack-refs", "--all")
+        assert not (common / "refs/heads/fix").exists()
+    shutil.rmtree(common / "logs/refs/heads/fix")
+    plan = mod.build_plan("claude", {}, "hello", workspace_root=tmp_path, mode="worktree_write", worktree=lane)
+    assert plan["lane_ref"] == "refs/heads/fix/nested"
+    profile = mod.os_confinement_profile(plan)
+    fixture = " ".join(shlex.quote(arg) for arg in GIT_FIXTURE)
+    script = (f"echo more >> app.txt && git {fixture} commit -q -am more"
+              f" && git {fixture} merge -q --no-ff --no-edit main")
+    run = subprocess.run([sandbox_exec, "-p", profile, "/bin/sh", "-c", script], capture_output=True,
+                         text=True, cwd=lane)
+    if run.returncode and "sandbox_apply" in run.stderr:
+        pytest.skip("sandbox_apply is refused in this test environment")
+    assert run.returncode == 0, run.stderr
+    assert head_of(repo, "fix/nested") == head_of(lane)
+    assert (common / "logs/refs/heads/fix/nested").is_file()
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="sandbox-exec is macOS-only")
+def test_a_sandboxed_writer_moves_only_its_own_branch(monkeypatch, tmp_path):
+    mod = supervisor()
+    sandbox_exec = mod._sandbox_exec_path()
+    if not sandbox_exec:
+        pytest.skip("sandbox-exec is unavailable or disabled")
+    repo, lane = instruction_lane(tmp_path)
+    git(repo, "update-ref", "refs/remotes/origin/main", "main")
+    git(repo, "pack-refs", "--all")
+    git(lane, "update-ref", "refs/heads/lane", "lane")  # A loose lane ref beside packed-refs.
+    plan = mod.build_plan("claude", {}, "hello", workspace_root=tmp_path, mode="worktree_write", worktree=lane)
+    profile = mod.os_confinement_profile(plan)
+    common = repo.resolve() / ".git"
+    private = common / "worktrees/lane"
+
+    def run(script):
+        return subprocess.run([sandbox_exec, "-p", profile, "/bin/sh", "-c", script], capture_output=True,
+                              text=True, cwd=lane)
+
+    probe = run("true")
+    if probe.returncode and "sandbox_apply" in probe.stderr:
+        pytest.skip("sandbox_apply is refused in this test environment")
+    fixture = " ".join(shlex.quote(arg) for arg in GIT_FIXTURE)
+    committed = run(f"echo more >> app.txt && git {fixture} commit -q -am more")
+    assert committed.returncode == 0, committed.stderr
+    assert head_of(repo, "lane") == head_of(lane)
+    main = head_of(repo, "main")
+    for ref in ("refs/heads/main", "refs/remotes/origin/main", "refs/tags/v1", "refs/heads/other"):
+        moved = run(f"git update-ref {ref} HEAD")
+        assert moved.returncode != 0, ref
+    assert head_of(repo, "main") == main
+    for path in (common / "packed-refs", lane / ".git", private / "commondir", private / "gitdir",
+                 private / "config.worktree", common / "objects/info/alternates", common / "HEAD",
+                 common / "provenant-instruction-checks"):
+        assert run(f"printf x >> {shlex.quote(str(path))}").returncode != 0, path
+
+
+def test_lane_provenance_stamps_the_installed_harness_revision(tmp_path):
+    code = """import json
+print(json.dumps({'type':'item.completed','item':{'type':'agent_message','text':'DONE'}}), flush=True)
+print(json.dumps({'type':'turn.completed'}), flush=True)
+"""
+    record = supervisor().execute(fixture_plan(tmp_path, code), tmp_path / "result.md")
+    head = subprocess.run(["git", "-C", str(Path(supervisor().__file__).resolve().parents[3]), "rev-parse", "HEAD"],
+                          capture_output=True, text=True)
+    assert record["status"] == "ok"
+    assert record["provenance"]["harness_rev"] == (head.stdout.strip() if head.returncode == 0 else None)
+
+
+@pytest.mark.parametrize("adapter", ["agy", "codex", "opencode", "claude"])
+@pytest.mark.parametrize(("window", "status"), [("day", "usage_limited"), ("minute", "rate_limited"), ("second", "rate_limited")])
+def test_resource_exhausted_classifies_the_quota_window(adapter, window, status):
+    message = f"429 RESOURCE_EXHAUSTED: Quota exceeded for requests per {window}"
+    parsed = supervisor().parse_output(adapter, "", message, 1)
+    assert parsed["status"] == status
+    assert message in parsed["excerpt"]
+
+
+@pytest.mark.parametrize(("message", "status"), [
+    ("Quota exceeded: requests per day. retry in 2 per minute docs", "usage_limited"),
+    ("Quota exceeded: requests per hour. See per minute docs", "usage_limited"),
+    ("Quota exceeded for GenerateRequestsPerMinutePerProjectPerModel", "rate_limited"),
+    ("Quota exceeded for GenerateRequestsPerDayPerProjectPerModel", "usage_limited"),
+    ("Quota exceeded for RequestsPerHour and RequestsPerMinute", "usage_limited"),
+    ('{"error":{"message":"Quota exceeded for requests per minute"},"docs":"limits per day"}', "rate_limited"),
+    ("RESOURCE_EXHAUSTED: limit: 60 per minute", "rate_limited"),
+    ('RESOURCE_EXHAUSTED: Quota metric "generativelanguage.googleapis.com/generate_requests" per minute', "rate_limited"),
+    ("RESOURCE_EXHAUSTED: limit: 60 per day", "usage_limited"),
+])
+def test_quota_window_comes_from_the_quota_phrase_not_the_whole_event(message, status):
+    parsed = supervisor().parse_output("agy", "", (message if "RESOURCE_EXHAUSTED" in message else "429 RESOURCE_EXHAUSTED: " + message), 1)
+    assert parsed["status"] == status
+
+
+@pytest.mark.parametrize("body_string", [False, True])
+@pytest.mark.parametrize("wrapped", [False, True])
+def test_opencode_spent_free_allowance_records_provider_reason(tmp_path, body_string, wrapped):
+    message = "Rate limit exceeded. Please try again later."
+    body = {"error": {"type": "FreeUsageLimitError", "message": message}}
+    error = {"type": "provider.quota", "status": 429,
+             "response": {"body": json.dumps(body) if body_string else body}}
+    event = {"type": "error", "error": error} if wrapped else error
+    code = "import json,sys; print(json.dumps(" + repr(event) + ")); sys.exit(1)"
+    record = supervisor().execute(fixture_plan(tmp_path, code, "opencode"), tmp_path / "result.md")
+    assert record["status"] == "usage_limited"
+    assert record["reason"] == message

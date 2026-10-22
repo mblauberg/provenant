@@ -79,106 +79,153 @@ def merge_route(base: list[Any], overlay: list[Any], path: str, drift: list[str]
     return merged + [entry for entry in base if isinstance(entry, dict) and entry.get("model") not in listed]
 
 
-# Pools renamed when the routes became the junior, senior and principal tiers; an older overlay
-# still names them.
-# Folded in this order, so a `workhorse` or `bulk` entry outranks a `strong` or
-# `scout` entry for the same model, as it did before the rename.
-LEGACY_ROUTES = {"workhorse": "senior", "strong": "senior", "bulk": "junior", "scout": "junior",
-                 "flagship": "principal"}
+# Names the tiers had before they became junior, senior and principal. None is accepted any more.
+RENAMED_TIERS = {"scout": "junior", "bulk": "junior", "workhorse": "senior", "strong": "senior",
+                 "review": "senior", "flagship": "principal"}
 TIER_ROUTES = ("junior", "senior", "principal")
-# The tier names as an adapter's own alias names, which the catalogue keeps.
-TIER_ALIASES = {"junior": "scout", "senior": "workhorse", "principal": "flagship"}
 
 
-def _alias_keys(mapping: Any) -> Any:
-    """Rename tier-named keys of an alias map, keeping an alias-named key on a clash."""
-    if not isinstance(mapping, dict):
-        return mapping
-    renamed = {key: value for key, value in mapping.items() if key not in TIER_ALIASES}
-    for key, value in mapping.items():
-        if key in TIER_ALIASES:
-            renamed.setdefault(TIER_ALIASES[key], value)
-    return renamed
+class RenamedNameError(ValueError):
+    """A route, alias or overlay key still uses a retired tier name."""
 
 
-def canonical_aliases(overlay: dict[str, Any]) -> None:
-    """Let an overlay name adapter aliases by tier (`senior` for `workhorse`)."""
-    tasks = overlay.get("task_class_routes")
-    if isinstance(tasks, dict):
-        overlay["task_class_routes"] = {
-            name: ({**route, "alias": TIER_ALIASES[route["alias"]]}
-                   if isinstance(route, dict) and route.get("alias") in TIER_ALIASES else route)
-            for name, route in tasks.items()
-        }
-    for section, nested in (("families", ("aliases",)), ("adapters", ("aliases",))):
-        block = overlay.get(section)
-        if not isinstance(block, dict):
-            continue
-        updated = {}
-        for name, entry in block.items():
-            if isinstance(entry, dict):
-                entry = dict(entry)
-                for key in nested:
-                    if key in entry:
-                        entry[key] = _alias_keys(entry[key])
-                if section == "families":
-                    for key in ("role_overrides", "role_effort_defaults"):
-                        roles = entry.get(key)
-                        if isinstance(roles, dict):
-                            entry[key] = {role: _alias_keys(value) for role, value in roles.items()}
-                    tiers = entry.get("risk_tier_overrides")
-                    if isinstance(tiers, dict):
-                        entry["risk_tier_overrides"] = {
-                            tier: ({**value, "alias": TIER_ALIASES[value["alias"]]}
-                                   if isinstance(value, dict) and value.get("alias") in TIER_ALIASES else value)
-                            for tier, value in tiers.items()
-                        }
-            updated[name] = entry
-        overlay[section] = updated
+def renamed_message(kind: str, name: str) -> str:
+    return f"{kind} '{name}' was renamed to '{RENAMED_TIERS[name.strip().casefold()]}'; fix: use the new name"
 
 
-def migrate_legacy_routes(overlay: Any, drift: list[str]) -> Any:
-    """Fold an overlay's renamed pools into their tiers and repoint its synonyms.
+def _renamed(name: Any) -> bool:
+    return isinstance(name, str) and name.strip().casefold() in RENAMED_TIERS
 
-    A legacy pool's entries follow the tier's own overlay entries, so a reweight
-    of `strong` still applies to `senior`. A synonym named after a pool or an old
-    tier is dropped, since the product maps those names, and one aimed at a
-    renamed pool is repointed; both are noted in `drift`. Tier names used as
-    adapter aliases become the alias names.
+
+def reject_renamed(overlay: Any, label: str = "overlay") -> Any:
+    """Refuse an overlay that still uses a retired tier name, naming its replacement.
+
+    Checked: pool names under `routes`, synonym targets, task-class and risk-tier aliases,
+    and the alias keys of adapter and family profiles.
     """
     if not isinstance(overlay, dict):
         return overlay
-    overlay = dict(overlay)
-    canonical_aliases(overlay)
     routes = overlay.get("routes")
-    if isinstance(routes, dict):
-        routes = dict(routes)
-        for old, new in LEGACY_ROUTES.items():
-            if old not in routes:
-                continue
-            legacy = routes.pop(old)
-            current = routes.get(new)
-            if isinstance(legacy, list) and (current is None or isinstance(current, list)):
-                listed = {entry.get("model") for entry in current or [] if isinstance(entry, dict)}
-                routes[new] = [*(current or []), *(entry for entry in legacy
-                                                   if not isinstance(entry, dict) or entry.get("model") not in listed)]
-                drift.append(f"routes.{old}: renamed to {new}; fix: rename it in the overlay")
-            else:
-                drift.append(f"routes.{old}: malformed legacy pool dropped; fix: list it under routes.{new}")
-        overlay["routes"] = routes
+    for name in routes if isinstance(routes, dict) else ():
+        if _renamed(name):
+            raise RenamedNameError(label + " " + renamed_message("route", name))
     synonyms = overlay.get("route_synonyms")
-    if isinstance(synonyms, dict):
-        kept: dict[str, Any] = {}
-        for name, target in synonyms.items():
-            if name in {*TIER_ROUTES, *LEGACY_ROUTES, "design", "writing"}:
-                drift.append(f"route_synonyms.{name}: dropped, the product maps tier names; fix: remove it")
+    for target in synonyms.values() if isinstance(synonyms, dict) else ():
+        if _renamed(target):
+            raise RenamedNameError(label + " " + renamed_message("route_synonyms target", target))
+    tasks = overlay.get("task_class_routes")
+    for route in tasks.values() if isinstance(tasks, dict) else ():
+        if isinstance(route, dict) and _renamed(route.get("alias")):
+            raise RenamedNameError(label + " " + renamed_message("alias", route["alias"]))
+    for section in ("families", "adapters"):
+        block = overlay.get(section)
+        for entry in block.values() if isinstance(block, dict) else ():
+            if not isinstance(entry, dict):
                 continue
-            if target in LEGACY_ROUTES:
-                drift.append(f"route_synonyms.{name}: {target} is now {LEGACY_ROUTES[target]}; fix: repoint it")
-                target = LEGACY_ROUTES[target]
-            kept[name] = target
-        overlay["route_synonyms"] = kept
+            keyed = [entry.get("aliases")]
+            for key in ("role_overrides", "role_effort_defaults"):
+                roles = entry.get(key)
+                keyed.extend(roles.values() if isinstance(roles, dict) else ())
+            for mapping in keyed:
+                for name in mapping if isinstance(mapping, dict) else ():
+                    if _renamed(name):
+                        raise RenamedNameError(label + " " + renamed_message("alias", name))
+            tiers = entry.get("risk_tier_overrides")
+            for value in tiers.values() if isinstance(tiers, dict) else ():
+                if isinstance(value, dict) and _renamed(value.get("alias")):
+                    raise RenamedNameError(label + " " + renamed_message("alias", value["alias"]))
+    kept = overlay.get("route_synonyms")
+    if isinstance(kept, dict):
+        overlay = {**overlay, "route_synonyms": {name: target for name, target in kept.items()
+                                                  if name not in {*TIER_ROUTES, "design", "writing"}}}
     return overlay
+
+
+class MigrationConflict(ValueError):
+    """An installed catalogue holds a retired name and its replacement with different values."""
+
+
+def migrate_renamed(document: Any) -> tuple[Any, list[str], list[str]]:
+    """Rewrite retired tier names in an installed catalogue, keeping their values; list what moved.
+
+    Used by the routing refresh only. Routing itself still rejects these names. A key under its new
+    holds the same value as the old one, or `MigrationConflict` is raised: no value is dropped.
+    The third result lists the dotted paths of renamed alias keys and route pools, whose values the
+    caller keeps.
+    """
+    if not isinstance(document, dict):
+        return document, [], []
+    document = json.loads(json.dumps(document))
+    notes: list[str] = []
+    moved: list[str] = []
+
+    def new_name(name: str) -> str:
+        return RENAMED_TIERS[name.strip().casefold()]
+
+    def settle(target: dict[str, Any], name: str, value: Any, old_path: str, new_path: str) -> None:
+        if name in target and target[name] != value:
+            raise MigrationConflict(
+                f"{old_path} = {json.dumps(value)} conflicts with {new_path} = {json.dumps(target[name])}; "
+                "keep one, delete the other, then refresh again")
+        target.setdefault(name, value)
+
+    def rename_keys(mapping: Any, path: str) -> Any:
+        if not isinstance(mapping, dict) or not any(_renamed(key) for key in mapping):
+            return mapping
+        result = {key: value for key, value in mapping.items() if not _renamed(key)}
+        for key, value in mapping.items():
+            if _renamed(key):
+                notes.append(f"{path}.{key} -> {new_name(key)}")
+                moved.append(f"{path}.{new_name(key)}")
+                settle(result, new_name(key), value, f"{path}.{key}", f"{path}.{new_name(key)}")
+        return result
+
+    def rename_alias(holder: Any, path: str) -> None:
+        if isinstance(holder, dict) and _renamed(holder.get("alias")):
+            notes.append(f"{path}.alias {holder['alias']} -> {new_name(holder['alias'])}")
+            holder["alias"] = new_name(holder["alias"])
+
+    routes = document.get("routes")
+    if isinstance(routes, dict) and any(_renamed(key) for key in routes):
+        merged = {key: value for key, value in routes.items() if not _renamed(key)}
+        for key, value in routes.items():
+            if not _renamed(key):
+                continue
+            notes.append(f"routes.{key} -> {new_name(key)}")
+            moved.append(f"routes.{new_name(key)}")
+            settle(merged, new_name(key), value, f"routes.{key}", f"routes.{new_name(key)}")
+        document["routes"] = merged
+    synonyms = document.get("route_synonyms")
+    if isinstance(synonyms, dict):
+        kept = {}
+        for name, target in synonyms.items():
+            if _renamed(name):
+                notes.append(f"route_synonyms.{name} dropped (the product maps task classes)")
+                continue
+            if _renamed(target):
+                notes.append(f"route_synonyms.{name} {target} -> {new_name(target)}")
+                target = new_name(target)
+            kept[name] = target
+        document["route_synonyms"] = kept
+    tasks = document.get("task_class_routes")
+    for name, route in (tasks.items() if isinstance(tasks, dict) else ()):
+        rename_alias(route, f"task_class_routes.{name}")
+    for section in ("families", "adapters"):
+        block = document.get(section)
+        for name, entry in (block.items() if isinstance(block, dict) else ()):
+            if not isinstance(entry, dict):
+                continue
+            base = f"{section}.{name}"
+            if "aliases" in entry:
+                entry["aliases"] = rename_keys(entry["aliases"], f"{base}.aliases")
+            for key in ("role_overrides", "role_effort_defaults"):
+                roles = entry.get(key)
+                if isinstance(roles, dict):
+                    entry[key] = {role: rename_keys(value, f"{base}.{key}.{role}") for role, value in roles.items()}
+            tiers = entry.get("risk_tier_overrides")
+            for tier, value in (tiers.items() if isinstance(tiers, dict) else ()):
+                rename_alias(value, f"{base}.risk_tier_overrides.{tier}")
+    return document, notes, moved
 
 
 def route_name(catalog: dict[str, Any], name: str) -> str:
@@ -186,6 +233,8 @@ def route_name(catalog: dict[str, Any], name: str) -> str:
     key = name.strip().casefold()
     if key in routes:
         return key
+    if key in RENAMED_TIERS:
+        raise PoolError("route_renamed", renamed_message("route", name.strip()))
     synonym = catalog.get("route_synonyms", {}).get(key)
     if isinstance(synonym, str) and synonym in routes:
         return synonym
@@ -271,6 +320,7 @@ class Availability:
         self.catalog = catalog
         self.installed = installed
         self.cooldowns = router._cooldowns(catalog) if cooldowns is None else cooldowns
+        self._quota: dict[str, Any] | None = None
         self._enabled: dict[str, str] = {}
         self._compatibility: dict[str, dict[str, Any] | None] = {}
 
@@ -301,6 +351,12 @@ class Availability:
         _, status = self.router.check_adapter_compatibility(compatibility, family, model)
         return {"adapter_family_forbidden": f"{adapter} cannot run the {family} family",
                 "adapter_model_forbidden": f"{adapter} does not allow {model}"}.get(status, status)
+
+    def last_resort(self, adapter: str) -> bool:
+        """The adapter's selected account is drawing on credits under the `last_resort` credits policy."""
+        if self._quota is None:
+            self._quota = getattr(self.router, "_quota_states", dict)()
+        return bool(self._quota.get(adapter, {}).get("last_resort"))
 
     def reason(self, adapter: str, model: str, weight: float = 1.0) -> str:
         if weight <= 0:
@@ -429,6 +485,8 @@ def pick(router: Any, catalog: dict[str, Any], request: dict[str, Any], *,
     models = request.get("models")
     confidential = request.get("confidential") is True
     requested_effort = request.get("effort") or None
+    if isinstance(requested_effort, str) and requested_effort.strip().casefold() == "max":
+        raise PoolError("effort_invalid", "effort 'max' was retired; fix: use xhigh")
     warnings: list[str] = []
     adapters = catalog.get("adapters", {})
     if council is not None and (isinstance(council, bool) or not isinstance(council, int)
@@ -490,6 +548,15 @@ def pick(router: Any, catalog: dict[str, Any], request: dict[str, Any], *,
                 warnings.append(f"skipped {entry['key']}: {why}")
             continue
         usable.append(entry)
+    if models is None and not request.get("adapter"):
+        # Credits are spent only when nothing with allowance qualifies; naming the adapter or model pins it.
+        allowance = [entry for entry in usable if not availability.last_resort(entry["adapter"])]
+        spare = [entry for entry in usable if entry not in allowance]
+        if allowance:
+            warnings.extend(f"skipped {entry['key']}: drawing on credits while others have allowance" for entry in spare)
+            usable = allowance
+        else:
+            warnings.extend(f"{entry['key']} draws on credits: nothing with allowance is available" for entry in spare)
     if not usable:
         raise PoolError("route_unavailable", "No available model in " + label
                         + ("" if not warnings else " (" + "; ".join(warnings) + ")")
@@ -554,25 +621,46 @@ def describe(router: Any, catalog: dict[str, Any], availability: Availability,
              effort_order: dict[str, int]) -> dict[str, Any]:
     """Every pool with live availability, for `provenant routes`."""
     routes = {}
+    # Provider pace is report-only here; only an exhausted window changes availability (as a cooldown).
+    quota = getattr(router, "_quota_states", dict)()
     for name in catalog.get("routes", {}):
         routes[name] = [{
             "model": entry["key"], "weight": entry["weight_label"], "family": entry["family"],
             **({"effort": "-".join(entry["effort"])} if entry["effort"] else {}),
             **({"traits": entry["traits"]} if entry["traits"] else {}),
             "availability": availability.reason(entry["adapter"], entry["model"], entry["weight"]) or "available",
+            **({"quota": {key: quota[entry["adapter"]][key] for key in ("account", "state", "summary", "observed_at")}}
+               if entry["adapter"] in quota else {}),
         } for entry in pool(router, catalog, name, effort_order)]
     return {"schema": "fabric.routes.v1", "routes": routes,
             "synonyms": dict(sorted(catalog.get("route_synonyms", {}).items()))}
 
 
-def render(document: dict[str, Any]) -> str:
+def render(document: dict[str, Any], full: bool = False) -> str:
+    """Every pool; by default unavailable and cooling models collapse to one line."""
     lines = []
     for name, entries in document["routes"].items():
         lines.append(name)
+        hidden = 0
+        cooling = []
         for entry in entries:
+            if not full and entry["availability"] != "available":
+                # Cooling models stay named, since they recover; the rest collapse to a count.
+                hidden += 1
+                if "cooling until " in entry["availability"]:
+                    cooling.append((entry["availability"].split("cooling until ", 1)[1], entry["model"]))
+                continue
             model = entry["model"] + (f"@{entry['effort']}" if "effort" in entry else "")
             caveat = f"  [{', '.join(entry['traits'])}]" if "traits" in entry else ""
+            if entry.get("quota", {}).get("state") in ("deficit", "credit_only"):
+                caveat += f"  [quota {entry['quota']['summary']}]"
             lines.append(f"  {model:<52} {str(entry['weight']):<8} {entry['availability']}{caveat}")
+        if hidden:
+            lines.append(f"  {hidden} unavailable or cooling"
+                         + (f"; soonest cooling until {min(cooling)[0]}" if cooling else "")
+                         + "; use --all")
+            if cooling:
+                lines.append("  cooling: " + ", ".join(model for _, model in sorted(cooling)))
     synonyms: dict[str, list[str]] = {}
     for alias, target in document["synonyms"].items():
         synonyms.setdefault(target, []).append(alias)

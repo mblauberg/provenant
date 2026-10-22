@@ -256,7 +256,7 @@ def _run_verdict(path: Path, kind: str, age: float, refs: str | None, pr_unknown
         retention = 30
     elif kind == "mission":
         retention = 7
-    elif status in {"failed", "quarantined", "partial", "stalled", "startup_timeout", "timed_out", "interrupted", "rejected",
+    elif status in {"failed", "quarantined", "partial", "stalled", "startup_timeout", "writer_changed", "timed_out", "interrupted", "lost", "rejected",
                     "tool_missing", "usage_limited", "rate_limited", "auth_required", "model_unavailable",
                     "permission_blocked"}:
         retention = 14

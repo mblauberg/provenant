@@ -21,6 +21,7 @@ import {
 } from "./execution-input.js";
 export { ACCESS_MODES, DISPATCH_ADAPTERS } from "./execution-input.js";
 export type { AccessMode, RouteInput, DispatchInput, BatchInput, BatchTaskInput } from "./execution-input.js";
+import { recordSeatRun } from "./seat-index.js";
 import { compactRoute, basePaths, compactDispatch, compactBatch, type OwnerCompletion } from "./owner-output.js";
 import { execFileSync, execFile, spawn, type ChildProcess } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
@@ -42,7 +43,8 @@ import {
   unlinkSync,
   writeFileSync,
 } from "node:fs";
-import { basename, dirname, isAbsolute, join, resolve } from "node:path";
+import { tmpdir } from "node:os";
+import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { promisify } from "node:util";
 
 import { catalogueSnapshot, type CatalogueSnapshot } from "./catalogue.js";
@@ -209,7 +211,69 @@ export async function pythonOwner(root: string, identity: Identity, env: NodeJS.
   }
 }
 
-function createRunDirectory(identity: Identity, kind: "dispatch" | "batch"): string {
+function realPath(path: string): string {
+  const absolute = resolve(path);
+  let candidate = absolute;
+  const missing: string[] = [];
+  while (true) {
+    try {
+      return resolve(realpathSync.native(candidate), ...missing);
+    } catch {
+      const parent = dirname(candidate);
+      if (parent === candidate) return absolute;
+      missing.unshift(basename(candidate));
+      candidate = parent;
+    }
+  }
+}
+
+/**
+ * Fixture attempts are test scaffolding. They may only land in a run root under
+ * the OS temp dir or a throwaway .agent-run/scratch tree, and never in a
+ * .agent-run tree that itself sits in temp (a lane's TMPDIR; issue #1002).
+ */
+/**
+ * The one rule for a fixture temp root, shared with the test helpers that pick
+ * one. It protects live run roots: refuse a root inside a git work tree (which
+ * covers a checkout's own .agent-run) and a run tree itself (`.agent-run` or
+ * `.agent-run/runs`). An isolated directory outside git is fine even when it
+ * sits below a lane's .agent-run, because the fixture's run root must then
+ * resolve inside that directory.
+ */
+export function acceptableFixtureTempRoot(root: string): boolean {
+  const real = realPath(root);
+  if (basename(real) === ".agent-run" || (basename(real) === "runs" && basename(dirname(real)) === ".agent-run")) return false;
+  for (let dir = real; ; dir = dirname(dir)) {
+    if (existsSync(join(dir, ".git"))) return false;
+    if (dirname(dir) === dir) return true;
+  }
+}
+
+export function assertFixtureRunRoot(
+  agentRun: string,
+  routes: readonly { model?: unknown; cli_version?: unknown }[],
+  temp: string = tmpdir(),
+): void {
+  if (!routes.some((route) => route.model === "fixture" || route.cli_version === "fixture")) return;
+  const root = realPath(agentRun);
+  // The OS temp dir, and the roots that test helpers fall back to when TMPDIR sits in a git work tree.
+  const fallbacks = [process.env.FABRIC_TEST_TMPDIR, "/tmp"].filter((path): path is string => !!path);
+  const tempRoots = [...new Set([temp, ...fallbacks].map(realPath))];
+  const acceptableTempRoots = tempRoots.filter(acceptableFixtureTempRoot);
+  const underTemp = acceptableTempRoots.some((tempRoot) => root.startsWith(tempRoot + sep));
+  if (underTemp || underScratch(root)) return;
+  throw new Error(
+    `fixture run refused: ${root} is not under an acceptable temp root (${acceptableTempRoots.join(" or ")}) or a .agent-run/scratch tree; fixture attempts must not write into a project .agent-run (issue #1002)`,
+  );
+}
+
+/** True when root sits strictly inside a `.agent-run/scratch` directory, which `provenant clean` expires. */
+function underScratch(root: string): boolean {
+  const parts = root.split(sep);
+  return parts.some((part, index) => part === ".agent-run" && parts[index + 1] === "scratch" && index + 2 < parts.length);
+}
+
+function createRunDirectory(identity: Identity, kind: "dispatch" | "batch", routes: readonly { model?: unknown; cli_version?: unknown }[]): string {
   const agentRun = runRoot(identity.cwd);
   mkdirSync(agentRun, { recursive: true, mode: 0o700 });
   if (lstatSync(agentRun).isSymbolicLink()) throw new Error("run root must not be a symlink");
@@ -272,11 +336,13 @@ async function initialiseRun(
   root: string,
   signal: AbortSignal,
   kind: "dispatch" | "batch" = "dispatch",
+  routes: readonly { model?: unknown; cli_version?: unknown }[] = [],
 ): Promise<string> {
+  assertFixtureRunRoot(runRoot(identity.cwd), routes);
   const owner = executableOwner(root, "skills/orchestrate/scripts/run_dir_init.sh");
   await maintainRunRoot(identity, env);
   signal.throwIfAborted();
-  const runDir = createRunDirectory(identity, kind);
+  const runDir = createRunDirectory(identity, kind, routes);
   try {
     await execFileAsync(owner, [runDir, "--owner-logs"], {
       cwd: identity.cwd,
@@ -312,6 +378,7 @@ export interface OwnerIdentification {
   identifier: string;
   routes?: unknown;
   taskIds?: string[];
+  taskAlias?: string;
   timeout?: number;
   resume?: boolean;
   batchId?: string;
@@ -392,6 +459,7 @@ export function startOwner(
     started_at: new Date().toISOString(),
     routes: identification.routes,
     task_ids: identification.taskIds,
+    task_alias: identification.taskAlias,
     cwd_projects: cwdProjects,
     timeout_seconds: identification.timeout,
     status: "running",
@@ -402,6 +470,8 @@ export function startOwner(
     host_started_at: launcherStartedAt(),
   };
   writeFileSync(statusPath, JSON.stringify(metadata) + "\n", { mode: 0o600 });
+  // The seat keeps the association once this host and launcher are gone.
+  recordSeatRun(runDir, env);
   // The pointer is only a discovery index: an unwritable target run root must
   // not fail the dispatch. The lane then stays visible from its source project.
   try {
@@ -720,12 +790,16 @@ async function dispatchConfiguredProviderUnchecked(
   const workspaceIdentity = identity;
   const root = productRoot(env);
   const ownSeatGuard = !launch.continuation && namesExplicitRoute(withoutEmptySelectors(input));
+  // Routing may replace an alias with a pool selector or a concrete model.
+  const callerAlias = input.task_id === undefined ? withoutEmptySelectors(input).alias : undefined;
+  const namedTaskId = input.task_id ?? (callerAlias === undefined ? undefined
+    : callerAlias.replace(/[^A-Za-z0-9._-]+/gu, "-").replace(/^[^A-Za-z0-9]+/u, "").slice(0, 64) || "task");
   const preferred = nativeFirst(input, identity);
   input = preferred.task;
   let poolWarnings: string[] = preferred.warnings;
   if (usesPool(input)) {
     // A route pick keeps this a single dispatch; a council runs as a batch of its members.
-    const taskId = input.task_id ?? (input.council === undefined && input.models === undefined ? undefined : "council");
+    const taskId = namedTaskId ?? (input.council === undefined && input.models === undefined ? undefined : "council");
     const expanded = await expandPools([{ ...input, ...(taskId === undefined ? {} : { id: taskId }) }],
       await pythonOwner(root, identity, env), root, identity, env, signal);
     if (expanded.errors.length) {
@@ -745,7 +819,7 @@ async function dispatchConfiguredProviderUnchecked(
     }
     // A single pick, or a selector that won precedence, replaces the request's own selectors.
     const { id: _id, ...picked } = expanded.tasks[0]!;
-    input = { ...(picked as DispatchInput), ...(input.task_id === undefined ? {} : { task_id: input.task_id }) };
+    input = picked as DispatchInput;
     poolWarnings = [...preferred.warnings, ...expanded.warnings];
   }
   const snapshotStarted = performance.now(), catalogue = catalogueSnapshot(root, env);
@@ -756,6 +830,7 @@ async function dispatchConfiguredProviderUnchecked(
     ...(input.prompt_file === undefined ? {} : { prompt_file: ownerPromptPath(identity, input.prompt_file) }) };
   const policy = dispatchDefaults(identity.cwd);
   const route = applyDispatchDefaults(normaliseRoute(input, identity, catalogue, ownSeatGuard), policy.defaults);
+  assertFixtureRunRoot(runRoot(workspaceIdentity.cwd), [route]);
   route.warnings = [...new Set([...(initialRoute.warnings ?? []), ...(route.warnings ?? []), ...poolWarnings, ...policy.warnings])];
   validatePrompt(input.prompt, input.prompt_file);
   const roots = [...new Set([...readRoots(identity, input.cwd, input.prompt_file), ...(input.read_roots ?? [])])];
@@ -770,7 +845,9 @@ async function dispatchConfiguredProviderUnchecked(
   const callStarted = Date.now(), validateStarted = performance.now();
   const snapshotMs = performance.now() - snapshotStarted;
   const timeout = timeoutSeconds(input.timeout_seconds ?? policy.defaults.timeout_seconds, input.mode);
-  const taskId = input.task_id ?? `task-${randomUUID().slice(0, 8)}`;
+  // A writer works in its worktree, a reader in its cwd; either names the lane's project.
+  const lanesProject = input.cwd === undefined ? route.worktree : providerIdentity.cwd;
+  const taskId = namedTaskId ?? `task-${randomUUID().slice(0, 8)}`;
   const owner = executableOwner(root, "skills/orchestrate/scripts/dispatch_run.py");
   const controls = executableOwner(root, "skills/orchestrate/scripts/run_controls.py");
   const python = await pythonOwner(root, identity, env);
@@ -791,7 +868,7 @@ async function dispatchConfiguredProviderUnchecked(
   signal.throwIfAborted();
   if (checked.status === "rejected") return { status: "rejected", error: checked.error, fix: checked.fix };
   const validateMs = performance.now() - validateStarted - snapshotMs;
-  const initStarted = performance.now(), runDir = await initialiseRun(workspaceIdentity, env, root, signal);
+  const initStarted = performance.now(), runDir = await initialiseRun(workspaceIdentity, env, root, signal, "dispatch", [route]);
   const initMs = performance.now() - initStarted;
   if (signal.aborted) rmSync(runDir, { recursive: true, force: true });
   signal.throwIfAborted();
@@ -846,7 +923,8 @@ async function dispatchConfiguredProviderUnchecked(
       identifier: taskId,
       routes: checked.routes,
       taskIds: [taskId],
-      cwdProjects: input.cwd === undefined ? undefined : { [taskId]: projectRoot(providerIdentity.cwd, env) },
+      taskAlias: callerAlias,
+      cwdProjects: lanesProject === undefined ? undefined : { [taskId]: projectRoot(lanesProject, env) },
       timeout,
     },
     input.prompt === undefined ? [] : [promptPath],
@@ -976,6 +1054,7 @@ async function dispatchConfiguredBatchUnchecked(
     }
   });
   if (tasks.length === 0) return { status: "rejected", error: errors[0]!.error, fix: errors[0]!.fix, tasks: errors.map((row) => ({ ...row, status: "rejected", state: "terminal" })) };
+  assertFixtureRunRoot(runRoot(identity.cwd), tasks);
   const owner = executableOwner(root, "skills/orchestrate/scripts/batch_run.py");
   const controls = executableOwner(root, "skills/orchestrate/scripts/run_controls.py");
   const python = await pythonOwner(root, identity, env);
@@ -999,7 +1078,7 @@ async function dispatchConfiguredBatchUnchecked(
     checked = await preflight(python, executableOwner(root, "skills/orchestrate/scripts/dispatch_run.py"), tasks, identity, env, signal);
     if (checked.status === "rejected") return rejected(new InputError(String(checked.error ?? "preflight_unavailable"), String(checked.fix ?? "Check task preflight inputs.")));
   }
-  const runDir = await initialiseRun(identity, env, root, signal, "batch");
+  const runDir = await initialiseRun(identity, env, root, signal, "batch", tasks);
   if (signal.aborted) rmSync(runDir, { recursive: true, force: true });
   signal.throwIfAborted();
   const manifestPath = stagingPath(runDir, "task-manifest.json");
@@ -1035,8 +1114,11 @@ async function dispatchConfiguredBatchUnchecked(
       identifier: FIRST_BATCH_ID,
       routes: checked.routes,
       taskIds: tasks.map((task) => String(task.id)),
-      cwdProjects: Object.fromEntries(tasks.filter((task) => typeof task.cwd === "string")
-        .map((task) => [String(task.id), projectRoot(String(task.cwd), env)])),
+      // A writer works in its worktree, a reader in its cwd; either names the lane's project.
+      cwdProjects: Object.fromEntries(tasks.flatMap((task) => {
+        const directory = task.cwd ?? task.worktree;
+        return typeof directory === "string" ? [[String(task.id), projectRoot(directory, env)]] : [];
+      })),
       timeout: Math.max(...tasks.map((task) => Number(task.timeout))),
     },
     [manifestPath],

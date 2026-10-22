@@ -485,6 +485,11 @@ def provision_created_node_modules(
             target_dir.parent.mkdir(parents=True, exist_ok=True)
             cloned.append(target_dir)
             cow_clone(source_dir, target_dir)
+        fabric_modules = worktree / "runtime" / "fabric" / "node_modules"
+        if not fabric_modules.exists() and not fabric_modules.is_symlink():
+            fabric_modules.parent.mkdir(parents=True, exist_ok=True)
+            cloned.append(fabric_modules)
+            fabric_modules.symlink_to(Path("../../node_modules"), target_is_directory=True)
     except OSError as exc:
         for path in reversed(cloned):
             if path.is_symlink():
@@ -631,6 +636,14 @@ def verify_claim(
         return {"status": "rejected", "reason": "claimed commit SHA is not an exact object ID"}
     if str(expected_record.get("HEAD", "")).lower() != resolved_commit.lower():
         return {"status": "rejected", "reason": "claimed commit does not match claimed worktree context"}
+    # Every commit since the primary HEAD must leave .agents/ alone or carry a chair release.
+    gate = subprocess.run(
+        [sys.executable, str(Path(__file__).resolve().parents[1] / "skills/orchestrate/scripts/lane_protection.py"),
+         "--common-dir", str(expected_common_path), "--tip", resolved_commit],
+        stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=120, check=False,
+    )
+    if gate.returncode != 0:
+        return {"status": "rejected", "reason": gate.stderr.strip() or "protected instruction check failed"}
 
     return {
         "status": "accepted",

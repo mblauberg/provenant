@@ -29,7 +29,7 @@ clean exit; otherwise use a lighter-weight skill.
 
 ## Bootstrap
 
-1. Run `scripts/bootstrap-autopilot.sh <mission-id>`, fill every CONFIG KNOB,
+1. Run `scripts/bootstrap-autopilot.py <mission-id>`, fill every CONFIG KNOB,
    then rerun to substitute/validate. See
    [state-contract.md](references/state-contract.md) for the file set and
    `.agent-run/runs/<mission-run-dir>/` location.

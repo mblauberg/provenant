@@ -1,6 +1,6 @@
 /** Continue a provider session, or hand its result to a fresh session. */
 import { randomUUID } from "node:crypto";
-import { closeSync, constants, fstatSync, mkdirSync, openSync, readFileSync, readSync, realpathSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
+import { closeSync, constants, existsSync, fstatSync, mkdirSync, openSync, readFileSync, readSync, realpathSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 
 import { preflight, validatePrompt, rejected, timeoutSeconds, InputError, ownerPromptPath, savedReadRoots, type DispatchInput, type RouteInput } from "./execution-input.js";
@@ -134,13 +134,21 @@ export async function resumeConfiguredProvider(
         : stagingPath(runDir, `resume-${randomUUID()}.md`);
     const roots = savedReadRoots(identity, previous.read_roots, previous.mode === "read_only" ? previous.cwd : undefined);
     const requested = previous.provenance?.requested ?? {};
+    const applied = { ...(previous.applied ?? {}) };
+    if (Array.isArray(applied.add_dirs)) {
+      applied.add_dirs = applied.add_dirs.filter((dir: unknown) => {
+        if (typeof dir !== "string") return false;
+        const target = isAbsolute(dir) ? dir : resolve(previous.workspace_root ?? identity.cwd, dir);
+        return existsSync(target);
+      });
+    }
     const checked = await preflight(python, owner, [{
       id: taskId, adapter: requested.adapter ?? previous.adapter ?? identity.provider,
       model: previous.provenance?.resolved_model ?? requested.model,
       effort: sentEffort(previous),
       access_mode: previous.mode ?? "read_only", worktree: previous.worktree ?? undefined,
       cwd: previous.mode === "worktree_write" ? undefined : executionIdentity.cwd,
-      ...Object.fromEntries(Object.entries(previous.applied ?? {}).filter(([key, value]) =>
+      ...Object.fromEntries(Object.entries(applied).filter(([key, value]) =>
         ["sandbox", "network", "add_dirs", "capabilities"].includes(key) && value !== null)),
       ...(input.prompt === undefined ? { prompt_file: path } : { prompt: input.prompt }),
       ...(roots.length ? { read_roots: roots } : {}),
@@ -207,6 +215,7 @@ export async function resumeConfiguredProvider(
         kind: "dispatch",
         identifier: taskId,
         taskIds,
+        taskAlias: saved.task_alias,
         cwdProjects: { ...saved.cwd_projects,
           ...(previous.mode === "read_only" ? { [taskId]: projectRoot(executionIdentity.cwd, env) } : {}) },
         resume: true,

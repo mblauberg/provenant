@@ -28,6 +28,7 @@ import { Store } from "../src/store.js";
 import {
   listRecordedRuns,
   fabricStatus,
+  fabricOutput,
   OWNER_RECORD_NAME,
   processMatches,
   processStartedAt,
@@ -35,6 +36,12 @@ import {
   terminateRecordedRun,
 } from "../src/run-registry.js";
 import type { Identity } from "../src/identity.js";
+import { describeLeaks, reapFixtureProcesses } from "./helpers/fixture-processes.js";
+import { scratchRoot } from "./helpers/temp-root.js";
+import { actAsMcpServer } from "../src/seat-index.js";
+
+actAsMcpServer(); // this file dispatches as the MCP server does
+
 
 const testDirectory = dirname(fileURLToPath(import.meta.url));
 const repositoryRoot = resolve(testDirectory, "../../..");
@@ -57,7 +64,7 @@ const spawnedPids: number[] = [];
 describe("Fabric input corrections", () => {
   it("normalises common mode, model casing and relative path with warnings", async () => {
     const catalogue = { adapters: [
-      { name: "codex", models: ["gpt-6-luna"], model_details: [], aliases: { workhorse: ["gpt-6-luna"] } },
+      { name: "codex", models: ["gpt-6-luna"], model_details: [], aliases: { senior: ["gpt-6-luna"] } },
     ] } as any;
     const result = normaliseRoute({ adapter: "codex", mode: "rw" as any, worktree: "../work",
       model: "GPT_6_LUNA" }, identity, catalogue);
@@ -66,8 +73,8 @@ describe("Fabric input corrections", () => {
     expect(result.model).toBe("gpt-6-luna");
     expect(result.warnings).toBeDefined();
     expect(normaliseRoute({ adapter: "codex", model: "gpt-6-lunx" }, identity, catalogue).model).toBe("gpt-6-luna");
-    expect(normaliseRoute({ adapter: "codex", alias: "workhorze" }, identity, catalogue).alias).toBe("workhorse");
-    for (const [tier, alias] of [["junior", "scout"], ["Senior", "workhorse"], ["principal", "flagship"], ["senir", "workhorse"]]) {
+    expect(normaliseRoute({ adapter: "codex", alias: "senir" }, identity, catalogue).alias).toBe("senior");
+    for (const [tier, alias] of [["junior", "junior"], ["Senior", "senior"], ["principal", "principal"], ["senir", "senior"]]) {
       const named = normaliseRoute({ adapter: "codex", alias: tier }, identity, catalogue);
       expect(named.alias, tier).toBe(alias);
       expect(named.model, tier).toBeUndefined();
@@ -82,7 +89,7 @@ describe("Fabric input corrections", () => {
 
   it("normalises opt-in capabilities and forwards them as a JSON list", () => {
     const catalogue = { adapters: [
-      { name: "codex", models: ["gpt-6-luna"], model_details: [], aliases: { workhorse: ["gpt-6-luna"] } },
+      { name: "codex", models: ["gpt-6-luna"], model_details: [], aliases: { senior: ["gpt-6-luna"] } },
     ] } as any;
     const route = normaliseRoute({ adapter: "codex", mode: "worktree_write", worktree: "../work",
       capabilities: ["postgres", "browser"] }, identity, catalogue);
@@ -146,6 +153,40 @@ describe("Fabric input corrections", () => {
       .toThrow(expect.objectContaining({ code: "adapter_required" }));
   });
 
+  it("resolves documented model aliases without correction warnings", () => {
+    const snapshot = catalogueSnapshot(repositoryRoot);
+    for (const alias of ["glm-free", "deepseek-free", "sol", "luna"]) {
+      const route = normaliseRoute({ alias }, identity, snapshot);
+      expect(route.model, alias).toBeDefined();
+      expect((route.warnings ?? []).filter((warning) => !warning.startsWith("NATIVE:")), alias).toEqual([]);
+    }
+    const typo = normaliseRoute({ adapter: "codex", model: "gpt-6-lunx" }, identity, snapshot);
+    expect(typo.model).toBe("gpt-6-luna");
+    expect(typo.warnings).toContain("corrected model gpt-6-lunx to gpt-6-luna");
+  });
+
+  it("resolves catalogue model suffixes and carries or defers their effort", () => {
+    const snapshot = { adapters: [{ name: "agy", models: ["gemini-3.8-flash", "plain-model"], aliases: {},
+      model_details: [
+        { id: "gemini-3.8-flash", efforts: ["low", "medium", "high"], effort_transport: "model-suffix",
+          suffix: { low: "-low", medium: "-medium", high: "-high" } },
+        { id: "plain-model", efforts: ["high"], effort_transport: "flag" },
+      ] }] } as any;
+    const implied = normaliseRoute({ adapter: "agy", model: "gemini-3.8-flash-high" }, identity, snapshot);
+    expect(implied).toMatchObject({ model: "gemini-3.8-flash", effort: "high" });
+    expect(implied.warnings ?? []).toEqual([]);
+    expect(normaliseRoute({ adapter: "agy", model: "Gemini-3.8-Flash-HIGH" }, identity, snapshot))
+      .toMatchObject({ model: "gemini-3.8-flash", effort: "high" });
+
+    const explicit = normaliseRoute({ adapter: "agy", model: "gemini-3.8-flash-high", effort: "medium" }, identity, snapshot);
+    expect(explicit).toMatchObject({ model: "gemini-3.8-flash", effort: "medium" });
+    expect(explicit.warnings).toContain("effort high in model ignored: effort medium was named");
+
+    const unsupported = normaliseRoute({ adapter: "agy", model: "plain-model-high" }, identity, snapshot);
+    expect(unsupported.model).toBe("plain-model-high");
+    expect(unsupported.effort).toBeUndefined();
+  });
+
   it("passes version-free family names through for model_route.py to resolve to the latest model", () => {
     const entry = (latest: boolean) => ({ name: "codex", latest_aliases: latest, aliases: {},
       models: ["gpt-6.1-sol", "gpt-6-luna"],
@@ -175,7 +216,7 @@ describe("Fabric input corrections", () => {
   });
 
   it("resolves relative read-only cwd against the caller directory", () => {
-    const base = mkdtempSync(join(tmpdir(), "fabric-cwd-"));
+    const base = scratchRoot("fabric-cwd-");
     const child = join(base, "child");
     mkdirSync(child);
     expect(workingIdentity({ cwd: "child" }, { ...identity, project: base, cwd: base }).cwd).toBe(realpathSync(child));
@@ -183,7 +224,7 @@ describe("Fabric input corrections", () => {
   });
 
   it("names the working route when a cwd is outside every registered project", () => {
-    const base = mkdtempSync(join(tmpdir(), "fabric-unregistered-"));
+    const base = scratchRoot("fabric-unregistered-");
     try {
       expect(() => workingIdentity({ cwd: base }, { ...identity, registeredProjects: [identity.project] }))
         .toThrow(expect.objectContaining({ code: "cwd_unavailable",
@@ -194,8 +235,8 @@ describe("Fabric input corrections", () => {
   });
 
   it("grants a read root only for another registered project", () => {
-    const other = realpathSync(mkdtempSync(join(tmpdir(), "fabric-read-root-")));
-    const stray = realpathSync(mkdtempSync(join(tmpdir(), "fabric-stray-")));
+    const other = realpathSync(scratchRoot("fabric-read-root-"));
+    const stray = realpathSync(scratchRoot("fabric-stray-"));
     try {
       mkdirSync(join(other, "src"));
       const caller = { ...identity, registeredProjects: [identity.project, other] };
@@ -212,7 +253,7 @@ describe("Fabric input corrections", () => {
   });
 
   it("accepts read-only cwd under another registered project", () => {
-    const base = mkdtempSync(join(tmpdir(), "fabric-other-project-"));
+    const base = scratchRoot("fabric-other-project-");
     const child = join(base, "child");
     mkdirSync(child);
     const caller = { ...identity, registeredProjects: [identity.project, base] };
@@ -233,8 +274,8 @@ function hostInstance(): string {
   return instance;
 }
 
-/** A product root whose dispatch owners are the lifecycle fixture. */
-function buildProduct(root: string): string {
+/** A product root whose dispatch owners use the selected local fixture. */
+function buildProduct(root: string, ownerFixture = fixture): string {
   const fake = join(root, "product");
   const owners = join(fake, "skills/orchestrate/scripts");
   const helpers = join(fake, "scripts/lib");
@@ -250,8 +291,8 @@ function buildProduct(root: string): string {
   for (const name of ["run_dir_init.sh", "dispatch_run.py", "batch_run.py", "run_controls.py"]) {
     const owner = join(owners, name);
     writeFileSync(owner, name === "run_dir_init.sh"
-      ? `#!/bin/sh\nPROVENANT_FIXTURE_OWNER=${shellQuote(name)} exec ${shellQuote(process.execPath)} ${shellQuote(fixture)} "$@"\n`
-      : `#!/usr/bin/env python3\nimport os, sys\nos.environ["PROVENANT_FIXTURE_OWNER"] = ${JSON.stringify(name)}\nos.execv(${JSON.stringify(process.execPath)}, [${JSON.stringify(process.execPath)}, ${JSON.stringify(fixture)}, *sys.argv[1:]])\n`);
+      ? `#!/bin/sh\nPROVENANT_FIXTURE_OWNER=${shellQuote(name)} exec ${shellQuote(process.execPath)} ${shellQuote(ownerFixture)} "$@"\n`
+      : `#!/usr/bin/env python3\nimport os, sys\nos.environ["PROVENANT_FIXTURE_OWNER"] = ${JSON.stringify(name)}\nos.execv(${JSON.stringify(process.execPath)}, [${JSON.stringify(process.execPath)}, ${JSON.stringify(ownerFixture)}, *sys.argv[1:]])\n`);
     chmodSync(owner, 0o755);
   }
   return fake;
@@ -330,7 +371,7 @@ async function startSleepingRun(prompt: string): Promise<Record<string, unknown>
 
 beforeEach(() => {
   // Canonical, as dispatch writes projects: macOS tmpdir is a /var -> /private/var symlink.
-  temporaryDirectory = realpathSync(mkdtempSync(join(tmpdir(), "fabric-lifecycle-")));
+  temporaryDirectory = realpathSync(scratchRoot("fabric-lifecycle-"));
   workspace = join(temporaryDirectory, "workspace");
   mkdirSync(workspace, { recursive: true });
   product = buildProduct(temporaryDirectory);
@@ -355,8 +396,15 @@ afterEach(async () => {
       process.kill(pid, "SIGKILL");
     } catch { /* already gone */ }
   }
-  await waitFor(() => pids.every((pid) => !alive(pid)), "execution processes to exit before fixture cleanup");
-  rmSync(temporaryDirectory, { recursive: true, force: true });
+  try {
+    await waitFor(() => pids.every((pid) => !alive(pid)), "execution processes to exit before fixture cleanup");
+    // Any child still naming this fixture tree was never tracked by its test.
+    const leaked = await reapFixtureProcesses(temporaryDirectory);
+    expect(leaked, describeLeaks(leaked)).toEqual([]);
+  } finally {
+    await reapFixtureProcesses(temporaryDirectory, 0);
+    rmSync(temporaryDirectory, { recursive: true, force: true });
+  }
 });
 
 describe("owner records", () => {
@@ -519,7 +567,7 @@ describe("owner records", () => {
       route: {
         adapter: "codex",
         provider_family: "codex",
-        resolved_model: "workhorse",
+        resolved_model: "senior",
         execution_intent: "ordinary",
       },
     });
@@ -576,7 +624,7 @@ describe("dispatch CLI", () => {
     writeFileSync(promptPath, "cli prompt");
     const cliPath = join(packageRoot, "src", "cli.ts");
     const output = execFileSync(process.execPath, ["--import", tsxLoader, cliPath,
-      "dispatch", "--adapter", "codex", "--alias", "workhorse", "--prompt-file", promptPath, "--id", "cli-prompt"], {
+      "dispatch", "--adapter", "codex", "--alias", "senior", "--prompt-file", promptPath, "--id", "cli-prompt"], {
       cwd: workspace,
       encoding: "utf8",
       env: ownerEnvironment,
@@ -589,7 +637,7 @@ describe("dispatch CLI", () => {
     writeFileSync(taskPath, JSON.stringify({ tasks: [{ id: "cli-task-manifest", prompt: "manifest task" }] }));
     const cliPath = join(packageRoot, "src", "cli.ts");
     const output = execFileSync(process.execPath, ["--import", tsxLoader, cliPath,
-      "dispatch", "--tasks", taskPath, "--adapter", "codex", "--alias", "workhorse", "--effort", "high"], {
+      "dispatch", "--tasks", taskPath, "--adapter", "codex", "--alias", "senior", "--effort", "high"], {
       cwd: workspace,
       encoding: "utf8",
       env: ownerEnvironment,
@@ -623,7 +671,7 @@ describe("dispatch CLI", () => {
     writeFileSync(promptPath, "registered project cwd");
     const cliPath = join(packageRoot, "src", "cli.ts");
     const output = execFileSync(process.execPath, ["--import", tsxLoader, cliPath,
-      "dispatch", "--adapter", "codex", "--alias", "workhorse", "--cwd", otherProject, "--prompt-file", promptPath], {
+      "dispatch", "--adapter", "codex", "--alias", "senior", "--cwd", otherProject, "--prompt-file", promptPath], {
       cwd: workspace,
       encoding: "utf8",
       env: ownerEnvironment,
@@ -735,6 +783,75 @@ describe("dispatch CLI", () => {
     }
   }, 25_000);
 
+  it("awaits a lane an MCP host of the same agent launched from another project", async () => {
+    // The MCP server runs in its own directory; the agent's shell is elsewhere.
+    const elsewhere = realpathSync(mkdtempSync(join(temporaryDirectory, "shell-elsewhere-")));
+    const store = new Store(databasePath(ownerEnvironment));
+    store.announce(identity);
+    store.announce({ ...identity, project: elsewhere, cwd: elsewhere });
+    store.close();
+    const started = await dispatchConfiguredBatch({ tasks: [{ id: "seat-lane", adapter: "codex",
+      prompt: "sleep with provider" }], wait_seconds: 0 }, { ...identity, registeredProjects: [workspace, elsewhere] },
+    new AbortController().signal, ownerEnvironment);
+    expect(started.status, JSON.stringify(started)).toBe("running");
+    spawnedPids.push(Number(started.pid));
+    const run = listRecordedRuns(workspace).find((record) => record.run_id === started.id)!;
+    await waitForFile(join(run.run_dir, "sleeping.pid"));
+    const poll = spawnSync(process.execPath, ["--import", tsxLoader, join(packageRoot, "src/cli.ts"),
+      "lanes", "--wait", "--all", "--timeout", "0"], { cwd: elsewhere, encoding: "utf8", env: ownerEnvironment, timeout: 15_000 });
+    expect(poll.stdout).not.toContain("no lanes are running");
+    expect(poll.status, poll.stdout + poll.stderr).toBe(124);
+    expect(poll.stdout).toContain(String(started.id));
+  }, 25_000);
+
+  it("awaits a writer lane from the project of its worktree", async () => {
+    const project = join(temporaryDirectory, "writer-target");
+    const worktree = join(temporaryDirectory, "writer-target-worktree");
+    execFileSync("git", ["init", "-q", project]);
+    execFileSync("git", ["-C", project, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.test",
+      "commit", "-q", "--allow-empty", "-m", "fixture"]);
+    execFileSync("git", ["-C", project, "worktree", "add", "-q", "-b", "writer-lane", worktree]);
+    const store = new Store(databasePath(ownerEnvironment));
+    store.announce(identity);
+    store.announce({ ...identity, project, cwd: worktree });
+    store.close();
+    const started = await dispatchConfiguredBatch({ tasks: [{ id: "writer-lane", adapter: "codex", mode: "worktree_write",
+      worktree, prompt: "sleep with provider" }], wait_seconds: 0 }, { ...identity, registeredProjects: [workspace, project] },
+    new AbortController().signal, ownerEnvironment);
+    expect(started.status, JSON.stringify(started)).toBe("running");
+    spawnedPids.push(Number(started.pid));
+    const run = listRecordedRuns(workspace).find((record) => record.run_id === started.id)!;
+    await waitForFile(join(run.run_dir, "sleeping.pid"));
+    const poll = spawnSync(process.execPath, ["--import", tsxLoader, join(packageRoot, "src/cli.ts"),
+      "lanes", "--wait", "--all", "--timeout", "0"], { cwd: worktree, encoding: "utf8", env: ownerEnvironment, timeout: 15_000 });
+    expect(poll.status, poll.stdout + poll.stderr).toBe(124);
+    expect(poll.stdout).toContain("writer-lane");
+  }, 25_000);
+
+  it("awaits a writer lane from the project of its worktree when dispatched singly", async () => {
+    const project = join(temporaryDirectory, "single-writer-target");
+    const worktree = join(temporaryDirectory, "single-writer-target-worktree");
+    execFileSync("git", ["init", "-q", project]);
+    execFileSync("git", ["-C", project, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.test",
+      "commit", "-q", "--allow-empty", "-m", "fixture"]);
+    execFileSync("git", ["-C", project, "worktree", "add", "-q", "-b", "writer-lane-single", worktree]);
+    const store = new Store(databasePath(ownerEnvironment));
+    store.announce(identity);
+    store.announce({ ...identity, project, cwd: worktree });
+    store.close();
+    const started = await dispatchConfiguredProvider({ task_id: "writer-lane-single", adapter: "codex", mode: "worktree_write",
+      worktree, prompt: "sleep with provider", wait_seconds: 0 }, { ...identity, registeredProjects: [workspace, project] },
+    new AbortController().signal, ownerEnvironment);
+    expect(started.status, JSON.stringify(started)).toBe("running");
+    spawnedPids.push(Number(started.pid));
+    const run = listRecordedRuns(workspace).find((record) => record.run_id === started.id)!;
+    await waitForFile(join(run.run_dir, "sleeping.pid"));
+    const poll = spawnSync(process.execPath, ["--import", tsxLoader, join(packageRoot, "src/cli.ts"),
+      "lanes", "--wait", "--all", "--timeout", "0"], { cwd: worktree, encoding: "utf8", env: ownerEnvironment, timeout: 15_000 });
+    expect(poll.status, poll.stdout + poll.stderr).toBe(124);
+    expect(poll.stdout).toContain("writer-lane-single");
+  }, 25_000);
+
   it("recomputes the project pointer when a resume supplies a new cwd", async () => {
     const project = realpathSync(mkdtempSync(join(temporaryDirectory, "resume-target-")));
     const oldProject = realpathSync(mkdtempSync(join(temporaryDirectory, "old-resume-target-")));
@@ -784,7 +901,7 @@ describe("dispatch CLI", () => {
     writeFileSync(taskPath, JSON.stringify({ tasks: [{ id: "cross", cwd: otherProject, prompt_file: brief }] }));
     const cliPath = join(packageRoot, "src", "cli.ts");
     execFileSync(process.execPath, ["--import", tsxLoader, cliPath,
-      "dispatch", "--tasks", taskPath, "--adapter", "codex", "--alias", "workhorse", "--mode", "read_only"], {
+      "dispatch", "--tasks", taskPath, "--adapter", "codex", "--alias", "senior", "--mode", "read_only"], {
       cwd: workspace,
       encoding: "utf8",
       env: ownerEnvironment,
@@ -823,7 +940,7 @@ describe("dispatch CLI", () => {
     writeFileSync(promptPath, "invalid mode still gets preflighted");
     const cliPath = join(packageRoot, "src", "cli.ts");
     const result = spawnSync(process.execPath, ["--import", tsxLoader, cliPath,
-      "dispatch", "--adapter", "codex", "--alias", "workhorse", "--mode", "invalid", "--cwd", workspace,
+      "dispatch", "--adapter", "codex", "--alias", "senior", "--mode", "invalid", "--cwd", workspace,
       "--prompt-file", promptPath], {
       cwd: workspace,
       encoding: "utf8",
@@ -841,7 +958,7 @@ describe("dispatch CLI", () => {
       ] }));
     const cliPath = join(packageRoot, "src", "cli.ts");
     const result = spawnSync(process.execPath, ["--import", tsxLoader, cliPath, "dispatch", "--tasks", taskPath,
-      "--adapter", "codex", "--alias", "workhorse"], {
+      "--adapter", "codex", "--alias", "senior"], {
       cwd: workspace,
       encoding: "utf8",
       env: ownerEnvironment,
@@ -859,7 +976,7 @@ describe("dispatch CLI", () => {
     ] }));
     const cliPath = join(packageRoot, "src", "cli.ts");
     const result = spawnSync(process.execPath, ["--import", tsxLoader, cliPath, "dispatch", "--tasks", taskPath,
-      "--adapter", "codex", "--alias", "workhorse"], {
+      "--adapter", "codex", "--alias", "senior"], {
       cwd: workspace,
       encoding: "utf8",
       env: ownerEnvironment,
@@ -1466,8 +1583,32 @@ describe("front door model selection", () => {
     }
   });
   it("treats an empty model as omitted and keeps the alias", async () => {
-    const done = await dispatchConfiguredProvider({adapter:"codex",alias:"scout",model:"",prompt:"ordinary run",wait_seconds:5}, identity, new AbortController().signal, ownerEnvironment);
-    expect(done).toMatchObject({status:"ok",route:{resolved_model:"scout"}});
+    const done = await dispatchConfiguredProvider({adapter:"codex",alias:"junior",model:"",prompt:"ordinary run",wait_seconds:5}, identity, new AbortController().signal, ownerEnvironment);
+    expect(done).toMatchObject({status:"ok",route:{resolved_model:"junior"}});
+  });
+  it("uses the alias as the task id and lane label when given without an explicit task_id", async () => {
+    const done = await dispatchConfiguredProvider({ adapter: "codex", alias: "junior", model: "", prompt: "ordinary run", wait_seconds: 5 },
+      identity, new AbortController().signal, ownerEnvironment);
+    expect(done).toMatchObject({ status: "ok", task_id: "junior" });
+  });
+  it.each([["legacy", fixture], ["v1", join(testDirectory, "v2-owner-fixture.mjs")]])(
+    "slugs a qualified alias and keeps status and resume lookups by its original name (%s)", async (format, ownerFixture) => {
+      product = buildProduct(temporaryDirectory, ownerFixture);
+      const done = await dispatchConfiguredProvider({ alias: "codex/junior", prompt: "ordinary run", wait_seconds: 5 },
+        identity, new AbortController().signal, poolEnvironment());
+      expect(done).toMatchObject({ status: "ok", task_id: "codex-junior" });
+      expect(await fabricStatus(workspace, "codex/junior")).toMatchObject({ task_id: "codex-junior", status: "ok" });
+      if (format === "v1") {
+        expect(await resumeConfiguredProvider({ resume: "codex/junior", prompt: "continue", wait_seconds: 5 },
+          identity, new AbortController().signal, ownerEnvironment)).toMatchObject({ status: "ok", task_id: "codex-junior", attempt: 2 });
+        expect(await fabricStatus(workspace, "codex/junior")).toMatchObject({ task_id: "codex-junior", attempt: 2 });
+      } else {
+        const log = join(temporaryDirectory, "qualified-resume.json");
+        expect(await resumeConfiguredProvider({ resume: "codex/junior", prompt: "continue", wait_seconds: 5 },
+          identity, new AbortController().signal, { ...ownerEnvironment, FIXTURE_PREFLIGHT_LOG: log }))
+          .toMatchObject({ status: "rejected", error: "fixture_logged" });
+        expect(JSON.parse(readFileSync(log, "utf8"))[0]).toMatchObject({ id: "codex-junior" });
+      }
   });
   it("passes an explicit model and effort without an alias", async () => {
     const done = await dispatchConfiguredProvider({ adapter: "codex", model: "gpt-6-luna", effort: "medium", prompt: "ordinary run", wait_seconds: 5 },
@@ -1500,11 +1641,11 @@ describe("route pools", () => {
   it("expands single, council and ad-hoc models into concrete tasks with a pick reason", async () => {
     const env = poolEnvironment();
     const expanded = await expandPools([
-      { id: "one", prompt: "p", route: "strong", adapter: "claude" },
-      { id: "pair", prompt: "p", route: "strong", council: 2 },
+      { id: "one", prompt: "p", route: "senior", adapter: "claude" },
+      { id: "pair", prompt: "p", route: "senior", council: 2 },
       { id: "adhoc", prompt: "p", models: ["codex/gpt-6-luna@low", "claude/haiku"] },
       { id: "plain", prompt: "p", adapter: "codex" },
-      { id: "both", prompt: "p", route: "bulk", model: "gpt-6-luna" },
+      { id: "both", prompt: "p", route: "junior", model: "gpt-6-luna" },
       { id: "nope", prompt: "p", route: "fastest" },
     ], fixturePython, product, { ...identity, provider: "agent" }, env, new AbortController().signal);
     expect(expanded.errors.map((error) => [error.task_id, error.error])).toEqual([["nope", "route_invalid"]]);
@@ -1523,11 +1664,11 @@ describe("route pools", () => {
 
   it("settles mixed selectors by precedence and names what it ignored", async () => {
     const expanded = await expandPools([
-      { id: "models", prompt: "p", models: ["codex/gpt-6-luna"], route: "strong", alias: "workhorse", council: 3 },
-      { id: "route", prompt: "p", route: "bulk", alias: "workhorse", adapter: "codex" },
-      { id: "alias", prompt: "p", alias: "workhorse", rotate: true },
-      { id: "secret", prompt: "p", route: "bulk", adapter: "codex", confidential: true },
-      { id: "plain", prompt: "p", alias: "workhorse", confidential: true },
+      { id: "models", prompt: "p", models: ["codex/gpt-6-luna"], route: "senior", alias: "senior", council: 3 },
+      { id: "route", prompt: "p", route: "junior", alias: "senior", adapter: "codex" },
+      { id: "alias", prompt: "p", alias: "senior", rotate: true },
+      { id: "secret", prompt: "p", route: "junior", adapter: "codex", confidential: true },
+      { id: "plain", prompt: "p", alias: "senior", confidential: true },
     ], fixturePython, product, identity, poolEnvironment(), new AbortController().signal);
     expect(expanded.errors).toEqual([]);
     const byId = Object.fromEntries(expanded.tasks.map((task) => [task.id, task]));
@@ -1535,14 +1676,14 @@ describe("route pools", () => {
     expect(byId["models-1"]).not.toHaveProperty("alias");
     expect(byId.route).toMatchObject({ adapter: "codex", model: "gpt-6-luna" });
     expect(byId.route).not.toHaveProperty("alias");
-    expect(byId.alias).toEqual({ id: "alias", prompt: "p", alias: "workhorse" });
+    expect(byId.alias).toEqual({ id: "alias", prompt: "p", alias: "senior" });
     expect(byId.secret).toMatchObject({ adapter: "codex", confidential: true });
-    expect(byId.plain).toEqual({ id: "plain", prompt: "p", alias: "workhorse", confidential: true });
+    expect(byId.plain).toEqual({ id: "plain", prompt: "p", alias: "senior", confidential: true });
     expect(expanded.warnings).toEqual(expect.arrayContaining([
       "alias, council ignored: models names the council",
-      expect.stringMatching(/^route strong ignored: models bypasses routes/u),
-      "alias ignored: route bulk was named",
-      "rotate ignored: alias workhorse names one model; pass route for a pool",
+      expect.stringMatching(/^route senior ignored: models bypasses routes/u),
+      "alias ignored: route junior was named",
+      "rotate ignored: alias senior names one model; pass route for a pool",
     ]));
   });
 
@@ -1560,7 +1701,7 @@ describe("route pools", () => {
   it("sizes batch concurrency after a nested council expands and keeps an explicit limit", async () => {
     const env = { ...poolEnvironment(), FIXTURE_ARGV_LOG: "1" };
     const concurrency = async (extra: Record<string, unknown>) => {
-      const done = await dispatchConfiguredBatch({ tasks: [{ id: "c", prompt: "sleep with provider", route: "strong", council: 2 }],
+      const done = await dispatchConfiguredBatch({ tasks: [{ id: "c", prompt: "sleep with provider", route: "senior", council: 2 }],
         wait_seconds: 0, ...extra }, { ...identity, provider: "agent" }, new AbortController().signal, env);
       expect(done.status, JSON.stringify(done)).toBe("running");
       spawnedPids.push(Number(done.pid));
@@ -1580,7 +1721,7 @@ describe("route pools", () => {
   it("hands off on the previous route unless any selector, pool selectors included, is named", () => {
     expect(inheritsPreviousRoute({})).toBe(true);
     expect(inheritsPreviousRoute({ confidential: true })).toBe(true);
-    expect(inheritsPreviousRoute({ route: "strong" })).toBe(false);
+    expect(inheritsPreviousRoute({ route: "senior" })).toBe(false);
     expect(inheritsPreviousRoute({ models: ["codex/gpt-6-luna"] })).toBe(false);
     expect(inheritsPreviousRoute({ adapter: "codex" })).toBe(false);
     expect(inheritedConfidential({}, { confidential: true })).toEqual({ confidential: true });
@@ -1589,7 +1730,7 @@ describe("route pools", () => {
   });
 
   it("dispatches route as one pick and forwards the reason to the owner", async () => {
-    const done = await dispatchConfiguredProvider({ route: "bulk", adapter: "codex", prompt: "ordinary run", wait_seconds: 5 },
+    const done = await dispatchConfiguredProvider({ route: "junior", adapter: "codex", prompt: "ordinary run", wait_seconds: 5 },
       identity, new AbortController().signal, poolEnvironment());
     expect(done).toMatchObject({ status: "ok", route: { resolved_model: "gpt-6-luna" } });
     expect(routeArguments({ adapter: "codex", role: "worker", access_mode: "read_only", pick_reason: "bulk top" }))
@@ -1608,7 +1749,7 @@ describe("route pools", () => {
   });
 
   it("lets an explicit model win over a pool, with a warning", async () => {
-    const done = await dispatchConfiguredProvider({ route: "strong", model: "gpt-6-luna", adapter: "codex", prompt: "ordinary run",
+    const done = await dispatchConfiguredProvider({ route: "senior", model: "gpt-6-luna", adapter: "codex", prompt: "ordinary run",
       wait_seconds: 5 }, identity, new AbortController().signal, poolEnvironment());
     expect(done).toMatchObject({ status: "ok", route: { resolved_model: "gpt-6-luna" } });
     expect(JSON.stringify(done)).toContain("route ignored: model gpt-6-luna was named explicitly");
@@ -1620,13 +1761,13 @@ describe("route pools", () => {
     const cliPath = join(packageRoot, "src", "cli.ts");
     const cli = (args: string[]) => spawnSync(process.execPath, ["--import", tsxLoader, cliPath, "dispatch",
       "--prompt-file", promptPath, ...args], { cwd: workspace, encoding: "utf8", env: poolEnvironment() });
-    for (const args of [["--route", "bulk", "--adapter", "codex", "--rotate"], ["--route", "strong", "--council", "2", "--confidential"],
+    for (const args of [["--route", "junior", "--adapter", "codex", "--rotate"], ["--route", "senior", "--council", "2", "--confidential"],
       ["--models", "codex/gpt-6-luna@low,claude/haiku"]]) {
       const run = cli(args);
       expect(run.stderr, args.join(" ")).not.toMatch(/unknown option|route_|models_|council/u);
       expect(run.stdout.trim(), args.join(" ")).not.toBe("");
     }
-    const bad = cli(["--route", "strong", "--council", "9"]);
+    const bad = cli(["--route", "senior", "--council", "9"]);
     expect(bad.status).not.toBe(0);
     expect(bad.stderr + bad.stdout).toMatch(/council/u);
   }, 60_000);
@@ -1636,7 +1777,7 @@ describe("native-first routing", () => {
   const claudeSeat = () => ({ ...identity, provider: "claude" });
 
   it("skips the caller's own models in a pool pick and names the native subagent", async () => {
-    const expanded = await expandPools([{ id: "one", prompt: "p", route: "strong" }],
+    const expanded = await expandPools([{ id: "one", prompt: "p", route: "senior" }],
       fixturePython, product, claudeSeat(), poolEnvironment(), new AbortController().signal);
     expect(expanded.errors).toEqual([]);
     expect(expanded.tasks[0]!.adapter).not.toBe("claude");
@@ -1644,7 +1785,7 @@ describe("native-first routing", () => {
   });
 
   it("hands a council's native members back to the chair with a spawn line", async () => {
-    const expanded = await expandPools([{ id: "pair", prompt: "p", route: "strong", council: 2 }],
+    const expanded = await expandPools([{ id: "pair", prompt: "p", route: "senior", council: 2 }],
       fixturePython, product, claudeSeat(), poolEnvironment(), new AbortController().signal);
     expect(expanded.tasks.map((task) => task.adapter)).toEqual(["codex"]);
     expect(expanded.tasks[0]).toMatchObject({ id: "pair-1", pick_reason: "senior council 1/1" });
@@ -1657,29 +1798,42 @@ describe("native-first routing", () => {
       claudeSeat(), new AbortController().signal, poolEnvironment());
     expect(done.status, JSON.stringify(done)).toBe("ok");
     expect((done.route as Record<string, unknown>).adapter).not.toBe("claude");
-    expect(JSON.stringify(done.warnings)).toContain("workhorse taken from the route pool: claude models run as native subagents");
+    expect(JSON.stringify(done.warnings)).toContain("senior taken from the route pool: claude models run as native subagents");
+  });
+
+  it("keeps a native seat's caller alias for task naming, status and resume", async () => {
+    const seat = claudeSeat();
+    const done = await dispatchConfiguredProvider({ alias: "junior", prompt: "ordinary run", wait_seconds: 5 },
+      seat, new AbortController().signal, poolEnvironment());
+    expect(done).toMatchObject({ status: "ok", task_id: "junior" });
+    expect(await fabricStatus(workspace, "junior")).toMatchObject({ task_id: "junior", status: "ok" });
+    const log = join(temporaryDirectory, "native-resume.json");
+    expect(await resumeConfiguredProvider({ resume: "junior", prompt: "continue", wait_seconds: 5 },
+      seat, new AbortController().signal, { ...ownerEnvironment, FIXTURE_PREFLIGHT_LOG: log }))
+      .toMatchObject({ status: "rejected", error: "fixture_logged" });
+    expect(JSON.parse(readFileSync(log, "utf8"))[0]).toMatchObject({ id: "junior" });
   });
 
   it("settles empty selectors and precedence before choosing native-first", async () => {
     const seat = claudeSeat();
     expect(nativeFirst({ id: "d", prompt: "p", model: "" } as BatchTaskInput, seat).task)
-      .toEqual({ id: "d", prompt: "p", route: "workhorse", native_default: "workhorse" });
+      .toEqual({ id: "d", prompt: "p", route: "senior", native_default: "senior" });
     expect(nativeFirst({ id: "d", prompt: "p", alias: " " } as BatchTaskInput, seat).task)
-      .toEqual({ id: "d", prompt: "p", route: "workhorse", native_default: "workhorse" });
-    const rotated = nativeFirst({ id: "d", prompt: "p", alias: "flagship", rotate: true } as BatchTaskInput, seat);
-    expect(rotated.task).toEqual({ id: "d", prompt: "p", route: "flagship", native_default: "flagship" });
-    expect(rotated.warnings).toEqual(["rotate ignored: alias flagship names one model; pass route for a pool"]);
-    const single = await dispatchConfiguredProvider({ alias: "flagship", rotate: true, model: "", prompt: "ordinary run", wait_seconds: 5 },
+      .toEqual({ id: "d", prompt: "p", route: "senior", native_default: "senior" });
+    const rotated = nativeFirst({ id: "d", prompt: "p", alias: "principal", rotate: true } as BatchTaskInput, seat);
+    expect(rotated.task).toEqual({ id: "d", prompt: "p", route: "principal", native_default: "principal" });
+    expect(rotated.warnings).toEqual(["rotate ignored: alias principal names one model; pass route for a pool"]);
+    const single = await dispatchConfiguredProvider({ alias: "principal", rotate: true, model: "", prompt: "ordinary run", wait_seconds: 5 },
       seat, new AbortController().signal, poolEnvironment());
     expect(single.status, JSON.stringify(single)).toBe("ok");
     expect((single.route as Record<string, unknown>).adapter).not.toBe("claude");
-    const batch = await dispatchConfiguredBatch({ tasks: [{ id: "e", prompt: "p", alias: "" }, { id: "r", prompt: "p", alias: "flagship", rotate: true }], wait_seconds: 5 },
+    const batch = await dispatchConfiguredBatch({ tasks: [{ id: "e", prompt: "p", alias: "" }, { id: "r", prompt: "p", alias: "principal", rotate: true }], wait_seconds: 5 },
       seat, new AbortController().signal, poolEnvironment());
     // Both tasks reach the pool, which skips the seat's own model, before any owner runs.
     const noted = JSON.stringify(batch.warnings);
-    expect(noted).toContain("workhorse taken from the route pool: claude models run as native subagents");
-    expect(noted).toContain("flagship taken from the route pool: claude models run as native subagents");
-    expect(noted).toContain("rotate ignored: alias flagship names one model");
+    expect(noted).toContain("senior taken from the route pool: claude models run as native subagents");
+    expect(noted).toContain("principal taken from the route pool: claude models run as native subagents");
+    expect(noted).toContain("rotate ignored: alias principal names one model");
   });
 
   it("lets a batch task's empty selector inherit the batch default", async () => {
@@ -1687,10 +1841,10 @@ describe("native-first routing", () => {
     const adapter = await dispatchConfiguredBatch({ adapter: "codex", tasks: [{ id: "a", prompt: "p", adapter: "" }], wait_seconds: 5 },
       seat, new AbortController().signal, poolEnvironment());
     expect(JSON.stringify(adapter.warnings ?? [])).not.toContain("taken from the route pool");
-    const routed = await dispatchConfiguredBatch({ route: "strong", tasks: [{ id: "r", prompt: "p", model: "" }], wait_seconds: 5 },
+    const routed = await dispatchConfiguredBatch({ route: "senior", tasks: [{ id: "r", prompt: "p", model: "" }], wait_seconds: 5 },
       seat, new AbortController().signal, poolEnvironment());
     const noted = JSON.stringify(routed.warnings ?? []);
-    expect(noted).not.toContain("workhorse taken from the route pool");
+    expect(noted).not.toContain("senior taken from the route pool");
     expect(noted).toContain("claude/claude-sonnet-5-5 skipped: use a native subagent");
   });
 
@@ -1715,7 +1869,7 @@ describe("native-first routing", () => {
       .warnings?.[0]).toContain("NATIVE:");
     expect(namesExplicitRoute(explicit)).toBe(true);
     expect(namesExplicitRoute({ model: "haiku" })).toBe(true);
-    expect(namesExplicitRoute({ task_class: "review", alias: "workhorse" } as any)).toBe(false);
+    expect(namesExplicitRoute({ task_class: "review", alias: "senior" } as any)).toBe(false);
   });
 
   it("guards an explicit own-seat Claude request on every batch entry path", async () => {
@@ -1739,7 +1893,7 @@ describe("native-first routing", () => {
   it("guards only selectors left after batch merging", async () => {
     const log = join(temporaryDirectory, "merged-routes.json");
     const batch = await dispatchConfiguredBatch({ model: "claude/haiku",
-      tasks: [{ id: "routed", route: "strong", prompt: "p" }] }, claudeSeat(), new AbortController().signal,
+      tasks: [{ id: "routed", route: "senior", prompt: "p" }] }, claudeSeat(), new AbortController().signal,
       { ...poolEnvironment(), FIXTURE_PREFLIGHT_LOG: log });
     expect(batch).toMatchObject({ status: "rejected", error: "fixture_logged" });
     expect(JSON.parse(readFileSync(log, "utf8"))).toMatchObject([{ id: "routed", adapter: "codex" }]);
@@ -1832,14 +1986,14 @@ describe("native-first routing", () => {
     expect(() => rejectOwnSeatClaude({ adapter: "claude", model: "haiku" }, { ...identity, provider: "codex" }, env)).not.toThrow();
   });
 
-  it("recognises a role alias by its normalised name, so task_class with Workhorse or workhorze is not own-seat", async () => {
-    for (const alias of ["Workhorse", "workhorze"]) {
+  it("recognises a role alias by its normalised name, so task_class with Senior or senir is not own-seat", async () => {
+    for (const alias of ["Senior", "senir"]) {
       const done = await dispatchConfiguredProvider({ task_class: "review", alias, prompt: "p", wait_seconds: 5 } as any,
         claudeSeat(), new AbortController().signal, poolEnvironment());
       expect(JSON.stringify(done), alias).not.toContain("native_seat_model");
     }
-    expect(namesExplicitRoute({ alias: "Workhorse" })).toBe(false);
-    expect(namesExplicitRoute({ alias: "workhorze" })).toBe(false);
+    expect(namesExplicitRoute({ alias: "Senior" })).toBe(false);
+    expect(namesExplicitRoute({ alias: "senir" })).toBe(false);
   });
 
   it("refuses a native seat's default when only its own models are available", async () => {
@@ -1849,7 +2003,7 @@ describe("native-first routing", () => {
     chmodSync(join(bin, "codex"), 0o755);
     const codexSeat = { ...identity, provider: "codex" };
     const { task } = nativeFirst({ id: "d", prompt: "p" } as BatchTaskInput, codexSeat);
-    expect(task).toEqual({ id: "d", prompt: "p", route: "workhorse", native_default: "workhorse" });
+    expect(task).toEqual({ id: "d", prompt: "p", route: "senior", native_default: "senior" });
     const expanded = await expandPools([task], fixturePython, product, codexSeat,
       { ...poolEnvironment(), PATH: bin }, new AbortController().signal);
     expect(expanded.tasks).toEqual([]);
@@ -1857,20 +2011,28 @@ describe("native-first routing", () => {
     expect(expanded.errors[0]!.fix).toMatch(/^spawn 1 native codex member \(.+\); .*pass adapter codex/u);
   });
 
+  it("rejects a retired tier name, naming its replacement", () => {
+    const codexSeat = { ...identity, provider: "codex" };
+    for (const [old, tier] of [["scout", "junior"], ["Workhorse", "senior"], ["FLAGSHIP", "principal"], ["strong", "senior"]])
+      expect(() => nativeFirst({ id: "d", prompt: "p", alias: old } as BatchTaskInput, codexSeat))
+        .toThrow(`alias '${old}' was renamed to '${tier}'`);
+    expect(() => namesExplicitRoute({ alias: "scout" })).toThrow(/renamed to 'junior'/u);
+  });
+
   it("canonicalises a tier alias before choosing native-first", () => {
     const codexSeat = { ...identity, provider: "codex" };
-    for (const alias of ["Workhorse", "workhorze", "WORKHORSE"])
+    for (const alias of ["Senior", "senir", "SENIOR"])
       expect(nativeFirst({ id: "d", prompt: "p", alias } as BatchTaskInput, codexSeat).task)
-        .toEqual({ id: "d", prompt: "p", route: "workhorse", native_default: "workhorse" });
-    expect(nativeFirst({ id: "d", prompt: "p", alias: "Flagshp" } as BatchTaskInput, codexSeat).task)
-      .toMatchObject({ route: "flagship" });
+        .toEqual({ id: "d", prompt: "p", route: "senior", native_default: "senior" });
+    expect(nativeFirst({ id: "d", prompt: "p", alias: "Principl" } as BatchTaskInput, codexSeat).task)
+      .toMatchObject({ route: "principal" });
     expect(nativeFirst({ id: "d", prompt: "p", alias: "luna" } as BatchTaskInput, codexSeat).task)
       .toEqual({ id: "d", prompt: "p", alias: "luna" });
   });
 
   it("changes nothing for a seat without native subagents", async () => {
     const agent = { ...identity, provider: "agent" };
-    const expanded = await expandPools([{ id: "one", prompt: "p", route: "strong" }],
+    const expanded = await expandPools([{ id: "one", prompt: "p", route: "senior" }],
       fixturePython, product, agent, poolEnvironment(), new AbortController().signal);
     expect(expanded.warnings.some((warning) => warning.includes("native"))).toBe(false);
     const route = normaliseRoute({ adapter: "claude", model: "haiku" }, agent, catalogueSnapshot(repositoryRoot));
@@ -2136,6 +2298,52 @@ it('runs a read-only dispatch in another registered project and records it for t
  expect(JSON.parse(fabricCli(['lanes','--json',String(result.id)])).runs).toEqual([expect.objectContaining({run_id:result.id,task_id:'cross-project',status:'ok'})]);
 });
 
+it.each([0, 2 * 86400000])('finds a cross-project pointed lane aged %i ms by explicit id while ignoring forged pointers', async (age) => {
+ const project = join(temporaryDirectory, 'target-project-b');
+ execFileSync('git', ['init', '-q', project]);
+ execFileSync('git', ['-C', project, '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.test',
+  'commit', '-q', '--allow-empty', '-m', 'fixture']);
+ const cwd = join(project, 'src');
+ mkdirSync(cwd, { recursive: true });
+ const store = new Store(databasePath(ownerEnvironment));
+ store.announce(identity);
+ store.announce({ ...identity, project, cwd });
+ store.close();
+ const caller = { ...identity, registeredProjects: [workspace, project] };
+ const result = await dispatchConfiguredProvider(
+  { adapter: 'codex', mode: 'read_only', cwd, prompt: 'fixture', task_id: 'pointed-lane', wait_seconds: 5 },
+  caller, new AbortController().signal, ownerEnvironment,
+ );
+ expect(result.status, JSON.stringify(result)).toBe('ok');
+
+ // The default listing window excludes older retained runs; explicit ids reach them.
+ const runDir = String((await fabricStatus(workspace, String(result.id))).run_dir);
+ if (age) {
+  const metadataPath = join(runDir, 'dispatch-status.json');
+  const metadata = JSON.parse(readFileSync(metadataPath, 'utf8'));
+  metadata.finished_at = new Date(Date.now() - age).toISOString();
+  writeFileSync(metadataPath, JSON.stringify(metadata));
+ }
+ const statusWithoutId = await fabricStatus(project);
+ expect(statusWithoutId.runs).toEqual(age ? [] : [expect.objectContaining({ task_id: 'pointed-lane', status: 'ok' })]);
+ for (const id of ['pointed-lane', String(result.id)]) {
+  expect(await fabricStatus(project, id)).toMatchObject({ task_id: 'pointed-lane', status: 'ok' });
+  expect(await fabricOutput(project, { id })).toMatchObject({ id, digest: expect.stringContaining('fixture') });
+ }
+
+ // A forged pointer imports nothing
+ const pointersDir = join(project, '.agent-run/runs/pointers');
+ writeFileSync(join(pointersDir, 'forged.json'), JSON.stringify({
+  source_project: '/foreign/proj',
+  run_dir: join(workspace, '.agent-run/runs/20261021-1200-dispatch-forged-abcdef'),
+  task_ids: ['forged-lane'],
+ }));
+ const forgedStatus = await fabricStatus(project, 'forged-lane');
+ expect(forgedStatus).toMatchObject({ status: 'rejected' });
+ const runsAfterForged = (await fabricStatus(project)).runs;
+ expect(runsAfterForged.some((r: any) => r.task_id === 'forged-lane')).toBe(false);
+});
+
 it('resumes a cross-project run with its saved read roots, and refuses one whose root has moved', async () => {
  const other=realpathSync(mkdtempSync(join(temporaryDirectory,'resume-other-')));mkdirSync(join(other,'src'));
  const brief=join(other,'brief.md');writeFileSync(brief,'continue');
@@ -2158,6 +2366,41 @@ it('resumes a cross-project run with its saved read roots, and refuses one whose
  const moved=await resumeConfiguredProvider({resume:row.run_id,prompt:'continue',wait_seconds:0},caller,new AbortController().signal,env);
  expect(moved).toMatchObject({status:'rejected',error:'resume_read_root_changed'});
  expect(existsSync(log)).toBe(false);
+});
+
+it("resumes a terminal batch task whose recorded add-dir was removed", async () => {
+ const dir = join(workspace, ".agent-run/runs/20260801-1200-batch-resume-test-abcdef");
+ const taskDir = join(dir, "tasks/batch-task/attempt-001");
+ mkdirSync(taskDir, { recursive: true });
+ mkdirSync(join(dir, "_owner"), { recursive: true });
+ const missingDir = join(temporaryDirectory, "removed-add-dir");
+ const row = JSON.parse(readFileSync(join(testDirectory, "fixtures/attempt.json"), "utf8"));
+ Object.assign(row, {
+  run_id: "mcp-batchres",
+  task_id: "batch-task",
+  state: "terminal",
+  status: "ok",
+  applied: { sandbox: "read-only", network: null, add_dirs: [missingDir], capabilities: [] },
+ });
+ writeFileSync(join(taskDir, "attempt.json"), JSON.stringify(row));
+ writeFileSync(join(dir, "dispatch-status.json"), JSON.stringify({
+  kind: "batch",
+  batch_id: "batch-1",
+  task_id: "batch-task",
+  task_ids: ["batch-task"],
+  routes: [{ adapter: "codex", model: "fixture" }],
+  status: "completed",
+  finished_at: new Date().toISOString(),
+ }));
+ const resumed = await resumeConfiguredProvider(
+  { resume: row.run_id, task_id: "batch-task", prompt: "continue prompt", wait_seconds: 0 },
+  identity,
+  new AbortController().signal,
+  ownerEnvironment,
+ );
+ expect(resumed.state, JSON.stringify(resumed)).toBe("queued");
+ await waitForFile(join(dir, OWNER_RECORD_NAME));
+ spawnedPids.push(Number(JSON.parse(readFileSync(join(dir, OWNER_RECORD_NAME), "utf8")).owner_pid));
 });
 
 it("fills unset dispatch fields from the project policy's dispatch_defaults", async () => {

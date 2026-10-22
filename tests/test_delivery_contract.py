@@ -15,7 +15,6 @@ ROOT = Path(__file__).resolve().parents[1]
 VALIDATOR_PATH = ROOT / "skills" / "deliver" / "scripts" / "validate_delivery.py"
 REFERENCE_RUNS_PATH = ROOT / "skills" / "deliver" / "scripts" / "reference_runs.py"
 REFERENCE_EVALUATION_PATH = ROOT / "skills" / "deliver" / "scripts" / "reference_evaluation.py"
-RUN_TEMPLATE_PATH = ROOT / "skills" / "deliver" / "templates" / "RUN.template.json"
 AUTHORITY_MAPPER_PATH = ROOT / "skills" / "deliver" / "scripts" / "authority_mapping.py"
 POLICY_VALIDATOR_PATH = ROOT / "skills" / "deliver" / "scripts" / "delivery_policy_validation.py"
 AUTHORITY_FIXTURE_ROOT = ROOT / "tests" / "fixtures" / "authority-envelope-v2"
@@ -366,18 +365,6 @@ def test_delivery_v1_records_typed_fabric_relationships_without_breaking_legacy_
     module.validate(coordinated, ROOT)
 
 
-def test_run_template_declares_an_explicit_independent_fabric_relationship_state():
-    template = json.loads(RUN_TEMPLATE_PATH.read_text())
-    assert template["fabric_relationships"] == {
-        "mode": "independent",
-        "delivery_run_id": template["run_id"],
-        "project_session_id": "not_applicable",
-        "coordination_run_id": "not_applicable",
-        "workstream_id": "not_applicable",
-        "lead_agent_id": "not_applicable",
-    }
-
-
 @pytest.mark.parametrize(
     ("relationships", "message"),
     [
@@ -514,42 +501,28 @@ def test_unapproved_run_needs_no_completed_evidence():
 
 
 @pytest.mark.parametrize(
-    ("risk_tier", "cycles"),
+    ("risk_tier", "cycles", "expected_error"),
     [
-        pytest.param("routine", 2, id="routine-at-2"),
-        pytest.param("substantial", 4, id="substantial-at-4"),
-        pytest.param("crucial", 5, id="crucial-at-5"),
-        pytest.param("terminal", 5, id="terminal-at-5"),
+        pytest.param("routine", 2, None, id="routine-at-limit"),
+        pytest.param("routine", 3, "repair_cycles 3 exceeds budget for routine tier (max 2)", id="routine-over-limit"),
+        pytest.param("substantial", 4, None, id="substantial-at-limit"),
+        pytest.param("substantial", 5, "repair_cycles 5 exceeds budget for substantial tier (max 4)", id="substantial-over-limit"),
+        pytest.param("crucial", 5, None, id="crucial-at-limit"),
+        pytest.param("crucial", 6, "repair_cycles 6 exceeds budget for crucial tier (max 5)", id="crucial-over-limit"),
+        pytest.param("terminal", 5, None, id="terminal-at-limit"),
+        pytest.param("terminal", 6, "repair_cycles 6 exceeds budget for terminal tier (max 5)", id="terminal-over-limit"),
     ],
 )
-def test_repair_cycle_budget_accepts_tier_boundary(risk_tier, cycles):
+def test_repair_cycle_budget_decisions_match_each_risk_tier(risk_tier, cycles, expected_error):
     module = load_validator()
     candidate = at_risk_tier(with_repair_cycles(fixture(), cycles), risk_tier)
 
-    module.validate(candidate, ROOT)
-
-
-@pytest.mark.parametrize(
-    ("risk_tier", "cycles", "budget"),
-    [
-        pytest.param("routine", 3, 2, id="routine-at-3"),
-        pytest.param("substantial", 5, 4, id="substantial-at-5"),
-        pytest.param("crucial", 6, 5, id="crucial-at-6"),
-        pytest.param("terminal", 6, 5, id="terminal-at-6"),
-    ],
-)
-def test_repair_cycle_budget_rejects_first_cycle_over_tier_limit(
-    risk_tier, cycles, budget,
-):
-    module = load_validator()
-    candidate = at_risk_tier(with_repair_cycles(fixture(), cycles), risk_tier)
-    message = (
-        rf"repair_cycles {cycles} exceeds budget for {risk_tier} tier "
-        rf"\(max {budget}\)"
-    )
-
-    with pytest.raises(module.Invalid, match=message):
+    if expected_error is None:
         module.validate(candidate, ROOT)
+    else:
+        with pytest.raises(module.Invalid) as excinfo:
+            module.validate(candidate, ROOT)
+        assert str(excinfo.value) == expected_error
 
 
 @pytest.mark.parametrize(

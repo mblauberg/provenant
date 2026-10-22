@@ -318,12 +318,26 @@ The full <!--skills-->25<!--/skills-->-skill catalogue, grouped by area:
 </details>
 <!-- skill-catalogue:end -->
 
+### Stack library
+
+[`library/`](library/) holds four stack skills kept apart from the workflow
+skills above: [`playwright`](library/playwright/SKILL.md),
+[`react-performance`](library/react-performance/SKILL.md),
+[`tanstack-query`](library/tanstack-query/SKILL.md) and
+[`typescript-clean-code`](library/typescript-clean-code/SKILL.md). They install
+through the same installer and manifest, into the same `skills/` directory of
+each client, as managed links. A library skill may not share a name with a
+workflow skill. Removing a folder from `library/` and re-running the installer
+prunes its link.
+
 ## Documentation and help
 
 - [`Architecture`](docs/ARCHITECTURE.md): system structure and design rationale.
 - [`Specifications`](docs/specs/README.md): the component contracts.
 - [Fabric hosts](docs/runbooks/fabric-hosts.md): SSH peer configuration and diagnostics.
-- [Local telemetry](docs/runbooks/telemetry.md): usage ingestion, source manifest and stats.
+- [Landing lease](docs/runbooks/landing-lease.md): taking Fabric's landing lease from a repository script with `provenant lease`.
+- [Local telemetry](docs/runbooks/telemetry.md): usage ingestion, source manifest, stats, change markers, before/after comparison and retro.
+- [Harness profiles](docs/runbooks/harness-profiles.md): switching cost/quality presets and comparing them.
 - [`Research`](docs/research/README.md): evidence and owners.
 - [`Skill portfolio evaluation`](docs/evals/skill-portfolio-2026/README.md): the retained routing evidence.
 - [`Maintenance`](MAINTAINING.md): how the repository is changed and governed.

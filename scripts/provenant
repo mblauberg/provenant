@@ -19,6 +19,7 @@ REPAIR = (
 )
 FABRIC_MCP = "runtime/fabric/bin/fabric-mcp"
 FABRIC_CLI = "runtime/fabric/bin/fabric"
+LEASE_VERBS = frozenset({"acquire", "release", "verify", "status", "push"})
 GIT_REDIRECT_ENVIRONMENT = (
     "GIT_DIR",
     "GIT_WORK_TREE",
@@ -81,52 +82,225 @@ def resolve_product_root(instance_root: Path | None = None) -> Path:
 
 
 def usage() -> None:
-    print("usage: provenant <help|root|route|routes|capabilities|worktree|clean|check|gate|telemetry|stats|fabric|hosts|peer|lanes|events|dispatch|batch|run> [arguments...]", file=sys.stderr)
+    print("usage: provenant <help|root|route|routes|capabilities|worktree|clean|reap|lint|check|gate|telemetry|stats|retro|quota|profile|fabric|lease|hosts|peer|lanes|events|dispatch|batch|run|pr> [arguments...]", file=sys.stderr)
 
 
 def help_text() -> None:
     print(
         """usage: provenant <command> [arguments...]
 
-Thin front door; each command delegates to its existing owner:
-  root           print the resolved product checkout
-  route ...      scripts/model-route ... (low-level resolver; capability-bound
-                 aliases need a fresh snapshot, normally supplied by dispatch);
-                 `route reset [adapter[/model]]` clears cooldowns
-  routes [--json] [--health]
-                 each global route pool with live availability; --health adds
-                 task-class routes and recent health (same as `help routes`)
-  capabilities ...
-                 skills/orchestrate/scripts/capabilities.py ...
+Thin front door to owners:
+  root           print resolved product checkout
+  route ...      scripts/model-route ...
+  routes ...     scripts/model-route routes
+  capabilities   skills/orchestrate/scripts/capabilities.py
   worktree ...   scripts/worktree ...
-  clean ...      scripts/clean.py ... (dry run by default; --apply --plan <digest>
-                 deletes the approved rows that are still eligible)
+  clean|reap ... scripts/clean.py|reap.py
+  lint ...       scripts/provenant_lint.py ...
   check ...      scripts/check-harness ...
-  gate           scripts/gate (the MAINTAINING.md verification list with
-                 per-step pass/fail output)
+  gate           scripts/gate
   fabric ...     runtime/fabric/bin/fabric ...
-  hosts list [--json] [host…]    configured local host and SSH peers
-  hosts doctor [--json] [host…]  local and peer diagnostics; offline peers get
-                                typed rows without failing the command
-  peer           fixed versioned JSON entrypoint on stdin/stdout (SSH)
-  lanes [--json] [id…]  lane state; use an id to see rows past the 20-row cap
-  lanes --wait [id…]    wait for a lane to finish or need input
-  events --follow       foreground/streaming Fabric task and inbox event stream
-  telemetry ingest|sources [--json]  local metadata-only usage ledger
-  stats [--since ISO-DATE] [--json]  usage, costs and outcomes
+  lease ...      runtime/fabric/bin/fabric landing-*
+  hosts|peer     scripts/fabric-hosts
+  lanes|events   runtime/fabric/bin/fabric lanes|events
+  telemetry ...  scripts/provenant-telemetry
+  stats|retro    scripts/provenant-telemetry
+  quota ...      scripts/provenant-quota
+  profile ...    scripts/provenant-profile
   dispatch ...   skills/orchestrate/scripts/dispatch_run.py ...
   batch ...      skills/orchestrate/scripts/batch_run.py ...
-  run ...        skills/orchestrate/scripts/run_controls.py ...
+  run ...        skills/orchestrate/scripts/run_controls.py
+  pr ...         scripts/provenant-pr
 
-`provenant run cancel` writes one cooperative cancellation request for an
-exact attempt or batch and waits boundedly for owner-written evidence.
-
-Fabric derives who you are from the working directory, so run it from the
-project you mean. `provenant fabric --help` lists its commands.
-Hosts use per-user <instance-root>/.agent-fabric/hosts.json (default ~/.agents).
-With no peers configured, host checks stay local. Every supported MCP chair
-can use fabric_hosts with action=list|doctor and optional hosts selectors."""
+`provenant help <command>` for detail."""
     )
+
+
+COMMAND_DETAILS: dict[str, str] = {
+    "root": (
+        "usage: provenant root\n\n"
+        "Print the resolved product checkout."
+    ),
+    "route": (
+        "usage: provenant route ...\n\n"
+        "Delegates to scripts/model-route ...\n"
+        "Low-level resolver; capability-bound aliases need a fresh snapshot,\n"
+        "normally supplied by dispatch.\n"
+        "`route reset [adapter[/model]] [--account LABEL]` clears cooldowns."
+    ),
+    "routes": (
+        "usage: provenant routes [--all] [--json] [--health]\n\n"
+        "Delegates to scripts/model-route routes ...\n"
+        "Each global route pool with live availability; unavailable or cooling\n"
+        "models collapse to a per-pool count line, --all lists every entry, and\n"
+        "--health adds task-class routes and recent health."
+    ),
+    "capabilities": (
+        "usage: provenant capabilities ...\n\n"
+        "Delegates to skills/orchestrate/scripts/capabilities.py ...\n"
+        "Inspect provider and adapter capabilities."
+    ),
+    "worktree": (
+        "usage: provenant worktree ...\n\n"
+        "Delegates to scripts/worktree ...\n"
+        "Create, list and remove managed Git worktrees."
+    ),
+    "clean": (
+        "usage: provenant clean ...\n\n"
+        "Delegates to scripts/clean.py ...\n"
+        "Dry run by default; --apply --plan <digest> deletes the approved rows\n"
+        "that are still eligible."
+    ),
+    "lint": (
+        "usage: provenant lint branch [NAME]\n"
+        "       provenant lint commit-msg FILE\n\n"
+        "Delegates to scripts/provenant_lint.py ...\n"
+        "Branch shape, session markers, agent attribution and closing keywords.\n"
+        "commit-msg works directly as a git commit-msg hook; see docs/runbooks/lint.md."
+    ),
+    "reap": (
+        "usage: provenant reap <pid>… [--tree] [--grace S] [--started-before TIME]\n\n"
+        "Delegates to scripts/reap.py ...\n"
+        "Stop explicit PIDs: TERM, then KILL after the grace period (default 5s).\n"
+        "Prints each process's age, parent, cwd and command first, and refuses one\n"
+        "that started after --started-before (epoch or ISO time) so a reused PID is\n"
+        "left alone. --tree adds descendants. Never signals a group or a pattern;\n"
+        "the lane-safety hook refuses pkill, killall and non-numeric kill targets."
+    ),
+    "check": (
+        "usage: provenant check ...\n\n"
+        "Delegates to scripts/check-harness ...\n"
+        "Run harness static, format and repository policy checks."
+    ),
+    "gate": (
+        "usage: provenant gate\n\n"
+        "Delegates to scripts/gate.\n"
+        "The MAINTAINING.md verification list with per-step pass/fail output."
+    ),
+    "fabric": (
+        "usage: provenant fabric ...\n\n"
+        "Delegates to runtime/fabric/bin/fabric ...\n"
+        "Fabric derives who you are from the working directory, so run it from the\n"
+        "project you mean. `provenant fabric --help` lists its commands."
+    ),
+    "lease": (
+        "usage: provenant lease <acquire|release|verify|status|push> ...\n\n"
+        "Delegates `lease <verb>` to runtime/fabric/bin/fabric landing-<verb>, the\n"
+        "one landing lease per project shared with fabric_landing_lease:\n"
+        "  acquire <session> (--expected-sha SHA | --branch B [--remote R]) [--seconds N]\n"
+        "  verify <session> <generation> [--expected-sha SHA] [--branch B [--remote R]]\n"
+        "  release <session> <generation>\n"
+        "  status\n"
+        "  push <session> <generation> <branch> [--remote R]\n"
+        "Each takes --label L and --json; pass acquire's label to later calls.\n"
+        "Exit 0 ok, 1 refused or stale, 2 usage, 3 held by another holder or a push\n"
+        "in progress. `provenant fabric landing-acquire --help` shows the flags."
+    ),
+    "hosts": (
+        "usage: provenant hosts list|doctor [--json] [host…]\n\n"
+        "Delegates to scripts/fabric-hosts.\n"
+        "  hosts list [--json] [host…]    configured local host and SSH peers\n"
+        "  hosts doctor [--json] [host…]  local and peer diagnostics; offline peers get\n"
+        "                                typed rows without failing the command\n\n"
+        "Hosts use per-user <instance-root>/.agent-fabric/hosts.json (default ~/.agents).\n"
+        "With no peers configured, host checks stay local. Every supported MCP chair\n"
+        "can use fabric_hosts with action=list|doctor and optional hosts selectors."
+    ),
+    "peer": (
+        "usage: provenant peer\n\n"
+        "Delegates to scripts/fabric-hosts peer.\n"
+        "Fixed versioned JSON entrypoint on stdin/stdout (SSH)."
+    ),
+    "lanes": (
+        "usage: provenant lanes [--json] [--all] [id…]\n"
+        "       provenant lanes --wait [--all] [--summary] [--timeout N] [id…]\n\n"
+        "Delegates to runtime/fabric/bin/fabric lanes ...\n"
+        "Default shows active lanes plus the 5 most recent terminal ones;\n"
+        "use --all to list all lanes.\n"
+        "`lanes --wait` waits for a lane to finish or need input; --summary prints\n"
+        "one bounded line per lane at the end."
+    ),
+    "events": (
+        "usage: provenant events --follow\n\n"
+        "Delegates to runtime/fabric/bin/fabric events ...\n"
+        "Foreground/streaming Fabric task and inbox event stream."
+    ),
+    "telemetry": (
+        "usage: provenant telemetry ingest|sources [--json]\n"
+        "       provenant telemetry changes [--sync | --add LABEL --at ISO] [--since ISO] [--json]\n\n"
+        "Delegates to scripts/provenant-telemetry.\n"
+        "Local metadata-only usage and event ledger. `changes --sync` records merged\n"
+        "PRs through gh; `--add` records a manual change marker."
+    ),
+    "stats": (
+        "usage: provenant stats [--since ISO-DATE] [--json] [--detail]\n"
+        "       provenant stats --compare <PR#|rev|date> [--window 7d] [--json]\n\n"
+        "Delegates to scripts/provenant-telemetry.\n"
+        "Usage, costs and outcomes. The default is the summary tables only;\n"
+        "per-account rows and the full tables are behind --detail, and --json\n"
+        "prints the full report. --compare gives before/after metrics with sample\n"
+        "sizes; a side with fewer than 10 lanes or rows is inconclusive."
+    ),
+    "retro": (
+        "usage: provenant retro [--since ISO-DATE] [--window 7d] [--json]\n\n"
+        "Delegates to scripts/provenant-telemetry retro.\n"
+        "Compact digest for retrospectives: change markers in the period with their\n"
+        "before/after summary, top error classes and attention proxies (default 7 days)."
+    ),
+    "quota": (
+        "usage: provenant quota [--refresh] [--json] | tick [--trigger T] [--power P] [--json] [--ignore-backoff]\n"
+        "       | schedule [--json] | trace [--since 24h] [--json] | path [--json]\n"
+        "       | credit list | credit <provider> [--account L] add|use\n\n"
+        "Delegates to scripts/provenant-quota.\n"
+        "Provider-reported quota windows and pace per account; PROVENANT_QUOTA=0 disables fetching."
+    ),
+    "profile": (
+        "usage: provenant profile list | show [--resolved] [--task-class X] [--risk-tier T]\n"
+        "       provenant profile use <preset> | set <knob>=<value> | reset <knob> [--project] [--task-class X]\n"
+        "       provenant profile diff <presetA> <presetB>\n\n"
+        "Delegates to scripts/provenant-profile.\n"
+        "Cost/quality knobs and presets (economy, balanced, rigorous) from\n"
+        "config/harness-knobs.json; balanced is today's behaviour. Writes the user file,\n"
+        "or with --project the checkout's .agents/harness-profile.json."
+    ),
+    "dispatch": (
+        "usage: provenant dispatch ...\n\n"
+        "Delegates to skills/orchestrate/scripts/dispatch_run.py ...\n"
+        "Own a durable run of provider attempts, including fallback and session resume."
+    ),
+    "batch": (
+        "usage: provenant batch ...\n\n"
+        "Delegates to skills/orchestrate/scripts/batch_run.py ...\n"
+        "Run a fixed, bounded set of ordinary dispatch attempts."
+    ),
+    "run": (
+        "usage: provenant run show <run-id|task-id> [--task-id T] [--tail N] [--json]\n"
+        "       provenant run cancel|inspect|retry|reduce ...\n\n"
+        "Delegates to skills/orchestrate/scripts/run_controls.py ...\n"
+        "`provenant run show` reads a lane's status and the last N lines (default 40,\n"
+        "max 500) of its result.md from the run directory, resolved from a run id, a\n"
+        "run directory name or the newest run holding the task id.\n"
+        "`provenant run cancel` writes one cooperative cancellation request for an\n"
+        "exact attempt or batch and waits boundedly for owner-written evidence."
+    ),
+    "pr": (
+        "usage: provenant pr checks <number|branch> [--wait] [--timeout S] [--json]\n\n"
+        "Delegates to scripts/provenant-pr ...\n"
+        "`pr checks --wait` blocks until the PR's required checks for its current head\n"
+        "finish, following a head that moves and waiting for checks not yet registered.\n"
+        "Required contexts come from rulesets or branch protection and match check\n"
+        "names exactly; all must register. If none are required, or they cannot be\n"
+        "read, the finished set must also hold for two polls. Polls gh with backoff\n"
+        "from 30s to 120s. Exit 0 required checks green, 1 any failure, 2 bad\n"
+        "reference, 4 required set unreadable (seen checks passed; success not\n"
+        "claimed), 124 timeout (default 1800s). Without --wait it reports once and\n"
+        "exits 3 if checks are pending. Run it as a background command."
+    ),
+    "help": (
+        "usage: provenant help [command]\n\n"
+        "Print general help, or detail for a specific command."
+    ),
+}
 
 
 def execute(
@@ -310,16 +484,28 @@ def main(arguments: list[str]) -> int:
     if command in {"lanes", "events"}:
         command_arguments = [command, *command_arguments]
         command = "fabric"
+    if command == "lease":
+        verb = command_arguments[0] if command_arguments else None
+        if verb in {"-h", "--help"}:
+            print(COMMAND_DETAILS["lease"])
+            return 0
+        if verb not in LEASE_VERBS:
+            print(COMMAND_DETAILS["lease"].split("\n", 1)[0], file=sys.stderr)
+            return 2
+        command, command_arguments = "fabric", [f"landing-{verb}", *command_arguments[1:]]
     if command == "routes":
         command, command_arguments = "route", ["routes", *command_arguments]
     elif command == "help" and command_arguments == ["routes"]:
         command, command_arguments = "route", ["routes", "--health"]
     elif command in {"help", "-h", "--help"}:
-        if command_arguments:
-            usage()
-            return 2
-        help_text()
-        return 0
+        if not command_arguments:
+            help_text()
+            return 0
+        if len(command_arguments) == 1 and command_arguments[0] in COMMAND_DETAILS:
+            print(COMMAND_DETAILS[command_arguments[0]])
+            return 0
+        usage()
+        return 2
 
     if command == "root":
         if command_arguments:
@@ -332,8 +518,8 @@ def main(arguments: list[str]) -> int:
             return 3
         return 0
 
-    if command == "stats":
-        command_arguments = ["stats", *command_arguments]
+    if command in {"stats", "retro"}:
+        command_arguments = [command, *command_arguments]
 
     if command in {"peer", "hosts"}:
         command_arguments = [command, *command_arguments]
@@ -341,18 +527,24 @@ def main(arguments: list[str]) -> int:
     owners = {
         "telemetry": "scripts/provenant-telemetry",
         "stats": "scripts/provenant-telemetry",
+        "retro": "scripts/provenant-telemetry",
+        "quota": "scripts/provenant-quota",
+        "profile": "scripts/provenant-profile",
         "peer": "scripts/fabric-hosts",
         "hosts": "scripts/fabric-hosts",
         "route": "scripts/model-route",
         "capabilities": "skills/orchestrate/scripts/capabilities.py",
         "worktree": "scripts/worktree",
         "clean": "scripts/clean.py",
+        "reap": "scripts/reap.py",
+        "lint": "scripts/provenant_lint.py",
         "check": "scripts/check-harness",
         "gate": "scripts/gate",
         "fabric": FABRIC_CLI,
         "dispatch": "skills/orchestrate/scripts/dispatch_run.py",
         "batch": "skills/orchestrate/scripts/batch_run.py",
         "run": "skills/orchestrate/scripts/run_controls.py",
+        "pr": "scripts/provenant-pr",
     }
     owner = owners.get(command)
     if owner is None:

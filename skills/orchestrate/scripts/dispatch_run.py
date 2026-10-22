@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Own a durable run of provider attempts, including fallback and session resume.
 
-Routing stays with cf_dispatch.sh --plan-only; provider_exec runs the provider
+Routing stays with cf_dispatch.py --plan-only; provider_exec runs the provider
 in this process. Legacy receipts remain additive while Fabric v1 rows provide
 live progress, typed terminal states, provenance, and controls.
 """
@@ -17,6 +17,7 @@ import io
 import json
 import math
 import os
+import random
 import re
 import shutil
 import signal
@@ -26,9 +27,9 @@ import sys
 import time
 import tempfile
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, NoReturn
 
 # The shared library sits one level above this skill. Resolving it from the
 # skill rather than from a repository root two levels further up keeps the
@@ -38,11 +39,13 @@ SKILLS_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(SKILLS_ROOT))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import process_info
-CF_DISPATCH = Path(__file__).with_name("cf_dispatch.sh")
+CF_DISPATCH = Path(__file__).with_name("cf_dispatch.py")
 TASK_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 ATTEMPT_ID_RE = re.compile(r"^attempt-(?P<number>\d{3}|[1-9]\d{3,})$")
 BATCH_ID_RE = re.compile(r"^batch-(?:\d{3}|[1-9]\d{3,})$")
 DEFAULT_TIMEOUT_SECONDS = 3600.0
+# Match the existing abandoned-receipt grace period for pre-identity attempts.
+LEGACY_ATTEMPT_STALE_SECONDS = 48 * 3600
 MAX_WORKER_QUESTION_PROMPT = 4096
 MAX_WORKER_TERMINAL_ENVELOPE_BYTES = 64 * 1024
 MAX_GIT_EVIDENCE_HEADER_BYTES = 64 * 1024
@@ -52,7 +55,8 @@ CANCEL_MARKER_NAME = "cancel.request"
 BRANCH_TYPES = "feat|fix|refactor|perf|test|docs|chore|ci|build"
 BRANCH_PATTERN = re.compile(rf"^(?:(?:{BRANCH_TYPES}|proto)/[a-z][a-z0-9]*-[a-z0-9]+(?:-[a-z0-9]+){{1,4}}|land/[0-9]{{8}}-[a-z0-9]+(?:-[a-z0-9]+)*)$")
 
-from _shared.bounded_process import stop_process_group
+from _shared.bounded_process import BudgetArgumentParser, stop_process_group
+from _shared import harness_profile
 from layout import run_workspace, run_root, contains_run
 import provider_exec
 import memory_admission
@@ -60,7 +64,7 @@ import secret_scan
 import exec_routing
 import context_usage
 import attempt_storage
-from fabric_records import render_digest, write_cooldown, write_route_health, append_index, TERMINAL_STATUSES
+from fabric_records import pacing_policy, identity_resolver, render_digest, write_cooldown, write_route_health, append_index, TERMINAL_STATUSES
 from _shared.custody import (
     OwnedFileError, OwnedLinkError, atomic_write_contained, contained_regular_path,
     ensure_contained_directory, create_contained_directory, open_contained_regular, read_bound_bytes,
@@ -312,16 +316,16 @@ def modified_since(cwd: str, since: float) -> bool:
     return False
 
 
-def guard_writer_startup_timeout(record: dict[str, Any], start: tuple[Any, ...] | None, cwd: str) -> None:
-    """A silent writer may still have edited files; fall back only over a provably untouched worktree."""
-    if record.get("status") != "startup_timeout":
+def guard_writer_retry(record: dict[str, Any], start: tuple[Any, ...] | None, cwd: str) -> None:
+    """Retry a silent or rate-limited writer only over a provably untouched worktree."""
+    if record.get("status") not in {"startup_timeout", "rate_limited"}:
         return
     state, launched = start or (None, 0.0)
     if (state is not None and not state[1] and writer_worktree_state(cwd) == state
             and not modified_since(cwd, launched - 1.0)):
         return
     record["retryable"] = False
-    record["fix"] = ("inspect the worktree: it changed or was dirty when the silent writer timed out; "
+    record["fix"] = ("inspect the worktree: it changed or was dirty when the writer stopped; "
                      "then dispatch again on another model or adapter")
 
 
@@ -509,6 +513,154 @@ def acquire_run_custody(run_dir: Path):
     return stream
 
 
+@contextmanager
+def attempt_custody(run_dir: Path, path: Path, *, blocking: bool = True):
+    """Serialise short publications, including children without run custody."""
+    fd, _relative, _target = open_contained_regular(
+        run_dir, path.with_suffix(".lock").relative_to(run_dir),
+        os.O_RDWR | os.O_CREAT, label="attempt custody"
+    )
+    with os.fdopen(fd, "a+") as stream:
+        fcntl.flock(stream.fileno(), fcntl.LOCK_EX | (0 if blocking else fcntl.LOCK_NB))
+        yield
+
+
+def reap_run_evidence(run_dir: Path):
+    """Read current closure evidence, refusing a live or unobservable owner."""
+    receipt = json.loads(read_bound_bytes(run_dir, "RUN_RECEIPT.json", label="run receipt"))
+    if not isinstance(receipt, dict) or receipt.get("status") != "active":
+        return None
+    # Older writers may not hold custody. A live or unobservable owner
+    # still owns its attempts, even if its provider has already exited.
+    owners = [receipt]
+    for name in ("dispatch-owner.json", "dispatch-status.json"):
+        try:
+            (run_dir / name).lstat()
+        except FileNotFoundError:
+            continue
+        owners.append(json.loads(read_bound_bytes(run_dir, name, label="run owner")))
+    terminal_status = "lost"
+    run_token = None
+    for owner in owners:
+        if not isinstance(owner, dict):
+            return None
+        if owner.get("run_token"):
+            run_token = owner["run_token"]
+        if owner.get("finished_at") and owner.get("status") in {"interrupted", "cancelled"}:
+            terminal_status = owner["status"]
+        pid = owner.get("owner_pid", owner.get("pid"))
+        if not isinstance(pid, int) or pid <= 0:
+            continue
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            continue
+        started = owner.get("owner_started_at")
+        observed = process_info.start_time(pid) if started else None
+        if not started or observed is None or observed == started:
+            return None
+    return terminal_status, run_token
+
+
+def reap_stop_status(run_dir: Path, path: Path, row: dict[str, Any]):
+    evidence = reap_run_evidence(run_dir)
+    if evidence is None:
+        return None
+    status, run_token = evidence
+    # A recorded closure takes precedence over leftover cancellation markers.
+    if status != "lost":
+        return status
+    try:
+        (run_dir / "termination-request.json").lstat()
+        request = json.loads(read_bound_bytes(run_dir, "termination-request.json", label="termination request"))
+    except FileNotFoundError:
+        request = {}
+    # Controller intent is run-scoped; batch children have distinct provider PIDs.
+    if provider_exec.termination_request_matches(
+        request, run_token=run_token, provider_pid=None,
+        started_at=row.get("started_at"), signals={"SIGTERM", "SIGKILL"},
+    ):
+        return "cancelled" if request["source"] == "cancel_requested" else "interrupted"
+    cancel_dir = run_dir / "dispatch/tasks" / path.parent.parent.name / path.parent.name
+    if cancellation_marker_present(run_dir, cancel_dir):
+        return "cancelled"
+    batch_id = row.get("batch_id")
+    if isinstance(batch_id, str) and BATCH_ID_RE.fullmatch(batch_id):
+        batch_dir = run_dir / "dispatch/batches" / batch_id
+        if cancellation_marker_present(run_dir, batch_dir):
+            try:
+                (batch_dir / "summary.json").lstat()
+                summary = json.loads(read_bound_bytes(run_dir, batch_dir.relative_to(run_dir) / "summary.json", label="batch summary"))
+            except FileNotFoundError:
+                summary = {}
+            if not isinstance(summary, dict) or summary.get("status") not in {"completed", "failed", "cancelled"}:
+                return "cancelled"
+    return "lost"
+
+
+def reap_attempts(run_dir: Path) -> list[str]:
+    """Finalise dead attempts under custody, preserving deliberate termination."""
+    run_dir = Path(run_dir)
+    reaped = []
+    try:
+        custody = acquire_run_custody(run_dir)
+    except (OSError, OwnedFileError):
+        return reaped
+    with custody:
+        try:
+            if reap_run_evidence(run_dir) is None:
+                return reaped
+        except (OSError, ValueError, TypeError, OwnedFileError):
+            return reaped
+        for tree in ("tasks", "dispatch/tasks"):
+            for path in (run_dir / tree).glob("*/attempt-*/attempt.json"):
+                try:
+                    row = json.loads(read_bound_bytes(run_dir, path.relative_to(run_dir), label="attempt receipt"))
+                    if not isinstance(row, dict) or row.get("schema") != "fabric.attempt.v1" or row.get("state") != "running":
+                        continue
+                    pgid = row.get("pgid")
+                    if not isinstance(pgid, int) or pgid <= 0:
+                        continue
+                    started = row.get("pgid_started_at")
+                    try:
+                        os.killpg(pgid, 0)
+                    except ProcessLookupError:
+                        if not started:
+                            if not isinstance(row.get("last_progress_at"), str):
+                                continue
+                            progress = datetime.fromisoformat(row["last_progress_at"].replace("Z", "+00:00"))
+                            if (datetime.now(UTC) - progress).total_seconds() <= LEGACY_ATTEMPT_STALE_SECONDS:
+                                continue
+                        reason = "pgid_gone"
+                    else:
+                        observed = process_info.start_time(pgid) if started else None
+                        if not started or observed is None or observed == started:
+                            continue
+                        reason = "pgid_reused"
+                    # A wedged publisher must not hold run custody through us.
+                    with attempt_custody(run_dir, path, blocking=False):
+                        current = json.loads(read_bound_bytes(run_dir, path.relative_to(run_dir), label="attempt receipt"))
+                        # A child may have published after its provider exited.
+                        if current != row or current.get("state") != "running":
+                            continue
+                        status = reap_stop_status(run_dir, path, row)
+                        if status is None:
+                            continue
+                        row.update(state="terminal", status=status, ended_at=now(), retryable=status == "lost",
+                                   error_class=provider_exec.error_class(status))
+                        row["evidence"] = {**(row.get("evidence") or {}), "signature": reason,
+                                           "excerpt": "Attempt process group is gone" if reason == "pgid_gone"
+                                           else "Attempt process group start time no longer matches"}
+                        row["digest"] = render_digest(row)
+                        write_owned(run_dir, path, json.dumps(row, indent=2) + "\n")
+                        reaped.append(str(path))
+                except (OSError, ValueError, TypeError, KeyError, AttributeError, OwnedFileError):
+                    continue
+        if reaped:
+            close_mcp_run(run_dir)
+    return reaped
+
+
 def reconcile_manifest(run_dir: Path, custody=None) -> None:
     """Index complete prior attempts whose manifest rows were lost on re-entry."""
     manifest = run_dir / "MANIFEST.md"
@@ -528,7 +680,7 @@ def reconcile_manifest(run_dir: Path, custody=None) -> None:
         try:
             row = json.loads(read_bound_bytes(run_dir, canonical, label="interrupted attempt"))
             if (row.get("schema") == "fabric.attempt.v1" and row.get("state") == "terminal"
-                    and row.get("status") == "interrupted" and row.get("task_id") == directory.parent.name
+                    and row.get("status") in {"interrupted", "lost"} and row.get("task_id") == directory.parent.name
                     and directory.name == f"attempt-{row.get('attempt', 0):03d}"):
                 recoverable.add(directory)
         except (OSError, ValueError, OwnedFileError):
@@ -843,7 +995,15 @@ def build_command(
 
 
 # Statuses whose provider turn ended before a result, so its session may be missing.
-INCOMPLETE_TURN_STATUSES = {"timed_out", "cancelled", "stalled", "startup_timeout", "interrupted"}
+INCOMPLETE_TURN_STATUSES = {"timed_out", "cancelled", "stalled", "startup_timeout", "interrupted", "lost"}
+
+
+def incomplete_provider_turn(attempt: dict) -> bool:
+    """Include provider deaths whose failure status does not imply a finished turn."""
+    return attempt.get("status") in INCOMPLETE_TURN_STATUSES or (
+        attempt.get("status") == "failed"
+        and (attempt.get("evidence") or {}).get("signature") in {"provider_signal", "provider_incomplete"}
+    )
 
 
 FAST_PLAN_SHELL_ENV_READS = {
@@ -975,7 +1135,7 @@ def fast_fabric_plan(args, prompt_path: Path, result_path: Path, workspace: Path
             with redirect_stdout(io.StringIO()) as output:
                 spec.loader.exec_module(module)
                 argv = ["resolve", "--adapter", args.tool, "--role", args.role,
-                        "--lead-family", "", "--alias", "flagship", f"--model={args.model}"]
+                        "--lead-family", "", "--alias", "principal", f"--model={args.model}"]
                 if args.effort:
                     argv += ["--effort", args.effort]
                 if args.fallback is not None:
@@ -1262,6 +1422,9 @@ def routing_environment() -> dict[str, str]:
     """Keep discovery and worker routing on the same instance/product fallback."""
     env = os.environ.copy()
     instance = Path(env.get("AGENT_FABRIC_INSTANCE_ROOT") or Path.home() / ".agents").expanduser()
+    # Routing may fall back to the product catalogue; the user's profile file stays the one receipts stamp.
+    if not env.get(harness_profile.PROFILE_ROOT_ENV):  # empty counts as unset, as in user_path
+        env[harness_profile.PROFILE_ROOT_ENV] = str(instance)
     try:
         (instance / "config/model-routing.json").lstat()
     except FileNotFoundError:
@@ -1271,7 +1434,7 @@ def routing_environment() -> dict[str, str]:
     return env
 
 
-EFFORT_RANK = {"low": 0, "medium": 1, "high": 2, "xhigh": 3, "max": 4, "ultra": 5}
+EFFORT_RANK = {"low": 0, "medium": 1, "high": 2, "xhigh": 3, "ultra": 4}
 
 
 def effort_retry_plan(plan: dict[str, Any], adapter_record: dict[str, Any]) -> dict[str, Any] | None:
@@ -1356,7 +1519,7 @@ def preflight_tasks(tasks: list[dict[str, Any]], workspace_root: Path | None = N
                         [str(workspace / Path(item).expanduser()) for item in task.get("add_dirs") or []],
                         workspace_root=workspace)
                 except (OSError, subprocess.SubprocessError) as exc:
-                    raise PreflightError("secret_scan_unavailable", "Make dispatch inputs readable for the secret scan.") from exc
+                    raise PreflightError("secret_scan_unavailable", f"Make dispatch inputs readable for the secret scan: {exc}") from exc
                 if scan.budget_exceeded and not task.get("allow_secrets", False):
                     raise PreflightError("secret_scan_budget_exceeded", scan.fix())
                 if scan.findings and not task.get("allow_secrets", False):
@@ -1398,7 +1561,7 @@ def preflight_tasks(tasks: list[dict[str, Any]], workspace_root: Path | None = N
                 elif task.get("alias"):
                     command.extend(("--alias", task["alias"]))
                 elif not task.get("model"):
-                    command.extend(("--alias", "workhorse"))
+                    command.extend(("--alias", "senior"))
                 policy = exec_routing.validate_policy(task.get("fallback"))
                 if policy is not None:
                     command.extend(("--fallback", "true" if isinstance(policy, list) else json.dumps(policy) if type(policy) is bool else policy))
@@ -1452,7 +1615,7 @@ def preflight_tasks(tasks: list[dict[str, Any]], workspace_root: Path | None = N
                     fix = ("Pass alias " + ", ".join(aliases) + " or model " + ", ".join(choices) + "."
                            if choices else "Pass an explicit provider/model id supported by " + adapter + ".")
                     if "effort" in code:
-                        fix = "Omit effort, or pass a supported level: low, medium, high, xhigh, max, ultra."
+                        fix = "Omit effort, or pass a supported level: low, medium, high, xhigh, ultra."
                     if code in {"model_ambiguous", "model_not_found"} and route.get("message"):
                         fix = str(route["message"])[:600]
                     raise PreflightError(code, fixes.get(code, fix))
@@ -1525,6 +1688,49 @@ def with_pick_reason(line, reason):
     return line[:-1] + "; " + reason + ")"
 
 
+def attempt_scope(args, number):
+    # Terminal construction reuses the scope captured before provider startup.
+    scopes = getattr(args, '_attempt_scopes', None)
+    if scopes is None:
+        scopes = args._attempt_scopes = {}
+    key = (number, args.tool)
+    if key not in scopes:
+        scopes[key] = identity_resolver().scope(args.tool)
+    return scopes[key]
+
+
+def export_knob_overrides(args: argparse.Namespace) -> None:
+    """Validate `--knob` overrides and export them, with the risk tier, so the routing subprocesses resolve the same profile."""
+    assignments = getattr(args, "knobs", None) or []
+    args._knob_overrides = {}
+    if assignments:  # an explicit override must be valid; a missing registry rejects it too
+        args._knob_overrides = harness_profile.parse_assignments(harness_profile.load_registry(), assignments)
+        for item in assignments:
+            name, _, raw = item.partition("=")
+            os.environ[harness_profile.env_name(name.strip())] = raw.strip()
+    if args.risk_tier:
+        try:
+            tiers = harness_profile.load_registry().tier_order
+        except harness_profile.ProfileError:
+            tiers = ()
+        if args.risk_tier in tiers:
+            os.environ[harness_profile.RISK_TIER_ENV] = args.risk_tier
+
+
+def profile_resolution(args: argparse.Namespace) -> dict[str, Any]:
+    """The attempt's harness-profile stamp, resolved once; a broken profile falls back to defaults and says why."""
+    if getattr(args, "_profile_stamp", None) is None:
+        resolution, error = harness_profile.lenient(
+            task_class=getattr(args, "task_class", None), risk_tier=getattr(args, "risk_tier", None),
+            dispatch=getattr(args, "_knob_overrides", None))
+        args._profile_stamp = resolution.stamp() if resolution else {"preset": None, "digest": None, "error": error}
+    return args._profile_stamp
+
+
+def profile_knob(args: argparse.Namespace, name: str, fallback: Any = None) -> Any:
+    return profile_resolution(args).get("knobs", {}).get(name, fallback)
+
+
 def contract_row(args,run_dir,number,attempt_dir,plan,started_at):
     route=plan.get("route",{})
     model=plan.get("model") or route.get("resolved_model") or args.model or ""
@@ -1532,7 +1738,7 @@ def contract_row(args,run_dir,number,attempt_dir,plan,started_at):
     family=route.get("model_family") or "unknown"
     label=args.tool+"/"+model+("@"+effort if effort else "")
     identity="resolved" if model else "unknown"
-    task_class = getattr(args, "task_class", None) or ""
+    task_class = getattr(args, "task_class", None) or getattr(args, "_rate_limit_task_class", "")
     provenance={"requested":{"adapter":args.tool,"alias":"" if args.model and not getattr(args,"alias_supplied",True) else args.alias or "","model":args.model,"effort":args.effort,"task_class":task_class},
         "resolved_model":model,"observed_model":None,"observed_source":None,"identity":identity,
         "provider":route.get("endpoint_provider") or args.tool,"transport":args.tool,"family":family,
@@ -1547,15 +1753,16 @@ def contract_row(args,run_dir,number,attempt_dir,plan,started_at):
         note = f'local fallback from {placement["from_host"]}: {placement["reason"]}' + (f': {placement["detail"]}' if placement.get('detail') else '')
         if note not in plan.setdefault('warnings', []):
             plan['warnings'].append(note)
-    return {"schema":"fabric.attempt.v1", **({'placement_fallback': placement} if placement else {}),"run_id":plan.get("run_id") or run_identity(run_dir),"task_id":args.task_id,"task_class":task_class,
+    return {"schema":"fabric.attempt.v1", **attempt_scope(args,number), **({'placement_fallback': placement} if placement else {}),"run_id":plan.get("run_id") or run_identity(run_dir),"task_id":args.task_id,"task_class":task_class,
+        **({"batch_id":args.batch_id} if getattr(args,"batch_id",None) else {}),"profile":profile_resolution(args),
         "attempt":number,"state":"running","status":None,"usage_source":"missing","mode":args.access_mode,"cwd":plan.get("cwd") or str(Path.cwd().resolve()),
         "workspace_root":plan.get("workspace_root") or str(Path(getattr(args,"workspace_root",None) or Path.cwd()).resolve()),
         **({"read_roots":[str(root) for root in args.read_roots]} if getattr(args,"read_roots",None) else {}),
         "worktree":str(args.worktree) if args.worktree else None,"started_at":started_at,"ended_at":None,"last_progress_at":started_at,
-        "pgid":None,"session_id":plan.get("session_id"),"retryable":False,"reset_at":None,"retry_after":None,"fix":None,
+        "pgid":None,"pgid_started_at":None,"session_id":plan.get("session_id"),"retryable":False,"reset_at":None,"retry_after":None,"fix":None,
         "evidence":{"exit":None,"signal":None,"signature":None,"excerpt":""},"question":None,
         "applied":plan.get("applied",{"sandbox":None,"network":None,"add_dirs":[],"guarantee":"prompt_only"}),
-        "warnings":list(plan.get("warnings",[])) + list(getattr(getattr(args, "_secret_scan", None), "warnings", [])) + list(getattr(args, "_branch_warnings", [])),"provenance":provenance,
+        "warnings":list(plan.get("warnings",[])) + list(getattr(getattr(args, "_secret_scan", None), "warnings", [])) + list(getattr(args, "_branch_warnings", [])) + list(getattr(args, "_resume_warnings", [])),"provenance":provenance,
         "secret_scan":{"allow_secrets":getattr(args,"allow_secrets",False),
                        "finding_names":getattr(getattr(args,"_secret_scan",None),"names",lambda:[])()},
         "timing":{"phases":getattr(args,"_phase_timings",{}).copy()},
@@ -1568,7 +1775,8 @@ def publish_contract(run_dir,row):
     row["digest"]=render_digest(row)
     path=run_dir/row["paths"]["receipt"]
     ensure_owned_directory(run_dir,path.parent)
-    write_owned(run_dir,path,json.dumps(row,indent=2)+"\n")
+    with attempt_custody(run_dir, path):
+        write_owned(run_dir,path,json.dumps(row,indent=2)+"\n")
 
 
 def terminal_contract(args,run_dir,legacy,adapter,number,attempt_dir):
@@ -1577,12 +1785,15 @@ def terminal_contract(args,run_dir,legacy,adapter,number,attempt_dir):
     if legacy["outcome"] in {"result_invalid_path","result_integrity_error","adapter_receipt_invalid","manifest_write_error","terminal_envelope_invalid"}: status="failed"
     elif legacy["status"] in {"cancelled","timed_out"}: status=legacy["status"]
     elif legacy["status"]=="blocked": status="input_required"
+    elif status == "ok" and legacy["status"] == "failed": status="failed"
     elif status=="quarantined" and legacy["status"]=="failed": status="failed"
     refusal=route_refusal(adapter,args.tool)
     if refusal: status=refusal["status"]
     if status not in TERMINAL_STATUSES: status="failed"
-    for field in ("session_id","retryable","reset_at","retry_after","fix","error","evidence","applied","context","usage_source","warnings","reaped","spared","provenance","pgid","last_progress_at","landable","quarantine"):
+    for field in ("reason","session_id","retryable","reset_at","retry_after","fix","error","evidence","applied","context","usage_source","warnings","reaped","spared","provenance","pgid","pgid_started_at","last_progress_at","landable","quarantine","result_partial"):
         if field in adapter: row[field]=adapter[field]
+    if row.get("task_class") and isinstance(row.get("provenance"), dict):
+        row["provenance"]["requested"] = {**(row["provenance"].get("requested") or {}), "task_class": row["task_class"]}
     # The provider's provenance replaces the recorded one; keep the confidential request so resume and handoff honour it.
     if getattr(args,"confidential",False) and isinstance(row.get("provenance"),dict):
         row["provenance"]["requested"]={**(row["provenance"].get("requested") or {}),"confidential":True}
@@ -1592,7 +1803,8 @@ def terminal_contract(args,run_dir,legacy,adapter,number,attempt_dir):
         row["provenance"]["pick_reason"]=reason
     row["warnings"] = list(dict.fromkeys(
         list(row.get("warnings", [])) + list(getattr(getattr(args, "_secret_scan", None), "warnings", []))
-        + list(getattr(args, "_memory_warnings", [])) + list(getattr(args, "_branch_warnings", []))))
+        + list(getattr(args, "_memory_warnings", [])) + list(getattr(args, "_branch_warnings", []))
+        + list(getattr(args, "_resume_warnings", []))))
     row["timing"]["queued_seconds"] = getattr(args, "_queued_seconds", 0.0)
     if legacy.get("process_error", "").startswith("Set .agents/fabric-policy.json memory_floor_percent"):
         row["fix"] = legacy["process_error"]
@@ -1671,7 +1883,22 @@ def prepare_resume(args):
         args.provider_cwd = supplied_cwd
     args.workspace_root=Path(previous.get("workspace_root") or (previous.get("workspace") or {}).get("root") or Path.cwd()).expanduser().resolve()
     args.sandbox=previous["applied"]["sandbox"];args.network=None if previous["applied"]["network"] is None else str(previous["applied"]["network"]).lower()
-    args.add_dirs=previous["applied"]["add_dirs"];args.resume_session=previous["session_id"]
+    applied_add_dirs = previous["applied"].get("add_dirs") or []
+    valid_add_dirs = []
+    missing_add_dirs = []
+    for item in applied_add_dirs:
+        p = Path(item).expanduser()
+        target = p if p.is_absolute() else (args.workspace_root / p)
+        if target.exists():
+            valid_add_dirs.append(item)
+        else:
+            missing_add_dirs.append(item)
+    args.add_dirs = valid_add_dirs
+    if missing_add_dirs:
+        args._resume_warnings = getattr(args, "_resume_warnings", []) + [
+            f"dropped missing recorded add_dir: {item}" for item in missing_add_dirs
+        ]
+    args.resume_session=previous["session_id"]
     args.read_roots=previous.get("read_roots") or []
     # A read root was canonical when granted; a directory since swapped for a link is not that grant.
     bound=[*args.read_roots,*([args.provider_cwd] if args.read_roots and args.provider_cwd else [])]
@@ -1685,7 +1912,7 @@ def prepare_resume(args):
             setattr(args, field, route[field])
     args.resume_previous=previous
     observed_session=False
-    if args.tool=="claude" and previous["status"] in INCOMPLETE_TURN_STATUSES:
+    if args.tool=="claude" and incomplete_provider_turn(previous):
         events=previous["paths"].get("events")
         if events:
             retained=retained_path(args.run_dir,events)
@@ -1710,14 +1937,14 @@ def prepare_resume(args):
         raise ResumeError("continuation_unsupported",f"attempt {previous['attempt']} did not record provider session {required}; "
                           "pass fresh: true to start a new session primed with its last result")
     if not args.resume_session or args.tool=="copilot" or (
-        args.tool=="claude" and previous["status"] in INCOMPLETE_TURN_STATUSES
+        args.tool=="claude" and incomplete_provider_turn(previous)
         and not observed_session
     ):
         if required is not None:
             raise ResumeError("continuation_unsupported",f"{args.tool} cannot continue provider session {required}; "
                               "pass fresh: true to start a new session primed with its last result")
         if (args.tool=="claude" and previous["mode"]=="worktree_write"
-            and previous["status"] in INCOMPLETE_TURN_STATUSES):
+            and incomplete_provider_turn(previous)):
             raise ValueError("Claude session unavailable after incomplete writer turn; review worktree changes, then dispatch a new run")
         args.resume_session=None
         args.resume_relaunch=resume_relaunch_context(args.run_dir,previous)
@@ -1734,6 +1961,7 @@ def prepare_resume(args):
 def _dispatch(args: argparse.Namespace, custody=None) -> int:
     args._last_plan={}
     args._last_row=None
+    args._attempt_scopes={}
     owner_started_ms = None
     try:
         incoming = ({} if getattr(args, "retry_of", None) or getattr(args, "fallback_from", None)
@@ -1823,8 +2051,8 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
         secret_scan_result = secret_scan.scan_inputs(
             prompt_bytes or b"", str(args.prompt_file) if args.prompt_file else "<prompt>", args.add_dirs,
             workspace_root=workspace)
-    except (OSError, subprocess.SubprocessError):
-        return fail(run_dir, "secret_scan_unavailable", "Make dispatch inputs readable for the secret scan.")
+    except (OSError, subprocess.SubprocessError) as exc:
+        return fail(run_dir, "secret_scan_unavailable", f"Make dispatch inputs readable for the secret scan: {exc}")
     if secret_scan_result.budget_exceeded and not getattr(args, "allow_secrets", False):
         print(json.dumps({"status": "rejected", "error": "secret_scan_budget_exceeded", "fix": secret_scan_result.fix()}))
         return 2
@@ -1949,7 +2177,7 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
         "preface": args.preface,
         "adapter": args.tool,
         "alias": args.alias or "",
-        "task_class": args.task_class or "",
+        "task_class": args.task_class or getattr(args, "_rate_limit_task_class", ""),
         "role": args.role,
         "model": args.model or "",
         "effort": args.effort or "",
@@ -1988,6 +2216,20 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
     old_handlers: dict[int, Any] = {}
     def admit_attempt(active, cancelled_now):
         nonlocal started, started_at, memory_lease, process_error, admission_queued_seconds
+        pacing = vars(args).pop("_rate_limit_retry", None)
+        if pacing:
+            active.update(state="queued", queue_reason="rate_limit", reason="waiting for model cooldown")
+            publish_contract(run_dir, active)
+            while not cancelled_now():
+                delay = (datetime.fromisoformat(pacing["until"].replace("Z", "+00:00")) - datetime.now(UTC)).total_seconds()
+                remaining = pacing["deadline"] - time.monotonic()
+                if delay <= 0 or remaining <= 0:
+                    break
+                time.sleep(min(0.1, delay, remaining))
+            args.timeout_seconds = min(args.timeout_seconds, pacing["deadline"] - time.monotonic())
+            if cancelled_now() or args.timeout_seconds < pacing_policy()["minimum_budget_seconds"]:
+                process_error = "cancelled" if cancelled_now() else "timeout"
+                return False
         waiting_since = time.monotonic()
         def waiting(reason):
             active["state"] = "queued"
@@ -2019,6 +2261,15 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
         active["timing"]["queued_seconds"] = args._queued_seconds
         started = time.monotonic()
         started_at = now()
+        if memory_lease is not None and pacing and active["mode"] == "worktree_write":
+            blocked = {**pacing["row"], "exit": 1, "pgid": None}
+            guard_writer_retry(blocked, pacing["writer_start"], active["cwd"])
+            if not blocked["retryable"]:
+                blocked.update(status="writer_changed", retryable=False, reason=blocked["fix"],
+                               evidence={"signature": "worktree_changed", "excerpt": blocked["fix"]})
+                args._pacing_blocked = blocked
+                memory_lease.close()
+                memory_lease = None
         if memory_lease is not None:
             active["state"] = "running"
             active.pop("queue_reason", None)
@@ -2027,7 +2278,7 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
             active["last_progress_at"] = started_at
             publish_contract(run_dir, active)
         return memory_lease is not None
-    if CF_DISPATCH == Path(__file__).with_name("cf_dispatch.sh"):
+    if CF_DISPATCH == Path(__file__).with_name("cf_dispatch.py"):
         owner_cancel=[False]
         def cancel_owner(_signal,_frame): owner_cancel[0]=True
         old_handlers={sig:signal.getsignal(sig) for sig in (signal.SIGTERM,signal.SIGHUP)}
@@ -2108,8 +2359,9 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
                         else:
                             plan["warnings"].append("all alias candidates cooling")
                             plan["cooldown_blocked"]=cooling
-                if args.context_ceiling is not None:
-                    context_usage.apply_ceiling(plan,args.context_ceiling,provider_exec.profile(plan["adapter"]).argv)
+                ceiling = args.context_ceiling if args.context_ceiling is not None else profile_knob(args, "context.ceiling_tokens")
+                if ceiling is not None:
+                    context_usage.apply_ceiling(plan,ceiling,provider_exec.profile(plan["adapter"]).argv)
                 if getattr(args,"resume_advice",None) and plan.get("resume_session"):
                     previous_row,advice_task=args.resume_advice
                     args.resume_warning=context_usage.resume_warning(previous_row,plan["adapter"],
@@ -2127,6 +2379,7 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
                     provider_started_at[0] = time.monotonic()
                     args._phase_timings["spawn"] = round((provider_started_at[0] - spawn_started) * 1000, 3)
                     active["pgid"]=child.pid
+                    active["pgid_started_at"]=process_info.start_time(child.pid)
                     _record_provider_process(run_dir,child)
                     write_owned(run_dir,attempt_dir/"pgid",str(child.pid)+"\n")
                     publish_contract(run_dir,active)
@@ -2139,15 +2392,21 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
                 def cancellation():
                     return owner_cancel[0] or cancellation_marker_present(run_dir,attempt_dir) or (batch_dir is not None and cancellation_marker_present(run_dir,batch_dir))
                 admitted = admit_attempt(active, cancellation)
+                plan["timeout_seconds"] = provider_timeout_seconds(args.timeout_seconds)
+                if plan["adapter"] == "agy" and admitted:
+                    plan["argv"] = provider_exec.profile("agy").argv(plan)
                 # Snapshot before launch: the timeout walk compares mtimes with this wall time.
                 writer_start = ((writer_worktree_state(plan["cwd"]), time.time())
                                 if admitted and plan["mode"] == "worktree_write" else None)
                 spawn_started = time.monotonic()
                 if not admitted:
                     plan["warnings"] = active["warnings"]
-                    process_error = process_error or "cancelled"
-                    adapter_record = {"status": "failed" if process_error == "memory_unavailable" else "cancelled",
-                                      "exit": 1, "warnings": active["warnings"]}
+                    adapter_record = vars(args).pop("_pacing_blocked", None)
+                    if adapter_record is None:
+                        process_error = process_error or "cancelled"
+                        adapter_record = {"status": "failed" if process_error == "memory_unavailable" else
+                                          "timed_out" if process_error == "timeout" else "cancelled",
+                                          "exit": 1, "warnings": active["warnings"]}
                 else:
                     plan["warnings"] = active["warnings"]
                     adapter_record=provider_exec.execute(plan,result_path,events_path=attempt_dir/"events.jsonl",stderr_path=stderr_path,
@@ -2178,7 +2437,7 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
                         adapter_record["error"]="continuation_unsupported"
                         adapter_record["fix"]="The provider no longer has this session; pass fresh: true to start a new session primed with its last result."
                         adapter_record["evidence"]["signature"]="continuation_unsupported"
-                    elif (previous["mode"]=="worktree_write" and previous["status"] in INCOMPLETE_TURN_STATUSES):
+                    elif (previous["mode"]=="worktree_write" and incomplete_provider_turn(previous)):
                         adapter_record["status"]="rejected"
                         adapter_record["fix"]="Review worktree changes, then dispatch a new run."
                         adapter_record["evidence"]["signature"]="resume_session_missing"
@@ -2207,7 +2466,8 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
                     adapter_record["provenance"]["notes"].append("resumed_by_relaunch")
                     adapter_record["warnings"].append("resume: relaunched")
                 if admitted and plan["mode"] == "worktree_write":
-                    guard_writer_startup_timeout(adapter_record, writer_start, plan["cwd"])
+                    guard_writer_retry(adapter_record, writer_start, plan["cwd"])
+                args._writer_start = writer_start
                 args._last_plan=plan
             else:
                 adapter_record=plan
@@ -2491,8 +2751,10 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
     record: dict[str, Any] = {
         "schema_version": 1,
         "record_type": "dispatch-attempt",
+        **attempt_scope(args, attempt_number),
         "usage_source": adapter.get("usage_source") or provider_exec.context_usage.usage_source(adapter.get("context") or {}),
         "error_class": provider_exec.error_class(status, (adapter.get("evidence") or {}).get("signature")),
+        **({"result_partial": True} if adapter.get("result_partial") else {}),
         **({"landable": False, "quarantine": adapter.get("quarantine")} if adapter_status == "quarantined" else {}),
         "run_id": run_dir.name,
         "task_id": args.task_id,
@@ -2627,7 +2889,7 @@ def close_mcp_run(run_dir: Path) -> None:
             receipt["resumable"]=any(row.get("status")=="input_required" for row in latest.values())
             statuses_by_task.update({task_id: canonical_success_status(row["status"])
                                      for task_id, row in latest.items()})
-        elif any(canonical_success_status(record.get("status")) not in {"ok", "quarantined", "failed", "blocked", "timed_out", "cancelled"} for record in records):
+        elif any(canonical_success_status(record.get("status")) not in {"ok", "quarantined", "failed", "blocked", "timed_out", "cancelled", "lost"} for record in records):
             return
         statuses = set(statuses_by_task.values())
         if not statuses:
@@ -2635,8 +2897,24 @@ def close_mcp_run(run_dir: Path) -> None:
         receipt.update(status="ok" if statuses == {"ok"} else "quarantined" if statuses <= {"ok", "quarantined"} else "cancelled" if statuses == {"cancelled"} else "input_required" if receipt.get("resumable") else "failed",
                        closed_at=now(), terminal_reason=None if statuses == {"ok"} else "MCP execution attempts are terminal")
         write_owned(run_dir, run_dir / "RUN_RECEIPT.json", json.dumps(receipt, indent=2) + "\n")
-    except (OSError, ValueError, OwnedFileError):
+    except (OSError, ValueError, TypeError, KeyError, AttributeError, OwnedFileError):
         pass
+
+
+def rate_limit_delay(previous, cooling, policy):
+    """A missing store must still pace; jitter never shortens a provider window."""
+    delay = None
+    if cooling:
+        try:
+            delay = max(0, (datetime.fromisoformat(cooling["cooling_until"].replace("Z", "+00:00"))
+                            - datetime.now(UTC)).total_seconds())
+        except (KeyError, TypeError, ValueError):
+            pass
+    if delay is None:
+        delay = previous.get("retry_after")
+        if not isinstance(delay, (int, float)) or not math.isfinite(delay) or delay <= 0:
+            delay = policy["base_delay_seconds"]
+    return delay + random.uniform(0, delay * policy["jitter_fraction"])
 
 
 def execute_attempt_sequence(args,custody=None):
@@ -2650,17 +2928,48 @@ def execute_attempt_sequence(args,custody=None):
     previous=getattr(args,"_last_row",None)
     plan=getattr(args,"_last_plan",None)
     if plan and previous and previous["retryable"] and not args.resume:
-        for candidate in exec_routing.candidates(plan,args.fallback,confidential=getattr(args,"confidential",False)):
-            remaining=sequence_budget-(time.monotonic()-sequence_start-getattr(args,"_queued_seconds",0.0))
-            if remaining<=0: break
-            args.timeout_seconds=remaining
-            if exec_routing.cooling(candidate["adapter"],candidate["model"]): continue
+        alternatives = iter(exec_routing.candidates(plan,args.fallback,confidential=getattr(args,"confidential",False)))
+        retried = set()
+        attempted = {(plan["adapter"], exec_routing.registered_model(plan["adapter"], plan["model"]))}
+        while previous and previous["retryable"]:
+            deadline = sequence_start + sequence_budget + getattr(args,"_queued_seconds",0.0)
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            current = getattr(args, "_last_plan", plan)
+            key = (current["adapter"], exec_routing.registered_model(current["adapter"], current["model"]))
+            cooling = exec_routing.cooling(*key)
+            policy = pacing_policy()
+            delay = rate_limit_delay(previous, cooling, policy)
+            pace = (previous["status"] == "rate_limited" and key not in retried
+                    and (previous.get("evidence") or {}).get("signature") != "cooldown_active"
+                    and delay + policy["minimum_budget_seconds"] <= remaining)
+            if pace:
+                args._rate_limit_task_class = previous.get("task_class", "")
+                retried.add(key)
+                candidate = {"adapter": current["adapter"], "model": current["model"], "effort": current.get("effort")}
+                args._rate_limit_retry = {"until": (datetime.now(UTC) + timedelta(seconds=delay)).isoformat(),
+                                          "deadline": deadline, "row": previous,
+                                          "writer_start": getattr(args, "_writer_start", None)}
+            else:
+                candidate = None
+                for item in alternatives:
+                    route = (item["adapter"], exec_routing.registered_model(item["adapter"], item["model"]))
+                    if route in attempted or exec_routing.cooling(*route):
+                        continue
+                    attempted.add(route)
+                    candidate = item
+                    break
+                if candidate is None:
+                    break
+                vars(args).pop("_rate_limit_task_class", None)
+            args.task_class = None
+            args.timeout_seconds = remaining
             args.fallback_from={"attempt":previous["attempt"],"status":previous["status"],"reset_at":previous.get("reset_at"),"route":previous["provenance"]["line"].split(" (",1)[0].removeprefix("Route: ")}
             args.tool=candidate["adapter"];args.model=candidate["model"];args.effort=candidate.get("effort")
-            args.alias=None;args.task_class=None;args.retry_of=f"attempt-{previous['attempt']:03d}"
+            args.alias=None;args.retry_of=f"attempt-{previous['attempt']:03d}"
             result=_dispatch(args,custody)
             previous=getattr(args,"_last_row",None)
-            if not previous or not previous["retryable"]: break
     return result
 
 
@@ -2676,6 +2985,11 @@ def cleanup_settled_reader(args) -> None:
 
 def dispatch(args: argparse.Namespace) -> int:
     """Run one attempt while serialising standalone run-ledger mutation."""
+    try:
+        export_knob_overrides(args)
+    except harness_profile.ProfileError as exc:
+        print(json.dumps({'status': 'rejected', 'error': 'invalid_knob', 'fix': str(exc)}))
+        return 1
     if os.environ.get('PROVENANT_HOST_LOCAL_ONLY') != '1':
         hosts = _fabric_hosts_owner()
         try:
@@ -2698,7 +3012,7 @@ def dispatch(args: argparse.Namespace) -> int:
                 'sandbox': args.sandbox, 'network': None if args.network is None else args.network == 'true',
                 'capabilities': args.capabilities, 'add_dirs': args.add_dirs,
                 'allow_secrets': args.allow_secrets, 'confidential': args.confidential,
-                'wait_seconds': 0,
+                'knobs': getattr(args, 'knobs', None) or None, 'wait_seconds': 0,
             }.items() if value is not None and value != []}
             if args.prompt_stdin:
                 request['prompt'] = sys.stdin.buffer.read().decode('utf-8')
@@ -2707,7 +3021,7 @@ def dispatch(args: argparse.Namespace) -> int:
             if args.resume:
                 request = {key: value for key, value in request.items() if key in {
                     'host', 'operation_id', 'resume', 'task_id', 'prompt', 'prompt_file',
-                    'context_ceiling', 'timeout_seconds', 'allow_secrets', 'wait_seconds'}}
+                    'context_ceiling', 'timeout_seconds', 'allow_secrets', 'wait_seconds', 'knobs'}}
                 if args.resume_attempt is not None:
                     request['resume_attempt'] = args.resume_attempt
                 if args.require_session:
@@ -2779,7 +3093,7 @@ def _fabric_hosts_owner():
 
 
 def parser() -> argparse.ArgumentParser:
-    root = argparse.ArgumentParser(description=__doc__)
+    root = BudgetArgumentParser(command_name="dispatch", description=__doc__)
     root.add_argument("--run-dir", type=Path, required=True)
     root.add_argument("--task-id")
     root.add_argument("--host")
@@ -2829,6 +3143,8 @@ def parser() -> argparse.ArgumentParser:
     root.add_argument("--resume-attempt", type=int, help="resume from this attempt instead of the latest")
     root.add_argument("--require-session", help="continue exactly this provider session; never relaunch a new one")
     root.add_argument("--context-ceiling", type=float, help="auto-compaction threshold in tokens, clamped to 100k-1M")
+    root.add_argument("--knob", dest="knobs", action="append", default=[], metavar="NAME=VALUE",
+                      help="harness-profile override for this dispatch; repeatable (provenant profile list)")
     root.add_argument("--sandbox", choices=("read-only","workspace-write","full"))
     root.add_argument("--network", choices=("true","false"))
     root.add_argument("--capabilities", type=provider_exec.parse_capabilities_argument)
@@ -2848,5 +3164,7 @@ def parser() -> argparse.ArgumentParser:
 if __name__ == "__main__":
     if sys.argv[1:] == ["--preflight-json"]:
         print(json.dumps(preflight_tasks(json.load(sys.stdin)["tasks"])))
+    elif sys.argv[1:] == ["--reap-attempts"]:
+        print(json.dumps([str(run) for run in json.load(sys.stdin) if reap_attempts(Path(run))]))
     else:
         raise SystemExit(dispatch(parser().parse_args()))

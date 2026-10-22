@@ -66,7 +66,7 @@ below.
 
 - Same model (or same family) verifying itself.
 - Pasting your full chain-of-thought to the "independent" verifier.
-- Letting a cheap scout veto the flagship.
+- Letting a cheap junior veto the principal.
 - Treating a single cross-family thumbs-up as proof on a high-stakes, non-objective claim.
 - Majority-voting hallucinations as equal to reasoning.
 

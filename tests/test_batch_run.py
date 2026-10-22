@@ -201,7 +201,7 @@ def task_manifest(tmp_path: Path, tasks: list[dict]) -> Path:
 def task(tmp_path: Path, task_id: str, **values: str) -> dict:
     prompt = tmp_path / f"{task_id}.md"
     prompt.write_text("\n".join(f"{key}={value}" for key, value in values.items()) + "\n", encoding="utf-8")
-    result = {'id': task_id, 'prompt_file': str(prompt), 'adapter': 'codex', 'alias': 'scout', 'role': 'worker'}
+    result = {'id': task_id, 'prompt_file': str(prompt), 'adapter': 'codex', 'alias': 'junior', 'role': 'worker'}
     for key in ('source_writing', 'non_overlapping', 'worktree_isolated', 'provider_family', 'access_mode', 'worktree'):
         if key in values:
             result[key] = values[key]
@@ -298,7 +298,7 @@ def test_current_routing_fixture_runs_real_dispatch_and_retains_partial_batch(tm
         prompts[task_id] = prompt
     manifest = task_manifest(tmp_path, [
         {'id': task_id, 'prompt_file': str(prompts[task_id]), 'adapter': f'fixture-{family}',
-         'alias': 'scout', 'role': 'worker'}
+         'alias': 'junior', 'role': 'worker'}
         for task_id, family, _status in task_specs
     ])
 
@@ -495,6 +495,11 @@ def test_real_full_chain_keeps_lifecycle_risk_separate_from_model_override(
 
 def test_real_dispatch_children_defer_manifest_race_and_preserve_route_identity(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
+    policy_dir = tmp_path / '.agents'
+    policy_dir.mkdir()
+    (policy_dir / 'fabric-policy.json').write_text(
+        json.dumps({'memory_floor_percent': {'read_only': 0}}), encoding='utf-8'
+    )
     run_dir = make_run(tmp_path, 'real-eight')
     bin_dir = tmp_path / 'bin'
     bin_dir.mkdir()
@@ -517,6 +522,9 @@ def test_real_dispatch_children_defer_manifest_race_and_preserve_route_identity(
     summary = json.loads((run_dir / 'dispatch/batches/batch-001/summary.json').read_text())
     assert {entry['status'] for entry in summary['tasks']} == {'ok'}
     assert all(entry['route']['provider_family'] for entry in summary['tasks'])
+    for entry in summary['tasks']:
+        row = json.loads((run_dir / f"tasks/{entry['task_id']}/attempt-001/attempt.json").read_text())
+        assert row['batch_id'] == summary['batch_id']
     lines = (run_dir / 'MANIFEST.md').read_text(encoding='utf-8').splitlines()
     assert sum('dispatch-' + f'task-{i}' in line for i in range(8) for line in lines) >= 8
     finalized = subprocess.run([str(FINALIZE), str(run_dir), '--status', 'failed',
@@ -571,7 +579,7 @@ def test_retained_non_success_attempt_allows_partial_route_and_question(tmp_path
         'attempt_id': 'attempt-001', 'attempt_path': attempt_rel,
         'status': 'timed_out', 'outcome': 'timeout',
         'question': question,
-        'requested_route': {'intent': 'ordinary', 'adapter': 'codex', 'alias': 'scout',
+        'requested_route': {'intent': 'ordinary', 'adapter': 'codex', 'alias': 'junior',
                             'task_class': '', 'role': 'worker', 'model': '',
                             'effort': '', 'orchestrator_family': ''},
         'route': {'adapter': 'codex'}, 'result': None,
@@ -593,13 +601,13 @@ def test_retained_non_success_attempt_allows_partial_route_and_question(tmp_path
     with pytest.raises(module.BatchInputError, match='child receipt'):
         module._validate_child_record(current, {**record, 'schema_version': 2}, run_dir, -15)
 
-    attempt['requested_route']['alias'] = 'flagship'
+    attempt['requested_route']['alias'] = 'principal'
     attempt_path.write_text(json.dumps(attempt, sort_keys=True) + '\n', encoding='utf-8')
     record['attempt_digest'] = module.digest(attempt_path)
     with pytest.raises(module.BatchInputError, match='selector'):
         module._validate_child_record(current, record, run_dir, -15)
 
-    attempt['requested_route']['alias'] = 'scout'
+    attempt['requested_route']['alias'] = 'junior'
     attempt['record_type'] = 'not-a-dispatch-attempt'
     attempt_path.write_text(json.dumps(attempt, sort_keys=True) + '\n', encoding='utf-8')
     record['attempt_digest'] = module.digest(attempt_path)
@@ -953,10 +961,10 @@ def test_retry_creates_new_attempt_without_replacing_attempt_one(tmp_path, monke
     prompt = tmp_path / 'retry.md'
     prompt.write_text('retry\n', encoding='utf-8')
     first_manifest = task_manifest(tmp_path, [{'id': 'retry', 'prompt_file': str(prompt),
-        'adapter': 'codex', 'alias': 'workhorse', 'role': 'worker'}])
+        'adapter': 'codex', 'alias': 'senior', 'role': 'worker'}])
     assert module.batch(args(module, run_dir, first_manifest, 1)) == 0, attempt_diagnostics(run_dir)
     second_manifest = task_manifest(tmp_path, [{'id': 'retry', 'prompt_file': str(prompt),
-        'adapter': 'codex', 'alias': 'workhorse', 'role': 'worker', 'retry_of': 'attempt-001'}])
+        'adapter': 'codex', 'alias': 'senior', 'role': 'worker', 'retry_of': 'attempt-001'}])
     assert module.batch(args(module, run_dir, second_manifest, 1)) == 0
     first = run_dir / 'dispatch/tasks/retry/attempt-001/attempt.json'
     second = run_dir / 'dispatch/tasks/retry/attempt-002/attempt.json'
@@ -1040,9 +1048,9 @@ def test_real_dispatch_child_propagates_worker_question_envelope(tmp_path, monke
 
 
 @pytest.mark.parametrize('bad_tasks', [
-    [{'id': 'same', 'prompt_file': 'a', 'adapter': 'codex', 'alias': 'scout', 'role': 'worker'},
-     {'id': 'same', 'prompt_file': 'b', 'adapter': 'gemini', 'alias': 'scout', 'role': 'worker'}],
-    [{'id': 'bad id', 'prompt_file': 'a', 'adapter': 'codex', 'alias': 'scout', 'role': 'worker'}],
+    [{'id': 'same', 'prompt_file': 'a', 'adapter': 'codex', 'alias': 'junior', 'role': 'worker'},
+     {'id': 'same', 'prompt_file': 'b', 'adapter': 'gemini', 'alias': 'junior', 'role': 'worker'}],
+    [{'id': 'bad id', 'prompt_file': 'a', 'adapter': 'codex', 'alias': 'junior', 'role': 'worker'}],
 ])
 def test_batch_rejects_duplicate_or_malformed_task_schema(tmp_path, bad_tasks):
     module = load_module()
@@ -1222,7 +1230,7 @@ def test_standalone_dispatch_is_blocked_by_batch_custody(tmp_path, monkeypatch):
         blocked = subprocess.run([
             str(BATCH.parent / 'dispatch_run.py'),
             '--run-dir', str(run_dir), '--task-id', 'blocked', '--adapter', 'codex',
-            '--prompt-file', str(prompt), '--alias', 'scout', '--role', 'worker',
+            '--prompt-file', str(prompt), '--alias', 'junior', '--role', 'worker',
         ], cwd=tmp_path, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         assert blocked.returncode == 2
         assert json.loads(blocked.stdout)['status'] == 'run_custody_busy'
@@ -1393,3 +1401,17 @@ def test_batch_rejects_invalid_fallback_before_launch(tmp_path, monkeypatch, fal
     mod = load_module()
     with pytest.raises(mod.BatchInputError, match='fallback'):
         mod.load_manifest(manifest)
+
+
+def test_batch_usage_error_is_one_line_and_exits_2():
+    result = subprocess.run([str(BATCH), "--run-dir", "/tmp", "--manifest", "/tmp/m.json", "--bad-arg"], capture_output=True, text=True)
+    assert result.returncode == 2
+    assert result.stdout == ""
+    assert result.stderr == "error: unrecognized arguments: --bad-arg; fix: provenant help batch\n"
+
+    missing = subprocess.run([str(BATCH)], capture_output=True, text=True)
+    assert missing.returncode == 2
+    assert missing.stdout == ""
+    assert missing.stderr.startswith("error: the following arguments are required: ")
+    assert "; fix: pass " in missing.stderr
+    assert len(missing.stderr.splitlines()) == 1

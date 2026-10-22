@@ -3,7 +3,7 @@
 **Status:** Accepted 2026-09-02 (issue [#772](https://github.com/mblauberg/provenant/issues/772))
 
 **Extends:** [ADR 0021](0021-configured-workspace-dispatch-boundaries.md), which
-makes `skills/orchestrate/scripts/cf_dispatch.sh` the sole owner of provider
+makes `skills/orchestrate/scripts/cf_dispatch.py` the sole owner of provider
 invocation.
 
 ## Context
@@ -30,7 +30,7 @@ Pass the provider inline. `--ignore-user-config` stays on every Codex route,
 ordinary and endpoint alike.
 
 When a dispatch names an endpoint profile whose `adapters` list includes
-`codex`, `cf_dispatch.sh` adds:
+`codex`, `cf_dispatch.py` adds:
 
 ```
 -c model_providers.provenant_endpoint.name=<profile name>
@@ -109,7 +109,7 @@ servers, plugins, hooks, execpolicy rules, memories and subagent settings, and
 so had less reach than a native Codex subagent. It now loads them, and the
 applied block of the receipt records `config: inherited` or `config: clean`.
 
-- `assurance` intent (the `cf_dispatch.sh` default), capability lanes (which run
+- `assurance` intent (the `cf_dispatch.py` default), capability lanes (which run
   under their own `CODEX_HOME`) and `CF_DISPATCH_CODEX_CONFIG=clean` keep
   `--ignore-user-config --ignore-rules` and `allow_login_shell=false`.
   `CF_DISPATCH_CODEX_CONFIG` accepts `clean` or `inherited`; any other value is

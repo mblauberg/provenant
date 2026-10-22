@@ -10,7 +10,14 @@ clean when the command in fact never ran, or ran on the wrong input.
   than splitting it on whitespace. The command runs once against the joined
   string instead of once per item, and nothing errors. Wrap loop or
   multi-value logic in an explicit `bash -c '...'`, use an array, or write out
-  each argument literally.
+  each argument literally. In zsh, `${=var}` forces the split, so
+  `for row in "a b c"; do sh x.sh $row; done` passes one argument but
+  `sh x.sh ${=row}` passes three.
+- **Quote heredoc delimiters (`<<'EOF'`) for every brief, comment or body.**
+  Briefs contain backticked commands, and an unquoted delimiter runs them: an
+  unquoted `python3 - <<EOF` once executed a `git fetch && git merge` embedded
+  in the text and fast-forwarded a primary checkout. Pass variables to the
+  interpreter as argv.
 - **An unquoted glob in a flag aborts the whole command.** `grep -rn PATTERN .
   --include=*.ts` lets zsh expand `--include=*.ts` before `grep` sees it; when
   nothing in the current directory matches that glob, zsh aborts the command
@@ -55,6 +62,13 @@ clean when the command in fact never ran, or ran on the wrong input.
   `kill -0 <pid>`; never poll with `pgrep -f`, whose pattern matches the
   waiting shell's own command line. Stopping a waiter can kill its process
   group, so launch the job from its own call, not from the waiter.
+- **Quote every heredoc delimiter.** `<<'EOF'` keeps the body literal; an
+  unquoted `<<EOF` expands `$(...)` and backticks inside the body, and once ran
+  a backticked `git` command that was only meant to be text in a commit message.
+- **Wait on a background PID with `kill -0`, never `pgrep -f`.** The pattern
+  matches the waiting shell's own command line, so the wait never ends.
+  Stopping a background task can kill its whole process group, including a
+  sibling you meant to keep; stop explicit PIDs with `provenant reap`.
 - **A wildcard git pathspec matches across slashes.** `apps/*/src/**` matches
   the whole path, not one segment; use `:(glob)apps/*/src/**` for glob
   semantics.

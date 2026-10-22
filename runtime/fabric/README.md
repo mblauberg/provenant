@@ -66,8 +66,8 @@ exposes retained task-state events. `lanes --wait` reports each terminal or
 input-required lane of the registered project, finished within the last day,
 once per seat, including lanes that finished between waits; named ids narrow it
 to those lanes, and a batch id to its tasks. `lanes --wait --all` holds the report
-until every listed lane is terminal or needs input, and `--timeout N` ends the
-wait with exit 124 naming the lanes still running (`--timeout 0` polls once; contention on the seen-cursor is bounded by it too, and unmarked lanes are reported again next wait). An unknown id fails the wait at once with the read error (exit 1) rather than being skipped. `lanes --project P` reads
+until every listed lane is terminal or needs input, `--summary` prints one bounded line per lane (at most 20, 160 characters each) at the end instead of as lanes land, and `--timeout N` ends the
+wait with exit 124 naming the lanes still running (`--timeout 0` polls once; contention on the seen-cursor is bounded by it too, and unmarked lanes are reported again next wait). An unknown id fails the wait at once with the read error (exit 1) rather than being skipped. `lanes` default output shows active lanes, lanes needing attention (such as quarantined or input-required), and the 5 most recent terminal ones, then `N more; use --all`; `lanes --json` without `--all` caps at 20 rows with `omitted`/`omitted_hint`; `--all` lists all lanes. `lanes --project P` reads
 another project; an empty listing says which project the cwd resolved to.
 The next dispatch reaps a run only when its host is gone and its owner or
 provider still runs: an owner that exited and left its provider behind, or a
@@ -257,15 +257,17 @@ quarantines the change: it archives the lane's files to `<attempt>/protected.pat
 they differ), commits the start or integration-branch version back to the lane,
 returns the index and files to their starting content. A successful provider
 then finishes `quarantined` only when the restore was verified: its result
-stays visible, `landable: false` is an advisory marker for the chair (not
-enforced landing), and status/digest/lanes name the reason and patches for chair
-review.
+stays visible, `landable: false` marks it, and status/digest/lanes name the
+reason and patches for chair review. Writers can move only their own branch
+ref, and `landing-push` refuses any commit since the leased remote SHA that
+changes `.agents/` without an [audited chair release](../../docs/specs/fabric-v2.md)
+of the reviewed tip.
 `.agents/fabric-policy.json` `instruction_changes` may instead be `allow` (keep
 an ordinary edit, with a warning) or `deny` (retain the edit for review without
 restoration). Denied edits, failed restoration and unverifiable checks leave
 edits on the lane, so the lane ends `failed` (fix: restore `.agents/` to the
 start commit before landing) with its output and patches retained and listed;
-incomplete or interrupted providers keep their failure outcomes.
+signal-killed providers stay `failed` without a terminal result or `interrupted` after one; explicit cancellations stay `cancelled`.
 `protected.patch` may be empty for an index-only edit or carry
 an unavailable-diff comment for unsafe states, with `quarantine.patch_error`
 explaining capture failure. Spared processes alone do not prove instruction
@@ -621,6 +623,32 @@ command waits at most two minutes for Git; its persisted hold lasts another
 thirty seconds. A push orphaned by a crash is fenced by the remote SHA, not by
 the hold. If the push succeeds but release fails, it reports `pushed` with a
 `release_warning`. Renew or release an aborted lease as appropriate.
+`landing-push --remote R` pushes to a remote other than `origin`. With
+`--json`, Git and hook output go to stderr, so stdout holds only the result.
+
+Scripts use the same lease from a shell, without an MCP connection:
+
+```sh
+fabric landing-acquire <session> (--expected-sha SHA | --branch B [--remote R]) [--seconds N]
+fabric landing-verify <session> <generation> [--expected-sha SHA] [--branch B [--remote R]]
+fabric landing-release <session> <generation>
+fabric landing-status
+```
+
+Each takes `--label L` and `--json`. Acquire returns `holder`, `label`,
+`session`, `generation`, `expected_sha`, `expires_at` (ISO 8601 UTC) and
+`taken_over_from` after a takeover. Pass its `label` to later calls. Verify
+returns `valid` and, when false, `reason`: `stale`, `sha_mismatch` (the given
+SHA) or `sha_moved` (the remote tip from `git ls-remote`). Release never
+touches another holder's lease. It returns `released: true`, or
+`released: false` with `reason` `expired`, `not_held` or `pushing`. Status
+returns `lease: null` or the live lease. Exit codes are 0 for ok (including an
+unreleased `expired` or `not_held`), 1 for refused or stale, 2 for usage and 3
+for held by another holder or a push in progress. A store that cannot be
+opened exits non-zero with nothing on stdout. `provenant lease <verb>` maps
+onto these commands; the [landing lease
+runbook](../../docs/runbooks/landing-lease.md) shows a repository script's
+calls.
 
 ## Run storage and boundaries
 
@@ -633,7 +661,14 @@ writable. Readers discover only current timestamped runs in the shared
 `.agent-run/runs` directory.
 
 Dispatch-time maintenance scans the shared run directory. It closes active receipts
-older than 48 hours with no observed live owner as `interrupted`. Retention is
+older than 48 hours with no observed live owner as `interrupted`.
+Fabric startup and status reads also finalise running attempts as `lost` when
+their process group is gone or its recorded OS start time (`pgid_started_at`)
+differs. Legacy attempts without that identity need both a dead group and
+`last_progress_at` older than 48 hours. The finaliser takes the writer's custody
+lock and leaves live owners alone; status checks only the runs selected for
+the response. Lost attempts retain their end time and liveness evidence and
+count as provider errors in telemetry. Retention is
 seven days for successful/cancelled runs and fourteen days for failures
 (`AGENT_FABRIC_RUN_RETENTION_HOURS` overrides). Live runs,
 `KEEP`, active receipts and delivery `RUN.json` files are preserved; unknown new
