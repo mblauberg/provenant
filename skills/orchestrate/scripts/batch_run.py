@@ -642,9 +642,15 @@ def _run_task(task: dict[str, Any], run_dir: Path, batch_dir: Path) -> dict[str,
     started = time.monotonic()
     timed_out = False
     try:
+        # Children prove membership with the token this batch published, whatever the caller's env held.
+        try:
+            token = run_lineage.owner_token(run_dir)
+        except (OSError, OwnedFileError):
+            token = None
+        environment = {**os.environ, **({"PROVENANT_RUN_DIR": str(run_dir), "PROVENANT_RUN_TOKEN": token} if token else {})}
         process = subprocess.Popen(_command(dispatch_task, run_dir), cwd=Path.cwd(), text=True,
                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                   start_new_session=True)
+                                   start_new_session=True, env=environment)
         with _state_lock:
             _active_processes[task_id] = process
         queued_seconds = 0.0

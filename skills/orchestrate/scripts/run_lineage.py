@@ -155,7 +155,7 @@ def ensure_nested_owner(run_dir, kind, *, batch_child=False):
     if parent_attempt() is None:
         return
     run_dir = Path(run_dir).resolve()
-    if os.environ.get("PROVENANT_RUN_DIR") == str(run_dir) and os.environ.get("PROVENANT_RUN_TOKEN"):
+    if _same_run(os.environ.get("PROVENANT_RUN_DIR"), run_dir) and os.environ.get("PROVENANT_RUN_TOKEN"):
         inherited = os.environ.pop(CUSTODY_ENV, None)
         if inherited is not None:
             fd = int(inherited)
@@ -221,11 +221,16 @@ def acquire_owner_custody(run_dir):
     return stream
 
 
+def _same_run(environment_dir, run_dir):
+    # Spellings such as /var and /private/var name one run.
+    return bool(environment_dir) and Path(environment_dir).resolve() == Path(run_dir).resolve()
+
+
 def record_owner(run_dir, kind="dispatch"):
     """Publish a direct CLI's identity only after acquiring its run custody."""
     record = json.loads(os.environ.get("PROVENANT_RUN_OWNER", "null"))
     if (isinstance(record, dict) and record.get("owner_pid") == os.getpid()
-            and os.environ.get("PROVENANT_RUN_DIR") == str(run_dir)
+            and _same_run(os.environ.get("PROVENANT_RUN_DIR"), run_dir)
             and record.get("run_dir") == str(run_dir)
             and record.get("run_token") == os.environ.get("PROVENANT_RUN_TOKEN")):
         _write(run_dir, "dispatch-owner.json", record)
@@ -233,7 +238,7 @@ def record_owner(run_dir, kind="dispatch"):
         # Custody authorises this owner to replace a previous owner's identity.
         # Keep the initial token inherited by the children this batch launches.
         token = (os.environ.get("PROVENANT_RUN_TOKEN")
-                 if os.environ.get("PROVENANT_RUN_DIR") == str(run_dir) else None) or uuid.uuid4().hex
+                 if _same_run(os.environ.get("PROVENANT_RUN_DIR"), run_dir) else None) or uuid.uuid4().hex
         _write(run_dir, "dispatch-owner.json", {
             "schema_version": 1, "kind": kind, "run_dir": str(run_dir), "run_token": token,
             "owner_pid": os.getpid(), "owner_pgid": os.getpgrp(),
