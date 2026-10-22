@@ -35,7 +35,7 @@ import fabric_policy
 import layout
 import context_usage
 import process_info
-from trusted_git import owner_location, writer_git_writes, writer_read_only
+from trusted_git import owner_location, prepare_writer_ref, writer_git_writes, writer_read_only
 
 
 # Home-relative paths a confined provider needs for its own state and sign-in.
@@ -1203,6 +1203,8 @@ def build_plan(
         git_private, git_common = location.private, location.common
         metadata["trusted_git"] = location.record()
         metadata["lane_ref"] = location.writer_ref()
+        if metadata["lane_ref"]:
+            prepare_writer_ref(git_common, metadata["lane_ref"])
         git_dirs, git_files = writer_git_writes(git_private, git_common, metadata["lane_ref"])
         git_writes = [str(path) for path in (*git_dirs, *git_files)]
     guarded = check_protected_inputs(route, workspace_root, cwd, worktree=worktree,

@@ -2720,17 +2720,24 @@ def test_a_linked_git_entry_never_moves_the_writable_git_grant(monkeypatch, tmp_
     common = Path(git(lane, "rev-parse", "--path-format=absolute", "--git-common-dir").strip()).resolve()
     outside = (tmp_path / "outside").resolve()
     outside.mkdir()
+    run_dir = tmp_path / "runs/task/attempt-001"
+    run_dir.mkdir(parents=True)
+
+    def plan_lane():
+        return mod.build_plan(
+            "codex", {}, "hello", workspace_root=tmp_path, mode="worktree_write",
+            worktree=lane, sandbox="workspace-write", network=True,
+            capabilities=["postgres"], run_dir=run_dir,
+        )
+
+    plan = plan_lane()
     shutil.rmtree(common / "logs", ignore_errors=True)
     (common / "logs").symlink_to(outside, target_is_directory=True)
     (common / "packed-refs").unlink(missing_ok=True)
     (common / "packed-refs").symlink_to(outside / "packed")
-    run_dir = tmp_path / "runs/task/attempt-001"
-    run_dir.mkdir(parents=True)
-    plan = mod.build_plan(
-        "codex", {}, "hello", workspace_root=tmp_path, mode="worktree_write",
-        worktree=lane, sandbox="workspace-write", network=True,
-        capabilities=["postgres"], run_dir=run_dir,
-    )
+    # Planning never creates the writer's ref directories through a link.
+    with pytest.raises(ValueError, match="is a link"):
+        plan_lane()
     profile = mod.os_confinement_profile(plan)
     assert str(outside) not in profile
     assert f'(literal "{common / "logs/refs/heads/lane"}")' in profile
@@ -7541,6 +7548,35 @@ def test_a_writer_cannot_take_a_branch_another_checkout_holds(tmp_path):
     plan = supervisor().build_plan("claude", {}, "hello", workspace_root=tmp_path, mode="worktree_write", worktree=lane)
     assert plan["lane_ref"] is None
     assert not any("/refs/" in path for path in plan["applied"]["write_boundary"]["writable_paths"])
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="sandbox-exec is macOS-only")
+@pytest.mark.parametrize("missing", ["packed-ref", "reflog"])
+def test_a_sandboxed_writer_commits_on_a_nested_branch_without_its_ref_directories(tmp_path, missing):
+    mod = supervisor()
+    sandbox_exec = mod._sandbox_exec_path()
+    if not sandbox_exec:
+        pytest.skip("sandbox-exec is unavailable or disabled")
+    repo, lane = instruction_lane(tmp_path)
+    git(lane, "switch", "-q", "-c", "fix/nested")
+    common = repo.resolve() / ".git"
+    if missing == "packed-ref":
+        git(repo, "pack-refs", "--all")
+        assert not (common / "refs/heads/fix").exists()
+    shutil.rmtree(common / "logs/refs/heads/fix")
+    plan = mod.build_plan("claude", {}, "hello", workspace_root=tmp_path, mode="worktree_write", worktree=lane)
+    assert plan["lane_ref"] == "refs/heads/fix/nested"
+    profile = mod.os_confinement_profile(plan)
+    fixture = " ".join(shlex.quote(arg) for arg in GIT_FIXTURE)
+    script = (f"echo more >> app.txt && git {fixture} commit -q -am more"
+              f" && git {fixture} merge -q --no-ff --no-edit main")
+    run = subprocess.run([sandbox_exec, "-p", profile, "/bin/sh", "-c", script], capture_output=True,
+                         text=True, cwd=lane)
+    if run.returncode and "sandbox_apply" in run.stderr:
+        pytest.skip("sandbox_apply is refused in this test environment")
+    assert run.returncode == 0, run.stderr
+    assert head_of(repo, "fix/nested") == head_of(lane)
+    assert (common / "logs/refs/heads/fix/nested").is_file()
 
 
 @pytest.mark.skipif(sys.platform != "darwin", reason="sandbox-exec is macOS-only")

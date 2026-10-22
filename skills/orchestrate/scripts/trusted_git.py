@@ -26,6 +26,20 @@ def writer_git_writes(private, common, ref):
     return [private, common / "objects"], files
 
 
+def prepare_writer_ref(common, ref):
+    """Create the ref and reflog parents that a writer's file-only grants cannot create.
+
+    Only the owner writes these directories, so a link among them was planted outside the boundary.
+    """
+    for parent in ((common / ref).parent, (common / "logs" / ref).parent):
+        path = common
+        for part in parent.relative_to(common).parts:
+            path = path / part
+            if path.is_symlink():
+                raise ValueError(f"writer ref directory {path} is a link")
+            path.mkdir(exist_ok=True)
+
+
 @dataclass(frozen=True)
 class GitLocation:
     worktree: Path
