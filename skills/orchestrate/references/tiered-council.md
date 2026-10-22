@@ -14,9 +14,10 @@ pool, so a dispatch names its tier directly. The live roster is
 | Principal | `principal` | critical decisions, high-level judgement, consensus |
 
 The same three names work as an adapter alias (`alias: "senior"`) for that
-adapter's own model of the tier. Old names still resolve: `bulk`, `scout`,
-`mechanical`, `lens` and `research` mean `junior`; `workhorse`, `strong`,
-`review` and `implementation` mean `senior`; `flagship` means `principal`. A
+adapter's own model of the tier. Task-class names resolve: `mechanical`, `lens`
+and `research` mean `junior`; `implementation` means `senior`. The retired names
+`scout`, `bulk`, `workhorse`, `strong`, `review` and `flagship` are rejected,
+naming their replacement. A
 Claude chair runs its own Claude members as native subagents: a pool hands them
 back with a spawn line ([routing-and-tiers.md](routing-and-tiers.md)).
 

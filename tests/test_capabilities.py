@@ -50,7 +50,7 @@ def fake_codex(tmp_path, *, stderr="", catalogue=None):
     )
 
 
-def fake_agy(tmp_path, *, stderr="", listing="gemini-3.1-pro-high\ngemini-3.1-pro-low\n"):
+def fake_agy(tmp_path, *, stderr="", listing="gemini-3.8-flash-high\ngemini-3.8-flash-medium\ngemini-3.8-flash-low\n"):
     return write_executable(
         tmp_path / "agy",
         "#!/usr/bin/env python3\n"
@@ -105,10 +105,10 @@ PROVIDERS = [
         fake_agy,
         [],
         {
-            "gemini-3.1-pro": {
-                "resolved_model": "gemini-3.1-pro",
-                "supported_efforts": ["low", "high"],
-                "dispatchable_ids": ["gemini-3.1-pro-high", "gemini-3.1-pro-low"],
+            "gemini-3.8-flash": {
+                "resolved_model": "gemini-3.8-flash",
+                "supported_efforts": ["low", "medium", "high"],
+                "dispatchable_ids": ["gemini-3.8-flash-high", "gemini-3.8-flash-low", "gemini-3.8-flash-medium"],
             }
         },
         "agy models",

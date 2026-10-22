@@ -628,7 +628,7 @@ def test_cache_read_share_counts_only_rows_with_every_input_field(tmp_path):
 
 
 def test_outcomes_group_route_quality_with_retries_errors_latency_and_throughput(tmp_path):
-    common = {'task_class': 'review', 'requested_route': {'alias': 'workhorse', 'task_class': 'review'},
+    common = {'task_class': 'review', 'requested_route': {'alias': 'senior', 'task_class': 'review'},
               'provenance': route('codex', 'gpt-6.1-sol', 'high'), 'started_at': '2026-10-21T01:00:00Z'}
     receipt(tmp_path, 'one', 1, **common, status='failed', error_class='provider_timeout',
             ended_at='2026-10-21T01:00:30Z', timing={'phases': {'provider': 30000}})
@@ -640,7 +640,7 @@ def test_outcomes_group_route_quality_with_retries_errors_latency_and_throughput
     report = json.loads(cli(tmp_path, 'stats', '--json').stdout)
     assert report['outcomes'] == [{
         'adapter': 'codex', 'model': 'gpt-6.1-sol', 'effort': 'high', 'task_class': 'review',
-        'route': 'workhorse', 'lanes': 2, 'succeeded': 2, 'success_rate': 1.0, 'attempts': 3,
+        'route': 'senior', 'lanes': 2, 'succeeded': 2, 'success_rate': 1.0, 'attempts': 3,
         'retries': 1, 'error_classes': {'provider_timeout': 1},
         'latency_samples': 3, 'latency_p50_s': 20.0, 'latency_p90_s': 30.0, 'output_tokens_per_s': 7.5}]
     table = cli(tmp_path, 'stats').stdout

@@ -93,7 +93,7 @@ def test_output_install_replaces_symlink_without_overwriting_target():
         result = subprocess.run(
             [str(SCRIPT), "--intent", "ordinary", "--tool", "codex",
              "--prompt-file", str(prompt), "--out", str(out),
-             "--alias", "workhorse", "--role", "worker"],
+             "--alias", "senior", "--role", "worker"],
             cwd=root, env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         )
 
@@ -136,7 +136,7 @@ def test_directory_symlink_output_is_rejected_without_escaping():
             [
                 str(SCRIPT), "--intent", "ordinary", "--tool", "codex",
                 "--prompt-file", str(prompt), "--out", str(out),
-                "--alias", "workhorse", "--role", "worker",
+                "--alias", "senior", "--role", "worker",
             ],
             cwd=root, env=env, text=True,
             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -181,7 +181,7 @@ def test_symlinked_output_parent_is_rejected_without_escaping():
             [
                 str(SCRIPT), "--intent", "ordinary", "--tool", "codex",
                 "--prompt-file", str(prompt), "--out", str(out),
-                "--alias", "workhorse", "--role", "worker",
+                "--alias", "senior", "--role", "worker",
             ],
             cwd=root, env=env, text=True,
             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -249,7 +249,7 @@ def test_output_parent_swap_cannot_certify_an_identical_outside_file():
                 str(SCRIPT), "--intent", "assurance", "--tool", "codex",
                 "--orchestrator-family", "anthropic",
                 "--prompt-file", str(prompt), "--out", str(out),
-                "--alias", "workhorse", "--role", "worker",
+                "--alias", "senior", "--role", "worker",
             ],
             cwd=root, env=env, text=True,
             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -356,7 +356,7 @@ def test_non_ok_routing_record_never_launches_provider_even_with_zero_exit():
             stub,
             provenant_stub="""\
                 #!/usr/bin/env bash
-                printf '%s\n' '{"status":"adapter_disabled","reason":"configured off","adapter_enabled":false,"resolved_model":"opus","model_family":"anthropic","endpoint_provider":"disabled","identity_source":"runtime-configuration","alias":"workhorse"}'
+                printf '%s\n' '{"status":"adapter_disabled","reason":"configured off","adapter_enabled":false,"resolved_model":"opus","model_family":"anthropic","endpoint_provider":"disabled","identity_source":"runtime-configuration","alias":"senior"}'
                 exit 0
             """,
         )
@@ -375,7 +375,7 @@ def test_ok_routing_record_requires_complete_execution_identity():
         "model_family": "anthropic",
         "endpoint_provider": "anthropic",
         "identity_source": "runtime-configuration",
-        "alias": "workhorse",
+        "alias": "senior",
     }
     with tempfile.TemporaryDirectory() as td:
         root = Path(td)
@@ -424,7 +424,7 @@ def test_claude_other_primary_uses_sonnet_without_implicit_fable_route():
     assert result.returncode == 0, result.output
     assert record["resolved_model"] == "sonnet"
     assert record["requested_model"] == "sonnet"
-    # The role `other-primary` takes the workhorse default; Opus remains an
+    # The role `other-primary` takes the senior default; Opus remains an
     # admissible fallback, while Fable is never reached implicitly.
     assert record["fallback_model"] == "opus"
     assert record["identity_source"] == "dated-catalog"
@@ -493,7 +493,7 @@ def test_task_class_route_accepts_lifecycle_risk_without_model_override():
         record = json.loads(result.stdout)
         assert result.returncode == 0, result.stderr + result.stdout
         assert record["status"] == "ok"
-        assert record["route_alias"] == "scout"
+        assert record["route_alias"] == "junior"
         assert record["risk_tier"] == "routine"
         assert record["model_override_tier"] == ""
         assert out.read_text(encoding="utf-8") == "TASK RISK OK\n"
@@ -768,7 +768,7 @@ def test_agy_task_class_uses_its_runtime_capability_producer():
         record = json.loads(result.stdout)
         assert result.returncode == 0, result.stderr + result.stdout
         assert record["status"] == "ok"
-        assert record["route_alias"] == "scout"
+        assert record["route_alias"] == "junior"
         assert record["resolved_model"] == "gemini-3.8-flash"
         assert record["provider_family"] == "google"
         assert record["effort"] == "low"
@@ -855,7 +855,7 @@ def test_claude_task_class_runs_the_subscription_capability_canary():
         record = json.loads(result.stdout)
         assert result.returncode == 0, result.stderr + result.stdout
         assert record["status"] == "ok"
-        assert record["route_alias"] == "flagship"
+        assert record["route_alias"] == "principal"
         assert record["resolved_model"] == "claude-opus-5-5"
         assert record["provider_family"] == "anthropic"
         assert record["effort"] == "high"
@@ -928,7 +928,7 @@ def test_agy_success_with_empty_response_is_non_passing():
         result = subprocess.run(
             [
                 str(SCRIPT), "--tool", "agy",
-                "--model", "gemini-3.1-pro-high",
+                "--model", "gemini-3.8-flash-high",
                 "--orchestrator-family", "codex",
                 "--out", str(out), "--prompt", "Reply",
             ],
@@ -1179,7 +1179,7 @@ def test_disabled_execution_routes_keep_configured_reason_and_never_launch_provi
             result = subprocess.run(
                 [
                     str(SCRIPT), "--intent", "ordinary", "--tool", tool,
-                    "--model", model, "--alias", "scout", "--role", "worker",
+                    "--model", model, "--alias", "junior", "--role", "worker",
                     "--prompt", "Review", "--out", str(out),
                 ],
                 cwd=tmp, env=env, text=True,
@@ -1221,7 +1221,7 @@ def test_disabled_capability_adapters_are_rejected_before_their_probe_runs():
             result = subprocess.run(
                 [
                     str(SCRIPT), "--intent", "ordinary", "--tool", tool,
-                    "--model", model, "--alias", "workhorse", "--role", "worker",
+                    "--model", model, "--alias", "senior", "--role", "worker",
                     "--prompt", "Review", "--out", str(out),
                 ],
                 cwd=tmp, env=env, text=True,
@@ -1261,7 +1261,7 @@ def test_prompt_file_trailing_newlines_reach_stdin_adapter_byte_for_byte():
         result = subprocess.run(
             [
                 str(SCRIPT), "--no-preface", "--intent", "ordinary", "--tool", "codex",
-                "--orchestrator-family", "anthropic", "--alias", "workhorse",
+                "--orchestrator-family", "anthropic", "--alias", "senior",
                 "--role", "worker", "--prompt-file", str(prompt), "--out", str(out),
             ],
             cwd=tmp, env=env, text=True,
@@ -1410,7 +1410,7 @@ def test_agy_failure_preserves_the_provider_reason_in_the_output():
         result = subprocess.run(
             [
                 str(SCRIPT), "--tool", "agy",
-                "--model", "gemini-3.1-pro-high",
+                "--model", "gemini-3.8-flash-high",
                 "--orchestrator-family", "codex",
                 "--out", str(out), "--prompt", "Reply",
             ],
@@ -1449,7 +1449,7 @@ def test_agy_failure_with_null_error_uses_generic_reason_and_never_publishes_res
         result = subprocess.run(
             [
                 str(SCRIPT), "--tool", "agy",
-                "--model", "gemini-3.1-pro-high",
+                "--model", "gemini-3.8-flash-high",
                 "--orchestrator-family", "codex",
                 "--out", str(out), "--prompt", "Reply",
             ],
@@ -1490,7 +1490,7 @@ def test_agy_permission_denial_overrides_false_success_envelope():
         result = subprocess.run(
             [
                 str(SCRIPT), "--tool", "agy",
-                "--model", "gemini-3.1-pro-high",
+                "--model", "gemini-3.8-flash-high",
                 "--orchestrator-family", "codex",
                 "--out", str(out), "--prompt", "Reply",
             ],
@@ -1617,11 +1617,11 @@ def test_task_class_route_preserves_effective_alias():
         role="worker",
         extra_args=["--intent", "ordinary", "--task-class", "mechanical"],
         provenant_stub="""#!/usr/bin/env bash
-            printf '{\"status\":\"ok\",\"alias\":\"scout\",\"resolved_model\":\"haiku\",\"model_family\":\"anthropic\",\"endpoint_provider\":\"anthropic\",\"identity_source\":\"test\"}\n'
+            printf '{\"status\":\"ok\",\"alias\":\"junior\",\"resolved_model\":\"haiku\",\"model_family\":\"anthropic\",\"endpoint_provider\":\"anthropic\",\"identity_source\":\"test\"}\n'
         """,
     )
     assert result.returncode == 0, result.output
-    assert record["route_alias"] == "scout"
+    assert record["route_alias"] == "junior"
 
 
 def test_route_json_fields_are_read_by_key_without_delimiter_shifting():
@@ -1639,7 +1639,7 @@ def test_route_json_fields_are_read_by_key_without_delimiter_shifting():
         stub,
         extra_args=["--intent", "ordinary"],
         provenant_stub="""#!/usr/bin/env bash
-            printf '%s\n' '{"status":"ok","alias":"flagship","resolved_model":"opus|candidate","model_family":"anthropic","endpoint_provider":"anthropic","identity_source":"test-route","requested_effort":"high","effort":"high","effort_source":"test","effort_capability_source":"test-capability"}'
+            printf '%s\n' '{"status":"ok","alias":"principal","resolved_model":"opus|candidate","model_family":"anthropic","endpoint_provider":"anthropic","identity_source":"test-route","requested_effort":"high","effort":"high","effort_source":"test","effort_capability_source":"test-capability"}'
         """,
     )
 
@@ -1865,10 +1865,10 @@ def test_resolved_role_effort_reaches_codex_adapter_and_receipt():
         assert "model_reasoning_effort=xhigh" not in args
 
 
-def test_bare_codex_dispatch_defaults_to_workhorse_not_flagship():
-    """A dispatch naming no alias, role or model must not land on the flagship.
+def test_bare_codex_dispatch_defaults_to_senior_not_principal():
+    """A dispatch naming no alias, role or model must not land on the principal.
 
-    The default alias used to be flagship unconditionally, so an ordinary dispatch
+    The default alias used to be principal unconditionally, so an ordinary dispatch
     silently ran on the most expensive model in the family.
     """
     with tempfile.TemporaryDirectory() as td:
@@ -1910,7 +1910,7 @@ def test_bare_codex_dispatch_defaults_to_workhorse_not_flagship():
         )
         record = json.loads(result.stdout)
         assert result.returncode == 0, json.dumps(record, sort_keys=True)
-        assert record["route_alias"] == "workhorse"
+        assert record["route_alias"] == "senior"
         assert record["resolved_model"] == "gpt-6.1-sol"
         args = args_file.read_text(encoding="utf-8").splitlines()
         assert "gpt-6.1-sol" in args
@@ -1919,8 +1919,8 @@ def test_bare_codex_dispatch_defaults_to_workhorse_not_flagship():
         assert 'service_tier="default"' in args
 
 
-def test_critical_review_role_still_defaults_to_flagship():
-    """The alias follows the role, so a critical review still reaches the flagship."""
+def test_critical_review_role_still_defaults_to_principal():
+    """The alias follows the role, so a critical review still reaches the principal."""
     with tempfile.TemporaryDirectory() as td:
         tmp = Path(td)
         bin_dir = tmp / "bin"
@@ -1962,7 +1962,7 @@ def test_critical_review_role_still_defaults_to_flagship():
         )
         record = json.loads(result.stdout)
         assert result.returncode == 0, result.stderr
-        assert record["route_alias"] == "flagship"
+        assert record["route_alias"] == "principal"
         assert record["resolved_model"] == "gpt-6-astra"
 
 
@@ -2814,7 +2814,7 @@ def test_openrouter_anthropic_endpoint_reaches_claude_with_blank_api_key():
         extra_args=[
             "--intent", "ordinary",
             "--model", "stealth/union-alpha",
-            "--alias", "scout",
+            "--alias", "junior",
         ],
         extra_env={
             "CF_DISPATCH_ENDPOINT": "openrouter-anthropic",
@@ -2841,7 +2841,7 @@ def test_openrouter_kimi_attributes_moonshot_for_ordinary_dispatch():
         extra_args=[
             "--intent", "ordinary",
             "--model", "moonshotai/kimi-k3",
-            "--alias", "scout",
+            "--alias", "junior",
         ],
         extra_env={
             "CF_DISPATCH_ENDPOINT": "openrouter-anthropic",
@@ -3093,7 +3093,7 @@ def test_opencode_arm_runs_with_explicit_model_and_reports_unsupported_variant()
         result = subprocess.run(
             [
                 str(SCRIPT), "--intent", "ordinary", "--tool", "opencode",
-                "--model", "opencode/union-alpha", "--alias", "scout",
+                "--model", "opencode/union-alpha", "--alias", "junior",
                 "--role", "worker", "--effort", "high",
                 "--prompt", "Reply with pong only.", "--out", str(out),
             ],
@@ -3581,7 +3581,7 @@ else:
             if args_file.exists():
                 args_file.unlink()
             result = subprocess.run([
-                str(SCRIPT), "--intent", intent, "--tool", "agy", "--alias", "scout",
+                str(SCRIPT), "--intent", intent, "--tool", "agy", "--alias", "junior",
                 "--orchestrator-family", "openai", "--out", str(tmp / f"out-{index}"),
                 "--prompt-file", str(prompt_file),
             ], cwd=tmp, env=env, text=True, capture_output=True)

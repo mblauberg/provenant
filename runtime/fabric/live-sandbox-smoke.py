@@ -23,8 +23,8 @@ BRANCH = "test/fabric-live-smoke"
 # deny the protected path, and one that needs no paid plan. Kiro's unresolved training flag
 # denies it too; the other routes are non-training and keep their usual read access.
 ROUTES = (
-    ("codex", "codex", ("--alias", "workhorse")),
-    ("claude", "claude", ("--alias", "workhorse")),
+    ("codex", "codex", ("--alias", "senior")),
+    ("claude", "claude", ("--alias", "senior")),
     # An explicit model runs even while a stale alias cooldown would skip it.
     ("agy", "agy", ("--model", "gemini-3.8-flash")),
     ("cursor", "cursor-agent", ("--model", "auto")),

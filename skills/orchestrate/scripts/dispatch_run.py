@@ -1127,7 +1127,7 @@ def fast_fabric_plan(args, prompt_path: Path, result_path: Path, workspace: Path
             with redirect_stdout(io.StringIO()) as output:
                 spec.loader.exec_module(module)
                 argv = ["resolve", "--adapter", args.tool, "--role", args.role,
-                        "--lead-family", "", "--alias", "flagship", f"--model={args.model}"]
+                        "--lead-family", "", "--alias", "principal", f"--model={args.model}"]
                 if args.effort:
                     argv += ["--effort", args.effort]
                 if args.fallback is not None:
@@ -1426,7 +1426,7 @@ def routing_environment() -> dict[str, str]:
     return env
 
 
-EFFORT_RANK = {"low": 0, "medium": 1, "high": 2, "xhigh": 3, "max": 4, "ultra": 5}
+EFFORT_RANK = {"low": 0, "medium": 1, "high": 2, "xhigh": 3, "ultra": 4}
 
 
 def effort_retry_plan(plan: dict[str, Any], adapter_record: dict[str, Any]) -> dict[str, Any] | None:
@@ -1553,7 +1553,7 @@ def preflight_tasks(tasks: list[dict[str, Any]], workspace_root: Path | None = N
                 elif task.get("alias"):
                     command.extend(("--alias", task["alias"]))
                 elif not task.get("model"):
-                    command.extend(("--alias", "workhorse"))
+                    command.extend(("--alias", "senior"))
                 policy = exec_routing.validate_policy(task.get("fallback"))
                 if policy is not None:
                     command.extend(("--fallback", "true" if isinstance(policy, list) else json.dumps(policy) if type(policy) is bool else policy))

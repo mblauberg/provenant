@@ -149,7 +149,7 @@ explicit `--knob` are strict and exit with an error instead.
 
 - `effort.shift` (`scripts/model_route.py`): after a task-class route is
   chosen, its effort moves one step along `low`, `medium`, `high`, `xhigh`
-  (never `max`, which is retired, or `ultra`), only when the new effort meets the class's policy minimum and every
+  (never `ultra`; `max` is retired and rejected), only when the new effort meets the class's policy minimum and every
   configured model lists it; otherwise the route keeps its effort. The route
   record carries `effort_shift`. A runtime fallback may not go below the lower
   of the configured and shifted effort.

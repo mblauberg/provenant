@@ -64,17 +64,17 @@ TRUSTED_CAPABILITY_SOURCES = {
     "agy models": "agy",
 }
 TASK_CLASS_POLICY = {
-    "mechanical": {"minimum_alias": "scout", "minimum_effort": "low", "role": "worker"},
-    "legwork": {"minimum_alias": "workhorse", "minimum_effort": "medium", "role": "worker"},
-    "implementation": {"minimum_alias": "workhorse", "minimum_effort": "high", "role": "worker"},
-    "ui-taste": {"minimum_alias": "flagship", "minimum_effort": "high", "role": "worker"},
-    "screenshots": {"minimum_alias": "workhorse", "minimum_effort": "high", "role": "worker"},
-    "review": {"minimum_alias": "flagship", "minimum_effort": "high", "role": "reviewer"},
-    "second-opinion": {"minimum_alias": "flagship", "minimum_effort": "high", "role": "reviewer"},
-    "research": {"minimum_alias": "workhorse", "minimum_effort": "medium", "role": "worker"},
-    "bulk": {"minimum_alias": "scout", "minimum_effort": "low", "role": "worker"},
-    "critical-review": {"minimum_alias": "flagship", "minimum_effort": "high", "role": "critical-review"},
-    "orchestration": {"minimum_alias": "flagship", "minimum_effort": "high", "role": "orchestrator"},
+    "mechanical": {"minimum_alias": "junior", "minimum_effort": "low", "role": "worker"},
+    "legwork": {"minimum_alias": "senior", "minimum_effort": "medium", "role": "worker"},
+    "implementation": {"minimum_alias": "senior", "minimum_effort": "high", "role": "worker"},
+    "ui-taste": {"minimum_alias": "principal", "minimum_effort": "high", "role": "worker"},
+    "screenshots": {"minimum_alias": "senior", "minimum_effort": "high", "role": "worker"},
+    "review": {"minimum_alias": "principal", "minimum_effort": "high", "role": "reviewer"},
+    "second-opinion": {"minimum_alias": "principal", "minimum_effort": "high", "role": "reviewer"},
+    "research": {"minimum_alias": "senior", "minimum_effort": "medium", "role": "worker"},
+    "bulk": {"minimum_alias": "junior", "minimum_effort": "low", "role": "worker"},
+    "critical-review": {"minimum_alias": "principal", "minimum_effort": "high", "role": "critical-review"},
+    "orchestration": {"minimum_alias": "principal", "minimum_effort": "high", "role": "orchestrator"},
 }
 
 # Path-loading avoids depending on `scripts/` being on `sys.path`. Tests reload
@@ -114,9 +114,8 @@ if _pools is None:
     _pools_spec.loader.exec_module(_pools)
 
 EFFORT_ORDER = _catalog_validation.EFFORT_ORDER
-# The effort ladder `effort.shift` steps along. `max` is retired (it maps to `xhigh`) and `ultra` is
-# opt-in only, so a shift never reaches either.
-SHIFT_LADDER = tuple(name for name in EFFORT_ORDER if name not in ("max", "ultra"))
+# The effort ladder `effort.shift` steps along. `ultra` is opt-in only, so a shift never reaches it.
+SHIFT_LADDER = tuple(name for name in EFFORT_ORDER if name != "ultra")
 
 
 def _harness_profile() -> Any:
@@ -146,8 +145,6 @@ def shifted_task_class_effort(task_class: str, effort: str, minimum: str, entrie
         return effort, 0
     return candidate, shift
 ALIAS_ORDER = _catalog_validation.ALIAS_ORDER
-# The route-pool tier names, accepted wherever an adapter's own alias is asked for.
-TIER_ALIASES = _pools.TIER_ALIASES
 infer_family = _catalog_validation.infer_family
 matching_model_families = _catalog_validation.matching_model_families
 model_slug_for_family = _catalog_validation.model_slug_for_family
@@ -287,9 +284,32 @@ def _apply_free_pattern(adapter: dict[str, Any]) -> None:
                 entry.setdefault("warning", FREE_TIER_WARNING)
 
 
+_EFFORT_VALUE_KEYS = {"effort", "default_effort", "maximum_effort", "minimum_effort"}
+
+
+def _reject_max(value: Any, path: str = "", key: str = "", container: str = "") -> None:
+    """Refuse a catalogue (usually an old instance overlay) that still offers the retired `max` effort."""
+    if isinstance(value, dict):
+        for name, item in value.items():
+            _reject_max(item, f"{path}.{name}" if path else name, name, key)
+        return
+    is_max = lambda item: isinstance(item, str) and item.strip().lower() == "max"  # noqa: E731
+    if isinstance(value, list):
+        if key in {*_EFFORT_LIST_KEYS, "effort"} or container == "per_model_efforts":
+            if any(is_max(item) for item in value):
+                raise _pools.RenamedNameError(f"catalogue {path}: effort 'max' was retired; fix: use xhigh")
+            return
+        for index, item in enumerate(value):
+            _reject_max(item, f"{path}[{index}]", key, container)
+        return
+    if is_max(value) and (key in _EFFORT_VALUE_KEYS or "role_effort_defaults" in path.split(".")):
+        raise _pools.RenamedNameError(f"catalogue {path}: effort 'max' was retired; fix: use xhigh")
+
+
 def catalogue_snapshot(path: Path | None = None) -> dict[str, Any]:
     product = path or PRODUCT_CATALOG_PATH
     base = json.loads(product.read_text())
+    _pools.reject_renamed(base, "catalogue")
     drift: list[str] = []
     sources = [str(product)]
     stale_routing = False
@@ -326,11 +346,14 @@ def catalogue_snapshot(path: Path | None = None) -> dict[str, Any]:
                 if stale_routing:
                     drift.append("instance catalogue is older than product routing; ignored until refreshed")
                 else:
-                    base = _merge_catalog(base, _pools.migrate_legacy_routes(overlay, drift), "", drift)
+                    base = _merge_catalog(base, _pools.reject_renamed(overlay), "", drift)
             else:
                 drift.append("instance catalogue: malformed overlay dropped; fix: use a JSON object")
+        except _pools.RenamedNameError:
+            raise
         except (OSError, ValueError):
             drift.append("instance catalogue: unreadable overlay dropped; fix: refresh routing")
+    _reject_max(base)
     for entry in base.get("adapters", {}).values():
         _apply_free_pattern(entry)
     models = [dict(model, adapter=adapter) for adapter, entry in base.get("adapters", {}).items()
@@ -905,10 +928,10 @@ def _fallback_candidates(
     current = _canonical_model(adapter_name, model, catalog)
     candidates = [(adapter_name, candidate) for candidate in own]
     if adapter_name != "opencode":
-        # OpenCode has no flagship tier, so a flagship route falls back to its workhorse list.
+        # OpenCode has no principal tier, so a principal route falls back to its senior list.
         opencode_tiers = catalog["adapters"].get("opencode", {}).get("aliases", {})
         candidates += [("opencode", candidate) for candidate in
-                       opencode_tiers.get(tier) or opencode_tiers.get("workhorse", [])]
+                       opencode_tiers.get(tier) or opencode_tiers.get("senior", [])]
     if fallback == "any":
         candidates += [("opencode", item["id"]) for item in
                        catalog["adapters"].get("opencode", {}).get("models", [])]
@@ -992,16 +1015,20 @@ def _resolve_opencode_name(requested: str, live: list[str]) -> tuple[str | None,
 _EFFORT_LIST_KEYS = {"efforts", "effort_fallback_order", "supported_efforts"}
 
 
-def _retire_max(value: Any) -> Any:
-    """Map the retired max effort to xhigh in every effort list, keeping order and dropping duplicates."""
+def _without_max(value: Any) -> Any:
+    """Drop `max` from provider-reported effort lists: no model is routed at it."""
     if isinstance(value, dict):
-        return {key: ([*dict.fromkeys("xhigh" if isinstance(item, str) and item.lower() == "max" else item
-                                       for item in item_list)]
-                      if key in _EFFORT_LIST_KEYS and isinstance(item_list, list) else _retire_max(item_list))
+        return {key: ([item for item in item_list if not (isinstance(item, str) and item.lower() == "max")]
+                      if key in _EFFORT_LIST_KEYS and isinstance(item_list, list) else _without_max(item_list))
                 for key, item_list in value.items()}
     if isinstance(value, list):
-        return [_retire_max(item) for item in value]
+        return [_without_max(item) for item in value]
     return value
+
+
+def _max_retired(subject: str = "effort") -> dict[str, Any]:
+    return {"schema_version": 1, "status": "invalid_effort",
+            "message": f"{subject} 'max' was retired; fix: use xhigh"}
 
 
 def resolve_ordinary(args: argparse.Namespace, catalog: dict[str, Any]) -> int:
@@ -1026,10 +1053,10 @@ def resolve_ordinary(args: argparse.Namespace, catalog: dict[str, Any]) -> int:
     if args.model and args.alias and args.alias != args.model and getattr(args, "alias_supplied", True):
         notes.append("alias and model both supplied; model won")
     if not requested:
-        candidates = adapter.get("aliases", {}).get(args.alias or "workhorse", [])
+        candidates = adapter.get("aliases", {}).get(args.alias or "senior", [])
         if not candidates:
             fixed = adapter.get("fixed_model_family")
-            candidates = catalog.get("families", {}).get(fixed, {}).get("aliases", {}).get(args.alias or "workhorse", [])
+            candidates = catalog.get("families", {}).get(fixed, {}).get("aliases", {}).get(args.alias or "senior", [])
         requested = candidates[0] if candidates else adapter.get("default_model", "")
         if not candidates and requested and args.alias in ALIAS_ORDER:
             warnings.append(f"{adapter_name} has no {args.alias} tier; using adapter default {requested}")
@@ -1040,13 +1067,10 @@ def resolve_ordinary(args: argparse.Namespace, catalog: dict[str, Any]) -> int:
     if adapter_name == "opencode" and "#" in requested:
         # `provider/model#variant`: the variant is OpenCode's own effort knob, sent as given.
         requested, _, variant = requested.partition("#")
-        retired_variant = False
-        if variant == "max":  # retired: same mapping as --effort max
-            variant = "xhigh"
-            retired_variant = True
+        if variant.lower() == "max":
+            return emit(_max_retired("opencode variant"), 2)
         if variant and not args.effort:
             args.effort = variant
-            args.max_remapped = retired_variant
             args.explicit_variant = True
             explicit = True
         elif variant and args.effort == variant:
@@ -1083,7 +1107,7 @@ def resolve_ordinary(args: argparse.Namespace, catalog: dict[str, Any]) -> int:
     if not aliases and adapter.get("fixed_model_family"):
         aliases = catalog.get("families", {}).get(adapter["fixed_model_family"], {}).get("aliases", {})
     tier = args.alias if args.alias in ALIAS_ORDER else next(
-        (name for name, candidates in aliases.items() if model in candidates), "workhorse"
+        (name for name, candidates in aliases.items() if model in candidates), "senior"
     )
     # `auto` is the provider's own chooser; a provider prefix is not a new model.
     provider_auto = requested.casefold() == "auto"
@@ -1187,7 +1211,7 @@ def resolve_ordinary(args: argparse.Namespace, catalog: dict[str, Any]) -> int:
                  "endpoint_provider": adapter.get("endpoint_provider", adapter_name), "provider": provider,
                  "adapter_enabled": True, "compatibility_adapter": compatibility["compatibility_adapter"] if compatibility else "",
                  "model_selection": "alias" if not explicit else "explicit",
-                 "requested_effort": "max" if getattr(args, "max_remapped", False) else args.effort or "",
+                 "requested_effort": args.effort or "",
                  "effort": effort if effort != "default" else "",
                  "effort_applied": effort if effort != "default" else "",
                  "supported_efforts": list(supported),
@@ -1195,9 +1219,8 @@ def resolve_ordinary(args: argparse.Namespace, catalog: dict[str, Any]) -> int:
                  "effort_source": "explicit" if args.effort else "model-default" if (registered or {}).get("default_effort") else "adapter-default",
                  "effort_capability_source": "registry" if supported else "provider-unverified" if unverified_effort
                  else "registry-no-effort-control" if registered else "adapter-no-effort-control",
-                 "effort_substitution": "; ".join(filter(None, (
-                     "max retired; mapped to xhigh" if getattr(args, "max_remapped", False) else "",
-                     next((note for note in notes if "unsupported" in note or "effort control" in note), "")))),
+                 "effort_substitution": next(
+                     (note for note in notes if "unsupported" in note or "effort control" in note), ""),
                  "substitution": "", "fallback_model": "",
                  "notes": notes, "warnings": warnings, "fallback_candidates": fallback,
                  "plan_cap_usd": cap, "trains_on_prompts": training_model,
@@ -1483,7 +1506,7 @@ def resolve_effort(
 
     ultra_eligible = (
         openai_codex
-        and args.alias == "flagship"
+        and args.alias == "principal"
         and args.role in family_config.get("ultra_eligible_roles", [])
     )
     if requested_effort == "ultra" and not ultra_eligible:
@@ -1522,8 +1545,8 @@ def resolve_effort(
 
     if args.effort_transport == "model-id":
         normalized_model = re.sub(r"(?:^|[-_])extra[-_]high(?=$|[-_])", "-xhigh", model.lower())
-        matches = re.findall(r"(?:^|[-_])(low|medium|high|xhigh|max|ultra)(?=$|[-_])", normalized_model)
-        parenthetical = re.search(r"\((low|medium|high|xhigh|max|ultra)\)\s*$", normalized_model)
+        matches = re.findall(r"(?:^|[-_])(low|medium|high|xhigh|ultra)(?=$|[-_])", normalized_model)
+        parenthetical = re.search(r"\((low|medium|high|xhigh|ultra)\)\s*$", normalized_model)
         derived = matches[-1] if matches else (parenthetical.group(1) if parenthetical else "")
         if args.effort and derived and args.effort != derived:
             return None, "", "adapter_effort_mismatch", "model-id"
@@ -1592,9 +1615,7 @@ def resolve(args: argparse.Namespace, catalog: dict[str, Any]) -> int:
     capability_models, capability_error = load_capabilities(
         args.capabilities_file, args.adapter, catalog
     )
-    if _retire_max(capability_models) != capability_models:
-        args.max_probe = True
-        capability_models = _retire_max(capability_models)
+    capability_models = _without_max(capability_models)
     args.capability_models = capability_models
     adapter = catalog["adapters"].get(args.adapter)
     endpoint_profile = getattr(args, "endpoint_profile", {})
@@ -1629,7 +1650,7 @@ def resolve(args: argparse.Namespace, catalog: dict[str, Any]) -> int:
         requested_effort, effort_source = task_class_effort, "task-class"
     else:
         requested_effort = args.effort or model_override_effort or role_effort or {
-            "flagship": "high", "workhorse": "medium", "scout": "low"
+            "principal": "high", "senior": "medium", "junior": "low"
         }[args.alias]
         effort_source = (
             "explicit" if args.effort else
@@ -1642,7 +1663,7 @@ def resolve(args: argparse.Namespace, catalog: dict[str, Any]) -> int:
         "adapter": args.adapter,
         "alias": "" if args.model and not getattr(args, "alias_supplied", True) else args.alias,
         "role": args.role,
-        "requested_effort": "max" if getattr(args, "max_remapped", False) else getattr(args, "raw_effort", requested_effort),
+        "requested_effort": getattr(args, "raw_effort", requested_effort),
         "effort": requested_effort,
         "effort_source": effort_source,
         "lead_family": args.lead_family,
@@ -2117,10 +2138,6 @@ def resolve(args: argparse.Namespace, catalog: dict[str, Any]) -> int:
             effort_status = ""
     if not effort_status and getattr(args, "raw_effort", None):
         effort_substitution = f"{args.raw_effort} unknown; ran at {effort or 'default'}"
-    if not effort_status and effort == "xhigh" and getattr(args, "max_probe", False) and not getattr(args, "max_remapped", False):
-        effort_substitution = "; ".join(filter(None, ("max retired; mapped to xhigh", effort_substitution)))
-    if not effort_status and getattr(args, "max_remapped", False):
-        effort_substitution = "; ".join(filter(None, ("max retired; mapped to xhigh", effort_substitution)))
     # The effort reaches a suffix model only through its id, so the id must carry it.
     suffix_model = args.effort_transport == "model-id" and (registered_model or {}).get("effort_transport") == "model-suffix"
     suffix = (registered_model.get("suffix", {}) if suffix_model else {}).get(effort or "", "")
@@ -2174,11 +2191,6 @@ def resolve(args: argparse.Namespace, catalog: dict[str, Any]) -> int:
             1,
         )
 
-    # Choke point: max is retired, so a probe snapshot, an overlay or a request never reaches the provider as max.
-    if effort == "max":
-        effort = "xhigh"
-        effort_substitution = "; ".join(filter(None, ("max retired; mapped to xhigh", effort_substitution)))
-    supported = [value for value in supported if value != "max"]
     record = {
         **base,
         "effort": effort,
@@ -2358,10 +2370,24 @@ def route_pick(requests: Any, seed: int | None = None) -> dict[str, Any]:
 
 
 def main(argv: list[str] | None = None) -> int:
+    try:
+        return _main(argv)
+    except _pools.RenamedNameError as exc:
+        print(f"model-route: {exc}", file=sys.stderr)
+        return 2
+
+
+def _main(argv: list[str] | None = None) -> int:
     argument_parser = parser()
     args = argument_parser.parse_args(argv)
-    if isinstance(getattr(args, "alias", None), str) and args.alias.casefold() in TIER_ALIASES:
-        args.alias = TIER_ALIASES[args.alias.casefold()]
+    renamed = _pools.RENAMED_TIERS.get(str(getattr(args, "alias", "") or "").casefold())
+    if renamed:
+        print(f"model-route: alias '{args.alias}' was renamed to '{renamed}'; fix: pass {renamed}", file=sys.stderr)
+        return 2
+    if isinstance(getattr(args, "alias", None), str) and args.alias.casefold() in ALIAS_ORDER:
+        args.alias = args.alias.casefold()
+    if str(getattr(args, "effort", "") or "").casefold() == "max" and args.command in {"resolve", "select"}:
+        return emit(_max_retired(), 2)
     if args.command == "select":
         return _preferences.select(args, TASK_CLASS_POLICY, ALIAS_ORDER, EFFORT_ORDER)
     if args.command == "snapshot":
@@ -2414,12 +2440,9 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(record, sort_keys=True))
         return code
     snapshot = catalogue_snapshot(Path(args.catalog) if args.catalog else None)
-    catalog = _retire_max(snapshot["catalogue"])
-    if getattr(args, "effort", None) == "max":  # retired: one mapping for every resolver
-        args.max_remapped = True
-        args.effort = "xhigh"
+    catalog = snapshot["catalogue"]
     if getattr(args, "available_effort", None):
-        args.available_effort = _retire_max({"efforts": list(args.available_effort)})["efforts"]
+        args.available_effort = _without_max({"efforts": list(args.available_effort)})["efforts"]
     global ROUTE_WARNINGS
     ROUTE_WARNINGS = ([
         "routing catalogue was stale; resolved against the fresh product snapshot; "
@@ -2429,7 +2452,7 @@ def main(argv: list[str] | None = None) -> int:
         # cf_dispatch defaults an alias beside a named model; that is not the caller's.
         args.alias_supplied = bool(args.alias) and os.environ.get("FABRIC_ALIAS_IMPLIED") != "1"
         if args.endpoint and args.model and not args.alias:
-            args.alias = "workhorse"
+            args.alias = "senior"
         ordinary_name = args.alias and args.alias not in ALIAS_ORDER
         ordinary_model = args.model and not args.alias
         ordinary_unknown = args.model and args.alias and not infer_family(args.model, catalog)
@@ -2625,7 +2648,7 @@ def main(argv: list[str] | None = None) -> int:
                 args.task_class, route_effort, policy["minimum_effort"], resolved_entries)
             # A runtime fallback may not go below the lower of the configured and shifted effort.
             args.task_class_effort_floor = min(route_effort, args.task_class_effort, key=EFFORT_ORDER.__getitem__)
-        elif args.alias not in {"flagship", "workhorse", "scout"}:
+        elif args.alias not in {"principal", "senior", "junior"}:
             return reject("unknown_alias")
         if args.effort and args.effort not in EFFORT_ORDER:
             if args.require_distinct or args.model_override_tier or args.task_class:
