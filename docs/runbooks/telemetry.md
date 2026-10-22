@@ -145,17 +145,23 @@ source remain unattributed. Fabric `ok` records
 execution success, not user acceptance or a passed delivery gate.
 
 `provenant telemetry accepted [--since ISO-DATE] [--json]` reports deliveries
-grouped by risk tier and the harness digest used by their lane attempts. A run
-is accepted when its `RUN.json` has `delivery_acceptance` with basis
-`checks-and-review`, `project-landing` or `user`. A run is merged only when the
-commit on its `software_delivery.canonical_artifact_id` artifact matches a
-`changes.merge_commit` row, populated by `telemetry changes --sync`. Lane `ok`
-means the provider returned; it is not acceptance. Cost uses every usage row
-whose `usage_files.path` is under the delivery run directory, including failed
-attempts and reviewer lanes. Unpriced rows are reported, and cost and cost per
-accepted run are lower bounds. Runs without delivery acceptance stay in the
-run count and never enter the accepted denominator. The ledger stores the
-receipt facts in `deliveries`; `accepted` and `merged` are report labels.
+by risk tier and one harness digest per run (most linked usage rows, ties by
+name). `--since` filters on the run's earliest recorded timestamp, falling back
+to its run-directory stamp, never ingest time. A run is accepted when its
+`RUN.json` has `delivery_acceptance` with basis `checks-and-review`,
+`project-landing` or `user`. A run is merged only when the commit on its
+`software_delivery.canonical_artifact_id` artifact matches a
+`changes.merge_commit` row populated by `telemetry changes --sync`; this only
+matches PRs in the product repository because sync covers that checkout only.
+Lanes link by realpath workspace equality or containment under an allowed
+source path (excluding `.`), with attempt starts bounded by the delivery's
+first and last recorded lifecycle timestamps. Cost includes every linked
+attempt and reviewer lane, including failed attempts and unaccepted runs.
+Runs without acceptance stay in the numerator and run count, and never enter
+the accepted denominator. Unpriced rows are reported; known costs and cost per
+accepted run are lower bounds. No linked lanes yields `usage_rows: 0` and null
+cost. The ledger stores receipt facts in `deliveries`; `accepted` and `merged`
+are report labels.
 
 
 ## Events, change markers and comparison
@@ -168,7 +174,7 @@ points back to the receipt, snapshot, transcript or collector line
 (`path@offset`). An event's ID derives from fields stored in its own row,
 never the host name: source and session for `session.start`; the receipt's
 resolved path for `lane.attempt`, so projects sharing run ids stay apart;
-otherwise `source_ref`, time, linked fields and attributes. Collector refs are
+provider, account and normalised plan pair for `plan.mismatch`; otherwise `source_ref`, time, linked fields and attributes. Collector refs are
 `path@offset#record`, so identical records on one line keep their count.
 Re-ingest therefore adds no duplicate rows, even after a `local_host` rename,
 which leaves earlier rows under their old id for readers to map. Opening a
@@ -180,6 +186,7 @@ keeping the earliest of any duplicates, so concurrent openers cannot race.
 | `lane.attempt` | A terminal Fabric receipt: adapter, effort, attempt, status, error class, task class, route alias, wall time, retry/escalation lineage, `empty_patch`, and profile stamp metadata when known (absent profile means balanced) |
 | `limit.rate_limited`, `limit.usage_limited`, `cooldown` | Route-health and cooldown snapshots |
 | `session.start` | The first ingested usage row of a Claude, Codex or OpenCode session; one event per session, not per message |
+| `plan.mismatch` | Configured `plan` and `plan_detected` disagree; one warning per provider, account and normalised pair, with both values in attrs |
 | `plan.change` | A quota reading whose `plan`, `plan_detected` or `plan_tier` differs from the account's previous reading; attrs hold each `<field>_from` and `<field>_to`. Spelling-only differences and unknown values are not changes |
 | `otel.<event.name>`, `otel.metric` | Collector log records and metric data points |
 
@@ -564,7 +571,9 @@ Max 5x from 20x), `credit_balance` (Codex usage credits drawn after the plan
 allowance) and `reset_credits`. A reading identical to the window's previous
 row only advances that row's `last_seen_at`, so the menu bar's two-minute polling
 adds a row only when something changed. A changed plan field emits
-`plan.change`. No new provider call is made for this history.
+`plan.change`. A configured plan that disagrees with the detected plan emits
+`plan.mismatch` once per account and normalised pair. No new provider call is
+made for this history.
 
 Plan prices are user configuration, read at report time and never fetched.
 List them under `plans.<provider>.<plan>` in the same file. `<plan>` matches a

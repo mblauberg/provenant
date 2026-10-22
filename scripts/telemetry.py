@@ -190,6 +190,13 @@ def connect():
             repair_cycles INTEGER, acceptance_basis TEXT, accepted INTEGER NOT NULL DEFAULT 0,
             merge_commit TEXT, ingested_at TEXT);
     ''')
+    delivery_columns = {row[1] for row in db.execute('PRAGMA table_info(deliveries)')}
+    for name in ('started_at', 'ended_at', 'source_paths'):
+        if name not in delivery_columns:
+            db.execute(f'ALTER TABLE deliveries ADD COLUMN {name} TEXT')
+    if db.execute("SELECT 1 FROM meta WHERE key='delivery_links'").fetchone() is None:
+        db.execute("DELETE FROM cursors WHERE source IN ('delivery','fabric')")
+        db.execute("INSERT OR IGNORE INTO meta VALUES ('delivery_links', ?)", (now(),))
     observation_columns = {row[1] for row in db.execute('PRAGMA table_info(observations)')}
     if 'origin_path' not in observation_columns:
         db.execute('ALTER TABLE observations ADD COLUMN origin_path TEXT')
@@ -351,6 +358,7 @@ EVENT_KINDS = {
     'limit.usage_limited': 'provider usage limit (route health, cooldowns)',
     'cooldown': 'route cooldown recorded (cooldowns.json)',
     'session.start': 'first ingested usage row of a Claude, Codex or OpenCode session',
+    'plan.mismatch': 'an account\'s configured plan differs from its detected plan',
     'plan.change': 'an account\'s plan, detected plan or plan tier differs from its previous quota reading',
     'otel.user_prompt': 'OTLP log: a user prompt was submitted (length only)',
     'otel.api_request': 'OTLP log: one provider request with tokens, cost and duration',
@@ -373,6 +381,8 @@ def event_key(row):
         parts = (os.path.realpath(row['source_ref']),)
     elif row['kind'] == 'session.compaction':
         parts = ((row['session'], row['ts']) if row['session'] and row['ts'] else (row['source_ref'],))
+    elif row['kind'] == 'plan.mismatch':
+        parts = (row['provider'], row['account'], plan_key(attrs.get('plan')), plan_key(attrs.get('plan_detected')))
     elif row['kind'] in {'repair.cycle', 'review.finding'}:
         parts = (row['source_ref'],)
     else:  # snapshot and collector records (`path@offset#record`): their source plus their content
@@ -435,6 +445,10 @@ SERIES_STATE = ('used_percent', 'window_minutes', 'reset_at', 'plan', 'plan_dete
 PLAN_FIELDS = ('plan', 'plan_detected', 'plan_tier')
 
 
+def plan_key(value):
+    return re.sub(r'[^a-z0-9]', '', str(value).lower()) if value else None
+
+
 def put_quota_series(db, provider, account, host, observed_at, windows, source=None, **reading):
     """Append each window's reading when it differs from the one before it, else extend that row.
 
@@ -461,8 +475,13 @@ def put_quota_series(db, provider, account, host, observed_at, windows, source=N
                    (provider, account, host, window['name'], observed_at, observed_at, source,
                     *(row[name] for name in SERIES_STATE)))
     # Spellings differ by source (`proLite`, `prolite`); an unknown value is never a change.
-    key = lambda value: re.sub(r'[^a-z0-9]', '', str(value).lower()) if value else None
-    changed = before and any(key(before[name]) and key(reading.get(name)) and key(before[name]) != key(reading[name])
+    configured, detected = plan_key(reading.get('plan')), plan_key(reading.get('plan_detected'))
+    if configured and detected and configured != detected:
+        put_event(db, 'plan.mismatch', observed_at, f'quota_series:{provider}/{account}@{host}',
+                  attrs={'plan': reading['plan'], 'plan_detected': reading['plan_detected']},
+                  provider=provider, account=account)
+    changed = before and any(plan_key(before[name]) and plan_key(reading.get(name))
+                             and plan_key(before[name]) != plan_key(reading[name])
                              for name in PLAN_FIELDS)
     if changed:
         put_event(db, 'plan.change', observed_at, f'quota_series:{provider}/{account}@{host}',
@@ -923,6 +942,8 @@ def ingest_document(db, source, path):
                       attrs={**{key: fields[key] for key in ('adapter', 'effort', 'attempt', 'status', 'error_class',
                                                              'task_class', 'route', 'duration_ms')},
                              'profile': profile.get('preset'), 'profile_digest': profile.get('digest'),
+                             'workspace_root': (row.get('workspace') or {}).get('root') or row.get('workspace_root'),
+                             'started_at': row.get('started_at'),
                              'risk_tier': profile.get('risk_tier'), 'floored': profile.get('floored'),
                              'empty_patch': row.get('empty_patch'), 'retry_of': retry_of,
                              'escalation_reason': row.get('escalation_reason'), 'escalated_from': escalated_from,

@@ -4,17 +4,45 @@ from __future__ import annotations
 
 from collections import Counter
 from collections import defaultdict
+from datetime import UTC, datetime
 import hashlib
 import json
 from pathlib import Path
 
 
 def paths(telemetry):
-    candidates = [*telemetry.fabric_paths('RUN.json')]
-    candidates.extend(path for root in telemetry.fabric_roots()
-                      for name in ('repairs.jsonl', 'findings.jsonl')
-                      for path in root.glob(f'runs/**/{name}'))
-    return sorted({path for path in candidates if path.is_file() and not path.is_symlink()})
+    return sorted({path for name in ('RUN.json', 'repairs.jsonl', 'findings.jsonl')
+                   for path in telemetry.fabric_paths(name)})
+
+
+def _run_times(telemetry, receipt, run_dir):
+    """Recorded lifecycle times, excluding authority expiry and other future limits."""
+    times = []
+
+    def visit(value):
+        if isinstance(value, dict):
+            for key, item in value.items():
+                if key in {'authority', 'risk_override'}:
+                    continue
+                if key == 'at' or key == 'timestamp' or key.endswith('_at'):
+                    try:
+                        times.append(telemetry.since_time(item))
+                    except (AttributeError, TypeError, ValueError):
+                        pass
+                elif isinstance(item, (dict, list)):
+                    visit(item)
+        elif isinstance(value, list):
+            for item in value:
+                visit(item)
+
+    visit(receipt)
+    if times:
+        return min(times).isoformat(), max(times).isoformat()
+    try:
+        stamp = datetime.strptime(run_dir.name[:13], '%Y%m%d-%H%M').replace(tzinfo=UTC).isoformat()
+        return stamp, None
+    except ValueError:
+        return None, None
 
 
 def ingest_receipt(telemetry, db, path):
@@ -34,87 +62,91 @@ def ingest_receipt(telemetry, db, path):
                      if isinstance(item, dict) and item.get('id') == canonical_id), {})
     revision = artifact.get('git_revision') or {}
     commit = revision.get('commit') if isinstance(revision, dict) else None
+    started, ended = _run_times(telemetry, receipt, path.parent)
+    workspace = next(parent.parent for parent in path.parents if parent.name == '.agent-run')
+    sources = [str((workspace / item).resolve())
+               for item in (receipt.get('authority') or {}).get('allowed_source_paths', [])
+               if item and Path(item) != Path('.')]
     db.execute('''INSERT INTO deliveries
-        (run_dir,host,run_id,risk_tier,chair_family,repair_cycles,acceptance_basis,accepted,merge_commit,ingested_at)
-        VALUES (?,?,?,?,?,?,?,?,?,?)
+        (run_dir,host,run_id,risk_tier,chair_family,repair_cycles,acceptance_basis,accepted,merge_commit,ingested_at,started_at,ended_at,source_paths)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
         ON CONFLICT(run_dir) DO UPDATE SET host=excluded.host,run_id=excluded.run_id,
         risk_tier=excluded.risk_tier,chair_family=excluded.chair_family,
         repair_cycles=excluded.repair_cycles,acceptance_basis=excluded.acceptance_basis,
-        accepted=excluded.accepted,merge_commit=excluded.merge_commit,ingested_at=excluded.ingested_at''',
+        accepted=excluded.accepted,merge_commit=excluded.merge_commit,ingested_at=excluded.ingested_at,
+        started_at=excluded.started_at,ended_at=excluded.ended_at,source_paths=excluded.source_paths''',
                (str(path.parent.resolve()), telemetry.host_id(), receipt.get('run_id'), receipt.get('risk_tier'),
                 receipt.get('chair_family'), receipt.get('repair_cycles'), basis, int(basis is not None),
-                commit, telemetry.now()))
+                commit, telemetry.now(), started, ended, json.dumps(sources)))
     db.execute('INSERT OR REPLACE INTO cursors VALUES (?,?,?,?,?,?)',
                ('delivery', str(path), stat.st_size, stat.st_mtime_ns, stat.st_size, '{}'))
 
 
 def cost_per_accepted(telemetry, db, since=None):
-    """Cost estimate by receipt risk tier and observed harness digest."""
+    """Cost estimate by receipt risk tier and each run's most-used harness digest."""
     boundary = telemetry.since_time(since) if since else None
     prices, free_patterns = telemetry.load_prices()
     adapters = telemetry.catalogue()
-    runs = db.execute('SELECT * FROM deliveries ORDER BY run_dir').fetchall()
+    telemetry.load_hosts(db)
+    aliases = telemetry.host_aliases()
+    current_host = telemetry.host_id()
+    lanes = {str(Path(row['source_ref']).resolve()): json.loads(row['attrs'])
+             for row in db.execute("SELECT source_ref,attrs FROM events WHERE kind='lane.attempt'")}
+    usage = db.execute("""SELECT DISTINCT u.*, f.path FROM usage_files f JOIN usage u
+                          ON u.source=f.source AND u.event_id=f.event_id AND u.host=f.host
+                          WHERE u.source='fabric'""").fetchall()
     groups = defaultdict(lambda: {'runs': set(), 'accepted': set(), 'merged': set(),
-                                  'known_cost': 0.0, 'unpriced_rows': 0})
-    for run in runs:
-        if boundary:
-            stamp = run['ingested_at']
-            if stamp is None or telemetry.since_time(stamp) < boundary:
-                continue
-        run_dir = run['run_dir']
+                                  'known_cost': 0.0, 'usage_rows': 0, 'unpriced_rows': 0})
+    for run in db.execute('SELECT * FROM deliveries ORDER BY run_dir').fetchall():
+        if boundary and (not run['started_at'] or telemetry.since_time(run['started_at']) < boundary):
+            continue
         merged = bool(run['merge_commit'] and db.execute(
             'SELECT 1 FROM changes WHERE merge_commit=? LIMIT 1', (run['merge_commit'],)).fetchone())
-        usage = db.execute('''SELECT DISTINCT u.*, f.path,
-                             h.digest AS harness_digest
-                             FROM usage_files f JOIN usage u
-                               ON u.source=f.source AND u.event_id=f.event_id AND u.host=f.host
-                             LEFT JOIN events e ON e.kind='lane.attempt' AND e.source_ref=f.path
-                             LEFT JOIN harness_stamps h
-                               ON h.digest=json_extract(e.attrs,'$.profile_digest')
-                             WHERE f.path LIKE ? ESCAPE '\\' ''',
-                           (_like_prefix(run_dir),)).fetchall()
-        telemetry.load_hosts(db)
-        aliases = telemetry.host_aliases()
-        current_host = telemetry.host_id()
+        sources = [Path(path).resolve() for path in json.loads(run['source_paths'] or '[]')]
         delivery_host = telemetry.same_host(run['host'], aliases)
         selected = {}
         for row in usage:
             canonical_host = telemetry.same_host(row['host'], aliases)
             if canonical_host != delivery_host:
                 continue
+            lane = lanes.get(str(Path(row['path']).resolve()), {})
+            workspace, started = lane.get('workspace_root'), lane.get('started_at')
+            if not workspace or not started or not run['started_at'] or not run['ended_at']:
+                continue
+            if not any(Path(workspace).resolve().is_relative_to(path) for path in sources):
+                continue
+            if not (telemetry.since_time(run['started_at']) <= telemetry.since_time(started)
+                    <= telemetry.since_time(run['ended_at'])):
+                continue
             key = (row['source'], row['event_id'], canonical_host)
             if key not in selected or row['host'] == current_host:
                 selected[key] = row
-        usage = list(selected.values())
-        if not usage:
-            group = groups[(run['risk_tier'], None)]
-            _add_run(group, run, merged)
-            continue
-        by_digest = defaultdict(list)
-        for row in usage:
-            by_digest[row['harness_digest']].append(row)
-        for digest, rows in by_digest.items():
-            group = groups[(run['risk_tier'], digest)]
-            _add_run(group, run, merged)
-            for row in rows:
-                cost_row = dict(row)
-                cost_row['model'] = telemetry.normalise_model(
-                    cost_row['adapter'], cost_row['provider'], cost_row['model'], adapters)
-                price = telemetry.price_entry(cost_row, prices, free_patterns)
-                cost = telemetry.estimated_cost(cost_row, prices, price)
-                if cost is None:
-                    group['unpriced_rows'] += 1
-                else:
-                    group['known_cost'] += cost
+        rows = list(selected.values())
+        digests = Counter(lanes[str(Path(row['path']).resolve())].get('profile_digest') for row in rows)
+        digest = min(digests, key=lambda name: (-digests[name], name or '')) if digests else None
+        group = groups[(run['risk_tier'], digest)]
+        _add_run(group, run, merged)
+        group['usage_rows'] += len(rows)
+        for row in rows:
+            cost_row = dict(row)
+            cost_row['model'] = telemetry.normalise_model(
+                cost_row['adapter'], cost_row['provider'], cost_row['model'], adapters)
+            price = telemetry.price_entry(cost_row, prices, free_patterns)
+            cost = telemetry.estimated_cost(cost_row, prices, price)
+            if cost is None:
+                group['unpriced_rows'] += 1
+            else:
+                group['known_cost'] += cost
     report = []
     for (risk_tier, digest), group in sorted(groups.items(), key=lambda item: (item[0][0] or '', item[0][1] or '')):
         accepted = len(group['accepted'])
+        cost = round(group['known_cost'], 9) if group['usage_rows'] else None
         report.append({'risk_tier': risk_tier, 'harness_digest': digest,
                        'runs': len(group['runs']), 'accepted': accepted, 'merged': len(group['merged']),
-                       'cost_usd_lower_bound': round(group['known_cost'], 9),
+                       'cost_usd_lower_bound': cost, 'usage_rows': group['usage_rows'],
                        'unpriced_rows': group['unpriced_rows'],
                        'cost_per_accepted_usd_lower_bound':
-                           round(group['known_cost'] / accepted, 9) if accepted else None})
+                           round(group['known_cost'] / accepted, 9) if accepted and cost is not None else None})
     return report
 
 
@@ -123,18 +155,14 @@ def run_accepted(telemetry, db, since=None, as_json=False):
     if as_json:
         print(json.dumps(report, indent=2))
     else:
-        print('risk_tier  harness_digest  runs  accepted  merged  cost_usd_lower_bound  unpriced_rows  cost_per_accepted_usd_lower_bound')
+        print('risk_tier  harness_digest  runs  accepted  merged  cost_usd_lower_bound  usage_rows  unpriced_rows  cost_per_accepted_usd_lower_bound')
         for row in report:
+            cost = row['cost_usd_lower_bound']
+            shown_cost = f'{cost:.9f}' if cost is not None else '-'
             print(f"{row['risk_tier'] or '-'}  {row['harness_digest'] or '-'}  {row['runs']}  "
-                  f"{row['accepted']}  {row['merged']}  {row['cost_usd_lower_bound']:.9f}  "
+                  f"{row['accepted']}  {row['merged']}  {shown_cost}  {row['usage_rows']}  "
                   f"{row['unpriced_rows']}  {row['cost_per_accepted_usd_lower_bound']}")
     return 0
-
-
-def _like_prefix(path):
-    """Escape a path before using it as a SQL LIKE directory prefix."""
-    escaped = path.replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_')
-    return escaped.rstrip('/') + '/%'
 
 
 def _add_run(group, run, merged):
