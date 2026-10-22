@@ -760,11 +760,14 @@ def render(value):
         for window in row['windows']:
             rows.append((*head, window['name'], f"{window['used_percent']:g}%", window_length(window['window_minutes']),
                          (window['reset_at'] or '-')[:16].replace('T', ' '), window['pace']['state'], window['pace']['summary']))
-        for name in row['unreported']:
-            rows.append((*head, name, '-', '-', '-', 'unreported', 'missing does not mean 0%'))
-        if not row['windows'] and not row['unreported']:
+        if not row['windows']:
             rows.append((*head, '-', '-', '-', '-', row['status'], row['error'] or ''))
     lines += table(('provider', 'account', 'plan', 'window', 'used', 'length', 'resets', 'pace', 'detail'), rows)
+    # Providers list many optional windows; one line per account keeps the table readable.
+    for row in value['accounts']:
+        if row['unreported']:
+            lines.append(f"{row['provider']}/{row['account']}: {len(row['unreported'])} window(s) not reported "
+                         "(missing does not mean 0%); use --json")
     for row in value['accounts']:
         advice = row['credit_advice']
         if advice['action'] != 'none':

@@ -824,6 +824,8 @@ async function dispatchConfiguredProviderUnchecked(
   const callStarted = Date.now(), validateStarted = performance.now();
   const snapshotMs = performance.now() - snapshotStarted;
   const timeout = timeoutSeconds(input.timeout_seconds ?? policy.defaults.timeout_seconds, input.mode);
+  // A writer works in its worktree, a reader in its cwd; either names the lane's project.
+  const lanesProject = input.cwd === undefined ? route.worktree : providerIdentity.cwd;
   const taskId = namedTaskId ?? `task-${randomUUID().slice(0, 8)}`;
   const owner = executableOwner(root, "skills/orchestrate/scripts/dispatch_run.py");
   const controls = executableOwner(root, "skills/orchestrate/scripts/run_controls.py");
@@ -901,7 +903,7 @@ async function dispatchConfiguredProviderUnchecked(
       routes: checked.routes,
       taskIds: [taskId],
       taskAlias: callerAlias,
-      cwdProjects: input.cwd === undefined ? undefined : { [taskId]: projectRoot(providerIdentity.cwd, env) },
+      cwdProjects: lanesProject === undefined ? undefined : { [taskId]: projectRoot(lanesProject, env) },
       timeout,
     },
     input.prompt === undefined ? [] : [promptPath],
@@ -1091,8 +1093,11 @@ async function dispatchConfiguredBatchUnchecked(
       identifier: FIRST_BATCH_ID,
       routes: checked.routes,
       taskIds: tasks.map((task) => String(task.id)),
-      cwdProjects: Object.fromEntries(tasks.filter((task) => typeof task.cwd === "string")
-        .map((task) => [String(task.id), projectRoot(String(task.cwd), env)])),
+      // A writer works in its worktree, a reader in its cwd; either names the lane's project.
+      cwdProjects: Object.fromEntries(tasks.flatMap((task) => {
+        const directory = task.cwd ?? task.worktree;
+        return typeof directory === "string" ? [[String(task.id), projectRoot(directory, env)]] : [];
+      })),
       timeout: Math.max(...tasks.map((task) => Number(task.timeout))),
     },
     [manifestPath],
