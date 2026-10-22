@@ -1,5 +1,6 @@
 import pytest
 
+from skills._shared import review_terminal
 from skills._shared.review_terminal import normalise_dispatch_review
 
 
@@ -271,3 +272,12 @@ def test_missing_worker_verdict_is_noncertifying_even_with_wrapper_verdict():
     assert leg["status"] == "failed"
     assert leg["reason"] == "no-verdict"
     assert leg["certifying_vote"] is False
+
+
+def test_every_implemented_adapter_has_an_endpoint_provider():
+    # A missing entry makes every review leg for that adapter fail closed (#827).
+    import yaml
+    from pathlib import Path
+    registry = yaml.safe_load((Path(__file__).resolve().parents[1] / "config" / "adapter-compatibility.yaml").read_text())
+    implemented = {name for name, entry in registry["dispatch_registry"].items() if entry["dispatch"] == "implemented"}
+    assert not implemented - set(review_terminal._ENDPOINT_PROVIDERS)
