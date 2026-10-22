@@ -346,6 +346,7 @@ it("exposes only the current tools", async () => {
         "cancel",
         "dispatch",
         "events",
+        "graph",
         "inbox",
         "landing_lease",
         "note",
@@ -376,6 +377,11 @@ it("exposes only the current tools", async () => {
       .toMatchObject({ schema: "fabric.runs.v1", status: "ok", runs: [] });
     expect((await client.callTool({ name: "fabric_events", arguments: {} })).structuredContent)
       .toMatchObject({ schema: "fabric.events.v1", status: "ok", events: [] });
+    const graphs = await client.callTool({ name: "fabric_graph", arguments: { action: "status" } });
+    expect(graphs.structuredContent).toBeUndefined();
+    expect((graphs.content as any[])[0]?.text).toBe("no graphs");
+    expect((await client.callTool({ name: "fabric_graph", arguments: { action: "run" } })).content)
+      .toEqual([{ type: "text", text: expect.stringContaining("graph_input_invalid") }]);
     expect((await client.callTool({ name: "fabric_inbox", arguments: { digest: true } })).structuredContent)
       .toMatchObject({ schema: "fabric.inbox_digest.v1", total: 0, groups: [] });
   } finally {
