@@ -174,6 +174,14 @@ To disable it, remove only the symlink to this hook:
 hook="$(git rev-parse --git-path hooks)/post-merge"; source="$(git rev-parse --show-toplevel)/scripts/hooks/post-merge"; if [ -L "$hook" ] && [ "$(readlink "$hook")" = "$source" ]; then rm "$hook"; fi
 ```
 
+An optional `pre-push` guard is off by default and installs the same way. It
+refuses pushes to the default branch from a linked worktree, non-fast-forward
+updates and deletion of the default branch, and pushed commits that add
+conflict markers. It reads the default branch from `origin/HEAD`, falling back
+to `main` or `master`. Run `scripts/install-harness --platform <platform>
+--pre-push-hook` from the primary checkout (`--no-pre-push-hook` removes its
+own symlink only; it never replaces an existing hook).
+
 For a manual prune after one merge, name each branch that merge brought in:
 
 ```sh

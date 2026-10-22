@@ -142,3 +142,24 @@ it("never truncates terminal lanes needing attention (quarantined, input_require
   expect(defaultListing.out).not.toContain("term-03");
   expect(lines[lines.length - 1]).toBe("1 more; use --all");
 });
+
+it("lanes --wait --summary caps at 20 lines and leaves the omitted lane unacknowledged", () => {
+  const repo = join(root, "repo-summary");
+  mkdirSync(repo, { recursive: true });
+  spawnSync("git", ["init", "-q", repo]);
+  const base = Date.now() - 600_000;
+  for (let i = 1; i <= 21; i++) {
+    createAttempt(repo, `sum-${String(i).padStart(2, "0")}`, "terminal", "ok", new Date(base + i * 1000).toISOString());
+  }
+  const first = lanes(repo, "--wait", "--summary", "--timeout", "0");
+  expect(first.code).toBe(0);
+  const lines = first.out.trim().split("\n");
+  expect(lines.length).toBe(21);
+  expect(lines[20]).toBe("+1 more; run lanes --wait again");
+  const shown = lines.slice(0, 20).map((line) => /sum-\d\d/.exec(line)?.[0]);
+  const second = lanes(repo, "--wait", "--summary", "--timeout", "0");
+  expect(second.out.trim().split("\n").length).toBe(1);
+  expect(shown).not.toContain(/sum-\d\d/.exec(second.out)?.[0]);
+  expect(second.out).toMatch(/sum-\d\d/);
+  expect(lanes(repo, "--summary").code).toBe(2);
+});
