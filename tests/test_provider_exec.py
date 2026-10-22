@@ -3582,6 +3582,61 @@ def test_opencode_disables_fabric_mcp_only_in_sandboxed_lanes(tmp_path, monkeypa
     assert config["permission"]["edit"]["*"] == "deny"
 
 
+@pytest.mark.parametrize("sandboxed", [False, True], ids=["shim", "sandbox-exec"])
+@pytest.mark.parametrize("failure", [None, "missing", "denied", "bad_handshake", "timeout", "sandbox_missing"])
+def test_opencode_writer_preflights_the_configured_fabric_command(tmp_path, monkeypatch, failure, sandboxed):
+    mod = supervisor()
+    native_sandbox = mod._sandbox_exec_path() if sandboxed else None
+    if sandboxed and not native_sandbox:
+        pytest.skip("sandbox-exec unavailable or nested sandbox refused")
+    adapter = mod.profile("opencode")
+    product = tmp_path / "product"
+    wrapper = product / "runtime/fabric/bin/fabric-mcp"
+    wrapper.parent.mkdir(parents=True)
+    wrapper.write_text(
+        "#!" + sys.executable + "\nimport json, os, sys, time\nassert os.environ.get('AGENT_FABRIC_SEAT') == 'opencode'\n"
+        + ("time.sleep(5)\n" if failure == "timeout" else "")
+        + "request = json.loads(sys.stdin.readline())\n"
+        + "print(json.dumps({'jsonrpc': '2.0', 'id': request['id'], 'result': "
+        + ("{}" if failure == "bad_handshake" else
+           "{'protocolVersion': '2024-11-05', 'capabilities': {}, 'serverInfo': {'name': 'fabric', 'version': 'test'}}")
+        + "}), flush=True)\n"
+    )
+    wrapper.chmod(0o644 if failure == "denied" else 0o755)
+    if failure == "missing":
+        wrapper.unlink()
+    monkeypatch.setattr(adapter, "FABRIC_MCP", wrapper, raising=False)
+    monkeypatch.setattr(mod, "MCP_PREFLIGHT_SECONDS", 0.5, raising=False)
+    provider_started = tmp_path / "provider-started"
+    code = ("import json; from pathlib import Path; Path(" + repr(str(provider_started))
+            + ").touch(); print(json.dumps({'type':'result','result':'done'}))")
+    plan = fixture_plan(tmp_path, code, "opencode")
+    plan["mode"] = "worktree_write"
+    # Model and MCP processes both go through this same sandbox boundary.
+    sandbox_log = tmp_path / "sandbox-commands"
+    sandbox = tmp_path / "sandbox-exec"
+    sandbox.write_text('#!/bin/sh\nprintf "%s\\n" "$3" >> ' + shlex.quote(str(sandbox_log))
+                       + '\nshift 2\nexec "$@"\n')
+    sandbox.chmod(0o755)
+    monkeypatch.setattr(mod, "_sandbox_exec_path", lambda: None if failure == "sandbox_missing" else native_sandbox or str(sandbox))
+    plan["applied"]["confinement"] = "sandbox-exec"
+    record = mod.execute(plan, tmp_path / "result.md")
+    config = json.loads(adapter.environment(plan)["OPENCODE_CONFIG_CONTENT"])
+    fabric = config["mcp"]["servers"]["fabric"]
+    assert fabric["command"] == [str(wrapper)]
+    assert fabric["disabled"] is False
+    assert fabric["environment"] == {"AGENT_FABRIC_SEAT": "opencode"}
+    assert record["status"] == ("rejected" if failure else "ok")
+    assert provider_started.exists() is (failure is None)
+    assert record["error_class"] == ("fabric_mcp_unavailable" if failure else "none")
+    if not sandboxed and failure != "sandbox_missing":
+        assert sandbox_log.read_text().splitlines()[0] == str(wrapper)
+    if failure:
+        assert record["error"] == "fabric_mcp_unavailable"
+        assert record["retryable"] is False
+        assert "Node" in record["fix"]
+
+
 def test_opencode_free_tier_refusal_is_model_unavailable(tmp_path):
     code = "import sys; print(\"403 FreeTierError: OpenCode's free tier can only be used from within OpenCode\", file=sys.stderr); sys.exit(1)"
     record = supervisor().execute(
