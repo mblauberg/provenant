@@ -5265,11 +5265,12 @@ def test_claude_resume_preamble_does_not_start_terminal_grace(tmp_path, provider
             advanced.append(True)
             resume.touch()
 
-    code = f"""import json,pathlib,time
+    code = f"""import json,pathlib,sys,time
 emit=lambda e: print(json.dumps(e), flush=True)
 emit({{'type':'system','subtype':'init','model':'claude-opus-5-5','session_id':'s-1'}})
 emit({{'type':'result','subtype':'success','result':'','is_error':False,'num_turns':0}})
 pathlib.Path({str(preamble)!r}).touch()
+print('reloading session', file=sys.stderr, flush=True)  # progress after the marker exists
 while not pathlib.Path({str(resume)!r}).exists():
     time.sleep(0.01)
 emit({{'type':'system','subtype':'init','model':'claude-opus-5-5','session_id':'s-1'}})
