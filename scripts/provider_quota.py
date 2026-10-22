@@ -851,24 +851,41 @@ def reset_text(resets):
     return f"{count} banked reset{'s' if count != 1 else ''}" + (f' ({lead} {day(expiries[0])})' if expiries else '')
 
 
-def render(value):
+def repeats(window, windows):
+    """A `limits` entry (`session:1`) that restates a named window (`five_hour`): same length, use and reset."""
+    def stamp(row):
+        return parse_time(row['reset_at'])
+    return ':' in window['name'] and any(
+        ':' not in other['name'] and other['window_minutes'] == window['window_minutes'] and
+        other['used_percent'] == window['used_percent'] and stamp(other) and stamp(window) and
+        abs((stamp(other) - stamp(window)).total_seconds()) <= 60 for other in windows)
+
+
+def render(value, verbose=False):
     table = _telemetry().table
     lines = [f"Provider quota on {value['host']}" + ('' if value['enabled'] else ' (fetching disabled)')]
     rows = []
     for row in value['accounts']:
         head = (row['provider'], row['account'] + ('*' if row['active'] else ''), row['plan'] or '-')
         for window in row['windows']:
+            if repeats(window, row['windows']):
+                continue
+            pace_state, detail = window['pace']['state'], window['pace']['summary']
+            if window.get('limit_amount') and not window['window_minutes']:  # a dollar budget has no pace
+                pace_state = '-'
+                detail = f"{amount(window['limit_amount'] - window['used_amount'], window.get('currency'))} left; " + \
+                    detail.removesuffix('; window length unreported')
             rows.append((*head, window.get('label') or window['name'], used_text(window),
                          window_length(window['window_minutes']),
-                         (window['reset_at'] or '-')[:16].replace('T', ' '), window['pace']['state'], window['pace']['summary']))
+                         (window['reset_at'] or '-')[:16].replace('T', ' '), pace_state, detail))
         if not row['windows']:
             rows.append((*head, '-', '-', '-', '-', row['status'], row['error'] or ''))
     lines += table(('provider', 'account', 'plan', 'window', 'used', 'length', 'resets', 'pace', 'detail'), rows)
-    # Providers list many optional windows; one line per account keeps the table readable.
-    for row in value['accounts']:
+    # A plan lacks many optional windows, so absence alone is not news: list them only on request.
+    for row in value['accounts'] if verbose else []:
         if row['unreported']:
             lines.append(f"{row['provider']}/{row['account']}: {len(row['unreported'])} window(s) not reported "
-                         "(missing does not mean 0%); use --json")
+                         "(missing does not mean 0%)")
     # Credits and banked resets appear only for an account that has some.
     for row in value['accounts']:
         parts = [credit_text(entry) for entry in row.get('usage_credits') or []]
@@ -912,6 +929,7 @@ def main(argv=None):
     parser = argparse.ArgumentParser(prog='provenant quota', description=__doc__.split('\n\n')[0])
     parser.add_argument('--json', action='store_true')
     parser.add_argument('--refresh', action='store_true', help='fetch now, ignoring the cache period')
+    parser.add_argument('--verbose', action='store_true', help='also list windows the provider did not report')
     args = parser.parse_args(argv)
     try:
         value = report(gather(force=args.refresh))
@@ -921,7 +939,7 @@ def main(argv=None):
     if args.json:
         print(json.dumps(value, indent=2))
     else:
-        render(value)
+        render(value, args.verbose)
     return 0
 
 
