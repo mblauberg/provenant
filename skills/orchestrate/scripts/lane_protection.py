@@ -91,7 +91,9 @@ def check(common, tip, base="HEAD"):
 
     A commit may also match one released tip's complete protected tree. That tip must not be
     an ancestor of the base, and its protected tree must differ from the base's, so an old
-    release cannot vouch for restoring content the base has already moved past.
+    release cannot vouch for restoring content the base has already moved past. A release
+    already in the commit's history stays subject to the merge-taking rules above, so later
+    merges cannot restore an older released tree after taking the base's newer versions.
     """
     tip, base = commit(common, tip), commit(common, base)
     tips = released(common)
@@ -119,9 +121,10 @@ def check(common, tip, base="HEAD"):
             continue
         if reviewed_trees is None:
             # Membership in covered excludes missing tips and tips already in the base's history.
-            reviewed_trees = [entries(tip) for tip in tips
+            reviewed_trees = [(tip, entries(tip)) for tip in tips
                               if tip in covered and entries(tip) != entries(base)]
-        if entries(sha) in reviewed_trees:
+        if any(entries(sha) == tree and git(common, "rev-list", "--max-count=1", reviewed, "^" + sha)
+               for reviewed, tree in reviewed_trees):
             vouched[sha] = inherited | changed
             continue
         # The base's version is trusted, as a merge or rebase from the base takes it.
