@@ -815,9 +815,16 @@ def public_snapshot(value):
     result = {key: value[key] for key in ('schema', 'provider', 'account', 'host', 'plan', 'active', 'priority',
                                          'observed_at', 'attempted_at', 'status', 'error', 'source', 'unreported')
               if key in value}
-    result['windows'] = [{key: row[key] for key in ('name', 'used_percent', 'window_minutes', 'reset_at',
-                                                   'raw_kind', 'window_start') if key in row}
+    quota = quota_owner()
+    result['windows'] = [{**{key: row[key] for key in ('name', 'used_percent', 'window_minutes', 'reset_at',
+                                                     'raw_kind', 'window_start') if key in row},
+                          **quota.window_amounts(row), **({'advisory': True} if row.get('advisory') is True else {})}
                          for row in value.get('windows', []) if isinstance(row, dict)]
+    for key, extra in (('usage_credits', quota.normalise_usage_credits(value.get('usage_credits'))),
+                       ('resets', quota.normalise_resets(value.get('resets'))),
+                       ('allowance', quota.normalise_allowance(value.get('allowance')))):
+        if extra:
+            result[key] = extra
     credits = value.get('credits')
     if isinstance(credits, dict) and type(credits.get('reset_credits')) is int and credits['reset_credits'] >= 0:
         result['credits'] = {'reset_credits': credits['reset_credits']}
