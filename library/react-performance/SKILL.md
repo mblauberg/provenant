@@ -13,9 +13,11 @@ docs.
 
 ## Measure first
 
-- **Profile the production build** (`vite build`, then `vite preview`). Dev mode
-  doubles renders under Strict Mode and loads modules unbundled, so its numbers
-  mislead.
+- **Profile a production profiling build** (`vite build`, then `vite preview`).
+  A plain production build strips React's profiling instrumentation, so alias
+  `react-dom/client` to `react-dom/profiling` in the Vite config for the
+  profiling run. Dev mode doubles renders under Strict Mode and loads modules
+  unbundled, so its numbers mislead.
 - **Use the right tools:** React DevTools Profiler shows which component
   rendered and why. Chrome's Performance panel shows React's Scheduler and
   Components tracks from 19.2. INP and LCP come from field data or `web-vitals`.
