@@ -12,6 +12,13 @@ export interface LaneWaitDependencies {
   fail: (text: string) => void;
   sleep: (ms: number) => Promise<void>;
   pollMs?: number;
+  /**
+   * Hold between reads until something may have changed or `ms` passes.
+   * Absent, the wait sleeps a fixed `pollMs`.
+   */
+  idle?: (ms: number) => Promise<void>;
+  /** Longest idle between reads when `idle` is set. */
+  fallbackMs?: number;
   /** Hold the report until every listed lane is finished or needs input. */
   all?: boolean;
   /** Stop waiting after this long; the wait then exits 124. */
@@ -81,7 +88,8 @@ export async function waitForLanes(deps: LaneWaitDependencies): Promise<number> 
       await write(timeout());
       return 124;
     }
-    await sleep(deps.pollMs ?? 2000);
+    if (deps.idle) await deps.idle(Math.max(0, Math.min(deps.fallbackMs ?? 30_000, deadline - now())));
+    else await sleep(deps.pollMs ?? 2000);
     const next = await deps.read();
     if (next.status === "ok") current = next;
   }

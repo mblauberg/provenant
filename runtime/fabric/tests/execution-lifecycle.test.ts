@@ -771,6 +771,27 @@ describe("dispatch CLI", () => {
     }
   }, 25_000);
 
+  it("awaits a lane an MCP host of the same agent launched from another project", async () => {
+    // The MCP server runs in its own directory; the agent's shell is elsewhere.
+    const elsewhere = realpathSync(mkdtempSync(join(temporaryDirectory, "shell-elsewhere-")));
+    const store = new Store(databasePath(ownerEnvironment));
+    store.announce(identity);
+    store.announce({ ...identity, project: elsewhere, cwd: elsewhere });
+    store.close();
+    const started = await dispatchConfiguredBatch({ tasks: [{ id: "seat-lane", adapter: "codex",
+      prompt: "sleep with provider" }], wait_seconds: 0 }, { ...identity, registeredProjects: [workspace, elsewhere] },
+    new AbortController().signal, ownerEnvironment);
+    expect(started.status, JSON.stringify(started)).toBe("running");
+    spawnedPids.push(Number(started.pid));
+    const run = listRecordedRuns(workspace).find((record) => record.run_id === started.id)!;
+    await waitForFile(join(run.run_dir, "sleeping.pid"));
+    const poll = spawnSync(process.execPath, ["--import", tsxLoader, join(packageRoot, "src/cli.ts"),
+      "lanes", "--wait", "--all", "--timeout", "0"], { cwd: elsewhere, encoding: "utf8", env: ownerEnvironment, timeout: 15_000 });
+    expect(poll.stdout).not.toContain("no lanes are running");
+    expect(poll.status, poll.stdout + poll.stderr).toBe(124);
+    expect(poll.stdout).toContain(String(started.id));
+  }, 25_000);
+
   it("awaits a writer lane from the project of its worktree", async () => {
     const project = join(temporaryDirectory, "writer-target");
     const worktree = join(temporaryDirectory, "writer-target-worktree");
