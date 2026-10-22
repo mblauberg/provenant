@@ -144,7 +144,8 @@ never the host name: source and session for `session.start`; the receipt's
 resolved path for `lane.attempt`, so projects sharing run ids stay apart;
 otherwise `source_ref`, time, linked fields and attributes. Collector refs are
 `path@offset#record`, so identical records on one line keep their count.
-Re-ingest therefore adds nothing, even after a `local_host` rename. Opening a
+Re-ingest therefore adds nothing, even after a `local_host` rename, which
+leaves earlier rows under their old id for readers to map. Opening a
 ledger from an earlier build re-keys its events once under a write lock,
 keeping the earliest of any duplicates, so concurrent openers cannot race.
 
@@ -639,7 +640,7 @@ provenant stats --hosts studio peer --json
 ```
 
 Host IDs come from the existing `hosts.json` `local_host`, defaulting to the
-hostname for telemetry. With no selectors, stats remains local. With no peers,
+hostname's slug as for fabric (see [fabric hosts](fabric-hosts.md)). With no selectors, stats remains local. With no peers,
 `--hosts all` also remains local. SSH uses the existing peer transport and its
 configured deadlines; no daemon, HTTP server or sync service is required.
 
@@ -691,8 +692,9 @@ lines into metadata events (see
 [Events, change markers and comparison](#events-change-markers-and-comparison)).
 
 Source: [tools/otlp-collector](../../tools/otlp-collector/otlp-collector.swift),
-Swift with no packages. It listens on `127.0.0.1:4318` only, through launchd
-socket activation, so it costs nothing while idle. It exits after
+Swift with no packages. It listens on `127.0.0.1` only, on port 4318 unless
+`PROVENANT_OTEL_PORT` names another, through launchd socket activation, so it
+costs nothing while idle. It exits after
 `PROVENANT_OTEL_IDLE_MINUTES` (default 10) without a connection and launchd
 starts it again on the next one. Foreground mode for hosts without launchd and
 for tests: `otlp-collector --listen 127.0.0.1:PORT [--idle-seconds N]`.
@@ -706,8 +708,12 @@ scripts/install-harness --uninstall-otel-collector           # removes agent and
 
 The installer writes `~/Library/LaunchAgents/com.provenant.otlp-collector.plist`,
 installs `provenant-otlp-collector` beside the `provenant` command and loads the
-agent with `launchctl bootstrap`. `PROVENANT_OTEL_NO_LAUNCHCTL=1` writes the
-files without touching launchd. Uninstall keeps stored data. The installer never
+agent with `launchctl bootstrap`. `PROVENANT_OTEL_PORT` (an integer from 1 to
+65535, default 4318) sets the listening port in the plist; change it by
+reinstalling. `PROVENANT_OTEL_NO_LAUNCHCTL=1` writes the files without touching
+launchd. Install exits non-zero, with the reason, on a host other than macOS,
+when `swiftc` is missing (install the Xcode command line tools) or when the
+port is invalid. Uninstall works on any host and keeps stored data. The installer never
 edits `~/.claude/settings.json` or `~/.codex/config.toml`; add the exports
 yourself.
 
@@ -720,6 +726,9 @@ directory 0700; state root as in `scripts/telemetry.py`). Replies are `200 {}`,
 `PROVENANT_OTEL_MAX_BODY_BYTES` (default 4 MiB) and `411` for chunked bodies.
 Files older than `PROVENANT_OTEL_RETENTION_DAYS` (default 30) are pruned at
 start and when the day changes.
+
+The examples below use the default port; with `PROVENANT_OTEL_PORT` set, use
+that port instead.
 
 Claude Code (environment, for example in a shell profile):
 

@@ -81,24 +81,42 @@ def released(common):
 
 
 def check(common, tip, base="HEAD"):
-    """Return tip's SHA when no commit in tip ^base makes an unreleased protected change."""
+    """Return tip's SHA when no commit in tip ^base makes an unreleased protected change.
+
+    A merge may also take a protected path's version from a parent in the range that is not held,
+    but only where a released commit in the range introduced that version, as a landing train's
+    --no-ff merge of a released tip does. Older versions, such as an outside parent's or a stale
+    branch's, never count, so a merge cannot revert a protected path.
+    """
     tip, base = commit(common, tip), commit(common, base)
-    trusted = covered = None
-    held = []
-    for sha in git(common, "rev-list", tip, "^" + base).split():
+    tips = released(common)
+    covered = set(git(common, "rev-list", "--ignore-missing", *tips, "^" + base).split()) if tips else set()
+    trees, held = {}, []
+    # Each judged, unheld range commit maps to the protected paths whose version a released commit introduced.
+    vouched = {}
+
+    def entries(rev):
+        if rev not in trees:
+            trees[rev] = protected(common, rev)
+        return trees[rev]
+
+    # Parents first, so each merge parent in the range is judged before the merge.
+    for line in git(common, "rev-list", "--topo-order", "--reverse", "--parents", tip, "^" + base).splitlines():
+        sha, *parents = line.split()
+        inside = [parent for parent in parents if parent in vouched]
         # -m compares a merge with each parent, so its resolution counts as well.
         names = git(common, "diff-tree", "--root", "-m", "-r", "--no-commit-id", "--name-only", "-z", sha)
         changed = {name for name in names.split("\0") if name and _instruction_path(name)}
-        if not changed:
+        inherited = set().union(*(vouched[parent] for parent in inside)) - changed
+        if sha in covered or not changed:
+            vouched[sha] = inherited | (changed if sha in covered else set())
             continue
-        trusted = protected(common, base) if trusted is None else trusted
-        entries = protected(common, sha)
-        if all(entries.get(name) == trusted.get(name) for name in changed):
-            continue  # It takes the base's version, as a merge or rebase from the base does.
-        if covered is None:
-            tips = released(common)
-            covered = set(git(common, "rev-list", "--ignore-missing", *tips, "^" + base).split()) if tips else set()
-        if sha not in covered:
+        # The base's version is trusted, as a merge or rebase from the base takes it.
+        taken = {name for name in changed if len(parents) > 1 and any(
+            name in vouched[parent] and entries(parent).get(name) == entries(sha).get(name) for parent in inside)}
+        if all(name in taken or entries(sha).get(name) == entries(base).get(name) for name in changed):
+            vouched[sha] = inherited | taken
+        else:
             held.append(sha)
     if held:
         raise ProtectionError(

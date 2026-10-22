@@ -18,6 +18,12 @@ fi
 unset GIT_DIR GIT_WORK_TREE GIT_COMMON_DIR GIT_INDEX_FILE
 unset GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES
 unset GIT_CEILING_DIRECTORIES GIT_DISCOVERY_ACROSS_FILESYSTEM
+# Caller config overlays can set safe.directory=* or redirect Git's config files.
+unset GIT_CONFIG_COUNT GIT_CONFIG_PARAMETERS GIT_CONFIG_GLOBAL GIT_CONFIG_SYSTEM GIT_CONFIG_NOSYSTEM
+while IFS= read -r git_config_variable; do unset "$git_config_variable"; done \
+  < <(compgen -A variable GIT_CONFIG_KEY_)
+while IFS= read -r git_config_variable; do unset "$git_config_variable"; done \
+  < <(compgen -A variable GIT_CONFIG_VALUE_)
 PROVENANT_GIT_BIN=""
 for git_candidate in \
   /opt/homebrew/bin/git /usr/local/bin/git /opt/local/bin/git /usr/bin/git /bin/git; do
@@ -26,8 +32,10 @@ for git_candidate in \
     break
   fi
 done
+# Never fall back to PATH: a caller-controlled git could forge checkout identity.
 [[ -n "$PROVENANT_GIT_BIN" ]] || {
-  echo "check-harness: trusted Git executable is unavailable" >&2
+  echo "check-harness: trusted Git executable is unavailable; install Git at one of" \
+    "/opt/homebrew/bin/git, /usr/local/bin/git, /opt/local/bin/git, /usr/bin/git or /bin/git" >&2
   exit 3
 }
 export PROVENANT_GIT_BIN

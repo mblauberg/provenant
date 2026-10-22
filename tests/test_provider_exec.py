@@ -8202,6 +8202,92 @@ def test_release_requires_the_reviewed_tip_and_covers_nothing_after_it(tmp_path,
     assert inside.returncode == 1
 
 
+OTHER_SKILL = ".agents/skills/other/SKILL.md"
+
+
+def released_train(repo, lane):
+    """Release a lane tip that adds a skill, then land it on main with a train's --no-ff merge."""
+    (lane / OTHER_SKILL).parent.mkdir(parents=True)
+    (lane / OTHER_SKILL).write_text("reviewed\n")
+    git(lane, "add", OTHER_SKILL)
+    git(lane, "commit", "-q", "-m", "reviewed skill")
+    released = protection(lane, "--release", "--tip", head_of(lane), "--actor", "chair", "--reason", "ok")
+    assert released.returncode == 0, released.stderr
+
+
+def test_a_landing_train_merge_of_a_released_tip_passes_and_so_do_later_merges(tmp_path, monkeypatch):
+    monkeypatch.delenv("PROVENANT_ATTEMPT_MARKER", raising=False)
+    repo, lane = instruction_lane(tmp_path)
+    leased = head_of(repo, "main")
+    released_train(repo, lane)
+    git(repo, "merge", "-q", "--no-ff", "-m", "Merge #1", "lane")
+    checked = landing(repo, head_of(repo), leased)
+    assert checked.returncode == 0, checked.stderr
+    # A later pull request cut before the release lands on top without touching .agents/.
+    later = side_commit(repo, head_of(repo, "main~2"), "later\n", path="later.txt")
+    git(repo, "merge", "-q", "--no-ff", "-m", "Merge #2", later)
+    checked = landing(repo, head_of(repo), leased)
+    assert checked.returncode == 0, checked.stderr
+
+
+@pytest.mark.parametrize("history", ["merge-edits-a-skill", "unreleased-lane", "stale-branch-revert",
+                                     "ancestor-parent-revert"])
+def test_a_landing_train_merge_still_holds_protected_content_no_released_parent_has(
+    tmp_path, monkeypatch, history,
+):
+    monkeypatch.delenv("PROVENANT_ATTEMPT_MARKER", raising=False)
+    repo, lane = instruction_lane(tmp_path)
+    leased = head_of(repo, "main")
+    if history == "merge-edits-a-skill":
+        released_train(repo, lane)
+        git(repo, "merge", "-q", "--no-ff", "--no-commit", "lane")
+        (repo / OTHER_SKILL).write_text("resolved by the merge\n")
+        git(repo, "commit", "-q", "-am", "Merge #1")
+        held = head_of(repo)
+    elif history == "unreleased-lane":
+        (lane / SKILL).write_text("unreviewed\n")
+        git(lane, "commit", "-q", "-am", "unreviewed skill")
+        held = head_of(lane)
+        git(repo, "merge", "-q", "--no-ff", "-X", "theirs", "-m", "Merge #1", "lane")
+    else:
+        released_train(repo, lane)
+        git(repo, "merge", "-q", "--no-ff", "-m", "Merge #1", "lane")
+        initial = head_of(repo, "main~2")
+        if history == "stale-branch-revert":
+            # A branch cut before main's skill change resolves the skill back to its version.
+            later = side_commit(repo, initial, "later\n", path="later.txt")
+            git(repo, "merge", "-q", "--no-ff", "--no-commit", later)
+            (repo / SKILL).write_text("v1\n")
+            git(repo, "commit", "-q", "-am", "Merge #2")
+        else:
+            # A merge with an older ancestor of the base as a parent takes that ancestor's skill.
+            reverted = side_commit(repo, head_of(repo), "v1\n")
+            tree = head_of(repo, reverted + "^{tree}")
+            merge = git(repo, "commit-tree", tree, "-p", head_of(repo), "-p", initial, "-m", "Merge #2").strip()
+            git(repo, "reset", "-q", "--hard", merge)
+        held = head_of(repo)
+    refused = landing(repo, head_of(repo), leased)
+    assert refused.returncode == 1
+    assert refused.stderr.startswith("protected_instructions_changed: unreleased commits")
+    assert held in refused.stderr
+
+
+def test_a_malformed_release_record_fails_even_a_protected_clean_range(tmp_path, monkeypatch):
+    monkeypatch.delenv("PROVENANT_ATTEMPT_MARKER", raising=False)
+    repo, _ = instruction_lane(tmp_path)
+    leased = head_of(repo, "main")
+    (repo / "later.txt").write_text("later\n")
+    git(repo, "add", "later.txt")
+    git(repo, "commit", "-q", "-m", "plain change")
+    assert landing(repo, head_of(repo), leased).returncode == 0
+    releases = repo / ".git/provenant-instruction-checks/releases"
+    releases.mkdir(parents=True, exist_ok=True)
+    (releases / "bad.json").write_text('{"tip": "not-a-sha"}')
+    refused = landing(repo, head_of(repo), leased)
+    assert refused.returncode != 0
+    assert "invalid release record bad.json" in refused.stderr
+
+
 def test_a_writer_cannot_take_a_branch_another_checkout_holds(tmp_path):
     _, lane = instruction_lane(tmp_path)
     git(lane, "symbolic-ref", "HEAD", "refs/heads/main")

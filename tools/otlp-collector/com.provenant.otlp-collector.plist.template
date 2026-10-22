@@ -14,7 +14,7 @@
     <key>Listeners</key>
     <dict>
       <key>SockNodeName</key><string>127.0.0.1</string>
-      <key>SockServiceName</key><string>4318</string>
+      <key>SockServiceName</key><string>@PORT@</string>
       <key>SockType</key><string>stream</string>
       <key>SockFamily</key><string>IPv4</string>
     </dict>

@@ -46,15 +46,19 @@ atexit.register(_remove_session_scratch)
 
 
 def _keep_tmpdir_outside_git() -> None:
-    """Relocate TMPDIR when it sits inside a git work tree.
+    """Keep test scratch in TMPDIR without inheriting the checkout's Git identity.
 
-    A dispatched agent's TMPDIR is under the live product checkout's
-    `.agent-run`, so every temp workspace would resolve its run root there.
+    A lane's writable TMPDIR lies under `.agent-run`. Without a discovery
+    boundary, fixture source files inherit that directory's ignore rule and
+    generated-file guards reject them. Moving to /tmp escapes the sandbox.
     """
     probe = subprocess.run(["git", "rev-parse", "--git-dir"], cwd=tempfile.gettempdir(),
                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     if probe.returncode == 0:
-        relocated = Path(tempfile.mkdtemp(prefix="provenant-pytest-", dir="/tmp")).resolve()
+        relocated = Path(tempfile.mkdtemp(prefix="provenant-pytest-")).resolve()
+        # An existing invalid gitdir stops discovery at this scratch boundary.
+        # Nested fixture repositories can still initialise their own .git.
+        (relocated / ".git").write_text("gitdir: .\n", encoding="utf-8")
         os.environ["TMPDIR"] = str(relocated)
         tempfile.tempdir = None
         _SESSION_SCRATCH.append(relocated)
