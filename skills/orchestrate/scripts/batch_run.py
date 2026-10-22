@@ -54,7 +54,9 @@ from dispatch_run import (
     create_cancellation_marker,
     remove_cancellation_marker,
     prompt_temp_roots,
+    run_identity,
 )
+import run_lineage
 from attempt_evidence import AttemptEvidenceError as SharedAttemptEvidenceError, canonical_success_status, validate_successful_attempt
 from secret_scan import scan_inputs
 from _shared.custody import (
@@ -811,6 +813,7 @@ def batch(args: argparse.Namespace) -> int:
         print(json.dumps({"schema_version": 1, "status": "invalid_manifest", "message": str(exc)}, sort_keys=True))
         return 2
 
+    run_lineage.ensure_nested_owner(run_dir, "batch")
     rejected: dict[str, dict[str, Any]] = {}
     for task in tasks:
         check = dict(task)
@@ -873,9 +876,11 @@ def batch(args: argparse.Namespace) -> int:
     try:
         try:
             run_dir = _validate_run_dir(args.run_dir)
+            run_lineage.record_owner(run_dir)
+            run_lineage.register_run(run_dir, run_identity(run_dir))
             reconcile_manifest(run_dir, batch_lock)
             # The batch lock is the append handle; do not reopen MANIFEST.md.
-        except (BatchInputError, AttemptEvidenceError, OSError) as exc:
+        except (BatchInputError, AttemptEvidenceError, OSError, ValueError) as exc:
             print(json.dumps({"schema_version": 1, "status": "custody_preflight_failed",
                               "message": str(exc)}, sort_keys=True))
             return 2

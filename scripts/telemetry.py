@@ -136,7 +136,8 @@ def connect():
     usage_columns = {row[1] for row in db.execute('PRAGMA table_info(usage)')}
     for name, kind in (('run_id', 'TEXT'), ('task_id', 'TEXT'), ('attempt', 'INTEGER'),
                        ('task_class', 'TEXT'), ('route', 'TEXT'), ('duration_ms', 'INTEGER'),
-                       ('provider_ms', 'INTEGER')):
+                       ('provider_ms', 'INTEGER'), ('parent_run_id', 'TEXT'),
+                       ('parent_task_id', 'TEXT'), ('parent_attempt', 'INTEGER')):
         if name not in usage_columns:
             db.execute(f'ALTER TABLE usage ADD COLUMN {name} {kind}')
     if version in (1, 2):
@@ -748,12 +749,15 @@ def ingest_document(db, source, path):
         started, ended = stamp_ms(row.get('started_at')), stamp_ms(row.get('ended_at'))
         provider_ms = number(((row.get('timing') or {}).get('phases') or {}).get('provider'))
         requested_route = row.get('requested_route') or {}
+        parent = row.get('parent') or {}
         if not row.get('usage'):
             if input_count is not None:
                 input_count = max(0, input_count - (cached or 0) - (written or 0))
             if output is not None and adapter in {'codex', 'claude', 'cursor'}:
                 output = max(0, output - (reasoning or 0))
         fields = dict(session=row.get('session_id'), run_id=row.get('run_id'),
+                      parent_run_id=parent.get('run_id'), parent_task_id=parent.get('task_id'),
+                      parent_attempt=parent.get('attempt'),
                       task_id=row.get('task_id'), attempt=row.get('attempt'), lane='/'.join(str(row.get(k, '')) for k in ('run_id','task_id','attempt')),
                       graph_node=row.get('graph_node'), adapter=adapter,
                       provider=provenance.get('provider') or PROVIDERS.get(adapter, adapter),
@@ -778,7 +782,10 @@ def ingest_document(db, source, path):
                       # A receipt without a profile ran the default (balanced) harness profile.
                       attrs={**{key: fields[key] for key in ('adapter', 'effort', 'attempt', 'status', 'error_class',
                                                              'task_class', 'route', 'duration_ms')},
-                             'profile': profile.get('preset'), 'profile_digest': profile.get('digest')},
+                             'profile': profile.get('preset'), 'profile_digest': profile.get('digest'),
+                             **({'parent': parent} if parent else {}),
+                             **({'children': [{key: child.get(key) for key in ('run_id', 'task_id', 'attempt', 'status')}
+                                              for child in row['children']]} if row.get('children') else {})},
                       harness_rev=provenance.get('harness_rev'), **fields)
     else:
         entries = row.get('routes', {}) if source == 'route_health' else row.get('cooldowns', {})
@@ -1221,6 +1228,8 @@ def stats(db, since=None, prices=None, *, summary=False, until=None):
     report = {'schema_version': 2, 'since': since, 'host': host_id(),
             'usage': aggregate(usage, ('provider', 'adapter', 'model'), prices, free_patterns),
             'usage_per_day': aggregate(usage, ('day', 'provider', 'adapter', 'account'), prices, free_patterns),
+            'usage_by_parent': aggregate([row for row in attributed if row['source'] == 'fabric' and row.get('parent_run_id')],
+                                         ('parent_run_id', 'parent_task_id', 'parent_attempt'), prices, free_patterns),
             'outcomes': outcomes([row for row in attributed if row['source'] == 'fabric']),
             # One overall group each, for before/after comparison; percentiles are never averaged.
             'lane_totals': outcomes([{**row, **dict.fromkeys(OUTCOME_KEYS)}

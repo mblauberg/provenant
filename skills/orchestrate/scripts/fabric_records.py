@@ -607,6 +607,7 @@ def append_index(row, run_dir, *, root=None):
         ):
             result_sha = "sha256:" + hashlib.sha256(candidate.read_bytes()).hexdigest()
     entry = {
+        **({"parent": row["parent"]} if row.get("parent") else {}),
         "run_id": row["run_id"],
         "task_id": row["task_id"],
         "attempt": row["attempt"],

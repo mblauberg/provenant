@@ -1770,3 +1770,37 @@ def test_a_transcript_swapped_for_a_link_after_discovery_is_never_read(tmp_path,
     jsonl(transcript, claude_turn('s', 'REPLACED'))
     telemetry.ingest(db)
     assert db.execute("SELECT COUNT(*) FROM usage WHERE source='claude'").fetchone()[0] == 0
+
+
+def test_nested_lineage_reaches_usage_events_and_parent_stats(tmp_path):
+    project = tmp_path / 'project'
+    project.mkdir()
+    state = tmp_path / 'state'
+    state.mkdir()
+    with sqlite3.connect(state / 'fabric.sqlite3') as db:
+        db.execute('CREATE TABLE agents(project TEXT)')
+        db.execute('INSERT INTO agents VALUES (?)', (str(project),))
+    parent = {'run_id': 'mcp-parent', 'task_id': 'writer', 'attempt': 2, 'run_dir': str(project)}
+    path = project / '.agent-run/runs/20261022-1000-dispatch-child-abc/tasks/junior/attempt-001/attempt.json'
+    write_json(path, {'schema': 'fabric.attempt.v1', 'run_id': 'mcp-child', 'task_id': 'junior',
+                     'attempt': 1, 'parent': parent, 'children': [{'run_id': 'mcp-grandchild', 'task_id': 'bulk',
+                         'attempt': 1, 'status': 'failed', 'error': 'PRIVATE_CHILD_ERROR'}],
+                     'status': 'ok', 'state': 'terminal',
+                     'cwd': str(project), 'ended_at': '2026-10-22T01:00:00Z',
+                     'provenance': {'requested': {'adapter': 'codex'}, 'resolved_model': 'gpt-6.1-sol'},
+                     'usage': {'input_tokens': 10, 'cache_read_tokens': 0, 'cache_write_tokens': 0,
+                               'output_tokens': 5, 'reasoning_tokens': 0}})
+    result = cli(tmp_path, 'telemetry', 'ingest')
+    assert result.returncode == 0, result.stderr
+    with sqlite3.connect(state / 'telemetry.sqlite3') as db:
+        assert db.execute('SELECT parent_run_id,parent_task_id,parent_attempt FROM usage').fetchall() == [
+            ('mcp-parent', 'writer', 2)]
+        attrs = json.loads(db.execute("SELECT attrs FROM events WHERE kind='lane.attempt'").fetchone()[0])
+        assert attrs['parent'] == parent
+        assert attrs['children'] == [{'run_id': 'mcp-grandchild', 'task_id': 'bulk', 'attempt': 1, 'status': 'failed'}]
+        assert 'PRIVATE_CHILD_ERROR' not in '\n'.join(db.iterdump())
+    result = cli(tmp_path, 'stats', '--json')
+    assert result.returncode == 0, result.stderr
+    groups = json.loads(result.stdout)['usage_by_parent']
+    assert [(row['parent_run_id'], row['parent_task_id'], row['parent_attempt'], row['output_tokens'])
+            for row in groups] == [('mcp-parent', 'writer', 2, 5)]

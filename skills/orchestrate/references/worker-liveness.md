@@ -113,6 +113,30 @@ do not replace the Git and disk instruction check with a tamper failure.
 An adopted orphan it cannot attribute to the attempt stays a zombie until the
 owner exits: reaping it blindly could collect another thread's child.
 
+Nested dispatch and batch are supported from worker lanes. The provider gets
+`PROVENANT_PARENT_ATTEMPT`, containing the owning `run_id`, `task_id`, numeric
+`attempt` and absolute `run_dir`. Child run receipts and attempt rows retain
+this object as `parent`; the parent attempt lists child run and task identities
+in `children`. Registration uses a journal in the parent's private attempt
+`tmp/children`, so a sandboxed worker need not write the parent's canonical
+receipt. The owner copies the journal into its attempt before pruning temp
+files and serialises registration with terminal publication.
+
+A direct nested CLI re-executes in its own process group with a fresh run token
+in its initial environment, then publishes `dispatch-owner.json` under run
+custody. It remains a foreground command. This supplies the same PID, start
+time and token evidence used to spare Fabric-launched owners. A busy caller
+cannot replace the active owner's record. Child failures and missing terminal
+evidence are named in the parent's `error`; they do not change the status
+implied by the parent's own provider exit. Child entries are observations at
+publication time, so a child still running when its parent ends stays running
+in that retained snapshot.
+Peer placement carries the parent identity as transport metadata. The receiving
+owner retains it without writing the source host's files; the source records
+the qualified child identity and refreshes its status before publishing the
+parent's terminal attempt. A failed peer status read is named as missing
+completion evidence and preserves the parent's own provider status.
+
 ## Waiting from inside a sub-agent
 
 A sub-agent that ends its turn is finished. Its result returns to the caller at

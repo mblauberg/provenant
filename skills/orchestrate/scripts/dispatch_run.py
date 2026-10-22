@@ -64,6 +64,7 @@ import secret_scan
 import exec_routing
 import context_usage
 import attempt_storage
+import run_lineage
 from fabric_records import pacing_policy, identity_resolver, render_digest, write_cooldown, write_route_health, append_index, TERMINAL_STATUSES
 from _shared.custody import (
     OwnedFileError, OwnedLinkError, atomic_write_contained, contained_regular_path,
@@ -1745,7 +1746,9 @@ def contract_row(args,run_dir,number,attempt_dir,plan,started_at):
         note = f'local fallback from {placement["from_host"]}: {placement["reason"]}' + (f': {placement["detail"]}' if placement.get('detail') else '')
         if note not in plan.setdefault('warnings', []):
             plan['warnings'].append(note)
-    return {"schema":"fabric.attempt.v1", **attempt_scope(args,number), **({'placement_fallback': placement} if placement else {}),"run_id":plan.get("run_id") or run_identity(run_dir),"task_id":args.task_id,"task_class":task_class,
+    lineage = run_lineage.fields(run_dir) if (run_dir / "RUN_RECEIPT.json").exists() else run_lineage.fields()
+    children = run_lineage.children(run_dir, args.task_id, number)
+    return {"schema":"fabric.attempt.v1", **attempt_scope(args,number), **lineage, **({"children": children} if children else {}), **({'placement_fallback': placement} if placement else {}),"run_id":plan.get("run_id") or run_identity(run_dir),"task_id":args.task_id,"task_class":task_class,
         **({"batch_id":args.batch_id} if getattr(args,"batch_id",None) else {}),"profile":profile_resolution(args),
         "attempt":number,"state":"running","status":None,"usage_source":"missing","mode":args.access_mode,"cwd":plan.get("cwd") or str(Path.cwd().resolve()),
         "workspace_root":plan.get("workspace_root") or str(Path(getattr(args,"workspace_root",None) or Path.cwd()).resolve()),
@@ -1764,14 +1767,22 @@ def contract_row(args,run_dir,number,attempt_dir,plan,started_at):
 
 def publish_contract(run_dir,row):
     row["run_dir"] = str(run_dir)
-    row["digest"]=render_digest(row)
     path=run_dir/row["paths"]["receipt"]
     ensure_owned_directory(run_dir,path.parent)
     with attempt_custody(run_dir, path):
-        write_owned(run_dir,path,json.dumps(row,indent=2)+"\n")
+        with run_lineage.journal_custody(run_dir, row["task_id"], row["attempt"]):
+            children = run_lineage.children(run_dir, row["task_id"], row["attempt"])
+            if children:
+                row["children"] = children
+            if row["state"] == "terminal":
+                run_lineage.annotate_child_errors(row)
+            row["digest"]=render_digest(row)
+            write_owned(run_dir,path,json.dumps(row,indent=2)+"\n")
 
 
 def terminal_contract(args,run_dir,legacy,adapter,number,attempt_dir):
+    run_lineage.refresh_external(run_dir, args.task_id, number, lambda ids:
+        _fabric_hosts_owner().lane_owner().client_call("status", str(Path.cwd()), {"ids": ids}, federated_read=True))
     row=contract_row(args,run_dir,number,attempt_dir,getattr(args,"_last_plan",{}),legacy["started_at"])
     status=adapter.get("status")
     if legacy["outcome"] in {"result_invalid_path","result_integrity_error","adapter_receipt_invalid","manifest_write_error","terminal_envelope_invalid"}: status="failed"
@@ -1810,6 +1821,7 @@ def terminal_contract(args,run_dir,legacy,adapter,number,attempt_dir):
     if not legacy.get("result"): row["paths"]["result"]=None
     row["legacy_attempt_path"]=legacy["attempt_path"]
     row["requested_route"]=legacy["requested_route"]
+    run_lineage.annotate_child_errors(row)
     return row
 
 
@@ -2358,6 +2370,8 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
                     args.resume_warning=context_usage.resume_warning(previous_row,plan["adapter"],
                         context_usage.effective_ceiling(plan["applied"]),args.resume,task_id=advice_task)
                     if args.resume_warning: plan["warnings"].insert(0,args.resume_warning)
+                plan["attempt_identity"] = {"run_id": run_identity(run_dir, run_receipt),
+                    "task_id": args.task_id, "attempt": attempt_number, "run_dir": str(run_dir)}
                 active = contract_row(args,run_dir,attempt_number,attempt_dir,plan,started_at)
                 active["requested_route"] = requested_route
                 spawn_started = time.monotonic()
@@ -2524,6 +2538,11 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
                     for name in list(provider_environment):
                         if name.startswith(("PROVENANT_RUN_", "PROVENANT_PREFLIGHT_")):
                             provider_environment.pop(name)
+                    provider_environment[run_lineage.PARENT_ENV] = json.dumps({
+                        "run_id": run_identity(run_dir, run_receipt), "task_id": args.task_id,
+                        "attempt": attempt_number, "run_dir": str(run_dir)})
+                    provider_environment.pop("PROVENANT_PARENT_REMOTE", None)
+                    ensure_owned_directory(run_dir, attempt_dir / "tmp" / "children")
                     if os.environ.get("PROVENANT_RUN_TOKEN"):
                         # cf_dispatch buffers stdout/stderr here until completion.
                         # Status can observe mtimes without reading provider output.
@@ -2742,6 +2761,8 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
     record: dict[str, Any] = {
         "schema_version": 1,
         "record_type": "dispatch-attempt",
+        **run_lineage.fields(run_dir),
+        "children": run_lineage.children(run_dir, args.task_id, attempt_number),
         **attempt_scope(args, attempt_number),
         "usage_source": adapter.get("usage_source") or provider_exec.context_usage.usage_source(adapter.get("context") or {}),
         "error_class": provider_exec.error_class(status, (adapter.get("evidence") or {}).get("signature")),
@@ -2794,6 +2815,7 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
         "argv_digest": json_digest(command),
         "retry_lineage": [retry_of] if retry_of else [],
     }
+    run_lineage.annotate_child_errors(record)
     if evidence_path is not None and git_evidence_identity is not None:
         record["git_evidence"] = {
             "path": relative_path(run_dir, evidence_path),
@@ -2831,6 +2853,8 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
     for sig, handler in old_handlers.items():
         signal.signal(sig, handler)
     row = terminal_contract(args,run_dir,record,adapter,attempt_number,attempt_dir)
+    # Close registration under journal custody before removing its private tmp.
+    publish_contract(run_dir, row)
     left=attempt_storage.prune_private_tmp(run_dir,attempt_dir,row["status"])[1]
     if left: row["warnings"].append("attempt tmp left in place (mount or unremovable): "+", ".join(left[:3]))
     for action in (lambda: write_cooldown(row),lambda: write_route_health(row),lambda: append_index(row,run_dir,root=run_workspace(run_dir, Path.cwd())/".agent-run")):
@@ -2975,6 +2999,11 @@ def cleanup_settled_reader(args) -> None:
 
 def dispatch(args: argparse.Namespace) -> int:
     """Run one attempt while serialising standalone run-ledger mutation."""
+    # Re-exec before peer placement can consume a stdin prompt. Identity is
+    # published later, under custody, so a busy caller cannot replace its owner.
+    run_dir = args.run_dir.resolve()
+    if contains_run(run_dir, Path.cwd()) and (run_dir / "MANIFEST.md").is_file():
+        run_lineage.ensure_nested_owner(run_dir, "dispatch", batch_child=args.batch_child)
     try:
         export_knob_overrides(args)
     except harness_profile.ProfileError as exc:
@@ -3003,6 +3032,7 @@ def dispatch(args: argparse.Namespace) -> int:
                 'capabilities': args.capabilities, 'add_dirs': args.add_dirs,
                 'allow_secrets': args.allow_secrets, 'confidential': args.confidential,
                 'knobs': getattr(args, 'knobs', None) or None, 'wait_seconds': 0,
+                '_lineage': run_lineage.parent_attempt(),
             }.items() if value is not None and value != []}
             if args.prompt_stdin:
                 request['prompt'] = sys.stdin.buffer.read().decode('utf-8')
@@ -3018,11 +3048,21 @@ def dispatch(args: argparse.Namespace) -> int:
                     request['require_session'] = args.require_session
             if args.git_evidence:
                 request['git_evidence'] = str(args.git_evidence)
+            placement_custody = None
             try:
+                if run_lineage.parent_attempt() and (run_dir / "MANIFEST.md").is_file() and not args.batch_child:
+                    placement_custody = acquire_run_custody(run_dir)
+                    run_lineage.record_owner(run_dir)
                 result = owner.client_call('resume' if args.resume else 'dispatch', str(Path.cwd()), request)
             except hosts.HostError as exc:
                 result = {'status': 'rejected', 'error': exc.code, 'fix': str(exc)}
+            except (OSError, OwnedFileError) as exc:
+                result = {'status': 'rejected', 'error': 'run_custody_busy', 'fix': str(exc)}
+            finally:
+                if placement_custody is not None:
+                    placement_custody.close()
             if not result.get('local'):
+                run_lineage.register_external(result)
                 print(json.dumps(result))
                 return 1 if result.get('status') == 'rejected' else 0
             if result.get('fallback'):
@@ -3057,6 +3097,11 @@ def dispatch(args: argparse.Namespace) -> int:
     except (OSError, OwnedFileError):
         return fail(run_dir, "run_custody_busy", "another dispatch, batch or finalizer owns the run")
     try:
+        try:
+            run_lineage.record_owner(run_dir)
+            run_lineage.register_run(run_dir, run_identity(run_dir))
+        except (OSError, ValueError, OwnedFileError) as exc:
+            return fail(run_dir, "lineage_unavailable", str(exc))
         if args.resume:
             try: prepare_resume(args)
             except (OSError,ValueError) as exc: return fail(run_dir,"rejected",str(exc),getattr(exc,"code",None))

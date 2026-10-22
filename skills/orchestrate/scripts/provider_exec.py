@@ -3457,6 +3457,11 @@ def _run_attempt(
         PROVENANT_CHAIR=plan.get("chair", ""),
         PWD=plan["cwd"],
     )
+    environment.pop("PROVENANT_PARENT_ATTEMPT", None)
+    environment.pop("PROVENANT_PARENT_REMOTE", None)
+    environment.pop("PROVENANT_HOST_LOCAL_ONLY", None)
+    if plan.get("attempt_identity"):
+        environment["PROVENANT_PARENT_ATTEMPT"] = json.dumps(plan["attempt_identity"])
     attempt_marker = uuid.uuid4().hex
     environment["PROVENANT_ATTEMPT_MARKER"] = attempt_marker
     instruction_start = None
@@ -3476,6 +3481,7 @@ def _run_attempt(
         environment["PYTHONDONTWRITEBYTECODE"] = "1"
     environment["CLAUDE_CODE_DISABLE_WORKFLOWS"] = "1"
     private_tmp = Path(plan["run_dir"]) / "tmp"
+    os.close(_private_dir(tmp_fd, "children"))
     private_cache = private_tmp / "cache"
     os.close(_private_dir(tmp_fd, "cache"))
     # Tool caches follow XDG_CACHE_HOME; Corepack is set too, so an inherited COREPACK_HOME

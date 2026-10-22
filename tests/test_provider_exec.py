@@ -8161,3 +8161,23 @@ def test_opencode_spent_free_allowance_records_provider_reason(tmp_path, body_st
     record = supervisor().execute(fixture_plan(tmp_path, code, "opencode"), tmp_path / "result.md")
     assert record["status"] == "usage_limited"
     assert record["reason"] == message
+
+
+def test_provider_exports_its_exact_attempt_for_nested_dispatch(tmp_path, monkeypatch):
+    monkeypatch.setenv('PROVENANT_HOST_LOCAL_ONLY', '1')
+    monkeypatch.setenv('PROVENANT_PARENT_REMOTE', '1')
+    code = """import json,os
+print(json.dumps({'type':'item.completed','item':{'type':'agent_message',
+    'text':json.dumps({key: os.environ.get(key) for key in
+        ('PROVENANT_PARENT_ATTEMPT','PROVENANT_HOST_LOCAL_ONLY','PROVENANT_PARENT_REMOTE')})}}), flush=True)
+print(json.dumps({'type':'turn.completed'}), flush=True)
+"""
+    plan = fixture_plan(tmp_path, code)
+    parent = {'run_id': 'mcp-parent', 'task_id': 'writer', 'attempt': 3, 'run_dir': str(tmp_path)}
+    plan['attempt_identity'] = parent
+    record = supervisor().execute(plan, tmp_path / 'result.md')
+    assert record['status'] == 'ok'
+    observed = json.loads((tmp_path / 'result.md').read_text())
+    assert json.loads(observed['PROVENANT_PARENT_ATTEMPT']) == parent
+    assert observed['PROVENANT_HOST_LOCAL_ONLY'] is None
+    assert observed['PROVENANT_PARENT_REMOTE'] is None

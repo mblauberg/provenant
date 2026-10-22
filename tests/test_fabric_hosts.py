@@ -3373,3 +3373,42 @@ class SshdAcceptance(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+def test_peer_worker_installs_nested_lineage_without_exposing_transport_fields(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    import fabric_lanes
+    loader = tmp_path / 'runtime/fabric/node_modules/tsx/dist/loader.mjs'
+    loader.parent.mkdir(parents=True)
+    loader.touch()
+    parent = {'run_id': 'mcp-parent', 'task_id': 'writer', 'attempt': 1, 'run_dir': '/source/run'}
+    seen = {}
+    def run(command, **kwargs):
+        seen['payload'] = json.loads(Path(command[-1]).read_text())
+        seen['env'] = kwargs['env']
+        return SimpleNamespace(timed_out=False, stdout_truncated=False, returncode=0, stdout='{}')
+    owner = fabric_lanes.LaneFederation.__new__(fabric_lanes.LaneFederation)
+    owner.root = tmp_path / 'state'
+    owner.config = SimpleNamespace(local_host='peer')
+    owner.h = SimpleNamespace(PRODUCT_ROOT=tmp_path, MAX_RESPONSE_BYTES=65536,
+        project_directory=lambda _project: tmp_path, strict_json=json.loads,
+        _load_module=lambda *_args: SimpleNamespace(run_bounded=run))
+    monkeypatch.setenv('FABRIC_NODE', sys.executable)
+    owner.worker('dispatch', 'Repos/project', {'prompt': 'hello', '_lineage': parent})
+    assert '_lineage' not in seen['payload']['input']
+    assert json.loads(seen['env']['PROVENANT_PARENT_ATTEMPT']) == parent
+    assert seen['env']['PROVENANT_PARENT_REMOTE'] == '1'
+
+
+def test_nested_status_read_bypass_preserves_local_only_writes(monkeypatch):
+    from types import SimpleNamespace
+    import fabric_lanes
+    owner = fabric_lanes.LaneFederation.__new__(fabric_lanes.LaneFederation)
+    owner.config = SimpleNamespace(peers={'peer': {}}, local_host='here')
+    owner.config_error = None
+    owner.request_project = lambda *_args: ('Repos/project', None)
+    owner.reads = lambda *_args: {'runs': [{'run_id': 'mcp-child@peer', 'status': 'ok'}]}
+    monkeypatch.setenv('PROVENANT_HOST_LOCAL_ONLY', '1')
+    assert owner.client_call('status', '.', {}) == {'local': True}
+    assert owner.client_call('status', '.', {}, federated_read=True)['runs'][0]['status'] == 'ok'
+    assert owner.client_call('dispatch', '.', {}, federated_read=True) == {'local': True}
