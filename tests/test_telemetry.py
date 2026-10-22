@@ -290,12 +290,30 @@ def test_delivery_link_migration_rereads_surviving_receipts_once(tmp_path):
     ledger = tmp_path / 'state/telemetry.sqlite3'
     with sqlite3.connect(ledger) as db:
         db.execute('ALTER TABLE usage DROP COLUMN delivery_run_id')
+        db.execute("DELETE FROM meta WHERE key='delivery_link_backfill'")
     assert cli(tmp_path, 'telemetry', 'ingest').returncode == 0
     with sqlite3.connect(ledger) as db:
         assert db.execute('SELECT run_id,delivery_run_id FROM usage ORDER BY run_id').fetchall() == [
             ('kept', 'delivery:kept'), ('pruned', None)]
         assert db.execute('PRAGMA user_version').fetchone() == (4,)
         db.execute("UPDATE usage SET delivery_run_id='sentinel' WHERE run_id='kept'")
+    assert cli(tmp_path, 'telemetry', 'ingest').returncode == 0
+    with sqlite3.connect(ledger) as db:
+        assert db.execute("SELECT delivery_run_id FROM usage WHERE run_id='kept'").fetchone() == ('sentinel',)
+
+
+def test_delivery_link_backfill_uses_marker_when_column_already_exists(tmp_path):
+    kept = receipt(tmp_path, 'kept', status='ok', delivery_run_id='delivery:kept')
+    assert cli(tmp_path, 'telemetry', 'ingest').returncode == 0
+    ledger = tmp_path / 'state/telemetry.sqlite3'
+    with sqlite3.connect(ledger) as db:
+        db.execute("UPDATE usage SET delivery_run_id=NULL WHERE run_id='kept'")
+        db.execute("DELETE FROM meta WHERE key='delivery_link_backfill'")
+    assert cli(tmp_path, 'telemetry', 'ingest').returncode == 0
+    with sqlite3.connect(ledger) as db:
+        assert db.execute("SELECT delivery_run_id FROM usage WHERE run_id='kept'").fetchone() == ('delivery:kept',)
+        assert db.execute("SELECT 1 FROM meta WHERE key='delivery_link_backfill'").fetchone() is not None
+        assert db.execute("UPDATE usage SET delivery_run_id='sentinel' WHERE run_id='kept'").rowcount == 1
     assert cli(tmp_path, 'telemetry', 'ingest').returncode == 0
     with sqlite3.connect(ledger) as db:
         assert db.execute("SELECT delivery_run_id FROM usage WHERE run_id='kept'").fetchone() == ('sentinel',)

@@ -10,6 +10,8 @@ import { z } from "zod";
 import { toolSchemas } from "../src/tool-schemas.js";
 import { catalogueSnapshot } from "../src/catalogue.js";
 import { normaliseRoute, routeArguments } from "../src/execution-input.js";
+import { batchDefaults, mergeBatchTask } from "../src/execution.js";
+import { inheritedDeliveryRunId } from "../src/resume.js";
 import { scratchRoot } from "./helpers/temp-root.js";
 
 const fixturePidLogs = new Set<string>();
@@ -39,6 +41,29 @@ it("accepts delivery_run_id in dispatch and batch schemas and the CLI flag", () 
     } });
   expect(cli.status).toBe(1);
   expect(cli.stdout).toContain("invalid_delivery_run_id");
+});
+
+it("inherits a handoff delivery id only when the caller omits it", () => {
+  expect(inheritedDeliveryRunId({}, { delivery_run_id: "delivery:1202" }))
+    .toEqual({ delivery_run_id: "delivery:1202" });
+  expect(inheritedDeliveryRunId({ delivery_run_id: "delivery:other" }, { delivery_run_id: "delivery:1202" }))
+    .toEqual({});
+});
+
+it("describes delivery_run_id as the served delivery receipt id", () => {
+  expect(toolSchemas.fabric_dispatch.delivery_run_id.meta()?.description)
+    .toBe("RUN.json run_id of the delivery this lane serves; retries inherit it");
+});
+
+it("merges a batch delivery id into each task, preserving task overrides", () => {
+  const defaults = batchDefaults({ delivery_run_id: "delivery:1202", tasks: [] } as any);
+  expect([
+    mergeBatchTask(defaults, { id: "one", prompt: "first" }, 0),
+    mergeBatchTask(defaults, { id: "two", prompt: "second", delivery_run_id: "delivery:other" }, 1),
+  ]).toEqual([
+    expect.objectContaining({ id: "one", delivery_run_id: "delivery:1202" }),
+    expect.objectContaining({ id: "two", delivery_run_id: "delivery:other" }),
+  ]);
 });
 
 afterEach(async () => {
@@ -579,6 +604,7 @@ it("runs the linked-worktree MCP flow with fixture owners only", async () => {
       .toMatchObject({ chair: "chair-seat" });
     const batch = await call("dispatch", {
       adapter: "codex",
+      delivery_run_id: "delivery:batch",
       capabilities: ["browser"],
       tasks: [
         { id: "one", prompt: "first" },
@@ -588,8 +614,10 @@ it("runs the linked-worktree MCP flow with fixture owners only", async () => {
     });
     expect((batch.structuredContent as any).runs).toHaveLength(2);
     expect((batch.structuredContent as any).runs[0].applied.capabilities).toEqual(["browser"]);
-    expect(JSON.parse(readFileSync(join((batch.structuredContent as any).runs[0].run_dir, "_owner", "one-args-1.json"), "utf8")))
-      .toEqual(expect.arrayContaining(["--capabilities", '["browser"]']));
+    for (const run of (batch.structuredContent as any).runs) {
+      expect(JSON.parse(readFileSync(join(run.run_dir, "_owner", `${run.task_id}-args-1.json`), "utf8")))
+        .toEqual(expect.arrayContaining(["--capabilities", '["browser"]', "--delivery-run-id", "delivery:batch"]));
+    }
     expect((batch.content as any[])[0].text).toMatch(/^batch mcp-.* 2 tasks: 2 ok/u);
     const partialBatch = await call("dispatch", { adapter: "codex", tasks: [
       { id: "valid", prompt: "still runs" },

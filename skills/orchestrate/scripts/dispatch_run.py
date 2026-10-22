@@ -1798,6 +1798,21 @@ def inherit_delivery_run_id(args, previous):
         args.delivery_run_id = delivery_run_id(value)
 
 
+class RetryReceiptInvalid(ValueError):
+    code = 'retry_of_invalid'
+
+
+def retry_receipt(run_dir, retry_dir):
+    try:
+        previous = json.loads(read_bound_bytes(
+            run_dir, (retry_dir / 'attempt.json').relative_to(run_dir), label='retry receipt'))
+    except (OSError, ValueError, OwnedFileError) as exc:
+        raise RetryReceiptInvalid(str(exc)) from exc
+    if not isinstance(previous, dict):
+        raise RetryReceiptInvalid('retry attempt receipt must be an object')
+    return previous
+
+
 def contract_row(args,run_dir,number,attempt_dir,plan,started_at):
     route=plan.get("route",{})
     model=plan.get("model") or route.get("resolved_model") or args.model or ""
@@ -2234,9 +2249,12 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
             return fail(run_dir, "retry_of_missing", f"retry attempt does not exist: {args.retry_of}")
         retry_of = args.retry_of
         try:
-            previous = json.loads(read_bound_bytes(run_dir, (retry_dir / 'attempt.json').relative_to(run_dir), label='retry receipt'))
+            previous = retry_receipt(run_dir, retry_dir)
+        except RetryReceiptInvalid as exc:
+            return fail(run_dir, exc.code, str(exc))
+        try:
             inherit_delivery_run_id(args, previous)
-        except (OSError, ValueError, OwnedFileError) as exc:
+        except ValueError as exc:
             return fail(run_dir, 'invalid_delivery_run_id', str(exc))
     attempt_number = max(existing_attempt_number(task_dir), existing_attempt_number(run_dir / "tasks" / args.task_id))
     attempt_id = f"attempt-{attempt_number:03d}"

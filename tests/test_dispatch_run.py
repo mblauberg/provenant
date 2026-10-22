@@ -2228,8 +2228,9 @@ def test_counterfeit_active_receipt_is_rejected_before_launch(tmp_path: Path, mo
         "--prompt-file", str(prompt), "--alias", "senior", "--role", "worker",
     ])
     monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("PROVENANT_HOST_LOCAL_ONLY", "1")
 
-    assert module.dispatch(args) == 2
+    assert module._dispatch(args) == 2
     assert not (run_dir / "dispatch/tasks/blocked").exists()
 
 
@@ -2463,6 +2464,20 @@ def test_reentry_reconciles_missing_manifest_rows_and_retry_lineage(tmp_path: Pa
     assert "dispatch-reconcile-attempt-001-attempt" in text
     second = json.loads((run_dir / "dispatch/tasks/reconcile/attempt-002/attempt.json").read_text())
     assert second["retry_of"] == "attempt-001"
+
+
+@pytest.mark.parametrize("contents", ["{broken", "[]"])
+def test_retry_receipt_parse_and_shape_errors_use_retry_of_invalid(tmp_path: Path, contents: str) -> None:
+    run_dir = make_run(tmp_path, "invalid-retry-receipt")
+    attempt = run_dir / "dispatch/tasks/retry/attempt-001/attempt.json"
+    attempt.parent.mkdir(parents=True)
+    attempt.write_text(contents, encoding="utf-8")
+    module = load_dispatch_module()
+
+    with pytest.raises(module.RetryReceiptInvalid) as error:
+        module.retry_receipt(run_dir, attempt.parent)
+
+    assert error.value.code == "retry_of_invalid"
 
 
 def test_attempt_number_and_retry_lineage_continue_past_999(tmp_path: Path, monkeypatch) -> None:

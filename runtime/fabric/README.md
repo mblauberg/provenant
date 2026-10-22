@@ -99,8 +99,9 @@ Twenty tools are registered by default:
 | `fabric_landing_lease` | Repository landing lease |
 
 Dispatch accepts exactly one of `prompt` and `prompt_file`. Route controls are
-`adapter`, `alias`, `model`, `effort`, `mode`, `worktree`, `cwd`, `network`,
-`sandbox`, `capabilities`, `add_dirs`, `fallback` and `allow_secrets`. Pool
+`adapter`, `alias`, `model`, `effort`, `delivery_run_id`, `mode`, `worktree`,
+`cwd`, `network`, `sandbox`, `capabilities`, `add_dirs`, `fallback` and
+`allow_secrets`. Pool
 controls `route`, `rotate`, `council` and `models` pick the adapter and model
 from a global route pool; `adapter` with `route` narrows the pool to that
 adapter. A council runs as a batch with one task per member (CLI: `--route`,

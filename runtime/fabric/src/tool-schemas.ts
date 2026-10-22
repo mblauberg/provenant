@@ -10,7 +10,7 @@ const ids = (maximum?: number) => z.union([
 const wait = z.unknown().optional();
 const optionalNumber = z.unknown().optional();
 const route = {
-  delivery_run_id: z.string().regex(DELIVERY_RUN_ID).optional(),
+  delivery_run_id: z.string().regex(DELIVERY_RUN_ID).optional().meta({ description: "RUN.json run_id of the delivery this lane serves; retries inherit it" }),
   host: str,
   operation_id: str,
   adapter: str,

@@ -29,7 +29,8 @@ reconciliation run.
    `software` through the complete installed-producer command in `deliver`,
    then follow [run-contract.md](references/run-contract.md). Routine minor work may proceed
    without `RUN.json` unless the user or project policy requests one.
-   The chair passes `delivery_run_id` equal to that `RUN.json` run_id on every lane dispatch for the delivery, including reviewer lanes.
+   Pass that `RUN.json` run_id as `delivery_run_id` on every new lane
+   dispatch for the delivery, reviewers included; retries and resumes inherit it.
 2. Keep an adaptive plan. Name the governing skill in the worker contract
    before changing code. Invoke `tdd` for every new or changed observable
    behaviour, and use `refactor`

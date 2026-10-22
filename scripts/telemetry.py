@@ -208,8 +208,9 @@ def connect():
                        ('delivery_run_id', 'TEXT')):
         if name not in usage_columns:
             db.execute(f'ALTER TABLE usage ADD COLUMN {name} {kind}')
-            if name == 'delivery_run_id':
-                db.execute("DELETE FROM cursors WHERE source='fabric'")
+    if db.execute("SELECT 1 FROM meta WHERE key='delivery_link_backfill'").fetchone() is None:
+        db.execute("DELETE FROM cursors WHERE source='fabric'")
+        db.execute("INSERT OR IGNORE INTO meta VALUES ('delivery_link_backfill', ?)", (now(),))
     if version in (1, 2):
         for source in SOURCES:
             paths = [row[0] for row in db.execute('SELECT path FROM cursors WHERE source=?', (source,))]

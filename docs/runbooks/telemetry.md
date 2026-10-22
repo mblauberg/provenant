@@ -161,7 +161,7 @@ denominator. The ledger stores receipt facts in `deliveries`; `accepted` and
 The chair passes `delivery_run_id` equal to the delivery's `RUN.json` run_id on
 each dispatch, including reviewers (`provenant fabric dispatch --delivery-run-id ID`).
 Batch tasks inherit the batch-level id unless they supply their own; retries
-keep the id. The owner stamps it into `attempt.json`, and the ledger joins
+keep the id. The dispatcher stamps it into `attempt.json`, and the ledger joins
 lane usage to deliveries on that fact. `cost_usd_lower_bound` sums known priced
 cost across linked attempts, including retries and unaccepted runs;
 `unpriced_rows` counts attempts with unknown cost. `usage_rows` counts linked
