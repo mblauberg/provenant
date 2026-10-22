@@ -206,6 +206,9 @@ def build_checkout(base: Path, role: str, name: str = "checkout") -> Path:
     checkout = base / name
     scripts = checkout / "scripts"
     scripts.mkdir(parents=True)
+    venv = checkout / ".venv/bin/python"
+    venv.parent.mkdir(parents=True)
+    venv.symlink_to(sys.executable)
     shutil.copy2(ROOT / "scripts/worktree.py", scripts / "worktree.py")
     shutil.copytree(ROOT / "scripts/lib", scripts / "lib")
     shutil.copy2(ROOT / "scripts/check_target.py", scripts / "check_target.py")

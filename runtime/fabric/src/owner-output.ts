@@ -120,7 +120,7 @@ function validOwnerRecord(record: Record<string, unknown>, kind: "dispatch" | "b
       tasks.length === record.task_count &&
       tasks.every((value) => {
         const task = objectValue(value);
-        if (task === undefined || !nonEmptyString(task.task_id) || !DISPATCH_TERMINAL_STATUSES.has(String(task.status)))
+        if (task === undefined || !nonEmptyString(task.task_id) || !(DISPATCH_TERMINAL_STATUSES.has(String(task.status)) || task.status === "rejected"))
           return false;
         return (
           !isSuccessStatus(task.status) ||
@@ -315,6 +315,8 @@ export function compactBatch(started: OwnerFiles, completion: OwnerCompletion): 
           task_id: task.task_id,
           status: empty ? "failed" : canonicalSuccessStatus(task.status),
           outcome: empty ? "empty_output" : task.outcome,
+          ...(typeof task.error === "string" ? { error: task.error } : {}),
+          ...(typeof task.fix === "string" ? { fix: task.fix } : {}),
           ...(task.landable === false ? { landable: false, quarantine: task.quarantine } : {}),
           route: compactRoute(task.route),
           paths: {

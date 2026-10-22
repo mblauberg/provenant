@@ -246,7 +246,24 @@ fn run(args: &[OsString]) -> u8 {
             Err(message) => message.map_or(3, |message| fail(&message)),
         },
         Route::Owner { relative, args } => match target(relative, &settings) {
-            Ok((program, root)) => launch(&program, &args, root.as_deref()),
+            Ok((program, root)) => {
+                if relative.ends_with(".py") && is_file(&program) && exec::is_executable(&program) {
+                    let checkout = program
+                        .ancestors()
+                        .nth(Path::new(relative).components().count())
+                        .unwrap();
+                    let mut forwarded = vec![
+                        checkout
+                            .join("scripts/lib/harness-python.sh")
+                            .into_os_string(),
+                        program.into_os_string(),
+                    ];
+                    forwarded.extend(args);
+                    launch(Path::new("/bin/bash"), &forwarded, root.as_deref())
+                } else {
+                    launch(&program, &args, root.as_deref())
+                }
+            }
             Err(message) => fail(&message),
         },
     }

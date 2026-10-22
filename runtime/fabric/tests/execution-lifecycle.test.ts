@@ -2516,3 +2516,32 @@ it('binds termination writes to the discovered run directory', async () => {
  expect(readFileSync(target,'utf8')).toBe('untouched');
  expect(JSON.parse(readFileSync(join(dir,'dispatch-status.json'),'utf8')).status).toBe('interrupted');
 });
+
+
+it("reports every preflight rejection from a batch with no attempts", async () => {
+  const runDir = join(workspace, ".agent-run/runs/20261022-1200-batch-rejected-abc123");
+  const batchDir = join(runDir, "dispatch/batches/batch-001");
+  mkdirSync(batchDir, { recursive: true });
+  const tasks = [
+    { task_id: "task-a", status: "rejected", outcome: "preflight_rejected", error: "model_routing_unavailable", fix: "Repair model routing." },
+    { task_id: "task-b", status: "rejected", outcome: "preflight_rejected", error: "prompt_unavailable", fix: "Provide a readable prompt." },
+  ];
+  const summary = { schema_version: 1, record_type: "dispatch-batch", batch_id: "batch-001",
+    status: "completed", task_count: 2, concurrency: 1, counts: { rejected: 2 }, tasks,
+    summary_path: "dispatch/batches/batch-001/summary.json" };
+  writeFileSync(join(batchDir, "summary.json"), JSON.stringify(summary));
+  const stdoutPath = join(runDir, "owner.stdout");
+  writeFileSync(stdoutPath, JSON.stringify(summary));
+  const { compactBatch } = await import("../src/owner-output.js");
+  const compact = compactBatch({ runDir, stdoutPath, stderrPath: join(runDir, "owner.stderr") },
+    { exitCode: 1, signal: null });
+  expect(compact).toMatchObject({ status: "completed", counts: { rejected: 2 }, tasks });
+  writeFileSync(join(runDir, "dispatch-status.json"), JSON.stringify({
+    ...compact, kind: "batch", task_ids: tasks.map((task) => task.task_id), started_at: new Date().toISOString(),
+    finished_at: new Date().toISOString(),
+  }));
+  const result = await fabricStatus(workspace, String(compact.id));
+  expect(result.runs).toEqual(tasks.map((task) => expect.objectContaining({
+    ...task, state: "terminal", attempt: 0, attempts: [], attempt_count: 0,
+  })));
+});

@@ -2,7 +2,7 @@
 #![allow(dead_code)]
 
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{symlink, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
@@ -21,6 +21,22 @@ printf 'gitdir=%s\n' "${GIT_DIR-<unset>}"
 printf 'gitname=%s\n' "${GIT_AUTHOR_NAME-<unset>}"
 printf 'stale=%s\n' "${PROVENANT_STALE_CHECKED-<unset>}"
 exit "${PROVENANT_TEST_EXIT:-0}"
+"#;
+
+const PYTHON_RECORDER: &str = r#"#!/usr/bin/env python3
+import os
+import sys
+
+print("argv0=" + sys.argv[0])
+for arg in sys.argv[1:]:
+    print("arg=" + arg)
+print("cwd=" + os.getcwd())
+print("pid=" + str(os.getpid()))
+for field, name in [("root", "AGENT_FABRIC_PRODUCT_ROOT"), ("home", "AGENTS_HOME"),
+                    ("instance", "AGENT_FABRIC_INSTANCE_ROOT"), ("gitdir", "GIT_DIR"),
+                    ("gitname", "GIT_AUTHOR_NAME"), ("stale", "PROVENANT_STALE_CHECKED")]:
+    print(field + "=" + os.environ.get(name, "<unset>"))
+sys.exit(int(os.environ.get("PROVENANT_TEST_EXIT", "0")))
 "#;
 
 pub const OWNERS: &[&str] = &[
@@ -65,8 +81,23 @@ impl Sandbox {
     pub fn checkout(&self, name: &str) -> PathBuf {
         let root = self.dir.join(name);
         for owner in OWNERS {
-            write_executable(&root.join(owner), RECORDER);
+            let recorder = if owner.ends_with(".py") {
+                PYTHON_RECORDER
+            } else {
+                RECORDER
+            };
+            write_executable(&root.join(owner), recorder);
         }
+        write_executable(
+            &root.join("scripts/lib/harness-python.sh"),
+            include_str!("../../../../scripts/lib/harness-python.sh"),
+        );
+        fs::create_dir_all(root.join(".venv/bin")).unwrap();
+        symlink(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.venv/bin/python"),
+            root.join(".venv/bin/python"),
+        )
+        .unwrap();
         root
     }
 
