@@ -761,6 +761,19 @@ def test_credits_that_cannot_be_spent_leave_the_account_exhausted(quota, tmp_pat
         assert state['summary'] == 'primary: allowance spent; codex refuses ordinary use'
 
 
+@pytest.mark.parametrize('reset_in', [None, -timedelta(hours=1)])
+@pytest.mark.parametrize('configured', [None, 600])
+def test_a_refused_allowance_with_no_future_reset_cools_for_a_bounded_wait(quota, tmp_path, reset_in, configured):
+    configure(tmp_path, {'quota': {'unknown_reset_cooldown_seconds': configured} if configured else {}})
+    snapshot(quota, 'codex', [window(60, WEEK, reset_in, 'primary')], usage_credits=None,
+             allowance={'ordinary_usage_allowed': False})
+    until = iso(NOW + timedelta(seconds=configured or 3600))
+    assert quota.route_states(NOW)['codex']['cooling_until'] == until
+    assert quota.apply_to_cooldowns({}, NOW)['codex/*']['cooling_until'] == until
+    # Once the wait ends, the next reading decides.
+    assert 'codex/*' not in quota.apply_to_cooldowns({}, NOW + timedelta(seconds=(configured or 3600) + 1))
+
+
 @pytest.mark.parametrize('policy, state, order, cooled', [
     ('last_resort', 'credit_only', ['work', 'default'], False),
     ('normal', 'credit_only', ['default', 'work'], False),

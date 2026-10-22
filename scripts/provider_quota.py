@@ -64,6 +64,7 @@ NEAR_EXHAUSTED = 95
 WAIT_HOURS = 6
 # How routing treats an account whose allowance is spent but whose credits keep it usable (`quota.credits_policy`).
 CREDITS_POLICIES = ('last_resort', 'normal', 'never')
+UNKNOWN_RESET_SECONDS = 3600  # How long a refused allowance cools when no reset time is known.
 # Providers name some windows by codename; `quota.window_labels` in telemetry.json adds or overrides labels.
 WINDOW_LABELS = {'iguana_necktie': 'Cloud session credits'}
 SEVERITY = ('exhausted', 'unknown', 'unreported', 'deficit', 'on_pace', 'reserve', 'early', 'not_started')
@@ -841,6 +842,19 @@ def gather(now=None, force=False):
 
 # Routing input -------------------------------------------------------------------------------
 
+def refused_until(worst, value, now):
+    """When a refused allowance may return: the governing window's reset, else a bounded wait.
+
+    The provider refuses ordinary use below 100%. With no future reset known, the account cools for
+    `quota.unknown_reset_cooldown_seconds` (default an hour) from the reading, then the next reading decides."""
+    reset = parse_time(worst.get('reset_at'))
+    if reset and reset > now:
+        return worst['reset_at']
+    seconds = number(settings().get('unknown_reset_cooldown_seconds'))
+    observed = parse_time(value.get('observed_at')) or now
+    return iso(observed + timedelta(seconds=seconds if seconds and seconds > 0 else UNKNOWN_RESET_SECONDS))
+
+
 def route_states(now=None):
     """Pace state per provider from the cached snapshot of its active account. Never fetches."""
     now = now or utcnow()
@@ -860,8 +874,7 @@ def route_states(now=None):
         exhausted = [window['reset_at'] for window in row['windows']
                      if window['pace']['state'] == 'exhausted' and sets_state(window)]
         if row['state'] == 'exhausted' and not exhausted:
-            # The provider refuses ordinary use below 100%: cool until the governing window resets.
-            exhausted = [governing(row['windows'])['reset_at']]
+            exhausted = [refused_until(governing(row['windows']), value, now)]
         states[name] = {'adapter': getattr(module, 'ADAPTER', None), 'account': label, 'host': telemetry_host(), 'state': row['state'],
                         'summary': row['summary'], 'observed_at': value.get('observed_at'),
                         'cooling_until': max(exhausted) if exhausted and all(exhausted) else None,

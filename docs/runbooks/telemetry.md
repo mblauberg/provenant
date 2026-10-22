@@ -251,7 +251,9 @@ state `credit_only`, `drawing_credits: true`, a summary with its balance, and
 no quota cooldown and clears older cooldowns that quota set. A cooldown from a
 real refusal stays until it expires or a reading shows allowance again, since
 credits may be switched off. A spent allowance without usable credits is
-`exhausted`, even below 100%, and cools until the governing window resets.
+`exhausted`, even below 100%, and cools until the governing window resets. With
+no future reset time known, it cools for `quota.unknown_reset_cooldown_seconds`
+(default 3600) from the reading, and the next reading decides.
 `quota.credits_policy` sets how routing ranks it:
 
 - `last_resort` (default): placement ranks it after every account with
