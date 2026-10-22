@@ -9,11 +9,11 @@ config change it proposes lands only through its own PR.
 
 ## Shared rules
 
-- **Cost.** We pay by subscription, so the primary cost is quota share per
-  account window (5-hour and weekly) per accepted change, with its
-  plan-dollar equivalent across providers. For example, 1% of a weekly
-  window on a USD 100/month plan is about USD 0.23. Weighted tokens (main
-  spec B4.4) and listed USD are secondary.
+- **Cost.** We pay by subscription, so in dedicated runs (Study A Stage 2,
+  Study B) the primary cost is quota share per account window (5-hour and
+  weekly) per accepted change, with its plan-dollar equivalent across
+  providers; 1% of a weekly window on a USD 100/month plan is about USD
+  0.23. Weighted tokens (main spec B4.4) and listed USD are secondary.
 - **Quota blocks** (dedicated runs, main spec B4.5). Each account runs one
   cell at a time in alternating ABAB blocks of whole tasks, which replace
   B3.4's per-attempt interleaving for that account. A block is void if the
@@ -52,16 +52,16 @@ Classes in scope are the writer classes `mechanical`, `legwork` and
    URL, publication date and confidence (high, medium, low, rated as in
    R1-R3), and the class the benchmark maps to (for example SWE-bench Pro
    to `implementation`).
-2. A cell is dropped before any internal spend when another cell of the
-   same model family beats it on both score and cost, by more than the
-   source's reported noise (else 5 points and 20%). That must hold in at
-   least two medium-or-higher sources, with no contrary source. Drops are
-   recorded with their reasons. A newer contrary source restores the cell.
-3. The best-value surviving cell per class becomes the proposed initial
-   default. Priors only seed the grid and defaults. Public leaderboards
-   are contaminated (main spec Not doing), so a prior is never acceptance
-   evidence for a harness change. The table is refreshed when a model
-   enters the catalogue.
+2. Priors only order the work. A cell that another cell of the same family
+   beats on both score and cost, beyond the source's reported noise (else
+   5 points and 20%), in at least two medium-or-higher sources with no
+   contrary source, is marked `externally_dominated`. It gets no Stage 2
+   grid spend. It stays available as a Stage 1 challenger, queued after
+   the undominated cells. The marks and their reasons are recorded, and
+   the table is refreshed when a model enters the catalogue.
+3. Public leaderboards are contaminated (main spec Not doing), so a prior
+   never changes a default and is never acceptance evidence. Every routing
+   change needs an internal win.
 
 ### Stage 1: in-flight arm on real work
 
@@ -84,23 +84,38 @@ Classes in scope are the writer classes `mechanical`, `legwork` and
    (`default` or `challenger`), `routing.assignment_p` and an ineligibility
    reason. Fabric receipts carry these fields, and the ledger ingests them.
    Native spawns join once the R1.4 soft gate stamps the assignment.
-5. **Outcomes, per task:** cost per accepted change (operating model R4.3)
-   in weighted tokens; quota share, apportioned by each lane's share of its
-   account's weighted tokens in the window and flagged as approximate;
-   tokens; wall-clock time; review findings on the change, as raw counts
-   until per-finding dispositions exist (MAP "Missing").
+5. **Outcomes.** The primary estimand is frozen in the trial record before
+   the first assignment. Quota cannot be attributed to a lane in flight,
+   so the primary is cost per accepted change (operating model R4.3) in
+   weighted tokens, with acceptance as its guard. Apportioned quota share
+   (flagged approximate), tokens, wall-clock time and review findings (raw
+   counts until per-finding dispositions exist, MAP "Missing") are
+   descriptive and never decide a trial.
 6. **Analysis.** The main spec's statistics apply, except that tasks are
    not paired: the bootstrap is stratified by class, risk tier, size and
    repository and clustered on task, and a within-stratum re-randomisation
    test of the assignment replaces the sign test as the agreeing check.
-7. **Stopping.** A weekly look stops a trial early on a guardrail: either
-   the challenger's acceptance one-sided bound is worse than the pass@1
-   tolerance, or its cost per accepted change is more than 50% above the
-   default's. A win, no-win or `within_noise` verdict is read only once
-   the sample reaches the size set by the power simulation (main spec
-   Stats 10). `within_noise` means the interval lies inside the tolerance
-   band. After N weeks (default 6) without a verdict, the trial is
-   `inconclusive`.
+7. **Budgets,** pre-registered per trial. A challenger lane is capped at 2x
+   the class's default-cell median weighted tokens; at the cap it stops,
+   its task reroutes to the default, and it counts as a challenger failure
+   (intention to treat). The challenger's cumulative excess over the
+   default median is capped, by default at 5% of the class's eligible
+   weighted tokens per week, checked at every lane completion; reaching it
+   stops the trial as `stopped_budget`. These caps, not the look schedule,
+   bound overspend.
+8. **Stopping.** Guardrails are checked at every challenger completion: the
+   challenger's one-sided acceptance bound worse than the pass@1 tolerance,
+   or its cost per accepted change more than 50% above the default's.
+   Verdicts are read once, at the sample size set by the power simulation
+   (main spec Stats 10):
+   - `win` follows the main spec's rule;
+   - `within_noise` is two one-sided tests at alpha 0.05 against a
+     pre-registered margin, by default +/-10% on cost per accepted change
+     (#1056's noise band) and the pass@1 tolerance on acceptance. Both
+     90% bounds must lie inside the margin;
+   - otherwise the trial is `no-win`;
+   - after N weeks (default 6) without the planned sample, it is
+     `inconclusive`.
 
 ### Stage 2: optional confirmation on the replay bench
 
@@ -127,8 +142,7 @@ pairs (Haiku high against Sonnet high, Opus medium against Sonnet medium);
 Stage 2 takes the rest. (2) Where is a Sonnet or Sol cell uniquely on the
 frontier, with no other model's cell within noise on both axes? (3) Does
 Luna at xhigh dominate Sol at low or medium, no worse on either axis beyond
-tolerance and better on one? Stage 0 answers it; Stage 2 settles it if
-needed.
+tolerance and better on one? Stage 0 orders it; Stage 2 decides it.
 
 ### Output and budget
 
@@ -138,11 +152,12 @@ needed.
 - **`role_effort_defaults` diff** for `config/model-routing.json`. Today
   only `families.openai` has the block; `families.anthropic` would gain
   one. `task_class_routes.<class>.effort` changes are listed beside it.
-  Each entry cites its Stage 0 prior or its winning trial. A default below
-  `implementation`'s high floor must change the floor in the same PR.
+  Each entry cites its winning internal trial or Stage 2 comparison;
+  priors are cited only as context. A default below `implementation`'s
+  high floor must change the floor in the same PR.
 - **Budget.** Stage 0 is one research lane. Stage 1 adds no lanes, since a
-  challenger replaces the default, and the guardrail bounds overspend at
-  about share x 50% (5% of eligible lanes at the default). At about 190
+  challenger replaces the default, and its overspend is bounded by the
+  per-lane and cumulative caps in Stage 1 item 7. At about 190
   `ok` Fabric lanes a week, a class takes weeks to reach 30 challenger
   tasks; the report projects each trial's end date. Stage 2 costs cells x
   tasks x repeats x the 1.28M median lane.
@@ -221,4 +236,5 @@ confidentiality rule above.
   confidential work with a model that trains on prompts.
 - No fleet arm scored by a judge from its own principal family.
 - No Sealle or confidential task on a model that trains on prompts.
-- No routing config change without a winning comparison.
+- No routing config change without an internal win; priors only order
+  trials.
