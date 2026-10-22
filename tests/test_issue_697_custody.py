@@ -166,7 +166,7 @@ def test_finalizer_rejects_forged_attempt_without_observed_exit(tmp_path: Path) 
     (attempt_dir / "attempt.sha256").write_text("sha256:bad  attempt.json\n")
     finalizer = load(FINALIZE, "finalize_forged_issue_697")
     errors = finalizer._validate_dispatch_evidence(run)
-    assert any("forged" in error for error in errors)
+    assert any("attempt receipt has invalid identity or status" in error for error in errors)
 
 
 def test_successful_attempt_is_validated_by_finalizer(tmp_path: Path) -> None:
