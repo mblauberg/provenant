@@ -4,6 +4,8 @@ from pathlib import Path
 import shutil
 import subprocess
 
+import pytest
+
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts/check-provenant-install.py"
@@ -244,3 +246,130 @@ def test_registration_diagnostics_do_not_require_an_adapter_on_path(tmp_path, mo
     # The pre-existing install check still reports provider availability as before.
     lines, _ = module._provider_lines(home)
     assert 'provider agy present=no' in lines
+
+
+# --- Rust front door acceptance (ADR 0027) ----------------------------------
+
+MARKER = "# Managed by scripts/install-harness; local edits to an installed copy are not preserved."
+
+
+@pytest.fixture(scope="module")
+def crate_product(tmp_path_factory) -> Path:
+    """A copy of the product with a crate in it, so source digests can be computed."""
+    product = tmp_path_factory.mktemp("product") / "product"
+    shutil.copytree(
+        ROOT,
+        product,
+        symlinks=True,
+        ignore=shutil.ignore_patterns(".git", ".agent-run", "node_modules", ".venv", "target"),
+    )
+    crate = product / "tools/front-door"
+    shutil.rmtree(crate, ignore_errors=True)
+    (crate / "src").mkdir(parents=True)
+    (crate / "Cargo.toml").write_text('[package]\nname = "provenant"\n')
+    (crate / "src/main.rs").write_text("fn main() {}\n")
+    return product
+
+
+def run_check_in(product: Path, tmp_path: Path) -> subprocess.CompletedProcess[str]:
+    instance_root = tmp_path / "instance"
+    pointer = instance_root / ".agent-fabric/product-root.json"
+    pointer.parent.mkdir(parents=True, exist_ok=True)
+    pointer.write_text(f'{{"schema_version": 1, "product_root": "{product}"}}\n')
+    return subprocess.run(
+        [str(product / "scripts/check-provenant-install.py")],
+        env={
+            **os.environ,
+            "AGENT_FABRIC_INSTANCE_ROOT": str(instance_root),
+            "PROVENANT_BIN_DIR": str(tmp_path / "bin"),
+            "HOME": str(tmp_path / "home"),
+            "PROVENANT_STALE_CHECKED": "1",
+        },
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+
+def install_binary(tmp_path: Path, identity: str | None) -> Path:
+    command = tmp_path / "bin/provenant"
+    command.parent.mkdir()
+    lines = ["#!/bin/sh", "exit 0", "", MARKER]
+    if identity is not None:
+        lines.append(f"provenant-front-door source-sha256={identity}")
+    command.write_text("\n".join(lines) + "\n")
+    command.chmod(0o755)
+    return command
+
+
+def current_digest(product: Path) -> str:
+    from lib.front_door_build import source_digest
+
+    return source_digest(product / "tools/front-door")
+
+
+def test_check_accepts_a_binary_whose_embedded_digest_matches_the_sources(
+    tmp_path: Path, crate_product: Path
+) -> None:
+    install_binary(tmp_path, current_digest(crate_product))
+
+    result = run_check_in(crate_product, tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    assert "provenant installed stub=ok" in result.stdout
+    assert "front-door=rust" in result.stdout.splitlines()
+
+
+def test_check_reports_a_rebuild_when_the_binary_predates_the_sources(
+    tmp_path: Path, crate_product: Path
+) -> None:
+    install_binary(tmp_path, "0" * 64)
+
+    result = run_check_in(crate_product, tmp_path)
+
+    assert result.returncode == 1
+    assert "built from different sources" in result.stderr
+    assert "rebuild: re-run install-harness" in result.stderr
+
+
+def test_check_treats_an_unstamped_binary_as_stale(tmp_path: Path, crate_product: Path) -> None:
+    install_binary(tmp_path, "unknown")
+
+    result = run_check_in(crate_product, tmp_path)
+
+    assert result.returncode == 1
+    assert "rebuild: re-run install-harness" in result.stderr
+
+
+def test_check_rejects_a_managed_file_with_no_identity_at_all(
+    tmp_path: Path, crate_product: Path
+) -> None:
+    install_binary(tmp_path, None)
+
+    result = run_check_in(crate_product, tmp_path)
+
+    assert result.returncode == 1
+    assert "installed stub differs" in result.stderr
+
+
+def test_check_still_accepts_the_template_when_a_crate_exists(
+    tmp_path: Path, crate_product: Path
+) -> None:
+    command = tmp_path / "bin/provenant"
+    command.parent.mkdir()
+    shutil.copy2(TEMPLATE, command)
+    command.chmod(0o755)
+
+    result = run_check_in(crate_product, tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    assert "front-door=python" in result.stdout.splitlines()
+
+
+def test_check_names_the_python_front_door_for_the_template(tmp_path: Path) -> None:
+    command = tmp_path / "bin/provenant"
+    command.parent.mkdir()
+    shutil.copy2(TEMPLATE, command)
+    command.chmod(0o755)
+
+    assert "front-door=python" in run_check(tmp_path).stdout.splitlines()
