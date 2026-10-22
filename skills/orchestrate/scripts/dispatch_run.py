@@ -1419,15 +1419,22 @@ def read_prompt_input(prompt_file: Path, workspace: Path, run_dir: Path, read_ro
     return prompt_bytes
 
 
-def routing_environment() -> dict[str, str]:
+def routing_environment(*, preserve_instance=False) -> dict[str, str]:
     """Keep discovery and worker routing on the same instance/product fallback."""
     env = os.environ.copy()
     instance = Path(env.get("AGENT_FABRIC_INSTANCE_ROOT") or Path.home() / ".agents").expanduser()
     # Routing may fall back to the product catalogue; the user's profile file stays the one receipts stamp.
     if not env.get(harness_profile.PROFILE_ROOT_ENV):  # empty counts as unset, as in user_path
         env[harness_profile.PROFILE_ROOT_ENV] = str(instance)
-    # The router owns catalogue fallback. Provider planning must retain the instance
-    # that owns telemetry accounts even when it has no routing catalogue.
+    # Only router invocations fall back to the product catalogue. Provider planning
+    # retains the instance that owns telemetry accounts.
+    if not preserve_instance:
+        try:
+            (instance / "config/model-routing.json").lstat()
+        except FileNotFoundError:
+            env["AGENT_FABRIC_INSTANCE_ROOT"] = env.get("AGENT_FABRIC_PRODUCT_ROOT", str(SKILLS_ROOT.parent))
+        except OSError:
+            pass
     return env
 
 
@@ -2290,7 +2297,7 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
             if (type(owner_started_ms) in (int, float) and math.isfinite(owner_started_ms)
                     and not getattr(args, "fallback_from", None)):
                 args._phase_timings["owner_setup"] = round(max(0, time.time() * 1000 - owner_started_ms), 3)
-            plan_environment=routing_environment()
+            plan_environment=routing_environment(preserve_instance=True)
             if git_evidence_requested: plan_environment.pop("CF_DISPATCH_AGY_ADD_DIR",None)
             fast_plan = fast_fabric_plan(args, prompt_path, result_path, workspace)
             planning = None
@@ -2308,7 +2315,7 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
                         alternate = argparse.Namespace(**vars(args))
                         alternate.model, alternate.alias, alternate.task_class = alternative, None, None
                         resolved = subprocess.run([*build_command(alternate, prompt_path, result_path, evidence_dir), "--plan-only"],
-                                                  cwd=workspace, env=routing_environment(), capture_output=True, text=True, timeout=30)
+                                                  cwd=workspace, env=routing_environment(preserve_instance=True), capture_output=True, text=True, timeout=30)
                         try:
                             replacement = json.loads(resolved.stdout)
                         except ValueError:
@@ -2337,7 +2344,8 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
                     plan["argv"] = provider_exec.profile(args.tool).argv(plan)
                 cooling=exec_routing.cooling(args.tool,plan["model"], account=plan.get("account"))
                 if cooling:
-                    if args.model and getattr(args, "fallback_from", None):
+                    if (args.model and getattr(args, "fallback_from", None)
+                            and not getattr(args, "_rate_limit_retry", None)):
                         plan["cooldown_blocked"] = cooling
                     elif args.model:
                         plan["warnings"].append("explicit model is cooling until "+cooling["cooling_until"])
@@ -2347,7 +2355,7 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
                                     and exec_routing.cooling(candidate["adapter"],candidate["model"])): continue
                             alternate=argparse.Namespace(**vars(args))
                             alternate.tool=candidate["adapter"];alternate.model=candidate["model"];alternate.alias=None;alternate.task_class=None;alternate.effort=candidate.get("effort")
-                            resolved=subprocess.run([*build_command(alternate,prompt_path,result_path,evidence_dir),"--plan-only"],cwd=workspace,env=routing_environment(),capture_output=True,text=True,timeout=30)
+                            resolved=subprocess.run([*build_command(alternate,prompt_path,result_path,evidence_dir),"--plan-only"],cwd=workspace,env=routing_environment(preserve_instance=True),capture_output=True,text=True,timeout=30)
                             try: replacement=json.loads(resolved.stdout)
                             except ValueError: continue
                             if replacement.get("schema")!="fabric.exec-plan.v1": continue
@@ -2931,6 +2939,7 @@ def execute_attempt_sequence(args,custody=None):
         return fail(args.run_dir, "fallback_invalid", str(exc))
     sequence_start=time.monotonic()
     sequence_budget=args.timeout_seconds
+    explicit_account = getattr(args, "account", None)
     result = _dispatch(args, custody)
     previous=getattr(args,"_last_row",None)
     plan=getattr(args,"_last_plan",None)
@@ -2962,10 +2971,20 @@ def execute_attempt_sequence(args,custody=None):
                 candidate = None
                 for item in alternatives:
                     route = (item["adapter"], exec_routing.registered_model(item["adapter"], item["model"]))
-                    if route in attempted or (route[0] != "claude" and exec_routing.cooling(*route)):
+                    if route in attempted:
+                        continue
+                    # Reuse the selected identity for automatic same-provider fallback.
+                    # An explicitly pinned Claude account is checked by its candidate plan.
+                    account = current.get("account") if route[0] == current["adapter"] else None
+                    check_cooling = (route[0] != "claude" or
+                                     (current["adapter"] == "claude" and explicit_account is None))
+                    if check_cooling and exec_routing.cooling(*route, account=account):
                         continue
                     attempted.add(route)
-                    candidate = item
+                    candidate = dict(item)
+                    if route[0] == "claude" and account is not None:
+                        # Model fallback retains the identity whose cooldown we checked.
+                        candidate["account"] = account
                     break
                 if candidate is None:
                     break
@@ -2974,6 +2993,8 @@ def execute_attempt_sequence(args,custody=None):
             args.timeout_seconds = remaining
             args.fallback_from={"attempt":previous["attempt"],"status":previous["status"],"reset_at":previous.get("reset_at"),"route":previous["provenance"]["line"].split(" (",1)[0].removeprefix("Route: ")}
             args.tool=candidate["adapter"];args.model=candidate["model"];args.effort=candidate.get("effort")
+            if "account" in candidate:
+                args.account = candidate["account"]
             args.alias=None;args.retry_of=f"attempt-{previous['attempt']:03d}"
             result=_dispatch(args,custody)
             previous=getattr(args,"_last_row",None)

@@ -7935,6 +7935,8 @@ def test_claude_json_is_read_only_to_every_lane(monkeypatch, tmp_path, adapter, 
 @pytest.mark.parametrize("adapter", ["claude", "cursor", "agy", "kiro"])
 def test_receipt_provider_state_grants_match_profile_with_symlink_home(monkeypatch, tmp_path, adapter):
     mod = supervisor()
+    # Exercise the default home rather than the suite's isolated Claude identity.
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
     home = (tmp_path / "home").resolve()
     home.mkdir()
     target = (tmp_path / "dotfiles" / adapter).resolve()

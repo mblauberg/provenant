@@ -266,7 +266,10 @@ COMMAND_DETAILS: dict[str, str] = {
     "dispatch": (
         "usage: provenant dispatch ...\n\n"
         "Delegates to skills/orchestrate/scripts/dispatch_run.py ...\n"
-        "Own a durable run of provider attempts, including fallback and session resume."
+        "Own a durable run of provider attempts, including fallback and session resume.\n\n"
+        "Claude lanes accept --account LABEL from accounts.claude in telemetry.json.\n"
+        "Without it, cached quota favours short-window room and expiring weekly reserve;\n"
+        "without usable cached quota, the default Claude config directory is retained."
     ),
     "batch": (
         "usage: provenant batch ...\n\n"

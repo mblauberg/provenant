@@ -2457,8 +2457,14 @@ def test_non_git_fallback_routes_via_product_root_model_route():
             "model_route_catalog.py",
             "model_route_preferences.py",
             "worktree.py",
+            "provider_quota.py",
+            "provider_identity.py",
+            "host_identity.py",
+            "quota_schedule.py",
+            "telemetry.py",
         ):
             shutil.copy2(PRODUCT_ROOT / "scripts" / name, product / "scripts" / name)
+        shutil.copytree(PRODUCT_ROOT / "scripts/quota_providers", product / "scripts/quota_providers")
         bin_dir = tmp / "bin"
         bin_dir.mkdir()
         write_executable(

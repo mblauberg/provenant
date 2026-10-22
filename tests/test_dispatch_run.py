@@ -5010,7 +5010,7 @@ def _sequence_fixture(monkeypatch, plan, rows, alternatives):
     launches = []
 
     def fake_dispatch(args, custody=None):
-        launches.append((getattr(args, "tool", None), getattr(args, "model", None)))
+        launches.append((getattr(args, "tool", None), getattr(args, "model", None), getattr(args, "account", None)))
         args._last_row = rows[len(launches) - 1] if len(launches) <= len(rows) else {**rows[-1], "retryable": False}
         args._last_plan = plan
         return 0
@@ -5020,7 +5020,7 @@ def _sequence_fixture(monkeypatch, plan, rows, alternatives):
     rows[:] = [{**row, **item} for item in rows]
     monkeypatch.setattr(mod, "_dispatch", fake_dispatch)
     monkeypatch.setattr(mod.exec_routing, "candidates", lambda *a, **k: alternatives)
-    monkeypatch.setattr(mod.exec_routing, "cooling", lambda *a: None)
+    monkeypatch.setattr(mod.exec_routing, "cooling", lambda *a, **k: None)
     monkeypatch.setattr(mod, "pacing_policy", lambda: {"base_delay_seconds": 30, "cap_seconds": 900,
                                                        "jitter_fraction": 0, "minimum_budget_seconds": 30})
     return mod, args, launches
@@ -5042,6 +5042,26 @@ def test_paced_retry_tolerates_a_row_with_null_evidence(monkeypatch):
     mod.execute_attempt_sequence(args)
     assert len(launches) == 2
     assert launches[1][1] == "claude-opus-5-5"
+
+
+def test_model_fallback_retains_the_automatically_selected_claude_account(monkeypatch):
+    plan = {"adapter": "claude", "model": "claude-opus-5-5", "account": "pro"}
+    rows = [{"status": "usage_limited"}, {"status": "ok", "retryable": False}]
+    alternatives = [{"adapter": "claude", "model": "sonnet"}]
+    mod, args, launches = _sequence_fixture(monkeypatch, plan, rows, alternatives)
+    mod.execute_attempt_sequence(args)
+    assert launches == [(None, None, None), ("claude", "sonnet", "pro")]
+
+
+def test_cross_adapter_fallback_plans_claude_before_checking_account_cooldown(monkeypatch):
+    plan = {"adapter": "codex", "model": "gpt-6.1-sol"}
+    rows = [{"status": "usage_limited"}, {"status": "ok", "retryable": False}]
+    alternatives = [{"adapter": "claude", "model": "sonnet"}]
+    mod, args, launches = _sequence_fixture(monkeypatch, plan, rows, alternatives)
+    monkeypatch.setattr(mod.exec_routing, "cooling",
+                        lambda adapter, *a, **k: {"cooling_until": "2099-01-01T00:00:00Z"} if adapter == "claude" else None)
+    mod.execute_attempt_sequence(args)
+    assert launches == [(None, None, None), ("claude", "sonnet", None)]
 
 
 def test_claude_fallback_does_not_override_selected_account_cooldown(tmp_path, monkeypatch):
