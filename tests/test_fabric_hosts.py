@@ -190,6 +190,37 @@ class PeerContracts(unittest.TestCase):
 
             self.assertEqual(result['runs'], [row])
 
+    def test_federated_absolute_selector_resolves_host_run_dir_from_main_repository(self):
+        import fabric_hosts as hosts
+        import fabric_lanes
+
+        with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, {
+                'HOME': directory, 'AGENT_FABRIC_INSTANCE_ROOT': directory}):
+            project = 'Repos/project'
+            repository = Path(directory) / project
+            repository.mkdir(parents=True)
+            subprocess.run(['git', 'init', '-q', str(repository)], check=True)
+            subprocess.run(['git', '-C', str(repository), 'config', 'user.name', 'Fixture'], check=True)
+            subprocess.run(['git', '-C', str(repository), 'config', 'user.email', 'fixture@example.invalid'], check=True)
+            subprocess.run(['git', '-C', str(repository), 'commit', '-q', '--allow-empty', '-m', 'fixture'], check=True)
+            worktree = repository / '.worktrees/peer'
+            subprocess.run(['git', '-C', str(repository), 'worktree', 'add', '-q', '--detach', str(worktree), 'HEAD'], check=True)
+            run_dir = repository / '.agent-run/runs/shared-run'
+            run_dir.mkdir(parents=True)
+            owner = fabric_lanes.LaneFederation(hosts)
+            row = {'id': 'shared-run-id', 'run_id': 'shared-run-id', 'task_id': 'batch-task', 'attempt': 1,
+                'run_path': 'runs/shared-run', 'run_dir': str(run_dir)}
+            with owner.database() as db:
+                db.execute('INSERT INTO snapshots VALUES (?,?,?,?,?)',
+                    (project, owner.config.local_host, 'lanes', time.time(), json.dumps([row])))
+            selector = str(repository / '.agent-run/runs/../runs/shared-run')
+            with patch.object(hosts, 'project_directory', return_value=worktree), \
+                    patch.object(owner, 'worker', side_effect=hosts.HostError('selector_not_found', 'missing')):
+                result = owner.reads('lanes', project, {'ids': [selector]})
+
+            self.assertEqual(result['runs'][0]['run_dir'], str(run_dir))
+            self.assertEqual(result['runs'][0]['host'], owner.config.local_host)
+
     def peer(self, request, **env):
         with tempfile.TemporaryDirectory() as directory:
             environment = {**os.environ, 'HOME': directory,

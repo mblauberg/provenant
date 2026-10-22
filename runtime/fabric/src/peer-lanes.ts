@@ -1,13 +1,13 @@
 /** Fixed peer boundary. Provider mechanics remain with the local owners. */
 import { closeSync, readFileSync, writeFileSync } from "node:fs";
-import { identify, databasePath, runRoot } from "./identity.js";
+import { identify, databasePath } from "./identity.js";
 import { dispatchConfiguredProvider, dispatchConfiguredBatch, cancelConfiguredRun, hostOwnersInThemselves, releaseActiveExecutions } from "./execution.js";
-import { statusRows, fabricOutput, runProcessAlive } from "./run-registry.js";
+import { statusRows, fabricOutput } from "./run-registry.js";
 import { readRuns } from "./run-reader.js";
 import { resumeConfiguredProvider, handoffDispatch } from "./resume.js";
 import { sessionDispatch } from "./sessions.js";
 import { Store } from "./store.js";
-import { resolve } from "node:path";
+import { annotatePeerLaneRows } from "./peer-lane-rows.js";
 
 const request = JSON.parse(readFileSync(process.argv[2]!, "utf8"));
 const identity = identify();
@@ -64,21 +64,10 @@ try {
     }
     default: throw new Error("Unsupported peer lane verb");
   }
-  // A terminal attempt can still have a live sequence owner between fallbacks.
-  // Expose that existing liveness field before the Python host considers cleanup.
   const rows = (result as { runs?: Array<Record<string, any>> } | undefined)?.runs;
-  for (const row of rows ?? []) {
-    // Imported lanes already carry liveness from their actual owner record;
-    // their intentionally empty project-relative path cannot be probed here.
-    if (typeof row.source_project === "string") continue;
-    const runDir = typeof row.run_dir === "string" ? row.run_dir
-      : typeof row.run_path === "string" ? resolve(runRoot(identity.project), row.run_path) : undefined;
-    if (row.run_dir === undefined && typeof row.run_path === "string") row.run_dir = runDir;
-    if (row.state === "terminal") {
-      row.pgid_alive = runDir === undefined || typeof row.task_id !== "string"
-        ? true : runProcessAlive(runDir, row.task_id, Number(row.attempt));
-    }
-  }
+  // A terminal attempt can still have a live sequence owner between fallbacks.
+  // Expose its liveness before the Python host considers cleanup.
+  annotatePeerLaneRows(rows ?? [], identity.project);
   console.log(JSON.stringify(result));
 } finally {
   releaseActiveExecutions();
