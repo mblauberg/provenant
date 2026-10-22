@@ -71,20 +71,20 @@ def test_registered_claude_efforts_bound_what_is_sent(tmp_path):
     """A registry effort list, not the request, decides what reaches the CLI."""
     route = resolve("--adapter", "claude", "--alias", "flagship", "--model", "sonnet",
                     "--role", "worker", "--effort", "ultra")
-    assert route["effort_applied"] == "max"
+    assert route["effort_applied"] == "xhigh"
     assert "ultra" in route["effort_substitution"]
     plan = planned("claude", route, tmp_path, requested_effort="ultra")
-    assert plan["argv"][plan["argv"].index("--effort") + 1] == "max"
+    assert plan["argv"][plan["argv"].index("--effort") + 1] == "xhigh"
 
 
 @pytest.mark.parametrize("alias", [(), ("--alias", "flagship")])
 def test_codex_unsupported_effort_records_the_clamped_value_sent(tmp_path, alias):
     route = resolve("--adapter", "codex", *alias, "--model", "gpt-6-luna",
                     "--role", "worker", "--effort", "ultra")
-    assert route["effort_applied"] == "max"
+    assert route["effort_applied"] == "xhigh"
     plan = planned("codex", route, tmp_path, requested_effort="ultra")
-    assert 'model_reasoning_effort="max"' in plan["argv"]
-    assert plan["route_label"] == "codex/gpt-6-luna@max"
+    assert 'model_reasoning_effort="xhigh"' in plan["argv"]
+    assert plan["route_label"] == "codex/gpt-6-luna@xhigh"
 
 
 def test_codex_without_effort_claims_no_default(tmp_path):

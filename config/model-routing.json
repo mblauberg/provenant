@@ -428,7 +428,6 @@
         "orchestrator"
       ],
       "effort_fallback_order": [
-        "max",
         "xhigh",
         "high",
         "medium",
@@ -495,8 +494,7 @@
             "low",
             "medium",
             "high",
-            "xhigh",
-            "max"
+            "xhigh"
           ],
           "default": false
         },
@@ -510,8 +508,7 @@
           "efforts": [
             "medium",
             "high",
-            "xhigh",
-            "max"
+            "xhigh"
           ],
           "default": true
         },
@@ -568,7 +565,6 @@
             "medium",
             "high",
             "xhigh",
-            "max",
             "ultra"
           ]
         },
@@ -582,7 +578,6 @@
             "medium",
             "high",
             "xhigh",
-            "max",
             "ultra"
           ],
           "default": true
@@ -596,8 +591,7 @@
             "low",
             "medium",
             "high",
-            "xhigh",
-            "max"
+            "xhigh"
           ]
         }
       ]

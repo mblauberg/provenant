@@ -1603,7 +1603,7 @@ def preflight_tasks(tasks: list[dict[str, Any]], workspace_root: Path | None = N
                     fix = ("Pass alias " + ", ".join(aliases) + " or model " + ", ".join(choices) + "."
                            if choices else "Pass an explicit provider/model id supported by " + adapter + ".")
                     if "effort" in code:
-                        fix = "Omit effort, or pass a supported level: low, medium, high, xhigh, max, ultra."
+                        fix = "Omit effort, or pass a supported level: low, medium, high, xhigh, ultra."
                     if code in {"model_ambiguous", "model_not_found"} and route.get("message"):
                         fix = str(route["message"])[:600]
                     raise PreflightError(code, fixes.get(code, fix))

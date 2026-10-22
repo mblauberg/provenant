@@ -584,7 +584,9 @@ def test_tier_alias_clamps_effort_to_the_registry_efforts(model, asked, resolved
     assert route["status"] == "ok"
     assert route["resolved_model"] == resolved
     assert route["effort"] == used
-    assert route["effort_substitution"] == f"{asked} unsupported by {resolved}; ran at {used}"
+    assert route["effort_substitution"] == (
+        "max retired; mapped to xhigh" if asked == "max"
+        else f"{asked} unsupported by {resolved}; ran at {used}")
     assert asked not in route["supported_efforts"]
 
 
@@ -3405,7 +3407,7 @@ def test_task_class_effort_overlay_may_raise_effort_above_policy_floor(
 ):
     router = load_router()
     catalog = json.loads((ROOT / "config" / "model-routing.json").read_text())
-    catalog["task_class_routes"]["critical-review"]["effort"] = "max"
+    catalog["task_class_routes"]["critical-review"]["effort"] = "xhigh"
     catalog_path = tmp_path / "model-routing.json"
     catalog_path.write_text(json.dumps(catalog))
     monkeypatch.setattr(router, "CATALOG_PATH", catalog_path)
@@ -3418,7 +3420,7 @@ def test_task_class_effort_overlay_may_raise_effort_above_policy_floor(
 
     route = json.loads(capsys.readouterr().out)
     assert route["status"] != "task_class_config_invalid"
-    assert route["requested_effort"] == "max"
+    assert route["requested_effort"] == "xhigh"
     assert result == 1
 
 
@@ -3501,7 +3503,7 @@ def test_openai_catalog_declares_effort_policy_only():
         "critical-review": {"flagship": "xhigh"},
         "worker": {"workhorse": "high", "scout": "high"},
     }
-    assert family["effort_fallback_order"] == ["max", "xhigh", "high", "medium", "low"]
+    assert family["effort_fallback_order"] == ["xhigh", "high", "medium", "low"]
 
 
 def test_codex_capabilities_documents_historical_no_effort_status():
@@ -3618,7 +3620,7 @@ def test_explicit_ultra_maps_to_supported_effort_on_ordinary_routes(tmp_path):
         assert result.returncode == 0
         assert route["status"] == "ok"
         assert route["requested_effort"] == "ultra"
-        assert route["effort"] in {"ultra", "max"}
+        assert route["effort"] in {"ultra", "xhigh"}
 
 
 def test_codex_failure_records_never_expose_a_dispatchable_model(tmp_path):

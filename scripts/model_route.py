@@ -2058,6 +2058,8 @@ def resolve(args: argparse.Namespace, catalog: dict[str, Any]) -> int:
             effort_status = ""
     if not effort_status and getattr(args, "raw_effort", None):
         effort_substitution = f"{args.raw_effort} unknown; ran at {effort or 'default'}"
+    if not effort_status and getattr(args, "max_remapped", False):
+        effort_substitution = "; ".join(filter(None, ("max retired; mapped to xhigh", effort_substitution)))
     # The effort reaches a suffix model only through its id, so the id must carry it.
     suffix_model = args.effort_transport == "model-id" and (registered_model or {}).get("effort_transport") == "model-suffix"
     suffix = (registered_model.get("suffix", {}) if suffix_model else {}).get(effort or "", "")
@@ -2548,6 +2550,9 @@ def main(argv: list[str] | None = None) -> int:
             args.task_class_effort = route_effort
         elif args.alias not in {"flagship", "workhorse", "scout"}:
             return reject("unknown_alias")
+        if args.effort == "max":  # retired: effort above xhigh does not pay
+            args.max_remapped = True
+            args.effort = "xhigh"
         if args.effort and args.effort not in EFFORT_ORDER:
             if args.require_distinct or args.model_override_tier or args.task_class:
                 return reject("invalid_effort", alias=args.alias)
