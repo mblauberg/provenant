@@ -971,6 +971,7 @@ def build_command(
         ("--reviewer-id", args.reviewer_id),
         ("--model", args.model),
         ("--effort", args.effort),
+        ("--account", getattr(args, "account", None) if args.tool == "claude" else None),
         ("--access-mode", args.access_mode),
         ("--worktree", str(args.worktree) if args.worktree else ""),
         ("--timeout-seconds", str(provider_timeout_seconds(args.timeout_seconds))),
@@ -1158,7 +1159,7 @@ def fast_fabric_plan(args, prompt_path: Path, result_path: Path, workspace: Path
             mode=args.access_mode, timeout_seconds=provider_timeout_seconds(args.timeout_seconds),
             intent=args.intent, preface=args.preface, requested_model=args.model,
             requested_effort=args.effort or "", run_id=os.environ.get("PROVENANT_RUN_ID", ""),
-            run_dir=result_path.parent,
+            run_dir=result_path.parent, account=getattr(args, "account", None) if args.tool == "claude" else None,
             original_prompt_file=getattr(args, "original_prompt_file", None) or prompt_path,
             chair=os.environ.get("PROVENANT_CHAIR", ""),
             reviewer_id=args.reviewer_id or "", risk_tier=args.risk_tier or "",
@@ -1425,12 +1426,8 @@ def routing_environment() -> dict[str, str]:
     # Routing may fall back to the product catalogue; the user's profile file stays the one receipts stamp.
     if not env.get(harness_profile.PROFILE_ROOT_ENV):  # empty counts as unset, as in user_path
         env[harness_profile.PROFILE_ROOT_ENV] = str(instance)
-    try:
-        (instance / "config/model-routing.json").lstat()
-    except FileNotFoundError:
-        env["AGENT_FABRIC_INSTANCE_ROOT"] = env.get("AGENT_FABRIC_PRODUCT_ROOT", str(SKILLS_ROOT.parent))
-    except OSError:
-        pass
+    # The router owns catalogue fallback. Provider planning must retain the instance
+    # that owns telemetry accounts even when it has no routing catalogue.
     return env
 
 
@@ -1653,7 +1650,7 @@ def preflight_tasks(tasks: list[dict[str, Any]], workspace_root: Path | None = N
                         cwd=str(worktree if mode == 'worktree_write' else task.get('cwd') or workspace), workspace_root=str(workspace),
                         worktree=str(worktree) if mode == 'worktree_write' else None, sandbox=task.get('sandbox'), network=task.get('network'),
                         capabilities=task.get('capabilities', []), add_dirs=task.get('add_dirs', []),
-                        read_roots=read_roots)
+                        read_roots=read_roots, account=task.get('account'))
                     if plan['applied'].get('confinement') in {None, 'none'}:
                         raise PreflightError('remote_confinement_degraded', 'Remote placement requires effective confinement')
                 routes.append(route)
@@ -1753,6 +1750,9 @@ def contract_row(args,run_dir,number,attempt_dir,plan,started_at):
         note = f'local fallback from {placement["from_host"]}: {placement["reason"]}' + (f': {placement["detail"]}' if placement.get('detail') else '')
         if note not in plan.setdefault('warnings', []):
             plan['warnings'].append(note)
+    if plan.get('account') is not None:
+        attempt_scope(args, number)['account'] = plan['account']
+        provenance['account'] = plan['account']
     return {"schema":"fabric.attempt.v1", **attempt_scope(args,number), **({'placement_fallback': placement} if placement else {}),"run_id":plan.get("run_id") or run_identity(run_dir),"task_id":args.task_id,"task_class":task_class,
         **({"batch_id":args.batch_id} if getattr(args,"batch_id",None) else {}),"profile":profile_resolution(args),
         "attempt":number,"state":"running","status":None,"usage_source":"missing","mode":args.access_mode,"cwd":plan.get("cwd") or str(Path.cwd().resolve()),
@@ -1899,6 +1899,8 @@ def prepare_resume(args):
             f"dropped missing recorded add_dir: {item}" for item in missing_add_dirs
         ]
     args.resume_session=previous["session_id"]
+    if args.tool == "claude":
+        args.account=previous.get("account")
     args.read_roots=previous.get("read_roots") or []
     # A read root was canonical when granted; a directory since swapped for a link is not that grant.
     bound=[*args.read_roots,*([args.provider_cwd] if args.read_roots and args.provider_cwd else [])]
@@ -2333,19 +2335,24 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
                 if hasattr(args,"resume_relaunch"):
                     plan["prompt"] += "\n\nPrevious turn and question:\n"+args.resume_relaunch
                     plan["argv"] = provider_exec.profile(args.tool).argv(plan)
-                cooling=exec_routing.cooling(args.tool,plan["model"])
+                cooling=exec_routing.cooling(args.tool,plan["model"], account=plan.get("account"))
                 if cooling:
-                    if args.model:
+                    if args.model and getattr(args, "fallback_from", None):
+                        plan["cooldown_blocked"] = cooling
+                    elif args.model:
                         plan["warnings"].append("explicit model is cooling until "+cooling["cooling_until"])
                     else:
                         for candidate in exec_routing.candidates(plan,True,confidential=getattr(args,"confidential",False)):
-                            if exec_routing.cooling(candidate["adapter"],candidate["model"]): continue
+                            if (candidate["adapter"] != "claude"
+                                    and exec_routing.cooling(candidate["adapter"],candidate["model"])): continue
                             alternate=argparse.Namespace(**vars(args))
                             alternate.tool=candidate["adapter"];alternate.model=candidate["model"];alternate.alias=None;alternate.task_class=None;alternate.effort=candidate.get("effort")
                             resolved=subprocess.run([*build_command(alternate,prompt_path,result_path,evidence_dir),"--plan-only"],cwd=workspace,env=routing_environment(),capture_output=True,text=True,timeout=30)
                             try: replacement=json.loads(resolved.stdout)
                             except ValueError: continue
                             if replacement.get("schema")!="fabric.exec-plan.v1": continue
+                            if exec_routing.cooling(candidate["adapter"], candidate["model"],
+                                                    account=replacement.get("account")): continue
                             old_run_dir = replacement.get("run_dir")
                             replacement["run_dir"] = str(attempt_dir)
                             boundary_paths = replacement.get("applied", {}).get("write_boundary", {}).get("writable_paths")
@@ -2938,7 +2945,7 @@ def execute_attempt_sequence(args,custody=None):
                 break
             current = getattr(args, "_last_plan", plan)
             key = (current["adapter"], exec_routing.registered_model(current["adapter"], current["model"]))
-            cooling = exec_routing.cooling(*key)
+            cooling = exec_routing.cooling(*key, account=current.get("account"))
             policy = pacing_policy()
             delay = rate_limit_delay(previous, cooling, policy)
             pace = (previous["status"] == "rate_limited" and key not in retried
@@ -2955,7 +2962,7 @@ def execute_attempt_sequence(args,custody=None):
                 candidate = None
                 for item in alternatives:
                     route = (item["adapter"], exec_routing.registered_model(item["adapter"], item["model"]))
-                    if route in attempted or exec_routing.cooling(*route):
+                    if route in attempted or (route[0] != "claude" and exec_routing.cooling(*route)):
                         continue
                     attempted.add(route)
                     candidate = item
@@ -3010,7 +3017,7 @@ def dispatch(args: argparse.Namespace) -> int:
                 'task_id': args.task_id, 'timeout_seconds': args.timeout_seconds,
                 'resume': args.resume, 'context_ceiling': args.context_ceiling,
                 'sandbox': args.sandbox, 'network': None if args.network is None else args.network == 'true',
-                'capabilities': args.capabilities, 'add_dirs': args.add_dirs,
+                'account': args.account, 'capabilities': args.capabilities, 'add_dirs': args.add_dirs,
                 'allow_secrets': args.allow_secrets, 'confidential': args.confidential,
                 'knobs': getattr(args, 'knobs', None) or None, 'wait_seconds': 0,
             }.items() if value is not None and value != []}
@@ -3126,6 +3133,7 @@ def parser() -> argparse.ArgumentParser:
         help="Git worktree root the writer owns exclusively; requires worktree_write",
     )
     root.add_argument("--effort")
+    root.add_argument("--account", help="Claude account label from telemetry configuration")
     root.add_argument(
         "--timeout", "--timeout-seconds", dest="timeout_seconds", type=timeout_value,
         default=None,

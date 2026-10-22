@@ -295,11 +295,11 @@ same_path = identity.same_path
 configured = identity.configured
 
 
-def accounts():
+def accounts(provider_name=None):
     """Configured accounts; a provider with no configuration gets its local default, if any."""
     listed = configured()
     found = []
-    for name in sorted(set(registered()) | set(listed)):
+    for name in sorted({provider_name} if provider_name else set(registered()) | set(listed)):
         module = provider(name)
         default = module.default_identity() if module else identity.selected_identity(name)
         shared = getattr(module, 'fingerprinted', None)  # one credential store serves several accounts
@@ -628,6 +628,31 @@ def load_snapshot(provider_name, label, identity_dir=None):
             return None
     return value if isinstance(value, dict) and value.get('schema') == SCHEMA and value.get('host') == telemetry_host() else None
 
+
+
+def choose_claude_account(snapshots, now):
+    """Choose a label from cached windows only; unknown caches preserve the CLI default.
+
+    Healthy weekly budgets precede deficits, then five-hour room precedes a full
+    short window. Project current weekly use to reset to spend expiring reserve first.
+    Labels break ties so configuration order does not affect selection.
+    """
+    ranked = []
+    for label, value in snapshots.items():
+        if not value or value.get('status') != 'ok':
+            continue
+        windows = {row.get('name'): row for row in value.get('windows', [])}
+        short, weekly = windows.get('five_hour'), windows.get('seven_day')
+        if not short or not weekly or any(number(row.get('used_percent')) is None for row in (short, weekly)):
+            continue
+        # A cached limit no longer binds once its reported reset has passed.
+        short = {**short, 'used_percent': 0} if reset_passed(short, now) else short
+        weekly = {**weekly, 'used_percent': 0} if reset_passed(weekly, now) else weekly
+        budget = pace(weekly, now)
+        deficit = budget['state'] in ('exhausted', 'deficit') or budget.get('will_last_to_reset') is False
+        reserve = budget.get('expiring_headroom_percent', 0)
+        ranked.append(((deficit, short['used_percent'] >= 100, -reserve, label), label))
+    return min(ranked)[1] if ranked else None
 
 def open_private(path, mode='a'):
     """Open for appending, or reading with mode 'r', never through a symlink; created 0600."""
@@ -1536,19 +1561,22 @@ def refused_until(worst, value, now):
     return iso(observed + timedelta(seconds=seconds if seconds and seconds > 0 else UNKNOWN_RESET_SECONDS))
 
 
-def route_states(now=None):
+def route_states(now=None, *, selected_accounts=None):
     """Pace state per provider from the cached snapshot of its active account. Never fetches."""
     now = now or utcnow()
     if not enabled():
         return {}
     try:
-        current = {(account.provider, account.label): account for account in accounts()}
+        candidates = ([account for name in selected_accounts for account in accounts(name)]
+                      if selected_accounts is not None else accounts())
+        current = {(account.provider, account.label): account for account in candidates}
     except ValueError:
         return {}
     states = {}
     for (name, label), account in current.items():
         value = load_snapshot(name, label, account.identity_dir)
-        if not account.active or not value or value.get('status') not in ('ok', 'stale'):
+        active = label == selected_accounts.get(name) if selected_accounts is not None else account.active
+        if not active or not value or value.get('status') not in ('ok', 'stale'):
             continue
         module = provider(name)
         row = describe(value, None, now)
@@ -1567,11 +1595,11 @@ def route_states(now=None):
     return states
 
 
-def apply_to_cooldowns(records, now=None):
+def apply_to_cooldowns(records, now=None, *, selected_accounts=None):
     """Add cooldowns for exhausted providers; drop stale usage cooldowns where the provider has headroom."""
     now = now or utcnow()
     try:
-        states = route_states(now)
+        states = route_states(now, selected_accounts=selected_accounts)
     except Exception:  # Routing must never fail on quota.
         return records
     result = dict(records)

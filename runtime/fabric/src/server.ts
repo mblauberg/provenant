@@ -155,6 +155,7 @@ const route = {
   alias: str,
   model: str.meta({ description: "A model name or catalogue alias (for example sonnet, sol, luna, deepseek-free, glm-free); the most predictable selector. adapter/model also works." }),
   effort: str,
+  account: str.meta({ description: "Claude account label from accounts.claude in telemetry configuration." }),
   mode: z.enum(ACCESS_MODES).optional(),
   worktree: str,
   cwd: str,

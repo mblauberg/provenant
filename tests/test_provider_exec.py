@@ -8237,3 +8237,56 @@ def test_opencode_spent_free_allowance_records_provider_reason(tmp_path, body_st
     record = supervisor().execute(fixture_plan(tmp_path, code, "opencode"), tmp_path / "result.md")
     assert record["status"] == "usage_limited"
     assert record["reason"] == message
+
+
+@pytest.mark.parametrize('mode', ['read_only', 'worktree_write'])
+@pytest.mark.parametrize('explicit', [True, False, 'uncached', 'resume-default', 'default-preflight'])
+@pytest.mark.parametrize('nested', [False, True, 'alias'])
+def test_claude_account_binds_environment_sandbox_and_receipt(tmp_path, monkeypatch, mode, explicit, nested):
+    mod = supervisor()
+    home = tmp_path / 'home'
+    home.mkdir()
+    monkeypatch.setenv('HOME', str(home))
+    monkeypatch.setenv('AGENT_FABRIC_INSTANCE_ROOT', str(home / '.agents'))
+    monkeypatch.setenv('AGENT_FABRIC_STATE_ROOT', str(tmp_path / 'state'))
+    monkeypatch.delenv('CLAUDE_CONFIG_DIR', raising=False)
+    config = home / '.agents/config/telemetry.json'
+    config.parent.mkdir(parents=True)
+    selected = home / '.claude/pro' if nested is True else home / '.claude-pro'
+    other = home / '.claude/max' if nested is True else home / '.claude-max'
+    if nested == 'alias':
+        target = tmp_path / 'identities/pro'
+        target.mkdir(parents=True)
+        selected.symlink_to(target, target_is_directory=True)
+    else:
+        selected.mkdir(parents=True)
+    other.mkdir(parents=True)
+    config.write_text(json.dumps({'accounts': {'claude': {
+        'pro': {'identity_dir': str(selected)}, 'max': {'identity_dir': str(other), 'enabled': False},
+    }}}))
+    # A synthetic, identity-bound cache is the only input to automatic selection.
+    import provider_quota as quota
+    quota.save_snapshot({'schema': quota.SCHEMA, 'host': quota.telemetry_host(), 'provider': 'claude',
+                         'account': 'pro', 'status': 'ok', 'windows': [
+                             {'name': 'five_hour', 'used_percent': 10, 'window_minutes': 300},
+                             {'name': 'seven_day', 'used_percent': 10, 'window_minutes': 10080},
+                         ]}, selected)
+    if explicit in ('uncached', 'resume-default', 'default-preflight'):
+        quota.cache_path('claude', 'pro', identity_dir=selected).unlink()
+        selected = home / '.claude'
+    code = "import os,json; print(json.dumps({'type':'result','is_error':False,'result':os.environ.get('CLAUDE_CONFIG_DIR')}))"
+    plan = fixture_plan(tmp_path, code, 'claude', mode=mode, account='pro' if explicit is True else 'default' if explicit in ('resume-default', 'default-preflight') else None,
+                        resume_session='01234567-0123-4567-89ab-0123456789ab' if explicit == 'resume-default' else None)
+    profile = mod.os_confinement_profile(plan)
+    assert f'(allow file-read-data (subpath "{selected.resolve()}")' in profile
+    assert f'(subpath "{other}")' in profile
+    assert any(line.startswith('(deny file-read') and f'"{other}"' in line for line in profile.splitlines())
+    assert not any(line.startswith('(allow ') and f'"{other}"' in line for line in profile.splitlines())
+    if explicit not in ('uncached', 'resume-default', 'default-preflight'):
+        assert not any(line.startswith('(allow ') and f'"{home / ".claude"}"' in line for line in profile.splitlines())
+    record = mod.execute(plan, tmp_path / 'result.md')
+    assert record['status'] == 'ok'
+    assert (tmp_path / 'result.md').read_text().strip() == str(selected)
+    expected = 'default' if explicit in ('uncached', 'resume-default', 'default-preflight') else 'pro'
+    assert record['account'] == expected
+    assert record['provenance']['account'] == expected

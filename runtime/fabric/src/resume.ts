@@ -146,6 +146,7 @@ export async function resumeConfiguredProvider(
       id: taskId, adapter: requested.adapter ?? previous.adapter ?? identity.provider,
       model: previous.provenance?.resolved_model ?? requested.model,
       effort: sentEffort(previous),
+      ...(previous.account === undefined ? {} : { account: previous.account }),
       access_mode: previous.mode ?? "read_only", worktree: previous.worktree ?? undefined,
       cwd: previous.mode === "worktree_write" ? undefined : executionIdentity.cwd,
       ...Object.fromEntries(Object.entries(applied).filter(([key, value]) =>

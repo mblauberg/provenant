@@ -58,6 +58,7 @@ Options:
   --reviewer-id ID             Stable worker/reviewer identity for receipt binding.
   --model MODEL                Optional model passed to adapter.
   --effort EFFORT              Optional effort passed to adapter.
+  --account LABEL              Claude account from telemetry configuration.
   --timeout-seconds N          Supervisor wall clock deadline, all adapters.
   --add-dir PATH               Additional provider directory; repeatable.
   --read-root PATH             Outside directory a read-only cwd may use; repeatable.
@@ -126,7 +127,7 @@ ROUTE_FIELDS = (
 
 VALUE_FLAGS = {
     "--fallback": "fallback", "--cwd": "provider_cwd", "--sandbox": "sandbox",
-    "--network": "network", "--capabilities": "capabilities",
+    "--account": "account", "--network": "network", "--capabilities": "capabilities",
     "--resume-session": "resume_session", "--tool": "tool",
     "--task-class": "task_class", "--model": "model", "--effort": "effort",
     "--access-mode": "access_mode", "--timeout-seconds": "timeout_seconds",
@@ -162,6 +163,7 @@ class Options:
     sandbox: str = ""
     network: str = ""
     capabilities: str = ""
+    account: str = ""
     resume_session: str = ""
     provider_cwd: str = ""
     fallback: str = ""
@@ -835,7 +837,7 @@ class Dispatcher:
             supervisor.append("--no-preface")
         for flag, value in (
             ("--worktree", opts.worktree), ("--cwd", opts.provider_cwd), ("--sandbox", opts.sandbox),
-            ("--network", opts.network), ("--capabilities", opts.capabilities),
+            ("--account", opts.account), ("--network", opts.network), ("--capabilities", opts.capabilities),
             ("--resume-session", opts.resume_session), ("--timeout-seconds", opts.timeout_seconds),
         ):
             if value:

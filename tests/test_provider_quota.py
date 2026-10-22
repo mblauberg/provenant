@@ -1908,3 +1908,41 @@ def test_claude_parse_loads_quota_schedule_itself_when_it_is_not_registered(monk
         assert rows['weekly_all:1']['window_minutes'] == WEEK
     finally:
         sys.modules.pop('quota_schedule', None)
+
+
+@pytest.mark.parametrize('short,weekly,expected', [
+    ((10, 20), (10, 35), 'pro'),  # More allowance would expire unused on Pro.
+    ((100, 20), (10, 35), 'max'),  # Short-window room wins over weekly reserve.
+    ((10, 20), (70, 35), 'max'),  # A weekly deficit is skipped.
+    ((10, 20), (100, 35), 'max'),
+    ((10, 100), (70, 35), 'max'),  # A healthy weekly budget beats a deficit.
+    ((10, 100), (100, 80), 'pro'),  # All in deficit: use short room then projection.
+    ((100, 100), (10, 35), 'pro'),
+    ((10, 10), (10, 10), 'max'),  # Stable label tie-break, independent of input order.
+])
+def test_choose_claude_account_from_cached_windows(quota, short, weekly, expected):
+    values = {label: {'status': 'ok', 'windows': [
+        window(five, 300, timedelta(hours=2), 'five_hour'),
+        window(seven, WEEK, timedelta(days=3.5)),
+    ]} for label, five, seven in zip(('pro', 'max'), short, weekly)}
+    choose = quota.choose_claude_account
+    assert choose(values, NOW) == expected
+
+
+@pytest.mark.parametrize('values', [{}, {'pro': None}, {'pro': {'status': 'error', 'windows': []}}])
+def test_choose_claude_account_without_usable_cache_keeps_default(quota, values):
+    assert quota.choose_claude_account(values, NOW) is None
+
+
+@pytest.mark.parametrize('selected,exhausted', [('pro', True), ('max', False)])
+def test_cached_cooldown_targets_selected_claude_account(quota, tmp_path, selected, exhausted):
+    configure(tmp_path, {'accounts': {'claude': {
+        'pro': {'identity_dir': str(tmp_path / 'pro')},
+        'max': {'identity_dir': str(tmp_path / 'max')},
+    }}})
+    snapshot(quota, 'claude', [window(100, WEEK, timedelta(days=2))], account='pro')
+    snapshot(quota, 'claude', [window(10, WEEK, timedelta(days=2))], account='max')
+    records = quota.apply_to_cooldowns({}, NOW, selected_accounts={'claude': selected})
+    assert ('claude/*' in records) is exhausted
+    if exhausted:
+        assert records['claude/*']['account'] == selected

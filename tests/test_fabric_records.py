@@ -64,6 +64,18 @@ def test_cooldowns_follow_selected_claude_identity(tmp_path, monkeypatch):
     assert records().read_cooldowns(path)
 
 
+
+def test_cooldowns_can_follow_a_lane_account_without_changing_parent_identity(tmp_path):
+    mod = records()
+    path = tmp_path / 'cooldowns.json'
+    row = json.loads((FIX / 'attempt.json').read_text())
+    row.update(status='rate_limited', account='pro', host='host-a')
+    row['provenance']['requested']['adapter'] = 'claude'
+    mod.write_cooldown(row, path=path)
+    assert mod.read_cooldowns(path) == {}
+    assert mod.read_cooldowns(path, scopes={'claude': {'account': 'pro', 'host': 'host-a'}})
+    assert mod.read_cooldowns(path, scopes={'claude': {'account': 'max', 'host': 'host-a'}}) == {}
+
 def test_digest_matches_shared_example_and_question():
     row = json.loads((FIX / "attempt.json").read_text())
     assert records().render_digest(row) == row["digest"]
