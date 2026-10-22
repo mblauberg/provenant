@@ -290,45 +290,62 @@ enum CLI {
         return Launcher(url: URL(fileURLWithPath: lines[0]), path: lines[1], custom: false)
     }
 
-    /// Drains both pipes as data arrives, so neither can fill and block the child. An overrun gets SIGTERM, then
-    /// SIGKILL after a grace period, and a pipe a grandchild still holds open is abandoned, so every wait is bounded.
+    /// Runs the CLI as the leader of its own process group, so an overrun's descendants are signalled with it.
+    /// Pipes drain as data arrives, so neither can fill and block the child. At the limit the group gets SIGTERM,
+    /// then SIGKILL 3 s later, and a pipe still held open after that is abandoned, so every wait is bounded.
     static func exec(_ url: URL, _ arguments: [String], path: String?, limit: Double) throws -> Output {
-        let process = Process(), out = Pipe(), err = Pipe(), shared = Shared()
-        let exited = DispatchSemaphore(value: 0), drained = DispatchGroup()
-        process.executableURL = url
-        process.arguments = arguments
-        if let path { process.environment = ProcessInfo.processInfo.environment.merging(["PATH": path]) { $1 } }
-        (process.standardOutput, process.standardError, process.standardInput) = (out, err, FileHandle.nullDevice)
-        process.terminationHandler = { _ in exited.signal() }
+        let out = Pipe(), err = Pipe(), shared = Shared(), drained = DispatchGroup(), exited = DispatchSemaphore(value: 0)
+        var environment = ProcessInfo.processInfo.environment
+        if let path { environment["PATH"] = path }
+        var actions: posix_spawn_file_actions_t?, attributes: posix_spawnattr_t?
+        posix_spawn_file_actions_init(&actions)
+        posix_spawnattr_init(&attributes)
+        defer { posix_spawn_file_actions_destroy(&actions); posix_spawnattr_destroy(&attributes) }
+        posix_spawn_file_actions_addopen(&actions, 0, "/dev/null", O_RDONLY, 0)
+        posix_spawn_file_actions_adddup2(&actions, out.fileHandleForWriting.fileDescriptor, 1)
+        posix_spawn_file_actions_adddup2(&actions, err.fileHandleForWriting.fileDescriptor, 2)
+        posix_spawnattr_setflags(&attributes, Int16(POSIX_SPAWN_SETPGROUP | POSIX_SPAWN_CLOEXEC_DEFAULT))
+        posix_spawnattr_setpgroup(&attributes, 0)
+        let argv = ([url.path] + arguments).map { strdup($0) } + [nil]
+        let envp = environment.map { strdup("\($0.key)=\($0.value)") } + [nil]
+        defer { (argv + envp).forEach { free($0) } }
+        var pid: pid_t = 0
+        let spawned = posix_spawn(&pid, url.path, &actions, &attributes, argv, envp)
+        try? out.fileHandleForWriting.close()   // the child holds its own copies; EOF needs ours closed
+        try? err.fileHandleForWriting.close()
+        guard spawned == 0 else { throw POSIXError(POSIXErrorCode(rawValue: spawned) ?? .EIO) }
         for pipe in [out, err] {
-            let handle = pipe.fileHandleForReading, toErr = pipe === err
+            let toErr = pipe === err
             drained.enter()
-            handle.readabilityHandler = { handle in
+            pipe.fileHandleForReading.readabilityHandler = { handle in
                 let data = handle.availableData
                 if !data.isEmpty { return shared.append(data, toErr: toErr) }
                 handle.readabilityHandler = nil
                 if shared.close(handle.fileDescriptor) { drained.leave() }
             }
         }
-        do { try process.run() } catch {
-            for pipe in [out, err] { pipe.fileHandleForReading.readabilityHandler = nil }
-            throw error
+        // Waits without reaping: the leader's unreaped pid keeps the group id from being reused while it is signalled.
+        DispatchQueue.global(qos: .utility).async {
+            var info = siginfo_t()
+            while waitid(P_PID, id_t(pid), &info, WEXITED | WNOWAIT) == -1 && errno == EINTR {}
+            exited.signal()
         }
         var killed = false
         if exited.wait(timeout: .now() + limit) == .timedOut {
             shared.markTimedOut()
-            process.terminate()
-            if exited.wait(timeout: .now() + 3) == .timedOut {
-                kill(process.processIdentifier, SIGKILL)
-                killed = exited.wait(timeout: .now() + 3) == .timedOut   // still not reaped: report it as killed
-            }
+            kill(-pid, SIGTERM)
+            let gone = exited.wait(timeout: .now() + 3) == .success
+            kill(-pid, SIGKILL)   // also when the leader exited but a descendant ignored SIGTERM
+            killed = !gone && exited.wait(timeout: .now() + 3) == .timedOut   // still not exited: leave it unreaped
         }
         if drained.wait(timeout: .now() + 2) == .timedOut {
+            kill(-pid, SIGKILL)   // a descendant still holds the pipes
             for pipe in [out, err] { pipe.fileHandleForReading.readabilityHandler = nil }
         }
+        var info = siginfo_t()
+        if !killed { while waitid(P_PID, id_t(pid), &info, WEXITED) == -1 && errno == EINTR {} }
         let (data, errData, timedOut) = shared.snapshot
-        return Output(status: killed ? SIGKILL : process.terminationStatus,
-                      signalled: killed || process.terminationReason == .uncaughtSignal,
+        return Output(status: killed ? SIGKILL : info.si_status, signalled: killed || info.si_code != CLD_EXITED,
                       timedOut: timedOut, out: data, err: String(decoding: errData, as: UTF8.self))
     }
 
