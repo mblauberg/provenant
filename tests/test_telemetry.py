@@ -712,10 +712,17 @@ def test_ledger_rows_carry_the_configured_host_id_without_duplicates(tmp_path):
                  'message': {'id': 'two', 'model': 'claude-opus-5-5', 'usage': {'input_tokens': 7}}})
     assert cli(tmp_path, 'telemetry', 'ingest').returncode == 0
     with sqlite3.connect(tmp_path / 'state/telemetry.sqlite3') as db:
-        assert db.execute('SELECT DISTINCT host FROM usage').fetchall() == [('studio',)]
-        assert db.execute('SELECT COUNT(*) FROM usage').fetchone()[0] == 3
-        assert db.execute('SELECT DISTINCT host FROM usage_files').fetchall() == [('studio',)]
-        assert db.execute('SELECT DISTINCT host FROM quota_events').fetchall() == [('studio',)]
+        # A rename never rewrites the ledger: earlier rows keep their id and read as this host.
+        assert sorted(db.execute('SELECT host, COUNT(*) FROM usage GROUP BY host')) == [('runner-ci', 2), ('studio', 1)]
+        assert db.execute('SELECT DISTINCT host FROM quota_events').fetchall() == [('runner-ci',)]
+    result = subprocess.run([str(ROOT / 'scripts/provenant'), 'peer'],
+                            input=json.dumps({'protocol_version': 1, 'verb': 'telemetry.stats',
+                                              'params': {'schema_version': 1}}),
+                            env=environment(tmp_path), capture_output=True, text=True)
+    summary = json.loads(result.stdout)['result']
+    assert summary['host'] == 'studio'
+    sessions = [row for row in summary['session_usage'] if row['source'] == 'claude']
+    assert [(row['host'], row['rows'], row['input_tokens']) for row in sessions] == [('studio', 2, 14)]
 
 
 def test_host_id_prefers_the_instance_config_over_home_and_hostname(tmp_path, monkeypatch):
@@ -1869,3 +1876,36 @@ else:
     assert report['hosts'] == [{'host': host, 'status': 'ok'} for host in ('a', 'b', 'c')]
     assert report['host'] == 'a, b, c'
     assert report['usage'][0]['input_tokens'] == 30 and report['usage'][0]['output_tokens'] == 6
+
+
+def test_a_renamed_host_never_rewrites_the_ledger_even_when_its_old_id_is_now_a_peer(tmp_path, monkeypatch):
+    """This ledger once wrote as `box`; `box` is now a peer and this host is `studio`."""
+    use_environment(tmp_path, monkeypatch)
+    config = tmp_path / 'home/.agents/.agent-fabric/hosts.json'
+    write_json(config, {'schema_version': 1, 'local_host': 'box'})
+    jsonl(tmp_path / 'home/.claude/projects/repo/s.jsonl',
+          {'type': 'assistant', 'sessionId': 'chair', 'timestamp': '2026-10-21T01:00:00Z',
+           'message': {'id': 'one', 'model': 'claude-test', 'usage': {'input_tokens': 10, 'output_tokens': 1}}})
+    telemetry = load_script('telemetry_rename_box', 'telemetry.py')
+    with telemetry.connect() as db:
+        telemetry.ingest(db)
+    database = tmp_path / 'state/telemetry.sqlite3'
+    tables = ('usage', 'usage_files', 'observations', 'quota_events', 'quota_series', 'events')
+    with sqlite3.connect(database) as db:
+        # The same event also stored under the new id, as a re-read after the rename would.
+        db.execute("INSERT INTO usage SELECT source,event_id,'studio',"
+                   + ','.join(column for (_, column, *_) in db.execute('PRAGMA table_info(usage)')
+                              if column not in {'source', 'event_id', 'host'})
+                   + " FROM usage WHERE host='box'")
+        before = {table: sorted(db.execute(f'SELECT * FROM {table}')) for table in tables}
+    assert len(before['usage']) == 2
+    write_json(config, {'schema_version': 1, 'local_host': 'studio', 'peers': {'box': {'ssh_destination': 'box'}}})
+    telemetry = load_script('telemetry_rename_studio', 'telemetry.py')
+    with telemetry.connect() as db:
+        telemetry.ingest(db)
+        db.row_factory = sqlite3.Row
+        report = telemetry.stats(db, summary=True)
+    with sqlite3.connect(database) as db:
+        assert {table: sorted(db.execute(f'SELECT * FROM {table}')) for table in tables} == before
+    assert report['host'] == 'studio'
+    assert [(row['host'], row['rows'], row['input_tokens']) for row in report['session_usage']] == [('studio', 1, 10)]

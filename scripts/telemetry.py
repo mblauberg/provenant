@@ -66,13 +66,18 @@ def host_id():
 
 
 _ALIASES = None
+# Ids this ledger has been written under, from its meta; `record_host` loads them on connect.
+_LEDGER_IDS = frozenset()
 
 
 def host_aliases():
-    """This machine's earlier ids, read once per process like the host id."""
+    """This machine's earlier ids: hostname defaults, plus every id this ledger was written under.
+
+    Only this machine writes its ledger, so a recorded id stays this host's even if a peer
+    now carries that name."""
     global _ALIASES
     if _ALIASES is None:
-        _ALIASES = frozenset(host_identity().aliases(host_id()))
+        _ALIASES = frozenset(host_identity().aliases(host_id())) | _LEDGER_IDS
     return _ALIASES
 
 
@@ -200,7 +205,7 @@ def connect():
         backfill_session_events(db)
         db.execute("DELETE FROM meta WHERE key='events_usage_rowid'")  # the earlier, lossy watermark
         db.execute("INSERT OR IGNORE INTO meta VALUES ('session_events_backfill', ?)", (now(),))
-    relabel_host(db)
+    record_host(db)
     for source, pattern in patterns().items():
         db.execute('INSERT INTO sources(source,path_pattern,parser_version,status) VALUES (?,?,2,?) '
                    'ON CONFLICT(source) DO UPDATE SET path_pattern=excluded.path_pattern,parser_version=excluded.parser_version',
@@ -209,18 +214,36 @@ def connect():
     return db
 
 
-def relabel_host(db):
-    """Move this host's rows to its configured id once, so a rename never duplicates rows.
+def load_hosts(db):
+    """Read the ids this ledger was written under, so readers map them to this host.
 
-    Rows under an earlier default (raw hostname, its slug, 'local') stay as written; readers
-    map them with `same_host`."""
-    current = host_id()
-    row = db.execute("SELECT value FROM meta WHERE key='host_id'").fetchone()
-    previous = row[0] if row else current
-    if same_host(previous) != current:
-        for table in ('usage', 'usage_files', 'observations', 'quota_events', 'quota_series', 'events'):
-            db.execute(f'UPDATE OR REPLACE {table} SET host=? WHERE host=?', (current, previous))
-    db.execute("INSERT OR REPLACE INTO meta VALUES ('host_id', ?)", (current,))
+    Works on a read-only connection. `host_id` is the single id an earlier build kept."""
+    global _LEDGER_IDS, _ALIASES
+    known = set()
+    try:
+        stored = db.execute("SELECT key, value FROM meta WHERE key IN ('host_id','host_ids')").fetchall()
+    except sqlite3.Error:
+        stored = []
+    for key, value in stored:
+        try:
+            values = json.loads(value) if key == 'host_ids' else [value]
+        except (TypeError, ValueError):
+            values = []
+        known.update(item for item in values if isinstance(item, str) and item)
+    if frozenset(known) != _LEDGER_IDS:
+        _LEDGER_IDS, _ALIASES = frozenset(known), None
+    return known
+
+
+def record_host(db):
+    """Note the current id in the ledger's host history; rows are never relabelled.
+
+    A rename leaves earlier rows under their old id, and readers map every recorded id to
+    this host (`same_host`)."""
+    known = load_hosts(db)
+    if host_id() not in known:
+        db.execute("INSERT OR REPLACE INTO meta VALUES ('host_ids', ?)", (json.dumps(sorted(known | {host_id()})),))
+        load_hosts(db)
 
 
 def number(value):
@@ -1195,6 +1218,7 @@ def stats(db, since=None, prices=None, *, summary=False, until=None):
     if boundary:
         query, parameters = query + ' WHERE timestamp >= ?', ((boundary - timedelta(days=1)).date().isoformat(),)
     current = host_id()
+    load_hosts(db)
     rows = {}
     for item in db.execute(query, parameters):
         row = dict(item)

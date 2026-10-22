@@ -488,8 +488,11 @@ peers, the command stays local.
 Ledger rows and quota snapshots carry the same local host id as fabric
 (`scripts/host_identity.py`). Rows and snapshots that an earlier build stored
 under the raw hostname or `local` are read as this host; they are not
-rewritten. A name configured as a peer is never read as this host, even when
-it matches the hostname. Cooldowns stored under an earlier id are rekeyed to
+rewritten. A `local_host` rename never rewrites the ledger either: it records
+each id it was written under and reads them all as this host, even an id a
+peer now carries, because only this machine writes its ledger. Otherwise a name
+configured as a peer is never read as this host, even when it matches the
+hostname. Cooldowns stored under an earlier id are rekeyed to
 the current id when the cooldown store is next written, so a success clears
 them and a repeat limit doubles their backoff. Quota is account-scoped and already includes
 use from every host. When peers report the same provider/account label, stats

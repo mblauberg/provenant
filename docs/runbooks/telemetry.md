@@ -144,7 +144,8 @@ never the host name: source and session for `session.start`; the receipt's
 resolved path for `lane.attempt`, so projects sharing run ids stay apart;
 otherwise `source_ref`, time, linked fields and attributes. Collector refs are
 `path@offset#record`, so identical records on one line keep their count.
-Re-ingest therefore adds nothing, even after a `local_host` rename. Opening a
+Re-ingest therefore adds nothing, even after a `local_host` rename, which
+leaves earlier rows under their old id for readers to map. Opening a
 ledger from an earlier build re-keys its events once under a write lock,
 keeping the earliest of any duplicates, so concurrent openers cannot race.
 
