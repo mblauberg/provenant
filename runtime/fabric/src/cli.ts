@@ -54,7 +54,7 @@ const USAGE = `fabric <command>
   watch [ids…] [--interval N] print run state changes; exit when all terminal
   lanes [--json] [--all] [id…]
                               run states; default shows active and recent terminal lanes (--all lists all)
-  lanes --wait [--all] [--timeout N] [id…]
+  lanes --wait [--all] [--summary] [--timeout N] [id…]
                               wait for a lane to finish or need input; --all waits
                               for every listed lane; exit 124 on timeout
   lanes --project <path> …   read another project's lanes (default: from the cwd)
@@ -196,11 +196,12 @@ if (command === "lanes") {
   const wait = args.includes("--wait");
   const all = args.includes("--all");
   const timeoutSeconds = timeout === undefined ? undefined : Number(timeout);
-  const ids = args.filter((value) => !["--json", "--wait", "--all"].includes(value));
-  if (["--json", "--wait", "--all"].some((name) => args.filter((value) => value === name).length > 1) ||
-      (json && wait) || (timeout !== undefined && !wait) || ids.some((value) => value.startsWith("--")) ||
+  const summary = args.includes("--summary");
+  const ids = args.filter((value) => !["--json", "--wait", "--all", "--summary"].includes(value));
+  if (["--json", "--wait", "--all", "--summary"].some((name) => args.filter((value) => value === name).length > 1) ||
+      (json && wait) || (summary && !wait) || (timeout !== undefined && !wait) || ids.some((value) => value.startsWith("--")) ||
       (timeoutSeconds !== undefined && !(timeoutSeconds >= 0))) {
-    console.error("fabric: usage: fabric lanes [--json] [--all] [--project P] [id…] | lanes --wait [--all] [--timeout N] [id…]");
+    console.error("fabric: usage: fabric lanes [--json] [--all] [--project P] [id…] | lanes --wait [--all] [--summary] [--timeout N] [id…]");
     process.exit(2);
   }
   if (wait) {
@@ -208,19 +209,27 @@ if (command === "lanes") {
     const store = new Store(databasePath());
     store.announce(laneWho);
     let code: number;
+    const held: string[] = [];
     try {
       // The registered project, not the raw cwd, owns the runs; the normal
       // retention window bounds the scan, and no row cap may hide a completion.
       code = await waitForLanes({
         who: laneWho, store, all, timeoutSeconds,
         read: () => readRuns(laneWho.project, watched, 0, undefined, null),
-        write: (text) => new Promise((resolveWrite, reject) =>
+        write: (text) => summary ? Promise.resolve(void held.push(text)) : new Promise((resolveWrite, reject) =>
           process.stdout.write(text, (error) => (error ? reject(error) : resolveWrite()))),
         fail: (text) => console.error(text),
         sleep: (ms) => new Promise((resolveSleep) => setTimeout(resolveSleep, ms)),
       });
     } finally {
       store.close();
+    }
+    if (summary) {
+      // One bounded line per lane, rather than the full listing.
+      const lines = held.join("").split("\n").filter(Boolean);
+      const shown = lines.slice(0, 20).map((line) => line.length > 160 ? `${line.slice(0, 159)}…` : line);
+      if (lines.length > shown.length) shown.push(`+${lines.length - shown.length} more`);
+      if (shown.length) console.log(shown.join("\n"));
     }
     process.exit(code);
   }

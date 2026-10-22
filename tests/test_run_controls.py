@@ -1220,3 +1220,26 @@ def test_reduce_rejects_original_prompt_symlink_before_resolving(tmp_path: Path)
 
     assert result.returncode == 2
     assert "must not be a symlink" in json.loads(result.stdout)["message"]
+
+
+def make_listed_run(tmp_path: Path) -> Path:
+    name = "20261022-1200-dispatch-task-1-abc123"
+    return Path(subprocess.check_output([str(INIT), str(tmp_path / ".agent-run" / "runs" / name)], text=True).strip())
+
+
+def test_show_resolves_task_id_and_bounds_the_result_tail(tmp_path: Path) -> None:
+    run_dir = make_listed_run(tmp_path)
+    write_attempt(run_dir, result="".join(f"line {number}\n" for number in range(100)))
+    shown = invoke("run", "show", "task-1", "--tail", "3", cwd=tmp_path)
+    assert shown.returncode == 0, shown.stderr
+    assert shown.stdout.splitlines()[-3:] == ["line 97", "line 98", "line 99"]
+    assert "task task-1 attempt-001 status ok" in shown.stdout
+    as_json = invoke("run", "show", f"mcp-{run_dir.name[-6:]}", "--tail", "2", "--json", cwd=tmp_path)
+    data = json.loads(as_json.stdout)
+    assert data["run_id"] == run_dir.name and data["tasks"][0]["result_tail"] == ["line 98", "line 99"]
+    assert data["tasks"][0]["result_clipped"] is True
+
+
+def test_show_rejects_unknown_reference(tmp_path: Path) -> None:
+    make_listed_run(tmp_path)
+    assert invoke("run", "show", "missing", cwd=tmp_path).returncode == 2

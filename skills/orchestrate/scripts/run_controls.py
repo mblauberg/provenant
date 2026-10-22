@@ -40,6 +40,7 @@ from dispatch_run import (
     worker_question_envelope_bytes,
 )
 from attempt_evidence import AttemptEvidenceError, canonical_success_status, is_success_status, validate_successful_attempt
+import layout
 from _shared.custody import OwnedFileError, open_contained_regular, read_contained_regular
 
 
@@ -1056,9 +1057,99 @@ def _reduce(args: argparse.Namespace) -> int:
     return _run_child(command, "\n".join(lines).encode())
 
 
+MAX_SHOW_TAIL_LINES = 500
+SHOW_READ_BYTES = 256 * 1024
+
+
+def _find_run(reference: str) -> tuple[Path, str | None]:
+    """Resolve a run id, run directory name, path or task id to a run directory.
+
+    Run ids follow Fabric's short form (`mcp-` plus the last six characters of
+    the directory name). A task id resolves to the newest run that holds it.
+    """
+    runs = layout.run_root() / ".agent-run" / "runs"
+    direct = Path(reference)
+    if direct.is_dir() and direct.resolve().parent == runs.resolve():
+        return direct.resolve(), None
+    candidates = sorted((path for path in runs.iterdir() if path.is_dir() and not path.is_symlink()),
+                        key=lambda path: path.name, reverse=True) if runs.is_dir() else []
+    for path in candidates:
+        if reference in {path.name, f"mcp-{path.name[-6:]}"}:
+            return path, None
+    if TASK_ID_RE.fullmatch(reference):
+        for path in candidates:
+            task_dir = path / "dispatch" / "tasks" / reference
+            if task_dir.is_dir() and not task_dir.is_symlink():
+                return path, reference
+    raise ControlError(f"no run or task matches: {reference}")
+
+
+def _tail_lines(path: Path, count: int) -> tuple[list[str], bool]:
+    """Last `count` lines of a regular file, reading at most SHOW_READ_BYTES."""
+    if path.is_symlink() or not path.is_file():
+        return [], False
+    size = path.stat().st_size
+    with path.open("rb") as stream:
+        stream.seek(max(0, size - SHOW_READ_BYTES))
+        text = stream.read().decode("utf-8", errors="replace")
+    lines = text.splitlines()
+    clipped = size > SHOW_READ_BYTES or len(lines) > count
+    return lines[-count:] if count else [], clipped
+
+
+def _show(args: argparse.Namespace) -> int:
+    tail = max(0, min(args.tail, MAX_SHOW_TAIL_LINES))
+    run_dir, task_filter = _find_run(args.reference)
+    task_filter = args.task_id or task_filter
+    try:
+        status = json.loads((run_dir / "dispatch-status.json").read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        status = None
+    tasks_root = run_dir / "dispatch" / "tasks"
+    tasks = []
+    names = [task_filter] if task_filter else sorted(
+        path.name for path in tasks_root.iterdir() if path.is_dir() and not path.is_symlink()
+    ) if tasks_root.is_dir() else []
+    for name in names:
+        attempts = sorted((tasks_root / name).glob("attempt-*"))
+        if not attempts:
+            continue
+        attempt = attempts[-1]
+        try:
+            record = json.loads((attempt / "attempt.json").read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            record = None
+        state = canonical_success_status(record.get("status")) if isinstance(record, dict) else "running"
+        lines, clipped = _tail_lines(attempt / "result.md", tail)
+        tasks.append({"task_id": name, "attempt_id": attempt.name, "status": state,
+                      "result_path": str((attempt / "result.md").relative_to(run_dir)),
+                      "result_tail": lines, "result_clipped": clipped})
+    if task_filter and not tasks:
+        raise ControlError(f"task has no attempts: {task_filter}")
+    report = {"schema_version": 1, "run_id": run_dir.name, "run_dir": str(run_dir),
+              "run_status": status.get("status") if isinstance(status, dict) else None, "tasks": tasks}
+    if args.json:
+        print(json.dumps(report, sort_keys=True))
+        return 0
+    print(f"run {run_dir.name} status {report['run_status'] or 'unknown'}")
+    for item in tasks:
+        print(f"task {item['task_id']} {item['attempt_id']} status {item['status']}")
+        if item["result_clipped"]:
+            print(f"... (last {len(item['result_tail'])} lines of {item['result_path']})")
+        for line in item["result_tail"]:
+            print(line)
+    return 0
+
+
 def parser() -> argparse.ArgumentParser:
     root = argparse.ArgumentParser(description=__doc__)
     commands = root.add_subparsers(dest="command", required=True)
+
+    show = commands.add_parser("show", help="bounded read of a lane's status and result")
+    show.add_argument("reference", help="run id, run directory name or task id")
+    show.add_argument("--task-id")
+    show.add_argument("--tail", type=int, default=40, metavar="N")
+    show.add_argument("--json", action="store_true")
 
     inspect = commands.add_parser("inspect", help="report retained task and attempt state")
     inspect.add_argument("--run-dir", type=Path, required=True)
@@ -1113,6 +1204,8 @@ def parser() -> argparse.ArgumentParser:
 
 def run(args: argparse.Namespace) -> int:
     try:
+        if args.command == "show":
+            return _show(args)
         if args.command == "inspect":
             return _inspect(args)
         if args.command in {"prompt", "result", "diagnostic-log"}:
