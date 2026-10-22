@@ -136,9 +136,9 @@ def test_create_cow_clones_root_and_workspace_node_modules(tmp_path, capsys, mon
     assert not worktree.exists()
 
 
-def test_create_links_worktree_node_modules_for_fabric_runtime(tmp_path, capsys, monkeypatch):
+def test_create_links_worktree_node_modules_for_fabric_runtime(tmp_path, capsys, monkeypatch, repo_template):
     repo = tmp_path / "project"
-    head = init_repo(repo)
+    head = init_repo(repo, repo_template)
     (repo / "runtime" / "fabric").mkdir(parents=True)
     (repo / ".gitignore").write_text("node_modules\n")
     subprocess.run(["git", "-C", str(repo), "add", ".gitignore"], check=True)
