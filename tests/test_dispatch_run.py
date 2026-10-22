@@ -5121,6 +5121,46 @@ def test_paced_retry_retains_the_selected_claude_account(monkeypatch):
     assert launches == [(None, None, None), ("claude", "claude-opus-5-5", "pro")]
 
 
+@pytest.mark.parametrize('restored_account', [False, True])
+def test_paced_retry_does_not_use_a_released_account_cooldown(tmp_path, monkeypatch, restored_account):
+    plan = {"adapter": "claude", "model": "claude-opus-5-5", "account": "pro"}
+    rows = [{"status": "rate_limited", "retry_after": 1}, {"status": "ok", "retryable": False}]
+    real_cooling = load_dispatch_module().exec_routing.cooling
+    mod, args, launches = _sequence_fixture(monkeypatch, plan, rows, [])
+    monkeypatch.setattr(mod.exec_routing, "cooling", real_cooling)
+    monkeypatch.setenv('FABRIC_COOLDOWNS_PATH', str(tmp_path / 'cooldowns.json'))
+    _claude_quota_accounts(tmp_path, monkeypatch, pro=100, max=10)
+    monkeypatch.setenv('CLAUDE_CONFIG_DIR', str(tmp_path / 'pro'))
+    if restored_account:
+        args.account, args._explicit_account = 'pro', None
+    mod.execute_attempt_sequence(args)
+
+    assert launches == [(None, None, 'pro' if restored_account else None), ('claude', plan['model'], 'max')]
+
+
+def _claude_quota_accounts(tmp_path, monkeypatch, **usage):
+    from datetime import UTC, datetime, timedelta
+    import provider_quota as quota
+
+    instance = tmp_path / 'quota-instance'
+    config = instance / 'config/telemetry.json'
+    config.parent.mkdir(parents=True)
+    config.write_text(json.dumps({'accounts': {'claude': {
+        label: {'identity_dir': str(tmp_path / label)} for label in usage}}}))
+    monkeypatch.setenv('AGENT_FABRIC_INSTANCE_ROOT', str(instance))
+    monkeypatch.setenv('AGENT_FABRIC_STATE_ROOT', str(tmp_path / 'state'))
+    monkeypatch.delenv('CLAUDE_CONFIG_DIR', raising=False)
+    for label, used in usage.items():
+        quota.save_snapshot({'schema': quota.SCHEMA, 'host': quota.telemetry_host(),
+            'observed_at': datetime.now(UTC).isoformat(),
+            'provider': 'claude', 'account': label, 'status': 'ok', 'windows': [
+                {'name': 'five_hour', 'used_percent': used, 'window_minutes': 300,
+                 'reset_at': (datetime.now(UTC) + timedelta(hours=2)).isoformat()},
+                {'name': 'seven_day', 'used_percent': 10, 'window_minutes': 10080,
+                 'reset_at': (datetime.now(UTC) + timedelta(days=3)).isoformat()},
+            ]}, tmp_path / label)
+
+
 def test_paced_retry_uses_the_longer_account_wide_cooldown():
     mod = load_dispatch_module()
     short = {"cooling_until": "2099-01-01T00:00:01Z", "status": "rate_limited"}
@@ -5129,8 +5169,9 @@ def test_paced_retry_uses_the_longer_account_wide_cooldown():
     assert mod.exec_routing.cooling("claude", "claude-opus-5-5", records, account="pro") == wide
 
 
-def test_paced_retry_blocks_quota_discovered_during_planning(tmp_path, monkeypatch):
-    from datetime import UTC, datetime, timedelta
+@pytest.mark.parametrize('state', ['credit_only', 'exhausted'])
+@pytest.mark.parametrize('selector', ['model', 'alias'])
+def test_explicit_account_out_of_quota_launches_with_warning(tmp_path, monkeypatch, capsys, state, selector):
     import provider_quota as quota
 
     launched = tmp_path / 'launched'
@@ -5138,28 +5179,75 @@ def test_paced_retry_blocks_quota_discovered_during_planning(tmp_path, monkeypat
         f'from pathlib import Path\nPath({str(launched)!r}).touch()\n'
         'import json\nprint(json.dumps({"type":"result","result":"DONE"}))\n')
     isolate_fabric_plan_env(monkeypatch, tmp_path)
-    instance = tmp_path / 'instance'
-    config = instance / 'config/telemetry.json'
-    config.parent.mkdir(parents=True)
-    identity = tmp_path / 'pro'
-    config.write_text(json.dumps({'accounts': {'claude': {'pro': {'identity_dir': str(identity)}}}}))
-    monkeypatch.setenv('AGENT_FABRIC_INSTANCE_ROOT', str(instance))
-    monkeypatch.setenv('AGENT_FABRIC_STATE_ROOT', str(tmp_path / 'state'))
-    quota.save_snapshot({'schema': quota.SCHEMA, 'host': quota.telemetry_host(),
-                         'provider': 'claude', 'account': 'pro', 'status': 'ok', 'windows': [
-                             {'name': 'five_hour', 'used_percent': 100, 'window_minutes': 300,
-                              'reset_at': (datetime.now(UTC) + timedelta(hours=2)).isoformat()},
-                         ]}, identity)
+    _claude_quota_accounts(tmp_path, monkeypatch, pro=100)
+    if state == 'credit_only':
+        value = quota.load_snapshot('claude', 'pro', tmp_path / 'pro')
+        value['usage_credits'] = [{'kind': 'credits', 'balance': 100, 'unit': 'credits'}]
+        quota.save_snapshot(value, tmp_path / 'pro')
+    if selector == 'alias':
+        model_index = command.index('--model')
+        del command[model_index:model_index + 2]
+        command += ['--alias', 'senior']
     monkeypatch.chdir(tmp_path)
     mod = load_dispatch_module()
     args = mod.parser().parse_args(command[2:] + ['--account', 'pro'])
     args.timeout_seconds = 60
+    if selector == 'model':
+        # A pinned retry also launches when planning discovers exhausted quota.
+        args.fallback_from = {'attempt': 1, 'status': 'rate_limited'}
+        args._rate_limit_retry = {'until': mod.now(), 'deadline': time.monotonic() + 60}
+    assert mod.dispatch(args) == 0
+    assert launched.exists()
+    warning = f'account pro is out of quota ({state}): launching because it was pinned explicitly'
+    assert warning in capsys.readouterr().err
+    attempt = json.loads(next(run.glob('tasks/*/attempt-*/attempt.json')).read_text())
+    assert warning in attempt['warnings']
+
+
+def test_paced_retry_skips_wait_for_a_known_cooldown_block(tmp_path, monkeypatch):
+    from datetime import UTC, datetime, timedelta
+
+    run, prompt, command = real_owner_fixture(tmp_path, monkeypatch,
+        'raise AssertionError("blocked provider must not launch")\n')
+    isolate_fabric_plan_env(monkeypatch, tmp_path)
+    _claude_quota_accounts(tmp_path, monkeypatch, pro=10)
+    monkeypatch.chdir(tmp_path)
+    mod = load_dispatch_module()
+    mod.write_cooldown({'status': 'rate_limited', 'account': 'pro', 'run_id': 'prior',
+        'evidence': {'signature': 'rate_limit'},
+        'reset_at': (datetime.now(UTC) + timedelta(hours=2)).isoformat(),
+        'provenance': {'requested': {'adapter': 'claude'}, 'resolved_model': 'claude-opus-5-5'}})
+    args = mod.parser().parse_args(command[2:] + ['--account', 'pro'])
+    args.timeout_seconds = 60
     args.fallback_from = {'attempt': 1, 'status': 'rate_limited'}
-    args._rate_limit_retry = {'until': datetime.now(UTC).isoformat(), 'deadline': time.monotonic() + 60}
+    args._rate_limit_retry = {'until': (datetime.now(UTC) + timedelta(seconds=5)).isoformat(),
+                            'deadline': time.monotonic() + 60}
+    sleep = time.sleep
+
+    def no_pacing_sleep(seconds):
+        attempts = list(run.glob('tasks/*/attempt-*/attempt.json'))
+        assert not any(json.loads(path.read_text()).get('queue_reason') == 'rate_limit'
+                       for path in attempts), 'known cooldown block must not wait for pacing'
+        sleep(seconds)
+
+    monkeypatch.setattr(mod.time, 'sleep', no_pacing_sleep)
     assert mod.dispatch(args) == 1
     attempt = json.loads(next(run.glob('tasks/*/attempt-*/attempt.json')).read_text())
     assert attempt['evidence']['signature'] == 'cooldown_active'
-    assert not launched.exists()
+
+
+def test_explicit_account_recovers_after_a_newer_healthy_quota_reading(tmp_path, monkeypatch):
+    from datetime import UTC, datetime, timedelta
+
+    _claude_quota_accounts(tmp_path, monkeypatch, pro=10)
+    mod = load_dispatch_module()
+    mod.write_cooldown({'status': 'usage_limited', 'account': 'pro', 'run_id': 'prior',
+        'evidence': {'signature': 'usage_limit', 'excerpt': 'weekly limit'},
+        'reset_at': (datetime.now(UTC) + timedelta(hours=2)).isoformat(),
+        'provenance': {'requested': {'adapter': 'claude'}, 'resolved_model': 'claude-opus-5-5'}},
+        at=datetime.now(UTC) - timedelta(hours=1))
+
+    assert mod.exec_routing.cooling('claude', 'claude-opus-5-5', account='pro', explicit_account=True) is None
 
 
 def test_nested_attempt_retains_parent_in_receipt_and_index(tmp_path, monkeypatch):
