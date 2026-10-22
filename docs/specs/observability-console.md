@@ -33,6 +33,9 @@ sessions.
 5. Zero or more peers, no host names in code, no SSH when nothing watches.
 6. Requested, resolved and observed model and effort on telemetry rows, with
    preset and harness revision.
+7. One modular app. Every feature is a module the user can switch off, a
+   disabled module costs nothing at runtime, and nothing in the CLI, Fabric or
+   telemetry depends on the app.
 
 ## Non-goals
 
@@ -51,11 +54,13 @@ sessions.
   [Fabric hosts](fabric-hosts.md#exclusions) excludes "any daemon, broker,
   relay service or listening port". Slices 1 to 4 add no long-running process.
   The [projector](#projector), if built, has real
-  [side effects](#side-effects), so it needs two amendments first, each its
-  own pull request with the user's approval: an ADR 0020 section admitting a
-  derived cache with exactly those side effects, and the Fabric hosts
-  exclusion reworded to "any coordination daemon, broker, relay service or
-  listening port", linking to it.
+  [side effects](#side-effects), so it needs two amendments first: an ADR 0020
+  section admitting a derived cache with exactly those side effects, and the
+  Fabric hosts exclusion reworded to "any coordination daemon, broker, relay
+  service or listening port", linking to it. The user approved this in
+  principle (see [Decisions](#decisions)); each amendment is its own pull
+  request through normal review and still waits for the Slice 5 measurement
+  trigger.
 - The telemetry ledger (R4) stays the single writer of usage rows.
 - The `session` skill's `STATE.md` and its `SessionStart:compact` hook
   (`skills/session/scripts/compact_reinject.py`) stay as they are. This spec
@@ -67,7 +72,8 @@ sessions.
  Slices 1 to 4 (no long-running process)
   transcripts, provider stores, Fabric state, ledger, quota report
      --> provenant session | lanes | quota | statusline | settings --json
-     <-- Console app (menu bar panel and console window), off main thread
+     <-- Provenant app: menu bar agent and console process (see Console),
+         both off main thread
 
  Slice 5 onwards, only if a trigger fires
   same sources --watch--> provenant-projector --> projector/v1/ (contract)
@@ -383,17 +389,39 @@ at the latest turn, at each compaction boundary and after each compaction;
    labelled `inferred`.
 3. **Cost per accepted change** is the headline cost figure: spend attributed
    to accepted changes in a period divided by the number of accepted changes.
-   - An accepted change is a row in the ledger's `changes` table with a
-     `merge_commit`, which today means a pull request merged through the
-     repository's own workflow. Open question 3 confirms this denominator
-     before Slice 3 starts.
-   - `changes` holds only `pr` and `merge_commit`, so attribution runs lane
-     to pull request through `events` rows that carry both `lane` and `pr`,
-     and session to pull request through rows that carry both `session` and
-     `pr`. Usage joins to a lane by `run_id` and to a session by session id.
-   - Slice 3 makes the paths that open a pull request from a lane or chair
-     session emit such an event. Spend with no such link is unattributed and
-     shown beside the headline as a share, never hidden.
+   - An accepted change is a merged pull request (decided): a row in the
+     ledger's `changes` table with a `merge_commit`, merged through the
+     repository's own workflow. It is not one agent's or one session's output:
+     many agents may code one pull request, and the user sometimes prefers one
+     large branch to many small merges. R4.3 accepted tasks without a pull
+     request are a second, separately labelled figure.
+   - **Contributors.** A merged pull request credits every session and lane
+     found on its branch, from three sources the ledger already holds: `events`
+     rows carrying both the pull request and a lane or session; lane records
+     whose branch is the pull request's head branch; and Fabric receipts for
+     those lanes (their start and finish commits place each commit in a lane).
+     Usage joins to a lane by `run_id` and to a session by session id. Slice 3
+     makes the paths that open a pull request from a lane or chair session emit
+     the event. Commits made outside any recorded lane are shown as unlinked
+     commits and credit no session.
+   - **Shares are descriptive.** Each contributor shows its commits, changed
+     lines, review and repair rounds and spend. There is no winner, no single
+     owner and no score that sums to one. Spend of a session or lane linked to
+     several pull requests is divided in proportion to its commits in each
+     (equally when it has none). Spend with no merged pull request, including
+     abandoned branches, is unattributed and shown beside the headline as a
+     share, never hidden.
+   - **Size normalisation.** Beside cost per accepted change the console shows
+     spend per 100 changed lines (`git diff --numstat` of the merge, ignoring
+     paths marked generated) and the median cost per change in three size
+     buckets (up to 100, up to 500, over 500 changed lines). Period
+     comparisons use the per-line figure or the buckets, so a large pull
+     request is neither penalised nor overweighted against small ones.
+   - **Long-lived branches.** Review and repair rounds are counted within the
+     pull request, across every intermediate review cycle before the merge,
+     from review and repair `events` carrying the pull request.
+   - **Approximate:** commit-to-lane placement, proportional spend splits and
+     line counts are approximate and labelled so; totals of spend are exact.
 4. **Internal names stay Provenant's.** Mapping to OpenTelemetry `gen_ai.*`
    happens only on export, which stays off by default and never carries
    content: resolved model to `gen_ai.request.model`, observed model to
@@ -451,8 +479,8 @@ badge. Nothing is pulled when no viewer is open.
 
 ## Console
 
-The console is a window scene in the existing menu-bar app (open question 1
-confirms one app). Its visual and interaction design is in
+Provenant is one app (decided): the quota menu bar app becomes Provenant and
+gains the console. Its visual and interaction design is in
 [the console design](observability-console-design.md); this section fixes
 the decisions the spec depends on.
 
@@ -460,7 +488,8 @@ the decisions the spec depends on.
   refinements (the `.tabs` picker, pointer-tuned interactive glass) sit
   behind availability checks. Nothing older: there is no macOS 25 (Apple
   went from 15 to 26), and macOS 15 lacks Liquid Glass and has no host to
-  test on. `Package.swift` moves from macOS 14 to 26 in Slice 1.
+  test on. `Package.swift` moves from macOS 14 to 26 in Slice 1, and the package is
+  renamed from `apps/quota-menubar` to `apps/provenant`.
 - **Structure.** `NavigationSplitView` with sidebar sections Activity (Fleet,
   Sessions), Insight (Telemetry, Accounts), Hosts (one row per host, "This
   Mac" alone with no peers) and Settings as a pane, reached by ⌘5 and ⌘,.
@@ -472,10 +501,11 @@ the decisions the spec depends on.
   controls; system text styles, since macOS has no Dynamic Type.
 - **Menu bar.** The panel adds one activity line, "5 lanes · 2 in review · 1
   needs you", from `provenant statusline --json` run when the panel opens,
-  hidden when all three are zero.
+  hidden when all three are zero (a module, see below).
 - **Settings.** Simple fields commit on edit through `provenant settings set
   --expect-rev`; a host's connection details edit together in a sheet with
-  Cancel and Save.
+  Cancel and Save. A Modules group holds the switches in
+  [Modules](#modules-and-build-targets).
 - **Data path.** The console never parses transcripts or opens SSH. It runs
   `provenant ... --json` off the main thread with a timeout and shows the
   typed result, and prefers the projector contract once one exists. Remote
@@ -484,22 +514,93 @@ the decisions the spec depends on.
 - **Accessibility.** Nodes and charts have labels in words; status is never
   colour alone; Fleet has a list equivalent.
 
-### Opening the console and app lifecycle
+### Processes and lifecycle
 
-- The app registers the URL scheme `provenant`. `provenant console
-  [section]` runs `open "provenant://console/<section>"`; LaunchServices
-  starts the app if it is not running, and the app's `onOpenURL` handler calls
-  `openWindow(id: "console")` and selects the section. The panel's Open Console
-  item (⌘O) does the same in-process. On Linux the command prints that the
-  console is macOS only and exits 2.
-- The window scene uses `defaultLaunchBehavior(.suppressed)`, so login
-  launches never open it. When the console window appears the app sets
-  `NSApp.setActivationPolicy(.regular)` (Dock and app switcher); when the last
-  console window closes it returns to `.accessory`.
-- The app is renamed Provenant. `scripts/install-harness` migrates the
-  LaunchAgent from `dev.provenant.quota-menubar` to `dev.provenant.app`: it
-  boots out the old label if loaded, removes its plist, writes and bootstraps
-  the new one, and is idempotent. Uninstall removes both labels.
+Two processes in one bundle, `Provenant.app` (decided).
+
+| Process | Role | Lifetime |
+|---|---|---|
+| Menu bar agent | `LSUIElement` helper in `Contents/Library/LoginItems/`; status item, quota panel, activity line, optional notifications | Always on while enabled; started at login by the LaunchAgent `dev.provenant.app` (renamed from `dev.provenant.quota-menubar`) |
+| Console | The visible `Provenant.app`: Dock icon, window, all console sections | Launched on demand; exits when its last window closes |
+
+- **Mechanism.** The console quits with
+  `applicationShouldTerminateAfterLastWindowClosed`, so closing the last
+  window ends the process and the operating system takes back all of its
+  memory, caches, charts and timers. The agent never imports console code, and
+  the two share state only through files and the CLI: settings via `provenant
+  settings`, data via `provenant ... --json` or the projector contract, window
+  restoration in the console's own defaults. No XPC service, no shared
+  in-process cache.
+- **Why not one process.** Closing a SwiftUI window in a long-running process
+  releases the views but not reliably the process footprint (view-model
+  caches, chart and glass layers and allocator pages stay resident), so the
+  menu bar would carry the console's peak. Process exit is the one mechanism
+  that returns the memory by construction. The cost is a cold start of the
+  console on open, inside the budget below. If a Slice 1 measurement shows a
+  single process returning to the agent budget within 60 seconds of close, the
+  split is reconsidered.
+- **Opening.** The console registers the URL scheme `provenant`. `provenant
+  console [section]` runs `open "provenant://console/<section>"`;
+  LaunchServices starts the console if it is not running, or brings it to the
+  front. The agent's Open Console item (⌘O) opens the same URL. The console
+  is also opened from the Dock, Spotlight or Finder. Only the agent is a
+  login item, so logging in never opens the console. On Linux the
+  command prints that the console is macOS only and exits 2. If the app is not
+  installed the command says so and exits 2; no other command mentions it.
+- **Migration.** `scripts/install-harness` boots out the old label if loaded,
+  removes its plist, writes and bootstraps `dev.provenant.app` (the agent),
+  and is idempotent. Uninstall removes both labels.
+
+### Independence from the menu bar
+
+The menu bar is optional. With it off or hidden, the CLI, Fabric, telemetry
+collection and the full console each run unchanged. Nothing in the CLI or
+Fabric depends on the app being installed or running: they never launch,
+signal or wait for it, and the only command that references the app is
+`provenant console`. `provenant app menubar on|off` sets
+`app.menubar.enabled` and boots the LaunchAgent in or out; the console's
+Settings toggle runs the same command. The console opens straight from the
+Dock, Spotlight or `provenant console` with no agent present. A hidden status
+item (the user removed it with Command-drag) leaves the agent idle; turning
+the menu bar off stops it.
+
+### Modules and build targets
+
+Every feature is a module registered at launch from `app.modules.*`. A
+disabled module is never constructed: no timers, no file watchers, no cached
+data, no code path run. A change takes effect the next time the console
+opens or the panel opens, with no restart of the agent.
+
+| Module | Process | Key | Default | Slice |
+|---|---|---|---|---|
+| Console | console | `app.modules.console` | on | 1 |
+| Sessions context counts (the exact-count probe and its UI) | console | `app.modules.exact_counts` | on, but counting stays off per account | 1 |
+| Fleet graph | console | `app.modules.fleet_graph` | on | 2 |
+| Activity line | agent | `app.modules.activity_line` | on | 2 |
+| Cross-host federation | both | `app.modules.federation` | on, inert with no peers | 6 |
+| Notifications | agent | `app.modules.notifications` | off | not scheduled |
+
+Weight is separable by target. The SwiftPM package has a small
+`ProvenantCore` (CLI client, typed JSON models, settings reader), the two
+executables `ProvenantMenu` and `ProvenantConsole`, and one library target per
+heavy module (`FleetGraph`, `ContextCounts`, `Federation`, `Notifications`).
+`ProvenantCore` is the only shared target. `scripts/build-app --without
+<module>` leaves a library out of the build, so a build can drop Fleet graph
+or Federation entirely; the registry then reports the module as not built and
+hides its switch.
+
+### Budgets and measurement
+
+Measured on the reference Mac, release build, with `footprint -p <pid>`
+(physical footprint), `top -pid <pid> -stats cpu,idlew` and `ps -o cputime`,
+each over a 10-minute idle window; recorded in the Slice pull request, not run
+in CI.
+
+| Process | State | Budget |
+|---|---|---|
+| Menu bar agent | idle, panel closed, any module combination | footprint at most 40 MB; CPU 0.0%, at most 2 s per hour; at most 1 wake-up per minute |
+| Console | open, 500 sessions, one Context tab | footprint at most 120 MB; idle CPU at most 1%; cold launch to first frame at most 700 ms |
+| Console | last window closed | process gone within 2 seconds; agent footprint unchanged within 5 MB |
 
 ## Settings model
 
@@ -527,7 +628,9 @@ removes it, so no `hosts add` command is needed.
 | `hosts.peers.<name>.connect_timeout` | `hosts.json` | seconds, 1 to 60, default 5 |
 | `hosts.peers.<name>.response_deadline` | `hosts.json` | seconds, 1 to 120, default 15 |
 | `hosts.peers.<name>.allow_content_reads` | `hosts.json` | bool, default false; lets this host read that peer's session context and state text on demand |
-| `observe.context.exact_counts` | `observability.json` | `off`, `on` per account (`observe.context.exact_counts.<account>`); default `off` (open question 2) |
+| `observe.context.exact_counts` | `observability.json` | `off`, `on` per account (`observe.context.exact_counts.<account>`); default `off`, opt-in per account (decided) |
+| `app.modules.<module>` | `observability.json` | bool per module in [Modules](#modules-and-build-targets); defaults there |
+| `app.menubar.enabled` | `observability.json` | bool, default true; set through `provenant app menubar on\|off` |
 | `observe.context.windows.<model-id>` | `observability.json` | tokens, 1,000 to 10,000,000; no default |
 | `console.default_scope` | `observability.json` | `all-hosts`, `this-host` or `mine`; default `all-hosts` |
 | `quota.merge_hosts` | `telemetry.json` | bool, default true |
@@ -717,10 +820,12 @@ locally. Every slice is usable on its own.
 Scope: `provenant session list|context|compactions` for Claude Code and Codex
 with the record schema and fabricated fixtures; the Claude Code probe behind
 `observe.context.exact_counts`; `observability.json` with the `observe.context`
-keys; the app rename, URL scheme, `provenant console` and LaunchAgent
-migration; the console window with the Sessions section (Overview, Context,
-State) reading the CLI. No projector, no seat-index change, no peer work.
-Prerequisite: open question 1.
+keys; the split into the menu bar agent and the console process, URL scheme,
+`provenant console`, LaunchAgent migration, the module registry with only the
+console and exact-count modules, and `provenant app menubar`; the console
+window with the Sessions section (Overview, Context, State) reading the CLI.
+Module switches are set through `provenant settings` until the Settings pane
+arrives in Slice 4. No projector, no seat-index change, no peer work.
 
 Acceptance:
 1. For fixture Claude Code and Codex sessions, the total matches the last
@@ -739,6 +844,14 @@ Acceptance:
    user's largest sessions is recorded; it feeds the projector trigger.
 6. Keyboard-only and VoiceOver walkthroughs of Sessions pass in light, dark
    and Increase Contrast.
+7. With the menu bar off (`provenant app menubar off`) and the agent not
+   running, `provenant console` opens the full console, and `provenant
+   session`, `lanes`, `quota` and Fabric dispatch behave identically; no CLI
+   or Fabric code path references the app.
+8. Closing the last console window ends the console process within 2 seconds;
+   the budgets above are recorded for the agent and the console; with
+   `app.modules.exact_counts` off, no probe code runs and the switch's
+   timers, watchers and caches are absent.
 
 Tests: parser fixtures per provider; schema validation; the privacy test;
 Swift view-model tests on recorded CLI JSON in a path-filtered macOS CI job;
@@ -763,22 +876,27 @@ Acceptance:
 
 Scope: `user_version` 5 with three-form model and effort, preset and
 `harness_rev` on usage rows; backfill; lane-to-PR and session-to-PR events;
-the cost per accepted change rollup; the Telemetry section; OTLP export
-mapping. Prerequisite: open question 3.
+the cost per accepted change rollup with contributor attribution and size
+normalisation; the Telemetry section; OTLP export mapping.
 
 Acceptance:
 1. New usage rows carry preset, harness revision and three-form model and
    effort, or an explicit `unknown` or `inferred`.
 2. For a fixture period, cost per accepted change reconciles with receipts,
    `events` and `changes`, and unattributed spend is reported.
-3. Exported OTLP carries the mapped `gen_ai.*` attributes and no content.
+3. A fixture pull request coded by three lanes and two sessions, with four
+   review rounds, credits all five and counts four rounds; a second fixture
+   with one small and one large pull request shows the per-line figure and
+   size buckets so the large one is not overweighted; spend of a session
+   linked to two pull requests is split by commits and sums to its total.
+4. Exported OTLP carries the mapped `gen_ai.*` attributes and no content.
 
 ### Slice 4: accounts across hosts and settings
 
 Scope: the `quota.snapshot` peer verb and `provenant quota --hosts all`; the
 Accounts section; menu-bar headline across hosts; `provenant settings` with
-the keys above; the Settings pane and host sheet. Remembered accounts are
-delivered by W17.
+the keys above; the Settings pane (including the Modules group and menu bar
+switch) and host sheet. Remembered accounts are delivered by W17.
 
 Acceptance:
 1. An account on several hosts appears once, with the freshest observation
@@ -797,8 +915,10 @@ these holds:
 - Fleet refresh through `provenant lanes --json` exceeds 1 s at p95;
 - `provenant statusline` exceeds 150 ms at p95 on the user's real state.
 
-Scope: the ADR 0020 and Fabric hosts amendments (merged first); the Rust
-projector for this host; readers preferring the contract.
+Scope: the ADR 0020 and Fabric hosts amendments (approved in principle, each
+its own pull request, merged first); the Rust projector for this host,
+a separate LaunchAgent that does not depend on the app; readers preferring the
+contract.
 
 Acceptance: the triggering measurement falls below its threshold; with the
 projector stopped, every reader's output is unchanged; a new lane appears in
@@ -813,7 +933,7 @@ sessions per hour while the console is open (counted at the transport), or
 peer lanes take more than 2 s at p95 to appear in Fleet.
 
 Scope: the three `observe.*` verbs, watch leases, merge, Hosts pages,
-reworded topology docs. Acceptance:
+reworded topology docs, all behind `app.modules.federation`. Acceptance:
 1. S3 and S4 attribute owning and executing host correctly on both hosts.
 2. With no live lease for ten minutes, no SSH session opens; while watched,
    one peer costs at most 16 SSH sessions per 15 minutes.
@@ -821,6 +941,8 @@ reworded topology docs. Acceptance:
    `--wait` keeps them pending; local lanes are unaffected.
 4. Zero, one and three peers work with no code change; a peer without a
    projector is shown through the `lanes` verb.
+5. With `app.modules.federation` off, no peer timer, watch lease or SSH
+   session exists in either process.
 
 Tests use separate state roots and a fake `ssh` program (zero, one and three
 peers, unreachable, version mismatch, truncated lanes) and count sessions.
@@ -888,19 +1010,31 @@ Owned by this spec:
 Noted, not owned here: M6 (Linux peer prerequisites), L2 (trusted
 directories), L5 (Linux reflinks), L6 (per-host accounts), L7 (socket paths).
 
-## Open questions
+## Decisions
 
-1. **One app or two?** *Recommendation:* one app, renamed Provenant, with the
-   LaunchAgent migration above: one process, one login item. Needed before
-   Slice 1.
-2. **Default for exact counts.** The probe sends counted text to the
-   provider's count endpoint under the session's own login. *Recommendation:*
-   default `off`, with a one-time prompt in the Context tab to turn it on per
-   account.
-3. **What counts as an accepted change?** *Recommendation:* a pull request
-   merged through the repository's own workflow (a `changes` row with a
-   `merge_commit`); R4.3 accepted tasks without a pull request become a
-   second, separately labelled figure. Needed before Slice 3.
-4. **Daemon exception.** Only if Slice 5 triggers: approve amending ADR 0020
-   and the Fabric hosts exclusion to admit a derived cache with the listed
-   side effects.
+Settled by the user on 2026-10-22; none remain open.
+
+1. **Exact context counts: off by default, opt-in per account.** The probe
+   sends counted text to the provider's count endpoint under the session's own
+   login, so the user enables it deliberately, per account, from a one-time
+   prompt in the Context tab.
+2. **Accepted change is a merged pull request, across contributors.** Many
+   agents may code one pull request, and the user sometimes prefers a large
+   branch to avoid the merge and verification churn of many small changes, so
+   acceptance never assumes one agent or session per pull request. Attribution,
+   normalisation and approximations are in [Telemetry rules](#telemetry-rules)
+   rule 3.
+3. **Background service amendment: approved in principle.** If the projector
+   improves the app it may amend ADR 0020 and the Fabric hosts exclusion. It
+   still goes through its ADR pull requests and the Slice 5 measurement
+   trigger; no further user gate is needed beyond normal review.
+4. **One app, not two, and modular.** The quota menu bar app becomes
+   Provenant and the LaunchAgent becomes `dev.provenant.app`. The user wants
+   it flexible and customisable (features are modules that can be switched
+   off, costing nothing when off), with extra weight easily shed (separate
+   targets), its memory freed when the full window closes while the menu bar
+   stays light (two processes in one bundle), and fully working with the menu
+   bar off (CLI, Fabric, telemetry and console independent of the agent). See
+   [Processes and lifecycle](#processes-and-lifecycle), [Independence from the
+   menu bar](#independence-from-the-menu-bar) and [Modules and build
+   targets](#modules-and-build-targets).

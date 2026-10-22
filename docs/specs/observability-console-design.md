@@ -3,7 +3,8 @@
 Status: **proposed with the spec**, 2026-10-22. Companion to
 [the observability console spec](observability-console.md), which owns
 requirements, data and delivery; this file owns visual and interaction design
-for the console window and the menu bar panel in `apps/quota-menubar`. Host
+for the console window and the menu bar panel of the Provenant app
+(`apps/provenant`, renamed from `apps/quota-menubar`). Host
 names in wireframes (workshop, studio) are examples.
 
 Basis. Every API named below was checked against the macOS 27.0 SDK
@@ -157,23 +158,38 @@ the Sessions three-column split.
 
 ### 3.2 Scene structure
 
+Two processes in one bundle (spec, Processes and lifecycle). The menu bar
+agent has no console code:
+
 ```swift
-@main struct ProvenantApp: App {
+@main struct ProvenantMenuApp: App {                               // LSUIElement agent, always on
     var body: some Scene {
         MenuBarExtra { Panel() } label: { MenuBarLabel() }
             .menuBarExtraStyle(.window)
+    }
+}
+```
+
+The console is a separate process, started on demand by the `provenant` URL
+scheme, the Dock, Spotlight or `provenant console`:
+
+```swift
+@main struct ProvenantConsoleApp: App {
+    var body: some Scene {
         Window("Provenant", id: "console") { Console() }          // one console, not a WindowGroup
             .defaultSize(width: 1120, height: 720)
             .windowResizability(.contentMinSize)                   // minimum 760 x 480 from content
-            .defaultLaunchBehavior(.suppressed)                    // login launch never opens it
             .commands { SidebarCommands(); InspectorCommands(); ConsoleCommands() }
     }
 }
 ```
 
-- The app stays `.accessory` (menu bar only) until the console opens, then
-  switches to `.regular` so it shows in the Dock and app switcher, and back on
-  close (spec, Console).
+- The console is a regular app (Dock icon, app switcher) while it runs and
+  quits when its last window closes, which frees all of its memory. The agent
+  stays an accessory with no Dock icon. The two share state only through files
+  and the CLI. The console works the same with the menu bar off.
+- Modules the user has switched off are not constructed: their sidebar items,
+  toolbar items and sections are absent, not greyed out.
 - Column widths: sidebar `navigationSplitViewColumnWidth(min: 180, ideal: 200,
   max: 260)`; Sessions list `min: 280, ideal: 340, max: 440`; inspector
   `inspectorColumnWidth(min: 260, ideal: 300, max: 400)`.
@@ -545,14 +561,24 @@ at 8000 characters. No snapshot of the file is stored.
 ### 3.11 Settings: pane, not a separate window
 
 Settings is a sidebar pane laid out like System Settings: `Form` with
-`.formStyle(.grouped)`, sections Hosts, Projector, Context, Console,
-Telemetry and Profile, in the order of the spec's settings model.
+`.formStyle(.grouped)`, sections Modules, Hosts, Projector, Context, Console,
+Telemetry and Profile, in the order of the spec's settings model, with a
+Modules group first.
 Command-comma and the app menu's Settings item select this pane (opening the
 console if needed). There is no separate `Settings` scene, so there is one
 place to look and one source of truth.
 
 ```text
  Settings
+ +-- Modules ------------------------------------------------------------+
+ | Menu bar item                                             [  on  ]    |
+ | Fleet graph                                               [  on  ]    |
+ | Exact context counts                                      [  on  ]    |
+ | Cross-host federation                                     [  on  ]    |
+ | Notifications                                             [ off  ]    |
+ |   A switched-off module is not loaded and uses no memory or CPU.      |
+ |   Changes apply the next time the console or panel opens.             |
+ +-----------------------------------------------------------------------+
  +-- Hosts --------------------------------------------------------------+
  | This Mac's name                       mini                    [Edit]  |
  | workshop   ssh workshop.tailnet · online                       (i)    |
@@ -879,7 +905,7 @@ rather than `.compactName`, which produces an uppercase `K`.
 ## 6. Menu bar panel alignment
 
 The panel should look like part of the same app without becoming a second
-console.
+console, and it is a separate lightweight process from it.
 
 - **No glass inside the panel.** The `.window` style panel already sits on a
   system material; adding `glassEffect` would be glass on glass. Hover rows
@@ -896,7 +922,9 @@ console.
 - **Width 300 pt** as today, 8 pt grid.
 - **Footer menu rows:** Open Console (Command-O), Refresh (Command-R),
   Settings (Command-comma, opens the console's Settings pane), Quit
-  Provenant (Command-Q). Text rows, not glass buttons; the HIG prefers menus
+  Provenant (Command-Q, quits the menu bar agent only; an open console keeps
+  running). Open Console launches the console process, which starts in
+  the budget below. Text rows, not glass buttons; the HIG prefers menus
   to popovers for menu bar extras and these rows keep the menu idiom
   ([HIG The menu bar](https://developer.apple.com/design/human-interface-guidelines/the-menu-bar#Menu-bar-extras)).
 - **Activity line:** one row above the footer, "5 lanes · 2 in review · 1
@@ -911,8 +939,11 @@ console.
 
 ### 7.1 Rules
 
-1. **One process.** Menu bar and console are one app; no helper, no XPC
-   service, no web view.
+1. **Two processes, one bundle.** A small menu bar agent and a console
+   process that exits when its last window closes; no XPC service, no shared
+   in-process cache, no web view. Heavy features are separate modules and
+   SwiftPM targets that a build or a Settings switch can leave out, and a
+   disabled module runs no timer or file watcher.
 2. **Event-driven reads.** Once the projector exists, watch
    `projector/v1/manifest.json` with a `DispatchSource` file-system object
    source for `.write`, `.rename` and `.delete` (atomic replace changes the
@@ -944,8 +975,9 @@ console.
 8. **Cheap bodies.** Formatters created once; strings for numbers computed
    when data arrives, not in `body`. Target: no view body over 4 ms (half a
    120 Hz frame).
-9. **Drop on close.** Closing the console releases detail caches, diff caches
-   and chart data; only the menu bar model stays resident.
+9. **Exit on close.** Closing the last console window ends the process, so
+   detail caches, diff caches and chart data go with it; only the agent's menu
+   bar model stays resident.
 10. **Glass budget.** At most one custom `GlassEffectContainer` on screen
     (Fleet graph controls); zero custom glass in the panel.
 11. **Animations are short and finite.** No repeating or indeterminate
@@ -961,29 +993,30 @@ physical footprint (`footprint`) and showed **0.0% CPU** at idle with the
 panel closed. For scale, Activity Monitor sits near 46 MB and Finder near
 144 MB. Its accumulated CPU time was 23.9 s over about 50 minutes of uptime
 (0.8% on average). That has not been attributed and is worth profiling
-before adding the console.
+before the console is added. Budgets are per process and measured as in the
+spec (Budgets and measurement).
 
-| Measure | Budget |
-|---|---|
-| Menu bar only, idle footprint | at most 40 MB |
-| Menu bar only, idle CPU | 0.0% in Activity Monitor; at most 2 s CPU per hour including refreshes |
-| Menu bar only, idle wake-ups | at most 1 per minute averaged over 10 minutes |
-| Cold launch to status item visible | at most 400 ms |
-| Panel click to first frame | at most 100 ms |
-| Console open (app already running) to first frame | at most 300 ms |
-| Console data visible, 500 sessions and 200 lanes | at most 500 ms |
-| Sidebar section switch | at most 100 ms |
-| Console open, steady state, 500 sessions, one Context tab | at most 120 MB footprint |
-| Console open and idle on screen | at most 1% CPU, updates only on data change |
-| Console hidden, minimised or occluded | no view updates at all |
-| After closing the console | back to at most 50 MB within 60 s |
-| Data change applied on main actor | at most 8 ms |
-| Scrolling a 1,000-row Sessions list | no hitches at 120 Hz in the SwiftUI instrument |
-| Release binary, arm64, stripped | at most 10 MB |
+| Process | Measure | Budget |
+|---|---|---|
+| Agent | Idle footprint, any module combination | at most 40 MB |
+| Agent | Idle CPU | 0.0% in Activity Monitor; at most 2 s CPU per hour including refreshes |
+| Agent | Idle wake-ups | at most 1 per minute averaged over 10 minutes |
+| Agent | Cold launch to status item visible | at most 400 ms |
+| Agent | Panel click to first frame | at most 100 ms |
+| Console | Cold launch (process start) to first frame | at most 700 ms |
+| Console | Data visible, 500 sessions and 200 lanes | at most 500 ms |
+| Console | Sidebar section switch | at most 100 ms |
+| Console | Open, steady state, 500 sessions, one Context tab | at most 120 MB footprint |
+| Console | Open and idle on screen | at most 1% CPU, updates only on data change |
+| Console | Hidden, minimised or occluded | no view updates at all |
+| Console | Last window closed | process gone within 2 s; agent unchanged within 5 MB |
+| Console | Data change applied on main actor | at most 8 ms |
+| Console | Scrolling a 1,000-row Sessions list | no hitches at 120 Hz in the SwiftUI instrument |
+| Both | Release binary, arm64, stripped | at most 10 MB each |
 
 ## 8. Decisions
 
-All ten design choices are settled as follows.
+All twelve design choices are settled as follows.
 
 1. **Minimum macOS 26**, adopting macOS 27 refinements (`.tabs` picker,
    pointer-tuned interactive glass) behind availability checks.
@@ -1001,6 +1034,11 @@ All ten design choices are settled as follows.
    zero, read from `provenant statusline --json` until the projector exists.
 9. **Custom glass only for the Fleet zoom controls.**
 10. **Context categories use the re-stepped palette** in section 5.2.
+11. **Two processes in one bundle:** a menu bar agent and an on-demand
+    console that exits with its last window, so the console's memory is freed
+    and the menu bar stays light. Everything works with the menu bar off.
+12. **Features are modules** the user can switch off in Settings, and a
+    disabled module costs nothing at runtime.
 
 ## Appendix A. Data the design needs
 
