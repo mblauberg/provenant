@@ -6,6 +6,7 @@ Adapted from token-meter (MIT, Galileo Agent Labs); see THIRD_PARTY_NOTICES.md.
 from __future__ import annotations
 
 import hashlib
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -119,10 +120,21 @@ def parse(payload, now=None):
     return {'windows': windows, 'unreported': unreported, 'usage_credits': usage_credits(payload.get('spend'))}
 
 
+def _schedule():
+    """The quota_schedule module: provider_quota registers it before loading providers, but a provider
+    loaded alone (as the tests do) loads it by path the same way."""
+    module = sys.modules.get('quota_schedule')
+    if module is None:
+        spec = importlib.util.spec_from_file_location('quota_schedule', Path(__file__).resolve().parents[1] / 'quota_schedule.py')
+        module = importlib.util.module_from_spec(spec)
+        sys.modules['quota_schedule'] = module
+        spec.loader.exec_module(module)
+    return module
+
+
 def _instant(value):
-    # provider_quota loads quota_schedule before any provider module; its lenient parser reads
-    # ISO strings and epoch seconds or milliseconds alike.
-    return sys.modules['quota_schedule'].parse_time(value)
+    # Its lenient parser reads ISO strings and epoch seconds or milliseconds alike.
+    return _schedule().parse_time(value)
 
 
 def _percent(value):

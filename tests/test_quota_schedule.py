@@ -188,3 +188,10 @@ def test_activity_is_stat_only_per_identity(tmp_path, monkeypatch):
     assert found['opencode'] == pytest.approx(ago(minutes=5).timestamp())
     assert found['agy'] is not None and found['cursor'] is None
     assert schedule.activity('claude', tmp_path / 'missing') is None
+
+
+@pytest.mark.parametrize('value', ['1e30', 1e30, -1e30, '-1e30', float('nan'), float('inf'), float('-inf'), 'nan', 'inf'])
+def test_out_of_range_timestamps_read_as_unset_never_raise(value):
+    assert schedule.parse_time(value) is None
+    block, due = plan(snapshot={'attempted_at': value, 'windows': []})
+    assert block['reason'] == 'first_fetch' and due is True

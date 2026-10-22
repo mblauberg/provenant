@@ -183,7 +183,12 @@ def parse_time(value):
     if seconds is not None:
         if seconds > 10_000_000_000:
             seconds /= 1000
-        return datetime.fromtimestamp(seconds, UTC) if seconds > 0 else None
+        if seconds <= 0:
+            return None
+        try:
+            return datetime.fromtimestamp(seconds, UTC)
+        except (OverflowError, ValueError, OSError):  # beyond what a datetime can hold
+            return None
     if not isinstance(value, str) or not value.strip():
         return None
     try:

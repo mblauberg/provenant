@@ -8,6 +8,7 @@ import io
 import json
 import os
 import stat
+import sys
 from pathlib import Path
 import shutil
 import sqlite3
@@ -1883,3 +1884,16 @@ def test_atomic_json_writes_private_files(quota):
     path = quota.report_path()
     quota.atomic_json(path, {'schema': quota.REPORT_SCHEMA})
     assert path.stat().st_mode & 0o777 == 0o600 and json.loads(path.read_text())['schema'] == quota.REPORT_SCHEMA
+
+
+def test_claude_parse_loads_quota_schedule_itself_when_it_is_not_registered(monkeypatch):
+    monkeypatch.delitem(sys.modules, 'quota_schedule', raising=False)
+    try:
+        claude = load('claude_alone', ROOT / 'scripts/quota_providers/claude.py')
+        reset = datetime(2026, 10, 28, 10, tzinfo=UTC)
+        payload = {'seven_day': {'utilization': 3.0, 'resets_at': reset.isoformat()},
+                   'limits': [claude_limit('weekly_all', 'unlisted', 3, reset.timestamp())]}
+        rows = {row['name']: row for row in claude.parse(payload)['windows']}
+        assert rows['weekly_all:1']['window_minutes'] == WEEK
+    finally:
+        sys.modules.pop('quota_schedule', None)
