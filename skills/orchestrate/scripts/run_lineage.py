@@ -176,7 +176,10 @@ def ensure_nested_owner(run_dir, kind, *, batch_child=False):
             finally:
                 # Never close stdio if the variable names one.
                 if inherited is not None and inherited.isdigit() and int(inherited) > 2:
-                    os.close(int(inherited))
+                    try:
+                        os.close(int(inherited))
+                    except OSError:
+                        pass
         except FileNotFoundError:
             # A standalone batch child can initialise an owner. A nested child
             # must use the batch parent's already-published owner identity.
