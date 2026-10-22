@@ -37,8 +37,8 @@ The versioned SQLite database is
 `$AGENT_FABRIC_STATE_ROOT/telemetry.sqlite3`, defaulting to
 `~/.local/state/agent-harness/fabric/telemetry.sqlite3`. Schema version 4
 migrates versions 1–3 metadata; unknown newer schemas are refused. The
-`events`, `changes` and `quota_series` tables are additive and keep version 4,
-so peers on this version still read the ledger.
+`events`, `changes`, `quota_series` and `harness_stamps` tables are additive
+and keep version 4, so peers on this version still read the ledger.
 
 | Source | Discovery and cursor |
 |---|---|
@@ -88,6 +88,12 @@ available and parses successfully; `pending_source_rebuilds` in stats names
 incomplete rebuilds.
 
 ## Interpretation and cost
+
+`usage.model` keeps the folded model (`COALESCE(observed, resolved, requested)`).
+`requested_model`, `resolved_model` and `observed_model` preserve the receipt's
+raw provider strings separately. Native Claude and Codex usage records set
+only `observed_model`. Existing ledgers re-read surviving Fabric receipts once;
+pruned receipts keep NULL components and their existing folded model.
 
 Token buckets are disjoint: input excludes known cache reads and writes;
 output excludes known reasoning tokens. Missing categories remain unknown.
@@ -151,18 +157,36 @@ never the host name: source and session for `session.start`; the receipt's
 resolved path for `lane.attempt`, so projects sharing run ids stay apart;
 otherwise `source_ref`, time, linked fields and attributes. Collector refs are
 `path@offset#record`, so identical records on one line keep their count.
-Re-ingest therefore adds nothing, even after a `local_host` rename, which
-leaves earlier rows under their old id for readers to map. Opening a
+Re-ingest therefore adds no duplicate rows, even after a `local_host` rename,
+which leaves earlier rows under their old id for readers to map. Opening a
 ledger from an earlier build re-keys its events once under a write lock,
 keeping the earliest of any duplicates, so concurrent openers cannot race.
 
 | Kind | From |
 |---|---|
-| `lane.attempt` | A Fabric receipt's first terminal status: adapter, effort, attempt, status, error class, task class, route alias, wall time, and the harness `profile` preset and `profile_digest` when the receipt has one (absent means the default, balanced, profile) |
+| `lane.attempt` | A terminal Fabric receipt: adapter, effort, attempt, status, error class, task class, route alias, wall time, retry/escalation lineage, `empty_patch`, and profile stamp metadata when known (absent profile means balanced) |
 | `limit.rate_limited`, `limit.usage_limited`, `cooldown` | Route-health and cooldown snapshots |
 | `session.start` | The first ingested usage row of a Claude, Codex or OpenCode session; one event per session, not per message |
 | `plan.change` | A quota reading whose `plan`, `plan_detected` or `plan_tier` differs from the account's previous reading; attrs hold each `<field>_from` and `<field>_to`. Spelling-only differences and unknown values are not changes |
 | `otel.<event.name>`, `otel.metric` | Collector log records and metric data points |
+
+Re-reading a lane receipt merges its attrs into the existing event, preserving
+other history. `empty_patch` comes from the writer's Git snapshot: true only
+when a clean starting worktree keeps the same HEAD and porcelain after the
+provider returns. Read-only lanes omit it; a dirty start or unreadable Git
+state stays unknown.
+Success with no diff selects successful lane events with
+`json_extract(attrs,'$.empty_patch')=1`; missing values do not count as false.
+
+`retry_of` names the predecessor attempt. A task may also set
+`escalation_reason` to `gate_failed`, `review_blocked`, `capability` or
+`quota_or_limit`, requiring `retry_of`. Only these escalations get
+`escalated_from` in `<run_id>/<task_id>/<n>` form; a plain retry stays a retry.
+Automatic provider fallback retains its separate `fallback_from` provenance.
+
+Lane attrs retain the profile's preset, digest, `risk_tier` and `floored`.
+`harness_stamps` stores full resolved knobs once per digest, with preset and
+first-seen time. A digest without a knobs object creates no stamp row.
 
 Events never hold prompt, output or error text. OTLP attributes keep numeric
 values plus `model`, `effort`, `type`, `tool_name`, `decision`, `source`,

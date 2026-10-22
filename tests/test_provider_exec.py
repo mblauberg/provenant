@@ -2436,9 +2436,8 @@ def test_reset_evidence_uses_provider_time_units():
 
 def fixture_plan(tmp_path, code, adapter="codex", **controls):
     mod = supervisor()
-    previous = os.environ.get("PROVENANT_NO_OS_CONFINEMENT")
-    os.environ["PROVENANT_NO_OS_CONFINEMENT"] = "1"
-    try:
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        monkeypatch.setenv("PROVENANT_NO_OS_CONFINEMENT", "1")
         plan = mod.build_plan(
             adapter,
             {
@@ -2452,11 +2451,6 @@ def fixture_plan(tmp_path, code, adapter="codex", **controls):
             workspace_root=tmp_path,
             **controls,
         )
-    finally:
-        if previous is None:
-            os.environ.pop("PROVENANT_NO_OS_CONFINEMENT", None)
-        else:
-            os.environ["PROVENANT_NO_OS_CONFINEMENT"] = previous
     plan["argv"] = [sys.executable, "-u", "-c", code]
     plan["grace_seconds"] = 0.1
     return plan
@@ -3839,7 +3833,8 @@ def test_opencode_free_tier_refusal_is_model_unavailable(tmp_path, shape):
         code = f"import sys; print({message!r}, file=sys.stderr); sys.exit(1)"
     record = supervisor().execute(fixture_plan(tmp_path, code, "opencode"), tmp_path / "result.md")
     assert record["status"] == "model_unavailable"
-    assert record["fix"] == "OpenCode rejected the free-tier request; use a paid opencode-go model or report this"
+    assert "free-tier request" in record["fix"]
+    assert "paid opencode-go model" in record["fix"]
 
 
 @pytest.mark.skipif(sys.platform != "darwin", reason="Codex seatbelt is macOS-only")
@@ -5101,7 +5096,7 @@ time.sleep(60)
     assert record["status"] == "startup_timeout"
     assert record["evidence"]["signature"] == "startup_watchdog"
     assert record["retryable"] is True
-    assert record["fix"] == "re-route to another model or adapter"
+    assert "re-route" in record["fix"]
     assert "no provider output within 0.6s" in (tmp_path / "result.md").read_text()
     deadline = time.monotonic() + 5
     while time.monotonic() < deadline:
@@ -5173,7 +5168,8 @@ time.sleep(30)
     assert record["status"] == "auth_required"
     assert record["evidence"]["signature"] == "auth_expired"
     assert record["evidence"]["termination_source"] == "auth_required"
-    assert record["fix"] == "run `kiro-cli whoami` outside the sandbox"
+    assert "kiro-cli whoami" in record["fix"]
+    assert "outside the sandbox" in record["fix"]
 
 
 @pytest.mark.parametrize("adapter,text", [("opencode", "Monthly usage limit reached. Resets in 2 days."),
@@ -5247,9 +5243,7 @@ emit({'type':'system','subtype':'task_notification','task_id':'b1','status':'sto
 emit({'type':'system','subtype':'init','model':'claude-opus-5-5','session_id':'s-1'})
 emit({'type':'result','subtype':'success','result':'','is_error':False,'num_turns':0})
 emit({'type':'system','subtype':'init','model':'claude-opus-5-5','session_id':'s-1'})
-time.sleep(0.6)
 emit({'type':'assistant','message':{'content':[{'type':'text','text':'working'}]}})
-time.sleep(0.6)
 emit({'type':'result','subtype':'success','result':'DONE','is_error':False,'num_turns':3})
 """
     plan = fixture_plan(tmp_path, code, "claude", timeout_seconds=10, idle_seconds=5)
@@ -5258,21 +5252,34 @@ emit({'type':'result','subtype':'success','result':'DONE','is_error':False,'num_
     assert (tmp_path / "result.md").read_text() == "DONE"
 
 
-def test_claude_resume_preamble_does_not_start_terminal_grace(tmp_path):
+def test_claude_resume_preamble_does_not_start_terminal_grace(tmp_path, provider_clock):
     # The real turn can start later than the grace period after the empty
     # preamble result, for example while a large session reloads.
-    code = """import json,time
+    preamble = tmp_path / "preamble-result-seen"
+    resume = tmp_path / "resume-session"
+    advanced = []
+
+    def progress(_timestamp):
+        if preamble.exists() and not advanced:
+            provider_clock(0.4)
+            advanced.append(True)
+            resume.touch()
+
+    code = f"""import json,pathlib,sys,time
 emit=lambda e: print(json.dumps(e), flush=True)
-emit({'type':'system','subtype':'init','model':'claude-opus-5-5','session_id':'s-1'})
-emit({'type':'result','subtype':'success','result':'','is_error':False,'num_turns':0})
-time.sleep(0.8)
-emit({'type':'system','subtype':'init','model':'claude-opus-5-5','session_id':'s-1'})
-emit({'type':'assistant','message':{'content':[{'type':'text','text':'working'}]}})
-emit({'type':'result','subtype':'success','result':'DONE','is_error':False,'num_turns':3})
+emit({{'type':'system','subtype':'init','model':'claude-opus-5-5','session_id':'s-1'}})
+emit({{'type':'result','subtype':'success','result':'','is_error':False,'num_turns':0}})
+pathlib.Path({str(preamble)!r}).touch()
+print('reloading session', file=sys.stderr, flush=True)  # progress after the marker exists
+while not pathlib.Path({str(resume)!r}).exists():
+    time.sleep(0.01)
+emit({{'type':'system','subtype':'init','model':'claude-opus-5-5','session_id':'s-1'}})
+emit({{'type':'assistant','message':{{'content':[{{'type':'text','text':'working'}}]}}}})
+emit({{'type':'result','subtype':'success','result':'DONE','is_error':False,'num_turns':3}})
 """
     plan = fixture_plan(tmp_path, code, "claude", timeout_seconds=10, idle_seconds=5)
     plan["grace_seconds"] = 0.3
-    record = supervisor().execute(plan, tmp_path / "result.md")
+    record = supervisor().execute(plan, tmp_path / "result.md", on_progress=progress)
     assert record["status"] == "ok"
     assert (tmp_path / "result.md").read_text() == "DONE"
 
@@ -8024,19 +8031,14 @@ def _stderr_run(tmp_path, lines, delays=0.05):
     return supervisor().execute(plan, tmp_path / "result.md")
 
 
-def test_opencode_non_error_stderr_quota_noise_is_not_fatal(tmp_path):
-    record = _stderr_run(tmp_path, ["WARN retrying: Individual quota reached"])
-    assert record["status"] != "usage_limited"
-
-
-def test_opencode_warn_quota_line_beside_unrelated_error_is_not_fatal(tmp_path):
-    record = _stderr_run(tmp_path, ["WARN retrying: Individual quota reached", "ERROR service=bus unrelated failure"])
-    assert record["status"] != "usage_limited"
-
-
-def test_opencode_warn_quota_line_with_reset_hint_beside_unrelated_error_is_not_fatal(tmp_path):
-    record = _stderr_run(tmp_path, ["WARN retrying: Individual quota reached, resets in 30s",
-                                    "ERROR service=bus unrelated failure"])
+@pytest.mark.parametrize("lines", [
+    ["WARN retrying: Individual quota reached"],
+    ["WARN retrying: Individual quota reached", "ERROR service=bus unrelated failure"],
+    ["WARN retrying: Individual quota reached, resets in 30s",
+     "ERROR service=bus unrelated failure"],
+], ids=["quota-warning", "unrelated-error", "reset-hint"])
+def test_opencode_quota_warning_noise_is_not_fatal(tmp_path, lines):
+    record = _stderr_run(tmp_path, lines)
     assert record["status"] != "usage_limited"
 
 

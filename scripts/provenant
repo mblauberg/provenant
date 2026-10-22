@@ -323,10 +323,16 @@ def execute(
     product_root: Path | None = None,
     *,
     clear_git_redirects: bool = False,
+    python_helper: Path | None = None,
 ) -> NoReturn:
     try:
+        if not path.is_file() or not os.access(path, os.X_OK):
+            python_helper = None
+        program = Path("/bin/bash") if python_helper is not None else path
+        argv = ([str(program), str(python_helper), str(path), *arguments]
+                if python_helper is not None else [str(path), *arguments])
         if product_root is None and not clear_git_redirects:
-            os.execv(path, [str(path), *arguments])
+            os.execv(program, argv)
         environment = os.environ.copy()
         if clear_git_redirects:
             for name in GIT_REDIRECT_ENVIRONMENT:
@@ -334,7 +340,7 @@ def execute(
         if product_root is not None:
             environment["AGENT_FABRIC_PRODUCT_ROOT"] = str(product_root)
             environment["AGENTS_HOME"] = str(product_root)
-        os.execve(path, [str(path), *arguments], environment)
+        os.execve(program, argv, environment)
     except OSError as exc:
         print(f"provenant: cannot execute {path}: {exc.strerror or exc}; {REPAIR}", file=sys.stderr)
         raise SystemExit(3) from None
@@ -575,7 +581,10 @@ def main(arguments: list[str]) -> int:
         except Exception as exc:  # advisory only; PROVENANT_DEBUG shows why it failed
             if os.environ.get("PROVENANT_DEBUG"):
                 print(f"provenant: stale-checkout check failed: {exc!r}", file=sys.stderr)
-    execute(target, command_arguments, product_root, clear_git_redirects=command == "check")
+    python_helper = (target.parents[len(Path(owner).parts) - 1] / "scripts/lib/harness-python.sh"
+                     if owner.endswith(".py") else None)
+    execute(target, command_arguments, product_root, clear_git_redirects=command == "check",
+            python_helper=python_helper)
 
 
 if __name__ == "__main__":

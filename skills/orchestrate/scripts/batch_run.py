@@ -41,6 +41,7 @@ from dispatch_run import (
     close_mcp_run,
     ACCESS_MODES,
     ATTEMPT_ID_RE,
+    ESCALATION_REASONS,
     AttemptEvidenceError,
     WORKTREE_WRITE_ADAPTERS,
     WorktreeLeaseError,
@@ -239,6 +240,12 @@ def _load_manifest(
         if task_id in seen:
             raise BatchInputError(f"duplicate task id: {task_id}")
         seen.add(task_id)
+        reason = task.get("escalation_reason")
+        if reason is not None:
+            if reason not in ESCALATION_REASONS:
+                raise BatchInputError(f"task {task_id} escalation_reason must be one of {', '.join(ESCALATION_REASONS)}")
+            if not task.get("retry_of"):
+                raise BatchInputError(f"task {task_id} escalation_reason requires retry_of")
         prompt_value = task.get("prompt_file")
         inline_prompt = task.get("prompt")
         if (prompt_value is None) == (inline_prompt is None):
@@ -406,6 +413,7 @@ def _command(task: dict[str, Any], run_dir: Path) -> list[str]:
                        ("model_override_tier", "--model-override-tier"),
                        ("reviewer_id", "--reviewer-id"),
                        ("account", "--account"), ("effort", "--effort"), ("retry_of", "--retry-of"),
+                       ("escalation_reason", "--escalation-reason"),
                        ("pick_reason", "--pick-reason"),
                        ("access_mode", "--access-mode"), ("worktree", "--worktree")):
         if task.get(name):

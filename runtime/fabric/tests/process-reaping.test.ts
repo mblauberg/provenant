@@ -1,5 +1,5 @@
-import { spawn, type ChildProcess } from "node:child_process";
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { execFileSync, spawn, type ChildProcess } from "node:child_process";
+import { chmodSync, copyFileSync, mkdirSync, realpathSync, symlinkSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { once } from "node:events";
 import * as ps from "../src/ps.mjs";
@@ -101,6 +101,7 @@ it.each(["status", "startup"])("%s persists a SIGKILL'd attempt as lost", async 
 
 afterEach(async () => {
   vi.restoreAllMocks();
+  vi.unstubAllEnvs();
   for (const child of children.splice(0)) {
     if (child.exitCode === null && child.signalCode === null) {
       const exited = once(child, "exit");
@@ -237,4 +238,40 @@ it("records the orphan reaper source before terminating an owned process", async
   expect(outcome).toMatchObject({ signalled: true, escalated: false });
   expect(JSON.parse(readFileSync(join(runDir, "termination-request.json"), "utf8")))
     .toMatchObject({ source: "orphan_reaper", sender_pid: process.pid, signal: "SIGTERM", run_token: "owned" });
+});
+
+
+it("reaps with the harness venv and diagnoses owner failures without throwing", async () => {
+  const workspace = scratchRoot("fabric-reaper-python-");
+  directories.push(workspace);
+  const runDir = join(workspace, ".agent-run/runs/20261022-1200-dispatch-reap-abcdef");
+  mkdirSync(runDir, { recursive: true });
+  writeFileSync(join(runDir, "RUN_RECEIPT.json"), JSON.stringify({ status: "active" }));
+  const product = join(workspace, "product");
+  for (const dir of ["scripts/lib", ".venv/bin", "skills/orchestrate/scripts", "old-bin"])
+    mkdirSync(join(product, dir), { recursive: true });
+  copyFileSync(new URL("../../../scripts/lib/harness-python.sh", import.meta.url), join(product, "scripts/lib/harness-python.sh"));
+  const python = execFileSync("python3", ["-c", "import sys; print(sys.executable)"], { encoding: "utf8" }).trim();
+  const selected = join(product, ".venv/bin/python");
+  symlinkSync(python, selected);
+  const old = join(product, "old-bin/python3");
+  writeFileSync(old, "#!/bin/sh\nexit 99\n");
+  chmodSync(old, 0o755);
+  const owner = join(product, "skills/orchestrate/scripts/dispatch_run.py");
+  const recorded = join(product, "python.txt");
+  writeFileSync(owner, `import json, sys
+from pathlib import Path
+Path(${JSON.stringify(recorded)}).write_text(sys.executable)
+print(json.dumps(json.load(sys.stdin)))
+`);
+  vi.stubEnv("AGENT_FABRIC_PRODUCT_ROOT", product);
+  vi.stubEnv("HARNESS_PYTHON", undefined);
+  vi.stubEnv("PATH", `${join(product, "old-bin")}:${process.env.PATH}`);
+
+  expect(await reapAttemptRuns(workspace)).toEqual([runDir]);
+  expect(realpathSync(readFileSync(recorded, "utf8"))).toBe(realpathSync(selected));
+  const diagnostic = vi.spyOn(console, "warn").mockImplementation(() => {});
+  writeFileSync(owner, 'import sys\nprint("reaper refused custody", file=sys.stderr)\nsys.exit(1)\n');
+  expect(await reapAttemptRuns(workspace)).toEqual([]);
+  expect(diagnostic).toHaveBeenCalledWith(expect.stringMatching(/attempt_reap_failed.*reaper refused custody/su));
 });

@@ -3303,6 +3303,46 @@ class LaneLoopbackContracts(unittest.TestCase):
             self.assertTrue(all(call.args[0] in {'lanes', 'operation'} for call in peer.call_args_list))
             self.assertEqual({row.get('error') for row in view['runs']}, {'resume_not_sent', 'handoff_not_sent', 'dispatch_not_sent'})
 
+    def test_all_rejected_batch_reconciles_and_remains_visible_by_operation_id(self):
+        import fabric_hosts as hosts
+        identifier = 'all-rejected-batch'
+        run_id = 'mcp-rej123'
+        directory = self.peer_workspace / '.agent-run/runs/20261022-1200-batch-rejected-rej123'
+        batch = directory / 'dispatch/batches/batch-001'
+        batch.mkdir(parents=True)
+        tasks = [{'task_id': task, 'status': 'rejected', 'outcome': 'preflight_rejected',
+                  'error': error, 'fix': fix} for task, error, fix in [
+            ('rejected-a', 'model_routing_unavailable', 'Repair model routing.'),
+            ('rejected-b', 'prompt_unavailable', 'Provide a readable prompt.')]]
+        (batch / 'summary.json').write_text(json.dumps({'status': 'completed', 'tasks': tasks}))
+        (directory / 'dispatch-status.json').write_text(json.dumps({
+            'id': run_id, 'kind': 'batch', 'batch_id': 'batch-001', 'status': 'completed',
+            'task_ids': [task['task_id'] for task in tasks],
+            'started_at': '2026-10-22T12:00:00Z', 'finished_at': '2026-10-22T12:00:01Z'}))
+        peer_env = {**self.env, 'HOME': str(self.peer_home),
+                    'AGENT_FABRIC_INSTANCE_ROOT': str(self.peer_home / '.agents')}
+        with patch.dict(os.environ, peer_env):
+            peer = hosts.lane_owner()
+            with peer.database() as database:
+                database.execute('INSERT INTO operations VALUES (?,?,NULL)', (identifier,
+                    json.dumps({'verb': 'dispatch', 'project': 'Repos/project'})))
+            launch = peer.root / 'operations' / (identifier + '.json')
+            launch.parent.mkdir(exist_ok=True)
+            launch.write_text(json.dumps({'runId': run_id, 'taskId': '*', 'attempt': 1}))
+            recovered = peer.peer_call('operation', {'project_path': 'Repos/project',
+                                                   'input': {'operation_id': identifier}})
+        self.assertEqual(recovered['status'], 'ok', recovered)
+        self.assertEqual([(row['task_id'], row['status'], row['error'], row['fix'])
+                          for row in recovered['runs']],
+                         [(row['task_id'], row['status'], row['error'], row['fix']) for row in tasks])
+        # No pending client row remains to provide the operation's identity.
+        result = self.client('status', ids=[identifier + '@workshop'])
+        self.assertEqual(result['status'], 'ok', result)
+        self.assertEqual({row['task_id'] for row in result['runs']},
+                         {task['task_id'] + '@workshop' for task in tasks})
+        self.assertTrue(all(row['state'] == 'terminal' and row['status'] == 'rejected'
+                            and row['attempt'] == 0 for row in result['runs']))
+
     def test_default_views_sort_globally_and_keep_unknown_hosts_visible(self):
         import fabric_hosts as hosts
         local = [{'id': f'mcp-local-{index}', 'run_id': f'mcp-local-{index}',

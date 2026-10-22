@@ -84,6 +84,17 @@ class LaneFederation:
 
     def worker(self, verb, project, request, launch_path=None, lock=None, reader_cwd=None):
         request = dict(request)
+        if verb in {'status', 'lanes'} and request.get('ids'):
+            selectors = []
+            for selector in request['ids']:
+                with self.database() as db:
+                    operation = db.execute('SELECT request FROM operations WHERE id=?', (selector,)).fetchone()
+                if operation and json.loads(operation[0]).get('project') == project:
+                    launch = self.root / 'operations' / f'{selector}.json'
+                    if launch.is_file():
+                        selector = self.h.strict_json(launch.read_bytes()).get('runId', selector)
+                selectors.append(selector)
+            request['ids'] = selectors
         lineage = request.pop('_lineage', None)
         directory = self.h.project_directory(project)
         if not directory.is_dir():
@@ -221,7 +232,9 @@ class LaneFederation:
                     return {'status': 'launch_unknown', 'state': 'launch_unknown', 'operation_id': identifier}
                 value = self.worker('status', project, {'ids': [identity['runId']]})
                 recovered = [row for row in value.get('runs', []) if (identity['taskId'] == '*' or row.get('task_id') == identity['taskId'])
-                    and row.get('attempt', 0) >= identity['attempt']]
+                    and (row.get('attempt', 0) >= identity['attempt']
+                        or identity['taskId'] == '*' and row.get('attempt') == 0
+                        and row.get('state') == 'terminal' and row.get('status') == 'rejected')]
                 if recovered:
                     return {**value, 'runs': recovered, 'operation_id': identifier}
                 return {'status': 'launch_unknown', 'state': 'launch_unknown', 'operation_id': identifier}

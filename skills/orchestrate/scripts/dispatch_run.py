@@ -43,6 +43,7 @@ import process_info
 CF_DISPATCH = Path(__file__).with_name("cf_dispatch.py")
 TASK_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 ATTEMPT_ID_RE = re.compile(r"^attempt-(?P<number>\d{3}|[1-9]\d{3,})$")
+ESCALATION_REASONS = ("gate_failed", "review_blocked", "capability", "quota_or_limit")
 BATCH_ID_RE = re.compile(r"^batch-(?:\d{3}|[1-9]\d{3,})$")
 DEFAULT_TIMEOUT_SECONDS = 3600.0
 # Match the existing abandoned-receipt grace period for pre-identity attempts.
@@ -285,6 +286,14 @@ def writer_worktree_state(cwd: str) -> tuple[str, bytes] | None:
     except (OSError, subprocess.SubprocessError):
         return None
     return head, status
+
+
+def worktree_unchanged(start, cwd: str) -> bool | None:
+    """Whether a clean starting worktree still has the same HEAD and porcelain; unknown from a dirty start."""
+    if start is None or start[1]:
+        return None
+    current = writer_worktree_state(cwd)
+    return None if current is None else current == start
 
 
 def modified_since(cwd: str, since: float) -> bool:
@@ -1804,6 +1813,7 @@ def contract_row(args,run_dir,number,attempt_dir,plan,started_at):
     return {"schema":"fabric.attempt.v1", **attempt_scope(args,number), **lineage, **({"children": children} if children else {}), **({'placement_fallback': placement} if placement else {}),"run_id":plan.get("run_id") or run_identity(run_dir),"task_id":args.task_id,"task_class":task_class,
         **({"batch_id":args.batch_id} if getattr(args,"batch_id",None) else {}),"profile":profile_resolution(args),
         "attempt":number,"state":"running","status":None,"usage_source":"missing","mode":args.access_mode,"cwd":plan.get("cwd") or str(Path.cwd().resolve()),
+        "retry_of":getattr(args,"retry_of",None),"escalation_reason":getattr(args,"escalation_reason",None),
         "workspace_root":plan.get("workspace_root") or str(Path(getattr(args,"workspace_root",None) or Path.cwd()).resolve()),
         **({"read_roots":[str(root) for root in args.read_roots]} if getattr(args,"read_roots",None) else {}),
         "worktree":str(args.worktree) if args.worktree else None,"started_at":started_at,"ended_at":None,"last_progress_at":started_at,
@@ -1865,7 +1875,7 @@ def terminal_contract(args,run_dir,legacy,adapter,number,attempt_dir):
     refusal=route_refusal(adapter,args.tool)
     if refusal: status=refusal["status"]
     if status not in TERMINAL_STATUSES: status="failed"
-    for field in ("reason","session_id","retryable","reset_at","retry_after","fix","error","evidence","applied","context","usage_source","warnings","reaped","spared","children","provenance","pgid","pgid_started_at","last_progress_at","landable","quarantine","result_partial"):
+    for field in ("reason","session_id","retryable","reset_at","retry_after","fix","error","evidence","applied","context","usage_source","warnings","reaped","spared","children","provenance","pgid","pgid_started_at","last_progress_at","landable","quarantine","result_partial","empty_patch"):
         if field in adapter: row[field]=adapter[field]
     if row.get("task_class") and isinstance(row.get("provenance"), dict):
         row["provenance"]["requested"] = {**(row["provenance"].get("requested") or {}), "task_class": row["task_class"]}
@@ -2196,6 +2206,8 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
     except AttemptEvidenceError as exc:
         return fail(run_dir, "attempt_path_invalid", str(exc))
     retry_of = None
+    if args.escalation_reason and not args.retry_of:
+        return fail(run_dir, "escalation_reason_invalid", "escalation-reason requires retry-of")
     if args.retry_of:
         retry_ref = Path(args.retry_of)
         if retry_ref.is_absolute() or retry_ref.name != args.retry_of or not ATTEMPT_ID_RE.fullmatch(args.retry_of):
@@ -2572,6 +2584,7 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
                     adapter_record["warnings"].append("resume: relaunched")
                 if admitted and plan["mode"] == "worktree_write":
                     guard_writer_retry(adapter_record, writer_start, plan["cwd"])
+                    adapter_record["empty_patch"] = worktree_unchanged(writer_start[0], plan["cwd"])
                 args._writer_start = writer_start
                 args._last_plan=plan
             else:
@@ -3106,6 +3119,7 @@ def execute_attempt_sequence(args,custody=None):
             if "account" in candidate:
                 args.account = candidate["account"]
             args.alias=None;args.retry_of=f"attempt-{previous['attempt']:03d}"
+            args.escalation_reason = None  # Automatic retries keep their cause in fallback_from.
             result=_dispatch(args,custody)
             previous=getattr(args,"_last_row",None)
     return result
@@ -3308,6 +3322,7 @@ def parser() -> argparse.ArgumentParser:
         help="maximum provider runtime: read_only 3600 seconds, worktree_write 10800",
     )
     root.add_argument("--retry-of", help="existing attempt id under this task, for lineage only")
+    root.add_argument("--escalation-reason", choices=ESCALATION_REASONS, help="reason for escalating retry-of")
     root.add_argument(
         "--git-evidence", type=Path,
         help="run-owned Git evidence packet to copy into an Agy attempt",
