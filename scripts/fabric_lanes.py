@@ -605,9 +605,40 @@ class LaneFederation:
                 'digest': 'local fallback: hosts.json invalid_config: ' + self.config_error}
         return result
 
+    def lift_task_hosts(self, request):
+        """A batch runs on one host: lift a uniform per-task host, refuse a mixed one."""
+        tasks = request.get('tasks')
+        if not isinstance(tasks, list) or not any(isinstance(task, dict) and task.get('host') for task in tasks):
+            return request
+        hosts = {task.get('host') or request.get('host') if isinstance(task, dict) else None for task in tasks}
+        if len(hosts) != 1 or None in hosts:
+            raise self.h.HostError('host_conflict', 'A batch runs on one host: pass one host at the top level, '
+                'or the same host on every task (saw ' + ', '.join(sorted(str(host) for host in hosts)) + ')')
+        return {**request, 'host': hosts.pop(), 'tasks': [{k: v for k, v in task.items() if k != 'host'} for task in tasks]}
+
+    def request_project(self, cwd, request):
+        """The project a request names by its own cwd (a linked worktree maps to its primary), else the chair's.
+
+        Also returns the cwd that maps to no registered project, which a remote placement must refuse.
+        """
+        chair = self.h.project_identity(cwd)
+        if not (isinstance(request.get('cwd'), str) and request['cwd']):
+            return chair, None
+        path = Path(request['cwd']).expanduser()
+        path = path if path.is_absolute() else Path(cwd or Path.cwd()) / path
+        try:
+            named = self.h.project_identity(path)
+        except self.h.HostError:
+            # Outside home: path rewriting refuses it with invalid_remote_path.
+            return chair, None
+        if named in self.config.projects:
+            return named, None
+        return chair, None if named == chair else path
+
     def placed_call(self, action, cwd, request):
         if os.environ.get('PROVENANT_HOST_LOCAL_ONLY') == '1':
             return {'local': True}
+        request = self.lift_task_hosts(request)
         def local_result(value):
             if action == 'fetch':
                 raise self.h.HostError('remote_host_required', 'Fetch requires a remote writer identifier qualified with its host')
@@ -641,7 +672,7 @@ class LaneFederation:
                 normalized['ids'] = ids
             return local_result({'local': True, 'input': {key: value for key, value in normalized.items() if key not in {'host', 'operation_id'}}})
         try:
-            project = self.h.project_identity(cwd)
+            project, unmapped = self.request_project(cwd, request)
         except self.h.HostError as exc:
             selectors = [request.get(key) for key in ('id', 'resume', 'handoff', 'session', 'task_id')] + (request.get('ids') or [])
             if (exc.code != 'invalid_project_path' or request.get('host') not in {None, self.config.local_host}
@@ -700,6 +731,9 @@ class LaneFederation:
                 for key, value in request.items() if key not in {'host', 'operation_id'}}})
         if host not in self.config.peers:
             raise self.h.HostError('unknown_host', 'Host is not configured')
+        if unmapped:
+            raise self.h.HostError('invalid_project_path',
+                f'cwd {unmapped} is not inside a project registered in hosts.json; cannot place it on {host}')
         clean = {key: value.rsplit('@', 1)[0] if key in {'id', 'resume', 'handoff', 'session'} and isinstance(value, str) and '@' in value else value
             for key, value in request.items() if key != 'host'}
         identifier = self.operation_id(clean)
