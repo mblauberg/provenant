@@ -7,7 +7,7 @@ the ledger owner stays the single source of row selection and cost rules.
 from __future__ import annotations
 
 from collections import Counter
-from datetime import UTC, timedelta
+from datetime import timedelta
 import json
 import math
 import os
@@ -49,10 +49,6 @@ def fit(lines, budget=BUDGET):
             kept.append(line)
             used += size
     return '\n'.join([*kept, f'{len(lines) - len(kept)} lines omitted to fit 4 KB; use --json'])
-
-
-def iso(stamp):
-    return stamp.astimezone(UTC).isoformat().replace('+00:00', 'Z')
 
 
 def window(value):
@@ -100,8 +96,8 @@ def sync(telemetry, db):
     state = json.loads(row[0]) if row else {}
     if not state.get('pending'):
         through = state.get('through')
-        low = iso(telemetry.since_time(through) - SYNC_OVERLAP) if through else SYNC_FLOOR
-        high = iso(telemetry.since_time(telemetry.now()).replace(microsecond=0))
+        low = telemetry.iso(telemetry.since_time(through) - SYNC_OVERLAP) if through else SYNC_FLOOR
+        high = telemetry.iso(telemetry.since_time(telemetry.now()).replace(microsecond=0))
         state = {**state, 'through': through, 'sweep': high, 'pending': [[low, high]]}
     state.setdefault('incomplete', [])
     added = queries = 0
@@ -118,7 +114,7 @@ def sync(telemetry, db):
         elif last - first >= timedelta(seconds=1):
             middle = split(telemetry, rows, first, last)
             # Merge times have one-second precision, so the halves need not share a second.
-            state['pending'] += [[low, iso(middle - timedelta(seconds=1))], [iso(middle), high]]  # newer first
+            state['pending'] += [[low, telemetry.iso(middle - timedelta(seconds=1))], [telemetry.iso(middle), high]]  # newer first
         elif limit < SEARCH_LIMIT:
             state['pending'].append([low, high, SEARCH_LIMIT])  # a single second: read deeper
         elif [low, high] not in state['incomplete']:
@@ -155,7 +151,7 @@ def upsert(telemetry, db, rows):
                    'merge_commit=excluded.merge_commit, merged_at=excluded.merged_at, title=excluded.title, '
                    'labels=excluded.labels',
                    (f"pr:{row['number']}", 'pr', row['number'], (row.get('mergeCommit') or {}).get('oid'),
-                    iso(telemetry.since_time(row['mergedAt'])), row.get('title'), json.dumps(labels),
+                    telemetry.iso(telemetry.since_time(row['mergedAt'])), row.get('title'), json.dumps(labels),
                     telemetry.now()))
     return added
 
@@ -164,7 +160,7 @@ def add(telemetry, db, label, at):
     if not label or not label.strip():
         raise ChangeError('--add needs a non-empty label')
     try:
-        stamp = iso(telemetry.since_time(at))
+        stamp = telemetry.iso(telemetry.since_time(at))
     except ValueError:
         raise ChangeError(f'--at must be an ISO date or timestamp, got {at!r}') from None
     change_id = 'manual:' + telemetry.identity(label, stamp)[:16]
@@ -213,7 +209,7 @@ def pivot(telemetry, db, ref):
 
 def side(telemetry, db, start, end):
     """Metrics for [start, end) from the ledger's own stats report."""
-    report = telemetry.stats(db, iso(start), until=iso(end))
+    report = telemetry.stats(db, telemetry.iso(start), until=telemetry.iso(end))
     lane = (report['lane_totals'] or [{}])[0]
     usage = (report['usage_totals'] or [{}])[0]
     lanes, rows = lane.get('lanes', 0), usage.get('rows', 0)
@@ -226,7 +222,7 @@ def side(telemetry, db, start, end):
                'latency_p50_s': lane.get('latency_samples', 0),
                'cache_read_share': usage.get('cache_share_rows', 0),
                'cost_usd_per_day': priced, 'limit_events_per_day': rows}
-    return {'start': iso(start), 'end': iso(end), 'lanes': lanes, 'usage_rows': rows, 'samples': samples,
+    return {'start': telemetry.iso(start), 'end': telemetry.iso(end), 'lanes': lanes, 'usage_rows': rows, 'samples': samples,
             'inconclusive': lanes < MIN_SAMPLE,
             'success_rate': lane.get('success_rate'),
             'retries_per_lane': round(lane['retries'] / lanes, 3) if lanes else None,
@@ -273,8 +269,8 @@ def compare_at(telemetry, db, change, at, span=DEFAULT_WINDOW, *, now=None):
     current = now or telemetry.since_time(telemetry.now()).replace(microsecond=0)
     before = side(telemetry, db, at - width, at)
     after = side(telemetry, db, at, max(at, min(at + width, current)))
-    return {'schema': 'provenant.telemetry.compare.v1', 'ref': reference(change) if change else iso(at),
-            'change': change, 'pivot': iso(at), 'window': span, 'min_sample': MIN_SAMPLE,
+    return {'schema': 'provenant.telemetry.compare.v1', 'ref': reference(change) if change else telemetry.iso(at),
+            'change': change, 'pivot': telemetry.iso(at), 'window': span, 'min_sample': MIN_SAMPLE,
             'before': before, 'after': after,
             'metrics': [{'metric': name, 'before': before[name], 'after': after[name],
                          'n_before': before['samples'][name], 'n_after': after['samples'][name],
@@ -338,21 +334,21 @@ def retro(telemetry, db, since=None, span=DEFAULT_WINDOW, *, now=None):
     current = now or telemetry.since_time(telemetry.now()).replace(microsecond=0)
     start = telemetry.since_time(since) if since else current - timedelta(days=7)
     overall = side(telemetry, db, start, current)
-    report = telemetry.stats(db, iso(start))
+    report = telemetry.stats(db, telemetry.iso(start))
     errors = Counter()
     for row in report['attempts']:
         if row['error_class']:
             errors[row['error_class']] += row['attempts']
-    marked = changes(db, iso(start))
-    return {'schema': 'provenant.telemetry.retro.v1', 'since': iso(start), 'until': iso(current),
+    marked = changes(db, telemetry.iso(start))
+    return {'schema': 'provenant.telemetry.retro.v1', 'since': telemetry.iso(start), 'until': telemetry.iso(current),
             'window': span, 'overall': overall,
             'lanes_input_required': sum(row['lanes'] for row in report['lanes'] if row['status'] == 'input_required'),
             'changes': [{**change, 'compare': compare_at(telemetry, db, change, telemetry.since_time(change['merged_at']),
                                                          span, now=current)} for change in marked],
             'top_error_classes': dict(errors.most_common(5)),
-            'attention': attention(db, iso(start)),
+            'attention': attention(db, telemetry.iso(start)),
             'events_by_kind': dict(db.execute('SELECT kind, COUNT(*) FROM events WHERE ts >= ? '
-                                              'GROUP BY kind ORDER BY COUNT(*) DESC, kind', (iso(start),)))}
+                                              'GROUP BY kind ORDER BY COUNT(*) DESC, kind', (telemetry.iso(start),)))}
 
 
 def render_retro(telemetry, report, limit):

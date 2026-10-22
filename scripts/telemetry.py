@@ -25,8 +25,13 @@ import sys
 SOURCES = ('fabric', 'route_health', 'cooldowns', 'claude', 'codex', 'opencode', 'otel')
 
 
+def iso(moment):
+    """A moment as ISO 8601 UTC with a Z suffix."""
+    return moment.astimezone(UTC).isoformat().replace('+00:00', 'Z')
+
+
 def now():
-    return datetime.now(UTC).isoformat().replace('+00:00', 'Z')
+    return iso(datetime.now(UTC))
 
 
 def state_root():
@@ -411,7 +416,7 @@ def codex_record(db, row, state, path, offset, account=None, owner=None):
             if isinstance(value, dict) and number(value.get('used_percent')) is not None:
                 reset_at = value.get('resets_at')
                 if isinstance(reset_at, (int, float)):
-                    reset_at = datetime.fromtimestamp(reset_at, UTC).isoformat().replace('+00:00', 'Z')
+                    reset_at = iso(datetime.fromtimestamp(reset_at, UTC))
                 observation(db, 'codex', origin_path=str(path), provider='openai', adapter='codex', model=state.get('model'),
                             account=meta['account'], session=state.get('session'),
                             timestamp=timestamp, window=window, used_percent=value['used_percent'],
@@ -439,7 +444,7 @@ def otel_attributes(items):
 
 def otel_stamp(nanos, fallback):
     try:
-        return datetime.fromtimestamp(int(nanos) / 1e9, UTC).isoformat().replace('+00:00', 'Z')
+        return iso(datetime.fromtimestamp(int(nanos) / 1e9, UTC))
     except (TypeError, ValueError, OverflowError, OSError):
         return fallback
 
@@ -851,7 +856,7 @@ def ingest_opencode(db, path, account=None, owner=None, inode=None):
                 usage = row.get('tokens') or {}
                 cache = usage.get('cache') or {}
                 stamp = (row.get('time') or {}).get('created') or created
-                timestamp = datetime.fromtimestamp(stamp / 1000, UTC).isoformat().replace('+00:00', 'Z')
+                timestamp = iso(datetime.fromtimestamp(stamp / 1000, UTC))
                 put_usage(db, 'opencode', message_id, origin_path=path, owner=owner, session=session, adapter='opencode',
                           provider=provider, model=model, timestamp=timestamp, repository=cwd or directory,
                           account=account or row.get('account'), input_tokens=number(usage.get('input')),

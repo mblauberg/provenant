@@ -176,7 +176,7 @@ def _time(value):
     return moment if moment.tzinfo else moment.replace(tzinfo=UTC)
 
 
-def _iso(moment):
+def iso(moment):
     return moment.astimezone(UTC).isoformat().replace('+00:00', 'Z') if moment else None
 
 
@@ -264,7 +264,7 @@ def plan(*, provider, account_id, snapshot, now, config, trigger='timer', power=
     if attempted is None:
         next_due, reason = now, 'first_fetch'
     else:
-        next_due = attempted + timedelta(seconds=ttl * (1 + jitter(f'{account_id}|{_iso(attempted)}',
+        next_due = attempted + timedelta(seconds=ttl * (1 + jitter(f'{account_id}|{iso(attempted)}',
                                                                    config['jitter_fraction'])))
         exhausted = [_time(row.get('reset_at')) for row in rows if row['used_percent'] >= 100]
         if exhausted and all(reset and reset > now for reset in exhausted):
@@ -295,8 +295,8 @@ def plan(*, provider, account_id, snapshot, now, config, trigger='timer', power=
         'event': timer_due or age >= max(config['min_interval_seconds'], config['event_debounce_seconds']),
         'wake': timer_due or age >= config['min_interval_seconds'],
     }.get(trigger, False)
-    block = {'next_due_at': _iso(next_due), 'reason': reason, 'ttl_seconds': round(ttl),
-             'trigger': state.get('trigger'), 'failures': failures, 'backoff_until': _iso(backoff),
+    block = {'next_due_at': iso(next_due), 'reason': reason, 'ttl_seconds': round(ttl),
+             'trigger': state.get('trigger'), 'failures': failures, 'backoff_until': iso(backoff),
              'error_kind': kind if failures else None, 'last_duration_ms': state.get('last_duration_ms'),
              'source_kind': state.get('source_kind') or ('fetch' if attempted else None)}
     if notes:

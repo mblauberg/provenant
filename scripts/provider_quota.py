@@ -182,8 +182,7 @@ def utcnow():
     return datetime.now(UTC)
 
 
-def iso(moment):
-    return moment.astimezone(UTC).isoformat().replace('+00:00', 'Z') if moment else None
+iso = schedule.iso
 
 
 def number(value):
