@@ -900,11 +900,16 @@ def _kiro_probe_metadata(adapter: str) -> dict[str, Any]:
 
 
 def _cooling(adapter: str, model: str, cooldowns: dict[str, Any], catalog: dict[str, Any]) -> str:
-    for key in (f"{adapter}/{_canonical_model(adapter, model, catalog)}", f"{adapter}/*"):
+    canonical = _canonical_model(adapter, model, catalog)
+    for key in (f"{adapter}/{canonical}", f"{adapter}/*"):
         item = cooldowns.get(key)
         if not isinstance(item, dict):
             continue
         until = item.get("cooling_until")
+        covers = item.get("covers")
+        # A plan's quota cooldown covers only the models billed to that plan.
+        if covers and not any(canonical.startswith(prefix) for prefix in covers):
+            continue
         try:
             if datetime.fromisoformat(str(until).replace("Z", "+00:00")) > datetime.now(timezone.utc):
                 return str(until)

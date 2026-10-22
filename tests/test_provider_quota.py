@@ -986,6 +986,12 @@ def test_early_headroom_clears_stale_usage_cooldowns_after_reset(quota):
     assert quota.apply_to_cooldowns(cooldowns, NOW) == {}
 
 
+def test_exhausted_opencode_go_window_cools_only_go_models_not_free_zen_models(quota, tmp_path):
+    snapshot(quota, 'opencode', [window(100, WEEK, timedelta(days=3), 'seven_day')])
+    record = quota.apply_to_cooldowns({}, NOW)['opencode/*']
+    assert record['status'] == 'quota_exhausted' and record['covers'] == ['opencode-go/']
+
+
 def test_both_claude_accounts_exhausted_block_routing_until_reset_then_lift(quota, tmp_path):
     reset = datetime(2026, 10, 28, 22, 0, tzinfo=UTC)  # Thursday 08:00 AEST
     configure(tmp_path, {'accounts': {'claude': {'max-a': {'identity_dir': '~/.claude'},
