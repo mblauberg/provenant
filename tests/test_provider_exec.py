@@ -7735,7 +7735,9 @@ def test_explicit_model_runs_despite_a_cooldown_with_a_warning(tmp_path):
     (tmp_path / "cooldowns.json").write_text(json.dumps({"schema": "fabric.cooldowns.v1", "cooldowns": {
         "claude/*": {"adapter": "claude", "model": "*", "account": None, "status": "usage_limited",
                      "cooling_until": until, "source_run": "r", "recorded_at": until, "signature": "quota_exhausted"}}}))
-    env = {**os.environ, "PROVENANT_NO_OS_CONFINEMENT": "1", "PATH": str(bindir) + ":" + os.environ["PATH"],
+    # An account-less cooldown belongs to the default identity, so the lane must not select another one.
+    env = {**{k: v for k, v in os.environ.items() if k != "CLAUDE_CONFIG_DIR"},
+           "PROVENANT_NO_OS_CONFINEMENT": "1", "PATH": str(bindir) + ":" + os.environ["PATH"],
            "AGENT_FABRIC_PRODUCT_ROOT": str(ROOT), "AGENT_FABRIC_INSTANCE_ROOT": str(ROOT),
            "FABRIC_COOLDOWNS_PATH": str(tmp_path / "cooldowns.json")}
     run = Path(subprocess.check_output([str(SCRIPTS / "run_dir_init.sh"), "--kind", "dispatch"],
