@@ -73,11 +73,12 @@ The next dispatch reaps a run only when its host is gone and its owner or
 provider still runs: an owner that exited and left its provider behind, or a
 run whose MCP host was killed with SIGKILL.
 
-Eighteen tools are registered by default:
+Nineteen tools are registered by default:
 
 | Tool | Purpose |
 | --- | --- |
 | `fabric_dispatch` | One prompt, `tasks[]`, `resume`, `handoff` or a named `session` |
+| `fabric_graph` | `action: run`, `status`, `cancel` or `resume` a plan graph of dispatch nodes |
 | `fabric_session` | `action: inspect`, `list` or `forget` a named session |
 | `fabric_status` | Read run/task/batch IDs; bounded wait for `any` or `all` |
 | `fabric_runs` | Versioned run and lane list with root-relative paths |
@@ -623,6 +624,37 @@ command waits at most two minutes for Git; its persisted hold lasts another
 thirty seconds. A push orphaned by a crash is fenced by the remote SHA, not by
 the hold. If the push succeeds but release fails, it reports `pushed` with a
 `release_warning`. Renew or release an aborted lease as appropriate.
+
+## Plan graphs
+
+`provenant graph run --file plan.json` (MCP `fabric_graph` with `action: run`)
+validates a JSON plan graph, stores it, starts one detached owner process for
+it and returns a digest at once. Each node is an ordinary dispatch made with
+the caller's identity: `id`, `route` (`adapter` with `model` or `alias`),
+`brief` (`prompt` or `prompt_file`), and optionally `tier`, `depends_on`,
+`inputs` (`{from, part: "result"}` from a dependency), `authority`, `cwd`,
+`worktree` (a key of the document's `worktrees`) and `gate: {fast: [[argv]]}`.
+Validation is strict and runs before anything starts: unknown fields, cycles,
+an input that is not a dependency, an unknown route, authority wider than the
+document's, a writer outside a linked worktree, unordered writers sharing one,
+a gate argv missing from `limits.gate_allowlist`, or a non-confidential node
+that consumes confidential output (`confidentiality_downgrade`) each reject
+the graph with a `node X: error · fix: ...` line.
+
+The owner launches ready nodes by height, then tier, within the graph's
+`max_width` and the per-pool caps in `config/graph-defaults.json`, counted
+transactionally across graphs. A failed node blocks its descendants while
+independent nodes continue; the chair hears about failures and the graph's end
+through Fabric messages, never by polling. Each attempt writes
+`.agent-run/graphs/<id>/r<rev>/<node>/a<n>/receipt.json`
+(`provenant.graph-node-receipt.v1`), which names its dispatch by run and task
+id. Launched runs carry a `KEEP` pin until the graph ends. If the owner dies,
+`graph status`, `lanes --wait` and the digest say so, and `graph resume ID`
+starts a new owner that adopts the running lanes instead of redispatching them.
+`graph cancel ID [--node N]` stops lanes and gate process groups and verifies
+them gone before releasing a writer's worktree reservation; `dispatch_run.py`
+refuses any other writer into a reserved worktree. Slice 1 has no repair,
+escalation, revision, templates or restarts.
 
 ## Run storage and boundaries
 
