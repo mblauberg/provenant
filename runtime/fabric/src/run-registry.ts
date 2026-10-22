@@ -188,7 +188,7 @@ function runDirectoryNames(workspace: string): string[] {
 
 /** One Python pass over the selected active runs; the writer owns all receipt writes. */
 export async function reapAttemptRuns(workspace: string, runDirs?: string[]): Promise<string[]> {
-  const candidates = [...new Set(runDirs ?? runDirectoryNames(workspace).map((name) => join(runRoot(workspace), name)))];
+  const candidates = [...new Set(runDirs ?? (() => { const root = runRoot(workspace); return runDirectoryNames(workspace).map((name) => join(root, name)); })())];
   const active = candidates.filter((dir) => readJson(join(dir, "RUN_RECEIPT.json"))?.status === "active" &&
     !runOwners(readOwnerRecord(dir), readJson(join(dir, "dispatch-status.json")))
       .some((owner) => observedAlive(owner.pid, owner.startedAt)));
@@ -356,8 +356,9 @@ export async function terminateRecordedRun(
  * owner. Its record remains until that owner observes the processes have stopped.
  */
 export async function reapOrphanedRuns(workspace: string): Promise<TerminationOutcome[]> {
+  const root = runRoot(workspace);
   for (const name of runDirectoryNames(workspace)) {
-    const dir = join(runRoot(workspace), name),
+    const dir = join(root, name),
       path = join(dir, "RUN_RECEIPT.json");
     const receipt = readJson(path);
     if (receipt?.status !== "active" || statSync(path).mtimeMs > Date.now() - 48 * 3600000) continue;
@@ -641,7 +642,7 @@ async function legacyStatus(
   const deadline = Date.now() + waitSeconds * 1000;
   while (true) {
     signal?.throwIfAborted();
-    const candidates = (onlyRunDir ? [onlyRunDir] : runDirectoryNames(workspace).map((name) => join(runRoot(workspace), name)))
+    const candidates = (onlyRunDir ? [onlyRunDir] : (() => { const base = runRoot(workspace); return runDirectoryNames(workspace).map((name) => join(base, name)); })())
       .flatMap((runDir) => {
         try {
           const metadata = lstatSync(runDir);

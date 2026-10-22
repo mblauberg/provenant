@@ -370,6 +370,16 @@ def test_overlay_with_a_retired_tier_name_fails_fast(overlay, message):
         pools.reject_renamed(overlay)
 
 
+def test_routes_command_rejects_retired_tier_in_overlay(tmp_path):
+    env = overlay_environment(tmp_path, {"routes": {
+        "strong": [{"model": "codex/gpt-6.1-sol"}],
+    }})
+    run = model_route(env, "routes")
+    assert run.returncode == 2
+    assert "model-route:" in run.stderr
+    assert "overlay" in run.stderr
+
+
 def test_overlay_may_name_adapter_aliases_by_tier(tmp_path):
     overlay = {"task_class_routes": {"implementation": {"alias": "senior", "effort": "high"}},
                "families": {"openai": {"aliases": {"principal": ["gpt-6-astra"], "senior": ["gpt-6.1-sol"]}}},
