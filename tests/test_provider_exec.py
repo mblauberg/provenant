@@ -2176,27 +2176,113 @@ def test_daily_catalogue_notes_are_not_promoted_back_to_dispatch_warnings(tmp_pa
         assert note in plan['route']['notes']
 
 
-@pytest.mark.parametrize(
-    "adapter", ["claude", "codex", "opencode", "cursor", "agy", "kiro", "copilot"]
-)
-@pytest.mark.parametrize(
-    "text,status",
-    [
-        ("You've hit your usage limit", "usage_limited"),
-        ("Individual quota reached", "usage_limited"),
-        ("rate limit exceeded; HTTP 429", "rate_limited"),
-        ("Login expired; not logged in", "auth_required"),
-        ("model not found", "model_unavailable"),
-        ('error: invalid model selection (--model "gemini-3.8-pro" --effort "high"): --effort is not supported for model "gemini-3.8-pro"', "rejected"),
-        ("invalid model selection; quota exceeded", "rejected"),
-        ("permission denied", "permission_blocked"),
-    ],
-)
-def test_failure_signatures(adapter, text, status):
-    parsed = supervisor().parse_output(adapter, "", text, 1)
-    assert parsed["status"] == status
-    assert parsed["signature"]
+# Expected outcomes are independent of the production rule registry.
+_CLASSIFIER_DIAGNOSTICS = [
+    ("You've hit your usage limit", "usage_limited", "usage_limited", "usage_limited"),
+    ("Individual quota reached", "usage_limited", "usage_limited", "usage_limited"),
+    ("rate limit exceeded; HTTP 429", "rate_limited", "rate_limited", "rate_limited"),
+    ("Login expired; not logged in", "auth_required", "auth_required", "auth"),
+    ("model not found", "model_unavailable", "model_unavailable", "model_unavailable"),
+    ('error: invalid model selection (--model "gemini-3.8-pro" --effort "high"): --effort is not supported for model "gemini-3.8-pro"', "rejected", "invalid_input", "provider_error"),
+    ("invalid model selection; quota exceeded", "rejected", "invalid_input", "provider_error"),
+    ("permission denied", "permission_blocked", "permission_blocked", "sandbox_denied"),
+    ("permission denied; HTTP 429", "permission_blocked", "permission_blocked", "sandbox_denied"),
+    ("HTTP 403 forbidden; HTTP 429", "rate_limited", "rate_limited", "rate_limited"),
+    ("HTTP 403 forbidden", "permission_blocked", "permission_blocked", "sandbox_denied"),
+    ("You've hit your weekly limit", "usage_limited", "usage_limited", "usage_limited"),
+    ("529 overloaded", "rate_limited", "rate_limited", "rate_limited"),
+]
+
+
+_CLASSIFIER_QUOTA_CASES = [
+    *[(adapter, f"429 RESOURCE_EXHAUSTED: Quota exceeded for requests per {window}", status)
+      for adapter in ("agy", "codex", "opencode", "claude")
+      for window, status in [("day", "usage_limited"), ("minute", "rate_limited"), ("second", "rate_limited")]],
+    *[("agy", message if "RESOURCE_EXHAUSTED" in message else "429 RESOURCE_EXHAUSTED: " + message, status)
+      for message, status in [
+          ("Quota exceeded: requests per day. retry in 2 per minute docs", "usage_limited"),
+          ("Quota exceeded: requests per hour. See per minute docs", "usage_limited"),
+          ("Quota exceeded for GenerateRequestsPerMinutePerProjectPerModel", "rate_limited"),
+          ("Quota exceeded for GenerateRequestsPerDayPerProjectPerModel", "usage_limited"),
+          ("Quota exceeded for RequestsPerHour and RequestsPerMinute", "usage_limited"),
+          ('{"error":{"message":"Quota exceeded for requests per minute"},"docs":"limits per day"}', "rate_limited"),
+          ("RESOURCE_EXHAUSTED: limit: 60 per minute", "rate_limited"),
+          ('RESOURCE_EXHAUSTED: Quota metric "generativelanguage.googleapis.com/generate_requests" per minute', "rate_limited"),
+          ("RESOURCE_EXHAUSTED: limit: 60 per day", "usage_limited"),
+      ]],
+]
+
+
+@pytest.mark.parametrize("adapter,stdout,stderr,exit_code,status,signature,expected_class", [
+    *[(adapter, "", text, 1, status, signature, expected_class)
+      for adapter in ("claude", "codex", "opencode", "cursor", "agy", "kiro", "copilot")
+      for text, status, signature, expected_class in _CLASSIFIER_DIAGNOSTICS],
+    *[(adapter, "", message, 1, status, status, status)
+      for adapter, message, status in _CLASSIFIER_QUOTA_CASES],
+    # Applicability and adapter-specific precedence are part of the contract.
+    ("codex", "", "try again at 2 AM; permission denied", 1, "usage_limited", "usage_limited", "usage_limited"),
+    ("agy", "", "Resets in 167h; permission denied", 1, "usage_limited", "usage_limited", "usage_limited"),
+    ("agy", "", "Resets in 167h", 1, "usage_limited", "usage_limited", "usage_limited"),
+    ("claude", "", "try again at 2 AM", 1, "failed", None, "provider_error"),
+    ("cursor", "", "Login expired; permission denied", 1, "auth_required", "auth_required", "auth"),
+    ("opencode", "", "EPERM; Variant unavailable for opencode/x: high", 1, "permission_blocked", "permission_blocked", "sandbox_denied"),
+    ("opencode", "", "Variant unavailable for opencode/x: high; provider.no-route", 1, "rejected", "invalid_input", "provider_error"),
+    *[("opencode", json.dumps({"type": "error", "sessionID": "ses_1", "error": {"type": "provider.no-route", "message": message}}), "", 1, status, signature, expected_class)
+      for message, status, signature, expected_class in [
+          ("Model unavailable: opencode/nope", "model_unavailable", "model_unavailable", "model_unavailable"),
+          ("Invalid model reference: bogus", "model_unavailable", "model_unavailable", "model_unavailable"),
+          ("Variant unavailable for opencode/x: bogusvar", "rejected", "invalid_input", "provider_error"),
+      ]],
+    ("opencode", json.dumps({"type": "error", "sessionID": "ses_1", "error": {
+        "type": "provider.quota", "message": "Rate limit exceeded. Please try again later.", "status": 429,
+        "response": {"body": json.dumps({"type": "error", "error": {"type": "FreeUsageLimitError"}})}}}),
+        "", 1, "usage_limited", "usage_limited", "usage_limited"),
+    ("opencode", "Explain the rate limit algorithm", "", 1, "failed", None, "provider_error"),
+    *[(adapter, '{"type":"result","result":"DONE"}', "ls: /root: Permission denied", 0, "ok", None, "none")
+      for adapter in ("claude", "codex", "opencode")],
+    *[(adapter, json.dumps({"type": "text", "text": message}), "", 0, "ok", None, "none")
+      for adapter, message in [("opencode", "Model at capacity; provider overload"),
+                               ("claude", "Discuss the weekly usage limit and quota exceeded errors")]],
+])
+def test_classifier_contract(adapter, stdout, stderr, exit_code, status, signature, expected_class):
+    parsed = supervisor().parse_output(adapter, stdout, stderr, exit_code)
+    assert (parsed["status"], parsed["signature"]) == (status, signature)
+    assert supervisor().error_class(parsed["status"], parsed["signature"]) == expected_class
     assert len(parsed["excerpt"]) <= 200
+    if "RESOURCE_EXHAUSTED" in stderr:
+        assert stderr in parsed["excerpt"]
+
+
+@pytest.mark.parametrize("adapter,shape", [
+    ("agy", "fixture"), ("claude", "fixture"), ("codex", "fixture"),
+    ("opencode", "event"), ("opencode", "stderr"),
+])
+@pytest.mark.parametrize("message", ["Model at capacity", "Provider overload"])
+def test_capacity_and_overload_are_retryable_provider_failures(tmp_path, adapter, shape, message):
+    if shape == "fixture":
+        fixture = json.loads((ROOT / f"tests/fixtures/fabric-v1/provider-{adapter}.json").read_text())
+        event = json.loads(fixture["stdout"])
+        if adapter == "agy":
+            event.update(status="ERROR", response="", error=message)
+        elif adapter == "claude":
+            event["result"] = message
+        else:
+            event["error"]["message"] = message
+        stdout, stderr, exit_code = json.dumps(event), "", fixture["exit"]
+    elif shape == "event":
+        stdout = json.dumps({"type": "error", "error": {"type": "provider.error", "message": message}})
+        stderr, exit_code = "", 0
+    else:
+        # OpenCode can exit 1 after emitting text. A capacity diagnostic must
+        # defeat its otherwise usable-output exception.
+        stdout = json.dumps({"type": "text", "part": {"text": "Working"}})
+        stderr, exit_code = message, 1
+    code = f"import sys; print({stdout!r}); print({stderr!r}, file=sys.stderr); sys.exit({exit_code})"
+    record = supervisor().execute(fixture_plan(tmp_path, code, adapter), tmp_path / "result.md")
+    assert record["status"] == "rate_limited"
+    assert record["retryable"] is True
+    assert record["error_class"] == "rate_limited"
+    assert record["evidence"]["signature"] == "rate_limited"
 
 
 def test_invalid_effort_is_rejected_with_cli_fix_and_no_cooldown(tmp_path):
@@ -2607,6 +2693,14 @@ def test_receipt_usage_source_tracks_token_evidence_not_context_estimates(tmp_pa
 @pytest.mark.parametrize("status,signature,expected", [
     ("ok", None, "none"), ("succeeded", None, "none"), ("input_required", None, "none"),
     ("ok", "rate_limited", "none"),
+    ("permission_blocked", "rate_limited", "sandbox_denied"),
+    ("rate_limited", "auth_expired", "rate_limited"),
+    ("lost", "empty_output", "provider_error"),
+    ("failed", "ok", "provider_error"),
+    ("failed", "provider_transport", "transient"),
+    ("failed", "fabric_mcp_unavailable", "fabric_mcp_unavailable"),
+    ("failed", "pinned_model_substitution", "model_unavailable"),
+    ("future_status", "ok", "unknown"),
     ("rate_limited", None, "rate_limited"), ("usage_limited", "quota_exhausted", "usage_limited"),
     ("auth_required", "auth_expired", "auth"), ("model_unavailable", None, "model_unavailable"),
     ("timed_out", None, "timeout"), ("startup_timeout", "startup_watchdog", "timeout"),
@@ -3732,49 +3826,18 @@ def test_opencode_writer_preflights_the_configured_fabric_command(tmp_path, monk
         assert "tsx loader not found" in json.dumps(record)
 
 
-def test_opencode_free_tier_refusal_is_model_unavailable(tmp_path):
-    code = "import sys; print(\"403 FreeTierError: OpenCode's free tier can only be used from within OpenCode\", file=sys.stderr); sys.exit(1)"
-    record = supervisor().execute(
-        fixture_plan(tmp_path, code, "opencode"), tmp_path / "result.md"
-    )
+@pytest.mark.parametrize("shape", ["stderr", "long_stderr", "structured"])
+def test_opencode_free_tier_refusal_is_model_unavailable(tmp_path, shape):
+    message = "403 FreeTierError: OpenCode's free tier can only be used from within OpenCode"
+    if shape != "stderr":
+        message = "diagnostic preamble " * 20 + message
+    if shape == "structured":
+        code = f"import sys; print({json.dumps({'type': 'error', 'error': message})!r}); sys.exit(1)"
+    else:
+        code = f"import sys; print({message!r}, file=sys.stderr); sys.exit(1)"
+    record = supervisor().execute(fixture_plan(tmp_path, code, "opencode"), tmp_path / "result.md")
     assert record["status"] == "model_unavailable"
-    assert record["fix"] == (
-        "OpenCode rejected the free-tier request; use a paid opencode-go model or report this"
-    )
-
-
-def test_opencode_free_tier_fix_uses_failure_text_beyond_excerpt_limit(tmp_path):
-    preamble = "diagnostic preamble " * 20
-    code = (
-        "import sys; print(" + repr(preamble +
-        "403 FreeTierError: OpenCode's free tier can only be used from within OpenCode") +
-        ", file=sys.stderr); sys.exit(1)"
-    )
-    record = supervisor().execute(
-        fixture_plan(tmp_path, code, "opencode"), tmp_path / "result.md"
-    )
-
-    assert record["status"] == "model_unavailable"
-    assert record["fix"] == (
-        "OpenCode rejected the free-tier request; use a paid opencode-go model or report this"
-    )
-
-
-def test_opencode_free_tier_fix_uses_structured_failure_text(tmp_path):
-    event = {
-        "type": "error",
-        "error": "diagnostic preamble " * 20
-        + "403 FreeTierError: OpenCode's free tier can only be used from within OpenCode",
-    }
-    code = "import json, sys; print(json.dumps(" + repr(event) + ")); sys.exit(1)"
-    record = supervisor().execute(
-        fixture_plan(tmp_path, code, "opencode"), tmp_path / "result.md"
-    )
-
-    assert record["status"] == "model_unavailable"
-    assert record["fix"] == (
-        "OpenCode rejected the free-tier request; use a paid opencode-go model or report this"
-    )
+    assert record["fix"] == "OpenCode rejected the free-tier request; use a paid opencode-go model or report this"
 
 
 @pytest.mark.skipif(sys.platform != "darwin", reason="Codex seatbelt is macOS-only")
@@ -3796,9 +3859,48 @@ def test_unknown_cpu_census_is_not_zero_cpu_progress(monkeypatch):
     assert mod._cpu_stamp(os.getpid()) is None
 
 
+@pytest.fixture
+def provider_clock(monkeypatch):
+    offset = [0.0]
+    monkeypatch.setattr(supervisor(), "time", SimpleNamespace(
+        monotonic=lambda: time.monotonic() + offset[0], sleep=time.sleep, time_ns=time.time_ns))
+
+    def advance(seconds):
+        offset[0] += seconds
+
+    return advance
+
+
+def _child_census_barrier(monkeypatch, pid_path, ready):
+    """Let the fixture exit only after its detached child is really tracked."""
+    original = supervisor()._Descendants.sample
+    trackers = []
+
+    def sampled(self, *args, **kwargs):
+        trackers[:] = [self]
+        rows = original(self, *args, **kwargs)
+        if pid_path.exists() and any(pid == int(pid_path.read_text()) for pid, _ in self.tracked):
+            ready.touch()
+        return rows
+
+    monkeypatch.setattr(supervisor()._Descendants, "sample", sampled)
+
+    def started(_process):
+        deadline = time.monotonic() + 5
+        while not pid_path.exists() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert pid_path.exists(), "provider did not publish its child PID"
+        trackers[0].sample()
+        assert ready.exists(), "provider child was not tracked"
+
+    return started
+
+
 @pytest.mark.parametrize("stop", ["cancelled", "timed_out", "normal", "stalled"])
-def test_new_session_grandchild_does_not_outlive_attempt(tmp_path, stop):
+def test_new_session_grandchild_does_not_outlive_attempt(tmp_path, monkeypatch, stop):
     pid_path = tmp_path / "grandchild.pid"
+    ready = tmp_path / "child-tracked"
+    on_start = _child_census_barrier(monkeypatch, pid_path, ready)
     code = f"""import json, pathlib, subprocess, sys, time
 child = subprocess.Popen(
     [sys.executable, '-c', 'import time; time.sleep(60)'],
@@ -3809,7 +3911,8 @@ child = subprocess.Popen(
 )
 pathlib.Path({str(pid_path)!r}).write_text(str(child.pid))
 if {stop!r} == 'normal':
-    time.sleep(1.2)  # Observe ancestry before the provider exits and the child reparents.
+    while not pathlib.Path({str(ready)!r}).exists():
+        time.sleep(0.01)
     print(json.dumps({{'type': 'item.completed', 'item': {{'type': 'agent_message', 'text': 'DONE'}}}}), flush=True)
     print(json.dumps({{'type': 'turn.completed'}}), flush=True)
 else:
@@ -3823,7 +3926,6 @@ else:
     )
     if stop == "normal":
         plan["warnings"].append("route warning " + "x" * 240)
-    started = time.monotonic()
     unrelated = subprocess.Popen(
         [sys.executable, "-c", "import time; time.sleep(60)"],
         start_new_session=True,
@@ -3832,21 +3934,12 @@ else:
         stderr=subprocess.DEVNULL,
     )
     try:
-        def wait_for_pid_file(_process):
-            if stop != "timed_out":
-                return
-            deadline = time.monotonic() + 5
-            while not pid_path.exists() and time.monotonic() < deadline:
-                time.sleep(0.02)
-            assert pid_path.exists(), "provider did not publish its child PID"
-
         record = supervisor().execute(
             plan,
             tmp_path / "result.md",
-            on_start=wait_for_pid_file,
+            on_start=on_start,
             cancelled=lambda: stop == "cancelled"
-            and pid_path.exists()
-            and time.monotonic() - started >= 1.5,
+            and ready.exists(),
         )
         assert record["status"] == ("ok" if stop == "normal" else stop)
         assert pid_path.exists()
@@ -4064,8 +4157,9 @@ def test_linux_targeted_tree_census_does_not_warn_without_owner_row(monkeypatch)
     assert tracker.snapshot_unavailable is False
 
 
-def test_watchdog_census_runs_about_once_per_second(tmp_path, monkeypatch):
+def test_watchdog_census_runs_about_once_per_second(tmp_path, monkeypatch, provider_clock):
     module = supervisor()
+    ready = tmp_path / "census-complete"
     counts = []
     stopping = []
     original_sample = module._Descendants.sample
@@ -4073,7 +4167,9 @@ def test_watchdog_census_runs_about_once_per_second(tmp_path, monkeypatch):
 
     def counted(self, *args, **kwargs):
         if not stopping:
-            counts.append(time.monotonic())
+            counts.append(module.time.monotonic())
+            if len(counts) == 2:
+                ready.touch()
         return original_sample(self, *args, **kwargs)
 
     def stopped(self, *args, **kwargs):
@@ -4082,9 +4178,15 @@ def test_watchdog_census_runs_about_once_per_second(tmp_path, monkeypatch):
 
     monkeypatch.setattr(module._Descendants, "sample", counted)
     monkeypatch.setattr(module._Descendants, "stop", stopped)
-    plan = fixture_plan(tmp_path, "import time; time.sleep(1.35)", timeout_seconds=5)
-    module.execute(plan, tmp_path / "result.md")
-    assert 1 <= len(counts) <= 3
+    code = f"""import pathlib,time
+print('ready', flush=True)
+while not pathlib.Path({str(ready)!r}).exists():
+    time.sleep(0.01)
+"""
+    plan = fixture_plan(tmp_path, code, timeout_seconds=5)
+    module.execute(plan, tmp_path / "result.md", on_progress=lambda _: provider_clock(1.35))
+    assert len(counts) == 2
+    assert counts[1] - counts[0] >= 1
 
 
 def test_missing_census_still_kills_provider_group_after_leader_exit(tmp_path, monkeypatch):
@@ -4189,21 +4291,24 @@ def _write_fake_owner_record(module, run_dir, row, token):
 
 
 @pytest.mark.parametrize("terminal_event", [False, True])
-def test_forged_fabric_token_does_not_spare_command(tmp_path, terminal_event):
+def test_forged_fabric_token_does_not_spare_command(tmp_path, monkeypatch, terminal_event):
     pid_path = tmp_path / "forged.pid"
+    ready = tmp_path / "child-tracked"
+    on_start = _child_census_barrier(monkeypatch, pid_path, ready)
     code = f"""import json,os,pathlib,subprocess,time
 environment = dict(os.environ)
 environment.update(PROVENANT_RUN_TOKEN='x', PROVENANT_RUN_DIR={str(tmp_path / 'not-a-run')!r})
 child = subprocess.Popen(['sleep', '60'], start_new_session=True, env=environment,
     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 pathlib.Path({str(pid_path)!r}).write_text(str(child.pid))
+while not pathlib.Path({str(ready)!r}).exists():
+    time.sleep(0.01)
 if {terminal_event!r}:
     print(json.dumps({{'type':'item.completed','item':{{'type':'agent_message','text':'DONE'}}}}), flush=True)
     print(json.dumps({{'type':'turn.completed'}}), flush=True)
-time.sleep(1.2)
 """
     try:
-        record = supervisor().execute(fixture_plan(tmp_path, code), tmp_path / "result.md")
+        record = supervisor().execute(fixture_plan(tmp_path, code), tmp_path / "result.md", on_start=on_start)
         pid = int(pid_path.read_text())
         assert any(item["pid"] == pid for item in record["reaped"]), (
             record["reaped"], record.get("spared"), record["warnings"], _live_process(pid)
@@ -5072,15 +5177,29 @@ def test_failure_phrases_in_assistant_prose_are_not_live_errors(tmp_path, adapte
     assert supervisor().execute(plan, tmp_path / "result.md")["status"] == "ok"
 
 
-def test_provider_output_before_startup_window_keeps_running(tmp_path):
-    code = """import json,time
-print(json.dumps({'type':'thread.started','thread_id':'t1'}), flush=True)
-time.sleep(1.5)
-print(json.dumps({'type':'item.completed','item':{'type':'agent_message','text':'DONE'}}), flush=True)
-print(json.dumps({'type':'turn.completed'}), flush=True)
+def test_provider_output_before_startup_window_keeps_running(tmp_path, provider_clock):
+    ready = tmp_path / "startup-elapsed"
+    advanced = []
+
+    def progress(_timestamp):
+        if not advanced:
+            provider_clock(1.5)
+            advanced.append(True)
+
+    def release():
+        if advanced:
+            ready.touch()
+        return False
+
+    code = f"""import json,pathlib,time
+print(json.dumps({{'type':'thread.started','thread_id':'t1'}}), flush=True)
+while not pathlib.Path({str(ready)!r}).exists():
+    time.sleep(0.01)
+print(json.dumps({{'type':'item.completed','item':{{'type':'agent_message','text':'DONE'}}}}), flush=True)
+print(json.dumps({{'type':'turn.completed'}}), flush=True)
 """
     plan = fixture_plan(tmp_path, code, startup_seconds=0.6, idle_seconds=30, timeout_seconds=30)
-    record = supervisor().execute(plan, tmp_path / "result.md")
+    record = supervisor().execute(plan, tmp_path / "result.md", on_progress=progress, cancelled=release)
     assert record["status"] == "ok"
     assert (tmp_path / "result.md").read_text() == "DONE"
 
@@ -6287,17 +6406,6 @@ def test_opencode_v1_cli_is_refused_at_planning(tmp_path, monkeypatch):
     mod._OPENCODE_VERSION_CACHE.clear()
 
 
-@pytest.mark.parametrize("message,status,signature", [
-    ("Model unavailable: opencode/nope", "model_unavailable", "model_unavailable"),
-    ("Invalid model reference: bogus", "model_unavailable", "model_unavailable"),
-    ("Variant unavailable for opencode/x: bogusvar", "rejected", "invalid_input"),
-])
-def test_opencode_v2_error_events_are_typed(message, status, signature):
-    event = json.dumps({"type": "error", "sessionID": "ses_1", "error": {"type": "provider.no-route", "message": message}})
-    parsed = supervisor().parse_output("opencode", event + "\n", "", 1)
-    assert (parsed["status"], parsed["signature"]) == (status, signature)
-
-
 def test_opencode_bad_variant_fix_names_the_variant_to_drop():
     event = json.dumps({"type": "error", "error": {"type": "provider.no-route", "message": "Variant unavailable for opencode/x: high"}})
     fix = supervisor()._variant_fix(event)
@@ -6454,11 +6562,6 @@ def test_claude_plan_isolates_settings_and_mcp(tmp_path, monkeypatch, api_key):
     assert plan['argv'][plan['argv'].index('--tools') + 1] == 'Read,Grep,Glob'
     assert 'fixture-key' not in ' '.join(plan['argv'])
 
-@pytest.mark.parametrize('adapter', ['claude', 'codex', 'opencode'])
-def test_successful_answer_survives_tool_permission_diagnostic(adapter):
-    parsed = supervisor().parse_output(adapter, '{"type":"result","result":"DONE"}', 'ls: /root: Permission denied', 0)
-    assert parsed['status'] == 'ok'
-
 
 def test_question_example_in_middle_of_answer_does_not_suspend():
     parsed = supervisor().parse_output('claude', json.dumps({'type':'result','result':'Example:\n```\nQUESTION: Which?\n```\nEnd of explanation.'}))
@@ -6510,12 +6613,6 @@ def test_add_dirs_warns_and_drops_credential_stores(tmp_path, monkeypatch, direc
     assert str(target) not in plan['applied']['add_dirs']
     assert str(safe) in plan['applied']['add_dirs']
     assert any('credential' in warning for warning in plan['warnings'])
-
-
-def test_failure_classification_uses_diagnostics_not_answer_prose():
-    parsed = supervisor().parse_output('opencode', 'Explain the rate limit algorithm', '', 1)
-    assert parsed['status'] == 'failed'
-    assert supervisor().parse_output('claude', '', '529 overloaded', 1)['status'] == 'rate_limited'
 
 
 def test_kiro_tool_echo_does_not_override_observed_model():
@@ -7984,14 +8081,6 @@ def test_opencode_v2_structured_error_log_lines_are_fatal_and_info_is_not():
     assert re.match(quiet, "timestamp=x level=WARN message=y")
 
 
-def test_opencode_v2_free_quota_event_is_usage_limited():
-    event = {"type": "error", "sessionID": "ses_1", "error": {
-        "type": "provider.quota", "message": "Rate limit exceeded. Please try again later.", "status": 429,
-        "response": {"body": json.dumps({"type": "error", "error": {"type": "FreeUsageLimitError"}})}}}
-    parsed = supervisor().parse_output("opencode", json.dumps(event) + "\n", "", 1)
-    assert parsed["status"] == "usage_limited"
-
-
 def test_opencode_v1_cli_is_a_typed_refusal_on_the_provider_exec_cli(tmp_path, monkeypatch, capsys):
     mod = supervisor()
     monkeypatch.setattr(mod, "_opencode_version_error",
@@ -8578,31 +8667,6 @@ print(json.dumps({'type':'turn.completed'}), flush=True)
                           capture_output=True, text=True)
     assert record["status"] == "ok"
     assert record["provenance"]["harness_rev"] == (head.stdout.strip() if head.returncode == 0 else None)
-
-
-@pytest.mark.parametrize("adapter", ["agy", "codex", "opencode", "claude"])
-@pytest.mark.parametrize(("window", "status"), [("day", "usage_limited"), ("minute", "rate_limited"), ("second", "rate_limited")])
-def test_resource_exhausted_classifies_the_quota_window(adapter, window, status):
-    message = f"429 RESOURCE_EXHAUSTED: Quota exceeded for requests per {window}"
-    parsed = supervisor().parse_output(adapter, "", message, 1)
-    assert parsed["status"] == status
-    assert message in parsed["excerpt"]
-
-
-@pytest.mark.parametrize(("message", "status"), [
-    ("Quota exceeded: requests per day. retry in 2 per minute docs", "usage_limited"),
-    ("Quota exceeded: requests per hour. See per minute docs", "usage_limited"),
-    ("Quota exceeded for GenerateRequestsPerMinutePerProjectPerModel", "rate_limited"),
-    ("Quota exceeded for GenerateRequestsPerDayPerProjectPerModel", "usage_limited"),
-    ("Quota exceeded for RequestsPerHour and RequestsPerMinute", "usage_limited"),
-    ('{"error":{"message":"Quota exceeded for requests per minute"},"docs":"limits per day"}', "rate_limited"),
-    ("RESOURCE_EXHAUSTED: limit: 60 per minute", "rate_limited"),
-    ('RESOURCE_EXHAUSTED: Quota metric "generativelanguage.googleapis.com/generate_requests" per minute', "rate_limited"),
-    ("RESOURCE_EXHAUSTED: limit: 60 per day", "usage_limited"),
-])
-def test_quota_window_comes_from_the_quota_phrase_not_the_whole_event(message, status):
-    parsed = supervisor().parse_output("agy", "", (message if "RESOURCE_EXHAUSTED" in message else "429 RESOURCE_EXHAUSTED: " + message), 1)
-    assert parsed["status"] == status
 
 
 @pytest.mark.parametrize("body_string", [False, True])

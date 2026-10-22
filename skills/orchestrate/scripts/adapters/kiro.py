@@ -7,7 +7,6 @@ IDLE_WRITE = 1800
 EFFORT_FLAG = "--effort"
 SESSION_KEYS = ("sessionId", "session_id", "conversation_id", "conversationId")
 MODEL_SOURCE = "kiro:stream"
-SIGNATURES = (("auth_required", r"not logged in|Login expired"),)
 
 
 def argv(p):

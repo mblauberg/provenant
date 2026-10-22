@@ -19,14 +19,6 @@ LOG_LEVEL = r"(?:^|\s|\[)(?:level=)?(DEBUG|INFO|WARN|ERROR)\b"
 EXIT_AFTER_OUTPUT = True
 EMPTY_FAILURE = "provider exited {exit_code} without final assistant output"
 UPGRADE_FIX = "upgrade OpenCode to v2 (`opencode upgrade`); Fabric no longer drives v1"
-SIGNATURES = (
-    ("permission_blocked", r"\bEPERM\b|operation not permitted|sandbox[^\n]*denied"),
-    # A bad `#variant` is the caller's input, not a missing model: keep it ahead of no-route.
-    ("invalid_input", r"Variant unavailable for [^\n]+"),
-    ("model_unavailable", r"FreeTierError|free tier can only be used from within OpenCode"
-                          r"|Model unavailable:|Invalid model reference|provider\.no-route"),
-    ("usage_limited", r"Individual quota reached|exhausted your capacity|(?:monthly|weekly|5.hour) usage limit reached"),
-)
 
 
 def continues_turn(event):

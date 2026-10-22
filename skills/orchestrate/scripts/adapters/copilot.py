@@ -7,7 +7,6 @@ IDLE_WRITE = 1800
 EFFORT_FLAG = "--effort"
 SESSION_KEYS = ("session_id",)
 MODEL_SOURCE = None
-SIGNATURES = (("auth_required", r"not logged in"),)
 
 
 def argv(p):

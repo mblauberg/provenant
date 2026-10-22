@@ -1658,56 +1658,86 @@ def build_plan(
 
 PERMISSION_DENIAL_PATTERN = r"permission denied|permission blocked|not allowed to|tool required the .+ permission|denied_actions"
 INVALID_INPUT_PATTERN = r"invalid model selection|--effort is not supported for model"
-SIGNATURES = (
-    (
-        "invalid_input",
-        INVALID_INPUT_PATTERN,
-    ),
-    (
-        "permission_blocked",
-        PERMISSION_DENIAL_PATTERN,
-    ),
-    (
-        "usage_limited",
-        r"you.ve hit your (?:usage|session|weekly) limit|usage limit|session limit|weekly limit|individual quota reached|insufficient_quota|FreeUsageLimitError|exhausted your capacity",
-    ),
-    (
-        "auth_required",
-        r"authentication required|please sign in|please(?: run)? login|not logged in|not authenticated|unauthenticated|unauthorized|login expired|\b401\b",
-    ),
-    ("rate_limited", r"rate.?limit|too many requests|overloaded|\b(?:429|529)\b|per[ -](?:minute|second)"),
-    (
-        "model_unavailable",
-        r"model[^\n]*(?:unavailable|not available|not found|unsupported|does not exist)|unknown model",
-    ),
-    ("permission_blocked", r"\b403\b|forbidden"),
-    ("provider_transport", r"reconnecting|stream disconnected|failed to load workspace requirements|transport (?:error|fail)|connection (?:reset|closed)|error sending request"),
-)
+
+
+@dataclass(frozen=True)
+class FailureRule:
+    signature: str
+    pattern: str = ""
+    adapters: tuple[str, ...] = ()
+    status: str | None = None
+    error_class: str | None = None
+    statuses: tuple[str, ...] = ()
+    aliases: tuple[str, ...] = ()
+    short_window: bool | None = None
+
+
+# First matching diagnostic wins. Adapter rules keep their former priority,
+# including the two permission patterns on either side of auth/rate limits.
+# Telemetry-only rows have no pattern; statuses take precedence over signatures.
+FAILURE_RULES: list[FailureRule] = [
+    FailureRule("invalid_input", INVALID_INPUT_PATTERN, status="rejected"),
+    FailureRule("rate_limited", r"RESOURCE_EXHAUSTED|quota exceeded", short_window=True),
+    FailureRule("usage_limited", r"RESOURCE_EXHAUSTED|quota exceeded", short_window=False),
+    FailureRule("usage_limited", r"you.ve hit your (?:usage|session|weekly) limit", ("claude",)),
+    FailureRule("usage_limited", r"usage limit|try again at \d", ("codex",)),
+    FailureRule("usage_limited", r"Resets in \d+h", ("agy",)),
+    FailureRule("auth_required", r"Login expired", ("cursor",)),
+    FailureRule("auth_required", r"not logged in|Login expired", ("kiro",)),
+    FailureRule("auth_required", r"not logged in", ("copilot",)),
+    FailureRule("permission_blocked", r"\bEPERM\b|operation not permitted|sandbox[^\n]*denied", ("opencode",)),
+    FailureRule("invalid_input", r"Variant unavailable for [^\n]+", ("opencode",), status="rejected"),
+    FailureRule("model_unavailable", r"FreeTierError|free tier can only be used from within OpenCode"
+                r"|Model unavailable:|Invalid model reference|provider\.no-route", ("opencode",)),
+    FailureRule("usage_limited", r"Individual quota reached|exhausted your capacity|(?:monthly|weekly|5.hour) usage limit reached", ("opencode",)),
+    FailureRule("permission_blocked", PERMISSION_DENIAL_PATTERN,
+                error_class="sandbox_denied", statuses=("permission_blocked",)),
+    FailureRule("usage_limited", r"you.ve hit your (?:usage|session|weekly) limit|usage limit|session limit|weekly limit|individual quota reached|insufficient_quota|FreeUsageLimitError|exhausted your capacity",
+                error_class="usage_limited", statuses=("usage_limited",), aliases=("quota_exhausted",)),
+    FailureRule("auth_required", r"authentication required|please sign in|please(?: run)? login|not logged in|not authenticated|unauthenticated|unauthorized|login expired|\b401\b",
+                error_class="auth", statuses=("auth_required",), aliases=("auth_expired",)),
+    FailureRule("rate_limited", r"rate.?limit|too many requests|overload(?:ed)?|model[^\n]*\bat capacity\b|\b(?:429|529)\b|per[ -](?:minute|second)",
+                error_class="rate_limited", statuses=("rate_limited",)),
+    FailureRule("model_unavailable", r"model[^\n]*(?:unavailable|not available|not found|unsupported|does not exist)|unknown model",
+                error_class="model_unavailable", statuses=("model_unavailable",), aliases=("pinned_model_substitution",)),
+    FailureRule("permission_blocked", r"\b403\b|forbidden"),
+    FailureRule("provider_transport", r"reconnecting|stream disconnected|failed to load workspace requirements|transport (?:error|fail)|connection (?:reset|closed)|error sending request",
+                status="failed", error_class="transient"),
+    FailureRule("", error_class="none", statuses=("ok", "succeeded", "input_required")),
+    FailureRule("timed_out", error_class="timeout", statuses=("timed_out", "startup_timeout", "stalled"),
+                aliases=("startup_timeout", "stalled", "print_timeout", "idle_watchdog", "startup_watchdog", "wall_clock")),
+    FailureRule("lost", error_class="provider_error", statuses=("lost",)),
+    FailureRule("cancelled", error_class="cancelled", statuses=("cancelled",)),
+    FailureRule("empty_output", error_class="empty_output"),
+    FailureRule("fabric_mcp_unavailable", error_class="fabric_mcp_unavailable"),
+    FailureRule("", error_class="provider_error", statuses=("failed", "rejected", "tool_missing", "output_identity_invalid", "output_write_error")),
+]
+
+
+def classify_failure(adapter: str, failure_text: str) -> FailureRule | None:
+    """Select the ordered rule for provider diagnostics, never assistant prose."""
+    for rule in FAILURE_RULES:
+        if not rule.pattern or rule.adapters and adapter not in rule.adapters:
+            continue
+        if not re.search(rule.pattern, failure_text, re.I):
+            continue
+        if rule.short_window is not None and quota_window_is_short(failure_text) != rule.short_window:
+            continue
+        return rule
+    return None
 
 
 def error_class(status, signature=None):
     """Stable telemetry only; routing and health continue to use status/signature."""
-    if status in {"ok", "succeeded", "input_required"}:
-        return "none"
-    classes = {
-        "rate_limited": "rate_limited", "usage_limited": "usage_limited",
-        "auth_required": "auth", "model_unavailable": "model_unavailable",
-        "timed_out": "timeout", "startup_timeout": "timeout", "stalled": "timeout",
-        "permission_blocked": "sandbox_denied",
-        "lost": "provider_error", "cancelled": "cancelled",
-    }
-    signatures = {
-        **classes, "quota_exhausted": "usage_limited", "auth_expired": "auth",
-        "pinned_model_substitution": "model_unavailable", "empty_output": "empty_output",
-        "print_timeout": "timeout", "idle_watchdog": "timeout", "startup_watchdog": "timeout",
-        "wall_clock": "timeout",
-        "provider_transport": "transient",
-        "fabric_mcp_unavailable": "fabric_mcp_unavailable",
-    }
-    return classes.get(status) or signatures.get(signature) or (
-        "provider_error" if status in {"failed", "rejected", "tool_missing", "output_identity_invalid", "output_write_error"}
-        else "unknown"
-    )
+    # Generic failure statuses are fallbacks, after the more specific signature.
+    fallback = FAILURE_RULES[-1]
+    for rule in FAILURE_RULES[:-1]:
+        if status in rule.statuses:
+            return rule.error_class
+    for rule in FAILURE_RULES[:-1]:
+        if rule.error_class and rule.signature and (signature == rule.signature or signature in rule.aliases):
+            return rule.error_class
+    return fallback.error_class if status in fallback.statuses else "unknown"
 
 
 def _variant_fix(failure_text):
@@ -2058,15 +2088,10 @@ def parse_output(adapter, stdout, stderr="", exit_code=0, *, at=None):
         failure_text = stderr + "\n" + failure_text
     status = None
     if errors or exit_code != 0 or denial:
-        signatures = (SIGNATURES[0], *config.SIGNATURES, *SIGNATURES[1:])
-        if re.search(r"RESOURCE_EXHAUSTED|quota exceeded", failure_text, re.I):
-            quota = "rate_limited" if quota_window_is_short(failure_text) else "usage_limited"
-            signatures = (signatures[0], (quota, r"RESOURCE_EXHAUSTED|quota exceeded"), *signatures[1:])
-        for name, pattern in signatures:
-            if re.search(pattern, failure_text, re.I):
-                status = "rejected" if name == "invalid_input" else "failed" if name == "provider_transport" else name
-                result["signature"] = name
-                break
+        rule = classify_failure(adapter, failure_text)
+        if rule is not None:
+            status = rule.status or rule.signature
+            result["signature"] = rule.signature
         status = status or (
             "timed_out" if "print-timeout" in failure_text else "failed"
         )
@@ -4132,7 +4157,8 @@ def _run_attempt(
         if retry_failure:
             failures.setdefault(retry_failure["status"], retry_failure)
         if failures:
-            priority = [status for status, _ in (SIGNATURES[0], *profile(plan["adapter"]).SIGNATURES, *SIGNATURES[1:])]
+            priority = [rule.signature for rule in FAILURE_RULES if rule.pattern and rule.short_window is None
+                        and (not rule.adapters or plan["adapter"] in rule.adapters)]
             selected = next((failures[status] for status in priority if status in failures), next(iter(failures.values())))
             parsed.update(selected)
     if live_failure and forced == live_failure["status"]:

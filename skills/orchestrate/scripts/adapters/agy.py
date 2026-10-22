@@ -7,7 +7,6 @@ IDLE_WRITE = 1800
 EFFORT_FLAG = "--effort"
 SESSION_KEYS = ("session_id", "conversation_id", "conversationId")
 MODEL_SOURCE = "agy:init.model|log"
-SIGNATURES = (("usage_limited", r"Resets in \d+h"),)
 
 
 def argv(p):
