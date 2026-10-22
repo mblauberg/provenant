@@ -766,7 +766,7 @@ def ingest_document(db, source, path):
                       input_tokens=input_count, cache_read_tokens=cached, cache_write_tokens=written,
                       output_tokens=output, reasoning_tokens=reasoning,
                       usage_source=usage.get('usage_source') or row.get('usage_source') or usage.get('source'),
-                      status=row.get('status') or row.get('state'), error_class=row.get('error_class'),
+                      status=row.get('status') or row.get('state'), error_class=receipt_error_class(row),
                       task_class=row.get('task_class') or requested_route.get('task_class') or None,
                       route=requested_route.get('alias') or None,
                       duration_ms=round(ended - started) if started is not None and ended is not None and ended >= started else None,
@@ -927,6 +927,22 @@ EFFORT_SUFFIX = re.compile(r'-(?:minimal|low|medium|high|xhigh|max)$')
 CONTEXT_SUFFIX = re.compile(r'-\d+k$')
 DATE_SUFFIX = re.compile(r'-\d{8}$')
 SUCCESS = {'ok', 'succeeded'}
+ERROR_CLASS_BY_STATUS = {
+    'rate_limited': 'rate_limited', 'usage_limited': 'usage_limited',
+    'auth_required': 'auth', 'model_unavailable': 'model_unavailable',
+    'timed_out': 'timeout', 'startup_timeout': 'timeout', 'stalled': 'timeout',
+    'permission_blocked': 'sandbox_denied', 'lost': 'provider_error', 'cancelled': 'cancelled',
+}
+
+
+def receipt_error_class(row):
+    """Keep legacy terminal receipts useful when they predate error_class."""
+    if row.get('error_class'):
+        return row['error_class']
+    status = row.get('status') or row.get('state')
+    if status in SUCCESS or status in {'running', 'input_required', None}:
+        return None
+    return ERROR_CLASS_BY_STATUS.get(status, 'provider_error')
 
 
 def catalogue():

@@ -474,6 +474,17 @@ def test_lost_attempt_is_reported_as_a_provider_error(tmp_path):
     assert report['attempts'] == [{'status':'lost','error_class':'provider_error','attempts':1}]
 
 
+def test_legacy_terminal_failures_receive_error_classes(tmp_path):
+    receipt(tmp_path, 'failed', status='failed', provenance=route('opencode', 'free-model'))
+    receipt(tmp_path, 'limited', status='rate_limited', provenance=route('opencode', 'free-model'))
+    assert cli(tmp_path, 'telemetry', 'ingest').returncode == 0
+    report = json.loads(cli(tmp_path, 'stats', '--json').stdout)
+    assert report['lanes'] == [
+        {'status':'failed','error_class':'provider_error','lanes':1},
+        {'status':'rate_limited','error_class':'rate_limited','lanes':1},
+    ]
+
+
 def test_cancelled_error_class_survives_ingestion_and_reporting(tmp_path):
     write_json(tmp_path / '.agent-run/runs/run/tasks/lane/attempt-001/attempt.json', {
         'run_id':'r','task_id':'lane','attempt':1,'state':'terminal','status':'cancelled',
