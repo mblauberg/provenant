@@ -878,6 +878,43 @@ class HostDiagnosticsContracts(unittest.TestCase):
                             self.assertIn('3.11', result['python']['error']['message'])
 
 
+class FabricGitDiagnosticContracts(unittest.TestCase):
+    def git_failure(self, directory, **fields):
+        from types import SimpleNamespace
+        import fabric_git
+        import fabric_hosts as hosts
+        code = fabric_git.CodeTransport(SimpleNamespace(h=hosts))
+        result = SimpleNamespace(**{'returncode': 0, 'timed_out': False, 'stdout': '', 'stderr': '',
+            'stdout_truncated': False, 'stderr_truncated': False, **fields})
+        load = code.h._load_module
+        def load_module(name, path):
+            if name == 'provenant_bounded_process':
+                return SimpleNamespace(run_bounded=lambda *args, **kwargs: result)
+            return load(name, path)
+        with patch.object(code.h, '_load_module', side_effect=load_module):
+            with self.assertRaises(hosts.HostError) as caught:
+                code.git(Path(directory), 'rev-parse', 'HEAD')
+        self.assertEqual(caught.exception.code, 'code_transport_failed')
+        return str(caught.exception)
+
+    def test_git_failure_reports_exit_code_and_repository(self):
+        with tempfile.TemporaryDirectory() as directory:
+            message = self.git_failure(directory, returncode=128)
+            self.assertIn(f'failed in {directory}: exit 128', message)
+            self.assertNotIn('no error output', message)
+
+    def test_git_failure_reports_truncated_output(self):
+        with tempfile.TemporaryDirectory() as directory:
+            self.assertIn('stdout truncated', self.git_failure(directory, stdout='', stderr='detail', stdout_truncated=True))
+
+    def test_git_failure_reports_signal_truncation_and_last_error_line(self):
+        with tempfile.TemporaryDirectory() as directory:
+            message = self.git_failure(directory, returncode=-9, stderr='warning\nfatal: x', stderr_truncated=True)
+            self.assertTrue(message.endswith('exit -9 (SIGKILL); stderr truncated: fatal: x'), message)
+            long_line = self.git_failure(directory, returncode=1, stderr='fatal: ' + 'y' * 300)
+            self.assertTrue(long_line.endswith('y…'), long_line)
+
+
 class TransportFilesystemContracts(unittest.TestCase):
     def test_project_root_accepts_case_different_git_toplevel_for_same_directory(self):
         import fabric_hosts as hosts
