@@ -151,7 +151,9 @@ def product_template(tmp_path_factory) -> Path:
         ROOT,
         template,
         symlinks=True,
-        ignore=shutil.ignore_patterns(".git", ".agent-run", "node_modules", ".venv"),
+        ignore=shutil.ignore_patterns(
+            ".git", ".agent-run", "node_modules", ".venv", "installation.json"
+        ),
     )
     return template
 
@@ -2156,8 +2158,8 @@ def install_fake_cargo(directory: Path, *, fail: bool = False) -> Path:
 
 
 @pytest.fixture
-def rust_product(tmp_path):
-    product = copy_product(ROOT, tmp_path / "product")
+def rust_product(tmp_path, product_template):
+    product = copy_product(product_template, tmp_path / "product")
     add_fake_crate(product)
     return product
 
@@ -2237,8 +2239,8 @@ def test_rust_mode_fails_without_installing_when_the_build_fails(tmp_path, rust_
     assert not (tmp_path / "bin/provenant").exists()
 
 
-def test_auto_mode_without_a_crate_installs_the_template_quietly(tmp_path):
-    product = copy_product(ROOT, tmp_path / "product")
+def test_auto_mode_without_a_crate_installs_the_template_quietly(tmp_path, product_template):
+    product = copy_product(product_template, tmp_path / "product")
     shutil.rmtree(product / "tools/front-door", ignore_errors=True)
 
     result = run_product(product, "codex", tmp_path, PROVENANT_FRONT_DOOR="auto")
