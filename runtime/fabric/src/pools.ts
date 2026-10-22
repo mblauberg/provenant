@@ -10,6 +10,14 @@ import { InputError, nativeAdapter, tierAlias, type BatchTaskInput, type RouteIn
 export const POOL_FIELDS = ["route", "rotate", "council", "models"] as const;
 const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
 
+export function rotateOverrideFromKnobs(knobs: string[] | undefined): boolean | undefined {
+  const mode = knobs?.map((item) => {
+    const [name, ...value] = item.split("=");
+    return [name, value.join("=")] as const;
+  }).filter(([name]) => name === "routing.pool_mode").at(-1)?.[1];
+  return mode === "rotate" ? true : mode === "top" ? false : undefined;
+}
+
 export interface Pick {
   adapter: string;
   model: string;
@@ -156,8 +164,10 @@ export async function expandPools(
   const pending: Array<{ index: number; request: Record<string, unknown> }> = [];
   settled.forEach((task, index) => {
     if (task === undefined || !usesPool(task)) return;
+    const knobRotate = rotateOverrideFromKnobs(task.knobs);
     pending.push({ index, request: {
       ...Object.fromEntries(POOL_FIELDS.filter((field) => task[field] !== undefined).map((field) => [field, task[field]])),
+      ...(task.rotate === undefined && knobRotate !== undefined ? { rotate: knobRotate } : {}),
       ...(task.adapter === undefined ? {} : { adapter: task.adapter }),
       ...(task.effort === undefined ? {} : { effort: task.effort }),
       ...(task.confidential === true ? { confidential: true } : {}),

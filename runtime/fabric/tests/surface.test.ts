@@ -12,6 +12,7 @@ import { catalogueSnapshot } from "../src/catalogue.js";
 import { normaliseRoute, routeArguments } from "../src/execution-input.js";
 import { batchDefaults, mergeBatchTask } from "../src/execution.js";
 import { inheritedDeliveryRunId } from "../src/resume.js";
+import { rotateOverrideFromKnobs } from "../src/pools.js";
 import { scratchRoot } from "./helpers/temp-root.js";
 
 const fixturePidLogs = new Set<string>();
@@ -41,6 +42,21 @@ it("accepts delivery_run_id in dispatch and batch schemas and the CLI flag", () 
     } });
   expect(cli.status).toBe(1);
   expect(cli.stdout).toContain("invalid_delivery_run_id");
+});
+
+it("forwards profile knobs through the MCP route to the dispatch owner", () => {
+  const schema = z.object(toolSchemas.fabric_dispatch);
+  const knobs = ["effort.shift=1", "routing.pool_mode=rotate"];
+  expect(schema.parse({ adapter: "codex", model: "gpt-6-luna", knobs })).toMatchObject({ knobs });
+  const root = scratchRoot("fabric-knob-route-");
+  fixtureRoots.add(root);
+  const route = normaliseRoute({ adapter: "codex", model: "gpt-6-luna", knobs },
+    { project: root, cwd: root, agentId: "knob-test", provider: "agent" },
+    catalogueSnapshot(resolve(import.meta.dirname, "../../.."), { AGENT_FABRIC_INSTANCE_ROOT: root }));
+  const args = routeArguments(route);
+  expect(args.slice(args.indexOf("--knob"))).toEqual(["--knob", knobs[0], "--knob", knobs[1]]);
+  expect(rotateOverrideFromKnobs(knobs)).toBe(true);
+  expect(rotateOverrideFromKnobs(["routing.pool_mode=top"])).toBe(false);
 });
 
 it("inherits a handoff delivery id only when the caller omits it", () => {

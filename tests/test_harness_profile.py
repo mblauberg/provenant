@@ -137,10 +137,9 @@ def test_a_task_class_entry_beats_its_layer_but_not_a_higher_layer(space):
     assert resolved(space, task_class="legwork").knobs["council.junior_size"] == 4
 
 
-def test_preset_task_class_overrides_apply_only_to_that_class():
+def test_economy_preset_leaves_effort_at_default():
     economy = [("env", {"preset": "economy"})]
-    assert hp.resolve(REGISTRY, layers=economy).knobs["effort.shift"] == -1
-    assert hp.resolve(REGISTRY, task_class="critical-review", layers=economy).knobs["effort.shift"] == 0
+    assert hp.resolve(REGISTRY, layers=economy).knobs["effort.shift"] == 0
     rigorous = [("env", {"preset": "rigorous"})]
     assert hp.resolve(REGISTRY, task_class="review", layers=rigorous).knobs["effort.shift"] == 1
     assert hp.resolve(REGISTRY, task_class="mechanical", layers=rigorous).knobs["effort.shift"] == 0
@@ -148,9 +147,10 @@ def test_preset_task_class_overrides_apply_only_to_that_class():
 
 def test_risk_tier_floor_raises_a_value_at_its_tier_and_above():
     economy = [("env", {"preset": "economy"})]
-    assert hp.resolve(REGISTRY, risk_tier="substantial", layers=economy).knobs["effort.shift"] == -1
+    assert hp.resolve(REGISTRY, risk_tier="substantial", layers=economy).knobs["effort.shift"] == 0
     for tier in ("crucial", "terminal"):
-        resolution = hp.resolve(REGISTRY, risk_tier=tier, layers=economy)
+        resolution = hp.resolve(REGISTRY, risk_tier=tier,
+                                layers=[*economy, ("dispatch", {"knobs": {"effort.shift": -1}})])
         assert resolution.knobs["effort.shift"] == 0
         assert resolution.sources["effort.shift"] == f"floor:{tier}"
         assert resolution.stamp()["floored"] == ["effort.shift"]
@@ -341,7 +341,8 @@ def test_attempt_receipt_carries_the_profile_stamp(space, monkeypatch):
     assert os.environ["PROVENANT_RISK_TIER"] == "crucial"
     stamp = dispatch.contract_row(args, space.project, 1, space.project / "attempt", {}, "now")["profile"]
     assert stamp["preset"] == "economy" and stamp["task_class"] == "review"
-    assert stamp["knobs"]["lanes.max_concurrency"] == 3 and stamp["floored"] == ["effort.shift"]
+    assert stamp["knobs"]["lanes.max_concurrency"] == 3 and stamp["knobs"]["effort.shift"] == 0
+    assert stamp.get("floored", []) == []
     assert dispatch.profile_knob(args, "context.ceiling_tokens") == 200000
 
     with pytest.raises(dispatch.harness_profile.ProfileError, match="unknown knob"):
@@ -431,6 +432,8 @@ def test_effort_shift_lowers_above_the_minimum_unless_the_tier_floors_it(space):
         "alias": "senior", "effort": "high", "role": "worker", "models": {"codex": ["gpt-6.1-sol"]}}
     path = space.project / "catalog.json"
     path.write_text(json.dumps(catalog))
-    assert route(space, path, "--task-class", "research", PROVENANT_PROFILE="economy")["effort"] == "medium"
-    floored = route(space, path, "--task-class", "research", PROVENANT_PROFILE="economy", PROVENANT_RISK_TIER="crucial")
+    assert route(space, path, "--task-class", "research", PROVENANT_PROFILE="economy")["effort"] == "high"
+    lowered = route(space, path, "--task-class", "research", PROVENANT_KNOB_EFFORT_SHIFT="-1")
+    assert lowered["effort"] == "medium"
+    floored = route(space, path, "--task-class", "research", PROVENANT_KNOB_EFFORT_SHIFT="-1", PROVENANT_RISK_TIER="crucial")
     assert floored["effort"] == "high"

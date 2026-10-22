@@ -37,10 +37,9 @@ and the owning prose or constant still holds today's value until it is wired.
 | Reviewers above the ladder | `HARNESS.md` Review ladder; `skills/code-review/SKILL.md` step 5; `references/multi-agent-review.md` (one reviewer at substantial, councils 2–4) | ladder minimum | Reviewer lanes against defect coverage | `review.extra_reviewers`, wired (skill) |
 | Cross-family requirement | `HARNESS.md` ladder: substantial falls back to same-family with another lens | prefer | Decorrelation against waiting on quota | `review.cross_family`, wired (skill) |
 | Re-review after repair | `skills/implement/SKILL.md` step 5 | repair delta only | Interaction defects against a second full review | `review.rereview_scope`, wired (skill) |
-| Repairs before writer escalation | `skills/implement/SKILL.md` step 2 | one repair at the same tier | Cheaper writers longer against frontier tokens sooner | `repair.escalate_after`, advisory |
 | Repair cycle stop | `skills/deliver/scripts/delivery_validation_common.py` `REPAIR_BUDGETS` | 2 / 4 / 5 / 5 by tier | User attention against repair spend | `repair.max_cycles`, advisory; the validator ceiling is fixed |
 | Council juniors per part | `skills/orchestrate/references/tiered-council.md` | 3 | Lens passes against family spread | `council.junior_size`, advisory |
-| Pool pick mode | `scripts/model_route_pools.py` `pick` (`top`, `rotate`, `council`) | top weight | Consistency against quota spread | `routing.pool_mode`, advisory |
+| Pool pick mode | `scripts/model_route_pools.py` `pick` (`top`, `rotate`, `council`) | top weight | Consistency against quota spread | `routing.pool_mode`, wired |
 | Final voice pass on prose | `skills/engineering-writing/SKILL.md` step 6 | optional | One writing lane against voice | `writing.final_polish`, advisory |
 | Worker summary size | `skills/orchestrate/references/layering-and-context.md` | about 1–2k tokens | Chair context against inline detail | `context.summary_tokens`, advisory |
 | Quota pacing tolerance | `scripts/provider_quota.py` `PACE_TOLERANCE` | 4 points | Early pacing against bursts | `quota.pace_tolerance`, advisory |
@@ -83,13 +82,12 @@ must be empty.
 
 | Knob | economy | balanced | rigorous |
 |---|---|---|---|
-| `effort.shift` | -1 (0 for critical-review) | 0 | +1 (0 for mechanical and bulk) |
+| `effort.shift` | 0 | 0 | +1 (0 for mechanical and bulk) |
 | `lanes.max_concurrency` | 4 | 8 | 8 |
 | `context.ceiling_tokens` | 200,000 | catalogue | catalogue |
 | `review.extra_reviewers` | 0 | 0 | 1 |
 | `review.cross_family` | prefer | prefer | require |
 | `review.rereview_scope` | delta | delta | full |
-| `repair.escalate_after` | 2 | 1 | 0 |
 | `council.junior_size` | 2 | 3 | 4 |
 | `routing.pool_mode` | rotate | top | top |
 | `writing.final_polish` | off | optional | optional |
@@ -163,10 +161,8 @@ explicit `--knob` are strict and exit with an error instead.
   ladder in `HARNESS.md` stays the floor.
 
 `dispatch_run.py` exports `--knob` values and a recognised `--risk-tier` to the
-environment, so the routing subprocesses resolve the same profile.
-`--knob` applies only to a lane placed on this host. A dispatch placed on a
-peer host with `--knob` is refused with `knob_remote_unsupported`; set the
-knob in the peer's profile or place the lane locally with `--host`.
+environment, so the routing subprocesses resolve the same profile. `--knob`
+values are forwarded when a lane is placed on a peer host.
 
 ## Telemetry stamp
 

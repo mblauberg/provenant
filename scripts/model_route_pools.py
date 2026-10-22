@@ -527,7 +527,10 @@ def pick(router: Any, catalog: dict[str, Any], request: dict[str, Any], *,
             raise PoolError("route_required", ROUTE_REQUIRED.format(routes=", ".join(catalog.get("routes", {}))))
         label = route_name(catalog, str(request["route"]))
         entries = pool(router, catalog, label, effort_order)
-        mode = "council" if council else "rotate" if request.get("rotate") else "top"
+        rotate = request.get("rotate")
+        if rotate is None:
+            rotate = os.environ.get("PROVENANT_KNOB_ROUTING_POOL_MODE") == "rotate"
+        mode = "council" if council else "rotate" if rotate else "top"
         if request.get("adapter"):
             entries = [entry for entry in entries if entry["adapter"] == request["adapter"]]
             if not entries:
