@@ -110,6 +110,8 @@ def _isolated_instance_root(tmp_path_factory, monkeypatch, request):
     need a root set their own over this. The installer tests derive those dirs from the
     HOME they build, so they keep their own."""
     monkeypatch.setenv("AGENT_FABRIC_INSTANCE_ROOT", str(tmp_path_factory.mktemp("instance-root")))
+    # A test run inside a remote Fabric lane must still exercise local placement.
+    monkeypatch.delenv("PROVENANT_REMOTE_LANE", raising=False)
     if request.node.path.name == "test_install_harness.py":
         return
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path_factory.mktemp("claude-config")))

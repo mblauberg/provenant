@@ -1,0 +1,5 @@
+[env]
+# The integration tests copy the binary and execute it. On Linux a parallel
+# test's fork can inherit the copy's write descriptor, and exec then fails with
+# ETXTBSY, so the suite runs serially; it takes well under a second.
+RUST_TEST_THREADS = "1"

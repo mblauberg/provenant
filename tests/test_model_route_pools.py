@@ -571,11 +571,12 @@ def test_confidential_preflight_uses_a_mixed_alias_and_refuses_only_when_nothing
     (instance / "config" / "model-routing.json").write_text(json.dumps(MIXED_SCOUT))
     monkeypatch.setenv("AGENT_FABRIC_INSTANCE_ROOT", str(instance))
     monkeypatch.setenv("AGENT_FABRIC_STATE_ROOT", str(tmp_path / "state"))
+    monkeypatch.setenv("AGENT_FABRIC_PRODUCT_ROOT", str(ROOT))
     monkeypatch.chdir(tmp_path)
     dispatch_run = load("pools_dispatch_mixed_alias_under_test", ROOT / "skills/orchestrate/scripts/dispatch_run.py")
     task = {"id": "t", "adapter": "opencode", "alias": "junior", "prompt": "hi"}
     ordinary = dispatch_run.preflight_tasks([task], tmp_path)
-    assert ordinary["routes"][0]["resolved_model"] == "opencode/mimo-v2.6-flash-free", "the alias leads with the free model"
+    assert ordinary.get("routes", [{}])[0].get("resolved_model") == "opencode/mimo-v2.6-flash-free", ordinary
     private = dispatch_run.preflight_tasks([{**task, "confidential": True}], tmp_path)
     assert private["status"] == "validated", private
     assert private["routes"][0]["resolved_model"] == "opencode-go/deepseek-v4.1-flash"
