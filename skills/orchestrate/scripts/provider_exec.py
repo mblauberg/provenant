@@ -27,7 +27,6 @@ import time
 import uuid
 import unicodedata
 from datetime import UTC, datetime, timedelta
-from dataclasses import dataclass
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
@@ -1660,84 +1659,64 @@ PERMISSION_DENIAL_PATTERN = r"permission denied|permission blocked|not allowed t
 INVALID_INPUT_PATTERN = r"invalid model selection|--effort is not supported for model"
 
 
-@dataclass(frozen=True)
-class FailureRule:
-    signature: str
-    pattern: str = ""
-    adapters: tuple[str, ...] = ()
-    status: str | None = None
-    error_class: str | None = None
-    statuses: tuple[str, ...] = ()
-    aliases: tuple[str, ...] = ()
-    short_window: bool | None = None
-
-
 # First matching diagnostic wins. Adapter rules keep their former priority,
 # including the two permission patterns on either side of auth/rate limits.
-# Telemetry-only rows have no pattern; statuses take precedence over signatures.
-FAILURE_RULES: list[FailureRule] = [
-    FailureRule("invalid_input", INVALID_INPUT_PATTERN, status="rejected"),
-    FailureRule("rate_limited", r"RESOURCE_EXHAUSTED|quota exceeded", short_window=True),
-    FailureRule("usage_limited", r"RESOURCE_EXHAUSTED|quota exceeded", short_window=False),
-    FailureRule("usage_limited", r"you.ve hit your (?:usage|session|weekly) limit", ("claude",)),
-    FailureRule("usage_limited", r"usage limit|try again at \d", ("codex",)),
-    FailureRule("usage_limited", r"Resets in \d+h", ("agy",)),
-    FailureRule("auth_required", r"Login expired", ("cursor",)),
-    FailureRule("auth_required", r"not logged in|Login expired", ("kiro",)),
-    FailureRule("auth_required", r"not logged in", ("copilot",)),
-    FailureRule("permission_blocked", r"\bEPERM\b|operation not permitted|sandbox[^\n]*denied", ("opencode",)),
-    FailureRule("invalid_input", r"Variant unavailable for [^\n]+", ("opencode",), status="rejected"),
-    FailureRule("model_unavailable", r"FreeTierError|free tier can only be used from within OpenCode"
-                r"|Model unavailable:|Invalid model reference|provider\.no-route", ("opencode",)),
-    FailureRule("usage_limited", r"Individual quota reached|exhausted your capacity|(?:monthly|weekly|5.hour) usage limit reached", ("opencode",)),
-    FailureRule("permission_blocked", PERMISSION_DENIAL_PATTERN,
-                error_class="sandbox_denied", statuses=("permission_blocked",)),
-    FailureRule("usage_limited", r"you.ve hit your (?:usage|session|weekly) limit|usage limit|session limit|weekly limit|individual quota reached|insufficient_quota|FreeUsageLimitError|exhausted your capacity",
-                error_class="usage_limited", statuses=("usage_limited",), aliases=("quota_exhausted",)),
-    FailureRule("auth_required", r"authentication required|please sign in|please(?: run)? login|not logged in|not authenticated|unauthenticated|unauthorized|login expired|\b401\b",
-                error_class="auth", statuses=("auth_required",), aliases=("auth_expired",)),
-    FailureRule("rate_limited", r"rate.?limit|too many requests|overloaded|model[^\n]*\bat capacity\b|\b(?:429|529)\b|per[ -](?:minute|second)",
-                error_class="rate_limited", statuses=("rate_limited",)),
-    FailureRule("model_unavailable", r"model[^\n]*(?:unavailable|not available|not found|unsupported|does not exist)|unknown model",
-                error_class="model_unavailable", statuses=("model_unavailable",), aliases=("pinned_model_substitution",)),
-    FailureRule("permission_blocked", r"\b403\b|forbidden"),
-    FailureRule("provider_transport", r"reconnecting|stream disconnected|failed to load workspace requirements|transport (?:error|fail)|connection (?:reset|closed)|error sending request",
-                status="failed", error_class="transient"),
-    FailureRule("", error_class="none", statuses=("ok", "succeeded", "input_required")),
-    FailureRule("timed_out", error_class="timeout", statuses=("timed_out", "startup_timeout", "stalled"),
-                aliases=("startup_timeout", "stalled", "print_timeout", "idle_watchdog", "startup_watchdog", "wall_clock")),
-    FailureRule("lost", error_class="provider_error", statuses=("lost",)),
-    FailureRule("cancelled", error_class="cancelled", statuses=("cancelled",)),
-    FailureRule("empty_output", error_class="empty_output"),
-    FailureRule("fabric_mcp_unavailable", error_class="fabric_mcp_unavailable"),
-    FailureRule("", error_class="provider_error", statuses=("failed", "rejected", "tool_missing", "output_identity_invalid", "output_write_error")),
+FAILURE_PATTERNS = [
+    ("invalid_input", INVALID_INPUT_PATTERN, ()),
+    ("quota_window", r"RESOURCE_EXHAUSTED|quota exceeded", ()),
+    ("usage_limited", r"you.ve hit your (?:usage|session|weekly) limit", ("claude",)),
+    ("usage_limited", r"usage limit|try again at \d", ("codex",)),
+    ("usage_limited", r"Resets in \d+h", ("agy",)),
+    ("auth_required", r"Login expired", ("cursor",)),
+    ("auth_required", r"not logged in|Login expired", ("kiro",)),
+    ("auth_required", r"not logged in", ("copilot",)),
+    ("permission_blocked", r"\bEPERM\b|operation not permitted|sandbox[^\n]*denied", ("opencode",)),
+    ("invalid_input", r"Variant unavailable for [^\n]+", ("opencode",)),
+    ("model_unavailable", r"FreeTierError|free tier can only be used from within OpenCode"
+     r"|Model unavailable:|Invalid model reference|provider\.no-route", ("opencode",)),
+    ("usage_limited", r"Individual quota reached|exhausted your capacity|(?:monthly|weekly|5.hour) usage limit reached", ("opencode",)),
+    ("permission_blocked", PERMISSION_DENIAL_PATTERN, ()),
+    ("usage_limited", r"you.ve hit your (?:usage|session|weekly) limit|usage limit|session limit|weekly limit|individual quota reached|insufficient_quota|FreeUsageLimitError|exhausted your capacity", ()),
+    ("auth_required", r"authentication required|please sign in|please(?: run)? login|not logged in|not authenticated|unauthenticated|unauthorized|login expired|\b401\b", ()),
+    ("rate_limited", r"rate.?limit|too many requests|overloaded|model[^\n]*\bat capacity\b|\b(?:429|529)\b|per[ -](?:minute|second)", ()),
+    ("model_unavailable", r"model[^\n]*(?:unavailable|not available|not found|unsupported|does not exist)|unknown model", ()),
+    ("permission_blocked", r"\b403\b|forbidden", ()),
+    ("provider_transport", r"reconnecting|stream disconnected|failed to load workspace requirements|transport (?:error|fail)|connection (?:reset|closed)|error sending request", ()),
 ]
 
+STATUS_ERROR_CLASSES = {
+    "ok": "none", "succeeded": "none", "input_required": "none",
+    "permission_blocked": "sandbox_denied", "usage_limited": "usage_limited",
+    "auth_required": "auth", "rate_limited": "rate_limited", "model_unavailable": "model_unavailable",
+    "timed_out": "timeout", "startup_timeout": "timeout", "stalled": "timeout",
+    "lost": "provider_error", "cancelled": "cancelled",
+}
+ERROR_CLASS_ALIASES = {
+    "permission_blocked": "sandbox_denied", "usage_limited": "usage_limited", "quota_exhausted": "usage_limited",
+    "auth_required": "auth", "auth_expired": "auth", "rate_limited": "rate_limited",
+    "model_unavailable": "model_unavailable", "pinned_model_substitution": "model_unavailable",
+    "provider_transport": "transient", "timed_out": "timeout", "startup_timeout": "timeout",
+    "stalled": "timeout", "print_timeout": "timeout", "idle_watchdog": "timeout",
+    "startup_watchdog": "timeout", "wall_clock": "timeout", "lost": "provider_error",
+    "cancelled": "cancelled", "empty_output": "empty_output", "fabric_mcp_unavailable": "fabric_mcp_unavailable",
+}
 
-def classify_failure(adapter: str, failure_text: str) -> FailureRule | None:
-    """Select the ordered rule for provider diagnostics, never assistant prose."""
-    for rule in FAILURE_RULES:
-        if not rule.pattern or rule.adapters and adapter not in rule.adapters:
-            continue
-        if not re.search(rule.pattern, failure_text, re.I):
-            continue
-        if rule.short_window is not None and quota_window_is_short(failure_text) != rule.short_window:
-            continue
-        return rule
+
+def classify_failure(adapter: str, failure_text: str) -> str | None:
+    """Select the ordered signature for provider diagnostics, never assistant prose."""
+    for signature, pattern, adapters in FAILURE_PATTERNS:
+        if (not adapters or adapter in adapters) and re.search(pattern, failure_text, re.I):
+            if signature == "quota_window":
+                return "rate_limited" if quota_window_is_short(failure_text) else "usage_limited"
+            return signature
     return None
 
 
 def error_class(status, signature=None):
     """Stable telemetry only; routing and health continue to use status/signature."""
-    # Generic failure statuses are fallbacks, after the more specific signature.
-    fallback = FAILURE_RULES[-1]
-    for rule in FAILURE_RULES[:-1]:
-        if status in rule.statuses:
-            return rule.error_class
-    for rule in FAILURE_RULES[:-1]:
-        if rule.error_class and rule.signature and (signature == rule.signature or signature in rule.aliases):
-            return rule.error_class
-    return fallback.error_class if status in fallback.statuses else "unknown"
+    # Generic failure statuses fall back only after the more specific signature.
+    fallback = "provider_error" if status in {"failed", "rejected", "tool_missing", "output_identity_invalid", "output_write_error"} else "unknown"
+    return STATUS_ERROR_CLASSES.get(status, ERROR_CLASS_ALIASES.get(signature, fallback))
 
 
 def _variant_fix(failure_text):
@@ -2088,10 +2067,10 @@ def parse_output(adapter, stdout, stderr="", exit_code=0, *, at=None):
         failure_text = stderr + "\n" + failure_text
     status = None
     if errors or exit_code != 0 or denial:
-        rule = classify_failure(adapter, failure_text)
-        if rule is not None:
-            status = rule.status or rule.signature
-            result["signature"] = rule.signature
+        signature = classify_failure(adapter, failure_text)
+        if signature is not None:
+            status = {"invalid_input": "rejected", "provider_transport": "failed"}.get(signature, signature)
+            result["signature"] = signature
         status = status or (
             "timed_out" if "print-timeout" in failure_text else "failed"
         )
@@ -2354,7 +2333,7 @@ def _termination_request(environment, process, exit_code, started_at, supervisor
     return {}
 
 
-def _is_nested_fabric_owner(row):
+def _nested_fabric_owner_token(row):
     try:
         values = {}
         for entry in _process_environment(row.pid):
@@ -2364,16 +2343,16 @@ def _is_nested_fabric_owner(row):
         token = values.get(b"PROVENANT_RUN_TOKEN")
         directory = values.get(b"PROVENANT_RUN_DIR")
         if not token or not directory:
-            return False
+            return None
         run_dir = Path(os.fsdecode(directory))
         if not run_dir.is_absolute():
-            return False
+            return None
         path = run_dir / "dispatch-owner.json"
         if path.is_symlink() or not path.is_file() or path.stat().st_size > 65536:
-            return False
+            return None
         record = json.loads(path.read_text())
         started_at = record.get("owner_started_at")
-        return (
+        valid = (
             record.get("schema_version") == 1
             and record.get("kind") in {"dispatch", "batch"}
             and Path(record.get("run_dir", "")).resolve() == run_dir.resolve()
@@ -2388,8 +2367,9 @@ def _is_nested_fabric_owner(row):
                 or started_at == _ps_start_time(row.pid, canonical=False)
             )
         )
+        return os.fsdecode(token) if valid else None
     except Exception:
-        return False
+        return None
 
 
 class _Descendants:
@@ -2493,12 +2473,10 @@ class _Descendants:
                     and row.pgid not in own_groups
                     and parent is not None and (parent == self.root or parent in observed)
                     and parent not in self.spared):
-                if _is_nested_fabric_owner(row):
+                if token := _nested_fabric_owner_token(row):
                     self.verified_owners.add(identity)
                     if exclusively_observed(identity):
-                        self.verified_owner_tokens[identity] = next(
-                            (os.fsdecode(entry.partition(b"=")[2]) for entry in _process_environment(row.pid)
-                             if entry.startswith(b"PROVENANT_RUN_TOKEN=")), None)
+                        self.verified_owner_tokens[identity] = token
                     spared.add(identity)
         changed = True
         while changed:
@@ -4157,8 +4135,9 @@ def _run_attempt(
         if retry_failure:
             failures.setdefault(retry_failure["status"], retry_failure)
         if failures:
-            priority = [rule.signature for rule in FAILURE_RULES if rule.pattern and rule.short_window is None
-                        and (not rule.adapters or plan["adapter"] in rule.adapters)]
+            # Quota-window classification has no independent rollover priority.
+            priority = [signature for signature, _, adapters in FAILURE_PATTERNS if signature != "quota_window"
+                        and (not adapters or plan["adapter"] in adapters)]
             selected = next((failures[status] for status in priority if status in failures), next(iter(failures.values())))
             parsed.update(selected)
     if live_failure and forced == live_failure["status"]:
