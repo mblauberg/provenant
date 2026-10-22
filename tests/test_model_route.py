@@ -5037,3 +5037,15 @@ def test_a_custom_catalogue_cannot_use_retired_tier_names(tmp_path, mutate, mess
                              "--alias", "senior", "--role", "worker"], text=True, capture_output=True, check=False)
     assert result.returncode == 2
     assert message in result.stderr
+
+
+def test_provider_quota_cooldown_skips_models_outside_the_plan_it_covers():
+    router = load_router()
+    catalog = router.catalogue_snapshot()
+    until = (datetime.now(timezone.utc) + timedelta(days=3)).isoformat()
+    cooldowns = {"opencode/*": {"status": "quota_exhausted", "cooling_until": until, "source": "provider quota",
+                                "covers": ["opencode-go/"]}}
+    assert router._cooling("opencode", "opencode-go/glm-5.3-flash", cooldowns, catalog) == until
+    assert not router._cooling("opencode", "opencode/glm-5.3-flash-free", cooldowns, catalog)
+    own = {**cooldowns, "opencode/opencode/glm-5.3-flash-free": {"cooling_until": until}}
+    assert router._cooling("opencode", "opencode/glm-5.3-flash-free", own, catalog) == until

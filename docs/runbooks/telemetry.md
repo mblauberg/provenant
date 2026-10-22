@@ -220,6 +220,7 @@ provenant quota tick --json     # fetch what is due, write report.json, print it
 provenant quota schedule        # each account's next due time and reason; never fetches
 provenant quota trace --since 24h
 provenant quota path [--json]   # the quota state directory
+provenant quota forget agy/google-<hash>   # drop a signed-out account's remembered reading
 provenant routes --json         # cached quota only; never fetches
 ```
 
@@ -245,7 +246,29 @@ is labelled `google-<hash>`: a hash of the signed-in address from agy's newest
 log under `~/.gemini/antigravity-cli/log`. A reading whose own run reports
 another address is refused rather than filed under the wrong account. agy quota
 is report-only: its pools differ per model family, so it sets no provider-wide
-cooldown (#1062).
+cooldown (#1062). Each window carries its `pool`, such as `gemini` or `claude`;
+see Display below.
+
+Switching agy to another Google account keeps the previous one as
+`status: signed_out`, with its last reading, observed time and resets. A
+signed-out account is never fetched, has no local activity and never enters
+routing placement. Signing in again resumes the same label and history. The
+label is a hash of the address, so it is the same on every host. `provenant
+quota forget <provider>/<label>` deletes a signed-out account's remembered
+snapshot; it refuses an account that is signed in. `quota.remembered.forget_after_days`
+(default unset) stops listing a remembered account unseen that long, without
+deleting it. Listing configured agy fingerprints in `accounts.agy` names them
+and still shows the signed-in and remembered ones not listed. An alias such
+as `accounts.agy.work` binds to the account it first reads, decided under the
+refresh lock, and keeps that account's history when another signs in: a
+reading for another account, or one that does not say whose it is, fails as
+`auth` and leaves the last reading `stale`. To rebind an alias deliberately,
+set its `fingerprint` to the new account's label, such as
+`"work": {"fingerprint": "google-4e7d2a91c05b"}`. The mechanism is
+generic: a provider module with `fingerprinted(label)` gets it. Codex and
+Cursor are labelled `default` and do not use it yet: Codex's rate-limit read
+carries no account identity, so it would need a further `account/read` call,
+and Cursor's user id is only in the session token it reads at fetch time.
 
 `PROVENANT_QUOTA=0` or `quota.enabled=false` in the telemetry config disables
 fetching and quota routing input. Cached quota can still be displayed. Errors
@@ -398,7 +421,7 @@ names them by codename, such as `iguana_necktie` with `limit_dollars` and
 `used_amount`, `limit_amount` and `currency`; the table shows `$136 of $250`.
 `quota.window_labels` maps a window name to a display label and adds to or
 overrides the built-in map, which labels `iguana_necktie` as
-`Cloud session credits`. Report windows carry `label` only when one is mapped.
+`Cloud session credits`. Every report window carries `label`; see Display.
 
 An account can also report `usage_credits`, a list of credit balances drawn on
 once the plan allowance runs out, and `resets`, the banked resets available with
@@ -419,6 +442,51 @@ events in `quota_events`, per provider, account, host and window. These describe
 observed changes, not a presumed billing calendar. Natural rollover compares
 the new provider window start against the previous provider reset. Restarted
 windows must start within five minutes of the observation.
+
+### Display
+
+The report owns the display vocabulary, so the table and the menu bar agree.
+All of it is additive to `provenant.quota.report.v1`.
+
+- Each account has `provider_name` ("Claude", "Codex", "OpenCode",
+  "Antigravity"; an unknown provider is title-cased), `display_name` and
+  `plan_label` ("Pro Lite", "Pro (Student)").
+- `display_name` comes from an optional `display_name` key on
+  `accounts.<provider>.<label>` in `telemetry.json`. Without one, a label is
+  title-cased (`anese` reads "Anese"), `default` has none, and a fingerprint
+  label such as `google-<hash>` has none, so the provider name stands alone.
+  Labels themselves never change.
+- Each window's `label` comes from `quota.window_labels`, else from its length:
+  `5-hour`, `Daily`, `Weekly`, `Monthly` (28 to 31 days, so a billing cycle
+  reads Monthly), or `3-day` for another length, with a qualifier when the
+  name adds one, such as `Weekly (Opus)`. An untimed window is its name in
+  sentence case.
+- A `limits` entry that restates a named window, with the same pool, length,
+  use and reset to the minute, such as Claude's `weekly_all:2` beside
+  `seven_day`, is dropped; the named one stays. An entry that differs in any
+  of those stays, and two named windows are never merged.
+- A pooled window has `pool` and `pool_label` ("Claude models"). Pools are
+  independent: the account is usable while any pool is, the most used usable
+  pool binds, and when every pool is exhausted the account is `back_at` the
+  first pool's return.
+- `display_window` names the window to show: an exhausted one; else one at or
+  above `quota.display.short_window_alert_percent` (default 90, echoed in the
+  report's `display`); else the longest. A window whose reset has passed
+  carries `reset_passed: true` and never shows as current use; the table shows
+  `-` and "reset since".
+- `headline` names the account the menu bar shows, set by
+  `quota.menubar.headline`: `recent` (default), the usable account with the
+  latest local activity, or the highest priority without any; `worst`, the
+  highest binding use; `<provider>/<account>` to pin one; or `none`. Its
+  `account` is null when nothing usable remains.
+
+```json
+{"quota": {"display": {"short_window_alert_percent": 90},
+           "menubar": {"headline": "recent"},
+           "remembered": {"forget_after_days": 30}},
+ "accounts": {"claude": {"anese": {"identity_dir": "~/.claude"}},
+              "agy": {"google-<hash>": {"display_name": "Michael"}}}}
+```
 
 ### Quota history and plan prices
 

@@ -54,7 +54,9 @@ REPORT_SCHEMA = 'provenant.quota.report.v1'
 HERE = Path(__file__).resolve().parent
 # Adding a provider is one module exposing ADAPTER, default_identity() and
 # fetch(account, io, now), plus one line here. A module whose one credential store
-# serves several accounts may add account_label() to name the signed-in one locally.
+# serves several accounts may add account_label() to name the signed-in one locally, and
+# fingerprinted(label) so accounts seen before are kept as signed out. A module whose
+# windows fall into independent pools may add window_pool(name).
 REGISTRY = {
     'agy': HERE / 'quota_providers/agy.py',
     'claude': HERE / 'quota_providers/claude.py',
@@ -77,6 +79,19 @@ CREDITS_POLICIES = ('last_resort', 'normal', 'never')
 UNKNOWN_RESET_SECONDS = 3600  # How long a refused allowance cools when no reset time is known.
 # Providers name some windows by codename; `quota.window_labels` in telemetry.json adds or overrides labels.
 WINDOW_LABELS = {'iguana_necktie': 'Cloud session credits'}
+# One display vocabulary for every reader of the report: the menu bar, `provenant quota` and the console.
+# An unknown provider or plan falls back to title case.
+PROVIDER_NAMES = {'agy': 'Antigravity', 'claude': 'Claude', 'codex': 'Codex', 'copilot': 'Copilot',
+                  'cursor': 'Cursor', 'kiro': 'Kiro', 'opencode': 'OpenCode'}
+PLAN_NAMES = {'prolite': 'Pro Lite', 'pro_lite': 'Pro Lite', 'pro_student': 'Pro (Student)'}
+LENGTH_LABELS = {60: 'Hourly', 300: '5-hour', 1440: 'Daily', 10080: 'Weekly'}
+MONTH_MINUTES = (28 * 1440, 31 * 1440)  # a calendar month or billing cycle
+# Name parts that only restate a window's length or slot; what remains qualifies its label, as in `Weekly (Opus)`.
+LENGTH_WORDS = frozenset({'five', 'seven', 'thirty', 'hour', 'hours', 'day', 'days', 'week', 'month', 'hourly',
+                          'daily', 'weekly', 'monthly', 'primary', 'secondary', 'billing', 'cycle', 'session',
+                          'all', 'scoped', 'window', 'limit'})
+SHORT_WINDOW_ALERT = 90  # a shorter window this used is shown instead of the longest (`quota.display`)
+HEADLINES = ('recent', 'worst', 'none')  # `quota.menubar.headline`, or a pinned `<provider>/<account>`
 SEVERITY = ('exhausted', 'unknown', 'unreported', 'deficit', 'on_pace', 'reserve', 'early', 'not_started')
 _identity_spec = importlib.util.spec_from_file_location('provider_identity', HERE / 'provider_identity.py')
 identity = sys.modules.get('provider_identity')
@@ -119,13 +134,15 @@ class Unavailable(Exception):
         self.retry_at = retry_at
 
 
-# A non-secret label, the CLI identity directory, and whether that is the CLI's default.
-class Account(namedtuple('Account', 'provider label identity_dir active plan priority options')):
+# A non-secret label, the CLI identity directory, and whether that is the CLI's default. A signed-out account
+# is one this host read before through a credential store that is now signed in to another; it is never fetched.
+class Account(namedtuple('Account', 'provider label identity_dir active plan priority options signed_out')):
     __slots__ = ()
 
-    def __new__(cls, provider, label, identity_dir, active=False, plan=None, priority=None, options=None):
+    def __new__(cls, provider, label, identity_dir, active=False, plan=None, priority=None, options=None,
+                signed_out=False):
         return super().__new__(cls, provider, label, identity_dir, active, plan, priority,
-                               options if options is not None else {})
+                               options if options is not None else {}, signed_out)
 
 
 class _Io:
@@ -285,27 +302,118 @@ def accounts():
     for name in sorted(set(registered()) | set(listed)):
         module = provider(name)
         default = module.default_identity() if module else identity.selected_identity(name)
+        shared = getattr(module, 'fingerprinted', None)  # one credential store serves several accounts
+        signed = getattr(module, 'account_label', lambda: None)() if module and (shared or name not in listed) else None
         if name not in listed:
             if default is not None and Path(default).exists():
-                label = getattr(module, 'account_label', lambda: None)() or identity.account_key(name, default, entries={})
+                label = signed or identity.account_key(name, default, entries={})
                 found.append(Account(name, label, Path(default), True))
+                found += [Account(name, other, Path(default), signed_out=True)
+                          for other in remembered(name, shared, Path(default)) if other != label]
             continue
         active_label = identity.account_key(name, default, listed[name])
         configured_default = identity.default_identity(name)
-        for label, entry in sorted(listed[name].items()):
-            entry = entry if isinstance(entry, dict) else {}
-            if entry.get('enabled') is False:
-                continue
+        enabled = {label: entry if isinstance(entry, dict) else {} for label, entry in listed[name].items()
+                   if not isinstance(entry, dict) or entry.get('enabled') is not False}
+        dirs = {}
+        for label, entry in sorted(enabled.items()):
             if not entry.get('identity_dir') and configured_default is None:
                 raise ValueError(f'{name}/{label} requires identity_dir')
-            identity_dir = Path(entry.get('identity_dir') or configured_default).expanduser()
+            dirs[label] = Path(entry.get('identity_dir') or configured_default).expanduser()
+        # On a shared store, an alias such as `work` names whichever account it first read: its fingerprint, from
+        # the entry or the alias's last reading. A fingerprint label is its own.
+        bound = {label: label if shared(label) else bound_fingerprint(name, label, dirs[label], entry, shared)
+                 for label, entry in enabled.items()} if shared else {}
+        claimed = signed in bound.values()
+        for label, entry in sorted(enabled.items()):
             priority = number(entry.get('priority'))
-            found.append(Account(name, label, identity_dir, default is not None and label == active_label,
-                                 str(entry['plan']) if entry.get('plan') else None,
-                                 int(priority) if priority is not None else None,
-                                 {key: value for key, value in entry.items()
-                                  if key not in ('identity_dir', 'enabled', 'plan', 'priority')}))
+            if shared:
+                # Current only while its own account is signed in; an unbound alias takes an unclaimed sign-in.
+                mine = bound[label] == signed if bound[label] else signed is None or not claimed
+                claimed = claimed or (bound[label] is None and mine and signed is not None)
+                away = not mine
+                active = default is not None and mine and (signed is not None or label == active_label)
+            else:
+                away, active = False, default is not None and label == active_label
+            # An entry's own `fingerprint` passes through as a deliberate binding; _refresh resolves the rest.
+            options = {key: value for key, value in entry.items()
+                       if key not in ('identity_dir', 'enabled', 'plan', 'priority', 'display_name')}
+            found.append(Account(name, label, dirs[label], active, str(entry['plan']) if entry.get('plan') else None,
+                                 int(priority) if priority is not None else None, options, away))
+        # Configured entries only name accounts, so the signed-in one and those seen before still appear under
+        # their fingerprints, unless an entry already stands for them.
+        if shared and enabled and default is not None and Path(default).exists():
+            taken = set(bound.values()) | ({signed} if claimed else set())
+            found += [Account(name, label, Path(default), label == signed, signed_out=label != signed)
+                      for label in sorted({signed} - {None} | set(remembered(name, shared, Path(default))))
+                      if label not in listed[name] and label not in taken]
     return found
+
+
+def bound_fingerprint(name, label, identity_dir, entry, shared):
+    """The account an alias on a shared store stands for: `fingerprint` in its entry, else its last reading's."""
+    for candidate in (entry.get('fingerprint'), (load_snapshot(name, label, identity_dir) or {}).get('fingerprint')):
+        if isinstance(candidate, str) and shared(candidate):
+            return candidate
+    return None
+
+
+def expected_fingerprint(account, previous):
+    """The account a reading from a shared store must come from: the entry's `fingerprint`, which deliberately
+    binds or rebinds an alias; a fingerprint label; else the alias's snapshot, reloaded under the refresh lock so
+    two concurrent refreshes never both claim an unbound alias. None for an unbound alias or an unshared store."""
+    shared = getattr(provider(account.provider), 'fingerprinted', None)
+    if not shared:
+        return None
+    for candidate in (account.options.get('fingerprint'), account.label, (previous or {}).get('fingerprint')):
+        if isinstance(candidate, str) and shared(candidate):
+            return candidate
+    return None
+
+
+def remembered(name, shared, identity_dir, now=None):
+    """Fingerprinted accounts this host has a snapshot for under one shared identity, such as agy's one Keychain
+    item: signing in to another account leaves their last reading listed as signed out rather than forgotten.
+
+    Fingerprints hash the account itself, never the host, so a later merge of peers' readings dedupes by label.
+    With `quota.remembered.forget_after_days`, an account unseen that long is no longer listed."""
+    if shared is None:
+        return []
+    template = cache_path(name, '*', identity_dir=identity_dir)
+    prefix, suffix = template.name.split('*')
+    days = number(setting_map('remembered').get('forget_after_days'))
+    cutoff = (now or utcnow()) - timedelta(days=days) if days and days > 0 else None
+    labels = []
+    for path in template.parent.glob(template.name):
+        label = path.name[len(prefix):-len(suffix)]
+        if not shared(label):
+            continue
+        if cutoff is not None:
+            try:
+                seen = parse_time(json.loads(path.read_text()).get('observed_at'))
+            except (OSError, ValueError, AttributeError):
+                seen = None
+            if seen is None or seen < cutoff:
+                continue
+        labels.append(label)
+    return sorted(labels)
+
+
+def forget(account_key):
+    """Remove a signed-out account's remembered snapshot on this host. A signed-in account is never forgotten."""
+    name, _, label = str(account_key).partition('/')
+    match = next((account for account in accounts() if (account.provider, account.label) == (name, label)), None)
+    if match is None:
+        raise ValueError(f'{account_key} is not a known account on this host')
+    if not match.signed_out:
+        raise ValueError(f'{account_key} is signed in; only a signed-out account can be forgotten')
+    path = cache_path(name, label, identity_dir=match.identity_dir)
+    with locked(path.with_suffix('.lock')):
+        path.unlink(missing_ok=True)
+    path.with_suffix('.lock').unlink(missing_ok=True)
+    named = isinstance((configured().get(name) or {}).get(label), dict)
+    return (f'{account_key}: forgotten' +
+            ('; it stays listed while telemetry.json names it' if named else ''))
 
 
 # Provider I/O for quota modules -------------------------------------------------------------
@@ -430,7 +538,8 @@ def normalise_window(raw):
     return {'name': name, 'raw_kind': str(raw['raw_kind']) if raw.get('raw_kind') is not None else None,
             'used_percent': round(max(0.0, min(100.0, used)), 2), 'window_minutes': minutes,
             'reset_at': iso(reset), 'window_start': iso(start), **window_amounts(raw),
-            **({'advisory': True} if raw.get('advisory') is True else {})}
+            **({'advisory': True} if raw.get('advisory') is True else {}),
+            **({'pool': raw['pool']} if _code(raw.get('pool'), r'[a-z0-9][a-z0-9._-]{0,31}') else {})}
 
 
 def _code(value, pattern):
@@ -707,12 +816,22 @@ def _refresh(account, now=None, force=False, trigger='timer', power='ac', ignore
     if provider(account.provider) is None:
         return blank(account, 'unreported', f'no quota source is registered for {account.provider}')
     previous = load_snapshot(account.provider, account.label, account.identity_dir)
+    if account.signed_out:  # never fetched: the shared store would answer for the signed-in account
+        return {**cached(account, previous or blank(account, 'signed_out')), 'status': 'signed_out', 'error': None}
     block, due = scheduled(account, previous, now, trigger, power, ignore_backoff)
     if previous and not force and not due:
         return cached(account, previous, block)
     started, kind, wait, deadline = monotonic(), None, None, None
     try:
         result = fetch(account, now)
+        # A shared store answers for whoever is signed in now; never file that under another account, and never
+        # file a reading that cannot say whose it is.
+        if getattr(provider(account.provider), 'fingerprinted', None):
+            expected, read = expected_fingerprint(account, previous), result.get('fingerprint')
+            if not isinstance(read, str):
+                raise Unavailable(f'{account.provider} did not say which account it read for {account.label}', 'auth')
+            if expected and read != expected:
+                raise Unavailable(f'{account.provider} is signed in to a different account than {account.label}', 'auth')
     except Unavailable as exc:
         # Provider text is fixed, but nothing token-shaped may reach the snapshot either.
         error, kind, wait = SECRETISH.sub('[redacted]', str(exc)), exc.kind, exc.retry_after
@@ -741,7 +860,8 @@ def _refresh(account, now=None, force=False, trigger='timer', power='ac', ignore
                  'plan': str(plan) if plan else None, 'observed_at': observed,
                  'source': result.get('source'), 'windows': windows, 'unreported': unreported,
                  'credits': result.get('credits') if isinstance(result.get('credits'), dict) else None,
-                 **{key: extra for key, extra in extras.items() if extra}}
+                 **{key: extra for key, extra in extras.items() if extra},
+                 **({'fingerprint': result['fingerprint']} if isinstance(result.get('fingerprint'), str) else {})}
         value['fetch'] = fetch_state(account, previous, now, trigger, monotonic() - started)
         record_events(previous, value)
         record_series(value, result)
@@ -928,6 +1048,149 @@ def governing(rows):
                default=None)
 
 
+def pools(rows):
+    """Windows by pool, each with the unpooled windows that bind every pool; one group when nothing is pooled."""
+    names = sorted({row['pool'] for row in rows if row.get('pool')})
+    return {name: [row for row in rows if row.get('pool') in (name, None)] for name in names} or {None: rows}
+
+
+def back_at(rows):
+    """When a pool's exhaustion ends: its exhausted window that resets last, or None if none is exhausted."""
+    spent = [row for row in rows if sets_state(row) and row['pace']['state'] == 'exhausted']
+    return max(spent, key=lambda row: row.get('reset_at') or '9999', default=None)
+
+
+def binding(rows):
+    """The window that binds the account. Pools are independent, so the account is usable while any pool is:
+    the most constrained usable pool binds, and when every pool is exhausted, the pool back soonest binds."""
+    groups = list(pools(rows).values())
+    live = [worst for worst in map(governing, groups) if worst and worst['pace']['state'] != 'exhausted']
+    if live:
+        return governing(live)
+    spent = [window for window in map(back_at, groups) if window]
+    return min(spent, key=lambda row: row.get('reset_at') or '9999', default=None) or governing(rows)
+
+
+def reset_passed(row, now):
+    reset = parse_time(row.get('reset_at'))
+    return bool(reset and reset <= now)
+
+
+def display(rows, now, alert=SHORT_WINDOW_ALERT):
+    """The window a reader should see: an exhausted one binds; else a shorter window at `alert`% or more, the
+    most used, even when the longest is higher, since the short one runs out first; else the longest, since
+    weekly and monthly headroom decides more than a 5-hour window does. A window whose reset has passed is never
+    shown as current."""
+    current = [row for row in rows if sets_state(row) and not reset_passed(row, now)]
+    spent = [row for row in current if row['pace']['state'] == 'exhausted']
+    if spent:
+        return max(spent, key=lambda row: row.get('reset_at') or '9999')
+    longest = max(current, key=lambda row: (row['window_minutes'] or 0, row['used_percent']), default=None)
+    alerts = [row for row in current if row['used_percent'] >= alert and row is not longest and
+              (row['window_minutes'] or 0) < (longest['window_minutes'] or 0)]
+    if alerts:
+        return max(alerts, key=lambda row: (row['used_percent'], -(row['window_minutes'] or 0)))
+    return longest
+
+
+def alert_percent():
+    value = number(setting_map('display').get('short_window_alert_percent'))
+    return value if value is not None and 0 < value <= 100 else SHORT_WINDOW_ALERT
+
+
+# Display vocabulary --------------------------------------------------------------------------
+
+def words(text):
+    return [word for word in re.split(r'[\s_.:-]+', str(text)) if word]
+
+
+def title_case(text):
+    """`pro_student` reads `Pro Student`; text that already has capitals is kept as written."""
+    text = str(text).strip()
+    return text if any(char.isupper() for char in text) else ' '.join(word[:1].upper() + word[1:] for word in words(text))
+
+
+def sentence_case(text):
+    text = str(text).strip() if any(char.isupper() for char in str(text)) else ' '.join(words(text))
+    return text[:1].upper() + text[1:]
+
+
+def provider_name(name):
+    return PROVIDER_NAMES.get(name) or title_case(name)
+
+
+def plan_label(plan):
+    return (PLAN_NAMES.get(str(plan).strip().lower()) or title_case(plan)) if plan else None
+
+
+def length_label(minutes):
+    """`Weekly` for 10080 minutes; an unnamed length reads `3-day` or `90-minute`."""
+    if not minutes:
+        return None
+    minutes = round(minutes)
+    if minutes in LENGTH_LABELS:
+        return LENGTH_LABELS[minutes]
+    if MONTH_MINUTES[0] <= minutes <= MONTH_MINUTES[1]:
+        return 'Monthly'
+    for unit, size in (('day', 1440), ('hour', 60)):
+        if minutes % size == 0:
+            return f'{minutes // size}-{unit}'
+    return f'{minutes}-minute'
+
+
+def window_label(row, labels):
+    """A label a provider or `quota.window_labels` gives wins. Otherwise the length names the window, so Codex's
+    `primary` of 10080 minutes reads `Weekly`, and what the name adds qualifies it: `seven_day_opus` reads
+    `Weekly (Opus)`. An untimed window keeps its own name in sentence case."""
+    if labels.get(row['name']):
+        return labels[row['name']]
+    length = length_label(row.get('window_minutes'))
+    if not length:
+        return sentence_case(row['name'])
+    base, _, tag = row['name'].partition(':')
+    extra = [word for word in words(base) if word.lower() not in LENGTH_WORDS and word != row.get('pool')
+             and not re.fullmatch(r'\d+[mhdw]', word.lower())]
+    extra += words(tag) if tag and not tag.isdigit() else []
+    return length + (f" ({sentence_case(' '.join(extra))})" if extra else '')
+
+
+def pool_of(provider_name, row):
+    hook = getattr(provider(provider_name), 'window_pool', None) if provider_name in registered() else None
+    value = row.get('pool') or (hook(row['name']) if hook else None)
+    return value if isinstance(value, str) and LABEL.fullmatch(value) else None
+
+
+def display_name(provider_name, label, entries):
+    """`accounts.<provider>.<label>.display_name`, else the label in title case. The CLI's `default` and a
+    discovered fingerprint name no one, so they read as the provider alone (None)."""
+    entry = (entries.get(provider_name) or {}).get(label)
+    named = entry.get('display_name') if isinstance(entry, dict) else None
+    if isinstance(named, str) and named.strip():
+        return named.strip()[:64]
+    shared = getattr(provider(provider_name), 'fingerprinted', None) if provider_name in registered() else None
+    return None if label == 'default' or (shared and shared(label)) else title_case(label)
+
+
+def configured_entries():
+    try:
+        return configured()
+    except ValueError:
+        return {}
+
+
+def repeats(window, windows):
+    """A `limits` entry (`weekly_all:2`) that restates a named window (`seven_day`): same pool, length, use and
+    reset. Only such an entry is dropped, never a named window, so two distinct limits that happen to match
+    both stay."""
+    def stamp(row):
+        return parse_time(row['reset_at'])
+    return ':' in window['name'] and any(
+        ':' not in other['name'] and other.get('pool') == window.get('pool') and
+        other['window_minutes'] == window['window_minutes'] and
+        other['used_percent'] == window['used_percent'] and stamp(other) and stamp(window) and
+        abs((stamp(other) - stamp(window)).total_seconds()) <= 60 for other in windows)
+
+
 def credits(*, raw=False):
     try:
         value = json.loads((state_root() / 'quota/credits.json').read_text())
@@ -1044,21 +1307,43 @@ def summary(value, worst, spent, drawing, rate):
             + (f', about {rate:,.0f}/h' if rate else ''))
 
 
-def describe(value, banked, now):
-    labels = window_labels()
-    rows = [{**row, 'pace': pace(row, now), **({'label': labels[row['name']]} if labels.get(row['name']) else {})}
-            for row in value.get('windows') or []]
-    worst = governing(rows)
+def describe(value, banked, now, entries=None, alert=None):
+    labels, name = window_labels(), value.get('provider')
+    rows = []
+    for row in value.get('windows') or []:
+        pool = pool_of(name, row)
+        row = {**row, 'pace': pace(row, now), **({'pool': pool, 'pool_label': f'{title_case(pool)} models'} if pool else {}),
+               **({'reset_passed': True} if reset_passed(row, now) else {})}
+        rows.append({**row, 'label': window_label(row, labels)})
+    # A restated window would show twice and count twice; the report keeps the named one.
+    rows = [row for row in rows if not repeats(row, rows)]
+    # A window whose reset has passed is history: it never makes the account exhausted or binds it, unless the
+    # provider still refuses ordinary use, which the next reading settles.
+    refused = (value.get('allowance') or {}).get('ordinary_usage_allowed') is False
+    worst = binding([row for row in rows if not row.get('reset_passed')]) or (binding(rows) if refused else None)
     spent = allowance_spent(value, worst)
     drawing = credit_draw(value, spent)
     rate = burn_rate(value, drawing) if drawing else None
     unreported = list(value.get('unreported') or [])
     dated = [row for row in rows if row.get('reset_at') and row.get('window_minutes')]
     longest = max(dated, key=lambda row: row['window_minutes'], default=None)
+    signed_out = value.get('status') == 'signed_out'
+    state = 'signed_out' if signed_out else 'credit_only' if drawing else 'exhausted' if spent else \
+        worst['pace']['state'] if worst else 'unreported'
+    shown = display([row for row in rows if row.get('pool') in (None, (worst or {}).get('pool'))], now,
+                    alert_percent() if alert is None else alert)
+    # A signed-out account's return is history too: "back since" once its reset has passed.
+    back = binding(rows) if signed_out else worst if spent else None
+    back = back if back and back['pace']['state'] == 'exhausted' else None
     return {key: value.get(key) for key in ('provider', 'account', 'plan', 'host', 'active', 'priority',
                                             'observed_at', 'attempted_at', 'status', 'error', 'source')} | {
-        'state': 'credit_only' if drawing else 'exhausted' if spent else worst['pace']['state'] if worst else 'unreported',
-        'summary': summary(value, worst, spent, drawing, rate),
+        'provider_name': provider_name(name),
+        'display_name': display_name(name, value.get('account'), configured_entries() if entries is None else entries),
+        'plan_label': plan_label(value.get('plan')), 'display_window': shown['name'] if shown else None,
+        'back_at': back.get('reset_at') if back else None,
+        'state': state,
+        'summary': f"signed out; last read {value.get('observed_at') or 'never'}" if signed_out else
+                   summary(value, worst, spent, drawing, rate),
         'windows': rows, 'unreported': unreported,
         'coverage_note': f"{', '.join(unreported)} not reported by {value.get('provider')}; missing does not mean 0%"
                          if unreported else '',
@@ -1080,14 +1365,55 @@ def optional_credits(value, banked):
     return {key: extra for key, extra in extras.items() if extra}
 
 
-def report(values, now=None, refreshing=()):
+def local_activity(found=None):
+    """The latest local use per account id, from identity file times; a signed-out account has none, since the
+    shared store's activity belongs to whoever is signed in."""
+    try:
+        found = accounts() if found is None else found
+    except (OSError, ValueError):
+        return {}
+    return {account_id(account): schedule.activity(account.provider, account.identity_dir)
+            for account in found if not account.signed_out}
+
+
+def usable(row):
+    return row['status'] in ('ok', 'stale') and row['display_window'] and row['state'] not in (
+        'exhausted', 'credit_only', 'signed_out', 'unreported')
+
+
+def headline(rows, activity):
+    """The account the menu bar shows (`quota.menubar.headline`): `recent`, the usable account used most recently
+    here, falling back to the highest priority; `worst`, the usable account with the highest binding use; a
+    pinned `<provider>/<account>`; or `none`, the icon alone. None when nothing usable remains."""
+    mode = setting_map('menubar').get('headline')
+    mode = mode if mode in HEADLINES or isinstance(mode, str) and '/' in mode else 'recent'
+    rows = [row for row in rows if mode != 'none']
+    pinned = next((row for row in rows if f"{row['provider']}/{row['account']}" == mode), None)
+    candidates = [row for row in rows if usable(row)]
+    if pinned:
+        return {'mode': mode, 'account': mode, 'window': pinned['display_window']}
+    if mode == 'worst':
+        peaks = [(row, binding([item for item in row['windows'] if not item.get('reset_passed')]))
+                 for row in candidates]
+        row, peak = max(peaks, key=lambda item: item[1]['used_percent'], default=(None, None))
+        return {'mode': mode, 'account': row and f"{row['provider']}/{row['account']}", 'window': peak and peak['name']}
+    used = [row for row in candidates if activity.get(f"{row['provider']}/{row['account']}")]
+    row = (max(used, key=lambda row: activity[f"{row['provider']}/{row['account']}"]) if used else
+           min(candidates, key=lambda row: row['priority'] if row['priority'] is not None else 100, default=None))
+    return {'mode': mode, 'account': row and f"{row['provider']}/{row['account']}", 'window': row and row['display_window']}
+
+
+def report(values, now=None, refreshing=(), activity=None):
     now = now or utcnow()
     banked = credits()
-    rows = [describe(value, banked.get((value.get('provider'), value.get('account'), telemetry_host())), now)
+    entries, alert = configured_entries(), alert_percent()
+    rows = [describe(value, banked.get((value.get('provider'), value.get('account'), telemetry_host())), now,
+                     entries, alert)
             for value in freshest(values)]
     preference = {}
     for row in rows:
-        preference.setdefault(row['provider'], []).append(row)
+        if row['state'] != 'signed_out':  # routing never places work on an account that is not signed in
+            preference.setdefault(row['provider'], []).append(row)
 
     def order(row):
         # Spend the account whose longest window resets soonest first, so its headroom is not lost.
@@ -1099,6 +1425,8 @@ def report(values, now=None, refreshing=()):
     return {'schema': REPORT_SCHEMA, 'generated_at': iso(now), 'host': telemetry_host(), 'enabled': enabled(),
             'next_due_at': min(due, key=parse_time) if due else None, 'refreshing': sorted(refreshing),
             'providers': registered(), 'accounts': rows,
+            'display': {'short_window_alert_percent': alert},
+            'headline': headline(rows, local_activity() if activity is None else activity),
             'placement_preference': {name: [row['account'] for row in sorted(group, key=order)]
                                      for name, group in sorted(preference.items())}}
 
@@ -1128,7 +1456,7 @@ def plans(now, trigger='timer', power='ac', ignore_backoff=False):
     for account in accounts():
         previous = load_snapshot(account.provider, account.label, account.identity_dir)
         # Phase 4 hook: passive readers (rollouts, refusals, cooldowns) would update `previous` here.
-        if not enabled() or provider(account.provider) is None:
+        if not enabled() or provider(account.provider) is None or account.signed_out:
             rows.append((account, _refresh(account, now), False))
             continue
         block, due = scheduled(account, previous, now, trigger, power, ignore_backoff)
@@ -1146,12 +1474,13 @@ def _tick(trigger, power, ignore_backoff):
     now = utcnow()
     rows = plans(now, trigger, power, ignore_backoff)
     values = {account_id(account): value for account, value, _ in rows}
+    activity = local_activity([account for account, _, _ in rows])
     due = [account for account, _, is_due in rows if is_due]
     if not due:
-        value = report(list(values.values()), now)
+        value = report(list(values.values()), now, activity=activity)
         written = current_report()
-        # The fast path writes only when the earliest due time moved, or no report exists yet.
-        if written is None or written.get('next_due_at') != value['next_due_at']:
+        # The fast path writes only when the earliest due time or the headline moved, or no report exists yet.
+        if written is None or any(written.get(key) != value[key] for key in ('next_due_at', 'headline')):
             atomic_json(report_path(), value)
         return value
     from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -1159,7 +1488,7 @@ def _tick(trigger, power, ignore_backoff):
     guard, refreshing, kinds = threading.Lock(), {account_id(account) for account in due}, []
 
     def publish():
-        atomic_json(report_path(), report(list(values.values()), utcnow(), refreshing))
+        atomic_json(report_path(), report(list(values.values()), utcnow(), refreshing, activity))
 
     def run(account):
         try:
@@ -1185,7 +1514,7 @@ def _tick(trigger, power, ignore_backoff):
             run(account)
     finally:  # Even after a crash, readers never see a fetch left marked as running.
         with guard:
-            value = report(list(values.values()), utcnow())
+            value = report(list(values.values()), utcnow(), activity=activity)
             if kinds and len(kinds) == len(due) and all(kind == 'network' for kind in kinds):
                 value['offline'] = True  # every fetch failed to connect
             atomic_json(report_path(), value)
@@ -1223,11 +1552,13 @@ def route_states(now=None):
             continue
         module = provider(name)
         row = describe(value, None, now)
-        exhausted = [window['reset_at'] for window in row['windows']
+        current = [window for window in row['windows'] if not window.get('reset_passed')]
+        exhausted = [window['reset_at'] for window in current
                      if window['pace']['state'] == 'exhausted' and sets_state(window)]
         if row['state'] == 'exhausted' and not exhausted:
-            exhausted = [refused_until(governing(row['windows']), value, now)]
-        states[name] = {'adapter': getattr(module, 'ADAPTER', None), 'account': label, 'host': telemetry_host(), 'state': row['state'],
+            exhausted = [refused_until(binding(current) or binding(row['windows']), value, now)]
+        states[name] = {'adapter': getattr(module, 'ADAPTER', None), 'covers': list(getattr(module, 'COVERS', ())),
+                        'account': label, 'host': telemetry_host(), 'state': row['state'],
                         'summary': row['summary'], 'observed_at': value.get('observed_at'),
                         'cooling_until': max(exhausted) if exhausted and all(exhausted) else None,
                         # Pools pick a last-resort adapter only when nothing with allowance qualifies.
@@ -1268,7 +1599,8 @@ def apply_to_cooldowns(records, now=None):
                     observed and recorded and observed > recorded):
                 result[key] = {'adapter': adapter, 'model': '*', 'account': state['account'], 'host': state['host'],
                                'status': 'quota_exhausted', 'cooling_until': state['cooling_until'],
-                               'recorded_at': state['observed_at'], 'source': 'provider quota'}
+                               'recorded_at': state['observed_at'], 'source': 'provider quota',
+                               **({'covers': state['covers']} if state['covers'] else {})}
     return result
 
 
@@ -1304,35 +1636,28 @@ def reset_text(resets):
     return f"{count} banked reset{'s' if count != 1 else ''}" + (f' ({lead} {day(expiries[0])})' if expiries else '')
 
 
-def repeats(window, windows):
-    """A `limits` entry (`session:1`) that restates a named window (`five_hour`): same length, use and reset."""
-    def stamp(row):
-        return parse_time(row['reset_at'])
-    return ':' in window['name'] and any(
-        ':' not in other['name'] and other['window_minutes'] == window['window_minutes'] and
-        other['used_percent'] == window['used_percent'] and stamp(other) and stamp(window) and
-        abs((stamp(other) - stamp(window)).total_seconds()) <= 60 for other in windows)
-
-
 def render(value, verbose=False):
     table = _telemetry().table
     lines = [f"Provider quota on {value['host']}" + ('' if value['enabled'] else ' (fetching disabled)')]
     rows = []
     for row in value['accounts']:
-        head = (row['provider'], row['account'] + ('*' if row['active'] else ''), row['plan'] or '-')
+        head = (row['provider'], row['account'] + ('*' if row['active'] else ''), row.get('plan_label') or row['plan'] or '-')
         for window in row['windows']:
-            if repeats(window, row['windows']):
-                continue
-            pace_state, detail = window['pace']['state'], window['pace']['summary']
+            pace_state, detail, used = window['pace']['state'], window['pace']['summary'], used_text(window)
             if window.get('limit_amount') and not window['window_minutes']:  # a dollar budget has no pace
                 pace_state = '-'
                 detail = f"{amount(window['limit_amount'] - window['used_amount'], window.get('currency'))} left; " + \
                     detail.removesuffix('; window length unreported')
-            rows.append((*head, window.get('label') or window['name'], used_text(window),
+            if window.get('reset_passed'):  # a passed reset makes the reading history, never current use
+                pace_state, used, detail = '-', '-', f"reset since {window['reset_at'][:16].replace('T', ' ')}"
+            if row['state'] == 'signed_out':
+                pace_state = 'signed out'
+            label = window.get('label') or window['name']
+            rows.append((*head, f"{window['pool_label']} · {label}" if window.get('pool_label') else label, used,
                          window_length(window['window_minutes']),
                          (window['reset_at'] or '-')[:16].replace('T', ' '), pace_state, detail))
         if not row['windows']:
-            rows.append((*head, '-', '-', '-', '-', row['status'], row['error'] or ''))
+            rows.append((*head, '-', '-', '-', '-', row['status'].replace('_', ' '), row['error'] or ''))
     lines += table(('provider', 'account', 'plan', 'window', 'used', 'length', 'resets', 'pace', 'detail'), rows)
     # A plan lacks many optional windows, so absence alone is not news: list them only on request.
     for row in value['accounts'] if verbose else []:
@@ -1443,6 +1768,22 @@ def main(argv=None):
         paths = {'state_dir': str(quota_dir()), 'report': str(report_path()),
                  'trace': str(quota_dir() / 'fetches.jsonl'), 'lock': str(quota_dir() / 'refresh.lock')}
         print(json.dumps(paths, indent=2) if args.json else paths['state_dir'])
+        return 0
+    if argv[:1] == ['forget']:
+        parser = argparse.ArgumentParser(prog='provenant quota forget',
+                                         description='Remove a signed-out account\'s remembered reading on this host.')
+        parser.add_argument('account', help='<provider>/<label>, as `provenant quota` lists it')
+        parser.add_argument('--json', action='store_true', help='print the report without the account')
+        args = parser.parse_args(argv[1:])
+        try:
+            message = forget(args.account)
+            value = report([row for _, row, _ in plans(utcnow())]) if args.json else None
+            if value is not None:
+                atomic_json(report_path(), value)
+        except (OSError, ValueError) as exc:
+            print(f'quota: {exc}', file=sys.stderr)
+            return 1
+        print(json.dumps(value, indent=2) if args.json else message)
         return 0
     if argv[:2] == ['credit', 'list']:
         parser = argparse.ArgumentParser(prog='provenant quota credit list')
