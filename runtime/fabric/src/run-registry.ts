@@ -951,6 +951,12 @@ function v1Rows(runDir: string): Record<string, any>[] {
       }
   }
   const metadata = readJson(join(runDir, "dispatch-status.json"));
+  const summary =
+    typeof metadata?.batch_id === "string" && /^[A-Za-z0-9._-]+$/u.test(metadata.batch_id)
+      ? readJson(join(runDir, "dispatch/batches", metadata.batch_id, "summary.json"))
+      : undefined;
+  // A batch rejected at preflight has a summary but no attempts; anything else empty has no rows.
+  if (grouped.size === 0 && !Array.isArray(summary?.tasks)) return [];
   const receipt = readJson(join(runDir, "RUN_RECEIPT.json"));
   const owners = runOwners(readOwnerRecord(runDir), metadata);
   const live = liveness(runDir, owners);
@@ -964,11 +970,6 @@ function v1Rows(runDir: string): Record<string, any>[] {
   // A closure the owner never wrote takes the run's recorded finish; unknown stays null.
   const time = (value: unknown) => (typeof value === "string" ? value : null);
   const closedAt = closed ? time(metadata?.finished_at) : null;
-  const summary =
-    typeof metadata?.batch_id === "string" && /^[A-Za-z0-9._-]+$/u.test(metadata.batch_id)
-      ? readJson(join(runDir, "dispatch/batches", metadata.batch_id, "summary.json"))
-      : undefined;
-  if (grouped.size === 0 && !Array.isArray(summary?.tasks)) return [];
   const rows: Record<string, any>[] = [...grouped.values()].map((attempts) => {
     const row = attempts.sort((a, b) => Number(a.attempt) - Number(b.attempt)).at(-1)!;
     const routeIndex = Array.isArray(metadata?.task_ids) ? metadata.task_ids.indexOf(row.task_id) : 0;
@@ -1047,7 +1048,7 @@ function v1Rows(runDir: string): Record<string, any>[] {
         started_at: metadata.started_at,
         ended_at: terminal ? time(terminalTask?.finished_at) ?? time(summary?.finished_at) ?? closedAt : null,
         paths: {},
-        digest: `${terminal ? canonicalSuccessStatus(terminalTask?.status ?? "interrupted") : "queued"} ${id}`,
+        digest: `${terminal ? canonicalSuccessStatus(terminalTask?.status ?? "interrupted") : "queued"} ${id}${typeof terminalTask?.error === "string" ? `: ${terminalTask.error}` : ""}`,
       });
     }
   const order = Array.isArray(metadata?.task_ids) ? metadata.task_ids.map(String) : []; // manifest order, else task-2 before task-10
