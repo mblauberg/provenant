@@ -980,7 +980,10 @@ def test_help_command_gives_detail_for_specific_command(tmp_path):
 def test_output_budget_defaults_stay_under_limits_on_fixture_state(tmp_path: Path):
     provenant_script = ROOT / "scripts" / "provenant"
     env = os.environ.copy()
+    for name in AMBIENT_ROOT_VARIABLES:  # an operator's AGENTS_HOME must not reach the budgets
+        env.pop(name, None)
     env["AGENT_FABRIC_PRODUCT_ROOT"] = str(ROOT)
+    env["AGENT_FABRIC_INSTANCE_ROOT"] = str(tmp_path / "instance-root")
     loader = ROOT / "runtime/fabric/node_modules/tsx/dist/loader.mjs"
     if not loader.exists():
         loader = ROOT / "node_modules/tsx/dist/loader.mjs"

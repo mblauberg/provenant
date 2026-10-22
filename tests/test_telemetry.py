@@ -1,11 +1,14 @@
 from pathlib import Path
+import contextlib
 import importlib.util
+import io
 import json
 import os
 import sqlite3
 import subprocess
 import sys
 import types
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -24,6 +27,32 @@ def environment(tmp_path):
 
 
 def cli(tmp_path, *args):
+    spec = importlib.util.spec_from_file_location('telemetry_cli_under_test', ROOT / 'scripts/telemetry.py')
+    assert spec is not None and spec.loader is not None
+    telemetry = importlib.util.module_from_spec(spec)
+    arguments = list(args[1:] if args and args[0] == 'telemetry' else args)
+    stdout, stderr = io.StringIO(), io.StringIO()
+    original_cwd = Path.cwd()
+    previous_module = sys.modules.get(spec.name)
+    try:
+        os.chdir(tmp_path)
+        with patch.dict(os.environ, environment(tmp_path)), \
+                patch.object(sys, 'path', [str(ROOT / 'scripts'), *sys.path]), \
+                contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            sys.modules[spec.name] = telemetry
+            spec.loader.exec_module(telemetry)
+            code = telemetry.main(arguments)
+    finally:
+        if previous_module is None:
+            sys.modules.pop(spec.name, None)
+        else:
+            sys.modules[spec.name] = previous_module
+        os.chdir(original_cwd)
+    return subprocess.CompletedProcess([str(ROOT / 'scripts/provenant'), *args], code,
+                                        stdout.getvalue(), stderr.getvalue())
+
+
+def cli_process(tmp_path, *args):
     return subprocess.run([str(ROOT / 'scripts/provenant'), *args],
                           env=environment(tmp_path), cwd=tmp_path,
                           capture_output=True, text=True)
@@ -242,7 +271,7 @@ def test_stats_since_json_tokens_unknown_cost_and_daily_limits(tmp_path):
         'adapter': 'opencode', 'model': 'free', 'status': 'rate_limited',
         'recorded_at': '2026-10-21T01:00:00Z', 'source_run': 'r'}}})
     assert cli(tmp_path, 'telemetry', 'ingest').returncode == 0
-    result = cli(tmp_path, 'stats', '--since', '2026-10-21', '--json')
+    result = cli_process(tmp_path, 'stats', '--since', '2026-10-21', '--json')
     assert result.returncode == 0, result.stderr
     stats = json.loads(result.stdout)
     usage = stats['usage'][0]
@@ -258,7 +287,7 @@ def test_stats_since_json_tokens_unknown_cost_and_daily_limits(tmp_path):
     assert len(stats['usage_per_day']) == 1
     assert stats['usage_per_day'][0]['day'] == '2026-10-21'
     assert stats['usage_per_day'][0]['input_tokens'] == 10
-    plain = cli(tmp_path, 'stats', '--since', '2026-10-21')
+    plain = cli_process(tmp_path, 'stats', '--since', '2026-10-21')
     assert plain.returncode == 0 and 'missing' in plain.stdout
 
 

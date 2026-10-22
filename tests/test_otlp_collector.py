@@ -206,7 +206,8 @@ def test_collector_stores_json_rejects_protobuf_and_exits_idle(binary, tmp_path)
 
 
 def test_collector_refuses_non_loopback(binary, tmp_path):
-    result = subprocess.run([str(binary), '--listen', '0.0.0.0:4318'],
+    # A fixed port would collide with another worker if the refusal regressed and bound it.
+    result = subprocess.run([str(binary), '--listen', f'0.0.0.0:{free_port()}'],
                             env={**os.environ, 'AGENT_FABRIC_STATE_ROOT': str(tmp_path)},
                             capture_output=True, text=True, timeout=5)
     assert result.returncode == 2 and 'loopback' in result.stderr

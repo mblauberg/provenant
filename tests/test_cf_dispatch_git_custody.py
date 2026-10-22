@@ -9,7 +9,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from test_cf_dispatch import PRODUCT_ROOT, SCRIPT, fabric_free_env, write_executable
+from cf_dispatch_support import PRODUCT_ROOT, SCRIPT, fabric_free_env, write_executable
 
 
 GIT_CONTEXT_VARIABLES = (

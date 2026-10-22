@@ -1,11 +1,15 @@
 """Routes and receipts report the effort actually applied, never a made-up one."""
 
 import importlib
+import importlib.util
+import io
 import json
 import os
 from pathlib import Path
 import subprocess
 import sys
+from contextlib import redirect_stderr, redirect_stdout
+from unittest.mock import patch
 
 import pytest
 
@@ -14,12 +18,18 @@ FIX = ROOT / "tests/fixtures/fabric-context"
 
 
 def resolve(*args):
-    result = subprocess.run(
-        [sys.executable, str(ROOT / "scripts" / "model_route.py"), "resolve", *args],
-        text=True, capture_output=True,
-        env={**os.environ, "PATH": "", "AGENT_FABRIC_INSTANCE_ROOT": str(ROOT),
-             "AGENT_FABRIC_PRODUCT_ROOT": str(ROOT)},
-    )
+    path = ROOT / "scripts" / "model_route.py"
+    spec = importlib.util.spec_from_file_location("actual_effort_router", path)
+    assert spec is not None and spec.loader is not None
+    router = importlib.util.module_from_spec(spec)
+    environment = {"PATH": "", "AGENT_FABRIC_INSTANCE_ROOT": str(ROOT),
+                   "AGENT_FABRIC_PRODUCT_ROOT": str(ROOT)}
+    stdout, stderr = io.StringIO(), io.StringIO()
+    with patch.dict(os.environ, environment), redirect_stdout(stdout), redirect_stderr(stderr):
+        spec.loader.exec_module(router)
+        code = router.main(["resolve", *args])
+    result = subprocess.CompletedProcess([str(path), "resolve", *args], code,
+                                         stdout.getvalue(), stderr.getvalue())
     route = json.loads(result.stdout) if result.stdout else None
     assert result.returncode == 0, (route, result.stderr)
     assert route["status"] == "ok", route

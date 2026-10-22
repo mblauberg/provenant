@@ -268,7 +268,9 @@ def test_live_script_requires_token_and_never_echoes_it_to_cross_origin_callers(
 def test_annotation_upload_refuses_an_existing_hard_link_without_changing_outside_bytes(
     tmp_path: Path,
 ) -> None:
-    with LiveServer(tmp_path) as server:
+    root = tmp_path / "workspace"
+    root.mkdir()
+    with LiveServer(root) as server:
         status, _, body = _request(
             f"{server.base_url}/annotation?token={quote(server.token)}&eventId=first",
             method="POST",
@@ -278,10 +280,10 @@ def test_annotation_upload_refuses_an_existing_hard_link_without_changing_outsid
         assert status == 200
         first_path = Path(json.loads(body)["path"])
         session_dir = first_path.parent
-        assert not session_dir.is_relative_to(tmp_path)
+        assert not session_dir.is_relative_to(root)
         assert session_dir.stat().st_mode & 0o777 == 0o700
-        assert not (tmp_path / ".impeccable" / "live" / "annotations").exists()
-        outside = tmp_path.parent / f"{tmp_path.name}-annotation-outside.png"
+        assert not (root / ".impeccable" / "live" / "annotations").exists()
+        outside = tmp_path / f"{root.name}-annotation-outside.png"
         outside.write_bytes(b"outside")
         os.link(outside, session_dir / "hard-link.png")
 
@@ -1230,9 +1232,11 @@ def test_offline_discard_cleanup_can_record_an_agent_error(tmp_path: Path) -> No
 def test_live_complete_rejects_a_missing_agent_state_at_an_unsafe_path(
     tmp_path: Path,
 ) -> None:
-    live_dir = tmp_path / ".impeccable" / "live"
+    root = tmp_path / "workspace"
+    root.mkdir()
+    live_dir = root / ".impeccable" / "live"
     live_dir.mkdir(parents=True)
-    unsafe_agent_path = tmp_path.parent / "untrusted-live-state" / "agent.json"
+    unsafe_agent_path = tmp_path / "untrusted-live-state" / "agent.json"
     (live_dir / "server.json").write_text(
         json.dumps(
             {
@@ -1246,7 +1250,7 @@ def test_live_complete_rejects_a_missing_agent_state_at_an_unsafe_path(
 
     completed = subprocess.run(
         ["node", str(SCRIPTS / "live-complete.mjs"), "--id", "deadbeef"],
-        cwd=tmp_path,
+        cwd=root,
         check=False,
         capture_output=True,
         text=True,
@@ -1394,13 +1398,15 @@ def test_default_lease_covers_the_normal_ten_minute_agent_poll_window(
 def test_design_sidecar_endpoint_rejects_a_symlink_instead_of_serving_it(
     tmp_path: Path,
 ) -> None:
-    outside = tmp_path.parent / f"{tmp_path.name}-design-secret.json"
+    root = tmp_path / "workspace"
+    root.mkdir()
+    outside = tmp_path / f"{root.name}-design-secret.json"
     outside.write_text(json.dumps({"schemaVersion": 2, "secret": "do-not-serve"}))
-    sidecar = tmp_path / ".impeccable" / "design.json"
+    sidecar = root / ".impeccable" / "design.json"
     sidecar.parent.mkdir(parents=True)
     sidecar.symlink_to(outside)
 
-    with LiveServer(tmp_path) as server:
+    with LiveServer(root) as server:
         status, _, body = _request(
             f"{server.base_url}/design-system.json?token={quote(server.token)}"
         )
@@ -1708,22 +1714,24 @@ def test_live_wrapper_fails_before_creating_private_state_when_runtime_is_missin
 def test_source_endpoint_rejects_ancestor_sibling_prefix_and_symlink_escape(
     tmp_path: Path,
 ) -> None:
-    inside = tmp_path / "inside..page.html"
+    root = tmp_path / "workspace"
+    root.mkdir()
+    inside = root / "inside..page.html"
     inside.write_text("inside")
-    secret = tmp_path / ".env"
+    secret = root / ".env"
     secret.write_text("API_KEY=do-not-serve")
-    disguised_secret = tmp_path / "disguised.html"
+    disguised_secret = root / "disguised.html"
     disguised_secret.symlink_to(secret)
-    unconfigured = tmp_path / "other.html"
+    unconfigured = root / "other.html"
     unconfigured.write_text("not configured")
-    outside_dir = tmp_path.parent / f"{tmp_path.name}-sibling"
+    outside_dir = tmp_path / f"{root.name}-sibling"
     outside_dir.mkdir(exist_ok=True)
     outside = outside_dir / "secret.html"
     outside.write_text("secret")
-    (tmp_path / "escape.html").symlink_to(outside)
-    _write_config(tmp_path, [inside.name, "disguised.html"])
+    (root / "escape.html").symlink_to(outside)
+    _write_config(root, [inside.name, "disguised.html"])
 
-    with LiveServer(tmp_path) as server:
+    with LiveServer(root) as server:
         def source(path_value: str):
             return _request(
                 f"{server.base_url}/source?token={quote(server.token)}&path={quote(path_value, safe='')}"

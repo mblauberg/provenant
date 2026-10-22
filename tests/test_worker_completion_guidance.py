@@ -56,21 +56,33 @@ def test_detached_helper_records_child_and_validates_reentry(tmp_path):
 def test_detached_helper_same_run_dir_allows_only_one_provider(tmp_path):
     run_dir = tmp_path / "same"
     launches = tmp_path / "launches"
+    release = tmp_path / "release"
+    # The winner holds the run dir until the test releases it, so the loser is refused
+    # whatever the host load; a fixed sleep would let the winner exit before the loser starts.
     worker_code = (
-        "import sys, time; "
-        "open(sys.argv[1], 'a').write('x'); "
-        "time.sleep(.15); sys.exit(7)"
+        "import os, sys, time\n"
+        "open(sys.argv[1], 'a').write('x')\n"
+        "while not os.path.exists(sys.argv[2]):\n"
+        "    time.sleep(.01)\n"
+        "sys.exit(7)\n"
     )
     processes = [
         subprocess.Popen(
-            _helper_command(run_dir, worker_code) + [str(launches)],
+            _helper_command(run_dir, worker_code) + [str(launches), str(release)],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.PIPE,
             text=True,
         )
         for _ in (1, 2)
     ]
-    statuses = [process.wait(timeout=5) for process in processes]
+    deadline = time.monotonic() + 30
+    try:
+        while not any(process.poll() is not None for process in processes):
+            assert time.monotonic() < deadline, "neither provider launch was refused"
+            time.sleep(0.01)
+    finally:
+        release.write_text("go")  # never leave the winner running when the wait fails
+    statuses = [process.wait(timeout=10) for process in processes]
 
     assert sorted(statuses) == [2, 7]
     assert launches.read_text() == "x"
@@ -122,14 +134,18 @@ def test_detached_helper_rejects_invalid_setup_before_launch(tmp_path):
 def test_detached_helper_validation_reports_startup(tmp_path):
     run_dir = tmp_path / "starting"
     run_dir.mkdir()
-    wrapper = subprocess.Popen(["sleep", "1"])
-    (run_dir / "wrapper.pid").write_text(f"{wrapper.pid}\n")
-    result = subprocess.run(
-        [str(DETACHED_HELPER), "--validate", "--run-dir", str(run_dir)],
-        capture_output=True,
-        text=True,
-    )
-    wrapper.wait(timeout=5)
+    wrapper = subprocess.Popen(["sleep", "60"])
+    try:
+        (run_dir / "wrapper.pid").write_text(f"{wrapper.pid}\n")
+        result = subprocess.run(
+            [str(DETACHED_HELPER), "--validate", "--run-dir", str(run_dir)],
+            capture_output=True,
+            text=True,
+        )
+    finally:
+        # Stop the wrapper explicitly: a fixed 1 s sleep could expire before validation ran.
+        wrapper.kill()
+        wrapper.wait(timeout=5)
 
     assert result.returncode == 1
     stale = subprocess.run(
