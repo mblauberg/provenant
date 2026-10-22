@@ -3687,7 +3687,7 @@ def _run_attempt(
     input_file = None
     workspace = None
     agy_home, agy_home_warnings = None, []
-    browser_tmp, browser_tmp_identity = None, None
+    browser_tmp, browser_tmp_identity, browser_tmp_warnings = None, None, []
     selector = selectors.DefaultSelector()
     try:
         if "browser" in plan["applied"].get("capabilities", []):
@@ -3895,14 +3895,19 @@ def _run_attempt(
                     agy_home_warnings = finish_agy_home(plan, tmp_fd, agy_home)
             finally:
                 if browser_tmp is not None and browser_tmp_identity is not None:
+                    # Cleanup trouble must not discard the lane's result; report it instead.
                     try:
                         current = browser_tmp.lstat()
                     except FileNotFoundError:
                         pass  # The lane already removed its temp directory.
                     else:
                         if (current.st_dev, current.st_ino) != (browser_tmp_identity.st_dev, browser_tmp_identity.st_ino):
-                            raise PermissionError(f"Browser temporary directory was replaced: {browser_tmp}")
-                        shutil.rmtree(browser_tmp)
+                            browser_tmp_warnings.append(f"browser temporary directory was replaced; left in place: {browser_tmp}")
+                        else:
+                            try:
+                                shutil.rmtree(browser_tmp)
+                            except OSError as exc:
+                                browser_tmp_warnings.append(f"browser temporary directory cleanup failed: {browser_tmp}: {exc}")
     exit_code = process.returncode if process else None
     if cancel_signal and not forced:
         forced = "interrupted"  # EOF can precede the loop's signal check.
@@ -3994,7 +3999,7 @@ def _run_attempt(
     session = parsed["session_id"] or plan["resume_session"] or plan["session_id"]
     parsed["session_id"] = session
     observed, source = _observed_model(plan, parsed, environment)
-    warnings = [*plan["warnings"], *agy_home_warnings]
+    warnings = [*plan["warnings"], *agy_home_warnings, *browser_tmp_warnings]
     if parsed["signature"] == "exit_after_output":
         warnings.append(parsed["excerpt"])
     reported = {}

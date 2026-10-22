@@ -2774,6 +2774,30 @@ def test_other_adapters_take_capabilities_without_a_grant(monkeypatch, tmp_path,
     assert not temporary.exists()
 
 
+def test_browser_tmp_cleanup_trouble_warns_without_discarding_the_result(monkeypatch, tmp_path):
+    mod = supervisor()
+    monkeypatch.setattr(mod, "_sandbox_exec_path", lambda: "/usr/bin/sandbox-exec")
+    _, lane = instruction_lane(tmp_path)
+    attempt = tmp_path / "attempt"
+    attempt.mkdir()
+    plan = mod.build_plan("claude", {"resolved_model": "fixture"}, "hello", workspace_root=tmp_path,
+                          mode="worktree_write", worktree=lane, capabilities=["browser"], run_dir=attempt)
+    plan["applied"]["confinement"] = "none"
+    # The lane swaps its directory for another one; cleanup must leave it and only warn.
+    plan["argv"] = [sys.executable, "-u", "-c", "import json, os; from pathlib import Path; "
+                    "root=Path(os.environ['MAC_CHROMIUM_TMPDIR']); root.rmdir(); root.mkdir(); "
+                    "print(json.dumps({'type':'result','result':'done'}))"]
+    record = mod.execute(plan, attempt / "result.md", env=dict(os.environ))
+    temporary = Path(record["applied"]["browser_tmpdir"])
+    try:
+        assert record["status"] == "ok", record
+        assert (attempt / "result.md").read_text() == "done"
+        assert temporary.exists()
+        assert any("was replaced" in warning for warning in record["warnings"])
+    finally:
+        temporary.rmdir()
+
+
 @pytest.mark.parametrize("capabilities", [["other"], ["browser", "browser"], "browser"])
 def test_codex_capabilities_reject_unknown_duplicate_and_non_list_values(monkeypatch, tmp_path, capabilities):
     mod = supervisor()
