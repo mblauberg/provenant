@@ -3119,6 +3119,7 @@ def execute_attempt_sequence(args,custody=None):
             if "account" in candidate:
                 args.account = candidate["account"]
             args.alias=None;args.retry_of=f"attempt-{previous['attempt']:03d}"
+            args.escalation_reason = None  # Automatic retries keep their cause in fallback_from.
             result=_dispatch(args,custody)
             previous=getattr(args,"_last_row",None)
     return result

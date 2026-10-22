@@ -6510,3 +6510,51 @@ def test_dispatch_refuses_escalation_without_retry(tmp_path, monkeypatch, capsys
     assert mod.dispatch(args) == 2
     assert json.loads(capsys.readouterr().out)['error'] == 'escalation_reason_invalid'
     assert not list(run.glob('tasks/*/attempt-*/attempt.json'))
+
+
+def test_automatic_retry_does_not_inherit_explicit_escalation(tmp_path, monkeypatch):
+    launches = tmp_path / 'launches'
+    code = f'''import json,sys
+from pathlib import Path
+sys.stdin.read()
+path = Path({str(launches)!r})
+count = int(path.read_text()) + 1 if path.exists() else 1
+path.write_text(str(count))
+if count == 2:
+    print(json.dumps({{"type":"result", "is_error":True, "result":"rate limit", "retry_after":0.05}}))
+    sys.exit(1)
+print(json.dumps({{"type":"result", "result":"DONE"}}))
+'''
+    _unused_run, _prompt, command = real_owner_fixture(tmp_path, monkeypatch, code)
+    run = make_run(tmp_path, 'escalation')
+    command[3] = str(run)
+    isolate_fabric_plan_env(monkeypatch, tmp_path)
+    monkeypatch.setenv('AGENT_FABRIC_STATE_ROOT', str(tmp_path / 'state'))
+    monkeypatch.chdir(tmp_path)
+    configure_fast_pacing(tmp_path, monkeypatch)
+    mod = load_dispatch_module()
+    assert mod.dispatch(mod.parser().parse_args(command[2:])) == 0
+    args = mod.parser().parse_args(command[2:] + [
+        '--retry-of', 'attempt-001', '--escalation-reason', 'capability'])
+    args.fallback = 'true'
+    args.timeout_seconds = 10
+    assert mod.dispatch(args) == 0
+    paths = sorted(run.glob('tasks/*/attempt-*/attempt.json'))
+    first, explicit, automatic = (json.loads(path.read_text()) for path in paths)
+    assert [first['status'], explicit['status'], automatic['status']] == ['ok', 'rate_limited', 'ok']
+    assert explicit['retry_of'] == 'attempt-001'
+    assert explicit['escalation_reason'] == 'capability'
+    assert automatic['retry_of'] == 'attempt-002'
+    assert automatic['escalation_reason'] is None
+    assert automatic['provenance']['fallback_from']['status'] == 'rate_limited'
+
+    spec = importlib.util.spec_from_file_location('telemetry_retry_test', ROOT / 'scripts/telemetry.py')
+    telemetry = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(telemetry)
+    with telemetry.connect() as db:
+        for path in paths:
+            telemetry.ingest_document(db, 'fabric', path)
+        rows = [json.loads(row[0]) for row in db.execute(
+            "SELECT attrs FROM events WHERE kind='lane.attempt' ORDER BY json_extract(attrs,'$.attempt')")]
+    assert rows[1]['escalated_from'].endswith('/dispatch-001/1')
+    assert 'escalated_from' not in rows[2]
