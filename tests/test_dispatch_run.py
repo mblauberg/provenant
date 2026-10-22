@@ -5753,7 +5753,7 @@ time.sleep(60)
 
 @pytest.mark.parametrize('unavailable', ['environment', 'exited', 'identity'])
 def test_cancel_cascade_reports_owner_verification_failure(cancel_cascade, monkeypatch, unavailable):
-    mod, parent_dir, child_dir, _ = cancel_cascade
+    mod, parent_dir, child_dir, row = cancel_cascade
     child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'],
                              env={**os.environ, 'PROVENANT_RUN_TOKEN': 'child-token',
                                   'PROVENANT_RUN_DIR': str(child_dir)}, start_new_session=True)
@@ -5776,6 +5776,17 @@ def test_cancel_cascade_reports_owner_verification_failure(cancel_cascade, monke
                 'identity': 'owner identity changed or unavailable'}[unavailable] == evidence['reason']
         if unavailable != 'exited':
             assert child.poll() is None
+        if unavailable in {'exited', 'identity'}:
+            # Even if a mismatch is repaired later, its first outcome is final.
+            if unavailable == 'identity':
+                owner['owner_started_at'] = mod.process_info.start_time(child.pid)
+                (child_dir / 'dispatch-owner.json').write_text(json.dumps(owner))
+            mod.publish_contract(parent_dir, {**row, 'state': 'terminal', 'status': 'cancelled',
+                                               'children': children})
+            terminal = json.loads((parent_dir / row['paths']['receipt']).read_text())
+            assert terminal['children'][0]['cancellation'] == evidence
+            if unavailable == 'identity':
+                assert child.poll() is None
     finally:
         if child.poll() is None:
             child.kill()
@@ -5872,6 +5883,60 @@ def test_cancel_cascade_records_unavailable_process_census(cancel_cascade, monke
         assert 'census' in (evidence.get('reason') or evidence['targets'][-1]['reason'])
     finally:
         real_kill(child.pid, signal.SIGKILL)
+        child.wait(timeout=3)
+        child.stdout.close()
+
+
+@pytest.mark.parametrize('unavailable', ['census', 'signal', 'verification', 'environment'])
+def test_cancel_cascade_retries_transient_skip_at_publication(cancel_cascade, monkeypatch, unavailable):
+    mod, parent_dir, child_dir, row = cancel_cascade
+    provider = mod.provider_exec
+    child = subprocess.Popen([sys.executable, '-c', 'import time; print("ready", flush=True); time.sleep(60)'],
+                             env={**os.environ, 'PROVENANT_RUN_TOKEN': 'child-token',
+                                  'PROVENANT_RUN_DIR': str(child_dir)}, start_new_session=True,
+                             stdout=subprocess.PIPE, text=True)
+    real_kill = os.kill
+
+    def unavailable_signal(pid, signum):
+        if signum:
+            raise PermissionError('signal unavailable')
+        return real_kill(pid, signum)
+
+    def unavailable_environment(pid):
+        raise OSError('verification unavailable')
+
+    try:
+        assert child.stdout.readline().strip() == 'ready'
+        (child_dir / 'dispatch-owner.json').write_text(json.dumps({
+            'schema_version': 1, 'kind': 'dispatch', 'run_dir': str(child_dir),
+            'run_token': 'child-token', 'owner_pid': child.pid, 'owner_pgid': child.pid,
+            'owner_started_at': mod.process_info.start_time(child.pid)}))
+        with monkeypatch.context() as patch:
+            if unavailable == 'census':
+                patch.setattr(provider, '_process_snapshot', lambda: None)
+                patch.setattr(provider, '_linux_tree_snapshot', lambda *args: None)
+            elif unavailable == 'signal':
+                patch.setattr(os, 'kill', unavailable_signal)
+                patch.setattr(os, 'killpg', unavailable_signal)
+            else:
+                patch.setattr(provider, '_process_environment',
+                              unavailable_environment if unavailable == 'verification' else lambda pid: ())
+            row['children'] = mod.run_lineage.cancel_children(parent_dir, 'writer', 1, timeout_seconds=0)
+        evidence = row['children'][0]['cancellation']
+        assert evidence['status'] == 'skipped'
+        assert evidence['reason'] == {
+            'census': 'process census unavailable', 'signal': 'process signal unavailable',
+            'verification': 'owner verification or signal unavailable',
+            'environment': 'environment unreadable'}[unavailable]
+        assert child.poll() is None
+
+        mod.publish_contract(parent_dir, {**row, 'state': 'terminal', 'status': 'cancelled'})
+        assert child.wait(timeout=3) == -signal.SIGTERM
+        terminal = json.loads((parent_dir / row['paths']['receipt']).read_text())
+        assert terminal['children'][0]['cancellation']['status'] == 'signalled'
+    finally:
+        if child.poll() is None:
+            child.kill()
         child.wait(timeout=3)
         child.stdout.close()
 
