@@ -14,7 +14,7 @@ Quota and cooldowns share one resolver in `scripts/provider_identity.py`:
 |---|---|
 | claude | `CLAUDE_CONFIG_DIR`, else `~/.claude` |
 | codex | `CODEX_HOME`, else `~/.codex` |
-| agy | OS user's macOS login Keychain; ignores HOME and `AGY_CONFIG_DIR` |
+| agy | On macOS the OS user's login Keychain, ignoring HOME and `AGY_CONFIG_DIR`; elsewhere `~/.gemini/antigravity-cli` |
 | cursor | `~/Library/Application Support/Cursor/User/globalStorage` on macOS, else `~/.config/Cursor/User/globalStorage` |
 | opencode | `$XDG_DATA_HOME/opencode`, else `~/.local/share/opencode` |
 | kiro | `~/.kiro` |
@@ -25,7 +25,7 @@ Configure non-secret labels in `accounts.<provider>.<label>.identity_dir` in
 An enabled matching label wins; otherwise the default directory is `default`
 and another resolved directory gets a stable `path-<sha256 prefix>` key.
 Unresolved identity is null and matches only null. Host is `local_host` in
-`.agent-fabric/hosts.json`, falling back to hostname. Attempts capture account
+`.agent-fabric/hosts.json`, falling back to the hostname's slug. Attempts capture account
 and host before provider startup, and retain them through completion.
 
 Switching the selected identity or host hides the previous scope's cooldowns;

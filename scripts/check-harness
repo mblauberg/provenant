@@ -21,8 +21,13 @@ for git_candidate in \
     break
   fi
 done
+# Trusted locations first; then PATH, for hosts that install Git elsewhere.
+if [[ -z "$PROVENANT_GIT_BIN" ]]; then
+  git_candidate="$(command -v git 2>/dev/null || true)"
+  [[ "$git_candidate" != /* || ! -x "$git_candidate" ]] || PROVENANT_GIT_BIN="$git_candidate"
+fi
 [[ -n "$PROVENANT_GIT_BIN" ]] || {
-  echo "check-harness: trusted Git executable is unavailable" >&2
+  echo "check-harness: no Git executable in the trusted locations or on PATH" >&2
   exit 3
 }
 export PROVENANT_GIT_BIN

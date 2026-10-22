@@ -494,9 +494,11 @@ def clear_cooldowns(selector=None, path=None, *, account=None):
         model = registered_model(adapter, model or "*")
     with locked(path.with_name("cooldowns.lock")):
         values = _load_cooldowns(path, datetime.now(UTC))
-        host = identity_resolver().host_id()
+        resolver = identity_resolver()
+        host = resolver.host_id()
         gone = [key for key, entry in values.items()
-                if (account is None or (entry.get('account') == account and entry.get('host') == host))
+                if (account is None or (entry.get('account') == account
+                                        and resolver.same_host(entry.get('host')) == host))
                 and (not selector or (entry['adapter'] == adapter and (not slash or entry['model'] == model)))]
         removed = sorted({values[key]['adapter'] + '/' + values[key]['model'] for key in gone})
         for key in gone:
