@@ -286,15 +286,22 @@ def agy_home(quota, monkeypatch, tmp_path, *emails):
     return keychain
 
 
-def agy_cli(monkeypatch, quota, email=AGY_EMAIL, payload=AGY_USAGE):
+def agy_cli(monkeypatch, quota, email=AGY_EMAIL, payload=AGY_USAGE, output=None):
     seen = []
 
-    def run(argv, **kwargs):
-        seen.append((argv, kwargs))
-        Path(argv[argv.index('--log-file') + 1]).write_text(f'OAuth: authenticated successfully as {email}\n')
-        return subprocess.CompletedProcess(argv, 0, json.dumps(payload), '')
+    class Process:
+        def __init__(self, argv, **kwargs):
+            seen.append((argv, kwargs))
+            Path(argv[argv.index('--log-file') + 1]).write_text(f'OAuth: authenticated successfully as {email}\n')
+            self.stdout = io.BytesIO(output if output is not None else json.dumps(payload).encode())
+            self.returncode = 0
+            seen.append(self)
+        def kill(self):
+            self.returncode = -9
+        def wait(self, timeout=None):
+            return self.returncode
     monkeypatch.setattr(quota, 'executable', lambda name: '/bin/' + name)
-    monkeypatch.setattr(quota, 'run_process', run)
+    monkeypatch.setattr(quota, 'open_process', Process)
     return seen
 
 
@@ -306,6 +313,25 @@ def test_agy_usage_reports_each_pool_window_and_skips_disabled_buckets(quota):
         ('claude.5h', '3p-5h', 13.39, 300)]
     assert rows[0]['reset_at'] == '2026-10-24T04:01:07Z'
     assert parsed['unreported'] == ['gemini.5h']
+
+
+@pytest.mark.parametrize('fraction', [True, False, -0.1, 1.5, float('nan'), '0.5', None])
+def test_agy_invalid_remaining_fractions_are_unreported_never_0_or_100_percent(quota, fraction):
+    payload = {'command': {'data': {'groups': [{'name': 'Claude and GPT models', 'buckets': [
+        {'id': '3p-weekly', 'window': 'weekly', 'remaining_fraction': fraction, 'reset_time': '2026-10-28T15:50:17Z'}]}]}}}
+    assert quota.provider('agy').parse(payload, NOW) == {'windows': [], 'unreported': ['claude.weekly']}
+
+
+def test_agy_output_is_read_within_the_response_limit(quota, monkeypatch, tmp_path):
+    agy_home(quota, monkeypatch, tmp_path, AGY_EMAIL)
+    monkeypatch.setattr(quota.IO, 'MAX_RESPONSE_BYTES', 64)
+    seen = agy_cli(monkeypatch, quota, output=b'{"status": "SUCCESS", "padding": "' + b'x' * 10_000 + b'"}')
+    account, = [account for account in quota.accounts() if account.provider == 'agy']
+    value = quota.refresh(account, NOW, force=True)
+    assert value['status'] == 'unavailable' and value['error'] == 'agy quota request failed'
+    (argv, kwargs), process = seen
+    # The read stops one byte past the limit and the oversized CLI is killed.
+    assert kwargs['stdout'] == quota.PIPE and process.stdout.closed and process.returncode == -9
 
 
 def test_agy_names_the_signed_in_account_by_a_fingerprint_from_its_newest_log(quota, monkeypatch, tmp_path):
@@ -323,7 +349,7 @@ def test_agy_quota_comes_from_print_mode_and_never_stores_the_address(quota, mon
     seen = agy_cli(monkeypatch, quota)
     account, = [account for account in quota.accounts() if account.provider == 'agy']
     value = quota.refresh(account, NOW, force=True)
-    argv, kwargs = seen[0]
+    (argv, kwargs), _ = seen
     assert argv[:5] == ['/bin/agy', '-p', '/usage', '--output-format', 'json'] and kwargs['stdin'] == quota.DEVNULL
     assert not Path(argv[-1]).exists()
     assert value['status'] == 'ok' and value['source'] == 'agy print-mode /usage'

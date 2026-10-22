@@ -10,9 +10,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from pathlib import Path
 import re
 import tempfile
+import threading
 
 
 # Quota is report-only for agy: a provider-wide cooldown would also block the pool that
@@ -78,7 +80,10 @@ def parse(payload, now=None):
                 continue
             name = f"{pool}.{bucket.get('window')}" if pool and bucket.get('window') else str(bucket.get('id') or '')
             remaining = bucket.get('remaining_fraction')
-            if bucket.get('disabled') or not isinstance(remaining, (int, float)):
+            # A boolean, NaN or out-of-range fraction would read as a false 0% or 100%.
+            valid = isinstance(remaining, (int, float)) and not isinstance(remaining, bool) and \
+                math.isfinite(remaining) and 0 <= remaining <= 1
+            if bucket.get('disabled') or not valid:
                 unreported.append(name)
                 continue
             windows.append({'name': name, 'raw_kind': bucket.get('id'), 'used_percent': (1 - remaining) * 100,
@@ -94,17 +99,30 @@ def usage(io):
     with tempfile.TemporaryDirectory(prefix='provenant-agy-') as scratch:
         log = Path(scratch) / 'cli.log'
         try:
-            result = io.run_process([executable, '-p', '/usage', '--output-format', 'json', '--log-file', str(log)],
-                                    capture_output=True, text=True, timeout=TIMEOUT, check=False,
-                                    cwd=scratch, stdin=io.DEVNULL)
-        except (OSError, io.TimeoutExpired):
+            process = io.open_process([executable, '-p', '/usage', '--output-format', 'json', '--log-file', str(log)],
+                                      stdin=io.DEVNULL, stdout=io.PIPE, stderr=io.DEVNULL, cwd=scratch)
+        except OSError:
             raise io.Unavailable('agy quota request failed') from None
+        # The deadline kills the CLI, which ends the bounded read below.
+        deadline = threading.Timer(TIMEOUT, process.kill)
+        deadline.start()
+        try:
+            raw = process.stdout.read(io.MAX_RESPONSE_BYTES + 1)
+            if len(raw) > io.MAX_RESPONSE_BYTES:
+                process.kill()
+            code = process.wait()
+        except OSError:
+            process.kill()
+            raise io.Unavailable('agy quota request failed') from None
+        finally:
+            deadline.cancel()
+            process.stdout.close()
         email = _signed_in(log, io.MAX_RESPONSE_BYTES)
-    if result.returncode != 0 or len(result.stdout or '') > io.MAX_RESPONSE_BYTES:
+    if code != 0 or len(raw) > io.MAX_RESPONSE_BYTES:
         raise io.Unavailable('agy quota request failed')
     try:
-        payload = json.loads(result.stdout)
-    except ValueError:
+        payload = json.loads(raw.decode('utf-8'))
+    except (UnicodeDecodeError, ValueError):
         raise io.Unavailable('agy returned an invalid quota response') from None
     if not isinstance(payload, dict) or payload.get('status') != 'SUCCESS':
         raise io.Unavailable('agy could not read quota; sign in to agy')
