@@ -936,3 +936,27 @@ def test_utility_rejects_malformed_confidentiality_in_requests_and_defaults(tmp_
         catalog['route_defaults']['utility']['confidential'] = malformed
         with pytest.raises(pools.PoolError, match='confidential must be a boolean'):
             pick({'route': 'utility'}, tmp_path, catalog=catalog)
+
+
+def test_utility_stays_private_without_catalogue_defaults(tmp_path):
+    catalog = json.loads(json.dumps(SEED))
+    catalog.pop('route_defaults')
+    private = pick({'route': 'utility', 'council': 8}, tmp_path, catalog=catalog)
+    assert private['confidential'] is True
+    assert set(models(private)) == {'claude/claude-haiku-5-5'}
+
+
+@pytest.mark.parametrize('malformed', ['true', 'false', None, 0, 1])
+@pytest.mark.parametrize('location', ['request', 'default', 'entry'])
+def test_utility_rejects_non_boolean_pool_policy(tmp_path, malformed, location):
+    catalog = json.loads(json.dumps(SEED))
+    request = {'route': 'utility'}
+    if location == 'request':
+        request['allow_free'] = malformed
+    elif location == 'default':
+        catalog['route_defaults']['utility']['allow_free'] = malformed
+    else:
+        catalog['routes']['utility'][0]['confidential'] = malformed
+    field = 'confidential' if location == 'entry' else 'allow_free'
+    with pytest.raises(pools.PoolError, match=field + ' must be a boolean'):
+        pick(request, tmp_path, catalog=catalog)

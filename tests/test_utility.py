@@ -71,7 +71,8 @@ def test_cli_plain_code_contracts_and_help(tmp_path, monkeypatch, capsys):
         assert done.stdout == (root / f'tools/front-door/src/help/{verb}.txt').read_text()
 
 
-def test_provider_path_uses_router_and_supervisor_and_records_usage(tmp_path, monkeypatch):
+@pytest.mark.parametrize('timeout_seconds', [None, 20])
+def test_provider_path_uses_router_and_supervisor_and_records_usage(tmp_path, monkeypatch, timeout_seconds):
     import os
     import utility
     bin_dir = tmp_path / 'bin'
@@ -98,9 +99,11 @@ print(json.dumps({'type':'result','subtype':'success','result':'["yes"]','is_err
     monkeypatch.chdir(tmp_path)
     import subprocess
     subprocess.run(['git', 'init', '-q', str(tmp_path)], check=True)
-    assert utility.execute('classify', 'some item', labels=['yes', 'no']) == ['yes']
+    assert utility.execute('classify', 'some item', labels=['yes', 'no'], timeout_seconds=timeout_seconds) == ['yes']
     db = sqlite3.connect(tmp_path / 'state/telemetry.sqlite3')
-    attrs = json.loads(db.execute("select attrs from events where kind='utility.call'").fetchone()[0])
+    model, attributes = db.execute("select model, attrs from events where kind='utility.call'").fetchone()
+    assert model == 'claude/claude-haiku-5-5'
+    attrs = json.loads(attributes)
     assert attrs['route'] == 'utility' and attrs['model'] == 'claude/claude-haiku-5-5'
     assert attrs['tokens']['input_tokens'] == 10 and attrs['cost_usd'] == 0.001
 
@@ -121,3 +124,29 @@ def test_cli_refuses_protected_input_from_another_repository(tmp_path, monkeypat
     monkeypatch.chdir(caller)
     with pytest.raises(ValueError, match='protected'):
         utility.read_input(source)
+
+
+def test_single_attempt_does_not_retry_or_escalate(tmp_path, monkeypatch):
+    import utility
+    monkeypatch.setenv('AGENT_FABRIC_STATE_ROOT', str(tmp_path / 'state'))
+    calls = []
+    def provider(prompt, route, confidential):
+        calls.append(route)
+        return ('invalid JSON', {})
+    with pytest.raises(ValueError):
+        utility.execute('digest', 'some output', provider=provider, retry=False)
+    assert calls == ['utility']
+
+
+@pytest.mark.parametrize('failure', [sqlite3.OperationalError, RuntimeError])
+def test_telemetry_failure_does_not_fail_the_call(monkeypatch, failure):
+    import utility
+    def broken():
+        raise failure('telemetry unavailable')
+    monkeypatch.setattr(utility.telemetry, 'connect', broken)
+    assert utility.execute('classify', 'yes', labels=['yes', 'no']) == ['yes']
+    def provider(prompt, route, confidential):
+        contract = json.loads(prompt.split('\n', 1)[1])
+        assert contract['items'] == ['some input'] and 'source' not in contract
+        return ('["yes"]', {})
+    assert utility.execute('classify', 'some input', labels=['yes', 'no'], provider=provider) == ['yes']

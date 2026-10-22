@@ -82,20 +82,6 @@
       "reader": "scripts/provider_quota.py PACE_TOLERANCE",
       "effect": "Percentage points either side of even use before a quota window reads as deficit or reserve.",
       "trade_off": "Lower flags pacing pressure earlier (fewer limit hits, more rerouting); higher tolerates bursts."
-    },
-    "utility.digest_tool_output": {
-      "type": "bool", "default": false, "status": "wired",
-      "reader": "scripts/utility_output_hook.py",
-      "effect": "Digest oversized Claude Code Bash results into a file pointer and short answer.",
-      "trade_off": "Saves context at the cost of a utility call; errors keep the original result."
-    },
-    "utility.output_threshold_bytes": {
-      "type": "int", "default": 20480, "status": "wired",
-      "min": 1024,
-      "max": 10485760,
-      "reader": "scripts/utility_output_hook.py",
-      "effect": "Minimum Bash output size before the optional digest hook runs.",
-      "trade_off": "Lower digests more results and costs more calls."
     }
   },
   "presets": {

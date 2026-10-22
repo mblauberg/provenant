@@ -20,7 +20,7 @@ class ConfigError(ValueError):
 
 
 def hook_command(guard: Path) -> str:
-    return f"python3 {shlex.quote(str(guard))}"
+    return f"{shlex.quote(sys.executable)} {shlex.quote(str(guard))}"
 
 
 def _managed(entry: object, name: str = GUARD_NAME) -> bool:
@@ -43,7 +43,8 @@ def merged(settings: dict, guard: Path | None, *, event="PreToolUse", name=GUARD
     if guard is not None:
         entries.append({
             "matcher": "Bash",
-            "hooks": [{"type": "command", "command": hook_command(guard)}],
+            "hooks": [{"type": "command", "command": hook_command(guard),
+                       **({"timeout": 30} if name == DIGEST_NAME else {})}],
         })
     result = {**settings, "hooks": {**hooks, event: entries}}
     if not entries:
@@ -85,7 +86,7 @@ def main(arguments: list[str]) -> int:
     parser.add_argument("--settings", required=True, type=Path)
     parser.add_argument("--guard", type=Path, help="path to lane_safety_guard.py")
     parser.add_argument("--remove", action="store_true")
-    parser.add_argument("--digest-hook", type=Path, help="install the optional Bash PostToolUse hook (disabled by profile default)")
+    parser.add_argument("--digest-hook", type=Path, help="install the optional Bash PostToolUse hook")
     parser.add_argument("--remove-digest", action="store_true")
     options = parser.parse_args(arguments)
     if options.digest_hook is not None or options.remove_digest:

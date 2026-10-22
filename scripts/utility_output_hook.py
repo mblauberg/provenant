@@ -7,13 +7,20 @@ import json
 import os
 from pathlib import Path
 import shlex
+import signal
 import sys
 
-import harness_profile
-import utility
+OUTPUT_THRESHOLD_BYTES = 30 * 1024
+MAX_SOURCE_BYTES = 200 * 1024
+DEADLINE_SECONDS = 25
+
+
+class _DeadlineExceeded(BaseException):
+    """Reach the outer hook guard even through best-effort dependency catches."""
 
 
 def checked_command(command, cwd):
+    import utility
     # Only remote GitHub reads and direct, explicit file readers have checkable
     # sources. Shells, interpreters, test runners and compound commands do not.
     if any(char in command for char in '$`;&|<>(){}\n*?[]'):
@@ -57,9 +64,9 @@ def checked_command(command, cwd):
 def handle(payload, *, digest=None):
     """Return supported hook JSON on success; no output means keep the original."""
     try:
+        import utility
         cwd = Path(payload['cwd']).resolve()
-        knobs = harness_profile.profiles.current(cwd=cwd).knobs
-        if (not knobs['utility.digest_tool_output'] or os.environ.get('PROVENANT_UTILITY_ACTIVE') == '1'
+        if (os.environ.get('PROVENANT_UTILITY_ACTIVE') == '1'
                 or payload.get('hook_event_name') != 'PostToolUse' or payload.get('tool_name') != 'Bash'):
             return None
         response = payload['tool_response']
@@ -67,7 +74,7 @@ def handle(payload, *, digest=None):
         if not isinstance(stdout, str) or not isinstance(stderr, str) or response.get('isImage'):
             return None
         source = stdout + ('\n' if stdout and stderr else '') + stderr
-        if len(source.encode('utf-8')) <= knobs['utility.output_threshold_bytes']:
+        if not OUTPUT_THRESHOLD_BYTES < len(source.encode('utf-8')) <= MAX_SOURCE_BYTES:
             return None
         # Bash has no input-file provenance. In a project declaring protected paths,
         # even an innocuous command can indirectly read them: leave every result alone.
@@ -83,12 +90,12 @@ def handle(payload, *, digest=None):
             stream.write(source)
         result = (digest or utility.execute)(
             'digest', source, question='Summarise the result, failures and next action. Cite source lines.',
-            confidential=True,
+            confidential=True, retry=False, timeout_seconds=20,
         )
         pointers = ', '.join(f'{path}:L{line}' for line in result['lines'])
         context = f"{result['answer']}\nFull Bash output: {pointers}\nRead only relevant lines from the file."
         return {'hookSpecificOutput': {
-            'hookEventName': 'PostToolUse', 'additionalContext': context,
+            'hookEventName': 'PostToolUse',
             'updatedToolOutput': {**response, 'stdout': context, 'stderr': ''},
         }}
     except Exception:
@@ -96,12 +103,25 @@ def handle(payload, *, digest=None):
 
 
 def main():
+    def expired(signum, frame):
+        raise _DeadlineExceeded('utility hook deadline exceeded')
+    previous = None
+    timer_started = False
     try:
-        result = handle(json.load(sys.stdin))
+        previous = signal.signal(signal.SIGALRM, expired)
+        signal.setitimer(signal.ITIMER_REAL, DEADLINE_SECONDS)
+        timer_started = True
+        import utility
+        result = handle(json.load(sys.stdin), digest=utility.execute)
         if result is not None:
             print(json.dumps(result))
-    except Exception:
+    except (Exception, _DeadlineExceeded):
         pass
+    finally:
+        if timer_started:
+            signal.setitimer(signal.ITIMER_REAL, 0)
+        if previous is not None:
+            signal.signal(signal.SIGALRM, previous)
     return 0
 
 

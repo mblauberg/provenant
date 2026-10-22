@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import shlex
 import os
 from pathlib import Path
 import subprocess
@@ -441,10 +442,10 @@ def test_settings_command_quotes_the_path_for_the_shell(tmp_path):
     guard_file = tmp_path / "a$(touch pwned)b" / "lane_safety_guard.py"
     command = hooks.hook_command(guard_file)
     done = subprocess.run(
-        ["sh", "-c", f"set -- {command.removeprefix('python3 ')}; printf %s \"$1\""],
+        ["sh", "-c", f"set -- {command}; printf '%s\\n' \"$1\" \"$2\""],
         capture_output=True, text=True, cwd=tmp_path, check=False,
     )
-    assert done.stdout == str(guard_file)
+    assert done.stdout.splitlines() == [sys.executable, str(guard_file)]
     assert not (tmp_path / "pwned").exists()
 
 
@@ -508,6 +509,8 @@ def test_utility_hook_install_preserves_lane_safety_and_other_post_hooks(tmp_pat
     assert hooks.apply(settings, digest, event='PostToolUse', name=hooks.DIGEST_NAME) == 'installed'
     assert hooks.apply(settings, digest, event='PostToolUse', name=hooks.DIGEST_NAME) == 'unchanged'
     data = json.loads(settings.read_text())
+    assert data['hooks']['PostToolUse'][1]['hooks'][0]['timeout'] == 30
+    assert shlex.split(data['hooks']['PostToolUse'][1]['hooks'][0]['command'])[0] == sys.executable
     assert data['hooks']['PreToolUse'][0]['matcher'] == 'Bash'
     assert [entry['matcher'] for entry in data['hooks']['PostToolUse']] == ['Read', 'Bash']
     hooks.apply(settings, None)

@@ -2,7 +2,8 @@ usage: provenant <command> [arguments...]
 
 Commands
   root checkout
-  route|routes   scripts/model-route ...
+  route ...      scripts/model-route ...
+  routes ...     scripts/model-route routes
   capabilities   skills/orchestrate/scripts/capabilities.py
   worktree ...   scripts/worktree ...
   clean|reap ... scripts/clean.py|reap.py
@@ -16,7 +17,8 @@ Commands
   graph ...      runtime/fabric/bin/fabric graph
   telemetry ...  scripts/provenant-telemetry
   stats|retro    scripts/provenant-telemetry
-  quota|profile  quota and harness profiles
+  quota ...      scripts/provenant-quota
+  profile ...    scripts/provenant-profile
   digest|classify|extract  validated utility operations
   dispatch ...   skills/orchestrate/scripts/dispatch_run.py ...
   batch ...      skills/orchestrate/scripts/batch_run.py ...

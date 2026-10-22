@@ -353,6 +353,7 @@ def observation(db, source, **values):
 # Known event kinds. `kind` stays a free string: a new kind needs no migration,
 # and OTLP log events keep their exporter's name as `otel.<event.name>`.
 EVENT_KINDS = {
+    'utility.call': 'validated utility operation attempt (route, usage and latency)',
     'lane.attempt': 'Fabric attempt reached a terminal status (attempt.json)',
     'repair.cycle': 'delivery repair cycle and failed gates before and after',
     'review.finding': 'delivery chair disposition of a review finding',

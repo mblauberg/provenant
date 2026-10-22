@@ -385,6 +385,8 @@ def pool(router: Any, catalog: dict[str, Any], name: str, effort_order: dict[str
     for raw in catalog.get("routes", {}).get(name, []):
         if not entry_is_valid(raw, effort_order):
             continue
+        if "confidential" in raw and type(raw["confidential"]) is not bool:
+            raise PoolError("confidential_invalid", f"{name} pool confidential must be a boolean")
         adapter, model = split_model(router, catalog, raw["model"])
         key = f"{adapter}/{model}"
         combined[key] = {**raw, **combined[key]} if key in combined else dict(raw)
@@ -487,7 +489,9 @@ def pick(router: Any, catalog: dict[str, Any], request: dict[str, Any], *,
     if "confidential" in request and type(request["confidential"]) is not bool:
         raise PoolError("confidential_invalid", "confidential must be a boolean")
     confidential = request.get("confidential") is True
-    allow_free = request.get("allow_free", True) is not False
+    if "allow_free" in request and type(request["allow_free"]) is not bool:
+        raise PoolError("allow_free_invalid", "allow_free must be a boolean")
+    allow_free = request.get("allow_free", True)
     requested_effort = request.get("effort") or None
     if isinstance(requested_effort, str) and requested_effort.strip().casefold() == "max":
         raise PoolError("effort_invalid", "effort 'max' was retired; fix: use xhigh")
@@ -533,8 +537,10 @@ def pick(router: Any, catalog: dict[str, Any], request: dict[str, Any], *,
         defaults = catalog.get("route_defaults", {}).get(label, {})
         if "confidential" in defaults and type(defaults["confidential"]) is not bool:
             raise PoolError("confidential_invalid", f"{label} default confidential must be a boolean")
-        confidential = request.get("confidential", defaults.get("confidential", False)) is True
-        allow_free = request.get("allow_free", defaults.get("allow_free", True)) is not False
+        if "allow_free" in defaults and type(defaults["allow_free"]) is not bool:
+            raise PoolError("allow_free_invalid", f"{label} default allow_free must be a boolean")
+        confidential = request.get("confidential", defaults.get("confidential", label == "utility"))
+        allow_free = request.get("allow_free", defaults.get("allow_free", label != "utility"))
         entries = pool(router, catalog, label, effort_order)
         mode = "council" if council else "rotate" if request.get("rotate") else "top"
         if request.get("adapter"):
