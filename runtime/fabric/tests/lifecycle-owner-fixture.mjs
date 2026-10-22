@@ -133,6 +133,36 @@ if (owner === "run_controls.py") {
   process.exit(0);
 }
 
+function finish(taskId, prompt, status) {
+    const attemptDir = join(runDir, "dispatch", "tasks", taskId, "attempt-001");
+    mkdirSync(attemptDir, { recursive: true });
+    const attemptPath = join(attemptDir, "attempt.json");
+    const resultPath = join(attemptDir, "result.md");
+    const stderrPath = join(attemptDir, "stderr.log");
+    writeFileSync(resultPath, `fixture result for: ${prompt}`);
+    writeFileSync(stderrPath, "");
+    const record = {
+      schema_version: 1,
+      record_type: "dispatch-attempt",
+      status,
+      outcome: status,
+      task_id: taskId,
+      attempt_id: "attempt-001",
+      attempt_path: relative(runDir, attemptPath),
+      result: { path: relative(runDir, resultPath) },
+      stderr: { path: relative(runDir, stderrPath) },
+      route: {
+        adapter: value("--adapter"),
+        provider_family: value("--adapter"),
+        resolved_model: value("--model") ?? value("--alias"),
+        execution_intent: "ordinary",
+      },
+    };
+    writeFileAtomic(attemptPath, JSON.stringify(record, null, 2) + "\n");
+    process.stdout.write(JSON.stringify(record) + "\n");
+    process.exit(0);
+  }
+
 if (owner === "dispatch_run.py") {
   if (process.env.FIXTURE_ARGV_PATH) writeFileSync(process.env.FIXTURE_ARGV_PATH, JSON.stringify(process.argv.slice(2)));
   const taskId = value("--task-id");
@@ -189,34 +219,19 @@ if (owner === "dispatch_run.py") {
     // the cooperative canceller has nothing to act on.
     startProvider();
     sleepUntilSignalled();
+  } else if (prompt.startsWith("hold ")) {
+    // A lane that runs until its release file appears (graph runner tests), or until SIGTERM.
+    const release = prompt.slice(5).split("\n")[0].trim();
+    mkdirSync(join(runDir, "dispatch", "tasks", taskId, "attempt-001"), { recursive: true });
+    process.once("SIGTERM", () => process.exit(143));
+    writeFileSync(join(runDir, "sleeping.pid"), `${process.pid}\n`);
+    const waiting = setInterval(() => {
+      if (!existsSync(release)) return;
+      clearInterval(waiting);
+      finish(taskId, prompt, "ok");
+    }, 20);
   } else {
-    const attemptDir = join(runDir, "dispatch", "tasks", taskId, "attempt-001");
-    mkdirSync(attemptDir, { recursive: true });
-    const attemptPath = join(attemptDir, "attempt.json");
-    const resultPath = join(attemptDir, "result.md");
-    const stderrPath = join(attemptDir, "stderr.log");
-    writeFileSync(resultPath, `fixture result for: ${prompt}`);
-    writeFileSync(stderrPath, "");
-    const record = {
-      schema_version: 1,
-      record_type: "dispatch-attempt",
-      status: "ok",
-      outcome: "ok",
-      task_id: taskId,
-      attempt_id: "attempt-001",
-      attempt_path: relative(runDir, attemptPath),
-      result: { path: relative(runDir, resultPath) },
-      stderr: { path: relative(runDir, stderrPath) },
-      route: {
-        adapter: value("--adapter"),
-        provider_family: value("--adapter"),
-        resolved_model: value("--model") ?? value("--alias"),
-        execution_intent: "ordinary",
-      },
-    };
-    writeFileAtomic(attemptPath, JSON.stringify(record, null, 2) + "\n");
-    process.stdout.write(JSON.stringify(record) + "\n");
-    process.exit(0);
+    finish(taskId, prompt, prompt.startsWith("fail") ? "failed" : "ok");
   }
 } else if (owner === "batch_run.py") {
   const manifest = JSON.parse(readFileSync(value("--manifest"), "utf8"));

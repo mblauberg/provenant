@@ -48,7 +48,7 @@ export function graphView(store: GraphStore, graph: Graph, env: NodeJS.ProcessEn
     ...(shown.length > MAX_LINES - 3 ? [`  ${shown.length - (MAX_LINES - 3)} more; use --json`] : []),
     ...(dead ? [`owner died: provenant graph resume ${graph.graph_id}`] : [])];
   return {
-    schema: "fabric.graph.v1", status: "ok", graph_id: graph.graph_id, state: graph.state, revision: graph.revision,
+    schema: "fabric.graph.v1", status: "ok", graph_id: graph.graph_id, graph_state: graph.state, revision: graph.revision,
     owner_alive: alive, ...(dead ? { fix: `provenant graph resume ${graph.graph_id}` } : {}),
     nodes: current.map((row) => ({ node_id: row.node_id, state: row.state, attempt: row.attempt, task_id: row.task_id,
       run_id: row.run_id, input_attempts: row.input_attempts, receipt: join(attemptDirectory(graph.chair, row, env), "receipt.json"),
@@ -82,24 +82,24 @@ export function graphRun(input: { file?: string; document?: unknown }, chair: Id
           dependsOn: node.depends_on.map((parent) => `${graph.graph_id}.${parent}`) });
     } finally { tasks.close(); }
     startGraphOwner(graph, env);
-    return { ...graphView(store, graph, env), status: "running" };
+    return graphView(store, graph, env);
   } finally { store.close(); }
 }
 
 export async function graphStatus(id: string | undefined, chair: Identity, env: NodeJS.ProcessEnv = process.env,
-  options: { waitSeconds?: number; resume?: boolean } = {}): Promise<Result> {
+  options: { waitSeconds?: number; resume?: boolean; signal?: AbortSignal } = {}): Promise<Result> {
   const store = new GraphStore(env);
   try {
     if (id === undefined) {
       const graphs = store.graphs(chair.project);
-      return { schema: "fabric.graphs.v1", status: "ok", graphs: graphs.map((graph) => ({ graph_id: graph.graph_id, state: graph.state, owner_alive: ownerAlive(graph) })),
+      return { schema: "fabric.graphs.v1", status: "ok", graphs: graphs.map((graph) => ({ graph_id: graph.graph_id, graph_state: graph.state, owner_alive: ownerAlive(graph) })),
         digest: graphs.length ? graphs.map((graph) => `${graph.state.padEnd(9)} ${graph.graph_id}${graph.state === "running" && !ownerAlive(graph) ? "  owner died: provenant graph resume " + graph.graph_id : ""}`).join("\n") : "no graphs" };
     }
     let graph = store.graph(chair.project, id);
     if (!graph) return { status: "rejected", error: "graph_unknown", fix: `No graph ${id} in ${chair.project}; run provenant graph status to list graphs.` };
     if (options.resume && graph.state === "running" && !ownerAlive(graph)) startGraphOwner(graph, env);
     const deadline = Date.now() + (options.waitSeconds ?? 0) * 1000;
-    while (!TERMINAL_GRAPH.includes(graph.state) && Date.now() < deadline) {
+    while (!TERMINAL_GRAPH.includes(graph.state) && Date.now() < deadline && !options.signal?.aborted) {
       await new Promise((resolveWait) => setTimeout(resolveWait, 1000));
       graph = store.graph(chair.project, id)!;
     }

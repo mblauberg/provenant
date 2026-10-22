@@ -1,0 +1,316 @@
+import { execFileSync, spawn, spawnSync } from "node:child_process";
+import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { createRequire } from "node:module";
+import { dirname, join, resolve } from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
+import { fileURLToPath } from "node:url";
+
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+
+import { Store } from "../src/store.js";
+import { databasePath } from "../src/identity.js";
+import { GraphStore, RESERVATION_FILE, type Attempt, type Graph } from "../src/graph/store.js";
+import { listRecordedRuns } from "../src/run-registry.js";
+import { scratchRoot } from "./helpers/temp-root.js";
+
+const testDirectory = dirname(fileURLToPath(import.meta.url));
+const repositoryRoot = resolve(testDirectory, "../../..");
+const packageRoot = resolve(testDirectory, "..");
+const fixture = join(testDirectory, "lifecycle-owner-fixture.mjs");
+const tsxLoader = createRequire(import.meta.url).resolve("tsx");
+const fixturePython = execFileSync("/usr/bin/env", ["python3", "-c", "import sys; print(sys.executable)"], { encoding: "utf8" }).trim();
+
+let root: string, workspace: string, env: NodeJS.ProcessEnv;
+const tracked = new Set<number>();
+
+const shellQuote = (value: string) => `'${value.replaceAll("'", `'"'"'`)}'`;
+const git = (cwd: string, ...args: string[]) => execFileSync("git", ["-C", cwd, ...args], { stdio: "ignore" });
+
+/** A product root whose dispatch owners are the lifecycle fixture, with a fast graph tick. */
+function buildProduct(caps: Record<string, number> = {}): string {
+  const product = join(root, "product");
+  const owners = join(product, "skills/orchestrate/scripts");
+  mkdirSync(join(product, "config"), { recursive: true });
+  mkdirSync(owners, { recursive: true });
+  mkdirSync(join(product, "scripts/lib"), { recursive: true });
+  for (const name of ["model-routing.json", "adapter-compatibility.yaml"])
+    copyFileSync(join(repositoryRoot, "config", name), join(product, "config", name));
+  copyFileSync(join(repositoryRoot, "scripts/lib/harness-python.sh"), join(product, "scripts/lib/harness-python.sh"));
+  writeFileSync(join(product, "config/graph-defaults.json"), JSON.stringify({
+    schema: "provenant.graph-defaults.v1", pool_caps: { opencode: 2, cursor: 1, agy: 2, default: 1, ...caps },
+    tick_seconds: 0.1, probe_seconds: 0.3, gate_grace_seconds: 1,
+  }));
+  for (const name of ["run_dir_init.sh", "dispatch_run.py", "batch_run.py", "run_controls.py"]) {
+    const owner = join(owners, name);
+    writeFileSync(owner, name === "run_dir_init.sh"
+      ? `#!/bin/sh\nPROVENANT_FIXTURE_OWNER=${shellQuote(name)} exec ${shellQuote(process.execPath)} ${shellQuote(fixture)} "$@"\n`
+      : `#!/usr/bin/env python3\nimport os, sys\nos.environ["PROVENANT_FIXTURE_OWNER"] = ${JSON.stringify(name)}\nos.execv(${JSON.stringify(process.execPath)}, [${JSON.stringify(process.execPath)}, ${JSON.stringify(fixture)}, *sys.argv[1:]])\n`);
+    chmodSync(owner, 0o755);
+  }
+  return product;
+}
+
+function fabric(args: string[], cwd = workspace): { status: number | null; stdout: string; stderr: string } {
+  const result = spawnSync(join(packageRoot, "bin/fabric"), args, { cwd, encoding: "utf8", env, timeout: 30_000 });
+  return { status: result.status, stdout: result.stdout, stderr: result.stderr };
+}
+
+function writeGraph(name: string, document: Record<string, unknown>): string {
+  const path = join(root, `${name}.json`);
+  writeFileSync(path, JSON.stringify({ schema_version: 1, ...document }));
+  return path;
+}
+
+function run(document: Record<string, unknown>, cwd = workspace): Record<string, any> {
+  const result = fabric(["graph", "run", "--file", writeGraph(`graph-${Date.now()}`, document), "--json"], cwd);
+  expect(result.status, result.stdout + result.stderr).toBe(0);
+  const view = JSON.parse(result.stdout) as Record<string, any>;
+  trackOwner(view.graph_id, cwd);
+  return view;
+}
+
+const withStore = <T>(work: (store: GraphStore) => T): T => {
+  const store = new GraphStore(env);
+  try { return work(store); } finally { store.close(); }
+};
+const graphRow = (id: string, project = workspace): Graph => withStore((store) => store.graph(project, id)!);
+const nodes = (id: string, project = workspace): Map<string, Attempt> => withStore((store) => store.current(project, id));
+const allAttempts = (id: string, project = workspace): Attempt[] => withStore((store) => store.attempts(project, id));
+
+function trackOwner(id: string, project: string): void {
+  void (async () => {
+    for (let index = 0; index < 100; index++) {
+      const owner = withStore((store) => store.graph(project, id)?.owner_pid);
+      if (owner) { tracked.add(owner); return; }
+      await delay(50);
+    }
+  })();
+}
+
+const alive = (pid: number) => { try { process.kill(pid, 0); return true; } catch { return false; } };
+
+async function waitForFile(path: string): Promise<string> {
+  await waitFor(() => existsSync(path) && readFileSync(path, "utf8").trim() !== "", `file ${path}`);
+  return path;
+}
+
+async function waitFor(condition: () => boolean, label: string, timeoutMs = 20_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!condition() && Date.now() < deadline) await delay(50);
+  expect(condition(), label).toBe(true);
+}
+
+const reader = (id: string, route: Record<string, string>, extra: Record<string, unknown> = {}) =>
+  ({ id, route, brief: { prompt: `Survey ${id}.` }, ...extra });
+
+beforeEach(() => {
+  root = realpathSync(scratchRoot("fabric-graph-"));
+  workspace = join(root, "workspace");
+  mkdirSync(workspace);
+  git(workspace, "init", "-q", "-b", "main");
+  git(workspace, "-c", "user.email=t@example.invalid", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "root");
+  env = {
+    ...process.env,
+    AGENT_FABRIC_PRODUCT_ROOT: buildProduct(),
+    AGENT_FABRIC_SEAT: "codex",
+    AGENT_FABRIC_STATE_DIRECTORY: join(root, "state"),
+    HARNESS_PYTHON: fixturePython,
+    FABRIC_NODE: process.execPath,
+    AGENT_FABRIC_TSX_LOADER: tsxLoader,
+  };
+});
+
+afterEach(async () => {
+  for (const pid of tracked) { try { process.kill(pid, "SIGKILL"); } catch { /* gone */ } }
+  for (const run of listRecordedRuns(workspace)) {
+    for (const pid of [run.owner_pid]) if (pid) { try { process.kill(-pid, "SIGKILL"); } catch { /* gone */ } try { process.kill(pid, "SIGKILL"); } catch { /* gone */ } }
+  }
+  const pids = [...tracked];
+  tracked.clear();
+  await waitFor(() => pids.every((pid) => !alive(pid)), "graph processes to exit before cleanup");
+  if (process.env.GRAPH_TEST_KEEP) { console.log(`kept ${root}`); return; }
+  rmSync(root, { recursive: true, force: true });
+});
+
+describe("graph runner", { timeout: 60_000 }, () => {
+  it("runs a three-tier mixed-provider graph to done with no coordinator, and every receipt joins its dispatch", async () => {
+    const started = Date.now();
+    const view = run({ nodes: [
+      reader("survey", { adapter: "opencode", alias: "glm-free" }, { tier: "junior" }),
+      reader("design", { adapter: "cursor", model: "composer-2.5" }, { tier: "senior" }),
+      reader("synth", { adapter: "agy", model: "gemini-3.8-flash" }, { tier: "principal", depends_on: ["survey", "design"],
+        inputs: [{ from: "survey", part: "result" }, { from: "design", part: "result" }] }),
+    ] });
+    expect(Date.now() - started).toBeLessThan(15_000);
+    expect(view).toMatchObject({ status: "ok", graph_state: "running" });
+    await waitFor(() => graphRow(view.graph_id).state !== "running", "graph to finish on its own");
+    expect(graphRow(view.graph_id).state).toBe("done");
+    const rows = allAttempts(view.graph_id);
+    expect(rows.map((row) => [row.node_id, row.state, row.adapter])).toEqual(expect.arrayContaining([
+      ["survey", "passed", "opencode"], ["design", "passed", "cursor"], ["synth", "passed", "agy"]]));
+    for (const row of rows) {
+      const receipt = JSON.parse(readFileSync(join(workspace, ".agent-run/graphs", view.graph_id, "r1", row.node_id, "a1", "receipt.json"), "utf8"));
+      expect(receipt.schema).toBe("provenant.graph-node-receipt.v1");
+      expect(receipt.identity).toMatchObject({ graph_id: view.graph_id, node_id: row.node_id, attempt: 1, revision: 1 });
+      // The join: the receipt names a dispatch whose own status record and attempt receipt agree with it.
+      const dispatch = JSON.parse(readFileSync(join(receipt.dispatch.run_dir, "dispatch-status.json"), "utf8"));
+      expect(dispatch).toMatchObject({ id: row.run_id, task_id: row.task_id, status: "ok" });
+      expect(dispatch.routes[0].adapter).toBe(row.adapter);
+      const attempt = JSON.parse(readFileSync(join(receipt.dispatch.run_dir, "dispatch/tasks", row.task_id, "attempt-001/attempt.json"), "utf8"));
+      expect(attempt).toMatchObject({ task_id: row.task_id, status: "ok" });
+      expect(receipt.outcome.result_path).toBe(join(receipt.dispatch.run_dir, attempt.result.path));
+      expect(existsSync(join(receipt.dispatch.run_dir, "KEEP")), "KEEP pins are removed once the graph ends").toBe(false);
+    }
+    const synth = rows.find((row) => row.node_id === "synth")!;
+    expect(synth.input_attempts).toEqual({ survey: 1, design: 1 });
+    const brief = readFileSync(join(workspace, ".agent-run/graphs", view.graph_id, "r1/synth/a1/brief.md"), "utf8");
+    for (const parent of ["survey", "design"])
+      expect(brief).toContain(`- ${parent}: ${String(rows.find((row) => row.node_id === parent)!.outcome!.result_path)}`);
+  });
+
+  it("rejects a confidential parent feeding a non-confidential synthesis node before anything runs", () => {
+    const result = fabric(["graph", "run", "--file", writeGraph("leak", { nodes: [
+      reader("secret", { adapter: "opencode", alias: "glm-free" }, { authority: { confidential: true } }),
+      reader("synth", { adapter: "opencode", alias: "glm-free" }, { depends_on: ["secret"], inputs: [{ from: "secret", part: "result" }],
+        authority: { confidential: false } }),
+    ] })]);
+    expect(result.status).toBe(1);
+    expect(result.stdout).toContain("node synth: confidentiality_downgrade");
+    expect(withStore((store) => store.graphs(workspace))).toEqual([]);
+    expect(listRecordedRuns(workspace)).toEqual([]);
+  });
+
+  it("survives its owner being killed mid-run: the lane keeps running and resume adopts it", async () => {
+    const release = join(root, "release-a");
+    const view = run({ nodes: [
+      reader("a", { adapter: "opencode", alias: "glm-free" }, { brief: { prompt: `hold ${release}` } }),
+      reader("b", { adapter: "opencode", model: "deepseek-free" }, { depends_on: ["a"] }),
+    ] });
+    const id = view.graph_id as string;
+    await waitFor(() => nodes(id).get("a")?.run_id != null, "node a to launch");
+    const before = nodes(id).get("a")!;
+    const lanePid = Number(readFileSync(await waitForFile(join(before.run_dir!, "sleeping.pid")), "utf8"));
+    tracked.add(lanePid);
+    expect(existsSync(join(before.run_dir!, "KEEP")), "a launched lane is pinned against pruning").toBe(true);
+    const owner = graphRow(id).owner_pid!;
+    process.kill(owner, "SIGKILL");
+    await waitFor(() => !alive(owner), "owner to die");
+    expect(alive(lanePid), "the lane outlives its graph owner").toBe(true);
+    const status = fabric(["graph", "status", id]);
+    expect(status.stdout).toContain(`owner died: provenant graph resume ${id}`);
+    const hint = fabric(["lanes", "--wait", "--all", "--timeout", "0"]);
+    expect(hint.stderr).toContain(`graph ${id} owner died: provenant graph resume ${id}`);
+    expect(fabric(["graph", "resume", id]).status).toBe(0);
+    await waitFor(() => { const pid = graphRow(id).owner_pid; return pid !== null && pid !== owner && alive(pid); }, "a new owner to claim the graph");
+    tracked.add(graphRow(id).owner_pid!);
+    writeFileSync(release, "");
+    await waitFor(() => graphRow(id).state !== "running", "graph to finish after resume");
+    expect(graphRow(id).state).toBe("done");
+    const a = allAttempts(id).filter((row) => row.node_id === "a");
+    expect(a.map((row) => [row.attempt, row.run_id, row.state])).toEqual([[1, before.run_id, "passed"]]);
+  });
+
+  it("cancels during a forking gate and leaves no group member alive before the worktree reservation releases", async () => {
+    const linked = join(root, "linked");
+    git(workspace, "worktree", "add", "-q", "-b", "work", linked);
+    const gitDir = execFileSync("git", ["-C", linked, "rev-parse", "--absolute-git-dir"], { encoding: "utf8" }).trim();
+    const script = join(root, "gate.sh");
+    writeFileSync(script, `trap '' TERM\n/bin/sh -c 'trap "" TERM; echo $$ > ${root}/child.pid; while :; do sleep 0.1; done' &\necho $$ > ${root}/gate.pid\nwait\n`);
+    const argv = ["/bin/sh", script];
+    const view = run({ authority: { mode: "worktree_write" }, worktrees: { w: { path: linked } }, limits: { gate_allowlist: [argv] },
+      nodes: [reader("edit", { adapter: "cursor", model: "composer-2.5" }, { authority: { mode: "worktree_write" }, worktree: "w",
+        gate: { fast: [argv] } })] });
+    const id = view.graph_id as string;
+    const gatePid = Number(readFileSync(await waitForFile(join(root, "gate.pid")), "utf8"));
+    const childPid = Number(readFileSync(await waitForFile(join(root, "child.pid")), "utf8"));
+    tracked.add(gatePid); tracked.add(childPid);
+    expect(nodes(id).get("edit")!.state).toBe("gating");
+    expect(existsSync(join(gitDir, RESERVATION_FILE)), "the graph holds the worktree while its gate runs").toBe(true);
+    expect(fabric(["graph", "cancel", id]).status).toBe(0);
+    let early = false;
+    while (graphRow(id).state === "running") {
+      const reserved = existsSync(join(gitDir, RESERVATION_FILE)) &&
+        withStore((store) => store.reservation(realpathSync(linked))) !== undefined;
+      if (!reserved && (alive(gatePid) || alive(childPid))) early = true;
+      await delay(10);
+    }
+    expect(early, "the reservation released while a gate group member was still alive").toBe(false);
+    expect(graphRow(id).state).toBe("cancelled");
+    expect(nodes(id).get("edit")!.state).toBe("cancelled");
+    expect(alive(gatePid) || alive(childPid)).toBe(false);
+    expect(existsSync(join(gitDir, RESERVATION_FILE))).toBe(false);
+  });
+
+  it("never runs more lanes in one pool than its cap across two concurrent graphs", async () => {
+    const release = join(root, "release-pool");
+    const holding = (prefix: string) => ["1", "2", "3"].map((index) =>
+      reader(`${prefix}${index}`, { adapter: "opencode", alias: "glm-free" }, { brief: { prompt: `hold ${release}` } }));
+    const first = run({ nodes: holding("x") }).graph_id as string;
+    const second = run({ nodes: holding("y") }).graph_id as string;
+    let peak = 0;
+    const deadline = Date.now() + 4_000;
+    while (Date.now() < deadline) {
+      const live = [...nodes(first).values(), ...nodes(second).values()].filter((row) => row.holds_slot).length;
+      peak = Math.max(peak, live);
+      await delay(10);
+    }
+    expect(peak).toBe(2);
+    writeFileSync(release, "");
+    for (const id of [first, second]) {
+      while (graphRow(id).state === "running") {
+        const live = [...nodes(first).values(), ...nodes(second).values()].filter((row) => row.holds_slot).length;
+        peak = Math.max(peak, live);
+        await delay(10);
+      }
+      expect(graphRow(id).state).toBe("done");
+    }
+    expect(peak).toBe(2);
+  });
+
+  it("makes a node dispatched into another registered repository visible to lanes --wait there", async () => {
+    const other = join(root, "other");
+    mkdirSync(other);
+    git(other, "init", "-q", "-b", "main");
+    const store = new Store(databasePath(env));
+    try {
+      store.announce({ project: workspace, cwd: workspace, agentId: "codex-graph", provider: "codex" });
+      store.announce({ project: other, cwd: other, agentId: "codex-other", provider: "codex" });
+    } finally { store.close(); }
+    const release = join(root, "release-other");
+    const view = run({ nodes: [reader("remote", { adapter: "opencode", alias: "glm-free" }, { cwd: other, brief: { prompt: `hold ${release}` } })] });
+    const id = view.graph_id as string;
+    await waitFor(() => nodes(id).get("remote")?.run_id != null, "the cross-project node to launch");
+    const runId = nodes(id).get("remote")!.run_id!;
+    const listed = JSON.parse(fabric(["lanes", "--json"], other).stdout) as { runs: Array<Record<string, unknown>> };
+    expect(listed.runs.map((lane) => lane.run_id)).toContain(runId);
+    let returned = false;
+    const waiting = new Promise<number | null>((resolveWait) => {
+      const child = spawn(join(packageRoot, "bin/fabric"), ["lanes", "--wait", "--all", "--timeout", "20"], { cwd: other, env, stdio: "ignore" });
+      child.once("exit", (code) => { returned = true; resolveWait(code); });
+    });
+    await delay(1_500);
+    expect(returned, "lanes --wait blocks on the graph's lane").toBe(false);
+    writeFileSync(release, "");
+    expect(await waiting, "lanes --wait from the target repository returns once the node ends").toBe(0);
+    await waitFor(() => graphRow(id).state === "done", "graph to finish");
+  });
+
+  it("blocks the descendants of a failed node, lets independent nodes finish and tells the chair", async () => {
+    const view = run({ nodes: [
+      reader("broken", { adapter: "opencode", alias: "glm-free" }, { brief: { prompt: "fail on purpose" } }),
+      reader("after", { adapter: "opencode", alias: "glm-free" }, { depends_on: ["broken"] }),
+      reader("aside", { adapter: "opencode", model: "deepseek-free" }),
+    ] });
+    const id = view.graph_id as string;
+    await waitFor(() => graphRow(id).state !== "running", "graph to stop");
+    expect(graphRow(id).state).toBe("stopped");
+    expect(Object.fromEntries([...nodes(id)].map(([node, row]) => [node, row.state]))).toEqual({ broken: "failed", after: "blocked", aside: "passed" });
+    const inbox = new Store(databasePath(env));
+    try {
+      const bodies = inbox.inbox({ project: workspace, cwd: workspace, agentId: graphRow(id).chair.agentId, provider: "codex" }, { peek: true })
+        .map((message: { body: string }) => message.body);
+      expect(bodies.some((body: string) => body.includes(`graph ${id} node broken failed`))).toBe(true);
+      expect(bodies.some((body: string) => body.startsWith(`graph ${id} stopped: failed broken`))).toBe(true);
+    } finally { inbox.close(); }
+  });
+});
