@@ -988,6 +988,21 @@ def _resolve_opencode_name(requested: str, live: list[str]) -> tuple[str | None,
                                  "fix: run `opencode models` and pass a full provider/model id"}
 
 
+_EFFORT_LIST_KEYS = {"efforts", "effort_fallback_order", "supported_efforts"}
+
+
+def _retire_max(value: Any) -> Any:
+    """Map the retired max effort to xhigh in every effort list, keeping order and dropping duplicates."""
+    if isinstance(value, dict):
+        return {key: ([*dict.fromkeys("xhigh" if isinstance(item, str) and item.lower() == "max" else item
+                                       for item in item_list)]
+                      if key in _EFFORT_LIST_KEYS and isinstance(item_list, list) else _retire_max(item_list))
+                for key, item_list in value.items()}
+    if isinstance(value, list):
+        return [_retire_max(item) for item in value]
+    return value
+
+
 def resolve_ordinary(args: argparse.Namespace, catalog: dict[str, Any]) -> int:
     requested = args.model or (args.alias if args.alias not in ALIAS_ORDER else "")
     adapter_name = args.adapter or (_owner_adapter(requested, catalog) if requested else "codex")
@@ -1024,8 +1039,13 @@ def resolve_ordinary(args: argparse.Namespace, catalog: dict[str, Any]) -> int:
     if adapter_name == "opencode" and "#" in requested:
         # `provider/model#variant`: the variant is OpenCode's own effort knob, sent as given.
         requested, _, variant = requested.partition("#")
+        retired_variant = False
+        if variant == "max":  # retired: same mapping as --effort max
+            variant = "xhigh"
+            retired_variant = True
         if variant and not args.effort:
             args.effort = variant
+            args.max_remapped = retired_variant
             args.explicit_variant = True
             explicit = True
         elif variant and args.effort == variant:
@@ -1166,14 +1186,17 @@ def resolve_ordinary(args: argparse.Namespace, catalog: dict[str, Any]) -> int:
                  "endpoint_provider": adapter.get("endpoint_provider", adapter_name), "provider": provider,
                  "adapter_enabled": True, "compatibility_adapter": compatibility["compatibility_adapter"] if compatibility else "",
                  "model_selection": "alias" if not explicit else "explicit",
-                 "requested_effort": args.effort or "", "effort": effort if effort != "default" else "",
+                 "requested_effort": "max" if getattr(args, "max_remapped", False) else args.effort or "",
+                 "effort": effort if effort != "default" else "",
                  "effort_applied": effort if effort != "default" else "",
                  "supported_efforts": list(supported),
                  "effort_note": next((note for note in notes if "effort" in note or "unsupported" in note), ""),
                  "effort_source": "explicit" if args.effort else "model-default" if (registered or {}).get("default_effort") else "adapter-default",
                  "effort_capability_source": "registry" if supported else "provider-unverified" if unverified_effort
                  else "registry-no-effort-control" if registered else "adapter-no-effort-control",
-                 "effort_substitution": next((note for note in notes if "unsupported" in note or "effort control" in note), ""),
+                 "effort_substitution": "; ".join(filter(None, (
+                     "max retired; mapped to xhigh" if getattr(args, "max_remapped", False) else "",
+                     next((note for note in notes if "unsupported" in note or "effort control" in note), "")))),
                  "substitution": "", "fallback_model": "",
                  "notes": notes, "warnings": warnings, "fallback_candidates": fallback,
                  "plan_cap_usd": cap, "trains_on_prompts": training_model,
@@ -1568,6 +1591,9 @@ def resolve(args: argparse.Namespace, catalog: dict[str, Any]) -> int:
     capability_models, capability_error = load_capabilities(
         args.capabilities_file, args.adapter, catalog
     )
+    if _retire_max(capability_models) != capability_models:
+        args.max_probe = True
+        capability_models = _retire_max(capability_models)
     args.capability_models = capability_models
     adapter = catalog["adapters"].get(args.adapter)
     endpoint_profile = getattr(args, "endpoint_profile", {})
@@ -1615,7 +1641,7 @@ def resolve(args: argparse.Namespace, catalog: dict[str, Any]) -> int:
         "adapter": args.adapter,
         "alias": "" if args.model and not getattr(args, "alias_supplied", True) else args.alias,
         "role": args.role,
-        "requested_effort": getattr(args, "raw_effort", requested_effort),
+        "requested_effort": "max" if getattr(args, "max_remapped", False) else getattr(args, "raw_effort", requested_effort),
         "effort": requested_effort,
         "effort_source": effort_source,
         "lead_family": args.lead_family,
@@ -2090,6 +2116,10 @@ def resolve(args: argparse.Namespace, catalog: dict[str, Any]) -> int:
             effort_status = ""
     if not effort_status and getattr(args, "raw_effort", None):
         effort_substitution = f"{args.raw_effort} unknown; ran at {effort or 'default'}"
+    if not effort_status and effort == "xhigh" and getattr(args, "max_probe", False) and not getattr(args, "max_remapped", False):
+        effort_substitution = "; ".join(filter(None, ("max retired; mapped to xhigh", effort_substitution)))
+    if not effort_status and getattr(args, "max_remapped", False):
+        effort_substitution = "; ".join(filter(None, ("max retired; mapped to xhigh", effort_substitution)))
     # The effort reaches a suffix model only through its id, so the id must carry it.
     suffix_model = args.effort_transport == "model-id" and (registered_model or {}).get("effort_transport") == "model-suffix"
     suffix = (registered_model.get("suffix", {}) if suffix_model else {}).get(effort or "", "")
@@ -2143,6 +2173,11 @@ def resolve(args: argparse.Namespace, catalog: dict[str, Any]) -> int:
             1,
         )
 
+    # Choke point: max is retired, so a probe snapshot, an overlay or a request never reaches the provider as max.
+    if effort == "max":
+        effort = "xhigh"
+        effort_substitution = "; ".join(filter(None, ("max retired; mapped to xhigh", effort_substitution)))
+    supported = [value for value in supported if value != "max"]
     record = {
         **base,
         "effort": effort,
@@ -2378,7 +2413,12 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(record, sort_keys=True))
         return code
     snapshot = catalogue_snapshot(Path(args.catalog) if args.catalog else None)
-    catalog = snapshot["catalogue"]
+    catalog = _retire_max(snapshot["catalogue"])
+    if getattr(args, "effort", None) == "max":  # retired: one mapping for every resolver
+        args.max_remapped = True
+        args.effort = "xhigh"
+    if getattr(args, "available_effort", None):
+        args.available_effort = _retire_max({"efforts": list(args.available_effort)})["efforts"]
     global ROUTE_WARNINGS
     ROUTE_WARNINGS = ([
         "routing catalogue was stale; resolved against the fresh product snapshot; "

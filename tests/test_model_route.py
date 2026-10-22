@@ -584,7 +584,9 @@ def test_tier_alias_clamps_effort_to_the_registry_efforts(model, asked, resolved
     assert route["status"] == "ok"
     assert route["resolved_model"] == resolved
     assert route["effort"] == used
-    assert route["effort_substitution"] == f"{asked} unsupported by {resolved}; ran at {used}"
+    assert route["effort_substitution"] == (
+        "max retired; mapped to xhigh" if asked == "max"
+        else f"{asked} unsupported by {resolved}; ran at {used}")
     assert asked not in route["supported_efforts"]
 
 
@@ -3405,7 +3407,7 @@ def test_task_class_effort_overlay_may_raise_effort_above_policy_floor(
 ):
     router = load_router()
     catalog = json.loads((ROOT / "config" / "model-routing.json").read_text())
-    catalog["task_class_routes"]["critical-review"]["effort"] = "max"
+    catalog["task_class_routes"]["critical-review"]["effort"] = "xhigh"
     catalog_path = tmp_path / "model-routing.json"
     catalog_path.write_text(json.dumps(catalog))
     monkeypatch.setattr(router, "CATALOG_PATH", catalog_path)
@@ -3418,7 +3420,7 @@ def test_task_class_effort_overlay_may_raise_effort_above_policy_floor(
 
     route = json.loads(capsys.readouterr().out)
     assert route["status"] != "task_class_config_invalid"
-    assert route["requested_effort"] == "max"
+    assert route["requested_effort"] == "xhigh"
     assert result == 1
 
 
@@ -3501,7 +3503,7 @@ def test_openai_catalog_declares_effort_policy_only():
         "critical-review": {"flagship": "xhigh"},
         "worker": {"workhorse": "high", "scout": "high"},
     }
-    assert family["effort_fallback_order"] == ["max", "xhigh", "high", "medium", "low"]
+    assert family["effort_fallback_order"] == ["xhigh", "high", "medium", "low"]
 
 
 def test_codex_capabilities_documents_historical_no_effort_status():
@@ -3566,8 +3568,89 @@ def test_noneligible_ultra_fallback_reports_runtime_capability_source(
     route = json.loads(capsys.readouterr().out)
     assert result == 0
     assert route["requested_effort"] == "ultra"
-    assert route["effort"] == "max"
+    assert route["effort"] == "xhigh"
     assert route["effort_capability_source"] == "runtime-model-catalog"
+
+
+def test_probe_snapshot_max_is_mapped_to_xhigh_with_a_note(tmp_path):
+    snapshot = write_codex_capability_snapshot(
+        tmp_path,
+        models={"gpt-6-astra": {"resolved_model": "gpt-6-astra",
+                                "supported_efforts": ["max"]}},
+    )
+    result, route = resolve(
+        "--adapter", "codex", "--alias", "flagship", "--role", "worker",
+        "--effort", "ultra", "--capabilities-file", str(snapshot),
+    )
+    assert result.returncode == 0
+    assert route["effort"] == route["effort_applied"] == "xhigh"
+    assert "max retired; mapped to xhigh" in route["effort_substitution"]
+    assert "max" not in route["supported_efforts"]
+
+
+def _overlay_with_max(tmp_path, monkeypatch):
+    """An instance overlay that predates the retirement: every effort list still offers max."""
+    router = load_router()
+    def readd(value):
+        if isinstance(value, dict):
+            return {k: (v + ["max"] if k in {"efforts", "effort_fallback_order"} and isinstance(v, list) and "xhigh" in v
+                        else readd(v)) for k, v in value.items()}
+        return [readd(v) for v in value] if isinstance(value, list) else value
+    catalog = readd(json.loads((ROOT / "config" / "model-routing.json").read_text()))
+    path = tmp_path / "model-routing.json"
+    path.write_text(json.dumps(catalog))
+    monkeypatch.setattr(router, "CATALOG_PATH", path)
+    monkeypatch.setattr(router, "PRODUCT_CATALOG_PATH", path)
+    return router
+
+
+@pytest.mark.parametrize("argv", [
+    ["--adapter", "claude", "--alias", "flagship", "--role", "worker", "--effort", "max"],
+    ["--adapter", "claude", "--model", "sonnet", "--role", "worker", "--effort", "max"],
+    ["--adapter", "codex", "--model", "gpt-6-luna", "--role", "worker", "--effort", "max"],
+    ["--adapter", "claude", "--model", "sonnet", "--role", "worker", "--effort", "ultra"],
+])
+def test_overlay_that_still_lists_max_never_resolves_to_max(tmp_path, monkeypatch, capsys, argv):
+    router = _overlay_with_max(tmp_path, monkeypatch)
+    router.main(["resolve", *argv])
+    route = json.loads(capsys.readouterr().out)
+    assert route["status"] == "ok"
+    assert route["effort"] != "max" and route["effort_applied"] != "max"
+    assert "max" not in route["supported_efforts"]
+    if "max" in argv:
+        assert route["requested_effort"] == "max"
+        assert "max retired; mapped to xhigh" in route["effort_substitution"]
+
+
+def test_opencode_max_variant_is_mapped_to_xhigh():
+    result, route = resolve("--adapter", "opencode", "--model", "opencode-go/deepseek-v4.1-flash#max",
+                            "--role", "worker")
+    assert route["effort"] == route["effort_applied"] == "xhigh"
+    assert "max retired; mapped to xhigh" in route["effort_substitution"]
+
+
+def test_explicit_effort_beats_a_retired_max_variant():
+    result, route = resolve("--adapter", "opencode", "--model", "opencode-go/deepseek-v4.1-flash#max",
+                            "--role", "worker", "--effort", "high")
+    assert route["requested_effort"] == "high"
+    assert "max retired" not in route["effort_substitution"]
+    assert route["effort"] != "xhigh"
+
+
+def test_explicit_max_and_ultra_agree_on_a_probe_that_offers_max(tmp_path):
+    snapshot = write_codex_capability_snapshot(
+        tmp_path,
+        models={"gpt-6-astra": {"resolved_model": "gpt-6-astra",
+                                "supported_efforts": ["high", "max"]}},
+    )
+    efforts = {}
+    for asked in ("max", "ultra"):
+        result, route = resolve("--adapter", "codex", "--alias", "flagship", "--role", "worker",
+                                "--effort", asked, "--capabilities-file", str(snapshot))
+        assert result.returncode == 0
+        efforts[asked] = route["effort"]
+        assert "ran at max" not in route["effort_substitution"]
+    assert efforts == {"max": "xhigh", "ultra": "xhigh"}
 
 
 def test_ultra_eligible_roles_must_be_a_list_of_role_names(
@@ -3618,7 +3701,7 @@ def test_explicit_ultra_maps_to_supported_effort_on_ordinary_routes(tmp_path):
         assert result.returncode == 0
         assert route["status"] == "ok"
         assert route["requested_effort"] == "ultra"
-        assert route["effort"] in {"ultra", "max"}
+        assert route["effort"] in {"ultra", "xhigh"}
 
 
 def test_codex_failure_records_never_expose_a_dispatchable_model(tmp_path):
@@ -3631,7 +3714,7 @@ def test_codex_failure_records_never_expose_a_dispatchable_model(tmp_path):
     )
     assert result.returncode == 0
     assert route["status"] == "ok"
-    assert route["effort"] == "max"
+    assert route["effort"] == "xhigh"
     assert route["resolved_model"] == "gpt-6-luna"
     assert route["identity_source"] == "runtime-capability+catalog"
     assert "catalog_model" not in route
@@ -3683,8 +3766,7 @@ def test_capability_snapshot_controls_default_fallback(
     snapshot.write_text(json.dumps(capability_snapshot({
             "gpt-6-astra": {
                 "resolved_model": "gpt-6-astra",
-                # max is present so the test proves the default steps down
-                # to high rather than up past the xhigh ceiling.
+                # max is retired and maps to xhigh, so the default is met.
                 "supported_efforts": ["medium", "high", "max"],
             }
         })))
@@ -3695,11 +3777,8 @@ def test_capability_snapshot_controls_default_fallback(
     route = json.loads(capsys.readouterr().out)
     assert result == 0
     assert route["requested_effort"] == "xhigh"
-    assert route["effort"] == "high"
+    assert route["effort"] == "xhigh"
     assert route["effort_capability_source"] == "runtime-model-catalog"
-    assert route["effort_substitution"] == (
-        "xhigh unavailable (runtime/model capability); used high"
-    )
 
 
 def test_default_effort_fallback_chooses_highest_supported_effort_at_or_below_request(
@@ -3792,7 +3871,7 @@ def test_explicit_unsupported_effort_maps_against_runtime_snapshot(tmp_path):
     )
     assert result.returncode == 0
     assert route["status"] == "ok"
-    assert route["effort"] == "max"
+    assert route["effort"] == "xhigh"
 
 
 def test_malformed_capability_snapshot_fails_closed(tmp_path):

@@ -311,15 +311,15 @@ generation and Terra are retired from the catalogue.
 `openai.role_effort_defaults.worker` raises both worker aliases to `high`, which
 outranks the task-class floors of `low` and `medium`. The raise is scoped to the
 OpenAI family on purpose, so Anthropic and Google worker routes stay at their
-floors rather than inheriting a cost rise nobody asked for. Reach for `xhigh` or
-`max` explicitly when a leg deserves it, and record the model and effort pair in
+floors rather than inheriting a cost rise nobody asked for. Reach for `xhigh`
+explicitly when a leg deserves it, and record the model and effort pair in
 the receipt. A cheap model with the effort dial up beats a dearer model at
 medium.
 
 **`gpt-6-astra` is the OpenAI flagship, reserved for critical and high-stakes
 slices and for legwork that needs judgement.** Run it between `low` and
-`xhigh`; `max` and `ultra` exist on the surfaces but are not the standing
-policy. It is the sole OpenAI flagship candidate: no worker model is an
+`xhigh`; `ultra` exists but is not the standing policy. `max` is retired: routing maps
+it to `xhigh`, since effort above `high` rarely pays. It is the sole OpenAI flagship candidate: no worker model is an
 automatic flagship fallback. Give Astra genuinely hard work where a miss is
 expensive or precise high-stakes judgement matters; ordinary frontend
 implementation belongs to Claude Sonnet 5.5 or Gemini legwork.
