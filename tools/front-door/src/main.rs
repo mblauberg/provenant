@@ -8,7 +8,6 @@ mod json;
 mod resolve;
 
 use exec::{replace_process, Launch};
-use help::Caps;
 use resolve::{is_file, Settings, FABRIC_MCP};
 use std::ffi::OsString;
 use std::io::Write;
@@ -48,10 +47,6 @@ mod identity {
 
 const LEASE_VERBS: [&str; 5] = ["acquire", "release", "verify", "status", "push"];
 const FABRIC_CLI: &str = "runtime/fabric/bin/fabric";
-/// Presence of these marks #1094 and #1095 in a tree.
-const LINT_OWNER: &str = "scripts/provenant_lint.py";
-const LEASE_OWNER: &str = "runtime/fabric/src/landing-cli.ts";
-
 /// Owner paths by verb, relative to the selected root. Verbs listed in
 /// `PREFIXED` also pass their own name as the first owner argument.
 const OWNERS: &[(&str, &str)] = &[
@@ -59,6 +54,8 @@ const OWNERS: &[(&str, &str)] = &[
     ("capabilities", "skills/orchestrate/scripts/capabilities.py"),
     ("worktree", "scripts/worktree"),
     ("clean", "scripts/clean.py"),
+    ("reap", "scripts/reap.py"),
+    ("pr", "scripts/provenant-pr"),
     ("lint", "scripts/provenant_lint.py"),
     ("check", "scripts/check-harness"),
     ("gate", "scripts/gate"),
@@ -93,28 +90,25 @@ enum Route {
     },
 }
 
-fn usage(caps: Caps) -> Route {
+fn usage() -> Route {
     Route::Print {
-        text: help::usage(caps),
+        text: help::USAGE.to_string(),
         stderr: true,
         status: 2,
     }
 }
 
-fn route(args: &[OsString], seat: bool, caps: Caps) -> Route {
+fn route(args: &[OsString], seat: bool) -> Route {
     let Some((first, rest)) = args.split_first() else {
-        return if seat { Route::Mcp } else { usage(caps) };
+        return if seat { Route::Mcp } else { usage() };
     };
     let Some(mut command) = first.to_str() else {
-        return usage(caps);
+        return usage();
     };
     let mut rest = rest.to_vec();
     if matches!(command, "lanes" | "events") {
         rest.insert(0, first.clone());
         command = "fabric";
-    }
-    if !caps.has(command) {
-        return usage(caps);
     }
     if command == "lease" {
         let lease = help::detail("lease").unwrap_or_default();
@@ -148,28 +142,21 @@ fn route(args: &[OsString], seat: bool, caps: Caps) -> Route {
         command = "route";
     } else if matches!(command, "help" | "-h" | "--help") {
         let text = match rest.as_slice() {
-            [] => Some(help::general(caps)),
-            [topic] => topic
-                .to_str()
-                .filter(|topic| caps.has(topic))
-                .and_then(help::detail)
-                .map(str::to_string),
+            [] => Some(help::GENERAL.to_string()),
+            [topic] => topic.to_str().and_then(help::detail).map(str::to_string),
             _ => None,
         };
-        return text.map_or_else(
-            || usage(caps),
-            |text| Route::Print {
-                text,
-                stderr: false,
-                status: 0,
-            },
-        );
+        return text.map_or_else(usage, |text| Route::Print {
+            text,
+            stderr: false,
+            status: 0,
+        });
     }
     if command == "root" {
         return if rest.is_empty() {
             Route::Root
         } else {
-            usage(caps)
+            usage()
         };
     }
     if PREFIXED.contains(&command) {
@@ -181,7 +168,7 @@ fn route(args: &[OsString], seat: bool, caps: Caps) -> Route {
             relative,
             args: rest,
         },
-        _ => usage(caps),
+        _ => usage(),
     }
 }
 
@@ -226,8 +213,7 @@ fn run(args: &[OsString]) -> u8 {
     if std::env::var_os("PROVENANT_FRONT_DOOR").is_some_and(|mode| mode == "python") {
         return run_python(args, &settings);
     }
-    let caps = capabilities(&settings);
-    match route(args, std::env::var_os("AGENT_FABRIC_SEAT").is_some(), caps) {
+    match route(args, std::env::var_os("AGENT_FABRIC_SEAT").is_some()) {
         Route::Print {
             text,
             stderr,
@@ -264,22 +250,6 @@ fn run(args: &[OsString]) -> u8 {
             Err(message) => fail(&message),
         },
     }
-}
-
-/// Which optional commands the tree this run would dispatch in provides:
-/// the checkout the binary lives in, else the resolved product root, else
-/// none (help still works without a root, and must not advertise guesses).
-fn capabilities(settings: &Settings) -> Caps {
-    let provides = |root: &Path| Caps {
-        lint: is_file(&root.join(LINT_OWNER)),
-        lease: is_file(&root.join(LEASE_OWNER)),
-    };
-    if let Some(local) = resolve::local_root() {
-        if is_file(&local.join(FABRIC_MCP)) {
-            return provides(&local);
-        }
-    }
-    resolve::product_root(settings).map_or(Caps::NONE, |root| provides(&root))
 }
 
 /// Rollback switch: run the preserved Python dispatcher directly. The
@@ -343,55 +313,55 @@ mod tests {
 
     #[test]
     fn empty_argv_is_mcp_with_a_seat_and_usage_without() {
-        assert_eq!(route(&[], true, Caps::ALL), Route::Mcp);
-        assert_eq!(route(&[], false, Caps::ALL), usage(Caps::ALL));
-        assert_eq!(route(&args(&["x"]), true, Caps::ALL), usage(Caps::ALL));
+        assert_eq!(route(&[], true), Route::Mcp);
+        assert_eq!(route(&[], false), usage());
+        assert_eq!(route(&args(&["x"]), true), usage());
     }
 
     #[test]
     fn verbs_pass_arguments_unchanged_or_with_their_prefix() {
         assert_eq!(
-            route(&args(&["route", "a", ""]), false, Caps::ALL),
+            route(&args(&["route", "a", ""]), false),
             owner("scripts/model-route", &["a", ""])
         );
         assert_eq!(
-            route(&args(&["routes", "--all"]), false, Caps::ALL),
+            route(&args(&["routes", "--all"]), false),
             owner("scripts/model-route", &["routes", "--all"])
         );
         assert_eq!(
-            route(&args(&["lanes", "--json"]), false, Caps::ALL),
+            route(&args(&["lanes", "--json"]), false),
             owner(FABRIC_CLI, &["lanes", "--json"])
         );
         assert_eq!(
-            route(&args(&["events"]), false, Caps::ALL),
+            route(&args(&["events"]), false),
             owner(FABRIC_CLI, &["events"])
         );
         assert_eq!(
-            route(&args(&["stats", "-x"]), false, Caps::ALL),
+            route(&args(&["stats", "-x"]), false),
             owner("scripts/provenant-telemetry", &["stats", "-x"])
         );
         assert_eq!(
-            route(&args(&["retro"]), false, Caps::ALL),
+            route(&args(&["retro"]), false),
             owner("scripts/provenant-telemetry", &["retro"])
         );
         assert_eq!(
-            route(&args(&["telemetry", "ingest"]), false, Caps::ALL),
+            route(&args(&["telemetry", "ingest"]), false),
             owner("scripts/provenant-telemetry", &["ingest"])
         );
         assert_eq!(
-            route(&args(&["peer"]), false, Caps::ALL),
+            route(&args(&["peer"]), false),
             owner("scripts/fabric-hosts", &["peer"])
         );
         assert_eq!(
-            route(&args(&["hosts", "list"]), false, Caps::ALL),
+            route(&args(&["hosts", "list"]), false),
             owner("scripts/fabric-hosts", &["hosts", "list"])
         );
         assert_eq!(
-            route(&args(&["lint", "commit-msg", "f"]), false, Caps::ALL),
+            route(&args(&["lint", "commit-msg", "f"]), false),
             owner("scripts/provenant_lint.py", &["commit-msg", "f"])
         );
         assert_eq!(
-            route(&args(&["check", "--fast"]), false, Caps::ALL),
+            route(&args(&["check", "--fast"]), false),
             Route::Check(args(&["--fast"]))
         );
     }
@@ -403,6 +373,8 @@ mod tests {
             "capabilities",
             "worktree",
             "clean",
+            "reap",
+            "pr",
             "lint",
             "check",
             "gate",
@@ -420,7 +392,7 @@ mod tests {
         ] {
             assert!(
                 matches!(
-                    route(&args(&[verb]), false, Caps::ALL),
+                    route(&args(&[verb]), false),
                     Route::Owner { .. } | Route::Check(_)
                 ),
                 "{verb}"
@@ -431,19 +403,16 @@ mod tests {
     #[test]
     fn help_routes_executes_and_dash_h_routes_prints() {
         assert_eq!(
-            route(&args(&["help", "routes"]), false, Caps::ALL),
+            route(&args(&["help", "routes"]), false),
             owner("scripts/model-route", &["routes", "--health"])
         );
-        assert_eq!(
-            route(&args(&["help", "routes", "x"]), false, Caps::ALL),
-            usage(Caps::ALL)
-        );
+        assert_eq!(route(&args(&["help", "routes", "x"]), false), usage());
         for flag in ["-h", "--help"] {
             let Route::Print {
                 text,
                 status: 0,
                 stderr: false,
-            } = route(&args(&[flag, "routes"]), false, Caps::ALL)
+            } = route(&args(&[flag, "routes"]), false)
             else {
                 panic!("{flag}");
             };
@@ -455,28 +424,19 @@ mod tests {
     fn help_prints_general_detail_or_usage() {
         for word in ["help", "-h", "--help"] {
             assert_eq!(
-                route(&args(&[word]), false, Caps::ALL),
+                route(&args(&[word]), false),
                 Route::Print {
-                    text: help::general(Caps::ALL),
+                    text: help::GENERAL.to_string(),
                     stderr: false,
                     status: 0
                 }
             );
         }
-        assert_eq!(
-            route(&args(&["help", "bogus"]), false, Caps::ALL),
-            usage(Caps::ALL)
-        );
-        assert_eq!(
-            route(&args(&["help", "a", "b"]), false, Caps::ALL),
-            usage(Caps::ALL)
-        );
-        assert_eq!(
-            route(&args(&["-h", "bogus"]), false, Caps::ALL),
-            usage(Caps::ALL)
-        );
+        assert_eq!(route(&args(&["help", "bogus"]), false), usage());
+        assert_eq!(route(&args(&["help", "a", "b"]), false), usage());
+        assert_eq!(route(&args(&["-h", "bogus"]), false), usage());
         for topic in ["root", "lint", "lease", "help", "check"] {
-            let Route::Print { text, .. } = route(&args(&["help", topic]), false, Caps::ALL) else {
+            let Route::Print { text, .. } = route(&args(&["help", topic]), false) else {
                 panic!()
             };
             assert_eq!(Some(text.as_str()), help::detail(topic));
@@ -486,21 +446,14 @@ mod tests {
     #[test]
     fn unknown_commands_are_usage_errors() {
         for word in ["bogus", "", "--version", "-v", "ROUTE", "Route", "--json"] {
-            assert_eq!(
-                route(&args(&[word]), false, Caps::ALL),
-                usage(Caps::ALL),
-                "{word:?}"
-            );
+            assert_eq!(route(&args(&[word]), false), usage(), "{word:?}");
         }
     }
 
     #[test]
     fn root_takes_no_arguments() {
-        assert_eq!(route(&args(&["root"]), false, Caps::ALL), Route::Root);
-        assert_eq!(
-            route(&args(&["root", "x"]), false, Caps::ALL),
-            usage(Caps::ALL)
-        );
+        assert_eq!(route(&args(&["root"]), false), Route::Root);
+        assert_eq!(route(&args(&["root", "x"]), false), usage());
     }
 
     #[test]
@@ -508,7 +461,7 @@ mod tests {
         for verb in LEASE_VERBS {
             let landing = format!("landing-{verb}");
             assert_eq!(
-                route(&args(&["lease", verb, "s", "1"]), false, Caps::ALL),
+                route(&args(&["lease", verb, "s", "1"]), false),
                 owner(FABRIC_CLI, &[&landing, "s", "1"])
             );
         }
@@ -523,7 +476,7 @@ mod tests {
             &["lease", "-h", "junk"],
         ] {
             assert_eq!(
-                route(&args(words), false, Caps::ALL),
+                route(&args(words), false),
                 Route::Print {
                     text: lease.to_string(),
                     stderr: false,
@@ -538,7 +491,7 @@ mod tests {
             &["lease", ""],
         ] {
             assert_eq!(
-                route(&args(words), false, Caps::ALL),
+                route(&args(words), false),
                 Route::Print {
                     text: help::first_line(lease).to_string(),
                     stderr: true,
@@ -553,13 +506,13 @@ mod tests {
         use std::os::unix::ffi::OsStringExt;
         let raw = OsString::from_vec(vec![b'a', 0xff, b'b']);
         assert_eq!(
-            route(&[OsString::from("fabric"), raw.clone()], false, Caps::ALL),
+            route(&[OsString::from("fabric"), raw.clone()], false),
             Route::Owner {
                 relative: FABRIC_CLI,
                 args: vec![raw.clone()]
             }
         );
-        assert_eq!(route(&[raw], false, Caps::ALL), usage(Caps::ALL));
+        assert_eq!(route(&[raw], false), usage());
     }
 
     #[test]

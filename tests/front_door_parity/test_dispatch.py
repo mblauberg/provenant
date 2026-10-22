@@ -12,8 +12,6 @@ import pytest
 from parity_support import (
     IMPL,
     REPAIR,
-    needs_lease,
-    needs_lint,
     sha256,
 )
 
@@ -25,6 +23,8 @@ VERBS = [
     ("capabilities", "skills/orchestrate/scripts/capabilities.py", []),
     ("worktree", "scripts/worktree", []),
     ("clean", "scripts/clean.py", []),
+    ("reap", "scripts/reap.py", []),
+    ("pr", "scripts/provenant-pr", []),
     ("check", "scripts/check-harness", []),
     ("gate", "scripts/gate", []),
     ("telemetry", "scripts/provenant-telemetry", []),
@@ -40,7 +40,7 @@ VERBS = [
     ("dispatch", "skills/orchestrate/scripts/dispatch_run.py", []),
     ("batch", "skills/orchestrate/scripts/batch_run.py", []),
     ("run", "skills/orchestrate/scripts/run_controls.py", []),
-    pytest.param("lint", "scripts/provenant_lint.py", [], marks=needs_lint),
+    ("lint", "scripts/provenant_lint.py", []),
 ]
 
 AWKWARD = [
@@ -96,7 +96,6 @@ def test_stub_clean_bypasses_the_checkout_dispatcher(stub):
     assert result.payload()["argv"] == ["--prune-merged"]
 
 
-@needs_lease
 @pytest.mark.parametrize("verb", ["acquire", "release", "verify", "status", "push"])
 def test_lease_verbs_rewrite_to_fabric_landing(fd, verb):
     """C§16 #10 (#1095): `lease VERB ARGS` runs fabric `landing-VERB ARGS`."""
@@ -109,7 +108,6 @@ def test_lease_verbs_rewrite_to_fabric_landing(fd, verb):
     assert payload["cwd"] == str(fd.cwd)
 
 
-@needs_lease
 @pytest.mark.parametrize("arguments", [(), ("wait",), ("--json",), ("",)])
 def test_lease_without_a_known_verb_is_a_usage_error(fd, arguments):
     """C§16 #10: first line of the lease detail on stderr, exit 2, no stdout."""
@@ -123,7 +121,6 @@ def test_lease_without_a_known_verb_is_a_usage_error(fd, arguments):
     assert result.err.startswith("usage: provenant lease <acquire|release|verify|status|push>")
 
 
-@needs_lease
 @pytest.mark.parametrize("arguments", [("-h",), ("--help",), ("--help", "acquire"), ("-h", "junk")])
 def test_lease_help_flags_print_the_detail(fd, arguments):
     """C§16 #10: `lease -h|--help` prints the detail and exits 0."""
@@ -134,7 +131,6 @@ def test_lease_help_flags_print_the_detail(fd, arguments):
     assert result.stderr == b""
 
 
-@needs_lint
 def test_lint_does_not_scrub_git_variables_but_check_does(fd):
     """C§16 #9 (#1094): GIT_DIR and GIT_INDEX_FILE reach lint, not check."""
     redirects = {"GIT_DIR": "/nonexistent/git-dir", "GIT_INDEX_FILE": "/nonexistent/index"}

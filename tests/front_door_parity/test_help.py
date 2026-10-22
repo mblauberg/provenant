@@ -13,21 +13,15 @@ from parity_support import (
     FABRIC_MCP,
     HELP_BUDGET,
     IMPL,
-    SUPPORTS_LEASE,
-    SUPPORTS_LINT,
     assert_matches_reference,
     reference_run,
 )
 
 MAIN_TOPICS = (
-    "root route routes capabilities worktree clean check gate fabric hosts peer "
-    "lanes events telemetry stats retro quota profile dispatch batch run help"
+    "root route routes capabilities worktree clean reap lint check gate fabric lease hosts peer "
+    "lanes events telemetry stats retro quota profile dispatch batch run pr help"
 ).split()
-TOPICS = [
-    *MAIN_TOPICS,
-    *(["lint"] if SUPPORTS_LINT else []),
-    *(["lease"] if SUPPORTS_LEASE else []),
-]
+TOPICS = MAIN_TOPICS
 USAGE_PREFIX = "usage: provenant <help|root|route|"
 
 
@@ -58,10 +52,8 @@ def test_general_help_stays_within_the_byte_budget_and_names_owners(fd):
     assert "  batch ...      skills/orchestrate/scripts/batch_run.py ..." in text
     assert "project ..." not in text
     assert all("\r" not in line for line in text.splitlines())
-    if SUPPORTS_LINT:
-        assert "scripts/provenant_lint.py" in text
-    if SUPPORTS_LEASE:
-        assert "landing-*" in text
+    assert "scripts/provenant_lint.py" in text
+    assert "landing-*" in text
 
 
 @pytest.mark.parametrize("topic", TOPICS)
@@ -127,14 +119,7 @@ def test_help_works_without_a_resolvable_product_root(fd):
         assert helped.stdout == b""
     else:
         assert helped.returncode == 0
-        if IMPL == "rust":
-            # No root means no owners to prove #1094/#1095: base help, whatever
-            # the reference tree carries.
-            assert "  lint " not in helped.out and "  lease " not in helped.out
-            assert "  lanes ...      runtime/fabric/bin/fabric lanes\n" in helped.out
-            assert "|lint|" not in usage.err and "|lease|" not in usage.err
-        else:
-            assert_matches_reference(helped, reference_run("help"))
+        assert_matches_reference(helped, reference_run("help"))
         assert usage.returncode == 2 and usage.err.startswith(USAGE_PREFIX)
 
 
@@ -171,38 +156,24 @@ def test_help_routes_needs_a_root_but_dash_h_routes_does_not(fd):
 
 
 def test_lint_is_listed_in_usage_and_help(fd):
-    """C§2a (#1094): lint appears between clean and check."""
-    if not SUPPORTS_LINT:
-        pytest.skip("lint (#1094) is not on this branch")
+    """C§2a (#1094): lint appears between reap and check."""
     usage = fd.run("bogus").err
-    assert "|clean|lint|check|" in usage
+    assert "|clean|reap|lint|check|" in usage
     text = fd.run("help").out
-    assert text.index("  clean ") < text.index("  lint ") < text.index("  check ")
+    assert text.index("  clean|reap ") < text.index("  lint ") < text.index("  check ")
 
 
 def test_lease_is_listed_in_usage_and_help(fd):
     """C§2b (#1095): lease follows profile in usage; help merges lanes|events."""
-    if not SUPPORTS_LEASE:
-        pytest.skip("lease (#1095) is not on this branch")
     assert "|lease|" in fd.run("bogus").err
     text = fd.run("help").out
     assert "  lanes|events   runtime/fabric/bin/fabric lanes|events" in text
     assert "`provenant help <command>` for detail." in text
 
 
-@pytest.mark.skipif(IMPL != "rust", reason="the Python dispatcher is the reference, not a subject")
-def test_rust_follows_the_tree_when_lint_and_lease_owners_are_absent(fd):
-    """A tree without #1094/#1095 answers as its Python dispatcher would: no lint, no lease."""
+def test_help_and_usage_do_not_depend_on_lint_and_lease_owners(fd):
+    """Help describes the public contract even when an owner file is missing."""
     for relative in ("scripts/provenant_lint.py", "runtime/fabric/src/landing-cli.ts"):
-        path = fd.owner(relative)
-        if path.exists():
-            path.unlink()
-    help_text = fd.run("help").out
-    usage = fd.run("bogus").err
-
-    assert "  lint " not in help_text and "  lease " not in help_text
-    assert "|lint|" not in usage and "|lease|" not in usage
-    for arguments in (("lint",), ("lease", "status"), ("help", "lint"), ("help", "lease")):
-        result = fd.run(*arguments)
-        assert result.returncode == 2 and result.stdout == b"", arguments
-        assert result.err == usage, arguments
+        fd.owner(relative).unlink()
+    for arguments in (("help",), ("bogus",), ("help", "lint"), ("help", "lease")):
+        assert_matches_reference(fd.run(*arguments), reference_run(*arguments))

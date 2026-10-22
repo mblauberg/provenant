@@ -63,8 +63,8 @@ PROVENANT_PARITY_IMPL=rust .venv/bin/python -m pytest tests/front_door_parity -q
 `PROVENANT_FRONT_DOOR_BIN` overrides the binary path
 (default `tools/front-door/target/release/provenant`).
 `PROVENANT_PARITY_REFERENCE_ROOT` names a tree whose Python dispatcher is the
-byte reference for help text. Cases for `lint` and `lease` skip while the
-reference dispatcher lacks those verbs.
+byte reference for help text. All command cases, including `lint` and `lease`,
+run unconditionally. Help and usage must match that reference byte for byte.
 
 ## Compare start-up time
 

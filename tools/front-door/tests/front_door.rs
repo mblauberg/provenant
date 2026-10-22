@@ -139,10 +139,9 @@ fn help_and_usage_need_no_product_root() {
     for flag in ["help", "-h", "--help"] {
         let output = command(&stub, &sandbox.home()).arg(flag).output().unwrap();
         assert_eq!(output.status.code(), Some(0));
-        // No root means no owners to prove #1094/#1095, so neither is listed.
         let text = stdout(&output);
-        assert!(text.contains("  lanes ...      runtime/fabric/bin/fabric lanes\n"));
-        assert!(!text.contains("  lint ") && !text.contains("  lease "));
+        assert!(text.contains("  lanes|events   runtime/fabric/bin/fabric lanes|events\n"));
+        assert!(text.contains("  lint ") && text.contains("  lease "));
         assert!(output.stderr.is_empty());
     }
     let output = command(&stub, &sandbox.home())
@@ -552,8 +551,8 @@ fn rollback_switch_refuses_to_loop_into_a_rust_dispatcher() {
 }
 
 #[test]
-fn lint_and_lease_follow_their_owners_exactly() {
-    let sandbox = Sandbox::new("gating");
+fn lint_and_lease_remain_available_without_owner_markers() {
+    let sandbox = Sandbox::new("missing-owners");
     let checkout = sandbox.checkout("checkout");
     fs::remove_file(checkout.join("scripts/provenant_lint.py")).unwrap();
     fs::remove_file(checkout.join("runtime/fabric/src/landing-cli.ts")).unwrap();
@@ -565,20 +564,23 @@ fn lint_and_lease_follow_their_owners_exactly() {
             .output()
             .unwrap()
     };
-    for words in [
-        &["lint"][..],
-        &["lease", "status"],
-        &["help", "lint"],
-        &["help", "lease"],
-    ] {
-        let output = run(words);
-        assert_eq!(output.status.code(), Some(2), "{words:?}");
-        let err = stderr(&output);
-        assert!(!err.contains("lint") && !err.contains("lease"), "{err}");
+    for topic in ["lint", "lease"] {
+        let output = run(&["help", topic]);
+        assert_eq!(output.status.code(), Some(0));
+        assert!(stdout(&output).starts_with(&format!("usage: provenant {topic} ")));
+        assert!(output.stderr.is_empty());
     }
+    // A missing lint owner is an exec failure, not an unknown command.
+    let lint = run(&["lint"]);
+    assert_eq!(lint.status.code(), Some(3));
+    assert!(stderr(&lint).contains("provenant_lint.py"));
+    // Lease routes to Fabric even when its TypeScript marker is absent.
+    let lease = run(&["lease", "status"]);
+    assert_eq!(lease.status.code(), Some(0));
+    assert_eq!(args(&stdout(&lease)), ["landing-status"]);
     let help = stdout(&run(&["help"]));
-    assert!(!help.contains("  lint ") && !help.contains("  lease "));
-    assert!(help.contains("  lanes ...      runtime/fabric/bin/fabric lanes\n"));
+    assert!(help.contains("  lint ") && help.contains("  lease "));
+    assert!(help.contains("  lanes|events   runtime/fabric/bin/fabric lanes|events\n"));
 }
 
 #[test]

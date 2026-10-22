@@ -35,7 +35,7 @@ if IMPL not in ("python", "rust"):
     raise RuntimeError(f"PROVENANT_PARITY_IMPL must be python or rust, got {IMPL!r}")
 
 #: Checkout whose Python dispatcher is the byte-for-byte reference for help
-#: text. Point it at a tree that has #1094 and #1095 merged to pin the union.
+#: text. Defaults to the current checkout.
 REFERENCE_ROOT = Path(os.environ.get("PROVENANT_PARITY_REFERENCE_ROOT") or ROOT)
 
 GIT_REDIRECT_VARIABLES = (
@@ -75,6 +75,10 @@ OWNER_PATHS = (
     "scripts/model-route",
     "scripts/worktree",
     "scripts/clean.py",
+    "scripts/reap.py",
+    "scripts/provenant-pr",
+    "scripts/provenant_lint.py",
+    "runtime/fabric/src/landing-cli.ts",
     "scripts/check-harness",
     "scripts/gate",
     "scripts/fabric-hosts",
@@ -172,13 +176,7 @@ def git(cwd: Path, *arguments: str, check: bool = True) -> subprocess.CompletedP
 
 def write_owners(checkout: Path) -> None:
     recorder = RECORDER.format(python=sys.executable)
-    # lint (#1094) and lease (#1095) exist in a fixture only when the reference
-    # tree has them, so Rust, which gates on these owners, sees the same tree.
-    optional = (
-        *(("scripts/provenant_lint.py",) if REFERENCE_HAS_LINT else ()),
-        *(("runtime/fabric/src/landing-cli.ts",) if REFERENCE_HAS_LEASE else ()),
-    )
-    for relative in (*OWNER_PATHS, *optional):
+    for relative in OWNER_PATHS:
         path = checkout / relative
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(recorder)
@@ -303,20 +301,7 @@ def reference_run(*arguments: str, env: dict[str, str] | None = None) -> Result:
     return Result(done.returncode, done.stdout, done.stderr)
 
 
-def reference_supports(verb: str) -> bool:
-    return f"  {verb} " in reference_run("help").out
-
-
-#: lint (#1094) and lease (#1095) exist only once those PRs are on the
-#: reference branch. Rust follows its tree's owners exactly as Python does.
-REFERENCE_HAS_LINT = reference_supports("lint")
-REFERENCE_HAS_LEASE = reference_supports("lease")
-SUPPORTS_LINT = REFERENCE_HAS_LINT
-SUPPORTS_LEASE = REFERENCE_HAS_LEASE
-HELP_BUDGET = 1100 if SUPPORTS_LINT else 1024
-
-needs_lint = pytest.mark.skipif(not SUPPORTS_LINT, reason="lint (#1094) is not on this branch")
-needs_lease = pytest.mark.skipif(not SUPPORTS_LEASE, reason="lease (#1095) is not on this branch")
+HELP_BUDGET = 1100
 
 
 def assert_matches_reference(actual: Result, expected: Result) -> None:
