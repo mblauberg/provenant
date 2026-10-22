@@ -6347,12 +6347,11 @@ def test_claude_fallback_does_not_override_selected_account_cooldown(tmp_path, m
 @pytest.mark.parametrize(('owner_kind', 'locked', 'inherited'), [
     ('dispatch', True, 'custody'), ('batch', False, 'none'), ('batch', True, 'custody'),
     ('batch', True, 'none'), ('batch', True, 'separate'), ('batch', True, 'other_file'),
+    ('batch', False, 'separate'),
 ])
 def test_batch_child_shares_only_a_locked_batch_parent(tmp_path, monkeypatch, owner_kind, locked, inherited):
     mod = load_dispatch_module()
     run = make_run(tmp_path, 'batch-parent-custody')
-    for key in ('PROVENANT_PARENT_ATTEMPT', 'PROVENANT_RUN_TOKEN', 'PROVENANT_RUN_OWNER'):
-        monkeypatch.delenv(key, raising=False)
     (run / 'dispatch-owner.json').write_text(json.dumps({
         'schema_version': 1, 'kind': owner_kind, 'run_dir': str(run),
         'run_token': 'parent-token', 'owner_pid': os.getpid(),
@@ -6418,6 +6417,7 @@ def observe(pid):
         observations += 1
         if observations == 2:
             # The batch dies just after its last successful identity observation.
+            Path({str(tmp_path / 'killed')!r}).write_text('killed')
             os.kill(owner_pid, signal.SIGTERM)
             deadline = time.monotonic() + 5
             while os.getppid() == owner_pid and time.monotonic() < deadline:
@@ -6437,14 +6437,12 @@ run_lineage.record_owner(Path({str(run)!r}), 'batch')
 subprocess.run([sys.executable, {str(child)!r}], check=False)
 '''
     environment = {**os.environ, 'PROVENANT_HOST_LOCAL_ONLY': '1'}
-    for key in ('PROVENANT_PARENT_ATTEMPT', 'PROVENANT_RUN_TOKEN', 'PROVENANT_RUN_OWNER',
-                mod.run_lineage.CUSTODY_ENV):
-        environment.pop(key, None)
     # This test process holds custody; the recorded batch never holds it.
     with mod.acquire_run_custody(run):
         result = subprocess.run([sys.executable, '-c', batch], cwd=tmp_path,
                                 env=environment, input='', capture_output=True, text=True, timeout=15)
         assert result.returncode == -signal.SIGTERM, result.stderr
+        assert (tmp_path / 'killed').exists()
         owner = json.loads((run / 'dispatch-owner.json').read_text())
         assert mod.process_info.start_time(owner['owner_pid']) is None
         assert result.stdout, result.stderr
@@ -6458,8 +6456,6 @@ def test_standalone_batch_child_replaces_a_dead_owner(tmp_path, monkeypatch, pre
     previous_pid = os.getpid() if previous == 'recycled_pid' else 2147483647
     mod = load_dispatch_module()
     run = make_run(tmp_path, 'dead-batch-child-owner')
-    for key in ('PROVENANT_PARENT_ATTEMPT', 'PROVENANT_RUN_TOKEN', 'PROVENANT_RUN_OWNER'):
-        monkeypatch.delenv(key, raising=False)
     (run / 'dispatch-owner.json').write_text(json.dumps({
         'schema_version': 1, 'kind': 'batch', 'run_dir': str(run),
         'run_token': 'dead-token', 'owner_pid': previous_pid,

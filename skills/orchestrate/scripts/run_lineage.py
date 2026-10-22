@@ -89,19 +89,41 @@ def _inherited_owner_custody(run_dir):
     if inherited is None:
         return None
     fd = int(inherited)
+    check, _, _ = open_contained_regular(run_dir, "MANIFEST.md", os.O_RDWR | os.O_APPEND, label="MANIFEST.md")
     try:
-        check, _, _ = open_contained_regular(run_dir, "MANIFEST.md", os.O_RDWR | os.O_APPEND, label="MANIFEST.md")
-        try:
-            if (os.fstat(fd).st_dev, os.fstat(fd).st_ino) != (os.fstat(check).st_dev, os.fstat(check).st_ino):
-                raise ValueError("nested run custody identity changed")
-        finally:
-            os.close(check)
+        held, wanted = os.fstat(fd), os.fstat(check)
+    finally:
+        os.close(check)
+    if (held.st_dev, held.st_ino) != (wanted.st_dev, wanted.st_ino):
+        raise ValueError("nested run custody identity changed")
+    try:
         fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         os.set_inheritable(fd, False)
         return os.fdopen(fd, "a+", encoding="utf-8")
-    except (OSError, ValueError):
+    except OSError:
         os.close(fd)
         raise
+
+
+def _check_borrowed_custody(run_dir, fd):
+    """Prove `fd` is the batch's held MANIFEST.md lock; the caller closes it."""
+    check, _, _ = open_contained_regular(run_dir, "MANIFEST.md", os.O_RDWR | os.O_APPEND, label="MANIFEST.md")
+    try:
+        try:
+            # A fresh open is a separate lock owner: it conflicts only while held.
+            fcntl.flock(check, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            pass
+        else:
+            raise OSError("batch run custody is not held")
+        held = os.fstat(check)
+        inherited = os.fstat(fd)
+        if (inherited.st_dev, inherited.st_ino) != (held.st_dev, held.st_ino):
+            raise ValueError("nested run custody identity changed")
+        # Succeeds only through the description that holds the lock.
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    finally:
+        os.close(check)
 
 
 def ensure_nested_owner(run_dir, kind, *, batch_child=False):
@@ -113,6 +135,8 @@ def ensure_nested_owner(run_dir, kind, *, batch_child=False):
     """
     if batch_child:
         run_dir = Path(run_dir).resolve()
+        # The fd is only borrowed for the identity check; never keep it.
+        inherited = os.environ.pop(CUSTODY_ENV, None)
 
         def validate_batch_owner():
             try:
@@ -141,15 +165,18 @@ def ensure_nested_owner(run_dir, kind, *, batch_child=False):
                 # Only batch owners may lend their already-held custody.
                 if record["kind"] != "batch":
                     raise ValueError("shared run custody requires a batch owner")
-                custody = _inherited_owner_custody(run_dir)
-                if custody is None:
+                if inherited is None:
                     raise ValueError("batch run owner did not pass custody")
-                # Close our reference without unlocking the batch's descriptor.
-                custody.close()
+                _check_borrowed_custody(run_dir, int(inherited))
             return record
 
         try:
-            return validate_batch_owner()["owner_pid"] == os.getpid()
+            try:
+                return validate_batch_owner()["owner_pid"] == os.getpid()
+            finally:
+                # Never close stdio if the variable names one.
+                if inherited is not None and inherited.isdigit() and int(inherited) > 2:
+                    os.close(int(inherited))
         except FileNotFoundError:
             # A standalone batch child can initialise an owner. A nested child
             # must use the batch parent's already-published owner identity.
