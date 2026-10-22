@@ -8138,7 +8138,8 @@ def test_a_landing_train_merge_of_a_released_tip_passes_and_so_do_later_merges(t
     assert checked.returncode == 0, checked.stderr
 
 
-@pytest.mark.parametrize("history", ["merge-edits-a-skill", "unreleased-lane"])
+@pytest.mark.parametrize("history", ["merge-edits-a-skill", "unreleased-lane", "stale-branch-revert",
+                                     "ancestor-parent-revert"])
 def test_a_landing_train_merge_still_holds_protected_content_no_released_parent_has(
     tmp_path, monkeypatch, history,
 ):
@@ -8151,11 +8152,28 @@ def test_a_landing_train_merge_still_holds_protected_content_no_released_parent_
         (repo / OTHER_SKILL).write_text("resolved by the merge\n")
         git(repo, "commit", "-q", "-am", "Merge #1")
         held = head_of(repo)
-    else:
+    elif history == "unreleased-lane":
         (lane / SKILL).write_text("unreviewed\n")
         git(lane, "commit", "-q", "-am", "unreviewed skill")
         held = head_of(lane)
         git(repo, "merge", "-q", "--no-ff", "-X", "theirs", "-m", "Merge #1", "lane")
+    else:
+        released_train(repo, lane)
+        git(repo, "merge", "-q", "--no-ff", "-m", "Merge #1", "lane")
+        initial = head_of(repo, "main~2")
+        if history == "stale-branch-revert":
+            # A branch cut before main's skill change resolves the skill back to its version.
+            later = side_commit(repo, initial, "later\n", path="later.txt")
+            git(repo, "merge", "-q", "--no-ff", "--no-commit", later)
+            (repo / SKILL).write_text("v1\n")
+            git(repo, "commit", "-q", "-am", "Merge #2")
+        else:
+            # A merge with an older ancestor of the base as a parent takes that ancestor's skill.
+            reverted = side_commit(repo, head_of(repo), "v1\n")
+            tree = head_of(repo, reverted + "^{tree}")
+            merge = git(repo, "commit-tree", tree, "-p", head_of(repo), "-p", initial, "-m", "Merge #2").strip()
+            git(repo, "reset", "-q", "--hard", merge)
+        held = head_of(repo)
     refused = landing(repo, head_of(repo), leased)
     assert refused.returncode == 1
     assert refused.stderr.startswith("protected_instructions_changed: unreleased commits")

@@ -181,11 +181,13 @@ finalisation nor a moved local ref can land an instruction change:
   the owner's common Git directory with `diff-tree --root -m`, so merge
   resolutions count. A commit may change a protected path only to the version
   the base already holds, as a merge or rebase from the base does, or be
-  reachable from a tip the chair released. A merge may also take each
-  protected path's version from a parent that is not held: the base's history,
-  a released commit or a range commit already judged clean. A landing train's
+  reachable from a tip the chair released. A merge may also take a protected
+  path's version from a parent in the range that is not held, but only where a
+  released commit in the range introduced that version. A landing train's
   `--no-ff` merge of a released tip, and later merges on top of it, therefore
-  pass, while a resolution that no such parent holds is held. Anything else fails with
+  pass. A merge cannot revert a protected path: an older version taken from a
+  parent outside the range or from a stale branch is held, as is a resolution
+  no parent holds. Anything else fails with
   `protected_instructions_changed` and names the held commits; the branch is
   left as it is. Fabric `landing-push` passes the landing lease's remote SHA as
   the base, never a local ref. `scripts/worktree verify-claim` and a manual
@@ -196,7 +198,8 @@ finalisation nor a moved local ref can land an instruction change:
 The invariant is: nothing lands on the integration branch unless every commit in
 `<leased remote SHA>..<tip>` leaves protected paths unchanged from the leased
 version, is reachable from an audited chair release of a reviewed tip, or is a
-merge that takes each protected path from a parent the gate does not hold;
+merge that takes each protected path from the leased version or from a released
+change in the range;
 writers can write only their own branch ref. The gate reads the object store,
 which writers can add packs to, so it trusts object content; it disables
 replace refs, commit graphs, the multi-pack index and lazy fetch, and refuses
