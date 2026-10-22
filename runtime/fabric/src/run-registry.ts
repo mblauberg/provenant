@@ -268,6 +268,61 @@ export function signalRecordedProcess(pid: number, pgid: number, startedAt: stri
   } catch { return false; }
 }
 
+/** A process group the graph runner started: its leader is `pid`, which is also `pgid`. */
+export interface RecordedGroup { pid: number; pgid: number; started_at: string | null }
+
+/**
+ * Whether a recorded group has exited, may be signalled, or cannot be told
+ * apart from someone else's. It has exited when no member remains, or when a
+ * different process now holds the leader's pid (a pid cannot be reused while
+ * its group exists). It is attributable while the leader matches its start
+ * time, or once the leader has gone and no process holds its pid. Any probe
+ * that cannot answer leaves it fenced.
+ */
+function groupState(group: RecordedGroup): "exited" | "attributable" | "fenced" {
+  if (!positiveInteger(group.pgid) || group.pgid !== group.pid || group.pgid === process.pid) return "fenced";
+  const probe = (target: number): "alive" | "gone" | "unknown" => {
+    try { process.kill(target, 0); return "alive"; }
+    catch (error) { return (error as NodeJS.ErrnoException).code === "ESRCH" ? "gone" : "unknown"; }
+  };
+  const members = probe(-group.pgid);
+  if (members === "gone") return "exited";
+  if (members === "unknown") return "fenced";
+  const leader = probe(group.pgid);
+  if (leader === "gone") return "attributable";
+  if (leader === "unknown" || group.started_at === null) return "fenced";
+  const observed = processStartedAt(group.pgid);
+  if (observed === null) return "fenced";
+  return startMatches(group.pgid, group.started_at, observed) ? "attributable" : "exited";
+}
+
+/**
+ * Terminate a recorded process group: SIGTERM, a grace period, then SIGKILL,
+ * signalling `-pgid` only while the group is attributable, and verify it has
+ * gone. `fenced` means the group may still hold members nobody can safely
+ * signal; the caller must not treat its work as stopped.
+ */
+export async function signalRecordedGroup(group: RecordedGroup, graceMs = 3_000): Promise<"exited" | "fenced"> {
+  const settle = async (timeoutMs: number) => {
+    const deadline = Date.now() + timeoutMs;
+    let state = groupState(group);
+    while (state === "attributable" && Date.now() < deadline) {
+      await new Promise((resolveWait) => setTimeout(resolveWait, 50));
+      state = groupState(group);
+    }
+    return state;
+  };
+  for (const [signal, waitMs] of [["SIGTERM", graceMs], ["SIGKILL", 2_000]] as const) {
+    const state = groupState(group);
+    if (state !== "attributable") return state;
+    try { process.kill(-group.pgid, signal); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code !== "ESRCH") return "fenced"; }
+    const after = await settle(waitMs);
+    if (after !== "attributable") return after;
+  }
+  return groupState(group) === "exited" ? "exited" : "fenced";
+}
+
 /** The owner cleans its descendants; controller signals never widen to a provider's group. */
 export function signalRecordedRun(run: RecordedRun, signal: NodeJS.Signals, source = "run_control"): boolean {
   // Publish before signalling so the provider can retain the controller's reason
