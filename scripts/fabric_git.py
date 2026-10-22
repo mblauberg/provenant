@@ -327,7 +327,7 @@ class CodeTransport:
                 branch = self.git(local, 'symbolic-ref', '--short', 'HEAD')
                 name = local.name
                 if name != branch.replace('/', '-'):
-                    self.fail('worktree_invalid', 'Worktree name must derive from its branch')
+                    self.fail('worktree_invalid', f'Worktree directory must be named {branch.replace("/", "-")!r} for branch {branch!r}')
             if len(identifier) > 120:
                 self.fail('invalid_operation_id', 'Writer operation IDs are limited to 120 characters')
             transfer_id = identifier + '-' + str(index)

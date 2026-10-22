@@ -96,10 +96,13 @@ if (args.includes("--resume")) {
 if (args.includes("--alias") && args.includes("--model")) {
   console.error("--alias and --model are mutually exclusive"); process.exit(2);
 }
-const prompt = readFileSync(value("--prompt-file"), "utf8");
+const suppliedPrompt = readFileSync(value("--prompt-file"), "utf8");
+// Keep control tokens usable when the host adds checkout context to the brief.
+const prompt = suppliedPrompt.startsWith("Remote read-only checkout: ")
+  ? suppliedPrompt.slice(suppliedPrompt.indexOf("\n\n") + 2) : suppliedPrompt;
 writeFileAtomic(join(dir, "_owner", `${task}-args-${attempt}.json`), JSON.stringify(args));
 writeFileAtomic(join(dir, "_owner", `${task}-env-${attempt}.json`), JSON.stringify({ chair: process.env.PROVENANT_CHAIR }));
-writeFileSync(join(dir, "_owner", `${task}-prompt-${attempt}.md`), prompt);
+writeFileSync(join(dir, "_owner", `${task}-prompt-${attempt}.md`), suppliedPrompt);
 if (prompt === "reject-before-attempt") {
   console.log(JSON.stringify({schema_version:1,status:"rejected",message:"dispatch a new run",fix:"dispatch a new run"})); process.exit(2);
 }
