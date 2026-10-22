@@ -35,7 +35,7 @@ class ProtectionError(ValueError):
         super().__init__(f"{code}: {message}")
 
 
-def git(git_dir, *args):
+def git(git_dir, *args, accept=(0,)):
     # No replace refs, commit graphs, multi-pack index, lazy fetch or caller Git environment.
     environment = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
     result = subprocess.run(
@@ -43,7 +43,7 @@ def git(git_dir, *args):
          "-c", "core.fsmonitor=false", "-c", "protocol.allow=never", *args],
         capture_output=True, text=True, timeout=30,
         env={**environment, "GIT_NO_LAZY_FETCH": "1", "GIT_NO_REPLACE_OBJECTS": "1"})
-    if result.returncode:
+    if result.returncode not in accept:
         raise ProtectionError(result.stderr.strip() or f"git {args[0]} failed")
     return result.stdout
 
@@ -125,10 +125,13 @@ def check(common, tip, base="HEAD"):
             # Membership in covered excludes missing tips and tips already in the base's history.
             # The base's protected tree must not have moved since the release forked from it, or the
             # release would carry stale versions of paths it never touched (superseded or squashed).
+            def current(release):
+                # merge-base exits 1 with no output for unrelated histories; such a release never applies.
+                forks = git(common, "merge-base", "--all", release, base, accept=(0, 1)).split()
+                return bool(forks) and all(entries(fork) == entries(base) for fork in forks)
+
             reviewed_trees = [(tip, entries(tip)) for tip in tips
-                              if tip in covered and entries(tip) != entries(base) and all(
-                                  entries(fork) == entries(base)
-                                  for fork in git(common, "merge-base", "--all", tip, base).split())]
+                              if tip in covered and entries(tip) != entries(base) and current(tip)]
         if any(entries(sha) == tree and git(common, "rev-list", "--max-count=1", reviewed, "^" + sha)
                for reviewed, tree in reviewed_trees):
             vouched[sha] = inherited | changed

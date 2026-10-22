@@ -8262,6 +8262,24 @@ def test_a_stale_release_cannot_restore_protected_content_the_base_moved_past(tm
     assert refused.stderr.startswith("protected_instructions_changed:")
 
 
+def test_a_release_with_unrelated_history_is_ignored_rather_than_blocking_checks(tmp_path, monkeypatch):
+    monkeypatch.delenv("PROVENANT_ATTEMPT_MARKER", raising=False)
+    repo, _ = instruction_lane(tmp_path)
+    leased = head_of(repo)
+    empty = git(repo, "hash-object", "-t", "tree", "-w", "/dev/null").strip()
+    orphan = git(repo, "commit-tree", empty, "-m", "orphan").strip()
+    git(repo, "reset", "-q", "--hard", orphan)
+    released = protection(repo, "--release", "--tip", orphan, "--actor", "chair", "--reason", "ok")
+    assert released.returncode == 0, released.stderr
+    # Taking the base's version still passes; an unreviewed change is still held.
+    restored = side_commit(repo, head_of(repo, "lane"), "v2\n")
+    assert landing(repo, restored, leased).returncode == 0
+    unreviewed = side_commit(repo, restored, "unreviewed\n", path=OTHER_SKILL)
+    refused = landing(repo, unreviewed, leased)
+    assert refused.returncode == 1
+    assert refused.stderr.startswith("protected_instructions_changed:")
+
+
 @pytest.mark.parametrize("history", ["merge-edits-a-skill", "unreleased-lane", "stale-branch-revert",
                                      "ancestor-parent-revert"])
 def test_a_landing_train_merge_still_holds_protected_content_no_released_parent_has(
