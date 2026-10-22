@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join, sep } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
+import { assertFixtureRunRoot } from "../src/execution.js";
 import { fixtureBase, scratchRoot } from "./helpers/temp-root.js";
 
 const cleanup: string[] = [];
@@ -89,4 +90,13 @@ describe("scratchRoot", () => {
     mkdirSync(lane, { recursive: true });
     expect(() => fixtureBase(lane, [join(runLocal(), "missing")])).toThrow(/FABRIC_TEST_TMPDIR/u);
   });
+});
+
+it("never picks a FABRIC_TEST_TMPDIR beneath .agent-run, which assertFixtureRunRoot would refuse", () => {
+  const lane = join(runLocal(), ".agent-run/attempt/tmp");
+  mkdirSync(lane, { recursive: true });
+  process.env.TMPDIR = lane;
+  process.env.FABRIC_TEST_TMPDIR = lane;
+  expect(() => fixtureBase(lane, [lane])).toThrow(/FABRIC_TEST_TMPDIR/u);
+  expect(() => assertFixtureRunRoot(join(lane, "ws/.agent-run"), [{ model: "fixture" }], lane)).toThrow(/fixture run refused/u);
 });

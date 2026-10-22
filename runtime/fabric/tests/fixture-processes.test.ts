@@ -38,3 +38,14 @@ it("reports nothing when every child has already exited", async () => {
   await new Promise((done) => child.once("close", done));
   expect(await reapFixtureProcesses(root, 100)).toEqual([]);
 });
+
+it("kills a non-detached leak by pid without signalling the runner's own group", async () => {
+  const root = scratchRoot("fabric-leak-");
+  roots.push(root);
+  const pid = sleeper(root);
+  const leaked = await reapFixtureProcesses(root, 100);
+  expect(leaked.map((item) => item.pid)).toEqual([pid]);
+  expect(processesUnder(root)).toEqual([]);
+  // Still alive to assert this: the runner's group was not signalled.
+  expect(() => process.kill(process.pid, 0)).not.toThrow();
+});

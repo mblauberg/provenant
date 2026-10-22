@@ -231,6 +231,11 @@ function realPath(path: string): string {
  * the OS temp dir or a throwaway .agent-run/scratch tree, and never in a
  * .agent-run tree that itself sits in temp (a lane's TMPDIR; issue #1002).
  */
+/** The one rule for a fixture temp root, shared with the test helpers that pick one: never inside a .agent-run tree. */
+export function acceptableFixtureTempRoot(root: string): boolean {
+  return !realPath(root).split(sep).includes(".agent-run");
+}
+
 export function assertFixtureRunRoot(
   agentRun: string,
   routes: readonly { model?: unknown; cli_version?: unknown }[],
@@ -241,7 +246,7 @@ export function assertFixtureRunRoot(
   // The OS temp dir, and the roots that test helpers fall back to when TMPDIR sits in a .agent-run tree.
   const fallbacks = [process.env.FABRIC_TEST_TMPDIR, "/tmp"].filter((path): path is string => !!path);
   const tempRoots = [...new Set([temp, ...fallbacks].map(realPath))];
-  const acceptableTempRoots = tempRoots.filter((tempRoot) => !tempRoot.split(sep).includes(".agent-run"));
+  const acceptableTempRoots = tempRoots.filter(acceptableFixtureTempRoot);
   const underTemp = acceptableTempRoots.some((tempRoot) => root.startsWith(tempRoot + sep));
   if (underTemp || underScratch(root)) return;
   throw new Error(

@@ -23,6 +23,11 @@ export function processesUnder(root: string): FixtureProcess[] {
   return found;
 }
 
+function ownProcessGroup(): number {
+  const out = execFileSync("ps", ["-o", "pgid=", "-p", String(process.pid)], { encoding: "utf8" });
+  return Number(out.trim());
+}
+
 function kill(pid: number, signal: NodeJS.Signals): void {
   try { process.kill(pid, signal); } catch { /* already gone */ }
 }
@@ -39,8 +44,10 @@ export async function reapFixtureProcesses(root: string, graceMs = 2_000): Promi
     await delay(50);
     remaining = processesUnder(root);
   }
+  // A non-detached leak shares the runner's group; signalling that group would kill the runner and its workers.
+  const own = ownProcessGroup();
   for (const item of remaining) {
-    if (item.pgid !== process.pid && item.pgid > 1) kill(-item.pgid, "SIGKILL");
+    if (item.pgid > 1 && item.pgid !== own) kill(-item.pgid, "SIGKILL");
     kill(item.pid, "SIGKILL");
   }
   return remaining;

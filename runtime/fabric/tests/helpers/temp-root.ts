@@ -1,7 +1,8 @@
 import { execFileSync } from "node:child_process";
 import { mkdtempSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve, sep } from "node:path";
+import { join, resolve } from "node:path";
+import { acceptableFixtureTempRoot } from "../../src/execution.js";
 
 function insideGitWorkTree(dir: string): boolean {
   try {
@@ -24,14 +25,15 @@ export function fixtureBase(
   alternatives: Array<string | undefined> = [process.env.FABRIC_TEST_TMPDIR, "/tmp"],
 ): string {
   const preferred = realpathSync.native(resolve(tmp));
-  if (!preferred.split(sep).includes(".agent-run") && !insideGitWorkTree(preferred)) return preferred;
+  if (acceptableFixtureTempRoot(preferred) && !insideGitWorkTree(preferred)) return preferred;
   for (const candidate of alternatives) {
     if (candidate === undefined || candidate === "") continue;
     try {
       const probe = mkdtempSync(join(candidate, ".fabric-probe-"));
       execFileSync("rmdir", [probe]);
       const real = realpathSync.native(candidate);
-      if (!insideGitWorkTree(real)) return real;
+      // Same rule assertFixtureRunRoot applies, so a root chosen here is never refused there.
+      if (acceptableFixtureTempRoot(real) && !insideGitWorkTree(real)) return real;
     } catch { /* not writable here; try the next root */ }
   }
   throw new Error(
