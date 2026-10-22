@@ -16,6 +16,7 @@ ADAPTER = 'claude'
 USAGE_URL = 'https://api.anthropic.com/api/oauth/usage'
 KEYCHAIN_SERVICE = 'Claude Code-credentials'
 MATCH_SECONDS = 5
+STATUS_SECONDS = 24 * 3600  # login state is kept a day, or until the identity is used
 
 
 def keychain_service(identity_dir):
@@ -35,6 +36,14 @@ def default_identity():
 
 
 def status(account, io):
+    """Login state for this identity, from a day-long cache that identity activity clears."""
+    memo = getattr(io, 'memo', None)
+    if memo is None:
+        return auth_status(account, io)
+    return memo('claude-auth-status', account, STATUS_SECONDS, lambda: auth_status(account, io))
+
+
+def auth_status(account, io):
     """`claude auth status --json` for this identity; only login state is kept."""
     executable = io.executable('claude')
     if not executable:
@@ -63,21 +72,21 @@ def credentials(account, state, io, now):
                                      keychain_service(account.identity_dir), '-w'],
                                     capture_output=True, timeout=io.PROCESS_TIMEOUT, check=False)
         except (OSError, io.TimeoutExpired):
-            raise io.Unavailable('Claude credentials are not available') from None
+            raise io.Unavailable('Claude credentials are not available', 'auth') from None
         raw = result.stdout if result.returncode == 0 else None
     if raw is None or len(raw) > io.MAX_RESPONSE_BYTES:
-        raise io.Unavailable('Claude credentials are not available')
+        raise io.Unavailable('Claude credentials are not available', 'auth')
     try:
         oauth = json.loads(raw).get('claudeAiOauth')
     except (ValueError, AttributeError):
-        raise io.Unavailable('Claude credentials are invalid') from None
+        raise io.Unavailable('Claude credentials are invalid', 'auth') from None
     if not isinstance(oauth, dict) or not oauth.get('accessToken'):
-        raise io.Unavailable('Claude credentials are not available')
+        raise io.Unavailable('Claude credentials are not available', 'auth')
     expires = io.parse_time(oauth.get('expiresAt'))
     if expires is not None and (expires - now).total_seconds() <= 60:
-        raise io.Unavailable('Claude credentials need a refresh; run claude once')
+        raise io.Unavailable('Claude credentials need a refresh; run claude once', 'auth')
     if oauth.get('scopes') and 'user:profile' not in oauth['scopes']:
-        raise io.Unavailable('Claude credentials lack quota access')
+        raise io.Unavailable('Claude credentials lack quota access', 'auth')
     return oauth
 
 
@@ -164,7 +173,7 @@ def io_window_name(name):
 def fetch(account, io, now):
     state = status(account, io)
     if str(state.get('authMethod') or '').lower() == 'third_party':
-        raise io.Unavailable('Claude account quota is not exposed for third-party authentication')
+        raise io.Unavailable('Claude account quota is not exposed for third-party authentication', 'auth')
     oauth = credentials(account, state, io, now)
     payload = io.http_json(USAGE_URL, {'Authorization': 'Bearer ' + oauth['accessToken'],
                                        'Accept': 'application/json', 'anthropic-beta': 'oauth-2025-04-20'})

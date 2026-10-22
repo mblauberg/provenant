@@ -692,7 +692,9 @@ def test_a_registered_provider_module_extends_quota_and_routing_without_core_cha
 
 # Cache, config and accounts ------------------------------------------------------------------
 
-def test_cache_is_reused_within_ttl_and_disabled_quota_never_fetches(quota, monkeypatch):
+def test_cache_is_reused_within_ttl_and_disabled_quota_never_fetches(quota, monkeypatch, tmp_path):
+    # With the schedule off, the cache period alone gates fetches, exactly as before the schedule.
+    configure(tmp_path, {'quota': {'schedule': {'enabled': False}}})
     calls = []
     monkeypatch.setattr(quota, 'fetch', lambda account, now: calls.append(account) or {
         'windows': [window(10, 300, timedelta(hours=1))], 'plan': None, 'source': 'test'})
@@ -1338,3 +1340,372 @@ def test_agy_identity_is_the_os_login_keychain_even_with_another_home(quota, mon
     monkeypatch.setenv('AGY_CONFIG_DIR', str(tmp_path / 'another-config'))
     assert quota.identity.selected_identity('agy') == first
     assert quota.identity.scope('agy')['account'] == 'default'
+
+
+# Adaptive refresh: tick, report.json, backoff and trace -------------------------------------
+
+def fake_accounts(quota, tmp_path, monkeypatch, labels, fetch, **settings):
+    quota.register('fake', SimpleNamespace(ADAPTER='fake', default_identity=lambda: None, fetch=fetch))
+    configure(tmp_path, {**({'quota': settings} if settings else {}), 'accounts': {'fake': {
+        label: {'identity_dir': str(tmp_path / 'ids' / label)} for label in labels}}})
+    monkeypatch.setattr(quota, 'utcnow', lambda: NOW)
+
+
+def refuse_fetch(*args, **kwargs):
+    raise AssertionError('nothing is due, so nothing may be fetched')
+
+
+REPORT_KEYS = {'schema', 'generated_at', 'host', 'enabled', 'providers', 'accounts', 'placement_preference'}
+ROW_KEYS = {'provider', 'account', 'plan', 'host', 'active', 'priority', 'observed_at', 'attempted_at', 'status',
+            'error', 'source', 'state', 'summary', 'windows', 'unreported', 'coverage_note', 'credits',
+            'credit_advice', 'use_it_or_lose_it'}
+SCHEDULE_KEYS = {'next_due_at', 'reason', 'ttl_seconds', 'trigger', 'failures', 'backoff_until', 'error_kind',
+                 'last_duration_ms', 'source_kind'}
+
+
+def test_tick_fetches_only_due_accounts_and_publishes_progress(quota, tmp_path, monkeypatch, capsys):
+    calls, seen = [], []
+
+    def fetch(account, io, now):
+        calls.append(account.label)
+        seen.append(json.loads(quota.report_path().read_text())['refreshing'])
+        return {'windows': [window(20, 300, timedelta(hours=2), 'five_hour')]}
+    fake_accounts(quota, tmp_path, monkeypatch, ['fresh', 'stale', 'new'], fetch)
+    snapshot(quota, 'fake', [window(20, 300, timedelta(hours=2))], account='fresh', observed=NOW - timedelta(minutes=1))
+    snapshot(quota, 'fake', [window(20, 300, timedelta(hours=2))], account='stale', observed=NOW - timedelta(hours=3))
+    assert quota.main(['tick', '--json']) == 0
+    printed = json.loads(capsys.readouterr().out)
+    assert sorted(calls) == ['new', 'stale']
+    # Readers saw a complete report naming what was still being fetched, then an idle one.
+    assert all(set(names) <= {'fake/new', 'fake/stale'} and names for names in seen)
+    assert printed == json.loads(quota.report_path().read_text()) and printed['refreshing'] == []
+    rows = {row['account']: row for row in printed['accounts']}
+    assert rows['fresh']['schedule']['reason'] == 'idle' and rows['fresh']['attempted_at'] == iso(NOW - timedelta(minutes=1))
+    assert rows['new']['schedule']['trigger'] == 'timer' and rows['new']['status'] == 'ok'
+    assert printed['next_due_at'] == min((row['schedule']['next_due_at'] for row in rows.values()), key=quota.parse_time)
+    assert not [path.name for path in quota.quota_dir().iterdir() if path.name.startswith('report.json.')]
+
+
+def test_a_crashed_tick_still_clears_refreshing(quota, tmp_path, monkeypatch):
+    fake_accounts(quota, tmp_path, monkeypatch, ['work'], lambda account, io, now: {'windows': []})
+    monkeypatch.setattr(quota, 'refresh', lambda *args: (_ for _ in ()).throw(KeyError('provider bug')))
+    with pytest.raises(KeyError):
+        quota.tick()
+    written = json.loads(quota.report_path().read_text())
+    assert written['refreshing'] == [] and [row['account'] for row in written['accounts']] == ['work']
+
+
+def test_tick_with_the_refresh_lock_held_prints_the_current_report_and_never_fetches(quota, tmp_path, monkeypatch, capsys):
+    import fcntl
+    fake_accounts(quota, tmp_path, monkeypatch, ['work'], refuse_fetch)
+    lock = quota.quota_dir() / 'refresh.lock'
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    quota.report_path().write_text(json.dumps({'schema': quota.REPORT_SCHEMA, 'accounts': [], 'marker': 1}))
+    with lock.open('a') as held:
+        fcntl.flock(held, fcntl.LOCK_EX)
+        assert quota.main(['tick', '--json', '--trigger', 'manual']) == 0
+    assert json.loads(capsys.readouterr().out)['marker'] == 1
+
+
+def test_report_writes_are_atomic(quota, monkeypatch):
+    path = quota.report_path()
+    quota.atomic_json(path, {'schema': quota.REPORT_SCHEMA, 'generation': 1})
+
+    def broken(*args, **kwargs):
+        raise ValueError('write interrupted')
+    monkeypatch.setattr(quota, 'json', SimpleNamespace(dumps=broken, loads=json.loads))
+    with pytest.raises(ValueError):
+        quota.atomic_json(path, {'schema': quota.REPORT_SCHEMA, 'generation': 2})
+    assert json.loads(path.read_text())['generation'] == 1
+    assert [entry.name for entry in path.parent.iterdir()] == ['report.json']
+
+
+def test_report_schema_is_unchanged_apart_from_optional_schedule_fields(quota, monkeypatch, capsys):
+    monkeypatch.setattr(quota, 'utcnow', lambda: NOW)
+    monkeypatch.setattr(quota, 'fetch', refuse_fetch)
+    snapshot(quota, 'codex', [window(64.2, WEEK, timedelta(hours=135.7))])
+    for command in (['--json'], ['tick', '--json']):
+        assert quota.main(command) == 0
+        payload = json.loads(capsys.readouterr().out)
+        assert set(payload) == REPORT_KEYS | {'next_due_at', 'refreshing'}
+        assert payload['schema'] == 'provenant.quota.report.v1' and payload['refreshing'] == []
+        codex, = payload['accounts']
+        assert set(codex) == ROW_KEYS | {'schedule'}
+        assert (codex['state'], codex['status'], codex['observed_at']) == ('deficit', 'ok', iso(NOW))
+        assert set(codex['schedule']) == SCHEDULE_KEYS
+        assert codex['schedule']['error_kind'] is None and codex['schedule']['source_kind'] == 'fetch'
+        assert payload['next_due_at'] == codex['schedule']['next_due_at']
+
+
+def test_tick_fast_path_fetches_nothing_and_rewrites_only_a_moved_due_time(quota, tmp_path, monkeypatch, capsys):
+    fake_accounts(quota, tmp_path, monkeypatch, ['work'], refuse_fetch)
+    monkeypatch.setattr(quota, 'fetch', refuse_fetch)
+    snapshot(quota, 'fake', [window(20, 300, timedelta(hours=2))], account='work', observed=NOW - timedelta(minutes=2))
+    assert quota.main(['tick']) == 0
+    first = quota.report_path().stat()
+    assert quota.main(['tick', '--json']) == 0 and quota.main(['tick', '--trigger', 'power']) == 0
+    assert quota.report_path().stat().st_ino == first.st_ino
+    # Another process fetched meanwhile: the due time moved, so the report is refreshed.
+    snapshot(quota, 'fake', [window(30, 300, timedelta(hours=2))], account='work', observed=NOW - timedelta(minutes=1))
+    assert quota.main(['tick']) == 0
+    assert quota.report_path().stat().st_ino != first.st_ino
+    assert 'fake/work: ok; next' in capsys.readouterr().out
+
+
+@pytest.mark.parametrize('kind, retry, low, high, manual_fetches', [
+    ('rate_limited', 900, 900, 900, False),
+    ('rate_limited', None, 108, 132, False),
+    ('network', None, 108, 132, True),
+    ('auth', None, 3240, 3960, True),
+    ('missing', None, 77760, 95040, True),
+    ('other', None, 108, 132, True),
+])
+def test_a_failed_fetch_backs_off_by_kind(quota, tmp_path, kind, retry, low, high, manual_fetches):
+    calls = []
+
+    def fetch(account, io, now):
+        calls.append(now)
+        raise io.Unavailable('provider quota request failed', kind, retry)
+    quota.register('fake', SimpleNamespace(ADAPTER='fake', default_identity=lambda: None, fetch=fetch))
+    account = quota.Account('fake', 'work', tmp_path / 'id', True)
+    value = quota.refresh(account, NOW)
+    wait = (quota.parse_time(value['fetch']['backoff_until']) - NOW).total_seconds()
+    assert low <= wait <= high and value['fetch']['retry_after_s'] == retry
+    assert (value['schedule']['reason'], value['schedule']['error_kind'], value['schedule']['failures']) == (
+        'backoff', kind, 1)
+    assert quota.refresh(account, NOW + timedelta(minutes=1), trigger='panel')['status'] == 'unavailable'
+    assert len(calls) == 1
+    again = quota.refresh(account, NOW + timedelta(minutes=1), trigger='manual')
+    assert len(calls) == (2 if manual_fetches else 1)
+    if manual_fetches and kind not in ('auth', 'missing'):
+        assert again['fetch']['failures'] == 2 and low * 2 <= (
+            quota.parse_time(again['fetch']['backoff_until']) - NOW - timedelta(minutes=1)).total_seconds() <= high * 2
+    quota.refresh(account, NOW + timedelta(minutes=2), trigger='manual', ignore_backoff=True)
+    assert len(calls) == (3 if manual_fetches else 2)
+
+
+@pytest.mark.parametrize('code, header, kind, wait', [
+    (429, '120', 'rate_limited', 120), (429, 'date', 'rate_limited', 300), (429, None, 'rate_limited', None),
+    (401, None, 'auth', None), (403, None, 'auth', None), (503, None, 'network', None), (404, None, 'other', None),
+    (None, None, 'network', None)])
+def test_http_json_surfaces_status_kind_and_retry_after_without_credentials(monkeypatch, code, header, kind, wait):
+    from email.message import Message
+    from email.utils import format_datetime
+    from urllib.error import HTTPError, URLError
+    module = load('quota_http_kinds', ROOT / 'scripts/provider_quota.py')
+    headers = Message()
+    if header:
+        headers['Retry-After'] = header if header != 'date' else format_datetime(
+            datetime.now(UTC) + timedelta(seconds=300), usegmt=True)
+
+    def opener(request, timeout):
+        assert request.get_header('Authorization') == 'Bearer ' + TOKEN
+        if code is None:
+            raise URLError(f'connection refused for {TOKEN}')
+        raise HTTPError(request.full_url, code, f'denied {TOKEN}', headers, io.BytesIO(TOKEN.encode()))
+    monkeypatch.setattr(module, 'urlopen', opener)
+    with pytest.raises(module.Unavailable) as caught:
+        module.http_json('https://api.anthropic.com/api/oauth/usage', {'Authorization': 'Bearer ' + TOKEN})
+    assert (caught.value.kind, caught.value.status) == (kind, code)
+    assert caught.value.retry_after == pytest.approx(wait, abs=2) if wait else caught.value.retry_after is None
+    assert TOKEN not in str(caught.value) and TOKEN not in repr(caught.value.args)
+    assert caught.value.__cause__ is None and caught.value.__suppress_context__
+
+
+def test_trace_records_each_attempt_and_summarises_and_prunes(quota, tmp_path, monkeypatch, capsys):
+    replies = iter([{'windows': [window(10, 300, timedelta(hours=1))]},
+                    quota.Unavailable('provider quota request could not connect', 'network'),
+                    quota.Unavailable('provider quota service is rate limited', 'rate_limited', 60),
+                    {'windows': [window(12, 300, timedelta(hours=1))]}])
+
+    def fetch(account, io, now):
+        reply = next(replies)
+        if isinstance(reply, Exception):
+            raise reply
+        return reply
+    quota.register('fake', SimpleNamespace(ADAPTER='fake', default_identity=lambda: None, fetch=fetch))
+    account = quota.Account('fake', 'work', tmp_path / 'id', True)
+    for minutes in range(4):
+        quota.refresh(account, NOW - timedelta(hours=1) + timedelta(minutes=minutes), force=True, trigger='manual')
+    lines = [json.loads(line) for line in (quota.quota_dir() / 'fetches.jsonl').read_text().splitlines()]
+    assert [line['outcome'] for line in lines] == ['ok', 'error', 'error', 'ok']
+    assert set(lines[2]) == {'at', 'account', 'provider', 'trigger', 'outcome', 'error_kind', 'duration_ms',
+                             'retry_after_s', 'error'}
+    assert (lines[2]['error_kind'], lines[2]['retry_after_s'], lines[2]['trigger']) == ('rate_limited', 60, 'manual')
+    monkeypatch.setattr(quota, 'utcnow', lambda: NOW)
+    assert quota.main(['trace', '--since', '24h', '--json']) == 0
+    summary = json.loads(capsys.readouterr().out)
+    row, = summary['accounts']
+    assert (summary['fetches'], summary['failures']) == (4, 2)
+    assert (row['fetches'], row['ok'], row['failures']) == (4, 2, {'network': 1, 'rate_limited': 1})
+    assert row['p50_ms'] is not None and row['max_ms'] >= row['p50_ms']
+    assert quota.trace_summary(NOW - timedelta(minutes=30))['fetches'] == 0
+    assert quota.main(['trace']) == 0 and 'rate_limited 1' in capsys.readouterr().out
+
+    path = quota.quota_dir() / 'fetches.jsonl'
+    old = json.dumps({**lines[0], 'at': iso(NOW - timedelta(days=40))}) + '\n'
+    path.write_text(old + path.read_text())
+    assert quota.prune_trace(NOW) is True
+    assert len(path.read_text().splitlines()) == 4
+    path.write_text(old + path.read_text())
+    assert quota.prune_trace(NOW + timedelta(hours=1)) is False      # at most once a day
+    assert len(path.read_text().splitlines()) == 5
+    configure(tmp_path, {'quota': {'trace': {'retention_days': 1}}})
+    assert quota.prune_trace(NOW + timedelta(hours=25)) is True
+    assert path.read_text() == ''
+
+
+def test_errors_and_trace_never_carry_credentials(quota, tmp_path):
+    secret = 'sk-ant-oat01-' + 'a1B2' * 12
+    replies = iter([RuntimeError(f'Bearer {TOKEN} {secret}'),
+                    quota.Unavailable(f'refused for owner@example.com with Bearer {TOKEN} and {secret}', 'auth')])
+
+    def fetch(account, io, now):
+        raise next(replies)
+    quota.register('fake', SimpleNamespace(ADAPTER='fake', default_identity=lambda: None, fetch=fetch))
+    account = quota.Account('fake', 'work', tmp_path / 'id', True)
+    first = quota.refresh(account, NOW, force=True)
+    second = quota.refresh(account, NOW + timedelta(minutes=1), force=True)
+    assert first['error'] == 'quota source failed (RuntimeError)'
+    stored = quota.cache_path('fake', 'work', identity_dir=account.identity_dir).read_text()
+    traced = (quota.quota_dir() / 'fetches.jsonl').read_text()
+    for text in (json.dumps(second), stored, traced, json.dumps(quota.report([second], NOW))):
+        for value in (TOKEN, secret, 'owner@example.com'):
+            assert value not in text
+    assert all(len(json.loads(line)['error'] or '') <= 200 for line in traced.splitlines())
+
+
+def test_gather_times_each_attempt_when_it_starts(quota, tmp_path, monkeypatch):
+    clock = iter([NOW, NOW + timedelta(seconds=3), NOW + timedelta(seconds=9)])
+    fake_accounts(quota, tmp_path, monkeypatch, ['a', 'b'], lambda account, io, now: {
+        'windows': [window(10, 300, timedelta(hours=1))]})
+    monkeypatch.setattr(quota, 'utcnow', lambda: next(clock))
+    assert [row['attempted_at'] for row in quota.gather()] == [iso(NOW), iso(NOW + timedelta(seconds=3))]
+
+
+def test_schedule_command_prints_each_account_block_without_fetching(quota, tmp_path, monkeypatch, capsys):
+    fake_accounts(quota, tmp_path, monkeypatch, ['work'], refuse_fetch)
+    snapshot(quota, 'fake', [window(20, 300, timedelta(hours=2))], account='work', observed=NOW - timedelta(minutes=2))
+    assert quota.main(['schedule', '--json']) == 0
+    row, = json.loads(capsys.readouterr().out)
+    assert (row['provider'], row['account'], row['schedule']['reason']) == ('fake', 'work', 'idle')
+    assert quota.main(['schedule']) == 0 and 'idle' in capsys.readouterr().out
+    assert quota.main(['path']) == 0 and capsys.readouterr().out.strip() == str(quota.quota_dir())
+    assert quota.main(['path', '--json']) == 0
+    assert json.loads(capsys.readouterr().out)['report'] == str(quota.report_path())
+
+
+def test_schedule_disabled_keeps_the_cache_period_and_enabled_drops_its_floor(quota, tmp_path, monkeypatch):
+    calls = []
+    fake_accounts(quota, tmp_path, monkeypatch, ['work'], lambda account, io, now: calls.append(now) or {
+        'windows': [window(10, 300, timedelta(hours=1))]}, cache_seconds=60,
+        providers={'fake': {'ttl_idle_seconds': 90}})
+    account, = quota.accounts()
+    quota.refresh(account, NOW)
+    quota.refresh(account, NOW + timedelta(seconds=120))
+    assert len(calls) == 2  # a 90 s schedule fetches again; the old 300 s floor would not
+    configure(tmp_path, {'quota': {'cache_seconds': 60, 'schedule': {'enabled': False}},
+                         'accounts': {'fake': {'work': {'identity_dir': str(tmp_path / 'ids/work')}}}})
+    quota.refresh(account, NOW + timedelta(seconds=240))
+    assert len(calls) == 2  # cache_seconds keeps its 300 s floor
+    assert quota.refresh(account, NOW + timedelta(seconds=421))['schedule']['reason'] == 'cache_seconds'
+    assert len(calls) == 3
+
+
+def test_tick_runs_a_solo_provider_alone_and_others_in_parallel(quota, tmp_path, monkeypatch):
+    import threading
+    import time
+    running, overlaps, guard = set(), [], threading.Lock()
+
+    def fetch(account, io, now):
+        with guard:
+            running.add(account.provider)
+            overlaps.append(set(running))
+        time.sleep(0.05)
+        with guard:
+            running.discard(account.provider)
+        return {'windows': [window(10, 300, timedelta(hours=1))]}
+    for name in ('fake', 'other', 'agy'):
+        quota.register(name, SimpleNamespace(ADAPTER=name, default_identity=lambda: None, fetch=fetch))
+    configure(tmp_path, {'accounts': {name: {'work': {'identity_dir': str(tmp_path / name)}} for name in ('fake', 'other', 'agy')}})
+    monkeypatch.setattr(quota, 'utcnow', lambda: NOW)
+    quota.tick()
+    assert {'fake', 'other'} in overlaps
+    assert all(seen == {'agy'} for seen in overlaps if 'agy' in seen)
+
+
+def test_claude_auth_status_is_cached_per_identity_until_it_ages_or_is_used(quota, monkeypatch, tmp_path):
+    identity = tmp_path / 'claude-c'
+    identity.mkdir()
+    history = identity / 'history.jsonl'
+    history.write_text('')
+    runs = []
+    monkeypatch.setattr(quota, 'executable', lambda name: '/fake/claude')
+
+    def run(args, **kwargs):
+        runs.append(args[1:3])
+        return SimpleNamespace(returncode=0, stdout=json.dumps({
+            'loggedIn': True, 'authMethod': 'claude.ai', 'subscriptionType': 'max', 'email': 'owner@example.com'}))
+    monkeypatch.setattr(quota, 'run_process', run)
+    claude, account = quota.provider('claude'), quota.Account('claude', 'c', identity, False)
+    assert claude.status(account, quota.IO) == {'loggedIn': True, 'authMethod': 'claude.ai', 'subscriptionType': 'max'}
+    claude.status(account, quota.IO)
+    assert runs == [['auth', 'status']]
+    assert 'owner@example.com' not in ''.join(path.read_text() for path in (quota.quota_dir() / 'memo').iterdir())
+    later = history.stat().st_mtime + 60
+    os.utime(history, (later, later))
+    claude.status(account, quota.IO)
+    assert len(runs) == 2
+    monkeypatch.setattr(quota, 'utcnow', lambda: datetime.now(UTC) + timedelta(hours=25))
+    claude.status(account, quota.IO)
+    assert len(runs) == 3
+    other = tmp_path / 'claude-d'
+    other.mkdir()
+    claude.status(quota.Account('claude', 'd', other, False), quota.IO)
+    assert len(runs) == 4
+
+
+def test_opencode_spend_queries_reach_messages_through_indexes(quota, tmp_path, monkeypatch):
+    home = tmp_path / 'oc'
+    home.mkdir()
+    ms = lambda age: int((NOW - age).timestamp() * 1000)
+    with sqlite3.connect(home / 'opencode.db') as db:
+        # The indexes of the real store (opencode 2.0.30); v1 `message` has no time index of its own.
+        db.executescript('''
+            CREATE TABLE session (id text PRIMARY KEY, time_created integer NOT NULL, time_updated integer NOT NULL);
+            CREATE TABLE message (id text PRIMARY KEY, session_id text NOT NULL, time_created integer NOT NULL,
+                                  time_updated integer NOT NULL, data text NOT NULL);
+            CREATE INDEX message_session_time_created_id_idx ON message (session_id, time_created, id);
+            CREATE TABLE session_message (id text PRIMARY KEY, session_id text NOT NULL, type text NOT NULL,
+                                          seq integer NOT NULL, time_created integer NOT NULL,
+                                          time_updated integer NOT NULL, data text NOT NULL);
+            CREATE INDEX session_message_session_time_created_id_idx ON session_message (session_id, time_created, id);
+            CREATE INDEX session_message_time_created_idx ON session_message (time_created);''')
+        db.executemany('INSERT INTO session VALUES (?,?,?)', [('recent', ms(day), ms(hour)), ('old', ms(90 * day), ms(60 * day))])
+        db.executemany('INSERT INTO message VALUES (?,?,?,?,?)', [
+            ('m1', 'recent', ms(hour), ms(hour), json.dumps({'providerID': 'opencode-go', 'cost': 3.2})),
+            ('m2', 'old', ms(60 * day), ms(60 * day), json.dumps({'providerID': 'opencode-go', 'cost': 99}))])
+        db.execute('INSERT INTO session_message VALUES (?,?,?,?,?,?,?)', ('s1', 'v2', 'assistant', 1, ms(hour), ms(hour),
+                   json.dumps({'model': {'providerID': 'opencode-go'}, 'cost': 1.6})))
+    opencode, queries = quota.provider('opencode'), []
+
+    class Recording:
+        def __init__(self, *args, **kwargs):
+            self.db = sqlite3.connect(*args, **kwargs)
+        def execute(self, sql, params=()):
+            queries.append((sql, params))
+            return self.db.execute(sql, params)
+        def close(self):
+            self.db.close()
+    monkeypatch.setattr(opencode, 'sqlite3', SimpleNamespace(connect=Recording, Error=sqlite3.Error))
+    windows, _ = opencode_rows(quota, quota.Account('opencode', 'go', home, True))
+    assert windows['thirty_day']['used_percent'] == pytest.approx(4.8 / 32 * 100)
+    reads = [(sql, params) for sql, params in queries if 'FROM message' in sql or 'FROM session_message' in sql]
+    assert len(reads) == 4
+    with sqlite3.connect(home / 'opencode.db') as db:
+        for sql, params in reads:
+            plan = [row[3] for row in db.execute('EXPLAIN QUERY PLAN ' + sql, params)]
+            assert not [step for step in plan if step in ('SCAN message', 'SCAN session_message')], (sql, plan)
+            assert any('USING' in step and 'INDEX' in step for step in plan), (sql, plan)
+            if 'FROM message' in sql:
+                assert any('message_session_time_created_id_idx' in step for step in plan)

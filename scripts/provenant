@@ -205,7 +205,9 @@ COMMAND_DETAILS: dict[str, str] = {
         "prints the full report."
     ),
     "quota": (
-        "usage: provenant quota [--refresh] [--json] | credit list | credit <provider> [--account L] add|use\n\n"
+        "usage: provenant quota [--refresh] [--json] | tick [--trigger T] [--power P] [--json] [--ignore-backoff]\n"
+        "       | schedule [--json] | trace [--since 24h] [--json] | path [--json]\n"
+        "       | credit list | credit <provider> [--account L] add|use\n\n"
         "Delegates to scripts/provenant-quota.\n"
         "Provider-reported quota windows and pace per account; PROVENANT_QUOTA=0 disables fetching."
     ),

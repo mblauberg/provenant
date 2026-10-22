@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import os
 from pathlib import Path
 import re
 import tempfile
@@ -53,8 +54,13 @@ def _signed_in(path, limit):
 
 def account_label(limit=2 * 1024 * 1024):
     """The signed-in account from agy's newest log that records one. Reads no credential."""
-    for path in sorted((state_dir() / 'log').glob('cli-*.log'), reverse=True)[:LOGS]:
-        email = _signed_in(path, limit)
+    folder = state_dir() / 'log'
+    try:  # Names sort by time; comparing strings, not paths, keeps a large log folder cheap.
+        names = [name for name in os.listdir(folder) if name.startswith('cli-') and name.endswith('.log')]
+    except OSError:
+        names = []
+    for name in sorted(names, reverse=True)[:LOGS]:
+        email = _signed_in(folder / name, limit)
         if email:
             return fingerprint(email)
     return None
@@ -95,7 +101,7 @@ def usage(io):
     """The `/usage` payload and the signed-in address from that run's own temporary log."""
     executable = io.executable('agy')
     if not executable:
-        raise io.Unavailable('agy is not installed')
+        raise io.Unavailable('agy is not installed', 'missing')
     with tempfile.TemporaryDirectory(prefix='provenant-agy-') as scratch:
         log = Path(scratch) / 'cli.log'
         try:
@@ -125,7 +131,7 @@ def usage(io):
     except (UnicodeDecodeError, ValueError):
         raise io.Unavailable('agy returned an invalid quota response') from None
     if not isinstance(payload, dict) or payload.get('status') != 'SUCCESS':
-        raise io.Unavailable('agy could not read quota; sign in to agy')
+        raise io.Unavailable('agy could not read quota; sign in to agy', 'auth')
     return payload, email
 
 
@@ -133,7 +139,7 @@ def fetch(account, io, now):
     payload, email = usage(io)
     # A discovered account is named by its fingerprint; never file a reading under another one.
     if account.label.startswith('google-') and (not email or fingerprint(email) != account.label):
-        raise io.Unavailable('agy is signed in to a different account than its log shows; run agy once')
+        raise io.Unavailable('agy is signed in to a different account than its log shows; run agy once', 'auth')
     parsed = parse(payload, now)
     if not parsed['windows']:
         raise io.Unavailable('agy reported no quota')

@@ -109,9 +109,13 @@ execution success, not user acceptance or a passed delivery gate.
 ## Provider quota
 
 ```sh
-provenant quota                 # cached for at least five minutes
+provenant quota                 # fetches only the accounts that are due
 provenant quota --json
-provenant quota --refresh       # explicitly bypass the cache
+provenant quota --refresh       # explicitly bypass the schedule
+provenant quota tick --json     # fetch what is due, write report.json, print it
+provenant quota schedule        # each account's next due time and reason; never fetches
+provenant quota trace --since 24h
+provenant quota path [--json]   # the quota state directory
 provenant routes --json         # cached quota only; never fetches
 ```
 
@@ -142,8 +146,92 @@ cooldown (#1062).
 `PROVENANT_QUOTA=0` or `quota.enabled=false` in the telemetry config disables
 fetching and quota routing input. Cached quota can still be displayed. Errors
 retain the last successful observation with `status: stale`; failed attempts
-also respect the cache TTL. The cache lives beside the ledger under
+back off by error kind, as below. The cache lives beside the ledger under
 `quota/<provider>--<account>--<host>.json`.
+
+### Refresh schedule
+
+Each account is due on its own schedule. It is fetched sooner while its identity
+directory shows recent use (`active`), less often when idle, sooner still when a
+window nears exhaustion or will run out before its reset, and not at all while
+a window is exhausted until just after its reset. Every report row carries a
+`schedule` block with `next_due_at`, `reason`, `ttl_seconds`, `trigger`,
+`failures`, `backoff_until`, `error_kind`, `last_duration_ms` and
+`source_kind`; the report adds the earliest `next_due_at` and `refreshing`, the
+`provider/account` ids being fetched now. Activity is read from file times only.
+
+`provenant quota tick` takes `--trigger timer|panel|manual|event|wake|power` and
+`--power ac|battery|low`, supplied by the caller. It holds
+`quota/refresh.lock` without waiting: a second tick prints the current report
+and fetches nothing. Up to `max_parallel` accounts fetch at once; agy runs alone.
+`quota/report.json` is rewritten atomically after each fetch. When nothing is
+due, tick fetches nothing and rewrites the report only if `next_due_at` moved.
+A `manual` trigger fetches an account at least 30 seconds old and overrides a
+backoff other than `rate_limited`; `--ignore-backoff` overrides any backoff.
+A `power` trigger never fetches.
+
+`quota.schedule.enabled=false` restores the fixed period: an account is fetched
+when its last attempt is older than `quota.cache_seconds` (at least 300). With
+the schedule on, `cache_seconds` is unused.
+
+| `quota.schedule` key | Default | Meaning |
+|---|---|---|
+| `enabled` | `true` | Use the adaptive schedule |
+| `min_interval_seconds` | 60 | Shortest wait between fetches of one account |
+| `max_interval_seconds` | 21600 | Longest wait |
+| `active_window_seconds` | 900 | Identity use this recent makes an account active |
+| `jitter_fraction` | 0.1 | Spread of each wait, stable per account |
+| `coalesce_seconds` | 120 | Fetch an account due this soon with the others (at most a quarter of its TTL) |
+| `near_exhaustion_percent` | 85 | Use at which the wait shortens |
+| `near_exhaustion_factor` | 0.5 | Multiplier then, and when run-out falls within the horizon |
+| `runs_out_horizon_factor` | 2 | Horizon as a multiple of the TTL |
+| `reset_grace_seconds` | 60 | Wait after a reset before an exhausted account is checked |
+| `exhausted_recheck_seconds` | 21600 | Longest wait while exhausted |
+| `battery_factor` | 2 | Wait multiplier on battery |
+| `low_power_factor` | 4 | Wait multiplier in low power |
+| `low_power_skip_costs` | `["expensive"]` | Costs that wait the maximum in low power |
+| `manual_min_age_seconds` | 30 | Youngest reading a manual trigger refetches |
+| `event_debounce_seconds` | 30 | Youngest reading an event trigger refetches |
+| `max_parallel` | 3 | Concurrent fetches |
+
+Per provider, `quota.providers.<name>` or an account's own `quota` object sets
+`ttl_active_seconds`, `ttl_idle_seconds`, `ttl_panel_seconds` (the youngest
+reading a panel open refetches), `cost` (`cheap`, `moderate` or `expensive`)
+and `solo`, and may override any key above. The defaults:
+
+| Provider | Cost | Active | Idle | Panel |
+|---|---|---|---|---|
+| claude | moderate | 300 | 1800 | 120 |
+| codex | moderate | 900 | 3600 | 300 |
+| cursor | cheap | 1800 | 3600 | 600 |
+| opencode | cheap | 300 | 3600 | 60 |
+| agy | expensive, solo | 1200 | 7200 | 900 |
+
+An invalid value falls back to the next layer, and the account's `schedule`
+block lists it under `notes`.
+
+A failed fetch sets `error_kind` and waits before the next attempt:
+
+| `quota.backoff` key | Default | Applies to |
+|---|---|---|
+| `base_seconds` | 120 | `rate_limited`, `network` and `other`: doubles per consecutive failure, with jitter |
+| `max_seconds` | 3600 | Cap on that doubling |
+| `auth_seconds` | 3600 | `auth`; cleared early by identity use, such as signing in again |
+| `missing_seconds` | 86400 | `missing`, such as a CLI that is not installed |
+
+A `Retry-After` header lengthens a `rate_limited` wait, up to a day. If every
+fetch in a tick fails to connect, the report sets `offline: true`.
+
+Each attempt appends one line to `quota/fetches.jsonl`: `at`, `provider`,
+`account`, `trigger`, `outcome`, `error_kind`, `duration_ms`, `retry_after_s`
+and a scrubbed `error`. `provenant quota trace --since 24h [--json]` totals
+fetches, failures by kind and duration percentiles per account. Lines older than
+`quota.trace.retention_days` (default 30) are pruned at most once a day.
+
+Claude's `claude auth status` result is cached per identity under
+`quota/memo/` for a day, or until the identity is used. OpenCode reads its v1
+message table only through sessions updated within the longest window, using
+the store's session index.
 
 Configure accounts in `<instance-root>/config/telemetry.json`. These are the
 `telemetry.accounts.<provider>.<label>` settings; omit the outer `telemetry`
@@ -154,7 +242,8 @@ An entry without `identity_dir` means the provider's default directory.
 
 ```json
 {
-  "quota": {"enabled": true, "cache_seconds": 300,
+  "quota": {"enabled": true, "schedule": {"max_parallel": 3},
+            "providers": {"agy": {"ttl_idle_seconds": 14400}},
             "window_labels": {"iguana_necktie": "Cloud session credits"},
             "credits_policy": "last_resort", "credit_floor": 0},
   "accounts": {
