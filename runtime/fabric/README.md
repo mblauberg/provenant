@@ -623,6 +623,31 @@ command waits at most two minutes for Git; its persisted hold lasts another
 thirty seconds. A push orphaned by a crash is fenced by the remote SHA, not by
 the hold. If the push succeeds but release fails, it reports `pushed` with a
 `release_warning`. Renew or release an aborted lease as appropriate.
+`landing-push --remote R` pushes to a remote other than `origin`.
+
+Scripts use the same lease from a shell, without an MCP connection:
+
+```sh
+fabric landing-acquire <session> (--expected-sha SHA | --branch B [--remote R]) [--seconds N]
+fabric landing-verify <session> <generation> [--expected-sha SHA] [--branch B [--remote R]]
+fabric landing-release <session> <generation>
+fabric landing-status
+```
+
+Each takes `--label L` and `--json`. Acquire returns `holder`, `label`,
+`session`, `generation`, `expected_sha`, `expires_at` (ISO 8601 UTC) and
+`taken_over_from` after a takeover. Pass its `label` to later calls. Verify
+returns `valid` and, when false, `reason`: `stale`, `sha_mismatch` (the given
+SHA) or `sha_moved` (the remote tip from `git ls-remote`). Release never
+touches another holder's lease. It returns `released: true`, or
+`released: false` with `reason` `expired`, `not_held` or `pushing`. Status
+returns `lease: null` or the live lease. Exit codes are 0 for ok (including an
+unreleased `expired` or `not_held`), 1 for refused or stale, 2 for usage and 3
+for held by another holder or a push in progress. A store that cannot be
+opened exits non-zero with nothing on stdout. `provenant lease <verb>` maps
+onto these commands; the [landing lease
+runbook](../../docs/runbooks/landing-lease.md) shows a repository script's
+calls.
 
 ## Run storage and boundaries
 

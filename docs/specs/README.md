@@ -17,6 +17,7 @@ described. Fabric is now small enough to be its own documentation: see
 
 - [Fabric across the user's own hosts](fabric-hosts.md)
 - [Host setup and diagnostics](../runbooks/fabric-hosts.md)
+- [Landing lease from a repository script](../runbooks/landing-lease.md)
 
 ## Harness
 
