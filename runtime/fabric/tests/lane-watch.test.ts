@@ -21,6 +21,9 @@ it("wakes on a receipt write long before the fallback", async () => {
   const watcher = laneIdle(() => [dir]);
   try {
     await watcher.idle(0); // establishes the watch
+    await new Promise((done) => setTimeout(done, 100));
+    // The platform may refuse a watch (EMFILE); the timer fallback is then the whole contract.
+    if (watcher.watching() === 0) return;
     setTimeout(() => writeFileSync(join(dir, "20260101-0000-batch-user-abc/dispatch/tasks/t/attempt-001/attempt.json"), "{}"), 50);
     const started = Date.now();
     await watcher.idle(20_000);
@@ -48,4 +51,18 @@ it("tolerates a missing directory", async () => {
   const watcher = laneIdle(() => ["/nonexistent/fabric-lane-watch"]);
   await watcher.idle(10);
   watcher.close();
+});
+
+it("never settles past the idle budget", async () => {
+  const dir = runs();
+  const watcher = laneIdle(() => [dir]);
+  try {
+    await watcher.idle(0);
+    await new Promise((done) => setTimeout(done, 100));
+    if (watcher.watching() === 0) return;
+    setTimeout(() => writeFileSync(join(dir, "20260101-0000-batch-user-abc/dispatch/tasks/t/attempt-001/attempt.json"), "{}"), 10);
+    const started = Date.now();
+    await watcher.idle(60);
+    expect(Date.now() - started).toBeLessThan(200);
+  } finally { watcher.close(); }
 });

@@ -188,22 +188,9 @@ export function databasePath(env: NodeJS.ProcessEnv = process.env): string {
   return resolve(stateDirectory, "fabric.sqlite3");
 }
 
-const gitRoots = new Map<string, string>();
-
-/**
- * Shared with orchestrate/layout.py: one durable run root per repository.
- * A git answer is kept for the process, so listing many run directories asks
- * git once, not once per directory; a non-repository is asked again.
- */
+/** Shared with orchestrate/layout.py: one durable run root per repository. */
 export function runRoot(cwd = process.cwd(), env: NodeJS.ProcessEnv = process.env): string {
   const current = canonicalPath(cwd);
-  const key = `${current}\0${env.GIT_DIR ?? ""}\0${env.GIT_COMMON_DIR ?? ""}\0${env.GIT_WORK_TREE ?? ""}`;
-  const known = gitRoots.get(key);
-  if (known !== undefined) return known;
-  try {
-    const root = join(dirname(canonicalPath(gitPath(current, "--git-common-dir", env))), ".agent-run");
-    gitRoots.set(key, root);
-    return root;
-  }
+  try { return join(dirname(canonicalPath(gitPath(current, "--git-common-dir", env))), ".agent-run"); }
   catch { return join(current, ".agent-run"); }
 }

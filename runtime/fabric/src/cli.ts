@@ -181,10 +181,6 @@ if (command === "cancel" || command === "output") {
     process.exit(2);
   }
 }
-// A busy mailbox must not end a wait: without the registry only the caller's own project is read.
-const registeredProjects = (store: Store): string[] => {
-  try { return store.projects(); } catch { return []; }
-};
 if (command === "lanes") {
   let project: string | undefined, timeout: string | undefined;
   try {
@@ -214,16 +210,16 @@ if (command === "lanes") {
     store.announce(laneWho);
     let code: number;
     const seatAncestors = ancestorPids();
-    const watcher = laneIdle(() => [laneWho.project, ...(project === undefined
-      ? seatRunDirectories(registeredProjects(store).filter((other) => other !== laneWho.project), seatAncestors).keys() : [])]
+    const watcher = laneIdle(() => [laneWho.project, ...(project === undefined ? seatRunDirectories(seatAncestors).keys() : [])]
       .map((dir) => join(runRoot(dir), "runs")));
+    const reader = laneReader({ who: laneWho, ids: watched, deps: { ancestors: seatAncestors,
+      ...(project === undefined ? {} : { ancestors: new Set<number>() }) } });
     try {
       // The registered project, not the raw cwd, owns the runs; the normal
       // retention window bounds the scan, and no row cap may hide a completion.
       code = await waitForLanes({
         who: laneWho, store, all, timeoutSeconds,
-        read: laneReader({ who: laneWho, ids: watched, deps: { ancestors: seatAncestors },
-          projects: () => project === undefined ? registeredProjects(store) : [] }),
+        read: reader, refresh: reader.refresh, stale: reader.stale,
         write: (text) => new Promise((resolveWrite, reject) =>
           process.stdout.write(text, (error) => (error ? reject(error) : resolveWrite()))),
         fail: (text) => console.error(text),

@@ -30,7 +30,10 @@ export function laneIdle(dirs: () => string[]) {
     }
   };
   return {
+    /** Directories with a live watch. */
+    watching: () => watchers.size,
     async idle(ms: number): Promise<void> {
+      const begun = Date.now();
       ensure();
       if (!changed) {
         await new Promise<void>((done) => {
@@ -41,7 +44,7 @@ export function laneIdle(dirs: () => string[]) {
       }
       if (changed) {
         // Let a burst of writes finish before the read.
-        await new Promise((done) => setTimeout(done, SETTLE_MS));
+        await new Promise((done) => setTimeout(done, Math.max(0, Math.min(SETTLE_MS, ms - (Date.now() - begun)))));
         changed = false;
       }
     },

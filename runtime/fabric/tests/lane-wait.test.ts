@@ -237,3 +237,18 @@ it("idles between reads through the watcher, never past the deadline", async () 
   expect(stuck).toBe(124);
   expect(idles).toEqual([5_000]);
 });
+
+it("re-reads stale peers before a timeout or a none-running decision", async () => {
+  let stale = true;
+  const output: string[] = [];
+  const code = await waitForLanes({
+    who, store: store(), now: () => 0, timeoutSeconds: 0,
+    read: async () => ({ schema: "fabric.runs.v1", status: "ok", runs: [lane("peer", "running", null)] }),
+    refresh: async () => { stale = false; return { schema: "fabric.runs.v1", status: "ok", runs: [lane("peer")] }; },
+    stale: () => stale,
+    write: async (text) => { output.push(text); }, fail: (text) => { throw new Error(text); }, sleep: async () => undefined,
+  });
+  expect(code).toBe(0);
+  expect(output.join("")).toContain("peer");
+  expect(output.join("")).not.toContain("timeout");
+});
