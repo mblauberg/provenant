@@ -90,8 +90,10 @@ def check(common, tip, base="HEAD"):
     branch's, never count, so a merge cannot revert a protected path.
 
     A commit may also match one released tip's complete protected tree. That tip must not be
-    an ancestor of the base, and its protected tree must differ from the base's, so an old
-    release cannot vouch for restoring content the base has already moved past. A release
+    an ancestor of the base, its protected tree must differ from the base's, and the base's
+    protected tree must be unchanged since the release forked from it, so a superseded or
+    squash-landed release cannot vouch for restoring content the base has already moved past.
+    A release vouches for content, not for the route that lands it. A release
     already in the commit's history stays subject to the merge-taking rules above, so later
     merges cannot restore an older released tree after taking the base's newer versions.
     """
@@ -121,8 +123,12 @@ def check(common, tip, base="HEAD"):
             continue
         if reviewed_trees is None:
             # Membership in covered excludes missing tips and tips already in the base's history.
+            # The base's protected tree must not have moved since the release forked from it, or the
+            # release would carry stale versions of paths it never touched (superseded or squashed).
             reviewed_trees = [(tip, entries(tip)) for tip in tips
-                              if tip in covered and entries(tip) != entries(base)]
+                              if tip in covered and entries(tip) != entries(base) and all(
+                                  entries(fork) == entries(base)
+                                  for fork in git(common, "merge-base", "--all", tip, base).split())]
         if any(entries(sha) == tree and git(common, "rev-list", "--max-count=1", reviewed, "^" + sha)
                for reviewed, tree in reviewed_trees):
             vouched[sha] = inherited | changed

@@ -8240,6 +8240,28 @@ def test_a_release_with_the_bases_protected_tree_does_not_cover_new_content(tmp_
     assert refused.stderr.startswith("protected_instructions_changed:")
 
 
+@pytest.mark.parametrize("landed", ["superseded", "squashed"])
+def test_a_stale_release_cannot_restore_protected_content_the_base_moved_past(tmp_path, monkeypatch, landed):
+    monkeypatch.delenv("PROVENANT_ATTEMPT_MARKER", raising=False)
+    repo, _ = instruction_lane(tmp_path)
+    fork = head_of(repo)
+    reviewed = side_commit(repo, fork, "reviewed\n", path=OTHER_SKILL)
+    git(repo, "reset", "-q", "--hard", reviewed)
+    released = protection(repo, "--release", "--tip", reviewed, "--actor", "chair", "--reason", "ok")
+    assert released.returncode == 0, released.stderr
+    base = fork
+    if landed == "squashed":
+        # A squash lands the release's content without its SHA ever reaching the base's history.
+        base = git(repo, "commit-tree", head_of(repo, reviewed + "^{tree}"), "-p", fork, "-m", "squash").strip()
+    newer = side_commit(repo, base, "v3\n")
+    # One commit on the newer base takes the release's whole tree, reverting SKILL from v3.
+    stale = git(repo, "commit-tree", head_of(repo, reviewed + "^{tree}"), "-p", newer, "-m", "stale").strip()
+    refused = landing(repo, stale, newer)
+    assert refused.returncode == 1
+    assert stale in refused.stderr
+    assert refused.stderr.startswith("protected_instructions_changed:")
+
+
 @pytest.mark.parametrize("history", ["merge-edits-a-skill", "unreleased-lane", "stale-branch-revert",
                                      "ancestor-parent-revert"])
 def test_a_landing_train_merge_still_holds_protected_content_no_released_parent_has(
