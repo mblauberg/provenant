@@ -1838,8 +1838,9 @@ def test_every_fetch_appends_a_deduplicated_series_row_with_plan_tier_credits_an
     calls = []
     monkeypatch.setattr(quota, 'fetch', lambda account, now: calls.append(now) or {**next(replies), 'source': 'test'})
     account = quota.Account('claude', 'anese', Path('/nowhere'), True, plan='Max')
-    for minutes in (0, 10, 12, 20):  # the reading at 12 minutes comes from the cache
-        quota.refresh(account, NOW + timedelta(minutes=minutes))
+    # The adaptive schedule sets the cadence now, so force the three fetches; 12 minutes comes from the cache.
+    for minutes, force in ((0, True), (10, True), (12, False), (20, True)):
+        quota.refresh(account, NOW + timedelta(minutes=minutes), force=force)
     assert len(calls) == 3
     with sqlite3.connect(tmp_path / 'state/telemetry.sqlite3') as db:
         db.row_factory = sqlite3.Row
