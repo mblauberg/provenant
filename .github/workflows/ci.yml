@@ -132,7 +132,8 @@ jobs:
   harness:
     name: Python checks and tests
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    # Measured max 19.0 min over 80 green runs (median 16.1); pytest is ~97% of it.
+    timeout-minutes: 30
     permissions:
       contents: read
     needs: detect-changes
