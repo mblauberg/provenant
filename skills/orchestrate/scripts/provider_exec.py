@@ -3999,60 +3999,64 @@ def _run_attempt(
         diagnostics.write(str(exc).encode())
     finally:
         try:
-            if workspace is not None:
-                workspace.close()
-            if process:
-                if descendants and not stopped:
-                    exited_at_stop = process.poll() is not None
-                    provider_exit_before_cleanup = process.returncode if exited_at_stop else None
-                    reaped.extend(descendants.stop(
-                        normal=exited_at_stop,
-                        terminal_grace=terminal_grace_break and not exited_at_stop,
-                    ))
-                # Drain final bytes after the group exits, without an unbounded communicate.
-                for key in list(selector.get_map().values()):
-                    while True:
-                        try:
-                            data = os.read(key.fileobj.fileno(), 65536)
-                        except (BlockingIOError, OSError):
-                            break
-                        if not data:
-                            break
-                        (raw if key.data == "stdout" else diagnostics).write(data)
-                        if key.data == "stdout":
-                            consume(data)
-                for stream in (process.stdin, process.stdout, process.stderr):
-                    if stream:
-                        stream.close()
-            selector.close()
-            if input_file:
-                input_file.close()
-            for sig, handler in old_handlers.items():
-                signal.signal(sig, handler)
-        finally:
             try:
-                if subreaper:
-                    _release_subreaper()
-                if agy_home:
-                    agy_home_warnings = finish_agy_home(plan, tmp_fd, agy_home)
-            finally:
-                if browser_tmp is not None and browser_tmp_identity is not None:
-                    # Cleanup trouble must not discard the lane's result; report it instead.
-                    try:
-                        current = browser_tmp.lstat()
-                    except FileNotFoundError:
-                        pass  # The lane already removed its temp directory.
-                    else:
-                        if (current.st_dev, current.st_ino) != (browser_tmp_identity.st_dev, browser_tmp_identity.st_ino):
-                            browser_tmp_warnings.append(f"browser temporary directory was replaced; left in place: {browser_tmp}")
-                        else:
+                if workspace is not None:
+                    workspace.close()
+                if process:
+                    if descendants and not stopped:
+                        exited_at_stop = process.poll() is not None
+                        provider_exit_before_cleanup = process.returncode if exited_at_stop else None
+                        reaped.extend(descendants.stop(
+                            normal=exited_at_stop,
+                            terminal_grace=terminal_grace_break and not exited_at_stop,
+                        ))
+                    # Drain final bytes after the group exits, without an unbounded communicate.
+                    for key in list(selector.get_map().values()):
+                        while True:
                             try:
-                                shutil.rmtree(browser_tmp)
-                            except OSError as exc:
-                                browser_tmp_warnings.append(f"browser temporary directory cleanup failed: {browser_tmp}: {exc}")
-    if (forced in {"cancelled", "interrupted"} or cancel_signal) and plan.get("attempt_identity"):
-        parent = plan["attempt_identity"]
-        run_lineage.cancel_children(Path(parent["run_dir"]), parent["task_id"], parent["attempt"])
+                                data = os.read(key.fileobj.fileno(), 65536)
+                            except (BlockingIOError, OSError):
+                                break
+                            if not data:
+                                break
+                            (raw if key.data == "stdout" else diagnostics).write(data)
+                            if key.data == "stdout":
+                                consume(data)
+                    for stream in (process.stdin, process.stdout, process.stderr):
+                        if stream:
+                            stream.close()
+                selector.close()
+                if input_file:
+                    input_file.close()
+                for sig, handler in old_handlers.items():
+                    signal.signal(sig, handler)
+            finally:
+                try:
+                    if subreaper:
+                        _release_subreaper()
+                    if agy_home:
+                        agy_home_warnings = finish_agy_home(plan, tmp_fd, agy_home)
+                finally:
+                    if browser_tmp is not None and browser_tmp_identity is not None:
+                        # Cleanup trouble must not discard the lane's result; report it instead.
+                        try:
+                            current = browser_tmp.lstat()
+                        except FileNotFoundError:
+                            pass  # The lane already removed its temp directory.
+                        except OSError as exc:
+                            browser_tmp_warnings.append(f"browser temporary directory cleanup failed: {browser_tmp}: {exc}")
+                        else:
+                            if (current.st_dev, current.st_ino) != (browser_tmp_identity.st_dev, browser_tmp_identity.st_ino):
+                                browser_tmp_warnings.append(f"browser temporary directory was replaced; left in place: {browser_tmp}")
+                            else:
+                                try:
+                                    shutil.rmtree(browser_tmp)
+                                except OSError as exc:
+                                    browser_tmp_warnings.append(f"browser temporary directory cleanup failed: {browser_tmp}: {exc}")
+        finally:
+            if (forced in {"cancelled", "interrupted"} or cancel_signal) and plan.get("attempt_identity"):
+                parent = plan["attempt_identity"]
+                run_lineage.cancel_children(Path(parent["run_dir"]), parent["task_id"], parent["attempt"])
     exit_code = process.returncode if process else None
     if cancel_signal and not forced:
         forced = "interrupted"  # EOF can precede the loop's signal check.

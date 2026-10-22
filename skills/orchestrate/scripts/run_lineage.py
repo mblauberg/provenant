@@ -1,5 +1,6 @@
 """Explicit attempt ancestry shared by dispatch, batch and provider boundaries."""
 
+import errno
 import fcntl
 import hashlib
 import json
@@ -100,6 +101,10 @@ def ensure_nested_owner(run_dir, kind, *, batch_child=False):
                 if isinstance(exc.__cause__, FileNotFoundError):
                     raise FileNotFoundError("batch run owner is missing") from exc
                 raise
+            owner_pid = record.get("owner_pid")
+            if (type(owner_pid) is int and owner_pid > 0
+                    and record.get("owner_started_at") != process_info.start_time(owner_pid)):
+                raise FileNotFoundError("batch run owner is dead")
             token = os.environ.get("PROVENANT_RUN_TOKEN")
             if (record.get("schema_version") != 1
                     or record.get("kind") not in {"dispatch", "batch"}
@@ -111,6 +116,23 @@ def ensure_nested_owner(run_dir, kind, *, batch_child=False):
                     or not record.get("owner_started_at")
                     or record["owner_started_at"] != process_info.start_time(record["owner_pid"])):
                 raise ValueError("batch run owner identity is invalid")
+            if record["owner_pid"] != os.getpid():
+                # A dispatch subreaper can adopt provider-launched orphans.
+                # Only batch owners may lend their already-held custody.
+                if record["kind"] != "batch":
+                    raise ValueError("shared run custody requires a batch owner")
+                fd, _, _ = open_contained_regular(run_dir, "MANIFEST.md", os.O_RDWR | os.O_APPEND, label="MANIFEST.md")
+                try:
+                    try:
+                        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    except OSError as exc:
+                        if exc.errno != errno.EWOULDBLOCK:
+                            raise
+                    else:
+                        fcntl.flock(fd, fcntl.LOCK_UN)
+                        raise ValueError("batch run owner does not hold custody")
+                finally:
+                    os.close(fd)
             return record
 
         try:
@@ -203,13 +225,15 @@ def record_owner(run_dir, kind="dispatch"):
     """Publish a direct CLI's identity only after acquiring its run custody."""
     record = json.loads(os.environ.get("PROVENANT_RUN_OWNER", "null"))
     if (isinstance(record, dict) and record.get("owner_pid") == os.getpid()
+            and os.environ.get("PROVENANT_RUN_DIR") == str(run_dir)
             and record.get("run_dir") == str(run_dir)
             and record.get("run_token") == os.environ.get("PROVENANT_RUN_TOKEN")):
         _write(run_dir, "dispatch-owner.json", record)
     else:
         # Custody authorises this owner to replace a previous owner's identity.
         # Keep the initial token inherited by the children this batch launches.
-        token = os.environ.get("PROVENANT_RUN_TOKEN") or uuid.uuid4().hex
+        token = (os.environ.get("PROVENANT_RUN_TOKEN")
+                 if os.environ.get("PROVENANT_RUN_DIR") == str(run_dir) else None) or uuid.uuid4().hex
         _write(run_dir, "dispatch-owner.json", {
             "schema_version": 1, "kind": kind, "run_dir": str(run_dir), "run_token": token,
             "owner_pid": os.getpid(), "owner_pgid": os.getpgrp(),

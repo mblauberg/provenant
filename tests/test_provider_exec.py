@@ -8795,3 +8795,72 @@ def test_claude_switch_from_custom_ambient_to_default_unsets_config_dir(tmp_path
     record = supervisor().execute(plan, tmp_path / 'result.md')
     assert record['status'] == 'ok'
     assert (tmp_path / 'result.md').read_text().strip() == 'False'
+
+
+@pytest.mark.parametrize('cleanup_error', ['agy_home', 'browser_lstat'])
+def test_cancelled_attempt_stops_nested_children_even_when_cleanup_fails(tmp_path, monkeypatch, cleanup_error):
+    mod = supervisor()
+    parent_dir = tmp_path / '.agent-run/runs/parent'
+    child_dir = parent_dir.parent / 'child'
+    journal = parent_dir / 'dispatch/tasks/writer/attempt-001/tmp/children'
+    journal.mkdir(parents=True)
+    child_dir.mkdir()
+    parent = {'run_id': 'mcp-parent', 'run_dir': str(parent_dir), 'task_id': 'writer', 'attempt': 1}
+    (child_dir / 'RUN_RECEIPT.json').write_text(json.dumps({'status': 'active', 'parent': parent}))
+    child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'],
+                             start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        (child_dir / 'dispatch-owner.json').write_text(json.dumps({
+            'schema_version': 1, 'kind': 'dispatch', 'run_dir': str(child_dir),
+            'run_token': 'child-token', 'owner_pid': child.pid, 'owner_pgid': child.pid,
+            'owner_started_at': mod.process_info.start_time(child.pid),
+        }))
+        (journal / 'child.json').write_text(json.dumps({
+            'run_id': 'mcp-child', 'run_dir': str(child_dir), 'run_token': 'child-token'}))
+        plan = fixture_plan(tmp_path, 'import time; time.sleep(30)',
+                            adapter='agy' if cleanup_error == 'agy_home' else 'claude',
+                            capabilities=[] if cleanup_error == 'agy_home' else ['browser'],
+                            run_dir=tmp_path / 'attempt')
+        plan['attempt_identity'] = parent
+        if cleanup_error == 'agy_home':
+            agy_home_fixture(mod, monkeypatch, tmp_path)
+            plan['applied']['confinement'] = 'sandbox-exec'
+            # Run the fixture process directly while exercising real home staging and cleanup.
+            monkeypatch.setattr(mod, 'confinement_command', lambda plan, command, search_path=None: command)
+            finish = mod.finish_agy_home
+
+            def failed_finish(*args):
+                finish(*args)
+                raise RuntimeError('home cleanup failed')
+
+            monkeypatch.setattr(mod, 'finish_agy_home', failed_finish)
+            with pytest.raises(RuntimeError, match='home cleanup failed'):
+                mod.execute(plan, tmp_path / 'result.md', cancelled=lambda: True)
+        else:
+            temporary = Path(plan['applied']['browser_tmpdir'])
+            lstat = Path.lstat
+            started = False
+
+            def unreadable_tmp(path, *args, **kwargs):
+                if started and path == temporary:
+                    raise PermissionError('browser temp inspection denied')
+                return lstat(path, *args, **kwargs)
+
+            def on_start(process):
+                nonlocal started
+                started = True
+
+            monkeypatch.setattr(Path, 'lstat', unreadable_tmp)
+            try:
+                record = mod.execute(plan, tmp_path / 'result.md', cancelled=lambda: started, on_start=on_start)
+                assert record['status'] == 'cancelled'
+                assert any('browser temp inspection denied' in warning for warning in record['warnings'])
+            finally:
+                started = False
+                if temporary.exists():
+                    shutil.rmtree(temporary)
+        assert child.wait(timeout=2) == -signal.SIGTERM
+    finally:
+        if child.poll() is None:
+            child.kill()
+        child.wait(timeout=5)

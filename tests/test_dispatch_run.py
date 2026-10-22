@@ -5670,3 +5670,82 @@ def test_claude_fallback_does_not_override_selected_account_cooldown(tmp_path, m
     assert attempts[1]['evidence']['signature'] == 'cooldown_active'
     assert launched.read_text().splitlines() == ['launch']
     assert {row['account'] for row in attempts} == {'pro'}
+
+
+@pytest.mark.parametrize(('owner_kind', 'locked'), [('dispatch', True), ('batch', False), ('batch', True)])
+def test_batch_child_shares_only_a_locked_batch_parent(tmp_path, monkeypatch, owner_kind, locked):
+    mod = load_dispatch_module()
+    run = make_run(tmp_path, 'batch-parent-custody')
+    for key in ('PROVENANT_PARENT_ATTEMPT', 'PROVENANT_RUN_TOKEN', 'PROVENANT_RUN_OWNER'):
+        monkeypatch.delenv(key, raising=False)
+    (run / 'dispatch-owner.json').write_text(json.dumps({
+        'schema_version': 1, 'kind': owner_kind, 'run_dir': str(run),
+        'run_token': 'parent-token', 'owner_pid': os.getpid(),
+        'owner_started_at': mod.process_info.start_time(os.getpid()),
+    }))
+    before = (run / 'dispatch-owner.json').read_bytes()
+    custody = mod.acquire_run_custody(run) if locked else None
+    # A reparented provider orphan has exactly this parent PID relationship.
+    code = '''import sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+import run_lineage
+try:
+    owned = run_lineage.ensure_nested_owner(Path(sys.argv[2]), 'dispatch', batch_child=True)
+except (OSError, ValueError):
+    print('refused')
+else:
+    print('owned' if owned else 'shared')
+'''
+    try:
+        result = subprocess.run([sys.executable, '-c', code, str(SCRIPT.parent), str(run)],
+                                text=True, capture_output=True, timeout=10)
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.strip() == ('shared' if owner_kind == 'batch' and locked else 'refused')
+        assert (run / 'dispatch-owner.json').read_bytes() == before
+    finally:
+        if custody is not None:
+            custody.close()
+    # Refusing an unlocked owner must release the probe's acquired lock.
+    with mod.acquire_run_custody(run):
+        pass
+
+
+@pytest.mark.parametrize('previous_pid', [os.getpid(), 2147483647])
+def test_standalone_batch_child_replaces_a_dead_owner(tmp_path, monkeypatch, previous_pid):
+    mod = load_dispatch_module()
+    run = make_run(tmp_path, 'dead-batch-child-owner')
+    for key in ('PROVENANT_PARENT_ATTEMPT', 'PROVENANT_RUN_TOKEN', 'PROVENANT_RUN_OWNER'):
+        monkeypatch.delenv(key, raising=False)
+    (run / 'dispatch-owner.json').write_text(json.dumps({
+        'schema_version': 1, 'kind': 'batch', 'run_dir': str(run),
+        'run_token': 'dead-token', 'owner_pid': previous_pid,
+        'owner_started_at': 'previous-process-start',
+    }))
+    assert mod.run_lineage.ensure_nested_owner(run, 'dispatch', batch_child=True) is True
+    owner = json.loads((run / 'dispatch-owner.json').read_text())
+    assert owner['owner_pid'] == os.getpid()
+    assert owner['owner_started_at'] == mod.process_info.start_time(os.getpid())
+    assert owner['kind'] == 'dispatch'
+    assert owner['run_token'] != 'dead-token'
+    with mod.acquire_run_custody(run):
+        pass
+
+
+@pytest.mark.parametrize('same_run', [False, True])
+@pytest.mark.parametrize('published_owner', [False, True])
+def test_record_owner_inherits_token_only_for_the_same_run(tmp_path, monkeypatch, same_run, published_owner):
+    mod = load_dispatch_module()
+    run = make_run(tmp_path, 'owner-token-scope')
+    monkeypatch.delenv('PROVENANT_RUN_OWNER', raising=False)
+    monkeypatch.delenv('PROVENANT_PARENT_ATTEMPT', raising=False)
+    monkeypatch.setenv('PROVENANT_RUN_TOKEN', 'inherited-token')
+    monkeypatch.setenv('PROVENANT_RUN_DIR', str(run if same_run else tmp_path / 'other-run'))
+    if published_owner:
+        monkeypatch.setenv('PROVENANT_RUN_OWNER', json.dumps({
+            'owner_pid': os.getpid(), 'run_dir': str(run), 'run_token': 'inherited-token'}))
+    with mod.acquire_run_custody(run):
+        mod.run_lineage.record_owner(run)
+    token = json.loads((run / 'dispatch-owner.json').read_text())['run_token']
+    assert bool(token)
+    assert (token == 'inherited-token') is same_run
