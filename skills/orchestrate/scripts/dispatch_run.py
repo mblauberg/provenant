@@ -3006,9 +3006,10 @@ def dispatch(args: argparse.Namespace) -> int:
     """Run one attempt while serialising standalone run-ledger mutation."""
     # Publish under custody before re-exec and before peer placement consumes stdin.
     run_dir = args.run_dir.resolve()
+    standalone_batch_child = False
     if contains_run(run_dir, Path.cwd()) and (run_dir / "MANIFEST.md").is_file():
         try:
-            run_lineage.ensure_nested_owner(run_dir, "dispatch", batch_child=args.batch_child)
+            standalone_batch_child = run_lineage.ensure_nested_owner(run_dir, "dispatch", batch_child=args.batch_child)
         except (OSError, ValueError):
             return fail(run_dir, "run_custody_busy", "another dispatch, batch or finalizer owns the run")
     try:
@@ -3096,9 +3097,21 @@ def dispatch(args: argparse.Namespace) -> int:
         cleanup_settled_reader(args)
         return result
     if args.batch_child:
-        result = execute_attempt_sequence(args)
-        cleanup_settled_reader(args)
-        return result
+        # Real batch children share their launching owner's custody. A direct
+        # standalone child must hold its own lock for the complete attempt.
+        try:
+            custody = acquire_run_custody(run_dir) if standalone_batch_child else None
+        except (OSError, OwnedFileError):
+            return fail(run_dir, "run_custody_busy", "another dispatch, batch or finalizer owns the run")
+        try:
+            if custody is not None:
+                run_lineage.record_owner(run_dir)
+            result = execute_attempt_sequence(args, custody)
+            cleanup_settled_reader(args)
+            return result
+        finally:
+            if custody is not None:
+                custody.close()
     try:
         custody = acquire_run_custody(run_dir)
     except (OSError, OwnedFileError):

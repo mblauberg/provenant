@@ -1597,8 +1597,28 @@ def test_batch_child_defers_shared_manifest_append(tmp_path: Path, monkeypatch) 
     prompt.write_text("batch child\n", encoding="utf-8")
     adapter = tmp_path / "adapter"
     write_success_adapter(adapter)
+    competing = tmp_path / 'competing.json'
+    import shlex
+    command = [sys.executable, str(SCRIPT), '--run-dir', str(run_dir),
+               '--task-id', 'competing', '--adapter', 'codex', '--model', 'fixture',
+               '--prompt-file', str(prompt)]
+    adapter.write_text(adapter.read_text().replace(
+        'while [ "$#" -gt 0 ]; do',
+        shlex.join(command) + ' > ' + shlex.quote(str(competing)) + '\nwhile [ "$#" -gt 0 ]; do'))
     module = load_dispatch_module()
     monkeypatch.setattr(module, "CF_DISPATCH", adapter)
+    acquire = module.acquire_run_custody
+
+    def acquire_after_another_owner(run):
+        # A previous owner can finish between initialisation and acquisition.
+        owner_path = run / 'dispatch-owner.json'
+        owner = json.loads(owner_path.read_text())
+        owner['owner_pid'] = os.getppid()
+        owner['run_token'] = 'intervening-owner-token'
+        owner_path.write_text(json.dumps(owner))
+        return acquire(run)
+
+    monkeypatch.setattr(module, 'acquire_run_custody', acquire_after_another_owner)
     args = module.parser().parse_args([
         "--run-dir", str(run_dir), "--task-id", "deferred", "--adapter", "codex",
         "--prompt-file", str(prompt), "--alias", "junior", "--role", "worker",
@@ -1612,6 +1632,10 @@ def test_batch_child_defers_shared_manifest_append(tmp_path: Path, monkeypatch) 
     assert attempt["requested_route"]["risk_tier"] == "substantial"
     assert attempt["requested_route"]["reviewer_id"] == "reviewer-1"
     assert attempt["requested_route"]["effort"] == "high"
+
+    assert json.loads(competing.read_text())['status'] == 'run_custody_busy'
+    assert not (run_dir / 'tasks/competing').exists()
+    assert json.loads((run_dir / 'dispatch-owner.json').read_text())['owner_pid'] == os.getpid()
 
 
 def test_prompt_stdin_is_retained_by_dispatch_owner(tmp_path: Path, monkeypatch) -> None:

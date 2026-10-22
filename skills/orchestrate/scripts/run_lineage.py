@@ -111,10 +111,10 @@ def ensure_nested_owner(run_dir, kind, *, batch_child=False):
                     or not record.get("owner_started_at")
                     or record["owner_started_at"] != process_info.start_time(record["owner_pid"])):
                 raise ValueError("batch run owner identity is invalid")
+            return record
 
         try:
-            validate_batch_owner()
-            return
+            return validate_batch_owner()["owner_pid"] == os.getpid()
         except FileNotFoundError:
             # A standalone batch child can initialise an owner. A nested child
             # must use the batch parent's already-published owner identity.
@@ -129,7 +129,7 @@ def ensure_nested_owner(run_dir, kind, *, batch_child=False):
                 validate_batch_owner()
         finally:
             custody.close()
-        return
+        return True  # This standalone child must acquire custody for execution.
     if parent_attempt() is None:
         return
     run_dir = Path(run_dir).resolve()
