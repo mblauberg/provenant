@@ -114,8 +114,9 @@ if _pools is None:
     _pools_spec.loader.exec_module(_pools)
 
 EFFORT_ORDER = _catalog_validation.EFFORT_ORDER
-# The effort ladder `effort.shift` steps along; `ultra` is opt-in only and never reached by a shift.
-SHIFT_LADDER = tuple(name for name in EFFORT_ORDER if name != "ultra")
+# The effort ladder `effort.shift` steps along. `max` is retired (it maps to `xhigh`) and `ultra` is
+# opt-in only, so a shift never reaches either.
+SHIFT_LADDER = tuple(name for name in EFFORT_ORDER if name not in ("max", "ultra"))
 
 
 def _harness_profile() -> Any:

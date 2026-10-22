@@ -5030,3 +5030,13 @@ def test_opencode_refresh_is_skipped_when_the_shared_budget_is_nearly_spent(monk
     assert router._opencode_live_models(refresh=True, deadline=router.time.monotonic() + 1) == ([], False)
     assert not calls
     assert router._opencode_live_models(refresh=True, deadline=router.time.monotonic() + 10)[0] == ["x/y"]
+
+
+def test_effort_shift_never_climbs_to_retired_max_or_ultra():
+    router = load_router()
+    assert router.SHIFT_LADDER == ("low", "medium", "high", "xhigh")
+    every = [{"efforts": ["low", "medium", "high", "xhigh", "max", "ultra"]}]
+    profile = type("Profile", (), {"value": staticmethod(lambda *args, **kwargs: 1)})
+    router._harness_profile = lambda: profile
+    assert router.shifted_task_class_effort("review", "high", "low", every) == ("xhigh", 1)
+    assert router.shifted_task_class_effort("review", "xhigh", "low", every) == ("xhigh", 0)

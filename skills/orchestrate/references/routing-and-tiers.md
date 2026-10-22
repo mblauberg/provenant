@@ -121,7 +121,7 @@ families.
 Effort rule: **medium by default**; **high for verification, adversarial, and high-stakes** calls
 (that's where subtle errors hide); reserve the very highest effort for isolated single-shot calls —
 it can be slow and has been observed to hang inside agent loops, so don't run it in a tight loop.
-Writers do not default to `xhigh` or `max`; use them only for a named escalation or a crucial review.
+Writers do not default to `xhigh`; use it only for a named escalation or a crucial review.
 
 Cost is not just tokens: tools meter differently (tokens vs credits vs monthly caps), and the highest
 tiers cost far more per call. A "small, objective" task only stays cheap if the schema is strict and
