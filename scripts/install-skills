@@ -78,6 +78,10 @@ run_stdlib "$ROOT/scripts/manage_installation.py" install \
   "${manager_args[@]}" \
   --summary
 
+# Verify the persisted installation receipt. A custom source can still contain
+# the old copy after a custom-to-managed migration; install has already
+# validated collisions and the migrated link now belongs to the managed source.
+check_args=(--source "$ROOT/skills" --target "$TARGET")
 run_stdlib "$ROOT/scripts/manage_installation.py" check \
-  "${manager_args[@]}" \
+  "${check_args[@]}" \
   --summary
