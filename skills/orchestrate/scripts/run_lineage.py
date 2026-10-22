@@ -515,7 +515,7 @@ def cancel_children(run_dir, task_id, number, *, child_rows=None, timeout_second
         except OSError:
             outcome(child, "skipped", reason="process signal unavailable", **target)
 
-    def signal_tree(tree, child, signum, rows=None):
+    def signal_tree(tree, child, signum, rows=None, *, owner_only=False):
         if rows is None:
             rows = tree.sample(include_reparented=True)
         if tree.snapshot_unavailable:
@@ -531,7 +531,8 @@ def cancel_children(run_dir, task_id, number, *, child_rows=None, timeout_second
         if root is not None and not tree.shared_hosts.intersection(tree.spared):
             signal_target(tree, child, root, signum, group=True)
         for row in tree.live(rows).values():
-            signal_target(tree, child, row, signum)
+            if not owner_only or row.identity == tree.root:
+                signal_target(tree, child, row, signum)
 
     if child_rows is None:
         child_rows = children(run_dir, task_id, number)
@@ -580,7 +581,10 @@ def cancel_children(run_dir, task_id, number, *, child_rows=None, timeout_second
             if tree.snapshot_unavailable:
                 child["cancellation"] = {"status": "skipped", "reason": "process census unavailable"}
                 continue
-            signal_tree(tree, child, signal.SIGTERM, rows)
+            # Let the owner cancel its separately sessioned provider and publish
+            # cancellation evidence first. Killing that provider here can win
+            # the owner's exit poll and turn cancellation into a failed receipt.
+            signal_tree(tree, child, signal.SIGTERM, rows, owner_only=True)
             pending.append((process, tree, child))
         except (OSError, ValueError, TypeError):
             outcome(child, "skipped", reason="owner verification or signal unavailable", scope="owner")
