@@ -258,7 +258,13 @@ quota forget <provider>/<label>` deletes a signed-out account's remembered
 snapshot; it refuses an account that is signed in. `quota.remembered.forget_after_days`
 (default unset) stops listing a remembered account unseen that long, without
 deleting it. Listing configured agy fingerprints in `accounts.agy` names them
-and still shows the signed-in and remembered ones not listed. The mechanism is
+and still shows the signed-in and remembered ones not listed. An alias such
+as `accounts.agy.work` binds to the account it first reads, decided under the
+refresh lock, and keeps that account's history when another signs in: a
+reading for another account, or one that does not say whose it is, fails as
+`auth` and leaves the last reading `stale`. To rebind an alias deliberately,
+set its `fingerprint` to the new account's label, such as
+`"work": {"fingerprint": "google-4e7d2a91c05b"}`. The mechanism is
 generic: a provider module with `fingerprinted(label)` gets it. Codex and
 Cursor are labelled `default` and do not use it yet: Codex's rate-limit read
 carries no account identity, so it would need a further `account/read` call,

@@ -335,10 +335,9 @@ def accounts():
                 active = default is not None and mine and (signed is not None or label == active_label)
             else:
                 away, active = False, default is not None and label == active_label
+            # An entry's own `fingerprint` passes through as a deliberate binding; _refresh resolves the rest.
             options = {key: value for key, value in entry.items()
                        if key not in ('identity_dir', 'enabled', 'plan', 'priority', 'display_name')}
-            if shared and bound[label]:
-                options['fingerprint'] = bound[label]
             found.append(Account(name, label, dirs[label], active, str(entry['plan']) if entry.get('plan') else None,
                                  int(priority) if priority is not None else None, options, away))
         # Configured entries only name accounts, so the signed-in one and those seen before still appear under
@@ -359,10 +358,17 @@ def bound_fingerprint(name, label, identity_dir, entry, shared):
     return None
 
 
-def shared_store(name, label):
-    """Whether a label is a fingerprint on a provider whose one credential store serves several accounts."""
-    shared = getattr(provider(name), 'fingerprinted', None)
-    return bool(shared and shared(label))
+def expected_fingerprint(account, previous):
+    """The account a reading from a shared store must come from: the entry's `fingerprint`, which deliberately
+    binds or rebinds an alias; a fingerprint label; else the alias's snapshot, reloaded under the refresh lock so
+    two concurrent refreshes never both claim an unbound alias. None for an unbound alias or an unshared store."""
+    shared = getattr(provider(account.provider), 'fingerprinted', None)
+    if not shared:
+        return None
+    for candidate in (account.options.get('fingerprint'), account.label, (previous or {}).get('fingerprint')):
+        if isinstance(candidate, str) and shared(candidate):
+            return candidate
+    return None
 
 
 def remembered(name, shared, identity_dir, now=None):
@@ -818,10 +824,14 @@ def _refresh(account, now=None, force=False, trigger='timer', power='ac', ignore
     started, kind, wait, deadline = monotonic(), None, None, None
     try:
         result = fetch(account, now)
-        # A shared store answers for whoever is signed in now; never file that under another account.
-        expected = account.options.get('fingerprint') or (account.label if shared_store(account.provider, account.label) else None)
-        if expected and result.get('fingerprint') and result['fingerprint'] != expected:
-            raise Unavailable(f'{account.provider} is signed in to a different account than {account.label}', 'auth')
+        # A shared store answers for whoever is signed in now; never file that under another account, and never
+        # file a reading that cannot say whose it is.
+        if getattr(provider(account.provider), 'fingerprinted', None):
+            expected, read = expected_fingerprint(account, previous), result.get('fingerprint')
+            if not isinstance(read, str):
+                raise Unavailable(f'{account.provider} did not say which account it read for {account.label}', 'auth')
+            if expected and read != expected:
+                raise Unavailable(f'{account.provider} is signed in to a different account than {account.label}', 'auth')
     except Unavailable as exc:
         # Provider text is fixed, but nothing token-shaped may reach the snapshot either.
         error, kind, wait = SECRETISH.sub('[redacted]', str(exc)), exc.kind, exc.retry_after

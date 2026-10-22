@@ -241,7 +241,9 @@ class Agy:
         class Process:
             def __init__(self, argv, **kwargs):
                 agy.runs.append(agy.email)
-                Path(argv[argv.index('--log-file') + 1]).write_text(f'OAuth: authenticated successfully as {agy.email}\n')
+                # No email means a response with no recognised sign-in in its log.
+                Path(argv[argv.index('--log-file') + 1]).write_text(
+                    f'OAuth: authenticated successfully as {agy.email}\n' if agy.email else 'started\n')
                 self.stdout, self.returncode = io.BytesIO(json.dumps(agy.payload).encode()), 0
 
             def kill(self):
@@ -421,3 +423,40 @@ def test_a_shared_store_reading_for_another_account_is_refused_under_a_bound_ali
     agy.email, agy.payload = ANESE, agy_usage()  # the sign-in changed after accounts were listed
     value = quota.refresh(work, NOW, force=True)
     assert value['status'] == 'stale' and value['windows'][1]['used_percent'] == 100
+
+
+def test_a_shared_store_reading_with_no_identity_is_refused_under_a_bound_alias(quota, monkeypatch, tmp_path):
+    agy = Agy(quota, monkeypatch, tmp_path)
+    configure(tmp_path, {'accounts': {'agy': {'work': {}}}})
+    michael = agy.sign_in(MICHAEL, agy_usage(0))
+    agy.tick(NOW - timedelta(hours=1))
+    work = agy.accounts()['work']
+    agy.email, agy.payload = None, agy_usage()  # whoever answered, the log does not say
+    value = quota.refresh(work, NOW, force=True)
+    assert value['status'] == 'stale' and value['fetch']['error_kind'] == 'auth'
+    assert value['windows'][1]['used_percent'] == 100 and value['fingerprint'] == michael
+
+
+def test_concurrent_refreshes_of_an_unbound_alias_bind_it_to_the_first_reading(quota, monkeypatch, tmp_path):
+    agy = Agy(quota, monkeypatch, tmp_path)
+    configure(tmp_path, {'accounts': {'agy': {'work': {}}}})
+    michael = agy.sign_in(MICHAEL, agy_usage(0))
+    work = agy.accounts()['work']  # listed while unbound, as two concurrent ticks would see it
+    first = quota.refresh(work, NOW - timedelta(minutes=1), force=True)
+    assert first['fingerprint'] == michael
+    agy.email, agy.payload = ANESE, agy_usage()  # the second tick runs after a switch
+    second = quota.refresh(work, NOW, force=True)
+    assert second['status'] == 'stale' and second['fetch']['error_kind'] == 'auth'
+    assert second['windows'][1]['used_percent'] == 100 and second['fingerprint'] == michael
+
+
+def test_a_fingerprint_in_the_alias_entry_rebinds_it_deliberately(quota, monkeypatch, tmp_path):
+    agy = Agy(quota, monkeypatch, tmp_path)
+    configure(tmp_path, {'accounts': {'agy': {'work': {}}}})
+    agy.sign_in(MICHAEL, agy_usage(0))
+    agy.tick(NOW - timedelta(hours=1))
+    anese = agy.sign_in(ANESE)
+    configure(tmp_path, {'accounts': {'agy': {'work': {'fingerprint': anese}}}})
+    value = quota.refresh(agy.accounts()['work'], NOW, force=True)
+    assert value['status'] == 'ok' and value['fingerprint'] == anese
+    assert value['windows'][1]['used_percent'] == pytest.approx(7)
