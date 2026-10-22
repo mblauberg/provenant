@@ -1824,7 +1824,18 @@ def publish_contract(run_dir,row):
             children = run_lineage.children(run_dir, row["task_id"], row["attempt"])
             if row["state"] == "terminal" and row["status"] in {"cancelled", "interrupted"}:
                 # Registration waits on this same journal lock and will see terminal state.
-                run_lineage.cancel_children(run_dir, row["task_id"], row["attempt"], child_rows=children)
+                evidence = {(child.get("run_dir"), child.get("run_token")): child["cancellation"]
+                            for child in row.get("children", []) if "cancellation" in child}
+                pending = [child for child in children
+                           if (child.get("run_dir"), child.get("run_token")) not in evidence]
+                run_lineage.cancel_children(run_dir, row["task_id"], row["attempt"], child_rows=pending)
+                evidence.update({(child.get("run_dir"), child.get("run_token")): child["cancellation"]
+                                 for child in pending if "cancellation" in child})
+                children = run_lineage.children(run_dir, row["task_id"], row["attempt"])
+                for child in children:
+                    cancellation = evidence.get((child.get("run_dir"), child.get("run_token")))
+                    if cancellation is not None:
+                        child["cancellation"] = cancellation
             if children:
                 row["children"] = children
             if row["state"] == "terminal":
@@ -1846,7 +1857,7 @@ def terminal_contract(args,run_dir,legacy,adapter,number,attempt_dir):
     refusal=route_refusal(adapter,args.tool)
     if refusal: status=refusal["status"]
     if status not in TERMINAL_STATUSES: status="failed"
-    for field in ("reason","session_id","retryable","reset_at","retry_after","fix","error","evidence","applied","context","usage_source","warnings","reaped","spared","provenance","pgid","pgid_started_at","last_progress_at","landable","quarantine","result_partial"):
+    for field in ("reason","session_id","retryable","reset_at","retry_after","fix","error","evidence","applied","context","usage_source","warnings","reaped","spared","children","provenance","pgid","pgid_started_at","last_progress_at","landable","quarantine","result_partial"):
         if field in adapter: row[field]=adapter[field]
     if row.get("task_class") and isinstance(row.get("provenance"), dict):
         row["provenance"]["requested"] = {**(row["provenance"].get("requested") or {}), "task_class": row["task_class"]}

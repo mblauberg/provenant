@@ -2373,6 +2373,7 @@ class _Descendants:
         self.tracked = {}
         self.spared = {}
         self.verified_owners = set()
+        self.verified_owner_tokens = {}
         self.shared_hosts = set()
         self.parents = {}
         self.spared_at_stop = set()
@@ -2445,6 +2446,15 @@ class _Descendants:
             if (row := rows.get(identity[0])) is not None and row.identity == identity
             and row.command in {"codex-code-mode-host", "codex-code-mode"}
         )
+        def exclusively_observed(identity):
+            while identity != self.root:
+                if identity in self.shared_hosts or identity not in self.parents:
+                    return False
+                identity = self.parents[identity]
+            return True
+
+        self.verified_owner_tokens = {identity: token for identity, token in self.verified_owner_tokens.items()
+                                      if exclusively_observed(identity)}
         spared = {identity for identity in self.verified_owners | self.shared_hosts if held(identity)}
         own_groups = {self.process.pid, os.getpgrp()}
         for identity in observed:
@@ -2458,6 +2468,10 @@ class _Descendants:
                     and parent not in self.spared):
                 if _is_nested_fabric_owner(row):
                     self.verified_owners.add(identity)
+                    if exclusively_observed(identity):
+                        self.verified_owner_tokens[identity] = next(
+                            (os.fsdecode(entry.partition(b"=")[2]) for entry in _process_environment(row.pid)
+                             if entry.startswith(b"PROVENANT_RUN_TOKEN=")), None)
                     spared.add(identity)
         changed = True
         while changed:
@@ -3698,6 +3712,7 @@ def _run_attempt(
     descendants = None
     subreaper = False
     reaped = []
+    child_cancellations = []
     stopped = False
     forced, terminal_at, cancel_signal = None, None, None
     preflight_error = None
@@ -4056,7 +4071,10 @@ def _run_attempt(
         finally:
             if (forced in {"cancelled", "interrupted"} or cancel_signal) and plan.get("attempt_identity"):
                 parent = plan["attempt_identity"]
-                run_lineage.cancel_children(Path(parent["run_dir"]), parent["task_id"], parent["attempt"])
+                child_cancellations = run_lineage.cancel_children(
+                    Path(parent["run_dir"]), parent["task_id"], parent["attempt"],
+                    observed_owners=descendants.verified_owner_tokens if descendants else None,
+                    shared_hosts=descendants.shared_hosts if descendants else frozenset())
     exit_code = process.returncode if process else None
     if cancel_signal and not forced:
         forced = "interrupted"  # EOF can precede the loop's signal check.
@@ -4448,6 +4466,7 @@ def _run_attempt(
         "error_class": error_class(status, parsed["signature"]),
         "warnings": warnings,
         "reaped": reaped,
+        **({"children": child_cancellations} if child_cancellations else {}),
         **({"spared": len(descendants.spared_at_stop)} if descendants and descendants.spared_at_stop else {}),
         "question": parsed["question"],
         "retryable": status
