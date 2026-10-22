@@ -347,7 +347,7 @@ async function initialiseRun(
  * throwing observer stops the launch: nothing runs that its caller could not record.
  */
 export interface LaunchObserver {
-  onLaunch?: (launch: { runId: string; taskId: string; attempt: number }) => void;
+  onLaunch?: (launch: { runId: string; taskId: string; attempt: number; runDir?: string }) => void;
   /** Set by a handoff: its route is inherited, so the own-seat guard for new explicit dispatches does not apply. */
   continuation?: boolean;
   /** Set by a single dispatch's council: its members come from the caller's own `models`/selectors. */
@@ -867,7 +867,7 @@ async function dispatchConfiguredProviderUnchecked(
     ...routeArguments(route),
   ];
   try {
-    launch.onLaunch?.({ runId: shortRunId(runDir), taskId, attempt: 1 });
+    launch.onLaunch?.({ runId: shortRunId(runDir), taskId, attempt: 1, runDir });
   } catch (error) {
     rmSync(runDir, { recursive: true, force: true });
     throw error;
@@ -1074,7 +1074,7 @@ async function dispatchConfiguredBatchUnchecked(
     ) + "\n",
     { flag: "wx", mode: 0o600 },
   );
-  launch.onLaunch?.({ runId: shortRunId(runDir), taskId: "*", attempt: 1 });
+  launch.onLaunch?.({ runId: shortRunId(runDir), taskId: "*", attempt: 1, runDir });
   const started = startOwner(
     python,
     [owner, "--run-dir", runDir, "--manifest", manifestPath, "--concurrency", String(concurrency)],
