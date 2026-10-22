@@ -4,6 +4,10 @@ on:
   push:
     branches: [main]
   pull_request:
+  # Merge queue: the queue waits for `ci-status` on the temporary merge-group
+  # ref, so the workflow must run there or entries time out.
+  merge_group:
+    types: [checks_requested]
 
 # Least privilege: the workflow grants nothing by default; every job
 # declares exactly what it needs.
@@ -42,10 +46,12 @@ jobs:
     outputs:
       # Pushes to main always run every job: full post-merge verification
       # and warm caches on the default branch for pull requests to reuse.
-      harness: ${{ github.event_name == 'push' && 'true' || steps.filter.outputs.harness }}
-      fabric: ${{ github.event_name == 'push' && 'true' || steps.filter.outputs.fabric }}
-      split-root: ${{ github.event_name == 'push' && 'true' || steps.filter.outputs.split-root }}
-      workflows: ${{ github.event_name == 'push' && 'true' || steps.filter.outputs.workflows }}
+      # Merge-group runs do the same: the queued commit is the exact tree that
+      # will land, so it gets the full gate rather than a path-filtered one.
+      harness: ${{ github.event_name != 'pull_request' && 'true' || steps.filter.outputs.harness }}
+      fabric: ${{ github.event_name != 'pull_request' && 'true' || steps.filter.outputs.fabric }}
+      split-root: ${{ github.event_name != 'pull_request' && 'true' || steps.filter.outputs.split-root }}
+      workflows: ${{ github.event_name != 'pull_request' && 'true' || steps.filter.outputs.workflows }}
     steps:
       - name: Filter changed paths
         id: filter
