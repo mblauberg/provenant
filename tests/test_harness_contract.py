@@ -429,3 +429,56 @@ def test_skill_javascript_gate_rejects_an_empty_tree(tmp_path: Path):
         text=True,
     )
     assert result.returncode != 0
+
+
+def test_root_harness_checker_never_trusts_git_from_path(tmp_path):
+    """With no Git at a trusted location, a PATH git must not become the checkout's identity source."""
+    script = (ROOT / "scripts/check-harness").read_text()
+    prelude = script[:script.index("export PROVENANT_GIT_BIN")]
+    trusted = "/opt/homebrew/bin/git /usr/local/bin/git /opt/local/bin/git /usr/bin/git /bin/git"
+    assert trusted in prelude
+    # Stand in for a host where none of the trusted locations exist.
+    missing = " ".join(str(tmp_path / "absent" / str(index) / "git") for index in range(5))
+    shadow_dir = tmp_path / "shadow-bin"
+    shadow_dir.mkdir()
+    marker = tmp_path / "shadow-git-ran"
+    (shadow_dir / "git").write_text(f"#!/bin/sh\ntouch '{marker}'\n")
+    (shadow_dir / "git").chmod(0o755)
+    probe = tmp_path / "probe.sh"
+    probe.write_text(prelude.replace(trusted, missing) + 'echo "git_bin=$PROVENANT_GIT_BIN"\n')
+    result = subprocess.run(
+        [shutil.which("bash"), str(probe)], cwd=tmp_path, text=True, capture_output=True, check=False,
+        env={**clean_git_test_environment(), "PATH": f"{shadow_dir}:/usr/bin:/bin"},
+    )
+    assert result.returncode == 3, result.stdout
+    assert "git_bin=" not in result.stdout
+    assert "trusted Git executable is unavailable" in result.stderr
+    for location in ("/opt/homebrew/bin/git", "/usr/bin/git", "/bin/git"):
+        assert location in result.stderr
+    assert not marker.exists()
+
+
+def test_root_harness_checker_drops_caller_git_config_overrides_before_git(tmp_path):
+    script = (ROOT / "scripts/check-harness").read_text()
+    prelude = script[:script.index("export PROVENANT_GIT_BIN")]
+    trusted = "/opt/homebrew/bin/git /usr/local/bin/git /opt/local/bin/git /usr/bin/git /bin/git"
+    git = tmp_path / "trusted-git"
+    git.write_text(
+        '#!/bin/bash\n'
+        'printf "%s|%s|%s|%s|%s|%s|%s\\n" "${GIT_CONFIG_COUNT-<unset>}" '
+        '"${GIT_CONFIG_KEY_0-<unset>}" "${GIT_CONFIG_VALUE_0-<unset>}" '
+        '"${GIT_CONFIG_PARAMETERS-<unset>}" "${GIT_CONFIG_GLOBAL-<unset>}" '
+        '"${GIT_CONFIG_SYSTEM-<unset>}" "${GIT_CONFIG_NOSYSTEM-<unset>}"\n'
+    )
+    git.chmod(0o755)
+    probe = tmp_path / "probe.sh"
+    probe.write_text(prelude.replace(trusted, str(git)) + '"$PROVENANT_GIT_BIN" probe\n')
+    result = subprocess.run(
+        [shutil.which("bash"), str(probe)], cwd=tmp_path, text=True, capture_output=True, check=False,
+        env={**clean_git_test_environment(), "PATH": "/usr/bin:/bin", "GIT_CONFIG_COUNT": "1",
+             "GIT_CONFIG_KEY_0": "safe.directory", "GIT_CONFIG_VALUE_0": "*",
+             "GIT_CONFIG_PARAMETERS": "'safe.directory=*'", "GIT_CONFIG_GLOBAL": "/untrusted/gitconfig",
+             "GIT_CONFIG_SYSTEM": "/untrusted/system-config", "GIT_CONFIG_NOSYSTEM": "1"},
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "<unset>|<unset>|<unset>|<unset>|<unset>|<unset>|<unset>\n"

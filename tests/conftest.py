@@ -21,6 +21,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import zlib
 from pathlib import Path
 
 import pytest
@@ -45,15 +46,19 @@ atexit.register(_remove_session_scratch)
 
 
 def _keep_tmpdir_outside_git() -> None:
-    """Relocate TMPDIR when it sits inside a git work tree.
+    """Keep test scratch in TMPDIR without inheriting the checkout's Git identity.
 
-    A dispatched agent's TMPDIR is under the live product checkout's
-    `.agent-run`, so every temp workspace would resolve its run root there.
+    A lane's writable TMPDIR lies under `.agent-run`. Without a discovery
+    boundary, fixture source files inherit that directory's ignore rule and
+    generated-file guards reject them. Moving to /tmp escapes the sandbox.
     """
     probe = subprocess.run(["git", "rev-parse", "--git-dir"], cwd=tempfile.gettempdir(),
                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     if probe.returncode == 0:
-        relocated = Path(tempfile.mkdtemp(prefix="provenant-pytest-", dir="/tmp")).resolve()
+        relocated = Path(tempfile.mkdtemp(prefix="provenant-pytest-")).resolve()
+        # An existing invalid gitdir stops discovery at this scratch boundary.
+        # Nested fixture repositories can still initialise their own .git.
+        (relocated / ".git").write_text("gitdir: .\n", encoding="utf-8")
         os.environ["TMPDIR"] = str(relocated)
         tempfile.tempdir = None
         _SESSION_SCRATCH.append(relocated)
@@ -77,13 +82,35 @@ def pytest_configure(config) -> None:
 
 
 def pytest_collection_modifyitems(config, items) -> None:
-    """Real-CLI tests run only when opted in; the default PATH holds fail-loud stubs."""
-    if os.environ.get(LIVE_PROVIDER_ENV) == "1":
+    """Skip live CLIs by default and optionally select a stable file shard."""
+    if os.environ.get(LIVE_PROVIDER_ENV) != "1":
+        skip = pytest.mark.skip(reason=f"real provider CLI test; set {LIVE_PROVIDER_ENV}=1 to run")
+        for item in items:
+            if item.get_closest_marker("live_provider"):
+                item.add_marker(skip)
+
+    shard = os.environ.get("PROVENANT_TEST_SHARD")
+    if not shard:
         return
-    skip = pytest.mark.skip(reason=f"real provider CLI test; set {LIVE_PROVIDER_ENV}=1 to run")
+    try:
+        index, count = (int(part) for part in shard.split("/", maxsplit=1))
+    except (ValueError, TypeError):
+        raise pytest.UsageError("PROVENANT_TEST_SHARD must be formatted as i/n") from None
+    if count < 2 or not 1 <= index <= count:
+        raise pytest.UsageError("PROVENANT_TEST_SHARD must select 1..n with n at least 2")
+
+    selected = []
+    deselected = []
     for item in items:
-        if item.get_closest_marker("live_provider"):
-            item.add_marker(skip)
+        path = Path(item.path).resolve().relative_to(ROOT).as_posix()
+        if path == "tests/test_fabric_hosts.py":
+            keep = index == 1
+        else:
+            bucket = zlib.crc32(path.encode("utf-8")) % (count - 1) + 2
+            keep = index == bucket
+        (selected if keep else deselected).append(item)
+    items[:] = selected
+    config.hook.pytest_deselected(items=deselected)
 
 
 def pytest_unconfigure(config) -> None:

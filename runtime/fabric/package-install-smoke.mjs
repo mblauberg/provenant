@@ -80,7 +80,7 @@ Object.defineProperty(process.versions, "node", { value: "26.0.0" });
       env: { ...env, FABRIC_NODE: unsupportedNode },
     });
     assert.equal(unsupported.status, 127, `${binary}: ${unsupported.stderr}`);
-    assert.match(unsupported.stderr, /requires Node >=24\.15\.0 and <25/);
+    assert.match(unsupported.stderr, /FABRIC_NODE=.*is not an executable Node >=24\.15\.0 and <25\./);
   }
 
   const transport = new StdioClientTransport({

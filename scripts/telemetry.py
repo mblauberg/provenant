@@ -16,7 +16,6 @@ import os
 from pathlib import Path
 import re
 import sqlite3
-import socket
 from stat import S_ISREG
 import statistics
 import subprocess
@@ -43,17 +42,69 @@ def state_root():
 _HOST = None
 
 
+@cache
+def host_identity():
+    """The shared host id owner (scripts/host_identity.py)."""
+    name = 'provenant_host_identity'
+    if name not in sys.modules:
+        spec = importlib.util.spec_from_file_location(name, Path(__file__).with_name('host_identity.py'))
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[name] = module
+        spec.loader.exec_module(module)
+    return sys.modules[name]
+
+
 def host_id():
-    """This host's ledger id: hosts.json `local_host`, otherwise the hostname."""
+    """This host's ledger id: a valid hosts.json `local_host`, otherwise the hostname's slug."""
     global _HOST
     if _HOST is None:
         root = Path(os.environ.get('AGENT_FABRIC_INSTANCE_ROOT') or '~/.agents').expanduser()
-        try:
-            configured = json.loads((root / '.agent-fabric/hosts.json').read_text()).get('local_host')
-        except (OSError, ValueError, AttributeError):
-            configured = None
-        _HOST = configured if isinstance(configured, str) and configured else socket.gethostname()
+        _HOST, error = host_identity().resolve(root / '.agent-fabric/hosts.json')
+        if error:
+            # Fabric hosts rejects the same file; both fall back to the hostname's slug.
+            print(f'telemetry: invalid_config: {error}; using host id {_HOST}', file=sys.stderr)
     return _HOST
+
+
+_ALIASES = None
+_ALIAS_CONFIG_SIGNATURE = object()
+# Ids this ledger has been written under, from its meta; `record_host` loads them on connect.
+_LEDGER_IDS = frozenset()
+
+
+def host_aliases():
+    """This machine's earlier ids, excluding ids currently configured as peers."""
+    global _ALIASES, _ALIAS_CONFIG_SIGNATURE
+    identity = host_identity()
+    path = identity.config_path()
+    try:
+        stat = path.stat()
+        signature = (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
+    except OSError:
+        signature = None
+    if _ALIASES is None or signature != _ALIAS_CONFIG_SIGNATURE:
+        peers = frozenset(identity.peer_ids(path))
+        _ALIASES = (frozenset(identity.aliases(host_id(), path)) | _LEDGER_IDS) - peers
+        _ALIAS_CONFIG_SIGNATURE = signature
+    return _ALIASES
+
+
+def same_host(value, known=None):
+    """This machine's rows read as one host, whichever earlier default stored them."""
+    return host_identity().canonical(value, host_id(), host_aliases() if known is None else known)
+
+
+def host_keys(host):
+    """The stored host values a lookup for `host` must match; this machine's earlier ids included."""
+    known = host_aliases()
+    if same_host(host, known) != host_id():
+        return [host]
+    return sorted(known)
+
+
+def host_clause(host):
+    keys = host_keys(host)
+    return f"host IN ({','.join('?' * len(keys))})", keys
 
 
 def patterns():
@@ -163,7 +214,7 @@ def connect():
         backfill_session_events(db)
         db.execute("DELETE FROM meta WHERE key='events_usage_rowid'")  # the earlier, lossy watermark
         db.execute("INSERT OR IGNORE INTO meta VALUES ('session_events_backfill', ?)", (now(),))
-    relabel_host(db)
+    record_host(db)
     for source, pattern in patterns().items():
         db.execute('INSERT INTO sources(source,path_pattern,parser_version,status) VALUES (?,?,2,?) '
                    'ON CONFLICT(source) DO UPDATE SET path_pattern=excluded.path_pattern,parser_version=excluded.parser_version',
@@ -172,15 +223,36 @@ def connect():
     return db
 
 
-def relabel_host(db):
-    """Move this host's rows to its configured id once, so a rename never duplicates rows."""
-    current = host_id()
-    row = db.execute("SELECT value FROM meta WHERE key='host_id'").fetchone()
-    previous = row[0] if row else socket.gethostname()
-    if previous != current:
-        for table in ('usage', 'usage_files', 'observations', 'quota_events', 'quota_series', 'events'):
-            db.execute(f'UPDATE OR REPLACE {table} SET host=? WHERE host=?', (current, previous))
-    db.execute("INSERT OR REPLACE INTO meta VALUES ('host_id', ?)", (current,))
+def load_hosts(db):
+    """Read the ids this ledger was written under, so readers map them to this host.
+
+    Works on a read-only connection. `host_id` is the single id an earlier build kept."""
+    global _LEDGER_IDS, _ALIASES
+    known = set()
+    try:
+        stored = db.execute("SELECT key, value FROM meta WHERE key IN ('host_id','host_ids')").fetchall()
+    except sqlite3.Error:
+        stored = []
+    for key, value in stored:
+        try:
+            values = json.loads(value) if key == 'host_ids' else [value]
+        except (TypeError, ValueError):
+            values = []
+        known.update(item for item in values if isinstance(item, str) and item)
+    if frozenset(known) != _LEDGER_IDS:
+        _LEDGER_IDS, _ALIASES = frozenset(known), None
+    return known
+
+
+def record_host(db):
+    """Note the current id in the ledger's host history; rows are never relabelled.
+
+    A rename leaves earlier rows under their old id. Readers map recorded ids to this host
+    unless an id is currently configured as a peer."""
+    known = load_hosts(db)
+    if host_id() not in known:
+        db.execute("INSERT OR REPLACE INTO meta VALUES ('host_ids', ?)", (json.dumps(sorted(known | {host_id()})),))
+        load_hosts(db)
 
 
 def number(value):
@@ -344,17 +416,18 @@ def put_quota_series(db, provider, account, host, observed_at, windows, source=N
     """
     if not observed_at:
         return
-    latest = ('SELECT * FROM quota_series WHERE provider=? AND account=? AND host=? {} AND observed_at<=? '
+    hosts, keys = host_clause(host)
+    latest = (f'SELECT * FROM quota_series WHERE provider=? AND account=? AND {hosts} {{}} AND observed_at<=? '
               'ORDER BY observed_at DESC LIMIT 1')
-    before = db.execute(latest.format(''), (provider, account, host, observed_at)).fetchone()
+    before = db.execute(latest.format(''), (provider, account, *keys, observed_at)).fetchone()
     for window in windows:
         row = {name: window.get(name) for name in SERIES_STATE[:3]} | {
             name: reading.get(name) for name in SERIES_STATE[3:]}
-        previous = db.execute(latest.format('AND window=?'), (provider, account, host, window['name'], observed_at)).fetchone()
+        previous = db.execute(latest.format('AND window=?'), (provider, account, *keys, window['name'], observed_at)).fetchone()
         if previous and all(previous[name] == row[name] for name in SERIES_STATE):
             db.execute('UPDATE quota_series SET last_seen_at=MAX(last_seen_at,?) WHERE provider=? AND account=? '
                        'AND host=? AND window=? AND observed_at=?',
-                       (observed_at, provider, account, host, window['name'], previous['observed_at']))
+                       (observed_at, provider, account, previous['host'], window['name'], previous['observed_at']))
             continue
         db.execute('INSERT OR IGNORE INTO quota_series(provider,account,host,window,observed_at,last_seen_at,source,'
                    f"{','.join(SERIES_STATE)}) VALUES ({','.join('?' * (7 + len(SERIES_STATE)))})",
@@ -666,12 +739,14 @@ def native_paths(source):
     return found
 
 
-def first_files(db, host, event=None):
+def first_files(db, host, event=None, *, earlier=False):
     """Each native message's first file by path. Its owner is the message's account in ingest and
-    relabelling alike, so a message seen in several files never flips account with ingest order."""
+    relabelling alike, so a message seen in several files never flips account with ingest order.
+    `earlier` also matches this machine's rows stored under an earlier host id."""
     where, args = ('source=? AND event_id=?', event) if event else ('source IN (?,?,?)', IDENTITY_SOURCES)
-    return db.execute(f'SELECT source, event_id, MIN(path) AS path FROM usage_files WHERE host=? AND {where} '
-                      'GROUP BY source, event_id', (host, *args)).fetchall()
+    hosts, keys = host_clause(host) if earlier else ('host=?', [host])
+    return db.execute(f'SELECT source, event_id, host, MIN(path) AS path FROM usage_files WHERE {hosts} AND {where} '
+                      'GROUP BY source, event_id, host', (*keys, *args)).fetchall()
 
 
 def owners():
@@ -689,20 +764,20 @@ def attribute_accounts(db):
     digest = identity([[source, str(root), label] for source in sorted(roots) for root, label in roots[source]])
     if (db.execute("SELECT value FROM meta WHERE key='account_roots'").fetchone() or [None])[0] == digest:
         return
-    host = host_id()
+    hosts, keys = host_clause(host_id())
     owner = owners()
     label = lambda source, path: owner[source](path)  # noqa: E731
-    usage = [(label(row['source'], row['path']), row['source'], row['event_id'], host)
-             for row in first_files(db, host)]
+    usage = [(label(row['source'], row['path']), row['source'], row['event_id'], row['host'])
+             for row in first_files(db, host_id(), earlier=True)]
     db.executemany('UPDATE usage SET account=? WHERE source=? AND event_id=? AND host=? AND account IS NOT ?',
                    [(*row, row[0]) for row in usage if row[0]])
-    for (path,) in db.execute("SELECT DISTINCT origin_path FROM observations WHERE source='codex' AND host=?",
-                              (host,)).fetchall():
+    for (path,) in db.execute(f"SELECT DISTINCT origin_path FROM observations WHERE source='codex' AND {hosts}",
+                              keys).fetchall():
         if path and label('codex', path):
-            db.execute("UPDATE observations SET account=? WHERE source='codex' AND host=? AND origin_path=?",
-                       (label('codex', path), host, path))
-    for row in db.execute("SELECT rowid, source_ref, attrs FROM events WHERE kind='session.start' AND host=?",
-                          (host,)).fetchall():
+            db.execute(f"UPDATE observations SET account=? WHERE source='codex' AND {hosts} AND origin_path=?",
+                       (label('codex', path), *keys, path))
+    for row in db.execute(f"SELECT rowid, source_ref, attrs FROM events WHERE kind='session.start' AND {hosts}",
+                          keys).fetchall():
         source = json.loads(row['attrs']).get('source')
         if source in IDENTITY_SOURCES and row['source_ref'] and label(source, row['source_ref']):
             db.execute('UPDATE events SET account=? WHERE rowid=?', (label(source, row['source_ref']), row['rowid']))
@@ -766,7 +841,7 @@ def ingest_document(db, source, path):
                       input_tokens=input_count, cache_read_tokens=cached, cache_write_tokens=written,
                       output_tokens=output, reasoning_tokens=reasoning,
                       usage_source=usage.get('usage_source') or row.get('usage_source') or usage.get('source'),
-                      status=row.get('status') or row.get('state'), error_class=row.get('error_class'),
+                      status=row.get('status') or row.get('state'), error_class=receipt_error_class(row),
                       task_class=row.get('task_class') or requested_route.get('task_class') or None,
                       route=requested_route.get('alias') or None,
                       duration_ms=round(ended - started) if started is not None and ended is not None and ended >= started else None,
@@ -927,6 +1002,25 @@ EFFORT_SUFFIX = re.compile(r'-(?:minimal|low|medium|high|xhigh|max)$')
 CONTEXT_SUFFIX = re.compile(r'-\d+k$')
 DATE_SUFFIX = re.compile(r'-\d{8}$')
 SUCCESS = {'ok', 'succeeded'}
+ERROR_CLASS_BY_STATUS = {
+    'rate_limited': 'rate_limited', 'usage_limited': 'usage_limited',
+    'auth_required': 'auth', 'model_unavailable': 'model_unavailable',
+    'timed_out': 'timeout', 'startup_timeout': 'timeout', 'stalled': 'timeout',
+    'permission_blocked': 'sandbox_denied', 'lost': 'provider_error', 'cancelled': 'cancelled',
+}
+UNCLASSIFIED_FAILURES = {'failed', 'quarantined', 'partial', 'blocked', 'rejected', 'interrupted',
+                         'writer_changed', 'tool_missing'}
+
+
+def receipt_error_class(row):
+    """Keep legacy terminal receipts useful when they predate error_class."""
+    if row.get('error_class'):
+        return row['error_class']
+    status = row.get('status') or row.get('state')
+    if status in ERROR_CLASS_BY_STATUS:
+        return ERROR_CLASS_BY_STATUS[status]
+    # Only terminal failures get the generic class; queued or active lanes stay unclassified.
+    return 'provider_error' if status in UNCLASSIFIED_FAILURES else None
 
 
 def catalogue():
@@ -1121,7 +1215,7 @@ def cell_unit(cell, keys, prices, free_patterns):
             'billing': [entry['billing']] if entry.get('billing') else []}
 
 
-def usage_cells(db, where, parameters, summary, boundary, end, need_native, order):
+def usage_cells(db, where, parameters, summary, boundary, end, need_native, order, current, aliases):
     """Non-receipt usage rows grouped in SQL, so a large ledger is never held as Python rows.
 
     A day key stands for every row of a UTC day lying wholly inside the bounds; any other
@@ -1129,25 +1223,43 @@ def usage_cells(db, where, parameters, summary, boundary, end, need_native, orde
     simple = ("timestamp GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T*' "
               "AND (timestamp LIKE '%Z' OR timestamp LIKE '%+00:00')")
     parameters = dict(parameters)
+    parameters['host_identity_current'] = current
+    alias_parameters = []
+    for index, alias in enumerate(sorted(aliases)):
+        name = f'host_identity_alias_{index}'
+        parameters[name] = alias
+        alias_parameters.append(':' + name)
+    host_condition = f"host IN ({', '.join(alias_parameters)})"
+    host_expression = f"CASE WHEN {host_condition} THEN :host_identity_current ELSE host END"
     for name, moment, operator in (('low', boundary, '>'), ('high', end, '<')):
         if moment:
             simple += f' AND substr(timestamp,1,10) {operator} :{name}'
             parameters[name] = moment.date().isoformat()
     stamp = f'CASE WHEN {simple} THEN substr(timestamp,1,10) ELSE timestamp END'
     where = " WHERE source!='fabric'" + where
-    columns = ['source', 'adapter', 'provider', 'model', 'account', 'status', *(('host', 'session') if summary else ())]
+    columns = ['source', 'adapter', 'provider', 'model', 'account', 'status']
+    group_columns = list(columns)
+    if summary:
+        columns += ['local_host AS host', 'session']
+        group_columns += ['local_host', 'session']
     flags = [f'{field} IS NULL AS null_{field}, COALESCE({field}>0,0) AS positive_{field}' for field in TOKEN_FIELDS]
     sums = [f'SUM(COALESCE({field},0)) AS {field}' for field in TOKEN_FIELDS]
+    ranked = ("WITH ranked_usage AS (SELECT usage.*, rowid AS ledger_rowid, "
+              f"{host_expression} AS local_host, ROW_NUMBER() OVER ("
+              f"PARTITION BY source, event_id, {host_expression} "
+              "ORDER BY CASE WHEN host=:host_identity_current THEN 0 ELSE 1 END, rowid) AS alias_rank "
+              f"FROM usage{where}) ")
     cells = [dict(row) for row in db.execute(
-        f"SELECT {', '.join(columns)}, {stamp} AS timestamp, {', '.join(flags)}, {', '.join(sums)}, "
-        f"SUM(reported_cost) AS reported_cost, COUNT(*) AS rows, MIN({order}) AS first_row FROM usage{where} "
-        f"GROUP BY {', '.join(columns)}, {stamp}, {', '.join(f'null_{f}, positive_{f}' for f in TOKEN_FIELDS)}",
+        f"{ranked}SELECT {', '.join(columns)}, {stamp} AS timestamp, {', '.join(flags)}, {', '.join(sums)}, "
+        f"SUM(reported_cost) AS reported_cost, COUNT(*) AS rows, MIN({order}) AS first_row "
+        f"FROM ranked_usage WHERE alias_rank=1 "
+        f"GROUP BY {', '.join(group_columns)}, {stamp}, {', '.join(f'null_{f}, positive_{f}' for f in TOKEN_FIELDS)}",
         parameters)]
     native = []
     if need_native:
         native = [dict(row) for row in db.execute(
-            f"SELECT DISTINCT adapter, provider, model, session, {stamp} AS timestamp FROM usage{where} "
-            "AND session IS NOT NULL AND session!=''", parameters)]
+            f"{ranked}SELECT DISTINCT adapter, provider, model, session, {stamp} AS timestamp "
+            "FROM ranked_usage WHERE alias_rank=1 AND session IS NOT NULL AND session!=''", parameters)]
     return cells, native
 
 
@@ -1222,13 +1334,18 @@ def stats(db, since=None, prices=None, *, summary=False, until=None):
     excluded = Counter()
     selected, unattributed = [], []
     # A day of margin keeps offset timestamps; `included` applies the exact bounds.
-    where, parameters, order, order_by = '', {}, "printf('%020d', rowid)", 'rowid'
+    where, parameters, order, cell_order, order_by = '', {}, "printf('%020d', rowid)", "printf('%020d', ledger_rowid)", 'rowid'
     if boundary:
         # The old full-row query was walked in index order here; ties between attempts keep that order.
         where, parameters['start'] = ' AND timestamp >= :start', (boundary - timedelta(days=1)).date().isoformat()
         # Fields are joined with \x01, below any timestamp character, so a prefix sorts first.
         order = "printf('%s' || char(1) || '%020d', COALESCE(timestamp,''), rowid)"
+        cell_order = "printf('%s' || char(1) || '%020d', COALESCE(timestamp,''), ledger_rowid)"
         order_by = 'timestamp, rowid'
+    current = host_id()
+    load_hosts(db)
+    aliases = host_aliases()
+    rows = {}
     def attribute(row):
         row['model_raw'] = row['model']
         row['model'] = normalise_model(row['adapter'], row['provider'], row['model'], adapters)
@@ -1236,6 +1353,12 @@ def stats(db, since=None, prices=None, *, summary=False, until=None):
     # Receipts stay row by row (few, and lanes need whole rows); native sources group in SQL.
     for item in db.execute(f"SELECT {order} AS first_row, * FROM usage WHERE source='fabric'" + where + ' ORDER BY ' + order_by, parameters):
         row = dict(item)
+        stored, row['host'] = row['host'], same_host(row['host'], aliases)
+        key = (row['source'], row['event_id'], row['host'])
+        # One event stored under an earlier and the current id counts once, as the current row.
+        if key not in rows or stored == current:
+            rows[key] = row
+    for row in rows.values():
         if not included(row):
             continue
         reason = attribute(row)
@@ -1246,7 +1369,8 @@ def stats(db, since=None, prices=None, *, summary=False, until=None):
             unattributed.append(row)
         selected.append(row)
     attributed = [row for row in selected if classify(row) is None]
-    cells, native_rows = usage_cells(db, where, parameters, summary, boundary, end, bool(attributed), order)
+    cells, native_rows = usage_cells(db, where, parameters, summary, boundary, end, bool(attributed),
+                                     cell_order, current, aliases)
     cells = [cell for cell in cells if included(cell)]
     for cell in cells:
         cell['reason'] = attribute(cell)
@@ -1296,6 +1420,7 @@ def stats(db, since=None, prices=None, *, summary=False, until=None):
     seen = set()
     for item in db.execute('SELECT * FROM observations ORDER BY source'):
         row = dict(item)
+        row['host'] = same_host(row['host'], aliases)
         if not included(row) or row['status'] not in {'rate_limited', 'usage_limited'}:
             continue
         remember_limit(row)
@@ -1309,6 +1434,7 @@ def stats(db, since=None, prices=None, *, summary=False, until=None):
     windows = {}
     for item in db.execute('SELECT * FROM observations WHERE used_percent IS NOT NULL ORDER BY timestamp'):
         row = dict(item)
+        row['host'] = same_host(row['host'], aliases)
         if included(row):
             windows[(row['provider'], row['account'], row['window'])] = row
     missing = Counter()
@@ -1366,8 +1492,8 @@ def peer_summary(db, since=None, host=None):
         for row in report['session_usage']:
             row['host'] = host
     report['schema'] = 'provenant.telemetry.summary.v1'
-    report['quota_snapshots'] = [public_snapshot(value) for value in quota_owner().snapshots()
-                                 if value.get('host') == host_id()]
+    report['quota_snapshots'] = [public_snapshot({**value, 'host': report['host'] if host else host_id()})
+                                 for value in quota_owner().snapshots() if same_host(value.get('host')) == host_id()]
     report['quota_observations'] = [
         {key: row.get(key) for key in ('host', 'provider', 'account', 'window', 'used_percent',
                                      'window_minutes', 'reset_at', 'timestamp')}

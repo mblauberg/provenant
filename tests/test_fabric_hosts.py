@@ -17,6 +17,14 @@ ROOT = Path(__file__).resolve().parents[1]
 REPOSITORY_ROOT = ROOT.parent.parent
 
 
+def default_host(config=None):
+    """The local id a subprocess on this machine uses: a valid local_host, else the hostname's slug."""
+    import host_identity
+    local = (config or {}).get('local_host')
+    return local if isinstance(local, str) and host_identity.NAME.fullmatch(local) else \
+        host_identity.slug(host_identity.hostname())
+
+
 @contextmanager
 def git_isolated_tempdir():
     """Keep fixtures in the worktree without inheriting its Git identity."""
@@ -88,7 +96,7 @@ class PeerContracts(unittest.TestCase):
         value = json.loads(response.stdout)
         self.assertTrue(value['ok'])
         self.assertEqual(value['protocol_version'], 1)
-        self.assertEqual(value['result']['host'], 'local')
+        self.assertEqual(value['result']['host'], default_host())
         self.assertIn('revision', value['result'])
         self.assertEqual(response.stderr, b'')
 
@@ -529,7 +537,7 @@ class ConfigContracts(unittest.TestCase):
     def test_absent_configuration_is_local_only(self):
         result = self.command(None)
         self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
-        self.assertEqual(json.loads(result.stdout)['hosts'], [{'host': 'local', 'local': True}])
+        self.assertEqual(json.loads(result.stdout)['hosts'], [{'host': default_host(), 'local': True}])
 
     def test_instance_root_must_be_absolute(self):
         result = subprocess.run([str(ROOT / 'scripts/provenant'), 'hosts', 'list', '--json'],
@@ -563,7 +571,8 @@ class ConfigContracts(unittest.TestCase):
                 self.assertEqual(result.returncode, 0)
                 value = json.loads(result.stdout)
                 self.assertEqual(value['error']['code'], 'invalid_config')
-                self.assertEqual(value['hosts'], [{'host': 'local', 'local': True}])
+                # The local row keeps a valid local_host even when another field is invalid.
+                self.assertEqual(value['hosts'], [{'host': default_host(config), 'local': True}])
 
 
 
@@ -590,10 +599,10 @@ class HostDiagnosticsContracts(unittest.TestCase):
                                          result.stdout + result.stderr)
                         if json_output:
                             value = json.loads(result.stdout)
-                            self.assertEqual([row['host'] for row in value['hosts']], ['local'])
+                            self.assertEqual([row['host'] for row in value['hosts']], [default_host()])
                             self.assertEqual(value['error']['code'], 'invalid_config')
                         else:
-                            self.assertIn('local ', result.stdout)
+                            self.assertIn(default_host() + ' ', result.stdout)
                             self.assertIn('invalid_config', result.stdout)
 
     def test_temporary_directory_estimate_uses_filesystem_path_limits(self):
@@ -907,7 +916,7 @@ class LaneLoopbackContracts(unittest.TestCase):
         self.assertEqual(process.returncode, 0 if value['ok'] else 1, process.stderr + process.stdout)
         return value
 
-    def mcp(self, name, arguments, seat='codex'):
+    def mcp(self, name, arguments, seat='codex', cwd=None):
         client_module = ROOT / 'node_modules/@modelcontextprotocol/sdk/dist/esm/client/index.js'
         transport_module = ROOT / 'node_modules/@modelcontextprotocol/sdk/dist/esm/client/stdio.js'
         script = ('import {Client} from ' + json.dumps(client_module.as_uri()) + ';\n'
@@ -919,7 +928,7 @@ class LaneLoopbackContracts(unittest.TestCase):
             + 'const result=await client.callTool(' + json.dumps({'name': name, 'arguments': arguments}) + ');\n'
             + 'console.log(JSON.stringify(result.structuredContent ?? JSON.parse(result.content[0].text)));\n'
             + '}finally{await client.close();}')
-        process = subprocess.run(['node', '--input-type=module', '-e', script], cwd=self.workspace,
+        process = subprocess.run(['node', '--input-type=module', '-e', script], cwd=cwd or self.workspace,
             env={**self.env, 'AGENT_FABRIC_SEAT': seat}, capture_output=True, text=True, timeout=40)
         self.assertEqual(process.returncode, 0, process.stdout + process.stderr)
         return json.loads(process.stdout)
@@ -984,6 +993,33 @@ class LaneLoopbackContracts(unittest.TestCase):
         self.wait_writer(launched['id'])
         self.assertFalse(remote.exists())
         self.assertNotIn(str(remote), git(self.peer_workspace, 'worktree', 'list', '--porcelain'))
+
+    def test_remote_reader_prompt_names_actual_checkout_cwd_and_head(self):
+        git, _, local = self.writer_fixture()
+        (local / 'src').mkdir()
+        (local / 'src/review.txt').write_text('review input')
+        git(local, 'add', 'src/review.txt')
+        git(local, 'commit', '-qm', 'review subdirectory')
+        head = git(local, 'rev-parse', 'HEAD')
+        brief = self.root / 'reader-brief.md'
+        brief.write_text('Review ' + str(local / 'src') + '\n\nslow')
+        launched = self.client('dispatch', host='workshop', adapter='codex', model='fixture',
+            prompt_file=str(brief), mode='read_only', cwd=str(local / 'src'),
+            task_id='prompt-location', operation_id='prompt-location')
+        self.assertEqual(launched['status'], 'running', launched)
+        try:
+            context = launched['code_transport']['readers'][0]
+            checkout = Path(context['worktree_path'])
+            prompt = Path(launched['paths']['run_dir']) / '_owner/prompt-location-prompt-1.md'
+            text = prompt.read_text()
+            preamble, original = text.split('\n\n', 1)
+            self.assertIn(str(checkout), preamble)
+            self.assertIn(str(checkout / 'src'), preamble)
+            self.assertIn(head, preamble)
+            self.assertEqual(original, brief.read_text())
+        finally:
+            self.client('cancel', id=launched['id'], operation_id='stop-prompt-location')
+            self.wait_writer(launched['id'])
 
     def test_reader_polling_preserves_input_between_fallback_attempts(self):
         self.writer_fixture()
@@ -1289,6 +1325,37 @@ class LaneLoopbackContracts(unittest.TestCase):
         finally:
             self.client('cancel', id=launched['id'], operation_id='stop-mapped')
 
+    def test_mcp_remote_placement_uses_task_paths_from_a_non_repository_cwd(self):
+        self.set_peer_response_deadline(30)
+        _, _, local = self.writer_fixture()
+        for mode, key in [('worktree_write', 'worktree'), ('read_only', 'cwd')]:
+            for batch in (False, True):
+                with self.subTest(mode=mode, batch=batch):
+                    identifier = 'path-' + key + ('-batch' if batch else '')
+                    task = dict(mode=mode, prompt='slow', **{key: str(local)})
+                    request = dict(host='workshop', adapter='codex', model='fixture',
+                        operation_id=identifier, detail='full')
+                    if batch:
+                        request['tasks'] = [dict(id=identifier, **task)]
+                    else:
+                        request.update(task_id=identifier, **task)
+                    launched = self.mcp('fabric_dispatch', request, cwd=self.local_home)
+                    self.assertEqual(launched['status'], 'running', launched)
+                    try:
+                        self.assertEqual(launched['host'], 'workshop', launched)
+                    finally:
+                        self.client('cancel', id=launched['id'], operation_id='stop-' + identifier)
+                        self.wait_writer(launched['id'])
+
+    def test_remote_writer_name_error_reports_expected_branch_directory(self):
+        git, _, local = self.writer_fixture()
+        git(local, 'branch', '-m', 'feat/expected')
+        refused = self.client('dispatch', host='workshop', adapter='codex', model='fixture',
+            prompt='fixture only', mode='worktree_write', worktree=str(local),
+            operation_id='wrong-directory')
+        self.assertEqual(refused['error'], 'worktree_invalid', refused)
+        self.assertIn('feat-expected', refused['fix'])
+
     def test_remote_cwd_outside_every_registered_project_is_refused_naming_path_and_host(self):
         self.writer_fixture()
         outside = self.local_home / 'Repos/unregistered'
@@ -1366,6 +1433,18 @@ class LaneLoopbackContracts(unittest.TestCase):
         self.assertTrue(result['runs'])
         self.assertIn('invalid_config', result['digest'])
         self.assertEqual(result['hosts'][0]['error']['code'], 'invalid_config')
+
+    def test_empty_peers_lanes_stay_local_and_never_reach_ssh(self):
+        (self.local_home / '.agents/.agent-fabric/hosts.json').write_text(
+            json.dumps({'schema_version': 1, 'local_host': 'laptop', 'peers': {}}))
+        marker = self.root / 'ssh-called'
+        self.ssh.write_text('#!/bin/sh\necho called > ' + str(marker) + '\nexit 99\n')
+        view = self.lanes()
+        # No peers: the plain local view, without a federated host table.
+        self.assertEqual(view['schema'], 'fabric.runs.v1')
+        self.assertEqual([row['run_id'] for row in view['runs']], ['mcp-shared'])
+        self.assertNotIn('hosts', view)
+        self.assertFalse(marker.exists())
 
     def test_writer_transports_committed_base_and_fetches_verified_head_without_github(self):
         git, base, local = self.writer_fixture()
@@ -2529,6 +2608,34 @@ class LaneLoopbackContracts(unittest.TestCase):
             self.client('cancel', id=first['id'], operation_id='cleanup-refused-writer')
             if 'next_run' in locals():
                 self.client('cancel', id=next_run['id'], operation_id='cleanup-retry-refused-writer')
+
+    def test_clean_peer_writer_worktree_fast_forwards_to_advanced_transported_base(self):
+        self.set_peer_response_deadline(30)
+        git, base, local = self.writer_fixture()
+        request = dict(host='workshop', adapter='codex', model='fixture', prompt='fixture only',
+            mode='worktree_write', worktree=str(local), task_id='writer')
+        first = self.client('dispatch', **request, operation_id='writer-before-fast-forward')
+        self.assertEqual(first['status'], 'running', first)
+        remote = self.peer_workspace / '.worktrees/feat-writer'
+        try:
+            self.wait_writer(first['id'])
+            self.assertEqual(git(remote, 'rev-parse', 'HEAD'), base)
+            (local / 'code.txt').write_text('advanced transported base\n')
+            git(local, 'add', 'code.txt')
+            git(local, 'commit', '-qm', 'advance transported base')
+            advanced = git(local, 'rev-parse', 'HEAD')
+
+            next_run = self.client('dispatch', **request, operation_id='writer-fast-forward')
+            self.assertEqual(next_run['status'], 'running', next_run)
+            self.assertEqual(git(remote, 'rev-parse', 'HEAD'), advanced)
+            self.assertEqual(git(remote, 'symbolic-ref', '--short', 'HEAD'), 'feat/writer')
+            self.assertEqual((remote / 'code.txt').read_text(), 'advanced transported base\n')
+            self.assertEqual(git(remote, 'status', '--porcelain'), '')
+            self.wait_writer(next_run['id'])
+        finally:
+            self.client('cancel', id=first['id'], operation_id='cleanup-writer-before-fast-forward')
+            if 'next_run' in locals() and next_run.get('id'):
+                self.client('cancel', id=next_run['id'], operation_id='cleanup-writer-fast-forward')
 
     def test_chair_refuses_changed_verification_bindings_and_forged_bundle_head(self):
         import copy
