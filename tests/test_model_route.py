@@ -2,11 +2,14 @@ import json
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 import importlib.util
+import io
 import os
 from pathlib import Path
 import shutil
 import subprocess
 import sys
+from contextlib import redirect_stderr, redirect_stdout
+from unittest.mock import patch
 
 import pytest
 import yaml
@@ -114,12 +117,12 @@ def test_fallback_inherits_adapter_training_flag_without_false_default():
     assert candidates[0]["trains_on_prompts"] is None
 CRUCIAL_RISK_OVERRIDE = CATALOG["families"]["anthropic"]["risk_tier_overrides"]["crucial"]
 RISK_OVERRIDE_MODEL = CRUCIAL_RISK_OVERRIDE["models"][0]
-NON_OCCUPANT_MODELS = tuple(
+NON_OCCUPANT_MODELS = tuple(dict.fromkeys(
     model
     for models in CATALOG["families"]["anthropic"]["aliases"].values()
     for model in models
     if RISK_OVERRIDE_MODEL.casefold() not in model.casefold()
-)
+))
 
 
 @pytest.fixture
@@ -202,19 +205,17 @@ def test_python_floor_rejects_missing_interpreter(harness_script, runner):
 
 
 def resolve(*args):
-    arguments = [sys.executable, str(ROOT / "scripts" / "model_route.py"), "resolve", *args]
+    arguments = [str(ROOT / "scripts" / "model_route.py"), "resolve", *args]
     # The router reads its catalogue from the instance root, which defaults to
     # ~/.agents. Left unpinned these cases route against whatever catalogue the
     # developer happens to have installed, so they pass or fail on the machine
     # rather than on the repository. CI already pins the same variable.
-    result = subprocess.run(
-        arguments,
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        env={**os.environ, "PATH": "", "AGENT_FABRIC_INSTANCE_ROOT": str(ROOT),
-             "AGENT_FABRIC_PRODUCT_ROOT": str(ROOT)},
-    )
+    environment = {"PATH": "", "AGENT_FABRIC_INSTANCE_ROOT": str(ROOT),
+                   "AGENT_FABRIC_PRODUCT_ROOT": str(ROOT)}
+    stdout, stderr = io.StringIO(), io.StringIO()
+    with patch.dict(os.environ, environment), redirect_stdout(stdout), redirect_stderr(stderr):
+        result = load_router().main(["resolve", *args])
+    result = subprocess.CompletedProcess(arguments, result, stdout.getvalue(), stderr.getvalue())
     return result, json.loads(result.stdout) if result.stdout else None
 
 
