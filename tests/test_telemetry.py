@@ -4,6 +4,7 @@ import os
 import sqlite3
 import subprocess
 import sys
+import types
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -1774,7 +1775,6 @@ def test_a_transcript_swapped_for_a_link_after_discovery_is_never_read(tmp_path,
 
 # Golden check for the SQL-grouped `stats`: the row-by-row implementation it replaced is kept
 # here as the oracle and both must report the same for one ledger.
-LEGACY_STATS = '''
 def legacy_stats(db, since=None, prices=None, *, summary=False, until=None):
     """Ledger report for [since, until); either bound may be omitted."""
     free_patterns = {}
@@ -1890,7 +1890,6 @@ def legacy_stats(db, since=None, prices=None, *, summary=False, until=None):
         keys = ('host', 'source', 'session', 'day', 'provider', 'adapter', 'account', 'model')
         report['session_usage'] = combine((unit(row, keys, prices, free_patterns) for row in usage), keys)
     return report
-'''
 
 
 def load_telemetry(tmp_path, monkeypatch):
@@ -1900,7 +1899,9 @@ def load_telemetry(tmp_path, monkeypatch):
     spec = importlib.util.spec_from_file_location('telemetry_golden', ROOT / 'scripts/telemetry.py')
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    exec(LEGACY_STATS, vars(module))
+    # The oracle runs against the module's own helpers.
+    module.legacy_stats = types.FunctionType(legacy_stats.__code__, vars(module), argdefs=legacy_stats.__defaults__)
+    module.legacy_stats.__kwdefaults__ = legacy_stats.__kwdefaults__
     return module
 
 
