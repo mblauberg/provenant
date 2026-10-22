@@ -16,8 +16,8 @@ Freeze the canonical evaluation plan before seeing results:
 - decision the evaluation informs and unacceptable failure modes;
 - hash-bound dataset/corpus, provenance, consent or licence, data policy and
   holdout boundary;
-- candidate and applicable comparator manifests, paired sampling, seeds,
-  repetitions, timeouts, retries and exclusions;
+- candidate and applicable comparator manifests, sampling paired by task,
+  seeds, repetitions, timeouts, retries and exclusions;
 - metric ranges, aggregation, thresholds and per-metric regression margins;
 - deterministic preflight, rubric, blinded independent graders and
   disagreement handling;
@@ -43,8 +43,12 @@ receipt; link safe relative artifacts and SHA-256 digests.
    new schema version.
 5. Blind independent graders to treatment identity. Record criterion evidence;
    send disagreements to a fresh adjudicator rather than majority vote.
+   Prefer execution oracles such as tests and type checks; use model graders
+   only for rubric items those cannot capture. Run each pairwise model
+   judgement in both orders; it counts only when both agree, else it is a tie.
 6. Compare with frozen thresholds and applicable arms. A post-hoc change creates
-   a fresh run; it does not rewrite the completed evidence.
+   a fresh run; it does not rewrite the completed evidence. A single run or a
+   gap under about 5 points never justifies a routing or preset change.
 7. Preserve bounded failures and route product defects to `implement`, unclear
    requirements to `scope`, and operational regressions to `diagnose`.
 

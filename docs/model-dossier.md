@@ -312,9 +312,9 @@ generation and Terra are retired from the catalogue.
 outranks the task-class floors of `low` and `medium`. The raise is scoped to the
 OpenAI family on purpose, so Anthropic and Google worker routes stay at their
 floors rather than inheriting a cost rise nobody asked for. Reach for `xhigh` or
-`max` explicitly when a leg deserves it, and record the model and effort pair in
-the receipt. A cheap model with the effort dial up beats a dearer model at
-medium.
+`max` explicitly only for a named escalation or a crucial review, and record the
+model and effort pair in the receipt. A cheap model with the effort dial up
+beats a dearer model at medium.
 
 **`gpt-6-astra` is the OpenAI flagship, reserved for critical and high-stakes
 slices and for legwork that needs judgement.** Run it between `low` and
