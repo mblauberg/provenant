@@ -182,10 +182,12 @@ is checked once per process.
   script's home, which v2's config discovery stats), because OpenCode needs them, so credentials are not
   denied to the model at the OS layer there; the config's `external_directory: deny` keeps the
   model's tools to the project. `~/.zshrc`, `~/.ssh` and the rest of HOME stay unreadable (checked
-  with `sandbox-exec`). Both read-only and writer profiles allow literal `file-read-metadata`
+  with `sandbox-exec`). Both read-only and writer profiles allow literal `file-read-data` and `file-read-metadata`
   on `.claude` and `.codex` directories along the cwd ancestry after protected-path denies.
-  These grants permit discovery's `lstat` without granting content or descendant reads, and
-  do not follow a leaf symlink. The existing Claude-disable switches suppress instruction
+  Discovery's `realPath` opens the directory, so metadata alone still fails with EPERM (#1012;
+  #1040's metadata-only grant was never run live, and only `opencode run --standalone`, which
+  starts its own sandboxed server, exercises it). The grant exposes entry names, not child content
+  or metadata, and does not follow a leaf symlink. The existing Claude-disable switches suppress instruction
   loading; they do not establish that v2.0.32 skips these metadata probes. Sandboxed lanes
   disable the `fabric` MCP server through the [v2 per-server switch](https://opencode.ai/v2/docs/mcp-servers):
   `mcp.servers.fabric = {type: "local", command: ["provenant"], disabled: true}` in the inline
