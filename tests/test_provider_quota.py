@@ -117,14 +117,33 @@ def test_missing_windows_are_unreported_never_zero(quota, monkeypatch):
     assert quota.provider('claude').parse({'five_hour': {'utilization': 1}, 'seven_day': None})['unreported'] == ['seven_day']
 
 
-def test_render_folds_unreported_windows_into_one_line_per_account(quota, monkeypatch, capsys):
+def test_render_lists_unreported_windows_only_when_verbose_one_line_per_account(quota, monkeypatch, capsys):
     monkeypatch.setattr(quota, 'fetch', lambda account, now: {
         'windows': [window(14, 300, timedelta(hours=1), 'five_hour')], 'unreported': ['seven_day_opus', 'seven_day_sonnet']})
     account = quota.Account('claude', 'max-a', Path('/nowhere'), True)
-    quota.render(quota.report([quota.refresh(account, NOW, force=True)], NOW))
+    shown = quota.report([quota.refresh(account, NOW, force=True)], NOW)
+    quota.render(shown)
+    assert 'not reported' not in capsys.readouterr().out
+    quota.render(shown, verbose=True)
     out = capsys.readouterr().out
     assert 'seven_day_opus' not in out and 'five_hour' in out
-    assert 'claude/max-a: 2 window(s) not reported (missing does not mean 0%); use --json' in out
+    assert 'claude/max-a: 2 window(s) not reported (missing does not mean 0%)' in out
+
+
+def test_render_hides_repeated_limit_windows_and_reads_a_dollar_budget_plainly(quota, monkeypatch, capsys):
+    scoped = window(50, WEEK, timedelta(days=2), 'weekly_scoped:fable')
+    budget = {'name': 'Cloud session credits', 'used_percent': 54, 'window_minutes': None,
+              'reset_at': (NOW + timedelta(days=14)).isoformat(), 'used_amount': 136, 'limit_amount': 250, 'currency': 'USD'}
+    monkeypatch.setattr(quota, 'fetch', lambda account, now: {
+        'windows': [window(14, 300, timedelta(hours=1), 'five_hour'), window(14, 300, timedelta(hours=1), 'session:1'),
+                    scoped, budget]})
+    account = quota.Account('claude', 'max-a', Path('/nowhere'), True)
+    value = quota.report([quota.refresh(account, NOW, force=True)], NOW)
+    quota.render(value)
+    out = capsys.readouterr().out
+    assert 'session:1' not in out and 'weekly_scoped:fable' in out and 'window length unreported' not in out
+    assert '$114 left; resets in 14d' in out and 'unknown' not in out
+    assert 'session:1' in {w['name'] for w in value['accounts'][0]['windows']}
 
 
 # Provider modules ---------------------------------------------------------------------------
@@ -169,7 +188,38 @@ def test_codex_app_server_speaks_json_rpc_and_never_inherits_a_token(quota, monk
     monkeypatch.setattr(quota, 'executable', lambda name: '/bin/' + name)
     account = quota.Account('codex', 'default', tmp_path / 'codex-home', True)
     assert quota.provider('codex').app_server(account, quota.IO, timeout=1) == {'rateLimits': {'primary': {'usedPercent': 7}}}
-    assert sent == [(['/bin/codex', '-s', 'read-only', '-a', 'untrusted', 'app-server'], str(tmp_path / 'codex-home'))]
+    # codex-cli 0.159 rejects `-a untrusted` and exits before answering.
+    assert sent == [(['/bin/codex', '-s', 'read-only', '-a', 'never', 'app-server'], str(tmp_path / 'codex-home'))]
+
+
+def test_codex_reports_its_credit_balance_and_banked_resets_with_expiry(quota):
+    # The shape `account/rateLimits/read` returned from codex-cli 0.159, identifiers removed.
+    expires = int((NOW + timedelta(days=16)).timestamp())
+    payload = {'rateLimits': {'primary': {'usedPercent': 77, 'windowDurationMins': WEEK},
+                              'credits': {'hasCredits': True, 'unlimited': False, 'balance': '27406.2146797500'},
+                              'planType': 'prolite'},
+               'rateLimitResetCredits': {'availableCount': 1, 'credits': [
+                   {'id': 'opaque', 'resetType': 'codexRateLimits', 'status': 'available', 'grantedAt': 1,
+                    'expiresAt': expires, 'title': 'Full reset'},
+                   {'id': 'spent', 'resetType': 'codexRateLimits', 'status': 'redeemed', 'grantedAt': 1,
+                    'expiresAt': expires + 1}]}}
+    parsed = quota.provider('codex').parse(payload, NOW)
+    assert parsed['credits'] == {'reset_credits': 1, 'source': 'provider'}
+    assert quota.normalise_allowance(parsed['allowance']) is None
+    allowed = quota.provider('codex').parse({**payload, 'ordinaryUsageAllowed': True,
+                                             'rateLimits': {**payload['rateLimits'], 'spendControlReached': False}})
+    assert quota.normalise_allowance(allowed['allowance']) == {'ordinary_usage_allowed': True,
+                                                               'spend_control_reached': False}
+    assert quota.normalise_resets(parsed['resets']) == {'available': 1, 'expires_at': [iso(NOW + timedelta(days=16))],
+                                                        'source': 'provider'}
+    assert quota.normalise_usage_credits(parsed['usage_credits']) == [{
+        'kind': 'credits', 'balance': 27406.21, 'unlimited': False, 'currency': None, 'unit': 'credits',
+        'expires_at': None, 'source': 'provider'}]
+    # Rollout events spell the balance in snake case; no balance and no count mean nothing to show.
+    assert quota.provider('codex').parse({'rate_limits': {}, 'credits': None})['usage_credits'] is None
+    empty = quota.provider('codex').parse({'rateLimits': {'credits': {'has_credits': False, 'balance': '0'}},
+                                           'rateLimitResetCredits': {'availableCount': 0, 'credits': None}})
+    assert empty['usage_credits'] is None and quota.normalise_resets(empty['resets']) is None
 
 
 def test_codex_falls_back_to_rollout_rate_limits_already_in_the_ledger(quota, monkeypatch, tmp_path):
@@ -225,6 +275,64 @@ def test_claude_usage_endpoint_uses_the_token_in_process_only(quota, monkeypatch
     for secret in (TOKEN, 'owner@example.com'):
         assert secret not in stored and secret not in json.dumps(result)
     assert TOKEN not in capsys.readouterr().out
+
+
+def test_claude_dollar_windows_and_usage_credit_balance(quota):
+    claude = quota.provider('claude')
+    parsed = claude.parse({'iguana_necktie': {'utilization': 54.5, 'resets_at': iso(NOW + timedelta(days=14)),
+                                              'limit_dollars': 250, 'used_dollars': 136.29385},
+                           'five_hour': {'utilization': 10, 'limit_dollars': None, 'used_dollars': None},
+                           'spend': {'used': {'amount_minor': 0, 'currency': 'USD', 'exponent': 2}, 'balance': None}})
+    rows = {row['name']: quota.normalise_window(row) for row in parsed['windows']}
+    assert (rows['iguana_necktie']['used_amount'], rows['iguana_necktie']['limit_amount']) == (136.29, 250)
+    assert rows['iguana_necktie']['currency'] == 'USD' and 'limit_amount' not in rows['five_hour']
+    # Every account seen so far reports a null balance, so none is shown.
+    assert parsed['usage_credits'] is None
+    balance = claude.usage_credits({'balance': {'amount_minor': 4250, 'currency': 'USD', 'exponent': 2}})
+    assert quota.normalise_usage_credits(balance)[0] == {
+        'kind': 'usage_credits', 'balance': 42.5, 'unlimited': False, 'currency': 'USD', 'unit': None,
+        'expires_at': None, 'source': 'provider'}
+
+
+def claude_limit(kind, group, percent, resets_at, active=True, scope=None):
+    return {'kind': kind, 'group': group, 'percent': percent, 'severity': 'normal', 'resets_at': resets_at,
+            'scope': scope, 'is_active': active}
+
+
+def test_claude_limits_take_the_length_of_the_named_window_they_repeat(quota, monkeypatch):
+    # The live anese and pro shapes from 2026-10-22: `limits` repeat named windows without a length.
+    budget = {'utilization': 54.51754, 'resets_at': '2026-11-05T07:59:00+00:00', 'limit_dollars': 250,
+              'used_dollars': 136.29385, 'remaining_dollars': 113.70615}
+    anese = {'five_hour': {'utilization': 10.0, 'resets_at': '2026-10-22T15:00:00.280268+00:00'},
+             'seven_day': {'utilization': 3.0, 'resets_at': '2026-10-28T10:00:00.280288+00:00'},
+             'iguana_necktie': budget, 'seven_day_opus': None,
+             'limits': [claude_limit('session', 'session', 10, '2026-10-22T15:00:00.280268+00:00'),
+                        claude_limit('weekly_all', 'weekly', 3, '2026-10-28T10:00:00.280288+00:00', active=False),
+                        claude_limit('weekly_scoped', 'weekly', 0, '2026-10-28T10:00:00+00:00', active=False,
+                                     scope={'model': {'id': 'fable', 'display_name': 'Fable'}, 'surface': None})]}
+    pro = {'five_hour': {'utilization': 0.0, 'resets_at': None},
+           'seven_day': {'utilization': 48.0, 'resets_at': '2026-10-25T19:59:59.866880+00:00'},
+           'limits': [claude_limit('session', 'session', 0, None, active=False),
+                      claude_limit('weekly_all', 'weekly', 48, '2026-10-25T19:59:59.866880+00:00')]}
+    claude = quota.provider('claude')
+    lengths = {name: {row['name']: row['window_minutes'] for row in claude.parse(payload)['windows']}
+               for name, payload in (('anese', anese), ('pro', pro))}
+    assert lengths['anese'] == {'five_hour': 300, 'seven_day': WEEK, 'iguana_necktie': None, 'session:1': 300}
+    assert lengths['pro'] == {'five_hour': 300, 'seven_day': WEEK, 'weekly_all:2': WEEK}
+    replies = {'anese': anese, 'pro': pro}
+    monkeypatch.setattr(quota, 'fetch', lambda account, now: claude.parse(replies[account.label]))
+    values = [quota.refresh(quota.Account('claude', label, Path('/nowhere') / label, False), NOW, force=True)
+              for label in replies]
+    states = {row['account']: row['state'] for row in quota.report(values, NOW)['accounts']}
+    assert states == {'anese': 'reserve', 'pro': 'reserve'}
+    # An entry that repeats no named window keeps no length, is shown, and never sets state.
+    unmatched = {**pro, 'limits': [claude_limit('weekly_all', 'weekly', 90, '2026-10-26T00:00:00+00:00')]}
+    row = next(row for row in claude.parse(unmatched)['windows'] if row['name'] == 'weekly_all:1')
+    assert row['window_minutes'] is None and row['advisory'] is True
+    replies['pro'] = unmatched
+    value = quota.refresh(quota.Account('claude', 'pro', Path('/nowhere/pro'), False), NOW, force=True)
+    account = quota.report([value], NOW)['accounts'][0]
+    assert 'weekly_all:1' in {window['name'] for window in account['windows']} and account['state'] == 'reserve'
 
 
 def test_claude_refuses_expiring_credentials_without_calling_the_endpoint(quota, monkeypatch, tmp_path):
@@ -437,6 +545,61 @@ def test_reset_events_are_recorded_in_the_ledger_and_pace_follows_the_latest_sna
 
 # Credits and use-it-or-lose-it ----------------------------------------------------------------
 
+def test_credits_and_resets_appear_only_for_accounts_that_have_them(quota, monkeypatch, capsys):
+    expires = NOW + timedelta(days=16)
+    replies = {'default': {'windows': [window(77, WEEK, timedelta(days=4), 'primary')],
+                           'usage_credits': [{'kind': 'credits', 'balance': '27406.21', 'unit': 'credits'}],
+                           'resets': {'available': 1, 'expires_at': [int(expires.timestamp())]}},
+               'spare': {'windows': [window(10, WEEK, timedelta(days=4), 'primary')],
+                         'usage_credits': [{'kind': 'credits', 'balance': '0'}], 'resets': {'available': 0}}}
+    monkeypatch.setattr(quota, 'fetch', lambda account, now: replies[account.label])
+    values = [quota.refresh(quota.Account('codex', label, Path('/nowhere') / label, label == 'default'), NOW, force=True)
+              for label in replies]
+    assert 'usage_credits' not in values[1] and 'resets' not in values[1]
+    rows = {row['account']: row for row in quota.report(values, NOW)['accounts']}
+    assert rows['default']['usage_credits'][0]['balance'] == 27406.21
+    assert rows['default']['resets'] == {'available': 1, 'expires_at': [iso(expires)], 'source': 'provider'}
+    assert 'usage_credits' not in rows['spare'] and 'resets' not in rows['spare']
+    quota.render(quota.report(values, NOW))
+    out = capsys.readouterr().out
+    local = expires.astimezone()
+    assert f'codex/default: 27,406 credits available; 1 banked reset (expires {local.day} {local:%b})' in out
+    assert 'codex/spare:' not in out
+
+
+def test_budget_windows_show_amounts_under_a_configurable_label(quota, tmp_path, monkeypatch, capsys):
+    budget = {**window(54.5, None, timedelta(days=14), 'iguana_necktie'), 'used_amount': 136.29, 'limit_amount': 250,
+              'currency': 'USD'}
+    monkeypatch.setattr(quota, 'fetch', lambda account, now: {'windows': [budget, window(3, WEEK, timedelta(days=6))]})
+    value = quota.refresh(quota.Account('claude', 'max-a', Path('/nowhere'), True), NOW, force=True)
+    account = quota.report([value], NOW)['accounts'][0]
+    rows = {row['name']: row for row in account['windows']}
+    assert rows['iguana_necktie']['label'] == 'Cloud session credits' and 'label' not in rows['seven_day']
+    # The budget's pace is unknown, but only the timed window sets the account's state.
+    assert rows['iguana_necktie']['pace']['state'] == 'unknown'
+    assert account['state'] == 'reserve' and account['summary'].startswith('seven_day:')
+    quota.render(quota.report([value], NOW))
+    out = capsys.readouterr().out
+    assert 'Cloud session credits' in out and '$136 of $250' in out and '3%' in out
+    configure(tmp_path, {'quota': {'window_labels': {'iguana_necktie': 'Cloud credits', 'seven_day': 'Week'}}})
+    rows = {row['name']: row for row in quota.report([value], NOW)['accounts'][0]['windows']}
+    assert (rows['iguana_necktie']['label'], rows['seven_day']['label']) == ('Cloud credits', 'Week')
+
+
+def test_peer_snapshots_carry_only_sanitised_credits_resets_and_amounts(quota):
+    telemetry = load('telemetry_for_quota_peer', ROOT / 'scripts/telemetry.py')
+    value = {'schema': quota.SCHEMA, 'provider': 'codex', 'account': 'default', 'host': 'studio',
+             'windows': [{'name': 'budget', 'used_percent': 5, 'used_amount': 'x', 'limit_amount': 250}],
+             'usage_credits': [{'kind': 'credits', 'balance': 12, 'credential': TOKEN}, {'balance': 'NaN'}],
+             'resets': {'available': 2, 'expires_at': [TOKEN, iso(NOW)], 'id': TOKEN}}
+    public = telemetry.public_snapshot(value)
+    assert TOKEN not in json.dumps(public)
+    assert public['windows'] == [{'name': 'budget', 'used_percent': 5}]
+    assert [row['balance'] for row in public['usage_credits']] == [12]
+    assert public['resets'] == {'available': 2, 'expires_at': [iso(NOW)], 'source': 'provider'}
+    assert 'resets' not in telemetry.public_snapshot({**value, 'resets': {'available': 0}})
+
+
 def test_manual_reset_credits_and_redeem_advice(quota, capsys):
     assert quota.main(['credit', 'codex', 'add']) == 0
     assert quota.main(['credit', 'codex', '--account', 'default', 'add']) == 0
@@ -449,6 +612,9 @@ def test_manual_reset_credits_and_redeem_advice(quota, capsys):
     assert advice(40, timedelta(days=3))['action'] == 'hold'
     assert advice(100, timedelta(hours=2))['action'] == 'wait'
     assert advice(100, timedelta(days=3))['action'] == 'redeem'
+    # A hand-recorded reset is still a banked reset; it has no known expiry.
+    row = quota.report([snapshot(quota, 'codex', [window(40, WEEK, timedelta(days=3))])], NOW)['accounts'][0]
+    assert row['resets'] == {'available': 1, 'expires_at': [], 'source': 'manual'}
     with pytest.raises(SystemExit):
         quota.main(['credit', 'codex', 'redeem'])
 
@@ -552,6 +718,110 @@ def test_exhausted_window_cools_the_provider_until_reset_and_deficit_is_report_o
     assert quota.apply_to_cooldowns({}, NOW) == {}
     state = quota.route_states(NOW)['codex']
     assert state['state'] == 'deficit' and 'runs out' in state['summary']
+
+
+CREDITS = [{'kind': 'credits', 'balance': 27406.21, 'unlimited': False, 'currency': None, 'unit': 'credits',
+            'expires_at': None, 'source': 'provider'}]
+
+
+def spent_codex(quota, account='default', credits=CREDITS, allowance=None, reset_in=timedelta(hours=3)):
+    return snapshot(quota, 'codex', [window(100, WEEK, reset_in, 'primary')], account=account, usage_credits=credits,
+                    **({'allowance': allowance} if allowance else {}))
+
+
+def cooldown(status, recorded, **extra):
+    return {'codex/*': {'account': 'default', 'host': 'studio', 'adapter': 'codex', 'model': '*', 'status': status,
+                        'cooling_until': iso(NOW + timedelta(hours=8)), 'recorded_at': iso(recorded), **extra}}
+
+
+def test_credits_keep_an_exhausted_codex_account_usable_as_a_last_resort(quota):
+    spent_codex(quota)
+    # The cooldown an earlier exhausted reading set goes once credits keep the account usable.
+    assert quota.apply_to_cooldowns(cooldown('quota_exhausted', NOW - timedelta(hours=1), source='provider quota'), NOW) == {}
+    state = quota.route_states(NOW)['codex']
+    assert state['state'] == 'credit_only' and state['last_resort'] is True
+    assert state['summary'] == 'primary: allowance spent; drawing on credits, 27,406 credits available'
+    row = quota.report(quota.snapshots(), NOW)['accounts'][0]
+    assert row['drawing_credits'] is True and row['credit_burn_per_hour'] is None
+    # The provider's own refusal of ordinary use spends the allowance even below 100%.
+    snapshot(quota, 'codex', [window(60, WEEK, timedelta(days=3), 'primary')], usage_credits=CREDITS,
+             allowance={'ordinary_usage_allowed': False})
+    assert quota.route_states(NOW)['codex']['state'] == 'credit_only'
+
+
+def test_a_refusal_while_drawing_on_credits_keeps_its_cooldown_until_allowance_returns(quota):
+    # Dispatch is refused (credits switched off, say); the next reading still shows credits.
+    refused = cooldown('usage_limited', NOW - timedelta(hours=1))
+    spent_codex(quota)
+    assert quota.apply_to_cooldowns(refused, NOW) == refused
+    snapshot(quota, 'codex', [window(100, WEEK, timedelta(hours=3), 'primary')], observed=NOW + timedelta(minutes=10),
+             usage_credits=CREDITS)
+    assert quota.apply_to_cooldowns(refused, NOW + timedelta(minutes=10)) == refused
+    # A reading with allowance again confirms recovery, so routing may retry.
+    snapshot(quota, 'codex', [window(5, WEEK, timedelta(days=7), 'primary')], observed=NOW + timedelta(hours=4))
+    assert quota.apply_to_cooldowns(refused, NOW + timedelta(hours=4)) == {}
+
+
+@pytest.mark.parametrize('used', [100, 60])
+@pytest.mark.parametrize('case', ['floor', 'spend_control', 'depleted', 'no_credits', 'never'])
+def test_credits_that_cannot_be_spent_leave_the_account_exhausted(quota, tmp_path, case, used):
+    configure(tmp_path, {'quota': {'credit_floor': 30000} if case == 'floor' else
+                                  {'credits_policy': 'never'} if case == 'never' else {}})
+    allowance = {'spend_control': {'spend_control_reached': True},
+                 'depleted': {'limit_reached_type': 'workspace_member_credits_depleted'}}.get(case) or {}
+    # Below 100%, only the provider's refusal of ordinary use spends the allowance.
+    allowance |= {'ordinary_usage_allowed': False} if used < 100 else {}
+    snapshot(quota, 'codex', [window(used, WEEK, timedelta(hours=3), 'primary')],
+             usage_credits=None if case == 'no_credits' else CREDITS, **({'allowance': allowance} if allowance else {}))
+    state = quota.route_states(NOW)['codex']
+    assert state['state'] == 'exhausted' and state['cooling_until'] == iso(NOW + timedelta(hours=3))
+    assert quota.apply_to_cooldowns({}, NOW)['codex/*']['status'] == 'quota_exhausted'
+    if used < 100:
+        assert state['summary'] == 'primary: allowance spent; codex refuses ordinary use'
+
+
+@pytest.mark.parametrize('reset_in', [None, -timedelta(hours=1)])
+@pytest.mark.parametrize('configured', [None, 600])
+def test_a_refused_allowance_with_no_future_reset_cools_for_a_bounded_wait(quota, tmp_path, reset_in, configured):
+    configure(tmp_path, {'quota': {'unknown_reset_cooldown_seconds': configured} if configured else {}})
+    snapshot(quota, 'codex', [window(60, WEEK, reset_in, 'primary')], usage_credits=None,
+             allowance={'ordinary_usage_allowed': False})
+    until = iso(NOW + timedelta(seconds=configured or 3600))
+    assert quota.route_states(NOW)['codex']['cooling_until'] == until
+    assert quota.apply_to_cooldowns({}, NOW)['codex/*']['cooling_until'] == until
+    # Once the wait ends, the next reading decides.
+    assert 'codex/*' not in quota.apply_to_cooldowns({}, NOW + timedelta(seconds=(configured or 3600) + 1))
+
+
+@pytest.mark.parametrize('policy, state, order, cooled', [
+    ('last_resort', 'credit_only', ['work', 'default'], False),
+    ('normal', 'credit_only', ['default', 'work'], False),
+    ('never', 'exhausted', ['work', 'default'], True)])
+def test_credits_policy_sets_state_ranking_and_cooldown(quota, tmp_path, policy, state, order, cooled):
+    configure(tmp_path, {'quota': {'credits_policy': policy},
+                         'accounts': {'codex': {'default': {}, 'work': {'identity_dir': str(tmp_path / 'codex-work')}}}})
+    spent_codex(quota, reset_in=timedelta(days=1))
+    snapshot(quota, 'codex', [window(30, WEEK, timedelta(days=5), 'primary')], account='work')
+    report = quota.report(quota.snapshots(), NOW)
+    assert next(row for row in report['accounts'] if row['account'] == 'default')['state'] == state
+    assert report['placement_preference']['codex'] == order
+    routed = quota.route_states(NOW)['codex']
+    assert routed.get('last_resort', False) is (policy == 'last_resort')
+    assert ('codex/*' in quota.apply_to_cooldowns({}, NOW)) is cooled
+
+
+def test_credit_burn_rate_spans_the_run_of_falling_balance(quota, monkeypatch):
+    balances = iter([30000, 27000, 26000, 26000])
+    monkeypatch.setattr(quota, 'fetch', lambda account, now: {
+        'windows': [window(100, WEEK, timedelta(hours=3), 'primary')],
+        'usage_credits': [{'kind': 'credits', 'balance': next(balances), 'unit': 'credits'}]})
+    account = quota.Account('codex', 'default', quota.provider('codex').default_identity(), True)
+    readings = [quota.refresh(account, NOW + timedelta(hours=hour), force=True) for hour in (0, 1, 2)]
+    assert readings[-1]['credit_anchor'] == {'balance': 30000, 'observed_at': iso(NOW)}
+    row = quota.report([readings[-1]], NOW + timedelta(hours=2))['accounts'][0]
+    assert row['credit_burn_per_hour'] == 2000 and row['summary'].endswith('26,000 credits available, about 2,000/h')
+    # A steady balance starts a new run.
+    assert quota.refresh(account, NOW + timedelta(hours=3), force=True)['credit_anchor']['balance'] == 26000
 
 
 def test_inactive_removed_and_disabled_accounts_do_not_touch_routing(quota, monkeypatch, tmp_path):
