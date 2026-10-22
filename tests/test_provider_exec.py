@@ -5677,6 +5677,51 @@ def test_capture_is_bounded_but_result_is_complete(tmp_path, monkeypatch):
     assert path.read_bytes() == b"A" * 50 + b"B" * 50
 
 
+@pytest.mark.parametrize("failure", ["write", "flush"])
+def test_capture_keeps_tail_when_disk_writes_fail(tmp_path, failure):
+    module = supervisor()
+    capture = module.BoundedCapture(tmp_path / "events.jsonl", limit=100)
+    stream = capture.file
+    class FullDisk:
+        def write(self, data):
+            if failure == "write" or capture.total >= capture.limit:
+                raise OSError(28, "No space left on device")
+            return stream.write(data)
+        def __getattr__(self, name):
+            return getattr(stream, name)
+    capture.file = FullDisk()
+    try:
+        capture.write(b"A" * 80)
+        capture.write(b"B" * 80)
+        assert capture.text() == "B" * 50
+        assert capture.write_error.errno == 28
+    finally:
+        capture.close()
+
+
+def test_handler_diagnostics_tolerate_enospc(tmp_path, monkeypatch):
+    module = supervisor()
+    plan = fixture_plan(tmp_path, "")
+    plan["argv"] = [str(tmp_path / "missing-provider")]
+    original_fdopen = os.fdopen
+    class FullDisk:
+        def __init__(self, stream):
+            self.stream = stream
+        def write(self, data):
+            raise OSError(28, "No space left on device")
+        def __getattr__(self, name):
+            return getattr(self.stream, name)
+    def fdopen(fd, mode="r", *args, **kwargs):
+        linked = os.fstat(fd).st_nlink > 0
+        stream = original_fdopen(fd, mode, *args, **kwargs)
+        return FullDisk(stream) if mode == "w+b" and linked else stream
+    monkeypatch.setattr(module.os, "fdopen", fdopen)
+    record = module.execute(plan, tmp_path / "result.md")
+    assert record["status"] == "tool_missing"
+    assert "missing-provider" in record["evidence"]["excerpt"]
+    assert any("capture write failed: [Errno 28]" in warning for warning in record["warnings"])
+
+
 def codex_profile(plan):
     """The permissions profile a Codex plan selects, and the config overrides that build it."""
     argv = plan["argv"]
