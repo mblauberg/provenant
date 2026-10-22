@@ -450,7 +450,7 @@ def test_installed_stub_delegates_non_mcp_commands_to_checkout_cli(tmp_path):
     )
 
     assert result.returncode == 0, result.stderr
-    assert "Thin front door" in result.stdout
+    assert "`provenant help <command>` for detail." in result.stdout
 
 
 def test_installed_check_uses_the_registered_caller_worktree(tmp_path):
