@@ -231,9 +231,21 @@ function realPath(path: string): string {
  * the OS temp dir or a throwaway .agent-run/scratch tree, and never in a
  * .agent-run tree that itself sits in temp (a lane's TMPDIR; issue #1002).
  */
-/** The one rule for a fixture temp root, shared with the test helpers that pick one: never inside a .agent-run tree. */
+/**
+ * The one rule for a fixture temp root, shared with the test helpers that pick
+ * one. It protects live run roots: refuse a root inside a git work tree (which
+ * covers a checkout's own .agent-run) and a run tree itself (`.agent-run` or
+ * `.agent-run/runs`). An isolated directory outside git is fine even when it
+ * sits below a lane's .agent-run, because the fixture's run root must then
+ * resolve inside that directory.
+ */
 export function acceptableFixtureTempRoot(root: string): boolean {
-  return !realPath(root).split(sep).includes(".agent-run");
+  const real = realPath(root);
+  if (basename(real) === ".agent-run" || (basename(real) === "runs" && basename(dirname(real)) === ".agent-run")) return false;
+  for (let dir = real; ; dir = dirname(dir)) {
+    if (existsSync(join(dir, ".git"))) return false;
+    if (dirname(dir) === dir) return true;
+  }
 }
 
 export function assertFixtureRunRoot(
@@ -243,7 +255,7 @@ export function assertFixtureRunRoot(
 ): void {
   if (!routes.some((route) => route.model === "fixture" || route.cli_version === "fixture")) return;
   const root = realPath(agentRun);
-  // The OS temp dir, and the roots that test helpers fall back to when TMPDIR sits in a .agent-run tree.
+  // The OS temp dir, and the roots that test helpers fall back to when TMPDIR sits in a git work tree.
   const fallbacks = [process.env.FABRIC_TEST_TMPDIR, "/tmp"].filter((path): path is string => !!path);
   const tempRoots = [...new Set([temp, ...fallbacks].map(realPath))];
   const acceptableTempRoots = tempRoots.filter(acceptableFixtureTempRoot);

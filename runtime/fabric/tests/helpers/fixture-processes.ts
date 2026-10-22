@@ -23,9 +23,18 @@ export function processesUnder(root: string): FixtureProcess[] {
   return found;
 }
 
-function ownProcessGroup(): number {
-  const out = execFileSync("ps", ["-o", "pgid=", "-p", String(process.pid)], { encoding: "utf8" });
-  return Number(out.trim());
+/** A process group id is a positive integer; anything else means unknown. */
+export function parseProcessGroup(raw: string): number | undefined {
+  const text = raw.trim();
+  if (!/^[0-9]+$/u.test(text)) return undefined;
+  const value = Number(text);
+  return Number.isSafeInteger(value) && value > 0 ? value : undefined;
+}
+
+function probeOwnProcessGroup(): string {
+  try {
+    return execFileSync("ps", ["-o", "pgid=", "-p", String(process.pid)], { encoding: "utf8" });
+  } catch { return ""; }
 }
 
 function kill(pid: number, signal: NodeJS.Signals): void {
@@ -37,7 +46,7 @@ function kill(pid: number, signal: NodeJS.Signals): void {
  * kill what is left, process groups included. Returns what had to be killed:
  * a non-empty answer means a test let a child outlive it.
  */
-export async function reapFixtureProcesses(root: string, graceMs = 2_000): Promise<FixtureProcess[]> {
+export async function reapFixtureProcesses(root: string, graceMs = 2_000, probe: () => string = probeOwnProcessGroup): Promise<FixtureProcess[]> {
   const deadline = Date.now() + graceMs;
   let remaining = processesUnder(root);
   while (remaining.length && Date.now() < deadline) {
@@ -45,9 +54,10 @@ export async function reapFixtureProcesses(root: string, graceMs = 2_000): Promi
     remaining = processesUnder(root);
   }
   // A non-detached leak shares the runner's group; signalling that group would kill the runner and its workers.
-  const own = ownProcessGroup();
+  // If the runner's own group is unknown, signal no group at all.
+  const own = parseProcessGroup(probe());
   for (const item of remaining) {
-    if (item.pgid > 1 && item.pgid !== own) kill(-item.pgid, "SIGKILL");
+    if (own !== undefined && item.pgid > 1 && item.pgid !== own) kill(-item.pgid, "SIGKILL");
     kill(item.pid, "SIGKILL");
   }
   return remaining;

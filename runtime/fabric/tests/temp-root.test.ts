@@ -1,9 +1,11 @@
 import { chmodSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, sep } from "node:path";
+import { fileURLToPath } from "node:url";
+import { runJsonSubprocess } from "../src/json-subprocess.js";
+import { dirname, join, sep } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
-import { assertFixtureRunRoot } from "../src/execution.js";
+import { acceptableFixtureTempRoot, assertFixtureRunRoot } from "../src/execution.js";
 import { fixtureBase, scratchRoot } from "./helpers/temp-root.js";
 
 const cleanup: string[] = [];
@@ -27,6 +29,7 @@ describe("scratchRoot", () => {
   it("ignores a TMPDIR inside a .agent-run tree", () => {
     const base = realpathSync(mkdtempSync(join(tmpdir(), "fake-lane-")));
     cleanup.push(base);
+    mkdirSync(join(base, ".git"));
     const agentRun = join(base, ".agent-run");
     const attemptTmp = join(agentRun, "runs/20261012-0126-batch-provenant/attempt-001/tmp");
     mkdirSync(attemptTmp, { recursive: true });
@@ -45,6 +48,7 @@ describe("scratchRoot", () => {
   it("ignores a TMPDIR symlink that resolves inside a .agent-run tree", () => {
     const base = realpathSync(mkdtempSync(join(tmpdir(), "fake-lane-link-")));
     cleanup.push(base);
+    mkdirSync(join(base, ".git"));
     const attemptTmp = join(base, ".agent-run/runs/attempt/tmp");
     mkdirSync(attemptTmp, { recursive: true });
     const link = join(base, "tmp-link");
@@ -75,7 +79,9 @@ describe("scratchRoot", () => {
     const denied = runLocal();
     chmodSync(denied, 0o500);
     cleanup.push(denied);
-    const lane = join(runLocal(), ".agent-run/attempt/tmp");
+    const checkout = runLocal();
+    mkdirSync(join(checkout, ".git"));
+    const lane = join(checkout, ".agent-run/attempt/tmp");
     mkdirSync(lane, { recursive: true });
     const good = runLocal();
 
@@ -86,17 +92,39 @@ describe("scratchRoot", () => {
   });
 
   it("fails with a fix when no temp root is writable", () => {
-    const lane = join(runLocal(), ".agent-run/attempt/tmp");
+    const checkout = runLocal();
+    mkdirSync(join(checkout, ".git"));
+    const lane = join(checkout, ".agent-run/attempt/tmp");
     mkdirSync(lane, { recursive: true });
     expect(() => fixtureBase(lane, [join(runLocal(), "missing")])).toThrow(/FABRIC_TEST_TMPDIR/u);
   });
 });
 
-it("never picks a FABRIC_TEST_TMPDIR beneath .agent-run, which assertFixtureRunRoot would refuse", () => {
-  const lane = join(runLocal(), ".agent-run/attempt/tmp");
+it("accepts an isolated lane directory under .agent-run outside git, and runs a fixture there", async () => {
+  const lane = join(runLocal(), ".agent-run/runs/20261022-run/attempt-001/tmp");
   mkdirSync(lane, { recursive: true });
   process.env.TMPDIR = lane;
   process.env.FABRIC_TEST_TMPDIR = lane;
-  expect(() => fixtureBase(lane, [lane])).toThrow(/FABRIC_TEST_TMPDIR/u);
-  expect(() => assertFixtureRunRoot(join(lane, "ws/.agent-run"), [{ model: "fixture" }], lane)).toThrow(/fixture run refused/u);
+  expect(fixtureBase(lane, [lane])).toBe(realpathSync(lane));
+
+  const root = scratchRoot("fabric-sandbox-");
+  cleanup.push(root);
+  expect(root.startsWith(realpathSync(lane) + sep)).toBe(true);
+  expect(() => assertFixtureRunRoot(join(root, "ws/.agent-run"), [{ model: "fixture" }], lane)).not.toThrow();
+  // A run tree itself is still refused.
+  expect(acceptableFixtureTempRoot(join(lane, "../../.."))).toBe(false);
+
+  const fixture = join(dirname(fileURLToPath(import.meta.url)), "lifecycle-owner-fixture.mjs");
+  const answer = await runJsonSubprocess<{ status: string }>(process.execPath, [fixture, "--preflight-json"], {
+    cwd: root, input: { tasks: [] }, timeoutMs: 10_000, maxBytes: 65_536, unavailable: "fixture unavailable",
+  });
+  expect(answer.status).toBe("validated");
+});
+
+it("refuses a temp root inside a git work tree", () => {
+  const repo = runLocal();
+  mkdirSync(join(repo, ".git"));
+  const inner = join(repo, "tmp");
+  mkdirSync(inner);
+  expect(() => fixtureBase(inner, [inner])).toThrow(/FABRIC_TEST_TMPDIR/u);
 });

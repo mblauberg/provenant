@@ -18,11 +18,11 @@ describe("assertFixtureRunRoot", () => {
       .toThrow(/fixture run refused/u);
   });
 
-  it("refuses a fixture run whose temp dir itself sits inside a .agent-run tree", () => {
+  it("refuses a fixture run whose temp dir is a run tree itself", () => {
     expect(() => assertFixtureRunRoot(
-      "/a/.agent-run/att/tmp/ws/.agent-run",
+      "/a/.agent-run/runs/ws/.agent-run",
       [{ model: "fixture" }],
-      "/a/.agent-run/att/tmp",
+      "/a/.agent-run/runs",
     )).toThrow(/fixture run refused/u);
   });
 

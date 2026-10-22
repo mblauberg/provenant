@@ -1,8 +1,8 @@
 import { spawn } from "node:child_process";
 import { mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
-import { afterEach, expect, it } from "vitest";
-import { processesUnder, reapFixtureProcesses } from "./helpers/fixture-processes.js";
+import { afterEach, expect, it, vi } from "vitest";
+import { parseProcessGroup, processesUnder, reapFixtureProcesses } from "./helpers/fixture-processes.js";
 import { scratchRoot } from "./helpers/temp-root.js";
 
 const roots: string[] = [];
@@ -48,4 +48,27 @@ it("kills a non-detached leak by pid without signalling the runner's own group",
   expect(processesUnder(root)).toEqual([]);
   // Still alive to assert this: the runner's group was not signalled.
   expect(() => process.kill(process.pid, 0)).not.toThrow();
+});
+
+it.each(["", "   \n", "abc", "0", "-5", "12x", "1.5", "NaN"])("treats %j as an unknown process group", (raw) => {
+  expect(parseProcessGroup(raw)).toBeUndefined();
+});
+
+it("parses a real process group", () => {
+  expect(parseProcessGroup(" 4242\n")).toBe(4242);
+});
+
+it.each(["", "garbage", "0"])("signals no group when the runner's group probe answers %j", async (answer) => {
+  const root = scratchRoot("fabric-leak-");
+  roots.push(root);
+  const pid = sleeper(root, { detached: true });
+  const kill = vi.spyOn(process, "kill");
+  try {
+    const leaked = await reapFixtureProcesses(root, 100, () => answer);
+    expect(leaked.map((item) => item.pid)).toEqual([pid]);
+    expect(kill.mock.calls.filter(([target]) => (target as number) <= 0)).toEqual([]);
+  } finally {
+    kill.mockRestore();
+  }
+  expect(processesUnder(root)).toEqual([]);
 });
