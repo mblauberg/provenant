@@ -916,7 +916,7 @@ class LaneLoopbackContracts(unittest.TestCase):
         self.assertEqual(process.returncode, 0 if value['ok'] else 1, process.stderr + process.stdout)
         return value
 
-    def mcp(self, name, arguments, seat='codex'):
+    def mcp(self, name, arguments, seat='codex', cwd=None):
         client_module = ROOT / 'node_modules/@modelcontextprotocol/sdk/dist/esm/client/index.js'
         transport_module = ROOT / 'node_modules/@modelcontextprotocol/sdk/dist/esm/client/stdio.js'
         script = ('import {Client} from ' + json.dumps(client_module.as_uri()) + ';\n'
@@ -928,7 +928,7 @@ class LaneLoopbackContracts(unittest.TestCase):
             + 'const result=await client.callTool(' + json.dumps({'name': name, 'arguments': arguments}) + ');\n'
             + 'console.log(JSON.stringify(result.structuredContent ?? JSON.parse(result.content[0].text)));\n'
             + '}finally{await client.close();}')
-        process = subprocess.run(['node', '--input-type=module', '-e', script], cwd=self.workspace,
+        process = subprocess.run(['node', '--input-type=module', '-e', script], cwd=cwd or self.workspace,
             env={**self.env, 'AGENT_FABRIC_SEAT': seat}, capture_output=True, text=True, timeout=40)
         self.assertEqual(process.returncode, 0, process.stdout + process.stderr)
         return json.loads(process.stdout)
@@ -1297,6 +1297,37 @@ class LaneLoopbackContracts(unittest.TestCase):
             self.assertTrue(launched['id'].endswith('@workshop'), launched)
         finally:
             self.client('cancel', id=launched['id'], operation_id='stop-mapped')
+
+    def test_mcp_remote_placement_uses_task_paths_from_a_non_repository_cwd(self):
+        self.set_peer_response_deadline(30)
+        _, _, local = self.writer_fixture()
+        for mode, key in [('worktree_write', 'worktree'), ('read_only', 'cwd')]:
+            for batch in (False, True):
+                with self.subTest(mode=mode, batch=batch):
+                    identifier = 'path-' + key + ('-batch' if batch else '')
+                    task = dict(mode=mode, prompt='slow', **{key: str(local)})
+                    request = dict(host='workshop', adapter='codex', model='fixture',
+                        operation_id=identifier, detail='full')
+                    if batch:
+                        request['tasks'] = [dict(id=identifier, **task)]
+                    else:
+                        request.update(task_id=identifier, **task)
+                    launched = self.mcp('fabric_dispatch', request, cwd=self.local_home)
+                    self.assertEqual(launched['status'], 'running', launched)
+                    try:
+                        self.assertEqual(launched['host'], 'workshop', launched)
+                    finally:
+                        self.client('cancel', id=launched['id'], operation_id='stop-' + identifier)
+                        self.wait_writer(launched['id'])
+
+    def test_remote_writer_name_error_reports_expected_branch_directory(self):
+        git, _, local = self.writer_fixture()
+        git(local, 'branch', '-m', 'feat/expected')
+        refused = self.client('dispatch', host='workshop', adapter='codex', model='fixture',
+            prompt='fixture only', mode='worktree_write', worktree=str(local),
+            operation_id='wrong-directory')
+        self.assertEqual(refused['error'], 'worktree_invalid', refused)
+        self.assertIn('feat-expected', refused['fix'])
 
     def test_remote_cwd_outside_every_registered_project_is_refused_naming_path_and_host(self):
         self.writer_fixture()

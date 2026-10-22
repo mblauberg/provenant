@@ -617,23 +617,30 @@ class LaneFederation:
         return {**request, 'host': hosts.pop(), 'tasks': [{k: v for k, v in task.items() if k != 'host'} for task in tasks]}
 
     def request_project(self, cwd, request):
-        """The project a request names by its own cwd (a linked worktree maps to its primary), else the chair's.
+        """Place from the task workspace before consulting the caller's directory.
 
-        Also returns the cwd that maps to no registered project, which a remote placement must refuse.
+        Linked worktrees map to their primary project. A batch has one project,
+        and task paths override its inherited paths just as local dispatch does.
         """
-        chair = self.h.project_identity(cwd)
-        if not (isinstance(request.get('cwd'), str) and request['cwd']):
-            return chair, None
-        path = Path(request['cwd']).expanduser()
-        path = path if path.is_absolute() else Path(cwd or Path.cwd()) / path
-        try:
-            named = self.h.project_identity(path)
-        except self.h.HostError:
-            # Outside home: path rewriting refuses it with invalid_remote_path.
-            return chair, None
-        if named in self.config.projects:
-            return named, None
-        return chair, None if named == chair else path
+        named_paths = []
+        for task in request.get('tasks') or [{}]:
+            effective = {**request, **task}
+            mode = effective.get('mode', 'read_only')
+            writer = str(mode).lower() in {'worktree_write', 'write', 'rw', 'worktree'}
+            raw = effective.get('worktree' if writer else 'cwd')
+            if not isinstance(raw, str) or not raw:
+                continue
+            path = Path(raw).expanduser()
+            path = path if path.is_absolute() else Path(cwd or Path.cwd()) / path
+            try:
+                named = self.h.project_identity(path)
+            except self.h.HostError:
+                # Outside home: path rewriting returns invalid_remote_path.
+                continue
+            named_paths.append((named, path))
+        registered = [name for name, _ in named_paths if name in self.config.projects]
+        project = registered[0] if registered else self.h.project_identity(cwd)
+        return project, next((path for name, path in named_paths if name != project), None)
 
     def placed_call(self, action, cwd, request):
         if os.environ.get('PROVENANT_HOST_LOCAL_ONLY') == '1':
@@ -733,7 +740,7 @@ class LaneFederation:
             raise self.h.HostError('unknown_host', 'Host is not configured')
         if unmapped:
             raise self.h.HostError('invalid_project_path',
-                f'cwd {unmapped} is not inside a project registered in hosts.json; cannot place it on {host}')
+                f'Workspace {unmapped} is not inside a project registered in hosts.json; cannot place it on {host}')
         if request.get('knobs'):
             raise self.h.HostError('knob_remote_unsupported', '--knob applies only to lanes placed on this host; '
                                    'set the knob in ' + host + "'s profile, or place the lane locally with --host " + self.config.local_host)
