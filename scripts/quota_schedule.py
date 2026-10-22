@@ -87,15 +87,15 @@ def resolve(provider, account_quota=None, settings=None):
     """(config, notes) for one account; every key comes from the first layer that sets it validly."""
     settings = settings if isinstance(settings, dict) else {}
     providers = settings.get('providers') if isinstance(settings.get('providers'), dict) else {}
-    layers = [('account quota', account_quota), (f'quota.providers.{provider}', providers.get(provider)),
-              ('quota.schedule', settings.get('schedule')), ('quota.backoff', settings.get('backoff'))]
+    shared = [('account quota', account_quota), (f'quota.providers.{provider}', providers.get(provider))]
+    # Backoff keys read `quota.backoff`; every other key reads `quota.schedule`.
+    layers = {True: [*shared, ('quota.backoff', settings.get('backoff'))],
+              False: [*shared, ('quota.schedule', settings.get('schedule'))]}
     defaults = {**SCHEDULE, **BACKOFF, **DEFAULT_POLICY, **POLICY.get(provider, {})}
     config, notes = {}, []
     for key, default in defaults.items():
-        for name, layer in layers:
+        for name, layer in layers[key in BACKOFF]:
             if not isinstance(layer, dict) or key not in layer:
-                continue
-            if name == 'quota.schedule' and key in BACKOFF or name == 'quota.backoff' and key not in BACKOFF:
                 continue
             if _valid(key, layer[key]):
                 config[key] = layer[key]
