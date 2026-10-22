@@ -22,7 +22,7 @@ import type { RouteInput } from "./execution-input.js";
 import {
   federatedStatusRows as statusRows, fabricStatus, findRecordedRun, listRecordedRuns, retentionHours, terminateRecordedRun,
 } from "./run-registry.js";
-import { inspectDatabase, Store } from "./store.js";
+import { inspectDatabase, isSQLiteContention, Store } from "./store.js";
 import { waitForLanes } from "./lane-wait.js";
 import { readEvents, readRuns } from "./run-reader.js";
 import { reconcileSession, sessionDispatch, sessionName, sessionView } from "./sessions.js";
@@ -210,26 +210,41 @@ if (command === "lanes") {
     store.announce(laneWho);
     let code: number;
     const held: string[] = [];
+    // With --summary, lanes are acknowledged only once printed, so a lane cut by the cap is reported next wait.
+    let toMark: Parameters<Store["markLanesSeen"]>[1] = [];
+    const waitStore = summary ? {
+      unseenLanes: (who: Parameters<Store["unseenLanes"]>[0], rows: Parameters<Store["unseenLanes"]>[1]) => store.unseenLanes(who, rows),
+      markLanesSeen: (_who: Parameters<Store["markLanesSeen"]>[0], rows: Parameters<Store["markLanesSeen"]>[1]) => { toMark = rows; },
+    } : store;
     try {
       // The registered project, not the raw cwd, owns the runs; the normal
       // retention window bounds the scan, and no row cap may hide a completion.
       code = await waitForLanes({
-        who: laneWho, store, all, timeoutSeconds,
+        who: laneWho, store: waitStore, all, timeoutSeconds,
         read: () => readRuns(laneWho.project, watched, 0, undefined, null),
         write: (text) => summary ? Promise.resolve(void held.push(text)) : new Promise((resolveWrite, reject) =>
           process.stdout.write(text, (error) => (error ? reject(error) : resolveWrite()))),
         fail: (text) => console.error(text),
         sleep: (ms) => new Promise((resolveSleep) => setTimeout(resolveSleep, ms)),
       });
+      if (summary) {
+        // One bounded line per lane, rather than the full listing; the lane lines come first.
+        const lines = held.join("").split("\n").filter(Boolean);
+        const laneLines = Math.min(toMark.length, lines.length);
+        const cap = 20;
+        const clip = (line: string) => line.length > 160 ? `${line.slice(0, 159)}…` : line;
+        const shown = lines.slice(0, Math.min(laneLines, cap)).map(clip);
+        if (laneLines > cap) shown.push(`+${laneLines - cap} more; run lanes --wait again`);
+        shown.push(...lines.slice(laneLines).map(clip));
+        if (shown.length) console.log(shown.join("\n"));
+        try {
+          store.markLanesSeen(laneWho, toMark.slice(0, cap));
+        } catch (error) {
+          if (!isSQLiteContention(error)) throw error;
+        }
+      }
     } finally {
       store.close();
-    }
-    if (summary) {
-      // One bounded line per lane, rather than the full listing.
-      const lines = held.join("").split("\n").filter(Boolean);
-      const shown = lines.slice(0, 20).map((line) => line.length > 160 ? `${line.slice(0, 159)}…` : line);
-      if (lines.length > shown.length) shown.push(`+${lines.length - shown.length} more`);
-      if (shown.length) console.log(shown.join("\n"));
     }
     process.exit(code);
   }

@@ -1243,3 +1243,21 @@ def test_show_resolves_task_id_and_bounds_the_result_tail(tmp_path: Path) -> Non
 def test_show_rejects_unknown_reference(tmp_path: Path) -> None:
     make_listed_run(tmp_path)
     assert invoke("run", "show", "missing", cwd=tmp_path).returncode == 2
+
+
+def test_show_does_not_follow_symlinks_out_of_the_run(tmp_path: Path) -> None:
+    run_dir = make_listed_run(tmp_path)
+    attempt_dir = write_attempt(run_dir).parent
+    secret = tmp_path / "outside.txt"
+    secret.write_text("TOPSECRET\n", encoding="utf-8")
+    (attempt_dir / "result.md").unlink()
+    (attempt_dir / "result.md").symlink_to(secret)
+    shown = invoke("run", "show", "task-1", cwd=tmp_path)
+    assert "TOPSECRET" not in shown.stdout and "result unavailable" in shown.stdout
+    outside = tmp_path / "outside-attempt"
+    outside.mkdir()
+    (outside / "result.md").write_text("TOPSECRET\n", encoding="utf-8")
+    (run_dir / "dispatch/tasks/task-2").mkdir()
+    (run_dir / "dispatch/tasks/task-2/attempt-001").symlink_to(outside)
+    shown = invoke("run", "show", "task-1", "--task-id", "task-2", cwd=tmp_path)
+    assert "TOPSECRET" not in shown.stdout and "TOPSECRET" not in shown.stderr

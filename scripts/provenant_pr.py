@@ -39,7 +39,7 @@ def gh(*arguments: str) -> subprocess.CompletedProcess[str]:
 
 
 def view(reference: str) -> dict | None:
-    result = gh("pr", "view", reference, "--json", "number,headRefOid,state")
+    result = gh("pr", "view", reference, "--json", "number,headRefOid,state,baseRefName")
     if result.returncode != 0:
         view.error = result.stderr.strip() or "gh pr view failed"  # type: ignore[attr-defined]
         return None
@@ -85,8 +85,47 @@ def fetch_checks(number: int) -> list[dict] | None:
     return rows
 
 
-def settled(rows: list[dict]) -> bool:
-    return bool(rows) and all(row["bucket"] in PASSING | FAILING for row in rows)
+def expected_contexts(base: str) -> set[str]:
+    """Required status-check contexts for the base branch, from rulesets and branch protection.
+
+    Best effort: an unreadable or unconfigured source contributes nothing.
+    """
+    names: set[str] = set()
+    ruled = gh("api", f"repos/{{owner}}/{{repo}}/rules/branches/{base}")
+    try:
+        for rule in json.loads(ruled.stdout) if ruled.returncode == 0 else []:
+            if isinstance(rule, dict) and rule.get("type") == "required_status_checks":
+                for check in (rule.get("parameters") or {}).get("required_status_checks") or []:
+                    names.add(str(check.get("context")))
+    except (json.JSONDecodeError, AttributeError, TypeError):
+        pass
+    classic = gh("api", f"repos/{{owner}}/{{repo}}/branches/{base}/protection/required_status_checks")
+    try:
+        data = json.loads(classic.stdout) if classic.returncode == 0 else {}
+        names.update(str(context) for context in data.get("contexts") or [])
+        names.update(str(check.get("context")) for check in data.get("checks") or [])
+    except (json.JSONDecodeError, AttributeError, TypeError):
+        pass
+    names.discard("None")
+    return names
+
+
+def covers(context: str, row_name: str) -> bool:
+    return row_name == context or context.endswith(f"/ {row_name}") or row_name.endswith(f"/ {context}")
+
+
+def settled(rows: list[dict], expected: set[str], previous: list[str] | None) -> bool:
+    """Every row is done and the required set is complete.
+
+    With known required contexts, each must have registered. Without them, a
+    check that has not registered yet is invisible, so the finished set must
+    also be unchanged since the previous poll.
+    """
+    if not rows or not all(row["bucket"] in PASSING | FAILING for row in rows):
+        return False
+    if expected:
+        return all(any(covers(context, row["name"]) for row in rows) for context in expected)
+    return previous == sorted(row["name"] for row in rows)
 
 
 def emit(number: int, head: str, outcome: str, rows: list[dict], as_json: bool) -> None:
@@ -108,6 +147,8 @@ def checks(args: argparse.Namespace) -> int:
     number = int(state["number"])
     head = str(state["headRefOid"])
     rows: list[dict] = []
+    expected = expected_contexts(str(state.get("baseRefName") or "main"))
+    previous: list[str] | None = None
     delay = start
     while True:
         if state is not None:
@@ -116,14 +157,19 @@ def checks(args: argparse.Namespace) -> int:
                 return 1
             if state["headRefOid"] != head:
                 print(f"provenant pr: head moved to {state['headRefOid'][:12]}; following it", file=sys.stderr)
-                head, rows, delay = str(state["headRefOid"]), [], start
+                head, rows, delay, previous = str(state["headRefOid"]), [], start, None
         fetched = fetch_checks(number)
         after = view(str(number))
         # A push between the two calls makes the rows belong to the old head; discard them.
         if fetched is not None and after is not None and after["headRefOid"] == head:
             rows = fetched
-            if not args.wait or settled(rows):
-                outcome = "pending" if not settled(rows) else (
+            done = settled(rows, expected, previous)
+            previous = sorted(row["name"] for row in rows) if all(
+                row["bucket"] in PASSING | FAILING for row in rows) else None
+            if not args.wait and not expected and all(row["bucket"] in PASSING | FAILING for row in rows) and rows:
+                done = True
+            if not args.wait or done:
+                outcome = "pending" if not done else (
                     "fail" if any(row["bucket"] in FAILING for row in rows) else "pass")
                 emit(number, head, outcome, rows, args.json)
                 return 0 if outcome == "pass" else 1 if outcome == "fail" else 3

@@ -1084,27 +1084,39 @@ def _find_run(reference: str) -> tuple[Path, str | None]:
     raise ControlError(f"no run or task matches: {reference}")
 
 
-def _tail_lines(path: Path, count: int) -> tuple[list[str], bool]:
-    """Last `count` lines of a regular file, reading at most SHOW_READ_BYTES."""
-    if path.is_symlink() or not path.is_file():
-        return [], False
-    size = path.stat().st_size
-    with path.open("rb") as stream:
-        stream.seek(max(0, size - SHOW_READ_BYTES))
-        text = stream.read().decode("utf-8", errors="replace")
+def _tail_lines(run_dir: Path, relative: str, count: int) -> tuple[list[str], bool, str | None]:
+    """Last `count` lines of a contained regular file, reading at most SHOW_READ_BYTES.
+
+    Opening through the custody helper refuses symlinks at every component, so a
+    planted link cannot make `run show` print content from outside the run.
+    """
+    try:
+        fd, _, _ = open_contained_regular(run_dir, relative, os.O_RDONLY, label="result")
+    except OwnedFileError as exc:
+        return [], False, str(exc)
+    try:
+        size = os.fstat(fd).st_size
+        os.lseek(fd, max(0, size - SHOW_READ_BYTES), os.SEEK_SET)
+        text = os.read(fd, SHOW_READ_BYTES).decode("utf-8", errors="replace")
+    finally:
+        os.close(fd)
     lines = text.splitlines()
-    clipped = size > SHOW_READ_BYTES or len(lines) > count
-    return lines[-count:] if count else [], clipped
+    return (lines[-count:] if count else []), size > SHOW_READ_BYTES or len(lines) > count, None
+
+
+def _read_json(run_dir: Path, relative: str) -> Any:
+    try:
+        _, _, data = read_contained_regular(run_dir, relative, label=relative, max_bytes=1024 * 1024)
+        return json.loads(data.decode("utf-8"))
+    except (OwnedFileError, UnicodeDecodeError, json.JSONDecodeError):
+        return None
 
 
 def _show(args: argparse.Namespace) -> int:
     tail = max(0, min(args.tail, MAX_SHOW_TAIL_LINES))
     run_dir, task_filter = _find_run(args.reference)
     task_filter = args.task_id or task_filter
-    try:
-        status = json.loads((run_dir / "dispatch-status.json").read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
-        status = None
+    status = _read_json(run_dir, "dispatch-status.json")
     tasks_root = run_dir / "dispatch" / "tasks"
     tasks = []
     names = [task_filter] if task_filter else sorted(
@@ -1115,15 +1127,13 @@ def _show(args: argparse.Namespace) -> int:
         if not attempts:
             continue
         attempt = attempts[-1]
-        try:
-            record = json.loads((attempt / "attempt.json").read_text(encoding="utf-8"))
-        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
-            record = None
+        record = _read_json(run_dir, f"dispatch/tasks/{name}/{attempt.name}/attempt.json")
         state = canonical_success_status(record.get("status")) if isinstance(record, dict) else "running"
-        lines, clipped = _tail_lines(attempt / "result.md", tail)
+        result_path = f"dispatch/tasks/{name}/{attempt.name}/result.md"
+        lines, clipped, error = _tail_lines(run_dir, result_path, tail)
         tasks.append({"task_id": name, "attempt_id": attempt.name, "status": state,
-                      "result_path": str((attempt / "result.md").relative_to(run_dir)),
-                      "result_tail": lines, "result_clipped": clipped})
+                      "result_path": result_path, "result_tail": lines, "result_clipped": clipped,
+                      "result_error": error})
     if task_filter and not tasks:
         raise ControlError(f"task has no attempts: {task_filter}")
     report = {"schema_version": 1, "run_id": run_dir.name, "run_dir": str(run_dir),
@@ -1136,6 +1146,8 @@ def _show(args: argparse.Namespace) -> int:
         print(f"task {item['task_id']} {item['attempt_id']} status {item['status']}")
         if item["result_clipped"]:
             print(f"... (last {len(item['result_tail'])} lines of {item['result_path']})")
+        if item["result_error"]:
+            print(f"result unavailable: {item['result_error']}")
         for line in item["result_tail"]:
             print(line)
     return 0
