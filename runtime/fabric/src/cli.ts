@@ -69,6 +69,11 @@ const USAGE = `fabric <command>
                               wait for a lane to finish or need input; --all waits
                               for every listed lane; exit 124 on timeout
   lanes --project <path> …   read another project's lanes (default: from the cwd)
+  graph run --file F          validate a plan graph, start its owner, print its digest
+  graph status [ID] [--json] [--wait [--timeout N]]
+                              one graph's digest, or the list; exit 124 on timeout
+  graph cancel ID [--node N]  fenced cancel of a graph or one node
+  graph resume ID             restart a graph whose owner died
   events [--follow] [--until-idle]  JSON lines; follow stays open unless idle exit is requested
   status [id] [--wait-seconds N]  run status by task, batch or run directory; no id: store summary
   doctor [--json]             read-only schema and integrity diagnostics
@@ -113,9 +118,18 @@ const commands = new Set([
   "whoami", "send", "inbox", "ack", "note", "tasks", "task", "claim", "done",
   "activity", "watch", "status", "doctor", "dispatch", "adapters", "lanes", "events",
   "work-claims", "landing-wait", "landing-push", "landing-acquire", "landing-verify", "landing-release",
-  "landing-status", "session", "cancel", "output", "fetch",
+  "landing-status", "session", "cancel", "output", "fetch", "graph",
 ]);
 
+// Internal graph-runner entry points: never listed, never run by hand.
+if (command === "gate-exec") {
+  const { runGateExec } = await import("./graph/gates.js");
+  process.exit(await runGateExec(argv[1] ?? ""));
+}
+if (command === "graph-owner") {
+  const { runGraphOwner } = await import("./graph/owner.js");
+  process.exit(await runGraphOwner(argv[1] ?? "", argv[2] ?? ""));
+}
 if (command === "--help" || command === "-h" || command === "help") {
   console.log(USAGE);
   process.exit(0);
@@ -217,6 +231,31 @@ if (command === "cancel" || command === "output") {
     process.exit(2);
   }
 }
+if (command === "graph") {
+  const { graphCancel, graphResume, graphRun, graphStatus } = await import("./graph/surface.js");
+  let file: string | undefined, timeout: string | undefined, node: string | undefined;
+  try { file = flag("file"); timeout = flag("timeout"); node = flag("node"); }
+  catch (error) { console.error(`fabric: ${error instanceof Error ? error.message : String(error)}`); process.exit(2); }
+  const [verb, ...rest] = argv.slice(1);
+  const json = rest.includes("--json"), wait = rest.includes("--wait"), force = rest.includes("--force");
+  const words = rest.filter((value) => value !== "--json" && value !== "--wait" && value !== "--force");
+  const timeoutSeconds = timeout === undefined ? undefined : Number(timeout);
+  const usage = "fabric: usage: fabric graph run --file F | status [ID] [--json] [--wait [--timeout N]] | cancel ID [--node N] | resume ID [--force]";
+  const valid = (verb === "run" && file !== undefined && !words.length && !wait && node === undefined) ||
+    (verb === "status" && words.length <= 1 && file === undefined && node === undefined && (timeout === undefined || wait) &&
+      (timeoutSeconds === undefined || timeoutSeconds >= 0) && !(json && wait)) ||
+    (verb === "cancel" && words.length === 1 && file === undefined && !wait) ||
+    (verb === "resume" && words.length === 1 && file === undefined && node === undefined && !wait);
+  if (!valid || (force && verb !== "resume") || words.some((value) => value.startsWith("--"))) { console.error(usage); process.exit(2); }
+  const chair = executionIdentity();
+  const result = verb === "run" ? graphRun({ file }, chair)
+    : verb === "status" ? await graphStatus(words[0], chair, process.env, { waitSeconds: wait ? (timeoutSeconds ?? 86_400) : 0 })
+    : verb === "cancel" ? graphCancel(words[0]!, node, chair)
+    : graphResume(words[0]!, chair, process.env, force);
+  if (json) console.log(JSON.stringify(result, null, 2));
+  else console.log(typeof result.digest === "string" ? result.digest : `${String(result.error ?? result.status)}${result.fix ? `\nfix: ${String(result.fix)}` : ""}`);
+  process.exit(result.status === "rejected" ? 1 : result.timed_out ? 124 : 0);
+}
 if (command === "lanes") {
   let project: string | undefined, timeout: string | undefined;
   try {
@@ -243,6 +282,9 @@ if (command === "lanes") {
   }
   if (wait) {
     const watched = ids.length ? ids : undefined;
+    // A graph whose owner died schedules nothing more: say how to restart it before waiting.
+    const hint = (await import("./graph/surface.js")).deadGraphHint(laneWho);
+    if (hint) console.error(hint);
     const store = new Store(databasePath());
     store.announce(laneWho);
     let code: number;
@@ -676,7 +718,7 @@ try {
     const head = execFileSync("git", ["rev-parse", "HEAD"], { ...gitOptions, encoding: "utf8" }).trim();
     execFileSync("git", ["merge-base", "--is-ancestor", remote, head], gitOptions);
     const root = productRoot(process.env);
-    execFileSync(await pythonOwner(root, who, process.env),
+    execFileSync(await pythonOwner(root, process.env),
       [resolve(root, "skills/orchestrate/scripts/lane_protection.py"),
         "--common-dir", resolve(who.project, ".git"), "--tip", head, "--base", lease.expectedSha],
       { ...gitOptions, stdio: ["ignore", "ignore", "inherit"], timeout: 30_000 });

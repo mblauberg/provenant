@@ -289,7 +289,7 @@ function register(
   const inputSchema = z.object(accepted).catchall(z.unknown()).meta({ additionalProperties: false });
   server.registerTool(name, { description, inputSchema }, async (rawInput, extra) => {
     const includeStructuredContent =
-      !["fabric_dispatch", "fabric_status", "fabric_cancel", "fabric_runs"].includes(name) || rawInput.detail === "full";
+      !["fabric_dispatch", "fabric_status", "fabric_cancel", "fabric_runs", "fabric_graph"].includes(name) || rawInput.detail === "full";
     try {
       let corrected;
       try { corrected = normaliseInputKeys(name, rawInput, Object.keys(schema)); }
@@ -631,6 +631,31 @@ register("fabric_cancel", "Stop a run and its provider group, or one task of a b
   const view = runView(result);
   return detail === "full" ? view : { ...view, digest: cancelDigest(view) };
 });
+register("fabric_graph",
+  "Run a plan graph of dispatch nodes under a detached owner, or read, cancel or resume one. run takes file or document; status without id lists graphs and restarts a dead owner; wait_seconds up to 55.",
+  { action: z.enum(["run", "status", "cancel", "resume"]), file: str, document: z.record(z.string(), z.unknown()).optional(),
+    id: str, node: str, force: z.boolean().optional(), wait_seconds: wait, detail },
+  async ({ action, file, document, id, node, force, wait_seconds, detail }, { signal }) => {
+    const misuse = (fix: string) => ({ status: "rejected", error: "graph_input_invalid", fix });
+    if (action === "run" && (file === undefined) === (document === undefined)) return misuse("Pass exactly one of file or document for run.");
+    if (action !== "run" && (file !== undefined || document !== undefined)) return misuse(`Remove file and document: ${action} reads an existing graph.`);
+    if ((action === "cancel" || action === "resume") && id === undefined) return misuse(`Pass the graph id to ${action}.`);
+    if (force !== undefined && action !== "resume") return misuse("force applies only to resume.");
+    if (node !== undefined && action !== "cancel") return misuse("node applies only to cancel.");
+    const waitResult = boundedWait(wait_seconds);
+    if (waitResult.error) return waitResult.error;
+    if (waitResult.value !== undefined && action !== "status") return misuse("wait_seconds applies only to status.");
+    const { graphCancel, graphResume, graphRun, graphStatus } = await import("./graph/surface.js");
+    const chair = executionIdentity();
+    const result = action === "run" ? graphRun(file !== undefined ? { file } : { document }, chair)
+      : action === "status" ? await graphStatus(id, chair, process.env, { waitSeconds: waitResult.value ?? 0, resume: true, signal })
+      : action === "cancel" ? graphCancel(id!, node, chair)
+      : graphResume(id!, chair, process.env, force);
+    const view = withWarnings(result, waitResult.warnings);
+    return detail === "full" ? view : { status: view.status, ...(view.error ? { error: view.error, fix: view.fix } : {}),
+      ...(typeof view.digest === "string" ? { digest: view.digest } : {}), ...(view.warnings ? { warnings: view.warnings } : {}) };
+  },
+);
 register("fabric_fetch", "Fetch one terminal remote writer: verify on the owning host, import its commits and compare the bound head.",
   { id: z.string() }, async (input, { signal }) =>
     await federatedLane("fetch", who.cwd, input, signal) ??
