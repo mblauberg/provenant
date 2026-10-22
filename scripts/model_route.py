@@ -284,23 +284,32 @@ def _apply_free_pattern(adapter: dict[str, Any]) -> None:
                 entry.setdefault("warning", FREE_TIER_WARNING)
 
 
+_EFFORT_VALUE_KEYS = {"effort", "default_effort", "maximum_effort", "minimum_effort"}
+
+
 def _reject_max(value: Any, path: str = "", key: str = "", container: str = "") -> None:
     """Refuse a catalogue (usually an old instance overlay) that still offers the retired `max` effort."""
     if isinstance(value, dict):
         for name, item in value.items():
             _reject_max(item, f"{path}.{name}" if path else name, name, key)
         return
-    retired = (isinstance(value, list) and (key in _EFFORT_LIST_KEYS or container == "per_model_efforts")
-               and any(isinstance(item, str) and item.lower() == "max" for item in value)) or (
-        isinstance(value, str) and value.lower() == "max"
-        and (key == "effort" or "role_effort_defaults" in path.split(".")))
-    if retired:
+    is_max = lambda item: isinstance(item, str) and item.strip().lower() == "max"  # noqa: E731
+    if isinstance(value, list):
+        if key in {*_EFFORT_LIST_KEYS, "effort"} or container == "per_model_efforts":
+            if any(is_max(item) for item in value):
+                raise _pools.RenamedNameError(f"catalogue {path}: effort 'max' was retired; fix: use xhigh")
+            return
+        for index, item in enumerate(value):
+            _reject_max(item, f"{path}[{index}]", key, container)
+        return
+    if is_max(value) and (key in _EFFORT_VALUE_KEYS or "role_effort_defaults" in path.split(".")):
         raise _pools.RenamedNameError(f"catalogue {path}: effort 'max' was retired; fix: use xhigh")
 
 
 def catalogue_snapshot(path: Path | None = None) -> dict[str, Any]:
     product = path or PRODUCT_CATALOG_PATH
     base = json.loads(product.read_text())
+    _pools.reject_renamed(base, "catalogue")
     drift: list[str] = []
     sources = [str(product)]
     stale_routing = False

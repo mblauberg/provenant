@@ -793,3 +793,60 @@ def test_a_symlinked_pointer_directory_is_refused_by_the_seeder(tmp_path):
     assert "escapes the instance root" in result.stderr
     assert "Traceback" not in result.stderr
     assert list(outside.iterdir()) == []
+
+
+OLD_NAMES = {"junior": "scout", "senior": "workhorse", "principal": "flagship"}
+
+
+def legacy_copy(document):
+    """The shipped catalogue in the shape of an old install: adapter aliases and synonyms under the retired names."""
+    document = json.loads(json.dumps(document))
+    for section in ("families", "adapters"):
+        for entry in document.get(section, {}).values():
+            entry["aliases"] = {OLD_NAMES.get(key, key): value for key, value in entry.get("aliases", {}).items()}
+            for key in ("role_overrides", "role_effort_defaults"):
+                entry[key] = {role: {OLD_NAMES.get(a, a): value for a, value in roles.items()}
+                              for role, roles in entry.get(key, {}).items()}
+            for override in entry.get("risk_tier_overrides", {}).values():
+                override["alias"] = OLD_NAMES.get(override.get("alias"), override.get("alias"))
+    for route in document["task_class_routes"].values():
+        route["alias"] = OLD_NAMES.get(route["alias"], route["alias"])
+    document["route_synonyms"].update({"flagship": "principal", "workhorse": "senior", "strong": "senior",
+                                       "review": "senior", "bulk": "junior", "scout": "junior"})
+    return document
+
+
+@pytest.mark.parametrize("with_base", [False, True])
+def test_refresh_migrates_retired_tier_names_and_the_router_accepts_the_result(tmp_path, with_base):
+    product = tmp_path / "product"
+    (product / "config").mkdir(parents=True)
+    shipped = json.loads((ROOT / "config" / "model-routing.json").read_text())
+    (product / "config" / "model-routing.json").write_text(json.dumps(shipped))
+    (product / "config" / "model-preferences.json").write_text("{}\n")
+    (product / "AGENTS.md").write_text("# doctrine\n")
+    (product / "package.json").write_text(json.dumps({"version": "1.2.3"}) + "\n")
+    root = tmp_path / "instance"
+    seed(product, root)
+    legacy = legacy_copy(shipped)
+    legacy["families"]["openai"]["aliases"]["flagship"] = ["custom-astra"]
+    target = root / "config/model-routing.json"
+    target.write_text(json.dumps(legacy))
+    base = root / "config/.model-routing.base.json"
+    if with_base:
+        base.write_text(json.dumps(legacy_copy(shipped)))
+    else:
+        base.unlink()
+
+    result = run("refresh-routing", product, root, "--summary")
+
+    assert result.returncode == 0, result.stderr
+    assert "routing migrated retired tier name=families.openai.aliases.flagship -> principal" in result.stdout
+    refreshed = json.loads(target.read_text())
+    assert refreshed["families"]["openai"]["aliases"]["principal"] == ["custom-astra"], "the edit is kept"
+    assert "flagship" not in json.dumps(refreshed) and "scout" not in json.dumps(refreshed)
+    env = {**os.environ, "AGENT_FABRIC_PRODUCT_ROOT": str(ROOT), "AGENT_FABRIC_INSTANCE_ROOT": str(root),
+           "AGENT_FABRIC_STATE_ROOT": str(tmp_path / "state")}
+    routes = subprocess.run([sys.executable, str(ROOT / "scripts" / "model_route.py"), "routes", "--json"],
+                            text=True, capture_output=True, env=env, check=False)
+    assert routes.returncode == 0, routes.stderr
+    assert instance.routing_drift(product, root) == []

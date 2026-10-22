@@ -97,7 +97,7 @@ def _renamed(name: Any) -> bool:
     return isinstance(name, str) and name.strip().casefold() in RENAMED_TIERS
 
 
-def reject_renamed(overlay: Any) -> Any:
+def reject_renamed(overlay: Any, label: str = "overlay") -> Any:
     """Refuse an overlay that still uses a retired tier name, naming its replacement.
 
     Checked: pool names under `routes`, synonym targets, task-class and risk-tier aliases,
@@ -108,15 +108,15 @@ def reject_renamed(overlay: Any) -> Any:
     routes = overlay.get("routes")
     for name in routes if isinstance(routes, dict) else ():
         if _renamed(name):
-            raise RenamedNameError("overlay " + renamed_message("route", name))
+            raise RenamedNameError(label + " " + renamed_message("route", name))
     synonyms = overlay.get("route_synonyms")
     for target in synonyms.values() if isinstance(synonyms, dict) else ():
         if _renamed(target):
-            raise RenamedNameError("overlay " + renamed_message("route_synonyms target", target))
+            raise RenamedNameError(label + " " + renamed_message("route_synonyms target", target))
     tasks = overlay.get("task_class_routes")
     for route in tasks.values() if isinstance(tasks, dict) else ():
         if isinstance(route, dict) and _renamed(route.get("alias")):
-            raise RenamedNameError("overlay " + renamed_message("alias", route["alias"]))
+            raise RenamedNameError(label + " " + renamed_message("alias", route["alias"]))
     for section in ("families", "adapters"):
         block = overlay.get(section)
         for entry in block.values() if isinstance(block, dict) else ():
@@ -129,16 +129,96 @@ def reject_renamed(overlay: Any) -> Any:
             for mapping in keyed:
                 for name in mapping if isinstance(mapping, dict) else ():
                     if _renamed(name):
-                        raise RenamedNameError("overlay " + renamed_message("alias", name))
+                        raise RenamedNameError(label + " " + renamed_message("alias", name))
             tiers = entry.get("risk_tier_overrides")
             for value in tiers.values() if isinstance(tiers, dict) else ():
                 if isinstance(value, dict) and _renamed(value.get("alias")):
-                    raise RenamedNameError("overlay " + renamed_message("alias", value["alias"]))
+                    raise RenamedNameError(label + " " + renamed_message("alias", value["alias"]))
     kept = overlay.get("route_synonyms")
     if isinstance(kept, dict):
         overlay = {**overlay, "route_synonyms": {name: target for name, target in kept.items()
                                                   if name not in {*TIER_ROUTES, "design", "writing"}}}
     return overlay
+
+
+def migrate_renamed(document: Any) -> tuple[Any, list[str], list[str]]:
+    """Rewrite retired tier names in an installed catalogue, keeping their values; list what moved.
+
+    Used by the routing refresh only. Routing itself still rejects these names. A key under its new
+    name wins over the same key under the old one; route pools merge, new-name entries first.
+    The third result lists the dotted paths of renamed alias keys, whose values the caller keeps.
+    """
+    if not isinstance(document, dict):
+        return document, [], []
+    document = json.loads(json.dumps(document))
+    notes: list[str] = []
+    moved: list[str] = []
+
+    def new_name(name: str) -> str:
+        return RENAMED_TIERS[name.strip().casefold()]
+
+    def rename_keys(mapping: Any, path: str) -> Any:
+        if not isinstance(mapping, dict) or not any(_renamed(key) for key in mapping):
+            return mapping
+        result = {key: value for key, value in mapping.items() if not _renamed(key)}
+        for key, value in mapping.items():
+            if _renamed(key):
+                notes.append(f"{path}.{key} -> {new_name(key)}")
+                moved.append(f"{path}.{new_name(key)}")
+                result.setdefault(new_name(key), value)
+        return result
+
+    def rename_alias(holder: Any, path: str) -> None:
+        if isinstance(holder, dict) and _renamed(holder.get("alias")):
+            notes.append(f"{path}.alias {holder['alias']} -> {new_name(holder['alias'])}")
+            holder["alias"] = new_name(holder["alias"])
+
+    routes = document.get("routes")
+    if isinstance(routes, dict) and any(_renamed(key) for key in routes):
+        merged = {key: value for key, value in routes.items() if not _renamed(key)}
+        for key, value in routes.items():
+            if not _renamed(key):
+                continue
+            notes.append(f"routes.{key} -> {new_name(key)}")
+            current = merged.get(new_name(key))
+            if isinstance(value, list) and isinstance(current, list):
+                listed = {entry.get("model") for entry in current if isinstance(entry, dict)}
+                merged[new_name(key)] = [*current, *(entry for entry in value
+                                                     if not isinstance(entry, dict) or entry.get("model") not in listed)]
+            else:
+                merged.setdefault(new_name(key), value)
+        document["routes"] = merged
+    synonyms = document.get("route_synonyms")
+    if isinstance(synonyms, dict):
+        kept = {}
+        for name, target in synonyms.items():
+            if _renamed(name):
+                notes.append(f"route_synonyms.{name} dropped (the product maps task classes)")
+                continue
+            if _renamed(target):
+                notes.append(f"route_synonyms.{name} {target} -> {new_name(target)}")
+                target = new_name(target)
+            kept[name] = target
+        document["route_synonyms"] = kept
+    tasks = document.get("task_class_routes")
+    for name, route in (tasks.items() if isinstance(tasks, dict) else ()):
+        rename_alias(route, f"task_class_routes.{name}")
+    for section in ("families", "adapters"):
+        block = document.get(section)
+        for name, entry in (block.items() if isinstance(block, dict) else ()):
+            if not isinstance(entry, dict):
+                continue
+            base = f"{section}.{name}"
+            if "aliases" in entry:
+                entry["aliases"] = rename_keys(entry["aliases"], f"{base}.aliases")
+            for key in ("role_overrides", "role_effort_defaults"):
+                roles = entry.get(key)
+                if isinstance(roles, dict):
+                    entry[key] = {role: rename_keys(value, f"{base}.{key}.{role}") for role, value in roles.items()}
+            tiers = entry.get("risk_tier_overrides")
+            for tier, value in (tiers.items() if isinstance(tiers, dict) else ()):
+                rename_alias(value, f"{base}.risk_tier_overrides.{tier}")
+    return document, notes, moved
 
 
 def route_name(catalog: dict[str, Any], name: str) -> str:

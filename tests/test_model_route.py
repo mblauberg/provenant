@@ -4999,3 +4999,41 @@ def test_effort_shift_never_climbs_to_retired_max_or_ultra():
     router._harness_profile = lambda: profile
     assert router.shifted_task_class_effort("review", "high", "low", every) == ("xhigh", 1)
     assert router.shifted_task_class_effort("review", "xhigh", "low", every) == ("xhigh", 0)
+
+
+def _write_catalog(tmp_path, mutate):
+    catalog = json.loads((ROOT / "config" / "model-routing.json").read_text())
+    mutate(catalog)
+    path = tmp_path / "custom-catalog.json"
+    path.write_text(json.dumps(catalog))
+    return path
+
+
+@pytest.mark.parametrize("mutate", [
+    lambda c: c["adapters"]["claude"]["models"][0].update(default_effort="max"),
+    lambda c: c["adapters"]["claude"]["models"][0].update(efforts=["max"]),
+    lambda c: c["families"]["anthropic"].update(default_effort="max"),
+    lambda c: c["routes"]["senior"][0].update(effort=["high", "max"]),
+    lambda c: c["task_class_routes"]["legwork"].update(effort="max"),
+])
+def test_every_effort_field_that_names_max_fails_with_the_xhigh_fix(tmp_path, mutate):
+    catalog = _write_catalog(tmp_path, mutate)
+    result, route = resolve("--catalog", str(catalog), "--adapter", "claude", "--alias", "senior",
+                            "--role", "worker")
+    assert result.returncode == 2
+    assert "effort 'max' was retired" in result.stderr and "xhigh" in result.stderr
+
+
+@pytest.mark.parametrize("mutate,message", [
+    (lambda c: c["families"]["openai"]["aliases"].update(flagship=c["families"]["openai"]["aliases"]["principal"]),
+     "alias 'flagship' was renamed to 'principal'"),
+    (lambda c: c["task_class_routes"]["legwork"].update(alias="workhorse"),
+     "alias 'workhorse' was renamed to 'senior'"),
+    (lambda c: c["routes"].update(strong=c["routes"]["senior"]), "route 'strong' was renamed to 'senior'"),
+])
+def test_a_custom_catalogue_cannot_use_retired_tier_names(tmp_path, mutate, message):
+    catalog = _write_catalog(tmp_path, mutate)
+    result = subprocess.run([str(SCRIPT), "resolve", "--catalog", str(catalog), "--adapter", "codex",
+                             "--alias", "senior", "--role", "worker"], text=True, capture_output=True, check=False)
+    assert result.returncode == 2
+    assert message in result.stderr
