@@ -108,8 +108,9 @@ class CodeTransport:
         if result.returncode or result.stdout_truncated or result.stderr_truncated:
             if not check:
                 return None
+            printable = lambda text: ''.join(char if char.isprintable() else '?' for char in text)
             lines = (result.stderr or '').strip().splitlines()
-            detail = ''.join(char if char.isprintable() else '?' for char in lines[-1][:200]) if lines else ''
+            detail = printable(lines[-1][:200]) + ('…' if len(lines[-1]) > 200 else '') if lines else ''
             rc = result.returncode
             status = f'exit {rc}'
             if rc < 0:
@@ -123,7 +124,7 @@ class CodeTransport:
             if result.stderr_truncated:
                 truncated.append('stderr')
             suffix = f"; {'/'.join(truncated)} truncated" if truncated else ''
-            message = f'git {args[0]} failed in {repo}: {status}{suffix}'
+            message = f'git {args[0]} failed in {printable(str(repo))}: {status}{suffix}'
             if detail:
                 message += f': {detail}'
             self.fail('code_transport_failed', message)
