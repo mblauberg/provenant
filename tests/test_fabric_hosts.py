@@ -762,6 +762,7 @@ class LaneLoopbackContracts(unittest.TestCase):
         self.temporary = tempfile.TemporaryDirectory(prefix='hosts-lanes-', dir=scratch)
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name).resolve()
+        self.addCleanup(self._cleanup_peer_lane_groups)
         # In-process transport uses tempfile while HOME/TMPDIR are patched.
         # Keep its cached default owned by this fixture and restore it before cleanup.
         temporary_default = patch.object(tempfile, 'tempdir', str(self.root))
@@ -801,6 +802,47 @@ class LaneLoopbackContracts(unittest.TestCase):
             'AGENT_FABRIC_SEAT': 'codex', 'PROVENANT_HOST_LOCAL_ONLY': '0'}
         self.local_run = self.terminal(self.workspace, 'shared-task', 'shared')
         self.peer_run = self.terminal(self.peer_workspace, 'shared-task', 'shared')
+
+    def _peer_lane_groups(self):
+        result = subprocess.run(['ps', '-axo', 'pid=,pgid=,command='], capture_output=True,
+            text=True, check=True)
+        groups = {}
+        for line in result.stdout.splitlines():
+            fields = line.strip().split(None, 2)
+            if len(fields) == 3 and 'peer-lanes.ts' in fields[2] and str(self.root) in fields[2]:
+                groups[int(fields[1])] = fields[2]
+        return groups
+
+    def _cleanup_peer_lane_groups(self):
+        groups = self._peer_lane_groups()
+        for group in groups:
+            try:
+                os.killpg(group, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+        if groups:
+            time.sleep(0.1)
+        for group in groups:
+            try:
+                os.killpg(group, signal.SIGKILL)
+            except OSError:
+                pass
+        self.assertFalse(groups, f'peer-lanes.ts process groups outlived the test: {groups}')
+
+    def test_peer_lane_leak_guard_fails_and_reaps_process_group(self):
+        process = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)',
+            str(self.root / 'runtime/fabric/src/peer-lanes.ts')], start_new_session=True)
+        try:
+            with self.assertRaisesRegex(AssertionError, 'peer-lanes.ts'):
+                self._cleanup_peer_lane_groups()
+            process.wait(timeout=2)
+        finally:
+            if process.poll() is None:
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except OSError:
+                    pass
+                process.wait(timeout=2)
 
     def terminal(self, workspace, task_id, suffix, text='remote-result-' * 200):
         run_id = 'mcp-' + suffix
