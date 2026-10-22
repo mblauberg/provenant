@@ -739,3 +739,78 @@ def test_pacing_policy_is_cached_until_the_catalogue_changes(tmp_path, monkeypat
     config.write_text(json.dumps({"rate_limit_pacing": {"base_delay_seconds": 5, "cap_seconds": 900}}))
     assert module.pacing_policy()["base_delay_seconds"] == 5
     assert len(reads) == 2
+
+
+def legacy_cooldown(tmp_path, monkeypatch, host, status='rate_limited'):
+    """A cooldown this machine stored under `host`, as an earlier version or a peer would have."""
+    monkeypatch.setattr('socket.gethostname', lambda: 'Box.local')
+    path = tmp_path / 'cooldowns.json'
+    row = json.loads((FIX / 'attempt.json').read_text())
+    row.update(status=status, reset_at=None, retry_after=None)
+    row['provenance']['requested']['adapter'] = 'codex'
+    row['provenance']['resolved_model'] = 'test-model'
+    at = datetime.now(UTC)
+    records().write_cooldown(row, path=path, at=at)
+    document = json.loads(path.read_text())
+    (entry,) = document['cooldowns'].values()
+    entry['host'] = host
+    document['cooldowns'] = {records().cooldown_key('codex', 'test-model', entry): entry}
+    path.write_text(json.dumps(document))
+    return path, row, at
+
+
+@pytest.mark.parametrize('host', ['local', 'Box.local', 'box'])
+def test_success_clears_a_cooldown_stored_under_an_earlier_host_id(tmp_path, monkeypatch, host):
+    path, row, at = legacy_cooldown(tmp_path, monkeypatch, host)
+    assert 'codex/test-model' in records().read_cooldowns(path, at)
+    row.update(status='ok', started_at=records().timestamp(at + timedelta(seconds=1)))
+    row['provenance']['observed_model'] = 'test-model'
+    records().write_cooldown(row, path=path, at=at + timedelta(seconds=2))
+    assert records().read_cooldowns(path, at) == {}
+    assert json.loads(path.read_text())['cooldowns'] == {}
+
+
+def test_rate_limit_backoff_doubles_across_an_earlier_host_id(tmp_path, monkeypatch):
+    path, row, at = legacy_cooldown(tmp_path, monkeypatch, 'local')
+    first = next(iter(json.loads(path.read_text())['cooldowns'].values()))['backoff_seconds']
+    records().write_cooldown(row, path=path, at=at)
+    (entry,) = json.loads(path.read_text())['cooldowns'].values()
+    assert entry['host'] == 'host-a'
+    assert entry['backoff_seconds'] == first * 2
+
+
+def test_a_peer_named_like_this_hostname_keeps_its_own_cooldowns(tmp_path, monkeypatch):
+    config = tmp_path / 'instance/.agent-fabric/hosts.json'
+    config.parent.mkdir(parents=True)
+    config.write_text(json.dumps({'schema_version': 1, 'local_host': 'host-a',
+                                  'peers': {'box': {'ssh_destination': 'box'}}}))
+    path, row, at = legacy_cooldown(tmp_path, monkeypatch, 'box')
+    assert records().read_cooldowns(path, at) == {}
+    row.update(status='ok', started_at=records().timestamp(at + timedelta(seconds=1)))
+    row['provenance']['observed_model'] = 'test-model'
+    records().write_cooldown(row, path=path, at=at + timedelta(seconds=2))
+    (entry,) = json.loads(path.read_text())['cooldowns'].values()
+    assert entry['host'] == 'box'
+
+
+def test_an_attempt_that_captured_an_earlier_host_id_clears_and_doubles_the_current_cooldown(tmp_path, monkeypatch):
+    path, row, at = legacy_cooldown(tmp_path, monkeypatch, 'host-a')
+    first = next(iter(json.loads(path.read_text())['cooldowns'].values()))['backoff_seconds']
+    # The attempt began before this host was configured as host-a, under its hostname's slug.
+    records().write_cooldown({**row, 'host': 'box'}, path=path, at=at)
+    (entry,) = json.loads(path.read_text())['cooldowns'].values()
+    assert (entry['host'], entry['backoff_seconds']) == ('host-a', first * 2)
+    done = {**row, 'host': 'Box.local', 'status': 'ok', 'started_at': records().timestamp(at + timedelta(seconds=1))}
+    done['provenance'] = {**row['provenance'], 'observed_model': 'test-model'}
+    records().write_cooldown(done, path=path, at=at + timedelta(seconds=2))
+    assert json.loads(path.read_text())['cooldowns'] == {}
+
+
+def test_an_attempt_on_a_peer_keeps_the_peer_scope(tmp_path, monkeypatch):
+    config = tmp_path / 'instance/.agent-fabric/hosts.json'
+    config.parent.mkdir(parents=True)
+    config.write_text(json.dumps({'schema_version': 1, 'local_host': 'host-a',
+                                  'peers': {'box': {'ssh_destination': 'box'}}}))
+    path, row, at = legacy_cooldown(tmp_path, monkeypatch, 'host-a')
+    records().write_cooldown({**row, 'host': 'box'}, path=path, at=at)
+    assert sorted(entry['host'] for entry in json.loads(path.read_text())['cooldowns'].values()) == ['box', 'host-a']

@@ -240,6 +240,15 @@ def telemetry_host():
     return identity.host_id()
 
 
+def local_hosts():
+    """This machine's current id, then the earlier ids its stores may hold (raw hostname, slug, 'local')."""
+    return identity.host_aliases(telemetry_host())
+
+
+def same_host(value):
+    return identity.same_host(value, telemetry_host())
+
+
 def state_root():
     return _telemetry().state_root()
 
@@ -502,10 +511,14 @@ def memo(name, account, seconds, produce):
 def ledger_windows(adapter, now, account=None):
     """The latest rate-limit observation per window that this host's ledger holds for one account."""
     try:
-        with _telemetry().connect() as db:
+        telemetry = _telemetry()
+        with telemetry.connect() as db:
+            # Connecting loads the ids this ledger was written under, so a renamed host still reads its rows.
+            hosts = sorted(set(local_hosts()) | telemetry.host_aliases())
             rows = db.execute('SELECT window,used_percent,window_minutes,reset_at,timestamp FROM observations '
-                              'WHERE adapter=? AND host=? AND account IS ? AND used_percent IS NOT NULL '
-                              'ORDER BY timestamp DESC LIMIT 500', (adapter, telemetry_host(), account)).fetchall()
+                              f"WHERE adapter=? AND host IN ({','.join('?' * len(hosts))}) AND account IS ? "
+                              'AND used_percent IS NOT NULL ORDER BY timestamp DESC LIMIT 500',
+                              (adapter, *hosts, account)).fetchall()
     except (OSError, ValueError, sqlite3.Error):
         rows = []
     latest = {}
@@ -615,9 +628,15 @@ def cache_path(provider_name, label, host=None, identity_dir=None):
 
 
 def load_snapshot(provider_name, label, identity_dir=None):
-    try:
-        value = json.loads(cache_path(provider_name, label, identity_dir=identity_dir).read_text())
-    except (OSError, ValueError):
+    value = None
+    # A snapshot written under an earlier host id is still this host's.
+    for host in local_hosts():
+        try:
+            value = json.loads(cache_path(provider_name, label, host, identity_dir).read_text())
+            break
+        except (OSError, ValueError):
+            continue
+    if value is None:
         # Unbound legacy snapshots cannot establish which identity supplied them.
         if identity_dir is not None:
             return None
@@ -626,7 +645,10 @@ def load_snapshot(provider_name, label, identity_dir=None):
             value = json.loads((state_root() / 'quota' / f'{provider_name}--{label}.json').read_text())
         except (OSError, ValueError):
             return None
-    return value if isinstance(value, dict) and value.get('schema') == SCHEMA and value.get('host') == telemetry_host() else None
+    if not (isinstance(value, dict) and value.get('schema') == SCHEMA
+            and same_host(value.get('host')) == telemetry_host()):
+        return None
+    return {**value, 'host': telemetry_host()}
 
 
 
@@ -706,7 +728,7 @@ def snapshots():
         except (OSError, ValueError):
             continue
         if isinstance(value, dict) and value.get('schema') == SCHEMA:
-            values.append(value)
+            values.append({**value, 'host': same_host(value.get('host'))})
     return values
 
 
@@ -1228,7 +1250,7 @@ def credits(*, raw=False):
             if raw:
                 result[key] = entry
             elif len(parts) == 3:
-                result[tuple(parts)] = entry
+                result[(*parts[:2], same_host(parts[2]))] = entry
             else:
                 result.setdefault((*parts, telemetry_host()), entry)
     return result
@@ -1242,8 +1264,10 @@ def change_credits(provider_name, label, delta):
         current = credits(raw=True)
         key = f'{provider_name}/{label}/{telemetry_host()}'
         generic = f'{provider_name}/{label}'
-        if key not in current and generic in current:
-            key = generic
+        earlier = [f'{provider_name}/{label}/{host}' for host in local_hosts()[1:]]
+        if key not in current:
+            # Keep a count banked under an earlier host id or the generic key where it is.
+            key = next((name for name in [*earlier, generic] if name in current), key)
         count = int((current.get(key) or {}).get('reset_credits') or 0) + delta
         if count < 0:
             raise ValueError(f'{key} has no banked reset credit to use')

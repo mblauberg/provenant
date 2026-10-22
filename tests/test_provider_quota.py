@@ -247,6 +247,23 @@ def test_codex_falls_back_to_rollout_rate_limits_already_in_the_ledger(quota, mo
     assert other['status'] == 'unavailable' and other['windows'] == []
 
 
+def test_codex_ledger_fallback_reads_rows_written_under_an_earlier_configured_host_id(quota, monkeypatch, tmp_path):
+    hosts = tmp_path / 'home/.agents/.agent-fabric/hosts.json'
+    hosts.parent.mkdir(parents=True)
+    hosts.write_text(json.dumps({'schema_version': 1, 'local_host': 'box'}))
+    telemetry = load('telemetry_for_quota_box', ROOT / 'scripts/telemetry.py')
+    with telemetry.connect() as db:
+        db.execute('INSERT INTO observations(event_id,source,host,provider,adapter,account,timestamp,window,used_percent,'
+                   'window_minutes,reset_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)',
+                   ('e1', 'codex', 'box', 'openai', 'codex', 'default', iso(NOW - timedelta(hours=1)), 'secondary', 45,
+                    10080, iso(NOW + timedelta(days=2))))
+    # The host is renamed; its earlier rows stay under `box` and must still read as this host's.
+    hosts.write_text(json.dumps({'schema_version': 1, 'local_host': 'studio'}))
+    monkeypatch.setattr(quota, '_telemetry', lambda: load('telemetry_for_quota_studio', ROOT / 'scripts/telemetry.py'))
+    assert [(row['name'], row['used_percent']) for row in quota.ledger_windows('codex', NOW, 'default')['windows']] == [
+        ('secondary', 45)]
+
+
 def test_claude_usage_endpoint_uses_the_token_in_process_only(quota, monkeypatch, tmp_path, capsys):
     identity = tmp_path / 'claude-b'
     identity.mkdir()
@@ -362,6 +379,7 @@ def test_claude_keychain_item_follows_the_config_directory(quota, monkeypatch, t
     identity.mkdir()
     claude = quota.provider('claude')
     monkeypatch.setattr(claude, 'status', lambda account, io: {'loggedIn': True})
+    monkeypatch.setattr(claude.sys, 'platform', 'darwin')
     seen = []
 
     def security(argv, **kwargs):
@@ -373,6 +391,25 @@ def test_claude_keychain_item_follows_the_config_directory(quota, monkeypatch, t
     expected = 'Claude Code-credentials' + (f'-{digest}' if suffixed else '')
     assert [argv[argv.index('-s') + 1] for argv in seen] == [expected]
     assert value['status'] == 'unavailable'
+
+
+def test_claude_on_linux_reads_only_the_credentials_file_and_never_calls_security(quota, monkeypatch, tmp_path):
+    claude = quota.provider('claude')
+    monkeypatch.setattr(claude, 'status', lambda account, io: {'loggedIn': True})
+    monkeypatch.setattr(claude.sys, 'platform', 'linux')
+    calls = []
+    monkeypatch.setattr(quota, 'run_process', lambda argv, **kwargs: calls.append(argv))
+    missing = tmp_path / 'claude-missing'
+    missing.mkdir()
+    value = quota.refresh(quota.Account('claude', 'x', missing, False), NOW, force=True)
+    assert value['status'] == 'unavailable' and value['error'] == 'Claude credentials are not available'
+    present = tmp_path / 'claude-present'
+    present.mkdir()
+    (present / '.credentials.json').write_text(json.dumps({'claudeAiOauth': {
+        'accessToken': TOKEN, 'expiresAt': int((NOW + timedelta(seconds=30)).timestamp() * 1000)}}))
+    value = quota.refresh(quota.Account('claude', 'y', present, False), NOW, force=True)
+    assert value['status'] == 'unavailable' and 'refresh' in value['error'] and TOKEN not in json.dumps(value)
+    assert calls == []
 
 
 def test_claude_keychain_service_matches_a_known_claude_code_name(quota):
@@ -1360,10 +1397,20 @@ def test_unconfigured_selected_identity_uses_same_path_token_in_quota_and_cooldo
 
 
 def test_agy_identity_is_the_os_login_keychain_even_with_another_home(quota, monkeypatch, tmp_path):
+    monkeypatch.setattr(quota.identity.sys, 'platform', 'darwin')
     first = quota.identity.selected_identity('agy')
+    assert first.name == 'login.keychain-db'
     monkeypatch.setenv('HOME', str(tmp_path / 'another-home'))
     monkeypatch.setenv('AGY_CONFIG_DIR', str(tmp_path / 'another-config'))
     assert quota.identity.selected_identity('agy') == first
+    assert quota.identity.scope('agy')['account'] == 'default'
+
+
+def test_agy_identity_off_macos_is_its_state_directory_not_a_keychain(quota, monkeypatch, tmp_path):
+    monkeypatch.setattr(quota.identity.sys, 'platform', 'linux')
+    identity = quota.identity.selected_identity('agy')
+    assert identity == tmp_path / 'home/.gemini/antigravity-cli'
+    assert 'Keychain' not in str(identity)
     assert quota.identity.scope('agy')['account'] == 'default'
 
 

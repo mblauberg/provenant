@@ -14,8 +14,6 @@ import sys
 
 
 LABEL = re.compile(r'[a-z0-9][a-z0-9._-]{0,63}')
-_TELEMETRY = None
-_TELEMETRY_ROOT = None
 _ACCOUNT_WARNING_EMITTED = False
 
 
@@ -45,8 +43,11 @@ def default_identity(provider):
         return home / ('Library/Application Support/Cursor/User/globalStorage' if sys.platform == 'darwin'
                        else '.config/Cursor/User/globalStorage')
     if provider == 'agy':
-        # The login Keychain belongs to the OS user, not HOME or AGY_CONFIG_DIR.
-        return Path(pwd.getpwuid(os.getuid()).pw_dir) / 'Library/Keychains/login.keychain-db'
+        if sys.platform == 'darwin':
+            # The login Keychain belongs to the OS user, not HOME or AGY_CONFIG_DIR.
+            return Path(pwd.getpwuid(os.getuid()).pw_dir) / 'Library/Keychains/login.keychain-db'
+        # No Keychain elsewhere: agy's own state directory names the sign-in.
+        return home / '.gemini/antigravity-cli'
     return {'claude': home / '.claude', 'codex': home / '.codex',
             'opencode': home / '.local/share/opencode', 'kiro': home / '.kiro',
             'copilot': home / '.copilot'}.get(provider)
@@ -85,16 +86,31 @@ def account_key(provider, identity_dir, entries=None):
     return 'path-' + hashlib.sha256(os.fsencode(resolved)).hexdigest()[:20]
 
 
+def _owner():
+    name = 'provenant_host_identity'
+    if name not in sys.modules:
+        spec = importlib.util.spec_from_file_location(name, Path(__file__).with_name('host_identity.py'))
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[name] = module
+        spec.loader.exec_module(module)
+    return sys.modules[name]
+
+
 def host_id():
-    """Use the telemetry/peer host id owner (hosts.json local_host, else hostname)."""
-    global _TELEMETRY, _TELEMETRY_ROOT
-    root = Path(os.environ.get('AGENT_FABRIC_INSTANCE_ROOT') or '~/.agents').expanduser().resolve()
-    if _TELEMETRY is None or _TELEMETRY_ROOT != root:
-        spec = importlib.util.spec_from_file_location('provenant_identity_telemetry', Path(__file__).with_name('telemetry.py'))
-        _TELEMETRY = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(_TELEMETRY)
-        _TELEMETRY_ROOT = root
-    return _TELEMETRY.host_id()
+    """The shared host id (scripts/host_identity.py): a valid hosts.json local_host, else the hostname's slug."""
+    root = Path(os.environ.get('AGENT_FABRIC_INSTANCE_ROOT') or '~/.agents').expanduser()
+    return _owner().host_id(root / '.agent-fabric/hosts.json')
+
+
+def same_host(value, current=None):
+    """This machine's records read as one host, whichever earlier default stored them."""
+    return _owner().canonical(value, current or host_id())
+
+
+def host_aliases(current=None):
+    """The current id first, then the earlier ids this machine's stores may hold."""
+    current = current or host_id()
+    return [current, *sorted(_owner().aliases(current) - {current})]
 
 
 def scope(provider, *, default=False):
@@ -113,4 +129,5 @@ def scope(provider, *, default=False):
 
 
 def matches(record, active):
-    return (record.get('account'), record.get('host')) == (active.get('account'), active.get('host'))
+    return ((record.get('account'), same_host(record.get('host')))
+            == (active.get('account'), same_host(active.get('host'))))

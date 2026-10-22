@@ -296,7 +296,8 @@ enum CLI {
             return (launcher, .failure(Failure(message: message)))
         }
         guard let launcher = cached ?? resolve() else {
-            return fail(nil, "not found", "provenant is not on the login shell's PATH. Set PROVENANT_BIN.")
+            return fail(nil, "not found", "provenant was not found on the login shell's PATH or at ~/.local/bin/provenant. "
+                        + "Set PROVENANT_BIN to its path.")
         }
         let name = launcher.custom ? "PROVENANT_BIN (\(launcher.url.path))" : "provenant"
         let run: Output
@@ -321,16 +322,36 @@ enum CLI {
         }
     }
 
-    /// PROVENANT_BIN, or `provenant` and PATH from a zsh login shell, so its `env python3` shebang resolves.
+    /// PROVENANT_BIN; else `provenant` and PATH from the user's login shell, so its `env python3` shebang
+    /// resolves; else ~/.local/bin/provenant with this process's PATH.
     static func resolve() -> Launcher? {
-        if let bin = ProcessInfo.processInfo.environment["PROVENANT_BIN"], !bin.isEmpty {
+        let environment = ProcessInfo.processInfo.environment
+        if let bin = environment["PROVENANT_BIN"], !bin.isEmpty {
             return Launcher(url: URL(fileURLWithPath: bin), path: nil, custom: true)
         }
-        guard let run = try? exec(URL(fileURLWithPath: "/bin/zsh"), ["-lc", "command -v provenant && print -r -- \"$PATH\""],
-                                  path: nil, limit: 20), run.status == 0, !run.timedOut else { return nil }
+        if let shell = loginShell(environment), let found = lookup(shell) { return found }
+        let local = FileManager.default.homeDirectoryForCurrentUser.appending(path: ".local/bin/provenant")
+        return FileManager.default.isExecutableFile(atPath: local.path) ? Launcher(url: local, path: nil, custom: false) : nil
+    }
+
+    /// $SHELL, else the account's shell; nil when neither is an absolute executable.
+    static func loginShell(_ environment: [String: String]) -> URL? {
+        var candidates = [environment["SHELL"]]
+        if let entry = getpwuid(getuid()), let shell = entry.pointee.pw_shell { candidates.append(String(cString: shell)) }
+        return candidates.compactMap { $0 }.first { $0.hasPrefix("/") && FileManager.default.isExecutableFile(atPath: $0) }
+            .map { URL(fileURLWithPath: $0) }
+    }
+
+    /// `command -v` works in zsh, bash and fish alike. PATH comes from `printenv`, not the shell's own syntax
+    /// (fish prints $PATH space-separated), and is optional. Taking the last absolute line skips login banners.
+    static func lookup(_ shell: URL) -> Launcher? {
+        guard let run = try? exec(shell, ["-lc", "command -v provenant && printenv PATH"], path: nil, limit: 20),
+              run.status == 0, !run.timedOut else { return nil }
         let lines = String(decoding: run.out, as: UTF8.self).split(separator: "\n").map(String.init)
-        guard lines.count >= 2, lines[0].hasPrefix("/") else { return nil }
-        return Launcher(url: URL(fileURLWithPath: lines[0]), path: lines[1], custom: false)
+        guard let index = lines.lastIndex(where: { $0.hasPrefix("/") && !$0.contains(":") && $0.hasSuffix("/provenant") })
+        else { return nil }
+        let path = lines.indices.contains(index + 1) && !lines[index + 1].isEmpty ? lines[index + 1] : nil
+        return Launcher(url: URL(fileURLWithPath: lines[index]), path: path, custom: false)
     }
 
     /// Runs the CLI as the leader of its own process group, so an overrun's descendants are signalled with it.

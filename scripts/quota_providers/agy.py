@@ -35,7 +35,8 @@ def state_dir():
 
 def default_identity():
     from provider_identity import selected_identity
-    # The login Keychain exists on every Mac; agy's state directory shows agy is in use.
+    # The identity is the login Keychain on macOS and the state directory elsewhere; either way
+    # agy's state directory shows agy is in use.
     return selected_identity('agy') if state_dir().is_dir() else None
 
 
