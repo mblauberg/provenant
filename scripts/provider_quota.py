@@ -167,6 +167,10 @@ class _Io:
         return ledger_windows(adapter, now, account)
 
     @staticmethod
+    def readonly(path):
+        return _telemetry().readonly(path)
+
+    @staticmethod
     def memo(name, account, seconds, produce):
         return memo(name, account, seconds, produce)
 

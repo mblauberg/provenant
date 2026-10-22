@@ -393,7 +393,7 @@ def test_cursor_session_cookie_comes_from_the_local_jwt_and_cycle_dates(quota, t
         opened.append(connection)
         return connection
     monkeypatch.setattr(cursor.sqlite3, 'connect', track)
-    assert cursor.session(database, NOW) == (jwt, 'user_42')
+    assert cursor.session(database, NOW, quota.IO) == (jwt, 'user_42')
     with pytest.raises(sqlite3.ProgrammingError):
         opened[0].execute('SELECT 1')
     parsed = cursor.parse({'membershipType': 'pro', 'individualUsage': {'plan': {'used': 250, 'limit': 1000}},
@@ -1815,7 +1815,7 @@ def test_opencode_spend_queries_reach_messages_through_indexes(quota, tmp_path, 
             return self.db.execute(sql, params)
         def close(self):
             self.db.close()
-    monkeypatch.setattr(opencode, 'sqlite3', SimpleNamespace(connect=Recording, Error=sqlite3.Error))
+    monkeypatch.setattr(quota.IO, 'readonly', lambda path: Recording(path.resolve().as_uri() + '?mode=ro', uri=True))
     windows, _ = opencode_rows(quota, quota.Account('opencode', 'go', home, True))
     assert windows['thirty_day']['used_percent'] == pytest.approx(4.8 / 32 * 100)
     reads = [(sql, params) for sql, params in queries if 'FROM message' in sql or 'FROM session_message' in sql]

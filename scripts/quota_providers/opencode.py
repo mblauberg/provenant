@@ -151,7 +151,7 @@ def fetch(account, io, now):
     anchor = anchor_of(account, io)
     frames = cycles(now, anchor, anchor_of(account, io, 'weekly_anchor'))
     try:
-        with closing(sqlite3.connect(database.resolve().as_uri() + '?mode=ro', uri=True)) as db:
+        with closing(io.readonly(database)) as db:
             spent = spend(db, now, providers, [start for _, start, _, _ in frames])
             errors = limit_errors(db, now, providers)
     except (sqlite3.Error, OSError):
