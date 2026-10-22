@@ -61,7 +61,7 @@ def test_routing_drift_names_product_keys_and_ignores_instance_additions(tmp_pat
     source = product / "config/model-routing.json"
     source.write_text(json.dumps({
         "catalog_date": "2026-09-23", "task_class_routes": {"review": {"alias": "new"}},
-        "families": {"openai": {"aliases": {"scout": ["new", "old"]}}},
+        "families": {"openai": {"aliases": {"junior": ["new", "old"]}}},
         "adapters": {"opencode": {"endpoint_provider": "opencode"}},
         "endpoints": {"new": {"base_url": "https://example.invalid"}},
         "model_patterns": [{"pattern": "new", "family": "openai"}],
@@ -72,7 +72,7 @@ def test_routing_drift_names_product_keys_and_ignores_instance_additions(tmp_pat
     old = json.loads(target.read_text())
     old["catalog_date"] = "2026-09-01"
     old["task_class_routes"]["review"]["alias"] = "old"
-    old["families"]["openai"]["aliases"]["scout"] = ["old", "custom"]
+    old["families"]["openai"]["aliases"]["junior"] = ["old", "custom"]
     old["adapters"]["opencode"]["endpoint_provider"] = "codex"
     old["endpoints"]["new"]["base_url"] = "https://old.invalid"
     old["endpoints"]["custom"] = {"base_url": "https://custom.invalid"}
@@ -86,7 +86,7 @@ def test_routing_drift_names_product_keys_and_ignores_instance_additions(tmp_pat
     changed = json.loads(source.read_text())
     changed["catalog_date"] = "2026-09-24"
     changed["task_class_routes"]["review"]["alias"] = "latest"
-    changed["families"]["openai"]["aliases"]["scout"] = ["latest"]
+    changed["families"]["openai"]["aliases"]["junior"] = ["latest"]
     changed["adapters"]["opencode"]["endpoint_provider"] = "latest"
     changed["endpoints"]["new"]["base_url"] = "https://latest.invalid"
     changed["model_patterns"] = [{"pattern": "latest", "family": "openai"}]
@@ -95,7 +95,7 @@ def test_routing_drift_names_product_keys_and_ignores_instance_additions(tmp_pat
     drift = json.loads(result.stdout)["routing_drift"]
     assert "catalog_date" in drift
     assert "task_class_routes.review.alias" in drift
-    assert "families.openai.aliases.scout" in drift
+    assert "families.openai.aliases.junior" in drift
     assert "adapters.opencode.endpoint_provider" in drift
     assert "endpoints.new.base_url" in drift
     assert "endpoints.custom" not in " ".join(drift)
@@ -113,7 +113,7 @@ def test_explicit_routing_refresh_backs_up_and_preserves_instance_additions(tmp_
     product = build_product(tmp_path)
     source = product / "config/model-routing.json"
     source.write_text(json.dumps({
-        "catalog_date": "2026-09-23", "families": {"openai": {"aliases": {"scout": ["new"]}}},
+        "catalog_date": "2026-09-23", "families": {"openai": {"aliases": {"junior": ["new"]}}},
         "adapters": {"opencode": {"endpoint_provider": "opencode"}},
         "endpoints": {"new": {"base_url": "https://new.invalid"}},
         "model_patterns": [{"pattern": "new", "family": "openai"}],
@@ -122,7 +122,7 @@ def test_explicit_routing_refresh_backs_up_and_preserves_instance_additions(tmp_
     seed(product, instance_root)
     target = instance_root / "config/model-routing.json"
     old = json.loads(target.read_text())
-    old["families"]["openai"]["aliases"]["scout"] = ["old", "custom"]
+    old["families"]["openai"]["aliases"]["junior"] = ["old", "custom"]
     old["adapters"]["custom"] = {"endpoint_provider": "custom"}
     old["endpoints"]["custom"] = {"base_url": "https://custom.invalid"}
     old["model_patterns"].append({"pattern": "custom", "family": "custom"})
@@ -130,17 +130,17 @@ def test_explicit_routing_refresh_backs_up_and_preserves_instance_additions(tmp_
     before = target.read_bytes()
 
     product_catalogue = json.loads(source.read_text())
-    product_catalogue["families"]["openai"]["aliases"]["scout"] = ["new", "next"]
+    product_catalogue["families"]["openai"]["aliases"]["junior"] = ["new", "next"]
     source.write_text(json.dumps(product_catalogue))
 
     result = run("refresh-routing", product, instance_root)
     assert result.returncode == 0, result.stderr
     updated = json.loads(target.read_text())
-    assert updated["families"]["openai"]["aliases"]["scout"] == ["new", "next"]
+    assert updated["families"]["openai"]["aliases"]["junior"] == ["new", "next"]
     assert updated["adapters"]["custom"] == old["adapters"]["custom"]
     assert updated["endpoints"]["custom"] == old["endpoints"]["custom"]
     assert updated["model_patterns"][-1] == old["model_patterns"][-1]
-    assert "families.openai.aliases.scout" in json.loads(result.stdout)["routing"]["conflicts"]
+    assert "families.openai.aliases.junior" in json.loads(result.stdout)["routing"]["conflicts"]
     backups = list(target.parent.glob("model-routing.json.bak-*"))
     assert len(backups) == 1
     assert backups[0].read_bytes() == before
@@ -152,7 +152,7 @@ def test_refresh_removes_retired_product_keys_and_preserves_unchanged_instance_e
     source = product / "config/model-routing.json"
     source.write_text(json.dumps({
         "schema_version": 1,
-        "families": {"openai": {"aliases": {"scout": ["old", "kept"]}}},
+        "families": {"openai": {"aliases": {"junior": ["old", "kept"]}}},
         "adapters": {"retired": {"model_patterns": ["old"]}, "kept": {"field": "product"}},
         "model_patterns": [{"pattern": "old"}, {"pattern": "kept"}],
     }))
@@ -161,7 +161,7 @@ def test_refresh_removes_retired_product_keys_and_preserves_unchanged_instance_e
     target = root / "config/model-routing.json"
     installed = json.loads(target.read_text())
     installed["adapters"]["kept"]["field"] = "user"
-    installed["families"]["openai"]["aliases"]["scout"] = ["kept", "old"]
+    installed["families"]["openai"]["aliases"]["junior"] = ["kept", "old"]
     target.write_text(json.dumps(installed))
     new_product = json.loads(source.read_text())
     del new_product["adapters"]["retired"]
@@ -180,7 +180,7 @@ def test_refresh_removes_retired_product_keys_and_preserves_unchanged_instance_e
     assert "retired" not in merged["adapters"]
     assert merged["model_patterns"] == [{"pattern": "kept"}]
     assert merged["adapters"]["kept"]["field"] == "user"
-    assert merged["families"]["openai"]["aliases"]["scout"] == ["kept", "old"]
+    assert merged["families"]["openai"]["aliases"]["junior"] == ["kept", "old"]
     assert merged["schema_version"] == 2
     assert "schema_version" in result.stdout
     assert "backup=" in result.stdout

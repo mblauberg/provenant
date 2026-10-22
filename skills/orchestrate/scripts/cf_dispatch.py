@@ -49,9 +49,9 @@ Options:
   --chain SPECS                Space-separated fallback chain.
   --orchestrator-family FAMILY Labels the chair family; assurance requires separation.
   --intent INTENT              assurance (default) or ordinary execution.
-  --alias ALIAS                Durable route alias: flagship, workhorse, scout.
-                               Defaults from --role: flagship for lead,
-                               orchestrator and critical-review, workhorse otherwise.
+  --alias ALIAS                Durable route alias: principal, senior, junior.
+                               Defaults from --role: principal for lead,
+                               orchestrator and critical-review, senior otherwise.
   --role ROLE                  Route role (default: reviewer).
   --risk-tier TIER             Lifecycle/receipt risk metadata; never selects a model.
   --model-override-tier TIER   Explicit special-model override tier.
@@ -281,12 +281,12 @@ def validate_options(opts: Options) -> None:
     if not opts.alias_explicit and not opts.task_class:
         if opts.model or opts.model_override_tier:
             # An explicitly named model has already made the cost decision, so leave the
-            # alias at flagship rather than narrowing the candidate list under it.
-            opts.model_alias = "flagship"
+            # alias at principal rather than narrowing the candidate list under it.
+            opts.model_alias = "principal"
         elif opts.route_role in ("lead", "orchestrator", "critical-review"):
-            opts.model_alias = "flagship"
+            opts.model_alias = "principal"
         else:
-            opts.model_alias = "workhorse"
+            opts.model_alias = "senior"
 
 
 def validate_access_mode(opts: Options) -> None:

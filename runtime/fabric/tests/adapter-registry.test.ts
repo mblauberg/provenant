@@ -215,8 +215,8 @@ describe("instance catalogue", () => {
       mkdirSync(join(root, "config"));
       const path = join(root, "config", "model-routing.json");
       const routing = JSON.parse(readFileSync(join(repositoryRoot, "config", "model-routing.json"), "utf8"));
-      const expectedCodexModel = routing.families.openai.aliases.workhorse[0];
-      routing.families.openai.aliases.workhorse = ["custom-luna"];
+      const expectedCodexModel = routing.families.openai.aliases.senior[0];
+      routing.families.openai.aliases.senior = ["custom-luna"];
       const expectedOpenCodeModel = routing.adapters.opencode.models[0].id;
       writeFileSync(path, JSON.stringify(routing));
       const env = { AGENT_FABRIC_INSTANCE_ROOT: root };

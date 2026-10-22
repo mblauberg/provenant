@@ -43,7 +43,7 @@ def test_plan_only_resolves_without_launch(tmp_path):
             "--tool",
             "claude",
             "--alias",
-            "workhorse",
+            "senior",
             "--prompt",
             "Hello",
             "--plan-only",
@@ -180,12 +180,14 @@ def test_read_only_state_link_into_a_credential_store_is_not_granted(monkeypatch
     assert f'(subpath "{home / ".config/opencode"}")' in profile
 
 
-def test_strip_jsonc_keeps_comment_and_comma_text_inside_strings():
+def test_jsonc_reader_keeps_comment_and_comma_text_inside_strings():
     supervisor = importlib.import_module("skills.orchestrate.scripts.provider_exec")
     text = '{"a": "x,}y // not a comment /* nor this */", "b": [1, 2, /* c */ ], // tail\n}'
-    assert supervisor.json.loads(supervisor._strip_jsonc(text)) == {
+    assert supervisor._jsonc_loads(text) == {
         "a": "x,}y // not a comment /* nor this */", "b": [1, 2],
     }
+    with pytest.raises(ValueError):
+        supervisor._jsonc_loads('{"a": 1} /* unterminated')
 
 
 def test_opencode_read_only_discovery_skips_symlinks_to_credentials(monkeypatch, tmp_path):
@@ -5109,7 +5111,7 @@ else:
             "--tool",
             adapter,
             "--alias",
-            "workhorse",
+            "senior",
             "--role",
             "worker",
             "--prompt-file",
@@ -5178,7 +5180,7 @@ def test_fallback_training_requires_explicit_opt_in(tmp_path):
     plan = fixture_plan(tmp_path, "")
     plan["requested_model"] = None
     plan["route"].update(
-        alias="workhorse",
+        alias="senior",
         candidates=["fixture", "paid", "training", "opencode/free-free"],
     )
     catalogue = {"models": {"training": {"trains_on_prompts": True}}, "adapters": {}}
@@ -5238,7 +5240,7 @@ sys.exit(1 if 'TARGET_MODEL' in model else 0)
             "--tool",
             "claude",
             "--model" if explicit else "--alias",
-            "opus" if explicit else "workhorse",
+            "opus" if explicit else "senior",
             "--fallback", "true",
             "--prompt-file",
             str(prompt),

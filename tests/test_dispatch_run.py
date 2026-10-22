@@ -578,7 +578,7 @@ def test_preflight_honours_policy_secret_scan_exclusions(tmp_path, monkeypatch):
     fixtures = tmp_path / 'shared' / 'fixtures'
     fixtures.mkdir(parents=True)
     (fixtures / 'key.txt').write_text('rk_live_' + 'a' * 24)
-    task = {'id': 'task-1', 'adapter': 'claude', 'alias': 'workhorse',
+    task = {'id': 'task-1', 'adapter': 'claude', 'alias': 'senior',
             'prompt': 'review shared files', 'add_dirs': [str(tmp_path / 'shared')]}
     module = load_dispatch_module()
     assert module.preflight_tasks([task], tmp_path)['status'] == 'validated'
@@ -638,7 +638,7 @@ def test_secret_scan_avoids_generic_credential_words_and_unprefixed_jwt():
 
 def test_terminal_attempt_carries_nested_owner_spared_count(tmp_path: Path) -> None:
     module = load_dispatch_module()
-    args = SimpleNamespace(tool="codex", alias="workhorse", model="fixture", effort="low",
+    args = SimpleNamespace(tool="codex", alias="senior", model="fixture", effort="low",
                            task_id="task-1", access_mode="read_only", worktree=None,
                            _last_plan={})
     legacy = {"started_at": "2026-09-23T00:00:00Z", "finished_at": "2026-09-23T00:00:01Z",
@@ -837,7 +837,7 @@ def test_ordinary_single_dispatch_records_one_attempt_and_route_identity(tmp_pat
             "--orchestrator-family",
             "openai",
             "--alias",
-            "workhorse",
+            "senior",
             "--role",
             "worker",
         ],
@@ -900,7 +900,7 @@ exit 99
         module.CF_DISPATCH = adapter
     args = module.parser().parse_args([
         "--run-dir", str(run_dir), "--task-id", "bad-floor", "--adapter", "codex",
-        "--prompt-file", str(prompt), "--alias", "workhorse", "--role", "worker",
+        "--prompt-file", str(prompt), "--alias", "senior", "--role", "worker",
     ])
     assert module.dispatch(args) == 1
     attempt = json.loads((run_dir / "dispatch/tasks/bad-floor/attempt-001/attempt.json").read_text())
@@ -944,7 +944,7 @@ exit 99
         module.CF_DISPATCH = adapter
     args = module.parser().parse_args([
         "--run-dir", str(run_dir), "--task-id", "memory-expiry", "--adapter", "codex",
-        "--prompt-file", str(prompt), "--alias", "workhorse", "--role", "worker",
+        "--prompt-file", str(prompt), "--alias", "senior", "--role", "worker",
         "--timeout-seconds", "0.01",
     ])
     assert module.dispatch(args) == 1
@@ -990,7 +990,7 @@ exit 99
     monkeypatch.chdir(tmp_path)
     args = module.parser().parse_args([
         "--run-dir", str(run_dir), "--task-id", "queue-wiring", "--adapter", "codex",
-        "--prompt-file", str(prompt), "--alias", "workhorse", "--role", "worker",
+        "--prompt-file", str(prompt), "--alias", "senior", "--role", "worker",
         "--timeout-seconds", "0.01",
     ])
     assert module.dispatch(args) == 1
@@ -1057,7 +1057,7 @@ def test_batch_preflight_does_not_invent_an_explicit_alias_for_model_routes(tmp_
     monkeypatch.setattr(module.subprocess, "run", resolve)
     result = module.preflight_tasks([
         {"id": "model-only", "adapter": "codex", "model": "gpt-6-luna", "prompt": "hi"},
-        {"id": "explicit-both", "adapter": "codex", "alias": "workhorse", "model": "gpt-6-luna", "prompt": "hi"},
+        {"id": "explicit-both", "adapter": "codex", "alias": "senior", "model": "gpt-6-luna", "prompt": "hi"},
     ])
 
     model_only, explicit_both = result["routes"]
@@ -1073,7 +1073,7 @@ def test_batch_preflight_does_not_invent_an_explicit_alias_for_model_routes(tmp_
 def test_explicit_model_receipt_does_not_record_an_implied_alias(tmp_path):
     mod = load_dispatch_module()
     args = SimpleNamespace(
-        tool="opencode", alias="flagship", model="mimo", alias_supplied=False, effort=None,
+        tool="opencode", alias="principal", model="mimo", alias_supplied=False, effort=None,
         task_id="dispatch-001", access_mode="read_only", worktree=None,
         _phase_timings={}, reviewer_id=None, risk_tier=None,
         model_override_tier=None,
@@ -1085,7 +1085,7 @@ def test_explicit_model_receipt_does_not_record_an_implied_alias(tmp_path):
 def test_config_fallback_detail_is_persisted_in_the_attempt_record(tmp_path, monkeypatch):
     mod = load_dispatch_module()
     args = SimpleNamespace(
-        tool="opencode", alias="workhorse", model="gpt-6-luna", alias_supplied=True,
+        tool="opencode", alias="senior", model="gpt-6-luna", alias_supplied=True,
         effort=None, task_id="dispatch-001", access_mode="read_only", worktree=None,
         _phase_timings={}, reviewer_id=None, risk_tier=None,
         model_override_tier=None,
@@ -1101,13 +1101,13 @@ def test_config_fallback_detail_is_persisted_in_the_attempt_record(tmp_path, mon
 def test_explicit_model_and_alias_are_both_recorded_in_receipt(tmp_path):
     mod = load_dispatch_module()
     args = SimpleNamespace(
-        tool="opencode", alias="workhorse", model="gpt-6-luna", alias_supplied=True,
+        tool="opencode", alias="senior", model="gpt-6-luna", alias_supplied=True,
         effort=None, task_id="dispatch-001", access_mode="read_only", worktree=None,
         _phase_timings={}, reviewer_id=None, risk_tier=None,
         model_override_tier=None,
     )
     row = mod.contract_row(args, tmp_path, 1, tmp_path / "attempt", {}, "now")
-    assert row["provenance"]["requested"]["alias"] == "workhorse"
+    assert row["provenance"]["requested"]["alias"] == "senior"
 
 
 def test_workspace_identity_keeps_root_and_records_provider_cwd(tmp_path):
@@ -1194,7 +1194,7 @@ else:
     monkeypatch.setenv("CF_DISPATCH_AGY_ADD_DIR", str(tmp_path / "unrelated"))
     args = module.parser().parse_args([
         "--run-dir", str(run_dir), "--task-id", "agy", "--adapter", "agy",
-        "--prompt-file", str(prompt), "--alias", "workhorse", "--role", "reviewer",
+        "--prompt-file", str(prompt), "--alias", "senior", "--role", "reviewer",
         "--git-evidence", str(source),
     ])
 
@@ -1245,7 +1245,7 @@ def test_agy_git_evidence_retains_denial_without_accepting_result(tmp_path: Path
     monkeypatch.chdir(tmp_path)
     args = module.parser().parse_args([
         "--run-dir", str(run_dir), "--task-id", "deny", "--adapter", "agy",
-        "--prompt-file", str(prompt), "--alias", "workhorse", "--role", "reviewer",
+        "--prompt-file", str(prompt), "--alias", "senior", "--role", "reviewer",
         "--git-evidence", str(source),
     ])
 
@@ -1268,7 +1268,7 @@ def test_agy_git_evidence_rejects_symlink_source(tmp_path: Path, monkeypatch) ->
     monkeypatch.chdir(tmp_path)
     args = module.parser().parse_args([
         "--run-dir", str(run_dir), "--task-id", "symlink", "--adapter", "agy",
-        "--prompt-file", str(prompt), "--alias", "workhorse", "--role", "reviewer",
+        "--prompt-file", str(prompt), "--alias", "senior", "--role", "reviewer",
         "--git-evidence", str(alias),
     ])
 
@@ -1286,7 +1286,7 @@ def test_valid_worker_question_envelope_is_retained_as_blocked_attempt(tmp_path:
     monkeypatch.setattr(module, "CF_DISPATCH", adapter)
     args = module.parser().parse_args([
         "--run-dir", str(run_dir), "--task-id", "question", "--adapter", "codex",
-        "--prompt-file", str(prompt), "--alias", "workhorse", "--role", "worker",
+        "--prompt-file", str(prompt), "--alias", "senior", "--role", "worker",
     ])
     monkeypatch.chdir(tmp_path)
 
@@ -1331,7 +1331,7 @@ def test_worker_question_detection_is_exact_and_fail_closed(
     monkeypatch.setattr(module, "CF_DISPATCH", adapter)
     args = module.parser().parse_args([
         "--run-dir", str(run_dir), "--task-id", "case", "--adapter", "codex",
-        "--prompt-file", str(prompt), "--alias", "workhorse", "--role", "worker",
+        "--prompt-file", str(prompt), "--alias", "senior", "--role", "worker",
     ])
     monkeypatch.chdir(tmp_path)
 
@@ -1361,7 +1361,7 @@ def test_quarantined_lane_gets_the_same_question_and_envelope_checks(tmp_path: P
     monkeypatch.setattr(module, "CF_DISPATCH", adapter)
     args = module.parser().parse_args([
         "--run-dir", str(run_dir), "--task-id", "case", "--adapter", "codex",
-        "--prompt-file", str(prompt), "--alias", "workhorse", "--role", "worker",
+        "--prompt-file", str(prompt), "--alias", "senior", "--role", "worker",
     ])
     monkeypatch.chdir(tmp_path)
     module.dispatch(args)
@@ -1380,7 +1380,7 @@ def test_valid_worker_question_cannot_override_nonzero_provider_exit(tmp_path: P
     monkeypatch.setattr(module, "CF_DISPATCH", adapter)
     args = module.parser().parse_args([
         "--run-dir", str(run_dir), "--task-id", "case", "--adapter", "codex",
-        "--prompt-file", str(prompt), "--alias", "workhorse", "--role", "worker",
+        "--prompt-file", str(prompt), "--alias", "senior", "--role", "worker",
     ])
     monkeypatch.chdir(tmp_path)
 
@@ -1407,7 +1407,7 @@ def test_worker_question_prompt_size_is_bounded(tmp_path: Path, monkeypatch) -> 
     monkeypatch.setattr(module, "CF_DISPATCH", adapter)
     args = module.parser().parse_args([
         "--run-dir", str(run_dir), "--task-id", "case", "--adapter", "codex",
-        "--prompt-file", str(prompt), "--alias", "workhorse", "--role", "worker",
+        "--prompt-file", str(prompt), "--alias", "senior", "--role", "worker",
     ])
     monkeypatch.chdir(tmp_path)
 
@@ -1452,7 +1452,7 @@ def test_valid_maximum_astral_worker_question_envelope_is_blocked(tmp_path: Path
     monkeypatch.setattr(module, "CF_DISPATCH", adapter)
     args = module.parser().parse_args([
         "--run-dir", str(run_dir), "--task-id", "case", "--adapter", "codex",
-        "--prompt-file", str(prompt), "--alias", "workhorse", "--role", "worker",
+        "--prompt-file", str(prompt), "--alias", "senior", "--role", "worker",
     ])
     monkeypatch.chdir(tmp_path)
 
@@ -1482,7 +1482,7 @@ def test_dispatch_fails_when_terminal_candidate_cannot_be_safely_reopened(
     monkeypatch.setattr(module.os, "open", refuse_result_open)
     args = module.parser().parse_args([
         "--run-dir", str(run_dir), "--task-id", "case", "--adapter", "codex",
-        "--prompt-file", str(prompt), "--alias", "workhorse", "--role", "worker",
+        "--prompt-file", str(prompt), "--alias", "senior", "--role", "worker",
     ])
     monkeypatch.chdir(tmp_path)
 
@@ -1511,7 +1511,7 @@ def test_ordinary_dispatch_without_lead_family_is_not_certification(tmp_path: Pa
     env["PATH"] = f"{bin_dir}:{ROOT / 'scripts'}:{env['PATH']}"
     result = subprocess.run(
         [str(SCRIPT), "--run-dir", str(run_dir), "--task-id", "no-family",
-         "--adapter", "codex", "--prompt-file", str(prompt), "--alias", "workhorse", "--role", "worker"],
+         "--adapter", "codex", "--prompt-file", str(prompt), "--alias", "senior", "--role", "worker"],
         cwd=tmp_path, env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
     )
     assert result.returncode == 0, result.stderr + result.stdout
@@ -1570,7 +1570,7 @@ def test_batch_child_defers_shared_manifest_append(tmp_path: Path, monkeypatch) 
     monkeypatch.setattr(module, "CF_DISPATCH", adapter)
     args = module.parser().parse_args([
         "--run-dir", str(run_dir), "--task-id", "deferred", "--adapter", "codex",
-        "--prompt-file", str(prompt), "--alias", "scout", "--role", "worker",
+        "--prompt-file", str(prompt), "--alias", "junior", "--role", "worker",
         "--risk-tier", "substantial", "--reviewer-id", "reviewer-1", "--effort", "high", "--batch-child",
     ])
     monkeypatch.chdir(tmp_path)
@@ -1591,7 +1591,7 @@ def test_prompt_stdin_is_retained_by_dispatch_owner(tmp_path: Path, monkeypatch)
     monkeypatch.setattr(module, "CF_DISPATCH", adapter)
     args = module.parser().parse_args([
         "--run-dir", str(run_dir), "--task-id", "stdin-task", "--adapter", "codex",
-        "--prompt-stdin", "--alias", "scout", "--role", "worker",
+        "--prompt-stdin", "--alias", "junior", "--role", "worker",
     ])
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(sys, "stdin", io.TextIOWrapper(io.BytesIO(b"stdin prompt\n")))
@@ -1678,7 +1678,7 @@ def test_nonzero_provider_exit_is_recorded_without_substitution(tmp_path: Path) 
             str(SCRIPT),
             "--run-dir", str(run_dir), "--task-id", "provider-failure",
             "--adapter", "codex", "--prompt-file", str(prompt),
-            "--alias", "workhorse", "--role", "worker",
+            "--alias", "senior", "--role", "worker",
         ], cwd=tmp_path, env=env, text=True,
         stdout=subprocess.PIPE, stderr=subprocess.PIPE,
     )
@@ -1711,7 +1711,7 @@ def test_malformed_adapter_receipt_is_fail_closed(tmp_path: Path, monkeypatch) -
     monkeypatch.setattr(module, "CF_DISPATCH", adapter)
     args = module.parser().parse_args([
         "--run-dir", str(run_dir), "--task-id", "malformed", "--adapter", "codex",
-        "--prompt-file", str(prompt), "--alias", "workhorse", "--role", "worker",
+        "--prompt-file", str(prompt), "--alias", "senior", "--role", "worker",
     ])
     monkeypatch.chdir(tmp_path)
     assert module.dispatch(args) == 1
@@ -1740,7 +1740,7 @@ def test_incomplete_success_receipt_is_fail_closed(tmp_path: Path, monkeypatch) 
     monkeypatch.setattr(module, "CF_DISPATCH", adapter)
     args = module.parser().parse_args([
         "--run-dir", str(run_dir), "--task-id", "incomplete-success", "--adapter", "codex",
-        "--prompt-file", str(prompt), "--alias", "workhorse", "--role", "worker",
+        "--prompt-file", str(prompt), "--alias", "senior", "--role", "worker",
     ])
     monkeypatch.chdir(tmp_path)
 
@@ -1763,7 +1763,7 @@ def test_reentry_rejects_tampered_success_adapter_receipt(tmp_path: Path, monkey
     monkeypatch.chdir(tmp_path)
     args = module.parser().parse_args([
         "--run-dir", str(run_dir), "--task-id", "reentry", "--adapter", "codex",
-        "--prompt-file", str(prompt), "--alias", "workhorse", "--role", "worker",
+        "--prompt-file", str(prompt), "--alias", "senior", "--role", "worker",
     ])
     assert module.dispatch(args) == 0
     attempt = run_dir / "dispatch/tasks/reentry/attempt-001/attempt.json"
@@ -1794,7 +1794,7 @@ def test_reentry_rejects_non_integer_zero_exit(tmp_path: Path, monkeypatch, exit
     monkeypatch.chdir(tmp_path)
     args = module.parser().parse_args([
         "--run-dir", str(run_dir), "--task-id", "reentry", "--adapter", "codex",
-        "--prompt-file", str(prompt), "--alias", "workhorse", "--role", "worker",
+        "--prompt-file", str(prompt), "--alias", "senior", "--role", "worker",
     ])
     assert module.dispatch(args) == 0
     attempt = run_dir / "dispatch/tasks/reentry/attempt-001/attempt.json"
@@ -1830,7 +1830,7 @@ def test_typed_adapter_auth_and_missing_tool_outcomes_are_preserved(tmp_path: Pa
         monkeypatch.setattr(module, "CF_DISPATCH", adapter)
         args = module.parser().parse_args([
             "--run-dir", str(run_dir), "--task-id", name, "--adapter", "codex",
-            "--prompt-file", str(prompt), "--alias", "workhorse", "--role", "worker",
+            "--prompt-file", str(prompt), "--alias", "senior", "--role", "worker",
         ])
         monkeypatch.chdir(tmp_path)
         assert module.dispatch(args) == 1
@@ -1858,7 +1858,7 @@ def test_timeout_records_reaped_exit(tmp_path: Path) -> None:
         """,
     )
     env = os.environ.copy()
-    env["PROVENANT_PREFLIGHT_ROUTES"] = json.dumps({"timeout": {"adapter": "codex", "alias": "workhorse", "resolved_model": "gpt-6-luna", "effort": "high"}})
+    env["PROVENANT_PREFLIGHT_ROUTES"] = json.dumps({"timeout": {"adapter": "codex", "alias": "senior", "resolved_model": "gpt-6-luna", "effort": "high"}})
     env["PATH"] = f"{bin_dir}:{ROOT / 'scripts'}:{env['PATH']}"
     result = subprocess.run(
         [str(SCRIPT), "--run-dir", str(run_dir), "--task-id", "timeout", "--adapter", "codex",
@@ -1901,7 +1901,7 @@ def test_sigterm_interrupts_and_reaps_provider_group(tmp_path: Path) -> None:
     process = subprocess.Popen(
         [str(SCRIPT), "--run-dir", str(run_dir), "--task-id", "cancel",
          "--adapter", "codex", "--prompt-file", str(prompt),
-         "--alias", "workhorse", "--role", "worker", "--timeout", "30"],
+         "--alias", "senior", "--role", "worker", "--timeout", "30"],
         cwd=tmp_path, env=env, text=True,
         stdout=subprocess.PIPE, stderr=subprocess.PIPE,
     )
@@ -1951,7 +1951,7 @@ def test_late_signal_after_provider_exit_preserves_attempt_publication(tmp_path:
     """), encoding="utf-8")
     result = subprocess.run([
         sys.executable, str(driver), "--run-dir", str(run_dir), "--task-id", "late",
-        "--adapter", "codex", "--prompt-file", str(prompt), "--alias", "workhorse", "--role", "worker",
+        "--adapter", "codex", "--prompt-file", str(prompt), "--alias", "senior", "--role", "worker",
     ], cwd=tmp_path, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 
     assert result.returncode == 0, result.stderr + result.stdout
@@ -2001,7 +2001,7 @@ def test_signal_during_popen_return_reaps_provider_and_publishes_cancelled_attem
     """), encoding="utf-8")
     result = subprocess.run([
         sys.executable, str(driver), "--run-dir", str(run_dir), "--task-id", "window",
-        "--adapter", "codex", "--prompt-file", str(prompt), "--alias", "workhorse", "--role", "worker",
+        "--adapter", "codex", "--prompt-file", str(prompt), "--alias", "senior", "--role", "worker",
     ], cwd=tmp_path, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=10)
 
     assert result.returncode == 1, result.stderr + result.stdout
@@ -2040,7 +2040,7 @@ def test_external_task_cancel_reaps_only_owned_provider_group(tmp_path: Path) ->
     env["PATH"] = f"{bin_dir}:{ROOT / 'scripts'}:{env['PATH']}"
     dispatch = subprocess.Popen(
         [str(SCRIPT), "--run-dir", str(run_dir), "--task-id", "cancel-me", "--adapter", "codex",
-         "--prompt-file", str(prompt), "--alias", "workhorse", "--role", "worker", "--timeout", "30"],
+         "--prompt-file", str(prompt), "--alias", "senior", "--role", "worker", "--timeout", "30"],
         cwd=tmp_path, env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
     )
     deadline = time.monotonic() + 5
@@ -2088,7 +2088,7 @@ def test_batch_marker_prelaunch_cancellation_has_no_provider_pid(tmp_path: Path,
     monkeypatch.setattr(module, "CF_DISPATCH", adapter)
     args = module.parser().parse_args([
         "--run-dir", str(run_dir), "--task-id", "prelaunch", "--adapter", "codex",
-        "--prompt-file", str(prompt), "--alias", "workhorse", "--role", "worker",
+        "--prompt-file", str(prompt), "--alias", "senior", "--role", "worker",
         "--batch-child", "--batch-id", "batch-001",
     ])
     monkeypatch.chdir(tmp_path)
@@ -2113,7 +2113,7 @@ def test_stale_marker_on_prior_attempt_does_not_cancel_next_attempt(tmp_path: Pa
     monkeypatch.chdir(tmp_path)
     args = module.parser().parse_args([
         "--run-dir", str(run_dir), "--task-id", "stale", "--adapter", "codex",
-        "--prompt-file", str(prompt), "--alias", "workhorse", "--role", "worker",
+        "--prompt-file", str(prompt), "--alias", "senior", "--role", "worker",
     ])
     assert module.dispatch(args) == 0
     stale = run_dir / "dispatch/tasks/stale/attempt-001/cancel.request"
@@ -2143,7 +2143,7 @@ def test_attempt_rows_are_accepted_by_existing_finalizer(tmp_path: Path) -> None
     env["PATH"] = f"{bin_dir}:{ROOT / 'scripts'}:{env['PATH']}"
     result = subprocess.run(
         [str(SCRIPT), "--run-dir", str(run_dir), "--task-id", "finalizer", "--adapter", "codex",
-         "--prompt-file", str(prompt), "--alias", "workhorse", "--role", "worker"],
+         "--prompt-file", str(prompt), "--alias", "senior", "--role", "worker"],
         cwd=tmp_path, env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
     )
     assert result.returncode == 0, result.stderr + result.stdout
@@ -2157,7 +2157,7 @@ def test_attempt_rows_are_accepted_by_existing_finalizer(tmp_path: Path) -> None
     rejected = subprocess.run(
         [str(SCRIPT), "--run-dir", str(run_dir), "--task-id", "after-close",
          "--adapter", "codex", "--prompt-file", str(prompt),
-         "--alias", "workhorse", "--role", "worker"],
+         "--alias", "senior", "--role", "worker"],
         cwd=tmp_path, env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
     )
     assert rejected.returncode == 2
@@ -2178,7 +2178,7 @@ def test_counterfeit_active_receipt_is_rejected_before_launch(tmp_path: Path, mo
     monkeypatch.setattr(module, "CF_DISPATCH", adapter)
     args = module.parser().parse_args([
         "--run-dir", str(run_dir), "--task-id", "blocked", "--adapter", "codex",
-        "--prompt-file", str(prompt), "--alias", "workhorse", "--role", "worker",
+        "--prompt-file", str(prompt), "--alias", "senior", "--role", "worker",
     ])
     monkeypatch.chdir(tmp_path)
 
@@ -2195,7 +2195,7 @@ def test_hard_linked_prompt_is_rejected_before_provider_launch(tmp_path: Path, m
     module = load_dispatch_module()
     args = module.parser().parse_args([
         "--run-dir", str(run_dir), "--task-id", "hardlink", "--adapter", "codex",
-        "--prompt-file", str(linked), "--alias", "workhorse", "--role", "worker",
+        "--prompt-file", str(linked), "--alias", "senior", "--role", "worker",
     ])
     monkeypatch.chdir(tmp_path)
     assert module.dispatch(args) == 2
@@ -2258,7 +2258,7 @@ def test_hard_linked_prompt_reports_typed_custody_error(tmp_path: Path, monkeypa
     module = load_dispatch_module()
     args = module.parser().parse_args([
         "--run-dir", str(run_dir), "--task-id", "hardlink-typed", "--adapter", "codex",
-        "--prompt-file", str(linked), "--alias", "workhorse", "--role", "worker",
+        "--prompt-file", str(linked), "--alias", "senior", "--role", "worker",
     ])
     monkeypatch.chdir(tmp_path)
     assert module.dispatch(args) == 2
@@ -2273,7 +2273,7 @@ def test_missing_run_receipt_reports_missing_custody(tmp_path: Path, monkeypatch
     module = load_dispatch_module()
     args = module.parser().parse_args([
         "--run-dir", str(run_dir), "--task-id", "missing-receipt", "--adapter", "codex",
-        "--prompt-file", str(prompt), "--alias", "workhorse", "--role", "worker",
+        "--prompt-file", str(prompt), "--alias", "senior", "--role", "worker",
     ])
     monkeypatch.chdir(tmp_path)
     assert module.dispatch(args) == 2
@@ -2298,7 +2298,7 @@ def test_remote_long_attempt_path_rejects_only_browser_before_launch(tmp_path, m
     monkeypatch.chdir(workspace)
     args = module.parser().parse_args([
         '--run-dir', str(run_dir), '--task-id', 'browser', '--adapter', 'claude',
-        '--prompt-file', str(prompt), '--alias', 'workhorse', '--role', 'worker',
+        '--prompt-file', str(prompt), '--alias', 'senior', '--role', 'worker',
         '--capabilities', '["browser"]' if browser else '[]',
     ])
     assert module.dispatch(args) == (2 if browser else 0)
@@ -2315,7 +2315,7 @@ def test_nonfinite_or_nonpositive_timeout_is_rejected() -> None:
         try:
             module.parser().parse_args([
                 "--run-dir", "/tmp", "--adapter", "codex", "--prompt-file", "/tmp/prompt",
-                "--alias", "workhorse", "--role", "worker", "--timeout", value,
+                "--alias", "senior", "--role", "worker", "--timeout", value,
             ])
         except SystemExit as exc:
             assert exc.code == 2
@@ -2335,7 +2335,7 @@ def test_manifest_appendability_failure_is_typed_before_launch(tmp_path: Path, m
     monkeypatch.setattr(module, "ensure_manifest_appendable", refuse)
     args = module.parser().parse_args([
         "--run-dir", str(run_dir), "--task-id", "manifest-readonly", "--adapter", "codex",
-        "--prompt-file", str(prompt), "--alias", "workhorse", "--role", "worker",
+        "--prompt-file", str(prompt), "--alias", "senior", "--role", "worker",
     ])
     monkeypatch.chdir(tmp_path)
     assert module.dispatch(args) == 2
@@ -2356,7 +2356,7 @@ def test_read_only_manifest_is_rejected_before_launch(tmp_path: Path, monkeypatc
             module = load_dispatch_module()
             args = module.parser().parse_args([
                 "--run-dir", str(run_dir), "--task-id", "manifest-mode", "--adapter", "codex",
-                "--prompt-file", str(prompt), "--alias", "workhorse", "--role", "worker",
+                "--prompt-file", str(prompt), "--alias", "senior", "--role", "worker",
             ])
             monkeypatch.chdir(tmp_path)
             assert module.dispatch(args) == 2
@@ -2378,7 +2378,7 @@ def test_manifest_append_failure_retains_terminal_attempt(tmp_path: Path, monkey
     monkeypatch.setattr(module, "append_manifest", lambda *_: (_ for _ in ()).throw(OSError("append failed")))
     args = module.parser().parse_args([
         "--run-dir", str(run_dir), "--task-id", "manifest-write", "--adapter", "codex",
-        "--prompt-file", str(prompt), "--alias", "workhorse", "--role", "worker",
+        "--prompt-file", str(prompt), "--alias", "senior", "--role", "worker",
     ])
     monkeypatch.chdir(tmp_path)
     assert module.dispatch(args) == 1
@@ -2400,7 +2400,7 @@ def test_reentry_reconciles_missing_manifest_rows_and_retry_lineage(tmp_path: Pa
     module.CF_DISPATCH = adapter
     args = module.parser().parse_args([
         "--run-dir", str(run_dir), "--task-id", "reconcile", "--adapter", "codex",
-        "--prompt-file", str(prompt), "--alias", "workhorse", "--role", "worker",
+        "--prompt-file", str(prompt), "--alias", "senior", "--role", "worker",
     ])
     monkeypatch.chdir(tmp_path)
     assert module.dispatch(args) == 0
@@ -2411,7 +2411,7 @@ def test_reentry_reconciles_missing_manifest_rows_and_retry_lineage(tmp_path: Pa
     ) + "\n", encoding="utf-8")
     retry_args = module.parser().parse_args([
         "--run-dir", str(run_dir), "--task-id", "reconcile", "--adapter", "codex",
-        "--prompt-file", str(prompt), "--alias", "workhorse", "--role", "worker",
+        "--prompt-file", str(prompt), "--alias", "senior", "--role", "worker",
         "--retry-of", "attempt-001",
     ])
     assert module.dispatch(retry_args) == 0
@@ -2436,7 +2436,7 @@ def test_attempt_number_and_retry_lineage_continue_past_999(tmp_path: Path, monk
     (task_dir / "attempt-1000/attempt.json").write_text("{}\n", encoding="utf-8")
     retry_args = module.parser().parse_args([
         "--run-dir", str(run_dir), "--task-id", "long-retry", "--adapter", "codex",
-        "--prompt-file", str(prompt), "--alias", "workhorse", "--role", "worker",
+        "--prompt-file", str(prompt), "--alias", "senior", "--role", "worker",
         "--retry-of", "attempt-1000", "--batch-child",
     ])
     monkeypatch.chdir(tmp_path)
@@ -2457,7 +2457,7 @@ def test_reentry_does_not_verify_missing_attempt_evidence(tmp_path: Path, monkey
     module.CF_DISPATCH = adapter
     args = module.parser().parse_args([
         "--run-dir", str(run_dir), "--task-id", "missing", "--adapter", "codex",
-        "--prompt-file", str(prompt), "--alias", "workhorse", "--role", "worker",
+        "--prompt-file", str(prompt), "--alias", "senior", "--role", "worker",
     ])
     monkeypatch.chdir(tmp_path)
     assert module.dispatch(args) == 0
@@ -2471,7 +2471,7 @@ def test_reentry_does_not_verify_missing_attempt_evidence(tmp_path: Path, monkey
 
     blocked = module.parser().parse_args([
         "--run-dir", str(run_dir), "--task-id", "next", "--adapter", "codex",
-        "--prompt-file", str(prompt), "--alias", "workhorse", "--role", "worker",
+        "--prompt-file", str(prompt), "--alias", "senior", "--role", "worker",
     ])
     assert module.dispatch(blocked) == 2
     assert "dispatch-missing-attempt-001" not in manifest.read_text(encoding="utf-8")
@@ -2493,7 +2493,7 @@ def test_reentry_fails_closed_for_malformed_attempt_record(tmp_path: Path, monke
     module.CF_DISPATCH = adapter
     args = module.parser().parse_args([
         "--run-dir", str(run_dir), "--task-id", "next", "--adapter", "codex",
-        "--prompt-file", str(prompt), "--alias", "workhorse", "--role", "worker",
+        "--prompt-file", str(prompt), "--alias", "senior", "--role", "worker",
     ])
     monkeypatch.chdir(tmp_path)
 
@@ -2526,7 +2526,7 @@ def test_reentry_rejects_retained_paths_that_escape_the_run(tmp_path: Path, monk
     module.CF_DISPATCH = adapter
     args = module.parser().parse_args([
         "--run-dir", str(run_dir), "--task-id", "next", "--adapter", "codex",
-        "--prompt-file", str(prompt), "--alias", "workhorse", "--role", "worker",
+        "--prompt-file", str(prompt), "--alias", "senior", "--role", "worker",
     ])
     monkeypatch.chdir(tmp_path)
 
@@ -2548,7 +2548,7 @@ def test_reentry_rejects_orphan_attempt_directory(tmp_path: Path, monkeypatch) -
     monkeypatch.setattr(module, "CF_DISPATCH", adapter)
     args = module.parser().parse_args([
         "--run-dir", str(run_dir), "--task-id", "next", "--adapter", "codex",
-        "--prompt-file", str(prompt), "--alias", "workhorse", "--role", "worker",
+        "--prompt-file", str(prompt), "--alias", "senior", "--role", "worker",
     ])
     monkeypatch.chdir(tmp_path)
 
@@ -2577,7 +2577,7 @@ def test_result_symlink_is_rejected_without_hashing_target(tmp_path: Path, monke
     monkeypatch.setattr(module, "CF_DISPATCH", adapter)
     args = module.parser().parse_args([
         "--run-dir", str(run_dir), "--task-id", "symlink", "--adapter", "codex",
-        "--prompt-file", str(prompt), "--alias", "workhorse", "--role", "worker",
+        "--prompt-file", str(prompt), "--alias", "senior", "--role", "worker",
     ])
     monkeypatch.chdir(tmp_path)
 
@@ -2619,7 +2619,7 @@ def test_attempt_records_available_git_base_identity(tmp_path: Path, monkeypatch
     monkeypatch.setattr(module, "CF_DISPATCH", adapter)
     args = module.parser().parse_args([
         "--run-dir", str(run_dir), "--task-id", "identity", "--adapter", "codex",
-        "--prompt-file", str(prompt), "--alias", "workhorse", "--role", "worker",
+        "--prompt-file", str(prompt), "--alias", "senior", "--role", "worker",
     ])
     monkeypatch.chdir(workspace)
 
@@ -2655,7 +2655,7 @@ def test_new_attempt_rejects_preexisting_directory_symlink(
     monkeypatch.setattr(module, "CF_DISPATCH", adapter)
     args = module.parser().parse_args([
         "--run-dir", str(run_dir), "--task-id", "escaped", "--adapter", "codex",
-        "--prompt-file", str(prompt), "--alias", "workhorse", "--role", "worker",
+        "--prompt-file", str(prompt), "--alias", "senior", "--role", "worker",
     ])
     monkeypatch.chdir(tmp_path)
 
@@ -2693,7 +2693,7 @@ def run_writer_dispatch(
     return subprocess.run(
         [str(SCRIPT), "--run-dir", str(run_dir), "--task-id", task_id, "--adapter", adapter,
          "--prompt-file", str(prompt), "--orchestrator-family", "openai",
-         *([] if adapter == "opencode" else ["--alias", "workhorse"]),
+         *([] if adapter == "opencode" else ["--alias", "senior"]),
          "--role", "worker", *extra],
         cwd=tmp_path, env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
     )
@@ -2792,7 +2792,7 @@ def test_worktree_writer_route_reaches_the_adapter_and_the_attempt_record(tmp_pa
     env["PATH"] = f"{bin_dir}:{ROOT / 'scripts'}:{env['PATH']}"
     result = subprocess.run(
         [str(SCRIPT), "--run-dir", str(run_dir), "--task-id", "task-1", "--adapter", "claude",
-         "--prompt-file", str(prompt), "--orchestrator-family", "openai", "--alias", "workhorse",
+         "--prompt-file", str(prompt), "--orchestrator-family", "openai", "--alias", "senior",
          "--role", "worker", "--access-mode", "worktree_write", "--worktree", str(worktree)],
         cwd=tmp_path, env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
     )
@@ -2829,7 +2829,7 @@ def test_read_only_route_is_the_default_and_refuses_a_worktree(tmp_path: Path) -
     module = load_dispatch_module()
     parsed = module.parser().parse_args([
         "--run-dir", str(run_dir), "--adapter", "claude", "--prompt-file", str(prompt),
-        "--alias", "workhorse", "--role", "worker",
+        "--alias", "senior", "--role", "worker",
     ])
     assert parsed.access_mode == "read_only"
     assert parsed.worktree is None
@@ -2891,7 +2891,7 @@ def test_provider_deadline_is_passed_below_the_owner_deadline(tmp_path: Path) ->
     prompt.write_text("Reply exactly OK\n", encoding="utf-8")
     args = module.parser().parse_args([
         "--run-dir", str(tmp_path), "--task-id", "deadline", "--adapter", "agy",
-        "--prompt-file", str(prompt), "--alias", "workhorse", "--role", "worker",
+        "--prompt-file", str(prompt), "--alias", "senior", "--role", "worker",
         "--timeout", "900",
     ])
     command = module.build_command(args, prompt, tmp_path / "result.md")
@@ -2993,7 +2993,7 @@ def test_claude_arm_short_timeout_reports_a_timeout_not_a_receipt_failure(tmp_pa
     env["PATH"] = f"{bin_dir}:{ROOT / 'scripts'}:{env['PATH']}"
     result = subprocess.run(
         [str(SCRIPT), "--run-dir", str(run_dir), "--task-id", "claudetimeout", "--adapter", "claude",
-         "--prompt-file", str(prompt), "--alias", "workhorse", "--role", "worker",
+         "--prompt-file", str(prompt), "--alias", "senior", "--role", "worker",
          "--intent", "ordinary", "--timeout", "2"],
         cwd=tmp_path, env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
     )
@@ -3035,7 +3035,7 @@ def test_result_missing_past_the_provider_deadline_is_a_timeout_not_a_result_fai
     monkeypatch.setattr(module, "CF_DISPATCH", adapter)
     args = module.parser().parse_args([
         "--run-dir", str(run_dir), "--task-id", "deadlinenet", "--adapter", "claude",
-        "--prompt-file", str(prompt), "--alias", "workhorse", "--role", "worker",
+        "--prompt-file", str(prompt), "--alias", "senior", "--role", "worker",
         "--timeout", "2",
     ])
     monkeypatch.chdir(tmp_path)
@@ -3054,8 +3054,8 @@ def test_front_door_preflight_rejects_all_invalid_tasks_without_run(tmp_path):
     result = subprocess.run(
         [sys.executable, str(SCRIPT), '--preflight-json'], cwd=tmp_path,
         input=json.dumps({'tasks': [
-            {'id': 'missing', 'adapter': 'claude', 'alias': 'workhorse', 'prompt_file': 'absent.md'},
-            {'id': 'broker', 'adapter': 'opencode', 'alias': 'workhorse', 'prompt': 'hello'},
+            {'id': 'missing', 'adapter': 'claude', 'alias': 'senior', 'prompt_file': 'absent.md'},
+            {'id': 'broker', 'adapter': 'opencode', 'alias': 'senior', 'prompt': 'hello'},
         ]}), text=True, capture_output=True,
         env={**os.environ, 'AGENT_FABRIC_INSTANCE_ROOT': str(ROOT)},
     )
@@ -3155,7 +3155,7 @@ def test_preflight_secret_file_rejects_and_explicit_override_accepts(tmp_path, m
     module = load_dispatch_module()
     prompt = tmp_path / 'prompt.md'
     prompt.write_text('hello\n' + 'AKIA' + 'A' * 16)
-    task = {'id': 'task-1', 'adapter': 'claude', 'alias': 'workhorse', 'prompt_file': str(prompt)}
+    task = {'id': 'task-1', 'adapter': 'claude', 'alias': 'senior', 'prompt_file': str(prompt)}
     rejected = module.preflight_tasks([task])
     assert rejected['error'] == 'secret_detected'
     assert f'{prompt}:2' in rejected['fix']
@@ -3173,7 +3173,7 @@ def test_preflight_accepts_a_prompt_file_only_inside_a_read_root(tmp_path, monke
     monkeypatch.setattr(module, "prompt_temp_roots", lambda: ())
     prompt = other / 'brief.md'
     prompt.write_text('read the other project')
-    task = {'id': 'task-1', 'adapter': 'claude', 'alias': 'workhorse', 'prompt_file': str(prompt)}
+    task = {'id': 'task-1', 'adapter': 'claude', 'alias': 'senior', 'prompt_file': str(prompt)}
 
     rejected = module.preflight_tasks([task], workspace)
     assert rejected['error'] == 'prompt_path_forbidden'
@@ -3193,7 +3193,7 @@ def test_preflight_accepts_temp_prompts_and_retains_secret_and_link_checks(tmp_p
     module = load_dispatch_module()
     prompt = scratch / 'brief.md'
     prompt.write_text('hello')
-    task = {'id': 'task-1', 'adapter': 'claude', 'alias': 'workhorse', 'prompt_file': str(prompt)}
+    task = {'id': 'task-1', 'adapter': 'claude', 'alias': 'senior', 'prompt_file': str(prompt)}
     assert module.preflight_tasks([task], workspace)['status'] == 'validated'
     prompt.write_text('AKIA' + 'A' * 16)
     assert module.preflight_tasks([task], workspace)['error'] == 'secret_detected'
@@ -3219,7 +3219,7 @@ def test_preflight_scans_a_read_root_prompt_for_secrets(tmp_path, monkeypatch):
     module = load_dispatch_module()
     prompt = other / 'brief.md'
     prompt.write_text('hello\n' + 'AKIA' + 'A' * 16)
-    task = {'id': 'task-1', 'adapter': 'claude', 'alias': 'workhorse', 'prompt_file': str(prompt),
+    task = {'id': 'task-1', 'adapter': 'claude', 'alias': 'senior', 'prompt_file': str(prompt),
             'read_roots': [str(other)]}
     assert module.preflight_tasks([task], workspace)['error'] == 'secret_detected'
 
@@ -3236,7 +3236,7 @@ def test_preflight_refuses_a_credential_store_prompt_in_any_root(tmp_path, monke
     auth.write_text('{"tokens": {"opaque": "value"}}')
     local = workspace / 'notes' / 'auth.json'
     local.write_text('{"opaque": "value"}')
-    task = {'id': 'task-1', 'adapter': 'claude', 'alias': 'workhorse'}
+    task = {'id': 'task-1', 'adapter': 'claude', 'alias': 'senior'}
     for prompt, roots in ((auth, [str(other)]), (local, [])):
         result = module.preflight_tasks([{**task, 'prompt_file': str(prompt), 'read_roots': roots}], workspace)
         assert result['error'] == 'credential_or_auth_store_denied', prompt
@@ -3344,7 +3344,7 @@ def test_preflight_secret_in_add_dirs_rejects_and_override_accepts(tmp_path, mon
     directory = tmp_path / 'shared'
     directory.mkdir()
     (directory / 'source.txt').write_text('rk_live_' + 'a' * 24)
-    task = {'id': 'task-1', 'adapter': 'claude', 'alias': 'workhorse',
+    task = {'id': 'task-1', 'adapter': 'claude', 'alias': 'senior',
             'prompt': 'review shared files', 'add_dirs': [str(directory)]}
     module = load_dispatch_module()
     rejected = module.preflight_tasks([task])
@@ -3361,7 +3361,7 @@ def test_preflight_and_dispatch_refuse_scan_budget_overrun_unless_overridden(tmp
     directory = tmp_path / 'shared'
     directory.mkdir()
     (directory / 'source.txt').write_text('ordinary content')
-    task = {'id': 'task-1', 'adapter': 'claude', 'alias': 'workhorse',
+    task = {'id': 'task-1', 'adapter': 'claude', 'alias': 'senior',
             'prompt': 'review shared files', 'add_dirs': [str(directory)]}
     module = load_dispatch_module()
 
@@ -3378,7 +3378,7 @@ def test_preflight_and_dispatch_refuse_scan_budget_overrun_unless_overridden(tmp
     prompt = tmp_path / 'prompt.md'
     prompt.write_text('review shared files')
     args = module.parser().parse_args(['--run-dir', str(run_dir), '--adapter', 'codex',
-        '--prompt-file', str(prompt), '--alias', 'workhorse', '--role', 'worker',
+        '--prompt-file', str(prompt), '--alias', 'senior', '--role', 'worker',
         '--add-dir', str(directory)])
     assert module.dispatch(args) == 2
     refused = json.loads(capsys.readouterr().out.splitlines()[-1])
@@ -3396,13 +3396,13 @@ def test_stale_instance_routing_uses_fresh_product_and_warns(tmp_path, monkeypat
     (instance / 'config').mkdir(parents=True)
     (instance / 'config/model-routing.json').write_text(
         json.dumps({'catalog_date': '2000-01-01', 'adapters': {},
-                    'families': {'anthropic': {'aliases': {'workhorse': ['claude-stale']}}}}))
+                    'families': {'anthropic': {'aliases': {'senior': ['claude-stale']}}}}))
     monkeypatch.setenv('AGENT_FABRIC_INSTANCE_ROOT', str(instance))
     monkeypatch.setenv('AGENT_FABRIC_PRODUCT_ROOT', str(ROOT))
     module = load_dispatch_module()
 
     result = module.preflight_tasks([{
-        'id': 'fresh-route', 'adapter': 'claude', 'alias': 'workhorse', 'prompt': 'review this',
+        'id': 'fresh-route', 'adapter': 'claude', 'alias': 'senior', 'prompt': 'review this',
     }])
 
     assert result['status'] == 'validated'
@@ -3443,7 +3443,7 @@ def test_direct_dispatch_rejects_before_prompt_staging_and_override_records_find
     prompt = tmp_path / 'prompt.md'
     prompt.write_text('hello\n' + 'AKIA' + 'A' * 16)
     args = module.parser().parse_args(['--run-dir', str(run_dir), '--adapter', 'codex',
-        '--prompt-file', str(prompt), '--alias', 'workhorse', '--role', 'worker'])
+        '--prompt-file', str(prompt), '--alias', 'senior', '--role', 'worker'])
     assert module.dispatch(args) == 2
     rejected = json.loads(capsys.readouterr().out.splitlines()[-1])
     assert rejected['status'] == 'rejected' and rejected['error'] == 'secret_detected'
@@ -3467,7 +3467,7 @@ def test_mcp_owner_closes_receipt(tmp_path, monkeypatch, capsys):
     prompt = tmp_path / 'prompt.md'
     prompt.write_text('hello')
     args = module.parser().parse_args(['--run-dir', str(run_dir), '--adapter', 'codex',
-        '--prompt-file', str(prompt), '--alias', 'workhorse', '--role', 'worker'])
+        '--prompt-file', str(prompt), '--alias', 'senior', '--role', 'worker'])
     assert module.dispatch(args) == 0
     terminal = json.loads(capsys.readouterr().out.splitlines()[-1])
     assert terminal['schema'] == 'fabric.attempt.v1'
@@ -3495,7 +3495,7 @@ def test_mcp_batch_cancelled_before_dispatch_closes_receipt(tmp_path, monkeypatc
 def test_front_door_mode_timeout_defaults(tmp_path, mode, timeout):
     module = load_dispatch_module()
     args = module.parser().parse_args(['--run-dir', str(tmp_path), '--adapter', 'codex',
-        '--prompt-stdin', '--alias', 'workhorse', '--role', 'worker', '--access-mode', mode])
+        '--prompt-stdin', '--alias', 'senior', '--role', 'worker', '--access-mode', mode])
     module.dispatch(args)
     assert args.timeout_seconds == timeout
 
@@ -3570,14 +3570,14 @@ else:
     worktree = make_worktree(tmp_path) if mode == 'worktree_write' else None
     if owner == 'dispatch':
         command = [str(SCRIPT), '--run-dir', str(run_dir), '--adapter', 'codex',
-                   '--prompt-file', str(prompt), '--alias', 'workhorse', '--role', 'worker']
+                   '--prompt-file', str(prompt), '--alias', 'senior', '--role', 'worker']
         if worktree is not None:
             command += ['--access-mode', mode, '--worktree', str(worktree)]
     else:
         manifest = tmp_path / 'tasks.json'
         manifest.write_text(json.dumps({'schema_version': 1, 'tasks': [
             {'id': 'isolated', 'adapter': 'codex', 'prompt_file': str(prompt),
-             'alias': 'workhorse', 'role': 'worker', 'access_mode': mode,
+             'alias': 'senior', 'role': 'worker', 'access_mode': mode,
              **({'worktree': str(worktree)} if worktree is not None else {})}]}))
         command = [str(SCRIPT.with_name('batch_run.py')), '--run-dir', str(run_dir), '--manifest', str(manifest)]
     result = subprocess.run(command, cwd=tmp_path, env=env, capture_output=True, text=True, timeout=30)
@@ -4425,7 +4425,7 @@ def _run_fake_codex(tmp_path: Path, name: str, body: str, extra_env: dict[str, s
     env.update(extra_env or {})
     result = subprocess.run(
         [str(SCRIPT), "--run-dir", str(run_dir), "--task-id", "task-1", "--adapter", "codex",
-         "--prompt-file", str(prompt), "--orchestrator-family", "openai", "--alias", "workhorse",
+         "--prompt-file", str(prompt), "--orchestrator-family", "openai", "--alias", "senior",
          "--role", "worker"],
         cwd=tmp_path, env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     return run_dir / "dispatch/tasks/task-1/attempt-001", result
@@ -4461,7 +4461,7 @@ def test_cli_dispatch_to_an_explicit_peer_still_rejects_with_invalid_hosts_confi
     prompt.write_text("hi\n")
     result = subprocess.run(
         [str(SCRIPT), "--run-dir", str(run_dir), "--task-id", "task-1", "--adapter", "codex", "--host", "there",
-         "--prompt-file", str(prompt), "--orchestrator-family", "openai", "--alias", "workhorse", "--role", "worker"],
+         "--prompt-file", str(prompt), "--orchestrator-family", "openai", "--alias", "senior", "--role", "worker"],
         cwd=tmp_path, env={**os.environ, **env}, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     assert result.returncode == 1
     assert json.loads(result.stdout)["error"] == "unknown_host"
@@ -4541,7 +4541,7 @@ def test_dispatch_retains_quarantined_result_without_clean_success(tmp_path, mon
     monkeypatch.chdir(tmp_path)
     args = module.parser().parse_args([
         '--run-dir', str(run_dir), '--task-id', 'review', '--adapter', 'codex',
-        '--prompt-file', str(prompt), '--alias', 'scout', '--role', 'worker'])
+        '--prompt-file', str(prompt), '--alias', 'junior', '--role', 'worker'])
     assert module.dispatch(args) == 1
     record = json.loads((run_dir / 'dispatch/tasks/review/attempt-001/attempt.json').read_text())
     assert record['status'] == ('failed' if invalid_digest else 'quarantined')
@@ -4560,7 +4560,7 @@ def test_dispatch_retains_quarantined_result_without_clean_success(tmp_path, mon
         import batch_run
         claimed = {**record, 'attempt_digest': module.digest(run_dir / record['attempt_path'])}
         child = batch_run._validate_child_record(
-            {'id': 'review', 'adapter': 'codex', 'alias': 'scout', 'role': 'worker'}, claimed, run_dir, 1)
+            {'id': 'review', 'adapter': 'codex', 'alias': 'junior', 'role': 'worker'}, claimed, run_dir, 1)
         assert child['status'] == 'quarantined'
         assert child['landable'] is False
         assert child['quarantine'] == record['quarantine']

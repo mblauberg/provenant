@@ -34,7 +34,7 @@ On macOS, Codex `read-only` and `workspace-write` runs and every `sandbox-exec` 
 
 Take the returned run id and call `fabric_status` with `ids: [id]` and `wait_seconds: 55`. `fabric_output` gives bounded live tails. `fabric_cancel` stops the process group. A worker question yields `input_required`; reply with `fabric_dispatch` using `resume: id` and a new prompt. For one task of a batch, pass the run id plus `task_id`, or the task's own id. Terminal digests include the ready-to-paste provenance line and, when known, the session size (`ctx 212k/1M`). Resuming a large session re-reads its whole context. When the digest warns `! resuming a ~620k-token session`, prefer `fabric_dispatch` with `handoff: id` and a new prompt. It starts a fresh session primed with the prior route and result tail. A `session` name on `fabric_dispatch` starts a provider conversation the first time and resumes it after that, from any agent in the project; `fabric_session` inspects, lists or forgets the name. A provider without native continuation, or one that has lost the session, returns `continuation_unsupported`, and `fresh: true` hands the last clean result to a new session instead. `context_ceiling` (default 300,000 tokens) can lower Claude and Codex auto-compaction but never raises it. Where the provider already compacts earlier, or its point is unknown, the receipt records `provider_default`. Other adapters record `unsupported`. Direct CLI is a degraded path under [direct-cli-fallback.md](direct-cli-fallback.md).
 
-Task class selects an adapter's `principal`, `senior` or `junior` model (aliases `flagship`, `workhorse`, `scout`) when no explicit model is chosen. The configured catalogue determines candidates; the receipt is authoritative for the applied route. A cooling explicit model still runs with a warning; alias routes skip cooling candidates. An account-level usage limit cools the whole adapter, except on agy, which meters each hosted model separately. Automatic fallback stays within permitted paid non-training routes unless the caller opts into `fallback: "any"` or an explicit list. A transient rate limit cools only the selected model and retries it once, including with fallback off. Backoff shares the cooldown account-and-host scope: 30 seconds initially, doubling to 15 minutes until success or an explicit clear. Provider reset and retry windows remain lower bounds. The cancellable wait adds up to 20% jitter and counts against the timeout, reserving at least 30 seconds for the retry. Configure `base_delay_seconds`, `cap_seconds`, `jitter_fraction` and `minimum_budget_seconds` under `rate_limit_pacing` in the existing routing catalogue or instance overlay. Daily quota exhaustion and OpenCode `FreeUsageLimitError` are usage limits and never trigger a same-model retry. Resumed sessions keep their no-retry policy. Writers retain their worktree lock and recheck their baseline after memory admission; an intervening change ends as `writer_changed`, without changing cooldowns or route health. Neither rate nor usage limits count as route failures. A lane whose provider produces no output within five minutes of launch ends as `startup_timeout`: treat it as a re-route signal, not a reason to retry the same route. It is retryable, so a dispatch that allows fallback moves to its next candidate automatically; with fallback off, dispatch again at once on another model or adapter. A writer falls back only when its worktree was clean and is unchanged; otherwise the receipt is not retryable and its fix says to inspect the worktree first.
+Task class selects an adapter's `principal`, `senior` or `junior` model when no explicit model is chosen. The configured catalogue determines candidates; the receipt is authoritative for the applied route. A cooling explicit model still runs with a warning; alias routes skip cooling candidates. An account-level usage limit cools the whole adapter, except on agy, which meters each hosted model separately. Automatic fallback stays within permitted paid non-training routes unless the caller opts into `fallback: "any"` or an explicit list. A transient rate limit cools only the selected model and retries it once, including with fallback off. Backoff shares the cooldown account-and-host scope: 30 seconds initially, doubling to 15 minutes until success or an explicit clear. Provider reset and retry windows remain lower bounds. The cancellable wait adds up to 20% jitter and counts against the timeout, reserving at least 30 seconds for the retry. Configure `base_delay_seconds`, `cap_seconds`, `jitter_fraction` and `minimum_budget_seconds` under `rate_limit_pacing` in the existing routing catalogue or instance overlay. Daily quota exhaustion and OpenCode `FreeUsageLimitError` are usage limits and never trigger a same-model retry. Resumed sessions keep their no-retry policy. Writers retain their worktree lock and recheck their baseline after memory admission; an intervening change ends as `writer_changed`, without changing cooldowns or route health. Neither rate nor usage limits count as route failures. A lane whose provider produces no output within five minutes of launch ends as `startup_timeout`: treat it as a re-route signal, not a reason to retry the same route. It is retryable, so a dispatch that allows fallback moves to its next candidate automatically; with fallback off, dispatch again at once on another model or adapter. A writer falls back only when its worktree was clean and is unchanged; otherwise the receipt is not retryable and its fix says to inspect the worktree first.
 
 ## Route pools
 
@@ -51,7 +51,7 @@ The three tier pools form a hierarchy ([tiered-council.md](tiered-council.md)): 
 
 Mixed selectors settle by precedence rather than rejection, and a warning names every ignored field: `models` beats `route`, `alias`, `model`, `council` and `rotate`; an explicit `model` beats `route`, `council` and `rotate`; `route` beats `alias`; `council` beats `rotate`; an `alias` without a `route` ignores `council` and `rotate`. `adapter` with `route` narrows the pool to that adapter's entries.
 
-`confidential: true` is a disclosure filter, not a selector: it works with a route, alias, model, adapter alone or task class, and removes every prompt-training model (`model_traits`, or a free model, that is a zero plan cap or `free_pattern` id, unless its own `trains_on_prompts` is `false`) from the resolved candidates, fallbacks included, even under `fallback: "any"`. An alias or task class whose first member is unsafe steps to its first safe member; dispatch refuses, with a fix, only when nothing safe remains. A resume or handoff of a confidential run stays confidential unless the caller passes `confidential: false`. Without it, such models stay in the pool; the warning appears only when one is actually selected. Task classes and the tier aliases map onto routes through `route_synonyms` (`workhorse`, `strong`, `mid`, `review`, `second-opinion` and `implementation` → `senior`; `bulk`, `scout`, `legwork`, `lens`, `mechanical`, `research` and `screenshots` → `junior`; `flagship`, `top`, `decision`, `critical-review` and `orchestration` → `principal`). The route line names the pick, for example `Route: opencode/deepseek-v4.1-flash (deepseek; observed; design council 2/3)`. `provenant routes` prints available models in full with live availability and
+`confidential: true` is a disclosure filter, not a selector: it works with a route, alias, model, adapter alone or task class, and removes every prompt-training model (`model_traits`, or a free model, that is a zero plan cap or `free_pattern` id, unless its own `trains_on_prompts` is `false`) from the resolved candidates, fallbacks included, even under `fallback: "any"`. An alias or task class whose first member is unsafe steps to its first safe member; dispatch refuses, with a fix, only when nothing safe remains. A resume or handoff of a confidential run stays confidential unless the caller passes `confidential: false`. Without it, such models stay in the pool; the warning appears only when one is actually selected. Task classes map onto routes through `route_synonyms` (`mid`, `second-opinion` and `implementation` → `senior`; `legwork`, `lens`, `mechanical`, `research` and `screenshots` → `junior`; `top`, `decision`, `critical-review` and `orchestration` → `principal`). The retired tier names `scout`, `bulk`, `workhorse`, `strong`, `review` and `flagship` are rejected with an error naming the replacement (`junior`, `senior` or `principal`), in a route, an alias or an overlay. The route line names the pick, for example `Route: opencode/deepseek-v4.1-flash (deepseek; observed; design council 2/3)`. `provenant routes` prints available models in full with live availability and
 collapses each pool's unavailable or cooling models to a count line, with
 `--all` for the full list; `--health` adds task-class routes and recent health (the same view as `provenant help routes`).
 
@@ -68,13 +68,13 @@ This puts Gemini first in `design` and switches one free model off. A spelling a
 
 ## Adapter alias tiers (relative, family-agnostic)
 
-Within one adapter, `scout`, `workhorse` and `flagship` are alias names: the adapter's own ranked models for a task class with no explicit model. `junior`, `senior` and `principal` work as the same aliases (`alias: "senior"`), so one vocabulary serves both layers; the pools above span adapters, an alias stays within one.
+Within one adapter, `junior`, `senior` and `principal` are alias names (`alias: "senior"`): the adapter's own ranked models for a task class with no explicit model. One vocabulary serves both layers; the pools above span adapters, an alias stays within one.
 
 | Tier | Use for | Reasoning effort |
 |---|---|---|
-| **scout** | bounded, objective work: extraction, classification, formatting, schema/grep checks, first-pass scouting | low |
-| **workhorse** | research legwork, drafting, ordinary review, diff analysis, source mapping | medium |
-| **flagship** | sparingly: decomposition, final synthesis, resolving disagreements, hard/high-stakes calls | high |
+| **junior** | bounded, objective work: extraction, classification, formatting, schema/grep checks, first-pass scouting | low |
+| **senior** | research legwork, drafting, ordinary review, diff analysis, source mapping | medium |
+| **principal** | sparingly: decomposition, final synthesis, resolving disagreements, hard/high-stakes calls | high |
 
 Concrete alias candidates and their resolution order live only in
 `config/model-routing.json`; verify them against runtime before execution.
@@ -113,7 +113,7 @@ divergence is a configuration error and must not surface as the provider fault
 for crucial or terminal work: select the override only when a deliberately
 different mind is wanted or the owner asks for it.
 
-Worker models are never a silent flagship fallback. Only the runtime capability
+Worker models are never a silent principal fallback. Only the runtime capability
 probe decides what the adapter can dispatch, and the catalogue defaults to
 neither. Every substitution is recorded. Claude and Codex are equal primary
 families.
@@ -194,9 +194,9 @@ stealth models into alias tables; pick the slug at dispatch time.
 OpenCode is an ordinary implemented broker for its catalogue (`opencode/<model>`).
 `opencode/deepseek-v4.1-flash-free` (zero-retention, no training) is the preferred go-to and
 adapter default, `high` in `junior`; `opencode/glm-5.3-flash-free` (also zero-retention) is the
-second. OpenCode has `workhorse` (`senior`) and `scout` (`junior`) aliases only: its models sit between the
-Sonnet/Sol and Haiku/Luna tiers, so a `flagship` request takes the adapter default and warns.
-Paid `opencode-go/deepseek-v4.1-flash` is the `workhorse` backup; paid `opencode-go/glm-5.3-flash`
+second. OpenCode has `senior` (`senior`) and `junior` (`junior`) aliases only: its models sit between the
+Sonnet/Sol and Haiku/Luna tiers, so a `principal` request takes the adapter default and warns.
+Paid `opencode-go/deepseek-v4.1-flash` is the `senior` backup; paid `opencode-go/glm-5.3-flash`
 is reachable by name. The two paid models share one small monthly quota, so both are `sparing` in the pools. `opencode-go/gemini-4-argon-contributor` (`argon`) is a rare `sparing` entry in `principal`: it is a Contributor-tier model that trains on prompts and is not zero-retention, so never send it private or client data. Any registered or unregistered
 model whose id matches the adapter's `free_pattern` (`-free$`) is free and, unless its
 entry sets `trains_on_prompts: false`, may train on prompts: it is then warned on and
@@ -264,7 +264,7 @@ Express chains by **role → tier/family**, resolving names at runtime:
 ```
 verify      → safest different-family read-only adapter → objective checks → user if needed
 adversary   → strong different-family critic → source/test-backed fix list
-long-ctx    → long-context scout → file-backed synthesis → flagship decision
+long-ctx    → long-context junior → file-backed synthesis → principal decision
 bulk        → cheap diverse tier-1 lenses → strict schema → sampled verification
 ```
 

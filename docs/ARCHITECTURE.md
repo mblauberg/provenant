@@ -313,8 +313,8 @@ The router separates policy from execution:
 - adapter scripts execute the resolved route;
 - receipts record requested and actual identity, effort and substitutions.
 
-`flagship`, `workhorse` and `scout` are capability aliases, not permanent jobs
-for a vendor. Opus is the default Claude flagship. The catalogue may configure
+`principal`, `senior` and `junior` are capability aliases, not permanent jobs
+for a vendor. Opus is the default Claude principal. The catalogue may configure
 one bounded override occupant per risk tier. Each configured occupant is
 reserved for that tier's roles, alias and effort ceiling. Runtime discovery,
 not this document, determines effort support and current availability.

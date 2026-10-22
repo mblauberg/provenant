@@ -79,105 +79,65 @@ def merge_route(base: list[Any], overlay: list[Any], path: str, drift: list[str]
     return merged + [entry for entry in base if isinstance(entry, dict) and entry.get("model") not in listed]
 
 
-# Pools renamed when the routes became the junior, senior and principal tiers; an older overlay
-# still names them.
-# Folded in this order, so a `workhorse` or `bulk` entry outranks a `strong` or
-# `scout` entry for the same model, as it did before the rename.
-LEGACY_ROUTES = {"workhorse": "senior", "strong": "senior", "bulk": "junior", "scout": "junior",
-                 "flagship": "principal"}
+# Names the tiers had before they became junior, senior and principal. None is accepted any more.
+RENAMED_TIERS = {"scout": "junior", "bulk": "junior", "workhorse": "senior", "strong": "senior",
+                 "review": "senior", "flagship": "principal"}
 TIER_ROUTES = ("junior", "senior", "principal")
-# The tier names as an adapter's own alias names, which the catalogue keeps.
-TIER_ALIASES = {"junior": "scout", "senior": "workhorse", "principal": "flagship"}
 
 
-def _alias_keys(mapping: Any) -> Any:
-    """Rename tier-named keys of an alias map, keeping an alias-named key on a clash."""
-    if not isinstance(mapping, dict):
-        return mapping
-    renamed = {key: value for key, value in mapping.items() if key not in TIER_ALIASES}
-    for key, value in mapping.items():
-        if key in TIER_ALIASES:
-            renamed.setdefault(TIER_ALIASES[key], value)
-    return renamed
+class RenamedNameError(ValueError):
+    """A route, alias or overlay key still uses a retired tier name."""
 
 
-def canonical_aliases(overlay: dict[str, Any]) -> None:
-    """Let an overlay name adapter aliases by tier (`senior` for `workhorse`)."""
-    tasks = overlay.get("task_class_routes")
-    if isinstance(tasks, dict):
-        overlay["task_class_routes"] = {
-            name: ({**route, "alias": TIER_ALIASES[route["alias"]]}
-                   if isinstance(route, dict) and route.get("alias") in TIER_ALIASES else route)
-            for name, route in tasks.items()
-        }
-    for section, nested in (("families", ("aliases",)), ("adapters", ("aliases",))):
-        block = overlay.get(section)
-        if not isinstance(block, dict):
-            continue
-        updated = {}
-        for name, entry in block.items():
-            if isinstance(entry, dict):
-                entry = dict(entry)
-                for key in nested:
-                    if key in entry:
-                        entry[key] = _alias_keys(entry[key])
-                if section == "families":
-                    for key in ("role_overrides", "role_effort_defaults"):
-                        roles = entry.get(key)
-                        if isinstance(roles, dict):
-                            entry[key] = {role: _alias_keys(value) for role, value in roles.items()}
-                    tiers = entry.get("risk_tier_overrides")
-                    if isinstance(tiers, dict):
-                        entry["risk_tier_overrides"] = {
-                            tier: ({**value, "alias": TIER_ALIASES[value["alias"]]}
-                                   if isinstance(value, dict) and value.get("alias") in TIER_ALIASES else value)
-                            for tier, value in tiers.items()
-                        }
-            updated[name] = entry
-        overlay[section] = updated
+def renamed_message(kind: str, name: str) -> str:
+    return f"{kind} '{name}' was renamed to '{RENAMED_TIERS[name.strip().casefold()]}'; fix: use the new name"
 
 
-def migrate_legacy_routes(overlay: Any, drift: list[str]) -> Any:
-    """Fold an overlay's renamed pools into their tiers and repoint its synonyms.
+def _renamed(name: Any) -> bool:
+    return isinstance(name, str) and name.strip().casefold() in RENAMED_TIERS
 
-    A legacy pool's entries follow the tier's own overlay entries, so a reweight
-    of `strong` still applies to `senior`. A synonym named after a pool or an old
-    tier is dropped, since the product maps those names, and one aimed at a
-    renamed pool is repointed; both are noted in `drift`. Tier names used as
-    adapter aliases become the alias names.
+
+def reject_renamed(overlay: Any) -> Any:
+    """Refuse an overlay that still uses a retired tier name, naming its replacement.
+
+    Checked: pool names under `routes`, synonym targets, task-class and risk-tier aliases,
+    and the alias keys of adapter and family profiles.
     """
     if not isinstance(overlay, dict):
         return overlay
-    overlay = dict(overlay)
-    canonical_aliases(overlay)
     routes = overlay.get("routes")
-    if isinstance(routes, dict):
-        routes = dict(routes)
-        for old, new in LEGACY_ROUTES.items():
-            if old not in routes:
-                continue
-            legacy = routes.pop(old)
-            current = routes.get(new)
-            if isinstance(legacy, list) and (current is None or isinstance(current, list)):
-                listed = {entry.get("model") for entry in current or [] if isinstance(entry, dict)}
-                routes[new] = [*(current or []), *(entry for entry in legacy
-                                                   if not isinstance(entry, dict) or entry.get("model") not in listed)]
-                drift.append(f"routes.{old}: renamed to {new}; fix: rename it in the overlay")
-            else:
-                drift.append(f"routes.{old}: malformed legacy pool dropped; fix: list it under routes.{new}")
-        overlay["routes"] = routes
+    for name in routes if isinstance(routes, dict) else ():
+        if _renamed(name):
+            raise RenamedNameError("overlay " + renamed_message("route", name))
     synonyms = overlay.get("route_synonyms")
-    if isinstance(synonyms, dict):
-        kept: dict[str, Any] = {}
-        for name, target in synonyms.items():
-            if name in {*TIER_ROUTES, *LEGACY_ROUTES, "design", "writing"}:
-                drift.append(f"route_synonyms.{name}: dropped, the product maps tier names; fix: remove it")
+    for target in synonyms.values() if isinstance(synonyms, dict) else ():
+        if _renamed(target):
+            raise RenamedNameError("overlay " + renamed_message("route_synonyms target", target))
+    tasks = overlay.get("task_class_routes")
+    for route in tasks.values() if isinstance(tasks, dict) else ():
+        if isinstance(route, dict) and _renamed(route.get("alias")):
+            raise RenamedNameError("overlay " + renamed_message("alias", route["alias"]))
+    for section in ("families", "adapters"):
+        block = overlay.get(section)
+        for entry in block.values() if isinstance(block, dict) else ():
+            if not isinstance(entry, dict):
                 continue
-            if target in LEGACY_ROUTES:
-                drift.append(f"route_synonyms.{name}: {target} is now {LEGACY_ROUTES[target]}; fix: repoint it")
-                target = LEGACY_ROUTES[target]
-            kept[name] = target
-        overlay["route_synonyms"] = kept
+            keyed = [entry.get("aliases")]
+            for key in ("role_overrides", "role_effort_defaults"):
+                roles = entry.get(key)
+                keyed.extend(roles.values() if isinstance(roles, dict) else ())
+            for mapping in keyed:
+                for name in mapping if isinstance(mapping, dict) else ():
+                    if _renamed(name):
+                        raise RenamedNameError("overlay " + renamed_message("alias", name))
+            tiers = entry.get("risk_tier_overrides")
+            for value in tiers.values() if isinstance(tiers, dict) else ():
+                if isinstance(value, dict) and _renamed(value.get("alias")):
+                    raise RenamedNameError("overlay " + renamed_message("alias", value["alias"]))
+    kept = overlay.get("route_synonyms")
+    if isinstance(kept, dict):
+        overlay = {**overlay, "route_synonyms": {name: target for name, target in kept.items()
+                                                  if name not in {*TIER_ROUTES, "design", "writing"}}}
     return overlay
 
 
@@ -186,6 +146,8 @@ def route_name(catalog: dict[str, Any], name: str) -> str:
     key = name.strip().casefold()
     if key in routes:
         return key
+    if key in RENAMED_TIERS:
+        raise PoolError("route_renamed", renamed_message("route", name.strip()))
     synonym = catalog.get("route_synonyms", {}).get(key)
     if isinstance(synonym, str) and synonym in routes:
         return synonym
@@ -436,6 +398,8 @@ def pick(router: Any, catalog: dict[str, Any], request: dict[str, Any], *,
     models = request.get("models")
     confidential = request.get("confidential") is True
     requested_effort = request.get("effort") or None
+    if isinstance(requested_effort, str) and requested_effort.strip().casefold() == "max":
+        raise PoolError("effort_invalid", "effort 'max' was retired; fix: use xhigh")
     warnings: list[str] = []
     adapters = catalog.get("adapters", {})
     if council is not None and (isinstance(council, bool) or not isinstance(council, int)
