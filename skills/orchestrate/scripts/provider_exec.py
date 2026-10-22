@@ -1714,6 +1714,9 @@ def classify_failure(adapter: str, failure_text: str) -> str | None:
 
 def error_class(status, signature=None):
     """Stable telemetry only; routing and health continue to use status/signature."""
+    # Foreign evidence can carry any JSON; only strings name a class.
+    status = status if isinstance(status, str) else None
+    signature = signature if isinstance(signature, str) else None
     # Generic failure statuses fall back only after the more specific signature.
     fallback = "provider_error" if status in {"failed", "rejected", "tool_missing", "output_identity_invalid", "output_write_error"} else "unknown"
     return STATUS_ERROR_CLASSES.get(status, ERROR_CLASS_ALIASES.get(signature, fallback))
