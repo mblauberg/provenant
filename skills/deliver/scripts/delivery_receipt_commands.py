@@ -389,7 +389,20 @@ def build_parser(api: dict[str, Any]) -> argparse.ArgumentParser:
     repair = subcommands.add_parser("repair")
     repair.add_argument("--run-dir", required=True)
     repair.add_argument("--reason", required=True)
+    repair.add_argument("--failing", action="append", default=[])
     repair.set_defaults(handler=api["command_repair"])
+
+    finding = subcommands.add_parser("finding")
+    finding.add_argument("--run-dir", required=True)
+    finding.add_argument("--review", required=True)
+    finding.add_argument("--finding", required=True)
+    finding.add_argument("--disposition", choices=("confirmed", "false_positive", "reviewer_bias", "duplicate"), required=True)
+    finding.add_argument("--severity", choices=("P0", "P1", "P2", "P3"))
+    finding.add_argument("--duplicate-of")
+    finding.add_argument("--reviewer-family")
+    finding.add_argument("--model")
+    finding.add_argument("--reviewer-id")
+    finding.set_defaults(handler=api["command_finding"])
 
     show = subcommands.add_parser("show")
     show.add_argument("--run-dir", required=True)
@@ -407,6 +420,8 @@ def command_repair(args: Any, api: dict[str, Any]) -> dict[str, Any]:
     """Record one repair cycle. The budget by risk tier is enforced by the reader."""
     if not args.reason:
         raise api["ReceiptError"]("repair requires a reason")
+    for check_id in args.failing:
+        api["require_identifier"](check_id, "failing check id")
 
     def apply(run: dict[str, Any], _run_dir: Path, _workspace: Path) -> dict[str, Any]:
         cycles = run.get("repair_cycles")
@@ -420,6 +435,34 @@ def command_repair(args: Any, api: dict[str, Any]) -> dict[str, Any]:
             raise api["ReceiptError"]("checkpoint is invalid")
         checkpoint["generation"] += 1
         checkpoint["next_action"] = args.reason
+        failing = sorted(set(args.failing))
+        api["append_jsonl"](_run_dir / "repairs.jsonl", {
+            "cycle": run["repair_cycles"], "at": api["utc_now"](), "failing_before": failing,
+        })
         return {"repair_cycles": run["repair_cycles"]}
+
+    return api["mutate_run"](args.run_dir, apply)
+
+
+def command_finding(args: Any, api: dict[str, Any]) -> dict[str, Any]:
+    api["require_identifier"](args.review, "review id")
+    api["require_identifier"](args.finding, "finding id")
+    if args.duplicate_of:
+        api["require_identifier"](args.duplicate_of, "duplicate-of finding id")
+    if args.disposition == "duplicate" and not args.duplicate_of:
+        raise api["ReceiptError"]("duplicate disposition requires --duplicate-of")
+    if args.disposition != "duplicate" and args.duplicate_of:
+        raise api["ReceiptError"]("--duplicate-of requires duplicate disposition")
+
+    def apply(run: dict[str, Any], run_dir: Path, _workspace: Path) -> dict[str, Any]:
+        row = {key: value for key, value in {
+            "review_id": args.review, "finding": args.finding,
+            "disposition": args.disposition, "severity": args.severity,
+            "duplicate_of": args.duplicate_of, "at": api["utc_now"](),
+            "reviewer_family": args.reviewer_family, "model": args.model,
+            "reviewer_id": args.reviewer_id,
+        }.items() if value is not None}
+        api["append_jsonl"](run_dir / "findings.jsonl", row)
+        return {"finding": args.finding, "disposition": args.disposition}
 
     return api["mutate_run"](args.run_dir, apply)

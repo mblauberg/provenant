@@ -34,6 +34,10 @@ Style preferences, arbitrary size limits and unproven redesigns are not
 findings. State uncertainty and the falsification step instead of inflating
 severity.
 
+## Disposition
+
+At adjudication, the chair records each finding as `confirmed`, `false_positive`, `reviewer_bias`, or `duplicate` with `delivery_receipt.py finding`; duplicate findings also name `--duplicate-of`.
+
 ## Output
 
 Order findings by severity, then dependency impact. Use:

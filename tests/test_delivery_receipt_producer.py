@@ -58,6 +58,47 @@ def test_init_accepts_canonical_runs_directory_and_writes_local_exclude(tmp_path
     assert checkpoint.returncode == 0, checkpoint.stdout + checkpoint.stderr
 
 
+def test_repair_records_failed_gates_in_cycle_sidecar(tmp_path):
+    run_dir = initialise(tmp_path)
+    first = run_cli(tmp_path, "repair", "--run-dir", str(run_dir), "--reason", "repair one",
+                    "--failing", "a", "--failing", "b")
+    second = run_cli(tmp_path, "repair", "--run-dir", str(run_dir), "--reason", "repair two",
+                     "--failing", "b")
+    assert first.returncode == second.returncode == 0
+    rows = [json.loads(line) for line in (run_dir / "repairs.jsonl").read_text().splitlines()]
+    assert [row["cycle"] for row in rows] == [1, 2]
+    assert [row["failing_before"] for row in rows] == [["a", "b"], ["b"]]
+
+
+def test_finding_rejects_unknown_disposition(tmp_path):
+    run_dir = initialise(tmp_path)
+    result = run_cli(tmp_path, "finding", "--run-dir", str(run_dir), "--review", "review-1",
+                     "--finding", "finding-1", "--disposition", "unclear")
+    assert result.returncode != 0
+    assert "invalid choice" in result.stderr
+
+
+def test_finding_records_dispositions_with_review_lineage(tmp_path):
+    run_dir = initialise(tmp_path)
+    receipt_path = run_dir / "RUN.json"
+    receipt = json.loads(receipt_path.read_text())
+    receipt["reviews"].append({
+        "id": "review-1", "provider_family": "anthropic", "model": "claude-test",
+        "reviewer_id": "reviewer", "status": "pass",
+    })
+    receipt_path.write_text(json.dumps(receipt))
+    for index, disposition in enumerate(("confirmed", "false_positive", "reviewer_bias", "duplicate")):
+        args = ["finding", "--run-dir", str(run_dir), "--review", "review-1",
+                "--finding", f"finding-{index}", "--disposition", disposition]
+        if disposition == "duplicate":
+            args += ["--duplicate-of", "finding-0"]
+        result = run_cli(tmp_path, *args)
+        assert result.returncode == 0, result.stderr
+    rows = [json.loads(line) for line in (run_dir / "findings.jsonl").read_text().splitlines()]
+    assert [row["disposition"] for row in rows] == ["confirmed", "false_positive", "reviewer_bias", "duplicate"]
+    assert rows[-1]["duplicate_of"] == "finding-0"
+
+
 def test_init_rejects_canonical_run_in_linked_worktree(tmp_path):
     primary = tmp_path / "primary"
     primary.mkdir()

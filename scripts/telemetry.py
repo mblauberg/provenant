@@ -22,7 +22,7 @@ import subprocess
 import sys
 
 
-SOURCES = ('fabric', 'route_health', 'cooldowns', 'claude', 'codex', 'opencode', 'otel')
+SOURCES = ('fabric', 'route_health', 'cooldowns', 'claude', 'codex', 'opencode', 'otel', 'delivery')
 
 
 def iso(moment):
@@ -116,6 +116,7 @@ def patterns():
         **{source: ';'.join(str(root / folder / pattern) for root, _ in account_roots(source))
            for source, (_, folder, pattern) in IDENTITY_SOURCES.items()},
         'otel': str(state / 'otel/*.ndjson'),
+        'delivery': '<current-and-registered-projects>/.agent-run/runs/**/{repairs,findings}.jsonl',
     }
 
 
@@ -215,6 +216,9 @@ def connect():
         backfill_session_events(db)
         db.execute("DELETE FROM meta WHERE key='events_usage_rowid'")  # the earlier, lossy watermark
         db.execute("INSERT OR IGNORE INTO meta VALUES ('session_events_backfill', ?)", (now(),))
+    if db.execute("SELECT 1 FROM meta WHERE key='compaction_backfill'").fetchone() is None:
+        db.execute("DELETE FROM cursors WHERE source IN ('claude','codex')")
+        db.execute("INSERT OR IGNORE INTO meta VALUES ('compaction_backfill', ?)", (now(),))
     record_host(db)
     for source, pattern in patterns().items():
         db.execute('INSERT INTO sources(source,path_pattern,parser_version,status) VALUES (?,?,2,?) '
@@ -286,6 +290,7 @@ def put_usage(db, source, event_id, origin_path, owner=None, **values):
 
 
 def claude_record(db, row, state, path, offset, account=None, owner=None):
+    delivery_owner().compact(sys.modules[__name__], db, 'claude', row, state, path, offset)
     message = row.get('message') or {}
     usage = message.get('usage')
     if row.get('type') != 'assistant' or not isinstance(usage, dict) or not message.get('id'):
@@ -327,6 +332,9 @@ def observation(db, source, **values):
 # and OTLP log events keep their exporter's name as `otel.<event.name>`.
 EVENT_KINDS = {
     'lane.attempt': 'Fabric attempt reached a terminal status (attempt.json)',
+    'repair.cycle': 'delivery repair cycle and failed gates before and after',
+    'review.finding': 'delivery chair disposition of a review finding',
+    'session.compaction': 'provider session context compaction boundary',
     'limit.rate_limited': 'provider rate limit (route health, cooldowns)',
     'limit.usage_limited': 'provider usage limit (route health, cooldowns)',
     'cooldown': 'route cooldown recorded (cooldowns.json)',
@@ -351,6 +359,8 @@ def event_key(row):
         parts = (attrs.get('source'), row['session'])
     elif row['kind'] == 'lane.attempt':  # the receipt itself, so projects sharing run ids stay apart
         parts = (os.path.realpath(row['source_ref']),)
+    elif row['kind'] in {'repair.cycle', 'review.finding', 'session.compaction'}:
+        parts = (row['source_ref'],)
     else:  # snapshot and collector records (`path@offset#record`): their source plus their content
         parts = (row['source_ref'], row['ts'], *(row[name] for name in EVENT_FIELDS), attrs)
     return identity('event', row['kind'], *parts)
@@ -393,14 +403,16 @@ def rekey_events(db):
             db.execute('UPDATE events SET event_id=? WHERE rowid=?', (key, row['rowid']))
 
 
-def put_event(db, kind, ts, source_ref, attrs=None, **fields):
+def put_event(db, kind, ts, source_ref, attrs=None, *, refresh=False, **fields):
     """Append one metadata event; its stored fields identify it, so re-ingest never duplicates it."""
     values = {'host': host_id(), 'kind': kind, 'ts': ts, 'source_ref': source_ref,
               'attrs': json.dumps({k: v for k, v in (attrs or {}).items() if v is not None}, sort_keys=True),
               **{name: fields.get(name) for name in EVENT_FIELDS}}
     values = {'event_id': event_key(values), **values}
-    db.execute(f"INSERT OR IGNORE INTO events({','.join(values)}) "
-               f"VALUES ({','.join('?' for _ in values)})", list(values.values()))
+    conflict = ('ON CONFLICT(event_id) DO UPDATE SET attrs=json_patch(events.attrs,excluded.attrs)'
+                if refresh else 'ON CONFLICT(event_id) DO NOTHING')
+    db.execute(f"INSERT INTO events({','.join(values)}) VALUES ({','.join('?' for _ in values)}) {conflict}",
+               list(values.values()))
 
 
 # A reading's state per window; a row is appended only when one of these changes.
@@ -446,6 +458,9 @@ def put_quota_series(db, provider, account, host, observed_at, windows, source=N
 
 
 def codex_record(db, row, state, path, offset, account=None, owner=None):
+    delivery_owner().compact(sys.modules[__name__], db, 'codex', row, state, path, offset)
+    if row.get('type') == 'compacted':
+        return
     payload = row.get('payload') or {}
     if row.get('type') == 'session_meta':
         state.update(session=payload.get('id') or payload.get('session_id'),
@@ -792,7 +807,16 @@ def source_paths():
             'cooldowns': [Path(configured['cooldowns'])] if Path(configured['cooldowns']).is_file() else [],
             # Native sources map each path to (account, inode); iterating them still yields paths.
             **{source: native_paths(source) for source in IDENTITY_SOURCES},
-            'otel': sorted((state_root() / 'otel').glob('*.ndjson'))}
+            'otel': sorted((state_root() / 'otel').glob('*.ndjson')),
+            'delivery': delivery_owner().paths(sys.modules[__name__])}
+
+
+@cache
+def delivery_owner():
+    spec = importlib.util.spec_from_file_location('provenant_telemetry_delivery', Path(__file__).with_name('telemetry_delivery.py'))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 PROVIDERS = {'claude': 'anthropic', 'codex': 'openai', 'cursor': 'cursor',
@@ -862,7 +886,7 @@ def ingest_document(db, source, path):
                              **({'parent': parent} if parent else {}),
                              **({'children': [{key: child.get(key) for key in ('run_id', 'task_id', 'attempt', 'status')}
                                               for child in row['children']]} if row.get('children') else {})},
-                      harness_rev=provenance.get('harness_rev'), **fields)
+                      harness_rev=provenance.get('harness_rev'), refresh=True, **fields)
     else:
         entries = row.get('routes', {}) if source == 'route_health' else row.get('cooldowns', {})
         for entry in entries.values():
@@ -975,6 +999,9 @@ def ingest(db):
                         ingest_document(db, source, path)
                     elif source == 'otel':
                         ingest_jsonl(db, source, path, otel_record)
+                    elif source == 'delivery':
+                        delivery_owner().prepare(db, path)
+                        ingest_jsonl(db, source, path, partial(delivery_owner().record, sys.modules[__name__]))
                     else:
                         ingest_jsonl(db, source, path, partial(
                             {'codex': codex_record, 'claude': claude_record}[source], **owner), inode=inode)
@@ -989,6 +1016,8 @@ def ingest(db):
             db.execute('DELETE FROM rebuilds WHERE source=?', (source,))
         if source == 'otel':
             count = db.execute("SELECT COUNT(*) FROM events WHERE kind LIKE 'otel.%'").fetchone()[0]
+        elif source == 'delivery':
+            count = db.execute("SELECT COUNT(*) FROM events WHERE kind IN ('repair.cycle','review.finding')").fetchone()[0]
         else:
             table = 'observations' if source in {'route_health', 'cooldowns'} else 'usage'
             count = db.execute(f'SELECT COUNT(*) FROM {table} WHERE source=?', (source,)).fetchone()[0]
@@ -1489,6 +1518,7 @@ def stats(db, since=None, prices=None, *, summary=False, until=None):
         keys = ('host', 'source', 'session', 'day', 'provider', 'adapter', 'account', 'model')
         # Transport to the host merge: full precision, rounded once after the merge.
         report['session_usage'] = groups(keys)
+    report['compactions_per_lane'] = delivery_owner().report(sys.modules[__name__], db, since, until)
     return report
 
 
