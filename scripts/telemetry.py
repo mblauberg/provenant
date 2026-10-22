@@ -191,12 +191,11 @@ def connect():
             merge_commit TEXT, ingested_at TEXT);
     ''')
     delivery_columns = {row[1] for row in db.execute('PRAGMA table_info(deliveries)')}
-    for name in ('started_at', 'ended_at', 'source_paths'):
-        if name not in delivery_columns:
-            db.execute(f'ALTER TABLE deliveries ADD COLUMN {name} TEXT')
-    if db.execute("SELECT 1 FROM meta WHERE key='delivery_links'").fetchone() is None:
-        db.execute("DELETE FROM cursors WHERE source IN ('delivery','fabric')")
-        db.execute("INSERT OR IGNORE INTO meta VALUES ('delivery_links', ?)", (now(),))
+    if 'started_at' not in delivery_columns:
+        db.execute('ALTER TABLE deliveries ADD COLUMN started_at TEXT')
+    if db.execute("SELECT 1 FROM meta WHERE key='delivery_run_time_v2'").fetchone() is None:
+        db.execute("DELETE FROM cursors WHERE source='delivery' AND path LIKE '%/RUN.json'")
+        db.execute("INSERT OR IGNORE INTO meta VALUES ('delivery_run_time_v2', ?)", (now(),))
     observation_columns = {row[1] for row in db.execute('PRAGMA table_info(observations)')}
     if 'origin_path' not in observation_columns:
         db.execute('ALTER TABLE observations ADD COLUMN origin_path TEXT')

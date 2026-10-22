@@ -15,8 +15,8 @@ def paths(telemetry):
                    for path in telemetry.fabric_paths(name)})
 
 
-def _run_times(telemetry, receipt, run_dir):
-    """Recorded lifecycle times, excluding authority expiry and other future limits."""
+def _run_timestamp(telemetry, receipt, mtime):
+    """Earliest receipt timestamp, or RUN.json mtime when none is recorded."""
     times = []
 
     def visit(value):
@@ -37,12 +37,8 @@ def _run_times(telemetry, receipt, run_dir):
 
     visit(receipt)
     if times:
-        return min(times).isoformat(), max(times).isoformat()
-    try:
-        stamp = datetime.strptime(run_dir.name[:13], '%Y%m%d-%H%M').replace(tzinfo=UTC).isoformat()
-        return stamp, None
-    except ValueError:
-        return None, None
+        return min(times).isoformat()
+    return datetime.fromtimestamp(mtime, UTC).isoformat()
 
 
 def ingest_receipt(telemetry, db, path):
@@ -62,91 +58,40 @@ def ingest_receipt(telemetry, db, path):
                      if isinstance(item, dict) and item.get('id') == canonical_id), {})
     revision = artifact.get('git_revision') or {}
     commit = revision.get('commit') if isinstance(revision, dict) else None
-    started, ended = _run_times(telemetry, receipt, path.parent)
-    workspace = next(parent.parent for parent in path.parents if parent.name == '.agent-run')
-    sources = [str((workspace / item).resolve())
-               for item in (receipt.get('authority') or {}).get('allowed_source_paths', [])
-               if item and Path(item) != Path('.')]
+    started = _run_timestamp(telemetry, receipt, stat.st_mtime)
     db.execute('''INSERT INTO deliveries
-        (run_dir,host,run_id,risk_tier,chair_family,repair_cycles,acceptance_basis,accepted,merge_commit,ingested_at,started_at,ended_at,source_paths)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+        (run_dir,host,run_id,risk_tier,chair_family,repair_cycles,acceptance_basis,accepted,merge_commit,ingested_at,started_at)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?)
         ON CONFLICT(run_dir) DO UPDATE SET host=excluded.host,run_id=excluded.run_id,
         risk_tier=excluded.risk_tier,chair_family=excluded.chair_family,
         repair_cycles=excluded.repair_cycles,acceptance_basis=excluded.acceptance_basis,
         accepted=excluded.accepted,merge_commit=excluded.merge_commit,ingested_at=excluded.ingested_at,
-        started_at=excluded.started_at,ended_at=excluded.ended_at,source_paths=excluded.source_paths''',
+        started_at=excluded.started_at''',
                (str(path.parent.resolve()), telemetry.host_id(), receipt.get('run_id'), receipt.get('risk_tier'),
                 receipt.get('chair_family'), receipt.get('repair_cycles'), basis, int(basis is not None),
-                commit, telemetry.now(), started, ended, json.dumps(sources)))
+                commit, telemetry.now(), started))
     db.execute('INSERT OR REPLACE INTO cursors VALUES (?,?,?,?,?,?)',
                ('delivery', str(path), stat.st_size, stat.st_mtime_ns, stat.st_size, '{}'))
 
 
 def cost_per_accepted(telemetry, db, since=None):
-    """Cost estimate by receipt risk tier and each run's most-used harness digest."""
+    """Delivery counts by risk tier; lane cost and harness digest are unlinked."""
     boundary = telemetry.since_time(since) if since else None
-    prices, free_patterns = telemetry.load_prices()
-    adapters = telemetry.catalogue()
-    telemetry.load_hosts(db)
-    aliases = telemetry.host_aliases()
-    current_host = telemetry.host_id()
-    lanes = {str(Path(row['source_ref']).resolve()): json.loads(row['attrs'])
-             for row in db.execute("SELECT source_ref,attrs FROM events WHERE kind='lane.attempt'")}
-    usage = db.execute("""SELECT DISTINCT u.*, f.path FROM usage_files f JOIN usage u
-                          ON u.source=f.source AND u.event_id=f.event_id AND u.host=f.host
-                          WHERE u.source='fabric'""").fetchall()
-    groups = defaultdict(lambda: {'runs': set(), 'accepted': set(), 'merged': set(),
-                                  'known_cost': 0.0, 'usage_rows': 0, 'unpriced_rows': 0})
+    groups = defaultdict(lambda: {'runs': set(), 'accepted': set(), 'merged': set()})
     for run in db.execute('SELECT * FROM deliveries ORDER BY run_dir').fetchall():
         if boundary and (not run['started_at'] or telemetry.since_time(run['started_at']) < boundary):
             continue
         merged = bool(run['merge_commit'] and db.execute(
             'SELECT 1 FROM changes WHERE merge_commit=? LIMIT 1', (run['merge_commit'],)).fetchone())
-        sources = [Path(path).resolve() for path in json.loads(run['source_paths'] or '[]')]
-        delivery_host = telemetry.same_host(run['host'], aliases)
-        selected = {}
-        for row in usage:
-            canonical_host = telemetry.same_host(row['host'], aliases)
-            if canonical_host != delivery_host:
-                continue
-            lane = lanes.get(str(Path(row['path']).resolve()), {})
-            workspace, started = lane.get('workspace_root'), lane.get('started_at')
-            if not workspace or not started or not run['started_at'] or not run['ended_at']:
-                continue
-            if not any(Path(workspace).resolve().is_relative_to(path) for path in sources):
-                continue
-            if not (telemetry.since_time(run['started_at']) <= telemetry.since_time(started)
-                    <= telemetry.since_time(run['ended_at'])):
-                continue
-            key = (row['source'], row['event_id'], canonical_host)
-            if key not in selected or row['host'] == current_host:
-                selected[key] = row
-        rows = list(selected.values())
-        digests = Counter(lanes[str(Path(row['path']).resolve())].get('profile_digest') for row in rows)
-        digest = min(digests, key=lambda name: (-digests[name], name or '')) if digests else None
-        group = groups[(run['risk_tier'], digest)]
+        group = groups[(run['risk_tier'], None)]
         _add_run(group, run, merged)
-        group['usage_rows'] += len(rows)
-        for row in rows:
-            cost_row = dict(row)
-            cost_row['model'] = telemetry.normalise_model(
-                cost_row['adapter'], cost_row['provider'], cost_row['model'], adapters)
-            price = telemetry.price_entry(cost_row, prices, free_patterns)
-            cost = telemetry.estimated_cost(cost_row, prices, price)
-            if cost is None:
-                group['unpriced_rows'] += 1
-            else:
-                group['known_cost'] += cost
     report = []
     for (risk_tier, digest), group in sorted(groups.items(), key=lambda item: (item[0][0] or '', item[0][1] or '')):
-        accepted = len(group['accepted'])
-        cost = round(group['known_cost'], 9) if group['usage_rows'] else None
         report.append({'risk_tier': risk_tier, 'harness_digest': digest,
-                       'runs': len(group['runs']), 'accepted': accepted, 'merged': len(group['merged']),
-                       'cost_usd_lower_bound': cost, 'usage_rows': group['usage_rows'],
-                       'unpriced_rows': group['unpriced_rows'],
-                       'cost_per_accepted_usd_lower_bound':
-                           round(group['known_cost'] / accepted, 9) if accepted and cost is not None else None})
+                       'runs': len(group['runs']), 'accepted': len(group['accepted']),
+                       'merged': len(group['merged']), 'cost_usd_lower_bound': None,
+                       'usage_rows': 0, 'unpriced_rows': 0,
+                       'cost_per_accepted_usd_lower_bound': None, 'cost_basis': 'unlinked'})
     return report
 
 
@@ -155,13 +100,13 @@ def run_accepted(telemetry, db, since=None, as_json=False):
     if as_json:
         print(json.dumps(report, indent=2))
     else:
-        print('risk_tier  harness_digest  runs  accepted  merged  cost_usd_lower_bound  usage_rows  unpriced_rows  cost_per_accepted_usd_lower_bound')
+        print('risk_tier  harness_digest  runs  accepted  merged  cost_usd_lower_bound  usage_rows  unpriced_rows  cost_per_accepted_usd_lower_bound  cost_basis')
         for row in report:
             cost = row['cost_usd_lower_bound']
             shown_cost = f'{cost:.9f}' if cost is not None else '-'
             print(f"{row['risk_tier'] or '-'}  {row['harness_digest'] or '-'}  {row['runs']}  "
                   f"{row['accepted']}  {row['merged']}  {shown_cost}  {row['usage_rows']}  "
-                  f"{row['unpriced_rows']}  {row['cost_per_accepted_usd_lower_bound']}")
+                  f"{row['unpriced_rows']}  {row['cost_per_accepted_usd_lower_bound']}  {row['cost_basis']}")
     return 0
 
 

@@ -145,23 +145,25 @@ source remain unattributed. Fabric `ok` records
 execution success, not user acceptance or a passed delivery gate.
 
 `provenant telemetry accepted [--since ISO-DATE] [--json]` reports deliveries
-by risk tier and one harness digest per run (most linked usage rows, ties by
-name). `--since` filters on the run's earliest recorded timestamp, falling back
-to its run-directory stamp, never ingest time. A run is accepted when its
-`RUN.json` has `delivery_acceptance` with basis `checks-and-review`,
-`project-landing` or `user`. A run is merged only when the commit on its
+by risk tier and harness digest. The digest is null until lanes carry a delivery
+link. `--since` filters on the run's earliest recorded timestamp, falling back
+to the `RUN.json` mtime when no timestamp is recorded. Folder names and ingest
+time are not used. A run is accepted when its `RUN.json` has
+`delivery_acceptance` with basis `checks-and-review`, `project-landing` or
+`user`. A run is merged only when the commit on its
 `software_delivery.canonical_artifact_id` artifact matches a
 `changes.merge_commit` row populated by `telemetry changes --sync`; this only
 matches PRs in the product repository because sync covers that checkout only.
-Lanes link by realpath workspace equality or containment under an allowed
-source path (excluding `.`), with attempt starts bounded by the delivery's
-first and last recorded lifecycle timestamps. Cost includes every linked
-attempt and reviewer lane, including failed attempts and unaccepted runs.
-Runs without acceptance stay in the numerator and run count, and never enter
-the accepted denominator. Unpriced rows are reported; known costs and cost per
-accepted run are lower bounds. No linked lanes yields `usage_rows: 0` and null
-cost. The ledger stores receipt facts in `deliveries`; `accepted` and `merged`
-are report labels.
+Runs without acceptance stay in the run count and never enter the accepted
+denominator. The ledger stores receipt facts in `deliveries`; `accepted` and
+`merged` are report labels.
+
+Cost per accepted is not reported yet because lanes carry no delivery link.
+Cost fields are null with `cost_basis: "unlinked"`; `usage_rows` and
+`unpriced_rows` are zero. Follow-up
+[#1202](https://github.com/mblauberg/provenant/issues/1202)
+will stamp an owner-supplied `delivery_run_id` in `attempt.json` so the ledger
+can link recorded facts.
 
 
 ## Events, change markers and comparison
@@ -174,7 +176,8 @@ points back to the receipt, snapshot, transcript or collector line
 (`path@offset`). An event's ID derives from fields stored in its own row,
 never the host name: source and session for `session.start`; the receipt's
 resolved path for `lane.attempt`, so projects sharing run ids stay apart;
-provider, account and normalised plan pair for `plan.mismatch`; otherwise `source_ref`, time, linked fields and attributes. Collector refs are
+provider, account and normalised plan pair for `plan.mismatch`; otherwise
+`source_ref`, time, linked fields and attributes. Collector refs are
 `path@offset#record`, so identical records on one line keep their count.
 Re-ingest therefore adds no duplicate rows, even after a `local_host` rename,
 which leaves earlier rows under their old id for readers to map. Opening a

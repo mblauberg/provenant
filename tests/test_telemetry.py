@@ -192,122 +192,70 @@ def test_delivery_discovery_follows_linked_worktree_git_common_dir(tmp_path):
         assert db.execute("SELECT COUNT(*) FROM events WHERE kind='repair.cycle'").fetchone()[0] == 1
 
 
-def test_accepted_cost_uses_run_receipts_all_attempts_and_synced_merge(tmp_path):
+def test_accepted_uses_receipt_basis_canonical_artifact_and_synced_merge(tmp_path):
     root = tmp_path / '.agent-run/runs'
-    digest = 'a' * 64
     merge_commit = 'b' * 40
-    worktrees = tmp_path / '.worktrees'
-    worktrees.mkdir()
-    alias = tmp_path / 'worktrees-alias'
-    alias.symlink_to(worktrees, target_is_directory=True)
-
-    def make_run(name, accepted, attempts):
-        run = root / name
-        run.mkdir(parents=True)
-        receipt = {'run_id': name, 'risk_tier': 'substantial', 'chair_family': 'openai',
-                   'repair_cycles': 1, 'reviews': [],
-                   'authority': {'allowed_source_paths': ['.', f'worktrees-alias/{name}']},
-                   'evidence': [{'started_at': '2026-10-22T00:00:00Z',
-                                 'finished_at': '2026-10-22T00:02:00Z'}]}
-        if accepted:
-            receipt['delivery_acceptance'] = {'basis': 'checks-and-review'}
-            receipt['software_delivery'] = {'canonical_artifact_id': 'merged-source'}
-            receipt['artifacts'] = [{'id': 'merged-source',
-                                     'git_revision': {'repository': '.', 'commit': merge_commit}}]
-        write_json(run / 'RUN.json', receipt)
-        for attempt, status in enumerate(attempts, start=1):
-            dispatch = root / f'20261022-1200-dispatch-{name}-{attempt}'
-            write_json(dispatch / f'dispatch/tasks/task-{attempt}/attempt-001/attempt.json', {
-                'run_id': dispatch.name, 'task_id': f'task-{attempt}', 'attempt': attempt, 'status': status,
-                'workspace': {'root': str(tmp_path / f'.worktrees/{name}/nested')},
-                'started_at': '2026-10-22T00:00:00Z', 'ended_at': '2026-10-22T00:01:00Z',
-                'provenance': {'requested': {'adapter': 'claude', 'model': 'opus'},
-                               'provider': 'anthropic'},
-                'profile': {'preset': 'balanced', 'digest': digest, 'knobs': {}},
-                'usage': {'input_tokens': 1000, 'cache_read_tokens': 0,
-                          'cache_write_tokens': 0, 'output_tokens': 2000,
-                          'reasoning_tokens': 0},
-            })
-
-    make_run('20261022-1200-delivery-accepted-a1b2c3', True, ['ok', 'error'])
-    make_run('20261022-1201-delivery-unaccepted-d4e5f6', False, ['ok'])
-    write_json(root / '20261022-1200-dispatch-unrelated/dispatch/tasks/other/attempt-001/attempt.json', {
-        'run_id': 'unrelated', 'task_id': 'other', 'attempt': 1, 'status': 'ok',
-        'workspace': {'root': str(tmp_path / '.worktrees/unrelated')},
-        'started_at': '2026-10-22T00:00:00Z', 'ended_at': '2026-10-22T00:01:00Z',
-        'provenance': {'requested': {'adapter': 'claude', 'model': 'opus'}, 'provider': 'anthropic'},
-        'profile': {'preset': 'balanced', 'digest': digest, 'knobs': {}},
-        'usage': {'input_tokens': 1000000, 'output_tokens': 2000000},
-    })
-    unrelated = root / '20261022-1200-dispatch-unrelated/dispatch/tasks/other/attempt-001/attempt.json'
-    for label, started in [('before', '2026-10-21T23:59:59Z'), ('after', '2026-10-22T00:02:01Z')]:
-        row = json.loads(unrelated.read_text())
-        row.update(run_id=label, started_at=started,
-                   workspace={'root': str(worktrees / '20261022-1200-delivery-accepted-a1b2c3')})
-        write_json(root / f'20261022-1200-dispatch-{label}/dispatch/tasks/other/attempt-001/attempt.json', row)
-    symlinked = root / '20261022-1200-dispatch-symlinked/dispatch/tasks/other/attempt-001/attempt.json'
-    symlinked.parent.mkdir(parents=True)
-    symlinked.symlink_to(unrelated)
+    for name, basis, canonical_commit in [
+            ('checks', 'checks-and-review', merge_commit),
+            ('landing', 'project-landing', 'c' * 40),
+            ('user', 'user', None), ('unaccepted', None, None),
+            ('invalid', 'ok', None)]:
+        receipt = {'run_id': name, 'risk_tier': 'substantial',
+                   'software_delivery': {'canonical_artifact_id': 'source'},
+                   'artifacts': [{'id': 'source', 'git_revision': {'commit': canonical_commit}},
+                                 {'id': 'other', 'git_revision': {'commit': merge_commit}}]}
+        if basis:
+            receipt['delivery_acceptance'] = {'basis': basis}
+        write_json(root / name / 'RUN.json', receipt)
     assert cli(tmp_path, 'telemetry', 'ingest').returncode == 0
     with sqlite3.connect(tmp_path / 'state/telemetry.sqlite3') as db:
-        assert db.execute("SELECT COUNT(*) FROM usage WHERE source='fabric'").fetchone()[0] == 6
         db.execute("INSERT INTO changes(change_id,kind,pr,merge_commit,merged_at,title,labels,added_at) "
                    "VALUES ('merge:1','pull_request',1,?,'2026-10-22T00:00:00Z','merged','[]',"
                    "'2026-10-22T00:00:00Z')", (merge_commit,))
-        columns = [row[1] for row in db.execute('PRAGMA table_info(usage)')]
-        host_index = columns.index('host')
-        usage_rows = db.execute("SELECT * FROM usage WHERE source='fabric'").fetchall()
-        current_host = usage_rows[0][host_index]
-        for row in usage_rows:
-            historical = list(row)
-            historical[host_index] = 'legacy-host'
-            db.execute(f"INSERT INTO usage({','.join(columns)}) VALUES ({','.join('?' for _ in columns)})",
-                       historical)
-            event_id = row[columns.index('event_id')]
-            path = db.execute("SELECT path FROM usage_files WHERE source='fabric' AND event_id=? AND host=?",
-                              (event_id, current_host)).fetchone()[0]
-            db.execute("INSERT INTO usage_files VALUES ('fabric',?,'legacy-host',?)", (event_id, path))
-        db.execute("INSERT OR REPLACE INTO meta VALUES ('host_ids',?)",
-                   (json.dumps(sorted((current_host, 'legacy-host'))),))
-    # Upgrade a ledger from before link facts were retained; unchanged receipts must refresh.
-    with sqlite3.connect(tmp_path / 'state/telemetry.sqlite3') as db:
-        db.execute("DELETE FROM meta WHERE key='delivery_links'")
-        db.execute('UPDATE deliveries SET started_at=NULL, ended_at=NULL, source_paths=NULL')
-        db.execute("UPDATE events SET attrs=json_remove(attrs,'$.workspace_root','$.started_at') "
-                   "WHERE kind='lane.attempt'")
-    assert cli(tmp_path, 'telemetry', 'ingest').returncode == 0
     report = json.loads(cli(tmp_path, 'telemetry', 'accepted', '--json').stdout)
-    assert report == [{
-        'risk_tier': 'substantial', 'harness_digest': digest,
-        'runs': 2, 'accepted': 1, 'merged': 1,
-        'cost_usd_lower_bound': 0.132, 'usage_rows': 3, 'unpriced_rows': 0,
-        'cost_per_accepted_usd_lower_bound': 0.132,
-    }]
+    assert len(report) == 1
+    assert (report[0]['runs'], report[0]['accepted'], report[0]['merged']) == (5, 3, 1)
 
 
-def test_accepted_cost_without_linked_lanes_is_unknown(tmp_path):
-    run = tmp_path / '.agent-run/runs/20261022-1200-delivery-empty-a1b2c3'
-    write_json(run / 'RUN.json', {'run_id': 'empty', 'risk_tier': 'routine',
-                                'delivery_acceptance': {'basis': 'user'}})
+def test_accepted_cost_is_null_and_unlinked_even_with_matching_lanes(tmp_path):
+    root = tmp_path / '.agent-run/runs'
+    write_json(root / 'delivery/RUN.json', {
+        'run_id': 'delivery', 'risk_tier': 'routine',
+        'delivery_acceptance': {'basis': 'user'},
+        'authority': {'allowed_source_paths': ['.worktrees/shared']},
+        'evidence': [{'started_at': '2026-10-22T00:00:00Z',
+                      'finished_at': '2026-10-22T00:02:00Z'}]})
+    write_json(root / 'dispatch/dispatch/tasks/task/attempt-001/attempt.json', {
+        'run_id': 'dispatch', 'task_id': 'task', 'attempt': 1, 'status': 'ok',
+        'workspace': {'root': str(tmp_path / '.worktrees/shared')},
+        'started_at': '2026-10-22T00:00:00Z', 'ended_at': '2026-10-22T00:01:00Z',
+        'provenance': {'requested': {'adapter': 'claude', 'model': 'opus'}, 'provider': 'anthropic'},
+        'profile': {'preset': 'balanced', 'digest': 'a' * 64, 'knobs': {}},
+        'usage': {'input_tokens': 1000, 'output_tokens': 2000}})
     assert cli(tmp_path, 'telemetry', 'ingest').returncode == 0
     report = json.loads(cli(tmp_path, 'telemetry', 'accepted', '--json').stdout)
     assert report == [{'risk_tier': 'routine', 'harness_digest': None,
                        'runs': 1, 'accepted': 1, 'merged': 0, 'usage_rows': 0,
                        'unpriced_rows': 0, 'cost_usd_lower_bound': None,
-                       'cost_per_accepted_usd_lower_bound': None}]
+                       'cost_per_accepted_usd_lower_bound': None, 'cost_basis': 'unlinked'}]
     table = cli(tmp_path, 'telemetry', 'accepted')
-    assert table.returncode == 0 and 'usage_rows' in table.stdout
+    assert table.returncode == 0 and 'unlinked' in table.stdout
 
 
 def test_accepted_since_uses_run_time_after_backfill_and_receipt_update(tmp_path):
     root = tmp_path / '.agent-run/runs'
     old = root / '20261022-1200-delivery-old-a1b2c3/RUN.json'
     write_json(old, {'run_id': 'old', 'risk_tier': 'routine',
+                     'authority': {'expires_at': '2019-01-01T00:00:00Z'},
                      'evidence': [{'started_at': '2020-01-01T00:00:00Z',
                                    'finished_at': '2020-01-01T00:02:00Z'}]})
-    # No recorded timestamp: the run-directory stamp is the fallback, never ingest time.
-    write_json(root / '20200101-1200-delivery-stamp-a1b2c3/RUN.json', {'run_id': 'stamp'})
-    write_json(root / '20261022-1201-delivery-current-a1b2c3/RUN.json', {'run_id': 'current'})
+    # Receipt mtimes deliberately disagree with the folder stamps in both directions.
+    for name, stamp in [('20200101-1200-delivery-current-a1b2c3', 1792627200),
+                        ('20261022-1201-delivery-stale-a1b2c3', 1577836800)]:
+        path = root / name / 'RUN.json'
+        write_json(path, {'run_id': name,
+                          'risk_tier': 'routine' if 'current' in name else 'substantial'})
+        os.utime(path, (stamp, stamp))
     for accepted in (False, True):
         receipt = json.loads(old.read_text())
         if accepted:
@@ -315,35 +263,29 @@ def test_accepted_since_uses_run_time_after_backfill_and_receipt_update(tmp_path
             write_json(old, receipt)
         assert cli(tmp_path, 'telemetry', 'ingest').returncode == 0
         report = json.loads(cli(tmp_path, 'telemetry', 'accepted', '--since', '2026-01-01', '--json').stdout)
+        assert [(row['risk_tier'], row['runs'], row['accepted']) for row in report] == [('routine', 1, 0)]
+        # Existing ledgers need unchanged receipts re-read under the corrected fallback.
+        with sqlite3.connect(tmp_path / 'state/telemetry.sqlite3') as db:
+            db.execute("DELETE FROM meta WHERE key='delivery_run_time_v2'")
+            db.execute('UPDATE deliveries SET started_at=NULL')
+        assert cli(tmp_path, 'telemetry', 'ingest').returncode == 0
+        report = json.loads(cli(tmp_path, 'telemetry', 'accepted', '--since', '2026-01-01', '--json').stdout)
         assert sum(row['runs'] for row in report) == 1
         assert sum(row['accepted'] for row in report) == 0
 
 
-def test_accepted_assigns_one_digest_per_run_by_majority_then_name(tmp_path):
+def test_accepted_groups_tiers_with_unknown_digest_without_double_counting(tmp_path):
     root = tmp_path / '.agent-run/runs'
-    for day, digests in [(21, ['a', 'b', 'b']), (22, ['b', 'a'])]:
-        name = f'202610{day}-1200-delivery-test-a1b2c3'
-        write_json(root / name / 'RUN.json', {
-            'run_id': name, 'risk_tier': 'substantial',
-            'delivery_acceptance': {'basis': 'checks-and-review'},
-            'authority': {'allowed_source_paths': ['.worktrees/reused'], 'expires_at': '2027-01-01T00:00:00Z'},
-            'evidence': [{'started_at': f'2026-10-{day}T00:00:00Z',
-                          'finished_at': f'2026-10-{day}T00:02:00Z'}]})
-        for index, digest in enumerate(digests):
-            write_json(root / f'202610{day}-1200-dispatch-test-{index}/dispatch/tasks/task/attempt-001/attempt.json', {
-                'run_id': f'{day}-{index}', 'task_id': 'task', 'attempt': 1, 'status': 'ok',
-                'workspace': {'root': str(tmp_path / '.worktrees/reused')},
-                'started_at': f'2026-10-{day}T00:00:00Z', 'ended_at': f'2026-10-{day}T00:01:00Z',
-                'provenance': {'requested': {'adapter': 'claude', 'model': 'opus'}, 'provider': 'anthropic'},
-                'profile': {'preset': 'balanced', 'digest': digest, 'knobs': {}},
-                'usage': {'input_tokens': 1000, 'cache_read_tokens': 0, 'cache_write_tokens': 0,
-                          'output_tokens': 2000, 'reasoning_tokens': 0},
-            })
+    for name, tier, accepted in [('one', 'routine', True), ('two', 'routine', False),
+                                 ('three', 'substantial', True)]:
+        receipt = {'run_id': name, 'risk_tier': tier}
+        if accepted:
+            receipt['delivery_acceptance'] = {'basis': 'checks-and-review'}
+        write_json(root / name / 'RUN.json', receipt)
     assert cli(tmp_path, 'telemetry', 'ingest').returncode == 0
     report = json.loads(cli(tmp_path, 'telemetry', 'accepted', '--json').stdout)
-    assert [(row['harness_digest'], row['runs'], row['accepted'], row['usage_rows'],
-             row['cost_usd_lower_bound']) for row in report] == [
-        ('a', 1, 1, 2, 0.088), ('b', 1, 1, 3, 0.132)]
+    assert [(row['risk_tier'], row['harness_digest'], row['runs'], row['accepted'])
+            for row in report] == [('routine', None, 2, 1), ('substantial', None, 1, 1)]
 
 
 def test_claude_incremental_dedup_subagents_and_content_exclusion(tmp_path):
