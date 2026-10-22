@@ -183,7 +183,7 @@ def test_claude_usage_endpoint_uses_the_token_in_process_only(quota, monkeypatch
     identity.mkdir()
     (identity / '.credentials.json').write_text(json.dumps({'claudeAiOauth': {
         'accessToken': TOKEN, 'expiresAt': int((NOW + timedelta(hours=1)).timestamp() * 1000),
-        'scopes': ['user:profile'], 'subscriptionType': 'max'}}))
+        'scopes': ['user:profile'], 'subscriptionType': 'max', 'rateLimitTier': 'default_claude_max_20x'}}))
     monkeypatch.setattr(quota.provider('claude'), 'status', lambda account, io: {'loggedIn': True,
                                                                                  'email': 'owner@example.com'})
     seen = {}
@@ -211,8 +211,11 @@ def test_claude_usage_endpoint_uses_the_token_in_process_only(quota, monkeypatch
     assert [(row['name'], row['window_minutes']) for row in result['windows']] == [
         ('five_hour', 300), ('seven_day', WEEK), ('seven_day_opus', WEEK), ('weekly_scoped:fable', WEEK)]
     stored = quota.cache_path('claude', 'max-b', identity_dir=identity).read_text()
+    with sqlite3.connect(tmp_path / 'state/telemetry.sqlite3') as db:
+        assert set(db.execute('SELECT plan_detected, plan_tier FROM quota_series')) == {('max', 'default_claude_max_20x')}
+        ledger = '\n'.join(db.iterdump())
     for secret in (TOKEN, 'owner@example.com'):
-        assert secret not in stored and secret not in json.dumps(result)
+        assert secret not in stored and secret not in json.dumps(result) and secret not in ledger
     assert TOKEN not in capsys.readouterr().out
 
 
@@ -763,3 +766,43 @@ def test_agy_identity_is_the_os_login_keychain_even_with_another_home(quota, mon
     monkeypatch.setenv('AGY_CONFIG_DIR', str(tmp_path / 'another-config'))
     assert quota.identity.selected_identity('agy') == first
     assert quota.identity.scope('agy')['account'] == 'default'
+
+
+def test_every_fetch_appends_a_deduplicated_series_row_with_plan_tier_credits_and_plan_changes(quota, monkeypatch, tmp_path):
+    replies = iter([
+        {'windows': [window(20, WEEK, timedelta(days=3))], 'plan': 'max', 'plan_tier': 'default_claude_max_5x'},
+        {'windows': [window(20, WEEK, timedelta(days=3))], 'plan': 'max', 'plan_tier': 'default_claude_max_5x'},
+        {'windows': [window(25, WEEK, timedelta(days=3))], 'plan': 'max', 'plan_tier': 'default_claude_max_20x',
+         'credit_balance': '41.5', 'credits': {'reset_credits': 2, 'source': 'provider'}}])
+    calls = []
+    monkeypatch.setattr(quota, 'fetch', lambda account, now: calls.append(now) or {**next(replies), 'source': 'test'})
+    account = quota.Account('claude', 'anese', Path('/nowhere'), True, plan='Max')
+    for minutes in (0, 10, 12, 20):  # the reading at 12 minutes comes from the cache
+        quota.refresh(account, NOW + timedelta(minutes=minutes))
+    assert len(calls) == 3
+    with sqlite3.connect(tmp_path / 'state/telemetry.sqlite3') as db:
+        db.row_factory = sqlite3.Row
+        series = [dict(row) for row in db.execute('SELECT * FROM quota_series ORDER BY observed_at')]
+        changes = [json.loads(row[0]) for row in db.execute("SELECT attrs FROM events WHERE kind='plan.change'")]
+    assert [(row['account'], row['host'], row['window'], row['used_percent'], row['plan'], row['plan_detected'],
+             row['plan_tier'], row['credit_balance'], row['reset_credits']) for row in series] == [
+        ('anese', 'studio', 'seven_day', 20, 'Max', 'max', 'default_claude_max_5x', None, None),
+        ('anese', 'studio', 'seven_day', 25, 'Max', 'max', 'default_claude_max_20x', 41.5, 2)]
+    assert series[0]['last_seen_at'] == iso(NOW + timedelta(minutes=10))
+    assert [(row['plan_tier_from'], row['plan_tier_to']) for row in changes] == [
+        ('default_claude_max_5x', 'default_claude_max_20x')]
+
+
+def test_series_never_blocks_a_reading_when_the_ledger_is_unwritable(quota, monkeypatch):
+    monkeypatch.setattr(quota, 'fetch', lambda account, now: {'windows': [window(5, 300, timedelta(hours=1))],
+                                                              'source': 'test'})
+    monkeypatch.setattr(quota._telemetry(), 'connect', lambda: (_ for _ in ()).throw(sqlite3.OperationalError('locked')))
+    value = quota.refresh(quota.Account('codex', 'default', Path('/nowhere'), True), NOW, force=True)
+    assert value['status'] == 'ok' and value['windows'][0]['used_percent'] == 5
+
+
+def test_codex_reports_its_usage_credit_balance_for_the_series(quota):
+    parsed = quota.provider('codex').parse({'rateLimits': {'planType': 'prolite', 'primary': {'usedPercent': 1},
+                                                           'credits': {'hasCredits': True, 'balance': '27406.21'}}})
+    assert (parsed['plan'], parsed['credit_balance']) == ('prolite', '27406.21')
+    assert quota.provider('codex').parse({'rateLimits': {'primary': {'usedPercent': 1}}})['credit_balance'] is None

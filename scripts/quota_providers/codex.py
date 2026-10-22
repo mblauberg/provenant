@@ -130,9 +130,12 @@ def parse(payload, now=None):
             elif not prefix and name in group:
                 unreported.append(name)
     credits = next((main.get(key, root.get(key)) for key in CREDIT_KEYS if key in main or key in root), None)
+    balance = main.get('credits') if isinstance(main.get('credits'), dict) else {}
     return {'windows': windows, 'unreported': unreported,
             'plan': main.get('planType') or main.get('plan_type') or root.get('plan_type'),
-            'credits': {'reset_credits': credits, 'source': 'provider'} if credits is not None else None}
+            'credits': {'reset_credits': credits, 'source': 'provider'} if credits is not None else None,
+            # The usage-credit balance drawn after the plan allowance; a decimal string.
+            'credit_balance': balance.get('balance')}
 
 
 def fetch(account, io, now):

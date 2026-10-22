@@ -94,7 +94,7 @@ def test_codex_cumulative_usage_deltas_and_quota_windows_survive_append(tmp_path
     assert cli(tmp_path, 'telemetry', 'ingest').returncode == 0
     with sqlite3.connect(tmp_path / 'state/telemetry.sqlite3') as db:
         assert db.execute('SELECT SUM(input_tokens),SUM(cache_read_tokens),SUM(output_tokens),SUM(reasoning_tokens) FROM usage').fetchone() == (110, 40, 40, 10)
-        assert db.execute('SELECT DISTINCT session,account,model,effort,revision FROM usage').fetchall() == [('cx', 'acct', 'test-sol', 'high', 'abc')]
+        assert db.execute('SELECT DISTINCT session,account,model,effort,revision FROM usage').fetchall() == [('cx', 'default', 'test-sol', 'high', 'abc')]
         assert db.execute('SELECT used_percent,window_minutes FROM observations ORDER BY used_percent').fetchall() == [(50, 300), (60, 300)]
 
 
@@ -1570,3 +1570,96 @@ def test_ledger_from_main_format_replays_collector_lines_with_their_record_posit
         assert [ref.rsplit('#', 1)[1] for ref, _ in rows] == ['1', '2', '3']
         assert [json.loads(attrs)['value'] for _, attrs in rows] == [5.0, 5.0, 7.0]
         assert db.execute("SELECT COUNT(*) FROM events WHERE kind='session.start'").fetchone()[0] == 1
+
+
+def claude_turn(session, message, stamp='2026-10-21T01:00:00Z'):
+    return {'type': 'assistant', 'sessionId': session, 'timestamp': stamp,
+            'message': {'id': message, 'model': 'claude-test', 'usage': {'input_tokens': 1, 'output_tokens': 1}}}
+
+
+def test_claude_sessions_in_every_identity_dir_carry_their_account_and_relabel_on_alias(tmp_path):
+    home = tmp_path / 'home'
+    jsonl(home / '.claude/projects/repo/a.jsonl', claude_turn('a', 'ma'))
+    jsonl(home / '.claude-michael/projects/repo/m.jsonl', claude_turn('m', 'mm'))
+    write_json(home / '.agents/config/telemetry.json', {'accounts': {'claude': {
+        'michael': {'identity_dir': str(home / '.claude-michael'), 'plan': 'Max'}}}})
+    assert cli(tmp_path, 'telemetry', 'ingest').returncode == 0
+    ledger = tmp_path / 'state/telemetry.sqlite3'
+    with sqlite3.connect(ledger) as db:
+        assert db.execute('SELECT session,account FROM usage ORDER BY session').fetchall() == [
+            ('a', 'default'), ('m', 'michael')]
+    # Declaring the default directory as another sign-in of `anese` relabels rows already stored.
+    jsonl(home / '.claude-anese/projects/repo/n.jsonl', claude_turn('n', 'mn'))
+    write_json(home / '.agents/config/telemetry.json', {'accounts': {'claude': {
+        'anese': {'identity_dir': str(home / '.claude-anese'), 'aliases': [str(home / '.claude')]},
+        'michael': {'identity_dir': str(home / '.claude-michael')}}}})
+    assert cli(tmp_path, 'telemetry', 'ingest').returncode == 0
+    with sqlite3.connect(ledger) as db:
+        assert db.execute('SELECT session,account FROM usage ORDER BY session').fetchall() == [
+            ('a', 'anese'), ('m', 'michael'), ('n', 'anese')]
+    sources = {row['source']: row for row in json.loads(cli(tmp_path, 'telemetry', 'sources', '--json').stdout)}
+    assert '.claude-anese/projects' in sources['claude']['path_pattern'] and sources['claude']['row_count'] == 3
+
+
+def test_codex_rollouts_record_a_deduplicated_plan_and_credit_series_with_plan_changes(tmp_path):
+    path = tmp_path / 'home/.codex/sessions/day/rollout-plan.jsonl'
+    def turn(stamp, used, plan, balance):
+        return {'type': 'event_msg', 'timestamp': stamp, 'payload': {
+            'type': 'token_count', 'info': {'last_token_usage': {'input_tokens': 10, 'output_tokens': 1}},
+            'rate_limits': {'limit_id': 'codex', 'primary': {'used_percent': used, 'window_minutes': 10080,
+                                                             'resets_at': 1793082744},
+                            'secondary': None, 'plan_type': plan,
+                            'credits': {'has_credits': True, 'unlimited': False, 'balance': balance}}}}
+    jsonl(path, {'type': 'session_meta', 'payload': {'id': 'cx', 'creator_account_id': 'opaque-id'}},
+          turn('2026-10-21T01:00:00Z', 70, 'plus', '120.50'), turn('2026-10-21T01:05:00Z', 70, 'plus', '120.50'),
+          turn('2026-10-21T01:10:00Z', 72, 'plus', '120.50'), turn('2026-10-21T02:00:00Z', 10, 'prolite', '99.25'))
+    for _ in range(2):
+        assert cli(tmp_path, 'telemetry', 'ingest').returncode == 0
+    with sqlite3.connect(tmp_path / 'state/telemetry.sqlite3') as db:
+        db.row_factory = sqlite3.Row
+        series = [dict(row) for row in db.execute('SELECT * FROM quota_series ORDER BY observed_at')]
+        changes = [dict(row) for row in db.execute("SELECT * FROM events WHERE kind='plan.change'")]
+        accounts = {row[0] for row in db.execute('SELECT account FROM observations UNION SELECT account FROM usage')}
+    assert [(row['observed_at'], row['last_seen_at'], row['used_percent'], row['plan_detected'], row['credit_balance'])
+            for row in series] == [
+        ('2026-10-21T01:00:00Z', '2026-10-21T01:05:00Z', 70, 'plus', 120.5),
+        ('2026-10-21T01:10:00Z', '2026-10-21T01:10:00Z', 72, 'plus', 120.5),
+        ('2026-10-21T02:00:00Z', '2026-10-21T02:00:00Z', 10, 'prolite', 99.25)]
+    assert {(row['provider'], row['account'], row['window'], row['source']) for row in series} == {
+        ('codex', 'default', 'primary', 'codex rollout')}
+    assert accounts == {'default'}  # the configured label, never the provider's account id
+    assert len(changes) == 1 and changes[0]['ts'] == '2026-10-21T02:00:00Z'
+    attrs = json.loads(changes[0]['attrs'])
+    assert (attrs['plan_detected_from'], attrs['plan_detected_to']) == ('plus', 'prolite')
+
+
+def test_ledgers_from_earlier_builds_re_read_codex_rollouts_once_into_the_series(tmp_path):
+    path = tmp_path / 'home/.codex/sessions/day/rollout-old.jsonl'
+    jsonl(path, {'type': 'session_meta', 'payload': {'id': 'cx', 'creator_account_id': 'opaque-id'}},
+          {'type': 'event_msg', 'timestamp': '2026-10-21T01:00:00Z', 'payload': {
+              'type': 'token_count', 'info': {'last_token_usage': {'input_tokens': 10}},
+              'rate_limits': {'primary': {'used_percent': 5, 'window_minutes': 300}, 'plan_type': 'plus'}}})
+    assert cli(tmp_path, 'telemetry', 'ingest').returncode == 0
+    ledger = tmp_path / 'state/telemetry.sqlite3'
+    with sqlite3.connect(ledger) as db:  # as an earlier build left it: creator ids and no series
+        db.execute("UPDATE usage SET account='opaque-id'")
+        db.execute("UPDATE observations SET account='opaque-id'")
+        db.execute('DELETE FROM quota_series')
+        db.execute("DELETE FROM meta WHERE key IN ('quota_series_backfill','account_roots')")
+    for _ in range(2):
+        assert cli(tmp_path, 'telemetry', 'ingest').returncode == 0
+    with sqlite3.connect(ledger) as db:
+        assert db.execute('SELECT account, COUNT(*) FROM observations GROUP BY account').fetchall() == [('default', 1)]
+        assert db.execute('SELECT account, COUNT(*) FROM usage GROUP BY account').fetchall() == [('default', 1)]
+        assert db.execute('SELECT plan_detected FROM quota_series').fetchall() == [('plus',)]
+
+
+def test_lane_events_carry_the_harness_profile_when_the_receipt_has_one(tmp_path):
+    receipt(tmp_path, 'run-p', 1, status='ok', provenance=route('codex', 'gpt-6.1-sol'),
+            profile={'preset': 'thorough', 'digest': 'd1', 'knobs': {'reviewers': 3}})
+    receipt(tmp_path, 'run-q', 1, status='ok', provenance=route('codex', 'gpt-6.1-sol'))
+    assert cli(tmp_path, 'telemetry', 'ingest').returncode == 0
+    with sqlite3.connect(tmp_path / 'state/telemetry.sqlite3') as db:
+        rows = dict(db.execute("SELECT run_id, attrs FROM events WHERE kind='lane.attempt'").fetchall())
+    assert (json.loads(rows['run-p'])['profile'], json.loads(rows['run-p'])['profile_digest']) == ('thorough', 'd1')
+    assert 'profile' not in json.loads(rows['run-q'])  # absent means the default (balanced) profile
