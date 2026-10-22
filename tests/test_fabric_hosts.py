@@ -804,7 +804,7 @@ class LaneLoopbackContracts(unittest.TestCase):
         self.peer_run = self.terminal(self.peer_workspace, 'shared-task', 'shared')
 
     def _peer_lane_groups(self):
-        result = subprocess.run(['ps', '-axo', 'pid=,pgid=,command='], capture_output=True,
+        result = subprocess.run(['ps', '-ww', '-axo', 'pid=,pgid=,command='], capture_output=True,
             text=True, check=True)
         groups = {}
         for line in result.stdout.splitlines():
