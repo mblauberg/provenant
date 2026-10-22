@@ -39,3 +39,4 @@ historical evidence; the current Fabric owner is
 | [0024](0024-git-log-and-adrs-own-history.md) | Git history and ADRs own the change record | Accepted |
 | [0025](0025-broker-upstream-family-attribution.md) | Broker upstream family attribution for multi-family pipes | Accepted |
 | [0026](0026-federate-fabric-across-own-hosts-over-ssh.md) | Federate Fabric across the user's own hosts over SSH | Accepted |
+| [0027](0027-rust-front-door.md) | Replace the two-layer Python front door with one Rust binary | Accepted |

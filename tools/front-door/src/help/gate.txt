@@ -1,0 +1,4 @@
+usage: provenant gate
+
+Delegates to scripts/gate.
+The MAINTAINING.md verification list with per-step pass/fail output.

@@ -86,6 +86,13 @@ esac
 provenant_bin_dir="${PROVENANT_BIN_DIR:-$HOME/.local/bin}"
 provenant_command="$provenant_bin_dir/provenant"
 provenant_source="$PRODUCT_ROOT/scripts/provenant.template"
+# ADR 0027: auto builds the Rust front door when cargo (or a matching prebuilt
+# binary) is available and otherwise installs the Python template.
+front_door_mode="${PROVENANT_FRONT_DOOR:-auto}"
+case "$front_door_mode" in
+  auto|rust|python) ;;
+  *) echo "PROVENANT_FRONT_DOOR must be auto, rust or python, got: $front_door_mode" >&2; exit 3 ;;
+esac
 instance_root="${AGENT_FABRIC_INSTANCE_ROOT:-$HOME/.agents}"
 case "$provenant_bin_dir" in
   /*) ;;
@@ -366,6 +373,26 @@ for primary in "${primary_platforms[@]}"; do
 done
 primary_platforms=(${selected_platforms[@]+"${selected_platforms[@]}"})
 
+# Choose and build the front door before the collision preflight, which needs
+# the exact bytes that will be published. A build is not an installation
+# mutation: it goes to a scratch directory removed on exit.
+front_door_build_directory="$(mktemp -d "${TMPDIR:-/tmp}/provenant-front-door.XXXXXXXX")" || exit 3
+trap 'rm -rf "$front_door_build_directory"' EXIT
+front_door_select_args=(
+  select
+  --product-root "$PRODUCT_ROOT"
+  --mode "$front_door_mode"
+  --build-dir "$front_door_build_directory"
+)
+if [[ -n "${PROVENANT_FRONT_DOOR_BINARY:-}" ]]; then
+  front_door_select_args+=(--prebuilt "$PROVENANT_FRONT_DOOR_BINARY")
+fi
+front_door_selection="$(
+  run_stdlib "$PRODUCT_ROOT/scripts/lib/front_door_build.py" "${front_door_select_args[@]}"
+)" || exit 3
+front_door_kind="${front_door_selection%%$'\t'*}"
+provenant_source="${front_door_selection#*$'\t'}"
+
 # Refuse a command collision before any installation mutation. Publication
 # revalidates this state and uses atomic no-replace or exchange primitives.
 provenant_preflight="$(
@@ -458,6 +485,7 @@ provenant_status="$(
     --expected "$provenant_preflight"
 )" || exit 3
 echo "command $provenant_status=$provenant_command"
+echo "front-door=$front_door_kind"
 case ":${PATH:-}:" in
   *":$provenant_bin_dir:"*) ;;
   *) echo "warning: $provenant_bin_dir is not on PATH" >&2 ;;
