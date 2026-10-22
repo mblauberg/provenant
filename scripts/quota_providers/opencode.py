@@ -10,7 +10,8 @@ Free zen models cost nothing and are ignored. Only message tables are read, neve
 from __future__ import annotations
 
 from contextlib import closing
-from datetime import timedelta
+from calendar import monthrange
+from datetime import UTC, timedelta
 import json
 import sqlite3
 
@@ -37,9 +38,34 @@ def default_identity():
     return selected_identity('opencode')
 
 
-def spend(db, now, providers):
+def add_months(anchor, count):
+    """The anchor `count` calendar months on, its day clamped to the month's length."""
+    year, month = divmod(anchor.year * 12 + anchor.month - 1 + count, 12)
+    return anchor.replace(year=year, month=month + 1, day=min(anchor.day, monthrange(year, month + 1)[1]))
+
+
+def cycles(now, anchor):
+    """(name, start, end, minutes) per window; end is None while a window rolls.
+
+    With a subscription anchor the weekly and monthly windows are fixed cycles from it; the
+    5 hour window always rolls.
+    """
+    rolling = [(name, now - timedelta(minutes=minutes), None, minutes) for name, minutes, _ in WINDOWS]
+    if anchor is None:
+        return rolling
+    weeks = (now - anchor) // timedelta(days=7)
+    week = anchor + timedelta(days=7 * weeks)
+    count = (now.year - anchor.year) * 12 + now.month - anchor.month
+    count -= add_months(anchor, count) > now
+    month = add_months(anchor, count)
+    fixed = {'seven_day': (week, week + timedelta(days=7)), 'thirty_day': (month, add_months(anchor, count + 1))}
+    return [(name, *fixed[name], (fixed[name][1] - fixed[name][0]).total_seconds() / 60) if name in fixed
+            else (name, start, end, minutes) for name, start, end, minutes in rolling]
+
+
+def spend(db, now, providers, starts):
     """Dollars per window over paid providers from both stores; None if neither is readable."""
-    since = [int((now - timedelta(minutes=minutes)).timestamp() * 1000) for _, minutes, _ in WINDOWS]
+    since = [int(start.timestamp() * 1000) for start in starts]
     sums = ','.join("COALESCE(SUM(CASE WHEN time_created>=? THEN json_extract(data,'$.cost') ELSE 0 END),0)"
                     for _ in WINDOWS)
     marks = ','.join('?' * len(providers))
@@ -62,7 +88,7 @@ def limit_errors(db, now, providers):
     A paid turn that later succeeded shows the provider accepted requests again (the limit
     was lifted or reset), so it supersedes earlier errors.
     """
-    oldest = int((now - timedelta(minutes=WINDOWS[-1][1])).timestamp() * 1000)
+    oldest = int((now - timedelta(days=32)).timestamp() * 1000)
     try:
         rows = db.execute("SELECT time_created, json_extract(data,'$.error.response.body') FROM session_message "
                           "WHERE type='assistant' AND json_extract(data,'$.error.type')='provider.quota' "
@@ -97,29 +123,42 @@ def monthly_cap(account):
     return cap if cap > 0 else None
 
 
+def anchor_of(account, io):
+    limits = account.options.get('limits')
+    anchor = io.parse_time(limits.get('cycle_anchor')) if isinstance(limits, dict) else None
+    return anchor.astimezone(UTC) if anchor else None
+
+
 def fetch(account, io, now):
     database = account.identity_dir / 'opencode.db'
     providers = tuple(account.options.get('providers') or PAID)
+    anchor = anchor_of(account, io)
+    frames = cycles(now, anchor)
     try:
         with closing(sqlite3.connect(database.resolve().as_uri() + '?mode=ro', uri=True)) as db:
-            spent, errors = spend(db, now, providers), limit_errors(db, now, providers)
+            spent = spend(db, now, providers, [start for _, start, _, _ in frames])
+            errors = limit_errors(db, now, providers)
     except (sqlite3.Error, OSError):
         spent, errors = None, {}
     cap = monthly_cap(account)
     windows, unreported = [], []
-    for index, (name, minutes, share) in enumerate(WINDOWS):
-        used = spent[index] / (cap * share) * 100 if cap and spent is not None else None
-        reset = None
-        if name in errors and errors[name] + minutes * 60_000 > now.timestamp() * 1000:
-            # The provider refused a request: exhausted, and at worst until the window has passed.
+    for (name, start, end, minutes), (_, _, share), dollars in zip(
+            frames, WINDOWS, spent or [None] * len(WINDOWS)):
+        used = dollars / (cap * share) * 100 if cap and dollars is not None else None
+        reset = int(end.timestamp() * 1000) if end else None
+        failed = errors.get(name)
+        if failed and failed >= start.timestamp() * 1000:
+            # The provider refused a request: exhausted until the cycle ends, or at worst a window on.
             used = max(used or 0, 100)
-            reset = (errors[name] + minutes * 60_000)
+            reset = reset or failed + minutes * 60_000
         if used is None:
             unreported.append(name)
             continue
         windows.append({'name': name, 'raw_kind': 'local_spend_usd', 'used_percent': used,
                         'window_minutes': minutes, 'reset_at': reset})
     assumed = ', assuming Go plan' if account.plan is None else ''
+    cycle = 'fixed cycles from the configured anchor' if anchor else 'rolling windows, resets estimated'
     return {'windows': windows, 'unreported': unreported, 'plan': None,
             'source': 'local estimate: partial, this machine only (other hosts not counted); '
-                      f'plan-wide caps calibrated, not documented{assumed}; GoUsageLimitError is authoritative'}
+                      f'{cycle}; plan-wide caps calibrated, not documented{assumed}; '
+                      'GoUsageLimitError is authoritative'}

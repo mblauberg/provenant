@@ -369,6 +369,43 @@ def test_opencode_error_is_superseded_by_a_later_successful_paid_turn(quota, tmp
     assert windows['seven_day']['used_percent'] < 10 and windows['seven_day']['reset_at'] is None
 
 
+@pytest.mark.parametrize('anchor, now, month, week', [
+    ('2026-01-31T00:00:00Z', '2026-03-05T12:00:00Z', ('2026-02-28', '2026-03-31'), ('2026-02-28', '2026-03-07')),
+    ('2026-01-31T00:00:00Z', '2026-03-31T00:00:00Z', ('2026-03-31', '2026-04-30'), ('2026-03-28', '2026-04-04')),
+    ('2027-12-31T06:00:00Z', '2028-02-29T07:00:00Z', ('2028-01-31', '2028-02-29'), ('2028-02-25', '2028-03-03')),
+    ('2026-10-18T00:00:00Z', '2026-10-22T00:40:00Z', ('2026-10-18', '2026-11-18'), ('2026-10-18', '2026-10-25')),
+    ('2026-10-18T00:00:00Z', '2026-12-31T23:59:00Z', ('2026-12-18', '2027-01-18'), ('2026-12-27', '2027-01-03')),
+])
+def test_opencode_fixed_cycles_follow_the_anchor_through_short_months(quota, anchor, now, month, week):
+    opencode = quota.provider('opencode')
+    when = quota.parse_time(now)
+    frames = {name: (start, end) for name, start, end, _ in opencode.cycles(when, quota.parse_time(anchor))}
+    day = lambda moment: moment.date().isoformat()
+    assert tuple(map(day, frames['thirty_day'])) == month and tuple(map(day, frames['seven_day'])) == week
+    assert frames['five_hour'] == (when - timedelta(hours=5), None)
+    assert all(start <= when < end for start, end in (frames['thirty_day'], frames['seven_day']))
+
+
+def test_opencode_anchor_sums_the_current_cycle_and_a_limit_error_expires_at_the_boundary(quota, tmp_path):
+    anchor = (NOW - 2 * day).isoformat()   # the weekly and monthly cycles began two days ago
+    v2 = ((3 * day, 9.0, 'opencode-go'), (day, 4.0, 'opencode-go'), (hour, 4.0, 'opencode-go'))
+    windows, fetched = opencode_rows(quota, opencode_account(quota, tmp_path, v2=v2, limits={'cycle_anchor': anchor}))
+    assert windows['seven_day']['used_percent'] == pytest.approx(50.0)
+    assert windows['thirty_day']['used_percent'] == pytest.approx(25.0)
+    assert windows['five_hour']['reset_at'] is None and windows['five_hour']['window_minutes'] == 300
+    assert quota.parse_time(windows['seven_day']['reset_at']) == NOW + 5 * day
+    assert 'fixed cycles' in fetched['source']
+    # An error in this cycle holds until the next boundary; one before the anchor is expired.
+    (tmp_path / 'f').mkdir()
+    failed = opencode_account(quota, tmp_path / 'f', v2=((day, LIMIT_ERROR, 'opencode-go'),), limits={'cycle_anchor': anchor})
+    windows, _ = opencode_rows(quota, failed)
+    assert windows['seven_day']['used_percent'] == 100
+    assert quota.parse_time(windows['seven_day']['reset_at']) == NOW + 5 * day
+    (tmp_path / 'g').mkdir()
+    old = opencode_account(quota, tmp_path / 'g', v2=((3 * day, LIMIT_ERROR, 'opencode-go'),), limits={'cycle_anchor': anchor})
+    assert opencode_rows(quota, old)[0]['seven_day']['used_percent'] == 0
+
+
 def test_opencode_unreadable_store_is_unreported_never_zero(quota, tmp_path):
     windows, fetched = opencode_rows(quota, quota.Account('opencode', 'go', tmp_path / 'missing', True))
     assert windows == {} and fetched['unreported'] == ['five_hour', 'seven_day', 'thirty_day']

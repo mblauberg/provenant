@@ -246,6 +246,10 @@ override it or to cover another plan, which is otherwise unreported. The estimat
 is partial: other hosts using the same account are not counted, so it
 undercounts. A recent `GoUsageLimitError` in the store is authoritative: that
 window reads 100% until its estimated reset (the error time plus the window).
+Set `limits.cycle_anchor` (ISO datetime of the subscription cycle start) to use fixed
+weekly (every 7 days) and monthly (same day each month, clamped to short months)
+cycles instead of rolling ones: spend is summed within the current cycle, resets
+are the next boundary, and an error expires at it. The 5 hour window always rolls.
 Free zen models are ignored. Only message tables are read, never credentials.
 
 ```json
