@@ -2383,7 +2383,27 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def _main(argv: list[str] | None = None) -> int:
+    argv = list(sys.argv[1:] if argv is None else argv)
     argument_parser = parser()
+    subcommands = next(action.choices for action in argument_parser._actions
+                       if isinstance(action, argparse._SubParsersAction))
+    if argv and not argv[0].startswith("-") and argv[0] not in subcommands:
+        result = route_pick([{"route": argv[0]}])
+        pick_result = result.get("results", [{}])[0]
+        if pick_result.get("status") == "ok":
+            picks = pick_result.get("picks", [])
+            quota_states = _quota_states()
+            for pick in picks:
+                quota = quota_states.get(pick["adapter"])
+                if quota:
+                    pick["quota"] = {key: quota[key] for key in
+                                      ("account", "state", "summary", "observed_at") if key in quota}
+                    if quota.get("state") in ("deficit", "credit_only"):
+                        pick_result.setdefault("warnings", []).append(
+                            f"{pick['adapter']} quota: {quota['summary']}"
+                        )
+        print(json.dumps(result, sort_keys=True))
+        return 0 if pick_result.get("status") == "ok" else 2
     args = argument_parser.parse_args(argv)
     renamed = _pools.RENAMED_TIERS.get(str(getattr(args, "alias", "") or "").casefold())
     if renamed:

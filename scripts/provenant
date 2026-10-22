@@ -82,7 +82,7 @@ def resolve_product_root(instance_root: Path | None = None) -> Path:
 
 
 def usage() -> None:
-    print("usage: provenant <help|root|route|routes|capabilities|worktree|clean|reap|check|gate|telemetry|stats|retro|quota|profile|fabric|lease|hosts|peer|lanes|events|dispatch|batch|run|pr> [arguments...]", file=sys.stderr)
+    print("usage: provenant <help|root|route|routes|capabilities|worktree|clean|reap|lint|check|gate|telemetry|stats|retro|quota|profile|fabric|lease|hosts|peer|lanes|events|dispatch|batch|run|pr> [arguments...]", file=sys.stderr)
 
 
 def help_text() -> None:
@@ -96,6 +96,7 @@ Thin front door to owners:
   capabilities   skills/orchestrate/scripts/capabilities.py
   worktree ...   scripts/worktree ...
   clean|reap ... scripts/clean.py|reap.py
+  lint ...       scripts/provenant_lint.py ...
   check ...      scripts/check-harness ...
   gate           scripts/gate
   fabric ...     runtime/fabric/bin/fabric ...
@@ -149,6 +150,13 @@ COMMAND_DETAILS: dict[str, str] = {
         "Delegates to scripts/clean.py ...\n"
         "Dry run by default; --apply --plan <digest> deletes the approved rows\n"
         "that are still eligible."
+    ),
+    "lint": (
+        "usage: provenant lint branch [NAME]\n"
+        "       provenant lint commit-msg FILE\n\n"
+        "Delegates to scripts/provenant_lint.py ...\n"
+        "Branch shape, session markers, agent attribution and closing keywords.\n"
+        "commit-msg works directly as a git commit-msg hook; see docs/runbooks/lint.md."
     ),
     "reap": (
         "usage: provenant reap <pid>… [--tree] [--grace S] [--started-before TIME]\n\n"
@@ -529,6 +537,7 @@ def main(arguments: list[str]) -> int:
         "worktree": "scripts/worktree",
         "clean": "scripts/clean.py",
         "reap": "scripts/reap.py",
+        "lint": "scripts/provenant_lint.py",
         "check": "scripts/check-harness",
         "gate": "scripts/gate",
         "fabric": FABRIC_CLI,
