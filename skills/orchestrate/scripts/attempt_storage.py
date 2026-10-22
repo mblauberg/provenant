@@ -47,11 +47,12 @@ def tree_bytes(path: Path) -> int:
         except OSError:
             return total
         try:
-            for child in os.listdir(fd):
-                if budget[0] <= 0:
-                    break
-                budget[0] -= 1
-                total += walk(fd, child, depth + 1)
+            with os.scandir(fd) as entries:  # one entry at a time: a lane may make it wide
+                for child in entries:
+                    if budget[0] <= 0:
+                        break
+                    budget[0] -= 1
+                    total += walk(fd, child.name, depth + 1)
         except OSError:
             pass
         finally:

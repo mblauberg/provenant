@@ -1296,6 +1296,40 @@ def test_tree_bytes_bounds_its_depth_and_entries(tmp_path, monkeypatch):
     assert storage.tree_bytes(tmp_path / "tmp") <= 4 * 300 * 1024
 
 
+def test_tree_bytes_reads_a_wide_directory_only_up_to_its_entry_budget(tmp_path, monkeypatch):
+    storage = cleaner().attempt_storage
+    wide = tmp_path / "tmp"
+    wide.mkdir()
+    for index in range(50):
+        (wide / f"f{index}").touch()
+    real_scandir, read = os.scandir, []
+
+    class Counted:
+        def __init__(self, path):
+            self.entries = real_scandir(path)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            self.entries.close()
+
+        def __iter__(self):
+            for entry in self.entries:
+                read.append(entry.name)
+                yield entry
+
+    def no_listdir(path="."):
+        raise AssertionError("tree_bytes must not list a whole directory at once")
+
+    monkeypatch.setattr(os, "scandir", Counted)
+    monkeypatch.setattr(os, "listdir", no_listdir)
+    monkeypatch.setattr(storage, "TREE_MAX_ENTRIES", 3)
+    storage.tree_bytes(wide)
+    monkeypatch.undo()
+    assert len(read) <= 4, read
+
+
 def test_open_dir_closes_fd_when_fstat_fails(tmp_path, monkeypatch):
     storage = cleaner().attempt_storage
     (tmp_path / "d").mkdir()
