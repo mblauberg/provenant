@@ -218,8 +218,9 @@ COMMAND_DETAILS: dict[str, str] = {
         "Delegates to runtime/fabric/bin/fabric lanes ...\n"
         "Default shows active lanes plus the 5 most recent terminal ones;\n"
         "use --all to list all lanes.\n"
-        "`lanes --wait` waits for a lane to finish or need input; --summary prints\n"
-        "one bounded line per lane at the end."
+        "`lanes --wait` waits for a lane to finish or need input; a lane needing input\n"
+        "exits 0, other non-ok terminal states exit 1, and timeout exits 124. --summary\n"
+        "prints one bounded line per lane at the end."
     ),
     "graph": (
         "usage: provenant graph run --file F\n"

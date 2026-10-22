@@ -32,6 +32,8 @@ export interface LaneWaitDependencies {
 
 const done = (row: RunRead) =>
   row.reachability !== "unreachable" && (row.state === "terminal" || row.state === "input_required" || row.status === "input_required");
+const unsuccessful = (row: RunRead) => done(row) && row.status !== "ok" &&
+  row.status !== "input_required" && row.state !== "input_required";
 
 /**
  * Report every completed lane this seat has not been told about, or wait for
@@ -79,7 +81,7 @@ export async function waitForLanes(deps: LaneWaitDependencies): Promise<number> 
         if (!first && now() >= deadline) return 124;
         try {
           store.markLanesSeen(who, unseen.map((index) => attempts[index]!));
-          return expired && pending.length ? 124 : 0;
+          return expired && pending.length ? 124 : current.runs.some(unsuccessful) ? 1 : 0;
         } catch (error) {
           if (!isSQLiteContention(error)) throw error;
           // Unmarked lanes are reported again next wait; contention must not outlast the deadline.
@@ -91,7 +93,7 @@ export async function waitForLanes(deps: LaneWaitDependencies): Promise<number> 
     }
     if (unseen !== undefined && !pending.length) {
       await write("no lanes are running\n");
-      return 0;
+      return current.runs.some(unsuccessful) ? 1 : 0;
     }
     if (expired) {
       await write(timeout());

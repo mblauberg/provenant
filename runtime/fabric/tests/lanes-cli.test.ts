@@ -69,6 +69,46 @@ it("accepts --all without --wait", () => {
   expect(res.out).toBe(`no lanes for project ${repo}\n`);
 });
 
+it("writes and parses the complete JSON listing when stdout is a pipe", () => {
+  const repo = join(root, "repo-large-listing");
+  mkdirSync(repo, { recursive: true });
+  spawnSync("git", ["init", "-q", repo]);
+  for (let i = 1; i <= 300; i++) {
+    createAttempt(repo, `large-${String(i).padStart(4, "0")}`, "terminal", "ok",
+      `2026-10-22T00:10:${String(i % 60).padStart(2, "0")}.000Z`);
+  }
+
+  const listing = lanes(repo, "--all", "--json");
+  expect(listing.code).toBe(0);
+  expect(Buffer.byteLength(listing.out)).toBeGreaterThan(65_536);
+  expect(JSON.parse(listing.out).runs).toHaveLength(300);
+});
+
+it.each(["failed", "cancelled", "interrupted", "usage_limited", "auth_required"])(
+  "returns 1 when a waited lane ends %s",
+  (status) => {
+    const repo = join(root, `repo-wait-${status}`);
+    mkdirSync(repo, { recursive: true });
+    spawnSync("git", ["init", "-q", repo]);
+    createAttempt(repo, "waited", "terminal", status, "2026-10-22T00:10:00.000Z");
+
+    const result = lanes(repo, "--wait", "--timeout", "0");
+    expect(result.code).toBe(1);
+    expect(result.out).toContain("waited");
+  },
+);
+
+it("keeps input-required lanes successful for --wait", () => {
+  const repo = join(root, "repo-wait-input-required");
+  mkdirSync(repo, { recursive: true });
+  spawnSync("git", ["init", "-q", repo]);
+  createAttempt(repo, "needs-input", "input_required", "input_required", "2026-10-22T00:10:00.000Z");
+
+  const result = lanes(repo, "--wait", "--timeout", "0");
+  expect(result.code).toBe(0);
+  expect(result.out).toContain("needs-input");
+});
+
 it("defaults to active lanes plus 5 most recent terminal ones, then N more; use --all", () => {
   const repo = join(root, "repo-lanes-budget");
   mkdirSync(repo, { recursive: true });
