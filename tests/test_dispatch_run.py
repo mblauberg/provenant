@@ -5208,7 +5208,7 @@ def test_nested_failure_is_named_without_replacing_parent_provider_status(
 
 
 @pytest.mark.parametrize('stop', ['normal', 'cancelled'])
-def test_parent_cleanup_spares_real_direct_nested_cli(tmp_path, stop):
+def test_parent_cleanup_spares_real_direct_nested_cli(tmp_path, monkeypatch, stop):
     mod = load_dispatch_module()
     disable_memory_admission_floor(tmp_path)
     parent_dir = make_run(tmp_path, 'runs/parent')
@@ -5223,7 +5223,23 @@ def test_parent_cleanup_spares_real_direct_nested_cli(tmp_path, stop):
     adapter = tmp_path / 'adapter'
     write_success_adapter(adapter)
     ready = tmp_path / 'child-ready'
-    adapter.write_text(adapter.read_text().replace('while [', f'touch {str(ready)!r}\nsleep {30 if stop == 'cancelled' else 2}\nwhile [', 1))
+    released = tmp_path / 'child-released'
+    observed = tmp_path / 'child-observed'
+    adapter.write_text(adapter.read_text().replace('while [',
+        f'touch {str(ready)!r}\nwhile [ ! -f {str(released)!r} ]; do sleep .02; done\nwhile [', 1))
+    original_sample = mod.provider_exec._Descendants.sample
+
+    def sample(descendants, include_reparented=False):
+        rows = original_sample(descendants, include_reparented)
+        if ready.exists():
+            owner = json.loads((child_dir / 'dispatch-owner.json').read_text())
+            if any(pid == owner['owner_pid'] for pid, _ in descendants.spared):
+                observed.touch()
+        return rows
+
+    # Reparenting before the first census leaves no observed ancestry to spare.
+    # Keep the provider alive until the supervisor recognises the nested owner.
+    monkeypatch.setattr(mod.provider_exec._Descendants, 'sample', sample)
     wrapper = tmp_path / 'nested.py'
     wrapper.write_text(f'''import sys,pathlib
 sys.path.insert(0, {str(SCRIPT.parent)!r})
@@ -5232,13 +5248,15 @@ dispatch.CF_DISPATCH = pathlib.Path({str(adapter)!r})
 raise SystemExit(dispatch.dispatch(dispatch.parser().parse_args()))
 ''')
     argv = [sys.executable, str(wrapper), '--run-dir', str(child_dir), '--task-id', 'junior',
-            '--adapter', 'codex', '--model', 'fixture', '--prompt-file', str(prompt)]
+            '--adapter', 'codex', '--model', 'fixture', '--prompt-file', str(prompt), '--timeout-seconds', '30']
     code = f'''import json,os,pathlib,subprocess,time
 child = subprocess.Popen({argv!r}, env={{**os.environ, 'PROVENANT_HOST_LOCAL_ONLY':'1'}},
     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 pathlib.Path('nested.pid').write_text(str(child.pid))
 deadline = time.monotonic() + 8
-while (not pathlib.Path({str(child_dir / 'dispatch-owner.json')!r}).is_file() or not pathlib.Path({str(ready)!r}).exists()) and time.monotonic() < deadline:
+while not pathlib.Path({str(observed)!r}).exists():
+    if child.poll() is not None or time.monotonic() >= deadline:
+        raise SystemExit('supervisor did not observe the live nested owner')
     time.sleep(.02)
 print(json.dumps({{'type':'item.completed','item':{{'type':'agent_message','text':'DONE'}}}}), flush=True)
 if {stop!r} == 'normal':
@@ -5261,11 +5279,13 @@ else:
     plan.update(argv=[sys.executable, '-u', '-c', code], attempt_identity=parent, grace_seconds=.1)
     try:
         record = mod.provider_exec.execute(plan, tmp_path / 'result.md',
-            cancelled=lambda: stop == 'cancelled' and ready.exists() and (child_dir / 'dispatch-owner.json').is_file(),
+            cancelled=lambda: stop == 'cancelled' and observed.exists(),
             env={**os.environ, 'PROVENANT_RUN_TOKEN': 'parent-token'})
         assert record['status'] == ('ok' if stop == 'normal' else 'cancelled')
         assert record.get('spared', 0) >= 1
         assert record['reaped'] == []
+        # Completion must follow parent cleanup, independent of scheduler speed.
+        released.touch()
         owner = json.loads((child_dir / 'dispatch-owner.json').read_text())
         child_path = child_dir / 'tasks/junior/attempt-001/attempt.json'
         deadline = time.monotonic() + 10
@@ -5276,6 +5296,7 @@ else:
         assert json.loads(child_path.read_text())['status'] == ('cancelled' if stop == 'cancelled' else 'ok')
         assert owner['owner_pid'] == owner['owner_pgid']
     finally:
+        released.touch()
         # Observe the owner's exit too: its first terminal row precedes final cleanup.
         path = child_dir / 'dispatch-owner.json'
         if path.exists():
