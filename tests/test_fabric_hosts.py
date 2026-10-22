@@ -830,12 +830,31 @@ class LaneLoopbackContracts(unittest.TestCase):
         self.assertFalse(groups, f'peer-lanes.ts process groups outlived the test: {groups}')
 
     def test_peer_lane_leak_guard_fails_and_reaps_process_group(self):
-        process = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)',
+        child_pid_path = self.root / 'peer-lane-child.pid'
+        child_code = 'import time; time.sleep(60)'
+        parent_code = ('import subprocess, sys, time; from pathlib import Path; '
+            f'child = subprocess.Popen([sys.executable, "-c", {child_code!r}]); '
+            f'Path({str(child_pid_path)!r}).write_text(str(child.pid)); time.sleep(60)')
+        process = subprocess.Popen([sys.executable, '-c', parent_code,
             str(self.root / 'runtime/fabric/src/peer-lanes.ts')], start_new_session=True)
         try:
+            deadline = time.monotonic() + 2
+            while not child_pid_path.exists() and time.monotonic() < deadline:
+                time.sleep(0.01)
+            self.assertTrue(child_pid_path.exists(), 'peer-lane fixture child did not start')
             with self.assertRaisesRegex(AssertionError, 'peer-lanes.ts'):
                 self._cleanup_peer_lane_groups()
             process.wait(timeout=2)
+            child_pid = int(child_pid_path.read_text())
+            deadline = time.monotonic() + 2
+            while time.monotonic() < deadline:
+                try:
+                    os.kill(child_pid, 0)
+                except ProcessLookupError:
+                    break
+                time.sleep(0.01)
+            else:
+                self.fail(f'peer-lane process group left child {child_pid} alive')
         finally:
             if process.poll() is None:
                 try:
