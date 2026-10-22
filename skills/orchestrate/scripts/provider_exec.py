@@ -1682,6 +1682,7 @@ def error_class(status, signature=None):
         "print_timeout": "timeout", "idle_watchdog": "timeout", "startup_watchdog": "timeout",
         "wall_clock": "timeout",
         "provider_transport": "transient",
+        "fabric_mcp_unavailable": "fabric_mcp_unavailable",
     }
     return classes.get(status) or signatures.get(signature) or (
         "provider_error" if status in {"failed", "rejected", "tool_missing", "output_identity_invalid", "output_write_error"}
@@ -3495,6 +3496,54 @@ def execute(plan, output_path, **options):
         os.close(tmp_fd)
 
 
+MCP_PREFLIGHT_SECONDS = 10
+
+
+def _preflight_opencode_mcp(plan, environment, tmp_fd):
+    """Check the exact writer MCP command under the lane's final environment and boundary."""
+    if plan["adapter"] != "opencode" or plan["mode"] != "worktree_write":
+        return
+    server = json.loads(environment["OPENCODE_CONFIG_CONTENT"])["mcp"]["servers"]["fabric"]
+    mcp_environment = {**environment, **server.get("environment", {})}
+    request = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+        "protocolVersion": "2024-11-05", "capabilities": {},
+        "clientInfo": {"name": "provenant-preflight", "version": "1"},
+    }}) + "\n"
+    said = ""
+    try:
+        command = confinement_command(plan, server["command"], environment.get("PATH"))
+        # Files bound what the supervisor reads even if startup produces noisy diagnostics.
+        with _unlinked_file(tmp_fd) as output, _unlinked_file(tmp_fd) as errors:
+            process = subprocess.Popen(command, cwd=plan["cwd"], env=mcp_environment,
+                                       stdin=subprocess.PIPE, stdout=output, stderr=errors,
+                                       start_new_session=True)
+            descendants = _Descendants(process, environment["PROVENANT_ATTEMPT_MARKER"])
+            descendants.sample()
+            try:
+                process.communicate(request.encode(), timeout=MCP_PREFLIGHT_SECONDS)
+            finally:
+                descendants.stop(normal=process.poll() is not None)
+                process.wait()
+            errors.seek(0)
+            # The wrapper names its own fault, such as a missing loader or an unsupported Node.
+            said = " ".join(errors.read(65536).decode(errors="replace").split())[-300:]
+            output.seek(0)
+            for line in output.read(65536).splitlines():
+                try:
+                    response = json.loads(line)
+                except ValueError:
+                    continue
+                result = response.get("result") if isinstance(response, dict) else None
+                if (isinstance(response, dict) and response.get("id") == 1 and isinstance(result, dict)
+                        and result.get("protocolVersion") and isinstance(result.get("capabilities"), dict)
+                        and isinstance(result.get("serverInfo"), dict) and process.returncode == 0):
+                    return
+    except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as exc:
+        raise CapabilityError("fabric_mcp_unavailable", "Fabric MCP preflight failed; check the product wrapper, Node runtime and confinement grants") from exc
+    raise CapabilityError("fabric_mcp_unavailable", "Fabric MCP preflight failed: no valid initialize response; check the product wrapper, Node runtime and confinement grants"
+                          + (f"; wrapper stderr: {said}" if said else ""))
+
+
 def _run_attempt(
     plan,
     output_path,
@@ -3623,6 +3672,7 @@ def _run_attempt(
     reaped = []
     stopped = False
     forced, terminal_at, cancel_signal = None, None, None
+    preflight_error = None
     provider_exit_before_cleanup = None
     terminal_grace_break = False
     pending = b""
@@ -3780,6 +3830,7 @@ def _run_attempt(
             forced = "rejected"
             diagnostics.write(b"copilot requires CF_DISPATCH_ENABLE_COPILOT=1\n")
         else:
+            _preflight_opencode_mcp(plan, environment, tmp_fd)
             command = list(plan["argv"])
             command[0] = (
                 shutil.which(command[0], path=environment.get("PATH")) or command[0]
@@ -3907,6 +3958,8 @@ def _run_attempt(
         diagnostics.write(str(exc).encode())
     except ValueError as exc:
         forced = "rejected"
+        if isinstance(exc, CapabilityError):
+            preflight_error = exc.code
         diagnostics.write(str(exc).encode())
     except OSError as exc:
         forced = "failed"
@@ -4024,6 +4077,8 @@ def _run_attempt(
             "cancelled": "cancel_requested",
             "interrupted": "supervisor_signal",
         }.get(forced, parsed["signature"])
+        if preflight_error:
+            parsed.update(signature=preflight_error, excerpt=stderr.strip())
     elif provider_exit_before_cleanup is not None and provider_exit_before_cleanup < 0:
         parsed["status"] = "interrupted" if valid_terminal else "failed"
         parsed["signature"] = "provider_signal"
@@ -4228,6 +4283,9 @@ def _run_attempt(
     )
     guarantee = plan["applied"]["guarantee"]
     fix = (
+        "check the Fabric product wrapper, supported Node runtime and confinement grants"
+        if parsed["signature"] == "fabric_mcp_unavailable"
+        else
         "run `kiro-cli whoami` outside the sandbox"
         if status == "auth_required" and parsed["signature"] == "auth_expired"
         else
@@ -4290,7 +4348,8 @@ def _run_attempt(
         "effort": plan["effort"],
         "status": status,
         **({"result_partial": True} if status not in {"ok", "input_required", "quarantined"} and not valid_terminal and parsed["text"].strip() else {}),
-        **({"error": "invalid_input"} if status == "rejected" and parsed["signature"] == "invalid_input" else {}),
+        **({"error": parsed["signature"]} if status == "rejected" and parsed["signature"] in {
+            "invalid_input", "fabric_mcp_unavailable"} else {}),
         **({"error": parsed["signature"]} if instruction_changes else {}),
         **({"landable": False, "quarantine": quarantine} if quarantine else {}),
         "reason": parsed["excerpt"],
