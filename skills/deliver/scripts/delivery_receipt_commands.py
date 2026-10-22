@@ -8,6 +8,8 @@ import math
 from pathlib import Path
 from typing import Any
 
+from delivery_lineage import delivery_lineage_eligibility
+
 
 def profile_judgement_gate(
     profile: str, profile_path: Path, error_type: type[ValueError],
@@ -234,26 +236,19 @@ def command_review_add(args: Any, api: dict[str, Any]) -> dict[str, Any]:
             route = json.loads(route_raw)
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise receipt_error(f"route receipt must be readable JSON: {exc}") from exc
-        if (
-            not isinstance(route, dict) or route.get("status") != "ok"
-            or route.get("adapter") != args.adapter
-            or route.get("reviewer_id") != args.reviewer_id
-            or route.get("resolved_model", route.get("model")) != args.model
-            or route.get("model_family") != args.provider_family
-            or not isinstance(route.get("provider_family"), str)
-            or not route.get("provider_family", "").strip()
-            or (
-                route.get("certification_eligible") is not True
-                and not (
-                    route.get("certification_eligible") is False
-                    and run.get("chair_family")
-                    and route.get("provider_family") == run.get("chair_family")
-                )
-            )
-        ):
+        if not isinstance(route, dict):
             raise receipt_error("route receipt identity does not match review lineage")
-        family = route["provider_family"].strip()
-        if family != run.get("chair_family") and route.get("cross_family") is not True:
+        eligibility = delivery_lineage_eligibility(
+            route,
+            adapter=args.adapter,
+            reviewer_id=args.reviewer_id,
+            model=args.model,
+            model_family=args.provider_family,
+            chair_family=run.get("chair_family"),
+        )
+        if not eligibility.eligible:
+            if not eligibility.identity_and_certification_agree:
+                raise receipt_error("route receipt identity does not match review lineage")
             raise receipt_error("cross-family review requires a cross-family route receipt")
         lineage = {
             "adapter": args.adapter, "provider_family": args.provider_family,

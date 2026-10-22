@@ -7,6 +7,8 @@ import json
 from pathlib import Path
 from typing import Any
 
+from delivery_lineage import delivery_lineage_eligibility
+
 from delivery_validation_common import (
     REVIEW_ROLES,
     Invalid,
@@ -51,29 +53,22 @@ def _validate_route(
         route = json.loads(raw)
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise Invalid(f"review {review.get('id')} route receipt is not readable JSON") from exc
-    fail(
-        not isinstance(route, dict)
-        or route.get("status") != "ok"
-        or route.get("adapter") != review.get("adapter")
-        or route.get("reviewer_id") != review.get("reviewer_id")
-        or route.get("resolved_model", route.get("model")) != review.get("model")
-        or route.get("model_family") != review.get("provider_family")
-        or not isinstance(route.get("provider_family"), str)
-        or not route.get("provider_family", "").strip()
-        or (
-            route.get("certification_eligible") is not True
-            and not (
-                route.get("certification_eligible") is False
-                and chair_family
-                and route.get("provider_family") == chair_family
-            )
-        ),
-        f"review {review.get('id')} route receipt identity does not match review lineage",
+    fail(not isinstance(route, dict), f"review {review.get('id')} route receipt identity does not match review lineage")
+    lineage = delivery_lineage_eligibility(
+        route,
+        adapter=review.get("adapter"),
+        reviewer_id=review.get("reviewer_id"),
+        model=review.get("model"),
+        model_family=review.get("provider_family"),
+        chair_family=chair_family,
     )
-    family = route["provider_family"].strip()
-    if family != chair_family:
-        fail(route.get("cross_family") is not True, "cross-family review requires a cross-family route receipt")
-    return family
+    if not lineage.eligible:
+        if not lineage.identity_and_certification_agree:
+            raise Invalid(
+                f"review {review.get('id')} route receipt identity does not match review lineage"
+            )
+        raise Invalid("cross-family review requires a cross-family route receipt")
+    return lineage.provider_family
 
 
 def _validate_reviews(
