@@ -77,9 +77,18 @@ export interface WorkClaim {
   expiresAtMs: number;
 }
 
-const STALE_LANDING =
+export const STALE_LANDING =
   "stale landing lease: it expired, was released, or belongs to another session or generation; " +
   "re-acquire with fabric_landing_lease action=acquire (or wait for it first)";
+
+/** Another holder's live lease refused an acquire; the CLI reports both fields. */
+export class LandingHeldError extends Error {
+  constructor(readonly holder: string, readonly until: string) {
+    super(`landing lease held by ${holder} until ${until}`);
+  }
+}
+
+export type LandingRelease = { released: true } | { released: false; reason: "expired" | "not_held" | "pushing" };
 
 export interface LandingLease {
   holder: string;
@@ -367,7 +376,7 @@ export class Store {
     if (!/^[0-9a-f]{40}$/u.test(expectedSha)) throw new Error("expected integration SHA must be 40 lowercase hex digits");
     return this.#db.transaction(() => {
       const live = this.landingLease(who.project, now);
-      if (live) throw new Error(`landing lease held by ${live.holder} until ${new Date(Math.max(live.expiresAtMs, live.pushingUntilMs ?? 0)).toISOString()}`);
+      if (live) throw new LandingHeldError(live.holder, new Date(Math.max(live.expiresAtMs, live.pushingUntilMs ?? 0)).toISOString());
       const prior = this.#db.prepare(`SELECT holder, expires_at, pushing_until, released_at FROM landing_leases WHERE project = ?`)
         .get(who.project) as { holder: string; expires_at: number; pushing_until: number | null; released_at: number | null } | undefined;
       this.#db.prepare(`INSERT INTO landing_leases(project, holder, generation, expected_sha, expires_at, released_at)
@@ -438,14 +447,29 @@ export class Store {
   }
 
   releaseLanding(who: Identity, session: string, generation: number): void {
+    if (!this.tryReleaseLanding(who, session, generation).released) throw new Error(STALE_LANDING);
+  }
+
+  /**
+   * Release only the caller's own live, idle lease, and say why when it cannot.
+   * Time is read after the write lock is held, so a release that waited past
+   * expiry is refused.
+   */
+  tryReleaseLanding(who: Identity, session: string, generation: number, at?: number): LandingRelease {
     const owner = holder(who, session);
-    this.#db.transaction(() => {
-      const changed = this.#db.prepare(`UPDATE landing_leases SET released_at = ? WHERE project = ?
-        AND holder = ? AND generation = ? AND released_at IS NULL AND expires_at > ?
-        AND (pushing_until IS NULL OR pushing_until <= ?)`)
-        .run(Date.now(), who.project, owner, generation, Date.now(), Date.now());
-      if (changed.changes !== 1) throw new Error(STALE_LANDING);
+    return this.#db.transaction((): LandingRelease => {
+      const now = at ?? Date.now();
+      const row = this.#db.prepare(`SELECT holder, generation, expires_at, pushing_until, released_at FROM landing_leases
+        WHERE project = ?`).get(who.project) as
+        { holder: string; generation: number; expires_at: number; pushing_until: number | null; released_at: number | null } | undefined;
+      if (!row || row.holder !== owner || row.generation !== generation || row.released_at !== null)
+        return { released: false, reason: "not_held" };
+      if ((row.pushing_until ?? 0) > now) return { released: false, reason: "pushing" };
+      if (row.expires_at <= now) return { released: false, reason: "expired" };
+      this.#db.prepare(`UPDATE landing_leases SET released_at = ? WHERE project = ? AND generation = ?`)
+        .run(now, who.project, generation);
       this.#log(who, "landing_release", `${owner} generation ${generation}`);
+      return { released: true };
     }).immediate();
   }
 

@@ -103,6 +103,13 @@ def _isolated_route_state(tmp_path_factory, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _isolated_instance_root(tmp_path_factory, monkeypatch):
+    """Pin the Fabric instance root so `~/.agents` (hosts.json peers, quota config and
+    snapshots) never leaks into a test. Tests that need a root set their own over this."""
+    monkeypatch.setenv("AGENT_FABRIC_INSTANCE_ROOT", str(tmp_path_factory.mktemp("instance-root")))
+
+
+@pytest.fixture(autouse=True)
 def _isolated_codex_home_and_state(tmp_path_factory, monkeypatch, request):
     """Codex argv reads the operator's MCP servers and names Provenant's state dir; pin both.
 

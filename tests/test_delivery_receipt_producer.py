@@ -115,7 +115,7 @@ def route_receipt(
         "catalog_model": "",
         "model_family": family,
         "provider_family": family,
-        "route_alias": "flagship",
+        "route_alias": "principal",
         "cross_family": False,
         "certification_eligible": True,
     }

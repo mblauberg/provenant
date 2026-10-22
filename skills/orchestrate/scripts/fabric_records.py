@@ -132,6 +132,8 @@ def render_digest(row):
         )
         if row.get("reset_at"):
             detail += " (resets " + row["reset_at"] + ")"
+    if row.get("result_partial"):
+        detail += " · partial result" + (" " + result if result else "")
     text = f"{status} {run_id} {route} {duration}s" + detail
     if prov.get("line"):
         text += "\n  " + prov["line"] + context_marker(row.get("context"))

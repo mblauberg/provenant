@@ -1,3 +1,4 @@
+import { actAsMcpServer } from "./seat-index.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { setTimeout as delay } from "node:timers/promises";
@@ -31,6 +32,7 @@ const MAX_WAIT_SECONDS = MAX_EXECUTION_WAIT_SECONDS;
  * class of error that reports "the daemon is unavailable" while the daemon is
  * running. If the file cannot be opened the caller is told which file and why.
  */
+actAsMcpServer();
 const who = identify();
 let store: Store | undefined;
 const initialiseStore = (busyTimeoutMs = 5000): Store => {
@@ -166,7 +168,7 @@ const route = {
   fallback: z
     .union([z.boolean(), z.literal("any"), z.array(z.union([z.string(), z.record(z.string(), z.unknown())]))])
     .optional(),
-  route: z.string().optional().meta({ description: "Tier pool: junior (laid-out work, cheap lenses), senior (judgement, review, delegation) or principal (critical decisions); or design or writing. Old names map on: bulk/scout to junior, workhorse/strong/review to senior, flagship to principal. adapter narrows the pool; an explicit model wins over route. Prefer naming a model (deepseek-free, glm-free, sonnet, sol) when you know what you want." }),
+  route: z.string().optional().meta({ description: "Tier pool: junior (laid-out work, cheap lenses), senior (judgement, review, delegation) or principal (critical decisions); or design or writing. adapter narrows the pool; an explicit model wins over route. Prefer naming a model (deepseek-free, glm-free, sonnet, sol) when you know what you want." }),
   rotate: z.boolean().optional().meta({ description: "Cycle the route's pool per project instead of taking its top model; ignored with council." }),
   council: z.number().int().min(1).max(8).optional().meta({ description: "Run 1-8 members from the route as one batch, families spread first; members repeat when fewer are available." }),
   models: z.array(z.string()).min(1).max(8).optional().meta({ description: "Ad-hoc council of adapter/model[@effort] entries; bypasses route and adapter." }),

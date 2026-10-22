@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import re
 
 POLICY = ".agents/fabric-policy.json"
 INSTRUCTION_MODES = ("quarantine", "allow", "deny")
@@ -51,3 +52,49 @@ def secret_scan_exclude(workspace_root) -> tuple[list[Path], list[str]]:
         else:
             warnings.append(f"{POLICY} secret_scan_exclude takes relative paths inside the project; ignoring {entry!r}")
     return excluded, warnings
+
+
+TOOLS_DEFAULTS = {
+    "default_branch": "main",
+    "lint": {
+        "areas": [],
+        "forbid_attribution": True,
+        "forbid_closing_keywords": True,
+    },
+}
+
+
+def tools_policy(workspace_root) -> tuple[dict, list[str]]:
+    """The `tools` object with defaults filled in, for `provenant lint` and later verbs.
+
+    Unknown keys are kept and ignored. A key of the wrong type falls back to its default with a warning.
+    """
+    policy, warnings = _load(workspace_root)
+    configured = policy.get("tools", {})
+    if not isinstance(configured, dict):
+        warnings.append(f"{POLICY} tools must be an object; using defaults")
+        configured = {}
+    tools = {**configured}
+    default_branch = configured.get("default_branch", TOOLS_DEFAULTS["default_branch"])
+    if not isinstance(default_branch, str) or not default_branch:
+        warnings.append(f"{POLICY} tools.default_branch must be a non-empty string; using main")
+        default_branch = TOOLS_DEFAULTS["default_branch"]
+    tools["default_branch"] = default_branch
+    configured_lint = configured.get("lint", {})
+    if not isinstance(configured_lint, dict):
+        warnings.append(f"{POLICY} tools.lint must be an object; using defaults")
+        configured_lint = {}
+    lint = {**configured_lint}
+    areas = configured_lint.get("areas", [])
+    if not isinstance(areas, list) or not all(isinstance(a, str) and re.fullmatch(r"[a-z][a-z0-9]*", a) for a in areas):
+        warnings.append(f"{POLICY} tools.lint.areas must be a list of lowercase words; allowing any area")
+        areas = []
+    lint["areas"] = areas
+    for key in ("forbid_attribution", "forbid_closing_keywords"):
+        value = configured_lint.get(key, True)
+        if not isinstance(value, bool):
+            warnings.append(f"{POLICY} tools.lint.{key} must be true or false; using true")
+            value = True
+        lint[key] = value
+    tools["lint"] = lint
+    return tools, warnings

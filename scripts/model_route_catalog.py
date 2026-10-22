@@ -21,8 +21,8 @@ import re
 from typing import Any
 
 
-EFFORT_ORDER = {name: index for index, name in enumerate(("low", "medium", "high", "xhigh", "max", "ultra"))}
-ALIAS_ORDER = {name: index for index, name in enumerate(("scout", "workhorse", "flagship"))}
+EFFORT_ORDER = {name: index for index, name in enumerate(("low", "medium", "high", "xhigh", "ultra"))}
+ALIAS_ORDER = {name: index for index, name in enumerate(("junior", "senior", "principal"))}
 
 # Families that may differ from the lead but must not satisfy distinct-family /
 # certification claims without a proven upstream vendor.

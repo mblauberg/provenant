@@ -165,7 +165,11 @@ def run_workflow_installer(target: Path):
 
 
 def expected_skills():
-    return {path.parent.name for path in (ROOT / "skills").glob("*/SKILL.md")}
+    return {
+        path.parent.name
+        for base in ("skills", "library")
+        for path in (ROOT / base).glob("*/SKILL.md")
+    }
 
 
 def expected_installed_entries():
@@ -416,7 +420,9 @@ def test_accepts_canonical_directory_links_for_claude_surfaces(tmp_path):
     result = run("claude", tmp_path, CLAUDE_CONFIG_DIR=str(config))
 
     assert result.returncode == 0, result.stderr
-    assert (config / "skills").resolve() == (ROOT / "skills").resolve()
+    # The personal library sits beside skills/, so the skills link converts to
+    # per-entry links; the workflows link is left as a directory link.
+    assert (config / "skills").is_dir() and not (config / "skills").is_symlink()
     assert (config / "workflows").resolve() == (ROOT / "workflows").resolve()
 
 
@@ -476,7 +482,7 @@ def test_claude_directory_link_layout_converts_to_project_custom_skills(tmp_path
     assert "local-skill" not in manifest["managed"]
 
 
-def test_claude_directory_link_layout_survives_an_install_without_custom_skills(
+def test_claude_directory_link_layout_converts_to_carry_the_library(
     tmp_path,
 ):
     config = tmp_path / "claude-config"
@@ -486,9 +492,9 @@ def test_claude_directory_link_layout_survives_an_install_without_custom_skills(
     result = run("claude", tmp_path, CLAUDE_CONFIG_DIR=str(config))
 
     assert result.returncode == 0, result.stderr
-    assert (config / "skills").is_symlink()
-    assert (config / "skills").resolve() == (ROOT / "skills").resolve()
-    assert not (config / ".agent-harness-installation.json").exists()
+    assert (config / "skills").is_dir() and not (config / "skills").is_symlink()
+    assert (config / "skills" / "tanstack-query").is_symlink()
+    assert (config / ".agent-harness-installation.json").exists()
 
 
 def test_claude_workflow_upgrade_relinks_a_previously_managed_file(tmp_path):

@@ -31,7 +31,7 @@ project uses them. Do not assume a custom agent exists; discover current tools a
 
 ## Routing rules
 
-- Prefer a GPT-6 Astra flagship Codex lead at `xhigh` for substantial-to-terminal
+- Prefer a GPT-6 Astra principal Codex lead at `xhigh` for substantial-to-terminal
   orchestration. The native runtime exposes `ultra` and the API route `max`,
   but neither is the standing default; record any fallback to `high`, and do
   not assume an entitlement exists.
@@ -65,7 +65,7 @@ Good Codex worker prompt fields:
 ```
 role:              explorer | worker | default
 task-class:        mechanical | legwork | critical-review | orchestration
-tier:              scout | workhorse | flagship
+tier:              junior | senior | principal
 catalog-model:     Astra | Sol | Luna
 effort:            <effective effort from route receipt>
 route-receipt:     <path or receipt identity>

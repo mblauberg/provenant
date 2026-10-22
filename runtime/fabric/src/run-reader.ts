@@ -19,6 +19,8 @@ export interface RunRead {
   source_project?: string;
   state: string;
   status: string | null;
+  error_class?: string;
+  result_partial?: true;
   landable?: false;
   quarantine?: Record<string, unknown>;
   route: string | null;
@@ -115,6 +117,8 @@ function publicRun(row: Record<string, any>, localRoot: string): RunRead {
     ...(typeof row.source_project === "string" ? { source_project: row.source_project } : {}),
     state: String(row.state ?? "unknown"),
     status: typeof row.status === "string" ? row.status : null,
+    ...(typeof row.error_class === "string" ? { error_class: row.error_class } : {}),
+    ...(row.result_partial === true ? { result_partial: true as const } : {}),
     ...(row.landable === false ? { landable: false as const, quarantine: row.quarantine } : {}),
     route: typeof adapter === "string" && typeof model === "string"
       ? `${adapter}/${model}${typeof effort === "string" && effort ? `@${effort}` : ""}` : null,
@@ -139,11 +143,13 @@ export async function readRuns(
   limit: number | null = 20,
   state?: string,
   includeHistory = false,
+  /** Skip the peer hosts: a caller that polls refreshes them on its own, slower, schedule. */
+  localOnly = false,
 ): Promise<RunReadResponse> {
   const deadline = Date.now() + waitSeconds * 1000;
   const request = { ids, wait_seconds: 0, limit, state };
   for (;;) {
-    const remote = await federatedLane("lanes", workspace, request, signal);
+    const remote = localOnly ? undefined : await federatedLane("lanes", workspace, request, signal);
     if (!remote) { ids = request.ids; break; }
     const rows = remote.runs ?? [];
     if (!waitSeconds || remote.status !== "ok" || Date.now() >= deadline || !rows.length ||
