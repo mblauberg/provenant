@@ -19,8 +19,8 @@ class ConfigError(ValueError):
     pass
 
 
-def hook_command(guard: Path) -> str:
-    return f"{shlex.quote(sys.executable)} {shlex.quote(str(guard))}"
+def hook_command(guard: Path, interpreter: str = "python3") -> str:
+    return f"{shlex.quote(interpreter)} {shlex.quote(str(guard))}"
 
 
 def _managed(entry: object, name: str = GUARD_NAME) -> bool:
@@ -43,8 +43,8 @@ def merged(settings: dict, guard: Path | None, *, event="PreToolUse", name=GUARD
     if guard is not None:
         entries.append({
             "matcher": "Bash",
-            "hooks": [{"type": "command", "command": hook_command(guard),
-                       **({"timeout": 30} if name == DIGEST_NAME else {})}],
+            "hooks": [{"type": "command", "command": hook_command(guard, sys.executable), "timeout": 30}]
+                     if name == DIGEST_NAME else [{"type": "command", "command": hook_command(guard)}],
         })
     result = {**settings, "hooks": {**hooks, event: entries}}
     if not entries:

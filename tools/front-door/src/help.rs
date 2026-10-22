@@ -55,7 +55,7 @@ mod tests {
 
     #[test]
     fn general_help_fits_the_byte_budget() {
-        assert!(GENERAL.len() <= 1150, "{} bytes", GENERAL.len());
+        assert!(GENERAL.len() <= 1100, "{} bytes", GENERAL.len());
         assert!(GENERAL.contains("  fabric ...     runtime/fabric/bin/fabric ...\n"));
         assert!(GENERAL.contains("  batch ...      skills/orchestrate/scripts/batch_run.py ...\n"));
         assert!(!GENERAL.contains("project ..."));

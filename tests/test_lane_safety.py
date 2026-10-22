@@ -440,7 +440,8 @@ def test_settings_install_is_idempotent_and_preserves_other_hooks(tmp_path):
 
 def test_settings_command_quotes_the_path_for_the_shell(tmp_path):
     guard_file = tmp_path / "a$(touch pwned)b" / "lane_safety_guard.py"
-    command = hooks.hook_command(guard_file)
+    assert hooks.hook_command(guard_file).startswith("python3 ")
+    command = hooks.hook_command(guard_file, sys.executable)
     done = subprocess.run(
         ["sh", "-c", f"set -- {command}; printf '%s\\n' \"$1\" \"$2\""],
         capture_output=True, text=True, cwd=tmp_path, check=False,
