@@ -572,7 +572,6 @@ def test_confidential_preflight_uses_a_mixed_alias_and_refuses_only_when_nothing
     monkeypatch.setenv("AGENT_FABRIC_INSTANCE_ROOT", str(instance))
     monkeypatch.setenv("AGENT_FABRIC_STATE_ROOT", str(tmp_path / "state"))
     monkeypatch.setenv("AGENT_FABRIC_PRODUCT_ROOT", str(ROOT))
-    monkeypatch.delenv("PROVENANT_REMOTE_LANE", raising=False)
     monkeypatch.chdir(tmp_path)
     dispatch_run = load("pools_dispatch_mixed_alias_under_test", ROOT / "skills/orchestrate/scripts/dispatch_run.py")
     task = {"id": "t", "adapter": "opencode", "alias": "junior", "prompt": "hi"}
