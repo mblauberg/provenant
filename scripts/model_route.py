@@ -114,6 +114,37 @@ if _pools is None:
     _pools_spec.loader.exec_module(_pools)
 
 EFFORT_ORDER = _catalog_validation.EFFORT_ORDER
+# The effort ladder `effort.shift` steps along. `max` is retired (it maps to `xhigh`) and `ultra` is
+# opt-in only, so a shift never reaches either.
+SHIFT_LADDER = tuple(name for name in EFFORT_ORDER if name not in ("max", "ultra"))
+
+
+def _harness_profile() -> Any:
+    """The shared profile resolver, loaded by path on first use and only for task-class routes."""
+    module = sys.modules.get("provenant_harness_profile")
+    if module is None:
+        spec = importlib.util.spec_from_file_location(
+            "provenant_harness_profile", Path(__file__).resolve().parents[1] / "skills/_shared/harness_profile.py")
+        assert spec is not None and spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
+        sys.modules["provenant_harness_profile"] = module
+        spec.loader.exec_module(module)
+    return module
+
+
+def shifted_task_class_effort(task_class: str, effort: str, minimum: str, entries: list[dict[str, Any]]) -> tuple[str, int]:
+    """Apply the profile's `effort.shift` one step, or keep `effort` when the step leaves policy or a model's efforts."""
+    shift = _harness_profile().value("effort.shift", 0, task_class=task_class)
+    if not shift or effort not in SHIFT_LADDER:
+        return effort, 0
+    target = SHIFT_LADDER.index(effort) + shift
+    if not 0 <= target < len(SHIFT_LADDER):
+        return effort, 0
+    candidate = SHIFT_LADDER[target]
+    if (EFFORT_ORDER[candidate] < EFFORT_ORDER[minimum]
+            or any(candidate not in entry.get("efforts", []) for entry in entries)):
+        return effort, 0
+    return candidate, shift
 ALIAS_ORDER = _catalog_validation.ALIAS_ORDER
 # The route-pool tier names, accepted wherever an adapter's own alias is asked for.
 TIER_ALIASES = _pools.TIER_ALIASES
@@ -958,6 +989,21 @@ def _resolve_opencode_name(requested: str, live: list[str]) -> tuple[str | None,
                                  "fix: run `opencode models` and pass a full provider/model id"}
 
 
+_EFFORT_LIST_KEYS = {"efforts", "effort_fallback_order", "supported_efforts"}
+
+
+def _retire_max(value: Any) -> Any:
+    """Map the retired max effort to xhigh in every effort list, keeping order and dropping duplicates."""
+    if isinstance(value, dict):
+        return {key: ([*dict.fromkeys("xhigh" if isinstance(item, str) and item.lower() == "max" else item
+                                       for item in item_list)]
+                      if key in _EFFORT_LIST_KEYS and isinstance(item_list, list) else _retire_max(item_list))
+                for key, item_list in value.items()}
+    if isinstance(value, list):
+        return [_retire_max(item) for item in value]
+    return value
+
+
 def resolve_ordinary(args: argparse.Namespace, catalog: dict[str, Any]) -> int:
     requested = args.model or (args.alias if args.alias not in ALIAS_ORDER else "")
     adapter_name = args.adapter or (_owner_adapter(requested, catalog) if requested else "codex")
@@ -994,8 +1040,13 @@ def resolve_ordinary(args: argparse.Namespace, catalog: dict[str, Any]) -> int:
     if adapter_name == "opencode" and "#" in requested:
         # `provider/model#variant`: the variant is OpenCode's own effort knob, sent as given.
         requested, _, variant = requested.partition("#")
+        retired_variant = False
+        if variant == "max":  # retired: same mapping as --effort max
+            variant = "xhigh"
+            retired_variant = True
         if variant and not args.effort:
             args.effort = variant
+            args.max_remapped = retired_variant
             args.explicit_variant = True
             explicit = True
         elif variant and args.effort == variant:
@@ -1136,14 +1187,17 @@ def resolve_ordinary(args: argparse.Namespace, catalog: dict[str, Any]) -> int:
                  "endpoint_provider": adapter.get("endpoint_provider", adapter_name), "provider": provider,
                  "adapter_enabled": True, "compatibility_adapter": compatibility["compatibility_adapter"] if compatibility else "",
                  "model_selection": "alias" if not explicit else "explicit",
-                 "requested_effort": args.effort or "", "effort": effort if effort != "default" else "",
+                 "requested_effort": "max" if getattr(args, "max_remapped", False) else args.effort or "",
+                 "effort": effort if effort != "default" else "",
                  "effort_applied": effort if effort != "default" else "",
                  "supported_efforts": list(supported),
                  "effort_note": next((note for note in notes if "effort" in note or "unsupported" in note), ""),
                  "effort_source": "explicit" if args.effort else "model-default" if (registered or {}).get("default_effort") else "adapter-default",
                  "effort_capability_source": "registry" if supported else "provider-unverified" if unverified_effort
                  else "registry-no-effort-control" if registered else "adapter-no-effort-control",
-                 "effort_substitution": next((note for note in notes if "unsupported" in note or "effort control" in note), ""),
+                 "effort_substitution": "; ".join(filter(None, (
+                     "max retired; mapped to xhigh" if getattr(args, "max_remapped", False) else "",
+                     next((note for note in notes if "unsupported" in note or "effort control" in note), "")))),
                  "substitution": "", "fallback_model": "",
                  "notes": notes, "warnings": warnings, "fallback_candidates": fallback,
                  "plan_cap_usd": cap, "trains_on_prompts": training_model,
@@ -1527,7 +1581,7 @@ def resolve_effort(
         return None, "", "no_effort_available", capability_source
     if (
         args.task_class_effort
-        and EFFORT_ORDER[fallback] < EFFORT_ORDER[args.task_class_effort]
+        and EFFORT_ORDER[fallback] < EFFORT_ORDER[getattr(args, "task_class_effort_floor", "") or args.task_class_effort]
     ):
         return None, "", "task_class_effort_below_floor", capability_source
     substitution = f"{requested_effort} unavailable (runtime/model capability); used {fallback}"
@@ -1538,6 +1592,9 @@ def resolve(args: argparse.Namespace, catalog: dict[str, Any]) -> int:
     capability_models, capability_error = load_capabilities(
         args.capabilities_file, args.adapter, catalog
     )
+    if _retire_max(capability_models) != capability_models:
+        args.max_probe = True
+        capability_models = _retire_max(capability_models)
     args.capability_models = capability_models
     adapter = catalog["adapters"].get(args.adapter)
     endpoint_profile = getattr(args, "endpoint_profile", {})
@@ -1585,7 +1642,7 @@ def resolve(args: argparse.Namespace, catalog: dict[str, Any]) -> int:
         "adapter": args.adapter,
         "alias": "" if args.model and not getattr(args, "alias_supplied", True) else args.alias,
         "role": args.role,
-        "requested_effort": getattr(args, "raw_effort", requested_effort),
+        "requested_effort": "max" if getattr(args, "max_remapped", False) else getattr(args, "raw_effort", requested_effort),
         "effort": requested_effort,
         "effort_source": effort_source,
         "lead_family": args.lead_family,
@@ -1593,6 +1650,8 @@ def resolve(args: argparse.Namespace, catalog: dict[str, Any]) -> int:
     if args.task_class:
         base.update({"task_class": args.task_class, "route_source": "task-class",
                      "configured_models": getattr(args, "task_class_configured_models", [])})
+        if getattr(args, "task_class_effort_shift", 0):
+            base["effort_shift"] = args.task_class_effort_shift
     elif args.model_override_tier:
         override_models = args.model_override.get("models", [])
         override_roles = args.model_override.get("roles", [])
@@ -2058,6 +2117,10 @@ def resolve(args: argparse.Namespace, catalog: dict[str, Any]) -> int:
             effort_status = ""
     if not effort_status and getattr(args, "raw_effort", None):
         effort_substitution = f"{args.raw_effort} unknown; ran at {effort or 'default'}"
+    if not effort_status and effort == "xhigh" and getattr(args, "max_probe", False) and not getattr(args, "max_remapped", False):
+        effort_substitution = "; ".join(filter(None, ("max retired; mapped to xhigh", effort_substitution)))
+    if not effort_status and getattr(args, "max_remapped", False):
+        effort_substitution = "; ".join(filter(None, ("max retired; mapped to xhigh", effort_substitution)))
     # The effort reaches a suffix model only through its id, so the id must carry it.
     suffix_model = args.effort_transport == "model-id" and (registered_model or {}).get("effort_transport") == "model-suffix"
     suffix = (registered_model.get("suffix", {}) if suffix_model else {}).get(effort or "", "")
@@ -2111,6 +2174,11 @@ def resolve(args: argparse.Namespace, catalog: dict[str, Any]) -> int:
             1,
         )
 
+    # Choke point: max is retired, so a probe snapshot, an overlay or a request never reaches the provider as max.
+    if effort == "max":
+        effort = "xhigh"
+        effort_substitution = "; ".join(filter(None, ("max retired; mapped to xhigh", effort_substitution)))
+    supported = [value for value in supported if value != "max"]
     record = {
         **base,
         "effort": effort,
@@ -2346,7 +2414,12 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(record, sort_keys=True))
         return code
     snapshot = catalogue_snapshot(Path(args.catalog) if args.catalog else None)
-    catalog = snapshot["catalogue"]
+    catalog = _retire_max(snapshot["catalogue"])
+    if getattr(args, "effort", None) == "max":  # retired: one mapping for every resolver
+        args.max_remapped = True
+        args.effort = "xhigh"
+    if getattr(args, "available_effort", None):
+        args.available_effort = _retire_max({"efforts": list(args.available_effort)})["efforts"]
     global ROUTE_WARNINGS
     ROUTE_WARNINGS = ([
         "routing catalogue was stale; resolved against the fresh product snapshot; "
@@ -2406,6 +2479,8 @@ def main(argv: list[str] | None = None) -> int:
             return emit(record, code)
 
         args.task_class_effort = ""
+        args.task_class_effort_floor = ""
+        args.task_class_effort_shift = 0
         args.model_override = {}
         args.endpoint_profile = {}
         if not args.alias and not args.task_class:
@@ -2528,7 +2603,7 @@ def main(argv: list[str] | None = None) -> int:
                     or any(not isinstance(model, str) or not model.strip() for model in configured_models)
                     or len(set(configured_models)) != len(configured_models)):
                 return reject("task_class_config_invalid", alias=route_alias, effort=route_effort)
-            resolved_models = []
+            resolved_models, resolved_entries = [], []
             for configured_model in configured_models:
                 entry, _ = _registered_match(args.adapter, configured_model, catalog)
                 if (entry is None or configured_model != entry["id"]
@@ -2536,6 +2611,7 @@ def main(argv: list[str] | None = None) -> int:
                         or route_effort not in entry.get("efforts", [])):
                     return reject("task_class_config_invalid", alias=route_alias, effort=route_effort)
                 resolved_models.append(entry["id"])
+                resolved_entries.append(entry)
             args.task_class_configured_models = list(resolved_models)
             if args.task_class in {"review", "critical-review", "second-opinion"}:
                 failed_models = _recent_failed_task_class_models(args.adapter, args.task_class)
@@ -2545,7 +2621,10 @@ def main(argv: list[str] | None = None) -> int:
                     resolved_models = [alternate] if alternate else []
             args.task_class_models = resolved_models
             args.alias = route_alias
-            args.task_class_effort = route_effort
+            args.task_class_effort, args.task_class_effort_shift = shifted_task_class_effort(
+                args.task_class, route_effort, policy["minimum_effort"], resolved_entries)
+            # A runtime fallback may not go below the lower of the configured and shifted effort.
+            args.task_class_effort_floor = min(route_effort, args.task_class_effort, key=EFFORT_ORDER.__getitem__)
         elif args.alias not in {"flagship", "workhorse", "scout"}:
             return reject("unknown_alias")
         if args.effort and args.effort not in EFFORT_ORDER:

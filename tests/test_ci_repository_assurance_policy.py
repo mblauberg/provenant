@@ -163,13 +163,15 @@ def _assert_exact_on_key(text: str) -> None:
 def _assert_trigger_semantics(document: dict[str, object]) -> None:
     _assert_exact_on_key(WORKFLOW.read_text(encoding="utf-8"))
     on = _triggers(document)
-    assert set(on) == {"push", "pull_request"}
+    assert set(on) == {"push", "pull_request", "merge_group"}
     # pull_request must fire on every PR: no paths, paths-ignore, branches or
     # types restriction may narrow it (null or empty config only).
     pull_request = on["pull_request"]
     assert pull_request is None or pull_request == {}, pull_request
     # push is restricted to the default branch and carries no other keys.
     assert on["push"] == {"branches": ["main"]}
+    # merge_group must fire for every queue entry so the required check reports.
+    assert on["merge_group"] == {"types": ["checks_requested"]}
 
 
 def _setup_action() -> dict[str, object]:

@@ -84,7 +84,7 @@ Terminal adapter, dispatch and Fabric attempt receipts also record `error_class`
 
 `timing.phases` records milliseconds for available dispatch phases: TypeScript validation and catalogue snapshot, run directory setup, owner startup and attempt setup, route planning, provider spawn, provider execution and finalisation. A direct Python owner has no TypeScript phase measurements. The writer watchdog scans at most 2,000 entries per probe, checks a 25 ms budget between entries and retains its scan position; a full cycle on a large tree may take several one-second probes. Stall detection waits for a complete scan covering the idle interval so a late file is not missed.
 
-Provenance records requested route, resolved and observed model, observation source, identity (`observed`, `resolved`, `unknown`), provider, transport, family, requested and applied effort, CLI version, fallback origin, notes and the generated line. `effort_applied` is the effort sent to the provider, clamped to the model's supported list. It is empty when none was sent: the model has no effort control (the catalogue gives it no `efforts` list, or `effort_transport: "none"`), or nothing was requested and there is no alias default. It never repeats an unsent request or guesses a provider default. The one exception is an effort the provider itself reports: with none sent, Codex's rollout `turn_context` fills it and `effort_observed_source` names that source; otherwise `effort_observed_source` is null. An ignored request stays in `effort_requested` and adds the note `effort <x> ignored: <model> has no effort control`, shown once among the digest warnings. A terminal digest and status row carry `Route: adapter/model@effort (provider; identity)`, with no `@effort` suffix when applied is empty; the retained index stores that line after run pruning. The proposed `provenant route <run-id>` index lookup is not yet wired: the current command invokes the model catalogue router. Until it is, copy the line from the digest or status row and use `Agent-Route: adapter/model@effort` for the commit trailer. Never infer a model from a worker self-report. Read-only Claude runs use `--permission-mode default` with `--tools Read,Grep,Glob`; they no longer use plan mode. Claude's observed model is the one on the assistant messages that answered (`claude:assistant.message.model`), else a lone `result.modelUsage` key, and `system.init.model` only when neither exists. Provenance keeps this comparison because Claude can still substitute under other invocations. For a substituted model, the family comes from catalogue patterns only when exactly one family matches; absent or ambiguous matches stay `unknown`, and substitutions cannot set `cross_family` or `certification_eligible`. Claude Code 2.1.280 in plan mode reports `claude-haiku-4-5` in init but `claude-sonnet-5` (1M) answers; Opus stays Opus, and a writer's explicit Haiku 4.5 answers as Haiku 4.5 (200k). The attempt records `init_model` and `answered_models` and warns `claude answered as <x>; init reported <y>`. If several models answered, the final top-level one goes on the Route line. Native Claude subagents use the Agent tool model parameter and record `claude/<model>@<effort> (anthropic; resolved)`.
+Provenance records requested route, resolved and observed model, observation source, identity (`observed`, `resolved`, `unknown`), provider, transport, family, requested and applied effort, CLI version, fallback origin, the installed Provenant revision (`harness_rev`, null outside a Git checkout), notes and the generated line. `effort_applied` is the effort sent to the provider, clamped to the model's supported list. It is empty when none was sent: the model has no effort control (the catalogue gives it no `efforts` list, or `effort_transport: "none"`), or nothing was requested and there is no alias default. It never repeats an unsent request or guesses a provider default. The one exception is an effort the provider itself reports: with none sent, Codex's rollout `turn_context` fills it and `effort_observed_source` names that source; otherwise `effort_observed_source` is null. An ignored request stays in `effort_requested` and adds the note `effort <x> ignored: <model> has no effort control`, shown once among the digest warnings. A terminal digest and status row carry `Route: adapter/model@effort (provider; identity)`, with no `@effort` suffix when applied is empty; the retained index stores that line after run pruning. The proposed `provenant route <run-id>` index lookup is not yet wired: the current command invokes the model catalogue router. Until it is, copy the line from the digest or status row and use `Agent-Route: adapter/model@effort` for the commit trailer. Never infer a model from a worker self-report. Read-only Claude runs use `--permission-mode default` with `--tools Read,Grep,Glob`; they no longer use plan mode. Claude's observed model is the one on the assistant messages that answered (`claude:assistant.message.model`), else a lone `result.modelUsage` key, and `system.init.model` only when neither exists. Provenance keeps this comparison because Claude can still substitute under other invocations. For a substituted model, the family comes from catalogue patterns only when exactly one family matches; absent or ambiguous matches stay `unknown`, and substitutions cannot set `cross_family` or `certification_eligible`. Claude Code 2.1.280 in plan mode reports `claude-haiku-4-5` in init but `claude-sonnet-5` (1M) answers; Opus stays Opus, and a writer's explicit Haiku 4.5 answers as Haiku 4.5 (200k). The attempt records `init_model` and `answered_models` and warns `claude answered as <x>; init reported <y>`. If several models answered, the final top-level one goes on the Route line. Native Claude subagents use the Agent tool model parameter and record `claude/<model>@<effort> (anthropic; resolved)`.
 
 ## Layout and retention
 
@@ -158,12 +158,66 @@ quarantine, with `fix: instruction edits remain on the lane branch; restore
 retained and listed. A `quarantined` lane retains the result, sets
 `landable: false` and `retryable: false`, and records `quarantine` with the
 reason, patch paths, whether restoration succeeded and any patch capture error.
-`landable: false` is an advisory marker for the chair, not enforced landing. It
-is never `ok` for landing, certification or session success. Digests, status and
+`landable: false` is never `ok` for landing, certification or session success.
+Digests, status and
 lanes show the result and a review action; chairs review the quarantine and
 verify the branch diff before landing any application work. Proposed instruction
 edits belong outside `.agents/` for separate chair review, as the default writer
 brief states (omitted when the policy is `allow`).
+
+The per-attempt check above is an early warning. Two owner-side controls
+enforce the hold, so neither a surviving provider child committing after
+finalisation nor a moved local ref can land an instruction change:
+
+- **Writer ref grants.** A writer's Git may write its private worktree
+  directory, the object store and only its own branch: `refs/heads/<branch>`,
+  its `.lock` and its reflog. The owner reads the branch from the worktree's
+  HEAD and refuses one that the primary checkout or another worktree holds; a
+  detached writer gets no shared ref. No writer can move the primary branch, its
+  upstream, a tag, `packed-refs` or another checkout's branch. Every boundary,
+  native and sandbox-exec, also keeps `.git`, the private `commondir`, `gitdir`
+  and `config.worktree`, and the common `objects/info` read-only.
+- **Range gate.** `lane_protection.py` walks every commit in `tip ^base` through
+  the owner's common Git directory with `diff-tree --root -m`, so merge
+  resolutions count. A commit may change a protected path only to the version
+  the base already holds, as a merge or rebase from the base does, or be
+  reachable from a tip the chair released. Anything else fails with
+  `protected_instructions_changed` and names the held commits; the branch is
+  left as it is. Fabric `landing-push` passes the landing lease's remote SHA as
+  the base, never a local ref. `scripts/worktree verify-claim` and a manual
+  check use the primary checkout's HEAD, which no writer can move. The gate
+  needs no per-attempt record, so chair, human and never-dispatched worktrees
+  go through the same check.
+
+The invariant is: nothing lands on the integration branch unless every commit in
+`<leased remote SHA>..<tip>` leaves protected paths unchanged from the leased
+version or is reachable from an audited chair release of a reviewed tip;
+writers can write only their own branch ref. The gate reads the object store,
+which writers can add packs to, so it trusts object content; it disables
+replace refs, commit graphs, the multi-pack index and lazy fetch, and refuses
+alternate object stores. Path classification normalises to NFC before
+casefolding: casefold covers APFS case folding, but not Unicode normalisation
+by itself.
+
+A quarantine restores the files in a new commit, so the edit stays in the
+lane's history and the gate holds it. After reviewing the exact commits, a
+chair outside a writer either rewrites the lane without them or releases the
+reviewed tip:
+
+```sh
+python3 "$(provenant root)/skills/orchestrate/scripts/lane_protection.py" \
+  --cwd <lane-worktree> --release --tip <reviewed-sha> \
+  --actor <chair> --reason '<review decision>'
+```
+
+Release requires the full SHA, refuses when the checkout's HEAD has moved
+past it, and writes an immutable record of the tip, actor, reason, worktree
+and time under the common directory's `provenant-instruction-checks/releases/`.
+It covers the tip and its ancestors, never a later commit. The record is an
+audit trail, not authorisation: anyone who can write the owner's common
+directory could add one. No writer boundary grants that directory, and the
+command refuses to run under a writer attempt's marker, so release stays
+chair-side.
 
 `protected.patch` is retained even for an index-only change (empty disk patch)
 or an unverifiable check (a comment explaining that the diff is unavailable).
@@ -173,8 +227,8 @@ reports `protected_instructions_unverifiable` separately from actual changes.
 A failed or signal-interrupted provider is never promoted to `quarantined`.
 Signal-interrupted attempts retain their changed files without restoration and
 fail for actual instruction edits, preserving the provider exit and signal.
-An unknown value warns and quarantines. The check trusts local refs, which the lane can
-move. It also reports a clean three-way merge into a skill the branch already
+An unknown value warns and quarantines. The per-attempt check reads local refs; only
+the owner can move them. It also reports a clean three-way merge into a skill the branch already
 changed, a refresh overtaken by a newer integration-branch change to the same
 file, a refresh under line-ending conversion, and any refresh in a repository
 that tracks a case variant such as `.Agents/`. A separately authorised review

@@ -84,7 +84,9 @@ def validate(telemetry, value, host):
         'unattributed': ('source', 'adapter', 'rows', 'input_tokens', 'statuses'),
         'last_limit_events': ('provider', 'account', 'timestamp', 'age_seconds'),
     }
-    counts = {'lanes', 'succeeded', 'attempts', 'retries', 'events', 'rows', 'input_tokens', 'age_seconds'}
+    # Optional counts (absent from older peers) are checked only when present.
+    counts = {'lanes', 'succeeded', 'attempts', 'retries', 'events', 'rows', 'input_tokens', 'age_seconds',
+              'latency_samples'}
     measurements = {'success_rate', 'latency_p50_s', 'latency_p90_s', 'output_tokens_per_s', 'used_percent', 'window_minutes'}
     mappings = {'statuses', 'error_classes'}
     for field, keys in required.items():

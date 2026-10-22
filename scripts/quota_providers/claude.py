@@ -6,14 +6,18 @@ Adapted from token-meter (MIT, Galileo Agent Labs); see THIRD_PARTY_NOTICES.md.
 from __future__ import annotations
 
 import hashlib
+import importlib.util
 import json
 import os
 from pathlib import Path
+import sys
 
 
 ADAPTER = 'claude'
 USAGE_URL = 'https://api.anthropic.com/api/oauth/usage'
 KEYCHAIN_SERVICE = 'Claude Code-credentials'
+MATCH_SECONDS = 5
+STATUS_SECONDS = 24 * 3600  # login state is kept a day, or until the identity is used
 
 
 def keychain_service(identity_dir):
@@ -33,6 +37,14 @@ def default_identity():
 
 
 def status(account, io):
+    """Login state for this identity, from a day-long cache that identity activity clears."""
+    memo = getattr(io, 'memo', None)
+    if memo is None:
+        return auth_status(account, io)
+    return memo('claude-auth-status', account, STATUS_SECONDS, lambda: auth_status(account, io))
+
+
+def auth_status(account, io):
     """`claude auth status --json` for this identity; only login state is kept."""
     executable = io.executable('claude')
     if not executable:
@@ -61,21 +73,21 @@ def credentials(account, state, io, now):
                                      keychain_service(account.identity_dir), '-w'],
                                     capture_output=True, timeout=io.PROCESS_TIMEOUT, check=False)
         except (OSError, io.TimeoutExpired):
-            raise io.Unavailable('Claude credentials are not available') from None
+            raise io.Unavailable('Claude credentials are not available', 'auth') from None
         raw = result.stdout if result.returncode == 0 else None
     if raw is None or len(raw) > io.MAX_RESPONSE_BYTES:
-        raise io.Unavailable('Claude credentials are not available')
+        raise io.Unavailable('Claude credentials are not available', 'auth')
     try:
         oauth = json.loads(raw).get('claudeAiOauth')
     except (ValueError, AttributeError):
-        raise io.Unavailable('Claude credentials are invalid') from None
+        raise io.Unavailable('Claude credentials are invalid', 'auth') from None
     if not isinstance(oauth, dict) or not oauth.get('accessToken'):
-        raise io.Unavailable('Claude credentials are not available')
+        raise io.Unavailable('Claude credentials are not available', 'auth')
     expires = io.parse_time(oauth.get('expiresAt'))
     if expires is not None and (expires - now).total_seconds() <= 60:
-        raise io.Unavailable('Claude credentials need a refresh; run claude once')
+        raise io.Unavailable('Claude credentials need a refresh; run claude once', 'auth')
     if oauth.get('scopes') and 'user:profile' not in oauth['scopes']:
-        raise io.Unavailable('Claude credentials lack quota access')
+        raise io.Unavailable('Claude credentials lack quota access', 'auth')
     return oauth
 
 
@@ -89,17 +101,68 @@ def parse(payload, now=None):
             unreported.append(name)
         if isinstance(value, dict) and 'utilization' in value:
             windows.append({'name': name, 'raw_kind': name, 'used_percent': value.get('utilization'),
-                            'window_minutes': io_window_name(name), 'reset_at': value.get('resets_at')})
+                            'window_minutes': io_window_name(name), 'reset_at': value.get('resets_at'),
+                            # Dollar budgets, such as cloud session credits, report their amounts.
+                            'used_amount': value.get('used_dollars'), 'limit_amount': value.get('limit_dollars'),
+                            'currency': 'USD' if value.get('limit_dollars') is not None else None})
     for index, limit in enumerate(payload.get('limits') or []):
         if not isinstance(limit, dict) or limit.get('is_active') is False:
             continue
         scope = limit.get('scope') if isinstance(limit.get('scope'), dict) else {}
         model = scope.get('model') if isinstance(scope.get('model'), dict) else {}
         label = model.get('id') or model.get('display_name') or str(index + 1)
+        minutes = (limit.get('window_minutes') or io_window_name(str(limit.get('group') or ''))
+                   or duplicated_length(limit, windows))
         windows.append({'name': f"{limit.get('kind') or 'limit'}:{label}", 'raw_kind': limit.get('kind'),
                         'used_percent': limit.get('percent'), 'reset_at': limit.get('resets_at'),
-                        'window_minutes': limit.get('window_minutes') or io_window_name(str(limit.get('group') or ''))})
-    return {'windows': windows, 'unreported': unreported}
+                        # Without a length its pace is always unknown, so it is shown but never sets state.
+                        'window_minutes': minutes, 'advisory': minutes is None})
+    return {'windows': windows, 'unreported': unreported, 'usage_credits': usage_credits(payload.get('spend'))}
+
+
+def _schedule():
+    """The quota_schedule module: provider_quota registers it before loading providers, but a provider
+    loaded alone (as the tests do) loads it by path the same way."""
+    module = sys.modules.get('quota_schedule')
+    if module is None:
+        spec = importlib.util.spec_from_file_location('quota_schedule', Path(__file__).resolve().parents[1] / 'quota_schedule.py')
+        module = importlib.util.module_from_spec(spec)
+        sys.modules['quota_schedule'] = module
+        spec.loader.exec_module(module)
+    return module
+
+
+def _instant(value):
+    # Its lenient parser reads ISO strings and epoch seconds or milliseconds alike.
+    return _schedule().parse_time(value)
+
+
+def _percent(value):
+    return float(value) if type(value) in (int, float) else None
+
+
+def duplicated_length(limit, named):
+    """A `limits` entry repeats a named window: the one with the same reset and, within rounding, the same use."""
+    reset, used = _instant(limit.get('resets_at')), _percent(limit.get('percent'))
+    for row in named:
+        other, seen = _instant(row['reset_at']), _percent(row['used_percent'])
+        if (row['window_minutes'] and reset and other and used is not None and seen is not None
+                and abs((reset - other).total_seconds()) <= MATCH_SECONDS and abs(used - seen) < 1):
+            return row['window_minutes']
+    return None
+
+
+def usage_credits(spend):
+    """The prepaid balance that covers use past the plan limits, when the endpoint reports one."""
+    if not isinstance(spend, dict):
+        return None
+    used = spend.get('used') if isinstance(spend.get('used'), dict) else {}
+    balance, currency = spend.get('balance'), used.get('currency')
+    if isinstance(balance, dict):  # The same minor-unit form as `used`.
+        currency = balance.get('currency') or currency
+        minor, exponent = balance.get('amount_minor'), balance.get('exponent')
+        balance = minor / 10 ** exponent if type(minor) is int and type(exponent) is int else None
+    return [{'kind': 'usage_credits', 'balance': balance, 'currency': currency}] if balance is not None else None
 
 
 WORDS = {'one': 1, 'two': 2, 'three': 3, 'four': 4, 'five': 5, 'six': 6, 'seven': 7,
@@ -120,10 +183,10 @@ def io_window_name(name):
 def fetch(account, io, now):
     state = status(account, io)
     if str(state.get('authMethod') or '').lower() == 'third_party':
-        raise io.Unavailable('Claude account quota is not exposed for third-party authentication')
+        raise io.Unavailable('Claude account quota is not exposed for third-party authentication', 'auth')
     oauth = credentials(account, state, io, now)
     payload = io.http_json(USAGE_URL, {'Authorization': 'Bearer ' + oauth['accessToken'],
                                        'Accept': 'application/json', 'anthropic-beta': 'oauth-2025-04-20'})
     parsed = parse(payload, now)
     return {**parsed, 'plan': oauth.get('subscriptionType') or oauth.get('rateLimitTier') or state.get('subscriptionType'),
-            'source': 'Claude OAuth usage endpoint'}
+            'plan_tier': oauth.get('rateLimitTier'), 'source': 'Claude OAuth usage endpoint'}

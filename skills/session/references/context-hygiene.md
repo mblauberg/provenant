@@ -30,9 +30,9 @@ names its evidence path, source version/date and invalidation trigger.
 - Fan-out agents do not recursively inherit unrelated worker findings. Cross
   pollination happens at an explicit reducer/barrier using curated artifacts.
 - Before model compaction, write a checkpoint with current stage, authority,
-  base/result revision, in-flight actors, accepted/rejected decisions, evidence
-  pointers and exact next action. A cold-resume agent must re-open owners and
-  verify the checkpoint before dispatching.
+  base/result revision, in-flight actors, accepted/rejected decisions and why,
+  evidence pointers and exact next action. A cold-resume agent must re-open
+  owners and verify the checkpoint before dispatching.
 - Claude may use `/compact` only after that checkpoint; `/clear` requires a
   durable handoff or completed stage barrier. Codex uses host compaction or a
   fresh session against the same checkpoint. Never treat compacted prose as

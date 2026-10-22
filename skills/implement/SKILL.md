@@ -56,8 +56,11 @@ reconciliation run.
 5. Batch findings from review and the slow checks into one repair round, then
    repeat verification and re-review only the repair delta. A gate that still
    fails takes the step 2 escalation, within the `deliver` receipt contract's
-   scaled budget. Every gate still passes before merge. Return evidence to
-   user or `scope` on drift.
+   scaled budget. Stop and escalate, or return to the user, when two
+   consecutive repair cycles leave the failing-check set unchanged or larger,
+   even with budget left. Every gate still passes before merge. Return
+   evidence to user or `scope` on drift. `review.rereview_scope` and the other
+   `review.*` knobs in `provenant profile show --resolved` adjust this step.
 6. Update owned docs for behavioural, architectural, operational or decision
    change. For substantial+ apply `session`: refresh recovery checkpoint,
    audit context, graduate durable findings and classify retained/ephemeral
@@ -80,7 +83,7 @@ reconciliation run.
 - Record missing legs as failed/unavailable; never filter them. Review coverage
   blocks whenever the HARNESS ladder is unsatisfied.
 - Objective evidence outranks reviewer confidence; adjudicate conclusions,
-  never vote.
+  never vote. Recheck an absence finding's cited evidence before it blocks.
 - Substantial+ starts a fresh implementation session bound to approved digests.
 - Do not infer a user approval from passing checks. The current receipt
   format still records explicit approval in `human_gates.acceptance`; leave

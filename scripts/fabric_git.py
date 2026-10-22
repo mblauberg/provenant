@@ -117,12 +117,13 @@ class CodeTransport:
         if receiving and project not in self.f.config.projects:
             self.fail('project_not_configured', 'Git transport requires an explicitly configured project')
         repo = self.h.project_directory(project)
+        host = self.f.config.local_host
         try:
             if (not self.w.same_directory(self.w.primary_root(repo), repo) or
                     not self.w.same_directory(self.w.owning_root(repo), repo)):
-                self.fail('invalid_project_path', 'Git transport requires the primary checkout')
+                self.fail('invalid_project_path', f'Git transport requires the primary checkout; checked {repo} on {host}')
         except self.w.PolicyError as exc:
-            self.fail('invalid_project_path', str(exc))
+            self.fail('invalid_project_path', f'{exc}; checked {repo} on {host}')
         if self.git(repo, 'rev-parse', '--is-shallow-repository') != 'false':
             self.fail('code_transport_unsupported', 'Shallow repositories cannot supply complete bundles')
         if (self.w.common_git_dir(repo) / 'info/grafts').exists():
@@ -277,7 +278,7 @@ class CodeTransport:
         candidates = self.git(repo, 'rev-parse', *(f'{base}~{offset}' for offset in offsets)).split() if offsets else []
         response = client.call('git-have', {'project_path': project, 'input': {'candidates': candidates}}, write=True)
         if not response.get('ok'):
-            self.fail(response['error']['code'], response['error']['message'])
+            self.fail(response['error']['code'], f"{response['error']['message']} (reported by {client.host} for project {project})")
         have = response['result'].get('have')
         if not isinstance(have, list) or len(have) > 1 or any(value not in candidates for value in have):
             self.fail('bad_response', 'Peer named a commit outside the offered candidates')

@@ -35,6 +35,7 @@ SCRIPT_ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(SCRIPT_ROOT.parents[1]))
 sys.path.insert(0, str(SCRIPT_ROOT))
 from _shared.bounded_process import BudgetArgumentParser, stop_process_group
+from _shared import harness_profile
 from layout import contains_run
 from dispatch_run import (
     close_mcp_run,
@@ -801,7 +802,9 @@ def batch(args: argparse.Namespace) -> int:
             raise BatchInputError(f"concurrency must be between 1 and {MAX_CONCURRENCY}")
         run_dir = _validate_run_dir(args.run_dir)
         tasks, _source_manifest, source_bytes = _load_manifest(args.manifest, args.concurrency, run_dir)
-        args.concurrency = min(args.concurrency, len(tasks))
+        # The profile's lanes.max_concurrency caps, and never raises, the requested width.
+        cap = harness_profile.value("lanes.max_concurrency", MAX_CONCURRENCY)
+        args.concurrency = min(args.concurrency, len(tasks), cap)
         if not DISPATCH_RUN.is_file() or not os.access(DISPATCH_RUN, os.X_OK):
             raise BatchInputError(f"dispatch owner is unavailable: {DISPATCH_RUN}")
     except BatchInputError as exc:
