@@ -5711,8 +5711,10 @@ else:
         pass
 
 
-@pytest.mark.parametrize('previous_pid', [os.getpid(), 2147483647])
-def test_standalone_batch_child_replaces_a_dead_owner(tmp_path, monkeypatch, previous_pid):
+# A recycled pid and a vanished pid; ids stay stable across xdist workers.
+@pytest.mark.parametrize('previous', ['recycled_pid', 'missing_pid'])
+def test_standalone_batch_child_replaces_a_dead_owner(tmp_path, monkeypatch, previous):
+    previous_pid = os.getpid() if previous == 'recycled_pid' else 2147483647
     mod = load_dispatch_module()
     run = make_run(tmp_path, 'dead-batch-child-owner')
     for key in ('PROVENANT_PARENT_ATTEMPT', 'PROVENANT_RUN_TOKEN', 'PROVENANT_RUN_OWNER'):
