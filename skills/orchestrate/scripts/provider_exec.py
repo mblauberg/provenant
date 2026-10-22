@@ -30,6 +30,7 @@ from datetime import UTC, datetime, timedelta
 from dataclasses import dataclass
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from adapters import profile
 from adapters import claude as claude_adapter
 from output_custody import install, verify, CustodyError
@@ -38,6 +39,7 @@ import fabric_policy
 import layout
 import context_usage
 import process_info
+import run_lineage
 from trusted_git import owner_location, prepare_writer_ref, writer_git_writes, writer_read_only
 
 
@@ -3607,6 +3609,15 @@ def _run_attempt(
         PROVENANT_CHAIR=plan.get("chair", ""),
         PWD=plan["cwd"],
     )
+    environment.pop("PROVENANT_PARENT_ATTEMPT", None)
+    environment.pop("PROVENANT_PARENT_RUN_TOKEN", None)
+    environment.pop("PROVENANT_PARENT_REMOTE", None)
+    environment.pop("PROVENANT_HOST_LOCAL_ONLY", None)
+    if plan.get("attempt_identity"):
+        environment["PROVENANT_PARENT_ATTEMPT"] = json.dumps(plan["attempt_identity"])
+        parent_token = plan.get("_lineage_token") or control_environment.get("PROVENANT_RUN_TOKEN")
+        if parent_token:
+            environment["PROVENANT_PARENT_RUN_TOKEN"] = parent_token
     attempt_marker = uuid.uuid4().hex
     environment["PROVENANT_ATTEMPT_MARKER"] = attempt_marker
     instruction_start = None
@@ -3631,6 +3642,7 @@ def _run_attempt(
             environment["CLAUDE_CONFIG_DIR"] = plan["claude_config_dir"]
     environment["CLAUDE_CODE_DISABLE_WORKFLOWS"] = "1"
     private_tmp = Path(plan["run_dir"]) / "tmp"
+    os.close(_private_dir(tmp_fd, "children"))
     private_cache = private_tmp / "cache"
     os.close(_private_dir(tmp_fd, "cache"))
     # Tool caches follow XDG_CACHE_HOME; Corepack is set too, so an inherited COREPACK_HOME
@@ -3989,57 +4001,64 @@ def _run_attempt(
         diagnostics.write(str(exc).encode())
     finally:
         try:
-            if workspace is not None:
-                workspace.close()
-            if process:
-                if descendants and not stopped:
-                    exited_at_stop = process.poll() is not None
-                    provider_exit_before_cleanup = process.returncode if exited_at_stop else None
-                    reaped.extend(descendants.stop(
-                        normal=exited_at_stop,
-                        terminal_grace=terminal_grace_break and not exited_at_stop,
-                    ))
-                # Drain final bytes after the group exits, without an unbounded communicate.
-                for key in list(selector.get_map().values()):
-                    while True:
-                        try:
-                            data = os.read(key.fileobj.fileno(), 65536)
-                        except (BlockingIOError, OSError):
-                            break
-                        if not data:
-                            break
-                        (raw if key.data == "stdout" else diagnostics).write(data)
-                        if key.data == "stdout":
-                            consume(data)
-                for stream in (process.stdin, process.stdout, process.stderr):
-                    if stream:
-                        stream.close()
-            selector.close()
-            if input_file:
-                input_file.close()
-            for sig, handler in old_handlers.items():
-                signal.signal(sig, handler)
-        finally:
             try:
-                if subreaper:
-                    _release_subreaper()
-                if agy_home:
-                    agy_home_warnings = finish_agy_home(plan, tmp_fd, agy_home)
-            finally:
-                if browser_tmp is not None and browser_tmp_identity is not None:
-                    # Cleanup trouble must not discard the lane's result; report it instead.
-                    try:
-                        current = browser_tmp.lstat()
-                    except FileNotFoundError:
-                        pass  # The lane already removed its temp directory.
-                    else:
-                        if (current.st_dev, current.st_ino) != (browser_tmp_identity.st_dev, browser_tmp_identity.st_ino):
-                            browser_tmp_warnings.append(f"browser temporary directory was replaced; left in place: {browser_tmp}")
-                        else:
+                if workspace is not None:
+                    workspace.close()
+                if process:
+                    if descendants and not stopped:
+                        exited_at_stop = process.poll() is not None
+                        provider_exit_before_cleanup = process.returncode if exited_at_stop else None
+                        reaped.extend(descendants.stop(
+                            normal=exited_at_stop,
+                            terminal_grace=terminal_grace_break and not exited_at_stop,
+                        ))
+                    # Drain final bytes after the group exits, without an unbounded communicate.
+                    for key in list(selector.get_map().values()):
+                        while True:
                             try:
-                                shutil.rmtree(browser_tmp)
-                            except OSError as exc:
-                                browser_tmp_warnings.append(f"browser temporary directory cleanup failed: {browser_tmp}: {exc}")
+                                data = os.read(key.fileobj.fileno(), 65536)
+                            except (BlockingIOError, OSError):
+                                break
+                            if not data:
+                                break
+                            (raw if key.data == "stdout" else diagnostics).write(data)
+                            if key.data == "stdout":
+                                consume(data)
+                    for stream in (process.stdin, process.stdout, process.stderr):
+                        if stream:
+                            stream.close()
+                selector.close()
+                if input_file:
+                    input_file.close()
+                for sig, handler in old_handlers.items():
+                    signal.signal(sig, handler)
+            finally:
+                try:
+                    if subreaper:
+                        _release_subreaper()
+                    if agy_home:
+                        agy_home_warnings = finish_agy_home(plan, tmp_fd, agy_home)
+                finally:
+                    if browser_tmp is not None and browser_tmp_identity is not None:
+                        # Cleanup trouble must not discard the lane's result; report it instead.
+                        try:
+                            current = browser_tmp.lstat()
+                        except FileNotFoundError:
+                            pass  # The lane already removed its temp directory.
+                        except OSError as exc:
+                            browser_tmp_warnings.append(f"browser temporary directory cleanup failed: {browser_tmp}: {exc}")
+                        else:
+                            if (current.st_dev, current.st_ino) != (browser_tmp_identity.st_dev, browser_tmp_identity.st_ino):
+                                browser_tmp_warnings.append(f"browser temporary directory was replaced; left in place: {browser_tmp}")
+                            else:
+                                try:
+                                    shutil.rmtree(browser_tmp)
+                                except OSError as exc:
+                                    browser_tmp_warnings.append(f"browser temporary directory cleanup failed: {browser_tmp}: {exc}")
+        finally:
+            if (forced in {"cancelled", "interrupted"} or cancel_signal) and plan.get("attempt_identity"):
+                parent = plan["attempt_identity"]
+                run_lineage.cancel_children(Path(parent["run_dir"]), parent["task_id"], parent["attempt"])
     exit_code = process.returncode if process else None
     if cancel_signal and not forced:
         forced = "interrupted"  # EOF can precede the loop's signal check.

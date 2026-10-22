@@ -106,6 +106,13 @@ then against each other by route, run, status and day. These snapshots retain
 only the events still present at ingest time; the ledger cannot recover older
 observations that vanished before its first ingest.
 
+Nested Fabric attempts retain their `parent` identity in the ledger's
+`parent_run_id`, `parent_task_id` and `parent_attempt` columns. Lane events also
+carry parent and child identities, without copying child error text. Local
+`provenant stats --json` includes `usage_by_parent`, grouped by the exact parent
+attempt. This view uses child receipt usage, including retries, and is separate
+from the native-session deduplication used for overall usage totals.
+
 [telemetry-prices.json](../../config/telemetry-prices.json) owns USD rates per
 million input, cached-input, cache-write and output tokens. Its dated entries cite the local `claude-api` skill references for Anthropic and
 official provider pages for other prices. Token Meter's reviewed catalogue is a

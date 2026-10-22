@@ -83,6 +83,8 @@ class LaneFederation:
                 fcntl.flock(handle, fcntl.LOCK_UN)
 
     def worker(self, verb, project, request, launch_path=None, lock=None, reader_cwd=None):
+        request = dict(request)
+        lineage = request.pop('_lineage', None)
         directory = self.h.project_directory(project)
         if not directory.is_dir():
             raise self.h.HostError('project_missing', 'Peer project directory is missing')
@@ -105,6 +107,8 @@ class LaneFederation:
                 pass_fds=(lock.fileno(),) if lock else (),
                 env={**os.environ, 'PROVENANT_HOST_LOCAL_ONLY': '1',
                     'PROVENANT_REMOTE_LANE': '1' if verb in WRITES else '0',
+                    **({'PROVENANT_PARENT_ATTEMPT': json.dumps(lineage), 'PROVENANT_PARENT_REMOTE': '1'}
+                       if lineage else {}),
                     **({'PROVENANT_OPERATION_LOCK_FD': str(lock.fileno())} if lock else {})})
         if result.timed_out or result.stdout_truncated or result.returncode != 0:
             raise self.h.HostError('lane_owner_failed', 'Local lane owner did not return a complete response')
@@ -600,8 +604,8 @@ class LaneFederation:
             rows = rows[:limit]
         return {'schema': 'fabric.runs.v2' if verb == 'lanes' else 'fabric.status.v2', 'status': 'ok', 'runs': rows, 'hosts': hosts, 'omitted': omitted + owner_omitted}
 
-    def client_call(self, action, cwd, request):
-        result = self.placed_call(action, cwd, request)
+    def client_call(self, action, cwd, request, *, federated_read=False):
+        result = self.placed_call(action, cwd, request, federated_read=federated_read)
         if self.config_error and action in {'lanes', 'status'} and result.get('local'):
             project = self.h.project_identity(cwd)
             result = self.worker(action, project, result.get('input', request))
@@ -652,8 +656,9 @@ class LaneFederation:
         project = registered[0] if registered else self.h.project_identity(cwd)
         return project, next((path for name, path in named_paths if name != project), None)
 
-    def placed_call(self, action, cwd, request):
-        if os.environ.get('PROVENANT_HOST_LOCAL_ONLY') == '1':
+    def placed_call(self, action, cwd, request, *, federated_read=False):
+        if (os.environ.get('PROVENANT_HOST_LOCAL_ONLY') == '1'
+                and not (federated_read and action in {'lanes', 'status'})):
             return {'local': True}
         request = self.lift_task_hosts(request)
         def local_result(value):
