@@ -4050,7 +4050,7 @@ def test_fabric_fast_plan_matches_shell_for_explicit_model(tmp_path, monkeypatch
     result = run / 'result.md'
     shell = subprocess.run(
         [*mod.build_command(args, prompt, result), '--plan-only'],
-        cwd=tmp_path, env=mod.routing_environment(), capture_output=True, text=True,
+        cwd=tmp_path, env=mod.routing_environment(preserve_instance=True), capture_output=True, text=True,
     )
     assert shell.returncode == 0, shell.stdout + shell.stderr
     planned = mod.fast_fabric_plan(args, prompt, result, tmp_path)

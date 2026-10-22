@@ -1,5 +1,7 @@
 from pathlib import Path
+import json
 import os
+import shutil
 import subprocess
 
 import pytest
@@ -25,7 +27,8 @@ esac
 
 def launch(tmp_path, name, path_dirs=(), **extra):
     loader = tmp_path / 'loader.mjs'
-    loader.write_text('')
+    # Runtime selection tests stop before application TypeScript is loaded.
+    loader.write_text('console.log(JSON.stringify({node:process.execPath, version:process.versions.node})); process.exit(0);')
     env = {'HOME': str(tmp_path / 'home'), 'PATH': os.pathsep.join([*map(str, path_dirs), '/usr/bin', '/bin']),
            'AGENT_FABRIC_TSX_LOADER': str(loader), **extra}
     return subprocess.run([str(ROOT / 'runtime/fabric/bin' / name)], env=env, capture_output=True, text=True,
@@ -61,12 +64,27 @@ def test_path_node_comes_first(tmp_path, name):
 @pytest.mark.parametrize('name', LAUNCHERS)
 def test_an_unsupported_path_node_is_skipped_for_a_supported_fallback(tmp_path, name):
     old = fake_node(tmp_path / 'path/node', supported=False)
+    # Exercise an actual supported runtime even when fixed system paths lack one.
+    node = shutil.which('node')
+    if node:
+        probe = subprocess.run([node, '-e',
+            'const [major, minor] = process.versions.node.split(".").map(Number); '
+            'process.exit(major === 24 && minor >= 15 ? 0 : 1)'], capture_output=True)
+        if probe.returncode == 0:
+            fallback = tmp_path / 'home/.local/bin/node'
+            fallback.parent.mkdir(parents=True)
+            fallback.symlink_to(Path(node).resolve())
     result = launch(tmp_path, name, [tmp_path / 'path'])
     assert f'ran {old}' not in result.stdout
     if result.returncode:
         # No supported node on this machine: the error names what it tried.
         assert result.returncode == 127
         assert f'Unsupported: {old}' in result.stderr and 'set FABRIC_NODE' in result.stderr
+    else:
+        selected = json.loads(result.stdout)
+        major, minor, _ = map(int, selected['version'].split('.'))
+        assert major == 24 and minor >= 15
+        assert Path(selected['node']).resolve() != old.resolve()
 
 
 @pytest.mark.skipif(any(Path(path).exists() for path in FIXED), reason='a system node would be chosen first')
