@@ -289,11 +289,11 @@ def writer_worktree_state(cwd: str) -> tuple[str, bytes] | None:
 
 
 def worktree_unchanged(start, cwd: str) -> bool | None:
-    """Whether a clean starting worktree still has the same HEAD and porcelain."""
-    current = writer_worktree_state(cwd) if start is not None else None
-    if start is None or current is None:
+    """Whether a clean starting worktree still has the same HEAD and porcelain; unknown from a dirty start."""
+    if start is None or start[1]:
         return None
-    return not start[1] and current == start
+    current = writer_worktree_state(cwd)
+    return None if current is None else current == start
 
 
 def modified_since(cwd: str, since: float) -> bool:

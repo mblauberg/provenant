@@ -400,7 +400,7 @@ def rekey_events(db):
             db.execute('UPDATE events SET event_id=? WHERE rowid=?', (key, row['rowid']))
 
 
-def put_event(db, kind, ts, source_ref, attrs=None, refresh=False, **fields):
+def put_event(db, kind, ts, source_ref, attrs=None, *, refresh=False, **fields):
     """Append one metadata event, optionally merging refreshed attrs into its existing history."""
     values = {'host': host_id(), 'kind': kind, 'ts': ts, 'source_ref': source_ref,
               'attrs': json.dumps({k: v for k, v in (attrs or {}).items() if v is not None}, sort_keys=True),

@@ -6491,7 +6491,7 @@ def test_finished_writer_records_whether_worktree_is_unchanged(tmp_path, monkeyp
     if change == 'read_only':
         assert 'empty_patch' not in row
     else:
-        assert row['empty_patch'] is (change == 'none')
+        assert row.get('empty_patch') is {'none': True, 'dirty': None}.get(change, False)
 
 
 def test_worktree_unchanged_is_unknown_when_git_cannot_say(tmp_path):

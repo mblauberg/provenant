@@ -37,8 +37,8 @@ The versioned SQLite database is
 `$AGENT_FABRIC_STATE_ROOT/telemetry.sqlite3`, defaulting to
 `~/.local/state/agent-harness/fabric/telemetry.sqlite3`. Schema version 4
 migrates versions 1–3 metadata; unknown newer schemas are refused. The
-`events`, `changes`, `quota_series` and `harness_stamps` tables are additive and keep version 4,
-so peers on this version still read the ledger.
+`events`, `changes`, `quota_series` and `harness_stamps` tables are additive
+and keep version 4, so peers on this version still read the ledger.
 
 | Source | Discovery and cursor |
 |---|---|
@@ -157,8 +157,8 @@ never the host name: source and session for `session.start`; the receipt's
 resolved path for `lane.attempt`, so projects sharing run ids stay apart;
 otherwise `source_ref`, time, linked fields and attributes. Collector refs are
 `path@offset#record`, so identical records on one line keep their count.
-Re-ingest therefore adds no duplicate rows, even after a `local_host` rename, which
-leaves earlier rows under their old id for readers to map. Opening a
+Re-ingest therefore adds no duplicate rows, even after a `local_host` rename,
+which leaves earlier rows under their old id for readers to map. Opening a
 ledger from an earlier build re-keys its events once under a write lock,
 keeping the earliest of any duplicates, so concurrent openers cannot race.
 
@@ -173,7 +173,8 @@ keeping the earliest of any duplicates, so concurrent openers cannot race.
 Re-reading a lane receipt merges its attrs into the existing event, preserving
 other history. `empty_patch` comes from the writer's Git snapshot: true only
 when a clean starting worktree keeps the same HEAD and porcelain after the
-provider returns. Read-only lanes omit it; unknown Git state stays unknown.
+provider returns. Read-only lanes omit it; a dirty start or unreadable Git
+state stays unknown.
 Success with no diff selects successful lane events with
 `json_extract(attrs,'$.empty_patch')=1`; missing values do not count as false.
 
