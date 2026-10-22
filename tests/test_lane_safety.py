@@ -63,6 +63,20 @@ DENIED = [
     "kill -- -4242",
     "kill -9 -- -4242",
     "kill -TERM -4242 -4243",
+    "kill 0",
+    "kill -9 0",
+    "kill -TERM -4242",
+    "kill -s TERM -4242",
+    "kill -9 -4242",
+    "kill --signal=TERM -- -4242",
+    "sudo --user root pkill node",
+    "sudo --group wheel killall node",
+    "env --unset=X pkill node",
+    "env -u X pkill node",
+    "nice --adjustment=5 pkill node",
+    "timeout --signal=KILL 5 pkill node",
+    "echo ${X:-$(pkill node)}",
+    "echo ${X:-`killall node`}",
     "kill $PID",
     "kill ${PID}",
     "kill %1",
@@ -94,6 +108,8 @@ ALLOWED = [
     "echo pkill",
     "echo 'pkill node; kill $(pgrep x)'",
     "grep pkill notes.txt",
+    "man pkill",
+    "which killall",
     "git commit -m 'never pkill or kill -- -1'",
     "ls # pkill node",
     "cat <<'EOF'\npkill node\nEOF",
@@ -360,6 +376,20 @@ def test_pre_push_refuses_conflict_markers_in_new_commits(pushing):
     assert git(pushing, "push", "origin", "topic", check=False).returncode != 0
 
 
+def test_pre_push_refuses_conflict_markers_left_in_a_merge(pushing):
+    git(pushing, "switch", "-q", "-c", "topic")
+    commit(pushing, "b.txt", "one\n")
+    git(pushing, "switch", "-q", "main")
+    commit(pushing, "c.txt", "two\n")
+    git(pushing, "merge", "-q", "--no-commit", "--no-ff", "topic")
+    (pushing / "m.txt").write_text(f"{MARK} HEAD\nleft behind\n")
+    git(pushing, "add", "m.txt")
+    git(pushing, "commit", "-q", "-m", "merge")
+    done = git(pushing, "push", "origin", "main", check=False)
+    assert done.returncode != 0
+    assert "conflict markers" in done.stderr
+
+
 def test_pre_push_ignores_markers_already_on_the_remote(pushing):
     commit(pushing, "b.txt", f"{MARK} HEAD\n")
     git(pushing, "push", "-q", "--no-verify", "origin", "main")
@@ -394,6 +424,36 @@ def test_settings_install_is_idempotent_and_preserves_other_hooks(tmp_path):
     assert [entry["matcher"] for entry in entries] == ["Edit", "Bash"]
     assert "lane_safety_guard.py" in entries[1]["hooks"][0]["command"]
     assert data["model"] == "x" and "Stop" in data["hooks"]
+
+
+def test_settings_command_quotes_the_path_for_the_shell(tmp_path):
+    guard_file = tmp_path / "a$(touch pwned)b" / "lane_safety_guard.py"
+    command = hooks.hook_command(guard_file)
+    done = subprocess.run(
+        ["sh", "-c", f"set -- {command.removeprefix('python3 ')}; printf %s \"$1\""],
+        capture_output=True, text=True, cwd=tmp_path, check=False,
+    )
+    assert done.stdout == str(guard_file)
+    assert not (tmp_path / "pwned").exists()
+
+
+def test_reap_skips_kill_when_pid_identity_changed(sleeper, monkeypatch, capsys):
+    process = sleeper("sh", "-c", "trap '' TERM; while :; do sleep 1; done")
+    real = reap.process_info
+    calls = {"n": 0}
+
+    def shifted(pid):
+        info = real(pid)
+        calls["n"] += pid == process.pid
+        if info is not None and pid == process.pid and calls["n"] > 1:
+            info["started"] = float(info["started"]) + 100
+        return info
+
+    monkeypatch.setattr(reap, "process_info", shifted)
+    status = reap.reap([process.pid], grace=0.3)
+    assert status == 1
+    assert process.poll() is None
+    assert "KILL skipped" in capsys.readouterr().out
 
 
 def test_settings_repoint_replaces_the_managed_entry(tmp_path):

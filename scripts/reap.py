@@ -78,7 +78,12 @@ def is_alive(pid: int) -> bool:
     except PermissionError:
         return True
     info = process_info(pid)
-    return info is not None and not str(info["state"]).startswith("Z")
+    return info is not None and not _dead_state(str(info["state"]))
+
+
+def _dead_state(state: str) -> bool:
+    """Zombie, or the `?` macOS shows for an exited child not yet reaped."""
+    return state[:1] in {"Z", "?"}
 
 
 def descendants(pid: int) -> list[int]:
@@ -155,16 +160,18 @@ def reap(
     protected = protected_pids()
     status = 0
     victims: list[int] = []
+    identity: dict[int, float] = {}
     for pid in dict.fromkeys(pids):
         if pid in protected:
             print(f"refused pid {pid}: pid 1, the caller or one of its ancestors", file=out)
             status = 1
             continue
         info = process_info(pid)
-        if info is None or str(info["state"]).startswith("Z"):
+        if info is None or _dead_state(str(info["state"])):
             print(f"pid {pid} already gone", file=out)
             continue
         print(describe(info, time.time()), file=out)
+        identity[pid] = float(info["started"])
         if started_before is not None and float(info["started"]) > started_before:
             print(f"refused pid {pid}: started after --started-before; PID may be reused", file=out)
             status = 1
@@ -175,6 +182,7 @@ def reap(
                     child_info = process_info(child)
                     if child_info is not None:
                         print("  " + describe(child_info, time.time()), file=out)
+                        identity[child] = float(child_info["started"])
                         victims.append(child)
         victims.append(pid)
     victims = list(dict.fromkeys(victims))
@@ -185,16 +193,27 @@ def reap(
     while live and time.monotonic() < deadline:
         time.sleep(0.1)
         live = [pid for pid in live if is_alive(pid)]
+    killed: set[int] = set()
     for pid in live:
+        info = process_info(pid)
+        if info is None or _dead_state(str(info["state"])):
+            continue
+        if float(info["started"]) != identity[pid]:
+            print(f"pid {pid} changed during the grace period; KILL skipped", file=out)
+            status = 1
+            continue
         _signal(pid, signal.SIGKILL)
-    if live:
+        killed.add(pid)
+    if killed:
         time.sleep(0.2)
     for pid in victims:
+        if pid in live and pid not in killed and is_alive(pid):
+            continue
         if is_alive(pid):
             print(f"pid {pid} still running", file=out)
             status = 1
         else:
-            print(f"stopped pid {pid}" + (" (KILL)" if pid in live else ""), file=out)
+            print(f"stopped pid {pid}" + (" (KILL)" if pid in killed else ""), file=out)
     return status
 
 

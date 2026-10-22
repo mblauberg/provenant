@@ -33,7 +33,22 @@ WRAPPER_VALUE_OPTIONS = {
     "nice": set("n"), "ionice": set("cnp"), "timeout": set("sk"),
     "xargs": set("IJnPLsdEa"), "stdbuf": set("ioe"),
 }
+WRAPPER_VALUE_LONG_OPTIONS = {
+    "sudo": {"user", "group", "host", "prompt", "chdir", "role", "type", "other-user", "close-from"},
+    "doas": set(), "env": {"unset", "chdir", "split-string"}, "nice": {"adjustment"},
+    "ionice": {"class", "classdata"}, "timeout": {"signal", "kill-after"},
+    "xargs": {"max-args", "max-procs", "max-lines", "delimiter", "arg-file", "replace"},
+    "stdbuf": {"input", "output", "error"},
+}
+QUOTED_HEREDOC = re.compile(r"<<-?\s*(['\"])(\w+)\1[^\n]*\n.*?\n\s*\2(?:\n|$)", re.S)
 MAX_DEPTH = 8
+# Backstop on the raw text for what the parser misses (for example inside ${…}):
+# pkill or killall as a command word, or after a wrapper on the same command.
+RAW_PATTERN = re.compile(
+    r"(?:^|[;&|({`\n]|\$\()\s*(?:\S*/)?(?:pkill|killall)\b"
+    r"|\b(?:sudo|doas|env|xargs|nice|timeout|nohup|exec|command|time|setsid|stdbuf)\b"
+    r"[^;&|\n]*?\s(?:\S*/)?(?:pkill|killall)\b"
+)
 NUMERIC = re.compile(r"\d+")
 
 
@@ -286,6 +301,11 @@ def _unwrap(words: list[str]) -> tuple[list[str], bool]:
             while words and (words[0].startswith("-") or (
                 wrapper in {"env", "nice"} and "=" in words[0]
             )):
+                if words[0].startswith("--") and "=" not in words[0] and (
+                    words[0][2:] in WRAPPER_VALUE_LONG_OPTIONS.get(wrapper, set())
+                ):
+                    words = words[2:]
+                    continue
                 short = words[0][1:]
                 skip = 2 if (
                     not words[0].startswith("--") and len(short) == 1 and short in takes
@@ -296,27 +316,30 @@ def _unwrap(words: list[str]) -> tuple[list[str], bool]:
 
 
 def _kill_reason(args: list[str]) -> str | None:
-    targets, options_done, i, numeric_options = [], False, 0, 0
+    targets, options_done, i, signalled = [], False, 0, False
     while i < len(args):
         word = args[i]
         if not options_done and word == "--":
             options_done = True
         elif not options_done and word in {"-l", "-L", "-t"}:
             return None  # listing signals only
-        elif not options_done and word in {"-s", "-n"}:
+        elif not options_done and word in {"-s", "-n", "--signal"}:
+            signalled = True
             i += 1
         elif not options_done and word.startswith("-") and len(word) > 1:
-            numeric_options += word[1:].isdigit()
-            if numeric_options > 1:
+            if signalled and word[1:].isdigit():
                 return "kill of a process group"
+            signalled = True
         else:
             targets.append(word)
         i += 1
     for target in targets:
-        if target.startswith("-") and target[1:].isdigit():
+        if target.startswith("-"):
             return "kill of a process group"
         if not NUMERIC.fullmatch(target):
             return f"kill target {target!r} is not a literal PID"
+        if int(target) == 0:
+            return "kill 0 signals the caller's process group"
     return None
 
 
@@ -366,6 +389,8 @@ def deny_reason(command: str, depth: int = 0) -> str | None:
     """Why the command line must be refused, or None when it may run."""
     if depth > MAX_DEPTH:
         return "command nesting is too deep to check"
+    if RAW_PATTERN.search(QUOTED_HEREDOC.sub("", command)):
+        return "pkill or killall signals processes by name"
     commands, nested = parse(command)
     for item in commands:
         reason = _command_reason(item, depth)

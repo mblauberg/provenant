@@ -7,6 +7,7 @@ import argparse
 import json
 import os
 from pathlib import Path
+import shlex
 import sys
 import tempfile
 
@@ -18,7 +19,7 @@ class ConfigError(ValueError):
 
 
 def hook_command(guard: Path) -> str:
-    return f"python3 {json.dumps(str(guard))}"
+    return f"python3 {shlex.quote(str(guard))}"
 
 
 def _managed(entry: object) -> bool:

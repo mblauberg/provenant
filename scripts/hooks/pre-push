@@ -44,10 +44,10 @@ while read -r local_ref local_sha remote_ref remote_sha; do
     [ -z "$deleting" ] || continue
     if [ -z "$new_remote" ] && git cat-file -e "$remote_sha^{commit}" 2>/dev/null; then
         range="$remote_sha..$local_sha"
-        found=$(git log --format= -p -U0 --no-ext-diff --no-textconv "$range" 2>/dev/null |
+        found=$(git log --format= -m -p -U0 --no-ext-diff --no-textconv "$range" 2>/dev/null |
             grep -E '^\+(<{7}|>{7})( |$)' | head -3)
     else
-        found=$(git log --format= -p -U0 --no-ext-diff --no-textconv "$local_sha" --not --remotes 2>/dev/null |
+        found=$(git log --format= -m -p -U0 --no-ext-diff --no-textconv "$local_sha" --not --remotes 2>/dev/null |
             grep -E '^\+(<{7}|>{7})( |$)' | head -3)
     fi
     [ -z "$found" ] || refuse "conflict markers in commits pushed to $remote_ref: $found"

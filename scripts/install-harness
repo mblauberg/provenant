@@ -499,14 +499,6 @@ install_primary() {
     --custom-source "$instance_root/custom-skills" || return $?
   if [[ "$PLATFORM" == "claude" ]]; then
     run_stdlib "$PRODUCT_ROOT/scripts/install-workflows" --target "$platform_home/workflows" || return $?
-    if [[ "$LANE_SAFETY_HOOKS" == install ]]; then
-      run_stdlib "$PRODUCT_ROOT/scripts/configure-claude-hooks.py" \
-        --settings "$platform_home/settings.json" \
-        --guard "$PRODUCT_ROOT/scripts/lane_safety_guard.py" || return $?
-    elif [[ "$LANE_SAFETY_HOOKS" == remove ]]; then
-      run_stdlib "$PRODUCT_ROOT/scripts/configure-claude-hooks.py" \
-        --settings "$platform_home/settings.json" --remove || return $?
-    fi
     local default_claude="${HOME%/}/.claude"
     if [[ -n "${CLAUDE_CONFIG_DIR:-}" && "${CLAUDE_CONFIG_DIR%/}" != "$default_claude" ]]; then
       local settings_link="$platform_home/settings.json"
@@ -518,6 +510,14 @@ install_primary() {
           echo "claude settings link skipped: target is not a regular file: $default_settings"
         fi
       fi
+    fi
+    if [[ "$LANE_SAFETY_HOOKS" == install ]]; then
+      run_stdlib "$PRODUCT_ROOT/scripts/configure-claude-hooks.py" \
+        --settings "$platform_home/settings.json" \
+        --guard "$PRODUCT_ROOT/scripts/lane_safety_guard.py" || return $?
+    elif [[ "$LANE_SAFETY_HOOKS" == remove ]]; then
+      run_stdlib "$PRODUCT_ROOT/scripts/configure-claude-hooks.py" \
+        --settings "$platform_home/settings.json" --remove || return $?
     fi
   fi
   if [[ "$PLATFORM" == "codex" ]]; then
