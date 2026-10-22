@@ -3,7 +3,8 @@
 
 The gate walks every commit in `tip ^base` through the owner's common Git directory. A commit
 may change a protected path only to the version the base already has, or be reachable from a
-tip the chair released after review. Fabric landing passes the landing lease's remote SHA as
+tip the chair released after review, or match that tip's complete protected tree while its
+reviewed content has not yet landed. Fabric landing passes the landing lease's remote SHA as
 the base; claims and manual consumption default to the primary checkout's HEAD. Writers can
 write only their own branch ref and the object store: never the primary branch, its upstream
 or the release records here.
@@ -34,7 +35,7 @@ class ProtectionError(ValueError):
         super().__init__(f"{code}: {message}")
 
 
-def git(git_dir, *args):
+def git(git_dir, *args, accept=(0,)):
     # No replace refs, commit graphs, multi-pack index, lazy fetch or caller Git environment.
     environment = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
     result = subprocess.run(
@@ -42,7 +43,7 @@ def git(git_dir, *args):
          "-c", "core.fsmonitor=false", "-c", "protocol.allow=never", *args],
         capture_output=True, text=True, timeout=30,
         env={**environment, "GIT_NO_LAZY_FETCH": "1", "GIT_NO_REPLACE_OBJECTS": "1"})
-    if result.returncode:
+    if result.returncode not in accept:
         raise ProtectionError(result.stderr.strip() or f"git {args[0]} failed")
     return result.stdout
 
@@ -87,11 +88,20 @@ def check(common, tip, base="HEAD"):
     but only where a released commit in the range introduced that version, as a landing train's
     --no-ff merge of a released tip does. Older versions, such as an outside parent's or a stale
     branch's, never count, so a merge cannot revert a protected path.
+
+    A commit may also match one released tip's complete protected tree. That tip must not be
+    an ancestor of the base, its protected tree must differ from the base's, and the base's
+    protected tree must be unchanged since the release forked from it, so a superseded or
+    squash-landed release cannot vouch for restoring content the base has already moved past.
+    A release vouches for content, not for the route that lands it. A release
+    already in the commit's history stays subject to the merge-taking rules above, so later
+    merges cannot restore an older released tree after taking the base's newer versions.
     """
     tip, base = commit(common, tip), commit(common, base)
     tips = released(common)
     covered = set(git(common, "rev-list", "--ignore-missing", *tips, "^" + base).split()) if tips else set()
     trees, held = {}, []
+    reviewed_trees = None
     # Each judged, unheld range commit maps to the protected paths whose version a released commit introduced.
     vouched = {}
 
@@ -110,6 +120,21 @@ def check(common, tip, base="HEAD"):
         inherited = set().union(*(vouched[parent] for parent in inside)) - changed
         if sha in covered or not changed:
             vouched[sha] = inherited | (changed if sha in covered else set())
+            continue
+        if reviewed_trees is None:
+            # Membership in covered excludes missing tips and tips already in the base's history.
+            # The base's protected tree must not have moved since the release forked from it, or the
+            # release would carry stale versions of paths it never touched (superseded or squashed).
+            def current(release):
+                # merge-base exits 1 with no output for unrelated histories; such a release never applies.
+                forks = git(common, "merge-base", "--all", release, base, accept=(0, 1)).split()
+                return bool(forks) and all(entries(fork) == entries(base) for fork in forks)
+
+            reviewed_trees = [(tip, entries(tip)) for tip in tips
+                              if tip in covered and entries(tip) != entries(base) and current(tip)]
+        if any(entries(sha) == tree and git(common, "rev-list", "--max-count=1", reviewed, "^" + sha)
+               for reviewed, tree in reviewed_trees):
+            vouched[sha] = inherited | changed
             continue
         # The base's version is trusted, as a merge or rebase from the base takes it.
         taken = {name for name in changed if len(parents) > 1 and any(

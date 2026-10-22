@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import importlib.util
+import hashlib
 import json
 import math
 import os
@@ -11,6 +12,7 @@ import re
 import selectors
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import tempfile
@@ -453,6 +455,29 @@ def project_directory(project_path):
     if not path.is_relative_to(home):
         raise HostError('invalid_project_path', 'Project path resolves outside the user home')
     return path
+
+def browser_temporary_directory(attempt, *, create=False):
+    """One short Chromium temp path per user and attempt, independent of project depth."""
+    identity = os.fsencode(str(Path(attempt).expanduser().resolve()))
+    digest = hashlib.sha256(str(os.getuid()).encode() + b'\0' + identity).hexdigest()[:12]
+    # Resolve the shared temp root, never the leaf: /tmp is /private/tmp on macOS,
+    # and a planted leaf symlink must not redirect the directory or its grants.
+    temporary = Path('/tmp').resolve() / ('fb-' + digest)
+    if create:
+        try:
+            temporary.mkdir(mode=0o700)
+        except FileExistsError:
+            pass
+        fd = os.open(temporary, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            info = os.fstat(fd)
+            if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid():
+                raise PermissionError(f'Browser temporary directory is not owned by us: {temporary}')
+            os.fchmod(fd, 0o700)
+        finally:
+            os.close(fd)
+    return temporary
+
 
 def browser_socket_paths(temporary):
     # MAC_CHROMIUM_TMPDIR owns Chromium's generated directory and SingletonSocket.

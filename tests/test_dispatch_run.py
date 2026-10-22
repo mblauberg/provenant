@@ -2336,9 +2336,10 @@ def test_missing_run_receipt_reports_missing_custody(tmp_path: Path, monkeypatch
 
 
 @pytest.mark.parametrize('browser', [True, False])
-def test_remote_long_attempt_path_rejects_only_browser_before_launch(tmp_path, monkeypatch, capsys, browser):
+def test_remote_long_attempt_path_fits_browser_socket_budget(tmp_path, monkeypatch, capsys, browser):
     workspace = tmp_path / ('long-peer-project-' + 'x' * 60)
     workspace.mkdir()
+    disable_memory_admission_floor(workspace)
     run_dir = make_run(workspace, 'long-browser')
     prompt = workspace / 'prompt.md'
     prompt.write_text('review\n')
@@ -2356,12 +2357,8 @@ def test_remote_long_attempt_path_rejects_only_browser_before_launch(tmp_path, m
         '--prompt-file', str(prompt), '--alias', 'senior', '--role', 'worker',
         '--capabilities', '["browser"]' if browser else '[]',
     ])
-    assert module.dispatch(args) == (2 if browser else 0)
-    if browser:
-        assert json.loads(capsys.readouterr().out)['error'] == 'remote_temporary_path_too_long'
-        assert not launched.exists()
-    else:
-        assert launched.exists()
+    assert module.dispatch(args) == 0
+    assert launched.exists()
 
 
 def test_nonfinite_or_nonpositive_timeout_is_rejected() -> None:

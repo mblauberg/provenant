@@ -2739,6 +2739,7 @@ def test_codex_capabilities_with_full_sandbox_are_accepted_with_a_warning(monkey
 @pytest.mark.parametrize("mode", ["worktree_write", "read_only"])
 def test_other_adapters_take_capabilities_without_a_grant(monkeypatch, tmp_path, mode):
     mod = supervisor()
+    monkeypatch.setattr(mod, "_sandbox_exec_path", lambda: "/usr/bin/sandbox-exec")
     _, lane = instruction_lane(tmp_path)
     attempt = tmp_path / "attempt"
     attempt.mkdir()
@@ -2751,12 +2752,52 @@ def test_other_adapters_take_capabilities_without_a_grant(monkeypatch, tmp_path,
     # Their sandbox-exec profile leaves SysV IPC and Mach services open; only Chrome's temp moves.
     profile = mod.os_confinement_profile(plan)
     assert "(deny mach-lookup)" not in profile and "(deny ipc-sysv*)" not in profile
+    temporary = plan["applied"]["browser_tmpdir"]
+    assert f'(subpath "{temporary}")' in next(
+        line for line in profile.splitlines() if line.startswith('(allow file-write* '))
+    if mode == "read_only":
+        assert profile.index(f'(allow file-read-data (subpath "{attempt}") (subpath "{temporary}"))') > profile.index(
+            '(deny file-read-data (subpath ')
+    assert temporary in plan["applied"]["write_boundary"]["writable_paths"]
     plan["applied"]["confinement"] = "none"
-    plan["argv"] = [sys.executable, "-u", "-c", "import json, os; print(json.dumps({'type':'result',"
-                    "'result':os.environ.get('MAC_CHROMIUM_TMPDIR')}))"]
+    plan["argv"] = [sys.executable, "-u", "-c", "import json, os; from pathlib import Path; "
+                    "root=Path(os.environ['MAC_CHROMIUM_TMPDIR']); "
+                    "assert root.stat().st_mode & 0o777 == 0o700; "
+                    "(root / '.org.chromium.Chromium.123456').mkdir(); "
+                    "(root / '.org.chromium.Chromium.123456/data').write_text('browser state'); "
+                    "print(json.dumps({'type':'result','result':str(root)}))"]
     record = mod.execute(plan, attempt / "result.md", env={**os.environ, "MAC_CHROMIUM_TMPDIR": "ambient"})
     assert record["status"] == "ok", record
-    assert (attempt / "result.md").read_text() == str(attempt / "tmp")
+    temporary = Path(record["applied"]["browser_tmpdir"])
+    assert (attempt / "result.md").read_text() == str(temporary)
+    assert temporary.parent == Path("/tmp").resolve()
+    assert not temporary.exists()
+
+
+def test_browser_tmp_cleanup_trouble_warns_without_discarding_the_result(monkeypatch, tmp_path):
+    mod = supervisor()
+    monkeypatch.setattr(mod, "_sandbox_exec_path", lambda: "/usr/bin/sandbox-exec")
+    _, lane = instruction_lane(tmp_path)
+    attempt = tmp_path / "attempt"
+    attempt.mkdir()
+    plan = mod.build_plan("claude", {"resolved_model": "fixture"}, "hello", workspace_root=tmp_path,
+                          mode="worktree_write", worktree=lane, capabilities=["browser"], run_dir=attempt)
+    plan["applied"]["confinement"] = "none"
+    # The lane swaps its directory for another one; cleanup must leave it and only warn. The new
+    # directory is made while the old one exists, as tmpfs may otherwise reuse its inode.
+    plan["argv"] = [sys.executable, "-u", "-c", "import json, os; from pathlib import Path; "
+                    "root=Path(os.environ['MAC_CHROMIUM_TMPDIR']); aside=root.rename(str(root) + '-old'); "
+                    "root.mkdir(); aside.rmdir(); "
+                    "print(json.dumps({'type':'result','result':'done'}))"]
+    record = mod.execute(plan, attempt / "result.md", env=dict(os.environ))
+    temporary = Path(record["applied"]["browser_tmpdir"])
+    try:
+        assert record["status"] == "ok", record
+        assert (attempt / "result.md").read_text() == "done"
+        assert temporary.exists()
+        assert any("was replaced" in warning for warning in record["warnings"])
+    finally:
+        temporary.rmdir()
 
 
 @pytest.mark.parametrize("capabilities", [["other"], ["browser", "browser"], "browser"])
@@ -2848,6 +2889,12 @@ def test_codex_capability_profile_keeps_git_narrow_and_grants_only_selected_feat
                              worktree=lane, sandbox="workspace-write", network=True,
                              capabilities=["browser"], run_dir=attempt)
     browser_profile = mod.os_confinement_profile(browser)
+    browser_tmp = browser["applied"]["browser_tmpdir"]
+    assert f'(subpath "{browser_tmp}")' in next(
+        line for line in browser_profile.splitlines() if line.startswith('(allow file-write* '))
+    assert f'(remote unix-socket (subpath "{browser_tmp}"))' in browser_profile
+    assert browser_tmp in browser["applied"]["write_boundary"]["writable_paths"]
+    assert "browser_tmpdir" not in plan["applied"]
     for service in mod.CODEX_BASE_MACH_SERVICES + mod.CODEX_BROWSER_MACH_SERVICES:
         assert f'(global-name "{service}")' in browser_profile
     for prefix in mod.CODEX_BROWSER_MACH_PORT_PREFIXES:
@@ -3345,10 +3392,14 @@ def test_codex_capability_home_is_seeded_and_browser_tmp_is_opt_in(
     assert record["status"] == "ok"
     assert json.loads((attempt / "result.md").read_text()) == {
         "CODEX_HOME": str(lane_home),
-        "MAC_CHROMIUM_TMPDIR": str(attempt / "tmp") if browser_tmp else None,
+        "MAC_CHROMIUM_TMPDIR": plan["applied"]["browser_tmpdir"] if browser_tmp else None,
         "TMPDIR": str(attempt / "tmp"),
         "XDG_CACHE_HOME": str(attempt / "tmp/cache"),
     }
+    if browser_tmp:
+        assert not Path(record["applied"]["browser_tmpdir"]).exists()
+    else:
+        assert "browser_tmpdir" not in record["applied"]
     for name in ("auth.json", "AGENTS.md", "HARNESS.md", "skills"):
         assert (lane_home / name).is_symlink()
         assert (lane_home / name).resolve() == (source / name).resolve()
@@ -3495,6 +3546,47 @@ def test_codex_capability_swappable_source_home_fails_before_launch(monkeypatch,
     assert record["status"] == "failed"
     assert reason in record["reason"]
     assert not launched.exists()
+    assert not Path(record["applied"]["browser_tmpdir"]).exists()
+
+
+def test_browser_temporary_directory_refuses_a_planted_link_before_launch(monkeypatch, tmp_path):
+    mod = supervisor()
+    plan = mod.build_plan("claude", {}, "hello", cwd=tmp_path, workspace_root=tmp_path,
+                          capabilities=["browser"], run_dir=tmp_path / "attempt")
+    temporary = Path(plan["applied"]["browser_tmpdir"])
+    victim = tmp_path / "victim"
+    victim.mkdir()
+    marker = victim / "keep"
+    marker.write_text("preserved")
+    temporary.symlink_to(victim, target_is_directory=True)
+    launched = tmp_path / "launched"
+    plan["argv"] = [sys.executable, "-c", f"open({str(launched)!r}, 'w').close()"]
+    try:
+        record = mod.execute(plan, tmp_path / "result.md")
+        assert record["status"] == "failed"
+        assert not launched.exists()
+        assert temporary.is_symlink()
+        assert marker.read_text() == "preserved"
+    finally:
+        temporary.unlink()
+
+
+def test_browser_temporary_directory_is_removed_when_a_callback_raises(monkeypatch, tmp_path):
+    mod = supervisor()
+    monkeypatch.setattr(mod, "_sandbox_exec_path", lambda: None)
+    plan = mod.build_plan("claude", {}, "hello", cwd=tmp_path, workspace_root=tmp_path,
+                          capabilities=["browser"], run_dir=tmp_path / "attempt")
+    plan["argv"] = [sys.executable, "-c", "import time; time.sleep(30)"]
+    temporary = Path(plan["applied"]["browser_tmpdir"])
+
+    def started(process):
+        assert temporary.is_dir()
+        (temporary / "browser-state").write_text("temporary")
+        raise RuntimeError("start callback failed")
+
+    with pytest.raises(RuntimeError, match="start callback failed"):
+        mod.execute(plan, tmp_path / "result.md", on_start=started)
+    assert not temporary.exists()
 
 
 def test_claude_adapter_receives_attempt_private_claude_tmpdir(tmp_path):
@@ -3580,6 +3672,64 @@ def test_opencode_disables_fabric_mcp_only_in_sandboxed_lanes(tmp_path, monkeypa
     assert config.get("mcp") == ({"servers": {"fabric": {"type": "local", "command": ["provenant"], "disabled": True}}}
                                  if confined else None)
     assert config["permission"]["edit"]["*"] == "deny"
+
+
+@pytest.mark.parametrize("sandboxed", [False, True], ids=["shim", "sandbox-exec"])
+@pytest.mark.parametrize("failure", [None, "missing", "denied", "bad_handshake", "timeout", "sandbox_missing"])
+def test_opencode_writer_preflights_the_configured_fabric_command(tmp_path, monkeypatch, failure, sandboxed):
+    mod = supervisor()
+    native_sandbox = mod._sandbox_exec_path() if sandboxed else None
+    if sandboxed and not native_sandbox:
+        pytest.skip("sandbox-exec unavailable or nested sandbox refused")
+    adapter = mod.profile("opencode")
+    product = tmp_path / "product"
+    wrapper = product / "runtime/fabric/bin/fabric-mcp"
+    wrapper.parent.mkdir(parents=True)
+    wrapper.write_text(
+        "#!" + sys.executable + "\nimport json, os, sys, time\nassert os.environ.get('AGENT_FABRIC_SEAT') == 'opencode'\n"
+        + ("time.sleep(5)\n" if failure == "timeout" else "")
+        + "request = json.loads(sys.stdin.readline())\n"
+        + ("print('tsx loader not found', file=sys.stderr)\n" if failure == "bad_handshake" else "")
+        + "print(json.dumps({'jsonrpc': '2.0', 'id': request['id'], 'result': "
+        + ("{}" if failure == "bad_handshake" else
+           "{'protocolVersion': '2024-11-05', 'capabilities': {}, 'serverInfo': {'name': 'fabric', 'version': 'test'}}")
+        + "}), flush=True)\n"
+    )
+    wrapper.chmod(0o644 if failure == "denied" else 0o755)
+    if failure == "missing":
+        wrapper.unlink()
+    monkeypatch.setattr(adapter, "FABRIC_MCP", wrapper, raising=False)
+    monkeypatch.setattr(mod, "MCP_PREFLIGHT_SECONDS", 0.5, raising=False)
+    provider_started = tmp_path / "provider-started"
+    code = ("import json; from pathlib import Path; Path(" + repr(str(provider_started))
+            + ").touch(); print(json.dumps({'type':'result','result':'done'}))")
+    plan = fixture_plan(tmp_path, code, "opencode")
+    plan["mode"] = "worktree_write"
+    # Model and MCP processes both go through this same sandbox boundary.
+    sandbox_log = tmp_path / "sandbox-commands"
+    sandbox = tmp_path / "sandbox-exec"
+    sandbox.write_text('#!/bin/sh\nprintf "%s\\n" "$3" >> ' + shlex.quote(str(sandbox_log))
+                       + '\nshift 2\nexec "$@"\n')
+    sandbox.chmod(0o755)
+    monkeypatch.setattr(mod, "_sandbox_exec_path", lambda: None if failure == "sandbox_missing" else native_sandbox or str(sandbox))
+    plan["applied"]["confinement"] = "sandbox-exec"
+    record = mod.execute(plan, tmp_path / "result.md")
+    config = json.loads(adapter.environment(plan)["OPENCODE_CONFIG_CONTENT"])
+    fabric = config["mcp"]["servers"]["fabric"]
+    assert fabric["command"] == [str(wrapper)]
+    assert fabric["disabled"] is False
+    assert fabric["environment"] == {"AGENT_FABRIC_SEAT": "opencode"}
+    assert record["status"] == ("rejected" if failure else "ok")
+    assert provider_started.exists() is (failure is None)
+    assert record["error_class"] == ("fabric_mcp_unavailable" if failure else "none")
+    if not sandboxed and failure != "sandbox_missing":
+        assert sandbox_log.read_text().splitlines()[0] == str(wrapper)
+    if failure:
+        assert record["error"] == "fabric_mcp_unavailable"
+        assert record["retryable"] is False
+        assert "Node" in record["fix"]
+    if failure == "bad_handshake":
+        assert "tsx loader not found" in json.dumps(record)
 
 
 def test_opencode_free_tier_refusal_is_model_unavailable(tmp_path):
@@ -8136,6 +8286,148 @@ def test_a_landing_train_merge_of_a_released_tip_passes_and_so_do_later_merges(t
     git(repo, "merge", "-q", "--no-ff", "-m", "Merge #2", later)
     checked = landing(repo, head_of(repo), leased)
     assert checked.returncode == 0, checked.stderr
+
+
+@pytest.mark.parametrize("variant", ["identical", "one-byte", "extra-entry", "missing-entry", "mode"])
+def test_a_landing_train_remerge_requires_the_complete_released_protected_tree(tmp_path, monkeypatch, variant):
+    monkeypatch.delenv("PROVENANT_ATTEMPT_MARKER", raising=False)
+    repo, lane = instruction_lane(tmp_path)
+    leased = head_of(repo, "main")
+    # The reviewed merge resolution introduces content neither parent carries.
+    git(repo, "merge", "-q", "--no-ff", "--no-commit", "lane")
+    (repo / SKILL).write_text("reviewed resolution\n")
+    (repo / OTHER_SKILL).parent.mkdir(parents=True)
+    (repo / OTHER_SKILL).write_text("reviewed\n")
+    git(repo, "add", OTHER_SKILL)
+    git(repo, "commit", "-q", "-am", "M1")
+    reviewed = head_of(repo)
+    released = protection(repo, "--release", "--tip", reviewed, "--actor", "chair", "--reason", "ok")
+    assert released.returncode == 0, released.stderr
+
+    git(repo, "reset", "-q", "--hard", leased)
+    git(repo, "merge", "-q", "--no-ff", "--no-commit", "lane")
+    (repo / SKILL).write_text("reviewed resolution\n")
+    (repo / OTHER_SKILL).parent.mkdir(parents=True)
+    (repo / OTHER_SKILL).write_text("reviewed\n")
+    git(repo, "add", OTHER_SKILL)
+    if variant == "one-byte":
+        (repo / SKILL).write_text("reviewed resolutioN\n")
+    elif variant == "extra-entry":
+        extra = ".agents/extra.md"
+        (repo / extra).write_text("unreviewed\n")
+        git(repo, "add", extra)
+    elif variant == "missing-entry":
+        git(repo, "rm", "-q", "-f", OTHER_SKILL)
+    elif variant == "mode":
+        git(repo, "update-index", "--chmod=+x", SKILL)
+        (repo / SKILL).chmod(0o755)
+    git(repo, "commit", "-q", "-am", "M2")
+    merged = head_of(repo)
+    assert merged != reviewed
+    assert bool(git(repo, "diff", reviewed, merged, "--", ".agents/")) == (variant != "identical")
+    checked = landing(repo, merged, leased)
+    if variant == "identical":
+        assert checked.returncode == 0, checked.stderr
+    else:
+        assert checked.returncode == 1
+        assert merged in checked.stderr
+        assert checked.stderr.startswith("protected_instructions_changed:")
+
+
+def test_released_protected_trees_cannot_be_combined_path_by_path(tmp_path, monkeypatch):
+    monkeypatch.delenv("PROVENANT_ATTEMPT_MARKER", raising=False)
+    repo, _ = instruction_lane(tmp_path)
+    leased = head_of(repo)
+    first = side_commit(repo, leased, "reviewed first\n")
+    second = side_commit(repo, leased, "reviewed second\n", path=OTHER_SKILL)
+    for tip in (first, second):
+        git(repo, "reset", "-q", "--hard", tip)
+        released = protection(repo, "--release", "--tip", tip, "--actor", "chair", "--reason", "ok")
+        assert released.returncode == 0, released.stderr
+    # Each path matches a release, but neither release reviewed the combination.
+    combined = side_commit(repo, first, "reviewed second\n", path=OTHER_SKILL)
+    refused = landing(repo, combined, leased)
+    assert refused.returncode == 1
+    assert combined in refused.stderr
+    assert refused.stderr.startswith("protected_instructions_changed:")
+
+
+def test_an_already_landed_release_cannot_vouch_for_a_reverting_merge(tmp_path, monkeypatch):
+    monkeypatch.delenv("PROVENANT_ATTEMPT_MARKER", raising=False)
+    repo, _ = instruction_lane(tmp_path)
+    leased = head_of(repo)
+    old = head_of(repo, "main~1")
+    git(repo, "reset", "-q", "--hard", old)
+    released = protection(repo, "--release", "--tip", old, "--actor", "chair", "--reason", "ok")
+    assert released.returncode == 0, released.stderr
+    # Base has moved past the released v1 skill. A new merge must not restore it.
+    later = side_commit(repo, leased, "later\n", path="later.txt")
+    reverted = side_commit(repo, later, "v1\n")
+    tree = head_of(repo, reverted + "^{tree}")
+    merge = git(repo, "commit-tree", tree, "-p", leased, "-p", later, "-m", "revert in merge").strip()
+    refused = landing(repo, merge, leased)
+    assert refused.returncode == 1
+    assert merge in refused.stderr
+    assert refused.stderr.startswith("protected_instructions_changed:")
+
+
+def test_a_release_with_the_bases_protected_tree_does_not_cover_new_content(tmp_path, monkeypatch):
+    monkeypatch.delenv("PROVENANT_ATTEMPT_MARKER", raising=False)
+    repo, _ = instruction_lane(tmp_path)
+    leased = head_of(repo)
+    same_as_base = side_commit(repo, leased, "release with unchanged instructions\n", path="app.txt")
+    git(repo, "reset", "-q", "--hard", same_as_base)
+    released = protection(repo, "--release", "--tip", same_as_base, "--actor", "chair", "--reason", "ok")
+    assert released.returncode == 0, released.stderr
+    # Taking the base remains allowed even though the release contains no new protected content.
+    restored = side_commit(repo, head_of(repo, "lane"), "v2\n")
+    checked = landing(repo, restored, leased)
+    assert checked.returncode == 0, checked.stderr
+    unreviewed = side_commit(repo, restored, "unreviewed\n", path=OTHER_SKILL)
+    refused = landing(repo, unreviewed, leased)
+    assert refused.returncode == 1
+    assert unreviewed in refused.stderr
+    assert refused.stderr.startswith("protected_instructions_changed:")
+
+
+@pytest.mark.parametrize("landed", ["superseded", "squashed"])
+def test_a_stale_release_cannot_restore_protected_content_the_base_moved_past(tmp_path, monkeypatch, landed):
+    monkeypatch.delenv("PROVENANT_ATTEMPT_MARKER", raising=False)
+    repo, _ = instruction_lane(tmp_path)
+    fork = head_of(repo)
+    reviewed = side_commit(repo, fork, "reviewed\n", path=OTHER_SKILL)
+    git(repo, "reset", "-q", "--hard", reviewed)
+    released = protection(repo, "--release", "--tip", reviewed, "--actor", "chair", "--reason", "ok")
+    assert released.returncode == 0, released.stderr
+    base = fork
+    if landed == "squashed":
+        # A squash lands the release's content without its SHA ever reaching the base's history.
+        base = git(repo, "commit-tree", head_of(repo, reviewed + "^{tree}"), "-p", fork, "-m", "squash").strip()
+    newer = side_commit(repo, base, "v3\n")
+    # One commit on the newer base takes the release's whole tree, reverting SKILL from v3.
+    stale = git(repo, "commit-tree", head_of(repo, reviewed + "^{tree}"), "-p", newer, "-m", "stale").strip()
+    refused = landing(repo, stale, newer)
+    assert refused.returncode == 1
+    assert stale in refused.stderr
+    assert refused.stderr.startswith("protected_instructions_changed:")
+
+
+def test_a_release_with_unrelated_history_is_ignored_rather_than_blocking_checks(tmp_path, monkeypatch):
+    monkeypatch.delenv("PROVENANT_ATTEMPT_MARKER", raising=False)
+    repo, _ = instruction_lane(tmp_path)
+    leased = head_of(repo)
+    empty = git(repo, "hash-object", "-t", "tree", "-w", "/dev/null").strip()
+    orphan = git(repo, "commit-tree", empty, "-m", "orphan").strip()
+    git(repo, "reset", "-q", "--hard", orphan)
+    released = protection(repo, "--release", "--tip", orphan, "--actor", "chair", "--reason", "ok")
+    assert released.returncode == 0, released.stderr
+    # Taking the base's version still passes; an unreviewed change is still held.
+    restored = side_commit(repo, head_of(repo, "lane"), "v2\n")
+    assert landing(repo, restored, leased).returncode == 0
+    unreviewed = side_commit(repo, restored, "unreviewed\n", path=OTHER_SKILL)
+    refused = landing(repo, unreviewed, leased)
+    assert refused.returncode == 1
+    assert refused.stderr.startswith("protected_instructions_changed:")
 
 
 @pytest.mark.parametrize("history", ["merge-edits-a-skill", "unreleased-lane", "stale-branch-revert",
