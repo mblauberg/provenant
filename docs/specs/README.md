@@ -24,3 +24,4 @@ described. Fabric is now small enough to be its own documentation: see
 - [Progressive-disclosure refactor](harness/disclosure-refactor.md)
 - [Configurable multi-provider execution core](harness/provider-execution-core.md)
 - [Harness operating model: routing, cache, quota and telemetry](harness/operating-model.md)
+- [Held-out replay bench for harness changes](harness/replay-bench.md)
