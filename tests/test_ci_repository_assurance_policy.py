@@ -67,6 +67,7 @@ JOB_PERMISSIONS = {
     "docs": {"contents": "read"},
     "fabric": {"contents": "read"},
     "split-root": {"contents": "read"},
+    "rust": {"contents": "read"},
     "zizmor": {"contents": "read"},
     "ci-status": {},
 }
@@ -281,7 +282,7 @@ def test_every_tracked_path_matches_at_least_one_build_filter() -> None:
     filters = _change_filters(document)
     outputs = _job(document, "detect-changes").get("outputs")
     assert isinstance(outputs, dict)
-    assert set(outputs) == {"harness", "docs", "fabric", "split-root", "workflows"}
+    assert set(outputs) == {"harness", "docs", "fabric", "split-root", "workflows", "rust"}
     # `docs` is computed from the pull request's file list, not a path filter:
     # it only narrows what a `harness`-matching change runs, so coverage is
     # still proven by the filters below.
