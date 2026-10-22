@@ -8740,6 +8740,21 @@ def test_claude_malformed_accounts_warn_and_launch_ambient_identity(tmp_path, mo
     assert (tmp_path / 'result.md').read_text().strip() == (str(home / '.claude-work') if inherited else 'None')
 
 
+@pytest.mark.parametrize('accounts', [['broken'], {'claude': []}, {'claude': {'INVALID': {}}}])
+@pytest.mark.parametrize('account', ['pro', 'default'])
+def test_claude_malformed_accounts_refuse_an_explicit_account(tmp_path, monkeypatch, accounts, account):
+    home = tmp_path / 'home'
+    home.mkdir()
+    monkeypatch.setenv('HOME', str(home))
+    monkeypatch.setenv('AGENT_FABRIC_INSTANCE_ROOT', str(home / '.agents'))
+    monkeypatch.setenv('AGENT_FABRIC_STATE_ROOT', str(tmp_path / 'state'))
+    config = home / '.agents/config/telemetry.json'
+    config.parent.mkdir(parents=True)
+    config.write_text(json.dumps({'accounts': accounts}))
+    with pytest.raises(ValueError, match='invalid Claude account configuration.*explicit --account'):
+        fixture_plan(tmp_path, "raise AssertionError('must never launch')", 'claude', account=account)
+
+
 @pytest.mark.parametrize('mode', ['read_only', 'worktree_write'])
 @pytest.mark.parametrize('selected', ['.claude-pro', '.claude/pro', '.claude'])
 def test_claude_config_read_grants_follow_selected_identity(tmp_path, monkeypatch, mode, selected):

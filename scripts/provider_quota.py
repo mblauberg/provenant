@@ -656,6 +656,14 @@ class ClaudeAccountsExhaustedError(ValueError):
     """Every candidate has a cached, still-binding usage limit."""
 
 
+def claude_account_exhausted(value, now):
+    """Known five-hour/weekly exhaustion binds even with errors, credits or advisory windows."""
+    return any(row.get('name') in ('five_hour', 'seven_day')
+               and number(row.get('used_percent')) is not None
+               and number(row['used_percent']) >= 100 and not reset_passed(row, now)
+               for row in (value or {}).get('windows', []))
+
+
 def choose_claude_account(snapshots, now):
     """Use cached windows: reserve first, then unknown readings, then least deficit.
 
@@ -667,9 +675,7 @@ def choose_claude_account(snapshots, now):
         windows = {row.get('name'): row for row in (value or {}).get('windows', [])}
         short, weekly = windows.get('five_hour'), windows.get('seven_day')
         # A known limit still binds when the other window is missing or the last fetch failed.
-        if any(row and number(row.get('used_percent')) is not None
-               and number(row['used_percent']) >= 100 and not reset_passed(row, now)
-               for row in (short, weekly)):
+        if claude_account_exhausted(value, now):
             continue
         if (not value or value.get('status') != 'ok' or not short or not weekly
                 or any(number(row.get('used_percent')) is None for row in (short, weekly))):

@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+from datetime import UTC, datetime
 
 try:
     from .fabric_records import read_cooldowns, identity_resolver
@@ -300,6 +301,21 @@ def _provider_quota():
     return _QUOTA or None
 
 
+def claude_account_needs_reselection(account):
+    """Release an automatic pin for exhausted windows or invalid telemetry configuration."""
+    quota = _provider_quota()
+    if not quota or account is None:
+        return False
+    try:
+        chosen = next((row for row in quota.accounts('claude') if row.label == account), None)
+        return bool(chosen and quota.claude_account_exhausted(
+            quota.load_snapshot('claude', account, chosen.identity_dir), datetime.now(UTC)))
+    except Exception:
+        # Quota readings stay advisory: an unreadable reading drops only an
+        # automatic pin, so planning can retain the ambient identity.
+        return True
+
+
 def cooling(adapter, model, records=None, *, account=None):
     if records is None:
         scopes = ({adapter: {'account': account, 'host': identity_resolver().host_id()}}
@@ -315,4 +331,7 @@ def cooling(adapter, model, records=None, *, account=None):
         except Exception:  # noqa: BLE001 - quota is advisory input to routing
             pass
     model = registered_model(adapter, model)
-    return records.get(adapter + "/" + model) or records.get(adapter + "/*")
+    entries = [entry for key in (adapter + "/" + model, adapter + "/*")
+               if (entry := records.get(key))]
+    return max(entries, key=lambda entry: datetime.fromisoformat(
+        entry["cooling_until"].replace("Z", "+00:00")), default=None)

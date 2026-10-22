@@ -4172,6 +4172,11 @@ def test_fabric_fast_plan_matches_or_delegates_shell_edge_routes(
 ):
     run, prompt, command = real_owner_fixture(tmp_path, monkeypatch, 'import sys\nsys.stdin.read()\n')
     isolate_fabric_plan_env(monkeypatch)
+    instance = tmp_path / 'instance'
+    config = instance / 'config/telemetry.json'
+    config.parent.mkdir(parents=True)
+    config.write_text(json.dumps({'accounts': {'claude': {'pro': {'identity_dir': str(tmp_path / 'identity')}}}}))
+    monkeypatch.setenv('AGENT_FABRIC_INSTANCE_ROOT', str(instance))
     monkeypatch.chdir(tmp_path)
     if adapter == 'codex':
         write_executable(tmp_path / 'provider-bin/codex', '#!/bin/sh\n[ "$1" = mcp ] && printf "[]"\nexit 0\n')
@@ -4182,7 +4187,7 @@ def test_fabric_fast_plan_matches_or_delegates_shell_edge_routes(
     args.timeout_seconds = mod.DEFAULT_TIMEOUT_SECONDS
     result = run / 'result.md'
     shell = subprocess.run([*mod.build_command(args, prompt, result), '--plan-only'],
-                           cwd=tmp_path, env=mod.routing_environment(), capture_output=True, text=True)
+                           cwd=tmp_path, env=mod.routing_environment(preserve_instance=True), capture_output=True, text=True)
     planned = mod.fast_fabric_plan(args, prompt, result, tmp_path)
     if planned is None:
         return  # The shell planner owns routes outside the narrow fast path.
@@ -4228,7 +4233,7 @@ def test_fabric_fast_plan_delegates_valid_shell_only_options(tmp_path, monkeypat
         args.fallback = 'true'
     result = run / 'result.md'
     shell = subprocess.run([*mod.build_command(args, prompt, result), '--plan-only'],
-                           cwd=tmp_path, env=mod.routing_environment(), capture_output=True, text=True)
+                           cwd=tmp_path, env=mod.routing_environment(preserve_instance=True), capture_output=True, text=True)
     assert shell.returncode == 0, shell.stderr
     expected = json.loads(shell.stdout)
     assert expected['adapter'] == 'claude'
@@ -5137,6 +5142,55 @@ def test_paced_retry_tolerates_a_row_with_null_evidence(monkeypatch):
     assert launches[1][1] == "claude-opus-5-5"
 
 
+def test_paced_retry_retains_the_selected_claude_account(monkeypatch):
+    plan = {"adapter": "claude", "model": "claude-opus-5-5", "account": "pro"}
+    rows = [{"status": "rate_limited", "retry_after": 1}, {"status": "ok", "retryable": False}]
+    mod, args, launches = _sequence_fixture(monkeypatch, plan, rows, [])
+    mod.execute_attempt_sequence(args)
+    assert launches == [(None, None, None), ("claude", "claude-opus-5-5", "pro")]
+
+
+def test_paced_retry_uses_the_longer_account_wide_cooldown():
+    mod = load_dispatch_module()
+    short = {"cooling_until": "2099-01-01T00:00:01Z", "status": "rate_limited"}
+    wide = {"cooling_until": "2099-01-01T02:00:00Z", "status": "quota_exhausted"}
+    records = {"claude/claude-opus-5-5": short, "claude/*": wide}
+    assert mod.exec_routing.cooling("claude", "claude-opus-5-5", records, account="pro") == wide
+
+
+def test_paced_retry_blocks_quota_discovered_during_planning(tmp_path, monkeypatch):
+    from datetime import UTC, datetime, timedelta
+    import provider_quota as quota
+
+    launched = tmp_path / 'launched'
+    run, prompt, command = real_owner_fixture(tmp_path, monkeypatch,
+        f'from pathlib import Path\nPath({str(launched)!r}).touch()\n'
+        'import json\nprint(json.dumps({"type":"result","result":"DONE"}))\n')
+    isolate_fabric_plan_env(monkeypatch)
+    instance = tmp_path / 'instance'
+    config = instance / 'config/telemetry.json'
+    config.parent.mkdir(parents=True)
+    identity = tmp_path / 'pro'
+    config.write_text(json.dumps({'accounts': {'claude': {'pro': {'identity_dir': str(identity)}}}}))
+    monkeypatch.setenv('AGENT_FABRIC_INSTANCE_ROOT', str(instance))
+    monkeypatch.setenv('AGENT_FABRIC_STATE_ROOT', str(tmp_path / 'state'))
+    quota.save_snapshot({'schema': quota.SCHEMA, 'host': quota.telemetry_host(),
+                         'provider': 'claude', 'account': 'pro', 'status': 'ok', 'windows': [
+                             {'name': 'five_hour', 'used_percent': 100, 'window_minutes': 300,
+                              'reset_at': (datetime.now(UTC) + timedelta(hours=2)).isoformat()},
+                         ]}, identity)
+    monkeypatch.chdir(tmp_path)
+    mod = load_dispatch_module()
+    args = mod.parser().parse_args(command[2:] + ['--account', 'pro'])
+    args.timeout_seconds = 60
+    args.fallback_from = {'attempt': 1, 'status': 'rate_limited'}
+    args._rate_limit_retry = {'until': datetime.now(UTC).isoformat(), 'deadline': time.monotonic() + 60}
+    assert mod.dispatch(args) == 1
+    attempt = json.loads(next(run.glob('tasks/*/attempt-*/attempt.json')).read_text())
+    assert attempt['evidence']['signature'] == 'cooldown_active'
+    assert not launched.exists()
+
+
 def test_nested_attempt_retains_parent_in_receipt_and_index(tmp_path, monkeypatch):
     mod = load_dispatch_module()
     parent = {'run_id': 'mcp-parent', 'task_id': 'writer', 'attempt': 2,
@@ -5634,6 +5688,72 @@ def test_model_fallback_retains_the_automatically_selected_claude_account(monkey
     mod, args, launches = _sequence_fixture(monkeypatch, plan, rows, alternatives)
     mod.execute_attempt_sequence(args)
     assert launches == [(None, None, None), ("claude", "sonnet", "pro")]
+
+
+def test_unreadable_account_quota_releases_an_automatic_pin_instead_of_crashing(tmp_path, monkeypatch):
+    instance = tmp_path / 'instance'
+    config = instance / 'config/telemetry.json'
+    config.parent.mkdir(parents=True)
+    config.write_text(json.dumps({'accounts': {'claude': {'pro': {'identity_dir': 5}}}}))
+    monkeypatch.setenv('AGENT_FABRIC_INSTANCE_ROOT', str(instance))
+    monkeypatch.setenv('AGENT_FABRIC_STATE_ROOT', str(tmp_path / 'state'))
+    mod = load_dispatch_module()
+    assert mod.exec_routing.claude_account_needs_reselection('pro') is True
+
+
+@pytest.mark.parametrize('reading', ['credit_only', 'error', 'advisory', 'malformed'])
+def test_model_fallback_reselects_an_automatically_pinned_exhausted_account(tmp_path, monkeypatch, reading):
+    from datetime import UTC, datetime, timedelta
+    import provider_quota as quota
+
+    run, prompt, command = real_owner_fixture(tmp_path, monkeypatch, 'import sys\nsys.stdin.read()\n')
+    isolate_fabric_plan_env(monkeypatch)
+    instance = tmp_path / 'instance'
+    config = instance / 'config/telemetry.json'
+    config.parent.mkdir(parents=True)
+    identities = {label: tmp_path / label for label in ('a', 'b')}
+    config.write_text(json.dumps({'accounts': {'claude': {
+        label: {'identity_dir': str(path)} for label, path in identities.items()}}}))
+    monkeypatch.setenv('AGENT_FABRIC_INSTANCE_ROOT', str(instance))
+    monkeypatch.setenv('AGENT_FABRIC_STATE_ROOT', str(tmp_path / 'state'))
+    monkeypatch.delenv('CLAUDE_CONFIG_DIR', raising=False)
+    for label, path in identities.items():
+        quota.save_snapshot({'schema': quota.SCHEMA, 'host': quota.telemetry_host(),
+                             'provider': 'claude', 'account': label, 'status': 'ok', 'windows': [
+                                 {'name': 'five_hour', 'used_percent': 10, 'window_minutes': 300,
+                                  'reset_at': (datetime.now(UTC) + timedelta(hours=2)).isoformat()},
+                                 {'name': 'seven_day', 'used_percent': 10, 'window_minutes': 10080,
+                                  'reset_at': (datetime.now(UTC) + timedelta(days=3)).isoformat()},
+                             ]}, path)
+    cache = quota.cache_path('claude', 'a', identity_dir=identities['a'])
+    code = f'''import json,sys,os
+from pathlib import Path
+sys.stdin.read()
+if any('opus' in arg for arg in sys.argv):
+    path = Path({str(cache)!r})
+    value = json.loads(path.read_text())
+    value['windows'][0]['used_percent'] = 100
+    value['windows'][0]['advisory'] = {reading == 'advisory'!r}
+    value['status'] = {'error' if reading == 'error' else 'ok'!r}
+    value['usage_credits'] = [{{'kind': 'credits', 'balance': 100, 'unit': 'credits'}}]
+    path.write_text(json.dumps(value))
+    if {reading == 'malformed'!r}:
+        Path({str(config)!r}).write_text(json.dumps({{'accounts': ['broken']}}))
+    print(json.dumps({{'type':'result','is_error':True,'result':'429 rate limit; retry after 2000 seconds'}}))
+    sys.exit(1)
+print(json.dumps({{'type':'result','result':str(os.environ.get('CLAUDE_CONFIG_DIR'))}}))
+'''
+    write_executable(tmp_path / 'provider-bin/claude', '#!/usr/bin/env python3\n' + code)
+    monkeypatch.chdir(tmp_path)
+    mod = load_dispatch_module()
+    args = mod.parser().parse_args(command[2:])
+    args.timeout_seconds = 60
+    args.fallback = json.dumps(['claude/sonnet'])
+    assert mod.dispatch(args) == 0
+    attempts = [json.loads(path.read_text()) for path in sorted(run.glob('tasks/*/attempt-*/attempt.json'))]
+    assert [row['account'] for row in attempts] == ['a', 'default' if reading == 'malformed' else 'b']
+    assert (run / attempts[-1]['paths']['result']).read_text().strip() == (
+        'None' if reading == 'malformed' else str(identities['b']))
 
 
 def test_cross_adapter_fallback_plans_claude_before_checking_account_cooldown(monkeypatch):
