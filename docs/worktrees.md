@@ -82,7 +82,9 @@ such a worktree to triage rather than guessing its branch.
 Creating a worktree clones the primary checkout's `node_modules` with
 copy-on-write when its dependency preflight passes and both checkouts have the
 same `package-lock.json`. It also clones existing `runtime/*/node_modules`
-directories. macOS uses APFS clone files; Linux requires reflink support. This
+directories; when `runtime/fabric/node_modules` is absent, it links to the
+primary root `node_modules`. macOS uses APFS clone files; Linux requires
+reflink support. This
 keeps each worktree's relative `@local/fabric` workspace link pointed at its
 own checkout. The measured primary tree was 131 MB; four worktrees took about
 4.3 seconds to create and added about 3.3 MB on disk.

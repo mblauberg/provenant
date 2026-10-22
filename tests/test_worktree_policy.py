@@ -128,6 +128,32 @@ def test_create_cow_clones_root_and_workspace_node_modules(tmp_path, capsys, mon
     assert not worktree.exists()
 
 
+def test_create_links_primary_node_modules_for_fabric_runtime(tmp_path, capsys, monkeypatch):
+    repo = tmp_path / "project"
+    head = init_repo(repo)
+    (repo / "runtime" / "fabric").mkdir(parents=True)
+    (repo / "package-lock.json").write_text("lock\n")
+    subprocess.run(["git", "-C", str(repo), "add", "package-lock.json"], check=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-qm", "add lock"], check=True)
+    head = subprocess.check_output(["git", "-C", str(repo), "rev-parse", "HEAD"], text=True).strip()
+    (repo / "node_modules" / "vitest").mkdir(parents=True)
+    (repo / "node_modules" / "vitest" / "package.json").write_text("{}\n")
+    monkeypatch.setattr(worktree_policy, "node_modules_preflight_passes", lambda _root: True)
+    monkeypatch.setattr(worktree_policy, "cow_clone", lambda source, target: shutil.copytree(source, target))
+
+    assert worktree_policy.main([
+        "create", "fabric-review", "--repo", str(repo), "--detach", head,
+    ]) == 0
+
+    worktree = repo / ".worktrees" / "fabric-review"
+    linked_modules = worktree / "runtime" / "fabric" / "node_modules"
+    assert linked_modules.is_symlink()
+    assert linked_modules.resolve() == (repo / "node_modules").resolve()
+    assert (linked_modules / "vitest" / "package.json").is_file()
+    assert (repo / "node_modules" / "vitest" / "package.json").read_text() == "{}\n"
+    assert json.loads(capsys.readouterr().out)["node_modules"] == "cloned"
+
+
 def test_node_preflight_uses_the_callers_node_path_and_clears_git_redirects(tmp_path, monkeypatch):
     root = tmp_path / "checkout"
     (root / "scripts").mkdir(parents=True)
