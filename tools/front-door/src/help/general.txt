@@ -1,7 +1,7 @@
 usage: provenant <command> [arguments...]
 
-Thin front door to owners:
-  root           print resolved product checkout
+Commands
+  root checkout
   route ...      scripts/model-route ...
   routes ...     scripts/model-route routes
   capabilities   skills/orchestrate/scripts/capabilities.py
@@ -14,6 +14,7 @@ Thin front door to owners:
   lease ...      runtime/fabric/bin/fabric landing-*
   hosts|peer     scripts/fabric-hosts
   lanes|events   runtime/fabric/bin/fabric lanes|events
+  graph ...      runtime/fabric/bin/fabric graph
   telemetry ...  scripts/provenant-telemetry
   stats|retro    scripts/provenant-telemetry
   quota ...      scripts/provenant-quota
