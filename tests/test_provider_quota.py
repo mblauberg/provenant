@@ -163,10 +163,13 @@ def test_codex_app_server_speaks_json_rpc_and_never_inherits_a_token(quota, monk
 
 def test_codex_falls_back_to_rollout_rate_limits_already_in_the_ledger(quota, monkeypatch, tmp_path):
     db = load('telemetry_for_quota', ROOT / 'scripts/telemetry.py').connect()
-    for used, stamp in ((40, NOW - timedelta(hours=2)), (45, NOW - timedelta(hours=1))):
-        db.execute('INSERT INTO observations(event_id,source,host,provider,adapter,timestamp,window,used_percent,window_minutes,reset_at) '
-                   'VALUES (?,?,?,?,?,?,?,?,?,?)', (f'e{used}', 'codex', 'studio', 'openai', 'codex', iso(stamp),
-                                                     'secondary', used, 10080, iso(NOW + timedelta(days=2))))
+    # Another account's newer reading on this host must never stand in for this account's.
+    for used, stamp, label in ((40, NOW - timedelta(hours=2), 'default'), (45, NOW - timedelta(hours=1), 'default'),
+                               (90, NOW - timedelta(minutes=5), 'work')):
+        db.execute('INSERT INTO observations(event_id,source,host,provider,adapter,account,timestamp,window,used_percent,'
+                   'window_minutes,reset_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)',
+                   (f'e{used}', 'codex', 'studio', 'openai', 'codex', label, iso(stamp), 'secondary', used, 10080,
+                    iso(NOW + timedelta(days=2))))
     db.commit()
     monkeypatch.setattr(quota, 'executable', lambda name: None)
     account = quota.Account('codex', 'default', tmp_path / 'home/.codex', True)

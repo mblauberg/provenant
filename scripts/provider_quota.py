@@ -126,8 +126,8 @@ class _Io:
         return http_json(url, headers)
 
     @staticmethod
-    def ledger_windows(adapter, now):
-        return ledger_windows(adapter, now)
+    def ledger_windows(adapter, now, account=None):
+        return ledger_windows(adapter, now, account)
 
 
 IO = _Io()
@@ -301,13 +301,13 @@ def http_json(url, headers):
     return value
 
 
-def ledger_windows(adapter, now):
-    """The latest rate-limit observation per window that this host's ledger already holds."""
+def ledger_windows(adapter, now, account=None):
+    """The latest rate-limit observation per window that this host's ledger holds for one account."""
     try:
         with _telemetry().connect() as db:
             rows = db.execute('SELECT window,used_percent,window_minutes,reset_at,timestamp FROM observations '
-                              'WHERE adapter=? AND host=? AND used_percent IS NOT NULL '
-                              'ORDER BY timestamp DESC LIMIT 500', (adapter, telemetry_host())).fetchall()
+                              'WHERE adapter=? AND host=? AND account IS ? AND used_percent IS NOT NULL '
+                              'ORDER BY timestamp DESC LIMIT 500', (adapter, telemetry_host(), account)).fetchall()
     except (OSError, ValueError, sqlite3.Error):
         rows = []
     latest = {}

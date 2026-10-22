@@ -55,7 +55,7 @@ def patterns():
         'fabric': '<current-and-registered-projects>/.agent-run/runs/**/attempt.json',
         'route_health': os.environ.get('AGENT_FABRIC_ROUTE_HEALTH_PATH', str(state / 'route-health.json')),
         'cooldowns': os.environ.get('FABRIC_COOLDOWNS_PATH', str(state / 'cooldowns.json')),
-        **{source: ';'.join(str(root / folder / pattern) for root, _, _ in account_roots(source))
+        **{source: ';'.join(str(root / folder / pattern) for root, _ in account_roots(source))
            for source, (_, folder, pattern) in IDENTITY_SOURCES.items()},
         'otel': str(state / 'otel/*.ndjson'),
     }
@@ -156,15 +156,6 @@ def connect():
         backfill_session_events(db)
         db.execute("DELETE FROM meta WHERE key='events_usage_rowid'")  # the earlier, lossy watermark
         db.execute("INSERT OR IGNORE INTO meta VALUES ('session_events_backfill', ?)", (now(),))
-    if db.execute("SELECT 1 FROM meta WHERE key='quota_series_backfill'").fetchone() is None:
-        # Codex rollouts carry plan and credit balance with every rate-limit reading. Re-read the
-        # rollouts still on disk once to backfill quota_series; their observations are rewritten
-        # under the account label, so drop the old ones first. Usage rows upsert in place.
-        for (path,) in db.execute("SELECT path FROM cursors WHERE source='codex'").fetchall():
-            if Path(path).is_file():
-                db.execute("DELETE FROM observations WHERE source='codex' AND origin_path=?", (path,))
-                db.execute("DELETE FROM cursors WHERE source='codex' AND path=?", (path,))
-        db.execute("INSERT OR IGNORE INTO meta VALUES ('quota_series_backfill', ?)", (now(),))
     relabel_host(db)
     for source, pattern in patterns().items():
         db.execute('INSERT INTO sources(source,path_pattern,parser_version,status) VALUES (?,?,2,?) '
@@ -208,7 +199,7 @@ def put_usage(db, source, event_id, origin_path, **values):
                   **{key: values.get(key) for key in ('session', 'provider', 'account', 'model')})
 
 
-def claude_record(db, row, state, path, offset, account=None, plan=None):
+def claude_record(db, row, state, path, offset, account=None):
     message = row.get('message') or {}
     usage = message.get('usage')
     if row.get('type') != 'assistant' or not isinstance(usage, dict) or not message.get('id'):
@@ -367,7 +358,7 @@ def put_quota_series(db, provider, account, host, observed_at, windows, source=N
                   provider=provider, account=account)
 
 
-def codex_record(db, row, state, path, offset, account=None, plan=None):
+def codex_record(db, row, state, path, offset, account=None):
     payload = row.get('payload') or {}
     if row.get('type') == 'session_meta':
         state.update(session=payload.get('id') or payload.get('session_id'),
@@ -409,7 +400,6 @@ def codex_record(db, row, state, path, offset, account=None, plan=None):
                       output_tokens=max(0, output - (reasoning or 0)) if output is not None else None,
                       reasoning_tokens=reasoning, usage_source='token_count')
         limits = payload.get('rate_limits') or {}
-        windows = []
         for window, value in limits.items():
             if isinstance(value, dict) and number(value.get('used_percent')) is not None:
                 reset_at = value.get('resets_at')
@@ -419,14 +409,6 @@ def codex_record(db, row, state, path, offset, account=None, plan=None):
                             account=meta['account'], session=state.get('session'),
                             timestamp=timestamp, window=window, used_percent=value['used_percent'],
                             window_minutes=number(value.get('window_minutes')), reset_at=reset_at)
-                windows.append({'name': window, 'used_percent': value['used_percent'],
-                                'window_minutes': number(value.get('window_minutes')), 'reset_at': reset_at})
-        if windows and account:
-            # The same reading `provenant quota` takes, plus plan and credit balance, at every turn.
-            credits = limits.get('credits') if isinstance(limits.get('credits'), dict) else {}
-            put_quota_series(db, 'codex', account, host_id(), timestamp, windows, source='codex rollout',
-                             plan=plan or limits.get('plan_type'), plan_detected=limits.get('plan_type'),
-                             credit_balance=amount(credits.get('balance')))
 
 
 # OTLP attributes kept beside every numeric one; any other string may carry content.
@@ -593,7 +575,7 @@ def identity_owner():
 
 
 def account_roots(source):
-    """(identity directory, account label, configured plan) for each directory this source reads.
+    """(identity directory, account label) for each directory this source reads, in rank order.
 
     Configured `identity_dir` paths come first, then `aliases` (another directory signed in to
     the same account, such as the CLI default), then the provider default as `default`.
@@ -608,43 +590,80 @@ def account_roots(source):
     ranked = []
     for label, entry in sorted(entries.items()):
         entry = entry if isinstance(entry, dict) else {}
-        plan = str(entry['plan']) if entry.get('plan') else None
-        ranked += [(1, alias, label, plan) for alias in entry.get('aliases') or () if isinstance(alias, str)]
-        ranked.append((0 if entry.get('identity_dir') else 2, entry.get('identity_dir') or default, label, plan))
-    ranked.append((3, default, 'default', None))
+        ranked += [(1, alias, label) for alias in entry.get('aliases') or () if isinstance(alias, str)]
+        ranked.append((0 if entry.get('identity_dir') else 2, entry.get('identity_dir') or default, label))
+    ranked.append((3, default, 'default'))
     roots = {}
-    for _, path, label, plan in sorted(ranked, key=lambda item: item[0]):
+    for _, path, label in sorted(ranked, key=lambda item: item[0]):
         if path is not None:
-            roots.setdefault(Path(path).expanduser(), (label, plan))
-    return [(root, label, plan) for root, (label, plan) in roots.items()]
+            roots.setdefault(Path(path).expanduser(), label)
+    return list(roots.items())
+
+
+def file_owner(source, path, roots):
+    """The account owning a file: the deepest identity directory holding it, ties by rank.
+
+    Ingest and relabelling both use this, so every file has exactly one owner.
+    """
+    folder = IDENTITY_SOURCES[source][1]
+    holders = [(len((root / folder).parts), -rank, label) for rank, (root, label) in enumerate(roots)
+               if Path(path).is_relative_to(root / folder)]
+    return max(holders)[2] if holders else None
+
+
+def contained(path, root):
+    """A regular file reached without any symlink below its identity directory.
+
+    A link named like a transcript could otherwise make ingest open a credential file.
+    """
+    try:
+        return (not path.is_symlink() and path.is_file() and
+                path.resolve() == root.resolve() / path.relative_to(root))
+    except (OSError, ValueError):
+        return False
 
 
 def native_paths(source):
-    """Each file of a native source mapped to the (account, plan) of the directory it lives in."""
+    """Each file of a native source mapped to the account of the directory that owns it."""
     _, folder, pattern = IDENTITY_SOURCES[source]
+    roots = account_roots(source)
     found = {}
-    for root, label, plan in account_roots(source):
+    for root, _ in roots:
         base = root / folder
-        paths = sorted(base.glob(pattern)) if '*' in pattern else [base / pattern]
-        for path in paths:
-            if path.is_file():
-                found.setdefault(path, (label, plan))
+        for path in sorted(base.glob(pattern)) if '*' in pattern else [base / pattern]:
+            if path not in found and contained(path, root):
+                found[path] = file_owner(source, path, roots)
     return found
 
 
 def attribute_accounts(db):
-    """Label this host's native usage rows by the directory their file came from, once per root set."""
+    """Relabel this host's native rows by their file's owner whenever the identity directories change.
+
+    Usage rows (through `usage_files`), Codex observations (`origin_path`) and `session.start`
+    events (`source_ref`) all move together, so no table keeps a stale label.
+    """
     roots = {source: account_roots(source) for source in IDENTITY_SOURCES}
-    digest = identity([[str(root), label] for source in sorted(roots) for root, label, _ in roots[source]])
+    digest = identity([[source, str(root), label] for source in sorted(roots) for root, label in roots[source]])
     if (db.execute("SELECT value FROM meta WHERE key='account_roots'").fetchone() or [None])[0] == digest:
         return
-    for source, pairs in roots.items():
-        for root, label, _ in pairs:
-            prefix = str(root) + os.sep
-            db.execute('UPDATE usage SET account=? WHERE source=? AND host=? AND account IS NOT ? AND EXISTS '
-                       '(SELECT 1 FROM usage_files f WHERE f.source=usage.source AND f.event_id=usage.event_id '
-                       'AND f.host=usage.host AND substr(f.path,1,?)=?)',
-                       (label, source, host_id(), label, len(prefix), prefix))
+    host = host_id()
+    label = cache(lambda source, path: file_owner(source, path, roots[source]))
+    # A message seen in several files takes its first path's owner, so the choice is stable.
+    usage = [(label(row['source'], row['path']), row['source'], row['event_id'], host) for row in db.execute(
+        'SELECT source, event_id, MIN(path) AS path FROM usage_files WHERE host=? AND source IN (?,?,?) '
+        'GROUP BY source, event_id', (host, *IDENTITY_SOURCES))]
+    db.executemany('UPDATE usage SET account=? WHERE source=? AND event_id=? AND host=? AND account IS NOT ?',
+                   [(*row, row[0]) for row in usage if row[0]])
+    for (path,) in db.execute("SELECT DISTINCT origin_path FROM observations WHERE source='codex' AND host=?",
+                              (host,)).fetchall():
+        if path and label('codex', path):
+            db.execute("UPDATE observations SET account=? WHERE source='codex' AND host=? AND origin_path=?",
+                       (label('codex', path), host, path))
+    for row in db.execute("SELECT rowid, source_ref, attrs FROM events WHERE kind='session.start' AND host=?",
+                          (host,)).fetchall():
+        source = json.loads(row['attrs']).get('source')
+        if source in IDENTITY_SOURCES and row['source_ref'] and label(source, row['source_ref']):
+            db.execute('UPDATE events SET account=? WHERE rowid=?', (label(source, row['source_ref']), row['rowid']))
     db.execute("INSERT OR REPLACE INTO meta VALUES ('account_roots', ?)", (digest,))
 
 
@@ -741,7 +760,7 @@ def ingest_document(db, source, path):
                (source, str(path), stat.st_size, stat.st_mtime_ns, stat.st_size, '{}'))
 
 
-def ingest_opencode(db, path, account=None, plan=None):
+def ingest_opencode(db, path, account=None):
     old = db.execute('SELECT state FROM cursors WHERE source=? AND path=?', ('opencode', str(path))).fetchone()
     saved = json.loads(old['state']) if old else {}
     watermark = saved.get('max_updated', 0)
@@ -787,7 +806,7 @@ def ingest(db):
             except (OSError, ValueError, sqlite3.Error):
                 errors += 1
         for path in paths:
-            owner = dict(zip(('account', 'plan'), paths[path])) if isinstance(paths, dict) else {}
+            owner = {'account': paths[path]} if isinstance(paths, dict) else {}
             try:
                 with db:
                     if source == 'opencode':

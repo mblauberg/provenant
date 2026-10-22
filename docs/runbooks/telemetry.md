@@ -211,7 +211,7 @@ provenant routes --json         # cached quota only; never fetches
 
 Codex prefers the credential-free `codex app-server` JSON-RPC rate-limit read,
 then falls back to the latest local rollout observations already ingested for
-its default identity. Claude reads its own OAuth usage endpoint using the
+the same account. Claude reads its own OAuth usage endpoint using the
 identity's credentials in process, with Keychain fallback for the default macOS
 identity. Cursor reads its usage-summary endpoint using its local session.
 Authenticated HTTP requests refuse redirects, so credentials stay at the
@@ -292,9 +292,7 @@ Cursor `membershipType`), `plan_tier` (Claude `rateLimitTier`, which separates
 Max 5x from 20x), `credit_balance` (Codex usage credits drawn after the plan
 allowance) and `reset_credits`. A reading identical to the window's previous
 row only advances that row's `last_seen_at`, so the menu bar's two-minute polling
-adds a row only when something changed. Codex rollouts add the same row at every
-rate-limit reading with `source: codex rollout`; an existing ledger re-reads the
-rollouts still on disk once to backfill them. A changed plan field emits
+adds a row only when something changed. A changed plan field emits
 `plan.change`. No new provider call is made for this history.
 
 Plan prices are user configuration, read at report time and never fetched.
