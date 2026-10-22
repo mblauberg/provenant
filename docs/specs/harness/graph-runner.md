@@ -161,12 +161,14 @@ graph is terminal and its receipts are written.
 2. **Reservation.** An attempt is **active** while its provider owner or any
    recorded gate group lives, whatever its state (`fast_passed` included). In
    one `BEGIN IMMEDIATE` transaction the owner counts active attempts in this
-   graph, and attempts with a live provider owner in each pool
-   `(adapter, model, account)` across every graph (gates hold no provider
-   slot), then moves a ready attempt to `running` only if graph occupancy is
+   graph, and attempts holding a provider slot in each pool
+   `(adapter, model, account)` across every graph, then moves a ready attempt to `running` only if graph occupancy is
    below `max_width` and pool occupancy is below `cap(adapter, model, account)`.
    The writer's worktree reservation joins the same transaction, so no wake or
-   concurrent owner overfills a cap. `account` is `default` until R3. `cap` is the static ceiling in
+   concurrent owner overfills a cap. An attempt holds a provider slot from the
+   transaction that moves it to `running` until its launch fails or its provider
+   owner exits, so a launch still in dispatch preflight counts; gate-only
+   attempts hold none. `account` is `default` until R3. `cap` is the static ceiling in
    `config/graph-defaults.json` (initially OpenCode free 2 per model, Cursor 1,
    agy 2, Codex and Claude 3), bounded by the R3 ledger when it exists; a pool
    in cooldown contributes zero. Active hand-made registry lanes count against
@@ -204,9 +206,16 @@ signals only the PID (`run-registry.ts:266`), so the registry gains
 `signalRecordedGroup`, which signals `-pgid` only while the group is
 attributable: the leader matches its recorded start time, or the leader has
 exited and no live process has pid equal to the pgid. SIGTERM, then SIGKILL
-after a grace period. A gate group has exited only when `kill(-pgid, 0)` returns
-`ESRCH` (the check `dispatch_run.py:626` already uses); no rerun or reservation
-release happens before that.
+after a grace period. A gate group has exited when `kill(-pgid, 0)` returns `ESRCH`, or when the
+pgid is positively owned by a different process, its start time differing from
+the recorded one (the `pgid_gone` and `pgid_reused` cases `dispatch_run.py:626`
+and `:636` already distinguish). An unknown or failed probe stays fenced. No
+rerun or reservation release happens before one of those holds.
+
+Slice-1 tests cover the handshake's edges: the owner is the only holder of the
+pipe's write end (close-on-exec everywhere else), EOF before `go` runs nothing,
+a buffered `go` written just before owner death still runs a recorded gate, and
+the wrapper reaps the command so a zombie never reads as live.
 
 A CI gate passes only on checks for the attempt's exact `head_sha` (compared
 against the check suite's SHA), so another push cannot satisfy it.
