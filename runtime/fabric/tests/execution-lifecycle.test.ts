@@ -782,7 +782,7 @@ describe("dispatch CLI", () => {
     });
     try {
       await cancelConfiguredRun(String(started.id), identity, "fixture complete", ownerEnvironment);
-      expect(await exited).toBe(0);
+      expect(await exited).toBe(1);
       expect(output).toContain("cross-project-lane");
       expect(output).toContain("cancelled");
       expect(output).not.toContain("no lanes are running");
