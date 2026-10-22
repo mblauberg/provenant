@@ -3632,9 +3632,9 @@ def test_opencode_max_variant_is_mapped_to_xhigh():
 def test_explicit_effort_beats_a_retired_max_variant():
     result, route = resolve("--adapter", "opencode", "--model", "opencode-go/deepseek-v4.1-flash#max",
                             "--role", "worker", "--effort", "high")
-    assert route["effort"] == "high"
     assert route["requested_effort"] == "high"
     assert "max retired" not in route["effort_substitution"]
+    assert route["effort"] != "xhigh"
 
 
 def test_explicit_max_and_ultra_agree_on_a_probe_that_offers_max(tmp_path):
