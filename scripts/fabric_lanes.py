@@ -263,6 +263,16 @@ class LaneFederation:
                 contexts = (transport.prepare(project, clean, identifier) if verb == 'dispatch'
                     else transport.continuation(project, verb, clean, identifier) if verb in {'resume', 'handoff'} else [])
                 preparing_reader = False
+                for context in contexts:
+                    if not context.get('read_only'):
+                        continue
+                    task = clean['tasks'][context['index']] if clean.get('tasks') else clean
+                    prompt = task.get('prompt', clean.get('prompt'))
+                    if isinstance(prompt, str):
+                        task['prompt'] = (f'Remote read-only checkout: {context["worktree_path"]}\n'
+                            f'Working directory: {transport.reader_cwd(context)}\n'
+                            f'HEAD: {context["base_revision"]}\n'
+                            'Use this checkout and HEAD for paths and revision references in the brief.\n\n' + prompt)
                 reader = next((c for c in contexts if c.get('read_only')), None)
                 result = (self.worker(verb, project, clean, launch_path, held, reader_cwd=str(transport.reader_cwd(reader)))
                     if reader and (verb in {'resume', 'handoff'} or clean.get('session')) else self.worker(verb, project, clean, launch_path, held))

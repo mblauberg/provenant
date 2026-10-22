@@ -994,6 +994,33 @@ class LaneLoopbackContracts(unittest.TestCase):
         self.assertFalse(remote.exists())
         self.assertNotIn(str(remote), git(self.peer_workspace, 'worktree', 'list', '--porcelain'))
 
+    def test_remote_reader_prompt_names_actual_checkout_cwd_and_head(self):
+        git, _, local = self.writer_fixture()
+        (local / 'src').mkdir()
+        (local / 'src/review.txt').write_text('review input')
+        git(local, 'add', 'src/review.txt')
+        git(local, 'commit', '-qm', 'review subdirectory')
+        head = git(local, 'rev-parse', 'HEAD')
+        brief = self.root / 'reader-brief.md'
+        brief.write_text('Review ' + str(local / 'src') + '\n\nslow')
+        launched = self.client('dispatch', host='workshop', adapter='codex', model='fixture',
+            prompt_file=str(brief), mode='read_only', cwd=str(local / 'src'),
+            task_id='prompt-location', operation_id='prompt-location')
+        self.assertEqual(launched['status'], 'running', launched)
+        try:
+            context = launched['code_transport']['readers'][0]
+            checkout = Path(context['worktree_path'])
+            prompt = Path(launched['paths']['run_dir']) / '_owner/prompt-location-prompt-1.md'
+            text = prompt.read_text()
+            preamble, original = text.split('\n\n', 1)
+            self.assertIn(str(checkout), preamble)
+            self.assertIn(str(checkout / 'src'), preamble)
+            self.assertIn(head, preamble)
+            self.assertEqual(original, brief.read_text())
+        finally:
+            self.client('cancel', id=launched['id'], operation_id='stop-prompt-location')
+            self.wait_writer(launched['id'])
+
     def test_reader_polling_preserves_input_between_fallback_attempts(self):
         self.writer_fixture()
         launched = self.client('dispatch', host='workshop', adapter='codex', model='fixture',
