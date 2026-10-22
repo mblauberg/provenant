@@ -597,7 +597,8 @@ class LaneFederation:
                 or '@' not in selector and (any(isinstance(row.get(key), str) and row[key].split('@')[0] == selector for key in ('id', 'run_id', 'task_id'))
                     or row['host'] == self.config.local_host and (selector == row.get('run_dir')
                         or isinstance(row.get('run_path'), str) and (selector == Path(row['run_path']).name
-                            or Path(selector).is_absolute() and Path(selector).resolve() == (self.h.project_directory(project) / '.agent-run' / row['run_path']).resolve())))]
+                            or Path(selector).is_absolute() and Path(selector).resolve() == Path(
+                                row.get('run_dir') or self.h.project_directory(project) / '.agent-run' / row['run_path']).resolve())))]
             owners = {row['host'] for row in candidates}
             if len(owners) > 1:
                 raise self.h.HostError('ambiguous_selector', 'Selector matches records on multiple hosts')

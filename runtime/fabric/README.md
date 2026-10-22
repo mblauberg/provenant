@@ -494,6 +494,7 @@ project has `source_project` naming the launching project, an empty `run_path`
 and null artifact paths. Read its artifacts, status or output from that source
 project; `lanes --project <source_project>` also returns its local paths. Older
 runs without a recorded cwd project remain readable from their original root.
+Rows read through the host owner also carry an absolute `run_dir`.
 `source_project` is display-only. A corrupt or unreadable pointed run leaves
 local lanes readable and reports `discovery_error`. Lane discovery does not
 consult the project registry.
