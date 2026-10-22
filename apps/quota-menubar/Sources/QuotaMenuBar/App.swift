@@ -93,7 +93,9 @@ struct QuotaPanel: View {
         let report = model.report, alert = report?.alertPercent ?? 90
         let accounts = report.map { $0.enabled ? $0.sorted(now: now) : [] } ?? []
         let refreshing = model.isRefreshing || report?.isRefreshing(now: now) == true
-        let next = refreshing ? "Refreshing…" : report?.nextCheck.map { Fmt.next($0, now: now) }
+        let updated = model.updatedAt.map { "Updated \(Fmt.ago($0, now: now))" } ?? "Not updated yet"
+        let status = refreshing ? "Refreshing…" : ([updated] + [report?.nextCheck.map { Fmt.next($0, now: now) }].compactMap { $0 })
+            .joined(separator: " · ")
         // Short content hugs; a tall report stops a margin short of the screen's edge and scrolls inside.
         let shown = min(listHeight, max(160, screenHeight - 24 - chrome))
         return VStack(alignment: .leading, spacing: 8) {
@@ -113,12 +115,10 @@ struct QuotaPanel: View {
             }
             Divider().padding(.horizontal, 8)
             VStack(alignment: .leading, spacing: 0) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(model.updatedAt.map { "Updated \(Fmt.ago($0, now: now))" } ?? "Not updated yet")
-                    if let next { Text(next) }
-                }
-                .font(.subheadline).foregroundStyle(.secondary).padding(.horizontal, 8).padding(.bottom, 4)
-                .accessibilityElement(children: .combine)
+                // "Updated just now · next in 4m"; the reason for the next check is on hover.
+                Text(status).font(.subheadline).foregroundStyle(.secondary).monospacedDigit()
+                    .padding(.horizontal, 8).padding(.bottom, 4)
+                    .help(report?.nextCheck.map { Fmt.nextInFull($0, now: now) } ?? "")
                 MenuRow(shortcut: "r", action: model.refresh) { Text("Refresh") }
                     .disabled(model.isRefreshing)
                 MenuRow(shortcut: "q", action: { NSApplication.shared.terminate(nil) }) { Text("Quit Quota") }
@@ -148,7 +148,7 @@ struct QuotaPanel: View {
     }
 }
 
-/// The headline account: "Claude · Anese" over "Weekly · 11% · resets Tue 19 Mar".
+/// The headline account: "Claude · Anese" over "Weekly · resets Tue 19 Mar", its use in the ring.
 struct Summary: View {
     let report: QuotaReport?, error: String?, now: Date
 
@@ -163,8 +163,8 @@ struct Summary: View {
         case (nil, _): error.map { ("Quota unavailable", $0) } ?? ("Loading…", "")
         case (let report?, _) where !report.enabled: ("Quota is off", "Turned off in Provenant's quota settings.")
         case (let report?, _) where report.accounts.isEmpty: ("No accounts", "No quota accounts are configured.")
-        case (_, let featured?): (featured.account.title, [featured.window.fullTitle, Fmt.used(featured.window),
-                                                           Fmt.resets(featured.window.resetAt, now: now)].compactMap { $0 }.joined(separator: " · "))
+        case (_, let featured?): (featured.account.title, [featured.window.fullTitle, Fmt.resets(featured.window.resetAt, now: now)]
+                                    .compactMap { $0 }.joined(separator: " · "))
         case _ where !drawing.isEmpty: ("Drawing on credits", drawing.map(\.title).joined(separator: ", "))
         default: used == nil ? ("No current readings", "")
             : ("All accounts exhausted", firstBack.map { "First " + Fmt.back($0, now: now) } ?? "Reset time unknown")
@@ -177,53 +177,75 @@ struct Summary: View {
                 .overlay { Text(value.map(Fmt.percent) ?? "–").font(.system(size: 11, weight: .semibold)).monospacedDigit() }
             VStack(alignment: .leading, spacing: 2) {
                 Text(title).font(.headline)
-                if !detail.isEmpty { Text(detail).font(.subheadline).foregroundStyle(.secondary).lineLimit(3).textSelection(.enabled) }
+                if !detail.isEmpty {
+                    Text(detail).font(.subheadline).foregroundStyle(.secondary).monospacedDigit().lineLimit(3).textSelection(.enabled)
+                }
                 if let estimate { Text(estimate).font(.subheadline).foregroundStyle(.tertiary) }
             }
         }
         .accessibilityElement(children: .combine)
-        .accessibilityLabel([title, detail, estimate].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: ", "))
+        .accessibilityLabel([title, value.map { "\(Fmt.percent($0)) used" }, detail, estimate].compactMap { $0 }.filter { !$0.isEmpty }
+            .joined(separator: ", "))
     }
 }
 
-/// One account as a menu item; clicking it discloses every window. A signed-out account offers Forget.
+/// One account as a menu item: its rings, its name over one short fact, and its use or when it is back. Clicking it
+/// discloses every window. A signed-out account offers Forget.
 struct AccountRow: View {
     let account: QuotaReport.Account, now: Date, alert: Double
     @Binding var expanded: Bool
     let forget: (String) -> Void
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.colorSchemeContrast) private var contrast
 
     var body: some View {
-        let window = account.display(now: now, alert: alert), usable = account.rank(now) == 0, drawing = account.isDrawing(now: now)
+        let usable = account.rank(now) == 0, drawing = account.isDrawing(now: now)
         let aged = !account.isSignedOut && (account.status == "stale" || account.observedAt.map { now.timeIntervalSince($0) > 1800 } ?? false)
-        let detail = Fmt.detail(account, now: now, alert: alert)
+        let row = Fmt.row(account, now: now, alert: alert)
         let spent = usable ? account.spentPools(now: now).map { Fmt.spent($0, now: now) } : []
+        // The binding pool takes the outer ring; its use is the figure on the right.
+        let bound = account.binding(now: now)?.pool, rings = account.poolRings(now: now, alert: alert)
+        let spoken = [account.title] + row.spoken + spent
+            + [aged ? account.status == "stale" ? "stale" : account.observedAt.map { "observed \(Fmt.ago($0, now: now))" } : nil].compactMap { $0 }
         VStack(alignment: .leading, spacing: 0) {
-            MenuRow(action: { withAnimation(.snappy(duration: 0.2)) { expanded.toggle() } }) {
+            MenuRow(action: { withAnimation(reduceMotion ? nil : .snappy(duration: 0.2)) { expanded.toggle() } }) {
                 HStack(spacing: 8) {
-                    PoolRings(rings: account.poolRings(now: now, alert: alert), drawing: drawing)
+                    PoolRings(rings: rings.filter { $0.pool == bound } + rings.filter { $0.pool != bound }, drawing: drawing)
                     VStack(alignment: .leading, spacing: 1) {
                         HStack(spacing: 4) {
-                            Text(account.title)
+                            Text(account.title).lineLimit(1)
                             if aged {
                                 Image(systemName: "clock").font(.caption).foregroundStyle(.secondary)
                                     .help(account.observedAt.map { "Observed \(Fmt.ago($0, now: now))" } ?? "Reading is stale")
                             }
                         }
-                        Text(detail).font(.subheadline).foregroundStyle(.secondary).lineLimit(1)
-                        ForEach(spent, id: \.self) { Text($0).font(.subheadline).foregroundStyle(.secondary).lineLimit(1) }
+                        if let fact = Self.fact(row) { fact.font(.subheadline).foregroundStyle(.secondary).monospacedDigit().lineLimit(1) }
+                        ForEach(spent, id: \.self) { Text($0).font(.subheadline).foregroundStyle(.secondary).monospacedDigit().lineLimit(1) }
                     }
                     Spacer(minLength: 4)
-                    if usable, let used = window?.usedPercent { Text(Fmt.percent(used)).monospacedDigit().foregroundStyle(.secondary) }
+                    if let trailing = row.trailing {
+                        Text(trailing).font(usable ? .body : .subheadline).monospacedDigit().foregroundStyle(.secondary).lineLimit(1)
+                    }
                 }
-                .opacity(usable || drawing ? 1 : 0.55)   // exhausted, unreadable and signed-out accounts recede
+                // Exhausted, unreadable and signed-out accounts recede; less so when the user asks for more contrast.
+                .opacity(usable || drawing ? 1 : contrast == .increased ? 0.8 : 0.55)
             }
             .help(account.id)   // fingerprinted accounts can share a title
-            .accessibilityLabel([account.title, usable ? window?.usedPercent.map { "\(Fmt.percent($0)) used" } : nil, detail]
-                .compactMap { $0 }.joined(separator: ", ") + spent.map { ", " + $0 }.joined()
-                + (aged ? account.status == "stale" ? ", stale" : account.observedAt.map { ", observed \(Fmt.ago($0, now: now))" } ?? "" : ""))
+            .accessibilityLabel(spoken.joined(separator: ", "))
             .accessibilityHint(expanded ? "Hides the windows" : "Shows every window")
             .modifier(ForgetMenu(account: account, forget: forget))
             if expanded { WindowList(account: account, now: now, forget: forget).padding(.leading, 38).padding([.trailing, .bottom], 8) }
+        }
+    }
+
+    /// "Claude models · ↻ Thu 21 Mar": the reset follows a symbol, so the row never repeats "resets".
+    static func fact(_ row: Fmt.Row) -> Text? {
+        let symbol = Image(systemName: "arrow.counterclockwise")
+        switch (row.lead, row.reset) {
+        case let (lead?, reset?): return Text("\(lead) · \(symbol) \(reset)")
+        case let (nil, reset?): return Text("\(symbol) \(reset)")
+        case let (lead?, nil): return Text(lead)
+        case (nil, nil): return nil
         }
     }
 }
@@ -239,21 +261,27 @@ struct ForgetMenu: ViewModifier {
     }
 }
 
-/// One ring per pool, side by side in the ring column; one pool fills it.
+/// One ring per pool, nested like Activity rings in the same 22-point column as a single ring: the outer ring
+/// is the first pool given, each further pool sits inside it.
 struct PoolRings: View {
     let rings: [(pool: String?, window: QuotaReport.Window?)], drawing: Bool
+    static let size: CGFloat = 22
 
     var body: some View {
-        let count = CGFloat(rings.count), size = (22 - (count - 1) * 2) / count
-        HStack(spacing: 2) {
+        let count = CGFloat(rings.count), gap: CGFloat = 1
+        let width = rings.count == 1 ? Self.size / 8 : min(3, (Self.size / 2 - 2) / count - gap)
+        ZStack {
             ForEach(rings.indices, id: \.self) { index in
-                Ring(value: rings[index].window?.usedPercent, state: drawing ? "credit_only" : rings[index].window?.pace.state ?? "unknown",
-                     size: size)
-                    .help(rings[index].pool.map { Fmt.human($0) + " models" } ?? "")
+                Ring(value: value(index), state: state(index), size: Self.size - 2 * CGFloat(index) * (width + gap), lineWidth: width)
             }
         }
-        .frame(width: 22, height: 22)
+        .frame(width: Self.size, height: Self.size)
+        .help(rings.count > 1 ? rings.map { "\($0.pool.map(Fmt.human) ?? "") models \($0.window?.usedPercent.map(Fmt.percent) ?? "–")" }
+            .joined(separator: " · ") : "")
     }
+
+    private func value(_ index: Int) -> Double? { rings[index].window?.usedPercent }
+    private func state(_ index: Int) -> String { drawing ? "credit_only" : rings[index].window?.pace.state ?? "unknown" }
 }
 
 struct WindowList: View {
@@ -309,14 +337,17 @@ struct WindowLine: View {
     }
 }
 
-/// A capacity ring. Colour is a small tint that carries pace meaning; system colours adapt to light and dark.
+/// A capacity ring. Colour is a small tint that carries pace meaning, over a faint track of the same tint, as in
+/// Activity rings; system colours adapt to light and dark. Increase Contrast strengthens the track.
 struct Ring: View {
     let value: Double?, state: String, size: CGFloat
+    var lineWidth: CGFloat? = nil
+    @Environment(\.colorSchemeContrast) private var contrast
 
     var body: some View {
-        let width = max(size / 8, 2)
+        let width = lineWidth ?? max(size / 8, 2), tint = Self.tint(state)
         ZStack {
-            Circle().inset(by: width / 2).stroke(.quaternary, lineWidth: width)
+            Circle().inset(by: width / 2).stroke(tint.opacity(contrast == .increased ? 0.4 : 0.2), lineWidth: width)
             Circle().inset(by: width / 2).trim(from: 0, to: min(max((value ?? 0) / 100, 0), 1))
                 .stroke(tint, style: StrokeStyle(lineWidth: width, lineCap: .round)).rotationEffect(.degrees(-90))
         }
@@ -324,7 +355,7 @@ struct Ring: View {
         .accessibilityHidden(true)
     }
 
-    private var tint: Color {
+    static func tint(_ state: String) -> Color {
         ["exhausted": .red, "credit_only": .blue, "deficit": .orange, "on_pace": .green, "reserve": .green, "early": .green, "not_started": .green][state]
             ?? .secondary
     }

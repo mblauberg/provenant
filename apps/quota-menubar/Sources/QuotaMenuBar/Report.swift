@@ -203,6 +203,13 @@ extension QuotaReport.Account {
         return Self.shown(Self.current(pools.isEmpty ? windows : windows(in: pool), now: now), alert: alert)
     }
 
+    /// True when a shorter window has taken the display from the longest, so the row names it.
+    func showsShortWindow(now: Date, alert: Double) -> Bool {
+        guard let shown = display(now: now, alert: alert) else { return false }
+        let group = Self.current(pools.isEmpty ? windows : windows(in: shown.pool), now: now)
+        return group.contains { ($0.windowMinutes ?? 0) > (shown.windowMinutes ?? 0) }
+    }
+
     /// One entry per pool, for its ring: the window shown for that pool, nil once every reading has reset.
     func poolRings(now: Date, alert: Double) -> [(pool: String?, window: Window?)] {
         (pools.isEmpty ? [nil] : pools.map(Optional.some)).map { pool in
@@ -293,10 +300,21 @@ enum Fmt {
             + (resets.expiresAt.first.map { " · \(lead) \(day($0))" } ?? "")
     }
 
-    /// "Next check in 4m · active".
+    /// "next in 4m", for the footer line.
     static func next(_ schedule: QuotaReport.Schedule, now: Date) -> String {
+        until(schedule.nextDueAt, now: now).map { "next in \($0)" } ?? "next due now"
+    }
+
+    /// "Next check in 4m · active", for the footer's tooltip.
+    static func nextInFull(_ schedule: QuotaReport.Schedule, now: Date) -> String {
         (until(schedule.nextDueAt, now: now).map { "Next check in \($0)" } ?? "Next check due now")
             + (schedule.reason.map { " · " + $0.replacingOccurrences(of: "_", with: " ") } ?? "")
+    }
+
+    /// A reset in a row, after its symbol: "4h 40m" within a day, otherwise "Thu 21 Mar".
+    static func soon(_ date: Date?, now: Date) -> String? {
+        guard let date, date > now else { return nil }
+        return date.timeIntervalSince(now) < 86_400 ? until(date, now: now)! : self.date(date)
     }
 
     /// "Weekly all", never "weekly_all:2": no underscores or colons reach the reader.
@@ -346,40 +364,50 @@ enum Fmt {
         return "At this pace, empty by \(day)"
     }
 
-    /// One window: "Weekly · resets Tue 19 Mar", "Weekly exhausted · back Mon 9 am", or "Weekly · reset since Mon 9 am".
-    static func status(_ window: QuotaReport.Window, now: Date, pooled: Bool = false) -> String {
-        let title = pooled ? window.fullTitle : window.title
-        if window.isExpired(now) { return "\(title) · reset since \(moment(window.resetAt!, now: now))" }
-        if window.pace.state == "exhausted" { return "\(title) exhausted · \(back(window.resetAt, now: now))" }
-        return [title, resets(window.resetAt, now: now)].compactMap { $0 }.joined(separator: " · ")
-    }
-
-    /// "Gemini exhausted until Mon 9 am", for a pool that does not bind the account.
+    /// "Gemini back Mon 9 am", for an exhausted pool that does not bind the account.
     static func spent(_ window: QuotaReport.Window, now: Date) -> String {
-        "\(window.pool.map(human) ?? window.title) exhausted " + (window.resetAt.map { "until \(moment($0, now: now))" } ?? "for now")
+        "\(window.pool.map(human) ?? window.title) \(back(window.resetAt, now: now))"
     }
 
-    /// The account's line under its name; the key fact first.
-    static func detail(_ account: QuotaReport.Account, now: Date, alert: Double) -> String {
+    /// What a row says beside the account's name. The section header already names the state and the ring shows
+    /// the use, so the row adds only what they cannot: the pool and any shorter window taking the display, the
+    /// reset after a symbol, and when an exhausted or signed-out account comes back.
+    struct Row {
+        var lead: String? = nil       // "Claude models", "5-hour", or an unreadable account's error
+        var reset: String? = nil      // "Thu 21 Mar", shown after the reset symbol
+        var trailing: String? = nil   // "11%", or "back Sun 10 am" for an account that is not usable
+        var spoken: [String] = []
+    }
+
+    static func row(_ account: QuotaReport.Account, now: Date, alert: Double) -> Row {
         if account.isSignedOut {
-            if let back = account.backAt { return "Signed out · \(self.back(back, now: now))" }
-            return "Signed out" + (account.observedAt.map { " · read \(ago($0, now: now))" } ?? "")
+            let when = account.backAt.map { back($0, now: now) } ?? account.observedAt.map { "read \(ago($0, now: now))" }
+            return Row(trailing: when, spoken: ["signed out", when].compactMap { $0 })
         }
-        if !account.hasReading { return account.error ?? "Not reported" }
+        if !account.hasReading {
+            let why = account.error ?? "Not reported"
+            return Row(lead: why, spoken: [why])
+        }
         let binding = account.binding(now: now)
-        if account.isDrawing(now: now) { return drawing(binding, now: now) }
-        if let binding, binding.pace.state == "exhausted" {
-            return binding.pool != nil ? "\(binding.poolLabel ?? human(binding.pool!)) \(back(binding.resetAt, now: now))"
-                : status(binding, now: now)
+        if account.isDrawing(now: now) {
+            let line = drawing(binding, now: now)
+            return Row(lead: line, spoken: [line])
         }
-        guard let window = account.display(now: now, alert: alert) else { return "No current reading" }
-        // A pool name leaves no room for the reset on one line; it shows when the row expands.
-        return window.pool != nil && !window.isExpired(now) ? window.fullTitle : status(window, now: now)
+        if let binding, binding.pace.state == "exhausted" {
+            let when = back(binding.resetAt, now: now)
+            return Row(trailing: when, spoken: ["exhausted", when])
+        }
+        guard let window = account.display(now: now, alert: alert) else { return Row(lead: "No current reading", spoken: ["no current reading"]) }
+        let lead = [window.poolLabel ?? window.pool.map(human), account.showsShortWindow(now: now, alert: alert) ? window.title : nil]
+            .compactMap { $0 }.joined(separator: " · ")
+        let used = percent(window.usedPercent ?? 0)
+        return Row(lead: lead.isEmpty ? nil : lead, reset: soon(window.resetAt, now: now), trailing: used,
+                   spoken: [lead.isEmpty ? nil : lead, "\(used) used", resets(window.resetAt, now: now)].compactMap { $0 })
     }
 
-    /// "Drawing on credits · allowance back in 3d 2h" for an account whose allowance is spent.
+    /// "Allowance back in 3d 2h" for an account drawing on credits; its section already says so.
     static func drawing(_ window: QuotaReport.Window?, now: Date) -> String {
         let back = window?.pace.state == "exhausted" ? window?.resetAt.map { self.back($0, now: now) } : nil
-        return "Drawing on credits" + (back.map { " · allowance \($0)" } ?? "")
+        return back.map { "Allowance " + $0 } ?? "Allowance spent"
     }
 }
