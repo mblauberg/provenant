@@ -4877,6 +4877,29 @@ def test_route_tier_names_work_as_adapter_aliases(tmp_path, tier, alias):
     assert not any("model won" in note for note in named.get("notes", [])), "a tier name is not a model name"
 
 
+@pytest.mark.parametrize("tier,route", [("junior", "junior"), ("legwork", "junior")])
+def test_positional_route_tier_shorthand_picks_from_the_pool(tier, route, monkeypatch, capsys):
+    router = load_router()
+    calls = []
+
+    def route_pick(requests):
+        calls.extend(requests)
+        return {"status": "ok", "results": [{"status": "ok", "route": route,
+                "picks": [{"adapter": "codex", "model": "gpt-6-luna", "reason": f"{route} top"}],
+                "warnings": []}]}
+
+    monkeypatch.setattr(router, "route_pick", route_pick)
+    monkeypatch.setattr(router, "_quota_states", lambda: {"codex": {
+        "account": "work", "state": "deficit", "summary": "window over pace", "observed_at": "now"
+    }})
+    assert router.main([tier]) == 0
+    result = json.loads(capsys.readouterr().out)
+    assert calls == [{"route": tier}]
+    assert result["results"][0]["picks"][0]["model"] == "gpt-6-luna"
+    assert result["results"][0]["picks"][0]["quota"]["summary"] == "window over pace"
+    assert result["results"][0]["warnings"] == ["codex quota: window over pace"]
+
+
 LIVE_OPENCODE = ["opencode/big-pickle", "opencode-go/qwen3.8-flash", "opencode-go/kimi-k3",
                  "opencode-go/kimi-k2.7-code", "opencode-go/mimo-v2.6-flash", "opencode/mimo-v2.6-flash-free"]
 
