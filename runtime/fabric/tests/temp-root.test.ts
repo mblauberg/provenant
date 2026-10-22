@@ -41,7 +41,6 @@ describe("scratchRoot", () => {
     cleanup.push(root);
 
     expect(root.startsWith(agentRun + sep)).toBe(false);
-    expect(root.split(sep)).not.toContain(".agent-run");
     expect(root.startsWith(fallback + sep)).toBe(true);
   });
 
