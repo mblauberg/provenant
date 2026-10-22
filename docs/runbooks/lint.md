@@ -29,6 +29,8 @@ under `commit.cleanup=verbatim`), the scissors tail and HTML comments:
 - a closing keyword with an issue (`Closes #n`, `fixes #n`) fails; use
   `Refs #n`, since the pull request owns closure.
 
+Attribution matches only the `Co-Authored-By:` trailer and a `Generated with <agent>` footer line, never prose. Attribution and closing-keyword checks ignore fenced blocks and inline code spans; session markers are checked on the raw text.
+
 Merge messages (`Merge branch|pull request|...`) and `Revert "..."` pass.
 
 ## Config

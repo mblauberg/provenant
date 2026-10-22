@@ -98,6 +98,10 @@ def test_default_branch_config(tmp_path):
     "Merge branch 'main' into feat/x\n",
     "Merge pull request #1086 from mblauberg/docs/memory-fold\n\nWave 12 closes #4\n",
     'Revert "Wave 12 cleanup"\n\nThis reverts commit abc.\nCloses #4\n',
+    "docs: x\n\nThe report generated with Claude is included in the example.\n",
+    "docs: x\n\nUse `Closes #12` in the pull request body.\n",
+    "docs: x\n\n```\nCo-Authored-By: A <a@b.c>\nCloses #4\n```\n",
+    "docs: x\n\n~~~text\nGenerated with Claude Code\n~~~\n\nRefs #1\n",
     "fix: thing\n\nRefs #12\n# Please enter the commit message\n# wave 12\n",
 ])
 def test_clean_messages_pass(tmp_path, text):
@@ -107,6 +111,8 @@ def test_clean_messages_pass(tmp_path, text):
 @pytest.mark.parametrize("text, needle", [
     ("fix: thing\n\nCo-Authored-By: A <a@b.c>\n", "attribution"),
     ("fix: thing\n\nGenerated with [Claude Code](x)\n", "attribution"),
+    ("fix: thing\n\n\U0001f916 Generated with [Claude Code](x)\n", "attribution"),
+    ("fix: thing\n\n```\nok\n```\nCloses #4\n", "closing keyword"),
     ("fix: wave 12 cleanup\n", "session marker"),
     ("fix: thing\n\nCloses #12\n", "closing keyword"),
     ("fix: thing\r\n\r\nfixes #3\r\n", "closing keyword"),

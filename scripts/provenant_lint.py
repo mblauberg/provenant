@@ -41,13 +41,14 @@ SESSION_PHRASES = re.compile(
 CLOSING_REFERENCE = re.compile(
     r"\b(?:closes?|closed|fix(?:es|ed)?|resolves?|resolved):?" + _SP + r"+#([1-9]\d*)\b", re.ASCII | re.IGNORECASE
 )
+# Line-shaped only: the trailer and the known "Generated with <agent>" footer, never prose.
 ATTRIBUTION = (
     re.compile(r"^\s*co-authored-by\s*:", re.IGNORECASE),
     re.compile(
-        r"\bgenerated\s+(?:with|by)\s+\[?(?:claude|codex|gemini|chatgpt|copilot|cursor|openai|anthropic|an?\s+ai\b)",
+        r"^\s*(?:[-*>]\s*)?(?:\U0001f916\s*)?generated\s+(?:with|by)\s+\[?"
+        r"(?:claude|codex|gemini|chatgpt|copilot|cursor|openai|anthropic)\b",
         re.IGNORECASE,
     ),
-    re.compile(r"noreply@anthropic\.com", re.IGNORECASE),
 )
 # Messages git writes itself: they name branches and PRs, not work.
 GENERATED = re.compile(r"(?:Merge (?:branch|branches|remote-tracking branch|pull request|tag|commit) |Revert \")")
@@ -96,6 +97,23 @@ def clean_message(raw: bytes, comment_char: str = "#") -> list[str]:
     return strip_html_comments("\n".join(kept)).split("\n")
 
 
+def live_lines(lines: list[str]) -> list[str]:
+    """Lines with fenced blocks and inline code spans blanked: GitHub acts on neither."""
+    live, fence = [], None
+    for line in lines:
+        marker = re.match(r"\s{0,3}(`{3,}|~{3,})", line)
+        if fence:
+            if marker and marker.group(1)[0] == fence[0] and len(marker.group(1)) >= len(fence):
+                fence = None
+            live.append("")
+        elif marker:
+            fence = marker.group(1)
+            live.append("")
+        else:
+            live.append(re.sub(r"(`+)(?:(?!\1).)+?\1", "", line))
+    return live
+
+
 def message_problems(lines: list[str], lint: dict) -> list[str]:
     body = [line for line in lines if line.strip()]
     if not body:
@@ -103,12 +121,12 @@ def message_problems(lines: list[str], lint: dict) -> list[str]:
     if GENERATED.match(body[0]):
         return []
     problems = []
-    for line in lines:
+    for line, live in zip(lines, live_lines(lines)):
         if SESSION_PHRASES.search(line):
             problems.append(f"session marker: {line}")
-        if lint["forbid_attribution"] and any(p.search(line) for p in ATTRIBUTION):
+        if lint["forbid_attribution"] and any(p.search(live) for p in ATTRIBUTION):
             problems.append(f"agent attribution: {line}")
-        if lint["forbid_closing_keywords"] and CLOSING_REFERENCE.search(line):
+        if lint["forbid_closing_keywords"] and CLOSING_REFERENCE.search(live):
             problems.append(f"closing keyword (the pull request owns closure; use Refs #n): {line}")
     return problems
 
