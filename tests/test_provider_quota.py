@@ -299,6 +299,13 @@ def test_opencode_plan_and_config_choose_the_cap_and_unknown_models_are_unreport
     assert fetched['unreported'] == ['longcat-2.5-preview']
 
 
+def test_opencode_ignores_messages_dated_after_now(quota, tmp_path):
+    rows = ((timedelta(hours=1), 'deepseek-v4-pro', 3.0, 'opencode-go'),
+            (-timedelta(hours=2), 'deepseek-v4-pro', 50.0, 'opencode-go'))
+    used, _ = opencode_rows(quota, opencode_account(quota, tmp_path, rows))
+    assert used['deepseek-v4-pro.5h'] == pytest.approx(100.0) and used['deepseek-v4-pro.30d'] == pytest.approx(20.0)
+
+
 def test_opencode_unknown_plan_or_unreadable_store_is_unreported_never_zero(quota, tmp_path):
     rows = ((timedelta(hours=1), 'deepseek-v4-pro', 6.0, 'opencode-go'),)
     used, fetched = opencode_rows(quota, opencode_account(quota, tmp_path, rows, plan='Enterprise'))

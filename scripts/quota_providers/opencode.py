@@ -49,8 +49,8 @@ def model_spend(database, now, providers):
     try:
         with closing(sqlite3.connect(database.resolve().as_uri() + '?mode=ro', uri=True)) as db:
             rows = db.execute(f"SELECT json_extract(data,'$.modelID'), {sums} FROM message "
-                              f"WHERE time_created>=? AND json_extract(data,'$.providerID') IN ({marks}) "
-                              "GROUP BY 1", (*since, min(since), *providers)).fetchall()
+                              f"WHERE time_created BETWEEN ? AND ? AND json_extract(data,'$.providerID') IN ({marks}) "
+                              "GROUP BY 1", (*since, min(since), int(now.timestamp() * 1000), *providers)).fetchall()
         return {row[0]: [float(value or 0) for value in row[1:]] for row in rows if row[0]}
     except (sqlite3.Error, OSError, TypeError, ValueError):
         return None
