@@ -72,6 +72,8 @@ struct QuotaPanel: View {
     @State var screenHeight: CGFloat = NSScreen.main?.visibleFrame.height ?? 800
     @State private var listHeight: CGFloat = 0
     @State private var chrome: CGFloat = 0   // the panel less its list
+    @State private var height: CGFloat = 0   // the whole panel, which the window is fitted to
+    @State private var window: NSWindow?   // the menu-bar window, known once it first becomes key
     @State private var open = true   // the panel window outlives a close, so its clock stops when it hides
 
     var body: some View {
@@ -82,8 +84,12 @@ struct QuotaPanel: View {
         }
         // Fires on every panel open; .onAppear may fire only once for a menu-bar window.
         .onReceive(NotificationCenter.default.publisher(for: NSWindow.didBecomeKeyNotification)) { note in
-            if let screen = (note.object as? NSWindow)?.screen { screenHeight = screen.visibleFrame.height }
+            if let window = note.object as? NSWindow {
+                self.window = window
+                if let screen = window.screen { screenHeight = screen.visibleFrame.height }
+            }
             open = true
+            fit()
             model.panelOpened()
         }
         .onReceive(NotificationCenter.default.publisher(for: NSWindow.didResignKeyNotification)) { _ in open = false }
@@ -126,7 +132,17 @@ struct QuotaPanel: View {
         }
         .padding(6)
         .frame(width: 300)
-        .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { chrome = max(0, $0 - shown) }
+        .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { chrome = max(0, $0 - shown); height = $0; fit() }
+    }
+
+    /// The menu-bar window grows with the panel but never shrinks, and would centre a collapsed panel in the
+    /// expanded height, so the panel sets its height, keeping the top edge under the status item.
+    private func fit() {
+        guard let window, height > 0, window.frame.height != height else { return }
+        var frame = window.frame
+        frame.origin.y += frame.height - height
+        frame.size.height = height
+        window.setFrame(frame, display: true)
     }
 
     private func rows(_ accounts: [QuotaReport.Account], now: Date, alert: Double) -> some View {

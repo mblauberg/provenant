@@ -7,6 +7,7 @@ import runpy
 import shlex
 import subprocess
 import sys
+import time
 
 import pytest
 
@@ -186,7 +187,14 @@ def test_command_preserves_arguments_with_spaces():
 
     child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(5)", "two words"])
     try:
-        observed = process_info.process(child.pid)
+        deadline = time.monotonic() + 1
+        while True:
+            observed = process_info.process(child.pid)
+            if observed is not None and shlex.split(observed.command)[-1:] == ["two words"]:
+                break
+            if time.monotonic() >= deadline:
+                break
+            time.sleep(0.005)
         assert observed is not None
         assert shlex.split(observed.command)[-1] == "two words"
     finally:
