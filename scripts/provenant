@@ -81,7 +81,7 @@ def resolve_product_root(instance_root: Path | None = None) -> Path:
 
 
 def usage() -> None:
-    print("usage: provenant <help|root|route|routes|capabilities|worktree|clean|check|gate|telemetry|stats|retro|quota|profile|fabric|hosts|peer|lanes|events|dispatch|batch|run> [arguments...]", file=sys.stderr)
+    print("usage: provenant <help|root|route|routes|capabilities|worktree|clean|reap|check|gate|telemetry|stats|retro|quota|profile|fabric|hosts|peer|lanes|events|dispatch|batch|run> [arguments...]", file=sys.stderr)
 
 
 def help_text() -> None:
@@ -94,7 +94,7 @@ Thin front door to owners:
   routes ...     scripts/model-route routes
   capabilities   skills/orchestrate/scripts/capabilities.py
   worktree ...   scripts/worktree ...
-  clean ...      scripts/clean.py ...
+  clean|reap ... scripts/clean.py|reap.py
   check ...      scripts/check-harness ...
   gate           scripts/gate
   fabric ...     runtime/fabric/bin/fabric ...
@@ -147,6 +147,15 @@ COMMAND_DETAILS: dict[str, str] = {
         "Delegates to scripts/clean.py ...\n"
         "Dry run by default; --apply --plan <digest> deletes the approved rows\n"
         "that are still eligible."
+    ),
+    "reap": (
+        "usage: provenant reap <pid>… [--tree] [--grace S] [--started-before TIME]\n\n"
+        "Delegates to scripts/reap.py ...\n"
+        "Stop explicit PIDs: TERM, then KILL after the grace period (default 5s).\n"
+        "Prints each process's age, parent, cwd and command first, and refuses one\n"
+        "that started after --started-before (epoch or ISO time) so a reused PID is\n"
+        "left alone. --tree adds descendants. Never signals a group or a pattern;\n"
+        "the lane-safety hook refuses pkill, killall and non-numeric kill targets."
     ),
     "check": (
         "usage: provenant check ...\n\n"
@@ -477,6 +486,7 @@ def main(arguments: list[str]) -> int:
         "capabilities": "skills/orchestrate/scripts/capabilities.py",
         "worktree": "scripts/worktree",
         "clean": "scripts/clean.py",
+        "reap": "scripts/reap.py",
         "check": "scripts/check-harness",
         "gate": "scripts/gate",
         "fabric": FABRIC_CLI,
