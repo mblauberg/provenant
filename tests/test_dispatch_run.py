@@ -5732,15 +5732,18 @@ def test_standalone_batch_child_replaces_a_dead_owner(tmp_path, monkeypatch, pre
         pass
 
 
-@pytest.mark.parametrize('same_run', [False, True])
+@pytest.mark.parametrize('spelling', ['other', 'same', 'alias'])
 @pytest.mark.parametrize('published_owner', [False, True])
-def test_record_owner_inherits_token_only_for_the_same_run(tmp_path, monkeypatch, same_run, published_owner):
+def test_record_owner_inherits_token_only_for_the_same_run(tmp_path, monkeypatch, spelling, published_owner):
     mod = load_dispatch_module()
     run = make_run(tmp_path, 'owner-token-scope')
+    # A symlinked spelling, like /var for /private/var, names the same run.
+    (tmp_path / 'alias').symlink_to(run)
+    same_run = spelling != 'other'
     monkeypatch.delenv('PROVENANT_RUN_OWNER', raising=False)
     monkeypatch.delenv('PROVENANT_PARENT_ATTEMPT', raising=False)
     monkeypatch.setenv('PROVENANT_RUN_TOKEN', 'inherited-token')
-    monkeypatch.setenv('PROVENANT_RUN_DIR', str(run if same_run else tmp_path / 'other-run'))
+    monkeypatch.setenv('PROVENANT_RUN_DIR', str({'other': tmp_path / 'other-run', 'same': run, 'alias': tmp_path / 'alias'}[spelling]))
     if published_owner:
         monkeypatch.setenv('PROVENANT_RUN_OWNER', json.dumps({
             'owner_pid': os.getpid(), 'run_dir': str(run), 'run_token': 'inherited-token'}))
