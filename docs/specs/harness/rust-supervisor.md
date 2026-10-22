@@ -323,7 +323,7 @@ spans on `origin/main` at `59bb0ba4`.
 | S1 | 1,549 (123 tests) | 0 | The parity suite except `test_stale.py`; Python dispatcher and template tests |
 | S2 | 1,826 (70) | 75 (4) | Census, sparing, reaping, signals, watchdogs, writer progress, byte capture, ENOSPC during capture and progress, subreaper; the two fake-transport receipt tests |
 | S3 | 830 (23) | 98 (3) | Cancel cascade identity, owner records, publication custody, lease release, late signals |
-| S4 | 832 (36) | 758 (35) | Reaper identity races, TS process identity and orphan reaping; `worker_liveness.py` if open question 1 allows |
+| S4 | 832 (36) | 758 (35) | Reaper identity races, TS process identity and orphan reaping |
 | **Total** | **5,037 (252)** | **931 (42)** | |
 
 That is 7.2% of the 69,537 test-body lines (5.7% of the 88,941 test-file
@@ -431,15 +431,16 @@ is reverted for that slice, so two implementations never linger.
   stale until `install-harness` runs; `check-provenant-install.py` says so,
   and launch spec versioning refuses a mismatched binary.
 
-## Decisions and open questions
+## Decisions
 
 Decided by the user: rustup with the pinned toolchain on each Mac and local
 builds; 7-day trials; S3 and S4 proceed automatically once the preceding
 slice's criteria pass.
 
-1. **Workers outside Fabric.** Does anything still supervise workers that are
-   not Fabric lanes? If not, `worker_liveness.py` retires in S4 with its 397
-   lines of tests; if so, it stays.
+Workers outside Fabric: the [direct-CLI
+fallback](../../../skills/orchestrate/references/direct-cli-fallback.md) still
+launches `codex exec` workers that `worker_liveness.py` reports on, so it and
+its 397 lines of tests stay until that fallback retires.
 
 ## Related
 
@@ -453,7 +454,7 @@ slice's criteria pass.
 - [Fabric v2](../fabric-v2.md): attempt states, statuses and the cleanup rules
   ported in S2.
 - [Worker liveness](../../../skills/orchestrate/references/worker-liveness.md):
-  retired in S4 only if open question 1 allows.
+  kept for the direct-CLI fallback.
 - [#1204](https://github.com/mblauberg/provenant/issues/1204),
   [#1207](https://github.com/mblauberg/provenant/pull/1207) and
   [#1209](https://github.com/mblauberg/provenant/pull/1209).

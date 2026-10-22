@@ -244,8 +244,9 @@ readers no longer wait through gaps.
 
 ## S4, conditional
 
-`worker_liveness.py` retires only if no supervised worker runs outside Fabric
-(open question 1). The other tests go only if `clean.py`, the `exec_layout`
+`worker_liveness.py` stays: the direct-CLI fallback still runs workers outside
+Fabric, so `tests/test_worker_liveness.py` is listed below only for when that
+fallback retires. The other tests go only if `clean.py`, the `exec_layout`
 orphan scan, `batch_run.py` and Fabric's kill and prune paths take liveness
 from `lane status`; otherwise they stay.
 
