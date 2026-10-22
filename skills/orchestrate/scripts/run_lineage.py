@@ -248,7 +248,7 @@ def record_owner(run_dir, kind="dispatch"):
         launched = previous if previous.get("run_token") == token else {}
         pid = os.getpid()
         started = process_info.start_time(pid)
-        self_hosted = "host_pid" not in launched or launched.get("host_pid") == launched.get("owner_pid")
+        self_hosted = launched.get("host_pid") in (None, launched.get("owner_pid"))
         _write(run_dir, "dispatch-owner.json", {
             **launched, "schema_version": 1, "kind": kind, "run_dir": str(run_dir), "run_token": token,
             "owner_pid": pid, "owner_pgid": os.getpgrp(), "owner_started_at": started,
