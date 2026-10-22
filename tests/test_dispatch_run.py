@@ -752,6 +752,7 @@ def test_prepare_resume_restores_previous_workspace_root(tmp_path: Path):
     workspace.mkdir()
     previous = {
         "run_id": "resume-me", "task_id": "task-1", "attempt": 1, "state": "terminal",
+        "delivery_run_id": "delivery:resume",
         "status": "ok", "mode": "read_only", "cwd": str(workspace / "src"), "worktree": None,
         "workspace": {"root": str(workspace)}, "session_id": "saved-session",
         "read_roots": [str(tmp_path / "other-project")],
@@ -772,6 +773,7 @@ def test_prepare_resume_restores_previous_workspace_root(tmp_path: Path):
     module.prepare_resume(args)
 
     assert args.workspace_root == workspace
+    assert args.delivery_run_id == 'delivery:resume'
     assert args.read_roots == [str(tmp_path / "other-project")]
     assert args.capabilities == ["browser", "postgres"]
 
@@ -832,6 +834,7 @@ def test_secret_scan_unavailable_fix_includes_failing_path_and_reason(tmp_path: 
 
 
 def test_ordinary_single_dispatch_records_one_attempt_and_route_identity(tmp_path: Path) -> None:
+    disable_memory_admission_floor(tmp_path)
     run_dir = make_run(tmp_path, "one")
     receipt_before = (run_dir / "RUN_RECEIPT.json").read_bytes()
     prompt = tmp_path / "prompt.md"
@@ -860,6 +863,8 @@ def test_ordinary_single_dispatch_records_one_attempt_and_route_identity(tmp_pat
             str(run_dir),
             "--task-id",
             "task-1",
+            "--delivery-run-id",
+            "delivery:1202",
             "--adapter",
             "codex",
             "--prompt-file",
@@ -884,6 +889,7 @@ def test_ordinary_single_dispatch_records_one_attempt_and_route_identity(tmp_pat
     attempt = run_dir / "dispatch" / "tasks" / "task-1" / "attempt-001" / "attempt.json"
     assert attempt.exists()
     record = json.loads(attempt.read_text(encoding="utf-8"))
+    assert record['delivery_run_id'] == 'delivery:1202'
     assert record["attempt_id"] == "attempt-001"
     assert record["requested_route"]["adapter"] == "codex"
     assert record["route"]["resolved_model"].startswith("gpt-")
@@ -900,6 +906,21 @@ def test_ordinary_single_dispatch_records_one_attempt_and_route_identity(tmp_pat
     assert receipt["attempt_digest"] == f"sha256:{expected_digest}"
     assert receipt["attempt_digest_path"].endswith("attempt.sha256")
     assert (run_dir / "RUN_RECEIPT.json").read_bytes() == receipt_before
+
+    retry = subprocess.run([
+        str(SCRIPT), '--run-dir', str(run_dir), '--task-id', 'task-1', '--adapter', 'codex',
+        '--prompt-file', str(prompt), '--alias', 'senior', '--retry-of', 'attempt-001',
+    ], cwd=tmp_path, env=env, text=True, capture_output=True)
+    assert retry.returncode == 0, retry.stderr + retry.stdout
+    retried = json.loads((attempt.parent.parent / 'attempt-002/attempt.json').read_text())
+    assert retried['delivery_run_id'] == 'delivery:1202'
+    changed = subprocess.run([
+        str(SCRIPT), '--run-dir', str(run_dir), '--task-id', 'task-1', '--adapter', 'codex',
+        '--prompt-file', str(prompt), '--alias', 'senior', '--retry-of', 'attempt-002',
+        '--delivery-run-id', 'delivery:other',
+    ], cwd=tmp_path, env=env, text=True, capture_output=True)
+    assert changed.returncode == 2
+    assert 'retry must keep delivery_run_id' in changed.stdout
 
 
 @pytest.mark.parametrize("legacy", [False, True])
@@ -2442,6 +2463,20 @@ def test_reentry_reconciles_missing_manifest_rows_and_retry_lineage(tmp_path: Pa
     assert "dispatch-reconcile-attempt-001-attempt" in text
     second = json.loads((run_dir / "dispatch/tasks/reconcile/attempt-002/attempt.json").read_text())
     assert second["retry_of"] == "attempt-001"
+
+
+@pytest.mark.parametrize("contents", ["{broken", "[]"])
+def test_retry_receipt_parse_and_shape_errors_use_retry_of_invalid(tmp_path: Path, contents: str) -> None:
+    run_dir = make_run(tmp_path, "invalid-retry-receipt")
+    attempt = run_dir / "dispatch/tasks/retry/attempt-001/attempt.json"
+    attempt.parent.mkdir(parents=True)
+    attempt.write_text(contents, encoding="utf-8")
+    module = load_dispatch_module()
+
+    with pytest.raises(module.RetryReceiptInvalid) as error:
+        module.retry_receipt(run_dir, attempt.parent)
+
+    assert error.value.code == "retry_of_invalid"
 
 
 def test_attempt_number_and_retry_lineage_continue_past_999(tmp_path: Path, monkeypatch) -> None:
@@ -6155,6 +6190,25 @@ raise SystemExit(dispatch.dispatch(dispatch.parser().parse_args()))
     assert 'mcp-child@peer' in row['error'] and 'peer_adapter_exit' in row['error']
 
 
+def test_peer_placement_request_carries_delivery_run_id(tmp_path, monkeypatch, capsys):
+    mod = load_dispatch_module()
+    run_dir = make_run(tmp_path, 'placed')
+    prompt = tmp_path / 'prompt.md'
+    prompt.write_text('placed\n', encoding='utf-8')
+    seen = []
+    owner = SimpleNamespace(config=SimpleNamespace(peers={'peer': {}}), config_error=None,
+                            client_call=lambda _op, _cwd, request: seen.append(request) or {'status': 'ok', 'local': False})
+    monkeypatch.delenv('PROVENANT_HOST_LOCAL_ONLY', raising=False)
+    monkeypatch.setattr(mod, '_fabric_hosts_owner', lambda: SimpleNamespace(lane_owner=lambda: owner, HostError=ValueError))
+    monkeypatch.setattr(mod.run_lineage, 'register_external', lambda _result: None)
+    monkeypatch.chdir(tmp_path)
+    args = mod.parser().parse_args([
+        '--run-dir', str(run_dir), '--task-id', 'placed', '--adapter', 'codex', '--prompt-file', str(prompt),
+        '--alias', 'senior', '--role', 'worker', '--host', 'peer', '--delivery-run-id', 'delivery:1202'])
+    assert mod.dispatch(args) == 0
+    assert seen[0]['delivery_run_id'] == 'delivery:1202'
+
+
 def test_peer_child_retains_parent_without_writing_the_source_host(tmp_path, monkeypatch):
     mod = load_dispatch_module()
     child_dir = make_run(tmp_path, 'runs/child')
@@ -6344,12 +6398,14 @@ def test_claude_fallback_does_not_override_selected_account_cooldown(tmp_path, m
     assert {row['account'] for row in attempts} == {'pro'}
 
 
-@pytest.mark.parametrize(('owner_kind', 'locked'), [('dispatch', True), ('batch', False), ('batch', True)])
-def test_batch_child_shares_only_a_locked_batch_parent(tmp_path, monkeypatch, owner_kind, locked):
+@pytest.mark.parametrize(('owner_kind', 'locked', 'inherited'), [
+    ('dispatch', True, 'custody'), ('batch', False, 'none'), ('batch', True, 'custody'),
+    ('batch', True, 'none'), ('batch', True, 'separate'), ('batch', True, 'other_file'),
+    ('batch', False, 'separate'),
+])
+def test_batch_child_shares_only_a_locked_batch_parent(tmp_path, monkeypatch, owner_kind, locked, inherited):
     mod = load_dispatch_module()
     run = make_run(tmp_path, 'batch-parent-custody')
-    for key in ('PROVENANT_PARENT_ATTEMPT', 'PROVENANT_RUN_TOKEN', 'PROVENANT_RUN_OWNER'):
-        monkeypatch.delenv(key, raising=False)
     (run / 'dispatch-owner.json').write_text(json.dumps({
         'schema_version': 1, 'kind': owner_kind, 'run_dir': str(run),
         'run_token': 'parent-token', 'owner_pid': os.getpid(),
@@ -6357,6 +6413,13 @@ def test_batch_child_shares_only_a_locked_batch_parent(tmp_path, monkeypatch, ow
     }))
     before = (run / 'dispatch-owner.json').read_bytes()
     custody = mod.acquire_run_custody(run) if locked else None
+    fd = (custody.fileno() if custody is not None and inherited == 'custody' else
+          os.open(run / ('RUN_RECEIPT.json' if inherited == 'other_file' else 'MANIFEST.md'), os.O_RDWR)
+          if inherited in {'separate', 'other_file'} else None)
+    environment = dict(os.environ)
+    environment.pop(mod.run_lineage.CUSTODY_ENV, None)
+    if fd is not None:
+        environment[mod.run_lineage.CUSTODY_ENV] = str(fd)
     # A reparented provider orphan has exactly this parent PID relationship.
     code = '''import sys
 from pathlib import Path
@@ -6371,16 +6434,74 @@ else:
 '''
     try:
         result = subprocess.run([sys.executable, '-c', code, str(SCRIPT.parent), str(run)],
+                                env=environment, pass_fds=() if fd is None else (fd,),
                                 text=True, capture_output=True, timeout=10)
         assert result.returncode == 0, result.stderr
-        assert result.stdout.strip() == ('shared' if owner_kind == 'batch' and locked else 'refused')
+        shared = owner_kind == 'batch' and locked and inherited == 'custody'
+        assert result.stdout.strip() == ('shared' if shared else 'refused')
         assert (run / 'dispatch-owner.json').read_bytes() == before
+        if custody is not None:
+            with pytest.raises(OSError):
+                mod.acquire_run_custody(run)
     finally:
+        if fd is not None and inherited in {'separate', 'other_file'}:
+            os.close(fd)
         if custody is not None:
             custody.close()
     # Refusing an unlocked owner must release the probe's acquired lock.
     with mod.acquire_run_custody(run):
         pass
+
+
+def test_batch_child_refuses_unrelated_custody_after_recorded_batch_dies(tmp_path):
+    mod = load_dispatch_module()
+    run = make_run(tmp_path, 'dead-batch-unrelated-custody')
+    child = tmp_path / 'child.py'
+    child.write_text(f'''import os, signal, sys, time
+from pathlib import Path
+sys.path.insert(0, {str(SCRIPT.parent)!r})
+import dispatch_run as dispatch
+owner_pid = os.getppid()
+start_time = dispatch.process_info.start_time
+observations = 0
+def observe(pid):
+    global observations
+    value = start_time(pid)
+    if pid == owner_pid:
+        observations += 1
+        if observations == 2:
+            # The batch dies just after its last successful identity observation.
+            Path({str(tmp_path / 'killed')!r}).write_text('killed')
+            os.kill(owner_pid, signal.SIGTERM)
+            deadline = time.monotonic() + 5
+            while os.getppid() == owner_pid and time.monotonic() < deadline:
+                time.sleep(0.01)
+            assert os.getppid() != owner_pid
+    return value
+dispatch.process_info.start_time = observe
+raise SystemExit(dispatch.dispatch(dispatch.parser().parse_args([
+    '--batch-child', '--run-dir', {str(run)!r}, '--adapter', 'codex', '--model', 'fixture',
+    '--prompt-file', {str(tmp_path / 'missing.md')!r}])))
+''')
+    batch = f'''import os, sys, subprocess
+from pathlib import Path
+sys.path.insert(0, {str(SCRIPT.parent)!r})
+import run_lineage
+run_lineage.record_owner(Path({str(run)!r}), 'batch')
+subprocess.run([sys.executable, {str(child)!r}], check=False)
+'''
+    environment = {**os.environ, 'PROVENANT_HOST_LOCAL_ONLY': '1'}
+    # This test process holds custody; the recorded batch never holds it.
+    with mod.acquire_run_custody(run):
+        result = subprocess.run([sys.executable, '-c', batch], cwd=tmp_path,
+                                env=environment, input='', capture_output=True, text=True, timeout=15)
+        assert result.returncode == -signal.SIGTERM, result.stderr
+        assert (tmp_path / 'killed').exists()
+        owner = json.loads((run / 'dispatch-owner.json').read_text())
+        assert mod.process_info.start_time(owner['owner_pid']) is None
+        assert result.stdout, result.stderr
+        assert json.loads(result.stdout)['status'] == 'run_custody_busy'
+        assert not (run / 'tasks').exists()
 
 
 # A recycled pid and a vanished pid; ids stay stable across xdist workers.
@@ -6389,8 +6510,6 @@ def test_standalone_batch_child_replaces_a_dead_owner(tmp_path, monkeypatch, pre
     previous_pid = os.getpid() if previous == 'recycled_pid' else 2147483647
     mod = load_dispatch_module()
     run = make_run(tmp_path, 'dead-batch-child-owner')
-    for key in ('PROVENANT_PARENT_ATTEMPT', 'PROVENANT_RUN_TOKEN', 'PROVENANT_RUN_OWNER'):
-        monkeypatch.delenv(key, raising=False)
     (run / 'dispatch-owner.json').write_text(json.dumps({
         'schema_version': 1, 'kind': 'batch', 'run_dir': str(run),
         'run_token': 'dead-token', 'owner_pid': previous_pid,
