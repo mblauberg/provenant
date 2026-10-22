@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -36,19 +37,12 @@ def test_reducer_keeps_failure_error_counts_and_summary_and_marks_dropped_spans(
     assert len(rendered.encode()) < len(source.encode())
 
 
-def test_reducer_returns_original_for_unsupported_command_and_possible_credentials():
+def test_reducer_returns_original_for_unsupported_command():
     plain = "routine output\n" * 500
     unsupported = log_reducer.reduce_text(plain, command="make", exit_status=0)
-    credentialed = log_reducer.reduce_text(
-        plain + "TOKEN=ghp_abcdefghijklmnopqrstuvwxyz123456\n",
-        command="pytest",
-        exit_status=0,
-    )
 
     assert unsupported["text"] == plain
     assert unsupported["reduced"] is False
-    assert credentialed["reduced"] is False
-    assert credentialed["text"].endswith("TOKEN=ghp_abcdefghijklmnopqrstuvwxyz123456\n")
 
 
 def test_cli_archives_full_source_and_writes_receipt(tmp_path):
@@ -71,3 +65,113 @@ def test_cli_archives_full_source_and_writes_receipt(tmp_path):
     assert metadata["exit_status"] == 1
     assert metadata["reduced"] is True
     assert len(result.stdout) < len(source.encode())
+
+
+def test_ansi_coloured_failure_is_retained():
+    source = ("routine output " + "x" * 80 + "\n") * 100 + "\x1b[31mFAILED tests/test_sample.py::test_bad\x1b[0m\n"
+
+    result = log_reducer.reduce_text(source, command="pytest", exit_status=1)
+
+    assert result["reduced"] is True
+    assert "\x1b[31mFAILED tests/test_sample.py::test_bad\x1b[0m" in result["text"]
+
+
+def test_failure_block_keeps_indented_assertion_traceback_and_context():
+    block = """________________ test_bad __________________
+source context: value = 1
+        assert value == 2
+E       assert 1 == 2
+E        +  where 1 = value
+E       Expected: 2
+E        Received: 1
+Traceback (most recent call last):
+  File \"test_sample.py\", line 4
+AssertionError: mismatch
+"""
+    source = ("routine output " + "x" * 80 + "\n") * 60 + block + ("routine tail " + "y" * 80 + "\n") * 40
+
+    result = log_reducer.reduce_text(source, command="pytest", exit_status=1)
+
+    assert result["reduced"] is True
+    for line in block.splitlines():
+        assert line in result["text"]
+
+
+def test_quote_verifier_requires_exact_source_lines_in_order():
+    verify = log_reducer._quotes_are_ordered_source_lines
+
+    assert verify("prefix evidence suffix\nevidence\n", ["evidence"])
+    assert not verify("prefix evidence suffix\n", ["evidence"])
+    assert not verify("second\nfirst\n", ["first", "second"])
+
+
+def test_cli_defaults_archive_under_instance_root(tmp_path):
+    instance = tmp_path / "instance"
+    source = ("normal output " + "x" * 90 + "\n") * 50 + "2 failed, 8 passed\n"
+    result = subprocess.run(
+        [sys.executable, str(SCRIPT), "--command", "pytest", "--exit-status", "1", "--pilot"],
+        input=source.encode(), capture_output=True,
+        env={**os.environ, "AGENT_FABRIC_INSTANCE_ROOT": str(instance)},
+    )
+
+    assert result.returncode == 0, result.stderr.decode()
+    archives = list((instance / "state" / "log-reducer").glob("*.log"))
+    assert len(archives) == 1
+    assert archives[0].read_bytes() == source.encode()
+
+
+def test_cli_refuses_to_archive_secret_scan_finding(tmp_path):
+    instance = tmp_path / "instance"
+    archive = tmp_path / "explicit.log"
+    source = ("routine output " + "x" * 90 + "\n") * 50 + "xoxb-1234567890-1234567890\n"
+    result = subprocess.run(
+        [sys.executable, str(SCRIPT), "--command", "pytest", "--exit-status", "1", "--archive", str(archive)],
+        input=source.encode(), capture_output=True,
+        env={**os.environ, "AGENT_FABRIC_INSTANCE_ROOT": str(instance)},
+    )
+
+    assert result.returncode != 0
+    assert b"secret" in result.stderr.lower()
+    assert not archive.exists()
+
+
+def test_interleaved_xdist_failures_keep_both_evidence_blocks():
+    first = "FAILED tests/test_a.py::test_a\nE   assert 1 == 2\nE    +  where 1 = value\n"
+    second = "FAILED tests/test_b.py::test_b\nE   Expected: 4\nE   Received: 3\n"
+    source = ("routine output " + "x" * 80 + "\n") * 60 + first + "worker gw1 heartbeat\n" * 8 + second + ("routine tail " + "y" * 80 + "\n") * 25
+
+    result = log_reducer.reduce_text(source, command="pytest", exit_status=1)
+
+    assert result["reduced"] is True
+    for block in (first, second):
+        assert block in result["text"]
+
+
+def test_unknown_format_falls_back_to_original():
+    source = "ordinary compiler chatter\n" * 180 + "last opaque diagnostic\n"
+
+    result = log_reducer.reduce_text(source, command="tsc", exit_status=1)
+
+    assert result["reduced"] is False
+    assert result["text"] == source
+
+
+def test_typescript_error_keeps_indented_continuations():
+    block = "src/example.ts(2,3): error TS2345: type mismatch\n  Related information:\n    required: string\n    found: number\n"
+    source = ("routine output " + "x" * 90 + "\n") * 50 + block + ("routine tail " + "y" * 90 + "\n") * 30
+
+    result = log_reducer.reduce_text(source, command="tsc", exit_status=2)
+
+    assert result["reduced"] is True
+    assert block.rstrip() in result["text"]
+
+
+def test_vitest_expected_received_block_is_retained():
+    block = " FAIL  test/sample.test.ts > sample\n  AssertionError: values differ\n  Expected:\n    Object {\n      count: 2,\n    }\n  Received:\n    Object {\n      count: 1,\n    }\n"
+    source = ("routine output " + "x" * 90 + "\n") * 50 + block + ("routine tail " + "y" * 90 + "\n") * 30
+
+    result = log_reducer.reduce_text(source, command="vitest", exit_status=1)
+
+    assert result["reduced"] is True
+    for line in block.splitlines():
+        assert line in result["text"]

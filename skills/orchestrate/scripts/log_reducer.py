@@ -6,8 +6,10 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import re
 import sys
+import time
 from pathlib import Path
 
 ALLOWED_COMMANDS = frozenset({"pytest", "vitest", "gh run view --log-failed", "tsc"})
@@ -18,11 +20,14 @@ _EVIDENCE = re.compile(
     r"\b\d+\s+tests?\b|\b(?:total|count|tests?)\s*[:=]\s*\d+)",
     re.IGNORECASE,
 )
-_SECRET = re.compile(
-    r"(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|"
-    r"AKIA[0-9A-Z]{16}|-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----|"
-    r"(?i:api[_-]?key|token|secret|password)\s*[:=]\s*['\"]?[^\s'\"]{12,})"
-)
+_ANSI = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+_TEST_HEADER = re.compile(r"^\s*_{3,}.*_{3,}\s*$")
+
+
+def _quotes_are_ordered_source_lines(source: str, quotes: list[str]) -> bool:
+    """Check exact source lines, in order, for all retained quotations."""
+    source_lines = iter(source.splitlines())
+    return all(any(line == quote for line in source_lines) for quote in quotes)
 
 
 def reduce_text(
@@ -47,17 +52,25 @@ def reduce_text(
         not enabled
         or command not in ALLOWED_COMMANDS
         or len(source_bytes) < MIN_BYTES
-        or _SECRET.search(source)
     ):
         return receipt
 
     lines = source.splitlines(keepends=True)
-    evidence = {index for index, line in enumerate(lines) if _EVIDENCE.search(line)}
-    nonempty = [index for index, line in enumerate(lines) if line.strip()]
-    if nonempty:
-        evidence.add(nonempty[-1])
-    if not evidence:
+    clean_lines = [_ANSI.sub("", line) for line in lines]
+    starts = {
+        index for index, line in enumerate(clean_lines)
+        if _EVIDENCE.search(line) or _TEST_HEADER.match(line)
+    }
+    if not starts:
         return receipt
+
+    evidence: set[int] = set()
+    for start in sorted(starts):
+        evidence.add(start)
+        index = start + 1
+        while index < len(lines) and lines[index].strip() and index not in starts:
+            evidence.add(index)
+            index += 1
 
     output: list[str] = []
     spans: list[dict[str, int]] = []
@@ -82,7 +95,7 @@ def reduce_text(
     if reduced_bytes >= len(source_bytes):
         return receipt
     # The retained quotes are exact source lines; verify them before returning a reduction.
-    if any(quote not in source for quote in quotes):
+    if not _quotes_are_ordered_source_lines(source, quotes):
         return receipt
     receipt.update({
         "reduced_bytes": reduced_bytes,
@@ -99,15 +112,33 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--command", required=True, choices=sorted(ALLOWED_COMMANDS))
     parser.add_argument("--exit-status", required=True, type=int)
     parser.add_argument(
-        "--archive", required=True, type=Path, help="path to preserve the full source log"
+        "--archive", type=Path, help="path to preserve the full source log"
     )
     parser.add_argument("--receipt", type=Path, help="optional JSON receipt path")
     parser.add_argument("--pilot", action="store_true", help="enable the reduction pilot")
     args = parser.parse_args(argv)
 
     source_bytes = sys.stdin.buffer.read()
-    args.archive.parent.mkdir(parents=True, exist_ok=True)
-    args.archive.write_bytes(source_bytes)
+    import secret_scan
+
+    findings = secret_scan.scan_bytes(source_bytes, "stdin")
+    if findings:
+        for finding in findings:
+            print(f"refusing to archive log: secret scan found {finding.name} at line {finding.line}", file=sys.stderr)
+        return 2
+    archive = args.archive
+    if archive is None:
+        instance_root = Path(
+            os.environ.get("AGENT_FABRIC_INSTANCE_ROOT") or Path.home() / ".agents"
+        ).expanduser()
+        archive_dir = instance_root / "state" / "log-reducer"
+        archive = archive_dir / f"log-{time.time_ns()}.log"
+    try:
+        archive.parent.mkdir(parents=True, exist_ok=True)
+        archive.write_bytes(source_bytes)
+    except OSError as exc:
+        print(f"cannot archive full source log: {exc}", file=sys.stderr)
+        return 2
     try:
         source = source_bytes.decode("utf-8")
     except UnicodeDecodeError:
