@@ -49,15 +49,23 @@ def test_substantial_accepts_one_passing_cross_family_leg_in_any_role(family, ro
 @pytest.mark.parametrize("legs,expected", [
     pytest.param([], [S_PASS, S_FAMILY, S_FALLBACK], id="no-review"),
     pytest.param([leg(lenses=[])], [S_PASS, S_FAMILY, S_FALLBACK], id="no-lens"),
+    pytest.param([leg(lenses=[""])], [S_PASS, S_FAMILY, S_FALLBACK], id="empty-lens"),
+    pytest.param([leg(lenses=["   "])], [S_PASS, S_FAMILY, S_FALLBACK], id="blank-lens"),
     pytest.param([leg(CHAIR)], [S_FAMILY], id="same-family-needs-blocker"),
     pytest.param([leg(CHAIR, []), leg(status="omitted", reason="provider outage")], [S_PASS, S_FALLBACK], id="fallback-needs-lens"),
+    pytest.param([leg(CHAIR, [""]), leg(status="omitted", reason="provider outage")], [S_PASS, S_FALLBACK], id="fallback-needs-non-empty-lens"),
+    pytest.param([leg(CHAIR, ["   "]), leg(status="omitted", reason="provider outage")], [S_PASS, S_FALLBACK], id="fallback-needs-non-blank-lens"),
     pytest.param([leg(CHAIR), leg("   ", status="omitted", reason="provider unavailable")], [S_FAMILY], id="blank-family-cannot-block"),
     pytest.param([leg(CHAIR), leg(None, status="omitted", reason="provider unavailable")], [S_FAMILY], id="missing-family-cannot-block"),
     pytest.param([leg(CHAIR), leg("google", status="unavailable", reason="   ")], [S_FAMILY], id="blocker-needs-reason"),
+    pytest.param([leg(CHAIR), leg(status="unavailable", reason=None)], [S_FAMILY], id="blocker-needs-reason-none"),
+    pytest.param([leg(CHAIR), leg(status="unavailable", reason="")], [S_FAMILY], id="blocker-needs-reason-empty"),
+    pytest.param([leg(CHAIR), leg(CHAIR, status="omitted", reason="provider unavailable")], [S_FAMILY], id="chair-family-cannot-block"),
     pytest.param([leg(status="failed", reason="review found defects")], [S_PASS, S_FAMILY, S_FALLBACK], id="failed-leg-is-not-a-review-or-blocker"),
     pytest.param([leg(), leg("google", status="unavailable", reason="")], [], id="invalid-unrelated-blocker-does-not-undo-pass"),
     pytest.param([leg(provider_family=CHAIR)], [S_FAMILY], id="validated-provider-lineage-wins"),
     pytest.param([leg("", provider_family="   ")], [S_FAMILY, S_FALLBACK], id="blank-provider-lineage-is-not-cross-family"),
+    pytest.param([leg(provider_family="   ")], [S_FAMILY, S_FALLBACK], id="blank-provider-lineage-with-default-family"),
 ])
 def test_substantial_ladder_returns_the_expected_decision(legs, expected):
     assert check_review_ladder("substantial", legs, chair_family=CHAIR) == expected
@@ -72,8 +80,11 @@ def test_substantial_same_family_fallback_requires_a_reasoned_blocker(status):
     pytest.param([leg(lenses=["correctness", "security"]), leg("google", ["security"])], [], id="two-families-different-lenses"),
     pytest.param([leg(lenses=["correctness", "security"])], [C_COUNT, C_LENSES, C_FAMILIES, C_FALLBACK], id="one-leg-cannot-cover-crucial"),
     pytest.param([leg(lenses=["correctness"]), leg("google", ["correctness"])], [C_LENSES], id="duplicate-lens-sets"),
+    pytest.param([leg(lenses=["correctness", "security"]), leg("google", ["correctness", "security"])], [C_LENSES], id="duplicate-multi-lens-sets"),
     pytest.param([leg(lenses=[]), leg("google")], [C_COUNT, C_LENSES, C_FAMILIES, C_FALLBACK], id="unnamed-lenses-do-not-count"),
     pytest.param([leg(lenses=[]), leg("google", ["correctness", "security"])], [C_COUNT, C_LENSES, C_FAMILIES, C_FALLBACK], id="cross-family-pass-needs-named-lens"),
+    pytest.param([leg(lenses=[""]), leg("google", ["security"]), leg(CHAIR, ["adversarial"])], [C_FAMILIES], id="empty-lens-is-not-a-pass"),
+    pytest.param([leg(lenses=["   "]), leg("google", ["security"]), leg(CHAIR, ["adversarial"])], [C_FAMILIES], id="blank-lens-is-not-a-pass"),
     pytest.param([leg(), leg(CHAIR, ["security"])], [C_FAMILIES], id="second-family-or-blocker-required"),
     pytest.param([leg(), leg(CHAIR, ["security"]), leg("google", status="omitted", reason="provider unavailable")], [], id="one-family-blocker-and-same-family-pass"),
     pytest.param([leg(), leg("google", ["security"], status="failed")], [C_COUNT, C_LENSES, C_FAMILIES, C_FALLBACK], id="failed-leg-does-not-count"),
@@ -81,6 +92,7 @@ def test_substantial_same_family_fallback_requires_a_reasoned_blocker(status):
     pytest.param([leg(), leg(CHAIR, ["security"]), leg("google", status="omitted", reason="")], [C_FAMILIES], id="omitted-blocker-needs-a-reason"),
     pytest.param([leg(), leg(CHAIR, ["security"]), leg("google", status="unavailable", reason="   ")], [C_FAMILIES], id="unavailable-blocker-needs-a-reason"),
     pytest.param([leg(), leg(lenses=["security"]), leg(status="omitted", reason="second route unavailable")], [C_FAMILIES, C_FALLBACK], id="blocker-from-passing-family-does-not-count-twice"),
+    pytest.param([leg(), leg(CHAIR, ["security"]), leg(status="omitted", reason="second route unavailable")], [C_FAMILIES], id="blocker-from-passing-family-with-same-family-pass"),
     pytest.param([leg(), leg(lenses=["security"]), leg("google", status="omitted", reason="provider quota")], [C_FALLBACK], id="blocked-family-needs-same-family-replacement"),
 ])
 def test_crucial_ladder_returns_the_expected_decision(legs, expected):
@@ -109,6 +121,8 @@ def test_same_family_exception_counts_distinct_non_chair_blockers(risk, blocked,
     pytest.param("terminal", [leg(), leg("google", ["security"]), leg(lenses=["adversarial"], status="failed")], [T_PRESSURE], id="failed-pressure-leg-does-not-count"),
     pytest.param("terminal", [leg(lenses=["correctness", "adversarial"])], [T_COUNT, T_LENSES, T_FAMILIES, T_FALLBACK], id="terminal-keeps-crucial-coverage"),
     pytest.param("terminal", [leg(lenses=[]), leg("google", ["correctness", "adversarial"])], [T_COUNT, T_LENSES, T_FAMILIES, T_FALLBACK], id="terminal-pass-needs-named-lens"),
+    pytest.param("terminal", [leg(lenses=[""]), leg("google", ["security"]), leg(CHAIR, ["adversarial"])], [T_FAMILIES], id="terminal-empty-lens-is-not-a-pass"),
+    pytest.param("terminal", [leg(lenses=["   "]), leg("google", ["security"]), leg(CHAIR, ["adversarial"])], [T_FAMILIES], id="terminal-blank-lens-is-not-a-pass"),
 ])
 def test_terminal_ladder_requires_passing_adversarial_pressure_and_crucial_coverage(risk, legs, expected):
     assert check_review_ladder(risk, legs, chair_family=CHAIR) == expected
