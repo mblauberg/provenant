@@ -133,6 +133,12 @@ capability or configuration, or another cause, the review records the reason.
 A blocked cross-family leg is replaced by an independent same-family reviewer
 through a different lens. The required number of independent reviews does not
 change, and another pass by the same reviewer never counts as one.
+For `substantial` and higher work, each counted reviewer's model tier, meaning
+the routing pool (`junior`, `senior` or `principal`) of the resolved route
+actually used rather than the model name, is at or above the author's. A family
+that offers only a weaker tier is unavailable for
+that leg: its junior pass may add claims but never fills the leg, and the
+same-family replacement above applies.
 
 A project may set its own ladder in its contributing guide. That ladder governs
 the project's work so long as each tier keeps at least the independence above.

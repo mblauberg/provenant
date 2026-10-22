@@ -18,7 +18,7 @@
 //                         {claim} arg this yields exactly one claim.
 //   3. Cross-verify     : PER CLAIM, fan out BOTH a same-family Claude skeptic AND a
 //                         cross-family worker (codex enforced read-only, optional
-//                         cursor) that shell out to cf_dispatch.sh. Cross-family is a
+//                         cursor) that shell out to cf_dispatch.py. Cross-family is a
 //                         first-class parallel worker here, not a final gate. Each
 //                         returns a normalised verdict with anchors.
 //   4. Synthesis        : one flagship agent reduces per-claim verdicts into one
@@ -135,7 +135,7 @@ const VERDICT_SCHEMA = {
       },
     },
     crossFamily: { type: 'boolean', description: 'true only when produced by a different model family with an enforced/oauth_safe_mode read-only guarantee.' },
-    readOnlyGuarantee: { type: 'string', enum: ['enforced', 'oauth_safe_mode', 'best_effort', 'none', 'unknown'], description: 'Mirrors cf_dispatch.sh read_only_guarantee for cross-family; "enforced" for the Claude skeptic.' },
+    readOnlyGuarantee: { type: 'string', enum: ['enforced', 'oauth_safe_mode', 'best_effort', 'none', 'unknown'], description: 'Mirrors cf_dispatch.py read_only_guarantee for cross-family; "enforced" for the Claude skeptic.' },
     notRunReason: { type: 'string', description: 'If verdict=unable due to cross-family failure, the CROSS-FAMILY-NOT-RUN reason from the dispatcher record.' },
     reasoning: { type: 'string', description: 'One or two lines on how the anchors settle the claim.' },
   },
@@ -264,7 +264,7 @@ function claudeSkepticPrompt(boot, claim) {
   ].join('\n')
 }
 
-// Cross-family worker — first-class parallel worker. Shells out to cf_dispatch.sh.
+// Cross-family worker — first-class parallel worker. Shells out to cf_dispatch.py.
 // Attacks a DIFFERENT angle from the Claude skeptic (independent evidence hunt) and
 // returns the dispatcher's normalised guarantees verbatim.
 function crossFamilyPrompt(boot, claim, idx) {
@@ -277,7 +277,7 @@ function crossFamilyPrompt(boot, claim, idx) {
   const gitCwd = boot.gitCwd || ''
   const cwdClause = gitCwd
     ? `Set your shell cwd to the git repo at ${gitCwd} before dispatch (codex refuses untrusted non-git dirs). Lead chain: try ${lead} first, then ${second}.`
-    : `No git repo was found at bootstrap, so codex is unusable here (cf_dispatch.sh exposes NO --skip-git-repo-check flag — it runs codex exec -s read-only). Lead with cursor (which does not require a git repo); only attempt codex if you can set cwd inside some nested git repo. If neither cross-family tool can run, record CROSS-FAMILY-NOT-RUN.`
+    : `No git repo was found at bootstrap, so codex is unusable here (cf_dispatch.py exposes NO --skip-git-repo-check flag — it runs codex exec -s read-only). Lead with cursor (which does not require a git repo); only attempt codex if you can set cwd inside some nested git repo. If neither cross-family tool can run, record CROSS-FAMILY-NOT-RUN.`
   const chain = gitCwd ? `${lead} ${second}` : `cursor ${lead === 'cursor' ? second : lead}`
   return [
     'You drive a CROSS-FAMILY verifier via Bash. You do not judge the claim yourself; you run a different model family on it and normalise its answer. READ-ONLY throughout.',
@@ -298,7 +298,7 @@ function crossFamilyPrompt(boot, claim, idx) {
     `  ${cwdClause}`,
     '  Before using cursor in the chain, run cursor-agent --list-models and export CF_DISPATCH_CURSOR_MODEL to a current model from a family distinct from Claude and OpenAI. The dispatcher fails closed if it cannot prove the provider family.',
     `  Use the --chain form so it fails over automatically:`,
-    `    ${SKILL_SCRIPTS}/cf_dispatch.sh --orchestrator-family claude --chain "${chain}" \\`,
+    `    ${SKILL_SCRIPTS}/cf_dispatch.py --orchestrator-family claude --chain "${chain}" \\`,
     `      --prompt-file <abs path to ${claim.id}.prompt.txt> --out <abs path to crossfamily/${claim.id}.out.txt>`,
     '  (codex runs `exec -s read-only` enforced; cursor runs `--mode plan`. Never use claude as the cross-family tool — same family. agy is advisory-only and disabled unless CF_DISPATCH_ENABLE_AGY=1; do not enable it here.)',
     '  The dispatcher prints a JSON record (adapter, provider_family, status, exit, output_path, read_only_guarantee, cross_family). Capture it.',

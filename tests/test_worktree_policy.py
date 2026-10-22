@@ -686,6 +686,25 @@ def test_verify_claim_accepts_new_descended_clean_head_with_receipt_evidence(tmp
     assert receipt["claimed_commit"] == claimed
 
 
+def test_verify_claim_holds_an_unreleased_instruction_commit_until_the_chair_releases_it(tmp_path, capsys):
+    _repo, base, worktree = _implementation_worktree(tmp_path, capsys)
+    (worktree / ".agents").mkdir()
+    (worktree / ".agents/late.md").write_text("late instruction\n")
+    subprocess.run(["git", "-C", str(worktree), "add", ".agents/late.md"], check=True)
+    subprocess.run(["git", "-C", str(worktree), "commit", "-qm", "late instruction"], check=True)
+    claimed = subprocess.check_output(["git", "-C", str(worktree), "rev-parse", "HEAD"], text=True).strip()
+
+    result = worktree_policy.verify_claim(worktree, worktree, claimed, base_revision=base)
+    assert result["status"] == "rejected", result
+    assert result["reason"].startswith("protected_instructions_changed: unreleased commits")
+    assert claimed in result["reason"]
+
+    gate = SCRIPT.parents[1] / "skills/orchestrate/scripts/lane_protection.py"
+    subprocess.run([sys.executable, str(gate), "--cwd", str(worktree), "--release", "--tip", claimed,
+                    "--actor", "chair", "--reason", "reviewed"], check=True, capture_output=True)
+    assert worktree_policy.verify_claim(worktree, worktree, claimed, base_revision=base)["status"] == "accepted"
+
+
 def test_verify_claim_allows_only_documented_generated_ignored_paths(tmp_path, capsys):
     _repo, base, worktree = _implementation_worktree(tmp_path, capsys)
     (worktree / "node_modules" / "generated.js").parent.mkdir()

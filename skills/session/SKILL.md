@@ -31,6 +31,7 @@ otherwise return it without writing. Use
 
 - `Status: active`, effort/leg IDs, superseded path, `Consumed-at: pending`;
 - original goal, disk-backed progress paths/commits, ordered remainder;
+- decisions taken and options rejected, each with its reason;
 - invariants and exact verification commands.
 
 Keep one active handoff per effort/leg. Archive a consumed handoff, mark and

@@ -257,9 +257,11 @@ quarantines the change: it archives the lane's files to `<attempt>/protected.pat
 they differ), commits the start or integration-branch version back to the lane,
 returns the index and files to their starting content. A successful provider
 then finishes `quarantined` only when the restore was verified: its result
-stays visible, `landable: false` is an advisory marker for the chair (not
-enforced landing), and status/digest/lanes name the reason and patches for chair
-review.
+stays visible, `landable: false` marks it, and status/digest/lanes name the
+reason and patches for chair review. Writers can move only their own branch
+ref, and `landing-push` refuses any commit since the leased remote SHA that
+changes `.agents/` without an [audited chair release](../../docs/specs/fabric-v2.md)
+of the reviewed tip.
 `.agents/fabric-policy.json` `instruction_changes` may instead be `allow` (keep
 an ordinary edit, with a warning) or `deny` (retain the edit for review without
 restoration). Denied edits, failed restoration and unverifiable checks leave
