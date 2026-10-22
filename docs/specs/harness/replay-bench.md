@@ -17,51 +17,66 @@ stamp in #1056.
 ## Statistics
 
 Sources disagreed on "3+ paired repeats", "n >= 10 tasks" and "two pooled
-standard errors". They answer different questions. Variance across tasks
-dominates, so more tasks buy more power than more repeats (R3 F4). Repeats
-cut within-task noise and are needed to measure reliability. The two-SE rule
-is #1056's observational noise filter, not a test.
+standard errors". Variance across tasks dominates, so tasks buy more power
+than repeats (R3 F4); repeats cut within-task noise and measure
+reliability; the two-SE rule is #1056's observational noise filter.
 
 1. **Unit.** The task. Attempts are nested in tasks and never pooled as
    independent samples.
 2. **Repeats.** 3 per task and arm. The task's pass fraction estimates
    pass@1; all 3 passing gives pass^3.
-3. **Primary metric.** Cost per accepted change, C = sum of cost / sum of
-   accepted over the set's tasks. The ratio of sums keeps tasks with no
-   accepted attempt in the estimate.
-4. **Decision.** Arms are paired by task. A stratified paired bootstrap over
-   tasks (10,000 resamples, recorded seed) gives a 95% percentile CI on
-   log(C_candidate / C_baseline). An exact sign test on per-task cost per
-   attempt is reported alongside.
-5. **Win.** Only when the CI excludes zero in the claimed direction, the sign
-   test agrees in direction at p < 0.05, and no guard regresses beyond its
-   tolerance. If bootstrap and sign test disagree, the verdict is
-   `inconclusive`. With 30 tasks a bootstrap CI can be carried by one or two
-   heavy tasks (one task supplied +0.300 of a 0.054 lead in R3 F4's source);
-   the sign test is the distribution-free check against that, not a
-   tie-break that can turn a non-win into a win.
-6. **Guards.** pass@1, pass^3, median wall time, attention events,
-   empty-patch rate and timeout rate, each with a paired bootstrap CI on the
-   task-level difference. A guard fails if its point estimate is worse than
-   its tolerance, or its CI excludes zero in the worse direction. Exact
-   McNemar on per-task pass^3 is reported for discordant tasks.
-7. **Tolerances** are frozen in the plan. Defaults: pass@1 and pass^3 -0.05
-   absolute; median wall time +25%; attention events per task +10%;
-   empty-patch and timeout rates +0.03 absolute. A plan may tighten a
-   tolerance, never loosen one. `harness-knobs.json` carries no tolerances,
-   so the plan owns them.
-8. **Claim direction.** A plan names its claim. For an efficiency claim (the
-   #1064 default) cost is primary and pass@1 a guard. For a capability claim
-   such as `rigorous`, pass@1 is primary and cost becomes a guard with a
-   stated ceiling, for example +50%.
+3. **Claim.** A plan pre-registers one claim and its direction, so every
+   test is one-sided. For an efficiency claim (the #1064 default) the
+   primary metric is cost per accepted change, C = sum of cost / sum of
+   accepted over the set's tasks, and pass@1 is a guard. For a capability
+   claim such as `rigorous` the primary metric is pass@1, and C becomes a
+   guard with a stated ceiling, for example +50%.
+4. **Bootstrap.** Arms are paired by task. A stratified paired bootstrap
+   over tasks (10,000 resamples, recorded seed) estimates the primary
+   difference: log(C_candidate / C_baseline) for efficiency, the mean
+   per-task pass-fraction difference for capability.
+5. **Task-level test.** An exact one-sided sign test over tasks on the same
+   outcome. Efficiency: a task favours the arm with the lower per-task cost
+   per accepted change over its 3 repeats; if only one arm accepted
+   anything, that arm wins the task; if neither did, the task is a tie.
+   Capability: a task favours the arm with the higher pass fraction. Ties
+   are excluded from the test and their count is reported.
+6. **Zero denominators.** An arm with no accepted attempt in the whole
+   sample makes an efficiency run `invalid` (reason `no_accepted`). A
+   resample in which either arm accepts nothing scores +inf, the worst case
+   for the candidate, so it cannot manufacture a win. The count of such
+   resamples is reported, and a resulting unbounded bound gives
+   `inconclusive`. No resample or task is dropped silently.
+7. **Win.** Only when all hold: the one-sided 97.5% bootstrap bound lies on
+   the claimed side of zero; the sign test agrees at one-sided p < 0.05; no
+   guard regresses beyond its tolerance. If bootstrap and sign test
+   disagree, the verdict is `inconclusive`. With 30 tasks a bootstrap
+   interval can be carried by one or two heavy tasks (one task supplied
+   +0.300 of a 0.054 lead in R3 F4's source); the sign test guards against
+   that and is not a tie-break that can turn a non-win into a win.
+8. **Guards.** pass@1, pass^3, median wall time, attention events,
+   empty-patch rate and timeout rate, each with a paired bootstrap interval
+   on the task-level difference. A guard fails if its point estimate is
+   worse than its tolerance, or its one-sided bound shows it worse. Exact
+   McNemar on per-task pass^3 is reported for discordant tasks. Defaults,
+   frozen in the plan: pass@1 and pass^3 -0.05 absolute; median wall time
+   +25%; attention events per task +10%; empty-patch and timeout rates
+   +0.03 absolute. A plan may tighten a tolerance, never loosen one.
+   `harness-knobs.json` carries no tolerances, so the plan owns them.
 9. **Search screen.** On the search set an arm advances to acceptance when
    it beats the baseline by more than two pooled standard errors (#1056's
    rule). The screen never gates a merge.
-10. **Power.** The pilot measures sigma_d, the per-task standard deviation of
-    the paired difference. Tasks needed at 80% power and alpha 0.05:
-    n = 7.85 sigma_d^2 / delta^2, so at n = 30 the minimum detectable effect
-    (MDE) is about 0.51 sigma_d. Every report states its MDE; a run sized
-    below the effect it claims reports `underpowered`, not `no-win`.
+10. **Power.** A closed-form paired-mean formula does not size this rule, so
+    power comes from simulating the full rule: resample the pilot's
+    per-task paired differences, shift them by a candidate effect delta,
+    apply steps 4-8 including zero-denominator handling, at least 1,000
+    seeded replicates per delta. The plan records the power curve, the
+    MDE at 80% power and the acceptance-set size it implies. Indicative
+    figures, normal differences, n = 30, 600 replicates: power 0.66 at
+    0.51 sigma_d and 0.83 at 0.6 sigma_d, so the MDE is about 0.6 sigma_d;
+    the one-sided sign test alone has about 0.70 at 0.51 sigma_d. Each report
+    states its MDE; a run sized below the effect it claims reports
+    `underpowered`, not `no-win`.
 11. **Oracles.** Execution only. A criterion that needs a judge follows
     `evaluate`: both orders, counted only when they agree (a disagreement is
     a tie), and the judge's family is never that of the output it scores.
@@ -89,21 +104,39 @@ is #1056's observational noise filter, not a test.
 6. A frozen split records task ids, seed, mining `harness_rev` and its
    SHA-256 digest. A change is a new split version, never an edit.
 
-### B2 Isolation and leakage
+### B2 Isolation, leakage and confidentiality
 
 1. Each attempt runs in a disposable single-commit repository made from the
    parent tree, with no other refs, objects or remote, so neither `git log`
    nor the object store can reveal the fix. The writer lane gets a linked
    worktree in it under `docs/worktrees.md`.
-2. Lanes run in the R9 box with GitHub denied, so they cannot read the PR or
-   its issue thread.
-3. Manifests, splits and per-task results live under the instance state root
-   (`bench/`, beside `telemetry.sqlite3`), never in a repository: Provenant
-   is public, Sealle is confidential, and a manifest committed to Provenant
-   would leak held-out tasks into later tasks' snapshots. Sealle tasks run
-   only on confidentiality-eligible routes (operating model D11) and their
-   manifest stays on Sealle's hosts.
-4. `docs/evals/replay-bench/README.md` records split versions, digests and
+2. R9 alone restricts writes, not reads, so the bench enforces a read
+   allowlist through the existing lane sandbox allowlist. A lane may read
+   only its task repository, a frozen dependency cache built from the
+   parent commit's lockfiles, the toolchain, and a read-only export of the
+   arm's harness (skills, config and `HARNESS.md`, no `.git`). Unreadable:
+   the bench state root (manifests, splits, results), source repositories
+   and their history, submodule stores, other worktrees, and the primary
+   and harness checkouts. Network reaches the provider API only; GitHub is
+   denied.
+3. A Provenant task whose PR changed a file present in the harness export is
+   excluded at mining, because the export would carry the fix.
+4. Canary: before each run the bench plants a unique sentinel in every
+   excluded path class, and a probe lane must fail to read each one. After
+   each attempt it scans the transcript, result, diff and oracle output for
+   any sentinel token. A successful read or a found token makes the run
+   `invalid`.
+5. Manifests, splits and per-task results live under the instance state
+   root (`bench/`, beside `telemetry.sqlite3`), never in a repository: a
+   manifest committed to Provenant would leak held-out tasks into later
+   tasks' snapshots.
+6. Sealle tasks run only on confidentiality-eligible routes (operating model
+   D11). Every Sealle execution artefact stays on the Sealle-authorised
+   host: manifest, raw prompts, provider transcripts, Fabric `prompt.md`,
+   `stderr.log` and result files, diffs and oracle output. Only text-free
+   ledger rows with opaque task ids leave it. Public Provenant CI never runs
+   a real Sealle task or holds its raw output; CI uses fixture tasks only.
+7. `docs/evals/replay-bench/README.md` records split versions, digests and
    release verdicts, as aggregates only.
 
 ### B3 Arms and runs
@@ -176,11 +209,17 @@ verdict per arm (`win`, `no-win`, `inconclusive`, `underpowered` or
 
 ## Pilot and budget
 
-The pilot is an A/A test: `balanced` against `balanced` on 10 acceptance
-tasks, 3 repeats each, 60 attempts. It measures run-to-run variance and
-sigma_d, and checks the decision rule, since an A/A run must not yield
-`win`. R1 F1 reports large rerun flips; in V1's check no Opus discordant
-pair reproduced.
+The pilot is an A/A run: `balanced` against `balanced` on 10 search tasks,
+3 repeats each, 60 attempts. Acceptance and held-out tasks are never used
+for calibration. It measures run-to-run variance and sigma_d, which feed the
+power simulation. An A/A run can still show a `win` at rate alpha, so the
+false-positive check is a seeded null simulation, not the pilot verdict:
+flip each task's paired difference at random, apply the full rule, and
+require a false-positive rate at or below 0.025 within Monte Carlo error
+(the indicative simulation gave 0.018). The decision rule, its code
+revision and parameters are frozen after the pilot and before any
+acceptance run. R1 F1 reports large rerun flips; in V1's check no Opus
+discordant pair reproduced.
 
 A read-only ledger query over the 1,414 `ok` Fabric lanes since 2026-09-01
 gives a median of 1.28M tokens per lane (IQR 0.49M-3.21M), 97.6% of them
@@ -201,7 +240,8 @@ From the open questions in R1, R2 and R3 section 3 that map to #1070 knobs,
 in priority order. "Blocked" marks a dependency on telemetry MAP.md lists as
 missing.
 
-1. **A/A pilot on `balanced`** (R3 Q6). Prerequisite for the rest.
+1. **A/A pilot on `balanced`**, search tasks (R3 Q6). Prerequisite for the
+   rest.
 2. **`economy` against `balanced`**, efficiency claim (R3 Q5). Test the
    bundle; decompose it only on a win or a guard failure.
    `writing.final_polish` and `council.junior_size` are inert on code replay.
@@ -234,16 +274,20 @@ benched.
 - `mine` re-checks every frozen task in the disposable environment: 3 of 3
   failures on the parent and 3 of 3 passes on the merge.
 - A leakage test in a lane environment shows that `git log --all` and
-  `git cat-file` cannot reach the merge commit and that GitHub is
-  unreachable.
+  `git cat-file` cannot reach the merge commit, that GitHub is unreachable,
+  and that every excluded path class denies a read of its planted sentinel.
+- A Sealle fixture run leaves no prompt, transcript, `prompt.md`,
+  `stderr.log` or oracle output off the authorised host.
 - Provider-free fixture tests on a seeded fixture adapter, like
   `tests/fixtures/current-routing-eval`, reproduce the bootstrap, sign test,
-  McNemar and verdicts exactly; a synthetic A/A run yields no `win`.
+  McNemar and verdicts exactly, including zero-denominator cases. A seeded
+  null simulation keeps the false-positive rate at or below 0.025 within
+  Monte Carlo error.
 - `run` refuses held-out without `--release` and refuses a plan whose digest
   changed after the first attempt. `report` rejects a row missing a
   provenance field and stays within 4 KB.
-- The pilot has run and its sigma_d and MDE are recorded in
-  `docs/evals/replay-bench/README.md`.
+- The pilot has run on search tasks, and its sigma_d, simulated power curve
+  and MDE are recorded in `docs/evals/replay-bench/README.md`.
 
 ## Not doing
 
