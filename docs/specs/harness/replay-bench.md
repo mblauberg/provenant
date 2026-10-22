@@ -42,11 +42,14 @@ reliability; the two-SE rule is #1056's observational noise filter.
    Capability: a task favours the arm with the higher pass fraction. Ties
    are excluded from the test and their count is reported.
 6. **Zero denominators.** An arm with no accepted attempt in the whole
-   sample makes an efficiency run `invalid` (reason `no_accepted`). A
-   resample in which either arm accepts nothing scores +inf, the worst case
-   for the candidate, so it cannot manufacture a win. The count of such
-   resamples is reported, and a resulting unbounded bound gives
-   `inconclusive`. No resample or task is dropped silently.
+   sample makes an efficiency run `invalid` (reason `no_accepted`). Within
+   the bootstrap, log(C_candidate / C_baseline) keeps its sign: a resample
+   where only the candidate accepts nothing scores +inf (candidate worse);
+   where only the baseline accepts nothing, -inf (candidate better); where
+   both accept nothing, it is undefined and left out of the quantile. All
+   three counts are reported. Undefined resamples above 2.5%, or an
+   unbounded one-sided bound, give `inconclusive`. Nothing is dropped
+   silently.
 7. **Win.** Only when all hold: the one-sided 97.5% bootstrap bound lies on
    the claimed side of zero; the sign test agrees at one-sided p < 0.05; no
    guard regresses beyond its tolerance. If bootstrap and sign test
@@ -67,10 +70,15 @@ reliability; the two-SE rule is #1056's observational noise filter.
    it beats the baseline by more than two pooled standard errors (#1056's
    rule). The screen never gates a merge.
 10. **Power.** A closed-form paired-mean formula does not size this rule, so
-    power comes from simulating the full rule: resample the pilot's
-    per-task paired differences, shift them by a candidate effect delta,
-    apply steps 4-8 including zero-denominator handling, at least 1,000
-    seeded replicates per delta. The plan records the power curve, the
+    power comes from simulating the full rule. Each replicate resamples
+    whole tasks from the pilot with their per-repeat arm outcomes (cost,
+    pass, accepted and every guard metric), randomly assigns the two pilot
+    arms to baseline and candidate per task, applies the effect delta to
+    the candidate arm only (costs scaled by exp(-delta) for efficiency;
+    pass probability raised by delta, capped at 1, and passes redrawn for
+    capability), then runs steps 4-8 unchanged, including the ratio of
+    sums, the zero cases and the guards. At least 1,000 seeded replicates
+    per delta. The plan records the power curve, the
     MDE at 80% power and the acceptance-set size it implies. Indicative
     figures, normal differences, n = 30, 600 replicates: power 0.66 at
     0.51 sigma_d and 0.83 at 0.6 sigma_d, so the MDE is about 0.6 sigma_d;
@@ -213,13 +221,12 @@ The pilot is an A/A run: `balanced` against `balanced` on 10 search tasks,
 3 repeats each, 60 attempts. Acceptance and held-out tasks are never used
 for calibration. It measures run-to-run variance and sigma_d, which feed the
 power simulation. An A/A run can still show a `win` at rate alpha, so the
-false-positive check is a seeded null simulation, not the pilot verdict:
-flip each task's paired difference at random, apply the full rule, and
-require a false-positive rate at or below 0.025 within Monte Carlo error
-(the indicative simulation gave 0.018). The decision rule, its code
-revision and parameters are frozen after the pilot and before any
-acceptance run. R1 F1 reports large rerun flips; in V1's check no Opus
-discordant pair reproduced.
+false-positive check is the seeded step 10 simulation at delta = 0, not
+the pilot verdict. It must give a false-positive rate at or below 0.025
+within Monte Carlo error (the indicative simulation gave 0.018). The
+decision rule, its code revision and parameters are frozen after the
+pilot and before any acceptance run. R1 F1 reports large rerun flips; in
+V1's check no Opus discordant pair reproduced.
 
 A read-only ledger query over the 1,414 `ok` Fabric lanes since 2026-09-01
 gives a median of 1.28M tokens per lane (IQR 0.49M-3.21M), 97.6% of them
