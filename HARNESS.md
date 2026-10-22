@@ -135,7 +135,8 @@ through a different lens. The required number of independent reviews does not
 change, and another pass by the same reviewer never counts as one.
 For `substantial` and higher work, each counted reviewer's model tier, meaning
 the routing pool (`junior`, `senior` or `principal`) of the resolved route
-actually used rather than the model name, is at or above the author's. A family that offers only a weaker tier is unavailable for
+actually used rather than the model name, is at or above the author's. A family
+that offers only a weaker tier is unavailable for
 that leg: its junior pass may add claims but never fills the leg, and the
 same-family replacement above applies.
 
