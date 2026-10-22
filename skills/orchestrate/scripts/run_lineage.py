@@ -240,10 +240,21 @@ def record_owner(run_dir, kind="dispatch"):
         # Keep the initial token inherited by the children this batch launches.
         token = (os.environ.get("PROVENANT_RUN_TOKEN")
                  if _same_run(os.environ.get("PROVENANT_RUN_DIR"), run_dir) else None) or uuid.uuid4().hex
+        try:
+            previous = _read(run_dir, "dispatch-owner.json")
+        except (OSError, ValueError, OwnedFileError):
+            previous = {}
+        # Keep the launcher's record for this token: Fabric's orphan reaper
+        # stops a running owner whose recorded host it cannot see.
+        launched = previous if previous.get("run_token") == token else {}
+        pid = os.getpid()
+        started = process_info.start_time(pid)
+        self_hosted = launched.get("host_pid") in (None, launched.get("owner_pid"))
         _write(run_dir, "dispatch-owner.json", {
-            "schema_version": 1, "kind": kind, "run_dir": str(run_dir), "run_token": token,
-            "owner_pid": os.getpid(), "owner_pgid": os.getpgrp(),
-            "owner_started_at": process_info.start_time(os.getpid()), **fields()})
+            **launched, "schema_version": 1, "kind": kind, "run_dir": str(run_dir), "run_token": token,
+            "owner_pid": pid, "owner_pgid": os.getpgrp(), "owner_started_at": started,
+            "host_pid": pid if self_hosted else launched["host_pid"],
+            "host_started_at": started if self_hosted else launched.get("host_started_at"), **fields()})
 
 
 def _check_parent(parent):
