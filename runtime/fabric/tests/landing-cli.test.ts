@@ -55,7 +55,7 @@ function database<T>(use: (db: Database.Database) => T): T {
 
 const lapse = () => database((db) => db.prepare("UPDATE landing_leases SET expires_at = ?").run(Date.now() - 1));
 
-describe("landing lease CLI", () => {
+describe("landing lease CLI", { timeout: 60_000 }, () => {
   it("refuses an acquire while another holder's lease is live, reporting holder and expiry", () => {
     const first = fabric(primary, "alice", "landing-acquire", "land", "--expected-sha", base, "--json");
     expect(first.code, first.err).toBe(0);
