@@ -1,0 +1,368 @@
+"""Quota display vocabulary, pools, the display rule, the menu bar headline and signed-out accounts."""
+
+from datetime import UTC, datetime, timedelta
+import importlib.util
+import io
+import json
+from pathlib import Path
+
+import pytest
+
+
+ROOT = Path(__file__).resolve().parents[1]
+NOW = datetime(2026, 10, 22, 12, 0, tzinfo=UTC)
+WEEK = 7 * 24 * 60
+ANESE, MICHAEL = 'anese@example.com', 'michael@example.com'
+
+
+@pytest.fixture
+def quota(tmp_path, monkeypatch):
+    home = tmp_path / 'home'
+    home.mkdir()
+    monkeypatch.setenv('HOME', str(home))
+    monkeypatch.setenv('AGENT_FABRIC_STATE_ROOT', str(tmp_path / 'state'))
+    monkeypatch.setenv('AGENT_FABRIC_INSTANCE_ROOT', str(home / '.agents'))
+    for name in ('PROVENANT_QUOTA', 'CLAUDE_CONFIG_DIR', 'CODEX_HOME', 'XDG_DATA_HOME'):
+        monkeypatch.delenv(name, raising=False)
+    spec = importlib.util.spec_from_file_location('provider_quota_display_under_test', ROOT / 'scripts/provider_quota.py')
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    def refuse(*args, **kwargs):
+        raise AssertionError('tests never reach a real provider, CLI or credential store')
+    for name in ('run_process', 'open_process', 'urlopen', 'executable'):
+        monkeypatch.setattr(module, name, refuse)
+    monkeypatch.setattr(module, 'telemetry_host', lambda: 'studio')
+    return module
+
+
+def configure(tmp_path, value):
+    path = tmp_path / 'home/.agents/config/telemetry.json'
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(value))
+
+
+def iso(moment):
+    return moment.isoformat().replace('+00:00', 'Z')
+
+
+def window(used, minutes, reset_in=None, name='seven_day', **extra):
+    return {'name': name, 'raw_kind': name, 'used_percent': used, 'window_minutes': minutes,
+            'reset_at': iso(NOW + reset_in) if reset_in is not None else None, **extra}
+
+
+def value(quota, provider, account, windows, observed=NOW, **extra):
+    return {'schema': quota.SCHEMA, 'provider': provider, 'account': account, 'plan': None, 'host': 'studio',
+            'active': True, 'priority': None, 'observed_at': iso(observed), 'attempted_at': iso(observed),
+            'source': 'test', 'status': 'ok', 'error': None, 'unreported': [], 'credits': None,
+            'windows': [quota.normalise_window(row) for row in windows], **extra}
+
+
+def row(quota, *values, **settings):
+    """The first account of a report built from these snapshots, with no local activity."""
+    return quota.report(list(values), NOW, activity={})['accounts'][0]
+
+
+def shown(account):
+    return next(item for item in account['windows'] if item['name'] == account['display_window'])
+
+
+# Vocabulary ----------------------------------------------------------------------------------
+
+def test_codex_primary_of_a_week_reads_weekly_with_display_names(quota):
+    codex = row(quota, value(quota, 'codex', 'default', [window(83, WEEK, timedelta(days=5), 'primary')], plan='prolite'))
+    assert (codex['provider_name'], codex['display_name'], codex['plan_label']) == ('Codex', None, 'Pro Lite')
+    assert codex['windows'][0]['label'] == 'Weekly' and codex['display_window'] == 'primary'
+
+
+def test_names_degrade_to_sane_title_and_sentence_case(quota, tmp_path):
+    assert quota.provider_name('agy') == 'Antigravity' and quota.provider_name('opencode') == 'OpenCode'
+    assert quota.provider_name('fakeprov') == 'Fakeprov' and quota.provider_name('big_model') == 'Big Model'
+    assert [quota.plan_label(plan) for plan in ('pro_student', 'prolite', 'Max', 'go', None)] == [
+        'Pro (Student)', 'Pro Lite', 'Max', 'Go', None]
+    labels = quota.window_labels()
+    cases = [(300, 'five_hour', '5-hour'), (1440, 'daily', 'Daily'), (4320, 'odd', '3-day (Odd)'),
+             (90, 'burst', '90-minute (Burst)'), (44640, 'billing_cycle', 'Monthly'), (43200, 'thirty_day', 'Monthly'),
+             (WEEK, 'seven_day_opus', 'Weekly (Opus)'), (WEEK, 'weekly_scoped:fable', 'Weekly (Fable)'),
+             (WEEK, 'weekly_all:2', 'Weekly'), (None, 'odd_window_name', 'Odd window name'),
+             (None, 'iguana_necktie', 'Cloud session credits')]
+    for minutes, name, label in cases:
+        assert quota.window_label({'name': name, 'window_minutes': minutes}, labels) == label
+    assert quota.window_label({'name': 'claude.5h', 'window_minutes': 300, 'pool': 'claude'}, labels) == '5-hour'
+    configure(tmp_path, {'accounts': {'claude': {'anese': {'identity_dir': '~/.claude'},
+                                                 'max-a': {'identity_dir': '~/.claude-a', 'display_name': 'Work'}}}})
+    entries = quota.configured_entries()
+    assert quota.display_name('claude', 'anese', entries) == 'Anese'
+    assert quota.display_name('claude', 'max-a', entries) == 'Work'
+    assert quota.display_name('claude', 'default', entries) is None
+    assert quota.display_name('agy', 'google-662390bb3131', entries) is None
+    # Labels themselves stay lowercase: they key snapshots and routing.
+    assert {account.label for account in quota.accounts() if account.provider == 'claude'} == {'anese', 'max-a'}
+    assert all('display_name' not in account.options for account in quota.accounts())
+
+
+def test_a_restated_limit_is_dropped_and_a_different_one_kept(quota):
+    weekly = window(9, WEEK, timedelta(days=6), 'seven_day')
+    same = window(9, WEEK, timedelta(days=6), 'weekly_all:2', advisory=False)
+    other = window(12, WEEK, timedelta(days=6), 'weekly_all:3')
+    claude = row(quota, value(quota, 'claude', 'anese', [weekly, same, other]))
+    assert [item['name'] for item in claude['windows']] == ['seven_day', 'weekly_all:3']
+
+
+# Display rule --------------------------------------------------------------------------------
+
+@pytest.mark.parametrize('short, shown_name', [(89, 'seven_day'), (90, 'five_hour'), (100, 'five_hour')])
+def test_the_longest_window_shows_unless_a_shorter_one_is_nearly_spent(quota, short, shown_name):
+    claude = row(quota, value(quota, 'claude', 'anese', [window(short, 300, timedelta(hours=1), 'five_hour'),
+                                                          window(30, WEEK, timedelta(days=2))]))
+    assert claude['display_window'] == shown_name
+    assert quota.report([], NOW, activity={})['display'] == {'short_window_alert_percent': 90}
+
+
+def test_the_alert_threshold_is_a_quota_setting(quota, tmp_path):
+    configure(tmp_path, {'quota': {'display': {'short_window_alert_percent': 80}}})
+    claude = row(quota, value(quota, 'claude', 'anese', [window(85, 300, timedelta(hours=1), 'five_hour'),
+                                                          window(30, WEEK, timedelta(days=2))]))
+    assert claude['display_window'] == 'five_hour'
+    assert quota.report([], NOW, activity={})['display'] == {'short_window_alert_percent': 80}
+
+
+def test_a_window_whose_reset_passed_is_never_shown_as_current(quota):
+    claude = row(quota, value(quota, 'claude', 'anese', [window(95, 300, timedelta(minutes=-5), 'five_hour'),
+                                                          window(30, WEEK, timedelta(days=2))]))
+    passed = next(item for item in claude['windows'] if item['name'] == 'five_hour')
+    assert passed['reset_passed'] is True and claude['display_window'] == 'seven_day'
+    only = row(quota, value(quota, 'claude', 'anese', [window(40, WEEK, timedelta(minutes=-5))]))
+    assert only['display_window'] is None
+
+
+# Pools ---------------------------------------------------------------------------------------
+
+def agy_windows(gemini=100, claude=7.4, short=14.8):
+    return [window(gemini, WEEK, timedelta(days=1, hours=16), 'gemini.weekly'),
+            window(claude, WEEK, timedelta(days=6, hours=4), 'claude.weekly'),
+            window(short, 300, timedelta(hours=1, minutes=40), 'claude.5h')]
+
+
+def test_agy_with_one_pool_exhausted_stays_usable_and_names_the_usable_pool(quota, tmp_path, monkeypatch, capsys):
+    agy = row(quota, value(quota, 'agy', 'google-662390bb3131', agy_windows()))
+    assert agy['state'] not in ('exhausted', 'signed_out') and agy['back_at'] is None
+    assert (agy['provider_name'], agy['display_name']) == ('Antigravity', None)
+    assert {item['name']: (item['pool'], item['pool_label']) for item in agy['windows']} == {
+        'gemini.weekly': ('gemini', 'Gemini models'), 'claude.weekly': ('claude', 'Claude models'),
+        'claude.5h': ('claude', 'Claude models')}
+    assert agy['display_window'] == 'claude.weekly' and shown(agy)['label'] == 'Weekly'
+    report = quota.report([value(quota, 'agy', 'google-662390bb3131', agy_windows())], NOW, activity={})
+    assert report['headline']['account'] == 'agy/google-662390bb3131'
+    assert report['placement_preference']['agy'] == ['google-662390bb3131']
+    quota.render(report)
+    out = capsys.readouterr().out
+    assert 'Claude models · Weekly' in out and 'Gemini models · Weekly' in out
+    # Routing is unchanged: agy quota is report-only and sets no cooldown.
+    assert quota.provider('agy').ADAPTER is None
+
+
+def test_agy_with_every_pool_exhausted_is_back_when_the_first_pool_returns(quota):
+    windows = [window(100, WEEK, timedelta(days=2), 'gemini.weekly'), window(100, WEEK, timedelta(days=6), 'claude.weekly'),
+               window(100, 300, timedelta(hours=1), 'claude.5h')]
+    agy = row(quota, value(quota, 'agy', 'google-662390bb3131', windows))
+    assert agy['state'] == 'exhausted' and agy['back_at'] == iso(NOW + timedelta(days=2))
+    assert agy['display_window'] == 'gemini.weekly'
+    assert quota.report([value(quota, 'agy', 'google-662390bb3131', windows)], NOW, activity={})['headline']['account'] is None
+
+
+def test_a_pool_needing_both_windows_back_returns_at_the_later_reset(quota):
+    windows = [window(100, WEEK, timedelta(days=3), 'gemini.weekly'), window(100, WEEK, timedelta(days=6), 'claude.weekly'),
+               window(100, 300, timedelta(hours=1), 'claude.5h')]
+    agy = row(quota, value(quota, 'agy', 'google-662390bb3131', windows))
+    assert agy['back_at'] == iso(NOW + timedelta(days=3))
+
+
+def test_pools_never_merge_matching_windows(quota):
+    windows = [window(0, 300, None, 'gemini.5h'), window(0, 300, None, 'claude.5h')]
+    agy = row(quota, value(quota, 'agy', 'google-662390bb3131', windows))
+    assert len(agy['windows']) == 2
+
+
+# Headline ------------------------------------------------------------------------------------
+
+def readings(quota):
+    return [value(quota, 'claude', 'anese', [window(2, 300, timedelta(hours=4), 'five_hour'), window(9, WEEK, timedelta(days=6))]),
+            value(quota, 'claude', 'michael', [window(100, WEEK, timedelta(days=3))]),
+            value(quota, 'codex', 'default', [window(83, WEEK, timedelta(days=5), 'primary')], priority=1),
+            value(quota, 'agy', 'google-662390bb3131', agy_windows())]
+
+
+def test_headline_recent_is_the_usable_account_used_most_recently(quota):
+    activity = {'claude/michael': 300, 'claude/anese': 200, 'codex/default': 100}
+    headline = quota.report(readings(quota), NOW, activity=activity)['headline']
+    # Michael is exhausted, so the most recent usable account wins, shown by its display window.
+    assert headline == {'mode': 'recent', 'account': 'claude/anese', 'window': 'seven_day'}
+
+
+def test_headline_without_activity_falls_back_to_priority_and_to_nothing(quota):
+    assert quota.report(readings(quota), NOW, activity={})['headline']['account'] == 'codex/default'
+    spent = [value(quota, 'claude', 'michael', [window(100, WEEK, timedelta(days=3))])]
+    assert quota.report(spent, NOW, activity={})['headline'] == {'mode': 'recent', 'account': None, 'window': None}
+
+
+@pytest.mark.parametrize('mode, account', [('worst', 'codex/default'), ('none', None),
+                                           ('agy/google-662390bb3131', 'agy/google-662390bb3131'),
+                                           ('claude/gone', 'codex/default'), ('bogus', 'codex/default')])
+def test_headline_modes(quota, tmp_path, mode, account):
+    configure(tmp_path, {'quota': {'menubar': {'headline': mode}}})
+    headline = quota.report(readings(quota), NOW, activity={})['headline']
+    assert headline['account'] == account
+
+
+# Signed-out accounts -------------------------------------------------------------------------
+
+def agy_usage(fraction=0.93):
+    return {'status': 'SUCCESS', 'command': {'data': {'groups': [
+        {'name': 'Gemini Models', 'buckets': [{'id': 'gemini-weekly', 'window': 'weekly', 'remaining_fraction': 0,
+                                               'reset_time': iso(NOW + timedelta(days=2))}]},
+        {'name': 'Claude and GPT models', 'buckets': [{'id': '3p-weekly', 'window': 'weekly',
+                                                       'remaining_fraction': fraction,
+                                                       'reset_time': iso(NOW + timedelta(days=3))}]}]}}}
+
+
+class Agy:
+    """agy on a stand-in Keychain: its logs say who is signed in, and its print-mode CLI answers for them."""
+
+    def __init__(self, quota, monkeypatch, tmp_path):
+        self.quota, self.runs, self.logs, self.count = quota, [], tmp_path / 'home/.gemini/antigravity-cli/log', 0
+        keychain = tmp_path / 'login.keychain-db'
+        keychain.write_text('')
+        original = quota.identity.default_identity
+        monkeypatch.setattr(quota.identity, 'default_identity', lambda name: keychain if name == 'agy' else original(name))
+        self.logs.mkdir(parents=True)
+        agy = self
+
+        class Process:
+            def __init__(self, argv, **kwargs):
+                agy.runs.append(agy.email)
+                Path(argv[argv.index('--log-file') + 1]).write_text(f'OAuth: authenticated successfully as {agy.email}\n')
+                self.stdout, self.returncode = io.BytesIO(json.dumps(agy.payload).encode()), 0
+
+            def kill(self):
+                self.returncode = -9
+
+            def wait(self, timeout=None):
+                return self.returncode
+        monkeypatch.setattr(quota, 'executable', lambda name: '/bin/' + name)
+        monkeypatch.setattr(quota, 'open_process', Process)
+
+    def sign_in(self, email, payload=None):
+        self.email, self.payload, self.count = email, payload or agy_usage(), self.count + 1
+        (self.logs / f'cli-20261022_09{self.count:02d}00.log').write_text(
+            f'OAuth: authenticated successfully as {email}\n')
+        return self.quota.provider('agy').fingerprint(email)
+
+    def accounts(self):
+        return {account.label: account for account in self.quota.accounts() if account.provider == 'agy'}
+
+    def tick(self, now):
+        return {account.label: self.quota.refresh(account, now, force=True) for account in self.accounts().values()}
+
+
+def test_switching_agy_accounts_keeps_the_first_as_signed_out_and_never_fetches_it(quota, monkeypatch, tmp_path):
+    agy = Agy(quota, monkeypatch, tmp_path)
+    michael = agy.sign_in(MICHAEL, agy_usage(0))
+    agy.tick(NOW - timedelta(hours=1))
+    anese = agy.sign_in(ANESE)
+    agy.runs.clear()
+    values = agy.tick(NOW)
+    assert agy.runs == [ANESE]  # only the signed-in account is fetched
+    accounts = agy.accounts()
+    assert accounts[michael].signed_out and not accounts[michael].active
+    assert accounts[anese].active and not accounts[anese].signed_out
+    report = quota.report(list(values.values()), NOW, activity={})
+    rows = {row['account']: row for row in report['accounts']}
+    assert rows[michael]['status'] == rows[michael]['state'] == 'signed_out'
+    assert rows[michael]['observed_at'] == iso(NOW - timedelta(hours=1))
+    assert rows[michael]['back_at'] == iso(NOW + timedelta(days=2))  # both pools spent: back when Gemini resets
+    assert {item['reset_at'] for item in rows[michael]['windows']} == {iso(NOW + timedelta(days=2)), iso(NOW + timedelta(days=3))}
+    # Each reading stays under its own fingerprint.
+    assert rows[anese]['windows'][1]['used_percent'] == pytest.approx(7)
+    assert rows[michael]['windows'][1]['used_percent'] == 100
+    assert report['placement_preference']['agy'] == [anese] and report['headline']['account'] == f'agy/{anese}'
+    # A forced refresh of the signed-out account still never runs agy.
+    agy.runs.clear()
+    assert quota.refresh(accounts[michael], NOW, force=True)['status'] == 'signed_out' and agy.runs == []
+
+
+def test_a_signed_out_account_shows_back_since_once_its_reset_passed(quota, monkeypatch, tmp_path):
+    agy = Agy(quota, monkeypatch, tmp_path)
+    michael = agy.sign_in(MICHAEL, agy_usage(0))
+    agy.tick(NOW)
+    agy.sign_in(ANESE)
+    later = NOW + timedelta(days=4)
+    report = quota.report(list(agy.tick(later).values()), later, activity={})
+    row = next(row for row in report['accounts'] if row['account'] == michael)
+    assert all(item.get('reset_passed') for item in row['windows'])
+    assert row['back_at'] == iso(NOW + timedelta(days=2)) and row['display_window'] is None
+
+
+def test_signing_back_in_resumes_the_same_history(quota, monkeypatch, tmp_path):
+    agy = Agy(quota, monkeypatch, tmp_path)
+    michael = agy.sign_in(MICHAEL)
+    agy.tick(NOW - timedelta(hours=2))
+    anese = agy.sign_in(ANESE)
+    agy.tick(NOW - timedelta(hours=1))
+    agy.sign_in(MICHAEL)
+    accounts = agy.accounts()
+    assert accounts[michael].active and accounts[anese].signed_out
+    before = quota.load_snapshot('agy', michael, accounts[michael].identity_dir)
+    assert before['observed_at'] == iso(NOW - timedelta(hours=2))
+    assert agy.tick(NOW)[michael]['observed_at'] == iso(NOW)
+    # The label and snapshot are the account's own, so the same file carries on.
+    assert quota.cache_path('agy', michael, identity_dir=accounts[michael].identity_dir).exists()
+
+
+def test_forget_refuses_the_signed_in_account_and_removes_a_signed_out_one(quota, monkeypatch, tmp_path, capsys):
+    agy = Agy(quota, monkeypatch, tmp_path)
+    michael = agy.sign_in(MICHAEL)
+    agy.tick(NOW)
+    anese = agy.sign_in(ANESE)
+    agy.tick(NOW)
+    assert quota.main(['forget', f'agy/{anese}']) == 1
+    assert 'signed in' in capsys.readouterr().err
+    assert quota.main(['forget', 'agy/google-000000000000']) == 1
+    capsys.readouterr()
+    assert quota.main(['forget', f'agy/{michael}', '--json']) == 0
+    printed = json.loads(capsys.readouterr().out)
+    assert [row['account'] for row in printed['accounts'] if row['provider'] == 'agy'] == [anese]
+    assert set(agy.accounts()) == {anese}
+
+
+def test_configured_fingerprints_name_accounts_and_others_still_appear(quota, monkeypatch, tmp_path):
+    agy = Agy(quota, monkeypatch, tmp_path)
+    michael = agy.sign_in(MICHAEL)
+    agy.tick(NOW)
+    anese = agy.sign_in(ANESE)
+    configure(tmp_path, {'accounts': {'agy': {michael: {'display_name': 'Michael'}}}})
+    accounts = agy.accounts()
+    assert accounts[michael].signed_out and accounts[anese].active
+    report = quota.report(list(agy.tick(NOW).values()), NOW, activity={})
+    names = {row['account']: row['display_name'] for row in report['accounts']}
+    assert names == {michael: 'Michael', anese: None}
+
+
+def test_remembered_accounts_unseen_too_long_are_no_longer_listed(quota, monkeypatch, tmp_path):
+    agy = Agy(quota, monkeypatch, tmp_path)
+    michael = agy.sign_in(MICHAEL)
+    agy.tick(NOW - timedelta(days=10))
+    anese = agy.sign_in(ANESE)
+    assert set(agy.accounts()) == {michael, anese}
+    configure(tmp_path, {'quota': {'remembered': {'forget_after_days': 7}}})
+    monkeypatch.setattr(quota, 'utcnow', lambda: NOW)
+    assert set(agy.accounts()) == {anese}
+
+
+def test_local_activity_never_credits_a_signed_out_account(quota, monkeypatch, tmp_path):
+    agy = Agy(quota, monkeypatch, tmp_path)
+    michael = agy.sign_in(MICHAEL)
+    agy.tick(NOW)
+    anese = agy.sign_in(ANESE)
+    activity = quota.local_activity()
+    assert f'agy/{anese}' in activity and f'agy/{michael}' not in activity
