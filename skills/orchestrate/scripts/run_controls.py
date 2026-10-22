@@ -675,7 +675,7 @@ def _route_selector(values: dict[str, Any]) -> tuple[str, str]:
 def _dispatch_command(run_dir: Path, task_id: str, prompt: Path | None, route: dict[str, Any], retry_of: str | None = None, *, prompt_stdin: bool = False) -> list[str]:
     if not isinstance(route.get("adapter"), str) or not route["adapter"]:
         raise ControlError("adapter is required")
-    command = [str(DISPATCH_RUN), "--run-dir", str(run_dir), "--task-id", task_id,
+    command = [sys.executable, str(DISPATCH_RUN), "--run-dir", str(run_dir), "--task-id", task_id,
                "--adapter", str(route["adapter"]),
                "--role", str(route.get("role", "worker")), "--intent", str(route.get("intent", "ordinary"))]
     if prompt_stdin:
