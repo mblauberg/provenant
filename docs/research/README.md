@@ -9,6 +9,10 @@ links and verify volatile provider or model claims at the live runtime.
 - [Evidence-based provider routing](evidence-based-provider-routing.md)
 - [Native orchestration and discovery surfaces](native-orchestration-and-discovery-surfaces.md)
 
+- [Model benchmark registry](model-benchmarks/README.md)
+  : benchmark priors per catalogue model and effort; priors only, never acceptance evidence.
+  [`effort-priors.md`](effort-priors.md) points here
+
 ## Dated evidence and decisions
 
 - [Agent continuity and checkpointing](agent-continuity-and-checkpointing.md)
