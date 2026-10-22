@@ -92,17 +92,16 @@ def test_top_is_the_highest_weight_available_and_deterministic(tmp_path):
     # The seed pools are the three tiers: deciders, mid-level judges and tier-1 lenses.
     assert models(pick({"route": "principal"}, tmp_path, catalog=SEED)) == ["claude/claude-opus-5-5"]
     assert models(pick({"route": "senior"}, tmp_path, catalog=SEED)) == ["claude/claude-sonnet-5-5"]
-    assert models(pick({"route": "junior"}, tmp_path, catalog=SEED)) == ["opencode/opencode/deepseek-v4.1-flash-free"]
+    assert models(pick({"route": "junior"}, tmp_path, catalog=SEED)) == ["claude/claude-haiku-5-5"]
     bulk = {entry["model"]: entry["weight"] for entry in SEED["routes"]["junior"]}
-    assert {bulk[model] for model in ("opencode/opencode/glm-5.3-flash-free", "claude/claude-haiku-5-5",
-                                       "codex/gpt-6-luna")} == {"high"}
+    assert {model for model, weight in bulk.items() if weight == "high"} == {"claude/claude-haiku-5-5",
+                                                                            "codex/gpt-6-luna"}
     cooling = []
     for _ in bulk:
         cooling.extend(models(pick({"route": "junior"}, tmp_path, catalog=SEED, cooling=cooling)))
-    free = [model for model in bulk if model.endswith("-free")]
-    subscription = [model for model in bulk if not model.startswith("opencode/")]
-    paid = [model for model in bulk if model.startswith("opencode/opencode-go/")]
-    assert cooling == free + subscription + paid
+    # Free routes are rate limited, so they stay sparing and follow the subscription routes.
+    rank = {"high": 0, "normal": 1, "sparing": 2}
+    assert cooling == sorted(bulk, key=lambda model: rank[bulk[model]])
     assert not set(bulk) & {"claude/claude-sonnet-5-5", "codex/gpt-6.1-sol", "claude/claude-opus-5-5"}
 
 

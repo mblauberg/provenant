@@ -630,6 +630,49 @@ class HostDiagnosticsContracts(unittest.TestCase):
                 # One non-ASCII character needs two UTF-8 bytes.
                 self.assertFalse(hosts.browser_socket_paths(Path(str(temporary)[:-1] + 'é'))['fits'])
 
+    def test_browser_temporary_directory_stays_short_for_long_attempt_paths(self):
+        import fabric_hosts as hosts
+        attempt = Path('/project') / ('long-name-' * 20) / '.agent-run/runs/run/dispatch/tasks/task/attempt-001'
+        temporary = hosts.browser_temporary_directory(attempt)
+        self.assertEqual(temporary.parent, Path('/tmp').resolve())
+        self.assertRegex(temporary.name, r'^fb-[0-9a-f]{12}$')
+        self.assertEqual(temporary, hosts.browser_temporary_directory(attempt))
+        self.assertNotEqual(temporary, hosts.browser_temporary_directory(attempt.with_name('attempt-002')))
+        with patch.object(hosts.sys, 'platform', 'darwin'):
+            self.assertTrue(hosts.browser_socket_paths(temporary)['fits'])
+
+    def test_browser_temporary_directory_is_private_and_refuses_unsafe_existing_paths(self):
+        import fabric_hosts as hosts
+        with tempfile.TemporaryDirectory() as directory:
+            attempt = Path(directory) / 'attempt'
+            temporary = hosts.browser_temporary_directory(attempt)
+            try:
+                self.assertEqual(hosts.browser_temporary_directory(attempt, create=True), temporary)
+                self.assertEqual(temporary.stat().st_uid, os.getuid())
+                self.assertEqual(temporary.stat().st_mode & 0o777, 0o700)
+                temporary.chmod(0o755)
+                hosts.browser_temporary_directory(attempt, create=True)
+                self.assertEqual(temporary.stat().st_mode & 0o777, 0o700)
+                from types import SimpleNamespace
+                foreign = SimpleNamespace(st_mode=temporary.stat().st_mode, st_uid=os.getuid() + 1)
+                with patch.object(hosts.os, 'fstat', return_value=foreign):
+                    with self.assertRaises(PermissionError):
+                        hosts.browser_temporary_directory(attempt, create=True)
+                temporary.rmdir()
+                temporary.symlink_to(directory, target_is_directory=True)
+                with self.assertRaises(OSError):
+                    hosts.browser_temporary_directory(attempt, create=True)
+                self.assertTrue(temporary.is_symlink())
+                temporary.unlink()
+                temporary.write_text('not a directory')
+                with self.assertRaises(OSError):
+                    hosts.browser_temporary_directory(attempt, create=True)
+            finally:
+                if temporary.is_symlink() or temporary.is_file():
+                    temporary.unlink()
+                elif temporary.exists():
+                    temporary.rmdir()
+
     def test_doctor_interpreter_probe_failure_names_python_minimum(self):
         with tempfile.TemporaryDirectory() as directory:
             interpreter = Path(directory) / 'python'
@@ -916,7 +959,7 @@ class LaneLoopbackContracts(unittest.TestCase):
         self.assertEqual(process.returncode, 0 if value['ok'] else 1, process.stderr + process.stdout)
         return value
 
-    def mcp(self, name, arguments, seat='codex'):
+    def mcp(self, name, arguments, seat='codex', cwd=None):
         client_module = ROOT / 'node_modules/@modelcontextprotocol/sdk/dist/esm/client/index.js'
         transport_module = ROOT / 'node_modules/@modelcontextprotocol/sdk/dist/esm/client/stdio.js'
         script = ('import {Client} from ' + json.dumps(client_module.as_uri()) + ';\n'
@@ -928,7 +971,7 @@ class LaneLoopbackContracts(unittest.TestCase):
             + 'const result=await client.callTool(' + json.dumps({'name': name, 'arguments': arguments}) + ');\n'
             + 'console.log(JSON.stringify(result.structuredContent ?? JSON.parse(result.content[0].text)));\n'
             + '}finally{await client.close();}')
-        process = subprocess.run(['node', '--input-type=module', '-e', script], cwd=self.workspace,
+        process = subprocess.run(['node', '--input-type=module', '-e', script], cwd=cwd or self.workspace,
             env={**self.env, 'AGENT_FABRIC_SEAT': seat}, capture_output=True, text=True, timeout=40)
         self.assertEqual(process.returncode, 0, process.stdout + process.stderr)
         return json.loads(process.stdout)
@@ -993,6 +1036,33 @@ class LaneLoopbackContracts(unittest.TestCase):
         self.wait_writer(launched['id'])
         self.assertFalse(remote.exists())
         self.assertNotIn(str(remote), git(self.peer_workspace, 'worktree', 'list', '--porcelain'))
+
+    def test_remote_reader_prompt_names_actual_checkout_cwd_and_head(self):
+        git, _, local = self.writer_fixture()
+        (local / 'src').mkdir()
+        (local / 'src/review.txt').write_text('review input')
+        git(local, 'add', 'src/review.txt')
+        git(local, 'commit', '-qm', 'review subdirectory')
+        head = git(local, 'rev-parse', 'HEAD')
+        brief = self.root / 'reader-brief.md'
+        brief.write_text('Review ' + str(local / 'src') + '\n\nslow')
+        launched = self.client('dispatch', host='workshop', adapter='codex', model='fixture',
+            prompt_file=str(brief), mode='read_only', cwd=str(local / 'src'),
+            task_id='prompt-location', operation_id='prompt-location')
+        self.assertEqual(launched['status'], 'running', launched)
+        try:
+            context = launched['code_transport']['readers'][0]
+            checkout = Path(context['worktree_path'])
+            prompt = Path(launched['paths']['run_dir']) / '_owner/prompt-location-prompt-1.md'
+            text = prompt.read_text()
+            preamble, original = text.split('\n\n', 1)
+            self.assertIn(str(checkout), preamble)
+            self.assertIn(str(checkout / 'src'), preamble)
+            self.assertIn(head, preamble)
+            self.assertEqual(original, brief.read_text())
+        finally:
+            self.client('cancel', id=launched['id'], operation_id='stop-prompt-location')
+            self.wait_writer(launched['id'])
 
     def test_reader_polling_preserves_input_between_fallback_attempts(self):
         self.writer_fixture()
@@ -1297,6 +1367,37 @@ class LaneLoopbackContracts(unittest.TestCase):
             self.assertTrue(launched['id'].endswith('@workshop'), launched)
         finally:
             self.client('cancel', id=launched['id'], operation_id='stop-mapped')
+
+    def test_mcp_remote_placement_uses_task_paths_from_a_non_repository_cwd(self):
+        self.set_peer_response_deadline(30)
+        _, _, local = self.writer_fixture()
+        for mode, key in [('worktree_write', 'worktree'), ('read_only', 'cwd')]:
+            for batch in (False, True):
+                with self.subTest(mode=mode, batch=batch):
+                    identifier = 'path-' + key + ('-batch' if batch else '')
+                    task = dict(mode=mode, prompt='slow', **{key: str(local)})
+                    request = dict(host='workshop', adapter='codex', model='fixture',
+                        operation_id=identifier, detail='full')
+                    if batch:
+                        request['tasks'] = [dict(id=identifier, **task)]
+                    else:
+                        request.update(task_id=identifier, **task)
+                    launched = self.mcp('fabric_dispatch', request, cwd=self.local_home)
+                    self.assertEqual(launched['status'], 'running', launched)
+                    try:
+                        self.assertEqual(launched['host'], 'workshop', launched)
+                    finally:
+                        self.client('cancel', id=launched['id'], operation_id='stop-' + identifier)
+                        self.wait_writer(launched['id'])
+
+    def test_remote_writer_name_error_reports_expected_branch_directory(self):
+        git, _, local = self.writer_fixture()
+        git(local, 'branch', '-m', 'feat/expected')
+        refused = self.client('dispatch', host='workshop', adapter='codex', model='fixture',
+            prompt='fixture only', mode='worktree_write', worktree=str(local),
+            operation_id='wrong-directory')
+        self.assertEqual(refused['error'], 'worktree_invalid', refused)
+        self.assertIn('feat-expected', refused['fix'])
 
     def test_remote_cwd_outside_every_registered_project_is_refused_naming_path_and_host(self):
         self.writer_fixture()

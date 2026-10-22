@@ -112,11 +112,10 @@ status probe report `unknown`. Confinement uses the existing read-only planning
 and sandbox probes; the executing dispatch owner checks adapter sign-in,
 effective read-only confinement and requested browser socket paths before
 launch. Doctor's temporary-path `fits` estimate measures filesystem path and
-component limits only. Remote browser lanes separately check the actual attempt's
-`tmp` path used by `MAC_CHROMIUM_TMPDIR`, reserving Chromium's generated directory
-and `SingletonSocket` suffix. Before provider launch, paths must fit the native
-Unix socket compatibility limit (104 bytes on macOS, 108 on Linux, including the
-terminator). Shorten the peer project/run path if this check rejects placement.
+component limits only. Browser lanes put Chromium's `SingletonSocket` under a
+short private `/tmp/fb-<id>` directory (`MAC_CHROMIUM_TMPDIR`), so its path fits
+the native Unix socket limit (104 bytes on macOS, 108 on Linux, including the
+terminator) whatever the project path; remote placement still checks it.
 Registration reports the existing install check's Fabric-entry presence,
 independently of whether the adapter executable is on PATH.
 
@@ -256,6 +255,13 @@ runs the lane there; uncommitted chair files do not travel. Both hosts need the
 configured project key and a complete Git checkout. If preparation cannot
 transport the input, dispatch runs locally with a visible `placement_fallback`
 reason. The operation stays bound locally on retry.
+
+The reader's prompt names its actual checkout, working directory and frozen
+HEAD SHA before the original brief. Use those paths and HEAD when the brief
+names paths or refs that exist only on the dispatching host. Targeted pytest
+runs keep temporary files under the lane's writable `TMPDIR`; a Git discovery
+boundary prevents scratch source fixtures from inheriting `.agent-run` ignore
+rules and being classified as generated files.
 
 The detached worktree is removed after the lane's owner settles; polling keeps
 it while a fallback sequence is still alive and retries cleanup when needed.

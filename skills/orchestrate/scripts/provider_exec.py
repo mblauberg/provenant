@@ -238,6 +238,18 @@ def _opencode_discovery_grantable(path, *, directory=False):
     return target.is_file() and target.name in OPENCODE_INSTRUCTION_FILES
 
 
+@functools.lru_cache(maxsize=1)
+def _fabric_hosts_owner():
+    name = "provenant_provider_hosts"
+    if name not in sys.modules:
+        spec = importlib.util.spec_from_file_location(
+            name, Path(__file__).resolve().parents[3] / "scripts/fabric_hosts.py")
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[name] = module
+        spec.loader.exec_module(module)
+    return sys.modules[name]
+
+
 def _jsonc_loads(text):
     # The one JSONC reader lives in the product's scripts/lib; a skill reaches it by path.
     spec = importlib.util.spec_from_file_location(
@@ -556,6 +568,8 @@ def os_confinement_profile(plan, search_path=None):
     state = _provider_state(plan)
     add_dirs = [Path(path) for path in plan.get("applied", {}).get("add_dirs", [])]
     run_dir = Path(plan["run_dir"]) if plan.get("run_dir") else None
+    browser_tmp = plan.get("applied", {}).get("browser_tmpdir")
+    attempt_paths = [*([run_dir] if run_dir else []), *([Path(browser_tmp)] if browser_tmp else [])]
     state_writes = _state_paths(home, state.get("read_write", ()))
     cwd_path = Path(plan["cwd"]).resolve()
     discovery_metadata = [ancestor / name for ancestor in (cwd_path, *cwd_path.parents)
@@ -576,7 +590,7 @@ def os_confinement_profile(plan, search_path=None):
             git_denied = [location.common]
             git_allowed, literal_files = writer_git_writes(location.private, location.common, plan.get("lane_ref"))
             read_only = writer_read_only(cwd, location.private, location.common)
-        allowed = [cwd, *add_dirs, *([run_dir] if run_dir else []), Path("/dev")]
+        allowed = [cwd, *add_dirs, *attempt_paths, Path("/dev")]
         shared_paths = plan["applied"].get("shared_write_paths", {})
         locks_dir = plan.get("applied", {}).get("locks_dir")
         if locks_dir and _real_dir_chain(Path(locks_dir)):
@@ -617,7 +631,7 @@ def os_confinement_profile(plan, search_path=None):
                                             selector="global-name-prefix")
             profile += "(deny network-outbound (remote unix-socket))\n"
             profile += _sbpl_unix_socket_allow(
-                [cwd, *add_dirs, *([run_dir] if run_dir else []), codex_home]
+                [cwd, *add_dirs, *attempt_paths, codex_home]
             )
         profile += _state_write_guards(home, state)
         profile += _provider_config_write_denies(home)
@@ -648,13 +662,13 @@ def os_confinement_profile(plan, search_path=None):
     launcher_links, install_directories = _adapter_binary_reads(plan, search_path)
     return (
         "(version 1)\n(allow default)\n(deny file-write*)\n"
-        + _sbpl_rule("allow", "file-write*", [*([run_dir] if run_dir else []), Path("/dev")])
+        + _sbpl_rule("allow", "file-write*", [*attempt_paths, Path("/dev")])
         + "".join(rule for rule, _ in _state_write_grants(home, state, ("read_write",)))
         + _state_write_guards(home, state)
         + _sbpl_rule("deny", "file-read-data", [home, Path("/private/tmp")])
         + _sbpl_rule("deny", "file-read-data", [root, *add_dirs])
         + _sbpl_rule("allow", "file-read-data", [*discovery_dirs, *discovery_files], literal=True)
-        + _sbpl_rule("allow", "file-read-data", [*([run_dir] if run_dir else [])])
+        + _sbpl_rule("allow", "file-read-data", attempt_paths)
         + _sbpl_rule("allow", "file-read-data", state_writes, canonical=True)
         + _sbpl_rule("allow", "file-read-data", _state_read_paths(home, reads))
         + _sbpl_rule("allow", "file-read-data", [home / path for path in state.get("read_literal", ())],
@@ -1435,13 +1449,14 @@ def build_plan(
         if locks_dir is None:
             warnings.append("project locks directory is not grantable: a link or non-directory is in the way")
     attempt_dir = Path(run_dir or cwd).expanduser().resolve()
+    browser_tmp = str(_fabric_hosts_owner().browser_temporary_directory(attempt_dir)) if "browser" in capabilities else None
     codex_home = attempt_dir.parent / "codex-home" if capabilities and adapter == "codex" else None
     codex_auth_path = None
     if codex_home is not None:
         source_codex_home = Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex").expanduser().resolve()
         codex_auth_path = source_codex_home / "auth.json"
     if confinement == "sandbox-exec":
-        writable_paths = [str(attempt_dir), "/dev"]
+        writable_paths = [str(attempt_dir), *([browser_tmp] if browser_tmp else []), "/dev"]
         if mode == "worktree_write":
             writable_paths = [cwd, *directories, *shared_write_paths, *([locks_dir] if locks_dir else []), *writable_paths, *git_writes]
         if codex_home is not None:
@@ -1539,6 +1554,7 @@ def build_plan(
             "confinement": confinement,
             "write_boundary": write_boundary,
             "capabilities": capabilities,
+            **({"browser_tmpdir": browser_tmp} if browser_tmp else {}),
             "protected_paths": [str(path) for path in guarded],
         },
         **({"codex_home": str(codex_home), "codex_auth_path": str(codex_auth_path)}
@@ -1610,6 +1626,7 @@ def error_class(status, signature=None):
         "print_timeout": "timeout", "idle_watchdog": "timeout", "startup_watchdog": "timeout",
         "wall_clock": "timeout",
         "provider_transport": "transient",
+        "fabric_mcp_unavailable": "fabric_mcp_unavailable",
     }
     return classes.get(status) or signatures.get(signature) or (
         "provider_error" if status in {"failed", "rejected", "tool_missing", "output_identity_invalid", "output_write_error"}
@@ -2791,7 +2808,7 @@ def _prepare_codex_capability_home(plan, environment):
             boundary.append(str(lane_home))
     environment["CODEX_HOME"] = str(lane_home)
     if "browser" in capabilities:
-        environment["MAC_CHROMIUM_TMPDIR"] = str(Path(plan["run_dir"]) / "tmp")
+        environment["MAC_CHROMIUM_TMPDIR"] = plan["applied"]["browser_tmpdir"]
     else:
         environment.pop("MAC_CHROMIUM_TMPDIR", None)
 
@@ -3423,6 +3440,54 @@ def execute(plan, output_path, **options):
         os.close(tmp_fd)
 
 
+MCP_PREFLIGHT_SECONDS = 10
+
+
+def _preflight_opencode_mcp(plan, environment, tmp_fd):
+    """Check the exact writer MCP command under the lane's final environment and boundary."""
+    if plan["adapter"] != "opencode" or plan["mode"] != "worktree_write":
+        return
+    server = json.loads(environment["OPENCODE_CONFIG_CONTENT"])["mcp"]["servers"]["fabric"]
+    mcp_environment = {**environment, **server.get("environment", {})}
+    request = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+        "protocolVersion": "2024-11-05", "capabilities": {},
+        "clientInfo": {"name": "provenant-preflight", "version": "1"},
+    }}) + "\n"
+    said = ""
+    try:
+        command = confinement_command(plan, server["command"], environment.get("PATH"))
+        # Files bound what the supervisor reads even if startup produces noisy diagnostics.
+        with _unlinked_file(tmp_fd) as output, _unlinked_file(tmp_fd) as errors:
+            process = subprocess.Popen(command, cwd=plan["cwd"], env=mcp_environment,
+                                       stdin=subprocess.PIPE, stdout=output, stderr=errors,
+                                       start_new_session=True)
+            descendants = _Descendants(process, environment["PROVENANT_ATTEMPT_MARKER"])
+            descendants.sample()
+            try:
+                process.communicate(request.encode(), timeout=MCP_PREFLIGHT_SECONDS)
+            finally:
+                descendants.stop(normal=process.poll() is not None)
+                process.wait()
+            errors.seek(0)
+            # The wrapper names its own fault, such as a missing loader or an unsupported Node.
+            said = " ".join(errors.read(65536).decode(errors="replace").split())[-300:]
+            output.seek(0)
+            for line in output.read(65536).splitlines():
+                try:
+                    response = json.loads(line)
+                except ValueError:
+                    continue
+                result = response.get("result") if isinstance(response, dict) else None
+                if (isinstance(response, dict) and response.get("id") == 1 and isinstance(result, dict)
+                        and result.get("protocolVersion") and isinstance(result.get("capabilities"), dict)
+                        and isinstance(result.get("serverInfo"), dict) and process.returncode == 0):
+                    return
+    except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as exc:
+        raise CapabilityError("fabric_mcp_unavailable", "Fabric MCP preflight failed; check the product wrapper, Node runtime and confinement grants") from exc
+    raise CapabilityError("fabric_mcp_unavailable", "Fabric MCP preflight failed: no valid initialize response; check the product wrapper, Node runtime and confinement grants"
+                          + (f"; wrapper stderr: {said}" if said else ""))
+
+
 def _run_attempt(
     plan,
     output_path,
@@ -3546,6 +3611,7 @@ def _run_attempt(
     reaped = []
     stopped = False
     forced, terminal_at, cancel_signal = None, None, None
+    preflight_error = None
     provider_exit_before_cleanup = None
     terminal_grace_break = False
     pending = b""
@@ -3671,15 +3737,20 @@ def _run_attempt(
     input_file = None
     workspace = None
     agy_home, agy_home_warnings = None, []
+    browser_tmp, browser_tmp_identity, browser_tmp_warnings = None, None, []
     selector = selectors.DefaultSelector()
     try:
+        if "browser" in plan["applied"].get("capabilities", []):
+            browser_tmp = _fabric_hosts_owner().browser_temporary_directory(plan["run_dir"], create=True)
+            browser_tmp_identity = browser_tmp.lstat()
+            plan["applied"]["browser_tmpdir"] = str(browser_tmp)
         _prepare_codex_capability_home(plan, environment)
         _prepare_codex_state_dir(plan)
         agy_home = stage_agy_home(plan, tmp_fd, private_tmp)
         if agy_home:
             environment["HOME"] = str(agy_home.path)
         if plan["adapter"] != "codex" and "browser" in plan["applied"].get("capabilities", []):
-            environment["MAC_CHROMIUM_TMPDIR"] = str(private_tmp)  # Chrome's default temp is outside the boundary.
+            environment["MAC_CHROMIUM_TMPDIR"] = str(browser_tmp)
         if plan["stdin_policy"] == "prompt":
             input_file = _unlinked_file(tmp_fd)
             input_file.write(plan["prompt"].encode())
@@ -3703,6 +3774,7 @@ def _run_attempt(
             forced = "rejected"
             diagnostics.write(b"copilot requires CF_DISPATCH_ENABLE_COPILOT=1\n")
         else:
+            _preflight_opencode_mcp(plan, environment, tmp_fd)
             command = list(plan["argv"])
             command[0] = (
                 shutil.which(command[0], path=environment.get("PATH")) or command[0]
@@ -3830,6 +3902,8 @@ def _run_attempt(
         diagnostics.write(str(exc).encode())
     except ValueError as exc:
         forced = "rejected"
+        if isinstance(exc, CapabilityError):
+            preflight_error = exc.code
         diagnostics.write(str(exc).encode())
     except OSError as exc:
         forced = "failed"
@@ -3867,10 +3941,26 @@ def _run_attempt(
             for sig, handler in old_handlers.items():
                 signal.signal(sig, handler)
         finally:
-            if subreaper:
-                _release_subreaper()
-            if agy_home:
-                agy_home_warnings = finish_agy_home(plan, tmp_fd, agy_home)
+            try:
+                if subreaper:
+                    _release_subreaper()
+                if agy_home:
+                    agy_home_warnings = finish_agy_home(plan, tmp_fd, agy_home)
+            finally:
+                if browser_tmp is not None and browser_tmp_identity is not None:
+                    # Cleanup trouble must not discard the lane's result; report it instead.
+                    try:
+                        current = browser_tmp.lstat()
+                    except FileNotFoundError:
+                        pass  # The lane already removed its temp directory.
+                    else:
+                        if (current.st_dev, current.st_ino) != (browser_tmp_identity.st_dev, browser_tmp_identity.st_ino):
+                            browser_tmp_warnings.append(f"browser temporary directory was replaced; left in place: {browser_tmp}")
+                        else:
+                            try:
+                                shutil.rmtree(browser_tmp)
+                            except OSError as exc:
+                                browser_tmp_warnings.append(f"browser temporary directory cleanup failed: {browser_tmp}: {exc}")
     exit_code = process.returncode if process else None
     if cancel_signal and not forced:
         forced = "interrupted"  # EOF can precede the loop's signal check.
@@ -3947,6 +4037,8 @@ def _run_attempt(
             "cancelled": "cancel_requested",
             "interrupted": "supervisor_signal",
         }.get(forced, parsed["signature"])
+        if preflight_error:
+            parsed.update(signature=preflight_error, excerpt=stderr.strip())
     elif provider_exit_before_cleanup is not None and provider_exit_before_cleanup < 0:
         parsed["status"] = "interrupted" if valid_terminal else "failed"
         parsed["signature"] = "provider_signal"
@@ -3962,7 +4054,7 @@ def _run_attempt(
     session = parsed["session_id"] or plan["resume_session"] or plan["session_id"]
     parsed["session_id"] = session
     observed, source = _observed_model(plan, parsed, environment)
-    warnings = [*plan["warnings"], *agy_home_warnings]
+    warnings = [*plan["warnings"], *agy_home_warnings, *browser_tmp_warnings]
     if parsed["signature"] == "exit_after_output":
         warnings.append(parsed["excerpt"])
     reported = {}
@@ -4150,6 +4242,9 @@ def _run_attempt(
     )
     guarantee = plan["applied"]["guarantee"]
     fix = (
+        "check the Fabric product wrapper, supported Node runtime and confinement grants"
+        if parsed["signature"] == "fabric_mcp_unavailable"
+        else
         "run `kiro-cli whoami` outside the sandbox"
         if status == "auth_required" and parsed["signature"] == "auth_expired"
         else
@@ -4211,7 +4306,8 @@ def _run_attempt(
         "effort": plan["effort"],
         "status": status,
         **({"result_partial": True} if status not in {"ok", "input_required", "quarantined"} and not valid_terminal and parsed["text"].strip() else {}),
-        **({"error": "invalid_input"} if status == "rejected" and parsed["signature"] == "invalid_input" else {}),
+        **({"error": parsed["signature"]} if status == "rejected" and parsed["signature"] in {
+            "invalid_input", "fabric_mcp_unavailable"} else {}),
         **({"error": parsed["signature"]} if instruction_changes else {}),
         **({"landable": False, "quarantine": quarantine} if quarantine else {}),
         "reason": parsed["excerpt"],

@@ -2174,12 +2174,14 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
     attempt_id = f"attempt-{attempt_number:03d}"
     attempt_dir = task_dir / attempt_id
     if os.environ.get('PROVENANT_REMOTE_LANE') == '1' and 'browser' in args.capabilities:
-        socket = _fabric_hosts_owner().browser_socket_paths(attempt_dir / 'tmp')
+        hosts = _fabric_hosts_owner()
+        browser_tmp = hosts.browser_temporary_directory(attempt_dir)
+        socket = hosts.browser_socket_paths(browser_tmp)
         if not socket['fits']:
             return fail(run_dir, 'remote_temporary_path_too_long',
-                f"Chromium SingletonSocket under {attempt_dir / 'tmp'} needs "
+                f"Chromium SingletonSocket under {browser_tmp} needs "
                 f"{socket['max_path_bytes']} bytes; the socket path must be shorter than "
-                f"{socket['limit_bytes']} bytes. Use a shorter peer project/run path.")
+                f"{socket['limit_bytes']} bytes. The short browser temporary path exceeds the socket limit.")
     try:
         create_contained_directory(
             run_dir, attempt_dir.relative_to(run_dir), label="attempt directory"
