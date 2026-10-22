@@ -351,7 +351,7 @@ enum CLI {
             kill(-pid, SIGTERM)
             let grace = DispatchTime.now() + 3
             let gone = exited.wait(timeout: grace) == .success
-            if gone, grace > .now() { usleep(useconds_t((grace.uptimeNanoseconds - DispatchTime.now().uptimeNanoseconds) / 1000)) }
+            if gone { _ = DispatchSemaphore(value: 0).wait(timeout: grace) }   // sleeps out the rest; no clock arithmetic
             kill(-pid, SIGKILL)   // descendants get the full grace even when the leader exits early
             running = !gone && exited.wait(timeout: .now() + 3) == .timedOut
         }
