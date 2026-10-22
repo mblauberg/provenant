@@ -26,8 +26,8 @@ batch execution.
 | Concern | Current owner | Boundary |
 |---|---|---|
 | Model and tier resolution | `scripts/model-route` | Resolves configured routes and records route identity; it does not launch providers. |
-| Provider-invocation adapter | `skills/orchestrate/scripts/cf_dispatch.sh` | Invoked by ordinary and assurance routes; its distinct-family requirement remains assurance policy. |
-| Ordinary dispatch runner and interface | `skills/orchestrate/scripts/dispatch_run.py` (implemented by [#690](https://github.com/mblauberg/provenant/pull/690)) | Owns one ordinary intent/policy attempt and its `attempt.json`, and delegates provider invocation to `cf_dispatch.sh`. |
+| Provider-invocation adapter | `skills/orchestrate/scripts/cf_dispatch.py` | Invoked by ordinary and assurance routes; its distinct-family requirement remains assurance policy. |
+| Ordinary dispatch runner and interface | `skills/orchestrate/scripts/dispatch_run.py` (implemented by [#690](https://github.com/mblauberg/provenant/pull/690)) | Owns one ordinary intent/policy attempt and its `attempt.json`, and delegates provider invocation to `cf_dispatch.py`. |
 | Fixed bounded batches | `skills/orchestrate/scripts/batch_run.py` (implemented by [#692](https://github.com/mblauberg/provenant/pull/692)) | Builds on `dispatch_run.py` for fixed task sets, bounded concurrency, partial results and explicit retry; it does not own provider invocation or workspace policy. |
 | Coordination and MCP front door | `runtime/fabric` | Mailbox, shared tasks and activity; its two execution tools only start the existing dispatch owners. No provider implementation, scheduler or lifecycle owner. |
 | Dispatch evidence | `attempt.json`, validated and indexed by `dispatch_run.py`; `run_controls.py` owns retained-attempt validation and operator controls | Records execution attempts, route lineage and observed completion. `run_dir_finalize.py` invokes the `run_controls.py` validator during generic custody finalisation but does not own the attempt schema; dispatch evidence is not delivery acceptance and must not create a parallel lifecycle ledger. |
@@ -36,7 +36,7 @@ batch execution.
 The dispatch runner provides the ordinary intent/policy interface and the
 ordinary single-dispatch intent/policy mode; the batch layer provides the fixed
 bounded implementation boundary. The existing
-distinct-family behaviour in `cf_dispatch.sh` remains the assurance path, while
+distinct-family behaviour in `cf_dispatch.py` remains the assurance path, while
 ordinary execution explicitly records that it makes no independence claim.
 Credential/auth-store exclusions, unrelated-path containment, explicit denials,
 write/resource limits and external-action gates remain implementation acceptance

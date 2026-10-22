@@ -9,6 +9,7 @@ import shutil
 import re
 import signal
 import socket
+import stat
 import subprocess
 import ctypes
 import sys
@@ -36,7 +37,7 @@ def test_plan_only_resolves_without_launch(tmp_path):
     }
     result = subprocess.run(
         [
-            str(SCRIPTS / "cf_dispatch.sh"),
+            str(SCRIPTS / "cf_dispatch.py"),
             "--intent",
             "ordinary",
             "--tool",
@@ -213,17 +214,16 @@ def test_opencode_read_only_discovery_skips_symlinks_to_credentials(monkeypatch,
 @pytest.mark.parametrize("adapter", ["agy", "claude", "cursor", "opencode", "kiro"])
 def test_writer_confinement_allows_owned_paths_and_add_dirs(monkeypatch, tmp_path, adapter):
     mod = supervisor()
-    worktree = tmp_path / "worktree"
+    primary, worktree = linked_worktree(tmp_path)
     attempt = tmp_path / "run" / "attempt"
-    common = tmp_path / "common.git"
-    private = tmp_path / "linked.git"
+    common = primary / ".git"
+    private = common / "worktrees/lane"
     add_dir = tmp_path / "extra"
-    for path in (worktree, attempt, common, private, add_dir):
+    for path in (attempt, add_dir):
         path.mkdir(parents=True)
-    dirs = iter((private, common))
-    monkeypatch.setattr(mod.subprocess, "run", lambda *a, **k: SimpleNamespace(returncode=0, stdout=str(next(dirs))))
     plan = {"adapter": adapter, "mode": "worktree_write", "cwd": str(worktree),
-            "workspace_root": str(worktree), "run_dir": str(attempt),
+            "workspace_root": str(worktree), "run_dir": str(attempt), "lane_ref": "refs/heads/lane",
+            "trusted_git": {"common": str(common)},
             "applied": {"confinement": "sandbox-exec", "add_dirs": [str(add_dir)]}}
     profile = mod.os_confinement_profile(plan)
     assert "(deny file-write*)" in profile
@@ -232,15 +232,20 @@ def test_writer_confinement_allows_owned_paths_and_add_dirs(monkeypatch, tmp_pat
     for path in (worktree, add_dir, attempt, private, Path("/dev")):
         assert f'(subpath "{path}")' in allow
     assert f'(subpath "{common}")' not in allow
-    for path in (common / "objects", common / "refs", common / "logs"):
-        assert f'(subpath "{path}")' in profile
-    for path in (common / "packed-refs", common / "packed-refs.lock", common / "packed-refs.new"):
-        assert f'(literal "{path}")' in profile
-    for path in (common / "config", common / "hooks", common / "HEAD", common / "index"):
+    assert f'(subpath "{common / "objects"}")' in allow
+    for path in (common / "refs/heads/lane", common / "refs/heads/lane.lock", common / "logs/refs/heads/lane"):
+        assert f'(literal "{path}")' in allow
+    # Writers move only their own branch; the primary branch, upstreams and tags stay owner-only.
+    for path in (common / "config", common / "hooks", common / "HEAD", common / "index", common / "refs",
+                 common / "logs", common / "packed-refs", common / "refs/heads/main"):
         assert f'(subpath "{path}")' not in profile
         assert f'(literal "{path}")' not in profile
     for path in (Path.home() / ".cache", Path.home() / "Library/Caches", Path("/private/tmp")):
         assert f'(subpath "{path}")' not in profile
+    deny = "\n".join(line for line in profile.splitlines() if line.startswith("(deny file-write* "))
+    for path in (worktree / ".git", private / "commondir", private / "gitdir", private / "config.worktree",
+                 common / "objects/info"):
+        assert f'(subpath "{path}")' in deny
     for state_path in mod.CONFINED_STATE[adapter]["read_write"]:
         assert mod._sbpl_filter(Path.home() / state_path) in profile
     assert f'(subpath "{tmp_path}")' not in profile
@@ -358,12 +363,10 @@ def test_read_only_plan_gets_no_locks_grant(monkeypatch, tmp_path):
 
 def test_writer_protected_path_inside_add_dir_keeps_read_and_write_denied(monkeypatch, tmp_path):
     mod = supervisor()
-    worktree = tmp_path / "worktree"
+    _primary, worktree = linked_worktree(tmp_path)
     add_dir = tmp_path / "extra"
     protected = add_dir / "private"
-    worktree.mkdir()
     protected.mkdir(parents=True)
-    monkeypatch.setattr(mod.subprocess, "run", lambda *a, **k: SimpleNamespace(returncode=1, stdout=""))
     plan = {"adapter": "agy", "mode": "worktree_write", "cwd": str(worktree),
             "workspace_root": str(worktree), "protected_paths": [str(protected)],
             "applied": {"confinement": "sandbox-exec", "add_dirs": [str(add_dir)]}}
@@ -896,7 +899,8 @@ PROVIDER_STATE_CASES = (
     ("agy", (".gemini/config/mcp_config.json", ".gemini/config/plugins/attack.js",
              ".gemini/config/skills/attack/SKILL.md", ".gemini/antigravity-cli/settings.json",
              ".gemini/antigravity-cli/plugins/attack.js", ".gemini/antigravity-cli/skills/attack/SKILL.md",
-             ".gemini/antigravity-cli/bin/attack", ".gemini/antigravity-cli/builtin/skills/attack.md",
+             ".gemini/antigravity-cli/bin/attack", ".gemini/antigravity-cli/bin/agentapi",
+             ".gemini/antigravity-cli/builtin/skills/attack.md",
              ".gemini/antigravity-cli/mcp/server/instructions.md",
              ".gemini/antigravity-cli/cache/marketplaces/attack.js", ".gemini/config/projects/probe.json",
              ".gemini/config/sidecars/attack.json"),
@@ -1142,6 +1146,495 @@ def test_agy_prepares_fresh_state_and_allows_atomic_runtime_rewrites(monkeypatch
         denied.parent.mkdir(parents=True, exist_ok=True)
         assert subprocess.run([*command, f"printf bad > {shlex.quote(str(denied))}"],
                               capture_output=True, text=True).returncode != 0
+
+
+AGY_TOKENS = (".gemini/oauth_creds.json", ".gemini/antigravity-cli/antigravity-oauth-token",
+              ".gemini/antigravity-cli/mcp_oauth_tokens.json")
+
+
+def agy_home_fixture(mod, monkeypatch, tmp_path):
+    home = (tmp_path / "home").resolve()
+    root = home / ".gemini/antigravity-cli"
+    for relative in (".gitconfig", ".gemini/config/settings.json", *AGY_TOKENS,
+                     ".gemini/antigravity-cli/settings.json", ".gemini/antigravity-cli/conversations/c.pb",
+                     ".gemini/antigravity-cli/jetski_state.pbtxt", ".gemini/antigravity-cli/history.jsonl",
+                     ".gemini/antigravity-cli/bin/agentapi", ".gemini/antigravity-cli/bin/webm_encoder"):
+        (home / relative).parent.mkdir(parents=True, exist_ok=True)
+        (home / relative).write_text("original\n", encoding="utf-8")
+    monkeypatch.setattr(mod.Path, "home", lambda: home)
+    return home, root
+
+
+def stage_agy(mod, plan, private_tmp):
+    """Stage as execute does, in the attempt tmp opened once without following a link."""
+    tmp_fd = mod._open_canonical_dir(private_tmp)
+    return mod.stage_agy_home(plan, tmp_fd, private_tmp), tmp_fd
+
+
+def agy_plan(**extra):
+    return {"adapter": "agy", "mode": "read_only", "applied": {"confinement": "sandbox-exec", "add_dirs": []},
+            **extra}
+
+
+def test_confined_agy_home_links_everything_but_its_bin_shim_and_token_files(monkeypatch, tmp_path):
+    mod = supervisor()
+    home, root = agy_home_fixture(mod, monkeypatch, tmp_path)
+    private_tmp = tmp_path / "attempt/tmp"
+    private_tmp.mkdir(parents=True)
+    plan = agy_plan()
+    overlay = stage_agy(mod, plan, private_tmp)[0].path
+    assert overlay.parent == private_tmp and overlay.name.startswith("agy-home-")
+    lane_root = overlay / ".gemini/antigravity-cli"
+    for directory in (overlay, overlay / ".gemini", lane_root, lane_root / "bin"):
+        assert directory.is_dir() and not directory.is_symlink(), directory
+    # State directories are prepared before staging, so each is a link and nothing is lost at cleanup.
+    for relative in (".gitconfig", ".gemini/config", ".gemini/antigravity-cli/settings.json",
+                     ".gemini/antigravity-cli/conversations", ".gemini/antigravity-cli/brain",
+                     ".gemini/antigravity-cli/updater", ".gemini/antigravity-cli/bin/webm_encoder"):
+        assert (overlay / relative).readlink() == home / relative, relative
+    for relative in (*AGY_TOKENS, ".gemini/antigravity-cli/bin/agentapi"):
+        assert not (overlay / relative).exists() and not (overlay / relative).is_symlink(), relative
+
+    # Each attempt stages a fresh overlay, whatever a lane or a failed cleanup left in the last one.
+    (lane_root / "bin/agentapi").write_text("planted\n", encoding="utf-8")
+    (lane_root / "settings.json").unlink()
+    (lane_root / "settings.json").write_text("planted\n", encoding="utf-8")
+    os.mkfifo(private_tmp / "agy-home")
+    again = stage_agy(mod, plan, private_tmp)[0].path
+    assert again != overlay
+    assert not (again / ".gemini/antigravity-cli/bin/agentapi").exists()
+    assert (again / ".gemini/antigravity-cli/settings.json").readlink() == root / "settings.json"
+    assert (root / "bin/agentapi").read_text() == "original\n"
+
+    assert stage_agy(mod, {**plan, "adapter": "claude"}, private_tmp)[0] is None
+    assert stage_agy(mod, agy_plan(applied={"confinement": "none"}), private_tmp)[0] is None
+
+
+def test_agy_home_keeps_dangling_links_and_tolerates_a_missing_bin(monkeypatch, tmp_path):
+    mod = supervisor()
+    home = (tmp_path / "home").resolve()
+    home.mkdir()
+    (home / ".dangling").symlink_to(home / "absent")
+    monkeypatch.setattr(mod.Path, "home", lambda: home)
+    private_tmp = tmp_path / "tmp"
+    private_tmp.mkdir()
+    overlay = stage_agy(mod, agy_plan(), private_tmp)[0].path
+    assert (overlay / ".dangling").readlink() == home / ".dangling"
+    assert not (home / ".gemini/antigravity-cli/bin").exists()
+    assert list((overlay / ".gemini/antigravity-cli/bin").iterdir()) == []
+    assert (overlay / ".gemini/antigravity-cli/conversations").readlink() == home / ".gemini/antigravity-cli/conversations"
+
+
+def test_agy_home_copies_back_renamed_state_but_never_tokens_links_or_oversized_files(monkeypatch, tmp_path):
+    mod = supervisor()
+    agy_state = mod.CONFINED_STATE["agy"]
+    granted = {entry.removesuffix("*") for entry in (*agy_state["read_write"], *agy_state["write_literal"])}
+    # Only state the profile already lets the lane write is ever copied back.
+    assert {f".gemini/antigravity-cli/{name}" for name in mod.AGY_RENAMED_STATE} <= granted
+    _, root = agy_home_fixture(mod, monkeypatch, tmp_path)
+    (root / "jetski_state.pbtxt").chmod(0o644)
+    private_tmp = tmp_path / "tmp"
+    private_tmp.mkdir()
+    outside = tmp_path / "outside"
+    outside.write_text("outside\n", encoding="utf-8")
+    plan = agy_plan()
+    staged, tmp_fd = stage_agy(mod, plan, private_tmp)
+    overlay = staged.path
+    lane_root = overlay / ".gemini/antigravity-cli"
+    # agy writes a temp file and renames it over the overlay's link.
+    for name, text in (("jetski_state.pbtxt", "renamed\n"), ("antigravity-oauth-token", "token\n")):
+        (lane_root / (name + ".tmp")).write_text(text, encoding="utf-8")
+        os.replace(lane_root / (name + ".tmp"), lane_root / name)
+    (lane_root / "history.jsonl").unlink()
+    (lane_root / "history.jsonl").symlink_to(outside)  # a link is never followed or installed
+    os.mkfifo(lane_root / "last_check.timestamp")  # nor a FIFO, which must not block the copy
+    (lane_root / "installation_id").write_text("x" * 65, encoding="utf-8")
+    monkeypatch.setattr(mod, "AGY_STATE_COPY_MAX", 64)
+    (lane_root / "locked").mkdir()
+    (lane_root / "locked/file").write_text("x", encoding="utf-8")
+    (lane_root / "locked").chmod(0o500)
+
+    warnings = mod.finish_agy_home(plan, tmp_fd, staged)
+    assert (root / "jetski_state.pbtxt").read_text() == "renamed\n"
+    assert stat.S_IMODE((root / "jetski_state.pbtxt").stat().st_mode) == 0o644
+    assert not (root / "jetski_state.pbtxt").is_symlink()
+    assert (root / "antigravity-oauth-token").read_text() == "original\n"
+    assert (root / "history.jsonl").read_text() == "original\n" and outside.read_text() == "outside\n"
+    assert not (root / "last_check.timestamp").exists()
+    assert not (root / "installation_id").exists()
+    assert sorted(warnings) == ["agy state not copied back: installation_id: larger than 64 bytes",
+                                "agy state not copied back: last_check.timestamp: not a regular file"]
+    assert not overlay.exists()  # read-only directories and FIFOs included
+    assert sorted(path.name for path in root.iterdir() if path.name.startswith(".")) == [mod.AGY_COPY_BACK_LOCK]
+
+
+def test_confined_agy_writes_its_shim_in_the_overlay_and_never_the_live_bin(monkeypatch, tmp_path):
+    """Verified on a Mac only: CI runs Ubuntu, which has no sandbox-exec, so this skips there."""
+    mod = supervisor()
+    _, root = agy_home_fixture(mod, monkeypatch, tmp_path)
+    sandbox_exec = mod._sandbox_exec_path()
+    if not sandbox_exec:
+        pytest.skip("sandbox-exec is unavailable or disabled")
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    run_dir = tmp_path / "attempt"
+    (run_dir / "tmp").mkdir(parents=True)
+    plan = agy_plan(cwd=str(workspace), workspace_root=str(workspace), run_dir=str(run_dir))
+    profile = mod.os_confinement_profile(plan)
+    overlay = stage_agy(mod, plan, run_dir / "tmp")[0].path
+
+    def run(script):
+        return subprocess.run([sandbox_exec, "-p", profile, "/bin/sh", "-c", script],
+                              capture_output=True, text=True, check=False,
+                              env={**os.environ, "HOME": str(overlay)})
+
+    probe = run("true")
+    if probe.returncode and "sandbox_apply" in probe.stderr:
+        pytest.skip("sandbox_apply is refused in this test environment")
+    shim = '#!/bin/sh\nexec "/usr/local/bin/agy" agentapi "$@"\n'
+    assert run(f'printf {shlex.quote(shim)} > "$HOME/.gemini/antigravity-cli/bin/agentapi"').returncode == 0
+    assert (overlay / ".gemini/antigravity-cli/bin/agentapi").read_text() == shim
+    # Every link is judged at its real path: state stays writable, config and the live bin do not.
+    assert run('printf new > "$HOME/.gemini/antigravity-cli/conversations/c.pb"').returncode == 0
+    assert (root / "conversations/c.pb").read_text() == "new"
+    for relative in ("settings.json", "bin/webm_encoder"):
+        assert run(f'printf bad > "$HOME/.gemini/antigravity-cli/{relative}"').returncode != 0, relative
+        assert (root / relative).read_text() == "original\n"
+    assert run(f"printf bad > {shlex.quote(str(root / 'bin/agentapi'))}").returncode != 0
+    assert (root / "bin/agentapi").read_text() == "original\n"
+
+
+def test_attempt_tmp_replaces_a_planted_link_and_refuses_a_linked_attempt(monkeypatch, tmp_path):
+    mod = supervisor()
+    agy_home_fixture(mod, monkeypatch, tmp_path)
+    victim = tmp_path / "victim/tmp"
+    victim.mkdir(parents=True)
+    attempt = tmp_path / "attempt"
+    attempt.mkdir()
+    (attempt / "tmp").symlink_to(victim)
+    tmp_fd = mod._open_attempt_tmp(attempt)
+    staged = mod.stage_agy_home(agy_plan(), tmp_fd, attempt / "tmp")
+    assert (attempt / "tmp").is_dir() and not (attempt / "tmp").is_symlink()
+    assert stat.S_IMODE((attempt / "tmp").stat().st_mode) == 0o700
+    assert staged.path.is_dir() and list(victim.iterdir()) == []
+    os.close(tmp_fd)
+    linked = tmp_path / "linked-attempt"
+    linked.symlink_to(attempt)
+    with pytest.raises(OSError):
+        mod._open_attempt_tmp(linked)
+
+
+def _plant_victim_overlay(victim, name):
+    lane_root = victim / name / ".gemini/antigravity-cli"
+    lane_root.mkdir(parents=True)
+    (lane_root / "jetski_state.pbtxt").write_text("victim\n", encoding="utf-8")
+    return lane_root
+
+
+def _rename_into(lane_root, name, text):
+    (lane_root / (name + ".tmp")).write_text(text, encoding="utf-8")
+    os.replace(lane_root / (name + ".tmp"), lane_root / name)
+
+
+def test_agy_home_cleanup_never_follows_a_tmp_or_overlay_swapped_for_a_link(monkeypatch, tmp_path):
+    """A lane that swaps tmp for another attempt's tmp cannot redirect copy-back or removal."""
+    mod = supervisor()
+    _, root = agy_home_fixture(mod, monkeypatch, tmp_path)
+    attempt = tmp_path / "attempt"
+    (attempt / "tmp").mkdir(parents=True)
+    plan = agy_plan()
+    staged, tmp_fd = stage_agy(mod, plan, attempt / "tmp")
+    _rename_into(staged.path / ".gemini/antigravity-cli", "jetski_state.pbtxt", "lane\n")
+    victim = tmp_path / "other-attempt/tmp"
+    victim_root = _plant_victim_overlay(victim, staged.name)
+    (attempt / "tmp").rename(attempt / "moved")
+    (attempt / "tmp").symlink_to(victim)
+
+    assert mod.finish_agy_home(plan, tmp_fd, staged) == []
+    assert (root / "jetski_state.pbtxt").read_text() == "lane\n"
+    assert (victim_root / "jetski_state.pbtxt").read_text() == "victim\n"
+    assert list((attempt / "moved").iterdir()) == []
+
+    # The same holds for a link planted inside the overlay itself.
+    staged = mod.stage_agy_home(plan, tmp_fd, attempt / "moved")
+    victim_root = _plant_victim_overlay(victim, "planted")
+    shutil.rmtree(staged.path / ".gemini")
+    (staged.path / ".gemini").symlink_to(victim / "planted/.gemini")
+    warnings = mod.finish_agy_home(plan, tmp_fd, staged)
+    assert len(warnings) == 1 and warnings[0].startswith("agy state not copied back: "), warnings
+    assert (root / "jetski_state.pbtxt").read_text() == "lane\n"
+    assert (victim_root / "jetski_state.pbtxt").read_text() == "victim\n"
+    assert list((attempt / "moved").iterdir()) == []
+
+
+@pytest.mark.parametrize("swapped", [".gemini", ".gemini/antigravity-cli"])
+def test_agy_home_copy_back_never_follows_a_real_state_parent_swapped_for_a_link(monkeypatch, tmp_path, swapped):
+    mod = supervisor()
+    home, _ = agy_home_fixture(mod, monkeypatch, tmp_path)
+    private_tmp = tmp_path / "tmp"
+    private_tmp.mkdir()
+    plan = agy_plan()
+    staged, tmp_fd = stage_agy(mod, plan, private_tmp)
+    _rename_into(staged.path / ".gemini/antigravity-cli", "jetski_state.pbtxt", "lane\n")
+    elsewhere = tmp_path / "elsewhere"
+    (elsewhere / "antigravity-cli").mkdir(parents=True)
+    (home / swapped).rename(tmp_path / "moved")
+    (home / swapped).symlink_to(elsewhere if swapped == ".gemini" else elsewhere / "antigravity-cli")
+
+    warnings = mod.finish_agy_home(plan, tmp_fd, staged)
+    assert len(warnings) == 1 and warnings[0].startswith("agy state not copied back: "), warnings
+    assert list((elsewhere / "antigravity-cli").iterdir()) == []
+    assert list(private_tmp.iterdir()) == []
+
+
+def test_agy_copy_back_keeps_a_real_file_changed_since_staging_and_appends_history(monkeypatch, tmp_path):
+    mod = supervisor()
+    _, root = agy_home_fixture(mod, monkeypatch, tmp_path)
+    (root / "history.jsonl").write_text('{"n": 1}\n', encoding="utf-8")
+    private_tmp = tmp_path / "tmp"
+    private_tmp.mkdir()
+    plan = agy_plan()
+    staged, tmp_fd = stage_agy(mod, plan, private_tmp)
+    lane_root = staged.path / ".gemini/antigravity-cli"
+    _rename_into(lane_root, "jetski_state.pbtxt", "lane\n")
+    _rename_into(lane_root, "history.jsonl", '{"n": 1}\n{"lane": 1}\n')
+    _rename_into(lane_root, "installation_id", "lane\n")
+    # Another session finishes first: it rewrites jetski_state and appends to history.
+    (root / "jetski_state.pbtxt.new").write_text("other\n", encoding="utf-8")
+    os.replace(root / "jetski_state.pbtxt.new", root / "jetski_state.pbtxt")
+    with (root / "history.jsonl").open("a", encoding="utf-8") as history:
+        history.write('{"other": 1}\n')
+
+    warnings = mod.finish_agy_home(plan, tmp_fd, staged)
+    kept = "jetski_state.pbtxt: changed by another session since staging; kept it"
+    assert warnings == ["agy state not copied back: " + kept]
+    assert (root / "jetski_state.pbtxt").read_text() == "other\n"
+    assert (root / "history.jsonl").read_text() == '{"n": 1}\n{"other": 1}\n{"lane": 1}\n'
+    assert (root / "installation_id").read_text() == "lane\n"  # absent at staging and still absent
+
+    # A lane that truncated or rewrote history adds nothing.
+    staged = mod.stage_agy_home(plan, tmp_fd, private_tmp)
+    _rename_into(staged.path / ".gemini/antigravity-cli", "history.jsonl", '{"forged": 1}\n')
+    assert mod.finish_agy_home(plan, tmp_fd, staged) == [
+        "agy state not copied back: history.jsonl: shorter than at staging"]
+    assert (root / "history.jsonl").read_text() == '{"n": 1}\n{"other": 1}\n{"lane": 1}\n'
+
+
+def test_agy_history_copy_back_never_reads_a_sparse_staged_size(monkeypatch, tmp_path):
+    """A first lane enlarges the real history sparsely before a retry stages; the copy stays bounded."""
+    mod = supervisor()
+    _, root = agy_home_fixture(mod, monkeypatch, tmp_path)
+    with (root / "history.jsonl").open("r+b") as history:
+        history.truncate(1 << 30)
+    private_tmp = tmp_path / "tmp"
+    private_tmp.mkdir()
+    plan = agy_plan()
+    staged, tmp_fd = stage_agy(mod, plan, private_tmp)
+    _rename_into(staged.path / ".gemini/antigravity-cli", "history.jsonl", '{"lane": 1}\n')
+    real_pread, requested = os.pread, []
+
+    def bounded(fd, size, offset):
+        requested.append(size)
+        assert size <= 1024 * 1024, size
+        return real_pread(fd, size, offset)
+
+    monkeypatch.setattr(os, "pread", bounded)
+    warnings = mod.finish_agy_home(plan, tmp_fd, staged)
+    monkeypatch.undo()
+    assert warnings == ["agy state not copied back: history.jsonl: shorter than at staging"], warnings
+    assert (root / "history.jsonl").stat().st_size == 1 << 30
+
+
+def test_agy_copy_back_refuses_hardlinked_sources_and_history_targets(monkeypatch, tmp_path):
+    mod = supervisor()
+    _, root = agy_home_fixture(mod, monkeypatch, tmp_path)
+    (root / "history.jsonl").write_text('{"n": 1}\n', encoding="utf-8")
+    alias = tmp_path / "alias.jsonl"
+    os.link(root / "history.jsonl", alias)  # writing through the real name would also change this
+    secret = tmp_path / "secret"
+    secret.write_text("secret\n", encoding="utf-8")
+    private_tmp = tmp_path / "tmp"
+    private_tmp.mkdir()
+    plan = agy_plan()
+    staged, tmp_fd = stage_agy(mod, plan, private_tmp)
+    lane_root = staged.path / ".gemini/antigravity-cli"
+    (lane_root / "jetski_state.pbtxt").unlink()
+    os.link(secret, lane_root / "jetski_state.pbtxt")
+    _rename_into(lane_root, "history.jsonl", '{"n": 1}\n{"lane": 1}\n')
+
+    warnings = mod.finish_agy_home(plan, tmp_fd, staged)
+    assert sorted(warnings) == ["agy state not copied back: history.jsonl: not a single-link regular file",
+                                "agy state not copied back: jetski_state.pbtxt: not a single-link regular file"]
+    assert (root / "jetski_state.pbtxt").read_text() == "original\n"
+    assert alias.read_text() == '{"n": 1}\n' and secret.read_text() == "secret\n"
+
+
+def test_overlapping_agy_finishers_never_both_install(monkeypatch, tmp_path):
+    """Two attempts staged from the same real state finish at once: the first wins, the second warns."""
+    import threading
+    mod = supervisor()
+    _, root = agy_home_fixture(mod, monkeypatch, tmp_path)
+    plan = agy_plan()
+    finishers = []
+    for name in ("first", "second"):
+        private_tmp = tmp_path / name
+        private_tmp.mkdir()
+        staged, tmp_fd = stage_agy(mod, plan, private_tmp)
+        _rename_into(staged.path / ".gemini/antigravity-cli", "jetski_state.pbtxt", name + "\n")
+        finishers.append((staged, tmp_fd))
+    results = {}
+    second = threading.Thread(target=lambda: results.update(second=mod.finish_agy_home(plan, *reversed(finishers[1]))))
+    real_install = mod._install_state
+
+    def install_while_the_second_finishes(directory, name, data):
+        if not second.is_alive() and "second" not in results:
+            second.start()
+            second.join(0.5)  # without a lock the second finisher checks and installs here
+        return real_install(directory, name, data)
+
+    monkeypatch.setattr(mod, "_install_state", install_while_the_second_finishes)
+    results["first"] = mod.finish_agy_home(plan, *reversed(finishers[0]))
+    second.join()
+    assert results["first"] == []
+    kept = "jetski_state.pbtxt: changed by another session since staging; kept it"
+    assert results["second"] == ["agy state not copied back: " + kept]
+    assert (root / "jetski_state.pbtxt").read_text() == "first\n"
+
+    # A lane holding the lock delays copy-back only for a bounded time.
+    import fcntl
+    staged, tmp_fd = stage_agy(mod, plan, tmp_path / "first")
+    _rename_into(staged.path / ".gemini/antigravity-cli", "jetski_state.pbtxt", "held\n")
+    monkeypatch.setattr(mod, "AGY_COPY_BACK_WAIT", 0.2)
+    with open(root / mod.AGY_COPY_BACK_LOCK, "rb") as held:
+        fcntl.flock(held, fcntl.LOCK_EX)
+        warnings = mod.finish_agy_home(plan, tmp_fd, staged)
+    assert len(warnings) == 1 and "stayed locked" in warnings[0], warnings
+    assert (root / "jetski_state.pbtxt").read_text() == "first\n" and not staged.path.exists()
+
+
+def test_agy_staging_creates_an_empty_database_so_sqlite_writes_through_the_link(monkeypatch, tmp_path):
+    import sqlite3
+    mod = supervisor()
+    _, root = agy_home_fixture(mod, monkeypatch, tmp_path)
+    private_tmp = tmp_path / "tmp"
+    private_tmp.mkdir()
+    plan = agy_plan()
+    staged, tmp_fd = stage_agy(mod, plan, private_tmp)
+    database = staged.path / ".gemini/antigravity-cli" / mod.AGY_DATABASE
+    assert database.readlink() == root / mod.AGY_DATABASE
+    with sqlite3.connect(database) as connection:
+        connection.execute("create table t (v)")
+        connection.execute("insert into t values (1)")
+    connection.close()
+    assert mod.finish_agy_home(plan, tmp_fd, staged) == []
+    with sqlite3.connect(root / mod.AGY_DATABASE) as connection:
+        assert connection.execute("select v from t").fetchall() == [(1,)]
+    connection.close()
+    # An existing database is left as it is.
+    before = (root / mod.AGY_DATABASE).read_bytes()
+    mod.finish_agy_home(plan, tmp_fd, mod.stage_agy_home(plan, tmp_fd, private_tmp))
+    assert (root / mod.AGY_DATABASE).read_bytes() == before
+
+
+RETRY_LANE = """
+import os, pathlib, sys
+tmp = pathlib.Path(os.environ["TMPDIR"])
+victim = pathlib.Path(sys.argv[1])
+shim = tmp / "provenant-shim"
+for name in ("bin/ps", "process_info.py"):
+    (shim / name).unlink()
+    (shim / name).symlink_to(victim / "agentapi")
+(tmp / "cache").rename(tmp / "cache-moved")
+(tmp / "cache").symlink_to(victim)
+sys.stderr.write("--effort is not supported for model fixture\\n")
+sys.exit(1)
+"""
+
+SWAP_LANE = """
+import json, os, pathlib, sys
+tmp = pathlib.Path(os.environ["TMPDIR"])
+tmp.rename(tmp.with_name("tmp-moved"))
+tmp.symlink_to(sys.argv[1])
+print(json.dumps({"type": "item.completed", "item": {"type": "agent_message", "text": "done"}}), flush=True)
+print(json.dumps({"type": "turn.completed"}), flush=True)
+"""
+
+
+def test_effort_retry_never_writes_through_links_the_first_lane_planted(monkeypatch, tmp_path):
+    """A lane forges an unsupported-effort diagnostic, so the same attempt runs again in its tmp."""
+    mod = supervisor()
+    dispatch_run = importlib.import_module("skills.orchestrate.scripts.dispatch_run")
+    monkeypatch.setattr(mod, "needs_ps_shim", lambda plan: True)
+    victim = tmp_path / "live-bin"
+    victim.mkdir(mode=0o755)
+    (victim / "agentapi").write_text("live shim\n", encoding="utf-8")
+    attempt = tmp_path / "attempt"
+    plan = fixture_plan(tmp_path, RETRY_LANE, run_dir=attempt)
+    plan["argv"].append(str(victim))
+    plan["effort"] = plan["route"]["effort"] = "high"
+    plan["route"]["supported_efforts"] = ["low", "high"]
+
+    record = mod.execute(plan, attempt / "result.md")
+    retry = dispatch_run.effort_retry_plan(plan, record)
+    assert retry is not None, record
+    retry["argv"] = plan["argv"]
+    mod.execute(retry, attempt / "result.md")
+
+    assert (victim / "agentapi").read_text() == "live shim\n"
+    assert sorted(path.name for path in victim.iterdir()) == ["agentapi"]
+    assert stat.S_IMODE(victim.stat().st_mode) == 0o755  # the planted cache link was not chmodded
+
+
+def test_output_is_staged_in_the_held_tmp_after_the_lane_swaps_it(tmp_path):
+    mod = supervisor()
+    victim = tmp_path / "victim"
+    victim.mkdir()
+    attempt = tmp_path / "attempt"
+    victim.chmod(0o500)  # a write that followed the swapped tmp would fail here
+    plan = fixture_plan(tmp_path, SWAP_LANE, run_dir=attempt)
+    plan["argv"].append(str(victim))
+    record = mod.execute(plan, attempt / "result.md")
+    assert record["status"] == "ok", record
+    assert "done" in (attempt / "result.md").read_text()
+    assert (attempt / "tmp").is_symlink() and list(victim.iterdir()) == []
+    assert [path.name for path in (attempt / "tmp-moved").iterdir() if path.name.startswith(".provenant")] == []
+
+
+AGY_LANE = """
+import json, os, pathlib
+home = pathlib.Path(os.environ["HOME"])
+lane = home / ".gemini/antigravity-cli"
+(lane / "jetski_state.pbtxt.tmp").write_text("lane\\n")
+os.replace(lane / "jetski_state.pbtxt.tmp", lane / "jetski_state.pbtxt")
+print(json.dumps({"status": "SUCCESS", "response": json.dumps(
+    [str(home), (lane / "brain").is_symlink(), (lane / "conversations").is_symlink()])}))
+"""
+
+
+def test_agy_attempt_stages_after_state_preparation_and_cleans_up(monkeypatch, tmp_path):
+    """Runs the real confinement_command; a pass-through stand-in replaces sandbox-exec itself."""
+    mod = supervisor()
+    home, root = agy_home_fixture(mod, monkeypatch, tmp_path)
+    shutil.rmtree(root / "conversations")
+    passthrough = tmp_path / "sandbox-exec"
+    passthrough.write_text('#!/bin/sh\nshift 2\nexec "$@"\n', encoding="utf-8")
+    passthrough.chmod(0o755)
+    monkeypatch.setattr(mod, "_sandbox_exec_path", lambda: str(passthrough))
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    attempt = tmp_path / "attempt"
+    attempt.mkdir()
+    plan = fixture_plan(workspace, AGY_LANE, "agy", run_dir=attempt)
+    plan["applied"]["confinement"] = "sandbox-exec"
+    record = mod.execute(plan, attempt / "result.md")
+    assert record["status"] == "ok", record
+    lane_home, brain_linked, conversations_linked = json.loads((attempt / "result.md").read_text())
+    assert Path(lane_home).parent == attempt / "tmp" and Path(lane_home).name.startswith("agy-home-")
+    assert brain_linked and conversations_linked
+    assert (root / "conversations").is_dir() and not (root / "conversations").is_symlink()
+    assert (root / "jetski_state.pbtxt").read_text() == "lane\n"
+    assert not Path(lane_home).exists()
+    assert home.is_dir()
 
 
 @pytest.mark.parametrize("adapter,project", [
@@ -2237,11 +2730,13 @@ def test_codex_capability_profile_keeps_git_narrow_and_grants_only_selected_feat
     assert expected_socket_allow in profile
 
     assert f'(deny file-write* (subpath "{common}")' in profile
-    for path in (common / "objects", common / "refs", common / "logs"):
-        assert f'(subpath "{path}")' in profile
-        assert str(path) in plan["applied"]["write_boundary"]["writable_paths"]
-    for path in (common / "packed-refs", common / "packed-refs.lock", common / "packed-refs.new"):
+    assert f'(subpath "{common / "objects"}")' in profile
+    for path in (common / "refs/heads/lane", common / "refs/heads/lane.lock", common / "logs/refs/heads/lane"):
         assert f'(literal "{path}")' in profile
+    for path in (common / "objects", common / "refs/heads/lane", common / "logs/refs/heads/lane"):
+        assert str(path) in plan["applied"]["write_boundary"]["writable_paths"]
+    for path in (common / "refs", common / "logs", common / "packed-refs"):
+        assert str(path) not in plan["applied"]["write_boundary"]["writable_paths"]
     assert f'(allow file-write* (subpath "{common}")' not in profile
     assert f'(subpath "{attempt.parent / "codex-home"}")' in profile
     assert f'(literal "{(home / "auth.json").resolve()}")' in profile
@@ -2258,9 +2753,13 @@ def test_codex_capability_profile_keeps_git_narrow_and_grants_only_selected_feat
     private = Path(git(lane, "rev-parse", "--path-format=absolute", "--absolute-git-dir").strip())
     assert str(private) in plan["applied"]["write_boundary"]["writable_paths"]
     assert f'(allow file-write* (subpath "{private}")' in profile
-    assert f'(deny file-write* (subpath "{lane / ".git"}"))' in profile
-    for name in ("config.worktree", "commondir", "gitdir"):
-        assert f'(deny file-write* (literal "{private / name}"))' in profile
+    read_only = [lane / ".git", *(private / name for name in ("config.worktree", "commondir", "gitdir"))]
+
+    def denied(text):
+        return "\n".join(line for line in text.splitlines() if line.startswith("(deny file-write* "))
+
+    for path in read_only:
+        assert f'(subpath "{path}")' in denied(profile)
 
     for adapter in ("codex", "claude"):
         without_capabilities = mod.build_plan(
@@ -2269,7 +2768,9 @@ def test_codex_capability_profile_keeps_git_narrow_and_grants_only_selected_feat
         )
         other_profile = mod.os_confinement_profile(without_capabilities)
         assert "(remote unix-socket" not in other_profile
-        assert f'(deny file-write* (subpath "{lane / ".git"}"))' not in other_profile
+        # Every writer keeps the Git discovery files read-only, not only capability lanes.
+        for path in read_only:
+            assert f'(subpath "{path}")' in denied(other_profile)
         for name in ("config.worktree", "commondir", "gitdir"):
             assert f'(deny file-write* (literal "{private / name}"))' not in other_profile
 
@@ -2710,20 +3211,27 @@ def test_a_linked_git_entry_never_moves_the_writable_git_grant(monkeypatch, tmp_
     common = Path(git(lane, "rev-parse", "--path-format=absolute", "--git-common-dir").strip()).resolve()
     outside = (tmp_path / "outside").resolve()
     outside.mkdir()
+    run_dir = tmp_path / "runs/task/attempt-001"
+    run_dir.mkdir(parents=True)
+
+    def plan_lane():
+        return mod.build_plan(
+            "codex", {}, "hello", workspace_root=tmp_path, mode="worktree_write",
+            worktree=lane, sandbox="workspace-write", network=True,
+            capabilities=["postgres"], run_dir=run_dir,
+        )
+
+    plan = plan_lane()
     shutil.rmtree(common / "logs", ignore_errors=True)
     (common / "logs").symlink_to(outside, target_is_directory=True)
     (common / "packed-refs").unlink(missing_ok=True)
     (common / "packed-refs").symlink_to(outside / "packed")
-    run_dir = tmp_path / "runs/task/attempt-001"
-    run_dir.mkdir(parents=True)
-    plan = mod.build_plan(
-        "codex", {}, "hello", workspace_root=tmp_path, mode="worktree_write",
-        worktree=lane, sandbox="workspace-write", network=True,
-        capabilities=["postgres"], run_dir=run_dir,
-    )
+    # Planning never creates the writer's ref directories through a link.
+    with pytest.raises(ValueError, match="is a link"):
+        plan_lane()
     profile = mod.os_confinement_profile(plan)
     assert str(outside) not in profile
-    assert f'(subpath "{common / "logs"}")' in profile
+    assert f'(literal "{common / "logs/refs/heads/lane"}")' in profile
     script = f"""
 for path in ({str(common / "logs" / "probe")!r}, {str(common / "packed-refs")!r}):
     try:
@@ -4962,12 +5470,15 @@ def test_codex_writer_gets_the_wrapped_writer_git_boundary(tmp_path, resume):
     assert plan["applied"]["write_boundary"]["filesystem"] == {str(path): access for path, access in table.items()}
     for granted in (private, private / "index", private / "index.lock", private / "HEAD",
                     private / "ORIG_HEAD", private / "logs/HEAD",
-                    common / "objects", common / "refs/heads/lane", common / "logs/refs/heads/lane",
-                    common / "packed-refs", common / "packed-refs.lock", common / "packed-refs.new"):
+                    common / "objects", common / "refs/heads/lane", common / "refs/heads/lane.lock",
+                    common / "logs/refs/heads/lane"):
         assert codex_access(table, granted) == "write", granted
     for denied in (common, common / "hooks", common / "hooks/pre-commit", common / "config",
                    common / "info/exclude", common / "worktrees", sibling, sibling / "HEAD",
-                   private / "config.worktree", private / "commondir", private / "gitdir", lane / ".git"):
+                   private / "config.worktree", private / "commondir", private / "gitdir", lane / ".git",
+                   common / "objects/info", common / "objects/info/alternates", common / "refs/heads/main",
+                   common / "refs/remotes/origin/main", common / "refs/tags/v1", common / "packed-refs",
+                   common / "logs/refs/heads/main"):
         assert codex_access(table, denied) == "read", denied
         assert not any(denied == root or denied.is_relative_to(root) for root in add_dirs), denied
     assert table[lane.resolve() / ".git"] == "read"
@@ -5056,7 +5567,7 @@ def instruction_lane(tmp_path):
     (repo / "app.txt").write_text("app\n")
     git(repo, "add", ".")
     git(repo, "commit", "-q", "-m", "initial")
-    lane = tmp_path / "lane"
+    lane = repo / ".worktrees/lane"
     git(repo, "worktree", "add", "-q", "-b", "lane", str(lane))
     (lane / "app.txt").write_text("lane\n")
     git(lane, "commit", "-q", "-am", "lane work")
@@ -5473,7 +5984,7 @@ def test_plan_only_honors_read_only_cwd_inside_workspace(tmp_path):
     }
     result = subprocess.run(
         [
-            str(SCRIPTS / "cf_dispatch.sh"),
+            str(SCRIPTS / "cf_dispatch.py"),
             "--tool",
             "claude",
             "--intent",
@@ -6261,7 +6772,7 @@ def first_instruction_lane(tmp_path):
     (repo / "app.txt").write_text("app\n")
     git(repo, "add", ".")
     git(repo, "commit", "-q", "-m", "initial")
-    lane = tmp_path / "lane"
+    lane = repo / ".worktrees/lane"
     git(repo, "worktree", "add", "-q", "-b", "lane", str(lane))
     (repo / SKILL).parent.mkdir(parents=True)
     (repo / SKILL).write_text("v1\n")
@@ -7384,6 +7895,229 @@ def test_provider_state_accepts_normal_provider_under_symlink_home(monkeypatch, 
     assert mod.os_confinement_profile(plan).startswith("(version 1)")
     relative = ".gemini" if adapter == "agy" else f".{adapter}"
     assert plan["provider_home"] == str(home / relative)
+
+
+def protection(cwd, *extra):
+    return subprocess.run([sys.executable, str(SCRIPTS / "lane_protection.py"), "--cwd", str(cwd), *extra],
+                          capture_output=True, text=True, timeout=30)
+
+
+def landing(repo, tip, base):
+    """Fabric's landing gate: the leased remote SHA is the base, never a local ref."""
+    return protection(repo, "--common-dir", str(repo / ".git"), "--tip", tip, "--base", base)
+
+
+def side_commit(cwd, parent, content, path=SKILL):
+    """A plumbing commit on parent with path replaced, leaving HEAD and the index alone."""
+    environment = {**os.environ, "GIT_INDEX_FILE": str(Path(cwd) / ".side-index")}
+
+    def run(*args, stdin=""):
+        return subprocess.run(["git", "-C", str(cwd), *GIT_FIXTURE, *args], check=True, capture_output=True,
+                              text=True, env=environment, input=stdin).stdout.strip()
+
+    run("read-tree", parent)
+    blob = run("hash-object", "-w", "--stdin", stdin=content)
+    run("update-index", "--add", "--cacheinfo", f"100644,{blob},{path}")
+    tree = run("write-tree")
+    os.unlink(Path(cwd) / ".side-index")
+    return run("commit-tree", tree, "-p", parent, "-m", "side")
+
+
+def head_of(cwd, rev="HEAD"):
+    return git(cwd, "rev-parse", rev).strip()
+
+
+@pytest.mark.parametrize("ref", ["refs/heads/main", "refs/remotes/origin/main"])
+def test_landing_refuses_protected_commits_laundered_through_a_moved_integration_ref(tmp_path, ref):
+    repo, lane = instruction_lane(tmp_path)
+    leased = head_of(repo, "main")
+    # Writers can no longer move these refs; the gate must not rely on that either.
+    poison = side_commit(lane, leased, "POISON\n")
+    git(repo, "update-ref", ref, poison)
+    git(lane, "merge", "-q", "--no-edit", ref)
+    tip = head_of(lane)
+    refused = landing(repo, tip, leased)
+    assert refused.returncode == 1
+    assert refused.stderr.startswith("protected_instructions_changed: unreleased commits")
+    assert poison in refused.stderr and "quarantine" not in refused.stderr
+    assert refused.stderr.count("protected_instructions_changed") == 1
+    # A commit on the primary branch itself is checked the same way.
+    assert landing(repo, poison, leased).returncode == 1
+
+
+def test_landing_checks_the_landed_history_not_the_lane_branch(tmp_path):
+    repo, lane = instruction_lane(tmp_path)
+    leased = head_of(repo, "main")
+    # The lane branch is rewritten onto main with a protected change, then consumed.
+    git(lane, "reset", "-q", "--hard", side_commit(lane, leased, "POISON\n"))
+    git(repo, "merge", "-q", "--no-ff", "-m", "consume lane", "lane")
+    tip = head_of(repo)
+    git(lane, "reset", "-q", "--hard", leased)  # The child then resets its branch.
+    assert landing(repo, tip, leased).returncode == 1
+
+
+def test_merging_the_trusted_base_into_a_lane_passes_but_rolling_it_back_does_not(tmp_path):
+    repo, lane = instruction_lane(tmp_path)
+    leased = head_of(repo, "main")
+    # The chair refreshes the lane from main, which carries a trusted skill change.
+    git(lane, "merge", "-q", "--no-edit", "main")
+    assert landing(repo, head_of(lane), leased).returncode == 0
+    checked = protection(lane)
+    assert checked.returncode == 0, checked.stderr
+    assert checked.stdout.strip() == head_of(lane)
+    (lane / SKILL).write_text("v1\n")
+    git(lane, "commit", "-q", "-am", "roll the skill back")
+    assert landing(repo, head_of(lane), leased).returncode == 1
+
+
+def test_a_registered_worktree_that_was_never_dispatched_lands_without_any_record(tmp_path):
+    repo, lane = instruction_lane(tmp_path)
+    assert not (repo / ".git/provenant-instruction-checks").exists()
+    checked = protection(lane)
+    assert checked.returncode == 0, checked.stderr
+    assert landing(repo, head_of(lane), head_of(repo, "main")).returncode == 0
+
+
+@pytest.mark.parametrize("history", ["revert", "evil-merge", "case-variant"])
+def test_landing_refuses_each_commit_that_changes_instructions(tmp_path, history):
+    repo, lane = instruction_lane(tmp_path)
+    git(lane, "merge", "-q", "--no-edit", "main")
+    leased = head_of(repo, "main")
+    if history == "revert":
+        (lane / SKILL).write_text("lane\n")
+        git(lane, "commit", "-q", "-am", "edit")
+        git(lane, "revert", "--no-edit", "HEAD")
+    elif history == "evil-merge":
+        # Neither parent changes the skill; only the merge resolution does.
+        git(lane, "branch", "-q", "side", side_commit(lane, head_of(lane), "side\n", path="side.txt"))
+        git(lane, "merge", "-q", "--no-ff", "--no-commit", "side")
+        (lane / SKILL).write_text("merged\n")
+        git(lane, "commit", "-q", "-am", "merge side")
+    else:
+        git(lane, "reset", "-q", "--hard", side_commit(lane, head_of(lane), "x\n", path=".AGENTS/x.md"))
+    assert landing(repo, head_of(lane), leased).returncode == 1
+
+
+def test_release_requires_the_reviewed_tip_and_covers_nothing_after_it(tmp_path, monkeypatch):
+    monkeypatch.delenv("PROVENANT_ATTEMPT_MARKER", raising=False)
+    repo, lane = instruction_lane(tmp_path)
+    leased = head_of(repo, "main")
+    git(lane, "merge", "-q", "--no-edit", "main")
+    (lane / SKILL).write_text("chair reviewed\n")
+    git(lane, "commit", "-q", "-am", "reviewed edit")
+    reviewed = head_of(lane)
+    assert landing(repo, reviewed, leased).returncode == 1
+    missing = protection(lane, "--release", "--actor", "chair", "--reason", "ok")
+    assert missing.returncode == 1 and "--tip" in missing.stderr
+    # A detached child races the chair with one more protected commit.
+    (lane / SKILL).write_text("UNREVIEWED\n")
+    git(lane, "commit", "-q", "-am", "race")
+    raced = head_of(lane)
+    moved = protection(lane, "--release", "--tip", reviewed, "--actor", "chair", "--reason", "ok")
+    assert moved.returncode == 1 and "not the reviewed tip" in moved.stderr
+    git(lane, "reset", "-q", "--hard", reviewed)
+    released = protection(lane, "--release", "--tip", reviewed, "--actor", "chair", "--reason", "decision 7")
+    assert released.returncode == 0, released.stderr
+    [record] = (repo / ".git/provenant-instruction-checks/releases").glob("*.json")
+    audit = json.loads(record.read_text())
+    assert audit["tip"] == reviewed and audit["actor"] == "chair" and audit["reason"] == "decision 7"
+    assert audit["worktree"] == str(lane.resolve())
+    assert landing(repo, reviewed, leased).returncode == 0
+    assert landing(repo, raced, leased).returncode == 1
+    inside = subprocess.run([sys.executable, str(SCRIPTS / "lane_protection.py"), "--cwd", str(lane), "--release",
+                             "--tip", reviewed, "--actor", "chair", "--reason", "ok"], capture_output=True, text=True,
+                            env={**os.environ, "PROVENANT_ATTEMPT_MARKER": "1"})
+    assert inside.returncode == 1
+
+
+def test_a_writer_cannot_take_a_branch_another_checkout_holds(tmp_path):
+    _, lane = instruction_lane(tmp_path)
+    git(lane, "symbolic-ref", "HEAD", "refs/heads/main")
+    with pytest.raises(ValueError, match="checked out by another worktree"):
+        supervisor().build_plan("claude", {}, "hello", workspace_root=tmp_path, mode="worktree_write", worktree=lane)
+    git(lane, "checkout", "-q", "--detach", "lane")
+    plan = supervisor().build_plan("claude", {}, "hello", workspace_root=tmp_path, mode="worktree_write", worktree=lane)
+    assert plan["lane_ref"] is None
+    # Without sandbox-exec (Linux CI) there is no path boundary: writable_paths is None.
+    assert not any("/refs/" in path for path in plan["applied"]["write_boundary"]["writable_paths"] or [])
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="sandbox-exec is macOS-only")
+@pytest.mark.parametrize("missing", ["packed-ref", "reflog"])
+def test_a_sandboxed_writer_commits_on_a_nested_branch_without_its_ref_directories(tmp_path, missing):
+    mod = supervisor()
+    sandbox_exec = mod._sandbox_exec_path()
+    if not sandbox_exec:
+        pytest.skip("sandbox-exec is unavailable or disabled")
+    repo, lane = instruction_lane(tmp_path)
+    git(lane, "switch", "-q", "-c", "fix/nested")
+    common = repo.resolve() / ".git"
+    if missing == "packed-ref":
+        git(repo, "pack-refs", "--all")
+        assert not (common / "refs/heads/fix").exists()
+    shutil.rmtree(common / "logs/refs/heads/fix")
+    plan = mod.build_plan("claude", {}, "hello", workspace_root=tmp_path, mode="worktree_write", worktree=lane)
+    assert plan["lane_ref"] == "refs/heads/fix/nested"
+    profile = mod.os_confinement_profile(plan)
+    fixture = " ".join(shlex.quote(arg) for arg in GIT_FIXTURE)
+    script = (f"echo more >> app.txt && git {fixture} commit -q -am more"
+              f" && git {fixture} merge -q --no-ff --no-edit main")
+    run = subprocess.run([sandbox_exec, "-p", profile, "/bin/sh", "-c", script], capture_output=True,
+                         text=True, cwd=lane)
+    if run.returncode and "sandbox_apply" in run.stderr:
+        pytest.skip("sandbox_apply is refused in this test environment")
+    assert run.returncode == 0, run.stderr
+    assert head_of(repo, "fix/nested") == head_of(lane)
+    assert (common / "logs/refs/heads/fix/nested").is_file()
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="sandbox-exec is macOS-only")
+def test_a_sandboxed_writer_moves_only_its_own_branch(monkeypatch, tmp_path):
+    mod = supervisor()
+    sandbox_exec = mod._sandbox_exec_path()
+    if not sandbox_exec:
+        pytest.skip("sandbox-exec is unavailable or disabled")
+    repo, lane = instruction_lane(tmp_path)
+    git(repo, "update-ref", "refs/remotes/origin/main", "main")
+    git(repo, "pack-refs", "--all")
+    git(lane, "update-ref", "refs/heads/lane", "lane")  # A loose lane ref beside packed-refs.
+    plan = mod.build_plan("claude", {}, "hello", workspace_root=tmp_path, mode="worktree_write", worktree=lane)
+    profile = mod.os_confinement_profile(plan)
+    common = repo.resolve() / ".git"
+    private = common / "worktrees/lane"
+
+    def run(script):
+        return subprocess.run([sandbox_exec, "-p", profile, "/bin/sh", "-c", script], capture_output=True,
+                              text=True, cwd=lane)
+
+    probe = run("true")
+    if probe.returncode and "sandbox_apply" in probe.stderr:
+        pytest.skip("sandbox_apply is refused in this test environment")
+    fixture = " ".join(shlex.quote(arg) for arg in GIT_FIXTURE)
+    committed = run(f"echo more >> app.txt && git {fixture} commit -q -am more")
+    assert committed.returncode == 0, committed.stderr
+    assert head_of(repo, "lane") == head_of(lane)
+    main = head_of(repo, "main")
+    for ref in ("refs/heads/main", "refs/remotes/origin/main", "refs/tags/v1", "refs/heads/other"):
+        moved = run(f"git update-ref {ref} HEAD")
+        assert moved.returncode != 0, ref
+    assert head_of(repo, "main") == main
+    for path in (common / "packed-refs", lane / ".git", private / "commondir", private / "gitdir",
+                 private / "config.worktree", common / "objects/info/alternates", common / "HEAD",
+                 common / "provenant-instruction-checks"):
+        assert run(f"printf x >> {shlex.quote(str(path))}").returncode != 0, path
+
+
+def test_lane_provenance_stamps_the_installed_harness_revision(tmp_path):
+    code = """import json
+print(json.dumps({'type':'item.completed','item':{'type':'agent_message','text':'DONE'}}), flush=True)
+print(json.dumps({'type':'turn.completed'}), flush=True)
+"""
+    record = supervisor().execute(fixture_plan(tmp_path, code), tmp_path / "result.md")
+    head = subprocess.run(["git", "-C", str(Path(supervisor().__file__).resolve().parents[3]), "rev-parse", "HEAD"],
+                          capture_output=True, text=True)
+    assert record["status"] == "ok"
+    assert record["provenance"]["harness_rev"] == (head.stdout.strip() if head.returncode == 0 else None)
 
 
 @pytest.mark.parametrize("adapter", ["agy", "codex", "opencode", "claude"])

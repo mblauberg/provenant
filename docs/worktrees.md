@@ -59,6 +59,12 @@ scripts/worktree remove NAME
 `validate-context` rejects invalid linked-worktree metadata before a lane
 trusts its own checkout; `verify-claim` enforces claim verification at an
 acceptance boundary.
+Claim verification also runs the instruction range gate from the primary
+checkout's HEAD to the claimed commit: any commit that changes `.agents/` to a
+version the primary does not hold, and that no chair release covers, is
+rejected without deleting or restoring the branch. The gate needs no dispatch
+record, so a worktree that was never dispatched is checked the same way. See
+[the gate and release procedure](specs/fabric-v2.md).
 
 The helper resolves the primary checkout through Git's common directory, checks
 the name and protected root, and refuses unsafe creation/removal. A create

@@ -1,6 +1,6 @@
 """Adapter identity maps must not drift from the product dispatch registry.
 
-cf_dispatch.sh derives `endpoint_provider` when a route does not name one, and
+cf_dispatch.py derives `endpoint_provider` when a route does not name one, and
 review_terminal.py re-derives the same facts when it decides whether a review
 leg proves cross-family lineage. Two independent maps for one identity fact
 silently disagree when an adapter is added in one place only (#827, review
@@ -58,13 +58,12 @@ def test_fixed_family_maps_mirror_the_catalogue_fixed_model_family():
     )["adapters"].items()
     if entry.get("endpoint_provider")
 ))
-def test_shell_endpoint_provider_map_matches_the_catalogue(adapter, expected):
-    source = (ROOT / "skills" / "orchestrate" / "scripts" / "cf_dispatch.sh").read_text()
-    import re
-    match = re.search(
-        r"^endpoint_provider\(\) \{\n(.*?)\n\}", source, re.MULTILINE | re.DOTALL,
-    )
-    assert match, "cf_dispatch.sh has no endpoint_provider() map"
-    arm = re.search(rf"^\s+{re.escape(adapter)}\) echo \"([^\"]+)\";;$", match.group(1), re.MULTILINE)
-    assert arm, f"cf_dispatch.sh endpoint_provider() has no {adapter} arm"
-    assert arm.group(1) == expected
+def test_dispatcher_endpoint_provider_map_matches_the_catalogue(adapter, expected):
+    import importlib.util
+    import sys
+    path = ROOT / "skills" / "orchestrate" / "scripts" / "cf_dispatch.py"
+    spec = importlib.util.spec_from_file_location("cf_dispatch_under_test", path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    assert module.ENDPOINT_PROVIDERS.get(adapter) == expected

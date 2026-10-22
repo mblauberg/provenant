@@ -25,7 +25,7 @@
 //   bulk read / convention sniff / grep-map      -> cheap tier (intent)
 //   plan framing / per-angle review / build       -> mid tier (intent)
 //   plan adjudication / synthesis / apply-gate     -> flagship tier (intent; the orchestrator session)
-//   other-primary explore + review                 -> Codex via cf_dispatch.sh
+//   other-primary explore + review                 -> Codex via cf_dispatch.py
 //   distinct-family independent lens               -> Cursor/xAI or Agy/Gemini when warranted
 
 export const meta = {
@@ -67,7 +67,7 @@ const BOOTSTRAP_SCHEMA = {
     repoRoot: { type: 'string', description: 'Absolute path to the project root the task targets' },
     gitCwd: {
       type: 'string',
-      description: 'Absolute path to a git repo dir usable as cwd for codex dispatch; empty string if none (cf_dispatch.sh has NO --skip-git-repo-check flag, so codex cross-family then falls back to a nested git repo, else cursor/agy, else CROSS-FAMILY-NOT-RUN)',
+      description: 'Absolute path to a git repo dir usable as cwd for codex dispatch; empty string if none (cf_dispatch.py has NO --skip-git-repo-check flag, so codex cross-family then falls back to a nested git repo, else cursor/agy, else CROSS-FAMILY-NOT-RUN)',
     },
     baseRevision: { type: 'string', description: 'Git HEAD captured before any source mutation' },
     effectiveRisk: { type: 'string', enum: ['substantial', 'crucial', 'terminal'] },
@@ -201,7 +201,7 @@ const REVIEW_SCHEMA = {
         endpointProvider: { type: 'string' },
         crossFamily: { type: 'boolean' },
         certificationEligible: { type: 'boolean' },
-        readOnlyGuarantee: { type: 'string', description: 'cf_dispatch.sh value: enforced | oauth_safe_mode | best_effort | prompt_only | none (none only for a Claude reviewer)' },
+        readOnlyGuarantee: { type: 'string', description: 'cf_dispatch.py value: enforced | oauth_safe_mode | best_effort | prompt_only | none (none only for a Claude reviewer)' },
         outputPath: { type: 'string' },
         routeReceipt: { type: 'string', description: 'Exact cf_dispatch JSON receipt path; empty for native review' },
         notRunReason: { type: 'string', description: 'CROSS-FAMILY-NOT-RUN reason if ran=false; else ""' },
@@ -310,7 +310,7 @@ const ESCALATION_RULES =
   'If the task targets any of these, emit a recommendation only.'
 
 // Cross-family dispatch instructions reused by explorer + reviewer agents. codex refuses untrusted
-// (non-git) dirs, so the dispatch runs with cwd inside a git repo; cf_dispatch.sh has NO
+// (non-git) dirs, so the dispatch runs with cwd inside a git repo; cf_dispatch.py has NO
 // --skip-git-repo-check flag. The "codex cursor" --chain lets the dispatcher own failover in one call
 // (codex enforced -> cursor enforced), so cursor is attempted deterministically, not on agent whim.
 function crossFamilyDispatchHint(runDir, gitCwd, kind = 'primary') {
@@ -321,7 +321,7 @@ function crossFamilyDispatchHint(runDir, gitCwd, kind = 'primary') {
     'Dispatch the load-bearing OpenAI other-primary worker. ' +
     cwdClause +
     ' Write your prompt to a file, then run:\n' +
-    '  "$(provenant root)/skills/orchestrate/scripts/cf_dispatch.sh" ' +
+    '  "$(provenant root)/skills/orchestrate/scripts/cf_dispatch.py" ' +
     '--orchestrator-family anthropic --tool codex --alias flagship --role other-primary --prompt-file <your-prompt-file> ' +
     `--out "${runDir}/crossfamily/<name>.txt" > "${runDir}/crossfamily/<name>.route.json"\n` +
     (kind === 'primary-review'

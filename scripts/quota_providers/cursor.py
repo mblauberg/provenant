@@ -22,11 +22,12 @@ def default_identity():
     return selected_identity('cursor')
 
 
-def session(database, now, io=None):
+def session(database, now, io):
     """The access token and user id from Cursor's state database, opened read-only."""
-    unavailable = io.Unavailable if io else ValueError
+    def unavailable(message):  # every local-session failure is a sign-in problem
+        return io.Unavailable(message, 'auth')
     try:
-        with closing(sqlite3.connect(database.resolve().as_uri() + '?mode=ro', uri=True)) as db:
+        with closing(io.readonly(database)) as db:
             row = db.execute("SELECT value FROM ItemTable WHERE key='cursorAuth/accessToken' LIMIT 1").fetchone()
     except sqlite3.Error:
         raise unavailable('Cursor is not signed in locally') from None

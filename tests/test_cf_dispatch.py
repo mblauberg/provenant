@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Contract tests for cf_dispatch.sh, the provider adapter, with stubbed CLIs."""
+"""Contract tests for cf_dispatch.py, the provider adapter, with stubbed CLIs."""
 import json
 import os
 import re
@@ -19,7 +19,7 @@ import pytest
 
 PRODUCT_ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = PRODUCT_ROOT / "skills" / "orchestrate" / "scripts"
-SCRIPT = SCRIPTS / "cf_dispatch.sh"
+SCRIPT = SCRIPTS / "cf_dispatch.py"
 RUN_DIR_SCRIPT = SCRIPTS / "run_dir_init.sh"
 
 from _shared.bounded_process import run_bounded
@@ -529,17 +529,8 @@ def test_claude_tool_not_found_keeps_diagnostic_instead_of_retrying_fallback():
         misleading_path.mkdir()
         home = tmp / "home"
         home.mkdir()
-        bash_env = tmp / "bash-env"
-        bash_env.write_text(
-            "command() {\n"
-            "  if [ \"$1\" = \"-v\" ] && [ \"$2\" = \"claude\" ]; then return 1; fi\n"
-            "  builtin command \"$@\"\n"
-            "}\n",
-            encoding="utf-8",
-        )
         env = fabric_free_env()
         env["HOME"] = str(home)
-        env["BASH_ENV"] = str(bash_env)
         env["AGENT_FABRIC_PRODUCT_ROOT"] = str(PRODUCT_ROOT)
         env["AGENT_FABRIC_INSTANCE_ROOT"] = str(PRODUCT_ROOT)
         env["PATH"] = os.pathsep.join(
@@ -608,6 +599,27 @@ def test_missing_option_value_is_clean_error():
     )
     assert result.returncode == 2
     assert "unbound variable" not in result.stderr
+
+
+def test_missing_option_value_names_the_flag():
+    result = subprocess.run(
+        [str(SCRIPT), "--tool"], text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+    )
+    assert result.returncode == 2
+    assert result.stderr == "missing value for --tool\n"
+
+
+def test_doctor_reports_every_provider_cli():
+    result = subprocess.run(
+        [str(SCRIPT), "--doctor"], text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+    )
+    assert result.returncode == 0
+    lines = result.stdout.splitlines()
+    assert lines[0] == "cf_dispatch doctor"
+    keys = {line.split("=", 1)[0] for line in lines if "=" in line}
+    assert {"pwd", "PATH", "CF_DISPATCH_ENABLE_KIRO", "CF_DISPATCH_ENABLE_COPILOT",
+            "CF_DISPATCH_AGY_ADD_DIR", "claude", "codex", "cursor-agent", "agy",
+            "kiro-cli", "copilot", "opencode"} <= keys
 
 
 def test_missing_prompt_file_is_clean_error():
@@ -2476,7 +2488,7 @@ def test_non_git_fallback_routes_via_product_root_model_route():
         write_executable(bin_dir / "python3", f'#!/bin/sh\nexec {sys.executable} "$@"\n')
         env = fabric_free_env()
         env["PATH"] = f"{bin_dir}:/usr/bin:/bin"
-        # cf_dispatch.sh appends $HOME/.local/bin and $HOME/bin to PATH;
+        # cf_dispatch.py appends $HOME/.local/bin and $HOME/bin to PATH;
         # point HOME at the sandbox so an installed provenant cannot leak in.
         env["HOME"] = str(tmp)
         instance = tmp / "instance"
@@ -2487,7 +2499,7 @@ def test_non_git_fallback_routes_via_product_root_model_route():
         out = tmp / "out.txt"
         result = subprocess.run(
             [
-                str(product / "skills" / "orchestrate" / "scripts" / "cf_dispatch.sh"),
+                str(product / "skills" / "orchestrate" / "scripts" / "cf_dispatch.py"),
                 "--tool",
                 "claude",
                 "--orchestrator-family",

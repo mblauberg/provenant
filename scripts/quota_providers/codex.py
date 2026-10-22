@@ -27,9 +27,9 @@ def app_server(account, io, timeout=None):
     timeout = timeout or io.PROCESS_TIMEOUT
     executable = io.executable('codex')
     if not executable:
-        raise io.Unavailable('Codex CLI is not installed')
+        raise io.Unavailable('Codex CLI is not installed', 'missing')
     try:
-        process = io.open_process([executable, '-s', 'read-only', '-a', 'untrusted', 'app-server'],
+        process = io.open_process([executable, '-s', 'read-only', '-a', 'never', 'app-server'],
                                   stdin=io.PIPE, stdout=io.PIPE, stderr=io.DEVNULL, text=True, bufsize=1,
                                   env={**os.environ, 'CODEX_HOME': str(account.identity_dir)})
     except OSError:
@@ -129,20 +129,46 @@ def parse(payload, now=None):
                 windows.append(row)
             elif not prefix and name in group:
                 unreported.append(name)
-    credits = next((main.get(key, root.get(key)) for key in CREDIT_KEYS if key in main or key in root), None)
+    resets = _resets(root.get('rateLimitResetCredits'))
+    count = resets['available'] if resets else next(
+        (main.get(key, root.get(key)) for key in CREDIT_KEYS if key in main or key in root), None)
     return {'windows': windows, 'unreported': unreported,
             'plan': main.get('planType') or main.get('plan_type') or root.get('plan_type'),
-            'credits': {'reset_credits': credits, 'source': 'provider'} if credits is not None else None}
+            'credits': {'reset_credits': count, 'source': 'provider'} if count is not None else None,
+            'resets': resets, 'usage_credits': _balance(main.get('credits')),
+            # The raw usage-credit balance (a decimal string) for the plan-value series.
+            'credit_balance': (main.get('credits') or {}).get('balance') if isinstance(main.get('credits'), dict) else None,
+            'allowance': {'ordinary_usage_allowed': root.get('ordinaryUsageAllowed'),
+                          'spend_control_reached': main.get('spendControlReached'),
+                          'limit_reached_type': main.get('rateLimitReachedType')}}
+
+
+def _resets(raw):
+    """Banked full resets; detail rows may be capped or absent, so only their expiries are kept."""
+    if not isinstance(raw, dict) or type(raw.get('availableCount')) is not int:
+        return None
+    rows = raw.get('credits') if isinstance(raw.get('credits'), list) else []
+    return {'available': raw['availableCount'], 'source': 'provider',
+            'expires_at': [row.get('expiresAt') for row in rows
+                           if isinstance(row, dict) and row.get('status') == 'available' and row.get('expiresAt')]}
+
+
+def _balance(raw):
+    """Credits drawn on once the plan allowance runs out; Codex reports no expiry for them."""
+    if not isinstance(raw, dict) or not raw.get('hasCredits', raw.get('has_credits')):
+        return None
+    return [{'kind': 'credits', 'balance': raw.get('balance'), 'unlimited': raw.get('unlimited') is True,
+             'unit': 'credits'}]
 
 
 def fetch(account, io, now):
     try:
         return {**parse(app_server(account, io), now), 'source': 'codex app-server'}
     except io.Unavailable:
-        # Rollout logs record only the default Codex home, which the ledger already reads.
+        # Only the default home falls back; the ledger read is scoped to its account label.
         if account.identity_dir != Path.home() / '.codex':
             raise
-    observed = io.ledger_windows(ADAPTER, now)
+    observed = io.ledger_windows(ADAPTER, now, account.label)
     if not observed['windows']:
         raise io.Unavailable('Codex reported no rate limits')
     return {**observed, 'source': 'codex rollout rate-limit events'}

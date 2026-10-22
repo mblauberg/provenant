@@ -12,7 +12,7 @@ def test_agy_has_no_parallel_provider_skill():
 
 
 def test_headless_dispatcher_uses_direct_router_without_daemon_gate():
-    dispatcher = read("skills/orchestrate/scripts/cf_dispatch.sh")
+    dispatcher = read("skills/orchestrate/scripts/cf_dispatch.py")
     assert not (ROOT / "skills/autopilot/scripts/cross-family.sh").exists()
     assert "--adapter-gate" not in dispatcher
     # The point of this guard is that agy is reached the same way every other
@@ -26,7 +26,7 @@ def test_headless_dispatcher_uses_direct_router_without_daemon_gate():
         "run-agy-headless",
     ):
         assert forbidden not in dispatcher
-    assert "agy)" in dispatcher, "agy must be dispatchable like every other adapter"
+    assert '"agy"' in dispatcher, "agy must be dispatchable like every other adapter"
 
 
 def test_direct_agy_dispatch_keeps_the_compatibility_contract():

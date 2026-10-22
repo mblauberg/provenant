@@ -1255,6 +1255,82 @@ def test_remove_tree_refuses_ancestor_on_another_device(tmp_path, monkeypatch):
     assert (target / "f").is_file()
 
 
+@pytest.mark.parametrize("swapped", ["tmp", "sub"])
+def test_tree_bytes_never_follows_a_directory_swapped_for_a_link_mid_walk(tmp_path, monkeypatch, swapped):
+    storage = cleaner().attempt_storage
+    tmp = tmp_path / "attempt" / "tmp"
+    (tmp / "sub").mkdir(parents=True)
+    (tmp / "sub" / "f").write_text("x")
+    victim = tmp_path / "victim"
+    victim.mkdir()
+    (victim / "big").write_bytes(os.urandom(4 * 1024 * 1024))
+    target = tmp if swapped == "tmp" else tmp / "sub"
+    real_stat, real_lstat, done = os.stat, os.lstat, []
+
+    def swap_after(result, name):
+        # Swap the directory for a link right after the walker first examines it.
+        if not done and os.fspath(name).endswith(swapped):
+            done.append(name)
+            os.rename(target, tmp_path / "moved")
+            os.symlink(victim, target)
+        return result
+
+    monkeypatch.setattr(os, "stat", lambda path, *a, **k: swap_after(real_stat(path, *a, **k), path))
+    monkeypatch.setattr(os, "lstat", lambda path, *a, **k: swap_after(real_lstat(path, *a, **k), path))
+    size = storage.tree_bytes(tmp)
+    monkeypatch.undo()
+    assert done and target.is_symlink() and size < 1024 * 1024
+
+
+def test_tree_bytes_bounds_its_depth_and_entries(tmp_path, monkeypatch):
+    storage = cleaner().attempt_storage
+    deep = tmp_path / "tmp" / "a" / "b" / "c"
+    deep.mkdir(parents=True)
+    (deep / "big").write_bytes(os.urandom(1024 * 1024))
+    monkeypatch.setattr(storage, "TREE_MAX_DEPTH", 2, raising=False)
+    assert storage.tree_bytes(tmp_path / "tmp") < 1024 * 1024
+    monkeypatch.setattr(storage, "TREE_MAX_DEPTH", 64, raising=False)
+    assert storage.tree_bytes(tmp_path / "tmp") >= 1024 * 1024
+    for index in range(10):
+        (tmp_path / "tmp" / f"f{index}").write_bytes(os.urandom(256 * 1024))
+    monkeypatch.setattr(storage, "TREE_MAX_ENTRIES", 3, raising=False)
+    assert storage.tree_bytes(tmp_path / "tmp") <= 4 * 300 * 1024
+
+
+def test_tree_bytes_reads_a_wide_directory_only_up_to_its_entry_budget(tmp_path, monkeypatch):
+    storage = cleaner().attempt_storage
+    wide = tmp_path / "tmp"
+    wide.mkdir()
+    for index in range(50):
+        (wide / f"f{index}").touch()
+    real_scandir, read = os.scandir, []
+
+    class Counted:
+        def __init__(self, path):
+            self.entries = real_scandir(path)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            self.entries.close()
+
+        def __iter__(self):
+            for entry in self.entries:
+                read.append(entry.name)
+                yield entry
+
+    def no_listdir(path="."):
+        raise AssertionError("tree_bytes must not list a whole directory at once")
+
+    monkeypatch.setattr(os, "scandir", Counted)
+    monkeypatch.setattr(os, "listdir", no_listdir)
+    monkeypatch.setattr(storage, "TREE_MAX_ENTRIES", 3)
+    storage.tree_bytes(wide)
+    monkeypatch.undo()
+    assert len(read) <= 4, read
+
+
 def test_open_dir_closes_fd_when_fstat_fails(tmp_path, monkeypatch):
     storage = cleaner().attempt_storage
     (tmp_path / "d").mkdir()
