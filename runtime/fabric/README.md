@@ -267,7 +267,7 @@ an ordinary edit, with a warning) or `deny` (retain the edit for review without
 restoration). Denied edits, failed restoration and unverifiable checks leave
 edits on the lane, so the lane ends `failed` (fix: restore `.agents/` to the
 start commit before landing) with its output and patches retained and listed;
-incomplete or interrupted providers keep their failure outcomes.
+signal-killed providers stay `failed` without a terminal result or `interrupted` after one; explicit cancellations stay `cancelled`.
 `protected.patch` may be empty for an index-only edit or carry
 an unavailable-diff comment for unsafe states, with `quarantine.patch_error`
 explaining capture failure. Spared processes alone do not prove instruction
