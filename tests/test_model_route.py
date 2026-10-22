@@ -3588,6 +3588,63 @@ def test_probe_snapshot_max_is_mapped_to_xhigh_with_a_note(tmp_path):
     assert "max" not in route["supported_efforts"]
 
 
+def _overlay_with_max(tmp_path, monkeypatch):
+    """An instance overlay that predates the retirement: every effort list still offers max."""
+    router = load_router()
+    def readd(value):
+        if isinstance(value, dict):
+            return {k: (v + ["max"] if k in {"efforts", "effort_fallback_order"} and isinstance(v, list) and "xhigh" in v
+                        else readd(v)) for k, v in value.items()}
+        return [readd(v) for v in value] if isinstance(value, list) else value
+    catalog = readd(json.loads((ROOT / "config" / "model-routing.json").read_text()))
+    path = tmp_path / "model-routing.json"
+    path.write_text(json.dumps(catalog))
+    monkeypatch.setattr(router, "CATALOG_PATH", path)
+    monkeypatch.setattr(router, "PRODUCT_CATALOG_PATH", path)
+    return router
+
+
+@pytest.mark.parametrize("argv", [
+    ["--adapter", "claude", "--alias", "flagship", "--role", "worker", "--effort", "max"],
+    ["--adapter", "claude", "--model", "sonnet", "--role", "worker", "--effort", "max"],
+    ["--adapter", "codex", "--model", "gpt-6-luna", "--role", "worker", "--effort", "max"],
+    ["--adapter", "claude", "--model", "sonnet", "--role", "worker", "--effort", "ultra"],
+])
+def test_overlay_that_still_lists_max_never_resolves_to_max(tmp_path, monkeypatch, capsys, argv):
+    router = _overlay_with_max(tmp_path, monkeypatch)
+    router.main(["resolve", *argv])
+    route = json.loads(capsys.readouterr().out)
+    assert route["status"] == "ok"
+    assert route["effort"] != "max" and route["effort_applied"] != "max"
+    assert "max" not in route["supported_efforts"]
+    if "max" in argv:
+        assert route["requested_effort"] == "max"
+        assert "max retired; mapped to xhigh" in route["effort_substitution"]
+
+
+def test_opencode_max_variant_is_mapped_to_xhigh():
+    result, route = resolve("--adapter", "opencode", "--model", "opencode-go/deepseek-v4.1-flash#max",
+                            "--role", "worker")
+    assert route["effort"] == route["effort_applied"] == "xhigh"
+    assert "max retired; mapped to xhigh" in route["effort_substitution"]
+
+
+def test_explicit_max_and_ultra_agree_on_a_probe_that_offers_max(tmp_path):
+    snapshot = write_codex_capability_snapshot(
+        tmp_path,
+        models={"gpt-6-astra": {"resolved_model": "gpt-6-astra",
+                                "supported_efforts": ["high", "max"]}},
+    )
+    efforts = {}
+    for asked in ("max", "ultra"):
+        result, route = resolve("--adapter", "codex", "--alias", "flagship", "--role", "worker",
+                                "--effort", asked, "--capabilities-file", str(snapshot))
+        assert result.returncode == 0
+        efforts[asked] = route["effort"]
+        assert "ran at max" not in route["effort_substitution"]
+    assert efforts == {"max": "xhigh", "ultra": "xhigh"}
+
+
 def test_ultra_eligible_roles_must_be_a_list_of_role_names(
     tmp_path, monkeypatch, capsys
 ):
@@ -3701,8 +3758,7 @@ def test_capability_snapshot_controls_default_fallback(
     snapshot.write_text(json.dumps(capability_snapshot({
             "gpt-6-astra": {
                 "resolved_model": "gpt-6-astra",
-                # max is present so the test proves the default steps down
-                # to high rather than up past the xhigh ceiling.
+                # max is retired and maps to xhigh, so the default is met.
                 "supported_efforts": ["medium", "high", "max"],
             }
         })))
@@ -3713,11 +3769,8 @@ def test_capability_snapshot_controls_default_fallback(
     route = json.loads(capsys.readouterr().out)
     assert result == 0
     assert route["requested_effort"] == "xhigh"
-    assert route["effort"] == "high"
+    assert route["effort"] == "xhigh"
     assert route["effort_capability_source"] == "runtime-model-catalog"
-    assert route["effort_substitution"] == (
-        "xhigh unavailable (runtime/model capability); used high"
-    )
 
 
 def test_default_effort_fallback_chooses_highest_supported_effort_at_or_below_request(
