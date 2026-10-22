@@ -188,11 +188,17 @@ is checked once per process.
   #1040's metadata-only grant was never run live, and only `opencode run --standalone`, which
   starts its own sandboxed server, exercises it). The grant exposes entry names, not child content
   or metadata, and does not follow a leaf symlink. The existing Claude-disable switches suppress instruction
-  loading; they do not establish that v2.0.32 skips these metadata probes. Sandboxed lanes
+  loading; they do not establish that v2.0.32 skips these metadata probes. Sandboxed read-only lanes
   disable the `fabric` MCP server through the [v2 per-server switch](https://opencode.ai/v2/docs/mcp-servers):
   `mcp.servers.fabric = {type: "local", command: ["provenant"], disabled: true}` in the inline
   config. V2 replaces the whole server definition, so the disabled entry includes its required
-  type and command; other servers keep their configuration. The run also sets `OPENCODE_DISABLE_CLAUDE_CODE`, `..._CLAUDE_CODE_SKILLS`,
+  type and command; other servers keep their configuration. Writer lanes use the product's resolved
+  `runtime/fabric/bin/fabric-mcp` wrapper with the `opencode` seat, bypassing the home-installed
+  Python launcher and product pointer. Writer confinement already permits reads of this wrapper
+  and its Node runtime; no home read grant is added. Before starting the model process, the supervisor
+  checks MCP initialization under the same environment and confinement profile. A missing wrapper,
+  runtime failure, denied launch or invalid handshake rejects the lane with `fabric_mcp_unavailable`.
+  The run also sets `OPENCODE_DISABLE_CLAUDE_CODE`, `..._CLAUDE_CODE_SKILLS`,
   `..._AUTOUPDATE` and `..._FILEWATCHER` so foreign instruction files, auto-update and watchers stay out.
 - **Herdr plugin.** A user plugin `~/.config/opencode/plugins/herdr-agent-state.js` fails to load
   in v2 ("must export default definition with id and effect/setup"). It is logged as a warning
