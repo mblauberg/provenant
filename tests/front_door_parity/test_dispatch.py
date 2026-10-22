@@ -327,3 +327,15 @@ def test_python_owners_use_harness_interpreter_with_old_python_on_path(fd, verb,
     assert result.returncode == 0, result.err
     assert result.payload() == {"python": sys.executable if selection == "override" else str(venv),
                                 "args": ["two words", ""]}
+
+
+@pytest.mark.parametrize("verb", ["dispatch", "clean"])
+def test_missing_python_helper_reports_repair(fd, verb):
+    (fd.checkout / "scripts/lib/harness-python.sh").unlink()
+
+    result = fd.run(verb)
+
+    assert result.returncode == 3, result.err
+    assert "scripts/lib/harness-python.sh" in result.err
+    assert REPAIR in result.err
+    assert not result.out

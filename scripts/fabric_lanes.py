@@ -84,16 +84,26 @@ class LaneFederation:
 
     def worker(self, verb, project, request, launch_path=None, lock=None, reader_cwd=None):
         request = dict(request)
+        scopes = []
+        unscoped = []
         if verb in {'status', 'lanes'} and request.get('ids'):
             selectors = []
-            for selector in request['ids']:
-                with self.database() as db:
+            with self.database() as db:
+                for selector in request['ids']:
+                    scope = None
                     operation = db.execute('SELECT request FROM operations WHERE id=?', (selector,)).fetchone()
-                if operation and json.loads(operation[0]).get('project') == project:
-                    launch = self.root / 'operations' / f'{selector}.json'
-                    if launch.is_file():
-                        selector = self.h.strict_json(launch.read_bytes()).get('runId', selector)
-                selectors.append(selector)
+                    if operation and json.loads(operation[0]).get('project') == project:
+                        launch = self.root / 'operations' / f'{selector}.json'
+                        if launch.is_file():
+                            identity = self.h.strict_json(launch.read_bytes())
+                            selector = identity.get('runId', selector)
+                            if identity.get('taskId') not in {None, '*'}:
+                                scope = identity
+                    if scope:
+                        scopes.append(scope)
+                    else:
+                        unscoped.append(selector)
+                    selectors.append(selector)
             request['ids'] = selectors
         lineage = request.pop('_lineage', None)
         directory = self.h.project_directory(project)
@@ -127,6 +137,32 @@ class LaneFederation:
             value = self.h.strict_json(result.stdout)
             if not isinstance(value, dict):
                 raise ValueError()
+            if scopes and isinstance(value.get('runs'), list):
+                runs = []
+                for row in value['runs']:
+                    names = {row.get(key) for key in ('id', 'run_id', 'task_id', 'batch_id', 'run_dir')}
+                    if row.get('run_dir'):
+                        names.add(Path(row['run_dir']).name)
+                    if unscoped and not any(selector in names for selector in unscoped):
+                        run_dir = row.get('run_dir') or directory / '.agent-run' / row.get('run_path', '')
+                        try:
+                            metadata = self.h.strict_json((Path(run_dir) / 'dispatch-status.json').read_bytes())
+                            if metadata.get('task_id') == row.get('task_id'):
+                                names.add(metadata.get('task_alias'))
+                        except (OSError, ValueError):
+                            pass
+                    if any(selector in names for selector in unscoped):
+                        runs.append(row)
+                        continue
+                    attempts = [scope['attempt'] for scope in scopes
+                        if row.get('run_id') == scope['runId'] and row.get('task_id') == scope['taskId']]
+                    if attempts and row.get('attempt', 0) >= min(attempts):
+                        row = dict(row)
+                        if isinstance(row.get('attempts'), list):
+                            row['attempts'] = [attempt for attempt in row['attempts']
+                                if attempt.get('attempt', 0) >= min(attempts)]
+                        runs.append(row)
+                value['runs'] = runs
             return value
         except ValueError as exc:
             raise self.h.HostError('bad_response', 'Lane owner returned invalid JSON') from exc
@@ -230,7 +266,7 @@ class LaneFederation:
                             db.execute('UPDATE operations SET result=? WHERE id=?', (json.dumps(result), identifier))
                         return result
                     return {'status': 'launch_unknown', 'state': 'launch_unknown', 'operation_id': identifier}
-                value = self.worker('status', project, {'ids': [identity['runId']]})
+                value = self.worker('status', project, {'ids': [identifier]})
                 recovered = [row for row in value.get('runs', []) if (identity['taskId'] == '*' or row.get('task_id') == identity['taskId'])
                     and (row.get('attempt', 0) >= identity['attempt']
                         or identity['taskId'] == '*' and row.get('attempt') == 0

@@ -252,12 +252,15 @@ fn run(args: &[OsString]) -> u8 {
                         .ancestors()
                         .nth(Path::new(relative).components().count())
                         .unwrap();
-                    let mut forwarded = vec![
-                        checkout
-                            .join("scripts/lib/harness-python.sh")
-                            .into_os_string(),
-                        program.into_os_string(),
-                    ];
+                    let helper = checkout.join("scripts/lib/harness-python.sh");
+                    if !is_file(&helper) {
+                        return fail(&format!(
+                            "Python helper is missing at {}; {}",
+                            helper.display(),
+                            exec::REPAIR
+                        ));
+                    }
+                    let mut forwarded = vec![helper.into_os_string(), program.into_os_string()];
                     forwarded.extend(args);
                     launch(Path::new("/bin/bash"), &forwarded, root.as_deref())
                 } else {

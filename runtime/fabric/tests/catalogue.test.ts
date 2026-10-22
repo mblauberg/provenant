@@ -1,11 +1,12 @@
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { chmodSync, copyFileSync, existsSync, readFileSync, symlinkSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { expect, it } from "vitest";
 
-import { catalogueSnapshot, liveModels, resetCooldowns } from "../src/catalogue.js";
+import { activeCooldowns, catalogueSnapshot, liveModels, resetCooldowns } from "../src/catalogue.js";
 import { scratchRoot } from "./helpers/temp-root.js";
 
 const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
@@ -116,5 +117,36 @@ it("resets cooldowns through the Python owner", () => {
     expect(resetCooldowns("claude", env)).toEqual(["claude/*"]);
     expect(resetCooldowns("claude", env)).toEqual([]);
     expect(resetCooldowns(undefined, env)).toEqual(["codex/*"]);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+
+it.each(["venv", "override"])("uses the harness Python environment for every catalogue launch (%s)", async (selection) => {
+  const root = scratchRoot("fabric-catalogue-python-");
+  try {
+    mkdirSync(join(root, "scripts/lib"), { recursive: true });
+    copyFileSync(join(repositoryRoot, "scripts/lib/harness-python.sh"), join(root, "scripts/lib/harness-python.sh"));
+    const python = execFileSync("/bin/bash", [join(repositoryRoot, "scripts/lib/harness-python.sh"),
+      "-c", "import sys; print(sys.executable)"], { encoding: "utf8" }).trim();
+    mkdirSync(join(root, ".venv/bin"), { recursive: true });
+    symlinkSync(python, join(root, ".venv/bin/python"));
+    const log = join(root, "environment.jsonl");
+    writeFileSync(join(root, "scripts/model_route.py"), `import json, os, subprocess, sys
+child = subprocess.check_output([sys.executable, "-c", "import os; print(os.environ.get('PYTHONNOUSERSITE', ''))"], text=True).strip()
+with open(${JSON.stringify(log)}, "a") as output:
+    output.write(json.dumps([sys.argv[1], os.environ.get("PYTHONNOUSERSITE"), child, sys.executable]) + "\\n")
+print(json.dumps({"schema": "fabric.catalogue.v1", "sha256": "fixture", "cooldowns": {}, "removed": [], "models": ["fixture"]}))
+`);
+    const env = { ...process.env, AGENT_FABRIC_PRODUCT_ROOT: root, AGENT_FABRIC_INSTANCE_ROOT: root,
+      HARNESS_PYTHON: selection === "override" ? python : "", PYTHONNOUSERSITE: "0" };
+    expect(catalogueSnapshot(root, env).sha256).toBe("fixture");
+    expect(activeCooldowns(env)).toEqual([]);
+    expect(resetCooldowns(undefined, env)).toEqual([]);
+    const snapshot = { adapters: [{ name: "opencode", models: [] }], endpoints: {}, drift: [] } as any;
+    expect((await liveModels("opencode", { root, env, snapshot })).digest).toContain("1 live models");
+    expect(readFileSync(log, "utf8").trim().split("\n").map((row) => JSON.parse(row))).toEqual(
+      ["snapshot", "cooldowns", "reset", "probe"].map((verb) => [verb, "1", "1",
+        selection === "override" ? python : join(root, ".venv/bin/python")]),
+    );
   } finally { rmSync(root, { recursive: true, force: true }); }
 });

@@ -55,6 +55,64 @@ class PeerContracts(unittest.TestCase):
                 'verb': 'lanes', 'params': {'project_path': 'Repos/project', 'input': {}}}).encode())
             self.assertEqual(verb, 'lanes')
 
+    def test_operation_status_reuses_connection_and_scopes_resume_attempts(self):
+        import fabric_hosts as hosts
+        import fabric_lanes
+        import sqlite3
+        from types import SimpleNamespace
+
+        with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, {
+                'HOME': directory, 'AGENT_FABRIC_INSTANCE_ROOT': directory}):
+            project = 'Repos/project'
+            (Path(directory) / project).mkdir(parents=True)
+            owner = fabric_lanes.LaneFederation(hosts)
+            launch_dir = owner.root / 'operations'
+            launch_dir.mkdir(parents=True)
+            with owner.database() as db:
+                for identifier, verb, run, task, attempt in [
+                        ('resume-op', 'resume', 'run-one', 'resumed', 2),
+                        ('dispatch-op', 'dispatch', 'run-two', '*', 1)]:
+                    db.execute('INSERT INTO operations VALUES (?,?,NULL)',
+                        (identifier, json.dumps({'project': project, 'verb': verb})))
+                    (launch_dir / (identifier + '.json')).write_text(json.dumps(
+                        {'runId': run, 'taskId': task, 'attempt': attempt}))
+            loader = Path(directory) / 'product/node_modules/tsx/dist/loader.mjs'
+            loader.parent.mkdir(parents=True)
+            loader.touch()
+            rows = [
+                {'run_id': 'run-one', 'task_id': 'resumed', 'attempt': 3,
+                 'attempts': [{'attempt': 1}, {'attempt': 2}, {'attempt': 3}]},
+                {'run_id': 'run-one', 'task_id': 'unrelated', 'attempt': 1},
+                {'run_id': 'run-two', 'task_id': 'batch-task', 'attempt': 1},
+            ]
+            run_dir = Path(directory) / project / '.agent-run/runs/run-one'
+            run_dir.mkdir(parents=True)
+            (run_dir / 'dispatch-status.json').write_text(json.dumps(
+                {'task_alias': 'unrelated-alias', 'task_id': 'unrelated'}))
+            bounded = hosts._load_module('provenant_bounded_process', ROOT / 'skills/_shared/bounded_process.py')
+            def run(command, **kwargs):
+                payload = json.loads(Path(command[-1]).read_text())
+                self.assertEqual(payload['input']['ids'], ['run-one', 'run-two', *extra])
+                return SimpleNamespace(timed_out=False, stdout_truncated=False, returncode=0,
+                    stdout=json.dumps({'status': 'ok', 'runs': response_rows}).encode())
+            for verb in ('status', 'lanes'):
+                response_rows = [{**row, **({'run_dir': str(run_dir.parent / row['run_id'])} if verb == 'status'
+                    else {'run_path': 'runs/' + row['run_id']})} for row in rows]
+                for extra in ([], ['unrelated-alias'], ['run-one']):
+                    with self.subTest(verb=verb, extra=extra), \
+                            patch.object(sqlite3, 'connect', wraps=sqlite3.connect) as connect, \
+                            patch.object(bounded, 'run_bounded', side_effect=run), \
+                            patch.object(hosts, 'PRODUCT_ROOT', Path(directory) / 'product'):
+                        result = owner.worker(verb, project, {
+                            'ids': ['resume-op', 'dispatch-op', *extra], 'detail': 'full'})
+                        self.assertEqual(connect.call_count, 1)
+                        if extra == ['run-one']:
+                            expected = response_rows
+                        else:
+                            expected = [{**response_rows[0], 'attempts': [{'attempt': 2}, {'attempt': 3}]},
+                                *([response_rows[1]] if extra else []), response_rows[2]]
+                        self.assertEqual(result['runs'], expected)
+
     def peer(self, request, **env):
         with tempfile.TemporaryDirectory() as directory:
             environment = {**os.environ, 'HOME': directory,

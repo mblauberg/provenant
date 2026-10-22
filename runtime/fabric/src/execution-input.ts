@@ -1,7 +1,8 @@
 /** Validate the Fabric request and forward routing/control choices to its owner. */
+import { pythonOwnerEnvironment } from "./python-owner.js";
 import { readFileSync, realpathSync, statSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
-import { projectRoot, withoutGitRedirects, type Identity } from "./identity.js";
+import { projectRoot, type Identity } from "./identity.js";
 import { runJsonSubprocess } from "./json-subprocess.js";
 import type { CatalogueSnapshot } from "./catalogue.js";
 const DEFAULT_TIMEOUT_SECONDS = 3600;
@@ -584,7 +585,7 @@ export async function preflight(
 ): Promise<Record<string, unknown>> {
   return runJsonSubprocess<Record<string, unknown>>(python, [owner, "--preflight-json"], {
     cwd: identity.cwd,
-    env: withoutGitRedirects(env),
+    env: pythonOwnerEnvironment(env),
     input: { tasks },
     signal,
     timeoutMs: 50_000,

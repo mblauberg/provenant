@@ -204,6 +204,20 @@ def test_python_floor_rejects_missing_interpreter(harness_script, runner):
         pytest.fail(f"missing unusable-interpreter detail: {result.stderr}")
 
 
+@pytest.mark.parametrize("runner", ["run_stdlib", "run_yaml", "run_test", "exec_stdlib"])
+def test_python_rejects_relative_override(harness_script, runner):
+    result = run_harness(
+        harness_script, runner,
+        harness_python=os.path.relpath(sys.executable, ROOT),
+        pythonpath=None, optimize="",
+    )
+
+    assert result.returncode == 3
+    assert not result.stdout
+    assert "HARNESS_PYTHON must be an absolute path" in result.stderr
+    assert "repair:" in result.stderr
+
+
 def resolve(*args):
     arguments = [str(ROOT / "scripts" / "model_route.py"), "resolve", *args]
     # The router reads its catalogue from the instance root, which defaults to

@@ -1,4 +1,5 @@
 /** Read the Python-owned merged routing snapshot, cached by source mtimes. */
+import { pythonOwner, pythonOwnerSync, pythonOwnerEnvironment } from "./python-owner.js";
 import { execFile, spawnSync } from "node:child_process";
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
@@ -76,11 +77,12 @@ export function catalogueSnapshot(root?: string, env: NodeJS.ProcessEnv = proces
     return value;
   };
   if (!existsSync(script)) return failed("catalogue snapshot unavailable; fix: restore scripts/model_route.py");
-  const configuredPython = env.HARNESS_PYTHON;
-  const python = configuredPython && isAbsolute(configuredPython) ? configuredPython : "python3";
+  let python: string;
+  try { python = pythonOwnerSync(productRoot, { ...process.env, ...env }); }
+  catch (error) { return failed(`catalogue snapshot unavailable: ${error instanceof Error ? error.message : String(error)}`); }
   const run = spawnSync(python, [script, "snapshot", "--json"], {
     cwd: productRoot,
-    env: { ...process.env, ...env, AGENT_FABRIC_PRODUCT_ROOT: productRoot, AGENT_FABRIC_INSTANCE_ROOT: instanceRoot },
+    env: pythonOwnerEnvironment({ ...process.env, ...env, AGENT_FABRIC_PRODUCT_ROOT: productRoot, AGENT_FABRIC_INSTANCE_ROOT: instanceRoot }),
     encoding: "utf8",
     timeout: 10_000,
     maxBuffer: 4 * 1024 * 1024,
@@ -153,9 +155,11 @@ interface Cooldown { adapter: string; model: string; cooling_until: string }
 export function activeCooldowns(env: NodeJS.ProcessEnv = process.env): Cooldown[] {
   const configuredRoot = env.AGENT_FABRIC_PRODUCT_ROOT;
   const productRoot = configuredRoot && isAbsolute(configuredRoot) ? configuredRoot : findProductRoot();
-  const python = env.HARNESS_PYTHON && isAbsolute(env.HARNESS_PYTHON) ? env.HARNESS_PYTHON : "python3";
+  let python: string;
+  try { python = pythonOwnerSync(productRoot, { ...process.env, ...env }); }
+  catch { return []; }
   const run = spawnSync(python, [join(productRoot, "scripts", "model_route.py"), "cooldowns", "--json"],
-    { cwd: productRoot, env: { ...process.env, ...env }, encoding: "utf8", timeout: 10_000 });
+    { cwd: productRoot, env: pythonOwnerEnvironment({ ...process.env, ...env }), encoding: "utf8", timeout: 10_000 });
   if (run.status !== 0) return [];
   try {
     const value: unknown = JSON.parse(run.stdout);
@@ -174,9 +178,9 @@ export function activeCooldowns(env: NodeJS.ProcessEnv = process.env): Cooldown[
 export function resetCooldowns(selector?: string, env: NodeJS.ProcessEnv = process.env): string[] {
   const configuredRoot = env.AGENT_FABRIC_PRODUCT_ROOT;
   const productRoot = configuredRoot && isAbsolute(configuredRoot) ? configuredRoot : findProductRoot();
-  const python = env.HARNESS_PYTHON && isAbsolute(env.HARNESS_PYTHON) ? env.HARNESS_PYTHON : "python3";
+  const python = pythonOwnerSync(productRoot, { ...process.env, ...env });
   const run = spawnSync(python, [join(productRoot, "scripts", "model_route.py"), "reset", "--json", ...(selector === undefined ? [] : ["--", selector])],
-    { cwd: productRoot, env: { ...process.env, ...env }, encoding: "utf8", timeout: 10_000 });
+    { cwd: productRoot, env: pythonOwnerEnvironment({ ...process.env, ...env }), encoding: "utf8", timeout: 10_000 });
   if (run.status !== 0) throw new Error(`cooldown reset failed: ${(run.stderr || "unknown error").split("\n", 1)[0]}`);
   return (JSON.parse(run.stdout) as { removed: string[] }).removed;
 }
@@ -225,12 +229,13 @@ async function liveDigest(adapter: string, options: LiveModelOptions): Promise<s
   if (executable === undefined) return withCatalogue(`${adapter}: no live list`);
   const configuredRoot = options.root || env.AGENT_FABRIC_PRODUCT_ROOT;
   const productRoot = configuredRoot && isAbsolute(configuredRoot) ? configuredRoot : findProductRoot();
-  const configuredPython = env.HARNESS_PYTHON;
-  const python = configuredPython && isAbsolute(configuredPython) ? configuredPython : "python3";
+  let python: string;
+  try { python = await pythonOwner(productRoot, { ...process.env, ...env }); }
+  catch { return withCatalogue(`${adapter}: live list unavailable (check the harness Python installation)`); }
   const stdout = await new Promise<string>((resolveOutput) => {
     execFile(python, [join(productRoot, "scripts", "model_route.py"), "probe", "--adapter", adapter, "--executable", executable, "--listing-only"],
       // The listing-only probe bounds each child within its own 30-second deadline, inside this one.
-      { cwd: productRoot, env: { ...process.env, ...env }, encoding: "utf8", timeout: 40_000, maxBuffer: 4 * 1024 * 1024 },
+      { cwd: productRoot, env: pythonOwnerEnvironment({ ...process.env, ...env }), encoding: "utf8", timeout: 40_000, maxBuffer: 4 * 1024 * 1024 },
       (_error, output) => resolveOutput(output ?? ""));
   });
   let record: { models?: unknown; message?: string; status?: string; cache_hit?: boolean } = {};

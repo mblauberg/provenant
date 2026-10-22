@@ -87,6 +87,8 @@ def execute(path: Path, arguments: list[str], product_root: Path) -> NoReturn:
     try:
         if path.suffix == ".py" and path.is_file() and os.access(path, os.X_OK):
             helper = product_root / "scripts/lib/harness-python.sh"
+            if not helper.is_file():
+                raise FileNotFoundError(f"Python helper is missing at {helper}")
             os.execve("/bin/bash", ["/bin/bash", str(helper), str(path), *arguments], environment)
         os.execve(path, [str(path), *arguments], environment)
     except OSError as exc:

@@ -11,8 +11,8 @@
  * owner handles its descendants. When an owner cannot finish cleanup, these
  * records do not authorise a broader group kill that could hit a shared host.
  */
+import { pythonOwner, pythonOwnerEnvironment } from "./python-owner.js";
 import { projectRoot, runRoot, withoutGitRedirects } from "./identity.js";
-import { pythonOwner } from "./execution.js";
 import { federatedLane } from "./hosts.js";
 import { canonicalSuccessStatus, isSuccessStatus } from "./success-status.js";
 export { runRoot } from "./identity.js";
@@ -201,7 +201,7 @@ export async function reapAttemptRuns(workspace: string, runDirs?: string[]): Pr
     const output = await new Promise<string>((done, reject) => {
       const child = execFile(python,
         [join(product, "skills/orchestrate/scripts/dispatch_run.py"), "--reap-attempts"],
-        { cwd: workspace, timeout: 10_000, maxBuffer: 64 * 1024 },
+        { cwd: workspace, env: pythonOwnerEnvironment(process.env), timeout: 10_000, maxBuffer: 64 * 1024 },
         (error, stdout) => error ? reject(error) : done(stdout));
       child.stdin?.on("error", () => { /* execFile reports an early exit. */ });
       child.stdin?.end(JSON.stringify(active));

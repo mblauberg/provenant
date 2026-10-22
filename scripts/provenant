@@ -328,6 +328,8 @@ def execute(
     try:
         if not path.is_file() or not os.access(path, os.X_OK):
             python_helper = None
+        if python_helper is not None and not python_helper.is_file():
+            raise FileNotFoundError(f"Python helper is missing at {python_helper}")
         program = Path("/bin/bash") if python_helper is not None else path
         argv = ([str(program), str(python_helper), str(path), *arguments]
                 if python_helper is not None else [str(path), *arguments])

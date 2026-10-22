@@ -1,3 +1,4 @@
+import { pythonOwnerSync, pythonOwnerEnvironment } from "../python-owner.js";
 /**
  * Graph documents (slice 1): plain, already expanded work nodes. Validation is
  * deterministic over the document, the catalogue and the filesystem. The
@@ -11,7 +12,7 @@ import { fileURLToPath } from "node:url";
 
 import type { CatalogueSnapshot } from "../catalogue.js";
 import { InputError, normaliseRoute, ownerPromptPath, readRoots, workingIdentity, type RouteInput } from "../execution-input.js";
-import { productRoot, pythonOwnerSync } from "../execution.js";
+import { productRoot } from "../execution.js";
 import { projectRoot, withoutGitRedirects, type Identity } from "../identity.js";
 
 export const GRAPH_ID = /^g-[0-9a-f]{6,16}$/u;
@@ -148,7 +149,7 @@ except PreflightError as error:
  print(json.dumps({"error":error.code,"fix":str(error)}))
 `;
   const result = JSON.parse(execFileSync(python, ["-I", "-c", script, scripts, ownerPromptPath(identity, path), identity.cwd,
-    JSON.stringify(readRoots(identity, undefined, path))], { cwd: root, env: withoutGitRedirects(env), encoding: "utf8", timeout: 10_000,
+    JSON.stringify(readRoots(identity, undefined, path))], { cwd: root, env: pythonOwnerEnvironment(env), encoding: "utf8", timeout: 10_000,
     maxBuffer: 16 * 1024 * 1024, stdio: ["ignore", "pipe", "pipe"] })) as { prompt: string; error?: string; fix?: string };
   if (result.error) throw new InputError(result.error, result.fix!);
   return Buffer.from(result.prompt, "base64");
