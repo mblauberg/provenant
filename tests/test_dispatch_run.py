@@ -3982,8 +3982,12 @@ def test_reap_attempt_recovers_missing_pgid(tmp_path, monkeypatch, source, disk_
     terminal = json.loads(path.read_text())
     assert terminal["pgid"] == 123456
     assert terminal["state"] == "terminal"
-    assert terminal["evidence"]["signature"] == ("host_disk_full" if disk_full else "pgid_gone")
-    assert terminal["error_class"] == ("host_resource" if disk_full else "provider_error")
+    disk_proven = disk_full == "stderr"
+    assert terminal["evidence"]["signature"] == ("host_disk_full" if disk_proven else "pgid_gone")
+    assert terminal["error_class"] == ("host_resource" if disk_proven else "provider_error")
+    assert terminal["status"] == ("failed" if disk_proven else "lost")
+    assert terminal["retryable"] is (not disk_proven)
+    assert ("low_free_space_hint" in terminal["evidence"]) is (disk_full == "space")
     assert not (run / "dispatch-status.json").exists()
 
 
@@ -6214,6 +6218,24 @@ time.sleep(60)
                 os.killpg(int(host_pid_path.read_text()), signal.SIGKILL)
             except (ProcessLookupError, PermissionError):
                 pass
+
+
+def test_terminal_contract_ignores_adapter_paths_outside_run(cancel_cascade, tmp_path):
+    mod, parent_dir, child_dir, row = cancel_cascade
+    attempt_dir = parent_dir / 'dispatch/tasks/writer/attempt-001'
+    args = SimpleNamespace(tool='claude', alias='senior', model='fixture', effort='high',
+                           task_id='writer', access_mode='read_only', worktree=None)
+    legacy = {'started_at': row['started_at'], 'finished_at': row['ended_at'],
+              'outcome': 'cancelled', 'status': 'cancelled', 'result': None,
+              'attempt_path': 'dispatch/tasks/writer/attempt-001/attempt.json', 'requested_route': {}}
+    adapter = {'status': 'cancelled', 'paths': {'events': str(tmp_path / 'outside-events.jsonl'),
+                                                'stderr': '../../outside-stderr.log'}}
+    terminal = mod.terminal_contract(args, parent_dir, legacy, adapter, 1, attempt_dir)
+    assert terminal['paths']['events'] == row['paths']['events']
+    assert terminal['paths']['stderr'] == row['paths']['stderr']
+    mod.publish_contract(parent_dir, terminal)
+    saved = json.loads((parent_dir / row['paths']['receipt']).read_text())
+    assert saved['state'] == 'terminal'
 
 
 @pytest.mark.parametrize('unavailable', ['environment', 'exited', 'identity'])

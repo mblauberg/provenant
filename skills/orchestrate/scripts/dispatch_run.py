@@ -651,9 +651,12 @@ def reap_provider_identity(run_dir: Path, path: Path, row: dict[str, Any]) -> di
         evidence = reap_run_evidence(run_dir)
         token = evidence[1] if evidence else None
         pgid = provider.get("provider_pgid")
-        if (provider.get("run_token") == (token or run_identity(run_dir))
-                and provider.get("task_id", row.get("task_id")) == row.get("task_id")
-                and provider.get("attempt", row.get("attempt")) == row.get("attempt")
+        if "task_id" in provider and "attempt" in provider:
+            same_attempt = provider["task_id"] == row.get("task_id") and provider["attempt"] == row.get("attempt")
+        else:  # An older owner did not record the attempt; trust it only for a single-task run.
+            same_attempt = len({p.parent.parent.name for tree in ("tasks", "dispatch/tasks")
+                                for p in (run_dir / tree).glob("*/attempt-*")}) <= 1
+        if (provider.get("run_token") == (token or run_identity(run_dir)) and same_attempt
                 and type(pgid) is int and pgid > 0):
             return {"pgid": pgid, "pgid_started_at": provider.get("provider_started_at")}
     except (OSError, ValueError, TypeError, AttributeError, OwnedFileError):
@@ -661,7 +664,8 @@ def reap_provider_identity(run_dir: Path, path: Path, row: dict[str, Any]) -> di
     return {}
 
 
-def reap_disk_full(run_dir: Path, row: dict[str, Any]) -> str | None:
+def reap_disk_full(run_dir: Path, row: dict[str, Any]) -> tuple[str | None, str | None]:
+    """Return (ENOSPC stderr evidence, low-free-space hint); only the first proves disk exhaustion."""
     try:
         value = (row.get("paths") or {}).get("stderr")
         if value:
@@ -672,16 +676,16 @@ def reap_disk_full(run_dir: Path, row: dict[str, Any]) -> str | None:
             finally:
                 os.close(fd)
             if re.search(r"ENOSPC|no space left on device|disk (?:is )?full", tail, re.I):
-                return tail[-400:]
+                return tail[-400:], None
     except (OSError, OwnedFileError):
         pass
     try:
         workspace = Path(row.get("workspace_root") or row.get("cwd") or run_dir)
         if shutil.disk_usage(run_dir).free < disk_floor_bytes(workspace, row.get("mode", "read_only")):
-            return "Free space below disk_floor_bytes at reap time"
+            return None, "Free space below disk_floor_bytes at reap time"
     except (OSError, ValueError, KeyError):
         pass
-    return None
+    return None, None
 
 
 def reap_attempts(run_dir: Path) -> list[str]:
@@ -734,7 +738,7 @@ def reap_attempts(run_dir: Path) -> list[str]:
                         if status is None:
                             continue
                         row.update(identity)
-                        disk_error = reap_disk_full(run_dir, row)
+                        disk_error, space_hint = reap_disk_full(run_dir, row)
                         if disk_error and status == "lost":
                             status = "failed"
                             reason = "host_disk_full"
@@ -748,6 +752,8 @@ def reap_attempts(run_dir: Path) -> list[str]:
                                            else "Attempt process group start time no longer matches"}
                         if disk_error:
                             row["evidence"]["host_disk_full"] = True
+                        elif space_hint:
+                            row["evidence"]["low_free_space_hint"] = space_hint
                         row["evidence"].update(process_evidence(run_dir, row))
                         row["digest"] = render_digest(row)
                         write_owned(run_dir, path, json.dumps(row, indent=2) + "\n")
@@ -2030,7 +2036,10 @@ def terminal_contract(args,run_dir,legacy,adapter,number,attempt_dir,active=None
     for name in ("events", "stderr"):
         value = (adapter.get("paths") or {}).get(name)
         if value:
-            row["paths"][name] = relative_path(run_dir, run_dir / value)
+            try:
+                row["paths"][name] = relative_path(run_dir, run_dir / value)
+            except ValueError:
+                pass  # Keep the contract path when the adapter's lies outside the run.
     row["evidence"].update(process_evidence(run_dir, row))
     row["error_class"] = provider_exec.error_class(status, row["evidence"].get("signature"))
     if not legacy.get("result"): row["paths"]["result"]=None

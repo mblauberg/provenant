@@ -123,7 +123,7 @@ def test_retained_legacy_success_is_valid_and_cannot_be_retried(tmp_path: Path) 
     assert "successful attempts cannot be retried" in json.loads(result.stdout)["message"]
 
 
-@pytest.mark.parametrize("outcome,pid", [("host_disk_full", 12345), ("provider_lost", 12345), ("process_spawn_error", None)])
+@pytest.mark.parametrize("outcome,pid", [("host_disk_full", 12345), ("host_disk_full", None), ("provider_lost", 12345), ("process_spawn_error", None)])
 def test_retained_host_failure_accepts_unobserved_exit(tmp_path, outcome, pid):
     run_dir = make_run(tmp_path)
     attempt = write_attempt(run_dir, status="failed", result=None, observed_exit=False)
