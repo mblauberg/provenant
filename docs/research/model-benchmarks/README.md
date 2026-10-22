@@ -33,10 +33,11 @@ Read the `contamination_note` and `run_by` of a record before leaning on it.
 
 `confidence` is about the figure as recorded, not the benchmark's worth: **H**
 read on a primary page, independent, current; **M** primary but vendor-run, or
-independent with a caveat (estimated, assumed model mapping, second-hand
-transcription of a primary chart); **L** secondary source only, unverified, or
-in conflict with another primary reading. `effort: null` means the source did not
-state one. `catalogue: false` marks a predecessor or sibling kept as a proxy; it
+independent with a caveat (estimated, assumed model mapping); **L** any
+secondary-only source (a blog or write-up citing a vendor or leaderboard),
+unverified, or in conflict with another primary reading. `effort: null` means
+the source did not state an effort; `"none"` means the source says the run used
+no reasoning or effort setting (for example Snorkel's GLM-5.3-Flash row). `catalogue: false` marks a predecessor or sibling kept as a proxy; it
 is not routable. `also_applies_to` lists catalogue ids assumed to share the
 measurement (for example a free OpenCode route and its paid twin), which is
 unverified. `cost_per_task_usd` is per benchmark task, so the AA Intelligence

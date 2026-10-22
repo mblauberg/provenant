@@ -777,10 +777,10 @@
    "source_date": "2026-09-29",
    "retrieved": "2026-10-22",
    "run_by": "vendor",
-   "confidence": "M",
+   "confidence": "L",
    "contamination_note": "Public benchmark; contamination not assessed.",
    "task_class_hint": "implementation",
-   "notes": "Secondary blog citing OpenAI's announcement; ~$1.50 per task is approximate. GPT-6 Sol (old) at max: 68.8 for $2.60, so a newer model beats a higher tier."
+   "notes": "Secondary only: a blog citing OpenAI's announcement; ~$1.50 per task is approximate. GPT-6 Sol (old) at max: 68.8 for $2.60, so a newer model beats a higher tier."
   },
   {
    "id": "gpt-6.1-sol.max.osworld-2.0-(offline,-v2026.08.08)",
@@ -797,7 +797,7 @@
    "source_date": "2026-09-29",
    "retrieved": "2026-10-22",
    "run_by": "vendor",
-   "confidence": "M",
+   "confidence": "L",
    "contamination_note": "Public benchmark; contamination not assessed.",
    "task_class_hint": null,
    "notes": "Computer use; not a coding prior."
@@ -878,10 +878,10 @@
    "source_date": "2026-09-29",
    "retrieved": "2026-10-22",
    "run_by": "vendor",
-   "confidence": "M",
+   "confidence": "L",
    "contamination_note": "Public benchmark; contamination not assessed.",
    "task_class_hint": "implementation",
-   "notes": "Secondary blog citing OpenAI; ~$7.70 per task approximate. Sol 6.1 high scores 75.2 for ~$1.50."
+   "notes": "Secondary only: a blog citing OpenAI; ~$7.70 per task approximate. Sol 6.1 high scores 75.2 for ~$1.50."
   },
   {
    "id": "gpt-6-luna.low.aa-intelligence-index",
@@ -1247,7 +1247,7 @@
    "source_date": "2026-09-29",
    "retrieved": "2026-10-22",
    "run_by": "vendor",
-   "confidence": "M",
+   "confidence": "L",
    "contamination_note": "Cursor-authored benchmark run by the model vendor (SpaceXAI); contamination status not stated.",
    "task_class_hint": "implementation",
    "notes": "Read via apidog's transcription of the SpaceXAI release chart; the x.ai page itself gave only the xhigh figure (46.3). Cursor harness may differ from what users get in Cursor."
@@ -1267,7 +1267,7 @@
    "source_date": "2026-09-29",
    "retrieved": "2026-10-22",
    "run_by": "vendor",
-   "confidence": "M",
+   "confidence": "L",
    "contamination_note": "Cursor-authored benchmark run by the model vendor (SpaceXAI); contamination status not stated.",
    "task_class_hint": "implementation",
    "notes": "Read via apidog's transcription of the SpaceXAI release chart; the x.ai page itself gave only the xhigh figure (46.3). Cursor harness may differ from what users get in Cursor."
@@ -1287,7 +1287,7 @@
    "source_date": "2026-09-29",
    "retrieved": "2026-10-22",
    "run_by": "vendor",
-   "confidence": "M",
+   "confidence": "L",
    "contamination_note": "Cursor-authored benchmark run by the model vendor (SpaceXAI); contamination status not stated.",
    "task_class_hint": "implementation",
    "notes": "Read via apidog's transcription of the SpaceXAI release chart; the x.ai page itself gave only the xhigh figure (46.3). Cursor harness may differ from what users get in Cursor."
@@ -1307,7 +1307,7 @@
    "source_date": "2026-09-29",
    "retrieved": "2026-10-22",
    "run_by": "vendor",
-   "confidence": "M",
+   "confidence": "L",
    "contamination_note": "Cursor-authored benchmark run by the model vendor (SpaceXAI); contamination status not stated.",
    "task_class_hint": "implementation",
    "notes": "Read via apidog's transcription of the SpaceXAI release chart; the x.ai page itself gave only the xhigh figure (46.3). Cursor harness may differ from what users get in Cursor."
@@ -1702,10 +1702,10 @@
    "notes": "Secondary summary of the V4.1-Flash-1017 update (original V4.1 Flash: 31.2). Checkpoint served via OpenCode unknown."
   },
   {
-   "id": "opencode-go_glm-5.3-flash.max.aa-intelligence-index",
+   "id": "opencode-go_glm-5.3-flash.na.aa-intelligence-index",
    "model_id": "opencode-go/glm-5.3-flash",
    "catalogue": true,
-   "effort": "max",
+   "effort": null,
    "benchmark": "AA Intelligence Index",
    "metric": "index_points",
    "score": 42,
@@ -1726,10 +1726,10 @@
    ]
   },
   {
-   "id": "opencode-go_glm-5.3-flash.na.terminal-bench-4.0",
+   "id": "opencode-go_glm-5.3-flash.none.terminal-bench-4.0",
    "model_id": "opencode-go/glm-5.3-flash",
    "catalogue": true,
-   "effort": null,
+   "effort": "none",
    "benchmark": "Terminal-Bench 4.0",
    "metric": "pct_resolved",
    "score": 35.8,
