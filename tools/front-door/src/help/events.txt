@@ -1,0 +1,4 @@
+usage: provenant events --follow
+
+Delegates to runtime/fabric/bin/fabric events ...
+Foreground/streaming Fabric task and inbox event stream.

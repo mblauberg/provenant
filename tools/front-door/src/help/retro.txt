@@ -1,0 +1,5 @@
+usage: provenant retro [--since ISO-DATE] [--window 7d] [--json]
+
+Delegates to scripts/provenant-telemetry retro.
+Compact digest for retrospectives: change markers in the period with their
+before/after summary, top error classes and attention proxies (default 7 days).
