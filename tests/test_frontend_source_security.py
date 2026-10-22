@@ -867,61 +867,40 @@ def test_live_wrap_rejects_targets_outside_project_before_any_write(
     assert outside.read_text() == original
 
 
-@pytest.mark.parametrize("explicit", [True, False])
-def test_live_wrap_rejects_hard_linked_source_before_any_write(
-    tmp_path: Path, explicit: bool
-) -> None:
-    outside = tmp_path.parent / f"{tmp_path.name}-wrap-hardlink.html"
-    original = '<html><body><section class="target">outside</section></body></html>\n'
-    outside.write_text(original)
-    inside = tmp_path / "index.html"
-    os.link(outside, inside)
-
-    result = _run_wrap(tmp_path, *(["--file", "index.html"] if explicit else []))
-
-    assert result.returncode != 0
-    assert outside.read_text() == original
-    assert inside.read_text() == original
-
-
-@pytest.mark.parametrize("mode", ["insert", "remove"])
-def test_live_inject_rejects_hard_linked_source_for_every_mutation_mode(
+@pytest.mark.parametrize(
+    "mode", ["wrap-explicit", "wrap-discovered", "insert", "remove", "accept", "discard"]
+)
+def test_live_mutations_reject_hard_linked_source_before_any_write(
     tmp_path: Path, mode: str
 ) -> None:
-    page = tmp_path / "index.html"
-    original = "<html><body>safe</body></html>\n"
-    page.write_text(original)
-    _write_config(tmp_path, ["index.html"])
-    if mode == "remove":
-        inserted = _run_inject(tmp_path, "--port", "8400", "--token", TOKEN)
-        assert inserted.returncode == 0, inserted.stderr
-    outside = tmp_path.parent / f"{tmp_path.name}-inject-{mode}-hardlink.html"
+    if mode.startswith("wrap"):
+        page = tmp_path / "index.html"
+        page.write_text('<html><body><section class="target">outside</section></body></html>\n')
+    elif mode in ("insert", "remove"):
+        page = tmp_path / "index.html"
+        page.write_text("<html><body>safe</body></html>\n")
+        _write_config(tmp_path, ["index.html"])
+        if mode == "remove":
+            inserted = _run_inject(tmp_path, "--port", "8400", "--token", TOKEN)
+            assert inserted.returncode == 0, inserted.stderr
+    else:
+        page = _write_wrapped_session(tmp_path, with_variant=mode == "accept")
+    outside = tmp_path.parent / f"{tmp_path.name}-{mode}-hardlink.html"
     os.link(page, outside)
-    outside_before = outside.read_bytes()
+    before = outside.read_bytes()
 
-    args = ["--remove"] if mode == "remove" else ["--port", "8400", "--token", TOKEN]
-    result = _run_inject(tmp_path, *args)
+    result = {
+        "wrap-explicit": lambda: _run_wrap(tmp_path, "--file", "index.html"),
+        "wrap-discovered": lambda: _run_wrap(tmp_path),
+        "insert": lambda: _run_inject(tmp_path, "--port", "8400", "--token", TOKEN),
+        "remove": lambda: _run_inject(tmp_path, "--remove"),
+        "accept": lambda: _run_accept(tmp_path, "--variant", "1"),
+        "discard": lambda: _run_accept(tmp_path, "--discard"),
+    }[mode]()
 
     assert result.returncode != 0
-    assert outside.read_bytes() == outside_before
-    assert page.read_bytes() == outside_before
-
-
-@pytest.mark.parametrize("mode", ["accept", "discard"])
-def test_live_accept_rejects_hard_linked_source_for_every_mutation_mode(
-    tmp_path: Path, mode: str
-) -> None:
-    page = _write_wrapped_session(tmp_path, with_variant=mode == "accept")
-    outside = tmp_path.parent / f"{tmp_path.name}-accept-{mode}-hardlink.html"
-    os.link(page, outside)
-    outside_before = outside.read_bytes()
-
-    args = ["--variant", "1"] if mode == "accept" else ["--discard"]
-    result = _run_accept(tmp_path, *args)
-
-    assert result.returncode != 0
-    assert outside.read_bytes() == outside_before
-    assert page.read_bytes() == outside_before
+    assert outside.read_bytes() == before
+    assert page.read_bytes() == before
 
 
 def test_live_entrypoint_does_not_execute_shell_syntax_from_server_state(
@@ -1059,27 +1038,44 @@ def test_live_inject_remove_cleans_existing_targets_when_one_was_deleted(tmp_pat
 
 
 @pytest.mark.parametrize(
-    ("filename", "source", "anchor"),
+    ("filename", "source", "anchor", "accepted", "decoy"),
     [
-        (
+        pytest.param(
             "App.tsx",
             "const demo = '<head>';\nexport default () => <html><head><title>Real</title></head></html>;\n",
             "<head>",
+            True,
+            "const demo = '<head>';",
+            id="jsx-string",
         ),
-        (
+        pytest.param(
             "Component.svelte",
             "{condition ? `<main>` : ''}\n<main>Real</main>\n",
             "<main>",
+            True,
+            "{condition ? `<main>` : ''}",
+            id="svelte-template",
         ),
-        (
+        pytest.param(
             "Page.astro",
             "---\nconst demo = `<head>`;\n---\n<html><head><title>Real</title></head></html>\n",
             "<head>",
+            True,
+            "const demo = `<head>`;",
+            id="astro-frontmatter",
+        ),
+        pytest.param(
+            "App.tsx",
+            "const demo = '<head>';\nexport default () => <main>Real</main>;\n",
+            "<head>",
+            False,
+            "",
+            id="anchor-only-in-jsx-string",
         ),
     ],
 )
 def test_live_inject_ignores_framework_anchor_decoys(
-    tmp_path: Path, filename: str, source: str, anchor: str
+    tmp_path: Path, filename: str, source: str, anchor: str, accepted: bool, decoy: str
 ) -> None:
     page = tmp_path / filename
     page.write_text(source)
@@ -1097,35 +1093,15 @@ def test_live_inject_ignores_framework_anchor_decoys(
 
     inserted = _run_inject(tmp_path, "--port", "8400", "--token", TOKEN)
 
+    if not accepted:
+        assert inserted.returncode != 0
+        assert json.loads(inserted.stderr)["error"] == "mutation_preflight_failed"
+        assert page.read_text() == source
+        return
     assert inserted.returncode == 0, inserted.stderr
     result = page.read_text()
     assert result.count("impeccable-live-start") == 1
-    assert source.splitlines()[0] in result
-    if filename.endswith(".astro"):
-        assert "const demo = `<head>`;" in result
-
-
-def test_live_inject_rejects_anchor_found_only_in_jsx_string(tmp_path: Path) -> None:
-    page = tmp_path / "App.tsx"
-    source = "const demo = '<head>';\nexport default () => <main>Real</main>;\n"
-    page.write_text(source)
-    config_dir = tmp_path / ".impeccable" / "live"
-    config_dir.mkdir(parents=True)
-    (config_dir / "config.json").write_text(
-        json.dumps(
-            {
-                "files": [page.name],
-                "insertAfter": "<head>",
-                "commentSyntax": "jsx",
-            }
-        )
-    )
-
-    inserted = _run_inject(tmp_path, "--port", "8400", "--token", TOKEN)
-
-    assert inserted.returncode != 0
-    assert json.loads(inserted.stderr)["error"] == "mutation_preflight_failed"
-    assert page.read_text() == source
+    assert decoy in result
 
 
 @pytest.mark.parametrize(
@@ -1273,38 +1249,51 @@ def test_live_inject_strict_dynamic_fails_before_any_source_write(tmp_path: Path
     assert strict.read_text() == strict_source
 
 
-def test_live_inject_remove_ignores_template_marker_decoy_before_real_block(
-    tmp_path: Path,
+def _marker_block(start: str, end: str) -> str:
+    script = f'<script src="http://127.0.0.1:8400/live.js?token={TOKEN}"></script>'
+    return "\n".join([start, script, end, ""])
+
+
+_JSX_BLOCK = _marker_block("{/* impeccable-live-start */}", "{/* impeccable-live-end */}")
+_HTML_BLOCK = _marker_block("<!-- impeccable-live-start -->", "<!-- impeccable-live-end -->")
+_JSX_TEMPLATE_DECOY = "const fixture = `\n" + _JSX_BLOCK + "`;\n"
+_HTML_COMMENT_DECOY = "<!-- docs mention <script but do not open raw text -->\n"
+
+
+@pytest.mark.parametrize(
+    ("filename", "source", "expected"),
+    [
+        pytest.param(
+            "App.tsx",
+            _JSX_TEMPLATE_DECOY + _JSX_BLOCK + "export const App = () => <main>safe</main>;\n",
+            _JSX_TEMPLATE_DECOY + "export const App = () => <main>safe</main>;\n",
+            id="template-literal-before-real-block",
+        ),
+        pytest.param(
+            "index.html",
+            _HTML_COMMENT_DECOY + _HTML_BLOCK + "<main>safe</main>\n",
+            _HTML_COMMENT_DECOY + "<main>safe</main>\n",
+            id="html-comment-and-stale-syntax",
+        ),
+        pytest.param(
+            "Component.svelte",
+            "{condition ? `\n" + _HTML_BLOCK + "` : ''}\n<section>Real</section>\n",
+            "{condition ? `\n" + _HTML_BLOCK + "` : ''}\n<section>Real</section>\n",
+            id="framework-expression-template",
+        ),
+    ],
+)
+def test_live_inject_remove_ignores_decoy_marker_blocks(
+    tmp_path: Path, filename: str, source: str, expected: str
 ) -> None:
-    page = tmp_path / "App.tsx"
-    config_dir = tmp_path / ".impeccable" / "live"
-    config_dir.mkdir(parents=True)
-    (config_dir / "config.json").write_text(
-        json.dumps(
-            {
-                "files": [page.name],
-                "insertAfter": "<main>",
-                "commentSyntax": "jsx",
-            }
-        )
-    )
-    block = "\n".join(
-        [
-            "{/* impeccable-live-start */}",
-            f'<script src="http://127.0.0.1:8400/live.js?token={TOKEN}"></script>',
-            "{/* impeccable-live-end */}",
-            "",
-        ]
-    )
-    decoy = "const fixture = `\n" + block + "`;\n"
-    page.write_text(decoy + block + "export const App = () => <main>safe</main>;\n")
+    page = tmp_path / filename
+    page.write_text(source)
+    _write_config(tmp_path, [filename])
 
     removed = _run_inject(tmp_path, "--remove")
 
     assert removed.returncode == 0, removed.stderr
-    assert page.read_text().startswith(decoy)
-    assert page.read_text().count("impeccable-live-start") == 1
-    assert "export const App" in page.read_text()
+    assert page.read_text() == expected
 
 
 def test_live_inject_remove_fails_closed_on_multiple_executable_blocks(
@@ -1329,59 +1318,6 @@ def test_live_inject_remove_fails_closed_on_multiple_executable_blocks(
     assert json.loads(removed.stderr)["error"] == "live_marker_ambiguous"
     assert page.read_text() == source
 
-
-def test_live_inject_remove_handles_stale_syntax_and_html_comment_decoys(
-    tmp_path: Path,
-) -> None:
-    page = tmp_path / "index.html"
-    config_dir = tmp_path / ".impeccable" / "live"
-    config_dir.mkdir(parents=True)
-    (config_dir / "config.json").write_text(
-        json.dumps(
-            {
-                "files": [page.name],
-                "insertBefore": "</body>",
-                "commentSyntax": "jsx",
-            }
-        )
-    )
-    block = "\n".join(
-        [
-            "<!-- impeccable-live-start -->",
-            f'<script src="http://127.0.0.1:8400/live.js?token={TOKEN}"></script>',
-            "<!-- impeccable-live-end -->",
-            "",
-        ]
-    )
-    prefix = "<!-- docs mention <script but do not open raw text -->\n"
-    page.write_text(prefix + block + "<main>safe</main>\n")
-
-    removed = _run_inject(tmp_path, "--remove")
-
-    assert removed.returncode == 0, removed.stderr
-    assert page.read_text() == prefix + "<main>safe</main>\n"
-
-
-def test_live_inject_remove_ignores_framework_expression_template_decoy(
-    tmp_path: Path,
-) -> None:
-    page = tmp_path / "Component.svelte"
-    _write_config(tmp_path, [page.name])
-    block = "\n".join(
-        [
-            "<!-- impeccable-live-start -->",
-            f'<script src="http://127.0.0.1:8400/live.js?token={TOKEN}"></script>',
-            "<!-- impeccable-live-end -->",
-            "",
-        ]
-    )
-    source = "{condition ? `\n" + block + "` : ''}\n<section>Real</section>\n"
-    page.write_text(source)
-
-    removed = _run_inject(tmp_path, "--remove")
-
-    assert removed.returncode == 0, removed.stderr
-    assert page.read_text() == source
 
 
 def test_live_runtime_http_urls_use_one_ipv4_loopback_origin() -> None:
@@ -1549,108 +1485,79 @@ def test_live_wrap_scans_nested_multiline_jsx_without_treating_strings_as_tags(
     assert result.stdout == "8"
 
 
-def test_live_wrap_ignores_module_level_jsx_decoys_before_the_real_target(
-    tmp_path: Path,
-) -> None:
-    page = tmp_path / "App.tsx"
-    source = "\n".join(
-        [
-            "const typed = identity<string>(value);",
-            "type Fn = <T>(value: T) => T;",
-            "const quoted = '<Card className=\"target\">quoted</Card>';",
-            "const templated = html`<Card className=\"target\">template</Card>`;",
-            "// <Card className=\"target\">line comment</Card>",
-            "/* <Card className=\"target\">block comment</Card> */",
-            "export const App = () => (",
-            "  <main>",
-            '    <p>It\'s "ready"</p>',
-            "    <Card className=\"target\">Real</Card>",
-            "  </main>",
-            ");",
-            "",
-        ]
-    )
-    page.write_text(source)
-
-    wrapped = _run_wrap(tmp_path, "--file", page.name, "--tag", "Card")
-
-    assert wrapped.returncode == 0, wrapped.stderr
-    result = page.read_text()
-    assert result.startswith(source.splitlines()[0] + "\n" + source.splitlines()[1] + "\n")
-    assert "quoted</Card>';" in result
-    assert "template</Card>`;" in result
-    assert "data-impeccable-variant=\"original\"" in result
-    assert "Real</Card>" in result
+_JSX_DECOYS = "\n".join(
+    [
+        "const typed = identity<string>(value);",
+        "type Fn = <T>(value: T) => T;",
+        "const quoted = '<Card className=\"target\">quoted</Card>';",
+        "const templated = html`<Card className=\"target\">template</Card>`;",
+        "// <Card className=\"target\">line comment</Card>",
+        "/* <Card className=\"target\">block comment</Card> */",
+        "export const App = () => (",
+        "  <main>",
+        '    <p>It\'s "ready"</p>',
+        "",
+    ]
+)
+_SECTION = '<section class="target">Example</section>'
 
 
 @pytest.mark.parametrize(
-    ("filename", "prefix"),
+    ("filename", "prefix", "tag", "real"),
     [
-        (
-            "Component.svelte",
-            "{condition ? '<section class=\"target\">Example</section>' : ''}\n",
+        pytest.param(
+            "App.tsx", _JSX_DECOYS, "Card", '    <Card className="target">Real</Card>', id="module-level-jsx"
         ),
-        (
-            "Page.astro",
-            "---\nconst docs = '<section class=\"target\">Example</section>';\n---\n",
+        pytest.param(
+            "Component.svelte", "{condition ? '" + _SECTION + "' : ''}\n", "section", "", id="svelte-string"
         ),
-        (
+        pytest.param("Page.astro", f"---\nconst docs = '{_SECTION}';\n---\n", "section", "", id="astro-string"),
+        pytest.param(
             "Multiline.svelte",
-            "{condition ? `\n<section class=\"target\">Example</section>\n` : ''}\n",
+            "{condition ? `\n" + _SECTION + "\n` : ''}\n",
+            "section",
+            "",
+            id="svelte-multiline-template",
         ),
-        (
+        pytest.param(
             "Multiline.astro",
-            "---\nconst docs = `\n<section class=\"target\">Example</section>\n`;\n---\n",
+            f"---\nconst docs = `\n{_SECTION}\n`;\n---\n",
+            "section",
+            "",
+            id="astro-multiline-template",
         ),
-        (
+        pytest.param(
             "Shift.svelte",
-            "<p>It's ready</p>\n{condition ? `'\n<section class=\"target\">Example</section>\n` : ''}\n",
+            "<p>It's ready</p>\n{condition ? `'\n" + _SECTION + "\n` : ''}\n",
+            "section",
+            "",
+            id="svelte-apostrophe-shift",
         ),
-        (
-            "Contraction.svelte",
-            "<p>It's ready</p>\n",
+        pytest.param("Contraction.svelte", "<p>It's ready</p>\n", "section", "", id="svelte-contraction"),
+        pytest.param(
+            "index.html",
+            f"<script>const docs = '{_SECTION}';</script>\n"
+            '<!-- <section class="target">comment</section> -->\n',
+            "section",
+            "",
+            id="html-raw-text",
         ),
     ],
 )
-def test_live_wrap_ignores_framework_script_expression_decoys(
-    tmp_path: Path, filename: str, prefix: str
+def test_live_wrap_ignores_decoys_before_the_real_target(
+    tmp_path: Path, filename: str, prefix: str, tag: str, real: str
 ) -> None:
+    real = real or '<section class="target">Real</section>'
     page = tmp_path / filename
-    page.write_text(prefix + '<section class="target">Real</section>\n')
+    page.write_text(prefix + real + "\n")
 
-    wrapped = _run_wrap(tmp_path, "--file", page.name, "--tag", "section")
+    wrapped = _run_wrap(tmp_path, "--file", page.name, "--tag", tag)
 
     assert wrapped.returncode == 0, wrapped.stderr
     result = page.read_text()
     assert result.startswith(prefix)
-    if "Example</section>" in prefix:
-        assert "Example</section>" in result
-    assert "data-impeccable-variant=\"original\"" in result
-    assert "Real</section>" in result
-
-
-def test_live_wrap_ignores_html_raw_text_decoys_before_the_real_target(
-    tmp_path: Path,
-) -> None:
-    page = tmp_path / "index.html"
-    source = "\n".join(
-        [
-            '<script>const docs = \'<section class="target">Example</section>\';</script>',
-            '<!-- <section class="target">comment</section> -->',
-            '<section class="target">Real</section>',
-            "",
-        ]
-    )
-    page.write_text(source)
-
-    wrapped = _run_wrap(tmp_path, "--file", page.name, "--tag", "section")
-
-    assert wrapped.returncode == 0, wrapped.stderr
-    result = page.read_text()
-    assert result.startswith(source.splitlines()[0] + "\n")
-    assert "Example</section>" in result
-    assert "data-impeccable-variant=\"original\"" in result
-    assert "Real</section>" in result
+    assert 'data-impeccable-variant="original"' in result
+    assert real.strip() in result
 
 
 @pytest.mark.parametrize(
@@ -2388,116 +2295,49 @@ def test_live_discard_fails_closed_when_session_structure_is_not_bound(
     assert "ORIGINAL_SECRET" in page.read_text()
 
 
-@pytest.mark.parametrize(
-    "opening",
+_JSX_SCAFFOLD = "\n".join(
     [
-        "const fixture = `",
-        "const fixture = html`",
-        "const backtickPattern = /`/;\nconst fixture = `",
+        '<div data-impeccable-variants="security-test">',
+        "  {/* impeccable-variants-start security-test */}",
+        '  <div data-impeccable-variant="original"><span>literal</span></div>',
+        "  {/* impeccable-variants-end security-test */}",
+        "</div>",
+        "",
+    ]
+)
+_HTML_SCAFFOLD = _JSX_SCAFFOLD.replace("{/*", "<!--").replace("*/}", "-->")
+_TARGET = '<section class="target">Real</section>\n'
+
+
+@pytest.mark.parametrize(
+    ("filename", "source"),
+    [
+        pytest.param("component.tsx", f"const fixture = `\n{_JSX_SCAFFOLD}`;\n", id="template"),
+        pytest.param("component.tsx", f"const fixture = html`\n{_JSX_SCAFFOLD}`;\n", id="tagged-template"),
+        pytest.param(
+            "component.tsx",
+            f"const backtickPattern = /`/;\nconst fixture = `\n{_JSX_SCAFFOLD}`;\n",
+            id="after-regex-backtick",
+        ),
+        pytest.param(
+            "component.tsx", f"const fixture = `outer ${{`inner\n{_JSX_SCAFFOLD}`}}`;\n", id="nested-template"
+        ),
+        pytest.param(
+            "Component.svelte",
+            f"<script>\nconst fixture = `\n{_HTML_SCAFFOLD}`;\n</script>\n{_TARGET}",
+            id="svelte-script-template",
+        ),
+        pytest.param(
+            "Page.astro",
+            f"---\nconst fixture = `\n---\n{_HTML_SCAFFOLD}`;\n---\n{_TARGET}",
+            id="astro-frontmatter-delimiter",
+        ),
     ],
 )
 def test_live_discard_ignores_exact_session_scaffolds_inside_template_literals(
-    tmp_path: Path, opening: str
+    tmp_path: Path, filename: str, source: str
 ) -> None:
-    page = tmp_path / "component.tsx"
-    source = "\n".join(
-        [
-            opening,
-            '<div data-impeccable-variants="security-test">',
-            "  {/* impeccable-variants-start security-test */}",
-            '  <div data-impeccable-variant="original">',
-            "    <span>literal content</span>",
-            "  </div>",
-            "  {/* impeccable-variants-end security-test */}",
-            "</div>",
-            "`;",
-            "",
-        ]
-    )
-    page.write_text(source)
-
-    completed = _run_accept(tmp_path, "--discard")
-
-    assert completed.returncode == 0, completed.stderr
-    assert json.loads(completed.stdout)["handled"] is False
-    assert page.read_text() == source
-
-
-def test_live_discard_ignores_scaffolds_inside_nested_template_literals(
-    tmp_path: Path,
-) -> None:
-    page = tmp_path / "component.tsx"
-    source = "\n".join(
-        [
-            "const fixture = `outer ${`inner",
-            '<div data-impeccable-variants="security-test">',
-            "  {/* impeccable-variants-start security-test */}",
-            '  <div data-impeccable-variant="original">literal content</div>',
-            "  {/* impeccable-variants-end security-test */}",
-            "</div>",
-            "`}`;",
-            "",
-        ]
-    )
-    page.write_text(source)
-
-    completed = _run_accept(tmp_path, "--discard")
-
-    assert completed.returncode == 0, completed.stderr
-    assert json.loads(completed.stdout)["handled"] is False
-    assert page.read_text() == source
-
-
-def test_live_discard_ignores_html_scaffold_inside_framework_script_template(
-    tmp_path: Path,
-) -> None:
-    page = tmp_path / "Component.svelte"
-    source = "\n".join(
-        [
-            "<script>",
-            "const fixture = `",
-            '<div data-impeccable-variants="security-test">',
-            "  <!-- impeccable-variants-start security-test -->",
-            '  <div data-impeccable-variant="original">',
-            "    <span>literal content</span>",
-            "  </div>",
-            "  <!-- impeccable-variants-end security-test -->",
-            "</div>",
-            "`;",
-            "</script>",
-            '<section class="target">Real</section>',
-            "",
-        ]
-    )
-    page.write_text(source)
-
-    completed = _run_accept(tmp_path, "--discard")
-
-    assert completed.returncode == 0, completed.stderr
-    assert json.loads(completed.stdout)["handled"] is False
-    assert page.read_text() == source
-
-
-def test_live_discard_ignores_astro_frontmatter_template_delimiter_decoy(
-    tmp_path: Path,
-) -> None:
-    page = tmp_path / "Page.astro"
-    source = "\n".join(
-        [
-            "---",
-            "const fixture = `",
-            "---",
-            '<div data-impeccable-variants="security-test">',
-            "  <!-- impeccable-variants-start security-test -->",
-            '  <div data-impeccable-variant="original"><span>literal</span></div>',
-            "  <!-- impeccable-variants-end security-test -->",
-            "</div>",
-            "`;",
-            "---",
-            '<section class="target">Real</section>',
-            "",
-        ]
-    )
+    page = tmp_path / filename
     page.write_text(source)
 
     completed = _run_accept(tmp_path, "--discard")
