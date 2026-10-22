@@ -5734,6 +5734,45 @@ def test_standalone_batch_child_replaces_a_dead_owner(tmp_path, monkeypatch, pre
         pass
 
 
+@pytest.mark.parametrize('self_hosted', [False, True])
+def test_record_owner_keeps_the_launcher_host_the_reaper_reads(tmp_path, monkeypatch, self_hosted):
+    # Fabric writes the hosted record before the owner starts; dropping its host
+    # fields made the next dispatch's orphan reaper stop this live run.
+    mod = load_dispatch_module()
+    run = make_run(tmp_path, 'fabric-hosted-owner')
+    monkeypatch.delenv('PROVENANT_RUN_OWNER', raising=False)
+    monkeypatch.delenv('PROVENANT_PARENT_ATTEMPT', raising=False)
+    monkeypatch.setenv('PROVENANT_RUN_TOKEN', 'fabric-token')
+    monkeypatch.setenv('PROVENANT_RUN_DIR', str(run))
+    launcher = os.getpid() if self_hosted else os.getppid()
+    (run / 'dispatch-owner.json').write_text(json.dumps({
+        'schema_version': 1, 'kind': 'dispatch', 'run_dir': str(run), 'run_token': 'fabric-token',
+        'owner_pid': os.getpid() if self_hosted else 999999, 'owner_pgid': 999999,
+        'owner_started_at': 'launcher-view', 'host_pid': launcher, 'host_started_at': 'host-start',
+        'owner_stdout': 'out.log', 'owner_stderr': 'err.log', 'task_id': 'lane'}))
+    with mod.acquire_run_custody(run):
+        mod.run_lineage.record_owner(run)
+    owner = json.loads((run / 'dispatch-owner.json').read_text())
+    assert owner['owner_pid'] == os.getpid()
+    assert owner['run_token'] == 'fabric-token'
+    assert (owner['owner_stdout'], owner['owner_stderr'], owner['task_id']) == ('out.log', 'err.log', 'lane')
+    if self_hosted:
+        assert (owner['host_pid'], owner['host_started_at']) == (os.getpid(), owner['owner_started_at'])
+    else:
+        assert (owner['host_pid'], owner['host_started_at']) == (launcher, 'host-start')
+
+
+def test_record_owner_without_a_launcher_hosts_itself(tmp_path, monkeypatch):
+    mod = load_dispatch_module()
+    run = make_run(tmp_path, 'direct-owner')
+    for key in ('PROVENANT_RUN_OWNER', 'PROVENANT_PARENT_ATTEMPT', 'PROVENANT_RUN_TOKEN', 'PROVENANT_RUN_DIR'):
+        monkeypatch.delenv(key, raising=False)
+    with mod.acquire_run_custody(run):
+        mod.run_lineage.record_owner(run)
+    owner = json.loads((run / 'dispatch-owner.json').read_text())
+    assert (owner['host_pid'], owner['host_started_at']) == (owner['owner_pid'], owner['owner_started_at'])
+
+
 @pytest.mark.parametrize('spelling', ['other', 'same', 'alias'])
 @pytest.mark.parametrize('published_owner', [False, True])
 def test_record_owner_inherits_token_only_for_the_same_run(tmp_path, monkeypatch, spelling, published_owner):
