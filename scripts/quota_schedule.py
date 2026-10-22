@@ -166,11 +166,28 @@ def activity(provider, identity_dir, now=None, home=None):
 
 # Planning ------------------------------------------------------------------------------------
 
-def _time(value):
-    if not isinstance(value, str) or not value:
+def number(value):
+    """A finite float from a number or numeric string; booleans and anything else give None."""
+    if isinstance(value, bool):
         return None
     try:
-        moment = datetime.fromisoformat(value)
+        value = float(value)
+    except (TypeError, ValueError):
+        return None
+    return value if math.isfinite(value) else None
+
+
+def parse_time(value):
+    """A UTC-aware datetime from an ISO string or an epoch in seconds or milliseconds; None if unusable."""
+    seconds = number(value)
+    if seconds is not None:
+        if seconds > 10_000_000_000:
+            seconds /= 1000
+        return datetime.fromtimestamp(seconds, UTC) if seconds > 0 else None
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        moment = datetime.fromisoformat(value.strip())
     except ValueError:
         return None
     return moment if moment.tzinfo else moment.replace(tzinfo=UTC)
@@ -221,7 +238,7 @@ def _near(rows, now, ttl, config):
             continue
         if used >= config['near_exhaustion_percent']:
             return True
-        reset, minutes = _time(row.get('reset_at')), _number(row.get('window_minutes'))
+        reset, minutes = parse_time(row.get('reset_at')), _number(row.get('window_minutes'))
         if not reset or not minutes or used <= 0:
             continue
         remaining = (reset - now).total_seconds()
@@ -239,10 +256,10 @@ def plan(*, provider, account_id, snapshot, now, config, trigger='timer', power=
     """The account's schedule block, plus `due`: whether this trigger should fetch it now."""
     snapshot = snapshot or {}
     state = snapshot.get('fetch') if isinstance(snapshot.get('fetch'), dict) else {}
-    attempted = _time(snapshot.get('attempted_at'))
+    attempted = parse_time(snapshot.get('attempted_at'))
     failures = int(_number(state.get('failures')) or 0)
     kind = state.get('error_kind') if state.get('error_kind') in ERROR_KINDS else None
-    backoff = _time(state.get('backoff_until')) if failures else None
+    backoff = parse_time(state.get('backoff_until')) if failures else None
     duration = (_number(state.get('last_duration_ms')) or 0) / 1000
     seen = datetime.fromtimestamp(activity_at, UTC) if _number(activity_at) is not None else None
     own = attempted and seen and attempted <= seen <= attempted + timedelta(seconds=duration + OWN_WINDOW_SLACK)
@@ -266,12 +283,12 @@ def plan(*, provider, account_id, snapshot, now, config, trigger='timer', power=
     else:
         next_due = attempted + timedelta(seconds=ttl * (1 + jitter(f'{account_id}|{iso(attempted)}',
                                                                    config['jitter_fraction'])))
-        exhausted = [_time(row.get('reset_at')) for row in rows if row['used_percent'] >= 100]
+        exhausted = [parse_time(row.get('reset_at')) for row in rows if row['used_percent'] >= 100]
         if exhausted and all(reset and reset > now for reset in exhausted):
             next_due = min(max(exhausted) + timedelta(seconds=config['reset_grace_seconds']),
                            attempted + timedelta(seconds=config['exhausted_recheck_seconds']))
             reason = 'exhausted_until_reset'
-        passed = [reset for reset in map(_time, (row.get('reset_at') for row in rows))
+        passed = [reset for reset in map(parse_time, (row.get('reset_at') for row in rows))
                   if reset and attempted < reset <= now]
         if passed:
             next_due, reason = min(passed), 'reset_passed'

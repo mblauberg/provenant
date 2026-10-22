@@ -5,11 +5,11 @@ Adapted from token-meter (MIT, Galileo Agent Labs); see THIRD_PARTY_NOTICES.md.
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
 import hashlib
 import json
 import os
 from pathlib import Path
+import sys
 
 
 ADAPTER = 'claude'
@@ -120,11 +120,9 @@ def parse(payload, now=None):
 
 
 def _instant(value):
-    try:
-        moment = datetime.fromisoformat(value) if isinstance(value, str) else None
-    except ValueError:
-        return None
-    return moment and (moment if moment.tzinfo else moment.replace(tzinfo=UTC))
+    # provider_quota loads quota_schedule before any provider module; its lenient parser reads
+    # ISO strings and epoch seconds or milliseconds alike.
+    return sys.modules['quota_schedule'].parse_time(value)
 
 
 def _percent(value):

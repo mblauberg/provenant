@@ -87,15 +87,15 @@ def test_plan(case, provider, snapshot, options, activity, reason, ttl, due):
 
 def test_due_times_follow_ttl_with_bounded_jitter_and_reset_rules():
     block, _ = plan('claude', snap(ago(minutes=10)))
-    offset = (schedule._time(block['next_due_at']) - ago(minutes=10)).total_seconds()
+    offset = (schedule.parse_time(block['next_due_at']) - ago(minutes=10)).total_seconds()
     assert 1800 * 0.9 <= offset <= 1800 * 1.1
     assert plan('claude', snap(ago(minutes=10)))[0] == block  # stable for one anchor
     exhausted, _ = plan('claude', snap(ago(minutes=40), [win(100, reset_in=timedelta(hours=2))]))
-    assert schedule._time(exhausted['next_due_at']) == NOW + timedelta(hours=2, seconds=60)
+    assert schedule.parse_time(exhausted['next_due_at']) == NOW + timedelta(hours=2, seconds=60)
     far, _ = plan('claude', snap(ago(minutes=40), [win(100, WEEK, reset_in=timedelta(days=5))]))
-    assert (far['reason'], schedule._time(far['next_due_at'])) == ('exhausted_until_reset', ago(minutes=40) + timedelta(hours=6))
+    assert (far['reason'], schedule.parse_time(far['next_due_at'])) == ('exhausted_until_reset', ago(minutes=40) + timedelta(hours=6))
     passed, _ = plan('claude', snap(ago(minutes=10), [win(40, reset_in=timedelta(minutes=-1))]))
-    assert schedule._time(passed['next_due_at']) == NOW - timedelta(minutes=1)
+    assert schedule.parse_time(passed['next_due_at']) == NOW - timedelta(minutes=1)
     # A reset already past at the last fetch does not keep the account due.
     stale, due = plan('claude', snap(ago(minutes=10), [win(40, reset_in=timedelta(hours=-1))]))
     assert (stale['reason'], due) == ('idle', False)

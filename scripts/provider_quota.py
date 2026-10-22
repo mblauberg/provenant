@@ -185,29 +185,8 @@ def utcnow():
 iso = schedule.iso
 
 
-def number(value):
-    if isinstance(value, bool):
-        return None
-    try:
-        value = float(value)
-    except (TypeError, ValueError):
-        return None
-    return value if math.isfinite(value) else None
-
-
-def parse_time(value):
-    seconds = number(value)
-    if seconds is not None:
-        if seconds > 10_000_000_000:
-            seconds /= 1000
-        return datetime.fromtimestamp(seconds, UTC) if seconds > 0 else None
-    if not isinstance(value, str) or not value.strip():
-        return None
-    try:
-        moment = datetime.fromisoformat(value.strip())
-    except ValueError:
-        return None
-    return moment if moment.tzinfo else moment.replace(tzinfo=UTC)
+number = schedule.number
+parse_time = schedule.parse_time
 
 
 def duration(seconds):

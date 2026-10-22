@@ -1868,3 +1868,12 @@ def test_codex_reports_its_usage_credit_balance_for_the_series(quota):
                                                            'credits': {'hasCredits': True, 'balance': '27406.21'}}})
     assert (parsed['plan'], parsed['credit_balance']) == ('prolite', '27406.21')
     assert quota.provider('codex').parse({'rateLimits': {'primary': {'usedPercent': 1}}})['credit_balance'] is None
+
+
+@pytest.mark.parametrize('scale', [1, 1000])
+def test_claude_limit_with_a_numeric_reset_still_matches_the_window_it_repeats(quota, scale):
+    reset = datetime(2026, 10, 28, 10, tzinfo=UTC)
+    payload = {'seven_day': {'utilization': 3.0, 'resets_at': reset.isoformat()},
+               'limits': [claude_limit('weekly_all', 'unlisted', 3, reset.timestamp() * scale)]}
+    rows = {row['name']: row for row in quota.provider('claude').parse(payload)['windows']}
+    assert rows['weekly_all:1']['window_minutes'] == WEEK and rows['weekly_all:1']['advisory'] is False
