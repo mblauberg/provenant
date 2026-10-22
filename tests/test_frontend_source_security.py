@@ -1038,13 +1038,14 @@ def test_live_inject_remove_cleans_existing_targets_when_one_was_deleted(tmp_pat
 
 
 @pytest.mark.parametrize(
-    ("filename", "source", "anchor", "accepted"),
+    ("filename", "source", "anchor", "accepted", "decoy"),
     [
         pytest.param(
             "App.tsx",
             "const demo = '<head>';\nexport default () => <html><head><title>Real</title></head></html>;\n",
             "<head>",
             True,
+            "const demo = '<head>';",
             id="jsx-string",
         ),
         pytest.param(
@@ -1052,6 +1053,7 @@ def test_live_inject_remove_cleans_existing_targets_when_one_was_deleted(tmp_pat
             "{condition ? `<main>` : ''}\n<main>Real</main>\n",
             "<main>",
             True,
+            "{condition ? `<main>` : ''}",
             id="svelte-template",
         ),
         pytest.param(
@@ -1059,6 +1061,7 @@ def test_live_inject_remove_cleans_existing_targets_when_one_was_deleted(tmp_pat
             "---\nconst demo = `<head>`;\n---\n<html><head><title>Real</title></head></html>\n",
             "<head>",
             True,
+            "const demo = `<head>`;",
             id="astro-frontmatter",
         ),
         pytest.param(
@@ -1066,12 +1069,13 @@ def test_live_inject_remove_cleans_existing_targets_when_one_was_deleted(tmp_pat
             "const demo = '<head>';\nexport default () => <main>Real</main>;\n",
             "<head>",
             False,
+            "",
             id="anchor-only-in-jsx-string",
         ),
     ],
 )
 def test_live_inject_ignores_framework_anchor_decoys(
-    tmp_path: Path, filename: str, source: str, anchor: str, accepted: bool
+    tmp_path: Path, filename: str, source: str, anchor: str, accepted: bool, decoy: str
 ) -> None:
     page = tmp_path / filename
     page.write_text(source)
@@ -1097,7 +1101,7 @@ def test_live_inject_ignores_framework_anchor_decoys(
     assert inserted.returncode == 0, inserted.stderr
     result = page.read_text()
     assert result.count("impeccable-live-start") == 1
-    assert source.splitlines()[0] in result
+    assert decoy in result
 
 
 @pytest.mark.parametrize(
