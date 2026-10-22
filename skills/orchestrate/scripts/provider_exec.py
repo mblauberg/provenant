@@ -598,6 +598,8 @@ def os_confinement_profile(plan, search_path=None):
         capabilities = plan.get("applied", {}).get("capabilities", [])
         profile = (
             "(version 1)\n(allow default)\n(deny file-write*)\n"
+            + (_sbpl_rule("allow", "file-read-data", [state["resolved_home"]])
+               if plan.get("adapter") == "claude" else "")
             + _sbpl_rule("allow", "file-write*", allowed)
             + "".join(rule for rule, _ in _state_write_grants(home, state, ("read_write",)))
             + _sbpl_rule("deny", "file-write*", git_denied)
@@ -637,7 +639,7 @@ def os_confinement_profile(plan, search_path=None):
         profile += _provider_config_write_denies(home)
         profile += _sbpl_rule("deny", "file-write*", plan.get("protected_paths", []))
         profile += _sbpl_rule("deny", "file-read*", plan.get("protected_paths", []))
-        return profile + metadata_grant
+        return profile + metadata_grant + _claude_account_denies(plan)
     configured_xdg = Path(os.environ.get("XDG_CONFIG_HOME", "")).expanduser()
     xdg_config_home = configured_xdg if configured_xdg.is_absolute() else home / ".config"
     git_config_files = [home / ".gitconfig", xdg_config_home / "git/config"]
@@ -688,11 +690,36 @@ def os_confinement_profile(plan, search_path=None):
         # After every allow, since a state grant such as ~/.claude would otherwise reopen them.
         + _sbpl_rule("deny", "file-read-data", [home / path for path in
                                                 (*EXTRA_DENIED_READS, *state.get("read_denied", ()))])
-        + (_claude_session_reads(home, plan) if plan.get("adapter") == "claude" else "")
+        + (_sbpl_rule('deny', 'file-read-data', [state['resolved_home'] / 'projects'])
+           + _claude_session_reads(home, plan) if plan.get("adapter") == "claude" else "")
         + _provider_config_write_denies(home)
         + _sbpl_rule("deny", "file-read*", plan.get("protected_paths", []))
         + metadata_grant
+        + _claude_account_denies(plan)
     )
+
+
+def _claude_account_denies(plan):
+    """Apply after broad workspace grants, excluding only the selected subtree."""
+    if plan.get('adapter') != 'claude':
+        return ''
+    selected = Path(plan.get('provider_home') or Path.home() / '.claude').resolve()
+    rules = []
+    if selected != (Path.home() / '.claude').resolve():
+        # Also deny broad workspace/writer reads of the ambient startup config.
+        startup = Path.home() / '.claude.json'
+        rules.append(_sbpl_rule('deny', 'file-read*', [startup, startup.resolve()]))
+    for path in plan.get('claude_account_dirs', []):
+        other = Path(path)
+        if other == selected:
+            continue
+        if selected.is_relative_to(other):
+            rules.append('(deny file-read* file-write* (require-all '
+                         f'(subpath {_sbpl_quote(other)}) '
+                         f'(require-not (subpath {_sbpl_quote(selected)}))))\n')
+        else:
+            rules.append(_sbpl_rule('deny', 'file-read* file-write*', [other]))
+    return ''.join(rules)
 
 
 def _provider_state(plan):
@@ -705,9 +732,14 @@ def _provider_state(plan):
     relative = state.get("home")
     if relative:
         root = Path(plan.setdefault("provider_home", str((Path.home() / relative).resolve())))
-        if root != Path.home().resolve() / relative and credential_path(root):
+        default = Path.home().resolve() / relative
+        claude_child = (plan.get('adapter') == 'claude' and root.is_relative_to(default)
+                        and not credential_path(Path('/provenant-identity') / root.relative_to(default)))
+        if root != default and credential_path(root) and not claude_child:
             raise PermissionError(f"provider home resolves into a credential store: {root}")
         state["resolved_home"] = root
+        if plan.get("adapter") == "claude" and root != default.resolve():
+            state["read"] = tuple(entry for entry in state.get("read", ()) if entry != ".claude.json")
         for key in ("read_write", "write_literal", "write_in_place", "read", "oauth_read",
                     "read_literal", "read_denied", "no_links", "no_symlinks"):
             state[key] = tuple(str(root / Path(entry).relative_to(relative))
@@ -1258,6 +1290,7 @@ def build_plan(
     requested_effort=None,
     intent="ordinary",
     context_ceiling=None,
+    account=None,
     **metadata,
 ):
     metadata = dict(metadata)
@@ -1266,6 +1299,44 @@ def build_plan(
     original_prompt_file = metadata.pop("original_prompt_file", prompt_file)
     run_dir = metadata.pop("run_dir", None)
     config = profile(adapter)
+    account_warnings = []
+    if account is not None and adapter != "claude":
+        raise ValueError("--account is supported only for Claude")
+    if adapter == "claude":
+        spec = importlib.util.spec_from_file_location(
+            'provenant_lane_quota', Path(__file__).resolve().parents[3] / 'scripts/provider_quota.py')
+        quota = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(quota)
+        try:
+            candidates = quota.accounts('claude')
+            entries = quota.configured().get('claude', {})
+        except ValueError:
+            candidates, entries, account = [], {}, None
+            account_warnings.append('invalid Claude account configuration; using ambient default identity')
+        if account is None and not resume_session and not claude_adapter.uses_api_key(route):
+            account = quota.choose_claude_account({row.label: quota.load_snapshot('claude', row.label, row.identity_dir)
+                                                  for row in candidates}, datetime.now(UTC))
+        chosen = next((row for row in candidates if row.label == account), None)
+        if account is not None and chosen is None:
+            # Implicit default/path labels also pin receipts during preflight or session relaunch.
+            ambient = quota.identity.selected_identity('claude')
+            if account != quota.identity.account_key('claude', ambient, entries=entries):
+                raise ValueError("unknown or disabled Claude account label")
+        identity_dir = (chosen.identity_dir if chosen else quota.identity.selected_identity('claude')).expanduser().absolute()
+        selected = identity_dir.resolve()
+        # Reuse the existing provider-home guard; no credential contents are needed.
+        metadata['provider_home'] = str(selected)
+        # Unset and explicitly set default paths use different CLI config/Keychain names.
+        # Preserve the caller's exact spelling when retaining its ambient identity.
+        ambient = quota.identity.selected_identity('claude').resolve()
+        if selected != ambient:
+            metadata['claude_config_dir'] = (None if selected == quota.identity.default_identity('claude').resolve()
+                                             else str(identity_dir))
+        metadata['account'] = account or quota.identity.account_key('claude', selected, entries=entries)
+        metadata['claude_account_dirs'] = list(dict.fromkeys(
+            [str(quota.identity.default_identity('claude').resolve()),
+             *[str(Path(entry.get('identity_dir') or quota.identity.default_identity('claude')).expanduser().resolve())
+               for entry in entries.values() if isinstance(entry, dict)]]))
     if adapter == "opencode":
         version_error = _opencode_version_error(config.CLI, os.environ.get("PATH"))
         if version_error:
@@ -1311,6 +1382,7 @@ def build_plan(
         raise ValueError("network must be a boolean")
     # Catalogue notices demoted to receipt notes must not become warnings again.
     warnings = list(dict.fromkeys([
+        *account_warnings,
         *(note for note in route.get("notes") or [] if " is newer than the catalogue;" not in note),
         *list(route.get("warnings") or []),
     ]))
@@ -3550,6 +3622,11 @@ def _run_attempt(
             instruction_start = exc
         # Running a skill's script must not leave bytecode behind for the check to report.
         environment["PYTHONDONTWRITEBYTECODE"] = "1"
+    if plan["adapter"] == "claude" and "claude_config_dir" in plan:
+        if plan["claude_config_dir"] is None:
+            environment.pop("CLAUDE_CONFIG_DIR", None)
+        else:
+            environment["CLAUDE_CONFIG_DIR"] = plan["claude_config_dir"]
     environment["CLAUDE_CODE_DISABLE_WORKFLOWS"] = "1"
     private_tmp = Path(plan["run_dir"]) / "tmp"
     private_cache = private_tmp / "cache"
@@ -4130,6 +4207,7 @@ def _run_attempt(
         "identity": identity,
         "provider": route.get("endpoint_provider") or plan["adapter"],
         "transport": plan["adapter"],
+        **({"account": plan["account"]} if "account" in plan else {}),
         "family": family,
         "effort_requested": plan.get("requested_effort"),
         "effort_applied": effort,
@@ -4299,6 +4377,7 @@ def _run_attempt(
         "tool": plan["adapter"],
         "adapter": plan["adapter"],
         "adapter_gate": "direct-cli",
+        **({"account": plan["account"]} if "account" in plan else {}),
         "execution_intent": plan["intent"],
         "model": plan["model"],
         "requested_model": plan.get("requested_model") or plan["model"],
@@ -4395,6 +4474,7 @@ def parser():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--route-file", type=Path, required=True)
     p.add_argument("--adapter", required=True)
+    p.add_argument("--account")
     p.add_argument("--prompt-file", type=Path, required=True)
     p.add_argument("--original-prompt-file", type=Path)
     p.add_argument("--out", type=Path, required=True)
@@ -4461,6 +4541,7 @@ def main():
             preface=not args.no_preface,
             resume_session=args.resume_session,
             context_ceiling=args.context_ceiling,
+            account=args.account,
             orchestrator_family=args.orchestrator_family,
             reviewer_id=args.reviewer_id,
             risk_tier=args.risk_tier,

@@ -2,3 +2,7 @@ usage: provenant dispatch ...
 
 Delegates to skills/orchestrate/scripts/dispatch_run.py ...
 Own a durable run of provider attempts, including fallback and session resume.
+
+Claude lanes accept --account LABEL from accounts.claude in telemetry.json.
+Without it, cached quota favours short-window room and expiring weekly reserve;
+without usable cached quota, the default Claude config directory is retained.

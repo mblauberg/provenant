@@ -707,3 +707,9 @@ including its symlinked-cwd case.
 
 Before: 15 tools, 9,077 characters, approximately 2,269 tokens (`chars / 4`).
 The default v2 tool-list test enforces at least a 35% reduction.
+
+Claude dispatch accepts `account: "label"` (CLI `--account label`) from
+`accounts.claude` in telemetry configuration. Without a label it chooses from
+cached quota, preferring five-hour room and projected unused weekly allowance
+after excluding weekly deficits when a healthy account exists. No usable cache
+keeps the default identity. Receipts and telemetry record the selected label.

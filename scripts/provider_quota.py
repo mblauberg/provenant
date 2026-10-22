@@ -304,11 +304,11 @@ same_path = identity.same_path
 configured = identity.configured
 
 
-def accounts():
+def accounts(provider_name=None):
     """Configured accounts; a provider with no configuration gets its local default, if any."""
     listed = configured()
     found = []
-    for name in sorted(set(registered()) | set(listed)):
+    for name in sorted({provider_name} if provider_name else set(registered()) | set(listed)):
         module = provider(name)
         default = module.default_identity() if module else identity.selected_identity(name)
         shared = getattr(module, 'fingerprinted', None)  # one credential store serves several accounts
@@ -649,6 +649,45 @@ def load_snapshot(provider_name, label, identity_dir=None):
             and same_host(value.get('host')) == telemetry_host()):
         return None
     return {**value, 'host': telemetry_host()}
+
+
+
+class ClaudeAccountsExhaustedError(ValueError):
+    """Every candidate has a cached, still-binding usage limit."""
+
+
+def choose_claude_account(snapshots, now):
+    """Use cached windows: reserve first, then unknown readings, then least deficit.
+
+    Exhausted accounts cannot launch. Spend projected weekly waste first among
+    healthy accounts, preferring Pro on ties, then use labels for stable ordering.
+    """
+    ranked = []
+    for label, value in snapshots.items():
+        windows = {row.get('name'): row for row in (value or {}).get('windows', [])}
+        short, weekly = windows.get('five_hour'), windows.get('seven_day')
+        # A known limit still binds when the other window is missing or the last fetch failed.
+        if any(row and number(row.get('used_percent')) is not None
+               and number(row['used_percent']) >= 100 and not reset_passed(row, now)
+               for row in (short, weekly)):
+            continue
+        if (not value or value.get('status') != 'ok' or not short or not weekly
+                or any(number(row.get('used_percent')) is None for row in (short, weekly))):
+            ranked.append(((1, 0, 0, label), label))
+            continue
+        weekly = {**weekly, 'used_percent': 0} if reset_passed(weekly, now) else weekly
+        budget = pace(weekly, now)
+        deficit = budget['state'] == 'deficit' or budget.get('will_last_to_reset') is False
+        if budget['state'] in ('unknown', 'unreported'):
+            score = (1, 0, 0, label)
+        elif deficit:
+            score = (2, max(0, budget.get('delta_percent') or 0), 0, label)
+        else:
+            score = (0, -budget.get('expiring_headroom_percent', 0), value.get('plan') != 'pro', label)
+        ranked.append((score, label))
+    if snapshots and not ranked:
+        raise ClaudeAccountsExhaustedError('claude_accounts_exhausted: all Claude accounts have an exhausted window')
+    return min(ranked)[1] if ranked else None
 
 
 def open_private(path, mode='a'):
@@ -1560,19 +1599,22 @@ def refused_until(worst, value, now):
     return iso(observed + timedelta(seconds=seconds if seconds and seconds > 0 else UNKNOWN_RESET_SECONDS))
 
 
-def route_states(now=None):
+def route_states(now=None, *, selected_accounts=None):
     """Pace state per provider from the cached snapshot of its active account. Never fetches."""
     now = now or utcnow()
     if not enabled():
         return {}
     try:
-        current = {(account.provider, account.label): account for account in accounts()}
+        candidates = ([account for name in selected_accounts for account in accounts(name)]
+                      if selected_accounts is not None else accounts())
+        current = {(account.provider, account.label): account for account in candidates}
     except ValueError:
         return {}
     states = {}
     for (name, label), account in current.items():
         value = load_snapshot(name, label, account.identity_dir)
-        if not account.active or not value or value.get('status') not in ('ok', 'stale'):
+        active = label == selected_accounts.get(name) if selected_accounts is not None else account.active
+        if not active or not value or value.get('status') not in ('ok', 'stale'):
             continue
         module = provider(name)
         row = describe(value, None, now)
@@ -1591,11 +1633,11 @@ def route_states(now=None):
     return states
 
 
-def apply_to_cooldowns(records, now=None):
+def apply_to_cooldowns(records, now=None, *, selected_accounts=None):
     """Add cooldowns for exhausted providers; drop stale usage cooldowns where the provider has headroom."""
     now = now or utcnow()
     try:
-        states = route_states(now)
+        states = route_states(now, selected_accounts=selected_accounts)
     except Exception:  # Routing must never fail on quota.
         return records
     result = dict(records)

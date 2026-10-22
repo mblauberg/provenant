@@ -87,6 +87,15 @@ describe("Fabric input corrections", () => {
     expect(unsure.warnings).toContain("gpt-6-lunx is not in the codex catalogue; passing it as given");
   });
 
+  it("forwards a Claude account label through dispatch route arguments", () => {
+    const catalogue = { adapters: [
+      { name: "claude", models: ["fixture"], model_details: [], aliases: { senior: ["fixture"] } },
+    ] } as any;
+    const route = normaliseRoute({ adapter: "claude", model: "fixture", account: "pro" }, identity, catalogue);
+    const args = routeArguments(route);
+    expect(args.slice(args.indexOf("--account"), args.indexOf("--account") + 2)).toEqual(["--account", "pro"]);
+  });
+
   it("normalises opt-in capabilities and forwards them as a JSON list", () => {
     const catalogue = { adapters: [
       { name: "codex", models: ["gpt-6-luna"], model_details: [], aliases: { senior: ["gpt-6-luna"] } },

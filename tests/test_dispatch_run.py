@@ -4029,6 +4029,11 @@ def test_fabric_fast_plan_matches_shell_for_explicit_model(tmp_path, monkeypatch
         'import sys,json\nsys.stdin.read()\nprint(json.dumps({"type":"result","result":"DONE"}))\n',
     )
     isolate_fabric_plan_env(monkeypatch)
+    instance = tmp_path / 'instance'
+    config = instance / 'config/telemetry.json'
+    config.parent.mkdir(parents=True)
+    config.write_text(json.dumps({'accounts': {'claude': {'pro': {'identity_dir': str(tmp_path / 'identity')}}}}))
+    monkeypatch.setenv('AGENT_FABRIC_INSTANCE_ROOT', str(instance))
     monkeypatch.chdir(tmp_path)
     if adapter == 'codex':
         write_executable(tmp_path / 'provider-bin/codex', '#!/bin/sh\n[ "$1" = mcp ] && printf "[]"\nexit 0\n')
@@ -4037,18 +4042,24 @@ def test_fabric_fast_plan_matches_shell_for_explicit_model(tmp_path, monkeypatch
     args.tool = adapter
     args.model = model
     args.effort = effort
+    args.account = "pro"  # A fallback to Codex must drop this Claude-only selector.
     args.timeout_seconds = mod.DEFAULT_TIMEOUT_SECONDS
     result = run / 'result.md'
     shell = subprocess.run(
         [*mod.build_command(args, prompt, result), '--plan-only'],
-        cwd=tmp_path, env=mod.routing_environment(), capture_output=True, text=True, check=True,
+        cwd=tmp_path, env=mod.routing_environment(preserve_instance=True), capture_output=True, text=True,
     )
+    assert shell.returncode == 0, shell.stdout + shell.stderr
     planned = mod.fast_fabric_plan(args, prompt, result, tmp_path)
     assert planned is not None
     expected = json.loads(shell.stdout)
     for value in (planned, expected):
         normalise_plan_identity(value)
     assert planned == expected
+    if adapter == "claude":
+        assert planned["account"] == "pro"
+    else:
+        assert "account" not in planned
 
 
 @pytest.mark.parametrize('adapter, model, effort, content', [
@@ -4996,7 +5007,7 @@ def _sequence_fixture(monkeypatch, plan, rows, alternatives):
     launches = []
 
     def fake_dispatch(args, custody=None):
-        launches.append((getattr(args, "tool", None), getattr(args, "model", None)))
+        launches.append((getattr(args, "tool", None), getattr(args, "model", None), getattr(args, "account", None)))
         args._last_row = rows[len(launches) - 1] if len(launches) <= len(rows) else {**rows[-1], "retryable": False}
         args._last_plan = plan
         return 0
@@ -5006,7 +5017,7 @@ def _sequence_fixture(monkeypatch, plan, rows, alternatives):
     rows[:] = [{**row, **item} for item in rows]
     monkeypatch.setattr(mod, "_dispatch", fake_dispatch)
     monkeypatch.setattr(mod.exec_routing, "candidates", lambda *a, **k: alternatives)
-    monkeypatch.setattr(mod.exec_routing, "cooling", lambda *a: None)
+    monkeypatch.setattr(mod.exec_routing, "cooling", lambda *a, **k: None)
     monkeypatch.setattr(mod, "pacing_policy", lambda: {"base_delay_seconds": 30, "cap_seconds": 900,
                                                        "jitter_fraction": 0, "minimum_budget_seconds": 30})
     return mod, args, launches
@@ -5028,3 +5039,48 @@ def test_paced_retry_tolerates_a_row_with_null_evidence(monkeypatch):
     mod.execute_attempt_sequence(args)
     assert len(launches) == 2
     assert launches[1][1] == "claude-opus-5-5"
+
+
+def test_model_fallback_retains_the_automatically_selected_claude_account(monkeypatch):
+    plan = {"adapter": "claude", "model": "claude-opus-5-5", "account": "pro"}
+    rows = [{"status": "usage_limited"}, {"status": "ok", "retryable": False}]
+    alternatives = [{"adapter": "claude", "model": "sonnet"}]
+    mod, args, launches = _sequence_fixture(monkeypatch, plan, rows, alternatives)
+    mod.execute_attempt_sequence(args)
+    assert launches == [(None, None, None), ("claude", "sonnet", "pro")]
+
+
+def test_cross_adapter_fallback_plans_claude_before_checking_account_cooldown(monkeypatch):
+    plan = {"adapter": "codex", "model": "gpt-6.1-sol"}
+    rows = [{"status": "usage_limited"}, {"status": "ok", "retryable": False}]
+    alternatives = [{"adapter": "claude", "model": "sonnet"}]
+    mod, args, launches = _sequence_fixture(monkeypatch, plan, rows, alternatives)
+    monkeypatch.setattr(mod.exec_routing, "cooling",
+                        lambda adapter, *a, **k: {"cooling_until": "2099-01-01T00:00:00Z"} if adapter == "claude" else None)
+    mod.execute_attempt_sequence(args)
+    assert launches == [(None, None, None), ("claude", "sonnet", None)]
+
+
+def test_claude_fallback_does_not_override_selected_account_cooldown(tmp_path, monkeypatch):
+    launched = tmp_path / 'launches'
+    run, prompt, command = real_owner_fixture(tmp_path, monkeypatch,
+        'import sys,json\nfrom pathlib import Path\nsys.stdin.read()\n'
+        f'with Path({str(launched)!r}).open("a") as stream: stream.write("launch\\n")\n'
+        'print(json.dumps({"type":"result","is_error":True,"result":"You have hit your weekly limit"}))\n')
+    isolate_fabric_plan_env(monkeypatch)
+    instance = tmp_path / 'instance'
+    config = instance / 'config/telemetry.json'
+    config.parent.mkdir(parents=True)
+    config.write_text(json.dumps({'accounts': {'claude': {'pro': {'identity_dir': str(tmp_path / 'identity')}}}}))
+    monkeypatch.setenv('AGENT_FABRIC_INSTANCE_ROOT', str(instance))
+    monkeypatch.chdir(tmp_path)
+    mod = load_dispatch_module()
+    args = mod.parser().parse_args(command[2:] + ['--account', 'pro'])
+    args.fallback = json.dumps(['claude/sonnet'])
+    args.timeout_seconds = mod.DEFAULT_TIMEOUT_SECONDS
+    mod.dispatch(args)
+    attempts = [json.loads(path.read_text()) for path in sorted(run.glob('tasks/*/attempt-*/attempt.json'))]
+    assert len(attempts) == 2
+    assert attempts[1]['evidence']['signature'] == 'cooldown_active'
+    assert launched.read_text().splitlines() == ['launch']
+    assert {row['account'] for row in attempts} == {'pro'}

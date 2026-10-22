@@ -317,11 +317,11 @@ def _load_cooldowns(path, at, *, persist=True):
     return values
 
 
-def active_cooldowns(values, at=None):
+def active_cooldowns(values, at=None, *, scopes=None):
     """Project only the current account and host of each adapter to adapter/model."""
     at = at or datetime.now(UTC)
     resolver = identity_resolver()
-    scopes = {}
+    scopes = dict(scopes or {})
     active = {}
     for entry in values.values():
         if parse_time(entry['cooling_until']) <= at:
@@ -334,7 +334,7 @@ def active_cooldowns(values, at=None):
     return active
 
 
-def read_cooldowns(path=None, at=None):
+def read_cooldowns(path=None, at=None, *, scopes=None):
     at = at or datetime.now(UTC)
     path = Path(path or cooldown_path())
     try:
@@ -342,9 +342,9 @@ def read_cooldowns(path=None, at=None):
             return {}
         try:
             with locked(path.with_name('cooldowns.lock')):
-                return active_cooldowns(_load_cooldowns(path, at), at)
+                return active_cooldowns(_load_cooldowns(path, at), at, scopes=scopes)
         except (OSError, ValueError):  # ValueError: lock refused (hard-linked); the store may still be readable
-            return active_cooldowns(_load_cooldowns(path, at, persist=False), at)
+            return active_cooldowns(_load_cooldowns(path, at, persist=False), at, scopes=scopes)
     except (OSError, ValueError, TypeError, KeyError, AttributeError):
         return {}
 

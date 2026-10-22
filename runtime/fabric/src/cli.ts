@@ -82,7 +82,7 @@ const USAGE = `fabric <command>
   fetch <operation-or-task@host>  import a verified remote writer commit
   output <id@host> [--part P] [--offset N] [--max-bytes N] [--tail]
                               bounded output from the owning host
-  dispatch --prompt-file F [--adapter A] [--alias NAME | --model M] [--effort E]
+  dispatch --prompt-file F [--adapter A] [--alias NAME | --model M] [--effort E] [--account LABEL]
            [--mode MODE] [--worktree W | --cwd D] [--id ID] [--wait]
            [--host H] [--operation-id ID] [--resume ID | --handoff ID]
   dispatch --prompt-file F --route junior|senior|principal|design|writing
@@ -426,7 +426,7 @@ if (command === "dispatch") {
     const options = subcommand?.startsWith("--") ? rest : rest.slice(1);
     const values = new Map<string, string>();
     const switches = new Set<string>();
-    const allowed = new Set(["--adapter", "--alias", "--model", "--effort", "--mode", "--worktree", "--cwd", "--prompt-file", "--id", "--tasks",
+    const allowed = new Set(["--adapter", "--alias", "--model", "--effort", "--account", "--mode", "--worktree", "--cwd", "--prompt-file", "--id", "--tasks",
       "--route", "--council", "--models", "--session", "--host", "--operation-id", "--resume", "--handoff"]);
     for (let index = 0; index < options.length; index += 1) {
       const option = options[index]!;
@@ -452,6 +452,7 @@ if (command === "dispatch") {
       ...(read("alias") === undefined ? {} : { alias: read("alias") }),
       ...(read("model") === undefined ? {} : { model: read("model") }),
       ...(read("effort") === undefined ? {} : { effort: read("effort") }),
+      ...(read("account") === undefined ? {} : { account: read("account") }),
       ...(read("mode") === undefined ? {} : { mode: read("mode") as RouteInput["mode"] }),
       ...(read("worktree") === undefined ? {} : { worktree: read("worktree") }),
       ...(read("cwd") === undefined ? {} : { cwd: read("cwd") }),

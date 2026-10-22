@@ -8,9 +8,9 @@ import subprocess
 import sys
 
 try:
-    from .fabric_records import read_cooldowns
+    from .fabric_records import read_cooldowns, identity_resolver
 except ImportError:
-    from fabric_records import read_cooldowns
+    from fabric_records import read_cooldowns, identity_resolver
 
 
 def snapshot():
@@ -300,14 +300,18 @@ def _provider_quota():
     return _QUOTA or None
 
 
-def cooling(adapter, model, records=None):
+def cooling(adapter, model, records=None, *, account=None):
     if records is None:
-        records = read_cooldowns()
+        scopes = ({adapter: {'account': account, 'host': identity_resolver().host_id()}}
+                  if account is not None else None)
+        records = read_cooldowns(scopes=scopes) if scopes else read_cooldowns()
         quota = _provider_quota()
         try:
             # Cached provider readings only: an exhausted window cools until reset, and
             # a newer reading with headroom drops a stale usage cooldown.
-            records = quota.apply_to_cooldowns(records) if quota else records
+            if quota:
+                records = (quota.apply_to_cooldowns(records, selected_accounts={adapter: account})
+                           if account is not None else quota.apply_to_cooldowns(records))
         except Exception:  # noqa: BLE001 - quota is advisory input to routing
             pass
     model = registered_model(adapter, model)

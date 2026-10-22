@@ -214,6 +214,12 @@ locks. Direct dispatch enforces the checked-in activation decision and uses
 fresh adapter capability evidence where the route requires it; a CLI update
 does not by itself require a compatibility-table edit.
 
+Claude account selection preserves the inherited `CLAUDE_CONFIG_DIR` when using
+its ambient identity, including leaving it unset. Confined non-default lanes use
+their configured directory and its `.claude.json`, without access to `~/.claude.json`.
+On macOS, Keychain items are shared across accounts: folder isolation is not
+credential isolation. Account directories separate CLI state, not the Keychain.
+
 ## Core workflows
 
 Each task has a front-door skill; the agent loads it when a request matches.
