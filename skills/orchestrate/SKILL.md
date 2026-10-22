@@ -48,10 +48,15 @@ description: "Use for bounded fan-out, multi-agent research, cross-family review
 - A chair running lanes across many wakes follows [chair-loop.md](references/chair-loop.md), including its reviewer git-verb denylist and decision council.
 - Before landing, acquire a work claim if none is live for this session, verify
   it, and acquire `fabric_landing_lease` with the integration branch's current
-  remote SHA. Use
+  remote SHA. Before a lane merge or cherry-pick, run
+  `python3 "$(provenant root)/skills/orchestrate/scripts/lane_protection.py" --cwd <lane-worktree>`
+  and consume the SHA it prints, rather than resolving the mutable lane branch
+  again. It refuses any commit since the primary HEAD that changes `.agents/`
+  without an [audited chair release](../../docs/specs/fabric-v2.md) of the
+  reviewed tip; `scripts/worktree verify-claim` runs the same gate. Use
   `fabric landing-push <session-id> <generation> <branch> --label <seat>`
-  for the final push; it checks the holder, generation and remote SHA immediately
-  before pushing. The label must match the MCP lease holder; a matching
+  for the final push; it checks the holder, generation and remote SHA, then runs
+  the gate from the leased remote SHA before pushing the pinned head. The label must match the MCP lease holder; a matching
   `AGENT_FABRIC_LABEL` export also works. Renew an expiring lease and release it
   after an aborted landing. To wait for another chair's lease, use
   `fabric_landing_lease` `action: "wait"` (or shell `fabric landing-wait --timeout N`), not sleep loops.

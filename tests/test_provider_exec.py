@@ -214,17 +214,16 @@ def test_opencode_read_only_discovery_skips_symlinks_to_credentials(monkeypatch,
 @pytest.mark.parametrize("adapter", ["agy", "claude", "cursor", "opencode", "kiro"])
 def test_writer_confinement_allows_owned_paths_and_add_dirs(monkeypatch, tmp_path, adapter):
     mod = supervisor()
-    worktree = tmp_path / "worktree"
+    primary, worktree = linked_worktree(tmp_path)
     attempt = tmp_path / "run" / "attempt"
-    common = tmp_path / "common.git"
-    private = tmp_path / "linked.git"
+    common = primary / ".git"
+    private = common / "worktrees/lane"
     add_dir = tmp_path / "extra"
-    for path in (worktree, attempt, common, private, add_dir):
+    for path in (attempt, add_dir):
         path.mkdir(parents=True)
-    dirs = iter((private, common))
-    monkeypatch.setattr(mod.subprocess, "run", lambda *a, **k: SimpleNamespace(returncode=0, stdout=str(next(dirs))))
     plan = {"adapter": adapter, "mode": "worktree_write", "cwd": str(worktree),
-            "workspace_root": str(worktree), "run_dir": str(attempt),
+            "workspace_root": str(worktree), "run_dir": str(attempt), "lane_ref": "refs/heads/lane",
+            "trusted_git": {"common": str(common)},
             "applied": {"confinement": "sandbox-exec", "add_dirs": [str(add_dir)]}}
     profile = mod.os_confinement_profile(plan)
     assert "(deny file-write*)" in profile
@@ -233,15 +232,20 @@ def test_writer_confinement_allows_owned_paths_and_add_dirs(monkeypatch, tmp_pat
     for path in (worktree, add_dir, attempt, private, Path("/dev")):
         assert f'(subpath "{path}")' in allow
     assert f'(subpath "{common}")' not in allow
-    for path in (common / "objects", common / "refs", common / "logs"):
-        assert f'(subpath "{path}")' in profile
-    for path in (common / "packed-refs", common / "packed-refs.lock", common / "packed-refs.new"):
-        assert f'(literal "{path}")' in profile
-    for path in (common / "config", common / "hooks", common / "HEAD", common / "index"):
+    assert f'(subpath "{common / "objects"}")' in allow
+    for path in (common / "refs/heads/lane", common / "refs/heads/lane.lock", common / "logs/refs/heads/lane"):
+        assert f'(literal "{path}")' in allow
+    # Writers move only their own branch; the primary branch, upstreams and tags stay owner-only.
+    for path in (common / "config", common / "hooks", common / "HEAD", common / "index", common / "refs",
+                 common / "logs", common / "packed-refs", common / "refs/heads/main"):
         assert f'(subpath "{path}")' not in profile
         assert f'(literal "{path}")' not in profile
     for path in (Path.home() / ".cache", Path.home() / "Library/Caches", Path("/private/tmp")):
         assert f'(subpath "{path}")' not in profile
+    deny = "\n".join(line for line in profile.splitlines() if line.startswith("(deny file-write* "))
+    for path in (worktree / ".git", private / "commondir", private / "gitdir", private / "config.worktree",
+                 common / "objects/info"):
+        assert f'(subpath "{path}")' in deny
     for state_path in mod.CONFINED_STATE[adapter]["read_write"]:
         assert mod._sbpl_filter(Path.home() / state_path) in profile
     assert f'(subpath "{tmp_path}")' not in profile
@@ -359,12 +363,10 @@ def test_read_only_plan_gets_no_locks_grant(monkeypatch, tmp_path):
 
 def test_writer_protected_path_inside_add_dir_keeps_read_and_write_denied(monkeypatch, tmp_path):
     mod = supervisor()
-    worktree = tmp_path / "worktree"
+    _primary, worktree = linked_worktree(tmp_path)
     add_dir = tmp_path / "extra"
     protected = add_dir / "private"
-    worktree.mkdir()
     protected.mkdir(parents=True)
-    monkeypatch.setattr(mod.subprocess, "run", lambda *a, **k: SimpleNamespace(returncode=1, stdout=""))
     plan = {"adapter": "agy", "mode": "worktree_write", "cwd": str(worktree),
             "workspace_root": str(worktree), "protected_paths": [str(protected)],
             "applied": {"confinement": "sandbox-exec", "add_dirs": [str(add_dir)]}}
@@ -2728,11 +2730,13 @@ def test_codex_capability_profile_keeps_git_narrow_and_grants_only_selected_feat
     assert expected_socket_allow in profile
 
     assert f'(deny file-write* (subpath "{common}")' in profile
-    for path in (common / "objects", common / "refs", common / "logs"):
-        assert f'(subpath "{path}")' in profile
-        assert str(path) in plan["applied"]["write_boundary"]["writable_paths"]
-    for path in (common / "packed-refs", common / "packed-refs.lock", common / "packed-refs.new"):
+    assert f'(subpath "{common / "objects"}")' in profile
+    for path in (common / "refs/heads/lane", common / "refs/heads/lane.lock", common / "logs/refs/heads/lane"):
         assert f'(literal "{path}")' in profile
+    for path in (common / "objects", common / "refs/heads/lane", common / "logs/refs/heads/lane"):
+        assert str(path) in plan["applied"]["write_boundary"]["writable_paths"]
+    for path in (common / "refs", common / "logs", common / "packed-refs"):
+        assert str(path) not in plan["applied"]["write_boundary"]["writable_paths"]
     assert f'(allow file-write* (subpath "{common}")' not in profile
     assert f'(subpath "{attempt.parent / "codex-home"}")' in profile
     assert f'(literal "{(home / "auth.json").resolve()}")' in profile
@@ -2749,9 +2753,13 @@ def test_codex_capability_profile_keeps_git_narrow_and_grants_only_selected_feat
     private = Path(git(lane, "rev-parse", "--path-format=absolute", "--absolute-git-dir").strip())
     assert str(private) in plan["applied"]["write_boundary"]["writable_paths"]
     assert f'(allow file-write* (subpath "{private}")' in profile
-    assert f'(deny file-write* (subpath "{lane / ".git"}"))' in profile
-    for name in ("config.worktree", "commondir", "gitdir"):
-        assert f'(deny file-write* (literal "{private / name}"))' in profile
+    read_only = [lane / ".git", *(private / name for name in ("config.worktree", "commondir", "gitdir"))]
+
+    def denied(text):
+        return "\n".join(line for line in text.splitlines() if line.startswith("(deny file-write* "))
+
+    for path in read_only:
+        assert f'(subpath "{path}")' in denied(profile)
 
     for adapter in ("codex", "claude"):
         without_capabilities = mod.build_plan(
@@ -2760,7 +2768,9 @@ def test_codex_capability_profile_keeps_git_narrow_and_grants_only_selected_feat
         )
         other_profile = mod.os_confinement_profile(without_capabilities)
         assert "(remote unix-socket" not in other_profile
-        assert f'(deny file-write* (subpath "{lane / ".git"}"))' not in other_profile
+        # Every writer keeps the Git discovery files read-only, not only capability lanes.
+        for path in read_only:
+            assert f'(subpath "{path}")' in denied(other_profile)
         for name in ("config.worktree", "commondir", "gitdir"):
             assert f'(deny file-write* (literal "{private / name}"))' not in other_profile
 
@@ -3201,20 +3211,27 @@ def test_a_linked_git_entry_never_moves_the_writable_git_grant(monkeypatch, tmp_
     common = Path(git(lane, "rev-parse", "--path-format=absolute", "--git-common-dir").strip()).resolve()
     outside = (tmp_path / "outside").resolve()
     outside.mkdir()
+    run_dir = tmp_path / "runs/task/attempt-001"
+    run_dir.mkdir(parents=True)
+
+    def plan_lane():
+        return mod.build_plan(
+            "codex", {}, "hello", workspace_root=tmp_path, mode="worktree_write",
+            worktree=lane, sandbox="workspace-write", network=True,
+            capabilities=["postgres"], run_dir=run_dir,
+        )
+
+    plan = plan_lane()
     shutil.rmtree(common / "logs", ignore_errors=True)
     (common / "logs").symlink_to(outside, target_is_directory=True)
     (common / "packed-refs").unlink(missing_ok=True)
     (common / "packed-refs").symlink_to(outside / "packed")
-    run_dir = tmp_path / "runs/task/attempt-001"
-    run_dir.mkdir(parents=True)
-    plan = mod.build_plan(
-        "codex", {}, "hello", workspace_root=tmp_path, mode="worktree_write",
-        worktree=lane, sandbox="workspace-write", network=True,
-        capabilities=["postgres"], run_dir=run_dir,
-    )
+    # Planning never creates the writer's ref directories through a link.
+    with pytest.raises(ValueError, match="is a link"):
+        plan_lane()
     profile = mod.os_confinement_profile(plan)
     assert str(outside) not in profile
-    assert f'(subpath "{common / "logs"}")' in profile
+    assert f'(literal "{common / "logs/refs/heads/lane"}")' in profile
     script = f"""
 for path in ({str(common / "logs" / "probe")!r}, {str(common / "packed-refs")!r}):
     try:
@@ -5453,12 +5470,15 @@ def test_codex_writer_gets_the_wrapped_writer_git_boundary(tmp_path, resume):
     assert plan["applied"]["write_boundary"]["filesystem"] == {str(path): access for path, access in table.items()}
     for granted in (private, private / "index", private / "index.lock", private / "HEAD",
                     private / "ORIG_HEAD", private / "logs/HEAD",
-                    common / "objects", common / "refs/heads/lane", common / "logs/refs/heads/lane",
-                    common / "packed-refs", common / "packed-refs.lock", common / "packed-refs.new"):
+                    common / "objects", common / "refs/heads/lane", common / "refs/heads/lane.lock",
+                    common / "logs/refs/heads/lane"):
         assert codex_access(table, granted) == "write", granted
     for denied in (common, common / "hooks", common / "hooks/pre-commit", common / "config",
                    common / "info/exclude", common / "worktrees", sibling, sibling / "HEAD",
-                   private / "config.worktree", private / "commondir", private / "gitdir", lane / ".git"):
+                   private / "config.worktree", private / "commondir", private / "gitdir", lane / ".git",
+                   common / "objects/info", common / "objects/info/alternates", common / "refs/heads/main",
+                   common / "refs/remotes/origin/main", common / "refs/tags/v1", common / "packed-refs",
+                   common / "logs/refs/heads/main"):
         assert codex_access(table, denied) == "read", denied
         assert not any(denied == root or denied.is_relative_to(root) for root in add_dirs), denied
     assert table[lane.resolve() / ".git"] == "read"
@@ -5547,7 +5567,7 @@ def instruction_lane(tmp_path):
     (repo / "app.txt").write_text("app\n")
     git(repo, "add", ".")
     git(repo, "commit", "-q", "-m", "initial")
-    lane = tmp_path / "lane"
+    lane = repo / ".worktrees/lane"
     git(repo, "worktree", "add", "-q", "-b", "lane", str(lane))
     (lane / "app.txt").write_text("lane\n")
     git(lane, "commit", "-q", "-am", "lane work")
@@ -6752,7 +6772,7 @@ def first_instruction_lane(tmp_path):
     (repo / "app.txt").write_text("app\n")
     git(repo, "add", ".")
     git(repo, "commit", "-q", "-m", "initial")
-    lane = tmp_path / "lane"
+    lane = repo / ".worktrees/lane"
     git(repo, "worktree", "add", "-q", "-b", "lane", str(lane))
     (repo / SKILL).parent.mkdir(parents=True)
     (repo / SKILL).write_text("v1\n")
@@ -7875,6 +7895,216 @@ def test_provider_state_accepts_normal_provider_under_symlink_home(monkeypatch, 
     assert mod.os_confinement_profile(plan).startswith("(version 1)")
     relative = ".gemini" if adapter == "agy" else f".{adapter}"
     assert plan["provider_home"] == str(home / relative)
+
+
+def protection(cwd, *extra):
+    return subprocess.run([sys.executable, str(SCRIPTS / "lane_protection.py"), "--cwd", str(cwd), *extra],
+                          capture_output=True, text=True, timeout=30)
+
+
+def landing(repo, tip, base):
+    """Fabric's landing gate: the leased remote SHA is the base, never a local ref."""
+    return protection(repo, "--common-dir", str(repo / ".git"), "--tip", tip, "--base", base)
+
+
+def side_commit(cwd, parent, content, path=SKILL):
+    """A plumbing commit on parent with path replaced, leaving HEAD and the index alone."""
+    environment = {**os.environ, "GIT_INDEX_FILE": str(Path(cwd) / ".side-index")}
+
+    def run(*args, stdin=""):
+        return subprocess.run(["git", "-C", str(cwd), *GIT_FIXTURE, *args], check=True, capture_output=True,
+                              text=True, env=environment, input=stdin).stdout.strip()
+
+    run("read-tree", parent)
+    blob = run("hash-object", "-w", "--stdin", stdin=content)
+    run("update-index", "--add", "--cacheinfo", f"100644,{blob},{path}")
+    tree = run("write-tree")
+    os.unlink(Path(cwd) / ".side-index")
+    return run("commit-tree", tree, "-p", parent, "-m", "side")
+
+
+def head_of(cwd, rev="HEAD"):
+    return git(cwd, "rev-parse", rev).strip()
+
+
+@pytest.mark.parametrize("ref", ["refs/heads/main", "refs/remotes/origin/main"])
+def test_landing_refuses_protected_commits_laundered_through_a_moved_integration_ref(tmp_path, ref):
+    repo, lane = instruction_lane(tmp_path)
+    leased = head_of(repo, "main")
+    # Writers can no longer move these refs; the gate must not rely on that either.
+    poison = side_commit(lane, leased, "POISON\n")
+    git(repo, "update-ref", ref, poison)
+    git(lane, "merge", "-q", "--no-edit", ref)
+    tip = head_of(lane)
+    refused = landing(repo, tip, leased)
+    assert refused.returncode == 1
+    assert refused.stderr.startswith("protected_instructions_changed: unreleased commits")
+    assert poison in refused.stderr and "quarantine" not in refused.stderr
+    assert refused.stderr.count("protected_instructions_changed") == 1
+    # A commit on the primary branch itself is checked the same way.
+    assert landing(repo, poison, leased).returncode == 1
+
+
+def test_landing_checks_the_landed_history_not_the_lane_branch(tmp_path):
+    repo, lane = instruction_lane(tmp_path)
+    leased = head_of(repo, "main")
+    # The lane branch is rewritten onto main with a protected change, then consumed.
+    git(lane, "reset", "-q", "--hard", side_commit(lane, leased, "POISON\n"))
+    git(repo, "merge", "-q", "--no-ff", "-m", "consume lane", "lane")
+    tip = head_of(repo)
+    git(lane, "reset", "-q", "--hard", leased)  # The child then resets its branch.
+    assert landing(repo, tip, leased).returncode == 1
+
+
+def test_merging_the_trusted_base_into_a_lane_passes_but_rolling_it_back_does_not(tmp_path):
+    repo, lane = instruction_lane(tmp_path)
+    leased = head_of(repo, "main")
+    # The chair refreshes the lane from main, which carries a trusted skill change.
+    git(lane, "merge", "-q", "--no-edit", "main")
+    assert landing(repo, head_of(lane), leased).returncode == 0
+    checked = protection(lane)
+    assert checked.returncode == 0, checked.stderr
+    assert checked.stdout.strip() == head_of(lane)
+    (lane / SKILL).write_text("v1\n")
+    git(lane, "commit", "-q", "-am", "roll the skill back")
+    assert landing(repo, head_of(lane), leased).returncode == 1
+
+
+def test_a_registered_worktree_that_was_never_dispatched_lands_without_any_record(tmp_path):
+    repo, lane = instruction_lane(tmp_path)
+    assert not (repo / ".git/provenant-instruction-checks").exists()
+    checked = protection(lane)
+    assert checked.returncode == 0, checked.stderr
+    assert landing(repo, head_of(lane), head_of(repo, "main")).returncode == 0
+
+
+@pytest.mark.parametrize("history", ["revert", "evil-merge", "case-variant"])
+def test_landing_refuses_each_commit_that_changes_instructions(tmp_path, history):
+    repo, lane = instruction_lane(tmp_path)
+    git(lane, "merge", "-q", "--no-edit", "main")
+    leased = head_of(repo, "main")
+    if history == "revert":
+        (lane / SKILL).write_text("lane\n")
+        git(lane, "commit", "-q", "-am", "edit")
+        git(lane, "revert", "--no-edit", "HEAD")
+    elif history == "evil-merge":
+        # Neither parent changes the skill; only the merge resolution does.
+        git(lane, "branch", "-q", "side", side_commit(lane, head_of(lane), "side\n", path="side.txt"))
+        git(lane, "merge", "-q", "--no-ff", "--no-commit", "side")
+        (lane / SKILL).write_text("merged\n")
+        git(lane, "commit", "-q", "-am", "merge side")
+    else:
+        git(lane, "reset", "-q", "--hard", side_commit(lane, head_of(lane), "x\n", path=".AGENTS/x.md"))
+    assert landing(repo, head_of(lane), leased).returncode == 1
+
+
+def test_release_requires_the_reviewed_tip_and_covers_nothing_after_it(tmp_path, monkeypatch):
+    monkeypatch.delenv("PROVENANT_ATTEMPT_MARKER", raising=False)
+    repo, lane = instruction_lane(tmp_path)
+    leased = head_of(repo, "main")
+    git(lane, "merge", "-q", "--no-edit", "main")
+    (lane / SKILL).write_text("chair reviewed\n")
+    git(lane, "commit", "-q", "-am", "reviewed edit")
+    reviewed = head_of(lane)
+    assert landing(repo, reviewed, leased).returncode == 1
+    missing = protection(lane, "--release", "--actor", "chair", "--reason", "ok")
+    assert missing.returncode == 1 and "--tip" in missing.stderr
+    # A detached child races the chair with one more protected commit.
+    (lane / SKILL).write_text("UNREVIEWED\n")
+    git(lane, "commit", "-q", "-am", "race")
+    raced = head_of(lane)
+    moved = protection(lane, "--release", "--tip", reviewed, "--actor", "chair", "--reason", "ok")
+    assert moved.returncode == 1 and "not the reviewed tip" in moved.stderr
+    git(lane, "reset", "-q", "--hard", reviewed)
+    released = protection(lane, "--release", "--tip", reviewed, "--actor", "chair", "--reason", "decision 7")
+    assert released.returncode == 0, released.stderr
+    [record] = (repo / ".git/provenant-instruction-checks/releases").glob("*.json")
+    audit = json.loads(record.read_text())
+    assert audit["tip"] == reviewed and audit["actor"] == "chair" and audit["reason"] == "decision 7"
+    assert audit["worktree"] == str(lane.resolve())
+    assert landing(repo, reviewed, leased).returncode == 0
+    assert landing(repo, raced, leased).returncode == 1
+    inside = subprocess.run([sys.executable, str(SCRIPTS / "lane_protection.py"), "--cwd", str(lane), "--release",
+                             "--tip", reviewed, "--actor", "chair", "--reason", "ok"], capture_output=True, text=True,
+                            env={**os.environ, "PROVENANT_ATTEMPT_MARKER": "1"})
+    assert inside.returncode == 1
+
+
+def test_a_writer_cannot_take_a_branch_another_checkout_holds(tmp_path):
+    _, lane = instruction_lane(tmp_path)
+    git(lane, "symbolic-ref", "HEAD", "refs/heads/main")
+    with pytest.raises(ValueError, match="checked out by another worktree"):
+        supervisor().build_plan("claude", {}, "hello", workspace_root=tmp_path, mode="worktree_write", worktree=lane)
+    git(lane, "checkout", "-q", "--detach", "lane")
+    plan = supervisor().build_plan("claude", {}, "hello", workspace_root=tmp_path, mode="worktree_write", worktree=lane)
+    assert plan["lane_ref"] is None
+    assert not any("/refs/" in path for path in plan["applied"]["write_boundary"]["writable_paths"])
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="sandbox-exec is macOS-only")
+@pytest.mark.parametrize("missing", ["packed-ref", "reflog"])
+def test_a_sandboxed_writer_commits_on_a_nested_branch_without_its_ref_directories(tmp_path, missing):
+    mod = supervisor()
+    sandbox_exec = mod._sandbox_exec_path()
+    if not sandbox_exec:
+        pytest.skip("sandbox-exec is unavailable or disabled")
+    repo, lane = instruction_lane(tmp_path)
+    git(lane, "switch", "-q", "-c", "fix/nested")
+    common = repo.resolve() / ".git"
+    if missing == "packed-ref":
+        git(repo, "pack-refs", "--all")
+        assert not (common / "refs/heads/fix").exists()
+    shutil.rmtree(common / "logs/refs/heads/fix")
+    plan = mod.build_plan("claude", {}, "hello", workspace_root=tmp_path, mode="worktree_write", worktree=lane)
+    assert plan["lane_ref"] == "refs/heads/fix/nested"
+    profile = mod.os_confinement_profile(plan)
+    fixture = " ".join(shlex.quote(arg) for arg in GIT_FIXTURE)
+    script = (f"echo more >> app.txt && git {fixture} commit -q -am more"
+              f" && git {fixture} merge -q --no-ff --no-edit main")
+    run = subprocess.run([sandbox_exec, "-p", profile, "/bin/sh", "-c", script], capture_output=True,
+                         text=True, cwd=lane)
+    if run.returncode and "sandbox_apply" in run.stderr:
+        pytest.skip("sandbox_apply is refused in this test environment")
+    assert run.returncode == 0, run.stderr
+    assert head_of(repo, "fix/nested") == head_of(lane)
+    assert (common / "logs/refs/heads/fix/nested").is_file()
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="sandbox-exec is macOS-only")
+def test_a_sandboxed_writer_moves_only_its_own_branch(monkeypatch, tmp_path):
+    mod = supervisor()
+    sandbox_exec = mod._sandbox_exec_path()
+    if not sandbox_exec:
+        pytest.skip("sandbox-exec is unavailable or disabled")
+    repo, lane = instruction_lane(tmp_path)
+    git(repo, "update-ref", "refs/remotes/origin/main", "main")
+    git(repo, "pack-refs", "--all")
+    git(lane, "update-ref", "refs/heads/lane", "lane")  # A loose lane ref beside packed-refs.
+    plan = mod.build_plan("claude", {}, "hello", workspace_root=tmp_path, mode="worktree_write", worktree=lane)
+    profile = mod.os_confinement_profile(plan)
+    common = repo.resolve() / ".git"
+    private = common / "worktrees/lane"
+
+    def run(script):
+        return subprocess.run([sandbox_exec, "-p", profile, "/bin/sh", "-c", script], capture_output=True,
+                              text=True, cwd=lane)
+
+    probe = run("true")
+    if probe.returncode and "sandbox_apply" in probe.stderr:
+        pytest.skip("sandbox_apply is refused in this test environment")
+    fixture = " ".join(shlex.quote(arg) for arg in GIT_FIXTURE)
+    committed = run(f"echo more >> app.txt && git {fixture} commit -q -am more")
+    assert committed.returncode == 0, committed.stderr
+    assert head_of(repo, "lane") == head_of(lane)
+    main = head_of(repo, "main")
+    for ref in ("refs/heads/main", "refs/remotes/origin/main", "refs/tags/v1", "refs/heads/other"):
+        moved = run(f"git update-ref {ref} HEAD")
+        assert moved.returncode != 0, ref
+    assert head_of(repo, "main") == main
+    for path in (common / "packed-refs", lane / ".git", private / "commondir", private / "gitdir",
+                 private / "config.worktree", common / "objects/info/alternates", common / "HEAD",
+                 common / "provenant-instruction-checks"):
+        assert run(f"printf x >> {shlex.quote(str(path))}").returncode != 0, path
 
 
 @pytest.mark.parametrize("adapter", ["agy", "codex", "opencode", "claude"])

@@ -24,6 +24,7 @@ import tempfile
 import threading
 import time
 import uuid
+import unicodedata
 from datetime import UTC, datetime, timedelta
 from dataclasses import dataclass
 
@@ -36,6 +37,7 @@ import fabric_policy
 import layout
 import context_usage
 import process_info
+from trusted_git import owner_location, prepare_writer_ref, writer_git_writes, writer_read_only
 
 
 # Home-relative paths a confined provider needs for its own state and sign-in.
@@ -171,13 +173,10 @@ CODEX_BROWSER_MACH_PORT_PREFIXES = (
 CODEX_POSTGRES_IPC_OPERATIONS = ("ipc-sysv-shm", "ipc-sysv-sem")
 CAPABILITY_VALUES = frozenset({"postgres", "browser"})
 EXTRA_DENIED_READS = (".claude/projects", ".codex/sessions")
-# Every writer's Git write boundary: its private worktree Git directory plus these common paths.
-# The rest of the common directory (hooks, config, info, other worktrees) runs code or holds state
-# for every checkout, so it stays read-only. Codex writers also keep GIT_PRIVATE_READ_ONLY.
-GIT_COMMON_WRITE_DIRS = ("objects", "refs", "logs")
-# Git rewrites packed-refs through the lock and a .new file renamed over it.
-GIT_COMMON_WRITE_FILES = ("packed-refs", "packed-refs.lock", "packed-refs.new")
-GIT_PRIVATE_READ_ONLY = ("config.worktree", "commondir", "gitdir")
+# Every writer's Git write boundary is trusted_git.writer_git_writes: its private worktree Git
+# directory, the object store and its own branch ref. The rest of the common directory (hooks,
+# config, info, other refs and worktrees) runs code or holds state for every checkout, so it
+# stays read-only.
 # Automatic gc and rerere write gc.pid, gc.log and rr-cache in the read-only common directory.
 WRITER_GIT_CONFIG = (("gc.auto", "0"), ("maintenance.auto", "false"), ("rerere.enabled", "false"))
 # Repository agent instructions and skills. Codex protects them inside a writable root.
@@ -574,46 +573,37 @@ def os_confinement_profile(plan, search_path=None):
     metadata_grant = _sbpl_rule("allow", "file-read-metadata", discovery_metadata, literal=True, keep_leaf=True)
     if plan.get("mode") == "worktree_write":
         cwd = Path(plan["cwd"])
-        git_dirs = {}
-        for flag in ("--absolute-git-dir", "--git-common-dir"):
-            result = subprocess.run(["git", "-C", str(cwd), "rev-parse", "--path-format=absolute", flag],
-                                    capture_output=True, text=True, timeout=5)
-            if result.returncode == 0 and result.stdout.strip():
-                git_dirs[flag] = Path(result.stdout.strip()).resolve()
-        private = git_dirs.get("--absolute-git-dir")
-        common = git_dirs.get("--git-common-dir")
+        # Only an owner-recorded linked worktree gets Git grants; any other Git directory in cwd
+        # is already writable as part of it.
+        git_denied, git_allowed, literal_files, read_only = [], [], [], []
+        if plan.get("trusted_git"):
+            location = owner_location(cwd, common=plan["trusted_git"]["common"])
+            location.validate()
+            git_denied = [location.common]
+            git_allowed, literal_files = writer_git_writes(location.private, location.common, plan.get("lane_ref"))
+            read_only = writer_read_only(cwd, location.private, location.common)
         allowed = [cwd, *add_dirs, *([run_dir] if run_dir else []), Path("/dev")]
         shared_paths = plan["applied"].get("shared_write_paths", {})
         locks_dir = plan.get("applied", {}).get("locks_dir")
         if locks_dir and _real_dir_chain(Path(locks_dir)):
             allowed.append(Path(locks_dir))
-        git_allowed = []
-        if private is not None and private != common:
-            git_allowed.append(private)
-        if common is not None:
-            git_allowed.extend(common / path for path in GIT_COMMON_WRITE_DIRS)
-        literal_files = ([common / path for path in GIT_COMMON_WRITE_FILES]
-                         if common is not None else [])
         capabilities = plan.get("applied", {}).get("capabilities", [])
         profile = (
             "(version 1)\n(allow default)\n(deny file-write*)\n"
             + _sbpl_rule("allow", "file-write*", allowed)
             + "".join(rule for rule, _ in _state_write_grants(home, state, ("read_write",)))
-            + _sbpl_rule("deny", "file-write*", [common] if common is not None else [])
+            + _sbpl_rule("deny", "file-write*", git_denied)
             + _sbpl_rule("allow", "file-write*", git_allowed, keep_leaf=True)
-            + _sbpl_rule("allow", "file-write*", literal_files, literal=True, keep_leaf=True)
+            # Owner-resolved lexical paths: a link planted in logs/ or refs/ cannot move these grants.
+            + _sbpl_rule("allow", "file-write*", literal_files, literal=True, canonical=True)
         )
         for path, literal in shared_paths.items():
             profile += _sbpl_rule("allow", "file-write*", [Path(path)], literal=literal, keep_leaf=True)
         profile += _state_write_guards(home, {"no_links": [path for path, literal in shared_paths.items() if literal]})
+        profile += _sbpl_rule("deny", "file-write*", read_only, keep_leaf=True)
         if plan.get("adapter") == "codex" and capabilities:
             codex_home = Path(plan["codex_home"])
             auth_path = Path(plan["codex_auth_path"])
-            # Codex's native sandbox keeps these read-only, so a capability lane keeps them too.
-            profile += _sbpl_rule("deny", "file-write*", [cwd / ".git"])
-            if private is not None and private != common:
-                for name in GIT_PRIVATE_READ_ONLY:
-                    profile += _sbpl_rule("deny", "file-write*", [private / name], literal=True)
             profile += _sbpl_rule("allow", "file-write*", [codex_home])
             # Quote without resolving, and allow in-place rewrites only, so the lane cannot swap the
             # entry for a link that would move the next attempt's grant.
@@ -1283,18 +1273,19 @@ def build_plan(
     cwd = str(selected_cwd)
     git_common = None
     git_private = None
+    git_writes = []
     if mode == "worktree_write" and worktree is not None:
-        git_dirs = []
-        for flag in ("--absolute-git-dir", "--git-common-dir"):
-            result = subprocess.run(["git", "-C", cwd, "rev-parse", "--path-format=absolute", flag],
-                                    capture_output=True, text=True, timeout=5)
-            if result.returncode != 0 or not result.stdout.strip():
-                raise ValueError("worktree_write requires a linked worktree; fix: create a linked worktree")
-            git_dirs.append(Path(result.stdout.strip()).resolve())
-        if git_dirs[0] == git_dirs[1]:
+        location = owner_location(cwd, common=metadata.pop("common_git_dir", None))
+        location.validate()
+        if location.private == location.common:
             raise ValueError("worktree_write requires a linked worktree; fix: create a linked worktree")
-        git_private = git_dirs[0]
-        git_common = git_dirs[1]
+        git_private, git_common = location.private, location.common
+        metadata["trusted_git"] = location.record()
+        metadata["lane_ref"] = location.writer_ref()
+        if metadata["lane_ref"]:
+            prepare_writer_ref(git_common, metadata["lane_ref"])
+        git_dirs, git_files = writer_git_writes(git_private, git_common, metadata["lane_ref"])
+        git_writes = [str(path) for path in (*git_dirs, *git_files)]
     guarded = check_protected_inputs(route, workspace_root, cwd, worktree=worktree,
                                      prompt_file=original_prompt_file, add_dirs=add_dirs,
                                      read_roots=read_roots)
@@ -1458,10 +1449,7 @@ def build_plan(
     if confinement == "sandbox-exec":
         writable_paths = [str(attempt_dir), "/dev"]
         if mode == "worktree_write":
-            git_paths = ([str(git_private), *(str(git_common / path) for path in
-                           GIT_COMMON_WRITE_DIRS + GIT_COMMON_WRITE_FILES)]
-                         if git_private is not None else [])
-            writable_paths = [cwd, *directories, *shared_write_paths, *([locks_dir] if locks_dir else []), *writable_paths, *git_paths]
+            writable_paths = [cwd, *directories, *shared_write_paths, *([locks_dir] if locks_dir else []), *writable_paths, *git_writes]
         if codex_home is not None:
             writable_paths.extend((str(codex_home), str(codex_auth_path)))
         write_boundary = {"kind": "sandbox-exec", "writable_paths": writable_paths}
@@ -1477,12 +1465,9 @@ def build_plan(
                           **({locks_dir: "write"} if locks_dir else {})}
             if git_private is not None:
                 filesystem[str(git_common)] = "read"
-                for path in (git_private, *(git_common / name for name in
-                                            GIT_COMMON_WRITE_DIRS + GIT_COMMON_WRITE_FILES)):
-                    filesystem[str(path)] = "write"
-                for name in GIT_PRIVATE_READ_ONLY:
-                    filesystem[str(git_private / name)] = "read"
-                filesystem[str(Path(cwd, ".git"))] = "read"
+                filesystem.update(dict.fromkeys(git_writes, "write"))
+                for path in writer_read_only(cwd, git_private, git_common):
+                    filesystem[str(path)] = "read"
             write_boundary["filesystem"] = filesystem
     else:
         write_boundary = {"kind": "none", "writable_paths": None}
@@ -2833,7 +2818,7 @@ def _instruction_path(path):
     # A tree may spell the directory in any case, and a case-insensitive checkout writes it to
     # .agents. The spelling is kept, so a variant is a new path rather than shadowing the original.
     # An entry named .agents itself (a link, file or submodule) counts as well.
-    return path if path.partition("/")[0].casefold() == INSTRUCTION_DIR else None
+    return path if unicodedata.normalize("NFC", path.partition("/")[0]).casefold() == INSTRUCTION_DIR else None
 
 
 def _instruction_entries(cwd, listing, *, index=False):
