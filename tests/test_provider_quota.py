@@ -7,6 +7,7 @@ import importlib.util
 import io
 import json
 import os
+import stat
 from pathlib import Path
 import shutil
 import sqlite3
@@ -1479,7 +1480,7 @@ def test_a_failed_fetch_backs_off_by_kind(quota, tmp_path, kind, retry, low, hig
     account = quota.Account('fake', 'work', tmp_path / 'id', True)
     value = quota.refresh(account, NOW)
     wait = (quota.parse_time(value['fetch']['backoff_until']) - NOW).total_seconds()
-    assert low <= wait <= high and value['fetch']['retry_after_s'] == retry
+    assert low <= wait <= high + 1 and value['fetch']['retry_after_s'] == retry  # from completion
     assert (value['schedule']['reason'], value['schedule']['error_kind'], value['schedule']['failures']) == (
         'backoff', kind, 1)
     assert quota.refresh(account, NOW + timedelta(minutes=1), trigger='panel')['status'] == 'unavailable'
@@ -1488,7 +1489,7 @@ def test_a_failed_fetch_backs_off_by_kind(quota, tmp_path, kind, retry, low, hig
     assert len(calls) == (2 if manual_fetches else 1)
     if manual_fetches and kind not in ('auth', 'missing'):
         assert again['fetch']['failures'] == 2 and low * 2 <= (
-            quota.parse_time(again['fetch']['backoff_until']) - NOW - timedelta(minutes=1)).total_seconds() <= high * 2
+            quota.parse_time(again['fetch']['backoff_until']) - NOW - timedelta(minutes=1)).total_seconds() <= high * 2 + 1
     quota.refresh(account, NOW + timedelta(minutes=2), trigger='manual', ignore_backoff=True)
     assert len(calls) == (3 if manual_fetches else 2)
 
@@ -1517,6 +1518,7 @@ def test_http_json_surfaces_status_kind_and_retry_after_without_credentials(monk
         module.http_json('https://api.anthropic.com/api/oauth/usage', {'Authorization': 'Bearer ' + TOKEN})
     assert (caught.value.kind, caught.value.status) == (kind, code)
     assert caught.value.retry_after == pytest.approx(wait, abs=2) if wait else caught.value.retry_after is None
+    assert (caught.value.retry_at is not None) == (header == 'date')
     assert TOKEN not in str(caught.value) and TOKEN not in repr(caught.value.args)
     assert caught.value.__cause__ is None and caught.value.__suppress_context__
 
@@ -1554,14 +1556,77 @@ def test_trace_records_each_attempt_and_summarises_and_prunes(quota, tmp_path, m
     path = quota.quota_dir() / 'fetches.jsonl'
     old = json.dumps({**lines[0], 'at': iso(NOW - timedelta(days=40))}) + '\n'
     path.write_text(old + path.read_text())
-    assert quota.prune_trace(NOW) is True
-    assert len(path.read_text().splitlines()) == 4
-    path.write_text(old + path.read_text())
-    assert quota.prune_trace(NOW + timedelta(hours=1)) is False      # at most once a day
+    assert quota.prune_trace(NOW) is False      # the first append pruned an hour ago: once a day
     assert len(path.read_text().splitlines()) == 5
+    assert quota.prune_trace(NOW + timedelta(days=1)) is True
+    assert len(path.read_text().splitlines()) == 4
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
     configure(tmp_path, {'quota': {'trace': {'retention_days': 1}}})
-    assert quota.prune_trace(NOW + timedelta(hours=25)) is True
+    assert quota.prune_trace(NOW + timedelta(days=2, hours=1)) is True
     assert path.read_text() == ''
+
+
+def test_every_trace_writer_prunes_daily_not_only_tick(quota, tmp_path):
+    quota.register('fake', SimpleNamespace(ADAPTER='fake', default_identity=lambda: None,
+                                           fetch=lambda account, io, now: {'windows': [window(10, 300, timedelta(hours=1))]}))
+    path = quota.quota_dir() / 'fetches.jsonl'
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps({'at': iso(NOW - timedelta(days=40)), 'outcome': 'ok'}) + '\n')
+    quota.refresh(quota.Account('fake', 'work', tmp_path / 'id', True), NOW, force=True)  # as `quota --refresh`
+    assert [json.loads(line)['at'] for line in path.read_text().splitlines()] == [iso(NOW)]
+
+
+@pytest.mark.parametrize('planted', ['fetches.jsonl', 'fetches.lock', 'fetches.pruned', 'refresh.lock'])
+def test_quota_state_files_are_never_written_through_a_symlink(quota, tmp_path, planted):
+    victim = tmp_path / 'victim'
+    victim.write_text('keep\n')
+    os.utime(victim, (1, 1))
+    missing = tmp_path / 'never-created'
+    quota.quota_dir().mkdir(parents=True)
+    (quota.quota_dir() / planted).symlink_to(victim if planted != 'refresh.lock' else missing)
+    quota.register('fake', SimpleNamespace(ADAPTER='fake', default_identity=lambda: None,
+                                           fetch=lambda account, io, now: {'windows': [window(10, 300, timedelta(hours=1))]}))
+    configure(tmp_path, {'accounts': {'fake': {'work': {'identity_dir': str(tmp_path / 'id')}}}})
+    if planted == 'refresh.lock':
+        with pytest.raises(OSError):
+            quota.tick()
+    else:
+        quota.refresh(quota.Account('fake', 'work', tmp_path / 'id', True), NOW, force=True)
+        try:
+            quota.prune_trace(NOW + timedelta(days=2))
+        except OSError:
+            pass  # refusing the planted lock is the safe outcome
+    assert victim.read_text() == 'keep\n' and victim.stat().st_mtime == 1 and not missing.exists()
+
+
+def test_trace_pruning_ignores_a_planted_temporary(quota, tmp_path):
+    victim = tmp_path / 'victim'
+    victim.write_text('keep\n')
+    folder = quota.quota_dir()
+    folder.mkdir(parents=True)
+    (folder / 'fetches.jsonl').write_text(json.dumps({'at': iso(NOW), 'outcome': 'ok'}) + '\n')
+    for name in ('fetches.jsonl.prune', 'fetches.jsonl.tmp', 'fetches.pruned.tmp'):
+        (folder / name).symlink_to(victim)
+    assert quota.prune_trace(NOW) is True
+    assert victim.read_text() == 'keep\n'
+    assert (folder / 'fetches.jsonl').read_text().count('\n') == 1
+
+
+def test_backoff_runs_from_completion_and_a_retry_after_date_stays_absolute(quota, tmp_path, monkeypatch):
+    clock = iter([100.0, 130.0, 200.0, 230.0])
+    monkeypatch.setattr(quota, 'monotonic', lambda: next(clock))
+    replies = iter([quota.Unavailable('provider quota service is rate limited', 'rate_limited', 900),
+                    quota.Unavailable('provider quota service is rate limited', 'rate_limited', 600,
+                                      retry_at=NOW + timedelta(minutes=10))])
+
+    def fetch(account, io, now):
+        raise next(replies)
+    quota.register('fake', SimpleNamespace(ADAPTER='fake', default_identity=lambda: None, fetch=fetch))
+    account = quota.Account('fake', 'work', tmp_path / 'id', True)
+    first = quota.refresh(account, NOW, force=True)
+    assert first['fetch']['backoff_until'] == iso(NOW + timedelta(seconds=30 + 900))   # 30 s request, then 900 s
+    second = quota.refresh(account, NOW, force=True)
+    assert second['fetch']['backoff_until'] == iso(NOW + timedelta(minutes=10))        # the date, not 30 s later
 
 
 def test_errors_and_trace_never_carry_credentials(quota, tmp_path):
@@ -1672,6 +1737,23 @@ def test_claude_auth_status_is_cached_per_identity_until_it_ages_or_is_used(quot
     other.mkdir()
     claude.status(quota.Account('claude', 'd', other, False), quota.IO)
     assert len(runs) == 4
+
+
+def test_opencode_counts_a_recent_message_in_a_session_last_updated_before_the_window(quota, tmp_path):
+    home = tmp_path / 'oc'
+    home.mkdir()
+    ms = lambda age: int((NOW - age).timestamp() * 1000)
+    with sqlite3.connect(home / 'opencode.db') as db:
+        db.executescript('''
+            CREATE TABLE session (id text PRIMARY KEY, time_created integer NOT NULL, time_updated integer NOT NULL);
+            CREATE TABLE message (id text PRIMARY KEY, session_id text NOT NULL, time_created integer NOT NULL,
+                                  time_updated integer NOT NULL, data text NOT NULL);
+            CREATE INDEX message_session_time_created_id_idx ON message (session_id, time_created, id);''')
+        db.execute('INSERT INTO session VALUES (?,?,?)', ('stale', ms(90 * day), ms(60 * day)))
+        db.execute('INSERT INTO message VALUES (?,?,?,?,?)', ('m1', 'stale', ms(hour), ms(hour),
+                   json.dumps({'providerID': 'opencode-go', 'cost': 7.0})))
+    windows, _ = opencode_rows(quota, quota.Account('opencode', 'go', home, True))
+    assert windows['five_hour']['used_percent'] == pytest.approx(7.0 / 6.4 * 100)
 
 
 def test_opencode_spend_queries_reach_messages_through_indexes(quota, tmp_path, monkeypatch):

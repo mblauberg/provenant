@@ -219,7 +219,9 @@ A failed fetch sets `error_kind` and waits before the next attempt:
 | `auth_seconds` | 3600 | `auth`; cleared early by identity use, such as signing in again |
 | `missing_seconds` | 86400 | `missing`, such as a CLI that is not installed |
 
-A `Retry-After` header lengthens a `rate_limited` wait, up to a day. If every
+Each wait runs from when the attempt finished. A `Retry-After` header lengthens
+a `rate_limited` wait, up to a day; a date in it is kept as that deadline. Trace
+and state files are created 0600 and never written through a symlink. If every
 fetch in a tick fails to connect, the report sets `offline: true`.
 
 Each attempt appends one line to `quota/fetches.jsonl`: `at`, `provider`,
@@ -230,8 +232,8 @@ fetches, failures by kind and duration percentiles per account. Lines older than
 
 Claude's `claude auth status` result is cached per identity under
 `quota/memo/` for a day, or until the identity is used. OpenCode reads its v1
-message table only through sessions updated within the longest window, using
-the store's session index.
+message table through its session and time index, one time range per session,
+filtered by message time.
 
 Configure accounts in `<instance-root>/config/telemetry.json`. These are the
 `telemetry.accounts.<provider>.<label>` settings; omit the outer `telemetry`

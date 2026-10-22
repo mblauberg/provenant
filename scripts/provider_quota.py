@@ -108,13 +108,15 @@ class Unavailable(Exception):
     """A provider could not report quota. The message is fixed text, never a credential.
 
     `kind` is one of quota_schedule.ERROR_KINDS and sets the backoff; `retry_after` is the
-    provider's own wait in seconds, and `status` the HTTP status, when known."""
+    provider's own wait in seconds, `retry_at` its deadline when it named a date, and `status`
+    the HTTP status, when known."""
 
-    def __init__(self, message, kind='other', retry_after=None, status=None):
+    def __init__(self, message, kind='other', retry_after=None, status=None, retry_at=None):
         super().__init__(message)
         self.kind = kind if kind in schedule.ERROR_KINDS else 'other'
         self.retry_after = retry_after
         self.status = status
+        self.retry_at = retry_at
 
 
 # A non-secret label, the CLI identity directory, and whether that is the CLI's default.
@@ -323,14 +325,15 @@ def http_json(url, headers):
             raw = response.read(MAX_RESPONSE_BYTES + 1)
     except HTTPError as exc:
         code = exc.code
-        wait = retry_after(exc.headers.get('Retry-After') if exc.headers else None)
+        header = exc.headers.get('Retry-After') if exc.headers else None
+        wait, deadline = retry_after(header), retry_deadline(header)
         exc.close()
         if code in (401, 403):
             raise Unavailable('provider authentication needs a refresh', 'auth', status=code) from None
         if code == 429:
-            raise Unavailable('provider quota service is rate limited', 'rate_limited', wait, code) from None
+            raise Unavailable('provider quota service is rate limited', 'rate_limited', wait, code, deadline) from None
         raise Unavailable(f'provider quota request failed (HTTP {code})',
-                          'network' if code >= 500 else 'other', wait, code) from None
+                          'network' if code >= 500 else 'other', wait, code, deadline) from None
     except (URLError, TimeoutError, OSError):
         raise Unavailable('provider quota request could not connect', 'network') from None
     if len(raw) > MAX_RESPONSE_BYTES:
@@ -358,6 +361,18 @@ def retry_after(value, now=None):
         moment = moment if moment.tzinfo else moment.replace(tzinfo=UTC)
         seconds = (moment - (now or utcnow())).total_seconds()
     return round(min(RETRY_AFTER_CAP, max(0.0, seconds)), 1)
+
+
+def retry_deadline(value):
+    """The moment a Retry-After HTTP date names, kept absolute; None for a wait in seconds."""
+    if not isinstance(value, str) or not value.strip() or number(value.strip()) is not None:
+        return None
+    from email.utils import parsedate_to_datetime
+    try:
+        moment = parsedate_to_datetime(value.strip())
+    except (TypeError, ValueError, IndexError):
+        return None
+    return moment if moment.tzinfo else moment.replace(tzinfo=UTC)
 
 
 def memo(name, account, seconds, produce):
@@ -512,13 +527,24 @@ def load_snapshot(provider_name, label, identity_dir=None):
     return value if isinstance(value, dict) and value.get('schema') == SCHEMA and value.get('host') == telemetry_host() else None
 
 
+def open_private(path, mode='a'):
+    """Open for appending, or reading with mode 'r', never through a symlink; created 0600."""
+    flags = os.O_RDONLY if mode == 'r' else os.O_WRONLY | os.O_CREAT | os.O_APPEND
+    return os.fdopen(os.open(path, flags | os.O_NOFOLLOW, 0o600), mode)
+
+
 @contextmanager
-def locked(path):
+def locked(path, blocking=True):
+    """Hold an exclusive lock on `path`; without `blocking`, yield False if another holder has it."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open('a') as stream:
-        fcntl.flock(stream, fcntl.LOCK_EX)
+    with open_private(path) as stream:
         try:
-            yield
+            fcntl.flock(stream, fcntl.LOCK_EX | (0 if blocking else fcntl.LOCK_NB))
+        except BlockingIOError:
+            yield False
+            return
+        try:
+            yield True
         finally:
             fcntl.flock(stream, fcntl.LOCK_UN)
 
@@ -669,12 +695,13 @@ def _refresh(account, now=None, force=False, trigger='timer', power='ac', ignore
     block, due = scheduled(account, previous, now, trigger, power, ignore_backoff)
     if previous and not force and not due:
         return cached(account, previous, block)
-    started, kind, wait = monotonic(), None, None
+    started, kind, wait, deadline = monotonic(), None, None, None
     try:
         result = fetch(account, now)
     except Unavailable as exc:
         # Provider text is fixed, but nothing token-shaped may reach the snapshot either.
         error, kind, wait = SECRETISH.sub('[redacted]', str(exc)), exc.kind, exc.retry_after
+        deadline = exc.retry_at
     except Exception as exc:  # A provider module bug must not break quota or routing.
         error, kind = f'quota source failed ({type(exc).__name__})', 'other'
     else:
@@ -708,14 +735,17 @@ def _refresh(account, now=None, force=False, trigger='timer', power='ac', ignore
     value = {**(previous or blank(account, 'unavailable')), 'attempted_at': iso(now), 'error': error,
              'status': 'stale' if previous and previous.get('windows') else 'unavailable',
              'active': account.active, 'priority': account.priority,
-             'fetch': fetch_state(account, previous, now, trigger, monotonic() - started, kind, wait)}
+             'fetch': fetch_state(account, previous, now, trigger, monotonic() - started, kind, wait, deadline)}
     save_snapshot(value, account.identity_dir)
     trace(value, trigger, 'error', kind, value['fetch']['last_duration_ms'], wait, error)
     return {**value, 'schedule': scheduled(account, value, now, trigger, power)[0]}
 
 
-def fetch_state(account, previous, now, trigger, elapsed, kind=None, wait=None):
-    """What the schedule needs from this attempt; a failure extends the account's backoff."""
+def fetch_state(account, previous, now, trigger, elapsed, kind=None, wait=None, deadline=None):
+    """What the schedule needs from this attempt; a failure extends the account's backoff.
+
+    The backoff runs from when the attempt finished, so a slow request never shortens a
+    provider's Retry-After; a Retry-After date stays the deadline it named, capped at a day."""
     state = {'trigger': trigger, 'source_kind': 'fetch', 'last_duration_ms': round(elapsed * 1000),
              'failures': 0, 'error_kind': None, 'backoff_until': None, 'retry_after_s': None}
     if kind is None:
@@ -723,9 +753,12 @@ def fetch_state(account, previous, now, trigger, elapsed, kind=None, wait=None):
     before = (previous or {}).get('fetch') or {}
     failures = int(number(before.get('failures')) or 0) + 1
     config, _ = schedule.resolve(account.provider, account.options.get('quota'), settings())
-    seconds = schedule.backoff_seconds(kind, failures, wait, config, account_id(account))
-    return {**state, 'failures': failures, 'error_kind': kind, 'retry_after_s': wait,
-            'backoff_until': iso(now + timedelta(seconds=seconds))}
+    finished = now + timedelta(seconds=elapsed)
+    seconds = schedule.backoff_seconds(kind, failures, None if deadline else wait, config, account_id(account))
+    until = finished + timedelta(seconds=seconds)
+    if deadline:
+        until = max(until, min(deadline, finished + timedelta(seconds=RETRY_AFTER_CAP)))
+    return {**state, 'failures': failures, 'error_kind': kind, 'retry_after_s': wait, 'backoff_until': iso(until)}
 
 
 # Fetch trace ---------------------------------------------------------------------------------
@@ -746,15 +779,18 @@ def trace(value, trigger, outcome, kind, duration_ms, wait, error):
             'retry_after_s': wait, 'error': scrub(error)}
     path = quota_dir() / 'fetches.jsonl'
     try:
-        with locked(path.with_suffix('.lock')), path.open('a') as stream:
+        with locked(path.with_suffix('.lock')), open_private(path) as stream:
             stream.write(json.dumps(line, sort_keys=True) + '\n')
+        # Every writer prunes, so `quota` and `quota --refresh` stay bounded too; gated daily.
+        prune_trace(parse_time(line['at']) or utcnow())
     except OSError:
         pass  # The trace is advisory; a quota reading never fails on it.
 
 
 def trace_lines(since=None):
     try:
-        text = (quota_dir() / 'fetches.jsonl').read_text()
+        with open_private(quota_dir() / 'fetches.jsonl', 'r') as stream:
+            text = stream.read()
     except OSError:
         return []
     rows = []
@@ -783,14 +819,23 @@ def prune_trace(now, retention_days=None):
         pass
     with locked(path.with_suffix('.lock')):
         kept = trace_lines(now - timedelta(days=retention_days))
-        if path.exists():
-            temporary = path.with_name(path.name + '.prune')
-            temporary.write_text(''.join(json.dumps(row, sort_keys=True) + '\n' for row in kept))
-            temporary.replace(path)
-        marker.parent.mkdir(parents=True, exist_ok=True)
-        marker.touch()
-        os.utime(marker, (now.timestamp(), now.timestamp()))
+        # Exclusive 0600 temporaries replace the trace and the marker; a planted name is never followed.
+        if path.exists() or path.is_symlink():
+            replace_private(path, ''.join(json.dumps(row, sort_keys=True) + '\n' for row in kept))
+        replace_private(marker, '', now.timestamp())
     return True
+
+
+def replace_private(path, text, mtime=None):
+    descriptor, name = tempfile.mkstemp(dir=path.parent, prefix=path.name + '.')
+    try:
+        with os.fdopen(descriptor, 'w') as stream:
+            stream.write(text)
+        if mtime is not None:
+            os.utime(name, (mtime, mtime))
+        os.replace(name, path)
+    finally:
+        Path(name).unlink(missing_ok=True)
 
 
 def percentile(values, share):
@@ -1090,17 +1135,8 @@ def plans(now, trigger='timer', power='ac', ignore_backoff=False):
 
 def tick(trigger='timer', power='ac', ignore_backoff=False):
     """Fetch the due accounts under a non-blocking refresh lock. None means another tick holds it."""
-    lock = quota_dir() / 'refresh.lock'
-    lock.parent.mkdir(parents=True, exist_ok=True)
-    with lock.open('a') as stream:
-        try:
-            fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            return None
-        try:
-            return _tick(trigger, power, ignore_backoff)
-        finally:
-            fcntl.flock(stream, fcntl.LOCK_UN)
+    with locked(quota_dir() / 'refresh.lock', blocking=False) as held:
+        return _tick(trigger, power, ignore_backoff) if held else None
 
 
 def _tick(trigger, power, ignore_backoff):
@@ -1150,10 +1186,6 @@ def _tick(trigger, power, ignore_backoff):
             if kinds and len(kinds) == len(due) and all(kind == 'network' for kind in kinds):
                 value['offline'] = True  # every fetch failed to connect
             atomic_json(report_path(), value)
-    try:
-        prune_trace(now)
-    except OSError:
-        pass
     return value
 
 

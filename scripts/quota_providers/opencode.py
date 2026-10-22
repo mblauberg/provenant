@@ -33,9 +33,11 @@ STORES = (
 )
 # A per-row primary-key probe; `NOT IN (SELECT id ...)` would read every v2 id first.
 SEEN_IN_V2 = ' AND NOT EXISTS (SELECT 1 FROM session_message AS v2 WHERE v2.id=message.id)'
-# v1 `message` has no time index, only (session_id, time_created, id): reach it through the
-# sessions updated since the window start, so a large store is never scanned whole.
-RECENT_SESSIONS = ' AND session_id IN (SELECT id FROM session WHERE time_updated>=?)'
+# v1 `message` has no time index, only (session_id, time_created, id). Each of its session ids,
+# read from that index alone, gives a time-range search, so no message body outside the window
+# is read. The message times stay the filter: a session's own time_updated can be older than its
+# messages.
+SESSION_RANGES = ' AND session_id IN (SELECT DISTINCT session_id FROM message)'
 
 
 
@@ -79,16 +81,14 @@ def spend(db, now, providers, starts):
     totals, readable = [0.0] * len(WINDOWS), False
     names = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     for table, provider, extra in STORES:
-        bounds = ()
         if table == 'message':
             columns = {row[1] for row in db.execute('PRAGMA table_info(message)')}
-            if 'session' in names and 'session_id' in columns:
-                extra, bounds = RECENT_SESSIONS, (min(since),)
+            extra = SESSION_RANGES if 'session_id' in columns else ''
             extra += SEEN_IN_V2 if 'session_message' in names else ''
         try:
             row = db.execute(f'SELECT {sums} FROM {table} WHERE time_created BETWEEN ? AND ?{extra} '
                              f'AND {provider} IN ({marks})',
-                             (*since, min(since), int(now.timestamp() * 1000), *bounds, *providers)).fetchone()
+                             (*since, min(since), int(now.timestamp() * 1000), *providers)).fetchone()
         except sqlite3.Error:
             continue
         readable = True
