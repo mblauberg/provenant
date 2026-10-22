@@ -456,9 +456,11 @@ confirms one app). Its visual and interaction design is in
 [the console design](observability-console-design.md); this section fixes
 the decisions the spec depends on.
 
-- **Platform.** Minimum macOS 26; macOS 27 refinements (the `.tabs` picker,
-  pointer-tuned interactive glass) behind availability checks.
-  `Package.swift` moves from macOS 14 to 26 in Slice 1.
+- **Platform.** Minimum macOS 26 (decided; both hosts run 27). macOS 27
+  refinements (the `.tabs` picker, pointer-tuned interactive glass) sit
+  behind availability checks. Nothing older: there is no macOS 25 (Apple
+  went from 15 to 26), and macOS 15 lacks Liquid Glass and has no host to
+  test on. `Package.swift` moves from macOS 14 to 26 in Slice 1.
 - **Structure.** `NavigationSplitView` with sidebar sections Activity (Fleet,
   Sessions), Insight (Telemetry, Accounts), Hosts (one row per host, "This
   Mac" alone with no peers) and Settings as a pane, reached by ⌘5 and ⌘,.
