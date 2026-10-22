@@ -6,7 +6,7 @@ import { join, resolve } from "node:path";
 import { catalogueSnapshot } from "../catalogue.js";
 import { productRoot } from "../execution.js";
 import { databasePath, runRoot, type Identity } from "../identity.js";
-import { processMatches } from "../run-registry.js";
+import { observedAlive } from "../run-registry.js";
 import { Store } from "../store.js";
 import { faultLines, newGraphId, validateGraph, type GraphDocument } from "./document.js";
 import { fabricCommand } from "./gates.js";
@@ -16,7 +16,7 @@ import { GraphStore, TERMINAL_GRAPH, type Attempt, type Graph } from "./store.js
 const MAX_LINES = 25;
 type Result = Record<string, unknown>;
 
-const ownerAlive = (graph: Graph) => graph.owner_pid !== null && processMatches(graph.owner_pid, graph.owner_started);
+const ownerAlive = (graph: Graph) => graph.owner_pid !== null && observedAlive(graph.owner_pid, graph.owner_started);
 
 /** Start the detached owner; it outlives this call and claims the graph itself. */
 export function startGraphOwner(graph: Graph, env: NodeJS.ProcessEnv): void {
@@ -68,7 +68,7 @@ export function graphRun(input: { file?: string; document?: unknown }, chair: Id
   }
   document.graph_id ??= newGraphId();
   document.revision ??= 1;
-  const checked = validateGraph(document, chair, catalogueSnapshot(productRoot(env), env));
+  const checked = validateGraph(document, chair, catalogueSnapshot(productRoot(env), env), env);
   if (!checked.plan) return { status: "rejected", error: "graph_invalid", fix: faultLines(checked.faults), faults: checked.faults };
   const store = new GraphStore(env);
   try {

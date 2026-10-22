@@ -5,11 +5,12 @@
  */
 import { execFileSync } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
-import { lstatSync, readFileSync, realpathSync } from "node:fs";
+import { realpathSync } from "node:fs";
 import { isAbsolute, relative, resolve, sep } from "node:path";
+import { fileURLToPath } from "node:url";
 
 import type { CatalogueSnapshot } from "../catalogue.js";
-import { InputError, normaliseRoute, workingIdentity, type RouteInput } from "../execution-input.js";
+import { InputError, normaliseRoute, ownerPromptPath, readRoots, workingIdentity, type RouteInput } from "../execution-input.js";
 import { projectRoot, withoutGitRedirects, type Identity } from "../identity.js";
 
 export const GRAPH_ID = /^g-[0-9a-f]{6,16}$/u;
@@ -130,6 +131,27 @@ export function canonicalJson(value: unknown): string {
 
 const sha256 = (text: string | Buffer) => createHash("sha256").update(text).digest("hex");
 
+/** Read the original prompt through dispatch's path checks and inode-safe reader, before copying it. */
+export function readGraphPromptFile(path: string, identity: Identity, env: NodeJS.ProcessEnv = process.env): Buffer {
+  const scripts = fileURLToPath(new URL("../../../../skills/orchestrate/scripts/", import.meta.url));
+  const python = env.HARNESS_PYTHON && isAbsolute(env.HARNESS_PYTHON) ? env.HARNESS_PYTHON : "python3";
+  const script = `import base64,json,sys
+from pathlib import Path
+sys.path.insert(0,sys.argv[1])
+from dispatch_run import read_prompt_input,PreflightError
+try:
+ data=read_prompt_input(Path(sys.argv[2]),Path(sys.argv[3]),Path(sys.argv[3]),json.loads(sys.argv[4]))
+ print(json.dumps({"prompt":base64.b64encode(data).decode()}))
+except PreflightError as error:
+ print(json.dumps({"error":error.code,"fix":str(error)}))
+`;
+  const result = JSON.parse(execFileSync(python, ["-c", script, scripts, ownerPromptPath(identity, path), identity.cwd,
+    JSON.stringify(readRoots(identity, undefined, path))], { env, encoding: "utf8", timeout: 10_000,
+    maxBuffer: 16 * 1024 * 1024, stdio: ["ignore", "pipe", "pipe"] })) as { prompt: string; error?: string; fix?: string };
+  if (result.error) throw new InputError(result.error, result.fix!);
+  return Buffer.from(result.prompt, "base64");
+}
+
 /** The dispatch identity of one attempt: never the node id itself, so any node id fits dispatch's task id rule. */
 export function attemptTaskId(key: { project: string; graph_id: string; node_id: string; revision: number; attempt: number; restart: number }): string {
   const digest = sha256(canonicalJson({ project: key.project, graph_id: key.graph_id, node_id: key.node_id,
@@ -191,7 +213,8 @@ function authorityFaults(value: unknown, where: string, node?: string): Fault[] 
  * Validate a submitted document. Every fault is reported, one per rule broken;
  * a plan is returned only when there are none.
  */
-export function validateGraph(input: unknown, identity: Identity, catalogue: CatalogueSnapshot): { faults: Fault[]; plan?: GraphPlan } {
+export function validateGraph(input: unknown, identity: Identity, catalogue: CatalogueSnapshot,
+  env: NodeJS.ProcessEnv = process.env): { faults: Fault[]; plan?: GraphPlan } {
   if (!object(input)) return { faults: [{ error: "document_invalid", fix: "Pass one JSON object with schema_version 1." }] };
   const faults: Fault[] = unknownFields(input, DOCUMENT_FIELDS, "");
   if (input.schema_version !== 1) faults.push({ error: "schema_version_invalid", fix: "Set schema_version to 1." });
@@ -298,10 +321,10 @@ export function validateGraph(input: unknown, identity: Identity, catalogue: Cat
     } else {
       const path = resolve(identity.cwd, brief.prompt_file as string);
       try {
-        if (!lstatSync(path).isFile()) throw new Error("not a regular file");
-        briefPlan = { prompt_file: path, sha256: sha256(readFileSync(path)) };
-      } catch {
-        nodeFaults.push({ ...at, error: "brief_unavailable", fix: `Pass a readable regular brief.prompt_file (${path}).` });
+        briefPlan = { prompt_file: path, sha256: sha256(readGraphPromptFile(path, identity, env)) };
+      } catch (error) {
+        nodeFaults.push(error instanceof InputError ? { ...at, error: error.code, fix: error.fix }
+          : { ...at, error: "brief_unavailable", fix: `Pass a readable regular brief.prompt_file (${path}).` });
       }
     }
 
@@ -370,13 +393,21 @@ export function validateGraph(input: unknown, identity: Identity, catalogue: Cat
     } else {
       nodeFaults.push(...unknownFields(route, ROUTE_FIELDS, "route.", id));
       try {
-        const normal = normaliseRoute({
+        let normal = normaliseRoute({
           adapter: route.adapter, alias: route.alias, model: route.model, effort: route.effort, mode,
           // An unresolved worktree is already a fault; the route is still checked on its own.
           ...(mode === "worktree_write" ? { worktree: worktree?.path ?? identity.cwd } : {}),
         } as RouteInput, identity, catalogue, true);
         const unknown = (normal.warnings ?? []).find((warning) => warning.includes("catalogue; passing it as given"));
         if (unknown) nodeFaults.push({ ...at, error: "route_unknown", fix: `${unknown.replace(/; passing it as given$/u, "")}; name a catalogue model or alias.` });
+        if (normal.model === undefined && normal.alias !== undefined) {
+          const model = catalogue.adapters.find((entry) => entry.name === normal.adapter)?.aliases[normal.alias]?.[0];
+          if (model === undefined) throw new InputError("route_unknown", `Name a catalogue model for ${normal.adapter}/${normal.alias}.`);
+          // Freeze the alias to the model whose capacity is reserved. Dispatch
+          // must not pick another candidate after the reservation is taken.
+          normal = normaliseRoute({ ...route, adapter: normal.adapter, alias: undefined, model, effort: normal.effort, mode,
+            ...(mode === "worktree_write" ? { worktree: worktree?.path ?? identity.cwd } : {}) } as RouteInput, identity, catalogue, true);
+        }
         plannedRoute = Object.fromEntries(Object.entries({ adapter: normal.adapter, alias: normal.model === undefined ? normal.alias : undefined,
           model: normal.model, effort: normal.effort }).filter(([, value]) => value !== undefined)) as PlannedNode["route"];
         pool = { adapter: normal.adapter, model: normal.model ?? normal.alias ?? "default", account: "default" };

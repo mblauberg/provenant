@@ -8,6 +8,8 @@ import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { Store } from "../src/store.js";
+import { catalogueSnapshot } from "../src/catalogue.js";
+import { validateGraph, type GraphDocument } from "../src/graph/document.js";
 import { databasePath } from "../src/identity.js";
 import { GraphStore, RESERVATION_FILE, type Attempt, type Graph } from "../src/graph/store.js";
 import { listRecordedRuns } from "../src/run-registry.js";
@@ -210,6 +212,63 @@ describe("graph runner", { timeout: 60_000 }, () => {
     expect(a.map((row) => [row.attempt, row.run_id, row.state])).toEqual([[1, before.run_id, "passed"]]);
   });
 
+  it("fences live gate groups before stopping a resumed graph whose brief was deleted", async () => {
+    const linked = join(root, "linked");
+    git(workspace, "worktree", "add", "-q", "-b", "work", linked);
+    const brief = join(workspace, "brief.md");
+    writeFileSync(brief, "Survey the code.\n");
+    const argv = ["/bin/sh", "-c", `trap '' TERM; echo $$ > ${root}/gate.pid; while :; do sleep 0.1; done`];
+    const id = run({ authority: { mode: "worktree_write" }, worktrees: { w: { path: linked } }, limits: { gate_allowlist: [argv] },
+      nodes: [reader("edit", { adapter: "cursor", model: "composer-2.5" }, { authority: { mode: "worktree_write" }, worktree: "w",
+        brief: { prompt_file: brief }, gate: { fast: [argv] } })] }).graph_id as string;
+    const gatePid = Number(readFileSync(await waitForFile(join(root, "gate.pid")), "utf8"));
+    tracked.add(gatePid);
+    const gate = nodes(id).get("edit")!.gate_procs[0]!;
+    tracked.add(gate.pid!);
+    const owner = graphRow(id).owner_pid!;
+    process.kill(owner, "SIGKILL");
+    await waitFor(() => !alive(owner), "old graph owner to die");
+    rmSync(brief);
+    expect(fabric(["graph", "resume", id]).status).toBe(0);
+    trackOwner(id, workspace);
+    let unsafe = false;
+    await waitFor(() => {
+      const graph = graphRow(id);
+      if (graph.owner_pid !== owner && graph.owner_pid !== null) tracked.add(graph.owner_pid);
+      if (alive(gatePid) && (graph.state !== "running" || !withStore((store) => store.reservation(realpathSync(linked))))) unsafe = true;
+      return graph.state !== "running";
+    }, "invalid resumed graph to stop after fencing");
+    expect(unsafe, "terminal graphs make reservations stale while their gates still write").toBe(false);
+    expect(alive(gatePid)).toBe(false);
+    expect(alive(-gate.pgid!)).toBe(false);
+    expect(graphRow(id).state).toBe("stopped");
+  });
+
+  it("rejects a stale zero exit when a recovered gate launch cannot open stdout", async () => {
+    const argv = ["/bin/sh", "-c", `echo $$ > ${root}/gate.pid; while :; do sleep 0.1; done`];
+    const id = run({ limits: { gate_allowlist: [argv] },
+      nodes: [reader("a", { adapter: "opencode", alias: "glm-free" }, { gate: { fast: [argv] } })] }).graph_id as string;
+    tracked.add(Number(readFileSync(await waitForFile(join(root, "gate.pid")), "utf8")));
+    const gate = nodes(id).get("a")!.gate_procs[0]!;
+    tracked.add(gate.pid!);
+    const owner = graphRow(id).owner_pid!;
+    process.kill(owner, "SIGKILL");
+    await waitFor(() => !alive(owner), "old graph owner to die");
+    const dir = join(workspace, ".agent-run/graphs", id, "r1/a/a1/gates");
+    writeFileSync(join(dir, "0.exit.json"), JSON.stringify({ token: gate.token, exit_code: 0, signal: null, finished_at: new Date().toISOString() }));
+    rmSync(join(dir, "0.out"));
+    mkdirSync(join(dir, "0.out"));
+    expect(fabric(["graph", "resume", id]).status).toBe(0);
+    await waitFor(() => {
+      const graph = graphRow(id);
+      if (graph.owner_pid !== owner && graph.owner_pid !== null) tracked.add(graph.owner_pid);
+      return graph.state !== "running";
+    }, "recovered graph to finish");
+    expect(nodes(id).get("a")!.state).toBe("failed");
+    expect(nodes(id).get("a")!.outcome?.reason).toBe("gate 0 recorded no exit");
+    expect(nodes(id).get("a")!.gate_procs[0]!.token).not.toBe(gate.token);
+  });
+
   it("cancels during a forking gate and leaves no group member alive before the worktree reservation releases", async () => {
     const linked = join(root, "linked");
     git(workspace, "worktree", "add", "-q", "-b", "work", linked);
@@ -239,6 +298,33 @@ describe("graph runner", { timeout: 60_000 }, () => {
     expect(nodes(id).get("edit")!.state).toBe("cancelled");
     expect(alive(gatePid) || alive(childPid)).toBe(false);
     expect(existsSync(join(gitDir, RESERVATION_FILE))).toBe(false);
+  });
+
+  it.each(["takeover", "orphan cleanup"])("keeps a live owner with an unknown start time excluded from %s", async (operation) => {
+    const document = { schema_version: 1, graph_id: "g-012abc", revision: 1,
+      nodes: [reader("a", { adapter: "opencode", alias: "glm-free" })] } as GraphDocument;
+    const chair = { project: workspace, cwd: workspace, agentId: "codex-test", provider: "codex" };
+    const plan = validateGraph(document, chair, catalogueSnapshot(repositoryRoot)).plan!;
+    withStore((store) => {
+      store.create(chair, document, plan);
+      expect(store.claimOwner(workspace, document.graph_id, process.pid, null, () => false)).toBe(true);
+      expect(store.reserve(store.current(workspace, document.graph_id).get("a")!,
+        { maxWidth: 1, cap: 1, handOccupancy: 0 }, chair.agentId)).toBe("reserved");
+    });
+    if (operation === "takeover") {
+      expect(fabric(["graph-owner", document.graph_id, workspace]).status).toBe(0);
+      expect(graphRow(document.graph_id).owner_pid).toBe(process.pid);
+      const status = JSON.parse(fabric(["graph", "status", document.graph_id, "--json"]).stdout);
+      expect(status.owner_alive).toBe(true);
+      expect(status.fix).toBeUndefined();
+    } else {
+      env.AGENT_FABRIC_PRODUCT_ROOT = buildProduct({ opencode: 1 });
+      const id = run({ nodes: [reader("b", { adapter: "opencode", alias: "glm-free" })] }).graph_id as string;
+      await waitFor(() => graphRow(id).owner_pid !== null, "second graph owner to start");
+      await delay(1_000);
+      expect(nodes(document.graph_id).get("a")!.holds_slot, "unknown owner identity still holds its reserved slot").toBe(true);
+      expect(nodes(id).get("b")!.state).toBe("pending");
+    }
   });
 
   it("never runs more lanes in one pool than its cap across two concurrent graphs", async () => {

@@ -59,6 +59,20 @@ describe("graph document validation", () => {
       .toBe("node synth: confidentiality_downgrade · fix: Remove confidential false: it consumes confidential secret output.");
   });
 
+  it("reserves tier aliases sharing a resolved model against the same pool", () => {
+    const model = "opencode/glm-5.3-flash-free";
+    const shared = { ...catalogue, adapters: catalogue.adapters.map((adapter) => adapter.name !== "opencode" ? adapter
+      : { ...adapter, aliases: { ...adapter.aliases, junior: [model], senior: [model] } }) };
+    const result = validateGraph(graph([
+      reader("a", { route: { adapter: "opencode", alias: "junior" } }),
+      reader("b", { route: { adapter: "opencode", alias: "senior" } }),
+      reader("c", { route: { adapter: "opencode", model } }),
+    ]), identity, shared);
+    expect(result.faults).toEqual([]);
+    expect(result.plan!.nodes.map((node) => node.pool)).toEqual(Array(3).fill({ adapter: "opencode", model, account: "default" }));
+    expect(result.plan!.nodes.map((node) => node.route.model)).toEqual([model, model, model]);
+  });
+
   it("raises a consumer of confidential output to confidential when it does not say otherwise", () => {
     const result = validateGraph(graph([
       reader("secret", { authority: { confidential: true } }), reader("mid", { depends_on: ["secret"] }), reader("leaf", { depends_on: ["mid"] }),
@@ -90,6 +104,19 @@ describe("graph document validation", () => {
     expect(errors(graph([reader("a", { authority: { network: true, allow_secrets: true } })])))
       .toEqual(["a:authority_widened", "a:authority_widened"]);
   });
+
+  it.each(["credentials.json", ".ssh/config", ".config/codex/auth.json", "unrelated"])(
+    "rejects a prompt_file from %s before reading or staging it", (name) => {
+      const path = name === "unrelated" ? join(repositoryRoot, "README.md") : join(repo, name);
+      if (name !== "unrelated") {
+        mkdirSync(dirname(path), { recursive: true });
+        writeFileSync(path, "fixture content, not a secret\n");
+      }
+      const result = validateGraph(graph([reader("a", { brief: { prompt_file: path } })]), identity, catalogue);
+      expect(result.plan).toBeUndefined();
+      expect(result.faults).toContainEqual(expect.objectContaining({ node: "a",
+        error: name === "unrelated" ? "prompt_path_forbidden" : "credential_or_auth_store_denied" }));
+    });
 
   it("requires a writer to use a linked worktree, never the primary checkout, and orders writers sharing one", () => {
     const writer = (id: string, extra: Record<string, unknown> = {}) => reader(id, {

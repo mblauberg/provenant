@@ -27,7 +27,7 @@ export function fabricCommand(args: string[], env: NodeJS.ProcessEnv = process.e
 }
 
 export interface GateOrder { token: string; argv: string[]; cwd: string; out: string; err: string; exit: string }
-export interface GateExit { exit_code: number | null; signal: string | null; finished_at: string }
+export interface GateExit { token: string; exit_code: number | null; signal: string | null; finished_at: string }
 
 export const argvHash = (argv: string[]): string => createHash("sha256").update(JSON.stringify(argv)).digest("hex");
 
@@ -46,10 +46,10 @@ export function launchGate(token: string, cwd: string, env: NodeJS.ProcessEnv = 
   };
 }
 
-export function readGateExit(path: string): GateExit | undefined {
+export function readGateExit(path: string, token: string): GateExit | undefined {
   try {
     const value = JSON.parse(readFileSync(path, "utf8")) as GateExit;
-    return typeof value.finished_at === "string" ? value : undefined;
+    return value.token === token && typeof value.finished_at === "string" ? value : undefined;
   } catch { return undefined; }
 }
 
@@ -73,7 +73,7 @@ export async function runGateExec(token: string): Promise<number> {
   });
   closeSync(out); closeSync(err);
   const temporary = `${order.exit}.${process.pid}.tmp`;
-  writeFileSync(temporary, `${JSON.stringify({ exit_code: result.code, signal: result.signal, finished_at: new Date().toISOString() })}\n`,
+  writeFileSync(temporary, `${JSON.stringify({ token, exit_code: result.code, signal: result.signal, finished_at: new Date().toISOString() })}\n`,
     { mode: 0o600 });
   renameSync(temporary, order.exit);
   return 0;

@@ -12,11 +12,11 @@ import { catalogueSnapshot } from "../catalogue.js";
 import { cancelConfiguredRun, dispatchConfiguredProvider, hostOwnersInThemselves, productRoot } from "../execution.js";
 import { databasePath, runRoot, withoutGitRedirects, type Identity } from "../identity.js";
 import {
-  listRecordedRuns, observedAlive, processMatches, processStartedAt, readOwnerRecord, runProcessAlive,
+  listRecordedRuns, observedAlive, processStartedAt, readOwnerRecord, runProcessAlive,
   signalRecordedGroup, statusRows, type RecordedGroup,
 } from "../run-registry.js";
 import { Store } from "../store.js";
-import { validateGraph, faultLines, type GraphPlan, type PlannedNode } from "./document.js";
+import { validateGraph, faultLines, readGraphPromptFile, type GraphPlan, type PlannedNode } from "./document.js";
 import { argvHash, launchGate, readGateExit } from "./gates.js";
 import { GraphStore, newToken, type Attempt, type AttemptState, type GateProc, type Graph } from "./store.js";
 
@@ -99,13 +99,21 @@ class Owner {
       const graph = this.#store.graph(this.project, this.graphId);
       if (!graph || graph.state !== "running") return 0;
       this.#started = processStartedAt(process.pid);
-      if (!this.#store.claimOwner(this.project, this.graphId, process.pid, this.#started, processMatches)) return 0;
+      if (!this.#store.claimOwner(this.project, this.graphId, process.pid, this.#started, observedAlive)) return 0;
       hostOwnersInThemselves();
       const mailbox = new Store(databasePath(this.#env));
       try { this.#chair = { ...graph.chair, registeredProjects: mailbox.projects() }; } finally { mailbox.close(); }
       const document = this.#store.document(this.project, this.graphId, graph.revision);
-      const checked = validateGraph(document, this.#chair, catalogueSnapshot(productRoot(this.#env), this.#env));
+      const checked = validateGraph(document, this.#chair, catalogueSnapshot(productRoot(this.#env), this.#env), this.#env);
       if (!checked.plan) {
+        // Terminal graphs make their reservations stale. Fence every recorded
+        // lane and gate first, even when the plan cannot be rebuilt.
+        for (const row of this.#store.attempts(this.project, this.graphId)) {
+          while (!(await this.#stopProcesses(row))) await sleep(this.#defaults.tick_seconds * 1000);
+          this.#store.releaseSlot(row);
+          if (!TERMINAL.includes(row.state)) this.#store.transition(row, [row.state], "stopped", {}, this.#chair.agentId);
+          if (row.kept && row.run_dir) rmSync(join(row.run_dir, "KEEP"), { force: true });
+        }
         this.#notify(`graph ${this.graphId} stopped: its document no longer validates · ${faultLines(checked.faults).split("\n")[0]}`);
         this.#store.setGraph(this.project, this.graphId, { state: "stopped" }, this.#chair.agentId);
         return 1;
@@ -293,7 +301,7 @@ class Owner {
         if (!later) this.#store.releaseReservation(node.worktree.path, node.worktree.gitDir, this.graphId);
       }
     }
-    for (const orphan of this.#store.orphanSlots(processMatches))
+    for (const orphan of this.#store.orphanSlots(observedAlive))
       if (orphan.run_dir === null || !runProcessAlive(orphan.run_dir, orphan.task_id, 1)) this.#store.releaseSlot(orphan);
   }
 
@@ -368,7 +376,7 @@ class Owner {
     const workCwd = node.worktree?.path ?? node.cwd ?? this.#chair.cwd;
     const inputs = node.inputs.map((input) => ({ from: input.from, attempt: current.get(input.from)!.attempt,
       path: String(current.get(input.from)!.outcome?.result_path ?? "") }));
-    const prompt = node.brief.prompt ?? readFileSync(node.brief.prompt_file!, "utf8");
+    const prompt = node.brief.prompt ?? readGraphPromptFile(node.brief.prompt_file!, this.#chair, this.#env).toString("utf8");
     const brief = inputs.length
       ? `${prompt.trimEnd()}\n\n## Inputs\n\nRead these files; they are the results of earlier graph nodes.\n\n${inputs.map((input) => `- ${input.from}: ${input.path}`).join("\n")}\n`
       : prompt;
@@ -454,7 +462,7 @@ class Owner {
         // Clear the group whatever happened: a gate's background children never outlive it.
         const fenced = await signalRecordedGroup(this.#group(procs[index]!), this.#defaults.gate_grace_seconds * 1000);
         if (abort.aborted) return;
-        const exit = readGateExit(exitPath);
+        const exit = readGateExit(exitPath, token);
         procs[index] = { ...procs[index]!, ...(exit ? { exit: { exit_code: exit.exit_code, signal: exit.signal } } : {}) };
         this.#store.setGates(row, procs);
         if (fenced === "fenced") { failure = `gate ${index} group could not be verified stopped`; break; }
@@ -468,16 +476,22 @@ class Owner {
     else this.#settle(latest, "passed", outcome);
   }
 
-  /** Stop a cancelling attempt's lane and gate groups, verify both, then mark it cancelled. */
-  async #fence(row: Attempt): Promise<void> {
+  /** Stop recorded lane and gate processes; unknown liveness keeps the reservation fenced. */
+  async #stopProcesses(row: Attempt): Promise<boolean> {
     if (row.run_id !== null && row.run_dir !== null && runProcessAlive(row.run_dir, row.task_id, 1))
       await cancelConfiguredRun(row.run_id, this.#chair, `graph ${this.graphId} cancelled`, this.#env).catch(() => undefined);
-    if (!(await this.#groupsExited(row))) return;
+    if (!(await this.#groupsExited(row))) return false;
     const deadline = Date.now() + 60_000;
     while (row.run_dir !== null && runProcessAlive(row.run_dir, row.task_id, 1)) {
-      if (Date.now() > deadline) return; // still fenced: the next tick tries again
+      if (Date.now() > deadline) return false; // still fenced: the next tick tries again
       await sleep(250);
     }
+    return true;
+  }
+
+  /** Stop a cancelling attempt's lane and gate groups, verify both, then mark it cancelled. */
+  async #fence(row: Attempt): Promise<void> {
+    if (!(await this.#stopProcesses(row))) return;
     this.#store.releaseSlot(row);
     this.#settle({ ...row, holds_slot: false }, "cancelled", { ...(row.outcome ?? {}), reason: "cancelled" });
   }

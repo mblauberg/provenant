@@ -57,8 +57,9 @@ describe("gate launch handshake", () => {
   it("still runs and records a gate whose go was written just before the owner died", async () => {
     const dir = scratchRoot("graph-gate-buffered-");
     await owner("buffered-go", dir);
-    expect(await until(() => readGateExit(join(dir, "exit.json")) !== undefined)).toBe(true);
-    expect(readGateExit(join(dir, "exit.json"))).toMatchObject({ exit_code: 0, signal: null });
+    expect(await until(() => readGateExit(join(dir, "exit.json"), "tok-1") !== undefined)).toBe(true);
+    expect(readGateExit(join(dir, "exit.json"), "tok-1")).toMatchObject({ token: "tok-1", exit_code: 0, signal: null });
+    expect(readGateExit(join(dir, "exit.json"), "other")).toBeUndefined();
     expect(readFileSync(join(dir, "marker"), "utf8")).toBe("ran\n");
   }, 30_000);
 
@@ -68,7 +69,7 @@ describe("gate launch handshake", () => {
     cleanup.push(launch.pid);
     launch.go({ token: "tok-2", argv: ["sh", "-c", "echo out; exit 7"], cwd: dir, out: join(dir, "o"), err: join(dir, "e"), exit: join(dir, "x.json") });
     await launch.exited;
-    expect(readGateExit(join(dir, "x.json"))).toMatchObject({ exit_code: 7 });
+    expect(readGateExit(join(dir, "x.json"), "tok-2")).toMatchObject({ token: "tok-2", exit_code: 7 });
     expect(readFileSync(join(dir, "o"), "utf8")).toBe("out\n");
     expect(await until(() => !alive(-launch.pid))).toBe(true);
   }, 30_000);
