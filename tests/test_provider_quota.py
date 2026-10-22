@@ -1877,3 +1877,9 @@ def test_claude_limit_with_a_numeric_reset_still_matches_the_window_it_repeats(q
                'limits': [claude_limit('weekly_all', 'unlisted', 3, reset.timestamp() * scale)]}
     rows = {row['name']: row for row in quota.provider('claude').parse(payload)['windows']}
     assert rows['weekly_all:1']['window_minutes'] == WEEK and rows['weekly_all:1']['advisory'] is False
+
+
+def test_atomic_json_writes_private_files(quota):
+    path = quota.report_path()
+    quota.atomic_json(path, {'schema': quota.REPORT_SCHEMA})
+    assert path.stat().st_mode & 0o777 == 0o600 and json.loads(path.read_text())['schema'] == quota.REPORT_SCHEMA

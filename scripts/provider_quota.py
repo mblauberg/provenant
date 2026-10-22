@@ -542,17 +542,22 @@ def locked(path, blocking=True):
             fcntl.flock(stream, fcntl.LOCK_UN)
 
 
+def replace_private(path, text, mtime=None):
+    """Replace `path` with `text` through an exclusive 0600 temporary; a planted name is never followed."""
+    descriptor, name = tempfile.mkstemp(dir=path.parent, prefix=path.name + '.')
+    try:
+        with os.fdopen(descriptor, 'w') as stream:
+            stream.write(text)
+        if mtime is not None:
+            os.utime(name, (mtime, mtime))
+        os.replace(name, path)
+    finally:
+        Path(name).unlink(missing_ok=True)
+
+
 def atomic_json(path, value):
     path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = None
-    try:
-        with tempfile.NamedTemporaryFile(mode='w', dir=path.parent, prefix=path.name + '.', delete=False) as stream:
-            temporary = Path(stream.name)
-            stream.write(json.dumps(value, indent=2, sort_keys=True) + '\n')
-        temporary.replace(path)
-    finally:
-        if temporary:
-            temporary.unlink(missing_ok=True)
+    replace_private(path, json.dumps(value, indent=2, sort_keys=True) + '\n')
 
 
 def save_snapshot(value, identity_dir=None):
@@ -835,18 +840,6 @@ def prune_trace(now, retention_days=None):
             replace_private(path, ''.join(json.dumps(row, sort_keys=True) + '\n' for row in kept))
         replace_private(marker, '', now.timestamp())
     return True
-
-
-def replace_private(path, text, mtime=None):
-    descriptor, name = tempfile.mkstemp(dir=path.parent, prefix=path.name + '.')
-    try:
-        with os.fdopen(descriptor, 'w') as stream:
-            stream.write(text)
-        if mtime is not None:
-            os.utime(name, (mtime, mtime))
-        os.replace(name, path)
-    finally:
-        Path(name).unlink(missing_ok=True)
 
 
 def percentile(values, share):
