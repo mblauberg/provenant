@@ -4675,7 +4675,7 @@ def test_remote_writer_preflight_uses_host_signin_and_effective_writer_confineme
     monkeypatch.setenv('AGENT_FABRIC_PRODUCT_ROOT', str(ROOT))
     original_run = subprocess.run
     def process(command, **kwargs):
-        if any(str(part).endswith('model_route.py') for part in command):
+        if any(str(part).endswith(('model_route.py', 'model-route')) for part in command):
             return subprocess.CompletedProcess(command, 0, json.dumps({
                 'status': 'ok', 'adapter': 'codex', 'resolved_model': 'gpt-6.1-sol',
                 'provider_family': 'openai', 'execution_intent': 'ordinary', 'notes': []}), '')

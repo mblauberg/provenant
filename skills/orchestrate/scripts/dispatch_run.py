@@ -1617,10 +1617,13 @@ def preflight_tasks(tasks: list[dict[str, Any]], workspace_root: Path | None = N
                     result = subprocess.run(command, text=True, capture_output=True, timeout=15, env=routing_environment())
                     try:
                         route = json.loads(result.stdout)
-                        resolved_routes[key] = route
-                        return route
                     except ValueError:
+                        route = {"status": "interpreter_unavailable"}
+                    # The wrapper reports a missing interpreter as JSON; it is the same repair.
+                    if not isinstance(route, dict) or route.get("status") == "interpreter_unavailable":
                         raise PreflightError("model_routing_unavailable", "Restore the routing catalogue and the harness Python environment.")
+                    resolved_routes[key] = route
+                    return route
                 route = resolve_route()
                 if (adapter == "codex" and route.get("status") == "capability_discovery_failed") or (
                     adapter == "agy" and route.get("status") in {"ok", "model_required_for_broker"}
