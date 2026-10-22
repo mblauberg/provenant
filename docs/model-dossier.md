@@ -75,6 +75,11 @@ preference written here only becomes the automatic default if the catalogue
 array is ordered to match. Change both together. A preference that contradicts
 the array is not a preference, it is a stale note.
 
+For numbers rather than judgement, see the
+[model benchmark registry](research/model-benchmarks/README.md): published
+scores, costs and the frontier effort range per model. Those are priors only
+and never override a replay-bench or golden-task result.
+
 ## Entry format
 
 Loose by design. An entry is a heading plus whatever labelled lines are worth
@@ -224,23 +229,24 @@ not read an absent `Watch out for` as an endorsement.
 - **Good at:** frontend legwork; mainly review across frontend and backend,
   with strong visual reviews and design opinions. A different-family review
   route. The default behind every Google alias, so an unqualified Gemini route
-  lands here.
-- **Watch out for:** nothing recorded.
+  lands here. Also the owner's first choice for the natural, human voice on
+  human-facing prose, so the preferred final polishing writer. See
+  [Human-facing final polish](#human-facing-final-polish). Recorded as the
+  owner's stated preference, not a measured result.
+- **Watch out for:** a polish pass is where substance quietly drifts. The chair
+  keeps the last word on meaning; take the voice, re-check the facts.
 - **Cost:** cheap.
 - **Reach:** the `agy` adapter, `google` family. `cursor` does not serve Google
   models itself; its fallback map delegates them back to `agy`.
 
 ### Gemini 3.1 Pro (Google)
 
-- **Good at:** UI and UX review. The owner's first choice for the natural,
-  human voice on human-facing prose, and so the preferred final polishing
-  writer. See [Human-facing final polish](#human-facing-final-polish). Recorded
-  as the owner's stated preference, not a measured result.
-- **Watch out for:** a polish pass is where substance quietly drifts. The chair
-  keeps the last word on meaning; take the voice, re-check the facts.
-- **Cost:** not recorded.
-- **Reach:** the `agy` adapter, `google` family. `cursor` delegates Google
-  models to `agy` rather than serving them itself.
+Retired. `agy models` no longer lists `gemini-3.1-pro-high` or
+`gemini-3.1-pro-low`. The owner's decision is that Gemini 3.8 Flash replaces
+it, judged stronger than the old Pro. Its voice and UI review role now sits
+with Gemini 3.8 Flash above; `claude-opus-4-6-thinking` through `agy` is the
+alternative. The voice preference is the owner's stated view, not a measured
+result.
 
 ## Categories
 
@@ -272,8 +278,8 @@ remain the cost-first choice for objective extraction and classification.
 
 For prose a person will actually read, such as an email, a document going out
 for review, a public README or a release note, consider one last pass by a model
-chosen for voice rather than for reasoning. Gemini 3.1 Pro is the current
-preference. Ask it for rewrite advice or a full suggested rewrite.
+chosen for voice rather than for reasoning. Gemini 3.8 Flash is the current
+preference, with `claude-opus-4-6-thinking` through `agy` as the alternative. Ask it for rewrite advice or a full suggested rewrite.
 
 This is a suggestion, never a required leg. Three bounds keep it safe:
 
