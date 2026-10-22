@@ -28,6 +28,10 @@ false report. Paste the first section into every lane and reviewer brief.
 
 - Read `git status` and the full diff; discard what the brief did not ask for;
   never `git add -A` on the strength of one file.
+- A mid-flight `SendMessage` correction to a running lane can be refused as
+  prompt injection while a sibling accepts it. Treat an unacknowledged
+  redirect as not delivered: stop and redispatch with the corrected brief, or
+  verify uptake from the commits, report file or transcript.
 - A worktree without installed dependencies runs nothing, yet lanes report
   passes. Install and prove it with one test file before dispatch.
 - Read lane state from `fabric_status{detail:"full"}`, not ad-hoc `ps`. Record

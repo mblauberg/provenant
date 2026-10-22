@@ -20,6 +20,25 @@ in `skills/orchestrate`; this page records the traps.
 - Prefer a native subagent for your own family and a headless CLI for another.
   Never self-deploy through your own headless CLI.
 - Strip ANSI noise from CLIs that emit it before parsing their output.
+- A lane inside a provider sandbox can report false failures: it cannot bind
+  localhost ports or reach some subprocesses, so suites show failures and CLI
+  probes show `capability_discovery_failed` or an unreachable language server,
+  all green when re-run outside. Re-run the lane's suite and live probes from
+  the primary checkout before believing either direction. An
+  environment-blocked probe is not evidence against a measured claim: tell
+  lanes not to rewrite one into "could not reproduce" prose, and check diffs
+  for that substitution.
+- Do not edit a worktree while its test suite is running. A mid-run edit to a
+  file a test reads produces a single phantom failure that looks like a real
+  regression.
+- Never enable a fast or priority service tier (Codex `service_tier=priority`,
+  Claude Code `/fast`, or any speed-for-usage flag). It costs roughly double
+  the usage for a minor latency gain, and no urgency unlocks it. Keep it off by
+  default and pin the safe value explicitly, since the tier can otherwise be
+  inherited from user config. The Codex adapter already pins
+  `-c service_tier="default"` (`skills/orchestrate/scripts/adapters/codex.py`);
+  no `config/` file sets a tier. Find a new adapter's fast tier before its
+  first dispatch.
 
 ## agy (Antigravity, Gemini family)
 
