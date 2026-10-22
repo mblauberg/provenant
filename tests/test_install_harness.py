@@ -72,6 +72,9 @@ def run(platform: str, home: Path, *arguments: str, bash=None, **extra_env):
     # test independent of any caller-provided instance selection.
     env["AGENT_FABRIC_INSTANCE_ROOT"] = str(instance_root_for(home))
     env["PROVENANT_ALLOW_LINKED_WORKTREE_INSTALL"] = "1"
+    # These tests are about the template path; the Rust front door has its own
+    # cases below, so a toolchain on the host must not change what they build.
+    env["PROVENANT_FRONT_DOOR"] = "python"
     env.update(extra_env)
     return subprocess.run(
         [*([bash] if bash else []), str(SCRIPT), "--platform", platform, *arguments],
@@ -119,6 +122,7 @@ def run_product(product: Path, platform: str, home: Path, *arguments: str, **ext
             "CLAUDE_CONFIG_DIR": str(home / "claude"),
             "CODEX_HOME": str(home / "codex"),
             "PATH": f"{home / 'bin'}{os.pathsep}{os.environ['PATH']}",
+            "PROVENANT_FRONT_DOOR": "python",
         }
     )
     environment.update(extra_env)
@@ -2035,3 +2039,206 @@ def test_claude_default_config_dir_does_not_link_settings_to_itself(tmp_path):
     assert not (tmp_path / ".claude/settings.json").is_symlink()
     assert not (tmp_path / ".claude/settings.json").exists()
     assert (tmp_path / ".claude.json").is_file()
+
+
+# --- Rust front door selection (ADR 0027) -----------------------------------
+
+MANAGED_MARKER_LINE = (
+    "# Managed by scripts/install-harness; "
+    "local edits to an installed copy are not preserved."
+)
+
+
+def add_fake_crate(product: Path) -> Path:
+    """A minimal crate whose sources hash to something; cargo is faked separately."""
+    crate = product / "tools/front-door"
+    # The product tree may already carry the real crate; the fake replaces it.
+    shutil.rmtree(crate, ignore_errors=True)
+    (crate / "src").mkdir(parents=True)
+    (crate / "Cargo.toml").write_text('[package]\nname = "provenant"\nversion = "0.0.0"\n')
+    (crate / "Cargo.lock").write_text("# lock\n")
+    (crate / "src/main.rs").write_text("fn main() {}\n")
+    return crate
+
+
+def fake_binary_text(digest: str) -> str:
+    # The identity lines follow `exit`, so the shell never parses them as commands.
+    return (
+        "#!/bin/sh\n"
+        'case "$1" in help) echo "usage: provenant <command> [arguments...]"; exit 0;; esac\n'
+        "exit 2\n"
+        f"\n{MANAGED_MARKER_LINE}\n"
+        f"provenant-front-door source-sha256={digest}\n"
+    )
+
+
+def install_fake_cargo(directory: Path, *, fail: bool = False) -> Path:
+    directory.mkdir(parents=True, exist_ok=True)
+    cargo = directory / "cargo"
+    log = directory / "cargo.log"
+    body = (
+        "#!/bin/sh\n"
+        f'echo "$@" >> "{log}"\n'
+        f'echo "MACOSX_DEPLOYMENT_TARGET=${{MACOSX_DEPLOYMENT_TARGET-unset}}" >> "{log}"\n'
+    )
+    if fail:
+        body += "exit 101\n"
+    else:
+        body += (
+            'mkdir -p "$CARGO_TARGET_DIR/release"\n'
+            'printf \'%s\\n\' \'#!/bin/sh\' '
+            "'case \"$1\" in help) echo \"usage: provenant <command> [arguments...]\"; exit 0;; esac' "
+            "'exit 2' '' "
+            f"'{MANAGED_MARKER_LINE}' "
+            '"provenant-front-door source-sha256=$PROVENANT_FD_SOURCE_SHA256" '
+            '> "$CARGO_TARGET_DIR/release/provenant"\n'
+            'chmod 755 "$CARGO_TARGET_DIR/release/provenant"\n'
+        )
+    cargo.write_text(body)
+    cargo.chmod(0o755)
+    return log
+
+
+@pytest.fixture
+def rust_product(tmp_path):
+    product = copy_product(ROOT, tmp_path / "product")
+    add_fake_crate(product)
+    return product
+
+
+def rust_env(tmp_path: Path, **extra: str) -> dict[str, str]:
+    fake_bin = tmp_path / "fake-bin"
+    return {"PATH": f"{fake_bin}{os.pathsep}{os.environ['PATH']}", **extra}
+
+
+def test_rust_mode_builds_stamps_and_installs_the_binary(tmp_path, rust_product):
+    log = install_fake_cargo(tmp_path / "fake-bin")
+    from lib.front_door_build import source_digest
+
+    result = run_product(
+        rust_product, "codex", tmp_path, **rust_env(tmp_path, PROVENANT_FRONT_DOOR="rust")
+    )
+
+    assert result.returncode == 0, result.stderr
+    installed = (tmp_path / "bin/provenant").read_text()
+    assert f"provenant-front-door source-sha256={source_digest(rust_product / 'tools/front-door')}\n" in installed
+    assert MANAGED_MARKER_LINE in installed.splitlines()
+    assert os.access(tmp_path / "bin/provenant", os.X_OK)
+    assert f"command installed={tmp_path / 'bin/provenant'}" in result.stdout
+    assert "front-door=rust" in result.stdout.splitlines()
+    cargo_log = log.read_text()
+    assert "build --release --locked --manifest-path" in cargo_log
+    if sys.platform == "darwin":
+        assert "MACOSX_DEPLOYMENT_TARGET=15.0" in cargo_log
+
+
+def test_reinstalling_the_same_binary_is_idempotent(tmp_path, rust_product):
+    install_fake_cargo(tmp_path / "fake-bin")
+    environment = rust_env(tmp_path, PROVENANT_FRONT_DOOR="rust")
+    first = run_product(rust_product, "codex", tmp_path, **environment)
+    second = run_product(rust_product, "codex", tmp_path, **environment)
+
+    assert first.returncode == 0 and second.returncode == 0, second.stderr
+    assert f"command existing={tmp_path / 'bin/provenant'}" in second.stdout
+
+
+def test_python_mode_rolls_an_installed_binary_back_to_the_template(tmp_path, rust_product):
+    install_fake_cargo(tmp_path / "fake-bin")
+    run_product(rust_product, "codex", tmp_path, **rust_env(tmp_path, PROVENANT_FRONT_DOOR="rust"))
+
+    result = run_product(
+        rust_product, "codex", tmp_path, **rust_env(tmp_path, PROVENANT_FRONT_DOOR="python")
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert f"command updated={tmp_path / 'bin/provenant'}" in result.stdout
+    assert "front-door=python" in result.stdout.splitlines()
+    assert (tmp_path / "bin/provenant").read_bytes() == (rust_product / "scripts/provenant.template").read_bytes()
+
+
+def test_auto_mode_falls_back_to_the_template_when_the_build_fails(tmp_path, rust_product):
+    install_fake_cargo(tmp_path / "fake-bin", fail=True)
+
+    result = run_product(
+        rust_product, "codex", tmp_path, **rust_env(tmp_path, PROVENANT_FRONT_DOOR="auto")
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert (tmp_path / "bin/provenant").read_bytes() == (rust_product / "scripts/provenant.template").read_bytes()
+    assert "front-door=python" in result.stdout.splitlines()
+    assert "falls back to the Python template" in result.stderr
+
+
+def test_rust_mode_fails_without_installing_when_the_build_fails(tmp_path, rust_product):
+    install_fake_cargo(tmp_path / "fake-bin", fail=True)
+
+    result = run_product(
+        rust_product, "codex", tmp_path, **rust_env(tmp_path, PROVENANT_FRONT_DOOR="rust")
+    )
+
+    assert result.returncode == 3
+    assert "cargo build failed" in result.stderr
+    assert not (tmp_path / "bin/provenant").exists()
+
+
+def test_auto_mode_without_a_crate_installs_the_template_quietly(tmp_path):
+    product = copy_product(ROOT, tmp_path / "product")
+    shutil.rmtree(product / "tools/front-door", ignore_errors=True)
+
+    result = run_product(product, "codex", tmp_path, PROVENANT_FRONT_DOOR="auto")
+
+    assert result.returncode == 0, result.stderr
+    assert "front-door=python" in result.stdout.splitlines()
+    assert "falls back" not in result.stderr
+
+
+def test_prebuilt_binary_with_matching_sources_is_installed_without_cargo(tmp_path, rust_product):
+    from lib.front_door_build import source_digest
+
+    prebuilt = tmp_path / "prebuilt/provenant"
+    prebuilt.parent.mkdir()
+    prebuilt.write_text(fake_binary_text(source_digest(rust_product / "tools/front-door")))
+    prebuilt.chmod(0o755)
+    install_fake_cargo(tmp_path / "fake-bin", fail=True)  # would fail if it were used
+
+    result = run_product(
+        rust_product,
+        "codex",
+        tmp_path,
+        **rust_env(tmp_path, PROVENANT_FRONT_DOOR="rust", PROVENANT_FRONT_DOOR_BINARY=str(prebuilt)),
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert (tmp_path / "bin/provenant").read_bytes() == prebuilt.read_bytes()
+    assert not (tmp_path / "fake-bin/cargo.log").exists()
+
+
+def test_prebuilt_binary_from_other_sources_is_refused_in_rust_mode_and_skipped_in_auto(
+    tmp_path, rust_product
+):
+    prebuilt = tmp_path / "prebuilt/provenant"
+    prebuilt.parent.mkdir()
+    prebuilt.write_text(fake_binary_text("0" * 64))
+    prebuilt.chmod(0o755)
+    environment = {"PROVENANT_FRONT_DOOR_BINARY": str(prebuilt)}
+
+    strict = run_product(
+        rust_product, "codex", tmp_path, **rust_env(tmp_path, PROVENANT_FRONT_DOOR="rust", **environment)
+    )
+    assert strict.returncode == 3
+    assert "built from different sources" in strict.stderr
+    assert not (tmp_path / "bin/provenant").exists()
+
+    lenient = run_product(
+        rust_product, "codex", tmp_path, **rust_env(tmp_path, PROVENANT_FRONT_DOOR="auto", **environment)
+    )
+    assert lenient.returncode == 0, lenient.stderr
+    assert "front-door=python" in lenient.stdout.splitlines()
+
+
+def test_unknown_front_door_mode_is_refused_before_any_mutation(tmp_path, rust_product):
+    result = run_product(rust_product, "codex", tmp_path, PROVENANT_FRONT_DOOR="fast")
+
+    assert result.returncode == 3
+    assert "PROVENANT_FRONT_DOOR must be auto, rust or python" in result.stderr
+    assert not (tmp_path / "bin/provenant").exists()

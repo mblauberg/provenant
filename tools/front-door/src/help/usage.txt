@@ -1,0 +1,1 @@
+usage: provenant <help|root|route|routes|capabilities|worktree|clean|reap|lint|check|gate|telemetry|stats|retro|quota|profile|fabric|lease|hosts|peer|lanes|events|dispatch|batch|run|pr> [arguments...]
