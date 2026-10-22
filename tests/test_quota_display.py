@@ -138,7 +138,7 @@ def test_a_window_whose_reset_passed_is_never_shown_as_current(quota):
 
 # Pools ---------------------------------------------------------------------------------------
 
-def agy_windows(gemini=100, claude=7.4, short=14.8):
+def agy_windows(gemini=100, claude=6, short=12):
     return [window(gemini, WEEK, timedelta(days=1, hours=16), 'gemini.weekly'),
             window(claude, WEEK, timedelta(days=6, hours=4), 'claude.weekly'),
             window(short, 300, timedelta(hours=1, minutes=40), 'claude.5h')]
@@ -366,3 +366,58 @@ def test_local_activity_never_credits_a_signed_out_account(quota, monkeypatch, t
     anese = agy.sign_in(ANESE)
     activity = quota.local_activity()
     assert f'agy/{anese}' in activity and f'agy/{michael}' not in activity
+
+
+# Review repairs ------------------------------------------------------------------------------
+
+def test_an_expired_exhausted_window_never_makes_the_account_exhausted(quota):
+    reading = value(quota, 'claude', 'anese', [window(100, WEEK, timedelta(hours=-1)),
+                                                window(20, 300, timedelta(hours=2), 'five_hour')])
+    report = quota.report([reading], NOW, activity={})
+    claude = report['accounts'][0]
+    assert claude['state'] != 'exhausted' and claude['back_at'] is None
+    assert claude['display_window'] == 'five_hour'
+    assert report['headline']['account'] == 'claude/anese'
+    # The cached history stays, marked as reset.
+    weekly = next(item for item in claude['windows'] if item['name'] == 'seven_day')
+    assert weekly['used_percent'] == 100 and weekly['reset_passed'] is True
+
+
+@pytest.mark.parametrize('weekly, short, shown_name', [(95, 90, 'five_hour'), (95, 50, 'seven_day'), (99, 92, 'five_hour')])
+def test_a_short_window_at_the_alert_takes_the_display_even_below_the_long_one(quota, weekly, short, shown_name):
+    claude = row(quota, value(quota, 'claude', 'anese', [window(short, 300, timedelta(hours=1), 'five_hour'),
+                                                          window(weekly, WEEK, timedelta(days=2))]))
+    assert claude['display_window'] == shown_name
+
+
+def test_an_alias_on_a_shared_store_keeps_its_own_account_when_another_signs_in(quota, monkeypatch, tmp_path):
+    agy = Agy(quota, monkeypatch, tmp_path)
+    configure(tmp_path, {'accounts': {'agy': {'work': {'display_name': 'Work'}}}})
+    michael = agy.sign_in(MICHAEL, agy_usage(0))
+    assert set(agy.accounts()) == {'work'} and agy.accounts()['work'].active
+    agy.tick(NOW - timedelta(hours=1))
+    anese = agy.sign_in(ANESE)
+    accounts = agy.accounts()
+    # The alias is bound to the account it first read, so the newcomer gets its own fingerprint.
+    assert set(accounts) == {'work', anese}
+    assert accounts['work'].signed_out and accounts[anese].active
+    agy.runs.clear()
+    values = agy.tick(NOW)
+    assert agy.runs == [ANESE]
+    assert values['work']['status'] == 'signed_out' and values['work']['windows'][1]['used_percent'] == 100
+    assert values[anese]['windows'][1]['used_percent'] == pytest.approx(7)
+    # Signing back in resumes the alias, and the other account is remembered.
+    agy.sign_in(MICHAEL)
+    accounts = agy.accounts()
+    assert accounts['work'].active and accounts[anese].signed_out and michael not in accounts
+
+
+def test_a_shared_store_reading_for_another_account_is_refused_under_a_bound_alias(quota, monkeypatch, tmp_path):
+    agy = Agy(quota, monkeypatch, tmp_path)
+    configure(tmp_path, {'accounts': {'agy': {'work': {}}}})
+    agy.sign_in(MICHAEL, agy_usage(0))
+    agy.tick(NOW - timedelta(hours=1))
+    work = agy.accounts()['work']
+    agy.email, agy.payload = ANESE, agy_usage()  # the sign-in changed after accounts were listed
+    value = quota.refresh(work, NOW, force=True)
+    assert value['status'] == 'stale' and value['windows'][1]['used_percent'] == 100

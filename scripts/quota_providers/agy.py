@@ -157,4 +157,5 @@ def fetch(account, io, now):
     parsed = parse(payload, now)
     if not parsed['windows']:
         raise io.Unavailable('agy reported no quota')
-    return {**parsed, 'source': 'agy print-mode /usage'}
+    # The fingerprint binds a configured alias to the account it read.
+    return {**parsed, 'source': 'agy print-mode /usage', 'fingerprint': fingerprint(email) if email else None}

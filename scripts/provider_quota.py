@@ -315,26 +315,54 @@ def accounts():
         configured_default = identity.default_identity(name)
         enabled = {label: entry if isinstance(entry, dict) else {} for label, entry in listed[name].items()
                    if not isinstance(entry, dict) or entry.get('enabled') is not False}
+        dirs = {}
         for label, entry in sorted(enabled.items()):
             if not entry.get('identity_dir') and configured_default is None:
                 raise ValueError(f'{name}/{label} requires identity_dir')
-            identity_dir = Path(entry.get('identity_dir') or configured_default).expanduser()
+            dirs[label] = Path(entry.get('identity_dir') or configured_default).expanduser()
+        # On a shared store, an alias such as `work` names whichever account it first read: its fingerprint, from
+        # the entry or the alias's last reading. A fingerprint label is its own.
+        bound = {label: label if shared(label) else bound_fingerprint(name, label, dirs[label], entry, shared)
+                 for label, entry in enabled.items()} if shared else {}
+        claimed = signed in bound.values()
+        for label, entry in sorted(enabled.items()):
             priority = number(entry.get('priority'))
-            # A fingerprint names one account of a shared store: it is current only while that account is signed in.
-            away = bool(shared and shared(label) and label != signed)
-            found.append(Account(name, label, identity_dir, default is not None and not away and
-                                 (label == signed if shared and shared(label) else label == active_label),
-                                 str(entry['plan']) if entry.get('plan') else None,
-                                 int(priority) if priority is not None else None,
-                                 {key: value for key, value in entry.items()
-                                  if key not in ('identity_dir', 'enabled', 'plan', 'priority', 'display_name')},
-                                 away))
-        # Entries keyed by fingerprint only name accounts, so the signed-in one and those seen before still appear.
-        if shared and enabled and all(shared(label) for label in enabled) and default is not None and Path(default).exists():
+            if shared:
+                # Current only while its own account is signed in; an unbound alias takes an unclaimed sign-in.
+                mine = bound[label] == signed if bound[label] else signed is None or not claimed
+                claimed = claimed or (bound[label] is None and mine and signed is not None)
+                away = not mine
+                active = default is not None and mine and (signed is not None or label == active_label)
+            else:
+                away, active = False, default is not None and label == active_label
+            options = {key: value for key, value in entry.items()
+                       if key not in ('identity_dir', 'enabled', 'plan', 'priority', 'display_name')}
+            if shared and bound[label]:
+                options['fingerprint'] = bound[label]
+            found.append(Account(name, label, dirs[label], active, str(entry['plan']) if entry.get('plan') else None,
+                                 int(priority) if priority is not None else None, options, away))
+        # Configured entries only name accounts, so the signed-in one and those seen before still appear under
+        # their fingerprints, unless an entry already stands for them.
+        if shared and enabled and default is not None and Path(default).exists():
+            taken = set(bound.values()) | ({signed} if claimed else set())
             found += [Account(name, label, Path(default), label == signed, signed_out=label != signed)
                       for label in sorted({signed} - {None} | set(remembered(name, shared, Path(default))))
-                      if label not in listed[name]]
+                      if label not in listed[name] and label not in taken]
     return found
+
+
+def bound_fingerprint(name, label, identity_dir, entry, shared):
+    """The account an alias on a shared store stands for: `fingerprint` in its entry, else its last reading's."""
+    for candidate in (entry.get('fingerprint'), (load_snapshot(name, label, identity_dir) or {}).get('fingerprint')):
+        if isinstance(candidate, str) and shared(candidate):
+            return candidate
+    return None
+
+
+def shared_store(name, label):
+    """Whether a label is a fingerprint on a provider whose one credential store serves several accounts."""
+    shared = getattr(provider(name), 'fingerprinted', None)
+    return bool(shared and shared(label))
 
 
 def remembered(name, shared, identity_dir, now=None):
@@ -790,6 +818,10 @@ def _refresh(account, now=None, force=False, trigger='timer', power='ac', ignore
     started, kind, wait, deadline = monotonic(), None, None, None
     try:
         result = fetch(account, now)
+        # A shared store answers for whoever is signed in now; never file that under another account.
+        expected = account.options.get('fingerprint') or (account.label if shared_store(account.provider, account.label) else None)
+        if expected and result.get('fingerprint') and result['fingerprint'] != expected:
+            raise Unavailable(f'{account.provider} is signed in to a different account than {account.label}', 'auth')
     except Unavailable as exc:
         # Provider text is fixed, but nothing token-shaped may reach the snapshot either.
         error, kind, wait = SECRETISH.sub('[redacted]', str(exc)), exc.kind, exc.retry_after
@@ -818,7 +850,8 @@ def _refresh(account, now=None, force=False, trigger='timer', power='ac', ignore
                  'plan': str(plan) if plan else None, 'observed_at': observed,
                  'source': result.get('source'), 'windows': windows, 'unreported': unreported,
                  'credits': result.get('credits') if isinstance(result.get('credits'), dict) else None,
-                 **{key: extra for key, extra in extras.items() if extra}}
+                 **{key: extra for key, extra in extras.items() if extra},
+                 **({'fingerprint': result['fingerprint']} if isinstance(result.get('fingerprint'), str) else {})}
         value['fetch'] = fetch_state(account, previous, now, trigger, monotonic() - started)
         record_events(previous, value)
         record_series(value, result)
@@ -1034,17 +1067,20 @@ def reset_passed(row, now):
 
 
 def display(rows, now, alert=SHORT_WINDOW_ALERT):
-    """The window a reader should see: an exhausted one binds; else a window at `alert`% or more, the most used;
-    else the longest, since weekly and monthly headroom decides more than a 5-hour window does. A window whose
-    reset has passed is never shown as current."""
+    """The window a reader should see: an exhausted one binds; else a shorter window at `alert`% or more, the
+    most used, even when the longest is higher, since the short one runs out first; else the longest, since
+    weekly and monthly headroom decides more than a 5-hour window does. A window whose reset has passed is never
+    shown as current."""
     current = [row for row in rows if sets_state(row) and not reset_passed(row, now)]
     spent = [row for row in current if row['pace']['state'] == 'exhausted']
     if spent:
         return max(spent, key=lambda row: row.get('reset_at') or '9999')
-    alerts = [row for row in current if row['used_percent'] >= alert]
+    longest = max(current, key=lambda row: (row['window_minutes'] or 0, row['used_percent']), default=None)
+    alerts = [row for row in current if row['used_percent'] >= alert and row is not longest and
+              (row['window_minutes'] or 0) < (longest['window_minutes'] or 0)]
     if alerts:
         return max(alerts, key=lambda row: (row['used_percent'], -(row['window_minutes'] or 0)))
-    return max(current, key=lambda row: (row['window_minutes'] or 0, row['used_percent']), default=None)
+    return longest
 
 
 def alert_percent():
@@ -1271,7 +1307,10 @@ def describe(value, banked, now, entries=None, alert=None):
         rows.append({**row, 'label': window_label(row, labels)})
     # A restated window would show twice and count twice; the report keeps the named one.
     rows = [row for row in rows if not repeats(row, rows)]
-    worst = binding(rows)
+    # A window whose reset has passed is history: it never makes the account exhausted or binds it, unless the
+    # provider still refuses ordinary use, which the next reading settles.
+    refused = (value.get('allowance') or {}).get('ordinary_usage_allowed') is False
+    worst = binding([row for row in rows if not row.get('reset_passed')]) or (binding(rows) if refused else None)
     spent = allowance_spent(value, worst)
     drawing = credit_draw(value, spent)
     rate = burn_rate(value, drawing) if drawing else None
@@ -1283,7 +1322,9 @@ def describe(value, banked, now, entries=None, alert=None):
         worst['pace']['state'] if worst else 'unreported'
     shown = display([row for row in rows if row.get('pool') in (None, (worst or {}).get('pool'))], now,
                     alert_percent() if alert is None else alert)
-    back = worst if worst and worst['pace']['state'] == 'exhausted' and (spent or signed_out) else None
+    # A signed-out account's return is history too: "back since" once its reset has passed.
+    back = binding(rows) if signed_out else worst if spent else None
+    back = back if back and back['pace']['state'] == 'exhausted' else None
     return {key: value.get(key) for key in ('provider', 'account', 'plan', 'host', 'active', 'priority',
                                             'observed_at', 'attempted_at', 'status', 'error', 'source')} | {
         'provider_name': provider_name(name),
@@ -1342,7 +1383,8 @@ def headline(rows, activity):
     if pinned:
         return {'mode': mode, 'account': mode, 'window': pinned['display_window']}
     if mode == 'worst':
-        peaks = [(row, binding(row['windows'])) for row in candidates]
+        peaks = [(row, binding([item for item in row['windows'] if not item.get('reset_passed')]))
+                 for row in candidates]
         row, peak = max(peaks, key=lambda item: item[1]['used_percent'], default=(None, None))
         return {'mode': mode, 'account': row and f"{row['provider']}/{row['account']}", 'window': peak and peak['name']}
     used = [row for row in candidates if activity.get(f"{row['provider']}/{row['account']}")]
@@ -1500,10 +1542,11 @@ def route_states(now=None):
             continue
         module = provider(name)
         row = describe(value, None, now)
-        exhausted = [window['reset_at'] for window in row['windows']
+        current = [window for window in row['windows'] if not window.get('reset_passed')]
+        exhausted = [window['reset_at'] for window in current
                      if window['pace']['state'] == 'exhausted' and sets_state(window)]
         if row['state'] == 'exhausted' and not exhausted:
-            exhausted = [refused_until(binding(row['windows']), value, now)]
+            exhausted = [refused_until(binding(current) or binding(row['windows']), value, now)]
         states[name] = {'adapter': getattr(module, 'ADAPTER', None), 'account': label, 'host': telemetry_host(), 'state': row['state'],
                         'summary': row['summary'], 'observed_at': value.get('observed_at'),
                         'cooling_until': max(exhausted) if exhausted and all(exhausted) else None,

@@ -1,9 +1,9 @@
 {
  "schema": "provenant.quota.report.v1",
- "generated_at": "2026-10-22T02:00:00Z",
+ "generated_at": "2030-03-14T01:00:00Z",
  "host": "laptop",
  "enabled": true,
- "next_due_at": "2026-10-22T02:04:00Z",
+ "next_due_at": "2030-03-14T01:04:00Z",
  "refreshing": [],
  "providers": [
   "agy",
@@ -20,68 +20,68 @@
    "host": "laptop",
    "active": true,
    "priority": null,
-   "observed_at": "2026-10-22T01:57:00Z",
-   "attempted_at": "2026-10-22T01:57:00Z",
+   "observed_at": "2030-03-14T00:57:00Z",
+   "attempted_at": "2030-03-14T00:57:00Z",
    "status": "ok",
    "error": null,
    "source": "fixture",
    "state": "on_pace",
-   "summary": "claude.weekly: on pace; runs out in 5d 7h",
+   "summary": "claude.weekly: on pace; runs out in 6d 12h",
    "windows": [
     {
      "name": "gemini.weekly",
      "raw_kind": "gemini.weekly",
      "used_percent": 100.0,
      "window_minutes": 10080,
-     "reset_at": "2026-10-24T04:01:00Z",
-     "window_start": "2026-10-17T04:01:00Z",
+     "reset_at": "2030-03-16T04:00:00Z",
+     "window_start": "2030-03-09T04:00:00Z",
      "pace": {
       "state": "exhausted",
       "expected_used_percent": null,
       "delta_percent": null,
       "will_last_to_reset": false,
-      "runs_out_at": "2026-10-22T02:00:00Z",
+      "runs_out_at": "2030-03-14T01:00:00Z",
       "headroom_percent": 0.0,
       "expiring_headroom_percent": 0,
-      "summary": "exhausted; resets in 2d 2h"
+      "summary": "exhausted; resets in 2d 3h"
      },
      "label": "Weekly"
     },
     {
      "name": "claude.weekly",
      "raw_kind": "claude.weekly",
-     "used_percent": 7.4,
+     "used_percent": 6.0,
      "window_minutes": 10080,
-     "reset_at": "2026-10-28T15:50:00Z",
-     "window_start": "2026-10-21T15:50:00Z",
+     "reset_at": "2030-03-20T15:00:00Z",
+     "window_start": "2030-03-13T15:00:00Z",
      "pace": {
       "state": "on_pace",
-      "expected_used_percent": 6.1,
-      "delta_percent": 1.3,
+      "expected_used_percent": 6.0,
+      "delta_percent": 0.0,
       "will_last_to_reset": false,
-      "runs_out_at": "2026-10-27T09:13:14.594595Z",
-      "headroom_percent": 92.6,
+      "runs_out_at": "2030-03-20T13:40:00Z",
+      "headroom_percent": 94.0,
       "expiring_headroom_percent": 0,
-      "summary": "on pace; runs out in 5d 7h"
+      "summary": "on pace; runs out in 6d 12h"
      },
      "label": "Weekly"
     },
     {
      "name": "claude.5h",
      "raw_kind": "claude.5h",
-     "used_percent": 14.8,
+     "used_percent": 12.0,
      "window_minutes": 300,
-     "reset_at": "2026-10-22T05:10:00Z",
-     "window_start": "2026-10-22T00:10:00Z",
+     "reset_at": "2030-03-14T04:00:00Z",
+     "window_start": "2030-03-13T23:00:00Z",
      "pace": {
       "state": "reserve",
-      "expected_used_percent": 36.7,
-      "delta_percent": -21.9,
+      "expected_used_percent": 40.0,
+      "delta_percent": -28.0,
       "will_last_to_reset": true,
       "runs_out_at": null,
-      "headroom_percent": 85.2,
-      "expiring_headroom_percent": 59.6,
-      "summary": "22% in reserve; lasts until reset"
+      "headroom_percent": 88.0,
+      "expiring_headroom_percent": 70.0,
+      "summary": "28% in reserve; lasts until reset"
      },
      "label": "5-hour"
     }
@@ -97,12 +97,12 @@
    },
    "use_it_or_lose_it": {
     "window": "gemini.weekly",
-    "reset_at": "2026-10-24T04:01:00Z",
+    "reset_at": "2030-03-16T04:00:00Z",
     "unused_percent": 0.0,
     "expiring_headroom_percent": 0
    },
    "schedule": {
-    "next_due_at": "2026-10-22T02:06:00Z",
+    "next_due_at": "2030-03-14T01:06:00Z",
     "reason": "active"
    }
   },
@@ -113,8 +113,8 @@
    "host": "laptop",
    "active": true,
    "priority": 1,
-   "observed_at": "2026-10-22T01:57:00Z",
-   "attempted_at": "2026-10-22T01:57:00Z",
+   "observed_at": "2030-03-14T00:57:00Z",
+   "attempted_at": "2030-03-14T00:57:00Z",
    "status": "ok",
    "error": null,
    "source": "fixture",
@@ -124,18 +124,18 @@
     {
      "name": "five_hour",
      "raw_kind": "five_hour",
-     "used_percent": 2.0,
+     "used_percent": 3.0,
      "window_minutes": 300,
-     "reset_at": "2026-10-22T06:51:00Z",
-     "window_start": "2026-10-22T01:51:00Z",
+     "reset_at": "2030-03-14T05:40:00Z",
+     "window_start": "2030-03-14T00:40:00Z",
      "pace": {
       "state": "on_pace",
-      "expected_used_percent": 3.0,
-      "delta_percent": -1.0,
+      "expected_used_percent": 6.7,
+      "delta_percent": -3.7,
       "will_last_to_reset": true,
       "runs_out_at": null,
-      "headroom_percent": 98.0,
-      "expiring_headroom_percent": 33.3,
+      "headroom_percent": 97.0,
+      "expiring_headroom_percent": 55.0,
       "summary": "on pace; lasts until reset"
      },
      "label": "5-hour"
@@ -143,17 +143,17 @@
     {
      "name": "seven_day",
      "raw_kind": "seven_day",
-     "used_percent": 9.0,
+     "used_percent": 11.0,
      "window_minutes": 10080,
-     "reset_at": "2026-10-28T22:00:00Z",
-     "window_start": "2026-10-21T22:00:00Z",
+     "reset_at": "2030-03-20T21:00:00Z",
+     "window_start": "2030-03-13T21:00:00Z",
      "pace": {
       "state": "early",
       "expected_used_percent": 2.4,
-      "delta_percent": 6.6,
+      "delta_percent": 8.6,
       "will_last_to_reset": false,
-      "runs_out_at": "2026-10-23T18:26:40Z",
-      "headroom_percent": 91.0,
+      "runs_out_at": "2030-03-15T09:21:49.090909Z",
+      "headroom_percent": 89.0,
       "expiring_headroom_percent": 0,
       "summary": "window just started; resets in 6d 20h"
      },
@@ -162,12 +162,12 @@
     {
      "name": "iguana_necktie",
      "raw_kind": "iguana_necktie",
-     "used_percent": 54.5,
+     "used_percent": 30.0,
      "window_minutes": null,
      "reset_at": null,
      "window_start": null,
-     "used_amount": 136.25,
-     "limit_amount": 250.0,
+     "used_amount": 30.0,
+     "limit_amount": 100.0,
      "currency": "USD",
      "pace": {
       "state": "unknown",
@@ -175,7 +175,7 @@
       "delta_percent": null,
       "will_last_to_reset": null,
       "runs_out_at": null,
-      "headroom_percent": 45.5,
+      "headroom_percent": 70.0,
       "expiring_headroom_percent": 0,
       "summary": "reset time unreported; pace unknown"
      },
@@ -191,12 +191,12 @@
    },
    "use_it_or_lose_it": {
     "window": "seven_day",
-    "reset_at": "2026-10-28T22:00:00Z",
-    "unused_percent": 91.0,
+    "reset_at": "2030-03-20T21:00:00Z",
+    "unused_percent": 89.0,
     "expiring_headroom_percent": 0
    },
    "schedule": {
-    "next_due_at": "2026-10-22T02:04:00Z",
+    "next_due_at": "2030-03-14T01:04:00Z",
     "reason": "active"
    }
   },
@@ -207,8 +207,8 @@
    "host": "laptop",
    "active": true,
    "priority": 2,
-   "observed_at": "2026-10-22T01:57:00Z",
-   "attempted_at": "2026-10-22T01:57:00Z",
+   "observed_at": "2030-03-14T00:57:00Z",
+   "attempted_at": "2030-03-14T00:57:00Z",
    "status": "ok",
    "error": null,
    "source": "fixture",
@@ -220,14 +220,14 @@
      "raw_kind": "seven_day",
      "used_percent": 100.0,
      "window_minutes": 10080,
-     "reset_at": "2026-10-25T01:00:00Z",
-     "window_start": "2026-10-18T01:00:00Z",
+     "reset_at": "2030-03-17T00:00:00Z",
+     "window_start": "2030-03-10T00:00:00Z",
      "pace": {
       "state": "exhausted",
       "expected_used_percent": null,
       "delta_percent": null,
       "will_last_to_reset": false,
-      "runs_out_at": "2026-10-22T02:00:00Z",
+      "runs_out_at": "2030-03-14T01:00:00Z",
       "headroom_percent": 0.0,
       "expiring_headroom_percent": 0,
       "summary": "exhausted; resets in 2d 23h"
@@ -263,7 +263,7 @@
    },
    "use_it_or_lose_it": {
     "window": "seven_day",
-    "reset_at": "2026-10-25T01:00:00Z",
+    "reset_at": "2030-03-17T00:00:00Z",
     "unused_percent": 0.0,
     "expiring_headroom_percent": 0
    }
@@ -275,30 +275,30 @@
    "host": "laptop",
    "active": true,
    "priority": 3,
-   "observed_at": "2026-10-22T01:57:00Z",
-   "attempted_at": "2026-10-22T01:57:00Z",
+   "observed_at": "2030-03-14T00:57:00Z",
+   "attempted_at": "2030-03-14T00:57:00Z",
    "status": "ok",
    "error": null,
    "source": "fixture",
-   "state": "on_pace",
-   "summary": "seven_day: on pace; runs out in 3d 12h",
+   "state": "reserve",
+   "summary": "seven_day: 5% in reserve; lasts until reset",
    "windows": [
     {
      "name": "seven_day",
      "raw_kind": "seven_day",
-     "used_percent": 48.0,
+     "used_percent": 41.0,
      "window_minutes": 10080,
-     "reset_at": "2026-10-25T20:00:00Z",
-     "window_start": "2026-10-18T20:00:00Z",
+     "reset_at": "2030-03-17T19:00:00Z",
+     "window_start": "2030-03-10T19:00:00Z",
      "pace": {
-      "state": "on_pace",
+      "state": "reserve",
       "expected_used_percent": 46.4,
-      "delta_percent": 1.6,
-      "will_last_to_reset": false,
-      "runs_out_at": "2026-10-25T14:30:00Z",
-      "headroom_percent": 52.0,
-      "expiring_headroom_percent": 0,
-      "summary": "on pace; runs out in 3d 12h"
+      "delta_percent": -5.4,
+      "will_last_to_reset": true,
+      "runs_out_at": null,
+      "headroom_percent": 59.0,
+      "expiring_headroom_percent": 11.7,
+      "summary": "5% in reserve; lasts until reset"
      },
      "label": "Weekly"
     }
@@ -312,9 +312,9 @@
    },
    "use_it_or_lose_it": {
     "window": "seven_day",
-    "reset_at": "2026-10-25T20:00:00Z",
-    "unused_percent": 52.0,
-    "expiring_headroom_percent": 0
+    "reset_at": "2030-03-17T19:00:00Z",
+    "unused_percent": 59.0,
+    "expiring_headroom_percent": 11.7
    }
   },
   {
@@ -324,30 +324,30 @@
    "host": "laptop",
    "active": true,
    "priority": null,
-   "observed_at": "2026-10-22T01:57:00Z",
-   "attempted_at": "2026-10-22T01:57:00Z",
+   "observed_at": "2030-03-14T00:57:00Z",
+   "attempted_at": "2030-03-14T00:57:00Z",
    "status": "ok",
    "error": null,
    "source": "fixture",
    "state": "deficit",
-   "summary": "primary: 57% in deficit; runs out in 8h 54m",
+   "summary": "primary: 52% in deficit; runs out in 12h 24m",
    "windows": [
     {
      "name": "primary",
      "raw_kind": "primary",
-     "used_percent": 83.0,
+     "used_percent": 78.0,
      "window_minutes": 10080,
-     "reset_at": "2026-10-27T06:32:00Z",
-     "window_start": "2026-10-20T06:32:00Z",
+     "reset_at": "2030-03-19T05:00:00Z",
+     "window_start": "2030-03-12T05:00:00Z",
      "pace": {
       "state": "deficit",
-      "expected_used_percent": 25.9,
-      "delta_percent": 57.1,
+      "expected_used_percent": 26.2,
+      "delta_percent": 51.8,
       "will_last_to_reset": false,
-      "runs_out_at": "2026-10-22T10:54:10.120482Z",
-      "headroom_percent": 17.0,
+      "runs_out_at": "2030-03-14T13:24:36.923077Z",
+      "headroom_percent": 22.0,
       "expiring_headroom_percent": 0,
-      "summary": "57% in deficit; runs out in 8h 54m"
+      "summary": "52% in deficit; runs out in 12h 24m"
      },
      "label": "Weekly"
     }
@@ -363,8 +363,8 @@
    },
    "use_it_or_lose_it": {
     "window": "primary",
-    "reset_at": "2026-10-27T06:32:00Z",
-    "unused_percent": 17.0,
+    "reset_at": "2030-03-19T05:00:00Z",
+    "unused_percent": 22.0,
     "expiring_headroom_percent": 0
    }
   },
@@ -375,30 +375,30 @@
    "host": "laptop",
    "active": true,
    "priority": null,
-   "observed_at": "2026-10-22T01:57:00Z",
-   "attempted_at": "2026-10-22T01:57:00Z",
+   "observed_at": "2030-03-14T00:57:00Z",
+   "attempted_at": "2030-03-14T00:57:00Z",
    "status": "ok",
    "error": null,
    "source": "fixture",
    "state": "exhausted",
-   "summary": "billing_cycle: exhausted; resets in 21d 22h",
+   "summary": "billing_cycle: exhausted; resets in 22d",
    "windows": [
     {
      "name": "billing_cycle",
      "raw_kind": "billing_cycle",
      "used_percent": 100.0,
      "window_minutes": 44640,
-     "reset_at": "2026-11-13T00:00:00Z",
-     "window_start": "2026-10-13T00:00:00Z",
+     "reset_at": "2030-04-05T01:00:00Z",
+     "window_start": "2030-03-05T01:00:00Z",
      "pace": {
       "state": "exhausted",
       "expected_used_percent": null,
       "delta_percent": null,
       "will_last_to_reset": false,
-      "runs_out_at": "2026-10-22T02:00:00Z",
+      "runs_out_at": "2030-03-14T01:00:00Z",
       "headroom_percent": 0.0,
       "expiring_headroom_percent": 0,
-      "summary": "exhausted; resets in 21d 22h"
+      "summary": "exhausted; resets in 22d"
      },
      "label": "Monthly"
     }
@@ -412,7 +412,7 @@
    },
    "use_it_or_lose_it": {
     "window": "billing_cycle",
-    "reset_at": "2026-11-13T00:00:00Z",
+    "reset_at": "2030-04-05T01:00:00Z",
     "unused_percent": 0.0,
     "expiring_headroom_percent": 0
    }
@@ -424,8 +424,8 @@
    "host": "laptop",
    "active": true,
    "priority": null,
-   "observed_at": "2026-10-22T01:57:00Z",
-   "attempted_at": "2026-10-22T01:57:00Z",
+   "observed_at": "2030-03-14T00:57:00Z",
+   "attempted_at": "2030-03-14T00:57:00Z",
    "status": "ok",
    "error": null,
    "source": "fixture",
@@ -437,14 +437,14 @@
      "raw_kind": "seven_day",
      "used_percent": 100.0,
      "window_minutes": 10080,
-     "reset_at": "2026-10-25T23:20:00Z",
-     "window_start": "2026-10-18T23:20:00Z",
+     "reset_at": "2030-03-17T22:00:00Z",
+     "window_start": "2030-03-10T22:00:00Z",
      "pace": {
       "state": "exhausted",
       "expected_used_percent": null,
       "delta_percent": null,
       "will_last_to_reset": false,
-      "runs_out_at": "2026-10-22T02:00:00Z",
+      "runs_out_at": "2030-03-14T01:00:00Z",
       "headroom_percent": 0.0,
       "expiring_headroom_percent": 0,
       "summary": "exhausted; resets in 3d 21h"
@@ -454,19 +454,19 @@
     {
      "name": "thirty_day",
      "raw_kind": "thirty_day",
-     "used_percent": 24.0,
+     "used_percent": 19.0,
      "window_minutes": 43200,
-     "reset_at": "2026-11-08T00:00:00Z",
-     "window_start": "2026-10-09T00:00:00Z",
+     "reset_at": "2030-03-30T01:00:00Z",
+     "window_start": "2030-02-28T01:00:00Z",
      "pace": {
       "state": "reserve",
-      "expected_used_percent": 43.6,
-      "delta_percent": -19.6,
+      "expected_used_percent": 46.7,
+      "delta_percent": -27.7,
       "will_last_to_reset": true,
       "runs_out_at": null,
-      "headroom_percent": 76.0,
-      "expiring_headroom_percent": 45.0,
-      "summary": "20% in reserve; lasts until reset"
+      "headroom_percent": 81.0,
+      "expiring_headroom_percent": 59.3,
+      "summary": "28% in reserve; lasts until reset"
      },
      "label": "Monthly"
     },
@@ -499,9 +499,9 @@
    },
    "use_it_or_lose_it": {
     "window": "thirty_day",
-    "reset_at": "2026-11-08T00:00:00Z",
-    "unused_percent": 76.0,
-    "expiring_headroom_percent": 45.0
+    "reset_at": "2030-03-30T01:00:00Z",
+    "unused_percent": 81.0,
+    "expiring_headroom_percent": 59.3
    }
   }
  ],

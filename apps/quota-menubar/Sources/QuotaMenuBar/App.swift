@@ -148,7 +148,7 @@ struct QuotaPanel: View {
     }
 }
 
-/// The headline account: "Claude · Anese" over "Weekly · 9% · resets Tue 28 Oct".
+/// The headline account: "Claude · Anese" over "Weekly · 11% · resets Tue 19 Mar".
 struct Summary: View {
     let report: QuotaReport?, error: String?, now: Date
 

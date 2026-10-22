@@ -179,12 +179,13 @@ extension QuotaReport.Account {
             ?? windows.max { $0.usedPercent! < $1.usedPercent! }
     }
 
-    /// As in provider_quota.py `display`: an exhausted window; else one at the alert use or more; else the longest.
+    /// As in provider_quota.py `display`: an exhausted window; else a shorter window at the alert use or more,
+    /// even when the longest is higher, since the short one runs out first; else the longest.
     static func shown(_ windows: [Window], alert: Double) -> Window? {
         if let spent = worst(windows), spent.pace.state == "exhausted" { return spent }
-        let alerts = windows.filter { $0.usedPercent! >= alert }
-        return alerts.max { $0.usedPercent! < $1.usedPercent! }
-            ?? windows.max { ($0.windowMinutes ?? 0, $0.usedPercent!) < ($1.windowMinutes ?? 0, $1.usedPercent!) }
+        let longest = windows.max { ($0.windowMinutes ?? 0, $0.usedPercent!) < ($1.windowMinutes ?? 0, $1.usedPercent!) }
+        let alerts = windows.filter { $0.usedPercent! >= alert && ($0.windowMinutes ?? 0) < (longest?.windowMinutes ?? 0) }
+        return alerts.max { $0.usedPercent! < $1.usedPercent! } ?? longest
     }
 
     /// The window that binds the account now. Pools are independent, so the account is usable while any pool is:
@@ -310,26 +311,26 @@ enum Fmt {
     // Weekday and the rest are formatted apart, so no locale puts a comma between them.
     private static func weekday(_ date: Date) -> String { date.formatted(.dateTime.weekday(.abbreviated)) }
 
-    /// "Tue 28 Oct".
+    /// "Tue 19 Mar".
     static func date(_ date: Date) -> String { "\(weekday(date)) \(date.formatted(.dateTime.day().month(.abbreviated)))" }
 
-    /// "Sat 3 pm" within a week either way, otherwise "Tue 28 Oct".
+    /// "Mon 9 am" within a week either way, otherwise "Tue 19 Mar".
     static func moment(_ date: Date, now: Date) -> String {
         guard abs(date.timeIntervalSince(now)) < 6.5 * 86_400 else { return self.date(date) }
         let hour = Date.FormatStyle().hour(.defaultDigits(amPM: .abbreviated))
         return "\(weekday(date)) \(date.formatted(Calendar.current.component(.minute, from: date) == 0 ? hour : hour.minute()))"
     }
 
-    /// The exact instant, for a tooltip: "Tue 28 Oct, 9:00 am".
+    /// The exact instant, for a tooltip: "Tue 19 Mar, 9:00 am".
     static func exact(_ date: Date) -> String { date.formatted(.dateTime.weekday(.abbreviated).day().month(.abbreviated).hour().minute()) }
 
-    /// A reset is a fact: "resets in 4h 51m" within a day, otherwise "resets Tue 28 Oct".
+    /// A reset is a fact: "resets in 4h 40m" within a day, otherwise "resets Tue 19 Mar".
     static func resets(_ date: Date?, now: Date) -> String? {
         guard let date, date > now else { return nil }
         return date.timeIntervalSince(now) < 86_400 ? "resets in \(until(date, now: now)!)" : "resets \(self.date(date))"
     }
 
-    /// "back in 4h 51m", "back Sat 3 pm", or "back since Sat 3 pm" once it has passed.
+    /// "back in 4h 40m", "back Mon 9 am", or "back since Mon 9 am" once it has passed.
     static func back(_ date: Date?, now: Date) -> String {
         guard let date else { return "reset time unknown" }
         if date <= now { return "back since \(moment(date, now: now))" }
@@ -345,7 +346,7 @@ enum Fmt {
         return "At this pace, empty by \(day)"
     }
 
-    /// One window: "Weekly · resets Tue 28 Oct", "Weekly exhausted · back Sat 3 pm", or "Weekly · reset since Sat 3 pm".
+    /// One window: "Weekly · resets Tue 19 Mar", "Weekly exhausted · back Mon 9 am", or "Weekly · reset since Mon 9 am".
     static func status(_ window: QuotaReport.Window, now: Date, pooled: Bool = false) -> String {
         let title = pooled ? window.fullTitle : window.title
         if window.isExpired(now) { return "\(title) · reset since \(moment(window.resetAt!, now: now))" }
@@ -353,7 +354,7 @@ enum Fmt {
         return [title, resets(window.resetAt, now: now)].compactMap { $0 }.joined(separator: " · ")
     }
 
-    /// "Gemini exhausted until Sat 3 pm", for a pool that does not bind the account.
+    /// "Gemini exhausted until Mon 9 am", for a pool that does not bind the account.
     static func spent(_ window: QuotaReport.Window, now: Date) -> String {
         "\(window.pool.map(human) ?? window.title) exhausted " + (window.resetAt.map { "until \(moment($0, now: now))" } ?? "for now")
     }
