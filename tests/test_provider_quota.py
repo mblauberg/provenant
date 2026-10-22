@@ -2,6 +2,7 @@
 
 import base64
 from datetime import UTC, datetime, timedelta
+import hashlib
 import importlib.util
 import io
 import json
@@ -116,6 +117,16 @@ def test_missing_windows_are_unreported_never_zero(quota, monkeypatch):
     assert quota.provider('claude').parse({'five_hour': {'utilization': 1}, 'seven_day': None})['unreported'] == ['seven_day']
 
 
+def test_render_folds_unreported_windows_into_one_line_per_account(quota, monkeypatch, capsys):
+    monkeypatch.setattr(quota, 'fetch', lambda account, now: {
+        'windows': [window(14, 300, timedelta(hours=1), 'five_hour')], 'unreported': ['seven_day_opus', 'seven_day_sonnet']})
+    account = quota.Account('claude', 'max-a', Path('/nowhere'), True)
+    quota.render(quota.report([quota.refresh(account, NOW, force=True)], NOW))
+    out = capsys.readouterr().out
+    assert 'seven_day_opus' not in out and 'five_hour' in out
+    assert 'claude/max-a: 2 window(s) not reported (missing does not mean 0%); use --json' in out
+
+
 # Provider modules ---------------------------------------------------------------------------
 
 def test_registry_names_one_module_per_provider_with_the_common_interface(quota):
@@ -224,6 +235,30 @@ def test_claude_refuses_expiring_credentials_without_calling_the_endpoint(quota,
     monkeypatch.setattr(quota.provider('claude'), 'status', lambda account, io: {'loggedIn': True})
     value = quota.refresh(quota.Account('claude', 'c', identity, False), NOW, force=True)
     assert value['status'] == 'unavailable' and 'refresh' in value['error'] and TOKEN not in json.dumps(value)
+
+
+@pytest.mark.parametrize('name, suffixed', [('.claude', False), ('.claude-b', True)])
+def test_claude_keychain_item_follows_the_config_directory(quota, monkeypatch, tmp_path, name, suffixed):
+    identity = tmp_path / 'home' / name
+    identity.mkdir()
+    claude = quota.provider('claude')
+    monkeypatch.setattr(claude, 'status', lambda account, io: {'loggedIn': True})
+    seen = []
+
+    def security(argv, **kwargs):
+        seen.append(argv)
+        return subprocess.CompletedProcess(argv, 44, b'', b'')
+    monkeypatch.setattr(quota, 'run_process', security)
+    value = quota.refresh(quota.Account('claude', 'x', identity, False), NOW, force=True)
+    digest = hashlib.sha256(str(identity).encode()).hexdigest()[:8]
+    expected = 'Claude Code-credentials' + (f'-{digest}' if suffixed else '')
+    assert [argv[argv.index('-s') + 1] for argv in seen] == [expected]
+    assert value['status'] == 'unavailable'
+
+
+def test_claude_keychain_service_matches_a_known_claude_code_name(quota):
+    # Claude Code's item for CLAUDE_CONFIG_DIR=/Users/user/.claude-pro, observed on a real Mac.
+    assert quota.provider('claude').keychain_service(Path('/Users/user/.claude-pro')) == 'Claude Code-credentials-90930409'
 
 
 def test_cursor_session_cookie_comes_from_the_local_jwt_and_cycle_dates(quota, tmp_path, monkeypatch):
