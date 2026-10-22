@@ -30,6 +30,7 @@ hooks = load("configure_claude_hooks_test", "configure-claude-hooks.py")
 
 DENIED = [
     "pkill -f server",
+    'echo "Stopped user\'s server: $(pkill -f server)"',
     "killall node",
     "/usr/bin/pkill node",
     "echo done; pkill node",
@@ -97,6 +98,7 @@ DENIED = [
 
 ALLOWED = [
     "",
+    'echo "$(rg \'sudo pkill\' docs)"',
     "ls -la",
     "kill 4242",
     "kill -9 4242 4243",

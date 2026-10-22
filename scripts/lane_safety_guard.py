@@ -92,15 +92,18 @@ def _skip_backtick(text: str, start: int) -> int:
     return min(i + 1, len(text))
 
 
-def substitutions(text: str) -> list[str]:
-    """Command text of every `$(...)` and backtick substitution in text."""
+def substitutions(text: str, double_quoted: bool = False) -> list[str]:
+    """Command text of every `$(...)` and backtick substitution in text.
+
+    Inside double quotes an apostrophe is a literal, not a single quote.
+    """
     found, i, single = [], 0, False
     while i < len(text):
         c = text[i]
         if c == "\\":
             i += 2
             continue
-        if c == "'" :
+        if c == "'" and not double_quoted:
             single = not single
         elif not single and text.startswith("$(", i) and not text.startswith("$((", i):
             end = _skip_substitution(text, i + 2)
@@ -386,7 +389,9 @@ def executable_text(command: str) -> str:
     """Command text without what the shell will not run.
 
     Drops quoted here-document bodies and single-quoted spans; inside double
-    quotes keeps only `$(…)` and backtick bodies, which still execute.
+    quotes keeps only `$(…)` and backtick bodies, which still execute, filtered
+    the same way. An unterminated quote runs to the end of the line, as the
+    shell would refuse to run it.
     """
     text, out, i = QUOTED_HEREDOC.sub("", command), [], 0
     while i < len(text):
@@ -402,7 +407,7 @@ def executable_text(command: str) -> str:
             j = i + 1
             while j < len(text) and text[j] != '"':
                 j += 2 if text[j] == "\\" else 1
-            out.extend(f"\n{inner}\n" for inner in substitutions(text[i + 1 : j]))
+            out.extend(f"\n{executable_text(inner)}\n" for inner in substitutions(text[i + 1 : j], True))
             out.append(" ")
             i = j + 1
         else:
