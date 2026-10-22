@@ -42,6 +42,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import process_info
 CF_DISPATCH = Path(__file__).with_name("cf_dispatch.py")
 TASK_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+DELIVERY_RUN_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 ATTEMPT_ID_RE = re.compile(r"^attempt-(?P<number>\d{3}|[1-9]\d{3,})$")
 ESCALATION_REASONS = ("gate_failed", "review_blocked", "capability", "quota_or_limit")
 BATCH_ID_RE = re.compile(r"^batch-(?:\d{3}|[1-9]\d{3,})$")
@@ -1783,6 +1784,20 @@ def profile_knob(args: argparse.Namespace, name: str, fallback: Any = None) -> A
     return profile_resolution(args).get("knobs", {}).get(name, fallback)
 
 
+def delivery_run_id(value):
+    if not isinstance(value, str) or not DELIVERY_RUN_ID_RE.fullmatch(value):
+        raise ValueError("delivery_run_id must match RUN.json run_id: 1-128 letters, numbers, '.', '_', ':' or '-', starting with a letter or number")
+    return value
+
+
+def inherit_delivery_run_id(args, previous):
+    value = previous.get('delivery_run_id')
+    if value is not None:
+        if getattr(args, 'delivery_run_id', None) not in (None, value):
+            raise ValueError('retry must keep delivery_run_id')
+        args.delivery_run_id = delivery_run_id(value)
+
+
 def contract_row(args,run_dir,number,attempt_dir,plan,started_at):
     route=plan.get("route",{})
     model=plan.get("model") or route.get("resolved_model") or args.model or ""
@@ -1814,6 +1829,7 @@ def contract_row(args,run_dir,number,attempt_dir,plan,started_at):
         **({"batch_id":args.batch_id} if getattr(args,"batch_id",None) else {}),"profile":profile_resolution(args),
         "attempt":number,"state":"running","status":None,"usage_source":"missing","mode":args.access_mode,"cwd":plan.get("cwd") or str(Path.cwd().resolve()),
         "retry_of":getattr(args,"retry_of",None),"escalation_reason":getattr(args,"escalation_reason",None),
+        **({'delivery_run_id': args.delivery_run_id} if getattr(args, 'delivery_run_id', None) is not None else {}),
         "workspace_root":plan.get("workspace_root") or str(Path(getattr(args,"workspace_root",None) or Path.cwd()).resolve()),
         **({"read_roots":[str(root) for root in args.read_roots]} if getattr(args,"read_roots",None) else {}),
         "worktree":str(args.worktree) if args.worktree else None,"started_at":started_at,"ended_at":None,"last_progress_at":started_at,
@@ -1952,6 +1968,7 @@ def prepare_resume(args):
         if previous is None: raise ResumeError("resume_attempt_unknown",f"attempt {pinned} is not recorded in this run")
     route=previous.get("requested_route") or {}
     requested=previous["provenance"]["requested"]
+    inherit_delivery_run_id(args, previous)
     if (args.tool and args.tool!=requested["adapter"]) or (args.model and args.model!=previous["provenance"]["resolved_model"]):
         raise ValueError("dispatch a new run")
     args.tool=requested["adapter"];args.model=previous["provenance"]["resolved_model"];args.alias=None;args.task_class=None
@@ -2216,6 +2233,11 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
         if not (retry_dir.is_dir() and (retry_dir / "attempt.json").is_file()):
             return fail(run_dir, "retry_of_missing", f"retry attempt does not exist: {args.retry_of}")
         retry_of = args.retry_of
+        try:
+            previous = json.loads(read_bound_bytes(run_dir, (retry_dir / 'attempt.json').relative_to(run_dir), label='retry receipt'))
+            inherit_delivery_run_id(args, previous)
+        except (OSError, ValueError, OwnedFileError) as exc:
+            return fail(run_dir, 'invalid_delivery_run_id', str(exc))
     attempt_number = max(existing_attempt_number(task_dir), existing_attempt_number(run_dir / "tasks" / args.task_id))
     attempt_id = f"attempt-{attempt_number:03d}"
     attempt_dir = task_dir / attempt_id
@@ -2929,6 +2951,7 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
         },
         "argv_digest": json_digest(command),
         "retry_lineage": [retry_of] if retry_of else [],
+        **({'delivery_run_id': args.delivery_run_id} if getattr(args, 'delivery_run_id', None) is not None else {}),
     }
     run_lineage.annotate_child_errors(record)
     if evidence_path is not None and git_evidence_identity is not None:
@@ -3285,6 +3308,7 @@ def parser() -> argparse.ArgumentParser:
     root = BudgetArgumentParser(command_name="dispatch", description=__doc__)
     root.add_argument("--run-dir", type=Path, required=True)
     root.add_argument("--task-id")
+    root.add_argument("--delivery-run-id", type=delivery_run_id, help="RUN.json run_id of the delivery this lane serves")
     root.add_argument("--host")
     root.add_argument("--operation-id")
     adapter = root.add_mutually_exclusive_group(required=False)

@@ -75,9 +75,10 @@ def ingest_receipt(telemetry, db, path):
 
 
 def cost_per_accepted(telemetry, db, since=None):
-    """Delivery counts by risk tier; lane cost and harness digest are unlinked."""
+    """Delivery counts and explicitly linked lane costs by risk tier."""
     boundary = telemetry.since_time(since) if since else None
     groups = defaultdict(lambda: {'runs': set(), 'accepted': set(), 'merged': set()})
+    run_groups = {}
     for run in db.execute('SELECT * FROM deliveries ORDER BY run_dir').fetchall():
         if boundary and (not run['started_at'] or telemetry.since_time(run['started_at']) < boundary):
             continue
@@ -85,13 +86,37 @@ def cost_per_accepted(telemetry, db, since=None):
             'SELECT 1 FROM changes WHERE merge_commit=? LIMIT 1', (run['merge_commit'],)).fetchone())
         group = groups[(run['risk_tier'], None)]
         _add_run(group, run, merged)
+        run_groups[run['run_id']] = group
+    current = telemetry.host_id()
+    telemetry.load_hosts(db)
+    aliases = telemetry.host_aliases()
+    lanes = {}
+    for item in db.execute("SELECT * FROM usage WHERE source='fabric' AND delivery_run_id IS NOT NULL ORDER BY rowid"):
+        row = dict(item)
+        key = (row['source'], row['event_id'], telemetry.same_host(row['host'], aliases))
+        if key not in lanes or row['host'] == current:
+            lanes[key] = row
+    prices, free_patterns = telemetry.load_prices()
+    adapters = telemetry.catalogue()
+    for row in lanes.values():
+        group = run_groups.get(row['delivery_run_id'])
+        if group is None:
+            continue
+        row['model'] = telemetry.normalise_model(row['adapter'], row['provider'], row['model'], adapters)
+        cost = telemetry.estimated_cost(row, prices, telemetry.price_entry(row, prices, free_patterns))
+        group['usage_rows'] = group.get('usage_rows', 0) + 1
+        group['unpriced_rows'] = group.get('unpriced_rows', 0) + int(cost is None)
+        group['cost'] = group.get('cost', 0.0) + (cost or 0.0)
     report = []
     for (risk_tier, digest), group in sorted(groups.items(), key=lambda item: (item[0][0] or '', item[0][1] or '')):
+        cost = group.get('cost')
+        accepted = len(group['accepted'])
         report.append({'risk_tier': risk_tier, 'harness_digest': digest,
-                       'runs': len(group['runs']), 'accepted': len(group['accepted']),
-                       'merged': len(group['merged']), 'cost_usd_lower_bound': None,
-                       'usage_rows': 0, 'unpriced_rows': 0,
-                       'cost_per_accepted_usd_lower_bound': None, 'cost_basis': 'unlinked'})
+                       'runs': len(group['runs']), 'accepted': accepted,
+                       'merged': len(group['merged']), 'cost_usd_lower_bound': cost,
+                       'usage_rows': group.get('usage_rows', 0), 'unpriced_rows': group.get('unpriced_rows', 0),
+                       'cost_per_accepted_usd_lower_bound': cost / accepted if cost is not None and accepted else None,
+                       'cost_basis': 'linked' if cost is not None else 'unlinked'})
     return report
 
 

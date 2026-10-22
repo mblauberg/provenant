@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-import { ACCESS_MODES } from "./execution-input.js";
+import { ACCESS_MODES, DELIVERY_RUN_ID } from "./execution-input.js";
 
 const detail = z.enum(["brief", "full"]).optional();
 const str = z.string().optional();
@@ -10,6 +10,7 @@ const ids = (maximum?: number) => z.union([
 const wait = z.unknown().optional();
 const optionalNumber = z.unknown().optional();
 const route = {
+  delivery_run_id: z.string().regex(DELIVERY_RUN_ID).optional(),
   host: str,
   operation_id: str,
   adapter: str,

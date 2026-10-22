@@ -752,6 +752,7 @@ def test_prepare_resume_restores_previous_workspace_root(tmp_path: Path):
     workspace.mkdir()
     previous = {
         "run_id": "resume-me", "task_id": "task-1", "attempt": 1, "state": "terminal",
+        "delivery_run_id": "delivery:resume",
         "status": "ok", "mode": "read_only", "cwd": str(workspace / "src"), "worktree": None,
         "workspace": {"root": str(workspace)}, "session_id": "saved-session",
         "read_roots": [str(tmp_path / "other-project")],
@@ -772,6 +773,7 @@ def test_prepare_resume_restores_previous_workspace_root(tmp_path: Path):
     module.prepare_resume(args)
 
     assert args.workspace_root == workspace
+    assert args.delivery_run_id == 'delivery:resume'
     assert args.read_roots == [str(tmp_path / "other-project")]
     assert args.capabilities == ["browser", "postgres"]
 
@@ -832,6 +834,7 @@ def test_secret_scan_unavailable_fix_includes_failing_path_and_reason(tmp_path: 
 
 
 def test_ordinary_single_dispatch_records_one_attempt_and_route_identity(tmp_path: Path) -> None:
+    disable_memory_admission_floor(tmp_path)
     run_dir = make_run(tmp_path, "one")
     receipt_before = (run_dir / "RUN_RECEIPT.json").read_bytes()
     prompt = tmp_path / "prompt.md"
@@ -860,6 +863,8 @@ def test_ordinary_single_dispatch_records_one_attempt_and_route_identity(tmp_pat
             str(run_dir),
             "--task-id",
             "task-1",
+            "--delivery-run-id",
+            "delivery:1202",
             "--adapter",
             "codex",
             "--prompt-file",
@@ -884,6 +889,7 @@ def test_ordinary_single_dispatch_records_one_attempt_and_route_identity(tmp_pat
     attempt = run_dir / "dispatch" / "tasks" / "task-1" / "attempt-001" / "attempt.json"
     assert attempt.exists()
     record = json.loads(attempt.read_text(encoding="utf-8"))
+    assert record['delivery_run_id'] == 'delivery:1202'
     assert record["attempt_id"] == "attempt-001"
     assert record["requested_route"]["adapter"] == "codex"
     assert record["route"]["resolved_model"].startswith("gpt-")
@@ -900,6 +906,21 @@ def test_ordinary_single_dispatch_records_one_attempt_and_route_identity(tmp_pat
     assert receipt["attempt_digest"] == f"sha256:{expected_digest}"
     assert receipt["attempt_digest_path"].endswith("attempt.sha256")
     assert (run_dir / "RUN_RECEIPT.json").read_bytes() == receipt_before
+
+    retry = subprocess.run([
+        str(SCRIPT), '--run-dir', str(run_dir), '--task-id', 'task-1', '--adapter', 'codex',
+        '--prompt-file', str(prompt), '--alias', 'senior', '--retry-of', 'attempt-001',
+    ], cwd=tmp_path, env=env, text=True, capture_output=True)
+    assert retry.returncode == 0, retry.stderr + retry.stdout
+    retried = json.loads((attempt.parent.parent / 'attempt-002/attempt.json').read_text())
+    assert retried['delivery_run_id'] == 'delivery:1202'
+    changed = subprocess.run([
+        str(SCRIPT), '--run-dir', str(run_dir), '--task-id', 'task-1', '--adapter', 'codex',
+        '--prompt-file', str(prompt), '--alias', 'senior', '--retry-of', 'attempt-002',
+        '--delivery-run-id', 'delivery:other',
+    ], cwd=tmp_path, env=env, text=True, capture_output=True)
+    assert changed.returncode == 2
+    assert 'retry must keep delivery_run_id' in changed.stdout
 
 
 @pytest.mark.parametrize("legacy", [False, True])

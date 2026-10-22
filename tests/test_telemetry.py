@@ -242,6 +242,65 @@ def test_accepted_cost_is_null_and_unlinked_even_with_matching_lanes(tmp_path):
     assert table.returncode == 0 and 'unlinked' in table.stdout
 
 
+def test_accepted_cost_joins_sibling_lanes_by_delivery_id_once_across_host_aliases(tmp_path):
+    root = tmp_path / '.agent-run/runs'
+    usage = dict(input_tokens=1_000_000, output_tokens=0, cache_read_tokens=0,
+                 cache_write_tokens=0, reasoning_tokens=0)
+    for name, attempt, delivery in [('writer', 1, 'delivery-a'), ('reviewer', 1, 'delivery-a'),
+                                     ('retried', 1, 'delivery-b'), ('retried', 2, 'delivery-b'),
+                                     ('unaccepted', 1, 'delivery-c'), ('unrelated', 1, None)]:
+        receipt(tmp_path, name, attempt=attempt, status='ok',
+                started_at='2026-10-21T00:00:00Z',
+                retry_of='attempt-001' if attempt == 2 else None,
+                provenance=route('agy', 'claude-opus-4-6-thinking'), usage=usage,
+                **({'delivery_run_id': delivery} if delivery else {}))
+    receipt(tmp_path, 'unpriced', status='ok', delivery_run_id='delivery-a',
+            provenance=route('agy', 'unknown-model'), usage=usage)
+    # The writer exists before RUN.json; authority and timestamps cannot supply this join.
+    assert cli(tmp_path, 'telemetry', 'ingest').returncode == 0
+    for name in ('delivery-a', 'delivery-b', 'delivery-c'):
+        write_json(root / name / 'RUN.json', {
+            'run_id': name, 'risk_tier': 'substantial',
+            'authority': {'allowed_source_paths': ['.']},
+            'evidence': [{'started_at': '2026-10-22T00:00:00Z'}],
+            **({'delivery_acceptance': {'basis': 'checks-and-review'}} if name != 'delivery-c' else {})})
+    assert cli(tmp_path, 'telemetry', 'ingest').returncode == 0
+    ledger = tmp_path / 'state/telemetry.sqlite3'
+    with sqlite3.connect(ledger) as db:
+        host = db.execute('SELECT host FROM usage LIMIT 1').fetchone()[0]
+        db.execute("INSERT OR REPLACE INTO meta VALUES ('host_ids', ?)", (json.dumps([host, 'earlier-host']),))
+        columns = [row[1] for row in db.execute('PRAGMA table_info(usage)')]
+        values = ','.join("'earlier-host'" if column == 'host' else column for column in columns)
+        db.execute(f'INSERT INTO usage SELECT {values} FROM usage')
+        assert db.execute('PRAGMA user_version').fetchone() == (4,)
+    report = json.loads(cli(tmp_path, 'telemetry', 'accepted', '--since', '2026-10-22', '--json').stdout)
+    assert len(report) == 1
+    row = report[0]
+    assert (row['runs'], row['accepted'], row['usage_rows'], row['unpriced_rows']) == (3, 2, 6, 1)
+    assert row['cost_basis'] == 'linked'
+    assert row['cost_usd_lower_bound'] == 25
+    assert row['cost_per_accepted_usd_lower_bound'] == 12.5
+
+
+def test_delivery_link_migration_rereads_surviving_receipts_once(tmp_path):
+    receipt(tmp_path, 'kept', status='ok', delivery_run_id='delivery:kept')
+    pruned = receipt(tmp_path, 'pruned', status='ok', delivery_run_id='delivery:pruned')
+    assert cli(tmp_path, 'telemetry', 'ingest').returncode == 0
+    pruned.unlink()
+    ledger = tmp_path / 'state/telemetry.sqlite3'
+    with sqlite3.connect(ledger) as db:
+        db.execute('ALTER TABLE usage DROP COLUMN delivery_run_id')
+    assert cli(tmp_path, 'telemetry', 'ingest').returncode == 0
+    with sqlite3.connect(ledger) as db:
+        assert db.execute('SELECT run_id,delivery_run_id FROM usage ORDER BY run_id').fetchall() == [
+            ('kept', 'delivery:kept'), ('pruned', None)]
+        assert db.execute('PRAGMA user_version').fetchone() == (4,)
+        db.execute("UPDATE usage SET delivery_run_id='sentinel' WHERE run_id='kept'")
+    assert cli(tmp_path, 'telemetry', 'ingest').returncode == 0
+    with sqlite3.connect(ledger) as db:
+        assert db.execute("SELECT delivery_run_id FROM usage WHERE run_id='kept'").fetchone() == ('sentinel',)
+
+
 def test_accepted_since_uses_run_time_after_backfill_and_receipt_update(tmp_path):
     root = tmp_path / '.agent-run/runs'
     old = root / '20261022-1200-delivery-old-a1b2c3/RUN.json'
