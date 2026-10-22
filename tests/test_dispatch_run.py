@@ -3867,7 +3867,7 @@ def test_fallback_reentry_does_not_charge_front_door_phases_again(tmp_path, monk
     run, prompt, command = real_owner_fixture(
         tmp_path, monkeypatch,
         'import sys,json\nsys.stdin.read()\n'
-        'if any("opus" in item for item in sys.argv): print("rate limit", file=sys.stderr); sys.exit(1)\n'
+        'if any("opus" in item for item in sys.argv): print("model unavailable", file=sys.stderr); sys.exit(1)\n'
         'print(json.dumps({"type":"result","result":"DONE"}))\n',
     )
     isolate_fabric_plan_env(monkeypatch)
@@ -4604,3 +4604,339 @@ def test_dispatch_usage_error_is_one_line_and_exits_2():
     assert missing.stderr.startswith("error: the following arguments are required: ")
     assert "; fix: pass " in missing.stderr
     assert len(missing.stderr.splitlines()) == 1
+
+
+@pytest.mark.parametrize("selector", ["explicit", "task_class"])
+@pytest.mark.parametrize("persistent", [False, True])
+def test_rate_limit_retries_same_model_once_with_fallback_off(tmp_path, monkeypatch, persistent, selector):
+    launches = tmp_path / "launches"
+    code = f'''import json,sys
+from pathlib import Path
+if sys.argv[1:3] == ["auth", "status"]:
+    print(json.dumps({{"loggedIn":True, "authMethod":"claude.ai", "subscriptionType":"pro"}}))
+    sys.exit(0)
+if "Reply exactly OK." in sys.argv:
+    print(json.dumps({{"type":"result", "subtype":"success", "is_error":False, "result":"OK", "modelUsage":{{"claude-haiku-5-5":{{}}}}}}))
+    sys.exit(0)
+sys.stdin.read()
+path = Path({str(launches)!r})
+count = int(path.read_text()) + 1 if path.exists() else 1
+path.write_text(str(count))
+if count == 1 or {persistent!r}:
+    print(json.dumps({{"type":"result", "is_error":True, "result":"rate limit", "retry_after":0.05}}))
+    sys.exit(1)
+print(json.dumps({{"type":"result", "result":"DONE"}}))
+'''
+    run, prompt, command = real_owner_fixture(tmp_path, monkeypatch, code)
+    if selector == "task_class":
+        model_index = command.index("--model")
+        del command[model_index:model_index + 2]
+        command += ["--task-class", "mechanical", "--role", "worker"]
+    isolate_fabric_plan_env(monkeypatch)
+    monkeypatch.setenv("AGENT_FABRIC_STATE_ROOT", str(tmp_path / "state"))
+    monkeypatch.chdir(tmp_path)
+    configure_fast_pacing(tmp_path, monkeypatch)
+    mod = load_dispatch_module()
+    args = mod.parser().parse_args(command[2:])
+    args.timeout_seconds = 10
+    assert mod.dispatch(args) == (1 if persistent else 0)
+    attempts = [json.loads(path.read_text()) for path in sorted(run.glob("tasks/*/attempt-*/attempt.json"))]
+    assert [row["status"] for row in attempts] == ["rate_limited", "rate_limited" if persistent else "ok"]
+    assert launches.read_text() == "2"
+    expected_model = "claude-haiku-5-5" if selector == "task_class" else "claude-opus-5-5"
+    assert {row["provenance"]["resolved_model"] for row in attempts} == {expected_model}
+    if selector == "task_class":
+        assert all(row["task_class"] == "mechanical" for row in attempts)
+        assert all(row["provenance"]["requested"]["task_class"] == "mechanical" for row in attempts)
+    legacy = json.loads(next(run.glob("dispatch/tasks/*/attempt-002/attempt.json")).read_text())
+    assert legacy["retry_of"] == "attempt-001"
+    assert attempts[1]["provenance"]["fallback_from"]["status"] == "rate_limited"
+    health = mod.exec_routing._model_route_module()._fabric_records().read_route_health()
+    assert all(row["recent_failures"] == 0 for row in health.values())
+
+
+def test_rate_limit_does_not_retry_when_cooldown_exceeds_timeout(tmp_path, monkeypatch):
+    code = 'import json,sys\nsys.stdin.read()\nprint(json.dumps({"type":"result", "is_error":True, "result":"rate limit", "retry_after":60}))\nsys.exit(1)\n'
+    run, prompt, command = real_owner_fixture(tmp_path, monkeypatch, code)
+    isolate_fabric_plan_env(monkeypatch)
+    monkeypatch.setenv("AGENT_FABRIC_STATE_ROOT", str(tmp_path / "state"))
+    monkeypatch.chdir(tmp_path)
+    configure_fast_pacing(tmp_path, monkeypatch)
+    mod = load_dispatch_module()
+    args = mod.parser().parse_args(command[2:])
+    args.timeout_seconds = 5
+    assert mod.dispatch(args) == 1
+    attempts = [json.loads(path.read_text()) for path in run.glob("tasks/*/attempt-*/attempt.json")]
+    assert [row["status"] for row in attempts] == ["rate_limited"]
+
+
+@pytest.mark.parametrize("edits", [None, "partial.txt"])
+def test_rate_limited_writer_retries_only_if_unchanged(tmp_path, monkeypatch, edits):
+    launches = tmp_path / "launches"
+    code = f'''import json,sys
+from pathlib import Path
+sys.stdin.read()
+path = Path({str(launches)!r})
+count = int(path.read_text()) + 1 if path.exists() else 1
+path.write_text(str(count))
+if count == 1:
+    if {edits!r}:
+        Path({edits!r}).write_text("half done")
+    print(json.dumps({{"type":"result", "is_error":True, "result":"rate limit", "retry_after":0.05}}))
+    sys.exit(1)
+print(json.dumps({{"type":"result", "result":"DONE"}}))
+'''
+    run, prompt, command = real_owner_fixture(tmp_path, monkeypatch, code)
+    worktree = make_worktree(tmp_path)
+    time.sleep(1.2)
+    isolate_fabric_plan_env(monkeypatch)
+    monkeypatch.setenv("AGENT_FABRIC_STATE_ROOT", str(tmp_path / "state"))
+    monkeypatch.chdir(tmp_path)
+    configure_fast_pacing(tmp_path, monkeypatch)
+    mod = load_dispatch_module()
+    args = mod.parser().parse_args(command[2:] + ["--access-mode", "worktree_write", "--worktree", str(worktree)])
+    args.timeout_seconds = 10
+    assert mod.dispatch(args) == (1 if edits else 0)
+    attempts = [json.loads(path.read_text()) for path in sorted(run.glob("tasks/*/attempt-*/attempt.json"))]
+    assert [row["status"] for row in attempts] == (["rate_limited"] if edits else ["rate_limited", "ok"])
+    if edits:
+        assert attempts[0]["retryable"] is False
+        assert (worktree / edits).read_text() == "half done"
+
+
+@pytest.mark.parametrize("action", ["cancel", "edit"])
+def test_rate_limit_wait_observes_cancellation_and_intervening_writer_edits(tmp_path, monkeypatch, action):
+    code = 'import json,sys\nsys.stdin.read()\nprint(json.dumps({"type":"result", "is_error":True, "result":"rate limit", "retry_after":2}))\nsys.exit(1)\n'
+    run, prompt, command = real_owner_fixture(tmp_path, monkeypatch, code)
+    worktree = make_worktree(tmp_path) if action == "edit" else None
+    if worktree:
+        time.sleep(1.2)
+        command += ["--access-mode", "worktree_write", "--worktree", str(worktree)]
+    isolate_fabric_plan_env(monkeypatch)
+    monkeypatch.setenv("AGENT_FABRIC_STATE_ROOT", str(tmp_path / "state"))
+    monkeypatch.chdir(tmp_path)
+    configure_fast_pacing(tmp_path, monkeypatch)
+    mod = load_dispatch_module()
+    sleep = time.sleep
+    acted = []
+    stores_before = {}
+    def during_wait(seconds):
+        queued = list(run.glob("tasks/*/attempt-002/attempt.json"))
+        if queued and not acted and json.loads(queued[0].read_text()).get("queue_reason") == "rate_limit":
+            if action == "cancel":
+                (run / "dispatch/tasks" / queued[0].relative_to(run / "tasks").parent / "cancel.request").touch()
+            else:
+                with pytest.raises(mod.WorktreeLeaseError):
+                    mod.acquire_worktree_lease(worktree)
+                for store in (tmp_path / "cooldowns.json", tmp_path / "state/route-health.json"):
+                    stores_before[store] = store.read_bytes()
+                (worktree / "intervening.txt").write_text("another edit")
+            acted.append(action)
+        sleep(seconds)
+    monkeypatch.setattr(mod.time, "sleep", during_wait)
+    args = mod.parser().parse_args(command[2:])
+    args.timeout_seconds = 10
+    assert mod.dispatch(args) == 1
+    attempts = [json.loads(path.read_text()) for path in sorted(run.glob("tasks/*/attempt-*/attempt.json"))]
+    assert acted == [action]
+    assert [row["status"] for row in attempts] == ["rate_limited", "cancelled" if action == "cancel" else "writer_changed"]
+    assert attempts[1]["pgid"] is None
+    if action == "edit":
+        assert attempts[1]["retryable"] is False
+        assert (worktree / "intervening.txt").read_text() == "another edit"
+        assert all(path.read_bytes() == content for path, content in stores_before.items())
+
+
+def test_rate_limit_retry_rechecks_writer_after_memory_admission(tmp_path, monkeypatch):
+    launches = tmp_path / "launches"
+    code = f'''import json,sys
+from pathlib import Path
+sys.stdin.read()
+path = Path({str(launches)!r})
+count = int(path.read_text()) + 1 if path.exists() else 1
+path.write_text(str(count))
+if count == 1:
+    print(json.dumps({{"type":"result", "is_error":True, "result":"rate limit", "retry_after":0.05}}))
+    sys.exit(1)
+print(json.dumps({{"type":"result", "result":"DONE"}}))
+'''
+    run, prompt, command = real_owner_fixture(tmp_path, monkeypatch, code)
+    worktree = make_worktree(tmp_path)
+    (tmp_path / ".agents/fabric-policy.json").write_text(json.dumps({"memory_floor_percent": {"worktree_write":10}}))
+    time.sleep(1.2)
+    isolate_fabric_plan_env(monkeypatch)
+    monkeypatch.setenv("AGENT_FABRIC_STATE_ROOT", str(tmp_path / "state"))
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    monkeypatch.chdir(tmp_path)
+    configure_fast_pacing(tmp_path, monkeypatch)
+    mod = load_dispatch_module()
+    edited = []
+    def probe():
+        if list(run.glob("tasks/*/attempt-002/attempt.json")) and not edited:
+            (worktree / "during-admission.txt").write_text("another edit")
+            edited.append(True)
+        return 100, 100
+    monkeypatch.setattr(mod.memory_admission, "available_memory_mb", probe)
+    args = mod.parser().parse_args(command[2:] + ["--access-mode", "worktree_write", "--worktree", str(worktree)])
+    args.timeout_seconds = 10
+    assert mod.dispatch(args) == 1
+    assert edited == [True]
+    assert launches.read_text() == "1"
+    attempts = [json.loads(path.read_text()) for path in sorted(run.glob("tasks/*/attempt-*/attempt.json"))]
+    assert [row["status"] for row in attempts] == ["rate_limited", "writer_changed"]
+    assert attempts[1]["retryable"] is False
+    assert attempts[1]["pgid"] is None
+
+
+def configure_fast_pacing(tmp_path, monkeypatch, **overrides):
+    config = tmp_path / ".agents/config/model-routing.json"
+    config.parent.mkdir(parents=True, exist_ok=True)
+    policy = {"base_delay_seconds": 0.05, "cap_seconds": 0.1,
+              "jitter_fraction": 0, "minimum_budget_seconds": 0.1, **overrides}
+    config.write_text(json.dumps({"rate_limit_pacing": policy}))
+    monkeypatch.setenv("AGENT_FABRIC_INSTANCE_ROOT", str(tmp_path / ".agents"))
+
+
+@pytest.mark.parametrize("retry_after", [None, 0.2])
+def test_missing_cooldown_still_waits_before_retry(tmp_path, monkeypatch, retry_after):
+    launches = tmp_path / "launches"
+    code = f'''import json,sys,time
+from pathlib import Path
+sys.stdin.read()
+path = Path({str(launches)!r})
+with path.open("a") as stream:
+    stream.write(str(time.monotonic()) + "\\n")
+print(json.dumps({{"type":"result", "is_error":True, "result":"rate limit", "retry_after":{retry_after!r}}}))
+sys.exit(1)
+'''
+    run, prompt, command = real_owner_fixture(tmp_path, monkeypatch, code)
+    isolate_fabric_plan_env(monkeypatch)
+    configure_fast_pacing(tmp_path, monkeypatch, base_delay_seconds=0.1)
+    monkeypatch.chdir(tmp_path)
+    mod = load_dispatch_module()
+    records = sys.modules[mod.write_cooldown.__module__]
+    original = records.store_open
+    def no_lock(path, flags, create_parents=False):
+        if Path(path).name == "cooldowns.lock":
+            raise PermissionError("state unavailable")
+        return original(path, flags, create_parents)
+    monkeypatch.setattr(records, "store_open", no_lock)
+    args = mod.parser().parse_args(command[2:])
+    args.timeout_seconds = 5
+    assert mod.dispatch(args) == 1
+    times = list(map(float, launches.read_text().splitlines()))
+    assert len(times) == 2
+    assert times[1] - times[0] >= (retry_after or 0.1)
+
+
+def test_rate_limit_reserves_run_budget_after_the_delay(tmp_path, monkeypatch):
+    code = 'import json,sys; sys.stdin.read(); print(json.dumps({"type":"result", "is_error":True, "result":"rate limit", "retry_after":0.2})); sys.exit(1)'
+    run, prompt, command = real_owner_fixture(tmp_path, monkeypatch, code)
+    isolate_fabric_plan_env(monkeypatch)
+    configure_fast_pacing(tmp_path, monkeypatch, minimum_budget_seconds=10)
+    monkeypatch.chdir(tmp_path)
+    mod = load_dispatch_module()
+    args = mod.parser().parse_args(command[2:])
+    args.timeout_seconds = 10
+    assert mod.dispatch(args) == 1
+    assert len(list(run.glob("tasks/*/attempt-*/attempt.json"))) == 1
+
+
+@pytest.mark.parametrize("fallback", ["false", '[{"adapter":"claude","model":"claude-opus-5-5"}]', '[{"adapter":"claude","model":"opus"}]'])
+def test_usage_limit_never_retries_the_same_model(tmp_path, monkeypatch, fallback):
+    code = 'import json,sys; sys.stdin.read(); print(json.dumps({"type":"result", "is_error":True, "result":"429 RESOURCE_EXHAUSTED: Quota exceeded per day"})); sys.exit(1)'
+    run, prompt, command = real_owner_fixture(tmp_path, monkeypatch, code)
+    command[command.index("--fallback") + 1] = fallback
+    isolate_fabric_plan_env(monkeypatch)
+    configure_fast_pacing(tmp_path, monkeypatch)
+    monkeypatch.chdir(tmp_path)
+    mod = load_dispatch_module()
+    args = mod.parser().parse_args(command[2:])
+    args.timeout_seconds = 10
+    records = sys.modules[mod.write_cooldown.__module__]
+    original = records.store_open
+    def no_cooldown_lock(path, flags, create_parents=False):
+        if Path(path).name == "cooldowns.lock":
+            raise PermissionError("state unavailable")
+        return original(path, flags, create_parents)
+    monkeypatch.setattr(records, "store_open", no_cooldown_lock)
+    assert mod.dispatch(args) == 1
+    rows = [json.loads(path.read_text()) for path in run.glob("tasks/*/attempt-*/attempt.json")]
+    assert [row["status"] for row in rows] == ["usage_limited"]
+    assert "Quota exceeded per day" in rows[0]["reason"]
+
+
+def test_pacing_jitter_is_added_to_the_wait_without_shortening_it(monkeypatch):
+    mod = load_dispatch_module()
+    monkeypatch.setattr(mod.random, "uniform", lambda low, high: high)
+    policy = {"base_delay_seconds": 30, "jitter_fraction": 0.2}
+    assert mod.rate_limit_delay({}, None, policy) == 36
+    assert mod.rate_limit_delay({"retry_after": 60}, None, policy) == 72
+
+
+def test_agy_retry_rebuilds_argv_timeout_after_the_wait(tmp_path, monkeypatch):
+    launches = tmp_path / "argv-timeouts"
+    code = f'''import json,sys
+from pathlib import Path
+path = Path({str(launches)!r})
+count = len(path.read_text().splitlines()) if path.exists() else 0
+with path.open("a") as stream:
+    stream.write(sys.argv[sys.argv.index("--print-timeout") + 1] + "\\n")
+if count == 0:
+    print(json.dumps({{"type":"error", "message":"429 rate limit", "retry_after":1.3}}))
+    sys.exit(1)
+print(json.dumps({{"status":"SUCCESS", "response":"DONE"}}))
+'''
+    run, prompt, command = real_owner_fixture(tmp_path, monkeypatch, code)
+    write_executable(tmp_path / "provider-bin/agy", "#!/usr/bin/env python3\n" + code)
+    command[command.index("--adapter") + 1] = "agy"
+    command[command.index("--model") + 1] = "gemini-3.8-flash"
+    isolate_fabric_plan_env(monkeypatch)
+    configure_fast_pacing(tmp_path, monkeypatch)
+    monkeypatch.chdir(tmp_path)
+    mod = load_dispatch_module()
+    args = mod.parser().parse_args(command[2:])
+    args.timeout_seconds = 10
+    assert mod.dispatch(args) == 0
+    first, second = [int(value.removesuffix("s")) for value in launches.read_text().splitlines()]
+    assert second < first
+
+
+def _sequence_fixture(monkeypatch, plan, rows, alternatives):
+    mod = load_dispatch_module()
+    args = SimpleNamespace(fallback=False, resume=False, timeout_seconds=1000, confidential=False)
+    launches = []
+
+    def fake_dispatch(args, custody=None):
+        launches.append((getattr(args, "tool", None), getattr(args, "model", None)))
+        args._last_row = rows[len(launches) - 1] if len(launches) <= len(rows) else {**rows[-1], "retryable": False}
+        args._last_plan = plan
+        return 0
+
+    row = {"retryable": True, "attempt": 1, "task_class": "",
+           "provenance": {"line": "Route: claude/claude-opus-5-5 (x)"}}
+    rows[:] = [{**row, **item} for item in rows]
+    monkeypatch.setattr(mod, "_dispatch", fake_dispatch)
+    monkeypatch.setattr(mod.exec_routing, "candidates", lambda *a, **k: alternatives)
+    monkeypatch.setattr(mod.exec_routing, "cooling", lambda *a: None)
+    monkeypatch.setattr(mod, "pacing_policy", lambda: {"base_delay_seconds": 30, "cap_seconds": 900,
+                                                       "jitter_fraction": 0, "minimum_budget_seconds": 30})
+    return mod, args, launches
+
+
+def test_fallback_skips_the_route_of_an_effort_suffixed_plan_model(monkeypatch):
+    plan = {"adapter": "claude", "model": "claude-opus-5-5@high"}
+    rows = [{"status": "usage_limited"}]
+    alternatives = [{"adapter": "claude", "model": "claude-opus-5-5"}]
+    mod, args, launches = _sequence_fixture(monkeypatch, plan, rows, alternatives)
+    mod.execute_attempt_sequence(args)
+    assert len(launches) == 1
+
+
+def test_paced_retry_tolerates_a_row_with_null_evidence(monkeypatch):
+    plan = {"adapter": "claude", "model": "claude-opus-5-5"}
+    rows = [{"status": "rate_limited", "evidence": None, "retry_after": 1}]
+    mod, args, launches = _sequence_fixture(monkeypatch, plan, rows, [])
+    mod.execute_attempt_sequence(args)
+    assert len(launches) == 2
+    assert launches[1][1] == "claude-opus-5-5"
