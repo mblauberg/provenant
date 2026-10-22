@@ -106,7 +106,7 @@ A child that enters another session and reparents before its ancestry is observe
 cannot be attributed safely by this polling owner. On Linux the owner is a child
 subreaper only while an attempt runs, and restores its own setting afterwards.
 An unavailable or permission-denied host probe excludes orphan reaping; it does
-not establish host death. Unexpected signal deaths report `interrupted` with the
+not establish host death. Unexpected signal deaths report `failed` without a terminal result, otherwise `interrupted`, with the
 signal. Matching `termination-request.json` telemetry records the controller
 source and requester, while the OS sender remains unknown. Spared processes
 do not replace the Git and disk instruction check with a tamper failure.

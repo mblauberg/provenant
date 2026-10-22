@@ -1,9 +1,9 @@
 /** Expand `route`, `rotate`, `council` and `models` into concrete adapter/model tasks (#848). */
-import { execFile } from "node:child_process";
 import { existsSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { withoutGitRedirects, type Identity } from "./identity.js";
+import { runJsonSubprocess } from "./json-subprocess.js";
 import { InputError, nativeAdapter, tierAlias, type BatchTaskInput, type RouteInput } from "./execution-input.js";
 
 export const POOL_FIELDS = ["route", "rotate", "council", "models"] as const;
@@ -103,18 +103,15 @@ async function pick(
 ): Promise<PickResult[]> {
   const configured = join(root, "scripts", "model_route.py");
   const script = existsSync(configured) ? configured : join(repositoryRoot, "scripts", "model_route.py");
-  const output = await new Promise<string>((resolveOutput, rejectOutput) => {
-    const child = execFile(python, [script, "pick"], {
-      cwd: identity.cwd,
-      env: withoutGitRedirects({ ...env, AGENT_FABRIC_PRODUCT_ROOT: root }),
-      signal,
-      killSignal: "SIGKILL",
-      timeout: 20_000,
-      maxBuffer: 1024 * 1024,
-    }, (error, stdout) => (error ? rejectOutput(new Error("Route pools unavailable; check scripts/model_route.py.")) : resolveOutput(stdout)));
-    child.stdin!.end(JSON.stringify({ requests }));
+  const parsed = await runJsonSubprocess<{ status?: string; results?: PickResult[]; fix?: string }>(python, [script, "pick"], {
+    cwd: identity.cwd,
+    env: withoutGitRedirects({ ...env, AGENT_FABRIC_PRODUCT_ROOT: root }),
+    input: { requests },
+    signal,
+    timeoutMs: 20_000,
+    maxBytes: 1024 * 1024,
+    unavailable: "Route pools unavailable; check scripts/model_route.py.",
   });
-  const parsed = JSON.parse(output) as { status?: string; results?: PickResult[]; fix?: string };
   if (parsed.status !== "ok" || !Array.isArray(parsed.results) || parsed.results.length !== requests.length)
     throw new Error(parsed.fix ?? "Route pools returned an invalid answer.");
   return parsed.results;

@@ -1,0 +1,4 @@
+interface:
+  display_name: TanStack Query
+  short_description: TanStack Query v5 keys, freshness, mutations and loaders.
+  default_prompt: Use $tanstack-query for this React Query server-state task.

@@ -16,7 +16,6 @@ import sys
 import tempfile
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -575,6 +574,7 @@ def doctor(project_path=None, config=None):
         configured = catalogue_snapshot()['adapters']
     except (OSError, ValueError, KeyError):
         raise HostError('doctor_unavailable', 'Cannot load adapter catalogue') from None
+    from concurrent.futures import ThreadPoolExecutor  # deferred: costs ~10 ms, used only here and in hosts_doctor
     # Resolve shared helpers before the probe workers start. Module loading is
     # process-global, while the checks below run concurrently.
     _load_module(
@@ -610,6 +610,7 @@ def select_hosts(config, selectors):
     return selected
 
 def hosts_doctor(config, selected):
+    from concurrent.futures import ThreadPoolExecutor
     project_path = project_identity()
     def probe(host):
         if host == config.local_host:

@@ -8,6 +8,8 @@ import { afterEach, expect, it, vi } from "vitest";
 import { Store } from "../src/store.js";
 import { databasePath } from "../src/identity.js";
 import { readRuns, readEvents } from "../src/run-reader.js";
+import { fabricStatus } from "../src/run-registry.js";
+import { lanesDigest, runView } from "../src/surface.js";
 import { scratchRoot } from "./helpers/temp-root.js";
 
 const roots: string[] = [];
@@ -47,6 +49,23 @@ function laneWaitForSeat(cwd: string, state: string, seat: string, ...ids: strin
 function laneWait(cwd: string, state: string, ...ids: string[]) {
   return laneWaitForSeat(cwd, state, "wait-seat", ...ids);
 }
+
+it("reports failed transport attempts and partial output through status and lane waits", async () => {
+  const workspace = fixture();
+  const { row, run } = attempt(workspace, "tasks", "transport", "terminal", "failed");
+  Object.assign(row, { error_class: "transient", result_partial: true,
+    evidence: { signature: "provider_transport", excerpt: "Reconnecting... 5/5" } });
+  writeFileSync(join(workspace, ".agent-run", "runs", run, "tasks", "transport", "attempt-001", "attempt.json"), JSON.stringify(row));
+  const lanes = await readRuns(workspace);
+  expect(lanes.runs[0]).toMatchObject({ status: "failed", error_class: "transient", result_partial: true });
+  expect(lanesDigest(lanes)).toContain("partial result");
+  const status = runView(await fabricStatus(workspace, row.run_id));
+  expect(status).toMatchObject({ status: "failed", error_class: "transient", result_partial: true });
+  const waited = laneWait(workspace, join(workspace, "state"), row.run_id);
+  expect(waited.status, waited.stderr).toBe(0);
+  expect(waited.stdout).toContain("failed");
+  expect(waited.stdout).toContain("partial result");
+});
 
 function laneWaitEnv(state: string, seat = "wait-seat") {
   return { ...process.env, AGENT_FABRIC_PRODUCT_ROOT: product, AGENT_FABRIC_TSX_LOADER: tsxLoader,
