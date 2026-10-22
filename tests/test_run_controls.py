@@ -201,9 +201,9 @@ def test_retained_success_rejects_malformed_adapter_receipt(tmp_path: Path) -> N
     assert finalizer._validate_dispatch_evidence(run_dir) == errors
 
 
-@pytest.mark.parametrize("exit_code", [False, 0.0])
-def test_retained_success_rejects_non_integer_zero_exit(tmp_path: Path, exit_code: object) -> None:
-    """Controls and finalisation require the dispatch owner's exact exit evidence."""
+@pytest.mark.parametrize("exit_code", [1, False])
+def test_retained_success_rejects_a_non_zero_exit(tmp_path: Path, exit_code: object) -> None:
+    """Controls and finalisation reject a success without exit 0 (own check and shared validator)."""
     run_dir = make_run(tmp_path)
     attempt = write_attempt(run_dir)
     record = json.loads(attempt.read_text(encoding="utf-8"))

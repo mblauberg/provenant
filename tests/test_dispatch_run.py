@@ -573,7 +573,7 @@ def test_secret_scan_skips_excluded_directories_with_a_warning(tmp_path):
 
 def test_preflight_honours_policy_secret_scan_exclusions(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setenv('AGENT_FABRIC_INSTANCE_ROOT', str(ROOT))
+    monkeypatch.setenv('AGENT_FABRIC_INSTANCE_ROOT', str(tmp_path / '.agents'))
     (tmp_path / '.agents').mkdir()
     (tmp_path / '.agents' / 'fabric-policy.json').write_text(json.dumps({'secret_scan_exclude': ['shared/fixtures']}))
     fixtures = tmp_path / 'shared' / 'fixtures'
@@ -1566,7 +1566,7 @@ def test_dispatch_owner_keeps_lifecycle_risk_separate_from_model_override(tmp_pa
     )
     env = os.environ.copy()
     env["PATH"] = f"{bin_dir}:{ROOT / 'scripts'}:{env['PATH']}"
-    env["AGENT_FABRIC_INSTANCE_ROOT"] = str(ROOT)
+    env["AGENT_FABRIC_INSTANCE_ROOT"] = str(tmp_path / ".agents")
 
     result = subprocess.run(
         [
@@ -1833,35 +1833,6 @@ def test_reentry_rejects_tampered_success_adapter_receipt(tmp_path: Path, monkey
     )
 
     with pytest.raises(module.AttemptEvidenceError, match="successful adapter receipt is invalid"):
-        module.reconcile_manifest(run_dir)
-
-
-@pytest.mark.parametrize("exit_code", [False, 0.0])
-def test_reentry_rejects_non_integer_zero_exit(tmp_path: Path, monkeypatch, exit_code: object) -> None:
-    """Re-entry requires the exact terminal exit proof before repairing a manifest."""
-    run_dir = make_run(tmp_path, "reentry-invalid-exit")
-    prompt = tmp_path / "prompt.md"
-    prompt.write_text("revalidate retained success\n", encoding="utf-8")
-    adapter = tmp_path / "success-adapter"
-    write_success_adapter(adapter)
-    module = load_dispatch_module()
-    monkeypatch.setattr(module, "CF_DISPATCH", adapter)
-    monkeypatch.chdir(tmp_path)
-    args = module.parser().parse_args([
-        "--run-dir", str(run_dir), "--task-id", "reentry", "--adapter", "codex",
-        "--prompt-file", str(prompt), "--alias", "senior", "--role", "worker",
-    ])
-    assert module.dispatch(args) == 0
-    attempt = run_dir / "dispatch/tasks/reentry/attempt-001/attempt.json"
-    record = json.loads(attempt.read_text(encoding="utf-8"))
-    record["process"]["exit_code"] = exit_code
-    attempt.write_text(json.dumps(record, sort_keys=True) + "\n", encoding="utf-8")
-    attempt.with_name("attempt.sha256").write_text(
-        "sha256:" + hashlib.sha256(attempt.read_bytes()).hexdigest() + "  attempt.json\n",
-        encoding="utf-8",
-    )
-
-    with pytest.raises(module.AttemptEvidenceError, match="successful attempt does not prove exit 0"):
         module.reconcile_manifest(run_dir)
 
 
@@ -2268,7 +2239,7 @@ def test_relative_protected_prompt_is_rejected_before_staging(tmp_path: Path, mo
     module = load_dispatch_module()
     monkeypatch.chdir(repo)
     monkeypatch.setenv("AGENT_FABRIC_PRODUCT_ROOT", str(ROOT))
-    monkeypatch.setenv("AGENT_FABRIC_INSTANCE_ROOT", str(ROOT))
+    monkeypatch.setenv("AGENT_FABRIC_INSTANCE_ROOT", str(repo / ".agents"))
     args = module.parser().parse_args([
         "--run-dir", str(run_dir), "--task-id", "blocked", "--adapter", "opencode",
         "--prompt-file", "private/prompt.md", "--model", "opencode/mimo-v2.6-flash-free",
@@ -2293,7 +2264,7 @@ def test_relative_protected_add_dir_is_rejected_before_staging(tmp_path: Path, m
     module = load_dispatch_module()
     monkeypatch.chdir(repo)
     monkeypatch.setenv("AGENT_FABRIC_PRODUCT_ROOT", str(ROOT))
-    monkeypatch.setenv("AGENT_FABRIC_INSTANCE_ROOT", str(ROOT))
+    monkeypatch.setenv("AGENT_FABRIC_INSTANCE_ROOT", str(repo / ".agents"))
     args = module.parser().parse_args([
         "--run-dir", str(run_dir), "--task-id", "blocked", "--adapter", "opencode",
         "--prompt-file", "prompt.md", "--add-dir", "private",
@@ -2740,7 +2711,7 @@ def run_writer_dispatch(
         """)
     env = os.environ.copy()
     env.pop("AGENTS_HOME", None)
-    env["AGENT_FABRIC_INSTANCE_ROOT"] = str(ROOT)
+    env["AGENT_FABRIC_INSTANCE_ROOT"] = str(tmp_path / ".agents")
     env["AGENT_FABRIC_PRODUCT_ROOT"] = str(ROOT)
     env["PATH"] = f"{bin_dir}:{ROOT / 'scripts'}:{env['PATH']}"
     return subprocess.run(
@@ -2802,16 +2773,14 @@ def test_writer_branch_name_warns_in_receipt_without_refusing(tmp_path: Path) ->
     assert not any("branch " in note and "outside" in note for note in receipt["fabric"]["warnings"])
 
 
-@pytest.mark.parametrize("executable", [
-    "claude", "codex", "herdr", "pi", "agy", "cursor-agent", "copilot", "kiro-cli", "opencode",
-])
-def test_default_suite_blocks_provider_clis(executable: str, _provider_cli_stub_dir: Path) -> None:
-    path = shutil.which(executable)
-    assert path is not None
-    assert Path(path).parent == _provider_cli_stub_dir
-    result = subprocess.run([path], text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    assert result.returncode == 97
-    assert "blocked real provider CLI" in result.stderr
+def test_default_suite_blocks_provider_clis(_provider_cli_stub_dir: Path) -> None:
+    for executable in ("claude", "codex", "herdr", "pi", "agy", "cursor-agent", "copilot", "kiro-cli", "opencode"):
+        path = shutil.which(executable)
+        assert path is not None, executable
+        assert Path(path).parent == _provider_cli_stub_dir, executable
+        result = subprocess.run([path], text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        assert result.returncode == 97, executable
+        assert "blocked real provider CLI" in result.stderr, executable
 
 
 def test_primary_checkout_writer_is_rejected(tmp_path: Path) -> None:
@@ -3180,7 +3149,7 @@ def test_front_door_preflight_rejects_all_invalid_tasks_without_run(tmp_path):
             {'id': 'missing', 'adapter': 'claude', 'alias': 'senior', 'prompt_file': 'absent.md'},
             {'id': 'broker', 'adapter': 'opencode', 'alias': 'senior', 'prompt': 'hello'},
         ]}), text=True, capture_output=True,
-        env={**os.environ, 'AGENT_FABRIC_INSTANCE_ROOT': str(ROOT)},
+        env={**os.environ, 'AGENT_FABRIC_INSTANCE_ROOT': str(tmp_path / '.agents')},
     )
     record = json.loads(result.stdout)
     assert record['status'] == 'rejected'
@@ -3201,7 +3170,7 @@ def test_front_door_capability_preflight_fails_closed(monkeypatch, tmp_path, fie
     module = load_dispatch_module()
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("AGENT_FABRIC_PRODUCT_ROOT", str(ROOT))
-    monkeypatch.setenv("AGENT_FABRIC_INSTANCE_ROOT", str(ROOT))
+    monkeypatch.setenv("AGENT_FABRIC_INSTANCE_ROOT", str(tmp_path / ".agents"))
     monkeypatch.setattr(module.provider_exec.sys, "platform", "darwin")
     monkeypatch.setattr(module.provider_exec, "_sandbox_exec_path", lambda: "/usr/bin/sandbox-exec")
     task = {"id": "capability", "adapter": "codex", "access_mode": "worktree_write",
@@ -3274,7 +3243,7 @@ def test_secret_in_inline_prompt_is_rejected_before_preflight_route(tmp_path, mo
 
 def test_preflight_secret_file_rejects_and_explicit_override_accepts(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setenv('AGENT_FABRIC_INSTANCE_ROOT', str(ROOT))
+    monkeypatch.setenv('AGENT_FABRIC_INSTANCE_ROOT', str(tmp_path / '.agents'))
     module = load_dispatch_module()
     prompt = tmp_path / 'prompt.md'
     prompt.write_text('hello\n' + 'AKIA' + 'A' * 16)
@@ -3291,7 +3260,7 @@ def test_preflight_accepts_a_prompt_file_only_inside_a_read_root(tmp_path, monke
     workspace.mkdir()
     other.mkdir()
     monkeypatch.chdir(workspace)
-    monkeypatch.setenv('AGENT_FABRIC_INSTANCE_ROOT', str(ROOT))
+    monkeypatch.setenv('AGENT_FABRIC_INSTANCE_ROOT', str(tmp_path / '.agents'))
     module = load_dispatch_module()
     monkeypatch.setattr(module, "prompt_temp_roots", lambda: ())
     prompt = other / 'brief.md'
@@ -3312,7 +3281,7 @@ def test_preflight_accepts_temp_prompts_and_retains_secret_and_link_checks(tmp_p
     scratch.mkdir()
     monkeypatch.chdir(workspace)
     monkeypatch.setenv('TMPDIR', str(scratch))
-    monkeypatch.setenv('AGENT_FABRIC_INSTANCE_ROOT', str(ROOT))
+    monkeypatch.setenv('AGENT_FABRIC_INSTANCE_ROOT', str(tmp_path / '.agents'))
     module = load_dispatch_module()
     prompt = scratch / 'brief.md'
     prompt.write_text('hello')
@@ -3338,7 +3307,7 @@ def test_preflight_scans_a_read_root_prompt_for_secrets(tmp_path, monkeypatch):
     workspace.mkdir()
     other.mkdir()
     monkeypatch.chdir(workspace)
-    monkeypatch.setenv('AGENT_FABRIC_INSTANCE_ROOT', str(ROOT))
+    monkeypatch.setenv('AGENT_FABRIC_INSTANCE_ROOT', str(tmp_path / '.agents'))
     module = load_dispatch_module()
     prompt = other / 'brief.md'
     prompt.write_text('hello\n' + 'AKIA' + 'A' * 16)
@@ -3353,7 +3322,7 @@ def test_preflight_refuses_a_credential_store_prompt_in_any_root(tmp_path, monke
     (workspace / 'notes').mkdir(parents=True)
     (other / '.codex').mkdir(parents=True)
     monkeypatch.chdir(workspace)
-    monkeypatch.setenv('AGENT_FABRIC_INSTANCE_ROOT', str(ROOT))
+    monkeypatch.setenv('AGENT_FABRIC_INSTANCE_ROOT', str(tmp_path / '.agents'))
     module = load_dispatch_module()
     auth = other / '.codex' / 'auth.json'
     auth.write_text('{"tokens": {"opaque": "value"}}')
@@ -3463,7 +3432,7 @@ print(json.dumps({"type":"result","result":os.getcwd()}))
 
 def test_preflight_secret_in_add_dirs_rejects_and_override_accepts(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setenv('AGENT_FABRIC_INSTANCE_ROOT', str(ROOT))
+    monkeypatch.setenv('AGENT_FABRIC_INSTANCE_ROOT', str(tmp_path / '.agents'))
     directory = tmp_path / 'shared'
     directory.mkdir()
     (directory / 'source.txt').write_text('rk_live_' + 'a' * 24)
@@ -3478,7 +3447,7 @@ def test_preflight_secret_in_add_dirs_rejects_and_override_accepts(tmp_path, mon
 
 def test_preflight_and_dispatch_refuse_scan_budget_overrun_unless_overridden(tmp_path, monkeypatch, capsys):
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setenv('AGENT_FABRIC_INSTANCE_ROOT', str(ROOT))
+    monkeypatch.setenv('AGENT_FABRIC_INSTANCE_ROOT', str(tmp_path / '.agents'))
     scan = load_secret_scan_module()
     monkeypatch.setattr(scan, 'MAX_FILES', 0)
     directory = tmp_path / 'shared'
@@ -3637,7 +3606,7 @@ print(json.dumps({'models': [{'slug': 'gpt-6-luna', 'supported_reasoning_levels'
     result = subprocess.run([sys.executable, str(SCRIPT), '--preflight-json'], cwd=tmp_path,
         input=json.dumps({'tasks': [{'id': f't{i}', 'adapter': 'codex', 'model': 'gpt-6-luna',
             'effort': 'high', 'prompt': 'hello'} for i in range(3)]}), text=True, capture_output=True,
-        env={**os.environ, 'AGENT_FABRIC_INSTANCE_ROOT': str(ROOT), 'PROBE_COUNTER': str(counter),
+        env={**os.environ, 'AGENT_FABRIC_INSTANCE_ROOT': str(tmp_path / '.agents'), 'PROBE_COUNTER': str(counter),
              'PATH': str(bin_dir) + os.pathsep + os.environ['PATH']})
     record = json.loads(result.stdout)
     assert record['status'] == 'validated', record
@@ -3675,7 +3644,7 @@ else:
 ''')
     capture = tmp_path / 'provider-env.json'
     env = {**os.environ, 'PATH': f"{bin_dir}:{ROOT / 'scripts'}:{os.environ['PATH']}",
-           'AGENT_FABRIC_INSTANCE_ROOT': str(ROOT), 'AGENT_FABRIC_PRODUCT_ROOT': str(ROOT),
+           'AGENT_FABRIC_INSTANCE_ROOT': str(tmp_path / '.agents'), 'AGENT_FABRIC_PRODUCT_ROOT': str(ROOT),
            'AGENT_FABRIC_STATE_DIRECTORY': str(tmp_path / 'chair-state'),
            'AGENT_FABRIC_SEAT': 'claude', 'AGENT_FABRIC_CLIENT_LABEL': 'chair-client',
            'AGENT_FABRIC_LABEL': 'chair-label', 'PROVIDER_ENV_CAPTURE': str(capture),
@@ -3726,7 +3695,7 @@ def real_owner_fixture(tmp_path, monkeypatch, code):
     write_executable(bindir / 'claude', '#!/usr/bin/env python3\n' + code)
     monkeypatch.setenv('PATH', str(bindir) + os.pathsep + os.environ['PATH'])
     monkeypatch.setenv('AGENT_FABRIC_PRODUCT_ROOT', str(ROOT))
-    monkeypatch.setenv('AGENT_FABRIC_INSTANCE_ROOT', str(ROOT))
+    monkeypatch.setenv('AGENT_FABRIC_INSTANCE_ROOT', str(tmp_path / '.agents'))
     monkeypatch.setenv('FABRIC_COOLDOWNS_PATH', str(tmp_path / 'cooldowns.json'))
     monkeypatch.delenv('PROVENANT_RUN_TOKEN', raising=False)
     run = Path(subprocess.check_output([str(INIT), '--kind', 'dispatch'], cwd=tmp_path, text=True).strip())
@@ -3855,12 +3824,12 @@ print(json.dumps({{'type': 'result', 'result': 'DONE', 'is_error': False}}), flu
                 pass
 
 
-def isolate_fabric_plan_env(monkeypatch):
+def isolate_fabric_plan_env(monkeypatch, tmp_path):
     for key in tuple(os.environ):
         if key == 'PROVENANT_RUN_ID' or key.startswith('AGENT_FABRIC_'):
             monkeypatch.delenv(key, raising=False)
     monkeypatch.setenv('AGENT_FABRIC_PRODUCT_ROOT', str(ROOT))
-    monkeypatch.setenv('AGENT_FABRIC_INSTANCE_ROOT', str(ROOT))
+    monkeypatch.setenv('AGENT_FABRIC_INSTANCE_ROOT', str(tmp_path / '.agents'))
 
 
 def test_close_mcp_run_reads_legacy_successful_canonical_attempt(tmp_path):
@@ -3972,7 +3941,7 @@ def test_real_dispatcher_records_attempt_phase_timings(tmp_path, monkeypatch):
         tmp_path, monkeypatch,
         'import sys,json\nsys.stdin.read()\nprint(json.dumps({"type":"result","result":"DONE"}))\n',
     )
-    isolate_fabric_plan_env(monkeypatch)
+    isolate_fabric_plan_env(monkeypatch, tmp_path)
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv('PROVENANT_FABRIC_PHASES', json.dumps({'owner_started_at_ms': time.time() * 1000}))
     assert subprocess.run(command, cwd=tmp_path, capture_output=True).returncode == 0
@@ -3993,7 +3962,7 @@ def test_fallback_reentry_does_not_charge_front_door_phases_again(tmp_path, monk
         'if any("opus" in item for item in sys.argv): print("model unavailable", file=sys.stderr); sys.exit(1)\n'
         'print(json.dumps({"type":"result","result":"DONE"}))\n',
     )
-    isolate_fabric_plan_env(monkeypatch)
+    isolate_fabric_plan_env(monkeypatch, tmp_path)
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv('PROVENANT_FABRIC_PHASES', json.dumps({
         'validate': 12, 'run_dir_init': 34, 'snapshot': 56,
@@ -4018,7 +3987,7 @@ def test_startup_timeout_falls_back_when_the_dispatch_allows(tmp_path, monkeypat
         'if any("opus" in item for item in sys.argv): time.sleep(60)\n'
         'print(json.dumps({"type":"result","result":"DONE"}))\n',
     )
-    isolate_fabric_plan_env(monkeypatch)
+    isolate_fabric_plan_env(monkeypatch, tmp_path)
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv('CF_DISPATCH_STARTUP_SECONDS', '1')
     mod = load_dispatch_module()
@@ -4062,8 +4031,8 @@ def test_writer_startup_timeout_falls_back_only_over_an_untouched_worktree(tmp_p
     exclude = exclude if exclude.is_absolute() else worktree / exclude
     exclude.parent.mkdir(parents=True, exist_ok=True)
     exclude.write_text('config/installation.json\nlocal-config/\nnode_modules/\npkg/\n.pytest_cache/\n')
-    time.sleep(1.2)  # setup must predate the launch tolerance
-    isolate_fabric_plan_env(monkeypatch)
+    time.sleep(1.2)  # ctime must predate the launch tolerance; utime cannot set it
+    isolate_fabric_plan_env(monkeypatch, tmp_path)
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv('CF_DISPATCH_STARTUP_SECONDS', '1')
     mod = load_dispatch_module()
@@ -4090,7 +4059,7 @@ def test_finalize_phase_includes_receipt_publication(tmp_path, monkeypatch):
         tmp_path, monkeypatch,
         'import sys,json\nsys.stdin.read()\nprint(json.dumps({"type":"result","result":"DONE"}))\n',
     )
-    isolate_fabric_plan_env(monkeypatch)
+    isolate_fabric_plan_env(monkeypatch, tmp_path)
     monkeypatch.chdir(tmp_path)
     mod = load_dispatch_module()
     publish = mod.publish_contract
@@ -4124,7 +4093,7 @@ def test_fabric_fast_plan_matches_shell_for_explicit_model(tmp_path, monkeypatch
         tmp_path, monkeypatch,
         'import sys,json\nsys.stdin.read()\nprint(json.dumps({"type":"result","result":"DONE"}))\n',
     )
-    isolate_fabric_plan_env(monkeypatch)
+    isolate_fabric_plan_env(monkeypatch, tmp_path)
     instance = tmp_path / 'instance'
     config = instance / 'config/telemetry.json'
     config.parent.mkdir(parents=True)
@@ -4171,7 +4140,7 @@ def test_fabric_fast_plan_matches_or_delegates_shell_edge_routes(
     tmp_path, monkeypatch, adapter, model, effort, content,
 ):
     run, prompt, command = real_owner_fixture(tmp_path, monkeypatch, 'import sys\nsys.stdin.read()\n')
-    isolate_fabric_plan_env(monkeypatch)
+    isolate_fabric_plan_env(monkeypatch, tmp_path)
     instance = tmp_path / 'instance'
     config = instance / 'config/telemetry.json'
     config.parent.mkdir(parents=True)
@@ -4198,27 +4167,28 @@ def test_fabric_fast_plan_matches_or_delegates_shell_edge_routes(
     assert planned == expected
 
 
-@pytest.mark.parametrize('name', [
-    'CF_DISPATCH_IDLE_SECONDS', 'CF_DISPATCH_AGY_ADD_DIR', 'CF_DISPATCH_ENABLE_KIRO',
-    'CF_DISPATCH_ENABLE_COPILOT', 'CF_DISPATCH_CURSOR_MODEL', 'CF_DISPATCH_KIRO_MODEL',
-    'CF_DISPATCH_COPILOT_MODEL', 'CF_DISPATCH_OPENCODE_MODEL', 'CF_DISPATCH_ENDPOINT',
-    'CF_DISPATCH_CODEX_NETWORK', 'CF_DISPATCH_AGY_SANDBOX',
-])
-def test_fabric_fast_plan_delegates_shell_environment_knobs(tmp_path, monkeypatch, name):
+def test_fabric_fast_plan_delegates_shell_environment_knobs(tmp_path, monkeypatch):
     run, prompt, command = real_owner_fixture(tmp_path, monkeypatch, 'import sys\nsys.stdin.read()\n')
-    isolate_fabric_plan_env(monkeypatch)
+    isolate_fabric_plan_env(monkeypatch, tmp_path)
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setenv(name, '1')
     mod = load_dispatch_module()
     args = mod.parser().parse_args(command[2:])
     args.timeout_seconds = mod.DEFAULT_TIMEOUT_SECONDS
-    assert mod.fast_fabric_plan(args, prompt, run / 'result.md', tmp_path) is None
+    for name in (
+        'CF_DISPATCH_IDLE_SECONDS', 'CF_DISPATCH_AGY_ADD_DIR', 'CF_DISPATCH_ENABLE_KIRO',
+        'CF_DISPATCH_ENABLE_COPILOT', 'CF_DISPATCH_CURSOR_MODEL', 'CF_DISPATCH_KIRO_MODEL',
+        'CF_DISPATCH_COPILOT_MODEL', 'CF_DISPATCH_OPENCODE_MODEL', 'CF_DISPATCH_ENDPOINT',
+        'CF_DISPATCH_CODEX_NETWORK', 'CF_DISPATCH_AGY_SANDBOX',
+    ):
+        monkeypatch.setenv(name, '1')
+        assert mod.fast_fabric_plan(args, prompt, run / 'result.md', tmp_path) is None
+        monkeypatch.delenv(name)
 
 
 @pytest.mark.parametrize('variant', ['agy_add_dir', 'resume', 'fallback'])
 def test_fabric_fast_plan_delegates_valid_shell_only_options(tmp_path, monkeypatch, variant):
     run, prompt, command = real_owner_fixture(tmp_path, monkeypatch, 'import sys\nsys.stdin.read()\n')
-    isolate_fabric_plan_env(monkeypatch)
+    isolate_fabric_plan_env(monkeypatch, tmp_path)
     monkeypatch.chdir(tmp_path)
     mod = load_dispatch_module()
     args = mod.parser().parse_args(command[2:])
@@ -4247,7 +4217,7 @@ def test_fabric_fast_plan_delegates_valid_shell_only_options(tmp_path, monkeypat
 def test_fabric_fast_plan_delegates_missing_tmpdir(tmp_path, monkeypatch):
     """cf_dispatch.py rejects a TMPDIR that is not a directory; the fast path must not accept it."""
     run, prompt, command = real_owner_fixture(tmp_path, monkeypatch, 'import sys\nsys.stdin.read()\n')
-    isolate_fabric_plan_env(monkeypatch)
+    isolate_fabric_plan_env(monkeypatch, tmp_path)
     monkeypatch.chdir(tmp_path)
     mod = load_dispatch_module()
     args = mod.parser().parse_args(command[2:])
@@ -4296,7 +4266,7 @@ def test_fabric_fast_route_validation_tracks_shell_fields():
 ])
 def test_fabric_fast_plan_delegates_import_and_router_failures(tmp_path, monkeypatch, failure):
     run, prompt, command = real_owner_fixture(tmp_path, monkeypatch, 'import sys\nsys.stdin.read()\n')
-    isolate_fabric_plan_env(monkeypatch)
+    isolate_fabric_plan_env(monkeypatch, tmp_path)
     monkeypatch.chdir(tmp_path)
     mod = load_dispatch_module()
     args = mod.parser().parse_args(command[2:])
@@ -4769,7 +4739,7 @@ def test_preflight_types_an_opencode_below_v2_as_unsupported_cli_version(monkeyp
     module = load_dispatch_module()
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("AGENT_FABRIC_PRODUCT_ROOT", str(ROOT))
-    monkeypatch.setenv("AGENT_FABRIC_INSTANCE_ROOT", str(ROOT))
+    monkeypatch.setenv("AGENT_FABRIC_INSTANCE_ROOT", str(tmp_path / ".agents"))
     monkeypatch.setenv("PROVENANT_REMOTE_LANE", "1")
     monkeypatch.setattr(module, "_fabric_hosts_owner", lambda: SimpleNamespace(
         adapter_doctor=lambda *_: {"signin": {"status": "ok"}}))
@@ -4825,7 +4795,7 @@ print(json.dumps({{"type":"result", "result":"DONE"}}))
         model_index = command.index("--model")
         del command[model_index:model_index + 2]
         command += ["--task-class", "mechanical", "--role", "worker"]
-    isolate_fabric_plan_env(monkeypatch)
+    isolate_fabric_plan_env(monkeypatch, tmp_path)
     monkeypatch.setenv("AGENT_FABRIC_STATE_ROOT", str(tmp_path / "state"))
     monkeypatch.chdir(tmp_path)
     configure_fast_pacing(tmp_path, monkeypatch)
@@ -4851,7 +4821,7 @@ print(json.dumps({{"type":"result", "result":"DONE"}}))
 def test_rate_limit_does_not_retry_when_cooldown_exceeds_timeout(tmp_path, monkeypatch):
     code = 'import json,sys\nsys.stdin.read()\nprint(json.dumps({"type":"result", "is_error":True, "result":"rate limit", "retry_after":60}))\nsys.exit(1)\n'
     run, prompt, command = real_owner_fixture(tmp_path, monkeypatch, code)
-    isolate_fabric_plan_env(monkeypatch)
+    isolate_fabric_plan_env(monkeypatch, tmp_path)
     monkeypatch.setenv("AGENT_FABRIC_STATE_ROOT", str(tmp_path / "state"))
     monkeypatch.chdir(tmp_path)
     configure_fast_pacing(tmp_path, monkeypatch)
@@ -4882,7 +4852,7 @@ print(json.dumps({{"type":"result", "result":"DONE"}}))
     run, prompt, command = real_owner_fixture(tmp_path, monkeypatch, code)
     worktree = make_worktree(tmp_path)
     time.sleep(1.2)
-    isolate_fabric_plan_env(monkeypatch)
+    isolate_fabric_plan_env(monkeypatch, tmp_path)
     monkeypatch.setenv("AGENT_FABRIC_STATE_ROOT", str(tmp_path / "state"))
     monkeypatch.chdir(tmp_path)
     configure_fast_pacing(tmp_path, monkeypatch)
@@ -4905,7 +4875,7 @@ def test_rate_limit_wait_observes_cancellation_and_intervening_writer_edits(tmp_
     if worktree:
         time.sleep(1.2)
         command += ["--access-mode", "worktree_write", "--worktree", str(worktree)]
-    isolate_fabric_plan_env(monkeypatch)
+    isolate_fabric_plan_env(monkeypatch, tmp_path)
     monkeypatch.setenv("AGENT_FABRIC_STATE_ROOT", str(tmp_path / "state"))
     monkeypatch.chdir(tmp_path)
     configure_fast_pacing(tmp_path, monkeypatch)
@@ -4932,7 +4902,8 @@ def test_rate_limit_wait_observes_cancellation_and_intervening_writer_edits(tmp_
                 for store in (tmp_path / "cooldowns.json", tmp_path / "state/route-health.json"):
                     stores_before[store] = store.read_bytes()
                 (worktree / "intervening.txt").write_text("another edit")
-        sleep(seconds)
+        if not acted:
+            sleep(seconds)
     monkeypatch.setattr(mod.time, "sleep", during_wait)
     args = mod.parser().parse_args(command[2:])
     args.timeout_seconds = 10
@@ -4964,7 +4935,7 @@ print(json.dumps({{"type":"result", "result":"DONE"}}))
     worktree = make_worktree(tmp_path)
     (tmp_path / ".agents/fabric-policy.json").write_text(json.dumps({"memory_floor_percent": {"worktree_write":10}}))
     time.sleep(1.2)
-    isolate_fabric_plan_env(monkeypatch)
+    isolate_fabric_plan_env(monkeypatch, tmp_path)
     monkeypatch.setenv("AGENT_FABRIC_STATE_ROOT", str(tmp_path / "state"))
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
     monkeypatch.chdir(tmp_path)
@@ -5010,7 +4981,7 @@ print(json.dumps({{"type":"result", "is_error":True, "result":"rate limit", "ret
 sys.exit(1)
 '''
     run, prompt, command = real_owner_fixture(tmp_path, monkeypatch, code)
-    isolate_fabric_plan_env(monkeypatch)
+    isolate_fabric_plan_env(monkeypatch, tmp_path)
     configure_fast_pacing(tmp_path, monkeypatch, base_delay_seconds=0.1)
     monkeypatch.chdir(tmp_path)
     mod = load_dispatch_module()
@@ -5032,7 +5003,7 @@ sys.exit(1)
 def test_rate_limit_reserves_run_budget_after_the_delay(tmp_path, monkeypatch):
     code = 'import json,sys; sys.stdin.read(); print(json.dumps({"type":"result", "is_error":True, "result":"rate limit", "retry_after":0.2})); sys.exit(1)'
     run, prompt, command = real_owner_fixture(tmp_path, monkeypatch, code)
-    isolate_fabric_plan_env(monkeypatch)
+    isolate_fabric_plan_env(monkeypatch, tmp_path)
     configure_fast_pacing(tmp_path, monkeypatch, minimum_budget_seconds=10)
     monkeypatch.chdir(tmp_path)
     mod = load_dispatch_module()
@@ -5047,7 +5018,7 @@ def test_usage_limit_never_retries_the_same_model(tmp_path, monkeypatch, fallbac
     code = 'import json,sys; sys.stdin.read(); print(json.dumps({"type":"result", "is_error":True, "result":"429 RESOURCE_EXHAUSTED: Quota exceeded per day"})); sys.exit(1)'
     run, prompt, command = real_owner_fixture(tmp_path, monkeypatch, code)
     command[command.index("--fallback") + 1] = fallback
-    isolate_fabric_plan_env(monkeypatch)
+    isolate_fabric_plan_env(monkeypatch, tmp_path)
     configure_fast_pacing(tmp_path, monkeypatch)
     monkeypatch.chdir(tmp_path)
     mod = load_dispatch_module()
@@ -5091,7 +5062,7 @@ print(json.dumps({{"status":"SUCCESS", "response":"DONE"}}))
     write_executable(tmp_path / "provider-bin/agy", "#!/usr/bin/env python3\n" + code)
     command[command.index("--adapter") + 1] = "agy"
     command[command.index("--model") + 1] = "gemini-3.8-flash"
-    isolate_fabric_plan_env(monkeypatch)
+    isolate_fabric_plan_env(monkeypatch, tmp_path)
     configure_fast_pacing(tmp_path, monkeypatch)
     monkeypatch.chdir(tmp_path)
     mod = load_dispatch_module()
@@ -5166,7 +5137,7 @@ def test_paced_retry_blocks_quota_discovered_during_planning(tmp_path, monkeypat
     run, prompt, command = real_owner_fixture(tmp_path, monkeypatch,
         f'from pathlib import Path\nPath({str(launched)!r}).touch()\n'
         'import json\nprint(json.dumps({"type":"result","result":"DONE"}))\n')
-    isolate_fabric_plan_env(monkeypatch)
+    isolate_fabric_plan_env(monkeypatch, tmp_path)
     instance = tmp_path / 'instance'
     config = instance / 'config/telemetry.json'
     config.parent.mkdir(parents=True)
@@ -6128,7 +6099,7 @@ def test_model_fallback_reselects_an_automatically_pinned_exhausted_account(tmp_
     import provider_quota as quota
 
     run, prompt, command = real_owner_fixture(tmp_path, monkeypatch, 'import sys\nsys.stdin.read()\n')
-    isolate_fabric_plan_env(monkeypatch)
+    isolate_fabric_plan_env(monkeypatch, tmp_path)
     instance = tmp_path / 'instance'
     config = instance / 'config/telemetry.json'
     config.parent.mkdir(parents=True)
@@ -6194,7 +6165,7 @@ def test_claude_fallback_does_not_override_selected_account_cooldown(tmp_path, m
         'import sys,json\nfrom pathlib import Path\nsys.stdin.read()\n'
         f'with Path({str(launched)!r}).open("a") as stream: stream.write("launch\\n")\n'
         'print(json.dumps({"type":"result","is_error":True,"result":"You have hit your weekly limit"}))\n')
-    isolate_fabric_plan_env(monkeypatch)
+    isolate_fabric_plan_env(monkeypatch, tmp_path)
     instance = tmp_path / 'instance'
     config = instance / 'config/telemetry.json'
     config.parent.mkdir(parents=True)

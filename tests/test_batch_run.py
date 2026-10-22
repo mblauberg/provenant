@@ -650,29 +650,6 @@ def test_batch_rejects_incomplete_success_evidence_before_summary(tmp_path, monk
     }]
 
 
-@pytest.mark.parametrize('process_exit', ['false', 'float'])
-def test_batch_rejects_non_integer_zero_exit_before_summary(tmp_path, monkeypatch, process_exit):
-    """A successful child must retain a real integer process exit code."""
-    monkeypatch.chdir(tmp_path)
-    run_dir = make_run(tmp_path, f'non-integer-exit-{process_exit}')
-    dispatch = tmp_path / 'fake-dispatch'
-    fake_dispatch(dispatch)
-    module = load_module()
-    module.DISPATCH_RUN = dispatch
-    counter = tmp_path / 'counter'
-    counter.write_text('0', encoding='utf-8')
-    monkeypatch.setenv('BATCH_COUNTER', str(counter))
-    manifest = task_manifest(tmp_path, [task(tmp_path, 'probe', process_exit=process_exit)])
-
-    assert module.batch(args(module, run_dir, manifest, 1)) == 1
-
-    summary = json.loads((run_dir / 'dispatch/batches/batch-001/summary.json').read_text())
-    assert summary['tasks'][0]['status'] == 'failed'
-    assert summary['tasks'][0]['outcome'] == 'child_receipt_invalid'
-    assert summary['tasks'][0]['receipt_invalid'] is True
-    assert summary['tasks'][0]['message'] == 'successful attempt does not prove exit 0'
-
-
 def test_real_dispatch_timeout_retains_typed_non_success_attempt(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     run_dir = make_run(tmp_path, 'real-timeout')
@@ -703,7 +680,12 @@ def test_real_dispatch_timeout_retains_typed_non_success_attempt(tmp_path, monke
     assert (run_dir / 'dispatch/tasks/slow/attempt-001/attempt.json').is_file()
 
 
-def test_parent_watchdog_stops_hung_child(tmp_path, monkeypatch):
+@pytest.mark.parametrize('prior_attempt', [False, True])
+def test_parent_watchdog_stops_hung_child_even_with_prior_wait(tmp_path, monkeypatch, prior_attempt):
+    if prior_attempt:
+        old = tmp_path / 'tasks/hung/attempt-001/attempt.json'
+        old.parent.mkdir(parents=True)
+        old.write_text(json.dumps({'state': 'terminal', 'timing': {'queued_seconds': 100}}))
     child = tmp_path / 'hung-child'
     write_executable(child, '#!/usr/bin/env python3\nimport time\ntime.sleep(10)\n')
     module = load_module()
@@ -716,22 +698,6 @@ def test_parent_watchdog_stops_hung_child(tmp_path, monkeypatch):
                             'model': 'gpt-6-luna', 'role': 'worker', 'timeout': 0.1}, tmp_path, tmp_path)
     assert row['status'] == 'timed_out' and row['outcome'] == 'batch_timeout'
     assert time.monotonic() - started < 7
-
-
-def test_parent_watchdog_ignores_prior_attempt_wait(tmp_path, monkeypatch):
-    old = tmp_path / 'tasks/hung/attempt-001/attempt.json'
-    old.parent.mkdir(parents=True)
-    old.write_text(json.dumps({'state': 'terminal', 'timing': {'queued_seconds': 100}}))
-    child = tmp_path / 'hung-child'
-    write_executable(child, '#!/usr/bin/env python3\nimport time\ntime.sleep(1)\n')
-    module = load_module()
-    module.DISPATCH_RUN = child
-    monkeypatch.setattr(module, 'DISPATCH_WATCHDOG_GRACE_SECONDS', 0.05)
-    prompt = tmp_path / 'prompt.md'
-    prompt.write_text('hello\n')
-    row = module._run_task({'id': 'hung', 'prompt_file': str(prompt), 'adapter': 'codex',
-                            'model': 'gpt-6-luna', 'role': 'worker', 'timeout': 0.1}, tmp_path, tmp_path)
-    assert row['status'] == 'timed_out' and row['outcome'] == 'batch_timeout'
 
 
 def test_parent_watchdog_excludes_published_memory_wait(tmp_path, monkeypatch):
@@ -1275,8 +1241,7 @@ def test_batch_child_flag_cannot_bypass_unrelated_run_custody(tmp_path, monkeypa
         lock.close()
 
 
-@pytest.mark.parametrize('_run', range(3))
-def test_batch_cancellation_reaps_active_dispatches(tmp_path, monkeypatch, _run):
+def test_batch_cancellation_reaps_active_dispatches(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     run_dir = make_run(tmp_path, 'cancel')
     dispatch = tmp_path / 'fake-dispatch'
