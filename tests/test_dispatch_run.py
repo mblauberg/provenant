@@ -4158,7 +4158,6 @@ def test_fabric_fast_plan_matches_or_delegates_shell_edge_routes(
     mod = load_dispatch_module()
     args = mod.parser().parse_args(command[2:])
     args.tool, args.model, args.effort = adapter, model, effort
-    args.account = 'pro' if adapter == 'claude' else None
     args.timeout_seconds = mod.DEFAULT_TIMEOUT_SECONDS
     result = run / 'result.md'
     shell = subprocess.run([*mod.build_command(args, prompt, result), '--plan-only'],
@@ -5173,6 +5172,17 @@ def test_model_fallback_retains_the_automatically_selected_claude_account(monkey
     mod, args, launches = _sequence_fixture(monkeypatch, plan, rows, alternatives)
     mod.execute_attempt_sequence(args)
     assert launches == [(None, None, None), ("claude", "sonnet", "pro")]
+
+
+def test_unreadable_account_quota_releases_an_automatic_pin_instead_of_crashing(tmp_path, monkeypatch):
+    instance = tmp_path / 'instance'
+    config = instance / 'config/telemetry.json'
+    config.parent.mkdir(parents=True)
+    config.write_text(json.dumps({'accounts': {'claude': {'pro': {'identity_dir': 5}}}}))
+    monkeypatch.setenv('AGENT_FABRIC_INSTANCE_ROOT', str(instance))
+    monkeypatch.setenv('AGENT_FABRIC_STATE_ROOT', str(tmp_path / 'state'))
+    mod = load_dispatch_module()
+    assert mod.exec_routing.claude_account_needs_reselection('pro') is True
 
 
 @pytest.mark.parametrize('reading', ['credit_only', 'error', 'advisory', 'malformed'])

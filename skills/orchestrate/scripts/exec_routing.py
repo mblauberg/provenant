@@ -310,8 +310,9 @@ def claude_account_needs_reselection(account):
         chosen = next((row for row in quota.accounts('claude') if row.label == account), None)
         return bool(chosen and quota.claude_account_exhausted(
             quota.load_snapshot('claude', account, chosen.identity_dir), datetime.now(UTC)))
-    except ValueError:
-        # Drop only automatic pins, so planning can retain the ambient identity.
+    except Exception:
+        # Quota readings stay advisory: an unreadable reading drops only an
+        # automatic pin, so planning can retain the ambient identity.
         return True
 
 
