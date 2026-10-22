@@ -271,6 +271,7 @@ class Availability:
         self.catalog = catalog
         self.installed = installed
         self.cooldowns = router._cooldowns(catalog) if cooldowns is None else cooldowns
+        self._quota: dict[str, Any] | None = None
         self._enabled: dict[str, str] = {}
         self._compatibility: dict[str, dict[str, Any] | None] = {}
 
@@ -301,6 +302,12 @@ class Availability:
         _, status = self.router.check_adapter_compatibility(compatibility, family, model)
         return {"adapter_family_forbidden": f"{adapter} cannot run the {family} family",
                 "adapter_model_forbidden": f"{adapter} does not allow {model}"}.get(status, status)
+
+    def last_resort(self, adapter: str) -> bool:
+        """The adapter's selected account is drawing on credits under the `last_resort` credits policy."""
+        if self._quota is None:
+            self._quota = getattr(self.router, "_quota_states", dict)()
+        return bool(self._quota.get(adapter, {}).get("last_resort"))
 
     def reason(self, adapter: str, model: str, weight: float = 1.0) -> str:
         if weight <= 0:
@@ -490,6 +497,15 @@ def pick(router: Any, catalog: dict[str, Any], request: dict[str, Any], *,
                 warnings.append(f"skipped {entry['key']}: {why}")
             continue
         usable.append(entry)
+    if models is None and not request.get("adapter"):
+        # Credits are spent only when nothing with allowance qualifies; naming the adapter or model pins it.
+        allowance = [entry for entry in usable if not availability.last_resort(entry["adapter"])]
+        spare = [entry for entry in usable if entry not in allowance]
+        if allowance:
+            warnings.extend(f"skipped {entry['key']}: drawing on credits while others have allowance" for entry in spare)
+            usable = allowance
+        else:
+            warnings.extend(f"{entry['key']} draws on credits: nothing with allowance is available" for entry in spare)
     if not usable:
         raise PoolError("route_unavailable", "No available model in " + label
                         + ("" if not warnings else " (" + "; ".join(warnings) + ")")
@@ -585,7 +601,7 @@ def render(document: dict[str, Any], full: bool = False) -> str:
                 continue
             model = entry["model"] + (f"@{entry['effort']}" if "effort" in entry else "")
             caveat = f"  [{', '.join(entry['traits'])}]" if "traits" in entry else ""
-            if entry.get("quota", {}).get("state") == "deficit":
+            if entry.get("quota", {}).get("state") in ("deficit", "credit_only"):
                 caveat += f"  [quota {entry['quota']['summary']}]"
             lines.append(f"  {model:<52} {str(entry['weight']):<8} {entry['availability']}{caveat}")
         if hidden:

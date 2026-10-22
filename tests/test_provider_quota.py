@@ -186,6 +186,11 @@ def test_codex_reports_its_credit_balance_and_banked_resets_with_expiry(quota):
                     'expiresAt': expires + 1}]}}
     parsed = quota.provider('codex').parse(payload, NOW)
     assert parsed['credits'] == {'reset_credits': 1, 'source': 'provider'}
+    assert quota.normalise_allowance(parsed['allowance']) is None
+    allowed = quota.provider('codex').parse({**payload, 'ordinaryUsageAllowed': True,
+                                             'rateLimits': {**payload['rateLimits'], 'spendControlReached': False}})
+    assert quota.normalise_allowance(allowed['allowance']) == {'ordinary_usage_allowed': True,
+                                                               'spend_control_reached': False}
     assert quota.normalise_resets(parsed['resets']) == {'available': 1, 'expires_at': [iso(NOW + timedelta(days=16))],
                                                         'source': 'provider'}
     assert quota.normalise_usage_credits(parsed['usage_credits']) == [{
@@ -694,6 +699,110 @@ def test_exhausted_window_cools_the_provider_until_reset_and_deficit_is_report_o
     assert quota.apply_to_cooldowns({}, NOW) == {}
     state = quota.route_states(NOW)['codex']
     assert state['state'] == 'deficit' and 'runs out' in state['summary']
+
+
+CREDITS = [{'kind': 'credits', 'balance': 27406.21, 'unlimited': False, 'currency': None, 'unit': 'credits',
+            'expires_at': None, 'source': 'provider'}]
+
+
+def spent_codex(quota, account='default', credits=CREDITS, allowance=None, reset_in=timedelta(hours=3)):
+    return snapshot(quota, 'codex', [window(100, WEEK, reset_in, 'primary')], account=account, usage_credits=credits,
+                    **({'allowance': allowance} if allowance else {}))
+
+
+def cooldown(status, recorded, **extra):
+    return {'codex/*': {'account': 'default', 'host': 'studio', 'adapter': 'codex', 'model': '*', 'status': status,
+                        'cooling_until': iso(NOW + timedelta(hours=8)), 'recorded_at': iso(recorded), **extra}}
+
+
+def test_credits_keep_an_exhausted_codex_account_usable_as_a_last_resort(quota):
+    spent_codex(quota)
+    # The cooldown an earlier exhausted reading set goes once credits keep the account usable.
+    assert quota.apply_to_cooldowns(cooldown('quota_exhausted', NOW - timedelta(hours=1), source='provider quota'), NOW) == {}
+    state = quota.route_states(NOW)['codex']
+    assert state['state'] == 'credit_only' and state['last_resort'] is True
+    assert state['summary'] == 'primary: allowance spent; drawing on credits, 27,406 credits available'
+    row = quota.report(quota.snapshots(), NOW)['accounts'][0]
+    assert row['drawing_credits'] is True and row['credit_burn_per_hour'] is None
+    # The provider's own refusal of ordinary use spends the allowance even below 100%.
+    snapshot(quota, 'codex', [window(60, WEEK, timedelta(days=3), 'primary')], usage_credits=CREDITS,
+             allowance={'ordinary_usage_allowed': False})
+    assert quota.route_states(NOW)['codex']['state'] == 'credit_only'
+
+
+def test_a_refusal_while_drawing_on_credits_keeps_its_cooldown_until_allowance_returns(quota):
+    # Dispatch is refused (credits switched off, say); the next reading still shows credits.
+    refused = cooldown('usage_limited', NOW - timedelta(hours=1))
+    spent_codex(quota)
+    assert quota.apply_to_cooldowns(refused, NOW) == refused
+    snapshot(quota, 'codex', [window(100, WEEK, timedelta(hours=3), 'primary')], observed=NOW + timedelta(minutes=10),
+             usage_credits=CREDITS)
+    assert quota.apply_to_cooldowns(refused, NOW + timedelta(minutes=10)) == refused
+    # A reading with allowance again confirms recovery, so routing may retry.
+    snapshot(quota, 'codex', [window(5, WEEK, timedelta(days=7), 'primary')], observed=NOW + timedelta(hours=4))
+    assert quota.apply_to_cooldowns(refused, NOW + timedelta(hours=4)) == {}
+
+
+@pytest.mark.parametrize('used', [100, 60])
+@pytest.mark.parametrize('case', ['floor', 'spend_control', 'depleted', 'no_credits', 'never'])
+def test_credits_that_cannot_be_spent_leave_the_account_exhausted(quota, tmp_path, case, used):
+    configure(tmp_path, {'quota': {'credit_floor': 30000} if case == 'floor' else
+                                  {'credits_policy': 'never'} if case == 'never' else {}})
+    allowance = {'spend_control': {'spend_control_reached': True},
+                 'depleted': {'limit_reached_type': 'workspace_member_credits_depleted'}}.get(case) or {}
+    # Below 100%, only the provider's refusal of ordinary use spends the allowance.
+    allowance |= {'ordinary_usage_allowed': False} if used < 100 else {}
+    snapshot(quota, 'codex', [window(used, WEEK, timedelta(hours=3), 'primary')],
+             usage_credits=None if case == 'no_credits' else CREDITS, **({'allowance': allowance} if allowance else {}))
+    state = quota.route_states(NOW)['codex']
+    assert state['state'] == 'exhausted' and state['cooling_until'] == iso(NOW + timedelta(hours=3))
+    assert quota.apply_to_cooldowns({}, NOW)['codex/*']['status'] == 'quota_exhausted'
+    if used < 100:
+        assert state['summary'] == 'primary: allowance spent; codex refuses ordinary use'
+
+
+@pytest.mark.parametrize('reset_in', [None, -timedelta(hours=1)])
+@pytest.mark.parametrize('configured', [None, 600])
+def test_a_refused_allowance_with_no_future_reset_cools_for_a_bounded_wait(quota, tmp_path, reset_in, configured):
+    configure(tmp_path, {'quota': {'unknown_reset_cooldown_seconds': configured} if configured else {}})
+    snapshot(quota, 'codex', [window(60, WEEK, reset_in, 'primary')], usage_credits=None,
+             allowance={'ordinary_usage_allowed': False})
+    until = iso(NOW + timedelta(seconds=configured or 3600))
+    assert quota.route_states(NOW)['codex']['cooling_until'] == until
+    assert quota.apply_to_cooldowns({}, NOW)['codex/*']['cooling_until'] == until
+    # Once the wait ends, the next reading decides.
+    assert 'codex/*' not in quota.apply_to_cooldowns({}, NOW + timedelta(seconds=(configured or 3600) + 1))
+
+
+@pytest.mark.parametrize('policy, state, order, cooled', [
+    ('last_resort', 'credit_only', ['work', 'default'], False),
+    ('normal', 'credit_only', ['default', 'work'], False),
+    ('never', 'exhausted', ['work', 'default'], True)])
+def test_credits_policy_sets_state_ranking_and_cooldown(quota, tmp_path, policy, state, order, cooled):
+    configure(tmp_path, {'quota': {'credits_policy': policy},
+                         'accounts': {'codex': {'default': {}, 'work': {'identity_dir': str(tmp_path / 'codex-work')}}}})
+    spent_codex(quota, reset_in=timedelta(days=1))
+    snapshot(quota, 'codex', [window(30, WEEK, timedelta(days=5), 'primary')], account='work')
+    report = quota.report(quota.snapshots(), NOW)
+    assert next(row for row in report['accounts'] if row['account'] == 'default')['state'] == state
+    assert report['placement_preference']['codex'] == order
+    routed = quota.route_states(NOW)['codex']
+    assert routed.get('last_resort', False) is (policy == 'last_resort')
+    assert ('codex/*' in quota.apply_to_cooldowns({}, NOW)) is cooled
+
+
+def test_credit_burn_rate_spans_the_run_of_falling_balance(quota, monkeypatch):
+    balances = iter([30000, 27000, 26000, 26000])
+    monkeypatch.setattr(quota, 'fetch', lambda account, now: {
+        'windows': [window(100, WEEK, timedelta(hours=3), 'primary')],
+        'usage_credits': [{'kind': 'credits', 'balance': next(balances), 'unit': 'credits'}]})
+    account = quota.Account('codex', 'default', quota.provider('codex').default_identity(), True)
+    readings = [quota.refresh(account, NOW + timedelta(hours=hour), force=True) for hour in (0, 1, 2)]
+    assert readings[-1]['credit_anchor'] == {'balance': 30000, 'observed_at': iso(NOW)}
+    row = quota.report([readings[-1]], NOW + timedelta(hours=2))['accounts'][0]
+    assert row['credit_burn_per_hour'] == 2000 and row['summary'].endswith('26,000 credits available, about 2,000/h')
+    # A steady balance starts a new run.
+    assert quota.refresh(account, NOW + timedelta(hours=3), force=True)['credit_anchor']['balance'] == 26000
 
 
 def test_inactive_removed_and_disabled_accounts_do_not_touch_routing(quota, monkeypatch, tmp_path):

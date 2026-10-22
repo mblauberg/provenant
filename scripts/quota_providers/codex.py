@@ -135,7 +135,10 @@ def parse(payload, now=None):
     return {'windows': windows, 'unreported': unreported,
             'plan': main.get('planType') or main.get('plan_type') or root.get('plan_type'),
             'credits': {'reset_credits': count, 'source': 'provider'} if count is not None else None,
-            'resets': resets, 'usage_credits': _balance(main.get('credits'))}
+            'resets': resets, 'usage_credits': _balance(main.get('credits')),
+            'allowance': {'ordinary_usage_allowed': root.get('ordinaryUsageAllowed'),
+                          'spend_control_reached': main.get('spendControlReached'),
+                          'limit_reached_type': main.get('rateLimitReachedType')}}
 
 
 def _resets(raw):

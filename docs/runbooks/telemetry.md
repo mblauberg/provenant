@@ -144,7 +144,8 @@ An entry without `identity_dir` means the provider's default directory.
 ```json
 {
   "quota": {"enabled": true, "cache_seconds": 300,
-            "window_labels": {"iguana_necktie": "Cloud session credits"}},
+            "window_labels": {"iguana_necktie": "Cloud session credits"},
+            "credits_policy": "last_resort", "credit_floor": 0},
   "accounts": {
     "claude": {
       "max-a": {"identity_dir": "~/.claude", "plan": "Max", "priority": 1},
@@ -239,6 +240,29 @@ not-started readings clear older contradictory usage cooldowns in the same
 account and host; unknown readings
 preserve them. Short-term `rate_limited` cooldowns remain.
 Deficit is shown in `provenant routes` and JSON only; it does not lower weights.
+
+An account whose allowance is spent can stay usable on credits. The allowance is
+spent when a window is exhausted or the provider reports `ordinary_usage_allowed:
+false`. Credits keep the account usable when the latest reading has a balance
+above `quota.credit_floor` (default 0), or unlimited credits, and the provider
+reports no spend control reached and no depleted credits. Such an account has
+state `credit_only`, `drawing_credits: true`, a summary with its balance, and
+`credit_burn_per_hour` once successive readings show the balance falling. It adds
+no quota cooldown and clears older cooldowns that quota set. A cooldown from a
+real refusal stays until it expires or a reading shows allowance again, since
+credits may be switched off. A spent allowance without usable credits is
+`exhausted`, even below 100%, and cools until the governing window resets. With
+no future reset time known, it cools for `quota.unknown_reset_cooldown_seconds`
+(default 3600) from the reading, and the next reading decides.
+`quota.credits_policy` sets how routing ranks it:
+
+- `last_resort` (default): placement ranks it after every account with
+  allowance, and pools skip its adapter while another entry with allowance
+  qualifies. A request that names the adapter or the model still uses it.
+- `normal`: it ranks like an account with allowance.
+- `never`: it stays exhausted and cools until reset.
+
+A balance that the latest reading does not report is unknown, never usable.
 
 ### Adding a provider
 
