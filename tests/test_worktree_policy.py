@@ -84,6 +84,31 @@ def test_failed_checkout_removes_only_the_branch_it_created(tmp_path, repo_templ
         'refs/heads/feat/failed'], text=True).strip() == current
 
 
+def test_new_branch_from_remote_tracking_start_point_has_no_upstream(tmp_path, capsys, repo_template):
+    repo = tmp_path / 'project'
+    init_repo(repo, repo_template)
+    remote = tmp_path / 'origin.git'
+    subprocess.run(['git', 'clone', '-q', '--bare', str(repo), str(remote)], check=True)
+    subprocess.run(['git', '-C', str(repo), 'remote', 'add', 'origin', str(remote)], check=True)
+    subprocess.run(['git', '-C', str(repo), 'fetch', '-q', 'origin'], check=True)
+    head_branch = subprocess.check_output(
+        ['git', '-C', str(repo), 'rev-parse', '--abbrev-ref', 'HEAD'], text=True).strip()
+
+    worktree_policy.main([
+        'create', '--new-branch', 'feat/lane', '--start-point', f'origin/{head_branch}',
+        '--repo', str(repo),
+    ])
+
+    receipt = json.loads(capsys.readouterr().out)
+    assert receipt['branch'] == 'feat/lane'
+    target = Path(receipt['worktree_root'])
+    checked = subprocess.run(
+        ['git', '-C', str(target), 'rev-parse', '--abbrev-ref', 'feat/lane@{upstream}'],
+        capture_output=True,
+    )
+    assert checked.returncode != 0
+
+
 
 def test_late_metadata_failure_is_a_post_creation_error(tmp_path, monkeypatch, repo_template):
     repo = tmp_path / 'project'
