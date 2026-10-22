@@ -1922,10 +1922,10 @@ def fixture_ledger(db):
         source = rng.choice(['claude', 'codex', 'opencode', 'fabric', 'fabric'])
         adapter, provider, model = rng.choice(models)
         rows.append({'source': source, 'event_id': f'e{index}', 'host': rng.choice(['h1', 'h2']),
-                     'session': rng.choice([None, 's1', 's2', 's3']), 'run_id': f'r{rng.randrange(8)}',
+                     'session': rng.choice([None, '', 's1', 's2', 's3']), 'run_id': f'r{rng.randrange(8)}',
                      'task_id': f't{rng.randrange(3)}', 'attempt': rng.choice([None, 1, 2, 3]),
                      'repository': 'repo', 'adapter': adapter, 'provider': provider, 'model': model,
-                     'effort': rng.choice([None, 'high']), 'account': rng.choice([None, 'a', 'b']),
+                     'effort': rng.choice([None, 'high']), 'account': rng.choice([None, '', 'a', 'b']),
                      'timestamp': rng.choice(stamps),
                      **{field: rng.choice(tokens) for field in (
                          'input_tokens', 'cache_read_tokens', 'cache_write_tokens', 'output_tokens', 'reasoning_tokens')},
@@ -1939,20 +1939,10 @@ def fixture_ledger(db):
     db.commit()
 
 
-def same_report(left, right, path='report'):
-    if isinstance(left, dict):
-        assert left.keys() == right.keys(), path
-        for key in left:
-            same_report(left[key], right[key], f'{path}/{key}')
-    elif isinstance(left, list):
-        assert len(left) == len(right), path
-        for index, (a, b) in enumerate(zip(left, right)):
-            same_report(a, b, f'{path}[{index}]')
-    elif isinstance(left, float) or isinstance(right, float):
-        # SQL sums a group at once; Python adds row by row. They agree to float rounding.
-        assert left is not None and right is not None and abs(left - right) <= 1e-9 * max(1, abs(left)), path
-    else:
-        assert left == right and type(left) is type(right), path
+def serialised(report):
+    for event in report['last_limit_events']:
+        event.pop('age_seconds')  # depends on the clock
+    return json.dumps(report, indent=2)
 
 
 def test_sql_grouped_stats_match_the_row_by_row_oracle(tmp_path, monkeypatch):
@@ -1965,4 +1955,4 @@ def test_sql_grouped_stats_match_the_row_by_row_oracle(tmp_path, monkeypatch):
             new = telemetry.stats(db, **kwargs)
             old = telemetry.legacy_stats(db, **kwargs)
             assert new['usage'] and new['unattributed'] and new['excluded_rows'], kwargs
-            same_report(old, new)
+            assert serialised(new) == serialised(old), kwargs

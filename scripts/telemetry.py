@@ -1048,6 +1048,10 @@ def combine(groups, keys):
         target['model_raw'].update(group['model_raw'])
         target['billing'].update(group['billing'])
     for group in merged.values():
+        # Micro-dollars: the same figure however the rows were summed.
+        group['known_cost_usd'] = round(group['known_cost_usd'], 6)
+        if group['reported_cost_usd'] is not None:
+            group['reported_cost_usd'] = round(group['reported_cost_usd'], 6)
         group['model_raw'] = sorted(group['model_raw'])
         group['billing'] = sorted(group['billing'])
     return sorted(merged.values(), key=lambda row: tuple(str(row[k] or '') for k in keys))
@@ -1116,7 +1120,7 @@ def cell_unit(cell, keys, prices, free_patterns):
             'billing': [entry['billing']] if entry.get('billing') else []}
 
 
-def usage_cells(db, where, parameters, summary, boundary, end, need_native):
+def usage_cells(db, where, parameters, summary, boundary, end, need_native, order):
     """Non-receipt usage rows grouped in SQL, so a large ledger is never held as Python rows.
 
     A day key stands for every row of a UTC day lying wholly inside the bounds; any other
@@ -1135,7 +1139,7 @@ def usage_cells(db, where, parameters, summary, boundary, end, need_native):
     sums = [f'SUM(COALESCE({field},0)) AS {field}' for field in TOKEN_FIELDS]
     cells = [dict(row) for row in db.execute(
         f"SELECT {', '.join(columns)}, {stamp} AS timestamp, {', '.join(flags)}, {', '.join(sums)}, "
-        f"SUM(reported_cost) AS reported_cost, COUNT(*) AS rows FROM usage{where} "
+        f"SUM(reported_cost) AS reported_cost, COUNT(*) AS rows, MIN({order}) AS first_row FROM usage{where} "
         f"GROUP BY {', '.join(columns)}, {stamp}, {', '.join(f'null_{f}, positive_{f}' for f in TOKEN_FIELDS)}",
         parameters)]
     native = []
@@ -1217,17 +1221,17 @@ def stats(db, since=None, prices=None, *, summary=False, until=None):
     excluded = Counter()
     selected, unattributed = [], []
     # A day of margin keeps offset timestamps; `included` applies the exact bounds.
-    where, parameters, order = '', {}, 'rowid'
+    where, parameters, order = '', {}, "printf('%020d', rowid)"
     if boundary:
         # The old full-row query was walked in index order here; ties between attempts keep that order.
         where, parameters['start'] = ' AND timestamp >= :start', (boundary - timedelta(days=1)).date().isoformat()
-        order = 'timestamp, rowid'
+        order = "printf('%s|%020d', COALESCE(timestamp,''), rowid)"
     def attribute(row):
         row['model_raw'] = row['model']
         row['model'] = normalise_model(row['adapter'], row['provider'], row['model'], adapters)
         return classify(row)
     # Receipts stay row by row (few, and lanes need whole rows); native sources group in SQL.
-    for item in db.execute("SELECT * FROM usage WHERE source='fabric'" + where + ' ORDER BY ' + order, parameters):
+    for item in db.execute(f"SELECT {order} AS first_row, * FROM usage WHERE source='fabric'" + where + ' ORDER BY ' + order, parameters):
         row = dict(item)
         if not included(row):
             continue
@@ -1239,7 +1243,7 @@ def stats(db, since=None, prices=None, *, summary=False, until=None):
             unattributed.append(row)
         selected.append(row)
     attributed = [row for row in selected if classify(row) is None]
-    cells, native_rows = usage_cells(db, where, parameters, summary, boundary, end, bool(attributed))
+    cells, native_rows = usage_cells(db, where, parameters, summary, boundary, end, bool(attributed), order)
     cells = [cell for cell in cells if included(cell)]
     for cell in cells:
         cell['reason'] = attribute(cell)
@@ -1257,8 +1261,10 @@ def stats(db, since=None, prices=None, *, summary=False, until=None):
     for cell in usage_groups:
         cell['day'] = since_time(cell['timestamp']).date().isoformat() if cell['timestamp'] else None
     def groups(keys):
-        return combine(itertools.chain((unit(row, keys, prices, free_patterns) for row in usage),
-                                       (cell_unit(cell, keys, prices, free_patterns) for cell in usage_groups)), keys)
+        # Groups enter `combine` in the order their first row had, so tied sort keys keep that order.
+        ordered = itertools.chain(((row['first_row'], unit(row, keys, prices, free_patterns)) for row in usage),
+                                  ((cell['first_row'], cell_unit(cell, keys, prices, free_patterns)) for cell in usage_groups))
+        return combine((group for _, group in sorted(ordered, key=lambda pair: pair[0])), keys)
     latest = {}
     attempts = Counter()
     for row in selected:
