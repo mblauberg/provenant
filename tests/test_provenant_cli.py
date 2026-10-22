@@ -260,6 +260,18 @@ def test_worktree_runs_from_arbitrary_cwd_without_changing_it(tmp_path):
     assert payload["cwd"] == str(caller_cwd)
 
 
+@pytest.mark.parametrize("arguments", [("lanes", "--json"), ("events", "--follow"), ("graph", "status", "g-0a1b2c")])
+def test_fabric_reads_delegate_to_the_fabric_cli(tmp_path, arguments):
+    checkout, command = make_checkout(tmp_path)
+
+    result = invoke(command, *arguments, cwd=tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["argv"][0] == str(checkout / "runtime/fabric/bin/fabric")
+    assert payload["argv"][1:] == list(arguments)
+
+
 def test_installed_copy_ignores_same_named_commands_in_its_bin_directory(tmp_path):
     checkout, _ = make_checkout(tmp_path)
     product_owner = checkout / "runtime/fabric/bin/fabric"

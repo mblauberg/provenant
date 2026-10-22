@@ -81,7 +81,7 @@ def resolve_product_root(instance_root: Path | None = None) -> Path:
 
 
 def usage() -> None:
-    print("usage: provenant <help|root|route|routes|capabilities|worktree|clean|check|gate|telemetry|stats|retro|quota|profile|fabric|hosts|peer|lanes|events|dispatch|batch|run> [arguments...]", file=sys.stderr)
+    print("usage: provenant <help|root|route|routes|capabilities|worktree|clean|check|gate|telemetry|stats|retro|quota|profile|fabric|hosts|peer|lanes|events|graph|dispatch|batch|run> [arguments...]", file=sys.stderr)
 
 
 def help_text() -> None:
@@ -99,8 +99,7 @@ Thin front door to owners:
   gate           scripts/gate
   fabric ...     runtime/fabric/bin/fabric ...
   hosts|peer     scripts/fabric-hosts ...
-  lanes ...      runtime/fabric/bin/fabric lanes
-  events ...     runtime/fabric/bin/fabric events
+  lanes|events|graph  runtime/fabric/bin/fabric <command> ...
   telemetry ...  scripts/provenant-telemetry
   stats|retro    scripts/provenant-telemetry stats|retro
   quota ...      scripts/provenant-quota
@@ -186,6 +185,14 @@ COMMAND_DETAILS: dict[str, str] = {
         "Default shows active lanes plus the 5 most recent terminal ones;\n"
         "use --all to list all lanes.\n"
         "`lanes --wait` waits for a lane to finish or need input."
+    ),
+    "graph": (
+        "usage: provenant graph run --file F\n"
+        "       provenant graph status [ID] [--json] [--wait [--timeout N]]\n"
+        "       provenant graph cancel ID [--node N] | resume ID\n\n"
+        "Delegates to runtime/fabric/bin/fabric graph ...\n"
+        "Runs a JSON plan graph of dispatch nodes under a detached owner;\n"
+        "the chair hears about failures and the end through Fabric messages."
     ),
     "events": (
         "usage: provenant events --follow\n\n"
@@ -431,7 +438,7 @@ def main(arguments: list[str]) -> int:
         return 2
 
     command, *command_arguments = arguments
-    if command in {"lanes", "events"}:
+    if command in {"lanes", "events", "graph"}:
         command_arguments = [command, *command_arguments]
         command = "fabric"
     if command == "routes":
