@@ -62,7 +62,8 @@ IMMUTABLE_ACTION = re.compile(r"^[^@\s]+@[0-9a-f]{40}$")
 LOCAL_ACTION = re.compile(r"^\./\.github/actions/[a-z0-9-]+$")
 JOB_PERMISSIONS = {
     "detect-changes": {"pull-requests": "read"},
-    "harness": {"contents": "read"},
+    "harness-checks": {"contents": "read"},
+    "python-tests": {"contents": "read"},
     "docs": {"contents": "read"},
     "fabric": {"contents": "read"},
     "split-root": {"contents": "read"},
@@ -417,7 +418,9 @@ def test_duplicate_on_key_boolean_alias_fails_the_exact_key_guard() -> None:
 
 def test_ci_runs_complete_harness_and_fabric_gates() -> None:
     document = _workflow()
-    harness_steps = _steps(_job(document, "harness"))
+    harness_steps = _steps(_job(document, "harness-checks"))
+    python_test_job = _job(document, "python-tests")
+    python_test_steps = _steps(python_test_job)
     fabric_steps = _steps(_job(document, "fabric"))
 
     # The toolchain contract (Node 24, pinned npm before a locked install)
@@ -435,7 +438,7 @@ def test_ci_runs_complete_harness_and_fabric_gates() -> None:
     install_index = next(index for index, command in enumerate(setup_commands) if command.strip() == "npm ci")
     assert pin_index < install_index
 
-    for job_name in ("harness", "fabric", "split-root"):
+    for job_name in ("harness-checks", "fabric", "split-root"):
         steps = _steps(_job(document, job_name))
         uses = [str(step.get("uses", "")) for step in steps]
         checkout_index = next(index for index, action in enumerate(uses) if action.startswith("actions/checkout@"))
@@ -443,8 +446,15 @@ def test_ci_runs_complete_harness_and_fabric_gates() -> None:
         assert checkout_index < composite_index, job_name
 
     harness_commands = "\n".join(str(step.get("run", "")) for step in harness_steps)
-    assert "scripts/check-harness" in harness_commands
+    assert "scripts/check-harness --checks-only" in harness_commands
     assert "runtime/agent-fabric" not in harness_commands
+    assert python_test_job.get("strategy", {}).get("matrix", {}).get("shard") == [
+        "fabric-hosts",
+        "python-a",
+        "python-b",
+    ]
+    shard_runner = (ROOT / "scripts" / "check-python-test-shards.py").read_text(encoding="utf-8")
+    assert "--durations-min=1" in shard_runner
 
     fabric_commands = "\n".join(str(step.get("run", "")) for step in fabric_steps)
     for required in (
@@ -466,7 +476,7 @@ def test_harness_python_test_dependencies_install_locked_and_cached() -> None:
     # lock change invalidates the cache. The lock is the pin: pyproject
     # declares the `test` dependency group, uv.lock pins it transitively.
     document = _workflow()
-    harness_steps = _steps(_job(document, "harness"))
+    harness_steps = _steps(_job(document, "harness-checks"))
 
     setup_uv = next(
         step for step in harness_steps if str(step.get("uses", "")).startswith("astral-sh/setup-uv@")
@@ -480,13 +490,13 @@ def test_harness_python_test_dependencies_install_locked_and_cached() -> None:
     run_commands = [str(step.get("run", "")).strip() for step in harness_steps if "run" in step]
     assert not any("pip install" in command for command in run_commands)
     sync_index = run_commands.index("uv sync --locked --only-group test")
-    gate_index = run_commands.index("scripts/check-harness")
+    gate_index = run_commands.index("scripts/check-harness --checks-only")
     assert sync_index < gate_index
 
     # The gate runs against the synced environment: scripts/check-harness
     # honours HARNESS_PYTHON before any interpreter fallback.
     gate_step = next(
-        step for step in harness_steps if str(step.get("run", "")).strip() == "scripts/check-harness"
+        step for step in harness_steps if str(step.get("run", "")).strip() == "scripts/check-harness --checks-only"
     )
     assert gate_step.get("env") == {
         "AGENT_FABRIC_PRODUCT_ROOT": "${{ github.workspace }}",

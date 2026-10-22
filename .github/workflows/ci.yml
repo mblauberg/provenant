@@ -170,12 +170,9 @@ jobs:
               - '.github/actions/**'
               - '.github/zizmor.yml'
 
-  harness:
-    name: Python checks and tests
+  harness-checks:
+    name: Python checks
     runs-on: ubuntu-latest
-    # Serial pytest measured max 19.0 min over 80 green runs (median 16.1),
-    # ~97% of the job. Under pytest-xdist (-n auto, 4 vCPUs) the job takes
-    # about 7 min (pytest itself about 6 min); see the --durations=30 output.
     timeout-minutes: 30
     permissions:
       contents: read
@@ -208,7 +205,9 @@ jobs:
           cache-dependency-glob: uv.lock
       - name: Install locked harness test dependencies
         run: uv sync --locked --only-group test
-      - name: Run ordinary checks and Python tests
+      - name: Verify Python test shard coverage
+        run: .venv/bin/python scripts/check-python-test-shards.py --check
+      - name: Run ordinary checks
         env:
           # A source checkout is the fused product/instance fixture for this
           # job. The split-root job below provisions and verifies the installed
@@ -216,7 +215,42 @@ jobs:
           AGENT_FABRIC_PRODUCT_ROOT: ${{ github.workspace }}
           AGENT_FABRIC_INSTANCE_ROOT: ${{ github.workspace }}
           HARNESS_PYTHON: ${{ github.workspace }}/.venv/bin/python
-        run: scripts/check-harness
+        run: scripts/check-harness --checks-only
+
+  python-tests:
+    name: Python tests (${{ matrix.shard }})
+    runs-on: ubuntu-latest
+    # The two general shards each collect 2,329 cases; the slow Fabric host
+    # file is isolated based on the existing --durations evidence.
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    needs: detect-changes
+    if: needs.detect-changes.outputs.harness == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [fabric-hosts, python-a, python-b]
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Set up uv and Python
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          python-version: "3.12"
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+      - name: Install locked harness test dependencies
+        run: uv sync --locked --only-group test
+      - name: Run Python test shard
+        env:
+          AGENT_FABRIC_PRODUCT_ROOT: ${{ github.workspace }}
+          AGENT_FABRIC_INSTANCE_ROOT: ${{ github.workspace }}
+          PYTEST_SHARD: ${{ matrix.shard }}
+        run: .venv/bin/python scripts/check-python-test-shards.py --run "$PYTEST_SHARD"
 
   # Quick path for pull requests that change only prose under docs/: the
   # frontmatter, link and issue-form checks plus the two tests that read every
@@ -403,7 +437,8 @@ jobs:
     permissions: {}
     needs:
       - detect-changes
-      - harness
+      - harness-checks
+      - python-tests
       - docs
       - fabric
       - split-root
