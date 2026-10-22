@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import { closeSync, constants, existsSync, fstatSync, mkdirSync, openSync, readFileSync, readSync, realpathSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 
+import { pythonOwner } from "./python-owner.js";
 import { preflight, validatePrompt, rejected, timeoutSeconds, InputError, ownerPromptPath, savedReadRoots, type DispatchInput, type RouteInput } from "./execution-input.js";
 import { usesPool } from "./pools.js";
 import {
@@ -10,7 +11,6 @@ import {
   executableOwner,
   observeOwner,
   productRoot,
-  pythonOwner,
   stagingPath,
   startOwner,
   rejectOwnSeatClaude,

@@ -13,9 +13,10 @@ import { digest, quarantineAction } from "./surface.js";
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
+import { pythonOwner, pythonOwnerEnvironment } from "./python-owner.js";
 import { databasePath, identify, runRoot, withoutGitRedirects } from "./identity.js";
 import {
-  dispatchConfiguredBatch, dispatchConfiguredProvider, hostOwnersInThemselves, productRoot, pythonOwner,
+  dispatchConfiguredBatch, dispatchConfiguredProvider, hostOwnersInThemselves, productRoot,
   type BatchInput, type DispatchInput,
 } from "./execution.js";
 import type { RouteInput } from "./execution-input.js";
@@ -729,7 +730,7 @@ try {
     execFileSync(await pythonOwner(root, process.env),
       [resolve(root, "skills/orchestrate/scripts/lane_protection.py"),
         "--common-dir", resolve(who.project, ".git"), "--tip", head, "--base", lease.expectedSha],
-      { ...gitOptions, stdio: ["ignore", "ignore", "inherit"], timeout: 30_000 });
+      { ...gitOptions, env: pythonOwnerEnvironment(process.env), stdio: ["ignore", "ignore", "inherit"], timeout: 30_000 });
     const pushed = store.withLandingPush(who, session, generation, remote, () =>
       execFileSync("git", ["push", `--force-with-lease=refs/heads/${branch}:${remote}`,
         landingRemote, `${head}:refs/heads/${branch}`],

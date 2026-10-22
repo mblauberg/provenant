@@ -47,6 +47,7 @@ import { tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { promisify } from "node:util";
 
+import { pythonOwner, pythonOwnerEnvironment } from "./python-owner.js";
 import { catalogueSnapshot, type CatalogueSnapshot } from "./catalogue.js";
 import { expandPools, nativeFirst, usesPool, withoutEmptySelectors, POOL_FIELDS } from "./pools.js";
 import { runRoot, databasePath, projectRoot, withoutGitRedirects, type Identity } from "./identity.js";
@@ -180,43 +181,6 @@ export function executableOwner(root: string, relativePath: string): string {
     throw new Error(`execution owner must be a regular local file: ${path}`);
   }
   return path;
-}
-
-function pythonOwnerCommand(root: string, env: NodeJS.ProcessEnv) {
-  const helper = join(root, "scripts/lib/harness-python.sh");
-  const metadata = lstatSync(helper);
-  if (!metadata.isFile() || metadata.isSymbolicLink()) {
-    throw new Error(`Python owner selector must be a regular local file: ${helper}`);
-  }
-  return {
-    args: ["-c", 'source "$1"; run_stdlib -I -c "import sys; print(sys.executable)"', "provenant-python-owner", helper],
-    options: { cwd: root, env: withoutGitRedirects(env), encoding: "utf8" as const, timeout: 10_000, maxBuffer: 64 * 1024 },
-  };
-}
-
-function selectedPython(stdout: string): string {
-  const selected = resolve(stdout.trim());
-  const metadata = statSync(selected);
-  accessSync(selected, constants.X_OK);
-  if (!isAbsolute(selected) || !metadata.isFile()) throw new Error("selector returned a non-file");
-  return selected;
-}
-
-function pythonOwnerError(error: unknown): Error {
-  return new Error(`Python execution owner is unavailable: ${error instanceof Error ? error.message : String(error)}`, { cause: error });
-}
-
-export async function pythonOwner(root: string, env: NodeJS.ProcessEnv): Promise<string> {
-  const { args, options } = pythonOwnerCommand(root, env);
-  try { return selectedPython((await execFileAsync("/bin/bash", args, options)).stdout); }
-  catch (error) { throw pythonOwnerError(error); }
-}
-
-/** Synchronous validation uses the same interpreter selector as dispatch. */
-export function pythonOwnerSync(root: string, env: NodeJS.ProcessEnv): string {
-  const { args, options } = pythonOwnerCommand(root, env);
-  try { return selectedPython(execFileSync("/bin/bash", args, options)); }
-  catch (error) { throw pythonOwnerError(error); }
 }
 
 function realPath(path: string): string {
@@ -354,7 +318,7 @@ async function initialiseRun(
   try {
     await execFileAsync(owner, [runDir, "--owner-logs"], {
       cwd: identity.cwd,
-      env: withoutGitRedirects(env),
+      env: pythonOwnerEnvironment(env),
       signal,
       killSignal: "SIGKILL",
       timeout: 10_000,
@@ -436,7 +400,7 @@ export function startOwner(
   // a reused run directory can never be mistaken for this run's provider.
   const runToken = randomUUID();
   const ownerEnv = {
-    ...withoutGitRedirects(env),
+    ...pythonOwnerEnvironment(env),
     PROVENANT_RUN_TOKEN: runToken,
     PROVENANT_RUN_DIR: runDir,
     PROVENANT_RUN_ID: shortRunId(runDir),
@@ -1269,7 +1233,7 @@ async function cancelBatchTask(
   try {
     await execFileAsync(python, [controls, "cancel", "--run-dir", String(target.run_dir), "--task-id", String(target.task_id),
       "--attempt-id", attemptId, "--wait-seconds", "5"], {
-      cwd: dirname(runRoot(identity.cwd)), env: withoutGitRedirects(env), timeout: 10_000, maxBuffer: 64 * 1024,
+      cwd: dirname(runRoot(identity.cwd)), env: pythonOwnerEnvironment(env), timeout: 10_000, maxBuffer: 64 * 1024,
     });
   } catch {
     return { status: "rejected", error: "cancel_unconfirmed",

@@ -327,3 +327,16 @@ def test_python_owners_use_harness_interpreter_with_old_python_on_path(fd, verb,
     assert result.returncode == 0, result.err
     assert result.payload() == {"python": sys.executable if selection == "override" else str(venv),
                                 "args": ["two words", ""]}
+
+
+@pytest.mark.parametrize("verb", ["dispatch", "clean"])
+def test_missing_python_helper_reports_repair(fd, verb):
+    (fd.checkout / "scripts/lib/harness-python.sh").unlink()
+
+    result = fd.run(verb)
+
+    assert result.returncode == 3, result.err
+    owner = "skills/orchestrate/scripts/dispatch_run.py" if verb == "dispatch" else "scripts/clean.py"
+    assert result.err == (f"provenant: cannot execute {fd.owner(owner)}: Python helper is missing at "
+                          f"{fd.checkout / 'scripts/lib/harness-python.sh'}; {REPAIR}\n")
+    assert not result.out

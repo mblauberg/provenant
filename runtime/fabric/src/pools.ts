@@ -2,7 +2,8 @@
 import { existsSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { withoutGitRedirects, type Identity } from "./identity.js";
+import { pythonOwnerEnvironment } from "./python-owner.js";
+import { type Identity } from "./identity.js";
 import { runJsonSubprocess } from "./json-subprocess.js";
 import { InputError, nativeAdapter, tierAlias, type BatchTaskInput, type RouteInput } from "./execution-input.js";
 
@@ -105,7 +106,7 @@ async function pick(
   const script = existsSync(configured) ? configured : join(repositoryRoot, "scripts", "model_route.py");
   const parsed = await runJsonSubprocess<{ status?: string; results?: PickResult[]; fix?: string }>(python, [script, "pick"], {
     cwd: identity.cwd,
-    env: withoutGitRedirects({ ...env, AGENT_FABRIC_PRODUCT_ROOT: root }),
+    env: pythonOwnerEnvironment({ ...env, AGENT_FABRIC_PRODUCT_ROOT: root }),
     input: { requests },
     signal,
     timeoutMs: 20_000,

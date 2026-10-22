@@ -9,7 +9,8 @@ import { execFileSync, spawn } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { isAbsolute, join, relative, resolve } from "node:path";
 
-import { cancelConfiguredRun, dispatchConfiguredProvider, hostOwnersInThemselves, productRoot, pythonOwnerSync } from "../execution.js";
+import { pythonOwnerSync, pythonOwnerEnvironment } from "../python-owner.js";
+import { cancelConfiguredRun, dispatchConfiguredProvider, hostOwnersInThemselves, productRoot } from "../execution.js";
 import { databasePath, runRoot, withoutGitRedirects, type Identity } from "../identity.js";
 import {
   listRecordedRuns, observedAlive, processStartedAt, readOwnerRecord, runProcessAlive,
@@ -66,7 +67,7 @@ async function holdLock(path: string, chair: Identity, env: NodeJS.ProcessEnv): 
   const root = productRoot(env);
   const python = pythonOwnerSync(root, env);
   const script = "import fcntl,sys,time\nf=open(sys.argv[1],'a+')\nfor _ in range(300):\n  try:\n    fcntl.flock(f.fileno(),fcntl.LOCK_EX|fcntl.LOCK_NB);break\n  except OSError: time.sleep(0.1)\nelse: sys.exit(3)\nprint('locked',flush=True)\nsys.stdin.read()\n";
-  const child = spawn(python, ["-I", "-c", script, path], { cwd: root, env: withoutGitRedirects(env), stdio: ["pipe", "pipe", "ignore"] });
+  const child = spawn(python, ["-I", "-c", script, path], { cwd: root, env: pythonOwnerEnvironment(env), stdio: ["pipe", "pipe", "ignore"] });
   await new Promise<void>((resolveLock, reject) => {
     child.stdout!.once("data", () => resolveLock());
     child.once("error", reject);

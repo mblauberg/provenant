@@ -6,9 +6,19 @@
 _run_harness_python() {
   local mode="$1" probe="$2"
   shift 2
-  local product_root candidate primary_root common_dir
+  local product_root candidate primary_root common_dir path_variable
   product_root="${AGENT_FABRIC_PRODUCT_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
   candidate="${HARNESS_PYTHON:-$product_root/.venv/bin/python}"
+
+  if [[ "$candidate" != /* ]]; then
+    path_variable=AGENT_FABRIC_PRODUCT_ROOT
+    if test -n "${HARNESS_PYTHON:-}"; then
+      path_variable=HARNESS_PYTHON
+    fi
+    printf 'harness-python: %s must be an absolute path: %s\n' "$path_variable" "$candidate" >&2
+    printf 'repair: set %s to an absolute path\n' "$path_variable" >&2
+    return 3
+  fi
 
   # A linked worktree is a checkout, not a built environment, and provisioning
   # one virtualenv per lane would be wasteful. When this checkout has no venv,
