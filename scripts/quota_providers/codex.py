@@ -136,6 +136,8 @@ def parse(payload, now=None):
             'plan': main.get('planType') or main.get('plan_type') or root.get('plan_type'),
             'credits': {'reset_credits': count, 'source': 'provider'} if count is not None else None,
             'resets': resets, 'usage_credits': _balance(main.get('credits')),
+            # The raw usage-credit balance (a decimal string) for the plan-value series.
+            'credit_balance': (main.get('credits') or {}).get('balance') if isinstance(main.get('credits'), dict) else None,
             'allowance': {'ordinary_usage_allowed': root.get('ordinaryUsageAllowed'),
                           'spend_control_reached': main.get('spendControlReached'),
                           'limit_reached_type': main.get('rateLimitReachedType')}}
@@ -163,10 +165,10 @@ def fetch(account, io, now):
     try:
         return {**parse(app_server(account, io), now), 'source': 'codex app-server'}
     except io.Unavailable:
-        # Rollout logs record only the default Codex home, which the ledger already reads.
+        # Only the default home falls back; the ledger read is scoped to its account label.
         if account.identity_dir != Path.home() / '.codex':
             raise
-    observed = io.ledger_windows(ADAPTER, now)
+    observed = io.ledger_windows(ADAPTER, now, account.label)
     if not observed['windows']:
         raise io.Unavailable('Codex reported no rate limits')
     return {**observed, 'source': 'codex rollout rate-limit events'}

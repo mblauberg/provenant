@@ -37,18 +37,35 @@ The versioned SQLite database is
 `$AGENT_FABRIC_STATE_ROOT/telemetry.sqlite3`, defaulting to
 `~/.local/state/agent-harness/fabric/telemetry.sqlite3`. Schema version 4
 migrates versions 1–3 metadata; unknown newer schemas are refused. The
-`events` and `changes` tables are additive and keep version 4, so peers on
-this version still read the ledger.
+`events`, `changes` and `quota_series` tables are additive and keep version 4,
+so peers on this version still read the ledger.
 
 | Source | Discovery and cursor |
 |---|---|
 | Fabric | Current workspace plus projects registered in the Fabric `agents` table; shared Git run roots; receipt size and mtime |
 | Route health | `AGENT_FABRIC_ROUTE_HEALTH_PATH`, otherwise the state root's `route-health.json`; size and mtime |
 | Cooldowns | `FABRIC_COOLDOWNS_PATH`, otherwise the state root's `cooldowns.json`; size and mtime |
-| Claude Code | `~/.claude/projects/**/*.jsonl`, including subagents; byte offset, file identity and consumed-prefix digest |
-| Codex | `~/.codex/sessions/**/rollout-*.jsonl`; byte offset, file identity, consumed-prefix digest and cumulative token counters |
-| OpenCode | `~/.local/share/opencode/opencode.db`, opened with SQLite `mode=ro`; inclusive `time_updated` watermark and file identity |
+| Claude Code | `<identity>/projects/**/*.jsonl` for every Claude identity directory, including subagents; byte offset, file identity and consumed-prefix digest |
+| Codex | `<identity>/sessions/**/rollout-*.jsonl` for every Codex identity directory; byte offset, file identity, consumed-prefix digest and cumulative token counters |
+| OpenCode | `<identity>/opencode.db` (default `~/.local/share/opencode`), opened with SQLite `mode=ro`; assistant turns from `message` and, since OpenCode 2.0.30, `session_message`; an inclusive `time_updated` watermark per table and file identity |
 | OTLP collector | `$AGENT_FABRIC_STATE_ROOT/otel/*.ndjson` when the optional collector ran; byte offset as for JSONL. Feeds events only |
+
+Identity directories are the provider default (`~/.claude`, `~/.codex`) plus
+every `identity_dir` and `aliases` entry under `accounts.<provider>` in the
+telemetry config (see [Provider quota](#provider-quota)). Each native usage row's
+`account` is the label of the directory its file lives in, so usage joins
+quota, cooldowns and receipts on one label. The default directory is `default`
+unless an account claims it. Codex rows use that label, never the provider's
+`creator_account_id`. A file nested in several identity directories belongs to
+the deepest one. A message found in several files, such as a resumed Claude
+session, takes the owner of its first file by path, in ingest and relabelling
+alike. When the configured directories change, the next ingest relabels this
+host's usage rows, Codex observations and `session.start` events together from
+their recorded file paths.
+
+Discovery skips any transcript name that is a symlink or resolves outside its
+identity directory. Ingest then opens each file with `O_NOFOLLOW` and reads it
+only if it is still the regular file, by device and inode, that discovery saw.
 
 The Fabric registry follows its existing `AGENT_FABRIC_STATE_DIRECTORY`
 setting, defaulting to the same state directory. This differs from the
@@ -60,7 +77,9 @@ run. A detected rewrite reconciles the file's previous usage rows. Claude
 messages deduplicate by `message.id`, retaining the more complete output when
 a later duplicate contains partial usage. Codex cumulative counters become
 per-event deltas; repeated totals contribute no new tokens. OpenCode messages
-upsert by ID, so completion updates do not add another message. A replaced
+upsert by ID, so completion updates do not add another message. A turn that
+OpenCode's 2.0.30 migration copied into `session_message` is read only from
+there, so it keeps one row. A replaced
 OpenCode database resets its cursor and reconciles its previous rows.
 
 An older ledger rebuilds file ownership from its source paths on the next
@@ -131,9 +150,10 @@ keeping the earliest of any duplicates, so concurrent openers cannot race.
 
 | Kind | From |
 |---|---|
-| `lane.attempt` | A Fabric receipt's first terminal status: adapter, effort, attempt, status, error class, task class, route alias, wall time |
+| `lane.attempt` | A Fabric receipt's first terminal status: adapter, effort, attempt, status, error class, task class, route alias, wall time, and the harness `profile` preset and `profile_digest` when the receipt has one (absent means the default, balanced, profile) |
 | `limit.rate_limited`, `limit.usage_limited`, `cooldown` | Route-health and cooldown snapshots |
 | `session.start` | The first ingested usage row of a Claude, Codex or OpenCode session; one event per session, not per message |
+| `plan.change` | A quota reading whose `plan`, `plan_detected` or `plan_tier` differs from the account's previous reading; attrs hold each `<field>_from` and `<field>_to`. Spelling-only differences and unknown values are not changes |
 | `otel.<event.name>`, `otel.metric` | Collector log records and metric data points |
 
 Events never hold prompt, output or error text. OTLP attributes keep numeric
@@ -205,7 +225,7 @@ provenant routes --json         # cached quota only; never fetches
 
 Codex prefers the credential-free `codex app-server` JSON-RPC rate-limit read,
 then falls back to the latest local rollout observations already ingested for
-its default identity. Claude reads its own OAuth usage endpoint using the
+the same account. Claude reads its own OAuth usage endpoint using the
 identity's credentials in process. On macOS it falls back to the identity's
 Keychain item, which Claude Code names `Claude Code-credentials` for `~/.claude`
 and adds an 8-character path hash for any other config directory. The first
@@ -325,6 +345,9 @@ object in this dedicated file. Labels are short non-secret names, never email
 addresses or tokens. Plan labels are optional display text; priority is an
 optional integer, with smaller numbers preferred.
 An entry without `identity_dir` means the provider's default directory.
+`aliases` lists other directories signed in to the same account, such as the
+CLI default when it holds the same login as a named directory. They affect
+only ledger attribution, never quota fetching or routing.
 
 ```json
 {
@@ -334,7 +357,7 @@ An entry without `identity_dir` means the provider's default directory.
             "credits_policy": "last_resort", "credit_floor": 0},
   "accounts": {
     "claude": {
-      "max-a": {"identity_dir": "~/.claude", "plan": "Max", "priority": 1},
+      "max-a": {"identity_dir": "~/.claude-a", "aliases": ["~/.claude"], "plan": "Max", "priority": 1},
       "max-b": {"identity_dir": "~/.claude-b", "plan": "Max", "priority": 2}
     },
     "agy": {
@@ -396,6 +419,47 @@ events in `quota_events`, per provider, account, host and window. These describe
 observed changes, not a presumed billing calendar. Natural rollover compares
 the new provider window start against the previous provider reset. Restarted
 windows must start within five minutes of the observation.
+
+### Quota history and plan prices
+
+Every fetch (not a cached or failed reading) also lands in `quota_series`, one
+row per provider, account, host and window: `observed_at`, `last_seen_at`,
+`source`, `used_percent`, `window_minutes`, `reset_at`, `plan` (configured label,
+else detected), `plan_detected` (Claude `subscriptionType`, Codex `planType`,
+Cursor `membershipType`), `plan_tier` (Claude `rateLimitTier`, which separates
+Max 5x from 20x), `credit_balance` (Codex usage credits drawn after the plan
+allowance) and `reset_credits`. A reading identical to the window's previous
+row only advances that row's `last_seen_at`, so the menu bar's two-minute polling
+adds a row only when something changed. A changed plan field emits
+`plan.change`. No new provider call is made for this history.
+
+Plan prices are user configuration, read at report time and never fetched.
+List them under `plans.<provider>.<plan>` in the same file. `<plan>` matches a
+reading's `plan_tier`, then `plan_detected`, then `plan`, ignoring case and
+punctuation; `*` covers any reading of that provider with no other match. Each
+entry is a list of monthly prices with the date each took effect; the latest
+`effective` date at or before a reading applies. `list_usd` is the advertised
+price and `paid_usd` what you pay, so a free student plan has a list price and
+`paid_usd: 0`. Value for money divides by `paid_usd`; upgrade comparisons can
+use `list_usd`. A price applies per account, so two accounts on one plan count
+twice:
+
+```json
+{
+  "plans": {
+    "claude": {
+      "default_claude_max_20x": [{"list_usd": 200, "paid_usd": 200, "effective": "2026-01-01"}],
+      "pro": [{"list_usd": 20, "paid_usd": 20, "effective": "2026-01-01"}]
+    },
+    "cursor": {"pro_student": [{"list_usd": 20, "paid_usd": 0, "effective": "2026-01-01"}]},
+    "opencode": {"*": [{"list_usd": 10, "paid_usd": 10, "effective": "2026-09-01"}]}
+  }
+}
+```
+
+The values above illustrate the shape only. Enter the amounts you actually pay.
+Mileage (API-equivalent USD per 1% of a window), upgrade gain and value per plan
+read these tables; see #1071.
 
 ```sh
 provenant quota credit codex --account work add

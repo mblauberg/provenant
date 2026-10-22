@@ -179,4 +179,4 @@ def fetch(account, io, now):
                                        'Accept': 'application/json', 'anthropic-beta': 'oauth-2025-04-20'})
     parsed = parse(payload, now)
     return {**parsed, 'plan': oauth.get('subscriptionType') or oauth.get('rateLimitTier') or state.get('subscriptionType'),
-            'source': 'Claude OAuth usage endpoint'}
+            'plan_tier': oauth.get('rateLimitTier'), 'source': 'Claude OAuth usage endpoint'}

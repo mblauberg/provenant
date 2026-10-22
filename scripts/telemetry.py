@@ -8,7 +8,7 @@ import hashlib
 import importlib.util
 from collections import Counter
 from datetime import UTC, datetime, timedelta
-from functools import cache
+from functools import cache, partial
 import json
 import math
 import os
@@ -16,6 +16,7 @@ from pathlib import Path
 import re
 import sqlite3
 import socket
+from stat import S_ISREG
 import statistics
 import subprocess
 import sys
@@ -50,14 +51,13 @@ def host_id():
 
 
 def patterns():
-    home, state = Path.home(), state_root()
+    state = state_root()
     return {
         'fabric': '<current-and-registered-projects>/.agent-run/runs/**/attempt.json',
         'route_health': os.environ.get('AGENT_FABRIC_ROUTE_HEALTH_PATH', str(state / 'route-health.json')),
         'cooldowns': os.environ.get('FABRIC_COOLDOWNS_PATH', str(state / 'cooldowns.json')),
-        'claude': str(home / '.claude/projects/**/*.jsonl'),
-        'codex': str(home / '.codex/sessions/**/rollout-*.jsonl'),
-        'opencode': str(home / '.local/share/opencode/opencode.db'),
+        **{source: ';'.join(str(root / folder / pattern) for root, _ in account_roots(source))
+           for source, (_, folder, pattern) in IDENTITY_SOURCES.items()},
         'otel': str(state / 'otel/*.ndjson'),
     }
 
@@ -107,6 +107,13 @@ def connect():
             kind TEXT NOT NULL, observed_at TEXT NOT NULL, previous_observed_at TEXT,
             previous_used_percent REAL, used_percent REAL, previous_reset_at TEXT, reset_at TEXT,
             PRIMARY KEY(provider,account,host,window,observed_at));
+        CREATE TABLE IF NOT EXISTS quota_series (
+            provider TEXT NOT NULL, account TEXT NOT NULL, host TEXT NOT NULL, window TEXT NOT NULL,
+            observed_at TEXT NOT NULL, last_seen_at TEXT NOT NULL, source TEXT,
+            used_percent REAL, window_minutes REAL, reset_at TEXT, plan TEXT, plan_detected TEXT,
+            plan_tier TEXT, credit_balance REAL, reset_credits INTEGER,
+            PRIMARY KEY(provider,account,host,window,observed_at));
+        CREATE INDEX IF NOT EXISTS quota_series_account ON quota_series(provider,account,host,observed_at);
         CREATE TABLE IF NOT EXISTS events (
             event_id TEXT PRIMARY KEY, host TEXT NOT NULL, kind TEXT NOT NULL, ts TEXT,
             session TEXT, run_id TEXT, lane TEXT, task_id TEXT, pr INTEGER, provider TEXT,
@@ -165,7 +172,7 @@ def relabel_host(db):
     row = db.execute("SELECT value FROM meta WHERE key='host_id'").fetchone()
     previous = row[0] if row else socket.gethostname()
     if previous != current:
-        for table in ('usage', 'usage_files', 'observations', 'quota_events', 'events'):
+        for table in ('usage', 'usage_files', 'observations', 'quota_events', 'quota_series', 'events'):
             db.execute(f'UPDATE OR REPLACE {table} SET host=? WHERE host=?', (current, previous))
     db.execute("INSERT OR REPLACE INTO meta VALUES ('host_id', ?)", (current,))
 
@@ -174,7 +181,8 @@ def number(value):
     return value if isinstance(value, (int, float)) and not isinstance(value, bool) and value >= 0 else None
 
 
-def put_usage(db, source, event_id, origin_path, **values):
+def put_usage(db, source, event_id, origin_path, owner=None, **values):
+    """Upsert one usage row; `owner` maps a file to its account for messages seen in several files."""
     values = {'source': source, 'event_id': event_id, 'host': host_id(), **values}
     columns = list(values)
     update = ','.join(f'{key}=excluded.{key}' for key in columns if key not in {'source', 'event_id', 'host'})
@@ -187,22 +195,27 @@ def put_usage(db, source, event_id, origin_path, **values):
                f'ON CONFLICT(source,event_id,host) DO UPDATE SET {update}{condition}', list(values.values()))
     db.execute('INSERT OR IGNORE INTO usage_files VALUES (?,?,?,?)',
                (source, event_id, values['host'], str(origin_path)))
+    if owner:
+        (first,) = first_files(db, values['host'], (source, event_id))
+        values['account'] = owner(first['path']) or values.get('account')
+        db.execute('UPDATE usage SET account=? WHERE source=? AND event_id=? AND host=? AND account IS NOT ?',
+                   (values['account'], source, event_id, values['host'], values['account']))
     if source != 'fabric' and values.get('session'):
         put_event(db, 'session.start', values.get('timestamp'), str(origin_path),
                   attrs={'source': source, 'adapter': values.get('adapter')},
                   **{key: values.get(key) for key in ('session', 'provider', 'account', 'model')})
 
 
-def claude_record(db, row, state, path, offset):
+def claude_record(db, row, state, path, offset, account=None, owner=None):
     message = row.get('message') or {}
     usage = message.get('usage')
     if row.get('type') != 'assistant' or not isinstance(usage, dict) or not message.get('id'):
         return
     reasoning = number((usage.get('output_tokens_details') or {}).get('thinking_tokens'))
     output = number(usage.get('output_tokens'))
-    put_usage(db, 'claude', message['id'], origin_path=path, session=row.get('sessionId'),
+    put_usage(db, 'claude', message['id'], origin_path=path, owner=owner, session=row.get('sessionId'),
               adapter='claude', provider='anthropic', model=message.get('model'),
-              effort=row.get('perTurnEffort'), account=row.get('account'),
+              effort=row.get('perTurnEffort'), account=account or row.get('account'),
               repository=row.get('cwd'), revision=row.get('gitRevision'), timestamp=row.get('timestamp'),
               input_tokens=number(usage.get('input_tokens')),
               cache_read_tokens=number(usage.get('cache_read_input_tokens')),
@@ -213,6 +226,15 @@ def claude_record(db, row, state, path, offset):
 
 def identity(*values):
     return hashlib.sha256(json.dumps(values, sort_keys=True).encode()).hexdigest()
+
+
+def amount(value):
+    """A finite non-negative number from a number or a decimal string, such as a credit balance."""
+    try:
+        value = float(value) if not isinstance(value, bool) else None
+    except (TypeError, ValueError):
+        return None
+    return value if value is not None and math.isfinite(value) and value >= 0 else None
 
 
 def observation(db, source, **values):
@@ -230,6 +252,7 @@ EVENT_KINDS = {
     'limit.usage_limited': 'provider usage limit (route health, cooldowns)',
     'cooldown': 'route cooldown recorded (cooldowns.json)',
     'session.start': 'first ingested usage row of a Claude, Codex or OpenCode session',
+    'plan.change': 'an account\'s plan, detected plan or plan tier differs from its previous quota reading',
     'otel.user_prompt': 'OTLP log: a user prompt was submitted (length only)',
     'otel.api_request': 'OTLP log: one provider request with tokens, cost and duration',
     'otel.tool_decision': 'OTLP log: a tool permission decision',
@@ -301,7 +324,48 @@ def put_event(db, kind, ts, source_ref, attrs=None, **fields):
                f"VALUES ({','.join('?' for _ in values)})", list(values.values()))
 
 
-def codex_record(db, row, state, path, offset):
+# A reading's state per window; a row is appended only when one of these changes.
+SERIES_STATE = ('used_percent', 'window_minutes', 'reset_at', 'plan', 'plan_detected', 'plan_tier',
+                'credit_balance', 'reset_credits')
+PLAN_FIELDS = ('plan', 'plan_detected', 'plan_tier')
+
+
+def put_quota_series(db, provider, account, host, observed_at, windows, source=None, **reading):
+    """Append each window's reading when it differs from the one before it, else extend that row.
+
+    `reading` holds the account-wide fields (plan, plan_detected, plan_tier, credit_balance,
+    reset_credits). A plan field that changes between two known values emits `plan.change`.
+    """
+    if not observed_at:
+        return
+    latest = ('SELECT * FROM quota_series WHERE provider=? AND account=? AND host=? {} AND observed_at<=? '
+              'ORDER BY observed_at DESC LIMIT 1')
+    before = db.execute(latest.format(''), (provider, account, host, observed_at)).fetchone()
+    for window in windows:
+        row = {name: window.get(name) for name in SERIES_STATE[:3]} | {
+            name: reading.get(name) for name in SERIES_STATE[3:]}
+        previous = db.execute(latest.format('AND window=?'), (provider, account, host, window['name'], observed_at)).fetchone()
+        if previous and all(previous[name] == row[name] for name in SERIES_STATE):
+            db.execute('UPDATE quota_series SET last_seen_at=MAX(last_seen_at,?) WHERE provider=? AND account=? '
+                       'AND host=? AND window=? AND observed_at=?',
+                       (observed_at, provider, account, host, window['name'], previous['observed_at']))
+            continue
+        db.execute('INSERT OR IGNORE INTO quota_series(provider,account,host,window,observed_at,last_seen_at,source,'
+                   f"{','.join(SERIES_STATE)}) VALUES ({','.join('?' * (7 + len(SERIES_STATE)))})",
+                   (provider, account, host, window['name'], observed_at, observed_at, source,
+                    *(row[name] for name in SERIES_STATE)))
+    # Spellings differ by source (`proLite`, `prolite`); an unknown value is never a change.
+    key = lambda value: re.sub(r'[^a-z0-9]', '', str(value).lower()) if value else None
+    changed = before and any(key(before[name]) and key(reading.get(name)) and key(before[name]) != key(reading[name])
+                             for name in PLAN_FIELDS)
+    if changed:
+        put_event(db, 'plan.change', observed_at, f'quota_series:{provider}/{account}@{host}',
+                  attrs={**{f'{name}_from': before[name] for name in PLAN_FIELDS},
+                         **{f'{name}_to': reading.get(name) for name in PLAN_FIELDS}, 'source': source},
+                  provider=provider, account=account)
+
+
+def codex_record(db, row, state, path, offset, account=None, owner=None):
     payload = row.get('payload') or {}
     if row.get('type') == 'session_meta':
         state.update(session=payload.get('id') or payload.get('session_id'),
@@ -312,6 +376,7 @@ def codex_record(db, row, state, path, offset):
                      repository=payload.get('cwd') or state.get('repository'))
     elif row.get('type') == 'event_msg' and payload.get('type') == 'token_count':
         meta = {key: state.get(key) for key in ('session', 'repository', 'account', 'revision', 'model', 'effort')}
+        meta['account'] = account or meta['account']
         timestamp = row.get('timestamp')
         info = payload.get('info') or {}
         total = info.get('total_token_usage')
@@ -335,7 +400,7 @@ def codex_record(db, row, state, path, offset):
             written = delta.get('cache_write_input_tokens')
             reasoning = delta.get('reasoning_output_tokens')
             input_count, output = delta.get('input_tokens'), delta.get('output_tokens')
-            put_usage(db, 'codex', event_id, origin_path=path, **meta, adapter='codex', provider='openai',
+            put_usage(db, 'codex', event_id, origin_path=path, owner=owner, **meta, adapter='codex', provider='openai',
                       timestamp=timestamp,
                       input_tokens=max(0, input_count - (cached or 0) - (written or 0)) if input_count is not None else None,
                       cache_read_tokens=cached, cache_write_tokens=written,
@@ -348,7 +413,7 @@ def codex_record(db, row, state, path, offset):
                 if isinstance(reset_at, (int, float)):
                     reset_at = datetime.fromtimestamp(reset_at, UTC).isoformat().replace('+00:00', 'Z')
                 observation(db, 'codex', origin_path=str(path), provider='openai', adapter='codex', model=state.get('model'),
-                            account=state.get('account'), session=state.get('session'),
+                            account=meta['account'], session=state.get('session'),
                             timestamp=timestamp, window=window, used_percent=value['used_percent'],
                             window_minutes=number(value.get('window_minutes')), reset_at=reset_at)
 
@@ -433,22 +498,39 @@ def clear_file(db, source, path):
     db.execute('DELETE FROM observations WHERE source=? AND origin_path=?', (source, str(path)))
 
 
-def file_identity(path, length):
-    stat = path.stat()
+def open_verified(path, inode=None):
+    """Open a regular file without following a final symlink, as the inode seen at discovery when given.
+
+    Discovery refuses links, but a file swapped for one before this open would otherwise be read.
+    """
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    stat = os.fstat(fd)
+    if not S_ISREG(stat.st_mode) or (inode and (stat.st_dev, stat.st_ino) != tuple(inode)):
+        os.close(fd)
+        raise OSError(f'{path} changed since discovery')
+    return os.fdopen(fd, 'rb'), stat
+
+
+def file_identity(stream, stat, length):
     digest = hashlib.sha256()
-    with path.open('rb') as stream:
-        remaining = length
-        while remaining:
-            chunk = stream.read(min(remaining, 1024 * 1024))
-            if not chunk:
-                break
-            digest.update(chunk)
-            remaining -= len(chunk)
+    stream.seek(0)
+    remaining = length
+    while remaining:
+        chunk = stream.read(min(remaining, 1024 * 1024))
+        if not chunk:
+            break
+        digest.update(chunk)
+        remaining -= len(chunk)
     return [stat.st_dev, stat.st_ino, length, digest.hexdigest()]
 
 
-def ingest_jsonl(db, source, path, parse):
-    stat = path.stat()
+def ingest_jsonl(db, source, path, parse, inode=None):
+    stream, stat = open_verified(path, inode)
+    with stream:
+        ingest_stream(db, source, path, parse, stream, stat)
+
+
+def ingest_stream(db, source, path, parse, stream, stat):
     old = db.execute('SELECT * FROM cursors WHERE source=? AND path=?', (source, str(path))).fetchone()
     state = json.loads(old['state']) if old else {}
     previous_file = state.get('_file')
@@ -458,21 +540,20 @@ def ingest_jsonl(db, source, path, parse):
         return
     rewritten = bool(old and (stat.st_size < old['size'] or
                      (previous_file and (previous_file[2] < old['size'] or
-                      file_identity(path, previous_file[2]) != previous_file))))
+                      file_identity(stream, stat, previous_file[2]) != previous_file))))
     if rewritten:
         clear_file(db, source, path)
         state = {}
     offset = old['offset'] if old and not rewritten else 0
-    with path.open('rb') as stream:
-        stream.seek(offset)
-        while stream.tell() < stat.st_size:
-            line = stream.readline(stat.st_size - stream.tell())
-            if not line.endswith(b'\n'):
-                break
-            row = json.loads(line)
-            parse(db, row, state, path, offset)
-            offset = stream.tell()
-    state['_file'] = file_identity(path, stat.st_size)
+    stream.seek(offset)
+    while stream.tell() < stat.st_size:
+        line = stream.readline(stat.st_size - stream.tell())
+        if not line.endswith(b'\n'):
+            break
+        row = json.loads(line)
+        parse(db, row, state, path, offset)
+        offset = stream.tell()
+    state['_file'] = file_identity(stream, stat, stat.st_size)
     db.execute('INSERT OR REPLACE INTO cursors VALUES (?,?,?,?,?,?)',
                (source, str(path), stat.st_size, stat.st_mtime_ns, offset, json.dumps(state)))
 
@@ -502,14 +583,133 @@ def fabric_paths():
     return sorted({path for root in roots for path in root.glob('runs/**/attempt.json')})
 
 
+# Native sources: the provider whose CLI identity directories hold them, and their place inside one.
+IDENTITY_SOURCES = {'claude': ('claude', 'projects', '**/*.jsonl'),
+                    'codex': ('codex', 'sessions', '**/rollout-*.jsonl'),
+                    'opencode': ('opencode', '', 'opencode.db')}
+
+
+@cache
+def identity_owner():
+    spec = importlib.util.spec_from_file_location('provenant_telemetry_identity', Path(__file__).with_name('provider_identity.py'))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def account_roots(source):
+    """(identity directory, account label) for each directory this source reads, in rank order.
+
+    Configured `identity_dir` paths come first, then `aliases` (another directory signed in to
+    the same account, such as the CLI default), then the provider default as `default`.
+    """
+    owner = identity_owner()
+    provider = IDENTITY_SOURCES[source][0]
+    default = owner.default_identity(provider)
+    try:
+        entries = owner.configured().get(provider) or {}
+    except ValueError:
+        entries = {}
+    ranked = []
+    for label, entry in sorted(entries.items()):
+        entry = entry if isinstance(entry, dict) else {}
+        ranked += [(1, alias, label) for alias in entry.get('aliases') or () if isinstance(alias, str)]
+        ranked.append((0 if entry.get('identity_dir') else 2, entry.get('identity_dir') or default, label))
+    ranked.append((3, default, 'default'))
+    roots = {}
+    for _, path, label in sorted(ranked, key=lambda item: item[0]):
+        if path is not None:
+            roots.setdefault(Path(path).expanduser(), label)
+    return list(roots.items())
+
+
+def file_owner(source, path, roots):
+    """The account owning a file: the deepest identity directory holding it, ties by rank.
+
+    Ingest and relabelling both use this, so every file has exactly one owner.
+    """
+    folder = IDENTITY_SOURCES[source][1]
+    holders = [(len((root / folder).parts), -rank, label) for rank, (root, label) in enumerate(roots)
+               if Path(path).is_relative_to(root / folder)]
+    return max(holders)[2] if holders else None
+
+
+def contained(path, root):
+    """A regular file reached without any symlink below its identity directory.
+
+    A link named like a transcript could otherwise make ingest open a credential file.
+    """
+    try:
+        return (not path.is_symlink() and path.is_file() and
+                path.resolve() == root.resolve() / path.relative_to(root))
+    except (OSError, ValueError):
+        return False
+
+
+def native_paths(source):
+    """Each file of a native source mapped to its owner's label and the inode seen at discovery."""
+    _, folder, pattern = IDENTITY_SOURCES[source]
+    roots = account_roots(source)
+    found = {}
+    for root, _ in roots:
+        base = root / folder
+        for path in sorted(base.glob(pattern)) if '*' in pattern else [base / pattern]:
+            if path not in found and contained(path, root):
+                stat = path.lstat()
+                found[path] = (file_owner(source, path, roots), (stat.st_dev, stat.st_ino))
+    return found
+
+
+def first_files(db, host, event=None):
+    """Each native message's first file by path. Its owner is the message's account in ingest and
+    relabelling alike, so a message seen in several files never flips account with ingest order."""
+    where, args = ('source=? AND event_id=?', event) if event else ('source IN (?,?,?)', IDENTITY_SOURCES)
+    return db.execute(f'SELECT source, event_id, MIN(path) AS path FROM usage_files WHERE host=? AND {where} '
+                      'GROUP BY source, event_id', (host, *args)).fetchall()
+
+
+def owners():
+    """Per native source, the cached file → account function shared by ingest and relabelling."""
+    return {source: cache(partial(file_owner, source, roots=account_roots(source))) for source in IDENTITY_SOURCES}
+
+
+def attribute_accounts(db):
+    """Relabel this host's native rows by their file's owner whenever the identity directories change.
+
+    Usage rows (through `usage_files`), Codex observations (`origin_path`) and `session.start`
+    events (`source_ref`) all move together, so no table keeps a stale label.
+    """
+    roots = {source: account_roots(source) for source in IDENTITY_SOURCES}
+    digest = identity([[source, str(root), label] for source in sorted(roots) for root, label in roots[source]])
+    if (db.execute("SELECT value FROM meta WHERE key='account_roots'").fetchone() or [None])[0] == digest:
+        return
+    host = host_id()
+    owner = owners()
+    label = lambda source, path: owner[source](path)  # noqa: E731
+    usage = [(label(row['source'], row['path']), row['source'], row['event_id'], host)
+             for row in first_files(db, host)]
+    db.executemany('UPDATE usage SET account=? WHERE source=? AND event_id=? AND host=? AND account IS NOT ?',
+                   [(*row, row[0]) for row in usage if row[0]])
+    for (path,) in db.execute("SELECT DISTINCT origin_path FROM observations WHERE source='codex' AND host=?",
+                              (host,)).fetchall():
+        if path and label('codex', path):
+            db.execute("UPDATE observations SET account=? WHERE source='codex' AND host=? AND origin_path=?",
+                       (label('codex', path), host, path))
+    for row in db.execute("SELECT rowid, source_ref, attrs FROM events WHERE kind='session.start' AND host=?",
+                          (host,)).fetchall():
+        source = json.loads(row['attrs']).get('source')
+        if source in IDENTITY_SOURCES and row['source_ref'] and label(source, row['source_ref']):
+            db.execute('UPDATE events SET account=? WHERE rowid=?', (label(source, row['source_ref']), row['rowid']))
+    db.execute("INSERT OR REPLACE INTO meta VALUES ('account_roots', ?)", (digest,))
+
+
 def source_paths():
-    home, configured = Path.home(), patterns()
+    configured = patterns()
     return {'fabric': [],
             'route_health': [Path(configured['route_health'])] if Path(configured['route_health']).is_file() else [],
             'cooldowns': [Path(configured['cooldowns'])] if Path(configured['cooldowns']).is_file() else [],
-            'claude': sorted((home / '.claude/projects').glob('**/*.jsonl')),
-            'codex': sorted((home / '.codex/sessions').glob('**/rollout-*.jsonl')),
-            'opencode': [Path(configured['opencode'])] if Path(configured['opencode']).is_file() else [],
+            # Native sources map each path to (account, inode); iterating them still yields paths.
+            **{source: native_paths(source) for source in IDENTITY_SOURCES},
             'otel': sorted((state_root() / 'otel').glob('*.ndjson'))}
 
 
@@ -568,9 +768,12 @@ def ingest_document(db, source, path):
         put_usage(db, source, identity(str(path.resolve())), origin_path=path, **fields)
         if row.get('ended_at') and fields['status'] not in (None, 'running'):
             # First terminal sighting only: an attempt's outcome is appended once.
+            profile = row.get('profile') if isinstance(row.get('profile'), dict) else {}
             put_event(db, 'lane.attempt', fields['timestamp'], str(path),
-                      attrs={key: fields[key] for key in ('adapter', 'effort', 'attempt', 'status', 'error_class',
-                                                          'task_class', 'route', 'duration_ms')},
+                      # A receipt without a profile ran the default (balanced) harness profile.
+                      attrs={**{key: fields[key] for key in ('adapter', 'effort', 'attempt', 'status', 'error_class',
+                                                             'task_class', 'route', 'duration_ms')},
+                             'profile': profile.get('preset'), 'profile_digest': profile.get('digest')},
                       harness_rev=provenance.get('harness_rev'), **fields)
     else:
         entries = row.get('routes', {}) if source == 'route_health' else row.get('cooldowns', {})
@@ -593,42 +796,79 @@ def ingest_document(db, source, path):
                (source, str(path), stat.st_size, stat.st_mtime_ns, stat.st_size, '{}'))
 
 
-def ingest_opencode(db, path):
+# OpenCode 2.0.30 moved assistant turns from `message` to `session_message`, keeping ids.
+# A turn in both tables is read only from `session_message`, so it has one usage row and source.
+# Skipped rows come back with NULL data rather than being filtered, so they still advance the watermark.
+OPENCODE_TABLES = {
+    'message': ("SELECT id,session_id,time_created,time_updated,CASE WHEN {migrated} THEN NULL ELSE data END,NULL "
+                "FROM message WHERE time_updated>=? ORDER BY time_updated,id"),
+    'session_message': ("SELECT m.id,m.session_id,m.time_created,m.time_updated,"
+                        "CASE WHEN m.type='assistant' THEN m.data END,s.directory "
+                        "FROM session_message m LEFT JOIN session_v2 s ON s.id=m.session_id "
+                        "WHERE m.time_updated>=? ORDER BY m.time_updated,m.id"),
+}
+
+
+def opencode_turn(row):
+    """Provider, model and repository from either message layout; None for a non-assistant row."""
+    model = row.get('model') if isinstance(row.get('model'), dict) else {}
+    if row.get('role', 'assistant') != 'assistant':
+        return None
+    return (row.get('providerID') or model.get('providerID'), row.get('modelID') or model.get('id'),
+            (row.get('path') or {}).get('cwd'))
+
+
+def ingest_opencode(db, path, account=None, owner=None, inode=None):
     old = db.execute('SELECT state FROM cursors WHERE source=? AND path=?', ('opencode', str(path))).fetchone()
     saved = json.loads(old['state']) if old else {}
-    watermark = saved.get('max_updated', 0)
-    stat = path.stat()
+    marks = {'message': saved.get('max_updated', 0), **saved.get('tables', {})}
+    pinned, stat = open_verified(path, inode)
     file_id = [stat.st_dev, stat.st_ino]
-    with readonly(path) as source:
-        latest = source.execute('SELECT MAX(time_updated) FROM message').fetchone()[0] or 0
-        if old and (saved.get('file_id') != file_id or latest < watermark):
+    with pinned, readonly(path) as source:
+        source.execute('BEGIN')  # One snapshot for the watermarks and the rows they cover.
+        present = {name for (name,) in source.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        # SQLite opens by name, so confirm the name still held the pinned file once it had.
+        open_verified(path, file_id)[0].close()
+        tables = [name for name in OPENCODE_TABLES if name in present]
+        latest = {name: source.execute(f'SELECT MAX(time_updated) FROM {name}').fetchone()[0] or 0 for name in tables}
+        if old and (saved.get('file_id') != file_id or any(latest[name] < marks.get(name, 0) for name in tables)):
             clear_file(db, 'opencode', path)
-            watermark = 0
-        # Inclusive watermark covers messages updated during an earlier ingest.
-        for message_id, session, created, updated, data in source.execute(
-                'SELECT id,session_id,time_created,time_updated,data FROM message '
-                'WHERE time_updated>=? ORDER BY time_updated,id', (watermark,)):
-            row = json.loads(data)
-            watermark = max(watermark, updated)
-            if row.get('role') != 'assistant':
-                continue
-            usage = row.get('tokens') or {}
-            cache = usage.get('cache') or {}
-            stamp = (row.get('time') or {}).get('created') or created
-            timestamp = datetime.fromtimestamp(stamp / 1000, UTC).isoformat().replace('+00:00', 'Z')
-            put_usage(db, 'opencode', message_id, origin_path=path, session=session, adapter='opencode',
-                      provider=row.get('providerID'), model=row.get('modelID'),
-                      timestamp=timestamp, repository=(row.get('path') or {}).get('cwd'),
-                      account=row.get('account'), input_tokens=number(usage.get('input')),
-                      output_tokens=number(usage.get('output')), reasoning_tokens=number(usage.get('reasoning')),
-                      cache_read_tokens=number(cache.get('read')), cache_write_tokens=number(cache.get('write')),
-                      reported_cost=number(row.get('cost')), usage_source='message.tokens')
+            marks = {}
+        for name in tables:
+            watermark = marks.get(name, 0)
+            # Inclusive watermark covers messages updated during an earlier ingest.
+            for message_id, session, created, updated, data, directory in source.execute(
+                    OPENCODE_TABLES[name].format(migrated='id IN (SELECT id FROM session_message)'
+                                                 if 'session_message' in present else '0'), (watermark,)):
+                watermark = max(watermark, updated)
+                if data is None:
+                    continue
+                row = json.loads(data)
+                turn = opencode_turn(row)
+                if turn is None:
+                    continue
+                provider, model, cwd = turn
+                usage = row.get('tokens') or {}
+                cache = usage.get('cache') or {}
+                stamp = (row.get('time') or {}).get('created') or created
+                timestamp = datetime.fromtimestamp(stamp / 1000, UTC).isoformat().replace('+00:00', 'Z')
+                put_usage(db, 'opencode', message_id, origin_path=path, owner=owner, session=session, adapter='opencode',
+                          provider=provider, model=model, timestamp=timestamp, repository=cwd or directory,
+                          account=account or row.get('account'), input_tokens=number(usage.get('input')),
+                          output_tokens=number(usage.get('output')), reasoning_tokens=number(usage.get('reasoning')),
+                          cache_read_tokens=number(cache.get('read')), cache_write_tokens=number(cache.get('write')),
+                          reported_cost=number(row.get('cost')), usage_source=f'{name}.tokens')
+            marks[name] = watermark
     stat = path.stat()
     db.execute('INSERT OR REPLACE INTO cursors VALUES (?,?,?,?,?,?)',
-               ('opencode', str(path), stat.st_size, stat.st_mtime_ns, 0, json.dumps({'max_updated': watermark, 'file_id': file_id})))
+               ('opencode', str(path), stat.st_size, stat.st_mtime_ns, 0,
+                json.dumps({'max_updated': marks.get('message', 0), 'tables': marks, 'file_id': file_id})))
 
 
 def ingest(db):
+    with db:
+        attribute_accounts(db)
+    owners_by_source = owners()
     for source, paths in source_paths().items():
         errors = 0
         if source == 'fabric':
@@ -637,15 +877,19 @@ def ingest(db):
             except (OSError, ValueError, sqlite3.Error):
                 errors += 1
         for path in paths:
+            label, inode = paths[path] if isinstance(paths, dict) else (None, None)
+            owner = {'account': label, 'owner': owners_by_source[source]} if label else {}
             try:
                 with db:
                     if source == 'opencode':
-                        ingest_opencode(db, path)
+                        ingest_opencode(db, path, **owner, inode=inode)
                     elif source in {'fabric', 'route_health', 'cooldowns'}:
                         ingest_document(db, source, path)
+                    elif source == 'otel':
+                        ingest_jsonl(db, source, path, otel_record)
                     else:
-                        ingest_jsonl(db, source, path, {'codex': codex_record, 'otel': otel_record}.get(
-                            source, claude_record))
+                        ingest_jsonl(db, source, path, partial(
+                            {'codex': codex_record, 'claude': claude_record}[source], **owner), inode=inode)
             except (OSError, ValueError, TypeError, AttributeError, sqlite3.Error):
                 errors += 1
         rebuild = db.execute('SELECT paths FROM rebuilds WHERE source=?', (source,)).fetchone()

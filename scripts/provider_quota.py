@@ -163,8 +163,8 @@ class _Io:
         return http_json(url, headers)
 
     @staticmethod
-    def ledger_windows(adapter, now):
-        return ledger_windows(adapter, now)
+    def ledger_windows(adapter, now, account=None):
+        return ledger_windows(adapter, now, account)
 
     @staticmethod
     def memo(name, account, seconds, produce):
@@ -398,13 +398,13 @@ def memo(name, account, seconds, produce):
     return value
 
 
-def ledger_windows(adapter, now):
-    """The latest rate-limit observation per window that this host's ledger already holds."""
+def ledger_windows(adapter, now, account=None):
+    """The latest rate-limit observation per window that this host's ledger holds for one account."""
     try:
         with _telemetry().connect() as db:
             rows = db.execute('SELECT window,used_percent,window_minutes,reset_at,timestamp FROM observations '
-                              'WHERE adapter=? AND host=? AND used_percent IS NOT NULL '
-                              'ORDER BY timestamp DESC LIMIT 500', (adapter, telemetry_host())).fetchall()
+                              'WHERE adapter=? AND host=? AND account IS ? AND used_percent IS NOT NULL '
+                              'ORDER BY timestamp DESC LIMIT 500', (adapter, telemetry_host(), account)).fetchall()
     except (OSError, ValueError, sqlite3.Error):
         rows = []
     latest = {}
@@ -640,6 +640,23 @@ def record_events(previous, current):
     return events
 
 
+def record_series(value, result):
+    """Append this fetch to the ledger's quota time series; cached and failed readings add nothing."""
+    banked = value['credits'] or {}
+    try:
+        telemetry = _telemetry()
+        with telemetry.connect() as db:
+            telemetry.put_quota_series(
+                db, value['provider'], value['account'], value['host'], value['observed_at'], value['windows'],
+                source=value['source'], plan=value['plan'],
+                plan_detected=str(result['plan']) if result.get('plan') else None,
+                plan_tier=str(result['plan_tier']) if result.get('plan_tier') else None,
+                credit_balance=telemetry.amount(result.get('credit_balance')),
+                reset_credits=banked.get('reset_credits') if type(banked.get('reset_credits')) is int else None)
+    except (OSError, ValueError, sqlite3.Error):
+        pass  # The ledger is advisory here; a quota reading never fails on it.
+
+
 def fetch(account, now):
     module = provider(account.provider)
     if module is None:
@@ -729,6 +746,7 @@ def _refresh(account, now=None, force=False, trigger='timer', power='ac', ignore
                  **{key: extra for key, extra in extras.items() if extra}}
         value['fetch'] = fetch_state(account, previous, now, trigger, monotonic() - started)
         record_events(previous, value)
+        record_series(value, result)
         save_snapshot(value, account.identity_dir)
         trace(value, trigger, value['status'], None, value['fetch']['last_duration_ms'], None, None)
         return {**value, 'schedule': scheduled(account, value, now, trigger, power)[0]}

@@ -94,7 +94,7 @@ def test_codex_cumulative_usage_deltas_and_quota_windows_survive_append(tmp_path
     assert cli(tmp_path, 'telemetry', 'ingest').returncode == 0
     with sqlite3.connect(tmp_path / 'state/telemetry.sqlite3') as db:
         assert db.execute('SELECT SUM(input_tokens),SUM(cache_read_tokens),SUM(output_tokens),SUM(reasoning_tokens) FROM usage').fetchone() == (110, 40, 40, 10)
-        assert db.execute('SELECT DISTINCT session,account,model,effort,revision FROM usage').fetchall() == [('cx', 'acct', 'test-sol', 'high', 'abc')]
+        assert db.execute('SELECT DISTINCT session,account,model,effort,revision FROM usage').fetchall() == [('cx', 'default', 'test-sol', 'high', 'abc')]
         assert db.execute('SELECT used_percent,window_minutes FROM observations ORDER BY used_percent').fetchall() == [(50, 300), (60, 300)]
 
 
@@ -159,6 +159,48 @@ def test_opencode_updated_messages_use_readonly_sqlite_and_cursor(tmp_path):
     with sqlite3.connect(tmp_path / 'state/telemetry.sqlite3') as db:
         assert db.execute('SELECT provider,model,input_tokens,output_tokens,reasoning_tokens,cache_read_tokens,cache_write_tokens,reported_cost FROM usage').fetchall() == [('vendor','test-model',10,9,3,4,5,0.7)]
         assert 'PRIVATE_OPENCODE' not in '\n'.join(db.iterdump())
+
+
+def test_opencode_v2_session_messages_are_ingested_once_alongside_migrated_messages(tmp_path):
+    path = tmp_path / 'home/.local/share/opencode/opencode.db'
+    path.parent.mkdir(parents=True)
+    legacy = {'role': 'assistant', 'providerID': 'vendor', 'modelID': 'old-model', 'path': {'cwd': '/repo'},
+              'time': {'created': 1792544400000}, 'tokens': {'input': 10, 'output': 2}, 'cost': 0.5}
+    def turn(model, output, stamp):
+        return json.dumps({'time': {'created': stamp}, 'model': {'providerID': 'vendor', 'id': model},
+                           'tokens': {'input': 10, 'output': output, 'reasoning': 1, 'cache': {'read': 4, 'write': 0}},
+                           'cost': 0.25, 'content': ['PRIVATE_V2']})
+    with sqlite3.connect(path) as db:
+        db.execute('CREATE TABLE message(id TEXT PRIMARY KEY,session_id TEXT,time_created INTEGER,time_updated INTEGER,data TEXT)')
+        db.execute('CREATE TABLE session_v2(id TEXT PRIMARY KEY,directory TEXT NOT NULL)')
+        db.execute('CREATE TABLE session_message(id TEXT PRIMARY KEY,session_id TEXT,type TEXT,seq INTEGER,'
+                   'time_created INTEGER,time_updated INTEGER,data TEXT)')
+        db.execute('INSERT INTO session_v2 VALUES (?,?)', ('s', '/repo'))
+        # A pre-2.0.30 turn exists in both tables after migration; later turns only in session_message.
+        db.execute('INSERT INTO message VALUES (?,?,?,?,?)', ('m1', 's', 1000, 1000, json.dumps(legacy)))
+        db.executemany('INSERT INTO session_message VALUES (?,?,?,?,?,?,?)', [
+            ('m1', 's', 'assistant', 1, 1000, 1000, json.dumps({**json.loads(turn('old-model', 2, 1792544400000))})),
+            ('u2', 's', 'user', 2, 2000, 2000, json.dumps({'text': 'PRIVATE_PROMPT'})),
+            ('m3', 's', 'assistant', 3, 3000, 3000, turn('new-model', 7, 1792630800000))])
+    assert cli(tmp_path, 'telemetry', 'ingest').returncode == 0
+    with sqlite3.connect(path) as db:
+        db.executemany('INSERT INTO session_message VALUES (?,?,?,?,?,?,?)', [
+            ('m4', 's', 'assistant', 4, 4000, 4000, turn('new-model', 5, 1792630900000)),
+            ('u5', 's', 'user', 5, 5000, 5000, json.dumps({'text': 'PRIVATE_PROMPT'}))])
+    assert cli(tmp_path, 'telemetry', 'ingest').returncode == 0
+    assert cli(tmp_path, 'telemetry', 'ingest').returncode == 0
+    with sqlite3.connect(tmp_path / 'state/telemetry.sqlite3') as db:
+        # Skipped rows (migrated, or not assistant turns) still advance each table's watermark,
+        # so a fully migrated `message` table is not rescanned on every ingest.
+        state = json.loads(db.execute("SELECT state FROM cursors WHERE source='opencode'").fetchone()[0])
+        assert state['tables'] == {'message': 1000, 'session_message': 5000}
+        assert db.execute('SELECT event_id,provider,model,repository,output_tokens,cache_read_tokens,usage_source '
+                          'FROM usage ORDER BY event_id').fetchall() == [
+            ('m1', 'vendor', 'old-model', '/repo', 2, 4, 'session_message.tokens'),
+            ('m3', 'vendor', 'new-model', '/repo', 7, 4, 'session_message.tokens'),
+            ('m4', 'vendor', 'new-model', '/repo', 5, 4, 'session_message.tokens')]
+        dump = '\n'.join(db.iterdump())
+        assert 'PRIVATE_V2' not in dump and 'PRIVATE_PROMPT' not in dump
 
 
 def test_partial_jsonl_line_resumes_and_malformed_source_is_visible(tmp_path):
@@ -1570,3 +1612,161 @@ def test_ledger_from_main_format_replays_collector_lines_with_their_record_posit
         assert [ref.rsplit('#', 1)[1] for ref, _ in rows] == ['1', '2', '3']
         assert [json.loads(attrs)['value'] for _, attrs in rows] == [5.0, 5.0, 7.0]
         assert db.execute("SELECT COUNT(*) FROM events WHERE kind='session.start'").fetchone()[0] == 1
+
+
+def claude_turn(session, message, stamp='2026-10-21T01:00:00Z'):
+    return {'type': 'assistant', 'sessionId': session, 'timestamp': stamp,
+            'message': {'id': message, 'model': 'claude-test', 'usage': {'input_tokens': 1, 'output_tokens': 1}}}
+
+
+def test_claude_sessions_in_every_identity_dir_carry_their_account_and_relabel_on_alias(tmp_path):
+    home = tmp_path / 'home'
+    jsonl(home / '.claude/projects/repo/a.jsonl', claude_turn('a', 'ma'))
+    jsonl(home / '.claude-michael/projects/repo/m.jsonl', claude_turn('m', 'mm'))
+    write_json(home / '.agents/config/telemetry.json', {'accounts': {'claude': {
+        'michael': {'identity_dir': str(home / '.claude-michael'), 'plan': 'Max'}}}})
+    assert cli(tmp_path, 'telemetry', 'ingest').returncode == 0
+    ledger = tmp_path / 'state/telemetry.sqlite3'
+    with sqlite3.connect(ledger) as db:
+        assert db.execute('SELECT session,account FROM usage ORDER BY session').fetchall() == [
+            ('a', 'default'), ('m', 'michael')]
+    # Declaring the default directory as another sign-in of `anese` relabels rows already stored.
+    jsonl(home / '.claude-anese/projects/repo/n.jsonl', claude_turn('n', 'mn'))
+    write_json(home / '.agents/config/telemetry.json', {'accounts': {'claude': {
+        'anese': {'identity_dir': str(home / '.claude-anese'), 'aliases': [str(home / '.claude')]},
+        'michael': {'identity_dir': str(home / '.claude-michael')}}}})
+    assert cli(tmp_path, 'telemetry', 'ingest').returncode == 0
+    with sqlite3.connect(ledger) as db:
+        assert db.execute('SELECT session,account FROM usage ORDER BY session').fetchall() == [
+            ('a', 'anese'), ('m', 'michael'), ('n', 'anese')]
+    sources = {row['source']: row for row in json.loads(cli(tmp_path, 'telemetry', 'sources', '--json').stdout)}
+    assert '.claude-anese/projects' in sources['claude']['path_pattern'] and sources['claude']['row_count'] == 3
+
+
+def test_codex_rows_observations_and_session_events_relabel_together(tmp_path):
+    home = tmp_path / 'home'
+    path = home / '.codex/sessions/day/rollout-a.jsonl'
+    jsonl(path, {'type': 'session_meta', 'payload': {'id': 'cx', 'creator_account_id': 'opaque-id'}},
+          {'type': 'event_msg', 'timestamp': '2026-10-21T01:00:00Z', 'payload': {
+              'type': 'token_count', 'info': {'last_token_usage': {'input_tokens': 10}},
+              'rate_limits': {'primary': {'used_percent': 5, 'window_minutes': 300}, 'plan_type': 'plus'}}})
+    assert cli(tmp_path, 'telemetry', 'ingest').returncode == 0
+    ledger = tmp_path / 'state/telemetry.sqlite3'
+    def accounts():
+        with sqlite3.connect(ledger) as db:
+            return {table: {row[0] for row in db.execute(query)} for table, query in (
+                ('usage', 'SELECT account FROM usage'), ('observations', 'SELECT account FROM observations'),
+                ('session', "SELECT account FROM events WHERE kind='session.start'"))}
+    assert accounts() == dict.fromkeys(('usage', 'observations', 'session'), {'default'})  # never the provider id
+    write_json(home / '.agents/config/telemetry.json', {'accounts': {'codex': {
+        'work': {'identity_dir': str(home / '.codex-work'), 'aliases': [str(home / '.codex')]}}}})
+    assert cli(tmp_path, 'telemetry', 'ingest').returncode == 0  # the file is unchanged, so only relabelling moves it
+    assert accounts() == dict.fromkeys(('usage', 'observations', 'session'), {'work'})
+
+
+def test_a_nested_identity_directory_owns_its_files_in_ingest_and_relabelling(tmp_path):
+    home = tmp_path / 'home'
+    jsonl(home / '.claude/projects/repo/outer.jsonl', claude_turn('outer', 'mo'))
+    jsonl(home / '.claude/projects/nested/projects/repo/inner.jsonl', claude_turn('inner', 'mi'))
+    outer = {'outer': {'identity_dir': str(home / '.claude')}}
+    write_json(home / '.agents/config/telemetry.json', {'accounts': {'claude': outer}})
+    assert cli(tmp_path, 'telemetry', 'ingest').returncode == 0
+    ledger = tmp_path / 'state/telemetry.sqlite3'
+    with sqlite3.connect(ledger) as db:
+        assert db.execute('SELECT session, account FROM usage ORDER BY session').fetchall() == [
+            ('inner', 'outer'), ('outer', 'outer')]
+    # Declaring the nested directory moves only its files, although neither file changed.
+    write_json(home / '.agents/config/telemetry.json', {'accounts': {'claude': {
+        **outer, 'inner': {'identity_dir': str(home / '.claude/projects/nested')}}}})
+    assert cli(tmp_path, 'telemetry', 'ingest').returncode == 0
+    with sqlite3.connect(ledger) as db:
+        assert db.execute('SELECT session, account FROM usage ORDER BY session').fetchall() == [
+            ('inner', 'inner'), ('outer', 'outer')]
+
+
+def test_transcript_names_that_link_elsewhere_are_never_opened(tmp_path):
+    home = tmp_path / 'home'
+    secret = home / '.codex/auth.json'
+    secret.parent.mkdir(parents=True)
+    secret.write_text('{"tokens": {"access_token": "SECRET-TOKEN-VALUE"}}\n')
+    (home / '.codex/sessions/day').mkdir(parents=True)
+    (home / '.codex/sessions/day/rollout-link.jsonl').symlink_to(secret)
+    elsewhere = tmp_path / 'elsewhere'
+    jsonl(elsewhere / 'repo/s.jsonl', claude_turn('linked', 'ml'))
+    (home / '.claude/projects').mkdir(parents=True)
+    (home / '.claude/projects/linked').symlink_to(elsewhere / 'repo')
+    assert cli(tmp_path, 'telemetry', 'ingest').returncode == 0
+    with sqlite3.connect(tmp_path / 'state/telemetry.sqlite3') as db:
+        assert db.execute('SELECT COUNT(*) FROM usage').fetchone() == (0,)
+        assert db.execute('SELECT COUNT(*) FROM cursors').fetchone() == (0,)
+
+
+def test_lane_events_carry_the_harness_profile_when_the_receipt_has_one(tmp_path):
+    receipt(tmp_path, 'run-p', 1, status='ok', provenance=route('codex', 'gpt-6.1-sol'),
+            profile={'preset': 'thorough', 'digest': 'd1', 'knobs': {'reviewers': 3}})
+    receipt(tmp_path, 'run-q', 1, status='ok', provenance=route('codex', 'gpt-6.1-sol'))
+    assert cli(tmp_path, 'telemetry', 'ingest').returncode == 0
+    with sqlite3.connect(tmp_path / 'state/telemetry.sqlite3') as db:
+        rows = dict(db.execute("SELECT run_id, attrs FROM events WHERE kind='lane.attempt'").fetchall())
+    assert (json.loads(rows['run-p'])['profile'], json.loads(rows['run-p'])['profile_digest']) == ('thorough', 'd1')
+    assert 'profile' not in json.loads(rows['run-q'])  # absent means the default (balanced) profile
+
+
+def test_a_message_in_several_identity_dirs_keeps_one_owner_across_ingest_and_relabelling(tmp_path):
+    home = tmp_path / 'home'
+    # One resumed message in two accounts' transcripts; its owner is the first file by path.
+    jsonl(home / '.claude/projects/repo/a.jsonl', claude_turn('s', 'shared'))
+    jsonl(home / '.claude-michael/projects/repo/b.jsonl', claude_turn('s', 'shared'))
+    accounts = {'michael': {'identity_dir': str(home / '.claude-michael')}}
+    write_json(home / '.agents/config/telemetry.json', {'accounts': {'claude': accounts}})
+    ledger = tmp_path / 'state/telemetry.sqlite3'
+    assert cli(tmp_path, 'telemetry', 'ingest').returncode == 0
+    with sqlite3.connect(ledger) as db:
+        assert db.execute('SELECT account FROM usage').fetchall() == [('michael',)]
+    write_json(home / '.agents/config/telemetry.json', {'accounts': {'claude': {
+        **accounts, 'pro': {'identity_dir': str(home / '.claude-pro')}}}})
+    assert cli(tmp_path, 'telemetry', 'ingest').returncode == 0
+    with sqlite3.connect(ledger) as db:
+        assert db.execute('SELECT account FROM usage').fetchall() == [('michael',)]
+
+
+def test_a_transcript_swapped_for_a_link_after_discovery_is_never_read(tmp_path, monkeypatch):
+    home = tmp_path / 'home'
+    import importlib.util
+    for name, value in environment(tmp_path).items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.chdir(tmp_path)
+    spec = importlib.util.spec_from_file_location('telemetry_swap_test', ROOT / 'scripts/telemetry.py')
+    telemetry = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(telemetry)
+    transcript = home / '.claude/projects/repo/s.jsonl'
+    jsonl(transcript, claude_turn('s', 'real'))
+    database = home / '.local/share/opencode/opencode.db'
+    database.parent.mkdir(parents=True)
+    def opencode(target, message):
+        with sqlite3.connect(target) as db:
+            db.execute('CREATE TABLE message(id TEXT PRIMARY KEY,session_id TEXT,time_created INTEGER,'
+                       'time_updated INTEGER,data TEXT)')
+            db.execute('INSERT INTO message VALUES (?,?,?,?,?)', (message, 's', 1000, 1000, json.dumps(
+                {'role': 'assistant', 'tokens': {'input': 1}})))
+    opencode(database, 'real-oc')
+    discovered = {source: telemetry.native_paths(source) for source in ('claude', 'opencode')}
+    secret = home / '.claude/secret.jsonl'
+    jsonl(secret, claude_turn('s', 'SECRET_MESSAGE'))
+    opencode(home / 'other.db', 'SECRET_OC')
+    for target, path in ((secret, transcript), (home / 'other.db', database)):
+        link = path.with_name('swap')
+        link.symlink_to(target)
+        link.replace(path)
+    monkeypatch.setattr(telemetry, 'native_paths', lambda source: discovered.get(source, {}))
+    db = telemetry.connect()
+    telemetry.ingest(db)
+    assert db.execute('SELECT COUNT(*) FROM usage').fetchone()[0] == 0
+    assert {row['source']: row['status'] for row in db.execute(
+        "SELECT source, status FROM sources WHERE source IN ('claude','opencode')")} == {
+            'claude': 'error', 'opencode': 'error'}
+    # A plain file of another inode under the discovered name is refused too.
+    transcript.unlink()
+    jsonl(transcript, claude_turn('s', 'REPLACED'))
+    telemetry.ingest(db)
+    assert db.execute("SELECT COUNT(*) FROM usage WHERE source='claude'").fetchone()[0] == 0
