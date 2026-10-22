@@ -1091,7 +1091,7 @@ def test_batch_preflight_does_not_invent_an_explicit_alias_for_model_routes(tmp_
     ])
 
     model_only, explicit_both = result["routes"]
-    resolve_commands = [command for command in commands if len(command) > 2 and command[2] == "resolve"]
+    resolve_commands = [command for command in commands if "resolve" in command[:3]]
     assert len(resolve_commands) == 2
     assert "--alias" not in resolve_commands[0]
     assert "--model" in resolve_commands[0]
@@ -4675,7 +4675,7 @@ def test_remote_writer_preflight_uses_host_signin_and_effective_writer_confineme
     monkeypatch.setenv('AGENT_FABRIC_PRODUCT_ROOT', str(ROOT))
     original_run = subprocess.run
     def process(command, **kwargs):
-        if any(str(part).endswith('model_route.py') for part in command):
+        if any(str(part).endswith(('model_route.py', 'model-route')) for part in command):
             return subprocess.CompletedProcess(command, 0, json.dumps({
                 'status': 'ok', 'adapter': 'codex', 'resolved_model': 'gpt-6.1-sol',
                 'provider_family': 'openai', 'execution_intent': 'ordinary', 'notes': []}), '')

@@ -641,6 +641,9 @@ class Dispatcher:
 
         if shutil.which("provenant"):
             command = ["provenant", "route", "resolve", *args]
+        elif os.access(f"{product_root}/scripts/model-route", os.X_OK):
+            # The wrapper picks an interpreter with PyYAML; a stock python3 may lack it.
+            command = [f"{product_root}/scripts/model-route", "resolve", *args]
         elif os.path.isfile(f"{product_root}/scripts/model_route.py"):
             command = [sys.executable, f"{product_root}/scripts/model_route.py", "resolve", *args]
         else:

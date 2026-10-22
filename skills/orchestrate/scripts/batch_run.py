@@ -392,7 +392,8 @@ def _index_batch_files(run_dir: Path, batch_id: str, source_path: Path, summary_
 
 def _command(task: dict[str, Any], run_dir: Path) -> list[str]:
     batch_id = task.get("_batch_id")
-    command = [str(DISPATCH_RUN), "--run-dir", str(run_dir), "--task-id", task["id"],
+    # The shebang can find a stock python3 that lacks the harness dependencies.
+    command = [sys.executable, str(DISPATCH_RUN), "--run-dir", str(run_dir), "--task-id", task["id"],
                "--adapter", task["adapter"], "--prompt-file", task["prompt_file"],
                "--role", task["role"], "--intent", task.get("intent", "ordinary"),
                "--timeout", str(task["timeout"]), "--batch-child"]

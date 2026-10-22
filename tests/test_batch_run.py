@@ -9,6 +9,7 @@ import os
 import signal
 import stat
 import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -377,6 +378,8 @@ def test_batch_forwards_lifecycle_risk_and_model_override_separately(tmp_path, m
     loaded = module.load_manifest(manifest)
     command = module._command(loaded[0], run_dir)
 
+    # Children never fall back to whichever python3 the shebang finds first.
+    assert command[:2] == [sys.executable, str(dispatch)]
     assert command[command.index('--risk-tier') + 1] == 'routine'
     assert command[command.index('--model-override-tier') + 1] == 'crucial'
     assert module.batch(args(module, run_dir, manifest, 1)) == 0

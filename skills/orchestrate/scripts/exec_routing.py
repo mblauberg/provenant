@@ -14,6 +14,14 @@ except ImportError:
     from fabric_records import read_cooldowns, identity_resolver
 
 
+def route_command(product):
+    """Run the router through its wrapper, which selects an interpreter that has its dependencies."""
+    wrapper = product / "scripts/model-route"
+    if os.access(wrapper, os.X_OK):
+        return [str(wrapper)]
+    return [sys.executable, str(product / "scripts/model_route.py")]
+
+
 def snapshot():
     product = Path(
         os.environ.get("AGENT_FABRIC_PRODUCT_ROOT")
@@ -21,12 +29,7 @@ def snapshot():
     )
     try:
         result = subprocess.run(
-            [
-                sys.executable,
-                str(product / "scripts/model_route.py"),
-                "snapshot",
-                "--json",
-            ],
+            [*route_command(product), "snapshot", "--json"],
             capture_output=True,
             text=True,
             timeout=15,
