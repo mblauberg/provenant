@@ -1593,7 +1593,7 @@ def preflight_tasks(tasks: list[dict[str, Any]], workspace_root: Path | None = N
                     writers.add(worktree)
                 elif task.get("worktree"):
                     raise PreflightError("worktree_not_applicable", "Pass mode worktree_write with worktree, or omit worktree.")
-                command = [sys.executable, str(product / "scripts/model_route.py"), "resolve",
+                command = [*exec_routing.route_command(product), "resolve",
                            "--adapter", adapter,
                            "--role", task.get("role") or "worker"]
                 if task.get("task_class"):

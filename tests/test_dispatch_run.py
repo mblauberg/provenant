@@ -1091,7 +1091,7 @@ def test_batch_preflight_does_not_invent_an_explicit_alias_for_model_routes(tmp_
     ])
 
     model_only, explicit_both = result["routes"]
-    resolve_commands = [command for command in commands if len(command) > 2 and command[2] == "resolve"]
+    resolve_commands = [command for command in commands if "resolve" in command[:3]]
     assert len(resolve_commands) == 2
     assert "--alias" not in resolve_commands[0]
     assert "--model" in resolve_commands[0]
