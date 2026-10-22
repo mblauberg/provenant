@@ -38,7 +38,7 @@ For a host without a toolchain, build on a machine that has one:
 ```sh
 cd tools/front-door
 PROVENANT_FD_SOURCE_SHA256="$(python3 ../../scripts/lib/front_door_build.py digest .)" \
-  MACOSX_DEPLOYMENT_TARGET=25.0 cargo build --release --locked
+  MACOSX_DEPLOYMENT_TARGET=15.0 cargo build --release --locked
 ```
 
 Copy `target/release/provenant` to the host as an absolute path, then on that

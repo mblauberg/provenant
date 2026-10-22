@@ -126,7 +126,8 @@ def test_help_works_without_a_resolvable_product_root(fd):
         assert "provenant: " in helped.err and "repair:" in helped.err
         assert helped.stdout == b""
     else:
-        assert helped.returncode == 0 and helped.stdout == reference_run("help").stdout
+        assert helped.returncode == 0
+        assert_matches_reference(helped, reference_run("help"))
         assert usage.returncode == 2 and usage.err.startswith(USAGE_PREFIX)
 
 

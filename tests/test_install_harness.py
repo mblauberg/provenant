@@ -2021,6 +2021,8 @@ MANAGED_MARKER_LINE = (
 def add_fake_crate(product: Path) -> Path:
     """A minimal crate whose sources hash to something; cargo is faked separately."""
     crate = product / "tools/front-door"
+    # The product tree may already carry the real crate; the fake replaces it.
+    shutil.rmtree(crate, ignore_errors=True)
     (crate / "src").mkdir(parents=True)
     (crate / "Cargo.toml").write_text('[package]\nname = "provenant"\nversion = "0.0.0"\n')
     (crate / "Cargo.lock").write_text("# lock\n")
@@ -2096,7 +2098,7 @@ def test_rust_mode_builds_stamps_and_installs_the_binary(tmp_path, rust_product)
     cargo_log = log.read_text()
     assert "build --release --locked --manifest-path" in cargo_log
     if sys.platform == "darwin":
-        assert "MACOSX_DEPLOYMENT_TARGET=25.0" in cargo_log
+        assert "MACOSX_DEPLOYMENT_TARGET=15.0" in cargo_log
 
 
 def test_reinstalling_the_same_binary_is_idempotent(tmp_path, rust_product):

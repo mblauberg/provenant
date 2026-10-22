@@ -47,8 +47,8 @@ about 120 ms, against a fork-and-exec floor of about 6 ms
    `scripts/check_target.py`, which loads the Python dispatcher and returns the
    checker and root, so no custody rule is written twice.
 7. **Platforms.** The minimum is macOS 27, which both of the user's Macs run.
-   macOS 25 and 26 are cheap, so darwin builds set
-   `MACOSX_DEPLOYMENT_TARGET=25.0`. Linux is built and tested in CI. The
+   macOS 15 and 26 are cheap, so darwin builds set
+   `MACOSX_DEPLOYMENT_TARGET=15.0`. Linux is built and tested in CI. The
    toolchain is pinned by `rust-toolchain.toml` (1.94.1).
 
 ## Intentional divergences from the Python front door

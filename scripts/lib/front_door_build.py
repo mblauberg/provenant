@@ -34,7 +34,7 @@ CRATE_RELATIVE = "tools/front-door"
 TEMPLATE_RELATIVE = "scripts/provenant.template"
 HASHED_FILES = ("Cargo.toml", "Cargo.lock", "rust-toolchain.toml")
 MODES = ("auto", "rust", "python")
-DEPLOYMENT_TARGET = "25.0"
+DEPLOYMENT_TARGET = "15.0"
 IDENTITY = re.compile(rb"(?m)^provenant-front-door source-sha256=([0-9a-f]{64}|unknown)$")
 SMOKE_TIMEOUT_SECONDS = 30
 
