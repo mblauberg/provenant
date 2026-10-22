@@ -1,4 +1,5 @@
 from pathlib import Path
+import importlib.util
 import json
 import os
 import sqlite3
@@ -1915,7 +1916,7 @@ def fixture_ledger(db):
               ('claude', 'anthropic', 'unpriced-model'), (None, None, None), ('claude', 'anthropic', ' ')]
     stamps = ['2026-10-19T23:59:59Z', '2026-10-20T00:00:00Z', '2026-10-20T13:00:00.250Z',
               '2026-10-20T23:30:00-05:00', '2026-10-21T08:00:00+10:00', '2026-10-21T12:00:00+00:00',
-              '2026-10-21T23:59:59Z', '2026-10-22T00:00:00Z', '2026-10-23T09:00:00Z', '2026-10-21 12:00:00', None]
+              '2026-10-21T23:59:59Z', '2026-10-22T00:00:00Z', '2026-10-23T09:00:00Z', '2026-10-21 12:00:00', '2026-10-21T12:00:00', '2026-10-21T12:00:00Z', None]
     tokens = (None, 0, 5, 1200)
     rows = []
     for index in range(600):
@@ -1939,7 +1940,12 @@ def fixture_ledger(db):
     db.commit()
 
 
-def serialised(report):
+def serialised(report, telemetry):
+    # `session_usage` is full-precision transport to the host merge; compare it at the output edge.
+    # The legacy oracle predates the output-edge rounding of `usage_totals`.
+    for row in report.get('session_usage', []) + report['usage_totals']:
+        row['known_cost_usd'] = telemetry.micro(row['known_cost_usd'])
+        row['reported_cost_usd'] = telemetry.micro(row['reported_cost_usd'])
     for event in report['last_limit_events']:
         event.pop('age_seconds')  # depends on the clock
     return json.dumps(report, indent=2)
@@ -1955,4 +1961,25 @@ def test_sql_grouped_stats_match_the_row_by_row_oracle(tmp_path, monkeypatch):
             new = telemetry.stats(db, **kwargs)
             old = telemetry.legacy_stats(db, **kwargs)
             assert new['usage'] and new['unattributed'] and new['excluded_rows'], kwargs
-            assert serialised(new) == serialised(old), kwargs
+            assert serialised(new, telemetry) == serialised(old, telemetry), kwargs
+
+
+def test_host_merge_rounds_costs_once_after_summing(tmp_path, monkeypatch):
+    telemetry = load_telemetry(tmp_path, monkeypatch)
+    spec = importlib.util.spec_from_file_location('telemetry_hosts_golden', ROOT / 'scripts/telemetry_hosts.py')
+    hosts = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(hosts)
+    def group(session):
+        row = telemetry.unit({'adapter': 'codex', 'provider': 'openai', 'model': 'gpt-5.5', 'day': '2026-10-21',
+                              'account': None, 'input_tokens': 1, 'cache_read_tokens': 0, 'cache_write_tokens': 0,
+                              'output_tokens': 0, 'reasoning_tokens': 0, 'reported_cost': 4e-7, 'model_raw': 'gpt-5.5'},
+                             (), {}, {})
+        return {**row, 'known_cost_usd': 4e-7, 'missing_cost_rows': 0, 'host': 'h1', 'source': 'codex', 'session': session,
+                'provider': 'openai', 'adapter': 'codex', 'model': 'gpt-5.5', 'day': '2026-10-21', 'account': None}
+    summary = {'host': 'h1', 'session_usage': [group('a'), group('b')], 'excluded_rows': {},
+               'receipt_usage_rows_excluded': 0, 'pending_source_rebuilds': []}
+    monkeypatch.setattr(telemetry, 'quota_owner', lambda: types.SimpleNamespace(report=lambda values: {}))
+    merged = hosts.merge(telemetry, [summary], [{'host': 'h1', 'status': 'ok'}], None)
+    assert merged['usage'][0]['estimated_cost_usd'] == 1e-6
+    assert merged['usage'][0]['reported_cost_usd'] == 1e-6
+    assert merged['usage_per_day'][0]['estimated_cost_usd'] == 1e-6

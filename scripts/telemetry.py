@@ -1048,13 +1048,14 @@ def combine(groups, keys):
         target['model_raw'].update(group['model_raw'])
         target['billing'].update(group['billing'])
     for group in merged.values():
-        # Micro-dollars: the same figure however the rows were summed.
-        group['known_cost_usd'] = round(group['known_cost_usd'], 6)
-        if group['reported_cost_usd'] is not None:
-            group['reported_cost_usd'] = round(group['reported_cost_usd'], 6)
         group['model_raw'] = sorted(group['model_raw'])
         group['billing'] = sorted(group['billing'])
     return sorted(merged.values(), key=lambda row: tuple(str(row[k] or '') for k in keys))
+
+
+def micro(value):
+    """Micro-dollars: one figure however the rows were summed. Applied once, at the output edge."""
+    return None if value is None else round(value, 6)
 
 
 def finalise(groups, keys):
@@ -1067,9 +1068,9 @@ def finalise(groups, keys):
                'cache_read_share': (group['cache_share_read'] / group['cache_share_input']
                                     if group['cache_share_input'] else None),
                'cache_share_rows': group['cache_share_rows'],
-               'estimated_cost_usd': None if group['missing_cost_rows'] else group['known_cost_usd'],
+               'estimated_cost_usd': None if group['missing_cost_rows'] else micro(group['known_cost_usd']),
                'missing_cost_rows': group['missing_cost_rows'],
-               'reported_cost_usd': group['reported_cost_usd'],
+               'reported_cost_usd': micro(group['reported_cost_usd']),
                'cost_basis': 'api_equivalent_estimate',
                'billing': group['billing'][0] if len(group['billing']) == 1 else 'mixed' if group['billing'] else None}
         if 'model' in keys:
@@ -1221,17 +1222,19 @@ def stats(db, since=None, prices=None, *, summary=False, until=None):
     excluded = Counter()
     selected, unattributed = [], []
     # A day of margin keeps offset timestamps; `included` applies the exact bounds.
-    where, parameters, order = '', {}, "printf('%020d', rowid)"
+    where, parameters, order, order_by = '', {}, "printf('%020d', rowid)", 'rowid'
     if boundary:
         # The old full-row query was walked in index order here; ties between attempts keep that order.
         where, parameters['start'] = ' AND timestamp >= :start', (boundary - timedelta(days=1)).date().isoformat()
-        order = "printf('%s|%020d', COALESCE(timestamp,''), rowid)"
+        # Fields are joined with \x01, below any timestamp character, so a prefix sorts first.
+        order = "printf('%s' || char(1) || '%020d', COALESCE(timestamp,''), rowid)"
+        order_by = 'timestamp, rowid'
     def attribute(row):
         row['model_raw'] = row['model']
         row['model'] = normalise_model(row['adapter'], row['provider'], row['model'], adapters)
         return classify(row)
     # Receipts stay row by row (few, and lanes need whole rows); native sources group in SQL.
-    for item in db.execute(f"SELECT {order} AS first_row, * FROM usage WHERE source='fabric'" + where + ' ORDER BY ' + order, parameters):
+    for item in db.execute(f"SELECT {order} AS first_row, * FROM usage WHERE source='fabric'" + where + ' ORDER BY ' + order_by, parameters):
         row = dict(item)
         if not included(row):
             continue
@@ -1262,8 +1265,8 @@ def stats(db, since=None, prices=None, *, summary=False, until=None):
         cell['day'] = since_time(cell['timestamp']).date().isoformat() if cell['timestamp'] else None
     def groups(keys):
         # Groups enter `combine` in the order their first row had, so tied sort keys keep that order.
-        ordered = itertools.chain(((row['first_row'], unit(row, keys, prices, free_patterns)) for row in usage),
-                                  ((cell['first_row'], cell_unit(cell, keys, prices, free_patterns)) for cell in usage_groups))
+        ordered = itertools.chain(((tuple(row['first_row'].split('\x01')), unit(row, keys, prices, free_patterns)) for row in usage),
+                                  ((tuple(cell['first_row'].split('\x01')), cell_unit(cell, keys, prices, free_patterns)) for cell in usage_groups))
         return combine((group for _, group in sorted(ordered, key=lambda pair: pair[0])), keys)
     latest = {}
     attempts = Counter()
@@ -1329,7 +1332,8 @@ def stats(db, since=None, prices=None, *, summary=False, until=None):
             # One overall group each, for before/after comparison; percentiles are never averaged.
             'lane_totals': outcomes([{**row, **dict.fromkeys(OUTCOME_KEYS)}
                                      for row in attributed if row['source'] == 'fabric']),
-            'usage_totals': groups(()),
+            'usage_totals': [{**group, 'known_cost_usd': micro(group['known_cost_usd']),
+                              'reported_cost_usd': micro(group['reported_cost_usd'])} for group in groups(())],
             'lanes': [{'status': status, 'error_class': error, 'lanes': count}
                       for (status, error), count in sorted(lanes.items(), key=str)],
             'attempts': [{'status': status, 'error_class': error, 'attempts': count}
@@ -1348,6 +1352,7 @@ def stats(db, since=None, prices=None, *, summary=False, until=None):
             'pending_source_rebuilds': [row[0] for row in db.execute('SELECT source FROM rebuilds ORDER BY source')]}
     if summary:
         keys = ('host', 'source', 'session', 'day', 'provider', 'adapter', 'account', 'model')
+        # Transport to the host merge: full precision, rounded once after the merge.
         report['session_usage'] = groups(keys)
     return report
 
