@@ -33,7 +33,7 @@ description: "Use for bounded fan-out, multi-agent research, cross-family review
 - Dispatch defaults:
   - Fan out 2-4 independent lanes; go wider only for independent, checkable slices.
   - Before fan-out, run `provenant routes`; dispatch by tier alias and spread work across that tier's available members. Set effort where the tool exposes it, otherwise record the limit.
-  - Brief native subagents with paths, not pasted content. End one once its deliverable lands; continue it only for follow-up on that deliverable.
+  - Set route or model on every spawn, including native subagents; name Claude members directly (haiku junior, sonnet senior, opus principal) because Agent accepts no tier aliases. Brief native subagents with paths; end each when its deliverable lands.
   - Brief in five fields: goal, scope/paths, constraints, output shape and length, verification.
   - agy lanes are OS-confined to their `cwd` and `add_dirs`; pass briefs through `prompt` or `prompt_file` (read by Fabric), rather than paths for the lane to open.
   - Keep tool output bounded: output over a bound goes to a file, and the command returns a pointer and a short tail. Avoid unbounded `gh ... --limit 1000` and `rg --files` over run directories. A polling loop prints one line.

@@ -4877,6 +4877,53 @@ def test_route_tier_names_work_as_adapter_aliases(tmp_path, tier, alias):
     assert not any("model won" in note for note in named.get("notes", [])), "a tier name is not a model name"
 
 
+@pytest.mark.parametrize("flag", ["--help", "-h"])
+def test_dash_prefixed_positional_argument_falls_through_to_argparse(flag, monkeypatch, capsys):
+    router = load_router()
+    monkeypatch.setattr(router, "route_pick", lambda *_args, **_kwargs: pytest.fail("routed as a tier"))
+    with pytest.raises(SystemExit) as raised:
+        router.main([flag])
+    assert raised.value.code == 0
+    assert "usage:" in capsys.readouterr().out
+
+
+def test_positional_tier_shorthand_reports_unavailable_when_every_member_has_zero_weight(tmp_path):
+    instance = tmp_path / "instance"
+    config = instance / "config"
+    config.mkdir(parents=True)
+    (config / "model-routing.json").write_text(json.dumps({"routes": {"junior": [
+        {**entry, "weight": 0} for entry in CATALOG["routes"]["junior"]
+    ]}}))
+    env = {**os.environ, "AGENT_FABRIC_PRODUCT_ROOT": str(ROOT),
+           "AGENT_FABRIC_INSTANCE_ROOT": str(instance),
+           "AGENT_FABRIC_STATE_ROOT": str(tmp_path / "state")}
+    run = subprocess.run([sys.executable, str(ROOT / "scripts" / "model_route.py"), "junior"],
+                         capture_output=True, text=True, env=env)
+    result = json.loads(run.stdout)
+    assert run.returncode == 2
+    assert result["results"][0]["status"] == "rejected"
+    assert result["results"][0]["error"] == "route_unavailable"
+
+
+def test_legwork_synonym_resolves_through_the_configured_route_pool(tmp_path):
+    instance = tmp_path / "instance"
+    config = instance / "config"
+    config.mkdir(parents=True)
+    (config / "model-routing.json").write_text(json.dumps({"routes": {"junior": [
+        {**entry, "weight": 0} for entry in CATALOG["routes"]["junior"]
+    ]}}))
+    env = {**os.environ, "AGENT_FABRIC_PRODUCT_ROOT": str(ROOT),
+           "AGENT_FABRIC_INSTANCE_ROOT": str(instance),
+           "AGENT_FABRIC_STATE_ROOT": str(tmp_path / "state")}
+    run = subprocess.run([sys.executable, str(ROOT / "scripts" / "model_route.py"), "legwork"],
+                         capture_output=True, text=True, env=env)
+    result = json.loads(run.stdout)
+    assert run.returncode == 2
+    assert result["results"][0]["status"] == "rejected"
+    assert result["results"][0]["error"] == "route_unavailable"
+    assert "junior" in result["results"][0]["fix"]
+
+
 @pytest.mark.parametrize("tier,route", [("junior", "junior"), ("legwork", "junior")])
 def test_positional_route_tier_shorthand_picks_from_the_pool(tier, route, monkeypatch, capsys):
     router = load_router()

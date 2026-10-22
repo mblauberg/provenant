@@ -2379,9 +2379,10 @@ def main(argv: list[str] | None = None) -> int:
 
 def _main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
-    commands = {"resolve", "snapshot", "health", "probe", "select", "routes",
-                "cooldowns", "reset", "pick"}
-    if argv and argv[0] not in commands:
+    argument_parser = parser()
+    subcommands = next(action.choices for action in argument_parser._actions
+                       if isinstance(action, argparse._SubParsersAction))
+    if argv and not argv[0].startswith("-") and argv[0] not in subcommands:
         result = route_pick([{"route": argv[0]}])
         pick_result = result.get("results", [{}])[0]
         if pick_result.get("status") == "ok":
@@ -2398,7 +2399,6 @@ def _main(argv: list[str] | None = None) -> int:
                         )
         print(json.dumps(result, sort_keys=True))
         return 0 if pick_result.get("status") == "ok" else 2
-    argument_parser = parser()
     args = argument_parser.parse_args(argv)
     renamed = _pools.RENAMED_TIERS.get(str(getattr(args, "alias", "") or "").casefold())
     if renamed:
