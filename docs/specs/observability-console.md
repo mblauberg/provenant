@@ -480,8 +480,9 @@ host-independent fingerprint label (the same non-secret label on every host,
 as the telemetry runbook asks); an account seen on several hosts appears
 once, takes the freshest observation per window, and carries every host's
 badge. Nothing is pulled when no viewer is open, nor while
-`app.modules.federation` is off; the app then shows this host's accounts, and
-the CLI's `quota --hosts all` still works on its own.
+`quota.merge_hosts` is off; the app then shows this host's accounts, and the
+CLI's `quota --hosts all` still works on its own. This path is independent of
+`app.modules.federation`.
 
 ## Console
 
@@ -941,8 +942,8 @@ First, without a projector, lengthen `lanes --wait`'s remote poll from 2 s to
 30. Federation is built only if, after that, a peer costs more than 120 SSH
 sessions per hour while the console is open (counted at the transport), or
 peer lanes take more than 2 s at p95 to appear in Fleet. Meeting this trigger
-also opens Slice 5, whose projector (leases, manifests) is built and accepted
-first.
+also opens Slice 5 (an exception to its gate), whose projector (leases,
+manifests) is built and accepted first.
 
 Scope: the three `observe.*` verbs, watch leases, merge, Hosts pages,
 reworded topology docs, all behind `app.modules.federation`. Acceptance:
@@ -953,8 +954,9 @@ reworded topology docs, all behind `app.modules.federation`. Acceptance:
    `--wait` keeps them pending; local lanes are unaffected.
 4. Zero, one and three peers work with no code change; a peer without a
    projector is shown through the `lanes` verb.
-5. With `app.modules.federation` off, no peer timer, watch lease or SSH
-   session exists in either process.
+5. With `app.modules.federation` off, no `observe.*` timer, watch lease or
+   SSH session exists in either process (quota merging is governed by
+   `quota.merge_hosts`).
 
 Tests use separate state roots and a fake `ssh` program (zero, one and three
 peers, unreachable, version mismatch, truncated lanes) and count sessions.
