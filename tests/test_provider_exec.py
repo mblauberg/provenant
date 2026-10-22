@@ -8138,6 +8138,148 @@ def test_a_landing_train_merge_of_a_released_tip_passes_and_so_do_later_merges(t
     assert checked.returncode == 0, checked.stderr
 
 
+@pytest.mark.parametrize("variant", ["identical", "one-byte", "extra-entry", "missing-entry", "mode"])
+def test_a_landing_train_remerge_requires_the_complete_released_protected_tree(tmp_path, monkeypatch, variant):
+    monkeypatch.delenv("PROVENANT_ATTEMPT_MARKER", raising=False)
+    repo, lane = instruction_lane(tmp_path)
+    leased = head_of(repo, "main")
+    # The reviewed merge resolution introduces content neither parent carries.
+    git(repo, "merge", "-q", "--no-ff", "--no-commit", "lane")
+    (repo / SKILL).write_text("reviewed resolution\n")
+    (repo / OTHER_SKILL).parent.mkdir(parents=True)
+    (repo / OTHER_SKILL).write_text("reviewed\n")
+    git(repo, "add", OTHER_SKILL)
+    git(repo, "commit", "-q", "-am", "M1")
+    reviewed = head_of(repo)
+    released = protection(repo, "--release", "--tip", reviewed, "--actor", "chair", "--reason", "ok")
+    assert released.returncode == 0, released.stderr
+
+    git(repo, "reset", "-q", "--hard", leased)
+    git(repo, "merge", "-q", "--no-ff", "--no-commit", "lane")
+    (repo / SKILL).write_text("reviewed resolution\n")
+    (repo / OTHER_SKILL).parent.mkdir(parents=True)
+    (repo / OTHER_SKILL).write_text("reviewed\n")
+    git(repo, "add", OTHER_SKILL)
+    if variant == "one-byte":
+        (repo / SKILL).write_text("reviewed resolutioN\n")
+    elif variant == "extra-entry":
+        extra = ".agents/extra.md"
+        (repo / extra).write_text("unreviewed\n")
+        git(repo, "add", extra)
+    elif variant == "missing-entry":
+        git(repo, "rm", "-q", "-f", OTHER_SKILL)
+    elif variant == "mode":
+        git(repo, "update-index", "--chmod=+x", SKILL)
+        (repo / SKILL).chmod(0o755)
+    git(repo, "commit", "-q", "-am", "M2")
+    merged = head_of(repo)
+    assert merged != reviewed
+    assert bool(git(repo, "diff", reviewed, merged, "--", ".agents/")) == (variant != "identical")
+    checked = landing(repo, merged, leased)
+    if variant == "identical":
+        assert checked.returncode == 0, checked.stderr
+    else:
+        assert checked.returncode == 1
+        assert merged in checked.stderr
+        assert checked.stderr.startswith("protected_instructions_changed:")
+
+
+def test_released_protected_trees_cannot_be_combined_path_by_path(tmp_path, monkeypatch):
+    monkeypatch.delenv("PROVENANT_ATTEMPT_MARKER", raising=False)
+    repo, _ = instruction_lane(tmp_path)
+    leased = head_of(repo)
+    first = side_commit(repo, leased, "reviewed first\n")
+    second = side_commit(repo, leased, "reviewed second\n", path=OTHER_SKILL)
+    for tip in (first, second):
+        git(repo, "reset", "-q", "--hard", tip)
+        released = protection(repo, "--release", "--tip", tip, "--actor", "chair", "--reason", "ok")
+        assert released.returncode == 0, released.stderr
+    # Each path matches a release, but neither release reviewed the combination.
+    combined = side_commit(repo, first, "reviewed second\n", path=OTHER_SKILL)
+    refused = landing(repo, combined, leased)
+    assert refused.returncode == 1
+    assert combined in refused.stderr
+    assert refused.stderr.startswith("protected_instructions_changed:")
+
+
+def test_an_already_landed_release_cannot_vouch_for_a_reverting_merge(tmp_path, monkeypatch):
+    monkeypatch.delenv("PROVENANT_ATTEMPT_MARKER", raising=False)
+    repo, _ = instruction_lane(tmp_path)
+    leased = head_of(repo)
+    old = head_of(repo, "main~1")
+    git(repo, "reset", "-q", "--hard", old)
+    released = protection(repo, "--release", "--tip", old, "--actor", "chair", "--reason", "ok")
+    assert released.returncode == 0, released.stderr
+    # Base has moved past the released v1 skill. A new merge must not restore it.
+    later = side_commit(repo, leased, "later\n", path="later.txt")
+    reverted = side_commit(repo, later, "v1\n")
+    tree = head_of(repo, reverted + "^{tree}")
+    merge = git(repo, "commit-tree", tree, "-p", leased, "-p", later, "-m", "revert in merge").strip()
+    refused = landing(repo, merge, leased)
+    assert refused.returncode == 1
+    assert merge in refused.stderr
+    assert refused.stderr.startswith("protected_instructions_changed:")
+
+
+def test_a_release_with_the_bases_protected_tree_does_not_cover_new_content(tmp_path, monkeypatch):
+    monkeypatch.delenv("PROVENANT_ATTEMPT_MARKER", raising=False)
+    repo, _ = instruction_lane(tmp_path)
+    leased = head_of(repo)
+    same_as_base = side_commit(repo, leased, "release with unchanged instructions\n", path="app.txt")
+    git(repo, "reset", "-q", "--hard", same_as_base)
+    released = protection(repo, "--release", "--tip", same_as_base, "--actor", "chair", "--reason", "ok")
+    assert released.returncode == 0, released.stderr
+    # Taking the base remains allowed even though the release contains no new protected content.
+    restored = side_commit(repo, head_of(repo, "lane"), "v2\n")
+    checked = landing(repo, restored, leased)
+    assert checked.returncode == 0, checked.stderr
+    unreviewed = side_commit(repo, restored, "unreviewed\n", path=OTHER_SKILL)
+    refused = landing(repo, unreviewed, leased)
+    assert refused.returncode == 1
+    assert unreviewed in refused.stderr
+    assert refused.stderr.startswith("protected_instructions_changed:")
+
+
+@pytest.mark.parametrize("landed", ["superseded", "squashed"])
+def test_a_stale_release_cannot_restore_protected_content_the_base_moved_past(tmp_path, monkeypatch, landed):
+    monkeypatch.delenv("PROVENANT_ATTEMPT_MARKER", raising=False)
+    repo, _ = instruction_lane(tmp_path)
+    fork = head_of(repo)
+    reviewed = side_commit(repo, fork, "reviewed\n", path=OTHER_SKILL)
+    git(repo, "reset", "-q", "--hard", reviewed)
+    released = protection(repo, "--release", "--tip", reviewed, "--actor", "chair", "--reason", "ok")
+    assert released.returncode == 0, released.stderr
+    base = fork
+    if landed == "squashed":
+        # A squash lands the release's content without its SHA ever reaching the base's history.
+        base = git(repo, "commit-tree", head_of(repo, reviewed + "^{tree}"), "-p", fork, "-m", "squash").strip()
+    newer = side_commit(repo, base, "v3\n")
+    # One commit on the newer base takes the release's whole tree, reverting SKILL from v3.
+    stale = git(repo, "commit-tree", head_of(repo, reviewed + "^{tree}"), "-p", newer, "-m", "stale").strip()
+    refused = landing(repo, stale, newer)
+    assert refused.returncode == 1
+    assert stale in refused.stderr
+    assert refused.stderr.startswith("protected_instructions_changed:")
+
+
+def test_a_release_with_unrelated_history_is_ignored_rather_than_blocking_checks(tmp_path, monkeypatch):
+    monkeypatch.delenv("PROVENANT_ATTEMPT_MARKER", raising=False)
+    repo, _ = instruction_lane(tmp_path)
+    leased = head_of(repo)
+    empty = git(repo, "hash-object", "-t", "tree", "-w", "/dev/null").strip()
+    orphan = git(repo, "commit-tree", empty, "-m", "orphan").strip()
+    git(repo, "reset", "-q", "--hard", orphan)
+    released = protection(repo, "--release", "--tip", orphan, "--actor", "chair", "--reason", "ok")
+    assert released.returncode == 0, released.stderr
+    # Taking the base's version still passes; an unreviewed change is still held.
+    restored = side_commit(repo, head_of(repo, "lane"), "v2\n")
+    assert landing(repo, restored, leased).returncode == 0
+    unreviewed = side_commit(repo, restored, "unreviewed\n", path=OTHER_SKILL)
+    refused = landing(repo, unreviewed, leased)
+    assert refused.returncode == 1
+    assert refused.stderr.startswith("protected_instructions_changed:")
+
+
 @pytest.mark.parametrize("history", ["merge-edits-a-skill", "unreleased-lane", "stale-branch-revert",
                                      "ancestor-parent-revert"])
 def test_a_landing_train_merge_still_holds_protected_content_no_released_parent_has(
