@@ -17,6 +17,14 @@ ROOT = Path(__file__).resolve().parents[1]
 REPOSITORY_ROOT = ROOT.parent.parent
 
 
+def default_host(config=None):
+    """The local id a subprocess on this machine uses: a valid local_host, else the hostname's slug."""
+    import host_identity
+    local = (config or {}).get('local_host')
+    return local if isinstance(local, str) and host_identity.NAME.fullmatch(local) else \
+        host_identity.slug(host_identity.hostname())
+
+
 @contextmanager
 def git_isolated_tempdir():
     """Keep fixtures in the worktree without inheriting its Git identity."""
@@ -88,7 +96,7 @@ class PeerContracts(unittest.TestCase):
         value = json.loads(response.stdout)
         self.assertTrue(value['ok'])
         self.assertEqual(value['protocol_version'], 1)
-        self.assertEqual(value['result']['host'], 'local')
+        self.assertEqual(value['result']['host'], default_host())
         self.assertIn('revision', value['result'])
         self.assertEqual(response.stderr, b'')
 
@@ -529,7 +537,7 @@ class ConfigContracts(unittest.TestCase):
     def test_absent_configuration_is_local_only(self):
         result = self.command(None)
         self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
-        self.assertEqual(json.loads(result.stdout)['hosts'], [{'host': 'local', 'local': True}])
+        self.assertEqual(json.loads(result.stdout)['hosts'], [{'host': default_host(), 'local': True}])
 
     def test_instance_root_must_be_absolute(self):
         result = subprocess.run([str(ROOT / 'scripts/provenant'), 'hosts', 'list', '--json'],
@@ -563,7 +571,8 @@ class ConfigContracts(unittest.TestCase):
                 self.assertEqual(result.returncode, 0)
                 value = json.loads(result.stdout)
                 self.assertEqual(value['error']['code'], 'invalid_config')
-                self.assertEqual(value['hosts'], [{'host': 'local', 'local': True}])
+                # The local row keeps a valid local_host even when another field is invalid.
+                self.assertEqual(value['hosts'], [{'host': default_host(config), 'local': True}])
 
 
 
@@ -590,10 +599,10 @@ class HostDiagnosticsContracts(unittest.TestCase):
                                          result.stdout + result.stderr)
                         if json_output:
                             value = json.loads(result.stdout)
-                            self.assertEqual([row['host'] for row in value['hosts']], ['local'])
+                            self.assertEqual([row['host'] for row in value['hosts']], [default_host()])
                             self.assertEqual(value['error']['code'], 'invalid_config')
                         else:
-                            self.assertIn('local ', result.stdout)
+                            self.assertIn(default_host() + ' ', result.stdout)
                             self.assertIn('invalid_config', result.stdout)
 
     def test_temporary_directory_estimate_uses_filesystem_path_limits(self):
@@ -1366,6 +1375,18 @@ class LaneLoopbackContracts(unittest.TestCase):
         self.assertTrue(result['runs'])
         self.assertIn('invalid_config', result['digest'])
         self.assertEqual(result['hosts'][0]['error']['code'], 'invalid_config')
+
+    def test_empty_peers_lanes_stay_local_and_never_reach_ssh(self):
+        (self.local_home / '.agents/.agent-fabric/hosts.json').write_text(
+            json.dumps({'schema_version': 1, 'local_host': 'laptop', 'peers': {}}))
+        marker = self.root / 'ssh-called'
+        self.ssh.write_text('#!/bin/sh\necho called > ' + str(marker) + '\nexit 99\n')
+        view = self.lanes()
+        # No peers: the plain local view, without a federated host table.
+        self.assertEqual(view['schema'], 'fabric.runs.v1')
+        self.assertEqual([row['run_id'] for row in view['runs']], ['mcp-shared'])
+        self.assertNotIn('hosts', view)
+        self.assertFalse(marker.exists())
 
     def test_writer_transports_committed_base_and_fetches_verified_head_without_github(self):
         git, base, local = self.writer_fixture()

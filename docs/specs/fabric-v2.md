@@ -323,7 +323,7 @@ reading credential contents:
 |---|---|
 | claude | `CLAUDE_CONFIG_DIR`, else `~/.claude` |
 | codex | `CODEX_HOME`, else `~/.codex` |
-| agy | OS user's `~/Library/Keychains/login.keychain-db`, independent of HOME and `AGY_CONFIG_DIR`; a second account requires a second host |
+| agy | On macOS the OS user's `~/Library/Keychains/login.keychain-db`, independent of HOME and `AGY_CONFIG_DIR`; elsewhere `~/.gemini/antigravity-cli`; a second account requires a second host |
 | cursor | `~/Library/Application Support/Cursor/User/globalStorage` on macOS, else `~/.config/Cursor/User/globalStorage` |
 | opencode | `$XDG_DATA_HOME/opencode`, else `~/.local/share/opencode` (the authentication store, not `OPENCODE_CONFIG_DIR`) |
 | kiro | `~/.kiro` |

@@ -39,9 +39,13 @@ and work claims follow in slice 5.
    }
    ```
 
-   On `workshop`, use `local_host: "workshop"` and a `laptop` peer. Without a
-   file, the local name is `local`. Missing `peers` or an empty object means
-   local-only operation. Project keys are primary checkout paths relative to
+   On `workshop`, use `local_host: "workshop"` and a `laptop` peer. Host names
+   are 1 to 63 lowercase letters, digits and hyphens. Without a file, or when
+   `local_host` is invalid, the local name is the hostname as a slug: lowercased,
+   cut at the first dot, other characters turned into `-`, so
+   `Anes-MacBook-Pro.local` becomes `anes-macbook-pro`; an empty result is
+   `local`. An invalid file is reported as `invalid_config`. Missing `peers` or
+   an empty object means local-only operation. Project keys are primary checkout paths relative to
    home. An optional `modes` object overrides `default_host` for `read_only` or
    `worktree_write`. Defaults name
    the local host or a configured peer.
@@ -481,8 +485,16 @@ and response bounds and configured SSH deadlines apply. Older, offline or
 malformed peers produce typed partial host rows without failing stats. With no
 peers, the command stays local.
 
-Ledger rows and quota snapshots carry the configured `local_host`, with the
-hostname as telemetry's fallback. Quota is account-scoped and already includes
+Ledger rows and quota snapshots carry the same local host id as fabric
+(`scripts/host_identity.py`). Rows and snapshots that an earlier build stored
+under the raw hostname or `local` are read as this host; they are not
+rewritten. A `local_host` rename never rewrites the ledger either: it records
+each id it was written under and reads them all as this host, even an id a
+peer now carries, because only this machine writes its ledger. Otherwise a name
+configured as a peer is never read as this host, even when it matches the
+hostname. Cooldowns stored under an earlier id are rekeyed to
+the current id when the cooldown store is next written, so a success clears
+them and a repeat limit doubles their backoff. Quota is account-scoped and already includes
 use from every host. When peers report the same provider/account label, stats
 uses its freshest cached quota observation. It never sums quota percentages or
 writes peer snapshots into the local route state. See [telemetry](telemetry.md)

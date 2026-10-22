@@ -6,25 +6,36 @@
 set -eu
 
 # MCP clients do not always pass a login shell's PATH.
-node=${FABRIC_NODE:-$(command -v node 2>/dev/null || true)}
-if [ ! -x "${node:-}" ]; then
-  for candidate in /opt/homebrew/bin/node /usr/local/bin/node; do
-    if [ -x "$candidate" ]; then
+supported() {
+  [ -x "$1" ] && "$1" -e '
+    const [major, minor] = process.versions.node.split(".").map(Number);
+    process.exit(major === 24 && minor >= 15 ? 0 : 1);
+  ' 2>/dev/null
+}
+range="Node >=24.15.0 and <25"
+if [ -n "${FABRIC_NODE:-}" ]; then
+  # An explicit choice is used or refused, never silently replaced.
+  if ! supported "$FABRIC_NODE"; then
+    echo "fabric: FABRIC_NODE=$FABRIC_NODE is not an executable $range. Point it at a supported node, or unset it to search PATH." >&2
+    exit 127
+  fi
+  node=$FABRIC_NODE
+else
+  node=
+  tried=
+  for candidate in "$(command -v node 2>/dev/null || true)" /opt/homebrew/bin/node /usr/local/bin/node \
+      /usr/bin/node "${HOME:-/nonexistent}/.local/bin/node"; do
+    [ -n "$candidate" ] || continue
+    if supported "$candidate"; then
       node=$candidate
       break
     fi
+    [ ! -e "$candidate" ] || tried="$tried $candidate"
   done
-fi
-if [ ! -x "${node:-}" ]; then
-  echo "fabric: no node on PATH. Set FABRIC_NODE to a node binary." >&2
-  exit 127
-fi
-if ! "$node" -e '
-  const [major, minor] = process.versions.node.split(".").map(Number);
-  process.exit(major === 24 && minor >= 15 ? 0 : 1);
-'; then
-  echo "fabric: requires Node >=24.15.0 and <25. Set FABRIC_NODE to a supported binary." >&2
-  exit 127
+  if [ -z "$node" ]; then
+    echo "fabric: requires $range; none found on PATH or in /opt/homebrew/bin, /usr/local/bin, /usr/bin or ~/.local/bin.${tried:+ Unsupported:$tried.} Install Node 24 or set FABRIC_NODE to a supported node binary." >&2
+    exit 127
+  fi
 fi
 
 script_path=$("$node" -e 'process.stdout.write(require("node:fs").realpathSync.native(process.argv[1]))' "$0")
