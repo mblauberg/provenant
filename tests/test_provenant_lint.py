@@ -7,13 +7,12 @@ import sys
 
 import pytest
 
+import provenant_lint as lint
+
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts" / "provenant_lint.py"
 FIXTURE = ROOT / "tests" / "fixtures" / "lint-corpus.txt"
 SEALLE = Path("/Users/user/Repos/seal/sealle-app")
-
-sys.path.insert(0, str(ROOT / "scripts"))
-import provenant_lint as lint  # noqa: E402
 
 DEFAULTS = {"forbid_attribution": True, "forbid_closing_keywords": True, "areas": []}
 
