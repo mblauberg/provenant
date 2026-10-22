@@ -1,0 +1,48 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Model benchmark registry",
+  "type": "object",
+  "required": ["schema_version", "retrieved", "records", "gaps"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "retrieved": {"type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}$"},
+    "description": {"type": "string"},
+    "records": {"type": "array", "items": {"$ref": "#/$defs/record"}},
+    "gaps": {"type": "array", "items": {"$ref": "#/$defs/gap"}}
+  },
+  "$defs": {
+    "record": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "model_id", "catalogue", "effort", "benchmark", "metric", "score", "cost_per_task_usd", "tokens_per_task", "harness", "source_url", "source_date", "retrieved", "run_by", "confidence", "contamination_note"],
+      "properties": {
+        "id": {"type": "string"},
+        "model_id": {"type": "string", "description": "Catalogue id when catalogue is true; otherwise a free label for a proxy or predecessor."},
+        "catalogue": {"type": "boolean"},
+        "also_applies_to": {"type": "array", "items": {"type": "string"}, "description": "Other catalogue ids assumed to share this measurement; equivalence is unverified."},
+        "effort": {"type": ["string", "null"], "description": "Effort as the source labels it; null when the source states none."},
+        "benchmark": {"type": "string"},
+        "metric": {"type": "string"},
+        "score": {"type": "number"},
+        "cost_per_task_usd": {"type": ["number", "null"]},
+        "tokens_per_task": {"type": ["number", "null"]},
+        "tokens_total_run": {"type": "string", "description": "Total output tokens for the whole benchmark run, as printed by the source."},
+        "harness": {"type": "string"},
+        "source_url": {"type": "string", "pattern": "^https://"},
+        "source_date": {"type": ["string", "null"], "pattern": "^\\d{4}-\\d{2}-\\d{2}$", "description": "Publication or run date; null for an undated live page, in which case retrieved is the age anchor."},
+        "retrieved": {"type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}$"},
+        "run_by": {"enum": ["vendor", "independent"]},
+        "confidence": {"enum": ["H", "M", "L"]},
+        "contamination_note": {"type": "string"},
+        "task_class_hint": {"type": ["string", "null"]},
+        "notes": {"type": "string"}
+      }
+    },
+    "gap": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["model_id", "gap"],
+      "properties": {"model_id": {"type": "string"}, "gap": {"type": "string"}}
+    }
+  }
+}
