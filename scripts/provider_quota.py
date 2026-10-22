@@ -235,14 +235,25 @@ def settings():
     return value if isinstance(value, dict) else {}
 
 
+def setting(key, default=None):
+    """One `quota.<key>` setting, or `default` when it is not configured."""
+    return settings().get(key, default)
+
+
+def setting_map(key):
+    """A `quota.<key>` setting that must be an object; anything else reads as empty."""
+    value = setting(key)
+    return value if isinstance(value, dict) else {}
+
+
 def enabled():
     if os.environ.get('PROVENANT_QUOTA', '').strip().lower() in DISABLED:
         return False
-    return settings().get('enabled', True) is not False
+    return setting('enabled', True) is not False
 
 
 def cache_seconds():
-    return max(CACHE_SECONDS, int(number(settings().get('cache_seconds')) or CACHE_SECONDS))
+    return max(CACHE_SECONDS, int(number(setting('cache_seconds')) or CACHE_SECONDS))
 
 
 def register(name, module):
@@ -808,7 +819,7 @@ def trace_lines(since=None):
 def prune_trace(now, retention_days=None):
     """Drop trace lines older than `quota.trace.retention_days`, at most once a day."""
     if retention_days is None:
-        configured = (settings().get('trace') or {}) if isinstance(settings().get('trace'), dict) else {}
+        configured = setting_map('trace')
         retention_days = number(configured.get('retention_days'))
         retention_days = retention_days if retention_days and retention_days > 0 else TRACE_RETENTION_DAYS
     path, marker = quota_dir() / 'fetches.jsonl', quota_dir() / 'fetches.pruned'
@@ -971,7 +982,7 @@ def credit_advice(rows, banked, now):
     reset = parse_time(tightest and tightest['reset_at'])
     if tightest is None or tightest['used_percent'] < NEAR_EXHAUSTED:
         return {**advice, 'action': 'hold', 'reason': 'redeem a reset only at or near exhaustion'}
-    wait = number(settings().get('credit_wait_hours')) or WAIT_HOURS
+    wait = number(setting('credit_wait_hours')) or WAIT_HOURS
     left = (reset - now).total_seconds() if reset else None
     if left is not None and left <= wait * 3600:
         return {**advice, 'action': 'wait', 'reason': f'the natural reset is in {duration(left)}'}
@@ -991,13 +1002,12 @@ def freshest(values):
 
 
 def window_labels():
-    configured = settings().get('window_labels')
-    configured = configured if isinstance(configured, dict) else {}
+    configured = setting_map('window_labels')
     return {**WINDOW_LABELS, **{str(key): value for key, value in configured.items() if isinstance(value, str)}}
 
 
 def credits_policy():
-    value = settings().get('credits_policy')
+    value = setting('credits_policy')
     return value if value in CREDITS_POLICIES else CREDITS_POLICIES[0]
 
 
@@ -1016,7 +1026,7 @@ def credit_draw(value, spent):
     if (not spent or credits_policy() == 'never' or allowance.get('spend_control_reached') is True
             or 'credits_depleted' in allowance.get('limit_reached_type', '')):
         return None
-    floor = number(settings().get('credit_floor')) or 0
+    floor = number(setting('credit_floor')) or 0
     return next((entry for entry in normalise_usage_credits(value.get('usage_credits')) or []
                  if entry['unlimited'] or entry['balance'] > floor), None)
 
@@ -1199,7 +1209,7 @@ def refused_until(worst, value, now):
     reset = parse_time(worst.get('reset_at'))
     if reset and reset > now:
         return worst['reset_at']
-    seconds = number(settings().get('unknown_reset_cooldown_seconds'))
+    seconds = number(setting('unknown_reset_cooldown_seconds'))
     observed = parse_time(value.get('observed_at')) or now
     return iso(observed + timedelta(seconds=seconds if seconds and seconds > 0 else UNKNOWN_RESET_SECONDS))
 
