@@ -97,7 +97,6 @@ def main() -> int:
         return 0
     if args.impl:
         os.environ["PROVENANT_PARITY_IMPL"] = args.impl
-    sys.path.insert(0, str(HERE))
     results = measure(args.runs)
     text = json.dumps(results, indent=2, sort_keys=True) + "\n"
     if args.out:

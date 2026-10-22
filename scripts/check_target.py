@@ -43,7 +43,6 @@ def load_dispatcher():
             break
     else:
         raise ValueError("Python dispatcher is unavailable beside check_target.py")
-    sys.path.insert(0, str(HERE))
     loader = SourceFileLoader("provenant_dispatcher", str(path))
     module = module_from_spec(spec_from_loader(loader.name, loader))
     loader.exec_module(module)
