@@ -1432,7 +1432,8 @@ def test_reinstall_moves_a_recorded_custom_skill_into_the_managed_library(
     assert (config / "skills/moved-skill").resolve() == managed_skill.resolve()
 
 
-def test_check_lists_stale_legacy_agy_skill_links_without_removing_them(tmp_path):
+@pytest.mark.parametrize("receipt_root", ["current", "relocated"])
+def test_check_lists_stale_legacy_agy_skill_links_without_removing_them(tmp_path, receipt_root):
     legacy = tmp_path / ".gemini/config/skills"
     legacy.mkdir(parents=True)
     dangling = legacy / "dangling-skill"
@@ -1447,7 +1448,8 @@ def test_check_lists_stale_legacy_agy_skill_links_without_removing_them(tmp_path
     (legacy.parent / ".agent-harness-installation.json").write_text(json.dumps({
         "schema_version": 1,
         "owner": "agent-harness",
-        "target_root": str(legacy.resolve()),
+        # An older install may record a previous home directory.
+        "target_root": str(legacy.resolve()) if receipt_root == "current" else "/Users/previous/.gemini/config/skills",
         "updated_at": "2026-01-01T00:00:00Z",
         "managed": {
             "retired-skill": {
@@ -2406,3 +2408,16 @@ def test_unknown_front_door_mode_is_refused_before_any_mutation(tmp_path, rust_p
     assert result.returncode == 3
     assert "PROVENANT_FRONT_DOOR must be auto, rust or python" in result.stderr
     assert not (tmp_path / "bin/provenant").exists()
+
+
+def test_check_reports_an_unreadable_legacy_agy_receipt_and_still_lists_links(tmp_path):
+    legacy = tmp_path / ".gemini/config/skills"
+    legacy.mkdir(parents=True)
+    (legacy / "dangling-skill").symlink_to(tmp_path / "removed-product/skills/dangling-skill")
+    (legacy.parent / ".agent-harness-installation.json").write_text("not json\n")
+    env = {**os.environ, "HOME": str(tmp_path), "HARNESS_PYTHON": sys.executable}
+    result = subprocess.run([str(SCRIPT), "--check-legacy-skills"], cwd=ROOT, env=env,
+                            text=True, capture_output=True, check=False)
+    assert result.returncode == 1
+    assert "legacy agy skill stale=dangling-skill (dangling)" in result.stdout
+    assert "legacy agy skill stale=.agent-harness-installation.json (unreadable receipt)" in result.stdout

@@ -532,9 +532,17 @@ def execute(
                     items.append({"name": destination.name, "state": state})
         legacy_manifest_path = target.parent / manifest_io.MANIFEST_NAME
         if legacy_manifest_path.exists():
-            legacy_manifest = _load_manifest(target)
-            for name in sorted(set(legacy_manifest["managed"]) - set(current_catalogue)):
-                items.append({"name": name, "state": "retired"})
+            # A report-only check reads an old or relocated receipt leniently:
+            # its target root may name a previous home directory.
+            try:
+                managed = json.loads(legacy_manifest_path.read_text()).get("managed")
+            except (OSError, ValueError, AttributeError):
+                managed = None
+            if isinstance(managed, dict):
+                for name in sorted(set(managed) - set(current_catalogue)):
+                    items.append({"name": name, "state": "retired"})
+            else:
+                items.append({"name": legacy_manifest_path.name, "state": "unreadable receipt"})
         return {
             "schema_version": 1,
             "action": action,
