@@ -1595,26 +1595,6 @@
    "notes": "Anthropic Haiku 5.5 table."
   },
   {
-   "id": "gemini-3.1-pro.thinking.swe-bench-pro",
-   "model_id": "gemini-3.1-pro",
-   "catalogue": false,
-   "effort": "thinking",
-   "benchmark": "SWE-bench Pro",
-   "metric": "pct_resolved",
-   "score": 46.1,
-   "cost_per_task_usd": null,
-   "tokens_per_task": null,
-   "harness": "mini-swe-agent",
-   "source_url": "https://labs.scale.com/leaderboard/swe_bench_pro_public",
-   "source_date": null,
-   "retrieved": "2026-10-22",
-   "run_by": "independent",
-   "confidence": "M",
-   "contamination_note": "Public set; see contamination caveats on the Scale page.",
-   "task_class_hint": "implementation",
-   "notes": "Scale leaderboard row 'gemini-3.1-pro (thinking)'. Run date not stated. Retired from the catalogue."
-  },
-  {
    "id": "gemini-3.7-flash.high.terminal-bench-4.0",
    "model_id": "gemini-3.7-flash",
    "catalogue": true,
