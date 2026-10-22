@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Own a durable run of provider attempts, including fallback and session resume.
 
-Routing stays with cf_dispatch.sh --plan-only; provider_exec runs the provider
+Routing stays with cf_dispatch.py --plan-only; provider_exec runs the provider
 in this process. Legacy receipts remain additive while Fabric v1 rows provide
 live progress, typed terminal states, provenance, and controls.
 """
@@ -39,7 +39,7 @@ SKILLS_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(SKILLS_ROOT))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import process_info
-CF_DISPATCH = Path(__file__).with_name("cf_dispatch.sh")
+CF_DISPATCH = Path(__file__).with_name("cf_dispatch.py")
 TASK_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 ATTEMPT_ID_RE = re.compile(r"^attempt-(?P<number>\d{3}|[1-9]\d{3,})$")
 BATCH_ID_RE = re.compile(r"^batch-(?:\d{3}|[1-9]\d{3,})$")
@@ -2233,7 +2233,7 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
             active["last_progress_at"] = started_at
             publish_contract(run_dir, active)
         return memory_lease is not None
-    if CF_DISPATCH == Path(__file__).with_name("cf_dispatch.sh"):
+    if CF_DISPATCH == Path(__file__).with_name("cf_dispatch.py"):
         owner_cancel=[False]
         def cancel_owner(_signal,_frame): owner_cancel[0]=True
         old_handlers={sig:signal.getsignal(sig) for sig in (signal.SIGTERM,signal.SIGHUP)}
