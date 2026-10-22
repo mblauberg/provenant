@@ -423,13 +423,15 @@ $AGENT_FABRIC_STATE_ROOT/projector/          0700
     sessions/<provider>/<session>.json       one session's detail
     rollups/telemetry-daily.json             tokens, cache, cost by key
     rollups/accepted-changes.json            cost per accepted change
-    quota.json                               this host's quota summary
+    quota.json                               this host's quota report, unchanged
     peers/<host>/{manifest,host,lanes,quota}.json
     peers/<host>/sessions/index.json
     peers/<host>/fetch.json
 ```
 
 All files are mode 0600 and written by temporary file, flush and rename.
+`quota.json` is the CLI's quota report (`provenant.quota.report.v*`) passed
+through as written, so its presentation fields reach every reader intact.
 
 ### Manifest and consistency
 
@@ -576,9 +578,21 @@ model, effort, provider, preset, harness revision and host, with a period
 picker. A findings list of resolved-versus-observed mismatches.
 
 **Accounts.** The quota report for every host (see M1 in
-[Migration](#migration-from-current-hardcoding)): one row per account with a
-host badge, binding window, reset, pace and staleness, and history from the
-ledger's `quota_series`.
+[Migration](#migration-from-current-hardcoding)), modelled as account, then
+pools, then windows. Each account row shows its display name, plan, host
+badges, the report's display window and its state (including `signed_out`);
+disclosing it lists pools and their windows by label (5-hour, Weekly,
+Monthly), with the reset time as a fact and the "at this pace" estimate
+labelled separately. History comes from the ledger's `quota_series`.
+
+The console and menu bar consume the quota report's presentation fields and
+never re-derive them: window `label`, provider and account `display_name`,
+plan display, per-window `pool` (an account is usable while any pool is),
+the display window, the headline account choice (recent, pinned, worst or
+none), reset versus pace estimate, `signed_out` accounts and the dropping of
+duplicate windows. Raw provider vocabulary (window keys, plan codes, pool
+hashes, adapter names) never reaches the display; a field the report lacks is
+shown as unknown rather than filled in by the console.
 
 **Settings.** Forms for the keys in the [settings model](#settings-model),
 grouped as Hosts, Projector, Console, Telemetry and Profile. Each field is
@@ -866,12 +880,17 @@ Scope: peer quota in the digest, Accounts pane, menu-bar headline across hosts
 (M1); `provenant settings` facade and the Settings pane.
 
 Acceptance:
-1. The menu bar and Accounts pane show every host's accounts with a host
-   badge, and `console.quota_scope: this-host` restores today's view.
-2. Every setting in the table can be changed from the console, is refused with
+1. The menu bar and Accounts pane show every host's accounts with host
+   badges, and `console.quota_scope: this-host` restores today's view.
+2. An account signed in on only one host appears once, from that host; an
+   account signed in on several hosts appears once, with the freshest
+   observation per window and every host badge.
+3. No raw window key, plan code, pool hash or adapter name appears in either
+   view; every label comes from the quota report.
+4. Every setting in the table can be changed from the console, is refused with
    the owner's typed error when invalid, and is never written by the console
    itself.
-3. A concurrent change to the same file is detected by `--expect-rev` and
+5. A concurrent change to the same file is detected by `--expect-rev` and
    shown.
 
 Tests: `settings` facade tests per owner (valid, invalid, concurrent);
@@ -932,9 +951,16 @@ In flight in a separate pull request, referenced here, not designed here:
 Owned by this spec:
 
 - **M1, peer quota.** The menu bar reads only local quota, although quota
-  snapshots are already federated. Slice 4 adds peer quota to the digest, the
-  Accounts pane and the menu-bar headline, with `console.quota_scope` and a
-  host badge.
+  snapshots are already federated. Slice 4 adds each host's quota report to
+  the digest and merges accounts across hosts by provider and account label
+  (the same non-secret label on every host, as the telemetry runbook asks):
+  an account signed in on one host only still appears, and one signed in on
+  several takes the freshest observation per window. The quota report's
+  presentation work is in flight separately (window labels, display names,
+  plan display, pools, display window, headline account, reset versus pace,
+  `signed_out` accounts, duplicate-window drop); this spec consumes those
+  fields and owns only the cross-host merge, `console.quota_scope` and host
+  badges.
 - **Topology wording.** `fabric-hosts.md` and its runbook describe the
   topology as fixed to a laptop and a workshop, and the telemetry and model
   routing runbooks refer to "the workshop Mac". They are reworded so the
