@@ -64,7 +64,7 @@ def test_required_task_classes_bind_registered_exact_models_and_supported_effort
                 assert entries[model].get("effort_transport") != "none"
 
 
-def test_claude_sonnet_is_the_workhorse_default_and_opus_remains_flagship():
+def test_claude_sonnet_is_the_senior_default_and_opus_remains_principal():
     claude = CATALOG["adapters"]["claude"]
     sonnet = next(model for model in claude["models"] if model["id"] == "claude-sonnet-5-5")
     opus = next(model for model in claude["models"] if model["id"] == "claude-opus-5-5")
@@ -72,9 +72,9 @@ def test_claude_sonnet_is_the_workhorse_default_and_opus_remains_flagship():
     assert {"sonnet", "claude-sonnet-5-5", "claude-sonnet-5"} <= set(sonnet["names"])
     assert opus["default"] is False
     anthropic = CATALOG["families"]["anthropic"]
-    assert anthropic["aliases"]["workhorse"] == ["sonnet", "opus"]
-    assert anthropic["aliases"]["flagship"] == ["opus"]
-    assert anthropic["role_overrides"] == {"critical-review": {"flagship": ["opus"]}}
+    assert anthropic["aliases"]["senior"] == ["sonnet", "opus"]
+    assert anthropic["aliases"]["principal"] == ["opus"]
+    assert anthropic["role_overrides"] == {"critical-review": {"principal": ["opus"]}}
     assert CATALOG["task_class_routes"]["review"]["models"]["claude"] == [
         "claude-sonnet-5-5", "claude-opus-5-5"
     ]
@@ -88,9 +88,9 @@ def test_claude_sonnet_is_the_workhorse_default_and_opus_remains_flagship():
     assert CATALOG["task_class_routes"]["implementation"]["models"]["codex"] == [
         "gpt-6.1-sol", "gpt-6-luna"
     ]
-    assert CATALOG["families"]["openai"]["aliases"]["workhorse"] == ["gpt-6.1-sol", "gpt-6-luna"]
-    assert CATALOG["families"]["openai"]["aliases"]["scout"] == ["gpt-6-luna"]
-    result, route = resolve("--adapter", "claude", "--alias", "workhorse", "--role", "worker")
+    assert CATALOG["families"]["openai"]["aliases"]["senior"] == ["gpt-6.1-sol", "gpt-6-luna"]
+    assert CATALOG["families"]["openai"]["aliases"]["junior"] == ["gpt-6-luna"]
+    result, route = resolve("--adapter", "claude", "--alias", "senior", "--role", "worker")
     assert result.returncode == 0, result.stderr
     assert route["resolved_model"] == "sonnet"
 
@@ -100,16 +100,16 @@ def test_fallback_inherits_adapter_training_flag_without_false_default():
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     catalog = {"adapters": {"fixture": {"trains_on_prompts": True,
-                "aliases": {"workhorse": ["primary", "candidate"]},
+                "aliases": {"senior": ["primary", "candidate"]},
                 "models": [{"id": "primary", "plan_cap_usd": 1},
                            {"id": "candidate", "plan_cap_usd": 1}]}}}
-    assert module._fallback_candidates("fixture", "workhorse", "primary", catalog, {}) == []
+    assert module._fallback_candidates("fixture", "senior", "primary", catalog, {}) == []
     catalog["adapters"]["fixture"]["trains_on_prompts"] = False
-    candidates = module._fallback_candidates("fixture", "workhorse", "primary", catalog, {})
+    candidates = module._fallback_candidates("fixture", "senior", "primary", catalog, {})
     assert len(candidates) == 1
     assert candidates[0]["trains_on_prompts"] is False
     del catalog["adapters"]["fixture"]["trains_on_prompts"]
-    candidates = module._fallback_candidates("fixture", "workhorse", "primary", catalog, {})
+    candidates = module._fallback_candidates("fixture", "senior", "primary", catalog, {})
     assert len(candidates) == 1
     assert candidates[0]["trains_on_prompts"] is None
 CRUCIAL_RISK_OVERRIDE = CATALOG["families"]["anthropic"]["risk_tier_overrides"]["crucial"]
@@ -313,7 +313,7 @@ def test_snapshot_drops_invalid_new_adapter_effort_and_allows_nullable_override(
 def test_explicit_endpoint_and_newer_model_preserve_identity(monkeypatch):
     monkeypatch.setenv("OPENROUTER_API_KEY", "fixture")
     result, endpoint = resolve("--adapter", "claude", "--model", "custom-model",
-                               "--alias", "workhorse", "--endpoint", "openrouter-anthropic", "--role", "worker")
+                               "--alias", "senior", "--endpoint", "openrouter-anthropic", "--role", "worker")
     assert result.returncode == 0, result.stderr
     assert endpoint["endpoint_profile"] == "openrouter-anthropic"
     no_alias_result, no_alias = resolve("--adapter", "claude", "--model", "custom-model",
@@ -340,7 +340,7 @@ def test_canonical_cooldown_skips_suffix_and_warns_on_shorthand(tmp_path):
                              capture_output=True, text=True, env=env)
         assert run.returncode == 0, run.stderr
         return json.loads(run.stdout)
-    agy = route("--adapter", "agy", "--alias", "workhorse")
+    agy = route("--adapter", "agy", "--alias", "senior")
     assert not any(candidate["adapter"] == "agy" and candidate["model"].startswith("gemini-3.8-flash")
                    for candidate in agy["fallback_candidates"])
     agy_explicit = route("--adapter", "agy", "--model", "gemini-3.8-flash")
@@ -360,7 +360,7 @@ def test_cooling_alias_without_alternative_has_note(tmp_path):
     }}))
     run = subprocess.run(
         [sys.executable, str(ROOT / "scripts" / "model_route.py"), "resolve",
-         "--adapter", "agy", "--alias", "workhorse", "--role", "worker"],
+         "--adapter", "agy", "--alias", "senior", "--role", "worker"],
         capture_output=True, text=True,
         env={**os.environ, "PATH": str(tmp_path), "AGENT_FABRIC_STATE_ROOT": str(tmp_path),
              "AGENT_FABRIC_PRODUCT_ROOT": str(ROOT), "AGENT_FABRIC_INSTANCE_ROOT": str(ROOT)},
@@ -385,7 +385,7 @@ def test_account_wide_cooldown_warns_on_explicit_model(tmp_path):
 
 
 def test_fallback_false_and_default_explicit_routes_have_no_candidates():
-    for args in (("--alias", "workhorse", "--fallback", "false"),
+    for args in (("--alias", "senior", "--fallback", "false"),
                  ("--model", "gpt-6.1-sol", "--fallback", "false"),
                  ("--model", "gpt-6.1-sol")):
         result, route = resolve("--adapter", "codex", *args, "--role", "worker")
@@ -401,7 +401,7 @@ def test_fixed_adapter_cross_family_is_warned_and_default_cooling_does_not_crash
     (tmp_path / "cooldowns.json").write_text(json.dumps({"cooldowns": {
         "opencode/opencode-go/deepseek-v4.1-flash": {"cooling_until": until},
     }}))
-    run = subprocess.run([str(SCRIPT), "resolve", "--adapter", "opencode", "--alias", "flagship",
+    run = subprocess.run([str(SCRIPT), "resolve", "--adapter", "opencode", "--alias", "principal",
                           "--task-class", "critical-review", "--role", "worker"],
                          capture_output=True, text=True,
                          env={**os.environ, "HARNESS_PYTHON": sys.executable,
@@ -416,7 +416,7 @@ def test_kiro_is_enabled_for_both_routes():
     assert compatibility["dispatch_registry"]["kiro"]["write_modes"] == ["worktree_write"]
     assert compatibility["dispatch_registry"]["kiro"]["read_only_guarantee"] == "prompt_only"
     result, route = resolve("--adapter", "kiro", "--model", "deepseek-3.2",
-                            "--alias", "scout", "--role", "worker")
+                            "--alias", "junior", "--role", "worker")
     assert result.returncode == 0, route
     assert route["adapter_enabled"] is True
 
@@ -440,7 +440,7 @@ def test_kiro_route_carries_cached_negative_probe_evidence(tmp_path):
         "observed_at": checked, "read_only_probe": negative,
     }}))
     run = subprocess.run([sys.executable, str(ROOT / "scripts" / "model_route.py"),
-                          "resolve", "--adapter", "kiro", "--alias", "scout",
+                          "resolve", "--adapter", "kiro", "--alias", "junior",
                           "--model", "deepseek-3.2", "--role", "worker"], capture_output=True, text=True,
                          env={**os.environ, "PATH": str(tmp_path),
                               "AGENT_FABRIC_STATE_ROOT": str(tmp_path),
@@ -464,7 +464,7 @@ def test_kiro_route_discards_probe_after_cli_version_changes(tmp_path):
     }}))
     run = subprocess.run(
         [sys.executable, str(ROOT / "scripts" / "model_route.py"), "resolve",
-         "--adapter", "kiro", "--alias", "scout", "--model", "deepseek-3.2", "--role", "worker"],
+         "--adapter", "kiro", "--alias", "junior", "--model", "deepseek-3.2", "--role", "worker"],
         capture_output=True, text=True,
         env={**os.environ, "PATH": str(tmp_path), "AGENT_FABRIC_STATE_ROOT": str(tmp_path),
              "AGENT_FABRIC_PRODUCT_ROOT": str(ROOT), "AGENT_FABRIC_INSTANCE_ROOT": str(ROOT)},
@@ -546,7 +546,7 @@ def test_compatibility_drift_rejection_names_a_fix(tmp_path):
     path.write_text(json.dumps(catalog))
     compatibility = write_codex_compatibility(tmp_path, requires_explicit_model=False)
     result = subprocess.run([str(SCRIPT), "resolve", "--adapter", "codex", "--alias",
-                             "workhorse", "--role", "worker", "--catalog", str(path),
+                             "senior", "--role", "worker", "--catalog", str(path),
                              "--adapter-compatibility", str(compatibility)],
                             capture_output=True, text=True,
                             env={**os.environ, "HARNESS_PYTHON": sys.executable,
@@ -575,23 +575,20 @@ def test_ordinary_registry_routes_names_and_nearest_effort(arguments, model, eff
 
 @pytest.mark.parametrize("model,asked,resolved,used", [
     ("sonnet", "low", "claude-sonnet-5-5", "medium"),
-    ("haiku", "max", "claude-haiku-5-5", "xhigh"),
 ])
 def test_tier_alias_clamps_effort_to_the_registry_efforts(model, asked, resolved, used):
-    result, route = resolve("--adapter", "claude", "--alias", "workhorse", "--model", model,
+    result, route = resolve("--adapter", "claude", "--alias", "senior", "--model", model,
                             "--effort", asked, "--role", "worker")
     assert result.returncode == 0, route
     assert route["status"] == "ok"
     assert route["resolved_model"] == resolved
     assert route["effort"] == used
-    assert route["effort_substitution"] == (
-        "max retired; mapped to xhigh" if asked == "max"
-        else f"{asked} unsupported by {resolved}; ran at {used}")
+    assert route["effort_substitution"] == f"{asked} unsupported by {resolved}; ran at {used}"
     assert asked not in route["supported_efforts"]
 
 
 def test_ordinary_unknown_model_passes_through_and_conflict_prefers_model():
-    result, route = resolve("--adapter", "opencode", "--alias", "scout", "--model",
+    result, route = resolve("--adapter", "opencode", "--alias", "junior", "--model",
                             "example/new-model", "--role", "worker")
     assert result.returncode == 0, route
     assert route["resolved_model"] == "example/new-model"
@@ -629,7 +626,7 @@ def test_opencode_training_warning_and_paid_fallback_excludes_free():
                             "opencode/mimo-v2.6-flash-free", "--role", "worker")
     assert result.returncode == 0, route
     assert route["warnings"]
-    result, route = resolve("--adapter", "opencode", "--alias", "workhorse", "--role", "worker")
+    result, route = resolve("--adapter", "opencode", "--alias", "senior", "--role", "worker")
     assert result.returncode == 0, route
     assert [candidate["model"] for candidate in route["fallback_candidates"]] == [
         "opencode/glm-5.3-flash-free", "opencode-go/deepseek-v4.1-flash"]
@@ -641,12 +638,12 @@ def test_opencode_training_warning_and_paid_fallback_excludes_free():
     assert unregistered["warnings"]
 
 
-def test_opencode_has_no_flagship_tier_and_says_so():
-    assert "flagship" not in CATALOG["adapters"]["opencode"]["aliases"]
-    result, route = resolve("--adapter", "opencode", "--alias", "flagship", "--role", "worker")
+def test_opencode_has_no_principal_tier_and_says_so():
+    assert "principal" not in CATALOG["adapters"]["opencode"]["aliases"]
+    result, route = resolve("--adapter", "opencode", "--alias", "principal", "--role", "worker")
     assert result.returncode == 0, route
     assert route["resolved_model"] == CATALOG["adapters"]["opencode"]["default_model"]
-    assert any("no flagship tier" in warning for warning in route["warnings"])
+    assert any("no principal tier" in warning for warning in route["warnings"])
 
 
 def test_cooling_alias_skips_candidate_but_explicit_model_warns(tmp_path):
@@ -663,7 +660,7 @@ def test_cooling_alias_skips_candidate_but_explicit_model_warns(tmp_path):
         process = subprocess.run([str(SCRIPT), "resolve", *arguments, "--role", "worker"],
                                  capture_output=True, text=True, env=env)
         return process, json.loads(process.stdout)
-    result, alias = routed("--adapter", "opencode", "--alias", "workhorse")
+    result, alias = routed("--adapter", "opencode", "--alias", "senior")
     assert result.returncode == 0
     assert alias["resolved_model"] == "opencode-go/deepseek-v4.1-flash"
     assert any("cooling" in note for note in alias["notes"])
@@ -682,7 +679,7 @@ def test_malformed_cooldown_time_cannot_break_routing(tmp_path):
         "opencode/opencode-go/glm-5.3-flash": {"cooling_until": "2026-09-23T10:00:00"},
     }}))
     result = subprocess.run([str(SCRIPT), "resolve", "--adapter", "opencode", "--alias",
-                             "flagship", "--role", "worker"], capture_output=True, text=True,
+                             "principal", "--role", "worker"], capture_output=True, text=True,
                             env={**os.environ, "HARNESS_PYTHON": sys.executable,
                                  "AGENT_FABRIC_PRODUCT_ROOT": str(ROOT),
                                  "AGENT_FABRIC_INSTANCE_ROOT": str(ROOT),
@@ -690,14 +687,14 @@ def test_malformed_cooldown_time_cannot_break_routing(tmp_path):
     assert result.returncode == 0, result.stderr
 
 
-def test_codex_workhorse_has_no_luna_fallback_when_sol_cools(tmp_path):
+def test_codex_senior_has_no_luna_fallback_when_sol_cools(tmp_path):
     until = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
     (tmp_path / "cooldowns.json").write_text(json.dumps({"cooldowns": {
         "codex/gpt-6.1-sol": {"cooling_until": until},
     }}))
     capability = write_codex_capability_snapshot(tmp_path)
     result = subprocess.run([str(SCRIPT), "resolve", "--adapter", "codex", "--alias",
-                             "workhorse", "--role", "worker", "--capabilities-file", str(capability)],
+                             "senior", "--role", "worker", "--capabilities-file", str(capability)],
                             capture_output=True, text=True,
                             env={**os.environ, "HARNESS_PYTHON": sys.executable,
                                  "AGENT_FABRIC_PRODUCT_ROOT": str(ROOT),
@@ -714,7 +711,7 @@ def test_ordinary_tier_maps_unsupported_effort_to_nearest_probed_level(tmp_path)
     capability = write_codex_capability_snapshot(tmp_path, models={
         "gpt-6-luna": {"resolved_model": "gpt-6-luna", "supported_efforts": ["low", "high"]},
     })
-    result, route = resolve("--adapter", "codex", "--alias", "scout", "--role", "worker",
+    result, route = resolve("--adapter", "codex", "--alias", "junior", "--role", "worker",
                             "--effort", "xhigh", "--capabilities-file", str(capability))
     assert result.returncode == 0, route
     assert route["effort"] == route["effort_applied"] == "high"
@@ -725,7 +722,7 @@ def test_unknown_effort_on_tier_routes_as_nearest_supported(tmp_path):
     capability = write_codex_capability_snapshot(tmp_path, models={
         "gpt-6-luna": {"resolved_model": "gpt-6-luna", "supported_efforts": ["low", "high"]},
     })
-    result, route = resolve("--adapter", "codex", "--alias", "scout", "--role", "worker",
+    result, route = resolve("--adapter", "codex", "--alias", "junior", "--role", "worker",
                             "--effort", "balanced", "--capabilities-file", str(capability))
     assert result.returncode == 0, route
     assert route["requested_effort"] == "balanced"
@@ -735,7 +732,7 @@ def test_unknown_effort_on_tier_routes_as_nearest_supported(tmp_path):
 
 def test_tier_alias_and_explicit_model_keeps_model_with_note(tmp_path):
     capability = write_codex_capability_snapshot(tmp_path)
-    result, route = resolve("--adapter", "codex", "--alias", "scout", "--model",
+    result, route = resolve("--adapter", "codex", "--alias", "junior", "--model",
                             "gpt-6.1-sol", "--role", "worker", "--capabilities-file", str(capability))
     assert result.returncode == 0, route
     assert route["resolved_model"] == "gpt-6.1-sol"
@@ -743,7 +740,7 @@ def test_tier_alias_and_explicit_model_keeps_model_with_note(tmp_path):
 
 
 def test_fallback_any_may_include_free_and_training_models():
-    result, route = resolve("--adapter", "opencode", "--alias", "flagship",
+    result, route = resolve("--adapter", "opencode", "--alias", "principal",
                             "--fallback", "any", "--role", "worker")
     assert result.returncode == 0, route
     assert any(candidate["plan_cap_usd"] == 0 for candidate in route["fallback_candidates"])
@@ -1020,9 +1017,9 @@ def test_removed_fabric_activation_arguments_are_rejected(removed_args):
             "--adapter",
             "copilot",
             "--model",
-            "gemini-3.1-pro",
+            "gemini-3.8-flash",
             "--alias",
-            "flagship",
+            "principal",
             "--role",
             "worker",
             *removed_args,
@@ -1121,7 +1118,7 @@ def route_candidate(
     family,
     model,
     status="ok",
-    alias="flagship",
+    alias="principal",
     effort="high",
     availability=None,
 ):
@@ -1188,7 +1185,7 @@ def select_route(
 def test_critical_review_preference_cannot_lower_tier_or_effort(tmp_path):
     candidates = [
         route_candidate(
-            "anthropic-flagship",
+            "anthropic-principal",
             adapter="claude",
             family="anthropic",
             model="opus",
@@ -1199,7 +1196,7 @@ def test_critical_review_preference_cannot_lower_tier_or_effort(tmp_path):
             family="openai",
             model="gpt-5.6-terra",
             status="task_class_effort_below_floor",
-            alias="workhorse",
+            alias="senior",
             effort="medium",
         ),
     ]
@@ -1212,8 +1209,8 @@ def test_critical_review_preference_cannot_lower_tier_or_effort(tmp_path):
     })
 
     assert result.returncode == 0
-    assert receipt["chosen_candidate_id"] == "anthropic-flagship"
-    assert receipt["chosen_route"]["alias"] == "flagship"
+    assert receipt["chosen_candidate_id"] == "anthropic-principal"
+    assert receipt["chosen_route"]["alias"] == "principal"
     assert receipt["chosen_route"]["effort"] == "high"
     assert {
         "kind": "family_affinity",
@@ -1226,7 +1223,7 @@ def test_critical_review_preference_cannot_lower_tier_or_effort(tmp_path):
 def test_disabled_adapter_and_outside_model_preferences_are_reported(tmp_path):
     candidates = [
         route_candidate(
-            "anthropic-flagship",
+            "anthropic-principal",
             adapter="claude",
             family="anthropic",
             model="opus",
@@ -1254,7 +1251,7 @@ def test_disabled_adapter_and_outside_model_preferences_are_reported(tmp_path):
     })
 
     assert result.returncode == 0
-    assert receipt["chosen_candidate_id"] == "anthropic-flagship"
+    assert receipt["chosen_candidate_id"] == "anthropic-principal"
     assert {
         "kind": "adapter_affinity",
         "scope": "role",
@@ -1282,13 +1279,13 @@ def test_disabled_adapter_and_outside_model_preferences_are_reported(tmp_path):
 def test_fair_spreading_is_reproducible_from_persisted_state(tmp_path):
     candidates = [
         route_candidate(
-            "anthropic-flagship",
+            "anthropic-principal",
             adapter="claude",
             family="anthropic",
             model="opus",
         ),
         route_candidate(
-            "openai-flagship",
+            "openai-principal",
             adapter="codex",
             family="openai",
             model="gpt-5.6-sol",
@@ -1337,13 +1334,13 @@ def test_fair_spreading_is_reproducible_from_persisted_state(tmp_path):
 def test_concurrent_fan_out_serialises_persisted_spread_state(tmp_path):
     candidates = [
         route_candidate(
-            "anthropic-flagship",
+            "anthropic-principal",
             adapter="claude",
             family="anthropic",
             model="opus",
         ),
         route_candidate(
-            "openai-flagship",
+            "openai-principal",
             adapter="codex",
             family="openai",
             model="gpt-5.6-sol",
@@ -1381,7 +1378,7 @@ def test_concurrent_fan_out_serialises_persisted_spread_state(tmp_path):
 def test_unknown_availability_is_distinct_from_observed_unavailable(tmp_path):
     candidates = [
         route_candidate(
-            "anthropic-flagship",
+            "anthropic-principal",
             adapter="claude",
             family="anthropic",
             model="opus",
@@ -1462,13 +1459,13 @@ def test_malformed_observed_availability_rejects_candidate_set(
 def test_unknown_preference_entries_load_without_changing_route(tmp_path):
     candidates = [
         route_candidate(
-            "anthropic-flagship",
+            "anthropic-principal",
             adapter="claude",
             family="anthropic",
             model="opus",
         ),
         route_candidate(
-            "openai-flagship",
+            "openai-principal",
             adapter="codex",
             family="openai",
             model="gpt-5.6-sol",
@@ -1527,7 +1524,7 @@ def test_unknown_preference_keys_are_recorded_in_ignored(tmp_path):
         tmp_path,
         [
             route_candidate(
-                "anthropic-flagship",
+                "anthropic-principal",
                 adapter="claude",
                 family="anthropic",
                 model="opus",
@@ -1569,7 +1566,7 @@ def test_corrupt_preferences_file_has_distinct_receipt_status(tmp_path):
         tmp_path,
         [
             route_candidate(
-                "anthropic-flagship",
+                "anthropic-principal",
                 adapter="claude",
                 family="anthropic",
                 model="opus",
@@ -1587,7 +1584,7 @@ def test_unsupported_spreading_policy_is_recorded_as_ignored(tmp_path):
         tmp_path,
         [
             route_candidate(
-                "anthropic-flagship",
+                "anthropic-principal",
                 adapter="claude",
                 family="anthropic",
                 model="opus",
@@ -1612,13 +1609,13 @@ def test_unsupported_spreading_policy_is_recorded_as_ignored(tmp_path):
 def test_deprioritise_preference_changes_tie_break_and_is_recorded(tmp_path):
     candidates = [
         route_candidate(
-            "anthropic-flagship",
+            "anthropic-principal",
             adapter="claude",
             family="anthropic",
             model="opus",
         ),
         route_candidate(
-            "openai-flagship",
+            "openai-principal",
             adapter="codex",
             family="openai",
             model="gpt-5.6-sol",
@@ -1630,7 +1627,7 @@ def test_deprioritise_preference_changes_tie_break_and_is_recorded(tmp_path):
     })
 
     assert result.returncode == 0
-    assert receipt["chosen_candidate_id"] == "openai-flagship"
+    assert receipt["chosen_candidate_id"] == "openai-principal"
     assert {
         "kind": "family_deprioritise",
         "scope": "deprioritise",
@@ -1641,13 +1638,13 @@ def test_deprioritise_preference_changes_tie_break_and_is_recorded(tmp_path):
 def test_not_honoured_reason_distinguishes_higher_preference(tmp_path):
     candidates = [
         route_candidate(
-            "anthropic-flagship",
+            "anthropic-principal",
             adapter="claude",
             family="anthropic",
             model="opus",
         ),
         route_candidate(
-            "openai-flagship",
+            "openai-principal",
             adapter="codex",
             family="openai",
             model="gpt-5.6-sol",
@@ -1661,7 +1658,7 @@ def test_not_honoured_reason_distinguishes_higher_preference(tmp_path):
     })
 
     assert result.returncode == 0
-    assert receipt["chosen_candidate_id"] == "openai-flagship"
+    assert receipt["chosen_candidate_id"] == "openai-principal"
     assert {
         "kind": "family_affinity",
         "scope": "task_class",
@@ -1672,7 +1669,7 @@ def test_not_honoured_reason_distinguishes_higher_preference(tmp_path):
 
 def test_not_honoured_reason_distinguishes_fair_spreading(tmp_path):
     openai = route_candidate(
-        "openai-flagship",
+        "openai-principal",
         adapter="codex",
         family="openai",
         model="gpt-5.6-sol",
@@ -1688,7 +1685,7 @@ def test_not_honoured_reason_distinguishes_fair_spreading(tmp_path):
         tmp_path,
         [
             route_candidate(
-                "anthropic-flagship",
+                "anthropic-principal",
                 adapter="claude",
                 family="anthropic",
                 model="opus",
@@ -1706,7 +1703,7 @@ def test_not_honoured_reason_distinguishes_fair_spreading(tmp_path):
     )
 
     assert initial_result.returncode == result.returncode == 0
-    assert receipt["chosen_candidate_id"] == "anthropic-flagship"
+    assert receipt["chosen_candidate_id"] == "anthropic-principal"
     assert {
         "kind": "family_affinity",
         "scope": "task_class",
@@ -1720,7 +1717,7 @@ def test_deprioritise_only_admissible_candidate_reports_why_not_honoured(tmp_pat
         tmp_path,
         [
             route_candidate(
-                "anthropic-flagship",
+                "anthropic-principal",
                 adapter="claude",
                 family="anthropic",
                 model="opus",
@@ -1744,7 +1741,7 @@ def test_deprioritise_only_admissible_candidate_reports_why_not_honoured(tmp_pat
 def test_selector_rejects_forged_ok_route_below_hard_floor(tmp_path):
     candidates = [
         route_candidate(
-            "anthropic-flagship",
+            "anthropic-principal",
             adapter="claude",
             family="anthropic",
             model="opus",
@@ -1754,7 +1751,7 @@ def test_selector_rejects_forged_ok_route_below_hard_floor(tmp_path):
             adapter="codex",
             family="openai",
             model="gpt-5.6-terra",
-            alias="workhorse",
+            alias="senior",
             effort="medium",
         ),
     ]
@@ -1766,7 +1763,7 @@ def test_selector_rejects_forged_ok_route_below_hard_floor(tmp_path):
     })
 
     assert result.returncode == 0
-    assert receipt["chosen_candidate_id"] == "anthropic-flagship"
+    assert receipt["chosen_candidate_id"] == "anthropic-principal"
     by_id = {candidate["candidate_id"]: candidate for candidate in receipt["candidates"]}
     assert by_id["forged-cheap"]["admissible"] is False
     assert by_id["forged-cheap"]["disposition"] == "hard_policy_mismatch"
@@ -1802,7 +1799,7 @@ def test_risk_tier_override_catalogue_retargets_single_model(
     override = catalog["families"]["anthropic"]["risk_tier_overrides"]["crucial"]
     override["models"] = ["claude-retargeted-model"]
     override["roles"] = ["reviewer-one", "reviewer-two"]
-    override["alias"] = "workhorse"
+    override["alias"] = "senior"
     override["default_effort"] = "low"
     override["maximum_effort"] = "high"
     catalog_path = tmp_path / "model-routing.json"
@@ -1845,7 +1842,7 @@ def test_special_model_override_uses_an_explicit_non_lifecycle_input():
 @pytest.mark.parametrize("model", ("fable", "claude-fable-5-0"))
 def test_versioned_fable_override_reserves_generic_and_older_model_ids(model):
     result, route = resolve(
-        "--adapter", "claude", "--alias", "flagship", "--role", "worker",
+        "--adapter", "claude", "--alias", "principal", "--role", "worker",
         "--model", model, "--available-model", model, "--effort", "high",
     )
 
@@ -1866,7 +1863,7 @@ def test_retargeted_override_occupant_requires_explicit_risk_tier(
     monkeypatch.setattr(router, "PRODUCT_CATALOG_PATH", catalog_path)
 
     result = router.main([
-        "resolve", "--adapter", "claude", "--alias", "flagship",
+        "resolve", "--adapter", "claude", "--alias", "principal",
         "--role", "worker", "--model", "claude-newcomer",
     ])
 
@@ -1889,7 +1886,7 @@ def test_retargeting_override_occupant_ungates_previous_occupant(
     monkeypatch.setattr(router, "PRODUCT_CATALOG_PATH", catalog_path)
 
     result = router.main([
-        "resolve", "--adapter", "claude", "--alias", "flagship",
+        "resolve", "--adapter", "claude", "--alias", "principal",
         "--role", "worker", "--model", "fable",
     ])
 
@@ -1914,7 +1911,7 @@ def test_retargeting_one_tier_keeps_occupant_gated_by_another_tier(
     monkeypatch.setattr(router, "PRODUCT_CATALOG_PATH", catalog_path)
 
     result = router.main([
-        "resolve", "--adapter", "claude", "--alias", "flagship",
+        "resolve", "--adapter", "claude", "--alias", "principal",
         "--role", "worker", "--model", terminal_model,
     ])
 
@@ -1931,7 +1928,7 @@ def test_foreign_family_risk_override_does_not_gate_explicit_model(
     catalog["families"]["openai"]["risk_tier_overrides"] = {
         "crucial": {
             "roles": ["synthesis", "adjudication"],
-            "alias": "flagship",
+            "alias": "principal",
             "models": ["opus"],
             "default_effort": "medium",
             "maximum_effort": "medium",
@@ -1943,7 +1940,7 @@ def test_foreign_family_risk_override_does_not_gate_explicit_model(
     monkeypatch.setattr(router, "PRODUCT_CATALOG_PATH", catalog_path)
 
     result = router.main([
-        "resolve", "--adapter", "claude", "--alias", "flagship",
+        "resolve", "--adapter", "claude", "--alias", "principal",
         "--role", "worker", "--model", "claude-opus-4-6",
     ])
 
@@ -1953,7 +1950,7 @@ def test_foreign_family_risk_override_does_not_gate_explicit_model(
     assert route["resolved_model"] == "claude-opus-4-6"
 
 
-@pytest.mark.parametrize("occupant", ("flagship", "opus"))
+@pytest.mark.parametrize("occupant", ("principal", "opus"))
 def test_risk_tier_override_occupant_cannot_be_reached_by_alias(
     tmp_path, monkeypatch, capsys, occupant
 ):
@@ -1968,7 +1965,7 @@ def test_risk_tier_override_occupant_cannot_be_reached_by_alias(
     monkeypatch.setattr(router, "PRODUCT_CATALOG_PATH", catalog_path)
 
     result = router.main([
-        "resolve", "--adapter", "claude", "--alias", "flagship",
+        "resolve", "--adapter", "claude", "--alias", "principal",
         "--role", "worker",
     ])
 
@@ -1983,7 +1980,7 @@ def test_risk_tier_override_occupant_cannot_match_versioned_alias_candidate(
     router = load_router()
     catalog = json.loads((ROOT / "config" / "model-routing.json").read_text())
     family = catalog["families"]["anthropic"]
-    family["aliases"]["flagship"] = ["claude-opus-4-6"]
+    family["aliases"]["principal"] = ["claude-opus-4-6"]
     family["role_overrides"] = {}
     family["risk_tier_overrides"]["crucial"]["models"] = ["opus"]
     catalog_path = tmp_path / "model-routing.json"
@@ -1992,7 +1989,7 @@ def test_risk_tier_override_occupant_cannot_match_versioned_alias_candidate(
     monkeypatch.setattr(router, "PRODUCT_CATALOG_PATH", catalog_path)
 
     result = router.main([
-        "resolve", "--adapter", "claude", "--alias", "flagship",
+        "resolve", "--adapter", "claude", "--alias", "principal",
         "--role", "worker",
     ])
 
@@ -2007,7 +2004,7 @@ def test_versioned_fable_override_rejects_a_different_versioned_alias_candidate(
     router = load_router()
     catalog = json.loads((ROOT / "config" / "model-routing.json").read_text())
     family = catalog["families"]["anthropic"]
-    family["aliases"]["flagship"] = ["claude-fable-5-2"]
+    family["aliases"]["principal"] = ["claude-fable-5-2"]
     family["role_overrides"] = {}
     catalog_path = tmp_path / "model-routing.json"
     catalog_path.write_text(json.dumps(catalog))
@@ -2015,7 +2012,7 @@ def test_versioned_fable_override_rejects_a_different_versioned_alias_candidate(
     monkeypatch.setattr(router, "PRODUCT_CATALOG_PATH", catalog_path)
 
     result = router.main([
-        "resolve", "--adapter", "claude", "--alias", "flagship", "--role", "worker",
+        "resolve", "--adapter", "claude", "--alias", "principal", "--role", "worker",
     ])
 
     route = json.loads(capsys.readouterr().out)
@@ -2046,7 +2043,7 @@ def test_risk_tier_override_occupant_cannot_partially_match_explicit_model(
     monkeypatch.setattr(router, "PRODUCT_CATALOG_PATH", catalog_path)
 
     result = router.main([
-        "resolve", "--adapter", "claude", "--alias", "flagship",
+        "resolve", "--adapter", "claude", "--alias", "principal",
         "--role", "worker", "--model", explicit_model,
     ])
 
@@ -2061,7 +2058,7 @@ def test_risk_tier_override_occupant_cannot_be_reached_by_role_alias_override(
     router = load_router()
     catalog = json.loads((ROOT / "config" / "model-routing.json").read_text())
     family = catalog["families"]["anthropic"]
-    family["role_overrides"]["worker"] = {"flagship": ["claude-role-model"]}
+    family["role_overrides"]["worker"] = {"principal": ["claude-role-model"]}
     family["risk_tier_overrides"]["crucial"]["models"] = ["claude-role-model"]
     catalog_path = tmp_path / "model-routing.json"
     catalog_path.write_text(json.dumps(catalog))
@@ -2069,7 +2066,7 @@ def test_risk_tier_override_occupant_cannot_be_reached_by_role_alias_override(
     monkeypatch.setattr(router, "PRODUCT_CATALOG_PATH", catalog_path)
 
     result = router.main([
-        "resolve", "--adapter", "claude", "--alias", "flagship",
+        "resolve", "--adapter", "claude", "--alias", "principal",
         "--role", "worker",
     ])
 
@@ -2093,7 +2090,7 @@ def test_foreign_family_override_collision_does_not_reject_adapter_route(
     monkeypatch.setattr(router, "PRODUCT_CATALOG_PATH", catalog_path)
 
     result = router.main([
-        "resolve", "--adapter", "codex", "--alias", "workhorse",
+        "resolve", "--adapter", "codex", "--alias", "senior",
         "--role", "worker", "--capabilities-file", str(snapshot),
     ])
 
@@ -2125,10 +2122,10 @@ def test_missing_route_input_precedes_risk_tier_configuration_validation(
     assert route["status"] == "route_input_missing"
 
 
-def test_claude_flagship_and_critical_review_default_to_opus():
-    lead, lead_route = resolve("--adapter", "claude", "--alias", "flagship", "--role", "lead")
+def test_claude_principal_and_critical_review_default_to_opus():
+    lead, lead_route = resolve("--adapter", "claude", "--alias", "principal", "--role", "lead")
     review, review_route = resolve(
-        "--adapter", "claude", "--alias", "flagship", "--role", "critical-review"
+        "--adapter", "claude", "--alias", "principal", "--role", "critical-review"
     )
     assert lead.returncode == review.returncode == 0
     assert lead_route["resolved_model"] == review_route["resolved_model"] == "opus"
@@ -2137,7 +2134,7 @@ def test_claude_flagship_and_critical_review_default_to_opus():
 
 def test_claude_other_primary_uses_opus():
     result, route = resolve(
-        "--adapter", "claude", "--alias", "flagship", "--role", "other-primary"
+        "--adapter", "claude", "--alias", "principal", "--role", "other-primary"
     )
     assert result.returncode == 0
     assert route["resolved_model"] == "opus"
@@ -2148,7 +2145,7 @@ def test_opus_unavailable_has_no_implicit_risk_override_fallback():
         "--adapter",
         "claude",
         "--alias",
-        "flagship",
+        "principal",
         "--role",
         "lead",
         "--available-model",
@@ -2171,7 +2168,7 @@ def test_explicit_override_occupant_identifiers_require_the_bounded_risk_overrid
 ):
     model = model_template.format(occupant=RISK_OVERRIDE_MODEL)
     result, route = resolve(
-        "--adapter", "claude", "--alias", "flagship", "--role", "worker",
+        "--adapter", "claude", "--alias", "principal", "--role", "worker",
         "--model", model, "--effort", "high",
     )
     assert result.returncode == 1
@@ -2180,7 +2177,7 @@ def test_explicit_override_occupant_identifiers_require_the_bounded_risk_overrid
 
 def test_explicit_override_occupant_stays_reserved_for_broker_adapters():
     result, route = resolve(
-        "--adapter", "cursor", "--alias", "flagship", "--role", "worker",
+        "--adapter", "cursor", "--alias", "principal", "--role", "worker",
         "--model", RISK_OVERRIDE_MODEL, "--effort", "high",
     )
     assert result.returncode == 1
@@ -2190,7 +2187,7 @@ def test_explicit_override_occupant_stays_reserved_for_broker_adapters():
 @pytest.mark.parametrize(
     "route",
     (
-        ("--alias", "flagship", "--role", "worker"),
+        ("--alias", "principal", "--role", "worker"),
         ("--task-class", "critical-review", "--role", "critical-review"),
     ),
     ids=("alias", "task-class"),
@@ -2270,7 +2267,7 @@ def test_capability_resolved_override_occupant_records_explicit_risk_tier(
 
 def test_enabled_kiro_accepts_inferred_family_model():
     result, route = resolve(
-        "--adapter", "kiro", "--alias", "flagship", "--role", "worker",
+        "--adapter", "kiro", "--alias", "principal", "--role", "worker",
         "--model", "deepseek-v3.2",
     )
 
@@ -2328,7 +2325,7 @@ def test_fable_5_1_is_the_only_medium_capped_anthropic_override_model(risk_tier)
 
 def test_fable_5_1_override_rejects_a_different_version():
     result, route = resolve(
-        "--adapter", "claude", "--alias", "flagship", "--role", "synthesis",
+        "--adapter", "claude", "--alias", "principal", "--role", "synthesis",
         "--model-override-tier", "crucial", "--model", "claude-fable-5-10",
         "--effort", "medium", "--available-model", "claude-fable-5-10",
     )
@@ -2341,20 +2338,20 @@ def test_fable_5_1_override_rejects_a_different_version():
     ("arguments", "expected_status"),
     (
         (
-            ("--alias", "flagship", "--role", "synthesis", "--model-override-tier", "substantial"),
+            ("--alias", "principal", "--role", "synthesis", "--model-override-tier", "substantial"),
             "risk_tier_override_unavailable",
         ),
         (
-            ("--alias", "flagship", "--role", "worker", "--model-override-tier", "crucial"),
+            ("--alias", "principal", "--role", "worker", "--model-override-tier", "crucial"),
             "risk_tier_role_mismatch",
         ),
         (
-            ("--alias", "workhorse", "--role", "synthesis", "--model-override-tier", "crucial"),
+            ("--alias", "senior", "--role", "synthesis", "--model-override-tier", "crucial"),
             "risk_tier_alias_mismatch",
         ),
         (
             (
-                "--alias", "flagship", "--role", "synthesis", "--model-override-tier", "crucial",
+                "--alias", "principal", "--role", "synthesis", "--model-override-tier", "crucial",
                 "--effort", "high",
             ),
             "risk_tier_effort_above_ceiling",
@@ -2375,7 +2372,7 @@ def test_risk_override_fails_closed_outside_bounded_role_tier_and_effort(
 @pytest.mark.parametrize("model", NON_OCCUPANT_MODELS)
 def test_risk_override_rejects_non_occupant_explicit_models(model):
     result, route = resolve(
-        "--adapter", "claude", "--alias", "flagship", "--role", "synthesis",
+        "--adapter", "claude", "--alias", "principal", "--role", "synthesis",
         "--model-override-tier", "crucial", "--model", model, "--effort", "medium",
     )
     assert result.returncode == 1
@@ -2437,7 +2434,7 @@ def test_non_dict_risk_tier_override_is_rejected_as_malformed(tmp_path, monkeypa
     monkeypatch.setattr(router, "PRODUCT_CATALOG_PATH", catalog_path)
 
     result = router.main([
-        "resolve", "--adapter", "claude", "--alias", "flagship",
+        "resolve", "--adapter", "claude", "--alias", "principal",
         "--role", "synthesis", "--model-override-tier", "crucial",
     ])
 
@@ -2457,7 +2454,7 @@ def test_absent_risk_tier_is_still_reported_unavailable(tmp_path, monkeypatch, c
     monkeypatch.setattr(router, "PRODUCT_CATALOG_PATH", catalog_path)
 
     result = router.main([
-        "resolve", "--adapter", "claude", "--alias", "flagship",
+        "resolve", "--adapter", "claude", "--alias", "principal",
         "--role", "synthesis", "--model-override-tier", "crucial",
     ])
 
@@ -2491,7 +2488,7 @@ def test_malformed_override_models_never_unreserve_the_occupant(
     monkeypatch.setattr(router, "PRODUCT_CATALOG_PATH", catalog_path)
 
     result = router.main([
-        "resolve", "--adapter", "claude", "--alias", "flagship",
+        "resolve", "--adapter", "claude", "--alias", "principal",
         "--role", "worker", "--model", "fable",
     ])
 
@@ -2515,7 +2512,7 @@ def test_malformed_override_in_one_family_does_not_reject_another_family(
     monkeypatch.setattr(router, "PRODUCT_CATALOG_PATH", catalog_path)
 
     result = router.main([
-        "resolve", "--adapter", "codex", "--alias", "workhorse",
+        "resolve", "--adapter", "codex", "--alias", "senior",
         "--role", "worker", "--capabilities-file", str(snapshot),
     ])
 
@@ -2553,7 +2550,7 @@ def test_unusable_families_table_fails_closed(
 
     result = router.main([
         "resolve", "--adapter", adapter, "--model", "fable",
-        "--alias", "flagship", "--role", "worker",
+        "--alias", "principal", "--role", "worker",
     ])
 
     route = json.loads(capsys.readouterr().out)
@@ -2570,7 +2567,7 @@ def test_opencode_without_model_uses_adapter_default(capsys, monkeypatch):
     monkeypatch.setattr(router, "PRODUCT_CATALOG_PATH", ROOT / "config" / "model-routing.json")
 
     result = router.main([
-        "resolve", "--adapter", "opencode", "--alias", "flagship",
+        "resolve", "--adapter", "opencode", "--alias", "principal",
         "--role", "worker", "--adapter-compatibility",
         str(ROOT / "config" / "adapter-compatibility.yaml"),
     ])
@@ -2587,7 +2584,7 @@ def test_cursor_without_model_uses_account_auto_default(capsys, monkeypatch):
     monkeypatch.setattr(router, "CATALOG_PATH", ROOT / "config" / "model-routing.json")
     monkeypatch.setattr(router, "PRODUCT_CATALOG_PATH", ROOT / "config" / "model-routing.json")
     result = router.main([
-        "resolve", "--adapter", "cursor", "--alias", "workhorse",
+        "resolve", "--adapter", "cursor", "--alias", "senior",
         "--role", "worker", "--adapter-compatibility",
         str(ROOT / "config" / "adapter-compatibility.yaml"),
     ])
@@ -2631,7 +2628,7 @@ def test_unroutable_pinned_family_rejects_with_a_receipt(
     monkeypatch.setattr(router, "PRODUCT_CATALOG_PATH", catalog_path)
 
     result = router.main([
-        "resolve", "--adapter", "codex", "--alias", "flagship",
+        "resolve", "--adapter", "codex", "--alias", "principal",
         "--role", "worker",
     ])
 
@@ -2668,7 +2665,7 @@ def test_empty_routed_family_validates_every_family_the_scan_consults(
     assert list(router.override_scan_families("gpt-5.6-sol", catalog)) == list(catalog["families"])
 
     result = router.main([
-        "resolve", "--adapter", "cursor", "--alias", "flagship", "--role", "worker",
+        "resolve", "--adapter", "cursor", "--alias", "principal", "--role", "worker",
         "--model", "gpt-5.6-sol",
     ])
 
@@ -2702,7 +2699,7 @@ def test_unusable_alias_table_rejects_on_an_explicit_model_route(
     monkeypatch.setattr(router, "PRODUCT_CATALOG_PATH", catalog_path)
 
     result = router.main([
-        "resolve", "--adapter", "account-default-fixture", "--alias", "flagship",
+        "resolve", "--adapter", "account-default-fixture", "--alias", "principal",
         "--role", "worker", "--model", "gpt-5.6-sol",
     ])
 
@@ -2715,7 +2712,7 @@ def test_unusable_alias_table_rejects_on_an_explicit_model_route(
     "field, value",
     [
         ("roles", "ab"),
-        ("alias", ["flagship"]),
+        ("alias", ["principal"]),
         ("default_effort", ["high"]),
         ("maximum_effort", {"high": True}),
     ],
@@ -2740,7 +2737,7 @@ def test_override_field_of_the_wrong_type_fails_closed(
     monkeypatch.setattr(router, "PRODUCT_CATALOG_PATH", catalog_path)
 
     result = router.main([
-        "resolve", "--adapter", "claude", "--alias", "flagship", "--role", "a",
+        "resolve", "--adapter", "claude", "--alias", "principal", "--role", "a",
         "--model-override-tier", "crucial", "--model", "fable", "--available-model", "fable",
     ])
 
@@ -2770,7 +2767,7 @@ def test_fixed_family_adapter_fails_closed_on_an_alias_route(
     monkeypatch.setattr(router, "PRODUCT_CATALOG_PATH", catalog_path)
 
     result = router.main([
-        "resolve", "--adapter", "claude", "--alias", "flagship", "--role", "worker",
+        "resolve", "--adapter", "claude", "--alias", "principal", "--role", "worker",
     ])
 
     route = json.loads(capsys.readouterr().out)
@@ -2801,7 +2798,7 @@ def test_malformed_override_fails_closed_without_a_fixed_model_family(
 
     result = router.main([
         "resolve", "--adapter", adapter, "--model", "fable",
-        "--alias", "flagship", "--role", "worker",
+        "--alias", "principal", "--role", "worker",
     ])
 
     route = json.loads(capsys.readouterr().out)
@@ -2812,9 +2809,9 @@ def test_malformed_override_fails_closed_without_a_fixed_model_family(
 
 def test_account_default_aliases_resolve_to_account_default_dispatch(tmp_path):
     expected = {
-        "flagship": "gpt-6-astra",
-        "workhorse": "gpt-6.1-sol",
-        "scout": "gpt-6-luna",
+        "principal": "gpt-6-astra",
+        "senior": "gpt-6.1-sol",
+        "junior": "gpt-6-luna",
     }
     catalog = write_account_default_catalog(tmp_path)
     for alias, model in expected.items():
@@ -2833,7 +2830,7 @@ def test_account_default_aliases_resolve_to_account_default_dispatch(tmp_path):
 def test_account_default_adapter_ignores_runtime_selectable_model_list(tmp_path):
     catalog = write_account_default_catalog(tmp_path)
     result, route = resolve(
-        "--adapter", "account-default-fixture", "--alias", "flagship",
+        "--adapter", "account-default-fixture", "--alias", "principal",
         "--role", "worker", "--available-model", "gpt-5.6-luna",
         "--catalog", str(catalog),
     )
@@ -2866,7 +2863,7 @@ def test_catalog_and_compatibility_mismatch_fails_closed(
     monkeypatch.setattr(router, "PRODUCT_CATALOG_PATH", catalog_path)
 
     result = router.main([
-        "resolve", "--adapter", "codex", "--alias", "scout", "--role", "worker",
+        "resolve", "--adapter", "codex", "--alias", "junior", "--role", "worker",
         "--adapter-compatibility", str(compatibility_path),
     ])
 
@@ -2876,11 +2873,11 @@ def test_catalog_and_compatibility_mismatch_fails_closed(
 
 
 def test_codex_aliases_supply_proportionate_default_effort(tmp_path):
-    # Workhorse and scout are deliberately not proportionate on OpenAI. Luna is
+    # senior and junior are deliberately not proportionate on OpenAI. Luna is
     # cheap enough that the family raises both worker aliases to high in
-    # role_effort_defaults, so the tier difference against flagship is the
+    # role_effort_defaults, so the tier difference against principal is the
     # model, not the effort. See docs/model-dossier.md.
-    expected = {"flagship": "high", "workhorse": "high", "scout": "high"}
+    expected = {"principal": "high", "senior": "high", "junior": "high"}
     snapshot = write_codex_capability_snapshot(tmp_path)
     for alias, effort in expected.items():
         result, route = resolve(
@@ -2894,10 +2891,10 @@ def test_codex_aliases_supply_proportionate_default_effort(tmp_path):
 @pytest.mark.parametrize(
     ("task_class", "alias", "effort", "resolved_model"),
     (
-        ("mechanical", "scout", "low", "gpt-6-luna"),
-        ("legwork", "workhorse", "medium", "gpt-6.1-sol"),
-        ("critical-review", "flagship", "high", "gpt-6-astra"),
-        ("orchestration", "flagship", "high", "gpt-6-astra"),
+        ("mechanical", "junior", "low", "gpt-6-luna"),
+        ("legwork", "senior", "medium", "gpt-6.1-sol"),
+        ("critical-review", "principal", "high", "gpt-6-astra"),
+        ("orchestration", "principal", "high", "gpt-6-astra"),
     ),
 )
 def test_task_classes_bind_codex_runtime_identity(
@@ -2930,7 +2927,7 @@ def test_task_classes_bind_codex_runtime_identity(
 def test_task_class_uses_ordered_exact_models_from_catalogue(tmp_path):
     catalog = json.loads((ROOT / "config" / "model-routing.json").read_text())
     catalog["task_class_routes"]["implementation"] = {
-        "alias": "workhorse", "effort": "high", "role": "worker",
+        "alias": "senior", "effort": "high", "role": "worker",
         "models": {"codex": ["gpt-6-astra", "gpt-6.1-sol"]},
     }
     catalog_path = tmp_path / "catalog.json"
@@ -3221,7 +3218,7 @@ def test_claude_alias_route_uses_verified_model_without_claiming_effort_support(
     snapshot.write_text(json.dumps(value))
 
     result, route = resolve(
-        "--adapter", "claude", "--alias", "flagship",
+        "--adapter", "claude", "--alias", "principal",
         "--role", "critical-review", "--effort", "high",
         "--capabilities-file", str(snapshot),
     )
@@ -3250,7 +3247,7 @@ def test_claude_unverified_effort_snapshot_does_not_cover_another_effort(tmp_pat
     snapshot.write_text(json.dumps(value))
 
     result, route = resolve(
-        "--adapter", "claude", "--alias", "flagship",
+        "--adapter", "claude", "--alias", "principal",
         "--role", "critical-review", "--effort", "medium",
         "--capabilities-file", str(snapshot),
     )
@@ -3283,7 +3280,7 @@ def test_critical_review_task_class_rejects_worker_role_before_model_resolution(
 def test_legacy_alias_route_does_not_claim_task_class_binding(tmp_path):
     snapshot = write_codex_capability_snapshot(tmp_path)
     result, route = resolve(
-        "--adapter", "codex", "--alias", "scout", "--role", "worker",
+        "--adapter", "codex", "--alias", "junior", "--role", "worker",
         "--capabilities-file", str(snapshot),
     )
     assert result.returncode == 0
@@ -3294,7 +3291,7 @@ def test_legacy_alias_route_does_not_claim_task_class_binding(tmp_path):
 @pytest.mark.parametrize(
     "arguments,expected",
     (
-        (("--alias", "scout", "--task-class", "mechanical"), "route_input_conflict"),
+        (("--alias", "junior", "--task-class", "mechanical"), "route_input_conflict"),
         (("--task-class", "mechanical", "--effort", "medium"), "task_class_effort_conflict"),
         (("--task-class", "unknown"), "unknown_task_class"),
     ),
@@ -3315,7 +3312,7 @@ def test_task_class_rejects_explicit_model_override():
     )
     assert result.returncode == 2
     assert route["status"] == "task_class_model_conflict"
-    assert route["alias"] == "flagship"
+    assert route["alias"] == "principal"
 
 
 def test_task_class_rejects_effective_effort_below_policy_floor(tmp_path):
@@ -3379,7 +3376,7 @@ def test_task_class_role_policy_cannot_be_reconfigured_to_worker(tmp_path, monke
 
 @pytest.mark.parametrize(
     ("field", "value"),
-    (("alias", "scout"), ("effort", "low")),
+    (("alias", "junior"), ("effort", "low")),
 )
 def test_critical_review_policy_rejects_valid_vocabulary_downgrade(
     tmp_path, monkeypatch, capsys, field, value
@@ -3427,7 +3424,7 @@ def test_task_class_effort_overlay_may_raise_effort_above_policy_floor(
 def test_role_default_cannot_lower_task_class_effort(tmp_path, monkeypatch, capsys):
     router = load_router()
     catalog = json.loads((ROOT / "config" / "model-routing.json").read_text())
-    catalog["families"]["openai"]["role_effort_defaults"]["orchestrator"]["flagship"] = "low"
+    catalog["families"]["openai"]["role_effort_defaults"]["orchestrator"]["principal"] = "low"
     catalog_path = tmp_path / "model-routing.json"
     catalog_path.write_text(json.dumps(catalog))
     snapshot = tmp_path / "caps.json"
@@ -3456,7 +3453,7 @@ def test_explicit_ultra_without_runtime_snapshot_uses_registry(
     monkeypatch.setattr(router, "PRODUCT_CATALOG_PATH", ROOT / "config" / "model-routing.json")
 
     result = router.main([
-        "resolve", "--adapter", "codex", "--alias", "flagship", "--role", "lead",
+        "resolve", "--adapter", "codex", "--alias", "principal", "--role", "lead",
         "--effort", "ultra",
     ])
 
@@ -3479,7 +3476,7 @@ def test_explicit_ultra_with_stale_openai_capability_snapshot_fails_closed(
     snapshot = write_codex_capability_snapshot(tmp_path, observed_at=observed_at)
 
     result = router.main([
-        "resolve", "--adapter", "codex", "--alias", "flagship", "--role", "lead",
+        "resolve", "--adapter", "codex", "--alias", "principal", "--role", "lead",
         "--effort", "ultra",
         "--capabilities-file", str(snapshot),
     ])
@@ -3498,10 +3495,10 @@ def test_openai_catalog_declares_effort_policy_only():
     assert "ultra_eligible_models" not in family
     assert family["ultra_eligible_roles"] == ["lead", "orchestrator"]
     assert family["role_effort_defaults"] == {
-        "lead": {"flagship": "xhigh"},
-        "orchestrator": {"flagship": "xhigh"},
-        "critical-review": {"flagship": "xhigh"},
-        "worker": {"workhorse": "high", "scout": "high"},
+        "lead": {"principal": "xhigh"},
+        "orchestrator": {"principal": "xhigh"},
+        "critical-review": {"principal": "xhigh"},
+        "worker": {"senior": "high", "junior": "high"},
     }
     assert family["effort_fallback_order"] == ["xhigh", "high", "medium", "low"]
 
@@ -3525,7 +3522,7 @@ def test_fresh_openai_snapshot_accepts_explicit_ultra_effort(
     snapshot = write_codex_capability_snapshot(tmp_path)
 
     result = router.main([
-        "resolve", "--adapter", "codex", "--alias", "flagship", "--role", "lead",
+        "resolve", "--adapter", "codex", "--alias", "principal", "--role", "lead",
         "--effort", "ultra",
         "--capabilities-file", str(snapshot),
     ])
@@ -3544,7 +3541,7 @@ def test_noneligible_ultra_fallback_reports_runtime_capability_source(
     router = load_router()
     catalog = json.loads((ROOT / "config" / "model-routing.json").read_text())
     catalog["families"]["openai"]["role_effort_defaults"]["worker"] = {
-        "flagship": "ultra"
+        "principal": "ultra"
     }
     catalog_path = tmp_path / "model-routing.json"
     catalog_path.write_text(json.dumps(catalog))
@@ -3553,7 +3550,7 @@ def test_noneligible_ultra_fallback_reports_runtime_capability_source(
         models={
             "gpt-6-astra": {
                 "resolved_model": "gpt-6-astra",
-                "supported_efforts": ["max"],
+                "supported_efforts": ["xhigh", "max"],
             },
         },
     )
@@ -3561,7 +3558,7 @@ def test_noneligible_ultra_fallback_reports_runtime_capability_source(
     monkeypatch.setattr(router, "PRODUCT_CATALOG_PATH", catalog_path)
 
     result = router.main([
-        "resolve", "--adapter", "codex", "--alias", "flagship", "--role", "worker",
+        "resolve", "--adapter", "codex", "--alias", "principal", "--role", "worker",
         "--capabilities-file", str(snapshot),
     ])
 
@@ -3572,85 +3569,48 @@ def test_noneligible_ultra_fallback_reports_runtime_capability_source(
     assert route["effort_capability_source"] == "runtime-model-catalog"
 
 
-def test_probe_snapshot_max_is_mapped_to_xhigh_with_a_note(tmp_path):
-    snapshot = write_codex_capability_snapshot(
-        tmp_path,
-        models={"gpt-6-astra": {"resolved_model": "gpt-6-astra",
-                                "supported_efforts": ["max"]}},
-    )
-    result, route = resolve(
-        "--adapter", "codex", "--alias", "flagship", "--role", "worker",
-        "--effort", "ultra", "--capabilities-file", str(snapshot),
-    )
-    assert result.returncode == 0
-    assert route["effort"] == route["effort_applied"] == "xhigh"
-    assert "max retired; mapped to xhigh" in route["effort_substitution"]
-    assert "max" not in route["supported_efforts"]
-
-
-def _overlay_with_max(tmp_path, monkeypatch):
-    """An instance overlay that predates the retirement: every effort list still offers max."""
-    router = load_router()
-    def readd(value):
-        if isinstance(value, dict):
-            return {k: (v + ["max"] if k in {"efforts", "effort_fallback_order"} and isinstance(v, list) and "xhigh" in v
-                        else readd(v)) for k, v in value.items()}
-        return [readd(v) for v in value] if isinstance(value, list) else value
-    catalog = readd(json.loads((ROOT / "config" / "model-routing.json").read_text()))
-    path = tmp_path / "model-routing.json"
-    path.write_text(json.dumps(catalog))
-    monkeypatch.setattr(router, "CATALOG_PATH", path)
-    monkeypatch.setattr(router, "PRODUCT_CATALOG_PATH", path)
-    return router
-
-
-@pytest.mark.parametrize("argv", [
-    ["--adapter", "claude", "--alias", "flagship", "--role", "worker", "--effort", "max"],
-    ["--adapter", "claude", "--model", "sonnet", "--role", "worker", "--effort", "max"],
-    ["--adapter", "codex", "--model", "gpt-6-luna", "--role", "worker", "--effort", "max"],
-    ["--adapter", "claude", "--model", "sonnet", "--role", "worker", "--effort", "ultra"],
-])
-def test_overlay_that_still_lists_max_never_resolves_to_max(tmp_path, monkeypatch, capsys, argv):
-    router = _overlay_with_max(tmp_path, monkeypatch)
-    router.main(["resolve", *argv])
-    route = json.loads(capsys.readouterr().out)
-    assert route["status"] == "ok"
-    assert route["effort"] != "max" and route["effort_applied"] != "max"
-    assert "max" not in route["supported_efforts"]
-    if "max" in argv:
-        assert route["requested_effort"] == "max"
-        assert "max retired; mapped to xhigh" in route["effort_substitution"]
-
-
-def test_opencode_max_variant_is_mapped_to_xhigh():
-    result, route = resolve("--adapter", "opencode", "--model", "opencode-go/deepseek-v4.1-flash#max",
-                            "--role", "worker")
-    assert route["effort"] == route["effort_applied"] == "xhigh"
-    assert "max retired; mapped to xhigh" in route["effort_substitution"]
-
-
-def test_explicit_effort_beats_a_retired_max_variant():
-    result, route = resolve("--adapter", "opencode", "--model", "opencode-go/deepseek-v4.1-flash#max",
-                            "--role", "worker", "--effort", "high")
-    assert route["requested_effort"] == "high"
-    assert "max retired" not in route["effort_substitution"]
-    assert route["effort"] != "xhigh"
-
-
-def test_explicit_max_and_ultra_agree_on_a_probe_that_offers_max(tmp_path):
+def test_probe_snapshot_max_is_dropped_from_the_supported_efforts(tmp_path):
     snapshot = write_codex_capability_snapshot(
         tmp_path,
         models={"gpt-6-astra": {"resolved_model": "gpt-6-astra",
                                 "supported_efforts": ["high", "max"]}},
     )
-    efforts = {}
-    for asked in ("max", "ultra"):
-        result, route = resolve("--adapter", "codex", "--alias", "flagship", "--role", "worker",
-                                "--effort", asked, "--capabilities-file", str(snapshot))
-        assert result.returncode == 0
-        efforts[asked] = route["effort"]
-        assert "ran at max" not in route["effort_substitution"]
-    assert efforts == {"max": "xhigh", "ultra": "xhigh"}
+    result, route = resolve(
+        "--adapter", "codex", "--alias", "principal", "--role", "worker",
+        "--effort", "ultra", "--capabilities-file", str(snapshot),
+    )
+    assert result.returncode == 0
+    assert route["effort"] == route["effort_applied"] == "high"
+    assert "max" not in route["supported_efforts"]
+
+
+@pytest.mark.parametrize("argv", [
+    ["--adapter", "claude", "--alias", "principal", "--role", "worker", "--effort", "max"],
+    ["--adapter", "claude", "--model", "sonnet", "--role", "worker", "--effort", "MAX"],
+    ["--adapter", "codex", "--model", "gpt-6-luna", "--role", "worker", "--effort", "max"],
+    ["--adapter", "opencode", "--model", "opencode-go/deepseek-v4.1-flash#max", "--role", "worker"],
+    ["--adapter", "opencode", "--model", "opencode-go/deepseek-v4.1-flash#max", "--role", "worker",
+     "--effort", "high"],
+])
+def test_a_request_for_max_effort_fails_and_suggests_xhigh(argv):
+    result, route = resolve(*argv)
+    assert result.returncode == 2
+    assert route["status"] == "invalid_effort"
+    assert "'max' was retired" in route["message"] and "xhigh" in route["message"]
+
+
+def test_an_overlay_that_still_lists_max_fails_fast(tmp_path):
+    catalog = json.loads((ROOT / "config" / "model-routing.json").read_text())
+    catalog["families"]["openai"]["effort_fallback_order"].append("max")
+    instance = tmp_path / "instance"
+    (instance / "config").mkdir(parents=True)
+    (instance / "config" / "model-routing.json").write_text(json.dumps({"families": catalog["families"]}))
+    env = {**os.environ, "AGENT_FABRIC_INSTANCE_ROOT": str(instance),
+           "AGENT_FABRIC_STATE_ROOT": str(tmp_path / "state")}
+    run = subprocess.run([str(SCRIPT), "resolve", "--adapter", "claude", "--alias", "senior",
+                          "--role", "worker"], text=True, capture_output=True, env=env, check=False)
+    assert run.returncode == 2
+    assert "effort 'max' was retired" in run.stderr and "xhigh" in run.stderr
 
 
 def test_ultra_eligible_roles_must_be_a_list_of_role_names(
@@ -3666,7 +3626,7 @@ def test_ultra_eligible_roles_must_be_a_list_of_role_names(
     monkeypatch.setattr(router, "PRODUCT_CATALOG_PATH", catalog_path)
 
     result = router.main([
-        "resolve", "--adapter", "codex", "--alias", "flagship", "--role", "lead",
+        "resolve", "--adapter", "codex", "--alias", "principal", "--role", "lead",
         "--capabilities-file", str(snapshot),
     ])
 
@@ -3680,7 +3640,7 @@ def test_ultra_eligible_roles_must_be_a_list_of_role_names(
 def test_explicit_effort_overrides_codex_xhigh_default(tmp_path):
     snapshot = write_codex_capability_snapshot(tmp_path)
     result, route = resolve(
-        "--adapter", "codex", "--alias", "flagship", "--role", "lead", "--effort", "high",
+        "--adapter", "codex", "--alias", "principal", "--role", "lead", "--effort", "high",
         "--capabilities-file", str(snapshot),
     )
     assert result.returncode == 0
@@ -3691,10 +3651,10 @@ def test_explicit_ultra_maps_to_supported_effort_on_ordinary_routes(tmp_path):
     snapshot = write_codex_capability_snapshot(tmp_path)
     cases = [
         (
-            "--adapter", "codex", "--alias", "workhorse", "--role", "worker",
+            "--adapter", "codex", "--alias", "senior", "--role", "worker",
             "--capabilities-file", str(snapshot),
         ),
-        ("--adapter", "claude", "--alias", "flagship", "--role", "worker"),
+        ("--adapter", "claude", "--alias", "principal", "--role", "worker"),
     ]
     for route_args in cases:
         result, route = resolve(*route_args, "--effort", "ultra")
@@ -3709,7 +3669,7 @@ def test_codex_failure_records_never_expose_a_dispatchable_model(tmp_path):
     # identifies the capability-gated route that was attempted.
     snapshot = write_codex_capability_snapshot(tmp_path)
     result, route = resolve(
-        "--adapter", "codex", "--alias", "scout", "--role", "worker",
+        "--adapter", "codex", "--alias", "junior", "--role", "worker",
         "--effort", "ultra", "--capabilities-file", str(snapshot),
     )
     assert result.returncode == 0
@@ -3724,7 +3684,7 @@ def test_codex_failure_records_never_expose_a_dispatchable_model(tmp_path):
 def test_codex_resolves_explicit_runtime_model(tmp_path):
     snapshot = write_codex_capability_snapshot(tmp_path)
     result, route = resolve(
-        "--adapter", "codex", "--alias", "scout", "--role", "worker",
+        "--adapter", "codex", "--alias", "junior", "--role", "worker",
         "--model", "gpt-5.6-luna", "--effort", "low",
         "--capabilities-file", str(snapshot),
     )
@@ -3742,7 +3702,7 @@ def test_caller_efforts_do_not_replace_openai_capability_snapshot():
         "--adapter",
         "codex",
         "--alias",
-        "flagship",
+        "principal",
         "--role",
         "lead",
         "--available-effort",
@@ -3766,18 +3726,18 @@ def test_capability_snapshot_controls_default_fallback(
     snapshot.write_text(json.dumps(capability_snapshot({
             "gpt-6-astra": {
                 "resolved_model": "gpt-6-astra",
-                # max is retired and maps to xhigh, so the default is met.
+                # max is not routable, so xhigh is unmet and the default steps down to high.
                 "supported_efforts": ["medium", "high", "max"],
             }
         })))
     result = router.main([
-        "resolve", "--adapter", "codex", "--alias", "flagship", "--role", "lead",
+        "resolve", "--adapter", "codex", "--alias", "principal", "--role", "lead",
         "--capabilities-file", str(snapshot),
     ])
     route = json.loads(capsys.readouterr().out)
     assert result == 0
     assert route["requested_effort"] == "xhigh"
-    assert route["effort"] == "xhigh"
+    assert route["effort"] == "high"
     assert route["effort_capability_source"] == "runtime-model-catalog"
 
 
@@ -3795,7 +3755,7 @@ def test_default_effort_fallback_chooses_highest_supported_effort_at_or_below_re
     )
 
     result, route = resolve(
-        "--adapter", "codex", "--alias", "flagship", "--role", "worker",
+        "--adapter", "codex", "--alias", "principal", "--role", "worker",
         "--capabilities-file", str(snapshot),
     )
 
@@ -3846,7 +3806,7 @@ def test_fresh_openai_snapshot_without_alias_candidate_fails_closed(
             }
         })))
     result = router.main([
-        "resolve", "--adapter", "codex", "--alias", "flagship", "--role", "lead",
+        "resolve", "--adapter", "codex", "--alias", "principal", "--role", "lead",
         "--capabilities-file", str(snapshot),
     ])
     route = json.loads(capsys.readouterr().out)
@@ -3866,7 +3826,7 @@ def test_explicit_unsupported_effort_maps_against_runtime_snapshot(tmp_path):
             }
         })))
     result, route = resolve(
-        "--adapter", "codex", "--alias", "flagship", "--role", "lead",
+        "--adapter", "codex", "--alias", "principal", "--role", "lead",
         "--effort", "ultra", "--capabilities-file", str(snapshot),
     )
     assert result.returncode == 0
@@ -3878,7 +3838,7 @@ def test_malformed_capability_snapshot_fails_closed(tmp_path):
     snapshot = tmp_path / "caps.json"
     snapshot.write_text("{}")
     result, route = resolve(
-        "--adapter", "codex", "--alias", "flagship", "--role", "lead",
+        "--adapter", "codex", "--alias", "principal", "--role", "lead",
         "--capabilities-file", str(snapshot),
     )
     assert result.returncode == 1
@@ -3908,7 +3868,7 @@ def test_capability_snapshot_rejects_incomplete_or_inconsistent_models(tmp_path,
     snapshot = tmp_path / "caps.json"
     snapshot.write_text(json.dumps(capability_snapshot(models)))
     result, route = resolve(
-        "--adapter", "codex", "--alias", "flagship", "--role", "lead",
+        "--adapter", "codex", "--alias", "principal", "--role", "lead",
         "--capabilities-file", str(snapshot),
     )
     assert result.returncode == 1
@@ -3948,7 +3908,7 @@ def test_persisted_capability_snapshot_rejects_duplicate_json_members(
     snapshot = tmp_path / "caps.json"
     snapshot.write_text("{" + ",".join(fields) + "}")
     result, route = resolve(
-        "--adapter", "codex", "--alias", "flagship", "--role", "lead",
+        "--adapter", "codex", "--alias", "principal", "--role", "lead",
         "--capabilities-file", str(snapshot),
     )
     assert result.returncode == 1
@@ -3964,7 +3924,7 @@ def test_untrusted_capability_snapshot_fails_closed(tmp_path):
         "models": {"gpt-5.6-sol": {"resolved_model": "gpt-5.6-sol", "supported_efforts": ["ultra"]}},
     }))
     result, route = resolve(
-        "--adapter", "codex", "--alias", "flagship", "--role", "lead",
+        "--adapter", "codex", "--alias", "principal", "--role", "lead",
         "--capabilities-file", str(snapshot),
     )
     assert result.returncode == 1
@@ -3975,7 +3935,7 @@ def test_empty_runtime_capability_snapshot_fails_closed(tmp_path):
     snapshot = tmp_path / "caps.json"
     snapshot.write_text(json.dumps(capability_snapshot({})))
     result, route = resolve(
-        "--adapter", "codex", "--alias", "flagship", "--role", "lead",
+        "--adapter", "codex", "--alias", "principal", "--role", "lead",
         "--capabilities-file", str(snapshot),
     )
     assert result.returncode == 1
@@ -3984,18 +3944,18 @@ def test_empty_runtime_capability_snapshot_fails_closed(tmp_path):
 
 def test_model_id_effort_uses_last_token_and_explicit_unresolved_fails():
     result, route = resolve(
-        "--adapter", "cursor", "--model", "cursor-grok-4.5-low", "--alias", "flagship",
+        "--adapter", "cursor", "--model", "cursor-grok-4.5-low", "--alias", "principal",
         "--role", "reviewer", "--lead-family", "anthropic", "--require-distinct",
     )
     assert result.returncode == 0
     assert route["status"] == "ok"
     assert route["effort"] == "low"
     # Agy used to be a model-id adapter, which made every bare google alias
-    # undispatchable: `agy --model gemini-3.1-pro` exits 1 asking for --effort.
+    # undispatchable: `agy --model gemini-3.8-flash` exits 1 asking for --effort.
     # It now carries effort in its own flag, so without a runtime snapshot the
     # effort resolves but is not capability-evidenced.
     result, route = resolve(
-        "--adapter", "agy", "--model", "gemini-3.1-pro", "--alias", "flagship",
+        "--adapter", "agy", "--model", "gemini-3.8-flash", "--alias", "principal",
         "--role", "reviewer", "--effort", "high", "--lead-family", "openai", "--require-distinct",
     )
     assert result.returncode == 0
@@ -4003,7 +3963,7 @@ def test_model_id_effort_uses_last_token_and_explicit_unresolved_fails():
     assert route["effort"] == "high"
     assert route["effort_capability_source"] == "provider-unverified"
     result, route = resolve(
-        "--adapter", "cursor", "--model", "composer-2-extra-high", "--alias", "flagship",
+        "--adapter", "cursor", "--model", "composer-2-extra-high", "--alias", "principal",
         "--role", "reviewer", "--lead-family", "anthropic", "--require-distinct",
     )
     assert result.returncode == 0
@@ -4016,7 +3976,7 @@ def test_distinct_requirement_fails_closed_for_same_family():
         "--adapter",
         "codex",
         "--alias",
-        "flagship",
+        "principal",
         "--role",
         "reviewer",
         "--lead-family",
@@ -4034,7 +3994,7 @@ def test_broker_route_records_endpoint_separately_from_model_family():
         "--model",
         "cursor-grok-4.5-high",
         "--alias",
-        "flagship",
+        "principal",
         "--role",
         "reviewer",
         "--lead-family",
@@ -4056,7 +4016,7 @@ def test_cursor_composer_route_uses_cursor_model_family():
         "--model",
         "composer-2-high",
         "--alias",
-        "flagship",
+        "principal",
         "--role",
         "worker",
         "--lead-family",
@@ -4073,10 +4033,10 @@ def test_cursor_composer_route_uses_cursor_model_family():
 
 def test_agy_passes_unregistered_models_to_the_broker():
     allowed, allowed_route = resolve(
-        "--adapter", "agy", "--model", "gemini-3.1-pro", "--alias", "flagship", "--role", "worker",
+        "--adapter", "agy", "--model", "gemini-3.8-flash", "--alias", "principal", "--role", "worker",
     )
     forbidden, forbidden_route = resolve(
-        "--adapter", "agy", "--model", "grok-4", "--alias", "flagship", "--role", "worker"
+        "--adapter", "agy", "--model", "grok-4", "--alias", "principal", "--role", "worker"
     )
 
     assert allowed.returncode == 0
@@ -4091,9 +4051,9 @@ def test_agy_passes_unregistered_models_to_the_broker():
 
 @pytest.mark.parametrize("selector,alias,effort", [
     ("--task-class", "mechanical", "low"),
-    ("--alias", "scout", "low"),
-    ("--alias", "workhorse", "medium"),
-    ("--alias", "flagship", "high"),
+    ("--alias", "junior", "low"),
+    ("--alias", "senior", "medium"),
+    ("--alias", "principal", "high"),
 ])
 def test_agy_routes_use_fresh_preferred_family_capabilities(tmp_path, selector, alias, effort):
     snapshot = write_agy_capability_snapshot(tmp_path)
@@ -4106,7 +4066,7 @@ def test_agy_routes_use_fresh_preferred_family_capabilities(tmp_path, selector, 
 
     assert result.returncode == 0
     assert route["status"] == "ok"
-    assert route["alias"] == ("scout" if selector == "--task-class" else alias)
+    assert route["alias"] == ("junior" if selector == "--task-class" else alias)
     assert route["resolved_model"] == "gemini-3.8-flash"
     assert route["model_family"] == "google"
     assert route["identity_source"] == "runtime-capability+catalog"
@@ -4141,7 +4101,7 @@ def test_agy_task_class_does_not_substitute_outside_exact_model_roster(tmp_path)
 def test_opencode_route_resolves_explicit_free_model():
     result, route = resolve(
         "--adapter", "opencode", "--model", "opencode/union-alpha",
-        "--alias", "scout", "--role", "worker",
+        "--alias", "junior", "--role", "worker",
     )
 
     assert result.returncode == 0, result.stdout
@@ -4160,7 +4120,7 @@ def test_opencode_route_resolves_explicit_free_model():
 ])
 def test_ordinary_route_drops_only_an_implied_alias_for_explicit_model(adapter, model):
     command = [sys.executable, str(ROOT / "scripts" / "model_route.py"), "resolve",
-               "--adapter", adapter, "--alias", "flagship", "--model", model,
+               "--adapter", adapter, "--alias", "principal", "--model", model,
                "--role", "worker"]
     env = {**os.environ, "AGENT_FABRIC_INSTANCE_ROOT": str(ROOT),
            "AGENT_FABRIC_PRODUCT_ROOT": str(ROOT), "FABRIC_ALIAS_IMPLIED": "1"}
@@ -4171,7 +4131,7 @@ def test_ordinary_route_drops_only_an_implied_alias_for_explicit_model(adapter, 
     env["FABRIC_ALIAS_IMPLIED"] = "0"
     explicit = subprocess.run(command, capture_output=True, text=True, env=env)
     assert explicit.returncode == 0, explicit.stderr
-    assert json.loads(explicit.stdout)["alias"] == "flagship"
+    assert json.loads(explicit.stdout)["alias"] == "principal"
 
 
 def test_model_route_namespace_without_alias_supplied_keeps_explicit_alias(monkeypatch, capsys):
@@ -4179,13 +4139,13 @@ def test_model_route_namespace_without_alias_supplied_keeps_explicit_alias(monke
     monkeypatch.setenv("AGENT_FABRIC_INSTANCE_ROOT", str(ROOT))
     monkeypatch.setenv("AGENT_FABRIC_PRODUCT_ROOT", str(ROOT))
     args = router.parser().parse_args([
-        "resolve", "--adapter", "codex", "--alias", "workhorse",
+        "resolve", "--adapter", "codex", "--alias", "senior",
         "--model", "gpt-6-luna", "--role", "worker",
     ])
     args.task_class_effort = None
     args.model_override = {}
     assert router.resolve(args, router.load_catalog(None)) == 0
-    assert json.loads(capsys.readouterr().out)["alias"] == "workhorse"
+    assert json.loads(capsys.readouterr().out)["alias"] == "senior"
 
 
 @pytest.mark.parametrize("model", [
@@ -4196,7 +4156,7 @@ def test_model_route_namespace_without_alias_supplied_keeps_explicit_alias(monke
 def test_opencode_nested_deepseek_attributes_upstream_family(model):
     result, route = resolve(
         "--adapter", "opencode", "--model", model,
-        "--alias", "scout", "--role", "worker",
+        "--alias", "junior", "--role", "worker",
     )
 
     assert result.returncode == 0, result.stdout
@@ -4208,7 +4168,7 @@ def test_openrouter_anthropic_endpoint_infers_vendor_from_slug(monkeypatch):
     monkeypatch.setenv("OPENROUTER_API_KEY", "endpoint-token-fixture")
     result, route = resolve(
         "--adapter", "claude", "--endpoint", "openrouter-anthropic",
-        "--model", "moonshotai/kimi-k3", "--alias", "scout", "--role", "worker",
+        "--model", "moonshotai/kimi-k3", "--alias", "junior", "--role", "worker",
         "--catalog", PRODUCT_CATALOG,
     )
 
@@ -4225,7 +4185,7 @@ def test_openrouter_stealth_slug_stays_non_assurance(monkeypatch):
     monkeypatch.setenv("OPENROUTER_API_KEY", "endpoint-token-fixture")
     result, route = resolve(
         "--adapter", "claude", "--endpoint", "openrouter-anthropic",
-        "--model", "stealth/union-alpha", "--alias", "scout", "--role", "worker",
+        "--model", "stealth/union-alpha", "--alias", "junior", "--role", "worker",
         "--catalog", PRODUCT_CATALOG,
     )
 
@@ -4234,7 +4194,7 @@ def test_openrouter_stealth_slug_stays_non_assurance(monkeypatch):
     assert route["family_source"] == "slug-inferred"
     blocked, blocked_route = resolve(
         "--adapter", "claude", "--endpoint", "openrouter-anthropic",
-        "--model", "stealth/union-alpha", "--alias", "scout", "--role", "worker",
+        "--model", "stealth/union-alpha", "--alias", "junior", "--role", "worker",
         "--catalog", PRODUCT_CATALOG,
         "--require-distinct", "--lead-family", "anthropic",
     )
@@ -4246,7 +4206,7 @@ def test_openrouter_openai_endpoint_infers_deepseek(monkeypatch):
     monkeypatch.setenv("OPENROUTER_API_KEY", "endpoint-token-fixture")
     result, route = resolve(
         "--adapter", "codex", "--endpoint", "openrouter-openai",
-        "--model", "deepseek/deepseek-v4.1-flash", "--alias", "scout", "--role", "worker",
+        "--model", "deepseek/deepseek-v4.1-flash", "--alias", "junior", "--role", "worker",
         "--catalog", PRODUCT_CATALOG,
     )
 
@@ -4289,7 +4249,7 @@ def test_kiro_model_slugs_attribute_upstream_families():
 def test_agy_claude_is_same_family_as_anthropic_lead():
     result, route = resolve(
         "--adapter", "agy", "--model", "claude-opus-4-6-thinking",
-        "--alias", "scout", "--role", "worker",
+        "--alias", "junior", "--role", "worker",
         "--require-distinct", "--lead-family", "anthropic",
     )
     assert result.returncode != 0
@@ -4300,7 +4260,7 @@ def test_agy_claude_is_same_family_as_anthropic_lead():
 def test_agy_claude_is_distinct_from_google_lead():
     result, route = resolve(
         "--adapter", "agy", "--model", "claude-opus-4-6-thinking",
-        "--alias", "scout", "--role", "worker",
+        "--alias", "junior", "--role", "worker",
         "--require-distinct", "--lead-family", "google",
     )
     assert result.returncode == 0, result.stdout
@@ -4312,7 +4272,7 @@ def test_require_distinct_rejects_ineligible_lead_family(monkeypatch):
     monkeypatch.setenv("OPENROUTER_API_KEY", "endpoint-token-fixture")
     result, route = resolve(
         "--adapter", "claude", "--endpoint", "openrouter-anthropic",
-        "--model", "deepseek/deepseek-v4.1-flash", "--alias", "scout", "--role", "worker",
+        "--model", "deepseek/deepseek-v4.1-flash", "--alias", "junior", "--role", "worker",
         "--catalog", PRODUCT_CATALOG,
         "--require-distinct", "--lead-family", "generic-open",
     )
@@ -4338,9 +4298,9 @@ def test_google_flash_defaults_track_the_current_agy_catalogue():
     catalog = json.loads((ROOT / "config" / "model-routing.json").read_text())
     google = catalog["families"]["google"]
 
-    assert google["aliases"]["flagship"] == ["gemini-3.8-flash"]
-    assert google["aliases"]["workhorse"] == ["gemini-3.8-flash"]
-    assert google["aliases"]["scout"] == ["gemini-3.8-flash"]
+    assert google["aliases"]["principal"] == ["gemini-3.8-flash"]
+    assert google["aliases"]["senior"] == ["gemini-3.8-flash"]
+    assert google["aliases"]["junior"] == ["gemini-3.8-flash"]
     assert google["per_model_efforts"]["gemini-3.8-flash"] == [
         "low",
         "medium",
@@ -4385,7 +4345,7 @@ def test_split_root_defaults_use_instance_routing_and_product_compatibility(tmp_
             "--adapter",
             "claude",
             "--alias",
-            "scout",
+            "junior",
             "--role",
             "worker",
         ],
@@ -4404,20 +4364,20 @@ def test_cursor_accepts_preferred_and_supported_fallback_families_without_model_
     for model, family in (
         ("composer-2-high", "cursor-composer"),
         ("cursor-grok-4.5-high", "xai"),
-        ("gemini-3.1-pro", "google"),
+        ("gemini-3.8-flash", "google"),
         ("claude-opus", "anthropic"),
         ("gpt-5.6-sol", "openai"),
         ("grokish-high", "xai"),
     ):
         allowed, allowed_route = resolve(
-            "--adapter", "cursor", "--model", model, "--alias", "flagship", "--role", "worker",
+            "--adapter", "cursor", "--model", model, "--alias", "principal", "--role", "worker",
         )
         assert allowed.returncode == 0
         assert allowed_route["status"] == "ok"
         assert allowed_route["model_family"] == family
 
     wrong_family, wrong_family_route = resolve(
-        "--adapter", "cursor", "--model", "qwen3-coder", "--alias", "flagship", "--role", "worker"
+        "--adapter", "cursor", "--model", "qwen3-coder", "--alias", "principal", "--role", "worker"
     )
     assert wrong_family.returncode == 1
     assert wrong_family_route["status"] == "adapter_family_forbidden"
@@ -4426,7 +4386,7 @@ def test_cursor_accepts_preferred_and_supported_fallback_families_without_model_
 def test_enabled_kiro_route_passes_model_compatibility_checks():
     result, route = resolve(
         "--adapter", "kiro", "--model", "deepseek-3.2",
-        "--alias", "scout", "--role", "worker",
+        "--alias", "junior", "--role", "worker",
     )
 
     assert result.returncode == 0
@@ -4438,7 +4398,7 @@ def test_enabled_kiro_route_passes_model_compatibility_checks():
     ("selector_args", "status"),
     (
         (("--alias", "not-a-route"), "ok"),
-        (("--alias", "scout", "--task-class", "mechanical"), "route_input_conflict"),
+        (("--alias", "junior", "--task-class", "mechanical"), "route_input_conflict"),
         (("--task-class", "not-a-task"), "unknown_task_class"),
     ),
 )
@@ -4452,9 +4412,9 @@ def test_enabled_kiro_handles_route_selectors(selector_args, status):
 
 
 def test_disabled_pi_precedes_provider_family_checks():
-    for model in ("gpt-5.6-sol", "claude-opus-4.5", "gemini-3.1-pro"):
+    for model in ("gpt-5.6-sol", "claude-opus-4.5", "gemini-3.8-flash"):
         result, route = resolve(
-            "--adapter", "pi", "--model", model, "--alias", "scout", "--role", "worker"
+            "--adapter", "pi", "--model", model, "--alias", "junior", "--role", "worker"
         )
         assert result.returncode == 1
         assert route["status"] == "adapter_disabled"
@@ -4474,7 +4434,7 @@ def test_disabled_adapter_requires_a_nonempty_typed_reason(tmp_path, disabled_re
     compatibility_path.write_text(yaml.safe_dump(compatibility), encoding="utf-8")
 
     result, route = resolve(
-        "--adapter", "pi", "--model", "deepseek-v3", "--alias", "scout",
+        "--adapter", "pi", "--model", "deepseek-v3", "--alias", "junior",
         "--role", "worker", "--adapter-compatibility", str(compatibility_path),
     )
 
@@ -4487,7 +4447,7 @@ def test_disabled_adapter_precedes_malformed_runtime_capability_snapshot(tmp_pat
     snapshot.write_text("not-json", encoding="utf-8")
 
     result, route = resolve(
-        "--adapter", "pi", "--model", "deepseek-v3", "--alias", "scout",
+        "--adapter", "pi", "--model", "deepseek-v3", "--alias", "junior",
         "--role", "worker", "--capabilities-file", str(snapshot),
     )
 
@@ -4498,7 +4458,7 @@ def test_disabled_adapter_precedes_malformed_runtime_capability_snapshot(tmp_pat
 
 def test_same_family_rejection_precedes_adapter_family_rejection():
     result, route = resolve(
-        "--adapter", "cursor", "--model", "gpt-5.6-sol", "--alias", "flagship",
+        "--adapter", "cursor", "--model", "gpt-5.6-sol", "--alias", "principal",
         "--role", "reviewer", "--lead-family", "openai", "--require-distinct",
     )
 
@@ -4509,7 +4469,7 @@ def test_same_family_rejection_precedes_adapter_family_rejection():
 @pytest.mark.parametrize(
     ("adapter", "model", "family", "effort"),
     [
-        ("agy", "Gemini 3.1 Pro (High)", "google", "high"),
+        ("agy", "Gemini 3.8 Flash (High)", "google", "high"),
         ("cursor", "cursor-grok-4.5-high", "xai", "high"),
     ],
 )
@@ -4517,7 +4477,7 @@ def test_optional_reviewers_route_directly_with_exact_identity(
     adapter, model, family, effort
 ):
     result, route = resolve(
-        "--adapter", adapter, "--model", model, "--alias", "flagship",
+        "--adapter", adapter, "--model", model, "--alias", "principal",
         "--role", "reviewer", "--effort", effort,
         "--lead-family", "openai", "--require-distinct",
     )
@@ -4537,7 +4497,7 @@ def test_primary_adapters_route_directly_with_compatibility_metadata(tmp_path):
             ("--capabilities-file", str(snapshot)) if adapter == "codex" else ()
         )
         result, route = resolve(
-            "--adapter", adapter, "--alias", "flagship", "--role", "lead",
+            "--adapter", adapter, "--alias", "principal", "--role", "lead",
             *capability_args,
         )
 
@@ -4551,8 +4511,8 @@ def test_dormant_compatibility_adapter_fails_closed():
     # registered in the compatibility contract with enabled: false. The route
     # must refuse it rather than pass it through as an unknown adapter.
     arguments = (
-        "--adapter", "copilot", "--model", "gemini-3.1-pro",
-        "--alias", "flagship", "--role", "worker",
+        "--adapter", "copilot", "--model", "gemini-3.8-flash",
+        "--alias", "principal", "--role", "worker",
     )
 
     result, route = resolve(*arguments)
@@ -4567,12 +4527,8 @@ def test_dormant_compatibility_adapter_fails_closed():
 def write_agy_capability_snapshot(tmp_path, models=None):
     if models is None:
         # Measured against agy 1.1.10 and re-verified on 1.1.11: efforts are
-        # per model, and gemini-3.1-pro genuinely has no medium.
+        # per model.
         models = {
-            "gemini-3.1-pro": {
-                "resolved_model": "gemini-3.1-pro",
-                "supported_efforts": ["low", "high"],
-            },
             "gemini-3.7-flash": {
                 "resolved_model": "gemini-3.7-flash",
                 "supported_efforts": ["low", "medium", "high"],
@@ -4588,25 +4544,28 @@ def write_agy_capability_snapshot(tmp_path, models=None):
 
 
 def test_agy_effort_is_validated_against_the_runtime_model_catalogue(tmp_path):
-    snapshot = write_agy_capability_snapshot(tmp_path)
+    snapshot = write_agy_capability_snapshot(tmp_path, {
+        "gemini-3.8-flash": {"resolved_model": "gemini-3.8-flash", "supported_efforts": ["low", "high"]},
+        "gemini-3.7-flash": {"resolved_model": "gemini-3.7-flash", "supported_efforts": ["low", "medium", "high"]},
+    })
 
     def route_for(model, effort):
         return resolve(
-            "--adapter", "agy", "--model", model, "--alias", "flagship",
+            "--adapter", "agy", "--model", model, "--alias", "principal",
             "--role", "reviewer", "--effort", effort, "--lead-family", "openai",
             "--require-distinct", "--capabilities-file", str(snapshot),
         )
 
-    result, route = route_for("gemini-3.1-pro", "high")
+    result, route = route_for("gemini-3.8-flash", "high")
     assert result.returncode == 0
     assert route["status"] == "ok"
     assert route["effort"] == "high"
     assert route["effort_capability_source"] == "runtime-model-catalog"
 
-    # The catalogue used to offer flagship at medium, which agy cannot serve:
-    # gemini-3.1-pro exposes only low and high. It must fail closed rather than
+    # A model whose listing omits medium must reject it:
+    # the snapshot above gives gemini-3.8-flash only low and high. It must fail closed rather than
     # silently dispatching at some other effort.
-    result, route = route_for("gemini-3.1-pro", "medium")
+    result, route = route_for("gemini-3.8-flash", "medium")
     assert result.returncode != 0
     assert route["status"] == "effort_unsupported"
 
@@ -4636,7 +4595,7 @@ def endpoint_route(monkeypatch, name, *args, token="endpoint-token-fixture"):
         monkeypatch.setenv(profile["token_env"], token)
     return resolve(
         "--adapter", "claude", "--endpoint", name,
-        "--model", ENDPOINT_MODELS[name], "--alias", "flagship", "--role", "worker",
+        "--model", ENDPOINT_MODELS[name], "--alias", "principal", "--role", "worker",
         "--catalog", PRODUCT_CATALOG, *args,
     )
 
@@ -4695,7 +4654,7 @@ def test_unusable_endpoint_names_fail_closed(monkeypatch, name, adapter, status)
     monkeypatch.setenv(CATALOG["endpoints"]["zai-glm"]["token_env"], "endpoint-token-fixture")
     result, route = resolve(
         "--adapter", adapter, "--endpoint", name, "--model", "glm-4.7",
-        "--alias", "flagship", "--role", "worker", "--catalog", PRODUCT_CATALOG,
+        "--alias", "principal", "--role", "worker", "--catalog", PRODUCT_CATALOG,
     )
 
     assert result.returncode == 2
@@ -4707,7 +4666,7 @@ def test_claude_without_an_endpoint_stays_pinned_to_anthropic(monkeypatch):
     """The compatibility allowlist admits endpoint families; the catalogue still pins."""
     monkeypatch.setenv(CATALOG["endpoints"]["zai-glm"]["token_env"], "endpoint-token-fixture")
     result, route = resolve(
-        "--adapter", "claude", "--model", "glm-4.7", "--alias", "flagship",
+        "--adapter", "claude", "--model", "glm-4.7", "--alias", "principal",
         "--role", "worker", "--catalog", PRODUCT_CATALOG,
     )
 
@@ -4729,7 +4688,7 @@ def test_malformed_endpoint_profile_is_never_routed_against(monkeypatch, tmp_pat
 
     result, route = resolve(
         "--adapter", "claude", "--endpoint", "zai-glm", "--model", "glm-4.7",
-        "--alias", "flagship", "--role", "worker", "--catalog", str(catalog_path),
+        "--alias", "principal", "--role", "worker", "--catalog", str(catalog_path),
     )
 
     assert result.returncode == 2
@@ -4741,7 +4700,7 @@ def test_implied_alias_beside_a_named_model_adds_no_note(tmp_path):
     env = {**os.environ, "FABRIC_ALIAS_IMPLIED": "1", "AGENT_FABRIC_STATE_ROOT": str(tmp_path)}
     implied = subprocess.run(
         [sys.executable, str(ROOT / "scripts/model_route.py"), "resolve", "--adapter", "codex",
-         "--role", "worker", "--alias", "flagship", "--model", "gpt-6-luna"],
+         "--role", "worker", "--alias", "principal", "--model", "gpt-6-luna"],
         capture_output=True, text=True, env=env, check=False,
     )
     assert implied.returncode == 0 and json.loads(implied.stdout)["status"] == "ok"
@@ -4749,7 +4708,7 @@ def test_implied_alias_beside_a_named_model_adds_no_note(tmp_path):
     env.pop("FABRIC_ALIAS_IMPLIED")
     explicit = subprocess.run(
         [sys.executable, str(ROOT / "scripts/model_route.py"), "resolve", "--adapter", "codex",
-         "--role", "worker", "--alias", "flagship", "--model", "gpt-6-luna"],
+         "--role", "worker", "--alias", "principal", "--model", "gpt-6-luna"],
         capture_output=True, text=True, env=env, check=False,
     )
     assert "alias and model both supplied" in explicit.stdout
@@ -4767,7 +4726,7 @@ def test_informational_routes_add_no_warning_notes(tmp_path, adapter, model, abs
     env = {**os.environ, "AGENT_FABRIC_STATE_ROOT": str(tmp_path), "FABRIC_ALIAS_IMPLIED": "1"}
     result = subprocess.run(
         [sys.executable, str(ROOT / "scripts/model_route.py"), "resolve", "--adapter", adapter,
-         "--role", "worker", "--alias", "flagship", "--model", model],
+         "--role", "worker", "--alias", "principal", "--model", model],
         capture_output=True, text=True, env=env, check=False,
     )
     route = json.loads(result.stdout)
@@ -4864,7 +4823,7 @@ def test_newer_catalogue_warning_is_daily_and_always_kept_in_notes(tmp_path, mon
 def test_a_registered_id_in_the_live_listing_is_not_newer_than_the_catalogue(tmp_path):
     _live_cache(tmp_path, "codex", ["gpt-6.1-sol"])
     run = subprocess.run([str(SCRIPT), "resolve", "--adapter", "codex", "--model", "gpt-6.1-sol",
-                          "--alias", "workhorse", "--role", "worker"], capture_output=True, text=True,
+                          "--alias", "senior", "--role", "worker"], capture_output=True, text=True,
                          env={**_resolve_env(tmp_path), "FABRIC_ALIAS_IMPLIED": "1"})
     route = json.loads(run.stdout)
     assert run.returncode == 0 and route["resolved_model"] == "gpt-6.1-sol", run.stdout
@@ -4879,7 +4838,7 @@ def test_implied_alias_beside_a_family_model_still_resolves_to_a_concrete_id(tmp
     (tmp_path / "capabilities.json").write_text(json.dumps({
         "codex": {"observed_at": datetime.now(timezone.utc).isoformat(), "models": ["gpt-6.2-sol"]},
         "claude": {"observed_at": datetime.now(timezone.utc).isoformat(), "models": ["claude-sonnet-5-6"]}}))
-    run = subprocess.run([str(SCRIPT), "resolve", "--adapter", adapter, "--model", model, "--alias", "flagship",
+    run = subprocess.run([str(SCRIPT), "resolve", "--adapter", adapter, "--model", model, "--alias", "principal",
                           "--role", "worker"], capture_output=True, text=True,
                          env={**_resolve_env(tmp_path), "FABRIC_ALIAS_IMPLIED": "1"})
     route = json.loads(run.stdout)
@@ -4908,7 +4867,7 @@ def test_agy_effort_suffixed_live_ids_match_their_family_and_keep_the_dispatch_i
     assert run.returncode == 0 and route["resolved_model"] == "gemini-3.9-flash-high", route
 
 
-@pytest.mark.parametrize(("tier", "alias"), [("junior", "scout"), ("Senior", "workhorse"), ("principal", "flagship")])
+@pytest.mark.parametrize(("tier", "alias"), [("junior", "junior"), ("Senior", "senior"), ("principal", "principal")])
 def test_route_tier_names_work_as_adapter_aliases(tmp_path, tier, alias):
     capability = write_codex_capability_snapshot(tmp_path)
     common = ("--adapter", "codex", "--role", "worker", "--capabilities-file", str(capability))
@@ -5040,3 +4999,53 @@ def test_effort_shift_never_climbs_to_retired_max_or_ultra():
     router._harness_profile = lambda: profile
     assert router.shifted_task_class_effort("review", "high", "low", every) == ("xhigh", 1)
     assert router.shifted_task_class_effort("review", "xhigh", "low", every) == ("xhigh", 0)
+
+
+def _write_catalog(tmp_path, mutate):
+    catalog = json.loads((ROOT / "config" / "model-routing.json").read_text())
+    mutate(catalog)
+    path = tmp_path / "custom-catalog.json"
+    path.write_text(json.dumps(catalog))
+    return path
+
+
+@pytest.mark.parametrize("mutate", [
+    lambda c: c["adapters"]["claude"]["models"][0].update(default_effort="max"),
+    lambda c: c["adapters"]["claude"]["models"][0].update(efforts=["max"]),
+    lambda c: c["families"]["anthropic"].update(default_effort="max"),
+    lambda c: c["routes"]["senior"][0].update(effort=["high", "max"]),
+    lambda c: c["task_class_routes"]["legwork"].update(effort="max"),
+])
+def test_every_effort_field_that_names_max_fails_with_the_xhigh_fix(tmp_path, mutate):
+    catalog = _write_catalog(tmp_path, mutate)
+    result, route = resolve("--catalog", str(catalog), "--adapter", "claude", "--alias", "senior",
+                            "--role", "worker")
+    assert result.returncode == 2
+    assert "effort 'max' was retired" in result.stderr and "xhigh" in result.stderr
+
+
+@pytest.mark.parametrize("mutate,message", [
+    (lambda c: c["families"]["openai"]["aliases"].update(flagship=c["families"]["openai"]["aliases"]["principal"]),
+     "alias 'flagship' was renamed to 'principal'"),
+    (lambda c: c["task_class_routes"]["legwork"].update(alias="workhorse"),
+     "alias 'workhorse' was renamed to 'senior'"),
+    (lambda c: c["routes"].update(strong=c["routes"]["senior"]), "route 'strong' was renamed to 'senior'"),
+])
+def test_a_custom_catalogue_cannot_use_retired_tier_names(tmp_path, mutate, message):
+    catalog = _write_catalog(tmp_path, mutate)
+    result = subprocess.run([str(SCRIPT), "resolve", "--catalog", str(catalog), "--adapter", "codex",
+                             "--alias", "senior", "--role", "worker"], text=True, capture_output=True, check=False)
+    assert result.returncode == 2
+    assert message in result.stderr
+
+
+def test_provider_quota_cooldown_skips_models_outside_the_plan_it_covers():
+    router = load_router()
+    catalog = router.catalogue_snapshot()
+    until = (datetime.now(timezone.utc) + timedelta(days=3)).isoformat()
+    cooldowns = {"opencode/*": {"status": "quota_exhausted", "cooling_until": until, "source": "provider quota",
+                                "covers": ["opencode-go/"]}}
+    assert router._cooling("opencode", "opencode-go/glm-5.3-flash", cooldowns, catalog) == until
+    assert not router._cooling("opencode", "opencode/glm-5.3-flash-free", cooldowns, catalog)
+    own = {**cooldowns, "opencode/opencode/glm-5.3-flash-free": {"cooling_until": until}}
+    assert router._cooling("opencode", "opencode/glm-5.3-flash-free", own, catalog) == until

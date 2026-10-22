@@ -139,11 +139,13 @@ export async function readRuns(
   limit: number | null = 20,
   state?: string,
   includeHistory = false,
+  /** Skip the peer hosts: a caller that polls refreshes them on its own, slower, schedule. */
+  localOnly = false,
 ): Promise<RunReadResponse> {
   const deadline = Date.now() + waitSeconds * 1000;
   const request = { ids, wait_seconds: 0, limit, state };
   for (;;) {
-    const remote = await federatedLane("lanes", workspace, request, signal);
+    const remote = localOnly ? undefined : await federatedLane("lanes", workspace, request, signal);
     if (!remote) { ids = request.ids; break; }
     const rows = remote.runs ?? [];
     if (!waitSeconds || remote.status !== "ok" || Date.now() >= deadline || !rows.length ||

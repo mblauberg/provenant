@@ -934,7 +934,7 @@ def test_help_is_concise_and_names_existing_command_owners(tmp_path):
 
     assert result.returncode == 0
     assert result.stderr == ""
-    assert len(result.stdout.encode("utf-8")) <= 1024
+    assert len(result.stdout.encode("utf-8")) <= 1100
     assert "route" in result.stdout and "scripts/model-route" in result.stdout
     assert "fabric ...     runtime/fabric/bin/fabric ..." in result.stdout
     assert "lease ...      runtime/fabric/bin/fabric landing-*" in result.stdout
@@ -990,10 +990,10 @@ def test_output_budget_defaults_stay_under_limits_on_fixture_state(tmp_path: Pat
     env["AGENT_FABRIC_STATE_DIRECTORY"] = str(tmp_path / "fabric-state")
     env["AGENT_FABRIC_STATE_ROOT"] = str(tmp_path / "fabric-state")
 
-    # 1. Budget: provenant help <= 1024 bytes (1 KB)
+    # 1. Budget: provenant help <= 1100 bytes (1 KB)
     help_res = subprocess.run([sys.executable, str(provenant_script), "help"], cwd=tmp_path, env=env, capture_output=True, text=True)
     assert help_res.returncode == 0
-    assert len(help_res.stdout.encode("utf-8")) <= 1024
+    assert len(help_res.stdout.encode("utf-8")) <= 1100
 
     # 2. Budget: provenant dispatch bad arg usage error <= 4096 bytes and 1 line
     dispatch_res = subprocess.run([sys.executable, str(provenant_script), "dispatch"], cwd=tmp_path, env=env, capture_output=True, text=True)

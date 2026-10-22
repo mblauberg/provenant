@@ -17,8 +17,8 @@ codex
 agy
     `agy models` prints one dispatchable model id per line, optionally followed
     by a tab-separated display name, with reasoning effort baked into the id
-    suffix, for example `gemini-3.1-pro-high`. The bare family id is not
-    dispatchable on its own: `agy --model gemini-3.1-pro` exits 1 with
+    suffix, for example `gemini-3.8-flash-high`. The bare family id is not
+    dispatchable on its own: `agy --model gemini-3.8-flash` exits 1 with
     "requires --effort (available: low, high)". Efforts are per model rather
     than global, and the CLI's static help can describe a broader effort set
     than an individual model exposes, so the runtime list is authoritative. The

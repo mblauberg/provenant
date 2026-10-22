@@ -54,7 +54,7 @@ def write_valid_attempt(run: Path, task_id: str = "valid", *, observed_exit: boo
         "schema_version": 1, "record_type": "dispatch-attempt", "run_id": run.name,
         "task_id": task_id, "attempt_id": "attempt-001", "attempt_path": rel(root / "attempt.json"),
         "status": "succeeded", "outcome": "ok", "requested_route": {
-            "intent": "ordinary", "adapter": "codex", "alias": "scout", "task_class": "",
+            "intent": "ordinary", "adapter": "codex", "alias": "junior", "task_class": "",
             "model": "", "role": "worker", "effort": "", "orchestrator_family": "",
         },
         "route": {"adapter": "codex", "execution_intent": "ordinary", "resolved_model": "fixture",
@@ -111,7 +111,7 @@ def test_dispatch_custody_rejects_manifest_redirects(tmp_path: Path, kind: str) 
     prompt.write_text("prompt\n")
     result = subprocess.run(
         [str(DISPATCH), "--run-dir", str(run), "--task-id", "x", "--adapter", "none",
-         "--prompt-file", str(prompt), "--alias", "scout", "--role", "worker"],
+         "--prompt-file", str(prompt), "--alias", "junior", "--role", "worker"],
         cwd=tmp_path, text=True, capture_output=True,
     )
     assert result.returncode == 2
@@ -488,7 +488,7 @@ def test_dispatch_classifies_missing_manifest_as_missing_custody(tmp_path: Path)
     prompt.write_text("prompt\n")
     result = subprocess.run(
         [str(DISPATCH), "--run-dir", str(run), "--task-id", "missing-manifest", "--adapter", "none",
-         "--prompt-file", str(prompt), "--alias", "scout", "--role", "worker"],
+         "--prompt-file", str(prompt), "--alias", "junior", "--role", "worker"],
         cwd=tmp_path, text=True, capture_output=True,
     )
     assert result.returncode == 2

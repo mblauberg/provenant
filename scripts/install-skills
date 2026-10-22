@@ -49,6 +49,12 @@ fi
 if [[ -L "$TARGET" ]] \
   && [[ "$(cd "$TARGET" && pwd -P)" == "$(cd "$ROOT/skills" && pwd -P)" ]]; then
   custom_count=0
+  # Library skills sit beside skills/, so a single directory link cannot carry
+  # them either; they count like custom skills for the conversion.
+  for skill_file in "$ROOT"/library/*/SKILL.md; do
+    [[ -f "$skill_file" ]] || continue
+    custom_count=$((custom_count + 1))
+  done
   if [[ -n "$CUSTOM_SOURCE" ]]; then
     for skill_file in "$CUSTOM_SOURCE"/*/SKILL.md; do
       [[ -f "$skill_file" ]] || continue

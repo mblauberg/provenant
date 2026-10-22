@@ -18,6 +18,8 @@ import sqlite3
 
 ADAPTER = 'opencode'
 PAID = ('opencode-go',)
+# Model-id prefixes the plan's windows govern: free and pay-per-token Zen models are billed elsewhere.
+COVERS = tuple(f'{name}/' for name in PAID)
 # Calibrated against the Go dashboard (about $16 weekly, $32 monthly), not documented by OpenCode.
 # Override with `limits.monthly_usd`; other plans need it.
 PLAN_MONTHLY_USD = {'go': 32.0}

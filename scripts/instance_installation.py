@@ -469,12 +469,37 @@ def _routing_differences(product: Any, installed: Any, path: tuple[str, ...]) ->
     return [] if product == installed else [".".join(path)]
 
 
+def _pools_module() -> Any:
+    import importlib.util as _util
+    spec = _util.spec_from_file_location("provenant_pools_for_migration",
+                                         Path(__file__).resolve().parent / "model_route_pools.py")
+    module = _util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _migrate_renamed(installed: dict[str, Any], base: dict[str, Any] | None
+                     ) -> tuple[dict[str, Any], dict[str, Any] | None, list[str], list[str]]:
+    """Move retired tier names in the instance copy (and its base snapshot) to their new names."""
+    pools = _pools_module()
+    try:
+        migrated, notes, moved = pools.migrate_renamed(installed)
+        migrated_base = pools.migrate_renamed(base)[0] if base is not None else None
+    except pools.MigrationConflict as error:
+        raise InstallError(f"routing catalogue has a retired tier name and its replacement with different values: {error}") from error
+    return migrated, migrated_base, notes, moved
+
+
 def routing_drift(product_root: Path, instance_root: Path) -> list[str]:
     documents = _routing_documents(product_root, instance_root)
     if documents is None:
         return []
     product, installed = documents
-    merged, _ = _routing_result(product, installed, _routing_base(instance_root))
+    try:
+        migrated, base, _, _ = _migrate_renamed(installed, _routing_base(instance_root))
+    except InstallError as error:
+        return [str(error)]
+    merged, _ = _routing_result(product, migrated, base)
     return _routing_differences(merged, installed, ())
 
 
@@ -489,8 +514,20 @@ def refresh_routing(product_root: Path, instance_root: Path) -> dict[str, Any]:
     if product_root.resolve() == instance_root.resolve():
         return {"state": "existing", "conflicts": [], "schema_changed": False,
                 "updated_from_product": [], "retained": []}
-    base = _routing_base(instance_root)
+    original = installed
+    installed, base, migrated_notes, moved = _migrate_renamed(installed, _routing_base(instance_root))
     result, conflicts = _routing_result(product, installed, base)
+    if base is None:
+        # No snapshot says what the product shipped before, so a renamed alias key or route pool keeps its instance value.
+        for dotted in moved:
+            source: Any = installed
+            target_node: Any = result
+            *parents, leaf = dotted.split(".")
+            for part in parents:
+                source = source.get(part) if isinstance(source, dict) else None
+                target_node = target_node.get(part) if isinstance(target_node, dict) else None
+            if isinstance(source, dict) and isinstance(target_node, dict) and leaf in source:
+                target_node[leaf] = source[leaf]
     if base is None:
         updated_from_product, retained = _routing_no_base_changes(product, installed)
     else:
@@ -500,10 +537,10 @@ def refresh_routing(product_root: Path, instance_root: Path) -> dict[str, Any]:
         != product.get("schema_version")
     )
     base_path = instance_root / "config" / ROUTING_BASE_NAME
-    if result == installed:
+    if result == original:
         _write_json(base_path, product, contain=instance_root)
         return {"state": "existing", "conflicts": conflicts, "schema_changed": schema_change,
-                "updated_from_product": updated_from_product, "retained": retained}
+                "updated_from_product": updated_from_product, "retained": retained, "migrated": []}
     backup = target.with_name(f"{target.name}.bak-{date.today().isoformat()}")
     suffix = 1
     while backup.exists() or backup.is_symlink():
@@ -514,7 +551,7 @@ def refresh_routing(product_root: Path, instance_root: Path) -> dict[str, Any]:
     _write_json(base_path, product, contain=instance_root)
     return {"state": "updated", "backup": str(backup), "conflicts": conflicts,
             "schema_changed": schema_change, "updated_from_product": updated_from_product,
-            "retained": retained}
+            "retained": retained, "migrated": migrated_notes}
 
 
 def seed_desired_state(product_root: Path, instance_root: Path) -> tuple[str, dict[str, Any]]:
@@ -746,6 +783,8 @@ def main(argv: list[str] | None = None) -> int:
                       + (f" (backup: {routing['backup']})" if "backup" in routing else ""))
             for key in routing["retained"]:
                 print(f"routing retained (not in product; remove if retired)={key}")
+            for key in routing.get("migrated", []):
+                print(f"routing migrated retired tier name={key}")
             if routing["schema_changed"]:
                 print("routing warning=schema_version-changed")
             return 0

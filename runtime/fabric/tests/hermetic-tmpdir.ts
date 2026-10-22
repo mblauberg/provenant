@@ -2,25 +2,20 @@
 // A dispatched agent runs with TMPDIR inside its attempt directory under the
 // live product checkout's .agent-run, so git (and runRoot) would resolve every
 // mkdtemp workspace to that live checkout and write fixture runs into it.
-import { execFileSync } from "node:child_process";
 import { mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-
-function insideGitWorkTree(dir: string): boolean {
-  try {
-    execFileSync("git", ["rev-parse", "--git-dir"], { cwd: dir, stdio: "ignore" });
-    return true;
-  } catch { return false; }
-}
+import { fixtureBase } from "./helpers/temp-root.js";
 
 const scratchRoots: string[] = [];
 
 // Ordinary fixtures must never consult the developer's host federation config.
 process.env.PROVENANT_HOST_LOCAL_ONLY = "1";
 
-if (insideGitWorkTree(tmpdir())) {
-  process.env.TMPDIR = realpathSync(mkdtempSync(join("/tmp", "fabric-test-tmp-")));
+// fixtureBase respects TMPDIR and only leaves it when it sits inside a git work tree.
+const base = fixtureBase();
+if (base !== realpathSync(tmpdir())) {
+  process.env.TMPDIR = realpathSync(mkdtempSync(join(base, "fabric-test-tmp-")));
   scratchRoots.push(process.env.TMPDIR);
 }
 

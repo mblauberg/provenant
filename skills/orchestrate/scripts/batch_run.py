@@ -895,7 +895,7 @@ def parser() -> argparse.ArgumentParser:
     root = BudgetArgumentParser(
         command_name="batch",
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""Manifest schema v1: {\"schema_version\":1,\"tasks\":[{\"id\":\"task-1\",\"prompt_file\":\"prompt.md\",\"adapter\":\"codex\",\"alias\":\"scout\",\"role\":\"worker\"}]}.
+        epilog="""Manifest schema v1: {\"schema_version\":1,\"tasks\":[{\"id\":\"task-1\",\"prompt_file\":\"prompt.md\",\"adapter\":\"codex\",\"alias\":\"junior\",\"role\":\"worker\"}]}.
 Each task uses ordinary intent and exactly one of prompt_file/prompt plus one
 route selector (alias, task_class or model). Tasks default to read_only access;
 a task may set access_mode worktree_write with a worktree it owns exclusively, and

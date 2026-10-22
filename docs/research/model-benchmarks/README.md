@@ -91,7 +91,7 @@ Analysis Intelligence Index (general capability, not coding) at one snapshot.
 | `opencode-go/gemini-4-argon-contributor` | 1 | not established | Index 53 at $1.99 at high (mapping assumed). |
 | `opencode/mimo-v2.6-flash-free` | 1 | no effort axis | Index 38 at $0.06. |
 | `claude-opus-4-6-thinking`, `claude-sonnet-4-6`, `claude-haiku-4-5` (agy and legacy) | 2, 1, 2 | no effort axis | Deprecated. Estimated index 32 and 25; Scale SWE-bench Pro 51.9 (Opus 4.6) and 39.45 (Haiku 4.5). |
-| `gemini-3.1-pro`, `gemini-3.7-flash` | 1, 1 | not established | Scale SWE-bench Pro 46.1 (3.1 Pro); Terminal-Bench 4.0 11.2 (3.7 Flash, high). |
+| `gemini-3.7-flash` | 1 | not established | Terminal-Bench 4.0 11.2 (high). |
 | `composer-2.5`, `auto`, `opencode/longcat-2.5-preview-free` | 0 | none | No benchmark found; see `gaps`. |
 
 Records for proxies outside the catalogue (`catalogue: false`: Grok 4.5, Fable 5,
