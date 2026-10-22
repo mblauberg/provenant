@@ -12,6 +12,7 @@ import os
 from functools import wraps
 import re
 import shlex
+import signal
 import shutil
 import subprocess
 import tempfile
@@ -108,8 +109,24 @@ class CodeTransport:
             if not check:
                 return None
             lines = (result.stderr or '').strip().splitlines()
-            detail = ''.join(char if char.isprintable() else '?' for char in lines[-1][:200]) if lines else 'no error output'
-            self.fail('code_transport_failed', f'git {args[0]} failed: {detail}')
+            detail = ''.join(char if char.isprintable() else '?' for char in lines[-1][:200]) if lines else ''
+            rc = result.returncode
+            status = f'exit {rc}'
+            if rc < 0:
+                try:
+                    status += f' ({signal.Signals(-rc).name})'
+                except ValueError:
+                    pass
+            truncated = []
+            if result.stdout_truncated:
+                truncated.append('stdout')
+            if result.stderr_truncated:
+                truncated.append('stderr')
+            suffix = f"; {'/'.join(truncated)} truncated" if truncated else ''
+            message = f'git {args[0]} failed in {repo}: {status}{suffix}'
+            if detail:
+                message += f': {detail}'
+            self.fail('code_transport_failed', message)
         return result.stdout.strip()
 
     @hardened

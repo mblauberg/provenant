@@ -878,6 +878,46 @@ class HostDiagnosticsContracts(unittest.TestCase):
                             self.assertIn('3.11', result['python']['error']['message'])
 
 
+class FabricGitDiagnosticContracts(unittest.TestCase):
+    def test_git_failure_reports_exit_code_and_repository(self):
+        from types import SimpleNamespace
+        import fabric_git
+        import fabric_hosts as hosts
+        with tempfile.TemporaryDirectory() as directory:
+            code = fabric_git.CodeTransport(SimpleNamespace(h=hosts))
+            result = SimpleNamespace(returncode=128, timed_out=False, stdout='', stderr='',
+                stdout_truncated=False, stderr_truncated=False)
+            load = code.h._load_module
+            def load_module(name, path):
+                if name == 'provenant_bounded_process':
+                    return SimpleNamespace(run_bounded=lambda *args, **kwargs: result)
+                return load(name, path)
+            with patch.object(code.h, '_load_module', side_effect=load_module):
+                with self.assertRaises(hosts.HostError) as caught:
+                    code.git(Path(directory), 'rev-parse', 'HEAD')
+            self.assertEqual(caught.exception.code, 'code_transport_failed')
+            self.assertIn('exit 128', str(caught.exception))
+            self.assertIn(directory, str(caught.exception))
+
+    def test_git_failure_reports_truncated_output(self):
+        from types import SimpleNamespace
+        import fabric_git
+        import fabric_hosts as hosts
+        with tempfile.TemporaryDirectory() as directory:
+            code = fabric_git.CodeTransport(SimpleNamespace(h=hosts))
+            result = SimpleNamespace(returncode=0, timed_out=False, stdout='', stderr='detail',
+                stdout_truncated=True, stderr_truncated=False)
+            load = code.h._load_module
+            def load_module(name, path):
+                if name == 'provenant_bounded_process':
+                    return SimpleNamespace(run_bounded=lambda *args, **kwargs: result)
+                return load(name, path)
+            with patch.object(code.h, '_load_module', side_effect=load_module):
+                with self.assertRaises(hosts.HostError) as caught:
+                    code.git(Path(directory), 'rev-parse', 'HEAD')
+            self.assertIn('stdout truncated', str(caught.exception))
+
+
 class TransportFilesystemContracts(unittest.TestCase):
     def test_project_root_accepts_case_different_git_toplevel_for_same_directory(self):
         import fabric_hosts as hosts
