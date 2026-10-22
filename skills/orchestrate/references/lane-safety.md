@@ -71,8 +71,9 @@ false report. Paste the first section into every lane and reviewer brief.
   writers' work or wait for idle first.
 - `fabric_cancel` with a batch task id cancels the whole batch; dispatch writers
   as single-task runs. A cancel can reap a process another lane depends on.
-- A lane must not start a nested Fabric dispatch; it can end `failed` with no
-  error while the nested run keeps going. The coordinator reviews.
+- A lane must not start a nested Fabric dispatch; sandboxed Codex lanes reject
+  it before placement because host state is outside their writable roots, so
+  dispatch reviewers from the chair.
 - Headless Claude lanes exit when the turn ends: brief them to run long jobs in
   the foreground, take baselines in a separate detached worktree and end only
   with the final report.

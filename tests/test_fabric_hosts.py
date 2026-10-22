@@ -41,6 +41,33 @@ def git_isolated_tempdir():
 
 
 class PeerContracts(unittest.TestCase):
+    def test_lane_invalid_request_reports_bounded_cause_without_exception_message(self):
+        import fabric_hosts as hosts
+        import io
+        cases = [
+            (PermissionError(1, 'private exception message', '/denied/state.lock'),
+             'PermissionError', '/denied/state.lock'),
+            (KeyError('missing_key'), 'KeyError', 'missing_key'),
+            (KeyError('k' * 1000 + '\n'), 'KeyError', 'k' * 100),
+            (ValueError('private exception message'), 'ValueError', None),
+            (UnicodeError('private exception message'), 'UnicodeError', None),
+            (TypeError('private exception message'), 'TypeError', None),
+        ]
+        for error, name, target in cases:
+            with self.subTest(name=name, target=target), patch.object(sys, 'stdin') as stdin, \
+                    patch.object(sys, 'stdout', new_callable=io.StringIO) as stdout:
+                stdin.buffer.read.side_effect = error
+                self.assertEqual(hosts.main(['lane']), 0)
+                result = json.loads(stdout.getvalue())
+                self.assertEqual(result['status'], 'rejected')
+                self.assertEqual(result['error'], 'invalid_request')
+                self.assertIn(name, result['fix'])
+                if target:
+                    self.assertIn(target, result['fix'])
+                self.assertLess(len(result['fix']), 650)
+                self.assertNotIn('private exception message', result['fix'])
+                self.assertNotIn('\n', result['fix'])
+
     def test_project_placement_configuration_and_lane_verbs(self):
         import fabric_hosts as hosts
         with tempfile.TemporaryDirectory() as directory:

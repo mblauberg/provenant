@@ -748,7 +748,14 @@ def main(argv=None):
         except HostError as exc:
             result = {'status': 'rejected', 'error': exc.code, 'fix': str(exc)}
         except (ValueError, UnicodeError, TypeError, KeyError, OSError) as exc:
-            result = {'status': 'rejected', 'error': 'invalid_request', 'fix': 'Pass a valid lane request with readable paths'}
+            cause = type(exc).__name__
+            target = exc.filename if isinstance(exc, OSError) else (
+                exc.args[0] if isinstance(exc, KeyError) and exc.args and isinstance(exc.args[0], (str, int)) else None)
+            if target is not None:
+                target = ''.join(char if char.isprintable() else '?' for char in str(target)[:256])
+                cause += ': ' + json.dumps(target, ensure_ascii=False)
+            result = {'status': 'rejected', 'error': 'invalid_request',
+                'fix': 'Pass a valid lane request with readable paths (' + cause + ')'}
         print(json.dumps(result, allow_nan=False))
         return 0
     parser = argparse.ArgumentParser(description=__doc__)
