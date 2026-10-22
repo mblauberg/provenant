@@ -61,14 +61,16 @@ def test_path_node_comes_first(tmp_path, name):
 @pytest.mark.parametrize('name', LAUNCHERS)
 def test_an_unsupported_path_node_is_skipped_for_a_supported_fallback(tmp_path, name):
     old = fake_node(tmp_path / 'path/node', supported=False)
-    result = launch(tmp_path, name, [tmp_path / 'path'])
-    assert f'ran {old}' not in result.stdout
-    if result.returncode == 127:
+    # A missing loader stops the launcher once it has chosen a node, so a real system node never runs Fabric.
+    result = launch(tmp_path, name, [tmp_path / 'path'], AGENT_FABRIC_TSX_LOADER=str(tmp_path / 'missing.mjs'))
+    assert result.returncode == 127
+    assert 'ran' not in result.stdout
+    if 'Unsupported' in result.stderr:
         # No supported node on this machine: the error names what it tried.
         assert f'Unsupported: {old}' in result.stderr and 'set FABRIC_NODE' in result.stderr
     else:
-        # A real supported node on this machine ran Fabric, which may then fail on the empty test loader.
-        assert 'Unsupported' not in result.stderr
+        # A supported system node was chosen instead.
+        assert 'tsx loader not found' in result.stderr
 
 
 @pytest.mark.skipif(any(Path(path).exists() for path in FIXED), reason='a system node would be chosen first')
