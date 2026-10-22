@@ -257,6 +257,13 @@ configured project key and a complete Git checkout. If preparation cannot
 transport the input, dispatch runs locally with a visible `placement_fallback`
 reason. The operation stays bound locally on retry.
 
+The reader's prompt names its actual checkout, working directory and frozen
+HEAD SHA before the original brief. Use those paths and HEAD when the brief
+names paths or refs that exist only on the dispatching host. Targeted pytest
+runs keep temporary files under the lane's writable `TMPDIR`; a Git discovery
+boundary prevents scratch source fixtures from inheriting `.agent-run` ignore
+rules and being classified as generated files.
+
 The detached worktree is removed after the lane's owner settles; polling keeps
 it while a fallback sequence is still alive and retries cleanup when needed.
 Resume or inherited handoff recreates the
