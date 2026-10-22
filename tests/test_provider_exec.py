@@ -8359,8 +8359,9 @@ def test_claude_account_binds_environment_sandbox_and_receipt(tmp_path, monkeypa
                          ]}, selected)
     if explicit in ('uncached', 'resume-default', 'default-preflight'):
         quota.cache_path('claude', 'pro', identity_dir=selected).unlink()
-        selected = home / '.claude'
-    code = "import os,json; print(json.dumps({'type':'result','is_error':False,'result':os.environ.get('CLAUDE_CONFIG_DIR')}))"
+        if explicit != 'uncached':
+            selected = home / '.claude'
+    code = "import os,json; print(json.dumps({'type':'result','is_error':False,'result':str(os.environ.get('CLAUDE_CONFIG_DIR'))}))"
     plan = fixture_plan(tmp_path, code, 'claude', mode=mode, account='pro' if explicit is True else 'default' if explicit in ('resume-default', 'default-preflight') else None,
                         resume_session='01234567-0123-4567-89ab-0123456789ab' if explicit == 'resume-default' else None)
     profile = mod.os_confinement_profile(plan)
@@ -8368,11 +8369,112 @@ def test_claude_account_binds_environment_sandbox_and_receipt(tmp_path, monkeypa
     assert f'(subpath "{other}")' in profile
     assert any(line.startswith('(deny file-read') and f'"{other}"' in line for line in profile.splitlines())
     assert not any(line.startswith('(allow ') and f'"{other}"' in line for line in profile.splitlines())
-    if explicit not in ('uncached', 'resume-default', 'default-preflight'):
+    if explicit not in ('resume-default', 'default-preflight'):
         assert not any(line.startswith('(allow ') and f'"{home / ".claude"}"' in line for line in profile.splitlines())
     record = mod.execute(plan, tmp_path / 'result.md')
     assert record['status'] == 'ok'
-    assert (tmp_path / 'result.md').read_text().strip() == str(selected)
-    expected = 'default' if explicit in ('uncached', 'resume-default', 'default-preflight') else 'pro'
+    assert (tmp_path / 'result.md').read_text().strip() == (
+        'None' if explicit in ('resume-default', 'default-preflight') else str(selected))
+    expected = 'default' if explicit in ('resume-default', 'default-preflight') else 'pro'
     assert record['account'] == expected
     assert record['provenance']['account'] == expected
+
+
+@pytest.mark.parametrize('inherited', [None, '', '~/.claude', 'custom'])
+def test_claude_ambient_account_preserves_inherited_config_environment(tmp_path, monkeypatch, inherited):
+    home = tmp_path / 'home'
+    home.mkdir()
+    monkeypatch.setenv('HOME', str(home))
+    monkeypatch.setenv('AGENT_FABRIC_INSTANCE_ROOT', str(home / '.agents'))
+    monkeypatch.setenv('AGENT_FABRIC_STATE_ROOT', str(tmp_path / 'state'))
+    if inherited is None:
+        monkeypatch.delenv('CLAUDE_CONFIG_DIR', raising=False)
+    else:
+        monkeypatch.setenv('CLAUDE_CONFIG_DIR', inherited)
+    code = ("import os,json; print(json.dumps({'type':'result','is_error':False,'result':"
+            "json.dumps({'set':'CLAUDE_CONFIG_DIR' in os.environ,'value':os.environ.get('CLAUDE_CONFIG_DIR')})}))")
+    plan = fixture_plan(tmp_path, code, 'claude')
+    record = supervisor().execute(plan, tmp_path / 'result.md')
+    assert record['status'] == 'ok'
+    assert json.loads((tmp_path / 'result.md').read_text()) == {'set': inherited is not None, 'value': inherited}
+
+
+@pytest.mark.parametrize('accounts', [['broken'], {'claude': []}, {'claude': {'INVALID': {}}}])
+@pytest.mark.parametrize('inherited', [False, True])
+def test_claude_malformed_accounts_warn_and_launch_ambient_identity(tmp_path, monkeypatch, accounts, inherited):
+    home = tmp_path / 'home'
+    home.mkdir()
+    monkeypatch.setenv('HOME', str(home))
+    monkeypatch.setenv('AGENT_FABRIC_INSTANCE_ROOT', str(home / '.agents'))
+    monkeypatch.setenv('AGENT_FABRIC_STATE_ROOT', str(tmp_path / 'state'))
+    if inherited:
+        monkeypatch.setenv('CLAUDE_CONFIG_DIR', str(home / '.claude-work'))
+    else:
+        monkeypatch.delenv('CLAUDE_CONFIG_DIR', raising=False)
+    config = home / '.agents/config/telemetry.json'
+    config.parent.mkdir(parents=True)
+    config.write_text(json.dumps({'accounts': accounts}))
+    code = "import os,json; print(json.dumps({'type':'result','is_error':False,'result':str(os.environ.get('CLAUDE_CONFIG_DIR'))}))"
+    plan = fixture_plan(tmp_path, code, 'claude')
+    assert any('invalid Claude account configuration' in warning for warning in plan['warnings'])
+    assert plan['provider_home'] == str(home / ('.claude-work' if inherited else '.claude'))
+    record = supervisor().execute(plan, tmp_path / 'result.md')
+    assert record['status'] == 'ok'
+    assert (tmp_path / 'result.md').read_text().strip() == (str(home / '.claude-work') if inherited else 'None')
+
+
+@pytest.mark.parametrize('mode', ['read_only', 'worktree_write'])
+@pytest.mark.parametrize('selected', ['.claude-pro', '.claude/pro', '.claude'])
+def test_claude_config_read_grants_follow_selected_identity(tmp_path, monkeypatch, mode, selected):
+    home = tmp_path / 'home'
+    home.mkdir()
+    monkeypatch.setenv('HOME', str(home))
+    plan = {'adapter': 'claude', 'mode': mode, 'cwd': str(tmp_path), 'workspace_root': str(tmp_path),
+            'provider_home': str(home / selected), 'applied': {'add_dirs': []}}
+    profile = supervisor().os_confinement_profile(plan)
+    grants = '\n'.join(line for line in profile.splitlines() if line.startswith('(allow file-read'))
+    assert f'(subpath "{home / selected}")' in grants
+    assert (f'"{home / ".claude.json"}"' in grants) is (selected == '.claude' and mode == 'read_only')
+    denied = '\n'.join(line for line in profile.splitlines() if line.startswith('(deny file-read'))
+    assert (f'"{home / ".claude.json"}"' in denied) is (selected != '.claude')
+
+
+def test_claude_all_exhausted_refuses_plan_before_launch(tmp_path, monkeypatch):
+    home = tmp_path / 'home'
+    home.mkdir()
+    monkeypatch.setenv('HOME', str(home))
+    monkeypatch.setenv('AGENT_FABRIC_INSTANCE_ROOT', str(home / '.agents'))
+    monkeypatch.setenv('AGENT_FABRIC_STATE_ROOT', str(tmp_path / 'state'))
+    monkeypatch.delenv('CLAUDE_CONFIG_DIR', raising=False)
+    config = home / '.agents/config/telemetry.json'
+    config.parent.mkdir(parents=True)
+    identities = {label: home / ('.claude-' + label) for label in ('pro', 'max')}
+    config.write_text(json.dumps({'accounts': {'claude': {
+        label: {'identity_dir': str(path)} for label, path in identities.items()}}}))
+    import provider_quota as quota
+    for label, path in identities.items():
+        quota.save_snapshot({'schema': quota.SCHEMA, 'host': quota.telemetry_host(),
+                             'provider': 'claude', 'account': label, 'status': 'ok',
+                             'windows': [{'name': 'five_hour', 'used_percent': 100,
+                                          'reset_at': (datetime.now(UTC) + timedelta(hours=2)).isoformat()},
+                                         {'name': 'seven_day', 'used_percent': 10}]}, path)
+    with pytest.raises(ValueError, match='claude_accounts_exhausted'):
+        fixture_plan(tmp_path, "raise AssertionError('must never launch')", 'claude')
+
+
+def test_claude_switch_from_custom_ambient_to_default_unsets_config_dir(tmp_path, monkeypatch):
+    home = tmp_path / 'home'
+    home.mkdir()
+    monkeypatch.setenv('HOME', str(home))
+    monkeypatch.setenv('AGENT_FABRIC_INSTANCE_ROOT', str(home / '.agents'))
+    monkeypatch.setenv('AGENT_FABRIC_STATE_ROOT', str(tmp_path / 'state'))
+    monkeypatch.setenv('CLAUDE_CONFIG_DIR', str(home / '.claude-work'))
+    config = home / '.agents/config/telemetry.json'
+    config.parent.mkdir(parents=True)
+    config.write_text(json.dumps({'accounts': {'claude': {'default': {'identity_dir': str(home / '.claude')}}}}))
+    code = ("import os,json; print(json.dumps({'type':'result','is_error':False,'result':"
+            "str('CLAUDE_CONFIG_DIR' in os.environ)}))")
+    plan = fixture_plan(tmp_path, code, 'claude', account='default')
+    record = supervisor().execute(plan, tmp_path / 'result.md')
+    assert record['status'] == 'ok'
+    assert (tmp_path / 'result.md').read_text().strip() == 'False'

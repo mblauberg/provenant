@@ -691,6 +691,10 @@ def _claude_account_denies(plan):
         return ''
     selected = Path(plan.get('provider_home') or Path.home() / '.claude').resolve()
     rules = []
+    if selected != (Path.home() / '.claude').resolve():
+        # Also deny broad workspace/writer reads of the ambient startup config.
+        startup = Path.home() / '.claude.json'
+        rules.append(_sbpl_rule('deny', 'file-read*', [startup, startup.resolve()]))
     for path in plan.get('claude_account_dirs', []):
         other = Path(path)
         if other == selected:
@@ -720,6 +724,8 @@ def _provider_state(plan):
         if root != default and credential_path(root) and not claude_child:
             raise PermissionError(f"provider home resolves into a credential store: {root}")
         state["resolved_home"] = root
+        if plan.get("adapter") == "claude" and root != default.resolve():
+            state["read"] = tuple(entry for entry in state.get("read", ()) if entry != ".claude.json")
         for key in ("read_write", "write_literal", "write_in_place", "read", "oauth_read",
                     "read_literal", "read_denied", "no_links", "no_symlinks"):
             state[key] = tuple(str(root / Path(entry).relative_to(relative))
@@ -1279,6 +1285,7 @@ def build_plan(
     original_prompt_file = metadata.pop("original_prompt_file", prompt_file)
     run_dir = metadata.pop("run_dir", None)
     config = profile(adapter)
+    account_warnings = []
     if account is not None and adapter != "claude":
         raise ValueError("--account is supported only for Claude")
     if adapter == "claude":
@@ -1286,7 +1293,12 @@ def build_plan(
             'provenant_lane_quota', Path(__file__).resolve().parents[3] / 'scripts/provider_quota.py')
         quota = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(quota)
-        candidates = quota.accounts('claude')
+        try:
+            candidates = quota.accounts('claude')
+            entries = quota.configured().get('claude', {})
+        except ValueError:
+            candidates, entries, account = [], {}, None
+            account_warnings.append('invalid Claude account configuration; using ambient default identity')
         if account is None and not resume_session and not claude_adapter.uses_api_key(route):
             account = quota.choose_claude_account({row.label: quota.load_snapshot('claude', row.label, row.identity_dir)
                                                   for row in candidates}, datetime.now(UTC))
@@ -1294,18 +1306,23 @@ def build_plan(
         if account is not None and chosen is None:
             # Implicit default/path labels also pin receipts during preflight or session relaunch.
             ambient = quota.identity.selected_identity('claude')
-            if account != quota.identity.account_key('claude', ambient):
+            if account != quota.identity.account_key('claude', ambient, entries=entries):
                 raise ValueError("unknown or disabled Claude account label")
         identity_dir = (chosen.identity_dir if chosen else quota.identity.selected_identity('claude')).expanduser().absolute()
         selected = identity_dir.resolve()
         # Reuse the existing provider-home guard; no credential contents are needed.
         metadata['provider_home'] = str(selected)
-        metadata['claude_config_dir'] = str(identity_dir)
-        metadata['account'] = account or quota.identity.account_key('claude', selected)
+        # Unset and explicitly set default paths use different CLI config/Keychain names.
+        # Preserve the caller's exact spelling when retaining its ambient identity.
+        ambient = quota.identity.selected_identity('claude').resolve()
+        if selected != ambient:
+            metadata['claude_config_dir'] = (None if selected == quota.identity.default_identity('claude').resolve()
+                                             else str(identity_dir))
+        metadata['account'] = account or quota.identity.account_key('claude', selected, entries=entries)
         metadata['claude_account_dirs'] = list(dict.fromkeys(
             [str(quota.identity.default_identity('claude').resolve()),
              *[str(Path(entry.get('identity_dir') or quota.identity.default_identity('claude')).expanduser().resolve())
-               for entry in quota.configured().get('claude', {}).values() if isinstance(entry, dict)]]))
+               for entry in entries.values() if isinstance(entry, dict)]]))
     if adapter == "opencode":
         version_error = _opencode_version_error(config.CLI, os.environ.get("PATH"))
         if version_error:
@@ -1351,6 +1368,7 @@ def build_plan(
         raise ValueError("network must be a boolean")
     # Catalogue notices demoted to receipt notes must not become warnings again.
     warnings = list(dict.fromkeys([
+        *account_warnings,
         *(note for note in route.get("notes") or [] if " is newer than the catalogue;" not in note),
         *list(route.get("warnings") or []),
     ]))
@@ -3539,8 +3557,11 @@ def _run_attempt(
             instruction_start = exc
         # Running a skill's script must not leave bytecode behind for the check to report.
         environment["PYTHONDONTWRITEBYTECODE"] = "1"
-    if plan["adapter"] == "claude" and plan.get("provider_home"):
-        environment["CLAUDE_CONFIG_DIR"] = plan.get("claude_config_dir", plan["provider_home"])
+    if plan["adapter"] == "claude" and "claude_config_dir" in plan:
+        if plan["claude_config_dir"] is None:
+            environment.pop("CLAUDE_CONFIG_DIR", None)
+        else:
+            environment["CLAUDE_CONFIG_DIR"] = plan["claude_config_dir"]
     environment["CLAUDE_CODE_DISABLE_WORKFLOWS"] = "1"
     private_tmp = Path(plan["run_dir"]) / "tmp"
     private_cache = private_tmp / "cache"

@@ -652,29 +652,43 @@ def load_snapshot(provider_name, label, identity_dir=None):
 
 
 
-def choose_claude_account(snapshots, now):
-    """Choose a label from cached windows only; unknown caches preserve the CLI default.
+class ClaudeAccountsExhaustedError(ValueError):
+    """Every candidate has a cached, still-binding usage limit."""
 
-    Healthy weekly budgets precede deficits, then five-hour room precedes a full
-    short window. Project current weekly use to reset to spend expiring reserve first.
-    Labels break ties so configuration order does not affect selection.
+
+def choose_claude_account(snapshots, now):
+    """Use cached windows: reserve first, then unknown readings, then least deficit.
+
+    Exhausted accounts cannot launch. Spend projected weekly waste first among
+    healthy accounts, preferring Pro on ties, then use labels for stable ordering.
     """
     ranked = []
     for label, value in snapshots.items():
-        if not value or value.get('status') != 'ok':
-            continue
-        windows = {row.get('name'): row for row in value.get('windows', [])}
+        windows = {row.get('name'): row for row in (value or {}).get('windows', [])}
         short, weekly = windows.get('five_hour'), windows.get('seven_day')
-        if not short or not weekly or any(number(row.get('used_percent')) is None for row in (short, weekly)):
+        # A known limit still binds when the other window is missing or the last fetch failed.
+        if any(row and number(row.get('used_percent')) is not None
+               and number(row['used_percent']) >= 100 and not reset_passed(row, now)
+               for row in (short, weekly)):
             continue
-        # A cached limit no longer binds once its reported reset has passed.
-        short = {**short, 'used_percent': 0} if reset_passed(short, now) else short
+        if (not value or value.get('status') != 'ok' or not short or not weekly
+                or any(number(row.get('used_percent')) is None for row in (short, weekly))):
+            ranked.append(((1, 0, 0, label), label))
+            continue
         weekly = {**weekly, 'used_percent': 0} if reset_passed(weekly, now) else weekly
         budget = pace(weekly, now)
-        deficit = budget['state'] in ('exhausted', 'deficit') or budget.get('will_last_to_reset') is False
-        reserve = budget.get('expiring_headroom_percent', 0)
-        ranked.append(((deficit, short['used_percent'] >= 100, -reserve, label), label))
+        deficit = budget['state'] == 'deficit' or budget.get('will_last_to_reset') is False
+        if budget['state'] in ('unknown', 'unreported'):
+            score = (1, 0, 0, label)
+        elif deficit:
+            score = (2, max(0, budget.get('delta_percent') or 0), 0, label)
+        else:
+            score = (0, -budget.get('expiring_headroom_percent', 0), value.get('plan') != 'pro', label)
+        ranked.append((score, label))
+    if snapshots and not ranked:
+        raise ClaudeAccountsExhaustedError('claude_accounts_exhausted: all Claude accounts have an exhausted window')
     return min(ranked)[1] if ranked else None
+
 
 def open_private(path, mode='a'):
     """Open for appending, or reading with mode 'r', never through a symlink; created 0600."""

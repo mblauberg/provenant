@@ -1962,9 +1962,9 @@ def test_claude_parse_loads_quota_schedule_itself_when_it_is_not_registered(monk
     ((100, 20), (10, 35), 'max'),  # Short-window room wins over weekly reserve.
     ((10, 20), (70, 35), 'max'),  # A weekly deficit is skipped.
     ((10, 20), (100, 35), 'max'),
-    ((10, 100), (70, 35), 'max'),  # A healthy weekly budget beats a deficit.
-    ((10, 100), (100, 80), 'pro'),  # All in deficit: use short room then projection.
-    ((100, 100), (10, 35), 'pro'),
+    ((10, 100), (70, 35), 'pro'),  # An exhausted short window is never chosen.
+    ((10, 20), (70, 80), 'pro'),  # Among deficits, choose the least deficit.
+    ((10, 10), (60, 90), 'pro'),  # Label order cannot outweigh deficit size.
     ((10, 10), (10, 10), 'max'),  # Stable label tie-break, independent of input order.
 ])
 def test_choose_claude_account_from_cached_windows(quota, short, weekly, expected):
@@ -1976,9 +1976,10 @@ def test_choose_claude_account_from_cached_windows(quota, short, weekly, expecte
     assert choose(values, NOW) == expected
 
 
-@pytest.mark.parametrize('values', [{}, {'pro': None}, {'pro': {'status': 'error', 'windows': []}}])
-def test_choose_claude_account_without_usable_cache_keeps_default(quota, values):
-    assert quota.choose_claude_account(values, NOW) is None
+@pytest.mark.parametrize('values,expected', [({}, None), ({'pro': None}, 'pro'),
+    ({'pro': {'status': 'error', 'windows': []}}, 'pro')])
+def test_choose_claude_account_without_usable_cache_keeps_default(quota, values, expected):
+    assert quota.choose_claude_account(values, NOW) == expected
 
 
 @pytest.mark.parametrize('selected,exhausted', [('pro', True), ('max', False)])
@@ -1993,3 +1994,63 @@ def test_cached_cooldown_targets_selected_claude_account(quota, tmp_path, select
     assert ('claude/*' in records) is exhausted
     if exhausted:
         assert records['claude/*']['account'] == selected
+
+
+@pytest.mark.parametrize('five,seven', [(100, 10), (10, 100), (120, 100)])
+def test_choose_claude_account_refuses_all_exhausted(quota, five, seven):
+    values = {label: {'status': 'ok', 'windows': [
+        window(five, 300, timedelta(hours=2), 'five_hour'),
+        window(seven, WEEK, timedelta(days=3.5)),
+    ]} for label in ('pro', 'max')}
+    with pytest.raises(ValueError, match='claude_accounts_exhausted'):
+        quota.choose_claude_account(values, NOW)
+
+
+@pytest.mark.parametrize('used,expected', [(10, 'known'), (70, 'unknown'), (100, 'unknown')])
+@pytest.mark.parametrize('unknown', [None, {'status': 'error'}, {'status': 'ok', 'windows': []}])
+def test_choose_claude_account_places_unknown_between_reserve_and_deficit(quota, used, expected, unknown):
+    values = {'unknown': unknown, 'known': {'status': 'ok', 'windows': [
+        window(10, 300, timedelta(hours=2), 'five_hour'),
+        window(used, WEEK, timedelta(days=3.5)),
+    ]}}
+    assert quota.choose_claude_account(values, NOW) == expected
+
+
+@pytest.mark.parametrize('reverse', [False, True])
+def test_choose_claude_account_prefers_pro_plan_on_equal_waste(quota, reverse):
+    values = {label: {'status': 'ok', 'plan': plan, 'windows': [
+        window(10, 300, timedelta(hours=2), 'five_hour'),
+        window(10, WEEK, timedelta(days=3.5)),
+    ]} for label, plan in [('a-max', 'max'), ('z-pro', 'pro')]}
+    if reverse:
+        values = dict(reversed(list(values.items())))
+    assert quota.choose_claude_account(values, NOW) == 'z-pro'
+
+
+def test_choose_claude_account_releases_exhaustion_after_reset(quota):
+    values = {'reset': {'status': 'ok', 'windows': [
+        window(100, 300, timedelta(seconds=-1), 'five_hour'),
+        window(100, WEEK, timedelta(seconds=-1)),
+    ]}}
+    assert quota.choose_claude_account(values, NOW) == 'reset'
+
+
+def test_choose_claude_account_partial_reading_still_excludes_known_exhaustion(quota):
+    values = {'spent': {'status': 'ok', 'windows': [
+        window(100, 300, timedelta(hours=2), 'five_hour'),
+    ]}, 'unknown': None}
+    assert quota.choose_claude_account(values, NOW) == 'unknown'
+
+
+@pytest.mark.parametrize('missing', ['reset_at', 'window_minutes'])
+@pytest.mark.parametrize('used,expected', [(50, 'known-max'), (70, 'unknown-pro')])
+def test_choose_claude_account_incomplete_weekly_pace_ranks_as_unknown(quota, missing, used, expected):
+    incomplete = window(10, WEEK, timedelta(days=3.5))
+    incomplete.pop(missing)
+    values = {'unknown-pro': {'status': 'ok', 'plan': 'pro', 'windows': [
+        window(10, 300, timedelta(hours=2), 'five_hour'), incomplete,
+    ]}, 'known-max': {'status': 'ok', 'plan': 'max', 'windows': [
+        window(10, 300, timedelta(hours=2), 'five_hour'),
+        window(used, WEEK, timedelta(days=3.5)),
+    ]}}
+    assert quota.choose_claude_account(values, NOW) == expected
