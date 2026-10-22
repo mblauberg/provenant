@@ -710,11 +710,15 @@ def spent_codex(quota, account='default', credits=CREDITS, allowance=None, reset
                     **({'allowance': allowance} if allowance else {}))
 
 
+def cooldown(status, recorded, **extra):
+    return {'codex/*': {'account': 'default', 'host': 'studio', 'adapter': 'codex', 'model': '*', 'status': status,
+                        'cooling_until': iso(NOW + timedelta(hours=8)), 'recorded_at': iso(recorded), **extra}}
+
+
 def test_credits_keep_an_exhausted_codex_account_usable_as_a_last_resort(quota):
     spent_codex(quota)
-    stale = {'codex/*': {'account': 'default', 'host': 'studio', 'adapter': 'codex', 'model': '*', 'status': 'usage_limited',
-                         'cooling_until': iso(NOW + timedelta(hours=8)), 'recorded_at': iso(NOW - timedelta(hours=1))}}
-    assert quota.apply_to_cooldowns(stale, NOW) == {}
+    # The cooldown an earlier exhausted reading set goes once credits keep the account usable.
+    assert quota.apply_to_cooldowns(cooldown('quota_exhausted', NOW - timedelta(hours=1), source='provider quota'), NOW) == {}
     state = quota.route_states(NOW)['codex']
     assert state['state'] == 'credit_only' and state['last_resort'] is True
     assert state['summary'] == 'primary: allowance spent; drawing on credits, 27,406 credits available'
@@ -726,15 +730,35 @@ def test_credits_keep_an_exhausted_codex_account_usable_as_a_last_resort(quota):
     assert quota.route_states(NOW)['codex']['state'] == 'credit_only'
 
 
-@pytest.mark.parametrize('case', ['floor', 'spend_control', 'depleted', 'no_credits'])
-def test_credits_that_cannot_be_spent_leave_the_account_exhausted(quota, tmp_path, case):
-    if case == 'floor':
-        configure(tmp_path, {'quota': {'credit_floor': 30000}})
+def test_a_refusal_while_drawing_on_credits_keeps_its_cooldown_until_allowance_returns(quota):
+    # Dispatch is refused (credits switched off, say); the next reading still shows credits.
+    refused = cooldown('usage_limited', NOW - timedelta(hours=1))
+    spent_codex(quota)
+    assert quota.apply_to_cooldowns(refused, NOW) == refused
+    snapshot(quota, 'codex', [window(100, WEEK, timedelta(hours=3), 'primary')], observed=NOW + timedelta(minutes=10),
+             usage_credits=CREDITS)
+    assert quota.apply_to_cooldowns(refused, NOW + timedelta(minutes=10)) == refused
+    # A reading with allowance again confirms recovery, so routing may retry.
+    snapshot(quota, 'codex', [window(5, WEEK, timedelta(days=7), 'primary')], observed=NOW + timedelta(hours=4))
+    assert quota.apply_to_cooldowns(refused, NOW + timedelta(hours=4)) == {}
+
+
+@pytest.mark.parametrize('used', [100, 60])
+@pytest.mark.parametrize('case', ['floor', 'spend_control', 'depleted', 'no_credits', 'never'])
+def test_credits_that_cannot_be_spent_leave_the_account_exhausted(quota, tmp_path, case, used):
+    configure(tmp_path, {'quota': {'credit_floor': 30000} if case == 'floor' else
+                                  {'credits_policy': 'never'} if case == 'never' else {}})
     allowance = {'spend_control': {'spend_control_reached': True},
-                 'depleted': {'limit_reached_type': 'workspace_member_credits_depleted'}}.get(case)
-    spent_codex(quota, credits=None if case == 'no_credits' else CREDITS, allowance=allowance)
-    assert quota.route_states(NOW)['codex']['state'] == 'exhausted'
+                 'depleted': {'limit_reached_type': 'workspace_member_credits_depleted'}}.get(case) or {}
+    # Below 100%, only the provider's refusal of ordinary use spends the allowance.
+    allowance |= {'ordinary_usage_allowed': False} if used < 100 else {}
+    snapshot(quota, 'codex', [window(used, WEEK, timedelta(hours=3), 'primary')],
+             usage_credits=None if case == 'no_credits' else CREDITS, **({'allowance': allowance} if allowance else {}))
+    state = quota.route_states(NOW)['codex']
+    assert state['state'] == 'exhausted' and state['cooling_until'] == iso(NOW + timedelta(hours=3))
     assert quota.apply_to_cooldowns({}, NOW)['codex/*']['status'] == 'quota_exhausted'
+    if used < 100:
+        assert state['summary'] == 'primary: allowance spent; codex refuses ordinary use'
 
 
 @pytest.mark.parametrize('policy, state, order, cooled', [

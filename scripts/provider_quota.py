@@ -738,13 +738,18 @@ def credits_policy():
     return value if value in CREDITS_POLICIES else CREDITS_POLICIES[0]
 
 
-def credit_draw(value, worst):
+def allowance_spent(value, worst):
+    """Whether the plan allowance is gone: a window is exhausted, or the provider refuses ordinary use."""
+    allowance = value.get('allowance') or {}
+    return bool(worst) and (worst['pace']['state'] == 'exhausted' or allowance.get('ordinary_usage_allowed') is False)
+
+
+def credit_draw(value, spent):
     """The credit that keeps an account usable once its allowance is spent, or None.
 
     Only the latest reading's balance counts, and only above `quota.credit_floor`; a spend control or
     depleted credits stop it. The `never` policy leaves such an account exhausted."""
     allowance = value.get('allowance') or {}
-    spent = worst and (worst['pace']['state'] == 'exhausted' or allowance.get('ordinary_usage_allowed') is False)
     if (not spent or credits_policy() == 'never' or allowance.get('spend_control_reached') is True
             or 'credits_depleted' in allowance.get('limit_reached_type', '')):
         return None
@@ -762,9 +767,11 @@ def burn_rate(value, entry):
     return round(spent / hours, 2) if spent > 0 and hours > 0 else None
 
 
-def summary(value, worst, drawing, rate):
+def summary(value, worst, spent, drawing, rate):
     if not worst:
         return value.get('error') or 'unreported'
+    if spent and not drawing and worst['pace']['state'] != 'exhausted':
+        return f"{worst['name']}: allowance spent; {value.get('provider')} refuses ordinary use"
     if not drawing:
         return f"{worst['name']}: {worst['pace']['summary']}"
     return (f"{worst['name']}: allowance spent; drawing on credits, {credit_text(drawing)}"
@@ -776,15 +783,16 @@ def describe(value, banked, now):
     rows = [{**row, 'pace': pace(row, now), **({'label': labels[row['name']]} if labels.get(row['name']) else {})}
             for row in value.get('windows') or []]
     worst = governing(rows)
-    drawing = credit_draw(value, worst)
+    spent = allowance_spent(value, worst)
+    drawing = credit_draw(value, spent)
     rate = burn_rate(value, drawing) if drawing else None
     unreported = list(value.get('unreported') or [])
     dated = [row for row in rows if row.get('reset_at') and row.get('window_minutes')]
     longest = max(dated, key=lambda row: row['window_minutes'], default=None)
     return {key: value.get(key) for key in ('provider', 'account', 'plan', 'host', 'active', 'priority',
                                             'observed_at', 'attempted_at', 'status', 'error', 'source')} | {
-        'state': 'credit_only' if drawing else worst['pace']['state'] if worst else 'unreported',
-        'summary': summary(value, worst, drawing, rate),
+        'state': 'credit_only' if drawing else 'exhausted' if spent else worst['pace']['state'] if worst else 'unreported',
+        'summary': summary(value, worst, spent, drawing, rate),
         'windows': rows, 'unreported': unreported,
         'coverage_note': f"{', '.join(unreported)} not reported by {value.get('provider')}; missing does not mean 0%"
                          if unreported else '',
@@ -851,6 +859,9 @@ def route_states(now=None):
         row = describe(value, None, now)
         exhausted = [window['reset_at'] for window in row['windows']
                      if window['pace']['state'] == 'exhausted' and sets_state(window)]
+        if row['state'] == 'exhausted' and not exhausted:
+            # The provider refuses ordinary use below 100%: cool until the governing window resets.
+            exhausted = [governing(row['windows'])['reset_at']]
         states[name] = {'adapter': getattr(module, 'ADAPTER', None), 'account': label, 'host': telemetry_host(), 'state': row['state'],
                         'summary': row['summary'], 'observed_at': value.get('observed_at'),
                         'cooling_until': max(exhausted) if exhausted and all(exhausted) else None,
@@ -874,12 +885,14 @@ def apply_to_cooldowns(records, now=None):
             continue
         observed = parse_time(state['observed_at'])
         until = parse_time(state['cooling_until'])
-        # An account drawing on credits stays usable: it clears usage cooldowns and adds none.
-        if observed and state['state'] in ('reserve', 'on_pace', 'early', 'not_started', 'credit_only'):
+        # An account drawing on credits adds no cooldown and clears only the ones quota set. A real
+        # refusal stays until it expires or a reading shows allowance again: credits may be switched off.
+        drawing = state['state'] == 'credit_only'
+        if observed and (drawing or state['state'] in ('reserve', 'on_pace', 'early', 'not_started')):
             for key, record in records.items():
                 recorded = parse_time((record or {}).get('recorded_at'))
                 if (identity.matches(record, state) and str(key).split('/', 1)[0] == adapter and record.get('status') in ('usage_limited', 'quota_exhausted')
-                        and recorded and observed > recorded):
+                        and recorded and observed > recorded and (not drawing or record.get('source') == 'provider quota')):
                     result.pop(key, None)
         if state['state'] == 'exhausted' and until and until > now:
             key = f'{adapter}/*'

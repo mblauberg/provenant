@@ -248,7 +248,10 @@ above `quota.credit_floor` (default 0), or unlimited credits, and the provider
 reports no spend control reached and no depleted credits. Such an account has
 state `credit_only`, `drawing_credits: true`, a summary with its balance, and
 `credit_burn_per_hour` once successive readings show the balance falling. It adds
-no quota cooldown and clears older usage cooldowns like a reserve reading.
+no quota cooldown and clears older cooldowns that quota set. A cooldown from a
+real refusal stays until it expires or a reading shows allowance again, since
+credits may be switched off. A spent allowance without usable credits is
+`exhausted`, even below 100%, and cools until the governing window resets.
 `quota.credits_policy` sets how routing ranks it:
 
 - `last_resort` (default): placement ranks it after every account with
