@@ -110,3 +110,10 @@ def test_documented_fabric_call_parameters_fit_server_schema():
                 violations.append((str(path.relative_to(ROOT)), tool, sorted(invalid)))
     assert not violations, violations
     assert {"fabric_dispatch", "fabric_status", "fabric_cancel", "fabric_output"} <= covered
+    assert {"skills", "workflows", "docs"} <= {path.relative_to(ROOT).parts[0] for path in documentation_paths()}
+
+
+def test_checker_rejects_unknown_field_and_removed_tool():
+    for snippet in ("fabric_dispatch{imaginary: true}", "fabric_retired_tool()"):
+        tool, fields = next(documented_calls(snippet))
+        assert not call_fits_schema(tool, fields), snippet
