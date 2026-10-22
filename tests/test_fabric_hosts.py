@@ -1265,48 +1265,48 @@ class LaneLoopbackContracts(unittest.TestCase):
                     ('reader-chunk-failure',)).fetchone()[0], 'laptop')
         self.assertFalse((self.peer_home / '.agents/.agent-fabric/operations/reader-chunk-failure.json').exists())
 
-    def test_explicit_reader_host_never_falls_back(self):
+    def test_explicit_reader_host_never_falls_back_on_transport_failure(self):
         import fabric_hosts as hosts
-        # The unregistered peer project forces the transport failure case.
-        with self.subTest(failure='transport'):
-            with patch.dict(os.environ, self.env):
-                owner = hosts.lane_owner()
-                with self.assertRaises(hosts.HostError):
-                    owner.client_call('dispatch', str(self.workspace), {
-                        'host': 'workshop', 'mode': 'read_only', 'prompt': 'review',
-                        'operation_id': 'explicit-reader-failure'})
-                with owner.database() as db:
-                    self.assertIsNone(db.execute('SELECT id FROM writer_dispatches WHERE id=?',
-                        ('explicit-reader-failure',)).fetchone())
+        with patch.dict(os.environ, self.env):
+            owner = hosts.lane_owner()
+            with self.assertRaises(hosts.HostError):
+                owner.client_call('dispatch', str(self.workspace), {
+                    'host': 'workshop', 'mode': 'read_only', 'prompt': 'review',
+                    'operation_id': 'explicit-reader-failure'})
+            with owner.database() as db:
+                self.assertIsNone(db.execute('SELECT id FROM writer_dispatches WHERE id=?',
+                    ('explicit-reader-failure',)).fetchone())
 
+    def test_explicit_reader_host_never_falls_back_after_chunk_timeout(self):
+        import fabric_hosts as hosts
         self.writer_fixture()
-        with self.subTest(failure='chunk timeout'):
-            original_call = hosts.PeerClient.call
-            def call(client, verb, *args, **kwargs):
-                if verb == 'git-upload':
-                    raise hosts.HostError('timeout', 'chunk deadline')
-                return original_call(client, verb, *args, **kwargs)
-            with patch.dict(os.environ, self.env), patch.object(hosts.PeerClient, 'call', call):
-                owner = hosts.lane_owner()
-                result = owner.client_call('dispatch', str(self.workspace), {
-                    'host': 'workshop', 'prompt': 'review', 'operation_id': 'explicit-chunk'})
-                self.assertNotIn('local', result)
-                self.assertEqual(result['status'], 'launch_unknown')
-                with owner.database() as db:
-                    self.assertEqual(db.execute('SELECT host FROM writer_dispatches WHERE id=?',
-                        ('explicit-chunk',)).fetchone()[0], 'workshop')
-            self.assertFalse((self.peer_home / '.agents/.agent-fabric/operations/explicit-chunk.json').exists())
-
-        with self.subTest(failure='peer preparation'):
-            outside = self.peer_home / 'outside'
-            outside.mkdir()
-            (self.peer_workspace / '.worktrees').symlink_to(outside, target_is_directory=True)
-            result = self.client('dispatch', host='workshop', prompt='review',
-                operation_id='explicit-peer-prepare')
+        original_call = hosts.PeerClient.call
+        def call(client, verb, *args, **kwargs):
+            if verb == 'git-upload':
+                raise hosts.HostError('timeout', 'chunk deadline')
+            return original_call(client, verb, *args, **kwargs)
+        with patch.dict(os.environ, self.env), patch.object(hosts.PeerClient, 'call', call):
+            owner = hosts.lane_owner()
+            result = owner.client_call('dispatch', str(self.workspace), {
+                'host': 'workshop', 'prompt': 'review', 'operation_id': 'explicit-chunk'})
             self.assertNotIn('local', result)
-            self.assertEqual(result['status'], 'rejected')
-            self.assertTrue(result['code_transport_prelaunch_failure'])
-            self.assertEqual(list(outside.iterdir()), [])
+            self.assertEqual(result['status'], 'launch_unknown')
+            with owner.database() as db:
+                self.assertEqual(db.execute('SELECT host FROM writer_dispatches WHERE id=?',
+                    ('explicit-chunk',)).fetchone()[0], 'workshop')
+        self.assertFalse((self.peer_home / '.agents/.agent-fabric/operations/explicit-chunk.json').exists())
+
+    def test_explicit_reader_host_never_falls_back_after_peer_preparation_failure(self):
+        self.writer_fixture()
+        outside = self.peer_home / 'outside'
+        outside.mkdir()
+        (self.peer_workspace / '.worktrees').symlink_to(outside, target_is_directory=True)
+        result = self.client('dispatch', host='workshop', prompt='review',
+            operation_id='explicit-peer-prepare')
+        self.assertNotIn('local', result)
+        self.assertEqual(result['status'], 'rejected')
+        self.assertTrue(result['code_transport_prelaunch_failure'])
+        self.assertEqual(list(outside.iterdir()), [])
 
     def test_knob_overrides_are_refused_for_a_remote_lane_and_kept_for_a_local_one(self):
         import fabric_hosts as hosts
