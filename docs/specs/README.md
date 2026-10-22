@@ -25,3 +25,4 @@ described. Fabric is now small enough to be its own documentation: see
 - [Configurable multi-provider execution core](harness/provider-execution-core.md)
 - [Harness operating model: routing, cache, quota and telemetry](harness/operating-model.md)
 - [Held-out replay bench for harness changes](harness/replay-bench.md)
+- [Replay bench studies: model-effort frontier and fleet topology](harness/replay-bench-studies.md)
