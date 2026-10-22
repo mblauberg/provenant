@@ -2297,10 +2297,10 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
     provider_temporary = None
     cancelled = False
     old_handlers: dict[int, Any] = {}
-    def admit_attempt(active, cancelled_now):
+    def admit_attempt(active, cancelled_now, *, cooldown_blocked=False):
         nonlocal started, started_at, memory_lease, process_error, admission_queued_seconds
         pacing = vars(args).pop("_rate_limit_retry", None)
-        if pacing:
+        if pacing and not cooldown_blocked:
             active.update(state="queued", queue_reason="rate_limit", reason="waiting for model cooldown")
             publish_contract(run_dir, active)
             while not cancelled_now():
@@ -2416,7 +2416,12 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
                 if hasattr(args,"resume_relaunch"):
                     plan["prompt"] += "\n\nPrevious turn and question:\n"+args.resume_relaunch
                     plan["argv"] = provider_exec.profile(args.tool).argv(plan)
-                cooling=exec_routing.cooling(args.tool,plan["model"], account=plan.get("account"))
+                pinned_account = getattr(args, "_explicit_account", getattr(args, "account", None))
+                # A resume can launch on its earlier account; only the named account counts as pinned.
+                explicitly_pinned = (plan["adapter"] == "claude" and pinned_account is not None
+                                     and plan.get("account") == pinned_account)
+                cooling=exec_routing.cooling(args.tool,plan["model"], account=plan.get("account"),
+                                             explicit_account=explicitly_pinned)
                 if cooling:
                     pacing = getattr(args, "_rate_limit_retry", None)
                     if (args.model and getattr(args, "fallback_from", None)
@@ -2436,7 +2441,8 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
                             except ValueError: continue
                             if replacement.get("schema")!="fabric.exec-plan.v1": continue
                             if exec_routing.cooling(candidate["adapter"], candidate["model"],
-                                                    account=replacement.get("account")): continue
+                                                    account=replacement.get("account"),
+                                                    explicit_account=explicitly_pinned and candidate["adapter"] == "claude"): continue
                             old_run_dir = replacement.get("run_dir")
                             replacement["run_dir"] = str(attempt_dir)
                             boundary_paths = replacement.get("applied", {}).get("write_boundary", {}).get("writable_paths")
@@ -2450,6 +2456,11 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
                         else:
                             plan["warnings"].append("all alias candidates cooling")
                             plan["cooldown_blocked"]=cooling
+                if explicitly_pinned and plan["adapter"] == "claude" and not plan.get("cooldown_blocked"):
+                    warning = exec_routing.pinned_account_warning(plan["adapter"], pinned_account)
+                    if warning:
+                        plan["warnings"].append(warning)
+                        print(warning, file=sys.stderr)
                 ceiling = args.context_ceiling if args.context_ceiling is not None else profile_knob(args, "context.ceiling_tokens")
                 if ceiling is not None:
                     context_usage.apply_ceiling(plan,ceiling,provider_exec.profile(plan["adapter"]).argv)
@@ -2485,7 +2496,7 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
                         progress_publication[0]=time.monotonic()
                 def cancellation():
                     return owner_cancel[0] or cancellation_marker_present(run_dir,attempt_dir) or (batch_dir is not None and cancellation_marker_present(run_dir,batch_dir))
-                admitted = admit_attempt(active, cancellation)
+                admitted = admit_attempt(active, cancellation, cooldown_blocked=bool(plan.get("cooldown_blocked")))
                 plan["timeout_seconds"] = provider_timeout_seconds(args.timeout_seconds)
                 if plan["adapter"] == "agy" and admitted:
                     plan["argv"] = provider_exec.profile("agy").argv(plan)
@@ -3028,7 +3039,8 @@ def execute_attempt_sequence(args,custody=None):
         return fail(args.run_dir, "fallback_invalid", str(exc))
     sequence_start=time.monotonic()
     sequence_budget=args.timeout_seconds
-    explicit_account = getattr(args, "account", None)
+    explicit_account = getattr(args, "_explicit_account", getattr(args, "account", None))
+    args._explicit_account = explicit_account
     result = _dispatch(args, custody)
     previous=getattr(args,"_last_row",None)
     plan=getattr(args,"_last_plan",None)
@@ -3045,11 +3057,14 @@ def execute_attempt_sequence(args,custody=None):
             retry_account = current.get("account")
             if (current["adapter"] == "claude" and explicit_account is None
                     and exec_routing.claude_account_needs_reselection(retry_account)):
-                retry_account = None
+                retry_account = exec_routing.reselect_claude_account()
             key = (current["adapter"], exec_routing.registered_model(current["adapter"], current["model"]))
-            cooling = exec_routing.cooling(*key, account=current.get("account"))
+            cooling = exec_routing.cooling(*key, account=retry_account,
+                                           explicit_account=current["adapter"] == "claude" and explicit_account is not None)
             policy = pacing_policy()
-            delay = rate_limit_delay(previous, cooling, policy)
+            # A healthy reselected account owes nothing to the released account's retry window.
+            switched = retry_account != current.get("account")
+            delay = 0.0 if switched and not cooling else rate_limit_delay(previous, cooling, policy)
             pace = (previous["status"] == "rate_limited" and key not in retried
                     and (previous.get("evidence") or {}).get("signature") != "cooldown_active"
                     and delay + policy["minimum_budget_seconds"] <= remaining)
@@ -3108,6 +3123,7 @@ def cleanup_settled_reader(args) -> None:
 
 def dispatch(args: argparse.Namespace) -> int:
     """Run one attempt while serialising standalone run-ledger mutation."""
+    args._explicit_account = getattr(args, "account", None)
     # Publish under custody before re-exec and before peer placement consumes stdin.
     run_dir = args.run_dir.resolve()
     standalone_batch_child = False

@@ -319,17 +319,47 @@ def claude_account_needs_reselection(account):
         return True
 
 
-def cooling(adapter, model, records=None, *, account=None):
+def reselect_claude_account():
+    """Resolve a released automatic pin before consulting account-scoped cooldowns."""
+    quota = _provider_quota()
+    if not quota:
+        return None
+    try:
+        return quota.choose_claude_account({row.label: quota.load_snapshot('claude', row.label, row.identity_dir)
+                                            for row in quota.accounts('claude')}, datetime.now(UTC))
+    except Exception:  # Planning owns exhausted-account and invalid-configuration diagnostics.
+        return None
+
+
+def pinned_account_warning(adapter, account):
+    """Explain an explicit quota override using only a validated account label."""
+    quota = _provider_quota()
+    if not quota or account is None or not quota.LABEL.fullmatch(account):
+        return None
+    try:
+        state = quota.route_states(selected_accounts={adapter: account}).get(adapter, {}).get('state')
+    except Exception:  # Quota warnings remain advisory.
+        return None
+    if state in ('credit_only', 'exhausted'):
+        return f'account {account} is out of quota ({state}): launching because it was pinned explicitly'
+    return None
+
+
+def cooling(adapter, model, records=None, *, account=None, explicit_account=False):
     if records is None:
         scopes = ({adapter: {'account': account, 'host': identity_resolver().host_id()}}
                   if account is not None else None)
         records = read_cooldowns(scopes=scopes) if scopes else read_cooldowns()
+        if explicit_account:
+            # Pins override quota advice; provider refusals still reconcile with newer readings.
+            records = {key: entry for key, entry in records.items() if entry.get('source') != 'provider quota'}
         quota = _provider_quota()
         try:
             # Cached provider readings only: an exhausted window cools until reset, and
             # a newer reading with headroom drops a stale usage cooldown.
             if quota:
-                records = (quota.apply_to_cooldowns(records, selected_accounts={adapter: account})
+                records = (quota.apply_to_cooldowns(records, selected_accounts={adapter: account},
+                                                   include_exhausted=not explicit_account)
                            if account is not None else quota.apply_to_cooldowns(records))
         except Exception:  # noqa: BLE001 - quota is advisory input to routing
             pass

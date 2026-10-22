@@ -1639,7 +1639,7 @@ def route_states(now=None, *, selected_accounts=None):
     return states
 
 
-def apply_to_cooldowns(records, now=None, *, selected_accounts=None):
+def apply_to_cooldowns(records, now=None, *, selected_accounts=None, include_exhausted=True):
     """Add cooldowns for exhausted providers; drop stale usage cooldowns where the provider has headroom."""
     now = now or utcnow()
     try:
@@ -1662,7 +1662,7 @@ def apply_to_cooldowns(records, now=None, *, selected_accounts=None):
                 if (identity.matches(record, state) and str(key).split('/', 1)[0] == adapter and record.get('status') in ('usage_limited', 'quota_exhausted')
                         and recorded and observed > recorded and (not drawing or record.get('source') == 'provider quota')):
                     result.pop(key, None)
-        if state['state'] == 'exhausted' and until and until > now:
+        if include_exhausted and state['state'] == 'exhausted' and until and until > now:
             key = f'{adapter}/*'
             record = result.get(key) or {}
             recorded = parse_time(record.get('recorded_at'))
