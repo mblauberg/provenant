@@ -12,6 +12,7 @@
  * records do not authorise a broader group kill that could hit a shared host.
  */
 import { projectRoot, runRoot, withoutGitRedirects } from "./identity.js";
+import { pythonOwner } from "./execution.js";
 import { federatedLane } from "./hosts.js";
 import { canonicalSuccessStatus, isSuccessStatus } from "./success-status.js";
 export { runRoot } from "./identity.js";
@@ -194,10 +195,11 @@ export async function reapAttemptRuns(workspace: string, runDirs?: string[]): Pr
       .some((owner) => observedAlive(owner.pid, owner.startedAt)));
   if (!active.length) return [];
   const product = process.env.AGENT_FABRIC_PRODUCT_ROOT ?? resolve(import.meta.dirname, "../../..");
-  if (!isAbsolute(product)) return [];
   try {
+    if (!isAbsolute(product)) throw new Error("AGENT_FABRIC_PRODUCT_ROOT must be absolute");
+    const python = await pythonOwner(product, process.env);
     const output = await new Promise<string>((done, reject) => {
-      const child = execFile(process.env.HARNESS_PYTHON ?? "python3",
+      const child = execFile(python,
         [join(product, "skills/orchestrate/scripts/dispatch_run.py"), "--reap-attempts"],
         { cwd: workspace, timeout: 10_000, maxBuffer: 64 * 1024 },
         (error, stdout) => error ? reject(error) : done(stdout));
@@ -206,8 +208,9 @@ export async function reapAttemptRuns(workspace: string, runDirs?: string[]): Pr
     });
     const changed: unknown = JSON.parse(output);
     return Array.isArray(changed) ? changed.filter((dir): dir is string => typeof dir === "string" && active.includes(dir)) : [];
-  } catch {
+  } catch (error) {
     // Probe or custody failures preserve the retained evidence for a later read.
+    console.warn(`attempt_reap_failed: ${error instanceof Error ? error.message : String(error)}`);
     return [];
   }
 }
@@ -947,7 +950,6 @@ function v1Rows(runDir: string): Record<string, any>[] {
         grouped.set(String(row.task_id), values);
       }
   }
-  if (grouped.size === 0) return [];
   const metadata = readJson(join(runDir, "dispatch-status.json"));
   const receipt = readJson(join(runDir, "RUN_RECEIPT.json"));
   const owners = runOwners(readOwnerRecord(runDir), metadata);
@@ -966,6 +968,7 @@ function v1Rows(runDir: string): Record<string, any>[] {
     typeof metadata?.batch_id === "string" && /^[A-Za-z0-9._-]+$/u.test(metadata.batch_id)
       ? readJson(join(runDir, "dispatch/batches", metadata.batch_id, "summary.json"))
       : undefined;
+  if (grouped.size === 0 && !Array.isArray(summary?.tasks)) return [];
   const rows: Record<string, any>[] = [...grouped.values()].map((attempts) => {
     const row = attempts.sort((a, b) => Number(a.attempt) - Number(b.attempt)).at(-1)!;
     const routeIndex = Array.isArray(metadata?.task_ids) ? metadata.task_ids.indexOf(row.task_id) : 0;
@@ -1019,7 +1022,7 @@ function v1Rows(runDir: string): Record<string, any>[] {
     };
   });
   // A batch cannot finish before every manifest task has a row.
-  if (rows.length && Array.isArray(metadata?.task_ids))
+  if (Array.isArray(metadata?.task_ids))
     for (const id of metadata.task_ids) {
       if (rows.some((row) => row.task_id === id)) continue;
       const terminalTask = Array.isArray(summary?.tasks)
@@ -1036,6 +1039,9 @@ function v1Rows(runDir: string): Record<string, any>[] {
         attempt: 0,
         attempts: [],
         attempt_count: 0,
+        ...(terminalTask?.outcome === undefined ? {} : { outcome: terminalTask.outcome }),
+        ...(typeof terminalTask?.error === "string" ? { error: terminalTask.error } : {}),
+        ...(typeof terminalTask?.fix === "string" ? { fix: terminalTask.fix } : {}),
         state: terminal ? "terminal" : "queued",
         status: terminal ? canonicalSuccessStatus(terminalTask?.status ?? "interrupted") : null,
         started_at: metadata.started_at,

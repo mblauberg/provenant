@@ -246,7 +246,22 @@ fn run(args: &[OsString]) -> u8 {
             Err(message) => message.map_or(3, |message| fail(&message)),
         },
         Route::Owner { relative, args } => match target(relative, &settings) {
-            Ok((program, root)) => launch(&program, &args, root.as_deref()),
+            Ok((program, root)) => {
+                if relative.ends_with(".py") && is_file(&program) && exec::is_executable(&program) {
+                    let checkout = program
+                        .ancestors()
+                        .nth(Path::new(relative).components().count())
+                        .unwrap();
+                    let mut forwarded = vec![
+                        checkout.join("scripts/lib/harness-python.sh").into_os_string(),
+                        program.into_os_string(),
+                    ];
+                    forwarded.extend(args);
+                    launch(Path::new("/bin/bash"), &forwarded, root.as_deref())
+                } else {
+                    launch(&program, &args, root.as_deref())
+                }
+            }
             Err(message) => fail(&message),
         },
     }
@@ -273,13 +288,12 @@ fn run_python(args: &[OsString], settings: &Settings) -> u8 {
             exec::REPAIR
         ));
     }
-    let mut forwarded = vec![dispatcher.into_os_string()];
+    let mut forwarded = vec![
+        root.join("scripts/lib/harness-python.sh").into_os_string(),
+        dispatcher.into_os_string(),
+    ];
     forwarded.extend_from_slice(args);
-    launch(
-        Path::new("/usr/bin/env"),
-        &[&[OsString::from("python3")][..], &forwarded].concat(),
-        Some(&root),
-    )
+    launch(Path::new("/bin/bash"), &forwarded, Some(&root))
 }
 
 fn starts_with_shebang(path: &Path) -> bool {

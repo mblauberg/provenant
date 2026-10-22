@@ -56,7 +56,8 @@ fn run_helper(helper: &Path) -> Result<Selection, Option<String>> {
             helper.display()
         )));
     }
-    let output = Command::new("python3")
+    let output = Command::new("/bin/bash")
+        .arg(helper.parent().unwrap().join("lib/harness-python.sh"))
         .arg(helper)
         .stdin(Stdio::null())
         .stderr(Stdio::inherit())

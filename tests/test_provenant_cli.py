@@ -42,6 +42,9 @@ def make_checkout(tmp_path: Path) -> tuple[Path, Path]:
     checkout = tmp_path / "checkout"
     scripts = checkout / "scripts"
     scripts.mkdir(parents=True)
+    venv = checkout / ".venv/bin/python"
+    venv.parent.mkdir(parents=True)
+    venv.symlink_to(sys.executable)
     shutil.copy2(SOURCE, scripts / "provenant")
     shutil.copy2(ROOT / "scripts/worktree.py", scripts / "worktree.py")
     shutil.copytree(ROOT / "scripts/lib", scripts / "lib")

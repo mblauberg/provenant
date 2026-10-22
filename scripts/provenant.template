@@ -85,6 +85,9 @@ def execute(path: Path, arguments: list[str], product_root: Path) -> NoReturn:
     # the same default for itself when the variable is absent.
     environment["AGENTS_HOME"] = str(product_root)
     try:
+        if path.suffix == ".py" and path.is_file() and os.access(path, os.X_OK):
+            helper = product_root / "scripts/lib/harness-python.sh"
+            os.execve("/bin/bash", ["/bin/bash", str(helper), str(path), *arguments], environment)
         os.execve(path, [str(path), *arguments], environment)
     except OSError as exc:
         print(f"provenant: cannot execute {path}: {exc.strerror or exc}; {REPAIR}", file=sys.stderr)

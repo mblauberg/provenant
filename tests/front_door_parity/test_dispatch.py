@@ -292,3 +292,38 @@ def test_python_rollback_runs_the_preserved_dispatcher_instead_of_looping(dispat
 
     assert result.returncode == 0, result.err
     assert result.out.startswith("usage: provenant <command>")
+
+
+@pytest.mark.parametrize("verb,owner", [
+    ("dispatch", "skills/orchestrate/scripts/dispatch_run.py"),
+    ("batch", "skills/orchestrate/scripts/batch_run.py"),
+    ("run", "skills/orchestrate/scripts/run_controls.py"),
+    ("capabilities", "skills/orchestrate/scripts/capabilities.py"),
+    ("clean", "scripts/clean.py"),
+    ("reap", "scripts/reap.py"),
+    ("lint", "scripts/provenant_lint.py"),
+])
+@pytest.mark.parametrize("selection", ["venv", "override"])
+def test_python_owners_use_harness_interpreter_with_old_python_on_path(fd, verb, owner, selection):
+    import sys
+
+    python = fd.tmp / "old-bin/python3"
+    python.parent.mkdir()
+    python.write_text(
+        '#!/bin/sh\ncase "$1" in\n'
+        f'  */scripts/provenant|*/stable-bin/provenant) exec "{sys.executable}" "$@";;\n'
+        '  *) echo "old python cannot import datetime.UTC" >&2; exit 99;;\nesac\n'
+    )
+    python.chmod(0o755)
+    venv = fd.checkout / ".venv/bin/python"
+    fd.owner(owner).write_text(
+        '#!/usr/bin/env python3\nfrom datetime import UTC\nimport json, sys\n'
+        'print(json.dumps({"python": sys.executable, "args": sys.argv[1:]}))\n'
+    )
+
+    result = fd.run(verb, "two words", "", PATH=f"{python.parent}:{os.environ['PATH']}",
+                    HARNESS_PYTHON=sys.executable if selection == "override" else None)
+
+    assert result.returncode == 0, result.err
+    assert result.payload() == {"python": sys.executable if selection == "override" else str(venv),
+                                "args": ["two words", ""]}
