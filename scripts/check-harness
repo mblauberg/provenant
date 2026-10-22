@@ -2,11 +2,16 @@
 set -euo pipefail
 
 DOCTOR=false
+CHECKS_ONLY=false
 if [[ "${1:-}" == "--doctor" ]]; then
   DOCTOR=true
   shift
 fi
-[[ $# -eq 0 ]] || { echo "usage: check-harness [--doctor]" >&2; exit 2; }
+if [[ "${1:-}" == "--checks-only" ]]; then
+  CHECKS_ONLY=true
+  shift
+fi
+[[ $# -eq 0 ]] || { echo "usage: check-harness [--doctor] [--checks-only]" >&2; exit 2; }
 
 # Git discovery for checkout identity and interpreter selection must not inherit
 # caller redirects that can point the gate at another repository.
@@ -185,6 +190,8 @@ if [[ -d "$HOME/.claude/workflows" ]]; then
 fi
 
 run_test "$SCRIPTS_ROOT/static-security-check.py"
+
+[[ "$CHECKS_ONLY" == true ]] && exit 0
 
 # The suite runs under pytest-xdist. HARNESS_PYTEST_WORKERS overrides the
 # worker count (default "auto"); set it to 0 to run serially when bisecting an
