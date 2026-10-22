@@ -63,10 +63,12 @@ def test_an_unsupported_path_node_is_skipped_for_a_supported_fallback(tmp_path, 
     old = fake_node(tmp_path / 'path/node', supported=False)
     result = launch(tmp_path, name, [tmp_path / 'path'])
     assert f'ran {old}' not in result.stdout
-    if result.returncode:
+    if result.returncode == 127:
         # No supported node on this machine: the error names what it tried.
-        assert result.returncode == 127
         assert f'Unsupported: {old}' in result.stderr and 'set FABRIC_NODE' in result.stderr
+    else:
+        # A real supported node on this machine ran Fabric, which may then fail on the empty test loader.
+        assert 'Unsupported' not in result.stderr
 
 
 @pytest.mark.skipif(any(Path(path).exists() for path in FIXED), reason='a system node would be chosen first')
