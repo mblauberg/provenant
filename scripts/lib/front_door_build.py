@@ -87,6 +87,7 @@ def smoke(binary: Path) -> None:
 
 def build(crate: Path, target_dir: Path, digest: str) -> Path:
     """`cargo build --release --locked` into `target_dir`; returns the binary."""
+    crate, target_dir = crate.resolve(), target_dir.resolve()  # cwd changes below
     environment = os.environ.copy()
     environment["CARGO_TARGET_DIR"] = str(target_dir)
     environment["PROVENANT_FD_SOURCE_SHA256"] = digest

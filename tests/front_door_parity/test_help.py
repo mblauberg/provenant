@@ -127,7 +127,14 @@ def test_help_works_without_a_resolvable_product_root(fd):
         assert helped.stdout == b""
     else:
         assert helped.returncode == 0
-        assert_matches_reference(helped, reference_run("help"))
+        if IMPL == "rust":
+            # No root means no owners to prove #1094/#1095: base help, whatever
+            # the reference tree carries.
+            assert "  lint " not in helped.out and "  lease " not in helped.out
+            assert "  lanes ...      runtime/fabric/bin/fabric lanes\n" in helped.out
+            assert "|lint|" not in usage.err and "|lease|" not in usage.err
+        else:
+            assert_matches_reference(helped, reference_run("help"))
         assert usage.returncode == 2 and usage.err.startswith(USAGE_PREFIX)
 
 

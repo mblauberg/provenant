@@ -169,6 +169,17 @@ def test_cargo_runs_in_the_crate_directory_so_the_toolchain_pin_applies(tmp_path
     assert Path((tmp_path / "cwd").read_text().strip()) == crate.resolve()
 
 
+def test_relative_crate_and_target_paths_still_build(tmp_path, monkeypatch):
+    crate = make_crate(tmp_path)
+    fake_cargo(tmp_path / "fake")
+    monkeypatch.setenv("PATH", f"{tmp_path / 'fake'}{os.pathsep}{os.environ['PATH']}")
+    monkeypatch.chdir(tmp_path)
+
+    binary = build.build(Path("tools/front-door"), Path("rel-target"), build.source_digest(crate))
+
+    assert binary.is_file() and (tmp_path / "rel-target/release/provenant").is_file()
+
+
 def test_unreadable_prebuilt_is_fatal_for_rust_and_a_fallback_for_auto(tmp_path):
     crate = make_crate(tmp_path)
     locked = stamped_binary(tmp_path / "pre/locked", build.source_digest(crate))
