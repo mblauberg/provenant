@@ -1312,7 +1312,7 @@ def test_concurrent_reads_share_one_cached_fetch_and_credit_updates_are_not_lost
     import threading
     import time
     calls = []
-    barrier = threading.Barrier(4)
+    barrier = threading.Barrier(4, timeout=10)  # a dead reader fails the test, not the worker
     def fetch(account, io, now):
         calls.append(account.label)
         time.sleep(0.02)

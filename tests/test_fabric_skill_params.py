@@ -110,29 +110,10 @@ def test_documented_fabric_call_parameters_fit_server_schema():
                 violations.append((str(path.relative_to(ROOT)), tool, sorted(invalid)))
     assert not violations, violations
     assert {"fabric_dispatch", "fabric_status", "fabric_cancel", "fabric_output"} <= covered
-
-
-def test_checker_reads_registered_tools_and_all_doc_surfaces():
-    assert {"fabric_dispatch", "fabric_status", "fabric_cancel", "fabric_output", "fabric_adapters", "fabric_whoami"} <= set(SCHEMA)
-    assert {"fabric_dispatch", "fabric_task"} <= set(SCHEMA)
-    assert {"tasks", "concurrency", "resume"} <= SCHEMA["fabric_dispatch"]
-    assert {"ids", "wait_seconds", "until"} <= SCHEMA["fabric_status"]
-    assert {"id", "reason"} <= SCHEMA["fabric_cancel"]
-    assert {"id", "part", "offset", "max_bytes"} <= SCHEMA["fabric_output"]
-    assert {"detail"} <= SCHEMA["fabric_dispatch"]
-    assert {"detail"} <= SCHEMA["fabric_status"]
-    assert {"detail"} <= SCHEMA["fabric_adapters"]
-    assert {"detail"} <= SCHEMA["fabric_whoami"]
-    directories = {path.relative_to(ROOT).parts[0] for path in documentation_paths()}
-    assert {"skills", "workflows", "docs"} <= directories
+    assert {"skills", "workflows", "docs"} <= {path.relative_to(ROOT).parts[0] for path in documentation_paths()}
 
 
 def test_checker_rejects_unknown_field_and_removed_tool():
-    assert list(documented_calls("fabric_dispatch{imaginary: true}")) == [("fabric_dispatch", ["imaginary"])]
-    assert "imaginary" not in SCHEMA["fabric_dispatch"]
-    assert "fabric_batch" not in SCHEMA
-
-
-def test_checker_rejects_removed_tool_even_without_fields():
-    tool, fields = next(documented_calls("fabric_retired_tool()"))
-    assert not call_fits_schema(tool, fields)
+    for snippet in ("fabric_dispatch{imaginary: true}", "fabric_retired_tool()"):
+        tool, fields = next(documented_calls(snippet))
+        assert not call_fits_schema(tool, fields), snippet

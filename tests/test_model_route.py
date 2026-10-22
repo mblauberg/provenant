@@ -2,11 +2,14 @@ import json
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 import importlib.util
+import io
 import os
 from pathlib import Path
 import shutil
 import subprocess
 import sys
+from contextlib import redirect_stderr, redirect_stdout
+from unittest.mock import patch
 
 import pytest
 import yaml
@@ -114,12 +117,12 @@ def test_fallback_inherits_adapter_training_flag_without_false_default():
     assert candidates[0]["trains_on_prompts"] is None
 CRUCIAL_RISK_OVERRIDE = CATALOG["families"]["anthropic"]["risk_tier_overrides"]["crucial"]
 RISK_OVERRIDE_MODEL = CRUCIAL_RISK_OVERRIDE["models"][0]
-NON_OCCUPANT_MODELS = tuple(
+NON_OCCUPANT_MODELS = tuple(dict.fromkeys(
     model
     for models in CATALOG["families"]["anthropic"]["aliases"].values()
     for model in models
     if RISK_OVERRIDE_MODEL.casefold() not in model.casefold()
-)
+))
 
 
 @pytest.fixture
@@ -202,19 +205,17 @@ def test_python_floor_rejects_missing_interpreter(harness_script, runner):
 
 
 def resolve(*args):
-    arguments = [sys.executable, str(ROOT / "scripts" / "model_route.py"), "resolve", *args]
+    arguments = [str(ROOT / "scripts" / "model_route.py"), "resolve", *args]
     # The router reads its catalogue from the instance root, which defaults to
     # ~/.agents. Left unpinned these cases route against whatever catalogue the
     # developer happens to have installed, so they pass or fail on the machine
     # rather than on the repository. CI already pins the same variable.
-    result = subprocess.run(
-        arguments,
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        env={**os.environ, "PATH": "", "AGENT_FABRIC_INSTANCE_ROOT": str(ROOT),
-             "AGENT_FABRIC_PRODUCT_ROOT": str(ROOT)},
-    )
+    environment = {"PATH": "", "AGENT_FABRIC_INSTANCE_ROOT": str(ROOT),
+                   "AGENT_FABRIC_PRODUCT_ROOT": str(ROOT)}
+    stdout, stderr = io.StringIO(), io.StringIO()
+    with patch.dict(os.environ, environment), redirect_stdout(stdout), redirect_stderr(stderr):
+        result = load_router().main(["resolve", *args])
+    result = subprocess.CompletedProcess(arguments, result, stdout.getvalue(), stderr.getvalue())
     return result, json.loads(result.stdout) if result.stdout else None
 
 
@@ -419,6 +420,7 @@ def test_kiro_is_enabled_for_both_routes():
                             "--alias", "junior", "--role", "worker")
     assert result.returncode == 0, route
     assert route["adapter_enabled"] is True
+    assert route["status"] == "ok"
 
 
 def test_agy_write_mode_is_registered():
@@ -4383,17 +4385,6 @@ def test_cursor_accepts_preferred_and_supported_fallback_families_without_model_
     assert wrong_family_route["status"] == "adapter_family_forbidden"
 
 
-def test_enabled_kiro_route_passes_model_compatibility_checks():
-    result, route = resolve(
-        "--adapter", "kiro", "--model", "deepseek-3.2",
-        "--alias", "junior", "--role", "worker",
-    )
-
-    assert result.returncode == 0
-    assert route["status"] == "ok"
-    assert route["adapter_enabled"] is True
-
-
 @pytest.mark.parametrize(
     ("selector_args", "status"),
     (
@@ -4775,15 +4766,14 @@ def test_family_alias_picks_a_newer_live_model_with_a_note_and_never_upgrades_ex
     assert router._registered_match("codex", "sol", catalog)[1] == []
 
 
-def test_resolve_applies_effort_and_cooldown_gates_to_a_live_family_pick(tmp_path):
+def test_resolve_applies_effort_and_cooldown_gates_to_a_live_family_pick(tmp_path, monkeypatch):
     _live_cache(tmp_path, "codex", ["gpt-6.2-sol"])
-    env = {**os.environ, "HARNESS_PYTHON": sys.executable, "AGENT_FABRIC_PRODUCT_ROOT": str(ROOT),
-           "AGENT_FABRIC_INSTANCE_ROOT": str(ROOT), "AGENT_FABRIC_STATE_ROOT": str(tmp_path)}
+    monkeypatch.setenv("AGENT_FABRIC_STATE_ROOT", str(tmp_path))
     def route():
-        run = subprocess.run([str(SCRIPT), "resolve", "--adapter", "codex", "--model", "gpt-sol",
-                              "--effort", "high", "--role", "worker"], capture_output=True, text=True, env=env)
-        assert run.returncode == 0, run.stderr
-        return json.loads(run.stdout)
+        result, resolved = resolve("--adapter", "codex", "--model", "gpt-sol",
+                                   "--effort", "high", "--role", "worker")
+        assert result.returncode == 0, result.stderr
+        return resolved
     result = route()
     assert result["resolved_model"] == "gpt-6.2-sol", result
     assert result["requested_model"] == "gpt-sol"
@@ -4820,29 +4810,48 @@ def test_newer_catalogue_warning_is_daily_and_always_kept_in_notes(tmp_path, mon
     assert emit()["notes"] == [note]
 
 
-def test_a_registered_id_in_the_live_listing_is_not_newer_than_the_catalogue(tmp_path):
-    _live_cache(tmp_path, "codex", ["gpt-6.1-sol"])
-    run = subprocess.run([str(SCRIPT), "resolve", "--adapter", "codex", "--model", "gpt-6.1-sol",
-                          "--alias", "senior", "--role", "worker"], capture_output=True, text=True,
-                         env={**_resolve_env(tmp_path), "FABRIC_ALIAS_IMPLIED": "1"})
-    route = json.loads(run.stdout)
-    assert run.returncode == 0 and route["resolved_model"] == "gpt-6.1-sol", run.stdout
-    assert not any("newer than the catalogue" in note for note in route["notes"] + route["warnings"])
+ROUTE_LIVE_MODELS = {
+    "codex_new": ["gpt-6.2-sol"], "codex_registered": ["gpt-6.1-sol"],
+    "claude_new": ["claude-sonnet-5-6"],
+    "agy_efforts": ["gemini-3.9-flash-low", "gemini-3.9-flash-high", "gemini-3.8-flash-high"],
+}
 
 
-@pytest.mark.parametrize("adapter,model,expected", [
-    ("codex", "gpt-sol", "gpt-6.2-sol"), ("codex", "sol", "gpt-6.2-sol"), ("codex", "GPT_SOL", "gpt-6.2-sol"),
-    ("codex", "s_o_l", "gpt-6.2-sol"), ("codex", "gpt-6.2-sol", "gpt-6.2-sol"),
-    ("claude", "claude-sonnet", "claude-sonnet-5-6"), ("claude", "sonnet", "claude-sonnet-5-6")])
-def test_implied_alias_beside_a_family_model_still_resolves_to_a_concrete_id(tmp_path, adapter, model, expected):
-    (tmp_path / "capabilities.json").write_text(json.dumps({
-        "codex": {"observed_at": datetime.now(timezone.utc).isoformat(), "models": ["gpt-6.2-sol"]},
-        "claude": {"observed_at": datetime.now(timezone.utc).isoformat(), "models": ["claude-sonnet-5-6"]}}))
-    run = subprocess.run([str(SCRIPT), "resolve", "--adapter", adapter, "--model", model, "--alias", "principal",
-                          "--role", "worker"], capture_output=True, text=True,
-                         env={**_resolve_env(tmp_path), "FABRIC_ALIAS_IMPLIED": "1"})
-    route = json.loads(run.stdout)
-    assert run.returncode == 0 and route["resolved_model"] == expected, route
+@pytest.mark.parametrize(("tier", "alias", "adapter", "effort", "live_set", "model", "error", "no_newer_note"), [
+    ("principal", "gpt-sol", "codex", "", "codex_new", "gpt-6.2-sol", "", False),
+    ("principal", "sol", "codex", "", "codex_new", "gpt-6.2-sol", "", False),
+    ("principal", "GPT_SOL", "codex", "", "codex_new", "gpt-6.2-sol", "", False),
+    ("principal", "s_o_l", "codex", "", "codex_new", "gpt-6.2-sol", "", False),
+    ("principal", "gpt-6.2-sol", "codex", "", "codex_new", "gpt-6.2-sol", "", False),
+    ("senior", "gpt-6.1-sol", "codex", "", "codex_registered", "gpt-6.1-sol", "", True),
+    ("principal", "claude-sonnet", "claude", "", "claude_new", "claude-sonnet-5-6", "", False),
+    ("principal", "sonnet", "claude", "", "claude_new", "claude-sonnet-5-6", "", False),
+    ("", "flash", "agy", "high", "agy_efforts", "gemini-3.9-flash-high", "", False),
+    ("", "gemini-flash", "agy", "high", "agy_efforts", "gemini-3.9-flash-high", "", False),
+    ("", "gemini-3.9-flash-high", "agy", "high", "agy_efforts", "gemini-3.9-flash-high", "", False),
+    ("", "gemini-3.9-flash", "agy", "high", "agy_efforts", "gemini-3.9-flash-high", "", False),
+    ("principal", "qwen3-coder", "cursor", "", "", "", "adapter_family_forbidden", False),
+])
+def test_resolver_model_route_table(tmp_path, tier, alias, adapter, effort, live_set, model, error, no_newer_note):
+    if adapter in {"codex", "claude"}:
+        _live_cache(tmp_path, adapter, ROUTE_LIVE_MODELS[live_set])
+    if adapter == "agy":
+        _agy_live(tmp_path, ROUTE_LIVE_MODELS[live_set])
+    arguments = ["--adapter", adapter, "--model", alias, "--role", "worker"]
+    if tier:
+        arguments.extend(("--alias", tier))
+    if effort:
+        arguments.extend(("--effort", effort))
+    environment = _resolve_env(tmp_path) | {"FABRIC_ALIAS_IMPLIED": "1"}
+    with patch.dict(os.environ, environment):
+        result, route = resolve(*arguments)
+    if error:
+        assert result.returncode == 1 and route["status"] == error, route
+    else:
+        assert result.returncode == 0 and route["resolved_model"] == model, route
+        if no_newer_note:
+            assert not any("newer than the catalogue" in note
+                           for note in route.get("notes", []) + route.get("warnings", []))
 
 
 def test_spelling_variants_of_a_family_name_resolve_like_gpt_sol(tmp_path, monkeypatch):
@@ -4856,15 +4865,6 @@ def test_spelling_variants_of_a_family_name_resolve_like_gpt_sol(tmp_path, monke
 def _agy_live(state, models):
     (state / "capabilities.json").write_text(json.dumps({"agy": {
         "observed_at": datetime.now(timezone.utc).isoformat(), "models": models}}))
-
-
-@pytest.mark.parametrize("model", ["flash", "gemini-flash", "gemini-3.9-flash-high", "gemini-3.9-flash"])
-def test_agy_effort_suffixed_live_ids_match_their_family_and_keep_the_dispatch_id(tmp_path, model):
-    _agy_live(tmp_path, ["gemini-3.9-flash-low", "gemini-3.9-flash-high", "gemini-3.8-flash-high"])
-    run = subprocess.run([str(SCRIPT), "resolve", "--adapter", "agy", "--model", model, "--effort", "high",
-                          "--role", "worker"], capture_output=True, text=True, env=_resolve_env(tmp_path))
-    route = json.loads(run.stdout)
-    assert run.returncode == 0 and route["resolved_model"] == "gemini-3.9-flash-high", route
 
 
 @pytest.mark.parametrize(("tier", "alias"), [("junior", "junior"), ("Senior", "senior"), ("principal", "principal")])
@@ -5079,34 +5079,32 @@ def _write_catalog(tmp_path, mutate):
     return path
 
 
-@pytest.mark.parametrize("mutate", [
-    lambda c: c["adapters"]["claude"]["models"][0].update(default_effort="max"),
-    lambda c: c["adapters"]["claude"]["models"][0].update(efforts=["max"]),
-    lambda c: c["families"]["anthropic"].update(default_effort="max"),
-    lambda c: c["routes"]["senior"][0].update(effort=["high", "max"]),
-    lambda c: c["task_class_routes"]["legwork"].update(effort="max"),
-])
-def test_every_effort_field_that_names_max_fails_with_the_xhigh_fix(tmp_path, mutate):
-    catalog = _write_catalog(tmp_path, mutate)
-    result, route = resolve("--catalog", str(catalog), "--adapter", "claude", "--alias", "senior",
-                            "--role", "worker")
-    assert result.returncode == 2
-    assert "effort 'max' was retired" in result.stderr and "xhigh" in result.stderr
-
-
-@pytest.mark.parametrize("mutate,message", [
+@pytest.mark.parametrize("mutate,message,fix", [
+    (lambda c: c["adapters"]["claude"]["models"][0].update(default_effort="max"),
+     "effort 'max' was retired", "xhigh"),
+    (lambda c: c["adapters"]["claude"]["models"][0].update(efforts=["max"]),
+     "effort 'max' was retired", "xhigh"),
+    (lambda c: c["families"]["anthropic"].update(default_effort="max"),
+     "effort 'max' was retired", "xhigh"),
+    (lambda c: c["routes"]["senior"][0].update(effort=["high", "max"]),
+     "effort 'max' was retired", "xhigh"),
+    (lambda c: c["task_class_routes"]["legwork"].update(effort="max"),
+     "effort 'max' was retired", "xhigh"),
     (lambda c: c["families"]["openai"]["aliases"].update(flagship=c["families"]["openai"]["aliases"]["principal"]),
-     "alias 'flagship' was renamed to 'principal'"),
+     "alias 'flagship' was renamed to 'principal'", ""),
     (lambda c: c["task_class_routes"]["legwork"].update(alias="workhorse"),
-     "alias 'workhorse' was renamed to 'senior'"),
-    (lambda c: c["routes"].update(strong=c["routes"]["senior"]), "route 'strong' was renamed to 'senior'"),
+     "alias 'workhorse' was renamed to 'senior'", ""),
+    (lambda c: c["routes"].update(strong=c["routes"]["senior"]),
+     "route 'strong' was renamed to 'senior'", ""),
 ])
-def test_a_custom_catalogue_cannot_use_retired_tier_names(tmp_path, mutate, message):
+def test_catalogue_rejects_retired_efforts_and_routing_names(tmp_path, mutate, message, fix):
     catalog = _write_catalog(tmp_path, mutate)
     result = subprocess.run([str(SCRIPT), "resolve", "--catalog", str(catalog), "--adapter", "codex",
                              "--alias", "senior", "--role", "worker"], text=True, capture_output=True, check=False)
     assert result.returncode == 2
     assert message in result.stderr
+    if fix:
+        assert fix in result.stderr
 
 
 def test_provider_quota_cooldown_skips_models_outside_the_plan_it_covers():

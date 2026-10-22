@@ -6,23 +6,24 @@ import re
 import shlex
 import shutil
 import signal
-import stat
 import subprocess
 import sys
 import tempfile
-import textwrap
 import threading
 import time
 from pathlib import Path
 
 import pytest
 
-PRODUCT_ROOT = Path(__file__).resolve().parents[1]
-SCRIPTS = PRODUCT_ROOT / "skills" / "orchestrate" / "scripts"
-SCRIPT = SCRIPTS / "cf_dispatch.py"
-RUN_DIR_SCRIPT = SCRIPTS / "run_dir_init.sh"
-
 from _shared.bounded_process import run_bounded
+from cf_dispatch_support import (
+    PRODUCT_ROOT,
+    RUN_DIR_SCRIPT,
+    SCRIPT,
+    SCRIPTS,
+    fabric_free_env,
+    write_executable,
+)
 
 DISPATCH_SCHEMA = {
     "tool",
@@ -60,9 +61,6 @@ DISPATCH_SCHEMA = {
     "certification_eligible",
     "cross_family",
 }
-def write_executable(path, body):
-    path.write_text(textwrap.dedent(body).lstrip(), encoding="utf-8")
-    path.chmod(path.stat().st_mode | stat.S_IXUSR)
 
 
 def test_output_install_replaces_symlink_without_overwriting_target():
@@ -264,20 +262,6 @@ def test_output_parent_swap_cannot_certify_an_identical_outside_file():
         assert record["output_digest"] == ""
         assert record["certification_eligible"] is False
         assert out.resolve() == outside_output.resolve()
-
-
-def fabric_free_env():
-    # Keep the evals on this checkout's fused fixtures rather than an inherited
-    # developer instance or the operator's default ~/.agents instance.
-    env = {
-        key: value
-        for key, value in os.environ.items()
-        if key != "AGENTS_HOME" and not key.startswith("AGENT_FABRIC_")
-    }
-    env["AGENT_FABRIC_PRODUCT_ROOT"] = str(PRODUCT_ROOT)
-    env["AGENT_FABRIC_INSTANCE_ROOT"] = str(PRODUCT_ROOT)
-    env["PROVENANT_NO_OS_CONFINEMENT"] = "1"
-    return env
 
 
 def run_dispatch_with_stub(
@@ -3545,7 +3529,7 @@ def test_agy_denied_actions_never_publish_partial_success():
             else:
                 assert "PARTIAL RESULT" not in out.read_text()
                 assert record["certification_eligible"] is False
-                if expected == "permission_denied":
+                if expected == "permission_blocked":
                     assert "denied_actions" in out.read_text()
 
 
