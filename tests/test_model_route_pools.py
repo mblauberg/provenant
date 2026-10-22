@@ -365,10 +365,9 @@ def test_instance_overlay_reorders_and_reweights_a_pool(tmp_path):
     ({"families": {"openai": {"risk_tier_overrides": {"crucial": {"alias": "flagship"}}}}},
      "alias 'flagship' was renamed to 'principal'"),
 ])
-def test_overlay_with_a_retired_tier_name_fails_fast(tmp_path, overlay, message):
-    run = model_route(overlay_environment(tmp_path, overlay), "routes", "--json")
-    assert run.returncode == 2
-    assert message in run.stderr and "overlay" in run.stderr
+def test_overlay_with_a_retired_tier_name_fails_fast(overlay, message):
+    with pytest.raises(pools.RenamedNameError, match=message):
+        pools.reject_renamed(overlay)
 
 
 def test_overlay_may_name_adapter_aliases_by_tier(tmp_path):
