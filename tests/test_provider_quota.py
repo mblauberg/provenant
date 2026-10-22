@@ -315,7 +315,7 @@ def test_agy_usage_reports_each_pool_window_and_skips_disabled_buckets(quota):
     assert parsed['unreported'] == ['gemini.5h']
 
 
-@pytest.mark.parametrize('fraction', [True, False, -0.1, 1.5, float('nan'), '0.5', None])
+@pytest.mark.parametrize('fraction', [True, False, -0.1, 1.5, 10 ** 400, float('nan'), '0.5', None])
 def test_agy_invalid_remaining_fractions_are_unreported_never_0_or_100_percent(quota, fraction):
     payload = {'command': {'data': {'groups': [{'name': 'Claude and GPT models', 'buckets': [
         {'id': '3p-weekly', 'window': 'weekly', 'remaining_fraction': fraction, 'reset_time': '2026-10-28T15:50:17Z'}]}]}}}

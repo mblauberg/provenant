@@ -82,7 +82,7 @@ def parse(payload, now=None):
             remaining = bucket.get('remaining_fraction')
             # A boolean, NaN or out-of-range fraction would read as a false 0% or 100%.
             valid = isinstance(remaining, (int, float)) and not isinstance(remaining, bool) and \
-                math.isfinite(remaining) and 0 <= remaining <= 1
+                0 <= remaining <= 1 and math.isfinite(remaining)
             if bucket.get('disabled') or not valid:
                 unreported.append(name)
                 continue
