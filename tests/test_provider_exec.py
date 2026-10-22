@@ -8180,6 +8180,22 @@ def test_a_landing_train_merge_still_holds_protected_content_no_released_parent_
     assert held in refused.stderr
 
 
+def test_a_malformed_release_record_fails_even_a_protected_clean_range(tmp_path, monkeypatch):
+    monkeypatch.delenv("PROVENANT_ATTEMPT_MARKER", raising=False)
+    repo, _ = instruction_lane(tmp_path)
+    leased = head_of(repo, "main")
+    (repo / "later.txt").write_text("later\n")
+    git(repo, "add", "later.txt")
+    git(repo, "commit", "-q", "-m", "plain change")
+    assert landing(repo, head_of(repo), leased).returncode == 0
+    releases = repo / ".git/provenant-instruction-checks/releases"
+    releases.mkdir(parents=True, exist_ok=True)
+    (releases / "bad.json").write_text('{"tip": "not-a-sha"}')
+    refused = landing(repo, head_of(repo), leased)
+    assert refused.returncode != 0
+    assert "invalid release record bad.json" in refused.stderr
+
+
 def test_a_writer_cannot_take_a_branch_another_checkout_holds(tmp_path):
     _, lane = instruction_lane(tmp_path)
     git(lane, "symbolic-ref", "HEAD", "refs/heads/main")

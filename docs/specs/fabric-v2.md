@@ -185,9 +185,14 @@ finalisation nor a moved local ref can land an instruction change:
   path's version from a parent in the range that is not held, but only where a
   released commit in the range introduced that version. A landing train's
   `--no-ff` merge of a released tip, and later merges on top of it, therefore
-  pass. A merge cannot revert a protected path: an older version taken from a
-  parent outside the range or from a stale branch is held, as is a resolution
-  no parent holds. Anything else fails with
+  pass. A merge cannot revert a protected path to an older version taken from a
+  parent outside the range or from a stale branch, and a resolution no parent
+  holds is held. One exception remains: a released commit vouches for the
+  parent content it merges, so a later unreleased merge in the range can
+  restore that stale content, and the gate passes it. A release is therefore
+  a review of the whole released tip, parents included. A release record that
+  is malformed fails every range, protected-clean ones included, rather than
+  only ranges that change protected paths. Anything else fails with
   `protected_instructions_changed` and names the held commits; the branch is
   left as it is. Fabric `landing-push` passes the landing lease's remote SHA as
   the base, never a local ref. `scripts/worktree verify-claim` and a manual
