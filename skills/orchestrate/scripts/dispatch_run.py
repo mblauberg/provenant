@@ -1414,7 +1414,8 @@ def routing_environment() -> dict[str, str]:
     env = os.environ.copy()
     instance = Path(env.get("AGENT_FABRIC_INSTANCE_ROOT") or Path.home() / ".agents").expanduser()
     # Routing may fall back to the product catalogue; the user's profile file stays the one receipts stamp.
-    env.setdefault(harness_profile.PROFILE_ROOT_ENV, str(instance))
+    if not env.get(harness_profile.PROFILE_ROOT_ENV):  # empty counts as unset, as in user_path
+        env[harness_profile.PROFILE_ROOT_ENV] = str(instance)
     try:
         (instance / "config/model-routing.json").lstat()
     except FileNotFoundError:

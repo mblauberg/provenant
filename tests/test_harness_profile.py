@@ -357,16 +357,21 @@ def test_attempt_stamp_records_a_broken_profile_instead_of_failing(space, monkey
     assert stamp["preset"] is None and "no.such" in stamp["error"]
 
 
-def test_routing_reads_the_same_user_profile_as_the_receipt(space, monkeypatch):
+@pytest.mark.parametrize("profile_root", [None, ""])
+def test_routing_reads_the_same_user_profile_as_the_receipt(space, monkeypatch, profile_root):
     """Routing may fall back to the product catalogue's instance root; the profile must not move with it."""
     dispatch = load("dispatch_run_profile_root", ROOT / "skills/orchestrate/scripts/dispatch_run.py")
     monkeypatch.chdir(space.project)
     monkeypatch.setenv("AGENT_FABRIC_INSTANCE_ROOT", str(space.instance))  # no config/model-routing.json here
     monkeypatch.setenv("AGENT_FABRIC_PRODUCT_ROOT", str(ROOT))
-    monkeypatch.delenv(hp.PROFILE_ROOT_ENV, raising=False)
+    if profile_root is None:
+        monkeypatch.delenv(hp.PROFILE_ROOT_ENV, raising=False)
+    else:
+        monkeypatch.setenv(hp.PROFILE_ROOT_ENV, profile_root)
     write(space.user, {"knobs": {"effort.shift": 1}})
     environment = dispatch.routing_environment()
     assert environment["AGENT_FABRIC_INSTANCE_ROOT"] == str(ROOT)
+    assert environment[hp.PROFILE_ROOT_ENV] == str(space.instance)
     assert hp.user_path(environment) == space.user == hp.user_path(os.environ)
     routed = route(space, None, "--task-class", "legwork", **{
         key: environment[key] for key in ("AGENT_FABRIC_INSTANCE_ROOT", hp.PROFILE_ROOT_ENV)})
