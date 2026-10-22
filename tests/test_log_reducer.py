@@ -227,3 +227,22 @@ tests/test_sample.py:5: AssertionError
     assert "routine tail" not in failed["text"]
     assert "412 passed" in passed["text"]
     assert "detail" not in passed["text"]
+
+
+def test_gh_log_prefix_and_tsc_snippets_keep_their_continuations():
+    stamp = "Python checks\tRun tests\t2026-10-22T08:09:36.7557617Z "
+    traceback = [
+        "Traceback (most recent call last):",
+        '  File "a.py", line 3, in g',
+        "    f()",
+        "KeyError: 'x'",
+    ]
+    gh_log = "".join(stamp + line + "\n" for line in traceback)
+    tsc = "src/a.ts:3:5 - error TS2322: Type 'number' is not assignable.\n\n3 foo(1);\n      ~\n"
+    padding = ("routine output " + "x" * 90 + "\n") * 60
+
+    gh_result = log_reducer.reduce_text(padding + gh_log, command="gh run view --log-failed", exit_status=1)
+    tsc_result = log_reducer.reduce_text(padding + tsc, command="tsc", exit_status=2)
+
+    assert gh_log in gh_result["text"]
+    assert tsc in tsc_result["text"]

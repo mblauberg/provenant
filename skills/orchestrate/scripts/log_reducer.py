@@ -26,6 +26,10 @@ _COUNT = re.compile(
     re.IGNORECASE,
 )
 _ANSI = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+# `gh run view --log-failed` prefixes each line with job, step and timestamp.
+_GH_PREFIX = re.compile(r"^[^\t\n]*\t[^\t\n]*\t\ufeff?\d{4}-\d\d-\d\dT[\d:.]+Z ?")
+# tsc --pretty source snippets: a line number, then the source or `~~~` underline.
+_SNIPPET = re.compile(r"^(?:\d+ |\s*~+\s*$)")
 _TEST_HEADER = re.compile(r"^\s*_{3,}.*_{3,}\s*$")
 # A pytest failure section ends at a section rule, a captured-output rule, or
 # after its final location line (`path:N: ErrorName`, not `path:N: in func`).
@@ -35,7 +39,11 @@ _SECTION_LAST = re.compile(r"^\S+:\d+: (?!in )\S+")
 
 def _is_continuation(line: str) -> bool:
     """Indented detail or a diff, source or location marker line."""
-    return line[:1].isspace() or line.startswith(("E ", ">", "-", "+", "❯"))
+    return (
+        line[:1].isspace()
+        or line.startswith(("E ", ">", "-", "+", "❯"))
+        or bool(_SNIPPET.match(line))
+    )
 
 
 def _quotes_are_ordered_source_lines(source: str, quotes: list[str]) -> bool:
@@ -70,7 +78,7 @@ def reduce_text(
         return receipt
 
     lines = source.splitlines(keepends=True)
-    clean_lines = [_ANSI.sub("", line) for line in lines]
+    clean_lines = [_GH_PREFIX.sub("", _ANSI.sub("", line)) for line in lines]
     starts = {
         index for index, line in enumerate(clean_lines)
         if _EVIDENCE.search(line) or _TEST_HEADER.match(line)
@@ -97,7 +105,7 @@ def reduce_text(
         index = start + 1
         while index < len(lines) and index not in starts:
             next_index = index
-            while next_index < len(lines) and not lines[next_index].strip():
+            while next_index < len(lines) and not clean_lines[next_index].strip():
                 next_index += 1
             if next_index == len(lines) or not _is_continuation(clean_lines[next_index]):
                 break
