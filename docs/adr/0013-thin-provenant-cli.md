@@ -16,7 +16,7 @@ by [ADR 0022](0022-thin-fabric-mcp-execution-facade.md) on 2026-09-01
 > coordinates messages, tasks and activity, and its thin MCP façade can start
 > the same provider owners available through the direct CLI.
 > The current front door delegates `route`, `worktree`, `check`, `fabric`,
-> `dispatch`, `batch` and `run` to the owners below. The original daemon-era
+> `dispatch`, `batch`, `run` and `lint` to the owners below. The original daemon-era
 > command table remains in Git history.
 
 ## Context
@@ -56,6 +56,7 @@ sole behavioural owners:
 | `batch` | `skills/orchestrate/scripts/batch_run.py` |
 | `run` | `skills/orchestrate/scripts/run_controls.py` |
 | `pr` | `scripts/provenant-pr` |
+| `lint` | `scripts/provenant_lint.py` |
 
 The managed resolver finds the product checkout without changing the caller's
 working directory. Each delegation preserves arguments, standard input,
