@@ -927,6 +927,12 @@ def test_help_command_gives_detail_for_specific_command(tmp_path):
     assert "--all" in lanes_help.stdout
     assert "--wait" in lanes_help.stdout
 
+    retro_help = invoke(command, "help", "retro", cwd=tmp_path)
+    assert retro_help.returncode == 0
+    assert "provenant retro [--since ISO-DATE]" in retro_help.stdout
+    stats_help = invoke(command, "help", "stats", cwd=tmp_path)
+    assert "--compare <PR#|rev|date>" in stats_help.stdout
+
     unknown_help = invoke(command, "help", "nonexistent", cwd=tmp_path)
     assert unknown_help.returncode == 2
     assert "usage: provenant " in unknown_help.stderr

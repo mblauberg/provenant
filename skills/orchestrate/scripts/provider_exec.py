@@ -192,6 +192,20 @@ def now():
     return datetime.now(UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
 
+@functools.cache
+def harness_revision():
+    """Installed Provenant revision for lane provenance; None outside a Git checkout."""
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(Path(__file__).resolve().parents[3]), "rev-parse", "HEAD"],
+            capture_output=True, text=True, timeout=2, stdin=subprocess.DEVNULL,
+            env={key: value for key, value in os.environ.items() if not key.startswith("GIT_")},
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return result.stdout.strip() or None if result.returncode == 0 else None
+
+
 # Home-relative credential stores. No lane reads them, whatever else its profile grants.
 CREDENTIAL_STORES = (
     '.ssh', '.aws', '.azure', '.gnupg', '.codex', '.claude',
@@ -4035,6 +4049,7 @@ def _run_attempt(
         "effort_observed_source": effort_source,
         "cli_version": route.get("cli_version"),
         "fallback_from": plan.get("fallback_from"),
+        "harness_rev": harness_revision(),
         "notes": notes,
         "line": line,
     }

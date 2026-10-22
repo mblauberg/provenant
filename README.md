@@ -323,7 +323,7 @@ The full <!--skills-->25<!--/skills-->-skill catalogue, grouped by area:
 - [`Architecture`](docs/ARCHITECTURE.md): system structure and design rationale.
 - [`Specifications`](docs/specs/README.md): the component contracts.
 - [Fabric hosts](docs/runbooks/fabric-hosts.md): SSH peer configuration and diagnostics.
-- [Local telemetry](docs/runbooks/telemetry.md): usage ingestion, source manifest and stats.
+- [Local telemetry](docs/runbooks/telemetry.md): usage ingestion, source manifest, stats, change markers, before/after comparison and retro.
 - [Harness profiles](docs/runbooks/harness-profiles.md): switching cost/quality presets and comparing them.
 - [`Research`](docs/research/README.md): evidence and owners.
 - [`Skill portfolio evaluation`](docs/evals/skill-portfolio-2026/README.md): the retained routing evidence.

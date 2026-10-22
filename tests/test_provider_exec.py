@@ -8107,6 +8107,18 @@ def test_a_sandboxed_writer_moves_only_its_own_branch(monkeypatch, tmp_path):
         assert run(f"printf x >> {shlex.quote(str(path))}").returncode != 0, path
 
 
+def test_lane_provenance_stamps_the_installed_harness_revision(tmp_path):
+    code = """import json
+print(json.dumps({'type':'item.completed','item':{'type':'agent_message','text':'DONE'}}), flush=True)
+print(json.dumps({'type':'turn.completed'}), flush=True)
+"""
+    record = supervisor().execute(fixture_plan(tmp_path, code), tmp_path / "result.md")
+    head = subprocess.run(["git", "-C", str(Path(supervisor().__file__).resolve().parents[3]), "rev-parse", "HEAD"],
+                          capture_output=True, text=True)
+    assert record["status"] == "ok"
+    assert record["provenance"]["harness_rev"] == (head.stdout.strip() if head.returncode == 0 else None)
+
+
 @pytest.mark.parametrize("adapter", ["agy", "codex", "opencode", "claude"])
 @pytest.mark.parametrize(("window", "status"), [("day", "usage_limited"), ("minute", "rate_limited"), ("second", "rate_limited")])
 def test_resource_exhausted_classifies_the_quota_window(adapter, window, status):
