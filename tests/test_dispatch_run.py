@@ -5211,7 +5211,7 @@ real_setsid = os.setsid
 def detach():
     real_setsid()
     row = dispatch.provider_exec._process_snapshot()[os.getpid()]
-    pathlib.Path({str(tmp_path / 'detach-verified')!r}).write_text(str(dispatch.provider_exec._is_nested_fabric_owner(row)))
+    pathlib.Path({str(tmp_path / 'detach-verified')!r}).write_text(str(bool(dispatch.provider_exec._nested_fabric_owner_token(row))))
 os.setsid = detach
 dispatch.CF_DISPATCH = pathlib.Path({str(adapter)!r})
 batch.DISPATCH_RUN = pathlib.Path({str(wrapper)!r})
@@ -6031,7 +6031,7 @@ sys.path.insert(0, {str(SCRIPT.parent)!r})
 import dispatch_run as dispatch
 def call(verb,cwd,request):
     row = dispatch.provider_exec._process_snapshot().get(os.getpid())
-    captured = {{**request, 'owner_valid': bool(row and dispatch.provider_exec._is_nested_fabric_owner(row))}}
+    captured = {{**request, 'owner_valid': bool(row and dispatch.provider_exec._nested_fabric_owner_token(row))}}
     pathlib.Path({str(request_path)!r}).write_text(json.dumps(captured))
     return {{'runs':[{remote!r}]}}
 owner = SimpleNamespace(config=SimpleNamespace(peers={{'peer':{{}}}}), config_error=None, client_call=call)

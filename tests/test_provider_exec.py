@@ -4408,6 +4408,7 @@ def test_verified_owner_stays_spared_through_transient_validation_loss(tmp_path,
     run_dir = tmp_path / "nested-run"
     _write_fake_owner_record(module, run_dir, owner, "inner-token")
     lost = []
+    environment_reads = []
     signals = []
     process = type("Process", (), {"pid": root_pid, "poll": lambda self: None,
                                    "wait": lambda self, timeout: None})()
@@ -4415,6 +4416,7 @@ def test_verified_owner_stays_spared_through_transient_validation_loss(tmp_path,
     def environment(pid):
         if pid != owner_pid:
             return ()
+        environment_reads.append(pid)
         if lost and failure == "env_error":
             raise RuntimeError("environment unavailable")
         return [b"PROVENANT_RUN_TOKEN=inner-token",
@@ -4429,6 +4431,8 @@ def test_verified_owner_stays_spared_through_transient_validation_loss(tmp_path,
         tracker = module._Descendants(process, "fixture")
         tracker.sample()
         assert owner.identity in tracker.spared
+        assert tracker.verified_owner_tokens == {owner.identity: "inner-token"}
+        assert environment_reads == [owner_pid]
         original_sample = tracker.sample
 
         def lose_after_first_stop_sample(*args, **kwargs):
@@ -4608,7 +4612,7 @@ def test_token_without_owner_record_is_not_nested_owner(tmp_path, monkeypatch):
         b"PROVENANT_RUN_TOKEN=x",
         ("PROVENANT_RUN_DIR=" + str(tmp_path / "absent-run")).encode(),
     ])
-    assert not module._is_nested_fabric_owner(row)
+    assert not module._nested_fabric_owner_token(row)
 
 
 def test_cleanup_does_not_adopt_marker_host_or_signal_a_descendants_shared_group(monkeypatch):
@@ -4896,7 +4900,7 @@ def test_nested_owner_record_must_match_live_identity(tmp_path, monkeypatch, fie
         b"PROVENANT_RUN_TOKEN=inner-token",
         ("PROVENANT_RUN_DIR=" + str(run_dir)).encode(),
     ])
-    assert not module._is_nested_fabric_owner(row)
+    assert not module._nested_fabric_owner_token(row)
 
 
 def test_nested_owner_accepts_legacy_inherited_locale_start(tmp_path, monkeypatch):
@@ -4926,7 +4930,7 @@ def test_nested_owner_accepts_legacy_inherited_locale_start(tmp_path, monkeypatc
     # The fake pid may be a live process on the host; force the ps path under test.
     monkeypatch.setattr(module.process_info, "process", lambda _pid: None)
     monkeypatch.setattr(module.subprocess, "run", locale_ps)
-    assert module._is_nested_fabric_owner(row)
+    assert module._nested_fabric_owner_token(row)
     assert [call[1].get("env", {}).get("LC_ALL") for call in calls] == ["C", "en_AU.UTF-8"]
 
 
@@ -4950,7 +4954,7 @@ def test_nested_owner_accepts_canonical_ps_when_computed_start_differs(tmp_path,
     # The fake pid may be a live process on the host; force the ps path under test.
     monkeypatch.setattr(module.process_info, "process", lambda _pid: None)
     monkeypatch.setattr(module.subprocess, "run", canonical_ps)
-    assert module._is_nested_fabric_owner(row)
+    assert module._nested_fabric_owner_token(row)
     assert calls == ["C"]
 
 
