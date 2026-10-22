@@ -1379,6 +1379,84 @@ def test_skill_source_collision_preflights_before_harness_mutation(tmp_path):
     assert not (config / ".agent-harness-installation.json").exists()
 
 
+def test_reinstall_moves_a_recorded_custom_skill_into_the_managed_library(
+    tmp_path, product_template
+):
+    product = copy_product(product_template, tmp_path / "product")
+    custom_source = tmp_path / "instance/custom-skills"
+    custom_skill = custom_source / "moved-skill"
+    custom_skill.mkdir(parents=True)
+    (custom_skill / "SKILL.md").write_text(
+        "---\nname: moved-skill\ndescription: Previously custom skill.\n---\n"
+    )
+    config = tmp_path / "codex-home"
+
+    first = run_product(
+        product, "codex", tmp_path, CODEX_HOME=str(config)
+    )
+    assert first.returncode == 0, first.stderr
+    assert (config / "skills/moved-skill").resolve() == custom_skill.resolve()
+
+    managed_skill = product / "library/moved-skill"
+    managed_skill.mkdir(parents=True)
+    (managed_skill / "SKILL.md").write_text(
+        "---\nname: moved-skill\ndescription: Now managed skill.\n---\n"
+    )
+
+    second = run_product(
+        product, "codex", tmp_path, CODEX_HOME=str(config)
+    )
+
+    assert second.returncode == 0, second.stderr
+    assert (config / "skills/moved-skill").resolve() == managed_skill.resolve()
+    migration_notices = [
+        line
+        for line in second.stdout.splitlines()
+        if line.startswith("skills migrated=custom-to-managed")
+    ]
+    assert migration_notices == [
+        "skills migrated=custom-to-managed name=moved-skill"
+    ]
+    manifest = json.loads((config / ".agent-harness-installation.json").read_text())
+    assert manifest["managed"]["moved-skill"]["source_target"] == str(
+        managed_skill.resolve()
+    )
+    assert "moved-skill" not in manifest["custom"]
+
+
+def test_check_lists_stale_legacy_agy_skill_links_without_removing_them(tmp_path):
+    legacy = tmp_path / ".gemini/config/skills"
+    legacy.mkdir(parents=True)
+    dangling = legacy / "dangling-skill"
+    dangling.symlink_to(tmp_path / "removed-product/skills/dangling-skill")
+    foreign_source = tmp_path / "user-skills/foreign-skill"
+    foreign_source.mkdir(parents=True)
+    (foreign_source / "SKILL.md").write_text("user-owned\n")
+    foreign = legacy / "foreign-skill"
+    foreign.symlink_to(foreign_source)
+
+    env = os.environ.copy()
+    env.update({
+        "HOME": str(tmp_path),
+        "HARNESS_PYTHON": sys.executable,
+    })
+    result = subprocess.run(
+        [str(SCRIPT), "--check"],
+        cwd=ROOT,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 1
+    assert "legacy agy skill stale=dangling-skill (dangling)" in result.stdout
+    assert "legacy agy skill stale=foreign-skill (foreign)" in result.stdout
+    assert dangling.is_symlink()
+    assert foreign.is_symlink()
+    assert foreign.resolve() == foreign_source.resolve()
+
+
 def test_claude_retired_agent_conflict_preflights_before_harness_mutation(tmp_path):
     config = tmp_path / "claude-config"
     agents = config / "agents"

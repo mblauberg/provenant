@@ -10,12 +10,8 @@ while [[ -L "$script_path" ]]; do
   esac
 done
 PRODUCT_ROOT="$(CDPATH= cd -- "$(dirname "$script_path")/.." && pwd -P)"
-if [[ -f "$PRODUCT_ROOT/.git" && "${PROVENANT_ALLOW_LINKED_WORKTREE_INSTALL:-}" != 1 ]]; then
-  echo "install-harness refuses a linked worktree product root: $PRODUCT_ROOT" >&2
-  echo "repair: run from the canonical checkout, or explicitly acknowledge with PROVENANT_ALLOW_LINKED_WORKTREE_INSTALL=1" >&2
-  exit 3
-fi
 PLATFORM=""
+CHECK=0
 MCP_CLIENTS="primary"
 REFRESH_ROUTING=0
 LANE_SAFETY_HOOKS=""
@@ -23,11 +19,15 @@ PRE_PUSH_HOOK=""
 OTEL_COLLECTOR=""
 
 usage() {
-  echo "usage: install-harness --platform <claude|codex|opencode|agy|cursor|kiro|all> [--mcp-clients <primary|all>] [--refresh-routing] [--lane-safety-hooks|--no-lane-safety-hooks] [--pre-push-hook|--no-pre-push-hook] [--otel-collector|--uninstall-otel-collector]" >&2
+  echo "usage: install-harness --check | install-harness --platform <claude|codex|opencode|agy|cursor|kiro|all> [--mcp-clients <primary|all>] [--refresh-routing] [--lane-safety-hooks|--no-lane-safety-hooks] [--pre-push-hook|--no-pre-push-hook] [--otel-collector|--uninstall-otel-collector]" >&2
 }
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    --check)
+      CHECK=1
+      shift
+      ;;
     --platform)
       [[ $# -ge 2 ]] || { usage; exit 2; }
       PLATFORM="$2"
@@ -58,6 +58,22 @@ while [[ $# -gt 0 ]]; do
       ;;
   esac
 done
+
+if [[ "$CHECK" == 1 ]]; then
+  [[ -z "$PLATFORM" && "$MCP_CLIENTS" == primary && "$REFRESH_ROUTING" == 0 \
+    && -z "$LANE_SAFETY_HOOKS" && -z "$PRE_PUSH_HOOK" && -z "$OTEL_COLLECTOR" ]] \
+    || { usage; exit 2; }
+  source "$PRODUCT_ROOT/scripts/lib/harness-python.sh"
+  run_stdlib "$PRODUCT_ROOT/scripts/manage_installation.py" check-legacy-agy \
+    --target "${AGY_CONFIG_DIR:-$HOME/.gemini}/config/skills"
+  exit $?
+fi
+
+if [[ -f "$PRODUCT_ROOT/.git" && "${PROVENANT_ALLOW_LINKED_WORKTREE_INSTALL:-}" != 1 ]]; then
+  echo "install-harness refuses a linked worktree product root: $PRODUCT_ROOT" >&2
+  echo "repair: run from the canonical checkout, or explicitly acknowledge with PROVENANT_ALLOW_LINKED_WORKTREE_INSTALL=1" >&2
+  exit 3
+fi
 
 if [[ "$OTEL_COLLECTOR" == uninstall && -z "$PLATFORM" ]]; then
   exec "$PRODUCT_ROOT/scripts/install-otel-collector" uninstall
