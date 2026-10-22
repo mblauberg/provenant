@@ -1824,8 +1824,13 @@ def publish_contract(run_dir,row):
             children = run_lineage.children(run_dir, row["task_id"], row["attempt"])
             if row["state"] == "terminal" and row["status"] in {"cancelled", "interrupted"}:
                 # Registration waits on this same journal lock and will see terminal state.
+                transient_skips = {"process census unavailable", "process signal unavailable",
+                                   "owner verification or signal unavailable", "owner identity unavailable",
+                                   "environment unreadable"}
                 evidence = {(child.get("run_dir"), child.get("run_token")): child["cancellation"]
-                            for child in row.get("children", []) if "cancellation" in child}
+                            for child in row.get("children", []) if "cancellation" in child
+                            and not (child["cancellation"].get("status") == "skipped"
+                                     and child["cancellation"].get("reason") in transient_skips)}
                 pending = [child for child in children
                            if (child.get("run_dir"), child.get("run_token")) not in evidence]
                 run_lineage.cancel_children(run_dir, row["task_id"], row["attempt"], child_rows=pending)
