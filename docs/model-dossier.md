@@ -239,15 +239,6 @@ not read an absent `Watch out for` as an endorsement.
 - **Reach:** the `agy` adapter, `google` family. `cursor` does not serve Google
   models itself; its fallback map delegates them back to `agy`.
 
-### Gemini 3.1 Pro (Google)
-
-Retired. `agy models` no longer lists `gemini-3.1-pro-high` or
-`gemini-3.1-pro-low`. The owner's decision is that Gemini 3.8 Flash replaces
-it, judged stronger than the old Pro. Its voice and UI review role now sits
-with Gemini 3.8 Flash above; `claude-opus-4-6-thinking` through `agy` is the
-alternative. The voice preference is the owner's stated view, not a measured
-result.
-
 ## Categories
 
 Notes that are about a kind of work rather than one model. Add categories the
