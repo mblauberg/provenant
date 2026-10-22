@@ -15,7 +15,6 @@ IDLE_WRITE = 1800
 EFFORT_FLAG = "model_reasoning_effort"
 SESSION_KEYS = ("thread_id",)
 MODEL_SOURCE = "codex:rollout.turn_context.model"
-SIGNATURES = (("usage_limited", r"usage limit|try again at \d"),)
 
 
 # Codex reads these in a permission path as a pattern (it strips a trailing /** outright), so a

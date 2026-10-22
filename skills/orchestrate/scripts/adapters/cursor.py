@@ -8,7 +8,6 @@ IDLE_WRITE = 1800
 EFFORT_FLAG = None
 SESSION_KEYS = ("session_id", "sessionId")
 MODEL_SOURCE = "cursor:init.model"
-SIGNATURES = (("auth_required", r"Login expired"),)
 
 
 def argv(p):
