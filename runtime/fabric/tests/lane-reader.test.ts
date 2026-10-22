@@ -132,6 +132,19 @@ it("prunes only finished old runs, never an active one", async () => {
   } finally { seat.kill(); }
 });
 
+it("keeps a live seat when another file in it is unreadable or vanishing", async () => {
+  const { root, env } = seatEnv();
+  const seat = spawn("sleep", ["30"]);
+  try {
+    const live = join(root, "p/.agent-run/runs/20260101-0000-batch-user-liv");
+    recordSeatRun(live, env, { pid: seat.pid! });
+    const seatDir = readdirSync(join(root, "state/lane-seats"))[0]!;
+    writeFileSync(join(root, "state/lane-seats", seatDir, "000.json"), "{");
+    recordSeatRun(join(root, "p/.agent-run/runs/20260101-0000-batch-user-nxt"), env, { pid: seat.pid! });
+    expect(findSeat([seat.pid!], env)!.runs).toContain(live);
+  } finally { seat.kill(); }
+});
+
 it("drops a seat whose client has exited", async () => {
   const { root, env } = seatEnv();
   const seat = spawn("sleep", ["30"]);

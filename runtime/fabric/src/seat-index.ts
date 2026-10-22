@@ -39,10 +39,19 @@ const names = (directory: string): string[] => { try { return readdirSync(direct
 function prune(root: string, now = Date.now()): void {
   for (const seat of names(root)) {
     const directory = join(root, seat);
-    const files = names(directory).filter((name) => name.endsWith(".json"));
-    if (!files.length) continue; // A writer may be between creating the directory and its first file.
-    const first = readRunFile(join(directory, files[0]!));
-    if (!first || !processMatches(first.pid, first.started_at)) {
+    const entries = names(directory);
+    for (const name of entries.filter((entry) => entry.endsWith(".tmp"))) {
+      try { if (now - statSync(join(directory, name)).mtimeMs >= PRUNE_AFTER_MS) rmSync(join(directory, name), { force: true }); }
+      catch { /* Another pruner got there first. */ }
+    }
+    const files = entries.filter((name) => name.endsWith(".json"));
+    // Every file in a seat names the same client, so any readable one decides
+    // whether it is gone. An unreadable or vanished file decides nothing: a
+    // concurrent pruner or writer may be mid-change.
+    let seatFile: RunFile | undefined;
+    for (const name of files) if ((seatFile = readRunFile(join(directory, name)))) break;
+    if (!seatFile) continue;
+    if (!processMatches(seatFile.pid, seatFile.started_at)) {
       rmSync(directory, { recursive: true, force: true });
       continue;
     }
@@ -70,8 +79,10 @@ export function recordSeatRun(runDir: string, env: NodeJS.ProcessEnv, host: { pi
     mkdirSync(directory, { recursive: true, mode: 0o700 });
     const name = `${createHash("sha256").update(runDir).digest("hex").slice(0, 32)}.json`;
     const temporary = join(directory, `.${name}.${process.pid}.tmp`);
-    writeFileSync(temporary, JSON.stringify({ run_dir: runDir, pid: host.pid, started_at: started, label }) + "\n", { mode: 0o600 });
-    renameSync(temporary, join(directory, name));
+    try {
+      writeFileSync(temporary, JSON.stringify({ run_dir: runDir, pid: host.pid, started_at: started, label }) + "\n", { mode: 0o600 });
+      renameSync(temporary, join(directory, name));
+    } finally { rmSync(temporary, { force: true }); }
     prune(root);
   } catch { /* Discovery falls back to the project; the dispatch must not fail. */ }
 }
