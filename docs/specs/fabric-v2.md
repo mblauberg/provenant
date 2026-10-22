@@ -251,7 +251,8 @@ diff remains the backstop.
 `capabilities` is an optional list with distinct values from `postgres` and
 `browser`; an empty list means absent. Non-Codex adapters apply it without a
 grant, because their `sandbox-exec` profiles restrict only file access; a
-browser lane sets `MAC_CHROMIUM_TMPDIR` to `<attempt>/tmp`. A Codex
+browser lane sets `MAC_CHROMIUM_TMPDIR` to a short private per-attempt
+directory, `/tmp/fb-<id>`. A Codex
 `sandbox: "full"` lane applies none, with a warning, since it is unsandboxed.
 Any other Codex lane needs `worktree_write` with `sandbox: "workspace-write"` on macOS, with usable
 `sandbox-exec` outside another sandbox and applied `network: true`. The lane
@@ -262,8 +263,8 @@ services plus FSEvents, then denies other Mach lookups and registrations,
 denies external signals while allowing same-sandbox signals, denies
 preference writes through `cfprefsd`, and denies System V IPC by default. `postgres` adds shared-memory and semaphore IPC. `browser`
 adds the macOS browser services and Chrome/Chromium rendezvous Mach lookup and
-registration prefixes; browser lanes set `MAC_CHROMIUM_TMPDIR` to
-`<attempt>/tmp` for Chrome's process-singleton socket. These capabilities add no
+registration prefixes; browser lanes set `MAC_CHROMIUM_TMPDIR` to their
+`/tmp/fb-<id>` directory for Chrome's process-singleton socket. These capabilities add no
 network access beyond a Codex writer with network enabled; Unix-domain socket
 connects are limited to `cwd`, declared `add_dirs`, the attempt directory, task
 Codex home and mDNSResponder. SBPL `(local ip "localhost:*")` matches every

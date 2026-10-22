@@ -2739,6 +2739,7 @@ def test_codex_capabilities_with_full_sandbox_are_accepted_with_a_warning(monkey
 @pytest.mark.parametrize("mode", ["worktree_write", "read_only"])
 def test_other_adapters_take_capabilities_without_a_grant(monkeypatch, tmp_path, mode):
     mod = supervisor()
+    monkeypatch.setattr(mod, "_sandbox_exec_path", lambda: "/usr/bin/sandbox-exec")
     _, lane = instruction_lane(tmp_path)
     attempt = tmp_path / "attempt"
     attempt.mkdir()
@@ -2751,12 +2752,52 @@ def test_other_adapters_take_capabilities_without_a_grant(monkeypatch, tmp_path,
     # Their sandbox-exec profile leaves SysV IPC and Mach services open; only Chrome's temp moves.
     profile = mod.os_confinement_profile(plan)
     assert "(deny mach-lookup)" not in profile and "(deny ipc-sysv*)" not in profile
+    temporary = plan["applied"]["browser_tmpdir"]
+    assert f'(subpath "{temporary}")' in next(
+        line for line in profile.splitlines() if line.startswith('(allow file-write* '))
+    if mode == "read_only":
+        assert profile.index(f'(allow file-read-data (subpath "{attempt}") (subpath "{temporary}"))') > profile.index(
+            '(deny file-read-data (subpath ')
+    assert temporary in plan["applied"]["write_boundary"]["writable_paths"]
     plan["applied"]["confinement"] = "none"
-    plan["argv"] = [sys.executable, "-u", "-c", "import json, os; print(json.dumps({'type':'result',"
-                    "'result':os.environ.get('MAC_CHROMIUM_TMPDIR')}))"]
+    plan["argv"] = [sys.executable, "-u", "-c", "import json, os; from pathlib import Path; "
+                    "root=Path(os.environ['MAC_CHROMIUM_TMPDIR']); "
+                    "assert root.stat().st_mode & 0o777 == 0o700; "
+                    "(root / '.org.chromium.Chromium.123456').mkdir(); "
+                    "(root / '.org.chromium.Chromium.123456/data').write_text('browser state'); "
+                    "print(json.dumps({'type':'result','result':str(root)}))"]
     record = mod.execute(plan, attempt / "result.md", env={**os.environ, "MAC_CHROMIUM_TMPDIR": "ambient"})
     assert record["status"] == "ok", record
-    assert (attempt / "result.md").read_text() == str(attempt / "tmp")
+    temporary = Path(record["applied"]["browser_tmpdir"])
+    assert (attempt / "result.md").read_text() == str(temporary)
+    assert temporary.parent == Path("/tmp").resolve()
+    assert not temporary.exists()
+
+
+def test_browser_tmp_cleanup_trouble_warns_without_discarding_the_result(monkeypatch, tmp_path):
+    mod = supervisor()
+    monkeypatch.setattr(mod, "_sandbox_exec_path", lambda: "/usr/bin/sandbox-exec")
+    _, lane = instruction_lane(tmp_path)
+    attempt = tmp_path / "attempt"
+    attempt.mkdir()
+    plan = mod.build_plan("claude", {"resolved_model": "fixture"}, "hello", workspace_root=tmp_path,
+                          mode="worktree_write", worktree=lane, capabilities=["browser"], run_dir=attempt)
+    plan["applied"]["confinement"] = "none"
+    # The lane swaps its directory for another one; cleanup must leave it and only warn. The new
+    # directory is made while the old one exists, as tmpfs may otherwise reuse its inode.
+    plan["argv"] = [sys.executable, "-u", "-c", "import json, os; from pathlib import Path; "
+                    "root=Path(os.environ['MAC_CHROMIUM_TMPDIR']); aside=root.rename(str(root) + '-old'); "
+                    "root.mkdir(); aside.rmdir(); "
+                    "print(json.dumps({'type':'result','result':'done'}))"]
+    record = mod.execute(plan, attempt / "result.md", env=dict(os.environ))
+    temporary = Path(record["applied"]["browser_tmpdir"])
+    try:
+        assert record["status"] == "ok", record
+        assert (attempt / "result.md").read_text() == "done"
+        assert temporary.exists()
+        assert any("was replaced" in warning for warning in record["warnings"])
+    finally:
+        temporary.rmdir()
 
 
 @pytest.mark.parametrize("capabilities", [["other"], ["browser", "browser"], "browser"])
@@ -2848,6 +2889,12 @@ def test_codex_capability_profile_keeps_git_narrow_and_grants_only_selected_feat
                              worktree=lane, sandbox="workspace-write", network=True,
                              capabilities=["browser"], run_dir=attempt)
     browser_profile = mod.os_confinement_profile(browser)
+    browser_tmp = browser["applied"]["browser_tmpdir"]
+    assert f'(subpath "{browser_tmp}")' in next(
+        line for line in browser_profile.splitlines() if line.startswith('(allow file-write* '))
+    assert f'(remote unix-socket (subpath "{browser_tmp}"))' in browser_profile
+    assert browser_tmp in browser["applied"]["write_boundary"]["writable_paths"]
+    assert "browser_tmpdir" not in plan["applied"]
     for service in mod.CODEX_BASE_MACH_SERVICES + mod.CODEX_BROWSER_MACH_SERVICES:
         assert f'(global-name "{service}")' in browser_profile
     for prefix in mod.CODEX_BROWSER_MACH_PORT_PREFIXES:
@@ -3345,10 +3392,14 @@ def test_codex_capability_home_is_seeded_and_browser_tmp_is_opt_in(
     assert record["status"] == "ok"
     assert json.loads((attempt / "result.md").read_text()) == {
         "CODEX_HOME": str(lane_home),
-        "MAC_CHROMIUM_TMPDIR": str(attempt / "tmp") if browser_tmp else None,
+        "MAC_CHROMIUM_TMPDIR": plan["applied"]["browser_tmpdir"] if browser_tmp else None,
         "TMPDIR": str(attempt / "tmp"),
         "XDG_CACHE_HOME": str(attempt / "tmp/cache"),
     }
+    if browser_tmp:
+        assert not Path(record["applied"]["browser_tmpdir"]).exists()
+    else:
+        assert "browser_tmpdir" not in record["applied"]
     for name in ("auth.json", "AGENTS.md", "HARNESS.md", "skills"):
         assert (lane_home / name).is_symlink()
         assert (lane_home / name).resolve() == (source / name).resolve()
@@ -3495,6 +3546,47 @@ def test_codex_capability_swappable_source_home_fails_before_launch(monkeypatch,
     assert record["status"] == "failed"
     assert reason in record["reason"]
     assert not launched.exists()
+    assert not Path(record["applied"]["browser_tmpdir"]).exists()
+
+
+def test_browser_temporary_directory_refuses_a_planted_link_before_launch(monkeypatch, tmp_path):
+    mod = supervisor()
+    plan = mod.build_plan("claude", {}, "hello", cwd=tmp_path, workspace_root=tmp_path,
+                          capabilities=["browser"], run_dir=tmp_path / "attempt")
+    temporary = Path(plan["applied"]["browser_tmpdir"])
+    victim = tmp_path / "victim"
+    victim.mkdir()
+    marker = victim / "keep"
+    marker.write_text("preserved")
+    temporary.symlink_to(victim, target_is_directory=True)
+    launched = tmp_path / "launched"
+    plan["argv"] = [sys.executable, "-c", f"open({str(launched)!r}, 'w').close()"]
+    try:
+        record = mod.execute(plan, tmp_path / "result.md")
+        assert record["status"] == "failed"
+        assert not launched.exists()
+        assert temporary.is_symlink()
+        assert marker.read_text() == "preserved"
+    finally:
+        temporary.unlink()
+
+
+def test_browser_temporary_directory_is_removed_when_a_callback_raises(monkeypatch, tmp_path):
+    mod = supervisor()
+    monkeypatch.setattr(mod, "_sandbox_exec_path", lambda: None)
+    plan = mod.build_plan("claude", {}, "hello", cwd=tmp_path, workspace_root=tmp_path,
+                          capabilities=["browser"], run_dir=tmp_path / "attempt")
+    plan["argv"] = [sys.executable, "-c", "import time; time.sleep(30)"]
+    temporary = Path(plan["applied"]["browser_tmpdir"])
+
+    def started(process):
+        assert temporary.is_dir()
+        (temporary / "browser-state").write_text("temporary")
+        raise RuntimeError("start callback failed")
+
+    with pytest.raises(RuntimeError, match="start callback failed"):
+        mod.execute(plan, tmp_path / "result.md", on_start=started)
+    assert not temporary.exists()
 
 
 def test_claude_adapter_receives_attempt_private_claude_tmpdir(tmp_path):

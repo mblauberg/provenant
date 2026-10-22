@@ -279,7 +279,8 @@ wrapped attempts.
 Any lane may pass `capabilities: ["postgres", "browser"]`, using either or
 both distinct values; empty lists mean none. Other adapters' profiles already
 leave System V IPC and Mach services open, so they take the list without a
-grant; their browser lanes only move `MAC_CHROMIUM_TMPDIR` to `<attempt>/tmp`.
+grant; their browser lanes only move `MAC_CHROMIUM_TMPDIR` to the short private
+temporary directory described below.
 A Codex `sandbox: "full"` lane is unsandboxed, so it applies no capabilities
 and warns. Otherwise a Codex lane needs `worktree_write`, `sandbox:
 "workspace-write"`, macOS, usable `sandbox-exec` outside another sandbox and
@@ -290,11 +291,17 @@ Mach services plus FSEvents, denies other Mach lookups and registrations,
 denies signals except to processes in the same sandbox, denies preference
 writes through `cfprefsd`, and denies System V IPC by default. `postgres` adds shared-memory and semaphore IPC. `browser`
 adds the macOS browser services and the Chrome/Chromium rendezvous Mach lookup
-and registration prefixes; browser lanes set `MAC_CHROMIUM_TMPDIR` to
-`<attempt>/tmp` for Chrome's process-singleton socket. These capabilities add no
-network access beyond a Codex writer whose network is enabled; Unix-domain
-socket connects are limited to `cwd`, declared `add_dirs`, the attempt
-directory, task Codex home and mDNSResponder.
+and registration prefixes. Browser lanes set `MAC_CHROMIUM_TMPDIR` to a short
+per-attempt `/tmp/fb-<12 hex>` directory for Chrome's process-singleton socket,
+using `/private/tmp` on macOS. The name derives from the user and attempt path;
+project depth cannot exhaust the socket path budget. Fabric creates it with
+mode `0700`, refuses symlinks and foreign ownership, records `applied.browser_tmpdir`
+in the attempt receipt, and removes it after the provider and its descendants
+stop. The OS profile grants file access and Unix sockets under that directory.
+These capabilities add no network access beyond a Codex writer whose network
+is enabled; Unix-domain socket connects are limited to `cwd`, declared `add_dirs`,
+the attempt directory, its browser temporary directory, task Codex home and
+mDNSResponder.
 SBPL's `(local ip "localhost:*")` also matches every local address, so Fabric
 does not claim that an inbound loopback rule limits connections.
 

@@ -630,6 +630,49 @@ class HostDiagnosticsContracts(unittest.TestCase):
                 # One non-ASCII character needs two UTF-8 bytes.
                 self.assertFalse(hosts.browser_socket_paths(Path(str(temporary)[:-1] + 'é'))['fits'])
 
+    def test_browser_temporary_directory_stays_short_for_long_attempt_paths(self):
+        import fabric_hosts as hosts
+        attempt = Path('/project') / ('long-name-' * 20) / '.agent-run/runs/run/dispatch/tasks/task/attempt-001'
+        temporary = hosts.browser_temporary_directory(attempt)
+        self.assertEqual(temporary.parent, Path('/tmp').resolve())
+        self.assertRegex(temporary.name, r'^fb-[0-9a-f]{12}$')
+        self.assertEqual(temporary, hosts.browser_temporary_directory(attempt))
+        self.assertNotEqual(temporary, hosts.browser_temporary_directory(attempt.with_name('attempt-002')))
+        with patch.object(hosts.sys, 'platform', 'darwin'):
+            self.assertTrue(hosts.browser_socket_paths(temporary)['fits'])
+
+    def test_browser_temporary_directory_is_private_and_refuses_unsafe_existing_paths(self):
+        import fabric_hosts as hosts
+        with tempfile.TemporaryDirectory() as directory:
+            attempt = Path(directory) / 'attempt'
+            temporary = hosts.browser_temporary_directory(attempt)
+            try:
+                self.assertEqual(hosts.browser_temporary_directory(attempt, create=True), temporary)
+                self.assertEqual(temporary.stat().st_uid, os.getuid())
+                self.assertEqual(temporary.stat().st_mode & 0o777, 0o700)
+                temporary.chmod(0o755)
+                hosts.browser_temporary_directory(attempt, create=True)
+                self.assertEqual(temporary.stat().st_mode & 0o777, 0o700)
+                from types import SimpleNamespace
+                foreign = SimpleNamespace(st_mode=temporary.stat().st_mode, st_uid=os.getuid() + 1)
+                with patch.object(hosts.os, 'fstat', return_value=foreign):
+                    with self.assertRaises(PermissionError):
+                        hosts.browser_temporary_directory(attempt, create=True)
+                temporary.rmdir()
+                temporary.symlink_to(directory, target_is_directory=True)
+                with self.assertRaises(OSError):
+                    hosts.browser_temporary_directory(attempt, create=True)
+                self.assertTrue(temporary.is_symlink())
+                temporary.unlink()
+                temporary.write_text('not a directory')
+                with self.assertRaises(OSError):
+                    hosts.browser_temporary_directory(attempt, create=True)
+            finally:
+                if temporary.is_symlink() or temporary.is_file():
+                    temporary.unlink()
+                elif temporary.exists():
+                    temporary.rmdir()
+
     def test_doctor_interpreter_probe_failure_names_python_minimum(self):
         with tempfile.TemporaryDirectory() as directory:
             interpreter = Path(directory) / 'python'
