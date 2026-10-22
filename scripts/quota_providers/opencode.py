@@ -50,17 +50,18 @@ def add_months(anchor, count):
     return anchor.replace(year=year, month=month + 1, day=min(anchor.day, monthrange(year, month + 1)[1]))
 
 
-def cycles(now, anchor):
+def cycles(now, anchor, weekly=None):
     """(name, start, end, minutes) per window; end is None while a window rolls.
 
     With a subscription anchor the weekly and monthly windows are fixed cycles from it; the
-    5 hour window always rolls.
+    weekly cycle may have its own anchor. The 5 hour window always rolls.
     """
     rolling = [(name, now - timedelta(minutes=minutes), None, minutes) for name, minutes, _ in WINDOWS]
     if anchor is None:
         return rolling
-    weeks = (now - anchor) // timedelta(days=7)
-    week = anchor + timedelta(days=7 * weeks)
+    weekly = weekly or anchor
+    weeks = (now - weekly) // timedelta(days=7)
+    week = weekly + timedelta(days=7 * weeks)
     count = (now.year - anchor.year) * 12 + now.month - anchor.month
     count -= add_months(anchor, count) > now
     month = add_months(anchor, count)
@@ -138,9 +139,9 @@ def monthly_cap(account):
     return cap if cap > 0 else None
 
 
-def anchor_of(account, io):
+def anchor_of(account, io, key='cycle_anchor'):
     limits = account.options.get('limits')
-    anchor = io.parse_time(limits.get('cycle_anchor')) if isinstance(limits, dict) else None
+    anchor = io.parse_time(limits.get(key)) if isinstance(limits, dict) else None
     return anchor.astimezone(UTC) if anchor else None
 
 
@@ -148,7 +149,7 @@ def fetch(account, io, now):
     database = account.identity_dir / 'opencode.db'
     providers = tuple(account.options.get('providers') or PAID)
     anchor = anchor_of(account, io)
-    frames = cycles(now, anchor)
+    frames = cycles(now, anchor, anchor_of(account, io, 'weekly_anchor'))
     try:
         with closing(sqlite3.connect(database.resolve().as_uri() + '?mode=ro', uri=True)) as db:
             spent = spend(db, now, providers, [start for _, start, _, _ in frames])

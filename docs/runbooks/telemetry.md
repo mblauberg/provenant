@@ -397,7 +397,9 @@ window reads 100% until its estimated reset (the error time plus the window).
 Set `limits.cycle_anchor` (ISO datetime of the subscription cycle start) to use fixed
 weekly (every 7 days) and monthly (same day each month, clamped to short months)
 cycles instead of rolling ones: spend is summed within the current cycle, resets
-are the next boundary, and an error expires at it. The 5 hour window always rolls.
+are the next boundary, and an error expires at it. Set `limits.weekly_anchor` when
+the weekly cycle starts at a different time from the monthly one; it defaults to
+`cycle_anchor`. The 5 hour window always rolls.
 Free zen models are ignored. Only message tables are read, never credentials.
 
 ```json

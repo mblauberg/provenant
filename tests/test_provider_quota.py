@@ -496,6 +496,15 @@ def test_opencode_fixed_cycles_follow_the_anchor_through_short_months(quota, anc
     assert all(start <= when < end for start, end in (frames['thirty_day'], frames['seven_day']))
 
 
+def test_opencode_weekly_anchor_offsets_only_the_weekly_cycle(quota):
+    opencode = quota.provider('opencode')
+    when, anchor = quota.parse_time('2026-10-22T00:00:00Z'), quota.parse_time('2026-10-17T23:20:00Z')
+    frames = {name: (start, end) for name, start, end, _ in
+              opencode.cycles(when, anchor, quota.parse_time('2026-10-18T23:20:00Z'))}
+    assert frames['thirty_day'] == (anchor, quota.parse_time('2026-11-17T23:20:00Z'))
+    assert frames['seven_day'] == (quota.parse_time('2026-10-18T23:20:00Z'), quota.parse_time('2026-10-25T23:20:00Z'))
+
+
 def test_opencode_anchor_sums_the_current_cycle_and_a_limit_error_expires_at_the_boundary(quota, tmp_path):
     anchor = (NOW - 2 * day).isoformat()   # the weekly and monthly cycles began two days ago
     v2 = ((3 * day, 9.0, 'opencode-go'), (day, 4.0, 'opencode-go'), (hour, 4.0, 'opencode-go'))
