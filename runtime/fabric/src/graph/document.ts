@@ -1,4 +1,3 @@
-import { pythonOwnerSync, pythonOwnerEnvironment } from "../python-owner.js";
 /**
  * Graph documents (slice 1): plain, already expanded work nodes. Validation is
  * deterministic over the document, the catalogue and the filesystem. The
@@ -10,6 +9,7 @@ import { realpathSync } from "node:fs";
 import { isAbsolute, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { pythonOwnerSync, pythonOwnerEnvironment } from "../python-owner.js";
 import type { CatalogueSnapshot } from "../catalogue.js";
 import { InputError, normaliseRoute, ownerPromptPath, readRoots, workingIdentity, type RouteInput } from "../execution-input.js";
 import { productRoot } from "../execution.js";

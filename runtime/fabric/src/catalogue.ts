@@ -1,11 +1,11 @@
 /** Read the Python-owned merged routing snapshot, cached by source mtimes. */
-import { pythonOwner, pythonOwnerSync, pythonOwnerEnvironment } from "./python-owner.js";
 import { execFile, spawnSync } from "node:child_process";
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
+import { pythonOwner, pythonOwnerSync, pythonOwnerEnvironment } from "./python-owner.js";
 
 const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const require = createRequire(import.meta.url);
@@ -77,12 +77,14 @@ export function catalogueSnapshot(root?: string, env: NodeJS.ProcessEnv = proces
     return value;
   };
   if (!existsSync(script)) return failed("catalogue snapshot unavailable; fix: restore scripts/model_route.py");
+  const ownerEnv = pythonOwnerEnvironment({ ...process.env, ...env,
+    AGENT_FABRIC_PRODUCT_ROOT: productRoot, AGENT_FABRIC_INSTANCE_ROOT: instanceRoot });
   let python: string;
-  try { python = pythonOwnerSync(productRoot, { ...process.env, ...env }); }
+  try { python = pythonOwnerSync(productRoot, ownerEnv); }
   catch (error) { return failed(`catalogue snapshot unavailable: ${error instanceof Error ? error.message : String(error)}`); }
   const run = spawnSync(python, [script, "snapshot", "--json"], {
     cwd: productRoot,
-    env: pythonOwnerEnvironment({ ...process.env, ...env, AGENT_FABRIC_PRODUCT_ROOT: productRoot, AGENT_FABRIC_INSTANCE_ROOT: instanceRoot }),
+    env: ownerEnv,
     encoding: "utf8",
     timeout: 10_000,
     maxBuffer: 4 * 1024 * 1024,

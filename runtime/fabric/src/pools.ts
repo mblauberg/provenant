@@ -1,8 +1,8 @@
 /** Expand `route`, `rotate`, `council` and `models` into concrete adapter/model tasks (#848). */
-import { pythonOwnerEnvironment } from "./python-owner.js";
 import { existsSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { pythonOwnerEnvironment } from "./python-owner.js";
 import { type Identity } from "./identity.js";
 import { runJsonSubprocess } from "./json-subprocess.js";
 import { InputError, nativeAdapter, tierAlias, type BatchTaskInput, type RouteInput } from "./execution-input.js";

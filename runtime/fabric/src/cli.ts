@@ -1,4 +1,3 @@
-import { pythonOwner, pythonOwnerEnvironment } from "./python-owner.js";
 /**
  * The same store from a shell, for agents that would rather run a command than
  * hold an MCP connection, and for the user watching what their agents are doing.
@@ -14,6 +13,7 @@ import { digest, quarantineAction } from "./surface.js";
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
+import { pythonOwner, pythonOwnerEnvironment } from "./python-owner.js";
 import { databasePath, identify, runRoot, withoutGitRedirects } from "./identity.js";
 import {
   dispatchConfiguredBatch, dispatchConfiguredProvider, hostOwnersInThemselves, productRoot,

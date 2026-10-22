@@ -4,12 +4,12 @@
  * dispatch made with the creating seat's identity. It calls no model and is
  * never polled: the chair hears from it through Fabric messages.
  */
-import { pythonOwnerSync, pythonOwnerEnvironment } from "../python-owner.js";
 import { createHash } from "node:crypto";
 import { execFileSync, spawn } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { isAbsolute, join, relative, resolve } from "node:path";
 
+import { pythonOwnerSync, pythonOwnerEnvironment } from "../python-owner.js";
 import { cancelConfiguredRun, dispatchConfiguredProvider, hostOwnersInThemselves, productRoot } from "../execution.js";
 import { databasePath, runRoot, withoutGitRedirects, type Identity } from "../identity.js";
 import {

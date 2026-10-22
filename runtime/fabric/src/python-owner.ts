@@ -47,4 +47,3 @@ export function pythonOwnerSync(root: string, env: NodeJS.ProcessEnv): string {
   try { return selectedPython(execFileSync("/bin/bash", args, options)); }
   catch (error) { throw pythonOwnerError(error); }
 }
-

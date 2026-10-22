@@ -11,7 +11,6 @@
  * owner handles its descendants. When an owner cannot finish cleanup, these
  * records do not authorise a broader group kill that could hit a shared host.
  */
-import { pythonOwner, pythonOwnerEnvironment } from "./python-owner.js";
 import { projectRoot, runRoot, withoutGitRedirects } from "./identity.js";
 import { federatedLane } from "./hosts.js";
 import { canonicalSuccessStatus, isSuccessStatus } from "./success-status.js";
@@ -38,6 +37,7 @@ import {
 import { promisify } from "node:util";
 const execFileAsync = promisify(execFile);
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { pythonOwner, pythonOwnerEnvironment } from "./python-owner.js";
 
 export const OWNER_RECORD_NAME = "dispatch-owner.json";
 export const PROVIDER_RECORD_NAME = "dispatch-provider.json";

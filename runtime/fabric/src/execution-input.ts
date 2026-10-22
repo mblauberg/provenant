@@ -1,7 +1,7 @@
 /** Validate the Fabric request and forward routing/control choices to its owner. */
-import { pythonOwnerEnvironment } from "./python-owner.js";
 import { readFileSync, realpathSync, statSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { pythonOwnerEnvironment } from "./python-owner.js";
 import { projectRoot, type Identity } from "./identity.js";
 import { runJsonSubprocess } from "./json-subprocess.js";
 import type { CatalogueSnapshot } from "./catalogue.js";

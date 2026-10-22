@@ -139,14 +139,18 @@ class LaneFederation:
                 raise ValueError()
             if scopes and isinstance(value.get('runs'), list):
                 runs = []
+                scoped_runs = {scope['runId'] for scope in scopes}
                 for row in value['runs']:
+                    if row.get('run_id') not in scoped_runs:
+                        runs.append(row)
+                        continue
                     names = {row.get(key) for key in ('id', 'run_id', 'task_id', 'batch_id', 'run_dir')}
-                    if row.get('run_dir'):
-                        names.add(Path(row['run_dir']).name)
+                    run_dir = Path(row.get('run_dir') or directory / '.agent-run' / row.get('run_path', ''))
+                    names.update((str(run_dir), run_dir.name))
                     if unscoped and not any(selector in names for selector in unscoped):
-                        run_dir = row.get('run_dir') or directory / '.agent-run' / row.get('run_path', '')
                         try:
-                            metadata = self.h.strict_json((Path(run_dir) / 'dispatch-status.json').read_bytes())
+                            metadata = self.h.strict_json((run_dir / 'dispatch-status.json').read_bytes())
+                            names.add(metadata.get('batch_id'))
                             if metadata.get('task_id') == row.get('task_id'):
                                 names.add(metadata.get('task_alias'))
                         except (OSError, ValueError):
@@ -157,10 +161,6 @@ class LaneFederation:
                     attempts = [scope['attempt'] for scope in scopes
                         if row.get('run_id') == scope['runId'] and row.get('task_id') == scope['taskId']]
                     if attempts and row.get('attempt', 0) >= min(attempts):
-                        row = dict(row)
-                        if isinstance(row.get('attempts'), list):
-                            row['attempts'] = [attempt for attempt in row['attempts']
-                                if attempt.get('attempt', 0) >= min(attempts)]
                         runs.append(row)
                 value['runs'] = runs
             return value

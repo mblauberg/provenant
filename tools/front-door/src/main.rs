@@ -255,7 +255,8 @@ fn run(args: &[OsString]) -> u8 {
                     let helper = checkout.join("scripts/lib/harness-python.sh");
                     if !is_file(&helper) {
                         return fail(&format!(
-                            "Python helper is missing at {}; {}",
+                            "cannot execute {}: Python helper is missing at {}; {}",
+                            program.display(),
                             helper.display(),
                             exec::REPAIR
                         ));

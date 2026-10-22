@@ -336,6 +336,7 @@ def test_missing_python_helper_reports_repair(fd, verb):
     result = fd.run(verb)
 
     assert result.returncode == 3, result.err
-    assert "scripts/lib/harness-python.sh" in result.err
-    assert REPAIR in result.err
+    owner = "skills/orchestrate/scripts/dispatch_run.py" if verb == "dispatch" else "scripts/clean.py"
+    assert result.err == (f"provenant: cannot execute {fd.owner(owner)}: Python helper is missing at "
+                          f"{fd.checkout / 'scripts/lib/harness-python.sh'}; {REPAIR}\n")
     assert not result.out

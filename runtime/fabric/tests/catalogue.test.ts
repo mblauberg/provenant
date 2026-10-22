@@ -120,7 +120,6 @@ it("resets cooldowns through the Python owner", () => {
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
-
 it.each(["venv", "override"])("uses the harness Python environment for every catalogue launch (%s)", async (selection) => {
   const root = scratchRoot("fabric-catalogue-python-");
   try {
@@ -139,7 +138,7 @@ print(json.dumps({"schema": "fabric.catalogue.v1", "sha256": "fixture", "cooldow
 `);
     const env = { ...process.env, AGENT_FABRIC_PRODUCT_ROOT: root, AGENT_FABRIC_INSTANCE_ROOT: root,
       HARNESS_PYTHON: selection === "override" ? python : "", PYTHONNOUSERSITE: "0" };
-    expect(catalogueSnapshot(root, env).sha256).toBe("fixture");
+    expect(catalogueSnapshot(root, { ...env, AGENT_FABRIC_PRODUCT_ROOT: join(root, "other-product") }).sha256).toBe("fixture");
     expect(activeCooldowns(env)).toEqual([]);
     expect(resetCooldowns(undefined, env)).toEqual([]);
     const snapshot = { adapters: [{ name: "opencode", models: [] }], endpoints: {}, drift: [] } as any;

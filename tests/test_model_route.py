@@ -205,16 +205,16 @@ def test_python_floor_rejects_missing_interpreter(harness_script, runner):
 
 
 @pytest.mark.parametrize("runner", ["run_stdlib", "run_yaml", "run_test", "exec_stdlib"])
-def test_python_rejects_relative_override(harness_script, runner):
-    result = run_harness(
-        harness_script, runner,
-        harness_python=os.path.relpath(sys.executable, ROOT),
-        pythonpath=None, optimize="",
-    )
+@pytest.mark.parametrize("variable", ["HARNESS_PYTHON", "AGENT_FABRIC_PRODUCT_ROOT"])
+def test_python_rejects_relative_override(harness_script, runner, variable):
+    environment = {**os.environ, "HARNESS_RUNNER": runner, "HARNESS_PYTHON": "",
+        variable: "relative/path"}
+    result = subprocess.run([str(harness_script)], cwd=ROOT, env=environment,
+        text=True, capture_output=True, check=False)
 
     assert result.returncode == 3
     assert not result.stdout
-    assert "HARNESS_PYTHON must be an absolute path" in result.stderr
+    assert f"{variable} must be an absolute path" in result.stderr
     assert "repair:" in result.stderr
 
 
