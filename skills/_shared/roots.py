@@ -4,7 +4,7 @@ Before this module, five patterns answered the same question and disagreed.
 `skills/deliver/scripts/delivery_receipt.py` derived the root purely from its
 own location and ignored `AGENT_FABRIC_PRODUCT_ROOT`, so it read config from a
 different tree than every sibling deliver script whenever a launcher such as
-`skills/orchestrate/scripts/cf_dispatch.sh` pinned the root explicitly.
+`skills/orchestrate/scripts/cf_dispatch.py` pinned the root explicitly.
 
 Precedence, in one place:
 

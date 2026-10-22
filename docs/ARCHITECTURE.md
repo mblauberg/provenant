@@ -251,7 +251,7 @@ independence are separate things: ordinary dispatch records that it makes no
 independence claim, and the Fabric MCP execution tools reject an assurance
 selector as a typed input error, so a review leg that must carry an
 independence claim runs the assurance path in
-`skills/orchestrate/scripts/cf_dispatch.sh` ([ADR
+`skills/orchestrate/scripts/cf_dispatch.py` ([ADR
 0021](adr/0021-configured-workspace-dispatch-boundaries.md), [ADR
 0022](adr/0022-thin-fabric-mcp-execution-facade.md)).
 

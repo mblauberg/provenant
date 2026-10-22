@@ -18,7 +18,7 @@ programs run in `tests/test_provider_exec.py` without model prompts.
   `.agent-run/runs/index.jsonl`; terminal receipt closure follows publication.
 - Routing calls the existing model-router CLI and consumes `snapshot --json` when
   available. `adapters` may be a map or a list. The owner performs fallback as new
-  attempts in the same run. Legacy direct `cf_dispatch.sh --chain` remains a shell
+  attempts in the same run. Legacy direct `cf_dispatch.py --chain` remains a
   compatibility path; it does not gain owner attempt directories.
 - Lane B must replace the assertion that every adapter has a Bash execution arm:
   execution is now in `provider_exec.py`, with declarative `adapters/*.py` profiles.

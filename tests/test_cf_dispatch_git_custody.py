@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Git repository-custody regressions for cf_dispatch.sh."""
+"""Git repository-custody regressions for cf_dispatch.py."""
 
 import shlex
 import shutil

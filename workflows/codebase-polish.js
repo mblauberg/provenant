@@ -19,7 +19,7 @@
 //   0 Bootstrap   — one agent makes the run dir + discovers repo conventions (recon.json).
 //   1 Scan        — bounded fan-out of cheap finders over the slice -> candidate list.
 //   2 Review      — per candidate: parallel Claude reviewer + cross-family reviewer
-//                   (cf_dispatch.sh -> codex) at a DIFFERENT angle. Cross-family is a
+//                   (cf_dispatch.py -> codex) at a DIFFERENT angle. Cross-family is a
 //                   first-class parallel worker here, not a final gate.
 //   3 Adjudicate  — flagship synthesis risk-tags every candidate, splits low vs high.
 //   4 Apply       — ONE serial applier lands low-risk after objective checks; high-risk
@@ -31,8 +31,8 @@
 //   cross-family driver -> scout; adjudication -> flagship; serial applier -> workhorse.
 // Bootstrap resolves durable aliases through the global router; every later stage receives
 // the concrete model for its role.
-// Cross-family routing: cf_dispatch.sh with --orchestrator-family claude and a codex-first
-// --chain (exec -s read-only, enforced). codex refuses non-git dirs and cf_dispatch.sh does
+// Cross-family routing: cf_dispatch.py with --orchestrator-family claude and a codex-first
+// --chain (exec -s read-only, enforced). codex refuses non-git dirs and cf_dispatch.py does
 // NOT forward --skip-git-repo-check, so when recon.gitCwd is set the agent cd's into it
 // before dispatch; when it is null the agent relies on the chain failing over to cursor
 // (which has no git requirement). Fail-over codex -> cursor -> agy (advisory scout) is
@@ -233,7 +233,7 @@ const ARCH_DOCTRINE =
   'never auto-apply a cross-file refactor.'
 
 const cfDispatch =
-  '"$(provenant root)/skills/orchestrate/scripts/cf_dispatch.sh"'
+  '"$(provenant root)/skills/orchestrate/scripts/cf_dispatch.py"'
 
 // ---------------------------------------------------------------------------
 // Workflow body.
