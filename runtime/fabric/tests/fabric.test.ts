@@ -400,7 +400,7 @@ it("shows help for every CLI command before validating arguments or opening the 
   const commands = ["whoami", "send", "inbox", "ack", "note", "tasks", "task", "claim", "done",
     "activity", "watch", "status", "doctor", "dispatch", "adapters", "lanes", "events",
     "work-claims", "landing-wait", "landing-push", "landing-acquire", "landing-verify", "landing-release",
-    "landing-status", "session", "cancel", "output", "fetch"];
+    "landing-status", "session", "cancel", "output", "fetch", "graph"];
   for (const command of commands) {
     for (const help of ["--help", "-h"]) {
       const result = spawnSync(resolve(repositoryRoot, "runtime/fabric/bin/fabric"), [command, help], {

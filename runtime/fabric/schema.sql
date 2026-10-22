@@ -172,3 +172,69 @@ CREATE TABLE IF NOT EXISTS sessions (
   updated_at          INTEGER NOT NULL,
   PRIMARY KEY (project, name)
 );
+
+-- Graph runner (ADR 0022 amendment, docs/specs/harness/graph-runner.md).
+-- A graph is a stored, validated document plus one owner process that
+-- dispatches its nodes through the ordinary dispatch owners. Attempts are the
+-- mutable scheduler state; every transition is guarded by its current state.
+CREATE TABLE IF NOT EXISTS graphs (
+  project          TEXT NOT NULL,
+  graph_id         TEXT NOT NULL,
+  revision         INTEGER NOT NULL,
+  state            TEXT NOT NULL,
+  owner_pid        INTEGER,
+  owner_started    TEXT,
+  chair_identity   TEXT NOT NULL,
+  cancel_requested INTEGER NOT NULL DEFAULT 0,
+  created_at       INTEGER NOT NULL,
+  updated_at       INTEGER NOT NULL,
+  PRIMARY KEY (project, graph_id)
+);
+
+CREATE TABLE IF NOT EXISTS graph_revisions (
+  project       TEXT NOT NULL,
+  graph_id      TEXT NOT NULL,
+  revision      INTEGER NOT NULL,
+  document_json TEXT NOT NULL,
+  plan_json     TEXT,
+  spec_hash     TEXT,
+  origin        TEXT,
+  created_at    INTEGER NOT NULL,
+  PRIMARY KEY (project, graph_id, revision)
+);
+
+CREATE TABLE IF NOT EXISTS graph_attempts (
+  project        TEXT NOT NULL,
+  graph_id       TEXT NOT NULL,
+  node_id        TEXT NOT NULL,
+  revision       INTEGER NOT NULL,
+  attempt        INTEGER NOT NULL,
+  restart        INTEGER NOT NULL DEFAULT 0,
+  state          TEXT NOT NULL,
+  task_id        TEXT NOT NULL,
+  run_id         TEXT,
+  run_dir        TEXT,
+  input_attempts TEXT NOT NULL DEFAULT '{}',
+  adapter        TEXT NOT NULL,
+  model          TEXT NOT NULL,
+  account        TEXT NOT NULL,
+  holds_slot     INTEGER NOT NULL DEFAULT 0,
+  kept           INTEGER NOT NULL DEFAULT 0,
+  gate_procs     TEXT NOT NULL DEFAULT '[]',
+  outcome        TEXT,
+  updated_at     INTEGER NOT NULL,
+  PRIMARY KEY (project, graph_id, node_id, revision, attempt, restart)
+);
+
+CREATE INDEX IF NOT EXISTS graph_attempts_by_pool ON graph_attempts(adapter, model, account, holds_slot);
+
+CREATE TABLE IF NOT EXISTS graph_worktree_reservations (
+  realpath   TEXT PRIMARY KEY,
+  project    TEXT NOT NULL,
+  graph_id   TEXT NOT NULL,
+  node_id    TEXT NOT NULL,
+  revision   INTEGER NOT NULL,
+  attempt    INTEGER NOT NULL,
+  token      TEXT NOT NULL,
+  created_at INTEGER NOT NULL
+);

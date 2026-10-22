@@ -88,3 +88,35 @@ alias once no turn is active.
 The dedicated `fabric_batch` MCP registration and its `FABRIC_LEGACY_TOOLS`
 opt-in are retired. Callers use `fabric_dispatch` with `tasks[]` for finite
 batches; the existing batch owner still executes those tasks.
+
+## Amendment: plan graphs
+
+**Accepted 2026-10-22** (graph runner spec, [PR
+#1099](https://github.com/mblauberg/provenant/pull/1099); slice 1).
+
+The execution tools are now `fabric_dispatch` and `fabric_graph`.
+`fabric_graph` (`action: run|status|cancel|resume`) takes one validated JSON
+plan graph whose nodes are ordinary dispatches, and returns at once with a
+digest; `status` waits for at most 55 seconds and restarts an owner that died.
+The CLI equivalent is `provenant graph`.
+
+Fabric gains a scheduler only in this bounded form: one detached owner process
+per running graph, started by the call and ending with the graph. It holds no
+authority of its own and calls no model. Each node is a `fabric_dispatch` made
+with the creating seat's identity, so the workspace boundaries, capability
+rules and own-seat guard apply unchanged, and `dispatch_run.py` remains the
+sole owner of provider processes, attempts and results. The graph state lives
+in four tables in the existing Fabric store; a node's receipt references its
+dispatch receipt by run and task id and copies no provider output. There is
+still no daemon: a dead owner is detected on read and restarted by `resume`,
+and recovery adopts the lanes the registry still shows.
+`provenant graph resume ID --force` audits the caller and replaces stale owner identity under a process lock, retaining lane and gate fences until recovery proves them stopped.
+
+Two mechanisms are new. A writer node's linked worktree is reserved for the
+graph in the store and by a file in its Git directory, which `dispatch_run.py`
+honours, so a hand dispatch into it is refused while the graph runs. A node may
+run trusted fast gates: allowlisted argv run in the node's tree with a minimal
+environment, launched as recorded process groups behind a handshake so that no
+gate runs unrecorded and cancel terminates the whole group before the
+reservation is released. Gates are not confinement; they have the user's
+filesystem and network reach.

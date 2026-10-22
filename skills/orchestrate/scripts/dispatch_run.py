@@ -21,6 +21,7 @@ import random
 import re
 import shutil
 import signal
+import sqlite3
 import stat
 import subprocess
 import sys
@@ -907,6 +908,49 @@ def acquire_worktree_lease(worktree: Path):
     return handle
 
 
+GRAPH_RESERVATION_FILE = "provenant-graph-reservation.json"
+
+
+def graph_reservation_refusal(worktree: Path) -> str | None:
+    """Refuse a writer into a worktree that a running Fabric graph has reserved.
+
+    The graph owner writes the reservation file and passes its token to its own
+    writer lanes. Any other writer is refused while the reserving graph is
+    running; a file whose graph has ended is stale. Unreadable state refuses.
+    """
+    git_dir = _git_path(worktree, "--absolute-git-dir")
+    if git_dir is None:
+        return None
+    path = git_dir / GRAPH_RESERVATION_FILE
+    try:
+        reservation = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError):
+        return f"the graph reservation {path} is unreadable; fix: check it, or remove it if no graph uses this worktree"
+    token = reservation.get("token") if isinstance(reservation, dict) else None
+    if not isinstance(token, str) or not token:
+        return f"the graph reservation {path} names no token; fix: check it, or remove it if no graph uses this worktree"
+    if os.environ.get("PROVENANT_GRAPH_RESERVATION") == token:
+        return None
+    graph, node = reservation.get("graph_id", "?"), reservation.get("node_id", "?")
+    state = Path(os.environ.get("AGENT_FABRIC_STATE_DIRECTORY", str(Path.home() / ".local/state/agent-harness/fabric")))
+    try:
+        connection = sqlite3.connect(f"{(state / 'fabric.sqlite3').resolve().as_uri()}?mode=ro", uri=True, timeout=5)
+        try:
+            row = connection.execute(
+                "SELECT g.state FROM graph_worktree_reservations r JOIN graphs g"
+                " ON g.project = r.project AND g.graph_id = r.graph_id WHERE r.token = ?", (token,)).fetchone()
+        finally:
+            connection.close()
+    except sqlite3.Error:
+        return (f"worktree is reserved by graph {graph} node {node} and the Fabric store cannot confirm it ended;"
+                f" fix: run provenant graph status {graph}")
+    if row is None or row[0] != "running":
+        return None
+    return f"worktree is reserved by graph {graph} node {node}; fix: wait for it, or run provenant graph cancel {graph}"
+
+
 def release_worktree_lease(handle) -> None:
     if handle is None:
         return
@@ -963,6 +1007,7 @@ def build_command(
         ("--reviewer-id", args.reviewer_id),
         ("--model", args.model),
         ("--effort", args.effort),
+        ("--account", getattr(args, "account", None) if args.tool == "claude" else None),
         ("--access-mode", args.access_mode),
         ("--worktree", str(args.worktree) if args.worktree else ""),
         ("--timeout-seconds", str(provider_timeout_seconds(args.timeout_seconds))),
@@ -1150,7 +1195,7 @@ def fast_fabric_plan(args, prompt_path: Path, result_path: Path, workspace: Path
             mode=args.access_mode, timeout_seconds=provider_timeout_seconds(args.timeout_seconds),
             intent=args.intent, preface=args.preface, requested_model=args.model,
             requested_effort=args.effort or "", run_id=os.environ.get("PROVENANT_RUN_ID", ""),
-            run_dir=result_path.parent,
+            run_dir=result_path.parent, account=getattr(args, "account", None) if args.tool == "claude" else None,
             original_prompt_file=getattr(args, "original_prompt_file", None) or prompt_path,
             chair=os.environ.get("PROVENANT_CHAIR", ""),
             reviewer_id=args.reviewer_id or "", risk_tier=args.risk_tier or "",
@@ -1410,19 +1455,22 @@ def read_prompt_input(prompt_file: Path, workspace: Path, run_dir: Path, read_ro
     return prompt_bytes
 
 
-def routing_environment() -> dict[str, str]:
+def routing_environment(*, preserve_instance=False) -> dict[str, str]:
     """Keep discovery and worker routing on the same instance/product fallback."""
     env = os.environ.copy()
     instance = Path(env.get("AGENT_FABRIC_INSTANCE_ROOT") or Path.home() / ".agents").expanduser()
     # Routing may fall back to the product catalogue; the user's profile file stays the one receipts stamp.
     if not env.get(harness_profile.PROFILE_ROOT_ENV):  # empty counts as unset, as in user_path
         env[harness_profile.PROFILE_ROOT_ENV] = str(instance)
-    try:
-        (instance / "config/model-routing.json").lstat()
-    except FileNotFoundError:
-        env["AGENT_FABRIC_INSTANCE_ROOT"] = env.get("AGENT_FABRIC_PRODUCT_ROOT", str(SKILLS_ROOT.parent))
-    except OSError:
-        pass
+    # Only router invocations fall back to the product catalogue. Provider planning
+    # retains the instance that owns telemetry accounts.
+    if not preserve_instance:
+        try:
+            (instance / "config/model-routing.json").lstat()
+        except FileNotFoundError:
+            env["AGENT_FABRIC_INSTANCE_ROOT"] = env.get("AGENT_FABRIC_PRODUCT_ROOT", str(SKILLS_ROOT.parent))
+        except OSError:
+            pass
     return env
 
 
@@ -1645,7 +1693,7 @@ def preflight_tasks(tasks: list[dict[str, Any]], workspace_root: Path | None = N
                         cwd=str(worktree if mode == 'worktree_write' else task.get('cwd') or workspace), workspace_root=str(workspace),
                         worktree=str(worktree) if mode == 'worktree_write' else None, sandbox=task.get('sandbox'), network=task.get('network'),
                         capabilities=task.get('capabilities', []), add_dirs=task.get('add_dirs', []),
-                        read_roots=read_roots)
+                        read_roots=read_roots, account=task.get('account'))
                     if plan['applied'].get('confinement') in {None, 'none'}:
                         raise PreflightError('remote_confinement_degraded', 'Remote placement requires effective confinement')
                 routes.append(route)
@@ -1745,6 +1793,9 @@ def contract_row(args,run_dir,number,attempt_dir,plan,started_at):
         note = f'local fallback from {placement["from_host"]}: {placement["reason"]}' + (f': {placement["detail"]}' if placement.get('detail') else '')
         if note not in plan.setdefault('warnings', []):
             plan['warnings'].append(note)
+    if plan.get('account') is not None:
+        attempt_scope(args, number)['account'] = plan['account']
+        provenance['account'] = plan['account']
     lineage = run_lineage.fields(run_dir) if (run_dir / "RUN_RECEIPT.json").exists() else run_lineage.fields()
     children = run_lineage.children(run_dir, args.task_id, number)
     return {"schema":"fabric.attempt.v1", **attempt_scope(args,number), **lineage, **({"children": children} if children else {}), **({'placement_fallback': placement} if placement else {}),"run_id":plan.get("run_id") or run_identity(run_dir),"task_id":args.task_id,"task_class":task_class,
@@ -1905,6 +1956,8 @@ def prepare_resume(args):
             f"dropped missing recorded add_dir: {item}" for item in missing_add_dirs
         ]
     args.resume_session=previous["session_id"]
+    if args.tool == "claude":
+        args.account=previous.get("account")
     args.read_roots=previous.get("read_roots") or []
     # A read root was canonical when granted; a directory since swapped for a link is not that grant.
     bound=[*args.read_roots,*([args.provider_cwd] if args.read_roots and args.provider_cwd else [])]
@@ -2199,6 +2252,9 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
     }
     worktree_lease = None
     if args.access_mode == "worktree_write" and args.worktree is not None:
+        refusal = graph_reservation_refusal(args.worktree)
+        if refusal is not None:
+            return fail(run_dir, "worktree_reserved", refusal)
         try:
             worktree_lease = acquire_worktree_lease(args.worktree)
         except WorktreeLeaseError as exc:
@@ -2296,7 +2352,7 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
             if (type(owner_started_ms) in (int, float) and math.isfinite(owner_started_ms)
                     and not getattr(args, "fallback_from", None)):
                 args._phase_timings["owner_setup"] = round(max(0, time.time() * 1000 - owner_started_ms), 3)
-            plan_environment=routing_environment()
+            plan_environment=routing_environment(preserve_instance=True)
             if git_evidence_requested: plan_environment.pop("CF_DISPATCH_AGY_ADD_DIR",None)
             fast_plan = fast_fabric_plan(args, prompt_path, result_path, workspace)
             planning = None
@@ -2314,7 +2370,7 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
                         alternate = argparse.Namespace(**vars(args))
                         alternate.model, alternate.alias, alternate.task_class = alternative, None, None
                         resolved = subprocess.run([*build_command(alternate, prompt_path, result_path, evidence_dir), "--plan-only"],
-                                                  cwd=workspace, env=routing_environment(), capture_output=True, text=True, timeout=30)
+                                                  cwd=workspace, env=routing_environment(preserve_instance=True), capture_output=True, text=True, timeout=30)
                         try:
                             replacement = json.loads(resolved.stdout)
                         except ValueError:
@@ -2341,19 +2397,25 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
                 if hasattr(args,"resume_relaunch"):
                     plan["prompt"] += "\n\nPrevious turn and question:\n"+args.resume_relaunch
                     plan["argv"] = provider_exec.profile(args.tool).argv(plan)
-                cooling=exec_routing.cooling(args.tool,plan["model"])
+                cooling=exec_routing.cooling(args.tool,plan["model"], account=plan.get("account"))
                 if cooling:
-                    if args.model:
+                    if (args.model and getattr(args, "fallback_from", None)
+                            and not getattr(args, "_rate_limit_retry", None)):
+                        plan["cooldown_blocked"] = cooling
+                    elif args.model:
                         plan["warnings"].append("explicit model is cooling until "+cooling["cooling_until"])
                     else:
                         for candidate in exec_routing.candidates(plan,True,confidential=getattr(args,"confidential",False)):
-                            if exec_routing.cooling(candidate["adapter"],candidate["model"]): continue
+                            if (candidate["adapter"] != "claude"
+                                    and exec_routing.cooling(candidate["adapter"],candidate["model"])): continue
                             alternate=argparse.Namespace(**vars(args))
                             alternate.tool=candidate["adapter"];alternate.model=candidate["model"];alternate.alias=None;alternate.task_class=None;alternate.effort=candidate.get("effort")
-                            resolved=subprocess.run([*build_command(alternate,prompt_path,result_path,evidence_dir),"--plan-only"],cwd=workspace,env=routing_environment(),capture_output=True,text=True,timeout=30)
+                            resolved=subprocess.run([*build_command(alternate,prompt_path,result_path,evidence_dir),"--plan-only"],cwd=workspace,env=routing_environment(preserve_instance=True),capture_output=True,text=True,timeout=30)
                             try: replacement=json.loads(resolved.stdout)
                             except ValueError: continue
                             if replacement.get("schema")!="fabric.exec-plan.v1": continue
+                            if exec_routing.cooling(candidate["adapter"], candidate["model"],
+                                                    account=replacement.get("account")): continue
                             old_run_dir = replacement.get("run_dir")
                             replacement["run_dir"] = str(attempt_dir)
                             boundary_paths = replacement.get("applied", {}).get("write_boundary", {}).get("writable_paths")
@@ -2945,6 +3007,7 @@ def execute_attempt_sequence(args,custody=None):
         return fail(args.run_dir, "fallback_invalid", str(exc))
     sequence_start=time.monotonic()
     sequence_budget=args.timeout_seconds
+    explicit_account = getattr(args, "account", None)
     result = _dispatch(args, custody)
     previous=getattr(args,"_last_row",None)
     plan=getattr(args,"_last_plan",None)
@@ -2959,7 +3022,7 @@ def execute_attempt_sequence(args,custody=None):
                 break
             current = getattr(args, "_last_plan", plan)
             key = (current["adapter"], exec_routing.registered_model(current["adapter"], current["model"]))
-            cooling = exec_routing.cooling(*key)
+            cooling = exec_routing.cooling(*key, account=current.get("account"))
             policy = pacing_policy()
             delay = rate_limit_delay(previous, cooling, policy)
             pace = (previous["status"] == "rate_limited" and key not in retried
@@ -2976,10 +3039,20 @@ def execute_attempt_sequence(args,custody=None):
                 candidate = None
                 for item in alternatives:
                     route = (item["adapter"], exec_routing.registered_model(item["adapter"], item["model"]))
-                    if route in attempted or exec_routing.cooling(*route):
+                    if route in attempted:
+                        continue
+                    # Reuse the selected identity for automatic same-provider fallback.
+                    # An explicitly pinned Claude account is checked by its candidate plan.
+                    account = current.get("account") if route[0] == current["adapter"] else None
+                    check_cooling = (route[0] != "claude" or
+                                     (current["adapter"] == "claude" and explicit_account is None))
+                    if check_cooling and exec_routing.cooling(*route, account=account):
                         continue
                     attempted.add(route)
-                    candidate = item
+                    candidate = dict(item)
+                    if route[0] == "claude" and account is not None:
+                        # Model fallback retains the identity whose cooldown we checked.
+                        candidate["account"] = account
                     break
                 if candidate is None:
                     break
@@ -2988,6 +3061,8 @@ def execute_attempt_sequence(args,custody=None):
             args.timeout_seconds = remaining
             args.fallback_from={"attempt":previous["attempt"],"status":previous["status"],"reset_at":previous.get("reset_at"),"route":previous["provenance"]["line"].split(" (",1)[0].removeprefix("Route: ")}
             args.tool=candidate["adapter"];args.model=candidate["model"];args.effort=candidate.get("effort")
+            if "account" in candidate:
+                args.account = candidate["account"]
             args.alias=None;args.retry_of=f"attempt-{previous['attempt']:03d}"
             result=_dispatch(args,custody)
             previous=getattr(args,"_last_row",None)
@@ -3039,7 +3114,7 @@ def dispatch(args: argparse.Namespace) -> int:
                 'task_id': args.task_id, 'timeout_seconds': args.timeout_seconds,
                 'resume': args.resume, 'context_ceiling': args.context_ceiling,
                 'sandbox': args.sandbox, 'network': None if args.network is None else args.network == 'true',
-                'capabilities': args.capabilities, 'add_dirs': args.add_dirs,
+                'account': args.account, 'capabilities': args.capabilities, 'add_dirs': args.add_dirs,
                 'allow_secrets': args.allow_secrets, 'confidential': args.confidential,
                 'knobs': getattr(args, 'knobs', None) or None, 'wait_seconds': 0,
                 '_lineage': run_lineage.parent_attempt(),
@@ -3183,6 +3258,7 @@ def parser() -> argparse.ArgumentParser:
         help="Git worktree root the writer owns exclusively; requires worktree_write",
     )
     root.add_argument("--effort")
+    root.add_argument("--account", help="Claude account label from telemetry configuration")
     root.add_argument(
         "--timeout", "--timeout-seconds", dest="timeout_seconds", type=timeout_value,
         default=None,

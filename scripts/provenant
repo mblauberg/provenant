@@ -82,15 +82,15 @@ def resolve_product_root(instance_root: Path | None = None) -> Path:
 
 
 def usage() -> None:
-    print("usage: provenant <help|root|route|routes|capabilities|worktree|clean|reap|lint|check|gate|telemetry|stats|retro|quota|profile|fabric|lease|hosts|peer|lanes|events|dispatch|batch|run|pr> [arguments...]", file=sys.stderr)
+    print("usage: provenant <help|root|route|routes|capabilities|worktree|clean|reap|lint|check|gate|telemetry|stats|retro|quota|profile|fabric|lease|hosts|peer|lanes|events|graph|dispatch|batch|run|pr> [arguments...]", file=sys.stderr)
 
 
 def help_text() -> None:
     print(
         """usage: provenant <command> [arguments...]
 
-Thin front door to owners:
-  root           print resolved product checkout
+Commands
+  root checkout
   route ...      scripts/model-route ...
   routes ...     scripts/model-route routes
   capabilities   skills/orchestrate/scripts/capabilities.py
@@ -103,6 +103,7 @@ Thin front door to owners:
   lease ...      runtime/fabric/bin/fabric landing-*
   hosts|peer     scripts/fabric-hosts
   lanes|events   runtime/fabric/bin/fabric lanes|events
+  graph ...      runtime/fabric/bin/fabric graph
   telemetry ...  scripts/provenant-telemetry
   stats|retro    scripts/provenant-telemetry
   quota ...      scripts/provenant-quota
@@ -220,6 +221,14 @@ COMMAND_DETAILS: dict[str, str] = {
         "`lanes --wait` waits for a lane to finish or need input; --summary prints\n"
         "one bounded line per lane at the end."
     ),
+    "graph": (
+        "usage: provenant graph run --file F\n"
+        "       provenant graph status [ID] [--json] [--wait [--timeout N]]\n"
+        "       provenant graph cancel ID [--node N] | resume ID\n\n"
+        "Delegates to runtime/fabric/bin/fabric graph ...\n"
+        "Runs a JSON plan graph of dispatch nodes under a detached owner;\n"
+        "the chair hears about failures and the end through Fabric messages."
+    ),
     "events": (
         "usage: provenant events --follow\n\n"
         "Delegates to runtime/fabric/bin/fabric events ...\n"
@@ -266,7 +275,10 @@ COMMAND_DETAILS: dict[str, str] = {
     "dispatch": (
         "usage: provenant dispatch ...\n\n"
         "Delegates to skills/orchestrate/scripts/dispatch_run.py ...\n"
-        "Own a durable run of provider attempts, including fallback and session resume."
+        "Own a durable run of provider attempts, including fallback and session resume.\n\n"
+        "Claude lanes accept --account LABEL from accounts.claude in telemetry.json.\n"
+        "Without it, cached quota favours short-window room and expiring weekly reserve;\n"
+        "without usable cached quota, the default Claude config directory is retained."
     ),
     "batch": (
         "usage: provenant batch ...\n\n"
@@ -481,7 +493,7 @@ def main(arguments: list[str]) -> int:
         return 2
 
     command, *command_arguments = arguments
-    if command in {"lanes", "events"}:
+    if command in {"lanes", "events", "graph"}:
         command_arguments = [command, *command_arguments]
         command = "fabric"
     if command == "lease":

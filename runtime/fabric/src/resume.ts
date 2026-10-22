@@ -125,7 +125,7 @@ export async function resumeConfiguredProvider(
       : timeoutSeconds(input.timeout_seconds);
     const executionIdentity = { ...identity, cwd: previous.mode === "read_only" && pin.readOnlyCwd !== undefined
       ? pin.readOnlyCwd : typeof previous.cwd === "string" ? previous.cwd : identity.cwd };
-    const python = await pythonOwner(root, identity, env);
+    const python = await pythonOwner(root, env);
     const owner = executableOwner(root, "skills/orchestrate/scripts/dispatch_run.py");
     const controls = executableOwner(root, "skills/orchestrate/scripts/run_controls.py");
     const path =
@@ -146,6 +146,7 @@ export async function resumeConfiguredProvider(
       id: taskId, adapter: requested.adapter ?? previous.adapter ?? identity.provider,
       model: previous.provenance?.resolved_model ?? requested.model,
       effort: sentEffort(previous),
+      ...(previous.account === undefined ? {} : { account: previous.account }),
       access_mode: previous.mode ?? "read_only", worktree: previous.worktree ?? undefined,
       cwd: previous.mode === "worktree_write" ? undefined : executionIdentity.cwd,
       ...Object.fromEntries(Object.entries(applied).filter(([key, value]) =>

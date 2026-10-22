@@ -404,7 +404,7 @@ def _command(task: dict[str, Any], run_dir: Path) -> list[str]:
                        ("risk_tier", "--risk-tier"),
                        ("model_override_tier", "--model-override-tier"),
                        ("reviewer_id", "--reviewer-id"),
-                       ("effort", "--effort"), ("retry_of", "--retry-of"),
+                       ("account", "--account"), ("effort", "--effort"), ("retry_of", "--retry-of"),
                        ("pick_reason", "--pick-reason"),
                        ("access_mode", "--access-mode"), ("worktree", "--worktree")):
         if task.get(name):

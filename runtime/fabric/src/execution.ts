@@ -182,33 +182,41 @@ export function executableOwner(root: string, relativePath: string): string {
   return path;
 }
 
-export async function pythonOwner(root: string, identity: Identity, env: NodeJS.ProcessEnv): Promise<string> {
+function pythonOwnerCommand(root: string, env: NodeJS.ProcessEnv) {
   const helper = join(root, "scripts/lib/harness-python.sh");
   const metadata = lstatSync(helper);
   if (!metadata.isFile() || metadata.isSymbolicLink()) {
     throw new Error(`Python owner selector must be a regular local file: ${helper}`);
   }
-  try {
-    const { stdout } = await execFileAsync(
-      "/bin/bash",
-      ["-c", 'source "$1"; run_stdlib -c "import sys; print(sys.executable)"', "provenant-python-owner", helper],
-      {
-        cwd: identity.cwd,
-        env: withoutGitRedirects(env),
-        encoding: "utf8",
-        timeout: 10_000,
-        maxBuffer: 64 * 1024,
-      },
-    );
-    const selected = resolve(stdout.trim());
-    const selectedMetadata = statSync(selected);
-    accessSync(selected, constants.X_OK);
-    if (!isAbsolute(selected) || !selectedMetadata.isFile()) throw new Error("selector returned a non-file");
-    return selected;
-  } catch (error) {
-    const detail = error instanceof Error ? error.message : String(error);
-    throw new Error(`Python execution owner is unavailable: ${detail}`, { cause: error });
-  }
+  return {
+    args: ["-c", 'source "$1"; run_stdlib -I -c "import sys; print(sys.executable)"', "provenant-python-owner", helper],
+    options: { cwd: root, env: withoutGitRedirects(env), encoding: "utf8" as const, timeout: 10_000, maxBuffer: 64 * 1024 },
+  };
+}
+
+function selectedPython(stdout: string): string {
+  const selected = resolve(stdout.trim());
+  const metadata = statSync(selected);
+  accessSync(selected, constants.X_OK);
+  if (!isAbsolute(selected) || !metadata.isFile()) throw new Error("selector returned a non-file");
+  return selected;
+}
+
+function pythonOwnerError(error: unknown): Error {
+  return new Error(`Python execution owner is unavailable: ${error instanceof Error ? error.message : String(error)}`, { cause: error });
+}
+
+export async function pythonOwner(root: string, env: NodeJS.ProcessEnv): Promise<string> {
+  const { args, options } = pythonOwnerCommand(root, env);
+  try { return selectedPython((await execFileAsync("/bin/bash", args, options)).stdout); }
+  catch (error) { throw pythonOwnerError(error); }
+}
+
+/** Synchronous validation uses the same interpreter selector as dispatch. */
+export function pythonOwnerSync(root: string, env: NodeJS.ProcessEnv): string {
+  const { args, options } = pythonOwnerCommand(root, env);
+  try { return selectedPython(execFileSync("/bin/bash", args, options)); }
+  catch (error) { throw pythonOwnerError(error); }
 }
 
 function realPath(path: string): string {
@@ -366,7 +374,7 @@ async function initialiseRun(
  * throwing observer stops the launch: nothing runs that its caller could not record.
  */
 export interface LaunchObserver {
-  onLaunch?: (launch: { runId: string; taskId: string; attempt: number }) => void;
+  onLaunch?: (launch: { runId: string; taskId: string; attempt: number; runDir?: string }) => void;
   /** Set by a handoff: its route is inherited, so the own-seat guard for new explicit dispatches does not apply. */
   continuation?: boolean;
   /** Set by a single dispatch's council: its members come from the caller's own `models`/selectors. */
@@ -801,7 +809,7 @@ async function dispatchConfiguredProviderUnchecked(
     // A route pick keeps this a single dispatch; a council runs as a batch of its members.
     const taskId = namedTaskId ?? (input.council === undefined && input.models === undefined ? undefined : "council");
     const expanded = await expandPools([{ ...input, ...(taskId === undefined ? {} : { id: taskId }) }],
-      await pythonOwner(root, identity, env), root, identity, env, signal);
+      await pythonOwner(root, env), root, identity, env, signal);
     if (expanded.errors.length) {
       const error = expanded.errors[0]!;
       return { status: "rejected", error: error.error, fix: error.fix };
@@ -850,7 +858,7 @@ async function dispatchConfiguredProviderUnchecked(
   const taskId = namedTaskId ?? `task-${randomUUID().slice(0, 8)}`;
   const owner = executableOwner(root, "skills/orchestrate/scripts/dispatch_run.py");
   const controls = executableOwner(root, "skills/orchestrate/scripts/run_controls.py");
-  const python = await pythonOwner(root, identity, env);
+  const python = await pythonOwner(root, env);
   const checked = await preflight(
     python,
     owner,
@@ -888,7 +896,7 @@ async function dispatchConfiguredProviderUnchecked(
     ...routeArguments(route),
   ];
   try {
-    launch.onLaunch?.({ runId: shortRunId(runDir), taskId, attempt: 1 });
+    launch.onLaunch?.({ runId: shortRunId(runDir), taskId, attempt: 1, runDir });
   } catch (error) {
     rmSync(runDir, { recursive: true, force: true });
     throw error;
@@ -983,7 +991,7 @@ function normaliseTask(
 
 function batchDefaults(input: BatchInput): Record<string, any> {
   return withoutEmptySelectors(Object.fromEntries(Object.entries(input).filter(([key]) =>
-    ["adapter", "alias", "model", "effort", "mode", "worktree", "cwd", "network", "sandbox", "capabilities", "add_dirs", "fallback", "timeout_seconds", "context_ceiling", "allow_secrets", "confidential", ...POOL_FIELDS].includes(key))));
+    ["adapter", "alias", "model", "effort", "account", "mode", "worktree", "cwd", "network", "sandbox", "capabilities", "add_dirs", "fallback", "timeout_seconds", "context_ceiling", "allow_secrets", "confidential", ...POOL_FIELDS].includes(key))));
 }
 
 function mergeBatchTask(defaults: Record<string, any>, input: BatchTaskInput, index: number): BatchTaskInput {
@@ -1036,7 +1044,7 @@ async function dispatchConfiguredBatchUnchecked(
   });
   let councils = false;
   if (merged.some(usesPool)) {
-    const expanded = await expandPools(merged, await pythonOwner(root, identity, env), root, identity, env, signal);
+    const expanded = await expandPools(merged, await pythonOwner(root, env), root, identity, env, signal);
     errors.push(...expanded.errors);
     poolWarnings.push(...expanded.warnings);
     merged = expanded.tasks;
@@ -1057,7 +1065,7 @@ async function dispatchConfiguredBatchUnchecked(
   assertFixtureRunRoot(runRoot(identity.cwd), tasks);
   const owner = executableOwner(root, "skills/orchestrate/scripts/batch_run.py");
   const controls = executableOwner(root, "skills/orchestrate/scripts/run_controls.py");
-  const python = await pythonOwner(root, identity, env);
+  const python = await pythonOwner(root, env);
   let checked = await preflight(
     python,
     executableOwner(root, "skills/orchestrate/scripts/dispatch_run.py"),
@@ -1095,7 +1103,7 @@ async function dispatchConfiguredBatchUnchecked(
     ) + "\n",
     { flag: "wx", mode: 0o600 },
   );
-  launch.onLaunch?.({ runId: shortRunId(runDir), taskId: "*", attempt: 1 });
+  launch.onLaunch?.({ runId: shortRunId(runDir), taskId: "*", attempt: 1, runDir });
   const started = startOwner(
     python,
     [owner, "--run-dir", runDir, "--manifest", manifestPath, "--concurrency", String(concurrency)],
@@ -1247,7 +1255,7 @@ async function cancelBatchTask(
     return { status: "rejected", error: "attempt_not_started",
       fix: `Task ${target.task_id} attempt ${attempt} is queued and not yet published; retry cancel once it starts, or cancel the whole batch with its run id ${target.run_id}.` };
   const root = productRoot(env);
-  const python = await pythonOwner(root, identity, env);
+  const python = await pythonOwner(root, env);
   const controls = executableOwner(root, "skills/orchestrate/scripts/run_controls.py");
   try {
     await execFileAsync(python, [controls, "cancel", "--run-dir", String(target.run_dir), "--task-id", String(target.task_id),

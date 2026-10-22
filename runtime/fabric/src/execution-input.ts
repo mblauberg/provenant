@@ -91,6 +91,7 @@ export interface RouteInput {
   task_class?: string;
   model?: string;
   effort?: string;
+  account?: string;
   mode?: AccessMode | "write" | "worktree" | "rw" | "read" | "ro";
   worktree?: string;
   cwd?: string;
@@ -146,6 +147,7 @@ export interface NormalisedRoute {
   alias?: string;
   model?: string;
   effort?: string;
+  account?: string;
   role: string;
   access_mode: AccessMode;
   worktree?: string;
@@ -389,6 +391,7 @@ export function normaliseRoute(input: RouteInput, identity: Identity, catalogue:
     ...(input.alias === undefined ? {} : { alias: input.alias }),
     ...(input.model === undefined ? {} : { model: input.model }),
     ...(input.effort === undefined ? {} : { effort: input.effort }),
+    ...(input.account === undefined ? {} : { account: input.account }),
     role: input.role ?? "worker",
     access_mode: mode,
     ...(input.worktree === undefined ? {} : { worktree: resolve(identity.cwd, input.worktree) }),
