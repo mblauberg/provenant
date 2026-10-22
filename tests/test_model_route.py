@@ -3568,8 +3568,24 @@ def test_noneligible_ultra_fallback_reports_runtime_capability_source(
     route = json.loads(capsys.readouterr().out)
     assert result == 0
     assert route["requested_effort"] == "ultra"
-    assert route["effort"] == "max"
+    assert route["effort"] == "xhigh"
     assert route["effort_capability_source"] == "runtime-model-catalog"
+
+
+def test_probe_snapshot_max_is_mapped_to_xhigh_with_a_note(tmp_path):
+    snapshot = write_codex_capability_snapshot(
+        tmp_path,
+        models={"gpt-6-astra": {"resolved_model": "gpt-6-astra",
+                                "supported_efforts": ["max"]}},
+    )
+    result, route = resolve(
+        "--adapter", "codex", "--alias", "flagship", "--role", "worker",
+        "--effort", "ultra", "--capabilities-file", str(snapshot),
+    )
+    assert result.returncode == 0
+    assert route["effort"] == route["effort_applied"] == "xhigh"
+    assert "max retired; mapped to xhigh" in route["effort_substitution"]
+    assert "max" not in route["supported_efforts"]
 
 
 def test_ultra_eligible_roles_must_be_a_list_of_role_names(
@@ -3633,7 +3649,7 @@ def test_codex_failure_records_never_expose_a_dispatchable_model(tmp_path):
     )
     assert result.returncode == 0
     assert route["status"] == "ok"
-    assert route["effort"] == "max"
+    assert route["effort"] == "xhigh"
     assert route["resolved_model"] == "gpt-6-luna"
     assert route["identity_source"] == "runtime-capability+catalog"
     assert "catalog_model" not in route
@@ -3794,7 +3810,7 @@ def test_explicit_unsupported_effort_maps_against_runtime_snapshot(tmp_path):
     )
     assert result.returncode == 0
     assert route["status"] == "ok"
-    assert route["effort"] == "max"
+    assert route["effort"] == "xhigh"
 
 
 def test_malformed_capability_snapshot_fails_closed(tmp_path):

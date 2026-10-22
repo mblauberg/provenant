@@ -2113,6 +2113,11 @@ def resolve(args: argparse.Namespace, catalog: dict[str, Any]) -> int:
             1,
         )
 
+    # Choke point: max is retired, so a probe snapshot, an overlay or a request never reaches the provider as max.
+    if effort == "max":
+        effort = "xhigh"
+        effort_substitution = "; ".join(filter(None, ("max retired; mapped to xhigh", effort_substitution)))
+    supported = [value for value in supported if value != "max"]
     record = {
         **base,
         "effort": effort,
