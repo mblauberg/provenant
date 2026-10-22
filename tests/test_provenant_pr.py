@@ -133,3 +133,37 @@ def test_missing_required_context_times_out(tmp_path):
     result = run(tmp_path, rules=rules("build", "lint"), view=[pr("a")], required=[checks(("build", "pass"))],
                  timeout="0.2")
     assert result.returncode == 124
+
+
+def test_unreadable_required_set_never_exits_zero(tmp_path):
+    result = run(
+        tmp_path,
+        view=[pr("a")],
+        rules=[{"err": "HTTP 403", "code": 1}],
+        required=[checks(("build", "pass"))],
+    )
+    assert result.returncode == 4, result.stdout
+    assert "required set could not be read" in result.stderr
+
+
+def test_unreadable_required_set_still_reports_failure(tmp_path):
+    result = run(tmp_path, view=[pr("a")], rules=[{"err": "HTTP 404", "code": 1}],
+                 required=[checks(("build", "fail"))])
+    assert result.returncode == 1
+
+
+def test_similar_context_names_are_not_interchangeable(tmp_path):
+    result = run(tmp_path, rules=rules("build", "release / build"), view=[pr("a")],
+                 required=[checks(("build", "pass"))], timeout="0.2")
+    assert result.returncode == 124
+
+
+def test_ignores_failing_checks_that_are_not_required(tmp_path):
+    result = run(
+        tmp_path,
+        rules=rules("ci-status"),
+        view=[pr("a")],
+        required=[{"out": "", "err": "no required checks reported on the 'x' branch\n", "code": 1}],
+        every=[checks(("ci-status", "pass"), ("flaky", "fail"))],
+    )
+    assert result.returncode == 0, result.stdout

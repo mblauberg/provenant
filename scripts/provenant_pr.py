@@ -15,6 +15,8 @@ BACKOFF_START = 30.0
 BACKOFF_CAP = 120.0
 BACKOFF_FACTOR = 1.5
 GH_TIMEOUT = 60
+# 0 green, 1 failure, 3 still pending (no --wait), 4 required set unknown, 124 timeout.
+EXIT = {"pass": 0, "fail": 1, "pending": 3, "unknown": 4}
 PASSING = {"pass", "skipping"}
 FAILING = {"fail", "cancel"}
 
@@ -85,47 +87,60 @@ def fetch_checks(number: int) -> list[dict] | None:
     return rows
 
 
-def expected_contexts(base: str) -> set[str]:
+def expected_contexts(base: str) -> set[str] | None:
     """Required status-check contexts for the base branch, from rulesets and branch protection.
 
-    Best effort: an unreadable or unconfigured source contributes nothing.
+    None means discovery failed (no access, or no readable answer); an empty set
+    means it succeeded and nothing is required. The two must not be conflated.
     """
     names: set[str] = set()
+    answered = False
     ruled = gh("api", f"repos/{{owner}}/{{repo}}/rules/branches/{base}")
-    try:
-        for rule in json.loads(ruled.stdout) if ruled.returncode == 0 else []:
-            if isinstance(rule, dict) and rule.get("type") == "required_status_checks":
-                for check in (rule.get("parameters") or {}).get("required_status_checks") or []:
-                    names.add(str(check.get("context")))
-    except (json.JSONDecodeError, AttributeError, TypeError):
-        pass
+    if ruled.returncode == 0:
+        try:
+            listed = json.loads(ruled.stdout)
+            answered = isinstance(listed, list)
+            for rule in listed if answered else []:
+                if isinstance(rule, dict) and rule.get("type") == "required_status_checks":
+                    for check in (rule.get("parameters") or {}).get("required_status_checks") or []:
+                        names.add(str(check.get("context")))
+        except (json.JSONDecodeError, AttributeError, TypeError):
+            pass
     classic = gh("api", f"repos/{{owner}}/{{repo}}/branches/{base}/protection/required_status_checks")
-    try:
-        data = json.loads(classic.stdout) if classic.returncode == 0 else {}
-        names.update(str(context) for context in data.get("contexts") or [])
-        names.update(str(check.get("context")) for check in data.get("checks") or [])
-    except (json.JSONDecodeError, AttributeError, TypeError):
-        pass
+    if classic.returncode == 0:
+        try:
+            data = json.loads(classic.stdout)
+            names.update(str(context) for context in data.get("contexts") or [])
+            names.update(str(check.get("context")) for check in data.get("checks") or [])
+            answered = True
+        except (json.JSONDecodeError, AttributeError, TypeError):
+            pass
     names.discard("None")
-    return names
+    return names if answered else None
 
 
-def covers(context: str, row_name: str) -> bool:
-    return row_name == context or context.endswith(f"/ {row_name}") or row_name.endswith(f"/ {context}")
+def finished(rows: list[dict]) -> bool:
+    return all(row["bucket"] in PASSING | FAILING for row in rows)
 
 
-def settled(rows: list[dict], expected: set[str], previous: list[str] | None) -> bool:
-    """Every row is done and the required set is complete.
+def judge(rows: list[dict], expected: set[str] | None, previous: list[str] | None) -> tuple[list[dict], str]:
+    """Rows that count, and pending, pass, fail or unknown.
 
-    With known required contexts, each must have registered. Without them, a
-    check that has not registered yet is invisible, so the finished set must
-    also be unchanged since the previous poll.
+    Known required contexts match check names exactly and must all be present.
+    An empty or unknown required set cannot see a check that has not registered
+    yet, so it needs the finished set to be unchanged since the previous poll;
+    an unknown set then reports "unknown", never "pass".
     """
-    if not rows or not all(row["bucket"] in PASSING | FAILING for row in rows):
-        return False
     if expected:
-        return all(any(covers(context, row["name"]) for row in rows) for context in expected)
-    return previous == sorted(row["name"] for row in rows)
+        rows = [row for row in rows if row["name"] in expected]
+        complete = expected <= {row["name"] for row in rows}
+        if not (rows and complete and finished(rows)):
+            return rows, "pending"
+    elif not (rows and finished(rows) and previous == sorted(row["name"] for row in rows)):
+        return rows, "pending"
+    if any(row["bucket"] in FAILING for row in rows):
+        return rows, "fail"
+    return rows, "unknown" if expected is None else "pass"
 
 
 def emit(number: int, head: str, outcome: str, rows: list[dict], as_json: bool) -> None:
@@ -162,17 +177,18 @@ def checks(args: argparse.Namespace) -> int:
         after = view(str(number))
         # A push between the two calls makes the rows belong to the old head; discard them.
         if fetched is not None and after is not None and after["headRefOid"] == head:
-            rows = fetched
-            done = settled(rows, expected, previous)
-            previous = sorted(row["name"] for row in rows) if all(
-                row["bucket"] in PASSING | FAILING for row in rows) else None
-            if not args.wait and not expected and all(row["bucket"] in PASSING | FAILING for row in rows) and rows:
-                done = True
-            if not args.wait or done:
-                outcome = "pending" if not done else (
-                    "fail" if any(row["bucket"] in FAILING for row in rows) else "pass")
+            counted, outcome = judge(fetched, expected, previous)
+            rows = counted
+            previous = sorted(row["name"] for row in fetched) if fetched and finished(fetched) else None
+            if not args.wait and outcome == "pending" and not expected and fetched and finished(fetched):
+                outcome = "fail" if any(row["bucket"] in FAILING for row in fetched) else (
+                    "unknown" if expected is None else "pass")
+            if not args.wait or outcome != "pending":
+                if outcome == "unknown":
+                    print("provenant pr: all seen checks passed, but the required set could not be read "
+                          "(no access to rulesets or branch protection); not reporting success", file=sys.stderr)
                 emit(number, head, outcome, rows, args.json)
-                return 0 if outcome == "pass" else 1 if outcome == "fail" else 3
+                return EXIT[outcome]
         state = after
         remaining = deadline - time.monotonic()
         if remaining <= 0:
