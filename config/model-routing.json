@@ -93,6 +93,25 @@
         "weight": "sparing"
       }
     ],
+    "utility": [
+      {
+        "model": "claude/claude-haiku-5-5",
+        "weight": "high",
+        "effort": [
+          "low"
+        ]
+      },
+      {
+        "model": "opencode/opencode/deepseek-v4.1-flash-free",
+        "weight": "sparing",
+        "confidential": false
+      },
+      {
+        "model": "opencode/opencode/glm-5.3-flash-free",
+        "weight": "sparing",
+        "confidential": false
+      }
+    ],
     "design": [
       {
         "model": "claude/claude-sonnet-5-5",
@@ -151,7 +170,12 @@
     "mechanical": "junior",
     "research": "junior",
     "screenshots": "junior",
-    "ui-taste": "design"
+    "ui-taste": "design",
+    "classify": "utility",
+    "extract": "utility",
+    "format": "utility",
+    "transform": "utility",
+    "digest": "utility"
   },
   "model_traits": {},
   "task_class_routes": {
@@ -914,5 +938,11 @@
       "pattern": "llama",
       "family": "meta"
     }
-  ]
+  ],
+  "route_defaults": {
+    "utility": {
+      "confidential": true,
+      "allow_free": false
+    }
+  }
 }

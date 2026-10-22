@@ -15,11 +15,12 @@ CHECK=0
 MCP_CLIENTS="primary"
 REFRESH_ROUTING=0
 LANE_SAFETY_HOOKS=""
+UTILITY_OUTPUT_HOOKS=""
 PRE_PUSH_HOOK=""
 OTEL_COLLECTOR=""
 
 usage() {
-  echo "usage: install-harness --check-legacy-skills | install-harness --platform <claude|codex|opencode|agy|cursor|kiro|all> [--mcp-clients <primary|all>] [--refresh-routing] [--lane-safety-hooks|--no-lane-safety-hooks] [--pre-push-hook|--no-pre-push-hook] [--otel-collector|--uninstall-otel-collector]" >&2
+  echo "usage: install-harness --check-legacy-skills | install-harness --platform <claude|codex|opencode|agy|cursor|kiro|all> [--mcp-clients <primary|all>] [--refresh-routing] [--lane-safety-hooks|--no-lane-safety-hooks] [--utility-output-hooks|--no-utility-output-hooks] [--pre-push-hook|--no-pre-push-hook] [--otel-collector|--uninstall-otel-collector]" >&2
 }
 
 while [[ $# -gt 0 ]]; do
@@ -42,6 +43,8 @@ while [[ $# -gt 0 ]]; do
       REFRESH_ROUTING=1
       shift
       ;;
+    --utility-output-hooks) UTILITY_OUTPUT_HOOKS=install; shift ;;
+    --no-utility-output-hooks) UTILITY_OUTPUT_HOOKS=remove; shift ;;
     --lane-safety-hooks) LANE_SAFETY_HOOKS=install; shift ;;
     --no-lane-safety-hooks) LANE_SAFETY_HOOKS=remove; shift ;;
     --pre-push-hook) PRE_PUSH_HOOK=install; shift ;;
@@ -61,7 +64,7 @@ done
 
 if [[ "$CHECK" == 1 ]]; then
   [[ -z "$PLATFORM" && "$MCP_CLIENTS" == primary && "$REFRESH_ROUTING" == 0 \
-    && -z "$LANE_SAFETY_HOOKS" && -z "$PRE_PUSH_HOOK" && -z "$OTEL_COLLECTOR" ]] \
+    && -z "$LANE_SAFETY_HOOKS" && -z "$UTILITY_OUTPUT_HOOKS" && -z "$PRE_PUSH_HOOK" && -z "$OTEL_COLLECTOR" ]] \
     || { usage; exit 2; }
   source "$PRODUCT_ROOT/scripts/lib/harness-python.sh"
   run_stdlib "$PRODUCT_ROOT/scripts/manage_installation.py" check-legacy-agy \
@@ -554,6 +557,14 @@ install_primary() {
           echo "claude settings link skipped: target is not a regular file: $default_settings"
         fi
       fi
+    fi
+    if [[ "$UTILITY_OUTPUT_HOOKS" == install ]]; then
+      run_stdlib "$PRODUCT_ROOT/scripts/configure-claude-hooks.py" \
+        --settings "$platform_home/settings.json" \
+        --digest-hook "$PRODUCT_ROOT/scripts/utility_output_hook.py" || return $?
+    elif [[ "$UTILITY_OUTPUT_HOOKS" == remove ]]; then
+      run_stdlib "$PRODUCT_ROOT/scripts/configure-claude-hooks.py" \
+        --settings "$platform_home/settings.json" --remove-digest || return $?
     fi
     if [[ "$LANE_SAFETY_HOOKS" == install ]]; then
       run_stdlib "$PRODUCT_ROOT/scripts/configure-claude-hooks.py" \
