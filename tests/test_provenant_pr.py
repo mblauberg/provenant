@@ -12,10 +12,8 @@ STUB = """#!/usr/bin/env python3
 import json, os, sys
 from pathlib import Path
 state = Path(os.environ["GH_STUB_DIR"])
-key = "api" if sys.argv[1] == "api" and "rules/branches" in sys.argv[2] else "none" if sys.argv[1] == "api" else "view" if sys.argv[2] == "view" else ("required" if "--required" in sys.argv else "checks")
+key = "api" if sys.argv[1] == "api" and "rules/branches" in sys.argv[2] else "protection" if sys.argv[1] == "api" else "view" if sys.argv[2] == "view" else ("required" if "--required" in sys.argv else "checks")
 queue = json.loads((state / f"{key}.json").read_text())
-if key == "none":
-    sys.exit(1)
 index = int((state / f"{key}.n").read_text()) if (state / f"{key}.n").exists() else 0
 (state / f"{key}.n").write_text(str(index + 1))
 reply = queue[min(index, len(queue) - 1)]
@@ -33,13 +31,17 @@ def pr(head, state="OPEN"):
     return {"out": json.dumps({"number": 7, "headRefOid": head * 40, "state": state, "baseRefName": "main"})}
 
 
-def run(tmp_path, *arguments, view, required, every=None, timeout="5", rules=None):
+UNPROTECTED = [{"err": "gh: Branch not protected (HTTP 404)\n", "code": 1}]
+
+
+def run(tmp_path, *arguments, view, required, every=None, timeout="5", rules=None, protection=None):
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir(exist_ok=True)
     gh = bin_dir / "gh"
     gh.write_text(STUB)
     gh.chmod(0o755)
-    for name, queue in {"view": view, "required": required, "checks": every or [{"out": "[]"}], "api": rules or [{"out": "[]"}]}.items():
+    for name, queue in {"view": view, "required": required, "checks": every or [{"out": "[]"}], "api": rules or [{"out": "[]"}],
+                       "protection": protection or UNPROTECTED}.items():
         (tmp_path / f"{name}.json").write_text(json.dumps(queue))
     env = {**os.environ, "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}", "GH_STUB_DIR": str(tmp_path),
            "PROVENANT_PR_BACKOFF": "0.01,0.02"}
@@ -167,3 +169,18 @@ def test_ignores_failing_checks_that_are_not_required(tmp_path):
         every=[checks(("ci-status", "pass"), ("flaky", "fail"))],
     )
     assert result.returncode == 0, result.stdout
+
+
+def test_partial_discovery_never_exits_zero(tmp_path):
+    result = run(tmp_path, view=[pr("a")], rules=[{"out": "[]"}],
+                 protection=[{"err": "gh: Resource not accessible by integration (HTTP 403)\n", "code": 1}],
+                 required=[checks(("build", "pass"))])
+    assert result.returncode == 4, result.stdout
+    assert "required set could not be read" in result.stderr
+
+
+def test_classic_protection_contexts_are_required(tmp_path):
+    result = run(tmp_path, view=[pr("a")], rules=[{"out": "[]"}],
+                 protection=[{"out": json.dumps({"contexts": ["lint"], "checks": [{"context": "build"}]})}],
+                 required=[checks(("build", "pass"))], timeout="0.2")
+    assert result.returncode == 124

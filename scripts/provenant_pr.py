@@ -90,33 +90,34 @@ def fetch_checks(number: int) -> list[dict] | None:
 def expected_contexts(base: str) -> set[str] | None:
     """Required status-check contexts for the base branch, from rulesets and branch protection.
 
-    None means discovery failed (no access, or no readable answer); an empty set
-    means it succeeded and nothing is required. The two must not be conflated.
+    None means either source could not be read; an empty set means both answered
+    and nothing is required. Classic protection answering 404 means the branch is
+    unprotected, which is an answer; any other failure leaves the set unknown.
     """
-    names: set[str] = set()
-    answered = False
-    ruled = gh("api", f"repos/{{owner}}/{{repo}}/rules/branches/{base}")
-    if ruled.returncode == 0:
+    def read(path: str, absent_ok: bool, contexts) -> set[str] | None:
+        result = gh("api", path)
+        if result.returncode != 0:
+            return set() if absent_ok and "HTTP 404" in (result.stderr or "") else None
         try:
-            listed = json.loads(ruled.stdout)
-            answered = isinstance(listed, list)
-            for rule in listed if answered else []:
-                if isinstance(rule, dict) and rule.get("type") == "required_status_checks":
-                    for check in (rule.get("parameters") or {}).get("required_status_checks") or []:
-                        names.add(str(check.get("context")))
+            return {str(name) for name in contexts(json.loads(result.stdout))} - {"None"}
         except (json.JSONDecodeError, AttributeError, TypeError):
-            pass
-    classic = gh("api", f"repos/{{owner}}/{{repo}}/branches/{base}/protection/required_status_checks")
-    if classic.returncode == 0:
-        try:
-            data = json.loads(classic.stdout)
-            names.update(str(context) for context in data.get("contexts") or [])
-            names.update(str(check.get("context")) for check in data.get("checks") or [])
-            answered = True
-        except (json.JSONDecodeError, AttributeError, TypeError):
-            pass
-    names.discard("None")
-    return names if answered else None
+            return None
+
+    def ruled(listed):
+        if not isinstance(listed, list):
+            raise TypeError("rules response is not a list")
+        for rule in listed:
+            if isinstance(rule, dict) and rule.get("type") == "required_status_checks":
+                for check in (rule.get("parameters") or {}).get("required_status_checks") or []:
+                    yield check.get("context")
+
+    def classic(data):
+        yield from data.get("contexts") or []
+        yield from (check.get("context") for check in data.get("checks") or [])
+
+    rules = read(f"repos/{{owner}}/{{repo}}/rules/branches/{base}", False, ruled)
+    protection = read(f"repos/{{owner}}/{{repo}}/branches/{base}/protection/required_status_checks", True, classic)
+    return None if rules is None or protection is None else rules | protection
 
 
 def finished(rows: list[dict]) -> bool:
