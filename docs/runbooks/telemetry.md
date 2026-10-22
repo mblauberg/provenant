@@ -235,20 +235,21 @@ Deficit is shown in `provenant routes` and JSON only; it does not lower weights.
 4. Register a fake module and mock all process/network boundaries in tests.
    Add the account to config and verify it appears in `provenant quota`.
 
-OpenCode has no usage or limits endpoint. Its Go documentation gives each model
-a monthly dollar cap (Go or Go Plus) and 5 hour, weekly and monthly allowances of
-20%, 50% and 100% of it, but does not document reset semantics. The opencode
-provider is therefore a local estimate: it reads paid `opencode-go` message cost
-per model from `opencode.db` (read-only, by message timestamp over rolling 5 hour,
-7 day and 30 day windows) and reports `<model>.5h`, `.7d` and `.30d` for each
-model used in the last 30 days against the documented cap. Set `plan` to `Go` or
-`Go Plus`; with none it assumes Go, the cheapest plan, and the source says so.
-`limits.monthly_by_model` overrides or adds caps. Models without a known cap
-(including unlimited promotions) are unreported. Free zen models are ignored,
-other hosts' use is not counted, and resets are not reported.
+OpenCode has no usage or limits endpoint and documents no reset semantics.
+Go limits are plan-wide dollar amounts (5 hour 20%, weekly 50%, monthly 100% of
+the monthly amount). The opencode provider is a local estimate: it sums paid
+`opencode-go` cost from both `opencode.db` message stores (v1 `message`, v2
+`session_message`; read-only, rolling windows by message timestamp) against a
+monthly cap calibrated from the Go dashboard, not documented: $32 for Go, which is
+assumed when no `plan` is set (the source says so). Set `limits.monthly_usd` to
+override it or to cover another plan, which is otherwise unreported. The estimate
+is partial: other hosts using the same account are not counted, so it
+undercounts. A recent `GoUsageLimitError` in the store is authoritative: that
+window reads 100% until its estimated reset (the error time plus the window).
+Free zen models are ignored. Only message tables are read, never credentials.
 
 ```json
-"opencode": {"go": {"plan": "Go Plus", "limits": {"monthly_by_model": {"new-model": 50}}}}
+"opencode": {"go": {"plan": "Go", "limits": {"monthly_usd": 32}}}
 ```
 
 agy has receipt-only usage and no registered quota reader. Configured agy

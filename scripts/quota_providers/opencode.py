@@ -1,38 +1,35 @@
-"""OpenCode Go spend per model from its local message store, against the documented caps.
+"""OpenCode Go usage from its local message stores, plus its own usage-limit errors.
 
-OpenCode Go limits each model separately: 5 hour 20%, weekly 50% and monthly 100% of that
-model's monthly dollar cap (opencode.ai/docs/go). It documents no reset semantics and offers
-no usage endpoint, so every window here is a rolling local estimate: spend on this machine
-only. Models with no known cap (unlimited promotions included) are reported as unreported.
-Free zen models cost nothing and are ignored.
+Go limits are plan-wide dollar amounts over 5 hour, weekly and monthly windows. OpenCode
+documents no usage endpoint or reset semantics, so spend here is a rolling local estimate
+from this machine's `opencode.db` only: other hosts using the same account are not counted.
+A recent `GoUsageLimitError` in the store is authoritative and marks that window exhausted.
+Free zen models cost nothing and are ignored. Only message tables are read, never credentials.
 """
 
 from __future__ import annotations
 
 from contextlib import closing
 from datetime import timedelta
+import json
 import sqlite3
 
 
 ADAPTER = 'opencode'
 PAID = ('opencode-go',)
-DEFAULT_PLAN = 'go'      # the cheapest documented plan ($10/month), used when none is configured
-# Window label, minutes and share of the monthly cap.
-WINDOWS = (('5h', 5 * 60, 0.2), ('7d', 7 * 24 * 60, 0.5), ('30d', 30 * 24 * 60, 1.0))
-# Documented monthly dollar caps per model id: (Go, Go Plus). Peak/off-peak and long-context
-# tiers share one cap. `limits.monthly_by_model` in the account config overrides or adds models.
-CAPS = {
-    'glm-5.3-flash': (60, 180), 'glm-5.3': (15, 120), 'glm-5.2': (60, 180),
-    'kimi-k3': (15, 60), 'kimi-k2.7-code': (60, 180), 'longcat-2.0': (60, 240),
-    'step-5-preview': (15, 60), 'mimo-v2.6-flash': (60, 120), 'mimo-v2.6-pro': (15, 60),
-    'mimo-v2.5': (60, 120), 'mimo-v2.5-pro': (15, 60), 'minimax-m3': (60, 180),
-    'muse-spark-1.3-contributor': (60, 120), 'muse-spark-1.2-contributor': (60, 120),
-    'qwen3.8-max': (15, 60), 'qwen3.8-flash': (30, 90), 'qwen3.7-plus': (60, 180),
-    'deepseek-v4.1-flash': (80, 160), 'deepseek-v4-pro': (15, 60), 'hy4-preview': (30, 120),
-    'hy3': (60, 240), 'grok-4.7': (15, 60), 'gpt-6-luna': (15, 60), 'gpt-5.6-luna': (15, 60),
-    'claude-haiku-5-5': (15, 60), 'gemini-4-argon-contributor': (60, 240),
-}
-PLANS = {'go': 0, 'go plus': 1}
+# Calibrated against the Go dashboard (about $16 weekly, $32 monthly), not documented by OpenCode.
+# Override with `limits.monthly_usd`; other plans need it.
+PLAN_MONTHLY_USD = {'go': 32.0}
+DEFAULT_PLAN = 'go'
+# Window name, minutes and share of the monthly cap (5 hour 20%, weekly 50%, monthly 100%).
+WINDOWS = (('five_hour', 5 * 60, 0.2), ('seven_day', 7 * 24 * 60, 0.5), ('thirty_day', 30 * 24 * 60, 1.0))
+LIMIT_WINDOWS = {'weekly': 'seven_day', 'monthly': 'thirty_day'}
+# Both stores hold assistant turns: v1 `message` and v2 `session_message` (opencode 2.0.30+).
+# v2 also holds copies of migrated v1 rows (same id), which must count once.
+STORES = (
+    ('message', "json_extract(data,'$.providerID')", ' AND id NOT IN (SELECT id FROM session_message)'),
+    ('session_message', "json_extract(data,'$.model.providerID')", " AND type='assistant'"),
+)
 
 
 def default_identity():
@@ -40,51 +37,89 @@ def default_identity():
     return selected_identity('opencode')
 
 
-def model_spend(database, now, providers):
-    """Dollars per model for each window since now, over paid providers; None if unreadable."""
-    marks = ','.join('?' * len(providers))
-    sums = ','.join("SUM(CASE WHEN time_created>=? THEN COALESCE(json_extract(data,'$.cost'),0) ELSE 0 END)"
-                    for _ in WINDOWS)
+def spend(db, now, providers):
+    """Dollars per window over paid providers from both stores; None if neither is readable."""
     since = [int((now - timedelta(minutes=minutes)).timestamp() * 1000) for _, minutes, _ in WINDOWS]
-    try:
-        with closing(sqlite3.connect(database.resolve().as_uri() + '?mode=ro', uri=True)) as db:
-            rows = db.execute(f"SELECT json_extract(data,'$.modelID'), {sums} FROM message "
-                              f"WHERE time_created BETWEEN ? AND ? AND json_extract(data,'$.providerID') IN ({marks}) "
-                              "GROUP BY 1", (*since, min(since), int(now.timestamp() * 1000), *providers)).fetchall()
-        return {row[0]: [float(value or 0) for value in row[1:]] for row in rows if row[0]}
-    except (sqlite3.Error, OSError, TypeError, ValueError):
-        return None
+    sums = ','.join("COALESCE(SUM(CASE WHEN time_created>=? THEN json_extract(data,'$.cost') ELSE 0 END),0)"
+                    for _ in WINDOWS)
+    marks = ','.join('?' * len(providers))
+    totals, readable = [0.0] * len(WINDOWS), False
+    for table, provider, extra in STORES:
+        try:
+            row = db.execute(f'SELECT {sums} FROM {table} WHERE time_created BETWEEN ? AND ?{extra} '
+                             f'AND {provider} IN ({marks})',
+                             (*since, min(since), int(now.timestamp() * 1000), *providers)).fetchone()
+        except sqlite3.Error:
+            continue
+        readable = True
+        totals = [total + float(value or 0) for total, value in zip(totals, row)]
+    return totals if readable else None
 
 
-def cap_for(model, plan, overrides):
+def limit_errors(db, now, providers):
+    """Latest GoUsageLimitError time (ms) per window name from recent failed assistant turns.
+
+    A paid turn that later succeeded shows the provider accepted requests again (the limit
+    was lifted or reset), so it supersedes earlier errors.
+    """
+    oldest = int((now - timedelta(minutes=WINDOWS[-1][1])).timestamp() * 1000)
     try:
-        cap = float(overrides[model])
+        rows = db.execute("SELECT time_created, json_extract(data,'$.error.response.body') FROM session_message "
+                          "WHERE type='assistant' AND json_extract(data,'$.error.type')='provider.quota' "
+                          "AND time_created BETWEEN ? AND ? ORDER BY time_created", (oldest, int(now.timestamp() * 1000)))
+        rows = rows.fetchall()
+        marks = ','.join('?' * len(providers))
+        accepted = db.execute("SELECT MAX(time_created) FROM session_message WHERE type='assistant' "
+                              "AND json_extract(data,'$.error') IS NULL AND json_extract(data,'$.cost')>0 "
+                              f"AND json_extract(data,'$.model.providerID') IN ({marks})", providers).fetchone()[0] or 0
+    except sqlite3.Error:
+        return {}
+    latest = {}
+    for created, body in rows:
+        try:
+            body = json.loads(body)
+            if body['error']['type'] != 'GoUsageLimitError':
+                continue
+            name = str((body.get('metadata') or {}).get('limitName') or '').lower()
+        except (TypeError, ValueError, KeyError):
+            continue
+        if created > accepted:
+            latest[LIMIT_WINDOWS.get(name, 'five_hour')] = created
+    return latest
+
+
+def monthly_cap(account):
+    limits = account.options.get('limits')
+    try:
+        cap = float(limits['monthly_usd'])
     except (KeyError, TypeError, ValueError):
-        caps = CAPS.get(model)
-        cap = caps[plan] if caps else 0
+        cap = PLAN_MONTHLY_USD.get(str(account.plan or DEFAULT_PLAN).strip().lower(), 0)
     return cap if cap > 0 else None
 
 
 def fetch(account, io, now):
-    plan = PLANS.get(str(account.plan or DEFAULT_PLAN).strip().lower())
-    limits = account.options.get('limits')
-    overrides = limits.get('monthly_by_model') if isinstance(limits, dict) else None
-    overrides = overrides if isinstance(overrides, dict) else {}
+    database = account.identity_dir / 'opencode.db'
     providers = tuple(account.options.get('providers') or PAID)
-    spend = model_spend(account.identity_dir / 'opencode.db', now, providers)
+    try:
+        with closing(sqlite3.connect(database.resolve().as_uri() + '?mode=ro', uri=True)) as db:
+            spent, errors = spend(db, now, providers), limit_errors(db, now, providers)
+    except (sqlite3.Error, OSError):
+        spent, errors = None, {}
+    cap = monthly_cap(account)
     windows, unreported = [], []
-    if spend is None:
-        unreported.append('usage')
-    for model, spent in sorted((spend or {}).items()):
-        cap = cap_for(model, plan, overrides) if plan is not None or model in overrides else None
-        if cap is None:
-            unreported.append(model)
+    for index, (name, minutes, share) in enumerate(WINDOWS):
+        used = spent[index] / (cap * share) * 100 if cap and spent is not None else None
+        reset = None
+        if name in errors and errors[name] + minutes * 60_000 > now.timestamp() * 1000:
+            # The provider refused a request: exhausted, and at worst until the window has passed.
+            used = max(used or 0, 100)
+            reset = (errors[name] + minutes * 60_000)
+        if used is None:
+            unreported.append(name)
             continue
-        for (label, minutes, share), dollars in zip(WINDOWS, spent):
-            windows.append({'name': f'{model}.{label}', 'raw_kind': 'local_spend_usd',
-                            'used_percent': dollars / (cap * share) * 100,
-                            'window_minutes': minutes, 'reset_at': None})
+        windows.append({'name': name, 'raw_kind': 'local_spend_usd', 'used_percent': used,
+                        'window_minutes': minutes, 'reset_at': reset})
     assumed = ', assuming Go plan' if account.plan is None else ''
     return {'windows': windows, 'unreported': unreported, 'plan': None,
-            'source': f'local estimate: opencode.db spend per model against documented caps{assumed} '
-                      '(this machine only)'}
+            'source': 'local estimate: partial, this machine only (other hosts not counted); '
+                      f'plan-wide caps calibrated, not documented{assumed}; GoUsageLimitError is authoritative'}
