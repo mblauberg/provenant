@@ -12,6 +12,7 @@ import signal
 import stat
 import subprocess
 import sys
+import threading
 import textwrap
 import time
 from pathlib import Path
@@ -648,6 +649,35 @@ def test_terminal_attempt_carries_nested_owner_spared_count(tmp_path: Path) -> N
                                    {"status": "ok", "spared": 2}, 1,
                                    tmp_path / "tasks/task-1/attempt-001")
     assert row["spared"] == 2
+
+
+def test_terminal_attempt_does_not_promote_an_invalid_success_receipt(tmp_path):
+    module = load_dispatch_module()
+    args = SimpleNamespace(tool="codex", alias="", model="fixture", effort="high",
+                           task_id="task-1", access_mode="read_only", worktree=None, _last_plan={})
+    legacy = {"started_at": "2026-09-23T00:00:00Z", "finished_at": "2026-09-23T00:00:01Z",
+              "outcome": "ok", "status": "failed", "result": {"path": "result.md"},
+              "attempt_path": "tasks/task-1/attempt-001", "requested_route": {}}
+    row = module.terminal_contract(args, tmp_path, legacy, {"status": "ok", "exit": None},
+                                   1, tmp_path / "tasks/task-1/attempt-001")
+    assert row["status"] == "failed"
+    assert row["error_class"] == "provider_error"
+
+
+def test_terminal_attempt_retains_partial_transport_failure(tmp_path):
+    module = load_dispatch_module()
+    args = SimpleNamespace(tool="codex", alias="", model="fixture", effort="high",
+                           task_id="task-1", access_mode="read_only", worktree=None, _last_plan={})
+    legacy = {"started_at": "2026-09-23T00:00:00Z", "finished_at": "2026-09-23T00:00:01Z",
+              "outcome": "failed", "status": "failed", "result": {"path": "result.md"},
+              "attempt_path": "tasks/task-1/attempt-001", "requested_route": {}}
+    adapter = {"status": "failed", "result_partial": True, "evidence": {"signature": "provider_transport"}}
+    row = module.terminal_contract(args, tmp_path, legacy, adapter, 1, tmp_path / "tasks/task-1/attempt-001")
+    assert row["state"] == "terminal"
+    assert row["status"] == "failed"
+    assert row["error_class"] == "transient"
+    assert row["result_partial"] is True
+    assert "partial result" in module.render_digest(row)
 
 
 @pytest.mark.parametrize("adapter_status,legacy_status,signature,source,expected", [
@@ -4405,12 +4435,19 @@ print(json.dumps({'type':'result','result':'RESUMED ' + session}))
     assert row['session_id'] == 'saved-session'
 
 
-def test_incomplete_writer_without_claude_session_returns_typed_fix(tmp_path):
+@pytest.mark.parametrize(('status', 'signature'), [
+    ('timed_out', 'wall_clock'),
+    ('interrupted', 'supervisor_signal'),
+    ('failed', 'provider_signal'),
+    ('failed', 'provider_incomplete'),
+])
+def test_incomplete_writer_without_claude_session_returns_typed_fix(tmp_path, status, signature):
     mod = load_dispatch_module()
     run = Path(subprocess.check_output([str(INIT), '--kind', 'dispatch'], cwd=tmp_path, text=True).strip())
     row = json.loads((ROOT / 'tests/fixtures/fabric-v1/attempt.json').read_text())
-    row.update(run_id=run.name, status='timed_out', mode='worktree_write', cwd=str(tmp_path),
+    row.update(run_id=run.name, status=status, mode='worktree_write', cwd=str(tmp_path),
                worktree=str(tmp_path), session_id='generated-but-unobserved')
+    row['evidence']['signature'] = signature
     row['provenance']['requested']['adapter'] = 'claude'
     path = run / 'tasks/task-1/attempt-001/attempt.json'
     path.parent.mkdir(parents=True)
@@ -4423,6 +4460,52 @@ def test_incomplete_writer_without_claude_session_returns_typed_fix(tmp_path):
     response = json.loads(result.stdout)
     assert response['status'] == 'rejected'
     assert 'review worktree' in response['message'].lower()
+
+
+@pytest.mark.parametrize('observed_session', [False, True])
+def test_claude_signal_dead_writer_resume_never_relaunches_over_partial_edits(tmp_path, monkeypatch, observed_session):
+    code = '''import json,os,signal,sys
+from pathlib import Path
+sys.stdin.read()
+with Path('launches.txt').open('a') as stream:
+ stream.write('launch\\n')
+if '--resume' in sys.argv:
+ print('No conversation found with session ID', file=sys.stderr)
+ sys.exit(1)
+if Path('partial.txt').exists():
+ print(json.dumps({'type':'result','result':'FRESH OVER PARTIAL EDITS'}))
+ sys.exit(0)
+Path('partial.txt').write_text('unfinished edit')
+'''
+    if observed_session:
+        code += "print(json.dumps({'type':'system','subtype':'init','session_id':'writer-session','model':'opus'}), flush=True)\n"
+    code += 'os.kill(os.getpid(), signal.SIGTERM)\n'
+    run, prompt, command = real_owner_fixture(tmp_path, monkeypatch, code)
+    worktree = make_worktree(tmp_path)
+    first = subprocess.run([*command, '--access-mode', 'worktree_write', '--worktree', str(worktree)],
+                           cwd=tmp_path, capture_output=True, text=True, timeout=30)
+    assert first.returncode != 0, first.stdout + first.stderr
+    previous = json.loads((run / 'tasks/dispatch-001/attempt-001/attempt.json').read_text())
+    assert previous['status'] == 'failed'
+    assert previous['evidence']['signature'] == 'provider_signal'
+    assert previous['evidence']['signal'] == signal.SIGTERM
+
+    resumed = subprocess.run([sys.executable, str(SCRIPT), '--run-dir', str(run),
+                              '--resume', previous['run_id'], '--prompt-file', str(prompt)],
+                             cwd=tmp_path, capture_output=True, text=True, timeout=30)
+    assert resumed.returncode != 0, resumed.stdout + resumed.stderr
+    if observed_session:
+        row = json.loads((run / 'tasks/dispatch-001/attempt-002/attempt.json').read_text())
+        assert row['status'] == 'rejected'
+        assert row['evidence']['signature'] == 'resume_session_missing'
+        assert 'resumed_by_relaunch' not in row['provenance']['notes']
+    else:
+        response = json.loads(resumed.stdout)
+        assert response['status'] == 'rejected'
+        assert 'review worktree' in response['message'].lower()
+        assert not (run / 'tasks/dispatch-001/attempt-002').exists()
+    assert (worktree / 'partial.txt').read_text() == 'unfinished edit'
+    assert (worktree / 'launches.txt').read_text().splitlines() == ['launch'] * (2 if observed_session else 1)
 
 
 def test_planner_stopped_by_signal_is_interrupted_not_rejected():
@@ -4791,9 +4874,17 @@ def test_rate_limit_wait_observes_cancellation_and_intervening_writer_edits(tmp_
     sleep = time.sleep
     acted = []
     stores_before = {}
+    test_thread = threading.get_ident()
     def during_wait(seconds):
+        # time.sleep is patched process-wide; under pytest-xdist the execnet
+        # threads call it too, so only the dispatching thread may act.
+        if threading.get_ident() != test_thread:
+            return sleep(seconds)
         queued = list(run.glob("tasks/*/attempt-002/attempt.json"))
         if queued and not acted and json.loads(queued[0].read_text()).get("queue_reason") == "rate_limit":
+            # Record first: the lease retry below can itself call the patched
+            # sleep, which must not re-enter this branch.
+            acted.append(action)
             if action == "cancel":
                 (run / "dispatch/tasks" / queued[0].relative_to(run / "tasks").parent / "cancel.request").touch()
             else:
@@ -4802,7 +4893,6 @@ def test_rate_limit_wait_observes_cancellation_and_intervening_writer_edits(tmp_
                 for store in (tmp_path / "cooldowns.json", tmp_path / "state/route-health.json"):
                     stores_before[store] = store.read_bytes()
                 (worktree / "intervening.txt").write_text("another edit")
-            acted.append(action)
         sleep(seconds)
     monkeypatch.setattr(mod.time, "sleep", during_wait)
     args = mod.parser().parse_args(command[2:])

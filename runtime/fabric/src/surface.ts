@@ -83,7 +83,7 @@ export function runView(value: Record<string, any>, detail = "brief"): Record<st
   const keys = ["schema", "id", "run_id", "task_id", "batch_id", "run_dir", "state", "status",
     "host", "hosts", "reachability", "last_known_state", "last_known_status", "age_seconds", "observed_at", "operation_id", "placement_fallback",
     "attempt", "attempt_count", "digest", "paths", "cwd", "worktree", "mode", "applied",
-    "provenance", "warnings", "notes", "landable", "quarantine", "reason", "question", "error", "fix", "retryable", "reset_at", "retry_after", "tasks"];
+    "provenance", "warnings", "notes", "landable", "quarantine", "reason", "question", "error", "error_class", "result_partial", "fix", "retryable", "reset_at", "retry_after", "tasks"];
   return Object.fromEntries(keys.filter((key) => value[key] !== undefined).map((key) => [key, value[key]]).concat(
     value.digest === undefined ? [["digest", digest(value)]] : [],
   ));
@@ -115,7 +115,7 @@ export function quarantineAction(row: Record<string, any>): string {
 
 /** One line per lane: outcome, id, route, result path and any landing block. */
 export function laneLine(row: Record<string, any>): string {
-  return `${row.status ?? row.state}  ${row.id}  ${row.route ?? "-"}  ${row.result_path ?? "-"}${row.status === "quarantined" ? ` · ${quarantineAction(row)}` : ""}`;
+  return `${row.status ?? row.state}  ${row.id}  ${row.route ?? "-"}  ${row.result_path ?? "-"}${row.result_partial ? " · partial result" : ""}${row.status === "quarantined" ? ` · ${quarantineAction(row)}` : ""}`;
 }
 export function lanesDigest(result: Record<string, any>): string {
   if (!Array.isArray(result.runs)) return digest(result);

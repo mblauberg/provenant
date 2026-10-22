@@ -26,6 +26,7 @@ LOGS = 20
 SIGNED_IN = re.compile(rb'OAuth: authenticated successfully as (\S+@\S+)')
 UNITS = {'m': 1, 'h': 60, 'd': 1440, 'w': 10080}
 NAMED = {'hourly': 60, 'daily': 1440, 'weekly': 10080}
+FINGERPRINT = re.compile(r'google-[0-9a-f]{12}')
 
 
 def state_dir():
@@ -34,12 +35,24 @@ def state_dir():
 
 def default_identity():
     from provider_identity import selected_identity
-    # The login Keychain exists on every Mac; agy's state directory shows agy is in use.
+    # The identity is the login Keychain on macOS and the state directory elsewhere; either way
+    # agy's state directory shows agy is in use.
     return selected_identity('agy') if state_dir().is_dir() else None
 
 
 def fingerprint(email):
     return 'google-' + hashlib.sha256(email.strip().lower().encode()).hexdigest()[:12]
+
+
+def fingerprinted(label):
+    """Whether a label is a discovered account's fingerprint, which names no one and is shown only by provider."""
+    return bool(FINGERPRINT.fullmatch(str(label)))
+
+
+def window_pool(name):
+    """The model pool a window belongs to, from its name, so a snapshot written before pools existed still has one."""
+    head, dot, _ = str(name).partition('.')
+    return head if dot and head else None
 
 
 def _signed_in(path, limit):
@@ -92,8 +105,10 @@ def parse(payload, now=None):
             if bucket.get('disabled') or not valid:
                 unreported.append(name)
                 continue
+            # Each group is its own pool: one exhausted pool leaves the others usable.
             windows.append({'name': name, 'raw_kind': bucket.get('id'), 'used_percent': (1 - remaining) * 100,
-                            'window_minutes': window_minutes(bucket.get('window')), 'reset_at': bucket.get('reset_time')})
+                            'window_minutes': window_minutes(bucket.get('window')), 'reset_at': bucket.get('reset_time'),
+                            **({'pool': pool} if pool else {})})
     return {'windows': windows, 'unreported': [name for name in unreported if name]}
 
 
@@ -143,4 +158,5 @@ def fetch(account, io, now):
     parsed = parse(payload, now)
     if not parsed['windows']:
         raise io.Unavailable('agy reported no quota')
-    return {**parsed, 'source': 'agy print-mode /usage'}
+    # The fingerprint binds a configured alias to the account it read.
+    return {**parsed, 'source': 'agy print-mode /usage', 'fingerprint': fingerprint(email) if email else None}

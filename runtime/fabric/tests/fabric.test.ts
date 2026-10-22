@@ -161,6 +161,29 @@ describe("work ownership", () => {
     } finally { db.close(); }
   });
 
+  it("refuses a release that waits on the write lock past expiry", async () => {
+    const store = openStore(), who = agent("alice"), sha = "a".repeat(40);
+    announce(store, "alice");
+    const lease = store.acquireLanding(who, "session-a", sha, 2);
+    const holdUntil = lease.expiresAtMs + 300;
+    const betterSqlite = createRequire(import.meta.url).resolve("better-sqlite3");
+    const holder = spawn(process.execPath, ["-e", `
+      const Database = require(${JSON.stringify(betterSqlite)});
+      const db = new Database(${JSON.stringify(databasePath)});
+      db.exec("BEGIN IMMEDIATE");
+      console.log("locked");
+      while (Date.now() < ${holdUntil}) {}
+      db.exec("COMMIT");
+      db.close();`], { stdio: ["ignore", "pipe", "inherit"] });
+    const exited = new Promise((done) => holder.on("exit", done));
+    await new Promise<void>((done) => holder.stdout!.once("data", () => done()));
+    expect(Date.now()).toBeLessThan(lease.expiresAtMs);
+    expect(store.tryReleaseLanding(who, "session-a", lease.generation)).toEqual({ released: false, reason: "expired" });
+    expect(Date.now()).toBeGreaterThanOrEqual(holdUntil);
+    await exited;
+    expect(() => store.releaseLanding(who, "session-a", lease.generation)).toThrow(/stale/);
+  });
+
   it("reports a completed push when lease release fails", () => {
     const store = openStore(), who = agent("alice"), sha = "a".repeat(40);
     announce(store, "alice");
@@ -376,7 +399,8 @@ function statSnapshot(path: string) {
 it("shows help for every CLI command before validating arguments or opening the store", () => {
   const commands = ["whoami", "send", "inbox", "ack", "note", "tasks", "task", "claim", "done",
     "activity", "watch", "status", "doctor", "dispatch", "adapters", "lanes", "events",
-    "work-claims", "landing-wait", "landing-push", "session", "cancel", "output", "fetch", "graph"];
+    "work-claims", "landing-wait", "landing-push", "landing-acquire", "landing-verify", "landing-release",
+    "landing-status", "session", "cancel", "output", "fetch", "graph"];
   for (const command of commands) {
     for (const help of ["--help", "-h"]) {
       const result = spawnSync(resolve(repositoryRoot, "runtime/fabric/bin/fabric"), [command, help], {

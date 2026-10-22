@@ -77,8 +77,10 @@ const startProvider = ({ ignoreTerm = false, detached = false } = {}) => {
   const provider = spawn(process.execPath, [
     "-e",
     ignoreTerm
-      ? "const { writeFileSync } = require('node:fs'); process.on('SIGTERM', () => writeFileSync(process.env.PROVIDER_TERM_MARKER, 'SIGTERM\\n')); writeFileSync(process.env.PROVIDER_READY_MARKER, 'ready\\n'); setInterval(() => undefined, 1000);"
-      : "const { writeFileSync } = require('node:fs'); process.on('SIGTERM', () => process.exit(143)); writeFileSync(process.env.PROVIDER_READY_MARKER, 'ready\\n'); setInterval(() => undefined, 1000);",
+      ? "const { writeFileSync } = require('node:fs'); process.on('SIGTERM', () => writeFileSync(process.env.PROVIDER_TERM_MARKER, 'SIGTERM\\n')); writeFileSync(process.env.PROVIDER_READY_MARKER, 'ready\\n'); setTimeout(() => process.exit(0), 600000);"
+      : "const { writeFileSync } = require('node:fs'); process.on('SIGTERM', () => process.exit(143)); writeFileSync(process.env.PROVIDER_READY_MARKER, 'ready\\n'); setTimeout(() => process.exit(0), 600000);",
+    // The run directory names this provider in `ps`, so a test can find a leaked one.
+    runDir,
   ], { detached, stdio: "ignore", env: providerEnvironment });
   provider.unref();
   writeFileSync(join(runDir, "provider.pid"), `${provider.pid}\n`);
@@ -98,13 +100,16 @@ const startProvider = ({ ignoreTerm = false, detached = false } = {}) => {
   }) + "\n");
 };
 
+// Fixture processes bound their own life: a leaked sleeper ends instead of living for hours.
+const FIXTURE_LIFETIME_MS = 10 * 60_000;
+
 const sleepUntilSignalled = ({ ignoreTerm = false } = {}) => {
   if (ignoreTerm) {
     process.on("SIGTERM", () => {
       writeFileSync(join(runDir, "term-ignored.marker"), "SIGTERM\n");
     });
     writeFileSync(join(runDir, "sleeping.pid"), `${process.pid}\n`);
-    setInterval(() => undefined, 1000);
+    setTimeout(() => process.exit(0), FIXTURE_LIFETIME_MS);
     return;
   }
   process.once("SIGTERM", () => {
@@ -112,7 +117,7 @@ const sleepUntilSignalled = ({ ignoreTerm = false } = {}) => {
     process.exit(143);
   });
   writeFileSync(join(runDir, "sleeping.pid"), `${process.pid}\n`);
-  setInterval(() => undefined, 1000);
+  setTimeout(() => process.exit(0), FIXTURE_LIFETIME_MS);
 };
 
 const exitAfterOwnerRecord = ({ release = false } = {}) => {

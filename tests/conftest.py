@@ -21,6 +21,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import zlib
 from pathlib import Path
 
 import pytest
@@ -77,13 +78,35 @@ def pytest_configure(config) -> None:
 
 
 def pytest_collection_modifyitems(config, items) -> None:
-    """Real-CLI tests run only when opted in; the default PATH holds fail-loud stubs."""
-    if os.environ.get(LIVE_PROVIDER_ENV) == "1":
+    """Skip live CLIs by default and optionally select a stable file shard."""
+    if os.environ.get(LIVE_PROVIDER_ENV) != "1":
+        skip = pytest.mark.skip(reason=f"real provider CLI test; set {LIVE_PROVIDER_ENV}=1 to run")
+        for item in items:
+            if item.get_closest_marker("live_provider"):
+                item.add_marker(skip)
+
+    shard = os.environ.get("PROVENANT_TEST_SHARD")
+    if not shard:
         return
-    skip = pytest.mark.skip(reason=f"real provider CLI test; set {LIVE_PROVIDER_ENV}=1 to run")
+    try:
+        index, count = (int(part) for part in shard.split("/", maxsplit=1))
+    except (ValueError, TypeError):
+        raise pytest.UsageError("PROVENANT_TEST_SHARD must be formatted as i/n") from None
+    if count < 2 or not 1 <= index <= count:
+        raise pytest.UsageError("PROVENANT_TEST_SHARD must select 1..n with n at least 2")
+
+    selected = []
+    deselected = []
     for item in items:
-        if item.get_closest_marker("live_provider"):
-            item.add_marker(skip)
+        path = Path(item.path).resolve().relative_to(ROOT).as_posix()
+        if path == "tests/test_fabric_hosts.py":
+            keep = index == 1
+        else:
+            bucket = zlib.crc32(path.encode("utf-8")) % (count - 1) + 2
+            keep = index == bucket
+        (selected if keep else deselected).append(item)
+    items[:] = selected
+    config.hook.pytest_deselected(items=deselected)
 
 
 def pytest_unconfigure(config) -> None:
@@ -100,6 +123,22 @@ def _checkout_under_test_is_product_root(monkeypatch):
 def _isolated_route_state(tmp_path_factory, monkeypatch):
     monkeypatch.setenv("FABRIC_COOLDOWNS_PATH", str(tmp_path_factory.mktemp("cooldowns") / "cooldowns.json"))
     monkeypatch.setenv("AGENT_FABRIC_ROUTE_HEALTH_PATH", str(tmp_path_factory.mktemp("route-health") / "route-health.json"))
+
+
+@pytest.fixture(autouse=True)
+def _isolated_instance_root(tmp_path_factory, monkeypatch, request):
+    """Pin the Fabric instance root so `~/.agents` (hosts.json peers, quota config and
+    snapshots) never leaks into a test, and pin the Claude config dir and bin dir so a
+    developer's `~/.claude` or `~/.local/bin` never leaks into a subprocess. Tests that
+    need a root set their own over this. The installer tests derive those dirs from the
+    HOME they build, so they keep their own."""
+    monkeypatch.setenv("AGENT_FABRIC_INSTANCE_ROOT", str(tmp_path_factory.mktemp("instance-root")))
+    # A test run inside a remote Fabric lane must still exercise local placement.
+    monkeypatch.delenv("PROVENANT_REMOTE_LANE", raising=False)
+    if request.node.path.name == "test_install_harness.py":
+        return
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path_factory.mktemp("claude-config")))
+    monkeypatch.setenv("PROVENANT_BIN_DIR", str(tmp_path_factory.mktemp("bin-dir")))
 
 
 @pytest.fixture(autouse=True)

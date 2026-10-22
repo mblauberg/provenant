@@ -19,6 +19,7 @@ import {
 } from "../src/run-registry.js";
 import * as runRegistry from "../src/run-registry.js";
 import type { Identity } from "../src/identity.js";
+import { describeLeaks, reapFixtureProcesses } from "./helpers/fixture-processes.js";
 import { scratchRoot } from "./helpers/temp-root.js";
 
 const testDirectory = dirname(fileURLToPath(import.meta.url));
@@ -121,8 +122,14 @@ afterEach(async () => {
       process.kill(pid, "SIGKILL");
     } catch { /* already gone */ }
   }
-  await delay(50);
-  rmSync(temporaryDirectory, { recursive: true, force: true });
+  try {
+    // Any child still naming this fixture tree was never tracked by its test.
+    const leaked = await reapFixtureProcesses(temporaryDirectory);
+    expect(leaked, describeLeaks(leaked)).toEqual([]);
+  } finally {
+    await reapFixtureProcesses(temporaryDirectory, 0);
+    rmSync(temporaryDirectory, { recursive: true, force: true });
+  }
 });
 
 describe("run directory pruning", () => {

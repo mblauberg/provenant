@@ -165,6 +165,8 @@ const row = {
 const readRoots = args.filter((_, index) => args[index - 1] === "--read-root");
 if (readRoots.length) row.read_roots = readRoots;
 const write = () => writeFileAtomic(join(path, "attempt.json"), JSON.stringify(row));
+// A queued attempt is published as queued from its first write, never as running first.
+if (prompt === "admission-slow") Object.assign(row, { state: "queued", queue_reason: "memory", admission: { owner_pid: process.pid, owner_start_epoch: null } });
 write();
 writeFileSync(join(path, "stderr.log"), "fixture stderr");
 writeFileSync(join(path, "events.jsonl"), "{}\n");
@@ -185,9 +187,7 @@ if (prompt === "orphan-provider") {
   process.exit(0);
 }
 if (prompt === "admission-slow") {
-  // The owner waits for memory admission, then runs once released.
-  Object.assign(row, { state: "queued", queue_reason: "memory", admission: { owner_pid: process.pid, owner_start_epoch: null } });
-  write();
+  // The owner waits for memory admission (published queued above), then runs once released.
   while (!existsSync(join(dir, "release"))) await new Promise((r) => setTimeout(r, 20));
   delete row.queue_reason;
   delete row.admission;

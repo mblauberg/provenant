@@ -17,9 +17,10 @@ final class QuotaModel {
     private(set) var error: String?
     private(set) var updatedAt: Date?
     private(set) var isRefreshing = false
-    private(set) var minute = Date.now   // so the label sees a passed reset or exhaustion between refreshes
+    /// The status item's content, replaced only when it changes.
+    private(set) var label = MenuLabel()
     @ObservationIgnored private var timer: Timer?
-    @ObservationIgnored private var clock: Timer?
+    @ObservationIgnored private var clock: Timer?   // one shot, at the next reset that could change the label
     @ObservationIgnored private var launcher: CLI.Launcher?   // resolved once, forgotten if it stops working
     @ObservationIgnored private var ticks: Bool?   // nil until the CLI shows whether it has `quota tick`
     @ObservationIgnored private var pending: Trigger?
@@ -31,6 +32,13 @@ final class QuotaModel {
     @ObservationIgnored private var waking = false   // woke, waiting for the network
     @ObservationIgnored private let interval = max(
         ProcessInfo.processInfo.environment["QUOTA_INTERVAL_SECONDS"].flatMap(Double.init) ?? 120, 5)
+    @ObservationIgnored private var fixture = false   // a saved report to draw; never runs the CLI
+
+    /// A saved report, for `--render`: no timers, watchers or CLI runs.
+    init(fixture report: QuotaReport, updatedAt: Date) {
+        (self.report, self.updatedAt, fixture) = (report, updatedAt, true)
+        label = MenuLabel(report: report, failed: false, now: updatedAt)
+    }
 
     init() {
         let center = NSWorkspace.shared.notificationCenter
@@ -50,9 +58,6 @@ final class QuotaModel {
             MainActor.assumeIsolated { self?.online = path.status == .satisfied; self?.tickOnceOnline() }
         }
         network.start(queue: .main)
-        clock = Timer(timeInterval: 60, repeats: true) { [weak self] _ in MainActor.assumeIsolated { self?.minute = .now } }
-        clock?.tolerance = 10
-        RunLoop.main.add(clock!, forMode: .common)
         run(.timer)   // also learns whether the CLI has `tick`
     }
 
@@ -88,7 +93,25 @@ final class QuotaModel {
         if ticks == true { run(.power) }
     }
 
+    /// `provenant quota forget`: drops a signed-out account's remembered reading. The CLI refuses a signed-in one.
+    func forget(_ id: String) {
+        guard !fixture else { return }
+        let cached = launcher
+        Task {
+            let (resolved, outcome) = await withCheckedContinuation { done in
+                DispatchQueue.global(qos: .utility).async { done.resume(returning: CLI.quota(cached, ["quota", "forget", id, "--json"])) }
+            }
+            launcher = resolved
+            switch outcome {
+            case .report(let report): show(report)
+            case .failure(let failure): error = failure.message; relabel()
+            case .unsupported: break   // only `tick` reports this
+            }
+        }
+    }
+
     private func run(_ trigger: Trigger) {
+        guard !fixture else { return }
         guard !isRefreshing else {
             // The run in flight covers timer and panel; the others still happen after it, the strongest first.
             let strength: [Trigger] = [.power, .wake, .manual]
@@ -115,6 +138,7 @@ final class QuotaModel {
                 show(report)
             case .failure(let failure):
                 error = failure.message   // the last good report stays, flagged
+                relabel()
                 if ticks != false { schedule(nil) }
             case .unsupported:
                 log.notice("quota tick is unsupported; polling every \(Int(self.interval)) s")
@@ -130,7 +154,24 @@ final class QuotaModel {
         let report = self.report.flatMap { shown in
             shown.generatedAt.flatMap { at in incoming.generatedAt.map { $0 < at } } == true ? shown : nil } ?? incoming
         (self.report, error, updatedAt) = (report, nil, .now)
+        relabel()
         if ticks == true { schedule(report.nextDueAt ?? report.nextCheck?.nextDueAt) }
+    }
+
+    /// Recomputes the status item's content, and wakes again only when a reset or return could change it. A
+    /// repeating clock redrew the status item every minute for nothing; between refreshes only time passing a
+    /// reset changes what it shows.
+    private func relabel() {
+        let now = Date.now, next = MenuLabel(report: report, failed: error != nil, now: now)
+        if next != label { label = next }
+        clock?.invalidate()
+        let dates = (report?.accounts ?? []).flatMap { account in account.windows.compactMap(\.resetAt) + [account.backAt].compactMap { $0 } }
+        guard let due = dates.filter({ $0 > now }).min() else { return }
+        clock = Timer(timeInterval: due.timeIntervalSince(now) + 1, repeats: false) { [weak self] _ in
+            MainActor.assumeIsolated { self?.relabel() }
+        }
+        clock?.tolerance = 5
+        RunLoop.main.add(clock!, forMode: .common)
     }
 
     /// One timer at the earliest due time, but no sooner than 30 s, so a report that is always due cannot spin.
@@ -255,7 +296,8 @@ enum CLI {
             return (launcher, .failure(Failure(message: message)))
         }
         guard let launcher = cached ?? resolve() else {
-            return fail(nil, "not found", "provenant is not on the login shell's PATH. Set PROVENANT_BIN.")
+            return fail(nil, "not found", "provenant was not found on the login shell's PATH or at ~/.local/bin/provenant. "
+                        + "Set PROVENANT_BIN to its path.")
         }
         let name = launcher.custom ? "PROVENANT_BIN (\(launcher.url.path))" : "provenant"
         let run: Output
@@ -280,16 +322,36 @@ enum CLI {
         }
     }
 
-    /// PROVENANT_BIN, or `provenant` and PATH from a zsh login shell, so its `env python3` shebang resolves.
+    /// PROVENANT_BIN; else `provenant` and PATH from the user's login shell, so its `env python3` shebang
+    /// resolves; else ~/.local/bin/provenant with this process's PATH.
     static func resolve() -> Launcher? {
-        if let bin = ProcessInfo.processInfo.environment["PROVENANT_BIN"], !bin.isEmpty {
+        let environment = ProcessInfo.processInfo.environment
+        if let bin = environment["PROVENANT_BIN"], !bin.isEmpty {
             return Launcher(url: URL(fileURLWithPath: bin), path: nil, custom: true)
         }
-        guard let run = try? exec(URL(fileURLWithPath: "/bin/zsh"), ["-lc", "command -v provenant && print -r -- \"$PATH\""],
-                                  path: nil, limit: 20), run.status == 0, !run.timedOut else { return nil }
+        if let shell = loginShell(environment), let found = lookup(shell) { return found }
+        let local = FileManager.default.homeDirectoryForCurrentUser.appending(path: ".local/bin/provenant")
+        return FileManager.default.isExecutableFile(atPath: local.path) ? Launcher(url: local, path: nil, custom: false) : nil
+    }
+
+    /// $SHELL, else the account's shell; nil when neither is an absolute executable.
+    static func loginShell(_ environment: [String: String]) -> URL? {
+        var candidates = [environment["SHELL"]]
+        if let entry = getpwuid(getuid()), let shell = entry.pointee.pw_shell { candidates.append(String(cString: shell)) }
+        return candidates.compactMap { $0 }.first { $0.hasPrefix("/") && FileManager.default.isExecutableFile(atPath: $0) }
+            .map { URL(fileURLWithPath: $0) }
+    }
+
+    /// `command -v` works in zsh, bash and fish alike. PATH comes from `printenv`, not the shell's own syntax
+    /// (fish prints $PATH space-separated), and is optional. Taking the last absolute line skips login banners.
+    static func lookup(_ shell: URL) -> Launcher? {
+        guard let run = try? exec(shell, ["-lc", "command -v provenant && printenv PATH"], path: nil, limit: 20),
+              run.status == 0, !run.timedOut else { return nil }
         let lines = String(decoding: run.out, as: UTF8.self).split(separator: "\n").map(String.init)
-        guard lines.count >= 2, lines[0].hasPrefix("/") else { return nil }
-        return Launcher(url: URL(fileURLWithPath: lines[0]), path: lines[1], custom: false)
+        guard let index = lines.lastIndex(where: { $0.hasPrefix("/") && !$0.contains(":") && $0.hasSuffix("/provenant") })
+        else { return nil }
+        let path = lines.indices.contains(index + 1) && !lines[index + 1].isEmpty ? lines[index + 1] : nil
+        return Launcher(url: URL(fileURLWithPath: lines[index]), path: path, custom: false)
     }
 
     /// Runs the CLI as the leader of its own process group, so an overrun's descendants are signalled with it.

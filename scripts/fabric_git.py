@@ -637,11 +637,21 @@ class CodeTransport:
                         if not owners or target.is_symlink() or not self.w.same_directory(self.w.primary_root(target), repo):
                             self.fail('worktree_invalid', f'Peer worktree {meta["worktree"]} exists but no transported writer operation binds it; '
                                 'remove it on the peer or use another branch')
+                        invalid_existing = (f'Peer worktree {meta["worktree"]} (operation {", ".join(owners)}) must be clean '
+                            'at the transported base on its bound branch; fetch or remove it first')
                         with self.w.hold_writer_lease(target):
                             if (self.git(target, 'symbolic-ref', '--short', 'HEAD') != meta['branch'] or
-                                    self.git(target, 'rev-parse', 'HEAD') != meta['base_revision'] or self.w.worktree_residue(target)):
-                                self.fail('worktree_invalid', f'Peer worktree {meta["worktree"]} (operation {", ".join(owners)}) must be clean '
-                                    'at the transported base on its bound branch; fetch or remove it first')
+                                    self.w.worktree_residue(target)):
+                                self.fail('worktree_invalid', invalid_existing)
+                            head = self.git(target, 'rev-parse', 'HEAD')
+                            if head != meta['base_revision']:
+                                if self.git(repo, 'merge-base', '--is-ancestor', head, meta['base_revision'], check=False) is None:
+                                    self.fail('worktree_invalid', invalid_existing)
+                                if self.git(target, 'merge', '--ff-only', meta['base_revision'], check=False) is None:
+                                    self.fail('worktree_invalid', invalid_existing)
+                                if (self.git(target, 'rev-parse', 'HEAD') != meta['base_revision'] or
+                                        self.w.worktree_residue(target)):
+                                    self.fail('worktree_invalid', invalid_existing)
                     else:
                         # Publish ownership intent before create: even death between
                         # checkout and claim publication must be recoverable.

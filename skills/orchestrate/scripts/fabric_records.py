@@ -132,6 +132,8 @@ def render_digest(row):
         )
         if row.get("reset_at"):
             detail += " (resets " + row["reset_at"] + ")"
+    if row.get("result_partial"):
+        detail += " · partial result" + (" " + result if result else "")
     text = f"{status} {run_id} {route} {duration}s" + detail
     if prov.get("line"):
         text += "\n  " + prov["line"] + context_marker(row.get("context"))
@@ -303,6 +305,9 @@ def _load_cooldowns(path, at, *, persist=True):
             entry['host'] = legacy['host']
             if entry.get('account') is None:
                 entry['account'] = legacy['account']
+        # This machine's earlier ids (raw hostname, its slug, 'local') key as the current id, so a
+        # success clears and a repeat limit doubles the same entry. Peer ids are never aliases.
+        entry['host'] = resolver.same_host(entry['host'])
         scoped = cooldown_key(entry['adapter'], entry['model'], entry)
         previous = values.get(scoped)
         if previous is None or parse_time(entry['cooling_until']) > parse_time(previous['cooling_until']):
@@ -494,9 +499,11 @@ def clear_cooldowns(selector=None, path=None, *, account=None):
         model = registered_model(adapter, model or "*")
     with locked(path.with_name("cooldowns.lock")):
         values = _load_cooldowns(path, datetime.now(UTC))
-        host = identity_resolver().host_id()
+        resolver = identity_resolver()
+        host = resolver.host_id()
         gone = [key for key, entry in values.items()
-                if (account is None or (entry.get('account') == account and entry.get('host') == host))
+                if (account is None or (entry.get('account') == account
+                                        and resolver.same_host(entry.get('host')) == host))
                 and (not selector or (entry['adapter'] == adapter and (not slash or entry['model'] == model)))]
         removed = sorted({values[key]['adapter'] + '/' + values[key]['model'] for key in gone})
         for key in gone:
@@ -531,8 +538,12 @@ def write_cooldown(row, *, path=None, at=None):
         model = "*"
     with locked(path.with_name("cooldowns.lock")):
         values = _load_cooldowns(path, at)
-        scope = identity_resolver().scope(adapter)
+        resolver = identity_resolver()
+        scope = resolver.scope(adapter)
         scope.update({field: row[field] for field in ('account', 'host') if field in row})
+        # An attempt that captured an earlier id of this machine keys as the current id, like the
+        # loaded entries; a peer's id stays the peer's.
+        scope['host'] = resolver.same_host(scope['host'])
         key = cooldown_key(adapter, model, scope)
         if row["status"] == "ok":
             # A substitution proves the answering model recovered, not the requested one.

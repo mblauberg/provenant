@@ -18,10 +18,12 @@ fi
 PLATFORM=""
 MCP_CLIENTS="primary"
 REFRESH_ROUTING=0
+LANE_SAFETY_HOOKS=""
+PRE_PUSH_HOOK=""
 OTEL_COLLECTOR=""
 
 usage() {
-  echo "usage: install-harness --platform <claude|codex|opencode|agy|cursor|kiro|all> [--mcp-clients <primary|all>] [--refresh-routing] [--otel-collector|--uninstall-otel-collector]" >&2
+  echo "usage: install-harness --platform <claude|codex|opencode|agy|cursor|kiro|all> [--mcp-clients <primary|all>] [--refresh-routing] [--lane-safety-hooks|--no-lane-safety-hooks] [--pre-push-hook|--no-pre-push-hook] [--otel-collector|--uninstall-otel-collector]" >&2
 }
 
 while [[ $# -gt 0 ]]; do
@@ -40,6 +42,10 @@ while [[ $# -gt 0 ]]; do
       REFRESH_ROUTING=1
       shift
       ;;
+    --lane-safety-hooks) LANE_SAFETY_HOOKS=install; shift ;;
+    --no-lane-safety-hooks) LANE_SAFETY_HOOKS=remove; shift ;;
+    --pre-push-hook) PRE_PUSH_HOOK=install; shift ;;
+    --no-pre-push-hook) PRE_PUSH_HOOK=remove; shift ;;
     --otel-collector) OTEL_COLLECTOR=install; shift ;;
     --uninstall-otel-collector) OTEL_COLLECTOR=uninstall; shift ;;
     -h|--help)
@@ -80,6 +86,13 @@ esac
 provenant_bin_dir="${PROVENANT_BIN_DIR:-$HOME/.local/bin}"
 provenant_command="$provenant_bin_dir/provenant"
 provenant_source="$PRODUCT_ROOT/scripts/provenant.template"
+# ADR 0027: auto builds the Rust front door when cargo (or a matching prebuilt
+# binary) is available and otherwise installs the Python template.
+front_door_mode="${PROVENANT_FRONT_DOOR:-auto}"
+case "$front_door_mode" in
+  auto|rust|python) ;;
+  *) echo "PROVENANT_FRONT_DOOR must be auto, rust or python, got: $front_door_mode" >&2; exit 3 ;;
+esac
 instance_root="${AGENT_FABRIC_INSTANCE_ROOT:-$HOME/.agents}"
 case "$provenant_bin_dir" in
   /*) ;;
@@ -360,6 +373,26 @@ for primary in "${primary_platforms[@]}"; do
 done
 primary_platforms=(${selected_platforms[@]+"${selected_platforms[@]}"})
 
+# Choose and build the front door before the collision preflight, which needs
+# the exact bytes that will be published. A build is not an installation
+# mutation: it goes to a scratch directory removed on exit.
+front_door_build_directory="$(mktemp -d "${TMPDIR:-/tmp}/provenant-front-door.XXXXXXXX")" || exit 3
+trap 'rm -rf "$front_door_build_directory"' EXIT
+front_door_select_args=(
+  select
+  --product-root "$PRODUCT_ROOT"
+  --mode "$front_door_mode"
+  --build-dir "$front_door_build_directory"
+)
+if [[ -n "${PROVENANT_FRONT_DOOR_BINARY:-}" ]]; then
+  front_door_select_args+=(--prebuilt "$PROVENANT_FRONT_DOOR_BINARY")
+fi
+front_door_selection="$(
+  run_stdlib "$PRODUCT_ROOT/scripts/lib/front_door_build.py" "${front_door_select_args[@]}"
+)" || exit 3
+front_door_kind="${front_door_selection%%$'\t'*}"
+provenant_source="${front_door_selection#*$'\t'}"
+
 # Refuse a command collision before any installation mutation. Publication
 # revalidates this state and uses atomic no-replace or exchange primitives.
 provenant_preflight="$(
@@ -452,6 +485,7 @@ provenant_status="$(
     --expected "$provenant_preflight"
 )" || exit 3
 echo "command $provenant_status=$provenant_command"
+echo "front-door=$front_door_kind"
 case ":${PATH:-}:" in
   *":$provenant_bin_dir:"*) ;;
   *) echo "warning: $provenant_bin_dir is not on PATH" >&2 ;;
@@ -504,6 +538,14 @@ install_primary() {
           echo "claude settings link skipped: target is not a regular file: $default_settings"
         fi
       fi
+    fi
+    if [[ "$LANE_SAFETY_HOOKS" == install ]]; then
+      run_stdlib "$PRODUCT_ROOT/scripts/configure-claude-hooks.py" \
+        --settings "$platform_home/settings.json" \
+        --guard "$PRODUCT_ROOT/scripts/lane_safety_guard.py" || return $?
+    elif [[ "$LANE_SAFETY_HOOKS" == remove ]]; then
+      run_stdlib "$PRODUCT_ROOT/scripts/configure-claude-hooks.py" \
+        --settings "$platform_home/settings.json" --remove || return $?
     fi
   fi
   if [[ "$PLATFORM" == "codex" ]]; then
@@ -588,6 +630,32 @@ for client in "${mcp_platforms[@]}"; do
     configure_fabric_mcp "$client"
   fi
 done
+
+# Opt-in pre-push guard in the product checkout; never replaces a hook it does
+# not own. Linked worktrees share this hooks directory.
+if [[ -n "$PRE_PUSH_HOOK" ]]; then
+  pre_push_source="$PRODUCT_ROOT/scripts/hooks/pre-push"
+  if pre_push_dir="$(git -C "$PRODUCT_ROOT" rev-parse --path-format=absolute --git-path hooks 2>/dev/null)"; then
+    pre_push_hook="$pre_push_dir/pre-push"
+    if [[ "$PRE_PUSH_HOOK" == remove ]]; then
+      if [[ -L "$pre_push_hook" && "$(readlink "$pre_push_hook")" == "$pre_push_source" ]]; then
+        rm "$pre_push_hook"
+        echo "pre-push hook removed=$pre_push_hook"
+      else
+        echo "pre-push hook not ours; left in place=$pre_push_hook"
+      fi
+    elif [[ -L "$pre_push_hook" && "$(readlink "$pre_push_hook")" == "$pre_push_source" ]]; then
+      echo "pre-push hook existing=$pre_push_hook"
+    elif [[ -e "$pre_push_hook" || -L "$pre_push_hook" ]]; then
+      echo "warning: pre-push hook already exists; inspect it: $pre_push_hook" >&2
+    else
+      mkdir -p "$pre_push_dir" && ln -s "$pre_push_source" "$pre_push_hook"
+      echo "pre-push hook installed=$pre_push_hook"
+    fi
+  else
+    echo "warning: pre-push hook skipped: $PRODUCT_ROOT is not a git checkout" >&2
+  fi
+fi
 
 # The pointer is the final publication. Every deterministic conflict has been
 # checked above, so a failed install preserves the previous product selection.

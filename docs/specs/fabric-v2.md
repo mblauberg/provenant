@@ -67,7 +67,7 @@ On macOS, Codex providers in `read-only` and `workspace-write`, and every provid
 
 A resume reads the prior attempt's context. It adds a digest warning when that context exceeds the effective ceiling (the point in force, else the requested ceiling), or when the size is unknown and the adapter has no ceiling control, for example `! resuming a ~620k-token session; fresh: fabric_dispatch{prompt, handoff:"<run id>"}`. The resume still runs. `handoff: <run id>` (with `task_id` for a batch task) is the cheaper alternative. It starts a fresh run whose prompt is prefixed with the prior task's route line and its result tail, at most 8,000 bytes in total. If the call names no adapter, alias or model, the handoff reuses the prior adapter, model and effort, and a prior writer's mode and worktree. The prior task must be terminal.
 
-Host liveness probes treat permission denial and unavailable start times as unknown, so they exclude orphan reaping. Only a missing process or a verified identity mismatch proves host loss. Signal control verifies each recorded process and its actual group, then signals only the owner and provider PIDs; their owner handles descendants. A partial process census cannot authorise controller group signals. Before signalling, it writes `termination-request.json` with the run token, target provider, source, signal and requester PID. An unexpected provider signal death reports `interrupted` with its numeric signal and name; matching controller telemetry supplies the termination source and requester. The actual OS signal sender remains unknown. Watchdog, cancellation and terminal-grace cleanup keep their own outcomes.
+Host liveness probes treat permission denial and unavailable start times as unknown, so they exclude orphan reaping. Only a missing process or a verified identity mismatch proves host loss. Signal control verifies each recorded process and its actual group, then signals only the owner and provider PIDs; their owner handles descendants. A partial process census cannot authorise controller group signals. Before signalling, it writes `termination-request.json` with the run token, target provider, source, signal and requester PID. An unexpected provider signal death without a valid terminal result reports `failed`; a signal after a valid terminal result retains `interrupted`. Both retain the numeric signal and name; matching controller telemetry supplies the termination source and requester. The actual OS signal sender remains unknown. Watchdog, cancellation and terminal-grace cleanup keep their own outcomes.
 
 A terminal digest appends a compact marker to its Route line: `ctx 212k/1M` when observed, `ctx ~19k` when estimated, `ctx 8%` from a percentage, and nothing when unknown. The stored provenance line stays unmarked for trailers and the index. Brief status rows omit `context`; `detail: "full"` includes it.
 
@@ -80,7 +80,7 @@ An owner writes `fabric.attempt.v1` at `tasks/<id>/attempt-NNN/attempt.json` and
 
 Every attempt has `usage_source`: `observed` when token counters were read from the provider stream, `estimated` when usage was estimated, or `missing` when no token counters were reported. Current adapters do not estimate token usage; `estimated` is reserved for an estimator and preserved when supplied by an adapter. A context percentage alone is `missing` usage. This field is independent of `context.source`: Codex/Cursor turn totals are observed usage even when their context size is estimated. The meter result is retained on unsuccessful attempts, including non-zero provider exits.
 
-Terminal adapter, dispatch and Fabric attempt receipts also record `error_class`, derived only from that receipt's final status and existing evidence signature. The fixed vocabulary is `none`, `rate_limited`, `usage_limited`, `auth`, `model_unavailable`, `timeout`, `empty_output`, `sandbox_denied`, `provider_error`, `cancelled`, and `unknown`. Successful and input-required statuses map to `none`; named failure statuses take precedence over signatures. Signatures refine generic outcomes (for example `failed` + `empty_output`). Stalls and startup deadlines map to `timeout`; permission blocks map to `sandbox_denied`. Generic failures, rejected requests and missing tools map to `provider_error`; cancellations map to `cancelled`; interruption, quarantine and unrecognised outcomes default to `unknown`. This telemetry field does not affect routing, retries or health.
+Terminal adapter, dispatch and Fabric attempt receipts also record `error_class`, derived only from that receipt's final status and existing evidence signature. The fixed vocabulary is `none`, `rate_limited`, `usage_limited`, `auth`, `model_unavailable`, `timeout`, `empty_output`, `sandbox_denied`, `provider_error`, `transient`, `cancelled`, and `unknown`. Successful and input-required statuses map to `none`; named failure statuses take precedence over signatures. Signatures refine generic outcomes (for example `failed` + `empty_output`). Stalls and startup deadlines map to `timeout`; permission blocks map to `sandbox_denied`. Generic failures, rejected requests and missing tools map to `provider_error`; cancellations map to `cancelled`; interruption, quarantine and unrecognised outcomes default to `unknown`. Transport and exhausted reconnect failures map to `transient`. Codex progress text without a terminal result is a failure. Retained incomplete output carries `result_partial: true` in adapter and attempt receipts, lane rows and brief status responses; lane waits label it partial. A successful terminal event clears preceding reconnect errors. This telemetry field does not affect routing, retries or health.
 
 `timing.phases` records milliseconds for available dispatch phases: TypeScript validation and catalogue snapshot, run directory setup, owner startup and attempt setup, route planning, provider spawn, provider execution and finalisation. A direct Python owner has no TypeScript phase measurements. The writer watchdog scans at most 2,000 entries per probe, checks a 25 ms budget between entries and retains its scan position; a full cycle on a large tree may take several one-second probes. Stall detection waits for a complete scan covering the idle interval so a late file is not missed.
 
@@ -181,7 +181,18 @@ finalisation nor a moved local ref can land an instruction change:
   the owner's common Git directory with `diff-tree --root -m`, so merge
   resolutions count. A commit may change a protected path only to the version
   the base already holds, as a merge or rebase from the base does, or be
-  reachable from a tip the chair released. Anything else fails with
+  reachable from a tip the chair released. A merge may also take a protected
+  path's version from a parent in the range that is not held, but only where a
+  released commit in the range introduced that version. A landing train's
+  `--no-ff` merge of a released tip, and later merges on top of it, therefore
+  pass. A merge cannot revert a protected path to an older version taken from a
+  parent outside the range or from a stale branch, and a resolution no parent
+  holds is held. One exception remains: a released commit vouches for the
+  parent content it merges, so a later unreleased merge in the range can
+  restore that stale content, and the gate passes it. A release is therefore
+  a review of the whole released tip, parents included. A release record that
+  is malformed fails every range, protected-clean ones included, rather than
+  only ranges that change protected paths. Anything else fails with
   `protected_instructions_changed` and names the held commits; the branch is
   left as it is. Fabric `landing-push` passes the landing lease's remote SHA as
   the base, never a local ref. `scripts/worktree verify-claim` and a manual
@@ -191,7 +202,9 @@ finalisation nor a moved local ref can land an instruction change:
 
 The invariant is: nothing lands on the integration branch unless every commit in
 `<leased remote SHA>..<tip>` leaves protected paths unchanged from the leased
-version or is reachable from an audited chair release of a reviewed tip;
+version, is reachable from an audited chair release of a reviewed tip, or is a
+merge that takes each protected path from the leased version or from a released
+change in the range;
 writers can write only their own branch ref. The gate reads the object store,
 which writers can add packs to, so it trusts object content; it disables
 replace refs, commit graphs, the multi-pack index and lazy fetch, and refuses
@@ -225,7 +238,7 @@ If that marker cannot be installed, patches are listed as unavailable with a
 capture error; no patch is claimed as complete in that case. The check
 reports `protected_instructions_unverifiable` separately from actual changes.
 A failed or signal-interrupted provider is never promoted to `quarantined`.
-Signal-interrupted attempts retain their changed files without restoration and
+Signal-killed attempts (`failed` without a terminal result, otherwise `interrupted`, or `cancelled` on explicit cancellation) retain their changed files without restoration and
 fail for actual instruction edits, preserving the provider exit and signal.
 An unknown value warns and quarantines. The per-attempt check reads local refs; only
 the owner can move them. It also reports a clean three-way merge into a skill the branch already
@@ -323,7 +336,7 @@ reading credential contents:
 |---|---|
 | claude | `CLAUDE_CONFIG_DIR`, else `~/.claude` |
 | codex | `CODEX_HOME`, else `~/.codex` |
-| agy | OS user's `~/Library/Keychains/login.keychain-db`, independent of HOME and `AGY_CONFIG_DIR`; a second account requires a second host |
+| agy | On macOS the OS user's `~/Library/Keychains/login.keychain-db`, independent of HOME and `AGY_CONFIG_DIR`; elsewhere `~/.gemini/antigravity-cli`; a second account requires a second host |
 | cursor | `~/Library/Application Support/Cursor/User/globalStorage` on macOS, else `~/.config/Cursor/User/globalStorage` |
 | opencode | `$XDG_DATA_HOME/opencode`, else `~/.local/share/opencode` (the authentication store, not `OPENCODE_CONFIG_DIR`) |
 | kiro | `~/.kiro` |

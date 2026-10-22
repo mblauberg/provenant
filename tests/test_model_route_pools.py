@@ -365,10 +365,19 @@ def test_instance_overlay_reorders_and_reweights_a_pool(tmp_path):
     ({"families": {"openai": {"risk_tier_overrides": {"crucial": {"alias": "flagship"}}}}},
      "alias 'flagship' was renamed to 'principal'"),
 ])
-def test_overlay_with_a_retired_tier_name_fails_fast(tmp_path, overlay, message):
-    run = model_route(overlay_environment(tmp_path, overlay), "routes", "--json")
+def test_overlay_with_a_retired_tier_name_fails_fast(overlay, message):
+    with pytest.raises(pools.RenamedNameError, match=message):
+        pools.reject_renamed(overlay)
+
+
+def test_routes_command_rejects_retired_tier_in_overlay(tmp_path):
+    env = overlay_environment(tmp_path, {"routes": {
+        "strong": [{"model": "codex/gpt-6.1-sol"}],
+    }})
+    run = model_route(env, "routes")
     assert run.returncode == 2
-    assert message in run.stderr and "overlay" in run.stderr
+    assert "model-route:" in run.stderr
+    assert "overlay" in run.stderr
 
 
 def test_overlay_may_name_adapter_aliases_by_tier(tmp_path):
@@ -562,11 +571,12 @@ def test_confidential_preflight_uses_a_mixed_alias_and_refuses_only_when_nothing
     (instance / "config" / "model-routing.json").write_text(json.dumps(MIXED_SCOUT))
     monkeypatch.setenv("AGENT_FABRIC_INSTANCE_ROOT", str(instance))
     monkeypatch.setenv("AGENT_FABRIC_STATE_ROOT", str(tmp_path / "state"))
+    monkeypatch.setenv("AGENT_FABRIC_PRODUCT_ROOT", str(ROOT))
     monkeypatch.chdir(tmp_path)
     dispatch_run = load("pools_dispatch_mixed_alias_under_test", ROOT / "skills/orchestrate/scripts/dispatch_run.py")
     task = {"id": "t", "adapter": "opencode", "alias": "junior", "prompt": "hi"}
     ordinary = dispatch_run.preflight_tasks([task], tmp_path)
-    assert ordinary["routes"][0]["resolved_model"] == "opencode/mimo-v2.6-flash-free", "the alias leads with the free model"
+    assert ordinary.get("routes", [{}])[0].get("resolved_model") == "opencode/mimo-v2.6-flash-free", ordinary
     private = dispatch_run.preflight_tasks([{**task, "confidential": True}], tmp_path)
     assert private["status"] == "validated", private
     assert private["routes"][0]["resolved_model"] == "opencode-go/deepseek-v4.1-flash"

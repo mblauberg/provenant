@@ -19,6 +19,7 @@ REPAIR = (
 )
 FABRIC_MCP = "runtime/fabric/bin/fabric-mcp"
 FABRIC_CLI = "runtime/fabric/bin/fabric"
+LEASE_VERBS = frozenset({"acquire", "release", "verify", "status", "push"})
 GIT_REDIRECT_ENVIRONMENT = (
     "GIT_DIR",
     "GIT_WORK_TREE",
@@ -81,7 +82,7 @@ def resolve_product_root(instance_root: Path | None = None) -> Path:
 
 
 def usage() -> None:
-    print("usage: provenant <help|root|route|routes|capabilities|worktree|clean|check|gate|telemetry|stats|retro|quota|profile|fabric|hosts|peer|lanes|events|graph|dispatch|batch|run> [arguments...]", file=sys.stderr)
+    print("usage: provenant <help|root|route|routes|capabilities|worktree|clean|reap|lint|check|gate|telemetry|stats|retro|quota|profile|fabric|lease|hosts|peer|lanes|events|graph|dispatch|batch|run|pr> [arguments...]", file=sys.stderr)
 
 
 def help_text() -> None:
@@ -94,21 +95,24 @@ Thin front door to owners:
   routes ...     scripts/model-route routes
   capabilities   skills/orchestrate/scripts/capabilities.py
   worktree ...   scripts/worktree ...
-  clean ...      scripts/clean.py ...
+  clean|reap ... scripts/clean.py|reap.py
+  lint ...       scripts/provenant_lint.py ...
   check ...      scripts/check-harness ...
   gate           scripts/gate
   fabric ...     runtime/fabric/bin/fabric ...
+  lease ...      runtime/fabric/bin/fabric landing-*
   hosts|peer     scripts/fabric-hosts ...
   lanes|events|graph  runtime/fabric/bin/fabric <command> ...
   telemetry ...  scripts/provenant-telemetry
-  stats|retro    scripts/provenant-telemetry stats|retro
+  stats|retro    scripts/provenant-telemetry
   quota ...      scripts/provenant-quota
   profile ...    scripts/provenant-profile
   dispatch ...   skills/orchestrate/scripts/dispatch_run.py ...
   batch ...      skills/orchestrate/scripts/batch_run.py ...
   run ...        skills/orchestrate/scripts/run_controls.py
+  pr ...         scripts/provenant-pr
 
-Use `provenant help <command>` for detail."""
+`provenant help <command>` for detail."""
     )
 
 
@@ -147,6 +151,22 @@ COMMAND_DETAILS: dict[str, str] = {
         "Dry run by default; --apply --plan <digest> deletes the approved rows\n"
         "that are still eligible."
     ),
+    "lint": (
+        "usage: provenant lint branch [NAME]\n"
+        "       provenant lint commit-msg FILE\n\n"
+        "Delegates to scripts/provenant_lint.py ...\n"
+        "Branch shape, session markers, agent attribution and closing keywords.\n"
+        "commit-msg works directly as a git commit-msg hook; see docs/runbooks/lint.md."
+    ),
+    "reap": (
+        "usage: provenant reap <pid>… [--tree] [--grace S] [--started-before TIME]\n\n"
+        "Delegates to scripts/reap.py ...\n"
+        "Stop explicit PIDs: TERM, then KILL after the grace period (default 5s).\n"
+        "Prints each process's age, parent, cwd and command first, and refuses one\n"
+        "that started after --started-before (epoch or ISO time) so a reused PID is\n"
+        "left alone. --tree adds descendants. Never signals a group or a pattern;\n"
+        "the lane-safety hook refuses pkill, killall and non-numeric kill targets."
+    ),
     "check": (
         "usage: provenant check ...\n\n"
         "Delegates to scripts/check-harness ...\n"
@@ -162,6 +182,19 @@ COMMAND_DETAILS: dict[str, str] = {
         "Delegates to runtime/fabric/bin/fabric ...\n"
         "Fabric derives who you are from the working directory, so run it from the\n"
         "project you mean. `provenant fabric --help` lists its commands."
+    ),
+    "lease": (
+        "usage: provenant lease <acquire|release|verify|status|push> ...\n\n"
+        "Delegates `lease <verb>` to runtime/fabric/bin/fabric landing-<verb>, the\n"
+        "one landing lease per project shared with fabric_landing_lease:\n"
+        "  acquire <session> (--expected-sha SHA | --branch B [--remote R]) [--seconds N]\n"
+        "  verify <session> <generation> [--expected-sha SHA] [--branch B [--remote R]]\n"
+        "  release <session> <generation>\n"
+        "  status\n"
+        "  push <session> <generation> <branch> [--remote R]\n"
+        "Each takes --label L and --json; pass acquire's label to later calls.\n"
+        "Exit 0 ok, 1 refused or stale, 2 usage, 3 held by another holder or a push\n"
+        "in progress. `provenant fabric landing-acquire --help` shows the flags."
     ),
     "hosts": (
         "usage: provenant hosts list|doctor [--json] [host…]\n\n"
@@ -180,11 +213,12 @@ COMMAND_DETAILS: dict[str, str] = {
     ),
     "lanes": (
         "usage: provenant lanes [--json] [--all] [id…]\n"
-        "       provenant lanes --wait [--all] [--timeout N] [id…]\n\n"
+        "       provenant lanes --wait [--all] [--summary] [--timeout N] [id…]\n\n"
         "Delegates to runtime/fabric/bin/fabric lanes ...\n"
         "Default shows active lanes plus the 5 most recent terminal ones;\n"
         "use --all to list all lanes.\n"
-        "`lanes --wait` waits for a lane to finish or need input."
+        "`lanes --wait` waits for a lane to finish or need input; --summary prints\n"
+        "one bounded line per lane at the end."
     ),
     "graph": (
         "usage: provenant graph run --file F\n"
@@ -248,10 +282,27 @@ COMMAND_DETAILS: dict[str, str] = {
         "Run a fixed, bounded set of ordinary dispatch attempts."
     ),
     "run": (
-        "usage: provenant run ...\n\n"
+        "usage: provenant run show <run-id|task-id> [--task-id T] [--tail N] [--json]\n"
+        "       provenant run cancel|inspect|retry|reduce ...\n\n"
         "Delegates to skills/orchestrate/scripts/run_controls.py ...\n"
+        "`provenant run show` reads a lane's status and the last N lines (default 40,\n"
+        "max 500) of its result.md from the run directory, resolved from a run id, a\n"
+        "run directory name or the newest run holding the task id.\n"
         "`provenant run cancel` writes one cooperative cancellation request for an\n"
         "exact attempt or batch and waits boundedly for owner-written evidence."
+    ),
+    "pr": (
+        "usage: provenant pr checks <number|branch> [--wait] [--timeout S] [--json]\n\n"
+        "Delegates to scripts/provenant-pr ...\n"
+        "`pr checks --wait` blocks until the PR's required checks for its current head\n"
+        "finish, following a head that moves and waiting for checks not yet registered.\n"
+        "Required contexts come from rulesets or branch protection and match check\n"
+        "names exactly; all must register. If none are required, or they cannot be\n"
+        "read, the finished set must also hold for two polls. Polls gh with backoff\n"
+        "from 30s to 120s. Exit 0 required checks green, 1 any failure, 2 bad\n"
+        "reference, 4 required set unreadable (seen checks passed; success not\n"
+        "claimed), 124 timeout (default 1800s). Without --wait it reports once and\n"
+        "exits 3 if checks are pending. Run it as a background command."
     ),
     "help": (
         "usage: provenant help [command]\n\n"
@@ -441,6 +492,15 @@ def main(arguments: list[str]) -> int:
     if command in {"lanes", "events", "graph"}:
         command_arguments = [command, *command_arguments]
         command = "fabric"
+    if command == "lease":
+        verb = command_arguments[0] if command_arguments else None
+        if verb in {"-h", "--help"}:
+            print(COMMAND_DETAILS["lease"])
+            return 0
+        if verb not in LEASE_VERBS:
+            print(COMMAND_DETAILS["lease"].split("\n", 1)[0], file=sys.stderr)
+            return 2
+        command, command_arguments = "fabric", [f"landing-{verb}", *command_arguments[1:]]
     if command == "routes":
         command, command_arguments = "route", ["routes", *command_arguments]
     elif command == "help" and command_arguments == ["routes"]:
@@ -484,12 +544,15 @@ def main(arguments: list[str]) -> int:
         "capabilities": "skills/orchestrate/scripts/capabilities.py",
         "worktree": "scripts/worktree",
         "clean": "scripts/clean.py",
+        "reap": "scripts/reap.py",
+        "lint": "scripts/provenant_lint.py",
         "check": "scripts/check-harness",
         "gate": "scripts/gate",
         "fabric": FABRIC_CLI,
         "dispatch": "skills/orchestrate/scripts/dispatch_run.py",
         "batch": "skills/orchestrate/scripts/batch_run.py",
         "run": "skills/orchestrate/scripts/run_controls.py",
+        "pr": "scripts/provenant-pr",
     }
     owner = owners.get(command)
     if owner is None:

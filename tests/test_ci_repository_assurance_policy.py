@@ -52,19 +52,22 @@ import yaml
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = ROOT / ".github" / "workflows" / "ci.yml"
 SETUP_ACTION = ROOT / ".github" / "actions" / "setup-node-workspace" / "action.yml"
-SETUP_ACTION_USES = "./.github/actions/setup-node-workspace"
+SETUP_ACTION_USES = "$/.github/actions/setup-node-workspace"
 ROOT_PACKAGE = ROOT / "package.json"
 ROOT_LOCK = ROOT / "package-lock.json"
 FABRIC_PACKAGE = ROOT / "runtime" / "fabric" / "package.json"
 IMMUTABLE_ACTION = re.compile(r"^[^@\s]+@[0-9a-f]{40}$")
 # Local composite actions are pinned by the commit under review itself; only
 # repository-local paths are exempt from the 40-hex SHA pin.
-LOCAL_ACTION = re.compile(r"^\./\.github/actions/[a-z0-9-]+$")
+LOCAL_ACTION = re.compile(r"^\$/\.github/actions/[a-z0-9-]+$")
 JOB_PERMISSIONS = {
-    "detect-changes": {"pull-requests": "read"},
-    "harness": {"contents": "read"},
+    "detect-changes": {"actions": "read", "contents": "read", "pull-requests": "read"},
+    "harness-checks": {"contents": "read"},
+    "python-tests": {"contents": "read"},
+    "docs": {"contents": "read"},
     "fabric": {"contents": "read"},
     "split-root": {"contents": "read"},
+    "rust": {"contents": "read"},
     "zizmor": {"contents": "read"},
     "ci-status": {},
 }
@@ -103,7 +106,7 @@ def _assert_no_continue_on_error(
     # continue-on-error on any required job or step would neutralise failure
     # propagation invisibly, so no job and no step may set it. This also
     # covers the shared composite action (setup-node-workspace) that every
-    # workspace job runs through via `uses: ./...` -- a continue-on-error
+    # workspace job runs through via `uses: $/...` -- a continue-on-error
     # planted there is exactly as invisible to the ci-status aggregate as
     # one planted directly in ci.yml, and prior to this check it was outside
     # this guard's reach entirely, parsed and asserted on nowhere in this
@@ -225,21 +228,17 @@ def _matches_filter(path: str, pattern: str) -> bool:
     return path == pattern
 
 
-def test_ci_concurrency_policy_exempts_main_from_cancellation() -> None:
-    # Issue #170 (deferred from #150/#168): pushes to main force every
-    # path-filter output true, so ci-status — the single required check
-    # pinned on the branch protection ruleset — always runs on a main push.
-    # cancel-in-progress must stay true for PR runs (superseded runs are
-    # disposable) but must not cancel main-push runs: a cancelled main run
-    # would leave the merged commit's ci-status at "cancelled" forever, since
-    # main is never re-pushed to retrigger it — the commit's regression
-    # signal is silently lost. PR merging itself is unaffected (required
-    # checks are evaluated on the PR head, not main's commits); the exemption
-    # protects main's audit trail.
+def test_ci_concurrency_replaces_stale_pending_main_runs() -> None:
+    # Main pushes share a group with cancellation disabled. GitHub lets the
+    # active run finish and replaces its pending run with the newest push.
+    # Pull requests retain per-ref groups and cancel-in-progress behavior.
     document = _workflow()
     concurrency = document.get("concurrency")
     assert isinstance(concurrency, dict)
-    assert concurrency.get("group") == "ci-${{ github.workflow }}-${{ github.ref }}"
+    assert concurrency.get("group") == (
+        "${{ github.ref == 'refs/heads/main' && format('ci-{0}-main', github.workflow) "
+        "|| format('ci-{0}-{1}', github.workflow, github.ref) }}"
+    )
     assert concurrency.get("cancel-in-progress") == "${{ github.ref != 'refs/heads/main' }}"
 
 
@@ -262,7 +261,7 @@ def test_ci_uses_immutable_actions_and_least_privilege() -> None:
             if action is not None:
                 assert isinstance(action, str)
                 assert IMMUTABLE_ACTION.fullmatch(action) or LOCAL_ACTION.fullmatch(action), action
-                if action.startswith("./"):
+                if action.startswith("$/"):
                     assert (ROOT / action[2:] / "action.yml").is_file(), action
                 if action.startswith("actions/checkout@"):
                     options = step.get("with")
@@ -279,10 +278,15 @@ def test_every_tracked_path_matches_at_least_one_build_filter() -> None:
     filters = _change_filters(document)
     outputs = _job(document, "detect-changes").get("outputs")
     assert isinstance(outputs, dict)
-    assert set(outputs) == {"harness", "fabric", "split-root", "workflows"}
+    assert set(outputs) == {
+        "harness", "docs", "fabric", "split-root", "workflows", "rust", "tree", "passed-tree"
+    }
+    # `docs`, `tree` and `passed-tree` are computed from the PR file list or
+    # tested checkout, not path filters. They do not cover tracked paths.
     patterns = [
         pattern
         for output in outputs
+        if output in filters
         for pattern in _flatten_patterns(filters[output])
     ]
     tracked = subprocess.run(
@@ -412,7 +416,9 @@ def test_duplicate_on_key_boolean_alias_fails_the_exact_key_guard() -> None:
 
 def test_ci_runs_complete_harness_and_fabric_gates() -> None:
     document = _workflow()
-    harness_steps = _steps(_job(document, "harness"))
+    harness_steps = _steps(_job(document, "harness-checks"))
+    python_test_job = _job(document, "python-tests")
+    python_test_steps = _steps(python_test_job)
     fabric_steps = _steps(_job(document, "fabric"))
 
     # The toolchain contract (Node 24, pinned npm before a locked install)
@@ -430,7 +436,7 @@ def test_ci_runs_complete_harness_and_fabric_gates() -> None:
     install_index = next(index for index, command in enumerate(setup_commands) if command.strip() == "npm ci")
     assert pin_index < install_index
 
-    for job_name in ("harness", "fabric", "split-root"):
+    for job_name in ("harness-checks", "python-tests", "fabric", "split-root"):
         steps = _steps(_job(document, job_name))
         uses = [str(step.get("uses", "")) for step in steps]
         checkout_index = next(index for index, action in enumerate(uses) if action.startswith("actions/checkout@"))
@@ -438,8 +444,42 @@ def test_ci_runs_complete_harness_and_fabric_gates() -> None:
         assert checkout_index < composite_index, job_name
 
     harness_commands = "\n".join(str(step.get("run", "")) for step in harness_steps)
-    assert "scripts/check-harness" in harness_commands
+    assert "scripts/check-harness --checks-only" in harness_commands
     assert "runtime/agent-fabric" not in harness_commands
+    assert python_test_job.get("strategy", {}).get("matrix", {}).get("shard") == [
+        "fabric-hosts",
+        "python-a",
+        "python-b",
+    ]
+    assert not (ROOT / ".github/workflows/python-test-shards.json").exists()
+    assert not (ROOT / "scripts/check-python-test-shards.py").exists()
+    shard_run = next(step for step in python_test_steps if step.get("name") == "Run Python test shard")
+    assert shard_run.get("env", {}).get("PROVENANT_TEST_SHARD") == (
+        "${{ matrix.shard == 'fabric-hosts' && '1/3' || matrix.shard == 'python-a' && '2/3' || '3/3' }}"
+    )
+    assert "-m pytest -q --durations=30 --durations-min=1 -n auto" in shard_run.get("run", "")
+    hook = (ROOT / "tests" / "conftest.py").read_text(encoding="utf-8")
+    assert "PROVENANT_TEST_SHARD" in hook
+    assert "zlib.crc32" in hook
+    assert '"tests/test_fabric_hosts.py"' in hook
+
+    tree_check = next(
+        step for step in _steps(_job(document, "detect-changes"))
+        if step.get("name") == "Check for a passing PR run on this tree"
+    )
+    assert "git rev-parse 'HEAD^{tree}'" in tree_check.get("run", "")
+    assert "gh api \"repos/$REPO/actions/artifacts?name=$name\"" in tree_check.get("run", "")
+    assert '"passed-tree=false"' in tree_check.get("run", "")
+    assert "needs.detect-changes.outputs.passed-tree != 'true'" in _job(document, "python-tests").get("if", "")
+    ci_status_steps = _steps(_job(document, "ci-status"))
+    marker_upload = next(step for step in ci_status_steps if step.get("name") == "Record passing PR tree")
+    assert marker_upload.get("if") == (
+        "github.event_name == 'pull_request' && needs.detect-changes.outputs.harness == 'true'"
+    )
+    assert marker_upload.get("with", {}).get("name") == (
+        "ci-passed-tree-${{ needs.detect-changes.outputs.tree }}"
+    )
+    assert str(marker_upload.get("uses", "")).startswith("actions/upload-artifact@")
 
     fabric_commands = "\n".join(str(step.get("run", "")) for step in fabric_steps)
     for required in (
@@ -461,7 +501,7 @@ def test_harness_python_test_dependencies_install_locked_and_cached() -> None:
     # lock change invalidates the cache. The lock is the pin: pyproject
     # declares the `test` dependency group, uv.lock pins it transitively.
     document = _workflow()
-    harness_steps = _steps(_job(document, "harness"))
+    harness_steps = _steps(_job(document, "harness-checks"))
 
     setup_uv = next(
         step for step in harness_steps if str(step.get("uses", "")).startswith("astral-sh/setup-uv@")
@@ -475,13 +515,13 @@ def test_harness_python_test_dependencies_install_locked_and_cached() -> None:
     run_commands = [str(step.get("run", "")).strip() for step in harness_steps if "run" in step]
     assert not any("pip install" in command for command in run_commands)
     sync_index = run_commands.index("uv sync --locked --only-group test")
-    gate_index = run_commands.index("scripts/check-harness")
+    gate_index = run_commands.index("scripts/check-harness --checks-only")
     assert sync_index < gate_index
 
     # The gate runs against the synced environment: scripts/check-harness
     # honours HARNESS_PYTHON before any interpreter fallback.
     gate_step = next(
-        step for step in harness_steps if str(step.get("run", "")).strip() == "scripts/check-harness"
+        step for step in harness_steps if str(step.get("run", "")).strip() == "scripts/check-harness --checks-only"
     )
     assert gate_step.get("env") == {
         "AGENT_FABRIC_PRODUCT_ROOT": "${{ github.workspace }}",
@@ -496,7 +536,7 @@ def test_harness_python_test_dependencies_install_locked_and_cached() -> None:
         re.split(r"[<>=~!\[; ]", requirement, maxsplit=1)[0]
         for requirement in pyproject["dependency-groups"]["test"]
     }
-    assert declared == {"pytest", "pyyaml"}
+    assert declared == {"pytest", "pytest-xdist", "pyyaml"}
 
     lock_text = (ROOT / "uv.lock").read_text(encoding="utf-8")
     locked = set(re.findall(r'(?m)^name = "([^"]+)"$', lock_text))

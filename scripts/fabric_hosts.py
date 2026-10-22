@@ -16,8 +16,7 @@ import sys
 import tempfile
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 PRODUCT_ROOT = Path(__file__).resolve().parents[1]
@@ -44,11 +43,12 @@ def _load_module(name, path, *, package=False):
 stop_process_group = _load_module(
     'provenant_bounded_process', PRODUCT_ROOT / 'skills/_shared/bounded_process.py'
 ).stop_process_group
+identity = _load_module('provenant_host_identity', PRODUCT_ROOT / 'scripts/host_identity.py')
 
 PROTOCOL_VERSION = 1
 MAX_REQUEST_BYTES = 65_536
 MAX_RESPONSE_BYTES = 1_048_576
-NAME = re.compile(r"[a-z0-9-]+")
+NAME = identity.NAME
 DESTINATION = re.compile(r"(?:[A-Za-z0-9_][A-Za-z0-9_.-]*@)?[A-Za-z0-9][A-Za-z0-9_.-]*")
 CANCELLED = threading.Event()
 ACTIVE_SSH = set()
@@ -119,7 +119,7 @@ def fields(value, allowed, required, code):
 
 def host_name(value, code='invalid_identifier'):
     if not isinstance(value, str) or not NAME.fullmatch(value):
-        raise HostError(code, 'Host names use lowercase letters, digits and hyphens')
+        raise HostError(code, f'Host names use 1-{identity.NAME_LIMIT} lowercase letters, digits and hyphens')
     return value
 
 
@@ -131,9 +131,18 @@ class PeerConfig:
     response_deadline: float = 15
 
 
+def default_local_host():
+    """The shared owner's id: a valid hosts.json local_host, otherwise the hostname's slug."""
+    try:
+        path = config_path()
+    except HostError:
+        return identity.slug(identity.hostname())
+    return identity.host_id(path)
+
+
 @dataclass(frozen=True)
 class HostsConfig:
-    local_host: str = 'local'
+    local_host: str = field(default_factory=default_local_host)
     peers: dict[str, PeerConfig] = None
     projects: dict = None
 
@@ -575,6 +584,7 @@ def doctor(project_path=None, config=None):
         configured = catalogue_snapshot()['adapters']
     except (OSError, ValueError, KeyError):
         raise HostError('doctor_unavailable', 'Cannot load adapter catalogue') from None
+    from concurrent.futures import ThreadPoolExecutor  # deferred: costs ~10 ms, used only here and in hosts_doctor
     # Resolve shared helpers before the probe workers start. Module loading is
     # process-global, while the checks below run concurrently.
     _load_module(
@@ -610,6 +620,7 @@ def select_hosts(config, selectors):
     return selected
 
 def hosts_doctor(config, selected):
+    from concurrent.futures import ThreadPoolExecutor
     project_path = project_identity()
     def probe(host):
         if host == config.local_host:

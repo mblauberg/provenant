@@ -1,6 +1,8 @@
 import importlib.util
 from pathlib import Path
 
+import pytest
+
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -14,265 +16,112 @@ def _checker():
     return module
 
 
-def test_markdown_link_check_rejects_a_missing_fragment(tmp_path):
+@pytest.mark.parametrize(
+    ("target_content", "source_content", "has_errors"),
+    (
+        ("# Present heading\n", "[missing](target.md#missing-heading)\n", True),
+        (None, "# Present heading\n\n[missing](#missing-heading)\n", True),
+        ("# Repeated\n\n# Repeated\n", "[second](target.md#repeated-1)\n", False),
+        ("# Two  spaces\n", "[heading](target.md#two--spaces)\n", False),
+        ("```text\n# Not a heading\n```\n", "[false heading](target.md#not-a-heading)\n", True),
+        ("# Foo\n\n# Foo\n\n# Foo-1\n", "[third](target.md#foo-1-1)\n", False),
+        ("# A _helpful_ section\n", "[heading](target.md#a-helpful-section)\n", False),
+        ("# The `__init__` hook\n", "[heading](target.md#the-__init__-hook)\n", False),
+        ("# An _x_ value\n", "[heading](target.md#an-x-value)\n", False),
+        ("# A snake_case value\n", "[heading](target.md#a-snake_case-value)\n", False),
+    ),
+    ids=(
+        "missing-fragment", "missing-same-page-fragment", "duplicate-heading-suffix",
+        "spaces-in-anchors", "ignore-fenced-headings", "collision-safe-slugs",
+        "underscore-emphasis", "code-span-underscores", "single-character-emphasis",
+        "intraword-underscores",
+    ),
+)
+def test_markdown_link_checker_rules(tmp_path, target_content, source_content, has_errors):
     target = tmp_path / "target.md"
     source = tmp_path / "source.md"
-    target.write_text("# Present heading\n")
-    source.write_text("[missing](target.md#missing-heading)\n")
+    if target_content is not None:
+        target.write_text(target_content)
+    source.write_text(source_content)
 
     errors = _checker().markdown_link_errors([source])
 
-    assert errors
+    assert bool(errors) is has_errors
 
 
-def test_markdown_link_check_rejects_a_missing_same_page_fragment(tmp_path):
-    source = tmp_path / "source.md"
-    source.write_text("# Present heading\n\n[missing](#missing-heading)\n")
-
-    errors = _checker().markdown_link_errors([source])
-
-    assert errors
-
-
-def test_markdown_link_check_accepts_a_duplicate_heading_suffix(tmp_path):
-    target = tmp_path / "target.md"
-    source = tmp_path / "source.md"
-    target.write_text("# Repeated\n\n# Repeated\n")
-    source.write_text("[second](target.md#repeated-1)\n")
-
-    assert _checker().markdown_link_errors([source]) == []
-
-
-def test_markdown_link_check_preserves_each_space_in_github_anchors(tmp_path):
-    target = tmp_path / "target.md"
-    source = tmp_path / "source.md"
-    target.write_text("# Two  spaces\n")
-    source.write_text("[heading](target.md#two--spaces)\n")
-
-    assert _checker().markdown_link_errors([source]) == []
-
-
-def test_markdown_link_check_ignores_headings_inside_fences(tmp_path):
-    target = tmp_path / "target.md"
-    source = tmp_path / "source.md"
-    target.write_text("```text\n# Not a heading\n```\n")
-    source.write_text("[false heading](target.md#not-a-heading)\n")
-
-    assert _checker().markdown_link_errors([source])
-
-
-def test_markdown_link_check_allocates_collision_safe_duplicate_slugs(tmp_path):
-    target = tmp_path / "target.md"
-    source = tmp_path / "source.md"
-    target.write_text("# Foo\n\n# Foo\n\n# Foo-1\n")
-    source.write_text("[third](target.md#foo-1-1)\n")
-
-    assert _checker().markdown_link_errors([source]) == []
-
-
-def test_markdown_link_check_removes_underscore_emphasis_from_slugs(tmp_path):
-    target = tmp_path / "target.md"
-    source = tmp_path / "source.md"
-    target.write_text("# A _helpful_ section\n")
-    source.write_text("[heading](target.md#a-helpful-section)\n")
-
-    assert _checker().markdown_link_errors([source]) == []
-
-
-def test_markdown_link_check_preserves_underscores_inside_code_spans(tmp_path):
-    target = tmp_path / "target.md"
-    source = tmp_path / "source.md"
-    target.write_text("# The `__init__` hook\n")
-    source.write_text("[heading](target.md#the-__init__-hook)\n")
-
-    assert _checker().markdown_link_errors([source]) == []
-
-
-def test_markdown_link_check_handles_single_character_emphasis(tmp_path):
-    target = tmp_path / "target.md"
-    source = tmp_path / "source.md"
-    target.write_text("# An _x_ value\n")
-    source.write_text("[heading](target.md#an-x-value)\n")
-
-    assert _checker().markdown_link_errors([source]) == []
-
-
-def test_markdown_link_check_preserves_intraword_underscores(tmp_path):
-    target = tmp_path / "target.md"
-    source = tmp_path / "source.md"
-    target.write_text("# A snake_case value\n")
-    source.write_text("[heading](target.md#a-snake_case-value)\n")
-
-    assert _checker().markdown_link_errors([source]) == []
-
-
-def test_issue_form_check_rejects_a_body_item_without_attributes(tmp_path):
+@pytest.mark.parametrize(
+    ("top_level", "body", "has_errors"),
+    (
+        ("", "  - type: textarea\n    id: outcome\n", True),
+        (
+            "",
+            "  - type: dropdown\n    id: priority\n    attributes:\n"
+            "      label: Priority\n      options:\n        - {}\n",
+            True,
+        ),
+        (
+            "",
+            "  - type: checkboxes\n    id: checks\n    attributes:\n"
+            "      label: Checks\n      options:\n        - required: true\n",
+            True,
+        ),
+        (
+            "",
+            "  - type: upload\n    id: evidence_files\n    attributes:\n"
+            "      label: Evidence files\n",
+            False,
+        ),
+        (
+            "",
+            "  - type: input\n    id: invalid id\n    attributes:\n"
+            "      label: First\n  - type: textarea\n    id: invalid id\n"
+            "    attributes:\n      label: Second\n",
+            True,
+        ),
+        ("", "  - type: markdown\n    attributes:\n      value: Context only.\n", True),
+        (
+            "",
+            "  - type: dropdown\n    id: priority\n    attributes:\n"
+            "      label: Priority\n      options:\n        - high\n        - high\n",
+            True,
+        ),
+        (
+            "unknown: true\n",
+            "  - type: input\n    id: outcome\n    unknown: true\n"
+            "    attributes:\n      label: Outcome\n",
+            True,
+        ),
+        (
+            "",
+            "  - type: markdown\n    id: context\n    attributes:\n"
+            "      value: Context.\n  - type: input\n    id: outcome\n"
+            "    attributes:\n      label: Outcome\n",
+            True,
+        ),
+        (
+            "",
+            "  - type: input\n    id: outcome\n    attributes:\n"
+            "      label: Outcome\n    validations:\n      required: nope\n",
+            True,
+        ),
+    ),
+    ids=(
+        "body-item-needs-attributes", "dropdown-option-shape", "checkbox-option-label",
+        "upload-fields-accepted", "invalid-or-duplicate-ids", "requires-user-input",
+        "duplicate-options", "unknown-keys", "markdown-cannot-have-id",
+        "required-is-boolean",
+    ),
+)
+def test_issue_form_checker_rules(tmp_path, top_level, body, has_errors):
     form = tmp_path / "work-item.yml"
     form.write_text(
         "name: Work item\n"
         "description: A bounded change.\n"
-        "body:\n"
-        "  - type: textarea\n"
-        "    id: outcome\n"
+        + top_level
+        + "body:\n"
+        + body
     )
 
     errors = _checker().issue_form_errors([form])
 
-    assert errors
-
-
-def test_issue_form_check_rejects_malformed_dropdown_options(tmp_path):
-    form = tmp_path / "work-item.yml"
-    form.write_text(
-        "name: Work item\n"
-        "description: A bounded change.\n"
-        "body:\n"
-        "  - type: dropdown\n"
-        "    id: priority\n"
-        "    attributes:\n"
-        "      label: Priority\n"
-        "      options:\n"
-        "        - {}\n"
-    )
-
-    errors = _checker().issue_form_errors([form])
-
-    assert errors
-
-
-def test_issue_form_check_rejects_checkbox_options_without_labels(tmp_path):
-    form = tmp_path / "work-item.yml"
-    form.write_text(
-        "name: Work item\n"
-        "description: A bounded change.\n"
-        "body:\n"
-        "  - type: checkboxes\n"
-        "    id: checks\n"
-        "    attributes:\n"
-        "      label: Checks\n"
-        "      options:\n"
-        "        - required: true\n"
-    )
-
-    errors = _checker().issue_form_errors([form])
-
-    assert errors
-
-
-def test_issue_form_check_accepts_upload_fields(tmp_path):
-    form = tmp_path / "work-item.yml"
-    form.write_text(
-        "name: Work item\n"
-        "description: A bounded change.\n"
-        "body:\n"
-        "  - type: upload\n"
-        "    id: evidence_files\n"
-        "    attributes:\n"
-        "      label: Evidence files\n"
-    )
-
-    assert _checker().issue_form_errors([form]) == []
-
-
-def test_issue_form_check_rejects_invalid_or_duplicate_ids(tmp_path):
-    form = tmp_path / "work-item.yml"
-    form.write_text(
-        "name: Work item\n"
-        "description: A bounded change.\n"
-        "body:\n"
-        "  - type: input\n"
-        "    id: invalid id\n"
-        "    attributes:\n"
-        "      label: First\n"
-        "  - type: textarea\n"
-        "    id: invalid id\n"
-        "    attributes:\n"
-        "      label: Second\n"
-    )
-
-    assert _checker().issue_form_errors([form])
-
-
-def test_issue_form_check_requires_user_input(tmp_path):
-    form = tmp_path / "work-item.yml"
-    form.write_text(
-        "name: Work item\n"
-        "description: A bounded change.\n"
-        "body:\n"
-        "  - type: markdown\n"
-        "    attributes:\n"
-        "      value: Context only.\n"
-    )
-
-    assert _checker().issue_form_errors([form])
-
-
-def test_issue_form_check_rejects_duplicate_options(tmp_path):
-    form = tmp_path / "work-item.yml"
-    form.write_text(
-        "name: Work item\n"
-        "description: A bounded change.\n"
-        "body:\n"
-        "  - type: dropdown\n"
-        "    id: priority\n"
-        "    attributes:\n"
-        "      label: Priority\n"
-        "      options:\n"
-        "        - high\n"
-        "        - high\n"
-    )
-
-    assert _checker().issue_form_errors([form])
-
-
-def test_issue_form_check_rejects_unknown_top_level_and_body_keys(tmp_path):
-    form = tmp_path / "work-item.yml"
-    form.write_text(
-        "name: Work item\n"
-        "description: A bounded change.\n"
-        "unknown: true\n"
-        "body:\n"
-        "  - type: input\n"
-        "    id: outcome\n"
-        "    unknown: true\n"
-        "    attributes:\n"
-        "      label: Outcome\n"
-    )
-
-    assert _checker().issue_form_errors([form])
-
-
-def test_issue_form_check_rejects_an_id_on_markdown(tmp_path):
-    form = tmp_path / "work-item.yml"
-    form.write_text(
-        "name: Work item\n"
-        "description: A bounded change.\n"
-        "body:\n"
-        "  - type: markdown\n"
-        "    id: context\n"
-        "    attributes:\n"
-        "      value: Context.\n"
-        "  - type: input\n"
-        "    id: outcome\n"
-        "    attributes:\n"
-        "      label: Outcome\n"
-    )
-
-    assert _checker().issue_form_errors([form])
-
-
-def test_issue_form_check_rejects_non_boolean_required_validation(tmp_path):
-    form = tmp_path / "work-item.yml"
-    form.write_text(
-        "name: Work item\n"
-        "description: A bounded change.\n"
-        "body:\n"
-        "  - type: input\n"
-        "    id: outcome\n"
-        "    attributes:\n"
-        "      label: Outcome\n"
-        "    validations:\n"
-        "      required: nope\n"
-    )
-
-    assert _checker().issue_form_errors([form])
+    assert bool(errors) is has_errors

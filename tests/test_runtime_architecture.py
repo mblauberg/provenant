@@ -376,101 +376,60 @@ def test_source_size_checker_rejects_new_and_grown_files_but_warns_on_shrink(
 
 
 @pytest.mark.parametrize(
-    ("relative_file", "source", "rule_id"),
+    ("source", "allowances", "failure"),
     (
         (
-            "runtime/fabric/src/store.ts",
             'import { x } from "@local/agent-fabric";\n',
-            "R1",
+            [],
+            "R1 import-boundary violation",
         ),
         (
-            "runtime/fabric/src/store.ts",
             'import { x } from "../../other-runtime/src/index.js";\n',
-            "R2",
+            [],
+            "R2 import-boundary violation",
         ),
         (
-            "runtime/fabric/src/store.ts",
             'import { x } from "./server.js";\n',
-            "R3",
+            [],
+            "R3 import-boundary violation",
+        ),
+        ('const server = import("./server.js");\n', [], "R3 import-boundary violation"),
+        (
+            "export {};\n",
+            [{"file": "runtime/fabric/src/store.ts", "specifier_prefix": "./server.js", "removal_issue": "#344"}],
+            "stale import allowance",
+        ),
+        (
+            'import { x } from "./server.js";\n',
+            [{"file": "runtime/fabric/src/store.ts", "specifier_prefix": "./server.js", "rationale": "permanent composition placement"}],
+            None,
+        ),
+        (
+            "export {};\n",
+            [{"file": "runtime/fabric/src/store.ts", "specifier_prefix": "./server.js"}],
+            "exactly one of removal_issue or rationale",
+        ),
+        (
+            "export {};\n",
+            [{"file": "runtime/fabric/src/store.ts", "specifier_prefix": "./server.js", "rationale": " "}],
+            "invalid rationale",
+        ),
+        (
+            '// import { x } from "./server.js";\n'
+            '/* export { x } from "./server.js"; */\n',
+            [],
+            None,
         ),
     ),
+    ids=("R1", "R2", "R3", "dynamic-import", "stale-allowance", "permanent-allowance", "missing-allowance-fields", "empty-rationale", "comment-only-mention"),
 )
-def test_import_checker_detects_each_rule(
-    tmp_path: Path, relative_file: str, source: str, rule_id: str
+def test_import_checker_rules(
+    tmp_path: Path, source: str, allowances: list[dict[str, str]], failure: str | None
 ) -> None:
-    _write_source(tmp_path, relative_file, source)
+    _write_source(tmp_path, "runtime/fabric/src/store.ts", source)
 
-    with pytest.raises(AssertionError, match=rf"{rule_id} import-boundary violation"):
-        _check_import_boundaries(tmp_path, [])
-
-
-def test_import_checker_detects_dynamic_import(tmp_path: Path) -> None:
-    _write_source(
-        tmp_path,
-        "runtime/fabric/src/store.ts",
-        'const server = import("./server.js");\n',
-    )
-
-    with pytest.raises(AssertionError, match=r"R3 import-boundary violation"):
-        _check_import_boundaries(tmp_path, [])
-
-
-def test_import_checker_rejects_stale_allowance(tmp_path: Path) -> None:
-    _write_source(tmp_path, "runtime/fabric/src/store.ts", "export {};\n")
-    allowance = {
-        "file": "runtime/fabric/src/store.ts",
-        "specifier_prefix": "./server.js",
-        "removal_issue": "#344",
-    }
-
-    with pytest.raises(AssertionError, match="stale import allowance"):
-        _check_import_boundaries(tmp_path, [allowance])
-
-
-def test_import_checker_accepts_permanent_allowance(tmp_path: Path) -> None:
-    _write_source(
-        tmp_path,
-        "runtime/fabric/src/store.ts",
-        'import { x } from "./server.js";\n',
-    )
-    allowance = {
-        "file": "runtime/fabric/src/store.ts",
-        "specifier_prefix": "./server.js",
-        "rationale": "permanent composition placement",
-    }
-
-    _check_import_boundaries(tmp_path, [allowance])
-
-
-def test_import_checker_rejects_allowance_missing_both_fields(tmp_path: Path) -> None:
-    _write_source(tmp_path, "runtime/fabric/src/store.ts", "export {};\n")
-    allowance = {
-        "file": "runtime/fabric/src/store.ts",
-        "specifier_prefix": "./server.js",
-    }
-
-    with pytest.raises(AssertionError, match="exactly one of removal_issue or rationale"):
-        _check_import_boundaries(tmp_path, [allowance])
-
-
-def test_import_checker_rejects_empty_rationale(tmp_path: Path) -> None:
-    _write_source(tmp_path, "runtime/fabric/src/store.ts", "export {};\n")
-    allowance = {
-        "file": "runtime/fabric/src/store.ts",
-        "specifier_prefix": "./server.js",
-        "rationale": " ",
-    }
-
-    with pytest.raises(AssertionError, match="invalid rationale"):
-        _check_import_boundaries(tmp_path, [allowance])
-
-
-def test_import_checker_ignores_comment_only_daemon_mention(tmp_path: Path) -> None:
-    _write_source(
-        tmp_path,
-        "runtime/fabric/src/store.ts",
-        '// import { x } from "./server.js";\n'
-        '/* export { x } from "./server.js"; */\n',
-    )
-
-    _check_import_boundaries(tmp_path, [])
+    if failure is None:
+        _check_import_boundaries(tmp_path, allowances)
+    else:
+        with pytest.raises(AssertionError, match=failure):
+            _check_import_boundaries(tmp_path, allowances)

@@ -1042,6 +1042,14 @@ def build_command(
 INCOMPLETE_TURN_STATUSES = {"timed_out", "cancelled", "stalled", "startup_timeout", "interrupted", "lost"}
 
 
+def incomplete_provider_turn(attempt: dict) -> bool:
+    """Include provider deaths whose failure status does not imply a finished turn."""
+    return attempt.get("status") in INCOMPLETE_TURN_STATUSES or (
+        attempt.get("status") == "failed"
+        and (attempt.get("evidence") or {}).get("signature") in {"provider_signal", "provider_incomplete"}
+    )
+
+
 FAST_PLAN_SHELL_ENV_READS = {
     "CF_DISPATCH_IDLE_SECONDS", "CF_DISPATCH_AGY_ADD_DIR", "CF_DISPATCH_ENABLE_KIRO",
     "CF_DISPATCH_ENABLE_COPILOT", "CF_DISPATCH_CURSOR_MODEL", "CF_DISPATCH_KIRO_MODEL",
@@ -1821,11 +1829,12 @@ def terminal_contract(args,run_dir,legacy,adapter,number,attempt_dir):
     if legacy["outcome"] in {"result_invalid_path","result_integrity_error","adapter_receipt_invalid","manifest_write_error","terminal_envelope_invalid"}: status="failed"
     elif legacy["status"] in {"cancelled","timed_out"}: status=legacy["status"]
     elif legacy["status"]=="blocked": status="input_required"
+    elif status == "ok" and legacy["status"] == "failed": status="failed"
     elif status=="quarantined" and legacy["status"]=="failed": status="failed"
     refusal=route_refusal(adapter,args.tool)
     if refusal: status=refusal["status"]
     if status not in TERMINAL_STATUSES: status="failed"
-    for field in ("reason","session_id","retryable","reset_at","retry_after","fix","error","evidence","applied","context","usage_source","warnings","reaped","spared","provenance","pgid","pgid_started_at","last_progress_at","landable","quarantine"):
+    for field in ("reason","session_id","retryable","reset_at","retry_after","fix","error","evidence","applied","context","usage_source","warnings","reaped","spared","provenance","pgid","pgid_started_at","last_progress_at","landable","quarantine","result_partial"):
         if field in adapter: row[field]=adapter[field]
     if row.get("task_class") and isinstance(row.get("provenance"), dict):
         row["provenance"]["requested"] = {**(row["provenance"].get("requested") or {}), "task_class": row["task_class"]}
@@ -1947,7 +1956,7 @@ def prepare_resume(args):
             setattr(args, field, route[field])
     args.resume_previous=previous
     observed_session=False
-    if args.tool=="claude" and previous["status"] in INCOMPLETE_TURN_STATUSES:
+    if args.tool=="claude" and incomplete_provider_turn(previous):
         events=previous["paths"].get("events")
         if events:
             retained=retained_path(args.run_dir,events)
@@ -1972,14 +1981,14 @@ def prepare_resume(args):
         raise ResumeError("continuation_unsupported",f"attempt {previous['attempt']} did not record provider session {required}; "
                           "pass fresh: true to start a new session primed with its last result")
     if not args.resume_session or args.tool=="copilot" or (
-        args.tool=="claude" and previous["status"] in INCOMPLETE_TURN_STATUSES
+        args.tool=="claude" and incomplete_provider_turn(previous)
         and not observed_session
     ):
         if required is not None:
             raise ResumeError("continuation_unsupported",f"{args.tool} cannot continue provider session {required}; "
                               "pass fresh: true to start a new session primed with its last result")
         if (args.tool=="claude" and previous["mode"]=="worktree_write"
-            and previous["status"] in INCOMPLETE_TURN_STATUSES):
+            and incomplete_provider_turn(previous)):
             raise ValueError("Claude session unavailable after incomplete writer turn; review worktree changes, then dispatch a new run")
         args.resume_session=None
         args.resume_relaunch=resume_relaunch_context(args.run_dir,previous)
@@ -2475,7 +2484,7 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
                         adapter_record["error"]="continuation_unsupported"
                         adapter_record["fix"]="The provider no longer has this session; pass fresh: true to start a new session primed with its last result."
                         adapter_record["evidence"]["signature"]="continuation_unsupported"
-                    elif (previous["mode"]=="worktree_write" and previous["status"] in INCOMPLETE_TURN_STATUSES):
+                    elif (previous["mode"]=="worktree_write" and incomplete_provider_turn(previous)):
                         adapter_record["status"]="rejected"
                         adapter_record["fix"]="Review worktree changes, then dispatch a new run."
                         adapter_record["evidence"]["signature"]="resume_session_missing"
@@ -2792,6 +2801,7 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
         **attempt_scope(args, attempt_number),
         "usage_source": adapter.get("usage_source") or provider_exec.context_usage.usage_source(adapter.get("context") or {}),
         "error_class": provider_exec.error_class(status, (adapter.get("evidence") or {}).get("signature")),
+        **({"result_partial": True} if adapter.get("result_partial") else {}),
         **({"landable": False, "quarantine": adapter.get("quarantine")} if adapter_status == "quarantined" else {}),
         "run_id": run_dir.name,
         "task_id": args.task_id,
