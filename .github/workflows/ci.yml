@@ -211,7 +211,7 @@ jobs:
           # checks out shallow.
           fetch-depth: 0
       - name: Set up Node.js workspace
-        uses: ./.github/actions/setup-node-workspace
+        uses: $/.github/actions/setup-node-workspace
       - name: Set up uv and Python
         uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
         with:
@@ -277,7 +277,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Set up Node.js workspace
-        uses: ./.github/actions/setup-node-workspace
+        uses: $/.github/actions/setup-node-workspace
       - name: Set up uv and Python
         uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
         with:
@@ -318,7 +318,7 @@ jobs:
           # origin/main here was stale — no such test exists.
           fetch-depth: 1
       - name: Set up Node.js workspace
-        uses: ./.github/actions/setup-node-workspace
+        uses: $/.github/actions/setup-node-workspace
       - name: Set up uv
         uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
         with:
@@ -441,9 +441,9 @@ jobs:
         with:
           persist-credentials: false
       - name: Run zizmor
-        uses: zizmorcore/zizmor-action@cc914d7f3750a2d13d75c7f184a1060aa0e9d482 # v0.6.4
+        uses: zizmorcore/zizmor-action@85b2b9fb8e3325e7a23d7d0a9d7ba5ae0f999e3e # v0.7.1
         with:
-          version: "1.27.0"
+          version: "1.31.1"
           # Audit exactly the surfaces this job is path-filtered on.
           inputs: ".github/workflows .github/actions"
           config: .github/zizmor.yml
