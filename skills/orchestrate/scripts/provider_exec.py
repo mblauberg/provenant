@@ -3437,6 +3437,7 @@ def _preflight_opencode_mcp(plan, environment, tmp_fd):
         "protocolVersion": "2024-11-05", "capabilities": {},
         "clientInfo": {"name": "provenant-preflight", "version": "1"},
     }}) + "\n"
+    said = ""
     try:
         command = confinement_command(plan, server["command"], environment.get("PATH"))
         # Files bound what the supervisor reads even if startup produces noisy diagnostics.
@@ -3451,6 +3452,9 @@ def _preflight_opencode_mcp(plan, environment, tmp_fd):
             finally:
                 descendants.stop(normal=process.poll() is not None)
                 process.wait()
+            errors.seek(0)
+            # The wrapper names its own fault, such as a missing loader or an unsupported Node.
+            said = " ".join(errors.read(65536).decode(errors="replace").split())[-300:]
             output.seek(0)
             for line in output.read(65536).splitlines():
                 try:
@@ -3464,7 +3468,8 @@ def _preflight_opencode_mcp(plan, environment, tmp_fd):
                     return
     except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as exc:
         raise CapabilityError("fabric_mcp_unavailable", "Fabric MCP preflight failed; check the product wrapper, Node runtime and confinement grants") from exc
-    raise CapabilityError("fabric_mcp_unavailable", "Fabric MCP preflight failed: no valid initialize response; check the product wrapper, Node runtime and confinement grants")
+    raise CapabilityError("fabric_mcp_unavailable", "Fabric MCP preflight failed: no valid initialize response; check the product wrapper, Node runtime and confinement grants"
+                          + (f"; wrapper stderr: {said}" if said else ""))
 
 
 def _run_attempt(

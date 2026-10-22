@@ -3597,6 +3597,7 @@ def test_opencode_writer_preflights_the_configured_fabric_command(tmp_path, monk
         "#!" + sys.executable + "\nimport json, os, sys, time\nassert os.environ.get('AGENT_FABRIC_SEAT') == 'opencode'\n"
         + ("time.sleep(5)\n" if failure == "timeout" else "")
         + "request = json.loads(sys.stdin.readline())\n"
+        + ("print('tsx loader not found', file=sys.stderr)\n" if failure == "bad_handshake" else "")
         + "print(json.dumps({'jsonrpc': '2.0', 'id': request['id'], 'result': "
         + ("{}" if failure == "bad_handshake" else
            "{'protocolVersion': '2024-11-05', 'capabilities': {}, 'serverInfo': {'name': 'fabric', 'version': 'test'}}")
@@ -3635,6 +3636,8 @@ def test_opencode_writer_preflights_the_configured_fabric_command(tmp_path, monk
         assert record["error"] == "fabric_mcp_unavailable"
         assert record["retryable"] is False
         assert "Node" in record["fix"]
+    if failure == "bad_handshake":
+        assert "tsx loader not found" in json.dumps(record)
 
 
 def test_opencode_free_tier_refusal_is_model_unavailable(tmp_path):
