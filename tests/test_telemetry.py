@@ -184,11 +184,16 @@ def test_opencode_v2_session_messages_are_ingested_once_alongside_migrated_messa
             ('m3', 's', 'assistant', 3, 3000, 3000, turn('new-model', 7, 1792630800000))])
     assert cli(tmp_path, 'telemetry', 'ingest').returncode == 0
     with sqlite3.connect(path) as db:
-        db.execute('INSERT INTO session_message VALUES (?,?,?,?,?,?,?)',
-                   ('m4', 's', 'assistant', 4, 4000, 4000, turn('new-model', 5, 1792630900000)))
+        db.executemany('INSERT INTO session_message VALUES (?,?,?,?,?,?,?)', [
+            ('m4', 's', 'assistant', 4, 4000, 4000, turn('new-model', 5, 1792630900000)),
+            ('u5', 's', 'user', 5, 5000, 5000, json.dumps({'text': 'PRIVATE_PROMPT'}))])
     assert cli(tmp_path, 'telemetry', 'ingest').returncode == 0
     assert cli(tmp_path, 'telemetry', 'ingest').returncode == 0
     with sqlite3.connect(tmp_path / 'state/telemetry.sqlite3') as db:
+        # Skipped rows (migrated, or not assistant turns) still advance each table's watermark,
+        # so a fully migrated `message` table is not rescanned on every ingest.
+        state = json.loads(db.execute("SELECT state FROM cursors WHERE source='opencode'").fetchone()[0])
+        assert state['tables'] == {'message': 1000, 'session_message': 5000}
         assert db.execute('SELECT event_id,provider,model,repository,output_tokens,cache_read_tokens,usage_source '
                           'FROM usage ORDER BY event_id').fetchall() == [
             ('m1', 'vendor', 'old-model', '/repo', 2, 4, 'session_message.tokens'),

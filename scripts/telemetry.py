@@ -798,12 +798,14 @@ def ingest_document(db, source, path):
 
 # OpenCode 2.0.30 moved assistant turns from `message` to `session_message`, keeping ids.
 # A turn in both tables is read only from `session_message`, so it has one usage row and source.
+# Skipped rows come back with NULL data rather than being filtered, so they still advance the watermark.
 OPENCODE_TABLES = {
-    'message': ("SELECT id,session_id,time_created,time_updated,data,NULL FROM message "
-                "WHERE time_updated>=? {migrated}ORDER BY time_updated,id"),
-    'session_message': ("SELECT m.id,m.session_id,m.time_created,m.time_updated,m.data,s.directory "
+    'message': ("SELECT id,session_id,time_created,time_updated,CASE WHEN {migrated} THEN NULL ELSE data END,NULL "
+                "FROM message WHERE time_updated>=? ORDER BY time_updated,id"),
+    'session_message': ("SELECT m.id,m.session_id,m.time_created,m.time_updated,"
+                        "CASE WHEN m.type='assistant' THEN m.data END,s.directory "
                         "FROM session_message m LEFT JOIN session_v2 s ON s.id=m.session_id "
-                        "WHERE m.type='assistant' AND m.time_updated>=? ORDER BY m.time_updated,m.id"),
+                        "WHERE m.time_updated>=? ORDER BY m.time_updated,m.id"),
 }
 
 
@@ -823,6 +825,7 @@ def ingest_opencode(db, path, account=None, owner=None, inode=None):
     pinned, stat = open_verified(path, inode)
     file_id = [stat.st_dev, stat.st_ino]
     with pinned, readonly(path) as source:
+        source.execute('BEGIN')  # One snapshot for the watermarks and the rows they cover.
         present = {name for (name,) in source.execute("SELECT name FROM sqlite_master WHERE type='table'")}
         # SQLite opens by name, so confirm the name still held the pinned file once it had.
         open_verified(path, file_id)[0].close()
@@ -835,10 +838,12 @@ def ingest_opencode(db, path, account=None, owner=None, inode=None):
             watermark = marks.get(name, 0)
             # Inclusive watermark covers messages updated during an earlier ingest.
             for message_id, session, created, updated, data, directory in source.execute(
-                    OPENCODE_TABLES[name].format(migrated='AND id NOT IN (SELECT id FROM session_message) '
-                                                 if 'session_message' in present else ''), (watermark,)):
-                row = json.loads(data)
+                    OPENCODE_TABLES[name].format(migrated='id IN (SELECT id FROM session_message)'
+                                                 if 'session_message' in present else '0'), (watermark,)):
                 watermark = max(watermark, updated)
+                if data is None:
+                    continue
+                row = json.loads(data)
                 turn = opencode_turn(row)
                 if turn is None:
                     continue
