@@ -560,8 +560,11 @@ def os_confinement_profile(plan, search_path=None):
     cwd_path = Path(plan["cwd"]).resolve()
     discovery_metadata = [ancestor / name for ancestor in (cwd_path, *cwd_path.parents)
                           for name in state.get("ancestor_metadata", ())]
-    # Literal metadata grants must follow protected-path denies, without following a leaf symlink.
-    metadata_grant = _sbpl_rule("allow", "file-read-metadata", discovery_metadata, literal=True, keep_leaf=True)
+    # Discovery's realPath opens each of these directories, not only lstats them, and a live lane still died with
+    # EPERM on metadata alone (#1012). Grant the directory itself (names, never children) after protected-path
+    # denies, literal and without following a leaf symlink, so descendants stay unreadable.
+    metadata_grant = _sbpl_rule("allow", "file-read-data file-read-metadata", discovery_metadata,
+                                literal=True, keep_leaf=True)
     if plan.get("mode") == "worktree_write":
         cwd = Path(plan["cwd"])
         # Only an owner-recorded linked worktree gets Git grants; any other Git directory in cwd
