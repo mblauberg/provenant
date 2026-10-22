@@ -19,6 +19,7 @@ REPAIR = (
 )
 FABRIC_MCP = "runtime/fabric/bin/fabric-mcp"
 FABRIC_CLI = "runtime/fabric/bin/fabric"
+LEASE_VERBS = frozenset({"acquire", "release", "verify", "status", "push"})
 GIT_REDIRECT_ENVIRONMENT = (
     "GIT_DIR",
     "GIT_WORK_TREE",
@@ -81,7 +82,7 @@ def resolve_product_root(instance_root: Path | None = None) -> Path:
 
 
 def usage() -> None:
-    print("usage: provenant <help|root|route|routes|capabilities|worktree|clean|reap|lint|check|gate|telemetry|stats|retro|quota|profile|fabric|hosts|peer|lanes|events|dispatch|batch|run|pr> [arguments...]", file=sys.stderr)
+    print("usage: provenant <help|root|route|routes|capabilities|worktree|clean|reap|lint|check|gate|telemetry|stats|retro|quota|profile|fabric|lease|hosts|peer|lanes|events|dispatch|batch|run|pr> [arguments...]", file=sys.stderr)
 
 
 def help_text() -> None:
@@ -99,6 +100,7 @@ Thin front door to owners:
   check ...      scripts/check-harness ...
   gate           scripts/gate
   fabric ...     runtime/fabric/bin/fabric ...
+  lease ...      runtime/fabric/bin/fabric landing-*
   hosts|peer     scripts/fabric-hosts
   lanes|events   runtime/fabric/bin/fabric lanes|events
   telemetry ...  scripts/provenant-telemetry
@@ -110,7 +112,7 @@ Thin front door to owners:
   run ...        skills/orchestrate/scripts/run_controls.py
   pr ...         scripts/provenant-pr
 
-Use `provenant help <command>` for detail."""
+`provenant help <command>` for detail."""
     )
 
 
@@ -180,6 +182,19 @@ COMMAND_DETAILS: dict[str, str] = {
         "Delegates to runtime/fabric/bin/fabric ...\n"
         "Fabric derives who you are from the working directory, so run it from the\n"
         "project you mean. `provenant fabric --help` lists its commands."
+    ),
+    "lease": (
+        "usage: provenant lease <acquire|release|verify|status|push> ...\n\n"
+        "Delegates `lease <verb>` to runtime/fabric/bin/fabric landing-<verb>, the\n"
+        "one landing lease per project shared with fabric_landing_lease:\n"
+        "  acquire <session> (--expected-sha SHA | --branch B [--remote R]) [--seconds N]\n"
+        "  verify <session> <generation> [--expected-sha SHA] [--branch B [--remote R]]\n"
+        "  release <session> <generation>\n"
+        "  status\n"
+        "  push <session> <generation> <branch> [--remote R]\n"
+        "Each takes --label L and --json; pass acquire's label to later calls.\n"
+        "Exit 0 ok, 1 refused or stale, 2 usage, 3 held by another holder or a push\n"
+        "in progress. `provenant fabric landing-acquire --help` shows the flags."
     ),
     "hosts": (
         "usage: provenant hosts list|doctor [--json] [host…]\n\n"
@@ -469,6 +484,15 @@ def main(arguments: list[str]) -> int:
     if command in {"lanes", "events"}:
         command_arguments = [command, *command_arguments]
         command = "fabric"
+    if command == "lease":
+        verb = command_arguments[0] if command_arguments else None
+        if verb in {"-h", "--help"}:
+            print(COMMAND_DETAILS["lease"])
+            return 0
+        if verb not in LEASE_VERBS:
+            print(COMMAND_DETAILS["lease"].split("\n", 1)[0], file=sys.stderr)
+            return 2
+        command, command_arguments = "fabric", [f"landing-{verb}", *command_arguments[1:]]
     if command == "routes":
         command, command_arguments = "route", ["routes", *command_arguments]
     elif command == "help" and command_arguments == ["routes"]:

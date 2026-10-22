@@ -335,6 +335,7 @@ prunes its link.
 - [`Architecture`](docs/ARCHITECTURE.md): system structure and design rationale.
 - [`Specifications`](docs/specs/README.md): the component contracts.
 - [Fabric hosts](docs/runbooks/fabric-hosts.md): SSH peer configuration and diagnostics.
+- [Landing lease](docs/runbooks/landing-lease.md): taking Fabric's landing lease from a repository script with `provenant lease`.
 - [Local telemetry](docs/runbooks/telemetry.md): usage ingestion, source manifest, stats, change markers, before/after comparison and retro.
 - [Harness profiles](docs/runbooks/harness-profiles.md): switching cost/quality presets and comparing them.
 - [`Research`](docs/research/README.md): evidence and owners.

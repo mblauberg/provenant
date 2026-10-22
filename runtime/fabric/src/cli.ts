@@ -24,6 +24,7 @@ import {
 } from "./run-registry.js";
 import { inspectDatabase, isSQLiteContention, Store } from "./store.js";
 import { waitForLanes } from "./lane-wait.js";
+import { isLandingVerb, landingCommand, UsageError, validBranch, validRemote } from "./landing-cli.js";
 import { readEvents, readRuns } from "./run-reader.js";
 import { laneIdle } from "./lane-watch.js";
 import { ancestorPids, laneReader, seatRunDirectories } from "./seat-lanes.js";
@@ -49,7 +50,15 @@ const USAGE = `fabric <command>
   claim <task-id>             atomically claim an open, unowned task
   work-claims                 active work claims and landing lease
   landing-wait [--timeout N]  block until the landing lease changes or frees (default 900s; exit 124 on timeout)
-  landing-push <session> <generation> <branch> [--label <seat>]  verify lease and remote SHA, then push HEAD
+  landing-push <session> <generation> <branch> [--label <seat>] [--remote R]
+                              verify lease and remote SHA, then push HEAD (remote default origin)
+  landing-acquire <session> (--expected-sha SHA | --branch B [--remote R]) [--seconds N] [--label L] [--json]
+                              take the landing lease; exit 3 while another holder's is live
+  landing-verify <session> <generation> [--expected-sha SHA] [--branch B [--remote R]] [--label L] [--json]
+                              check holder and generation, and optionally the remote tip
+  landing-release <session> <generation> [--label L] [--json]
+                              release your lease; released:false with a reason if not held
+  landing-status [--json]     the live landing lease, or none
   done <task-id>              close a task
   activity [--after-seq N]    list activity, optionally after a cursor
            [--limit N]
@@ -93,7 +102,8 @@ const USAGE = `fabric <command>
   session list | inspect <name> | forget <name>
 
 Identity comes from the working directory and AGENT_FABRIC_LABEL (or
-landing-push --label for that command). Registered
+--label on the landing-* commands). Landing commands exit 0 ok, 1 refused or
+stale, 2 usage, 3 held by another holder or a push in progress. Registered
 worktrees share one repository project while retaining their own cwd. There is
 nothing to install, trust or provision.`;
 
@@ -102,7 +112,8 @@ const command = argv[0] ?? "whoami";
 const commands = new Set([
   "whoami", "send", "inbox", "ack", "note", "tasks", "task", "claim", "done",
   "activity", "watch", "status", "doctor", "dispatch", "adapters", "lanes", "events",
-  "work-claims", "landing-wait", "landing-push", "session", "cancel", "output", "fetch",
+  "work-claims", "landing-wait", "landing-push", "landing-acquire", "landing-verify", "landing-release",
+  "landing-status", "session", "cancel", "output", "fetch",
 ]);
 
 if (command === "--help" || command === "-h" || command === "help") {
@@ -135,9 +146,33 @@ const flag = (name: string): string | undefined => {
   argv.splice(at, 2);
   return value;
 };
+/** Write the whole line before exiting: stdout is asynchronous on a macOS pipe. */
+const finish = async (code: number, line: string, stream: NodeJS.WriteStream = process.stdout): Promise<never> => {
+  await new Promise<void>((done) => stream.write(`${line}\n`, () => done()));
+  process.exit(code);
+};
+if (isLandingVerb(command)) {
+  try {
+    const outcome = landingCommand(command, argv.slice(1), process.env, () => new Store(databasePath()));
+    if (outcome.json) await finish(outcome.code, JSON.stringify(outcome.result));
+    await finish(outcome.code, outcome.line, outcome.code === 0 ? process.stdout : process.stderr);
+  } catch (error) {
+    await finish(error instanceof UsageError ? 2 : 1,
+      `fabric: ${error instanceof Error ? error.message : String(error)}`, process.stderr);
+  }
+}
 let landingLabel: string | undefined;
+let landingRemote = "origin";
+let landingJson = false;
 try {
   landingLabel = command === "landing-push" ? flag("label") : undefined;
+  if (command === "landing-push") {
+    landingRemote = flag("remote") ?? landingRemote;
+    if (!validRemote(landingRemote)) throw new Error(`invalid remote name: ${landingRemote}`);
+    // With --json, stdout carries only the result; Git and hook output go to stderr.
+    landingJson = argv.includes("--json");
+    if (landingJson) argv.splice(argv.indexOf("--json"), 1);
+  }
 } catch (error) {
   console.error(`fabric: ${error instanceof Error ? error.message : String(error)}`);
   process.exit(2);
@@ -628,14 +663,13 @@ try {
 
   case "landing-push": {
     const session = argv[1], generation = Number(argv[2]), branch = argv[3];
-    if (argv.length !== 4 || !session || !Number.isSafeInteger(generation) || generation < 1 ||
-      !branch || !/^[A-Za-z0-9][A-Za-z0-9._/-]*$/u.test(branch) || branch.includes("..") || branch.endsWith("/"))
-      throw new Error("usage: fabric landing-push <session> <generation> <branch> [--label <seat>]");
+    if (argv.length !== 4 || !session || !Number.isSafeInteger(generation) || generation < 1 || !branch || !validBranch(branch))
+      throw new UsageError("usage: fabric landing-push <session> <generation> <branch> [--label <seat>] [--remote R]");
     const lease = store.landingLease(who.project);
     if (!lease) throw new Error("stale landing lease");
     store.verifyLanding(who, session, generation, lease.expectedSha);
     const gitOptions = { cwd: who.cwd, env: withoutGitRedirects(process.env) };
-    const remote = execFileSync("git", ["ls-remote", "--heads", "origin", `refs/heads/${branch}`],
+    const remote = execFileSync("git", ["ls-remote", "--heads", landingRemote, `refs/heads/${branch}`],
       { ...gitOptions, encoding: "utf8" }).trim().split(/\s+/u)[0];
     if (remote !== lease.expectedSha) throw new Error("remote integration SHA changed; acquire a new landing lease");
     const head = execFileSync("git", ["rev-parse", "HEAD"], { ...gitOptions, encoding: "utf8" }).trim();
@@ -647,7 +681,8 @@ try {
       { ...gitOptions, stdio: ["ignore", "ignore", "inherit"], timeout: 30_000 });
     const pushed = store.withLandingPush(who, session, generation, remote, () =>
       execFileSync("git", ["push", `--force-with-lease=refs/heads/${branch}:${remote}`,
-        "origin", `${head}:refs/heads/${branch}`], { ...gitOptions, stdio: "inherit", timeout: 120_000 }));
+        landingRemote, `${head}:refs/heads/${branch}`],
+      { ...gitOptions, stdio: landingJson ? ["inherit", 2, "inherit"] : "inherit", timeout: 120_000 }));
     show({ pushed: branch, previous_sha: remote, generation,
       ...(pushed.releaseWarning ? { release_warning: pushed.releaseWarning } : {}) });
     break;
@@ -819,7 +854,7 @@ try {
   }
 } catch (error) {
   console.error(`fabric: ${error instanceof Error ? error.message : String(error)}`);
-  process.exitCode = 1;
+  process.exitCode = error instanceof UsageError ? 2 : 1;
 } finally {
   store?.close();
 }

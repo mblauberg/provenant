@@ -4,7 +4,9 @@
 #266](https://github.com/mblauberg/provenant/issues/266)); amended by [ADR
 0020](0020-retire-the-daemon-fabric.md) on 2026-08-02; amended by [ADR
 0021](0021-configured-workspace-dispatch-boundaries.md) on 2026-08-29; amended
-by [ADR 0022](0022-thin-fabric-mcp-execution-facade.md) on 2026-09-01
+by [ADR 0022](0022-thin-fabric-mcp-execution-facade.md) on 2026-09-01;
+amended on 2026-10-22 to add the `lease` row (see
+[Amendment: `lease`](#amendment-lease))
 
 **Date:** 18 July 2026
 
@@ -57,6 +59,7 @@ sole behavioural owners:
 | `run` | `skills/orchestrate/scripts/run_controls.py` |
 | `pr` | `scripts/provenant-pr` |
 | `lint` | `scripts/provenant_lint.py` |
+| `lease` | `runtime/fabric/bin/fabric landing-acquire`, `landing-verify`, `landing-release`, `landing-status`, `landing-push` |
 
 The managed resolver finds the product checkout without changing the caller's
 working directory. Each delegation preserves arguments, standard input,
@@ -148,3 +151,13 @@ and failure handling. The reviewed proposal rejects this option.
 The thin front door remains worthwhile as a discovery layer and operator entry
 point. New bounded behaviour belongs with the existing dispatch owner and must
 be mechanically verifiable; it must not create a second owner.
+
+## Amendment: `lease`
+
+`provenant lease <acquire|release|verify|status|push>` maps each verb to
+`runtime/fabric/bin/fabric landing-<verb>`, its one owner, and passes the
+remaining arguments unchanged. Fabric's store remains the only lease state.
+The front door adds no lease logic, retry or fallback. It exists so a
+repository's landing script has a stable command instead of speaking MCP to
+an internal server path. The [landing lease
+runbook](../runbooks/landing-lease.md) states the contract.

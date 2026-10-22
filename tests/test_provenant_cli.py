@@ -873,6 +873,39 @@ def test_check_and_fabric_delegate_without_reinterpreting_arguments(tmp_path):
     assert json.loads(fabric.stdout)["argv"][1:] == ["send", "reviewer", "x y"]
 
 
+@pytest.mark.parametrize("verb", ["acquire", "release", "verify", "status", "push"])
+def test_lease_maps_each_verb_onto_its_fabric_landing_command(tmp_path, verb):
+    _, command = make_checkout(tmp_path)
+
+    result = invoke(command, "lease", verb, "land", "--json", cwd=tmp_path, PROVENANT_TEST_EXIT="3")
+
+    assert result.returncode == 3
+    payload = json.loads(result.stdout)
+    assert payload["argv"][0].endswith("runtime/fabric/bin/fabric")
+    assert payload["argv"][1:] == [f"landing-{verb}", "land", "--json"]
+    assert payload["cwd"] == str(tmp_path)
+
+
+@pytest.mark.parametrize("arguments", [(), ("wait",), ("--json",)])
+def test_lease_rejects_a_missing_or_unknown_verb(tmp_path, arguments):
+    _, command = make_checkout(tmp_path)
+
+    result = invoke(command, "lease", *arguments, cwd=tmp_path)
+
+    assert result.returncode == 2
+    assert result.stdout == ""
+    assert "usage: provenant lease <acquire|release|verify|status|push>" in result.stderr
+
+
+def test_lease_help_prints_the_verb_mapping(tmp_path):
+    _, command = make_checkout(tmp_path)
+
+    result = invoke(command, "lease", "--help", cwd=tmp_path)
+
+    assert result.returncode == 0
+    assert "usage: provenant lease <acquire|release|verify|status|push>" in result.stdout
+
+
 def test_dispatch_delegates_without_reinterpreting_arguments(tmp_path):
     _, command = make_checkout(tmp_path)
 
@@ -904,6 +937,7 @@ def test_help_is_concise_and_names_existing_command_owners(tmp_path):
     assert len(result.stdout.encode("utf-8")) <= 1100
     assert "route" in result.stdout and "scripts/model-route" in result.stdout
     assert "fabric ...     runtime/fabric/bin/fabric ..." in result.stdout
+    assert "lease ...      runtime/fabric/bin/fabric landing-*" in result.stdout
     assert "batch ...      skills/orchestrate/scripts/batch_run.py ..." in result.stdout
     assert "project ..." not in result.stdout
     # One line per command: each line starting with 2 spaces has no internal newlines
@@ -921,6 +955,11 @@ def test_help_command_gives_detail_for_specific_command(tmp_path):
     dispatch_help = invoke(command, "help", "dispatch", cwd=tmp_path)
     assert dispatch_help.returncode == 0
     assert "skills/orchestrate/scripts/dispatch_run.py" in dispatch_help.stdout
+
+    lease_help = invoke(command, "help", "lease", cwd=tmp_path)
+    assert lease_help.returncode == 0
+    assert "fabric landing-acquire" in lease_help.stdout
+    assert "3 held by another holder" in lease_help.stdout
 
     lanes_help = invoke(command, "help", "lanes", cwd=tmp_path)
     assert lanes_help.returncode == 0
