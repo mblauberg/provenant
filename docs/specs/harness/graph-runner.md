@@ -77,7 +77,11 @@ before storage, so the runner only ever sees plain nodes.
 | `context_budget`, `ui` | Slice 6 (R2.10, R2.9) |
 | `size`, `risk` | Recorded for telemetry and template defaults |
 
-A node's spec hash covers every field above. Revisions compare hashes.
+A node's spec hash covers its **effective** execution spec: the fields above
+after defaults and pool picks, the resolved worktree realpath, the effective
+(inherited and narrowed) authority, the brief's content hash and the gate argv.
+Revisions compare hashes, so changing `worktrees.w1` or root authority
+invalidates the writer.
 
 ### Validation
 
@@ -108,8 +112,8 @@ running `fabric graph-owner GRAPH_ID`. The call returns at once with a digest.
 It calls no model and nobody polls it: the chair gets a Fabric message on a
 decision point or completion, and may block with `provenant lanes --wait --all`.
 
-The owner calls `hostOwnersInThemselves()` before its first dispatch, so each
-provider owner records itself as its own host and survives the graph owner.
+It calls `hostOwnersInThemselves()` before its first dispatch, so provider
+owners are their own hosts and survive the graph owner.
 
 One owner per graph, claimed by compare-and-set on `graphs.owner_pid` and
 `owner_started`; liveness is `processMatches`, so PID reuse never passes.
@@ -154,14 +158,15 @@ graph is terminal and its receipts are written.
 1. **Ready set.** A `pending` node is ready when every parent's current attempt
    is in the state its `needs` names and its worktree, if any, is unreserved or
    reserved by this node.
-2. **Reservation.** In one `BEGIN IMMEDIATE` transaction the owner counts
-   occupancy (attempts in `running`, `gating` or `cancelling`) for this graph
-   and for each pool `(adapter, model, account)` across every graph in the
-   store, then moves a ready attempt to `running` only if graph occupancy is
+2. **Reservation.** An attempt is **active** while its provider owner or any
+   recorded gate group lives, whatever its state (`fast_passed` included). In
+   one `BEGIN IMMEDIATE` transaction the owner counts active attempts in this
+   graph, and attempts with a live provider owner in each pool
+   `(adapter, model, account)` across every graph (gates hold no provider
+   slot), then moves a ready attempt to `running` only if graph occupancy is
    below `max_width` and pool occupancy is below `cap(adapter, model, account)`.
-   A writer's worktree reservation is inserted in the same transaction, so
-   repeated wakes and concurrent owners cannot overfill a cap. `account` is
-   `default` until R3. `cap` is the static ceiling in
+   The writer's worktree reservation joins the same transaction, so no wake or
+   concurrent owner overfills a cap. `account` is `default` until R3. `cap` is the static ceiling in
    `config/graph-defaults.json` (initially OpenCode free 2 per model, Cursor 1,
    agy 2, Codex and Claude 3), bounded by the R3 ledger when it exists; a pool
    in cooldown contributes zero. Active hand-made registry lanes count against
@@ -181,29 +186,35 @@ graph is terminal and its receipts are written.
 
 ### Gates
 
-In slice 1 gates are **trusted commands**: argv the chair authorised in
-`limits.gate_allowlist`, run with the user's own filesystem and network reach.
-The runner gives them a timeout, an empty environment plus a short allowlist,
-the node's worktree as cwd and output to `gates/` files, but none of that is
-confinement and the spec claims none until R9 boxes ship. Workers can never
-supply or alter a gate command.
+In slice 1 gates are **trusted commands** from the chair-authorised
+`limits.gate_allowlist`, run with the user's filesystem and network reach. A
+timeout, minimal environment, worktree cwd and `gates/` output files are not
+confinement; none is claimed until R9. Workers never supply a gate command.
 
-Each gate starts as its own process group. Before waiting, the runner records
-`{pid, pgid, started_at, argv_hash}` in `gate_procs` and `gates/<name>.proc.json`;
-on exit it records the status. A gate without a recorded exit status never
-counts as passed.
+**Launch handshake.** The runner commits a gate intent (`gate_procs` entry with
+a launch token) before spawning `fabric gate-exec TOKEN` as a new
+process-group leader that blocks on a pipe from the owner. The owner commits
+`{pid, pgid, started_at, argv_hash}`, then writes `go`; only then does the
+wrapper run the argv as a child in its group. If the owner dies first, the
+wrapper reads EOF and exits having run nothing, so no gate runs unrecorded. A
+gate without a recorded exit status never counts as passed.
 
-CI as a gate verifies the exact expected commit: the gate passes only when the
-checks reported are for the attempt's `head_sha` (for example, comparing
-`gh pr view --json headRefOid` and the check suite's SHA before waiting), so a
-later push cannot satisfy an earlier attempt.
+**Group termination** (slice-1 code requirement). `signalRecordedProcess`
+signals only the PID (`run-registry.ts:266`), so the registry gains
+`signalRecordedGroup`, which signals `-pgid` only while the group is
+attributable: the leader matches its recorded start time, or the leader has
+exited and no live process has pid equal to the pgid. SIGTERM, then SIGKILL
+after a grace period. A gate group has exited only when `kill(-pgid, 0)` returns
+`ESRCH` (the check `dispatch_run.py:626` already uses); no rerun or reservation
+release happens before that.
+
+A CI gate passes only on checks for the attempt's exact `head_sha` (compared
+against the check suite's SHA), so another push cannot satisfy it.
 
 ### Worktree reservation
 
-Static validation orders writers within a graph; a reservation enforces one
-writer across graphs and against hand-made dispatch, from the transaction that
-marks a writer `running` until the provider owner and every recorded gate
-process group of that attempt have exited.
+A reservation enforces one writer across graphs and against hand dispatch, from
+the transaction that marks a writer `running` until the attempt is not active.
 
 - The reservation is the store row plus a file in the worktree's Git directory
   beside dispatch's lock (`provenant-graph-reservation.json`: graph, node,
@@ -218,17 +229,15 @@ process group of that attempt have exited.
 
 ### Crash and resume
 
-State is the store plus the run directories, so the owner is restartable.
-
-- On restart each `running` or `cancelling` attempt is found by its recorded
-  `run_id`. A live lane is adopted and observed through the registry; a
+- On restart each active or non-terminal attempt (`running`, `gating`,
+  `fast_passed`, `cancelling`) is found by its recorded `run_id`. A live lane is adopted and observed through the registry; a
   finished lane's receipt is read. A run with no owner record and no receipt
   never started (the crash fell between `onLaunch` and `startOwner`) and is
   redispatched as a new attempt outside the ladder; a row with no `run_id` was
   never launched. Nothing is redispatched under an identity that has a lane.
-- A `gating` attempt: each recorded gate group still alive (start time
-  matched) is terminated through `signalRecordedProcess`; any gate without an
-  exit status reruns. Reservation is kept throughout.
+- Each recorded gate group still alive is terminated with
+  `signalRecordedGroup` and its exit verified; an intent with no pid never ran.
+  Any gate without an exit status then reruns. Reservation is kept throughout.
 - A dead owner is detected, not supervised: `graph status` and `lanes --wait`
   print the exact `provenant graph resume GRAPH_ID`; the MCP tool resumes on
   the next `status`. A restart repeats no passed work.
@@ -254,14 +263,16 @@ written to the receipt as `stale` and never attached downstream.
 **Transitive invalidation.** When a node's current accepted attempt changes
 (revision, repair or escalation), every descendant whose `input_attempts`
 reaches the old attempt, directly or transitively, is invalidated in the same
-transaction: a running or gating descendant is fence-cancelled, a passed or
-`fast_passed` one returns to `pending`, and its old result stays as history.
+transaction. Each is marked `cancelling` and fenced (provider owner cancelled,
+gate groups terminated); it returns to `pending` only after verified exit. A
+`fast_passed` attempt with live slow gates is fenced like a running one. Old
+results stay as history.
 This covers an unchanged consumer that would otherwise finish on obsolete input,
 and `needs: fast` consumers of a parent that is later repaired.
 
 `graph cancel GRAPH_ID [--node ID]` uses the same fence: the provider owner is
 cancelled through `cancelConfiguredRun`, recorded gate groups are terminated
-through `signalRecordedProcess` (start time matched), and the attempt stays
+through `signalRecordedGroup`, and the attempt stays
 `cancelling` until all have exited. Reroute is a revise that changes `route`.
 No replacement or worktree reuse starts before that exit; this holds across a
 resume.
@@ -328,11 +339,10 @@ selector, scoped to the route that carries it:
   `adapter: claude`. The session id appears in `provenant lanes` (`session`,
   `session_id` in `--json`) with `claude --resume <id>` as the hint.
 
-Tests: refusal without the selector; an eligible headless dispatch; a mixed
-batch and graph (headless Claude, Codex, OpenCode) where the selector survives
-preflight and final normalisation while a sibling Claude task without it is
-refused; other `execution` values rejected; session id in the lane row;
-`confidential` and `allow_secrets` unchanged.
+Tests: refusal without the selector; a headless dispatch; a mixed batch and
+graph where the selector survives preflight and final normalisation while a
+sibling Claude task without it is refused; other values rejected; session id
+in the lane row; flags unchanged.
 
 ## Templates (R2.8)
 
@@ -353,9 +363,8 @@ Requirements; R2.8 holds the shapes.
   (absolute paths, worktree paths, accounts) as `${key}`, and refuses a document
   that still contains them. Every use re-validates.
 
-Acceptance: a graph from a one-line request; a node-level override; a
-repository template winning over an instance one; a save that leaves an absolute
-path refused.
+Acceptance: one-line request; node-level override; repository template wins;
+save with an absolute path left in refused.
 
 ## Context budget and restarts (R2.10)
 
@@ -369,8 +378,7 @@ Requirements; R2.10 holds the policy.
   `restart` (default maximum 3), which changes the `task_id`; it does not
   consume the ladder. Exceeding the maximum is a failed attempt.
 
-Acceptance: a node that restarts twice and passes; a node that exceeds the
-maximum and enters the ladder.
+Acceptance: two restarts then pass; exceeding the maximum enters the ladder.
 
 ## Surface
 
@@ -387,16 +395,14 @@ maximum and enters the ladder.
 
 Example: `provenant graph run fanout "survey how each adapter retries" --set n=5`.
 
-`graph` is a plain delegate in `scripts/provenant` to
-`runtime/fabric/bin/fabric graph`, like `lanes` and `events`. Holding no logic
-outside the Fabric command, it ports to the Rust front door as one table row.
+`graph` is a plain delegate row in `scripts/provenant`, like `lanes`, so the
+Rust front door ports it as one row.
 
 ### MCP
 
-One tool, `fabric_graph`, `action: run|status|revise|cancel|resume|templates`,
-strict schema, the dispatch tools' compact-digest and `Route:` conventions, and
-`wait_seconds` capped at 55 on `status`. It delegates to the CLI's functions.
-This amends [ADR 0022](../../adr/0022-thin-fabric-mcp-execution-facade.md),
+One tool, `fabric_graph` (`action: run|status|revise|cancel|resume|templates`),
+with the dispatch tools' conventions and `wait_seconds` capped at 55. This
+amends [ADR 0022](../../adr/0022-thin-fabric-mcp-execution-facade.md),
 which fixes the execution tools at two; slice 1 carries the amendment.
 
 ### Output
@@ -408,15 +414,11 @@ running, blocked or stopped node); `--json` and `detail: full` return
 
 ## Receipts
 
-Each attempt writes `receipt.json` (`provenant.graph-node-receipt.v1`) before
-it leaves `running`. Required fields: identity (`graph_id`, `revision`,
-`node_id`, `attempt`, `restart`, `task_id`, `run_id`, `input_attempts`), plan
-(`kind`, `role`, `tier`, `spec_hash`, `repair_of`, `escalated_from`), route
-(`adapter`, `model`, `effort`, `account`, `execution`, `session_id`,
-`confidential`), outcome (`status`, `stale`, `base_sha`, `head_sha`, gate
-`{name, argv_hash, exit, seconds, output_path}`), and token counts copied from
-the dispatch attempt receipt. It references that receipt by `run_id` and
-`task_id` and copies no provider output. R4 ingestion keys on
+Each attempt writes `receipt.json` (`provenant.graph-node-receipt.v1`) holding
+its identity (including `input_attempts`), plan, route, outcome (`stale`,
+`base_sha`, `head_sha`, per-gate exit and output path) and token counts copied
+from the dispatch receipt, which it references by `run_id` and `task_id`
+without copying provider output. R4 keys on
 `(graph_id, node_id, revision, attempt, restart)`.
 
 Acceptance: every attempt in a mixed three-provider graph has a receipt that
@@ -452,7 +454,7 @@ Each slice is an independent pull request with its own tests behind the same
 
 | # | Slice | Delivers | Acceptance |
 |---|---|---|---|
-| 1 | Static runner | Expanded JSON work nodes, validation (including confidentiality closure and gate allowlist), explicit routes, `depends_on` enforcement, transactional static caps, trusted fast gates with recorded process groups, worktree reservation honoured by `dispatch_run.py`, hashed task ids, `onLaunch` recording and `KEEP` pins, input-attempt binding in receipts, crash recovery through the registry, `graph run --file/status/cancel/resume`, notices, MCP `fabric_graph`, delegate row, ADR 0022 amendment. Stop on failure | Three-tier mixed-provider graph with no idle coordinator; graph owner killed mid-run, lanes survive and resume adopts them; cancel during a gate leaves no live gate process before the reservation releases; hand dispatch into a reserved worktree refused; two concurrent graphs never exceed a pool cap; confidential parent feeding a non-confidential synthesis node rejected; a node dispatched into a repository visible to `lanes --wait` from it |
+| 1 | Static runner | Expanded JSON work nodes, validation (including confidentiality closure and gate allowlist), effective spec hash, explicit routes, `depends_on` enforcement, transactional static caps, trusted fast gates with launch handshake and `signalRecordedGroup`, worktree reservation honoured by `dispatch_run.py`, hashed task ids, `onLaunch` recording and `KEEP` pins, input-attempt binding in receipts, crash recovery through the registry, `graph run --file/status/cancel/resume`, notices, MCP `fabric_graph`, delegate row, ADR 0022 amendment. Stop on failure | Three-tier mixed-provider graph with no idle coordinator; graph owner killed mid-run, lanes survive and resume adopts them; cancel during a gate whose command forks children leaves no group member before the reservation releases; owner killed between gate intent and `go` leaves no gate running; hand dispatch into a reserved worktree refused; two concurrent graphs never exceed a pool cap; confidential parent feeding a non-confidential synthesis node rejected; a node dispatched into a repository visible to `lanes --wait` from it |
 | 2 | Repair, escalation, review | Ladder, `on_fail`, `needs: fast`, `review` nodes, slow gates with CI commit check, one repair round, delta re-review, invalidation on repair | Failing leaf repairs once then escalates; `fast` consumer of a repaired parent reruns; CI result for an older SHA does not pass |
 | 3 | Revisions | `graph revise`, hash diff, fenced supersede, transitive invalidation | Mid-run revision: a running unchanged descendant of a changed node does not get its result accepted |
 | 4 | Templates | Built-ins, defaults, overrides, nesting, saved and repository templates, `templates` verb | See Templates |
@@ -463,11 +465,9 @@ Writers ship in slice 1 because the reservation and fencing ship with it. If
 any slice 1 fencing acceptance case is not met, slice 1 ships read-only and
 writers wait for it.
 
-**R2.7.** Mostly fixed on main (`writeLanePointers` registers a lane under an
-explicit `cwd` or `worktree` project). Graph nodes always name one, so the
-runner does not depend on
-[#1085](https://github.com/mblauberg/provenant/pull/1085); slice 1 carries the
-visibility test above.
+**R2.7.** Graph nodes always name `cwd` or `worktree`, which main already
+registers (`writeLanePointers`), so the runner does not depend on
+[#1085](https://github.com/mblauberg/provenant/pull/1085).
 
 ## Non-goals
 
