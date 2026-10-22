@@ -72,6 +72,7 @@ class PeerContracts(unittest.TestCase):
             self.assertTrue(json.loads(result.stdout)['ok'])
 
     def test_invalid_requests_return_typed_errors(self):
+        import fabric_hosts as hosts
         cases = [(b'{', 'bad_json'),
                  ('{"protocol_version":1,"verb":"hello"}'.encode('utf-16'), 'bad_json'),
                  (b'{} {}', 'bad_json'),
@@ -80,25 +81,34 @@ class PeerContracts(unittest.TestCase):
                  (b'{"protocol_version":1,"verb":"hello","params":{"command":"true"}}', 'invalid_request'),
                  (b'{"protocol_version":2,"verb":"doctor","params":{}}', 'protocol_mismatch'),
                  (b'{"protocol_version":1,"protocol_version":1,"verb":"hello"}', 'bad_json')]
-        for raw, code in cases:
+        for raw, code in cases[:-1]:
             with self.subTest(code=code, raw=raw[:50]):
-                response = self.peer(raw)
-                self.assertNotEqual(response.returncode, 0)
-                value = json.loads(response.stdout)
-                self.assertFalse(value['ok'])
-                self.assertEqual(value['error']['code'], code)
-                self.assertEqual(response.stderr, b'')
+                with self.assertRaises(hosts.HostError) as caught:
+                    hosts.parse_request(raw)
+                self.assertEqual(caught.exception.code, code)
+        # Keep one subprocess case to cover the peer envelope and exit status.
+        raw, code = cases[-1]
+        with self.subTest(code=code, raw=raw[:50]):
+            response = self.peer(raw)
+            self.assertNotEqual(response.returncode, 0)
+            value = json.loads(response.stdout)
+            self.assertFalse(value['ok'])
+            self.assertEqual(value['error']['code'], code)
+            self.assertEqual(response.stderr, b'')
 
     def test_hello_is_one_versioned_response_even_under_a_forced_command(self):
-        response = self.peer(json.dumps({'protocol_version': 1, 'verb': 'hello', 'params': {}}).encode(),
-                             SSH_ORIGINAL_COMMAND='touch /tmp/peer-injection')
-        self.assertEqual(response.returncode, 0, response.stderr)
-        value = json.loads(response.stdout)
-        self.assertTrue(value['ok'])
-        self.assertEqual(value['protocol_version'], 1)
-        self.assertEqual(value['result']['host'], default_host())
-        self.assertIn('revision', value['result'])
-        self.assertEqual(response.stderr, b'')
+        with tempfile.TemporaryDirectory() as directory:
+            marker = Path(directory) / 'peer-injection'
+            response = self.peer(json.dumps({'protocol_version': 1, 'verb': 'hello', 'params': {}}).encode(),
+                                 SSH_ORIGINAL_COMMAND='touch ' + shlex.quote(str(marker)))
+            self.assertEqual(response.returncode, 0, response.stderr)
+            value = json.loads(response.stdout)
+            self.assertTrue(value['ok'])
+            self.assertEqual(value['protocol_version'], 1)
+            self.assertEqual(value['result']['host'], default_host())
+            self.assertIn('revision', value['result'])
+            self.assertEqual(response.stderr, b'')
+            self.assertFalse(marker.exists())
 
 
 class DoctorContracts(unittest.TestCase):
@@ -133,12 +143,14 @@ class DoctorContracts(unittest.TestCase):
                     raise subprocess.TimeoutExpired(command, 10)
                 return subprocess.CompletedProcess(command, 0, stdout='', stderr='')
             environment = {**os.environ, 'PATH': str(root), 'PROVENANT_NO_OS_CONFINEMENT': '0'}
-            with patch.dict(os.environ, environment, clear=True), patch.object(provider_exec.sys, 'platform', 'darwin'), patch.object(subprocess, 'run', side_effect=run):
+            try:
+                with patch.dict(os.environ, environment, clear=True), patch.object(provider_exec.sys, 'platform', 'darwin'), patch.object(subprocess, 'run', side_effect=run):
+                    provider_exec._sandbox_exec_usable.cache_clear()
+                    value = hosts.adapter_doctor('kiro', root)
+                    self.assertEqual(value['confinement']['status'], 'unknown')
+                    self.assertEqual(hosts.signin_status('claude', str(root / 'claude'))['status'], 'unknown')
+            finally:
                 provider_exec._sandbox_exec_usable.cache_clear()
-                value = hosts.adapter_doctor('kiro', root)
-                self.assertEqual(value['confinement']['status'], 'unknown')
-                self.assertEqual(hosts.signin_status('claude', str(root / 'claude'))['status'], 'unknown')
-            provider_exec._sandbox_exec_usable.cache_clear()
 
     def test_peer_doctor_reports_host_local_checks_and_bounds_project_paths(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -1253,48 +1265,48 @@ class LaneLoopbackContracts(unittest.TestCase):
                     ('reader-chunk-failure',)).fetchone()[0], 'laptop')
         self.assertFalse((self.peer_home / '.agents/.agent-fabric/operations/reader-chunk-failure.json').exists())
 
-    def test_explicit_reader_host_never_falls_back_on_transport_failure(self):
+    def test_explicit_reader_host_never_falls_back(self):
         import fabric_hosts as hosts
-        with patch.dict(os.environ, self.env):
-            owner = hosts.lane_owner()
-            with self.assertRaises(hosts.HostError):
-                owner.client_call('dispatch', str(self.workspace), {
-                    'host': 'workshop', 'mode': 'read_only', 'prompt': 'review',
-                    'operation_id': 'explicit-reader-failure'})
-            with owner.database() as db:
-                self.assertIsNone(db.execute('SELECT id FROM writer_dispatches WHERE id=?',
-                    ('explicit-reader-failure',)).fetchone())
+        # The unregistered peer project forces the transport failure case.
+        with self.subTest(failure='transport'):
+            with patch.dict(os.environ, self.env):
+                owner = hosts.lane_owner()
+                with self.assertRaises(hosts.HostError):
+                    owner.client_call('dispatch', str(self.workspace), {
+                        'host': 'workshop', 'mode': 'read_only', 'prompt': 'review',
+                        'operation_id': 'explicit-reader-failure'})
+                with owner.database() as db:
+                    self.assertIsNone(db.execute('SELECT id FROM writer_dispatches WHERE id=?',
+                        ('explicit-reader-failure',)).fetchone())
 
-    def test_explicit_reader_host_never_falls_back_after_chunk_timeout(self):
-        import fabric_hosts as hosts
         self.writer_fixture()
-        original_call = hosts.PeerClient.call
-        def call(client, verb, *args, **kwargs):
-            if verb == 'git-upload':
-                raise hosts.HostError('timeout', 'chunk deadline')
-            return original_call(client, verb, *args, **kwargs)
-        with patch.dict(os.environ, self.env), patch.object(hosts.PeerClient, 'call', call):
-            owner = hosts.lane_owner()
-            result = owner.client_call('dispatch', str(self.workspace), {
-                'host': 'workshop', 'prompt': 'review', 'operation_id': 'explicit-chunk'})
+        with self.subTest(failure='chunk timeout'):
+            original_call = hosts.PeerClient.call
+            def call(client, verb, *args, **kwargs):
+                if verb == 'git-upload':
+                    raise hosts.HostError('timeout', 'chunk deadline')
+                return original_call(client, verb, *args, **kwargs)
+            with patch.dict(os.environ, self.env), patch.object(hosts.PeerClient, 'call', call):
+                owner = hosts.lane_owner()
+                result = owner.client_call('dispatch', str(self.workspace), {
+                    'host': 'workshop', 'prompt': 'review', 'operation_id': 'explicit-chunk'})
+                self.assertNotIn('local', result)
+                self.assertEqual(result['status'], 'launch_unknown')
+                with owner.database() as db:
+                    self.assertEqual(db.execute('SELECT host FROM writer_dispatches WHERE id=?',
+                        ('explicit-chunk',)).fetchone()[0], 'workshop')
+            self.assertFalse((self.peer_home / '.agents/.agent-fabric/operations/explicit-chunk.json').exists())
+
+        with self.subTest(failure='peer preparation'):
+            outside = self.peer_home / 'outside'
+            outside.mkdir()
+            (self.peer_workspace / '.worktrees').symlink_to(outside, target_is_directory=True)
+            result = self.client('dispatch', host='workshop', prompt='review',
+                operation_id='explicit-peer-prepare')
             self.assertNotIn('local', result)
-            self.assertEqual(result['status'], 'launch_unknown')
-            with owner.database() as db:
-                self.assertEqual(db.execute('SELECT host FROM writer_dispatches WHERE id=?',
-                    ('explicit-chunk',)).fetchone()[0], 'workshop')
-        self.assertFalse((self.peer_home / '.agents/.agent-fabric/operations/explicit-chunk.json').exists())
-
-    def test_explicit_reader_host_never_falls_back_after_peer_preparation_failure(self):
-        self.writer_fixture()
-        outside = self.peer_home / 'outside'
-        outside.mkdir()
-        (self.peer_workspace / '.worktrees').symlink_to(outside, target_is_directory=True)
-        result = self.client('dispatch', host='workshop', prompt='review',
-            operation_id='explicit-peer-prepare')
-        self.assertNotIn('local', result)
-        self.assertEqual(result['status'], 'rejected')
-        self.assertTrue(result['code_transport_prelaunch_failure'])
-        self.assertEqual(list(outside.iterdir()), [])
+            self.assertEqual(result['status'], 'rejected')
+            self.assertTrue(result['code_transport_prelaunch_failure'])
+            self.assertEqual(list(outside.iterdir()), [])
 
     def test_knob_overrides_are_refused_for_a_remote_lane_and_kept_for_a_local_one(self):
         import fabric_hosts as hosts
@@ -2193,13 +2205,37 @@ class LaneLoopbackContracts(unittest.TestCase):
             self.client('cancel', id='writer@workshop', operation_id='cleanup-verify-writer')
 
     def wait_writer(self, selector):
-        deadline = time.monotonic() + 15
-        while time.monotonic() < deadline:
-            rows = self.lanes(selector)['runs']
-            if rows and all(row['state'] == 'terminal' and row.get('pgid_alive') is not True for row in rows):
-                return rows
-            time.sleep(.05)
+        import fabric_hosts as hosts
+        with patch.dict(os.environ, self.env):
+            owner = hosts.lane_owner()
+            deadline = time.monotonic() + 15
+            while time.monotonic() < deadline:
+                rows = owner.client_call('lanes', str(self.workspace), {'ids': [selector]})['runs']
+                if rows and all(row['state'] == 'terminal' and row.get('pgid_alive') is not True for row in rows):
+                    return rows
+                time.sleep(.05)
         self.fail('fixture writer did not terminalise')
+
+    def test_wait_writer_polls_owner_until_terminal(self):
+        import fabric_hosts as hosts
+        calls = []
+        responses = iter([
+            [{'state': 'running', 'pgid_alive': True}],
+            [{'state': 'terminal', 'pgid_alive': False}],
+        ])
+        class Owner:
+            def client_call(self, action, cwd, request):
+                calls.append((action, cwd, request))
+                return {'runs': next(responses)}
+        with patch.dict(os.environ, self.env), patch.object(hosts, 'lane_owner', return_value=Owner()), \
+                patch.object(time, 'sleep') as sleep:
+            rows = self.wait_writer('writer@workshop')
+        self.assertEqual(rows, [{'state': 'terminal', 'pgid_alive': False}])
+        self.assertEqual(calls, [
+            ('lanes', str(self.workspace), {'ids': ['writer@workshop']}),
+            ('lanes', str(self.workspace), {'ids': ['writer@workshop']}),
+        ])
+        sleep.assert_called_once_with(.05)
 
     def test_interrupted_multichunk_writer_upload_and_lost_launch_reconcile_once(self):
         git, _, local = self.writer_fixture()
