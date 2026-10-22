@@ -489,7 +489,7 @@ def provision_created_node_modules(
         if not fabric_modules.exists() and not fabric_modules.is_symlink():
             fabric_modules.parent.mkdir(parents=True, exist_ok=True)
             cloned.append(fabric_modules)
-            fabric_modules.symlink_to(source, target_is_directory=True)
+            fabric_modules.symlink_to(Path("../../node_modules"), target_is_directory=True)
     except OSError as exc:
         for path in reversed(cloned):
             if path.is_symlink():
