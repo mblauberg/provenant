@@ -8808,6 +8808,7 @@ def test_cancelled_attempt_stops_nested_children_even_when_cleanup_fails(tmp_pat
     parent = {'run_id': 'mcp-parent', 'run_dir': str(parent_dir), 'task_id': 'writer', 'attempt': 1}
     (child_dir / 'RUN_RECEIPT.json').write_text(json.dumps({'status': 'active', 'parent': parent}))
     child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'],
+                             env={**os.environ, 'PROVENANT_RUN_TOKEN': 'child-token'},
                              start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     try:
         (child_dir / 'dispatch-owner.json').write_text(json.dumps({

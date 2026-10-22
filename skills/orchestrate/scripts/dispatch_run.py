@@ -1821,10 +1821,10 @@ def publish_contract(run_dir,row):
     ensure_owned_directory(run_dir,path.parent)
     with attempt_custody(run_dir, path):
         with run_lineage.journal_custody(run_dir, row["task_id"], row["attempt"]):
+            children = run_lineage.children(run_dir, row["task_id"], row["attempt"])
             if row["state"] == "terminal" and row["status"] in {"cancelled", "interrupted"}:
                 # Registration waits on this same journal lock and will see terminal state.
-                run_lineage.cancel_children(run_dir, row["task_id"], row["attempt"])
-            children = run_lineage.children(run_dir, row["task_id"], row["attempt"])
+                run_lineage.cancel_children(run_dir, row["task_id"], row["attempt"], child_rows=children)
             if children:
                 row["children"] = children
             if row["state"] == "terminal":
