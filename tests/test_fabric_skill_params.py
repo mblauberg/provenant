@@ -2,68 +2,27 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 import re
+import subprocess
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SERVER = ROOT / "runtime/fabric/src/server.ts"
-REGISTER = re.compile(r'register\(\s*"(fabric_[a-z_]+)"\s*,\s*"[^"]*"\s*,\s*(\{|[a-z_]+)')
-SCHEMA_FIELD = re.compile(r"\b([a-z_][a-z_0-9]*)\s*(?::|(?=,|$))")
-SPREAD = re.compile(r"\.\.\.([a-z_]+)")
 CALL = re.compile(r"fabric_([a-z_]+)\s*([({])([^})\n]*)[})]")
 FIELD = re.compile(r"\b([a-z_][a-z_0-9]*)\s*:")
 TOOL = re.compile(r"\bfabric_[a-z_]+\b")
 BACKTICK_FIELD = re.compile(r"`([a-z_][a-z_0-9]*)(?:\s*:[^`]*)?`")
 
 
-def object_body(source: str, start: int) -> str:
-    """Return the outer object body; inner zod calls may contain objects."""
-    depth = 0
-    quote = None
-    escaped = False
-    for index in range(start, len(source)):
-        char = source[index]
-        if quote:
-            if escaped:
-                escaped = False
-            elif char == "\\":
-                escaped = True
-            elif char == quote:
-                quote = None
-        elif char in "\"'`":
-            quote = char
-        elif char == "{":
-            depth += 1
-        elif char == "}":
-            depth -= 1
-            if depth == 0:
-                return source[start + 1:index]
-    raise AssertionError("unclosed server schema")
-
-
-def server_schema(source: str) -> dict[str, set[str]]:
-    shared = {}
-    for name in ("route", "task", "batch"):
-        match = re.search(rf"const {name} =\s*{{", source)
-        assert match, name
-        shared[name] = object_body(source, match.end() - 1)
-
-    def fields(body: str) -> set[str]:
-        result = set(SCHEMA_FIELD.findall(body))
-        for spread in SPREAD.findall(body):
-            result.update(fields(shared[spread]))
-        return result
-
-    schema = {}
-    for match in REGISTER.finditer(source):
-        token = match.group(2)
-        body = object_body(source, match.end() - 1) if token == "{" else shared[token]
-        schema[match.group(1)] = fields(body)
-    return schema
-
-
-SCHEMA = server_schema(SERVER.read_text())
+schema_export = subprocess.run(
+    ["node", "--import", "tsx", "src/export-tool-schemas.ts"],
+    cwd=ROOT / "runtime/fabric",
+    check=True,
+    capture_output=True,
+    text=True,
+)
+SCHEMA = {tool: set(fields) for tool, fields in json.loads(schema_export.stdout).items()}
 
 
 def call_fits_schema(tool: str, fields: list[str]) -> bool:
