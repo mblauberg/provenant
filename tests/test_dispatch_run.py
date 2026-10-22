@@ -124,6 +124,22 @@ def load_secret_scan_module():
     return importlib.import_module('secret_scan')
 
 
+def test_process_evidence_without_start_time_is_unknown(tmp_path):
+    mod = load_dispatch_module()
+    evidence = mod.process_evidence(tmp_path, {"pgid": os.getpgrp(), "paths": {}})
+    assert evidence["pgid_probe"] == "unknown"
+
+
+@pytest.mark.parametrize("task_id,attempt", [("other-task", 1), ("task-1", 2), ("task-1", 1)])
+def test_retire_provider_preserves_another_attempt_marker(tmp_path, task_id, attempt):
+    mod = load_dispatch_module()
+    marker = tmp_path / "dispatch-provider.json"
+    marker.write_text(json.dumps({"run_token": mod.run_identity(tmp_path), "provider_pid": 12345,
+                                  "task_id": task_id, "attempt": attempt}))
+    mod._retire_provider_process(tmp_path, SimpleNamespace(pid=12345, returncode=0), task_id="task-1", attempt=1)
+    assert marker.exists() is ((task_id, attempt) != ("task-1", 1))
+
+
 def test_reap_attempt_after_group_sigkill_is_terminal_and_idempotent(tmp_path):
     mod = load_dispatch_module()
     run = make_run(tmp_path, "runs/killed")
@@ -691,6 +707,46 @@ def test_terminal_attempt_retains_partial_transport_failure(tmp_path):
     assert row["error_class"] == "transient"
     assert row["result_partial"] is True
     assert "partial result" in module.render_digest(row)
+
+
+@pytest.mark.parametrize("status,outcome,signature", [
+    ("timed_out", "timeout", "wall_clock"),
+    ("cancelled", "cancelled", "cancel_requested"),
+])
+def test_terminal_attempt_keeps_provider_stop_evidence(tmp_path, status, outcome, signature):
+    module = load_dispatch_module()
+    args = SimpleNamespace(tool="codex", alias="", model="fixture", effort="high",
+                           task_id="task-1", access_mode="read_only", worktree=None, _last_plan={})
+    legacy = {"started_at": "2026-09-23T00:00:00Z", "finished_at": "2026-09-23T00:00:01Z",
+              "outcome": outcome, "status": status, "process_error": outcome, "result": None,
+              "attempt_path": "tasks/task-1/attempt-001", "requested_route": {}}
+    adapter = {"status": status, "evidence": {"signature": signature, "excerpt": "provider diagnostic"}}
+    row = module.terminal_contract(args, tmp_path, legacy, adapter, 1, tmp_path / "tasks/task-1/attempt-001")
+    assert row["evidence"]["signature"] == signature
+    assert row["evidence"]["excerpt"] == "provider diagnostic"
+
+
+def test_terminal_attempt_measures_suffixed_capture_paths(tmp_path):
+    module = load_dispatch_module()
+    args = SimpleNamespace(tool="codex", alias="", model="fixture", effort="high",
+                           task_id="task-1", access_mode="read_only", worktree=None, _last_plan={})
+    attempt = tmp_path / "tasks/task-1/attempt-001"
+    attempt.mkdir(parents=True)
+    (attempt / "events.jsonl").write_text("old events")
+    (attempt / "stderr.log").write_text("old stderr")
+    events = attempt / "events.jsonl.abcdef"
+    stderr = attempt / "stderr.log.abcdef"
+    events.write_text("new provider events")
+    stderr.write_text("")
+    legacy = {"started_at": "2026-09-23T00:00:00Z", "finished_at": "2026-09-23T00:00:01Z",
+              "outcome": "ok", "status": "ok", "result": None,
+              "attempt_path": "tasks/task-1/attempt-001", "requested_route": {}}
+    adapter = {"status": "ok", "paths": {"events": str(events), "stderr": str(stderr)}}
+    row = module.terminal_contract(args, tmp_path, legacy, adapter, 1, attempt)
+    assert tmp_path / row["paths"]["events"] == events
+    assert row["evidence"]["events_bytes"] == events.stat().st_size
+    assert tmp_path / row["paths"]["stderr"] == stderr
+    assert row["evidence"]["stderr_bytes"] == 0
 
 
 @pytest.mark.parametrize("adapter_status,legacy_status,signature,source,expected", [
@@ -3719,15 +3775,17 @@ def real_owner_fixture(tmp_path, monkeypatch, code):
     return run, prompt, command
 
 
-
-
-
 @pytest.mark.parametrize("floor,free,mode,blocked", [
-    (None, 2 * 1024**3 - 1, "worktree_write", True),
+    (None, 500 * 1024**2 - 1, "worktree_write", True),
+    (None, 500 * 1024**2, "worktree_write", False),
     (100, 99, "worktree_write", True),
     (100, 100, "worktree_write", False),
     (0, 0, "worktree_write", False),
-    (None, 0, "read_only", False),
+    (None, 500 * 1024**2 - 1, "read_only", True),
+    (None, 500 * 1024**2, "read_only", False),
+    (100, 99, "read_only", True),
+    (100, 100, "read_only", False),
+    (0, 0, "read_only", False),
 ])
 def test_disk_admission_floor(tmp_path, monkeypatch, floor, free, mode, blocked):
     marker = tmp_path / "provider-started"
@@ -3739,7 +3797,7 @@ def test_disk_admission_floor(tmp_path, monkeypatch, floor, free, mode, blocked)
     if floor is not None:
         policy = tmp_path / ".agents/fabric-policy.json"
         value = json.loads(policy.read_text())
-        value["disk_floor_bytes"] = {"worktree_write": floor}
+        value["disk_floor_bytes"] = {mode: floor}
         policy.write_text(json.dumps(value))
     monkeypatch.setenv("PROVENANT_HOST_LOCAL_ONLY", "1")
     monkeypatch.delenv("PROVENANT_RUN_ID", raising=False)
@@ -3761,11 +3819,12 @@ def test_disk_admission_floor(tmp_path, monkeypatch, floor, free, mode, blocked)
         assert legacy["process"]["pid"] is None
         assert "disk_floor_bytes" in row["fix"]
 
+
 @pytest.mark.parametrize("started,wrapped,number,outcome", [
     (True, True, 28, "host_disk_full"),
     (True, False, 28, "host_disk_full"),
     (True, False, 5, "provider_lost"),
-    (False, False, 28, "process_spawn_error"),
+    (False, False, 28, "host_disk_full"),
 ])
 def test_process_io_failure_classification_and_terminal_evidence(tmp_path, monkeypatch, started, wrapped, number, outcome):
     code = "import json,sys\nsys.stdin.read()\nprint(json.dumps({'type':'result','result':'DONE'}), flush=True)\n"
@@ -3804,7 +3863,7 @@ def test_process_io_failure_classification_and_terminal_evidence(tmp_path, monke
     assert legacy["process"]["observed_exit"] is False
     assert (legacy["process"]["pid"] is not None) == started
     if started:
-        assert row["error_class"] == legacy["error_class"] == "host_resource"
+        assert row["error_class"] == legacy["error_class"] == ("host_resource" if number == 28 else "provider_error")
         assert row["pgid"] == legacy["process"]["pid"] == live[-1]["pgid"]
         assert row["pgid_started_at"] == live[-1]["pgid_started_at"]
         assert row["last_progress_at"] == live[-1]["last_progress_at"]
@@ -3816,6 +3875,7 @@ def test_process_io_failure_classification_and_terminal_evidence(tmp_path, monke
         assert row["evidence"]["events_bytes"] == events.stat().st_size
         assert row["evidence"]["stderr_bytes"] == (events.parent / "stderr.log").stat().st_size
         assert row["evidence"]["last_event_at"] == mod.datetime.fromtimestamp(events.stat().st_mtime, mod.UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
 
 @pytest.mark.parametrize("stage", ["progress", "start"])
 def test_progress_bookkeeping_enospc_does_not_signal_provider(tmp_path, monkeypatch, stage):
@@ -3865,6 +3925,156 @@ print(json.dumps({'type':'result','result':'DONE'}), flush=True)
     assert legacy["process"]["observed_exit"] is True
     assert row["status"] == "ok"
     assert len([warning for warning in row["warnings"] if "provider bookkeeping write failed" in warning]) == 1
+
+
+@pytest.mark.parametrize("failure", ["probe", "policy"])
+def test_disk_admission_probe_warning_and_policy_fix(tmp_path, monkeypatch, failure):
+    code = "import json,sys\nsys.stdin.read()\nprint(json.dumps({'type':'result','result':'DONE'}))\n"
+    run, prompt, command = real_owner_fixture(tmp_path, monkeypatch, code)
+    monkeypatch.chdir(tmp_path)
+    mod = load_dispatch_module()
+    if failure == "probe":
+        def probe(path):
+            raise OSError(5, "disk probe unavailable")
+        monkeypatch.setattr(mod.shutil, "disk_usage", probe)
+    else:
+        policy = tmp_path / ".agents/fabric-policy.json"
+        value = json.loads(policy.read_text())
+        value["disk_floor_bytes"] = {"read_only": -1}
+        policy.write_text(json.dumps(value))
+    assert mod.dispatch(mod.parser().parse_args(command[2:])) == (0 if failure == "probe" else 1)
+    row = json.loads((run / "tasks/dispatch-001/attempt-001/attempt.json").read_text())
+    if failure == "probe":
+        assert any("disk admission probe failed" in warning for warning in row["warnings"])
+        assert row["status"] == "ok"
+    else:
+        assert row["fix"].startswith("Set .agents/fabric-policy.json disk_floor_bytes")
+
+
+@pytest.mark.parametrize("source", ["pgid", "provider"])
+@pytest.mark.parametrize("disk_full", ["stderr", "space", None])
+def test_reap_attempt_recovers_missing_pgid(tmp_path, monkeypatch, source, disk_full):
+    mod = load_dispatch_module()
+    run = make_run(tmp_path, "runs/missing-pgid")
+    path = run / "tasks/task-1/attempt-001/attempt.json"
+    path.parent.mkdir(parents=True)
+    row = json.loads((ROOT / "tests/fixtures/fabric-v1/attempt.json").read_text())
+    row.update(state="running", status=None, pgid=None, pgid_started_at=None,
+               workspace_root=str(tmp_path), last_progress_at="2000-01-01T00:00:00Z")
+    path.write_text(json.dumps(row))
+    attempt = run / "dispatch/tasks/task-1/attempt-001"
+    attempt.mkdir(parents=True)
+    if source == "pgid":
+        (attempt / "pgid").write_text("123456\n")
+    else:
+        (run / "dispatch-provider.json").write_text(json.dumps({
+            "run_token": mod.run_identity(run), "provider_pgid": 123456,
+            "provider_pid": 123456, "provider_started_at": "recorded",
+        }))
+    (path.parent / "stderr.log").write_text("No space left on device" if disk_full == "stderr" else "diagnostic")
+    def gone(pgid, sig):
+        assert (pgid, sig) == (123456, 0)
+        raise ProcessLookupError()
+    monkeypatch.setattr(mod.os, "killpg", gone)
+    monkeypatch.setattr(mod.shutil, "disk_usage", lambda path: SimpleNamespace(
+        free=0 if disk_full == "space" else 1024**3))
+    assert mod.reap_attempts(run) == [str(path)]
+    terminal = json.loads(path.read_text())
+    assert terminal["pgid"] == 123456
+    assert terminal["state"] == "terminal"
+    assert terminal["evidence"]["signature"] == ("host_disk_full" if disk_full else "pgid_gone")
+    assert terminal["error_class"] == ("host_resource" if disk_full else "provider_error")
+    assert not (run / "dispatch-status.json").exists()
+
+
+def test_attempt_warnings_do_not_leak_between_attempts(tmp_path, monkeypatch):
+    code = "import json,sys\nsys.stdin.read()\nprint(json.dumps({'type':'result','result':'DONE'}))\n"
+    run, prompt, command = real_owner_fixture(tmp_path, monkeypatch, code)
+    policy = tmp_path / ".agents/fabric-policy.json"
+    policy.write_text(json.dumps({"memory_floor_percent": {"read_only": 5}}))
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    monkeypatch.chdir(tmp_path)
+    mod = load_dispatch_module()
+    original_open = os.open
+    original_write = mod.write_owned
+    first = [True]
+    def open_file(path, *args, **kwargs):
+        if first[0] and Path(path).name == "admission.lock":
+            raise OSError(5, "lock unavailable")
+        return original_open(path, *args, **kwargs)
+    def write(run_dir, path, content):
+        if first[0] and path.name == "pgid":
+            raise OSError(28, "No space left on device")
+        return original_write(run_dir, path, content)
+    monkeypatch.setattr(mod.os, "open", open_file)
+    monkeypatch.setattr(mod, "write_owned", write)
+    monkeypatch.setattr(mod.memory_admission, "available_memory_mb", lambda: (100, 100))
+    args = mod.parser().parse_args(command[2:] + ["--batch-child"])
+    assert mod.dispatch(args) == 0
+    first[0] = False
+    assert mod.dispatch(args) == 0
+    rows = [json.loads(path.read_text()) for path in sorted(run.glob("tasks/*/attempt-*/attempt.json"))]
+    assert any("memory admission lock unavailable" in warning for warning in rows[0]["warnings"])
+    assert any("provider bookkeeping write failed" in warning for warning in rows[0]["warnings"])
+    assert not any("memory admission lock unavailable" in warning or "provider bookkeeping write failed" in warning
+                   for warning in rows[1]["warnings"])
+
+
+def test_disk_admission_rechecks_after_memory_wait(tmp_path, monkeypatch):
+    code = "import json,sys\nsys.stdin.read()\nprint(json.dumps({'type':'result','result':'DONE'}))\n"
+    run, prompt, command = real_owner_fixture(tmp_path, monkeypatch, code)
+    (tmp_path / ".agents/fabric-policy.json").write_text(json.dumps({"memory_floor_percent": {"read_only": 5}}))
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    monkeypatch.chdir(tmp_path)
+    mod = load_dispatch_module()
+    waited = []
+    def probe():
+        waited.append(True)
+        return (100, 100) if len(waited) > 1 else (0, 100)
+    monkeypatch.setattr(mod.memory_admission, "available_memory_mb", probe)
+    monkeypatch.setattr(mod.memory_admission, "POLL_SECONDS", 0.001)
+    monkeypatch.setattr(mod.shutil, "disk_usage", lambda path: SimpleNamespace(free=0 if waited else 1024**3))
+    assert mod.dispatch(mod.parser().parse_args(command[2:])) == 1
+    row = json.loads((run / "tasks/dispatch-001/attempt-001/attempt.json").read_text())
+    assert len(waited) >= 2
+    assert row["error"] == "host_disk_full"
+    assert row["pgid"] is None
+
+
+@pytest.mark.parametrize("failure", ["adapter", "stderr", "terminal", "terminal_once"])
+def test_terminal_io_is_best_effort(tmp_path, monkeypatch, failure):
+    code = "import json,sys\nsys.stdin.read()\nprint(json.dumps({'type':'result','result':'DONE'}))\n"
+    run, prompt, command = real_owner_fixture(tmp_path, monkeypatch, code)
+    monkeypatch.chdir(tmp_path)
+    mod = load_dispatch_module()
+    original_write = mod.write_owned
+    original_open = os.open
+    failed = []
+    def open_file(path, *args, **kwargs):
+        if not failure.startswith("terminal") and Path(path).name == "events.jsonl":
+            raise OSError(28, "No space left on device")
+        return original_open(path, *args, **kwargs)
+    def write(run_dir, path, content):
+        terminal = (path.name == "attempt.json" and json.loads(content).get("state") == "terminal")
+        if ((failure == "adapter" and path.name == "adapter-receipt.json")
+                or (failure == "stderr" and path.name == "stderr.log")
+                or (failure.startswith("terminal") and terminal and (failure == "terminal" or not failed))):
+            failed.append(path)
+            raise mod.OwnedFileError("publication failed") from OSError(28, "No space left on device")
+        return original_write(run_dir, path, content)
+    monkeypatch.setattr(mod.os, "open", open_file)
+    monkeypatch.setattr(mod, "write_owned", write)
+    args = mod.parser().parse_args(command[2:])
+    assert mod.dispatch(args) == (0 if failure.startswith("terminal") else 1)
+    assert failed
+    assert args._last_row["state"] == "terminal"
+    if not failure.startswith("terminal"):
+        assert args._last_row["evidence"]["signature"] == "host_disk_full"
+    elif failure == "terminal":
+        assert (run / "dispatch/tasks/dispatch-001/attempt-001/tmp/children").is_dir()
+    else:
+        assert not (run / "dispatch/tasks/dispatch-001/attempt-001/tmp").exists()
+
 
 def test_local_writer_launch_does_not_read_the_host_configuration(tmp_path, monkeypatch):
     code = '''import json,sys
@@ -4004,6 +4214,7 @@ def test_close_mcp_run_reads_legacy_successful_canonical_attempt(tmp_path):
     receipt = json.loads((run / 'RUN_RECEIPT.json').read_text())
     assert receipt['status'] == 'ok'
     assert receipt['attempts'] == [{**row, 'status': 'ok'}]
+    assert not (run / 'dispatch-status.json').exists()
 
 
 def test_close_mcp_run_preserves_input_required_for_resumption(tmp_path):
@@ -4609,6 +4820,8 @@ print(json.dumps({'type':'result','result':'RESUMED ' + session}))
     ('interrupted', 'supervisor_signal'),
     ('failed', 'provider_signal'),
     ('failed', 'provider_incomplete'),
+    ('failed', 'host_disk_full'),
+    ('failed', 'provider_lost'),
 ])
 def test_incomplete_writer_without_claude_session_returns_typed_fix(tmp_path, status, signature):
     mod = load_dispatch_module()

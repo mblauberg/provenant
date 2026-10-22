@@ -615,7 +615,8 @@ def process_evidence(run_dir: Path, row: dict[str, Any]) -> dict[str, Any]:
         else:
             started = row.get("pgid_started_at")
             observed = process_info.start_time(pgid) if started else None
-            evidence["pgid_probe"] = "reused" if started and observed and observed != started else "live"
+            if started and observed:
+                evidence["pgid_probe"] = "reused" if observed != started else "live"
     for name in ("events", "stderr"):
         try:
             value = (row.get("paths") or {}).get(name)
@@ -632,6 +633,55 @@ def process_evidence(run_dir: Path, row: dict[str, Any]) -> dict[str, Any]:
         except (OSError, OwnedFileError):
             pass
     return evidence
+
+
+def reap_provider_identity(run_dir: Path, path: Path, row: dict[str, Any]) -> dict[str, Any]:
+    if type(row.get("pgid")) is int and row["pgid"] > 0:
+        return {"pgid": row["pgid"], "pgid_started_at": row.get("pgid_started_at")}
+    attempt_dir = run_dir / "dispatch/tasks" / path.parent.parent.name / path.parent.name
+    for directory in dict.fromkeys((path.parent, attempt_dir)):
+        try:
+            pgid = int(read_bound_bytes(run_dir, (directory / "pgid").relative_to(run_dir), label="provider pgid"))
+            if pgid > 0:
+                return {"pgid": pgid, "pgid_started_at": row.get("pgid_started_at")}
+        except (OSError, ValueError, OwnedFileError):
+            pass
+    try:
+        provider = json.loads(read_bound_bytes(run_dir, "dispatch-provider.json", label="provider identity"))
+        evidence = reap_run_evidence(run_dir)
+        token = evidence[1] if evidence else None
+        pgid = provider.get("provider_pgid")
+        if (provider.get("run_token") == (token or run_identity(run_dir))
+                and provider.get("task_id", row.get("task_id")) == row.get("task_id")
+                and provider.get("attempt", row.get("attempt")) == row.get("attempt")
+                and type(pgid) is int and pgid > 0):
+            return {"pgid": pgid, "pgid_started_at": provider.get("provider_started_at")}
+    except (OSError, ValueError, TypeError, AttributeError, OwnedFileError):
+        pass
+    return {}
+
+
+def reap_disk_full(run_dir: Path, row: dict[str, Any]) -> str | None:
+    try:
+        value = (row.get("paths") or {}).get("stderr")
+        if value:
+            fd, _, _ = open_contained_regular(run_dir, value, os.O_RDONLY, label="stderr")
+            try:
+                os.lseek(fd, max(0, os.fstat(fd).st_size - 8192), os.SEEK_SET)
+                tail = os.read(fd, 8192).decode("utf-8", errors="replace")
+            finally:
+                os.close(fd)
+            if re.search(r"ENOSPC|no space left on device|disk (?:is )?full", tail, re.I):
+                return tail[-400:]
+    except (OSError, OwnedFileError):
+        pass
+    try:
+        workspace = Path(row.get("workspace_root") or row.get("cwd") or run_dir)
+        if shutil.disk_usage(run_dir).free < disk_floor_bytes(workspace, row.get("mode", "read_only")):
+            return "Free space below disk_floor_bytes at reap time"
+    except (OSError, ValueError, KeyError):
+        pass
+    return None
 
 
 def reap_attempts(run_dir: Path) -> list[str]:
@@ -654,10 +704,11 @@ def reap_attempts(run_dir: Path) -> list[str]:
                     row = json.loads(read_bound_bytes(run_dir, path.relative_to(run_dir), label="attempt receipt"))
                     if not isinstance(row, dict) or row.get("schema") != "fabric.attempt.v1" or row.get("state") != "running":
                         continue
-                    pgid = row.get("pgid")
+                    identity = reap_provider_identity(run_dir, path, row)
+                    pgid = identity.get("pgid")
                     if not isinstance(pgid, int) or pgid <= 0:
                         continue
-                    started = row.get("pgid_started_at")
+                    started = identity.get("pgid_started_at")
                     try:
                         os.killpg(pgid, 0)
                     except ProcessLookupError:
@@ -682,11 +733,21 @@ def reap_attempts(run_dir: Path) -> list[str]:
                         status = reap_stop_status(run_dir, path, row)
                         if status is None:
                             continue
+                        row.update(identity)
+                        disk_error = reap_disk_full(run_dir, row)
+                        if disk_error and status == "lost":
+                            status = "failed"
+                            reason = "host_disk_full"
+                            row["error"] = "host_disk_full"
+                            row["fix"] = "host_disk_full: free disk space or lower the mode's disk_floor_bytes in .agents/fabric-policy.json."
                         row.update(state="terminal", status=status, ended_at=now(), retryable=status == "lost",
-                                   error_class=provider_exec.error_class(status))
+                                   error_class=provider_exec.error_class(status, reason))
                         row["evidence"] = {**(row.get("evidence") or {}), "signature": reason,
-                                           "excerpt": "Attempt process group is gone" if reason == "pgid_gone"
+                                           "excerpt": disk_error if reason == "host_disk_full" else
+                                           "Attempt process group is gone" if reason == "pgid_gone"
                                            else "Attempt process group start time no longer matches"}
+                        if disk_error:
+                            row["evidence"]["host_disk_full"] = True
                         row["evidence"].update(process_evidence(run_dir, row))
                         row["digest"] = render_digest(row)
                         write_owned(run_dir, path, json.dumps(row, indent=2) + "\n")
@@ -1083,7 +1144,7 @@ def incomplete_provider_turn(attempt: dict) -> bool:
     """Include provider deaths whose failure status does not imply a finished turn."""
     return attempt.get("status") in INCOMPLETE_TURN_STATUSES or (
         attempt.get("status") == "failed"
-        and (attempt.get("evidence") or {}).get("signature") in {"provider_signal", "provider_incomplete"}
+        and (attempt.get("evidence") or {}).get("signature") in {"provider_signal", "provider_incomplete", "host_disk_full", "provider_lost"}
     )
 
 
@@ -1398,7 +1459,7 @@ def _copy_git_evidence(
     return metadata, f"sha256:{hasher.hexdigest()}"
 
 
-def _record_provider_process(run_dir: Path, process: subprocess.Popen[Any]) -> None:
+def _record_provider_process(run_dir: Path, process: subprocess.Popen[Any], *, task_id=None, attempt=None) -> None:
     """Record the provider's identity so a detached run stays reachable.
 
     The MCP front door spawns this owner detached and then lets go of it. If
@@ -1417,6 +1478,8 @@ def _record_provider_process(run_dir: Path, process: subprocess.Popen[Any]) -> N
             "provider_pid": process.pid,
             "provider_pgid": os.getpgid(process.pid),
             "provider_started_at": started_at or None,
+            "task_id": task_id,
+            "attempt": attempt,
         }
         (run_dir / "dispatch-provider.json").write_text(
             json.dumps(record, indent=2) + "\n", encoding="utf-8",
@@ -1425,7 +1488,7 @@ def _record_provider_process(run_dir: Path, process: subprocess.Popen[Any]) -> N
         return
 
 
-def _retire_provider_process(run_dir: Path, process: subprocess.Popen[Any] | None) -> None:
+def _retire_provider_process(run_dir: Path, process: subprocess.Popen[Any] | None, *, task_id=None, attempt=None) -> None:
     """Drop this run's provider record once this owner has reaped the provider.
 
     A reaped provider's pid can be recycled; a record left behind, especially one
@@ -1437,7 +1500,8 @@ def _retire_provider_process(run_dir: Path, process: subprocess.Popen[Any] | Non
     try:
         record = json.loads(path.read_text(encoding="utf-8"))
         token = os.environ.get("PROVENANT_RUN_TOKEN") or run_identity(run_dir)
-        if record.get("run_token") == token and record.get("provider_pid") == process.pid:
+        if (record.get("run_token") == token and record.get("provider_pid") == process.pid
+                and record.get("task_id") == task_id and record.get("attempt") == attempt):
             path.unlink()
     except (OSError, ValueError):
         return
@@ -1819,7 +1883,7 @@ def profile_knob(args: argparse.Namespace, name: str, fallback: Any = None) -> A
 
 
 def disk_floor_bytes(workspace_root: Path, mode: str) -> int:
-    defaults = {"worktree_write": 2 * 1024**3, "read_only": 0}
+    defaults = {"worktree_write": 500 * 1024**2, "read_only": 500 * 1024**2}
     path = workspace_root / ".agents/fabric-policy.json"
     fix = "Set .agents/fabric-policy.json disk_floor_bytes to non-negative integers."
     try:
@@ -1947,7 +2011,8 @@ def terminal_contract(args,run_dir,legacy,adapter,number,attempt_dir,active=None
         + list(getattr(args, "_memory_warnings", [])) + list(getattr(args, "_branch_warnings", []))
         + list(getattr(args, "_resume_warnings", [])) + list(getattr(args, "_bookkeeping_warnings", []))))
     row["timing"]["queued_seconds"] = getattr(args, "_queued_seconds", 0.0)
-    if legacy.get("process_error", "").startswith("Set .agents/fabric-policy.json memory_floor_percent"):
+    if legacy.get("process_error", "").startswith(("Set .agents/fabric-policy.json memory_floor_percent",
+                                                    "Set .agents/fabric-policy.json disk_floor_bytes")):
         row["fix"] = legacy["process_error"]
     if legacy["outcome"] == "host_disk_full":
         row["error"] = "host_disk_full"
@@ -1959,9 +2024,13 @@ def terminal_contract(args,run_dir,legacy,adapter,number,attempt_dir,active=None
         row["fix"]=adapter.get("fix") or adapter.get("reason") or refusal["fix"];row["evidence"]=refusal["evidence"];row["error"]=refusal["error"]
     row.update(state="terminal",status=status,ended_at=legacy["finished_at"],question=adapter.get("question") or (legacy.get("question") or {}).get("prompt"))
     row["usage_source"] = adapter.get("usage_source") or provider_exec.context_usage.usage_source(row.get("context") or {})
-    if legacy.get("process_error"):
+    if legacy.get("process_error") and legacy["outcome"] in {"provider_lost", "host_disk_full", "process_spawn_error"}:
         row["evidence"] = {**row["evidence"], "signature": legacy["outcome"],
                            "excerpt": legacy["process_error"][:400]}
+    for name in ("events", "stderr"):
+        value = (adapter.get("paths") or {}).get(name)
+        if value:
+            row["paths"][name] = relative_path(run_dir, run_dir / value)
     row["evidence"].update(process_evidence(run_dir, row))
     row["error_class"] = provider_exec.error_class(status, row["evidence"].get("signature"))
     if not legacy.get("result"): row["paths"]["result"]=None
@@ -2113,6 +2182,8 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
     args._last_plan={}
     args._last_row=None
     args._attempt_scopes={}
+    args._bookkeeping_warnings=[]
+    args._memory_warnings=[]
     owner_started_ms = None
     try:
         incoming = ({} if getattr(args, "retry_of", None) or getattr(args, "fallback_from", None)
@@ -2376,7 +2447,19 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
     old_handlers: dict[int, Any] = {}
     def admit_attempt(active, cancelled_now, *, cooldown_blocked=False):
         nonlocal started, started_at, memory_lease, process_error, admission_queued_seconds
-        if args.access_mode == "worktree_write" and shutil.disk_usage(run_dir).free < disk_floor_bytes(workspace, args.access_mode):
+        def warning(message):
+            active["warnings"].append(message)
+            args._memory_warnings = getattr(args, "_memory_warnings", []) + [message]
+        def disk_available():
+            floor = disk_floor_bytes(workspace, args.access_mode)
+            if not floor:
+                return True
+            try:
+                return shutil.disk_usage(run_dir).free >= floor
+            except OSError as exc:
+                warning(f"disk admission probe failed: {exc}; admitting attempt")
+                return True
+        if not disk_available():
             process_error = "host_disk_full"
             return False
         pacing = vars(args).pop("_rate_limit_retry", None)
@@ -2403,9 +2486,6 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
             active["timing"]["queued_since"] = waiting_since
             active["timing"]["queued_seconds"] = getattr(args, "_queued_seconds", 0.0)
             publish_contract(run_dir, active)
-        def warning(message):
-            active["warnings"].append(message)
-            args._memory_warnings = getattr(args, "_memory_warnings", []) + [message]
         try:
             memory_lease = memory_admission.admit(waiting, cancelled_now, warning,
                                                    waited_seconds=admission_queued_seconds,
@@ -2424,6 +2504,10 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
         active["timing"]["queued_seconds"] = args._queued_seconds
         started = time.monotonic()
         started_at = now()
+        if memory_lease is not None and not disk_available():
+            process_error = "host_disk_full"
+            memory_lease.close()
+            memory_lease = None
         if memory_lease is not None and pacing and active["mode"] == "worktree_write":
             blocked = {**pacing["row"], "exit": 1, "pgid": None}
             guard_writer_retry(blocked, pacing["writer_start"], active["cwd"])
@@ -2570,7 +2654,7 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
                     args._phase_timings["spawn"] = round((provider_started_at[0] - spawn_started) * 1000, 3)
                     active["pgid"]=child.pid
                     active["pgid_started_at"]=process_info.start_time(child.pid)
-                    _record_provider_process(run_dir,child)
+                    _record_provider_process(run_dir,child,task_id=args.task_id,attempt=attempt_number)
                     try:
                         write_owned(run_dir,attempt_dir/"pgid",str(child.pid)+"\n")
                         publish_contract(run_dir,active)
@@ -2608,7 +2692,7 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
                     plan["warnings"] = active["warnings"]
                     adapter_record=provider_exec.execute(plan,result_path,events_path=attempt_dir/"events.jsonl",stderr_path=stderr_path,
                         on_start=provider_started,on_progress=progress,cancelled=cancellation)
-                    _retire_provider_process(run_dir,process)
+                    _retire_provider_process(run_dir,process,task_id=args.task_id,attempt=attempt_number)
                     retry_plan = effort_retry_plan(plan, adapter_record)
                     if retry_plan is not None and not cancellation():
                         plan = retry_plan
@@ -2621,7 +2705,7 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
                             stderr_path=stderr_path, on_start=provider_started,
                             on_progress=progress, cancelled=cancellation,
                         )
-                        _retire_provider_process(run_dir, process)
+                        _retire_provider_process(run_dir, process, task_id=args.task_id, attempt=attempt_number)
                 relaunch_skipped = False
                 args._phase_timings["provider"] = round((time.monotonic() - (provider_started_at[0] or spawn_started)) * 1000, 3)
                 if (args.resume and args.tool=="claude" and plan.get("resume_session")
@@ -2681,8 +2765,11 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
         except (OSError,ValueError,subprocess.SubprocessError) as exc:
             process_error=f"{exc.__cause__}: {exc}" if isinstance(exc.__cause__, OSError) else str(exc)
             process_errno=getattr(exc, "errno", None) or getattr(exc.__cause__, "errno", None)
-            if not adapter_path.exists(): write_owned(run_dir,adapter_path,"{}\n")
-            if not stderr_path.exists(): write_owned(run_dir,stderr_path,str(exc))
+            for path, content in ((adapter_path, "{}\n"), (stderr_path, str(exc))):
+                try:
+                    if not path.exists(): write_owned(run_dir, path, content)
+                except (OSError, OwnedFileError):
+                    pass
         finally:
             if memory_lease is not None:
                 memory_lease.close()
@@ -2757,7 +2844,7 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
                     )
                     if memory_lease is not None:
                         memory_lease.started()
-                    _record_provider_process(run_dir, process)
+                    _record_provider_process(run_dir, process, task_id=args.task_id, attempt=attempt_number)
 
                     # A request can arrive after the provider is spawned but
                     # before Popen returns. Reconcile it before entering the
@@ -2829,7 +2916,7 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
                         pass
                     if cancelled:
                         process_error = "cancelled"
-                    _retire_provider_process(run_dir, process)
+                    _retire_provider_process(run_dir, process, task_id=args.task_id, attempt=attempt_number)
         except InterruptedError:
             pass
         except (OSError, ValueError) as exc:
@@ -2907,7 +2994,7 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
         outcome = "cancelled"
     elif not observed_exit:
         status = "failed"
-        outcome = "process_spawn_error" if process is None else "host_disk_full" if process_errno == errno.ENOSPC else "provider_lost"
+        outcome = "host_disk_full" if process_errno == errno.ENOSPC else "process_spawn_error" if process is None else "provider_lost"
     elif result_invalid:
         status = "failed"
         outcome = "result_invalid_path"
@@ -2981,7 +3068,7 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
             **adapter,
             "adapter_receipt": {
                 "path": relative_path(run_dir, adapter_path),
-                "digest": digest(adapter_path),
+                "digest": digest(adapter_path) if adapter_path.exists() else None,
             },
         },
         "outcome": outcome,
@@ -3000,7 +3087,7 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
             if result_exists
             else None
         ),
-        "stderr": {"path": relative_path(run_dir, stderr_path), "digest": digest(stderr_path)},
+        "stderr": {"path": relative_path(run_dir, stderr_path), "digest": digest(stderr_path) if stderr_path.exists() else None},
         "process": {
             "pid": process.pid if process is not None else None,
             "started_at": started_at,
@@ -3050,16 +3137,30 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
     for sig, handler in old_handlers.items():
         signal.signal(sig, handler)
     row = terminal_contract(args,run_dir,record,adapter,attempt_number,attempt_dir,active)
+    def prune_tmp():
+        left=attempt_storage.prune_private_tmp(run_dir,attempt_dir,row["status"])[1]
+        if left: row["warnings"].append("attempt tmp left in place (mount or unremovable): "+", ".join(left[:3]))
     # Close registration under journal custody before removing its private tmp.
-    publish_contract(run_dir, row)
-    left=attempt_storage.prune_private_tmp(run_dir,attempt_dir,row["status"])[1]
-    if left: row["warnings"].append("attempt tmp left in place (mount or unremovable): "+", ".join(left[:3]))
+    terminal_published = False
+    try:
+        publish_contract(run_dir, row)
+        terminal_published = True
+    except (OSError, OwnedFileError) as exc:
+        row["warnings"].append("terminal publication unavailable: " + str(exc))
+        row["digest"] = render_digest(row)
+    if terminal_published: prune_tmp()
     for action in (lambda: write_cooldown(row),lambda: write_route_health(row),lambda: append_index(row,run_dir,root=run_workspace(run_dir, Path.cwd())/".agent-run")):
         try: action()
         except (OSError,ValueError) as exc: row["warnings"].append("terminal index unavailable: "+str(exc))
     # Include the first durable terminal publication; rewrite only its timing.
     row["timing"]["phases"]["finalize"] = round((time.monotonic() - finalize_started) * 1000, 3)
-    publish_contract(run_dir,row)
+    try:
+        publish_contract(run_dir,row)
+        if not terminal_published: prune_tmp()
+    except (OSError, OwnedFileError) as exc:
+        warning = "terminal publication unavailable: " + str(exc)
+        if warning not in row["warnings"]: row["warnings"].append(warning)
+        row["digest"] = render_digest(row)
     args._last_row=row
     output_record = {**record, "attempt_digest": attempt_digest, "fabric":row, "digest":row["digest"]}
     # Batch children retain the legacy record for the batch evidence validator.
@@ -3110,10 +3211,8 @@ def close_mcp_run(run_dir: Path) -> None:
         status_path = run_dir / "dispatch-status.json"
         if status_path.exists():
             status = json.loads(read_bound_bytes(run_dir, "dispatch-status.json", label="dispatch status"))
-        else:
-            status = {}
-        status.update(status=receipt["status"], finished_at=receipt["closed_at"])
-        write_owned(run_dir, status_path, json.dumps(status, indent=2) + "\n")
+            status.update(status=receipt["status"], finished_at=receipt["closed_at"])
+            write_owned(run_dir, status_path, json.dumps(status, indent=2) + "\n")
     except (OSError, ValueError, TypeError, KeyError, AttributeError, OwnedFileError):
         pass
 

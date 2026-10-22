@@ -5677,7 +5677,6 @@ def test_capture_is_bounded_but_result_is_complete(tmp_path, monkeypatch):
     assert path.read_bytes() == b"A" * 50 + b"B" * 50
 
 
-
 @pytest.mark.parametrize("failure", ["write", "flush"])
 def test_capture_keeps_tail_when_disk_writes_fail(tmp_path, failure):
     module = supervisor()
@@ -5721,6 +5720,7 @@ def test_handler_diagnostics_tolerate_enospc(tmp_path, monkeypatch):
     assert record["status"] == "tool_missing"
     assert "missing-provider" in record["evidence"]["excerpt"]
     assert any("capture write failed: [Errno 28]" in warning for warning in record["warnings"])
+
 
 def codex_profile(plan):
     """The permissions profile a Codex plan selects, and the config overrides that build it."""

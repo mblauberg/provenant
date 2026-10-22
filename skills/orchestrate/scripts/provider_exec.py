@@ -1690,13 +1690,13 @@ STATUS_ERROR_CLASSES = {
     "auth_required": "auth", "rate_limited": "rate_limited", "model_unavailable": "model_unavailable",
     "timed_out": "timeout", "startup_timeout": "timeout", "stalled": "timeout",
     "lost": "provider_error", "cancelled": "cancelled",
-    "provider_lost": "host_resource", "host_disk_full": "host_resource",
+    "provider_lost": "provider_error", "host_disk_full": "host_resource",
 }
 ERROR_CLASS_ALIASES = {
     "permission_blocked": "sandbox_denied", "usage_limited": "usage_limited", "quota_exhausted": "usage_limited",
     "auth_required": "auth", "auth_expired": "auth", "rate_limited": "rate_limited",
     "model_unavailable": "model_unavailable", "pinned_model_substitution": "model_unavailable",
-    "provider_lost": "host_resource", "host_disk_full": "host_resource",
+    "provider_lost": "provider_error", "host_disk_full": "host_resource",
     "provider_transport": "transient", "timed_out": "timeout", "startup_timeout": "timeout",
     "stalled": "timeout", "print_timeout": "timeout", "idle_watchdog": "timeout",
     "startup_watchdog": "timeout", "wall_clock": "timeout", "lost": "provider_error",
