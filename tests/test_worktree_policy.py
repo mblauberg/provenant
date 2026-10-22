@@ -136,6 +136,49 @@ def test_create_cow_clones_root_and_workspace_node_modules(tmp_path, capsys, mon
     assert not worktree.exists()
 
 
+def test_create_links_worktree_node_modules_for_fabric_runtime(tmp_path, capsys, monkeypatch):
+    repo = tmp_path / "project"
+    head = init_repo(repo)
+    (repo / "runtime" / "fabric").mkdir(parents=True)
+    (repo / ".gitignore").write_text("node_modules\n")
+    subprocess.run(["git", "-C", str(repo), "add", ".gitignore"], check=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-qm", "ignore modules"], check=True)
+    (repo / "package-lock.json").write_text("lock\n")
+    subprocess.run(["git", "-C", str(repo), "add", "package-lock.json"], check=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-qm", "add lock"], check=True)
+    head = subprocess.check_output(["git", "-C", str(repo), "rev-parse", "HEAD"], text=True).strip()
+    (repo / "node_modules" / "vitest").mkdir(parents=True)
+    (repo / "node_modules" / "vitest" / "package.json").write_text("{}\n")
+    (repo / "node_modules" / "@local").mkdir()
+    (repo / "node_modules" / "@local" / "fabric").symlink_to("../../runtime/fabric")
+    monkeypatch.setattr(worktree_policy, "node_modules_preflight_passes", lambda _root: True)
+    monkeypatch.setattr(
+        worktree_policy, "cow_clone",
+        lambda source, target: shutil.copytree(source, target, symlinks=True),
+    )
+
+    assert worktree_policy.main([
+        "create", "fabric-review", "--repo", str(repo), "--detach", head,
+    ]) == 0
+
+    worktree = repo / ".worktrees" / "fabric-review"
+    linked_modules = worktree / "runtime" / "fabric" / "node_modules"
+    assert linked_modules.is_symlink()
+    assert os.readlink(linked_modules) == "../../node_modules"
+    assert linked_modules.resolve() == (worktree / "node_modules").resolve()
+    assert (linked_modules / "vitest" / "package.json").is_file()
+    fabric_package = (linked_modules / "@local" / "fabric").resolve()
+    assert worktree.resolve() in fabric_package.parents
+    assert fabric_package == (worktree / "runtime" / "fabric").resolve()
+    ignored = subprocess.run(
+        ["git", "-C", str(worktree), "check-ignore", "runtime/fabric/node_modules"],
+        check=False, capture_output=True, text=True,
+    )
+    assert ignored.returncode == 0
+    assert worktree_policy.worktree_residue(worktree) == []
+    assert json.loads(capsys.readouterr().out)["node_modules"] == "cloned"
+
+
 def test_node_preflight_uses_the_callers_node_path_and_clears_git_redirects(tmp_path, monkeypatch):
     root = tmp_path / "checkout"
     (root / "scripts").mkdir(parents=True)
@@ -694,7 +737,10 @@ def test_verify_claim_accepts_new_descended_clean_head_with_receipt_evidence(tmp
     assert receipt["claimed_commit"] == claimed
 
 
-def test_verify_claim_holds_an_unreleased_instruction_commit_until_the_chair_releases_it(tmp_path, capsys, repo_template):
+def test_verify_claim_holds_an_unreleased_instruction_commit_until_the_chair_releases_it(
+    tmp_path, capsys, monkeypatch, repo_template,
+):
+    monkeypatch.delenv("PROVENANT_ATTEMPT_MARKER", raising=False)
     _repo, base, worktree = _implementation_worktree(tmp_path, capsys, repo_template)
     (worktree / ".agents").mkdir()
     (worktree / ".agents/late.md").write_text("late instruction\n")

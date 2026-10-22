@@ -2,11 +2,14 @@ import json
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 import importlib.util
+import io
 import os
 from pathlib import Path
 import shutil
 import subprocess
 import sys
+from contextlib import redirect_stderr, redirect_stdout
+from unittest.mock import patch
 
 import pytest
 import yaml
@@ -114,12 +117,12 @@ def test_fallback_inherits_adapter_training_flag_without_false_default():
     assert candidates[0]["trains_on_prompts"] is None
 CRUCIAL_RISK_OVERRIDE = CATALOG["families"]["anthropic"]["risk_tier_overrides"]["crucial"]
 RISK_OVERRIDE_MODEL = CRUCIAL_RISK_OVERRIDE["models"][0]
-NON_OCCUPANT_MODELS = tuple(
+NON_OCCUPANT_MODELS = tuple(dict.fromkeys(
     model
     for models in CATALOG["families"]["anthropic"]["aliases"].values()
     for model in models
     if RISK_OVERRIDE_MODEL.casefold() not in model.casefold()
-)
+))
 
 
 @pytest.fixture
@@ -202,19 +205,17 @@ def test_python_floor_rejects_missing_interpreter(harness_script, runner):
 
 
 def resolve(*args):
-    arguments = [sys.executable, str(ROOT / "scripts" / "model_route.py"), "resolve", *args]
+    arguments = [str(ROOT / "scripts" / "model_route.py"), "resolve", *args]
     # The router reads its catalogue from the instance root, which defaults to
     # ~/.agents. Left unpinned these cases route against whatever catalogue the
     # developer happens to have installed, so they pass or fail on the machine
     # rather than on the repository. CI already pins the same variable.
-    result = subprocess.run(
-        arguments,
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        env={**os.environ, "PATH": "", "AGENT_FABRIC_INSTANCE_ROOT": str(ROOT),
-             "AGENT_FABRIC_PRODUCT_ROOT": str(ROOT)},
-    )
+    environment = {"PATH": "", "AGENT_FABRIC_INSTANCE_ROOT": str(ROOT),
+                   "AGENT_FABRIC_PRODUCT_ROOT": str(ROOT)}
+    stdout, stderr = io.StringIO(), io.StringIO()
+    with patch.dict(os.environ, environment), redirect_stdout(stdout), redirect_stderr(stderr):
+        result = load_router().main(["resolve", *args])
+    result = subprocess.CompletedProcess(arguments, result, stdout.getvalue(), stderr.getvalue())
     return result, json.loads(result.stdout) if result.stdout else None
 
 
@@ -4875,6 +4876,76 @@ def test_route_tier_names_work_as_adapter_aliases(tmp_path, tier, alias):
     _, original = resolve("--alias", alias, *common)
     assert named["resolved_model"] == original["resolved_model"]
     assert not any("model won" in note for note in named.get("notes", [])), "a tier name is not a model name"
+
+
+@pytest.mark.parametrize("flag", ["--help", "-h"])
+def test_dash_prefixed_positional_argument_falls_through_to_argparse(flag, monkeypatch, capsys):
+    router = load_router()
+    monkeypatch.setattr(router, "route_pick", lambda *_args, **_kwargs: pytest.fail("routed as a tier"))
+    with pytest.raises(SystemExit) as raised:
+        router.main([flag])
+    assert raised.value.code == 0
+    assert "usage:" in capsys.readouterr().out
+
+
+def test_positional_tier_shorthand_reports_unavailable_when_every_member_has_zero_weight(tmp_path):
+    instance = tmp_path / "instance"
+    config = instance / "config"
+    config.mkdir(parents=True)
+    (config / "model-routing.json").write_text(json.dumps({"routes": {"junior": [
+        {**entry, "weight": 0} for entry in CATALOG["routes"]["junior"]
+    ]}}))
+    env = {**os.environ, "AGENT_FABRIC_PRODUCT_ROOT": str(ROOT),
+           "AGENT_FABRIC_INSTANCE_ROOT": str(instance),
+           "AGENT_FABRIC_STATE_ROOT": str(tmp_path / "state")}
+    run = subprocess.run([sys.executable, str(ROOT / "scripts" / "model_route.py"), "junior"],
+                         capture_output=True, text=True, env=env)
+    result = json.loads(run.stdout)
+    assert run.returncode == 2
+    assert result["results"][0]["status"] == "rejected"
+    assert result["results"][0]["error"] == "route_unavailable"
+
+
+def test_legwork_synonym_resolves_through_the_configured_route_pool(tmp_path):
+    instance = tmp_path / "instance"
+    config = instance / "config"
+    config.mkdir(parents=True)
+    (config / "model-routing.json").write_text(json.dumps({"routes": {"junior": [
+        {**entry, "weight": 0} for entry in CATALOG["routes"]["junior"]
+    ]}}))
+    env = {**os.environ, "AGENT_FABRIC_PRODUCT_ROOT": str(ROOT),
+           "AGENT_FABRIC_INSTANCE_ROOT": str(instance),
+           "AGENT_FABRIC_STATE_ROOT": str(tmp_path / "state")}
+    run = subprocess.run([sys.executable, str(ROOT / "scripts" / "model_route.py"), "legwork"],
+                         capture_output=True, text=True, env=env)
+    result = json.loads(run.stdout)
+    assert run.returncode == 2
+    assert result["results"][0]["status"] == "rejected"
+    assert result["results"][0]["error"] == "route_unavailable"
+    assert "junior" in result["results"][0]["fix"]
+
+
+@pytest.mark.parametrize("tier,route", [("junior", "junior"), ("legwork", "junior")])
+def test_positional_route_tier_shorthand_picks_from_the_pool(tier, route, monkeypatch, capsys):
+    router = load_router()
+    calls = []
+
+    def route_pick(requests):
+        calls.extend(requests)
+        return {"status": "ok", "results": [{"status": "ok", "route": route,
+                "picks": [{"adapter": "codex", "model": "gpt-6-luna", "reason": f"{route} top"}],
+                "warnings": []}]}
+
+    monkeypatch.setattr(router, "route_pick", route_pick)
+    monkeypatch.setattr(router, "_quota_states", lambda: {"codex": {
+        "account": "work", "state": "deficit", "summary": "window over pace", "observed_at": "now"
+    }})
+    assert router.main([tier]) == 0
+    result = json.loads(capsys.readouterr().out)
+    assert calls == [{"route": tier}]
+    assert result["results"][0]["picks"][0]["model"] == "gpt-6-luna"
+    assert result["results"][0]["picks"][0]["quota"]["summary"] == "window over pace"
+    assert result["results"][0]["warnings"] == ["codex quota: window over pace"]
 
 
 LIVE_OPENCODE = ["opencode/big-pickle", "opencode-go/qwen3.8-flash", "opencode-go/kimi-k3",

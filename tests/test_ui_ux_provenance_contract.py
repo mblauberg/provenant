@@ -2,6 +2,7 @@ import hashlib
 from pathlib import Path
 import subprocess
 
+import pytest
 import yaml
 
 
@@ -22,18 +23,31 @@ def _component_for(relative: str, components: list[dict]) -> list[str]:
     return owners
 
 
-def test_every_shipped_skill_file_has_exactly_one_provenance_component():
-    ledger = yaml.safe_load((SKILL / "evals" / "provenance_components.yaml").read_text())
-    components = ledger["components"]
+@pytest.mark.parametrize(
+    ("directory", "ledger_path"),
+    (
+        (SKILL, SKILL / "evals" / "provenance_components.yaml"),
+        (UI_EVIDENCE, UI_EVIDENCE / "provenance_components.yaml"),
+        (UI_LIVE, UI_LIVE / "provenance_components.yaml"),
+    ),
+    ids=("skill", "ui-evidence", "ui-live"),
+)
+def test_every_shipped_provenance_file_has_exactly_one_component(directory, ledger_path):
+    components = yaml.safe_load(ledger_path.read_text())["components"]
     files = [
-        path.relative_to(SKILL).as_posix()
-        for path in SKILL.rglob("*")
+        path.relative_to(directory).as_posix()
+        for path in directory.rglob("*")
         if path.is_file() and "__pycache__" not in path.parts and path.suffix != ".pyc"
     ]
+
     for relative in files:
         owners = _component_for(relative, components)
         assert len(owners) == 1, (relative, owners)
 
+
+def test_skill_provenance_component_metadata_and_paths():
+    ledger = yaml.safe_load((SKILL / "evals" / "provenance_components.yaml").read_text())
+    components = ledger["components"]
     for component in components:
         assert component["origin"] in {"third-party", "harness-original"}
         if component["origin"] == "third-party":
@@ -79,18 +93,9 @@ def test_third_party_components_resolve_to_notices_and_local_licences():
             assert not revisions or all(revision in notices for revision in revisions)
 
 
-def test_every_ui_evidence_runtime_file_has_exactly_one_provenance_component():
+def test_ui_evidence_modification_markers():
     ledger = yaml.safe_load((UI_EVIDENCE / "provenance_components.yaml").read_text())
     components = ledger["components"]
-    files = [
-        path.relative_to(UI_EVIDENCE).as_posix()
-        for path in UI_EVIDENCE.rglob("*")
-        if path.is_file() and "__pycache__" not in path.parts and path.suffix != ".pyc"
-    ]
-
-    for relative in files:
-        assert len(_component_for(relative, components)) == 1, relative
-
     third_party = next(
         component
         for component in components
@@ -159,17 +164,9 @@ def test_modified_impeccable_sources_have_local_modification_notices():
         assert "Modified for Provenant" in (SKILL / relative).read_text()[:500], relative
 
 
-def test_every_ui_live_runtime_file_has_exactly_one_provenance_component():
+def test_ui_live_modification_markers():
     ledger = yaml.safe_load((UI_LIVE / "provenance_components.yaml").read_text())
     components = ledger["components"]
-    files = [
-        path.relative_to(UI_LIVE).as_posix()
-        for path in UI_LIVE.rglob("*")
-        if path.is_file() and "__pycache__" not in path.parts and path.suffix != ".pyc"
-    ]
-    for relative in files:
-        assert len(_component_for(relative, components)) == 1, relative
-
     third_party = next(
         component for component in components
         if component["id"] == "impeccable-ui-live-runtime"

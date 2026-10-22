@@ -17,6 +17,7 @@ described. Fabric is now small enough to be its own documentation: see
 
 - [Fabric across the user's own hosts](fabric-hosts.md)
 - [Host setup and diagnostics](../runbooks/fabric-hosts.md)
+- [Landing lease from a repository script](../runbooks/landing-lease.md)
 
 ## Observability
 
@@ -29,6 +30,7 @@ described. Fabric is now small enough to be its own documentation: see
 - [Progressive-disclosure refactor](harness/disclosure-refactor.md)
 - [Configurable multi-provider execution core](harness/provider-execution-core.md)
 - [Harness operating model: routing, cache, quota and telemetry](harness/operating-model.md)
+- [Graph runner: contract-driven plan graphs (operating model R2)](harness/graph-runner.md)
 - [Harness profiles: cost and quality knobs](harness/profiles.md)
 - [Switching and comparing profiles](../runbooks/harness-profiles.md)
 - [Held-out replay bench for harness changes](harness/replay-bench.md)
