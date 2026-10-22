@@ -312,7 +312,7 @@ def test_front_door_names_the_profile_command():
 
 def dispatch_args(**extra):
     return SimpleNamespace(**{
-        "tool": "codex", "alias": "workhorse", "model": None, "alias_supplied": True, "effort": None,
+        "tool": "codex", "alias": "senior", "model": None, "alias_supplied": True, "effort": None,
         "task_id": "dispatch-001", "access_mode": "read_only", "worktree": None, "_phase_timings": {},
         "reviewer_id": None, "risk_tier": None, "model_override_tier": None, **extra})
 
@@ -428,7 +428,7 @@ def test_effort_shift_steps_a_task_class_route(space):
 def test_effort_shift_lowers_above_the_minimum_unless_the_tier_floors_it(space):
     catalog = json.loads((ROOT / "config/model-routing.json").read_text())
     catalog["task_class_routes"]["research"] = {
-        "alias": "workhorse", "effort": "high", "role": "worker", "models": {"codex": ["gpt-6.1-sol"]}}
+        "alias": "senior", "effort": "high", "role": "worker", "models": {"codex": ["gpt-6.1-sol"]}}
     path = space.project / "catalog.json"
     path.write_text(json.dumps(catalog))
     assert route(space, path, "--task-class", "research", PROVENANT_PROFILE="economy")["effort"] == "medium"

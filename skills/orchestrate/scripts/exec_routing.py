@@ -180,7 +180,7 @@ def confidential_alternatives(adapter, model, alias, catalog=None):
     aliases = entry.get("aliases") if isinstance(entry, dict) else None
     if not aliases and isinstance(entry, dict) and entry.get("fixed_model_family"):
         aliases = catalog.get("families", {}).get(entry["fixed_model_family"], {}).get("aliases")
-    members = aliases.get(alias or "workhorse", []) if isinstance(aliases, dict) else []
+    members = aliases.get(alias or "senior", []) if isinstance(aliases, dict) else []
     return [member for member in members
             if isinstance(member, str) and member != model
             and not disclosure_risk(adapter, member, {}) and not cooling(adapter, member)]
@@ -198,7 +198,7 @@ def candidates(plan, policy=None, catalogue=None, confidential=False):
     catalogue = catalogue if catalogue is not None else snapshot()
     route = plan["route"]
     adapter = plan["adapter"]
-    alias = route.get("alias") or "workhorse"
+    alias = route.get("alias") or "senior"
     adapters = catalogue.get("adapters", {})
     if isinstance(adapters, list):
         adapters = {
@@ -223,7 +223,7 @@ def candidates(plan, policy=None, catalogue=None, confidential=False):
             cross = adapters["opencode"]
             cross_models = (
                 cross.get("aliases", {}).get(alias)
-                or cross.get("aliases", {}).get("workhorse")
+                or cross.get("aliases", {}).get("senior")
                 or [cross.get("default_model")]
             )
             raw += [

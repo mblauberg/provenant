@@ -1597,7 +1597,7 @@
   {
    "id": "gemini-3.1-pro.thinking.swe-bench-pro",
    "model_id": "gemini-3.1-pro",
-   "catalogue": true,
+   "catalogue": false,
    "effort": "thinking",
    "benchmark": "SWE-bench Pro",
    "metric": "pct_resolved",
@@ -1612,7 +1612,7 @@
    "confidence": "M",
    "contamination_note": "Public set; see contamination caveats on the Scale page.",
    "task_class_hint": "implementation",
-   "notes": "Scale leaderboard row 'gemini-3.1-pro (thinking)'. Run date not stated."
+   "notes": "Scale leaderboard row 'gemini-3.1-pro (thinking)'. Run date not stated. Retired from the catalogue."
   },
   {
    "id": "gemini-3.7-flash.high.terminal-bench-4.0",

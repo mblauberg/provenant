@@ -9,6 +9,7 @@ import ctypes
 import fcntl
 import functools
 import hashlib
+import importlib.util
 import json
 import logging
 import math
@@ -237,37 +238,13 @@ def _opencode_discovery_grantable(path, *, directory=False):
     return target.is_file() and target.name in OPENCODE_INSTRUCTION_FILES
 
 
-def _strip_jsonc(text):
-    # Drops comments and trailing commas outside strings, so the result parses as JSON.
-    out, i, quoted, comma = [], 0, False, None
-    while i < len(text):
-        char = text[i]
-        if quoted:
-            out.append(char)
-            if char == "\\" and i + 1 < len(text):
-                out.append(text[i + 1])
-                i += 1
-            elif char == '"':
-                quoted = False
-        elif text.startswith("//", i):
-            i = text.find("\n", i)
-            if i < 0:
-                break
-            continue
-        elif text.startswith("/*", i):
-            end = text.find("*/", i + 2)
-            i = len(text) if end < 0 else end + 2
-            continue
-        elif char.isspace():
-            out.append(char)
-        else:
-            if char in "}]" and comma is not None:
-                out[comma] = ""
-            comma = len(out) if char == "," else None
-            quoted = char == '"'
-            out.append(char)
-        i += 1
-    return "".join(out)
+def _jsonc_loads(text):
+    # The one JSONC reader lives in the product's scripts/lib; a skill reaches it by path.
+    spec = importlib.util.spec_from_file_location(
+        "provenant_jsonc", Path(__file__).resolve().parents[3] / "scripts/lib/jsonc.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.parse_jsonc(text)[0]
 
 
 def _opencode_configured_instructions(home, config_home):
@@ -277,7 +254,7 @@ def _opencode_configured_instructions(home, config_home):
     for config in (config_home / "opencode/opencode.json", config_home / "opencode/opencode.jsonc",
                    home / ".opencode/opencode.json", home / ".opencode/opencode.jsonc"):
         try:
-            entries = json.loads(_strip_jsonc(config.read_text(encoding="utf-8"))).get("instructions", [])
+            entries = _jsonc_loads(config.read_text(encoding="utf-8")).get("instructions", [])
         except (OSError, ValueError, AttributeError):
             continue
         for entry in entries if isinstance(entries, list) else []:

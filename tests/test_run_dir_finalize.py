@@ -36,7 +36,7 @@ def add_manifest_row(run, row):
         handle.write(row + "\n")
 
 
-def review(review_id, scope, lens, family, tier="flagship", status="complete", substitution_for="", wave=1, reason=None):
+def review(review_id, scope, lens, family, tier="principal", status="complete", substitution_for="", wave=1, reason=None):
     evidence_digest = "sha256:" + __import__("hashlib").sha256((review_id + ":evidence").encode()).hexdigest()
     route_digest = "sha256:" + __import__("hashlib").sha256((review_id + ":route").encode()).hexdigest()
     terminal_digest = "sha256:" + __import__("hashlib").sha256((review_id + ":terminal").encode()).hexdigest()
@@ -68,9 +68,9 @@ def substantial_plan(risk="substantial"):
         "concurrency_ceiling": 4,
         "panels": [],
         "reviews": [
-            review("target-memory", "targeted", "memory", "openai", "workhorse"),
-            review("target-routing", "targeted", "routing", "openai", "workhorse"),
-            review("target-authority", "targeted", terminal_lens, "anthropic", "workhorse"),
+            review("target-memory", "targeted", "memory", "openai", "senior"),
+            review("target-routing", "targeted", "routing", "openai", "senior"),
+            review("target-authority", "targeted", terminal_lens, "anthropic", "senior"),
             review("opus-primary", "primary", "whole-change", "anthropic"),
         ],
     }
@@ -305,7 +305,7 @@ def test_real_run_same_family_fallback_does_not_require_cross_family_certificati
 ])
 def test_broker_review_certification_uses_provider_family(tmp_path, model_family, provider_family, passes):
     plan = substantial_plan()
-    broker = review("broker", "targeted", "correctness", model_family, "workhorse")
+    broker = review("broker", "targeted", "correctness", model_family, "senior")
     broker["adapter"] = "cursor"
     plan["reviews"] = [
         broker,
@@ -443,16 +443,16 @@ def test_substantial_review_topology_is_machine_checked():
     assert any("passing independent leg" in error for error in run_dir_finalize._validate_review_plan(plan))
 
 
-def test_cross_family_primary_review_can_use_workhorse_strength():
+def test_cross_family_primary_review_can_use_senior_strength():
     plan = substantial_plan()
-    plan["reviews"][3]["tier"] = "workhorse"
+    plan["reviews"][3]["tier"] = "senior"
     assert run_dir_finalize._validate_review_plan(plan) == []
 
 
 def test_same_family_primary_review_can_cover_a_reasoned_blocker():
     plan = substantial_plan()
     plan["reviews"] = [
-        review("same-family", "primary", "correctness", "openai", "workhorse"),
+        review("same-family", "primary", "correctness", "openai", "senior"),
         review("primary-down", "primary", "other-primary", "anthropic", status="unavailable"),
     ]
     assert run_dir_finalize._validate_review_plan(plan) == []
@@ -525,7 +525,7 @@ def test_review_topology_binds_explicit_codex_route_and_review_evidence(tmp_path
         "endpoint_provider": "openai", "orchestrator_family": "openai",
         "output_digest": "sha256:" + __import__("hashlib").sha256(terminal.read_bytes()).hexdigest(),
         "read_only_guarantee": "enforced",
-        "route_alias": "flagship", "reviewer_id": "codex-primary",
+        "route_alias": "principal", "reviewer_id": "codex-primary",
     }))
     row = review("codex-primary", "targeted", "correctness", "openai")
     row.update({
@@ -587,9 +587,9 @@ def test_review_topology_rejects_malformed_fields_and_symlink_escape(tmp_path):
         "provider_family": "openai", "endpoint_provider": "openai", "orchestrator_family": "openai",
         "output_digest": "sha256:" + __import__("hashlib").sha256(terminal.read_bytes()).hexdigest(),
         "read_only_guarantee": "enforced",
-        "route_alias": "workhorse", "reviewer_id": "escaped",
+        "route_alias": "senior", "reviewer_id": "escaped",
     }))
-    row = review("escaped", "targeted", "correctness", "openai", tier="workhorse")
+    row = review("escaped", "targeted", "correctness", "openai", tier="senior")
     row.update({
         "model": "gpt-test", "catalog_model": "",
         "evidence": {"path": "review.md", "digest": "sha256:" + __import__("hashlib").sha256(outside.read_bytes()).hexdigest()},
@@ -632,7 +632,7 @@ def test_completed_reviews_require_distinct_reviewer_and_artifact_identity(risk,
     assert any("distinct route_receipt" in error for error in errors)
 
 
-@pytest.mark.parametrize(("family", "tier"), (("openai", "flagship"), ("anthropic", "flagship")))
+@pytest.mark.parametrize(("family", "tier"), (("openai", "principal"), ("anthropic", "principal")))
 def test_chair_or_already_passing_family_blocker_does_not_cover_missing_family(family, tier):
     plan = substantial_plan("crucial")
     plan["reviews"].append(
@@ -644,7 +644,7 @@ def test_chair_or_already_passing_family_blocker_does_not_cover_missing_family(f
 def test_recorded_distinct_family_skip_counts_regardless_of_tier():
     plan = substantial_plan("crucial")
     plan["reviews"].append(
-        review("invalid-extra", "primary", "terminal-challenge", "google", tier="workhorse", status="omitted", substitution_for="additional-distinct-family", wave=0)
+        review("invalid-extra", "primary", "terminal-challenge", "google", tier="senior", status="omitted", substitution_for="additional-distinct-family", wave=0)
     )
     assert run_dir_finalize._validate_review_plan(plan) == []
 
@@ -1103,14 +1103,14 @@ def test_finalisation_fails_if_canonical_receipt_inode_is_replaced(tmp_path, mon
     assert json.loads(receipt.read_text())["status"] == "active"
 
 
-@pytest.mark.parametrize("tier", ["principal", "flagship"])
+@pytest.mark.parametrize("tier", ["principal", "principal"])
 def test_review_tier_accepts_tier_names(tier):
     plan = substantial_plan()
     plan["reviews"][3]["tier"] = tier
-    assert not any("tier is invalid" in e or "flagship strength" in e for e in run_dir_finalize._validate_review_plan(plan))
+    assert not any("tier is invalid" in e or "principal strength" in e for e in run_dir_finalize._validate_review_plan(plan))
 
 
-def test_review_tier_senior_does_not_require_flagship_strength():
+def test_review_tier_senior_does_not_require_principal_strength():
     plan = substantial_plan()
     plan["reviews"][3]["tier"] = "senior"
     assert run_dir_finalize._validate_review_plan(plan) == []

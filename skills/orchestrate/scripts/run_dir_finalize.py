@@ -43,8 +43,8 @@ STATUSES = {"draft", "verified", "superseded", "retired"}
 RETENTION = {"capsule", "evidence", "ephemeral"}
 # A review tier may use the tier name or the adapter alias it maps to.
 REVIEW_TIERS = {
-    "scout": "scout", "workhorse": "workhorse", "flagship": "flagship",
-    "junior": "scout", "senior": "workhorse", "principal": "flagship",
+    "junior": "junior", "senior": "senior", "principal": "principal",
+    "junior": "junior", "senior": "senior", "principal": "principal",
 }
 SCAFFOLD = {
     "MANIFEST.md",
@@ -357,8 +357,8 @@ def _validate_review_plan(raw: object, run_dir: Path | None = None) -> list[str]
                             errors.append(f"receipt review_plan.reviews[{index}].route_receipt identity does not match")
                         if isinstance(route_value, dict):
                             route_alias = route_value.get("route_alias", route_value.get("alias"))
-                            if REVIEW_TIERS.get(review["tier"]) == "flagship" and route_alias != "flagship":
-                                errors.append(f"receipt review_plan.reviews[{index}].route_receipt does not prove flagship strength")
+                            if REVIEW_TIERS.get(review["tier"]) == "principal" and route_alias != "principal":
+                                errors.append(f"receipt review_plan.reviews[{index}].route_receipt does not prove principal strength")
                             transcript_available = bool(
                                 evidence_bytes is not None and evidence_bytes
                             )

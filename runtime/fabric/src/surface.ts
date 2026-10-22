@@ -180,7 +180,7 @@ export function adapterView(snapshot: CatalogueSnapshot, detail?: string) {
     const cooling = cooldowns.filter(
       (c) => c?.adapter === adapter.name && Date.parse(c.cooling_until) > Date.now(),
     );
-    return `${adapter.name} ${installed ? "ok auth?" : "cli missing"} ${adapter.models.join("|")} default=${adapter.aliases.workhorse?.[0] ?? "-"} ro=${adapter.read_only_guarantee ?? "unknown"} write=${adapter.write_modes?.length ? "yes" : "no"}${
+    return `${adapter.name} ${installed ? "ok auth?" : "cli missing"} ${adapter.models.join("|")} default=${adapter.aliases.senior?.[0] ?? "-"} ro=${adapter.read_only_guarantee ?? "unknown"} write=${adapter.write_modes?.length ? "yes" : "no"}${
       cooling.length
         ? ` cooling: ${cooling
             .map((c) => `${c.model ?? "*"} until ${c.cooling_until}`)

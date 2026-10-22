@@ -124,9 +124,9 @@ fail-closes it. All capture/independence rules of `cross-family-review.md` (raw-
 never-trust-self-report, build≠verdict-reporter) apply unchanged.
 
 Model/effort routing is likewise operator-relative and owned by `orchestrate`,
-substituting the Codex model lineup for the flagship/workhorse instance
-(flagship reasoning tier for judgement/design/synthesis + all adversarial
-judges; a cheaper tier only for mechanical breadth under a flagship-authored
+substituting the Codex model lineup for the principal/senior instance
+(principal reasoning tier for judgement/design/synthesis + all adversarial
+judges; a cheaper tier only for mechanical breadth under a principal-authored
 contract). This skill does not keep its own copy of that policy.
 
 ## Codex-operator pitfalls

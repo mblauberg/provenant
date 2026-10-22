@@ -53,8 +53,8 @@ those. This file only helps you pick among what they already allow.
 ### The hard catalogue, and the alias order
 
 `config/model-routing.json` is the hard catalogue and the only thing that
-decides what is *admissible*. It maps a task class to an alias (`flagship`,
-`workhorse`, `scout`) and each alias to the models a family can serve it with.
+decides what is *admissible*. It maps a task class to an alias (`principal`,
+`senior`, `junior`) and each alias to the models a family can serve it with.
 Those aliases are deliberately not version-pinned: that indirection is what lets
 a model be swapped without touching a single call site, and it is what the
 harness actually routes on.
@@ -93,7 +93,7 @@ not read an absent `Watch out for` as an endorsement.
 
 ## Models
 
-### Opus 5.5 (Anthropic flagship)
+### Opus 5.5 (Anthropic principal)
 
 - **Good at:** chairing, orchestration, hard reasoning and open-ended
   exploration. The default for critical review, synthesis and adjudication at
@@ -103,7 +103,7 @@ not read an absent `Watch out for` as an endorsement.
   quite horrible". Hand human-facing prose to a voice pass (see
   [Human-facing final polish](#human-facing-final-polish)) rather than shipping
   Opus drafts as written.
-- **Cost:** flagship-tier; not separately characterised.
+- **Cost:** principal-tier; not separately characterised.
 - **Reach:** the `opus` alias, which resolves to `claude-opus-5-5` (verified
   2026-09-23 from `modelUsage`). `claude` adapter, `anthropic` family; the `agy`
   adapter carries older Opus builds only.
@@ -120,32 +120,32 @@ not read an absent `Watch out for` as an endorsement.
 - **Reach:** `claude-fable-5-1` through the crucial and terminal
   `--model-override-tier`, synthesis and adjudication roles only.
 
-### GPT-6 Astra (OpenAI flagship)
+### GPT-6 Astra (OpenAI principal)
 
 - **Good at:** the hard, high-stakes slice: correctness, edge cases and precise
   work on a tight scope.
 - **Watch out for:** no standing behavioural note yet. Keep the brief tight and
   record new evidence rather than carrying GPT-5.6 Sol's profile forward by
   assumption.
-- **Cost:** flagship-tier.
+- **Cost:** principal-tier.
 - **Reach:** `codex` adapter (preferred), `openai` family. The native Codex app
   exposes `low` through `ultra`; the Responses API supports through `max`.
   Treat those as separate surfaces and probe the CLI before dispatch.
 
-### GPT-6.1 Sol (OpenAI workhorse)
+### GPT-6.1 Sol (OpenAI senior)
 
-- **Good at:** Codex workhorse tasks: ordinary implementation, research
+- **Good at:** Codex senior tasks: ordinary implementation, research
   legwork, review and drafting that need more judgement than bulk extraction
   but do not justify Astra. Very cheap for its strength.
 - **Watch out for:** new on 2026-09-23; no field record yet. Record what you see.
 - **Cost:** cheap.
-- **Reach:** `codex` adapter, `openai` family, first `workhorse` candidate (Luna is its fallback), at
+- **Reach:** `codex` adapter, `openai` family, first `senior` candidate (Luna is its fallback), at
   `high` by default; `low` through `ultra` in the Codex CLI (0.155.1+).
 
-### GPT-6 Luna (OpenAI scout)
+### GPT-6 Luna (OpenAI junior)
 
 - **Good at:** cheap, high-token legwork and mechanical slices, and fan-out
-  where several bounded opinions are worth more than one flagship call.
+  where several bounded opinions are worth more than one principal call.
 - **Watch out for:** the owner on its predecessor, GPT-5.6 Luna: "codex astra is
   better at design and motion than luna - luna isn't great", and it could
   over-engineer a loose brief. Keep briefs tight and keep design work off it
@@ -153,13 +153,13 @@ not read an absent `Watch out for` as an endorsement.
 - **Cost:** very cheap; the point of using it. The owner's standing wish is
   "use just luna or some of the opencode models for smaller
   implementation/fixes instead of loading up astra".
-- **Reach:** `codex` adapter, `openai` family, `scout` alias plus the
+- **Reach:** `codex` adapter, `openai` family, `junior` alias plus the
   `mechanical`, `bulk` and `research` task-class routes, at `high` by default;
   `low` through `max`. Needs Codex
   CLI 0.155.1 or later: older clients reject it as "not supported when using
   Codex with a ChatGPT account".
 
-### Sonnet 5.5 (Anthropic workhorse)
+### Sonnet 5.5 (Anthropic senior)
 
 - **Good at:** the preferred Claude model for most work: implementation
   (including UI/frontend), research, screenshots, second opinions, ordinary
@@ -167,11 +167,11 @@ not read an absent `Watch out for` as an endorsement.
   for about the same result, and probably better at design and taste.
 - **Watch out for:** Opus 5.5 remains the choice for critical review,
   orchestration, crucial and terminal synthesis and hard reasoning.
-- **Cost:** workhorse-tier.
+- **Cost:** senior-tier.
 - **Reach:** `sonnet` resolves to `claude-sonnet-5-5` on the `claude` adapter;
   1M-token context. `agy` keeps its separately listed Sonnet 4.6.
 
-### Haiku 5.5 (Anthropic scout)
+### Haiku 5.5 (Anthropic junior)
 
 - **Good at:** cheap, fast bulk and mechanical slices on the Claude seat:
   extraction, classification, sweeps and bounded edits. It covers the low-effort
@@ -192,9 +192,9 @@ not read an absent `Watch out for` as an endorsement.
   use it heavily for bulk work, small implementations and as an extra cheap
   review lens. `opencode/glm-5.3-flash-free` (zero-retention, Zhipu family) is
   the second free pick. Both sit between the Sonnet/Sol and Haiku/Luna tiers,
-  so OpenCode has `workhorse` (`senior`) and `scout` (`junior`) aliases but no `flagship` (`principal`); a flagship
+  so OpenCode has `senior` and `junior` aliases but no `principal`; a principal
   request falls to the adapter default with a warning. Both are limited-time
-  offers; `workhorse` falls back to paid Go `opencode-go/deepseek-v4.1-flash`,
+  offers; `senior` falls back to paid Go `opencode-go/deepseek-v4.1-flash`,
   and paid `opencode-go/glm-5.3-flash` stays reachable by name (`glm-paid`).
   Both paid models draw on the small Go monthly quota, so use them sparingly.
 - **Watch out for:** free models rotate often, and their data terms differ per
@@ -264,7 +264,7 @@ than an open invitation to criticise.
 
 Prefer a long-context family, Gemini through Agent Fabric being the current
 example, for the reading pass, then bring the distilled result back to a
-flagship for the decision. The long-context model is the reader, not the
+principal for the decision. The long-context model is the reader, not the
 decider.
 
 ### Cheap bulk and scouting
@@ -300,7 +300,7 @@ workspace an agent is working in.
 
 ### Effort as a substitute for tier
 
-An effort-controllable flagship can stand in for a mid model when the CLI
+An effort-controllable principal can stand in for a mid model when the CLI
 exposes effort control and the cost and latency are acceptable. Treat this as a
 dated local heuristic rather than doctrine, and smoke-test the route against the
 actual task before relying on it.
@@ -310,8 +310,8 @@ actual task before relying on it.
 **Token-heavy and medium work goes to OpenAI: GPT-6.1 Sol for medium tasks,
 GPT-6 Luna for bulk.** Both arrived on 2026-09-23 and are very cheap for their
 strength. Reading a lot to produce a report, exhaustive inventories and
-mechanical sweeps go to Luna (`scout`); ordinary implementation, legwork that
-needs some judgement, and review go to Sol (`workhorse`). The GPT-5.6
+mechanical sweeps go to Luna (`junior`); ordinary implementation, legwork that
+needs some judgement, and review go to Sol (`senior`). The GPT-5.6
 generation and Terra are retired from the catalogue.
 
 `openai.role_effort_defaults.worker` raises both worker aliases to `high`, which
@@ -322,11 +322,11 @@ explicitly only for a named escalation or a crucial review, and record the model
 and effort pair in the receipt. A cheap model with the effort dial up beats a
 dearer model at medium.
 
-**`gpt-6-astra` is the OpenAI flagship, reserved for critical and high-stakes
+**`gpt-6-astra` is the OpenAI principal, reserved for critical and high-stakes
 slices and for legwork that needs judgement.** Run it between `low` and
-`xhigh`; `ultra` exists but is not the standing policy. `max` is retired: routing maps
-it to `xhigh`, since effort above `high` rarely pays. It is the sole OpenAI flagship candidate: no worker model is an
-automatic flagship fallback. Give Astra genuinely hard work where a miss is
+`xhigh`; `ultra` exists but is not the standing policy. `max` is retired: a request for it
+fails with a fix naming `xhigh`, since effort above `high` rarely pays. It is the sole OpenAI principal candidate: no worker model is an
+automatic principal fallback. Give Astra genuinely hard work where a miss is
 expensive or precise high-stakes judgement matters; ordinary frontend
 implementation belongs to Claude Sonnet 5.5 or Gemini legwork.
 
@@ -340,7 +340,7 @@ helpers toward a cap of about four concurrent Claude agents. Prefer Opus over
 Claude Fable 5.1 (`claude-fable-5-1`) for critical judgement most of the time.
 Luna and Haiku 5.5 are the bulk legwork routes.
 
-**Orchestration stays with the chair's own family**, at flagship effort:
+**Orchestration stays with the chair's own family**, at principal effort:
 Anthropic at high effort when Claude is the chair, and Astra at `xhigh` when a
 Codex lead orchestrates. Decomposition, synthesis and final calls are the
 chair's job.
