@@ -10,7 +10,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { Store } from "../src/store.js";
 import { catalogueSnapshot } from "../src/catalogue.js";
-import { validateGraph, type GraphDocument } from "../src/graph/document.js";
+import { validateGraph, type GraphDocument, type GraphNode } from "../src/graph/document.js";
 import { databasePath } from "../src/identity.js";
 import { GraphStore, RESERVATION_FILE, type Attempt, type Graph } from "../src/graph/store.js";
 import { listRecordedRuns, processStartedAt } from "../src/run-registry.js";
@@ -103,7 +103,7 @@ async function waitFor(condition: () => boolean, label: string, timeoutMs = 20_0
   expect(condition(), label).toBe(true);
 }
 
-const reader = (id: string, route: Record<string, string>, extra: Record<string, unknown> = {}) =>
+const reader = (id: string, route: GraphNode["route"], extra: Record<string, unknown> = {}) =>
   ({ id, route, brief: { prompt: `Survey ${id}.` }, ...extra });
 
 beforeEach(() => {
