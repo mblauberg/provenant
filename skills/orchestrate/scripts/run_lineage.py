@@ -362,7 +362,7 @@ def _verified_child(run_dir, task_id, number, child):
     if ((parent.get("run_dir"), parent.get("task_id"), parent.get("attempt"))
             != (str(run_dir), task_id, number)):
         raise ValueError("unverified child parent")
-    return {"run_id": child["run_id"], "run_dir": str(directory)}
+    return {"run_id": child["run_id"], "run_dir": str(directory), "run_token": child["run_token"]}
 
 
 def _owner_gone(child_dir):
@@ -460,6 +460,9 @@ def cancel_children(run_dir, task_id, number, *, child_rows=None, timeout_second
 
     def signal_tree(tree, child, signum):
         rows = tree.sample(include_reparented=True)
+        if tree.snapshot_unavailable:
+            child["cancellation"] = {"status": "skipped", "reason": "process census unavailable"}
+            return
         for identity, row in tree.live(rows).items():
             # A census is not a signal-time identity check. Never signal a
             # group: membership alone does not prove child-run ancestry.
@@ -494,17 +497,24 @@ def cancel_children(run_dir, task_id, number, *, child_rows=None, timeout_second
                     or process_info.start_time(pid) != record["owner_started_at"]):
                 child["cancellation"] = {"status": "skipped", "reason": "owner identity changed or unavailable"}
                 continue
-            token = record.get("run_token")
+            token = child.get("run_token")
+            environment = provider_exec._process_environment(pid)
             # The owner file is provider-writable. Tie its target to the
             # child's exec environment before trusting any of its PID claims.
-            if (not isinstance(token, str) or not token
-                    or ("PROVENANT_RUN_TOKEN=" + token).encode() not in provider_exec._process_environment(pid)):
+            if (not isinstance(token, str) or not token or token != record.get("run_token")
+                    or ("PROVENANT_RUN_TOKEN=" + token).encode() not in environment):
                 child["cancellation"] = {"status": "skipped", "reason": "child run token missing from owner environment"}
+                continue
+            if ("PROVENANT_RUN_DIR=" + str(directory)).encode() not in environment:
+                child["cancellation"] = {"status": "skipped", "reason": "child run directory missing from owner environment"}
                 continue
             process = RecordedOwner(record, row.identity)
             tree = provider_exec._Descendants(process, None)
             tree.root = row.identity
             tree.sample()
+            if tree.snapshot_unavailable:
+                child["cancellation"] = {"status": "skipped", "reason": "process census unavailable"}
+                continue
             current = process_info._probe_process_row(pid)
             if current is None or current.identity != row.identity or current.zombie:
                 child["cancellation"] = {"status": "skipped", "reason": "owner identity changed before SIGTERM"}
@@ -522,6 +532,9 @@ def cancel_children(run_dir, task_id, number, *, child_rows=None, timeout_second
         time.sleep(.05)
     for process, tree, child in pending:
         rows = tree.sample(include_reparented=True)
+        if tree.snapshot_unavailable:
+            child["cancellation"] = {"status": "skipped", "reason": "process census unavailable"}
+            continue
         if process.poll() is None or tree.live(rows):
             signal_tree(tree, child, signal.SIGTERM)
             deadline = time.monotonic() + .2

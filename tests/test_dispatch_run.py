@@ -5455,7 +5455,8 @@ def test_terminal_publication_includes_child_registered_while_waiting_for_custod
     (parent_dir / 'dispatch/tasks/writer/attempt-001/tmp/children').mkdir(parents=True)
     child_dir = make_run(tmp_path, 'runs/child')
     child_process = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'],
-                                     env={**os.environ, 'PROVENANT_RUN_TOKEN': 'child-token'},
+                                     env={**os.environ, 'PROVENANT_RUN_TOKEN': 'child-token',
+                                          'PROVENANT_RUN_DIR': str(child_dir)},
                                      start_new_session=True)
     parent = {'run_id': 'mcp-parent', 'task_id': 'writer', 'attempt': 1, 'run_dir': str(parent_dir)}
     (child_dir / 'dispatch-owner.json').write_text(json.dumps({
@@ -5551,7 +5552,8 @@ def test_cancel_cascade_still_cancels_genuine_child(cancel_cascade, ignore_term)
             + ('signal.signal(signal.SIGTERM, signal.SIG_IGN); ' if ignore_term else '')
             + 'print("ready", flush=True); time.sleep(60)')
     child = subprocess.Popen([sys.executable, '-c', code], stdout=subprocess.PIPE, text=True,
-                             env={**os.environ, 'PROVENANT_RUN_TOKEN': 'child-token'},
+                             env={**os.environ, 'PROVENANT_RUN_TOKEN': 'child-token',
+                                  'PROVENANT_RUN_DIR': str(child_dir)},
                              start_new_session=True)
     try:
         assert child.stdout.readline().strip() == 'ready'
@@ -5570,15 +5572,108 @@ def test_cancel_cascade_still_cancels_genuine_child(cancel_cascade, ignore_term)
         child.stdout.close()
 
 
+def test_cancel_cascade_rejects_owner_replaced_after_enumeration(cancel_cascade):
+    mod, parent_dir, child_dir, _ = cancel_cascade
+    sleeper = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'],
+                               env={**os.environ, 'PROVENANT_RUN_TOKEN': 'sibling-token',
+                                    'PROVENANT_RUN_DIR': str(child_dir)},
+                               start_new_session=True)
+    try:
+        owner = {'schema_version': 1, 'kind': 'dispatch', 'run_dir': str(child_dir),
+                 'run_token': 'child-token', 'owner_pid': sleeper.pid, 'owner_pgid': sleeper.pid,
+                 'owner_started_at': mod.process_info.start_time(sleeper.pid)}
+        (child_dir / 'dispatch-owner.json').write_text(json.dumps(owner))
+        child_rows = mod.run_lineage.children(parent_dir, 'writer', 1)
+        (child_dir / 'dispatch-owner.json').write_text(json.dumps({**owner, 'run_token': 'sibling-token'}))
+        mod.run_lineage.cancel_children(parent_dir, 'writer', 1, child_rows=child_rows, timeout_seconds=0)
+        assert sleeper.poll() is None, 'replacement owner redirected cancellation to a sibling run'
+        assert child_rows[0]['cancellation']['status'] == 'skipped'
+        assert 'token' in child_rows[0]['cancellation']['reason']
+    finally:
+        if sleeper.poll() is None:
+            sleeper.kill()
+        sleeper.wait(timeout=3)
+
+
+def test_cancel_cascade_rejects_inherited_parent_identity(cancel_cascade):
+    mod, parent_dir, child_dir, row = cancel_cascade
+    sleeper = subprocess.Popen([sys.executable, '-c', 'import time; print("ready", flush=True); time.sleep(60)'],
+                               env={**os.environ, 'PROVENANT_RUN_TOKEN': 'parent-token',
+                                    'PROVENANT_RUN_DIR': str(parent_dir)}, start_new_session=True,
+                               stdout=subprocess.PIPE, text=True)
+    try:
+        assert sleeper.stdout.readline().strip() == 'ready'
+        (child_dir / 'dispatch-owner.json').write_text(json.dumps({
+            'schema_version': 1, 'kind': 'dispatch', 'run_dir': str(child_dir),
+            'run_token': 'parent-token', 'owner_pid': sleeper.pid, 'owner_pgid': sleeper.pid,
+            'owner_started_at': mod.process_info.start_time(sleeper.pid)}))
+        journal = parent_dir / 'dispatch/tasks/writer/attempt-001/tmp/children/child.json'
+        journal.write_text(json.dumps({'run_id': 'mcp-child', 'run_dir': str(child_dir),
+                                       'run_token': 'parent-token'}))
+        mod.publish_contract(parent_dir, {**row, 'state': 'terminal', 'status': 'cancelled'})
+        assert sleeper.poll() is None, 'inherited parent identity authorised a forged child run'
+        terminal = json.loads((parent_dir / row['paths']['receipt']).read_text())
+        assert terminal['children'][0]['cancellation']['status'] == 'skipped'
+        assert 'directory' in terminal['children'][0]['cancellation']['reason']
+    finally:
+        if sleeper.poll() is None:
+            sleeper.kill()
+        sleeper.wait(timeout=3)
+        sleeper.stdout.close()
+
+
+@pytest.mark.parametrize('failure_at', ['initial', 'escalation'])
+def test_cancel_cascade_records_unavailable_process_census(cancel_cascade, monkeypatch, failure_at):
+    mod, parent_dir, child_dir, _ = cancel_cascade
+    provider = mod.provider_exec
+    child = subprocess.Popen([sys.executable, '-c', 'import time; print("ready", flush=True); time.sleep(60)'],
+                             env={**os.environ, 'PROVENANT_RUN_TOKEN': 'child-token',
+                                  'PROVENANT_RUN_DIR': str(child_dir)}, start_new_session=True,
+                             stdout=subprocess.PIPE, text=True)
+    real_kill = os.kill
+    snapshot = provider._process_snapshot
+    linux_snapshot = provider._linux_tree_snapshot
+    failed = failure_at == 'initial'
+    signals = []
+
+    def send_signal(pid, signum):
+        nonlocal failed
+        if pid == child.pid and signum != 0:
+            signals.append(signum)
+            failed = True
+        else:
+            real_kill(pid, signum)
+
+    try:
+        assert child.stdout.readline().strip() == 'ready'
+        (child_dir / 'dispatch-owner.json').write_text(json.dumps({
+            'schema_version': 1, 'kind': 'dispatch', 'run_dir': str(child_dir),
+            'run_token': 'child-token', 'owner_pid': child.pid, 'owner_pgid': child.pid,
+            'owner_started_at': mod.process_info.start_time(child.pid)}))
+        monkeypatch.setattr(provider, '_process_snapshot', lambda: None if failed else snapshot())
+        monkeypatch.setattr(provider, '_linux_tree_snapshot',
+                            lambda *args: None if failed else linux_snapshot(*args))
+        monkeypatch.setattr(os, 'kill', send_signal)
+        child_rows = mod.run_lineage.cancel_children(parent_dir, 'writer', 1, timeout_seconds=0)
+        assert signals == ([] if failure_at == 'initial' else [signal.SIGTERM])
+        assert child_rows[0]['cancellation']['status'] == 'skipped'
+        assert 'census' in child_rows[0]['cancellation']['reason']
+    finally:
+        real_kill(child.pid, signal.SIGKILL)
+        child.wait(timeout=3)
+        child.stdout.close()
+
+
 @pytest.mark.parametrize('change_before', ['owner validation', 'SIGTERM', 'SIGKILL'])
 def test_cancel_cascade_rechecks_identity_before_each_signal(cancel_cascade, monkeypatch, change_before):
     from dataclasses import replace
     import provider_exec
 
     mod, parent_dir, child_dir, _ = cancel_cascade
-    child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'],
-                             env={**os.environ, 'PROVENANT_RUN_TOKEN': 'child-token'},
-                             start_new_session=True)
+    child = subprocess.Popen([sys.executable, '-c', 'import time; print("ready", flush=True); time.sleep(60)'],
+                             env={**os.environ, 'PROVENANT_RUN_TOKEN': 'child-token',
+                                  'PROVENANT_RUN_DIR': str(child_dir)},
+                             start_new_session=True, stdout=subprocess.PIPE, text=True)
     real_kill = os.kill
     probe = mod.process_info._probe_process_row
     start_time = mod.process_info.start_time
@@ -5613,6 +5708,7 @@ def test_cancel_cascade_rechecks_identity_before_each_signal(cancel_cascade, mon
             real_kill(pid, signum)
 
     try:
+        assert child.stdout.readline().strip() == 'ready'
         (child_dir / 'dispatch-owner.json').write_text(json.dumps({
             'schema_version': 1, 'kind': 'dispatch', 'run_dir': str(child_dir),
             'run_token': 'child-token', 'owner_pid': child.pid, 'owner_pgid': child.pid,
@@ -5631,6 +5727,7 @@ def test_cancel_cascade_rechecks_identity_before_each_signal(cancel_cascade, mon
     finally:
         real_kill(child.pid, signal.SIGKILL)
         child.wait(timeout=3)
+        child.stdout.close()
 
 
 def test_remote_nested_dispatch_records_source_child_and_refreshes_failure(tmp_path, monkeypatch):
