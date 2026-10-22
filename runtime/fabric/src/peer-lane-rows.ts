@@ -4,7 +4,7 @@ import { runProcessAlive } from "./run-registry.js";
 
 export function annotatePeerLaneRows(rows: Array<Record<string, any>>, project: string): void {
   for (const row of rows) {
-    // Imported lanes carry liveness from their actual owner record.
+    // Imported lanes carry liveness from their actual owner record; their empty run_path cannot be probed here.
     if (typeof row.source_project === "string") continue;
     const runDir = typeof row.run_dir === "string" ? row.run_dir
       : typeof row.run_path === "string" && row.run_path !== "" ? resolve(runRoot(project), row.run_path) : undefined;
