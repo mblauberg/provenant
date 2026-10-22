@@ -239,9 +239,9 @@ scheme, the Dock, Spotlight or `provenant console`:
 - Sidebar icons follow the user's accent colour. The only fixed colour is the
   Accounts badge, which carries meaning (the HIG allows fixed colours "if you
   use them sparingly" to clarify meaning).
-- Fleet and the Hosts section's pull state appear once the projector exists
-  (spec, Delivery plan); until then Sessions and Accounts are the populated
-  sections.
+- Fleet appears with Slice 2, reading `provenant lanes --json`; the Hosts
+  section appears with federation (spec, Delivery plan). Until then Sessions,
+  Fleet and Accounts are the populated sections.
 
 ### 3.4 Toolbar
 
@@ -412,9 +412,9 @@ The lower half of the tab:
 Behaviour:
 
 - Selecting a point on the chart (`chartXSelection(value:)`) sets "As of
-  turn N"; the header, bar and legend redraw for that turn. Escape returns to
-  the latest turn. Turns without a counted breakdown show transcript
-  estimates.
+  turn N"; it snaps to the nearest recorded snapshot (the latest turn or a
+  compaction boundary) and the header, bar and legend redraw for it. Other
+  turns show only their total. Escape returns to the latest turn.
 - **Count exactly** runs `provenant session context --exact` for this
   session. It appears only when `observe.context.exact_counts` allows it for
   the session's account, and its help tag says that counting sends the
@@ -1046,7 +1046,7 @@ From `provenant session context --json` (Slice 1) and later the projector's
 session records:
 
 - Per-category figures with their exactness label, the method
-  (`provider_full`, `probe_reconstructed`, `transcript_estimate`) and the
+  (`provider_counted`, `probe_reconstructed`, `transcript_estimate`) and the
   estimator id, for the footnote.
 - Per-item figures for skills, memory files, MCP tools (by server), built-in
   tools, agents, the ten largest tool results and files read, each with its

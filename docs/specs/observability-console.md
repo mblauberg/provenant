@@ -107,7 +107,9 @@ Rules:
 - **cwd decides write scope only.** It selects the worktree and confinement,
   never ownership or project attribution on its own.
 - **The seat decides ownership.** "Mine" means lanes whose `seat_id` is the
-  viewer's seat or a descendant through `parent_lane`.
+  viewer's seat or a descendant through `parent_lane`. The statusline and CLI
+  know their seat. The console is launched without one, so it offers a seat
+  picker (default: all seats, choice remembered) and "Mine" is that choice.
 - **Views default to everything on the host**, then add peers. Narrowing to a
   seat, project or host is a filter, never a different data source.
 - A dispatch with no MCP seat in its ancestry (a plain shell `provenant
@@ -396,14 +398,16 @@ at the latest turn, at each compaction boundary and after each compaction;
      large branch to many small merges. R4.3 accepted tasks without a pull
      request are a second, separately labelled figure.
    - **Contributors.** A merged pull request credits every session and lane
-     found on its branch, from three sources the ledger already holds: `events`
-     rows carrying both the pull request and a lane or session; lane records
-     whose branch is the pull request's head branch; and Fabric receipts for
-     those lanes (their start and finish commits place each commit in a lane).
-     Usage joins to a lane by `run_id` and to a session by session id. Slice 3
-     makes the paths that open a pull request from a lane or chair session emit
-     the event. Commits made outside any recorded lane are shown as unlinked
-     commits and credit no session.
+     found on its branch. Neither `changes` rows nor receipts hold the head
+     branch or a lane's commit range today, so Slice 3 adds the capture: the
+     paths that open a pull request from a lane or chair session emit an
+     `events` row carrying the pull request, head branch and session or lane,
+     and lane finish records its start and finish commits. The ledger keeps
+     these rows after branch cleanup. Pull requests merged before Slice 3 show
+     unlinked commits only. Usage joins to a lane by its host-qualified lane,
+     `task_id` and `attempt` (never `run_id` alone, which siblings in a batch
+     share) and to a session by session id. Commits made outside any recorded
+     lane are shown as unlinked commits and credit no session.
    - **Shares are descriptive.** Each contributor shows its commits, changed
      lines, review and repair rounds and spend. There is no winner, no single
      owner and no score that sums to one. Spend of a session or lane linked to
@@ -475,7 +479,9 @@ from the provider for a remote caller. Accounts are deduplicated by their
 host-independent fingerprint label (the same non-secret label on every host,
 as the telemetry runbook asks); an account seen on several hosts appears
 once, takes the freshest observation per window, and carries every host's
-badge. Nothing is pulled when no viewer is open.
+badge. Nothing is pulled when no viewer is open, nor while
+`app.modules.federation` is off; the app then shows this host's accounts, and
+the CLI's `quota --hosts all` still works on its own.
 
 ## Console
 
@@ -591,10 +597,13 @@ hides its switch.
 
 ### Budgets and measurement
 
-Measured on the reference Mac, release build, with `footprint -p <pid>`
-(physical footprint), `top -pid <pid> -stats cpu,idlew` and `ps -o cputime`,
-each over a 10-minute idle window; recorded in the Slice pull request, not run
-in CI.
+Measured on the user's own Mac (model and macOS version recorded), release
+build, over a corpus of 500 generated sessions (a committed generator; sizes
+from 100 KB to 20 MB), with `footprint -p <pid>`, `top -pid <pid> -stats
+cpu,idlew` and `ps -o cputime`. Idle figures are the worst of three
+10-minute windows; cold launch is the median of five runs from `open` of the
+URL after the process has exited to the first-frame signpost. Recorded in the
+Slice pull request, not run in CI.
 
 | Process | State | Budget |
 |---|---|---|
@@ -824,8 +833,9 @@ keys; the split into the menu bar agent and the console process, URL scheme,
 `provenant console`, LaunchAgent migration, the module registry with only the
 console and exact-count modules, and `provenant app menubar`; the console
 window with the Sessions section (Overview, Context, State) reading the CLI.
-Module switches are set through `provenant settings` until the Settings pane
-arrives in Slice 4. No projector, no seat-index change, no peer work.
+Module switches are set through a minimal `provenant settings`
+(list, get, set, unset for the module and `observe.context` keys) until the
+Settings pane arrives in Slice 4. No projector, no seat-index change, no peer work.
 
 Acceptance:
 1. For fixture Claude Code and Codex sessions, the total matches the last
@@ -894,8 +904,8 @@ Acceptance:
 ### Slice 4: accounts across hosts and settings
 
 Scope: the `quota.snapshot` peer verb and `provenant quota --hosts all`; the
-Accounts section; menu-bar headline across hosts; `provenant settings` with
-the keys above; the Settings pane (including the Modules group and menu bar
+Accounts section; menu-bar headline across hosts; `provenant settings`
+extended to the remaining keys; the Settings pane (including the Modules group and menu bar
 switch) and host sheet. Remembered accounts are delivered by W17.
 
 Acceptance:
@@ -930,7 +940,9 @@ First, without a projector, lengthen `lanes --wait`'s remote poll from 2 s to
 30 s, taking today's roughly 450 SSH sessions per peer per 15 minutes to about
 30. Federation is built only if, after that, a peer costs more than 120 SSH
 sessions per hour while the console is open (counted at the transport), or
-peer lanes take more than 2 s at p95 to appear in Fleet.
+peer lanes take more than 2 s at p95 to appear in Fleet. Meeting this trigger
+also opens Slice 5, whose projector (leases, manifests) is built and accepted
+first.
 
 Scope: the three `observe.*` verbs, watch leases, merge, Hosts pages,
 reworded topology docs, all behind `app.modules.federation`. Acceptance:
