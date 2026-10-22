@@ -11,6 +11,19 @@ struct QuotaReport: Decodable {
     let generatedAt: Date?
     let nextDueAt: Date?
     private let refreshing: Lenient<[String]>?
+    // Display settings and the menu bar's account; an older CLI leaves them out.
+    private let display: Lenient<Display>?, headline: Lenient<Headline>?
+    var alertPercent: Double { display?.value?.shortWindowAlertPercent ?? 90 }
+    var pick: Headline? { headline?.value }
+
+    /// `quota.display`: a shorter window shows instead of the longest once it reaches this use.
+    struct Display: Decodable { let shortWindowAlertPercent: Double? }
+
+    /// `quota.menubar.headline`: recent | worst | none | <provider>/<account>, and the account it chose.
+    struct Headline: Decodable {
+        let mode: String
+        let account: String?
+    }
 
     struct Account: Decodable, Identifiable {
         var id: String { "\(provider)/\(account)" }
@@ -18,7 +31,10 @@ struct QuotaReport: Decodable {
         let plan, error: String?
         let active: Bool?
         let priority: Double?
-        let status: String          // ok | stale | unavailable | unreported | disabled
+        let status: String          // ok | stale | unavailable | unreported | disabled | signed_out
+        // The CLI's display vocabulary; an older CLI leaves them out.
+        let providerName, displayName, planLabel: String?
+        let backAt: Date?           // when an exhausted or signed-out account's first pool comes back
         let observedAt: Date?
         let windows: [Window]
         let unreported: [String]?
@@ -26,6 +42,8 @@ struct QuotaReport: Decodable {
         let creditBurnPerHour: Double?
         private let schedule: Lenient<Schedule>?, usageCredits: Lenient<[Credit]>?, resets: Lenient<Resets>?
         var hasReading: Bool { status == "ok" || status == "stale" }
+        /// Signed out of a single-account credential store: the last reading is kept, and never fetched.
+        var isSignedOut: Bool { status == "signed_out" }
         var next: Schedule? { schedule?.value }
         var credits: [Credit] { usageCredits?.value ?? [] }
         var banked: Resets? { resets?.value }
@@ -60,8 +78,11 @@ struct QuotaReport: Decodable {
         let usedAmount, limitAmount: Double?   // a budget window, such as dollars of cloud session credit
         let currency: String?
         let advisory: Bool?
+        let pool, poolLabel: String?   // windows of one pool bind only that pool, such as agy's Gemini models
         let pace: Pace
         var title: String { label ?? Fmt.human(name) }
+        /// "Claude models · Weekly" for a pooled window.
+        var fullTitle: String { poolLabel.map { "\($0) · \(title)" } ?? title }
         /// As in provider_quota.py `sets_state`: an untimed budget or an advisory window never binds the account.
         var setsState: Bool { advisory != true && !(limitAmount != nil && (windowMinutes ?? 0) == 0) }
         /// A passed reset makes the reading obsolete until the next fetch.
@@ -90,7 +111,7 @@ struct QuotaReport: Decodable {
     /// The account schedule due soonest.
     var nextCheck: Schedule? { accounts.compactMap(\.next).min { $0.nextDueAt < $1.nextDueAt } }
 
-    /// Accounts in display order: usable, then unreadable, then exhausted; by priority, then report order.
+    /// Accounts in display order: usable, credits, unreadable, exhausted, signed out; by priority, then report order.
     func sorted(now: Date) -> [Account] {
         accounts.enumerated().sorted { ($0.element.rank(now), $0.element.priority ?? 100, $0.offset)
             < ($1.element.rank(now), $1.element.priority ?? 100, $1.offset) }.map(\.element)
@@ -104,7 +125,25 @@ struct QuotaReport: Decodable {
             .max { $0.window.usedPercent! < $1.window.usedPercent! }
     }
 
+    /// The account the menu bar shows and the window to show for it. The CLI picks it (`quota.menubar.headline`);
+    /// an account it picked that is no longer usable gives way to the highest use, unless it was pinned. An older
+    /// CLI picks nothing, so the highest use shows. Nil for `none` or when nothing usable remains.
+    func featured(now: Date) -> (account: Account, window: Window)? {
+        guard let pick else { return top(now: now).map { ($0.account, $0.account.display(now: now, alert: alertPercent) ?? $0.window) } }
+        guard let id = pick.account, let account = accounts.first(where: { $0.id == id }) else { return nil }
+        let pinned = pick.mode.contains("/")
+        guard pinned || account.rank(now) == 0 else { return top(now: now).flatMap { featured($0.account, now) } }
+        return featured(account, now)
+    }
+
+    private func featured(_ account: Account, _ now: Date) -> (account: Account, window: Window)? {
+        account.display(now: now, alert: alertPercent).map { (account, $0) }
+    }
+
     func exhausted(now: Date) -> [Account] { accounts.filter { $0.rank(now) == 3 } }
+
+    /// The menu bar shows the gauge alone: `none`, or the CLI found nothing usable.
+    var iconOnly: Bool { pick.map { $0.mode == "none" || $0.account == nil } ?? false }
 
     func drawing(now: Date) -> [Account] { accounts.filter { $0.rank(now) == 1 } }
 
@@ -121,13 +160,65 @@ struct Lenient<Value: Decodable>: Decodable {
 }
 
 extension QuotaReport.Account {
-    /// The window that binds the account now. A window whose reset has passed no longer counts. An account is
-    /// exhausted while an exhausted window still has a future or unknown reset; the one that resets last binds.
-    /// Otherwise the current window with the highest use binds.
-    func binding(now: Date) -> QuotaReport.Window? {
-        let current = windows.filter { $0.usedPercent != nil && !$0.isExpired(now) && $0.setsState }
-        return current.filter { $0.pace.state == "exhausted" }.max { ($0.resetAt ?? .distantFuture) < ($1.resetAt ?? .distantFuture) }
-            ?? current.max { $0.usedPercent! < $1.usedPercent! }
+    typealias Window = QuotaReport.Window
+
+    /// Pool names in report order; empty when nothing is pooled.
+    var pools: [String] { windows.compactMap(\.pool).reduce(into: []) { if !$0.contains($1) { $0.append($1) } } }
+
+    /// A pool's windows with the unpooled ones that bind every pool.
+    func windows(in pool: String?) -> [Window] { windows.filter { $0.pool == nil || $0.pool == pool } }
+
+    /// Windows with a reading that still holds: a window whose reset has passed no longer counts.
+    static func current(_ windows: [Window], now: Date) -> [Window] {
+        windows.filter { $0.usedPercent != nil && !$0.isExpired(now) && $0.setsState }
+    }
+
+    /// The window that constrains these most: an exhausted one, the one that resets last; else the highest use.
+    static func worst(_ windows: [Window]) -> Window? {
+        windows.filter { $0.pace.state == "exhausted" }.max { ($0.resetAt ?? .distantFuture) < ($1.resetAt ?? .distantFuture) }
+            ?? windows.max { $0.usedPercent! < $1.usedPercent! }
+    }
+
+    /// As in provider_quota.py `display`: an exhausted window; else one at the alert use or more; else the longest.
+    static func shown(_ windows: [Window], alert: Double) -> Window? {
+        if let spent = worst(windows), spent.pace.state == "exhausted" { return spent }
+        let alerts = windows.filter { $0.usedPercent! >= alert }
+        return alerts.max { $0.usedPercent! < $1.usedPercent! }
+            ?? windows.max { ($0.windowMinutes ?? 0, $0.usedPercent!) < ($1.windowMinutes ?? 0, $1.usedPercent!) }
+    }
+
+    /// The window that binds the account now. Pools are independent, so the account is usable while any pool is:
+    /// the most used usable pool binds, and when every pool is exhausted, the pool back soonest binds.
+    func binding(now: Date) -> Window? {
+        let groups = pools.isEmpty ? [windows] : pools.map { windows(in: $0) }
+        let worsts = groups.compactMap { Self.worst(Self.current($0, now: now)) }
+        return worsts.filter { $0.pace.state != "exhausted" }.max { $0.usedPercent! < $1.usedPercent! }
+            ?? worsts.min { ($0.resetAt ?? .distantFuture) < ($1.resetAt ?? .distantFuture) }
+    }
+
+    /// The window a reader sees, from the binding pool: the longest, unless a shorter one is nearly spent.
+    func display(now: Date, alert: Double) -> Window? {
+        let pool = binding(now: now)?.pool
+        return Self.shown(Self.current(pools.isEmpty ? windows : windows(in: pool), now: now), alert: alert)
+    }
+
+    /// One entry per pool, for its ring: the window shown for that pool, nil once every reading has reset.
+    func poolRings(now: Date, alert: Double) -> [(pool: String?, window: Window?)] {
+        (pools.isEmpty ? [nil] : pools.map(Optional.some)).map { pool in
+            (pool, Self.shown(Self.current(pool == nil ? windows : windows(in: pool), now: now), alert: alert))
+        }
+    }
+
+    /// Exhausted pools other than the binding one, each with the window that keeps it exhausted.
+    func spentPools(now: Date) -> [Window] {
+        let bound = binding(now: now)?.pool
+        return pools.filter { $0 != bound }.compactMap { Self.worst(Self.current(windows(in: $0), now: now)) }
+            .filter { $0.pace.state == "exhausted" }
+    }
+
+    /// When the account is usable again: the report's time, or the binding window's reset.
+    func back(now: Date) -> Date? {
+        backAt ?? (binding(now: now).flatMap { $0.pace.state == "exhausted" ? $0.resetAt : nil })
     }
 
     /// Drawing on credits, per the report, until an exhausted window behind it resets.
@@ -135,12 +226,18 @@ extension QuotaReport.Account {
         drawingCredits == true && (binding(now: now)?.pace.state == "exhausted" || !windows.contains { $0.pace.state == "exhausted" })
     }
 
-    /// 0 usable, 1 drawing on credits, 2 no reading, 3 exhausted.
+    /// 0 usable, 1 drawing on credits, 2 no reading, 3 exhausted, 4 signed out.
     func rank(_ now: Date) -> Int {
-        !hasReading ? 2 : isDrawing(now: now) ? 1 : binding(now: now)?.pace.state == "exhausted" ? 3 : 0
+        isSignedOut ? 4 : !hasReading ? 2 : isDrawing(now: now) ? 1 : binding(now: now)?.pace.state == "exhausted" ? 3 : 0
     }
 
-    var title: String { account == "default" ? Fmt.human(provider) : "\(Fmt.human(provider)) · \(account)" }
+    /// "Claude · Anese". The CLI names accounts; with an older CLI the label stands in, and `default` adds nothing.
+    var title: String {
+        let person = providerName != nil ? displayName : account == "default" ? nil : account
+        return [providerName ?? Fmt.human(provider), person].compactMap { $0 }.joined(separator: " · ")
+    }
+
+    var planTitle: String? { planLabel ?? plan.map(Fmt.human) }
 }
 
 enum Fmt {
@@ -201,23 +298,87 @@ enum Fmt {
             + (schedule.reason.map { " · " + $0.replacingOccurrences(of: "_", with: " ") } ?? "")
     }
 
+    /// "Weekly all", never "weekly_all:2": no underscores or colons reach the reader.
     static func human(_ raw: String) -> String {
         let text = raw.replacingOccurrences(of: "_", with: " ").replacingOccurrences(of: ":", with: " ")
         return text.prefix(1).uppercased() + text.dropFirst()
     }
 
-    /// "Seven day · runs out in 23h", "Primary · resets in 5d 8h", or "Exhausted · back in 3d 2h".
-    static func status(_ window: QuotaReport.Window, now: Date) -> String {
-        if window.isExpired(now) { return "\(window.title) · reset passed, awaiting a reading" }
-        let reset = until(window.resetAt, now: now)
-        if window.pace.state == "exhausted" { return "Exhausted · " + (reset.map { "back in \($0)" } ?? "reset time unknown") }
-        if let out = until(window.pace.runsOutAt, now: now) { return "\(window.title) · runs out in \(out)" }
-        return window.title + (reset.map { " · resets in \($0)" } ?? "")
+    /// The first letter capitalised, the rest left alone.
+    static func sentence(_ text: String) -> String { text.prefix(1).uppercased() + text.dropFirst() }
+
+    // Weekday and the rest are formatted apart, so no locale puts a comma between them.
+    private static func weekday(_ date: Date) -> String { date.formatted(.dateTime.weekday(.abbreviated)) }
+
+    /// "Tue 28 Oct".
+    static func date(_ date: Date) -> String { "\(weekday(date)) \(date.formatted(.dateTime.day().month(.abbreviated)))" }
+
+    /// "Sat 3 pm" within a week either way, otherwise "Tue 28 Oct".
+    static func moment(_ date: Date, now: Date) -> String {
+        guard abs(date.timeIntervalSince(now)) < 6.5 * 86_400 else { return self.date(date) }
+        let hour = Date.FormatStyle().hour(.defaultDigits(amPM: .abbreviated))
+        return "\(weekday(date)) \(date.formatted(Calendar.current.component(.minute, from: date) == 0 ? hour : hour.minute()))"
+    }
+
+    /// The exact instant, for a tooltip: "Tue 28 Oct, 9:00 am".
+    static func exact(_ date: Date) -> String { date.formatted(.dateTime.weekday(.abbreviated).day().month(.abbreviated).hour().minute()) }
+
+    /// A reset is a fact: "resets in 4h 51m" within a day, otherwise "resets Tue 28 Oct".
+    static func resets(_ date: Date?, now: Date) -> String? {
+        guard let date, date > now else { return nil }
+        return date.timeIntervalSince(now) < 86_400 ? "resets in \(until(date, now: now)!)" : "resets \(self.date(date))"
+    }
+
+    /// "back in 4h 51m", "back Sat 3 pm", or "back since Sat 3 pm" once it has passed.
+    static func back(_ date: Date?, now: Date) -> String {
+        guard let date else { return "reset time unknown" }
+        if date <= now { return "back since \(moment(date, now: now))" }
+        return date.timeIntervalSince(now) < 86_400 ? "back in \(until(date, now: now)!)" : "back \(moment(date, now: now))"
+    }
+
+    /// An estimate, labelled as one, and only when the window would run out before it resets.
+    static func projection(_ window: QuotaReport.Window, now: Date) -> String? {
+        guard window.pace.state != "exhausted", let out = window.pace.runsOutAt, out > now,
+              window.resetAt.map({ out < $0 }) ?? true else { return nil }
+        if out.timeIntervalSince(now) < 86_400 { return "At this pace, empty in \(until(out, now: now)!)" }
+        let day = abs(out.timeIntervalSince(now)) < 6.5 * 86_400 ? weekday(out) : date(out)
+        return "At this pace, empty by \(day)"
+    }
+
+    /// One window: "Weekly · resets Tue 28 Oct", "Weekly exhausted · back Sat 3 pm", or "Weekly · reset since Sat 3 pm".
+    static func status(_ window: QuotaReport.Window, now: Date, pooled: Bool = false) -> String {
+        let title = pooled ? window.fullTitle : window.title
+        if window.isExpired(now) { return "\(title) · reset since \(moment(window.resetAt!, now: now))" }
+        if window.pace.state == "exhausted" { return "\(title) exhausted · \(back(window.resetAt, now: now))" }
+        return [title, resets(window.resetAt, now: now)].compactMap { $0 }.joined(separator: " · ")
+    }
+
+    /// "Gemini exhausted until Sat 3 pm", for a pool that does not bind the account.
+    static func spent(_ window: QuotaReport.Window, now: Date) -> String {
+        "\(window.pool.map(human) ?? window.title) exhausted " + (window.resetAt.map { "until \(moment($0, now: now))" } ?? "for now")
+    }
+
+    /// The account's line under its name; the key fact first.
+    static func detail(_ account: QuotaReport.Account, now: Date, alert: Double) -> String {
+        if account.isSignedOut {
+            if let back = account.backAt { return "Signed out · \(self.back(back, now: now))" }
+            return "Signed out" + (account.observedAt.map { " · read \(ago($0, now: now))" } ?? "")
+        }
+        if !account.hasReading { return account.error ?? "Not reported" }
+        let binding = account.binding(now: now)
+        if account.isDrawing(now: now) { return drawing(binding, now: now) }
+        if let binding, binding.pace.state == "exhausted" {
+            return binding.pool != nil ? "\(binding.poolLabel ?? human(binding.pool!)) \(back(binding.resetAt, now: now))"
+                : status(binding, now: now)
+        }
+        guard let window = account.display(now: now, alert: alert) else { return "No current reading" }
+        // A pool name leaves no room for the reset on one line; it shows when the row expands.
+        return window.pool != nil && !window.isExpired(now) ? window.fullTitle : status(window, now: now)
     }
 
     /// "Drawing on credits · allowance back in 3d 2h" for an account whose allowance is spent.
     static func drawing(_ window: QuotaReport.Window?, now: Date) -> String {
-        let back = window?.pace.state == "exhausted" ? until(window?.resetAt, now: now) : nil
-        return "Drawing on credits" + (back.map { " · allowance back in \($0)" } ?? "")
+        let back = window?.pace.state == "exhausted" ? window?.resetAt.map { self.back($0, now: now) } : nil
+        return "Drawing on credits" + (back.map { " · allowance \($0)" } ?? "")
     }
 }

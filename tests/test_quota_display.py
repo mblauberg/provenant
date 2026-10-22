@@ -95,7 +95,7 @@ def test_names_degrade_to_sane_title_and_sentence_case(quota, tmp_path):
     assert quota.display_name('claude', 'anese', entries) == 'Anese'
     assert quota.display_name('claude', 'max-a', entries) == 'Work'
     assert quota.display_name('claude', 'default', entries) is None
-    assert quota.display_name('agy', 'google-662390bb3131', entries) is None
+    assert quota.display_name('agy', 'google-4e7d2a91c05b', entries) is None
     # Labels themselves stay lowercase: they key snapshots and routing.
     assert {account.label for account in quota.accounts() if account.provider == 'claude'} == {'anese', 'max-a'}
     assert all('display_name' not in account.options for account in quota.accounts())
@@ -145,16 +145,16 @@ def agy_windows(gemini=100, claude=7.4, short=14.8):
 
 
 def test_agy_with_one_pool_exhausted_stays_usable_and_names_the_usable_pool(quota, tmp_path, monkeypatch, capsys):
-    agy = row(quota, value(quota, 'agy', 'google-662390bb3131', agy_windows()))
+    agy = row(quota, value(quota, 'agy', 'google-4e7d2a91c05b', agy_windows()))
     assert agy['state'] not in ('exhausted', 'signed_out') and agy['back_at'] is None
     assert (agy['provider_name'], agy['display_name']) == ('Antigravity', None)
     assert {item['name']: (item['pool'], item['pool_label']) for item in agy['windows']} == {
         'gemini.weekly': ('gemini', 'Gemini models'), 'claude.weekly': ('claude', 'Claude models'),
         'claude.5h': ('claude', 'Claude models')}
     assert agy['display_window'] == 'claude.weekly' and shown(agy)['label'] == 'Weekly'
-    report = quota.report([value(quota, 'agy', 'google-662390bb3131', agy_windows())], NOW, activity={})
-    assert report['headline']['account'] == 'agy/google-662390bb3131'
-    assert report['placement_preference']['agy'] == ['google-662390bb3131']
+    report = quota.report([value(quota, 'agy', 'google-4e7d2a91c05b', agy_windows())], NOW, activity={})
+    assert report['headline']['account'] == 'agy/google-4e7d2a91c05b'
+    assert report['placement_preference']['agy'] == ['google-4e7d2a91c05b']
     quota.render(report)
     out = capsys.readouterr().out
     assert 'Claude models · Weekly' in out and 'Gemini models · Weekly' in out
@@ -165,22 +165,22 @@ def test_agy_with_one_pool_exhausted_stays_usable_and_names_the_usable_pool(quot
 def test_agy_with_every_pool_exhausted_is_back_when_the_first_pool_returns(quota):
     windows = [window(100, WEEK, timedelta(days=2), 'gemini.weekly'), window(100, WEEK, timedelta(days=6), 'claude.weekly'),
                window(100, 300, timedelta(hours=1), 'claude.5h')]
-    agy = row(quota, value(quota, 'agy', 'google-662390bb3131', windows))
+    agy = row(quota, value(quota, 'agy', 'google-4e7d2a91c05b', windows))
     assert agy['state'] == 'exhausted' and agy['back_at'] == iso(NOW + timedelta(days=2))
     assert agy['display_window'] == 'gemini.weekly'
-    assert quota.report([value(quota, 'agy', 'google-662390bb3131', windows)], NOW, activity={})['headline']['account'] is None
+    assert quota.report([value(quota, 'agy', 'google-4e7d2a91c05b', windows)], NOW, activity={})['headline']['account'] is None
 
 
 def test_a_pool_needing_both_windows_back_returns_at_the_later_reset(quota):
     windows = [window(100, WEEK, timedelta(days=3), 'gemini.weekly'), window(100, WEEK, timedelta(days=6), 'claude.weekly'),
                window(100, 300, timedelta(hours=1), 'claude.5h')]
-    agy = row(quota, value(quota, 'agy', 'google-662390bb3131', windows))
+    agy = row(quota, value(quota, 'agy', 'google-4e7d2a91c05b', windows))
     assert agy['back_at'] == iso(NOW + timedelta(days=3))
 
 
 def test_pools_never_merge_matching_windows(quota):
     windows = [window(0, 300, None, 'gemini.5h'), window(0, 300, None, 'claude.5h')]
-    agy = row(quota, value(quota, 'agy', 'google-662390bb3131', windows))
+    agy = row(quota, value(quota, 'agy', 'google-4e7d2a91c05b', windows))
     assert len(agy['windows']) == 2
 
 
@@ -190,7 +190,7 @@ def readings(quota):
     return [value(quota, 'claude', 'anese', [window(2, 300, timedelta(hours=4), 'five_hour'), window(9, WEEK, timedelta(days=6))]),
             value(quota, 'claude', 'michael', [window(100, WEEK, timedelta(days=3))]),
             value(quota, 'codex', 'default', [window(83, WEEK, timedelta(days=5), 'primary')], priority=1),
-            value(quota, 'agy', 'google-662390bb3131', agy_windows())]
+            value(quota, 'agy', 'google-4e7d2a91c05b', agy_windows())]
 
 
 def test_headline_recent_is_the_usable_account_used_most_recently(quota):
@@ -207,7 +207,7 @@ def test_headline_without_activity_falls_back_to_priority_and_to_nothing(quota):
 
 
 @pytest.mark.parametrize('mode, account', [('worst', 'codex/default'), ('none', None),
-                                           ('agy/google-662390bb3131', 'agy/google-662390bb3131'),
+                                           ('agy/google-4e7d2a91c05b', 'agy/google-4e7d2a91c05b'),
                                            ('claude/gone', 'codex/default'), ('bogus', 'codex/default')])
 def test_headline_modes(quota, tmp_path, mode, account):
     configure(tmp_path, {'quota': {'menubar': {'headline': mode}}})

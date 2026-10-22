@@ -1,0 +1,1469 @@
+{
+ "schema": "provenant.quota.report.v1",
+ "generated_at": "2026-10-22T02:00:00Z",
+ "host": "laptop",
+ "enabled": true,
+ "next_due_at": "2026-10-22T02:04:00Z",
+ "refreshing": [],
+ "providers": [
+  "agy",
+  "claude",
+  "codex",
+  "cursor",
+  "opencode"
+ ],
+ "accounts": [
+  {
+   "provider": "agy",
+   "account": "google-4e7d2a91c05b",
+   "plan": null,
+   "host": "laptop",
+   "active": true,
+   "priority": null,
+   "observed_at": "2026-10-22T01:57:00Z",
+   "attempted_at": "2026-10-22T01:57:00Z",
+   "status": "ok",
+   "error": null,
+   "source": "fixture",
+   "provider_name": "Antigravity",
+   "display_name": "Michael",
+   "plan_label": null,
+   "display_window": "claude.weekly",
+   "back_at": null,
+   "state": "on_pace",
+   "summary": "claude.weekly: on pace; runs out in 5d 7h",
+   "windows": [
+    {
+     "name": "gemini.weekly",
+     "raw_kind": "gemini.weekly",
+     "used_percent": 100.0,
+     "window_minutes": 10080,
+     "reset_at": "2026-10-24T04:01:00Z",
+     "window_start": "2026-10-17T04:01:00Z",
+     "pace": {
+      "state": "exhausted",
+      "expected_used_percent": null,
+      "delta_percent": null,
+      "will_last_to_reset": false,
+      "runs_out_at": "2026-10-22T02:00:00Z",
+      "headroom_percent": 0.0,
+      "expiring_headroom_percent": 0,
+      "summary": "exhausted; resets in 2d 2h"
+     },
+     "pool": "gemini",
+     "pool_label": "Gemini models",
+     "label": "Weekly"
+    },
+    {
+     "name": "claude.weekly",
+     "raw_kind": "claude.weekly",
+     "used_percent": 7.4,
+     "window_minutes": 10080,
+     "reset_at": "2026-10-28T15:50:00Z",
+     "window_start": "2026-10-21T15:50:00Z",
+     "pace": {
+      "state": "on_pace",
+      "expected_used_percent": 6.1,
+      "delta_percent": 1.3,
+      "will_last_to_reset": false,
+      "runs_out_at": "2026-10-27T09:13:14.594595Z",
+      "headroom_percent": 92.6,
+      "expiring_headroom_percent": 0,
+      "summary": "on pace; runs out in 5d 7h"
+     },
+     "pool": "claude",
+     "pool_label": "Claude models",
+     "label": "Weekly"
+    },
+    {
+     "name": "claude.5h",
+     "raw_kind": "claude.5h",
+     "used_percent": 14.8,
+     "window_minutes": 300,
+     "reset_at": "2026-10-22T05:10:00Z",
+     "window_start": "2026-10-22T00:10:00Z",
+     "pace": {
+      "state": "reserve",
+      "expected_used_percent": 36.7,
+      "delta_percent": -21.9,
+      "will_last_to_reset": true,
+      "runs_out_at": null,
+      "headroom_percent": 85.2,
+      "expiring_headroom_percent": 59.6,
+      "summary": "22% in reserve; lasts until reset"
+     },
+     "pool": "claude",
+     "pool_label": "Claude models",
+     "label": "5-hour"
+    }
+   ],
+   "unreported": [
+    "gemini.5h"
+   ],
+   "coverage_note": "gemini.5h not reported by agy; missing does not mean 0%",
+   "credits": null,
+   "credit_advice": {
+    "action": "none",
+    "reset_credits": 0
+   },
+   "use_it_or_lose_it": {
+    "window": "gemini.weekly",
+    "reset_at": "2026-10-24T04:01:00Z",
+    "unused_percent": 0.0,
+    "expiring_headroom_percent": 0
+   },
+   "schedule": {
+    "next_due_at": "2026-10-22T02:06:00Z",
+    "reason": "active"
+   }
+  },
+  {
+   "provider": "agy",
+   "account": "google-5d1e0c7a9b24",
+   "plan": null,
+   "host": "laptop",
+   "active": true,
+   "priority": null,
+   "observed_at": "2026-10-19T08:30:00Z",
+   "attempted_at": "2026-10-19T08:30:00Z",
+   "status": "signed_out",
+   "error": null,
+   "source": "fixture",
+   "provider_name": "Antigravity",
+   "display_name": null,
+   "plan_label": null,
+   "display_window": null,
+   "back_at": "2026-10-21T06:00:00Z",
+   "state": "signed_out",
+   "summary": "signed out; last read 2026-10-19T08:30:00Z",
+   "windows": [
+    {
+     "name": "gemini.weekly",
+     "raw_kind": "gemini.weekly",
+     "used_percent": 100.0,
+     "window_minutes": 10080,
+     "reset_at": "2026-10-21T06:00:00Z",
+     "window_start": "2026-10-14T06:00:00Z",
+     "pace": {
+      "state": "exhausted",
+      "expected_used_percent": null,
+      "delta_percent": null,
+      "will_last_to_reset": false,
+      "runs_out_at": "2026-10-22T02:00:00Z",
+      "headroom_percent": 0.0,
+      "expiring_headroom_percent": 0,
+      "summary": "exhausted"
+     },
+     "pool": "gemini",
+     "pool_label": "Gemini models",
+     "reset_passed": true,
+     "label": "Weekly"
+    },
+    {
+     "name": "claude.weekly",
+     "raw_kind": "claude.weekly",
+     "used_percent": 100.0,
+     "window_minutes": 10080,
+     "reset_at": "2026-10-26T09:00:00Z",
+     "window_start": "2026-10-19T09:00:00Z",
+     "pace": {
+      "state": "exhausted",
+      "expected_used_percent": null,
+      "delta_percent": null,
+      "will_last_to_reset": false,
+      "runs_out_at": "2026-10-22T02:00:00Z",
+      "headroom_percent": 0.0,
+      "expiring_headroom_percent": 0,
+      "summary": "exhausted; resets in 4d 7h"
+     },
+     "pool": "claude",
+     "pool_label": "Claude models",
+     "label": "Weekly"
+    }
+   ],
+   "unreported": [],
+   "coverage_note": "",
+   "credits": null,
+   "credit_advice": {
+    "action": "none",
+    "reset_credits": 0
+   },
+   "use_it_or_lose_it": {
+    "window": "gemini.weekly",
+    "reset_at": "2026-10-21T06:00:00Z",
+    "unused_percent": 0.0,
+    "expiring_headroom_percent": 0
+   }
+  },
+  {
+   "provider": "agy",
+   "account": "google-a07c33e1f918",
+   "plan": null,
+   "host": "laptop",
+   "active": true,
+   "priority": null,
+   "observed_at": "2026-10-20T02:00:00Z",
+   "attempted_at": "2026-10-20T02:00:00Z",
+   "status": "signed_out",
+   "error": null,
+   "source": "fixture",
+   "provider_name": "Antigravity",
+   "display_name": null,
+   "plan_label": null,
+   "display_window": "gemini.weekly",
+   "back_at": "2026-10-23T15:00:00Z",
+   "state": "signed_out",
+   "summary": "signed out; last read 2026-10-20T02:00:00Z",
+   "windows": [
+    {
+     "name": "gemini.weekly",
+     "raw_kind": "gemini.weekly",
+     "used_percent": 100.0,
+     "window_minutes": 10080,
+     "reset_at": "2026-10-23T15:00:00Z",
+     "window_start": "2026-10-16T15:00:00Z",
+     "pace": {
+      "state": "exhausted",
+      "expected_used_percent": null,
+      "delta_percent": null,
+      "will_last_to_reset": false,
+      "runs_out_at": "2026-10-22T02:00:00Z",
+      "headroom_percent": 0.0,
+      "expiring_headroom_percent": 0,
+      "summary": "exhausted; resets in 37h"
+     },
+     "pool": "gemini",
+     "pool_label": "Gemini models",
+     "label": "Weekly"
+    },
+    {
+     "name": "claude.weekly",
+     "raw_kind": "claude.weekly",
+     "used_percent": 100.0,
+     "window_minutes": 10080,
+     "reset_at": "2026-10-25T02:00:00Z",
+     "window_start": "2026-10-18T02:00:00Z",
+     "pace": {
+      "state": "exhausted",
+      "expected_used_percent": null,
+      "delta_percent": null,
+      "will_last_to_reset": false,
+      "runs_out_at": "2026-10-22T02:00:00Z",
+      "headroom_percent": 0.0,
+      "expiring_headroom_percent": 0,
+      "summary": "exhausted; resets in 3d"
+     },
+     "pool": "claude",
+     "pool_label": "Claude models",
+     "label": "Weekly"
+    }
+   ],
+   "unreported": [],
+   "coverage_note": "",
+   "credits": null,
+   "credit_advice": {
+    "action": "none",
+    "reset_credits": 0
+   },
+   "use_it_or_lose_it": {
+    "window": "gemini.weekly",
+    "reset_at": "2026-10-23T15:00:00Z",
+    "unused_percent": 0.0,
+    "expiring_headroom_percent": 0
+   }
+  },
+  {
+   "provider": "claude",
+   "account": "anese",
+   "plan": "Max",
+   "host": "laptop",
+   "active": true,
+   "priority": 1,
+   "observed_at": "2026-10-22T01:57:00Z",
+   "attempted_at": "2026-10-22T01:57:00Z",
+   "status": "ok",
+   "error": null,
+   "source": "fixture",
+   "provider_name": "Claude",
+   "display_name": "Anese",
+   "plan_label": "Max",
+   "display_window": "seven_day",
+   "back_at": null,
+   "state": "on_pace",
+   "summary": "five_hour: on pace; lasts until reset",
+   "windows": [
+    {
+     "name": "five_hour",
+     "raw_kind": "five_hour",
+     "used_percent": 2.0,
+     "window_minutes": 300,
+     "reset_at": "2026-10-22T06:51:00Z",
+     "window_start": "2026-10-22T01:51:00Z",
+     "pace": {
+      "state": "on_pace",
+      "expected_used_percent": 3.0,
+      "delta_percent": -1.0,
+      "will_last_to_reset": true,
+      "runs_out_at": null,
+      "headroom_percent": 98.0,
+      "expiring_headroom_percent": 33.3,
+      "summary": "on pace; lasts until reset"
+     },
+     "label": "5-hour"
+    },
+    {
+     "name": "seven_day",
+     "raw_kind": "seven_day",
+     "used_percent": 9.0,
+     "window_minutes": 10080,
+     "reset_at": "2026-10-28T22:00:00Z",
+     "window_start": "2026-10-21T22:00:00Z",
+     "pace": {
+      "state": "early",
+      "expected_used_percent": 2.4,
+      "delta_percent": 6.6,
+      "will_last_to_reset": false,
+      "runs_out_at": "2026-10-23T18:26:40Z",
+      "headroom_percent": 91.0,
+      "expiring_headroom_percent": 0,
+      "summary": "window just started; resets in 6d 20h"
+     },
+     "label": "Weekly"
+    },
+    {
+     "name": "iguana_necktie",
+     "raw_kind": "iguana_necktie",
+     "used_percent": 54.5,
+     "window_minutes": null,
+     "reset_at": null,
+     "window_start": null,
+     "used_amount": 136.25,
+     "limit_amount": 250.0,
+     "currency": "USD",
+     "pace": {
+      "state": "unknown",
+      "expected_used_percent": null,
+      "delta_percent": null,
+      "will_last_to_reset": null,
+      "runs_out_at": null,
+      "headroom_percent": 45.5,
+      "expiring_headroom_percent": 0,
+      "summary": "reset time unreported; pace unknown"
+     },
+     "label": "Cloud session credits"
+    }
+   ],
+   "unreported": [],
+   "coverage_note": "",
+   "credits": null,
+   "credit_advice": {
+    "action": "none",
+    "reset_credits": 0
+   },
+   "use_it_or_lose_it": {
+    "window": "seven_day",
+    "reset_at": "2026-10-28T22:00:00Z",
+    "unused_percent": 91.0,
+    "expiring_headroom_percent": 0
+   },
+   "schedule": {
+    "next_due_at": "2026-10-22T02:04:00Z",
+    "reason": "active"
+   }
+  },
+  {
+   "provider": "claude",
+   "account": "michael",
+   "plan": "Max",
+   "host": "laptop",
+   "active": true,
+   "priority": 2,
+   "observed_at": "2026-10-22T01:57:00Z",
+   "attempted_at": "2026-10-22T01:57:00Z",
+   "status": "ok",
+   "error": null,
+   "source": "fixture",
+   "provider_name": "Claude",
+   "display_name": "Michael",
+   "plan_label": "Max",
+   "display_window": "seven_day",
+   "back_at": "2026-10-25T01:00:00Z",
+   "state": "exhausted",
+   "summary": "seven_day: exhausted; resets in 2d 23h",
+   "windows": [
+    {
+     "name": "seven_day",
+     "raw_kind": "seven_day",
+     "used_percent": 100.0,
+     "window_minutes": 10080,
+     "reset_at": "2026-10-25T01:00:00Z",
+     "window_start": "2026-10-18T01:00:00Z",
+     "pace": {
+      "state": "exhausted",
+      "expected_used_percent": null,
+      "delta_percent": null,
+      "will_last_to_reset": false,
+      "runs_out_at": "2026-10-22T02:00:00Z",
+      "headroom_percent": 0.0,
+      "expiring_headroom_percent": 0,
+      "summary": "exhausted; resets in 2d 23h"
+     },
+     "label": "Weekly"
+    },
+    {
+     "name": "five_hour",
+     "raw_kind": "five_hour",
+     "used_percent": 0.0,
+     "window_minutes": 300,
+     "reset_at": null,
+     "window_start": null,
+     "pace": {
+      "state": "not_started",
+      "expected_used_percent": null,
+      "delta_percent": null,
+      "will_last_to_reset": null,
+      "runs_out_at": null,
+      "headroom_percent": 100.0,
+      "expiring_headroom_percent": 0,
+      "summary": "window starts on first use"
+     },
+     "label": "5-hour"
+    }
+   ],
+   "unreported": [],
+   "coverage_note": "",
+   "credits": null,
+   "credit_advice": {
+    "action": "none",
+    "reset_credits": 0
+   },
+   "use_it_or_lose_it": {
+    "window": "seven_day",
+    "reset_at": "2026-10-25T01:00:00Z",
+    "unused_percent": 0.0,
+    "expiring_headroom_percent": 0
+   }
+  },
+  {
+   "provider": "claude",
+   "account": "old",
+   "plan": "Max",
+   "host": "laptop",
+   "active": true,
+   "priority": null,
+   "observed_at": "2026-10-22T01:57:00Z",
+   "attempted_at": "2026-10-22T01:57:00Z",
+   "status": "unavailable",
+   "error": "token expired; run claude login",
+   "source": "fixture",
+   "provider_name": "Claude",
+   "display_name": "Old",
+   "plan_label": "Max",
+   "display_window": null,
+   "back_at": null,
+   "state": "unreported",
+   "summary": "token expired; run claude login",
+   "windows": [],
+   "unreported": [],
+   "coverage_note": "",
+   "credits": null,
+   "credit_advice": {
+    "action": "none",
+    "reset_credits": 0
+   },
+   "use_it_or_lose_it": null
+  },
+  {
+   "provider": "claude",
+   "account": "pro",
+   "plan": "Pro",
+   "host": "laptop",
+   "active": true,
+   "priority": 3,
+   "observed_at": "2026-10-22T01:57:00Z",
+   "attempted_at": "2026-10-22T01:57:00Z",
+   "status": "ok",
+   "error": null,
+   "source": "fixture",
+   "provider_name": "Claude",
+   "display_name": "Pro",
+   "plan_label": "Pro",
+   "display_window": "seven_day",
+   "back_at": null,
+   "state": "on_pace",
+   "summary": "seven_day: on pace; runs out in 3d 12h",
+   "windows": [
+    {
+     "name": "seven_day",
+     "raw_kind": "seven_day",
+     "used_percent": 48.0,
+     "window_minutes": 10080,
+     "reset_at": "2026-10-25T20:00:00Z",
+     "window_start": "2026-10-18T20:00:00Z",
+     "pace": {
+      "state": "on_pace",
+      "expected_used_percent": 46.4,
+      "delta_percent": 1.6,
+      "will_last_to_reset": false,
+      "runs_out_at": "2026-10-25T14:30:00Z",
+      "headroom_percent": 52.0,
+      "expiring_headroom_percent": 0,
+      "summary": "on pace; runs out in 3d 12h"
+     },
+     "label": "Weekly"
+    }
+   ],
+   "unreported": [],
+   "coverage_note": "",
+   "credits": null,
+   "credit_advice": {
+    "action": "none",
+    "reset_credits": 0
+   },
+   "use_it_or_lose_it": {
+    "window": "seven_day",
+    "reset_at": "2026-10-25T20:00:00Z",
+    "unused_percent": 52.0,
+    "expiring_headroom_percent": 0
+   }
+  },
+  {
+   "provider": "claude",
+   "account": "team-1",
+   "plan": "Max",
+   "host": "laptop",
+   "active": true,
+   "priority": 6,
+   "observed_at": "2026-10-22T01:57:00Z",
+   "attempted_at": "2026-10-22T01:57:00Z",
+   "status": "ok",
+   "error": null,
+   "source": "fixture",
+   "provider_name": "Claude",
+   "display_name": "Team 1",
+   "plan_label": "Max",
+   "display_window": "seven_day",
+   "back_at": null,
+   "state": "reserve",
+   "summary": "seven_day: 35% in reserve; lasts until reset",
+   "windows": [
+    {
+     "name": "five_hour",
+     "raw_kind": "five_hour",
+     "used_percent": 29.0,
+     "window_minutes": 300,
+     "reset_at": "2026-10-22T03:00:00Z",
+     "window_start": "2026-10-21T22:00:00Z",
+     "pace": {
+      "state": "reserve",
+      "expected_used_percent": 80.0,
+      "delta_percent": -51.0,
+      "will_last_to_reset": true,
+      "runs_out_at": null,
+      "headroom_percent": 71.0,
+      "expiring_headroom_percent": 63.8,
+      "summary": "51% in reserve; lasts until reset"
+     },
+     "label": "5-hour"
+    },
+    {
+     "name": "seven_day",
+     "raw_kind": "seven_day",
+     "used_percent": 36.0,
+     "window_minutes": 10080,
+     "reset_at": "2026-10-24T02:00:00Z",
+     "window_start": "2026-10-17T02:00:00Z",
+     "pace": {
+      "state": "reserve",
+      "expected_used_percent": 71.4,
+      "delta_percent": -35.4,
+      "will_last_to_reset": true,
+      "runs_out_at": null,
+      "headroom_percent": 64.0,
+      "expiring_headroom_percent": 49.6,
+      "summary": "35% in reserve; lasts until reset"
+     },
+     "label": "Weekly"
+    }
+   ],
+   "unreported": [],
+   "coverage_note": "",
+   "credits": null,
+   "credit_advice": {
+    "action": "none",
+    "reset_credits": 0
+   },
+   "use_it_or_lose_it": {
+    "window": "seven_day",
+    "reset_at": "2026-10-24T02:00:00Z",
+    "unused_percent": 64.0,
+    "expiring_headroom_percent": 49.6
+   }
+  },
+  {
+   "provider": "claude",
+   "account": "team-2",
+   "plan": "Max",
+   "host": "laptop",
+   "active": true,
+   "priority": 7,
+   "observed_at": "2026-10-22T01:57:00Z",
+   "attempted_at": "2026-10-22T01:57:00Z",
+   "status": "ok",
+   "error": null,
+   "source": "fixture",
+   "provider_name": "Claude",
+   "display_name": "Team 2",
+   "plan_label": "Max",
+   "display_window": "seven_day",
+   "back_at": null,
+   "state": "reserve",
+   "summary": "seven_day: 15% in reserve; lasts until reset",
+   "windows": [
+    {
+     "name": "five_hour",
+     "raw_kind": "five_hour",
+     "used_percent": 38.0,
+     "window_minutes": 300,
+     "reset_at": "2026-10-22T04:00:00Z",
+     "window_start": "2026-10-21T23:00:00Z",
+     "pace": {
+      "state": "reserve",
+      "expected_used_percent": 60.0,
+      "delta_percent": -22.0,
+      "will_last_to_reset": true,
+      "runs_out_at": null,
+      "headroom_percent": 62.0,
+      "expiring_headroom_percent": 36.7,
+      "summary": "22% in reserve; lasts until reset"
+     },
+     "label": "5-hour"
+    },
+    {
+     "name": "seven_day",
+     "raw_kind": "seven_day",
+     "used_percent": 42.0,
+     "window_minutes": 10080,
+     "reset_at": "2026-10-25T02:00:00Z",
+     "window_start": "2026-10-18T02:00:00Z",
+     "pace": {
+      "state": "reserve",
+      "expected_used_percent": 57.1,
+      "delta_percent": -15.1,
+      "will_last_to_reset": true,
+      "runs_out_at": null,
+      "headroom_percent": 58.0,
+      "expiring_headroom_percent": 26.5,
+      "summary": "15% in reserve; lasts until reset"
+     },
+     "label": "Weekly"
+    }
+   ],
+   "unreported": [],
+   "coverage_note": "",
+   "credits": null,
+   "credit_advice": {
+    "action": "none",
+    "reset_credits": 0
+   },
+   "use_it_or_lose_it": {
+    "window": "seven_day",
+    "reset_at": "2026-10-25T02:00:00Z",
+    "unused_percent": 58.0,
+    "expiring_headroom_percent": 26.5
+   }
+  },
+  {
+   "provider": "claude",
+   "account": "team-3",
+   "plan": "Max",
+   "host": "laptop",
+   "active": true,
+   "priority": 8,
+   "observed_at": "2026-10-22T01:57:00Z",
+   "attempted_at": "2026-10-22T01:57:00Z",
+   "status": "ok",
+   "error": null,
+   "source": "fixture",
+   "provider_name": "Claude",
+   "display_name": "Team 3",
+   "plan_label": "Max",
+   "display_window": "seven_day",
+   "back_at": null,
+   "state": "deficit",
+   "summary": "seven_day: 5% in deficit; runs out in 3d 6h",
+   "windows": [
+    {
+     "name": "five_hour",
+     "raw_kind": "five_hour",
+     "used_percent": 47.0,
+     "window_minutes": 300,
+     "reset_at": "2026-10-22T05:00:00Z",
+     "window_start": "2026-10-22T00:00:00Z",
+     "pace": {
+      "state": "deficit",
+      "expected_used_percent": 40.0,
+      "delta_percent": 7.0,
+      "will_last_to_reset": false,
+      "runs_out_at": "2026-10-22T04:15:19.148936Z",
+      "headroom_percent": 53.0,
+      "expiring_headroom_percent": 0,
+      "summary": "7% in deficit; runs out in 2h 15m"
+     },
+     "label": "5-hour"
+    },
+    {
+     "name": "seven_day",
+     "raw_kind": "seven_day",
+     "used_percent": 48.0,
+     "window_minutes": 10080,
+     "reset_at": "2026-10-26T02:00:00Z",
+     "window_start": "2026-10-19T02:00:00Z",
+     "pace": {
+      "state": "deficit",
+      "expected_used_percent": 42.9,
+      "delta_percent": 5.1,
+      "will_last_to_reset": false,
+      "runs_out_at": "2026-10-25T08:00:00Z",
+      "headroom_percent": 52.0,
+      "expiring_headroom_percent": 0,
+      "summary": "5% in deficit; runs out in 3d 6h"
+     },
+     "label": "Weekly"
+    }
+   ],
+   "unreported": [],
+   "coverage_note": "",
+   "credits": null,
+   "credit_advice": {
+    "action": "none",
+    "reset_credits": 0
+   },
+   "use_it_or_lose_it": {
+    "window": "seven_day",
+    "reset_at": "2026-10-26T02:00:00Z",
+    "unused_percent": 52.0,
+    "expiring_headroom_percent": 0
+   }
+  },
+  {
+   "provider": "claude",
+   "account": "team-4",
+   "plan": "Max",
+   "host": "laptop",
+   "active": true,
+   "priority": 9,
+   "observed_at": "2026-10-22T01:57:00Z",
+   "attempted_at": "2026-10-22T01:57:00Z",
+   "status": "ok",
+   "error": null,
+   "source": "fixture",
+   "provider_name": "Claude",
+   "display_name": "Team 4",
+   "plan_label": "Max",
+   "display_window": "seven_day",
+   "back_at": null,
+   "state": "deficit",
+   "summary": "five_hour: 36% in deficit; runs out in 47m",
+   "windows": [
+    {
+     "name": "five_hour",
+     "raw_kind": "five_hour",
+     "used_percent": 56.0,
+     "window_minutes": 300,
+     "reset_at": "2026-10-22T06:00:00Z",
+     "window_start": "2026-10-22T01:00:00Z",
+     "pace": {
+      "state": "deficit",
+      "expected_used_percent": 20.0,
+      "delta_percent": 36.0,
+      "will_last_to_reset": false,
+      "runs_out_at": "2026-10-22T02:47:08.571429Z",
+      "headroom_percent": 44.0,
+      "expiring_headroom_percent": 0,
+      "summary": "36% in deficit; runs out in 47m"
+     },
+     "label": "5-hour"
+    },
+    {
+     "name": "seven_day",
+     "raw_kind": "seven_day",
+     "used_percent": 54.0,
+     "window_minutes": 10080,
+     "reset_at": "2026-10-27T02:00:00Z",
+     "window_start": "2026-10-20T02:00:00Z",
+     "pace": {
+      "state": "deficit",
+      "expected_used_percent": 28.6,
+      "delta_percent": 25.4,
+      "will_last_to_reset": false,
+      "runs_out_at": "2026-10-23T18:53:20Z",
+      "headroom_percent": 46.0,
+      "expiring_headroom_percent": 0,
+      "summary": "25% in deficit; runs out in 40h 53m"
+     },
+     "label": "Weekly"
+    }
+   ],
+   "unreported": [],
+   "coverage_note": "",
+   "credits": null,
+   "credit_advice": {
+    "action": "none",
+    "reset_credits": 0
+   },
+   "use_it_or_lose_it": {
+    "window": "seven_day",
+    "reset_at": "2026-10-27T02:00:00Z",
+    "unused_percent": 46.0,
+    "expiring_headroom_percent": 0
+   }
+  },
+  {
+   "provider": "claude",
+   "account": "team-5",
+   "plan": "Max",
+   "host": "laptop",
+   "active": true,
+   "priority": 10,
+   "observed_at": "2026-10-22T01:57:00Z",
+   "attempted_at": "2026-10-22T01:57:00Z",
+   "status": "ok",
+   "error": null,
+   "source": "fixture",
+   "provider_name": "Claude",
+   "display_name": "Team 5",
+   "plan_label": "Max",
+   "display_window": "seven_day",
+   "back_at": null,
+   "state": "deficit",
+   "summary": "seven_day: 46% in deficit; runs out in 16h",
+   "windows": [
+    {
+     "name": "five_hour",
+     "raw_kind": "five_hour",
+     "used_percent": 65.0,
+     "window_minutes": 300,
+     "reset_at": "2026-10-22T07:00:00Z",
+     "window_start": "2026-10-22T02:00:00Z",
+     "pace": {
+      "state": "early",
+      "expected_used_percent": 0.0,
+      "delta_percent": 65.0,
+      "will_last_to_reset": true,
+      "runs_out_at": null,
+      "headroom_percent": 35.0,
+      "expiring_headroom_percent": 35.0,
+      "summary": "window just started; resets in 5h"
+     },
+     "label": "5-hour"
+    },
+    {
+     "name": "seven_day",
+     "raw_kind": "seven_day",
+     "used_percent": 60.0,
+     "window_minutes": 10080,
+     "reset_at": "2026-10-28T02:00:00Z",
+     "window_start": "2026-10-21T02:00:00Z",
+     "pace": {
+      "state": "deficit",
+      "expected_used_percent": 14.3,
+      "delta_percent": 45.7,
+      "will_last_to_reset": false,
+      "runs_out_at": "2026-10-22T18:00:00Z",
+      "headroom_percent": 40.0,
+      "expiring_headroom_percent": 0,
+      "summary": "46% in deficit; runs out in 16h"
+     },
+     "label": "Weekly"
+    }
+   ],
+   "unreported": [],
+   "coverage_note": "",
+   "credits": null,
+   "credit_advice": {
+    "action": "none",
+    "reset_credits": 0
+   },
+   "use_it_or_lose_it": {
+    "window": "seven_day",
+    "reset_at": "2026-10-28T02:00:00Z",
+    "unused_percent": 40.0,
+    "expiring_headroom_percent": 0
+   }
+  },
+  {
+   "provider": "claude",
+   "account": "team-6",
+   "plan": "Max",
+   "host": "laptop",
+   "active": true,
+   "priority": 11,
+   "observed_at": "2026-10-22T01:57:00Z",
+   "attempted_at": "2026-10-22T01:57:00Z",
+   "status": "ok",
+   "error": null,
+   "source": "fixture",
+   "provider_name": "Claude",
+   "display_name": "Team 6",
+   "plan_label": "Max",
+   "display_window": "seven_day",
+   "back_at": null,
+   "state": "unknown",
+   "summary": "five_hour: reset time exceeds the reported window; pace unknown",
+   "windows": [
+    {
+     "name": "five_hour",
+     "raw_kind": "five_hour",
+     "used_percent": 74.0,
+     "window_minutes": 300,
+     "reset_at": "2026-10-22T08:00:00Z",
+     "window_start": "2026-10-22T03:00:00Z",
+     "pace": {
+      "state": "unknown",
+      "expected_used_percent": null,
+      "delta_percent": null,
+      "will_last_to_reset": null,
+      "runs_out_at": null,
+      "headroom_percent": 26.0,
+      "expiring_headroom_percent": 0,
+      "summary": "reset time exceeds the reported window; pace unknown"
+     },
+     "label": "5-hour"
+    },
+    {
+     "name": "seven_day",
+     "raw_kind": "seven_day",
+     "used_percent": 66.0,
+     "window_minutes": 10080,
+     "reset_at": "2026-10-29T02:00:00Z",
+     "window_start": "2026-10-22T02:00:00Z",
+     "pace": {
+      "state": "early",
+      "expected_used_percent": 0.0,
+      "delta_percent": 66.0,
+      "will_last_to_reset": true,
+      "runs_out_at": null,
+      "headroom_percent": 34.0,
+      "expiring_headroom_percent": 34.0,
+      "summary": "window just started; resets in 7d"
+     },
+     "label": "Weekly"
+    }
+   ],
+   "unreported": [],
+   "coverage_note": "",
+   "credits": null,
+   "credit_advice": {
+    "action": "none",
+    "reset_credits": 0
+   },
+   "use_it_or_lose_it": {
+    "window": "seven_day",
+    "reset_at": "2026-10-29T02:00:00Z",
+    "unused_percent": 34.0,
+    "expiring_headroom_percent": 34.0
+   }
+  },
+  {
+   "provider": "codex",
+   "account": "default",
+   "plan": "prolite",
+   "host": "laptop",
+   "active": true,
+   "priority": null,
+   "observed_at": "2026-10-22T01:57:00Z",
+   "attempted_at": "2026-10-22T01:57:00Z",
+   "status": "ok",
+   "error": null,
+   "source": "fixture",
+   "provider_name": "Codex",
+   "display_name": null,
+   "plan_label": "Pro Lite",
+   "display_window": "primary",
+   "back_at": null,
+   "state": "deficit",
+   "summary": "primary: 57% in deficit; runs out in 8h 54m",
+   "windows": [
+    {
+     "name": "primary",
+     "raw_kind": "primary",
+     "used_percent": 83.0,
+     "window_minutes": 10080,
+     "reset_at": "2026-10-27T06:32:00Z",
+     "window_start": "2026-10-20T06:32:00Z",
+     "pace": {
+      "state": "deficit",
+      "expected_used_percent": 25.9,
+      "delta_percent": 57.1,
+      "will_last_to_reset": false,
+      "runs_out_at": "2026-10-22T10:54:10.120482Z",
+      "headroom_percent": 17.0,
+      "expiring_headroom_percent": 0,
+      "summary": "57% in deficit; runs out in 8h 54m"
+     },
+     "label": "Weekly"
+    }
+   ],
+   "unreported": [
+    "secondary"
+   ],
+   "coverage_note": "secondary not reported by codex; missing does not mean 0%",
+   "credits": null,
+   "credit_advice": {
+    "action": "none",
+    "reset_credits": 0
+   },
+   "use_it_or_lose_it": {
+    "window": "primary",
+    "reset_at": "2026-10-27T06:32:00Z",
+    "unused_percent": 17.0,
+    "expiring_headroom_percent": 0
+   }
+  },
+  {
+   "provider": "codex",
+   "account": "work",
+   "plan": "pro",
+   "host": "laptop",
+   "active": true,
+   "priority": null,
+   "observed_at": "2026-10-22T01:57:00Z",
+   "attempted_at": "2026-10-22T01:57:00Z",
+   "status": "ok",
+   "error": null,
+   "source": "fixture",
+   "provider_name": "Codex",
+   "display_name": "Work",
+   "plan_label": "Pro",
+   "display_window": "secondary",
+   "back_at": null,
+   "state": "deficit",
+   "summary": "secondary: 18% in deficit; runs out in 46h 1m",
+   "windows": [
+    {
+     "name": "primary",
+     "raw_kind": "primary",
+     "used_percent": 35.0,
+     "window_minutes": 300,
+     "reset_at": "2026-10-22T04:00:00Z",
+     "window_start": "2026-10-21T23:00:00Z",
+     "pace": {
+      "state": "reserve",
+      "expected_used_percent": 60.0,
+      "delta_percent": -25.0,
+      "will_last_to_reset": true,
+      "runs_out_at": null,
+      "headroom_percent": 65.0,
+      "expiring_headroom_percent": 41.7,
+      "summary": "25% in reserve; lasts until reset"
+     },
+     "label": "5-hour"
+    },
+    {
+     "name": "secondary",
+     "raw_kind": "secondary",
+     "used_percent": 61.0,
+     "window_minutes": 10080,
+     "reset_at": "2026-10-26T02:00:00Z",
+     "window_start": "2026-10-19T02:00:00Z",
+     "pace": {
+      "state": "deficit",
+      "expected_used_percent": 42.9,
+      "delta_percent": 18.1,
+      "will_last_to_reset": false,
+      "runs_out_at": "2026-10-24T00:01:58.032787Z",
+      "headroom_percent": 39.0,
+      "expiring_headroom_percent": 0,
+      "summary": "18% in deficit; runs out in 46h 1m"
+     },
+     "label": "Weekly"
+    }
+   ],
+   "unreported": [],
+   "coverage_note": "",
+   "credits": null,
+   "credit_advice": {
+    "action": "none",
+    "reset_credits": 0
+   },
+   "use_it_or_lose_it": {
+    "window": "secondary",
+    "reset_at": "2026-10-26T02:00:00Z",
+    "unused_percent": 39.0,
+    "expiring_headroom_percent": 0
+   }
+  },
+  {
+   "provider": "copilot",
+   "account": "default",
+   "plan": "pro",
+   "host": "laptop",
+   "active": true,
+   "priority": null,
+   "observed_at": "2026-10-22T01:57:00Z",
+   "attempted_at": "2026-10-22T01:57:00Z",
+   "status": "ok",
+   "error": null,
+   "source": "fixture",
+   "provider_name": "Copilot",
+   "display_name": null,
+   "plan_label": "Pro",
+   "display_window": "premium_interactions",
+   "back_at": null,
+   "state": "deficit",
+   "summary": "premium_interactions: 22% in deficit; runs out in 43h 49m",
+   "windows": [
+    {
+     "name": "premium_interactions",
+     "raw_kind": "premium_interactions",
+     "used_percent": 92.0,
+     "window_minutes": 43200,
+     "reset_at": "2026-10-31T02:00:00Z",
+     "window_start": "2026-10-01T02:00:00Z",
+     "pace": {
+      "state": "deficit",
+      "expected_used_percent": 70.0,
+      "delta_percent": 22.0,
+      "will_last_to_reset": false,
+      "runs_out_at": "2026-10-23T21:49:33.913043Z",
+      "headroom_percent": 8.0,
+      "expiring_headroom_percent": 0,
+      "summary": "22% in deficit; runs out in 43h 49m"
+     },
+     "label": "Monthly (Premium interactions)"
+    }
+   ],
+   "unreported": [],
+   "coverage_note": "",
+   "credits": null,
+   "credit_advice": {
+    "action": "none",
+    "reset_credits": 0
+   },
+   "use_it_or_lose_it": {
+    "window": "premium_interactions",
+    "reset_at": "2026-10-31T02:00:00Z",
+    "unused_percent": 8.0,
+    "expiring_headroom_percent": 0
+   }
+  },
+  {
+   "provider": "cursor",
+   "account": "default",
+   "plan": "pro_student",
+   "host": "laptop",
+   "active": true,
+   "priority": null,
+   "observed_at": "2026-10-22T01:57:00Z",
+   "attempted_at": "2026-10-22T01:57:00Z",
+   "status": "ok",
+   "error": null,
+   "source": "fixture",
+   "provider_name": "Cursor",
+   "display_name": null,
+   "plan_label": "Pro (Student)",
+   "display_window": "billing_cycle",
+   "back_at": "2026-11-13T00:00:00Z",
+   "state": "exhausted",
+   "summary": "billing_cycle: exhausted; resets in 21d 22h",
+   "windows": [
+    {
+     "name": "billing_cycle",
+     "raw_kind": "billing_cycle",
+     "used_percent": 100.0,
+     "window_minutes": 44640,
+     "reset_at": "2026-11-13T00:00:00Z",
+     "window_start": "2026-10-13T00:00:00Z",
+     "pace": {
+      "state": "exhausted",
+      "expected_used_percent": null,
+      "delta_percent": null,
+      "will_last_to_reset": false,
+      "runs_out_at": "2026-10-22T02:00:00Z",
+      "headroom_percent": 0.0,
+      "expiring_headroom_percent": 0,
+      "summary": "exhausted; resets in 21d 22h"
+     },
+     "label": "Monthly"
+    }
+   ],
+   "unreported": [],
+   "coverage_note": "",
+   "credits": null,
+   "credit_advice": {
+    "action": "none",
+    "reset_credits": 0
+   },
+   "use_it_or_lose_it": {
+    "window": "billing_cycle",
+    "reset_at": "2026-11-13T00:00:00Z",
+    "unused_percent": 0.0,
+    "expiring_headroom_percent": 0
+   }
+  },
+  {
+   "provider": "fakeprov",
+   "account": "lab",
+   "plan": "odd_tier",
+   "host": "laptop",
+   "active": true,
+   "priority": null,
+   "observed_at": "2026-10-22T01:57:00Z",
+   "attempted_at": "2026-10-22T01:57:00Z",
+   "status": "ok",
+   "error": null,
+   "source": "fixture",
+   "provider_name": "Fakeprov",
+   "display_name": "Lab",
+   "plan_label": "Odd Tier",
+   "display_window": "odd",
+   "back_at": null,
+   "state": "unknown",
+   "summary": "mystery: reset time unreported; pace unknown",
+   "windows": [
+    {
+     "name": "odd",
+     "raw_kind": "odd",
+     "used_percent": 40.0,
+     "window_minutes": 4320,
+     "reset_at": "2026-10-24T02:00:00Z",
+     "window_start": "2026-10-21T02:00:00Z",
+     "pace": {
+      "state": "deficit",
+      "expected_used_percent": 33.3,
+      "delta_percent": 6.7,
+      "will_last_to_reset": false,
+      "runs_out_at": "2026-10-23T14:00:00Z",
+      "headroom_percent": 60.0,
+      "expiring_headroom_percent": 0,
+      "summary": "7% in deficit; runs out in 36h"
+     },
+     "label": "3-day (Odd)"
+    },
+    {
+     "name": "mystery",
+     "raw_kind": "mystery",
+     "used_percent": 12.0,
+     "window_minutes": null,
+     "reset_at": null,
+     "window_start": null,
+     "pace": {
+      "state": "unknown",
+      "expected_used_percent": null,
+      "delta_percent": null,
+      "will_last_to_reset": null,
+      "runs_out_at": null,
+      "headroom_percent": 88.0,
+      "expiring_headroom_percent": 0,
+      "summary": "reset time unreported; pace unknown"
+     },
+     "label": "Mystery"
+    }
+   ],
+   "unreported": [],
+   "coverage_note": "",
+   "credits": null,
+   "credit_advice": {
+    "action": "none",
+    "reset_credits": 0
+   },
+   "use_it_or_lose_it": {
+    "window": "odd",
+    "reset_at": "2026-10-24T02:00:00Z",
+    "unused_percent": 60.0,
+    "expiring_headroom_percent": 0
+   }
+  },
+  {
+   "provider": "kiro",
+   "account": "default",
+   "plan": "pro",
+   "host": "laptop",
+   "active": true,
+   "priority": null,
+   "observed_at": "2026-10-22T01:57:00Z",
+   "attempted_at": "2026-10-22T01:57:00Z",
+   "status": "ok",
+   "error": null,
+   "source": "fixture",
+   "provider_name": "Kiro",
+   "display_name": null,
+   "plan_label": "Pro",
+   "display_window": "monthly",
+   "back_at": null,
+   "state": "reserve",
+   "summary": "monthly: 15% in reserve; lasts until reset",
+   "windows": [
+    {
+     "name": "monthly",
+     "raw_kind": "monthly",
+     "used_percent": 18.0,
+     "window_minutes": 43200,
+     "reset_at": "2026-11-11T02:00:00Z",
+     "window_start": "2026-10-12T02:00:00Z",
+     "pace": {
+      "state": "reserve",
+      "expected_used_percent": 33.3,
+      "delta_percent": -15.3,
+      "will_last_to_reset": true,
+      "runs_out_at": null,
+      "headroom_percent": 82.0,
+      "expiring_headroom_percent": 46.0,
+      "summary": "15% in reserve; lasts until reset"
+     },
+     "label": "Monthly"
+    }
+   ],
+   "unreported": [],
+   "coverage_note": "",
+   "credits": null,
+   "credit_advice": {
+    "action": "none",
+    "reset_credits": 0
+   },
+   "use_it_or_lose_it": {
+    "window": "monthly",
+    "reset_at": "2026-11-11T02:00:00Z",
+    "unused_percent": 82.0,
+    "expiring_headroom_percent": 46.0
+   }
+  },
+  {
+   "provider": "opencode",
+   "account": "go",
+   "plan": "Go",
+   "host": "laptop",
+   "active": true,
+   "priority": null,
+   "observed_at": "2026-10-22T01:57:00Z",
+   "attempted_at": "2026-10-22T01:57:00Z",
+   "status": "ok",
+   "error": null,
+   "source": "fixture",
+   "provider_name": "OpenCode",
+   "display_name": "Go",
+   "plan_label": "Go",
+   "display_window": "seven_day",
+   "back_at": "2026-10-25T23:20:00Z",
+   "state": "exhausted",
+   "summary": "seven_day: exhausted; resets in 3d 21h",
+   "windows": [
+    {
+     "name": "seven_day",
+     "raw_kind": "seven_day",
+     "used_percent": 100.0,
+     "window_minutes": 10080,
+     "reset_at": "2026-10-25T23:20:00Z",
+     "window_start": "2026-10-18T23:20:00Z",
+     "pace": {
+      "state": "exhausted",
+      "expected_used_percent": null,
+      "delta_percent": null,
+      "will_last_to_reset": false,
+      "runs_out_at": "2026-10-22T02:00:00Z",
+      "headroom_percent": 0.0,
+      "expiring_headroom_percent": 0,
+      "summary": "exhausted; resets in 3d 21h"
+     },
+     "label": "Weekly"
+    },
+    {
+     "name": "thirty_day",
+     "raw_kind": "thirty_day",
+     "used_percent": 24.0,
+     "window_minutes": 43200,
+     "reset_at": "2026-11-08T00:00:00Z",
+     "window_start": "2026-10-09T00:00:00Z",
+     "pace": {
+      "state": "reserve",
+      "expected_used_percent": 43.6,
+      "delta_percent": -19.6,
+      "will_last_to_reset": true,
+      "runs_out_at": null,
+      "headroom_percent": 76.0,
+      "expiring_headroom_percent": 45.0,
+      "summary": "20% in reserve; lasts until reset"
+     },
+     "label": "Monthly"
+    },
+    {
+     "name": "five_hour",
+     "raw_kind": "five_hour",
+     "used_percent": 0.0,
+     "window_minutes": 300,
+     "reset_at": null,
+     "window_start": null,
+     "pace": {
+      "state": "not_started",
+      "expected_used_percent": null,
+      "delta_percent": null,
+      "will_last_to_reset": null,
+      "runs_out_at": null,
+      "headroom_percent": 100.0,
+      "expiring_headroom_percent": 0,
+      "summary": "window starts on first use"
+     },
+     "label": "5-hour"
+    }
+   ],
+   "unreported": [],
+   "coverage_note": "",
+   "credits": null,
+   "credit_advice": {
+    "action": "none",
+    "reset_credits": 0
+   },
+   "use_it_or_lose_it": {
+    "window": "thirty_day",
+    "reset_at": "2026-11-08T00:00:00Z",
+    "unused_percent": 76.0,
+    "expiring_headroom_percent": 45.0
+   }
+  }
+ ],
+ "display": {
+  "short_window_alert_percent": 90
+ },
+ "headline": {
+  "mode": "recent",
+  "account": "claude/anese",
+  "window": "seven_day"
+ },
+ "placement_preference": {
+  "agy": [
+   "google-4e7d2a91c05b"
+  ],
+  "claude": [
+   "anese",
+   "pro",
+   "team-1",
+   "team-2",
+   "team-3",
+   "team-4",
+   "team-5",
+   "team-6",
+   "old",
+   "michael"
+  ],
+  "codex": [
+   "work",
+   "default"
+  ],
+  "copilot": [
+   "default"
+  ],
+  "cursor": [
+   "default"
+  ],
+  "fakeprov": [
+   "lab"
+  ],
+  "kiro": [
+   "default"
+  ],
+  "opencode": [
+   "go"
+  ]
+ }
+}
