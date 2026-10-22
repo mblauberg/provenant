@@ -52,14 +52,14 @@ import yaml
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = ROOT / ".github" / "workflows" / "ci.yml"
 SETUP_ACTION = ROOT / ".github" / "actions" / "setup-node-workspace" / "action.yml"
-SETUP_ACTION_USES = "./.github/actions/setup-node-workspace"
+SETUP_ACTION_USES = "$/.github/actions/setup-node-workspace"
 ROOT_PACKAGE = ROOT / "package.json"
 ROOT_LOCK = ROOT / "package-lock.json"
 FABRIC_PACKAGE = ROOT / "runtime" / "fabric" / "package.json"
 IMMUTABLE_ACTION = re.compile(r"^[^@\s]+@[0-9a-f]{40}$")
 # Local composite actions are pinned by the commit under review itself; only
 # repository-local paths are exempt from the 40-hex SHA pin.
-LOCAL_ACTION = re.compile(r"^\./\.github/actions/[a-z0-9-]+$")
+LOCAL_ACTION = re.compile(r"^\$/\.github/actions/[a-z0-9-]+$")
 JOB_PERMISSIONS = {
     "detect-changes": {"pull-requests": "read"},
     "harness": {"contents": "read"},
@@ -104,7 +104,7 @@ def _assert_no_continue_on_error(
     # continue-on-error on any required job or step would neutralise failure
     # propagation invisibly, so no job and no step may set it. This also
     # covers the shared composite action (setup-node-workspace) that every
-    # workspace job runs through via `uses: ./...` -- a continue-on-error
+    # workspace job runs through via `uses: $/...` -- a continue-on-error
     # planted there is exactly as invisible to the ci-status aggregate as
     # one planted directly in ci.yml, and prior to this check it was outside
     # this guard's reach entirely, parsed and asserted on nowhere in this
@@ -263,7 +263,7 @@ def test_ci_uses_immutable_actions_and_least_privilege() -> None:
             if action is not None:
                 assert isinstance(action, str)
                 assert IMMUTABLE_ACTION.fullmatch(action) or LOCAL_ACTION.fullmatch(action), action
-                if action.startswith("./"):
+                if action.startswith("$/"):
                     assert (ROOT / action[2:] / "action.yml").is_file(), action
                 if action.startswith("actions/checkout@"):
                     options = step.get("with")

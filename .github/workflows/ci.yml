@@ -199,7 +199,7 @@ jobs:
           # checks out shallow.
           fetch-depth: 0
       - name: Set up Node.js workspace
-        uses: ./.github/actions/setup-node-workspace
+        uses: $/.github/actions/setup-node-workspace
       - name: Set up uv and Python
         uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
         with:
@@ -265,7 +265,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Set up Node.js workspace
-        uses: ./.github/actions/setup-node-workspace
+        uses: $/.github/actions/setup-node-workspace
       - name: Set up uv and Python
         uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
         with:
@@ -306,7 +306,7 @@ jobs:
           # origin/main here was stale — no such test exists.
           fetch-depth: 1
       - name: Set up Node.js workspace
-        uses: ./.github/actions/setup-node-workspace
+        uses: $/.github/actions/setup-node-workspace
       - name: Set up uv
         uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
         with:
