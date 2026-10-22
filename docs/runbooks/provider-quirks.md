@@ -23,8 +23,9 @@ in `skills/orchestrate`; this page records the traps.
 - A lane inside a provider sandbox can report false failures: it cannot bind
   localhost ports or reach some subprocesses, so suites show failures and CLI
   probes show `capability_discovery_failed` or an unreachable language server,
-  all green when re-run outside. Re-run the lane's suite and live probes from
-  the primary checkout before believing either direction. An
+  all green when re-run outside. Re-run the lane's suite and live probes
+  outside the sandbox, in an isolated worktree at the exact reviewed head
+  (never the primary checkout), before believing either direction. An
   environment-blocked probe is not evidence against a measured claim: tell
   lanes not to rewrite one into "could not reproduce" prose, and check diffs
   for that substitution.
