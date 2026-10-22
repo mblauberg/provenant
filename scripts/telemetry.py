@@ -20,6 +20,7 @@ from stat import S_ISREG
 import statistics
 import subprocess
 import sys
+from types import SimpleNamespace
 
 
 SOURCES = ('fabric', 'route_health', 'cooldowns', 'claude', 'codex', 'opencode', 'otel', 'delivery')
@@ -297,7 +298,7 @@ def put_usage(db, source, event_id, origin_path, owner=None, **values):
 
 
 def claude_record(db, row, state, path, offset, account=None, owner=None):
-    delivery_owner().compact(sys.modules[__name__], db, 'claude', row, state, path, offset)
+    delivery_owner().compact(this(), db, 'claude', row, state, path, offset)
     message = row.get('message') or {}
     usage = message.get('usage')
     if row.get('type') != 'assistant' or not isinstance(usage, dict) or not message.get('id'):
@@ -467,7 +468,7 @@ def put_quota_series(db, provider, account, host, observed_at, windows, source=N
 
 
 def codex_record(db, row, state, path, offset, account=None, owner=None):
-    delivery_owner().compact(sys.modules[__name__], db, 'codex', row, state, path, offset)
+    delivery_owner().compact(this(), db, 'codex', row, state, path, offset)
     if row.get('type') == 'compacted':
         return
     payload = row.get('payload') or {}
@@ -828,7 +829,12 @@ def source_paths():
             # Native sources map each path to (account, inode); iterating them still yields paths.
             **{source: native_paths(source) for source in IDENTITY_SOURCES},
             'otel': sorted((state_root() / 'otel').glob('*.ndjson')),
-            'delivery': delivery_owner().paths(sys.modules[__name__])}
+            'delivery': []}
+
+
+def this():
+    """This module for sibling owners, also when a test loads it without registering it."""
+    return sys.modules.get(__name__) or SimpleNamespace(**globals())
 
 
 @cache
@@ -1015,9 +1021,10 @@ def ingest(db):
     owners_by_source = owners()
     for source, paths in source_paths().items():
         errors = 0
-        if source == 'fabric':
+        # Fabric-rooted sources read the registry, so a bad registry marks only them as errors.
+        if source in {'fabric', 'delivery'}:
             try:
-                paths = fabric_paths()
+                paths = fabric_paths() if source == 'fabric' else delivery_owner().paths(this())
             except (OSError, ValueError, sqlite3.Error):
                 errors += 1
         for path in paths:
@@ -1033,7 +1040,7 @@ def ingest(db):
                         ingest_jsonl(db, source, path, otel_record)
                     elif source == 'delivery':
                         delivery_owner().prepare(db, path)
-                        ingest_jsonl(db, source, path, partial(delivery_owner().record, sys.modules[__name__]))
+                        ingest_jsonl(db, source, path, partial(delivery_owner().record, this()))
                     else:
                         ingest_jsonl(db, source, path, partial(
                             {'codex': codex_record, 'claude': claude_record}[source], **owner), inode=inode)
@@ -1550,7 +1557,7 @@ def stats(db, since=None, prices=None, *, summary=False, until=None):
         keys = ('host', 'source', 'session', 'day', 'provider', 'adapter', 'account', 'model')
         # Transport to the host merge: full precision, rounded once after the merge.
         report['session_usage'] = groups(keys)
-    report['compactions_per_lane'] = delivery_owner().report(sys.modules[__name__], db, since, until)
+    report['compactions_per_lane'] = delivery_owner().report(this(), db, since, until)
     return report
 
 
@@ -1721,14 +1728,14 @@ def report_changes(db, args):
     span = args.window or owner.DEFAULT_WINDOW
     try:
         if args.compare:
-            report = owner.compare(sys.modules[__name__], db, args.compare, span)
-            text = lambda: owner.render_compare(sys.modules[__name__], report)
+            report = owner.compare(this(), db, args.compare, span)
+            text = lambda: owner.render_compare(this(), report)
         elif args.command == 'retro':
-            report = owner.retro(sys.modules[__name__], db, args.since, span)
-            text = lambda: owner.render_retro(sys.modules[__name__], report, ROW_LIMIT)
+            report = owner.retro(this(), db, args.since, span)
+            text = lambda: owner.render_retro(this(), report, ROW_LIMIT)
         else:
             if args.sync:
-                _, pending, incomplete = owner.sync(sys.modules[__name__], db)
+                _, pending, incomplete = owner.sync(this(), db)
                 if pending:
                     print(f'telemetry: sync paused with {pending} time ranges left; run --sync again',
                           file=sys.stderr)
@@ -1736,9 +1743,9 @@ def report_changes(db, args):
                     print(f'telemetry: {incomplete} one-second ranges exceed {owner.SEARCH_LIMIT} merges; '
                           'their change markers are incomplete', file=sys.stderr)
             elif args.add:
-                owner.add(sys.modules[__name__], db, args.add, args.at)
+                owner.add(this(), db, args.add, args.at)
             report = owner.changes(db, args.since)
-            text = lambda: owner.render_changes(sys.modules[__name__], report, ROW_LIMIT)
+            text = lambda: owner.render_changes(this(), report, ROW_LIMIT)
     except owner.ChangeError as exc:
         print(f'telemetry: {exc}', file=sys.stderr)
         return 1
@@ -1777,7 +1784,7 @@ def main(argv=None):
             if args.command in {'changes', 'retro'} or args.compare:
                 return report_changes(db, args)
             if args.command == 'stats':
-                report = host_owner().collect(sys.modules[__name__], db, args.since, args.hosts) if args.hosts else stats(db, args.since)
+                report = host_owner().collect(this(), db, args.since, args.hosts) if args.hosts else stats(db, args.since)
                 if args.json:
                     print(json.dumps(report, indent=2))
                 else:

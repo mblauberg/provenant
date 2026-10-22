@@ -2252,6 +2252,8 @@ def legacy_stats(db, since=None, prices=None, *, summary=False, until=None):
     if summary:
         keys = ('host', 'source', 'session', 'day', 'provider', 'adapter', 'account', 'model')
         report['session_usage'] = combine((unit(row, keys, prices, free_patterns) for row in usage), keys)
+    # Not SQL-grouped: the delivery owner's count, tested on its own.
+    report['compactions_per_lane'] = delivery_owner().report(this(), db, since, until)
     return report
 
 
