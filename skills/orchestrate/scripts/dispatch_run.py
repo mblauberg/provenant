@@ -2414,7 +2414,9 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
                     plan["prompt"] += "\n\nPrevious turn and question:\n"+args.resume_relaunch
                     plan["argv"] = provider_exec.profile(args.tool).argv(plan)
                 pinned_account = getattr(args, "_explicit_account", getattr(args, "account", None))
-                explicitly_pinned = plan["adapter"] == "claude" and pinned_account is not None
+                # A resume can launch on its earlier account; only the named account counts as pinned.
+                explicitly_pinned = (plan["adapter"] == "claude" and pinned_account is not None
+                                     and plan.get("account") == pinned_account)
                 cooling=exec_routing.cooling(args.tool,plan["model"], account=plan.get("account"),
                                              explicit_account=explicitly_pinned)
                 if cooling:
@@ -3057,7 +3059,9 @@ def execute_attempt_sequence(args,custody=None):
             cooling = exec_routing.cooling(*key, account=retry_account,
                                            explicit_account=current["adapter"] == "claude" and explicit_account is not None)
             policy = pacing_policy()
-            delay = rate_limit_delay(previous, cooling, policy)
+            # A healthy reselected account owes nothing to the released account's retry window.
+            switched = retry_account != current.get("account")
+            delay = 0.0 if switched and not cooling else rate_limit_delay(previous, cooling, policy)
             pace = (previous["status"] == "rate_limited" and key not in retried
                     and (previous.get("evidence") or {}).get("signature") != "cooldown_active"
                     and delay + policy["minimum_budget_seconds"] <= remaining)

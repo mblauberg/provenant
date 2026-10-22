@@ -6300,7 +6300,10 @@ print(json.dumps({{'type':'result','result':str(os.environ.get('CLAUDE_CONFIG_DI
     args.fallback = json.dumps(['claude/sonnet'])
     assert mod.dispatch(args) == 0
     attempts = [json.loads(path.read_text()) for path in sorted(run.glob('tasks/*/attempt-*/attempt.json'))]
-    assert [row['account'] for row in attempts] == ['a', 'default' if reading == 'malformed' else 'b']
+    # The healthy reselected account retries the same model before any model fallback.
+    reselected = 'default' if reading == 'malformed' else 'b'
+    assert [(row['account'], 'opus' in row['requested_route']['model']) for row in attempts] == [
+        ('a', True), (reselected, True), (reselected, False)]
     assert (run / attempts[-1]['paths']['result']).read_text().strip() == (
         'None' if reading == 'malformed' else str(identities['b']))
 
