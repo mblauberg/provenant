@@ -233,11 +233,12 @@ def test_cpu_time_matches_what_the_process_used():
     import time
 
     started = time.process_time()
-    while time.process_time() - started < 1.0:
+    while time.process_time() - started < 0.25:
         pass
     usage = resource.getrusage(resource.RUSAGE_SELF)
     minutes, seconds = process_info.process(os.getpid()).cpu.split(":")
     reported = int(minutes) * 60 + float(seconds)
+    assert reported > 0
     assert abs(reported - (usage.ru_utime + usage.ru_stime)) < 0.5
 
 
@@ -246,8 +247,14 @@ def test_a_sleeping_process_is_not_reported_running():
 
     sleeper = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
     try:
-        time.sleep(0.5)
-        assert process_info.process(sleeper.pid).stat == "S"
+        deadline = time.monotonic() + 1
+        while time.monotonic() < deadline:
+            observed = process_info.process(sleeper.pid)
+            if observed is not None and observed.stat == "S":
+                break
+            time.sleep(0.005)
+        assert observed is not None
+        assert observed.stat == "S"
     finally:
         sleeper.kill()
         sleeper.wait()

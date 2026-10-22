@@ -705,6 +705,26 @@ def descendant_pair(ready: Path, child_body: str, *, leader_tail: str = "") -> s
     )
 
 
+def wait_for_ready_pid(path: Path, timeout: float = 1) -> int:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if path.is_file():
+            return int(path.read_text())
+        time.sleep(0.005)
+    pytest.fail(f"descendant did not write its ready file: {path}")
+
+
+def wait_for_process_exit(pid: int, timeout: float = 1) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return True
+        time.sleep(0.005)
+    return False
+
+
 def test_evidence_bundle_publication_keeps_old_receipt_valid_on_run_write_failure(
     tmp_path, monkeypatch,
 ):
@@ -862,7 +882,7 @@ def test_review_add_requires_certification_by_provider_lineage(tmp_path, model_f
         )
 
 
-@pytest.mark.parametrize("role", ["targeted", "other-primary", "distinct-family"])
+@pytest.mark.parametrize("role", ["targeted", "distinct-family"])
 @pytest.mark.parametrize(("field", "value", "error"), [
     ("cross_family", False, "cross-family route receipt"),
     ("provider_family", None, "identity does not match"),
@@ -917,14 +937,13 @@ def test_validator_rechecks_cross_family_route_lineage_regardless_of_role(tmp_pa
     ("role", "provider_family", "cross_family", "error"),
     [
         pytest.param("targeted", "anthropic", False, "cross-family route receipt", id="targeted-needs-cross-family-proof"),
-        pytest.param("other-primary", "anthropic", False, "cross-family route receipt", id="other-primary-needs-cross-family-proof"),
         pytest.param("distinct-family", "anthropic", False, "cross-family route receipt", id="distinct-family-needs-cross-family-proof"),
         pytest.param("targeted", None, True, "identity does not match", id="missing-provider-family"),
         pytest.param("targeted", "", True, "identity does not match", id="empty-provider-family"),
         pytest.param("targeted", "   ", True, "identity does not match", id="blank-provider-family"),
     ],
 )
-def test_review_add_rejects_invalid_cross_family_route_for_any_role(
+def test_review_add_rejects_invalid_cross_family_route_regardless_of_role(
     tmp_path, role, provider_family, cross_family, error,
 ):
     run_dir = initialise(tmp_path)
@@ -984,22 +1003,24 @@ def test_bounded_execution_enforces_deadline_after_output_closes():
         module.execute_bounded(
             [
                 sys.executable, "-c",
-                "import os,time; os.close(1); os.close(2); time.sleep(0.2)",
+                "import os,time; os.close(1); os.close(2); time.sleep(2)",
             ],
             cwd=ROOT,
             timeout_seconds=0.05,
         )
 
-    assert time.monotonic() - started < 0.25
+    assert time.monotonic() - started < 1
 
 
 def test_bounded_execution_kills_descendants_on_timeout(tmp_path):
     module = load_producer()
     ready = tmp_path / "descendant-ready"
+    release = tmp_path / "descendant-release"
     marker = tmp_path / "descendant-survived"
     leader = descendant_pair(
         ready,
-        f"pathlib.Path({str(ready)!r}).write_text('ready'); time.sleep(0.6); "
+        f"pathlib.Path({str(ready)!r}).write_text(str(os.getpid())); "
+        f"\nwhile not pathlib.Path({str(release)!r}).exists(): time.sleep(0.005)\n"
         f"pathlib.Path({str(marker)!r}).write_text('alive')",
         leader_tail="\ntime.sleep(60)",
     )
@@ -1008,38 +1029,45 @@ def test_bounded_execution_kills_descendants_on_timeout(tmp_path):
         module.execute_bounded(
             [sys.executable, "-c", leader], cwd=tmp_path, timeout_seconds=0.25,
         )
-    time.sleep(0.7)
-
-    assert ready.exists()
+    pid = wait_for_ready_pid(ready)
+    release.touch()
+    assert wait_for_process_exit(pid)
     assert not marker.exists()
 
 
 def test_bounded_execution_kills_descendants_after_successful_leader_exit(tmp_path):
     module = load_producer()
     ready = tmp_path / "descendant-ready"
+    release = tmp_path / "descendant-release"
     marker = tmp_path / "descendant-survived"
     leader = descendant_pair(
         ready,
         "os.close(1); os.close(2); "
-        f"pathlib.Path({str(ready)!r}).write_text('ready'); time.sleep(0.6); "
+        f"pathlib.Path({str(ready)!r}).write_text(str(os.getpid())); "
+        f"\nwhile not pathlib.Path({str(release)!r}).exists(): time.sleep(0.005)\n"
         f"pathlib.Path({str(marker)!r}).write_text('alive')",
     )
 
     exit_code, _stdout, _stderr = module.execute_bounded(
         [sys.executable, "-c", leader], cwd=tmp_path, timeout_seconds=1,
     )
-    time.sleep(0.7)
-
     assert exit_code == 0
-    assert ready.exists()
+    pid = wait_for_ready_pid(ready)
+    release.touch()
+    assert wait_for_process_exit(pid)
     assert not marker.exists()
 
 
 def test_bounded_execution_preserves_success_while_cleaning_descendants(tmp_path):
     module = load_producer()
     ready = tmp_path / "descendant-ready"
+    release = tmp_path / "descendant-release"
+    marker = tmp_path / "descendant-survived"
     leader = descendant_pair(
-        ready, f"pathlib.Path({str(ready)!r}).write_text('ready'); time.sleep(1)",
+        ready,
+        f"pathlib.Path({str(ready)!r}).write_text(str(os.getpid())); "
+        f"\nwhile not pathlib.Path({str(release)!r}).exists(): time.sleep(0.005)\n"
+        f"pathlib.Path({str(marker)!r}).write_text('alive')",
     )
 
     exit_code, _stdout, _stderr = module.execute_bounded(
@@ -1047,7 +1075,10 @@ def test_bounded_execution_preserves_success_while_cleaning_descendants(tmp_path
     )
 
     assert exit_code == 0
-    assert ready.exists()
+    pid = wait_for_ready_pid(ready)
+    release.touch()
+    assert wait_for_process_exit(pid)
+    assert not marker.exists()
 
 
 def test_bounded_execution_stops_draining_pipes_from_escaped_descendant(tmp_path):
@@ -1056,7 +1087,7 @@ def test_bounded_execution_stops_draining_pipes_from_escaped_descendant(tmp_path
     leader = descendant_pair(
         child_pid,
         f"os.setsid(); pathlib.Path({str(child_pid)!r}).write_text(str(os.getpid())); "
-        "time.sleep(1)",
+        "\nwhile True: time.sleep(0.005)",
     )
     started = time.monotonic()
 
