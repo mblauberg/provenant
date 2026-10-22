@@ -708,9 +708,11 @@ def descendant_pair(ready: Path, child_body: str, *, leader_tail: str = "") -> s
 def wait_for_ready_pid(path: Path, timeout: float = 1) -> int:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        if path.is_file():
+        try:
             return int(path.read_text())
-        time.sleep(0.005)
+        except (OSError, ValueError):
+            # Absent, or caught between the writer's truncate and write.
+            time.sleep(0.005)
     pytest.fail(f"descendant did not write its ready file: {path}")
 
 
