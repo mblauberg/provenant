@@ -436,7 +436,7 @@ def test_ci_runs_complete_harness_and_fabric_gates() -> None:
     install_index = next(index for index, command in enumerate(setup_commands) if command.strip() == "npm ci")
     assert pin_index < install_index
 
-    for job_name in ("harness-checks", "fabric", "split-root"):
+    for job_name in ("harness-checks", "python-tests", "fabric", "split-root"):
         steps = _steps(_job(document, job_name))
         uses = [str(step.get("uses", "")) for step in steps]
         checkout_index = next(index for index, action in enumerate(uses) if action.startswith("actions/checkout@"))
