@@ -75,6 +75,11 @@ preference written here only becomes the automatic default if the catalogue
 array is ordered to match. Change both together. A preference that contradicts
 the array is not a preference, it is a stale note.
 
+For numbers rather than judgement, see the
+[model benchmark registry](research/model-benchmarks/README.md): published
+scores, costs and the frontier effort range per model. Those are priors only
+and never override a replay-bench or golden-task result.
+
 ## Entry format
 
 Loose by design. An entry is a heading plus whatever labelled lines are worth
