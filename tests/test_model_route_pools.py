@@ -15,8 +15,8 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 SEED = json.loads((ROOT / "config" / "model-routing.json").read_text())
-# The selection tests pin their own strong and design pools, so reweighting the seed never moves their arithmetic.
-CATALOG = {**SEED, "routes": {**SEED["routes"], "strong": [
+# The selection tests pin their own senior and design pools, so reweighting the seed never moves their arithmetic.
+CATALOG = {**SEED, "routes": {**SEED["routes"], "senior": [
     {"model": "claude/claude-opus-5-5", "weight": "high"},
     {"model": "codex/gpt-6.1-sol", "weight": "normal", "effort": ["high", "xhigh"]},
     {"model": "codex/gpt-6-astra", "weight": "sparing"}], "design": [
@@ -72,7 +72,7 @@ def test_seed_routes_name_registered_models_with_the_tiny_weight_vocabulary():
             for effort in entry.get("effort", []):
                 assert effort in registered["efforts"]
     assert all(target in CATALOG["routes"] for target in CATALOG["route_synonyms"].values())
-    assert set(CATALOG["task_class_routes"]) <= set(CATALOG["route_synonyms"]) | set(CATALOG["routes"])
+    assert set(CATALOG["task_class_routes"]) - {"review", "bulk"} <= set(CATALOG["route_synonyms"]) | set(CATALOG["routes"])
 
 
 def test_default_pools_hold_only_free_models_with_explicit_no_training():
@@ -85,10 +85,10 @@ def test_default_pools_hold_only_free_models_with_explicit_no_training():
 
 
 def test_top_is_the_highest_weight_available_and_deterministic(tmp_path):
-    first = pick({"route": "strong"}, tmp_path, seed=1)
+    first = pick({"route": "senior"}, tmp_path, seed=1)
     assert models(first) == ["claude/claude-opus-5-5"]
-    assert first["picks"][0]["reason"] == "strong top"
-    assert models(pick({"route": "strong"}, tmp_path, seed=99)) == models(first)
+    assert first["picks"][0]["reason"] == "senior top"
+    assert models(pick({"route": "senior"}, tmp_path, seed=99)) == models(first)
     # The seed pools are the three tiers: deciders, mid-level judges and tier-1 lenses.
     assert models(pick({"route": "principal"}, tmp_path, catalog=SEED)) == ["claude/claude-opus-5-5"]
     assert models(pick({"route": "senior"}, tmp_path, catalog=SEED)) == ["claude/claude-sonnet-5-5"]
@@ -107,11 +107,11 @@ def test_top_is_the_highest_weight_available_and_deterministic(tmp_path):
 
 
 def test_every_mode_filters_cooling_uninstalled_and_disabled_models(tmp_path):
-    cooling = pick({"route": "strong"}, tmp_path, cooling=("claude/claude-opus-5-5",))
+    cooling = pick({"route": "senior"}, tmp_path, cooling=("claude/claude-opus-5-5",))
     assert models(cooling) == ["codex/gpt-6.1-sol"]
     assert cooling["picks"][0]["effort"] == "high"
     assert any("claude-opus-5-5: cooling until" in warning for warning in cooling["warnings"])
-    missing = pick({"route": "strong", "council": 3}, tmp_path, installed=lambda adapter: adapter != "claude")
+    missing = pick({"route": "senior", "council": 3}, tmp_path, installed=lambda adapter: adapter != "claude")
     assert "claude/claude-opus-5-5" not in models(missing)
     assert any("not installed" in warning for warning in missing["warnings"])
     with pytest.raises(pools.PoolError) as error:
@@ -119,19 +119,21 @@ def test_every_mode_filters_cooling_uninstalled_and_disabled_models(tmp_path):
     assert error.value.code == "route_unavailable"
     disabled = availability()
     disabled._enabled["claude"] = "disabled"
-    assert models(pick({"route": "strong"}, tmp_path, available=disabled)) == ["codex/gpt-6.1-sol"]
+    assert models(pick({"route": "senior"}, tmp_path, available=disabled)) == ["codex/gpt-6.1-sol"]
 
 
 def test_route_effort_band_clamps_the_callers_effort(tmp_path):
     cooling = ("claude/claude-opus-5-5",)
-    assert pick({"route": "strong", "effort": "low"}, tmp_path, cooling=cooling)["picks"][0]["effort"] == "high"
-    assert pick({"route": "strong", "effort": "max"}, tmp_path, cooling=cooling)["picks"][0]["effort"] == "xhigh"
-    assert pick({"route": "strong", "effort": "xhigh"}, tmp_path, cooling=cooling)["picks"][0]["effort"] == "xhigh"
-    assert pick({"route": "strong", "effort": "medium"}, tmp_path)["picks"][0]["effort"] == "medium"
-    raised = pick({"route": "strong", "effort": "low"}, tmp_path, cooling=cooling)
-    assert "effort low raised to high by the strong band for codex/gpt-6.1-sol" in raised["warnings"]
-    lowered = pick({"route": "strong", "effort": "max"}, tmp_path, cooling=cooling)
-    assert "effort max lowered to xhigh by the strong band for codex/gpt-6.1-sol" in lowered["warnings"]
+    assert pick({"route": "senior", "effort": "low"}, tmp_path, cooling=cooling)["picks"][0]["effort"] == "high"
+    assert pick({"route": "senior", "effort": "xhigh"}, tmp_path, cooling=cooling)["picks"][0]["effort"] == "xhigh"
+    assert pick({"route": "senior", "effort": "medium"}, tmp_path)["picks"][0]["effort"] == "medium"
+    raised = pick({"route": "senior", "effort": "low"}, tmp_path, cooling=cooling)
+    assert "effort low raised to high by the senior band for codex/gpt-6.1-sol" in raised["warnings"]
+    lowered = pick({"route": "senior", "effort": "ultra"}, tmp_path, cooling=cooling)
+    assert "effort ultra lowered to xhigh by the senior band for codex/gpt-6.1-sol" in lowered["warnings"]
+    with pytest.raises(pools.PoolError) as error:
+        pick({"route": "senior", "effort": "max"}, tmp_path)
+    assert error.value.code == "effort_invalid" and "xhigh" in error.value.fix
 
 
 def test_council_spreads_families_first_and_names_each_member(tmp_path):
@@ -141,12 +143,12 @@ def test_council_spreads_families_first_and_names_each_member(tmp_path):
         assert len(set(families)) == 3, (seed, families)
         assert [item["reason"] for item in result["picks"]] == [
             "design council 1/3", "design council 2/3", "design council 3/3"]
-        strong = pick({"route": "strong", "council": 2}, tmp_path, seed=seed)
-        assert {item["family"] for item in strong["picks"]} == {"anthropic", "openai"}
+        senior = pick({"route": "senior", "council": 2}, tmp_path, seed=seed)
+        assert {item["family"] for item in senior["picks"]} == {"anthropic", "openai"}
 
 
 def test_council_weights_are_sampling_odds_and_sparing_is_rare(tmp_path):
-    drawn = Counter(models(pick({"route": "strong", "council": 1}, tmp_path, seed=seed))[0] for seed in range(400))
+    drawn = Counter(models(pick({"route": "senior", "council": 1}, tmp_path, seed=seed))[0] for seed in range(400))
     assert drawn["claude/claude-opus-5-5"] > drawn["codex/gpt-6.1-sol"] > drawn["codex/gpt-6-astra"] > 0
     assert drawn["codex/gpt-6-astra"] < 400 / 8
 
@@ -161,7 +163,7 @@ def test_a_prompt_training_model_never_takes_a_council_seat_for_its_family(tmp_p
 
 
 def test_council_larger_than_the_pool_repeats_with_a_warning(tmp_path):
-    result = pick({"route": "strong", "council": 5}, tmp_path)
+    result = pick({"route": "senior", "council": 5}, tmp_path)
     assert len(result["picks"]) == 5
     assert any("exceeds 3 available" in warning for warning in result["warnings"])
 
@@ -182,11 +184,11 @@ def test_confidential_skips_free_training_models_and_otherwise_warns(tmp_path):
 
 
 def test_rotate_cycles_by_weight_with_a_per_project_cursor(tmp_path):
-    sequence = [models(pick({"route": "strong", "rotate": True}, tmp_path))[0] for _ in range(13)]
+    sequence = [models(pick({"route": "senior", "rotate": True}, tmp_path))[0] for _ in range(13)]
     assert Counter(sequence) == {"claude/claude-opus-5-5": 8, "codex/gpt-6.1-sol": 4, "codex/gpt-6-astra": 1}
     assert len(set(sequence[:2])) == 2, "rotation mixes models from the second call"
-    assert pick({"route": "strong", "rotate": True}, tmp_path)["picks"][0]["reason"] == "strong rotate"
-    other = [models(pick({"route": "strong", "rotate": True, "project": "/work/b"}, tmp_path))[0] for _ in range(2)]
+    assert pick({"route": "senior", "rotate": True}, tmp_path)["picks"][0]["reason"] == "senior rotate"
+    other = [models(pick({"route": "senior", "rotate": True, "project": "/work/b"}, tmp_path))[0] for _ in range(2)]
     assert other == sequence[:2]
     state = json.loads((tmp_path / "route-rotation.json").read_text())
     assert set(state["projects"]) == {"/work/a", "/work/b"}
@@ -216,21 +218,21 @@ def test_models_rejects_only_an_unknown_adapter_and_passes_unregistered_ids_with
 
 
 def test_precedence_warns_instead_of_rejecting(tmp_path):
-    both = pick({"route": "strong", "council": 2, "rotate": True}, tmp_path)
+    both = pick({"route": "senior", "council": 2, "rotate": True}, tmp_path)
     assert len(both["picks"]) == 2
     assert any(warning.startswith("rotate ignored") for warning in both["warnings"])
     with pytest.raises(pools.PoolError) as error:
         pick({"rotate": True}, tmp_path)
-    assert error.value.code == "route_required" and "strong" in error.value.fix
+    assert error.value.code == "route_required" and "senior" in error.value.fix
 
 
 def test_spelling_aliases_collapse_so_an_overlay_switches_the_seed_off(tmp_path):
     catalog = json.loads(json.dumps(CATALOG))
-    catalog["routes"]["strong"] = [{"model": "codex/gpt-6-sol", "weight": "off"}, *catalog["routes"]["strong"]]
-    entries = pools.pool(router, catalog, "strong", router.EFFORT_ORDER)
+    catalog["routes"]["senior"] = [{"model": "codex/gpt-6-sol", "weight": "off"}, *catalog["routes"]["senior"]]
+    entries = pools.pool(router, catalog, "senior", router.EFFORT_ORDER)
     canonical = [entry for entry in entries if entry["key"] == "codex/gpt-6.1-sol"]
     assert len(canonical) == 1 and canonical[0]["weight"] == 0
-    assert models(pick({"route": "strong", "adapter": "codex"}, tmp_path, catalog=catalog)) == ["codex/gpt-6-astra"]
+    assert models(pick({"route": "senior", "adapter": "codex"}, tmp_path, catalog=catalog)) == ["codex/gpt-6-astra"]
 
 
 def test_availability_skips_entries_the_adapter_cannot_run(tmp_path):
@@ -248,41 +250,50 @@ def test_an_adapter_drawing_on_credits_runs_only_when_nothing_with_allowance_qua
         value = availability(cooling=cooling)
         value._quota = {"codex": {"state": "credit_only", **({"last_resort": True} if last_resort else {})}}
         return value
-    result = pick({"route": "strong", "council": 2}, tmp_path, available=checked())
+    result = pick({"route": "senior", "council": 2}, tmp_path, available=checked())
     assert set(models(result)) == {"claude/claude-opus-5-5"}
     assert any("codex/gpt-6.1-sol: drawing on credits" in warning for warning in result["warnings"])
     # With Claude cooling, Codex's credits are the last resort; naming the adapter pins Codex outright.
-    result = pick({"route": "strong"}, tmp_path, available=checked(cooling=("claude/*",)))
+    result = pick({"route": "senior"}, tmp_path, available=checked(cooling=("claude/*",)))
     assert models(result) == ["codex/gpt-6.1-sol"]
     assert any("draws on credits: nothing with allowance" in warning for warning in result["warnings"])
-    result = pick({"route": "strong", "adapter": "codex"}, tmp_path, available=checked())
+    result = pick({"route": "senior", "adapter": "codex"}, tmp_path, available=checked())
     assert models(result) == ["codex/gpt-6.1-sol"] and not any("credits" in warning for warning in result["warnings"])
     assert models(pick({"models": ["codex/gpt-6-astra"]}, tmp_path, available=checked())) == ["codex/gpt-6-astra"]
     # The `normal` policy marks no last resort, so Codex competes on weight.
-    result = pick({"route": "strong", "council": 3}, tmp_path, available=checked(last_resort=False))
+    result = pick({"route": "senior", "council": 3}, tmp_path, available=checked(last_resort=False))
     assert "codex/gpt-6.1-sol" in models(result)
 
 
-def test_task_classes_and_aliases_map_onto_routes(tmp_path):
-    assert pick({"route": "review"}, tmp_path, catalog=SEED)["route"] == "senior"
-    assert pick({"route": "strong"}, tmp_path, catalog=SEED)["route"] == "senior"
-    assert pick({"route": "Flagship"}, tmp_path, catalog=SEED)["route"] == "principal"
+def test_task_classes_and_synonyms_map_onto_routes(tmp_path):
+    assert pick({"route": "second-opinion"}, tmp_path, catalog=SEED)["route"] == "senior"
     assert pick({"route": "critical-review"}, tmp_path, catalog=SEED)["route"] == "principal"
     assert pick({"route": "ui-taste"}, tmp_path, catalog=SEED)["route"] == "design"
-    for lens in ("scout", "mechanical", "lens", "research"):
+    for lens in ("junior", "mechanical", "lens", "research"):
         assert pick({"route": lens}, tmp_path, catalog=SEED)["route"] == "junior"
     assert pick({"route": "implementation"}, tmp_path, catalog=SEED)["route"] == "senior", "matches its task class"
-    for old, new in (("workhorse", "senior"), ("flagship", "principal"), ("bulk", "junior")):
-        assert pick({"route": old}, tmp_path, catalog=SEED)["route"] == new
+    for name in ("senior", "principal", "junior"):
+        assert pick({"route": name}, tmp_path, catalog=SEED)["route"] == name
     with pytest.raises(pools.PoolError) as error:
         pick({"route": "fastest"}, tmp_path)
     assert error.value.code == "route_invalid"
 
 
-def test_adapter_narrows_the_pool(tmp_path):
-    assert models(pick({"route": "strong", "adapter": "codex"}, tmp_path)) == ["codex/gpt-6.1-sol"]
+@pytest.mark.parametrize("old,new", [
+    ("scout", "junior"), ("bulk", "junior"), ("workhorse", "senior"), ("strong", "senior"),
+    ("review", "senior"), ("Flagship", "principal"),
+])
+def test_retired_tier_names_are_rejected_with_their_replacement(tmp_path, old, new):
     with pytest.raises(pools.PoolError) as error:
-        pick({"route": "strong", "adapter": "opencode"}, tmp_path)
+        pick({"route": old}, tmp_path, catalog=SEED)
+    assert error.value.code == "route_renamed"
+    assert f"route '{old}' was renamed to '{new}'" in error.value.fix
+
+
+def test_adapter_narrows_the_pool(tmp_path):
+    assert models(pick({"route": "senior", "adapter": "codex"}, tmp_path)) == ["codex/gpt-6.1-sol"]
+    with pytest.raises(pools.PoolError) as error:
+        pick({"route": "senior", "adapter": "opencode"}, tmp_path)
     assert error.value.code == "route_adapter_empty"
     containing = [name for name, entries in CATALOG["routes"].items()
                   if any(entry["model"].startswith("opencode/") for entry in entries)]
@@ -308,29 +319,28 @@ def model_route(env, *args, stdin=None):
 
 def test_instance_overlay_reorders_and_reweights_a_pool(tmp_path):
     env = overlay_environment(tmp_path, {"routes": {
-        "strong": [{"model": "codex/gpt-6-astra", "weight": "high"},
+        "senior": [{"model": "codex/gpt-6-astra", "weight": "high"},
                    {"model": "claude/claude-opus-5-5", "weight": "off"}],
         "local": [{"model": "codex/gpt-6-luna"}],
         "broken": [{"model": "no-adapter", "weight": "loud"}],
-    }, "route_synonyms": {"deep": "strong", "flagship": "strong", "workhorse": "bulk"}})
+    }, "route_synonyms": {"deep": "senior", "principal": "senior"}})
     run = model_route(env, "routes", "--json")
     assert run.returncode == 0, run.stderr
     document = json.loads(run.stdout)
-    assert "strong" not in document["routes"], "a legacy pool folds into its tier"
     folded = document["routes"]["senior"]
     assert [entry["model"] for entry in folded][:2] == ["codex/gpt-6-astra", "claude/claude-opus-5-5"]
     assert folded[1]["weight"] == "off" and folded[1]["availability"] == "off"
-    assert [entry["model"] for entry in folded][2:] == [entry["model"] for entry in SEED["routes"]["senior"]], \
+    assert [entry["model"] for entry in folded][2:] == [entry["model"] for entry in SEED["routes"]["senior"] if entry["model"] not in {"codex/gpt-6-astra", "claude/claude-opus-5-5"}], \
         "the tier keeps its seed fallbacks"
     assert document["routes"]["principal"][0]["model"] == SEED["routes"]["principal"][0]["model"], \
-        "a legacy synonym cannot shadow a pool"
+        "a synonym cannot shadow a pool"
     second = tmp_path / "second"
     second.mkdir()
-    workhorse = model_route(overlay_environment(second, {"routes": {
-        "workhorse": [{"model": "codex/gpt-6-astra", "weight": "high"}]}}), "routes", "--json")
-    merged = json.loads(workhorse.stdout)["routes"]["senior"]
+    senior = model_route(overlay_environment(second, {"routes": {
+        "senior": [{"model": "codex/gpt-6-astra", "weight": "high"}]}}), "routes", "--json")
+    merged = json.loads(senior.stdout)["routes"]["senior"]
     assert [entry["model"] for entry in merged] == [
-        "codex/gpt-6-astra", *(entry["model"] for entry in SEED["routes"]["senior"])]
+        "codex/gpt-6-astra", *(entry["model"] for entry in SEED["routes"]["senior"] if entry["model"] != "codex/gpt-6-astra")]
     sol = next(entry for entry in merged if entry["model"] == "codex/gpt-6.1-sol")
     assert sol["effort"] == "high-xhigh", "unlisted entries keep their fields"
     assert document["routes"]["local"][0]["weight"] == "normal"
@@ -343,47 +353,44 @@ def test_instance_overlay_reorders_and_reweights_a_pool(tmp_path):
         assert results[0]["picks"][0]["model"] == "gpt-6-astra"
     snapshot = json.loads(model_route(env, "snapshot", "--json").stdout)
     assert any(note.startswith("routes.broken") for note in snapshot["drift"])
-    assert any(note.startswith("routes.strong: renamed to senior") for note in snapshot["drift"])
-    assert any(note.startswith("route_synonyms.deep: strong is now senior") for note in snapshot["drift"])
 
 
-def test_legacy_fold_keeps_workhorse_and_bulk_ahead_of_strong_and_scout(tmp_path):
+@pytest.mark.parametrize("overlay,message", [
+    ({"routes": {"strong": [{"model": "codex/gpt-6.1-sol"}]}}, "route 'strong' was renamed to 'senior'"),
+    ({"routes": {"scout": [{"model": "codex/gpt-6-luna"}]}}, "route 'scout' was renamed to 'junior'"),
+    ({"route_synonyms": {"deep": "flagship"}}, "route_synonyms target 'flagship' was renamed to 'principal'"),
+    ({"task_class_routes": {"legwork": {"alias": "workhorse"}}}, "alias 'workhorse' was renamed to 'senior'"),
+    ({"families": {"openai": {"aliases": {"flagship": ["gpt-6-astra"]}}}}, "alias 'flagship' was renamed to 'principal'"),
+    ({"adapters": {"opencode": {"aliases": {"scout": ["x"]}}}}, "alias 'scout' was renamed to 'junior'"),
+    ({"families": {"openai": {"risk_tier_overrides": {"crucial": {"alias": "flagship"}}}}},
+     "alias 'flagship' was renamed to 'principal'"),
+])
+def test_overlay_with_a_retired_tier_name_fails_fast(overlay, message):
+    with pytest.raises(pools.RenamedNameError, match=message):
+        pools.reject_renamed(overlay)
+
+
+def test_routes_command_rejects_retired_tier_in_overlay(tmp_path):
     env = overlay_environment(tmp_path, {"routes": {
-        "strong": [{"model": "codex/gpt-6.1-sol", "weight": "high"}],
-        "workhorse": [{"model": "codex/gpt-6.1-sol", "weight": "off"}],
-        "scout": [{"model": "codex/gpt-6-luna", "weight": "high"}],
-        "bulk": [{"model": "codex/gpt-6-luna", "weight": "sparing"}],
+        "strong": [{"model": "codex/gpt-6.1-sol"}],
     }})
-    routes = json.loads(model_route(env, "routes", "--json").stdout)["routes"]
-    sol = next(entry for entry in routes["senior"] if entry["model"] == "codex/gpt-6.1-sol")
-    luna = next(entry for entry in routes["junior"] if entry["model"] == "codex/gpt-6-luna")
-    assert sol["weight"] == "off"
-    assert luna["weight"] == "sparing"
+    run = model_route(env, "routes")
+    assert run.returncode == 2
+    assert "model-route:" in run.stderr
+    assert "overlay" in run.stderr
 
 
-def test_overlay_may_name_adapter_aliases_by_tier():
-    overlay = pools.migrate_legacy_routes({
-        "task_class_routes": {"implementation": {"alias": "senior", "effort": "high"}},
-        "families": {"openai": {
-            "aliases": {"principal": ["gpt-6-astra"], "workhorse": ["gpt-6.1-sol"], "senior": ["gpt-6-luna"]},
-            "role_effort_defaults": {"orchestrator": {"principal": "high"}},
-            "risk_tier_overrides": {"crucial": {"alias": "principal"}},
-        }},
-        "adapters": {"opencode": {"aliases": {"junior": ["opencode/glm-5.3-flash-free"]}}},
-    }, [])
-    assert overlay["task_class_routes"]["implementation"]["alias"] == "workhorse"
-    family = overlay["families"]["openai"]
-    assert family["aliases"] == {"flagship": ["gpt-6-astra"], "workhorse": ["gpt-6.1-sol"]}, \
-        "an alias-named key wins over its tier name"
-    assert family["role_effort_defaults"]["orchestrator"] == {"flagship": "high"}
-    assert family["risk_tier_overrides"]["crucial"]["alias"] == "flagship"
-    assert overlay["adapters"]["opencode"]["aliases"] == {"scout": ["opencode/glm-5.3-flash-free"]}
+def test_overlay_may_name_adapter_aliases_by_tier(tmp_path):
+    overlay = {"task_class_routes": {"implementation": {"alias": "senior", "effort": "high"}},
+               "families": {"openai": {"aliases": {"principal": ["gpt-6-astra"], "senior": ["gpt-6.1-sol"]}}},
+               "adapters": {"opencode": {"aliases": {"junior": ["opencode/glm-5.3-flash-free"]}}}}
+    assert pools.reject_renamed(overlay) == overlay
 
 
 def test_pick_command_answers_every_request_and_types_rejections(tmp_path):
     env = overlay_environment(tmp_path, {})
     run = model_route(env, "pick", "--seed", "3", stdin=json.dumps({"requests": [
-        {"route": "nope"}, {"route": "strong", "council": 9}, "bad",
+        {"route": "nope"}, {"route": "senior", "council": 9}, "bad",
         {"models": ["codex/gpt-6-luna@warp"]},
     ]}))
     assert run.returncode == 0, run.stderr
@@ -492,17 +499,17 @@ def test_refresh_routing_carries_new_route_keys_and_keeps_instance_reweighting(t
     source.write_text(json.dumps(changed))
     run("refresh-routing")
     installed = json.loads(target.read_text())
-    installed["routes"]["strong"] = [{**entry, "model": "codex/gpt-6-sol", "weight": "off"} if entry["model"] == "codex/gpt-6.1-sol"
-                                     else entry for entry in installed["routes"]["strong"]]
+    installed["routes"]["senior"] = [{**entry, "model": "codex/gpt-6-sol", "weight": "off"} if entry["model"] == "codex/gpt-6.1-sol"
+                                     else entry for entry in installed["routes"]["senior"]]
     target.write_text(json.dumps(installed))
-    changed["routes"]["strong"] = [{**entry, "weight": "high"} if entry["model"] == "codex/gpt-6-astra" else entry
-                                   for entry in changed["routes"]["strong"]]
+    changed["routes"]["senior"] = [{**entry, "weight": "high"} if entry["model"] == "codex/gpt-6-astra" else entry
+                                   for entry in changed["routes"]["senior"]]
     source.write_text(json.dumps(changed))
     result = run("refresh-routing")
-    strong = json.loads(target.read_text())["routes"]["strong"]
-    assert [(entry["model"], entry["weight"]) for entry in strong] == [
+    senior = json.loads(target.read_text())["routes"]["senior"]
+    assert [(entry["model"], entry["weight"]) for entry in senior] == [
         ("claude/claude-opus-5-5", "high"), ("codex/gpt-6-sol", "off"), ("codex/gpt-6-astra", "high")], result.stdout
-    assert strong[1]["effort"] == ["high", "xhigh"]
+    assert senior[1]["effort"] == ["high", "xhigh"]
 
 
 
@@ -545,16 +552,16 @@ def test_confidential_refuses_a_resolved_route_that_trains_and_names_the_fix():
     assert row["provenance"]["requested"]["confidential"] is True, "resume and handoff read it back"
 
 
-MIXED_SCOUT = {"adapters": {"opencode": {"aliases": {"scout": [
+MIXED_SCOUT = {"adapters": {"opencode": {"aliases": {"junior": [
     "opencode/mimo-v2.6-flash-free", "opencode-go/deepseek-v4.1-flash"]}}}}
 
 
 def test_confidential_alias_steps_to_its_first_safe_member():
     exec_routing = exec_routing_module()
     catalog = json.loads(json.dumps(CATALOG))
-    catalog["adapters"]["opencode"]["aliases"]["scout"] = MIXED_SCOUT["adapters"]["opencode"]["aliases"]["scout"]
+    catalog["adapters"]["opencode"]["aliases"]["junior"] = MIXED_SCOUT["adapters"]["opencode"]["aliases"]["junior"]
     assert exec_routing.confidential_alternatives(
-        "opencode", "opencode/mimo-v2.6-flash-free", "scout", catalog) == ["opencode-go/deepseek-v4.1-flash"]
+        "opencode", "opencode/mimo-v2.6-flash-free", "junior", catalog) == ["opencode-go/deepseek-v4.1-flash"]
     assert exec_routing.confidential_alternatives("opencode", "x", "nosuch", catalog) == []
 
 
@@ -564,11 +571,12 @@ def test_confidential_preflight_uses_a_mixed_alias_and_refuses_only_when_nothing
     (instance / "config" / "model-routing.json").write_text(json.dumps(MIXED_SCOUT))
     monkeypatch.setenv("AGENT_FABRIC_INSTANCE_ROOT", str(instance))
     monkeypatch.setenv("AGENT_FABRIC_STATE_ROOT", str(tmp_path / "state"))
+    monkeypatch.setenv("AGENT_FABRIC_PRODUCT_ROOT", str(ROOT))
     monkeypatch.chdir(tmp_path)
     dispatch_run = load("pools_dispatch_mixed_alias_under_test", ROOT / "skills/orchestrate/scripts/dispatch_run.py")
-    task = {"id": "t", "adapter": "opencode", "alias": "scout", "prompt": "hi"}
+    task = {"id": "t", "adapter": "opencode", "alias": "junior", "prompt": "hi"}
     ordinary = dispatch_run.preflight_tasks([task], tmp_path)
-    assert ordinary["routes"][0]["resolved_model"] == "opencode/mimo-v2.6-flash-free", "the alias leads with the free model"
+    assert ordinary.get("routes", [{}])[0].get("resolved_model") == "opencode/mimo-v2.6-flash-free", ordinary
     private = dispatch_run.preflight_tasks([{**task, "confidential": True}], tmp_path)
     assert private["status"] == "validated", private
     assert private["routes"][0]["resolved_model"] == "opencode-go/deepseek-v4.1-flash"
@@ -586,14 +594,14 @@ def test_routes_health_and_help_routes_print_the_same_view(tmp_path):
     helped = subprocess.run([sys.executable, str(ROOT / "scripts" / "provenant"), "help", "routes"],
                             text=True, capture_output=True, check=False, env=env)
     assert helped.returncode == 0, helped.stderr
-    assert "strong" in helped.stdout and "route health --json" in helped.stdout
+    assert "senior" in helped.stdout and "route health --json" in helped.stdout
     assert "--json" in model_route(env, "routes", "--help").stdout
 
 
 def native_catalog():
     """A fixed pool so the native-first tests do not track catalogue preference edits."""
     catalog = json.loads(json.dumps(CATALOG))
-    catalog["routes"]["strong"] = [
+    catalog["routes"]["senior"] = [
         {"model": "claude/claude-opus-5-5", "weight": "high"},
         {"model": "codex/gpt-6.1-sol", "weight": "normal"},
         {"model": "agy/gemini-3.8-flash", "weight": "normal"},
@@ -603,29 +611,29 @@ def native_catalog():
 
 def test_native_seat_skips_its_own_models_in_top_and_rotate(tmp_path):
     catalog = native_catalog()
-    top = pick({"route": "strong", "native": "claude"}, tmp_path, catalog=catalog)
+    top = pick({"route": "senior", "native": "claude"}, tmp_path, catalog=catalog)
     assert models(top) == ["codex/gpt-6.1-sol"]
     assert "claude/claude-opus-5-5 skipped: use a native subagent" in top["warnings"]
-    rotated = [models(pick({"route": "strong", "rotate": True, "native": "claude"}, tmp_path, catalog=catalog))[0]
+    rotated = [models(pick({"route": "senior", "rotate": True, "native": "claude"}, tmp_path, catalog=catalog))[0]
                for _ in range(4)]
     assert not any(model.startswith("claude/") for model in rotated)
-    assert models(pick({"route": "strong", "native": "codex"}, tmp_path, catalog=catalog)) == [
+    assert models(pick({"route": "senior", "native": "codex"}, tmp_path, catalog=catalog)) == [
         "claude/claude-opus-5-5"]
 
 
 def test_native_council_hands_its_own_members_back_to_the_chair(tmp_path):
     catalog = native_catalog()
     for seed in range(10):
-        result = pick({"route": "strong", "council": 3, "native": "claude"}, tmp_path, catalog=catalog, seed=seed)
+        result = pick({"route": "senior", "council": 3, "native": "claude"}, tmp_path, catalog=catalog, seed=seed)
         assert sorted(models(result)) == ["agy/gemini-3.8-flash", "codex/gpt-6.1-sol"]
         assert "spawn 1 native claude member (claude-opus-5-5); Fabric runs 2 of 3" in result["warnings"]
-        assert [item["reason"] for item in result["picks"]] == ["strong council 1/2", "strong council 2/2"]
+        assert [item["reason"] for item in result["picks"]] == ["senior council 1/2", "senior council 2/2"]
 
 
 def test_native_only_pool_names_the_native_spawn_instead_of_running_it(tmp_path):
     catalog = native_catalog()
-    catalog["routes"]["strong"] = [{"model": "claude/claude-opus-5-5", "weight": "high"}]
-    for request in ({"route": "strong"}, {"route": "strong", "council": 2}):
+    catalog["routes"]["senior"] = [{"model": "claude/claude-opus-5-5", "weight": "high"}]
+    for request in ({"route": "senior"}, {"route": "senior", "council": 2}):
         with pytest.raises(pools.PoolError) as error:
             pick({**request, "native": "claude"}, tmp_path, catalog=catalog)
         assert error.value.code == "route_native_only"
@@ -634,7 +642,7 @@ def test_native_only_pool_names_the_native_spawn_instead_of_running_it(tmp_path)
 
 def test_an_explicit_native_adapter_or_models_entry_still_runs(tmp_path):
     catalog = native_catalog()
-    narrowed = pick({"route": "strong", "adapter": "claude", "native": "claude"}, tmp_path, catalog=catalog)
+    narrowed = pick({"route": "senior", "adapter": "claude", "native": "claude"}, tmp_path, catalog=catalog)
     assert models(narrowed) == ["claude/claude-opus-5-5"]
     listed = pick({"models": ["claude/claude-opus-5-5", "codex/gpt-6-luna"], "native": "claude"}, tmp_path,
                   catalog=catalog)
@@ -887,7 +895,7 @@ def test_attempt_scope_is_frozen_before_identity_environment_changes(tmp_path, m
     from types import SimpleNamespace
     mod = load("scope_dispatch_run_under_test", ROOT / "skills/orchestrate/scripts/dispatch_run.py")
     monkeypatch.setenv('CLAUDE_CONFIG_DIR', str(tmp_path / 'a'))
-    args = SimpleNamespace(tool=adapter, alias='workhorse', model='sonnet', alias_supplied=True,
+    args = SimpleNamespace(tool=adapter, alias='senior', model='sonnet', alias_supplied=True,
                            effort=None, task_id='scope-test', access_mode='read_only', worktree=None,
                            _phase_timings={})
     running = mod.contract_row(args, tmp_path, 1, tmp_path / 'attempt', {}, 'now')

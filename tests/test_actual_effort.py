@@ -1,11 +1,15 @@
 """Routes and receipts report the effort actually applied, never a made-up one."""
 
 import importlib
+import importlib.util
+import io
 import json
 import os
 from pathlib import Path
 import subprocess
 import sys
+from contextlib import redirect_stderr, redirect_stdout
+from unittest.mock import patch
 
 import pytest
 
@@ -14,12 +18,18 @@ FIX = ROOT / "tests/fixtures/fabric-context"
 
 
 def resolve(*args):
-    result = subprocess.run(
-        [sys.executable, str(ROOT / "scripts" / "model_route.py"), "resolve", *args],
-        text=True, capture_output=True,
-        env={**os.environ, "PATH": "", "AGENT_FABRIC_INSTANCE_ROOT": str(ROOT),
-             "AGENT_FABRIC_PRODUCT_ROOT": str(ROOT)},
-    )
+    path = ROOT / "scripts" / "model_route.py"
+    spec = importlib.util.spec_from_file_location("actual_effort_router", path)
+    assert spec is not None and spec.loader is not None
+    router = importlib.util.module_from_spec(spec)
+    environment = {"PATH": "", "AGENT_FABRIC_INSTANCE_ROOT": str(ROOT),
+                   "AGENT_FABRIC_PRODUCT_ROOT": str(ROOT)}
+    stdout, stderr = io.StringIO(), io.StringIO()
+    with patch.dict(os.environ, environment), redirect_stdout(stdout), redirect_stderr(stderr):
+        spec.loader.exec_module(router)
+        code = router.main(["resolve", *args])
+    result = subprocess.CompletedProcess([str(path), "resolve", *args], code,
+                                         stdout.getvalue(), stderr.getvalue())
     route = json.loads(result.stdout) if result.stdout else None
     assert result.returncode == 0, (route, result.stderr)
     assert route["status"] == "ok", route
@@ -41,8 +51,8 @@ def effort_argv(plan):
 
 
 @pytest.mark.parametrize("extra", [(), ("--effort", "high")])
-def test_haiku_4_5_via_flagship_alias_sends_and_claims_no_effort(tmp_path, extra):
-    route = resolve("--adapter", "claude", "--alias", "flagship", "--model", "claude-haiku-4-5",
+def test_haiku_4_5_via_principal_alias_sends_and_claims_no_effort(tmp_path, extra):
+    route = resolve("--adapter", "claude", "--alias", "principal", "--model", "claude-haiku-4-5",
                     "--role", "worker", *extra)
     assert route["resolved_model"] == "claude-haiku-4-5"
     assert route["requested_effort"] == "high"
@@ -58,7 +68,7 @@ def test_haiku_4_5_via_flagship_alias_sends_and_claims_no_effort(tmp_path, extra
 
 
 def test_opus_with_high_effort_is_unchanged(tmp_path):
-    route = resolve("--adapter", "claude", "--alias", "flagship", "--model", "opus",
+    route = resolve("--adapter", "claude", "--alias", "principal", "--model", "opus",
                     "--role", "worker", "--effort", "high")
     assert route["effort"] == route["effort_applied"] == "high"
     assert not any("ignored" in note for note in route["notes"])
@@ -69,7 +79,7 @@ def test_opus_with_high_effort_is_unchanged(tmp_path):
 
 def test_registered_claude_efforts_bound_what_is_sent(tmp_path):
     """A registry effort list, not the request, decides what reaches the CLI."""
-    route = resolve("--adapter", "claude", "--alias", "flagship", "--model", "sonnet",
+    route = resolve("--adapter", "claude", "--alias", "principal", "--model", "sonnet",
                     "--role", "worker", "--effort", "ultra")
     assert route["effort_applied"] == "xhigh"
     assert "ultra" in route["effort_substitution"]
@@ -77,7 +87,7 @@ def test_registered_claude_efforts_bound_what_is_sent(tmp_path):
     assert plan["argv"][plan["argv"].index("--effort") + 1] == "xhigh"
 
 
-@pytest.mark.parametrize("alias", [(), ("--alias", "flagship")])
+@pytest.mark.parametrize("alias", [(), ("--alias", "principal")])
 def test_codex_unsupported_effort_records_the_clamped_value_sent(tmp_path, alias):
     route = resolve("--adapter", "codex", *alias, "--model", "gpt-6-luna",
                     "--role", "worker", "--effort", "ultra")
@@ -172,7 +182,7 @@ def homes(tmp_path, monkeypatch):
 
 
 def test_haiku_4_5_receipt_has_empty_applied_effort_and_one_note(tmp_path, homes):
-    route = resolve("--adapter", "claude", "--alias", "flagship", "--model", "claude-haiku-4-5", "--role", "worker")
+    route = resolve("--adapter", "claude", "--alias", "principal", "--model", "claude-haiku-4-5", "--role", "worker")
     record = replay(tmp_path, "claude", route, events("claude-direct-haiku"), requested_effort="high")
     provenance = record["provenance"]
     assert provenance["effort_requested"] == "high"
@@ -254,10 +264,10 @@ def test_cursor_model_suffix_effort_is_recorded_as_sent(tmp_path):
 
 
 @pytest.mark.parametrize(("extra", "model", "effort"), [
-    (("--alias", "flagship", "--effort", "high"), "grok-4.7-high", "high"),
-    (("--alias", "flagship", "--effort", "medium"), "grok-4.7-medium", "medium"),
-    (("--alias", "flagship", "--effort", "ultra"), "grok-4.7-xhigh", "xhigh"),
-    (("--alias", "flagship"), "grok-4.7-high", "high"),
+    (("--alias", "principal", "--effort", "high"), "grok-4.7-high", "high"),
+    (("--alias", "principal", "--effort", "medium"), "grok-4.7-medium", "medium"),
+    (("--alias", "principal", "--effort", "ultra"), "grok-4.7-xhigh", "xhigh"),
+    (("--alias", "principal"), "grok-4.7-high", "high"),
 ])
 def test_a_suffix_model_carries_the_effort_it_records_with_an_alias(extra, model, effort):
     """An alias with a model used to hit the adapter-wide model-id rule and refuse the route."""
@@ -271,6 +281,6 @@ def test_a_suffix_model_carries_the_effort_it_records_with_an_alias(extra, model
     ("grok-4.7-low", (), "grok-4.7-low", "low"),
 ])
 def test_a_suffixed_id_is_never_suffixed_twice(model, extra, resolved, effort):
-    route = resolve("--adapter", "cursor", "--alias", "flagship", "--model", model, "--role", "worker", *extra)
+    route = resolve("--adapter", "cursor", "--alias", "principal", "--model", model, "--role", "worker", *extra)
     assert route["resolved_model"] == resolved
     assert route["effort_applied"] == effort

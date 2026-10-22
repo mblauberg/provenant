@@ -2,7 +2,7 @@
 import { readFileSync, realpathSync, statSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { projectRoot, withoutGitRedirects, type Identity } from "./identity.js";
-import { execFile } from "node:child_process";
+import { runJsonSubprocess } from "./json-subprocess.js";
 import type { CatalogueSnapshot } from "./catalogue.js";
 const DEFAULT_TIMEOUT_SECONDS = 3600;
 function canonical(path: string) {
@@ -28,9 +28,11 @@ function inside(root: string, candidate: string) {
  */
 export const DISPATCH_ADAPTERS = ["agy", "claude", "codex", "copilot", "cursor", "kiro", "opencode"] as const;
 const SUPPORTED_ADAPTERS = new Set<string>(DISPATCH_ADAPTERS);
-const ROLE_ALIASES = ["flagship", "workhorse", "scout"];
-/** The route-pool tier names, accepted wherever an adapter's own alias is asked for. */
-const TIER_NAMES: Record<string, string> = { junior: "scout", senior: "workhorse", principal: "flagship" };
+const ROLE_ALIASES = ["principal", "senior", "junior"];
+/** Names the tiers had before junior, senior and principal; none is accepted. */
+const RENAMED_TIERS: Record<string, string> = {
+  scout: "junior", bulk: "junior", workhorse: "senior", strong: "senior", review: "senior", flagship: "principal",
+};
 
 /**
  * Seats whose provider runs its own models as native subagents: Claude Code
@@ -165,10 +167,14 @@ export function canonicalMode(value: string | undefined): string | undefined {
 }
 const routeKey = (value: string) => value.toLowerCase().replace(/[^a-z0-9]/gu, "");
 
-/** The tier alias a caller meant, tolerating case and a one-letter typo (`Workhorse`, `workhorze`). */
+/**
+ * The tier alias a caller meant, tolerating case and a one-letter typo (`Senior`, `senir`).
+ * A retired tier name is an error that names its replacement.
+ */
 export function tierAlias(alias: string): string | undefined {
-  const tier = Object.keys(TIER_NAMES).find((candidate) => editDistance(candidate, routeKey(alias)) <= 1);
-  if (tier !== undefined) return TIER_NAMES[tier];
+  const renamed = RENAMED_TIERS[routeKey(alias)];
+  if (renamed !== undefined)
+    throw new InputError("alias_renamed", `alias '${alias}' was renamed to '${renamed}'; pass ${renamed}.`);
   return ROLE_ALIASES.find((candidate) => editDistance(routeKey(candidate), routeKey(alias)) <= 1);
 }
 
@@ -301,10 +307,10 @@ export function normaliseRoute(input: RouteInput, identity: Identity, catalogue:
     throw new InputError("capabilities_invalid", "Pass capabilities as a list of distinct postgres or browser values.");
   }
   let selector =
-    input.model ?? (input.alias && !ROLE_ALIASES.includes(input.alias) && !(input.alias.toLowerCase() in TIER_NAMES)
+    input.model ?? (input.alias && !ROLE_ALIASES.includes(input.alias) && tierAlias(input.alias) === undefined
       ? input.alias : undefined);
   const roleAlias = input.model === undefined && input.alias !== undefined ? tierAlias(input.alias) : undefined;
-  if (roleAlias !== undefined && roleAlias !== input.alias && TIER_NAMES[input.alias!.toLowerCase()] !== roleAlias)
+  if (roleAlias !== undefined && roleAlias !== input.alias && input.alias!.toLowerCase() !== roleAlias)
     warnings.push(`corrected alias ${input.alias} to ${roleAlias}`);
   if (roleAlias !== undefined) input.alias = roleAlias;
   const isRoleAlias = roleAlias !== undefined;
@@ -361,7 +367,7 @@ export function normaliseRoute(input: RouteInput, identity: Identity, catalogue:
   }
   if (corrected.unknown) warnings.push(`${selector} is not in the ${adapter} catalogue; passing it as given`);
   if (adapter === nativeAdapter(identity)) {
-    const own = `${adapter}/${input.model ?? input.alias ?? "workhorse"} is this ${adapter} seat's own model; `;
+    const own = `${adapter}/${input.model ?? input.alias ?? "senior"} is this ${adapter} seat's own model; `;
     // Claude subagents are first-class on the host; a Codex seat still runs with a warning.
     if (adapter === "claude" && ownSeatGuard)
       throw new InputError("native_seat_model", `${own}use the host's native subagents instead of Fabric (or pass another adapter).`);
@@ -379,7 +385,7 @@ export function normaliseRoute(input: RouteInput, identity: Identity, catalogue:
   }
   return {
     adapter,
-    ...(input.alias === undefined && input.model === undefined && input.task_class === undefined ? { alias: "workhorse" } : {}),
+    ...(input.alias === undefined && input.model === undefined && input.task_class === undefined ? { alias: "senior" } : {}),
     ...(input.alias === undefined ? {} : { alias: input.alias }),
     ...(input.model === undefined ? {} : { model: input.model }),
     ...(input.effort === undefined ? {} : { effort: input.effort }),
@@ -573,27 +579,13 @@ export async function preflight(
   env: NodeJS.ProcessEnv,
   signal: AbortSignal,
 ): Promise<Record<string, unknown>> {
-  signal.throwIfAborted();
-  const child = execFile(python, [owner, "--preflight-json"], {
+  return runJsonSubprocess<Record<string, unknown>>(python, [owner, "--preflight-json"], {
     cwd: identity.cwd,
     env: withoutGitRedirects(env),
+    input: { tasks },
     signal,
-    killSignal: "SIGKILL",
-    timeout: 50_000,
-    maxBuffer: 1024 * 1024,
+    timeoutMs: 50_000,
+    maxBytes: 1024 * 1024,
+    unavailable: "Preflight unavailable; restore the harness Python environment.",
   });
-  const output = new Promise<string>((resolveOutput, rejectOutput) => {
-    let stdout = "";
-    child.stdout!.on("data", (chunk: string) => {
-      stdout += chunk;
-    });
-    child.once("error", rejectOutput);
-    child.once("close", (code) =>
-      code === 0
-        ? resolveOutput(stdout)
-        : rejectOutput(new Error("Preflight unavailable; restore the harness Python environment.")),
-    );
-  });
-  child.stdin!.end(JSON.stringify({ tasks }));
-  return JSON.parse(await output) as Record<string, unknown>;
 }

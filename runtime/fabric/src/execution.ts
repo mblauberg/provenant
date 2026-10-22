@@ -21,6 +21,7 @@ import {
 } from "./execution-input.js";
 export { ACCESS_MODES, DISPATCH_ADAPTERS } from "./execution-input.js";
 export type { AccessMode, RouteInput, DispatchInput, BatchInput, BatchTaskInput } from "./execution-input.js";
+import { recordSeatRun } from "./seat-index.js";
 import { compactRoute, basePaths, compactDispatch, compactBatch, type OwnerCompletion } from "./owner-output.js";
 import { execFileSync, execFile, spawn, type ChildProcess } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
@@ -231,6 +232,23 @@ function realPath(path: string): string {
  * the OS temp dir or a throwaway .agent-run/scratch tree, and never in a
  * .agent-run tree that itself sits in temp (a lane's TMPDIR; issue #1002).
  */
+/**
+ * The one rule for a fixture temp root, shared with the test helpers that pick
+ * one. It protects live run roots: refuse a root inside a git work tree (which
+ * covers a checkout's own .agent-run) and a run tree itself (`.agent-run` or
+ * `.agent-run/runs`). An isolated directory outside git is fine even when it
+ * sits below a lane's .agent-run, because the fixture's run root must then
+ * resolve inside that directory.
+ */
+export function acceptableFixtureTempRoot(root: string): boolean {
+  const real = realPath(root);
+  if (basename(real) === ".agent-run" || (basename(real) === "runs" && basename(dirname(real)) === ".agent-run")) return false;
+  for (let dir = real; ; dir = dirname(dir)) {
+    if (existsSync(join(dir, ".git"))) return false;
+    if (dirname(dir) === dir) return true;
+  }
+}
+
 export function assertFixtureRunRoot(
   agentRun: string,
   routes: readonly { model?: unknown; cli_version?: unknown }[],
@@ -238,9 +256,10 @@ export function assertFixtureRunRoot(
 ): void {
   if (!routes.some((route) => route.model === "fixture" || route.cli_version === "fixture")) return;
   const root = realPath(agentRun);
-  // The OS temp dir, and the fixed /tmp that test helpers fall back to when TMPDIR sits in a .agent-run tree.
-  const tempRoots = [...new Set([temp, "/tmp"].map(realPath))];
-  const acceptableTempRoots = tempRoots.filter((tempRoot) => !tempRoot.split(sep).includes(".agent-run"));
+  // The OS temp dir, and the roots that test helpers fall back to when TMPDIR sits in a git work tree.
+  const fallbacks = [process.env.FABRIC_TEST_TMPDIR, "/tmp"].filter((path): path is string => !!path);
+  const tempRoots = [...new Set([temp, ...fallbacks].map(realPath))];
+  const acceptableTempRoots = tempRoots.filter(acceptableFixtureTempRoot);
   const underTemp = acceptableTempRoots.some((tempRoot) => root.startsWith(tempRoot + sep));
   if (underTemp || underScratch(root)) return;
   throw new Error(
@@ -451,6 +470,8 @@ export function startOwner(
     host_started_at: launcherStartedAt(),
   };
   writeFileSync(statusPath, JSON.stringify(metadata) + "\n", { mode: 0o600 });
+  // The seat keeps the association once this host and launcher are gone.
+  recordSeatRun(runDir, env);
   // The pointer is only a discovery index: an unwritable target run root must
   // not fail the dispatch. The lane then stays visible from its source project.
   try {

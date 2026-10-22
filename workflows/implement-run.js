@@ -10,7 +10,7 @@
 //   0. bootstrap     -> one agent scaffolds the run dir (run_dir_init.sh) + sniffs conventions.
 //   1. understand    -> parallel readers (Claude) + a cross-family explorer at a different angle.
 //   2. plan          -> independent plan framings (minimal-diff / robust-refactor / UX-first),
-//                       each weighed, one chosen by the flagship orchestrator.
+//                       each weighed, one chosen by the principal orchestrator.
 //   3. implement     -> a builder agent emits PATCHES to patches/ (never edits source directly).
 //   4. review        -> independent code-review lenses + other-family reviewer.
 //   5. verify        -> objective checks mapped to acceptance criteria.
@@ -24,7 +24,7 @@
 // Concrete models are resolved once at bootstrap from durable aliases; later stages receive them.
 //   bulk read / convention sniff / grep-map      -> cheap tier (intent)
 //   plan framing / per-angle review / build       -> mid tier (intent)
-//   plan adjudication / synthesis / apply-gate     -> flagship tier (intent; the orchestrator session)
+//   plan adjudication / synthesis / apply-gate     -> principal tier (intent; the orchestrator session)
 //   other-primary explore + review                 -> Codex via cf_dispatch.py
 //   distinct-family independent lens               -> Cursor/xAI or Agy/Gemini when warranted
 
@@ -88,12 +88,12 @@ const BOOTSTRAP_SCHEMA = {
     modelRoutes: {
       type: 'object',
       additionalProperties: false,
-      required: ['flagship', 'criticalReviewer', 'workhorse', 'scout'],
+      required: ['principal', 'criticalReviewer', 'senior', 'junior'],
       properties: {
-        flagship: { type: 'string' },
+        principal: { type: 'string' },
         criticalReviewer: { type: 'string' },
-        workhorse: { type: 'string' },
-        scout: { type: 'string' },
+        senior: { type: 'string' },
+        junior: { type: 'string' },
       },
     },
   },
@@ -322,7 +322,7 @@ function crossFamilyDispatchHint(runDir, gitCwd, kind = 'primary') {
     cwdClause +
     ' Write your prompt to a file, then run:\n' +
     '  "$(provenant root)/skills/orchestrate/scripts/cf_dispatch.py" ' +
-    '--orchestrator-family anthropic --tool codex --alias flagship --role other-primary --prompt-file <your-prompt-file> ' +
+    '--orchestrator-family anthropic --tool codex --alias principal --role other-primary --prompt-file <your-prompt-file> ' +
     `--out "${runDir}/crossfamily/<name>.txt" > "${runDir}/crossfamily/<name>.route.json"\n` +
     (kind === 'primary-review'
       ? 'For this certifying review, the provider output at <your --out path> is the retained terminal result: ask the provider to return exactly one JSON object matching the existing REVIEW_SCHEMA keys angle, verdict, issues, crossFamily and path, with no markdown or prose. If the provider has no verdict, preserve that failure as non-certifying; never manufacture JSON in the wrapper. '
@@ -411,10 +411,10 @@ const boot = await agent(
     'CLAUDE.md, README. Report the NARROWEST meaningful test lane, lint/type cmd, formatter, any design ' +
     'system entry point, and any rules that forbid auto-editing specific files.\n' +
     '5. Resolve concrete Claude models by running the global model router four times:\n' +
-    '   provenant route resolve --adapter claude --alias flagship --role lead\n' +
-    '   provenant route resolve --adapter claude --alias flagship --role critical-review\n' +
-    '   provenant route resolve --adapter claude --alias workhorse --role worker\n' +
-    '   provenant route resolve --adapter claude --alias scout --role scout\n' +
+    '   provenant route resolve --adapter claude --alias principal --role lead\n' +
+    '   provenant route resolve --adapter claude --alias principal --role critical-review\n' +
+    '   provenant route resolve --adapter claude --alias senior --role worker\n' +
+    '   provenant route resolve --adapter claude --alias junior --role junior\n' +
     '   Return each resolved_model in modelRoutes.\n' +
     'Return the structured result only.',
   { label: 'bootstrap', phase: 'Bootstrap', schema: BOOTSTRAP_SCHEMA },
@@ -462,7 +462,7 @@ async function checkpoint(currentSlice, nextAction, inFlight, artifactPaths) {
       `--current-slice ${JSON.stringify(currentSlice)} --next-action ${JSON.stringify(nextAction)} ` +
       `--in-flight-json ${shellQuote(JSON.stringify(inFlight))} --artifact-paths-json ${shellQuote(JSON.stringify(artifactPaths))}\n` +
       'Return its JSON stdout exactly as the structured result. A non-zero exit is failure.',
-    { label: `checkpoint:${currentSlice}`, phase: 'Bootstrap', schema: CHECKPOINT_SCHEMA, model: models.scout },
+    { label: `checkpoint:${currentSlice}`, phase: 'Bootstrap', schema: CHECKPOINT_SCHEMA, model: models.junior },
   )
   if (!result || !result.verified) {
     log(`Checkpoint failed at ${currentSlice}; refusing the next dispatch.`)
@@ -478,7 +478,7 @@ async function failRun(reason) {
       `RUN_RECEIPT.json task/owner and clear or hand off owned panes, then run run_dir_finalize.py --status failed ` +
       `--reason ${JSON.stringify(reason)}. Re-open both receipts and return path, generation and verified=true only ` +
       'when the run is terminal failed with empty in_flight.',
-    { label: 'run:fail', phase: 'Human gate', schema: CHECKPOINT_SCHEMA, model: models.scout },
+    { label: 'run:fail', phase: 'Human gate', schema: CHECKPOINT_SCHEMA, model: models.junior },
   )
   if (!result || !result.verified) {
     log('Failure terminalisation could not be verified; preserve the active run for manual recovery.')
@@ -492,11 +492,11 @@ async function failRun(reason) {
 phase('Understand')
 // model omitted on every angle: inherit the session model (no dated literals, §3/§4). `tier` is intent only.
 const READER_ANGLES = [
-  { angle: 'data-flow', model: models.workhorse, cf: false, lens: 'trace the data/control flow the task touches end to end' },
-  { angle: 'callers-and-contracts', model: models.workhorse, cf: false, lens: 'map callers, public surfaces, and any contracts/routes/schemas at risk' },
-  { angle: 'tests-and-conventions', model: models.scout, cf: false, lens: 'find existing tests and the conventions a change must honour' },
-  { angle: 'ui-and-design', model: models.workhorse, cf: false, lens: 'assess UI/design-system impact (skip if non-UI) honouring ' + (conv.designSystem || 'the project design system') },
-  { angle: 'other-primary-explore', model: models.scout, cf: true, lens: 'drive an independent OpenAI-primary read through the dispatcher' },
+  { angle: 'data-flow', model: models.senior, cf: false, lens: 'trace the data/control flow the task touches end to end' },
+  { angle: 'callers-and-contracts', model: models.senior, cf: false, lens: 'map callers, public surfaces, and any contracts/routes/schemas at risk' },
+  { angle: 'tests-and-conventions', model: models.junior, cf: false, lens: 'find existing tests and the conventions a change must honour' },
+  { angle: 'ui-and-design', model: models.senior, cf: false, lens: 'assess UI/design-system impact (skip if non-UI) honouring ' + (conv.designSystem || 'the project design system') },
+  { angle: 'other-primary-explore', model: models.junior, cf: true, lens: 'drive an independent OpenAI-primary read through the dispatcher' },
 ]
 await checkpoint('understand-dispatch', 'reconcile understanding workers', READER_ANGLES.map((r) => `understand:${r.angle}`), ['RUN.json'])
 
@@ -517,7 +517,7 @@ const understanding = (
 log(`Understand: ${understanding.length}/${READER_ANGLES.length} reader angles returned.`)
 await checkpoint('understand-complete', 'plan against the approved contract', [], understanding.map((r) => r.path).filter(Boolean))
 
-// --- Phase 2: multi-angle plan. Independent framings in parallel, then flagship adjudicates. ---
+// --- Phase 2: multi-angle plan. Independent framings in parallel, then principal adjudicates. ---
 // parallel() because adjudication weighs ALL framings against each other (cross-item comparison).
 phase('Plan')
 const PLAN_FRAMINGS = [
@@ -538,13 +538,13 @@ const plans = (
           ESCALATION_RULES +
           '\nDo not read the other framings; argue your own. Predict the riskTier of the resulting edits. ' +
           'Return the structured plan only.',
-        { label: `plan:${p.framing}`, phase: 'Plan', schema: PLAN_SCHEMA, model: models.workhorse },
+        { label: `plan:${p.framing}`, phase: 'Plan', schema: PLAN_SCHEMA, model: models.senior },
       ),
     ),
   )
 ).filter(Boolean)
 
-// Flagship orchestrator weighs the framings — does NOT majority-vote. Inherits session (opus) model.
+// Principal orchestrator weighs the framings — does NOT majority-vote. Inherits session (opus) model.
 await checkpoint('plan-adjudication-dispatch', 'reconcile the selected plan', ['plan:adjudicate'], [])
 const chosen = await agent(
   'Adjudicate competing plan framings for this task. Weigh them on correctness, blast radius, and fit ' +
@@ -553,7 +553,7 @@ const chosen = await agent(
     `Task: """${task}"""\nFramings: ${JSON.stringify(plans)}\n` +
     ESCALATION_RULES +
     `\nWrite the decision to ${runDir}/findings/plan-decision.md and return the structured choice.`,
-  { label: 'plan:adjudicate', phase: 'Plan', schema: CHOSEN_PLAN_SCHEMA, model: models.flagship },
+  { label: 'plan:adjudicate', phase: 'Plan', schema: CHOSEN_PLAN_SCHEMA, model: models.principal },
 )
 if (!chosen) {
   log('Planning produced no viable framing — stopping before implement. No edits made.')
@@ -583,7 +583,7 @@ let built = await agent(
     'file, preserve the unexpected diff, stop, and report the exact paths for human recovery. Never ' +
     'checkout, restore, reset, or overwrite a dirty file. ' +
     `Write the build narrative to ${runDir}/findings/implement.md and return the structured result.`,
-  { label: 'implement', phase: 'Implement', schema: IMPLEMENT_SCHEMA, model: models.workhorse },
+  { label: 'implement', phase: 'Implement', schema: IMPLEMENT_SCHEMA, model: models.senior },
 )
 if (!built || !built.patches || built.patches.length === 0) {
   log('Implement produced no patches — nothing to review/apply. Stopping.')
@@ -598,8 +598,8 @@ const REVIEW_ANGLES = [
   { angle: 'correctness', model: models.criticalReviewer, cf: '', required: true, lens: 'correctness, invariants and failure paths' },
   { angle: 'regression-and-structure', model: models.criticalReviewer, cf: '', required: true, lens: 'dependency-cone regressions, ownership, state/types, atomicity and simplification' },
   { angle: 'scope-and-risk', model: models.criticalReviewer, cf: '', required: true, lens: 'scope drift, risk tier and authority boundaries' },
-  { angle: 'other-primary', model: models.scout, cf: 'primary', required: true, lens: 'drive an independent OpenAI-primary adversarial review' },
-  { angle: 'distinct-family', model: models.scout, cf: 'distinct-family', required: false, lens: 'distinct-family blind-spot pressure when warranted' },
+  { angle: 'other-primary', model: models.junior, cf: 'primary', required: true, lens: 'drive an independent OpenAI-primary adversarial review' },
+  { angle: 'distinct-family', model: models.junior, cf: 'distinct-family', required: false, lens: 'distinct-family blind-spot pressure when warranted' },
 ]
 let reviews = []
 let verify = null
@@ -676,7 +676,7 @@ for (let cycle = 0; cycle <= maxRepairCycles; cycle += 1) {
       `Discovered test lane: ${conv.testLane || '(none)'}\nLint/format: ${conv.lintCmd || '(none)'} / ${conv.formatCmd || '(none)'}\n` +
       `Patches: ${patchDigest}\nRepo root: ${boot.repoRoot}\n` +
       `Write evidence to ${runDir}/traces/verify-${cycle}.md and return the structured outcome.`,
-    { label: `verify:${cycle}`, phase: 'Verify', schema: VERIFY_SCHEMA, model: models.workhorse },
+    { label: `verify:${cycle}`, phase: 'Verify', schema: VERIFY_SCHEMA, model: models.senior },
   )
   checksPass = !!(verify && verify.passed)
   await checkpoint(`verify-${cycle}-complete`, checksPass && blocking === 0 ? 'prepare serial apply' : 'repair blocking findings', [], [verify && verify.path].filter(Boolean))
@@ -691,7 +691,7 @@ for (let cycle = 0; cycle <= maxRepairCycles; cycle += 1) {
       'approved behaviour and scope. Do not guess around a spec/design defect; report it instead.\n' +
       `Task: ${task}\nPatches: ${patchDigest}\nReviews: ${JSON.stringify(reviews)}\nVerify: ${JSON.stringify(verify)}\n` +
       `Write the repair narrative to ${runDir}/findings/repair-${cycle + 1}.md.`,
-    { label: `repair:${cycle + 1}`, phase: 'Repair', schema: IMPLEMENT_SCHEMA, model: models.workhorse },
+    { label: `repair:${cycle + 1}`, phase: 'Repair', schema: IMPLEMENT_SCHEMA, model: models.senior },
   )
   if (!repaired || !repaired.patches || repaired.patches.length === 0) {
     log('Repair produced no replacement patches; stopping at the human gate.')
@@ -723,7 +723,7 @@ const councilReduction = await agent(
     'Adjudicate each claim using source/spec/test evidence, never majority vote, and preserve unresolved dissent. ' +
     `Reviews: ${JSON.stringify(anonymousClaims)}\nChallenge: ${JSON.stringify(councilChallenge || {})}\n` +
     `Write the reduction to ${runDir}/findings/council-reduction.md.`,
-  { label: 'review:council-reduction', phase: 'Review', schema: COUNCIL_REDUCTION_SCHEMA, model: models.flagship },
+  { label: 'review:council-reduction', phase: 'Review', schema: COUNCIL_REDUCTION_SCHEMA, model: models.principal },
 )
 if (!councilChallenge || !councilChallenge.anonymized || !councilChallenge.randomized ||
     !councilReduction || !councilReduction.freshContext || councilReduction.unresolvedDissent.length > 0) {
@@ -807,7 +807,7 @@ const apply = await agent(
     `Record applied/escalated as topic/outcome, not as manifest status. For escalated patches, write a ` +
     `fully-reasoned approve-then-apply recommendation to ${runDir}/RECOMMENDATION.md (what, why high-risk, ` +
     'validation evidence, the exact approval gate it needs). Return the structured result.',
-  { label: 'apply:serial', phase: 'Apply', schema: APPLY_SCHEMA, model: models.workhorse },
+  { label: 'apply:serial', phase: 'Apply', schema: APPLY_SCHEMA, model: models.senior },
 )
 
 const appliedN = apply && apply.applied ? apply.applied.length : 0

@@ -211,3 +211,44 @@ it("does not write the cursor at the deadline when contention clears exactly the
   expect(await again.code).toBe(0);
   expect(again.output.join("")).toContain("edge");
 });
+
+it("idles between reads through the watcher, never past the deadline", async () => {
+  const idles: number[] = [];
+  let clock = 0;
+  let reads = 0;
+  const sequence = [[lane("a", "running", null)], [lane("a", "running", null)], [lane("a")]];
+  const code = await waitForLanes({
+    who, store: store(), now: () => clock, timeoutSeconds: 100,
+    read: async () => ({ schema: "fabric.runs.v1", status: "ok", runs: sequence[Math.min(reads++, 2)]! }),
+    write: async () => undefined, fail: (text) => { throw new Error(text); },
+    sleep: async () => { throw new Error("fixed sleep used"); },
+    idle: async (ms) => { idles.push(ms); clock += ms === 30_000 ? 10_000 : ms; },
+  });
+  expect(code).toBe(0);
+  expect(idles).toEqual([30_000, 30_000]);
+  clock = 95_000;
+  idles.length = 0;
+  const stuck = await waitForLanes({
+    who, store: store(), now: () => clock, timeoutSeconds: 5,
+    read: async () => ({ schema: "fabric.runs.v1", status: "ok", runs: [lane("b", "running", null)] }),
+    write: async () => undefined, fail: (text) => { throw new Error(text); },
+    sleep: async () => undefined, idle: async (ms) => { idles.push(ms); clock += ms; },
+  });
+  expect(stuck).toBe(124);
+  expect(idles).toEqual([5_000]);
+});
+
+it("re-reads stale peers before a timeout or a none-running decision", async () => {
+  let stale = true;
+  const output: string[] = [];
+  const code = await waitForLanes({
+    who, store: store(), now: () => 0, timeoutSeconds: 0,
+    read: async () => ({ schema: "fabric.runs.v1", status: "ok", runs: [lane("peer", "running", null)] }),
+    refresh: async () => { stale = false; return { schema: "fabric.runs.v1", status: "ok", runs: [lane("peer")] }; },
+    stale: () => stale,
+    write: async (text) => { output.push(text); }, fail: (text) => { throw new Error(text); }, sleep: async () => undefined,
+  });
+  expect(code).toBe(0);
+  expect(output.join("")).toContain("peer");
+  expect(output.join("")).not.toContain("timeout");
+});

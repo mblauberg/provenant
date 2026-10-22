@@ -128,7 +128,7 @@ def test_render_lists_unreported_windows_only_when_verbose_one_line_per_account(
     assert 'not reported' not in capsys.readouterr().out
     quota.render(shown, verbose=True)
     out = capsys.readouterr().out
-    assert 'seven_day_opus' not in out and 'five_hour' in out
+    assert 'seven_day_opus' not in out and '5-hour' in out
     assert 'claude/max-a: 2 window(s) not reported (missing does not mean 0%)' in out
 
 
@@ -143,9 +143,10 @@ def test_render_hides_repeated_limit_windows_and_reads_a_dollar_budget_plainly(q
     value = quota.report([quota.refresh(account, NOW, force=True)], NOW)
     quota.render(value)
     out = capsys.readouterr().out
-    assert 'session:1' not in out and 'weekly_scoped:fable' in out and 'window length unreported' not in out
+    assert 'session:1' not in out and 'Weekly (Fable)' in out and 'window length unreported' not in out
     assert '$114 left; resets in 14d' in out and 'unknown' not in out
-    assert 'session:1' in {w['name'] for w in value['accounts'][0]['windows']}
+    # The restated window is dropped from the report itself, so no reader counts it twice.
+    assert 'session:1' not in {w['name'] for w in value['accounts'][0]['windows']}
 
 
 # Provider modules ---------------------------------------------------------------------------
@@ -701,7 +702,8 @@ def test_agy_quota_comes_from_print_mode_and_never_stores_the_address(quota, mon
     assert value['status'] == 'ok' and value['source'] == 'agy print-mode /usage'
     assert [row['name'] for row in value['windows']] == ['gemini.weekly', 'claude.weekly', 'claude.5h']
     report = quota.report([value], NOW)
-    assert report['accounts'][0]['state'] == 'exhausted' and quota.apply_to_cooldowns({}, NOW) == {}
+    # Gemini is exhausted but the Claude pool is not, so the account stays usable; quota sets no cooldown.
+    assert report['accounts'][0]['state'] == 'reserve' and quota.apply_to_cooldowns({}, NOW) == {}
     stored = quota.cache_path('agy', account.label, identity_dir=account.identity_dir).read_text()
     for text in (stored, json.dumps(report), capsys.readouterr().out):
         assert AGY_EMAIL not in text and 'second.account' not in text
@@ -900,7 +902,7 @@ def test_budget_windows_show_amounts_under_a_configurable_label(quota, tmp_path,
     value = quota.refresh(quota.Account('claude', 'max-a', Path('/nowhere'), True), NOW, force=True)
     account = quota.report([value], NOW)['accounts'][0]
     rows = {row['name']: row for row in account['windows']}
-    assert rows['iguana_necktie']['label'] == 'Cloud session credits' and 'label' not in rows['seven_day']
+    assert (rows['iguana_necktie']['label'], rows['seven_day']['label']) == ('Cloud session credits', 'Weekly')
     # The budget's pace is unknown, but only the timed window sets the account's state.
     assert rows['iguana_necktie']['pace']['state'] == 'unknown'
     assert account['state'] == 'reserve' and account['summary'].startswith('seven_day:')
@@ -1019,6 +1021,12 @@ def test_early_headroom_clears_stale_usage_cooldowns_after_reset(quota):
     snapshot(quota, 'claude', [window(1, 300, timedelta(hours=4, minutes=59))])
     assert quota.route_states(NOW)['claude']['state'] == 'early'
     assert quota.apply_to_cooldowns(cooldowns, NOW) == {}
+
+
+def test_exhausted_opencode_go_window_cools_only_go_models_not_free_zen_models(quota, tmp_path):
+    snapshot(quota, 'opencode', [window(100, WEEK, timedelta(days=3), 'seven_day')])
+    record = quota.apply_to_cooldowns({}, NOW)['opencode/*']
+    assert record['status'] == 'quota_exhausted' and record['covers'] == ['opencode-go/']
 
 
 def test_both_claude_accounts_exhausted_block_routing_until_reset_then_lift(quota, tmp_path):
@@ -1341,7 +1349,7 @@ def test_concurrent_reads_share_one_cached_fetch_and_credit_updates_are_not_lost
     import threading
     import time
     calls = []
-    barrier = threading.Barrier(4)
+    barrier = threading.Barrier(4, timeout=10)  # a dead reader fails the test, not the worker
     def fetch(account, io, now):
         calls.append(account.label)
         time.sleep(0.02)
@@ -1440,10 +1448,13 @@ def refuse_fetch(*args, **kwargs):
     raise AssertionError('nothing is due, so nothing may be fetched')
 
 
-REPORT_KEYS = {'schema', 'generated_at', 'host', 'enabled', 'providers', 'accounts', 'placement_preference'}
+REPORT_KEYS = {'schema', 'generated_at', 'host', 'enabled', 'providers', 'accounts', 'placement_preference',
+               'display', 'headline'}
 ROW_KEYS = {'provider', 'account', 'plan', 'host', 'active', 'priority', 'observed_at', 'attempted_at', 'status',
             'error', 'source', 'state', 'summary', 'windows', 'unreported', 'coverage_note', 'credits',
-            'credit_advice', 'use_it_or_lose_it'}
+            'credit_advice', 'use_it_or_lose_it',
+            # The display vocabulary, added in place: older readers ignore it.
+            'provider_name', 'display_name', 'plan_label', 'display_window', 'back_at'}
 SCHEDULE_KEYS = {'next_due_at', 'reason', 'ttl_seconds', 'trigger', 'failures', 'backoff_until', 'error_kind',
                  'last_duration_ms', 'source_kind'}
 

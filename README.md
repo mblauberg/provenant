@@ -108,7 +108,8 @@ skill fails the install rather than shadowing it. If a client still exposes the
 product catalogue as one directory-level link, the first install carrying a
 custom skill converts that directory into per-entry links. A single-platform install changes
 only that primary. Every install also writes a managed copy of the thin
-`provenant` command in
+`provenant` command (a small Rust binary when `cargo` is available, otherwise the
+Python stub; see [`docs/runbooks/front-door.md`](docs/runbooks/front-door.md)) in
 `${PROVENANT_BIN_DIR:-$HOME/.local/bin}`; it warns when that directory is not
 on `PATH`, and never edits shell startup files. During an upgrade, the installer
 also retires prior managed Claude custom-agent links recorded by the old
@@ -318,11 +319,24 @@ The full <!--skills-->25<!--/skills-->-skill catalogue, grouped by area:
 </details>
 <!-- skill-catalogue:end -->
 
+### Stack library
+
+[`library/`](library/) holds four stack skills kept apart from the workflow
+skills above: [`playwright`](library/playwright/SKILL.md),
+[`react-performance`](library/react-performance/SKILL.md),
+[`tanstack-query`](library/tanstack-query/SKILL.md) and
+[`typescript-clean-code`](library/typescript-clean-code/SKILL.md). They install
+through the same installer and manifest, into the same `skills/` directory of
+each client, as managed links. A library skill may not share a name with a
+workflow skill. Removing a folder from `library/` and re-running the installer
+prunes its link.
+
 ## Documentation and help
 
 - [`Architecture`](docs/ARCHITECTURE.md): system structure and design rationale.
 - [`Specifications`](docs/specs/README.md): the component contracts.
 - [Fabric hosts](docs/runbooks/fabric-hosts.md): SSH peer configuration and diagnostics.
+- [Landing lease](docs/runbooks/landing-lease.md): taking Fabric's landing lease from a repository script with `provenant lease`.
 - [Local telemetry](docs/runbooks/telemetry.md): usage ingestion, source manifest, stats, change markers, before/after comparison and retro.
 - [Harness profiles](docs/runbooks/harness-profiles.md): switching cost/quality presets and comparing them.
 - [`Research`](docs/research/README.md): evidence and owners.

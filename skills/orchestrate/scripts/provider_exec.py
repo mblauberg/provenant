@@ -9,6 +9,7 @@ import ctypes
 import fcntl
 import functools
 import hashlib
+import importlib.util
 import json
 import logging
 import math
@@ -237,37 +238,13 @@ def _opencode_discovery_grantable(path, *, directory=False):
     return target.is_file() and target.name in OPENCODE_INSTRUCTION_FILES
 
 
-def _strip_jsonc(text):
-    # Drops comments and trailing commas outside strings, so the result parses as JSON.
-    out, i, quoted, comma = [], 0, False, None
-    while i < len(text):
-        char = text[i]
-        if quoted:
-            out.append(char)
-            if char == "\\" and i + 1 < len(text):
-                out.append(text[i + 1])
-                i += 1
-            elif char == '"':
-                quoted = False
-        elif text.startswith("//", i):
-            i = text.find("\n", i)
-            if i < 0:
-                break
-            continue
-        elif text.startswith("/*", i):
-            end = text.find("*/", i + 2)
-            i = len(text) if end < 0 else end + 2
-            continue
-        elif char.isspace():
-            out.append(char)
-        else:
-            if char in "}]" and comma is not None:
-                out[comma] = ""
-            comma = len(out) if char == "," else None
-            quoted = char == '"'
-            out.append(char)
-        i += 1
-    return "".join(out)
+def _jsonc_loads(text):
+    # The one JSONC reader lives in the product's scripts/lib; a skill reaches it by path.
+    spec = importlib.util.spec_from_file_location(
+        "provenant_jsonc", Path(__file__).resolve().parents[3] / "scripts/lib/jsonc.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.parse_jsonc(text)[0]
 
 
 def _opencode_configured_instructions(home, config_home):
@@ -277,7 +254,7 @@ def _opencode_configured_instructions(home, config_home):
     for config in (config_home / "opencode/opencode.json", config_home / "opencode/opencode.jsonc",
                    home / ".opencode/opencode.json", home / ".opencode/opencode.jsonc"):
         try:
-            entries = json.loads(_strip_jsonc(config.read_text(encoding="utf-8"))).get("instructions", [])
+            entries = _jsonc_loads(config.read_text(encoding="utf-8")).get("instructions", [])
         except (OSError, ValueError, AttributeError):
             continue
         for entry in entries if isinstance(entries, list) else []:
@@ -583,8 +560,11 @@ def os_confinement_profile(plan, search_path=None):
     cwd_path = Path(plan["cwd"]).resolve()
     discovery_metadata = [ancestor / name for ancestor in (cwd_path, *cwd_path.parents)
                           for name in state.get("ancestor_metadata", ())]
-    # Literal metadata grants must follow protected-path denies, without following a leaf symlink.
-    metadata_grant = _sbpl_rule("allow", "file-read-metadata", discovery_metadata, literal=True, keep_leaf=True)
+    # Discovery's realPath opens each of these directories, not only lstats them, and a live lane still died with
+    # EPERM on metadata alone (#1012). Grant the directory itself (names, never children) after protected-path
+    # denies, literal and without following a leaf symlink, so descendants stay unreadable.
+    metadata_grant = _sbpl_rule("allow", "file-read-data file-read-metadata", discovery_metadata,
+                                literal=True, keep_leaf=True)
     if plan.get("mode") == "worktree_write":
         cwd = Path(plan["cwd"])
         # Only an owner-recorded linked worktree gets Git grants; any other Git directory in cwd
@@ -1609,6 +1589,7 @@ SIGNATURES = (
         r"model[^\n]*(?:unavailable|not available|not found|unsupported|does not exist)|unknown model",
     ),
     ("permission_blocked", r"\b403\b|forbidden"),
+    ("provider_transport", r"reconnecting|stream disconnected|failed to load workspace requirements|transport (?:error|fail)|connection (?:reset|closed)|error sending request"),
 )
 
 
@@ -1628,6 +1609,7 @@ def error_class(status, signature=None):
         "pinned_model_substitution": "model_unavailable", "empty_output": "empty_output",
         "print_timeout": "timeout", "idle_watchdog": "timeout", "startup_watchdog": "timeout",
         "wall_clock": "timeout",
+        "provider_transport": "transient",
     }
     return classes.get(status) or signatures.get(signature) or (
         "provider_error" if status in {"failed", "rejected", "tool_missing", "output_identity_invalid", "output_write_error"}
@@ -1869,8 +1851,8 @@ def parse_output(adapter, stdout, stderr="", exit_code=0, *, at=None):
                     if isinstance(detail.get("message"), str):
                         provider_message = detail["message"]
             error_text = json.dumps(event, ensure_ascii=False)
-            if not (adapter == "codex" and "reconnecting" in error_text.lower()):
-                (retry_errors if kind == "api_retry" else errors).append(error_text)
+            retry = kind == "api_retry" or (adapter == "codex" and kind == "error" and "reconnecting" in error_text.lower())
+            (retry_errors if retry else errors).append(error_text)
         if event.get("denied_actions") is not None and not isinstance(
             event["denied_actions"], list
         ):
@@ -1888,6 +1870,8 @@ def parse_output(adapter, stdout, stderr="", exit_code=0, *, at=None):
                 terminal_text = text
         if kind in {"turn.completed", "turn.failed", "session.completed", "done"}:
             result["terminal"] = True
+        if adapter == "codex" and kind == "turn.completed":
+            retry_errors.clear()
         if kind == "assistant":
             content = (
                 event.get("message", {}).get("content", [])
@@ -1987,7 +1971,7 @@ def parse_output(adapter, stdout, stderr="", exit_code=0, *, at=None):
             signatures = (signatures[0], (quota, r"RESOURCE_EXHAUSTED|quota exceeded"), *signatures[1:])
         for name, pattern in signatures:
             if re.search(pattern, failure_text, re.I):
-                status = "rejected" if name == "invalid_input" else name
+                status = "rejected" if name == "invalid_input" else "failed" if name == "provider_transport" else name
                 result["signature"] = name
                 break
         status = status or (
@@ -1998,6 +1982,10 @@ def parse_output(adapter, stdout, stderr="", exit_code=0, *, at=None):
     elif partial:
         status = "partial"
         result["signature"] = "print_timeout"
+    elif adapter == "codex" and parts and not result["terminal"]:
+        status = "failed"
+        result["signature"] = "provider_incomplete"
+        result["excerpt"] = "provider exited without a terminal result"
     elif result["text"].strip():
         status = "ok"
     else:
@@ -3640,13 +3628,14 @@ def _run_attempt(
                 # A resumed Claude session settles leftover background tasks with
                 # an empty result before its real turn; later activity reopens it.
                 terminal_at = None
-            if parsed_line["status"] not in {"ok", "input_required"} and parsed_line["signature"] != "empty_output":
+            if parsed_line["status"] not in {"ok", "input_required"} and parsed_line["signature"] not in {"empty_output", "provider_incomplete"}:
                 failure = {key: parsed_line[key] for key in ("status", "signature", "excerpt", "reset_at", "retry_after")}
-                if event.get("type") == "api_retry":
+                if event.get("type") == "api_retry" or (plan["adapter"] == "codex" and event.get("type") == "error" and "reconnecting" in line.decode(errors="replace").lower()):
                     retry_failure = failure
                 else:
                     semantic_failures[parsed_line["status"]] = failure
-            elif event.get("type") == "result" and event.get("is_error") is False:
+            elif (event.get("type") == "result" and event.get("is_error") is False
+                  or plan["adapter"] == "codex" and event.get("type") == "turn.completed"):
                 retry_failure = None
             if parsed_line["text"]:
                 encoded = parsed_line["text"].encode()
@@ -3905,16 +3894,16 @@ def _run_attempt(
     )
     raw.close()
     diagnostics.close()
+    # Read terminal semantics before attributing a signal death below. The raw
+    # exit code remains in the receipt, including supervisor grace cleanup.
+    parse_exit = exit_code if exit_code is not None else 1
+    if terminal_at is not None and not forced and parse_exit < 0:
+        parse_exit = 0
     parsed = parse_output(
         plan["adapter"],
         stdout,
         stderr,
-        0
-        if terminal_grace_break and terminal_at is not None
-        and not forced
-        and exit_code is not None
-        and exit_code < 0
-        else (exit_code if exit_code is not None else 1),
+        parse_exit,
     )
     parsed.update(semantic)
     if raw.total > MAX_EVENTS_BYTES:
@@ -3924,8 +3913,13 @@ def _run_attempt(
             text = terminal_text if terminal_text is not None else b"\n".join(text_chunks).decode(errors="replace")
             text_event = getattr(adapter_config, "text_event", lambda text: {"type": "result", "result": text})
             recovered_event = text_event(text)
-            recovered = parse_output(plan["adapter"], json.dumps(recovered_event), stderr,
-                                     0 if terminal_grace_break and terminal_at is not None and exit_code is not None and exit_code < 0 else (exit_code or 0))
+            recovered_events = [recovered_event]
+            if plan["adapter"] == "codex":
+                recovered_events = [{"type": "item.completed", "item": {"type": "agent_message", "text": text}}]
+                if terminal_at is not None:
+                    recovered_events.append({"type": "turn.completed"})
+            recovered = parse_output(plan["adapter"], "\n".join(map(json.dumps, recovered_events)), stderr,
+                                     parse_exit)
             for key in ("text", "status", "question", "signature", "excerpt"):
                 parsed[key] = recovered[key]
         failures = dict(semantic_failures)
@@ -3937,6 +3931,7 @@ def _run_attempt(
             parsed.update(selected)
     if live_failure and forced == live_failure["status"]:
         parsed.update({key: live_failure[key] for key in ("status", "signature", "excerpt", "reset_at", "retry_after")})
+    valid_terminal = terminal_at is not None and parsed["status"] in {"ok", "input_required"} and bool(parsed["text"].strip())
     if plan["adapter"] == "opencode" and parsed["status"] == "usage_limited":
         parsed["signature"] = "quota_exhausted"
         if not parsed["reset_at"] and re.search(r"monthly usage limit", parsed.get("failure_text") or parsed["excerpt"], re.I):
@@ -3953,12 +3948,12 @@ def _run_attempt(
             "interrupted": "supervisor_signal",
         }.get(forced, parsed["signature"])
     elif provider_exit_before_cleanup is not None and provider_exit_before_cleanup < 0:
-        parsed["status"] = "interrupted"
+        parsed["status"] = "interrupted" if valid_terminal else "failed"
         parsed["signature"] = "provider_signal"
         source = termination_request.get("termination_source", "sender unknown")
         parsed["excerpt"] = f"provider terminated by {_signal_name(-provider_exit_before_cleanup)}; {source}"
     if (termination_request.get("termination_source") == "cancel_requested"
-            and parsed["status"] == "interrupted"):
+            and parsed["status"] in {"interrupted", "failed"}):
         parsed["status"] = "cancelled"
         parsed["signature"] = "cancel_requested"
     if plan.get("cooldown_blocked"):
@@ -4065,7 +4060,7 @@ def _run_attempt(
             instruction_changes = [f"{INSTRUCTION_DIR} (unverifiable: {exc})"]
     # A signal death must retain actual instruction edits as failures rather
     # than repairing a partial attempt and disguising its changed instructions.
-    instruction_policy = ("deny" if status == "interrupted" or
+    instruction_policy = ("deny" if status == "interrupted" or parsed["signature"] == "provider_signal" or
                           (status == "cancelled" and termination_request)
                           else plan.get("instruction_policy", "quarantine"))
     # Assurance failure blocks landing, independently of a usable provider result.
@@ -4215,6 +4210,7 @@ def _run_attempt(
         "resolved_model": plan["model"],
         "effort": plan["effort"],
         "status": status,
+        **({"result_partial": True} if status not in {"ok", "input_required", "quarantined"} and not valid_terminal and parsed["text"].strip() else {}),
         **({"error": "invalid_input"} if status == "rejected" and parsed["signature"] == "invalid_input" else {}),
         **({"error": parsed["signature"]} if instruction_changes else {}),
         **({"landable": False, "quarantine": quarantine} if quarantine else {}),

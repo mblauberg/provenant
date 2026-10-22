@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import importlib.util
+import itertools
 from collections import Counter
 from datetime import UTC, datetime, timedelta
 from functools import cache, partial
@@ -66,31 +67,39 @@ def host_id():
 
 
 _ALIASES = None
+_ALIAS_CONFIG_SIGNATURE = object()
 # Ids this ledger has been written under, from its meta; `record_host` loads them on connect.
 _LEDGER_IDS = frozenset()
 
 
 def host_aliases():
-    """This machine's earlier ids: hostname defaults, plus every id this ledger was written under.
-
-    Only this machine writes its ledger, so a recorded id stays this host's even if a peer
-    now carries that name."""
-    global _ALIASES
-    if _ALIASES is None:
-        _ALIASES = frozenset(host_identity().aliases(host_id())) | _LEDGER_IDS
+    """This machine's earlier ids, excluding ids currently configured as peers."""
+    global _ALIASES, _ALIAS_CONFIG_SIGNATURE
+    identity = host_identity()
+    path = identity.config_path()
+    try:
+        stat = path.stat()
+        signature = (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
+    except OSError:
+        signature = None
+    if _ALIASES is None or signature != _ALIAS_CONFIG_SIGNATURE:
+        peers = frozenset(identity.peer_ids(path))
+        _ALIASES = (frozenset(identity.aliases(host_id(), path)) | _LEDGER_IDS) - peers
+        _ALIAS_CONFIG_SIGNATURE = signature
     return _ALIASES
 
 
-def same_host(value):
+def same_host(value, known=None):
     """This machine's rows read as one host, whichever earlier default stored them."""
-    return host_identity().canonical(value, host_id(), host_aliases())
+    return host_identity().canonical(value, host_id(), host_aliases() if known is None else known)
 
 
 def host_keys(host):
     """The stored host values a lookup for `host` must match; this machine's earlier ids included."""
-    if same_host(host) != host_id():
+    known = host_aliases()
+    if same_host(host, known) != host_id():
         return [host]
-    return sorted(host_aliases())
+    return sorted(known)
 
 
 def host_clause(host):
@@ -238,8 +247,8 @@ def load_hosts(db):
 def record_host(db):
     """Note the current id in the ledger's host history; rows are never relabelled.
 
-    A rename leaves earlier rows under their old id, and readers map every recorded id to
-    this host (`same_host`)."""
+    A rename leaves earlier rows under their old id. Readers map recorded ids to this host
+    unless an id is currently configured as a peer."""
     known = load_hosts(db)
     if host_id() not in known:
         db.execute("INSERT OR REPLACE INTO meta VALUES ('host_ids', ?)", (json.dumps(sorted(known | {host_id()})),))
@@ -1119,6 +1128,11 @@ def combine(groups, keys):
     return sorted(merged.values(), key=lambda row: tuple(str(row[k] or '') for k in keys))
 
 
+def micro(value):
+    """Micro-dollars: one figure however the rows were summed. Applied once, at the output edge."""
+    return None if value is None else round(value, 6)
+
+
 def finalise(groups, keys):
     rows = []
     for group in groups:
@@ -1129,9 +1143,9 @@ def finalise(groups, keys):
                'cache_read_share': (group['cache_share_read'] / group['cache_share_input']
                                     if group['cache_share_input'] else None),
                'cache_share_rows': group['cache_share_rows'],
-               'estimated_cost_usd': None if group['missing_cost_rows'] else group['known_cost_usd'],
+               'estimated_cost_usd': None if group['missing_cost_rows'] else micro(group['known_cost_usd']),
                'missing_cost_rows': group['missing_cost_rows'],
-               'reported_cost_usd': group['reported_cost_usd'],
+               'reported_cost_usd': micro(group['reported_cost_usd']),
                'cost_basis': 'api_equivalent_estimate',
                'billing': group['billing'][0] if len(group['billing']) == 1 else 'mixed' if group['billing'] else None}
         if 'model' in keys:
@@ -1141,6 +1155,93 @@ def finalise(groups, keys):
                 row[field] = None
         rows.append(row)
     return rows
+
+
+def cell_cost(cell, entry):
+    """`estimated_cost` for rows that share null and positive flags, from their summed counts."""
+    if entry.get('billing') == 'free':
+        return 0.0
+    rates = entry.get('usd_per_million') or {}
+    total = 0.0
+    for token, rate in (('input_tokens', 'input'), ('cache_read_tokens', 'cached_input'),
+                        ('cache_write_tokens', 'cache_write'), ('output_tokens', 'output'),
+                        ('reasoning_tokens', 'output')):
+        if cell['null_' + token]:
+            if token == 'reasoning_tokens':
+                continue
+            return None
+        price = number(rates.get(rate))
+        if cell['positive_' + token] and price is None:
+            return None
+        total += cell[token] * (price or 0) / 1_000_000
+    return total
+
+
+def cell_unit(cell, keys, prices, free_patterns):
+    """`unit` for one SQL group of `cell['rows']` rows; `combine` adds it like the rows it stands for."""
+    entry = price_entry(cell, prices, free_patterns)
+    cost = cell_cost(cell, entry)
+    count = cell['rows']
+    known = not any(cell['null_' + field] for field in INPUT_FIELDS)
+    return {**{key: cell.get(key) for key in keys}, 'rows': count,
+            **{field: cell[field] for field in TOKEN_FIELDS},
+            'missing_token_fields': {field: count * cell['null_' + field] for field in TOKEN_FIELDS},
+            'missing_token_rows': count * any(cell['null_' + field] for field in TOKEN_FIELDS),
+            'cache_share_rows': count * known,
+            'cache_share_input': sum(cell[field] for field in INPUT_FIELDS) if known else 0,
+            'cache_share_read': cell['cache_read_tokens'] if known else 0,
+            'known_cost_usd': cost or 0.0, 'missing_cost_rows': count * (cost is None),
+            'reported_cost_usd': cell['reported_cost'],
+            'model_raw': [cell['model_raw']] if cell.get('model_raw') else [],
+            'billing': [entry['billing']] if entry.get('billing') else []}
+
+
+def usage_cells(db, where, parameters, summary, boundary, end, need_native, order, current, aliases):
+    """Non-receipt usage rows grouped in SQL, so a large ledger is never held as Python rows.
+
+    A day key stands for every row of a UTC day lying wholly inside the bounds; any other
+    timestamp stays whole for `included`. Rows of one group agree on every field a report reads."""
+    simple = ("timestamp GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T*' "
+              "AND (timestamp LIKE '%Z' OR timestamp LIKE '%+00:00')")
+    parameters = dict(parameters)
+    parameters['host_identity_current'] = current
+    alias_parameters = []
+    for index, alias in enumerate(sorted(aliases)):
+        name = f'host_identity_alias_{index}'
+        parameters[name] = alias
+        alias_parameters.append(':' + name)
+    host_condition = f"host IN ({', '.join(alias_parameters)})"
+    host_expression = f"CASE WHEN {host_condition} THEN :host_identity_current ELSE host END"
+    for name, moment, operator in (('low', boundary, '>'), ('high', end, '<')):
+        if moment:
+            simple += f' AND substr(timestamp,1,10) {operator} :{name}'
+            parameters[name] = moment.date().isoformat()
+    stamp = f'CASE WHEN {simple} THEN substr(timestamp,1,10) ELSE timestamp END'
+    where = " WHERE source!='fabric'" + where
+    columns = ['source', 'adapter', 'provider', 'model', 'account', 'status']
+    group_columns = list(columns)
+    if summary:
+        columns += ['local_host AS host', 'session']
+        group_columns += ['local_host', 'session']
+    flags = [f'{field} IS NULL AS null_{field}, COALESCE({field}>0,0) AS positive_{field}' for field in TOKEN_FIELDS]
+    sums = [f'SUM(COALESCE({field},0)) AS {field}' for field in TOKEN_FIELDS]
+    ranked = ("WITH ranked_usage AS (SELECT usage.*, rowid AS ledger_rowid, "
+              f"{host_expression} AS local_host, ROW_NUMBER() OVER ("
+              f"PARTITION BY source, event_id, {host_expression} "
+              "ORDER BY CASE WHEN host=:host_identity_current THEN 0 ELSE 1 END, rowid) AS alias_rank "
+              f"FROM usage{where}) ")
+    cells = [dict(row) for row in db.execute(
+        f"{ranked}SELECT {', '.join(columns)}, {stamp} AS timestamp, {', '.join(flags)}, {', '.join(sums)}, "
+        f"SUM(reported_cost) AS reported_cost, COUNT(*) AS rows, MIN({order}) AS first_row "
+        f"FROM ranked_usage WHERE alias_rank=1 "
+        f"GROUP BY {', '.join(group_columns)}, {stamp}, {', '.join(f'null_{f}, positive_{f}' for f in TOKEN_FIELDS)}",
+        parameters)]
+    native = []
+    if need_native:
+        native = [dict(row) for row in db.execute(
+            f"{ranked}SELECT DISTINCT adapter, provider, model, session, {stamp} AS timestamp "
+            "FROM ranked_usage WHERE alias_rank=1 AND session IS NOT NULL AND session!=''", parameters)]
+    return cells, native
 
 
 def aggregate(rows, keys, prices, free_patterns=None):
@@ -1214,15 +1315,26 @@ def stats(db, since=None, prices=None, *, summary=False, until=None):
     excluded = Counter()
     selected, unattributed = [], []
     # A day of margin keeps offset timestamps; `included` applies the exact bounds.
-    query, parameters = 'SELECT * FROM usage', ()
+    where, parameters, order, cell_order, order_by = '', {}, "printf('%020d', rowid)", "printf('%020d', ledger_rowid)", 'rowid'
     if boundary:
-        query, parameters = query + ' WHERE timestamp >= ?', ((boundary - timedelta(days=1)).date().isoformat(),)
+        # The old full-row query was walked in index order here; ties between attempts keep that order.
+        where, parameters['start'] = ' AND timestamp >= :start', (boundary - timedelta(days=1)).date().isoformat()
+        # Fields are joined with \x01, below any timestamp character, so a prefix sorts first.
+        order = "printf('%s' || char(1) || '%020d', COALESCE(timestamp,''), rowid)"
+        cell_order = "printf('%s' || char(1) || '%020d', COALESCE(timestamp,''), ledger_rowid)"
+        order_by = 'timestamp, rowid'
     current = host_id()
     load_hosts(db)
+    aliases = host_aliases()
     rows = {}
-    for item in db.execute(query, parameters):
+    def attribute(row):
+        row['model_raw'] = row['model']
+        row['model'] = normalise_model(row['adapter'], row['provider'], row['model'], adapters)
+        return classify(row)
+    # Receipts stay row by row (few, and lanes need whole rows); native sources group in SQL.
+    for item in db.execute(f"SELECT {order} AS first_row, * FROM usage WHERE source='fabric'" + where + ' ORDER BY ' + order_by, parameters):
         row = dict(item)
-        stored, row['host'] = row['host'], same_host(row['host'])
+        stored, row['host'] = row['host'], same_host(row['host'], aliases)
         key = (row['source'], row['event_id'], row['host'])
         # One event stored under an earlier and the current id counts once, as the current row.
         if key not in rows or stored == current:
@@ -1230,9 +1342,7 @@ def stats(db, since=None, prices=None, *, summary=False, until=None):
     for row in rows.values():
         if not included(row):
             continue
-        row['model_raw'] = row['model']
-        row['model'] = normalise_model(row['adapter'], row['provider'], row['model'], adapters)
-        reason = classify(row)
+        reason = attribute(row)
         if reason == 'test_fixture':
             excluded[reason] += 1
             continue
@@ -1240,10 +1350,29 @@ def stats(db, since=None, prices=None, *, summary=False, until=None):
             unattributed.append(row)
         selected.append(row)
     attributed = [row for row in selected if classify(row) is None]
-    native = {(row['adapter'], row['session']) for row in attributed if row['source'] != 'fabric' and row['session']}
+    cells, native_rows = usage_cells(db, where, parameters, summary, boundary, end, bool(attributed),
+                                     cell_order, current, aliases)
+    cells = [cell for cell in cells if included(cell)]
+    for cell in cells:
+        cell['reason'] = attribute(cell)
+        if cell['reason'] == 'test_fixture':
+            excluded[cell['reason']] += cell['rows']
+    cells = [cell for cell in cells if cell['reason'] != 'test_fixture']
+    native = set()
+    for row in native_rows:
+        if included(row) and attribute(row) is None:
+            native.add((row['adapter'], row['session']))
     usage = [row for row in attributed if row['source'] != 'fabric' or (row['adapter'], row['session']) not in native]
     for row in usage:
         row['day'] = since_time(row['timestamp']).date().isoformat() if row['timestamp'] else None
+    usage_groups = [cell for cell in cells if cell['reason'] is None]
+    for cell in usage_groups:
+        cell['day'] = since_time(cell['timestamp']).date().isoformat() if cell['timestamp'] else None
+    def groups(keys):
+        # Groups enter `combine` in the order their first row had, so tied sort keys keep that order.
+        ordered = itertools.chain(((tuple(row['first_row'].split('\x01')), unit(row, keys, prices, free_patterns)) for row in usage),
+                                  ((tuple(cell['first_row'].split('\x01')), cell_unit(cell, keys, prices, free_patterns)) for cell in usage_groups))
+        return combine((group for _, group in sorted(ordered, key=lambda pair: pair[0])), keys)
     latest = {}
     attempts = Counter()
     for row in selected:
@@ -1272,7 +1401,7 @@ def stats(db, since=None, prices=None, *, summary=False, until=None):
     seen = set()
     for item in db.execute('SELECT * FROM observations ORDER BY source'):
         row = dict(item)
-        row['host'] = same_host(row['host'])
+        row['host'] = same_host(row['host'], aliases)
         if not included(row) or row['status'] not in {'rate_limited', 'usage_limited'}:
             continue
         remember_limit(row)
@@ -1286,7 +1415,7 @@ def stats(db, since=None, prices=None, *, summary=False, until=None):
     windows = {}
     for item in db.execute('SELECT * FROM observations WHERE used_percent IS NOT NULL ORDER BY timestamp'):
         row = dict(item)
-        row['host'] = same_host(row['host'])
+        row['host'] = same_host(row['host'], aliases)
         if included(row):
             windows[(row['provider'], row['account'], row['window'])] = row
     missing = Counter()
@@ -1296,14 +1425,22 @@ def stats(db, since=None, prices=None, *, summary=False, until=None):
         group['input_tokens'] += row['input_tokens'] or 0
         if row['status']:
             group['statuses'][row['status']] += 1
+    for cell in cells:
+        if cell['reason'] == 'unattributed':
+            group = missing.setdefault((cell['source'], cell['adapter']), {'rows': 0, 'input_tokens': 0, 'statuses': Counter()})
+            group['rows'] += cell['rows']
+            group['input_tokens'] += cell['input_tokens']
+            if cell['status']:
+                group['statuses'][cell['status']] += cell['rows']
     report = {'schema_version': 2, 'since': since, 'host': host_id(),
-            'usage': aggregate(usage, ('provider', 'adapter', 'model'), prices, free_patterns),
-            'usage_per_day': aggregate(usage, ('day', 'provider', 'adapter', 'account'), prices, free_patterns),
+            'usage': finalise(groups(('provider', 'adapter', 'model')), ('provider', 'adapter', 'model')),
+            'usage_per_day': finalise(groups(('day', 'provider', 'adapter', 'account')), ('day', 'provider', 'adapter', 'account')),
             'outcomes': outcomes([row for row in attributed if row['source'] == 'fabric']),
             # One overall group each, for before/after comparison; percentiles are never averaged.
             'lane_totals': outcomes([{**row, **dict.fromkeys(OUTCOME_KEYS)}
                                      for row in attributed if row['source'] == 'fabric']),
-            'usage_totals': combine((unit(row, (), prices, free_patterns) for row in usage), ()),
+            'usage_totals': [{**group, 'known_cost_usd': micro(group['known_cost_usd']),
+                              'reported_cost_usd': micro(group['reported_cost_usd'])} for group in groups(())],
             'lanes': [{'status': status, 'error_class': error, 'lanes': count}
                       for (status, error), count in sorted(lanes.items(), key=str)],
             'attempts': [{'status': status, 'error_class': error, 'attempts': count}
@@ -1322,7 +1459,8 @@ def stats(db, since=None, prices=None, *, summary=False, until=None):
             'pending_source_rebuilds': [row[0] for row in db.execute('SELECT source FROM rebuilds ORDER BY source')]}
     if summary:
         keys = ('host', 'source', 'session', 'day', 'provider', 'adapter', 'account', 'model')
-        report['session_usage'] = combine((unit(row, keys, prices, free_patterns) for row in usage), keys)
+        # Transport to the host merge: full precision, rounded once after the merge.
+        report['session_usage'] = groups(keys)
     return report
 
 

@@ -82,9 +82,11 @@ such a worktree to triage rather than guessing its branch.
 Creating a worktree clones the primary checkout's `node_modules` with
 copy-on-write when its dependency preflight passes and both checkouts have the
 same `package-lock.json`. It also clones existing `runtime/*/node_modules`
-directories. macOS uses APFS clone files; Linux requires reflink support. This
-keeps each worktree's relative `@local/fabric` workspace link pointed at its
-own checkout. The measured primary tree was 131 MB; four worktrees took about
+directories; when `runtime/fabric/node_modules` is absent, it links to the
+worktree's root `node_modules` using the relative target `../../node_modules`.
+macOS uses APFS clone files; Linux requires reflink support. This keeps each
+worktree's relative `@local/fabric` workspace link pointed at its own checkout.
+The measured primary tree was 131 MB; four worktrees took about
 4.3 seconds to create and added about 3.3 MB on disk.
 
 If the lockfiles differ, the primary dependencies are missing or invalid, or
@@ -173,6 +175,14 @@ To disable it, remove only the symlink to this hook:
 ```sh
 hook="$(git rev-parse --git-path hooks)/post-merge"; source="$(git rev-parse --show-toplevel)/scripts/hooks/post-merge"; if [ -L "$hook" ] && [ "$(readlink "$hook")" = "$source" ]; then rm "$hook"; fi
 ```
+
+An optional `pre-push` guard is off by default and installs the same way. It
+refuses pushes to the default branch from a linked worktree, non-fast-forward
+updates and deletion of the default branch, and pushed commits that add
+conflict markers. It reads the default branch from `origin/HEAD`, falling back
+to `main` or `master`. Run `scripts/install-harness --platform <platform>
+--pre-push-hook` from the primary checkout (`--no-pre-push-hook` removes its
+own symlink only; it never replaces an existing hook).
 
 For a manual prune after one merge, name each branch that merge brought in:
 

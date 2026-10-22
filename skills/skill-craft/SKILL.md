@@ -36,6 +36,12 @@ Both branches follow this without restating it in two voices:
   body, and entrypoint references loaded at one hop. Reference documents may
   link to sibling references, but that depth is not recursively enforced by
   `check_harness.py`.
+- **Tier placement:** a rule is applied reliably only if it sits in the
+  always-loaded `SKILL.md` core rules. A rule buried in a reference file is
+  skipped, because references load late and deep. When a skill keeps missing a
+  rule the user repeats, diagnose a tier-placement bug first: hoist the rule,
+  with concrete banned-pattern examples inline, into `SKILL.md`; do not just
+  expand the reference.
 - **Reuse boundary:** global skills express cross-project triggers, procedures
   and gates. Convert contextual values into parameters, keep examples
   synthetic and leave project policy local. Global promotion requires a

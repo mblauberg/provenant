@@ -115,7 +115,7 @@ it("reads adapter cooldowns from the configured state root and explicit override
   const oldRoot = process.env.AGENT_FABRIC_STATE_ROOT;
   const oldPath = process.env.FABRIC_COOLDOWNS_PATH;
   const oldInstance = process.env.AGENT_FABRIC_INSTANCE_ROOT;
-  const snapshot = { adapters: [{ name: "codex", models: ["gpt-6.1-sol"], aliases: { workhorse: ["gpt-6.1-sol"] } }], endpoints: {} } as any;
+  const snapshot = { adapters: [{ name: "codex", models: ["gpt-6.1-sol"], aliases: { senior: ["gpt-6.1-sol"] } }], endpoints: {} } as any;
   try {
     writeFileSync(join(root, "cooldowns.json"), JSON.stringify({ cooldowns: { one: {
       adapter: "codex", model: "gpt-6.1-sol", cooling_until: "2999-01-01T00:00:00Z",
@@ -601,7 +601,7 @@ it("runs the linked-worktree MCP flow with fixture owners only", async () => {
     mkdirSync(join(linked, "nested-batch"));
     writeFileSync(join(linked, "batch.md"), "first");
     const routed = await call("dispatch", {
-      adapter: "claude", alias: "workhorse", model: "claude-opus-5-5", effort: "high", timeout_seconds: 4321,
+      adapter: "claude", alias: "senior", model: "claude-opus-5-5", effort: "high", timeout_seconds: 4321,
       tasks: [{ id: "default", prompt_file: "batch.md", cwd: "nested-batch" },
         { id: "override", prompt: "second", adapter: "codex", model: "sol", timeout_seconds: 123 }],
       wait_seconds: 5, detail: "full",

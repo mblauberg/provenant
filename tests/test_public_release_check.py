@@ -42,9 +42,14 @@ def git_at(root: Path, *args: str) -> str:
 
 
 def publication_repository(
-    tmp_path: Path, object_format: str | None = None,
+    tmp_path: Path, object_format: str | None = None, template: Path | None = None,
 ) -> tuple[Path, Path, str]:
     repository = tmp_path / "publication"
+    if template is not None:
+        shutil.copytree(template, repository, symlinks=True)
+        return repository, repository / "scripts" / "public_release_check.py", git_at(
+            repository, "rev-parse", "HEAD",
+        )
     repository.mkdir(parents=True)
     init_args = ["init", "-q"]
     if object_format is not None:
@@ -57,6 +62,13 @@ def publication_repository(
     git_at(repository, "add", ".")
     git_at(repository, "commit", "-q", "-m", "base")
     return repository, script, git_at(repository, "rev-parse", "HEAD")
+
+
+@pytest.fixture(scope="module")
+def publication_template(tmp_path_factory) -> Path:
+    """One default-format publication repository per module; tests copy it."""
+    repository, _, _ = publication_repository(tmp_path_factory.mktemp("publication-template"))
+    return repository
 
 
 def run_publication_range(
@@ -345,8 +357,8 @@ def test_publication_range_ignores_tainted_sibling_but_scans_selected_commits(tm
     assert "reachable history exposes a personal email: alice@gmail.com" in all_refs.stderr
 
 
-def test_publication_gates_reject_a_clean_author_with_a_personal_committer(tmp_path):
-    repository, script, base = publication_repository(tmp_path)
+def test_publication_gates_reject_a_clean_author_with_a_personal_committer(tmp_path, publication_template):
+    repository, script, base = publication_repository(tmp_path, template=publication_template)
     (repository / "safe.md").write_text("portable\n")
     git_at(repository, "add", "safe.md")
     git_at(
@@ -377,8 +389,8 @@ def test_publication_gates_reject_a_clean_author_with_a_personal_committer(tmp_p
     )
 
 
-def test_publication_range_ignores_tainted_checked_out_sibling(tmp_path):
-    repository, script, base = publication_repository(tmp_path)
+def test_publication_range_ignores_tainted_checked_out_sibling(tmp_path, publication_template):
+    repository, script, base = publication_repository(tmp_path, template=publication_template)
     git_at(repository, "switch", "-q", "-c", "selected")
     (repository / "safe.md").write_text("portable selected change\n")
     git_at(repository, "add", "safe.md")
@@ -403,30 +415,16 @@ def test_publication_range_ignores_tainted_checked_out_sibling(tmp_path):
     assert result.stdout == "PASS: publication range clean\n"
 
 
-def test_raw_range_and_history_ignore_default_replacement_objects(tmp_path):
-    repository, script, base = publication_repository(tmp_path)
+@pytest.mark.parametrize("mechanism", ["default_replace_refs", "alternate_namespace"])
+def test_raw_range_and_history_ignore_replacement_objects(tmp_path, mechanism, publication_template):
+    repository, script, base = publication_repository(tmp_path, template=publication_template)
     tainted, clean = tainted_selected_and_clean_decoy(repository, base)
-    git_at(repository, "replace", tainted, clean)
-
-    selected = run_publication_range(repository, script, base, tainted)
-    history = run_history(repository, script)
-
-    assert selected.returncode == 1
-    assert (
-        "publication HEAD forbidden tracked path: .agent-run/DEL-999/RUN.json"
-    ) in selected.stderr
-    assert history.returncode == 1
-    assert (
-        "reachable history contains a forbidden tracked path: "
-        ".agent-run/DEL-999/RUN.json"
-    ) in history.stderr
-
-
-def test_raw_range_and_history_ignore_alternate_replacement_namespace(tmp_path):
-    repository, script, base = publication_repository(tmp_path)
-    tainted, clean = tainted_selected_and_clean_decoy(repository, base)
-    git_at(repository, "update-ref", f"refs/custom-replace/{tainted}", clean)
-    environment = {"GIT_REPLACE_REF_BASE": "refs/custom-replace/"}
+    environment = None
+    if mechanism == "default_replace_refs":
+        git_at(repository, "replace", tainted, clean)
+    else:
+        git_at(repository, "update-ref", f"refs/custom-replace/{tainted}", clean)
+        environment = {"GIT_REPLACE_REF_BASE": "refs/custom-replace/"}
 
     selected = run_publication_range(repository, script, base, tainted, environment)
     history = run_history(repository, script, environment)
@@ -442,8 +440,8 @@ def test_raw_range_and_history_ignore_alternate_replacement_namespace(tmp_path):
     ) in history.stderr
 
 
-def test_history_validates_raw_head_required_files_over_worktree_decoy(tmp_path):
-    repository, script, _ = publication_repository(tmp_path)
+def test_history_validates_raw_head_required_files_over_worktree_decoy(tmp_path, publication_template):
+    repository, script, _ = publication_repository(tmp_path, template=publication_template)
     git_at(repository, "rm", "-q", "LICENSE")
     git_at(repository, "commit", "-q", "-m", "remove required licence")
     (repository / "LICENSE").write_text("untracked decoy licence\n")
@@ -454,8 +452,8 @@ def test_history_validates_raw_head_required_files_over_worktree_decoy(tmp_path)
     assert "publication HEAD missing required public file: LICENSE" in history.stderr
 
 
-def test_history_validates_raw_head_symlink_and_size_over_index_decoy(tmp_path):
-    repository, script, _ = publication_repository(tmp_path)
+def test_history_validates_raw_head_symlink_and_size_over_index_decoy(tmp_path, publication_template):
+    repository, script, _ = publication_repository(tmp_path, template=publication_template)
     (repository / "portable-link").symlink_to("README.md")
     (repository / "oversized.bin").write_bytes(b"x" * (5 * 1024 * 1024 + 1))
     git_at(repository, "add", "portable-link", "oversized.bin")
@@ -506,8 +504,8 @@ def test_evidence_git_environment_removes_inherited_redirections():
 
 
 @pytest.mark.parametrize("config_source", ["direct", "included", "worktree"])
-def test_history_disables_repository_fsmonitor_hooks(tmp_path, config_source):
-    repository, script, _ = publication_repository(tmp_path)
+def test_history_disables_repository_fsmonitor_hooks(tmp_path, config_source, publication_template):
+    repository, script, _ = publication_repository(tmp_path, template=publication_template)
     marker = tmp_path / f"{config_source}-fsmonitor-ran"
     hook = tmp_path / f"{config_source}-fsmonitor.sh"
     hook.write_text(
@@ -534,8 +532,8 @@ def test_history_disables_repository_fsmonitor_hooks(tmp_path, config_source):
     assert not marker.exists()
 
 
-def test_range_passes_from_clean_linked_worktree(tmp_path):
-    repository, _, base = publication_repository(tmp_path / "source")
+def test_range_passes_from_clean_linked_worktree(tmp_path, publication_template):
+    repository, _, base = publication_repository(tmp_path / "source", template=publication_template)
     (repository / "safe.md").write_text("clean linked worktree change\n")
     git_at(repository, "add", "safe.md")
     git_at(repository, "commit", "-q", "-m", "clean linked worktree change")
@@ -551,8 +549,8 @@ def test_range_passes_from_clean_linked_worktree(tmp_path):
     assert selected.stdout == "PASS: publication range clean\n"
 
 
-def test_range_passes_with_repository_native_object_alternate(tmp_path):
-    source, _, base = publication_repository(tmp_path / "source")
+def test_range_passes_with_repository_native_object_alternate(tmp_path, publication_template):
+    source, _, base = publication_repository(tmp_path / "source", template=publication_template)
     (source / "safe.md").write_text("clean alternate-backed change\n")
     git_at(source, "add", "safe.md")
     git_at(source, "commit", "-q", "-m", "clean alternate-backed change")
@@ -572,8 +570,8 @@ def test_range_passes_with_repository_native_object_alternate(tmp_path):
     assert selected.stdout == "PASS: publication range clean\n"
 
 
-def test_range_and_history_pass_with_packed_object_storage(tmp_path):
-    repository, script, base = publication_repository(tmp_path)
+def test_range_and_history_pass_with_packed_object_storage(tmp_path, publication_template):
+    repository, script, base = publication_repository(tmp_path, template=publication_template)
     (repository / "safe.md").write_text("packed object evidence\n")
     git_at(repository, "add", "safe.md")
     git_at(repository, "commit", "-q", "-m", "packed object evidence")
@@ -590,8 +588,8 @@ def test_range_and_history_pass_with_packed_object_storage(tmp_path):
     assert history.returncode == 0, history.stderr
 
 
-def test_publication_range_rejects_receipt_added_then_deleted_on_selected_branch(tmp_path):
-    repository, script, base = publication_repository(tmp_path)
+def test_publication_range_rejects_receipt_added_then_deleted_on_selected_branch(tmp_path, publication_template):
+    repository, script, base = publication_repository(tmp_path, template=publication_template)
     git_at(repository, "switch", "-q", "-c", "selected")
     receipt = repository / ".agent-run" / "DEL-999" / "RUN.json"
     receipt.parent.mkdir(parents=True)
@@ -614,8 +612,8 @@ def test_publication_range_rejects_receipt_added_then_deleted_on_selected_branch
     ) in result.stderr
 
 
-def test_publication_range_validates_selected_head_tree_not_checked_out_sibling(tmp_path):
-    repository, script, base = publication_repository(tmp_path)
+def test_publication_range_validates_selected_head_tree_not_checked_out_sibling(tmp_path, publication_template):
+    repository, script, base = publication_repository(tmp_path, template=publication_template)
     git_at(repository, "switch", "-q", "-c", "selected")
     git_at(repository, "rm", "-q", "LICENSE")
     git_at(repository, "commit", "-q", "-m", "remove required licence")
@@ -628,8 +626,8 @@ def test_publication_range_validates_selected_head_tree_not_checked_out_sibling(
     assert "publication HEAD missing required public file: LICENSE" in result.stderr
 
 
-def test_publication_range_rejects_selected_head_symlink_and_oversized_file(tmp_path):
-    repository, script, base = publication_repository(tmp_path)
+def test_publication_range_rejects_selected_head_symlink_and_oversized_file(tmp_path, publication_template):
+    repository, script, base = publication_repository(tmp_path, template=publication_template)
     git_at(repository, "switch", "-q", "-c", "selected")
     (repository / "portable-link").symlink_to("README.md")
     (repository / "oversized.bin").write_bytes(b"x" * (5 * 1024 * 1024 + 1))
@@ -645,8 +643,8 @@ def test_publication_range_rejects_selected_head_symlink_and_oversized_file(tmp_
     assert "publication HEAD tracked file exceeds 5 MiB: oversized.bin" in result.stderr
 
 
-def test_publication_range_scans_full_selected_commit_messages(tmp_path):
-    repository, script, base = publication_repository(tmp_path)
+def test_publication_range_scans_full_selected_commit_messages(tmp_path, publication_template):
+    repository, script, base = publication_repository(tmp_path, template=publication_template)
     git_at(repository, "switch", "-q", "-c", "selected")
     body = (
         "metadata must not expose /" + "Users/alice/private\n"
@@ -745,8 +743,8 @@ def test_history_scan_reproduces_the_removed_parser_hits(tmp_path):
     ) == RANGE_ORACLE
 
 
-def test_publication_range_scans_only_blobs_added_after_the_base(tmp_path):
-    repository, _script, _initial = publication_repository(tmp_path)
+def test_publication_range_scans_only_blobs_added_after_the_base(tmp_path, publication_template):
+    repository, _script, _initial = publication_repository(tmp_path, template=publication_template)
     (repository / "inherited-fixture.txt").write_text(
         "ghp_" + "abcdefghijklmnopqrstuvwxyz123456\n"
     )

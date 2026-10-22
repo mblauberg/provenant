@@ -66,7 +66,7 @@ exposes retained task-state events. `lanes --wait` reports each terminal or
 input-required lane of the registered project, finished within the last day,
 once per seat, including lanes that finished between waits; named ids narrow it
 to those lanes, and a batch id to its tasks. `lanes --wait --all` holds the report
-until every listed lane is terminal or needs input, and `--timeout N` ends the
+until every listed lane is terminal or needs input, `--summary` prints one bounded line per lane (at most 20, 160 characters each) at the end instead of as lanes land, and `--timeout N` ends the
 wait with exit 124 naming the lanes still running (`--timeout 0` polls once; contention on the seen-cursor is bounded by it too, and unmarked lanes are reported again next wait). An unknown id fails the wait at once with the read error (exit 1) rather than being skipped. `lanes` default output shows active lanes, lanes needing attention (such as quarantined or input-required), and the 5 most recent terminal ones, then `N more; use --all`; `lanes --json` without `--all` caps at 20 rows with `omitted`/`omitted_hint`; `--all` lists all lanes. `lanes --project P` reads
 another project; an empty listing says which project the cwd resolved to.
 The next dispatch reaps a run only when its host is gone and its owner or
@@ -267,7 +267,7 @@ an ordinary edit, with a warning) or `deny` (retain the edit for review without
 restoration). Denied edits, failed restoration and unverifiable checks leave
 edits on the lane, so the lane ends `failed` (fix: restore `.agents/` to the
 start commit before landing) with its output and patches retained and listed;
-incomplete or interrupted providers keep their failure outcomes.
+signal-killed providers stay `failed` without a terminal result or `interrupted` after one; explicit cancellations stay `cancelled`.
 `protected.patch` may be empty for an index-only edit or carry
 an unavailable-diff comment for unsafe states, with `quarantine.patch_error`
 explaining capture failure. Spared processes alone do not prove instruction
@@ -623,6 +623,32 @@ command waits at most two minutes for Git; its persisted hold lasts another
 thirty seconds. A push orphaned by a crash is fenced by the remote SHA, not by
 the hold. If the push succeeds but release fails, it reports `pushed` with a
 `release_warning`. Renew or release an aborted lease as appropriate.
+`landing-push --remote R` pushes to a remote other than `origin`. With
+`--json`, Git and hook output go to stderr, so stdout holds only the result.
+
+Scripts use the same lease from a shell, without an MCP connection:
+
+```sh
+fabric landing-acquire <session> (--expected-sha SHA | --branch B [--remote R]) [--seconds N]
+fabric landing-verify <session> <generation> [--expected-sha SHA] [--branch B [--remote R]]
+fabric landing-release <session> <generation>
+fabric landing-status
+```
+
+Each takes `--label L` and `--json`. Acquire returns `holder`, `label`,
+`session`, `generation`, `expected_sha`, `expires_at` (ISO 8601 UTC) and
+`taken_over_from` after a takeover. Pass its `label` to later calls. Verify
+returns `valid` and, when false, `reason`: `stale`, `sha_mismatch` (the given
+SHA) or `sha_moved` (the remote tip from `git ls-remote`). Release never
+touches another holder's lease. It returns `released: true`, or
+`released: false` with `reason` `expired`, `not_held` or `pushing`. Status
+returns `lease: null` or the live lease. Exit codes are 0 for ok (including an
+unreleased `expired` or `not_held`), 1 for refused or stale, 2 for usage and 3
+for held by another holder or a push in progress. A store that cannot be
+opened exits non-zero with nothing on stdout. `provenant lease <verb>` maps
+onto these commands; the [landing lease
+runbook](../../docs/runbooks/landing-lease.md) shows a repository script's
+calls.
 
 ## Run storage and boundaries
 

@@ -1,15 +1,36 @@
-import { mkdtempSync, realpathSync } from "node:fs";
+import { mkdtempSync, realpathSync, rmdirSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve, sep } from "node:path";
+import { join, resolve } from "node:path";
+import { acceptableFixtureTempRoot } from "../../src/execution.js";
 
 /**
- * A fresh temp root for a fixture workspace. A Provenant lane sets TMPDIR inside
- * its attempt directory, which sits under a real .agent-run tree; a fixture
- * rooted there leaks into that run listing (issue #1002). In that case use the
- * fixed system temp path instead.
+ * The directory fixtures are created in. TMPDIR is respected unless it sits in
+ * a git work tree or is a run tree (issue #1002). Then take the
+ * first writable of FABRIC_TEST_TMPDIR and the system temp path. Nothing is
+ * hard-coded: under a sandbox that denies /tmp the explicit root is the way
+ * out, and failing loudly beats a mid-test EPERM.
  */
+export function fixtureBase(
+  tmp: string = tmpdir(),
+  alternatives: Array<string | undefined> = [process.env.FABRIC_TEST_TMPDIR, "/tmp"],
+): string {
+  const preferred = realpathSync.native(resolve(tmp));
+  if (acceptableFixtureTempRoot(preferred)) return preferred;
+  for (const candidate of alternatives) {
+    if (candidate === undefined || candidate === "") continue;
+    try {
+      const probe = mkdtempSync(join(candidate, ".fabric-probe-"));
+      rmdirSync(probe);
+      const real = realpathSync.native(candidate);
+      // Same rule assertFixtureRunRoot applies, so a root chosen here is never refused there.
+      if (acceptableFixtureTempRoot(real)) return real;
+    } catch { /* not writable here; try the next root */ }
+  }
+  throw new Error(
+    `TMPDIR ${preferred} is inside a git work tree and no other writable temp root exists; set FABRIC_TEST_TMPDIR to a writable directory outside any repository.`);
+}
+
+/** A fresh temp root for a fixture workspace. */
 export function scratchRoot(prefix: string): string {
-  const preferred = realpathSync.native(resolve(tmpdir()));
-  const base = preferred.split(sep).includes(".agent-run") ? "/tmp" : preferred;
-  return realpathSync.native(mkdtempSync(join(base, prefix)));
+  return realpathSync.native(mkdtempSync(join(fixtureBase(), prefix)));
 }

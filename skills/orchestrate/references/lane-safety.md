@@ -9,7 +9,19 @@ false report. Paste the first section into every lane and reviewer brief.
   and any test suite, build, browser walk or process that starts a database or
   server in a shared checkout. Before trusting a review, check no suite ran;
   cancel and redispatch a lane that started one.
-- Never pattern-kill processes host-wide; kill your own process group by PID.
+- Never pattern-kill processes host-wide: no `pkill`, `killall`, `kill $(pgrep …)`,
+  `kill -- -<pgid>` or other non-numeric kill target, bare or behind `sudo`,
+  `env`, `xargs`, `timeout` or `bash -c`. Stop explicit PIDs you started with
+  `provenant reap <pid>… [--tree] [--grace S] [--started-before TIME]`; it
+  prints each process's age, parent, cwd and command first, and
+  `--started-before` refuses a PID that was reused after your process began.
+- Enforcement is opt-in. `scripts/install-harness --platform claude
+  --lane-safety-hooks` adds the PreToolUse Bash hook
+  (`scripts/lane_safety_guard.py`) to the Claude `settings.json`, and
+  `--pre-push-hook` links `scripts/hooks/pre-push` into the product checkout.
+  The pre-push guard refuses pushes to the default branch from a linked
+  worktree, non-fast-forward updates and deletion of it, and pushed conflict
+  markers. `--no-lane-safety-hooks` and `--no-pre-push-hook` remove them.
 - A lane has no inbox: it hears new instructions only through `resume` or a new
   dispatch.
 
@@ -28,6 +40,10 @@ false report. Paste the first section into every lane and reviewer brief.
 
 - Read `git status` and the full diff; discard what the brief did not ask for;
   never `git add -A` on the strength of one file.
+- A mid-flight `SendMessage` correction to a running lane can be refused as
+  prompt injection while a sibling accepts it. Treat an unacknowledged
+  redirect as not delivered: stop and redispatch with the corrected brief, or
+  verify uptake from the commits, report file or transcript.
 - A worktree without installed dependencies runs nothing, yet lanes report
   passes. Install and prove it with one test file before dispatch.
 - Read lane state from `fabric_status{detail:"full"}`, not ad-hoc `ps`. Record

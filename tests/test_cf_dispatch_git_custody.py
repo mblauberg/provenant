@@ -9,7 +9,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from test_cf_dispatch import PRODUCT_ROOT, SCRIPT, fabric_free_env, write_executable
+from cf_dispatch_support import PRODUCT_ROOT, SCRIPT, fabric_free_env, write_executable
 
 
 GIT_CONTEXT_VARIABLES = (
@@ -88,7 +88,7 @@ def make_fixture(tmp_path):
         bin_dir / "provenant",
         """\
         #!/usr/bin/env bash
-        printf '%s\\n' '{"status":"ok","alias":"workhorse","resolved_model":"sonnet","model_family":"anthropic","endpoint_provider":"anthropic","identity_source":"test","requested_effort":"","effort":"","effort_source":"route-default","effort_capability_source":"test"}'
+        printf '%s\\n' '{"status":"ok","alias":"senior","resolved_model":"sonnet","model_family":"anthropic","endpoint_provider":"anthropic","identity_source":"test","requested_effort":"","effort":"","effort_source":"route-default","effort_capability_source":"test"}'
         """,
     )
     env = fabric_free_env()
@@ -98,7 +98,7 @@ def make_fixture(tmp_path):
         return subprocess.run(
             [
                 str(SCRIPT), "--intent", "ordinary", "--tool", "claude",
-                "--orchestrator-family", "openai", "--alias", "workhorse",
+                "--orchestrator-family", "openai", "--alias", "senior",
                 "--role", "worker", "--out", str(tmp_path / out_name),
                 "--prompt", "inspect",
             ],

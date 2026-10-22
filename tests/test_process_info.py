@@ -59,7 +59,9 @@ def test_shim_O_adds_fields_to_default_output():
     assert result.stdout.splitlines()[0].split() == ["PID", "TTY", "TIME", "PPID", "CMD"]
     cells = result.stdout.splitlines()[1].split(None, 4)
     assert cells[3] == str(os.getppid())
-    assert "pytest" in cells[4]
+    # Under pytest-xdist a worker's command line is the execnet bootstrap,
+    # which has no "pytest" in it; the interpreter name is always present.
+    assert "pytest" in cells[4] or Path(sys.executable).name in cells[4]
 
 
 def test_shim_cpu_time_retains_hundredths():

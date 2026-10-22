@@ -1,0 +1,4 @@
+usage: provenant peer
+
+Delegates to scripts/fabric-hosts peer.
+Fixed versioned JSON entrypoint on stdin/stdout (SSH).
