@@ -4187,8 +4187,9 @@ while not pathlib.Path({str(ready)!r}).exists():
 """
     plan = fixture_plan(tmp_path, code, timeout_seconds=5)
     module.execute(plan, tmp_path / "result.md", on_progress=lambda _: provider_clock(1.35))
-    assert len(counts) == 2
-    assert counts[1] - counts[0] >= 1
+    # A slow host may census again before the provider sees the ready file.
+    assert len(counts) >= 2
+    assert all(later - earlier >= 1 for earlier, later in zip(counts, counts[1:]))
 
 
 def test_missing_census_still_kills_provider_group_after_leader_exit(tmp_path, monkeypatch):
