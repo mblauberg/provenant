@@ -21,6 +21,7 @@ import {
 import { isSQLiteContention, Store, type Message } from "./store.js";
 import { readEvents, readRuns } from "./run-reader.js";
 import { canonicalMode, editDistance, rejected, ACCESS_MODES } from "./execution-input.js";
+import { taskFields, taskShape, toolSchemas } from "./tool-schemas.js";
 
 // Leave margin under the MCP SDK's 60-second default request timeout.
 const MAX_WAIT_SECONDS = MAX_EXECUTION_WAIT_SECONDS;
@@ -141,47 +142,6 @@ const waitForInbox = async (
   }
 };
 
-const detail = z.enum(["brief", "full"]).optional();
-const str = z.string().optional();
-const ids = (maximum?: number) => z.union([
-  maximum === undefined ? z.array(z.string()) : z.array(z.string()).max(maximum), z.string(),
-]).transform((value) => typeof value === "string" ? [value] : value).optional();
-const wait = z.unknown().optional();
-const optionalNumber = z.unknown().optional();
-const route = {
-  host: str,
-  operation_id: str,
-  adapter: str,
-  alias: str,
-  model: str.meta({ description: "A model name or catalogue alias (for example sonnet, sol, luna, deepseek-free, glm-free); the most predictable selector. adapter/model also works." }),
-  effort: str,
-  account: str.meta({ description: "Claude account label from accounts.claude in telemetry configuration." }),
-  mode: z.enum(ACCESS_MODES).optional(),
-  worktree: str,
-  cwd: str,
-  network: z.boolean().optional(),
-  sandbox: z.enum(["read-only", "workspace-write", "full"]).optional(),
-  capabilities: z.array(z.enum(["postgres", "browser"])).refine((items) => new Set(items).size === items.length, {
-    message: "Pass capabilities as a list of distinct postgres or browser values.",
-  }).optional(),
-  add_dirs: z.array(z.string()).optional(),
-  allow_secrets: z.boolean().optional(),
-  fallback: z
-    .union([z.boolean(), z.literal("any"), z.array(z.union([z.string(), z.record(z.string(), z.unknown())]))])
-    .optional(),
-  route: z.string().optional().meta({ description: "Tier pool: junior (laid-out work, cheap lenses), senior (judgement, review, delegation) or principal (critical decisions); or design or writing. adapter narrows the pool; an explicit model wins over route. Prefer naming a model (deepseek-free, glm-free, sonnet, sol) when you know what you want." }),
-  rotate: z.boolean().optional().meta({ description: "Cycle the route's pool per project instead of taking its top model; ignored with council." }),
-  council: z.number().int().min(1).max(8).optional().meta({ description: "Run 1-8 members from the route as one batch, families spread first; members repeat when fewer are available." }),
-  models: z.array(z.string()).min(1).max(8).optional().meta({ description: "Ad-hoc council of adapter/model[@effort] entries; bypasses route and adapter." }),
-  confidential: z.boolean().optional().meta({ description: "Never use a prompt-training model, fallbacks included (free models count unless their entry says they do not train); works with any selector." }),
-};
-const task = { prompt: str, prompt_file: str, timeout_seconds: optionalNumber, ...route };
-const taskFields = { id: str, ...task };
-const batch = {
-  tasks: z.array(z.object(taskFields).catchall(z.unknown()).meta({ additionalProperties: false })).min(1).max(64),
-  concurrency: optionalNumber,
-  wait_seconds: wait,
-};
 // The first listed target a tool actually has wins, so run_id is `id` on status and `ids` on runs.
 const INPUT_SYNONYMS: Record<string, string[]> = {
   ttl_seconds: ["seconds"],
@@ -250,7 +210,7 @@ function normaliseInputKeys(name: string, input: Record<string, any>, fields: st
         return { id: `task-${index + 1}`, prompt: "", prompt_file: "" };
       const rawTask = item as Record<string, any>;
       try {
-        const nested = normaliseInputKeys(name, rawTask, ["id", ...Object.keys(task)], true);
+        const nested = normaliseInputKeys(name, rawTask, ["id", ...Object.keys(taskShape)], true);
         warnings.push(...nested.warnings.map((text) => `tasks[${index}]: ${text}`));
         return nested.value;
       }
@@ -279,7 +239,7 @@ function register(
   if (Object.hasOwn(accepted, "until")) accepted.until = z.unknown().optional().meta({ enum: ["any", "all"] }) as unknown as z.ZodRawShape[string];
   if (["fabric_cancel", "fabric_output"].includes(name)) accepted.id = z.string().optional();
   if (name === "fabric_dispatch") {
-    const acceptedTask = { id: str, ...task, mode: z.string().optional().meta({ enum: ACCESS_MODES }) };
+    const acceptedTask = { id: taskFields.id, ...taskShape, mode: z.string().optional().meta({ enum: ACCESS_MODES }) };
     acceptedTask.capabilities = z.unknown().optional()
       .meta({ description: "Array of distinct postgres or browser values.", type: "array", items: { type: "string", enum: ["postgres", "browser"] } }) as unknown as typeof acceptedTask.capabilities;
     const acceptedTasks = z.array(z.object(acceptedTask).catchall(z.unknown()).meta({ additionalProperties: false }))
@@ -344,7 +304,8 @@ function withWarnings<T extends Record<string, any>>(value: T, warnings: string[
   if (!warnings.length) return value;
   return { ...value, warnings: [...(value.warnings ?? []), ...warnings] };
 }
-register("fabric_whoami", "Identify this seat and server.", { detail }, ({ detail }) => ({
+register("fabric_whoami", "Identify this seat and server.",
+  toolSchemas.fabric_whoami, ({ detail }) => ({
   ...who,
   ...serverBuild(),
   database: (readyStore(), databasePath()),
@@ -353,23 +314,14 @@ register("fabric_whoami", "Identify this seat and server.", { detail }, ({ detai
 register(
   "fabric_send",
   "Send to a seat, team, chair or all.",
-  { to: z.string(), body: z.string(), kind: str, reply_to: str, task_id: str, output_path: str },
+  toolSchemas.fabric_send,
   ({ to, body, kind, reply_to, task_id, output_path }) =>
     readyStore().send(who, to, body, { kind, replyTo: reply_to, taskId: task_id, outputPath: output_path }),
 );
 register(
   "fabric_inbox",
   "Peek headers or claim bodies.",
-  {
-    peek: z.boolean().optional(),
-    task_id: str,
-    claim_seconds: z.number().int().min(1).max(3600).optional(),
-    ids: ids(100),
-    claim: z.boolean().optional(),
-    limit: z.number().int().min(1).max(100).optional(),
-    wait_seconds: wait,
-    digest: z.boolean().optional(),
-  },
+  toolSchemas.fabric_inbox,
   async ({ ids, claim, peek: explicitPeek, task_id, claim_seconds, limit, wait_seconds, digest }, { signal }) => {
     if (digest) {
       if (ids !== undefined || claim === true) return { status: "rejected", error: "digest_conflict", fix: "Fetch message bodies by id in a separate inbox call." };
@@ -393,7 +345,7 @@ register(
 register(
   "fabric_runs",
   "Versioned, bounded run and lane reader. state filters (running, terminal, active, ok, failed...); limit caps rows (default 20); detail:full adds the structured rows.",
-  { ids: ids(20), wait_seconds: wait, state: str, limit: z.number().int().min(1).max(200).optional(), detail },
+  toolSchemas.fabric_runs,
   async ({ ids, wait_seconds, state, limit, detail }, { signal }) => {
     const bounded = boundedWait(wait_seconds);
     if (bounded.error) return bounded.error;
@@ -404,7 +356,7 @@ register(
 register(
   "fabric_events",
   "Read task terminal/input_required and inbox events; pass cursor to wait for new events.",
-  { cursor: z.string().max(8192).optional(), wait_seconds: wait },
+  toolSchemas.fabric_events,
   async ({ cursor, wait_seconds }, { signal }) => {
     const bounded = boundedWait(wait_seconds);
     if (bounded.error) return bounded.error;
@@ -426,19 +378,7 @@ function acknowledgeRuns(result: { runs?: Record<string, any>[] }) {
 register(
   "fabric_dispatch",
   "Run one prompt or tasks; resume or hand off a run; session names a resumable conversation. wait_seconds above 55 clamps to 55.",
-  {
-    ...task,
-    task_id: str,
-    tasks: batch.tasks.optional(),
-    concurrency: batch.concurrency,
-    resume: str,
-    handoff: str,
-    session: str,
-    fresh: z.boolean().optional(),
-    context_ceiling: z.number().optional(),
-    wait_seconds: wait,
-    detail,
-  },
+  toolSchemas.fabric_dispatch,
   async (input, { signal }) => {
     const waitResult = boundedWait(input.wait_seconds);
     if (waitResult.error) return waitResult.error;
@@ -495,15 +435,7 @@ register(
 register(
   "fabric_status",
   "Read or wait for runs. Batch status shows each finished lane's tail once per session; request one lane or pass tail_chars to see it again. wait_seconds above 55 is clamped to 55; invalid numeric values return a typed rejection.",
-  {
-    ids: ids(),
-    id: str,
-    wait_seconds: wait,
-    until: z.enum(["any", "all"]).optional(),
-    detail,
-    tail_chars: z.number().int().min(0).max(4000).optional(),
-    fields: z.array(z.string()).optional(),
-  },
+  toolSchemas.fabric_status,
   async ({ ids, id, wait_seconds, until, detail, tail_chars, fields }, { signal }) => {
     const waitResult = boundedWait(wait_seconds);
     if (waitResult.error) return waitResult.error;
@@ -559,11 +491,8 @@ register(
       ...(ownership.length ? { digest: `${digest(view)}\n${ownership.join("\n")}` } : {}) };
   },
 );
-register("fabric_work_claim", "Acquire, renew, verify or release an advisory issue or path claim.", {
-  action: z.enum(["acquire", "renew", "verify", "release"]), session_id: z.string().min(1),
-  issue: str, paths: z.array(z.string()).optional(), id: str,
-  generation: z.number().int().positive().optional(), seconds: z.number().int().min(1).optional(),
-}, ({ action, session_id, issue, paths, id, generation, seconds }) => {
+register("fabric_work_claim", "Acquire, renew, verify or release an advisory issue or path claim.",
+  toolSchemas.fabric_work_claim, ({ action, session_id, issue, paths, id, generation, seconds }) => {
   const ttl = Math.min(seconds ?? 900, 3600);
   const warnings = seconds > 3600 ? [`seconds ${seconds} clamped to 3600`] : [];
   if (action === "acquire") return withWarnings(readyStore().acquireWork(who, session_id, { issue, paths }, ttl), warnings);
@@ -575,11 +504,8 @@ register("fabric_work_claim", "Acquire, renew, verify or release an advisory iss
 });
 register("fabric_landing_lease",
   "Acquire, renew, verify or release the repository landing lease. action=wait blocks up to wait_seconds (max 55) " +
-  "until the lease changes hands or frees; use it instead of sleep loops. expected_sha may be short or uppercase.", {
-  action: z.enum(["acquire", "renew", "verify", "release", "wait"]), session_id: z.string().min(1),
-  expected_sha: str, generation: z.number().int().positive().optional(),
-  seconds: z.number().int().min(1).max(3600).optional(), wait_seconds: z.number().optional(),
-}, async ({ action, session_id, expected_sha, generation, seconds, wait_seconds }, { signal }) => {
+  "until the lease changes hands or frees; use it instead of sleep loops. expected_sha may be short or uppercase.",
+  toolSchemas.fabric_landing_lease, async ({ action, session_id, expected_sha, generation, seconds, wait_seconds }, { signal }) => {
   if (action === "wait") {
     const bounded = boundedWait(wait_seconds ?? MAX_WAIT_SECONDS);
     if (bounded.error) return bounded.error;
@@ -603,7 +529,7 @@ register("fabric_landing_lease",
 register(
   "fabric_session",
   "Inspect, list or forget named sessions; fabric_dispatch with session starts or resumes one.",
-  { action: z.enum(["inspect", "list", "forget"]), name: str },
+  toolSchemas.fabric_session,
   async ({ action, name }) => {
     const store = readyStore();
     if (action === "list") {
@@ -625,7 +551,8 @@ register(
     return { status: "ok", forgotten: key, digest: `forgot session ${key}; run ${row.runId ?? row.turnRunId} and provider history kept` };
   },
 );
-register("fabric_cancel", "Stop a run and its provider group, or one task of a batch by its task id.", { id: z.string(), reason: str, operation_id: str, detail }, async ({ id, reason, operation_id, detail }) => {
+register("fabric_cancel", "Stop a run and its provider group, or one task of a batch by its task id.",
+  toolSchemas.fabric_cancel, async ({ id, reason, operation_id, detail }) => {
   const result = await cancelConfiguredRun(id, who, reason, process.env, operation_id);
   acknowledgeRuns(result);
   const view = runView(result);
@@ -633,8 +560,7 @@ register("fabric_cancel", "Stop a run and its provider group, or one task of a b
 });
 register("fabric_graph",
   "Run a plan graph of dispatch nodes under a detached owner, or read, cancel or resume one. run takes file or document; status without id lists graphs and restarts a dead owner; wait_seconds up to 55.",
-  { action: z.enum(["run", "status", "cancel", "resume"]), file: str, document: z.record(z.string(), z.unknown()).optional(),
-    id: str, node: str, force: z.boolean().optional(), wait_seconds: wait, detail },
+  toolSchemas.fabric_graph,
   async ({ action, file, document, id, node, force, wait_seconds, detail }, { signal }) => {
     const misuse = (fix: string) => ({ status: "rejected", error: "graph_input_invalid", fix });
     if (action === "run" && (file === undefined) === (document === undefined)) return misuse("Pass exactly one of file or document for run.");
@@ -657,20 +583,14 @@ register("fabric_graph",
   },
 );
 register("fabric_fetch", "Fetch one terminal remote writer: verify on the owning host, import its commits and compare the bound head.",
-  { id: z.string() }, async (input, { signal }) =>
+  toolSchemas.fabric_fetch, async (input, { signal }) =>
     await federatedLane("fetch", who.cwd, input, signal) ??
       { status: "rejected", error: "remote_host_required", fix: "Qualify a remote writer ID with its host." },
 );
 register(
   "fabric_output",
   "Read output; continue at next_offset. max_bytes above 20000 is clamped with a warning; invalid numeric values return a typed rejection.",
-  {
-    id: z.string(),
-    part: z.enum(["result", "stderr", "events", "receipt"]).optional(),
-    offset: z.number().int().nonnegative().optional(),
-    tail: z.boolean().optional(),
-    max_bytes: optionalNumber,
-  },
+  toolSchemas.fabric_output,
   async (input) => {
     if (input.max_bytes !== undefined &&
       (typeof input.max_bytes !== "number" || !Number.isInteger(input.max_bytes) || input.max_bytes < 1))
@@ -685,21 +605,13 @@ register(
 register(
   "fabric_acknowledge",
   "Acknowledge a claimed delivery.",
-  { message_id: z.string(), claim_id: z.string() },
+  toolSchemas.fabric_acknowledge,
   ({ message_id, claim_id }) => readyStore().acknowledge(who, message_id, claim_id),
 );
 register(
   "fabric_task",
   "Create, claim, update or list tasks.",
-  {
-    action: z.enum(["create", "claim", "update", "list"]),
-    task_id: str,
-    objective: str,
-    owner: str,
-    depends_on: z.array(z.string()).optional(),
-    state: str,
-    note: str,
-  },
+  toolSchemas.fabric_task,
   ({ action, task_id, objective, owner, depends_on, state, note }) => {
     if (action === "list") return { tasks: readyStore().tasks(who.project, state) };
     if (action === "create" && objective)
@@ -709,14 +621,15 @@ register(
     throw new Error("Supply objective for create; task_id for claim; task_id and state for update.");
   },
 );
-register("fabric_note", "Append an activity note.", { detail: z.string() }, ({ detail }) => {
+register("fabric_note", "Append an activity note.",
+  toolSchemas.fabric_note, ({ detail }) => {
   readyStore().note(who, detail);
   return { noted: detail };
 });
 register(
   "fabric_activity",
   "Read recent activity or entries after a cursor.",
-  { limit: z.number().int().min(1).max(100).optional(), after_seq: z.number().int().nonnegative().optional() },
+  toolSchemas.fabric_activity,
   ({ limit, after_seq }) => ({
     activity:
       after_seq === undefined
@@ -724,17 +637,10 @@ register(
         : readyStore().activityAfter(who.project, after_seq, limit ?? 20),
   }),
 );
-register("fabric_hosts", "List hosts or diagnose peers over SSH.", {
-  action: z.enum(["list", "doctor"]).default("list"),
-  hosts: z.array(z.string()).optional(),
-}, ({ action, hosts }, { signal }) => fabricHosts(action, hosts ?? [], who.cwd, signal));
-register("fabric_adapters", "List routes and guarantees; full includes profiles; models lists one adapter's live models; action reset clears cooldowns.", {
-  detail,
-  models: z.string().max(40).optional().describe("Adapter whose live models to list (cached probe)."),
-  match: z.string().max(80).optional().describe("Substring filter for models."),
-  action: z.enum(["reset"]).optional().describe("reset clears cooldowns (selector: adapter or adapter/model; omit for all); use after the user says usage is back or switches accounts."),
-  selector: z.string().min(1).max(80).optional(),
-}, ({ detail, models, match, action, selector }) => {
+register("fabric_hosts", "List hosts or diagnose peers over SSH.",
+  toolSchemas.fabric_hosts, ({ action, hosts }, { signal }) => fabricHosts(action, hosts ?? [], who.cwd, signal));
+register("fabric_adapters", "List routes and guarantees; full includes profiles; models lists one adapter's live models; action reset clears cooldowns.",
+  toolSchemas.fabric_adapters, ({ detail, models, match, action, selector }) => {
   if (action === "reset") {
     const removed = resetCooldowns(selector);
     return { digest: removed.length ? `cleared: ${removed.join(" ")}` : "no cooldowns matched" };
