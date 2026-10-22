@@ -17,7 +17,8 @@ behaves as it did before profiles existed.
    `--project` to write `.agents/harness-profile.json` in the current checkout
    instead, so one repository can run `rigorous` while the rest stay
    `balanced`. Add `--task-class critical-review` to scope a preset or knob to
-   one task class.
+   one task class. A project file may raise `review.*` knobs but not lower
+   them; lower them in your user file or the environment.
 3. Adjust single knobs with `provenant profile set lanes.max_concurrency=2`
    (the same `--project` and `--task-class` flags apply) and drop them again
    with `provenant profile reset lanes.max_concurrency`, or `reset preset`.
@@ -26,7 +27,7 @@ behaves as it did before profiles existed.
 4. For one session or one experiment, use the environment instead of a file:
    `PROVENANT_PROFILE=rigorous` or `PROVENANT_KNOB_EFFORT_SHIFT=1`. For one
    dispatch, pass `provenant dispatch --knob effort.shift=1`. Both beat the
-   files.
+   files. `--knob` is refused for a lane placed on a peer host.
 5. Confirm with `provenant profile show --resolved` (add `--task-class` and
    `--risk-tier` to see a specific lane). Each line names the layer that set
    the value; `floor:crucial` means a risk-tier floor overrode the profile.

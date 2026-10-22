@@ -198,6 +198,46 @@ def test_profile_files_are_validated_against_the_registry(space, document, messa
         resolved(space)
 
 
+@pytest.mark.parametrize("document", [
+    {"preset": []}, {"preset": {}}, {"task_classes": {"legwork": {"preset": 3}}},
+    {"task_classes": []}, {"knobs": []}, [],
+])
+def test_malformed_profile_types_are_profile_errors_not_crashes(space, document):
+    write(space.project_file, document)
+    with pytest.raises(hp.ProfileError):
+        resolved(space)
+    with pytest.raises(hp.ProfileError):
+        hp.edit_file(REGISTRY, space.project_file, lambda doc: None)
+
+
+def test_project_file_may_strengthen_but_not_weaken_review_knobs(space):
+    write(space.user, {"preset": "rigorous"})
+    write(space.project_file, {"preset": "economy", "knobs": {"review.cross_family": "prefer"}})
+    resolution = resolved(space)
+    assert resolution.preset == "economy"
+    assert resolution.knobs["lanes.max_concurrency"] == 4  # other knobs follow the project
+    assert resolution.knobs["review.extra_reviewers"] == 1
+    assert resolution.knobs["review.cross_family"] == "require"
+    assert resolution.knobs["review.rereview_scope"] == "full"
+    assert resolution.sources["review.cross_family"] == "preset:rigorous (project may only strengthen)"
+
+    write(space.user, {})
+    write(space.project_file, {"knobs": {"review.rereview_scope": "full", "review.extra_reviewers": 2}})
+    strengthened = resolved(space)
+    assert strengthened.knobs["review.rereview_scope"] == "full"
+    assert strengthened.knobs["review.extra_reviewers"] == 2
+
+    # The user's own environment still decides above the project file.
+    write(space.user, {"preset": "rigorous"})
+    space.environ["PROVENANT_KNOB_REVIEW_EXTRA_REVIEWERS"] = "0"
+    assert resolved(space).knobs["review.extra_reviewers"] == 0
+
+
+def test_review_knobs_are_the_strengthen_only_ones():
+    guarded = {name for name, spec in REGISTRY.knobs.items() if spec.get("project") == "strengthen"}
+    assert guarded == {name for name in REGISTRY.knobs if name.startswith("review.")}
+
+
 def test_unknown_knob_variables_and_tiers_are_errors(space):
     with pytest.raises(hp.ProfileError, match="PROVENANT_KNOB_NO_SUCH"):
         hp.current(cwd=space.project, environ={**space.environ, "PROVENANT_KNOB_NO_SUCH": "1"}, registry=REGISTRY)
@@ -315,6 +355,24 @@ def test_attempt_stamp_records_a_broken_profile_instead_of_failing(space, monkey
     write(space.project_file, {"knobs": {"no.such": 1}})
     stamp = dispatch.contract_row(dispatch_args(), space.project, 1, space.project / "attempt", {}, "now")["profile"]
     assert stamp["preset"] is None and "no.such" in stamp["error"]
+
+
+def test_routing_reads_the_same_user_profile_as_the_receipt(space, monkeypatch):
+    """Routing may fall back to the product catalogue's instance root; the profile must not move with it."""
+    dispatch = load("dispatch_run_profile_root", ROOT / "skills/orchestrate/scripts/dispatch_run.py")
+    monkeypatch.chdir(space.project)
+    monkeypatch.setenv("AGENT_FABRIC_INSTANCE_ROOT", str(space.instance))  # no config/model-routing.json here
+    monkeypatch.setenv("AGENT_FABRIC_PRODUCT_ROOT", str(ROOT))
+    monkeypatch.delenv(hp.PROFILE_ROOT_ENV, raising=False)
+    write(space.user, {"knobs": {"effort.shift": 1}})
+    environment = dispatch.routing_environment()
+    assert environment["AGENT_FABRIC_INSTANCE_ROOT"] == str(ROOT)
+    assert hp.user_path(environment) == space.user == hp.user_path(os.environ)
+    routed = route(space, None, "--task-class", "legwork", **{
+        key: environment[key] for key in ("AGENT_FABRIC_INSTANCE_ROOT", hp.PROFILE_ROOT_ENV)})
+    stamp = dispatch.contract_row(dispatch_args(task_class="legwork"), space.project, 1,
+                                  space.project / "attempt", {}, "now")["profile"]
+    assert routed["effort"] == "high" and stamp["knobs"]["effort.shift"] == 1
 
 
 def test_batch_concurrency_is_capped_by_the_profile(space, monkeypatch):

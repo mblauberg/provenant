@@ -1413,6 +1413,8 @@ def routing_environment() -> dict[str, str]:
     """Keep discovery and worker routing on the same instance/product fallback."""
     env = os.environ.copy()
     instance = Path(env.get("AGENT_FABRIC_INSTANCE_ROOT") or Path.home() / ".agents").expanduser()
+    # Routing may fall back to the product catalogue; the user's profile file stays the one receipts stamp.
+    env.setdefault(harness_profile.PROFILE_ROOT_ENV, str(instance))
     try:
         (instance / "config/model-routing.json").lstat()
     except FileNotFoundError:
@@ -2919,7 +2921,7 @@ def dispatch(args: argparse.Namespace) -> int:
                 'sandbox': args.sandbox, 'network': None if args.network is None else args.network == 'true',
                 'capabilities': args.capabilities, 'add_dirs': args.add_dirs,
                 'allow_secrets': args.allow_secrets, 'confidential': args.confidential,
-                'wait_seconds': 0,
+                'knobs': getattr(args, 'knobs', None) or None, 'wait_seconds': 0,
             }.items() if value is not None and value != []}
             if args.prompt_stdin:
                 request['prompt'] = sys.stdin.buffer.read().decode('utf-8')
@@ -2928,7 +2930,7 @@ def dispatch(args: argparse.Namespace) -> int:
             if args.resume:
                 request = {key: value for key, value in request.items() if key in {
                     'host', 'operation_id', 'resume', 'task_id', 'prompt', 'prompt_file',
-                    'context_ceiling', 'timeout_seconds', 'allow_secrets', 'wait_seconds'}}
+                    'context_ceiling', 'timeout_seconds', 'allow_secrets', 'wait_seconds', 'knobs'}}
                 if args.resume_attempt is not None:
                     request['resume_attempt'] = args.resume_attempt
                 if args.require_session:

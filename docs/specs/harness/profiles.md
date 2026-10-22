@@ -120,6 +120,19 @@ Within a layer, an entry under `task_classes.<class>` beats the layer's
 general entry. A floor for the dispatch's risk tier is applied last and wins
 over every layer.
 
+A writer lane can edit its checkout, so the project file may only strengthen
+a knob the registry marks `"project": "strengthen"` (every `review.*` knob).
+For those knobs the resolver compares the project value with the value the
+other layers give and keeps the stronger by registry rank; the source then
+reads `... (project may only strengthen)`. The user file, the environment and
+`--knob` may still lower them.
+
+The user file is found through `PROVENANT_PROFILE_ROOT`, then
+`AGENT_FABRIC_INSTANCE_ROOT`, then `~/.agents`. When `dispatch_run.py` points
+routing at the product catalogue because the instance root has no
+`config/model-routing.json`, it pins `PROVENANT_PROFILE_ROOT` to the original
+instance root first, so routing and the receipt read the same user file.
+
 A profile file has the shape:
 
 ```json
@@ -151,6 +164,9 @@ explicit `--knob` are strict and exit with an error instead.
 
 `dispatch_run.py` exports `--knob` values and a recognised `--risk-tier` to the
 environment, so the routing subprocesses resolve the same profile.
+`--knob` applies only to a lane placed on this host. A dispatch placed on a
+peer host with `--knob` is refused with `knob_remote_unsupported`; set the
+knob in the peer's profile or place the lane locally with `--host`.
 
 ## Telemetry stamp
 

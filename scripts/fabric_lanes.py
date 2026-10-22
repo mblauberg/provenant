@@ -700,6 +700,9 @@ class LaneFederation:
                 for key, value in request.items() if key not in {'host', 'operation_id'}}})
         if host not in self.config.peers:
             raise self.h.HostError('unknown_host', 'Host is not configured')
+        if request.get('knobs'):
+            raise self.h.HostError('knob_remote_unsupported', '--knob applies only to lanes placed on this host; '
+                                   'set the knob in ' + host + "'s profile, or place the lane locally with --host " + self.config.local_host)
         clean = {key: value.rsplit('@', 1)[0] if key in {'id', 'resume', 'handoff', 'session'} and isinstance(value, str) and '@' in value else value
             for key, value in request.items() if key != 'host'}
         identifier = self.operation_id(clean)

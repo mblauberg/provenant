@@ -10,8 +10,11 @@ The user file is `<instance root>/config/harness-profile.json`, the project file
 `<project root>/.agents/harness-profile.json`. The environment names a preset in
 `PROVENANT_PROFILE` and knobs in `PROVENANT_KNOB_<NAME>`. Within each layer a
 task-class entry beats the layer's general one, and the preset applied is the
-one named by the highest layer that names any. A registry `floor` then raises a
-value below the minimum for the risk tier and every tier above it.
+one named by the highest layer that names any. A knob marked
+`"project": "strengthen"` (the review knobs) may only be made more rigorous by
+the project file, because a lane's own checkout writes that file. A registry
+`floor` then raises a value below the minimum for the risk tier and every tier
+above it.
 
 The specification is `docs/specs/harness/profiles.md`. Python and the CLI share
 this module; nothing else re-implements resolution.
@@ -40,10 +43,13 @@ DEFAULT_PRESET = "balanced"
 PRESET_ENV = "PROVENANT_PROFILE"
 KNOB_ENV_PREFIX = "PROVENANT_KNOB_"
 RISK_TIER_ENV = "PROVENANT_RISK_TIER"
+# The instance root whose user file applies, pinned by dispatch before routing may
+# repoint AGENT_FABRIC_INSTANCE_ROOT at the product catalogue.
+PROFILE_ROOT_ENV = "PROVENANT_PROFILE_ROOT"
 TYPES = {"int", "enum", "bool"}
 STATUSES = {"wired", "advisory"}
 KNOB_FIELDS = {"type", "default", "status", "reader", "effect", "trade_off",
-               "min", "max", "nullable", "values", "floor"}
+               "min", "max", "nullable", "values", "floor", "project"}
 LAYER_FIELDS = {"schema_version", "description", "preset", "knobs", "task_classes"}
 CLASS_FIELDS = {"preset", "knobs"}
 
@@ -73,7 +79,8 @@ def env_name(knob: str) -> str:
 
 def user_path(environ: Mapping[str, str] | None = None) -> Path:
     environ = os.environ if environ is None else environ
-    instance = environ.get("AGENT_FABRIC_INSTANCE_ROOT") or str(Path.home() / ".agents")
+    instance = (environ.get(PROFILE_ROOT_ENV) or environ.get("AGENT_FABRIC_INSTANCE_ROOT")
+                or str(Path.home() / ".agents"))
     return Path(instance).expanduser() / USER_FILE
 
 
@@ -167,6 +174,8 @@ class Registry:
 
     def _check_part(self, part: dict[str, Any], origin: str, allow_presets: bool) -> None:
         if "preset" in part:
+            if not isinstance(part["preset"], str):
+                raise ProfileError(f"{origin}: preset must be a preset name")
             if not allow_presets:
                 raise ProfileError(f"{origin}: a preset cannot name another preset")
             if part["preset"] not in self.presets:
@@ -195,6 +204,8 @@ def _check_knob(name: str, spec: Any, tier_order: tuple[str, ...]) -> None:
         raise ProfileError(f"{where}: floor keys must be risk tiers ({', '.join(tier_order)})")
     if floor and spec.get("nullable"):
         raise ProfileError(f"{where}: a nullable knob cannot carry a floor")
+    if spec.get("project", "strengthen") != "strengthen" or ("project" in spec and spec.get("nullable")):
+        raise ProfileError(f"{where}: project takes only \"strengthen\", on a knob that is not nullable")
 
 
 def load_registry(root: Path | None = None) -> Registry:
@@ -254,12 +265,9 @@ def _class_part(layer: Mapping[str, Any], task_class: str | None) -> Mapping[str
     return (layer.get("task_classes") or {}).get(task_class, {}) if task_class else {}
 
 
-def resolve(registry: Registry, *, task_class: str | None = None, risk_tier: str | None = None,
-            layers: list[tuple[str, Mapping[str, Any]]] | None = None) -> Resolution:
-    """Resolve knobs from layers given lowest first, e.g. user, project, env, dispatch."""
-    layers = layers or []
-    if risk_tier is not None and risk_tier not in registry.tier_order:
-        raise ProfileError(f"unknown risk tier {risk_tier!r}; known: {', '.join(registry.tier_order)}")
+def _merge(registry: Registry, task_class: str | None,
+           layers: list[tuple[str, Mapping[str, Any]]]) -> tuple[str, dict[str, Any], dict[str, str]]:
+    """The preset, knob values and sources from `layers`, before guards and floors."""
     preset = DEFAULT_PRESET
     for _source, layer in reversed(layers):
         named = _class_part(layer, task_class).get("preset") or layer.get("preset")
@@ -275,6 +283,23 @@ def resolve(registry: Registry, *, task_class: str | None = None, risk_tier: str
             for name, value in (part.get("knobs") or {}).items():
                 knobs[name] = registry.check(name, value, source)
                 sources[name] = source + (f" ({task_class})" if part is not layer else "")
+    return preset, knobs, sources
+
+
+def resolve(registry: Registry, *, task_class: str | None = None, risk_tier: str | None = None,
+            layers: list[tuple[str, Mapping[str, Any]]] | None = None) -> Resolution:
+    """Resolve knobs from layers given lowest first, e.g. user, project, env, dispatch."""
+    layers = layers or []
+    if risk_tier is not None and risk_tier not in registry.tier_order:
+        raise ProfileError(f"unknown risk tier {risk_tier!r}; known: {', '.join(registry.tier_order)}")
+    preset, knobs, sources = _merge(registry, task_class, layers)
+    guarded = [name for name, spec in registry.knobs.items() if spec.get("project") == "strengthen"]
+    if guarded and any(source == "project" for source, _ in layers):
+        # Resolve again without the project file; a guarded knob keeps the more rigorous result.
+        _, trusted, trusted_sources = _merge(registry, task_class, [item for item in layers if item[0] != "project"])
+        for name in guarded:
+            if registry.rank(name, trusted[name]) > registry.rank(name, knobs[name]):
+                knobs[name], sources[name] = trusted[name], trusted_sources[name] + " (project may only strengthen)"
     floored = []
     if risk_tier is not None:
         position = registry.tier_order.index(risk_tier)
@@ -358,8 +383,7 @@ def edit_file(registry: Registry, path: Path, change: Callable[[dict[str, Any]],
         document = _read_json(path)
     except FileNotFoundError:
         document = {"schema_version": 1}
-    if not isinstance(document, dict):
-        raise ProfileError(f"{path}: must be a JSON object")
+    registry.check_layer(document, str(path))  # repair a malformed file by hand before editing it
     change(document)
     for task_class in list(document.get("task_classes", {})):
         part = document["task_classes"][task_class]

@@ -21,18 +21,21 @@
       "trade_off": "Lower compacts sooner, so each turn re-reads fewer tokens, at more risk that a long lane loses detail."
     },
     "review.extra_reviewers": {
+      "project": "strengthen",
       "type": "int", "min": 0, "max": 2, "default": 0, "status": "wired",
       "reader": "skills/code-review/SKILL.md, skills/implement/SKILL.md",
       "effect": "Independent reviews added on top of the HARNESS.md ladder minimum for the tier.",
       "trade_off": "Each extra review costs one reviewer lane and adjudication time for wider defect coverage."
     },
     "review.cross_family": {
+      "project": "strengthen",
       "type": "enum", "values": ["prefer", "require"], "default": "prefer", "status": "wired",
       "reader": "skills/code-review/SKILL.md, skills/implement/SKILL.md",
       "effect": "prefer: a blocked cross-family leg is replaced by a same-family reviewer through another lens, as the ladder allows. require: wait for, or reroute to, another family instead.",
       "trade_off": "require keeps decorrelated review at the price of waiting on quota or outages."
     },
     "review.rereview_scope": {
+      "project": "strengthen",
       "type": "enum", "values": ["delta", "full"], "default": "delta", "status": "wired",
       "reader": "skills/code-review/SKILL.md, skills/implement/SKILL.md",
       "effect": "After a repair, re-review only the repair delta, or the whole change again.",
