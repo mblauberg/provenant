@@ -66,9 +66,8 @@ final class QuotaModel {
         run(.panel)
     }
 
-    /// Asks again whether the CLI has `tick`, since it may have been upgraded while asleep.
+    /// A wake always runs `tick`, so a CLI upgraded while asleep is found.
     private func woke() {
-        if ticks == false { ticks = nil }
         waking = true
         tickOnceOnline()
     }
@@ -91,14 +90,16 @@ final class QuotaModel {
 
     private func run(_ trigger: Trigger) {
         guard !isRefreshing else {
-            // The run in flight covers the others; these must still happen after it.
-            if trigger == .manual || trigger == .power, pending != .manual { pending = trigger }
+            // The run in flight covers timer and panel; the others still happen after it, the strongest first.
+            let strength: [Trigger] = [.power, .wake, .manual]
+            if let rank = strength.firstIndex(of: trigger), rank > pending.flatMap(strength.firstIndex) ?? -1 { pending = trigger }
             return
         }
         isRefreshing = true
-        let arguments = ticks == false ? ["quota", "--json"] + (trigger == .manual ? ["--refresh"] : [])
-            : ["quota", "tick", "--trigger", trigger.rawValue, "--power", power, "--json"]
-        if ticks != false { log.info("tick: trigger \(trigger.rawValue, privacy: .public), power \(self.power, privacy: .public)") }
+        let ticking = ticks != false || trigger == .wake
+        let arguments = ticking ? ["quota", "tick", "--trigger", trigger.rawValue, "--power", power, "--json"]
+            : ["quota", "--json"] + (trigger == .manual ? ["--refresh"] : [])
+        if ticking { log.info("tick: trigger \(trigger.rawValue, privacy: .public), power \(self.power, privacy: .public)") }
         let cached = launcher
         Task {
             let (resolved, outcome) = await withCheckedContinuation { done in
@@ -108,7 +109,8 @@ final class QuotaModel {
             isRefreshing = false
             switch outcome {
             case .report(let report):
-                if ticks == nil { ticks = true; watch() }
+                // Only a run of `tick` shows the CLI has it.
+                if ticking, ticks != true { ticks = true; watch() }
                 watcher?.arm()   // the first tick may have created the directory
                 show(report)
             case .failure(let failure):
@@ -123,7 +125,10 @@ final class QuotaModel {
         }
     }
 
-    private func show(_ report: QuotaReport) {
+    /// Runs and the watcher both deliver reports, in either order; an older one never replaces a newer.
+    private func show(_ incoming: QuotaReport) {
+        let report = self.report.flatMap { shown in
+            shown.generatedAt.flatMap { at in incoming.generatedAt.map { $0 < at } } == true ? shown : nil } ?? incoming
         (self.report, error, updatedAt) = (report, nil, .now)
         if ticks == true { schedule(report.nextDueAt ?? report.nextCheck?.nextDueAt) }
     }
@@ -225,10 +230,12 @@ enum CLI {
     /// State shared by the reader, watchdog and calling threads.
     final class Shared: @unchecked Sendable {
         private let lock = NSLock()
-        private var err = Data(), timedOut = false
-        func set(err data: Data) { lock.withLock { err = data } }
+        private var out = Data(), err = Data(), closed: Set<Int32> = [], timedOut = false
+        func append(_ data: Data, toErr: Bool) { lock.withLock { if toErr { err += data } else { out += data } } }
+        /// True the first time a pipe reports end of file.
+        func close(_ fd: Int32) -> Bool { lock.withLock { closed.insert(fd).inserted } }
         func markTimedOut() { lock.withLock { timedOut = true } }
-        var snapshot: (Data, Bool) { lock.withLock { (err, timedOut) } }
+        var snapshot: (Data, Data, Bool) { lock.withLock { (out, err, timedOut) } }
     }
 
     /// Where `tick` writes report.json: provider_quota.py `state_root() / 'quota'`. The CLI inherits this
@@ -283,24 +290,45 @@ enum CLI {
         return Launcher(url: URL(fileURLWithPath: lines[0]), path: lines[1], custom: false)
     }
 
-    /// Drains both pipes before waiting, so neither can fill and block the child; a watchdog ends overruns.
+    /// Drains both pipes as data arrives, so neither can fill and block the child. An overrun gets SIGTERM, then
+    /// SIGKILL after a grace period, and a pipe a grandchild still holds open is abandoned, so every wait is bounded.
     static func exec(_ url: URL, _ arguments: [String], path: String?, limit: Double) throws -> Output {
         let process = Process(), out = Pipe(), err = Pipe(), shared = Shared()
+        let exited = DispatchSemaphore(value: 0), drained = DispatchGroup()
         process.executableURL = url
         process.arguments = arguments
         if let path { process.environment = ProcessInfo.processInfo.environment.merging(["PATH": path]) { $1 } }
         (process.standardOutput, process.standardError, process.standardInput) = (out, err, FileHandle.nullDevice)
-        try process.run()
-        let drained = DispatchGroup()
-        DispatchQueue.global(qos: .utility).async(group: drained) { shared.set(err: err.fileHandleForReading.readDataToEndOfFile()) }
-        let watchdog = DispatchWorkItem { if process.isRunning { shared.markTimedOut(); process.terminate() } }
-        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + limit, execute: watchdog)
-        let data = out.fileHandleForReading.readDataToEndOfFile()
-        process.waitUntilExit()
-        watchdog.cancel()
-        drained.wait()
-        let (errData, timedOut) = shared.snapshot
-        return Output(status: process.terminationStatus, signalled: process.terminationReason == .uncaughtSignal,
+        process.terminationHandler = { _ in exited.signal() }
+        for pipe in [out, err] {
+            let handle = pipe.fileHandleForReading, toErr = pipe === err
+            drained.enter()
+            handle.readabilityHandler = { handle in
+                let data = handle.availableData
+                if !data.isEmpty { return shared.append(data, toErr: toErr) }
+                handle.readabilityHandler = nil
+                if shared.close(handle.fileDescriptor) { drained.leave() }
+            }
+        }
+        do { try process.run() } catch {
+            for pipe in [out, err] { pipe.fileHandleForReading.readabilityHandler = nil }
+            throw error
+        }
+        var killed = false
+        if exited.wait(timeout: .now() + limit) == .timedOut {
+            shared.markTimedOut()
+            process.terminate()
+            if exited.wait(timeout: .now() + 3) == .timedOut {
+                kill(process.processIdentifier, SIGKILL)
+                killed = exited.wait(timeout: .now() + 3) == .timedOut   // still not reaped: report it as killed
+            }
+        }
+        if drained.wait(timeout: .now() + 2) == .timedOut {
+            for pipe in [out, err] { pipe.fileHandleForReading.readabilityHandler = nil }
+        }
+        let (data, errData, timedOut) = shared.snapshot
+        return Output(status: killed ? SIGKILL : process.terminationStatus,
+                      signalled: killed || process.terminationReason == .uncaughtSignal,
                       timedOut: timedOut, out: data, err: String(decoding: errData, as: UTF8.self))
     }
 

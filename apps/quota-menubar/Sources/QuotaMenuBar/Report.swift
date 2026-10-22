@@ -185,7 +185,7 @@ enum Fmt {
             : entry.currency != nil ? "\(money(entry.balance ?? 0, entry.currency)) credit"
             : "\(money(entry.balance ?? 0, nil)) \(entry.unit.map(human) ?? "credits")"
         return [amount + " available", entry.expiresAt.map { "expires \(day($0))" },
-                burn.map { "about \(money($0.rounded(), entry.currency))/h" }].compactMap { $0 }.joined(separator: " · ")
+                burn.map { "about \(money($0 < 10 ? $0 : $0.rounded(), entry.currency))/h" }].compactMap { $0 }.joined(separator: " · ")
     }
 
     /// "2 banked resets · soonest expires 3 Nov".
