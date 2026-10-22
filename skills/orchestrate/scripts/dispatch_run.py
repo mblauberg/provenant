@@ -21,6 +21,7 @@ import random
 import re
 import shutil
 import signal
+import sqlite3
 import stat
 import subprocess
 import sys
@@ -913,6 +914,49 @@ def acquire_worktree_lease(worktree: Path):
         handle.close()
         raise WorktreeLeaseError(f"another writer already owns this worktree: {worktree}") from exc
     return handle
+
+
+GRAPH_RESERVATION_FILE = "provenant-graph-reservation.json"
+
+
+def graph_reservation_refusal(worktree: Path) -> str | None:
+    """Refuse a writer into a worktree that a running Fabric graph has reserved.
+
+    The graph owner writes the reservation file and passes its token to its own
+    writer lanes. Any other writer is refused while the reserving graph is
+    running; a file whose graph has ended is stale. Unreadable state refuses.
+    """
+    git_dir = _git_path(worktree, "--absolute-git-dir")
+    if git_dir is None:
+        return None
+    path = git_dir / GRAPH_RESERVATION_FILE
+    try:
+        reservation = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError):
+        return f"the graph reservation {path} is unreadable; fix: check it, or remove it if no graph uses this worktree"
+    token = reservation.get("token") if isinstance(reservation, dict) else None
+    if not isinstance(token, str) or not token:
+        return f"the graph reservation {path} names no token; fix: check it, or remove it if no graph uses this worktree"
+    if os.environ.get("PROVENANT_GRAPH_RESERVATION") == token:
+        return None
+    graph, node = reservation.get("graph_id", "?"), reservation.get("node_id", "?")
+    state = Path(os.environ.get("AGENT_FABRIC_STATE_DIRECTORY", str(Path.home() / ".local/state/agent-harness/fabric")))
+    try:
+        connection = sqlite3.connect(f"{(state / 'fabric.sqlite3').resolve().as_uri()}?mode=ro", uri=True, timeout=5)
+        try:
+            row = connection.execute(
+                "SELECT g.state FROM graph_worktree_reservations r JOIN graphs g"
+                " ON g.project = r.project AND g.graph_id = r.graph_id WHERE r.token = ?", (token,)).fetchone()
+        finally:
+            connection.close()
+    except sqlite3.Error:
+        return (f"worktree is reserved by graph {graph} node {node} and the Fabric store cannot confirm it ended;"
+                f" fix: run provenant graph status {graph}")
+    if row is None or row[0] != "running":
+        return None
+    return f"worktree is reserved by graph {graph} node {node}; fix: wait for it, or run provenant graph cancel {graph}"
 
 
 def release_worktree_lease(handle) -> None:
@@ -2182,6 +2226,9 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
     }
     worktree_lease = None
     if args.access_mode == "worktree_write" and args.worktree is not None:
+        refusal = graph_reservation_refusal(args.worktree)
+        if refusal is not None:
+            return fail(run_dir, "worktree_reserved", refusal)
         try:
             worktree_lease = acquire_worktree_lease(args.worktree)
         except WorktreeLeaseError as exc:
