@@ -106,7 +106,10 @@ def ensure_nested_owner(run_dir, kind, *, batch_child=False):
                     or record.get("run_dir") != str(run_dir)
                     or not isinstance(record.get("run_token"), str)
                     or not record["run_token"]
-                    or (token and record["run_token"] != token)):
+                    or (token and record["run_token"] != token)
+                    or record.get("owner_pid") not in {os.getpid(), os.getppid()}
+                    or not record.get("owner_started_at")
+                    or record["owner_started_at"] != process_info.start_time(record["owner_pid"])):
                 raise ValueError("batch run owner identity is invalid")
 
         try:
@@ -203,8 +206,10 @@ def record_owner(run_dir, kind="dispatch"):
             and record.get("run_dir") == str(run_dir)
             and record.get("run_token") == os.environ.get("PROVENANT_RUN_TOKEN")):
         _write(run_dir, "dispatch-owner.json", record)
-    elif not (Path(run_dir) / "dispatch-owner.json").exists():
-        token = uuid.uuid4().hex
+    else:
+        # Custody authorises this owner to replace a previous owner's identity.
+        # Keep the initial token inherited by the children this batch launches.
+        token = os.environ.get("PROVENANT_RUN_TOKEN") or uuid.uuid4().hex
         _write(run_dir, "dispatch-owner.json", {
             "schema_version": 1, "kind": kind, "run_dir": str(run_dir), "run_token": token,
             "owner_pid": os.getpid(), "owner_pgid": os.getpgrp(),
