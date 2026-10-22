@@ -181,33 +181,41 @@ export function executableOwner(root: string, relativePath: string): string {
   return path;
 }
 
-export async function pythonOwner(root: string, identity: Identity, env: NodeJS.ProcessEnv): Promise<string> {
+function pythonOwnerCommand(root: string, env: NodeJS.ProcessEnv) {
   const helper = join(root, "scripts/lib/harness-python.sh");
   const metadata = lstatSync(helper);
   if (!metadata.isFile() || metadata.isSymbolicLink()) {
     throw new Error(`Python owner selector must be a regular local file: ${helper}`);
   }
-  try {
-    const { stdout } = await execFileAsync(
-      "/bin/bash",
-      ["-c", 'source "$1"; run_stdlib -c "import sys; print(sys.executable)"', "provenant-python-owner", helper],
-      {
-        cwd: identity.cwd,
-        env: withoutGitRedirects(env),
-        encoding: "utf8",
-        timeout: 10_000,
-        maxBuffer: 64 * 1024,
-      },
-    );
-    const selected = resolve(stdout.trim());
-    const selectedMetadata = statSync(selected);
-    accessSync(selected, constants.X_OK);
-    if (!isAbsolute(selected) || !selectedMetadata.isFile()) throw new Error("selector returned a non-file");
-    return selected;
-  } catch (error) {
-    const detail = error instanceof Error ? error.message : String(error);
-    throw new Error(`Python execution owner is unavailable: ${detail}`, { cause: error });
-  }
+  return {
+    args: ["-c", 'source "$1"; run_stdlib -I -c "import sys; print(sys.executable)"', "provenant-python-owner", helper],
+    options: { cwd: root, env: withoutGitRedirects(env), encoding: "utf8" as const, timeout: 10_000, maxBuffer: 64 * 1024 },
+  };
+}
+
+function selectedPython(stdout: string): string {
+  const selected = resolve(stdout.trim());
+  const metadata = statSync(selected);
+  accessSync(selected, constants.X_OK);
+  if (!isAbsolute(selected) || !metadata.isFile()) throw new Error("selector returned a non-file");
+  return selected;
+}
+
+function pythonOwnerError(error: unknown): Error {
+  return new Error(`Python execution owner is unavailable: ${error instanceof Error ? error.message : String(error)}`, { cause: error });
+}
+
+export async function pythonOwner(root: string, _identity: Identity, env: NodeJS.ProcessEnv): Promise<string> {
+  const { args, options } = pythonOwnerCommand(root, env);
+  try { return selectedPython((await execFileAsync("/bin/bash", args, options)).stdout); }
+  catch (error) { throw pythonOwnerError(error); }
+}
+
+/** Synchronous validation uses the same interpreter selector as dispatch. */
+export function pythonOwnerSync(root: string, _identity: Identity, env: NodeJS.ProcessEnv): string {
+  const { args, options } = pythonOwnerCommand(root, env);
+  try { return selectedPython(execFileSync("/bin/bash", args, options)); }
+  catch (error) { throw pythonOwnerError(error); }
 }
 
 function realPath(path: string): string {

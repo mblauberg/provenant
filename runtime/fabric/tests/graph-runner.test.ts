@@ -1,3 +1,4 @@
+import Database from "better-sqlite3";
 import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
@@ -212,7 +213,117 @@ describe("graph runner", { timeout: 60_000 }, () => {
     expect(a.map((row) => [row.attempt, row.run_id, row.state])).toEqual([[1, before.run_id, "passed"]]);
   });
 
-  it("fences live gate groups before stopping a resumed graph whose brief was deleted", async () => {
+  it("resumes the frozen route even when catalogue alias order changes", async () => {
+    const document = { schema_version: 1, graph_id: "g-012abc", revision: 1,
+      nodes: [reader("a", { adapter: "opencode", alias: "junior" })] } as GraphDocument;
+    const chair = { project: workspace, cwd: workspace, agentId: "codex-test", provider: "codex" };
+    const catalogue = catalogueSnapshot(repositoryRoot);
+    const model = "opencode/glm-5.3-flash-free";
+    const previous = { ...catalogue, adapters: catalogue.adapters.map((adapter) => adapter.name !== "opencode" ? adapter
+      : { ...adapter, aliases: { ...adapter.aliases, junior: [model] } }) };
+    const plan = validateGraph(document, chair, previous, env).plan!;
+    expect(validateGraph(document, chair, catalogue, env).plan!.nodes[0]!.pool.model).not.toBe(model);
+    withStore((store) => store.create(chair, document, plan));
+    expect(fabric(["graph", "resume", document.graph_id]).status).toBe(0);
+    trackOwner(document.graph_id, workspace);
+    await waitFor(() => graphRow(document.graph_id).state !== "running", "frozen graph to finish");
+    const row = nodes(document.graph_id).get("a")!;
+    expect(row.model).toBe(model);
+    const attempt = JSON.parse(readFileSync(join(row.run_dir!, "dispatch/tasks", row.task_id, "attempt-001/attempt.json"), "utf8"));
+    expect(attempt.route.resolved_model).toBe(model);
+    expect(row.state).toBe("passed");
+  });
+
+  it.each(["document", "plan"])("refuses resume when the stored %s spec_hash changes", (part) => {
+    const document = { schema_version: 1, graph_id: "g-012abc", revision: 1,
+      nodes: [reader("a", { adapter: "opencode", alias: "glm-free" })] } as GraphDocument;
+    const chair = { project: workspace, cwd: workspace, agentId: "codex-test", provider: "codex" };
+    const plan = validateGraph(document, chair, catalogueSnapshot(repositoryRoot), env).plan!;
+    withStore((store) => store.create(chair, document, plan));
+    document.nodes[0]!.brief = { prompt: "Changed after validation" };
+    const db = new Database(databasePath(env));
+    try {
+      if (part === "document") db.prepare("UPDATE graph_revisions SET document_json = ?").run(JSON.stringify(document));
+      else {
+        plan.nodes[0]!.brief.sha256 = "changed";
+        db.prepare("UPDATE graph_revisions SET plan_json = ?").run(JSON.stringify(plan));
+      }
+    } finally { db.close(); }
+    const result = fabric(["graph-owner", document.graph_id, workspace]);
+    expect(result.status).toBe(1);
+    expect(nodes(document.graph_id).get("a")!.run_id).toBeNull();
+    const audit = new Database(databasePath(env));
+    try { expect(JSON.stringify(audit.prepare("SELECT detail FROM activity").all())).toContain("spec_hash changed; refusing resume"); } finally { audit.close(); }
+  });
+
+  it.each(["changed", "unreadable"])("fails a %s prompt at launch once without dispatching or retrying", async (condition) => {
+    const brief = join(workspace, "brief.md");
+    writeFileSync(brief, "Validated content");
+    const document = { schema_version: 1, graph_id: "g-012abc", revision: 1,
+      nodes: [reader("a", { adapter: "opencode", alias: "glm-free" }, { brief: { prompt_file: brief } }),
+        reader("child", { adapter: "opencode", alias: "glm-free" }, { depends_on: ["a"] })] } as GraphDocument;
+    const chair = { project: workspace, cwd: workspace, agentId: "codex-test", provider: "codex" };
+    const plan = validateGraph(document, chair, catalogueSnapshot(repositoryRoot), env).plan!;
+    withStore((store) => store.create(chair, document, plan));
+    if (condition === "changed") writeFileSync(brief, "Unvalidated content");
+    else rmSync(brief);
+    expect(fabric(["graph", "resume", document.graph_id]).status).toBe(0);
+    trackOwner(document.graph_id, workspace);
+    await waitFor(() => graphRow(document.graph_id).state !== "running", "prompt error to finish the graph", 5_000);
+    const row = nodes(document.graph_id).get("a")!;
+    expect(row.state).toBe("failed");
+    expect(row.outcome?.reason).toContain(condition === "changed" ? "brief sha256 mismatch" : "brief unavailable");
+    expect(row.run_id).toBeNull();
+    expect(row.holds_slot).toBe(false);
+    expect(nodes(document.graph_id).get("child")!.state).toBe("blocked");
+    expect(allAttempts(document.graph_id).filter((attempt) => attempt.node_id === "a")).toHaveLength(1);
+    const audit = new Database(databasePath(env));
+    try { expect(audit.prepare("SELECT detail FROM activity WHERE detail LIKE '%a a1: running%'").all()).toHaveLength(1); }
+    finally { audit.close(); }
+  });
+
+  it("reports an unavailable owner lock without releasing graph fences", () => {
+    const document = { schema_version: 1, graph_id: "g-012abc", revision: 1,
+      nodes: [reader("a", { adapter: "opencode", alias: "glm-free" })] } as GraphDocument;
+    const chair = { project: workspace, cwd: workspace, agentId: "codex-test", provider: "codex" };
+    const plan = validateGraph(document, chair, catalogueSnapshot(repositoryRoot), env).plan!;
+    withStore((store) => store.create(chair, document, plan));
+    mkdirSync(join(workspace, ".agent-run/graphs", document.graph_id, "owner.lock"), { recursive: true });
+    expect(fabric(["graph-owner", document.graph_id, workspace]).status).toBe(1);
+    expect(graphRow(document.graph_id).state).toBe("running");
+    const audit = new Database(databasePath(env));
+    try { expect(JSON.stringify(audit.prepare("SELECT detail FROM activity").all())).toContain("owner lock unavailable; graph remains running"); }
+    finally { audit.close(); }
+  });
+
+  it("bounds startup fencing and leaves an unverifiable graph nonterminal with a diagnostic", () => {
+    const document = { schema_version: 1, graph_id: "g-012abc", revision: 1,
+      nodes: [reader("a", { adapter: "opencode", alias: "glm-free" })] } as GraphDocument;
+    const chair = { project: workspace, cwd: workspace, agentId: "codex-test", provider: "codex" };
+    const plan = validateGraph(document, chair, catalogueSnapshot(repositoryRoot), env).plan!;
+    const unknown = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { detached: true, stdio: "ignore" });
+    unknown.unref();
+    tracked.add(unknown.pid!);
+    withStore((store) => {
+      store.create(chair, document, plan);
+      const row = store.current(workspace, document.graph_id).get("a")!;
+      store.reserve(row, { maxWidth: 1, cap: 1, handOccupancy: 0 }, chair.agentId);
+      store.setGates(row, [{ index: 0, token: "unknown", argv_hash: "unknown", pid: unknown.pid!, pgid: unknown.pid!, started_at: null }]);
+    });
+    document.nodes[0]!.brief = { prompt: "Changed" };
+    const db = new Database(databasePath(env));
+    try { db.prepare("UPDATE graph_revisions SET document_json = ?").run(JSON.stringify(document)); } finally { db.close(); }
+    const result = spawnSync(join(packageRoot, "bin/fabric"), ["graph-owner", document.graph_id, workspace],
+      { cwd: workspace, encoding: "utf8", env, timeout: 5_000 });
+    expect(result.status, result.stderr).toBe(1);
+    expect(graphRow(document.graph_id).state).toBe("running");
+    expect(nodes(document.graph_id).get("a")!.holds_slot).toBe(true);
+    const audit = new Database(databasePath(env));
+    try { expect(JSON.stringify(audit.prepare("SELECT detail FROM activity").all())).toContain("startup fencing exhausted"); }
+    finally { audit.close(); }
+  });
+
+  it("fences live gate groups before stopping a resumed graph whose stored document changed", async () => {
     const linked = join(root, "linked");
     git(workspace, "worktree", "add", "-q", "-b", "work", linked);
     const brief = join(workspace, "brief.md");
@@ -229,6 +340,12 @@ describe("graph runner", { timeout: 60_000 }, () => {
     process.kill(owner, "SIGKILL");
     await waitFor(() => !alive(owner), "old graph owner to die");
     rmSync(brief);
+    const db = new Database(databasePath(env));
+    try {
+      const document = withStore((store) => store.document(workspace, id, 1));
+      document.nodes[0]!.brief = { prompt: "Changed after validation" };
+      db.prepare("UPDATE graph_revisions SET document_json = ? WHERE graph_id = ?").run(JSON.stringify(document), id);
+    } finally { db.close(); }
     expect(fabric(["graph", "resume", id]).status).toBe(0);
     trackOwner(id, workspace);
     let unsafe = false;
@@ -236,12 +353,19 @@ describe("graph runner", { timeout: 60_000 }, () => {
       const graph = graphRow(id);
       if (graph.owner_pid !== owner && graph.owner_pid !== null) tracked.add(graph.owner_pid);
       if (alive(gatePid) && (graph.state !== "running" || !withStore((store) => store.reservation(realpathSync(linked))))) unsafe = true;
-      return graph.state !== "running";
-    }, "invalid resumed graph to stop after fencing");
+      const audit = new Database(databasePath(env));
+      try {
+        return graph.state !== "running" || audit.prepare("SELECT 1 FROM activity WHERE detail LIKE '%startup fencing exhausted%'").get() !== undefined;
+      } finally { audit.close(); }
+    }, "invalid resumed graph to stop or report an exhausted fence");
     expect(unsafe, "terminal graphs make reservations stale while their gates still write").toBe(false);
-    expect(alive(gatePid)).toBe(false);
-    expect(alive(-gate.pgid!)).toBe(false);
-    expect(graphRow(id).state).toBe("stopped");
+    if (graphRow(id).state === "stopped") {
+      expect(alive(gatePid)).toBe(false);
+      expect(alive(-gate.pgid!)).toBe(false);
+    } else {
+      expect(graphRow(id).state).toBe("running");
+      expect(withStore((store) => store.reservation(realpathSync(linked)))).toBeDefined();
+    }
   });
 
   it("rejects a stale zero exit when a recovered gate launch cannot open stdout", async () => {
@@ -298,6 +422,32 @@ describe("graph runner", { timeout: 60_000 }, () => {
     expect(nodes(id).get("edit")!.state).toBe("cancelled");
     expect(alive(gatePid) || alive(childPid)).toBe(false);
     expect(existsSync(join(gitDir, RESERVATION_FILE))).toBe(false);
+  });
+
+  it("force resumes an unverifiable owner with an audit trail and recovers its reserved slot", async () => {
+    const document = { schema_version: 1, graph_id: "g-012abc", revision: 1,
+      nodes: [reader("a", { adapter: "opencode", alias: "glm-free" })] } as GraphDocument;
+    const chair = { project: workspace, cwd: workspace, agentId: "codex-test", provider: "codex" };
+    const plan = validateGraph(document, chair, catalogueSnapshot(repositoryRoot), env).plan!;
+    withStore((store) => {
+      store.create(chair, document, plan);
+      store.claimOwner(workspace, document.graph_id, process.pid, null, () => false);
+      store.reserve(store.current(workspace, document.graph_id).get("a")!, { maxWidth: 1, cap: 1, handOccupancy: 0 }, chair.agentId);
+    });
+    const result = fabric(["graph", "resume", document.graph_id, "--force"]);
+    expect(result.status, result.stdout + result.stderr).toBe(0);
+    trackOwner(document.graph_id, workspace);
+    await waitFor(() => graphRow(document.graph_id).state !== "running", "forced recovery to finish");
+    expect(graphRow(document.graph_id).state).toBe("done");
+    expect(nodes(document.graph_id).get("a")!.holds_slot).toBe(false);
+    expect(alive(process.pid), "never signal a possibly reused owner PID").toBe(true);
+    const audit = new Database(databasePath(env));
+    try {
+      const forced = audit.prepare("SELECT agent_id, detail FROM activity WHERE detail LIKE '%forced owner takeover%'").all() as Array<{ agent_id: string; detail: string }>;
+      expect(forced).toHaveLength(1);
+      expect(forced[0]!.agent_id).toMatch(/^codex/u);
+      expect(forced[0]!.detail).toContain(String(process.pid));
+    } finally { audit.close(); }
   });
 
   it.each(["takeover", "orphan cleanup"])("keeps a live owner with an unknown start time excluded from %s", async (operation) => {

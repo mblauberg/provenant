@@ -125,13 +125,15 @@ export function graphCancel(id: string, node: string | undefined, chair: Identit
   } finally { store.close(); }
 }
 
-export function graphResume(id: string, chair: Identity, env: NodeJS.ProcessEnv = process.env): Result {
+export function graphResume(id: string, chair: Identity, env: NodeJS.ProcessEnv = process.env, force = false): Result {
   const store = new GraphStore(env);
   try {
     const graph = store.graph(chair.project, id);
     if (!graph) return { status: "rejected", error: "graph_unknown", fix: `No graph ${id} in ${chair.project}.` };
-    if (graph.state === "running" && !ownerAlive(graph)) startGraphOwner(graph, env);
-    return graphView(store, graph, env);
+    if (graph.state === "running" && force) store.forceOwner(chair.project, id, chair.agentId);
+    const current = store.graph(chair.project, id)!;
+    if (current.state === "running" && !ownerAlive(current)) startGraphOwner(current, env);
+    return graphView(store, current, env);
   } finally { store.close(); }
 }
 

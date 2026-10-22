@@ -4,19 +4,19 @@
  * dispatch made with the creating seat's identity. It calls no model and is
  * never polled: the chair hears from it through Fabric messages.
  */
+import { createHash } from "node:crypto";
 import { execFileSync, spawn } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { isAbsolute, join, relative, resolve } from "node:path";
 
-import { catalogueSnapshot } from "../catalogue.js";
-import { cancelConfiguredRun, dispatchConfiguredProvider, hostOwnersInThemselves, productRoot } from "../execution.js";
+import { cancelConfiguredRun, dispatchConfiguredProvider, hostOwnersInThemselves, productRoot, pythonOwnerSync } from "../execution.js";
 import { databasePath, runRoot, withoutGitRedirects, type Identity } from "../identity.js";
 import {
   listRecordedRuns, observedAlive, processStartedAt, readOwnerRecord, runProcessAlive,
   signalRecordedGroup, statusRows, type RecordedGroup,
 } from "../run-registry.js";
 import { Store } from "../store.js";
-import { validateGraph, faultLines, readGraphPromptFile, type GraphPlan, type PlannedNode } from "./document.js";
+import { readGraphPromptFile, type GraphPlan, type PlannedNode } from "./document.js";
 import { argvHash, launchGate, readGateExit } from "./gates.js";
 import { GraphStore, newToken, type Attempt, type AttemptState, type GateProc, type Graph } from "./store.js";
 
@@ -61,14 +61,16 @@ function resultPath(row: Record<string, any>): string | undefined {
   return typeof result === "string" && typeof row.run_dir === "string" ? resolve(row.run_dir, result) : undefined;
 }
 
-/** Hold dispatch's own writer lock on a worktree while gates run, so a concurrent writer is still refused. */
-async function holdWriterLock(gitDir: string, env: NodeJS.ProcessEnv): Promise<() => void> {
-  const python = env.HARNESS_PYTHON && isAbsolute(env.HARNESS_PYTHON) ? env.HARNESS_PYTHON : "python3";
+/** Serialise graph owners, or hold dispatch's writer lock while a worktree gate runs. */
+async function holdLock(path: string, chair: Identity, env: NodeJS.ProcessEnv): Promise<() => void> {
+  const root = productRoot(env);
+  const python = pythonOwnerSync(root, chair, env);
   const script = "import fcntl,sys,time\nf=open(sys.argv[1],'a+')\nfor _ in range(300):\n  try:\n    fcntl.flock(f.fileno(),fcntl.LOCK_EX|fcntl.LOCK_NB);break\n  except OSError: time.sleep(0.1)\nelse: sys.exit(3)\nprint('locked',flush=True)\nsys.stdin.read()\n";
-  const child = spawn(python, ["-c", script, join(gitDir, WRITER_LOCK)], { stdio: ["pipe", "pipe", "ignore"] });
+  const child = spawn(python, ["-I", "-c", script, path], { cwd: root, env, stdio: ["pipe", "pipe", "ignore"] });
   await new Promise<void>((resolveLock, reject) => {
     child.stdout!.once("data", () => resolveLock());
-    child.once("exit", (code) => reject(new Error(`worktree writer lock unavailable (${code})`)));
+    child.once("error", reject);
+    child.once("exit", (code) => reject(new Error(`graph process lock unavailable (${code})`)));
   });
   return () => { child.stdin!.end(); };
 }
@@ -95,31 +97,41 @@ class Owner {
   }
 
   async run(): Promise<number> {
+    let releaseLock: (() => void) | undefined;
     try {
       const graph = this.#store.graph(this.project, this.graphId);
       if (!graph || graph.state !== "running") return 0;
+      const dir = join(runRoot(graph.chair.cwd, this.#env), "graphs", this.graphId);
+      mkdirSync(dir, { recursive: true });
+      this.#chair = graph.chair;
+      try { releaseLock = await holdLock(join(dir, "owner.lock"), graph.chair, this.#env); }
+      catch (error) {
+        this.#notify(`graph ${this.graphId} owner lock unavailable; graph remains running with reservations held: ${(error instanceof Error ? error.message : String(error)).slice(0, 500)}`);
+        return 1;
+      }
       this.#started = processStartedAt(process.pid);
       if (!this.#store.claimOwner(this.project, this.graphId, process.pid, this.#started, observedAlive)) return 0;
       hostOwnersInThemselves();
       const mailbox = new Store(databasePath(this.#env));
       try { this.#chair = { ...graph.chair, registeredProjects: mailbox.projects() }; } finally { mailbox.close(); }
-      const document = this.#store.document(this.project, this.graphId, graph.revision);
-      const checked = validateGraph(document, this.#chair, catalogueSnapshot(productRoot(this.#env), this.#env), this.#env);
-      if (!checked.plan) {
-        // Terminal graphs make their reservations stale. Fence every recorded
-        // lane and gate first, even when the plan cannot be rebuilt.
+      try {
+        this.#plan = this.#store.plan(this.project, this.graphId, graph.revision);
+      } catch (error) {
+        // Terminal graphs make reservations stale, so recorded processes must be fenced first.
         for (const row of this.#store.attempts(this.project, this.graphId)) {
-          while (!(await this.#stopProcesses(row))) await sleep(this.#defaults.tick_seconds * 1000);
+          if (!(await this.#stopProcesses(row))) {
+            this.#notify(`graph ${this.graphId} startup fencing exhausted at ${row.node_id}; graph remains running with reservations held; retry resume after checking recorded processes`);
+            return 1;
+          }
           this.#store.releaseSlot(row);
           if (!TERMINAL.includes(row.state)) this.#store.transition(row, [row.state], "stopped", {}, this.#chair.agentId);
           if (row.kept && row.run_dir) rmSync(join(row.run_dir, "KEEP"), { force: true });
         }
-        this.#notify(`graph ${this.graphId} stopped: its document no longer validates · ${faultLines(checked.faults).split("\n")[0]}`);
+        this.#notify(`graph ${this.graphId} stopped: ${error instanceof Error ? error.message : String(error)}`);
         this.#store.setGraph(this.project, this.graphId, { state: "stopped" }, this.#chair.agentId);
         return 1;
       }
-      this.#plan = checked.plan;
-      this.#nodes = new Map(checked.plan.nodes.map((node) => [node.id, node]));
+      this.#nodes = new Map(this.#plan.nodes.map((node) => [node.id, node]));
       this.#graph = graph;
       this.#recover();
       for (;;) {
@@ -133,6 +145,7 @@ class Owner {
     } finally {
       for (const abort of this.#aborts.values()) abort.abort();
       await Promise.allSettled(this.#inflight.values());
+      releaseLock?.();
       this.#store.close();
     }
   }
@@ -376,7 +389,20 @@ class Owner {
     const workCwd = node.worktree?.path ?? node.cwd ?? this.#chair.cwd;
     const inputs = node.inputs.map((input) => ({ from: input.from, attempt: current.get(input.from)!.attempt,
       path: String(current.get(input.from)!.outcome?.result_path ?? "") }));
-    const prompt = node.brief.prompt ?? readGraphPromptFile(node.brief.prompt_file!, this.#chair, this.#env).toString("utf8");
+    let content: Buffer;
+    try {
+      content = node.brief.prompt === undefined ? readGraphPromptFile(node.brief.prompt_file!, this.#chair, this.#env) : Buffer.from(node.brief.prompt);
+    } catch (error) {
+      this.#store.releaseSlot(row);
+      this.#settle(row, "failed", { reason: `brief unavailable: ${(error instanceof Error ? error.message : String(error)).slice(0, 500)}` });
+      return;
+    }
+    if (createHash("sha256").update(content).digest("hex") !== node.brief.sha256) {
+      this.#store.releaseSlot(row);
+      this.#settle(row, "failed", { reason: "brief sha256 mismatch; refusing unvalidated content" });
+      return;
+    }
+    const prompt = content.toString("utf8");
     const brief = inputs.length
       ? `${prompt.trimEnd()}\n\n## Inputs\n\nRead these files; they are the results of earlier graph nodes.\n\n${inputs.map((input) => `- ${input.from}: ${input.path}`).join("\n")}\n`
       : prompt;
@@ -440,7 +466,7 @@ class Owner {
     }
     const procs: GateProc[] = row.gate_procs.filter((gate) => gate.exit !== undefined && gate.exit.exit_code === 0);
     const cwd = node.worktree?.path ?? node.cwd ?? this.#chair.cwd;
-    const release = node.worktree ? await holdWriterLock(node.worktree.gitDir, this.#env) : () => {};
+    const release = node.worktree ? await holdLock(join(node.worktree.gitDir, WRITER_LOCK), this.#chair, this.#env) : () => {};
     let failure: string | undefined;
     try {
       for (let index = procs.length; index < node.gates.length; index++) {

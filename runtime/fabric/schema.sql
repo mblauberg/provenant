@@ -196,6 +196,8 @@ CREATE TABLE IF NOT EXISTS graph_revisions (
   graph_id      TEXT NOT NULL,
   revision      INTEGER NOT NULL,
   document_json TEXT NOT NULL,
+  plan_json     TEXT,
+  spec_hash     TEXT,
   origin        TEXT,
   created_at    INTEGER NOT NULL,
   PRIMARY KEY (project, graph_id, revision)

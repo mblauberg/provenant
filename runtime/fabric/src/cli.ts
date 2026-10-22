@@ -200,21 +200,21 @@ if (command === "graph") {
   try { file = flag("file"); timeout = flag("timeout"); node = flag("node"); }
   catch (error) { console.error(`fabric: ${error instanceof Error ? error.message : String(error)}`); process.exit(2); }
   const [verb, ...rest] = argv.slice(1);
-  const json = rest.includes("--json"), wait = rest.includes("--wait");
-  const words = rest.filter((value) => value !== "--json" && value !== "--wait");
+  const json = rest.includes("--json"), wait = rest.includes("--wait"), force = rest.includes("--force");
+  const words = rest.filter((value) => value !== "--json" && value !== "--wait" && value !== "--force");
   const timeoutSeconds = timeout === undefined ? undefined : Number(timeout);
-  const usage = "fabric: usage: fabric graph run --file F | status [ID] [--json] [--wait [--timeout N]] | cancel ID [--node N] | resume ID";
+  const usage = "fabric: usage: fabric graph run --file F | status [ID] [--json] [--wait [--timeout N]] | cancel ID [--node N] | resume ID [--force]";
   const valid = (verb === "run" && file !== undefined && !words.length && !wait && node === undefined) ||
     (verb === "status" && words.length <= 1 && file === undefined && node === undefined && (timeout === undefined || wait) &&
       (timeoutSeconds === undefined || timeoutSeconds >= 0) && !(json && wait)) ||
     (verb === "cancel" && words.length === 1 && file === undefined && !wait) ||
     (verb === "resume" && words.length === 1 && file === undefined && node === undefined && !wait);
-  if (!valid || words.some((value) => value.startsWith("--"))) { console.error(usage); process.exit(2); }
+  if (!valid || (force && verb !== "resume") || words.some((value) => value.startsWith("--"))) { console.error(usage); process.exit(2); }
   const chair = executionIdentity();
   const result = verb === "run" ? graphRun({ file }, chair)
     : verb === "status" ? await graphStatus(words[0], chair, process.env, { waitSeconds: wait ? (timeoutSeconds ?? 86_400) : 0 })
     : verb === "cancel" ? graphCancel(words[0]!, node, chair)
-    : graphResume(words[0]!, chair);
+    : graphResume(words[0]!, chair, process.env, force);
   if (json) console.log(JSON.stringify(result, null, 2));
   else console.log(typeof result.digest === "string" ? result.digest : `${String(result.error ?? result.status)}${result.fix ? `\nfix: ${String(result.fix)}` : ""}`);
   process.exit(result.status === "rejected" ? 1 : result.timed_out ? 124 : 0);

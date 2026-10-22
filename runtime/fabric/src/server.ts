@@ -631,12 +631,13 @@ register("fabric_cancel", "Stop a run and its provider group, or one task of a b
 register("fabric_graph",
   "Run a plan graph of dispatch nodes under a detached owner, or read, cancel or resume one. run takes file or document; status without id lists graphs and restarts a dead owner; wait_seconds up to 55.",
   { action: z.enum(["run", "status", "cancel", "resume"]), file: str, document: z.record(z.string(), z.unknown()).optional(),
-    id: str, node: str, wait_seconds: wait, detail },
-  async ({ action, file, document, id, node, wait_seconds, detail }, { signal }) => {
+    id: str, node: str, force: z.boolean().optional(), wait_seconds: wait, detail },
+  async ({ action, file, document, id, node, force, wait_seconds, detail }, { signal }) => {
     const misuse = (fix: string) => ({ status: "rejected", error: "graph_input_invalid", fix });
     if (action === "run" && (file === undefined) === (document === undefined)) return misuse("Pass exactly one of file or document for run.");
     if (action !== "run" && (file !== undefined || document !== undefined)) return misuse(`Remove file and document: ${action} reads an existing graph.`);
     if ((action === "cancel" || action === "resume") && id === undefined) return misuse(`Pass the graph id to ${action}.`);
+    if (force !== undefined && action !== "resume") return misuse("force applies only to resume.");
     if (node !== undefined && action !== "cancel") return misuse("node applies only to cancel.");
     const waitResult = boundedWait(wait_seconds);
     if (waitResult.error) return waitResult.error;
@@ -646,7 +647,7 @@ register("fabric_graph",
     const result = action === "run" ? graphRun(file !== undefined ? { file } : { document }, chair)
       : action === "status" ? await graphStatus(id, chair, process.env, { waitSeconds: waitResult.value ?? 0, resume: true, signal })
       : action === "cancel" ? graphCancel(id!, node, chair)
-      : graphResume(id!, chair);
+      : graphResume(id!, chair, process.env, force);
     const view = withWarnings(result, waitResult.warnings);
     return detail === "full" ? view : { status: view.status, ...(view.error ? { error: view.error, fix: view.fix } : {}),
       ...(typeof view.digest === "string" ? { digest: view.digest } : {}), ...(view.warnings ? { warnings: view.warnings } : {}) };

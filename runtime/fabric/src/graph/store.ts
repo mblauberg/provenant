@@ -4,13 +4,13 @@
  * so `fabric_events` and the console see the graph move.
  */
 import Database from "better-sqlite3";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { databasePath, type Identity } from "../identity.js";
 import { Store } from "../store.js";
-import { attemptTaskId, type GraphDocument, type GraphPlan } from "./document.js";
+import { canonicalJson, attemptTaskId, type GraphDocument, type GraphPlan } from "./document.js";
 
 export const RESERVATION_FILE = "provenant-graph-reservation.json";
 export const TERMINAL_GRAPH = ["done", "stopped", "cancelled"];
@@ -104,6 +104,13 @@ export class GraphStore {
     new Store(path).close(); // bootstraps the schema, graph tables included
     this.#db = new Database(path, { timeout: 5000 });
     this.#db.pragma("busy_timeout = 5000");
+    // Older revisions have no frozen plan and must never be silently replanned.
+    const columns = new Set((this.#db.pragma("table_info(graph_revisions)") as Array<{ name: string }>).map((column) => column.name));
+    for (const name of ["plan_json", "spec_hash"]) {
+      if (columns.has(name)) continue;
+      try { this.#db.exec(`ALTER TABLE graph_revisions ADD COLUMN ${name} TEXT`); }
+      catch (error) { if (!(error instanceof Error) || !/duplicate column name/i.test(error.message)) throw error; }
+    }
   }
 
   close(): void { this.#db.close(); }
@@ -119,8 +126,8 @@ export class GraphStore {
     this.#db.transaction(() => {
       this.#db.prepare(`INSERT INTO graphs(project, graph_id, revision, state, chair_identity, created_at, updated_at)
         VALUES (?, ?, 1, 'running', ?, ?, ?)`).run(chair.project, plan.graph_id, JSON.stringify(chair), now, now);
-      this.#db.prepare(`INSERT INTO graph_revisions(project, graph_id, revision, document_json, origin, created_at)
-        VALUES (?, ?, 1, ?, ?, ?)`).run(chair.project, plan.graph_id, JSON.stringify(document),
+      this.#db.prepare(`INSERT INTO graph_revisions(project, graph_id, revision, document_json, plan_json, spec_hash, origin, created_at)
+        VALUES (?, ?, 1, ?, ?, ?, ?, ?)`).run(chair.project, plan.graph_id, JSON.stringify(document), JSON.stringify(plan), createHash("sha256").update(canonicalJson({ document, plan })).digest("hex"),
         document.origin === undefined ? null : JSON.stringify(document.origin), now);
       const insert = this.#db.prepare(`INSERT INTO graph_attempts(project, graph_id, node_id, revision, attempt, restart,
         state, task_id, adapter, model, account, updated_at) VALUES (?, ?, ?, 1, 1, 0, 'pending', ?, ?, ?, ?, ?)`);
@@ -149,6 +156,18 @@ export class GraphStore {
     return JSON.parse(row.document_json) as GraphDocument;
   }
 
+  /** Load exactly the validated plan; catalogue and prompt changes cannot replan a revision. */
+  plan(project: string, graphId: string, revision: number): GraphPlan {
+    const row = this.#db.prepare(`SELECT document_json, plan_json, spec_hash FROM graph_revisions
+      WHERE project = ? AND graph_id = ? AND revision = ?`).get(project, graphId, revision) as
+      { document_json: string; plan_json: string | null; spec_hash: string | null } | undefined;
+    if (!row?.plan_json || !row.spec_hash) throw new Error("no frozen plan; refusing resume; create a new graph");
+    const document: unknown = JSON.parse(row.document_json), plan: GraphPlan = JSON.parse(row.plan_json) as GraphPlan;
+    const hash = createHash("sha256").update(canonicalJson({ document, plan })).digest("hex");
+    if (hash !== row.spec_hash) throw new Error("document or frozen plan spec_hash changed; refusing resume; create a new graph");
+    return plan;
+  }
+
   /** Every attempt of a graph, oldest first per node. */
   attempts(project: string, graphId: string): Attempt[] {
     return (this.#db.prepare(`SELECT * FROM graph_attempts WHERE project = ? AND graph_id = ?
@@ -172,6 +191,17 @@ export class GraphStore {
       this.#db.prepare(`UPDATE graphs SET owner_pid = ?, owner_started = ?, updated_at = ? WHERE project = ? AND graph_id = ?`)
         .run(pid, started, Date.now(), project, graphId);
       return true;
+    }).immediate();
+  }
+
+  /** Explicit operator escape; the process lock serialises owners and recovery keeps all fences. */
+  forceOwner(project: string, graphId: string, agentId: string): void {
+    this.#db.transaction(() => {
+      const row = this.graph(project, graphId);
+      if (!row || row.state !== "running") return;
+      this.#db.prepare(`UPDATE graphs SET owner_pid = NULL, owner_started = NULL, updated_at = ? WHERE project = ? AND graph_id = ?`)
+        .run(Date.now(), project, graphId);
+      this.#log(project, agentId, `${graphId} forced owner takeover by ${agentId}; previous pid ${row.owner_pid}, started ${row.owner_started}`);
     }).immediate();
   }
 

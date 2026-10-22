@@ -1,5 +1,6 @@
-import { execFileSync } from "node:child_process";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { execFileSync, spawnSync } from "node:child_process";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { createRequire } from "node:module";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -117,6 +118,26 @@ describe("graph document validation", () => {
       expect(result.faults).toContainEqual(expect.objectContaining({ node: "a",
         error: name === "unrelated" ? "prompt_path_forbidden" : "credential_or_auth_store_denied" }));
     });
+
+  it("isolates prompt validation from project Python modules and honours the Python owner selector", () => {
+    const marker = join(repo, "python-imported");
+    const shadow = join(repo, "base64.py");
+    writeFileSync(shadow, `from pathlib import Path\nPath(${JSON.stringify(marker)}).touch()\nraise RuntimeError("project module executed")\n`);
+    const python = execFileSync("/usr/bin/env", ["python3", "-I", "-c", "import sys; print(sys.executable)"], { encoding: "utf8" }).trim();
+    const script = `import { readGraphPromptFile } from ${JSON.stringify(new URL("../src/graph/document.ts", import.meta.url).href)};
+      process.stdout.write(readGraphPromptFile("brief.md", ${JSON.stringify(identity)}).toString());`;
+    try {
+      const result = spawnSync(process.execPath, ["--import", createRequire(import.meta.url).resolve("tsx"), "--input-type=module", "-e", script],
+        { cwd: repo, env: { ...process.env, HARNESS_PYTHON: python, AGENT_FABRIC_PRODUCT_ROOT: repositoryRoot }, encoding: "utf8" });
+      expect(existsSync(marker), result.stderr).toBe(false);
+      expect(result.status, result.stderr).toBe(0);
+      expect(result.stdout).toBe("Read the code.\n");
+      const rejected = spawnSync(process.execPath, ["--import", createRequire(import.meta.url).resolve("tsx"), "--input-type=module", "-e", script],
+        { cwd: repo, env: { ...process.env, HARNESS_PYTHON: "relative-python", AGENT_FABRIC_PRODUCT_ROOT: repositoryRoot }, encoding: "utf8" });
+      expect(rejected.status).not.toBe(0);
+      expect(rejected.stderr).toContain("Python execution owner is unavailable");
+    } finally { rmSync(shadow); }
+  });
 
   it("requires a writer to use a linked worktree, never the primary checkout, and orders writers sharing one", () => {
     const writer = (id: string, extra: Record<string, unknown> = {}) => reader(id, {

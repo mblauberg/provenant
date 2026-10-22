@@ -110,6 +110,7 @@ in four tables in the existing Fabric store; a node's receipt references its
 dispatch receipt by run and task id and copies no provider output. There is
 still no daemon: a dead owner is detected on read and restarted by `resume`,
 and recovery adopts the lanes the registry still shows.
+`provenant graph resume ID --force` audits the caller and replaces stale owner identity under a process lock, retaining lane and gate fences until recovery proves them stopped.
 
 Two mechanisms are new. A writer node's linked worktree is reserved for the
 graph in the store and by a file in its Git directory, which `dispatch_run.py`
