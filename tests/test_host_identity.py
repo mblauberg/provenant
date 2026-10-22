@@ -120,3 +120,14 @@ def test_earlier_stored_ids_read_as_this_host(owners):
         assert owner.canonical(stored, 'studio') == 'studio'
     for other in ('peer', 'Peer-Box.local', None, ['studio']):
         assert owner.canonical(other, 'studio') == other
+
+
+def test_a_configured_peer_named_like_this_hostname_is_never_a_local_alias(owners, monkeypatch):
+    _, _, path = owners
+    monkeypatch.setattr(socket, 'gethostname', lambda: 'box.local')
+    write(path, {'schema_version': 1, 'local_host': 'studio', 'peers': {'box': {'ssh_destination': 'box'},
+                                                                         'local': {'ssh_destination': 'l'}}})
+    assert owner.aliases('studio') == {'studio', 'box.local'}
+    assert owner.canonical('box', 'studio') == 'box'
+    assert owner.canonical('local', 'studio') == 'local'
+    assert owner.canonical('box.local', 'studio') == 'studio'

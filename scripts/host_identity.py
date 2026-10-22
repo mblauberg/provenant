@@ -73,13 +73,30 @@ def host_id(path=None):
     return resolve(path)[0]
 
 
-def aliases(current=None):
-    """Ids this machine's own stores may hold: the current id, the raw hostname, its slug and 'local'."""
+def peer_ids(path=None):
+    """Configured peer names, read leniently: a broken file names no peers."""
+    path = Path(path) if path is not None else config_path()
+    try:
+        value = json.loads(path.read_bytes())
+    except (OSError, ValueError, UnicodeError):
+        return set()
+    peers = value.get('peers') if isinstance(value, dict) else None
+    return {name for name in peers if isinstance(name, str)} if isinstance(peers, dict) else set()
+
+
+def aliases(current=None, path=None):
+    """Ids this machine's own stores may hold: the current id, the raw hostname, its slug and 'local'.
+
+    A configured peer's id is never an alias, even when it matches this hostname's slug."""
+    current = current or host_id(path)
     raw = hostname()
-    return {current or host_id(), raw, slug(raw), FALLBACK} - {''}
+    return {current} | ({raw, slug(raw), FALLBACK} - {''} - peer_ids(path))
 
 
-def canonical(value, current=None):
-    """Read a host stored by this machine under an earlier default as the current id."""
+def canonical(value, current=None, known=None):
+    """Read a host stored by this machine under an earlier default as the current id.
+
+    `known` is a precomputed `aliases(current)` for callers that map many rows."""
     current = current or host_id()
-    return current if isinstance(value, str) and value in aliases(current) else value
+    known = aliases(current) if known is None else known
+    return current if isinstance(value, str) and value in known else value

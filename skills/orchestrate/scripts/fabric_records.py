@@ -303,6 +303,9 @@ def _load_cooldowns(path, at, *, persist=True):
             entry['host'] = legacy['host']
             if entry.get('account') is None:
                 entry['account'] = legacy['account']
+        # This machine's earlier ids (raw hostname, its slug, 'local') key as the current id, so a
+        # success clears and a repeat limit doubles the same entry. Peer ids are never aliases.
+        entry['host'] = resolver.same_host(entry['host'])
         scoped = cooldown_key(entry['adapter'], entry['model'], entry)
         previous = values.get(scoped)
         if previous is None or parse_time(entry['cooling_until']) > parse_time(previous['cooling_until']):

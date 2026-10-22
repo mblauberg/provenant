@@ -488,7 +488,10 @@ peers, the command stays local.
 Ledger rows and quota snapshots carry the same local host id as fabric
 (`scripts/host_identity.py`). Rows and snapshots that an earlier build stored
 under the raw hostname or `local` are read as this host; they are not
-rewritten. Quota is account-scoped and already includes
+rewritten. A name configured as a peer is never read as this host, even when
+it matches the hostname. Cooldowns stored under an earlier id are rekeyed to
+the current id when the cooldown store is next written, so a success clears
+them and a repeat limit doubles their backoff. Quota is account-scoped and already includes
 use from every host. When peers report the same provider/account label, stats
 uses its freshest cached quota observation. It never sums quota percentages or
 writes peer snapshots into the local route state. See [telemetry](telemetry.md)

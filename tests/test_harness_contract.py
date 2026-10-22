@@ -429,3 +429,30 @@ def test_skill_javascript_gate_rejects_an_empty_tree(tmp_path: Path):
         text=True,
     )
     assert result.returncode != 0
+
+
+def test_root_harness_checker_never_trusts_git_from_path(tmp_path):
+    """With no Git at a trusted location, a PATH git must not become the checkout's identity source."""
+    script = (ROOT / "scripts/check-harness").read_text()
+    prelude = script[:script.index("export PROVENANT_GIT_BIN")]
+    trusted = "/opt/homebrew/bin/git /usr/local/bin/git /opt/local/bin/git /usr/bin/git /bin/git"
+    assert trusted in prelude
+    # Stand in for a host where none of the trusted locations exist.
+    missing = " ".join(str(tmp_path / "absent" / str(index) / "git") for index in range(5))
+    shadow_dir = tmp_path / "shadow-bin"
+    shadow_dir.mkdir()
+    marker = tmp_path / "shadow-git-ran"
+    (shadow_dir / "git").write_text(f"#!/bin/sh\ntouch '{marker}'\n")
+    (shadow_dir / "git").chmod(0o755)
+    probe = tmp_path / "probe.sh"
+    probe.write_text(prelude.replace(trusted, missing) + 'echo "git_bin=$PROVENANT_GIT_BIN"\n')
+    result = subprocess.run(
+        [shutil.which("bash"), str(probe)], cwd=tmp_path, text=True, capture_output=True, check=False,
+        env={**clean_git_test_environment(), "PATH": f"{shadow_dir}:/usr/bin:/bin"},
+    )
+    assert result.returncode == 3, result.stdout
+    assert "git_bin=" not in result.stdout
+    assert "trusted Git executable is unavailable" in result.stderr
+    for location in ("/opt/homebrew/bin/git", "/usr/bin/git", "/bin/git"):
+        assert location in result.stderr
+    assert not marker.exists()

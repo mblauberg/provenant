@@ -65,16 +65,27 @@ def host_id():
     return _HOST
 
 
+_ALIASES = None
+
+
+def host_aliases():
+    """This machine's earlier ids, read once per process like the host id."""
+    global _ALIASES
+    if _ALIASES is None:
+        _ALIASES = frozenset(host_identity().aliases(host_id()))
+    return _ALIASES
+
+
 def same_host(value):
     """This machine's rows read as one host, whichever earlier default stored them."""
-    return host_identity().canonical(value, host_id())
+    return host_identity().canonical(value, host_id(), host_aliases())
 
 
 def host_keys(host):
     """The stored host values a lookup for `host` must match; this machine's earlier ids included."""
     if same_host(host) != host_id():
         return [host]
-    return sorted(host_identity().aliases(host_id()))
+    return sorted(host_aliases())
 
 
 def host_clause(host):
