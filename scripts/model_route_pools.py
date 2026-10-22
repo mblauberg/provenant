@@ -141,12 +141,17 @@ def reject_renamed(overlay: Any, label: str = "overlay") -> Any:
     return overlay
 
 
+class MigrationConflict(ValueError):
+    """An installed catalogue holds a retired name and its replacement with different values."""
+
+
 def migrate_renamed(document: Any) -> tuple[Any, list[str], list[str]]:
     """Rewrite retired tier names in an installed catalogue, keeping their values; list what moved.
 
     Used by the routing refresh only. Routing itself still rejects these names. A key under its new
-    name wins over the same key under the old one; route pools merge, new-name entries first.
-    The third result lists the dotted paths of renamed alias keys, whose values the caller keeps.
+    holds the same value as the old one, or `MigrationConflict` is raised: no value is dropped.
+    The third result lists the dotted paths of renamed alias keys and route pools, whose values the
+    caller keeps.
     """
     if not isinstance(document, dict):
         return document, [], []
@@ -157,6 +162,13 @@ def migrate_renamed(document: Any) -> tuple[Any, list[str], list[str]]:
     def new_name(name: str) -> str:
         return RENAMED_TIERS[name.strip().casefold()]
 
+    def settle(target: dict[str, Any], name: str, value: Any, old_path: str, new_path: str) -> None:
+        if name in target and target[name] != value:
+            raise MigrationConflict(
+                f"{old_path} = {json.dumps(value)} conflicts with {new_path} = {json.dumps(target[name])}; "
+                "keep one, delete the other, then refresh again")
+        target.setdefault(name, value)
+
     def rename_keys(mapping: Any, path: str) -> Any:
         if not isinstance(mapping, dict) or not any(_renamed(key) for key in mapping):
             return mapping
@@ -165,7 +177,7 @@ def migrate_renamed(document: Any) -> tuple[Any, list[str], list[str]]:
             if _renamed(key):
                 notes.append(f"{path}.{key} -> {new_name(key)}")
                 moved.append(f"{path}.{new_name(key)}")
-                result.setdefault(new_name(key), value)
+                settle(result, new_name(key), value, f"{path}.{key}", f"{path}.{new_name(key)}")
         return result
 
     def rename_alias(holder: Any, path: str) -> None:
@@ -180,13 +192,8 @@ def migrate_renamed(document: Any) -> tuple[Any, list[str], list[str]]:
             if not _renamed(key):
                 continue
             notes.append(f"routes.{key} -> {new_name(key)}")
-            current = merged.get(new_name(key))
-            if isinstance(value, list) and isinstance(current, list):
-                listed = {entry.get("model") for entry in current if isinstance(entry, dict)}
-                merged[new_name(key)] = [*current, *(entry for entry in value
-                                                     if not isinstance(entry, dict) or entry.get("model") not in listed)]
-            else:
-                merged.setdefault(new_name(key), value)
+            moved.append(f"routes.{new_name(key)}")
+            settle(merged, new_name(key), value, f"routes.{key}", f"routes.{new_name(key)}")
         document["routes"] = merged
     synonyms = document.get("route_synonyms")
     if isinstance(synonyms, dict):

@@ -850,3 +850,77 @@ def test_refresh_migrates_retired_tier_names_and_the_router_accepts_the_result(t
                             text=True, capture_output=True, env=env, check=False)
     assert routes.returncode == 0, routes.stderr
     assert instance.routing_drift(product, root) == []
+
+
+def _legacy_instance(tmp_path, with_base, edit):
+    product = tmp_path / "product"
+    (product / "config").mkdir(parents=True)
+    shipped = json.loads((ROOT / "config" / "model-routing.json").read_text())
+    (product / "config" / "model-routing.json").write_text(json.dumps(shipped))
+    (product / "config" / "model-preferences.json").write_text("{}\n")
+    (product / "AGENTS.md").write_text("# doctrine\n")
+    (product / "package.json").write_text(json.dumps({"version": "1.2.3"}) + "\n")
+    root = tmp_path / "instance"
+    seed(product, root)
+    legacy = legacy_copy(shipped)
+    edit(legacy)
+    target = root / "config/model-routing.json"
+    target.write_text(json.dumps(legacy))
+    base = root / "config/.model-routing.base.json"
+    if with_base:
+        base.write_text(json.dumps(legacy_copy(shipped)))
+    else:
+        base.unlink()
+    return product, root, target
+
+
+@pytest.mark.parametrize("with_base", [False, True])
+def test_refresh_stops_when_old_and_new_keys_hold_different_values(tmp_path, with_base):
+    def edit(doc):
+        aliases = doc["families"]["openai"]["aliases"]
+        aliases["flagship"] = ["gpt-6-luna"]
+        aliases["principal"] = ["gpt-6-astra"]
+    product, root, target = _legacy_instance(tmp_path, with_base, edit)
+    before = target.read_bytes()
+
+    result = run("refresh-routing", product, root, "--summary")
+
+    assert result.returncode != 0
+    message = result.stdout + result.stderr
+    assert "flagship" in message and "principal" in message
+    assert "gpt-6-luna" in message and "gpt-6-astra" in message
+    assert "kept" not in message
+    assert target.read_bytes() == before
+
+
+def test_refresh_merges_old_and_new_keys_quietly_when_values_are_equal(tmp_path):
+    def edit(doc):
+        aliases = doc["families"]["openai"]["aliases"]
+        aliases["flagship"] = ["gpt-6-astra"]
+        aliases["principal"] = ["gpt-6-astra"]
+    product, root, target = _legacy_instance(tmp_path, False, edit)
+
+    result = run("refresh-routing", product, root, "--summary")
+
+    assert result.returncode == 0, result.stderr
+    assert json.loads(target.read_text())["families"]["openai"]["aliases"]["principal"] == ["gpt-6-astra"]
+
+
+def test_refresh_without_a_base_moves_edited_route_pools_to_the_new_name(tmp_path):
+    edited = {}
+
+    def edit(doc):
+        pool = doc["routes"].pop("senior")
+        pool.append({"model": "custom-extra", "weight": "high"})
+        pool[0]["weight"] = "off"
+        doc["routes"]["workhorse"] = pool
+        edited["pool"] = json.loads(json.dumps(pool))
+    product, root, target = _legacy_instance(tmp_path, False, edit)
+
+    result = run("refresh-routing", product, root, "--summary")
+
+    assert result.returncode == 0, result.stderr
+    refreshed = json.loads(target.read_text())
+    assert "workhorse" not in refreshed["routes"]
+    assert refreshed["routes"]["senior"] == edited["pool"], "the user's pool edits move with the name"
+    assert instance.routing_drift(product, root) == []

@@ -482,8 +482,12 @@ def _migrate_renamed(installed: dict[str, Any], base: dict[str, Any] | None
                      ) -> tuple[dict[str, Any], dict[str, Any] | None, list[str], list[str]]:
     """Move retired tier names in the instance copy (and its base snapshot) to their new names."""
     pools = _pools_module()
-    migrated, notes, moved = pools.migrate_renamed(installed)
-    return migrated, (pools.migrate_renamed(base)[0] if base is not None else None), notes, moved
+    try:
+        migrated, notes, moved = pools.migrate_renamed(installed)
+        migrated_base = pools.migrate_renamed(base)[0] if base is not None else None
+    except pools.MigrationConflict as error:
+        raise InstallError(f"routing catalogue has a retired tier name and its replacement with different values: {error}") from error
+    return migrated, migrated_base, notes, moved
 
 
 def routing_drift(product_root: Path, instance_root: Path) -> list[str]:
@@ -491,7 +495,10 @@ def routing_drift(product_root: Path, instance_root: Path) -> list[str]:
     if documents is None:
         return []
     product, installed = documents
-    migrated, base, _, _ = _migrate_renamed(installed, _routing_base(instance_root))
+    try:
+        migrated, base, _, _ = _migrate_renamed(installed, _routing_base(instance_root))
+    except InstallError as error:
+        return [str(error)]
     merged, _ = _routing_result(product, migrated, base)
     return _routing_differences(merged, installed, ())
 
@@ -511,7 +518,7 @@ def refresh_routing(product_root: Path, instance_root: Path) -> dict[str, Any]:
     installed, base, migrated_notes, moved = _migrate_renamed(installed, _routing_base(instance_root))
     result, conflicts = _routing_result(product, installed, base)
     if base is None:
-        # No snapshot says what the product shipped before, so a renamed alias key keeps its instance value.
+        # No snapshot says what the product shipped before, so a renamed alias key or route pool keeps its instance value.
         for dotted in moved:
             source: Any = installed
             target_node: Any = result
@@ -777,7 +784,7 @@ def main(argv: list[str] | None = None) -> int:
             for key in routing["retained"]:
                 print(f"routing retained (not in product; remove if retired)={key}")
             for key in routing.get("migrated", []):
-                print(f"routing migrated retired tier name={key} (value kept)")
+                print(f"routing migrated retired tier name={key}")
             if routing["schema_changed"]:
                 print("routing warning=schema_version-changed")
             return 0
