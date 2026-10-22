@@ -1696,7 +1696,7 @@ FAILURE_RULES: list[FailureRule] = [
                 error_class="usage_limited", statuses=("usage_limited",), aliases=("quota_exhausted",)),
     FailureRule("auth_required", r"authentication required|please sign in|please(?: run)? login|not logged in|not authenticated|unauthenticated|unauthorized|login expired|\b401\b",
                 error_class="auth", statuses=("auth_required",), aliases=("auth_expired",)),
-    FailureRule("rate_limited", r"rate.?limit|too many requests|overload(?:ed)?|model[^\n]*\bat capacity\b|\b(?:429|529)\b|per[ -](?:minute|second)",
+    FailureRule("rate_limited", r"rate.?limit|too many requests|overloaded|model[^\n]*\bat capacity\b|\b(?:429|529)\b|per[ -](?:minute|second)",
                 error_class="rate_limited", statuses=("rate_limited",)),
     FailureRule("model_unavailable", r"model[^\n]*(?:unavailable|not available|not found|unsupported|does not exist)|unknown model",
                 error_class="model_unavailable", statuses=("model_unavailable",), aliases=("pinned_model_substitution",)),

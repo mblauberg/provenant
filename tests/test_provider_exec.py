@@ -2241,8 +2241,10 @@ _CLASSIFIER_QUOTA_CASES = [
     *[(adapter, '{"type":"result","result":"DONE"}', "ls: /root: Permission denied", 0, "ok", None, "none")
       for adapter in ("claude", "codex", "opencode")],
     *[(adapter, json.dumps({"type": "text", "text": message}), "", 0, "ok", None, "none")
-      for adapter, message in [("opencode", "Model at capacity; provider overload"),
+      for adapter, message in [("opencode", "Model at capacity; provider overloaded"),
                                ("claude", "Discuss the weekly usage limit and quota exceeded errors")]],
+    ("opencode", json.dumps({"type": "text", "text": "DONE"}),
+     "ERROR src/a.ts(3,1): error TS2769: No overload matches this call.", 1, "ok", "exit_after_output", "none"),
 ])
 def test_classifier_contract(adapter, stdout, stderr, exit_code, status, signature, expected_class):
     parsed = supervisor().parse_output(adapter, stdout, stderr, exit_code)
@@ -2257,7 +2259,7 @@ def test_classifier_contract(adapter, stdout, stderr, exit_code, status, signatu
     ("agy", "fixture"), ("claude", "fixture"), ("codex", "fixture"),
     ("opencode", "event"), ("opencode", "stderr"),
 ])
-@pytest.mark.parametrize("message", ["Model at capacity", "Provider overload"])
+@pytest.mark.parametrize("message", ["Model at capacity", "overloaded_error: Overloaded"])
 def test_capacity_and_overload_are_retryable_provider_failures(tmp_path, adapter, shape, message):
     if shape == "fixture":
         fixture = json.loads((ROOT / f"tests/fixtures/fabric-v1/provider-{adapter}.json").read_text())
