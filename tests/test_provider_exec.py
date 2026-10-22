@@ -2002,7 +2002,7 @@ def test_sandbox_exec_profile_denies_home_reads_and_writes_but_keeps_provider_st
         pytest.skip("sandbox_apply is refused in this test environment")
     assert probe.stdout == "note\n"
     config = run(
-        f"git -C '{cwd}' config --global user.name && git -C '{cwd}' config --global user.email"
+        f"git -C '{cwd}' config user.name && git -C '{cwd}' config user.email"
     )
     assert config.returncode == 0, config.stderr
     assert config.stdout.splitlines() == ["home-config", "xdg-config@example.invalid"]
@@ -6951,8 +6951,10 @@ def test_opencode_discovery_grants_only_ancestor_directory_metadata(tmp_path, mo
 @pytest.mark.skipif(sys.platform != "darwin", reason="sandbox-exec is macOS-only")
 @pytest.mark.parametrize("mode", ["read_only", "worktree_write"])
 @pytest.mark.parametrize("symlink", [False, True])
-def test_opencode_discovery_lstats_denied_ancestor_without_reading_contents(tmp_path, mode, symlink):
+def test_opencode_discovery_lstats_denied_ancestor_without_reading_contents(tmp_path, monkeypatch, mode, symlink):
     mod = supervisor()
+    # The profile denies reads under HOME; a uv/pyenv interpreter lives there, so point HOME elsewhere.
+    monkeypatch.setattr(mod.Path, "home", lambda: tmp_path / "home")
     sandbox_exec = mod._sandbox_exec_path()
     if not sandbox_exec:
         pytest.skip("sandbox-exec is unavailable or disabled")
