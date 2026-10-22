@@ -1,4 +1,5 @@
 usage: provenant telemetry ingest|sources [--json]
+       provenant telemetry accepted [--since ISO-DATE] [--json]
        provenant telemetry changes [--sync | --add LABEL --at ISO] [--since ISO] [--json]
 
 Delegates to scripts/provenant-telemetry.

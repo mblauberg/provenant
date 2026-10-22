@@ -127,7 +127,7 @@ def test_delivery_sidecars_ingest_repair_transitions_and_finding_lineage(tmp_pat
     assert len(findings) == 3
     assert all(item['reviewer_family'] == 'anthropic' and item['model'] == 'claude-test' for item in findings)
     sources = {item['source']: item for item in json.loads(cli(tmp_path, 'telemetry', 'sources', '--json').stdout)}
-    assert sources['delivery']['row_count'] == 5
+    assert sources['delivery']['row_count'] == 6
 
 
 def test_provider_compaction_rows_store_only_metadata(tmp_path):
@@ -190,6 +190,102 @@ def test_delivery_discovery_follows_linked_worktree_git_common_dir(tmp_path):
     assert result.returncode == 0, result.stdout + result.stderr
     with sqlite3.connect(worktree / 'state/telemetry.sqlite3') as db:
         assert db.execute("SELECT COUNT(*) FROM events WHERE kind='repair.cycle'").fetchone()[0] == 1
+
+
+def test_accepted_uses_receipt_basis_canonical_artifact_and_synced_merge(tmp_path):
+    root = tmp_path / '.agent-run/runs'
+    merge_commit = 'b' * 40
+    for name, basis, canonical_commit in [
+            ('checks', 'checks-and-review', merge_commit),
+            ('landing', 'project-landing', 'c' * 40),
+            ('user', 'user', None), ('unaccepted', None, None),
+            ('invalid', 'ok', None)]:
+        receipt = {'run_id': name, 'risk_tier': 'substantial',
+                   'software_delivery': {'canonical_artifact_id': 'source'},
+                   'artifacts': [{'id': 'source', 'git_revision': {'commit': canonical_commit}},
+                                 {'id': 'other', 'git_revision': {'commit': merge_commit}}]}
+        if basis:
+            receipt['delivery_acceptance'] = {'basis': basis}
+        write_json(root / name / 'RUN.json', receipt)
+    assert cli(tmp_path, 'telemetry', 'ingest').returncode == 0
+    with sqlite3.connect(tmp_path / 'state/telemetry.sqlite3') as db:
+        db.execute("INSERT INTO changes(change_id,kind,pr,merge_commit,merged_at,title,labels,added_at) "
+                   "VALUES ('merge:1','pull_request',1,?,'2026-10-22T00:00:00Z','merged','[]',"
+                   "'2026-10-22T00:00:00Z')", (merge_commit,))
+    report = json.loads(cli(tmp_path, 'telemetry', 'accepted', '--json').stdout)
+    assert len(report) == 1
+    assert (report[0]['runs'], report[0]['accepted'], report[0]['merged']) == (5, 3, 1)
+
+
+def test_accepted_cost_is_null_and_unlinked_even_with_matching_lanes(tmp_path):
+    root = tmp_path / '.agent-run/runs'
+    write_json(root / 'delivery/RUN.json', {
+        'run_id': 'delivery', 'risk_tier': 'routine',
+        'delivery_acceptance': {'basis': 'user'},
+        'authority': {'allowed_source_paths': ['.worktrees/shared']},
+        'evidence': [{'started_at': '2026-10-22T00:00:00Z',
+                      'finished_at': '2026-10-22T00:02:00Z'}]})
+    write_json(root / 'dispatch/dispatch/tasks/task/attempt-001/attempt.json', {
+        'run_id': 'dispatch', 'task_id': 'task', 'attempt': 1, 'status': 'ok',
+        'workspace': {'root': str(tmp_path / '.worktrees/shared')},
+        'started_at': '2026-10-22T00:00:00Z', 'ended_at': '2026-10-22T00:01:00Z',
+        'provenance': {'requested': {'adapter': 'claude', 'model': 'opus'}, 'provider': 'anthropic'},
+        'profile': {'preset': 'balanced', 'digest': 'a' * 64, 'knobs': {}},
+        'usage': {'input_tokens': 1000, 'output_tokens': 2000}})
+    assert cli(tmp_path, 'telemetry', 'ingest').returncode == 0
+    report = json.loads(cli(tmp_path, 'telemetry', 'accepted', '--json').stdout)
+    assert report == [{'risk_tier': 'routine', 'harness_digest': None,
+                       'runs': 1, 'accepted': 1, 'merged': 0, 'usage_rows': 0,
+                       'unpriced_rows': 0, 'cost_usd_lower_bound': None,
+                       'cost_per_accepted_usd_lower_bound': None, 'cost_basis': 'unlinked'}]
+    table = cli(tmp_path, 'telemetry', 'accepted')
+    assert table.returncode == 0 and 'unlinked' in table.stdout
+
+
+def test_accepted_since_uses_run_time_after_backfill_and_receipt_update(tmp_path):
+    root = tmp_path / '.agent-run/runs'
+    old = root / '20261022-1200-delivery-old-a1b2c3/RUN.json'
+    write_json(old, {'run_id': 'old', 'risk_tier': 'routine',
+                     'authority': {'expires_at': '2019-01-01T00:00:00Z'},
+                     'evidence': [{'started_at': '2020-01-01T00:00:00Z',
+                                   'finished_at': '2020-01-01T00:02:00Z'}]})
+    # Receipt mtimes deliberately disagree with the folder stamps in both directions.
+    for name, stamp in [('20200101-1200-delivery-current-a1b2c3', 1792627200),
+                        ('20261022-1201-delivery-stale-a1b2c3', 1577836800)]:
+        path = root / name / 'RUN.json'
+        write_json(path, {'run_id': name,
+                          'risk_tier': 'routine' if 'current' in name else 'substantial'})
+        os.utime(path, (stamp, stamp))
+    for accepted in (False, True):
+        receipt = json.loads(old.read_text())
+        if accepted:
+            receipt['delivery_acceptance'] = {'basis': 'user', 'recorded_at': '2026-10-22T00:00:00Z'}
+            write_json(old, receipt)
+        assert cli(tmp_path, 'telemetry', 'ingest').returncode == 0
+        report = json.loads(cli(tmp_path, 'telemetry', 'accepted', '--since', '2026-01-01', '--json').stdout)
+        assert [(row['risk_tier'], row['runs'], row['accepted']) for row in report] == [('routine', 1, 0)]
+        # Existing ledgers need unchanged receipts re-read under the corrected fallback.
+        with sqlite3.connect(tmp_path / 'state/telemetry.sqlite3') as db:
+            db.execute("DELETE FROM meta WHERE key='delivery_run_time_v2'")
+            db.execute('UPDATE deliveries SET started_at=NULL')
+        assert cli(tmp_path, 'telemetry', 'ingest').returncode == 0
+        report = json.loads(cli(tmp_path, 'telemetry', 'accepted', '--since', '2026-01-01', '--json').stdout)
+        assert sum(row['runs'] for row in report) == 1
+        assert sum(row['accepted'] for row in report) == 0
+
+
+def test_accepted_groups_tiers_with_unknown_digest_without_double_counting(tmp_path):
+    root = tmp_path / '.agent-run/runs'
+    for name, tier, accepted in [('one', 'routine', True), ('two', 'routine', False),
+                                 ('three', 'substantial', True)]:
+        receipt = {'run_id': name, 'risk_tier': tier}
+        if accepted:
+            receipt['delivery_acceptance'] = {'basis': 'checks-and-review'}
+        write_json(root / name / 'RUN.json', receipt)
+    assert cli(tmp_path, 'telemetry', 'ingest').returncode == 0
+    report = json.loads(cli(tmp_path, 'telemetry', 'accepted', '--json').stdout)
+    assert [(row['risk_tier'], row['harness_digest'], row['runs'], row['accepted'])
+            for row in report] == [('routine', None, 2, 1), ('substantial', None, 1, 1)]
 
 
 def test_claude_incremental_dedup_subagents_and_content_exclusion(tmp_path):

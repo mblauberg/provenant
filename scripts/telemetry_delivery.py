@@ -3,15 +3,119 @@
 from __future__ import annotations
 
 from collections import Counter
+from collections import defaultdict
+from datetime import UTC, datetime
 import hashlib
 import json
 from pathlib import Path
 
 
 def paths(telemetry):
-    return sorted(path for root in telemetry.fabric_roots() for name in ('repairs.jsonl', 'findings.jsonl')
-                  for path in root.glob(f'runs/**/{name}')
-                  if path.is_file() and not path.is_symlink())
+    return sorted({path for name in ('RUN.json', 'repairs.jsonl', 'findings.jsonl')
+                   for path in telemetry.fabric_paths(name)})
+
+
+def _run_timestamp(telemetry, receipt, mtime):
+    """Earliest receipt timestamp, or RUN.json mtime when none is recorded."""
+    times = []
+
+    def visit(value):
+        if isinstance(value, dict):
+            for key, item in value.items():
+                if key in {'authority', 'risk_override'}:
+                    continue
+                if key == 'at' or key == 'timestamp' or key.endswith('_at'):
+                    try:
+                        times.append(telemetry.since_time(item))
+                    except (AttributeError, TypeError, ValueError):
+                        pass
+                elif isinstance(item, (dict, list)):
+                    visit(item)
+        elif isinstance(value, list):
+            for item in value:
+                visit(item)
+
+    visit(receipt)
+    if times:
+        return min(times).isoformat()
+    return datetime.fromtimestamp(mtime, UTC).isoformat()
+
+
+def ingest_receipt(telemetry, db, path):
+    """Ingest one RUN.json as a size/mtime-cursored document."""
+    stat = path.stat()
+    old = db.execute("SELECT size,mtime FROM cursors WHERE source='delivery' AND path=?",
+                     (str(path),)).fetchone()
+    if old and (old['size'], old['mtime']) == (stat.st_size, stat.st_mtime_ns):
+        return
+    receipt = json.loads(path.read_text())
+    acceptance = receipt.get('delivery_acceptance')
+    basis = acceptance.get('basis') if isinstance(acceptance, dict) else None
+    if basis not in {'checks-and-review', 'project-landing', 'user'}:
+        basis = None
+    canonical_id = (receipt.get('software_delivery') or {}).get('canonical_artifact_id')
+    artifact = next((item for item in receipt.get('artifacts', [])
+                     if isinstance(item, dict) and item.get('id') == canonical_id), {})
+    revision = artifact.get('git_revision') or {}
+    commit = revision.get('commit') if isinstance(revision, dict) else None
+    started = _run_timestamp(telemetry, receipt, stat.st_mtime)
+    db.execute('''INSERT INTO deliveries
+        (run_dir,host,run_id,risk_tier,chair_family,repair_cycles,acceptance_basis,accepted,merge_commit,ingested_at,started_at)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?)
+        ON CONFLICT(run_dir) DO UPDATE SET host=excluded.host,run_id=excluded.run_id,
+        risk_tier=excluded.risk_tier,chair_family=excluded.chair_family,
+        repair_cycles=excluded.repair_cycles,acceptance_basis=excluded.acceptance_basis,
+        accepted=excluded.accepted,merge_commit=excluded.merge_commit,ingested_at=excluded.ingested_at,
+        started_at=excluded.started_at''',
+               (str(path.parent.resolve()), telemetry.host_id(), receipt.get('run_id'), receipt.get('risk_tier'),
+                receipt.get('chair_family'), receipt.get('repair_cycles'), basis, int(basis is not None),
+                commit, telemetry.now(), started))
+    db.execute('INSERT OR REPLACE INTO cursors VALUES (?,?,?,?,?,?)',
+               ('delivery', str(path), stat.st_size, stat.st_mtime_ns, stat.st_size, '{}'))
+
+
+def cost_per_accepted(telemetry, db, since=None):
+    """Delivery counts by risk tier; lane cost and harness digest are unlinked."""
+    boundary = telemetry.since_time(since) if since else None
+    groups = defaultdict(lambda: {'runs': set(), 'accepted': set(), 'merged': set()})
+    for run in db.execute('SELECT * FROM deliveries ORDER BY run_dir').fetchall():
+        if boundary and (not run['started_at'] or telemetry.since_time(run['started_at']) < boundary):
+            continue
+        merged = bool(run['merge_commit'] and db.execute(
+            'SELECT 1 FROM changes WHERE merge_commit=? LIMIT 1', (run['merge_commit'],)).fetchone())
+        group = groups[(run['risk_tier'], None)]
+        _add_run(group, run, merged)
+    report = []
+    for (risk_tier, digest), group in sorted(groups.items(), key=lambda item: (item[0][0] or '', item[0][1] or '')):
+        report.append({'risk_tier': risk_tier, 'harness_digest': digest,
+                       'runs': len(group['runs']), 'accepted': len(group['accepted']),
+                       'merged': len(group['merged']), 'cost_usd_lower_bound': None,
+                       'usage_rows': 0, 'unpriced_rows': 0,
+                       'cost_per_accepted_usd_lower_bound': None, 'cost_basis': 'unlinked'})
+    return report
+
+
+def run_accepted(telemetry, db, since=None, as_json=False):
+    report = cost_per_accepted(telemetry, db, since)
+    if as_json:
+        print(json.dumps(report, indent=2))
+    else:
+        print('risk_tier  harness_digest  runs  accepted  merged  cost_usd_lower_bound  usage_rows  unpriced_rows  cost_per_accepted_usd_lower_bound  cost_basis')
+        for row in report:
+            cost = row['cost_usd_lower_bound']
+            shown_cost = f'{cost:.9f}' if cost is not None else '-'
+            print(f"{row['risk_tier'] or '-'}  {row['harness_digest'] or '-'}  {row['runs']}  "
+                  f"{row['accepted']}  {row['merged']}  {shown_cost}  {row['usage_rows']}  "
+                  f"{row['unpriced_rows']}  {row['cost_per_accepted_usd_lower_bound']}  {row['cost_basis']}")
+    return 0
+
+
+def _add_run(group, run, merged):
+    group['runs'].add(run['run_dir'])
+    if run['accepted']:
+        group['accepted'].add(run['run_dir'])
+    if merged:
+        group['merged'].add(run['run_dir'])
 
 
 def _review(run_dir, review_id):

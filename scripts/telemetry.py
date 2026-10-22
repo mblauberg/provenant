@@ -117,7 +117,7 @@ def patterns():
         **{source: ';'.join(str(root / folder / pattern) for root, _ in account_roots(source))
            for source, (_, folder, pattern) in IDENTITY_SOURCES.items()},
         'otel': str(state / 'otel/*.ndjson'),
-        'delivery': '<current-and-registered-projects>/.agent-run/runs/**/{repairs,findings}.jsonl',
+        'delivery': '<current-and-registered-projects>/.agent-run/runs/**/{RUN.json,repairs.jsonl,findings.jsonl}',
     }
 
 
@@ -185,7 +185,17 @@ def connect():
             added_at TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS harness_stamps (
             digest TEXT PRIMARY KEY, preset TEXT, knobs TEXT NOT NULL, first_seen TEXT);
+        CREATE TABLE IF NOT EXISTS deliveries (
+            run_dir TEXT PRIMARY KEY, host TEXT, run_id TEXT, risk_tier TEXT, chair_family TEXT,
+            repair_cycles INTEGER, acceptance_basis TEXT, accepted INTEGER NOT NULL DEFAULT 0,
+            merge_commit TEXT, ingested_at TEXT);
     ''')
+    delivery_columns = {row[1] for row in db.execute('PRAGMA table_info(deliveries)')}
+    if 'started_at' not in delivery_columns:
+        db.execute('ALTER TABLE deliveries ADD COLUMN started_at TEXT')
+    if db.execute("SELECT 1 FROM meta WHERE key='delivery_run_time_v2'").fetchone() is None:
+        db.execute("DELETE FROM cursors WHERE source='delivery' AND path LIKE '%/RUN.json'")
+        db.execute("INSERT OR IGNORE INTO meta VALUES ('delivery_run_time_v2', ?)", (now(),))
     observation_columns = {row[1] for row in db.execute('PRAGMA table_info(observations)')}
     if 'origin_path' not in observation_columns:
         db.execute('ALTER TABLE observations ADD COLUMN origin_path TEXT')
@@ -347,6 +357,7 @@ EVENT_KINDS = {
     'limit.usage_limited': 'provider usage limit (route health, cooldowns)',
     'cooldown': 'route cooldown recorded (cooldowns.json)',
     'session.start': 'first ingested usage row of a Claude, Codex or OpenCode session',
+    'plan.mismatch': 'an account\'s configured plan differs from its detected plan',
     'plan.change': 'an account\'s plan, detected plan or plan tier differs from its previous quota reading',
     'otel.user_prompt': 'OTLP log: a user prompt was submitted (length only)',
     'otel.api_request': 'OTLP log: one provider request with tokens, cost and duration',
@@ -369,6 +380,8 @@ def event_key(row):
         parts = (os.path.realpath(row['source_ref']),)
     elif row['kind'] == 'session.compaction':
         parts = ((row['session'], row['ts']) if row['session'] and row['ts'] else (row['source_ref'],))
+    elif row['kind'] == 'plan.mismatch':
+        parts = (row['provider'], row['account'], plan_key(attrs.get('plan')), plan_key(attrs.get('plan_detected')))
     elif row['kind'] in {'repair.cycle', 'review.finding'}:
         parts = (row['source_ref'],)
     else:  # snapshot and collector records (`path@offset#record`): their source plus their content
@@ -431,6 +444,10 @@ SERIES_STATE = ('used_percent', 'window_minutes', 'reset_at', 'plan', 'plan_dete
 PLAN_FIELDS = ('plan', 'plan_detected', 'plan_tier')
 
 
+def plan_key(value):
+    return re.sub(r'[^a-z0-9]', '', str(value).lower()) if value else None
+
+
 def put_quota_series(db, provider, account, host, observed_at, windows, source=None, **reading):
     """Append each window's reading when it differs from the one before it, else extend that row.
 
@@ -457,8 +474,13 @@ def put_quota_series(db, provider, account, host, observed_at, windows, source=N
                    (provider, account, host, window['name'], observed_at, observed_at, source,
                     *(row[name] for name in SERIES_STATE)))
     # Spellings differ by source (`proLite`, `prolite`); an unknown value is never a change.
-    key = lambda value: re.sub(r'[^a-z0-9]', '', str(value).lower()) if value else None
-    changed = before and any(key(before[name]) and key(reading.get(name)) and key(before[name]) != key(reading[name])
+    configured, detected = plan_key(reading.get('plan')), plan_key(reading.get('plan_detected'))
+    if configured and detected and configured != detected:
+        put_event(db, 'plan.mismatch', observed_at, f'quota_series:{provider}/{account}@{host}',
+                  attrs={'plan': reading['plan'], 'plan_detected': reading['plan_detected']},
+                  provider=provider, account=account)
+    changed = before and any(plan_key(before[name]) and plan_key(reading.get(name))
+                             and plan_key(before[name]) != plan_key(reading[name])
                              for name in PLAN_FIELDS)
     if changed:
         put_event(db, 'plan.change', observed_at, f'quota_series:{provider}/{account}@{host}',
@@ -695,8 +717,9 @@ def fabric_roots():
     return _fabric_roots(str(Path.cwd()), registry)
 
 
-def fabric_paths():
-    return sorted({path for root in fabric_roots() for path in root.glob('runs/**/attempt.json')})
+def fabric_paths(name='attempt.json'):
+    return sorted({path for root in fabric_roots() for path in root.glob(f'runs/**/{name}')
+                   if path.is_file() and not path.is_symlink()})
 
 
 # Native sources: the provider whose CLI identity directories hold them, and their place inside one.
@@ -1039,8 +1062,11 @@ def ingest(db):
                     elif source == 'otel':
                         ingest_jsonl(db, source, path, otel_record)
                     elif source == 'delivery':
-                        delivery_owner().prepare(db, path)
-                        ingest_jsonl(db, source, path, partial(delivery_owner().record, this()))
+                        if path.name == 'RUN.json':
+                            delivery_owner().ingest_receipt(this(), db, path)
+                        else:
+                            delivery_owner().prepare(db, path)
+                            ingest_jsonl(db, source, path, partial(delivery_owner().record, this()))
                     else:
                         ingest_jsonl(db, source, path, partial(
                             {'codex': codex_record, 'claude': claude_record}[source], **owner), inode=inode)
@@ -1056,7 +1082,8 @@ def ingest(db):
         if source == 'otel':
             count = db.execute("SELECT COUNT(*) FROM events WHERE kind LIKE 'otel.%'").fetchone()[0]
         elif source == 'delivery':
-            count = db.execute("SELECT COUNT(*) FROM events WHERE kind IN ('repair.cycle','review.finding')").fetchone()[0]
+            count = db.execute("SELECT COUNT(*) FROM deliveries").fetchone()[0] + db.execute(
+                "SELECT COUNT(*) FROM events WHERE kind IN ('repair.cycle','review.finding')").fetchone()[0]
         else:
             table = 'observations' if source in {'route_health', 'cooldowns'} else 'usage'
             count = db.execute(f'SELECT COUNT(*) FROM {table} WHERE source=?', (source,)).fetchone()[0]
@@ -1755,7 +1782,7 @@ def report_changes(db, args):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('command', choices=('ingest', 'sources', 'stats', 'changes', 'retro'))
+    parser.add_argument('command', choices=('ingest', 'sources', 'stats', 'changes', 'retro', 'accepted'))
     parser.add_argument('--json', action='store_true')
     parser.add_argument('--detail', action='store_true')
     parser.add_argument('--since', type=str)
@@ -1766,7 +1793,7 @@ def main(argv=None):
     parser.add_argument('--add', metavar='LABEL', help='manual change marker (changes only; needs --at)')
     parser.add_argument('--at', metavar='ISO', help='time of a manual marker')
     args = parser.parse_args(argv)
-    for flag, commands in (('since', {'stats', 'changes', 'retro'}), ('hosts', {'stats'}), ('detail', {'stats'}),
+    for flag, commands in (('since', {'stats', 'changes', 'retro', 'accepted'}), ('hosts', {'stats'}), ('detail', {'stats'}),
                            ('compare', {'stats'}), ('window', {'stats', 'retro'}), ('sync', {'changes'}),
                            ('add', {'changes'}), ('at', {'changes'})):
         if getattr(args, flag) and args.command not in commands:
@@ -1790,6 +1817,8 @@ def main(argv=None):
                 else:
                     render_stats(report, detail=args.detail)
                 return 0
+            if args.command == 'accepted':
+                return delivery_owner().run_accepted(this(), db, args.since, args.json)
             rows = ingest(db) if args.command == 'ingest' else [
                 dict(row) for row in db.execute('SELECT * FROM sources ORDER BY source')]
         if args.json:

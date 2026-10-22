@@ -237,6 +237,7 @@ COMMAND_DETAILS: dict[str, str] = {
     ),
     "telemetry": (
         "usage: provenant telemetry ingest|sources [--json]\n"
+        "       provenant telemetry accepted [--since ISO-DATE] [--json]\n"
         "       provenant telemetry changes [--sync | --add LABEL --at ISO] [--since ISO] [--json]\n\n"
         "Delegates to scripts/provenant-telemetry.\n"
         "Local metadata-only usage and event ledger. `changes --sync` records merged\n"

@@ -1914,6 +1914,25 @@ def test_every_fetch_appends_a_deduplicated_series_row_with_plan_tier_credits_an
         ('default_claude_max_5x', 'default_claude_max_20x')]
 
 
+def test_plan_mismatch_warns_once_per_account_and_plan_pair(quota, monkeypatch, tmp_path):
+    plans = iter(['max', 'MAX', 'pro', None, 'max'])
+    monkeypatch.setattr(quota, 'fetch', lambda account, now: {
+        'windows': [window(20, WEEK)], 'plan': next(plans), 'source': 'test'})
+    account = quota.Account('claude', 'anese', Path('/nowhere'), True, plan='Pro')
+    for minute in range(5):
+        quota.refresh(account, NOW + timedelta(minutes=minute), force=True)
+    # The same mismatch on another account is its own warning.
+    monkeypatch.setattr(quota, 'fetch', lambda account, now: {
+        'windows': [window(20, WEEK)], 'plan': 'max', 'source': 'test'})
+    quota.refresh(quota.Account('claude', 'other', Path('/nowhere'), True, plan='Pro'), NOW, force=True)
+    quota.refresh(quota.Account('claude', 'anese', Path('/nowhere'), True, plan='Team'), NOW, force=True)
+    with sqlite3.connect(tmp_path / 'state/telemetry.sqlite3') as db:
+        warnings = [(account, json.loads(attrs)) for account, attrs in db.execute(
+            "SELECT account,attrs FROM events WHERE kind='plan.mismatch' ORDER BY account,attrs")]
+    assert [(account, attrs['plan'], attrs['plan_detected']) for account, attrs in warnings] == [
+        ('anese', 'Pro', 'max'), ('anese', 'Team', 'max'), ('other', 'Pro', 'max')]
+
+
 def test_series_never_blocks_a_reading_when_the_ledger_is_unwritable(quota, monkeypatch):
     monkeypatch.setattr(quota, 'fetch', lambda account, now: {'windows': [window(5, 300, timedelta(hours=1))],
                                                               'source': 'test'})
