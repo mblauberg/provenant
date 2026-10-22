@@ -4,6 +4,7 @@ import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "nod
 import { projectRoot, withoutGitRedirects, type Identity } from "./identity.js";
 import { runJsonSubprocess } from "./json-subprocess.js";
 import type { CatalogueSnapshot } from "./catalogue.js";
+import { DISPATCH_ADAPTERS } from "./dispatch-vocabulary.js";
 const DEFAULT_TIMEOUT_SECONDS = 3600;
 function canonical(path: string) {
   try {
@@ -23,10 +24,9 @@ function inside(root: string, candidate: string) {
  * config/adapter-compatibility.yaml. Adapters the registry marks dormant or
  * unsupported are absent on purpose, so they are a typed input error here
  * rather than a refusal paid for with a run directory, prompt staging and
- * route resolution. tests/adapter-registry.test.ts binds this list to the
- * registry and to the dispatcher.
+ * route resolution. The list is generated (dispatch-vocabulary.ts).
  */
-export const DISPATCH_ADAPTERS = ["agy", "claude", "codex", "copilot", "cursor", "kiro", "opencode"] as const;
+export { DISPATCH_ADAPTERS };
 const SUPPORTED_ADAPTERS = new Set<string>(DISPATCH_ADAPTERS);
 const ROLE_ALIASES = ["principal", "senior", "junior"];
 /** Names the tiers had before junior, senior and principal; none is accepted. */

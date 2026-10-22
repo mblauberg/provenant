@@ -80,14 +80,11 @@ Options:
 When Fabric is used, the caller records any Fabric correlation.
 """
 
-# The adapters with an executing arm in the supervisor. This is the only
-# adapter list kept here: dispatch state (implemented / dormant / unsupported)
-# is owned by `dispatch_registry` in config/adapter-compatibility.yaml, and
-# runtime/fabric/tests/adapter-registry.test.ts binds this list to the
-# registry's implemented set, so the two cannot drift. There are no dormant
-# adapters today; a future dormant adapter must be refused here (absent from
-# this list) until its arm and safety boundary exist.
-DISPATCH_IMPLEMENTED_ADAPTERS = ("agy", "claude", "codex", "copilot", "cursor", "kiro", "opencode")
+# The adapters with an executing arm in the supervisor, generated from
+# `dispatch_registry` in config/adapter-compatibility.yaml (the one owner of
+# dispatch state). A future dormant adapter is refused here until its arm and
+# safety boundary exist.
+from adapters.dispatch_vocabulary import IMPLEMENTED as DISPATCH_IMPLEMENTED_ADAPTERS  # noqa: E402
 
 # Mirror of the routing catalogue's per-adapter endpoint_provider, drift-bound
 # by tests/test_adapter_identity_maps.py.

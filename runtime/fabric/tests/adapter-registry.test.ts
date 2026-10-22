@@ -21,17 +21,6 @@ const compatibility = parseYaml(
 ) as {
   dispatch_registry?: Record<string, { dispatch?: string; write_modes?: string[] }>;
 };
-const dispatcher = readFileSync(
-  join(repositoryRoot, "skills", "orchestrate", "scripts", "cf_dispatch.py"),
-  "utf8",
-);
-
-function shellList(name: string): string[] {
-  const match = new RegExp(`^${name} = \\(([^)]*)\\)$`, "mu").exec(dispatcher);
-  if (match === null) throw new Error(`cf_dispatch.py declares no ${name}`);
-  return [...match[1]!.matchAll(/"([^"]+)"/gu)].map((entry) => entry[1]!).sort();
-}
-
 function registryAdapters(state: string): string[] {
   // herdr is a policy-only entry: it observes and steers but is never a
   // routing adapter, so it is excluded from the routable sets (it still
@@ -47,8 +36,8 @@ function registryAdapters(state: string): string[] {
  * `dispatch_registry` in adapter-compatibility.yaml. The instance-owned
  * routing catalogue (`config/model-routing.json`, ADR 0019) carries no
  * dispatch field and may lag behind product policy, so no test here may read
- * adapter state from it. These tests read the registry, the Fabric schema and
- * the dispatcher, and fail on any disagreement. Unsupported adapters are
+ * adapter state from it. These tests read the registry and the Fabric schema, and
+ * the generated vocabulary is checked for freshness. Unsupported adapters are
  * absent from the catalogue, not stubbed in it: the catalogue lists exactly
  * the implemented set.
  */
@@ -81,22 +70,9 @@ describe("adapter registry", () => {
       .toStrictEqual(registryAdapters("implemented"));
   });
 
-  it("agrees on the implemented adapters across the schema, the registry and the dispatcher", () => {
-    const schema = [...DISPATCH_ADAPTERS].sort();
-    expect(schema).toStrictEqual(registryAdapters("implemented"));
-    expect(schema).toStrictEqual(shellList("DISPATCH_IMPLEMENTED_ADAPTERS"));
-  });
-
-  it("keeps adapters the registry marks dormant out of the dispatcher", () => {
-    // No dormant adapters exist today; the loop is the guard for the day one
-    // is added: dormant means refused (absent from the implemented list),
-    // never silently runnable. The shell keeps no dormant list by design; the
-    // registry is the only place dormant state is declared.
-    const implemented = new Set(shellList("DISPATCH_IMPLEMENTED_ADAPTERS"));
-    for (const adapter of registryAdapters("dormant")) {
-      expect(DISPATCH_ADAPTERS as readonly string[]).not.toContain(adapter);
-      expect(implemented.has(adapter), `dispatcher runs dormant ${adapter}`).toBe(false);
-    }
+  it("keeps the generated dispatch vocabulary fresh against the registry", () => {
+    execFileSync("python3", ["scripts/gen_dispatch_vocabulary.py", "--check"], { cwd: repositoryRoot });
+    expect([...DISPATCH_ADAPTERS]).toStrictEqual(registryAdapters("implemented"));
   });
 
   it("keeps adapters the dispatcher cannot execute out of the schema", () => {

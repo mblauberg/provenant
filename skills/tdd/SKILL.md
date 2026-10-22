@@ -88,7 +88,9 @@ Write no test, and give this evidence instead, for:
   it covers the change; otherwise the characterisation evidence `refactor`
   requires.
 - **What types, a schema, a parser or a linter already guarantee:** that check,
-  plus one boundary test proving the real path applies it.
+  plus one boundary test proving the real path applies it. A test-side copy of
+  a production table or vocabulary earns no test of its own: derive it from the
+  owner or generate it, and keep one freshness check.
 - **Trivial delegation or wiring with no decision in it:** the caller's test.
 - **A case an existing test already covers, here or at a lower layer:** that
   test. Test a shared unit once where it is owned, not again through each

@@ -8,7 +8,7 @@ EXIT_AFTER_OUTPUT defaults to False; EMPTY_FAILURE defaults to an empty reason.
 
 from importlib import import_module
 
-NAMES = ("claude", "codex", "opencode", "cursor", "agy", "kiro", "copilot")
+from .dispatch_vocabulary import IMPLEMENTED as NAMES
 
 
 def profile(name):
