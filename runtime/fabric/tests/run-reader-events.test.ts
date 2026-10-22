@@ -62,7 +62,7 @@ it("reports failed transport attempts and partial output through status and lane
   const status = runView(await fabricStatus(workspace, row.run_id));
   expect(status).toMatchObject({ status: "failed", error_class: "transient", result_partial: true });
   const waited = laneWait(workspace, join(workspace, "state"), row.run_id);
-  expect(waited.status, waited.stderr).toBe(0);
+  expect(waited.status, waited.stderr).toBe(1);
   expect(waited.stdout).toContain("failed");
   expect(waited.stdout).toContain("partial result");
 });

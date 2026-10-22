@@ -67,7 +67,8 @@ const USAGE = `fabric <command>
                               run states; default shows active and recent terminal lanes (--all lists all)
   lanes --wait [--all] [--summary] [--timeout N] [id…]
                               wait for a lane to finish or need input; --all waits
-                              for every listed lane; exit 124 on timeout
+                              for every listed lane; exit 1 if any ends non-ok
+                              (needs-input still exits 0); exit 124 on timeout
   lanes --project <path> …   read another project's lanes (default: from the cwd)
   graph run --file F          validate a plan graph, start its owner, print its digest
   graph status [ID] [--json] [--wait [--timeout N]]
@@ -112,6 +113,13 @@ stale, 2 usage, 3 held by another holder or a push in progress. Registered
 worktrees share one repository project while retaining their own cwd. There is
 nothing to install, trust or provision.`;
 
+const drainAndExit = async (code: number): Promise<never> => {
+  const drain = (stream: NodeJS.WriteStream) => new Promise<void>((resolveDrain) =>
+    stream.write("", () => resolveDrain()));
+  await Promise.all([drain(process.stdout), drain(process.stderr)]);
+  process.exit(code);
+};
+
 const argv = process.argv.slice(2);
 const command = argv[0] ?? "whoami";
 const commands = new Set([
@@ -124,19 +132,19 @@ const commands = new Set([
 // Internal graph-runner entry points: never listed, never run by hand.
 if (command === "gate-exec") {
   const { runGateExec } = await import("./graph/gates.js");
-  process.exit(await runGateExec(argv[1] ?? ""));
+  await drainAndExit(await runGateExec(argv[1] ?? ""));
 }
 if (command === "graph-owner") {
   const { runGraphOwner } = await import("./graph/owner.js");
-  process.exit(await runGraphOwner(argv[1] ?? "", argv[2] ?? ""));
+  await drainAndExit(await runGraphOwner(argv[1] ?? "", argv[2] ?? ""));
 }
 if (command === "--help" || command === "-h" || command === "help") {
   console.log(USAGE);
-  process.exit(0);
+  await drainAndExit(0);
 }
 if (!commands.has(command)) {
   console.error(`unknown command "${command}"\n\n${USAGE}`);
-  process.exit(2);
+  await drainAndExit(2);
 }
 if (argv.slice(1).some((arg) => arg === "--help" || arg === "-h")) {
   let include = false;
@@ -146,7 +154,7 @@ if (argv.slice(1).some((arg) => arg === "--help" || arg === "-h")) {
     return include;
   });
   console.log(`fabric ${command}\n\n${lines.join("\n")}`);
-  process.exit(0);
+  await drainAndExit(0);
 }
 
 /** Read `--flag value` out of argv, so the remaining words form the body. */
@@ -163,7 +171,7 @@ const flag = (name: string): string | undefined => {
 /** Write the whole line before exiting: stdout is asynchronous on a macOS pipe. */
 const finish = async (code: number, line: string, stream: NodeJS.WriteStream = process.stdout): Promise<never> => {
   await new Promise<void>((done) => stream.write(`${line}\n`, () => done()));
-  process.exit(code);
+  return await drainAndExit(code);
 };
 if (isLandingVerb(command)) {
   try {
@@ -189,7 +197,7 @@ try {
   }
 } catch (error) {
   console.error(`fabric: ${error instanceof Error ? error.message : String(error)}`);
-  process.exit(2);
+  await drainAndExit(2);
 }
 const who = identify(landingLabel === undefined ? process.env : { ...process.env, AGENT_FABRIC_LABEL: landingLabel });
 const executionIdentity = () => {
@@ -203,12 +211,12 @@ const executionIdentity = () => {
 };
 if (command === "fetch") {
   const ids = argv.slice(1).filter((value) => value !== "--json");
-  if (ids.length !== 1) { console.error("Pass exactly one remote writer ID"); process.exit(2); }
+  if (ids.length !== 1) { console.error("Pass exactly one remote writer ID"); await drainAndExit(2); }
   const { federatedLane } = await import("./hosts.js");
   const result = await federatedLane("fetch", who.cwd, { id: ids[0] }) ??
     { status: "rejected", error: "remote_host_required", fix: "Qualify a remote writer ID with its host." };
   console.log(JSON.stringify(result, null, 2));
-  process.exit(result.status === "ok" ? 0 : 1);
+  await drainAndExit(result.status === "ok" ? 0 : 1);
 }
 if (command === "cancel" || command === "output") {
   try {
@@ -225,17 +233,17 @@ if (command === "cancel" || command === "output") {
       : await fabricOutput(who.project, { id: rest[0]!, part, offset: offset === undefined ? undefined : Number(offset),
         max_bytes: maxBytes === undefined ? undefined : Number(maxBytes), tail });
     console.log(JSON.stringify(result, null, 2));
-    process.exit(result.status === "rejected" ? 1 : 0);
+    await drainAndExit(result.status === "rejected" ? 1 : 0);
   } catch (error) {
     console.error(`fabric: ${error instanceof Error ? error.message : String(error)}`);
-    process.exit(2);
+    await drainAndExit(2);
   }
 }
 if (command === "graph") {
   const { graphCancel, graphResume, graphRun, graphStatus } = await import("./graph/surface.js");
   let file: string | undefined, timeout: string | undefined, node: string | undefined;
   try { file = flag("file"); timeout = flag("timeout"); node = flag("node"); }
-  catch (error) { console.error(`fabric: ${error instanceof Error ? error.message : String(error)}`); process.exit(2); }
+  catch (error) { console.error(`fabric: ${error instanceof Error ? error.message : String(error)}`); await drainAndExit(2); }
   const [verb, ...rest] = argv.slice(1);
   const json = rest.includes("--json"), wait = rest.includes("--wait"), force = rest.includes("--force");
   const words = rest.filter((value) => value !== "--json" && value !== "--wait" && value !== "--force");
@@ -246,7 +254,7 @@ if (command === "graph") {
       (timeoutSeconds === undefined || timeoutSeconds >= 0) && !(json && wait)) ||
     (verb === "cancel" && words.length === 1 && file === undefined && !wait) ||
     (verb === "resume" && words.length === 1 && file === undefined && node === undefined && !wait);
-  if (!valid || (force && verb !== "resume") || words.some((value) => value.startsWith("--"))) { console.error(usage); process.exit(2); }
+  if (!valid || (force && verb !== "resume") || words.some((value) => value.startsWith("--"))) { console.error(usage); await drainAndExit(2); }
   const chair = executionIdentity();
   const result = verb === "run" ? graphRun({ file }, chair)
     : verb === "status" ? await graphStatus(words[0], chair, process.env, { waitSeconds: wait ? (timeoutSeconds ?? 86_400) : 0 })
@@ -254,7 +262,7 @@ if (command === "graph") {
     : graphResume(words[0]!, chair, process.env, force);
   if (json) console.log(JSON.stringify(result, null, 2));
   else console.log(typeof result.digest === "string" ? result.digest : `${String(result.error ?? result.status)}${result.fix ? `\nfix: ${String(result.fix)}` : ""}`);
-  process.exit(result.status === "rejected" ? 1 : result.timed_out ? 124 : 0);
+  await drainAndExit(result.status === "rejected" ? 1 : result.timed_out ? 124 : 0);
 }
 if (command === "lanes") {
   let project: string | undefined, timeout: string | undefined;
@@ -263,7 +271,7 @@ if (command === "lanes") {
     timeout = flag("timeout");
   } catch (error) {
     console.error(`fabric: ${error instanceof Error ? error.message : String(error)}`);
-    process.exit(2);
+    await drainAndExit(2);
   }
   // A nested repository resolves to its own project; --project reads another one.
   const laneWho = project === undefined ? who : identify(process.env, resolve(project));
@@ -278,7 +286,7 @@ if (command === "lanes") {
       (json && wait) || (summary && !wait) || (timeout !== undefined && !wait) || ids.some((value) => value.startsWith("--")) ||
       (timeoutSeconds !== undefined && !(timeoutSeconds >= 0))) {
     console.error("fabric: usage: fabric lanes [--json] [--all] [--project P] [id…] | lanes --wait [--all] [--summary] [--timeout N] [id…]");
-    process.exit(2);
+    await drainAndExit(2);
   }
   if (wait) {
     const watched = ids.length ? ids : undefined;
@@ -304,7 +312,7 @@ if (command === "lanes") {
       // The registered project, not the raw cwd, owns the runs; the normal
       // retention window bounds the scan, and no row cap may hide a completion.
       code = await waitForLanes({
-        who: laneWho, store: waitStore, all, timeoutSeconds,
+        who: laneWho, store: waitStore, all, watched: watched !== undefined, timeoutSeconds,
         read: reader, refresh: reader.refresh, stale: reader.stale,
         write: (text) => summary ? Promise.resolve(void held.push(text)) : new Promise((resolveWrite, reject) =>
           process.stdout.write(text, (error) => (error ? reject(error) : resolveWrite()))),
@@ -332,7 +340,7 @@ if (command === "lanes") {
       watcher.close();
       store.close();
     }
-    process.exit(code);
+    await drainAndExit(code);
   }
   const result = await readRuns(laneWho.project, ids.length ? ids : undefined, 0, undefined, (all || !json) ? null : undefined);
   if (json) {
@@ -378,7 +386,7 @@ if (command === "lanes") {
   } else {
     console.log(JSON.stringify(result));
   }
-  process.exit(result.status === "ok" ? 0 : 1);
+  await drainAndExit(result.status === "ok" ? 0 : 1);
 }
 if (command === "status") {
   try {
@@ -389,11 +397,11 @@ if (command === "status") {
     }
     if (rest[0] !== undefined || argv.includes("--runs") || wait !== undefined) {
       console.log(JSON.stringify(await fabricStatus(who.project, rest[0], wait === undefined ? 0 : Number(wait)), null, 2));
-      process.exit(0);
+      await drainAndExit(0);
     }
   } catch (error) {
     console.error(`fabric: ${error instanceof Error ? error.message : String(error)}`);
-    process.exit(2);
+    await drainAndExit(2);
   }
 }
 /**
@@ -408,7 +416,7 @@ if (command === "dispatch") {
   if (subcommand === "list") {
     if (rest.length !== 1) {
       console.error("fabric: usage: fabric dispatch list [--json]");
-      process.exit(2);
+      await drainAndExit(2);
     }
     const runs = listRecordedRuns(who.project);
     if (json) {
@@ -426,34 +434,34 @@ if (command === "dispatch") {
           `${run.kind} ${run.task_id ?? run.batch_id ?? ""}`);
       }
     }
-    process.exit(0);
+    await drainAndExit(0);
   }
   if (subcommand === "kill") {
     const reference = rest[1];
     if (rest.length !== 2 || reference === undefined) {
       console.error("fabric: usage: fabric dispatch kill <run-id|run-dir> [--json]");
-      process.exit(2);
+      await drainAndExit(2);
     }
     const { federatedLane } = await import("./hosts.js");
-    const remote = await federatedLane("cancel", who.project, { id: reference });
+    const remote = await federatedLane("cancel", who.project, { id: reference! });
     if (remote) {
       console.log(JSON.stringify(remote, null, 2));
-      process.exit(remote.status === "rejected" ? 1 : 0);
+      await drainAndExit(remote.status === "rejected" ? 1 : 0);
     }
-    const run = findRecordedRun(who.project, reference.split("@")[0]!);
+    const run = findRecordedRun(who.project, reference!.split("@")[0]!);
     if (run === undefined) {
       console.error(`fabric: no recorded dispatch run: ${reference}`);
-      process.exit(1);
+      await drainAndExit(1);
     }
-    const outcome = await terminateRecordedRun(run);
+    const outcome = await terminateRecordedRun(run!);
     const state = outcome.reason === "still running"
       ? outcome.reason
       : outcome.signalled ? "signalled" : "not running";
     const output = json ? JSON.stringify(outcome, null, 2)
-      : `${run.run_id} ${state}${outcome.escalated ? " (escalated to SIGKILL)" : ""}` +
+      : `${run!.run_id} ${state}${outcome.escalated ? " (escalated to SIGKILL)" : ""}` +
         `${outcome.reason !== undefined && outcome.reason !== state ? ` (${outcome.reason})` : ""}`;
     await new Promise<void>((resolveWrite) => process.stdout.write(`${output}\n`, "utf8", () => resolveWrite()));
-    process.exit(outcome.signalled && outcome.reason !== "still running" ? 0 : 1);
+    await drainAndExit(outcome.signalled && outcome.reason !== "still running" ? 0 : 1);
   }
   const controller = new AbortController();
   let interrupted: number | undefined;
@@ -573,10 +581,10 @@ if (command === "dispatch") {
     console.log(`status: ${String(result.status ?? "unknown")}${rejectedDetails}${rejectedTaskDetails}`);
     if (result.placement_fallback || result.status === "launch_unknown") console.log(digest(result));
     if (sessionLine) console.log(sessionLine);
-    process.exit(interrupted ?? (result.status === "rejected" ? 1 : 0));
+    await drainAndExit(interrupted ?? (result.status === "rejected" ? 1 : 0));
   } catch (error) {
     console.error(`fabric: ${error instanceof Error ? error.message : String(error)}`);
-    process.exit(interrupted ?? 2);
+    await drainAndExit(interrupted ?? 2);
   }
 }
 if (command === "adapters" && argv.includes("--models")) {
@@ -587,17 +595,17 @@ if (command === "adapters" && argv.includes("--models")) {
     ["--models", "--match"].includes(rest[index - 1] ?? ""));
   if (adapter === undefined || adapter.startsWith("--") || match?.startsWith("--") || known.length !== rest.length) {
     console.error("fabric: usage: fabric adapters --models ADAPTER [--match TEXT]");
-    process.exit(2);
+    await drainAndExit(2);
   }
   const { liveModels } = await import("./catalogue.js");
-  console.log((await liveModels(adapter, { match })).digest);
-  process.exit(0);
+  console.log((await liveModels(adapter!, { match })).digest);
+  await drainAndExit(0);
 }
 if (command === "adapters") {
   const unknown = argv.slice(1).filter((argument) => argument !== "--json");
   if (unknown.length > 0) {
     console.error("fabric: usage: fabric adapters [--json] | fabric adapters --models ADAPTER [--match TEXT]");
-    process.exit(2);
+    await drainAndExit(2);
   }
   const { catalogueSnapshot } = await import("./catalogue.js");
   const snapshot = catalogueSnapshot();
@@ -605,7 +613,7 @@ if (command === "adapters") {
     console.log(JSON.stringify(snapshot, null, 2));
   } else if (snapshot.adapters.length === 0) {
     console.error("fabric: adapter catalogue unavailable (no product checkout found)");
-    process.exit(1);
+    await drainAndExit(1);
   } else {
     for (const adapter of snapshot.adapters) {
       const alias = Object.keys(adapter.aliases).sort().join("/") || "-";
@@ -621,17 +629,17 @@ if (command === "adapters") {
       console.log(`endpoint profiles: ${endpoints.join(", ")}`);
     }
   }
-  process.exit(0);
+  await drainAndExit(0);
 }
 if (command === "status" || command === "doctor") {
   const unknown = argv.slice(1).filter((argument) => argument !== "--json");
   if (unknown.length > 0) {
     console.error(`fabric: usage: fabric ${command} [--json]`);
-    process.exit(2);
+    await drainAndExit(2);
   }
   const result = inspectDatabase(databasePath(), who.project, command);
   console.log(JSON.stringify(result, null, 2));
-  process.exit(result.status === "error" ? 1 : 0);
+  await drainAndExit(result.status === "error" ? 1 : 0);
 }
 let store: Store | undefined;
 
