@@ -3214,6 +3214,7 @@ def dispatch(args: argparse.Namespace) -> int:
                 'sandbox': args.sandbox, 'network': None if args.network is None else args.network == 'true',
                 'account': args.account, 'capabilities': args.capabilities, 'add_dirs': args.add_dirs,
                 'allow_secrets': args.allow_secrets, 'confidential': args.confidential,
+                'delivery_run_id': getattr(args, 'delivery_run_id', None),
                 'knobs': getattr(args, 'knobs', None) or None, 'wait_seconds': 0,
                 '_lineage': run_lineage.parent_attempt(),
             }.items() if value is not None and value != []}

@@ -146,9 +146,8 @@ execution success, not user acceptance or a passed delivery gate.
 
 `provenant telemetry accepted [--since ISO-DATE] [--json]` reports deliveries
 by risk tier and harness digest (currently null). `--since` filters on the run's
-earliest recorded timestamp, falling back
-to the `RUN.json` mtime when no timestamp is recorded. Folder names and ingest
-time are not used. A run is accepted when its `RUN.json` has
+earliest recorded timestamp, falling back to the `RUN.json` mtime when no
+timestamp is recorded. Folder names and ingest time are not used. A run is accepted when its `RUN.json` has
 `delivery_acceptance` with basis `checks-and-review`, `project-landing` or
 `user`. A run is merged only when the commit on its
 `software_delivery.canonical_artifact_id` artifact matches a

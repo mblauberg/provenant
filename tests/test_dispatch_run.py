@@ -2228,9 +2228,8 @@ def test_counterfeit_active_receipt_is_rejected_before_launch(tmp_path: Path, mo
         "--prompt-file", str(prompt), "--alias", "senior", "--role", "worker",
     ])
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setenv("PROVENANT_HOST_LOCAL_ONLY", "1")
 
-    assert module._dispatch(args) == 2
+    assert module.dispatch(args) == 2
     assert not (run_dir / "dispatch/tasks/blocked").exists()
 
 
@@ -6189,6 +6188,25 @@ raise SystemExit(dispatch.dispatch(dispatch.parser().parse_args()))
     row = mod.terminal_contract(args, parent_dir, legacy, {'status': 'ok'}, 1, parent_path.parent)
     assert row['status'] == 'ok'
     assert 'mcp-child@peer' in row['error'] and 'peer_adapter_exit' in row['error']
+
+
+def test_peer_placement_request_carries_delivery_run_id(tmp_path, monkeypatch, capsys):
+    mod = load_dispatch_module()
+    run_dir = make_run(tmp_path, 'placed')
+    prompt = tmp_path / 'prompt.md'
+    prompt.write_text('placed\n', encoding='utf-8')
+    seen = []
+    owner = SimpleNamespace(config=SimpleNamespace(peers={'peer': {}}), config_error=None,
+                            client_call=lambda _op, _cwd, request: seen.append(request) or {'status': 'ok', 'local': False})
+    monkeypatch.delenv('PROVENANT_HOST_LOCAL_ONLY', raising=False)
+    monkeypatch.setattr(mod, '_fabric_hosts_owner', lambda: SimpleNamespace(lane_owner=lambda: owner, HostError=ValueError))
+    monkeypatch.setattr(mod.run_lineage, 'register_external', lambda _result: None)
+    monkeypatch.chdir(tmp_path)
+    args = mod.parser().parse_args([
+        '--run-dir', str(run_dir), '--task-id', 'placed', '--adapter', 'codex', '--prompt-file', str(prompt),
+        '--alias', 'senior', '--role', 'worker', '--host', 'peer', '--delivery-run-id', 'delivery:1202'])
+    assert mod.dispatch(args) == 0
+    assert seen[0]['delivery_run_id'] == 'delivery:1202'
 
 
 def test_peer_child_retains_parent_without_writing_the_source_host(tmp_path, monkeypatch):

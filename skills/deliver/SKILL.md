@@ -39,7 +39,8 @@ inventing.
    producer and follow
    [the receipt contract](references/contract.md).
    Pass that `RUN.json` run_id as `delivery_run_id` on every new lane
-   dispatch for the delivery, reviewers included; retries and resumes inherit it.
+   dispatch for the delivery, reviewers included; retries, resumes and handoffs
+   inherit the id.
 2. Record each state transition. No state may jump an approval, evidence,
    review, acceptance or release gate.
 3. Execute through relevant skills. Software routes through `implement`;
