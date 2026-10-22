@@ -4730,6 +4730,9 @@ def test_rate_limit_wait_observes_cancellation_and_intervening_writer_edits(tmp_
             return sleep(seconds)
         queued = list(run.glob("tasks/*/attempt-002/attempt.json"))
         if queued and not acted and json.loads(queued[0].read_text()).get("queue_reason") == "rate_limit":
+            # Record first: the lease retry below can itself call the patched
+            # sleep, which must not re-enter this branch.
+            acted.append(action)
             if action == "cancel":
                 (run / "dispatch/tasks" / queued[0].relative_to(run / "tasks").parent / "cancel.request").touch()
             else:
@@ -4738,7 +4741,6 @@ def test_rate_limit_wait_observes_cancellation_and_intervening_writer_edits(tmp_
                 for store in (tmp_path / "cooldowns.json", tmp_path / "state/route-health.json"):
                     stores_before[store] = store.read_bytes()
                 (worktree / "intervening.txt").write_text("another edit")
-            acted.append(action)
         sleep(seconds)
     monkeypatch.setattr(mod.time, "sleep", during_wait)
     args = mod.parser().parse_args(command[2:])
