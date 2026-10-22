@@ -39,3 +39,14 @@ updates:
         dependency-type: development
       workspace-production-dependencies:
         dependency-type: production
+
+  # The Rust front door crate (ADR 0027). Std-only today, so this tracks the
+  # lockfile and any dependency a later decision admits.
+  - package-ecosystem: cargo
+    directory: /tools/front-door
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    labels:
+      - dependencies

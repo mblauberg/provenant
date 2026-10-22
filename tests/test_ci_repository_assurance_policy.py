@@ -65,6 +65,7 @@ JOB_PERMISSIONS = {
     "harness": {"contents": "read"},
     "fabric": {"contents": "read"},
     "split-root": {"contents": "read"},
+    "rust": {"contents": "read"},
     "zizmor": {"contents": "read"},
     "ci-status": {},
 }
@@ -279,7 +280,7 @@ def test_every_tracked_path_matches_at_least_one_build_filter() -> None:
     filters = _change_filters(document)
     outputs = _job(document, "detect-changes").get("outputs")
     assert isinstance(outputs, dict)
-    assert set(outputs) == {"harness", "fabric", "split-root", "workflows"}
+    assert set(outputs) == {"harness", "fabric", "split-root", "workflows", "rust"}
     patterns = [
         pattern
         for output in outputs
