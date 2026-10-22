@@ -37,6 +37,10 @@ import {
 } from "../src/run-registry.js";
 import type { Identity } from "../src/identity.js";
 import { scratchRoot } from "./helpers/temp-root.js";
+import { actAsMcpServer } from "../src/seat-index.js";
+
+actAsMcpServer(); // this file dispatches as the MCP server does
+
 
 const testDirectory = dirname(fileURLToPath(import.meta.url));
 const repositoryRoot = resolve(testDirectory, "../../..");

@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -7,10 +7,11 @@ import { afterEach, expect, it } from "vitest";
 
 import { runRoot, type Identity } from "../src/identity.js";
 import { reapOrphanedRuns } from "../src/run-registry.js";
-import { findSeat, recordSeatRun } from "../src/seat-index.js";
+import { actAsMcpServer, findSeat, recordSeatRun } from "../src/seat-index.js";
 import { laneIdentity, laneReader, readSeatRuns } from "../src/seat-lanes.js";
 import type { RunRead, RunReadResponse } from "../src/run-reader.js";
 
+actAsMcpServer();
 const roots: string[] = [];
 const originalPath = process.env.PATH;
 afterEach(() => {
@@ -93,6 +94,42 @@ it("keeps a seat's lane after its launcher is gone and ignores shells and other 
     const none = await readSeatRuns(who, undefined, { read, env, ancestors: new Set([process.pid, other.pid!]) });
     expect(none.runs).toEqual([]);
   } finally { seat.kill(); other.kill(); }
+});
+
+it("keeps concurrent dispatches and separate labels under one client pid", async () => {
+  const { root, env } = seatEnv();
+  const seat = spawn("sleep", ["30"]);
+  try {
+    const dirs = Array.from({ length: 12 }, (_, i) => join(root, `p${i}/.agent-run/runs/20260101-0000-batch-user-r${i}`));
+    await Promise.all(dirs.map(async (dir, i) => recordSeatRun(dir, i % 2 ? { ...env, AGENT_FABRIC_LABEL: "b" } : { ...env, AGENT_FABRIC_LABEL: "a" }, { pid: seat.pid! })));
+    expect(findSeat([seat.pid!], { ...env, AGENT_FABRIC_LABEL: "a" })?.runs.sort()).toEqual(dirs.filter((_, i) => i % 2 === 0).sort());
+    expect(findSeat([seat.pid!], { ...env, AGENT_FABRIC_LABEL: "b" })?.runs.sort()).toEqual(dirs.filter((_, i) => i % 2 === 1).sort());
+    expect(findSeat([seat.pid!], env)?.runs).toHaveLength(12);
+  } finally { seat.kill(); }
+});
+
+it("prunes only finished old runs, never an active one", async () => {
+  const { root, env } = seatEnv();
+  const seat = spawn("sleep", ["30"]);
+  try {
+    const make = (name: string, status: string) => {
+      const dir = join(root, `p/.agent-run/runs/${name}`);
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(join(dir, "dispatch-status.json"), JSON.stringify({ status }));
+      recordSeatRun(dir, env, { pid: seat.pid! });
+      return dir;
+    };
+    const active = make("20260101-0000-batch-user-act", "running");
+    const done = make("20260101-0000-batch-user-don", "ok");
+    const old = new Date(Date.now() - 30 * 24 * 3600 * 1000);
+    for (const seatDir of readdirSync(join(root, "state/lane-seats")))
+      for (const file of readdirSync(join(root, "state/lane-seats", seatDir)))
+        utimesSync(join(root, "state/lane-seats", seatDir, file), old, old);
+    recordSeatRun(join(root, "p/.agent-run/runs/20260101-0000-batch-user-new"), env, { pid: seat.pid! });
+    const runs = findSeat([seat.pid!], env)!.runs;
+    expect(runs).toContain(active);
+    expect(runs).not.toContain(done);
+  } finally { seat.kill(); }
 });
 
 it("drops a seat whose client has exited", async () => {
