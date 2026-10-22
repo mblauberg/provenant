@@ -39,7 +39,8 @@ def merge(telemetry, summaries, statuses, since):
               'usage': telemetry.finalise(telemetry.combine(groups, USAGE_KEYS), USAGE_KEYS),
               'usage_per_day': telemetry.finalise(telemetry.combine(groups, DAY_KEYS), DAY_KEYS)}
     # Keep outcome percentiles per host: averaging quantiles would misstate latency.
-    for field in ('outcomes', 'lanes', 'attempts', 'limits_per_day', 'quota_observations', 'unattributed', 'last_limit_events'):
+    for field in ('outcomes', 'lanes', 'attempts', 'limits_per_day', 'quota_observations', 'unattributed',
+                  'last_limit_events', 'compactions_per_lane'):
         result[field] = [{**row, 'host': host} for host, report in reports.items() for row in report.get(field, [])]
     result['excluded_rows'] = {}
     for report in reports.values():
@@ -78,6 +79,7 @@ def validate(telemetry, value, host):
         'outcomes': ('adapter', 'model', 'effort', 'task_class', 'route', 'error_classes', 'lanes', 'succeeded',
                      'attempts', 'retries', 'success_rate', 'latency_p50_s', 'latency_p90_s', 'output_tokens_per_s'),
         'lanes': ('status', 'error_class', 'lanes'),
+        'compactions_per_lane': ('lane', 'compactions'),
         'attempts': ('status', 'error_class', 'attempts'),
         'limits_per_day': ('day', 'provider', 'account', 'status', 'events'),
         'quota_observations': ('provider', 'window', 'used_percent', 'reset_at', 'timestamp'),
@@ -86,6 +88,7 @@ def validate(telemetry, value, host):
     }
     # Optional counts (absent from older peers) are checked only when present.
     counts = {'lanes', 'succeeded', 'attempts', 'retries', 'events', 'rows', 'input_tokens', 'age_seconds',
+              'compactions',
               'latency_samples'}
     measurements = {'success_rate', 'latency_p50_s', 'latency_p90_s', 'output_tokens_per_s', 'used_percent', 'window_minutes'}
     mappings = {'statuses', 'error_classes'}

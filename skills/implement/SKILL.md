@@ -58,7 +58,9 @@ reconciliation run.
    fails takes the step 2 escalation, within the `deliver` receipt contract's
    scaled budget. Stop and escalate, or return to the user, when two
    consecutive repair cycles leave the failing-check set unchanged or larger,
-   even with budget left. Every gate still passes before merge. Return
+   even with budget left; pass each failed gate as a repeatable
+   `repair --failing CHECK_ID`.
+   Every gate still passes before merge. Return
    evidence to user or `scope` on drift. `review.rereview_scope` and the other
    `review.*` knobs in `provenant profile show --resolved` adjust this step.
 6. Update owned docs for behavioural, architectural, operational or decision

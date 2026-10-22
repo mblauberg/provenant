@@ -77,11 +77,119 @@ def test_missing_sources_are_manifested_not_errors(tmp_path):
     assert result.returncode == 0, result.stderr
     rows = json.loads(result.stdout)
     assert {row['source'] for row in rows} == {
-        'fabric', 'route_health', 'cooldowns', 'claude', 'codex', 'opencode', 'otel'}
+        'fabric', 'route_health', 'cooldowns', 'claude', 'codex', 'opencode', 'otel', 'delivery'}
     assert all(row['status'] == 'absent' and row['row_count'] == 0 for row in rows)
     assert all(row['parser_version'] == 2 and row['path_pattern'] for row in rows)
     with sqlite3.connect(tmp_path / 'state/telemetry.sqlite3') as db:
         assert db.execute("PRAGMA user_version").fetchone()[0] == 4
+
+
+def test_delivery_sidecars_ingest_repair_transitions_and_finding_lineage(tmp_path):
+    run = tmp_path / '.agent-run/runs/20261022-1200-delivery-test-a1b2c3'
+    run.mkdir(parents=True)
+    (run / 'RUN.json').write_text(json.dumps({
+        'repair_cycles': 2,
+        'reviews': [],
+    }))
+    jsonl(run / 'repairs.jsonl',
+          {'cycle': 1, 'at': '2026-10-22T00:00:00Z', 'failing_before': ['a', 'b']},
+          {'cycle': 2, 'at': '2026-10-22T00:01:00Z', 'failing_before': ['b']})
+    jsonl(run / 'findings.jsonl', *[
+        {'review_id': 'review-1', 'finding': f'f-{index}', 'disposition': disposition,
+         'reviewer_family': 'fallback-family', 'model': 'fallback-model', 'reviewer_id': 'fallback-reviewer',
+         'at': f'2026-10-22T00:0{index}:00Z'}
+        for index, disposition in enumerate(('confirmed', 'false_positive', 'reviewer_bias'), start=1)
+    ])
+    result = cli(tmp_path, 'telemetry', 'ingest')
+    assert result.returncode == 0, result.stdout + result.stderr
+    with sqlite3.connect(tmp_path / 'state/telemetry.sqlite3') as db:
+        rows = [json.loads(attrs) for (attrs,) in db.execute(
+            "SELECT attrs FROM events WHERE kind='repair.cycle' ORDER BY ts")]
+        findings = [json.loads(attrs) for (attrs,) in db.execute(
+            "SELECT attrs FROM events WHERE kind='review.finding' ORDER BY ts")]
+    assert rows[0]['failing_after_count'] == 1
+    assert rows[0]['failing_after_hash'] == rows[1]['failing_before_hash']
+    assert [item['disposition'] for item in findings] == ['confirmed', 'false_positive', 'reviewer_bias']
+    assert all(item['reviewer_family'] == 'fallback-family' and item['model'] == 'fallback-model'
+               for item in findings)
+    receipt = json.loads((run / 'RUN.json').read_text())
+    receipt['delivery_acceptance'] = {'basis': 'checks-and-review', 'evidence_ids': ['checks']}
+    receipt['reviews'] = [{'id': 'review-1', 'provider_family': 'anthropic', 'model': 'claude-test',
+                           'reviewer_id': 'reviewer'}]
+    (run / 'RUN.json').write_text(json.dumps(receipt))
+    assert cli(tmp_path, 'telemetry', 'ingest').returncode == 0
+    with sqlite3.connect(tmp_path / 'state/telemetry.sqlite3') as db:
+        final = json.loads(db.execute("SELECT attrs FROM events WHERE kind='repair.cycle' ORDER BY ts DESC LIMIT 1").fetchone()[0])
+        findings = [json.loads(attrs) for (attrs,) in db.execute(
+            "SELECT attrs FROM events WHERE kind='review.finding' ORDER BY ts")]
+    assert final['failing_after_count'] == 0
+    assert final['failing_after'] == []
+    assert len(findings) == 3
+    assert all(item['reviewer_family'] == 'anthropic' and item['model'] == 'claude-test' for item in findings)
+    sources = {item['source']: item for item in json.loads(cli(tmp_path, 'telemetry', 'sources', '--json').stdout)}
+    assert sources['delivery']['row_count'] == 5
+
+
+def test_provider_compaction_rows_store_only_metadata(tmp_path):
+    env = environment(tmp_path)
+    home = Path(env['HOME'])
+    claude = home / '.claude/projects/project/session.jsonl'
+    codex = home / '.codex/sessions/2026/rollout-test.jsonl'
+    claude_rows = [
+        {'type': 'system', 'subtype': 'compact_boundary', 'sessionId': 'claude-session',
+         'timestamp': '2026-10-22T00:00:00Z',
+         'compactMetadata': {'trigger': 'auto', 'preTokens': 100, 'postTokens': 20}},
+        *[{'type': 'assistant', 'sessionId': 'claude-session', 'timestamp': f'2026-10-22T00:0{index}:00Z',
+           'message': {'id': f'message-{index}', 'model': 'claude-test',
+                       'usage': {'input_tokens': 1, 'output_tokens': 1}}}
+          for index in range(1, 4)],
+    ]
+    jsonl(claude, *claude_rows)
+    duplicate_claude = home / '.claude-michael/projects/project/session.jsonl'
+    jsonl(duplicate_claude, *claude_rows)
+    write_json(home / '.agents/config/telemetry.json', {'accounts': {'claude': {
+        'michael': {'identity_dir': str(home / '.claude-michael')}}}})
+    jsonl(codex,
+          {'type': 'session_meta', 'payload': {'id': 'codex-session'}},
+          {'type': 'compacted', 'timestamp': '2026-10-22T00:02:00Z',
+           'payload': {'message': 'never store this', 'replacement_history': [{'secret': 'never store'}]}})
+    result = cli(tmp_path, 'telemetry', 'ingest')
+    assert result.returncode == 0, result.stderr
+    with sqlite3.connect(tmp_path / 'state/telemetry.sqlite3') as db:
+        rows = db.execute("SELECT session, attrs FROM events WHERE kind='session.compaction' ORDER BY session").fetchall()
+    assert len(rows) == 2
+    assert rows[0][0] == 'claude-session'
+    assert json.loads(rows[0][1]) == {'post_tokens': 20, 'pre_tokens': 100, 'trigger': 'auto'}
+    assert rows[1][0] == 'codex-session'
+    assert 'never store' not in json.dumps(rows)
+    with sqlite3.connect(tmp_path / 'state/telemetry.sqlite3') as db:
+        db.execute("UPDATE usage SET lane='lane-a' WHERE session='claude-session'")
+        assert db.execute("SELECT COUNT(*) FROM usage WHERE session='claude-session'").fetchone()[0] == 3
+    summary = json.loads(cli(tmp_path, 'telemetry', 'stats', '--json').stdout)
+    bounded = json.loads(cli(tmp_path, 'telemetry', 'stats', '--json', '--since', '2026-10-22T00:01:00Z').stdout)
+    assert summary['compactions_per_lane'] == [{'lane': 'lane-a', 'compactions': 1}]
+    assert bounded['compactions_per_lane'] == []
+    assert 'Compactions per lane:' in cli(tmp_path, 'telemetry', 'stats').stdout
+
+
+def test_delivery_discovery_follows_linked_worktree_git_common_dir(tmp_path):
+    primary = tmp_path / 'primary'
+    primary.mkdir()
+    subprocess.run(['git', 'init', '-q', str(primary)], check=True)
+    subprocess.run(['git', '-C', str(primary), 'config', 'user.email', 'test@example.com'], check=True)
+    subprocess.run(['git', '-C', str(primary), 'config', 'user.name', 'Test'], check=True)
+    (primary / 'tracked').write_text('tracked\n')
+    subprocess.run(['git', '-C', str(primary), 'add', 'tracked'], check=True)
+    subprocess.run(['git', '-C', str(primary), 'commit', '-qm', 'init'], check=True)
+    worktree = tmp_path / 'linked'
+    subprocess.run(['git', '-C', str(primary), 'worktree', 'add', '-qb', 'test/linked', str(worktree)], check=True)
+    run = primary / '.agent-run/runs/20261022-1200-delivery-test-a1b2c3'
+    run.mkdir(parents=True)
+    jsonl(run / 'repairs.jsonl', {'cycle': 1, 'at': '2026-10-22T00:00:00Z', 'failing_before': ['lint']})
+    result = cli(worktree, 'telemetry', 'ingest')
+    assert result.returncode == 0, result.stdout + result.stderr
+    with sqlite3.connect(worktree / 'state/telemetry.sqlite3') as db:
+        assert db.execute("SELECT COUNT(*) FROM events WHERE kind='repair.cycle'").fetchone()[0] == 1
 
 
 def test_claude_incremental_dedup_subagents_and_content_exclusion(tmp_path):
@@ -2144,6 +2252,8 @@ def legacy_stats(db, since=None, prices=None, *, summary=False, until=None):
     if summary:
         keys = ('host', 'source', 'session', 'day', 'provider', 'adapter', 'account', 'model')
         report['session_usage'] = combine((unit(row, keys, prices, free_patterns) for row in usage), keys)
+    # Not SQL-grouped: the delivery owner's count, tested on its own.
+    report['compactions_per_lane'] = delivery_owner().report(this(), db, since, until)
     return report
 
 
@@ -2231,12 +2341,14 @@ def test_host_merge_rounds_costs_once_after_summing(tmp_path, monkeypatch):
         return {**row, 'known_cost_usd': 4e-7, 'missing_cost_rows': 0, 'host': 'h1', 'source': 'codex', 'session': session,
                 'provider': 'openai', 'adapter': 'codex', 'model': 'gpt-5.5', 'day': '2026-10-21', 'account': None}
     summary = {'host': 'h1', 'session_usage': [group('a'), group('b')], 'excluded_rows': {},
-               'receipt_usage_rows_excluded': 0, 'pending_source_rebuilds': []}
+               'receipt_usage_rows_excluded': 0, 'pending_source_rebuilds': [],
+               'compactions_per_lane': [{'lane': 'lane-a', 'compactions': 2}]}
     monkeypatch.setattr(telemetry, 'quota_owner', lambda: types.SimpleNamespace(report=lambda values: {}))
     merged = hosts.merge(telemetry, [summary], [{'host': 'h1', 'status': 'ok'}], None)
     assert merged['usage'][0]['estimated_cost_usd'] == 1e-6
     assert merged['usage'][0]['reported_cost_usd'] == 1e-6
     assert merged['usage_per_day'][0]['estimated_cost_usd'] == 1e-6
+    assert merged['compactions_per_lane'] == [{'lane': 'lane-a', 'compactions': 2, 'host': 'h1'}]
 
 
 def test_receipt_models_stay_distinct_and_native_models_are_observed(tmp_path):

@@ -198,6 +198,13 @@ def fsync_directory(path: Path) -> None:
         os.close(descriptor)
 
 
+def append_jsonl(path: Path, row: dict[str, Any]) -> None:
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(row, sort_keys=True) + "\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+
+
 @contextmanager
 def run_lock(run_dir: Path) -> Iterator[None]:
     lock_path = run_dir / ".RUN.lock"
@@ -908,6 +915,10 @@ def command_review_add(args: argparse.Namespace) -> dict[str, Any]:
 
 def command_repair(args: argparse.Namespace) -> dict[str, Any]:
     return commands.command_repair(args, globals())
+
+
+def command_finding(args: argparse.Namespace) -> dict[str, Any]:
+    return commands.command_finding(args, globals())
 
 
 def build_parser() -> argparse.ArgumentParser:
