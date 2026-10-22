@@ -487,3 +487,4 @@ use from every host. When peers report the same provider/account label, stats
 uses its freshest cached quota observation. It never sums quota percentages or
 writes peer snapshots into the local route state. See [telemetry](telemetry.md)
 for account configuration, credential handling, routing and coverage limits.
+
