@@ -25,6 +25,8 @@ export interface LaneWaitDependencies {
   fallbackMs?: number;
   /** Hold the report until every listed lane is finished or needs input. */
   all?: boolean;
+  /** Lanes were named, so an already-reported failure still sets the exit status. */
+  watched?: boolean;
   /** Stop waiting after this long; the wait then exits 124. */
   timeoutSeconds?: number;
   now?: () => number;
@@ -81,7 +83,7 @@ export async function waitForLanes(deps: LaneWaitDependencies): Promise<number> 
         if (!first && now() >= deadline) return 124;
         try {
           store.markLanesSeen(who, unseen.map((index) => attempts[index]!));
-          return expired && pending.length ? 124 : current.runs.some(unsuccessful) ? 1 : 0;
+          return expired && pending.length ? 124 : unseen.some((index) => unsuccessful(completed[index]!)) ? 1 : 0;
         } catch (error) {
           if (!isSQLiteContention(error)) throw error;
           // Unmarked lanes are reported again next wait; contention must not outlast the deadline.
@@ -93,7 +95,8 @@ export async function waitForLanes(deps: LaneWaitDependencies): Promise<number> 
     }
     if (unseen !== undefined && !pending.length) {
       await write("no lanes are running\n");
-      return current.runs.some(unsuccessful) ? 1 : 0;
+      // Unnamed waits scan the retention window; an old failure must not fail them.
+      return deps.watched && current.runs.some(unsuccessful) ? 1 : 0;
     }
     if (expired) {
       await write(timeout());

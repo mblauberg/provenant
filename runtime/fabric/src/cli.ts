@@ -312,7 +312,7 @@ if (command === "lanes") {
       // The registered project, not the raw cwd, owns the runs; the normal
       // retention window bounds the scan, and no row cap may hide a completion.
       code = await waitForLanes({
-        who: laneWho, store: waitStore, all, timeoutSeconds,
+        who: laneWho, store: waitStore, all, watched: watched !== undefined, timeoutSeconds,
         read: reader, refresh: reader.refresh, stale: reader.stale,
         write: (text) => summary ? Promise.resolve(void held.push(text)) : new Promise((resolveWrite, reject) =>
           process.stdout.write(text, (error) => (error ? reject(error) : resolveWrite()))),

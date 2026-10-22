@@ -98,6 +98,19 @@ it.each(["failed", "cancelled", "interrupted", "usage_limited", "auth_required"]
   },
 );
 
+it("fails a later wait only when it names the already-reported failed lane", () => {
+  const repo = join(root, "repo-wait-reported-failure");
+  mkdirSync(repo, { recursive: true });
+  spawnSync("git", ["init", "-q", repo]);
+  createAttempt(repo, "old-failure", "terminal", "failed", "2026-10-22T00:10:00.000Z");
+  expect(lanes(repo, "--wait", "--timeout", "0").code).toBe(1);
+
+  const bare = lanes(repo, "--wait", "--timeout", "0");
+  expect(bare.code).toBe(0);
+  expect(bare.out).toBe("no lanes are running\n");
+  expect(lanes(repo, "--wait", "--timeout", "0", "old-failure").code).toBe(1);
+});
+
 it("keeps input-required lanes successful for --wait", () => {
   const repo = join(root, "repo-wait-input-required");
   mkdirSync(repo, { recursive: true });
