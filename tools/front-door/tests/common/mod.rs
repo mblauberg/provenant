@@ -30,6 +30,7 @@ pub const OWNERS: &[&str] = &[
     "scripts/worktree",
     "scripts/clean.py",
     "scripts/provenant_lint.py",
+    "runtime/fabric/src/landing-cli.ts",
     "scripts/check-harness",
     "scripts/gate",
     "scripts/fabric-hosts",

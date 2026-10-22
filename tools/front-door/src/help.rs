@@ -31,6 +31,73 @@ const DETAILS: &[(&str, &str)] = &[
     ("help", include_str!("help/help.txt")),
 ];
 
+/// Which optional commands the selected tree's owners provide. `lint` needs
+/// #1094 and `lease` needs #1095; a tree without them must answer exactly as
+/// its Python dispatcher does, so the text and routes follow the owners.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Caps {
+    pub lint: bool,
+    pub lease: bool,
+}
+
+impl Caps {
+    #[cfg(test)]
+    pub const ALL: Caps = Caps {
+        lint: true,
+        lease: true,
+    };
+    pub const NONE: Caps = Caps {
+        lint: false,
+        lease: false,
+    };
+
+    pub fn has(self, command: &str) -> bool {
+        match command {
+            "lint" => self.lint,
+            "lease" => self.lease,
+            _ => true,
+        }
+    }
+}
+
+/// The one-line usage error for a tree with these capabilities.
+pub fn usage(caps: Caps) -> String {
+    let mut text = USAGE.to_string();
+    if !caps.lint {
+        text = text.replace("|lint", "");
+    }
+    if !caps.lease {
+        text = text.replace("|lease", "");
+    }
+    text
+}
+
+/// The general help for a tree with these capabilities.
+pub fn general(caps: Caps) -> String {
+    let mut text = GENERAL.to_string();
+    if !caps.lint {
+        text = drop_line(&text, "  lint ");
+    }
+    if !caps.lease {
+        text = drop_line(&text, "  lease ");
+        text = text.replace(
+            "  lanes|events   runtime/fabric/bin/fabric lanes|events\n",
+            "  lanes ...      runtime/fabric/bin/fabric lanes\n  events ...     runtime/fabric/bin/fabric events\n",
+        );
+        text = text.replace(
+            "`provenant help <command>` for detail.",
+            "Use `provenant help <command>` for detail.",
+        );
+    }
+    text
+}
+
+fn drop_line(text: &str, prefix: &str) -> String {
+    text.split_inclusive('\n')
+        .filter(|line| !line.starts_with(prefix))
+        .collect()
+}
+
 /// Detail text for `topic`, newline terminated.
 pub fn detail(topic: &str) -> Option<&'static str> {
     DETAILS

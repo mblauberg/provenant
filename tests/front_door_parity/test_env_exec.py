@@ -195,3 +195,16 @@ def test_no_seat_and_no_arguments_is_usage_after_resolution(fd):
 
     assert result.returncode == 2 and result.stdout == b""
     assert result.err.startswith("usage: provenant ")
+
+
+def test_shebangless_owner_is_an_exec_failure_not_a_shell_script(dispatcher):
+    """execve semantics: ENOEXEC is `Exec format error`, never a `/bin/sh` fallback."""
+    owner = dispatcher.owner("scripts/model-route")
+    owner.write_text("echo ran-through-a-shell\n")
+    owner.chmod(0o755)
+
+    result = dispatcher.run("route", product=False)
+
+    assert result.returncode == 3
+    assert result.stdout == b""
+    assert result.err.startswith(f"provenant: cannot execute {owner}: Exec format error; repair:")

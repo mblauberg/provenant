@@ -96,7 +96,13 @@ def build(crate: Path, target_dir: Path, digest: str) -> Path:
     try:
         # Cargo's own output is progress, not an answer: keep it off stdout.
         done = subprocess.run(
-            command, env=environment, stdin=subprocess.DEVNULL, stdout=sys.stderr, check=False
+            command,
+            env=environment,
+            stdin=subprocess.DEVNULL,
+            stdout=sys.stderr,
+            check=False,
+            # The crate's rustup toolchain pin applies to the working directory.
+            cwd=crate,
         )
     except OSError as exc:
         raise FrontDoorError(f"cannot run cargo: {exc}") from None
@@ -145,7 +151,10 @@ def select(
                 raise FrontDoorError(
                     f"PROVENANT_FRONT_DOOR_BINARY must be an absolute regular file: {prebuilt}"
                 )
-            stamped = embedded_digest(prebuilt)
+            try:
+                stamped = embedded_digest(prebuilt)
+            except OSError as exc:
+                raise FrontDoorError(f"cannot read prebuilt front door {prebuilt}: {exc}") from None
             if stamped != digest:
                 raise FrontDoorError(
                     f"prebuilt front door {prebuilt} was built from different sources "

@@ -155,6 +155,33 @@ def test_build_stamps_the_digest_and_selects_the_binary(tmp_path, monkeypatch):
     assert build.embedded_digest(source) == build.source_digest(crate)
 
 
+def test_cargo_runs_in_the_crate_directory_so_the_toolchain_pin_applies(tmp_path, monkeypatch):
+    crate = make_crate(tmp_path)
+    fake = tmp_path / "fake"
+    fake_cargo(fake)
+    cargo = fake / "cargo"
+    cargo.write_text(cargo.read_text().replace("#!/bin/sh\n", f"#!/bin/sh\npwd -P > {tmp_path}/cwd\n", 1))
+    monkeypatch.setenv("PATH", f"{fake}{os.pathsep}{os.environ['PATH']}")
+    monkeypatch.chdir(tmp_path)
+
+    build.select(tmp_path, "rust", tmp_path / "b")
+
+    assert Path((tmp_path / "cwd").read_text().strip()) == crate.resolve()
+
+
+def test_unreadable_prebuilt_is_fatal_for_rust_and_a_fallback_for_auto(tmp_path):
+    crate = make_crate(tmp_path)
+    locked = stamped_binary(tmp_path / "pre/locked", build.source_digest(crate))
+    locked.chmod(0)
+    try:
+        with pytest.raises(build.FrontDoorError, match="cannot read prebuilt"):
+            build.select(tmp_path, "rust", tmp_path / "b", locked)
+        kind, source, note = build.select(tmp_path, "auto", tmp_path / "b", locked)
+    finally:
+        locked.chmod(0o755)
+    assert kind == "python" and source.name == "provenant.template" and "cannot read" in note
+
+
 def test_failed_build_is_fatal_for_rust_and_a_fallback_for_auto(tmp_path, monkeypatch):
     make_crate(tmp_path)
     fake_cargo(tmp_path / "fake", fail=True)

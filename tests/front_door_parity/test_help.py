@@ -181,3 +181,21 @@ def test_lease_is_listed_in_usage_and_help(fd):
     text = fd.run("help").out
     assert "  lanes|events   runtime/fabric/bin/fabric lanes|events" in text
     assert "`provenant help <command>` for detail." in text
+
+
+@pytest.mark.skipif(IMPL != "rust", reason="the Python dispatcher is the reference, not a subject")
+def test_rust_follows_the_tree_when_lint_and_lease_owners_are_absent(fd):
+    """A tree without #1094/#1095 answers as its Python dispatcher would: no lint, no lease."""
+    for relative in ("scripts/provenant_lint.py", "runtime/fabric/src/landing-cli.ts"):
+        path = fd.owner(relative)
+        if path.exists():
+            path.unlink()
+    help_text = fd.run("help").out
+    usage = fd.run("bogus").err
+
+    assert "  lint " not in help_text and "  lease " not in help_text
+    assert "|lint|" not in usage and "|lease|" not in usage
+    for arguments in (("lint",), ("lease", "status"), ("help", "lint"), ("help", "lease")):
+        result = fd.run(*arguments)
+        assert result.returncode == 2 and result.stdout == b"", arguments
+        assert result.err == usage, arguments

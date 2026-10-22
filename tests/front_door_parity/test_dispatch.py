@@ -10,6 +10,7 @@ import time
 import pytest
 
 from parity_support import (
+    IMPL,
     REPAIR,
     needs_lease,
     needs_lint,
@@ -286,3 +287,12 @@ def test_exec_failure_is_exit_3_with_a_repair_line_and_no_traceback(fd, how):
     assert result.err.endswith(f"; {REPAIR}\n")
     assert result.err.count("\n") == 1
     assert "Traceback" not in result.err and "panicked" not in result.err
+
+
+@pytest.mark.skipif(IMPL != "rust", reason="only the Rust binary can be installed over scripts/provenant")
+def test_python_rollback_runs_the_preserved_dispatcher_instead_of_looping(dispatcher):
+    """PROVENANT_FRONT_DOOR=python with Rust at scripts/provenant must not re-enter Rust."""
+    result = dispatcher.run("help", PROVENANT_FRONT_DOOR="python", timeout=20)
+
+    assert result.returncode == 0, result.err
+    assert result.out.startswith("usage: provenant <command>")

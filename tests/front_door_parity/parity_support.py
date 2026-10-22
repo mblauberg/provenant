@@ -81,7 +81,6 @@ OWNER_PATHS = (
     "scripts/provenant-telemetry",
     "scripts/provenant-quota",
     "scripts/provenant-profile",
-    "scripts/provenant_lint.py",
     "skills/orchestrate/scripts/capabilities.py",
     "skills/orchestrate/scripts/dispatch_run.py",
     "skills/orchestrate/scripts/batch_run.py",
@@ -173,7 +172,13 @@ def git(cwd: Path, *arguments: str, check: bool = True) -> subprocess.CompletedP
 
 def write_owners(checkout: Path) -> None:
     recorder = RECORDER.format(python=sys.executable)
-    for relative in OWNER_PATHS:
+    # lint (#1094) and lease (#1095) exist in a fixture only when the reference
+    # tree has them, so Rust, which gates on these owners, sees the same tree.
+    optional = (
+        *(("scripts/provenant_lint.py",) if REFERENCE_HAS_LINT else ()),
+        *(("runtime/fabric/src/landing-cli.ts",) if REFERENCE_HAS_LEASE else ()),
+    )
+    for relative in (*OWNER_PATHS, *optional):
         path = checkout / relative
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(recorder)
@@ -302,13 +307,12 @@ def reference_supports(verb: str) -> bool:
     return f"  {verb} " in reference_run("help").out
 
 
-#: lint (#1094) and lease (#1095). Rust carries both from day one; the Python
-#: reference has them only once those PRs are on its branch.
+#: lint (#1094) and lease (#1095) exist only once those PRs are on the
+#: reference branch. Rust follows its tree's owners exactly as Python does.
 REFERENCE_HAS_LINT = reference_supports("lint")
 REFERENCE_HAS_LEASE = reference_supports("lease")
-SUPPORTS_LINT = IMPL == "rust" or REFERENCE_HAS_LINT
-SUPPORTS_LEASE = IMPL == "rust" or REFERENCE_HAS_LEASE
-REFERENCE_COMPLETE = REFERENCE_HAS_LINT and REFERENCE_HAS_LEASE
+SUPPORTS_LINT = REFERENCE_HAS_LINT
+SUPPORTS_LEASE = REFERENCE_HAS_LEASE
 HELP_BUDGET = 1100 if SUPPORTS_LINT else 1024
 
 needs_lint = pytest.mark.skipif(not SUPPORTS_LINT, reason="lint (#1094) is not on this branch")
@@ -316,21 +320,12 @@ needs_lease = pytest.mark.skipif(not SUPPORTS_LEASE, reason="lease (#1095) is no
 
 
 def assert_matches_reference(actual: Result, expected: Result) -> None:
-    """Byte equality with the live Python reference.
-
-    While the reference lacks #1094/#1095 a Rust mismatch is an expected
-    failure (xfail), not a defect: the golden cannot yet be the union.
-    """
-    same = (actual.returncode, actual.stdout, actual.stderr) == (
+    """Byte equality with the live Python reference, with no exemptions."""
+    assert (actual.returncode, actual.stdout, actual.stderr) == (
         expected.returncode,
         expected.stdout,
         expected.stderr,
     )
-    if same:
-        return
-    if IMPL == "rust" and not REFERENCE_COMPLETE:
-        pytest.xfail("Python reference lacks #1094/#1095; set PROVENANT_PARITY_REFERENCE_ROOT to a merged tree")
-    assert actual == expected
 
 
 # ---------------------------------------------------------------- git fixtures

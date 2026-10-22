@@ -136,13 +136,13 @@ fn a_checkout_without_the_launcher_falls_through_to_resolution() {
 fn help_and_usage_need_no_product_root() {
     let sandbox = Sandbox::new("help");
     let stub = sandbox.install_binary("bin/provenant");
-    let general =
-        fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/help/general.txt"))
-            .unwrap();
     for flag in ["help", "-h", "--help"] {
         let output = command(&stub, &sandbox.home()).arg(flag).output().unwrap();
         assert_eq!(output.status.code(), Some(0));
-        assert_eq!(stdout(&output), general);
+        // No root means no owners to prove #1094/#1095, so neither is listed.
+        let text = stdout(&output);
+        assert!(text.contains("  lanes ...      runtime/fabric/bin/fabric lanes\n"));
+        assert!(!text.contains("  lint ") && !text.contains("  lease "));
         assert!(output.stderr.is_empty());
     }
     let output = command(&stub, &sandbox.home())
@@ -187,7 +187,7 @@ fn help_routes_runs_the_route_owner() {
 fn resolution_failures_exit_3_with_one_clean_line() {
     let sandbox = Sandbox::new("unresolvable");
     let stub = sandbox.install_binary("bin/provenant");
-    for words in [&["root"][..], &["gate"], &["lease", "status"]] {
+    for words in [&["root"][..], &["gate"], &["route"]] {
         let output = command(&stub, &sandbox.home())
             .args(words)
             .output()
@@ -441,6 +441,7 @@ fn lease_maps_to_landing_verbs_and_passes_exit_3_through() {
         &["lease", ""],
     ] {
         let output = command(&stub, &sandbox.home())
+            .env("AGENT_FABRIC_PRODUCT_ROOT", &checkout)
             .args(words)
             .output()
             .unwrap();
@@ -452,6 +453,7 @@ fn lease_maps_to_landing_verbs_and_passes_exit_3_through() {
         );
     }
     let output = command(&stub, &sandbox.home())
+        .env("AGENT_FABRIC_PRODUCT_ROOT", &checkout)
         .args(["lease", "--help", "acquire"])
         .output()
         .unwrap();
@@ -513,15 +515,16 @@ fn check_helper_refusal_exits_3_and_lets_stderr_through() {
 }
 
 #[test]
-fn rollback_switch_hands_the_command_line_to_the_python_template() {
+fn rollback_switch_runs_the_preserved_python_dispatcher_without_looping() {
     let sandbox = Sandbox::new("rollback");
     let checkout = sandbox.checkout("checkout");
+    // Rust installed at scripts/provenant; the Python source is preserved beside it.
+    let binary = sandbox.install_binary("checkout/scripts/provenant");
     write_executable(
-        &checkout.join("scripts/provenant.template"),
-        "import os, sys\nprint('template', *sys.argv[1:], os.environ['AGENTS_HOME'])\n",
+        &checkout.join("scripts/provenant.py"),
+        "#!/usr/bin/env python3\nimport os, sys\nprint('python', *sys.argv[1:], os.environ['AGENTS_HOME'])\n",
     );
-    let stub = sandbox.install_binary("bin/provenant");
-    let output = command(&stub, &sandbox.home())
+    let output = command(&binary, &sandbox.home())
         .env("AGENT_FABRIC_PRODUCT_ROOT", &checkout)
         .env("PROVENANT_FRONT_DOOR", "python")
         .args(["help", "x"])
@@ -529,8 +532,73 @@ fn rollback_switch_hands_the_command_line_to_the_python_template() {
         .unwrap();
     assert_eq!(
         stdout(&output),
-        format!("template help x {}\n", real(&checkout))
+        format!("python help x {}\n", real(&checkout))
     );
+}
+
+#[test]
+fn rollback_switch_refuses_to_loop_into_a_rust_dispatcher() {
+    let sandbox = Sandbox::new("rollback-loop");
+    let checkout = sandbox.checkout("checkout");
+    let binary = sandbox.install_binary("checkout/scripts/provenant");
+    let output = command(&binary, &sandbox.home())
+        .env("AGENT_FABRIC_PRODUCT_ROOT", &checkout)
+        .env("PROVENANT_FRONT_DOOR", "python")
+        .arg("help")
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(3));
+    assert!(stderr(&output).contains("no Python dispatcher at "));
+}
+
+#[test]
+fn lint_and_lease_follow_their_owners_exactly() {
+    let sandbox = Sandbox::new("gating");
+    let checkout = sandbox.checkout("checkout");
+    fs::remove_file(checkout.join("scripts/provenant_lint.py")).unwrap();
+    fs::remove_file(checkout.join("runtime/fabric/src/landing-cli.ts")).unwrap();
+    let stub = sandbox.install_binary("bin/provenant");
+    let run = |words: &[&str]| {
+        command(&stub, &sandbox.home())
+            .env("AGENT_FABRIC_PRODUCT_ROOT", &checkout)
+            .args(words)
+            .output()
+            .unwrap()
+    };
+    for words in [
+        &["lint"][..],
+        &["lease", "status"],
+        &["help", "lint"],
+        &["help", "lease"],
+    ] {
+        let output = run(words);
+        assert_eq!(output.status.code(), Some(2), "{words:?}");
+        let err = stderr(&output);
+        assert!(!err.contains("lint") && !err.contains("lease"), "{err}");
+    }
+    let help = stdout(&run(&["help"]));
+    assert!(!help.contains("  lint ") && !help.contains("  lease "));
+    assert!(help.contains("  lanes ...      runtime/fabric/bin/fabric lanes\n"));
+}
+
+#[test]
+fn a_shebangless_owner_is_not_run_through_a_shell() {
+    let sandbox = Sandbox::new("enoexec");
+    let checkout = sandbox.checkout("checkout");
+    write_executable(
+        &checkout.join("scripts/model-route"),
+        "echo ran-through-a-shell\n",
+    );
+    let stub = sandbox.install_binary("bin/provenant");
+    let output = command(&stub, &sandbox.home())
+        .env("AGENT_FABRIC_PRODUCT_ROOT", &checkout)
+        .arg("route")
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(3));
+    assert!(output.stdout.is_empty(), "{}", stdout(&output));
+    assert!(stderr(&output).starts_with("provenant: cannot execute "));
+    assert!(stderr(&output).contains("Exec format error"));
 }
 
 #[test]
