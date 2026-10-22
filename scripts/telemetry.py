@@ -933,6 +933,8 @@ ERROR_CLASS_BY_STATUS = {
     'timed_out': 'timeout', 'startup_timeout': 'timeout', 'stalled': 'timeout',
     'permission_blocked': 'sandbox_denied', 'lost': 'provider_error', 'cancelled': 'cancelled',
 }
+UNCLASSIFIED_FAILURES = {'failed', 'quarantined', 'partial', 'blocked', 'rejected', 'interrupted',
+                         'writer_changed', 'tool_missing'}
 
 
 def receipt_error_class(row):
@@ -940,9 +942,10 @@ def receipt_error_class(row):
     if row.get('error_class'):
         return row['error_class']
     status = row.get('status') or row.get('state')
-    if status in SUCCESS or status in {'running', 'input_required', None}:
-        return None
-    return ERROR_CLASS_BY_STATUS.get(status, 'provider_error')
+    if status in ERROR_CLASS_BY_STATUS:
+        return ERROR_CLASS_BY_STATUS[status]
+    # Only terminal failures get the generic class; queued or active lanes stay unclassified.
+    return 'provider_error' if status in UNCLASSIFIED_FAILURES else None
 
 
 def catalogue():
