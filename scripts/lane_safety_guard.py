@@ -293,24 +293,21 @@ def _unwrap(words: list[str]) -> tuple[list[str], bool]:
         wrapper = os.path.basename(words[0])
         via_xargs = via_xargs or wrapper == "xargs"
         words, takes = words[1:], WRAPPER_VALUE_OPTIONS.get(wrapper, set())
+        while words and (words[0].startswith("-") or (
+            wrapper in {"env", "nice"} and "=" in words[0]
+        )):
+            if words[0].startswith("--") and "=" not in words[0] and (
+                words[0][2:] in WRAPPER_VALUE_LONG_OPTIONS.get(wrapper, set())
+            ):
+                words = words[2:]
+                continue
+            short = words[0][1:]
+            skip = 2 if (
+                not words[0].startswith("--") and len(short) == 1 and short in takes
+            ) else 1
+            words = words[skip:]
         if wrapper == "timeout":
-            while words and words[0].startswith("-"):
-                words = words[2:] if words[0][1:] in {"s", "k"} else words[1:]
-            words = words[1:]
-        else:
-            while words and (words[0].startswith("-") or (
-                wrapper in {"env", "nice"} and "=" in words[0]
-            )):
-                if words[0].startswith("--") and "=" not in words[0] and (
-                    words[0][2:] in WRAPPER_VALUE_LONG_OPTIONS.get(wrapper, set())
-                ):
-                    words = words[2:]
-                    continue
-                short = words[0][1:]
-                skip = 2 if (
-                    not words[0].startswith("--") and len(short) == 1 and short in takes
-                ) else 1
-                words = words[skip:]
+            words = words[1:]  # the duration
         words = _strip_reserved(words)
     return words, via_xargs
 
@@ -385,11 +382,40 @@ def _command_reason(command: Command, depth: int) -> str | None:
     return None
 
 
+def executable_text(command: str) -> str:
+    """Command text without what the shell will not run.
+
+    Drops quoted here-document bodies and single-quoted spans; inside double
+    quotes keeps only `$(…)` and backtick bodies, which still execute.
+    """
+    text, out, i = QUOTED_HEREDOC.sub("", command), [], 0
+    while i < len(text):
+        c = text[i]
+        if c == "\\":
+            out.append(text[i : i + 2])
+            i += 2
+        elif c == "'":
+            end = text.find("'", i + 1)
+            i = len(text) if end < 0 else end + 1
+            out.append(" ")
+        elif c == '"':
+            j = i + 1
+            while j < len(text) and text[j] != '"':
+                j += 2 if text[j] == "\\" else 1
+            out.extend(f"\n{inner}\n" for inner in substitutions(text[i + 1 : j]))
+            out.append(" ")
+            i = j + 1
+        else:
+            out.append(c)
+            i += 1
+    return "".join(out)
+
+
 def deny_reason(command: str, depth: int = 0) -> str | None:
     """Why the command line must be refused, or None when it may run."""
     if depth > MAX_DEPTH:
         return "command nesting is too deep to check"
-    if RAW_PATTERN.search(QUOTED_HEREDOC.sub("", command)):
+    if RAW_PATTERN.search(executable_text(command)):
         return "pkill or killall signals processes by name"
     commands, nested = parse(command)
     for item in commands:
