@@ -161,6 +161,43 @@ def test_opencode_updated_messages_use_readonly_sqlite_and_cursor(tmp_path):
         assert 'PRIVATE_OPENCODE' not in '\n'.join(db.iterdump())
 
 
+def test_opencode_v2_session_messages_are_ingested_once_alongside_migrated_messages(tmp_path):
+    path = tmp_path / 'home/.local/share/opencode/opencode.db'
+    path.parent.mkdir(parents=True)
+    legacy = {'role': 'assistant', 'providerID': 'vendor', 'modelID': 'old-model', 'path': {'cwd': '/repo'},
+              'time': {'created': 1792544400000}, 'tokens': {'input': 10, 'output': 2}, 'cost': 0.5}
+    def turn(model, output, stamp):
+        return json.dumps({'time': {'created': stamp}, 'model': {'providerID': 'vendor', 'id': model},
+                           'tokens': {'input': 10, 'output': output, 'reasoning': 1, 'cache': {'read': 4, 'write': 0}},
+                           'cost': 0.25, 'content': ['PRIVATE_V2']})
+    with sqlite3.connect(path) as db:
+        db.execute('CREATE TABLE message(id TEXT PRIMARY KEY,session_id TEXT,time_created INTEGER,time_updated INTEGER,data TEXT)')
+        db.execute('CREATE TABLE session_v2(id TEXT PRIMARY KEY,directory TEXT NOT NULL)')
+        db.execute('CREATE TABLE session_message(id TEXT PRIMARY KEY,session_id TEXT,type TEXT,seq INTEGER,'
+                   'time_created INTEGER,time_updated INTEGER,data TEXT)')
+        db.execute('INSERT INTO session_v2 VALUES (?,?)', ('s', '/repo'))
+        # A pre-2.0.30 turn exists in both tables after migration; later turns only in session_message.
+        db.execute('INSERT INTO message VALUES (?,?,?,?,?)', ('m1', 's', 1000, 1000, json.dumps(legacy)))
+        db.executemany('INSERT INTO session_message VALUES (?,?,?,?,?,?,?)', [
+            ('m1', 's', 'assistant', 1, 1000, 1000, json.dumps({**json.loads(turn('old-model', 2, 1792544400000))})),
+            ('u2', 's', 'user', 2, 2000, 2000, json.dumps({'text': 'PRIVATE_PROMPT'})),
+            ('m3', 's', 'assistant', 3, 3000, 3000, turn('new-model', 7, 1792630800000))])
+    assert cli(tmp_path, 'telemetry', 'ingest').returncode == 0
+    with sqlite3.connect(path) as db:
+        db.execute('INSERT INTO session_message VALUES (?,?,?,?,?,?,?)',
+                   ('m4', 's', 'assistant', 4, 4000, 4000, turn('new-model', 5, 1792630900000)))
+    assert cli(tmp_path, 'telemetry', 'ingest').returncode == 0
+    assert cli(tmp_path, 'telemetry', 'ingest').returncode == 0
+    with sqlite3.connect(tmp_path / 'state/telemetry.sqlite3') as db:
+        assert db.execute('SELECT event_id,provider,model,repository,output_tokens,cache_read_tokens,usage_source '
+                          'FROM usage ORDER BY event_id').fetchall() == [
+            ('m1', 'vendor', 'old-model', '/repo', 2, 4, 'session_message.tokens'),
+            ('m3', 'vendor', 'new-model', '/repo', 7, 4, 'session_message.tokens'),
+            ('m4', 'vendor', 'new-model', '/repo', 5, 4, 'session_message.tokens')]
+        dump = '\n'.join(db.iterdump())
+        assert 'PRIVATE_V2' not in dump and 'PRIVATE_PROMPT' not in dump
+
+
 def test_partial_jsonl_line_resumes_and_malformed_source_is_visible(tmp_path):
     path = tmp_path / 'home/.claude/projects/repo/partial.jsonl'
     row = {'type': 'assistant', 'sessionId': 's1', 'timestamp': '2026-10-21T01:00:00Z',
@@ -1668,3 +1705,63 @@ def test_lane_events_carry_the_harness_profile_when_the_receipt_has_one(tmp_path
         rows = dict(db.execute("SELECT run_id, attrs FROM events WHERE kind='lane.attempt'").fetchall())
     assert (json.loads(rows['run-p'])['profile'], json.loads(rows['run-p'])['profile_digest']) == ('thorough', 'd1')
     assert 'profile' not in json.loads(rows['run-q'])  # absent means the default (balanced) profile
+
+
+def test_a_message_in_several_identity_dirs_keeps_one_owner_across_ingest_and_relabelling(tmp_path):
+    home = tmp_path / 'home'
+    # One resumed message in two accounts' transcripts; its owner is the first file by path.
+    jsonl(home / '.claude/projects/repo/a.jsonl', claude_turn('s', 'shared'))
+    jsonl(home / '.claude-michael/projects/repo/b.jsonl', claude_turn('s', 'shared'))
+    accounts = {'michael': {'identity_dir': str(home / '.claude-michael')}}
+    write_json(home / '.agents/config/telemetry.json', {'accounts': {'claude': accounts}})
+    ledger = tmp_path / 'state/telemetry.sqlite3'
+    assert cli(tmp_path, 'telemetry', 'ingest').returncode == 0
+    with sqlite3.connect(ledger) as db:
+        assert db.execute('SELECT account FROM usage').fetchall() == [('michael',)]
+    write_json(home / '.agents/config/telemetry.json', {'accounts': {'claude': {
+        **accounts, 'pro': {'identity_dir': str(home / '.claude-pro')}}}})
+    assert cli(tmp_path, 'telemetry', 'ingest').returncode == 0
+    with sqlite3.connect(ledger) as db:
+        assert db.execute('SELECT account FROM usage').fetchall() == [('michael',)]
+
+
+def test_a_transcript_swapped_for_a_link_after_discovery_is_never_read(tmp_path, monkeypatch):
+    home = tmp_path / 'home'
+    import importlib.util
+    for name, value in environment(tmp_path).items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.chdir(tmp_path)
+    spec = importlib.util.spec_from_file_location('telemetry_swap_test', ROOT / 'scripts/telemetry.py')
+    telemetry = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(telemetry)
+    transcript = home / '.claude/projects/repo/s.jsonl'
+    jsonl(transcript, claude_turn('s', 'real'))
+    database = home / '.local/share/opencode/opencode.db'
+    database.parent.mkdir(parents=True)
+    def opencode(target, message):
+        with sqlite3.connect(target) as db:
+            db.execute('CREATE TABLE message(id TEXT PRIMARY KEY,session_id TEXT,time_created INTEGER,'
+                       'time_updated INTEGER,data TEXT)')
+            db.execute('INSERT INTO message VALUES (?,?,?,?,?)', (message, 's', 1000, 1000, json.dumps(
+                {'role': 'assistant', 'tokens': {'input': 1}})))
+    opencode(database, 'real-oc')
+    discovered = {source: telemetry.native_paths(source) for source in ('claude', 'opencode')}
+    secret = home / '.claude/secret.jsonl'
+    jsonl(secret, claude_turn('s', 'SECRET_MESSAGE'))
+    opencode(home / 'other.db', 'SECRET_OC')
+    for target, path in ((secret, transcript), (home / 'other.db', database)):
+        link = path.with_name('swap')
+        link.symlink_to(target)
+        link.replace(path)
+    monkeypatch.setattr(telemetry, 'native_paths', lambda source: discovered.get(source, {}))
+    db = telemetry.connect()
+    telemetry.ingest(db)
+    assert db.execute('SELECT COUNT(*) FROM usage').fetchone()[0] == 0
+    assert {row['source']: row['status'] for row in db.execute(
+        "SELECT source, status FROM sources WHERE source IN ('claude','opencode')")} == {
+            'claude': 'error', 'opencode': 'error'}
+    # A plain file of another inode under the discovered name is refused too.
+    transcript.unlink()
+    jsonl(transcript, claude_turn('s', 'REPLACED'))
+    telemetry.ingest(db)
+    assert db.execute("SELECT COUNT(*) FROM usage WHERE source='claude'").fetchone()[0] == 0
