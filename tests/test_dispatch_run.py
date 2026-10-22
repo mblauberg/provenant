@@ -5508,7 +5508,10 @@ def test_terminal_publication_includes_child_registered_while_waiting_for_custod
     mod.publish_contract(parent_dir, row)
     (parent_dir / 'dispatch/tasks/writer/attempt-001/tmp/children').mkdir(parents=True)
     child_dir = make_run(tmp_path, 'runs/child')
-    child_process = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'], start_new_session=True)
+    child_process = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'],
+                                     env={**os.environ, 'PROVENANT_RUN_TOKEN': 'child-token',
+                                          'PROVENANT_RUN_DIR': str(child_dir)},
+                                     start_new_session=True)
     parent = {'run_id': 'mcp-parent', 'task_id': 'writer', 'attempt': 1, 'run_dir': str(parent_dir)}
     (child_dir / 'dispatch-owner.json').write_text(json.dumps({
         'schema_version': 1, 'kind': 'dispatch', 'run_dir': str(child_dir),
@@ -5550,6 +5553,424 @@ def test_terminal_publication_includes_child_registered_while_waiting_for_custod
     finally:
         child_process.terminate()
         child_process.wait(timeout=3)
+
+
+@pytest.fixture
+def cancel_cascade(tmp_path):
+    mod = load_dispatch_module()
+    parent_dir = make_run(tmp_path, 'runs/parent')
+    child_dir = make_run(tmp_path, 'runs/child')
+    args = SimpleNamespace(tool='codex', alias='senior', model='fixture', effort='low',
+                           task_id='writer', access_mode='read_only', worktree=None)
+    row = mod.contract_row(args, parent_dir, 1, parent_dir / 'dispatch/tasks/writer/attempt-001',
+                           {'run_id': 'mcp-parent'}, '2026-10-22T00:00:00Z')
+    row['ended_at'] = '2026-10-22T00:00:01Z'
+    parent = {'run_id': 'mcp-parent', 'task_id': 'writer', 'attempt': 1, 'run_dir': str(parent_dir)}
+    (child_dir / 'RUN_RECEIPT.json').write_text(json.dumps({'status': 'active', 'parent': parent}))
+    journal = parent_dir / 'dispatch/tasks/writer/attempt-001/tmp/children'
+    journal.mkdir(parents=True)
+    (journal / 'child.json').write_text(json.dumps({
+        'run_id': 'mcp-child', 'run_dir': str(child_dir), 'run_token': 'child-token'}))
+    return mod, parent_dir, child_dir, row
+
+
+@pytest.mark.parametrize('token', [None, 'unrelated-token', 'child-token-extra'])
+def test_cancel_cascade_does_not_signal_forged_owner(cancel_cascade, token):
+    mod, parent_dir, child_dir, row = cancel_cascade
+    environment = {key: value for key, value in os.environ.items() if key != 'PROVENANT_RUN_TOKEN'}
+    if token:
+        environment['PROVENANT_RUN_TOKEN'] = token
+    sleeper = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'],
+                               env=environment, start_new_session=True)
+    try:
+        (child_dir / 'dispatch-owner.json').write_text(json.dumps({
+            'schema_version': 1, 'kind': 'dispatch', 'run_dir': str(child_dir),
+            'run_token': 'child-token', 'owner_pid': sleeper.pid, 'owner_pgid': sleeper.pid,
+            'owner_started_at': mod.process_info.start_time(sleeper.pid)}))
+        mod.publish_contract(parent_dir, {**row, 'state': 'terminal', 'status': 'cancelled'})
+        assert sleeper.poll() is None, 'forged owner caused an unrelated process to be signalled'
+        terminal = json.loads((parent_dir / row['paths']['receipt']).read_text())
+        cancellation = terminal['children'][0]['cancellation']
+        assert cancellation['status'] == 'skipped'
+        assert 'token' in cancellation['reason']
+    finally:
+        if sleeper.poll() is None:
+            sleeper.kill()
+        sleeper.wait(timeout=3)
+
+
+@pytest.mark.parametrize('ignore_term', [False, True])
+def test_cancel_cascade_still_cancels_genuine_child(cancel_cascade, ignore_term):
+    mod, parent_dir, child_dir, row = cancel_cascade
+    code = f'''import json,os,pathlib,signal,time
+def cancelled(signum, frame):
+    receipt = pathlib.Path({str(child_dir / 'RUN_RECEIPT.json')!r})
+    receipt.write_text(json.dumps({{**json.loads(receipt.read_text()), 'status': 'cancelled'}}))
+    signal.signal(signal.SIGTERM, signal.SIG_DFL)
+    os.kill(os.getpid(), signal.SIGTERM)
+signal.signal(signal.SIGTERM, signal.SIG_IGN if {ignore_term!r} else cancelled)
+print('ready', flush=True)
+time.sleep(60)
+'''
+    child = subprocess.Popen([sys.executable, '-c', code], stdout=subprocess.PIPE, text=True,
+                             env={**os.environ, 'PROVENANT_RUN_TOKEN': 'child-token',
+                                  'PROVENANT_RUN_DIR': str(child_dir)},
+                             start_new_session=True)
+    try:
+        assert child.stdout.readline().strip() == 'ready'
+        (child_dir / 'dispatch-owner.json').write_text(json.dumps({
+            'schema_version': 1, 'kind': 'dispatch', 'run_dir': str(child_dir),
+            'run_token': 'child-token', 'owner_pid': child.pid, 'owner_pgid': child.pid,
+            'owner_started_at': mod.process_info.start_time(child.pid)}))
+        mod.publish_contract(parent_dir, {**row, 'state': 'terminal', 'status': 'cancelled'})
+        assert child.wait(timeout=3) == -(signal.SIGKILL if ignore_term else signal.SIGTERM)
+        terminal = json.loads((parent_dir / row['paths']['receipt']).read_text())
+        assert terminal['children'][0]['cancellation']['status'] == 'signalled'
+        assert any(target['scope'] == 'group' and target['status'] == 'signalled'
+                   for target in terminal['children'][0]['cancellation']['targets'])
+        if not ignore_term:
+            assert terminal['children'][0]['status'] == 'cancelled'
+            assert 'cancelled' in terminal['error']
+        evidence = terminal['children'][0]['cancellation']
+        mod.publish_contract(parent_dir, terminal)
+        republished = json.loads((parent_dir / row['paths']['receipt']).read_text())
+        assert republished['children'][0]['cancellation'] == evidence
+        assert republished['children'][0]['status'] == ('lost' if ignore_term else 'cancelled')
+    finally:
+        if child.poll() is None:
+            child.kill()
+        child.wait(timeout=3)
+        child.stdout.close()
+
+
+def test_cancel_cascade_rejects_matching_sibling_environment(cancel_cascade):
+    mod, parent_dir, child_dir, row = cancel_cascade
+    sibling = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'],
+                               env={**os.environ, 'PROVENANT_RUN_TOKEN': 'child-token',
+                                    'PROVENANT_RUN_DIR': str(child_dir)}, start_new_session=True)
+    try:
+        (child_dir / 'dispatch-owner.json').write_text(json.dumps({
+            'schema_version': 1, 'kind': 'dispatch', 'run_dir': str(child_dir),
+            'run_token': 'child-token', 'owner_pid': sibling.pid, 'owner_pgid': sibling.pid,
+            'owner_started_at': mod.process_info.start_time(sibling.pid)}))
+        code = '''import json,pathlib,sys
+sys.path.insert(0, sys.argv[1])
+import dispatch_run
+dispatch_run.publish_contract(pathlib.Path(sys.argv[2]), json.loads(sys.argv[3]))
+'''
+        result = subprocess.run([sys.executable, '-c', code, str(SCRIPT.parent), str(parent_dir),
+                                 json.dumps({**row, 'state': 'terminal', 'status': 'cancelled'})],
+                                capture_output=True, text=True, timeout=15)
+        assert result.returncode == 0, result.stderr
+        assert sibling.poll() is None, 'matching environment authorised signalling a sibling'
+        terminal = json.loads((parent_dir / row['paths']['receipt']).read_text())
+        assert terminal['children'][0]['cancellation']['status'] == 'skipped'
+        assert 'descendant' in terminal['children'][0]['cancellation']['reason']
+    finally:
+        if sibling.poll() is None:
+            sibling.kill()
+        sibling.wait(timeout=3)
+
+
+@pytest.mark.parametrize('shared_host', [False, True])
+@pytest.mark.parametrize('subreaper', [False, True])
+def test_cancel_cascade_preserves_observed_owner_after_provider_exit(cancel_cascade, tmp_path, monkeypatch,
+                                                                  shared_host, subreaper):
+    mod, parent_dir, child_dir, row = cancel_cascade
+    provider = mod.provider_exec
+    child_script = tmp_path / 'nested-owner.py'
+    child_script.write_text(f'''import json,os,pathlib,signal,sys,time
+sys.path.insert(0, {str(SCRIPT.parent)!r})
+import process_info
+directory = pathlib.Path({str(child_dir)!r})
+def cancelled(signum, frame):
+    receipt = directory / 'RUN_RECEIPT.json'
+    receipt.write_text(json.dumps({{**json.loads(receipt.read_text()), 'status': 'cancelled'}}))
+    raise SystemExit(0)
+signal.signal(signal.SIGTERM, cancelled)
+pid = os.getpid()
+(directory / 'dispatch-owner.json').write_text(json.dumps({{
+    'schema_version': 1, 'kind': 'dispatch', 'run_dir': str(directory),
+    'run_token': 'child-token', 'owner_pid': pid, 'owner_pgid': pid,
+    'owner_started_at': process_info.start_time(pid)}}))
+time.sleep(60)
+''')
+    code = f'''import os,subprocess,time
+subprocess.Popen([{sys.executable!r}, {str(child_script)!r}], start_new_session=True,
+    env={{**os.environ, 'PROVENANT_RUN_DIR': {str(child_dir)!r}, 'PROVENANT_RUN_TOKEN': 'child-token'}},
+    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+time.sleep(60)
+'''
+    host_pid_path = tmp_path / 'host.pid'
+    if shared_host:
+        host_script = tmp_path / 'shared-host.py'
+        host_script.write_text(code)
+        code = f'''import pathlib,subprocess,time
+host = subprocess.Popen([{sys.executable!r}, {str(host_script)!r}], start_new_session=True)
+pathlib.Path({str(host_pid_path)!r}).write_text(str(host.pid))
+time.sleep(60)
+'''
+        from dataclasses import replace
+        snapshot = provider._process_snapshot
+        linux_snapshot = provider._linux_tree_snapshot
+
+        def named_host(rows):
+            # Model the OS command name at its boundary; all ancestry is real.
+            if rows and host_pid_path.exists():
+                pid = int(host_pid_path.read_text())
+                if pid in rows:
+                    rows[pid] = replace(rows[pid], command='codex-code-mode-host')
+            return rows
+
+        monkeypatch.setattr(provider, '_process_snapshot', lambda: named_host(snapshot()))
+        monkeypatch.setattr(provider, '_linux_tree_snapshot', lambda *args: named_host(linux_snapshot(*args)))
+    observed = False
+    sample = provider._Descendants.sample
+
+    def observe(tree, include_reparented=False):
+        nonlocal observed
+        rows = sample(tree, include_reparented)
+        observed = observed or bool(tree.verified_owners)
+        return rows
+
+    monkeypatch.setattr(provider._Descendants, 'sample', observe)
+    # Exercise macOS-style reparenting on Linux too, rather than adopting the child.
+    if not subreaper:
+        monkeypatch.setattr(provider, '_enable_subreaper', lambda: False)
+    monkeypatch.setenv('PROVENANT_NO_OS_CONFINEMENT', '1')
+    plan = provider.build_plan('claude', {'resolved_model': 'fixture', 'model_family': 'anthropic',
+        'endpoint_provider': 'anthropic', 'effort': 'high'}, 'hello', cwd=tmp_path,
+        workspace_root=tmp_path, run_dir=parent_dir / 'dispatch/tasks/writer/attempt-001',
+        timeout_seconds=10, idle_seconds=10)
+    plan.update(argv=[sys.executable, '-u', '-c', code], grace_seconds=.1,
+                attempt_identity={'run_id': 'mcp-parent', 'run_dir': str(parent_dir),
+                                  'task_id': 'writer', 'attempt': 1})
+    try:
+        record = provider.execute(plan, tmp_path / 'result.md', cancelled=lambda: observed)
+        assert record['status'] == 'cancelled'
+        if shared_host:
+            assert record['children'][0]['cancellation']['status'] == 'skipped'
+            assert 'descendant' in record['children'][0]['cancellation']['reason']
+            owner = json.loads((child_dir / 'dispatch-owner.json').read_text())
+            assert mod.process_info._probe_process_row(owner['owner_pid']) is not None
+            return
+        assert record['children'][0]['cancellation']['status'] == 'signalled'
+        args = SimpleNamespace(tool='claude', alias='senior', model='fixture', effort='high',
+                               task_id='writer', access_mode='read_only', worktree=None, _last_plan=plan)
+        legacy = {'started_at': row['started_at'], 'finished_at': row['ended_at'],
+                  'outcome': 'cancelled', 'status': 'cancelled', 'result': None,
+                  'attempt_path': 'dispatch/tasks/writer/attempt-001/attempt.json', 'requested_route': {}}
+        terminal = mod.terminal_contract(args, parent_dir, legacy, record, 1, Path(plan['run_dir']))
+        mod.publish_contract(parent_dir, terminal)
+        saved = json.loads((parent_dir / row['paths']['receipt']).read_text())
+        assert saved['children'][0]['cancellation'] == record['children'][0]['cancellation']
+        assert saved['children'][0]['status'] == 'cancelled'
+        assert 'cancelled' in saved['error']
+    finally:
+        owner_path = child_dir / 'dispatch-owner.json'
+        if owner_path.exists():
+            try:
+                os.killpg(json.loads(owner_path.read_text())['owner_pid'], signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                pass
+        if host_pid_path.exists():
+            try:
+                os.killpg(int(host_pid_path.read_text()), signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                pass
+
+
+@pytest.mark.parametrize('unavailable', ['environment', 'exited', 'identity'])
+def test_cancel_cascade_reports_owner_verification_failure(cancel_cascade, monkeypatch, unavailable):
+    mod, parent_dir, child_dir, _ = cancel_cascade
+    child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'],
+                             env={**os.environ, 'PROVENANT_RUN_TOKEN': 'child-token',
+                                  'PROVENANT_RUN_DIR': str(child_dir)}, start_new_session=True)
+    try:
+        owner = {'schema_version': 1, 'kind': 'dispatch', 'run_dir': str(child_dir),
+                 'run_token': 'child-token', 'owner_pid': child.pid, 'owner_pgid': child.pid,
+                 'owner_started_at': mod.process_info.start_time(child.pid)}
+        if unavailable == 'identity':
+            owner['owner_started_at'] = 'changed'
+        (child_dir / 'dispatch-owner.json').write_text(json.dumps(owner))
+        if unavailable == 'environment':
+            monkeypatch.setattr(mod.provider_exec, '_process_environment', lambda pid: ())
+        elif unavailable == 'exited':
+            child.kill()
+            child.wait(timeout=3)
+        children = mod.run_lineage.cancel_children(parent_dir, 'writer', 1, timeout_seconds=0)
+        evidence = children[0]['cancellation']
+        assert evidence['status'] == 'skipped'
+        assert {'environment': 'environment unreadable', 'exited': 'owner already exited',
+                'identity': 'owner identity changed or unavailable'}[unavailable] == evidence['reason']
+        if unavailable != 'exited':
+            assert child.poll() is None
+    finally:
+        if child.poll() is None:
+            child.kill()
+        child.wait(timeout=3)
+
+
+def test_cancel_cascade_rejects_owner_replaced_after_enumeration(cancel_cascade):
+    mod, parent_dir, child_dir, _ = cancel_cascade
+    sleeper = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'],
+                               env={**os.environ, 'PROVENANT_RUN_TOKEN': 'sibling-token',
+                                    'PROVENANT_RUN_DIR': str(child_dir)},
+                               start_new_session=True)
+    try:
+        owner = {'schema_version': 1, 'kind': 'dispatch', 'run_dir': str(child_dir),
+                 'run_token': 'child-token', 'owner_pid': sleeper.pid, 'owner_pgid': sleeper.pid,
+                 'owner_started_at': mod.process_info.start_time(sleeper.pid)}
+        (child_dir / 'dispatch-owner.json').write_text(json.dumps(owner))
+        child_rows = mod.run_lineage.children(parent_dir, 'writer', 1)
+        (child_dir / 'dispatch-owner.json').write_text(json.dumps({**owner, 'run_token': 'sibling-token'}))
+        mod.run_lineage.cancel_children(parent_dir, 'writer', 1, child_rows=child_rows, timeout_seconds=0)
+        assert sleeper.poll() is None, 'replacement owner redirected cancellation to a sibling run'
+        assert child_rows[0]['cancellation']['status'] == 'skipped'
+        assert 'token' in child_rows[0]['cancellation']['reason']
+    finally:
+        if sleeper.poll() is None:
+            sleeper.kill()
+        sleeper.wait(timeout=3)
+
+
+def test_cancel_cascade_rejects_inherited_parent_identity(cancel_cascade):
+    mod, parent_dir, child_dir, row = cancel_cascade
+    sleeper = subprocess.Popen([sys.executable, '-c', 'import time; print("ready", flush=True); time.sleep(60)'],
+                               env={**os.environ, 'PROVENANT_RUN_TOKEN': 'parent-token',
+                                    'PROVENANT_RUN_DIR': str(parent_dir)}, start_new_session=True,
+                               stdout=subprocess.PIPE, text=True)
+    try:
+        assert sleeper.stdout.readline().strip() == 'ready'
+        (child_dir / 'dispatch-owner.json').write_text(json.dumps({
+            'schema_version': 1, 'kind': 'dispatch', 'run_dir': str(child_dir),
+            'run_token': 'parent-token', 'owner_pid': sleeper.pid, 'owner_pgid': sleeper.pid,
+            'owner_started_at': mod.process_info.start_time(sleeper.pid)}))
+        journal = parent_dir / 'dispatch/tasks/writer/attempt-001/tmp/children/child.json'
+        journal.write_text(json.dumps({'run_id': 'mcp-child', 'run_dir': str(child_dir),
+                                       'run_token': 'parent-token'}))
+        mod.publish_contract(parent_dir, {**row, 'state': 'terminal', 'status': 'cancelled'})
+        assert sleeper.poll() is None, 'inherited parent identity authorised a forged child run'
+        terminal = json.loads((parent_dir / row['paths']['receipt']).read_text())
+        assert terminal['children'][0]['cancellation']['status'] == 'skipped'
+        assert 'directory' in terminal['children'][0]['cancellation']['reason']
+    finally:
+        if sleeper.poll() is None:
+            sleeper.kill()
+        sleeper.wait(timeout=3)
+        sleeper.stdout.close()
+
+
+@pytest.mark.parametrize('failure_at', ['initial', 'escalation'])
+def test_cancel_cascade_records_unavailable_process_census(cancel_cascade, monkeypatch, failure_at):
+    mod, parent_dir, child_dir, _ = cancel_cascade
+    provider = mod.provider_exec
+    child = subprocess.Popen([sys.executable, '-c', 'import time; print("ready", flush=True); time.sleep(60)'],
+                             env={**os.environ, 'PROVENANT_RUN_TOKEN': 'child-token',
+                                  'PROVENANT_RUN_DIR': str(child_dir)}, start_new_session=True,
+                             stdout=subprocess.PIPE, text=True)
+    real_kill = os.kill
+    snapshot = provider._process_snapshot
+    linux_snapshot = provider._linux_tree_snapshot
+    failed = failure_at == 'initial'
+    signals = []
+
+    def send_signal(pid, signum):
+        nonlocal failed
+        if pid == child.pid and signum != 0:
+            signals.append(signum)
+            failed = True
+        else:
+            real_kill(pid, signum)
+
+    try:
+        assert child.stdout.readline().strip() == 'ready'
+        (child_dir / 'dispatch-owner.json').write_text(json.dumps({
+            'schema_version': 1, 'kind': 'dispatch', 'run_dir': str(child_dir),
+            'run_token': 'child-token', 'owner_pid': child.pid, 'owner_pgid': child.pid,
+            'owner_started_at': mod.process_info.start_time(child.pid)}))
+        monkeypatch.setattr(provider, '_process_snapshot', lambda: None if failed else snapshot())
+        monkeypatch.setattr(provider, '_linux_tree_snapshot',
+                            lambda *args: None if failed else linux_snapshot(*args))
+        monkeypatch.setattr(os, 'kill', send_signal)
+        monkeypatch.setattr(os, 'killpg', send_signal)
+        child_rows = mod.run_lineage.cancel_children(parent_dir, 'writer', 1, timeout_seconds=0)
+        assert signals == ([] if failure_at == 'initial' else [signal.SIGTERM, signal.SIGTERM])
+        evidence = child_rows[0]['cancellation']
+        assert evidence['status'] == ('skipped' if failure_at == 'initial' else 'signalled')
+        assert 'census' in (evidence.get('reason') or evidence['targets'][-1]['reason'])
+    finally:
+        real_kill(child.pid, signal.SIGKILL)
+        child.wait(timeout=3)
+        child.stdout.close()
+
+
+@pytest.mark.parametrize('change_before', ['owner validation', 'SIGTERM', 'SIGKILL'])
+def test_cancel_cascade_rechecks_identity_before_each_signal(cancel_cascade, monkeypatch, change_before):
+    from dataclasses import replace
+    import provider_exec
+
+    mod, parent_dir, child_dir, _ = cancel_cascade
+    child = subprocess.Popen([sys.executable, '-c', 'import time; print("ready", flush=True); time.sleep(60)'],
+                             env={**os.environ, 'PROVENANT_RUN_TOKEN': 'child-token',
+                                  'PROVENANT_RUN_DIR': str(child_dir)},
+                             start_new_session=True, stdout=subprocess.PIPE, text=True)
+    real_kill = os.kill
+    probe = mod.process_info._probe_process_row
+    start_time = mod.process_info.start_time
+    environment = provider_exec._process_environment
+    changed = False
+    signals = []
+
+    def owner_start_time(pid):
+        nonlocal changed
+        result = start_time(pid)
+        if pid == child.pid and change_before == 'owner validation':
+            changed = True
+        return result
+
+    def read_environment(pid):
+        nonlocal changed
+        result = environment(pid)
+        if pid == child.pid and change_before == 'SIGTERM':
+            changed = True
+        return result
+
+    def current_process(pid):
+        row = probe(pid)
+        return replace(row, started='0') if row and pid == child.pid and changed else row
+
+    def send_signal(pid, signum):
+        nonlocal changed
+        if pid == child.pid and signum != 0:
+            signals.append(signum)
+            changed = True
+        else:
+            real_kill(pid, signum)
+
+    try:
+        assert child.stdout.readline().strip() == 'ready'
+        (child_dir / 'dispatch-owner.json').write_text(json.dumps({
+            'schema_version': 1, 'kind': 'dispatch', 'run_dir': str(child_dir),
+            'run_token': 'child-token', 'owner_pid': child.pid, 'owner_pgid': child.pid,
+            'owner_started_at': mod.process_info.start_time(child.pid)}))
+        child_rows = mod.run_lineage.children(parent_dir, 'writer', 1)
+        monkeypatch.setattr(provider_exec, '_process_environment', read_environment)
+        monkeypatch.setattr(mod.process_info, 'start_time', owner_start_time)
+        monkeypatch.setattr(mod.process_info, '_probe_process_row', current_process)
+        monkeypatch.setattr(os, 'kill', send_signal)
+        monkeypatch.setattr(os, 'killpg', send_signal)
+        mod.run_lineage.cancel_children(parent_dir, 'writer', 1, child_rows=child_rows, timeout_seconds=0)
+        assert signals == ([signal.SIGTERM] if change_before == 'SIGKILL' else [])
+        evidence = child_rows[0]['cancellation']
+        assert evidence['status'] == ('signalled' if change_before == 'SIGKILL' else 'skipped')
+        reasons = [evidence.get('reason', ''), *(target.get('reason', '') for target in evidence.get('targets', []))]
+        assert any('identity' in reason for reason in reasons)
+        assert child.poll() is None
+    finally:
+        real_kill(child.pid, signal.SIGKILL)
+        child.wait(timeout=3)
+        child.stdout.close()
 
 
 def test_remote_nested_dispatch_records_source_child_and_refreshes_failure(tmp_path, monkeypatch):

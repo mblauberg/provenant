@@ -10,13 +10,14 @@ from pathlib import Path
 import re
 import sys
 import signal
-import subprocess
 import time
 import uuid
 from datetime import UTC, datetime
 
 import process_info
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+SKILLS_ROOT = str(Path(__file__).resolve().parents[2])
+if SKILLS_ROOT not in sys.path:
+    sys.path.insert(0, SKILLS_ROOT)
 from _shared.custody import (
     OwnedFileError,
     atomic_write_contained,
@@ -361,7 +362,7 @@ def _verified_child(run_dir, task_id, number, child):
     if ((parent.get("run_dir"), parent.get("task_id"), parent.get("attempt"))
             != (str(run_dir), task_id, number)):
         raise ValueError("unverified child parent")
-    return {"run_id": child["run_id"], "run_dir": str(directory)}
+    return {"run_id": child["run_id"], "run_dir": str(directory), "run_token": child["run_token"]}
 
 
 def _owner_gone(child_dir):
@@ -445,9 +446,35 @@ def owner_token(run_dir):
     return _read(run_dir, "dispatch-owner.json").get("run_token")
 
 
-def cancel_children(run_dir, task_id, number, *, timeout_seconds=5):
+def _live_descendant(row, shared_hosts):
+    """Require OS ancestry to this supervisor, never provider-written claims."""
+    chain = []
+    seen = {os.getpid()}
+    while row is not None and not row.zombie and row.pid not in seen:
+        if row.identity in shared_hosts or row.command in {"codex-code-mode-host", "codex-code-mode"}:
+            return False
+        seen.add(row.pid)
+        chain.append(row)
+        if row.ppid == os.getpid():
+            # Fail closed if an intermediate process exited or reparented.
+            return all((current := process_info._probe_process_row(old.pid)) is not None
+                       and current.identity == old.identity and current.ppid == old.ppid
+                       and not current.zombie for old in chain)
+        row = process_info._probe_process_row(row.ppid)
+    return False
+
+
+def cancel_children(run_dir, task_id, number, *, child_rows=None, timeout_seconds=5,
+                    observed_owners=None, shared_hosts=frozenset()):
     """Cancel verified local children together, then bound uncooperative cleanup."""
     import provider_exec
+
+    # Only the supervising census supplies this in-memory evidence. Journals
+    # and child receipts cannot grant ancestry, even with a matching exec env.
+    observed_owners = observed_owners or {}
+
+    def observed_descendant(row, token):
+        return observed_owners.get(row.identity) == token or _live_descendant(row, shared_hosts)
 
     class RecordedOwner:
         def __init__(self, record, identity):
@@ -457,14 +484,61 @@ def cancel_children(run_dir, task_id, number, *, timeout_seconds=5):
             row = process_info._probe_process_row(self.pid)
             return None if row and row.identity == self.identity and not row.zombie else 0
 
-        def wait(self, timeout):
-            if self.poll() is None:
-                raise subprocess.TimeoutExpired("nested owner", timeout)
-            return 0
+    def outcome(child, status, *, reason=None, **target):
+        evidence = child.setdefault("cancellation", {"status": "skipped", "targets": []})
+        evidence.setdefault("targets", []).append({**target, "status": status, **({"reason": reason} if reason else {})})
+        if status == "signalled":
+            evidence["status"] = status
+            evidence.pop("reason", None)
+        elif evidence["status"] != "signalled":
+            evidence["reason"] = reason
 
+    def signal_target(tree, child, row, signum, *, group=False):
+        target = {"pid": row.pid, "signal": signum, "scope": "group" if group else "process"}
+        current = process_info._probe_process_row(row.pid)
+        if current is None or current.zombie:
+            outcome(child, "skipped", reason="owner already exited" if row.identity == tree.root
+                    else "process already exited", **target)
+            return
+        if current.identity != row.identity:
+            outcome(child, "skipped", reason="process identity changed", **target)
+            return
+        if row.identity == tree.root and (current.pgid != row.pid
+                                         or not observed_descendant(current, child["run_token"])):
+            outcome(child, "skipped", reason="owner is not an observed or live descendant of cancelling supervisor", **target)
+            return
+        try:
+            (os.killpg if group else os.kill)(row.pid, signum)
+            outcome(child, "signalled", **target)
+        except ProcessLookupError:
+            outcome(child, "skipped", reason="process already exited", **target)
+        except OSError:
+            outcome(child, "skipped", reason="process signal unavailable", **target)
+
+    def signal_tree(tree, child, signum, rows=None, *, owner_only=False):
+        if rows is None:
+            rows = tree.sample(include_reparented=True)
+        if tree.snapshot_unavailable:
+            outcome(child, "skipped", reason="process census unavailable", scope="tree", signal=signum)
+            return
+        root = tree.live(rows).get(tree.root)
+        if root is None:
+            current = process_info._probe_process_row(tree.process.pid)
+            reason = ("owner identity changed" if current and current.identity != tree.root
+                      else "owner already exited" if current and current.zombie
+                      else "owner identity unavailable")
+            outcome(child, "skipped", reason=reason, pid=tree.process.pid, signal=signum, scope="process")
+        if root is not None and not tree.shared_hosts.intersection(tree.spared):
+            signal_target(tree, child, root, signum, group=True)
+        for row in tree.live(rows).values():
+            if not owner_only or row.identity == tree.root:
+                signal_target(tree, child, row, signum)
+
+    if child_rows is None:
+        child_rows = children(run_dir, task_id, number)
     pending = []
     seen = set()
-    for child in children(run_dir, task_id, number):
+    for child in child_rows:
         if child.get("remote") or child.get("run_dir") in seen:
             continue
         directory = Path(child["run_dir"])
@@ -472,31 +546,68 @@ def cancel_children(run_dir, task_id, number, *, timeout_seconds=5):
         try:
             record = _read(directory, "dispatch-owner.json")
             pid = record.get("owner_pid")
+            row = process_info._probe_process_row(pid) if type(pid) is int and pid > 1 else None
             info = process_info.process(pid) if type(pid) is int and pid > 1 else None
-            if (info is None or "Z" in info.stat or pid == os.getpid()
+            if (row is not None and row.zombie) or (row is None and _owner_gone(directory)):
+                child["cancellation"] = {"status": "skipped", "reason": "owner already exited"}
+                continue
+            if (row is None or info is None or "Z" in info.stat or pid == os.getpid()
                     or info.pgid != pid or record.get("owner_pgid") != pid
                     or not record.get("owner_started_at")
                     or process_info.start_time(pid) != record["owner_started_at"]):
+                child["cancellation"] = {"status": "skipped", "reason": "owner identity changed or unavailable"}
                 continue
-            row = process_info._probe_process_row(pid)
-            if row is None or row.zombie:
+            token = child.get("run_token")
+            environment = provider_exec._process_environment(pid)
+            if not environment:
+                child["cancellation"] = {"status": "skipped", "reason": "environment unreadable"}
+                continue
+            # The owner file is provider-writable. Tie its target to the
+            # child's exec environment before trusting any of its PID claims.
+            if (not isinstance(token, str) or not token or token != record.get("run_token")
+                    or ("PROVENANT_RUN_TOKEN=" + token).encode() not in environment):
+                child["cancellation"] = {"status": "skipped", "reason": "child run token missing from owner environment"}
+                continue
+            if ("PROVENANT_RUN_DIR=" + str(directory)).encode() not in environment:
+                child["cancellation"] = {"status": "skipped", "reason": "child run directory missing from owner environment"}
+                continue
+            if not observed_descendant(row, token):
+                child["cancellation"] = {"status": "skipped", "reason": "owner ancestry or identity changed; no observed or live descendant identity"}
                 continue
             process = RecordedOwner(record, row.identity)
             tree = provider_exec._Descendants(process, None)
-            tree.sample()
-            os.kill(pid, signal.SIGTERM)
-            pending.append((process, tree))
+            tree.root = row.identity
+            rows = tree.sample()
+            if tree.snapshot_unavailable:
+                child["cancellation"] = {"status": "skipped", "reason": "process census unavailable"}
+                continue
+            # Let the owner cancel its separately sessioned provider and publish
+            # cancellation evidence first. Killing that provider here can win
+            # the owner's exit poll and turn cancellation into a failed receipt.
+            signal_tree(tree, child, signal.SIGTERM, rows, owner_only=True)
+            pending.append((process, tree, child))
         except (OSError, ValueError, TypeError):
+            outcome(child, "skipped", reason="owner verification or signal unavailable", scope="owner")
             print("nested cancellation owner unavailable", file=sys.stderr)
     deadline = time.monotonic() + timeout_seconds
     while pending and time.monotonic() < deadline:
-        if all(process.poll() is not None for process, _ in pending):
+        if all(process.poll() is not None for process, _, _ in pending):
             break
         time.sleep(.05)
-    for process, tree in pending:
+    for process, tree, child in pending:
         rows = tree.sample(include_reparented=True)
+        if tree.snapshot_unavailable:
+            outcome(child, "skipped", reason="process census unavailable", scope="tree")
+            continue
         if process.poll() is None or tree.live(rows):
-            tree.stop(root_grace=.2, descendant_grace=.05)
+            signal_tree(tree, child, signal.SIGTERM)
+            deadline = time.monotonic() + .2
+            while time.monotonic() < deadline:
+                if not tree.live(tree.sample(include_reparented=True)):
+                    break
+                time.sleep(.05)
+            signal_tree(tree, child, signal.SIGKILL)
+    return child_rows
 
 
 def child_errors(children):
