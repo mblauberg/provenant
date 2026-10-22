@@ -117,7 +117,7 @@ def patterns():
         **{source: ';'.join(str(root / folder / pattern) for root, _ in account_roots(source))
            for source, (_, folder, pattern) in IDENTITY_SOURCES.items()},
         'otel': str(state / 'otel/*.ndjson'),
-        'delivery': '<current-and-registered-projects>/.agent-run/runs/**/{repairs,findings}.jsonl',
+        'delivery': '<current-and-registered-projects>/.agent-run/runs/**/{RUN.json,repairs.jsonl,findings.jsonl}',
     }
 
 
@@ -185,6 +185,10 @@ def connect():
             added_at TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS harness_stamps (
             digest TEXT PRIMARY KEY, preset TEXT, knobs TEXT NOT NULL, first_seen TEXT);
+        CREATE TABLE IF NOT EXISTS deliveries (
+            run_dir TEXT PRIMARY KEY, host TEXT, run_id TEXT, risk_tier TEXT, chair_family TEXT,
+            repair_cycles INTEGER, acceptance_basis TEXT, accepted INTEGER NOT NULL DEFAULT 0,
+            merge_commit TEXT, ingested_at TEXT);
     ''')
     observation_columns = {row[1] for row in db.execute('PRAGMA table_info(observations)')}
     if 'origin_path' not in observation_columns:
@@ -695,8 +699,9 @@ def fabric_roots():
     return _fabric_roots(str(Path.cwd()), registry)
 
 
-def fabric_paths():
-    return sorted({path for root in fabric_roots() for path in root.glob('runs/**/attempt.json')})
+def fabric_paths(name='attempt.json'):
+    return sorted({path for root in fabric_roots() for path in root.glob(f'runs/**/{name}')
+                   if path.is_file() and not path.is_symlink()})
 
 
 # Native sources: the provider whose CLI identity directories hold them, and their place inside one.
@@ -1039,8 +1044,11 @@ def ingest(db):
                     elif source == 'otel':
                         ingest_jsonl(db, source, path, otel_record)
                     elif source == 'delivery':
-                        delivery_owner().prepare(db, path)
-                        ingest_jsonl(db, source, path, partial(delivery_owner().record, this()))
+                        if path.name == 'RUN.json':
+                            delivery_owner().ingest_receipt(this(), db, path)
+                        else:
+                            delivery_owner().prepare(db, path)
+                            ingest_jsonl(db, source, path, partial(delivery_owner().record, this()))
                     else:
                         ingest_jsonl(db, source, path, partial(
                             {'codex': codex_record, 'claude': claude_record}[source], **owner), inode=inode)
@@ -1056,7 +1064,8 @@ def ingest(db):
         if source == 'otel':
             count = db.execute("SELECT COUNT(*) FROM events WHERE kind LIKE 'otel.%'").fetchone()[0]
         elif source == 'delivery':
-            count = db.execute("SELECT COUNT(*) FROM events WHERE kind IN ('repair.cycle','review.finding')").fetchone()[0]
+            count = db.execute("SELECT COUNT(*) FROM deliveries").fetchone()[0] + db.execute(
+                "SELECT COUNT(*) FROM events WHERE kind IN ('repair.cycle','review.finding')").fetchone()[0]
         else:
             table = 'observations' if source in {'route_health', 'cooldowns'} else 'usage'
             count = db.execute(f'SELECT COUNT(*) FROM {table} WHERE source=?', (source,)).fetchone()[0]
@@ -1755,7 +1764,7 @@ def report_changes(db, args):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('command', choices=('ingest', 'sources', 'stats', 'changes', 'retro'))
+    parser.add_argument('command', choices=('ingest', 'sources', 'stats', 'changes', 'retro', 'accepted'))
     parser.add_argument('--json', action='store_true')
     parser.add_argument('--detail', action='store_true')
     parser.add_argument('--since', type=str)
@@ -1766,7 +1775,7 @@ def main(argv=None):
     parser.add_argument('--add', metavar='LABEL', help='manual change marker (changes only; needs --at)')
     parser.add_argument('--at', metavar='ISO', help='time of a manual marker')
     args = parser.parse_args(argv)
-    for flag, commands in (('since', {'stats', 'changes', 'retro'}), ('hosts', {'stats'}), ('detail', {'stats'}),
+    for flag, commands in (('since', {'stats', 'changes', 'retro', 'accepted'}), ('hosts', {'stats'}), ('detail', {'stats'}),
                            ('compare', {'stats'}), ('window', {'stats', 'retro'}), ('sync', {'changes'}),
                            ('add', {'changes'}), ('at', {'changes'})):
         if getattr(args, flag) and args.command not in commands:
@@ -1790,6 +1799,8 @@ def main(argv=None):
                 else:
                     render_stats(report, detail=args.detail)
                 return 0
+            if args.command == 'accepted':
+                return delivery_owner().run_accepted(this(), db, args.since, args.json)
             rows = ingest(db) if args.command == 'ingest' else [
                 dict(row) for row in db.execute('SELECT * FROM sources ORDER BY source')]
         if args.json:

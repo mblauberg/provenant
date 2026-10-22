@@ -144,6 +144,19 @@ recorded limit and its age per provider, account and host; accounts missing in a
 source remain unattributed. Fabric `ok` records
 execution success, not user acceptance or a passed delivery gate.
 
+`provenant telemetry accepted [--since ISO-DATE] [--json]` reports deliveries
+grouped by risk tier and the harness digest used by their lane attempts. A run
+is accepted when its `RUN.json` has `delivery_acceptance` with basis
+`checks-and-review`, `project-landing` or `user`. A run is merged only when the
+commit on its `software_delivery.canonical_artifact_id` artifact matches a
+`changes.merge_commit` row, populated by `telemetry changes --sync`. Lane `ok`
+means the provider returned; it is not acceptance. Cost uses every usage row
+whose `usage_files.path` is under the delivery run directory, including failed
+attempts and reviewer lanes. Unpriced rows are reported, and cost and cost per
+accepted run are lower bounds. Runs without delivery acceptance stay in the
+run count and never enter the accepted denominator. The ledger stores the
+receipt facts in `deliveries`; `accepted` and `merged` are report labels.
+
 
 ## Events, change markers and comparison
 
@@ -201,7 +214,27 @@ unlinked OTLP records leave it null. An existing ledger re-reads its receipts
 and snapshots once to backfill events; transcripts are not re-read, because
 session events derive from usage rows already stored.
 
+The future OTel exporter mapping is pinned here while `gen_ai.*` remains a
+Development convention. Keep it in one constant in the exporter module when
+that module exists; the map is documentation only until then.
+
+| Ledger field | OTel export attribute |
+|---|---|
+| `requested_model` | `gen_ai.request.model` |
+| `resolved_model`, `observed_model` | `gen_ai.response.model` (observed preferred); resolved also as `provenant.model.resolved` |
+| `provider` | `gen_ai.provider.name` |
+| `session` | `gen_ai.conversation.id` |
+| input and output tokens | `gen_ai.usage.input_tokens`, `gen_ai.usage.output_tokens` |
+| `review.finding` disposition | `gen_ai.evaluation.result` event (score label = disposition); otherwise `provenant.*` |
+| `empty_patch` | `provenant.empty_patch` |
+| `escalation_reason`, `escalated_from` | `provenant.escalation.reason`, `provenant.escalation.from` |
+| `repair_cycle` | `provenant.repair.cycle` |
+| compaction count | `provenant.session.compactions` |
+| profile preset and digest | `provenant.profile.preset`, `provenant.profile.digest` |
+| `harness_rev` | `provenant.harness_rev` (also used on inbound records) |
+
 ```sh
+provenant telemetry accepted [--since ISO-DATE] [--json]
 provenant telemetry changes --sync           # merged PRs via gh, incremental
 provenant telemetry changes --add "switched default reviewer" --at 2026-10-20
 provenant telemetry changes [--since DATE] [--json]

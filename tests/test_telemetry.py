@@ -127,7 +127,7 @@ def test_delivery_sidecars_ingest_repair_transitions_and_finding_lineage(tmp_pat
     assert len(findings) == 3
     assert all(item['reviewer_family'] == 'anthropic' and item['model'] == 'claude-test' for item in findings)
     sources = {item['source']: item for item in json.loads(cli(tmp_path, 'telemetry', 'sources', '--json').stdout)}
-    assert sources['delivery']['row_count'] == 5
+    assert sources['delivery']['row_count'] == 6
 
 
 def test_provider_compaction_rows_store_only_metadata(tmp_path):
@@ -190,6 +190,65 @@ def test_delivery_discovery_follows_linked_worktree_git_common_dir(tmp_path):
     assert result.returncode == 0, result.stdout + result.stderr
     with sqlite3.connect(worktree / 'state/telemetry.sqlite3') as db:
         assert db.execute("SELECT COUNT(*) FROM events WHERE kind='repair.cycle'").fetchone()[0] == 1
+
+
+def test_accepted_cost_uses_run_receipts_all_attempts_and_synced_merge(tmp_path):
+    root = tmp_path / '.agent-run/runs'
+    digest = 'a' * 64
+    merge_commit = 'b' * 40
+
+    def make_run(name, accepted, attempts):
+        run = root / name
+        run.mkdir(parents=True)
+        receipt = {'run_id': name, 'risk_tier': 'substantial', 'chair_family': 'openai',
+                   'repair_cycles': 1, 'reviews': []}
+        if accepted:
+            receipt['delivery_acceptance'] = {'basis': 'checks-and-review'}
+            receipt['software_delivery'] = {'canonical_artifact_id': 'merged-source'}
+            receipt['artifacts'] = [{'id': 'merged-source',
+                                     'git_revision': {'repository': '.', 'commit': merge_commit}}]
+        write_json(run / 'RUN.json', receipt)
+        for attempt, status in enumerate(attempts, start=1):
+            write_json(run / f'task-{attempt}' / 'attempt.json', {
+                'run_id': name, 'task_id': f'task-{attempt}', 'attempt': attempt, 'status': status,
+                'started_at': '2026-10-22T00:00:00Z', 'ended_at': '2026-10-22T00:01:00Z',
+                'provenance': {'requested': {'adapter': 'claude', 'model': 'opus'},
+                               'provider': 'anthropic'},
+                'profile': {'preset': 'balanced', 'digest': digest, 'knobs': {}},
+                'usage': {'input_tokens': 1000, 'cache_read_tokens': 0,
+                          'cache_write_tokens': 0, 'output_tokens': 2000,
+                          'reasoning_tokens': 0},
+            })
+
+    make_run('20261022-1200-delivery-accepted-a1b2c3', True, ['ok', 'error'])
+    make_run('20261022-1201-delivery-unaccepted-d4e5f6', False, ['ok'])
+    assert cli(tmp_path, 'telemetry', 'ingest').returncode == 0
+    with sqlite3.connect(tmp_path / 'state/telemetry.sqlite3') as db:
+        db.execute("INSERT INTO changes(change_id,kind,pr,merge_commit,merged_at,title,labels,added_at) "
+                   "VALUES ('merge:1','pull_request',1,?,'2026-10-22T00:00:00Z','merged','[]',"
+                   "'2026-10-22T00:00:00Z')", (merge_commit,))
+        columns = [row[1] for row in db.execute('PRAGMA table_info(usage)')]
+        host_index = columns.index('host')
+        usage_rows = db.execute("SELECT * FROM usage WHERE source='fabric'").fetchall()
+        current_host = usage_rows[0][host_index]
+        for row in usage_rows:
+            historical = list(row)
+            historical[host_index] = 'legacy-host'
+            db.execute(f"INSERT INTO usage({','.join(columns)}) VALUES ({','.join('?' for _ in columns)})",
+                       historical)
+            event_id = row[columns.index('event_id')]
+            path = db.execute("SELECT path FROM usage_files WHERE source='fabric' AND event_id=? AND host=?",
+                              (event_id, current_host)).fetchone()[0]
+            db.execute("INSERT INTO usage_files VALUES ('fabric',?,'legacy-host',?)", (event_id, path))
+        db.execute("INSERT OR REPLACE INTO meta VALUES ('host_ids',?)",
+                   (json.dumps(sorted((current_host, 'legacy-host'))),))
+    report = json.loads(cli(tmp_path, 'telemetry', 'accepted', '--json').stdout)
+    assert report == [{
+        'risk_tier': 'substantial', 'harness_digest': digest,
+        'runs': 2, 'accepted': 1, 'merged': 1,
+        'cost_usd_lower_bound': 0.132, 'unpriced_rows': 0,
+        'cost_per_accepted_usd_lower_bound': 0.132,
+    }]
 
 
 def test_claude_incremental_dedup_subagents_and_content_exclusion(tmp_path):
