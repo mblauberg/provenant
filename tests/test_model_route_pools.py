@@ -243,6 +243,26 @@ def test_availability_skips_entries_the_adapter_cannot_run(tmp_path):
                for warning in result["warnings"])
 
 
+def test_an_adapter_drawing_on_credits_runs_only_when_nothing_with_allowance_qualifies(tmp_path):
+    def checked(cooling=(), last_resort=True):
+        value = availability(cooling=cooling)
+        value._quota = {"codex": {"state": "credit_only", **({"last_resort": True} if last_resort else {})}}
+        return value
+    result = pick({"route": "strong", "council": 2}, tmp_path, available=checked())
+    assert set(models(result)) == {"claude/claude-opus-5-5"}
+    assert any("codex/gpt-6.1-sol: drawing on credits" in warning for warning in result["warnings"])
+    # With Claude cooling, Codex's credits are the last resort; naming the adapter pins Codex outright.
+    result = pick({"route": "strong"}, tmp_path, available=checked(cooling=("claude/*",)))
+    assert models(result) == ["codex/gpt-6.1-sol"]
+    assert any("draws on credits: nothing with allowance" in warning for warning in result["warnings"])
+    result = pick({"route": "strong", "adapter": "codex"}, tmp_path, available=checked())
+    assert models(result) == ["codex/gpt-6.1-sol"] and not any("credits" in warning for warning in result["warnings"])
+    assert models(pick({"models": ["codex/gpt-6-astra"]}, tmp_path, available=checked())) == ["codex/gpt-6-astra"]
+    # The `normal` policy marks no last resort, so Codex competes on weight.
+    result = pick({"route": "strong", "council": 3}, tmp_path, available=checked(last_resort=False))
+    assert "codex/gpt-6.1-sol" in models(result)
+
+
 def test_task_classes_and_aliases_map_onto_routes(tmp_path):
     assert pick({"route": "review"}, tmp_path, catalog=SEED)["route"] == "senior"
     assert pick({"route": "strong"}, tmp_path, catalog=SEED)["route"] == "senior"

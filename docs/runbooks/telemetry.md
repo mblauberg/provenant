@@ -143,7 +143,9 @@ An entry without `identity_dir` means the provider's default directory.
 
 ```json
 {
-  "quota": {"enabled": true, "cache_seconds": 300},
+  "quota": {"enabled": true, "cache_seconds": 300,
+            "window_labels": {"iguana_necktie": "Cloud session credits"},
+            "credits_policy": "last_resort", "credit_floor": 0},
   "accounts": {
     "claude": {
       "max-a": {"identity_dir": "~/.claude", "plan": "Max", "priority": 1},
@@ -180,6 +182,27 @@ Only zero use can mean a window has not started. Positive use with a missing or
 passed reset has unknown pace pending a fresh reading; it retains its reported
 headroom. A reset up to five minutes beyond the window length is clamped for
 pace calculations; larger discrepancies have unknown pace.
+
+Some providers report budget windows in money rather than a percentage. Claude
+names them by codename, such as `iguana_necktie` with `limit_dollars` and
+`used_dollars`. Such a window keeps its percentage for pace and adds
+`used_amount`, `limit_amount` and `currency`; the table shows `$136 of $250`.
+`quota.window_labels` maps a window name to a display label and adds to or
+overrides the built-in map, which labels `iguana_necktie` as
+`Cloud session credits`. Report windows carry `label` only when one is mapped.
+
+An account can also report `usage_credits`, a list of credit balances drawn on
+once the plan allowance runs out, and `resets`, the banked resets available with
+their known expiries. Each credit has `kind`, `balance` (null when `unlimited`),
+`currency` or `unit`, `expires_at` and `source`. `resets` has `available`, a
+sorted `expires_at` list that may be shorter than `available`, and `source`.
+Both are omitted when the provider reports none, zero or nothing; a missing
+balance is unknown, not zero. The table adds one line per account that has
+either, for example `codex/default: 27,406 credits available; 1 banked reset
+(expires 7 Nov)`. Codex reports both through `account/rateLimits/read`. Claude
+reports a `spend.balance`, shown when positive, and no banked resets. A reset
+recorded with `provenant quota credit` appears with `source: manual` when the
+provider reports no count.
 
 Successive observations record `natural`, `granted_date_kept`,
 `granted_window_restarted`, `window_moved`, `not_started` or `window_started`
@@ -218,13 +241,36 @@ account and host; unknown readings
 preserve them. Short-term `rate_limited` cooldowns remain.
 Deficit is shown in `provenant routes` and JSON only; it does not lower weights.
 
+An account whose allowance is spent can stay usable on credits. The allowance is
+spent when a window is exhausted or the provider reports `ordinary_usage_allowed:
+false`. Credits keep the account usable when the latest reading has a balance
+above `quota.credit_floor` (default 0), or unlimited credits, and the provider
+reports no spend control reached and no depleted credits. Such an account has
+state `credit_only`, `drawing_credits: true`, a summary with its balance, and
+`credit_burn_per_hour` once successive readings show the balance falling. It adds
+no quota cooldown and clears older cooldowns that quota set. A cooldown from a
+real refusal stays until it expires or a reading shows allowance again, since
+credits may be switched off. A spent allowance without usable credits is
+`exhausted`, even below 100%, and cools until the governing window resets. With
+no future reset time known, it cools for `quota.unknown_reset_cooldown_seconds`
+(default 3600) from the reading, and the next reading decides.
+`quota.credits_policy` sets how routing ranks it:
+
+- `last_resort` (default): placement ranks it after every account with
+  allowance, and pools skip its adapter while another entry with allowance
+  qualifies. A request that names the adapter or the model still uses it.
+- `normal`: it ranks like an account with allowance.
+- `never`: it stays exhausted and cools until reset.
+
+A balance that the latest reading does not report is unknown, never usable.
+
 ### Adding a provider
 
 1. Add one small module under `scripts/quota_providers/`, then one entry in
    `provider_quota.REGISTRY`. No provider-name branches belong in the core.
 2. Implement `ADAPTER`, `default_identity()` and `fetch(account, io, now)`.
-   Fetch returns `windows`, optionally `plan`, `source`, `unreported`, `credits`
-   and `observed_at`. Provider-specific account config keys are passed through
+   Fetch returns `windows`, optionally `plan`, `source`, `unreported`, `credits`,
+   `usage_credits`, `resets` and `observed_at`. Provider-specific account config keys are passed through
    in `account.options`; `identity_dir`, `enabled`, `plan` and `priority` are
    handled by the core. Options stay out of snapshots and reports. Each window
    has `name`, `used_percent`, `window_minutes`, `reset_at` and `raw_kind`; names

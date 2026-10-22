@@ -5,6 +5,7 @@ Adapted from token-meter (MIT, Galileo Agent Labs); see THIRD_PARTY_NOTICES.md.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 import hashlib
 import json
 import os
@@ -14,6 +15,7 @@ from pathlib import Path
 ADAPTER = 'claude'
 USAGE_URL = 'https://api.anthropic.com/api/oauth/usage'
 KEYCHAIN_SERVICE = 'Claude Code-credentials'
+MATCH_SECONDS = 5
 
 
 def keychain_service(identity_dir):
@@ -89,17 +91,59 @@ def parse(payload, now=None):
             unreported.append(name)
         if isinstance(value, dict) and 'utilization' in value:
             windows.append({'name': name, 'raw_kind': name, 'used_percent': value.get('utilization'),
-                            'window_minutes': io_window_name(name), 'reset_at': value.get('resets_at')})
+                            'window_minutes': io_window_name(name), 'reset_at': value.get('resets_at'),
+                            # Dollar budgets, such as cloud session credits, report their amounts.
+                            'used_amount': value.get('used_dollars'), 'limit_amount': value.get('limit_dollars'),
+                            'currency': 'USD' if value.get('limit_dollars') is not None else None})
     for index, limit in enumerate(payload.get('limits') or []):
         if not isinstance(limit, dict) or limit.get('is_active') is False:
             continue
         scope = limit.get('scope') if isinstance(limit.get('scope'), dict) else {}
         model = scope.get('model') if isinstance(scope.get('model'), dict) else {}
         label = model.get('id') or model.get('display_name') or str(index + 1)
+        minutes = (limit.get('window_minutes') or io_window_name(str(limit.get('group') or ''))
+                   or duplicated_length(limit, windows))
         windows.append({'name': f"{limit.get('kind') or 'limit'}:{label}", 'raw_kind': limit.get('kind'),
                         'used_percent': limit.get('percent'), 'reset_at': limit.get('resets_at'),
-                        'window_minutes': limit.get('window_minutes') or io_window_name(str(limit.get('group') or ''))})
-    return {'windows': windows, 'unreported': unreported}
+                        # Without a length its pace is always unknown, so it is shown but never sets state.
+                        'window_minutes': minutes, 'advisory': minutes is None})
+    return {'windows': windows, 'unreported': unreported, 'usage_credits': usage_credits(payload.get('spend'))}
+
+
+def _instant(value):
+    try:
+        moment = datetime.fromisoformat(value) if isinstance(value, str) else None
+    except ValueError:
+        return None
+    return moment and (moment if moment.tzinfo else moment.replace(tzinfo=UTC))
+
+
+def _percent(value):
+    return float(value) if type(value) in (int, float) else None
+
+
+def duplicated_length(limit, named):
+    """A `limits` entry repeats a named window: the one with the same reset and, within rounding, the same use."""
+    reset, used = _instant(limit.get('resets_at')), _percent(limit.get('percent'))
+    for row in named:
+        other, seen = _instant(row['reset_at']), _percent(row['used_percent'])
+        if (row['window_minutes'] and reset and other and used is not None and seen is not None
+                and abs((reset - other).total_seconds()) <= MATCH_SECONDS and abs(used - seen) < 1):
+            return row['window_minutes']
+    return None
+
+
+def usage_credits(spend):
+    """The prepaid balance that covers use past the plan limits, when the endpoint reports one."""
+    if not isinstance(spend, dict):
+        return None
+    used = spend.get('used') if isinstance(spend.get('used'), dict) else {}
+    balance, currency = spend.get('balance'), used.get('currency')
+    if isinstance(balance, dict):  # The same minor-unit form as `used`.
+        currency = balance.get('currency') or currency
+        minor, exponent = balance.get('amount_minor'), balance.get('exponent')
+        balance = minor / 10 ** exponent if type(minor) is int and type(exponent) is int else None
+    return [{'kind': 'usage_credits', 'balance': balance, 'currency': currency}] if balance is not None else None
 
 
 WORDS = {'one': 1, 'two': 2, 'three': 3, 'four': 4, 'five': 5, 'six': 6, 'seven': 7,
