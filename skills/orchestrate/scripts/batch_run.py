@@ -54,7 +54,9 @@ from dispatch_run import (
     create_cancellation_marker,
     remove_cancellation_marker,
     prompt_temp_roots,
+    run_identity,
 )
+import run_lineage
 from attempt_evidence import AttemptEvidenceError as SharedAttemptEvidenceError, canonical_success_status, validate_successful_attempt
 from secret_scan import scan_inputs
 from _shared.custody import (
@@ -357,11 +359,7 @@ def _acquire_batch_lock(run_dir: Path):
     try:
         ensure_owned_directory(run_dir, dispatch_dir)
         ensure_owned_directory(run_dir, dispatch_dir / "batches")
-        fd, _relative, _target = open_contained_regular(
-            run_dir, "MANIFEST.md", os.O_RDWR | os.O_APPEND, label="MANIFEST.md"
-        )
-        stream = os.fdopen(fd, "a+", encoding="utf-8")
-        fcntl.flock(stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        stream = run_lineage.acquire_owner_custody(run_dir)
         return stream
     except (OSError, AttemptEvidenceError, OwnedFileError) as exc:
         if "stream" in locals():
@@ -644,9 +642,15 @@ def _run_task(task: dict[str, Any], run_dir: Path, batch_dir: Path) -> dict[str,
     started = time.monotonic()
     timed_out = False
     try:
+        # Children prove membership with the token this batch published, whatever the caller's env held.
+        try:
+            token = run_lineage.owner_token(run_dir)
+        except (OSError, OwnedFileError):
+            token = None
+        environment = {**os.environ, **({"PROVENANT_RUN_DIR": str(run_dir), "PROVENANT_RUN_TOKEN": token} if token else {})}
         process = subprocess.Popen(_command(dispatch_task, run_dir), cwd=Path.cwd(), text=True,
                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                   start_new_session=True)
+                                   start_new_session=True, env=environment)
         with _state_lock:
             _active_processes[task_id] = process
         queued_seconds = 0.0
@@ -811,6 +815,7 @@ def batch(args: argparse.Namespace) -> int:
         print(json.dumps({"schema_version": 1, "status": "invalid_manifest", "message": str(exc)}, sort_keys=True))
         return 2
 
+    run_lineage.ensure_nested_owner(run_dir, "batch")
     rejected: dict[str, dict[str, Any]] = {}
     for task in tasks:
         check = dict(task)
@@ -873,9 +878,11 @@ def batch(args: argparse.Namespace) -> int:
     try:
         try:
             run_dir = _validate_run_dir(args.run_dir)
+            run_lineage.record_owner(run_dir, "batch")
+            run_lineage.register_run(run_dir, run_identity(run_dir))
             reconcile_manifest(run_dir, batch_lock)
             # The batch lock is the append handle; do not reopen MANIFEST.md.
-        except (BatchInputError, AttemptEvidenceError, OSError) as exc:
+        except (BatchInputError, AttemptEvidenceError, OSError, ValueError) as exc:
             print(json.dumps({"schema_version": 1, "status": "custody_preflight_failed",
                               "message": str(exc)}, sort_keys=True))
             return 2
