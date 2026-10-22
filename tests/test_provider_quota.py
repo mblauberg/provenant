@@ -117,14 +117,33 @@ def test_missing_windows_are_unreported_never_zero(quota, monkeypatch):
     assert quota.provider('claude').parse({'five_hour': {'utilization': 1}, 'seven_day': None})['unreported'] == ['seven_day']
 
 
-def test_render_folds_unreported_windows_into_one_line_per_account(quota, monkeypatch, capsys):
+def test_render_lists_unreported_windows_only_when_verbose_one_line_per_account(quota, monkeypatch, capsys):
     monkeypatch.setattr(quota, 'fetch', lambda account, now: {
         'windows': [window(14, 300, timedelta(hours=1), 'five_hour')], 'unreported': ['seven_day_opus', 'seven_day_sonnet']})
     account = quota.Account('claude', 'max-a', Path('/nowhere'), True)
-    quota.render(quota.report([quota.refresh(account, NOW, force=True)], NOW))
+    shown = quota.report([quota.refresh(account, NOW, force=True)], NOW)
+    quota.render(shown)
+    assert 'not reported' not in capsys.readouterr().out
+    quota.render(shown, verbose=True)
     out = capsys.readouterr().out
     assert 'seven_day_opus' not in out and 'five_hour' in out
-    assert 'claude/max-a: 2 window(s) not reported (missing does not mean 0%); use --json' in out
+    assert 'claude/max-a: 2 window(s) not reported (missing does not mean 0%)' in out
+
+
+def test_render_hides_repeated_limit_windows_and_reads_a_dollar_budget_plainly(quota, monkeypatch, capsys):
+    scoped = window(50, WEEK, timedelta(days=2), 'weekly_scoped:fable')
+    budget = {'name': 'Cloud session credits', 'used_percent': 54, 'window_minutes': None,
+              'reset_at': (NOW + timedelta(days=14)).isoformat(), 'used_amount': 136, 'limit_amount': 250, 'currency': 'USD'}
+    monkeypatch.setattr(quota, 'fetch', lambda account, now: {
+        'windows': [window(14, 300, timedelta(hours=1), 'five_hour'), window(14, 300, timedelta(hours=1), 'session:1'),
+                    scoped, budget]})
+    account = quota.Account('claude', 'max-a', Path('/nowhere'), True)
+    value = quota.report([quota.refresh(account, NOW, force=True)], NOW)
+    quota.render(value)
+    out = capsys.readouterr().out
+    assert 'session:1' not in out and 'weekly_scoped:fable' in out and 'window length unreported' not in out
+    assert '$114 left; resets in 14d' in out and 'unknown' not in out
+    assert 'session:1' in {w['name'] for w in value['accounts'][0]['windows']}
 
 
 # Provider modules ---------------------------------------------------------------------------
