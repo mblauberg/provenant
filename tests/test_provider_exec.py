@@ -2392,7 +2392,11 @@ def test_codex_progress_requires_a_successful_terminal_result(tmp_path, monkeypa
             {"type": "item.completed", "item": {"type": "agent_message", "text": "Final review"}},
             {"type": "turn.completed"},
         ])
-    code = "import os, signal\nprint(" + repr("\n".join(map(json.dumps, events))) + ", flush=True)\n"
+    # Keep the large event stream out of argv: Linux limits each exec argument.
+    events_path = tmp_path / "provider-events.jsonl"
+    events_path.write_text("\n".join(map(json.dumps, events)))
+    code = ("import os, signal\nfrom pathlib import Path\n"
+            f"print(Path({str(events_path)!r}).read_text(), flush=True)\n")
     if ending == "signal":
         code += "os.kill(os.getpid(), signal.SIGKILL)\n"
     output = tmp_path / "result.md"
@@ -2418,7 +2422,11 @@ def test_codex_terminal_result_in_rolled_output_survives_later_signal(tmp_path, 
         {"type": "item.completed", "item": {"type": "agent_message", "text": "Final review"}},
         {"type": "turn.completed"},
     ] + padding
-    code = ("import os, signal\nprint(" + repr("\n".join(map(json.dumps, events))) + ", flush=True)\n"
+    # Preserve capture rollover without exceeding Linux's per-argument exec limit.
+    events_path = tmp_path / "provider-events.jsonl"
+    events_path.write_text("\n".join(map(json.dumps, events)))
+    code = ("import os, signal\nfrom pathlib import Path\n"
+            f"print(Path({str(events_path)!r}).read_text(), flush=True)\n"
             "os.kill(os.getpid(), signal.SIGKILL)\n")
     output = tmp_path / "result.md"
     plan = fixture_plan(tmp_path, code)
