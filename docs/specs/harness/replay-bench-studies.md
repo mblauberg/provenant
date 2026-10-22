@@ -1,7 +1,7 @@
 # Spec: replay bench studies, model-effort frontier and fleet topology
 
 Status: **proposed**, 2026-10-22, for issue #1064. This file defines two
-studies that run on the [replay bench](replay-bench.md). It reuses that
+studies that build on the [replay bench](replay-bench.md). It reuses that
 spec's statistics (unit, repeats, win rule, guards, power, zero cases),
 sets and split rules (B1), isolation and confidentiality (B2), run rules
 (B3) and row provenance (B4) by reference. It grants no authority, and a
@@ -9,21 +9,16 @@ config change it proposes lands only through its own PR.
 
 ## Shared rules
 
-- **Cost.** We pay by subscription, so the primary cost is the quota share
-  per account window: the `used_percent` delta over a block, divided by the
-  block's accepted changes, reported for each window (5-hour and weekly).
-  Weighted tokens (main spec B4.4) and listed USD are secondary.
-  - Across providers, the table also shows the plan-dollar equivalent of
-    each share. For example, a 1% weekly share on a USD 100/month plan is
-    about USD 0.23.
-- **Quota blocks.** Quota attribution follows main spec B4.5.
-  - Each account runs one cell at a time, in alternating ABAB blocks of
-    whole tasks. These blocks replace main spec B3.4's per-attempt
-    interleaving for that account.
-  - A block is void if the ledger shows other sessions on that account
-    during it.
-  - A block must move the meter by at least 10 points, so that the meter's
-    1-point resolution stays below 10% error.
+- **Cost.** We pay by subscription, so the primary cost is quota share per
+  account window (5-hour and weekly) per accepted change, with its
+  plan-dollar equivalent across providers. For example, 1% of a weekly
+  window on a USD 100/month plan is about USD 0.23. Weighted tokens (main
+  spec B4.4) and listed USD are secondary.
+- **Quota blocks** (dedicated runs, main spec B4.5). Each account runs one
+  cell at a time in alternating ABAB blocks of whole tasks, which replace
+  B3.4's per-attempt interleaving for that account. A block is void if the
+  ledger shows other sessions on the account, and it must move the meter
+  by at least 10 points, keeping 1-point meter resolution under 10% error.
 - **Confidentiality.** No confidential or Sealle task is sent to a model
   whose catalogue entry is `trains_on_prompts: true` or unset; unset counts
   as true. Main spec B2.6 applies to every Sealle artefact.
@@ -32,88 +27,125 @@ config change it proposes lands only through its own PR.
 
 ## Study A: model x effort frontier per task class
 
-### Grid
+Study A starts from published results and learns from real work. The
+dedicated replay grid is a fallback, not the main instrument.
+
+### Candidate grid
 
 | Family | Cells |
 |---|---|
-| Claude | `claude-haiku-5-5` low, medium, high; `claude-sonnet-5-5` medium, high; `claude-opus-5-5` low, medium, high; each model at xhigh as a probe |
+| Claude | `claude-haiku-5-5` low, medium, high; `claude-sonnet-5-5` medium, high; `claude-opus-5-5` low, medium, high; xhigh on each as a probe only |
 | OpenAI | `gpt-6-luna` and `gpt-6.1-sol`, low, medium, high, xhigh |
 | OpenCode | `opencode-go/deepseek-v4.1-flash` at its catalogue default |
 | Cursor | `grok-4.7` at its route default |
 
-That gives 21 cells. Sonnet 5.5 has no `low` in the catalogue, so its low
-cell does not exist and is not substituted. The xhigh probes run in Stage 1
-only, and they enter Stage 2 only if they are not dominated.
+Sonnet 5.5 has no `low` in the catalogue, so that cell does not exist.
+Classes in scope are the writer classes `mechanical`, `legwork` and
+`implementation`; review, research and UI classes are out of scope.
 
-### Tasks and acceptance
+### Stage 0: external priors
 
-- **Task classes.** Replay tasks are classed by size as `mechanical`,
-  `legwork` and `implementation` (operating model R1.2), and the class is
-  frozen at mining. Review, research and UI classes are out of scope here.
-- **Isolated writer.** Study A measures the writer cell alone:
-  - each attempt is one writer lane with tier review disabled;
-  - an accepted change is a lane `ok` with both oracles passing;
-  - cost covers only that lane.
+1. A research lane collects published per-effort results into
+   `docs/research/effort-priors.md`, seeded from E1: Artificial Analysis,
+   vendor effort curves, SWE-bench Pro, Terminal-Bench 2.x and similar.
+   Each row records model, effort, benchmark, score, cost or tokens, source
+   URL, publication date and confidence (high, medium, low, rated as in
+   R1-R3), and the class the benchmark maps to (for example SWE-bench Pro
+   to `implementation`).
+2. A cell is dropped before any internal spend when another cell of the
+   same model family beats it on both score and cost, by more than the
+   source's reported noise (else 5 points and 20%). That must hold in at
+   least two medium-or-higher sources, with no contrary source. Drops are
+   recorded with their reasons. A newer contrary source restores the cell.
+3. The best-value surviving cell per class becomes the proposed initial
+   default. Priors only seed the grid and defaults. Public leaderboards
+   are contaminated (main spec Not doing), so a prior is never acceptance
+   evidence for a harness change. The table is refreshed when a model
+   enters the catalogue.
 
-  This deviates from main spec B3.6 on purpose. A review ladder would add
-  the reviewer's model to every cell.
-- **Effort floors.** Cells pin both model and effort, overriding route
-  floors for the experiment only. `implementation`'s high floor is policy,
-  so a proposed default below it must change the floor in the same PR.
+### Stage 1: in-flight arm on real work
 
-### Stages
+1. **Eligibility.** A lane routed by default (no explicit model or
+   `principal:` override), in an in-scope class, at `routine` or
+   `substantial` risk, and not confidential unless neither cell's model
+   trains on prompts (unset counts as training).
+2. **Trials.** Each class runs one pre-registered trial at a time: its
+   current default cell against one adjacent challenger. Adjacent means
+   either the same model at one effort step up or down, or the
+   neighbouring tier at the same effort. Route floors still apply on real
+   work.
+3. **Assignment.** At route resolution, before any outcome is seen, a
+   seeded hash of the lane id sends the lane to the challenger with
+   probability `routing.inflight_share`. The share is a proposed #1070
+   knob, an int percent from 0 to 25, default 10; 0 turns trials off.
+   Because assignment is random, task difficulty balances between arms in
+   expectation, which #1056's before/after comparison cannot do.
+4. **Telemetry.** Each lane records `routing.trial_id`, `routing.arm`
+   (`default` or `challenger`), `routing.assignment_p` and an ineligibility
+   reason. Fabric receipts carry these fields, and the ledger ingests them.
+   Native spawns join once the R1.4 soft gate stamps the assignment.
+5. **Outcomes, per task:** cost per accepted change (operating model R4.3)
+   in weighted tokens; quota share, apportioned by each lane's share of its
+   account's weighted tokens in the window and flagged as approximate;
+   tokens; wall-clock time; review findings on the change, as raw counts
+   until per-finding dispositions exist (MAP "Missing").
+6. **Analysis.** The main spec's statistics apply, except that tasks are
+   not paired: the bootstrap is stratified by class, risk tier, size and
+   repository and clustered on task, and a within-stratum re-randomisation
+   test of the assignment replaces the sign test as the agreeing check.
+7. **Stopping.** A weekly look stops a trial early on a guardrail: either
+   the challenger's acceptance one-sided bound is worse than the pass@1
+   tolerance, or its cost per accepted change is more than 50% above the
+   default's. A win, no-win or `within_noise` verdict is read only once
+   the sample reaches the size set by the power simulation (main spec
+   Stats 10). `within_noise` means the interval lies inside the tolerance
+   band. After N weeks (default 6) without a verdict, the trial is
+   `inconclusive`.
 
-1. **Stage 1, screen.** Search set (20 tasks), 1 repeat, all cells, 420
-   attempts.
-   - A cell is pruned when another cell beats it by more than two pooled
-     standard errors (main spec Stats 9) on both cost per accepted change
-     and acceptance rate. Pruning is pooled across classes, because 20
-     tasks cannot screen each class. A cell whose blocks move the meter by
-     less than 10 points screens on weighted tokens instead, and the
-     report flags it.
-   - The cells the questions below need are protected from pruning:
-     Haiku high, Opus low and medium, every Sonnet cell, Luna xhigh, and
-     Sol low and medium.
-2. **Stage 2, decide.** Acceptance set, 3 repeats, surviving cells only.
-   - A class needs at least 30 acceptance tasks before its table can
-     decide. Mining tops up by class (main spec B1.5).
-   - A class below 30 tasks is reported `underpowered`, and its table is
-     descriptive only.
+### Stage 2: optional confirmation on the replay bench
 
-### Questions it must answer
+This stage runs only for a class where Stage 0 and Stage 1 disagree beyond
+noise, or where Stage 1 is still `inconclusive` after N weeks. It also
+answers comparisons that are not adjacent, such as Luna at xhigh against
+Sol at low or medium.
 
-Each is a paired comparison under the main spec's win rule, with the claim
-pre-registered.
+Each attempt is a single writer lane with tier review off, costed for that
+lane only. This deviates from main spec B3.6 deliberately, so that the
+reviewer's model does not confound the cell. Cells pin model and effort,
+overriding route floors for the experiment only. The search set runs at 1
+repeat; a cell is pruned when another beats it on both cost per accepted
+change and acceptance rate by more than two pooled standard errors, pooled
+across classes, with the cells the questions need protected. The
+acceptance set then runs at 3 repeats; a class with fewer than 30 tasks is
+`underpowered` and descriptive only.
 
-1. Does Haiku at high, or Opus at low or medium, beat Sonnet's best cell in
-   a class? "Beat" means an efficiency win with the pass@1 guard holding,
-   or a capability win with the quota-share guard holding.
-2. Where is a Sonnet or Sol cell uniquely on the frontier, meaning no other
-   model's cell is within the screen on both axes? Reported per class with
-   the margin to the nearest alternative.
-3. Does Luna at xhigh dominate Sol at low or medium: no worse on either
-   axis beyond the guard tolerance, and a win on at least one?
+### Questions
 
-### Output
+Each answer cites the stage that settled it. (1) Does Haiku at high, or
+Opus at low or medium, beat Sonnet in a class? Stage 1 runs the adjacent
+pairs (Haiku high against Sonnet high, Opus medium against Sonnet medium);
+Stage 2 takes the rest. (2) Where is a Sonnet or Sol cell uniquely on the
+frontier, with no other model's cell within noise on both axes? (3) Does
+Luna at xhigh dominate Sol at low or medium, no worse on either axis beyond
+tolerance and better on one? Stage 0 answers it; Stage 2 settles it if
+needed.
 
-- **Pareto table per class:** cell; pass@1 with its interval; pass^3; quota
-  share per accepted change, per window; weighted tokens per accepted
-  change; median wall time; timeout and empty-patch rates; frontier flag;
-  and the answers above.
-- **Proposed `role_effort_defaults` diff** for `config/model-routing.json`.
-  Today only `families.openai` has the block (worker: workhorse high, scout
-  high); `families.anthropic` would gain one. Any
-  `task_class_routes.<class>.effort` change is listed beside it. Each
-  changed entry cites the comparison that won it; entries without a win
-  stay unchanged.
+### Output and budget
 
-### Budget
-
-- Stage 1 costs about 420 x m tokens, where m is the median writer lane.
-  At the ledger's 1.28M median lane that is about 540M tokens, about 97%
-  of them cache reads.
-- Stage 2 costs C x T x 3 x m, for C surviving cells and T acceptance tasks.
-- The quota share per block is measured, not estimated.
+- **Pareto table per class:** cell, pass@1 with its interval, pass^3
+  (Stage 2 only), quota share and weighted tokens per accepted change,
+  median wall time, frontier flag, and the source stage of each figure.
+- **`role_effort_defaults` diff** for `config/model-routing.json`. Today
+  only `families.openai` has the block; `families.anthropic` would gain
+  one. `task_class_routes.<class>.effort` changes are listed beside it.
+  Each entry cites its Stage 0 prior or its winning trial. A default below
+  `implementation`'s high floor must change the floor in the same PR.
+- **Budget.** Stage 0 is one research lane. Stage 1 adds no lanes, since a
+  challenger replaces the default, and the guardrail bounds overspend at
+  about share x 50% (5% of eligible lanes at the default). At about 190
+  `ok` Fabric lanes a week, a class takes weeks to reach 30 challenger
+  tasks; the report projects each trial's end date. Stage 2 costs cells x
+  tasks x repeats x the 1.28M median lane.
 
 ## Study B: fleet topology and ratio
 
@@ -183,7 +215,10 @@ confidentiality rule above.
 ## Not doing
 
 - No cross-provider ranking on USD alone.
-- No pruning per class from 20 tasks.
+- No pruning per class from 20 tasks, and no leaderboard result used as
+  acceptance evidence.
+- No in-flight randomisation on `crucial` or `terminal` work, or on
+  confidential work with a model that trains on prompts.
 - No fleet arm scored by a judge from its own principal family.
 - No Sealle or confidential task on a model that trains on prompts.
 - No routing config change without a winning comparison.
