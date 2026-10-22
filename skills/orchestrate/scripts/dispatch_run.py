@@ -998,6 +998,14 @@ def build_command(
 INCOMPLETE_TURN_STATUSES = {"timed_out", "cancelled", "stalled", "startup_timeout", "interrupted", "lost"}
 
 
+def incomplete_provider_turn(attempt: dict) -> bool:
+    """Include provider deaths whose failure status does not imply a finished turn."""
+    return attempt.get("status") in INCOMPLETE_TURN_STATUSES or (
+        attempt.get("status") == "failed"
+        and (attempt.get("evidence") or {}).get("signature") in {"provider_signal", "provider_incomplete"}
+    )
+
+
 FAST_PLAN_SHELL_ENV_READS = {
     "CF_DISPATCH_IDLE_SECONDS", "CF_DISPATCH_AGY_ADD_DIR", "CF_DISPATCH_ENABLE_KIRO",
     "CF_DISPATCH_ENABLE_COPILOT", "CF_DISPATCH_CURSOR_MODEL", "CF_DISPATCH_KIRO_MODEL",
@@ -1904,7 +1912,7 @@ def prepare_resume(args):
             setattr(args, field, route[field])
     args.resume_previous=previous
     observed_session=False
-    if args.tool=="claude" and previous["status"] in INCOMPLETE_TURN_STATUSES:
+    if args.tool=="claude" and incomplete_provider_turn(previous):
         events=previous["paths"].get("events")
         if events:
             retained=retained_path(args.run_dir,events)
@@ -1929,14 +1937,14 @@ def prepare_resume(args):
         raise ResumeError("continuation_unsupported",f"attempt {previous['attempt']} did not record provider session {required}; "
                           "pass fresh: true to start a new session primed with its last result")
     if not args.resume_session or args.tool=="copilot" or (
-        args.tool=="claude" and previous["status"] in INCOMPLETE_TURN_STATUSES
+        args.tool=="claude" and incomplete_provider_turn(previous)
         and not observed_session
     ):
         if required is not None:
             raise ResumeError("continuation_unsupported",f"{args.tool} cannot continue provider session {required}; "
                               "pass fresh: true to start a new session primed with its last result")
         if (args.tool=="claude" and previous["mode"]=="worktree_write"
-            and previous["status"] in INCOMPLETE_TURN_STATUSES):
+            and incomplete_provider_turn(previous)):
             raise ValueError("Claude session unavailable after incomplete writer turn; review worktree changes, then dispatch a new run")
         args.resume_session=None
         args.resume_relaunch=resume_relaunch_context(args.run_dir,previous)
@@ -2429,7 +2437,7 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
                         adapter_record["error"]="continuation_unsupported"
                         adapter_record["fix"]="The provider no longer has this session; pass fresh: true to start a new session primed with its last result."
                         adapter_record["evidence"]["signature"]="continuation_unsupported"
-                    elif (previous["mode"]=="worktree_write" and previous["status"] in INCOMPLETE_TURN_STATUSES):
+                    elif (previous["mode"]=="worktree_write" and incomplete_provider_turn(previous)):
                         adapter_record["status"]="rejected"
                         adapter_record["fix"]="Review worktree changes, then dispatch a new run."
                         adapter_record["evidence"]["signature"]="resume_session_missing"

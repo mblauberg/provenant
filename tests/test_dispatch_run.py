@@ -4364,12 +4364,19 @@ print(json.dumps({'type':'result','result':'RESUMED ' + session}))
     assert row['session_id'] == 'saved-session'
 
 
-def test_incomplete_writer_without_claude_session_returns_typed_fix(tmp_path):
+@pytest.mark.parametrize(('status', 'signature'), [
+    ('timed_out', 'wall_clock'),
+    ('interrupted', 'supervisor_signal'),
+    ('failed', 'provider_signal'),
+    ('failed', 'provider_incomplete'),
+])
+def test_incomplete_writer_without_claude_session_returns_typed_fix(tmp_path, status, signature):
     mod = load_dispatch_module()
     run = Path(subprocess.check_output([str(INIT), '--kind', 'dispatch'], cwd=tmp_path, text=True).strip())
     row = json.loads((ROOT / 'tests/fixtures/fabric-v1/attempt.json').read_text())
-    row.update(run_id=run.name, status='timed_out', mode='worktree_write', cwd=str(tmp_path),
+    row.update(run_id=run.name, status=status, mode='worktree_write', cwd=str(tmp_path),
                worktree=str(tmp_path), session_id='generated-but-unobserved')
+    row['evidence']['signature'] = signature
     row['provenance']['requested']['adapter'] = 'claude'
     path = run / 'tasks/task-1/attempt-001/attempt.json'
     path.parent.mkdir(parents=True)
@@ -4382,6 +4389,52 @@ def test_incomplete_writer_without_claude_session_returns_typed_fix(tmp_path):
     response = json.loads(result.stdout)
     assert response['status'] == 'rejected'
     assert 'review worktree' in response['message'].lower()
+
+
+@pytest.mark.parametrize('observed_session', [False, True])
+def test_claude_signal_dead_writer_resume_never_relaunches_over_partial_edits(tmp_path, monkeypatch, observed_session):
+    code = '''import json,os,signal,sys
+from pathlib import Path
+sys.stdin.read()
+with Path('launches.txt').open('a') as stream:
+ stream.write('launch\\n')
+if '--resume' in sys.argv:
+ print('No conversation found with session ID', file=sys.stderr)
+ sys.exit(1)
+if Path('partial.txt').exists():
+ print(json.dumps({'type':'result','result':'FRESH OVER PARTIAL EDITS'}))
+ sys.exit(0)
+Path('partial.txt').write_text('unfinished edit')
+'''
+    if observed_session:
+        code += "print(json.dumps({'type':'system','subtype':'init','session_id':'writer-session','model':'opus'}), flush=True)\n"
+    code += 'os.kill(os.getpid(), signal.SIGTERM)\n'
+    run, prompt, command = real_owner_fixture(tmp_path, monkeypatch, code)
+    worktree = make_worktree(tmp_path)
+    first = subprocess.run([*command, '--access-mode', 'worktree_write', '--worktree', str(worktree)],
+                           cwd=tmp_path, capture_output=True, text=True, timeout=30)
+    assert first.returncode != 0, first.stdout + first.stderr
+    previous = json.loads((run / 'tasks/dispatch-001/attempt-001/attempt.json').read_text())
+    assert previous['status'] == 'failed'
+    assert previous['evidence']['signature'] == 'provider_signal'
+    assert previous['evidence']['signal'] == signal.SIGTERM
+
+    resumed = subprocess.run([sys.executable, str(SCRIPT), '--run-dir', str(run),
+                              '--resume', previous['run_id'], '--prompt-file', str(prompt)],
+                             cwd=tmp_path, capture_output=True, text=True, timeout=30)
+    assert resumed.returncode != 0, resumed.stdout + resumed.stderr
+    if observed_session:
+        row = json.loads((run / 'tasks/dispatch-001/attempt-002/attempt.json').read_text())
+        assert row['status'] == 'rejected'
+        assert row['evidence']['signature'] == 'resume_session_missing'
+        assert 'resumed_by_relaunch' not in row['provenance']['notes']
+    else:
+        response = json.loads(resumed.stdout)
+        assert response['status'] == 'rejected'
+        assert 'review worktree' in response['message'].lower()
+        assert not (run / 'tasks/dispatch-001/attempt-002').exists()
+    assert (worktree / 'partial.txt').read_text() == 'unfinished edit'
+    assert (worktree / 'launches.txt').read_text().splitlines() == ['launch'] * (2 if observed_session else 1)
 
 
 def test_planner_stopped_by_signal_is_interrupted_not_rejected():

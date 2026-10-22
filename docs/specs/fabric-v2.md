@@ -225,7 +225,7 @@ If that marker cannot be installed, patches are listed as unavailable with a
 capture error; no patch is claimed as complete in that case. The check
 reports `protected_instructions_unverifiable` separately from actual changes.
 A failed or signal-interrupted provider is never promoted to `quarantined`.
-Signal-interrupted attempts retain their changed files without restoration and
+Signal-killed attempts (`failed` without a terminal result, otherwise `interrupted`, or `cancelled` on explicit cancellation) retain their changed files without restoration and
 fail for actual instruction edits, preserving the provider exit and signal.
 An unknown value warns and quarantines. The per-attempt check reads local refs; only
 the owner can move them. It also reports a clean three-way merge into a skill the branch already
