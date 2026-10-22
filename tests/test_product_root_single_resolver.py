@@ -11,22 +11,18 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 RESOLVER = ROOT / "skills" / "_shared" / "roots.py"
 
-def _load(path: Path, name: str):
+def _load(path: Path, name: str, monkeypatch: pytest.MonkeyPatch):
     spec = importlib.util.spec_from_file_location(name, path)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
-    sys.modules[name] = module
-    try:
-        spec.loader.exec_module(module)
-    except BaseException:
-        sys.modules.pop(name, None)
-        raise
+    monkeypatch.setitem(sys.modules, name, module)  # undone at teardown, never leaks
+    spec.loader.exec_module(module)
     return module
 
 
 @pytest.fixture()
-def resolver():
-    return _load(RESOLVER, "product_roots_under_test")
+def resolver(monkeypatch):
+    return _load(RESOLVER, "product_roots_under_test", monkeypatch)
 
 
 def test_resolver_prefers_the_configured_root(monkeypatch, resolver, tmp_path):
@@ -56,6 +52,7 @@ def test_delivery_receipt_honours_the_configured_product_root(monkeypatch, tmp_p
     module = _load(
         ROOT / "skills" / "deliver" / "scripts" / "delivery_receipt.py",
         "delivery_receipt_root_under_test",
+        monkeypatch,
     )
 
     assert module.RISK_POLICY_PATH == tmp_path / "config" / "risk-policy.json"

@@ -103,10 +103,17 @@ def _isolated_route_state(tmp_path_factory, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
-def _isolated_instance_root(tmp_path_factory, monkeypatch):
+def _isolated_instance_root(tmp_path_factory, monkeypatch, request):
     """Pin the Fabric instance root so `~/.agents` (hosts.json peers, quota config and
-    snapshots) never leaks into a test. Tests that need a root set their own over this."""
+    snapshots) never leaks into a test, and pin the Claude config dir and bin dir so a
+    developer's `~/.claude` or `~/.local/bin` never leaks into a subprocess. Tests that
+    need a root set their own over this. The installer tests derive those dirs from the
+    HOME they build, so they keep their own."""
     monkeypatch.setenv("AGENT_FABRIC_INSTANCE_ROOT", str(tmp_path_factory.mktemp("instance-root")))
+    if request.node.path.name == "test_install_harness.py":
+        return
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path_factory.mktemp("claude-config")))
+    monkeypatch.setenv("PROVENANT_BIN_DIR", str(tmp_path_factory.mktemp("bin-dir")))
 
 
 @pytest.fixture(autouse=True)
