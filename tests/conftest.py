@@ -139,6 +139,11 @@ def _isolated_instance_root(tmp_path_factory, monkeypatch, request):
     monkeypatch.setenv("AGENT_FABRIC_INSTANCE_ROOT", str(tmp_path_factory.mktemp("instance-root")))
     # A test run inside a remote Fabric lane must still exercise local placement.
     monkeypatch.delenv("PROVENANT_REMOTE_LANE", raising=False)
+    # Nor may an enclosing run's lineage or custody leak into a nested-CLI test.
+    for key in ("PROVENANT_PARENT_ATTEMPT", "PROVENANT_RUN_TOKEN", "PROVENANT_RUN_OWNER",
+                "PROVENANT_NESTED_CUSTODY_FD", "PROVENANT_PARENT_RUN_TOKEN",
+                "PROVENANT_RUN_DIR", "PROVENANT_RUN_ID"):
+        monkeypatch.delenv(key, raising=False)
     if request.node.path.name == "test_install_harness.py":
         return
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path_factory.mktemp("claude-config")))

@@ -6398,12 +6398,14 @@ def test_claude_fallback_does_not_override_selected_account_cooldown(tmp_path, m
     assert {row['account'] for row in attempts} == {'pro'}
 
 
-@pytest.mark.parametrize(('owner_kind', 'locked'), [('dispatch', True), ('batch', False), ('batch', True)])
-def test_batch_child_shares_only_a_locked_batch_parent(tmp_path, monkeypatch, owner_kind, locked):
+@pytest.mark.parametrize(('owner_kind', 'locked', 'inherited'), [
+    ('dispatch', True, 'custody'), ('batch', False, 'none'), ('batch', True, 'custody'),
+    ('batch', True, 'none'), ('batch', True, 'separate'), ('batch', True, 'other_file'),
+    ('batch', False, 'separate'),
+])
+def test_batch_child_shares_only_a_locked_batch_parent(tmp_path, monkeypatch, owner_kind, locked, inherited):
     mod = load_dispatch_module()
     run = make_run(tmp_path, 'batch-parent-custody')
-    for key in ('PROVENANT_PARENT_ATTEMPT', 'PROVENANT_RUN_TOKEN', 'PROVENANT_RUN_OWNER'):
-        monkeypatch.delenv(key, raising=False)
     (run / 'dispatch-owner.json').write_text(json.dumps({
         'schema_version': 1, 'kind': owner_kind, 'run_dir': str(run),
         'run_token': 'parent-token', 'owner_pid': os.getpid(),
@@ -6411,6 +6413,13 @@ def test_batch_child_shares_only_a_locked_batch_parent(tmp_path, monkeypatch, ow
     }))
     before = (run / 'dispatch-owner.json').read_bytes()
     custody = mod.acquire_run_custody(run) if locked else None
+    fd = (custody.fileno() if custody is not None and inherited == 'custody' else
+          os.open(run / ('RUN_RECEIPT.json' if inherited == 'other_file' else 'MANIFEST.md'), os.O_RDWR)
+          if inherited in {'separate', 'other_file'} else None)
+    environment = dict(os.environ)
+    environment.pop(mod.run_lineage.CUSTODY_ENV, None)
+    if fd is not None:
+        environment[mod.run_lineage.CUSTODY_ENV] = str(fd)
     # A reparented provider orphan has exactly this parent PID relationship.
     code = '''import sys
 from pathlib import Path
@@ -6425,16 +6434,74 @@ else:
 '''
     try:
         result = subprocess.run([sys.executable, '-c', code, str(SCRIPT.parent), str(run)],
+                                env=environment, pass_fds=() if fd is None else (fd,),
                                 text=True, capture_output=True, timeout=10)
         assert result.returncode == 0, result.stderr
-        assert result.stdout.strip() == ('shared' if owner_kind == 'batch' and locked else 'refused')
+        shared = owner_kind == 'batch' and locked and inherited == 'custody'
+        assert result.stdout.strip() == ('shared' if shared else 'refused')
         assert (run / 'dispatch-owner.json').read_bytes() == before
+        if custody is not None:
+            with pytest.raises(OSError):
+                mod.acquire_run_custody(run)
     finally:
+        if fd is not None and inherited in {'separate', 'other_file'}:
+            os.close(fd)
         if custody is not None:
             custody.close()
     # Refusing an unlocked owner must release the probe's acquired lock.
     with mod.acquire_run_custody(run):
         pass
+
+
+def test_batch_child_refuses_unrelated_custody_after_recorded_batch_dies(tmp_path):
+    mod = load_dispatch_module()
+    run = make_run(tmp_path, 'dead-batch-unrelated-custody')
+    child = tmp_path / 'child.py'
+    child.write_text(f'''import os, signal, sys, time
+from pathlib import Path
+sys.path.insert(0, {str(SCRIPT.parent)!r})
+import dispatch_run as dispatch
+owner_pid = os.getppid()
+start_time = dispatch.process_info.start_time
+observations = 0
+def observe(pid):
+    global observations
+    value = start_time(pid)
+    if pid == owner_pid:
+        observations += 1
+        if observations == 2:
+            # The batch dies just after its last successful identity observation.
+            Path({str(tmp_path / 'killed')!r}).write_text('killed')
+            os.kill(owner_pid, signal.SIGTERM)
+            deadline = time.monotonic() + 5
+            while os.getppid() == owner_pid and time.monotonic() < deadline:
+                time.sleep(0.01)
+            assert os.getppid() != owner_pid
+    return value
+dispatch.process_info.start_time = observe
+raise SystemExit(dispatch.dispatch(dispatch.parser().parse_args([
+    '--batch-child', '--run-dir', {str(run)!r}, '--adapter', 'codex', '--model', 'fixture',
+    '--prompt-file', {str(tmp_path / 'missing.md')!r}])))
+''')
+    batch = f'''import os, sys, subprocess
+from pathlib import Path
+sys.path.insert(0, {str(SCRIPT.parent)!r})
+import run_lineage
+run_lineage.record_owner(Path({str(run)!r}), 'batch')
+subprocess.run([sys.executable, {str(child)!r}], check=False)
+'''
+    environment = {**os.environ, 'PROVENANT_HOST_LOCAL_ONLY': '1'}
+    # This test process holds custody; the recorded batch never holds it.
+    with mod.acquire_run_custody(run):
+        result = subprocess.run([sys.executable, '-c', batch], cwd=tmp_path,
+                                env=environment, input='', capture_output=True, text=True, timeout=15)
+        assert result.returncode == -signal.SIGTERM, result.stderr
+        assert (tmp_path / 'killed').exists()
+        owner = json.loads((run / 'dispatch-owner.json').read_text())
+        assert mod.process_info.start_time(owner['owner_pid']) is None
+        assert result.stdout, result.stderr
+        assert json.loads(result.stdout)['status'] == 'run_custody_busy'
+        assert not (run / 'tasks').exists()
 
 
 # A recycled pid and a vanished pid; ids stay stable across xdist workers.
@@ -6443,8 +6510,6 @@ def test_standalone_batch_child_replaces_a_dead_owner(tmp_path, monkeypatch, pre
     previous_pid = os.getpid() if previous == 'recycled_pid' else 2147483647
     mod = load_dispatch_module()
     run = make_run(tmp_path, 'dead-batch-child-owner')
-    for key in ('PROVENANT_PARENT_ATTEMPT', 'PROVENANT_RUN_TOKEN', 'PROVENANT_RUN_OWNER'):
-        monkeypatch.delenv(key, raising=False)
     (run / 'dispatch-owner.json').write_text(json.dumps({
         'schema_version': 1, 'kind': 'batch', 'run_dir': str(run),
         'run_token': 'dead-token', 'owner_pid': previous_pid,

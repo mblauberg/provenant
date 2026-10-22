@@ -648,7 +648,7 @@ def _child_queued_seconds(run_dir: Path, task_id: str, after_attempt: int) -> fl
         return 0.0
 
 
-def _run_task(task: dict[str, Any], run_dir: Path, batch_dir: Path) -> dict[str, Any]:
+def _run_task(task: dict[str, Any], run_dir: Path, batch_dir: Path, custody=None) -> dict[str, Any]:
     task_id = task["id"]
     if _cancel_requested or cancellation_marker_present(run_dir, batch_dir):
         return {"task_id": task_id, "status": "cancelled", "outcome": "batch_cancelled"}
@@ -665,15 +665,19 @@ def _run_task(task: dict[str, Any], run_dir: Path, batch_dir: Path) -> dict[str,
     started = time.monotonic()
     timed_out = False
     try:
-        # Children prove membership with the token this batch published, whatever the caller's env held.
+        # Children inherit this batch's identity and locked custody descriptor.
         try:
             token = run_lineage.owner_token(run_dir)
         except (OSError, OwnedFileError):
             token = None
         environment = {**os.environ, **({"PROVENANT_RUN_DIR": str(run_dir), "PROVENANT_RUN_TOKEN": token} if token else {})}
+        environment.pop(run_lineage.CUSTODY_ENV, None)
+        pass_fds = () if custody is None else (custody.fileno(),)
+        if custody is not None:
+            environment[run_lineage.CUSTODY_ENV] = str(custody.fileno())
         process = subprocess.Popen(_command(dispatch_task, run_dir), cwd=Path.cwd(), text=True,
                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                   start_new_session=True, env=environment)
+                                   start_new_session=True, env=environment, pass_fds=pass_fds)
         with _state_lock:
             _active_processes[task_id] = process
         queued_seconds = 0.0
@@ -744,7 +748,7 @@ def _execute_batch(args: argparse.Namespace, tasks: list[dict[str, Any]], run_di
         _active_batch_dirs.add(batch_dir)
     try:
         with ThreadPoolExecutor(max_workers=args.concurrency, thread_name_prefix="provenant-batch") as pool:
-            futures = {pool.submit(_run_task, task, run_dir, batch_dir): task["id"] for task in tasks
+            futures = {pool.submit(_run_task, task, run_dir, batch_dir, custody): task["id"] for task in tasks
                        if not (preflight_results or {}).get(task["id"])}
             results.update(preflight_results or {})
             pending = set(futures)
