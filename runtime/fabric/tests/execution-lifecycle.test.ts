@@ -1647,6 +1647,16 @@ function poolEnvironment(): NodeJS.ProcessEnv {
 }
 
 describe("route pools", () => {
+  it("keeps utility confidential through expansion and preserves an explicit public opt-out", async () => {
+    const expanded = await expandPools([
+      { id: "private", prompt: "p", route: "utility" },
+      { id: "public", prompt: "p", route: "classify", confidential: false },
+    ], fixturePython, product, { ...identity, provider: "agent" }, poolEnvironment(), new AbortController().signal);
+    expect(expanded.errors).toEqual([]);
+    expect(expanded.tasks[0]).toMatchObject({ model: "claude-haiku-5-5", effort: "low", confidential: true, fallback: false });
+    expect(expanded.tasks[1]).toMatchObject({ confidential: false, fallback: false });
+  });
+
   it("expands single, council and ad-hoc models into concrete tasks with a pick reason", async () => {
     const env = poolEnvironment();
     const expanded = await expandPools([

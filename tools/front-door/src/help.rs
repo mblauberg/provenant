@@ -5,6 +5,9 @@ pub const USAGE: &str = include_str!("help/usage.txt");
 pub const GENERAL: &str = include_str!("help/general.txt");
 
 const DETAILS: &[(&str, &str)] = &[
+    ("digest", include_str!("help/digest.txt")),
+    ("classify", include_str!("help/classify.txt")),
+    ("extract", include_str!("help/extract.txt")),
     ("root", include_str!("help/root.txt")),
     ("route", include_str!("help/route.txt")),
     ("routes", include_str!("help/routes.txt")),
