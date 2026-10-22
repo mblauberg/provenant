@@ -6465,3 +6465,96 @@ def test_record_owner_inherits_token_only_for_the_same_run(tmp_path, monkeypatch
     token = json.loads((run / 'dispatch-owner.json').read_text())['run_token']
     assert bool(token)
     assert (token == 'inherited-token') is same_run
+
+
+@pytest.mark.parametrize('change', ['none', 'file', 'commit', 'dirty', 'read_only'])
+def test_finished_writer_records_whether_worktree_is_unchanged(tmp_path, monkeypatch, change):
+    code = 'import json,sys\nfrom pathlib import Path\nsys.stdin.read()\n'
+    if change == 'file':
+        code += 'Path("new.txt").write_text("done")\n'
+    elif change == 'commit':
+        code += ('import subprocess\nsubprocess.run(["git", "-c", "user.name=Test", "-c", '
+                 '"user.email=test@example.invalid", "commit", "--allow-empty", "-qm", "work"], check=True)\n')
+    code += 'print(json.dumps({"type":"result","result":"DONE"}))\n'
+    run, _prompt, command = real_owner_fixture(tmp_path, monkeypatch, code)
+    worktree = make_worktree(tmp_path)
+    if change == 'dirty':
+        (worktree / 'preexisting.txt').write_text('already here')
+    isolate_fabric_plan_env(monkeypatch, tmp_path)
+    monkeypatch.chdir(tmp_path)
+    mod = load_dispatch_module()
+    extra = [] if change == 'read_only' else ['--access-mode', 'worktree_write', '--worktree', str(worktree)]
+    args = mod.parser().parse_args(command[2:] + extra)
+    assert mod.dispatch(args) == 0
+    row = json.loads(next(run.glob('tasks/*/attempt-*/attempt.json')).read_text())
+    assert row['status'] == 'ok'
+    if change == 'read_only':
+        assert 'empty_patch' not in row
+    else:
+        assert row.get('empty_patch') is {'none': True, 'dirty': None}.get(change, False)
+
+
+def test_worktree_unchanged_is_unknown_when_git_cannot_say(tmp_path):
+    mod = load_dispatch_module()
+    assert mod.worktree_unchanged(None, str(tmp_path)) is None
+    assert mod.worktree_unchanged(('old-head', b''), str(tmp_path)) is None
+
+
+def test_dispatch_refuses_escalation_without_retry(tmp_path, monkeypatch, capsys):
+    run, _prompt, command = real_owner_fixture(
+        tmp_path, monkeypatch, 'raise SystemExit("provider must not launch")\n')
+    isolate_fabric_plan_env(monkeypatch, tmp_path)
+    monkeypatch.chdir(tmp_path)
+    mod = load_dispatch_module()
+    args = mod.parser().parse_args(command[2:] + ['--escalation-reason', 'capability'])
+    assert mod.dispatch(args) == 2
+    assert json.loads(capsys.readouterr().out)['error'] == 'escalation_reason_invalid'
+    assert not list(run.glob('tasks/*/attempt-*/attempt.json'))
+
+
+def test_automatic_retry_does_not_inherit_explicit_escalation(tmp_path, monkeypatch):
+    launches = tmp_path / 'launches'
+    code = f'''import json,sys
+from pathlib import Path
+sys.stdin.read()
+path = Path({str(launches)!r})
+count = int(path.read_text()) + 1 if path.exists() else 1
+path.write_text(str(count))
+if count == 2:
+    print(json.dumps({{"type":"result", "is_error":True, "result":"rate limit", "retry_after":0.05}}))
+    sys.exit(1)
+print(json.dumps({{"type":"result", "result":"DONE"}}))
+'''
+    _unused_run, _prompt, command = real_owner_fixture(tmp_path, monkeypatch, code)
+    run = make_run(tmp_path, 'escalation')
+    command[3] = str(run)
+    isolate_fabric_plan_env(monkeypatch, tmp_path)
+    monkeypatch.setenv('AGENT_FABRIC_STATE_ROOT', str(tmp_path / 'state'))
+    monkeypatch.chdir(tmp_path)
+    configure_fast_pacing(tmp_path, monkeypatch)
+    mod = load_dispatch_module()
+    assert mod.dispatch(mod.parser().parse_args(command[2:])) == 0
+    args = mod.parser().parse_args(command[2:] + [
+        '--retry-of', 'attempt-001', '--escalation-reason', 'capability'])
+    args.fallback = 'true'
+    args.timeout_seconds = 10
+    assert mod.dispatch(args) == 0
+    paths = sorted(run.glob('tasks/*/attempt-*/attempt.json'))
+    first, explicit, automatic = (json.loads(path.read_text()) for path in paths)
+    assert [first['status'], explicit['status'], automatic['status']] == ['ok', 'rate_limited', 'ok']
+    assert explicit['retry_of'] == 'attempt-001'
+    assert explicit['escalation_reason'] == 'capability'
+    assert automatic['retry_of'] == 'attempt-002'
+    assert automatic['escalation_reason'] is None
+    assert automatic['provenance']['fallback_from']['status'] == 'rate_limited'
+
+    spec = importlib.util.spec_from_file_location('telemetry_retry_test', ROOT / 'scripts/telemetry.py')
+    telemetry = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(telemetry)
+    with telemetry.connect() as db:
+        for path in paths:
+            telemetry.ingest_document(db, 'fabric', path)
+        rows = [json.loads(row[0]) for row in db.execute(
+            "SELECT attrs FROM events WHERE kind='lane.attempt' ORDER BY json_extract(attrs,'$.attempt')")]
+    assert rows[1]['escalated_from'].endswith('/dispatch-001/1')
+    assert 'escalated_from' not in rows[2]
