@@ -31,7 +31,11 @@ def run(target: Path, custom_source: Path | None = None):
 
 def catalogue_names():
     """Skills plus the shared library every per-entry layout must also carry."""
-    return {path.parent.name for path in (ROOT / "skills").glob("*/SKILL.md")} | {SHARED}
+    return library_names() | {path.parent.name for path in (ROOT / "skills").glob("*/SKILL.md")} | {SHARED}
+
+
+def library_names():
+    return {path.parent.name for path in (ROOT / "library").glob("*/SKILL.md")}
 
 
 def custom_skill_source(tmp_path: Path, name: str = "instance-skill"):
@@ -218,8 +222,9 @@ def test_directory_link_install_still_retires_the_previous_managed_surface(tmp_p
     result = run(target)
 
     assert result.returncode == 0, result.stderr
-    assert target.is_symlink()
-    assert target.resolve() == (ROOT / "skills").resolve()
+    # The library skills sit beside skills/, so the layout converts per entry.
+    assert not target.is_symlink()
+    assert library_names() <= {path.name for path in target.iterdir()}
     assert not (old_target / old_source.name).is_symlink()
     assert not os.path.lexists(old_target / old_source.name)
     assert not receipt.exists()
@@ -1231,3 +1236,37 @@ def test_installer_refuses_symlinked_source_content(tmp_path):
     assert "skill source contains a symlink" in result.stderr
     assert not (target / "alpha").exists()
     assert not manifest_for(target).exists()
+
+
+def test_library_skills_install_as_managed_links_and_prune_with_uninstall(tmp_path):
+    target = tmp_path / "skills"
+    assert run(target).returncode == 0
+    names = library_names()
+    assert names
+    manifest = json.loads(manifest_for(target).read_text())
+    for name in names:
+        assert (target / name).resolve() == (ROOT / "library" / name).resolve()
+        assert manifest["managed"][name]["source_target"] == str(
+            (ROOT / "library" / name).resolve()
+        )
+    removed = subprocess.run(
+        [sys.executable, str(MANAGER), "uninstall-managed", "--target", str(target)],
+        cwd=ROOT, text=True, capture_output=True, check=False,
+    )
+    assert removed.returncode == 0, removed.stderr
+    assert not any((target / name).exists() for name in names)
+
+
+def test_library_name_colliding_with_a_workflow_skill_is_refused(tmp_path):
+    product = tmp_path / "product"
+    for base in ("skills", "library"):
+        skill = product / base / "same-name"
+        skill.mkdir(parents=True)
+        (skill / "SKILL.md").write_text("---\nname: same-name\ndescription: x\n---\n")
+    result = subprocess.run(
+        [sys.executable, str(MANAGER), "plan", "--source", str(product / "skills"),
+         "--target", str(tmp_path / "target")],
+        cwd=ROOT, text=True, capture_output=True, check=False,
+    )
+    assert result.returncode == 3
+    assert "collides" in result.stderr

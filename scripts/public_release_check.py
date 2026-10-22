@@ -50,11 +50,11 @@ FORBIDDEN_PREFIXES = (
     "skills/humanise-text/",  # retired name; capability moved to natural-writing
     "skills/tanstack-query-best-practices/",  # retired local skill must not return
     "skills/vercel-react-best-practices/",  # retired vendor-branded skill name
-    "skills/playwright/",  # moved to the personal ~/Repos/skills catalogue
-    "skills/react-performance/",  # moved to the personal ~/Repos/skills catalogue
-    "skills/tanstack-query/",  # moved to the personal ~/Repos/skills catalogue
-    "skills/typescript-clean-code/",  # moved to the personal ~/Repos/skills catalogue
-    "skills/uml-diagrams/",  # moved to the personal ~/Repos/skills catalogue
+    "skills/playwright/",  # lives in library/, not skills/
+    "skills/react-performance/",  # lives in library/, not skills/
+    "skills/tanstack-query/",  # lives in library/, not skills/
+    "skills/typescript-clean-code/",  # lives in library/, not skills/
+    "skills/uml-diagrams/",  # lives in library/, not skills/
     "skills/web-stack-conventions/",  # retired; deltas rot on a fixed schedule
 )
 HOME_PATH = re.compile(r"/(?:Users|home)/[A-Za-z0-9._-]+/")
