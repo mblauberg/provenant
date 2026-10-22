@@ -8038,7 +8038,8 @@ def test_a_writer_cannot_take_a_branch_another_checkout_holds(tmp_path):
     git(lane, "checkout", "-q", "--detach", "lane")
     plan = supervisor().build_plan("claude", {}, "hello", workspace_root=tmp_path, mode="worktree_write", worktree=lane)
     assert plan["lane_ref"] is None
-    assert not any("/refs/" in path for path in plan["applied"]["write_boundary"]["writable_paths"])
+    # Without sandbox-exec (Linux CI) there is no path boundary: writable_paths is None.
+    assert not any("/refs/" in path for path in plan["applied"]["write_boundary"]["writable_paths"] or [])
 
 
 @pytest.mark.skipif(sys.platform != "darwin", reason="sandbox-exec is macOS-only")
