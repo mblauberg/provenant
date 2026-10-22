@@ -402,9 +402,11 @@ def memo(name, account, seconds, produce):
 
 def ledger_windows(adapter, now, account=None):
     """The latest rate-limit observation per window that this host's ledger holds for one account."""
-    hosts = local_hosts()
     try:
-        with _telemetry().connect() as db:
+        telemetry = _telemetry()
+        with telemetry.connect() as db:
+            # Connecting loads the ids this ledger was written under, so a renamed host still reads its rows.
+            hosts = sorted(set(local_hosts()) | telemetry.host_aliases())
             rows = db.execute('SELECT window,used_percent,window_minutes,reset_at,timestamp FROM observations '
                               f"WHERE adapter=? AND host IN ({','.join('?' * len(hosts))}) AND account IS ? "
                               'AND used_percent IS NOT NULL ORDER BY timestamp DESC LIMIT 500',

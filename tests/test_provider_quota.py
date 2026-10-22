@@ -246,6 +246,23 @@ def test_codex_falls_back_to_rollout_rate_limits_already_in_the_ledger(quota, mo
     assert other['status'] == 'unavailable' and other['windows'] == []
 
 
+def test_codex_ledger_fallback_reads_rows_written_under_an_earlier_configured_host_id(quota, monkeypatch, tmp_path):
+    hosts = tmp_path / 'home/.agents/.agent-fabric/hosts.json'
+    hosts.parent.mkdir(parents=True)
+    hosts.write_text(json.dumps({'schema_version': 1, 'local_host': 'box'}))
+    telemetry = load('telemetry_for_quota_box', ROOT / 'scripts/telemetry.py')
+    with telemetry.connect() as db:
+        db.execute('INSERT INTO observations(event_id,source,host,provider,adapter,account,timestamp,window,used_percent,'
+                   'window_minutes,reset_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)',
+                   ('e1', 'codex', 'box', 'openai', 'codex', 'default', iso(NOW - timedelta(hours=1)), 'secondary', 45,
+                    10080, iso(NOW + timedelta(days=2))))
+    # The host is renamed; its earlier rows stay under `box` and must still read as this host's.
+    hosts.write_text(json.dumps({'schema_version': 1, 'local_host': 'studio'}))
+    monkeypatch.setattr(quota, '_telemetry', lambda: load('telemetry_for_quota_studio', ROOT / 'scripts/telemetry.py'))
+    assert [(row['name'], row['used_percent']) for row in quota.ledger_windows('codex', NOW, 'default')['windows']] == [
+        ('secondary', 45)]
+
+
 def test_claude_usage_endpoint_uses_the_token_in_process_only(quota, monkeypatch, tmp_path, capsys):
     identity = tmp_path / 'claude-b'
     identity.mkdir()
