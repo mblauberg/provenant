@@ -1,3 +1,4 @@
+import { actAsMcpServer } from "./seat-index.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { setTimeout as delay } from "node:timers/promises";
@@ -31,6 +32,7 @@ const MAX_WAIT_SECONDS = MAX_EXECUTION_WAIT_SECONDS;
  * class of error that reports "the daemon is unavailable" while the daemon is
  * running. If the file cannot be opened the caller is told which file and why.
  */
+actAsMcpServer();
 const who = identify();
 let store: Store | undefined;
 const initialiseStore = (busyTimeoutMs = 5000): Store => {

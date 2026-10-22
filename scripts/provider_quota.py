@@ -1557,7 +1557,8 @@ def route_states(now=None):
                      if window['pace']['state'] == 'exhausted' and sets_state(window)]
         if row['state'] == 'exhausted' and not exhausted:
             exhausted = [refused_until(binding(current) or binding(row['windows']), value, now)]
-        states[name] = {'adapter': getattr(module, 'ADAPTER', None), 'account': label, 'host': telemetry_host(), 'state': row['state'],
+        states[name] = {'adapter': getattr(module, 'ADAPTER', None), 'covers': list(getattr(module, 'COVERS', ())),
+                        'account': label, 'host': telemetry_host(), 'state': row['state'],
                         'summary': row['summary'], 'observed_at': value.get('observed_at'),
                         'cooling_until': max(exhausted) if exhausted and all(exhausted) else None,
                         # Pools pick a last-resort adapter only when nothing with allowance qualifies.
@@ -1598,7 +1599,8 @@ def apply_to_cooldowns(records, now=None):
                     observed and recorded and observed > recorded):
                 result[key] = {'adapter': adapter, 'model': '*', 'account': state['account'], 'host': state['host'],
                                'status': 'quota_exhausted', 'cooling_until': state['cooling_until'],
-                               'recorded_at': state['observed_at'], 'source': 'provider quota'}
+                               'recorded_at': state['observed_at'], 'source': 'provider quota',
+                               **({'covers': state['covers']} if state['covers'] else {})}
     return result
 
 

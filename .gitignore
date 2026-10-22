@@ -12,7 +12,7 @@ skills/.backups/
 .claude/settings.local.json
 .env
 .env.*
-node_modules/
+node_modules
 
 # Transient review snapshots (build scratch, contains node_modules)
 .review-snapshots/

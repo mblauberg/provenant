@@ -2,7 +2,7 @@
 import { readFileSync, realpathSync, statSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { projectRoot, withoutGitRedirects, type Identity } from "./identity.js";
-import { execFile } from "node:child_process";
+import { runJsonSubprocess } from "./json-subprocess.js";
 import type { CatalogueSnapshot } from "./catalogue.js";
 const DEFAULT_TIMEOUT_SECONDS = 3600;
 function canonical(path: string) {
@@ -579,27 +579,13 @@ export async function preflight(
   env: NodeJS.ProcessEnv,
   signal: AbortSignal,
 ): Promise<Record<string, unknown>> {
-  signal.throwIfAborted();
-  const child = execFile(python, [owner, "--preflight-json"], {
+  return runJsonSubprocess<Record<string, unknown>>(python, [owner, "--preflight-json"], {
     cwd: identity.cwd,
     env: withoutGitRedirects(env),
+    input: { tasks },
     signal,
-    killSignal: "SIGKILL",
-    timeout: 50_000,
-    maxBuffer: 1024 * 1024,
+    timeoutMs: 50_000,
+    maxBytes: 1024 * 1024,
+    unavailable: "Preflight unavailable; restore the harness Python environment.",
   });
-  const output = new Promise<string>((resolveOutput, rejectOutput) => {
-    let stdout = "";
-    child.stdout!.on("data", (chunk: string) => {
-      stdout += chunk;
-    });
-    child.once("error", rejectOutput);
-    child.once("close", (code) =>
-      code === 0
-        ? resolveOutput(stdout)
-        : rejectOutput(new Error("Preflight unavailable; restore the harness Python environment.")),
-    );
-  });
-  child.stdin!.end(JSON.stringify({ tasks }));
-  return JSON.parse(await output) as Record<string, unknown>;
 }

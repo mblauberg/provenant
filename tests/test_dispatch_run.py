@@ -12,6 +12,7 @@ import signal
 import stat
 import subprocess
 import sys
+import threading
 import textwrap
 import time
 from pathlib import Path
@@ -4803,9 +4804,17 @@ def test_rate_limit_wait_observes_cancellation_and_intervening_writer_edits(tmp_
     sleep = time.sleep
     acted = []
     stores_before = {}
+    test_thread = threading.get_ident()
     def during_wait(seconds):
+        # time.sleep is patched process-wide; under pytest-xdist the execnet
+        # threads call it too, so only the dispatching thread may act.
+        if threading.get_ident() != test_thread:
+            return sleep(seconds)
         queued = list(run.glob("tasks/*/attempt-002/attempt.json"))
         if queued and not acted and json.loads(queued[0].read_text()).get("queue_reason") == "rate_limit":
+            # Record first: the lease retry below can itself call the patched
+            # sleep, which must not re-enter this branch.
+            acted.append(action)
             if action == "cancel":
                 (run / "dispatch/tasks" / queued[0].relative_to(run / "tasks").parent / "cancel.request").touch()
             else:
@@ -4814,7 +4823,6 @@ def test_rate_limit_wait_observes_cancellation_and_intervening_writer_edits(tmp_
                 for store in (tmp_path / "cooldowns.json", tmp_path / "state/route-health.json"):
                     stores_before[store] = store.read_bytes()
                 (worktree / "intervening.txt").write_text("another edit")
-            acted.append(action)
         sleep(seconds)
     monkeypatch.setattr(mod.time, "sleep", during_wait)
     args = mod.parser().parse_args(command[2:])

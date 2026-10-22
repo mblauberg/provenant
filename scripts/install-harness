@@ -18,10 +18,12 @@ fi
 PLATFORM=""
 MCP_CLIENTS="primary"
 REFRESH_ROUTING=0
+LANE_SAFETY_HOOKS=""
+PRE_PUSH_HOOK=""
 OTEL_COLLECTOR=""
 
 usage() {
-  echo "usage: install-harness --platform <claude|codex|opencode|agy|cursor|kiro|all> [--mcp-clients <primary|all>] [--refresh-routing] [--otel-collector|--uninstall-otel-collector]" >&2
+  echo "usage: install-harness --platform <claude|codex|opencode|agy|cursor|kiro|all> [--mcp-clients <primary|all>] [--refresh-routing] [--lane-safety-hooks|--no-lane-safety-hooks] [--pre-push-hook|--no-pre-push-hook] [--otel-collector|--uninstall-otel-collector]" >&2
 }
 
 while [[ $# -gt 0 ]]; do
@@ -40,6 +42,10 @@ while [[ $# -gt 0 ]]; do
       REFRESH_ROUTING=1
       shift
       ;;
+    --lane-safety-hooks) LANE_SAFETY_HOOKS=install; shift ;;
+    --no-lane-safety-hooks) LANE_SAFETY_HOOKS=remove; shift ;;
+    --pre-push-hook) PRE_PUSH_HOOK=install; shift ;;
+    --no-pre-push-hook) PRE_PUSH_HOOK=remove; shift ;;
     --otel-collector) OTEL_COLLECTOR=install; shift ;;
     --uninstall-otel-collector) OTEL_COLLECTOR=uninstall; shift ;;
     -h|--help)
@@ -505,6 +511,14 @@ install_primary() {
         fi
       fi
     fi
+    if [[ "$LANE_SAFETY_HOOKS" == install ]]; then
+      run_stdlib "$PRODUCT_ROOT/scripts/configure-claude-hooks.py" \
+        --settings "$platform_home/settings.json" \
+        --guard "$PRODUCT_ROOT/scripts/lane_safety_guard.py" || return $?
+    elif [[ "$LANE_SAFETY_HOOKS" == remove ]]; then
+      run_stdlib "$PRODUCT_ROOT/scripts/configure-claude-hooks.py" \
+        --settings "$platform_home/settings.json" --remove || return $?
+    fi
   fi
   if [[ "$PLATFORM" == "codex" ]]; then
     run_stdlib "$PRODUCT_ROOT/scripts/configure-codex-skill-overrides.py" \
@@ -588,6 +602,32 @@ for client in "${mcp_platforms[@]}"; do
     configure_fabric_mcp "$client"
   fi
 done
+
+# Opt-in pre-push guard in the product checkout; never replaces a hook it does
+# not own. Linked worktrees share this hooks directory.
+if [[ -n "$PRE_PUSH_HOOK" ]]; then
+  pre_push_source="$PRODUCT_ROOT/scripts/hooks/pre-push"
+  if pre_push_dir="$(git -C "$PRODUCT_ROOT" rev-parse --path-format=absolute --git-path hooks 2>/dev/null)"; then
+    pre_push_hook="$pre_push_dir/pre-push"
+    if [[ "$PRE_PUSH_HOOK" == remove ]]; then
+      if [[ -L "$pre_push_hook" && "$(readlink "$pre_push_hook")" == "$pre_push_source" ]]; then
+        rm "$pre_push_hook"
+        echo "pre-push hook removed=$pre_push_hook"
+      else
+        echo "pre-push hook not ours; left in place=$pre_push_hook"
+      fi
+    elif [[ -L "$pre_push_hook" && "$(readlink "$pre_push_hook")" == "$pre_push_source" ]]; then
+      echo "pre-push hook existing=$pre_push_hook"
+    elif [[ -e "$pre_push_hook" || -L "$pre_push_hook" ]]; then
+      echo "warning: pre-push hook already exists; inspect it: $pre_push_hook" >&2
+    else
+      mkdir -p "$pre_push_dir" && ln -s "$pre_push_source" "$pre_push_hook"
+      echo "pre-push hook installed=$pre_push_hook"
+    fi
+  else
+    echo "warning: pre-push hook skipped: $PRODUCT_ROOT is not a git checkout" >&2
+  fi
+fi
 
 # The pointer is the final publication. Every deterministic conflict has been
 # checked above, so a failed install preserves the previous product selection.

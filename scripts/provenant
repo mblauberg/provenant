@@ -81,7 +81,7 @@ def resolve_product_root(instance_root: Path | None = None) -> Path:
 
 
 def usage() -> None:
-    print("usage: provenant <help|root|route|routes|capabilities|worktree|clean|check|gate|telemetry|stats|retro|quota|profile|fabric|hosts|peer|lanes|events|dispatch|batch|run> [arguments...]", file=sys.stderr)
+    print("usage: provenant <help|root|route|routes|capabilities|worktree|clean|reap|check|gate|telemetry|stats|retro|quota|profile|fabric|hosts|peer|lanes|events|dispatch|batch|run|pr> [arguments...]", file=sys.stderr)
 
 
 def help_text() -> None:
@@ -94,20 +94,20 @@ Thin front door to owners:
   routes ...     scripts/model-route routes
   capabilities   skills/orchestrate/scripts/capabilities.py
   worktree ...   scripts/worktree ...
-  clean ...      scripts/clean.py ...
+  clean|reap ... scripts/clean.py|reap.py
   check ...      scripts/check-harness ...
   gate           scripts/gate
   fabric ...     runtime/fabric/bin/fabric ...
-  hosts|peer     scripts/fabric-hosts ...
-  lanes ...      runtime/fabric/bin/fabric lanes
-  events ...     runtime/fabric/bin/fabric events
+  hosts|peer     scripts/fabric-hosts
+  lanes|events   runtime/fabric/bin/fabric lanes|events
   telemetry ...  scripts/provenant-telemetry
-  stats|retro    scripts/provenant-telemetry stats|retro
+  stats|retro    scripts/provenant-telemetry
   quota ...      scripts/provenant-quota
   profile ...    scripts/provenant-profile
   dispatch ...   skills/orchestrate/scripts/dispatch_run.py ...
   batch ...      skills/orchestrate/scripts/batch_run.py ...
   run ...        skills/orchestrate/scripts/run_controls.py
+  pr ...         scripts/provenant-pr
 
 Use `provenant help <command>` for detail."""
     )
@@ -148,6 +148,15 @@ COMMAND_DETAILS: dict[str, str] = {
         "Dry run by default; --apply --plan <digest> deletes the approved rows\n"
         "that are still eligible."
     ),
+    "reap": (
+        "usage: provenant reap <pid>… [--tree] [--grace S] [--started-before TIME]\n\n"
+        "Delegates to scripts/reap.py ...\n"
+        "Stop explicit PIDs: TERM, then KILL after the grace period (default 5s).\n"
+        "Prints each process's age, parent, cwd and command first, and refuses one\n"
+        "that started after --started-before (epoch or ISO time) so a reused PID is\n"
+        "left alone. --tree adds descendants. Never signals a group or a pattern;\n"
+        "the lane-safety hook refuses pkill, killall and non-numeric kill targets."
+    ),
     "check": (
         "usage: provenant check ...\n\n"
         "Delegates to scripts/check-harness ...\n"
@@ -181,11 +190,12 @@ COMMAND_DETAILS: dict[str, str] = {
     ),
     "lanes": (
         "usage: provenant lanes [--json] [--all] [id…]\n"
-        "       provenant lanes --wait [--all] [--timeout N] [id…]\n\n"
+        "       provenant lanes --wait [--all] [--summary] [--timeout N] [id…]\n\n"
         "Delegates to runtime/fabric/bin/fabric lanes ...\n"
         "Default shows active lanes plus the 5 most recent terminal ones;\n"
         "use --all to list all lanes.\n"
-        "`lanes --wait` waits for a lane to finish or need input."
+        "`lanes --wait` waits for a lane to finish or need input; --summary prints\n"
+        "one bounded line per lane at the end."
     ),
     "events": (
         "usage: provenant events --follow\n\n"
@@ -241,10 +251,27 @@ COMMAND_DETAILS: dict[str, str] = {
         "Run a fixed, bounded set of ordinary dispatch attempts."
     ),
     "run": (
-        "usage: provenant run ...\n\n"
+        "usage: provenant run show <run-id|task-id> [--task-id T] [--tail N] [--json]\n"
+        "       provenant run cancel|inspect|retry|reduce ...\n\n"
         "Delegates to skills/orchestrate/scripts/run_controls.py ...\n"
+        "`provenant run show` reads a lane's status and the last N lines (default 40,\n"
+        "max 500) of its result.md from the run directory, resolved from a run id, a\n"
+        "run directory name or the newest run holding the task id.\n"
         "`provenant run cancel` writes one cooperative cancellation request for an\n"
         "exact attempt or batch and waits boundedly for owner-written evidence."
+    ),
+    "pr": (
+        "usage: provenant pr checks <number|branch> [--wait] [--timeout S] [--json]\n\n"
+        "Delegates to scripts/provenant-pr ...\n"
+        "`pr checks --wait` blocks until the PR's required checks for its current head\n"
+        "finish, following a head that moves and waiting for checks not yet registered.\n"
+        "Required contexts come from rulesets or branch protection and match check\n"
+        "names exactly; all must register. If none are required, or they cannot be\n"
+        "read, the finished set must also hold for two polls. Polls gh with backoff\n"
+        "from 30s to 120s. Exit 0 required checks green, 1 any failure, 2 bad\n"
+        "reference, 4 required set unreadable (seen checks passed; success not\n"
+        "claimed), 124 timeout (default 1800s). Without --wait it reports once and\n"
+        "exits 3 if checks are pending. Run it as a background command."
     ),
     "help": (
         "usage: provenant help [command]\n\n"
@@ -477,12 +504,14 @@ def main(arguments: list[str]) -> int:
         "capabilities": "skills/orchestrate/scripts/capabilities.py",
         "worktree": "scripts/worktree",
         "clean": "scripts/clean.py",
+        "reap": "scripts/reap.py",
         "check": "scripts/check-harness",
         "gate": "scripts/gate",
         "fabric": FABRIC_CLI,
         "dispatch": "skills/orchestrate/scripts/dispatch_run.py",
         "batch": "skills/orchestrate/scripts/batch_run.py",
         "run": "skills/orchestrate/scripts/run_controls.py",
+        "pr": "scripts/provenant-pr",
     }
     owner = owners.get(command)
     if owner is None:

@@ -1862,7 +1862,7 @@ def test_read_only_transcript_denies_follow_every_state_allow(monkeypatch, tmp_p
     last_deny = max(index for index, line in enumerate(lines)
                     if line.startswith("(deny file-read-data ") and all(rule in line for rule in denied))
     later = [line for line in lines[last_deny + 1:]
-             if line.startswith("(allow file-read") and not line.startswith("(allow file-read-metadata ")]
+             if line.startswith("(allow file-read") and not line.startswith("(allow file-read-data file-read-metadata ")]
     # Only a Claude lane's own session transcript reopens, so that it can resume.
     own = home / ".claude/projects" / re.sub(r"[^A-Za-z0-9]", "-", str(workspace.resolve()))
     session = own / plan["session_id"]
@@ -2002,7 +2002,7 @@ def test_sandbox_exec_profile_denies_home_reads_and_writes_but_keeps_provider_st
         pytest.skip("sandbox_apply is refused in this test environment")
     assert probe.stdout == "note\n"
     config = run(
-        f"git -C '{cwd}' config --global user.name && git -C '{cwd}' config --global user.email"
+        f"git -C '{cwd}' config user.name && git -C '{cwd}' config user.email"
     )
     assert config.returncode == 0, config.stderr
     assert config.stdout.splitlines() == ["home-config", "xdg-config@example.invalid"]
@@ -7002,17 +7002,19 @@ def test_opencode_discovery_grants_only_ancestor_directory_metadata(tmp_path, mo
     for ancestor in (cwd, *cwd.parents):
         for name in (".claude", ".codex"):
             grant = f'(literal "{ancestor / name}")'
-            assert any(line.startswith("(allow file-read-metadata ") and grant in line
+            assert any(line.startswith("(allow file-read-data file-read-metadata ") and grant in line
                        for line in profile[deny_at:].splitlines())
-    assert not any(line.startswith("(allow file-read-metadata ") and '(subpath ' in line
+    assert not any(line.startswith("(allow file-read-data file-read-metadata ") and '(subpath ' in line
                    for line in profile[deny_at:].splitlines())
 
 
 @pytest.mark.skipif(sys.platform != "darwin", reason="sandbox-exec is macOS-only")
 @pytest.mark.parametrize("mode", ["read_only", "worktree_write"])
 @pytest.mark.parametrize("symlink", [False, True])
-def test_opencode_discovery_lstats_denied_ancestor_without_reading_contents(tmp_path, mode, symlink):
+def test_opencode_discovery_lstats_denied_ancestor_without_reading_contents(tmp_path, monkeypatch, mode, symlink):
     mod = supervisor()
+    # The profile denies reads under HOME; a uv/pyenv interpreter lives there, so point HOME elsewhere.
+    monkeypatch.setattr(mod.Path, "home", lambda: tmp_path / "home")
     sandbox_exec = mod._sandbox_exec_path()
     if not sandbox_exec:
         pytest.skip("sandbox-exec is unavailable or disabled")
@@ -7027,11 +7029,15 @@ def test_opencode_discovery_lstats_denied_ancestor_without_reading_contents(tmp_
         if symlink:
             directory.symlink_to(target, target_is_directory=True)
     plan["protected_paths"] = list(map(str, targets))
+    # OpenCode's realPath opens the directory itself (a bare lstat grant still returns EPERM live, #1012):
+    # a real directory must open, while a planted link must not carry the grant to its target.
     script = """import os, sys
-for path in sys.argv[1:]:
+opens = sys.argv[1] == 'open'
+for path in sys.argv[2:]:
     os.lstat(path)
-    for operation in (lambda: os.listdir(path), lambda: open(path + '/secret.txt').read(),
-                      lambda: os.stat(path + '/secret.txt')):
+    if opens:
+        os.close(os.open(path, os.O_RDONLY))
+    for operation in (lambda: open(path + '/secret.txt').read(), lambda: os.stat(path + '/secret.txt')):
         try:
             operation()
         except PermissionError:
@@ -7039,8 +7045,10 @@ for path in sys.argv[1:]:
         raise AssertionError('protected content or descendant metadata became readable')
 print('metadata only')
 """
-    result = subprocess.run([sandbox_exec, "-p", mod.os_confinement_profile(plan), sys.executable,
-                             "-c", script, *map(str, protected)], cwd=cwd,
+    # The system interpreter stays readable under the profile; a uv or venv one lives under the denied HOME.
+    interpreter = "/usr/bin/python3" if os.access("/usr/bin/python3", os.X_OK) else sys.executable
+    result = subprocess.run([sandbox_exec, "-p", mod.os_confinement_profile(plan), interpreter,
+                             "-c", script, "link" if symlink else "open", *map(str, protected)], cwd=cwd,
                             capture_output=True, text=True, timeout=10)
     if result.returncode and "sandbox_apply" in result.stderr:
         pytest.skip("sandbox_apply is refused in this test environment")
