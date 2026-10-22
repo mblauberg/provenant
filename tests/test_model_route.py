@@ -4469,7 +4469,7 @@ def test_same_family_rejection_precedes_adapter_family_rejection():
 @pytest.mark.parametrize(
     ("adapter", "model", "family", "effort"),
     [
-        ("agy", "Gemini 3.1 Pro (High)", "google", "high"),
+        ("agy", "Gemini 3.8 Flash (High)", "google", "high"),
         ("cursor", "cursor-grok-4.5-high", "xai", "high"),
     ],
 )
