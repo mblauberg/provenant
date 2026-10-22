@@ -236,6 +236,8 @@ enum CLI {
         func close(_ fd: Int32) -> Bool { lock.withLock { closed.insert(fd).inserted } }
         func markTimedOut() { lock.withLock { timedOut = true } }
         var snapshot: (Data, Data, Bool) { lock.withLock { (out, err, timedOut) } }
+        private var exit = siginfo_t()
+        var reaped: siginfo_t { get { lock.withLock { exit } } set { lock.withLock { exit = newValue } } }
     }
 
     /// Where `tick` writes report.json: provider_quota.py `state_root() / 'quota'`. The CLI inherits this
@@ -291,10 +293,12 @@ enum CLI {
     }
 
     /// Runs the CLI as the leader of its own process group, so an overrun's descendants are signalled with it.
-    /// Pipes drain as data arrives, so neither can fill and block the child. At the limit the group gets SIGTERM,
-    /// then SIGKILL 3 s later, and a pipe still held open after that is abandoned, so every wait is bounded.
+    /// Pipes drain as data arrives, so neither can fill and block the child. At the limit the group gets SIGTERM
+    /// and a full grace period, then SIGKILL; a pipe still held open after that is abandoned. Every wait here is
+    /// bounded, and one waiter owns reaping the leader, however late it exits.
     static func exec(_ url: URL, _ arguments: [String], path: String?, limit: Double) throws -> Output {
-        let out = Pipe(), err = Pipe(), shared = Shared(), drained = DispatchGroup(), exited = DispatchSemaphore(value: 0)
+        let out = Pipe(), err = Pipe(), shared = Shared(), drained = DispatchGroup()
+        let exited = DispatchSemaphore(value: 0), released = DispatchSemaphore(value: 0), reaped = DispatchSemaphore(value: 0)
         var environment = ProcessInfo.processInfo.environment
         if let path { environment["PATH"] = path }
         var actions: posix_spawn_file_actions_t?, attributes: posix_spawnattr_t?
@@ -304,7 +308,13 @@ enum CLI {
         posix_spawn_file_actions_addopen(&actions, 0, "/dev/null", O_RDONLY, 0)
         posix_spawn_file_actions_adddup2(&actions, out.fileHandleForWriting.fileDescriptor, 1)
         posix_spawn_file_actions_adddup2(&actions, err.fileHandleForWriting.fileDescriptor, 2)
-        posix_spawnattr_setflags(&attributes, Int16(POSIX_SPAWN_SETPGROUP | POSIX_SPAWN_CLOEXEC_DEFAULT))
+        // The calling dispatch thread blocks some signals; the CLI starts with none blocked and default handlers.
+        var unblocked = sigset_t(), defaults = sigset_t()
+        for signal in [SIGTERM, SIGINT, SIGPIPE] { defaults |= 1 << (signal - 1) }
+        posix_spawnattr_setsigmask(&attributes, &unblocked)
+        posix_spawnattr_setsigdefault(&attributes, &defaults)
+        posix_spawnattr_setflags(&attributes, Int16(POSIX_SPAWN_SETPGROUP | POSIX_SPAWN_SETSIGMASK | POSIX_SPAWN_SETSIGDEF
+                                                     | POSIX_SPAWN_CLOEXEC_DEFAULT))
         posix_spawnattr_setpgroup(&attributes, 0)
         let argv = ([url.path] + arguments).map { strdup($0) } + [nil]
         let envp = environment.map { strdup("\($0.key)=\($0.value)") } + [nil]
@@ -324,28 +334,35 @@ enum CLI {
                 if shared.close(handle.fileDescriptor) { drained.leave() }
             }
         }
-        // Waits without reaping: the leader's unreaped pid keeps the group id from being reused while it is signalled.
+        // The one owner of the leader's exit. It reaps only once signalling is over, so until then the unreaped
+        // pid keeps the group id from being reused.
         DispatchQueue.global(qos: .utility).async {
             var info = siginfo_t()
             while waitid(P_PID, id_t(pid), &info, WEXITED | WNOWAIT) == -1 && errno == EINTR {}
             exited.signal()
+            released.wait()
+            while waitid(P_PID, id_t(pid), &info, WEXITED) == -1 && errno == EINTR {}
+            shared.reaped = info
+            reaped.signal()
         }
-        var killed = false
+        var running = false
         if exited.wait(timeout: .now() + limit) == .timedOut {
             shared.markTimedOut()
             kill(-pid, SIGTERM)
-            let gone = exited.wait(timeout: .now() + 3) == .success
-            kill(-pid, SIGKILL)   // also when the leader exited but a descendant ignored SIGTERM
-            killed = !gone && exited.wait(timeout: .now() + 3) == .timedOut   // still not exited: leave it unreaped
+            let grace = DispatchTime.now() + 3
+            let gone = exited.wait(timeout: grace) == .success
+            if gone, grace > .now() { usleep(useconds_t((grace.uptimeNanoseconds - DispatchTime.now().uptimeNanoseconds) / 1000)) }
+            kill(-pid, SIGKILL)   // descendants get the full grace even when the leader exits early
+            running = !gone && exited.wait(timeout: .now() + 3) == .timedOut
         }
         if drained.wait(timeout: .now() + 2) == .timedOut {
             kill(-pid, SIGKILL)   // a descendant still holds the pipes
             for pipe in [out, err] { pipe.fileHandleForReading.readabilityHandler = nil }
         }
-        var info = siginfo_t()
-        if !killed { while waitid(P_PID, id_t(pid), &info, WEXITED) == -1 && errno == EINTR {} }
-        let (data, errData, timedOut) = shared.snapshot
-        return Output(status: killed ? SIGKILL : info.si_status, signalled: killed || info.si_code != CLD_EXITED,
+        released.signal()
+        if !running { reaped.wait() }   // the leader has exited, so this is immediate
+        let (data, errData, timedOut) = shared.snapshot, info = shared.reaped
+        return Output(status: running ? SIGKILL : info.si_status, signalled: running || info.si_code != CLD_EXITED,
                       timedOut: timedOut, out: data, err: String(decoding: errData, as: UTF8.self))
     }
 
