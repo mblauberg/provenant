@@ -136,7 +136,7 @@ const sha256 = (text: string | Buffer) => createHash("sha256").update(text).dige
 export function readGraphPromptFile(path: string, identity: Identity, env: NodeJS.ProcessEnv = process.env): Buffer {
   const scripts = fileURLToPath(new URL("../../../../skills/orchestrate/scripts/", import.meta.url));
   const root = productRoot(env);
-  const python = pythonOwnerSync(root, identity, env);
+  const python = pythonOwnerSync(root, env);
   const script = `import base64,json,sys
 from pathlib import Path
 sys.path.insert(0,sys.argv[1])

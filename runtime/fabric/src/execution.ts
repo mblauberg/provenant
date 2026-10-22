@@ -205,14 +205,14 @@ function pythonOwnerError(error: unknown): Error {
   return new Error(`Python execution owner is unavailable: ${error instanceof Error ? error.message : String(error)}`, { cause: error });
 }
 
-export async function pythonOwner(root: string, _identity: Identity, env: NodeJS.ProcessEnv): Promise<string> {
+export async function pythonOwner(root: string, env: NodeJS.ProcessEnv): Promise<string> {
   const { args, options } = pythonOwnerCommand(root, env);
   try { return selectedPython((await execFileAsync("/bin/bash", args, options)).stdout); }
   catch (error) { throw pythonOwnerError(error); }
 }
 
 /** Synchronous validation uses the same interpreter selector as dispatch. */
-export function pythonOwnerSync(root: string, _identity: Identity, env: NodeJS.ProcessEnv): string {
+export function pythonOwnerSync(root: string, env: NodeJS.ProcessEnv): string {
   const { args, options } = pythonOwnerCommand(root, env);
   try { return selectedPython(execFileSync("/bin/bash", args, options)); }
   catch (error) { throw pythonOwnerError(error); }
@@ -788,7 +788,7 @@ async function dispatchConfiguredProviderUnchecked(
     // A route pick keeps this a single dispatch; a council runs as a batch of its members.
     const taskId = namedTaskId ?? (input.council === undefined && input.models === undefined ? undefined : "council");
     const expanded = await expandPools([{ ...input, ...(taskId === undefined ? {} : { id: taskId }) }],
-      await pythonOwner(root, identity, env), root, identity, env, signal);
+      await pythonOwner(root, env), root, identity, env, signal);
     if (expanded.errors.length) {
       const error = expanded.errors[0]!;
       return { status: "rejected", error: error.error, fix: error.fix };
@@ -837,7 +837,7 @@ async function dispatchConfiguredProviderUnchecked(
   const taskId = namedTaskId ?? `task-${randomUUID().slice(0, 8)}`;
   const owner = executableOwner(root, "skills/orchestrate/scripts/dispatch_run.py");
   const controls = executableOwner(root, "skills/orchestrate/scripts/run_controls.py");
-  const python = await pythonOwner(root, identity, env);
+  const python = await pythonOwner(root, env);
   const checked = await preflight(
     python,
     owner,
@@ -1023,7 +1023,7 @@ async function dispatchConfiguredBatchUnchecked(
   });
   let councils = false;
   if (merged.some(usesPool)) {
-    const expanded = await expandPools(merged, await pythonOwner(root, identity, env), root, identity, env, signal);
+    const expanded = await expandPools(merged, await pythonOwner(root, env), root, identity, env, signal);
     errors.push(...expanded.errors);
     poolWarnings.push(...expanded.warnings);
     merged = expanded.tasks;
@@ -1044,7 +1044,7 @@ async function dispatchConfiguredBatchUnchecked(
   assertFixtureRunRoot(runRoot(identity.cwd), tasks);
   const owner = executableOwner(root, "skills/orchestrate/scripts/batch_run.py");
   const controls = executableOwner(root, "skills/orchestrate/scripts/run_controls.py");
-  const python = await pythonOwner(root, identity, env);
+  const python = await pythonOwner(root, env);
   let checked = await preflight(
     python,
     executableOwner(root, "skills/orchestrate/scripts/dispatch_run.py"),
@@ -1234,7 +1234,7 @@ async function cancelBatchTask(
     return { status: "rejected", error: "attempt_not_started",
       fix: `Task ${target.task_id} attempt ${attempt} is queued and not yet published; retry cancel once it starts, or cancel the whole batch with its run id ${target.run_id}.` };
   const root = productRoot(env);
-  const python = await pythonOwner(root, identity, env);
+  const python = await pythonOwner(root, env);
   const controls = executableOwner(root, "skills/orchestrate/scripts/run_controls.py");
   try {
     await execFileAsync(python, [controls, "cancel", "--run-dir", String(target.run_dir), "--task-id", String(target.task_id),

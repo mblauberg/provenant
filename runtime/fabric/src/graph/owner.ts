@@ -64,9 +64,9 @@ function resultPath(row: Record<string, any>): string | undefined {
 /** Serialise graph owners, or hold dispatch's writer lock while a worktree gate runs. */
 async function holdLock(path: string, chair: Identity, env: NodeJS.ProcessEnv): Promise<() => void> {
   const root = productRoot(env);
-  const python = pythonOwnerSync(root, chair, env);
+  const python = pythonOwnerSync(root, env);
   const script = "import fcntl,sys,time\nf=open(sys.argv[1],'a+')\nfor _ in range(300):\n  try:\n    fcntl.flock(f.fileno(),fcntl.LOCK_EX|fcntl.LOCK_NB);break\n  except OSError: time.sleep(0.1)\nelse: sys.exit(3)\nprint('locked',flush=True)\nsys.stdin.read()\n";
-  const child = spawn(python, ["-I", "-c", script, path], { cwd: root, env, stdio: ["pipe", "pipe", "ignore"] });
+  const child = spawn(python, ["-I", "-c", script, path], { cwd: root, env: withoutGitRedirects(env), stdio: ["pipe", "pipe", "ignore"] });
   await new Promise<void>((resolveLock, reject) => {
     child.stdout!.once("data", () => resolveLock());
     child.once("error", reject);
@@ -106,6 +106,8 @@ class Owner {
       this.#chair = graph.chair;
       try { releaseLock = await holdLock(join(dir, "owner.lock"), graph.chair, this.#env); }
       catch (error) {
+        const latest = this.#store.graph(this.project, this.graphId);
+        if (latest?.owner_pid != null && observedAlive(latest.owner_pid, latest.owner_started)) return 0;
         this.#notify(`graph ${this.graphId} owner lock unavailable; graph remains running with reservations held: ${(error instanceof Error ? error.message : String(error)).slice(0, 500)}`);
         return 1;
       }

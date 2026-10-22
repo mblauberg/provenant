@@ -650,7 +650,7 @@ try {
     const head = execFileSync("git", ["rev-parse", "HEAD"], { ...gitOptions, encoding: "utf8" }).trim();
     execFileSync("git", ["merge-base", "--is-ancestor", remote, head], gitOptions);
     const root = productRoot(process.env);
-    execFileSync(await pythonOwner(root, who, process.env),
+    execFileSync(await pythonOwner(root, process.env),
       [resolve(root, "skills/orchestrate/scripts/lane_protection.py"),
         "--common-dir", resolve(who.project, ".git"), "--tip", head, "--base", lease.expectedSha],
       { ...gitOptions, stdio: ["ignore", "ignore", "inherit"], timeout: 30_000 });
