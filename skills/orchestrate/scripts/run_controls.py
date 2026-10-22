@@ -880,8 +880,8 @@ def _load_summary(run_dir: Path, batch_id: str, *, require_complete: bool = Fals
             raise ControlError(f"batch attempt has invalid observed completion: {item['task_id']}")
         if process.get("observed_exit") is not True and not (
             status == "failed"
-            and record.get("outcome") == "process_spawn_error"
-            and process.get("pid") is None
+            and (record.get("outcome") == "process_spawn_error" and process.get("pid") is None
+                 or record.get("outcome") in {"provider_lost", "host_disk_full"} and process.get("pid") is not None)
             and process.get("exit_code") is None
         ):
             raise ControlError(f"batch attempt lacks observed completion: {item['task_id']}")
@@ -935,8 +935,8 @@ def validate_retained_dispatch(run_dir: Path) -> list[str]:
                     raise ControlError("attempt has invalid observed completion")
                 if process.get("observed_exit") is not True and not (
                     record.get("status") == "failed"
-                    and record.get("outcome") == "process_spawn_error"
-                    and process.get("pid") is None
+                    and (record.get("outcome") == "process_spawn_error" and process.get("pid") is None
+                         or record.get("outcome") in {"provider_lost", "host_disk_full"} and process.get("pid") is not None)
                     and process.get("exit_code") is None
                 ):
                     raise ControlError("attempt does not prove observed completion")

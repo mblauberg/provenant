@@ -9,6 +9,7 @@ live progress, typed terminal states, provenance, and controls.
 from __future__ import annotations
 
 import argparse
+import errno
 from contextlib import contextmanager, redirect_stdout
 import fcntl
 import hashlib
@@ -600,6 +601,39 @@ def reap_stop_status(run_dir: Path, path: Path, row: dict[str, Any]):
     return "lost"
 
 
+def process_evidence(run_dir: Path, row: dict[str, Any]) -> dict[str, Any]:
+    evidence = {"pgid_probe": "unknown", "last_event_at": None,
+                "events_bytes": None, "stderr_bytes": None}
+    pgid = row.get("pgid")
+    if isinstance(pgid, int) and pgid > 0:
+        try:
+            os.killpg(pgid, 0)
+        except ProcessLookupError:
+            evidence["pgid_probe"] = "gone"
+        except OSError:
+            pass
+        else:
+            started = row.get("pgid_started_at")
+            observed = process_info.start_time(pgid) if started else None
+            evidence["pgid_probe"] = "reused" if started and observed and observed != started else "live"
+    for name in ("events", "stderr"):
+        try:
+            value = (row.get("paths") or {}).get(name)
+            if not value:
+                continue
+            fd, _, _ = open_contained_regular(run_dir, value, os.O_RDONLY, label=name)
+            try:
+                metadata = os.fstat(fd)
+            finally:
+                os.close(fd)
+            evidence[name + "_bytes"] = metadata.st_size
+            if name == "events":
+                evidence["last_event_at"] = datetime.fromtimestamp(metadata.st_mtime, UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+        except (OSError, OwnedFileError):
+            pass
+    return evidence
+
+
 def reap_attempts(run_dir: Path) -> list[str]:
     """Finalise dead attempts under custody, preserving deliberate termination."""
     run_dir = Path(run_dir)
@@ -653,6 +687,7 @@ def reap_attempts(run_dir: Path) -> list[str]:
                         row["evidence"] = {**(row.get("evidence") or {}), "signature": reason,
                                            "excerpt": "Attempt process group is gone" if reason == "pgid_gone"
                                            else "Attempt process group start time no longer matches"}
+                        row["evidence"].update(process_evidence(run_dir, row))
                         row["digest"] = render_digest(row)
                         write_owned(run_dir, path, json.dumps(row, indent=2) + "\n")
                         reaped.append(str(path))
@@ -1783,6 +1818,24 @@ def profile_knob(args: argparse.Namespace, name: str, fallback: Any = None) -> A
     return profile_resolution(args).get("knobs", {}).get(name, fallback)
 
 
+def disk_floor_bytes(workspace_root: Path, mode: str) -> int:
+    defaults = {"worktree_write": 2 * 1024**3, "read_only": 0}
+    path = workspace_root / ".agents/fabric-policy.json"
+    fix = "Set .agents/fabric-policy.json disk_floor_bytes to non-negative integers."
+    try:
+        policy = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return defaults[mode]
+    except (OSError, UnicodeError, ValueError) as exc:
+        raise ValueError(fix) from exc
+    floors = policy.get("disk_floor_bytes", {}) if isinstance(policy, dict) else None
+    if not isinstance(floors, dict) or any(
+        key not in defaults or type(value) is not int or value < 0 for key, value in floors.items()
+    ):
+        raise ValueError(fix)
+    return floors.get(mode, defaults[mode])
+
+
 def contract_row(args,run_dir,number,attempt_dir,plan,started_at):
     route=plan.get("route",{})
     model=plan.get("model") or route.get("resolved_model") or args.model or ""
@@ -1862,10 +1915,13 @@ def publish_contract(run_dir,row):
             write_owned(run_dir,path,json.dumps(row,indent=2)+"\n")
 
 
-def terminal_contract(args,run_dir,legacy,adapter,number,attempt_dir):
+def terminal_contract(args,run_dir,legacy,adapter,number,attempt_dir,active=None):
     run_lineage.refresh_external(run_dir, args.task_id, number, lambda ids:
         _fabric_hosts_owner().lane_owner().client_call("status", str(Path.cwd()), {"ids": ids}, federated_read=True))
     row=contract_row(args,run_dir,number,attempt_dir,getattr(args,"_last_plan",{}),legacy["started_at"])
+    for field in ("pgid", "pgid_started_at", "last_progress_at", "process_error"):
+        if field in (active or {}): row[field]=active[field]
+    if legacy.get("process_error"): row["process_error"]=legacy["process_error"]
     status=adapter.get("status")
     if legacy["outcome"] in {"result_invalid_path","result_integrity_error","adapter_receipt_invalid","manifest_write_error","terminal_envelope_invalid"}: status="failed"
     elif legacy["status"] in {"cancelled","timed_out"}: status=legacy["status"]
@@ -1889,10 +1945,13 @@ def terminal_contract(args,run_dir,legacy,adapter,number,attempt_dir):
     row["warnings"] = list(dict.fromkeys(
         list(row.get("warnings", [])) + list(getattr(getattr(args, "_secret_scan", None), "warnings", []))
         + list(getattr(args, "_memory_warnings", [])) + list(getattr(args, "_branch_warnings", []))
-        + list(getattr(args, "_resume_warnings", []))))
+        + list(getattr(args, "_resume_warnings", [])) + list(getattr(args, "_bookkeeping_warnings", []))))
     row["timing"]["queued_seconds"] = getattr(args, "_queued_seconds", 0.0)
     if legacy.get("process_error", "").startswith("Set .agents/fabric-policy.json memory_floor_percent"):
         row["fix"] = legacy["process_error"]
+    if legacy["outcome"] == "host_disk_full":
+        row["error"] = "host_disk_full"
+        row["fix"] = "host_disk_full: free disk space or lower the mode's disk_floor_bytes in .agents/fabric-policy.json."
     if legacy["outcome"] == "memory_unavailable":
         row["error"] = "memory_unavailable"
         row["fix"] = "memory_unavailable: free memory or lower the mode's memory_floor_percent in .agents/fabric-policy.json."
@@ -1900,6 +1959,10 @@ def terminal_contract(args,run_dir,legacy,adapter,number,attempt_dir):
         row["fix"]=adapter.get("fix") or adapter.get("reason") or refusal["fix"];row["evidence"]=refusal["evidence"];row["error"]=refusal["error"]
     row.update(state="terminal",status=status,ended_at=legacy["finished_at"],question=adapter.get("question") or (legacy.get("question") or {}).get("prompt"))
     row["usage_source"] = adapter.get("usage_source") or provider_exec.context_usage.usage_source(row.get("context") or {})
+    if legacy.get("process_error"):
+        row["evidence"] = {**row["evidence"], "signature": legacy["outcome"],
+                           "excerpt": legacy["process_error"][:400]}
+    row["evidence"].update(process_evidence(run_dir, row))
     row["error_class"] = provider_exec.error_class(status, row["evidence"].get("signature"))
     if not legacy.get("result"): row["paths"]["result"]=None
     row["legacy_attempt_path"]=legacy["attempt_path"]
@@ -2303,7 +2366,9 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
     observed_exit = False
     exit_code: int | None = None
     process_error = ""
+    process_errno = None
     process = None
+    active = None
     memory_lease = None
     admission_queued_seconds = 0.0
     provider_temporary = None
@@ -2311,6 +2376,9 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
     old_handlers: dict[int, Any] = {}
     def admit_attempt(active, cancelled_now, *, cooldown_blocked=False):
         nonlocal started, started_at, memory_lease, process_error, admission_queued_seconds
+        if args.access_mode == "worktree_write" and shutil.disk_usage(run_dir).free < disk_floor_bytes(workspace, args.access_mode):
+            process_error = "host_disk_full"
+            return False
         pacing = vars(args).pop("_rate_limit_retry", None)
         if pacing and not cooldown_blocked:
             active.update(state="queued", queue_reason="rate_limit", reason="waiting for model cooldown")
@@ -2488,6 +2556,11 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
                 active["requested_route"] = requested_route
                 spawn_started = time.monotonic()
                 provider_started_at = [None]
+                def bookkeeping_warning(exc):
+                    if not getattr(args, "_bookkeeping_warnings", []):
+                        warning = "provider bookkeeping write failed: " + str(exc)
+                        active["warnings"].append(warning)
+                        args._bookkeeping_warnings = [warning]
                 def provider_started(child):
                     nonlocal process
                     process=child
@@ -2498,14 +2571,21 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
                     active["pgid"]=child.pid
                     active["pgid_started_at"]=process_info.start_time(child.pid)
                     _record_provider_process(run_dir,child)
-                    write_owned(run_dir,attempt_dir/"pgid",str(child.pid)+"\n")
-                    publish_contract(run_dir,active)
+                    try:
+                        write_owned(run_dir,attempt_dir/"pgid",str(child.pid)+"\n")
+                        publish_contract(run_dir,active)
+                    except (OSError, OwnedFileError) as exc:
+                        bookkeeping_warning(exc)
                 progress_publication=[0.0]
                 def progress(at):
                     active["last_progress_at"]=at
                     if time.monotonic()-progress_publication[0]>=1:
-                        publish_contract(run_dir,active)
-                        progress_publication[0]=time.monotonic()
+                        try:
+                            publish_contract(run_dir,active)
+                        except (OSError, OwnedFileError) as exc:
+                            bookkeeping_warning(exc)
+                        else:
+                            progress_publication[0]=time.monotonic()
                 def cancellation():
                     return owner_cancel[0] or cancellation_marker_present(run_dir,attempt_dir) or (batch_dir is not None and cancellation_marker_present(run_dir,batch_dir))
                 admitted = admit_attempt(active, cancellation, cooldown_blocked=bool(plan.get("cooldown_blocked")))
@@ -2521,7 +2601,7 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
                     adapter_record = vars(args).pop("_pacing_blocked", None)
                     if adapter_record is None:
                         process_error = process_error or "cancelled"
-                        adapter_record = {"status": "failed" if process_error == "memory_unavailable" else
+                        adapter_record = {"status": "failed" if process_error in {"memory_unavailable", "host_disk_full"} else
                                           "timed_out" if process_error == "timeout" else "cancelled",
                                           "exit": 1, "warnings": active["warnings"]}
                 else:
@@ -2577,7 +2657,7 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
                         else:
                             relaunch_skipped = True
                             process_error = process_error or "cancelled"
-                            adapter_record = {"status": "failed" if process_error == "memory_unavailable" else "cancelled",
+                            adapter_record = {"status": "failed" if process_error in {"memory_unavailable", "host_disk_full"} else "cancelled",
                                               "exit": 1, "warnings": active["warnings"]}
                 if hasattr(args,"resume_relaunch") and not relaunch_skipped:
                     adapter_record["provenance"]["notes"].append("resumed_by_relaunch")
@@ -2599,7 +2679,8 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
             if adapter_record.get("status")=="cancelled" or adapter_record.get("evidence",{}).get("signature")=="wall_clock":
                 process_error="cancelled" if adapter_record["status"]=="cancelled" else "timeout"
         except (OSError,ValueError,subprocess.SubprocessError) as exc:
-            process_error=str(exc)
+            process_error=f"{exc.__cause__}: {exc}" if isinstance(exc.__cause__, OSError) else str(exc)
+            process_errno=getattr(exc, "errno", None) or getattr(exc.__cause__, "errno", None)
             if not adapter_path.exists(): write_owned(run_dir,adapter_path,"{}\n")
             if not stderr_path.exists(): write_owned(run_dir,stderr_path,str(exc))
         finally:
@@ -2752,7 +2833,8 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
         except InterruptedError:
             pass
         except (OSError, ValueError) as exc:
-            process_error = str(exc)
+            process_error = f"{exc.__cause__}: {exc}" if isinstance(exc.__cause__, OSError) else str(exc)
+            process_errno = getattr(exc, "errno", None) or getattr(exc.__cause__, "errno", None)
         finally:
             if memory_lease is not None:
                 memory_lease.close()
@@ -2814,9 +2896,9 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
         and not result_integrity_error and not terminal_envelope_error
     )
     deadline_reached = duration_seconds >= provider_timeout_seconds(args.timeout_seconds)
-    if process_error == "memory_unavailable":
+    if process_error in {"memory_unavailable", "host_disk_full"}:
         status = "failed"
-        outcome = "memory_unavailable"
+        outcome = process_error
     elif process_error == "timeout":
         status = "timed_out"
         outcome = "timeout"
@@ -2825,7 +2907,7 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
         outcome = "cancelled"
     elif not observed_exit:
         status = "failed"
-        outcome = "process_spawn_error"
+        outcome = "process_spawn_error" if process is None else "host_disk_full" if process_errno == errno.ENOSPC else "provider_lost"
     elif result_invalid:
         status = "failed"
         outcome = "result_invalid_path"
@@ -2879,7 +2961,7 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
         "children": run_lineage.children(run_dir, args.task_id, attempt_number),
         **attempt_scope(args, attempt_number),
         "usage_source": adapter.get("usage_source") or provider_exec.context_usage.usage_source(adapter.get("context") or {}),
-        "error_class": provider_exec.error_class(status, (adapter.get("evidence") or {}).get("signature")),
+        "error_class": provider_exec.error_class(status, outcome if process_error else (adapter.get("evidence") or {}).get("signature")),
         **({"result_partial": True} if adapter.get("result_partial") else {}),
         **({"landable": False, "quarantine": adapter.get("quarantine")} if adapter_status == "quarantined" else {}),
         "run_id": run_dir.name,
@@ -2967,7 +3049,7 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
     remove_cancellation_marker(run_dir, attempt_dir)
     for sig, handler in old_handlers.items():
         signal.signal(sig, handler)
-    row = terminal_contract(args,run_dir,record,adapter,attempt_number,attempt_dir)
+    row = terminal_contract(args,run_dir,record,adapter,attempt_number,attempt_dir,active)
     # Close registration under journal custody before removing its private tmp.
     publish_contract(run_dir, row)
     left=attempt_storage.prune_private_tmp(run_dir,attempt_dir,row["status"])[1]
@@ -3025,6 +3107,13 @@ def close_mcp_run(run_dir: Path) -> None:
         receipt.update(status="ok" if statuses == {"ok"} else "quarantined" if statuses <= {"ok", "quarantined"} else "cancelled" if statuses == {"cancelled"} else "input_required" if receipt.get("resumable") else "failed",
                        closed_at=now(), terminal_reason=None if statuses == {"ok"} else "MCP execution attempts are terminal")
         write_owned(run_dir, run_dir / "RUN_RECEIPT.json", json.dumps(receipt, indent=2) + "\n")
+        status_path = run_dir / "dispatch-status.json"
+        if status_path.exists():
+            status = json.loads(read_bound_bytes(run_dir, "dispatch-status.json", label="dispatch status"))
+        else:
+            status = {}
+        status.update(status=receipt["status"], finished_at=receipt["closed_at"])
+        write_owned(run_dir, status_path, json.dumps(status, indent=2) + "\n")
     except (OSError, ValueError, TypeError, KeyError, AttributeError, OwnedFileError):
         pass
 

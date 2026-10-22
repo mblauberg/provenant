@@ -1690,11 +1690,13 @@ STATUS_ERROR_CLASSES = {
     "auth_required": "auth", "rate_limited": "rate_limited", "model_unavailable": "model_unavailable",
     "timed_out": "timeout", "startup_timeout": "timeout", "stalled": "timeout",
     "lost": "provider_error", "cancelled": "cancelled",
+    "provider_lost": "host_resource", "host_disk_full": "host_resource",
 }
 ERROR_CLASS_ALIASES = {
     "permission_blocked": "sandbox_denied", "usage_limited": "usage_limited", "quota_exhausted": "usage_limited",
     "auth_required": "auth", "auth_expired": "auth", "rate_limited": "rate_limited",
     "model_unavailable": "model_unavailable", "pinned_model_substitution": "model_unavailable",
+    "provider_lost": "host_resource", "host_disk_full": "host_resource",
     "provider_transport": "transient", "timed_out": "timeout", "startup_timeout": "timeout",
     "stalled": "timeout", "print_timeout": "timeout", "idle_watchdog": "timeout",
     "startup_watchdog": "timeout", "wall_clock": "timeout", "lost": "provider_error",
@@ -2130,6 +2132,7 @@ class BoundedCapture:
             os.close(parent)
         self.file = os.fdopen(fd, "w+b", buffering=0)
         self.total = 0
+        self.write_error = None
         self.tail = deque()
         self.tail_size = 0
 
@@ -2137,8 +2140,11 @@ class BoundedCapture:
         # Append to disk only until the cap. Keep subsequent tail chunks in a
         # deque: every byte is copied a bounded number of times, even for JSONL.
         room = max(0, self.limit - self.total)
-        if room:
-            self.file.write(data[:room])
+        if room and self.write_error is None:
+            try:
+                self.file.write(data[:room])
+            except OSError as exc:
+                self.write_error = exc
         self.total += len(data)
         half = self.limit - self.limit // 2
         self.tail.append(data[-half:])
@@ -2153,19 +2159,30 @@ class BoundedCapture:
                 self.tail_size -= len(first)
 
     def _flush_tail(self):
-        if self.total > self.limit:
-            self.file.seek(self.limit // 2)
-            self.file.write(b"".join(self.tail))
-            self.file.truncate(self.limit)
+        if self.total > self.limit and self.write_error is None:
+            try:
+                self.file.seek(self.limit // 2)
+                self.file.write(b"".join(self.tail))
+                self.file.truncate(self.limit)
+            except OSError as exc:
+                self.write_error = exc
 
     def text(self):
         self._flush_tail()
-        self.file.seek(0)
-        return self.file.read().decode("utf-8", errors="replace")
+        if self.write_error is None:
+            try:
+                self.file.seek(0)
+                return self.file.read().decode("utf-8", errors="replace")
+            except OSError as exc:
+                self.write_error = exc
+        return b"".join(self.tail).decode("utf-8", errors="replace")
 
     def close(self):
         self._flush_tail()
-        self.file.close()
+        try:
+            self.file.close()
+        except OSError as exc:
+            self.write_error = exc
 
 
 from process_info import (
@@ -4179,6 +4196,9 @@ def _run_attempt(
     parsed["session_id"] = session
     observed, source = _observed_model(plan, parsed, environment)
     warnings = [*plan["warnings"], *agy_home_warnings, *browser_tmp_warnings]
+    for capture in (raw, diagnostics):
+        if capture.write_error is not None:
+            warnings.append(f"{capture.path.name} capture write failed: {capture.write_error}")
     if parsed["signature"] == "exit_after_output":
         warnings.append(parsed["excerpt"])
     reported = {}

@@ -123,6 +123,29 @@ def test_retained_legacy_success_is_valid_and_cannot_be_retried(tmp_path: Path) 
     assert "successful attempts cannot be retried" in json.loads(result.stdout)["message"]
 
 
+
+@pytest.mark.parametrize("outcome,pid", [("host_disk_full", 12345), ("provider_lost", 12345), ("process_spawn_error", None)])
+def test_retained_host_failure_accepts_unobserved_exit(tmp_path, outcome, pid):
+    run_dir = make_run(tmp_path)
+    attempt = write_attempt(run_dir, status="failed", result=None, observed_exit=False)
+    row = json.loads(attempt.read_text())
+    row.update(outcome=outcome)
+    row["process"].update(pid=pid, exit_code=None)
+    attempt.write_text(json.dumps(row) + "\n")
+    attempt.with_name("attempt.sha256").write_text(f"{file_digest(attempt)}  attempt.json\n")
+    spec = importlib.util.spec_from_file_location("run_controls_host_failure", SCRIPT)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    assert module.validate_retained_dispatch(run_dir) == []
+    summary = run_dir / "dispatch/batches/batch-001/summary.json"
+    summary.parent.mkdir(parents=True)
+    summary.write_text(json.dumps({
+        "schema_version": 1, "record_type": "dispatch-batch", "batch_id": "batch-001",
+        "status": "failed", "tasks": [{"task_id": "task-1", "status": "failed",
+            "attempt_path": str(attempt.relative_to(run_dir))}],
+    }))
+    assert module._load_summary(run_dir, "batch-001")["status"] == "failed"
+
 def test_retained_git_evidence_path_digest_and_payload_are_validated(tmp_path: Path):
     run_dir = make_run(tmp_path)
     attempt = write_attempt(run_dir, status="failed", result=None)

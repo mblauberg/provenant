@@ -126,7 +126,9 @@ def load_secret_scan_module():
 
 def test_reap_attempt_after_group_sigkill_is_terminal_and_idempotent(tmp_path):
     mod = load_dispatch_module()
-    run = make_run(tmp_path, "killed")
+    run = make_run(tmp_path, "runs/killed")
+    status_path = run / "dispatch-status.json"
+    status_path.write_text(json.dumps({"status": "running", "finished_at": None, "run_token": "keep"}))
     child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"], start_new_session=True)
     try:
         started = mod.process_info.start_time(child.pid)
@@ -136,6 +138,9 @@ def test_reap_attempt_after_group_sigkill_is_terminal_and_idempotent(tmp_path):
         row = json.loads((ROOT / "tests/fixtures/fabric-v1/attempt.json").read_text())
         row.update(state="running", status=None, pgid=child.pid, pgid_started_at=started)
         path.write_text(json.dumps(row))
+        (path.parent / "events.jsonl").write_bytes(b'{"type":"item.completed"}\n')
+        (path.parent / "stderr.log").write_bytes(b"partial diagnostic\n")
+        os.utime(path.parent / "events.jsonl", (1700000000, 1700000000))
         os.killpg(child.pid, signal.SIGKILL)
         child.wait(timeout=5)
         mod.reap_attempts(run)
@@ -145,6 +150,14 @@ def test_reap_attempt_after_group_sigkill_is_terminal_and_idempotent(tmp_path):
         assert lost["error_class"] == "provider_error"
         assert lost["ended_at"]
         assert lost["evidence"]["signature"] == "pgid_gone"
+        assert lost["evidence"]["pgid_probe"] == "gone"
+        assert lost["evidence"]["last_event_at"] == "2023-11-14T22:13:20.000Z"
+        assert lost["evidence"]["events_bytes"] == (path.parent / "events.jsonl").stat().st_size
+        assert lost["evidence"]["stderr_bytes"] == (path.parent / "stderr.log").stat().st_size
+        status = json.loads(status_path.read_text())
+        assert status["status"] == "failed"
+        assert status["finished_at"]
+        assert status["run_token"] == "keep"
         before = path.read_bytes()
         mod.reap_attempts(run)
         assert path.read_bytes() == before
@@ -3705,6 +3718,153 @@ def real_owner_fixture(tmp_path, monkeypatch, code):
                '--model', 'opus', '--prompt-file', str(prompt), '--fallback', 'false']
     return run, prompt, command
 
+
+
+
+
+@pytest.mark.parametrize("floor,free,mode,blocked", [
+    (None, 2 * 1024**3 - 1, "worktree_write", True),
+    (100, 99, "worktree_write", True),
+    (100, 100, "worktree_write", False),
+    (0, 0, "worktree_write", False),
+    (None, 0, "read_only", False),
+])
+def test_disk_admission_floor(tmp_path, monkeypatch, floor, free, mode, blocked):
+    marker = tmp_path / "provider-started"
+    code = f"import json,sys\nfrom pathlib import Path\nsys.stdin.read()\nPath({str(marker)!r}).touch()\nprint(json.dumps({{'type':'result','result':'DONE'}}))\n"
+    run, prompt, command = real_owner_fixture(tmp_path, monkeypatch, code)
+    worktree = make_worktree(tmp_path) if mode == "worktree_write" else None
+    if worktree:
+        command += ["--access-mode", mode, "--worktree", str(worktree)]
+    if floor is not None:
+        policy = tmp_path / ".agents/fabric-policy.json"
+        value = json.loads(policy.read_text())
+        value["disk_floor_bytes"] = {"worktree_write": floor}
+        policy.write_text(json.dumps(value))
+    monkeypatch.setenv("PROVENANT_HOST_LOCAL_ONLY", "1")
+    monkeypatch.delenv("PROVENANT_RUN_ID", raising=False)
+    monkeypatch.chdir(tmp_path)
+    mod = load_dispatch_module()
+    probes = []
+    def disk_usage(path):
+        probes.append(path)
+        return SimpleNamespace(free=free)
+    monkeypatch.setattr(mod.shutil, "disk_usage", disk_usage)
+    assert mod.dispatch(mod.parser().parse_args(command[2:])) == (1 if blocked else 0)
+    legacy = json.loads((run / "dispatch/tasks/dispatch-001/attempt-001/attempt.json").read_text())
+    row = json.loads((run / "tasks/dispatch-001/attempt-001/attempt.json").read_text())
+    assert marker.exists() is not blocked
+    if blocked:
+        assert probes == [run]
+        assert legacy["outcome"] == row["error"] == "host_disk_full"
+        assert row["error_class"] == legacy["error_class"] == "host_resource"
+        assert legacy["process"]["pid"] is None
+        assert "disk_floor_bytes" in row["fix"]
+
+@pytest.mark.parametrize("started,wrapped,number,outcome", [
+    (True, True, 28, "host_disk_full"),
+    (True, False, 28, "host_disk_full"),
+    (True, False, 5, "provider_lost"),
+    (False, False, 28, "process_spawn_error"),
+])
+def test_process_io_failure_classification_and_terminal_evidence(tmp_path, monkeypatch, started, wrapped, number, outcome):
+    code = "import json,sys\nsys.stdin.read()\nprint(json.dumps({'type':'result','result':'DONE'}), flush=True)\n"
+    run, prompt, command = real_owner_fixture(tmp_path, monkeypatch, code)
+    monkeypatch.chdir(tmp_path)
+    mod = load_dispatch_module()
+    original_write = mod.write_owned
+    original_open = os.open
+    live = []
+    injected = []
+    def fail():
+        injected.append(True)
+        error = OSError(number, "No space left on device" if number == 28 else "Input/output error")
+        if wrapped:
+            raise mod.OwnedFileError("attempt receipt cannot be written safely") from error
+        raise error
+    def write(run_dir, path, content):
+        if path.name == "attempt.json":
+            row = json.loads(content)
+            if row.get("state") == "running" and row.get("pgid"):
+                live.append(row)
+        if started and path.name == "adapter-receipt.json" and not injected:
+            fail()
+        return original_write(run_dir, path, content)
+    def open_file(path, *args, **kwargs):
+        if not started and Path(path).name == "events.jsonl":
+            fail()
+        return original_open(path, *args, **kwargs)
+    monkeypatch.setattr(mod, "write_owned", write)
+    monkeypatch.setattr(mod.os, "open", open_file)
+    assert mod.dispatch(mod.parser().parse_args(command[2:])) == 1
+    legacy = json.loads((run / "dispatch/tasks/dispatch-001/attempt-001/attempt.json").read_text())
+    row = json.loads((run / "tasks/dispatch-001/attempt-001/attempt.json").read_text())
+    assert injected
+    assert legacy["outcome"] == outcome
+    assert legacy["process"]["observed_exit"] is False
+    assert (legacy["process"]["pid"] is not None) == started
+    if started:
+        assert row["error_class"] == legacy["error_class"] == "host_resource"
+        assert row["pgid"] == legacy["process"]["pid"] == live[-1]["pgid"]
+        assert row["pgid_started_at"] == live[-1]["pgid_started_at"]
+        assert row["last_progress_at"] == live[-1]["last_progress_at"]
+        assert row["process_error"] == legacy["process_error"]
+        assert row["evidence"]["signature"] == outcome
+        assert f"Errno {number}" in row["evidence"]["excerpt"]
+        assert row["evidence"]["pgid_probe"] == "gone"
+        events = run / "dispatch/tasks/dispatch-001/attempt-001/events.jsonl"
+        assert row["evidence"]["events_bytes"] == events.stat().st_size
+        assert row["evidence"]["stderr_bytes"] == (events.parent / "stderr.log").stat().st_size
+        assert row["evidence"]["last_event_at"] == mod.datetime.fromtimestamp(events.stat().st_mtime, mod.UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+@pytest.mark.parametrize("stage", ["progress", "start"])
+def test_progress_bookkeeping_enospc_does_not_signal_provider(tmp_path, monkeypatch, stage):
+    code = """import json,sys,time
+sys.stdin.read()
+print(json.dumps({'type':'system','subtype':'init','session_id':'disk-test','model':'opus'}), flush=True)
+time.sleep(0.2)
+print(json.dumps({'type':'result','result':'DONE'}), flush=True)
+"""
+    run, prompt, command = real_owner_fixture(tmp_path, monkeypatch, code)
+    monkeypatch.chdir(tmp_path)
+    mod = load_dispatch_module()
+    original_write = mod.write_owned
+    failed = []
+    retried = []
+    signals = []
+    original_killpg = os.killpg
+    def killpg(pgid, sig):
+        if sig:
+            try:
+                original_killpg(pgid, 0)
+            except ProcessLookupError:
+                pass
+            else:
+                signals.append((pgid, sig))
+        return original_killpg(pgid, sig)
+    def write(run_dir, path, content):
+        if stage == "start" and path.name == "pgid" and not failed:
+            failed.append(True)
+            raise mod.OwnedFileError("pgid write failed") from OSError(28, "No space left on device")
+        if path.name == "attempt.json":
+            row = json.loads(content)
+            if row.get("state") == "running" and row.get("pgid") and row["last_progress_at"] != row["started_at"]:
+                if stage == "progress" and not failed:
+                    failed.append(True)
+                    raise mod.OwnedFileError("progress write failed") from OSError(28, "No space left on device")
+                if failed:
+                    retried.append(True)
+        return original_write(run_dir, path, content)
+    monkeypatch.setattr(mod, "write_owned", write)
+    monkeypatch.setattr(mod.os, "killpg", killpg)
+    assert mod.dispatch(mod.parser().parse_args(command[2:])) == 0
+    legacy = json.loads((run / "dispatch/tasks/dispatch-001/attempt-001/attempt.json").read_text())
+    row = json.loads((run / "tasks/dispatch-001/attempt-001/attempt.json").read_text())
+    assert failed and retried
+    assert signals == []
+    assert legacy["process"]["observed_exit"] is True
+    assert row["status"] == "ok"
+    assert len([warning for warning in row["warnings"] if "provider bookkeeping write failed" in warning]) == 1
 
 def test_local_writer_launch_does_not_read_the_host_configuration(tmp_path, monkeypatch):
     code = '''import json,sys
