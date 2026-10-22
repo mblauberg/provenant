@@ -19,20 +19,28 @@ sys.modules[SPEC.name] = worktree_policy
 SPEC.loader.exec_module(worktree_policy)
 
 
-def init_repo(path: Path) -> str:
-    path.mkdir(parents=True)
-    subprocess.run(["git", "init", "-q", str(path)], check=True)
-    subprocess.run(["git", "-C", str(path), "config", "user.email", "test@example.com"], check=True)
-    subprocess.run(["git", "-C", str(path), "config", "user.name", "Test"], check=True)
-    (path / "tracked.txt").write_text("base\n")
-    subprocess.run(["git", "-C", str(path), "add", "."], check=True)
-    subprocess.run(["git", "-C", str(path), "commit", "-qm", "base"], check=True)
+@pytest.fixture(scope="module")
+def repo_template(tmp_path_factory) -> Path:
+    """One committed repository per module; each test copies it (keeps .git)."""
+    template = tmp_path_factory.mktemp("repo-template") / "template"
+    template.mkdir()
+    subprocess.run(["git", "init", "-q", str(template)], check=True)
+    subprocess.run(["git", "-C", str(template), "config", "user.email", "test@example.com"], check=True)
+    subprocess.run(["git", "-C", str(template), "config", "user.name", "Test"], check=True)
+    (template / "tracked.txt").write_text("base\n")
+    subprocess.run(["git", "-C", str(template), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(template), "commit", "-qm", "base"], check=True)
+    return template
+
+
+def init_repo(path: Path, template: Path) -> str:
+    shutil.copytree(template, path, symlinks=True)
     return subprocess.check_output(["git", "-C", str(path), "rev-parse", "HEAD"], text=True).strip()
 
 
-def test_detached_worktree_uses_shared_project_directory(tmp_path, capsys):
+def test_detached_worktree_uses_shared_project_directory(tmp_path, capsys, repo_template):
     repo = tmp_path / "project"
-    head = init_repo(repo)
+    head = init_repo(repo, repo_template)
 
     assert worktree_policy.main([
         "create", "review-one", "--repo", str(repo), "--detach", head,
@@ -50,9 +58,9 @@ def test_detached_worktree_uses_shared_project_directory(tmp_path, capsys):
     ).strip() == str(expected)
 
 
-def test_failed_checkout_removes_only_the_branch_it_created(tmp_path):
+def test_failed_checkout_removes_only_the_branch_it_created(tmp_path, repo_template):
     repo = tmp_path / 'project'
-    head = init_repo(repo)
+    head = init_repo(repo, repo_template)
     (repo / '.gitattributes').write_text('*.txt filter=broken\n')
     subprocess.run(['git', '-C', str(repo), 'add', '.gitattributes'], check=True)
     subprocess.run(['git', '-C', str(repo), 'commit', '-qm', 'require filter'], check=True)
@@ -77,9 +85,9 @@ def test_failed_checkout_removes_only_the_branch_it_created(tmp_path):
 
 
 
-def test_late_metadata_failure_is_a_post_creation_error(tmp_path, monkeypatch):
+def test_late_metadata_failure_is_a_post_creation_error(tmp_path, monkeypatch, repo_template):
     repo = tmp_path / 'project'
-    init_repo(repo)
+    init_repo(repo, repo_template)
     args = argparse.Namespace(repo=repo, name='feat-late', existing_branch=None,
         new_branch='feat/late', detach=None, start_point='HEAD', no_node_modules=True)
     original = worktree_policy.common_git_dir
@@ -96,9 +104,9 @@ def test_late_metadata_failure_is_a_post_creation_error(tmp_path, monkeypatch):
         worktree_policy.create(args)
     assert (repo / '.worktrees/feat-late').is_dir()
 
-def test_create_cow_clones_root_and_workspace_node_modules(tmp_path, capsys, monkeypatch):
+def test_create_cow_clones_root_and_workspace_node_modules(tmp_path, capsys, monkeypatch, repo_template):
     repo = tmp_path / "project"
-    head = init_repo(repo)
+    head = init_repo(repo, repo_template)
     (repo / ".gitignore").write_text("node_modules/\n")
     subprocess.run(["git", "-C", str(repo), "add", ".gitignore"], check=True)
     subprocess.run(["git", "-C", str(repo), "commit", "-qm", "ignore modules"], check=True)
@@ -152,9 +160,9 @@ def test_node_preflight_uses_the_callers_node_path_and_clears_git_redirects(tmp_
 @pytest.mark.parametrize(
     "case", ["different-lock", "no-primary-modules", "disabled", "clone-unavailable"],
 )
-def test_create_reports_node_modules_skip_reasons(tmp_path, capsys, monkeypatch, case):
+def test_create_reports_node_modules_skip_reasons(tmp_path, capsys, monkeypatch, case, repo_template):
     repo = tmp_path / "project"
-    head = init_repo(repo)
+    head = init_repo(repo, repo_template)
     (repo / "package-lock.json").write_text("primary lock\n")
     subprocess.run(["git", "-C", str(repo), "add", "package-lock.json"], check=True)
     subprocess.run(["git", "-C", str(repo), "commit", "-qm", "add lock"], check=True)
@@ -197,9 +205,9 @@ def test_create_reports_node_modules_skip_reasons(tmp_path, capsys, monkeypatch,
         assert "reflink unsupported" in receipt["node_modules_reason"]
 
 
-def test_creation_from_linked_checkout_still_anchors_primary_root(tmp_path, capsys):
+def test_creation_from_linked_checkout_still_anchors_primary_root(tmp_path, capsys, repo_template):
     repo = tmp_path / "project"
-    head = init_repo(repo)
+    head = init_repo(repo, repo_template)
     first = repo / ".worktrees" / "first"
     first.parent.mkdir()
     subprocess.run(["git", "-C", str(repo), "worktree", "add", "--detach", str(first), head], check=True)
@@ -214,9 +222,9 @@ def test_creation_from_linked_checkout_still_anchors_primary_root(tmp_path, caps
     assert not (first / ".worktrees").exists()
 
 
-def test_copied_linked_checkout_cannot_mutate_its_source_repository(tmp_path, capsys):
+def test_copied_linked_checkout_cannot_mutate_its_source_repository(tmp_path, capsys, repo_template):
     repo = tmp_path / "project"
-    head = init_repo(repo)
+    head = init_repo(repo, repo_template)
     source = repo / ".worktrees" / "source"
     source.parent.mkdir()
     subprocess.run(
@@ -309,9 +317,9 @@ def test_validate_context_does_not_treat_invalid_git_metadata_as_non_git(
     assert "invalid Git metadata" in capsys.readouterr().err
 
 
-def test_creation_rejects_unsafe_names_without_authorisation_flags(tmp_path, capsys):
+def test_creation_rejects_unsafe_names_without_authorisation_flags(tmp_path, capsys, repo_template):
     repo = tmp_path / "project"
-    head = init_repo(repo)
+    head = init_repo(repo, repo_template)
     assert worktree_policy.main([
         "create", "../escape", "--repo", str(repo), "--detach", head,
     ]) == 2
@@ -319,9 +327,9 @@ def test_creation_rejects_unsafe_names_without_authorisation_flags(tmp_path, cap
     assert not (tmp_path / "escape").exists()
 
 
-def test_new_branch_creation_needs_no_attestation_flags(tmp_path, capsys):
+def test_new_branch_creation_needs_no_attestation_flags(tmp_path, capsys, repo_template):
     repo = tmp_path / "project"
-    init_repo(repo)
+    init_repo(repo, repo_template)
     args = ["create", "feature", "--repo", str(repo), "--new-branch", "feature/test"]
     assert worktree_policy.main(args) == 0
     receipt = json.loads(capsys.readouterr().out)
@@ -333,9 +341,9 @@ def test_new_branch_creation_needs_no_attestation_flags(tmp_path, capsys):
     assert receipt["detached"] is False
 
 
-def test_branch_name_defaults_to_safe_worktree_name_and_warns_on_override(tmp_path, capsys):
+def test_branch_name_defaults_to_safe_worktree_name_and_warns_on_override(tmp_path, capsys, repo_template):
     repo = tmp_path / "project"
-    init_repo(repo)
+    init_repo(repo, repo_template)
     assert worktree_policy.main([
         "create", "--repo", str(repo), "--new-branch", "lane/docs-clean",
     ]) == 0
@@ -349,9 +357,9 @@ def test_branch_name_defaults_to_safe_worktree_name_and_warns_on_override(tmp_pa
     assert "differs from branch-derived" in capsys.readouterr().err
 
 
-def test_ignore_rule_is_repository_local_and_idempotent(tmp_path, capsys):
+def test_ignore_rule_is_repository_local_and_idempotent(tmp_path, capsys, repo_template):
     repo = tmp_path / "project"
-    head = init_repo(repo)
+    head = init_repo(repo, repo_template)
     for name in ("one", "two"):
         assert worktree_policy.main([
             "create", name, "--repo", str(repo), "--detach", head,
@@ -365,9 +373,9 @@ def test_ignore_rule_is_repository_local_and_idempotent(tmp_path, capsys):
     ).returncode == 0
 
 
-def test_check_reports_only_direct_project_local_registered_worktrees(tmp_path, capsys):
+def test_check_reports_only_direct_project_local_registered_worktrees(tmp_path, capsys, repo_template):
     repo = tmp_path / "project"
-    head = init_repo(repo)
+    head = init_repo(repo, repo_template)
     assert worktree_policy.main([
         "create", "valid", "--repo", str(repo), "--detach", head,
     ]) == 0
@@ -386,9 +394,9 @@ def test_check_reports_only_direct_project_local_registered_worktrees(tmp_path, 
     assert any("outside canonical .worktrees" in finding for finding in receipt["findings"])
 
 
-def test_symlinked_or_tracked_shared_root_is_rejected(tmp_path, capsys):
+def test_symlinked_or_tracked_shared_root_is_rejected(tmp_path, capsys, repo_template):
     repo = tmp_path / "project"
-    head = init_repo(repo)
+    head = init_repo(repo, repo_template)
     elsewhere = tmp_path / "elsewhere"
     elsewhere.mkdir()
     (repo / ".worktrees").symlink_to(elsewhere, target_is_directory=True)
@@ -408,9 +416,9 @@ def test_symlinked_or_tracked_shared_root_is_rejected(tmp_path, capsys):
     assert "tracked paths" in capsys.readouterr().err
 
 
-def test_remove_refuses_dirty_worktree_and_keeps_unmerged_branch(tmp_path, capsys):
+def test_remove_refuses_dirty_worktree_and_keeps_unmerged_branch(tmp_path, capsys, repo_template):
     repo = tmp_path / "project"
-    init_repo(repo)
+    init_repo(repo, repo_template)
     assert worktree_policy.main([
         "create", "clean", "--repo", str(repo), "--new-branch", "feature/unmerged",
     ]) == 0
@@ -435,9 +443,9 @@ def test_remove_refuses_dirty_worktree_and_keeps_unmerged_branch(tmp_path, capsy
     capsys.readouterr()
 
 
-def test_remove_deletes_merged_branch(tmp_path, capsys):
+def test_remove_deletes_merged_branch(tmp_path, capsys, repo_template):
     repo = tmp_path / "project"
-    init_repo(repo)
+    init_repo(repo, repo_template)
     assert worktree_policy.main([
         "create", "done", "--repo", str(repo), "--new-branch", "feature/done",
     ]) == 0
@@ -455,9 +463,9 @@ def test_remove_deletes_merged_branch(tmp_path, capsys):
                            "refs/heads/feature/done"]).returncode != 0
 
 
-def test_remove_keeps_branch_at_integration_tip(tmp_path, capsys):
+def test_remove_keeps_branch_at_integration_tip(tmp_path, capsys, repo_template):
     repo = tmp_path / "project"
-    init_repo(repo)
+    init_repo(repo, repo_template)
     assert worktree_policy.main([
         "create", "at-base", "--repo", str(repo), "--new-branch", "feature/base",
     ]) == 0
@@ -469,9 +477,9 @@ def test_remove_keeps_branch_at_integration_tip(tmp_path, capsys):
                            "refs/heads/feature/base"]).returncode == 0
 
 
-def test_remove_keeps_branch_merged_only_into_upstream(tmp_path, capsys):
+def test_remove_keeps_branch_merged_only_into_upstream(tmp_path, capsys, repo_template):
     repo = tmp_path / "project"
-    init_repo(repo)
+    init_repo(repo, repo_template)
     branch = "feature/upstream-only"
     assert worktree_policy.main([
         "create", "upstream-only", "--repo", str(repo), "--new-branch", branch,
@@ -494,9 +502,9 @@ def test_remove_keeps_branch_merged_only_into_upstream(tmp_path, capsys):
     capsys.readouterr()
 
 
-def test_remove_keeps_branch_merged_only_into_primary_topic_branch(tmp_path, capsys):
+def test_remove_keeps_branch_merged_only_into_primary_topic_branch(tmp_path, capsys, repo_template):
     repo = tmp_path / "project"
-    init_repo(repo)
+    init_repo(repo, repo_template)
     branch = "feature/work"
     assert worktree_policy.main([
         "create", "work", "--repo", str(repo), "--new-branch", branch,
@@ -517,9 +525,9 @@ def test_remove_keeps_branch_merged_only_into_primary_topic_branch(tmp_path, cap
     capsys.readouterr()
 
 
-def test_remove_does_not_confuse_tag_with_local_branch(tmp_path, capsys):
+def test_remove_does_not_confuse_tag_with_local_branch(tmp_path, capsys, repo_template):
     repo = tmp_path / "project"
-    init_repo(repo)
+    init_repo(repo, repo_template)
     branch = "feature/ambiguous"
     assert worktree_policy.main([
         "create", "ambiguous", "--repo", str(repo), "--new-branch", branch,
@@ -545,9 +553,9 @@ def test_remove_does_not_confuse_tag_with_local_branch(tmp_path, capsys):
 
 
 
-def _implementation_worktree(tmp_path, capsys):
+def _implementation_worktree(tmp_path, capsys, repo_template):
     repo = tmp_path / "project"
-    base = init_repo(repo)
+    base = init_repo(repo, repo_template)
     assert worktree_policy.main([
         "create", "implementation", "--repo", str(repo), "--detach", base,
     ]) == 0
@@ -555,8 +563,8 @@ def _implementation_worktree(tmp_path, capsys):
     return repo, base, repo / ".worktrees" / "implementation"
 
 
-def test_verify_claim_requires_a_recorded_pre_dispatch_base(tmp_path, capsys):
-    _repo, _base, worktree = _implementation_worktree(tmp_path, capsys)
+def test_verify_claim_requires_a_recorded_pre_dispatch_base(tmp_path, capsys, repo_template):
+    _repo, _base, worktree = _implementation_worktree(tmp_path, capsys, repo_template)
 
     assert worktree_policy.main([
         "verify-claim", "--expected-worktree", str(worktree),
@@ -567,9 +575,9 @@ def test_verify_claim_requires_a_recorded_pre_dispatch_base(tmp_path, capsys):
     assert receipt == {"status": "rejected", "reason": "missing pre-dispatch base revision"}
 
 
-def test_verify_claim_rejects_primary_and_wrong_linked_worktrees(tmp_path, capsys):
+def test_verify_claim_rejects_primary_and_wrong_linked_worktrees(tmp_path, capsys, repo_template):
     repo = tmp_path / "project"
-    base = init_repo(repo)
+    base = init_repo(repo, repo_template)
     first = repo / ".worktrees" / "first"
     second = repo / ".worktrees" / "second"
     first.parent.mkdir()
@@ -588,10 +596,10 @@ def test_verify_claim_rejects_primary_and_wrong_linked_worktrees(tmp_path, capsy
     capsys.readouterr()
 
 
-def test_verify_claim_rejects_a_worktree_from_the_wrong_common_git_directory(tmp_path, capsys):
-    _repo, base, worktree = _implementation_worktree(tmp_path, capsys)
+def test_verify_claim_rejects_a_worktree_from_the_wrong_common_git_directory(tmp_path, capsys, repo_template):
+    _repo, base, worktree = _implementation_worktree(tmp_path, capsys, repo_template)
     other = tmp_path / "other"
-    other_base = init_repo(other)
+    other_base = init_repo(other, repo_template)
     foreign = other / ".worktrees" / "foreign"
     foreign.parent.mkdir()
     subprocess.run(["git", "-C", str(other), "worktree", "add", "--detach", str(foreign), other_base], check=True)
@@ -604,8 +612,8 @@ def test_verify_claim_rejects_a_worktree_from_the_wrong_common_git_directory(tmp
     }
 
 
-def test_verify_claim_rejects_a_non_descendant_head(tmp_path, capsys):
-    _repo, base, worktree = _implementation_worktree(tmp_path, capsys)
+def test_verify_claim_rejects_a_non_descendant_head(tmp_path, capsys, repo_template):
+    _repo, base, worktree = _implementation_worktree(tmp_path, capsys, repo_template)
     subprocess.run(["git", "-C", str(worktree), "checkout", "--orphan", "unrelated"], check=True, stdout=subprocess.DEVNULL)
     (worktree / "unrelated.txt").write_text("unrelated\n")
     subprocess.run(["git", "-C", str(worktree), "add", "unrelated.txt"], check=True)
@@ -620,8 +628,8 @@ def test_verify_claim_rejects_a_non_descendant_head(tmp_path, capsys):
     }
 
 
-def test_verify_claim_rejects_unchanged_base_and_dirty_residue(tmp_path, capsys):
-    _repo, base, worktree = _implementation_worktree(tmp_path, capsys)
+def test_verify_claim_rejects_unchanged_base_and_dirty_residue(tmp_path, capsys, repo_template):
+    _repo, base, worktree = _implementation_worktree(tmp_path, capsys, repo_template)
     (worktree / "tracked.txt").write_text("uncommitted\n")
 
     assert worktree_policy.main([
@@ -644,8 +652,8 @@ def test_verify_claim_rejects_unchanged_base_and_dirty_residue(tmp_path, capsys)
     assert "unchanged" in receipt["reason"]
 
 
-def test_verify_claim_rejects_dirty_residue_against_a_new_claim(tmp_path, capsys):
-    _repo, base, worktree = _implementation_worktree(tmp_path, capsys)
+def test_verify_claim_rejects_dirty_residue_against_a_new_claim(tmp_path, capsys, repo_template):
+    _repo, base, worktree = _implementation_worktree(tmp_path, capsys, repo_template)
     (worktree / "tracked.txt").write_text("implementation\n")
     subprocess.run(["git", "-C", str(worktree), "add", "tracked.txt"], check=True)
     subprocess.run(["git", "-C", str(worktree), "commit", "-qm", "implementation"], check=True)
@@ -663,8 +671,8 @@ def test_verify_claim_rejects_dirty_residue_against_a_new_claim(tmp_path, capsys
     assert "residue" in receipt["reason"]
 
 
-def test_verify_claim_accepts_new_descended_clean_head_with_receipt_evidence(tmp_path, capsys):
-    _repo, base, worktree = _implementation_worktree(tmp_path, capsys)
+def test_verify_claim_accepts_new_descended_clean_head_with_receipt_evidence(tmp_path, capsys, repo_template):
+    _repo, base, worktree = _implementation_worktree(tmp_path, capsys, repo_template)
     (worktree / "tracked.txt").write_text("implementation\n")
     subprocess.run(["git", "-C", str(worktree), "add", "tracked.txt"], check=True)
     subprocess.run(["git", "-C", str(worktree), "commit", "-qm", "implementation"], check=True)
@@ -686,8 +694,8 @@ def test_verify_claim_accepts_new_descended_clean_head_with_receipt_evidence(tmp
     assert receipt["claimed_commit"] == claimed
 
 
-def test_verify_claim_holds_an_unreleased_instruction_commit_until_the_chair_releases_it(tmp_path, capsys):
-    _repo, base, worktree = _implementation_worktree(tmp_path, capsys)
+def test_verify_claim_holds_an_unreleased_instruction_commit_until_the_chair_releases_it(tmp_path, capsys, repo_template):
+    _repo, base, worktree = _implementation_worktree(tmp_path, capsys, repo_template)
     (worktree / ".agents").mkdir()
     (worktree / ".agents/late.md").write_text("late instruction\n")
     subprocess.run(["git", "-C", str(worktree), "add", ".agents/late.md"], check=True)
@@ -705,8 +713,8 @@ def test_verify_claim_holds_an_unreleased_instruction_commit_until_the_chair_rel
     assert worktree_policy.verify_claim(worktree, worktree, claimed, base_revision=base)["status"] == "accepted"
 
 
-def test_verify_claim_allows_only_documented_generated_ignored_paths(tmp_path, capsys):
-    _repo, base, worktree = _implementation_worktree(tmp_path, capsys)
+def test_verify_claim_allows_only_documented_generated_ignored_paths(tmp_path, capsys, repo_template):
+    _repo, base, worktree = _implementation_worktree(tmp_path, capsys, repo_template)
     (worktree / "node_modules" / "generated.js").parent.mkdir()
     (worktree / "node_modules" / "generated.js").write_text("generated\n")
 
@@ -718,12 +726,21 @@ def test_verify_claim_allows_only_documented_generated_ignored_paths(tmp_path, c
     receipt = json.loads(capsys.readouterr().out)
     assert "unchanged" in receipt["reason"]
 
+    # Ignore node_modules as a real repository would, so its files are generated, not residue.
+    (worktree / ".gitignore").write_text("node_modules/\n")
     (worktree / "tracked.txt").write_text("implementation\n")
-    subprocess.run(["git", "-C", str(worktree), "add", "tracked.txt"], check=True)
+    subprocess.run(["git", "-C", str(worktree), "add", "tracked.txt", ".gitignore"], check=True)
     subprocess.run(["git", "-C", str(worktree), "commit", "-qm", "implementation"], check=True)
     claimed = subprocess.check_output(
         ["git", "-C", str(worktree), "rev-parse", "HEAD"], text=True,
     ).strip()
+    # Documented generated residue (ignored node_modules) must still be accepted.
+    assert worktree_policy.main([
+        "verify-claim", "--expected-worktree", str(worktree),
+        "--claimed-worktree", str(worktree), "--claimed-commit", claimed,
+        "--base-revision", base,
+    ]) == 0
+    capsys.readouterr()
     (worktree / ".env").write_text("unexpected\n")
 
     assert worktree_policy.main([
@@ -735,8 +752,8 @@ def test_verify_claim_allows_only_documented_generated_ignored_paths(tmp_path, c
     assert "residue" in receipt["reason"]
 
 
-def test_verify_claim_rejects_a_head_change_during_verification(tmp_path, capsys, monkeypatch):
-    _repo, base, worktree = _implementation_worktree(tmp_path, capsys)
+def test_verify_claim_rejects_a_head_change_during_verification(tmp_path, capsys, monkeypatch, repo_template):
+    _repo, base, worktree = _implementation_worktree(tmp_path, capsys, repo_template)
     (worktree / "tracked.txt").write_text("first\n")
     subprocess.run(["git", "-C", str(worktree), "add", "tracked.txt"], check=True)
     subprocess.run(["git", "-C", str(worktree), "commit", "-qm", "first"], check=True)
@@ -908,9 +925,9 @@ def _hold_lease(target: Path):
     return handle
 
 
-def test_remove_refuses_worktree_with_live_writer_lane(tmp_path, capsys):
+def test_remove_refuses_worktree_with_live_writer_lane(tmp_path, capsys, repo_template):
     repo = tmp_path / "project"
-    init_repo(repo)
+    init_repo(repo, repo_template)
     assert worktree_policy.main(["create", "busy", "--repo", str(repo), "--new-branch", "feature/busy"]) == 0
     target = repo / ".worktrees" / "busy"
     handle = _hold_lease(target)
@@ -924,9 +941,9 @@ def test_remove_refuses_worktree_with_live_writer_lane(tmp_path, capsys):
     assert not target.exists()
 
 
-def test_remove_force_overrides_live_writer_lane(tmp_path, capsys):
+def test_remove_force_overrides_live_writer_lane(tmp_path, capsys, repo_template):
     repo = tmp_path / "project"
-    init_repo(repo)
+    init_repo(repo, repo_template)
     assert worktree_policy.main(["create", "busy", "--repo", str(repo), "--new-branch", "feature/busy"]) == 0
     target = repo / ".worktrees" / "busy"
     handle = _hold_lease(target)
