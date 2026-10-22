@@ -47,8 +47,10 @@ receipt; link safe relative artifacts and SHA-256 digests.
    only for rubric items those cannot capture. Run each pairwise model
    judgement in both orders; it counts only when both agree, else it is a tie.
 6. Compare with frozen thresholds and applicable arms. A post-hoc change creates
-   a fresh run; it does not rewrite the completed evidence. A single run or a
-   gap under about 5 points never justifies a routing or preset change.
+   a fresh run; it does not rewrite the completed evidence. A single run, or a
+   gap below about 5 percentage points on a pass-rate-style metric or below the
+   plan's frozen minimum effect for any other metric, never justifies a routing
+   or preset change.
 7. Preserve bounded failures and route product defects to `implement`, unclear
    requirements to `scope`, and operational regressions to `diagnose`.
 
