@@ -54,11 +54,11 @@
     "junior": [
       {
         "model": "opencode/opencode/deepseek-v4.1-flash-free",
-        "weight": "high"
+        "weight": "sparing"
       },
       {
         "model": "opencode/opencode/glm-5.3-flash-free",
-        "weight": "high"
+        "weight": "sparing"
       },
       {
         "model": "claude/claude-haiku-5-5",
