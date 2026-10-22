@@ -22,6 +22,7 @@ _EVIDENCE = re.compile(
 )
 _ANSI = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 _TEST_HEADER = re.compile(r"^\s*_{3,}.*_{3,}\s*$")
+_TEST_SUMMARY = re.compile(r"^\s*={3,}.*short test summary info.*={3,}\s*$", re.IGNORECASE)
 
 
 def _quotes_are_ordered_source_lines(source: str, quotes: list[str]) -> bool:
@@ -67,8 +68,32 @@ def reduce_text(
     evidence: set[int] = set()
     for start in sorted(starts):
         evidence.add(start)
+        if _TEST_HEADER.match(clean_lines[start]):
+            index = start + 1
+            while index < len(lines) and not (
+                _TEST_HEADER.match(clean_lines[index])
+                or _TEST_SUMMARY.match(clean_lines[index])
+            ):
+                evidence.add(index)
+                index += 1
+            continue
         index = start + 1
-        while index < len(lines) and lines[index].strip() and index not in starts:
+        while index < len(lines) and index not in starts:
+            if not lines[index].strip():
+                next_index = index + 1
+                while next_index < len(lines) and not lines[next_index].strip():
+                    next_index += 1
+                if next_index == len(lines):
+                    break
+                continuation = clean_lines[next_index]
+                if not (
+                    continuation[:1].isspace()
+                    or continuation.lstrip().startswith(("E", ">", "-", "+", "❯"))
+                ):
+                    break
+                evidence.update(range(index, next_index))
+                index = next_index
+                continue
             evidence.add(index)
             index += 1
 

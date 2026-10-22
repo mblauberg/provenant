@@ -167,11 +167,42 @@ def test_typescript_error_keeps_indented_continuations():
 
 
 def test_vitest_expected_received_block_is_retained():
-    block = " FAIL  test/sample.test.ts > sample\n  AssertionError: values differ\n  Expected:\n    Object {\n      count: 2,\n    }\n  Received:\n    Object {\n      count: 1,\n    }\n"
+    block = """ FAIL  test/sample.test.ts > sample
+AssertionError: values differ
+
+- Expected
++ Received
+  Object {
+-   count: 2,
++   count: 1,
+  }
+
+ ❯ test/sample.test.ts:14:9
+"""
     source = ("routine output " + "x" * 90 + "\n") * 50 + block + ("routine tail " + "y" * 90 + "\n") * 30
 
     result = log_reducer.reduce_text(source, command="vitest", exit_status=1)
 
     assert result["reduced"] is True
-    for line in block.splitlines():
-        assert line in result["text"]
+    assert block.rstrip() in result["text"]
+
+
+def test_pytest_failure_keeps_source_context_through_section_end():
+    block = """________________ test_bad __________________
+
+    def test_bad():
+        value = 1
+
+        assert value == 2
+E       assert 1 == 2
+
+tests/test_sample.py:5: AssertionError
+"""
+    source = ("routine output " + "x" * 80 + "\n") * 60 + block + (
+        "routine tail " + "y" * 80 + "\n"
+    ) * 40
+
+    result = log_reducer.reduce_text(source, command="pytest", exit_status=1)
+
+    assert result["reduced"] is True
+    assert block.rstrip() in result["text"]
