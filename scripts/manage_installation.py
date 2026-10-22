@@ -69,12 +69,23 @@ def _catalogues(
     source: Path,
     custom_source: Path | None = None,
 ) -> tuple[dict[str, Path], dict[str, Path]]:
-    """Every directory a per-entry installation owns: skills and shared libraries.
+    """Every directory a per-entry installation owns: skills, library skills and
+    shared libraries.
 
     A whole-directory projection exposes both without a manifest, so the
     catalogue only drives per-entry layouts.
     """
     managed = {**_skills(source), **_shared(source)}
+    # The personal library is a `library/` directory beside `skills/`. Its
+    # skills install as managed entries, so one manifest owns and prunes both.
+    library = _skills(source.parent / "library", optional=True) if source.name == "skills" else {}
+    library_collisions = sorted(set(managed) & set(library))
+    if library_collisions:
+        raise InstallError(
+            "library skill name collides with a workflow skill: "
+            + ", ".join(library_collisions)
+        )
+    managed.update(library)
     custom = (
         _skills(custom_source, optional=True, validate_content=False)
         if custom_source is not None

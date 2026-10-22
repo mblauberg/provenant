@@ -110,6 +110,7 @@ jobs:
               - 'config/**'
               - 'docs/**'
               - 'evals/**'
+              - 'library/**'
               - 'runtime/**'
               - 'scripts/**'
               - 'skills/**'
