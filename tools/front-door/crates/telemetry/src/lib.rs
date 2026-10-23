@@ -8,6 +8,7 @@ pub mod delivery;
 mod differential;
 pub mod hosts;
 pub mod ingest;
+pub mod ingest_store;
 mod pending;
 pub use pending::{decode_json, Numeric};
 pub mod report;

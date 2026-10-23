@@ -726,3 +726,26 @@ fn stats_renderer_matches_python() {
         assert_eq!(expected, json!("TypeError"));
     }
 }
+
+#[test]
+fn document_millisecond_stamps_match_python_operation_order() {
+    let values = json!([
+        "2025-01-01T00:00:00.791625Z",
+        "2026-10-23T12:34:56.000499Z",
+        "2026-10-23T12:34:56.999501+01:00",
+        "1969-12-31T23:59:59.000001Z",
+        "2026-01-01",
+        "bad"
+    ]);
+    let source = format!("{LOAD}\ningest=load('telemetry_ingest')\nprint(json.dumps([ingest.stamp_ms(v) for v in input]))");
+    let Some(expected) = python(&source, &values) else {
+        return;
+    };
+    let actual: Vec<_> = values
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| ingest::stamp_ms(v.as_str().unwrap()))
+        .collect();
+    equal(&json!(actual), &expected);
+}
