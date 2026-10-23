@@ -520,7 +520,7 @@ PR; update surviving skill/hook/docs callers then, without forwarding adapters.
 | 5 | `scripts/lib/roots.py` | 33 |
 | 5 | `skills/_shared/roots.py` | 45 |
 | 5 | `scripts/host_identity.py` | 102 |
-| 1 | `scripts/lib/jsonc.py` | 68 |
+| 4 | `scripts/lib/jsonc.py` | 68 |
 | 1 | `tools/front-door/crates/core/scripts/generate_unicode.py` | 29 |
 | 5 | `skills/_shared/harness_profile.py` | 403 |
 | 5 | `scripts/harness_profile.py` | 212 |
@@ -639,3 +639,7 @@ Land these slices in dependency order:
 
 Each build PR needs native diff review, chair/cross-family review and exact-head
 CI. Lanes do not merge or arm auto-merge.
+
+Deleted inert code designated for reuse in the CLI, config, supervisor, confinement, providers and run designs is recoverable from `e0613438`; the owning lanes rehome it without the removed emulation.
+
+The JSONC reader retains token spans; a path-to-span map shared with the TOML editor is deferred to the config lane rather than added to this values-and-codecs slice.

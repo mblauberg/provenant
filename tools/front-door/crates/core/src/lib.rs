@@ -3,7 +3,7 @@
 
 mod bytes;
 mod ids;
-pub use bytes::hex;
+pub use bytes::{hex, unhex};
 pub use ids::*;
 mod time;
 pub use time::*;

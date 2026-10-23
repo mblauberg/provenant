@@ -5,19 +5,14 @@ use thiserror::Error;
 #[error("expected 32 lowercase hexadecimal ID digits")]
 pub struct IdError;
 
-pub(crate) fn decode_hex<const N: usize>(text: &str, lowercase: bool) -> Option<[u8; N]> {
+fn decode_hex<const N: usize>(text: &str) -> Option<[u8; N]> {
     if text.len() != N.checked_mul(2)? {
         return None;
     }
     let mut result = [0; N];
-    for (out, pair) in result.iter_mut().zip(text.as_bytes().chunks_exact(2)) {
-        let mut digits = pair.iter().copied().map(|byte| match byte {
-            b'0'..=b'9' => Some(byte - b'0'),
-            b'a'..=b'f' => Some(byte - b'a' + 10),
-            b'A'..=b'F' if !lowercase => Some(byte - b'A' + 10),
-            _ => None,
-        });
-        *out = digits.next()?? * 16 + digits.next()??;
+    let (pairs, _) = text.as_bytes().as_chunks::<2>();
+    for (out, pair) in result.iter_mut().zip(pairs) {
+        *out = crate::bytes::decode_hex_byte(pair)?;
     }
     Some(result)
 }
@@ -31,7 +26,7 @@ macro_rules! ids {
             pub const fn from_bytes(bytes: [u8; 16]) -> Self { Self(bytes) }
             pub const fn as_bytes(&self) -> &[u8; 16] { &self.0 }
             pub fn parse(text: &str) -> Result<Self, IdError> {
-                decode_hex(text, true).map(Self).ok_or(IdError)
+                decode_hex(text).map(Self).ok_or(IdError)
             }
         }
         impl std::fmt::Display for $name {
@@ -125,13 +120,13 @@ pub enum GitOid {
     Sha256([u8; 32]),
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
-#[error("Git object ID must contain exactly 40 or 64 hexadecimal digits")]
+#[error("Git object ID must contain exactly 40 or 64 lowercase hexadecimal digits")]
 pub struct GitOidError;
 impl GitOid {
     pub fn parse(text: &str) -> Result<Self, GitOidError> {
         match text.len() {
-            40 => decode_hex(text, false).map(Self::Sha1),
-            64 => decode_hex(text, false).map(Self::Sha256),
+            40 => decode_hex(text).map(Self::Sha1),
+            64 => decode_hex(text).map(Self::Sha256),
             _ => None,
         }
         .ok_or(GitOidError)
@@ -179,7 +174,7 @@ impl Digest {
     }
     pub fn parse(text: &str) -> Result<Self, DigestError> {
         text.strip_prefix("sha256:")
-            .and_then(|s| decode_hex(s, true))
+            .and_then(decode_hex)
             .map(Self)
             .ok_or(DigestError)
     }
@@ -211,9 +206,10 @@ impl From<Digest> for String {
 mod object_tests {
     use super::*;
     #[test]
-    fn full_git_ids_canonicalize_hex_without_algorithm_confusion() {
+    fn full_git_ids_require_lowercase_without_algorithm_confusion() {
         for length in [40, 64] {
-            let input = "Ab".repeat(length / 2);
+            let input = "ab".repeat(length / 2);
+            assert!(GitOid::parse(&input.to_ascii_uppercase()).is_err());
             let oid = GitOid::parse(&input).unwrap();
             assert_eq!(oid.to_string(), input.to_ascii_lowercase());
             let wire = serde_json::to_string(&oid).unwrap();

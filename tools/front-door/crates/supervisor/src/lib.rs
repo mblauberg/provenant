@@ -21,3 +21,5 @@ pub mod identity;
 pub mod pid;
 #[allow(unsafe_code)]
 pub mod sys;
+
+mod legacy_json;
