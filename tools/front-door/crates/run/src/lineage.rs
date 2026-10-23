@@ -1,0 +1,351 @@
+//! Attempt ancestry contract shared by run owners and provider boundaries.
+//!
+//! This unit defines the interface, not the journal/cancellation implementation.
+//! Process identities and lock custody must come from the supervisor's safe API.
+pub use crate::pending::{ChildReport, OwnerCustody, ParentAttempt};
+use std::io;
+use std::path::{Path, PathBuf};
+use thiserror::Error;
+
+pub const PARENT_ENV: &str = "PROVENANT_PARENT_ATTEMPT";
+pub const PARENT_TOKEN_ENV: &str = "PROVENANT_PARENT_RUN_TOKEN";
+pub const CUSTODY_ENV: &str = "PROVENANT_NESTED_CUSTODY_FD";
+
+/// Invalid inherited ancestry is ignored, as it is by the Python owner.
+pub fn parent_attempt(environment_value: Option<&str>) -> Option<ParentAttempt> {
+    environment_value.and_then(|s| serde_json::from_str(s).ok())
+}
+
+pub fn journal(parent: &ParentAttempt) -> PathBuf {
+    PathBuf::from(format!(
+        "dispatch/tasks/{}/attempt-{:03}/tmp/children",
+        parent.task_id(),
+        parent.attempt()
+    ))
+}
+
+#[derive(Debug, Error)]
+pub enum Error {
+    #[error("nested parent run token is missing or does not match")]
+    ParentToken,
+    #[error("nested parent attempt is not running or its identity changed")]
+    ParentAttempt,
+    #[error("nested run custody identity changed")]
+    CustodyIdentity,
+    #[error("batch run custody is not held")]
+    CustodyNotHeld,
+    #[error("unverified child owner")]
+    ChildOwner,
+    #[error("unverified child parent")]
+    ChildParent,
+    #[error("invalid child run directory")]
+    ChildDirectory,
+    #[error("run lineage record must be an object")]
+    Record,
+    #[error("run lineage JSON is invalid: {0}")]
+    Json(#[from] serde_json::Error),
+    #[error("{path}: {source}")]
+    Io {
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+}
+
+/// Check both proofs before a caller writes either side of the ancestry link.
+/// The journal implementation must repeat this check while holding journal custody.
+pub fn check_parent(
+    parent: &ParentAttempt,
+    inherited_token: Option<&str>,
+    owner: &serde_json::Value,
+    attempt: &serde_json::Value,
+) -> Result<(), Error> {
+    if inherited_token.filter(|s| !s.is_empty())
+        != owner.get("run_token").and_then(serde_json::Value::as_str)
+        || inherited_token.is_none_or(str::is_empty)
+    {
+        return Err(Error::ParentToken);
+    }
+    if attempt.get("run_id").and_then(serde_json::Value::as_str) != Some(parent.run_id())
+        || attempt.get("task_id").and_then(serde_json::Value::as_str) != Some(parent.task_id())
+        || attempt.get("attempt").and_then(serde_json::Value::as_u64) != Some(parent.attempt())
+        || attempt.get("state").and_then(serde_json::Value::as_str) != Some("running")
+    {
+        return Err(Error::ParentAttempt);
+    }
+    Ok(())
+}
+
+/// All file operations are contained regular-file operations, limited to 1 MiB.
+/// Local children must be canonical direct children of `.agent-run/runs`, with
+/// matching owner token and receipt ancestry, before completion evidence is read.
+/// Remote registration writes only the local receipt; the source host owns its journal.
+/// No provider-written PID, token or journal grants cancellation authority.
+pub trait Lineage {
+    type Custody: OwnerCustody;
+
+    /// Validate inherited lock identity before re-exec or borrowed batch custody.
+    fn ensure_nested_owner(
+        &mut self,
+        run_dir: &Path,
+        kind: RunKind,
+        batch_child: bool,
+    ) -> Result<(), Error>;
+
+    fn acquire_owner_custody(&mut self, run_dir: &Path) -> Result<Self::Custody, Error>;
+    fn record_owner(
+        &mut self,
+        custody: &Self::Custody,
+        run_dir: &Path,
+        kind: RunKind,
+    ) -> Result<(), Error>;
+    fn register_run(
+        &mut self,
+        run_dir: &Path,
+        run_id: &str,
+        parent: &ParentAttempt,
+        remote: bool,
+    ) -> Result<(), Error>;
+    fn register_external(
+        &mut self,
+        parent: &ParentAttempt,
+        children: &[ChildReport],
+    ) -> Result<(), Error>;
+    fn refresh_external(
+        &mut self,
+        parent: &ParentAttempt,
+        observed: &[ChildReport],
+    ) -> Result<(), Error>;
+    fn children(&mut self, parent: &ParentAttempt) -> Result<Vec<ChildReport>, Error>;
+    /// Request cancellation through supervisor-held custody; return retained evidence.
+    /// The implementing owner handles explicit deadlines, shared hosts and ancestry.
+    fn cancel_children(
+        &mut self,
+        custody: &Self::Custody,
+        parent: &ParentAttempt,
+        timeout: std::time::Duration,
+    ) -> Result<Vec<ChildReport>, Error>;
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RunKind {
+    Dispatch,
+    Batch,
+}
+
+/// Preserve the error aggregation used by terminal attempt publication.
+pub fn child_errors(children: &[ChildReport]) -> Vec<String> {
+    children
+        .iter()
+        .filter_map(|child| {
+            let status = child
+                .fields
+                .get("status")
+                .and_then(serde_json::Value::as_str);
+            let reaped = child
+                .fields
+                .get("reaped")
+                .and_then(serde_json::Value::as_array);
+            let has_reaped = reaped.is_some_and(|v| !v.is_empty());
+            if matches!(status, None | Some("running" | "ok" | "partial")) && !has_reaped {
+                return None;
+            }
+            let task = child
+                .fields
+                .get("task_id")
+                .map(python_string)
+                .unwrap_or_else(|| "?".into());
+            let detail = if let Some(reaped) = reaped.filter(|v| !v.is_empty()) {
+                format!(
+                    "{}; reaped {} leftover process(es)",
+                    status.unwrap_or("None"),
+                    reaped.len()
+                )
+            } else {
+                child
+                    .fields
+                    .get("error")
+                    .filter(|v| !v.is_null() && v.as_str() != Some(""))
+                    .map(python_string)
+                    .unwrap_or_else(|| status.unwrap_or("None").into())
+            };
+            Some(format!("child run {} task {task}: {detail}", child.run_id))
+        })
+        .collect()
+}
+
+fn python_string(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::Null => "None".into(),
+        serde_json::Value::Bool(true) => "True".into(),
+        serde_json::Value::Bool(false) => "False".into(),
+        serde_json::Value::String(s) => s.clone(),
+        other => other.to_string(),
+    }
+}
+
+pub fn annotate_child_errors(error: Option<&str>, children: &[ChildReport]) -> Option<String> {
+    let original = error.unwrap_or("");
+    let mut messages = Vec::new();
+    if !original.is_empty() {
+        messages.push(original.to_owned());
+    }
+    messages.extend(
+        child_errors(children)
+            .into_iter()
+            .filter(|message| !original.contains(message)),
+    );
+    if messages.is_empty() {
+        error.map(str::to_owned)
+    } else {
+        Some(messages.join("; "))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::{json, Value};
+    fn value() -> Value {
+        json!({"run_id":"mcp-parent","task_id":"writer","attempt":1,"run_dir":"/runs/parent"})
+    }
+    fn parent() -> ParentAttempt {
+        serde_json::from_value(value()).unwrap()
+    }
+
+    #[test]
+    fn parent_requires_explicit_well_formed_identity() {
+        assert!(parent_attempt(None).is_none());
+        for text in ["null", "[]", "true", "{", "{}"] {
+            assert!(parent_attempt(Some(text)).is_none());
+        }
+        for (key, bad) in [
+            ("run_id", json!("")),
+            ("task_id", json!("../escape")),
+            ("task_id", json!("é")),
+            ("task_id", json!("a".repeat(65))),
+            ("attempt", json!(true)),
+            ("attempt", json!(0)),
+            ("attempt", json!(-1)),
+            ("attempt", json!(1.0)),
+            ("run_dir", json!("relative")),
+        ] {
+            let mut v = value();
+            v[key] = bad;
+            assert!(parent_attempt(Some(&v.to_string())).is_none(), "{v}");
+        }
+        let mut v = value();
+        v["extra"] = json!("ignored");
+        assert_eq!(
+            serde_json::to_value(parent_attempt(Some(&v.to_string())).unwrap()).unwrap(),
+            value()
+        );
+    }
+    #[test]
+    fn journals_use_only_private_attempt_tmp_with_unbounded_width() {
+        assert_eq!(
+            journal(&parent()),
+            Path::new("dispatch/tasks/writer/attempt-001/tmp/children")
+        );
+        let mut v = value();
+        v["attempt"] = json!(1000);
+        assert_eq!(
+            journal(&serde_json::from_value(v).unwrap()),
+            Path::new("dispatch/tasks/writer/attempt-1000/tmp/children")
+        );
+    }
+    #[test]
+    fn registration_requires_token_and_running_parent_before_writing() {
+        let parent = parent();
+        let owner = json!({"run_token":"token"});
+        let mut row = value();
+        row["state"] = json!("running");
+        for token in [None, Some(""), Some("other")] {
+            assert!(matches!(
+                check_parent(&parent, token, &owner, &row),
+                Err(Error::ParentToken)
+            ));
+        }
+        assert!(check_parent(&parent, Some("token"), &owner, &row).is_ok());
+        for (field, bad) in [
+            ("state", json!("terminal")),
+            ("attempt", json!(2)),
+            ("run_id", json!("other")),
+            ("task_id", json!("other")),
+        ] {
+            let mut wrong = row.clone();
+            wrong[field] = bad;
+            assert!(matches!(
+                check_parent(&parent, Some("token"), &owner, &wrong),
+                Err(Error::ParentAttempt)
+            ));
+        }
+    }
+    #[test]
+    fn failed_and_reaped_children_annotate_without_duplicate_errors() {
+        let rows: Vec<ChildReport> = serde_json::from_value(json!([
+            {"run_id":"ok","status":"ok"},
+            {"run_id":"failed","task_id":"writer","status":"failed","error":"boom"},
+            {"run_id":"reaped","status":"ok","reaped":[{"pid":3}]},
+            {"run_id":"partial","status":"partial"}
+        ]))
+        .unwrap();
+        let errors = child_errors(&rows);
+        assert_eq!(
+            errors,
+            [
+                "child run failed task writer: boom",
+                "child run reaped task ?: ok; reaped 1 leftover process(es)"
+            ]
+        );
+        let annotated = annotate_child_errors(Some("original"), &rows).unwrap();
+        assert_eq!(
+            annotate_child_errors(Some(&annotated), &rows),
+            Some(annotated)
+        );
+        assert_eq!(annotate_child_errors(None, &[]), None);
+    }
+    #[test]
+    fn differential_parent_parsing() {
+        let script_root =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../../skills/orchestrate/scripts");
+        let fixtures = json!([value(), {"run_id":"r","task_id":"bad/path","attempt":1,"run_dir":"/r"}, {"run_id":"r","task_id":"t","attempt":true,"run_dir":"/r"}]);
+        let result = std::process::Command::new("python3")
+            .args([
+                "-c",
+                r#"
+import json,os,sys
+sys.path.insert(0,sys.argv[1]);import run_lineage as m
+rows=[]
+for v in json.loads(sys.argv[2]):
+ os.environ[m.PARENT_ENV]=json.dumps(v);rows.append(m.parent_attempt())
+print(json.dumps(rows))
+"#,
+            ])
+            .arg(script_root)
+            .arg(fixtures.to_string())
+            .output();
+        let result = match result {
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                eprintln!("SKIP: python3 absent");
+                return;
+            }
+            v => v.unwrap(),
+        };
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        let actual: Vec<_> = fixtures
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| parent_attempt(Some(&v.to_string())))
+            .collect();
+        assert_eq!(
+            serde_json::to_value(actual).unwrap(),
+            serde_json::from_slice::<Value>(&result.stdout).unwrap()
+        );
+    }
+}

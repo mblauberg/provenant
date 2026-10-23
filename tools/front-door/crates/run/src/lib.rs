@@ -2,4 +2,5 @@
 #![forbid(unsafe_code)]
 
 pub mod lease;
+pub mod lineage;
 mod pending;

@@ -104,3 +104,82 @@ pub struct Lease {
     pub expires_at: String,
     pub handoff_evidence: String,
 }
+
+// port: belongs in provenant-records
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "serde_json::Value")]
+pub struct ParentAttempt {
+    run_id: String,
+    task_id: String,
+    attempt: u64,
+    run_dir: std::path::PathBuf,
+}
+
+impl TryFrom<serde_json::Value> for ParentAttempt {
+    type Error = &'static str;
+    fn try_from(value: serde_json::Value) -> Result<Self, Self::Error> {
+        let run_id = value
+            .get("run_id")
+            .and_then(serde_json::Value::as_str)
+            .filter(|s| !s.is_empty())
+            .ok_or("invalid parent run id")?;
+        let task_id = value
+            .get("task_id")
+            .and_then(serde_json::Value::as_str)
+            .filter(|s| {
+                let bytes = s.as_bytes();
+                !bytes.is_empty()
+                    && bytes.len() <= 64
+                    && bytes[0].is_ascii_alphanumeric()
+                    && bytes
+                        .iter()
+                        .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(b))
+            })
+            .ok_or("invalid parent task id")?;
+        let attempt = value
+            .get("attempt")
+            .and_then(serde_json::Value::as_u64)
+            .filter(|n| *n > 0)
+            .ok_or("invalid parent attempt")?;
+        let run_dir = value
+            .get("run_dir")
+            .and_then(serde_json::Value::as_str)
+            .map(std::path::PathBuf::from)
+            .filter(|p| p.is_absolute())
+            .ok_or("invalid parent run directory")?;
+        Ok(Self {
+            run_id: run_id.into(),
+            task_id: task_id.into(),
+            attempt,
+            run_dir,
+        })
+    }
+}
+
+impl ParentAttempt {
+    pub fn run_id(&self) -> &str {
+        &self.run_id
+    }
+    pub fn task_id(&self) -> &str {
+        &self.task_id
+    }
+    pub fn attempt(&self) -> u64 {
+        self.attempt
+    }
+    pub fn run_dir(&self) -> &Path {
+        &self.run_dir
+    }
+}
+
+// port: belongs in provenant-records
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ChildReport {
+    pub run_id: String,
+    #[serde(flatten)]
+    pub fields: std::collections::BTreeMap<String, serde_json::Value>,
+}
+
+// port: belongs in provenant-supervisor
+/// A custody capability owns its lock and cannot be constructed from a recorded PID.
+/// Implementations must retain it through publication and terminal cleanup.
+pub trait OwnerCustody: std::fmt::Debug {}
