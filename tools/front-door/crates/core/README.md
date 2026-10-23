@@ -19,7 +19,8 @@ selects these implementations yet. Rulebook: `PORTING.md` version 4.
 | `from_timestamp(f64)` | The single float-second conversion: split integral/fractional seconds, round half-even to microseconds, then enforce Python years 1..9999. |
 
 `py::parse_time` implements telemetry's naive-as-UTC parsing policy;
-`PythonTimestamp::iso_utc` formats the shared UTC `Z` wire spelling.
+`PythonTimestamp::iso_utc` formats the shared UTC `Z` wire spelling;
+`py::iso` adapts Jiff timestamps through exact integer microseconds.
 `PythonTimestamp::as_microsecond()` is exact across Python's entire datetime
 range. `to_jiff()` is a checked adapter: Jiff reserves the last twelve hours
 of year 9999, so it cannot represent every Python timestamp. ISO grammar is

@@ -9,7 +9,7 @@ pub use numbers::{
 };
 pub mod unicode;
 pub use datetime::{
-    from_timestamp, parse_time, python_fromisoformat, python_fromisoformat_with,
+    from_timestamp, iso, parse_time, python_fromisoformat, python_fromisoformat_with,
     python_iso_timestamp, DateTimeError, IsoformatSemantics, PythonDateTime, PythonTimestamp,
 };
 pub use unicode::{

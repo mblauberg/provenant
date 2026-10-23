@@ -430,3 +430,54 @@ pub fn parse_time(value: &str) -> Result<PythonTimestamp, DateTimeError> {
     parsed.offset_microseconds.get_or_insert(0);
     parsed.timestamp()
 }
+
+#[cfg(test)]
+mod jiff_iso_tests {
+    use super::*;
+    #[test]
+    fn jiff_iso_adapter_preserves_negative_submicrosecond_floor_and_python_range() {
+        let nanos = [
+            -62_135_596_800_000_000_001_i128,
+            -62_135_596_800_000_000_000,
+            -1001,
+            -1000,
+            -1,
+            0,
+            999,
+            1000,
+            1_700_000_000_123_456_789,
+        ];
+        let inputs: Vec<_> = nanos.iter().map(ToString::to_string).collect();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("input.json");
+        std::fs::write(&path, serde_json::to_vec(&inputs).unwrap()).unwrap();
+        let Some(expected) = crate::test_support::python(
+            "scripts/telemetry.py",
+            r#"
+from datetime import datetime, timedelta, UTC
+out=[]
+for s in json.loads(pathlib.Path(sys.argv[3]).read_text()):
+    try: out.append(m.iso(datetime(1970,1,1,tzinfo=UTC)+timedelta(microseconds=int(s)//1000)))
+    except OverflowError: out.append(None)
+print(json.dumps(out))
+"#,
+            &[&path],
+        ) else {
+            return;
+        };
+        let actual: Vec<_> = nanos
+            .iter()
+            .map(|&n| iso(Timestamp::from_nanosecond(n).unwrap()).ok())
+            .collect();
+        assert_eq!(serde_json::json!(actual), expected);
+    }
+}
+
+/// Exact adapter for telemetry's Jiff timestamps. Python clocks have microsecond
+/// precision; discard lower nanoseconds within the civil second, including
+/// before the epoch. This preserves the source's datetime ISO spelling.
+pub fn iso(value: Timestamp) -> Result<String, DateTimeError> {
+    let micros = i64::try_from(value.as_nanosecond().div_euclid(1000))
+        .map_err(|_| DateTimeError::TimeRange)?;
+    timestamp_micros(micros)?.iso_utc()
+}

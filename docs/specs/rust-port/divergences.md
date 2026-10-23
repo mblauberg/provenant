@@ -1727,6 +1727,11 @@ are not yet proved exact. Their IDs are removed from the completion ledger.
   week forms, offset conversion, truncated fractions, both year bounds and
   malformed input. Float-second conversion continues to use `py::from_timestamp`.
 - Checks on the merged candidate: fmt and clippy pass; the required-mode core
-  suite has 67 passing tests and four explicitly ignored pre-cut-over parity
+  suite has 68 passing tests and four explicitly ignored pre-cut-over parity
   gaps. Forced exit-77 fixtures prove that both oracle routes emit `skip:` and
   pass optional mode but fail required mode. No new dependency or codec copy.
+
+- The `py::iso(jiff::Timestamp)` adoption adapter keeps this path entirely in
+  integer nanoseconds/microseconds, including floor-within-second truncation
+  before the epoch. Its source differential also refuses datetimes before
+  Python year 1 without emitting a misleading wire value.
