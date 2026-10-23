@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import inspect
 import json
+import os
 import shlex
 import stat
 from collections.abc import Mapping, Sequence
@@ -19,7 +20,10 @@ def write_executable(path: Path, body: str) -> Path:
     text = inspect.cleandoc(body) + "\n"
     if text.lstrip().startswith("#!"):
         assert text.startswith("#!"), "executable fixture shebang must start at byte zero"
-    path.write_text(text, encoding="utf-8")
+    with path.open("w", encoding="utf-8") as executable:
+        executable.write(text)
+        executable.flush()
+        os.fsync(executable.fileno())
     path.chmod(path.stat().st_mode | stat.S_IXUSR)
     return path
 
