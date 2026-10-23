@@ -13,6 +13,7 @@ pub mod manifest;
 mod ordered;
 pub use ordered::OrderedMap;
 mod pending;
+pub mod profile_command;
 pub mod profiles;
 pub mod workflows;
 
