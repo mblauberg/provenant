@@ -549,12 +549,12 @@ name = "provenant-telemetry"
 version = "0.1.0"
 dependencies = [
  "jiff",
- "regex",
+ "provenant-core",
+ "provenant-records",
  "serde",
  "serde_json",
- "sha2",
- "tempfile",
  "thiserror",
+ "toml_edit",
 ]
 
 [[package]]

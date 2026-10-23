@@ -4,7 +4,7 @@
 Accounts come from configuration; quota sources come from one module per provider under
 `quota_providers/`. Nothing here knows a plan, a limit or a window length: every window,
 limit and reset time comes from the provider's own response. Credentials are read
-in-process only to call that provider's endpoint, and never reach the cache, the ledger,
+in-process only to call that provider's endpoint, and never reach the cache,
 logs or stdout. Pace and window handling are adapted from token-meter (MIT, Galileo Agent
 Labs); see THIRD_PARTY_NOTICES.md.
 """
@@ -72,7 +72,6 @@ MAX_RESPONSE_BYTES = 2 * 1024 * 1024
 PACE_TOLERANCE = 4      # percentage points either side of even use
 EARLY_SHARE = 0.03      # too little of a window has passed to judge its pace
 CLOCK_SKEW_SECONDS = 300
-RESET_NOISE = 5         # a smaller drop is reporting noise, not a granted reset
 NEAR_EXHAUSTED = 95
 WAIT_HOURS = 6
 # How routing treats an account whose allowance is spent but whose credits keep it usable (`quota.credits_policy`).
@@ -172,12 +171,8 @@ class _Io:
         return http_json(url, headers)
 
     @staticmethod
-    def ledger_windows(adapter, now, account=None):
-        return ledger_windows(adapter, now, account)
-
-    @staticmethod
     def readonly(path):
-        return _telemetry().readonly(path)
+        return sqlite3.connect(path.resolve().as_uri() + '?mode=ro', uri=True)
 
     @staticmethod
     def memo(name, account, seconds, produce):
@@ -185,7 +180,6 @@ class _Io:
 
 
 IO = _Io()
-_TELEMETRY = None
 _LOADED = {}
 
 
@@ -214,16 +208,6 @@ def duration(seconds):
 
 # Configuration, registry and accounts --------------------------------------------------------
 
-def _telemetry():
-    global _TELEMETRY
-    if _TELEMETRY is None:
-        spec = importlib.util.spec_from_file_location('provenant_telemetry_for_quota', HERE / 'telemetry.py')
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
-        _TELEMETRY = module
-    return _TELEMETRY
-
-
 def telemetry_host():
     return identity.host_id()
 
@@ -238,7 +222,7 @@ def same_host(value):
 
 
 def state_root():
-    return _telemetry().state_root()
+    return Path(os.environ.get('AGENT_FABRIC_STATE_ROOT', str(Path.home() / '.local/state/agent-harness/fabric')))
 
 
 config = identity.config
@@ -496,30 +480,6 @@ def memo(name, account, seconds, produce):
     return value
 
 
-def ledger_windows(adapter, now, account=None):
-    """The latest rate-limit observation per window that this host's ledger holds for one account."""
-    try:
-        telemetry = _telemetry()
-        with telemetry.connect(readonly=True) as db:
-            # Connecting loads the ids this ledger was written under, so a renamed host still reads its rows.
-            hosts = sorted(set(local_hosts()) | telemetry.host_aliases())
-            rows = db.execute('SELECT window,used_percent,window_minutes,reset_at,timestamp FROM observations '
-                              f"WHERE adapter=? AND host IN ({','.join('?' * len(hosts))}) AND account IS ? "
-                              'AND used_percent IS NOT NULL ORDER BY timestamp DESC LIMIT 500',
-                              (adapter, *hosts, account)).fetchall()
-    except (OSError, ValueError, sqlite3.Error):
-        rows = []
-    latest = {}
-    for row in rows:
-        latest.setdefault(row['window'], row)
-    windows = [{'name': name, 'raw_kind': name, 'used_percent': row['used_percent'],
-                'window_minutes': row['window_minutes'], 'reset_at': row['reset_at']}
-               for name, row in sorted(latest.items())]
-    observed = max((row['timestamp'] for row in latest.values()), default=None)
-    return {'windows': windows, 'unreported': [], 'observed_at': iso(parse_time(observed))}
-
-
-# Snapshots, cache and reset events ----------------------------------------------------------
 
 def normalise_window(raw):
     name = str((raw or {}).get('name') or '').strip()
@@ -774,78 +734,6 @@ def blank(account, status, error=None, now=None):
             'status': status, 'error': error, 'windows': [], 'unreported': [], 'credits': None}
 
 
-def classify_reset(previous, current, previous_observed, observed):
-    """Name what happened between two readings of one window, from the readings alone."""
-    before, after = parse_time(previous.get('reset_at')), parse_time(current.get('reset_at'))
-    drop = (number(previous.get('used_percent')) or 0) - (number(current.get('used_percent')) or 0)
-    observed = parse_time(observed) if isinstance(observed, str) else observed
-    minutes = number(current.get('window_minutes')) or number(previous.get('window_minutes')) or 0
-    start = after - timedelta(minutes=minutes) if after and minutes else None
-    kind = None
-    if after is None:
-        kind = 'not_started' if before is not None or drop > RESET_NOISE else None
-    elif before is None:
-        kind = 'window_started'
-    elif start and after > before and abs((start - before).total_seconds()) <= CLOCK_SKEW_SECONDS:
-        kind = 'natural'
-    else:
-        moved = abs((after - before).total_seconds()) > CLOCK_SKEW_SECONDS
-        if drop > RESET_NOISE:
-            restarted = start and observed and abs((start - observed).total_seconds()) <= CLOCK_SKEW_SECONDS
-            kind = 'granted_window_restarted' if moved and after > before and restarted else \
-                'window_moved' if moved else 'granted_date_kept'
-        elif moved:
-            kind = 'window_moved'
-    if kind is None:
-        return None
-    return {'kind': kind, 'previous_used_percent': previous.get('used_percent'),
-            'used_percent': current.get('used_percent'), 'previous_reset_at': previous.get('reset_at'),
-            'reset_at': current.get('reset_at')}
-
-
-def record_events(previous, current):
-    if not previous or not previous.get('windows'):
-        return []
-    before = {row['name']: row for row in previous['windows']}
-    events = []
-    for row in current['windows']:
-        if row['name'] in before:
-            event = classify_reset(before[row['name']], row, previous.get('observed_at'), current['observed_at'])
-            if event:
-                events.append({**event, 'window': row['name']})
-    if not events:
-        return events
-    try:
-        with _telemetry().connect() as db:
-            db.executemany(
-                'INSERT OR IGNORE INTO quota_events(provider,account,host,window,kind,observed_at,'
-                'previous_observed_at,previous_used_percent,used_percent,previous_reset_at,reset_at) '
-                'VALUES (?,?,?,?,?,?,?,?,?,?,?)',
-                [(current['provider'], current['account'], current['host'], event['window'], event['kind'],
-                  current['observed_at'], previous.get('observed_at'), event['previous_used_percent'],
-                  event['used_percent'], event['previous_reset_at'], event['reset_at']) for event in events])
-    except (OSError, ValueError, sqlite3.Error):
-        pass  # The ledger is advisory here; a quota reading never fails on it.
-    return events
-
-
-def record_series(value, result):
-    """Append this fetch to the ledger's quota time series; cached and failed readings add nothing."""
-    banked = value['credits'] or {}
-    try:
-        telemetry = _telemetry()
-        with telemetry.connect() as db:
-            telemetry.put_quota_series(
-                db, value['provider'], value['account'], value['host'], value['observed_at'], value['windows'],
-                source=value['source'], plan=value['plan'],
-                plan_detected=str(result['plan']) if result.get('plan') else None,
-                plan_tier=str(result['plan_tier']) if result.get('plan_tier') else None,
-                credit_balance=telemetry.amount(result.get('credit_balance')),
-                reset_credits=banked.get('reset_credits') if type(banked.get('reset_credits')) is int else None)
-    except (OSError, ValueError, sqlite3.Error):
-        pass  # The ledger is advisory here; a quota reading never fails on it.
-
-
 def fetch(account, now):
     module = provider(account.provider)
     if module is None:
@@ -945,8 +833,6 @@ def _refresh(account, now=None, force=False, trigger='timer', power='ac', ignore
                  **{key: extra for key, extra in extras.items() if extra},
                  **({'fingerprint': result['fingerprint']} if isinstance(result.get('fingerprint'), str) else {})}
         value['fetch'] = fetch_state(account, previous, now, trigger, monotonic() - started)
-        record_events(previous, value)
-        record_series(value, result)
         save_snapshot(value, account.identity_dir)
         trace(value, trigger, value['status'], None, value['fetch']['last_duration_ms'], None, None)
         return {**value, 'schedule': scheduled(account, value, now, trigger, power)[0]}
@@ -1213,7 +1099,7 @@ def credit_advice(rows, banked, now):
         return {**advice, 'action': 'wait', 'reason': f'the natural reset is in {duration(left)}'}
     return {**advice, 'action': 'redeem',
             'reason': 'the natural reset is ' + (f'{duration(left)} away' if left else 'unreported') +
-                      '; prefer a reset that keeps the reset date (see quota_events)'}
+                      '; prefer a reset that keeps the reset date'}
 
 
 def freshest(values):
@@ -1476,7 +1362,7 @@ def schedule_main(argv):
     if args.json:
         print(json.dumps(rows, indent=2))
         return 0
-    lines = _telemetry().report_owner().table(('provider', 'account', 'next due', 'reason', 'ttl', 'failures', 'error'), [
+    lines = quota_display.table(('provider', 'account', 'next due', 'reason', 'ttl', 'failures', 'error'), [
         (row['provider'], row['account'], (block.get('next_due_at') or '-')[:19].replace('T', ' '),
          block.get('reason') or '-', duration(block.get('ttl_seconds')), str(block.get('failures') or 0),
          block.get('error_kind') or '-') for row in rows for block in [row['schedule'] or {}]])
@@ -1497,7 +1383,7 @@ def trace_main(argv):
         print(json.dumps(value, indent=2))
         return 0
     lines = [f"Quota fetches since {value['since']}: {value['fetches']} ({value['failures']} failed)"]
-    lines += _telemetry().report_owner().table(('provider', 'account', 'fetches', 'failures', 'p50', 'max', 'last'), [
+    lines += quota_display.table(('provider', 'account', 'fetches', 'failures', 'p50', 'max', 'last'), [
         (row['provider'], row['account'], str(row['fetches']),
          ', '.join(f'{kind} {count}' for kind, count in sorted(row['failures'].items())) or '-',
          f"{row['p50_ms']}ms" if row['p50_ms'] is not None else '-',

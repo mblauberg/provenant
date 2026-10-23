@@ -24,6 +24,9 @@ warning with `configure-claude-hooks.py --settings <path> --routing-hook
 scripts/routing_context_hook.py`; the SessionStart hook also runs after
 compaction. The PreToolUse warning never denies a tool call.
 
+Retired: `provenant telemetry ingest` and its ledger workflow below;
+[run integration step 2](../specs/rust-port/design/telemetry.md#tests-and-build-sequence) owns caller removal.
+
 To compare classifiers, leave rules and model in `shadow`, then inspect the
 `classified_by`, `classifier_confidence` and `shadow_answers` columns in the
 local `usage` ledger after `provenant telemetry ingest`. Compare agreement and

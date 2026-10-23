@@ -126,7 +126,7 @@ Bound the reduction to 100,000 selected attempts, 10,000 groups and 1 MiB of
 retained group-key bytes; enforce limits before insertion. Retain fixed
 numeric accumulators, not per-token/event vectors. Return `TooLarge` rather
 than partial totals on a bound. Other typed errors are `InvalidFact`,
-`InvalidPrice` and `Overflow`; CLI maps invalid facts/prices to 2 and
+`InvalidWindow`, `InvalidPrice` and `Overflow`; CLI maps invalid facts/windows/prices to 2 and
 overflow/size refusals to 1. Run read errors retain their own version/I/O
 classification. No successful totals accompany a failed reduction.
 
@@ -144,8 +144,8 @@ There is one user-owned `config.toml`; no telemetry profile or overlay.
 
 The price asset has `schema_version`, `reviewed_at` and `[[models]]` entries
 keyed by exact provider/model. Entries carry source references, billing kind
-(API, subscription or explicitly free) and optional `u64` rates for each usage
-category in **USD microdollars per million tokens**. Omitted rates mean unknown
+(API, subscription or explicitly free) and optional `u64` rates for uncached input, cache read, cache write and
+output excluding reasoning; reasoning uses the output rate in **USD microdollars per million tokens**. Omitted rates mean unknown
 (TOML has no null); zero requires an explicitly verified zero rate. Reject
 duplicate keys, unknown versions and invalid units. No runtime fetch, model
 regex or inferred aliases. Group by the exact resolved provider/model in
@@ -177,7 +177,8 @@ numerators, not rounded group values.
 
 A complete estimate is null if any included attempt lacks required usage or a
 positive-count rate. Report the known-cost lower bound and missing-cost count
-separately. Zero tokens need no rate; an unpriced subscription is not free.
+separately. Verified-free routes cost exactly zero even with missing usage;
+missing categories still count in coverage. Zero tokens need no rate; an unpriced subscription is not free.
 Cost is an API-equivalent estimate, not a bill or cost per accepted delivery.
 Weekly quota history is not reconstructed from costs or retained old rows.
 
@@ -241,7 +242,10 @@ where useful; **no insta** dependency.
 
 1. **Telemetry crate and deletions only.** Build the pure reducer, shared
    `AttemptFact` in records and telemetry-owned TOML price schema; replace inert
-   telemetry Rust and delete telemetry Python, tests and schemas below. No clap
+   telemetry Rust and delete telemetry Python, tests and schemas below. Retain
+   telemetry/stats/retro golden cases until CLI step 3 removes the verbs.
+   State slice 4 (harness cut-over) deletes the OTel installer helper, Swift
+   collector, plist template and collector tests together with installer flags. No clap
    subtree lands here: CLI owns that later. Removing `scripts/telemetry.py` breaks
    `scripts/provider_quota.py:217–220`'s dynamic import and
    `scripts/utility.py:18`'s direct import: the **old quota path goes red**
@@ -266,12 +270,12 @@ modules. Count each deletion once, including workflow's reducer hand-off.
 | Owner | Delete or replace |
 |---|---|
 | Telemetry | `scripts/telemetry{,_ingest,_costs,_report,_changes,_delivery,_hosts}.py`, `scripts/provenant-telemetry`, `tests/test_telemetry.py`; all inert Rust under `tools/front-door/crates/telemetry/src/`, including `pending`, Unicode generator/tables and differential harness. |
-| Telemetry data | Four `schemas/telemetry-{usage,event,quota-series,quota-event}-row.schema.json` files, telemetry golden cases, and JSON price asset with its TOML replacement. Repair `schemas/README.md`; shared record-schema tests retire with their subjects. |
-| Telemetry/state | `scripts/install-otel-collector`, Swift collector and plist template under `tools/otlp-collector/`, `tests/test_otlp_collector.py`; state removes OTel flags/wiring from `scripts/install-harness` and counts the OTel slices of `tests/test_install_harness.py`. Retained legacy install supplies the cut-over uninstall helper. |
+| Telemetry data | Four `schemas/telemetry-{usage,event,quota-series,quota-event}-row.schema.json` files and JSON price asset with its TOML replacement. Repair `schemas/README.md`; shared record-schema tests retire with their subjects. |
+| State slice 4 (harness cut-over) | `scripts/install-otel-collector`, Swift collector and plist template under `tools/otlp-collector/`, `tests/test_otlp_collector.py`; state removes OTel flags/wiring from `scripts/install-harness` and counts the OTel slices of `tests/test_install_harness.py`. Retained legacy install supplies the cut-over uninstall helper. |
 | Providers/execution-route | Replace `scripts/provider_identity.py`; update `scripts/quota_display.py:9`'s window-label configuration and telemetry renderer import, remove account help/`--account` from `skills/orchestrate/scripts/dispatch_run.py` and `cf_dispatch.py`, and identity/account tests including `runtime/fabric/tests/surface.test.ts:253`. Routing owns eligibility; run records the resolved label. |
 | Quota | Remove `_telemetry`, `state_root`, `ledger_windows`, `record_series` and telemetry writes in `scripts/provider_quota.py`; remove ledger fallback from `scripts/quota_providers/codex.py` and removed-subject quota tests/oracles. |
 | Run/utility/Fabric | Remove dispatch telemetry assertions and callbacks; telemetry import/`record_call` in `scripts/utility.py`; `telemetry_summary` and registration in `scripts/fabric_hosts.py`. Do not remove unrelated identity/quota/peer behaviour. |
-| CLI | Replace telemetry command routing; remove root stats/retro aliases; replace/remove `tools/front-door/src/help/{telemetry,stats,retro}.txt`, stale telemetry fixture setup in `tools/front-door/tests/common/mod.rs:53`, and retired-command tests. |
+| CLI step 3 | Delete telemetry/stats/retro golden cases with their verbs and help. Replace telemetry command routing; remove root stats/retro aliases; replace/remove `tools/front-door/src/help/{telemetry,stats,retro}.txt`, stale telemetry fixture setup in `tools/front-door/tests/common/mod.rs:53`, and retired-command tests. |
 | Docs/skills | Update telemetry/host/routing runbooks, README and architecture references, delivery/retrospect promises and code-review's `multi-agent-review.md` plus orchestrate's `routing-and-tiers.md`, `worker-liveness.md` and `herdr-panes.md` references. Remove ledger, sources, ingest and accepted-cost instructions; preserve unrelated policy. |
 
 State alone deletes/counts `tests/test_host_identity.py` and the OTel slices
