@@ -69,3 +69,39 @@ fn lifecycle_versions_ids_and_strict_envelopes() {
     };
     assert_eq!(reply["error"]["code"], -32600);
 }
+
+#[test]
+fn modern_uncorrelated_errors_omit_id_while_legacy_keeps_null() {
+    // MCP 2026-07-28 schema#jsonrpcerrorresponse: id is optional RequestId,
+    // which is string | number. JSON-RPC 2.0 section 5 uses null for legacy.
+    let mut modern = Protocol::default();
+    let request = json!({"jsonrpc":"2.0","id":"discover","method":"server/discover","params":{"_meta":{VERSION:MODERN,CAPABILITIES:{}}}});
+    modern.receive(&serde_json::to_vec(&request).unwrap());
+    let Action::Reply(reply) = modern.receive(b"{") else {
+        panic!()
+    };
+    assert!(reply.get("id").is_none());
+    for id in [json!(null), json!(true), json!(1.5)] {
+        let Action::Reply(reply) = modern.receive(
+            &serde_json::to_vec(&json!({"jsonrpc":"2.0","id":id,"method":"tools/list"})).unwrap(),
+        ) else {
+            panic!()
+        };
+        assert!(reply.get("id").is_none());
+    }
+    let Action::Reply(reply) = modern.receive(br#"{"jsonrpc":"wrong","method":"tools/list"}"#)
+    else {
+        panic!()
+    };
+    assert!(reply.get("id").is_none());
+    let Action::Reply(reply) =
+        modern.receive(br#"{"jsonrpc":"wrong","id":"preserved","method":"tools/list"}"#)
+    else {
+        panic!()
+    };
+    assert_eq!(reply["id"], "preserved");
+    let Action::Reply(reply) = Protocol::default().receive(b"{") else {
+        panic!()
+    };
+    assert_eq!(reply.get("id"), Some(&Value::Null));
+}

@@ -255,7 +255,11 @@ pub fn serve(
                     if framer.incomplete() {
                         write(
                             output,
-                            &protocol::error(None, -32700, "EOF inside a JSON frame"),
+                            &protocol::uncorrelated_error(
+                                -32700,
+                                "EOF inside a JSON frame",
+                                protocol.modern(),
+                            ),
                         )?;
                     }
                     return Ok(());

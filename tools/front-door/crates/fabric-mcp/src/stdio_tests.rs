@@ -274,6 +274,20 @@ fn eof_inside_a_frame_emits_parse_error_then_closes() {
 }
 
 #[test]
+fn modern_eof_error_has_no_uncorrelated_id() {
+    // MCP 2026-07-28 schema#jsonrpcerrorresponse: optional id is RequestId.
+    let server = Server::start(FakeFactory::new(Arc::new(Gate::default())), false);
+    server.send(&json!({"jsonrpc":"2.0","id":"discover","method":"server/discover","params":{"_meta":{protocol::VERSION:protocol::MODERN,protocol::CAPABILITIES:{}}}}));
+    server.wait_for_frames(1, TEST_WAIT).unwrap();
+    server.send_bytes(b"{");
+    server.close_input();
+    let frames = server.wait_for_frames(2, TEST_WAIT).unwrap();
+    assert_eq!(frames[1]["error"]["code"], -32700);
+    assert!(frames[1].get("id").is_none());
+    assert!(matches!(server.finish(), Ok(())));
+}
+
+#[test]
 fn oversize_frame_fails_transport_and_broken_stdout_is_reported() {
     let server = Server::start(FakeFactory::new(Arc::new(Gate::default())), false);
     server.send_bytes(&vec![b'x'; MAX_FRAME + 1]);

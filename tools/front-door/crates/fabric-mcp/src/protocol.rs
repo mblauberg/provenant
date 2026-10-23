@@ -73,6 +73,13 @@ pub enum Action {
 pub fn error(id: Option<&Id>, code: i64, message: &str) -> Value {
     json!({"jsonrpc":"2.0","id":id,"error":{"code":code,"message":message}})
 }
+pub fn uncorrelated_error(code: i64, message: &str, modern: bool) -> Value {
+    if modern {
+        json!({"jsonrpc":"2.0","error":{"code":code,"message":message}})
+    } else {
+        error(None, code, message)
+    }
+}
 pub fn result(id: &Id, mut value: Value, modern: bool) -> Value {
     if modern && let Some(object) = value.as_object_mut() {
         object.insert("resultType".into(), json!("complete"));
@@ -96,24 +103,40 @@ impl Protocol {
             },
         ) {
             Ok(value) => value,
-            Err(_) => return Action::Reply(error(None, -32700, "Invalid bounded JSON frame")),
+            Err(_) => {
+                return Action::Reply(uncorrelated_error(
+                    -32700,
+                    "Invalid bounded JSON frame",
+                    self.modern(),
+                ));
+            }
         };
         let id = value
             .get("id")
             .and_then(|v| serde_json::from_value::<Id>(v.clone()).ok());
         if value.get("id").is_some() && id.is_none() {
-            return Action::Reply(error(None, -32600, "Invalid request ID"));
+            return Action::Reply(uncorrelated_error(
+                -32600,
+                "Invalid request ID",
+                self.modern(),
+            ));
         }
         let envelope: Envelope = match serde_json::from_value(value) {
             Ok(envelope) => envelope,
-            Err(_) => return Action::Reply(error(id.as_ref(), -32600, "Invalid JSON-RPC request")),
+            Err(_) => return Action::Reply(self.invalid(id.as_ref(), "Invalid JSON-RPC request")),
         };
         if envelope.jsonrpc != "2.0" {
-            return Action::Reply(error(id.as_ref(), -32600, "Invalid JSON-RPC version"));
+            return Action::Reply(self.invalid(id.as_ref(), "Invalid JSON-RPC version"));
         }
         match envelope.id {
             None => self.notification(envelope.method.as_str(), envelope.params),
             Some(id) => self.request(id, envelope.method.as_str(), envelope.params),
+        }
+    }
+    fn invalid(&self, id: Option<&Id>, message: &str) -> Value {
+        match id {
+            Some(id) => error(Some(id), -32600, message),
+            None => uncorrelated_error(-32600, message, self.modern()),
         }
     }
     fn notification(&mut self, method: &str, params: BTreeMap<String, Value>) -> Action {
