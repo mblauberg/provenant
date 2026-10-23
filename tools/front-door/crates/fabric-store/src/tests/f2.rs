@@ -371,7 +371,14 @@ fn push_transition_matrix_and_frozen_operation_identity() {
             };
             let result = store.change_push(&guard, &fence, &operation_id(), action, &f.request());
             if let Some(expected) = expected {
-                assert_eq!(result.unwrap().phase, expected, "{from:?} {action:?}");
+                let operation = result.unwrap();
+                assert_eq!(operation.phase, expected, "{from:?} {action:?}");
+                let observed = match action {
+                    PushAction::Confirmed => Some(input.candidate),
+                    PushAction::Reconcile { remote } => remote,
+                    PushAction::Begin | PushAction::Uncertain => None,
+                };
+                assert_eq!(operation.observed_remote, observed, "{from:?} {action:?}");
             } else {
                 assert!(
                     matches!(result, Err(Error::PushTransition { .. })),
