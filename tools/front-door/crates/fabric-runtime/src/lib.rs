@@ -15,6 +15,7 @@ pub mod identity;
 pub mod json_subprocess;
 pub mod lane_federation;
 pub mod lane_watch;
+pub mod pools;
 pub mod ps;
 pub mod run_registry;
 pub mod run_root;
