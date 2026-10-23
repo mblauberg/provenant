@@ -1,7 +1,7 @@
 //! Provider context metering, Codex rollout enrichment and ceiling policy.
 //! Environment, storage, and provider behavior are explicit seams.
 use crate::{Error, Result};
-use serde::{Deserialize, Deserializer, Serialize, de};
+use serde::{de, Deserialize, Deserializer, Serialize};
 use serde_json::{Map, Value};
 use std::{
     fs,
@@ -1200,6 +1200,83 @@ pub fn short(tokens: u64) -> String {
     }
 }
 
+// Unit-02 begins at the source marker() boundary.
+pub fn marker(value: Option<&ContextRecord>) -> Result<String> {
+    let Some(value) = value else {
+        return Ok(String::new());
+    };
+    if let Some(tokens) = value.context_tokens {
+        let estimate = if value.source == Some(ContextSource::Estimated) {
+            "~"
+        } else {
+            ""
+        };
+        let window = value
+            .context_window_tokens
+            .filter(|n| *n != 0)
+            .map(|n| format!("/{}", short(n)))
+            .unwrap_or_default();
+        return Ok(format!(" · ctx {estimate}{}{window}", short(tokens)));
+    }
+    if let Some(percent) = value.context_percent {
+        if !percent.is_finite() {
+            return Err(Error::Invalid("context_percent must be finite".into()));
+        }
+        let rounded = percent.round_ties_even();
+        if rounded < i64::MIN as f64 || rounded >= u64::MAX as f64 {
+            return Err(Error::NumberOutOfRange);
+        }
+        let spelling = if rounded < 0.0 {
+            format!("{}", rounded as i64)
+        } else {
+            format!("{}", rounded as u64)
+        };
+        return Ok(format!(" · ctx {spelling}%"));
+    }
+    Ok(String::new())
+}
+
+pub fn resume_warning(
+    previous: &Value,
+    adapter: &str,
+    ceiling: u64,
+    run_id: &Value,
+    task_id: Option<&Value>,
+) -> Result<Option<String>> {
+    if !previous.is_object() {
+        return Err(Error::Invalid("previous must be an object".into()));
+    }
+    let context = previous.get("context");
+    let context = if context.is_some_and(provenant_core::py::python_truth) {
+        context
+    } else {
+        None
+    };
+    if context.is_some_and(|context| !context.is_object()) {
+        return Err(Error::Invalid("previous.context must be an object".into()));
+    }
+    let tokens = context.and_then(|context| integer(context.get("context_tokens")));
+    if tokens.is_some_and(|tokens| tokens <= ceiling) {
+        return Ok(None);
+    }
+    if tokens.is_none() && controls_ceiling(adapter) {
+        return Ok(None);
+    }
+    let size = tokens
+        .map(|tokens| format!("a ~{}-token session", short(tokens)))
+        .unwrap_or_else(|| "a session of unknown size".into());
+    let mut target = format!("handoff:\"{}\"", provenant_core::py::python_str(run_id));
+    if task_id.is_some_and(provenant_core::py::python_truth) {
+        target.push_str(&format!(
+            ", task_id:\"{}\"",
+            provenant_core::py::python_str(task_id.unwrap_or(&Value::Null))
+        ));
+    }
+    Ok(Some(format!(
+        "resuming {size}; fresh: fabric_dispatch{{prompt, {target}}}"
+    )))
+}
+
 fn ordered_model_usage_keys(line: &str) -> Result<Option<Vec<String>>> {
     #[derive(Default)]
     struct RootKeys(Option<Vec<String>>);
@@ -1553,6 +1630,81 @@ mod tests {
         }
     }
 
+    #[test]
+    fn marker_effective_threshold_and_resume_policy_match_examples() {
+        let (_temp, env, store) = fixture_policy();
+        assert_eq!(
+            effective_ceiling(
+                &json!({"context_ceiling_tokens":258400,"context_ceiling_requested":300000}),
+                &env,
+                &store
+            )
+            .unwrap(),
+            258400
+        );
+        assert_eq!(
+            marker(Some(&ContextRecord {
+                context_tokens: Some(212000),
+                context_window_tokens: Some(1000000),
+                source: Some(ContextSource::Observed),
+                ..ContextRecord::default()
+            }))
+            .unwrap(),
+            " · ctx 212k/1M"
+        );
+        assert_eq!(
+            marker(Some(&ContextRecord {
+                context_tokens: Some(19124),
+                source: Some(ContextSource::Estimated),
+                ..ContextRecord::default()
+            }))
+            .unwrap(),
+            " · ctx ~19k"
+        );
+        assert_eq!(
+            marker(Some(&ContextRecord {
+                context_percent: Some(7.73),
+                ..ContextRecord::default()
+            }))
+            .unwrap(),
+            " · ctx 8%"
+        );
+        let warning = resume_warning(
+            &json!({"context":{"context_tokens":620000}}),
+            "cursor",
+            300000,
+            &json!("run-1"),
+            Some(&json!("two")),
+        )
+        .unwrap();
+        assert_eq!(
+            warning.as_deref(),
+            Some(
+                "resuming a ~620k-token session; fresh: fabric_dispatch{prompt, handoff:\"run-1\", task_id:\"two\"}"
+            )
+        );
+        assert_eq!(
+            resume_warning(
+                &json!({"context":null}),
+                "claude",
+                300000,
+                &json!("r"),
+                None
+            )
+            .unwrap(),
+            None
+        );
+        assert!(resume_warning(
+            &json!({"context":null}),
+            "cursor",
+            300000,
+            &json!("r"),
+            None
+        )
+        .unwrap()
+        .is_some());
+    }
+
     const STREAM_ORACLE: &str = r#"
 import importlib.util,json,sys
 from pathlib import Path
@@ -1702,5 +1854,139 @@ print(json.dumps(out))
         crate::differential::equal(&Value::Object(actual), &expected);
     }
 
+    const POLICY_ORACLE: &str = r#"
+import importlib.util,json,os,sys
+from pathlib import Path
+root=Path(sys.argv[1])
+spec=importlib.util.spec_from_file_location('context_usage',root/'skills/orchestrate/scripts/context_usage.py')
+ctx=importlib.util.module_from_spec(spec);spec.loader.exec_module(ctx)
+data=json.load(sys.stdin)
+os.environ.clear();os.environ.update(data['process_env'])
+out={'ceilings':[ctx.clamp_ceiling(v) for v in data['ceilings']],
+     'markers':[ctx.marker(v) for v in data['markers']],
+     'warnings':[ctx.resume_warning(*v) for v in data['warnings']]}
+for item in data['plans']:
+ ctx.apply_ceiling(item['plan'],item['value'],lambda p:['flag',str(p.get('context_ceiling'))] if p.get('context_ceiling') else [],item['env'])
+out['plans']=[item['plan'] for item in data['plans']]
+print(json.dumps(out))
+"#;
 
+    #[test]
+    fn differential_ceiling_marker_and_resume_policy_match_python() {
+        let (_temp, env, store) = fixture_policy();
+        let product = env.product_root.clone().expect("product root");
+        let codex = env.codex_home.clone().expect("Codex home");
+        let claude = env.claude_config_dir.clone().expect("Claude home");
+        let records = vec![
+            json!({"context_tokens":212000,"context_window_tokens":1000000,"source":"observed"}),
+            json!({"context_tokens":19124,"context_window_tokens":null,"source":"estimated"}),
+            json!({"context_tokens":null,"context_percent":7.73,"source":"observed"}),
+            Value::Null,
+        ];
+        let warnings = vec![
+            json!([{"context":{"context_tokens":620000}},"claude",300000,"run",null]),
+            json!([{"context":{"context_tokens":212000}},"cursor",300000,"r",null]),
+            json!([{"context":null},"codex",300000,"r",null]),
+            json!([{}, "kiro", 300000, "r", "two"]),
+        ];
+        let mut plans = vec![
+            json!({"plan":{"adapter":"codex","model":"gpt-6-luna","applied":{},"warnings":[],"argv":[]},"value":null,
+                "env":{"CODEX_HOME":codex.to_string_lossy(),"CLAUDE_CONFIG_DIR":claude.to_string_lossy()}}),
+            json!({"plan":{"adapter":"claude","model":"opus","applied":{},"warnings":[],"argv":[]},"value":150000,
+                "env":{"CODEX_HOME":codex.to_string_lossy(),"CLAUDE_CONFIG_DIR":claude.to_string_lossy()}}),
+            json!({"plan":{"adapter":"cursor","model":"auto","applied":{},"warnings":[],"argv":[]},"value":"bad",
+                "env":{"CODEX_HOME":codex.to_string_lossy(),"CLAUDE_CONFIG_DIR":claude.to_string_lossy()}}),
+        ];
+        for model in [
+            Some(Value::Null),
+            Some(json!(false)),
+            Some(json!(0)),
+            Some(json!("")),
+            None,
+        ] {
+            let mut plan = json!({"adapter":"codex","applied":{},"warnings":[],"argv":[]});
+            if let Some(model) = model {
+                plan["model"] = model;
+            }
+            plans.push(json!({"plan":plan,"value":null,
+                "env":{"CODEX_HOME":codex.to_string_lossy(),"CLAUDE_CONFIG_DIR":claude.to_string_lossy()}}));
+        }
+        let input = json!({
+            "process_env":{"AGENT_FABRIC_PRODUCT_ROOT":product.to_string_lossy()},
+            "ceilings":[null,250000,"bad",5000,1000001,true,"١٢٣.٤","١_٢٣٤_٥٦٧","\u{1c}123\u{1c}","\u{00a0}١٢٣.٤\u{00a0}"],
+            "markers":records,
+            "warnings":warnings,
+            "plans":plans,
+        });
+        let Some(expected) = crate::differential::python(POLICY_ORACLE, &input) else {
+            return;
+        };
+        let ceilings: Vec<Value> = input["ceilings"]
+            .as_array()
+            .expect("ceilings")
+            .iter()
+            .map(|v| {
+                let (n, w) = clamp_ceiling(Some(v), &env, &store).unwrap();
+                json!([n, w])
+            })
+            .collect();
+        let markers: Vec<String> = input["markers"]
+            .as_array()
+            .expect("markers")
+            .iter()
+            .map(|v| {
+                let record = if v.is_null() {
+                    None
+                } else {
+                    serde_json::from_value(v.clone()).ok()
+                };
+                marker(record.as_ref()).unwrap()
+            })
+            .collect();
+        let warning_values: Vec<Value> = input["warnings"]
+            .as_array()
+            .expect("warnings")
+            .iter()
+            .map(|row| {
+                let items = row.as_array().expect("warning row");
+                let task = items.get(4).filter(|v| !v.is_null());
+                json!(resume_warning(
+                    &items[0],
+                    items[1].as_str().unwrap_or(""),
+                    items[2].as_u64().unwrap_or(0),
+                    &items[3],
+                    task
+                )
+                .unwrap())
+            })
+            .collect();
+        let mut actual_plans = Vec::new();
+        for item in plans.iter_mut() {
+            let item_env = &item["env"];
+            let plan_env = ContextEnvironment {
+                home: env.home.clone(),
+                codex_home: item_env
+                    .get("CODEX_HOME")
+                    .and_then(Value::as_str)
+                    .map(PathBuf::from),
+                claude_config_dir: item_env
+                    .get("CLAUDE_CONFIG_DIR")
+                    .and_then(Value::as_str)
+                    .map(PathBuf::from),
+                product_root: Some(product.clone()),
+            };
+            let value = item.get("value").cloned();
+            let callback = |plan: &Value| {
+                plan.get("context_ceiling")
+                    .filter(|value| !value.is_null())
+                    .map(|value| vec!["flag".into(), provenant_core::py::python_str(value)])
+                    .unwrap_or_default()
+            };
+            let plan = item.get_mut("plan").expect("plan");
+            apply_ceiling(plan, value.as_ref(), &plan_env, &store, Some(&callback)).unwrap();
+            actual_plans.push(plan.clone());
+        }
+        let actual = json!({"ceilings":ceilings,"markers":markers,"warnings":warning_values,"plans":actual_plans});
+        crate::differential::equal(&actual, &expected);
+    }
 }
