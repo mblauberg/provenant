@@ -258,7 +258,7 @@ terminal and malformed-protocol events. Structured errors and diagnostics
 outrank claimed success; answer prose discussing quota is not an error.
 Recovered transport retries clear transient evidence. Terminal answer and process
 exit are separate facts. OpenCode's exit-after-output exception requires recorded
-terminal evidence; Agy timeout text stays partial. Providers never signals or
+terminal evidence; Agy timeout text stays partial. The providers crate never signals or
 publishes a run result.
 
 | Needed from owner | API/obligation |
@@ -331,7 +331,10 @@ made redundant by Rust types or keep Python oracles.
 Binary integration tests use fake providers and isolated S: real CLI/MCP views,
 JSON/exits, no process on help/list/show/resolve, explicit refresh/canary, no old
 root access, failed cache keeping last good, and secrets absent from argv/files/
-diagnostics. Replay recordings through the actual decoder; run consumes the same
+diagnostics. A fake-curl process asserts that the authorised header arrives only
+on stdin, is absent from argv/environment/files/diagnostics, and targets only the
+allowlisted URL with redirects disabled. Replay recordings through the actual
+decoder; run consumes the same
 route/launch spec. Update Swift report decoding/fixtures together, removing
 historical forecast and old-CLI fallbacks.
 
