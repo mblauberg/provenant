@@ -68,7 +68,7 @@ pub fn check_parent(
     }
     if attempt.get("run_id").and_then(serde_json::Value::as_str) != Some(parent.run_id())
         || attempt.get("task_id").and_then(serde_json::Value::as_str) != Some(parent.task_id())
-        || attempt.get("attempt").and_then(serde_json::Value::as_u64) != Some(parent.attempt())
+        || !python_numeric_equal(attempt.get("attempt"), parent.attempt())
         || attempt.get("state").and_then(serde_json::Value::as_str) != Some("running")
     {
         return Err(Error::ParentAttempt);
@@ -159,11 +159,8 @@ pub fn child_errors(children: &[ChildReport]) -> Vec<String> {
                 .fields
                 .get("status")
                 .unwrap_or(&serde_json::Value::Null);
-            let reaped = child
-                .fields
-                .get("reaped")
-                .and_then(serde_json::Value::as_array);
-            let has_reaped = reaped.is_some_and(|v| !v.is_empty());
+            let reaped = child.fields.get("reaped");
+            let has_reaped = reaped.is_some_and(crate::pending::json_truthy);
             if (status.is_null() || matches!(status.as_str(), Some("running" | "ok" | "partial")))
                 && !has_reaped
             {
@@ -174,11 +171,19 @@ pub fn child_errors(children: &[ChildReport]) -> Vec<String> {
                 .get("task_id")
                 .map(python_string)
                 .unwrap_or_else(|| "?".into());
-            let detail = if let Some(reaped) = reaped.filter(|v| !v.is_empty()) {
+            let detail = if let Some(reaped) = reaped.filter(|v| crate::pending::json_truthy(v)) {
                 format!(
                     "{}; reaped {} leftover process(es)",
                     python_string(status),
-                    reaped.len()
+                    match reaped {
+                        serde_json::Value::Array(values) => values.len(),
+                        serde_json::Value::Object(values) => values.len(),
+                        serde_json::Value::String(value) => value.chars().count(),
+                        // Python raises TypeError for len(number/bool). The
+                        // interface returns Vec, so preserve truthiness and
+                        // report the single truthy primitive as one item.
+                        _ => 1,
+                    }
                 )
             } else {
                 child
@@ -199,7 +204,69 @@ fn python_string(value: &serde_json::Value) -> String {
         serde_json::Value::Bool(true) => "True".into(),
         serde_json::Value::Bool(false) => "False".into(),
         serde_json::Value::String(s) => s.clone(),
-        other => other.to_string(),
+        serde_json::Value::Array(items) => format!(
+            "[{}]",
+            items
+                .iter()
+                .map(python_repr_value)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        // serde_json's default Map is key-sorted; Python dict repr preserves
+        // input order. Nested object key order is a known boundary divergence.
+        serde_json::Value::Object(items) => format!(
+            "{{{}}}",
+            items
+                .iter()
+                .map(|(k, v)| format!(
+                    "{}: {}",
+                    crate::pending::python_repr(k),
+                    python_repr_value(v)
+                ))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        serde_json::Value::Number(n) if n.is_i64() || n.is_u64() => n.to_string(),
+        serde_json::Value::Number(n) => python_float_string(n.as_f64().unwrap_or(0.0)),
+    }
+}
+
+fn python_repr_value(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::String(s) => crate::pending::python_repr(s),
+        other => python_string(other),
+    }
+}
+
+fn python_float_string(value: f64) -> String {
+    let raw = format!("{value:?}");
+    if let Some((mantissa, exponent)) = raw.split_once('e') {
+        let exponent: i32 = exponent.parse().unwrap_or(0);
+        format!(
+            "{mantissa}e{}{:#02}",
+            if exponent >= 0 { "+" } else { "" },
+            exponent.abs()
+        )
+    } else if raw.contains('.') {
+        raw
+    } else {
+        format!("{raw}.0")
+    }
+}
+
+fn python_numeric_equal(value: Option<&serde_json::Value>, expected: u64) -> bool {
+    match value {
+        Some(serde_json::Value::Number(n)) if n.is_u64() || n.is_i64() => {
+            n.as_u64() == Some(expected)
+        }
+        Some(serde_json::Value::Number(n)) => n.as_f64().is_some_and(|v| {
+            v.is_finite()
+                && v.fract() == 0.0
+                && (0.0..18_446_744_073_709_551_616.0).contains(&v)
+                && v as u64 == expected
+        }),
+        Some(serde_json::Value::Bool(v)) => u64::from(*v) == expected,
+        _ => false,
     }
 }
 
@@ -225,6 +292,39 @@ pub fn annotate_child_errors(error: Option<&str>, children: &[ChildReport]) -> O
 mod tests {
     use super::*;
     use serde_json::{json, Value};
+    pub(super) fn port_python() -> Option<std::ffi::OsString> {
+        let executable =
+            std::env::var_os("PROVENANT_PORT_PYTHON").unwrap_or_else(|| "python3".into());
+        let version_ok = std::process::Command::new(&executable)
+            .arg("--version")
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .and_then(|o| {
+                String::from_utf8(o.stdout)
+                    .ok()
+                    .or_else(|| String::from_utf8(o.stderr).ok())
+            })
+            .and_then(|s| {
+                s.split_whitespace()
+                    .last()?
+                    .split('.')
+                    .take(2)
+                    .map(str::parse::<u32>)
+                    .collect::<Result<Vec<_>, _>>()
+                    .ok()
+            })
+            .is_some_and(|v| v.len() == 2 && (v[0], v[1]) >= (3, 12));
+        if version_ok {
+            Some(executable)
+        } else {
+            if std::env::var("PROVENANT_PORT_DIFF_REQUIRED").as_deref() == Ok("1") {
+                panic!("PROVENANT_PORT_DIFF_REQUIRED=1 but Python >=3.12 oracle unavailable");
+            }
+            eprintln!("skip: Python >=3.12 oracle unavailable");
+            None
+        }
+    }
     fn value() -> Value {
         json!({"run_id":"mcp-parent","task_id":"writer","attempt":1,"run_dir":"/runs/parent"})
     }
@@ -286,6 +386,20 @@ mod tests {
             ));
         }
         assert!(check_parent(&parent, Some("token"), &owner, &row).is_ok());
+        for equivalent in [json!(true), json!(1.0)] {
+            let mut equivalent_row = row.clone();
+            equivalent_row["attempt"] = equivalent;
+            assert!(check_parent(&parent, Some("token"), &owner, &equivalent_row).is_ok());
+        }
+        let mut large_parent = value();
+        large_parent["attempt"] = json!(9_007_199_254_740_993u64);
+        let large_parent: ParentAttempt = serde_json::from_value(large_parent).unwrap();
+        let mut rounded_row = row.clone();
+        rounded_row["attempt"] = json!(9_007_199_254_740_992.0);
+        assert!(matches!(
+            check_parent(&large_parent, Some("token"), &owner, &rounded_row),
+            Err(Error::ParentAttempt)
+        ));
         for (field, bad) in [
             ("state", json!("terminal")),
             ("attempt", json!(2)),
@@ -328,21 +442,32 @@ mod tests {
     fn differential_parent_parsing() {
         let script_root =
             Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../../skills/orchestrate/scripts");
-        let fixtures = json!([value(), {"run_id":"r","task_id":"bad/path","attempt":1,"run_dir":"/r"}, {"run_id":"r","task_id":"t","attempt":true,"run_dir":"/r"}]);
-        let result = std::process::Command::new("python3")
+        let fixtures = serde_json::to_string(&[
+            value().to_string(),
+            r#"{"run_id":"r","task_id":"bad/path","attempt":1,"run_dir":"/r"}"#.into(),
+            r#"{"run_id":"r","task_id":"t","attempt":true,"run_dir":"/r"}"#.into(),
+            r#"{"run_id":"r","task_id":"t","attempt":1.0,"run_dir":"/r"}"#.into(),
+            r#"{"run_id":"r","task_id":"t","attempt":18446744073709551616,"run_dir":"/r"}"#.into(),
+        ])
+        .unwrap();
+        let Some(python) = super::tests::port_python() else {
+            return;
+        };
+        let result = std::process::Command::new(python)
             .args([
                 "-c",
                 r#"
 import json,os,sys
 sys.path.insert(0,sys.argv[1]);import run_lineage as m
 rows=[]
-for v in json.loads(sys.argv[2]):
+for raw in json.loads(sys.argv[2]):
+ v=json.loads(raw)
  os.environ[m.PARENT_ENV]=json.dumps(v);rows.append(m.parent_attempt())
 print(json.dumps(rows))
 "#,
             ])
             .arg(script_root)
-            .arg(fixtures.to_string())
+            .arg(&fixtures)
             .output();
         let result = match result {
             Err(e) if e.kind() == io::ErrorKind::NotFound => {
@@ -356,23 +481,20 @@ print(json.dumps(rows))
             "{}",
             String::from_utf8_lossy(&result.stderr)
         );
-        let actual: Vec<_> = fixtures
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|v| parent_attempt(Some(&v.to_string())))
-            .collect();
-        assert_eq!(
-            serde_json::to_value(actual).unwrap(),
-            serde_json::from_slice::<Value>(&result.stdout).unwrap()
-        );
+        let raw_rows: Vec<String> = serde_json::from_str(&fixtures).unwrap();
+        let actual: Vec<_> = raw_rows.iter().map(|v| parent_attempt(Some(v))).collect();
+        let mut expected = serde_json::from_slice::<Value>(&result.stdout).unwrap();
+        // Python accepts arbitrary-size ints; this typed API stores u64 and
+        // treats the out-of-range fixture as an invalid parent attempt.
+        expected.as_array_mut().unwrap()[4] = Value::Null;
+        assert_eq!(serde_json::to_value(actual).unwrap(), expected);
     }
 }
 
 #[cfg(test)]
 mod review_regressions {
     use super::*;
-    use serde_json::json;
+    use serde_json::{json, Value};
     #[test]
     fn batch_owner_mode_preserves_execution_custody_decision() {
         assert!(OwnerMode::StandaloneBatchChild.acquire_execution_custody());
@@ -398,5 +520,72 @@ mod review_regressions {
         let row: ChildReport =
             serde_json::from_value(json!({"run_id":"x","status":false})).unwrap();
         assert_eq!(child_errors(&[row]), ["child run x task ?: False"]);
+    }
+
+    #[test]
+    fn differential_python_repr_and_reaped_truthiness_shapes() {
+        let children: Vec<ChildReport> = serde_json::from_value(json!([
+            {"run_id":"a","status":"failed","error":["a"]},
+            {"run_id":"b","status":"failed","error":{"k":1}},
+            {"run_id":"c","status":"failed","error":1e20},
+            {"run_id":"d","status":"failed","error":true},
+            {"run_id":"e","status":null,"reaped":"abc"},
+            {"run_id":"f","status":"ok","reaped":{"k":1,"j":2}},
+        ]))
+        .unwrap();
+        let script = r#"
+import json,sys
+sys.path.insert(0,sys.argv[1]);import run_lineage as m
+print(json.dumps(m.child_errors(json.loads(sys.argv[2]))))
+"#;
+        let script_root =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../../skills/orchestrate/scripts");
+        let Some(python) = super::tests::port_python() else {
+            return;
+        };
+        let result = std::process::Command::new(python)
+            .args([
+                "-c",
+                script,
+                script_root.to_str().unwrap(),
+                &serde_json::to_string(&children).unwrap(),
+            ])
+            .output();
+        let result = match result {
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                eprintln!("skip: python3 absent");
+                return;
+            }
+            v => v.unwrap(),
+        };
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert_eq!(
+            serde_json::to_value(child_errors(&children)).unwrap(),
+            serde_json::from_slice::<Value>(&result.stdout).unwrap()
+        );
+        assert_eq!(
+            child_errors(&children),
+            [
+                "child run a task ?: ['a']",
+                "child run b task ?: {'k': 1}",
+                "child run c task ?: 1e+20",
+                "child run d task ?: True",
+                "child run e task ?: None; reaped 3 leftover process(es)",
+                "child run f task ?: ok; reaped 2 leftover process(es)"
+            ]
+        );
+        for reaped in [json!(1), json!(true)] {
+            let row: ChildReport =
+                serde_json::from_value(json!({"run_id":"primitive","status":"ok","reaped":reaped}))
+                    .unwrap();
+            assert_eq!(
+                child_errors(&[row]),
+                ["child run primitive task ?: ok; reaped 1 leftover process(es)"]
+            );
+        }
     }
 }
