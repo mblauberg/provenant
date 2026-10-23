@@ -143,6 +143,7 @@ def run(platform: str, home: Path, *arguments: str, bash=None, **extra_env):
         [*([bash] if bash else []), SCRIPT, "--platform", platform, *arguments],
         cwd=ROOT,
         env=env,
+        timeout=600,  # main ran these without a timeout
     )
 
 
@@ -194,6 +195,7 @@ def run_product(product: Path, platform: str, home: Path, *arguments: str, **ext
         [product / "scripts/install-harness", "--platform", platform, *arguments],
         cwd=product,
         env=environment,
+        timeout=600,  # main ran these without a timeout
     )
 
 
