@@ -59,12 +59,13 @@ class Meter:
     # input with cache reads reported separately. Kiro/Copilot report no input.
     def _claude(self, event):
         kind, models = event.get("type"), self.models
-        if kind == "system" and event.get("subtype") == "init" and isinstance(event.get("model"), str):
+        if (kind == "system" and event.get("subtype") == "init" and isinstance(event.get("model"), str)
+                and event["model"] != "<synthetic>"):
             models["init"] = event["model"]
         if kind == "assistant" and isinstance(event.get("message"), dict):
             message = event["message"]
             model = message.get("model")
-            if isinstance(model, str) and model:
+            if isinstance(model, str) and model and model != "<synthetic>":
                 if model not in models["answered"]:
                     models["answered"].append(model)
                 if event.get("parent_tool_use_id") is None:

@@ -1930,11 +1930,12 @@ def parse_output(adapter, stdout, stderr="", exit_code=0, *, at=None):
                 }
             ):
                 for item in _objects(event):
-                    if isinstance(item.get("model"), str):
+                    if isinstance(item.get("model"), str) and item["model"] != "<synthetic>":
                         result["observed_model"] = item["model"]
         if adapter == "claude" and kind == "assistant":
             message = event.get("message")
-            if isinstance(message, dict) and isinstance(message.get("model"), str):
+            if (isinstance(message, dict) and isinstance(message.get("model"), str)
+                    and message["model"] != "<synthetic>"):
                 result["observed_model"] = message["model"]
         error_event = kind in {
             "error",
@@ -2053,7 +2054,7 @@ def parse_output(adapter, stdout, stderr="", exit_code=0, *, at=None):
                         )
                     )
     if adapter == "agy":
-        match = re.search(r'(?:using model|model[=:])\s*["\']?([\w./-]+)', stderr, re.I)
+        match = re.search(r'^\s*using model\b[=:]?\s*["\']?([\w./-]+)', stderr, re.I | re.M)
         if match and not result["observed_model"]:
             result["observed_model"] = match[1]
         if "AGY_ERROR" in stderr:
@@ -3801,7 +3802,7 @@ def _run_attempt(
 
     def observe_model(model):
         nonlocal last_model
-        if model:
+        if model and model != "<synthetic>":
             if not _same_model(plan["adapter"], last_model, model):
                 model_changes.append({"from": last_model, "to": model})
             last_model = model

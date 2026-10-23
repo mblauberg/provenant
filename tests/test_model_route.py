@@ -812,6 +812,51 @@ def test_capability_probe_lists_agy_and_codex_models_for_discovery(tmp_path, mon
         "gpt-6-luna", "gpt-6.1-sol"]
 
 
+@pytest.mark.parametrize("adapter,expected", [
+    ("cursor", ["auto", "gpt-5.3-codex-low", "gpt-5.3-codex-low-fast"]),
+    ("opencode", ["opencode-go/beam-free", "opencode-go/claude-haiku-5-5",
+                  "openrouter/~anthropic/claude-fable-latest", "openrouter/~anthropic/claude-haiku-latest"]),
+    ("kiro", ["auto", "claude-sonnet-4.5"]),
+])
+def test_discovery_accepts_captured_cli_listings(tmp_path, adapter, expected):
+    router = load_router()
+    suffix = "json" if adapter == "kiro" else "txt"
+    fixture = ROOT / "tests/fixtures/model-listings" / f"{adapter}-models.{suffix}"
+    cli = tmp_path / adapter
+    cli.write_text(f"#!{sys.executable}\nimport pathlib, sys\n"
+                   "if sys.argv[1:] == ['--version']: print('1.0')\n"
+                   "elif sys.argv[1:] == ['--help']: pass\n"
+                   f"else: print(pathlib.Path({str(fixture)!r}).read_text())\n")
+    cli.chmod(0o755)
+    record, code = router.probe_capabilities(adapter, str(cli), listing_only=True)
+    assert code == 0
+    assert record["models"] == expected
+    cached = json.loads((Path(os.environ["AGENT_FABRIC_STATE_ROOT"]) / "capabilities.json").read_text())
+    assert cached[adapter]["models"] == expected
+
+
+@pytest.mark.parametrize("adapter", ["cursor", "agy", "codex", "kiro", "opencode"])
+@pytest.mark.parametrize("failure", ["listing", "version"])
+@pytest.mark.parametrize("cache_failures", [True, False])
+def test_routing_discovery_failed_refresh_preserves_last_good_listing(tmp_path, adapter, failure, cache_failures):
+    router = load_router()
+    cli = tmp_path / adapter
+    cli.write_text("#!/bin/sh\n" + ("if [ \"$1\" = --version ]; then echo 1.0; exit; fi\n"
+                                  if failure == "listing" else "") + "exit 1\n")
+    cli.chmod(0o755)
+    state = Path(os.environ["AGENT_FABRIC_STATE_ROOT"]) / "capabilities.json"
+    previous = {adapter: {"listing_format": 1, "version": "1.0", "executable": str(cli),
+                          "models": ["last-good"], "observed_at": "2000-01-01T00:00:00Z"}}
+    state.write_text(json.dumps(previous))
+    record, code = router.probe_capabilities(adapter, str(cli), listing_only=True, refresh=True,
+                                             cache_failures=cache_failures)
+    if cache_failures:
+        assert code == 0 and record["models"] == ["last-good"] and record["refresh_failed"]
+    else:
+        assert code == 1 and record["status"] == "probe_unavailable" and not record.get("models")
+    assert json.loads(state.read_text()) == previous
+
+
 def test_discovery_keeps_colon_variants_beside_their_base_id():
     router = load_router()
     assert router._listed_models("openrouter/vendor/model\nopenrouter/vendor/model:free\n") == [

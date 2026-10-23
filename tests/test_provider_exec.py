@@ -9140,3 +9140,38 @@ print(json.dumps({'event': 'result', 'result': {'status': 'SUCCESS', 'response':
     assert record["provenance"]["observed_model"] == "gemini-cheap"
     assert record["model_changes"] == [{"from": "gemini-valid", "to": "gemini-cheap"}]
     assert not record["certification_eligible"]
+
+
+@pytest.mark.parametrize("diagnostic", [
+    'DEBUG request model=gemini-cheap',
+    'INFO model: gemini-cheap',
+    'notusing model gemini-cheap',
+])
+def test_agy_log_model_fields_do_not_substitute_pinned_route(tmp_path, diagnostic):
+    code = (f"import json, sys; print({diagnostic!r}, file=sys.stderr); "
+            "print(json.dumps({'event': 'result', 'result': {'status': 'SUCCESS', 'response': 'DONE'}}))")
+    plan = fixture_plan(tmp_path, code, "agy", requested_model="gemini-valid")
+    plan["model"] = "gemini-valid"
+    record = supervisor().execute(plan, tmp_path / "result.md")
+    assert record["status"] == "ok"
+    assert record["model_changes"] == []
+
+
+@pytest.mark.parametrize("synthetic_last", [False, True])
+@pytest.mark.parametrize("synthetic_kind", ["assistant", "init"])
+def test_claude_synthetic_model_does_not_change_parent_route(tmp_path, synthetic_last, synthetic_kind):
+    models = ["<synthetic>", "claude-sonnet-5-5"]
+    if synthetic_last:
+        models.reverse()
+    events = [{"type": "system", "subtype": "init", "model": model}
+              if model == "<synthetic>" and synthetic_kind == "init" else
+              {"type": "assistant", "message": {"model": model, "content": []}} for model in models]
+    events.append({"type": "result", "result": "DONE", "is_error": False})
+    plan = fixture_plan(tmp_path, f"import json; events={events!r}; [print(json.dumps(e)) for e in events]", "claude")
+    plan["model"] = "claude-sonnet-5-5"
+    record = supervisor().execute(plan, tmp_path / "result.md")
+    assert record["status"] == "ok"
+    assert record["provenance"]["observed_model"] == plan["model"]
+    assert record["model_changes"] == []
+    assert not any("mismatch" in warning or "model changed" in warning for warning in record["warnings"])
+    assert "<synthetic>" not in json.dumps(record["provenance"])

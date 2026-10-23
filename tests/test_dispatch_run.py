@@ -2002,10 +2002,11 @@ def test_sigterm_interrupts_and_reaps_provider_group(tmp_path: Path) -> None:
     write_executable(
         bin_dir / "codex",
         """#!/usr/bin/env bash
-        if [ "$1" = "--version" ]; then exit 1; fi
+        if [ "$1" = "--version" ]; then echo 'codex-cli 1.0'; exit 0; fi
+        if [ "$1" = "--help" ]; then exit 0; fi
         if [ "$1" = "mcp" ]; then printf '[]'; exit 0; fi
         if [ "$1" = "debug" ] && [ "$2" = "models" ]; then
-          printf '{"models":[{"slug":"gpt-6-luna","supported_reasoning_levels":[{"effort":"high"}]}]}'
+          printf '{"models":[{"slug":"gpt-6.1-sol","supported_reasoning_levels":[{"effort":"high"}]}]}'
           exit 0
         fi
         printf '%s\n' "$$" > "$PROBE_PID_PATH"

@@ -709,9 +709,9 @@ def _listed_models(raw: str, adapter: str | None = None) -> list[str]:
         data = list(data)
     if isinstance(data, list):
         models = [item if isinstance(item, str) else
-                  item.get("id", item.get("slug", item.get("name"))) if isinstance(item, dict) else None
+                  item.get("id", item.get("model_id", item.get("slug", item.get("name")))) if isinstance(item, dict) else None
                   for item in data]
-        if all(isinstance(model, str) and re.fullmatch(r"[A-Za-z0-9_./:-]+", model) for model in models):
+        if all(isinstance(model, str) and re.fullmatch(r"[A-Za-z0-9_./:~-]+", model) for model in models):
             return list(dict.fromkeys(models))
         return []
     if adapter in {"codex", "kiro"}:
@@ -719,10 +719,11 @@ def _listed_models(raw: str, adapter: str | None = None) -> list[str]:
     listed: list[str] = []
     for line in raw.splitlines():
         line = line.strip()
-        if not line or line in {"Fetching available models...", "Available models:", "Models:"}:
+        if (not line or line in {"Fetching available models...", "Available models", "Available models:", "Models:"}
+                or line.startswith("Tip: use --model ")):
             continue
-        # IDs alone, or an ID followed by a tab/column-aligned display name.
-        match = re.fullmatch(r"(?:[-*]\s+)?([A-Za-z][A-Za-z0-9._/-]*(?::[A-Za-z0-9._-]+)*)(?:(?:\t| {2,})\S.*)?", line)
+        # IDs alone, or an ID followed by a display-name column.
+        match = re.fullmatch(r"(?:[-*]\s+)?([A-Za-z][A-Za-z0-9._/~-]*(?::[A-Za-z0-9._~-]+)*)(?:(?:\t| {2,}| - )\S.*)?", line)
         if not match or (match[1] != "auto" and not re.search(r"[-/.\d]", match[1])):
             return []
         if adapter == "opencode" and "/" not in match[1]:
@@ -753,14 +754,6 @@ def probe_capabilities(adapter: str, executable: str, deadline: float | None = N
     executable = shutil.which(executable, path=env.get("PATH") if env is not None else None) or executable
     def remaining(limit: float) -> float:
         return max(0.01, min(limit, deadline - time.monotonic())) if deadline is not None else limit
-    try:
-        version = subprocess.run([executable, "--version"], capture_output=True, text=True,
-                                 timeout=remaining(5), check=True, env=env).stdout.strip()
-        if not re.search(r"\d+\.\d+", version):
-            raise ValueError("CLI did not report a version")
-    except (OSError, ValueError, subprocess.SubprocessError):
-        return {"status": "probe_unavailable", "adapter": adapter,
-                "message": "CLI version unavailable; fix: check the executable"}, 1
     path = _state_root() / "capabilities.json"
     try:
         cache = json.loads(path.read_text())
@@ -770,6 +763,23 @@ def probe_capabilities(adapter: str, executable: str, deadline: float | None = N
         cache = {}
     previous = cache.get(adapter)
     executable_path = str(Path(executable).resolve())
+    last_good = None
+    if (cache_failures and (listing_only or adapter == "opencode")
+            and isinstance(previous, dict) and previous.get("listing_format") == 1
+            and previous.get("executable") == executable_path
+            and previous.get("status") != "probe_unavailable" and previous.get("models")):
+        last_good = {**previous, "cache_hit": False,
+                     "refresh_failed": "Model list refresh failed; using the last good listing"}
+    try:
+        version = subprocess.run([executable, "--version"], capture_output=True, text=True,
+                                 timeout=remaining(5), check=True, env=env).stdout.strip()
+        if not re.search(r"\d+\.\d+", version):
+            raise ValueError("CLI did not report a version")
+    except (OSError, ValueError, subprocess.SubprocessError):
+        if last_good is not None:
+            return last_good, 0
+        return {"status": "probe_unavailable", "adapter": adapter,
+                "message": "CLI version unavailable; fix: check the executable"}, 1
     safety_missing = adapter == "kiro" and not listing_only and isinstance(previous, dict) \
         and "read_only_probe" not in previous and previous.get("status") != "probe_unavailable"
     if (isinstance(previous, dict) and previous.get("version") == version and not refresh
@@ -797,12 +807,9 @@ def probe_capabilities(adapter: str, executable: str, deadline: float | None = N
         help_text = subprocess.run([executable, "--help"], capture_output=True, text=True,
                                    timeout=remaining(3), check=False, env=env).stdout
     except (OSError, ValueError, subprocess.SubprocessError):
-        if cache_failures and adapter == "opencode" and isinstance(previous, dict) and previous.get("listing_format") == 1 \
-                and previous.get("status") != "probe_unavailable" \
-                and previous.get("models"):
-            # A failed refresh must not replace the last good listing; report it without touching the cache.
-            return {**previous, "cache_hit": False,
-                    "refresh_failed": "Model list refresh failed; using the last good listing"}, 0
+        if last_good is not None:
+            # A failed refresh must not replace the last good listing.
+            return last_good, 0
         record = {"status": "probe_unavailable", "adapter": adapter, "version": version,
                   "executable": executable_path,
                   "observed_at": datetime.now(timezone.utc).isoformat(), "models": [],
