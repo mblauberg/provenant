@@ -71,7 +71,7 @@ pub fn matching_model_families(model: &str, catalog: &Value) -> Result<Vec<Strin
 }
 
 pub fn family_is_assurance_eligible(family: Option<&str>, family_source: &str) -> bool {
-    family.is_some_and(|name| !matches!(name, "generic-open" | "open-weight"))
+    family.is_some_and(|name| !name.is_empty() && !matches!(name, "generic-open" | "open-weight"))
         && family_source != "unresolved"
 }
 
@@ -337,6 +337,8 @@ mod tests {
         assert_eq!(family.as_deref(), Some("generic-open"));
         assert_eq!(source, "broker-default");
         assert!(!family_is_assurance_eligible(family.as_deref(), &source));
+        assert!(!family_is_assurance_eligible(Some(""), "slug-inferred"));
+        assert!(!family_is_assurance_eligible(None, "slug-inferred"));
     }
 
     #[test]
