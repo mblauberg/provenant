@@ -21,9 +21,12 @@ fn nonblocking(fd: &impl AsRawFd) -> io::Result<()> {
     // SAFETY: fd is borrowed and live for both calls; flags belong to this
     // private pipe description. No pointer, ownership or shared state escapes.
     let flags = unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_GETFL) };
-    if flags < 0
-        || unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0
-    {
+    if flags < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: the same live, private descriptor is borrowed; F_SETFL preserves
+    // other flags and retains no pointer or ownership. Errors use thread errno.
+    if unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
         return Err(io::Error::last_os_error());
     }
     Ok(())
@@ -169,10 +172,10 @@ impl OwnedPid {
 }
 impl Drop for OwnedPid {
     fn drop(&mut self) {
-        if let (Some(child), Some(permit)) = (self.child.take(), self.permit.take()) {
-            if !self.reaped {
-                permit.transfer(child);
-            }
+        if let (Some(child), Some(permit)) = (self.child.take(), self.permit.take())
+            && !self.reaped
+        {
+            permit.transfer(child);
         }
     }
 }

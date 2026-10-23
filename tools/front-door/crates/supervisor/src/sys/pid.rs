@@ -9,11 +9,11 @@ fn failure(pid: i32, source: io::Error) -> PidError {
 pub(crate) fn cwd(pid: i32) -> Result<CwdObservation, PidError> {
     #[cfg(target_os = "linux")]
     {
-        return linux_cwd(pid);
+        linux_cwd(pid)
     }
     #[cfg(target_os = "macos")]
     {
-        return darwin_cwd(pid);
+        darwin_cwd(pid)
     }
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {

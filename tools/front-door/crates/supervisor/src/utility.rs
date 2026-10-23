@@ -761,10 +761,12 @@ mod tests {
             assert!(call.captured && call.cancelled);
             assert_eq!(call.grace, DEFAULT_TERMINATE_GRACE);
             assert_eq!(call.reap, DEFAULT_REAP_TIMEOUT);
-            assert!(!call
-                .argv
-                .iter()
-                .any(|arg| matches!(text(arg), "-c" | "sh" | "bash")));
+            assert!(
+                !call
+                    .argv
+                    .iter()
+                    .any(|arg| matches!(text(arg), "-c" | "sh" | "bash"))
+            );
             assert_eq!(
                 call.env
                     .iter()
@@ -948,5 +950,83 @@ mod tests {
             result,
             Err(UtilityError::Truncated { stream: "stdout" })
         ));
+    }
+}
+
+#[cfg(test)]
+mod external_contract_tests {
+    use super::*;
+    use crate::exec::{CapturedStream, Termination};
+    use serde::Deserialize;
+    #[derive(Deserialize)]
+    struct GitRecording {
+        recorded_with: String,
+        platform: String,
+        setup: String,
+        argv: Vec<String>,
+        exit_code: i64,
+        stdout: String,
+        stderr: String,
+    }
+    struct RecordedGit(GitRecording);
+    impl Executor for RecordedGit {
+        fn execute(&self, options: ExecOptions<'_>) -> Result<ExecOutcome, ExecError> {
+            let args: Vec<_> = options
+                .argv
+                .iter()
+                .skip(1)
+                .map(|arg| arg.to_string_lossy().into_owned())
+                .collect();
+            assert_eq!(args, self.0.argv);
+            Ok(ExecOutcome {
+                termination: Termination::Exit(self.0.exit_code),
+                stdout: CapturedStream {
+                    bytes: self.0.stdout.as_bytes().to_vec(),
+                    total_bytes: self.0.stdout.len() as u64,
+                    ..Default::default()
+                },
+                stderr: CapturedStream {
+                    bytes: self.0.stderr.as_bytes().to_vec(),
+                    total_bytes: self.0.stderr.len() as u64,
+                    ..Default::default()
+                },
+                timed_out: false,
+                drain_truncated: false,
+                overflow_stopped: false,
+                cancelled: false,
+                elapsed_micros: 1,
+            })
+        }
+    }
+    #[test]
+    fn recorded_system_git_nul_status_is_preserved_as_bytes() {
+        let recording: GitRecording = serde_json::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/git-read.json"
+        )))
+        .unwrap();
+        assert!(recording.recorded_with.starts_with("git version "));
+        assert!(!recording.platform.is_empty() && !recording.setup.is_empty());
+        let expected = recording.stdout.as_bytes().to_vec();
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir(root.path().join(".git")).unwrap();
+        let repo = RepoDir::new(root.path()).unwrap();
+        let git = root.path().join("git");
+        std::fs::write(&git, b"fixture executable identity").unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&git, std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let runtime = UtilityRuntime::git_only(git, root.path()).unwrap();
+        let outcome = run_utility(
+            &RecordedGit(recording),
+            UtilityRead::Git(GitRead::Status),
+            &repo,
+            &runtime,
+            UtilityBudget::bounded(Duration::from_secs(1)).unwrap(),
+            &CancelToken::new(),
+        )
+        .unwrap();
+        assert_eq!(outcome.stdout.bytes, expected);
+        assert_eq!(outcome.termination, Termination::Exit(0));
     }
 }

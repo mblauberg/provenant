@@ -28,10 +28,7 @@ impl Clock for SystemClock {
 
     fn mono_now(&self) -> MonoTime {
         let elapsed = self.origin.elapsed().as_micros();
-        let micros = match u64::try_from(elapsed) {
-            Ok(value) => value,
-            Err(_) => u64::MAX,
-        };
+        let micros = u64::try_from(elapsed).unwrap_or(u64::MAX);
         MonoTime::from_micros(micros)
     }
 }

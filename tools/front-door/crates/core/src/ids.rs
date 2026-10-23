@@ -10,7 +10,7 @@ pub(crate) fn decode_hex<const N: usize>(text: &str, lowercase: bool) -> Option<
         return None;
     }
     let mut result = [0; N];
-    for (out, pair) in result.iter_mut().zip(text.as_bytes().chunks_exact(2)) {
+    for (out, pair) in result.iter_mut().zip(text.as_bytes().as_chunks::<2>().0) {
         let mut digits = pair.iter().copied().map(|byte| match byte {
             b'0'..=b'9' => Some(byte - b'0'),
             b'a'..=b'f' => Some(byte - b'a' + 10),

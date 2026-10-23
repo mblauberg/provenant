@@ -273,12 +273,12 @@ impl Pump<'_> {
                     .bytes
                     .extend_from_slice(&bytes[..bytes.len().min(room)]);
                 capture.truncated |= bytes.len() > room;
-                if let StreamPolicy::Tee { sink, .. } = self.policy {
-                    if let Err(loss) = sink.try_send(bytes) {
-                        capture.sink_lost_bytes =
-                            capture.sink_lost_bytes.saturating_add(bytes.len() as u64);
-                        capture.sink_failed |= loss == QueueLoss::Closed;
-                    }
+                if let StreamPolicy::Tee { sink, .. } = self.policy
+                    && let Err(loss) = sink.try_send(bytes)
+                {
+                    capture.sink_lost_bytes =
+                        capture.sink_lost_bytes.saturating_add(bytes.len() as u64);
+                    capture.sink_failed |= loss == QueueLoss::Closed;
                 }
             }
             Err(error)
@@ -350,12 +350,16 @@ fn run(reaper: &Reaper, options: ExecOptions<'_>) -> Result<ExecOutcome, ExecErr
         elapsed_micros: 0,
     };
     let mut status = None;
+    let mut drain_deadline = None;
     let mut term_at = None;
     let mut kill_at = None;
     loop {
         // Exit observation wins over cancellation and wall expiry in this turn.
         if status.is_none() {
             status = child.observe().map_err(io_error("observe"))?;
+            if status.is_some() {
+                drain_deadline = Instant::now().checked_add(options.reap_timeout);
+            }
         }
         out_pump.read(&mut stdout, &mut output.stdout);
         err_pump.read(&mut stderr, &mut output.stderr);
@@ -378,9 +382,7 @@ fn run(reaper: &Reaper, options: ExecOptions<'_>) -> Result<ExecOutcome, ExecErr
         let now = Instant::now();
         if let Some(termination) = status {
             let finished = stdout.is_none() && stderr.is_none();
-            let final_deadline = kill_at
-                .map(|at: Instant| at + options.reap_timeout)
-                .unwrap_or(deadline);
+            let final_deadline = drain_deadline.unwrap_or(now);
             if finished || now >= final_deadline {
                 output.termination = termination;
                 output.drain_truncated = !finished;

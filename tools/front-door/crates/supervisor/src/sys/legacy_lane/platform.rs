@@ -502,7 +502,7 @@ pub fn has_file(pid: i32, file: &File) -> bool {
         }
         let mut fds = vec![0i32; (size as usize + 64) / 4];
         let n = proc_pidinfo(pid, 1, 0, fds.as_mut_ptr().cast(), (fds.len() * 4) as i32);
-        for pair in fds[..(n.max(0) as usize / 4)].chunks_exact(2) {
+        for pair in fds[..(n.max(0) as usize / 4)].as_chunks::<2>().0 {
             if pair[1] != 1 {
                 continue;
             }

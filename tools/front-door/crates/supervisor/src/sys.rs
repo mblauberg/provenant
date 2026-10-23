@@ -179,6 +179,126 @@ pub mod errno {
 
 pub(crate) mod reaper;
 
+/// Construct the fixture binary's only child command through the same strict
+/// post-fork boundary used by the supervisor.
+#[cfg(feature = "fixture")]
+#[allow(clippy::disallowed_methods)]
+pub fn fixture_command(
+    argv: &[OsString],
+    env: &[(OsString, OsString)],
+    cwd: &Path,
+    new_session: bool,
+) -> io::Result<std::process::Command> {
+    let program = argv
+        .first()
+        .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidInput))?;
+    if std::path::Path::new(program) != std::env::current_exe()? {
+        return Err(io::ErrorKind::InvalidInput.into());
+    }
+    let mut command = std::process::Command::new(program);
+    command
+        .args(argv.iter().skip(1))
+        .env_clear()
+        .envs(env.iter().cloned())
+        .current_dir(cwd);
+    child::configure_command(&mut command, &[], Some(env), new_session)?;
+    Ok(command)
+}
+
+/// Accept a fixture connection with one bounded poll of a held Unix listener.
+#[cfg(feature = "fixture")]
+pub fn fixture_accept(
+    listener: &std::os::unix::net::UnixListener,
+    timeout: std::time::Duration,
+) -> io::Result<std::os::unix::net::UnixStream> {
+    use std::os::fd::AsRawFd;
+    let deadline = std::time::Instant::now()
+        .checked_add(timeout)
+        .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidInput))?;
+    loop {
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        let micros = remaining.as_micros();
+        let millis = if remaining.is_zero() {
+            0
+        } else {
+            i32::try_from(micros.saturating_add(999) / 1_000).unwrap_or(i32::MAX)
+        };
+        let mut descriptor = libc::pollfd {
+            fd: listener.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        // SAFETY: descriptor is a live borrowed listener fd and descriptor's
+        // one-element storage stays writable through poll. The timeout is
+        // derived from one checked deadline; poll retains no pointers/ownership.
+        let result = unsafe { libc::poll(&mut descriptor, 1, millis) };
+        if result > 0 {
+            if descriptor.revents & (libc::POLLIN | libc::POLLHUP | libc::POLLERR) == 0 {
+                return Err(io::Error::from(io::ErrorKind::InvalidData));
+            }
+            return listener.accept().map(|(stream, _)| stream);
+        }
+        if result == 0 {
+            return Err(io::Error::from(io::ErrorKind::TimedOut));
+        }
+        let error = io::Error::last_os_error();
+        if error.kind() != io::ErrorKind::Interrupted {
+            return Err(error);
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err(io::Error::from(io::ErrorKind::TimedOut));
+        }
+    }
+}
+
+/// Read one fixture handshake byte with a bounded readiness wait.
+#[cfg(feature = "fixture")]
+pub fn fixture_read_byte(
+    stream: &mut std::os::unix::net::UnixStream,
+    timeout: std::time::Duration,
+) -> io::Result<u8> {
+    use std::io::Read;
+    use std::os::fd::AsRawFd;
+    let deadline = std::time::Instant::now()
+        .checked_add(timeout)
+        .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidInput))?;
+    loop {
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        let micros = remaining.as_micros();
+        let millis = if remaining.is_zero() {
+            0
+        } else {
+            i32::try_from(micros.saturating_add(999) / 1_000).unwrap_or(i32::MAX)
+        };
+        let mut descriptor = libc::pollfd {
+            fd: stream.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        // SAFETY: descriptor borrows a live stream fd and its one-element
+        // storage remains writable through poll. The timeout is bounded by a
+        // checked deadline; poll retains neither memory nor descriptor.
+        let result = unsafe { libc::poll(&mut descriptor, 1, millis) };
+        if result > 0 {
+            if descriptor.revents & (libc::POLLIN | libc::POLLHUP | libc::POLLERR) == 0 {
+                return Err(io::Error::from(io::ErrorKind::InvalidData));
+            }
+            let mut byte = [0];
+            return stream.read_exact(&mut byte).map(|()| byte[0]);
+        }
+        if result == 0 {
+            return Err(io::Error::from(io::ErrorKind::TimedOut));
+        }
+        let error = io::Error::last_os_error();
+        if error.kind() != io::ErrorKind::Interrupted {
+            return Err(error);
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err(io::Error::from(io::ErrorKind::TimedOut));
+        }
+    }
+}
+
 /// Replace the current process with a selected owner. Argument parsing remains
 /// at the binary edge; no shell fallback or Python delegation is introduced.
 pub fn replace_process(
@@ -211,7 +331,12 @@ pub(crate) fn fixture_ignore_term() -> io::Result<()> {
 
 // Existing lane subjects remain until S2 replaces custody. These narrow
 // allowances cover inherited diagnostics and pre-R7 unsafe grouping only.
-#[allow(clippy::print_stderr, clippy::collapsible_if, clippy::unwrap_used,
-        clippy::undocumented_unsafe_blocks, clippy::multiple_unsafe_ops_per_block)]
+#[allow(
+    clippy::print_stderr,
+    clippy::collapsible_if,
+    clippy::unwrap_used,
+    clippy::undocumented_unsafe_blocks,
+    clippy::multiple_unsafe_ops_per_block
+)]
 #[doc(hidden)]
 pub mod legacy_lane;

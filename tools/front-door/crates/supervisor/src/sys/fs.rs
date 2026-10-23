@@ -368,6 +368,10 @@ pub(crate) fn effective_uid() -> u32 {
     unsafe { libc::geteuid() }
 }
 
+pub(crate) fn wait(duration: std::time::Duration) {
+    std::thread::sleep(duration);
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
@@ -441,5 +445,3 @@ pub(crate) mod tests {
         }
     }
 }
-
-pub(crate) fn wait(duration: std::time::Duration) { std::thread::sleep(duration); }

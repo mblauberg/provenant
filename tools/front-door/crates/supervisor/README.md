@@ -23,6 +23,7 @@ Authoritative parents must be private and trusted. Owner locks additionally
 validate directory ownership, leaf type, owner, permissions, link count and
 identity. `Directory::lock` uses nonblocking flock polling with core's
 `WaitBudget`, `CancelToken` and the `Clock` that defines its monotonic coordinate.
+Stable names end in `.lock`; generic mutation refuses these leaves.
 An expired budget permits one nonblocking attempt. The non-cloneable `LockGuard`
 has no explicit unlock or raw descriptor escape; its deadline never revokes it.
 

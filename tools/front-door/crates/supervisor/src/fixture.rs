@@ -1,8 +1,9 @@
 //! Dev-only fixtures: dispatch scenario arguments before the test suite.
 use std::ffi::OsString;
 use std::io::{self, Read, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
+
 pub fn environment(root: &Path) -> Vec<(OsString, OsString)> {
     let mut env = vec![
         ("PATH".into(), "/usr/bin:/bin".into()),
@@ -23,25 +24,102 @@ pub fn environment(root: &Path) -> Vec<(OsString, OsString)> {
     }
     env
 }
-/// Only self re-exec has this scoped lint allowance.
-#[allow(clippy::disallowed_methods)]
-pub fn command(scenario: &str, root: &Path) -> io::Result<Command> {
-    let mut command = Command::new(std::env::current_exe()?);
-    command
-        .arg("--fixture")
-        .arg(scenario)
-        .env_clear()
-        .envs(environment(root))
-        .current_dir(root);
-    Ok(command)
-}
+
 pub fn argv(scenario: &str) -> io::Result<Vec<OsString>> {
-    Ok(vec![
+    argv_with_args(scenario, &[])
+}
+pub fn argv_with_args(scenario: &str, extra: &[OsString]) -> io::Result<Vec<OsString>> {
+    let mut argv = vec![
         std::env::current_exe()?.into_os_string(),
         "--fixture".into(),
         scenario.into(),
-    ])
+    ];
+    argv.extend_from_slice(extra);
+    Ok(argv)
 }
+
+pub fn command_with_args(
+    scenario: &str,
+    extra: &[OsString],
+    root: &Path,
+    new_session: bool,
+) -> io::Result<Command> {
+    let argv = argv_with_args(scenario, extra)?;
+    let env = environment(root);
+    crate::sys::fixture_command(&argv, &env, root, new_session)
+}
+pub fn command(scenario: &str, root: &Path) -> io::Result<Command> {
+    command_with_args(scenario, &[], root, false)
+}
+
+#[cfg(feature = "fixture")]
+pub struct ReaperFixture {
+    reaper: crate::sys::reaper::Reaper,
+}
+#[cfg(feature = "fixture")]
+impl ReaperFixture {
+    pub fn new(capacity: usize) -> io::Result<Self> {
+        Ok(Self {
+            reaper: crate::sys::reaper::Reaper::new_paused(capacity)?,
+        })
+    }
+    /// Transfer a spawned fixture child into the paused reaper.
+    pub fn transfer(&self, scenario: &str, extra: &[OsString], root: &Path) -> io::Result<()> {
+        let permit = self
+            .reaper
+            .reserve()
+            .ok_or_else(|| io::Error::from(io::ErrorKind::WouldBlock))?;
+        let argv = argv_with_args(scenario, extra)?;
+        let env = environment(root);
+        let child = crate::sys::raw_exec::OwnedPid::spawn(
+            permit,
+            &argv,
+            Some(&env),
+            root,
+            false,
+            false,
+            false,
+        )?;
+        drop(child);
+        Ok(())
+    }
+    pub fn occupied(&self) -> usize {
+        self.reaper.occupied_fixture()
+    }
+    pub fn resume(&self) {
+        self.reaper.resume();
+    }
+    pub fn wait_for_occupied(
+        &self,
+        maximum: usize,
+        timeout: std::time::Duration,
+    ) -> io::Result<usize> {
+        self.reaper.wait_for_occupied(maximum, timeout)
+    }
+}
+#[cfg(feature = "fixture")]
+impl Drop for ReaperFixture {
+    fn drop(&mut self) {
+        self.reaper.resume();
+    }
+}
+
+#[cfg(feature = "fixture")]
+pub fn fixture_accept(
+    listener: &std::os::unix::net::UnixListener,
+    timeout: std::time::Duration,
+) -> io::Result<std::os::unix::net::UnixStream> {
+    crate::sys::fixture_accept(listener, timeout)
+}
+
+#[cfg(feature = "fixture")]
+pub fn fixture_read_byte(
+    stream: &mut std::os::unix::net::UnixStream,
+    timeout: std::time::Duration,
+) -> io::Result<u8> {
+    crate::sys::fixture_read_byte(stream, timeout)
+}
+
 pub fn dispatch() -> io::Result<bool> {
     let args: Vec<_> = std::env::args_os().collect();
     if args.get(1).is_none_or(|arg| arg != "--fixture") {
@@ -76,7 +154,55 @@ pub fn dispatch() -> io::Result<bool> {
                 }
             }
         }
+        "socket-blocked" => {
+            crate::sys::fixture_ignore_term()?;
+            let path = fixture_path(&args, 3)?;
+            let mut stream = std::os::unix::net::UnixStream::connect(&path)?;
+            stream.write_all(b"R")?;
+            wait_for_eof(&mut stream)?;
+        }
+        "hold-stdout" => {
+            let path = fixture_path(&args, 3)?;
+            let mut stream = std::os::unix::net::UnixStream::connect(&path)?;
+            stream.write_all(b"R")?;
+            io::stdout().write_all(b"held\n")?;
+            wait_for_eof(&mut stream)?;
+            let mut done = std::os::unix::net::UnixStream::connect(path)?;
+            done.write_all(b"D")?;
+        }
+        "exit-with-descendant" => {
+            let socket = fixture_path(&args, 3)?.into_os_string();
+            let exit_socket = fixture_path(&args, 4)?.into_os_string();
+            let root = std::env::current_dir()?;
+            let mut child = command_with_args("hold-stdout", &[socket], &root, true)?;
+            let _ = child.spawn()?;
+            let mut exiting = std::os::unix::net::UnixStream::connect(exit_socket)?;
+            exiting.write_all(b"E")?;
+        }
+        "wait-on-socket" => {
+            let path = fixture_path(&args, 3)?;
+            let mut stream = std::os::unix::net::UnixStream::connect(path)?;
+            stream.write_all(b"R")?;
+            wait_for_eof(&mut stream)?;
+        }
+        "exit" => {}
         _ => return Err(io::ErrorKind::InvalidInput.into()),
     }
     Ok(true)
+}
+fn fixture_path(args: &[OsString], index: usize) -> io::Result<PathBuf> {
+    args.get(index)
+        .map(PathBuf::from)
+        .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidInput))
+}
+fn wait_for_eof(stream: &mut std::os::unix::net::UnixStream) -> io::Result<()> {
+    let mut byte = [0; 1];
+    loop {
+        match stream.read(&mut byte) {
+            Ok(0) => return Ok(()),
+            Ok(_) => return Err(io::Error::from(io::ErrorKind::InvalidData)),
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(error),
+        }
+    }
 }

@@ -316,15 +316,16 @@ fn owner_lock_is_nonblocking_bounded_and_releases_only_when_its_guard_drops() {
     ));
     drop(first);
     drop(second);
-    assert!(dir
-        .lock(
+    assert!(
+        dir.lock(
             OsStr::new("owner.lock"),
             LockMode::Exclusive,
             one_second_budget(),
             &cancel,
             &clock
         )
-        .is_ok());
+        .is_ok()
+    );
 }
 
 #[test]
@@ -385,8 +386,7 @@ fn owner_lock_refuses_symlinked_lock_entries() {
     let temp = tempfile::tempdir().unwrap();
     let dir = Directory::open_anchor(temp.path()).unwrap();
     dir.create_new(OsStr::new("target")).unwrap();
-    dir.symlink(Path::new("target"), OsStr::new("owner.lock"))
-        .unwrap();
+    symlink("target", temp.path().join("owner.lock")).unwrap();
     assert!(matches!(
         dir.lock(
             OsStr::new("owner.lock"),
@@ -732,4 +732,78 @@ fn boxed_filesystem_capabilities_support_threads() {
     check::<dyn SafeFs>();
     check::<dyn SafeDir>();
     check::<dyn SafeFile>();
+}
+
+#[test]
+fn stable_lock_namespace_refuses_every_mutation_without_splitting_exclusion() {
+    let temp = tempfile::tempdir().unwrap();
+    let dir = Directory::open_anchor(temp.path()).unwrap();
+    let clock = FixedClock(provenant_core::MonoTime::from_micros(1_000_000));
+    let token = CancelToken::new();
+    let name = OsStr::new("writer.lock");
+    let guard = dir
+        .lock(
+            name,
+            LockMode::Exclusive,
+            one_second_budget(),
+            &token,
+            &clock,
+        )
+        .unwrap();
+    let inode = dir.metadata_at(name, false).unwrap();
+    dir.create_new(OsStr::new("replacement")).unwrap();
+    for result in [
+        dir.unlink(name),
+        dir.replace(OsStr::new("replacement"), &dir, name),
+        dir.replace(name, &dir, OsStr::new("other")),
+        dir.rename_noreplace(name, &dir, OsStr::new("other")),
+        dir.exchange(OsStr::new("replacement"), &dir, name),
+        dir.symlink(Path::new("replacement"), name),
+    ] {
+        assert!(matches!(result, Err(FsError::ReservedLockName { .. })));
+    }
+    assert!(matches!(
+        dir.atomic_write(name, ".stage", b"new", PublishMode::Replace),
+        Err(FsError::ReservedLockName { .. })
+    ));
+    assert!(matches!(
+        dir.replace_link(name, Path::new("replacement")),
+        Err(FsError::ReservedLockName { .. })
+    ));
+    for alias in ["writer.LOCK", "writer.locK"] {
+        assert!(matches!(dir.unlink(OsStr::new(alias)), Err(FsError::ReservedLockName { .. })));
+        assert!(matches!(dir.replace(OsStr::new("replacement"), &dir, OsStr::new(alias)), Err(FsError::ReservedLockName { .. })));
+    }
+    assert!(inode.same_identity(&dir.metadata_at(name, false).unwrap()));
+    assert!(matches!(
+        dir.lock(
+            name,
+            LockMode::Exclusive,
+            one_second_budget(),
+            &token,
+            &clock
+        ),
+        Err(FsError::LockTimeout { .. })
+    ));
+    drop(guard);
+    assert!(
+        dir.lock(
+            name,
+            LockMode::Exclusive,
+            one_second_budget(),
+            &token,
+            &clock
+        )
+        .is_ok()
+    );
+    assert!(matches!(
+        dir.lock(
+            OsStr::new("ambiguous"),
+            LockMode::Exclusive,
+            one_second_budget(),
+            &token,
+            &clock
+        ),
+        Err(FsError::InvalidLockName { .. })
+    ));
 }

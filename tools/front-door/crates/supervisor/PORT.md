@@ -17,7 +17,7 @@ leaves remain with their old subjects until the design's last-importer gates
 | `pid` | Linux CWD link and Darwin `proc_pidinfo`, typed absence/permission/unsupported and malformed-record failures. CWD grants no custody. |
 | `fs` | Held-path open/stat/mkdir/unlink/symlink, atomic rename modes, entropy, errno, directory iteration and nonblocking flock. File ownership transfers once. |
 | `lane_files` | Existing lane's held-path creation and no-replace link publication, pending S2's owner replacement. |
-| `lane` | Existing binary lane's signal, spawn, reactor and process-observation mechanisms, relocated for R7. S2 owns the lifecycle redesign. |
+| `legacy_lane` | Existing binary lane's signal, spawn, reactor and process-observation mechanisms, relocated for R7. S2 owns the lifecycle redesign. |
 | Module root | Real-ID executable check, reentrant account lookup and process replacement for surviving binary owners. |
 
 S2 retains observation-before-spawn, WNOWAIT/reserved identity, provider
@@ -33,3 +33,23 @@ clock coordinate or unbounded `None` path.
 
 Utility policy is supplied as a supervisor API for confinement's S3 facade.
 No workflow-to-supervisor dependency is introduced.
+
+Stable lock leaves use the reserved `.lock` suffix. Generic directory mutation
+APIs refuse that suffix as source or destination, even through another anchor.
+This protects stable inodes without a process-global registry. The trusted
+owner still protects directory permissions from unmanaged filesystem actors.
+
+`Clock::wall_now` returns a typed error: an infallible wall clock cannot report
+an OS value outside Jiff/core's wire range without panicking or inventing time.
+The legacy lane retains its existing start-display matching, implemented with
+safe Jiff, until S2 removes that old-subject field. It grants no S1 authority.
+
+PR #1350's private `sys::legacy_lane` keeps the previous provider subject for
+its remaining Python importer. Its existing group destructor, observer wait,
+signal-handler state and lifecycle policy are S2 work; moving them does not
+claim the guardian redesign has landed. The new utility owner has none of
+those destructor waits or signal-by-observed-PID interfaces.
+
+Merging #1350 also required Rust 1.99 formatting and small mechanical clippy
+changes in the stacked core/records dependency (chunk iteration and let chains).
+These do not change its types or wire contracts.

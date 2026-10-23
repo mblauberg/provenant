@@ -9,7 +9,11 @@ pub mod fs;
 mod identity;
 pub mod pid;
 // This is the sole syscall boundary, including nonblocking child/lock waits.
-#[allow(unsafe_code, clippy::disallowed_methods, clippy::multiple_unsafe_ops_per_block)]
+#[allow(
+    unsafe_code,
+    clippy::disallowed_methods,
+    clippy::multiple_unsafe_ops_per_block
+)]
 pub mod sys;
 
 #[cfg(feature = "fixture")]

@@ -16,7 +16,7 @@ serde = { workspace = true }
 thiserror = { workspace = true }
 
 [dev-dependencies]
-provenant-supervisor = { path = ".", features = ["fixture"] }
+provenant-supervisor = { workspace = true, features = ["fixture"] }
 tempfile = { workspace = true }
 
 [features]

@@ -273,18 +273,45 @@ impl ExitRecord {
         ];
         loop {
             let list = |v: &[String], n| array(v[..n].iter().cloned());
-            let s=format!(concat!("{{\"schema\":\"provenant.lane.exit.v1\",\"pid\":{pid},\"pgid\":{pid},",
-                "\"started_at\":{start},\"ended_at\":{end},\"last_progress_at\":{progress},\"exit\":{exit},\"signal\":{signal},",
-                "\"forced\":{forced},\"terminal_event_seen\":{terminal},\"reaped\":{reaped},\"spared\":{spared},",
-                "\"census_warnings\":{warnings},\"io_errors\":{io},\"capture\":{{\"events\":{out},\"stderr\":{err}}},",
-                "\"observer_lost\":{lost},\"observer_dropped\":{dropped},",
-                "\"reaped_truncated\":{rt},\"spared_truncated\":{st},\"census_warnings_truncated\":{wt},\"io_errors_truncated\":{it}}}\n"),
-                pid=self.pid.map(|p|p.to_string()).unwrap_or_else(||"null".into()),start=quote(&self.started),end=quote(&self.ended),progress=quote(&self.progress),
-                exit=self.exit.map(|p|p.to_string()).unwrap_or_else(||"null".into()),signal=self.signal.map(|p|p.to_string()).unwrap_or_else(||"null".into()),
-                forced=nullable(self.forced.as_deref()),terminal=self.terminal,reaped=list(&self.reaped,sizes[0]),spared=list(&self.spared,sizes[1]),
-                warnings=array(self.warnings.items[..sizes[2]].iter().map(|s|quote(s))),io=array(self.io.items[..sizes[3]].iter().map(|s|quote(s))),out=self.out,err=self.err,
-                lost=self.observer_lost,dropped=self.observer_dropped,rt=self.reaped.len()-sizes[0],st=self.spared.len()-sizes[1],
-                wt=self.warnings.items.len()-sizes[2]+self.warnings.omitted,it=self.io.items.len()-sizes[3]+self.io.omitted);
+            let s = format!(
+                concat!(
+                    "{{\"schema\":\"provenant.lane.exit.v1\",\"pid\":{pid},\"pgid\":{pid},",
+                    "\"started_at\":{start},\"ended_at\":{end},\"last_progress_at\":{progress},\"exit\":{exit},\"signal\":{signal},",
+                    "\"forced\":{forced},\"terminal_event_seen\":{terminal},\"reaped\":{reaped},\"spared\":{spared},",
+                    "\"census_warnings\":{warnings},\"io_errors\":{io},\"capture\":{{\"events\":{out},\"stderr\":{err}}},",
+                    "\"observer_lost\":{lost},\"observer_dropped\":{dropped},",
+                    "\"reaped_truncated\":{rt},\"spared_truncated\":{st},\"census_warnings_truncated\":{wt},\"io_errors_truncated\":{it}}}\n"
+                ),
+                pid = self
+                    .pid
+                    .map(|p| p.to_string())
+                    .unwrap_or_else(|| "null".into()),
+                start = quote(&self.started),
+                end = quote(&self.ended),
+                progress = quote(&self.progress),
+                exit = self
+                    .exit
+                    .map(|p| p.to_string())
+                    .unwrap_or_else(|| "null".into()),
+                signal = self
+                    .signal
+                    .map(|p| p.to_string())
+                    .unwrap_or_else(|| "null".into()),
+                forced = nullable(self.forced.as_deref()),
+                terminal = self.terminal,
+                reaped = list(&self.reaped, sizes[0]),
+                spared = list(&self.spared, sizes[1]),
+                warnings = array(self.warnings.items[..sizes[2]].iter().map(|s| quote(s))),
+                io = array(self.io.items[..sizes[3]].iter().map(|s| quote(s))),
+                out = self.out,
+                err = self.err,
+                lost = self.observer_lost,
+                dropped = self.observer_dropped,
+                rt = self.reaped.len() - sizes[0],
+                st = self.spared.len() - sizes[1],
+                wt = self.warnings.items.len() - sizes[2] + self.warnings.omitted,
+                it = self.io.items.len() - sizes[3] + self.io.omitted
+            );
             if s.len() <= 16 * 1024 - 64 {
                 return s;
             }
@@ -327,9 +354,9 @@ mod tests {
     fn exit_record_is_valid_and_bounded_with_omission_counts() {
         let r = ExitRecord {
             pid: Some(1),
-            started: timestamp(),
-            ended: timestamp(),
-            progress: timestamp(),
+            started: timestamp().unwrap(),
+            ended: timestamp().unwrap(),
+            progress: timestamp().unwrap(),
             exit: Some(0),
             signal: None,
             forced: None,
@@ -346,6 +373,8 @@ mod tests {
         let text = r.encode();
         assert!(text.len() <= 16384);
         let v = crate::legacy_json::parse(&text).unwrap();
-        assert!(matches!(v.get("reaped_truncated"),Some(crate::legacy_json::Value::Int(n)) if *n>0));
+        assert!(
+            matches!(v.get("reaped_truncated"),Some(crate::legacy_json::Value::Int(n)) if *n>0)
+        );
     }
 }

@@ -1,8 +1,8 @@
+use serde::Serialize;
 use serde::ser::{
     self, Impossible, SerializeMap, SerializeSeq, SerializeStruct, SerializeStructVariant,
     SerializeTuple, SerializeTupleStruct, SerializeTupleVariant, Serializer,
 };
-use serde::Serialize;
 use sha2::{Digest as _, Sha256};
 use std::collections::BTreeMap;
 use thiserror::Error;
@@ -87,7 +87,7 @@ pub fn record_digest(
 
 #[cfg(test)]
 mod tests {
-    use super::{record_digest, CanonicalV1};
+    use super::{CanonicalV1, record_digest};
     use serde_json::json;
 
     #[test]

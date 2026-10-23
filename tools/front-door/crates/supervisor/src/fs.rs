@@ -55,6 +55,10 @@ pub enum FsError {
     LockRefused { name: OsString, reason: LockRefusal },
     #[error("lock deadline could not be represented for {path:?}")]
     LockDeadlineOverflow { path: PathBuf },
+    #[error("stable lock names must end in .lock: {name:?}")]
+    InvalidLockName { name: OsString },
+    #[error("stable lock entry cannot be mutated: {name:?}")]
+    ReservedLockName { name: OsString },
     #[error("file exceeds byte limit {limit}")]
     TooLarge { limit: u64 },
 }
@@ -178,6 +182,21 @@ fn component(name: &OsStr) -> Result<&OsStr> {
         || bytes.contains(&0)
     {
         return Err(FsError::InvalidComponent { name: name.into() });
+    }
+    Ok(name)
+}
+
+fn is_lock_name(name: &OsStr) -> bool {
+    // Case-insensitive filesystems also accept case and Unicode spellings of
+    // an existing leaf. Inspect just the extension so non-UTF-8 prefixes retain
+    // their native bytes (e.g. Kelvin sign canonically aliases ASCII K).
+    let extension = name.as_bytes().rsplit(|byte| *byte == b'.').next().unwrap_or_default();
+    std::str::from_utf8(extension).is_ok_and(|text| text.to_lowercase() == "lock")
+}
+fn mutable_component(name: &OsStr) -> Result<&OsStr> {
+    component(name)?;
+    if is_lock_name(name) {
+        return Err(FsError::ReservedLockName { name: name.into() });
     }
     Ok(name)
 }
@@ -327,6 +346,9 @@ impl Directory {
         clock: &dyn Clock,
     ) -> Result<LockGuard> {
         let name = component(name)?;
+        if !name.as_bytes().ends_with(b".lock") {
+            return Err(FsError::InvalidLockName { name: name.into() });
+        }
         let path = self.path.join(name);
         if cancel.is_cancelled() {
             return Err(FsError::Cancelled { path });
@@ -395,7 +417,7 @@ impl Directory {
         self.remove(name, true)
     }
     fn remove(&self, name: &OsStr, directory: bool) -> Result<()> {
-        let name = component(name)?;
+        let name = mutable_component(name)?;
         os::unlink(&self.file, name, directory).map_err(error("unlinkat", &self.path.join(name)))
     }
     /// Atomic same-filesystem publication; existing destinations are refused.
@@ -431,8 +453,8 @@ impl Directory {
         destination: &OsStr,
         mode: os::Rename,
     ) -> Result<()> {
-        component(source)?;
-        component(destination)?;
+        mutable_component(source)?;
+        mutable_component(destination)?;
         os::rename(&self.file, source, &destination_dir.file, destination, mode).map_err(
             |source_error| FsError::Rename {
                 from_path: self.path.join(source),
@@ -442,7 +464,7 @@ impl Directory {
         )
     }
     pub fn symlink(&self, target: &Path, name: &OsStr) -> Result<()> {
-        let name = component(name)?;
+        let name = mutable_component(name)?;
         os::symlink(target, &self.file, name).map_err(error("symlinkat", &self.path.join(name)))
     }
     pub fn sync(&self) -> Result<()> {
