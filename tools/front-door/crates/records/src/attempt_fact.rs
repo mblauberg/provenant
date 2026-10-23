@@ -6,7 +6,7 @@ use serde::Serialize;
 use crate::{FileDigest, PathWire};
 
 /// Terminal attempt outcomes published to workflow, telemetry and the CLI.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AttemptOutcome {
     Succeeded,
@@ -26,7 +26,7 @@ pub enum AttemptOutcome {
 
 /// Route details resolved for an attempt. Unknown provider observations remain
 /// absent rather than being filled from a requested route.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 pub struct RouteFact {
     pub provider: Option<String>,
     pub model: Option<String>,

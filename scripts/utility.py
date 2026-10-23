@@ -12,10 +12,8 @@ from pathlib import Path
 import subprocess
 import sys
 import time
-import uuid
 
 import model_route
-import telemetry
 
 ROOT = Path(__file__).resolve().parents[1]
 ORCHESTRATE = ROOT / 'skills/orchestrate/scripts'
@@ -59,25 +57,6 @@ def validate_schema(schema, value=None, *, check=False):
         raise ValueError(result.stderr.strip()[:500] or 'schema validation failed')
 
 
-def record_call(verb, route, escalated, started, status, metadata=None):
-    try:
-        attrs = {'verb': verb, 'route': route, 'escalated': escalated,
-                 'latency_ms': round((time.monotonic() - started) * 1000, 2), 'status': status,
-                 **{key: value for key, value in (metadata or {}).items()
-                    if key in {'model', 'tokens', 'cost_usd'}}}
-        with telemetry.connect() as db:
-            telemetry.put_event(db, 'utility.call', telemetry.now(), str(uuid.uuid4()), attrs,
-                                model=attrs.get('model'))
-    except Exception:
-        pass  # Telemetry is best effort, including for deterministic calls.
-
-
-class ProviderCallError(ValueError):
-    def __init__(self, message, metadata):
-        super().__init__(message)
-        self.metadata = metadata
-
-
 def provider_call(prompt, route, confidential, *, timeout_seconds=None):
     """One pool pick and one supervised provider call; no implicit fallback or fan-out."""
     deadline = time.monotonic() + timeout_seconds if timeout_seconds is not None else None
@@ -115,27 +94,14 @@ def provider_call(prompt, route, confidential, *, timeout_seconds=None):
     record = provider_exec.execute(plan, output,
                                    events_path=directory / 'events.jsonl', stderr_path=directory / 'stderr.log',
                                    env={**os.environ, 'PROVENANT_UTILITY_ACTIVE': '1'})
-    tokens = {key: value for key, value in record.get('context', {}).items()
-              if key.endswith('_tokens') and value is not None}
-    metadata = {'model': f'{adapter}/{model}', 'tokens': tokens or None}
-    with (directory / 'events.jsonl').open(encoding='utf-8') as events:
-        for line in events:
-            try:
-                event = json.loads(line)
-            except ValueError:
-                continue
-            cost = event.get('total_cost_usd') if event.get('type') == 'result' else None
-            if type(cost) in (int, float) and cost >= 0:
-                metadata['cost_usd'] = cost
     if record['status'] != 'ok':
-        raise ProviderCallError('utility provider call failed: ' + record['status'], metadata)
-    return output.read_text(encoding='utf-8'), metadata
+        raise ValueError('utility provider call failed: ' + record['status'])
+    return output.read_text(encoding='utf-8')
 
 
 def execute(verb, source, *, labels=None, schema=None, question=None, confidential=True, provider=None,
             retry=True, timeout_seconds=None):
     """Return a validated result; CLI calls retry utility once, then try junior once."""
-    started = time.monotonic()
     if verb == 'extract':
         validate_schema(schema, check=True)
         def validate(value):
@@ -147,7 +113,6 @@ def execute(verb, source, *, labels=None, schema=None, question=None, confidenti
         except ValueError:
             pass
         else:
-            record_call(verb, 'code', False, started, 'ok')
             return value
     elif verb == 'classify':
         if not labels or any(not label for label in labels) or len(set(labels)) != len(labels):
@@ -165,9 +130,7 @@ def execute(verb, source, *, labels=None, schema=None, question=None, confidenti
         contract = {'labels': labels, 'items': items, 'output': 'JSON array of labels in item order'}
         exact = {label.casefold(): label for label in labels}
         if all(item.strip().casefold() in exact for item in items):
-            value = [exact[item.strip().casefold()] for item in items]
-            record_call(verb, 'code', False, started, 'ok')
-            return value
+            return [exact[item.strip().casefold()] for item in items]
     elif verb == 'digest':
         lines = source.splitlines()
         def validate(value):
@@ -189,21 +152,13 @@ def execute(verb, source, *, labels=None, schema=None, question=None, confidenti
               'Return only JSON matching the contract.\n' + json.dumps(contract, ensure_ascii=False))
     error = ''
     for route in (('utility', 'utility', 'junior') if retry else ('utility',)):
-        started = time.monotonic()
-        metadata = {}
-        status = 'failed'
         try:
             call_prompt = prompt + ('\nFix: ' + error if error else '')
-            raw, metadata = (provider(call_prompt, route, confidential) if provider else
-                             provider_call(call_prompt, route, confidential, timeout_seconds=timeout_seconds))
-            value = validate(json.loads(raw))
-            status = 'ok'
-            return value
+            raw = (provider(call_prompt, route, confidential) if provider else
+                   provider_call(call_prompt, route, confidential, timeout_seconds=timeout_seconds))
+            return validate(json.loads(raw))
         except (OSError, ValueError, subprocess.SubprocessError) as exc:
-            metadata = getattr(exc, "metadata", metadata)
             error = str(exc)[:500]
-        finally:
-            record_call(verb, route, route == 'junior', started, status, metadata)
     raise ValueError('utility output validation failed: ' + error)
 
 

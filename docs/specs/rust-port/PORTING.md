@@ -68,7 +68,7 @@ which `tests/test_rust_port_layering.py` reads, in the same PR.
 | confinement | Plan permissions, quarantine, secret redaction, safe Git/path policy, worktree lifecycle and scratch settlement | core, records, config, supervisor's safe OS API |
 | providers | Adapter mechanics, account identity, verified lineage/availability, quota wire decoding, argv/environment, output classification and continuation | core, records, config, confinement, quota |
 | quota | Quota windows, reset schedules, refresh scheduling and admission advice | core, records, config |
-| telemetry | Ingest, usage/cost attribution, summaries and reports | core, records, config |
+| telemetry | Pure terminal-attempt usage/cost reduction and price schema | core, records, config |
 | routing | Catalogue, named routes, eligibility and route decisions | core, records, config, quota, providers |
 | run | Dispatch, admission, the run registry and status, attempts, batch, retry and publication orchestration | core, records, config, supervisor, confinement, providers, quota, routing |
 | fabric-store | SQLite schema/migrations, messages, claims, sessions and graph persistence | core, records, supervisor's safe lock API |

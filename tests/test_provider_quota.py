@@ -200,43 +200,6 @@ def test_codex_reports_its_credit_balance_and_banked_resets_with_expiry(quota):
     assert empty['usage_credits'] is None and quota.normalise_resets(empty['resets']) is None
 
 
-def test_codex_falls_back_to_rollout_rate_limits_already_in_the_ledger(quota, monkeypatch, tmp_path):
-    db = load('telemetry_for_quota', ROOT / 'scripts/telemetry.py').connect()
-    # Another account's newer reading on this host must never stand in for this account's.
-    for used, stamp, label in ((40, NOW - timedelta(hours=2), 'default'), (45, NOW - timedelta(hours=1), 'default'),
-                               (90, NOW - timedelta(minutes=5), 'work')):
-        db.execute('INSERT INTO observations(event_id,source,host,provider,adapter,account,timestamp,window,used_percent,'
-                   'window_minutes,reset_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)',
-                   (f'e{used}', 'codex', 'studio', 'openai', 'codex', label, iso(stamp), 'secondary', used, 10080,
-                    iso(NOW + timedelta(days=2))))
-    db.commit()
-    monkeypatch.setattr(quota, 'executable', lambda name: None)
-    account = quota.Account('codex', 'default', tmp_path / 'home/.codex', True)
-    value = quota.refresh(account, NOW, force=True)
-    assert value['source'] == 'codex rollout rate-limit events'
-    assert value['observed_at'] == iso(NOW - timedelta(hours=1))
-    assert [(row['name'], row['used_percent']) for row in value['windows']] == [('secondary', 45)]
-    other = quota.refresh(quota.Account('codex', 'work', tmp_path / 'codex-work', False), NOW, force=True)
-    assert other['status'] == 'unavailable' and other['windows'] == []
-
-
-def test_codex_ledger_fallback_reads_rows_written_under_an_earlier_configured_host_id(quota, monkeypatch, tmp_path):
-    hosts = tmp_path / 'home/.agents/.agent-fabric/hosts.json'
-    hosts.parent.mkdir(parents=True)
-    hosts.write_text(json.dumps({'schema_version': 1, 'local_host': 'box'}))
-    telemetry = load('telemetry_for_quota_box', ROOT / 'scripts/telemetry.py')
-    with telemetry.connect() as db:
-        db.execute('INSERT INTO observations(event_id,source,host,provider,adapter,account,timestamp,window,used_percent,'
-                   'window_minutes,reset_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)',
-                   ('e1', 'codex', 'box', 'openai', 'codex', 'default', iso(NOW - timedelta(hours=1)), 'secondary', 45,
-                    10080, iso(NOW + timedelta(days=2))))
-    # The host is renamed; its earlier rows stay under `box` and must still read as this host's.
-    hosts.write_text(json.dumps({'schema_version': 1, 'local_host': 'studio'}))
-    monkeypatch.setattr(quota, '_telemetry', lambda: load('telemetry_for_quota_studio', ROOT / 'scripts/telemetry.py'))
-    assert [(row['name'], row['used_percent']) for row in quota.ledger_windows('codex', NOW, 'default')['windows']] == [
-        ('secondary', 45)]
-
-
 def test_claude_usage_endpoint_uses_the_token_in_process_only(quota, monkeypatch, tmp_path, capsys):
     identity = tmp_path / 'claude-b'
     identity.mkdir()
@@ -270,11 +233,8 @@ def test_claude_usage_endpoint_uses_the_token_in_process_only(quota, monkeypatch
     assert [(row['name'], row['window_minutes']) for row in result['windows']] == [
         ('five_hour', 300), ('seven_day', WEEK), ('seven_day_opus', WEEK), ('weekly_scoped:fable', WEEK)]
     stored = quota.cache_path('claude', 'max-b', identity_dir=identity).read_text()
-    with sqlite3.connect(tmp_path / 'state/telemetry.sqlite3') as db:
-        assert set(db.execute('SELECT plan_detected, plan_tier FROM quota_series')) == {('max', 'default_claude_max_20x')}
-        ledger = '\n'.join(db.iterdump())
     for secret in (TOKEN, 'owner@example.com'):
-        assert secret not in stored and secret not in json.dumps(result) and secret not in ledger
+        assert secret not in stored and secret not in json.dumps(result)
     assert TOKEN not in capsys.readouterr().out
 
 
@@ -813,42 +773,6 @@ def test_accounts_come_from_config_and_default_to_one_discovered_identity(quota,
 
 # Reset events -------------------------------------------------------------------------------
 
-@pytest.mark.parametrize(('previous', 'current', 'observed', 'kind'), [
-    ((80, timedelta(hours=1)), (5, timedelta(days=7, hours=1)), NOW + timedelta(hours=2), 'natural'),
-    ((80, timedelta(days=3)), (10, timedelta(days=3)), NOW + timedelta(hours=1), 'granted_date_kept'),
-    ((80, timedelta(days=3)), (2, timedelta(days=7, hours=1)), NOW + timedelta(hours=1), 'granted_window_restarted'),
-    ((40, timedelta(days=3)), (41, timedelta(days=4)), NOW + timedelta(hours=1), 'window_moved'),
-    ((40, timedelta(days=3)), (0, None), NOW + timedelta(hours=1), 'not_started'),
-    ((0, None), (3, timedelta(days=7)), NOW + timedelta(hours=1), 'window_started'),
-    ((40, timedelta(days=3)), (41, timedelta(days=3)), NOW + timedelta(hours=1), None),
-    # A local clock beyond the previous reset is not proof that the provider rolled its window.
-    ((80, timedelta(days=3)), (10, timedelta(days=3)), NOW + timedelta(days=4), 'granted_date_kept'),
-    ((40, timedelta(days=3)), (41, timedelta(days=3)), NOW + timedelta(days=4), None),
-    # A large gap from the previous provider reset is not a natural rollover.
-    ((80, timedelta(days=3)), (2, timedelta(days=14)), NOW + timedelta(hours=1), 'window_moved'),
-    # A thirty-minute mismatch is not a window restarted at this observation.
-    ((80, timedelta(days=3)), (2, timedelta(days=7, minutes=30)), NOW + timedelta(hours=1), 'window_moved'),
-    ((80, timedelta(days=3)), (2, timedelta(days=7, minutes=58)), NOW + timedelta(hours=1), 'granted_window_restarted'),
-])
-def test_consecutive_observations_classify_reset_events(quota, previous, current, observed, kind):
-    before = window(previous[0], WEEK, previous[1])
-    after = window(current[0], WEEK, current[1])
-    event = quota.classify_reset(before, after, NOW, observed)
-    assert (event or {}).get('kind') == kind
-
-
-def test_reset_events_are_recorded_in_the_ledger_and_pace_follows_the_latest_snapshot(quota, monkeypatch, tmp_path):
-    replies = iter([[window(80, WEEK, timedelta(days=3))], [window(10, WEEK, timedelta(days=3))]])
-    monkeypatch.setattr(quota, 'fetch', lambda account, now: {'windows': next(replies), 'source': 'test'})
-    account = quota.Account('codex', 'default', Path('/nowhere'), True)
-    quota.refresh(account, NOW, force=True)
-    latest = quota.refresh(account, NOW + timedelta(hours=1), force=True)
-    with sqlite3.connect(tmp_path / 'state/telemetry.sqlite3') as db:
-        rows = db.execute('SELECT provider,account,host,window,kind,previous_used_percent,used_percent FROM quota_events').fetchall()
-    assert rows == [('codex', 'default', 'studio', 'seven_day', 'granted_date_kept', 80, 10)]
-    assert quota_display.report(vars(quota), [latest], NOW + timedelta(hours=1))['accounts'][0]['windows'][0]['pace']['state'] == 'reserve'
-
-
 # Credits and use-it-or-lose-it ----------------------------------------------------------------
 
 def test_credits_and_resets_appear_only_for_accounts_that_have_them(quota, monkeypatch, capsys):
@@ -890,20 +814,6 @@ def test_budget_windows_show_amounts_under_a_configurable_label(quota, tmp_path,
     configure(tmp_path, {'quota': {'window_labels': {'iguana_necktie': 'Cloud credits', 'seven_day': 'Week'}}})
     rows = {row['name']: row for row in quota_display.report(vars(quota), [value], NOW)['accounts'][0]['windows']}
     assert (rows['iguana_necktie']['label'], rows['seven_day']['label']) == ('Cloud credits', 'Week')
-
-
-def test_peer_snapshots_carry_only_sanitised_credits_resets_and_amounts(quota):
-    telemetry = load('telemetry_for_quota_peer', ROOT / 'scripts/telemetry.py')
-    value = {'schema': quota.SCHEMA, 'provider': 'codex', 'account': 'default', 'host': 'studio',
-             'windows': [{'name': 'budget', 'used_percent': 5, 'used_amount': 'x', 'limit_amount': 250}],
-             'usage_credits': [{'kind': 'credits', 'balance': 12, 'credential': TOKEN}, {'balance': 'NaN'}],
-             'resets': {'available': 2, 'expires_at': [TOKEN, iso(NOW)], 'id': TOKEN}}
-    public = telemetry.report_owner().public_snapshot(telemetry, value)
-    assert TOKEN not in json.dumps(public)
-    assert public['windows'] == [{'name': 'budget', 'used_percent': 5}]
-    assert [row['balance'] for row in public['usage_credits']] == [12]
-    assert public['resets'] == {'available': 2, 'expires_at': [iso(NOW)], 'source': 'provider'}
-    assert 'resets' not in telemetry.report_owner().public_snapshot(telemetry, {**value, 'resets': {'available': 0}})
 
 
 def test_manual_reset_credits_and_redeem_advice(quota, capsys):
@@ -1839,59 +1749,6 @@ def test_opencode_spend_queries_reach_messages_through_indexes(quota, tmp_path, 
             assert any('USING' in step and 'INDEX' in step for step in plan), (sql, plan)
             if 'FROM message' in sql:
                 assert any('message_session_time_created_id_idx' in step for step in plan)
-
-
-def test_every_fetch_appends_a_deduplicated_series_row_with_plan_tier_credits_and_plan_changes(quota, monkeypatch, tmp_path):
-    replies = iter([
-        {'windows': [window(20, WEEK, timedelta(days=3))], 'plan': 'max', 'plan_tier': 'default_claude_max_5x'},
-        {'windows': [window(20, WEEK, timedelta(days=3))], 'plan': 'max', 'plan_tier': 'default_claude_max_5x'},
-        {'windows': [window(25, WEEK, timedelta(days=3))], 'plan': 'max', 'plan_tier': 'default_claude_max_20x',
-         'credit_balance': '41.5', 'credits': {'reset_credits': 2, 'source': 'provider'}}])
-    calls = []
-    monkeypatch.setattr(quota, 'fetch', lambda account, now: calls.append(now) or {**next(replies), 'source': 'test'})
-    account = quota.Account('claude', 'anese', Path('/nowhere'), True, plan='Max')
-    # The adaptive schedule sets the cadence now, so force the three fetches; 12 minutes comes from the cache.
-    for minutes, force in ((0, True), (10, True), (12, False), (20, True)):
-        quota.refresh(account, NOW + timedelta(minutes=minutes), force=force)
-    assert len(calls) == 3
-    with sqlite3.connect(tmp_path / 'state/telemetry.sqlite3') as db:
-        db.row_factory = sqlite3.Row
-        series = [dict(row) for row in db.execute('SELECT * FROM quota_series ORDER BY observed_at')]
-        changes = [json.loads(row[0]) for row in db.execute("SELECT attrs FROM events WHERE kind='plan.change'")]
-    assert [(row['account'], row['host'], row['window'], row['used_percent'], row['plan'], row['plan_detected'],
-             row['plan_tier'], row['credit_balance'], row['reset_credits']) for row in series] == [
-        ('anese', 'studio', 'seven_day', 20, 'Max', 'max', 'default_claude_max_5x', None, None),
-        ('anese', 'studio', 'seven_day', 25, 'Max', 'max', 'default_claude_max_20x', 41.5, 2)]
-    assert series[0]['last_seen_at'] == iso(NOW + timedelta(minutes=10))
-    assert [(row['plan_tier_from'], row['plan_tier_to']) for row in changes] == [
-        ('default_claude_max_5x', 'default_claude_max_20x')]
-
-
-def test_plan_mismatch_warns_once_per_account_and_plan_pair(quota, monkeypatch, tmp_path):
-    plans = iter(['max', 'MAX', 'pro', None, 'max'])
-    monkeypatch.setattr(quota, 'fetch', lambda account, now: {
-        'windows': [window(20, WEEK)], 'plan': next(plans), 'source': 'test'})
-    account = quota.Account('claude', 'anese', Path('/nowhere'), True, plan='Pro')
-    for minute in range(5):
-        quota.refresh(account, NOW + timedelta(minutes=minute), force=True)
-    # The same mismatch on another account is its own warning.
-    monkeypatch.setattr(quota, 'fetch', lambda account, now: {
-        'windows': [window(20, WEEK)], 'plan': 'max', 'source': 'test'})
-    quota.refresh(quota.Account('claude', 'other', Path('/nowhere'), True, plan='Pro'), NOW, force=True)
-    quota.refresh(quota.Account('claude', 'anese', Path('/nowhere'), True, plan='Team'), NOW, force=True)
-    with sqlite3.connect(tmp_path / 'state/telemetry.sqlite3') as db:
-        warnings = [(account, json.loads(attrs)) for account, attrs in db.execute(
-            "SELECT account,attrs FROM events WHERE kind='plan.mismatch' ORDER BY account,attrs")]
-    assert [(account, attrs['plan'], attrs['plan_detected']) for account, attrs in warnings] == [
-        ('anese', 'Pro', 'max'), ('anese', 'Team', 'max'), ('other', 'Pro', 'max')]
-
-
-def test_series_never_blocks_a_reading_when_the_ledger_is_unwritable(quota, monkeypatch):
-    monkeypatch.setattr(quota, 'fetch', lambda account, now: {'windows': [window(5, 300, timedelta(hours=1))],
-                                                              'source': 'test'})
-    monkeypatch.setattr(quota._telemetry(), 'connect', lambda: (_ for _ in ()).throw(sqlite3.OperationalError('locked')))
-    value = quota.refresh(quota.Account('codex', 'default', Path('/nowhere'), True), NOW, force=True)
-    assert value['status'] == 'ok' and value['windows'][0]['used_percent'] == 5
 
 
 def test_codex_reports_its_usage_credit_balance_for_the_series(quota):
