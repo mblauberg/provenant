@@ -12,13 +12,8 @@ import { reply, digest, serverBuild, mailboxView, adapterView, runView, fullView
 import { catalogueSnapshot, liveModels, resetCooldowns } from "./catalogue.js";
 import { handoffDispatch, resumeConfiguredProvider } from "./resume.js";
 import { reconcileSession, sessionDispatch, sessionName, sessionView } from "./sessions.js";
-import {
-  cancelConfiguredRun,
-  dispatchConfiguredBatch,
-  dispatchConfiguredProvider,
-  MAX_EXECUTION_WAIT_SECONDS,
-  releaseActiveExecutions,
-} from "./execution.js";
+import { dispatchConfiguredProvider, MAX_EXECUTION_WAIT_SECONDS, releaseActiveExecutions } from "./execution.js";
+import { cancelConfiguredRun, dispatchConfiguredBatch } from "./batch-execution.js";
 import { isSQLiteContention, Store, type Message } from "./store.js";
 import { readEvents, readRuns } from "./run-reader.js";
 import { canonicalMode, editDistance, rejected, ACCESS_MODES } from "./execution-input.js";

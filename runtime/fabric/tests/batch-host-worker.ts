@@ -1,4 +1,4 @@
-import { dispatchConfiguredBatch } from "../src/execution.js";
+import { dispatchConfiguredBatch } from "../src/batch-execution.js";
 
 const [workspace, prompt] = process.argv.slice(2) as [string, string];
 
