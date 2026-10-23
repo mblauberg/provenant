@@ -20,7 +20,6 @@ TASK_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 BATCH_ID_RE = re.compile(r"^batch-(?:\d{3}|[1-9]\d{3,})$")
 TERMINAL_STATUSES = {"blocked", "ok", "quarantined", "failed", "timed_out", "cancelled", "lost"}
 DISPATCH_RUN = Path(__file__).with_name("dispatch_run.py")
-MAX_WORKER_QUESTION_PROMPT = 4096
 MAX_OPERATOR_RESPONSE_BYTES = 64 * 1024
 MAX_CANCEL_WAIT_SECONDS = 60.0
 MAX_GIT_EVIDENCE_HEADER_BYTES = 64 * 1024
@@ -34,11 +33,7 @@ MAX_GIT_EVIDENCE_HEADER_BYTES = 64 * 1024
 SCRIPT_ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(SCRIPT_ROOT))
 sys.path.insert(0, str(SCRIPT_ROOT.parents[1]))
-from dispatch_run import (
-    create_cancellation_marker,
-    remove_cancellation_marker,
-    worker_question_envelope_bytes,
-)
+import run_records
 from attempt_evidence import AttemptEvidenceError, canonical_success_status, is_success_status, validate_successful_attempt
 import layout
 from _shared.custody import OwnedFileError, open_contained_regular, read_contained_regular
@@ -55,7 +50,7 @@ def _valid_worker_question(value: Any) -> bool:
         and value.get("code") == "needs_input"
         and isinstance(value.get("prompt"), str)
         and bool(value["prompt"])
-        and len(value["prompt"]) <= MAX_WORKER_QUESTION_PROMPT
+        and len(value["prompt"]) <= run_records.MAX_WORKER_QUESTION_PROMPT
         and "\x00" not in value["prompt"]
     )
 
@@ -96,7 +91,7 @@ def _cancel_wait_seconds(value: Any) -> float:
 
 def _create_cancel_marker(run_dir: Path, directory: Path) -> None:
     try:
-        create_cancellation_marker(run_dir, directory)
+        run_records.create_cancellation_marker(run_dir, directory)
     except ValueError as exc:
         raise ControlError(str(exc)) from exc
 
@@ -185,13 +180,13 @@ def _cancel(args: argparse.Namespace) -> int:
             raise ControlError("cancel target attempt directory does not exist")
         existing = _attempt_terminal(run_dir, args.task_id, args.attempt_id)
         if existing is not None:
-            remove_cancellation_marker(run_dir, target)
+            run_records.remove_cancellation_marker(run_dir, target)
             return _cancel_result("already_terminal", "attempt already has validated terminal evidence")
         _create_cancel_marker(run_dir, target)
         existing = _wait_for_attempt_terminal(run_dir, args.task_id, args.attempt_id, wait_seconds)
         if existing is None:
             return _cancel_result("completion_evidence_missing", "owner did not produce validated terminal attempt evidence", code=1)
-        remove_cancellation_marker(run_dir, target)
+        run_records.remove_cancellation_marker(run_dir, target)
         status = "cancelled" if existing.get("status") == "cancelled" else "already_terminal"
         return _cancel_result(status, "validated terminal attempt evidence is durable")
 
@@ -218,7 +213,7 @@ def _cancel(args: argparse.Namespace) -> int:
                 raise
             summary = None
         else:
-            remove_cancellation_marker(run_dir, target)
+            run_records.remove_cancellation_marker(run_dir, target)
             return _cancel_result("already_terminal", "batch already has validated terminal summary evidence")
         if summary is None:
             deadline = time.monotonic() + wait_seconds
@@ -230,7 +225,7 @@ def _cancel(args: argparse.Namespace) -> int:
                         raise
                     time.sleep(min(0.05, max(0.0, deadline - time.monotonic())))
                     continue
-                remove_cancellation_marker(run_dir, target)
+                run_records.remove_cancellation_marker(run_dir, target)
                 status = "cancelled" if summary.get("status") == "cancelled" else "already_terminal"
                 return _cancel_result(status, "validated terminal batch summary evidence is durable")
             return _cancel_result("completion_evidence_missing", "owner did not produce validated terminal batch summary evidence", code=1)
@@ -250,7 +245,7 @@ def _cancel(args: argparse.Namespace) -> int:
                     raise ControlError("batch summary evidence is invalid")
             summary = None
         if summary is not None:
-            remove_cancellation_marker(run_dir, target)
+            run_records.remove_cancellation_marker(run_dir, target)
             status = "cancelled" if summary.get("status") == "cancelled" else "already_terminal"
             return _cancel_result(status, "validated terminal batch summary evidence is durable")
         remaining = deadline - time.monotonic()
@@ -494,7 +489,7 @@ def _attempt(run_dir: Path, task_id: str, attempt_id: str) -> tuple[dict[str, An
         if not isinstance(result_claim, dict) or "result" not in payloads:
             raise ControlError(f"blocked attempt has no retained terminal question: {attempt_rel}")
         try:
-            envelope_question = worker_question_envelope_bytes(
+            envelope_question = run_records.worker_question_envelope_bytes(
                 payloads["result"], result_claim.get("digest")
             )
         except (ValueError, TypeError) as exc:
@@ -756,7 +751,7 @@ def _retry(args: argparse.Namespace) -> int:
         if "result" not in payloads or not isinstance(result_digest, str):
             raise ControlError("blocked retry requires the retained question envelope")
         try:
-            retained_question = worker_question_envelope_bytes(payloads["result"], result_digest)
+            retained_question = run_records.worker_question_envelope_bytes(payloads["result"], result_digest)
         except (ValueError, ControlError) as exc:
             raise ControlError("blocked retry requires the retained question envelope") from exc
         if retained_question != question:

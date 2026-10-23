@@ -43,25 +43,20 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import process_info
 CF_DISPATCH = Path(__file__).with_name("cf_dispatch.py")
 TASK_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
-DELIVERY_RUN_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 ATTEMPT_ID_RE = re.compile(r"^attempt-(?P<number>\d{3}|[1-9]\d{3,})$")
 ESCALATION_REASONS = ("gate_failed", "review_blocked", "capability", "quota_or_limit")
 BATCH_ID_RE = re.compile(r"^batch-(?:\d{3}|[1-9]\d{3,})$")
 DEFAULT_TIMEOUT_SECONDS = 3600.0
 # Match the existing abandoned-receipt grace period for pre-identity attempts.
 LEGACY_ATTEMPT_STALE_SECONDS = 48 * 3600
-MAX_WORKER_QUESTION_PROMPT = 4096
-MAX_WORKER_TERMINAL_ENVELOPE_BYTES = 64 * 1024
 MAX_GIT_EVIDENCE_HEADER_BYTES = 64 * 1024
-WORKER_TERMINAL_RECORD_TYPE = "provenant-worker-terminal"
-GIT_EVIDENCE_RECORD_TYPE = "provenant-git-evidence"
-CANCEL_MARKER_NAME = "cancel.request"
 BRANCH_TYPES = "feat|fix|refactor|perf|test|docs|chore|ci|build"
 BRANCH_PATTERN = re.compile(rf"^(?:(?:{BRANCH_TYPES}|proto)/[a-z][a-z0-9]*-[a-z0-9]+(?:-[a-z0-9]+){{1,4}}|land/[0-9]{{8}}-[a-z0-9]+(?:-[a-z0-9]+)*)$")
 
 from _shared.bounded_process import BudgetArgumentParser, stop_process_group
 from _shared import harness_profile
 from layout import run_workspace, run_root, contains_run
+import run_records
 import provider_exec
 import provider_output
 import memory_admission
@@ -79,126 +74,8 @@ from _shared.custody import (
 )
 from attempt_evidence import AttemptEvidenceError as SharedAttemptEvidenceError, canonical_success_status, is_success_status, successful_adapter_error, validate_successful_attempt
 
-class AttemptEvidenceError(ValueError):
-    """A retained attempt cannot be reconciled without inventing evidence."""
-
-
-class TerminalEnvelopeIntegrityError(ValueError):
-    """A bounded terminal candidate changed or became unsafe to reread."""
-
-
 def now() -> str:
     return datetime.now(UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z")
-
-
-def digest(path: Path) -> str:
-    hasher = hashlib.sha256()
-    with path.open("rb") as stream:
-        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-            hasher.update(chunk)
-    return f"sha256:{hasher.hexdigest()}"
-
-
-def json_digest(value: Any) -> str:
-    encoded = json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
-    return f"sha256:{hashlib.sha256(encoded).hexdigest()}"
-
-
-def write_owned(run_dir: Path, path: Path, content: str) -> None:
-    atomic_write_contained(run_dir, path.relative_to(run_dir), content.encode(), label=str(path.name))
-
-
-@contextmanager
-def owned_text_file(run_dir: Path, path: Path, mode: str):
-    flags = os.O_WRONLY | os.O_CREAT | (os.O_APPEND if "a" in mode else os.O_EXCL)
-    fd, _relative, _target = open_contained_regular(
-        run_dir, path.relative_to(run_dir), flags, label=str(path.name)
-    )
-    with os.fdopen(fd, mode, encoding="utf-8") as stream:
-        yield stream
-
-
-def _valid_cancel_directory(run_dir: Path, directory: Path) -> bool:
-    try:
-        relative = directory.relative_to(run_dir)
-    except ValueError:
-        return False
-    current = run_dir
-    for part in relative.parts:
-        current /= part
-        try:
-            metadata = current.lstat()
-        except OSError:
-            return False
-        if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
-            return False
-    return True
-
-
-def cancellation_marker_present(run_dir: Path, directory: Path) -> bool:
-    """Return true only for the exact empty regular single-link marker."""
-    if not _valid_cancel_directory(run_dir, directory):
-        return False
-    marker = directory / CANCEL_MARKER_NAME
-    try:
-        metadata = marker.lstat()
-    except OSError:
-        return False
-    return stat.S_ISREG(metadata.st_mode) and metadata.st_nlink == 1 and metadata.st_size == 0
-
-
-def create_cancellation_marker(run_dir: Path, directory: Path) -> None:
-    """Create the exact marker atomically and idempotently."""
-    if not _valid_cancel_directory(run_dir, directory):
-        raise ValueError("cancellation target directory is unavailable or unsafe")
-    marker = directory / CANCEL_MARKER_NAME
-    try:
-        fd = os.open(marker, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
-    except FileExistsError:
-        if not cancellation_marker_present(run_dir, directory):
-            raise ValueError("cancellation marker is invalid")
-        return
-    except OSError as exc:
-        raise ValueError("cancellation marker cannot be created") from exc
-    os.close(fd)
-
-
-def remove_cancellation_marker(run_dir: Path, directory: Path) -> None:
-    """Remove only the exact valid marker after owner evidence is durable."""
-    if cancellation_marker_present(run_dir, directory):
-        try:
-            (directory / CANCEL_MARKER_NAME).unlink()
-        except FileNotFoundError:
-            pass
-
-
-def relative_path(run_dir: Path, path: Path) -> str:
-    return path.resolve().relative_to(run_dir.resolve()).as_posix()
-
-
-def retained_path(run_dir: Path, value: Any) -> str:
-    if not isinstance(value, str) or not value:
-        raise AttemptEvidenceError("attempt evidence path is missing or invalid")
-    relative = Path(value)
-    if relative.is_absolute() or ".." in relative.parts:
-        raise AttemptEvidenceError(f"attempt evidence path escapes the run: {value}")
-    try:
-        (run_dir / relative).resolve().relative_to(run_dir.resolve())
-    except ValueError as exc:
-        raise AttemptEvidenceError(f"attempt evidence path escapes the run: {value}") from exc
-    return relative.as_posix()
-
-
-def ensure_owned_directory(run_dir: Path, path: Path) -> None:
-    try:
-        relative = path.relative_to(run_dir)
-    except ValueError as exc:
-        raise AttemptEvidenceError(f"attempt directory escapes the run: {path}") from exc
-    try:
-        ensure_contained_directory(run_dir, relative, label="attempt directory")
-    except OwnedFileError as exc:
-        raise AttemptEvidenceError(str(exc)) from exc
-
 
 def active_receipt_error(receipt: Any) -> str | None:
     if not isinstance(receipt, dict):
@@ -234,7 +111,6 @@ def active_receipt_error(receipt: Any) -> str | None:
     if not isinstance(pair.get("status"), str) or not pair["status"]:
         return "RUN_RECEIPT.json pair status is required"
     return None
-
 
 def workspace_identity(workspace: Path, provider_cwd: Path | None = None) -> dict[str, Any]:
     identity: dict[str, Any] = {
@@ -272,12 +148,10 @@ def workspace_identity(workspace: Path, provider_cwd: Path | None = None) -> dic
         pass
     return identity
 
-
 # Directories a launch itself churns, or Git owns; edits under them are not writer work.
 STARTUP_WALK_SKIP = {".git", ".agent-run", "node_modules", ".venv", "__pycache__", ".pytest_cache", "dist", "build"}
 STARTUP_WALK_MAX_ENTRIES = 200_000
 STARTUP_WALK_MAX_SECONDS = 5.0
-
 
 def writer_worktree_state(cwd: str) -> tuple[str, bytes] | None:
     """HEAD and porcelain status of a writer's worktree, or None when Git cannot say."""
@@ -291,14 +165,12 @@ def writer_worktree_state(cwd: str) -> tuple[str, bytes] | None:
         return None
     return head, status
 
-
 def worktree_unchanged(start, cwd: str) -> bool | None:
     """Whether a clean starting worktree still has the same HEAD and porcelain; unknown from a dirty start."""
     if start is None or start[1]:
         return None
     current = writer_worktree_state(cwd)
     return None if current is None else current == start
-
 
 def modified_since(cwd: str, since: float) -> bool:
     """Whether any entry under cwd, ignored files included, changed at or after since.
@@ -330,7 +202,6 @@ def modified_since(cwd: str, since: float) -> bool:
             return True
     return False
 
-
 def guard_writer_retry(record: dict[str, Any], start: tuple[Any, ...] | None, cwd: str) -> None:
     """Retry a silent or rate-limited writer only over a provably untouched worktree."""
     if record.get("status") not in {"startup_timeout", "rate_limited"}:
@@ -343,117 +214,16 @@ def guard_writer_retry(record: dict[str, Any], start: tuple[Any, ...] | None, cw
     record["fix"] = ("inspect the worktree: it changed or was dirty when the writer stopped; "
                      "then dispatch again on another model or adapter")
 
-
-def valid_regular_result(run_dir: Path, path: Path) -> bool:
-    try:
-        contained_regular_path(run_dir, path.relative_to(run_dir), "retained evidence")
-    except (OSError, ValueError, OwnedFileError):
-        return False
-    return True
-
-
 def success_receipt_error(
     adapter: dict[str, Any], args: argparse.Namespace, result_path: Path, result_digest: str
 ) -> str | None:
     return successful_adapter_error(adapter, args.tool, args.intent, result_path, result_digest)
-
-
-class _JSONObject(dict[str, Any]):
-    """JSON object retaining whether a duplicate key was supplied."""
-
-    def __init__(self, pairs: list[tuple[str, Any]]) -> None:
-        super().__init__()
-        self.duplicate_keys: set[str] = set()
-        self.values_by_key: dict[str, list[Any]] = {}
-        for key, value in pairs:
-            if key in self:
-                self.duplicate_keys.add(key)
-            self.values_by_key.setdefault(key, []).append(value)
-            self[key] = value
-
-
-def worker_question_envelope_bytes(
-    candidate: bytes, expected_digest: str | None = None
-) -> dict[str, Any] | None:
-    """Validate one already-bound worker terminal result envelope."""
-    if len(candidate) > MAX_WORKER_TERMINAL_ENVELOPE_BYTES:
-        return None
-    if expected_digest is not None:
-        candidate_hash = hashlib.sha256(candidate).hexdigest()
-        if expected_digest != f"sha256:{candidate_hash}":
-            raise TerminalEnvelopeIntegrityError(
-                "terminal candidate digest does not match retained result"
-            )
-    try:
-        value = json.loads(candidate.decode("utf-8"), object_pairs_hook=_JSONObject)
-    except (UnicodeDecodeError, json.JSONDecodeError):
-        return None
-    if not isinstance(value, _JSONObject) or value.get("record_type") != WORKER_TERMINAL_RECORD_TYPE:
-        if (
-            isinstance(value, _JSONObject)
-            and "record_type" in value.duplicate_keys
-            and WORKER_TERMINAL_RECORD_TYPE in value.values_by_key.get("record_type", [])
-        ):
-            raise ValueError("terminal worker envelope has a duplicate record_type")
-        return None
-    if value.duplicate_keys or set(value) != {
-        "schema_version", "record_type", "classification", "question"
-    }:
-        raise ValueError("terminal worker envelope has an invalid root")
-    if type(value.get("schema_version")) is not int or value.get("schema_version") != 1:
-        raise ValueError("terminal worker envelope schema_version must be 1")
-    if value.get("classification") != "question":
-        raise ValueError("terminal worker envelope classification must be question")
-    question = value.get("question")
-    if not isinstance(question, _JSONObject) or question.duplicate_keys or set(question) != {"code", "prompt"}:
-        raise ValueError("terminal worker envelope question is invalid")
-    prompt = question.get("prompt")
-    if (
-        question.get("code") != "needs_input"
-        or not isinstance(prompt, str)
-        or not prompt
-        or len(prompt) > MAX_WORKER_QUESTION_PROMPT
-        or "\x00" in prompt
-    ):
-        raise ValueError("terminal worker envelope prompt is invalid")
-    return {"code": "needs_input", "prompt": prompt}
-
-
-def worker_question_envelope(result_path: Path, expected_digest: str) -> dict[str, Any] | None:
-    """Return a validated worker question, or fail closed for a reserved record."""
-    try:
-        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
-        fd = os.open(result_path, flags)
-    except OSError as exc:
-        raise TerminalEnvelopeIntegrityError("terminal candidate cannot be safely reopened") from exc
-    try:
-        metadata = os.fstat(fd)
-        if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
-            raise TerminalEnvelopeIntegrityError("terminal candidate is not a regular single-link file")
-        chunks: list[bytes] = []
-        total = 0
-        while total <= MAX_WORKER_TERMINAL_ENVELOPE_BYTES:
-            chunk = os.read(
-                fd, min(1024 * 1024, MAX_WORKER_TERMINAL_ENVELOPE_BYTES + 1 - total)
-            )
-            if not chunk:
-                break
-            chunks.append(chunk)
-            total += len(chunk)
-        candidate = b"".join(chunks)
-    except OSError as exc:
-        raise TerminalEnvelopeIntegrityError("terminal candidate cannot be safely read") from exc
-    finally:
-        os.close(fd)
-    return worker_question_envelope_bytes(candidate, expected_digest)
-
 
 def fail(run_dir: Path | None, status: str, message: str, error: str | None = None) -> int:
     record = {"schema_version": 1, "status": status, "message": message,
               "error": error or status}
     print(json.dumps(record, sort_keys=True))
     return 2
-
 
 def timeout_value(value: str) -> float:
     try:
@@ -464,60 +234,9 @@ def timeout_value(value: str) -> float:
         raise argparse.ArgumentTypeError("timeout must be a finite positive number")
     return timeout
 
-
-def manifest_rows(run_dir: Path, record: dict[str, Any]) -> list[tuple[str, str]]:
-    paths = [
-        ("attempt", record["attempt_path"]),
-        ("prompt", record["prompt"]["path"]),
-        ("adapter", record["route"]["adapter_receipt"]["path"]),
-        ("stderr", record["stderr"]["path"]),
-        ("attempt-digest", record["attempt_digest_path"]),
-    ]
-    if record["result"] is not None:
-        paths.append(("result", record["result"]["path"]))
-    if record.get("git_evidence") is not None:
-        paths.append(("git-evidence", record["git_evidence"]["path"]))
-    return paths
-
-
-def append_manifest(run_dir: Path, record: dict[str, Any], custody=None) -> None:
-    append_manifest_to(run_dir, record, custody)
-
-
-def append_manifest_to(run_dir: Path, record: dict[str, Any], custody=None) -> None:
-    manifest = run_dir / "MANIFEST.md"
-    date = record["finished_at"][:10]
-    prefix = f"dispatch-{record['task_id']}-{record['attempt_id']}"
-    paths = manifest_rows(run_dir, record)
-    rows_text = "".join(
-        f"| {prefix}-{kind} | {path} | single dispatch {kind} | dispatch_run | "
-        f"{date} | verified | evidence | |\n"
-        for kind, path in paths
-    )
-    if custody is None:
-        with manifest.open("a", encoding="utf-8") as stream:
-            stream.write(rows_text)
-            stream.flush()
-            os.fsync(stream.fileno())
-    else:
-        custody.seek(0, os.SEEK_END)
-        custody.write(rows_text)
-        custody.flush()
-        os.fsync(custody.fileno())
-
-
-def ensure_manifest_appendable(run_dir: Path) -> None:
-    """Check append access without changing the manifest."""
-    fd, _relative, _target = open_contained_regular(
-        run_dir, "MANIFEST.md", os.O_RDWR | os.O_APPEND, label="MANIFEST.md"
-    )
-    os.close(fd)
-
-
 def acquire_run_custody(run_dir: Path):
     """Acquire the shared manifest lock without creating a new run artifact."""
     return run_lineage.acquire_owner_custody(run_dir)
-
 
 @contextmanager
 def attempt_custody(run_dir: Path, path: Path, *, blocking: bool = True):
@@ -529,7 +248,6 @@ def attempt_custody(run_dir: Path, path: Path, *, blocking: bool = True):
     with os.fdopen(fd, "a+") as stream:
         fcntl.flock(stream.fileno(), fcntl.LOCK_EX | (0 if blocking else fcntl.LOCK_NB))
         yield
-
 
 def reap_run_evidence(run_dir: Path):
     """Read current closure evidence, refusing a live or unobservable owner."""
@@ -567,7 +285,6 @@ def reap_run_evidence(run_dir: Path):
             return None
     return terminal_status, run_token
 
-
 def reap_stop_status(run_dir: Path, path: Path, row: dict[str, Any]):
     evidence = reap_run_evidence(run_dir)
     if evidence is None:
@@ -588,12 +305,12 @@ def reap_stop_status(run_dir: Path, path: Path, row: dict[str, Any]):
     ):
         return "cancelled" if request["source"] == "cancel_requested" else "interrupted"
     cancel_dir = run_dir / "dispatch/tasks" / path.parent.parent.name / path.parent.name
-    if cancellation_marker_present(run_dir, cancel_dir):
+    if run_records.cancellation_marker_present(run_dir, cancel_dir):
         return "cancelled"
     batch_id = row.get("batch_id")
     if isinstance(batch_id, str) and BATCH_ID_RE.fullmatch(batch_id):
         batch_dir = run_dir / "dispatch/batches" / batch_id
-        if cancellation_marker_present(run_dir, batch_dir):
+        if run_records.cancellation_marker_present(run_dir, batch_dir):
             try:
                 (batch_dir / "summary.json").lstat()
                 summary = json.loads(read_bound_bytes(run_dir, batch_dir.relative_to(run_dir) / "summary.json", label="batch summary"))
@@ -602,7 +319,6 @@ def reap_stop_status(run_dir: Path, path: Path, row: dict[str, Any]):
             if not isinstance(summary, dict) or summary.get("status") not in {"completed", "failed", "cancelled"}:
                 return "cancelled"
     return "lost"
-
 
 def process_evidence(run_dir: Path, row: dict[str, Any]) -> dict[str, Any]:
     evidence = {"pgid_probe": "unknown", "last_event_at": None,
@@ -637,7 +353,6 @@ def process_evidence(run_dir: Path, row: dict[str, Any]) -> dict[str, Any]:
             pass
     return evidence
 
-
 def reap_provider_identity(run_dir: Path, path: Path, row: dict[str, Any]) -> dict[str, Any]:
     if type(row.get("pgid")) is int and row["pgid"] > 0:
         return {"pgid": row["pgid"], "pgid_started_at": row.get("pgid_started_at")}
@@ -659,13 +374,12 @@ def reap_provider_identity(run_dir: Path, path: Path, row: dict[str, Any]) -> di
         else:  # An older owner did not record the attempt; trust it only for a single-task run.
             same_attempt = len({p.parent.parent.name for tree in ("tasks", "dispatch/tasks")
                                 for p in (run_dir / tree).glob("*/attempt-*")}) <= 1
-        if (provider.get("run_token") == (token or run_identity(run_dir)) and same_attempt
+        if (provider.get("run_token") == (token or run_records.run_identity(run_dir)) and same_attempt
                 and type(pgid) is int and pgid > 0):
             return {"pgid": pgid, "pgid_started_at": provider.get("provider_started_at")}
     except (OSError, ValueError, TypeError, AttributeError, OwnedFileError):
         pass
     return {}
-
 
 def reap_disk_full(run_dir: Path, row: dict[str, Any]) -> tuple[str | None, str | None]:
     """Return (ENOSPC stderr evidence, low-free-space hint); only the first proves disk exhaustion."""
@@ -689,7 +403,6 @@ def reap_disk_full(run_dir: Path, row: dict[str, Any]) -> tuple[str | None, str 
     except (OSError, ValueError, KeyError):
         pass
     return None, None
-
 
 def reap_attempts(run_dir: Path) -> list[str]:
     """Finalise dead attempts under custody, preserving deliberate termination."""
@@ -757,7 +470,7 @@ def reap_attempts(run_dir: Path) -> list[str]:
                         except (OSError, ValueError) as exc:
                             row.setdefault("warnings", []).append("checkpoint unavailable: " + str(exc))
                         else:
-                            row.setdefault("paths", {})["checkpoint"] = relative_path(run_dir, evidence_dir / "wip-checkpoint.json")
+                            row.setdefault("paths", {})["checkpoint"] = run_records.relative_path(run_dir, evidence_dir / "wip-checkpoint.json")
                         row.update(identity)
                         disk_error, space_hint = reap_disk_full(run_dir, row)
                         if disk_error and status == "lost":
@@ -777,174 +490,13 @@ def reap_attempts(run_dir: Path) -> list[str]:
                             row["evidence"]["low_free_space_hint"] = space_hint
                         row["evidence"].update(process_evidence(run_dir, row))
                         row["digest"] = render_digest(row)
-                        write_owned(run_dir, path, json.dumps(row, indent=2) + "\n")
+                        run_records.write_owned(run_dir, path, json.dumps(row, indent=2) + "\n")
                         reaped.append(str(path))
                 except (OSError, ValueError, TypeError, KeyError, AttributeError, OwnedFileError):
                     continue
         if reaped:
             close_mcp_run(run_dir)
     return reaped
-
-
-def reconcile_manifest(run_dir: Path, custody=None) -> None:
-    """Index complete prior attempts whose manifest rows were lost on re-entry."""
-    manifest = run_dir / "MANIFEST.md"
-    if custody is None:
-        existing = manifest.read_text(encoding="utf-8", errors="replace")
-    else:
-        custody.seek(0)
-        existing = custody.read()
-    attempt_dirs = sorted((run_dir / "dispatch" / "tasks").glob("*/attempt-*"))
-    # A recovered interrupted attempt has no legacy terminal envelope. Its
-    # canonical terminal row is the recovery evidence; retain partial files.
-    recoverable = set()
-    for directory in attempt_dirs:
-        if (directory / "attempt.json").exists():
-            continue
-        canonical = Path("tasks") / directory.parent.name / directory.name / "attempt.json"
-        try:
-            row = json.loads(read_bound_bytes(run_dir, canonical, label="interrupted attempt"))
-            if (row.get("schema") == "fabric.attempt.v1" and row.get("state") == "terminal"
-                    and row.get("status") in {"interrupted", "lost"} and row.get("task_id") == directory.parent.name
-                    and directory.name == f"attempt-{row.get('attempt', 0):03d}"):
-                recoverable.add(directory)
-        except (OSError, OwnedFileError):
-            pass
-    attempt_dirs = [directory for directory in attempt_dirs if directory not in recoverable]
-    for attempt_dir in attempt_dirs:
-        try:
-            relative_path(run_dir, attempt_dir)
-        except ValueError as exc:
-            raise AttemptEvidenceError(f"attempt directory escapes the run: {attempt_dir}") from exc
-        if (
-            attempt_dir.is_symlink()
-            or not attempt_dir.is_dir()
-            or not ATTEMPT_ID_RE.fullmatch(attempt_dir.name)
-            or not (attempt_dir / "attempt.json").is_file()
-            or (attempt_dir / "attempt.json").is_symlink()
-        ):
-            raise AttemptEvidenceError(f"attempt directory is incomplete: {attempt_dir}")
-    for attempt_path in (attempt_dir / "attempt.json" for attempt_dir in attempt_dirs):
-        try:
-            discovered_attempt_path = relative_path(run_dir, attempt_path)
-        except ValueError as exc:
-            raise AttemptEvidenceError(f"attempt record path escapes the run: {attempt_path}") from exc
-        try:
-            record = json.loads(attempt_path.read_text(encoding="utf-8"))
-        except (OSError, TypeError, ValueError) as exc:
-            raise AttemptEvidenceError(f"attempt record is unreadable: {attempt_path}") from exc
-        task_id = attempt_path.parent.parent.name
-        attempt_id = attempt_path.parent.name
-        if (
-            not isinstance(record, dict)
-            or record.get("schema_version") != 1
-            or record.get("record_type") != "dispatch-attempt"
-            or record.get("task_id") != task_id
-            or record.get("attempt_id") != attempt_id
-            or not TASK_ID_RE.fullmatch(task_id)
-        ):
-            raise AttemptEvidenceError(f"attempt record has invalid schema or identity: {attempt_path}")
-        try:
-            if retained_path(run_dir, record["attempt_path"]) != discovered_attempt_path:
-                raise AttemptEvidenceError(
-                    f"attempt record path does not match its retained file: {attempt_path}"
-                )
-            sidecar = attempt_path.with_name("attempt.sha256")
-            if not sidecar.is_file():
-                write_owned(run_dir, sidecar, f"{digest(attempt_path)}  {attempt_path.name}\n")
-            if not valid_regular_result(run_dir, sidecar):
-                raise AttemptEvidenceError(f"attempt digest is not a regular retained file: {sidecar}")
-            expected_sidecar = f"{digest(attempt_path)}  {attempt_path.name}\n"
-            if sidecar.read_text(encoding="utf-8") != expected_sidecar:
-                raise AttemptEvidenceError(f"attempt digest does not match retained record: {attempt_path}")
-            record["attempt_digest_path"] = relative_path(run_dir, sidecar)
-            rows = [
-                (kind, retained_path(run_dir, path))
-                for kind, path in manifest_rows(run_dir, record)
-            ]
-            attempt_root = Path("dispatch") / "tasks" / task_id / attempt_id
-            expected = {
-                "attempt": (attempt_root / "attempt.json").as_posix(),
-                "prompt": (attempt_root / "prompt.md").as_posix(),
-                "adapter": (attempt_root / "adapter-receipt.json").as_posix(),
-                "stderr": (attempt_root / "stderr.log").as_posix(),
-                "attempt-digest": (attempt_root / "attempt.sha256").as_posix(),
-                "result": (attempt_root / "result.md").as_posix(),
-            }
-            if record.get("git_evidence") is not None:
-                expected["git-evidence"] = (attempt_root / "evidence" / "git-evidence.md").as_posix()
-            mismatched = [kind for kind, path in rows if path != expected[kind]]
-            if mismatched:
-                raise AttemptEvidenceError(
-                    f"attempt evidence path is not canonical for {attempt_path}: {', '.join(mismatched)}"
-                )
-            absent = [path for _, path in rows if not valid_regular_result(run_dir, run_dir / path)]
-            if absent:
-                raise AttemptEvidenceError(
-                    f"attempt evidence is missing for {attempt_path}: {', '.join(absent)}"
-                )
-            claimed_digests = {
-                "prompt": record["prompt"]["digest"],
-                "adapter": record["route"]["adapter_receipt"]["digest"],
-                "stderr": record["stderr"]["digest"],
-            }
-            if record["result"] is not None:
-                claimed_digests["result"] = record["result"]["digest"]
-            if record.get("git_evidence") is not None:
-                evidence = record["git_evidence"]
-                if not isinstance(evidence, dict) or not isinstance(evidence.get("digest"), str):
-                    raise AttemptEvidenceError(f"Git evidence receipt is malformed: {attempt_path}")
-                claimed_digests["git-evidence"] = evidence["digest"]
-            mismatched_digests = [
-                kind
-                for kind, path in rows
-                if kind in claimed_digests and claimed_digests[kind] != digest(run_dir / path)
-            ]
-            if mismatched_digests:
-                raise AttemptEvidenceError(
-                    f"attempt evidence digest does not match {attempt_path}: "
-                    + ", ".join(mismatched_digests)
-                )
-            if is_success_status(record.get("status")):
-                try:
-                    _adapter_rel, _adapter_path, adapter_bytes = read_contained_regular(
-                        run_dir, expected["adapter"], label="adapter receipt"
-                    )
-                    _result_rel, _result_path, result_bytes = read_contained_regular(
-                        run_dir, expected["result"], label="result"
-                    )
-                    validate_successful_attempt(run_dir, record, {
-                        "adapter_receipt": adapter_bytes, "result": result_bytes,
-                    })
-                except (OSError, ValueError, SharedAttemptEvidenceError) as exc:
-                    raise AttemptEvidenceError(str(exc)) from exc
-            missing = [(kind, path) for kind, path in rows if f"| {path} |" not in existing]
-            if not missing:
-                continue
-            date = record["finished_at"][:10]
-            prefix = f"dispatch-{record['task_id']}-{record['attempt_id']}"
-            rows_text = "".join(
-                f"| {prefix}-{kind} | {path} | single dispatch {kind} | dispatch_run | "
-                f"{date} | verified | evidence | |\n"
-                for kind, path in missing
-            )
-            if custody is None:
-                with manifest.open("a", encoding="utf-8") as stream:
-                    stream.write(rows_text)
-                    stream.flush()
-                    os.fsync(stream.fileno())
-                existing = manifest.read_text(encoding="utf-8", errors="replace")
-            else:
-                custody.seek(0, os.SEEK_END)
-                custody.write(rows_text)
-                custody.flush()
-                os.fsync(custody.fileno())
-                existing += rows_text
-        except AttemptEvidenceError:
-            raise
-        except (KeyError, TypeError, ValueError) as exc:
-            raise AttemptEvidenceError(f"attempt record is malformed: {attempt_path}") from exc
-
 
 def existing_attempt_number(task_dir: Path) -> int:
     numbers = []
@@ -954,15 +506,12 @@ def existing_attempt_number(task_dir: Path) -> int:
             numbers.append(int(match.group("number")))
     return max(numbers, default=0) + 1
 
-
 ACCESS_MODES = ("read_only", "worktree_write")
 WORKTREE_WRITER_LOCK = "provenant-dispatch-writer.lock"
 WORKTREE_WRITE_ADAPTERS = ("claude", "codex", "opencode", "cursor", "agy", "kiro", "copilot")
 
-
 class WorktreeLeaseError(ValueError):
     """The requested writer worktree cannot be owned exclusively."""
-
 
 def _git_path(worktree: Path, which: str) -> Path | None:
     """Resolve one absolute Git path for a worktree, or None when it is not one."""
@@ -977,7 +526,6 @@ def _git_path(worktree: Path, which: str) -> Path | None:
         return None
     value = completed.stdout.strip()
     return Path(value) if value else None
-
 
 def resolve_writer_worktree(worktree: Path) -> Path:
     """Return the resolved root of a Git worktree the caller may write inside."""
@@ -1009,7 +557,6 @@ def resolve_writer_worktree(worktree: Path) -> Path:
         raise WorktreeLeaseError("worktree_write requires a linked worktree; fix: create a linked worktree")
     return resolved
 
-
 def branch_name_warning(worktree: Path) -> str | None:
     result = subprocess.run(
         ["git", "-C", str(worktree), "symbolic-ref", "--quiet", "--short", "HEAD"],
@@ -1020,7 +567,6 @@ def branch_name_warning(worktree: Path) -> str | None:
     if len(branch) <= 48 and BRANCH_PATTERN.fullmatch(branch):
         return None
     return f"branch {branch} is outside <type>/<area>-<slug> (or land/, proto/); rename for repository convention"
-
 
 def acquire_worktree_lease(worktree: Path):
     """Hold the one-writer lease for a worktree, or refuse a concurrent writer."""
@@ -1039,9 +585,7 @@ def acquire_worktree_lease(worktree: Path):
         raise WorktreeLeaseError(f"another writer already owns this worktree: {worktree}") from exc
     return handle
 
-
 GRAPH_RESERVATION_FILE = "provenant-graph-reservation.json"
-
 
 def graph_reservation_refusal(worktree: Path) -> str | None:
     """Refuse a writer into a worktree that a running Fabric graph has reserved.
@@ -1082,7 +626,6 @@ def graph_reservation_refusal(worktree: Path) -> str | None:
         return None
     return f"worktree is reserved by graph {graph} node {node}; fix: wait for it, or run provenant graph cancel {graph}"
 
-
 def release_worktree_lease(handle) -> None:
     if handle is None:
         return
@@ -1091,13 +634,11 @@ def release_worktree_lease(handle) -> None:
     finally:
         handle.close()
 
-
 # Provider deadlines sit slightly under the owner's own deadline so the provider
 # reaches its limit first and exits through its normal path, flushing whatever
 # result it has. Without the gap the owner kills the process group mid-write and
 # the truncated result is diagnosed as a corrupt receipt rather than a timeout.
 PROVIDER_TIMEOUT_MARGIN_SECONDS = 5.0
-
 
 def provider_timeout_seconds(timeout_seconds: float) -> int:
     """Return the whole-second deadline handed to the provider CLI.
@@ -1109,7 +650,6 @@ def provider_timeout_seconds(timeout_seconds: float) -> int:
     """
     margin = max(1.0, min(PROVIDER_TIMEOUT_MARGIN_SECONDS, timeout_seconds * 0.1))
     return max(1, int(timeout_seconds - margin))
-
 
 def build_command(
     args: argparse.Namespace, prompt_path: Path, result_path: Path,
@@ -1162,10 +702,8 @@ def build_command(
         command.extend(("--fallback", "true" if isinstance(policy, list) else json.dumps(policy) if type(policy) is bool else policy))
     return command
 
-
 # Statuses whose provider turn ended before a result, so its session may be missing.
 INCOMPLETE_TURN_STATUSES = {"timed_out", "cancelled", "stalled", "startup_timeout", "interrupted", "lost"}
-
 
 def incomplete_provider_turn(attempt: dict) -> bool:
     """Include provider deaths whose failure status does not imply a finished turn."""
@@ -1173,7 +711,6 @@ def incomplete_provider_turn(attempt: dict) -> bool:
         attempt.get("status") == "failed"
         and (attempt.get("evidence") or {}).get("signature") in {"provider_signal", "provider_incomplete", "host_disk_full", "provider_lost"}
     )
-
 
 FAST_PLAN_SHELL_ENV_READS = {
     "CF_DISPATCH_AGY_ADD_DIR", "CF_DISPATCH_ENABLE_KIRO",
@@ -1192,7 +729,6 @@ FAST_PLAN_ROUTE_FIELDS = (
     "model_override_tier", "policy_override", "alias", "reason",
     "endpoint_profile", "endpoint_base_url", "endpoint_token_env", "endpoint_wire_api",
 )
-
 
 def parse_fast_route_json(raw: str) -> dict:
     """Apply the shell planner's parse_route_json field contract before fast planning."""
@@ -1218,13 +754,11 @@ def parse_fast_route_json(raw: str) -> dict:
             raise ValueError(f"route field {key} must be a NUL-free string")
     return route
 
-
 PLANNER_MODEL_STATUSES = {"capability_model_unavailable", "no_candidate_available", "alias_unavailable",
                           "adapter_default_model_invalid", "model_required_for_broker",
                           "model_ambiguous", "model_not_found"}
 PLANNER_TRANSIENT_STATUSES = {"capability_discovery_failed", "capability_snapshot_untrusted",
                               "capability_snapshot_stale", "probe_unavailable", "probe_cache_busy"}
-
 
 def planner_result(planning):
     """The route plan, or a typed failure when the planner produced none."""
@@ -1237,14 +771,12 @@ def planner_result(planning):
             return {"status": "failed", "fix": f"route planner crashed (signal {-planning.returncode}); inspect stderr"}
         return {"status": "rejected", "fix": "route planner returned invalid JSON"}
 
-
 def route_refusal(record, adapter=""):
     """A planner refusal in the router's vocabulary; provider-exec records carry provenance."""
     status = record.get("status")
     if not status or status in TERMINAL_STATUSES or "provenance" in record or record.get("schema") == "fabric.exec-plan.v1":
         return None
     return router_failure(str(status), adapter, record.get("message"))
-
 
 def router_failure(signature, adapter="", message=None):
     """Fabric's status and fix for a router refusal; the router's own status stays the signature."""
@@ -1259,7 +791,6 @@ def router_failure(signature, adapter="", message=None):
         status, fix = "rejected", f"route planner refused the route ({signature}); change the requested route"
     return {"status": status, "error": signature, "fix": fix,
             "evidence": {"exit": None, "signal": None, "signature": signature, "excerpt": ""}}
-
 
 def fast_fabric_plan(args, prompt_path: Path, result_path: Path, workspace: Path):
     """Plan a simple explicit route in the owner process using the same router and supervisor."""
@@ -1339,7 +870,6 @@ def fast_fabric_plan(args, prompt_path: Path, result_path: Path, workspace: Path
     except (Exception, SystemExit):
         return None
 
-
 def _read_prompt_once(workspace: Path, prompt_source: Path, max_bytes: int | None = None) -> bytes:
     """Read the validated prompt inode once for both retention and provider use."""
     try:
@@ -1363,7 +893,6 @@ def _read_prompt_once(workspace: Path, prompt_source: Path, max_bytes: int | Non
     finally:
         os.close(fd)
 
-
 def _validate_git_evidence_metadata(metadata: Any) -> dict[str, Any]:
     """Validate the bounded JSON header of one Git evidence packet."""
     try:
@@ -1374,7 +903,7 @@ def _validate_git_evidence_metadata(metadata: Any) -> dict[str, Any]:
                 "diff_base", "working_tree", "diff_from", "paths", "encoding",
             }
             and metadata.get("schema_version") == 1
-            and metadata.get("record_type") == GIT_EVIDENCE_RECORD_TYPE
+            and metadata.get("record_type") == run_records.GIT_EVIDENCE_RECORD_TYPE
             and isinstance(metadata.get("repository"), str)
             and isinstance(metadata.get("git_root"), str)
             and isinstance(metadata.get("head"), str)
@@ -1391,9 +920,8 @@ def _validate_git_evidence_metadata(metadata: Any) -> dict[str, Any]:
     except (KeyError, TypeError):
         valid = False
     if not valid:
-        raise AttemptEvidenceError("Git evidence packet header is invalid")
+        raise run_records.AttemptEvidenceError("Git evidence packet header is invalid")
     return metadata
-
 
 def _copy_git_evidence(
     workspace: Path, run_dir: Path, source: Path, destination: Path
@@ -1404,7 +932,7 @@ def _copy_git_evidence(
         source_relative = source.relative_to(run_dir)
         destination_relative = destination.relative_to(run_dir)
     except ValueError as exc:
-        raise AttemptEvidenceError("Git evidence must be materialised inside the run directory") from exc
+        raise run_records.AttemptEvidenceError("Git evidence must be materialised inside the run directory") from exc
     source_fd = destination_fd = -1
     try:
         source_fd, _source_rel, _source_target = open_contained_regular(
@@ -1419,7 +947,7 @@ def _copy_git_evidence(
     except (OwnedLinkError, OwnedFileError) as exc:
         if source_fd >= 0:
             os.close(source_fd)
-        raise AttemptEvidenceError(str(exc)) from exc
+        raise run_records.AttemptEvidenceError(str(exc)) from exc
     hasher = hashlib.sha256()
     header = bytearray()
     metadata: dict[str, Any] | None = None
@@ -1441,12 +969,12 @@ def _copy_git_evidence(
             if metadata is None:
                 header.extend(remaining)
                 if len(header) > MAX_GIT_EVIDENCE_HEADER_BYTES and b"\n" not in header:
-                    raise AttemptEvidenceError("Git evidence packet header exceeds its 64 KiB limit")
+                    raise run_records.AttemptEvidenceError("Git evidence packet header exceeds its 64 KiB limit")
                 separator = header.find(b"\n")
                 if separator < 0:
                     continue
                 if separator > MAX_GIT_EVIDENCE_HEADER_BYTES:
-                    raise AttemptEvidenceError("Git evidence packet header exceeds its 64 KiB limit")
+                    raise run_records.AttemptEvidenceError("Git evidence packet header exceeds its 64 KiB limit")
                 first_line = bytes(header[:separator])
                 metadata = _validate_git_evidence_metadata(
                     json.loads(first_line.decode("utf-8"))
@@ -1454,25 +982,25 @@ def _copy_git_evidence(
                 remaining = bytes(header[separator + 1:])
             body_prefix.extend(remaining[: len(status_prefix) - len(body_prefix)])
             if len(body_prefix) >= len(status_prefix) and bytes(body_prefix) != status_prefix:
-                raise AttemptEvidenceError("Git evidence packet is missing its status section")
+                raise run_records.AttemptEvidenceError("Git evidence packet is missing its status section")
             combined = tail + remaining
             if marker in combined:
                 tail = marker
             else:
                 tail = combined[-(len(marker) - 1):]
         if metadata is None:
-            raise AttemptEvidenceError("Git evidence packet has no JSON header")
+            raise run_records.AttemptEvidenceError("Git evidence packet has no JSON header")
         if len(body_prefix) < len(status_prefix):
-            raise AttemptEvidenceError("Git evidence packet is missing its status section")
+            raise run_records.AttemptEvidenceError("Git evidence packet is missing its status section")
         if marker not in tail:
-            raise AttemptEvidenceError("Git evidence packet is missing its diff section")
+            raise run_records.AttemptEvidenceError("Git evidence packet is missing its diff section")
         os.fsync(destination_fd)
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         try:
             unlink_contained_regular(run_dir, destination_relative, label="Git evidence packet")
         except (OSError, ValueError, OwnedFileError):
             pass
-        raise AttemptEvidenceError("Git evidence packet has an invalid JSON header") from exc
+        raise run_records.AttemptEvidenceError("Git evidence packet has an invalid JSON header") from exc
     except BaseException:
         try:
             unlink_contained_regular(run_dir, destination_relative, label="Git evidence packet")
@@ -1486,7 +1014,6 @@ def _copy_git_evidence(
             os.close(destination_fd)
     return metadata, f"sha256:{hasher.hexdigest()}"
 
-
 def _record_provider_process(run_dir: Path, process: subprocess.Popen[Any], *, task_id=None, attempt=None) -> None:
     """Record the provider's identity so a detached run stays reachable.
 
@@ -1497,7 +1024,7 @@ def _record_provider_process(run_dir: Path, process: subprocess.Popen[Any], *, t
     run rather than to an earlier one in a reused directory. A failure to write
     it costs later reaping, never the dispatch itself.
     """
-    token = os.environ.get("PROVENANT_RUN_TOKEN") or run_identity(run_dir)
+    token = os.environ.get("PROVENANT_RUN_TOKEN") or run_records.run_identity(run_dir)
     try:
         started_at = process_info.start_time(process.pid)
         record = {
@@ -1515,7 +1042,6 @@ def _record_provider_process(run_dir: Path, process: subprocess.Popen[Any], *, t
     except (OSError, ValueError, subprocess.SubprocessError):
         return
 
-
 def _retire_provider_process(run_dir: Path, process: subprocess.Popen[Any] | None, *, task_id=None, attempt=None) -> None:
     """Drop this run's provider record once this owner has reaped the provider.
 
@@ -1527,30 +1053,21 @@ def _retire_provider_process(run_dir: Path, process: subprocess.Popen[Any] | Non
     path = run_dir / "dispatch-provider.json"
     try:
         record = json.loads(path.read_text(encoding="utf-8"))
-        token = os.environ.get("PROVENANT_RUN_TOKEN") or run_identity(run_dir)
+        token = os.environ.get("PROVENANT_RUN_TOKEN") or run_records.run_identity(run_dir)
         if (record.get("run_token") == token and record.get("provider_pid") == process.pid
                 and record.get("task_id") == task_id and record.get("attempt") == attempt):
             path.unlink()
     except (OSError, ValueError):
         return
 
-
 # Fabric grants a read root only for a directory inside a registered project.
 PROMPT_PATH_FIX = ("Pass prompt_file=<readable regular file inside the workspace, a caller temp directory or a registered Fabric project>; "
                    "register another project by running `fabric whoami` there, or dispatch from it.")
-
 
 class PreflightError(ValueError):
     def __init__(self, code: str, fix: str):
         super().__init__(fix)
         self.code = code
-
-
-def prompt_temp_roots() -> tuple[Path, ...]:
-    roots = [Path(value).expanduser() for value in
-             (os.environ.get("TMPDIR", ""), "/tmp", "/private/tmp", "/private/var/folders") if value]
-    return tuple(dict.fromkeys(candidate for root in roots if root.is_absolute() for candidate in (root, root.resolve())))
-
 
 def read_prompt_input(prompt_file: Path, workspace: Path, run_dir: Path, read_roots=(), max_bytes=None) -> bytes:
     prompt_source = None
@@ -1563,7 +1080,7 @@ def read_prompt_input(prompt_file: Path, workspace: Path, run_dir: Path, read_ro
         if not prompt_source.exists():
             raise PreflightError("prompt_unavailable", f"cannot read prompt file: {prompt_source}")
         roots = (run_dir, workspace, run_workspace(run_dir, workspace), *(Path(root) for root in read_roots),
-                 *prompt_temp_roots())
+                 *run_records.prompt_temp_roots())
         prompt_root = next((root for root in roots if prompt_source.is_relative_to(root)), None)
         if prompt_root is None:
             raise PreflightError("prompt_path_forbidden", PROMPT_PATH_FIX)
@@ -1590,7 +1107,6 @@ def read_prompt_input(prompt_file: Path, workspace: Path, run_dir: Path, read_ro
             raise PreflightError("prompt_unavailable", str(exc))
     return prompt_bytes
 
-
 def routing_environment(*, preserve_instance=False) -> dict[str, str]:
     """Keep discovery and worker routing on the same instance/product fallback."""
     env = os.environ.copy()
@@ -1609,9 +1125,7 @@ def routing_environment(*, preserve_instance=False) -> dict[str, str]:
             pass
     return env
 
-
 EFFORT_RANK = {"low": 0, "medium": 1, "high": 2, "xhigh": 3, "ultra": 4}
-
 
 def effort_retry_plan(plan: dict[str, Any], adapter_record: dict[str, Any]) -> dict[str, Any] | None:
     """Retry a provider-rejected effort only when route capabilities prove a lower option."""
@@ -1639,7 +1153,6 @@ def effort_retry_plan(plan: dict[str, Any], adapter_record: dict[str, Any]) -> d
     retry["warnings"] = [*plan.get("warnings", []), warning]
     retry["argv"] = provider_exec.profile(plan["adapter"]).argv(retry)
     return retry
-
 
 def preflight_tasks(tasks: list[dict[str, Any]], workspace_root: Path | None = None) -> dict[str, Any]:
     """Use the dispatcher router before creating custody or launching any task."""
@@ -1848,24 +1361,17 @@ def preflight_tasks(tasks: list[dict[str, Any]], workspace_root: Path | None = N
     return ({"status": "rejected", "error": errors[0]["error"], "fix": errors[0]["fix"], "errors": errors}
             if errors else {"status": "validated", "routes": routes})
 
-
 def confidential_refusal(adapter, model, route):
     """The fix for a confidential task whose resolved route may train on its prompt."""
     risk = exec_routing.disclosure_risk(adapter, model, route)
     return (f"{adapter}/{model} {risk}; fix: pass a paid non-training model, alias or route, "
             "or drop confidential") if risk else None
 
-
-def run_identity(run_dir, receipt=None):
-    return os.environ.get("PROVENANT_RUN_ID") or (receipt or {}).get("run_id") or (run_dir.name if run_dir.name.startswith("mcp-") else "mcp-"+run_dir.name.rsplit("-",1)[-1])
-
-
 def with_pick_reason(line, reason):
     """Name why a route pool picked this model inside the Route line's parentheses."""
     if not reason or not line.endswith(")") or line.endswith("; " + reason + ")"):
         return line
     return line[:-1] + "; " + reason + ")"
-
 
 def attempt_scope(args, number):
     # Terminal construction reuses the scope captured before provider startup.
@@ -1876,7 +1382,6 @@ def attempt_scope(args, number):
     if key not in scopes:
         scopes[key] = identity_resolver().scope(args.tool)
     return scopes[key]
-
 
 def export_knob_overrides(args: argparse.Namespace) -> None:
     """Validate `--knob` overrides and export them, with the risk tier, so the routing subprocesses resolve the same profile."""
@@ -1895,7 +1400,6 @@ def export_knob_overrides(args: argparse.Namespace) -> None:
         if args.risk_tier in tiers:
             os.environ[harness_profile.RISK_TIER_ENV] = args.risk_tier
 
-
 def profile_resolution(args: argparse.Namespace) -> dict[str, Any]:
     """The attempt's harness-profile stamp, resolved once; a broken profile falls back to defaults and says why."""
     if getattr(args, "_profile_stamp", None) is None:
@@ -1905,10 +1409,8 @@ def profile_resolution(args: argparse.Namespace) -> dict[str, Any]:
         args._profile_stamp = resolution.stamp() if resolution else {"preset": None, "digest": None, "error": error}
     return args._profile_stamp
 
-
 def profile_knob(args: argparse.Namespace, name: str, fallback: Any = None) -> Any:
     return profile_resolution(args).get("knobs", {}).get(name, fallback)
-
 
 def disk_floor_bytes(workspace_root: Path, mode: str) -> int:
     defaults = {"worktree_write": 500 * 1024**2, "read_only": 500 * 1024**2}
@@ -1927,24 +1429,15 @@ def disk_floor_bytes(workspace_root: Path, mode: str) -> int:
         raise ValueError(fix)
     return floors.get(mode, defaults[mode])
 
-
-def delivery_run_id(value):
-    if not isinstance(value, str) or not DELIVERY_RUN_ID_RE.fullmatch(value):
-        raise ValueError("delivery_run_id must match RUN.json run_id: 1-128 letters, numbers, '.', '_', ':' or '-', starting with a letter or number")
-    return value
-
-
 def inherit_delivery_run_id(args, previous):
     value = previous.get('delivery_run_id')
     if value is not None:
         if getattr(args, 'delivery_run_id', None) not in (None, value):
             raise ValueError('retry must keep delivery_run_id')
-        args.delivery_run_id = delivery_run_id(value)
-
+        args.delivery_run_id = run_records.delivery_run_id(value)
 
 class RetryReceiptInvalid(ValueError):
     code = 'retry_of_invalid'
-
 
 def retry_receipt(run_dir, retry_dir):
     try:
@@ -1955,7 +1448,6 @@ def retry_receipt(run_dir, retry_dir):
     if not isinstance(previous, dict):
         raise RetryReceiptInvalid('retry attempt receipt must be an object')
     return previous
-
 
 def contract_row(args,run_dir,number,attempt_dir,plan,started_at):
     route=plan.get("route",{})
@@ -1984,7 +1476,7 @@ def contract_row(args,run_dir,number,attempt_dir,plan,started_at):
         provenance['account'] = plan['account']
     lineage = run_lineage.fields(run_dir) if (run_dir / "RUN_RECEIPT.json").exists() else run_lineage.fields()
     children = run_lineage.children(run_dir, args.task_id, number)
-    return {"schema":"fabric.attempt.v1", **attempt_scope(args,number), **lineage, **({"children": children} if children else {}), **({'placement_fallback': placement} if placement else {}),"run_id":plan.get("run_id") or run_identity(run_dir),"task_id":args.task_id,"task_class":task_class,
+    return {"schema":"fabric.attempt.v1", **attempt_scope(args,number), **lineage, **({"children": children} if children else {}), **({'placement_fallback': placement} if placement else {}),"run_id":plan.get("run_id") or run_records.run_identity(run_dir),"task_id":args.task_id,"task_class":task_class,
         **({"batch_id":args.batch_id} if getattr(args,"batch_id",None) else {}),"profile":profile_resolution(args),
         "attempt":number,"state":"running","status":None,"usage_source":"missing","mode":args.access_mode,"cwd":plan.get("cwd") or str(Path.cwd().resolve()),
         "retry_of":getattr(args,"retry_of",None),"escalation_reason":getattr(args,"escalation_reason",None),
@@ -1999,15 +1491,14 @@ def contract_row(args,run_dir,number,attempt_dir,plan,started_at):
         "secret_scan":{"allow_secrets":getattr(args,"allow_secrets",False),
                        "finding_names":getattr(getattr(args,"_secret_scan",None),"names",lambda:[])()},
         "timing":{"phases":getattr(args,"_phase_timings",{}).copy()},
-        "paths":{"result":relative_path(run_dir,attempt_dir/"result.md"),"stderr":relative_path(run_dir,attempt_dir/"stderr.log"),
-                 "events":relative_path(run_dir,attempt_dir/"events.jsonl"),"watchdog":relative_path(run_dir,attempt_dir/"watchdog.json"),
+        "paths":{"result":run_records.relative_path(run_dir,attempt_dir/"result.md"),"stderr":run_records.relative_path(run_dir,attempt_dir/"stderr.log"),
+                 "events":run_records.relative_path(run_dir,attempt_dir/"events.jsonl"),"watchdog":run_records.relative_path(run_dir,attempt_dir/"watchdog.json"),
                  "receipt":f"tasks/{args.task_id}/attempt-{number:03d}/attempt.json"},"digest":""}
-
 
 def publish_contract(run_dir,row):
     row["run_dir"] = str(run_dir)
     path=run_dir/row["paths"]["receipt"]
-    ensure_owned_directory(run_dir,path.parent)
+    run_records.ensure_owned_directory(run_dir,path.parent)
     with attempt_custody(run_dir, path):
         with run_lineage.journal_custody(run_dir, row["task_id"], row["attempt"]):
             children = run_lineage.children(run_dir, row["task_id"], row["attempt"])
@@ -2035,8 +1526,7 @@ def publish_contract(run_dir,row):
             if row["state"] == "terminal":
                 run_lineage.annotate_child_errors(row)
             row["digest"]=render_digest(row)
-            write_owned(run_dir,path,json.dumps(row,indent=2)+"\n")
-
+            run_records.write_owned(run_dir,path,json.dumps(row,indent=2)+"\n")
 
 def terminal_contract(args,run_dir,legacy,adapter,number,attempt_dir,active=None):
     run_lineage.refresh_external(run_dir, args.task_id, number, lambda ids:
@@ -2090,7 +1580,7 @@ def terminal_contract(args,run_dir,legacy,adapter,number,attempt_dir,active=None
         value = (adapter.get("paths") or {}).get(name)
         if value:
             try:
-                row["paths"][name] = relative_path(run_dir, run_dir / value)
+                row["paths"][name] = run_records.relative_path(run_dir, run_dir / value)
             except ValueError:
                 pass  # Keep the contract path when the adapter's lies outside the run.
     row["evidence"].update(process_evidence(run_dir, row))
@@ -2101,12 +1591,11 @@ def terminal_contract(args,run_dir,legacy,adapter,number,attempt_dir,active=None
     run_lineage.annotate_child_errors(row)
     return row
 
-
 def resume_relaunch_context(run_dir, previous):
     tail=""
     result=previous["paths"].get("result")
     if result:
-        retained=retained_path(run_dir,result)
+        retained=run_records.retained_path(run_dir,result)
         try:
             (run_dir / retained).lstat()
         except FileNotFoundError:
@@ -2120,12 +1609,10 @@ def resume_relaunch_context(run_dir, previous):
                 os.close(fd)
     return (previous.get("question") or "")+"\n"+tail
 
-
 class ResumeError(ValueError):
     def __init__(self, code, message):
         super().__init__(message)
         self.code = code
-
 
 def prepare_resume(args):
     paths=sorted((args.run_dir.resolve()/"tasks").glob("*/attempt-*/attempt.json"))
@@ -2198,7 +1685,7 @@ def prepare_resume(args):
     if args.tool=="claude" and incomplete_provider_turn(previous):
         events=previous["paths"].get("events")
         if events:
-            retained=retained_path(args.run_dir,events)
+            retained=run_records.retained_path(args.run_dir,events)
             try:
                 (args.run_dir / retained).lstat()
             except FileNotFoundError:
@@ -2238,8 +1725,7 @@ def prepare_resume(args):
         args.resume_advice=(previous,previous["task_id"] if len(tasks)>1 else None)
     receipt=json.loads(read_bound_bytes(args.run_dir,"RUN_RECEIPT.json",label="RUN_RECEIPT.json"))
     receipt.update(status="active",closed_at=None)
-    write_owned(args.run_dir,args.run_dir/"RUN_RECEIPT.json",json.dumps(receipt,indent=2)+"\n")
-
+    run_records.write_owned(args.run_dir,args.run_dir/"RUN_RECEIPT.json",json.dumps(receipt,indent=2)+"\n")
 
 def _dispatch(args: argparse.Namespace, custody=None) -> int:
     args._last_plan={}
@@ -2346,11 +1832,11 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
         return 2
     args._secret_scan = secret_scan_result
     try:
-        ensure_owned_directory(run_dir, run_dir / "dispatch" / "tasks")
+        run_records.ensure_owned_directory(run_dir, run_dir / "dispatch" / "tasks")
         if not args.batch_child:
-            reconcile_manifest(run_dir, custody)
-            ensure_manifest_appendable(run_dir)
-    except AttemptEvidenceError as exc:
+            run_records.reconcile_manifest(run_dir, custody)
+            run_records.ensure_manifest_appendable(run_dir)
+    except run_records.AttemptEvidenceError as exc:
         return fail(run_dir, "attempt_evidence_incomplete", str(exc))
     except OSError as exc:
         return fail(run_dir, "manifest_not_appendable", f"MANIFEST.md is not appendable: {exc}")
@@ -2399,8 +1885,8 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
 
     task_dir = run_dir / "dispatch" / "tasks" / args.task_id
     try:
-        ensure_owned_directory(run_dir, task_dir)
-    except AttemptEvidenceError as exc:
+        run_records.ensure_owned_directory(run_dir, task_dir)
+    except run_records.AttemptEvidenceError as exc:
         return fail(run_dir, "attempt_path_invalid", str(exc))
     retry_of = None
     if args.escalation_reason and not args.retry_of:
@@ -2454,7 +1940,7 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
                 git_evidence_source if git_evidence_source is not None else evidence_path,
                 evidence_path,
             )
-        except (OSError, OwnedFileError, AttemptEvidenceError) as exc:
+        except (OSError, OwnedFileError, run_records.AttemptEvidenceError) as exc:
             return fail(run_dir, "git_evidence_invalid", str(exc))
         prompt_bytes = (
             (f"Read the supplied evidence files under {evidence_dir}. In particular, read "
@@ -2499,7 +1985,7 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
         try:
             transport = hosts._load_module('provenant_fabric_git', hosts.PRODUCT_ROOT / 'scripts/fabric_git.py')
             transport.validate_launch(hosts, hosts.config_path().parent, args.worktree,
-                run_identity(run_dir, run_receipt), args.task_id)
+                run_records.run_identity(run_dir, run_receipt), args.task_id)
         except hosts.HostError as exc:
             release_worktree_lease(worktree_lease)
             return fail(run_dir, exc.code, str(exc))
@@ -2647,7 +2133,7 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
                 plan["original_prompt_file"] = original_prompt
                 provider_cwd = Path(plan.get("cwd") or workspace).resolve()
                 workspace_observation["cwd"] = str(provider_cwd)
-                plan.update(timeout_seconds=args.timeout_seconds,run_id=run_identity(run_dir,run_receipt),chair=os.environ.get("PROVENANT_CHAIR") or os.environ.get("AGENT_FABRIC_SEAT", ""),fallback_from=getattr(args,"fallback_from",None))
+                plan.update(timeout_seconds=args.timeout_seconds,run_id=run_records.run_identity(run_dir,run_receipt),chair=os.environ.get("PROVENANT_CHAIR") or os.environ.get("AGENT_FABRIC_SEAT", ""),fallback_from=getattr(args,"fallback_from",None))
                 if hasattr(args,"resume_relaunch"):
                     plan["prompt"] += "\n\nPrevious turn and question:\n"+args.resume_relaunch
                     plan["argv"] = provider_exec.profile(args.tool).argv(plan)
@@ -2706,7 +2192,7 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
                     if args.resume_warning: plan["warnings"].insert(0,args.resume_warning)
                 plan["silence_seconds"] = profile_knob(args, "lanes.silence_seconds", 300)
                 plan["_lineage_token"] = run_lineage.owner_token(run_dir)
-                plan["attempt_identity"] = {"run_id": run_identity(run_dir, run_receipt),
+                plan["attempt_identity"] = {"run_id": run_records.run_identity(run_dir, run_receipt),
                     "task_id": args.task_id, "attempt": attempt_number, "run_dir": str(run_dir)}
                 active = contract_row(args,run_dir,attempt_number,attempt_dir,plan,started_at)
                 active["requested_route"] = requested_route
@@ -2728,7 +2214,7 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
                     active["pgid_started_at"]=process_info.start_time(child.pid)
                     _record_provider_process(run_dir,child,task_id=args.task_id,attempt=attempt_number)
                     try:
-                        write_owned(run_dir,attempt_dir/"pgid",str(child.pid)+"\n")
+                        run_records.write_owned(run_dir,attempt_dir/"pgid",str(child.pid)+"\n")
                         publish_contract(run_dir,active)
                     except (OSError, OwnedFileError) as exc:
                         bookkeeping_warning(exc)
@@ -2743,7 +2229,7 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
                         else:
                             progress_publication[0]=time.monotonic()
                 def cancellation():
-                    return owner_cancel[0] or cancellation_marker_present(run_dir,attempt_dir) or (batch_dir is not None and cancellation_marker_present(run_dir,batch_dir))
+                    return owner_cancel[0] or run_records.cancellation_marker_present(run_dir,attempt_dir) or (batch_dir is not None and run_records.cancellation_marker_present(run_dir,batch_dir))
                 admitted = admit_attempt(active, cancellation, cooldown_blocked=bool(plan.get("cooldown_blocked")))
                 plan["timeout_seconds"] = provider_timeout_seconds(args.timeout_seconds)
                 if plan["adapter"] == "agy" and admitted:
@@ -2825,10 +2311,10 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
                 args._last_plan=plan
             else:
                 adapter_record=plan
-                write_owned(run_dir,stderr_path,planning.stderr if planning is not None else "")
+                run_records.write_owned(run_dir,stderr_path,planning.stderr if planning is not None else "")
             if not stderr_path.exists():
-                write_owned(run_dir, stderr_path, "")
-            write_owned(run_dir,adapter_path,json.dumps(adapter_record)+"\n")
+                run_records.write_owned(run_dir, stderr_path, "")
+            run_records.write_owned(run_dir,adapter_path,json.dumps(adapter_record)+"\n")
             exit_code=adapter_record.get("exit")
             if type(exit_code) is not int: exit_code=1
             observed_exit=True
@@ -2839,7 +2325,7 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
             process_errno=getattr(exc, "errno", None) or getattr(exc.__cause__, "errno", None)
             for path, content in ((adapter_path, "{}\n"), (stderr_path, str(exc))):
                 try:
-                    if not path.exists(): write_owned(run_dir, path, content)
+                    if not path.exists(): run_records.write_owned(run_dir, path, content)
                 except (OSError, OwnedFileError):
                     pass
         finally:
@@ -2848,11 +2334,11 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
             release_worktree_lease(worktree_lease)
     else:
         try:
-            with owned_text_file(run_dir, adapter_path, "w") as adapter_stream, owned_text_file(
+            with run_records.owned_text_file(run_dir, adapter_path, "w") as adapter_stream, run_records.owned_text_file(
                 run_dir, stderr_path, "w"
             ) as stderr_stream:
-                attempt_cancelled = cancellation_marker_present(run_dir, attempt_dir)
-                batch_cancelled = batch_dir is not None and cancellation_marker_present(run_dir, batch_dir)
+                attempt_cancelled = run_records.cancellation_marker_present(run_dir, attempt_dir)
+                batch_cancelled = batch_dir is not None and run_records.cancellation_marker_present(run_dir, batch_dir)
                 if attempt_cancelled or batch_cancelled:
                     # The owner still writes the ordinary attempt evidence, but no
                     # provider process is created for a pre-launch request.
@@ -2873,8 +2359,8 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
                     signal.signal(signal.SIGHUP, cancel_handler)
                     active = contract_row(args, run_dir, attempt_number, attempt_dir, {}, started_at)
                     active["requested_route"] = requested_route
-                    if not admit_attempt(active, lambda: cancel_pending or cancellation_marker_present(run_dir, attempt_dir)
-                                         or (batch_dir is not None and cancellation_marker_present(run_dir, batch_dir))):
+                    if not admit_attempt(active, lambda: cancel_pending or run_records.cancellation_marker_present(run_dir, attempt_dir)
+                                         or (batch_dir is not None and run_records.cancellation_marker_present(run_dir, batch_dir))):
                         process_error = process_error or "cancelled"
                         observed_exit = True
                         raise InterruptedError("memory wait cancelled")
@@ -2893,10 +2379,10 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
                             provider_environment.pop(name)
                     provider_environment[run_lineage.PARENT_TOKEN_ENV] = run_lineage.owner_token(run_dir)
                     provider_environment[run_lineage.PARENT_ENV] = json.dumps({
-                        "run_id": run_identity(run_dir, run_receipt), "task_id": args.task_id,
+                        "run_id": run_records.run_identity(run_dir, run_receipt), "task_id": args.task_id,
                         "attempt": attempt_number, "run_dir": str(run_dir)})
                     provider_environment.pop("PROVENANT_PARENT_REMOTE", None)
-                    ensure_owned_directory(run_dir, attempt_dir / "tmp" / "children")
+                    run_records.ensure_owned_directory(run_dir, attempt_dir / "tmp" / "children")
                     if os.environ.get("PROVENANT_RUN_TOKEN"):
                         # cf_dispatch buffers stdout/stderr here until completion.
                         # Status can observe mtimes without reading provider output.
@@ -2921,9 +2407,9 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
                     # A request can arrive after the provider is spawned but
                     # before Popen returns. Reconcile it before entering the
                     # normal wait loop, preserving natural exit at the boundary.
-                    marker_seen = cancellation_marker_present(run_dir, attempt_dir)
+                    marker_seen = run_records.cancellation_marker_present(run_dir, attempt_dir)
                     if batch_dir is not None:
-                        marker_seen = marker_seen or cancellation_marker_present(run_dir, batch_dir)
+                        marker_seen = marker_seen or run_records.cancellation_marker_present(run_dir, batch_dir)
                     if cancel_pending or marker_seen:
                         exit_code = process.poll()
                         if exit_code is None:
@@ -2948,9 +2434,9 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
                                 process_error = "cancelled"
                                 observed_exit = True
                                 break
-                            marker_seen = cancellation_marker_present(run_dir, attempt_dir)
+                            marker_seen = run_records.cancellation_marker_present(run_dir, attempt_dir)
                             if batch_dir is not None:
-                                marker_seen = marker_seen or cancellation_marker_present(run_dir, batch_dir)
+                                marker_seen = marker_seen or run_records.cancellation_marker_present(run_dir, batch_dir)
                             if marker_seen:
                                 # Re-check before stopping to preserve a natural
                                 # exit that became observable at the boundary.
@@ -3019,12 +2505,12 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
         result_metadata = result_path.lstat()
     except OSError:
         result_metadata = None
-    result_invalid = result_metadata is not None and not valid_regular_result(run_dir, result_path)
+    result_invalid = result_metadata is not None and not run_records.valid_regular_result(run_dir, result_path)
     if result_invalid and result_metadata is not None and not stat.S_ISDIR(result_metadata.st_mode):
         result_path.unlink(missing_ok=True)
-    result_exists = valid_regular_result(run_dir, result_path)
+    result_exists = run_records.valid_regular_result(run_dir, result_path)
     result_nonempty = result_exists and result_path.stat().st_size > 0
-    result_digest = digest(result_path) if result_exists else ""
+    result_digest = run_records.digest(result_path) if result_exists else ""
     adapter_status = str(adapter.get("status", "")) if adapter else "adapter_receipt_invalid"
     receipt_error = (
         success_receipt_error({**adapter, "status": "ok"}, args, result_path, result_digest)
@@ -3038,8 +2524,8 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
                            or adapter_status == "quarantined" and adapter.get("exit") == 0)
             and not receipt_error and result_nonempty):
         try:
-            question = worker_question_envelope(result_path, result_digest)
-        except TerminalEnvelopeIntegrityError:
+            question = run_records.worker_question_envelope(result_path, result_digest)
+        except run_records.TerminalEnvelopeIntegrityError:
             result_integrity_error = True
         except ValueError:
             terminal_envelope_error = True
@@ -3139,8 +2625,8 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
             }},
             **adapter,
             "adapter_receipt": {
-                "path": relative_path(run_dir, adapter_path),
-                "digest": digest(adapter_path) if adapter_path.exists() else None,
+                "path": run_records.relative_path(run_dir, adapter_path),
+                "digest": run_records.digest(adapter_path) if adapter_path.exists() else None,
             },
         },
         "outcome": outcome,
@@ -3152,14 +2638,14 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
         "finished_at": finished_at,
         "duration_seconds": duration_seconds,
         "workspace": workspace_observation,
-        "prompt": {"path": relative_path(run_dir, prompt_path), "digest": digest(prompt_path),
+        "prompt": {"path": run_records.relative_path(run_dir, prompt_path), "digest": run_records.digest(prompt_path),
                    "original_path": original_prompt},
         "result": (
-            {"path": relative_path(run_dir, result_path), "digest": result_digest}
+            {"path": run_records.relative_path(run_dir, result_path), "digest": result_digest}
             if result_exists
             else None
         ),
-        "stderr": {"path": relative_path(run_dir, stderr_path), "digest": digest(stderr_path) if stderr_path.exists() else None},
+        "stderr": {"path": run_records.relative_path(run_dir, stderr_path), "digest": run_records.digest(stderr_path) if stderr_path.exists() else None},
         "process": {
             "pid": process.pid if process is not None else None,
             "started_at": started_at,
@@ -3168,14 +2654,14 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
             "observed_exit": observed_exit,
             "terminating_signal": -exit_code if isinstance(exit_code, int) and exit_code < 0 else None,
         },
-        "argv_digest": json_digest(command),
+        "argv_digest": run_records.json_digest(command),
         "retry_lineage": [retry_of] if retry_of else [],
         **({'delivery_run_id': args.delivery_run_id} if getattr(args, 'delivery_run_id', None) is not None else {}),
     }
     run_lineage.annotate_child_errors(record)
     if evidence_path is not None and git_evidence_identity is not None:
         record["git_evidence"] = {
-            "path": relative_path(run_dir, evidence_path),
+            "path": run_records.relative_path(run_dir, evidence_path),
             "digest": git_evidence_digest,
             "checkout": git_evidence_identity,
         }
@@ -3192,18 +2678,18 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
         else:
             checkpoint_written = True
     attempt_path = attempt_dir / "attempt.json"
-    record["attempt_path"] = relative_path(run_dir, attempt_path)
+    record["attempt_path"] = run_records.relative_path(run_dir, attempt_path)
     digest_path = attempt_dir / "attempt.sha256"
-    record["attempt_digest_path"] = relative_path(run_dir, digest_path)
-    write_owned(run_dir, attempt_path, json.dumps(record, indent=2, sort_keys=True) + "\n")
-    attempt_digest = digest(attempt_path)
-    write_owned(run_dir, digest_path, f"{attempt_digest}  {attempt_path.name}\n")
+    record["attempt_digest_path"] = run_records.relative_path(run_dir, digest_path)
+    run_records.write_owned(run_dir, attempt_path, json.dumps(record, indent=2, sort_keys=True) + "\n")
+    attempt_digest = run_records.digest(attempt_path)
+    run_records.write_owned(run_dir, digest_path, f"{attempt_digest}  {attempt_path.name}\n")
     manifest_error = False
     try:
         if args.batch_child:
             manifest_error = False
         else:
-            append_manifest(run_dir, record, custody)
+            run_records.append_manifest(run_dir, record, custody)
     except OSError as exc:
         manifest_error = True
         record["status"] = "failed"
@@ -3211,15 +2697,15 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
         record["outcome"] = "manifest_write_error"
         record["failure_code"] = "manifest_write_error"
         record["manifest_error"] = str(exc)
-        write_owned(run_dir, attempt_path, json.dumps(record, indent=2, sort_keys=True) + "\n")
-        attempt_digest = digest(attempt_path)
-        write_owned(run_dir, digest_path, f"{attempt_digest}  {attempt_path.name}\n")
-    remove_cancellation_marker(run_dir, attempt_dir)
+        run_records.write_owned(run_dir, attempt_path, json.dumps(record, indent=2, sort_keys=True) + "\n")
+        attempt_digest = run_records.digest(attempt_path)
+        run_records.write_owned(run_dir, digest_path, f"{attempt_digest}  {attempt_path.name}\n")
+    run_records.remove_cancellation_marker(run_dir, attempt_dir)
     for sig, handler in old_handlers.items():
         signal.signal(sig, handler)
     row = terminal_contract(args,run_dir,record,adapter,attempt_number,attempt_dir,active)
     if checkpoint_written:
-        row["paths"]["checkpoint"] = relative_path(run_dir, attempt_dir / "wip-checkpoint.json")
+        row["paths"]["checkpoint"] = run_records.relative_path(run_dir, attempt_dir / "wip-checkpoint.json")
     def prune_tmp():
         left=attempt_storage.prune_private_tmp(run_dir,attempt_dir,row["status"])[1]
         if left: row["warnings"].append("attempt tmp left in place (mount or unremovable): "+", ".join(left[:3]))
@@ -3250,7 +2736,6 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
     # The MCP front door consumes the canonical attempt as its terminal row.
     print(json.dumps(row if os.environ.get("PROVENANT_RUN_TOKEN") and not args.batch_child else output_record, sort_keys=True))
     return 0 if status == "ok" and not manifest_error else 1
-
 
 def close_mcp_run(run_dir: Path) -> None:
     """Close execution custody only; this is not a delivery/assurance final gate."""
@@ -3290,15 +2775,14 @@ def close_mcp_run(run_dir: Path) -> None:
             return
         receipt.update(status="ok" if statuses == {"ok"} else "quarantined" if statuses <= {"ok", "quarantined"} else "cancelled" if statuses == {"cancelled"} else "input_required" if receipt.get("resumable") else "failed",
                        closed_at=now(), terminal_reason=None if statuses == {"ok"} else "MCP execution attempts are terminal")
-        write_owned(run_dir, run_dir / "RUN_RECEIPT.json", json.dumps(receipt, indent=2) + "\n")
+        run_records.write_owned(run_dir, run_dir / "RUN_RECEIPT.json", json.dumps(receipt, indent=2) + "\n")
         status_path = run_dir / "dispatch-status.json"
         if status_path.exists():
             status = json.loads(read_bound_bytes(run_dir, "dispatch-status.json", label="dispatch status"))
             status.update(status=receipt["status"], finished_at=receipt["closed_at"])
-            write_owned(run_dir, status_path, json.dumps(status, indent=2) + "\n")
+            run_records.write_owned(run_dir, status_path, json.dumps(status, indent=2) + "\n")
     except (OSError, ValueError, TypeError, KeyError, AttributeError, OwnedFileError):
         pass
-
 
 def rate_limit_delay(previous, cooling, policy):
     """A missing store must still pace; jitter never shortens a provider window."""
@@ -3314,7 +2798,6 @@ def rate_limit_delay(previous, cooling, policy):
         if not isinstance(delay, (int, float)) or not math.isfinite(delay) or delay <= 0:
             delay = policy["base_delay_seconds"]
     return delay + random.uniform(0, delay * policy["jitter_fraction"])
-
 
 def execute_attempt_sequence(args,custody=None):
     try:
@@ -3395,7 +2878,6 @@ def execute_attempt_sequence(args,custody=None):
             previous=getattr(args,"_last_row",None)
     return result
 
-
 def cleanup_settled_reader(args) -> None:
     row = getattr(args, "_last_row", None) or {}
     if row.get("mode") == "read_only" and os.environ.get("PROVENANT_REMOTE_LANE") == "1":
@@ -3404,7 +2886,6 @@ def cleanup_settled_reader(args) -> None:
         except (OSError, ValueError, RuntimeError, subprocess.SubprocessError):
             # A subsequent host read retries operation-owned cleanup.
             pass
-
 
 def dispatch(args: argparse.Namespace) -> int:
     """Run one attempt while serialising standalone run-ledger mutation."""
@@ -3525,7 +3006,7 @@ def dispatch(args: argparse.Namespace) -> int:
     try:
         try:
             run_lineage.record_owner(run_dir)
-            run_lineage.register_run(run_dir, run_identity(run_dir))
+            run_lineage.register_run(run_dir, run_records.run_identity(run_dir))
         except (OSError, ValueError, OwnedFileError) as exc:
             return fail(run_dir, "lineage_unavailable", str(exc))
         if args.resume:
@@ -3541,7 +3022,6 @@ def dispatch(args: argparse.Namespace) -> int:
         fcntl.flock(custody.fileno(), fcntl.LOCK_UN)
         custody.close()
 
-
 def _fabric_hosts_owner():
     import importlib.util
     name = 'provenant_dispatch_hosts'
@@ -3552,12 +3032,11 @@ def _fabric_hosts_owner():
         spec.loader.exec_module(module)
     return sys.modules[name]
 
-
 def parser() -> argparse.ArgumentParser:
     root = BudgetArgumentParser(command_name="dispatch", description=__doc__)
     root.add_argument("--run-dir", type=Path, required=True)
     root.add_argument("--task-id")
-    root.add_argument("--delivery-run-id", type=delivery_run_id, help="RUN.json run_id of the delivery this lane serves")
+    root.add_argument("--delivery-run-id", type=run_records.delivery_run_id, help="RUN.json run_id of the delivery this lane serves")
     root.add_argument("--host")
     root.add_argument("--operation-id")
     adapter = root.add_mutually_exclusive_group(required=False)
@@ -3623,7 +3102,6 @@ def parser() -> argparse.ArgumentParser:
                            "a free model counts unless its entry sets trains_on_prompts false")
     root.add_argument("--pick-reason", help="why a route pool picked this model; appended to the Route line")
     return root
-
 
 if __name__ == "__main__":
     if sys.argv[1:] == ["--preflight-json"]:
