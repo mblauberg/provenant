@@ -1048,13 +1048,19 @@ fn guardian_loss_never_invents_exit_or_releases_the_reservation(root: &Path) -> 
     let clock = SystemClock::new();
     // The live provider retains the inherited lease after guardian loss.
     let writer_path = root.join("crash-writer");
-    let provider = reservation_identity(&writer_path, "provider")?;
+    let provider = process_identity(read_pid_line(&mut held)?)?;
     let locked = acquire_recovery(
         Directory::open_anchor(&writer_path)?,
         WaitBudget::cli(provenant_core::MonoTime::from_micros(0), 1)?,
-        &CancelToken::new(), &clock,
+        &CancelToken::new(),
+        &clock,
     );
-    assert!(matches!(locked, Err(CustodyError::Filesystem(provenant_supervisor::fs::FsError::LockTimeout { .. }))));
+    assert!(matches!(
+        locked,
+        Err(CustodyError::Filesystem(
+            provenant_supervisor::fs::FsError::LockTimeout { .. }
+        ))
+    ));
     assert!(!root.join("crash-attempt/process-exit.json").exists());
     drop(held);
     wait_for_identity_absence(&provider)?;

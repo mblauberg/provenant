@@ -91,7 +91,7 @@ fn collect_recorded_processes(
         }
         if !matches!(
             entry.file_name().to_str(),
-            Some("reservation.json" | "process.json")
+            Some("reservation.json" | "process.json" | "fixture-process.json")
         ) {
             continue;
         }
@@ -249,7 +249,9 @@ pub fn run_libtest(
         return Ok(());
     }
     for name in selected {
-        io::stdout().lock().write_all(format!("test {name} ... ").as_bytes())?;
+        io::stdout()
+            .lock()
+            .write_all(format!("test {name} ... ").as_bytes())?;
         run(name)?;
         io::stdout().lock().write_all(b"ok\n")?;
     }
@@ -486,23 +488,25 @@ impl crate::ExitPublisher for ExitPublicationFaults {
         }
 
         let blocked = self.marker(S2_EXIT_PUBLICATION_SYNC_BLOCKED);
-        let publication = directory.atomic_write_with_sync(
+        let publication = directory.atomic_write_with_faults(
             std::ffi::OsStr::new("process-exit.json"),
             ".exit-",
             bytes,
             crate::fs::PublishMode::NoReplace,
-            || match marker_present(&blocked) {
-                Ok(true) => Err(injected_fs_error(
-                    "fixture post-link directory sync",
-                    PathBuf::from("process-exit.json"),
-                    libc::ENOSPC,
-                )),
-                Ok(false) => directory.sync(),
-                Err(source) => Err(crate::fs::FsError::Io {
-                    operation: "read fixture sync marker",
-                    path: blocked.clone(),
-                    source,
-                }),
+            &mut DirectorySyncOperations {
+                sync: |directory: &crate::fs::Directory| match marker_present(&blocked) {
+                    Ok(true) => Err(injected_fs_error(
+                        "fixture post-link directory sync",
+                        PathBuf::from("process-exit.json"),
+                        libc::ENOSPC,
+                    )),
+                    Ok(false) => directory.sync(),
+                    Err(source) => Err(crate::fs::FsError::Io {
+                        operation: "read fixture sync marker",
+                        path: blocked.clone(),
+                        source,
+                    }),
+                },
             },
         )?;
         Ok(publication)
@@ -515,31 +519,33 @@ impl crate::ExitPublisher for ExitPublicationFaults {
     ) -> crate::custody::Result<crate::fs::Publication> {
         let blocked = self.marker(S2_RESERVATION_SYNC_BLOCKED);
         let pending = self.marker(S2_RESERVATION_SYNC_PENDING);
-        let publication = directory.atomic_write_with_sync(
+        let publication = directory.atomic_write_with_faults(
             std::ffi::OsStr::new("reservation.json"),
             ".reservation-",
             bytes,
             crate::fs::PublishMode::Replace,
-            || match marker_present(&blocked) {
-                Ok(true) => {
-                    std::fs::write(&pending, b"reservation visible; directory sync blocked")
-                        .map_err(|source| crate::fs::FsError::Io {
-                            operation: "write fixture reservation sync marker",
-                            path: pending.clone(),
-                            source,
-                        })?;
-                    Err(injected_fs_error(
-                        "fixture post-link reservation directory sync",
-                        PathBuf::from("reservation.json"),
-                        libc::ENOSPC,
-                    ))
-                }
-                Ok(false) => directory.sync(),
-                Err(source) => Err(crate::fs::FsError::Io {
-                    operation: "read fixture reservation sync marker",
-                    path: blocked.clone(),
-                    source,
-                }),
+            &mut DirectorySyncOperations {
+                sync: |directory: &crate::fs::Directory| match marker_present(&blocked) {
+                    Ok(true) => {
+                        std::fs::write(&pending, b"reservation visible; directory sync blocked")
+                            .map_err(|source| crate::fs::FsError::Io {
+                                operation: "write fixture reservation sync marker",
+                                path: pending.clone(),
+                                source,
+                            })?;
+                        Err(injected_fs_error(
+                            "fixture post-link reservation directory sync",
+                            PathBuf::from("reservation.json"),
+                            libc::ENOSPC,
+                        ))
+                    }
+                    Ok(false) => directory.sync(),
+                    Err(source) => Err(crate::fs::FsError::Io {
+                        operation: "read fixture reservation sync marker",
+                        path: blocked.clone(),
+                        source,
+                    }),
+                },
             },
         )?;
         Ok(publication)
@@ -563,6 +569,49 @@ impl crate::ExitPublisher for ExitPublicationFaults {
         Ok(())
     }
 }
+// The shared production seam remains AtomicWriteOperations; fixture-only
+// directory-sync faults delegate every other storage operation unchanged.
+struct DirectorySyncOperations<F> {
+    sync: F,
+}
+impl<F: FnMut(&crate::fs::Directory) -> crate::fs::Result<()>> crate::fs::AtomicWriteOperations
+    for DirectorySyncOperations<F>
+{
+    fn write(
+        &mut self,
+        file: &mut crate::fs::FileHandle,
+        bytes: &[u8],
+        path: &Path,
+    ) -> crate::fs::Result<()> {
+        file.write_all(bytes)
+            .map_err(|source| crate::fs::FsError::Io {
+                operation: "write fixture staging file",
+                path: path.into(),
+                source,
+            })
+    }
+    fn sync_file(&mut self, file: &crate::fs::FileHandle) -> crate::fs::Result<()> {
+        file.sync()
+    }
+    fn rename(
+        &mut self,
+        directory: &crate::fs::Directory,
+        temporary: &std::ffi::OsStr,
+        name: &std::ffi::OsStr,
+        mode: crate::fs::PublishMode,
+    ) -> crate::fs::Result<()> {
+        match mode {
+            crate::fs::PublishMode::NoReplace => {
+                directory.rename_noreplace(temporary, directory, name)
+            }
+            crate::fs::PublishMode::Replace => directory.replace(temporary, directory, name),
+        }
+    }
+    fn sync_directory(&mut self, directory: &crate::fs::Directory) -> crate::fs::Result<()> {
+        (self.sync)(directory)
+    }
+}
+
 fn marker_present(path: &Path) -> io::Result<bool> {
     match std::fs::symlink_metadata(path) {
         Ok(_) => Ok(true),
@@ -780,8 +829,17 @@ pub fn dispatch() -> io::Result<bool> {
             wait_for_eof(&mut stream)?;
         }
         "crash-guardian-provider" => {
+            let identity = match RecordedBootObserver.observe(i64::from(std::process::id())) {
+                crate::census::ProcessObservation::Present(fact) => fact.identity,
+                _ => return Err(io::Error::other("fixture identity unavailable")),
+            };
+            std::fs::write(
+                std::env::current_dir()?.join("fixture-process.json"),
+                serde_json::to_vec(&serde_json::json!({"provider":identity}))?,
+            )?;
             let mut stream = std::os::unix::net::UnixStream::connect(fixture_path(&args, 3)?)?;
             stream.write_all(b"R")?;
+            writeln!(stream, "{}", std::process::id())?;
             io::stdout().write_all(b"crash-guardian\n")?;
             wait_for_eof(&mut stream)?;
         }

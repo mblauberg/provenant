@@ -277,6 +277,8 @@ UTC microseconds and no final LF in canonical bytes. Files written to disk may a
 oversized input and invalid integers. Limits: receipt 64 KiB, 256 review refs,
 checkpoint 32 KiB and hook output 8 KiB. Reports have deterministic ordering.
 
+A corrupt stored receipt fails closed with no repair path; a crash before rename can leave a temporary file, which a later save ignores.
+
 Save the entire receipt at an expected revision. Acquire a stable lock inode,
 read/check revision, validate the replacement, write/sync a same-directory
 temporary file, replace the receipt and sync the directory. Increment revision
