@@ -11,10 +11,20 @@ pub(crate) fn resolve(path: &Path) -> io::Result<PathBuf> {
     } else {
         std::env::current_dir()?.join(path)
     };
-    let mut parts = components(&absolute);
+    let mut parts: VecDeque<_> = components(&absolute)
+        .into_iter()
+        .map(ResolvePart::Name)
+        .collect();
     let mut resolved = PathBuf::new();
-    let mut links = 0;
+    let mut seen = std::collections::BTreeMap::<PathBuf, Option<PathBuf>>::new();
     while let Some(part) = parts.pop_front() {
+        let part = match part {
+            ResolvePart::Complete(link) => {
+                seen.insert(link, Some(resolved.clone()));
+                continue;
+            }
+            ResolvePart::Name(part) => part,
+        };
         if part == "/" {
             resolved.push(Path::new("/"));
         } else if part == ".." {
@@ -23,17 +33,22 @@ pub(crate) fn resolve(path: &Path) -> io::Result<PathBuf> {
             resolved.push(&part);
             match std::fs::read_link(&resolved) {
                 Ok(target) => {
-                    links += 1;
-                    if links > 40 {
-                        return Err(io::Error::other("too many symbolic links"));
+                    if let Some(previous) = seen.get(&resolved) {
+                        if let Some(previous) = previous {
+                            resolved = previous.clone();
+                        }
+                        // Non-strict resolution leaves an unresolved loop in place.
+                        continue;
                     }
+                    let link = resolved.clone();
+                    seen.insert(link.clone(), None);
                     resolved.pop();
-                    let mut target_parts = components(&target);
-                    target_parts.append(&mut parts);
-                    parts = target_parts;
+                    parts.push_front(ResolvePart::Complete(link));
+                    for part in components(&target).into_iter().rev() {
+                        parts.push_front(ResolvePart::Name(part));
+                    }
                 }
                 Err(error) if error.kind() == io::ErrorKind::InvalidInput => {
-                    // InvalidInput also reports a regular file on Unix. Reject NUL paths.
                     if part.as_encoded_bytes().contains(&0) {
                         return Err(error);
                     }
@@ -43,6 +58,12 @@ pub(crate) fn resolve(path: &Path) -> io::Result<PathBuf> {
         }
     }
     Ok(resolved)
+}
+
+// port: belongs in provenant-core
+enum ResolvePart {
+    Name(OsString),
+    Complete(PathBuf),
 }
 
 // port: belongs in provenant-core

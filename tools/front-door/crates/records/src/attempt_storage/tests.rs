@@ -348,3 +348,14 @@ with tempfile.TemporaryDirectory() as root:
         value["exists"].as_bool().unwrap()
     );
 }
+
+#[test]
+fn removal_refuses_parent_components_before_opening() {
+    let (fs, _) = fixture();
+    fs.nodes.borrow_mut()[1].children.insert("..".into(), 0);
+    let victim = fs.add(0, "victim", true, 512);
+    fs.add(victim, "keep", false, 512);
+    let path = Path::new("/run/../victim");
+    assert_eq!(remove_tree(&fs, Path::new("/run"), path), vec![path]);
+    assert!(fs.child(&victim, OsStr::new("keep")).is_ok());
+}

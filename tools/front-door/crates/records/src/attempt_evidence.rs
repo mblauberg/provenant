@@ -120,6 +120,62 @@ pub fn successful_adapter_error(
     None
 }
 
+// Python json.loads accepts nonfinite constants and numeric magnitudes beyond
+// f64. These can never satisfy any numeric success field; retain their shape as
+// null for validation, without rewriting retained evidence bytes.
+fn decode_adapter(line: &str) -> Result<Value, serde_json::Error> {
+    if let Ok(value) = serde_json::from_str(line) {
+        if !line.contains("-0") {
+            return Ok(value);
+        }
+    }
+    let mut normalized = String::with_capacity(line.len());
+    let mut chars = line.char_indices().peekable();
+    while let Some((start, ch)) = chars.next() {
+        if ch == '"' {
+            normalized.push(ch);
+            while let Some((_, ch)) = chars.next() {
+                normalized.push(ch);
+                if ch == '\\' {
+                    if let Some((_, escaped)) = chars.next() {
+                        normalized.push(escaped);
+                    }
+                } else if ch == '"' {
+                    break;
+                }
+            }
+        } else if matches!(
+            ch,
+            '{' | '}' | '[' | ']' | ',' | ':' | ' ' | '\t' | '\r' | '\n'
+        ) {
+            normalized.push(ch);
+        } else {
+            let mut end = start + ch.len_utf8();
+            while let Some(&(index, next)) = chars.peek() {
+                if matches!(
+                    next,
+                    '{' | '}' | '[' | ']' | ',' | ':' | ' ' | '\t' | '\r' | '\n' | '"'
+                ) {
+                    break;
+                }
+                end = index + next.len_utf8();
+                chars.next();
+            }
+            let token = &line[start..end];
+            let beyond_range = serde_json::from_str::<Value>(token).is_err()
+                && serde_json::from_str::<serde::de::IgnoredAny>(token).is_ok();
+            normalized.push_str(if token == "-0" {
+                "0"
+            } else if matches!(token, "NaN" | "Infinity" | "-Infinity") || beyond_range {
+                "null"
+            } else {
+                token
+            });
+        }
+    }
+    serde_json::from_str(&normalized)
+}
+
 pub fn validate_successful_attempt(
     run_dir: &Path,
     record: &Value,
@@ -155,9 +211,13 @@ pub fn validate_successful_attempt(
             '\n', '\r', '\u{000b}', '\u{000c}', '\u{001c}', '\u{001d}', '\u{001e}', '\u{0085}',
             '\u{2028}', '\u{2029}',
         ])
-        .rfind(|line| !line.trim().is_empty());
+        .rfind(|line| {
+            !line
+                .trim_matches(|ch: char| ch.is_whitespace() || ch == '\u{001f}')
+                .is_empty()
+        });
     let adapter: Value = match last {
-        Some(line) => serde_json::from_str(line).map_err(|_| AdapterJson)?,
+        Some(line) => decode_adapter(line).map_err(|_| AdapterJson)?,
         None => Value::Null,
     };
     if !adapter.is_object() || adapter["status"] != "ok" {

@@ -31,6 +31,10 @@ fn fixture(run: &Path) -> (Value, BTreeMap<String, Vec<u8>>, Value) {
 }
 
 const CASES: &[(&str, Option<&str>)] = &[
+    ("negative_zero_adapter_exit", None),
+    ("nonfinite_unknown", None),
+    ("overflow_unknown", None),
+    ("python_blank_tail", None),
     ("valid", None),
     ("legacy_success", None),
     ("unknown_fields", None),
@@ -181,6 +185,10 @@ fn mutate(
     adapter: &mut Value,
 ) {
     match name {
+        "negative_zero_adapter_exit"
+        | "nonfinite_unknown"
+        | "overflow_unknown"
+        | "python_blank_tail" => {}
         "valid" => {}
         "legacy_success" => record["status"] = json!("succeeded"),
         "unknown_fields" => {
@@ -245,6 +253,21 @@ fn mutate(
     }
     let line = serde_json::to_vec(&adapter).unwrap();
     let bytes = match name {
+        "negative_zero_adapter_exit" => String::from_utf8(line)
+            .unwrap()
+            .replace("\"exit\":0", "\"exit\":-0")
+            .into_bytes(),
+        "nonfinite_unknown" | "overflow_unknown" => {
+            let mut line = line;
+            line.pop();
+            line.extend_from_slice(if name == "nonfinite_unknown" {
+                b", \"future\": [NaN, Infinity, -Infinity]}"
+            } else {
+                b", \"future\": 1e400}"
+            });
+            line
+        }
+        "python_blank_tail" => [line.as_slice(), b"\n\x1f"].concat(),
         "invalid_utf8" => vec![255],
         "invalid_json" => b"{".to_vec(),
         "trailing_invalid_json" => [line.as_slice(), b"\ninvalid"].concat(),
@@ -437,4 +460,65 @@ print(json.dumps(answers))
     );
     let old: Vec<Option<String>> = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(old, answers);
+}
+
+#[cfg(unix)]
+#[test]
+fn differential_python_non_strict_symlink_resolution() {
+    use std::os::unix::fs::symlink;
+    let run = tempfile::tempdir().unwrap();
+    symlink("loop", run.path().join("loop")).unwrap();
+    std::fs::create_dir(run.path().join("real")).unwrap();
+    for index in 0..50 {
+        symlink(
+            if index == 49 {
+                "real".to_owned()
+            } else {
+                format!("link{}", index + 1)
+            },
+            run.path().join(format!("link{index}")),
+        )
+        .unwrap();
+    }
+    let paths = [
+        run.path().join("loop/result.md"),
+        run.path().join("link0/missing/../result.md"),
+    ];
+    let rust: Vec<_> = paths
+        .iter()
+        .map(|path| crate::pending::resolve(path).unwrap())
+        .collect();
+    assert_eq!(rust[0], run.path().join("loop/result.md"));
+    assert_eq!(rust[1], run.path().join("real/result.md"));
+    let output = match Command::new("python3")
+        .args([
+            "-c",
+            r#"
+import json,sys
+from pathlib import Path
+if sys.version_info<(3,13): print('null')
+else: print(json.dumps([str(Path(p).resolve()) for p in sys.argv[1:]]))
+"#,
+        ])
+        .args(paths)
+        .output()
+    {
+        Ok(output) => output,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            eprintln!("skipped: python3 is absent");
+            return;
+        }
+        Err(error) => panic!("cannot run Python oracle: {error}"),
+    };
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let old: Option<Vec<std::path::PathBuf>> = serde_json::from_slice(&output.stdout).unwrap();
+    if let Some(old) = old {
+        assert_eq!(rust, old);
+    } else {
+        eprintln!("skipped: non-strict loop semantics require Python >=3.13");
+    }
 }

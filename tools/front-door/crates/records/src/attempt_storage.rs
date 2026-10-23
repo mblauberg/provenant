@@ -145,7 +145,11 @@ pub(crate) fn remove_tree(fs: &impl StorageFs, anchor: &Path, path: &Path) -> Ve
         return vec![path.to_owned()];
     };
     let parts: Vec<_> = relative.components().collect();
-    if parts.is_empty() {
+    if parts.is_empty()
+        || parts
+            .iter()
+            .any(|part| !matches!(part, std::path::Component::Normal(_)))
+    {
         return vec![path.to_owned()];
     }
     let mut left = Vec::new();
