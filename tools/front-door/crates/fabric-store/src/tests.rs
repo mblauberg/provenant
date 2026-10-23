@@ -616,7 +616,7 @@ fn diagnostics_use_private_wal_snapshot_and_remove_every_temporary_file() {
         &provenant_supervisor::fs::LocalFs,
         scratch.path(),
     );
-    assert_eq!(report.status, DiagnosticStatus::Ok);
+    assert_eq!(report.status, DiagnosticStatus::Ok, "{report:#?}");
     assert_eq!(report.counts.unwrap().activity, 1);
     assert_eq!(std::fs::read(&path).unwrap(), before_main);
     assert_eq!(

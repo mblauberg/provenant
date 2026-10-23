@@ -132,9 +132,11 @@ fn compare(scenario: &str, result: Value) {
         )
         .unwrap();
         panic!(
-            "{scenario}: differential mismatch; actual {}, expected {}",
+            "{scenario}: differential mismatch; actual {}, expected {}\nactual out: {}\nexpected out: {}",
             path.display(),
-            expected_path.display()
+            expected_path.display(),
+            serde_json::to_string_pretty(&result["out"]).unwrap(),
+            serde_json::to_string_pretty(&expected["out"]).unwrap(),
         );
     }
 }
