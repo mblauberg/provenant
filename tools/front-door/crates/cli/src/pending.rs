@@ -247,3 +247,28 @@ pub(crate) fn python_splitlines(text: &str) -> Vec<&str> {
 pub(crate) fn python_word_character(c: char) -> bool {
     c == '_' || python_unicode::alphanumeric(c)
 }
+
+// port: belongs in provenant-records
+// No public ensure_ascii string encoder exists on main yet. Used only by the
+// typed hook record encoder, never as an unchecked JSON parser.
+pub(crate) fn ascii_json_string(value: &str) -> Result<String, serde_json::Error> {
+    ascii_json(&value)
+}
+
+// port: belongs in provenant-records
+pub(crate) fn ascii_json(value: &impl serde::Serialize) -> Result<String, serde_json::Error> {
+    let json = serde_json::to_string(value)?;
+    let mut output = String::new();
+    for c in json.chars() {
+        if c.is_ascii() && c != '\u{7f}' {
+            output.push(c);
+        } else {
+            let mut units = [0; 2];
+            for unit in c.encode_utf16(&mut units) {
+                output.push_str(&format!("\\u{unit:04x}"));
+            }
+        }
+    }
+    Ok(output)
+}
+
