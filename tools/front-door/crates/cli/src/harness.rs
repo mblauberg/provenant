@@ -33,15 +33,14 @@ pub fn sidecar_errors(
             ));
         }
     }
-    // For non-string prompts Python stringifies the value. A JSON value cannot
-    // contain '$skill' in scalar non-string values; collections may contain it.
+    // Python str(container) uses repr for its members, including None/True.
     let prompt = interface
         .get("default_prompt")
         .map(|value| {
             value
                 .as_str()
                 .map(str::to_owned)
-                .unwrap_or_else(|| value.to_string())
+                .unwrap_or_else(|| crate::pending::python_value_repr(value))
         })
         .unwrap_or_default();
     if !prompt.contains(&format!("${skill}")) {
@@ -57,10 +56,54 @@ pub fn sidecar_errors(
     errors
 }
 
+/// YAML decoding is supplied by the external-format owner. Preserve its diagnostic
+/// verbatim, rather than mistaking invalid YAML for a missing interface mapping.
+#[derive(Debug, thiserror::Error)]
+#[error("{diagnostic}")]
+pub struct YamlError { pub diagnostic: String }
+
+pub fn validate_sidecar(display: &Path, skill: &str, document: Result<&Value, &YamlError>, asset_exists: impl Fn(&str) -> bool) -> Vec<String> {
+    match document {
+        Ok(document) => sidecar_errors(display, skill, document, asset_exists),
+        Err(error) => vec![format!("{}: invalid YAML: {error}", display.display())],
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn sidecar_policy_and_invalid_yaml_match_the_source() {
+        use std::fs;
+        let dir = tempfile::tempdir().unwrap();
+        let scripts=dir.path().join("scripts"); fs::create_dir(&scripts).unwrap();
+        fs::copy(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../../scripts/check_harness.py"), scripts.join("check_harness.py")).unwrap();
+        let sidecar=dir.path().join("skills/build/agents/openai.yaml"); fs::create_dir_all(sidecar.parent().unwrap()).unwrap();
+        for document in [json!([]),json!({"interface":{}}),json!({"interface":{"display_name":"Build", "short_description":"x".repeat(25),"default_prompt":[true,null,"$build"],"icon_small":"./missing"}})] {
+            fs::write(&sidecar,serde_json::to_vec(&document).unwrap()).unwrap();
+            let Some(expected): Option<Vec<String>> = crate::oracle::python(r#"
+import json,sys,importlib.util
+from pathlib import Path
+x=json.load(sys.stdin); p=Path(x['root'])/'scripts/check_harness.py'
+spec=importlib.util.spec_from_file_location('harness_oracle',p); m=importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+print(json.dumps(m.openai_sidecar_errors()))
+"#,&json!({"root":dir.path()})) else {return;};
+            assert_eq!(sidecar_errors(Path::new("skills/build/agents/openai.yaml"),"build",&document, |_|false),expected);
+        }
+        fs::write(&sidecar,"interface: [\n").unwrap();
+        let Some(expected): Option<Vec<String>> = crate::oracle::python(r#"
+import json,sys,importlib.util
+from pathlib import Path
+x=json.load(sys.stdin); p=Path(x['root'])/'scripts/check_harness.py'
+spec=importlib.util.spec_from_file_location('harness_oracle',p); m=importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+print(json.dumps(m.openai_sidecar_errors()))
+"#,&json!({"root":dir.path()})) else {return;};
+        let diagnostic=expected[0].split_once(": invalid YAML: ").unwrap().1.to_owned();
+        let error=YamlError {diagnostic};
+        assert_eq!(validate_sidecar(Path::new("skills/build/agents/openai.yaml"),"build",Err(&error), |_|true),expected);
+    }
 
     #[test]
     fn requires_mapping_and_reports_fields_in_source_order() {

@@ -246,3 +246,14 @@ pub(crate) fn decimal_integer(text: &str) -> Result<u64, IntegerError> {
         n.checked_mul(10).and_then(|n| n.checked_add(u64::from(d))).ok_or(IntegerError::NumberOutOfRange)
     })
 }
+
+// port: belongs in provenant-core
+pub(crate) fn python_value_repr(value: &serde_json::Value) -> String {
+    use serde_json::Value;
+    match value {
+        Value::Null => "None".into(), Value::Bool(true) => "True".into(), Value::Bool(false) => "False".into(),
+        Value::String(text) => python_repr(text), Value::Number(number) => number.to_string(),
+        Value::Array(values) => format!("[{}]",values.iter().map(python_value_repr).collect::<Vec<_>>().join(", ")),
+        Value::Object(values) => format!("{{{}}}",values.iter().map(|(k,v)|format!("{}: {}",python_repr(k),python_value_repr(v))).collect::<Vec<_>>().join(", ")),
+    }
+}
