@@ -4,6 +4,7 @@
 mod artifact_ref;
 mod attempt_fact;
 mod canonical;
+mod finding;
 mod json;
 mod jsonc;
 mod path_wire;
@@ -15,6 +16,7 @@ pub use attempt_fact::{
     UsageCounts,
 };
 pub use canonical::{CanonicalBytes, CanonicalError, CanonicalV1, FileDigest, record_digest};
+pub use finding::Finding;
 pub use json::{DecodeError, EncodeError, Limits, RecordHeader, decode, decode_v1, encode};
 pub use jsonc::{JsoncDocument, JsoncToken, JsoncTokenKind, decode_jsonc};
 pub use path_wire::{PathWire, PathWireError};
