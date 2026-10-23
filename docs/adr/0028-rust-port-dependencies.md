@@ -57,14 +57,51 @@ pieces to be written in-house so the dependency set stays lean.
    - **Diagnostics** use a small stderr module, not `tracing`.
    - **Random identifiers** take 16 bytes from `getentropy` through `libc`,
      not `uuid` or `getrandom`.
-5. **YAML.** Provenant's own YAML data files move to JSON. Validating GitHub
-   issue forms and skill eval cases needs a YAML reader; `serde_yaml` is
-   unmaintained, so that lane proposes a maintained parser (`saphyr` is the
-   current candidate) or a restricted reader under the same criteria.
+5. **YAML.** Provenant's own YAML data files move to JSON in a separate
+   migration lane. This includes `skills/*/evals/*.yaml`, `library/*/evals`,
+   `evals/`, `docs/evals/`, `config/adapter-compatibility.yaml` (read at runtime
+   by `scripts/model_route.py`), `runtime/*/provenance_components.yaml` and
+   `tests/fixtures/*.yaml`. Migrate their readers and callers together.
+
+   Formats owned by other tools remain YAML: GitHub issue forms under
+   `.github/` and the setup-repo skill templates, `agents/openai.yaml`
+   sidecars and `SKILL.md` frontmatter. `provenant-records` owns an in-house,
+   fail-closed subset reader. It accepts block maps and sequences, plain,
+   single-quoted and double-quoted scalars, `>`, `>-` and `|` block scalars,
+   flow sequences of quoted strings and comments. Plain scalars resolve only
+   to `true`, `false` or string. Refuse `yes`, `on`, numbers and null-like
+   words with a `quote this` error. Refuse anchors, aliases, tags, flow maps,
+   multiple documents, multi-line plain scalars, tabs and duplicate keys.
+   Every refusal names the construct and line.
+
+   The reader's CI test must parse every tracked file in those external
+   groups and, while Python exists, compare accepted values against PyYAML
+   on the same files. Exact PyYAML error text is not a contract; PORTING.md
+   records the divergence class. YAML 1.2, PyYAML's YAML 1.1 and GitHub's
+   parser do not share exact semantics. A controlled subset needs only a
+   few hundred lines, so `saphyr` adds a dependency without solving parity.
 6. **Adding to the list.** A new direct crate, a feature expansion or a
    material transitive addition needs a PORTING.md rule change with a reason.
    A crate must be widely used, actively maintained, MIT or Apache-2.0
    licensed, and not cheaply replaceable in-house. No per-lane additions.
+7. **Python AST tooling stays outside the port.** No Python parser crate is
+   added: the crates.io `ruff_python_parser` is an internal, unstable
+   component and `rustpython-parser` is dormant. Neither meets decision 6.
+   Graph units marked `retired` carry a deletion criterion and are not Rust
+   port assignments. Delete Python-AST tooling when its target glob is empty.
+
+   Retire the unused AST move-comparison helper immediately; its sole caller
+   is its own test. Keep `scripts/static-security-check.py` running in Python
+   CI until no tracked Python sources remain. Its Rust controls are
+   `#![forbid(unsafe_code)]` in every crate except supervisor and a workspace
+   `clippy.toml` `disallowed-methods` entry for `std::process::Command::new`
+   outside supervisor, where process custody belongs. The command lint is
+   separate graph work because existing callers need migration or scoped
+   allowances.
+
+   Retire `scripts/lint-timebomb-fixtures.py` for Python and JS/TS targets
+   when no `tests/*.py` and no `*.test.ts` remain. Retarget date lint to Rust
+   `#[test]` sources using the textual date engine already in `provenant-cli`.
 
 ## Consequences
 
@@ -76,4 +113,6 @@ pieces to be written in-house so the dependency set stays lean.
 - `help` and root resolution stay cheap: they must not open SQLite or start
   threads.
 - Rejected: `reqwest`, `ureq`, `rmcp`, `tokio`, `anyhow`, `tracing`, `uuid`
-  and `serde_yaml`, for the reasons above.
+  and `serde_yaml`, for the reasons above. Also rejected: `saphyr` (parser
+  semantics cannot provide parity; the controlled subset is small),
+  `ruff_python_parser` and `rustpython-parser` (decision 7).

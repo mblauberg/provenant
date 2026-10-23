@@ -23,11 +23,11 @@ It is not counted again in the batch's `Units:` line or `ported.txt` append.
 
 | Assigned unit | Implemented now or retained | Remaining / named prerequisite |
 | --- | --- | --- |
-| `scripts/check_harness.py#unit-01` | Retained decoded sidecar policy and diagnostics | YAML parser with PyYAML value/error semantics; Markdown anchors/links, decoded issue forms and route/skill validation. No allowlisted YAML reader/API exists on main. |
+| `scripts/check_harness.py#unit-01` | Retained decoded sidecar policy and diagnostics | Records-owned YAML subset reader and owned-data JSON migration (ADR 0028 decision 5, PORTING.md version 5); Markdown anchors/links, decoded issue forms and route/skill validation. |
 | `scripts/clean.py#interface` | Retained arguments, approvals/plans/context/removal records and renderers | Records owner Python filesystem-path JSON codec (lone surrogates); full JSON/text rendering and planner binding. Current record strings cannot represent surrogateescaped paths. |
 | `scripts/git_evidence.py#unit-01` | Closed environments, literal selection/untracked policy; typed metadata and exact ASCII compact header/status framing; raw-byte GitRead seam replaces the local unbounded child helper | Supervisor byte-preserving bounded executor and streaming sink with cleanup; filter discovery, tracked snapshots, incremental UTF-8 diff decoding, capture/change detection, safe atomic publication and main. |
 | `scripts/lib/stale_checkout.py#interface` | Retained local-query/environment/deadline contract, snapshots and advisory suppression | Supervisor exported strict text runner (public bounded runner replacement-decodes); core Python OS-string/path text boundary. |
-| `scripts/lint-timebomb-fixtures.py#unit-01` | New complete textual JS/TS date and changed-test-context policy | Agreed Python AST parser for Python windows/fixtures/helpers; Git changed-line collection, traversal, diagnostic/main binding. |
+| `scripts/lint-timebomb-fixtures.py#unit-01` | New complete textual JS/TS date and changed-test-context policy | Retired for Python and JS/TS under PORTING.md version 5. `cli:rust-test-date-lint` reuses the textual engine for Rust tests, including discovery, Git changed-line collection, traversal and diagnostic/main binding. |
 | `scripts/provenant_pr.py#unit-01` | Existing judge/settlement/exit policy; new checked, ordered check-response normalization and required/all fallback classifications | Discovery of rulesets/classic protection; gh launch/view, polling and moving-head orchestration, backoff/env parsing, rendering and main. Full raw Python JSON semantics (surrogates/non-finite values) remain a records prerequisite. |
 | `scripts/reap.py#unit-01` | New literal PID validation, dead-state policy, descendant ordering, age/description formatting, protected ancestor walk and victim/refusal selection | Supervisor per-PID TERM/KILL authority and cross-platform CWD observation; local-time parser; liveness/grace/reuse/reap effect integration, argv and main. No process is signalled by this crate. |
 | `scripts/retry-npm-install.py#unit-01` | Existing retry signatures/tail/budget/delays; new exact argv separator and missing-command contract | Supervisor concurrent live stdout/stderr forwarding and joined-reader custody, launch/wait and clock-driven retry driver. Public file-backed bounded runner is not a live-output adapter. |
@@ -41,14 +41,12 @@ It is not counted again in the batch's `Units:` line or `ported.txt` append.
 | `scripts/worktree.py#unit-02` | New complete pure porcelain decoder, safe-name/full-OID checks, generated ignored-path/residue rules and pre-observation claim refusals | Safe raw Git binding, primary/common-root observation, COW provisioning/rollback, full claim checks and protected-instruction gate. |
 | `scripts/worktree.py#unit-03` | New create-name derivation and warning/refusal policy; arguments above | Root/exclude/create/list/check/context effects and writer lease/removal lifecycle. Safe FS and core excludes now exist; Git capture, protected-instruction gate and clean integration-ref/tip policy are not complete. |
 
-## Skipped units after prerequisite audit
+## Retired tooling under PORTING.md version 5
 
-- `scripts/movecheck.py#unit-01`: needs Python AST parsing and canonical `ast.dump`
-  equivalence. Comparing raw Rust token strings would not preserve the source.
-- `scripts/static-security-check.py#unit-01` and `#unit-02`: need the same agreed
-  Python AST representation, lexical scopes/bindings and branch-sensitive drain
-  analysis. No allowlisted parser/API is available on main. No regex substitute
-  or Python production invocation is introduced.
+`scripts/static-security-check.py#unit-01` and `#unit-02` stay in Python CI
+until no tracked Python sources remain. Rust uses crate unsafe guards and the
+planned workspace command-construction lint. Python AST parsing is outside
+the port (ADR 0028 decision 7).
 
 ## Shared owners and pending work
 
