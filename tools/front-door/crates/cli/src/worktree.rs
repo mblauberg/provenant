@@ -244,6 +244,22 @@ pub struct Create {
     #[arg(long, default_value = "HEAD")]
     pub start_point: String,
 }
+impl Create {
+    /// Name/default policy precedes all filesystem operations in the source.
+    pub fn resolve_name(&self) -> Result<(String, Option<String>), PolicyError> {
+        let branch = self.existing_branch.as_ref().or(self.new_branch.as_ref());
+        let derived = branch.map(|s| s.replace('/', "-"));
+        let name = self
+            .name
+            .as_ref()
+            .or(derived.as_ref())
+            .ok_or(PolicyError::DetachedName)?
+            .clone();
+        let warning = derived.filter(|derived| self.name.is_some() && *derived != name).map(|derived| format!("worktree policy: name {} differs from branch-derived {}; clean may need triage\n",provenant_core::py::python_repr(&name),provenant_core::py::python_repr(&derived)));
+        validate_name(&name)?;
+        Ok((name, warning))
+    }
+}
 /// Exact verify_claim result variants. Accepted records have no reason and
 /// rejected records have none of the acceptance fields.
 #[derive(Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
@@ -310,6 +326,7 @@ pub struct Checked {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::Parser;
     use serde_json::{json, Value};
     use std::os::unix::ffi::OsStrExt;
     fn record_json(record: &WorktreeRecord) -> Value {
@@ -462,6 +479,48 @@ print(json.dumps(result))
         assert_eq!(
             residue("!! node_modules/\n?? src.py\n!! user-data/\n M a\n"),
             ["?? src.py", "!! user-data/", " M a"]
+        );
+    }
+    #[test]
+    fn names_and_create_modes_follow_source_contract() {
+        for name in ["a", "a._-9", &"a".repeat(64)] {
+            assert!(validate_name(name).is_ok());
+        }
+        for name in ["", ".", "..", "-a", "é", "a/b", &"a".repeat(65)] {
+            assert!(validate_name(name).is_err());
+        }
+        for argv in [
+            vec!["worktree", "create"],
+            vec![
+                "worktree",
+                "create",
+                "x",
+                "--detach",
+                "HEAD",
+                "--new-branch",
+                "b",
+            ],
+        ] {
+            assert!(Arguments::try_parse_from(argv).is_err());
+        }
+        let Operation::Create(create) =
+            Arguments::try_parse_from(["worktree", "create", "--new-branch", "feat/one"])
+                .unwrap()
+                .command
+        else {
+            panic!()
+        };
+        assert_eq!(create.resolve_name().unwrap(), ("feat-one".into(), None));
+        let Operation::Create(create) =
+            Arguments::try_parse_from(["worktree", "create", "--detach", "HEAD"])
+                .unwrap()
+                .command
+        else {
+            panic!()
+        };
+        assert_eq!(
+            create.resolve_name().unwrap_err(),
+            PolicyError::DetachedName
         );
     }
 }
