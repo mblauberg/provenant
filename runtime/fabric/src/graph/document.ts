@@ -12,7 +12,7 @@ import { fileURLToPath } from "node:url";
 import { pythonOwnerSync, pythonOwnerEnvironment } from "../python-owner.js";
 import type { CatalogueSnapshot } from "../catalogue.js";
 import { InputError, normaliseRoute, ownerPromptPath, readRoots, workingIdentity, type RouteInput } from "../execution-input.js";
-import { productRoot } from "../execution.js";
+import { productRoot } from "../run-root.js";
 import { projectRoot, withoutGitRedirects, type Identity } from "../identity.js";
 
 export const GRAPH_ID = /^g-[0-9a-f]{6,16}$/u;

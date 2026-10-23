@@ -5,7 +5,7 @@ import { runJsonSubprocess } from "../src/json-subprocess.js";
 import { dirname, join, sep } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
-import { acceptableFixtureTempRoot, assertFixtureRunRoot } from "../src/execution.js";
+import { acceptableFixtureTempRoot, assertFixtureRunRoot } from "../src/run-root.js";
 import { fixtureBase, scratchRoot } from "./helpers/temp-root.js";
 
 const cleanup: string[] = [];

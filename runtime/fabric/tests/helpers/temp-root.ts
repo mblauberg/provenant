@@ -1,7 +1,7 @@
 import { mkdtempSync, realpathSync, rmdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { acceptableFixtureTempRoot } from "../../src/execution.js";
+import { acceptableFixtureTempRoot } from "../../src/run-root.js";
 
 /**
  * The directory fixtures are created in. TMPDIR is respected unless it sits in

@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
-import { assertFixtureRunRoot } from "../src/execution.js";
+import { assertFixtureRunRoot } from "../src/run-root.js";
 
 describe("assertFixtureRunRoot", () => {
   const temp = "/private/var/folders/xx/T";

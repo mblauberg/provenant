@@ -4,7 +4,7 @@ import { mkdirSync, openSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 
 import { catalogueSnapshot } from "../catalogue.js";
-import { productRoot } from "../execution.js";
+import { productRoot } from "../run-root.js";
 import { databasePath, runRoot, type Identity } from "../identity.js";
 import { observedAlive } from "../run-registry.js";
 import { Store } from "../store.js";

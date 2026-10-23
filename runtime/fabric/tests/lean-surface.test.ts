@@ -6,7 +6,7 @@ import { createRequire } from "node:module";
 import { execFileSync } from "node:child_process";
 import { afterAll, describe, expect, it } from "vitest";
 
-import { cancelConfiguredRun } from "../src/execution.js";
+import { cancelConfiguredRun } from "../src/batch-execution.js";
 import { fullView, lanesDigest, cancelDigest } from "../src/surface.js";
 import { readRuns } from "../src/run-reader.js";
 import { scratchRoot } from "./helpers/temp-root.js";

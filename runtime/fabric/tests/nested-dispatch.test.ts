@@ -1,7 +1,8 @@
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 
-import { dispatchConfiguredBatch, dispatchConfiguredProvider } from "../src/execution.js";
+import { dispatchConfiguredProvider } from "../src/execution.js";
+import { dispatchConfiguredBatch } from "../src/batch-execution.js";
 
 const root = resolve(import.meta.dirname, "../../..");
 const identity = { project: root, cwd: root, agentId: "nested-probe", provider: "codex" };
