@@ -130,6 +130,8 @@ pub const S2_EXIT_PUBLICATION_CONFIG: &str = "s2-exit-publication.config";
 pub const S2_EXIT_PUBLICATION_ENOSPC_ONCE: &str = "s2-exit-publication.enospc-once";
 pub const S2_EXIT_PUBLICATION_SYNC_BLOCKED: &str = "s2-exit-publication.sync-blocked";
 pub const S2_EXIT_PUBLICATION_DURABLE: &str = "s2-exit-publication.durable";
+pub const S2_RESERVATION_SYNC_BLOCKED: &str = "s2-reservation-sync-blocked";
+pub const S2_RESERVATION_SYNC_PENDING: &str = "s2-reservation-sync-pending";
 
 impl ExitPublicationFaults {
     pub fn from_state_dir(state_dir: &Path) -> io::Result<Option<Self>> {
@@ -185,6 +187,43 @@ impl crate::ExitPublisher for ExitPublicationFaults {
                 Ok(false) => directory.sync(),
                 Err(source) => Err(crate::fs::FsError::Io {
                     operation: "read fixture sync marker",
+                    path: blocked.clone(),
+                    source,
+                }),
+            },
+        )?;
+        Ok(publication)
+    }
+
+    fn commit_reservation(
+        &self,
+        directory: &crate::fs::Directory,
+        bytes: &[u8],
+    ) -> crate::custody::Result<crate::fs::Publication> {
+        let blocked = self.marker(S2_RESERVATION_SYNC_BLOCKED);
+        let pending = self.marker(S2_RESERVATION_SYNC_PENDING);
+        let publication = directory.atomic_write_with_sync(
+            std::ffi::OsStr::new("reservation.json"),
+            ".reservation-",
+            bytes,
+            crate::fs::PublishMode::Replace,
+            || match marker_present(&blocked) {
+                Ok(true) => {
+                    std::fs::write(&pending, b"reservation visible; directory sync blocked")
+                        .map_err(|source| crate::fs::FsError::Io {
+                            operation: "write fixture reservation sync marker",
+                            path: pending.clone(),
+                            source,
+                        })?;
+                    Err(injected_fs_error(
+                        "fixture post-link reservation directory sync",
+                        PathBuf::from("reservation.json"),
+                        libc::ENOSPC,
+                    ))
+                }
+                Ok(false) => directory.sync(),
+                Err(source) => Err(crate::fs::FsError::Io {
+                    operation: "read fixture reservation sync marker",
                     path: blocked.clone(),
                     source,
                 }),

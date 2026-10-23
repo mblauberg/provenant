@@ -190,6 +190,78 @@ fn exit_publication_enospc_and_visible_sync_retry_keeps_one_snapshot(root: &Path
     Ok(())
 }
 
+fn final_reservation_sync_failure_blocks_exit_until_durable(root: &Path) -> Result<()> {
+    let state_dir = root.join("PROVENANT_STATE_DIR");
+    std::fs::create_dir_all(&state_dir)?;
+    std::fs::write(
+        state_dir.join(fixture::S2_EXIT_PUBLICATION_CONFIG),
+        b"enospc-post-link-sync-v1\n",
+    )?;
+    let blocked = state_dir.join(fixture::S2_RESERVATION_SYNC_BLOCKED);
+    let pending = state_dir.join(fixture::S2_RESERVATION_SYNC_PENDING);
+    std::fs::write(&blocked, b"hold final reservation directory sync")?;
+
+    let name = "reservation-sync-fault";
+    let (writer, handle) = start(root, name, "exit")?;
+    drop(writer);
+    wait_for_file(&pending)?;
+
+    let attempt = root.join(format!("{name}-attempt"));
+    let writer_path = root.join(format!("{name}-writer"));
+    let exit_path = attempt.join("process-exit.json");
+    let reservation_path = writer_path.join("reservation.json");
+    assert!(
+        reservation_path.is_file(),
+        "replace should be visible before sync"
+    );
+    assert!(
+        !exit_path.exists(),
+        "exit must wait for durable reservation commit"
+    );
+    let visible_reservation: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&reservation_path)?)?;
+    let visible_unresolved = visible_reservation["unresolved_cleanup"]
+        .as_bool()
+        .ok_or_else(|| io::Error::other("visible reservation omitted cleanup state"))?;
+    assert!(lock_is_held(&writer_path, OsStr::new("writer.lock"))?);
+    assert!(lock_is_held(&attempt, OsStr::new("custody.lock"))?);
+
+    std::fs::remove_file(&blocked)?;
+    let clock = SystemClock::new();
+    let exit = match observe(&handle, budget(&clock)?, &CancelToken::new(), &clock)? {
+        Observation::Exited(exit) => exit,
+        other => return Err(io::Error::other(format!("expected exit, got {other:?}")).into()),
+    };
+    let final_reservation: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&reservation_path)?)?;
+    let final_exit: serde_json::Value = serde_json::from_slice(&std::fs::read(&exit_path)?)?;
+    assert_eq!(
+        final_reservation["unresolved_cleanup"], final_exit["unresolved_cleanup"],
+        "exit and reservation must describe the same durable cleanup state"
+    );
+    assert_eq!(
+        final_exit["unresolved_cleanup"].as_bool(),
+        Some(visible_unresolved)
+    );
+    assert_eq!(exit.unresolved_cleanup, visible_unresolved);
+    assert_eq!(exit.delivered_signals, Vec::<i64>::new());
+    assert_eq!(exit.stop_reason, None);
+    assert_eq!(
+        exit.termination,
+        Some(provenant_supervisor::exec::Termination::Exit(0))
+    );
+
+    let clock = SystemClock::new();
+    let _settled = Directory::open_anchor(&writer_path)?.lock(
+        OsStr::new("writer.lock"),
+        provenant_supervisor::fs::LockMode::Exclusive,
+        budget(&clock)?,
+        &CancelToken::new(),
+        &clock,
+    )?;
+    Ok(())
+}
+
 fn main() -> Result<()> {
     let args: Vec<_> = std::env::args_os().skip(1).collect();
     if args.first().is_some_and(|arg| arg == "internal")
@@ -216,5 +288,6 @@ fn main() -> Result<()> {
         .prefix("s2-publication-")
         .tempdir_in("/tmp")?;
     exit_publication_enospc_and_visible_sync_retry_keeps_one_snapshot(root.path())?;
+    final_reservation_sync_failure_blocks_exit_until_durable(root.path())?;
     Ok(())
 }
