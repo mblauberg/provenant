@@ -120,7 +120,7 @@ pub fn rearm_poll_deadline(
 pub fn parse_duration(value: &str) -> f64 {
     let Some(parts) = provenant_core::py::python_strip(value)
         .split(':')
-        .map(crate::pending::python_float)
+        .map(provenant_core::py::python_float)
         .collect::<Option<Vec<_>>>()
     else {
         return 0.0;
@@ -136,7 +136,7 @@ pub fn parse_elapsed(value: &str) -> Result<f64, LivenessError> {
     let value = provenant_core::py::python_strip(value);
     let (days, value) = match value.split_once('-') {
         Some((days, rest)) => (
-            crate::pending::python_float(days)
+            provenant_core::py::python_float(days)
                 .ok_or_else(|| LivenessError::Duration(provenant_core::py::python_repr(days)))?
                 * 86400.0,
             rest,
@@ -146,7 +146,7 @@ pub fn parse_elapsed(value: &str) -> Result<f64, LivenessError> {
     Ok(days + parse_duration(value))
 }
 pub fn command_cwd(command: &str) -> Option<String> {
-    let arguments = crate::pending::shell_split(command)?;
+    let arguments = provenant_core::py::shell_split(command).ok()?;
     for (index, argument) in arguments.iter().enumerate() {
         if matches!(argument.as_str(), "--cd" | "-C") {
             if let Some(next) = arguments.get(index + 1) {

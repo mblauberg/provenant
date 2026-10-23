@@ -10,6 +10,7 @@ use std::time::{Duration, UNIX_EPOCH};
 #[derive(Default)]
 struct FixtureFs {
     linux: bool,
+    native_cwd: Option<PathBuf>,
     exists: BTreeSet<PathBuf>,
     resolved: BTreeMap<PathBuf, PathBuf>,
     home: Option<PathBuf>,
@@ -26,6 +27,14 @@ impl ObservationFs for FixtureFs {
 
     fn is_linux(&self) -> bool {
         self.linux
+    }
+
+    fn pid_cwd(&self, _pid: i64) -> Result<crate::pid::CwdObservation, crate::pid::PidError> {
+        Ok(self
+            .native_cwd
+            .clone()
+            .map(crate::pid::CwdObservation::Path)
+            .unwrap_or(crate::pid::CwdObservation::Unsupported))
     }
 
     fn exists(&self, path: &Path) -> bool {
@@ -529,4 +538,26 @@ fn empty_home_expansion_is_root_as_in_pathlib() {
     };
     assert_eq!(canonical_cwd(&fs, "~").unwrap(), "/");
     assert_eq!(canonical_cwd(&fs, "~/sub").unwrap(), "/sub");
+}
+
+#[test]
+fn native_cwd_is_linux_only_and_darwin_preserves_lsof_observation() {
+    let mut fs = FixtureFs {
+        linux: false,
+        native_cwd: Some("/native".into()),
+        ..FixtureFs::default()
+    };
+    let lsof = FixtureRunner::with_outputs([command_output(0, "n/lsof\n")]);
+    assert_eq!(process_cwd(&fs, &lsof, 48).unwrap(), "/lsof");
+    fs.linux = true;
+    assert_eq!(
+        process_cwd(&fs, &FixtureRunner::default(), 48).unwrap(),
+        "/native"
+    );
+    use std::os::unix::ffi::OsStringExt;
+    fs.native_cwd = Some(PathBuf::from(OsString::from_vec(b"/bad\xff".to_vec())));
+    assert!(matches!(
+        process_cwd(&fs, &FixtureRunner::default(), 48),
+        Err(ObserveError::NonUtf8Path { .. })
+    ));
 }
