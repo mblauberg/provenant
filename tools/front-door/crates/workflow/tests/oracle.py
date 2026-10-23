@@ -10,13 +10,13 @@ if unit in {"git_evidence_packet", "git_evidence_header"}:
     source = root / "skills/orchestrate/scripts/git_evidence_packet.py"
 if unit == "idle_pause":
     source = root / "skills/autopilot/scripts/validate_idle_pause.py"
-if unit == "preflight_contract":
+if unit in {"preflight_contract", "preflight_wire", "preflight_decode"}:
     source = root / "skills/orchestrate/scripts/dispatch_preflight.py"
 if unit == "lane_exit_contract":
     source = root / "skills/orchestrate/scripts/lane_exit.py"
 if unit == "lane_launch_contract":
     source = root / "skills/orchestrate/scripts/lane_launch.py"
-if unit == "observer_contract":
+if unit in {"observer_contract", "observer_contract_wire"}:
     source = root / "skills/orchestrate/scripts/provider_observer.py"
 if unit == "authority_mapping":
     source = root / "skills/deliver/scripts/authority_mapping.py"
@@ -59,7 +59,8 @@ for case in cases:
                 else:
                     results.append(module.scan(path, latex=case.get("latex", False)))
     elif unit == "compact_reverse":
-        results.append([list(line) for line in module.reverse_lines(case["path"])])
+        import hashlib
+        results.append([{"length": len(line), "digest": "sha256:" + hashlib.sha256(line).hexdigest()} for line in module.reverse_lines(case["path"])])
     elif unit == "compact_render":
         results.append(module.render(case["path"]))
     elif unit == "writer_branch":
@@ -92,17 +93,25 @@ for case in cases:
                 results.append(module.REDUCERS[case["name"]](case["output"]))
         except ValueError as error:
             results.append({"error": str(error)})
-    elif unit == "observer_contract":
+    elif unit in {"observer_contract", "observer_contract_wire"}:
         observer = module.LiveObserver(case["plan"])
         for line in case["lines"]:
             observer.feed_stdout((json.dumps(line) + "\n").encode())
-        results.append(observer.result())
+        summary = observer.result()
+        results.append({"wire": json.dumps(summary), "failure_keys": list(summary["semantic_failures"])} if unit == "observer_contract_wire" else summary)
     elif unit == "lane_launch_contract":
         directory = Path(case["root"])
         plan = {"adapter":"claude","model":"m","cwd":str(directory),"run_dir":str(directory),"mode":case["mode"],"timeout_seconds":1.125,"startup_seconds":0.025,"grace_seconds":0.050,"silence_seconds":0.125,"_lineage_token":"token","batch_id":"batch-001","attempt_identity":{"run_dir":str(directory / "run")}}
         results.append(module.build_spec(plan, {"PATH":"/bin","SECRET_REFERENCE":"synthetic-value"}, argv=["/bin/claude","-p"], stdin_path=directory / "prompt.md" if case["stdin"] else None, events_path=directory / "events.jsonl", stderr_path=directory / "stderr.log", max_bytes=2048))
     elif unit == "lane_exit_contract":
         results.append(module.receipt_fields(case))
+    elif unit == "preflight_decode":
+        try:
+            results.append({"wire": json.dumps(module.parse_fast_route_json(case["raw"]), ensure_ascii=False, separators=(",", ":"))})
+        except ValueError as error:
+            results.append({"error": str(error)})
+    elif unit == "preflight_wire":
+        results.append(json.dumps(module.parse_fast_route_json(case["raw"]), ensure_ascii=False, separators=(",", ":")))
     elif unit == "preflight_contract":
         results.append(module.parse_fast_route_json(json.dumps(case)))
     elif unit == "idle_pause":

@@ -263,67 +263,56 @@ pub(crate) fn python_json(value: &serde_json::Value) -> String {
     }
 }
 
-// port: belongs in provenant-config
-fn contains_out_of_range_integer(bytes: &[u8]) -> bool {
-    let mut index = 0;
-    let mut in_string = false;
-    let mut escaped = false;
-    while index < bytes.len() {
-        let byte = bytes[index];
-        if in_string {
-            match (byte, escaped) {
-                (_, true) => escaped = false,
-                (b'\\', false) => escaped = true,
-                (b'"', false) => in_string = false,
-                _ => {}
-            }
-            index += 1;
-            continue;
-        }
-        if byte == b'"' {
-            in_string = true;
-            index += 1;
-            continue;
-        }
-        if byte == b'-' || byte.is_ascii_digit() {
-            let start = index;
-            while index < bytes.len()
-                && !matches!(
-                    bytes[index],
-                    b',' | b']' | b'}' | b' ' | b'\t' | b'\r' | b'\n'
-                )
-            {
-                index += 1;
-            }
-            let token = &bytes[start..index];
-            let digits = token.strip_prefix(b"-").unwrap_or(token);
-            let is_integer = !digits.is_empty()
-                && digits.iter().all(u8::is_ascii_digit)
-                && (digits == b"0" || digits.first() != Some(&b'0'));
-            if is_integer
-                && std::str::from_utf8(token).is_ok_and(|number| {
-                    number.parse::<i64>().is_err() && number.parse::<u64>().is_err()
-                })
-            {
-                return true;
-            }
-            continue;
-        }
-        index += 1;
-    }
-    false
-}
-
+// port: belongs in provenant-records
 pub(crate) enum PythonJsonError {
     NumberOutOfRange,
     Invalid(serde_json::Error),
 }
 
+// port: belongs in provenant-records
+// Pending copy of main's checked_json boundary until it is a workspace dependency.
 pub(crate) fn parse_python_json(bytes: &[u8]) -> Result<serde_json::Value, PythonJsonError> {
-    if contains_out_of_range_integer(bytes) {
-        return Err(PythonJsonError::NumberOutOfRange);
+    serde_json::from_slice::<serde::de::IgnoredAny>(bytes).map_err(PythonJsonError::Invalid)?;
+    let text = match std::str::from_utf8(bytes) {
+        Ok(text) => text,
+        Err(_) => return serde_json::from_slice(bytes).map_err(PythonJsonError::Invalid),
+    };
+    let mut normalized = String::with_capacity(text.len());
+    let mut chars = text.char_indices().peekable();
+    while let Some((start, ch)) = chars.next() {
+        normalized.push(ch);
+        if ch == '"' {
+            while let Some((_, ch)) = chars.next() {
+                normalized.push(ch);
+                if ch == '\\' {
+                    if let Some((_, next)) = chars.next() {
+                        normalized.push(next);
+                    }
+                } else if ch == '"' {
+                    break;
+                }
+            }
+        } else if ch == '-' || ch.is_ascii_digit() {
+            let mut end = start + ch.len_utf8();
+            while let Some(&(index, next)) = chars.peek() {
+                if !(next.is_ascii_digit() || matches!(next, '.' | 'e' | 'E' | '+' | '-')) {
+                    break;
+                }
+                end = index + next.len_utf8();
+                chars.next();
+            }
+            let token = &text[start..end];
+            if !token.contains(['.', 'e', 'E'])
+                && token.parse::<i64>().is_err()
+                && token.parse::<u64>().is_err()
+            {
+                return Err(PythonJsonError::NumberOutOfRange);
+            }
+            normalized.pop();
+            normalized.push_str(if token == "-0" { "0" } else { token });
+        }
     }
-    serde_json::from_slice(bytes).map_err(PythonJsonError::Invalid)
+    serde_json::from_str(&normalized).map_err(PythonJsonError::Invalid)
 }
 
 /// Temporary finite JSON reader. Non-finite values and lone surrogates remain
@@ -356,53 +345,170 @@ pub(crate) fn equals_one(value: &serde_json::Value) -> bool {
     use serde_json::Value;
     match value {
         Value::Bool(value) => *value,
-        Value::Number(number) => number.as_i64() == Some(1) || (number.is_f64() && number.as_f64() == Some(1.0)),
+        Value::Number(number) => {
+            number.as_i64() == Some(1) || (number.is_f64() && number.as_f64() == Some(1.0))
+        }
         _ => false,
     }
 }
 
 // port: belongs in provenant-core
 pub(crate) fn splitlines(text: &str) -> Vec<&str> {
-    let mut result=Vec::new(); let mut start=0; let mut chars=text.char_indices().peekable();
-    while let Some((i,c))=chars.next() {
-        if matches!(c,'\n'|'\r'|'\u{b}'|'\u{c}'|'\u{1c}'|'\u{1d}'|'\u{1e}'|'\u{85}'|'\u{2028}'|'\u{2029}') {
-            result.push(&text[start..i]); start=i+c.len_utf8();
-            if c=='\r' && chars.peek().is_some_and(|(_,c)|*c=='\n') {chars.next();start+=1;}
+    let mut result = Vec::new();
+    let mut start = 0;
+    let mut chars = text.char_indices().peekable();
+    while let Some((i, c)) = chars.next() {
+        if matches!(
+            c,
+            '\n' | '\r'
+                | '\u{b}'
+                | '\u{c}'
+                | '\u{1c}'
+                | '\u{1d}'
+                | '\u{1e}'
+                | '\u{85}'
+                | '\u{2028}'
+                | '\u{2029}'
+        ) {
+            result.push(&text[start..i]);
+            start = i + c.len_utf8();
+            if c == '\r' && chars.peek().is_some_and(|(_, c)| *c == '\n') {
+                chars.next();
+                start += 1;
+            }
         }
     }
-    if start<text.len() {result.push(&text[start..]);}
+    if start < text.len() {
+        result.push(&text[start..]);
+    }
     result
 }
 
 // port: belongs in provenant-core
 /// Exact JSON-domain Python equality, including bool/int/float comparisons.
-pub(crate) fn python_json_equal(left:&serde_json::Value,right:&serde_json::Value)->bool {
+pub(crate) fn python_json_equal(left: &serde_json::Value, right: &serde_json::Value) -> bool {
     use serde_json::Value;
-    if let Some(integer)=python_integer_value(left) {
-        if let Some(other)=self::python_integer_value(right) {return integer==other;}
-        if let Some(float)=right.as_number().filter(|n|n.is_f64()).and_then(|n|n.as_f64()) {
-            return float.fract()==0.0 && (-9223372036854775808.0..18446744073709551616.0).contains(&float) && float as i128==integer;
+    if let Some(integer) = python_integer_value(left) {
+        if let Some(other) = self::python_integer_value(right) {
+            return integer == other;
+        }
+        if let Some(float) = right
+            .as_number()
+            .filter(|n| n.is_f64())
+            .and_then(|n| n.as_f64())
+        {
+            return float.fract() == 0.0
+                && (-9223372036854775808.0..18446744073709551616.0).contains(&float)
+                && float as i128 == integer;
         }
         return false;
     }
-    if python_integer_value(right).is_some() {return python_json_equal(right,left);}
-    match (left,right) {
-        (Value::Array(a),Value::Array(b))=>a.len()==b.len() && a.iter().zip(b).all(|(a,b)|python_json_equal(a,b)),
-        (Value::Object(a),Value::Object(b))=>a.len()==b.len() && a.iter().all(|(k,v)|b.get(k).is_some_and(|b|python_json_equal(v,b))),
-        _=>left==right,
+    if python_integer_value(right).is_some() {
+        return python_json_equal(right, left);
+    }
+    match (left, right) {
+        (Value::Array(a), Value::Array(b)) => {
+            a.len() == b.len() && a.iter().zip(b).all(|(a, b)| python_json_equal(a, b))
+        }
+        (Value::Object(a), Value::Object(b)) => {
+            a.len() == b.len()
+                && a.iter()
+                    .all(|(k, v)| b.get(k).is_some_and(|b| python_json_equal(v, b)))
+        }
+        _ => left == right,
     }
 }
 
 // port: belongs in provenant-core
-fn python_integer_value(value:&serde_json::Value)->Option<i128> {
+fn python_integer_value(value: &serde_json::Value) -> Option<i128> {
     match value {
-        serde_json::Value::Bool(b)=>Some(i128::from(*b)),
-        serde_json::Value::Number(n) if !n.is_f64()=>n.as_i64().map(i128::from).or_else(||n.as_u64().map(i128::from)),
-        _=>None,
+        serde_json::Value::Bool(b) => Some(i128::from(*b)),
+        serde_json::Value::Number(n) if !n.is_f64() => n
+            .as_i64()
+            .map(i128::from)
+            .or_else(|| n.as_u64().map(i128::from)),
+        _ => None,
     }
 }
 
 mod python_word;
 
 // port: belongs in provenant-core
-pub(crate) fn python_word(c:char)->bool {python_word::is_word(c)}
+pub(crate) fn python_word(c: char) -> bool {
+    python_word::is_word(c)
+}
+
+// port: belongs in provenant-records
+/// An object whose key order is retained, including Python's replacement of a
+/// duplicate member's value in its original position. This does not sort keys.
+#[derive(Debug, Clone, PartialEq)]
+pub struct OrderedMap<T>(Vec<(String, T)>);
+impl<T> OrderedMap<T> {
+    pub(crate) fn entries_mut(&mut self) -> impl Iterator<Item = (&str, &mut T)> {
+        self.0.iter_mut().map(|(k, v)| (k.as_str(), v))
+    }
+    pub fn entries(&self) -> impl Iterator<Item = (&str, &T)> {
+        self.0.iter().map(|(k, v)| (k.as_str(), v))
+    }
+}
+impl<T: serde::Serialize> serde::Serialize for OrderedMap<T> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        let mut map = serializer.serialize_map(Some(self.0.len()))?;
+        for (key, value) in &self.0 {
+            map.serialize_entry(key, value)?;
+        }
+        map.end()
+    }
+}
+impl<'de, T: serde::Deserialize<'de>> serde::Deserialize<'de> for OrderedMap<T> {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct Visitor<T>(std::marker::PhantomData<T>);
+        impl<'de, T: serde::Deserialize<'de>> serde::de::Visitor<'de> for Visitor<T> {
+            type Value = OrderedMap<T>;
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("a JSON object")
+            }
+            fn visit_map<M: serde::de::MapAccess<'de>>(
+                self,
+                mut map: M,
+            ) -> Result<Self::Value, M::Error> {
+                let mut entries: Vec<(String, T)> = Vec::new();
+                while let Some((key, value)) = map.next_entry::<String, T>()? {
+                    if let Some((_, old)) = entries.iter_mut().find(|(k, _)| k == &key) {
+                        *old = value;
+                    } else {
+                        entries.push((key, value));
+                    }
+                }
+                Ok(OrderedMap(entries))
+            }
+        }
+        deserializer.deserialize_map(Visitor(std::marker::PhantomData))
+    }
+}
+
+// port: belongs in provenant-records
+/// A required JSON member may contain null. Deserialising Option without this
+/// hook would also silently accept an absent member and materialise a null.
+pub(crate) fn required_option<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::Deserialize<'de>,
+{
+    <Option<T> as serde::Deserialize>::deserialize(deserializer)
+}
+
+// port: belongs in provenant-records
+/// Open JSON at cycle interfaces, retaining object order at every nesting level.
+/// Decode through the shared checked-JSON boundary before accepting raw numbers.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(untagged)]
+pub enum OrderedValue {
+    Null,
+    Bool(bool),
+    Number(serde_json::Number),
+    String(String),
+    Array(Vec<OrderedValue>),
+    Object(OrderedMap<OrderedValue>),
+}

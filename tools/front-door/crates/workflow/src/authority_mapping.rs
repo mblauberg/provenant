@@ -373,7 +373,9 @@ impl ParsedTimestamp {
 
 fn parse_timestamp(value: &str) -> Option<ParsedTimestamp> {
     // datetime.fromisoformat rejects Unicode decimal digits even though re \d accepts them.
-    if !value.is_ascii() { return None; }
+    if !value.is_ascii() {
+        return None;
+    }
     let chars: Vec<char> = value.chars().collect();
     if chars.len() < 20
         || chars.get(4) != Some(&'-')
@@ -506,8 +508,19 @@ fn budget(value: &Value, field: &str) -> Result<BTreeMap<String, u64>, Authority
 }
 
 fn provider_token_budget(value: &str) -> bool {
-    let Some(suffix) = value.strip_prefix("input_tokens:").or_else(|| value.strip_prefix("output_tokens:")) else {return false;};
-    !suffix.is_empty() && suffix.split(['.','-']).all(|segment| !segment.is_empty() && segment.bytes().all(|b|b.is_ascii_lowercase()||b.is_ascii_digit()))
+    let Some(suffix) = value
+        .strip_prefix("input_tokens:")
+        .or_else(|| value.strip_prefix("output_tokens:"))
+    else {
+        return false;
+    };
+    !suffix.is_empty()
+        && suffix.split(['.', '-']).all(|segment| {
+            !segment.is_empty()
+                && segment
+                    .bytes()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
+        })
 }
 
 fn map_scope(
@@ -814,7 +827,7 @@ pub fn map_delivery_delegations(
             &format!("{field}.actor"),
         )?;
         let child = map_scope(delegation, parent.approval.clone(), &field)?;
-        if !authority_contained(&child, &parent) {
+        if !authority_contained(&child, &parent)? {
             return Err(invalid(format!(
                 "delegation {index} broadens parent authority"
             )));
@@ -843,85 +856,79 @@ fn denied_paths_preserved(child: &[String], parent: &[String]) -> bool {
         .all(|denial| child.iter().any(|path| inside(denial, path)))
 }
 
-fn union_contained<T: PartialEq>(
+fn union_contained(
     child_allowed: bool,
-    child_values: &[T],
+    child_values: Option<&[String]>,
     parent_allowed: bool,
-    parent_values: &[T],
-) -> bool {
+    parent_values: Option<&[String]>,
+    field: &str,
+) -> Result<bool, AuthorityMappingError> {
     if !parent_allowed {
-        return !child_allowed;
+        return Ok(!child_allowed);
     }
-    !child_allowed
-        || child_values
-            .iter()
-            .all(|value| parent_values.contains(value))
+    if !child_allowed {
+        return Ok(true);
+    }
+    let child = child_values.ok_or_else(|| invalid(format!("child {field} is missing")))?;
+    let parent = parent_values.ok_or_else(|| invalid(format!("parent {field} is missing")))?;
+    Ok(child.iter().all(|value| parent.contains(value)))
 }
 
-fn timestamp_order(value: &str) -> Option<ParsedTimestamp> {
-    parse_timestamp(value)
-}
-
-/// Return whether a mapped child is no broader than its mapped parent.
-pub fn authority_contained(child: &MappedAuthority, parent: &MappedAuthority) -> bool {
-    let disclosure_rank = |level: &str| match level {
-        "allowed" => Some(0),
-        "scoped" => Some(1),
-        "forbidden" => Some(2),
-        _ => None,
+/// Mapped records remain fallible at this boundary: deserialising a struct is
+/// not proof that an enabled union carries its required payload.
+pub fn authority_contained(
+    child: &MappedAuthority,
+    parent: &MappedAuthority,
+) -> Result<bool, AuthorityMappingError> {
+    let rank = |level: &str| match level {
+        "allowed" => Ok(0),
+        "scoped" => Ok(1),
+        "forbidden" => Ok(2),
+        _ => Err(invalid("mapped disclosure level is invalid")),
     };
-    let child_rank = disclosure_rank(&child.disclosure.level);
-    let parent_rank = disclosure_rank(&parent.disclosure.level);
-    let mut disclosure_ok = matches!((child_rank, parent_rank), (Some(c), Some(p)) if c >= p);
+    let mut disclosure_ok = rank(&child.disclosure.level)? >= rank(&parent.disclosure.level)?;
     if child.disclosure.level == "scoped" && parent.disclosure.level == "scoped" {
-        disclosure_ok = child
+        let c = child
             .disclosure
             .scopes
             .as_ref()
-            .zip(parent.disclosure.scopes.as_ref())
-            .is_some_and(|(child, parent)| child.iter().all(|scope| parent.contains(scope)));
+            .ok_or_else(|| invalid("child disclosure.scopes is missing"))?;
+        let p = parent
+            .disclosure
+            .scopes
+            .as_ref()
+            .ok_or_else(|| invalid("parent disclosure.scopes is missing"))?;
+        disclosure_ok = c.iter().all(|s| p.contains(s));
     }
-
-    let secrets_ok = if child.secrets.access == "none" {
-        true
-    } else if parent.secrets.access == "none" {
-        false
-    } else {
-        child
+    let mut secrets_ok = child.secrets.access == "none";
+    if parent.secrets.access != "none" && child.secrets.access != "none" {
+        let c = child
             .secrets
             .references
             .as_ref()
-            .zip(parent.secrets.references.as_ref())
-            .is_some_and(|(child, parent)| child.iter().all(|reference| parent.contains(reference)))
-    };
-    let network_ok = if child.network.tool_egress == "none" {
-        true
-    } else if parent.network.tool_egress == "none" {
-        false
-    } else {
-        child
+            .ok_or_else(|| invalid("child secrets.references is missing"))?;
+        let p = parent
+            .secrets
+            .references
+            .as_ref()
+            .ok_or_else(|| invalid("parent secrets.references is missing"))?;
+        secrets_ok = c.iter().all(|s| p.contains(s));
+    }
+    let mut network_ok = child.network.tool_egress == "none";
+    if parent.network.tool_egress != "none" && child.network.tool_egress != "none" {
+        let c = child
             .network
             .allowed_hosts
             .as_ref()
-            .zip(parent.network.allowed_hosts.as_ref())
-            .is_some_and(|(child, parent)| child.iter().all(|host| parent.contains(host)))
-    };
-    let child_budget: BTreeMap<&str, u64> = child
-        .budget
-        .iter()
-        .map(|(unit, amount)| (unit.as_str(), *amount))
-        .collect();
-    let budget_ok = child_budget.iter().all(|(unit, amount)| {
-        parent
-            .budget
-            .get(*unit)
-            .is_some_and(|parent_amount| amount <= parent_amount)
-    });
-    let expiry_ok = timestamp_order(&child.expires_at)
-        .zip(timestamp_order(&parent.expires_at))
-        .is_some_and(|(child, parent)| child.order_key() <= parent.order_key());
-
-    child.approval == parent.approval
+            .ok_or_else(|| invalid("child network.allowedHosts is missing"))?;
+        let p = parent
+            .network
+            .allowed_hosts
+            .as_ref()
+            .ok_or_else(|| invalid("parent network.allowedHosts is missing"))?;
+        network_ok = c.iter().all(|s| p.contains(s));
+    }
+    if !(child.approval == parent.approval
         && allowed_paths_contained(&child.workspace_roots, &parent.workspace_roots)
         && allowed_paths_contained(&child.source_paths, &parent.source_paths)
         && allowed_paths_contained(&child.artifact_paths, &parent.artifact_paths)
@@ -929,38 +936,44 @@ pub fn authority_contained(child: &MappedAuthority, parent: &MappedAuthority) ->
         && parent
             .prohibited_actions
             .iter()
-            .all(|action| child.prohibited_actions.contains(action))
+            .all(|a| child.prohibited_actions.contains(a))
         && disclosure_ok
         && secrets_ok
         && union_contained(
             child.deployment.allowed,
-            child.deployment.targets.as_deref().unwrap_or_default(),
+            child.deployment.targets.as_deref(),
             parent.deployment.allowed,
-            parent.deployment.targets.as_deref().unwrap_or_default(),
-        )
+            parent.deployment.targets.as_deref(),
+            "deployment.targets",
+        )?
         && union_contained(
             child.irreversible_actions.allowed,
-            child
-                .irreversible_actions
-                .action_ids
-                .as_deref()
-                .unwrap_or_default(),
+            child.irreversible_actions.action_ids.as_deref(),
             parent.irreversible_actions.allowed,
+            parent.irreversible_actions.action_ids.as_deref(),
+            "irreversibleActions.actionIds",
+        )?
+        && network_ok)
+    {
+        return Ok(false);
+    }
+    let child_expiry = parse_timestamp(&child.expires_at)
+        .ok_or_else(|| invalid("child expiresAt must be a strict RFC3339 timestamp"))?;
+    let parent_expiry = parse_timestamp(&parent.expires_at)
+        .ok_or_else(|| invalid("parent expiresAt must be a strict RFC3339 timestamp"))?;
+    Ok(child_expiry.order_key() <= parent_expiry.order_key()
+        && child.budget.iter().all(|(key, amount)| {
             parent
-                .irreversible_actions
-                .action_ids
-                .as_deref()
-                .unwrap_or_default(),
-        )
-        && network_ok
-        && expiry_ok
-        && budget_ok
+                .budget
+                .get(key)
+                .is_some_and(|parent| amount <= parent)
+        }))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::{Value, json};
+    use serde_json::{json, Value};
     use std::path::PathBuf;
 
     fn root() -> PathBuf {
@@ -988,7 +1001,9 @@ mod tests {
     fn outcome<T: Serialize>(result: Result<T, AuthorityMappingError>) -> Value {
         match result {
             Ok(value) => json!({"ok": value}),
-            Err(AuthorityMappingError::Unhashable { kind }) => crate::test_support::unhashable(kind),
+            Err(AuthorityMappingError::Unhashable { kind }) => {
+                crate::test_support::unhashable(kind)
+            }
             Err(error) => json!({
                 "error_type": error.error_type(),
                 "error": error.to_string(),
@@ -1112,7 +1127,7 @@ mod tests {
                         .expect("mapped child is typed");
                     let parent: MappedAuthority = serde_json::from_value(case["parent"].clone())
                         .expect("mapped parent is typed");
-                    json!({"ok":authority_contained(&child, &parent)})
+                    outcome(authority_contained(&child, &parent))
                 })
                 .collect();
             assert_eq!(json!(actual), expected);
@@ -1120,55 +1135,145 @@ mod tests {
     }
     #[test]
     fn policy_boundaries_and_each_containment_dimension_match_python() {
-        let mut cases=vec![];
-        for (field,values) in [
-            ("schema_version",vec![json!(true),json!(2.0),json!(null)]),
-            ("disclosure",vec![json!([]),json!("public"),json!("other")]),
-            ("secrets_access",vec![json!({}),json!("none")]),
-            ("deployment",vec![json!(1),json!(false)]),
-            ("irreversible_actions",vec![json!(null),json!(false)]),
-            ("delegations",vec![json!({}),json!(null)]),
-            ("expires_at",vec![json!("٢٠٢٦-01-01T00:00:00Z"),json!("2026-01-01T00:00:00.١Z")]),
-            ("allowed_source_paths",vec![json!(["input\0escape"]),json!(["x".repeat(4097)]),json!(["input","input"]),json!(["input/./x"]),json!(["input//x"]),json!(["./input"])]),
-            ("budget",vec![json!({"turns":true}),json!({"turns":2.0}),json!({"turns":9007199254740992_u64}),json!({"cost:ZZZ":1})]),
+        let mut cases = vec![];
+        for (field, values) in [
+            ("schema_version", vec![json!(true), json!(2.0), json!(null)]),
+            (
+                "disclosure",
+                vec![json!([]), json!("public"), json!("other")],
+            ),
+            ("secrets_access", vec![json!({}), json!("none")]),
+            ("deployment", vec![json!(1), json!(false)]),
+            ("irreversible_actions", vec![json!(null), json!(false)]),
+            ("delegations", vec![json!({}), json!(null)]),
+            (
+                "expires_at",
+                vec![
+                    json!("٢٠٢٦-01-01T00:00:00Z"),
+                    json!("2026-01-01T00:00:00.١Z"),
+                ],
+            ),
+            (
+                "allowed_source_paths",
+                vec![
+                    json!(["input\0escape"]),
+                    json!(["x".repeat(4097)]),
+                    json!(["input", "input"]),
+                    json!(["input/./x"]),
+                    json!(["input//x"]),
+                    json!(["./input"]),
+                ],
+            ),
+            (
+                "budget",
+                vec![
+                    json!({"turns":true}),
+                    json!({"turns":2.0}),
+                    json!({"turns":9007199254740992_u64}),
+                    json!({"cost:ZZZ":1}),
+                ],
+            ),
         ] {
-            for value in values { let mut input=delivery_fixture();input[field]=value;cases.push(json!({"op":"map","authority":input})); }
+            for value in values {
+                let mut input = delivery_fixture();
+                input[field] = value;
+                cases.push(json!({"op":"map","authority":input}));
+            }
         }
-        for field in ["workspace_roots","allowed_source_paths","allowed_artifact_paths","denied_paths","prohibited_actions","secret_refs","deployment_targets","irreversible_action_ids"] {
-            let count=if field=="workspace_roots" {65} else {257};
-            let mut input=delivery_fixture(); input[field]=json!((0..count).map(|i|format!("item-{i}")).collect::<Vec<_>>());
+        for field in [
+            "workspace_roots",
+            "allowed_source_paths",
+            "allowed_artifact_paths",
+            "denied_paths",
+            "prohibited_actions",
+            "secret_refs",
+            "deployment_targets",
+            "irreversible_action_ids",
+        ] {
+            let count = if field == "workspace_roots" { 65 } else { 257 };
+            let mut input = delivery_fixture();
+            input[field] = json!((0..count).map(|i| format!("item-{i}")).collect::<Vec<_>>());
             cases.push(json!({"op":"map","authority":input}));
         }
-        for count in [128,129] {
-            let mut input=delivery_fixture();
-            input["budget"]=json!((0..count).map(|i|(format!("input_tokens:provider-{i}"),json!(1))).collect::<Map<_,_>>());
+        for count in [128, 129] {
+            let mut input = delivery_fixture();
+            input["budget"] = json!((0..count)
+                .map(|i| (format!("input_tokens:provider-{i}"), json!(1)))
+                .collect::<Map<_, _>>());
             cases.push(json!({"op":"map","authority":input}));
         }
         compare_map_cases(cases);
-        let base=serde_json::to_value(mapped_fixture()).unwrap();
-        let mut cases=vec![json!({"op":"contained","child":base,"parent":base})];
-        for (field,value) in [
-            ("approval",json!({"approvedBy":"other","evidenceId":"e","evidenceDigest":"d"})),
-            ("sourcePaths",json!(["outside"])),("artifactPaths",json!(["output-sibling"])),
-            ("deniedPaths",json!([])),("prohibitedActions",json!([])),
-            ("disclosure",json!({"level":"allowed"})),
-            ("disclosure",json!({"level":"scoped","scopes":["public"]})),
-            ("secrets",json!({"access":"use-without-disclosure","references":["outside"]})),
-            ("deployment",json!({"allowed":true,"targets":["outside"]})),
-            ("irreversibleActions",json!({"allowed":true,"actionIds":["outside"]})),
-            ("network",json!({"toolEgress":"allowlist","allowedHosts":["outside.test"]})),
-            ("expiresAt",json!("2026-07-21T00:00:00Z")),
-            ("budget",json!({"turns":5})),("budget",json!({"wall_clock_milliseconds":1})),
-        ] {let mut child=base.clone();child[field]=value;cases.push(json!({"op":"contained","child":child,"parent":base}));}
-        let mut child=base.clone();let mut parent=base.clone();
-        child["workspaceRoots"]=json!(["workspace-sibling"]);parent["workspaceRoots"]=json!(["workspace"]);
+        let base = serde_json::to_value(mapped_fixture()).unwrap();
+        let mut cases = vec![json!({"op":"contained","child":base,"parent":base})];
+        for (field, value) in [
+            (
+                "approval",
+                json!({"approvedBy":"other","evidenceId":"e","evidenceDigest":"d"}),
+            ),
+            ("sourcePaths", json!(["outside"])),
+            ("artifactPaths", json!(["output-sibling"])),
+            ("deniedPaths", json!([])),
+            ("prohibitedActions", json!([])),
+            ("disclosure", json!({"level":"allowed"})),
+            ("disclosure", json!({"level":"scoped","scopes":["public"]})),
+            (
+                "secrets",
+                json!({"access":"use-without-disclosure","references":["outside"]}),
+            ),
+            ("deployment", json!({"allowed":true,"targets":["outside"]})),
+            (
+                "irreversibleActions",
+                json!({"allowed":true,"actionIds":["outside"]}),
+            ),
+            (
+                "network",
+                json!({"toolEgress":"allowlist","allowedHosts":["outside.test"]}),
+            ),
+            ("expiresAt", json!("2026-07-21T00:00:00Z")),
+            ("budget", json!({"turns":5})),
+            ("budget", json!({"wall_clock_milliseconds":1})),
+        ] {
+            let mut child = base.clone();
+            child[field] = value;
+            cases.push(json!({"op":"contained","child":child,"parent":base}));
+        }
+        let mut child = base.clone();
+        let mut parent = base.clone();
+        child["workspaceRoots"] = json!(["workspace-sibling"]);
+        parent["workspaceRoots"] = json!(["workspace"]);
         cases.push(json!({"op":"contained","child":child,"parent":parent}));
-        let actual:Vec<_>=cases.iter().map(|c|{
-            let child:MappedAuthority=serde_json::from_value(c["child"].clone()).unwrap();
-            let parent:MappedAuthority=serde_json::from_value(c["parent"].clone()).unwrap();
-            json!({"ok":authority_contained(&child,&parent)})
-        }).collect();
-        if let Some(expected)=crate::test_support::oracle("authority_mapping",&json!(cases)){assert_eq!(json!(actual),expected);}
+        let actual: Vec<_> = cases
+            .iter()
+            .map(|c| {
+                let child: MappedAuthority = serde_json::from_value(c["child"].clone()).unwrap();
+                let parent: MappedAuthority = serde_json::from_value(c["parent"].clone()).unwrap();
+                outcome(authority_contained(&child, &parent))
+            })
+            .collect();
+        if let Some(expected) = crate::test_support::oracle("authority_mapping", &json!(cases)) {
+            assert_eq!(json!(actual), expected);
+        }
     }
-
+    #[test]
+    fn malformed_mapped_unions_never_grant_containment() {
+        let base = mapped_fixture();
+        let mut child = base.clone();
+        child.deployment.targets = None;
+        assert!(authority_contained(&child, &base).is_err());
+        child = base.clone();
+        child.irreversible_actions.action_ids = None;
+        assert!(authority_contained(&child, &base).is_err());
+        child = base.clone();
+        child.expires_at = "bad".into();
+        assert!(authority_contained(&child, &base).is_err());
+        child = base.clone();
+        child.disclosure.level = "bad".into();
+        assert!(authority_contained(&child, &base).is_err());
+        child = base.clone();
+        child.network.allowed_hosts = None;
+        assert!(authority_contained(&child, &base).is_err());
+        child = base.clone();
+        child.secrets.references = None;
+        assert!(authority_contained(&child, &base).is_err());
+    }
 }

@@ -1,9 +1,9 @@
 //! Declarative review panel presets, validation and reducer output.
 
-use crate::review_ladder::{REVIEW_PLAN_STATUSES, SKIPPED_STATUSES};
 use crate::pending;
+use crate::review_ladder::{REVIEW_PLAN_STATUSES, SKIPPED_STATUSES};
 use serde::{Deserialize, Serialize};
-use serde_json::{Map, Value, json};
+use serde_json::{json, Map, Value};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
@@ -78,10 +78,7 @@ impl Default for PanelRegistry {
                 "agreements-conflicts".to_owned(),
                 Arc::new(agreements_conflicts) as Reducer,
             ),
-            (
-                "union".to_owned(),
-                Arc::new(union) as Reducer,
-            ),
+            ("union".to_owned(), Arc::new(union) as Reducer),
         ]);
         Self { presets, reducers }
     }
@@ -147,6 +144,7 @@ pub struct PanelShortfall {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PanelResult {
+    #[serde(deserialize_with = "crate::pending::required_option")]
     pub shortfall: Option<PanelShortfall>,
     pub output: Value,
 }
@@ -756,11 +754,9 @@ mod tests {
             ),
             (council_spec(), json!("not-members")),
         ];
-        assert!(
-            cases
-                .iter()
-                .all(|(spec, rows)| !validate_panel(spec, rows).is_empty())
-        );
+        assert!(cases
+            .iter()
+            .all(|(spec, rows)| !validate_panel(spec, rows).is_empty()));
         assert!(resolve_panel("missing", None, &Map::new()).is_err());
         assert_eq!(
             resolve_panel(
