@@ -18,12 +18,12 @@ pub struct LandingLease {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum LandingRelease {
-    Released {
-        released: bool,
-    },
     Refused {
         released: bool,
         reason: ReleaseReason,
+    },
+    Released {
+        released: bool,
     },
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

@@ -426,3 +426,13 @@ fn only_plain_busy_and_locked_are_retryable() {
         assert_eq!(is_sqlite_contention(&error), expected);
     }
 }
+
+#[test]
+fn landing_release_refusals_round_trip_without_losing_reason() {
+    for reason in ["pushing", "expired", "not_held"] {
+        let wire = format!(r#"{{"released":false,"reason":"{reason}"}}"#);
+        let release: LandingRelease = serde_json::from_str(&wire).unwrap();
+        assert!(matches!(release, LandingRelease::Refused { .. }));
+        assert_eq!(serde_json::to_string(&release).unwrap(), wire);
+    }
+}
