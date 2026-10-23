@@ -9,7 +9,6 @@ import json
 import os
 import shutil
 import signal
-import stat
 import subprocess
 import sys
 import threading
@@ -23,12 +22,16 @@ import pytest
 
 from tests.support.dispatch import disable_memory_admission_floor, real_owner_fixture
 from tests.support.fake_cli import fake_codex, write_executable
-from tests.support.runs import make_run
+from tests.support.runs import make_run as _make_run
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "skills/orchestrate/scripts/dispatch_run.py"
 INIT = ROOT / "skills/orchestrate/scripts/run_dir_init.sh"
 FINALIZE = ROOT / "skills/orchestrate/scripts/run_dir_finalize.py"
+
+
+def make_run(root: Path, name: str = "run") -> Path:
+    return _make_run(root.resolve(), name)
 
 
 def write_success_adapter(path: Path) -> None:
@@ -692,26 +695,31 @@ def test_secret_scan_avoids_generic_credential_words_and_unprefixed_jwt():
     assert scan.scan_bytes(content, '<prompt>') == []
 
 
-@pytest.mark.parametrize(("legacy_status", "adapter", "expected"), [
-    ("ok", {"status": "ok", "spared": 2}, {"spared": 2}),
-    ("failed", {"status": "ok", "exit": None}, {"status": "failed", "error_class": "provider_error"}),
-], ids=[
-    "test_terminal_attempt_carries_nested_owner_spared_count",
-    "test_terminal_attempt_does_not_promote_an_invalid_success_receipt",
-])
 def test_terminal_attempt_carries_nested_owner_spared_count(
-    tmp_path: Path, legacy_status, adapter, expected,
+    tmp_path: Path,
 ) -> None:
     module = load_dispatch_module()
     args = dispatch_args()
     legacy = {"started_at": timestamp(), "finished_at": timestamp(),
-              "outcome": "ok", "status": legacy_status,
-              "result": "result.md" if legacy_status == "ok" else {"path": "result.md"},
+              "outcome": "ok", "status": "ok", "result": "result.md",
               "attempt_path": "tasks/task-1/attempt-001", "requested_route": {}}
-    row = module.terminal_contract(args, tmp_path, legacy, adapter, 1,
+    row = module.terminal_contract(args, tmp_path, legacy, {"status": "ok", "spared": 2}, 1,
                                    tmp_path / "tasks/task-1/attempt-001")
-    for key, value in expected.items():
-        assert row[key] == value
+    assert row["spared"] == 2
+
+
+def test_terminal_attempt_does_not_promote_an_invalid_success_receipt(tmp_path: Path) -> None:
+    module = load_dispatch_module()
+    args = dispatch_args(alias="", effort="high")
+    legacy = {"started_at": timestamp(), "finished_at": timestamp(),
+              "outcome": "ok", "status": "failed", "result": {"path": "result.md"},
+              "attempt_path": "tasks/task-1/attempt-001", "requested_route": {}}
+    row = module.terminal_contract(
+        args, tmp_path, legacy, {"status": "ok", "exit": None}, 1,
+        tmp_path / "tasks/task-1/attempt-001",
+    )
+    assert row["status"] == "failed"
+    assert row["error_class"] == "provider_error"
 
 
 def test_terminal_attempt_retains_partial_transport_failure(tmp_path):
@@ -1174,7 +1182,7 @@ def test_explicit_model_receipt_does_not_record_an_implied_alias(
 
 def test_config_fallback_detail_is_persisted_in_the_attempt_record(tmp_path, monkeypatch):
     mod = load_dispatch_module()
-    args = dispatch_args()
+    args = dispatch_args(_profile="receipt")
     fallback = {"from_host": "hosts.json", "reason": "invalid_config", "detail": "Response deadline must be positive and finite"}
     monkeypatch.setenv("PROVENANT_PLACEMENT_FALLBACK", json.dumps(fallback))
     plan = {}
@@ -1565,15 +1573,11 @@ def test_dispatch_fails_when_terminal_candidate_cannot_be_safely_reopened(
     assert attempt["outcome"] == "result_integrity_error"
 
 
-@pytest.mark.parametrize("coverage", ["no_family", "finalizer"], ids=[
-    "test_ordinary_dispatch_without_lead_family_is_not_certification",
-    "test_attempt_rows_are_accepted_by_existing_finalizer",
-])
-def test_ordinary_dispatch_without_lead_family_is_not_certification(tmp_path: Path, coverage) -> None:
-    task_id = "no-family" if coverage == "no_family" else "finalizer"
+def test_ordinary_dispatch_without_lead_family_is_not_certification(tmp_path: Path) -> None:
+    task_id = "no-family"
     run_dir = make_run(tmp_path, task_id)
     prompt = tmp_path / "prompt.md"
-    prompt.write_text("Reply exactly OK\n" if coverage == "no_family" else "finalizer\n", encoding="utf-8")
+    prompt.write_text("Reply exactly OK\n", encoding="utf-8")
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     fake_codex(bin_dir, body="cat >/dev/null\nprintf 'OK\\n'")
@@ -1586,26 +1590,42 @@ def test_ordinary_dispatch_without_lead_family_is_not_certification(tmp_path: Pa
     )
     assert result.returncode == 0, result.stderr + result.stdout
     record = json.loads(result.stdout)
-    if coverage == "no_family":
-        assert record["route"]["orchestrator_family"] == ""
-        assert record["route"]["cross_family"] is False
-        assert record["route"]["certification_eligible"] is False
-    else:
-        finalized = subprocess.run(
-            [str(FINALIZE), str(run_dir), "--status", "failed", "--reason", "dispatch test"],
-            cwd=tmp_path, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-        )
-        assert finalized.returncode == 0, finalized.stderr
-        assert json.loads((run_dir / "RUN_RECEIPT.json").read_text())["status"] == "failed"
-        rejected = subprocess.run(
-            [str(SCRIPT), "--run-dir", str(run_dir), "--task-id", "after-close",
-             "--adapter", "codex", "--prompt-file", str(prompt),
-             "--alias", "senior", "--role", "worker"],
-            cwd=tmp_path, env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-        )
-        assert rejected.returncode == 2
-        assert json.loads(rejected.stdout)["status"] == "run_custody_closed"
-        assert not (run_dir / "dispatch/tasks/after-close").exists()
+    assert record["route"]["orchestrator_family"] == ""
+    assert record["route"]["cross_family"] is False
+    assert record["route"]["certification_eligible"] is False
+
+
+def test_attempt_rows_are_accepted_by_existing_finalizer(tmp_path: Path) -> None:
+    task_id = "finalizer"
+    run_dir = make_run(tmp_path, task_id)
+    prompt = tmp_path / "prompt.md"
+    prompt.write_text("finalizer\n", encoding="utf-8")
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    fake_codex(bin_dir, body="cat >/dev/null\nprintf 'OK\\n'")
+    env = os.environ.copy()
+    env["PATH"] = f"{bin_dir}:{ROOT / 'scripts'}:{env['PATH']}"
+    result = subprocess.run(
+        [str(SCRIPT), "--run-dir", str(run_dir), "--task-id", task_id,
+         "--adapter", "codex", "--prompt-file", str(prompt), "--alias", "senior", "--role", "worker"],
+        cwd=tmp_path, env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+    )
+    assert result.returncode == 0, result.stderr + result.stdout
+    finalized = subprocess.run(
+        [str(FINALIZE), str(run_dir), "--status", "failed", "--reason", "dispatch test"],
+        cwd=tmp_path, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+    )
+    assert finalized.returncode == 0, finalized.stderr
+    assert json.loads((run_dir / "RUN_RECEIPT.json").read_text())["status"] == "failed"
+    rejected = subprocess.run(
+        [str(SCRIPT), "--run-dir", str(run_dir), "--task-id", "after-close",
+         "--adapter", "codex", "--prompt-file", str(prompt),
+         "--alias", "senior", "--role", "worker"],
+        cwd=tmp_path, env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+    )
+    assert rejected.returncode == 2
+    assert json.loads(rejected.stdout)["status"] == "run_custody_closed"
+    assert not (run_dir / "dispatch/tasks/after-close").exists()
 
 
 def test_dispatch_owner_keeps_lifecycle_risk_separate_from_model_override(tmp_path: Path) -> None:
@@ -2181,52 +2201,45 @@ def test_stale_marker_on_prior_attempt_does_not_cancel_next_attempt(tmp_path: Pa
     assert next_record["status"] == "ok"
 
 
-@pytest.mark.parametrize(("custody", "expected_status"), [
-    ("counterfeit", None),
-    ("missing", "run_custody_missing"),
-], ids=[
-    "test_counterfeit_active_receipt_is_rejected_before_launch",
-    "test_missing_run_receipt_reports_missing_custody",
-])
-def test_counterfeit_active_receipt_is_rejected_before_launch(
-    tmp_path: Path, monkeypatch, capsys, custody, expected_status,
-) -> None:
-    run_dir = make_run(tmp_path, "counterfeit-receipt" if custody == "counterfeit" else "missing-receipt")
-    if custody == "counterfeit":
-        (run_dir / "RUN_RECEIPT.json").write_text(
-            '{"status":"active","closed_at":null}\n', encoding="utf-8"
-        )
-    else:
-        (run_dir / "RUN_RECEIPT.json").unlink()
+def test_counterfeit_active_receipt_is_rejected_before_launch(tmp_path: Path, monkeypatch) -> None:
+    run_dir = make_run(tmp_path, "counterfeit-receipt")
+    (run_dir / "RUN_RECEIPT.json").write_text(
+        '{"status":"active","closed_at":null}\n', encoding="utf-8"
+    )
     prompt = tmp_path / "prompt.md"
-    prompt.write_text("counterfeit\n" if custody == "counterfeit" else "missing receipt\n", encoding="utf-8")
+    prompt.write_text("counterfeit\n", encoding="utf-8")
     module = load_dispatch_module()
-    if custody == "counterfeit":
-        adapter = tmp_path / "adapter-never-run-receipt"
-        write_executable(adapter, "#!/usr/bin/env bash\nexit 99\n")
-        monkeypatch.setattr(module, "CF_DISPATCH", adapter)
+    adapter = tmp_path / "adapter-never-run-receipt"
+    write_executable(adapter, "#!/usr/bin/env bash\nexit 99\n")
+    monkeypatch.setattr(module, "CF_DISPATCH", adapter)
     args = module.parser().parse_args([
-        "--run-dir", str(run_dir), "--task-id", "blocked" if custody == "counterfeit" else "missing-receipt", "--adapter", "codex",
+        "--run-dir", str(run_dir), "--task-id", "blocked", "--adapter", "codex",
         "--prompt-file", str(prompt), "--alias", "senior", "--role", "worker",
     ])
     monkeypatch.chdir(tmp_path)
 
     assert module.dispatch(args) == 2
-    if expected_status:
-        assert json.loads(capsys.readouterr().out)["status"] == expected_status
-    assert not (run_dir / "dispatch/tasks" / ("blocked" if custody == "counterfeit" else "missing-receipt")).exists()
+    assert not (run_dir / "dispatch/tasks/blocked").exists()
 
 
-@pytest.mark.parametrize(("task_id", "expected_status"), [
-    ("hardlink", None),
-    ("hardlink-typed", "prompt_hard_link_denied"),
-], ids=[
-    "test_hard_linked_prompt_is_rejected_before_provider_launch",
-    "test_hard_linked_prompt_reports_typed_custody_error",
-])
-def test_hard_linked_prompt_is_rejected_before_provider_launch(
-    tmp_path: Path, monkeypatch, capsys, task_id, expected_status,
-) -> None:
+def test_missing_run_receipt_reports_missing_custody(tmp_path: Path, monkeypatch, capsys) -> None:
+    run_dir = make_run(tmp_path, "missing-receipt")
+    (run_dir / "RUN_RECEIPT.json").unlink()
+    prompt = tmp_path / "prompt.md"
+    prompt.write_text("missing receipt\n", encoding="utf-8")
+    module = load_dispatch_module()
+    args = module.parser().parse_args([
+        "--run-dir", str(run_dir), "--task-id", "missing-receipt", "--adapter", "codex",
+        "--prompt-file", str(prompt), "--alias", "senior", "--role", "worker",
+    ])
+    monkeypatch.chdir(tmp_path)
+
+    assert module.dispatch(args) == 2
+    assert json.loads(capsys.readouterr().out)["status"] == "run_custody_missing"
+
+
+def test_hard_linked_prompt_is_rejected_before_provider_launch(tmp_path: Path, monkeypatch) -> None:
+    task_id = "hardlink"
     run_dir = make_run(tmp_path, task_id)
     source = tmp_path / "prompt.md"
     source.write_text("secret boundary\n", encoding="utf-8")
@@ -2239,45 +2252,70 @@ def test_hard_linked_prompt_is_rejected_before_provider_launch(
     ])
     monkeypatch.chdir(tmp_path)
     assert module.dispatch(args) == 2
-    if expected_status:
-        assert json.loads(capsys.readouterr().out)["status"] == expected_status
 
 
-@pytest.mark.parametrize(("protected_input", "expected_status"), [
-    ("prompt", "protected_path_denied"),
-    ("add_dir", None),
-], ids=[
-    "test_relative_protected_prompt_is_rejected_before_staging",
-    "test_relative_protected_add_dir_is_rejected_before_staging",
-])
-def test_relative_protected_prompt_is_rejected_before_staging(
-    tmp_path: Path, monkeypatch, capsys, protected_input, expected_status,
-) -> None:
+def test_hard_linked_prompt_reports_typed_custody_error(tmp_path: Path, monkeypatch, capsys) -> None:
+    task_id = "hardlink-typed"
+    run_dir = make_run(tmp_path, task_id)
+    source = tmp_path / "prompt.md"
+    source.write_text("secret boundary\n", encoding="utf-8")
+    linked = tmp_path / "linked-prompt.md"
+    linked.hardlink_to(source)
+    module = load_dispatch_module()
+    args = module.parser().parse_args([
+        "--run-dir", str(run_dir), "--task-id", task_id, "--adapter", "codex",
+        "--prompt-file", str(linked), "--alias", "senior", "--role", "worker",
+    ])
+    monkeypatch.chdir(tmp_path)
+    assert module.dispatch(args) == 2
+    assert json.loads(capsys.readouterr().out)["status"] == "prompt_hard_link_denied"
+
+
+def test_relative_protected_prompt_is_rejected_before_staging(tmp_path: Path, monkeypatch, capsys) -> None:
     repo = tmp_path / "repo"
     repo.mkdir()
     subprocess.run(["git", "init", "-q", str(repo)], check=True)
     (repo / ".agents").mkdir()
     (repo / ".agents/fabric-policy.json").write_text('{"protected_paths":["private/"]}')
     (repo / "private").mkdir()
-    if protected_input == "prompt":
-        (repo / "private/prompt.md").write_text("secret", encoding="utf-8")
-    else:
-        (repo / "prompt.md").write_text("safe", encoding="utf-8")
-    run_dir = make_run(repo, "protected-direct" if protected_input == "prompt" else "protected-add-dir")
+    (repo / "private/prompt.md").write_text("secret", encoding="utf-8")
+    run_dir = make_run(repo, "protected-direct")
     module = load_dispatch_module()
     monkeypatch.chdir(repo)
     monkeypatch.setenv("AGENT_FABRIC_PRODUCT_ROOT", str(ROOT))
     monkeypatch.setenv("AGENT_FABRIC_INSTANCE_ROOT", str(repo / ".agents"))
     args = module.parser().parse_args([
         "--run-dir", str(run_dir), "--task-id", "blocked", "--adapter", "opencode",
-        "--prompt-file", "private/prompt.md" if protected_input == "prompt" else "prompt.md",
-        *(["--add-dir", "private"] if protected_input == "add_dir" else []),
+        "--prompt-file", "private/prompt.md",
         "--model", "opencode/mimo-v2.6-flash-free", "--role", "worker",
     ])
     assert module.dispatch(args) == 2
     rejection = json.loads(capsys.readouterr().out)
-    if expected_status:
-        assert rejection["status"] == expected_status
+    assert rejection["status"] == "protected_path_denied"
+    assert "protected path" in str(rejection), rejection
+    assert not (run_dir / "dispatch/tasks/blocked/attempt-001/prompt.md").exists()
+
+
+def test_relative_protected_add_dir_is_rejected_before_staging(tmp_path: Path, monkeypatch, capsys) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    (repo / ".agents").mkdir()
+    (repo / ".agents/fabric-policy.json").write_text('{"protected_paths":["private/"]}')
+    (repo / "private").mkdir()
+    (repo / "prompt.md").write_text("safe", encoding="utf-8")
+    run_dir = make_run(repo, "protected-add-dir")
+    module = load_dispatch_module()
+    monkeypatch.chdir(repo)
+    monkeypatch.setenv("AGENT_FABRIC_PRODUCT_ROOT", str(ROOT))
+    monkeypatch.setenv("AGENT_FABRIC_INSTANCE_ROOT", str(repo / ".agents"))
+    args = module.parser().parse_args([
+        "--run-dir", str(run_dir), "--task-id", "blocked", "--adapter", "opencode",
+        "--prompt-file", "prompt.md", "--add-dir", "private",
+        "--model", "opencode/mimo-v2.6-flash-free", "--role", "worker",
+    ])
+    assert module.dispatch(args) == 2
+    rejection = json.loads(capsys.readouterr().out)
     assert "protected path" in str(rejection), rejection
     assert not (run_dir / "dispatch/tasks/blocked/attempt-001/prompt.md").exists()
 
@@ -2333,25 +2371,25 @@ def test_manifest_appendability_failure_is_typed_before_launch(tmp_path: Path, m
     module = load_dispatch_module()
     manifest = run_dir / "MANIFEST.md"
     original_mode = manifest.stat().st_mode
-    if mode == "appendability":
-        def refuse(_run_dir):
-            raise OSError("read-only fixture")
-        monkeypatch.setattr(module, "ensure_manifest_appendable", refuse)
-    else:
-        manifest.chmod(0o444)
-        try:
-            with manifest.open("a", encoding="utf-8"):
-                pass
-        except OSError:
-            pass
-        else:
-            pytest.skip("test user can append to chmod 0444 files")
-    args = module.parser().parse_args([
-        "--run-dir", str(run_dir), "--task-id", "manifest-readonly" if mode == "appendability" else "manifest-mode", "--adapter", "codex",
-        "--prompt-file", str(prompt), "--alias", "senior", "--role", "worker",
-    ])
-    monkeypatch.chdir(tmp_path)
     try:
+        if mode == "appendability":
+            def refuse(_run_dir):
+                raise OSError("read-only fixture")
+            monkeypatch.setattr(module, "ensure_manifest_appendable", refuse)
+        else:
+            manifest.chmod(0o444)
+            try:
+                with manifest.open("a", encoding="utf-8"):
+                    pass
+            except OSError:
+                pass
+            else:
+                pytest.skip("test user can append to chmod 0444 files")
+        args = module.parser().parse_args([
+            "--run-dir", str(run_dir), "--task-id", "manifest-readonly" if mode == "appendability" else "manifest-mode", "--adapter", "codex",
+            "--prompt-file", str(prompt), "--alias", "senior", "--role", "worker",
+        ])
+        monkeypatch.chdir(tmp_path)
         assert module.dispatch(args) == 2
     finally:
         if mode == "read_only":
@@ -4631,11 +4669,7 @@ print(json.dumps({"type":"result","result":os.getcwd()}))
     assert 'resume: relaunched' in second['warnings']
 
 
-@pytest.mark.parametrize("named_session", [False, True], ids=[
-    "test_claude_resume_relaunches_when_saved_session_is_missing",
-    "test_named_session_resume_never_relaunches_a_missing_claude_session",
-])
-def test_claude_resume_relaunches_when_saved_session_is_missing(tmp_path, monkeypatch, named_session):
+def test_claude_resume_relaunches_when_saved_session_is_missing(tmp_path, monkeypatch):
     code = '''import json,sys
 prompt = sys.stdin.read()
 if '--resume' in sys.argv:
@@ -4651,22 +4685,38 @@ print(json.dumps({'type':'result','result':'DONE'}))
     assert previous['session_id'] == 'saved-session'
     command = [sys.executable, str(SCRIPT), '--run-dir', str(run), '--resume', previous['run_id'],
                '--prompt-file', str(prompt)]
-    if named_session:
-        command += ['--resume-attempt', '1', '--require-session', 'saved-session']
+    resumed = subprocess.run(command, cwd=tmp_path, capture_output=True, text=True)
+    assert resumed.returncode == 0, resumed.stdout + resumed.stderr
+    row = json.loads((run / 'tasks/dispatch-001/attempt-002/attempt.json').read_text())
+    assert previous['session_id'] == 'saved-session'
+    assert row['status'] == 'ok'
+    assert 'resumed_by_relaunch' in row['provenance']['notes']
+    assert 'resume: relaunched' in row['warnings']
+
+
+def test_named_session_resume_never_relaunches_a_missing_claude_session(tmp_path, monkeypatch):
+    code = '''import json,sys
+prompt = sys.stdin.read()
+if '--resume' in sys.argv:
+ print('No conversation found with session ID', file=sys.stderr)
+ sys.exit(1)
+print(json.dumps({'type':'system','subtype':'init','session_id':'saved-session','model':'opus'}))
+print(json.dumps({'type':'result','result':'DONE'}))
+'''
+    run, prompt, command = real_owner_fixture(tmp_path, monkeypatch, code)
+    first = subprocess.run(command, cwd=tmp_path, capture_output=True, text=True)
+    assert first.returncode == 0, first.stdout + first.stderr
+    previous = json.loads((run / 'tasks/dispatch-001/attempt-001/attempt.json').read_text())
+    assert previous['session_id'] == 'saved-session'
+    command = [sys.executable, str(SCRIPT), '--run-dir', str(run), '--resume', previous['run_id'],
+               '--prompt-file', str(prompt), '--resume-attempt', '1', '--require-session', 'saved-session']
     resumed = subprocess.run(command, cwd=tmp_path, capture_output=True, text=True)
     row = json.loads((run / 'tasks/dispatch-001/attempt-002/attempt.json').read_text())
-    if named_session:
-        assert row['status'] == 'rejected', resumed.stdout + resumed.stderr
-        assert row['error'] == 'continuation_unsupported'
-        assert 'fresh: true' in row['fix']
-        assert 'resumed_by_relaunch' not in row['provenance']['notes']
-        assert not (run / 'tasks/dispatch-001/attempt-003').exists()
-    else:
-        assert previous['session_id'] == 'saved-session'
-        assert resumed.returncode == 0, resumed.stdout + resumed.stderr
-        assert row['status'] == 'ok'
-        assert 'resumed_by_relaunch' in row['provenance']['notes']
-        assert 'resume: relaunched' in row['warnings']
+    assert row['status'] == 'rejected', resumed.stdout + resumed.stderr
+    assert row['error'] == 'continuation_unsupported'
+    assert 'fresh: true' in row['fix']
+    assert 'resumed_by_relaunch' not in row['provenance']['notes']
+    assert not (run / 'tasks/dispatch-001/attempt-003').exists()
 
 
 def test_named_session_resume_continues_the_pinned_attempt_session(tmp_path, monkeypatch):
