@@ -5,9 +5,10 @@
 mod casefold;
 mod render;
 
-pub mod catalog;
 pub mod capability;
+pub mod catalog;
 pub mod cli;
+pub mod discovery;
 pub mod exec_routing;
 pub mod live;
 pub mod matching;
