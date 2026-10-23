@@ -6,6 +6,10 @@ rust-version.workspace = true
 license.workspace = true
 publish = false
 
+[features]
+fault-injection = []
+test-fixtures = []
+
 [dependencies]
 provenant-core = { workspace = true }
 provenant-records = { workspace = true }
@@ -17,3 +21,20 @@ thiserror = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+
+# Cargo does not support overriding one lint with lints.workspace = true.
+# Mirror the workspace policy, lowering unsafe_code only so sys can allow it.
+[lints.rust]
+unsafe_code = "deny"
+unsafe_op_in_unsafe_fn = "deny"
+
+[lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+print_stdout = "deny"
+print_stderr = "deny"
+float_cmp = "deny"
+undocumented_unsafe_blocks = "deny"
+multiple_unsafe_ops_per_block = "deny"
+disallowed_methods = "deny"

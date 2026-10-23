@@ -1,4 +1,10 @@
 //! Adapter profiles, argv and environment builders, output classification and continuation.
+// Rewrite pending: remove when this crate is rewritten.
+#![allow(
+    clippy::collapsible_if,
+    clippy::disallowed_methods,
+    clippy::print_stderr
+)]
 #![forbid(unsafe_code)]
 
 pub mod adapters;

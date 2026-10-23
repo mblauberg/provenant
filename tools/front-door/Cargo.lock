@@ -418,7 +418,6 @@ dependencies = [
 name = "provenant"
 version = "0.1.0"
 dependencies = [
- "libc",
  "provenant-supervisor",
 ]
 

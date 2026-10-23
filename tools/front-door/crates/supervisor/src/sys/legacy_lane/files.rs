@@ -482,7 +482,9 @@ mod tests {
         };
         let text = r.encode();
         assert!(text.len() <= 16384);
-        let v = crate::json::parse(&text).unwrap();
-        assert!(matches!(v.get("reaped_truncated"),Some(crate::json::Value::Int(n)) if *n>0));
+        let v = crate::legacy_json::parse(&text).unwrap();
+        assert!(
+            matches!(v.get("reaped_truncated"),Some(crate::legacy_json::Value::Int(n)) if *n>0)
+        );
     }
 }

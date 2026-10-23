@@ -1,5 +1,12 @@
 //! End-to-end behaviour of the built binary against fixture checkouts.
 
+// Rewrite pending: remove when this crate is rewritten.
+#![allow(
+    clippy::disallowed_methods,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::unwrap_used
+)]
 mod common;
 
 use common::*;

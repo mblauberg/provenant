@@ -1,4 +1,11 @@
 //! Inert argument and rendering boundaries. Command ownership has not switched.
+// Rewrite pending: remove when this crate is rewritten.
+#![allow(
+    clippy::byte_char_slices,
+    clippy::collapsible_if,
+    clippy::disallowed_methods,
+    clippy::print_stderr
+)]
 #![forbid(unsafe_code)]
 
 pub mod harness;

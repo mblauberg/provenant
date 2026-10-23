@@ -17,3 +17,6 @@ thiserror = { workspace = true }
 provenant-records = { workspace = true }
 serde_json = { workspace = true }
 tempfile = { workspace = true }
+
+[lints]
+workspace = true

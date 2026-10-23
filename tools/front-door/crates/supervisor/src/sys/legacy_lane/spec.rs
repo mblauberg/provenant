@@ -1,4 +1,4 @@
-use crate::json::{self, Value};
+use crate::legacy_json::{self as json, Value};
 use std::collections::BTreeMap;
 use std::path::{Component, PathBuf};
 

@@ -5,7 +5,7 @@ use super::{
     spec::Spec,
     state::{Event, ObserverReason, StopReason},
 };
-use crate::json::{self, Value};
+use crate::legacy_json::{self as json, Value};
 use std::collections::VecDeque;
 use std::io::{self, Read, Write};
 use std::os::fd::{AsRawFd, RawFd};

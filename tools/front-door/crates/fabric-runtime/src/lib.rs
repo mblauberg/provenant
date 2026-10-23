@@ -1,4 +1,11 @@
 //! Inert Fabric runtime contracts and policy. No command is switched to this crate.
+// Rewrite pending: remove when this crate is rewritten.
+#![allow(
+    clippy::collapsible_if,
+    clippy::disallowed_methods,
+    clippy::expect_used,
+    clippy::print_stderr
+)]
 #![forbid(unsafe_code)]
 
 pub mod batch_execution;

@@ -1,3 +1,11 @@
+// Rewrite pending: remove when this crate is rewritten.
+#![allow(
+    clippy::disallowed_methods,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::unwrap_used
+)]
+use provenant_supervisor::sys::legacy_lane::fixtures;
 mod common;
 use common::{BINARY, Sandbox};
 use std::fs;
@@ -255,7 +263,7 @@ fn escaped_child_helper() {
     if std::env::var("S2_ESCAPE").as_deref() != Ok("1") {
         return;
     }
-    assert!(unsafe { libc::setsid() } > 0);
+    assert!(fixtures::new_session() > 0);
     fs::write(
         std::path::Path::new(&std::env::var("S2_DIR").unwrap()).join("escaped.pid"),
         std::process::id().to_string(),
@@ -274,9 +282,7 @@ impl Drop for EscapeCleanup {
             .unwrap_or_default()
             .parse::<i32>()
         {
-            unsafe {
-                libc::kill(-pid, libc::SIGKILL);
-            }
+            fixtures::signal(-pid, fixtures::KILL);
         }
     }
 }
@@ -290,7 +296,7 @@ fn new_session_grandchild_is_cleaned_up() {
     f.wall = 5000;
     let fifo = f.sandbox.dir.join("finish.fifo");
     let name = std::ffi::CString::new(fifo.to_string_lossy().as_bytes()).unwrap();
-    assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+    assert_eq!(fixtures::fifo(&name), 0);
     let _cleanup = EscapeCleanup(f.sandbox.dir.clone());
     let mut child = Command::new(BINARY)
         .args(["lane", "run"])
@@ -322,14 +328,12 @@ fn new_session_grandchild_is_cleaned_up() {
                 break;
             }
         }
-        unsafe {
-            libc::poll(std::ptr::null_mut(), 0, 10);
-        }
+        fixtures::wait_tick();
     }
     fs::OpenOptions::new()
         .read(true)
         .write(true)
-        .custom_flags(libc::O_NONBLOCK)
+        .custom_flags(fixtures::NONBLOCK)
         .open(&fifo)
         .unwrap()
         .write_all(b"finish\n")
@@ -342,7 +346,7 @@ fn new_session_grandchild_is_cleaned_up() {
     );
     let record = fs::read_to_string(f.sandbox.dir.join("supervisor.exit.json")).unwrap();
     assert!(record.contains(&format!("\"pid\":{pid}")), "{record}");
-    let exists = unsafe { libc::kill(pid, 0) } == 0;
+    let exists = fixtures::signal(pid, 0) == 0;
     #[cfg(target_os = "macos")]
     assert!(!exists, "escaped child {pid} survived: {record}");
     #[cfg(target_os = "linux")]
@@ -436,9 +440,7 @@ fn inherited_non_cloexec_descriptors_do_not_reach_the_provider() {
     fs::write(&path, b"private").unwrap();
     let file = fs::File::open(&path).unwrap();
     let fd = file.as_raw_fd();
-    unsafe {
-        libc::fcntl(fd, libc::F_SETFD, 0);
-    }
+    fixtures::make_inheritable(&file);
     f.script = format!("if [ /dev/fd/{fd} -ef inherited.file ]; then printf leaked; fi; exit 0");
     f.run();
     assert!(
@@ -469,9 +471,7 @@ fn supervisor_signal_becomes_a_staged_stop() {
     let mut first = String::new();
     reader.read_line(&mut first).unwrap();
     assert!(first.contains("\"event\":\"started\""));
-    unsafe {
-        libc::kill(child.id() as i32, libc::SIGTERM);
-    }
+    fixtures::signal(child.id() as i32, fixtures::TERM);
     let mut rest = String::new();
     reader.read_to_string(&mut rest).unwrap();
     assert!(child.wait().unwrap().success());
@@ -483,7 +483,6 @@ fn supervisor_signal_becomes_a_staged_stop() {
 }
 #[test]
 fn inherited_ignored_signals_and_mask_are_reset_before_provider_exec() {
-    use std::os::unix::process::CommandExt;
     let f = Fixture::new("lane-inherited-signals", "kill -TERM $$; exit 88");
     let mut command = Command::new(BINARY);
     command
@@ -492,17 +491,7 @@ fn inherited_ignored_signals_and_mask_are_reset_before_provider_exec() {
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    unsafe {
-        command.pre_exec(|| {
-            libc::signal(libc::SIGCHLD, libc::SIG_IGN);
-            libc::signal(libc::SIGTERM, libc::SIG_IGN);
-            let mut mask: libc::sigset_t = std::mem::zeroed();
-            libc::sigemptyset(&mut mask);
-            libc::sigaddset(&mut mask, libc::SIGTERM);
-            libc::sigprocmask(libc::SIG_BLOCK, &mask, std::ptr::null_mut());
-            Ok(())
-        });
-    }
+    fixtures::inherit_ignored_signals(&mut command);
     let mut child = command.spawn().unwrap();
     child
         .stdin
@@ -545,7 +534,6 @@ fn descendant_cpu_activity_advances_progress_without_output() {
 
 #[test]
 fn nested_owner_helper() {
-    use std::os::fd::AsRawFd;
     let Ok(mode) = std::env::var("S2_NESTED") else {
         return;
     };
@@ -560,56 +548,11 @@ fn nested_owner_helper() {
         .open(dir.join("MANIFEST.md"))
         .unwrap();
     if mode == "held" {
-        assert_eq!(
-            unsafe { libc::flock(custody.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
-            0
-        );
+        assert_eq!(fixtures::lock(&custody), 0);
     }
     let pid = std::process::id();
-    #[cfg(target_os = "macos")]
-    let epoch = unsafe {
-        #[link(name = "proc")]
-        unsafe extern "C" {
-            fn proc_pidinfo(
-                pid: i32,
-                flavor: i32,
-                arg: u64,
-                buffer: *mut libc::c_void,
-                size: i32,
-            ) -> i32;
-        }
-        let mut bsd = [0u64; 17];
-        assert_eq!(
-            proc_pidinfo(pid as i32, 3, 0, bsd.as_mut_ptr().cast(), 136),
-            136
-        );
-        bsd[15]
-    };
-    #[cfg(target_os = "linux")]
-    let epoch = {
-        let stat = fs::read_to_string("/proc/self/stat").unwrap();
-        let start = stat[stat.rfind(") ").unwrap() + 2..]
-            .split_whitespace()
-            .nth(19)
-            .unwrap()
-            .parse::<u64>()
-            .unwrap();
-        let boot = fs::read_to_string("/proc/stat")
-            .unwrap()
-            .lines()
-            .find_map(|s| s.strip_prefix("btime ").and_then(|s| s.parse::<u64>().ok()))
-            .unwrap();
-        boot + start / unsafe { libc::sysconf(libc::_SC_CLK_TCK) } as u64
-    };
-    let start = unsafe {
-        let epoch = epoch as libc::time_t;
-        let mut tm: libc::tm = std::mem::zeroed();
-        libc::localtime_r(&epoch, &mut tm);
-        let mut buf = [0u8; 80];
-        let n = libc::strftime(buf.as_mut_ptr().cast(), 80, c"%a %b %e %T %Y".as_ptr(), &tm);
-        String::from_utf8_lossy(&buf[..n]).into_owned()
-    };
-    fs::write(dir.join("dispatch-owner.json"),format!("{{\"schema_version\":1,\"kind\":\"dispatch\",\"run_dir\":{},\"run_token\":\"nested\",\"owner_pid\":{pid},\"owner_pgid\":{},\"owner_started_at\":{}}}",quote(&dir.to_string_lossy()),unsafe {libc::getpgrp()},quote(&start))).unwrap();
+    let start = fixtures::current_start();
+    fs::write(dir.join("dispatch-owner.json"),format!("{{\"schema_version\":1,\"kind\":\"dispatch\",\"run_dir\":{},\"run_token\":\"nested\",\"owner_pid\":{pid},\"owner_pgid\":{},\"owner_started_at\":{}}}",quote(&dir.to_string_lossy()),fixtures::process_group(),quote(&start))).unwrap();
     fs::create_dir_all(attempt.join("tmp/children")).unwrap();
     fs::write(
         attempt.join("tmp/children/nested.json"),
@@ -624,9 +567,7 @@ fn nested_owner_helper() {
     while !attempt.join("nested.release").exists()
         && began.elapsed() < std::time::Duration::from_secs(5)
     {
-        unsafe {
-            libc::poll(std::ptr::null_mut(), 0, 10);
-        }
+        fixtures::wait_tick();
     }
 }
 struct ReleaseNested(std::path::PathBuf);
@@ -638,12 +579,10 @@ impl Drop for ReleaseNested {
             .parse::<i32>()
         {
             let start = std::time::Instant::now();
-            while unsafe { libc::kill(pid, 0) } == 0
+            while fixtures::signal(pid, 0) == 0
                 && start.elapsed() < std::time::Duration::from_millis(750)
             {
-                unsafe {
-                    libc::poll(std::ptr::null_mut(), 0, 10);
-                }
+                fixtures::wait_tick();
             }
         }
     }
@@ -671,11 +610,10 @@ fn registered_nested_owner_with_custody_is_spared_inside_provider_group() {
             .starts_with(&format!("[{{\"pid\":{pid},")),
         "{record}"
     );
-    assert_eq!(unsafe { libc::kill(pid.parse().unwrap(), 0) }, 0);
+    assert_eq!(fixtures::signal(pid.parse().unwrap(), 0), 0);
 }
 #[test]
 fn registered_owner_with_only_an_unlocked_descriptor_is_not_spared() {
-    use std::os::fd::AsRawFd;
     let f = Fixture::new(
         "lane-nested-unlocked",
         "S2_NESTED=unlocked \"$S2_HELPER\" --exact nested_owner_helper --nocapture & while [ ! -f nested.ready ]; do :; done; printf ready; /bin/sleep 0.15; exit 0",
@@ -688,10 +626,7 @@ fn registered_owner_with_only_an_unlocked_descriptor_is_not_spared() {
         .truncate(false)
         .open(f.sandbox.dir.join("nested/MANIFEST.md"))
         .unwrap();
-    assert_eq!(
-        unsafe { libc::flock(custody.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
-        0
-    );
+    assert_eq!(fixtures::lock(&custody), 0);
     let _release = ReleaseNested(f.sandbox.dir.clone());
     let record = f.run();
     assert!(record.contains("\"spared\":[]"), "{record}");

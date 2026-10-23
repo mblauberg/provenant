@@ -1,11 +1,18 @@
 //! The provenant front door: resolve the product checkout, pick the owner of
 //! a verb, and replace this process with it. Owners keep their own logic.
 
+// Rewrite pending: remove when this crate is rewritten.
+#![allow(
+    clippy::collapsible_if,
+    clippy::disallowed_methods,
+    clippy::print_stderr,
+    clippy::unwrap_used
+)]
 mod check;
 mod exec;
 mod help;
 mod json;
-mod lane;
+use provenant_supervisor::sys::legacy_lane as lane;
 mod resolve;
 mod stale;
 

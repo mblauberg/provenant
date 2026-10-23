@@ -1,4 +1,13 @@
 //! Metadata-only usage attribution. Inert library: no command or live state owner.
+// Rewrite pending: remove when this crate is rewritten.
+#![allow(
+    clippy::collapsible_if,
+    clippy::disallowed_methods,
+    clippy::expect_used,
+    clippy::needless_late_init,
+    clippy::print_stderr,
+    clippy::some_filter
+)]
 #![forbid(unsafe_code)]
 
 pub mod changes;

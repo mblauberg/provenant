@@ -255,3 +255,7 @@ pub mod errno {
         EOPNOTSUPP, EPERM, EXDEV,
     };
 }
+
+// Existing S2 implementation, pending the supervisor rewrite.
+#[doc(hidden)]
+pub mod legacy_lane;
