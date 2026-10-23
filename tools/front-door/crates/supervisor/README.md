@@ -311,3 +311,20 @@ J1/J2/J3 and unrestricted Linux/macOS conformance remain chair-owned gates.
 
 Filesystem review repairs additionally retain both rename paths in typed
 errors and require `Send + Sync` for boxed safe filesystem capabilities.
+
+Batch-3 final local evidence: 130 supervisor tests passed with
+`PROVENANT_PORT_DIFF_REQUIRED=1`; all 102 root-package tests passed; supervisor
+clippy with warnings denied and workspace fmt passed. Both layering policy
+functions passed under isolated Python (pytest is absent locally). Two native
+read-only reviews covered syscall/custody and source/record parity. Repairs
+preserve a rotated first session-log path, root-before-nested glob ordering,
+directory-link exclusion, refusal of truncated diagnostic paths, and the
+source's missing/empty-home behavior. The missing-home/rotation regressions
+were observed failing before their repairs and passing afterwards.
+
+The syscall review found no introduced defects. It noted the existing
+source-compatible utility policy can reap its leader before group cleanup,
+leaving a theoretical process-group ID reuse race; this batch does not change
+that implementation or S2 provider custody. Treat it as a cut-over design
+question, not proof of provider custody. The chair still owns cross-family
+review and exact-head CI/acceptance; no auto-merge is armed.

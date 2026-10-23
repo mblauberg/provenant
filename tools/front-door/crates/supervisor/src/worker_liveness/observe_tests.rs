@@ -520,3 +520,13 @@ fn diagnostic_capture_refuses_truncated_stdout_instead_of_using_it_as_a_path() {
         Err(ObserveError::CommandOutputLimit { limit: 3, .. })
     ));
 }
+
+#[test]
+fn empty_home_expansion_is_root_as_in_pathlib() {
+    let fs = FixtureFs {
+        home: Some(PathBuf::new()),
+        ..FixtureFs::default()
+    };
+    assert_eq!(canonical_cwd(&fs, "~").unwrap(), "/");
+    assert_eq!(canonical_cwd(&fs, "~/sub").unwrap(), "/sub");
+}

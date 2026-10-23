@@ -41,7 +41,7 @@ pub enum ObserveError {
         #[source]
         source: io::Error,
     },
-    #[error("could not determine home directory for {path:?}")]
+    #[error("Could not determine home directory.")]
     HomeDirectory { path: PathBuf },
     #[error("process command is not valid UTF-8")]
     NonUtf8Command { command: OsString },
@@ -337,7 +337,7 @@ fn expand_user(fs: &dyn ObservationFs, path: &Path) -> Result<PathBuf, ObserveEr
     let suffix = &text[end..];
     if account.as_os_str().is_empty() {
         return Ok(if suffix.is_empty() {
-            PathBuf::from(".")
+            PathBuf::from("/")
         } else {
             PathBuf::from(suffix)
         });

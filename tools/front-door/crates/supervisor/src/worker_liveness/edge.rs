@@ -172,7 +172,9 @@ pub fn execute_request(
                 | LivenessError::MissingExit,
             )
             | MainError::Census(_)
-            | MainError::Observation(ObserveError::ProcessCensus(_))),
+            | MainError::Observation(
+                ObserveError::ProcessCensus(_) | ObserveError::HomeDirectory { .. },
+            )),
         ) => Ok(MainOutput {
             stdout: String::new(),
             stderr: format!("worker-liveness: {error}\n"),
@@ -307,6 +309,58 @@ mod tests {
         .unwrap();
         assert_eq!(out.stdout, "[]\n");
     }
+    #[test]
+    fn main_reports_failed_home_expansion_as_a_runtime_error() {
+        let sessions = tempfile::tempdir().unwrap();
+        std::fs::write(
+            sessions.path().join("rollout-one.jsonl"),
+            r#"{"payload":{"cwd":"~provenant_missing_user_zz/a"}}"#,
+        )
+        .unwrap();
+        let path = serde_json::to_string(&sessions.path()).unwrap();
+        let script = format!(
+            r#"
+import importlib.util, sys, json, io
+from contextlib import redirect_stdout, redirect_stderr
+spec=importlib.util.spec_from_file_location('worker_liveness','skills/orchestrate/scripts/worker_liveness.py')
+m=importlib.util.module_from_spec(spec); sys.modules[spec.name]=m; spec.loader.exec_module(m)
+out=io.StringIO(); err=io.StringIO()
+with redirect_stdout(out), redirect_stderr(err):
+    code=m.main(['--sessions-root',{path}])
+print(json.dumps([code,out.getvalue(),err.getvalue()]))
+"#
+        );
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../..");
+        let Some(expected) = crate::test_support::python(&root, &script) else {
+            return;
+        };
+        struct MissingHome;
+        impl LivenessSource for MissingHome {
+            fn live(&self) -> Result<Vec<Process>, MainError> {
+                Ok(vec![])
+            }
+            fn workers(&self, _: &Path, _: &Path) -> Result<Vec<Worker>, MainError> {
+                Err(ObserveError::HomeDirectory {
+                    path: "~provenant_missing_user_zz/a".into(),
+                }
+                .into())
+            }
+        }
+        let output = execute_request(
+            &MissingHome,
+            &Request::Collect {
+                sessions_root: sessions.path().into(),
+                repository: "/repo".into(),
+                json: false,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            serde_json::json!([output.exit_code, output.stdout, output.stderr]),
+            expected
+        );
+    }
+
     #[test]
     fn worker_json_bytes_match_python_dataclass_order_unicode_and_float_policy() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../..");

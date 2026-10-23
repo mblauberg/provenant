@@ -1694,3 +1694,20 @@ are not yet proved exact. Their IDs are removed from the completion ledger.
   (SIGINFO on macOS; SIGSTKFLT/SIGPWR on Linux). A Node differential checks the
   mapping. RP-SUP-PS-BUFFER's overflow contract remains open; this repair does
   not complete the Fabric ps unit.
+
+### RP-SUP3-LIVENESS review repairs (bug, fixed)
+
+- Native review found an extra stat before selecting the first session log.
+  Python short-circuits that stat; if rotation removes the log after its read,
+  it still retains the selected path. The regression first failed with an
+  absent path and now passes with the retained path and missing metadata.
+- The typed main edge now catches failed home expansion as Python's
+  RuntimeError, emits `worker-liveness: Could not determine home directory.`
+  and returns 2. Its source differential first failed on an escaping error.
+  Empty HOME expands bare `~` to `/`, also confirmed by a failing-then-passing
+  regression. No source behavior changes are accepted by these repairs.
+- Final local evidence: 130 required-differential supervisor tests, 102
+  root-package tests and 2 layering policy checks passed; fmt and clippy with
+  warnings denied passed. Native syscall and source-parity review repairs are
+  complete. The partial domains above and chair-owned cross-family/CI gates
+  remain unchanged.
