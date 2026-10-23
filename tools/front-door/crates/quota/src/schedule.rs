@@ -16,31 +16,31 @@ use std::{
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Config {
     pub enabled: bool,
-    pub min_interval_seconds: f64,
-    pub max_interval_seconds: f64,
-    pub active_window_seconds: f64,
-    pub jitter_fraction: f64,
-    pub coalesce_seconds: f64,
-    pub near_exhaustion_percent: f64,
-    pub near_exhaustion_factor: f64,
-    pub runs_out_horizon_factor: f64,
-    pub reset_grace_seconds: f64,
-    pub exhausted_recheck_seconds: f64,
-    pub battery_factor: f64,
-    pub low_power_factor: f64,
+    pub min_interval_seconds: Number,
+    pub max_interval_seconds: Number,
+    pub active_window_seconds: Number,
+    pub jitter_fraction: Number,
+    pub coalesce_seconds: Number,
+    pub near_exhaustion_percent: Number,
+    pub near_exhaustion_factor: Number,
+    pub runs_out_horizon_factor: Number,
+    pub reset_grace_seconds: Number,
+    pub exhausted_recheck_seconds: Number,
+    pub battery_factor: Number,
+    pub low_power_factor: Number,
     pub low_power_skip_costs: Vec<String>,
-    pub manual_min_age_seconds: f64,
-    pub event_debounce_seconds: f64,
+    pub manual_min_age_seconds: Number,
+    pub event_debounce_seconds: Number,
     pub max_parallel: u64,
-    pub base_seconds: f64,
-    pub max_seconds: f64,
-    pub auth_seconds: f64,
-    pub missing_seconds: f64,
+    pub base_seconds: Number,
+    pub max_seconds: Number,
+    pub auth_seconds: Number,
+    pub missing_seconds: Number,
     pub cost: String,
     pub solo: bool,
-    pub ttl_active_seconds: f64,
-    pub ttl_idle_seconds: f64,
-    pub ttl_panel_seconds: f64,
+    pub ttl_active_seconds: Number,
+    pub ttl_idle_seconds: Number,
+    pub ttl_panel_seconds: Number,
 }
 const KEYS: &[&str] = &[
     "enabled",
@@ -103,40 +103,40 @@ fn valid(key: &str, v: &Value) -> bool {
 impl Config {
     pub fn for_provider(provider: &str) -> Self {
         let (cost, solo, active, idle, panel) = match provider {
-            "claude" => ("moderate", false, 300.0, 1800.0, 120.0),
-            "codex" => ("moderate", false, 900.0, 3600.0, 300.0),
-            "cursor" => ("cheap", false, 1800.0, 3600.0, 600.0),
-            "opencode" => ("cheap", false, 300.0, 3600.0, 60.0),
-            "agy" => ("expensive", true, 1200.0, 7200.0, 900.0),
-            _ => ("moderate", false, 900.0, 3600.0, 300.0),
+            "claude" => ("moderate", false, 300, 1800, 120),
+            "codex" => ("moderate", false, 900, 3600, 300),
+            "cursor" => ("cheap", false, 1800, 3600, 600),
+            "opencode" => ("cheap", false, 300, 3600, 60),
+            "agy" => ("expensive", true, 1200, 7200, 900),
+            _ => ("moderate", false, 900, 3600, 300),
         };
         Self {
             enabled: true,
-            min_interval_seconds: 60.0,
-            max_interval_seconds: 21600.0,
-            active_window_seconds: 900.0,
-            jitter_fraction: 0.1,
-            coalesce_seconds: 120.0,
-            near_exhaustion_percent: 85.0,
-            near_exhaustion_factor: 0.5,
-            runs_out_horizon_factor: 2.0,
-            reset_grace_seconds: 60.0,
-            exhausted_recheck_seconds: 21600.0,
-            battery_factor: 2.0,
-            low_power_factor: 4.0,
+            min_interval_seconds: Number::Int(60),
+            max_interval_seconds: Number::Int(21600),
+            active_window_seconds: Number::Int(900),
+            jitter_fraction: Number::Float(0.1),
+            coalesce_seconds: Number::Int(120),
+            near_exhaustion_percent: Number::Int(85),
+            near_exhaustion_factor: Number::Float(0.5),
+            runs_out_horizon_factor: Number::Int(2),
+            reset_grace_seconds: Number::Int(60),
+            exhausted_recheck_seconds: Number::Int(21600),
+            battery_factor: Number::Int(2),
+            low_power_factor: Number::Int(4),
             low_power_skip_costs: vec!["expensive".into()],
-            manual_min_age_seconds: 30.0,
-            event_debounce_seconds: 30.0,
+            manual_min_age_seconds: Number::Int(30),
+            event_debounce_seconds: Number::Int(30),
             max_parallel: 3,
-            base_seconds: 120.0,
-            max_seconds: 3600.0,
-            auth_seconds: 3600.0,
-            missing_seconds: 86400.0,
+            base_seconds: Number::Int(120),
+            max_seconds: Number::Int(3600),
+            auth_seconds: Number::Int(3600),
+            missing_seconds: Number::Int(86400),
             cost: cost.into(),
             solo,
-            ttl_active_seconds: active,
-            ttl_idle_seconds: idle,
-            ttl_panel_seconds: panel,
+            ttl_active_seconds: Number::Int(active),
+            ttl_idle_seconds: Number::Int(idle),
+            ttl_panel_seconds: Number::Int(panel),
         }
     }
 }
@@ -177,10 +177,10 @@ pub fn resolve(
         }
     }
     let mut config: Config = serde_json::from_value(values).map_err(QuotaError::Record)?;
-    if config.max_interval_seconds < config.min_interval_seconds {
+    if config.max_interval_seconds.get() < config.min_interval_seconds.get() {
         notes.push("max_interval_seconds is below min_interval_seconds; using the defaults".into());
-        config.min_interval_seconds = 60.0;
-        config.max_interval_seconds = 21600.0;
+        config.min_interval_seconds = Number::Int(60);
+        config.max_interval_seconds = Number::Int(21600);
     }
     Ok((config, notes))
 }
@@ -198,12 +198,11 @@ pub fn backoff_seconds(
     seed: &str,
 ) -> f64 {
     let wait = match kind {
-        ErrorKind::Missing => config.missing_seconds,
-        ErrorKind::Auth => config.auth_seconds,
-        _ => config
-            .max_seconds
-            .min(config.base_seconds * 2.0_f64.powi((failures.clamp(1, 32) - 1) as i32)),
-    } * (1.0 + jitter(&format!("{seed}|{failures}"), config.jitter_fraction));
+        ErrorKind::Missing => config.missing_seconds.get(),
+        ErrorKind::Auth => config.auth_seconds.get(),
+        _ => config.max_seconds.get()
+            .min(config.base_seconds.get() * 2.0_f64.powi((failures.clamp(1, 32) - 1) as i32)),
+    } * (1.0 + jitter(&format!("{seed}|{failures}"), config.jitter_fraction.get()));
     if kind == ErrorKind::RateLimited {
         retry_after
             .filter(|v| v.is_finite())
@@ -214,20 +213,20 @@ pub fn backoff_seconds(
 }
 fn sets_state(row: &Window) -> bool {
     row.advisory != Some(true)
-        && !(row.limit_amount.is_some_and(|v| v != 0.0)
-            && row.window_minutes.is_none_or(|v| v == 0.0))
+        && !(row.limit_amount.map(Number::get).is_some_and(|v| v != 0.0)
+            && row.window_minutes.map(Number::get).is_none_or(|v| v == 0.0))
 }
 fn near(rows: &[&Window], now: Timestamp, ttl: f64, config: &Config) -> bool {
     rows.iter().any(|row| {
-        let used = row.used_percent;
+        let used = row.used();
         if used >= 100.0 {
             return false;
         }
-        if used >= config.near_exhaustion_percent {
+        if used >= config.near_exhaustion_percent.get() {
             return true;
         }
         let Some((reset, minutes)) =
-            stamp(row.reset_at.as_deref()).zip(row.window_minutes.filter(|v| *v != 0.0))
+            stamp(row.reset_at.as_deref()).zip(row.window_minutes.map(Number::get).filter(|v| *v != 0.0))
         else {
             return false;
         };
@@ -237,7 +236,7 @@ fn near(rows: &[&Window], now: Timestamp, ttl: f64, config: &Config) -> bool {
             return false;
         }
         let runs_out = (100.0 - used) / (used / elapsed);
-        runs_out < remaining && runs_out <= config.runs_out_horizon_factor * ttl
+        runs_out < remaining && runs_out <= config.runs_out_horizon_factor.get() * ttl
     })
 }
 pub struct PlanInput<'a> {
@@ -267,23 +266,20 @@ pub fn plan(input: PlanInput<'_>) -> Result<(Schedule, bool), QuotaError> {
     let snapshot = snapshot.unwrap_or(&blank);
     let state = snapshot.fetch.clone().unwrap_or_default();
     let attempted = snapshot.attempted_at.as_ref().and_then(parse_time);
-    let failures = if state.failures.is_finite() {
-        state.failures as i64
-    } else {
-        0
-    };
+    let failures = state.failures.unwrap_or_default().integer_part()?;
     let kind = state
         .error_kind
         .as_deref()
         .filter(|s| ["rate_limited", "network", "auth", "missing", "other"].contains(s))
         .map(ErrorKind::from_name);
-    let backoff = if failures != 0 {
+    let backoff = if failures.get() != 0.0 {
         state.backoff_until.as_ref().and_then(parse_time)
     } else {
         None
     };
     let duration = state
         .last_duration_ms
+        .map(Number::get)
         .filter(|v| v.is_finite())
         .unwrap_or(0.0)
         / 1000.0;
@@ -295,36 +291,35 @@ pub fn plan(input: PlanInput<'_>) -> Result<(Schedule, bool), QuotaError> {
         .zip(seen)
         .is_some_and(|(a, s)| a <= s && seconds_between(s, a) <= duration + 5.0);
     let active =
-        seen.is_some_and(|s| !own && seconds_between(now, s) <= config.active_window_seconds);
+        seen.is_some_and(|s| !own && seconds_between(now, s) <= config.active_window_seconds.get());
     let since_fetch = seen.zip(attempted).is_some_and(|(s, a)| !own && s > a);
     let base = if active {
-        config.ttl_active_seconds
+        config.ttl_active_seconds.get()
     } else {
-        config.ttl_idle_seconds
+        config.ttl_idle_seconds.get()
     };
     let mut reason = if active { "active" } else { "idle" };
     let rows: Vec<_> = snapshot
         .windows
         .iter()
-        .filter(|r| r.used_percent.is_finite() && sets_state(r))
+        .filter(|r| r.used().is_finite() && sets_state(r))
         .collect();
     let mut factor = 1.0;
     if near(&rows, now, base, config) {
-        factor = config.near_exhaustion_factor;
+        factor = config.near_exhaustion_factor.get();
         reason = "near_exhaustion";
     }
     if trigger != "manual" {
         factor *= match power {
-            "battery" => config.battery_factor,
-            "low" => config.low_power_factor,
+            "battery" => config.battery_factor.get(),
+            "low" => config.low_power_factor.get(),
             _ => 1.0,
         };
     }
-    let mut ttl = config
-        .max_interval_seconds
-        .min(config.min_interval_seconds.max(base * factor));
+    let mut ttl = config.max_interval_seconds.get()
+        .min(config.min_interval_seconds.get().max(base * factor));
     if power == "low" && trigger != "manual" && config.low_power_skip_costs.contains(&config.cost) {
-        ttl = config.max_interval_seconds;
+        ttl = config.max_interval_seconds.get();
         reason = "low_power";
     }
     let mut next_due = if let Some(attempted) = attempted {
@@ -333,18 +328,18 @@ pub fn plan(input: PlanInput<'_>) -> Result<(Schedule, bool), QuotaError> {
             ttl * (1.0
                 + jitter(
                     &format!("{account_id}|{}", iso(attempted)),
-                    config.jitter_fraction,
+                    config.jitter_fraction.get(),
                 )),
         )?;
         let exhausted: Vec<_> = rows
             .iter()
-            .filter(|r| r.used_percent >= 100.0)
+            .filter(|r| r.used() >= 100.0)
             .map(|r| stamp(r.reset_at.as_deref()))
             .collect();
         if !exhausted.is_empty() && exhausted.iter().all(|r| r.is_some_and(|r| r > now)) {
             if let Some(last) = exhausted.into_iter().flatten().max() {
-                due = add_seconds(last, config.reset_grace_seconds)?
-                    .min(add_seconds(attempted, config.exhausted_recheck_seconds)?);
+                due = add_seconds(last, config.reset_grace_seconds.get())?
+                    .min(add_seconds(attempted, config.exhausted_recheck_seconds.get())?);
                 reason = "exhausted_until_reset";
             }
         }
@@ -379,32 +374,31 @@ pub fn plan(input: PlanInput<'_>) -> Result<(Schedule, bool), QuotaError> {
     let age = attempted
         .map(|a| seconds_between(now, a))
         .unwrap_or(f64::INFINITY);
-    let coalesce = config.coalesce_seconds.min(0.25 * ttl);
+    let coalesce = config.coalesce_seconds.get().min(0.25 * ttl);
     let timer_due = seconds_between(next_due.min(plain), now) <= coalesce;
     let due = !blocked
         && match trigger {
             "timer" => timer_due,
-            "panel" => timer_due || age >= config.ttl_panel_seconds,
-            "manual" => timer_due || age >= config.manual_min_age_seconds,
+            "panel" => timer_due || age >= config.ttl_panel_seconds.get(),
+            "manual" => timer_due || age >= config.manual_min_age_seconds.get(),
             "event" => {
                 timer_due
                     || age
-                        >= config
-                            .min_interval_seconds
-                            .max(config.event_debounce_seconds)
+                        >= config.min_interval_seconds.get()
+                            .max(config.event_debounce_seconds.get())
             }
-            "wake" => timer_due || age >= config.min_interval_seconds,
+            "wake" => timer_due || age >= config.min_interval_seconds.get(),
             _ => false,
         };
     Ok((
         Schedule {
             next_due_at: iso(next_due),
             reason: reason.into(),
-            ttl_seconds: ttl.round_ties_even(),
+            ttl_seconds: Number::checked_integer(ttl.round_ties_even())?,
             trigger: state.trigger,
             failures,
             backoff_until: backoff.map(iso),
-            error_kind: if failures != 0 { kind } else { None },
+            error_kind: if failures.get() != 0.0 { kind } else { None },
             last_duration_ms: state.last_duration_ms,
             source_kind: state
                 .source_kind

@@ -123,6 +123,8 @@ pub mod time;
 
 #[derive(Debug, thiserror::Error)]
 pub enum QuotaError {
+    #[error("quota number is out of range")]
+    NumberOutOfRange,
     #[error("invalid quota record")]
     Record(#[source] serde_json::Error),
     #[error("quota timestamp is out of range")]

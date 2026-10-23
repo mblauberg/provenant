@@ -9,14 +9,14 @@ use std::collections::BTreeMap;
 pub struct Window {
     pub name: String,
     pub raw_kind: Option<String>,
-    pub used_percent: f64,
-    pub window_minutes: Option<f64>,
+    pub used_percent: Value,
+    pub window_minutes: Option<Number>,
     pub reset_at: Option<String>,
     pub window_start: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub used_amount: Option<f64>,
+    pub used_amount: Option<Number>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub limit_amount: Option<f64>,
+    pub limit_amount: Option<Number>,
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
@@ -53,7 +53,8 @@ pub struct DisplayWindow {
 // port: belongs in provenant-records
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct BankedCredits {
-    pub reset_credits: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reset_credits: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
 }
@@ -62,7 +63,7 @@ pub struct BankedCredits {
 pub struct UsageCredit {
     #[serde(default)]
     pub kind: String,
-    pub balance: Option<f64>,
+    pub balance: Option<Number>,
     #[serde(default)]
     pub unlimited: bool,
     pub currency: Option<String>,
@@ -95,24 +96,24 @@ pub struct Allowance {
 pub struct Fetch {
     pub trigger: Option<String>,
     pub source_kind: Option<String>,
-    pub last_duration_ms: Option<f64>,
+    pub last_duration_ms: Option<Number>,
     #[serde(default)]
-    pub failures: f64,
+    pub failures: Option<Number>,
     pub error_kind: Option<String>,
     pub backoff_until: Option<Value>,
-    pub retry_after_s: Option<f64>,
+    pub retry_after_s: Option<Number>,
 }
 // port: belongs in provenant-records
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Schedule {
     pub next_due_at: String,
     pub reason: String,
-    pub ttl_seconds: f64,
+    pub ttl_seconds: Number,
     pub trigger: Option<String>,
-    pub failures: i64,
+    pub failures: Number,
     pub backoff_until: Option<String>,
     pub error_kind: Option<ErrorKind>,
-    pub last_duration_ms: Option<f64>,
+    pub last_duration_ms: Option<Number>,
     pub source_kind: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub notes: Vec<String>,
@@ -215,7 +216,7 @@ pub struct Headline {
 // port: belongs in provenant-records
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct DisplaySettings {
-    pub short_window_alert_percent: f64,
+    pub short_window_alert_percent: Number,
 }
 // port: belongs in provenant-records
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -277,4 +278,70 @@ impl<'de, T: Deserialize<'de>> Deserialize<'de> for OptionalRecord<T> {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         Option::<T>::deserialize(deserializer).map(Self::from)
     }
+}
+
+// port: belongs in provenant-records
+/// Python numbers retain their integer or floating point wire form.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
+#[serde(untagged)]
+pub enum Number {
+    Int(i64),
+    Unsigned(u64),
+    Float(f64),
+}
+impl Default for Number {
+    fn default() -> Self { Self::Int(0) }
+}
+impl Number {
+    /// Floating point is used only for calculations, never for retained integers.
+    pub fn get(self) -> f64 {
+        match self { Self::Int(n) => n as f64, Self::Unsigned(n) => n as f64, Self::Float(n) => n }
+    }
+    pub fn integer_part(self) -> Result<Self, crate::QuotaError> {
+        match self {
+            Self::Float(n) => Self::checked_integer(n.trunc()),
+            n => Ok(n),
+        }
+    }
+    pub fn checked_integer(n: f64) -> Result<Self, crate::QuotaError> {
+        if !n.is_finite() || n < i64::MIN as f64 || n >= 18446744073709551616.0 {
+            return Err(crate::QuotaError::NumberOutOfRange);
+        }
+        Ok(if n < 0.0 { Self::Int(n as i64) } else { Self::Unsigned(n as u64) })
+    }
+}
+impl<'de> Deserialize<'de> for Number {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let n = serde_json::Number::deserialize(deserializer)?;
+        if let Some(n) = n.as_i64() { return Ok(Self::Int(n)); }
+        if let Some(n) = n.as_u64() { return Ok(Self::Unsigned(n)); }
+        if n.is_f64() {
+            if let Some(n) = n.as_f64() { return Ok(Self::Float(n)); }
+        }
+        Err(serde::de::Error::custom("quota number is out of range"))
+    }
+}
+
+// port: belongs in provenant-records
+/// Decode before constructing typed records, including numbers in unknown fields.
+/// arbitrary_precision keeps oversized integer tokens intact until this check.
+pub fn decode_record<T: serde::de::DeserializeOwned>(input: &[u8]) -> Result<T, crate::QuotaError> {
+    fn check(value: &Value) -> Result<(), crate::QuotaError> {
+        match value {
+            Value::Number(n) if !n.is_i64() && !n.is_u64() && !n.is_f64() => {
+                return Err(crate::QuotaError::NumberOutOfRange);
+            }
+            Value::Array(items) => { for value in items { check(value)?; } }
+            Value::Object(items) => { for value in items.values() { check(value)?; } }
+            _ => {}
+        }
+        Ok(())
+    }
+    let value: Value = serde_json::from_slice(input).map_err(crate::QuotaError::Record)?;
+    check(&value)?;
+    serde_json::from_value(value).map_err(crate::QuotaError::Record)
+}
+
+impl Window {
+    pub fn used(&self) -> f64 { self.used_percent.as_f64().unwrap_or(f64::NAN) }
 }

@@ -96,3 +96,28 @@ They form the current baseline; they are not newly discovered port mismatches.
   argument expands `~` and `~/`; Python instead consults the process home and
   supports `~user`. This dependency injection remains an intentional inert
   library divergence and must be reconciled by the command cut-over owner.
+
+## RP-5: quota integer spelling and tolerant readers (fixed)
+
+- Units: `scripts/provider_quota.py#interface`,
+  `scripts/quota_schedule.py#unit-01`, `scripts/quota_display.py#unit-01`;
+  PORTING.md version 3.
+- Class: `bug`. Floating point wire fields changed `50` to `50.0` and could
+  round integers above 2^53. Schedule TTLs must be integers; copied durations,
+  amounts, percentages and configuration retain their input number category.
+- Oracle: Python source revision `e897b10d58b27a46544969594eed08a5ed64c72c`.
+- Evidence: `review_regression_integer_wire_spelling_is_preserved` failed
+  before repair. Record comparisons now compare numeric spellings exactly.
+  `checked_numbers_preserve_large_integers_and_reject_out_of_range_tokens`
+  covers i64/u64 boundaries, 2^53+1, float spelling and oversized nested tokens.
+- Disposition: fixed with an int-or-float model and a checked `decode_record`
+  boundary in `pending`, marked for the records owner. Integers outside the
+  union of i64/u64 return typed `NumberOutOfRange`, including unknown fields;
+  they are never rounded through f64. Future ingress owners must use this
+  decoder. Python integers beyond that range remain a recorded refusal at
+  this inert Rust boundary under the owner's number policy.
+- Reader compatibility: unreadable `used_percent` remains intact and is
+  skipped by scheduling; null failures become zero in the schedule; an empty
+  credits dictionary loads and falls back as Python does. These tolerant
+  reader cases do not make malformed producer output schema-valid. The
+  existing independent J2 schema still rejects string usage percentages.

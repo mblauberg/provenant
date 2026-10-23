@@ -20,8 +20,8 @@ fn at(seconds: f64) -> String {
 fn window(name: &str, used: f64, minutes: Option<f64>, reset: Option<f64>) -> Window {
     Window {
         name: name.into(),
-        used_percent: used,
-        window_minutes: minutes,
+        used_percent: json!(used),
+        window_minutes: minutes.map(Number::Float),
         reset_at: reset.map(at),
         ..Default::default()
     }
@@ -394,13 +394,13 @@ fn display_report_parity_headlines_priority_and_reserves() {
             vec![window("primary", 33.0, Some(10080.0), Some(159.0 * 3600.0))],
         );
         s.usage_credits = Some(vec![UsageCredit {
-            balance: Some(26000.0),
+            balance: Some(Number::Float(26000.0)),
             unit: Some("credits".into()),
             ..Default::default()
         }])
         .into();
         s.credits = Some(BankedCredits {
-            reset_credits: 1,
+            reset_credits: Some(1),
             source: Some("provider".into()),
         });
         if drawing {
@@ -682,7 +682,7 @@ fn schedule_plan_policy_matrix_and_differential() {
         s.attempted_at = attempt.map(|v| json!(at(v)));
         if activity == Some(-358.0) {
             s.fetch = Some(Fetch {
-                last_duration_ms: Some(3000.0),
+                last_duration_ms: Some(Number::Float(3000.0)),
                 ..Default::default()
             });
         }
@@ -702,18 +702,15 @@ fn schedule_plan_policy_matrix_and_differential() {
         })
         .unwrap();
         assert_eq!(
-            (&*block.reason, block.ttl_seconds, is_due),
-            (reason, ttl, due),
+            (&*block.reason, json!(block.ttl_seconds), is_due),
+            (reason, json!(ttl as u64), due),
             "{provider} {trigger} {attempt:?} {activity:?}"
         );
         if differential {
             let expected: Value = oracle(
                 json!({"operation":"schedule","provider":provider,"account_id":id,"snapshot":s,"now":NOW,"trigger":trigger,"power":power,"activity_at":activity_at}),
             );
-            assert_eq!(
-                c,
-                serde_json::from_value::<crate::schedule::Config>(expected[0].clone()).unwrap()
-            );
+            assert_record_eq(&json!(c), &expected[0]);
             assert_record_eq(&serde_json::to_value(&block).unwrap(), &expected[2]);
             assert_eq!(json!(is_due), expected[3]);
         }
@@ -737,7 +734,7 @@ fn schedule_backoff_and_auth_activity() {
         let mut s = snapshot("claude", "a", vec![]);
         s.attempted_at = Some(json!(at(-120.0)));
         s.fetch = Some(Fetch {
-            failures: 2.0,
+            failures: Some(Number::Int(2)),
             error_kind: Some(kind.into()),
             backoff_until: Some(json!(at(300.0))),
             trigger: Some("timer".into()),
@@ -781,7 +778,7 @@ fn schedule_backoff_and_auth_activity() {
             let expected: String = oracle(
                 json!({"operation":"backoff","provider":"claude","seed":"claude/a","args":[kind,failures,retry]}),
             );
-            assert_eq!(wait, expected.parse::<f64>().unwrap());
+            assert_record_eq(&json!(wait), &serde_json::from_str::<Value>(&expected).unwrap());
         }
     }
 }
@@ -793,12 +790,12 @@ fn schedule_configuration_precedence_and_validation() {
         resolve("claude", &json!({"ttl_idle_seconds":600}), &settings).unwrap();
     assert_eq!(
         (
-            config.ttl_idle_seconds,
-            config.ttl_active_seconds,
-            config.min_interval_seconds,
-            config.jitter_fraction,
-            config.max_seconds,
-            config.base_seconds
+            config.ttl_idle_seconds.get(),
+            config.ttl_active_seconds.get(),
+            config.min_interval_seconds.get(),
+            config.jitter_fraction.get(),
+            config.max_seconds.get(),
+            config.base_seconds.get()
         ),
         (600.0, 300.0, 90.0, 0.1, 3600.0, 60.0)
     );
@@ -818,7 +815,7 @@ fn schedule_configuration_precedence_and_validation() {
     )
     .unwrap();
     assert_eq!(
-        (c.min_interval_seconds, c.max_interval_seconds),
+        (c.min_interval_seconds.get(), c.max_interval_seconds.get()),
         (60.0, 21600.0)
     );
     assert_eq!(notes.len(), 1);
@@ -842,7 +839,7 @@ fn schedule_configuration_precedence_and_validation() {
         notes: &[],
     })
     .unwrap();
-    assert_eq!(b.ttl_seconds, 60.0);
+    assert_eq!(json!(b.ttl_seconds), json!(60));
     assert!(d);
 }
 #[test]
@@ -937,8 +934,8 @@ fn renderer_matches_python_bytes_including_credits_budgets_and_history() {
     s.active = Some(true);
     s.plan = Some("pro_student".into());
     s.observed_at = Some(json!(at(-7200.0)));
-    s.windows[0].limit_amount = Some(250.0);
-    s.windows[0].used_amount = Some(136.0);
+    s.windows[0].limit_amount = Some(Number::Float(250.0));
+    s.windows[0].used_amount = Some(Number::Float(136.0));
     s.windows[0].currency = Some(json!("USD"));
     s.unreported = vec!["weekly".into()];
     s.resets = Some(Resets {
@@ -948,7 +945,7 @@ fn renderer_matches_python_bytes_including_credits_budgets_and_history() {
     })
     .into();
     s.usage_credits = Some(vec![UsageCredit {
-        balance: Some(26000.0),
+        balance: Some(Number::Float(26000.0)),
         unit: Some("credits".into()),
         expires_at: Some(at(86400.0)),
         ..Default::default()
@@ -985,7 +982,7 @@ fn renderer_matches_python_bytes_including_credits_budgets_and_history() {
 #[test]
 fn credit_and_reset_rendering_and_invalid_dates() {
     let credit = UsageCredit {
-        balance: Some(1234.5),
+        balance: Some(Number::Float(1234.5)),
         currency: Some("USD".into()),
         expires_at: Some("2026-10-23T18:00:00Z".into()),
         ..Default::default()
@@ -1017,13 +1014,10 @@ fn credit_and_reset_rendering_and_invalid_dates() {
     ));
 }
 
-// JSON numbers compare mathematically at non-canonical record boundaries; key sets,
-// array order, absent fields and explicit nulls remain exact.
+// Records compare exact numeric spelling, key sets, array order and field presence.
 fn assert_record_eq(actual: &Value, expected: &Value) {
     match (actual, expected) {
-        (Value::Number(a), Value::Number(b)) if a.is_f64() || b.is_f64() => {
-            assert_eq!(a.as_f64(), b.as_f64())
-        }
+        (Value::Number(a), Value::Number(b)) => assert_eq!(a.to_string(), b.to_string()),
         (Value::Array(a), Value::Array(b)) => {
             assert_eq!(a.len(), b.len());
             for (a, b) in a.iter().zip(b) {
@@ -1092,7 +1086,7 @@ fn snapshot_wire_nulls_and_j2_contract() {
     assert_record_eq(&json!(absent), &value);
     let mut mutant = value.clone();
     mutant["windows"][0]["used_percent"] = json!("fifty");
-    assert!(serde_json::from_value::<Snapshot>(mutant.clone()).is_err());
+    assert!(serde_json::from_value::<Snapshot>(mutant.clone()).is_ok());
     if python_available() {
         let result: Value = oracle(json!({"operation":"schema","value":value,"mutant":mutant}));
         if result["available"] == true {
@@ -1119,12 +1113,12 @@ fn review_regression_activity_uses_fromtimestamp_fraction_rounding() {
         (1735689600791625390_u64 as f64 / 1e9, "2025-01-01T00:00:00.791626Z"),
     ] {
         let mut c = Config::for_provider("claude");
-        c.active_window_seconds = 0.0;
+        c.active_window_seconds = Number::Int(0);
         let s = snapshot("claude", "a", vec![]);
         let (block, _) = plan(PlanInput { account_id:"claude/a", snapshot:Some(&s),
             now:later.parse().unwrap(), config:&c, trigger:"timer", power:"ac",
             activity_at:Some(seconds), ignore_backoff:false, notes:&[] }).unwrap();
-        assert_eq!(block.ttl_seconds, 1800.0);
+        assert_eq!(json!(block.ttl_seconds), json!(1800));
         assert_eq!(parse_time(&json!(seconds)).map(iso).as_deref(),
             Some(if seconds < 1730000000.0 { "2023-11-14T22:13:20.000001Z" } else { "2025-01-01T00:00:00.791625Z" }));
     }
@@ -1143,4 +1137,65 @@ fn review_regression_dangling_project_symlink_keeps_real_activity() {
     let paths = activity_paths("claude", root, now(), root, &TimeZone::UTC);
     assert!(paths.contains(&session), "{paths:?}");
     assert!(activity("claude", root, now(), root, &TimeZone::UTC).is_some());
+}
+
+#[test]
+fn review_regression_integer_wire_spelling_is_preserved() {
+    let wire = json!({"name":"weekly","used_percent":50,"window_minutes":10080,
+        "raw_kind":null,"reset_at":null,"window_start":null,"used_amount":5,"limit_amount":10});
+    let record: Window = serde_json::from_value(wire.clone()).unwrap();
+    assert_eq!(serde_json::to_string(&json!(record)).unwrap(), serde_json::to_string(&wire).unwrap());
+}
+
+#[test]
+fn checked_numbers_preserve_large_integers_and_reject_out_of_range_tokens() {
+    for text in ["-9223372036854775808", "9007199254740993", "18446744073709551615", "50.0", "50"] {
+        let n: Number = decode_record(text.as_bytes()).unwrap();
+        assert_eq!(serde_json::to_string(&n).unwrap(), text);
+        let wire = format!("{{\"name\":\"w\",\"used_percent\":{text},\"window_minutes\":{text},\"used_amount\":{text},\"limit_amount\":{text}}}");
+        let row: Window = decode_record(wire.as_bytes()).unwrap();
+        let value = json!(row);
+        for key in ["used_percent", "window_minutes", "used_amount", "limit_amount"] {
+            assert_eq!(value[key].to_string(), text);
+        }
+        let state: Fetch = decode_record(format!("{{\"last_duration_ms\":{text},\"retry_after_s\":{text}}}").as_bytes()).unwrap();
+        assert_eq!(json!(state)["last_duration_ms"].to_string(), text);
+        let credit: UsageCredit = decode_record(format!("{{\"balance\":{text}}}").as_bytes()).unwrap();
+        assert_eq!(json!(credit)["balance"].to_string(), text);
+    }
+    for text in ["18446744073709551616", "-9223372036854775809", "999999999999999999999999999999999999999"] {
+        for wire in [text.to_owned(), format!("{{\"extra\":[{text}]}}"), format!("{{\"name\":\"w\",\"used_percent\":{text}}}")] {
+            assert!(matches!(decode_record::<Value>(wire.as_bytes()), Err(QuotaError::NumberOutOfRange)));
+        }
+    }
+    assert!(matches!(Number::checked_integer(18446744073709551616.0), Err(QuotaError::NumberOutOfRange)));
+}
+
+#[test]
+fn schedule_tolerates_unreadable_percent_null_failures_and_empty_credits() {
+    use crate::schedule::*;
+    let differential = python_available();
+    for used in [json!("unknown"), Value::Null, json!({}), json!(true)] {
+        let s: Snapshot = decode_record(serde_json::to_vec(&json!({"provider":"claude","account":"a",
+            "windows":[{"name":"w","used_percent":used}], "fetch":{"failures":null,"last_duration_ms":3000},
+            "credits":{}})).unwrap().as_slice()).unwrap();
+        let (config, notes) = resolve("claude", &Value::Null, &Value::Null).unwrap();
+        let (block, due) = plan(PlanInput {account_id:"claude/a", snapshot:Some(&s), now:now(),
+            config:&config, trigger:"timer", power:"ac", activity_at:None, ignore_backoff:false, notes:&notes}).unwrap();
+        assert_eq!(json!(block.ttl_seconds), json!(1800));
+        assert_eq!(json!(block.last_duration_ms), json!(3000));
+        assert_eq!(json!(block.failures), json!(0));
+        if differential {
+            let expected: Value = oracle(json!({"operation":"schedule","provider":"claude","account_id":"claude/a","snapshot":s,"now":NOW}));
+            assert_record_eq(&json!(config), &expected[0]);
+            assert_record_eq(&json!(block), &expected[2]);
+            assert_eq!(json!(due), expected[3]);
+        }
+    }
+    if differential {
+        let mut s = snapshot("claude", "a", vec![]);
+        s.credits = Some(BankedCredits::default());
+        let r = compare_report(&[s], &context());
+        assert!(r.accounts[0].credits.is_none());
+    }
 }

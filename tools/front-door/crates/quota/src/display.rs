@@ -107,7 +107,7 @@ pub fn window_label(row: &Window, labels: &BTreeMap<String, String>) -> String {
     if let Some(label) = labels.get(&row.name).filter(|s| !s.is_empty()) {
         return label.clone();
     }
-    let Some(length) = length_label(row.window_minutes) else {
+    let Some(length) = length_label(row.window_minutes.map(Number::get)) else {
         return sentence_case(&row.name);
     };
     const LENGTH: &[&str] = &[
@@ -155,11 +155,14 @@ pub fn window_label(row: &Window, labels: &BTreeMap<String, String>) -> String {
             format!(" ({})", sentence_case(&extra.join(" ")))
         }
 }
-pub fn alert_percent(context: &Context) -> f64 {
+fn alert_number(context: &Context) -> Number {
     number(&context.settings["display"]["short_window_alert_percent"])
         .filter(|v| *v > 0.0 && *v <= 100.0)
-        .unwrap_or(90.0)
+        .map(Number::Float)
+        .unwrap_or(Number::Int(90))
 }
+pub fn alert_percent(context: &Context) -> f64 { alert_number(context).get() }
+
 pub fn display_name(
     policy: &impl QuotaPolicy,
     context: &Context,
@@ -221,27 +224,27 @@ pub fn display<'a>(
     }
     let longest = maximum(current.iter().copied(), |a, b| {
         a.window
-            .window_minutes
+            .window_minutes.map(Number::get)
             .unwrap_or(0.0)
-            .total_cmp(&b.window.window_minutes.unwrap_or(0.0))
-            .then(a.window.used_percent.total_cmp(&b.window.used_percent))
+            .total_cmp(&b.window.window_minutes.map(Number::get).unwrap_or(0.0))
+            .then(a.window.used().total_cmp(&b.window.used()))
     })?;
     maximum(
         current.iter().copied().filter(|r| {
-            r.window.used_percent >= alert
+            r.window.used() >= alert
                 && !std::ptr::eq(*r, longest)
-                && r.window.window_minutes.unwrap_or(0.0)
-                    < longest.window.window_minutes.unwrap_or(0.0)
+                && r.window.window_minutes.map(Number::get).unwrap_or(0.0)
+                    < longest.window.window_minutes.map(Number::get).unwrap_or(0.0)
         }),
         |a, b| {
             a.window
-                .used_percent
-                .total_cmp(&b.window.used_percent)
+                .used()
+                .total_cmp(&b.window.used())
                 .then(
                     b.window
-                        .window_minutes
+                        .window_minutes.map(Number::get)
                         .unwrap_or(0.0)
-                        .total_cmp(&a.window.window_minutes.unwrap_or(0.0)),
+                        .total_cmp(&a.window.window_minutes.map(Number::get).unwrap_or(0.0)),
                 )
         },
     )
@@ -252,8 +255,8 @@ pub fn repeats(window: &DisplayWindow, windows: &[DisplayWindow]) -> bool {
         && windows.iter().any(|other| {
             !other.window.name.contains(':')
                 && other.window.pool == window.window.pool
-                && other.window.window_minutes == window.window.window_minutes
-                && other.window.used_percent == window.window.used_percent
+                && other.window.window_minutes.map(Number::get) == window.window.window_minutes.map(Number::get)
+                && other.window.used() == window.window.used()
                 && stamp(other.window.reset_at.as_deref())
                     .zip(stamp(window.window.reset_at.as_deref()))
                     .is_some_and(|(a, b)| seconds_between(a, b).abs() <= 60.0)
@@ -287,9 +290,9 @@ fn optional_credits(
     value: &Snapshot,
     banked: Option<&BankedCredits>,
 ) -> (Vec<UsageCredit>, Option<Resets>) {
-    let counted = value.credits.as_ref().or(banked);
+    let counted = value.credits.as_ref().filter(|c| c.reset_credits.is_some() || c.source.is_some()).or(banked);
     let fallback = counted.map(|c| Resets {
-        available: c.reset_credits,
+        available: c.reset_credits.unwrap_or(0),
         expires_at: vec![],
         source: c.source.clone().unwrap_or("manual".into()),
     });
@@ -326,7 +329,7 @@ fn runway(
             let floor = number(&context.settings["credit_floor"]).unwrap_or(0.0);
             format!(
                 "then about {} on credits at the measured credit burn rate",
-                duration((credit.balance.unwrap_or(0.0) - floor).max(0.0) / rate * 3600.0)
+                duration((credit.balance.map(Number::get).unwrap_or(0.0) - floor).max(0.0) / rate * 3600.0)
             )
         } else {
             format!(
@@ -388,7 +391,7 @@ pub fn describe(
             allowance.ordinary_usage_allowed == Some(false)
         };
         let inactive = outdated
-            || observed.is_some() && passed && window.used_percent < NEAR_EXHAUSTED && !refused;
+            || observed.is_some() && passed && window.used() < NEAR_EXHAUSTED && !refused;
         let pace = policy.pace(&window, now);
         if let Some(pool) = &pool {
             window.pool = Some(pool.clone());
@@ -440,13 +443,13 @@ pub fn describe(
     let longest = maximum(
         rows.iter().filter(|r| {
             r.window.reset_at.as_ref().is_some_and(|s| !s.is_empty())
-                && r.window.window_minutes.is_some_and(|v| v != 0.0)
+                && r.window.window_minutes.map(Number::get).is_some_and(|v| v != 0.0)
         }),
         |a, b| {
             a.window
-                .window_minutes
+                .window_minutes.map(Number::get)
                 .unwrap_or(0.0)
-                .total_cmp(&b.window.window_minutes.unwrap_or(0.0))
+                .total_cmp(&b.window.window_minutes.map(Number::get).unwrap_or(0.0))
         },
     );
     let signed_out = value.status.as_deref() == Some("signed_out");
@@ -479,7 +482,7 @@ pub fn describe(
     let mut history = rows.clone();
     if signed_out {
         for row in &mut history {
-            if row.window.used_percent >= 100.0 {
+            if row.window.used() >= 100.0 {
                 row.pace.state = "exhausted".into();
             }
         }
@@ -491,7 +494,7 @@ pub fn describe(
     } else {
         None
     }
-    .filter(|w| w.window.used_percent >= 100.0);
+    .filter(|w| w.window.used() >= 100.0);
     // Summaries use the enriched row, including reserve advice.
     let worst = worst
         .as_ref()
@@ -578,8 +581,8 @@ pub fn describe(
                 value.provider
             )
         },
-        credits: value.credits.clone().or(banked.cloned()),
-        credit_advice: policy.credit_advice(&rows, value.credits.as_ref().or(banked), now),
+        credits: value.credits.as_ref().filter(|c| c.reset_credits.is_some() || c.source.is_some()).or(banked).cloned(),
+        credit_advice: policy.credit_advice(&rows, value.credits.as_ref().filter(|c| c.reset_credits.is_some() || c.source.is_some()).or(banked), now),
         use_it_or_lose_it: longest.map(|w| ExpiringHeadroom {
             window: w.window.name.clone(),
             reset_at: w.window.reset_at.clone(),
@@ -652,7 +655,7 @@ pub fn headline(policy: &impl QuotaPolicy, context: &Context, rows: &[DisplayAcc
             })
             .collect();
         let peak = peaks.into_iter().reduce(|a, b| {
-            if b.1.window.used_percent > a.1.window.used_percent {
+            if b.1.window.used() > a.1.window.used() {
                 b
             } else {
                 a
@@ -715,9 +718,9 @@ pub fn report(
     let order = |r: &DisplayAccount| {
         let longest = maximum(r.windows.iter(), |a, b| {
             a.window
-                .window_minutes
+                .window_minutes.map(Number::get)
                 .unwrap_or(0.0)
-                .total_cmp(&b.window.window_minutes.unwrap_or(0.0))
+                .total_cmp(&b.window.window_minutes.map(Number::get).unwrap_or(0.0))
         });
         (
             r.state == "exhausted",
@@ -756,7 +759,7 @@ pub fn report(
         refreshing,
         providers: context.providers.clone(),
         display: DisplaySettings {
-            short_window_alert_percent: alert_percent(context),
+            short_window_alert_percent: alert_number(context),
         },
         headline: headline(policy, context, &rows),
         accounts: rows,
@@ -796,17 +799,17 @@ pub fn amount(value: f64, currency: Option<&str>) -> String {
     }
 }
 pub fn used_text(window: &Window) -> String {
-    if let Some(limit) = window.limit_amount.filter(|n| *n != 0.0) {
+    if let Some(limit) = window.limit_amount.map(Number::get).filter(|n| *n != 0.0) {
         format!(
             "{} of {}",
             amount(
-                window.used_amount.unwrap_or(0.0),
+                window.used_amount.map(Number::get).unwrap_or(0.0),
                 window.currency.as_ref().and_then(Value::as_str)
             ),
             amount(limit, window.currency.as_ref().and_then(Value::as_str))
         )
     } else {
-        format!("{}%", general(window.used_percent))
+        format!("{}%", general(window.used()))
     }
 }
 // Python's default :g uses six significant digits and switches at exponents -4 and 6.
@@ -850,12 +853,12 @@ fn format_credit(entry: &UsageCredit, timezone: &TimeZone) -> Result<String, Quo
     } else if entry.currency.as_ref().is_some_and(|s| !s.is_empty()) {
         format!(
             "{} credit",
-            amount(entry.balance.unwrap_or(0.0), entry.currency.as_deref())
+            amount(entry.balance.map(Number::get).unwrap_or(0.0), entry.currency.as_deref())
         )
     } else {
         format!(
             "{} {}",
-            grouped(entry.balance.unwrap_or(0.0)),
+            grouped(entry.balance.map(Number::get).unwrap_or(0.0)),
             entry
                 .unit
                 .as_deref()
@@ -946,13 +949,13 @@ pub fn render(value: &Report, verbose: bool, timezone: &TimeZone) -> Result<Stri
                 window.pace.summary.clone(),
                 used_text(w),
             );
-            if w.limit_amount.is_some_and(|v| v != 0.0) && w.window_minutes.is_none_or(|v| v == 0.0)
+            if w.limit_amount.map(Number::get).is_some_and(|v| v != 0.0) && w.window_minutes.map(Number::get).is_none_or(|v| v == 0.0)
             {
                 state = "-".into();
                 detail = format!(
                     "{} left; {}",
                     amount(
-                        w.limit_amount.unwrap_or(0.0) - w.used_amount.unwrap_or(0.0),
+                        w.limit_amount.map(Number::get).unwrap_or(0.0) - w.used_amount.map(Number::get).unwrap_or(0.0),
                         w.currency.as_ref().and_then(Value::as_str)
                     ),
                     detail
@@ -983,7 +986,7 @@ pub fn render(value: &Report, verbose: bool, timezone: &TimeZone) -> Result<Stri
             cells.extend([
                 label,
                 used,
-                window_length(w.window_minutes),
+                window_length(w.window_minutes.map(Number::get)),
                 reset_cell(w.reset_at.as_deref()),
                 state,
                 detail,
