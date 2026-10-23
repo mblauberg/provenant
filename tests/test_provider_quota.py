@@ -1106,6 +1106,17 @@ def test_a_refused_allowance_with_no_future_reset_cools_for_a_bounded_wait(quota
     assert 'codex/*' not in quota.apply_to_cooldowns({}, NOW + timedelta(seconds=(configured or 3600) + 1))
 
 
+@pytest.mark.parametrize('reached', [None, 'rate_limit_reached', 'workspace_member_credits_depleted',
+                                     'primary', 'five_hour', 'secondary'])
+def test_refusal_codes_and_unnamed_refusals_use_the_same_cooldown(quota, reached):
+    snapshot(quota, 'codex', [window(30, 300, -timedelta(hours=1), 'primary', raw_kind='five_hour'),
+                              window(10, WEEK, timedelta(days=3.5), 'secondary')],
+             allowance={'ordinary_usage_allowed': False,
+                        **({'limit_reached_type': reached} if reached else {})})
+    until = iso(NOW + (timedelta(days=3.5) if reached == 'secondary' else timedelta(hours=1)))
+    assert quota.apply_to_cooldowns({}, NOW)['codex/*']['cooling_until'] == until
+
+
 @pytest.mark.parametrize('policy, state, order, cooled', [
     ('last_resort', 'credit_only', ['work', 'default'], False),
     ('normal', 'credit_only', ['default', 'work'], False),
@@ -2041,7 +2052,9 @@ def test_choose_claude_account_releases_exhaustion_after_reset(quota):
         window(100, 300, timedelta(seconds=-1), 'five_hour'),
         window(100, WEEK, timedelta(seconds=-1)),
     ]}}
-    assert quota.choose_claude_account(values, NOW) == 'reset'
+    with pytest.raises(quota.ClaudeAccountsExhaustedError):
+        quota.choose_claude_account(values, NOW)
+    assert quota.choose_claude_account(values, NOW + timedelta(seconds=quota.CLOCK_SKEW_SECONDS)) == 'reset'
 
 
 @pytest.mark.parametrize('reset_in', [timedelta(0), -timedelta(hours=1)])
@@ -2049,7 +2062,8 @@ def test_reset_weekly_allowance_ranks_above_an_alphabetically_earlier_unknown(qu
     values = {'aaa': None, 'zreset': {'status': 'ok', 'windows': [
         window(10, 300, timedelta(hours=2), 'five_hour'), window(80, WEEK, reset_in)]}}
     assert quota.pace(window(0, WEEK, reset_in), NOW)['state'] == 'not_started'
-    assert quota.choose_claude_account(values, NOW) == 'zreset'
+    assert quota.choose_claude_account(values, NOW) == ('aaa' if reset_in == timedelta(0) else 'zreset')
+    assert quota.choose_claude_account(values, NOW + timedelta(seconds=quota.CLOCK_SKEW_SECONDS)) == 'zreset'
 
 
 def test_choose_claude_account_partial_reading_still_excludes_known_exhaustion(quota):
@@ -2105,6 +2119,28 @@ def test_fresh_lapsed_window_leaves_cooldown_recovery_to_current_allowance(quota
     assert state['state'] == 'reserve' and state['has_headroom'] is True
     assert state['summary'].startswith('secondary:')
     assert quota.apply_to_cooldowns(cooldown('usage_limited', NOW - timedelta(hours=2)), NOW) == {}
+
+
+@pytest.mark.parametrize('used', [94, 95, 96, 97])
+def test_lapsed_window_needs_headroom_before_clearing_a_usage_refusal(quota, used):
+    snapshot(quota, 'codex', [window(used, 300, -timedelta(hours=1), 'primary'),
+                              window(10, WEEK, timedelta(days=3.5), 'secondary')])
+    refused = cooldown('usage_limited', NOW - timedelta(minutes=10))
+    assert quota.apply_to_cooldowns(refused, NOW) == ({} if used < 95 else refused)
+
+
+@pytest.mark.parametrize('seconds_after_reset', [0, 1, 299, 300, 301])
+def test_reset_waits_for_clock_skew_before_clearing_a_cached_refusal(quota, seconds_after_reset):
+    snapshot(quota, 'codex', [window(30, 300, -timedelta(seconds=seconds_after_reset), 'primary'),
+                              window(10, WEEK, timedelta(days=3.5), 'secondary')],
+             observed=NOW - timedelta(minutes=10),
+             allowance={'ordinary_usage_allowed': False, 'limit_reached_type': 'primary'})
+    refused = cooldown('usage_limited', NOW - timedelta(minutes=20))
+    result = quota.apply_to_cooldowns(refused, NOW)
+    if seconds_after_reset < quota.CLOCK_SKEW_SECONDS:
+        assert result['codex/*']['cooling_until'] == iso(NOW - timedelta(minutes=10) + timedelta(hours=1))
+    else:
+        assert result == {}
 
 
 def test_route_summary_includes_manually_banked_resets(quota):

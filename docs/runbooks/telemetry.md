@@ -576,9 +576,9 @@ All of it is additive to `provenant.quota.report.v1`.
   above `quota.display.short_window_alert_percent` (default 90, echoed in the
   report's `display`); else the longest. A window carries `reset_passed: true`
   and never shows as current use when its reset passed after `observed_at`, or
-  when the reading is fresh but the window has reset below 100% and is not
-  refused (by name, or by an unnamed refusal); the table shows `-` and "reset
-  since".
+  when the reading is fresh but the window has reset below 95% and is not
+  refused (by name, or by an unnamed refusal). Resets allow five minutes for
+  clock skew before counting as passed; the table shows `-` and "reset since".
 - `headline` names the account the menu bar shows, set by
   `quota.menubar.headline`: `recent` (default), the usable account with the
   latest local activity, or the highest priority without any; `worst`, the
@@ -675,10 +675,12 @@ usable reserves cover the estimated gap to reset. Exhaustion without usable
 credits still blocks routing, and `credit_only` keeps its policy below.
 Readers retain `deficit` for old receipts; new readings do not emit it.
 
-A window is stale only when `observed_at < reset_at <= now`: its reset passed
-after the reading. In a fresh reading, a window with a past reset binds only
-while it is exhausted or refused, by name or by an unnamed refusal; otherwise
-the remaining windows decide, and an account with no current window left reads
+A window is stale only when `observed_at < reset_at <= now - 300 seconds`: its
+reset passed after the reading, allowing five minutes for clock skew. In a fresh
+reading, a window with a past reset binds while use is at or above 95% or it is
+refused, by name or by an unnamed refusal. A refusal code that names no reported
+window binds like an unnamed refusal in a fresh reading. Otherwise the remaining
+windows decide, and an account with no current window left reads
 `unknown` until a fresh reading arrives. A cached refusal expires with its named
 window, or, when no window is named, after every reported window has reset and
 none is unreported. Spend caps and refusals for unreported windows remain.

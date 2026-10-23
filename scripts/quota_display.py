@@ -196,14 +196,16 @@ def describe(quota, value, banked, now, entries=None, alert=None):
     allowance = value.get('allowance') or {}
     reached = allowance.get('limit_reached_type')
     extras = optional_credits(quota, value, banked)
+    named_refusal = reached and any(reached in (row['name'], row.get('raw_kind'))
+                                    for row in value.get('windows') or [])
     for row in value.get('windows') or []:
         pool = pool_of(quota, name, row)
         passed = quota['reset_passed'](row, now)
         outdated = bool(observed and passed and observed < quota['parse_time'](row.get('reset_at')))
         stale = stale or outdated and quota['sets_state'](row)
-        refused = reached in (row['name'], row.get('raw_kind')) if reached else allowance.get('ordinary_usage_allowed') is False
-        # A fresh lapsed window binds only while exhausted or refused.
-        inactive = outdated or bool(observed and passed and row['used_percent'] < 100 and not refused)
+        refused = reached in (row['name'], row.get('raw_kind')) if named_refusal else allowance.get('ordinary_usage_allowed') is False
+        # A fresh lapsed window still binds without headroom or while refused.
+        inactive = outdated or bool(observed and passed and row['used_percent'] < quota['NEAR_EXHAUSTED'] and not refused)
         row = {**row, 'pace': quota['pace'](row, now), **({'pool': pool, 'pool_label': f'{title_case(pool)} models'} if pool else {}),
                **({'reset_passed': True} if inactive else {})}
         rows.append({**row, 'label': window_label(row, labels)})
