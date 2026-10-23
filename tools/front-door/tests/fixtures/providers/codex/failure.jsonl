@@ -1,0 +1,4 @@
+{"type":"thread.started","thread_id":"FIXTURE_SESSION_IDENTIFIER_008"}
+{"type":"turn.started"}
+{"type":"error","message":"FIXTURE_USER_OR_PROVIDER_TEXT_016"}
+{"type":"turn.failed","error":{"message":"FIXTURE_USER_OR_PROVIDER_TEXT_016"}}

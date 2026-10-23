@@ -14,6 +14,65 @@ pub(crate) fn configure_command(
     new_session: bool,
 ) -> io::Result<()> {
     let pass: Vec<_> = pass_fds.iter().map(AsRawFd::as_raw_fd).collect();
+    let spec = prepare(command, env)?;
+    // SAFETY: callers use this configured command only with spawn, never exec
+    // in place: pre_exec also runs in the current process for CommandExt::exec.
+    // After fork the hook only invokes
+    // async-signal-safe syscalls over preallocated vectors, does not lock,
+    // allocate or mutate parent state. Each borrowed passed fd stays live
+    // through spawn. Rust's exec-error pipe is already CLOEXEC. Failures
+    // return errno through that pipe and std reaps the failed child.
+    unsafe {
+        command.pre_exec(move || {
+            reset_signals()?;
+            if new_session && libc::setsid() < 0 {
+                return Err(io::Error::last_os_error());
+            }
+            cloexec_descriptors()?;
+            for &fd in &pass {
+                let flags = libc::fcntl(fd, libc::F_GETFD);
+                if flags < 0 || libc::fcntl(fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) < 0 {
+                    return Err(io::Error::last_os_error());
+                }
+            }
+            Err(spec.exec())
+        });
+    }
+    Ok(())
+}
+
+/// Attempt exec in the current process without running the post-fork reset.
+/// Failure leaves dispositions, signal mask and descriptor flags untouched.
+pub(crate) fn replace_process(command: &Command, env: &[(OsString, OsString)]) -> io::Error {
+    match prepare(command, Some(env)) {
+        Ok(spec) => spec.exec(),
+        Err(error) => error,
+    }
+}
+
+struct ExecSpec {
+    programs: Vec<CString>,
+    buffers: ExecBuffers,
+}
+impl ExecSpec {
+    fn exec(&self) -> io::Error {
+        let mut saved_error = None;
+        let mut last_error = libc::ENOENT;
+        for program in &self.programs {
+            self.buffers.exec(program);
+            let error = io::Error::last_os_error()
+                .raw_os_error()
+                .unwrap_or(libc::EIO);
+            if !matches!(error, libc::ENOENT | libc::ENOTDIR) && saved_error.is_none() {
+                saved_error = Some(error);
+            }
+            last_error = error;
+        }
+        io::Error::from_raw_os_error(saved_error.unwrap_or(last_error))
+    }
+}
+
+fn prepare(command: &Command, env: Option<&[(OsString, OsString)]>) -> io::Result<ExecSpec> {
     let env: Vec<_> = env
         .map(<[_]>::to_vec)
         .unwrap_or_else(|| std::env::vars_os().collect());
@@ -43,43 +102,10 @@ pub(crate) fn configure_command(
             .map(|dir| string(&[dir, if dir.is_empty() { b"" } else { b"/" }, program].concat()))
             .collect::<io::Result<Vec<_>>>()?
     };
-    let buffers = ExecBuffers::new(arguments, environment);
-    // SAFETY: this hook runs after fork, before exec. It only invokes
-    // async-signal-safe syscalls over preallocated vectors, does not lock,
-    // allocate or mutate parent state. Each borrowed passed fd stays live
-    // through spawn. Rust's exec-error pipe is already CLOEXEC. Failures
-    // return errno through that pipe and std reaps the failed child.
-    unsafe {
-        command.pre_exec(move || {
-            reset_signals()?;
-            if new_session && libc::setsid() < 0 {
-                return Err(io::Error::last_os_error());
-            }
-            cloexec_descriptors()?;
-            for &fd in &pass {
-                let flags = libc::fcntl(fd, libc::F_GETFD);
-                if flags < 0 || libc::fcntl(fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) < 0 {
-                    return Err(io::Error::last_os_error());
-                }
-            }
-            let mut saved_error = None;
-            let mut last_error = libc::ENOENT;
-            for program in &programs {
-                buffers.exec(program);
-                let error = io::Error::last_os_error()
-                    .raw_os_error()
-                    .unwrap_or(libc::EIO);
-                if !matches!(error, libc::ENOENT | libc::ENOTDIR) && saved_error.is_none() {
-                    saved_error = Some(error);
-                }
-                last_error = error;
-            }
-            Err(io::Error::from_raw_os_error(
-                saved_error.unwrap_or(last_error),
-            ))
-        });
-    }
-    Ok(())
+    Ok(ExecSpec {
+        programs,
+        buffers: ExecBuffers::new(arguments, environment),
+    })
 }
 
 // The pointer arrays borrow immutable CString allocations owned by this object.

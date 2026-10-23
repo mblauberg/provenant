@@ -1,13 +1,14 @@
 # Safe OS owner
 
 `provenant-supervisor` owns the operating system boundary under PORTING.md v7,
-step S1 of `design/supervisor.md`. All first-party unsafe code lives in `sys`.
+steps S1 and S2 of `design/supervisor.md`. All first-party unsafe code lives in `sys`.
 
 `exec::SystemExecutor` is constructed once at the process edge and shared with
 consumers through `Executor`. Its clones share fixed-capacity cleanup admission,
 reserved before spawn. Every child is reaped explicitly or transferred to that
-reaper; dropping an owner never sends a signal or waits for a child. Utilities
-have direct-child authority only. Provider custody and the guardian belong to S2.
+reaper. Error paths send SIGKILL before transfer; dropping an owner never waits.
+All executor instances share one reaper worker, which parks when idle. Utilities
+have direct-child authority only. Providers use the dedicated same-binary guardian, persistent writer reservation and explicit census/cleanup described in `PORT.md`.
 
 Each stream selects `Capture`, `Discard` or `Tee`. Capture defaults to 8 MiB and
 refuses limits over 64 MiB. Discard creates no pipe. Tee uses a bounded
@@ -18,7 +19,8 @@ Only a delivered deadline TERM sets `timed_out`; drain expiry and overflow have
 separate outcomes. `run_text` strictly decodes retained UTF-8 bytes.
 
 `fs::Directory` retains a directory descriptor and validates every relative
-component. `SafeFs`, `SafeDir`, `SafeFile` and `PathIo` are the filesystem seams.
+component. `SafeFs`, `SafeDir`, `SafeFile` and `PathIo` are the filesystem seams;
+their filesystem methods preserve typed `FsError` results through trait objects.
 Authoritative parents must be private and trusted. Owner locks additionally
 validate directory ownership, leaf type, owner, permissions, link count and
 identity. `Directory::lock` uses nonblocking flock polling with core's
@@ -35,8 +37,8 @@ retry durability rather than overwrite the visible record.
 
 `utility::run_utility` accepts closed Git and gh read operations with validated
 IDs, a repository directory, pinned executable identities and a private home.
-It builds fixed arguments and a complete sanitised environment, and refuses
-truncated or incomplete evidence. Confinement supplies its policy facade in S3.
+It builds fixed arguments and a complete sanitised environment, stops on output
+limits, and refuses truncated or incomplete evidence. Confinement supplies its policy facade in S3.
 
 The dev-only `fixture` feature supplies self-re-exec scenarios for the
 `harness = false` process target. A self dev-dependency enables it for crate

@@ -191,6 +191,8 @@ pub(crate) fn unlink(dir: &File, name: &OsStr, directory: bool) -> io::Result<()
 pub(crate) enum Rename {
     Replace,
     NoReplace,
+    // Kept crate-private until an authorised caller lands.
+    #[allow(dead_code)]
     Exchange,
 }
 pub(crate) fn rename(

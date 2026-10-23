@@ -65,6 +65,7 @@ impl ReaperFixture {
     }
     /// Transfer a spawned fixture child into the paused reaper.
     pub fn transfer(&self, scenario: &str, extra: &[OsString], root: &Path) -> io::Result<()> {
+        crate::sys::raw_exec::verify_child_wait_policy()?;
         let permit = self
             .reaper
             .reserve()
@@ -130,6 +131,44 @@ pub fn dispatch() -> io::Result<bool> {
         .and_then(|arg| arg.to_str())
         .ok_or(io::ErrorKind::InvalidInput)?;
     match scenario {
+        "inheritance-parent" | "failed-replace" => {
+            use std::os::fd::AsRawFd;
+            let fd = crate::sys::fixture_parent_state()?;
+            let raw = fd.as_raw_fd();
+            let root = std::env::current_dir()?;
+            if scenario == "failed-replace" {
+                let error = crate::sys::replace_process(
+                    &root.join("does-not-exist"),
+                    &[],
+                    &environment(&root),
+                );
+                if error.kind() != io::ErrorKind::NotFound {
+                    return Err(error);
+                }
+                crate::sys::fixture_check_inherited_state(raw, true)?;
+            } else {
+                let mut child = command_with_args(
+                    "inheritance-probe",
+                    &[raw.to_string().into()],
+                    &root,
+                    false,
+                )?
+                .spawn()?;
+                if !child.wait()?.success() {
+                    return Err(io::Error::other(
+                        "child inherited parent descriptors or signals",
+                    ));
+                }
+            }
+        }
+        "inheritance-probe" => {
+            let fd = args
+                .get(3)
+                .and_then(|arg| arg.to_str())
+                .and_then(|arg| arg.parse::<i32>().ok())
+                .ok_or(io::ErrorKind::InvalidInput)?;
+            crate::sys::fixture_check_inherited_state(fd, false)?;
+        }
         "echo" => {
             io::copy(&mut io::stdin().lock(), &mut io::stdout().lock())?;
             io::stderr().write_all(b"done\r\n")?;
@@ -215,9 +254,9 @@ pub fn dispatch() -> io::Result<bool> {
             use crate::exec::Executor;
             match executor.execute(options) {
                 Err(crate::exec::ExecError::ChildWaitPolicy(_))
-                    if scenario != "wait-policy-blocked" => {}
+                    if matches!(scenario, "wait-policy-ignore" | "wait-policy-no-wait") => {}
                 Ok(outcome)
-                    if scenario == "wait-policy-blocked"
+                    if matches!(scenario, "wait-policy-blocked" | "wait-policy-handler")
                         && outcome.termination == crate::exec::Termination::Exit(0) => {}
                 _ => return Err(io::Error::other("unexpected child-wait policy result")),
             }

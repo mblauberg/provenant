@@ -103,6 +103,17 @@ fn suite() -> Result<()> {
     natural_exit_beats_pipe_drain_expiry(root.path(), &env)?;
     reaper_transfers_and_polls_fairly(root.path())?;
     inherited_wait_policy_preserves_pid_reservation(&executor, root.path(), &env)?;
+    for scenario in ["inheritance-parent", "failed-replace"] {
+        let argv = fixture::argv(scenario)?;
+        let mut options = ExecOptions::new(&argv, root.path(), Duration::from_secs(5));
+        options.env = Some(&env);
+        let outcome = executor.execute(options)?;
+        assert_eq!(
+            outcome.termination,
+            Termination::Exit(0),
+            "{scenario}: {outcome:?}"
+        );
+    }
     Ok(())
 }
 
@@ -123,7 +134,10 @@ fn inherited_wait_policy_preserves_pid_reservation(
         options.env = Some(env);
         let outcome = executor.execute(options)?;
         assert_eq!(outcome.termination, Termination::Exit(0));
-        assert_eq!(marker.exists(), policy == "wait-policy-blocked");
+        assert_eq!(
+            marker.exists(),
+            matches!(policy, "wait-policy-blocked" | "wait-policy-handler")
+        );
     }
     Ok(())
 }

@@ -1,17 +1,13 @@
 //! Production sampling of wall and monotonic time.
 use provenant_core::{Clock, MonoTime, TimeError, WallTime};
-use std::time::{Instant, SystemTime};
+use std::time::SystemTime;
 
-/// Samples UTC wall time through Jiff and elapsed time from a local monotonic origin.
+/// Samples UTC wall time through Jiff and one process-wide monotonic origin.
 #[derive(Debug, Clone)]
-pub struct SystemClock {
-    origin: Instant,
-}
+pub struct SystemClock;
 impl SystemClock {
     pub fn new() -> Self {
-        Self {
-            origin: Instant::now(),
-        }
+        Self
     }
 }
 impl Default for SystemClock {
@@ -27,9 +23,7 @@ impl Clock for SystemClock {
     }
 
     fn mono_now(&self) -> MonoTime {
-        let elapsed = self.origin.elapsed().as_micros();
-        let micros = u64::try_from(elapsed).unwrap_or(u64::MAX);
-        MonoTime::from_micros(micros)
+        crate::sys::monotonic_now()
     }
 }
 
@@ -44,5 +38,17 @@ mod tests {
         let monotonic = clock.mono_now();
         let _second = clock.wall_now().unwrap();
         assert!(clock.mono_now() >= monotonic);
+    }
+
+    #[test]
+    fn separate_instances_share_one_monotonic_coordinate() {
+        let first = SystemClock::new();
+        let started = first.mono_now().as_micros();
+        while first.mono_now().as_micros().saturating_sub(started) < 1_000 {
+            std::thread::yield_now();
+        }
+        let before = first.mono_now();
+        let second = SystemClock::new();
+        assert!(second.mono_now() >= before);
     }
 }

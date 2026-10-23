@@ -45,7 +45,6 @@ impl CwdObserver for SystemCwdObserver {
         crate::sys::pid::cwd(pid)
     }
 }
-pub use crate::sys::raw_exec::OwnedPid;
 
 #[cfg(test)]
 mod tests {

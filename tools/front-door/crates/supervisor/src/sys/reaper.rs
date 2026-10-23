@@ -1,11 +1,12 @@
-//! Fixed-capacity utility cleanup. No global state and no destructor signalling.
+//! Fixed-capacity utility cleanup. One process-wide worker, no destructor signalling.
 use std::io;
 use std::process::Child;
 #[cfg(feature = "fixture")]
 use std::sync::Condvar;
 #[cfg(feature = "fixture")]
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Condvar as WakeCondvar, Mutex, MutexGuard, OnceLock, Weak};
 use std::time::Duration;
 #[cfg(feature = "fixture")]
 use std::time::Instant;
@@ -19,6 +20,8 @@ enum Slot {
 #[derive(Debug)]
 struct State {
     slots: Mutex<Vec<Slot>>,
+    worker: Weak<Worker>,
+    unknown_outcomes: AtomicUsize,
     #[cfg(feature = "fixture")]
     paused: AtomicBool,
     #[cfg(feature = "fixture")]
@@ -31,6 +34,127 @@ impl State {
             .lock()
             .unwrap_or_else(|poison| poison.into_inner())
     }
+}
+#[derive(Debug)]
+struct Worker {
+    states: Mutex<Vec<Arc<State>>>,
+    wake_lock: Mutex<()>,
+    wake: WakeCondvar,
+}
+impl Worker {
+    fn states(&self) -> MutexGuard<'_, Vec<Arc<State>>> {
+        self.states
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+    }
+    fn wake_lock(&self) -> MutexGuard<'_, ()> {
+        self.wake_lock
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+    }
+    fn notify(&self) {
+        let _guard = self.wake_lock();
+        self.wake.notify_one();
+    }
+    fn register(&self, state: Arc<State>) {
+        {
+            let mut states = self.states();
+            if !states.iter().any(|current| Arc::ptr_eq(current, &state)) {
+                states.push(state);
+            }
+        }
+        self.notify();
+    }
+    fn run(self: Arc<Self>) {
+        loop {
+            // Keep the wake lock across the scan and into wait: a transfer
+            // cannot notify between an empty scan and the worker parking.
+            let guard = self.wake_lock();
+            let mut has_child = false;
+            {
+                let mut states = self.states();
+                let mut index = 0;
+                while index < states.len() {
+                    let state = &states[index];
+                    #[cfg(feature = "fixture")]
+                    if state.paused.load(Ordering::Acquire) {
+                        index += 1;
+                        continue;
+                    }
+                    let mut slots = state.slots();
+                    #[cfg(feature = "fixture")]
+                    let mut released = false;
+                    for slot in slots.iter_mut() {
+                        if let Slot::Child(child) = slot {
+                            match child.try_wait() {
+                                Ok(None) => has_child = true,
+                                Ok(Some(_)) => {
+                                    *slot = Slot::Free;
+                                    #[cfg(feature = "fixture")]
+                                    {
+                                        released = true;
+                                    }
+                                }
+                                Err(_) => {
+                                    // Status is unknown (for example ECHILD),
+                                    // but retaining this slot would deadlock
+                                    // future admissions forever.
+                                    state.unknown_outcomes.fetch_add(1, Ordering::Relaxed);
+                                    *slot = Slot::Free;
+                                    #[cfg(feature = "fixture")]
+                                    {
+                                        released = true;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    let has_child_here = slots.iter().any(|slot| matches!(slot, Slot::Child(_)));
+                    drop(slots);
+                    has_child |= has_child_here;
+                    #[cfg(feature = "fixture")]
+                    if released {
+                        state.changed.notify_all();
+                    }
+                    if !has_child_here {
+                        states.swap_remove(index);
+                    } else {
+                        index += 1;
+                    }
+                }
+            }
+            if has_child {
+                let _ = self
+                    .wake
+                    .wait_timeout(guard, Duration::from_millis(5))
+                    .unwrap_or_else(|poison| poison.into_inner());
+            } else {
+                let _guard = self
+                    .wake
+                    .wait(guard)
+                    .unwrap_or_else(|poison| poison.into_inner());
+            }
+        }
+    }
+}
+static WORKER: OnceLock<Mutex<Option<Arc<Worker>>>> = OnceLock::new();
+fn process_worker() -> io::Result<Arc<Worker>> {
+    let slot = WORKER.get_or_init(|| Mutex::new(None));
+    let mut slot = slot.lock().unwrap_or_else(|poison| poison.into_inner());
+    if let Some(worker) = slot.as_ref() {
+        return Ok(worker.clone());
+    }
+    let worker = Arc::new(Worker {
+        states: Mutex::new(Vec::new()),
+        wake_lock: Mutex::new(()),
+        wake: WakeCondvar::new(),
+    });
+    let thread_worker = worker.clone();
+    std::thread::Builder::new()
+        .name("utility-reaper".into())
+        .spawn(move || thread_worker.run())?;
+    *slot = Some(worker.clone());
+    Ok(worker)
 }
 /// Compose one shared executor at the process edge; clones share admission.
 #[derive(Clone, Debug)]
@@ -46,42 +170,16 @@ impl Reaper {
         if capacity == 0 || capacity > 1024 {
             return Err(io::ErrorKind::InvalidInput.into());
         }
+        let worker = process_worker()?;
         let state = Arc::new(State {
             slots: Mutex::new((0..capacity).map(|_| Slot::Free).collect()),
+            worker: Arc::downgrade(&worker),
+            unknown_outcomes: AtomicUsize::new(0),
             #[cfg(feature = "fixture")]
             paused: AtomicBool::new(false),
             #[cfg(feature = "fixture")]
             changed: Condvar::new(),
         });
-        let worker = state.clone();
-        std::thread::Builder::new()
-            .name("utility-reaper".into())
-            .spawn(move || {
-                loop {
-                    #[cfg(feature = "fixture")]
-                    if worker.paused.load(Ordering::Acquire) {
-                        std::thread::sleep(Duration::from_millis(5));
-                        continue;
-                    }
-                    let empty = {
-                        let mut slots = worker.slots();
-                        for slot in slots.iter_mut() {
-                            if let Slot::Child(child) = slot
-                                && matches!(child.try_wait(), Ok(Some(_)))
-                            {
-                                *slot = Slot::Free;
-                            }
-                        }
-                        #[cfg(feature = "fixture")]
-                        worker.changed.notify_all();
-                        slots.iter().all(|slot| matches!(slot, Slot::Free))
-                    };
-                    if empty && Arc::strong_count(&worker) == 1 {
-                        return;
-                    }
-                    std::thread::sleep(Duration::from_millis(5));
-                }
-            })?;
         Ok(Self(state))
     }
     #[cfg(feature = "fixture")]
@@ -119,6 +217,9 @@ impl Reaper {
     #[cfg(feature = "fixture")]
     pub(crate) fn resume(&self) {
         self.0.paused.store(false, Ordering::Release);
+        if let Some(worker) = self.0.worker.upgrade() {
+            worker.notify();
+        }
     }
     #[cfg(feature = "fixture")]
     pub(crate) fn wait_for_occupied(&self, maximum: usize, timeout: Duration) -> io::Result<usize> {
@@ -155,23 +256,63 @@ impl Reaper {
             }
         }
     }
+    #[cfg(test)]
+    pub(crate) fn unknown_outcomes(&self) -> usize {
+        self.0.unknown_outcomes.load(Ordering::Relaxed)
+    }
+    #[cfg(test)]
+    pub(crate) fn shares_process_worker(&self, other: &Self) -> bool {
+        self.0
+            .worker
+            .upgrade()
+            .zip(other.0.worker.upgrade())
+            .is_some_and(|(left, right)| Arc::ptr_eq(&left, &right))
+    }
+}
+impl Drop for Reaper {
+    fn drop(&mut self) {
+        if let Some(worker) = self.0.worker.upgrade() {
+            worker.notify();
+        }
+    }
 }
 impl Permit {
     pub(crate) fn transfer(mut self, child: Child) {
         // slot is reserved before spawn, never resized or released by a peer.
         // Its index cannot fail; match avoids a panic if an invariant regresses.
-        if let Some(slot) = self.state.slots().get_mut(self.slot) {
-            *slot = Slot::Child(child);
+        let transferred = {
+            let mut slots = self.state.slots();
+            if let Some(slot) = slots.get_mut(self.slot) {
+                *slot = Slot::Child(child);
+                true
+            } else {
+                false
+            }
+        };
+        if transferred {
             self.transferred = true;
+        }
+        if transferred && let Some(worker) = self.state.worker.upgrade() {
+            worker.register(self.state.clone());
         }
     }
 }
 impl Drop for Permit {
     fn drop(&mut self) {
-        if !self.transferred
-            && let Some(slot) = self.state.slots().get_mut(self.slot)
-        {
-            *slot = Slot::Free;
+        if !self.transferred {
+            let freed = {
+                let mut slots = self.state.slots();
+                if let Some(slot) = slots.get_mut(self.slot) {
+                    *slot = Slot::Free;
+                    true
+                } else {
+                    false
+                }
+            };
+            if freed {
+                #[cfg(feature = "fixture")]
+                self.state.changed.notify_all();
+            }
         }
     }
 }

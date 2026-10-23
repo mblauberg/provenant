@@ -476,6 +476,7 @@ pub fn run_utility(
     let env = environment(&runtime.home, &runtime.programs.git, github);
     let mut options = ExecOptions::new(&argv, repo.as_path(), budget.timeout);
     options.env = Some(&env);
+    options.stop_on_output_limit = true;
     options.stdout = StreamPolicy::Capture {
         limit: budget.stdout_limit,
     };
@@ -540,6 +541,7 @@ mod tests {
     struct FakeExecutor(Mutex<Option<Invocation>>);
     impl Executor for FakeExecutor {
         fn execute(&self, options: ExecOptions<'_>) -> Result<ExecOutcome, ExecError> {
+            assert!(options.stop_on_output_limit);
             let (captured, cancelled) = (
                 matches!(&options.stdout, StreamPolicy::Capture { .. })
                     && matches!(&options.stderr, StreamPolicy::Capture { .. }),
@@ -604,8 +606,8 @@ mod tests {
             }
             Self {
                 repo: RepoDir::new(repo_path).unwrap(),
-                home_path: home_path.clone(),
-                bin_path: bin_path.clone(),
+                home_path: fs::canonicalize(&home_path).unwrap(),
+                bin_path: fs::canonicalize(&bin_path).unwrap(),
                 runtime: UtilityRuntime::new(bin_path.join("git"), bin_path.join("gh"), home_path)
                     .unwrap(),
                 _root: root,

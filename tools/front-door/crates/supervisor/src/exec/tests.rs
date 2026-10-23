@@ -44,6 +44,58 @@ fn reaper_reserves_before_spawn_and_releases_unused_admission() {
 }
 
 #[test]
+fn reaper_worker_is_shared_between_executor_states() {
+    let first = Reaper::new(1).unwrap();
+    let second = Reaper::new(2).unwrap();
+    assert!(first.shares_process_worker(&second));
+}
+
+#[cfg(feature = "fixture")]
+#[test]
+fn post_spawn_setup_failure_kills_child_and_releases_unknown_wait_slot() {
+    use std::ffi::OsString;
+
+    let reaper = Reaper::new_paused(1).unwrap();
+    let permit = reaper.reserve().unwrap();
+    let argv = [OsString::from("/bin/sleep"), OsString::from("5")];
+    let mut pid = None;
+    let spawn = crate::sys::raw_exec::OwnedPid::spawn_with_setup(
+        permit,
+        crate::sys::raw_exec::SpawnSpec {
+            argv: &argv,
+            env: None,
+            cwd: Path::new("/"),
+            input: false,
+            capture_stdout: false,
+            capture_stderr: false,
+        },
+        |child| {
+            pid = child.pid_for_test();
+            Err(io::Error::other("injected nonblocking setup failure"))
+        },
+    );
+    assert!(spawn.is_err());
+    let pid = pid.expect("child was spawned before setup failed");
+    assert_eq!(reaper.occupied(), 1);
+
+    let status = crate::sys::raw_exec::reap_pid_for_test(pid).unwrap();
+    assert!(libc::WIFSIGNALED(status));
+    assert_eq!(libc::WTERMSIG(status), libc::SIGKILL);
+    assert!(crate::sys::raw_exec::pid_is_absent_for_test(pid).unwrap());
+
+    reaper.resume();
+    assert_eq!(
+        reaper.wait_for_occupied(0, Duration::from_secs(5)).unwrap(),
+        0
+    );
+    assert_eq!(reaper.unknown_outcomes(), 1);
+    assert!(
+        reaper.reserve().is_some(),
+        "admission slot was not released"
+    );
+}
+
+#[test]
 fn decoder_and_filter_failures_are_observable_without_fabricating_frames() {
     struct ClosedDecoder;
     impl FrameSink for ClosedDecoder {

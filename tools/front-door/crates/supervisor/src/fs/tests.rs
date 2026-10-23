@@ -4,7 +4,7 @@ use std::os::unix::fs::{PermissionsExt, symlink};
 use std::sync::{Arc, Barrier};
 
 fn names(dir: &Directory) -> Vec<OsString> {
-    dir.entries().unwrap().collect::<io::Result<_>>().unwrap()
+    dir.entries().unwrap().collect::<Result<_>>().unwrap()
 }
 
 #[test]
@@ -230,7 +230,7 @@ fn empty_bounds_and_adversarial_file_types_do_not_block() {
         Err(FsError::NotRegular { .. })
     ));
     let name = temporary_name().unwrap();
-    assert_eq!(name.as_bytes().len(), b".cf-dispatch-output.".len() + 24);
+    assert_eq!(name.as_bytes().len(), b".provenant-staging.".len() + 24);
     assert_ne!(name, temporary_name().unwrap());
     std::fs::set_permissions(
         temp.path().join("empty"),
@@ -326,6 +326,54 @@ fn owner_lock_is_nonblocking_bounded_and_releases_only_when_its_guard_drops() {
         )
         .is_ok()
     );
+}
+
+#[test]
+fn object_safe_lock_preserves_typed_timeout_and_cancellation_errors() {
+    let temp = tempfile::tempdir().unwrap();
+    let dir = Directory::open_anchor(temp.path()).unwrap();
+    let object: &dyn SafeDir = &dir;
+    let missing = match object.open_read(OsStr::new("missing")) {
+        Err(error) => error,
+        Ok(_) => panic!("opening a missing entry unexpectedly succeeded"),
+    };
+    assert!(matches!(&missing, FsError::Io { .. }));
+    assert!(missing.is_not_found());
+    let clock = FixedClock(provenant_core::MonoTime::from_micros(0));
+    let cancelled = CancelToken::new();
+    cancelled.cancel();
+    assert!(matches!(
+        object.lock(
+            OsStr::new("typed.lock"),
+            LockMode::Exclusive,
+            one_second_budget(),
+            &cancelled,
+            &clock,
+        ),
+        Err(FsError::Cancelled { .. })
+    ));
+
+    let live = CancelToken::new();
+    let held = object
+        .lock(
+            OsStr::new("typed.lock"),
+            LockMode::Shared,
+            one_second_budget(),
+            &live,
+            &clock,
+        )
+        .unwrap();
+    assert!(matches!(
+        object.lock(
+            OsStr::new("typed.lock"),
+            LockMode::Exclusive,
+            one_second_budget(),
+            &live,
+            &FixedClock(provenant_core::MonoTime::from_micros(1_000_000)),
+        ),
+        Err(FsError::LockTimeout { .. })
+    ));
+    drop(held);
 }
 
 #[test]
@@ -613,10 +661,7 @@ fn object_safe_consumers_can_use_real_and_mock_files() {
     let mut mock = MockFile(std::io::Cursor::new(b"mock".to_vec()));
     assert_eq!(read_file(&mut mock).unwrap(), b"mock");
     assert_eq!(
-        dir.entries()
-            .unwrap()
-            .collect::<io::Result<Vec<_>>>()
-            .unwrap(),
+        dir.entries().unwrap().collect::<Result<Vec<_>>>().unwrap(),
         [OsString::from("file")]
     );
 }
@@ -641,13 +686,17 @@ impl Seek for MockFile {
     }
 }
 impl SafeFile for MockFile {
-    fn metadata(&self) -> io::Result<Metadata> {
-        Err(io::ErrorKind::Unsupported.into())
+    fn metadata(&self) -> Result<Metadata> {
+        Err(FsError::Io {
+            operation: "mock metadata",
+            path: PathBuf::from("<mock>"),
+            source: io::ErrorKind::Unsupported.into(),
+        })
     }
-    fn duplicate(&self) -> io::Result<Box<dyn SafeFile>> {
+    fn duplicate(&self) -> Result<Box<dyn SafeFile>> {
         Ok(Box::new(Self(self.0.clone())))
     }
-    fn sync(&self) -> io::Result<()> {
+    fn sync(&self) -> Result<()> {
         Ok(())
     }
 }
