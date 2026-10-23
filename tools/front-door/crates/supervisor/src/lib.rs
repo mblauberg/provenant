@@ -11,8 +11,8 @@ pub mod identity;
 mod pending;
 pub mod process_info;
 pub mod ps;
-pub mod worker_liveness;
 #[allow(unsafe_code)]
 pub mod sys;
 #[cfg(test)]
 mod test_support;
+pub mod worker_liveness;

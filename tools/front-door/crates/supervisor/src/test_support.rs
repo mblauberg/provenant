@@ -72,7 +72,17 @@ fn oracle(root: &Path, script: &str, node: bool) -> Option<serde_json::Value> {
         version.stderr
     );
     assert!(!version.timed_out, "{default} version probe timed out");
-    let output = run(script).unwrap_or_else(|e| panic!("could not run {default} oracle: {e}"));
+    let source_script = if node {
+        script.to_owned()
+    } else {
+        // -I removes cwd from sys.path. Add only the explicit oracle root,
+        // never PYTHONPATH or user-site imports.
+        format!(
+            "import sys; from pathlib import Path; sys.path.insert(0, str(Path.cwd()));\n{script}"
+        )
+    };
+    let output =
+        run(&source_script).unwrap_or_else(|e| panic!("could not run {default} oracle: {e}"));
     assert!(!output.timed_out, "{default} oracle timed out");
     assert!(
         !output.output_truncated,
