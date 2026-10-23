@@ -155,9 +155,10 @@ terminal error precedence and exact error text.
 
 This unit remains partial: live cwd/lsof observation, canonical path expansion,
 recursive session discovery/checked JSON, git status/repository adapters and
-filesystem timestamp metadata are not ported here. Core has no public Python
-float/shlex/repr compatibility API yet, so the minimal pure helpers remain in
-`pending` with their core-owner marks. This does not add a private timestamp or
+filesystem timestamp metadata are not ported here. Core now supplies public whitespace/strip/repr APIs, but their integration
+requires a root workspace dependency entry outside this lane's write scope.
+The marked copies remain pending that declaration. Float/shlex helpers still
+have no public owner API. This does not add a private timestamp or
 JSON codec; records already owns checked JSON and core owns future datetime
 conversion. Integration must wire those shared owners before these OS adapters
 are completed.
@@ -186,3 +187,9 @@ explicit identity-replacement/cross-device refusal fixtures. The filesystem
 review is clean. Source-parity review keeps the graph units partial and the
 Node maxBuffer mismatch open; the ungraphed filesystem foundation is complete.
 The chair remains responsible for cross-family assurance and cut-over judges.
+
+Main integration `d0027d7cd8de987b15c2f7c855691ca3ddf488aa` adds public core
+Python compatibility helpers. The root workspace has no `provenant-core`
+dependency entry; this lane permits only inherited dependencies and cannot
+edit that manifest. Replacing the corresponding marked `pending` copies is
+blocked on that declaration. No path dependency bypass is introduced.

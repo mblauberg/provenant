@@ -250,6 +250,13 @@ pub struct Installed {
     pub failures: Vec<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommandResult {
+    pub exit_code: i32,
+    pub stdout: String,
+    pub stderr: String,
+}
+
 /// Caller handles the canonical-directory-link fast path before invoking this.
 pub fn install(source: &Path, target: &Path, now: &str) -> Result<Installed> {
     preflight(source, target, false, now)?;
@@ -327,6 +334,65 @@ pub fn install(source: &Path, target: &Path, now: &str) -> Result<Installed> {
         existing: sources.len() as i64 - linked as i64,
         failures,
     })
+}
+
+/// Run the script's summary boundary with an explicit clock value.
+pub fn run(source: &Path, target: &Path, preflight_only: bool, now: &str) -> CommandResult {
+    if preflight_only {
+        return match preflight(source, target, true, now) {
+            Ok(()) => CommandResult {
+                exit_code: 0,
+                stdout: format!("workflows preflight=ok target={}\n", target.display()),
+                stderr: String::new(),
+            },
+            Err(error) => CommandResult {
+                exit_code: 3,
+                stdout: String::new(),
+                stderr: format!("conflicting: {error}\n"),
+            },
+        };
+    }
+    if canonical_directory_link(source, target) {
+        return CommandResult {
+            exit_code: 0,
+            stdout: format!(
+                "workflows existing=directory-link target={}\n",
+                target.display()
+            ),
+            stderr: String::new(),
+        };
+    }
+    match install(source, target, now) {
+        Err(error) => CommandResult {
+            exit_code: 3,
+            stdout: String::new(),
+            stderr: format!("conflicting: {error}\n"),
+        },
+        Ok(installed) => {
+            let stdout = format!(
+                "workflows linked={} existing={} target={}\n",
+                installed.linked,
+                installed.existing,
+                target.display()
+            );
+            if installed.failures.is_empty() {
+                CommandResult {
+                    exit_code: 0,
+                    stdout,
+                    stderr: String::new(),
+                }
+            } else {
+                CommandResult {
+                    exit_code: 3,
+                    stdout,
+                    stderr: format!(
+                        "conflicting: workflow installation integrity failed: {}\n",
+                        installed.failures.join(", ")
+                    ),
+                }
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -438,5 +504,72 @@ mod tests {
             old,
             serde_json::json!([[result.linked, result.existing, result.failures], new])
         );
+    }
+
+    #[test]
+    fn conflicting_target_refusal_matches_python() {
+        let (_dir, source, target) = fixture();
+        fs::create_dir_all(&target).unwrap();
+        fs::write(target.join("one.js"), "user-owned").unwrap();
+        let Some(output) = crate::oracle::python(
+            "scripts/install-workflows",
+            "m.SOURCE=p.parents[1]/'workflows'\nt=p\ntry: m._preflight(t,reject_unmanaged=True)\nexcept m.InstallError as e: print(str(e))",
+            &target,
+        ) else {
+            return;
+        };
+        assert_eq!(
+            preflight(&source, &target, true, NOW)
+                .unwrap_err()
+                .to_string()
+                .as_bytes(),
+            output.strip_suffix(b"\n").unwrap_or(&output)
+        );
+    }
+
+    #[test]
+    fn conflicting_preflight_command_matches_python() {
+        let (_dir, source, target) = fixture();
+        fs::create_dir_all(&target).unwrap();
+        fs::write(target.join("one.js"), "user-owned").unwrap();
+        let Some(output) = crate::oracle::python(
+            "scripts/install-workflows",
+            "import contextlib,io,json\nm.SOURCE=p.parents[1]/'workflows'\nout=io.StringIO();err=io.StringIO()\nwith contextlib.redirect_stdout(out),contextlib.redirect_stderr(err): code=m.main(['--target',str(p),'--preflight'])\nprint(json.dumps([code,out.getvalue(),err.getvalue()]))",
+            &target,
+        ) else {
+            return;
+        };
+        let old: Value = serde_json::from_slice(&output).unwrap();
+        let result = run(&source, &target, true, NOW);
+        assert_eq!(
+            old,
+            serde_json::json!([result.exit_code, result.stdout, result.stderr])
+        );
+    }
+
+    #[test]
+    fn command_summary_exit_code_and_streams_match_python() {
+        for preflight_only in [true, false] {
+            let (_dir, source, target) = fixture();
+            let Some(output) = crate::oracle::python(
+                "scripts/install-workflows",
+                &format!(
+                    "import contextlib,io,json\nm.SOURCE=p.parents[1]/'workflows'\nm._now=lambda: {NOW:?}\nout=io.StringIO();err=io.StringIO()\nargs=['--target',str(p)] + ({:?} if {} == 1 else [])\nwith contextlib.redirect_stdout(out),contextlib.redirect_stderr(err): code=m.main(args)\nprint(json.dumps([code,out.getvalue(),err.getvalue()]))",
+                    vec!["--preflight"],
+                    u8::from(preflight_only)
+                ),
+                &target,
+            ) else {
+                return;
+            };
+            let old: serde_json::Value = serde_json::from_slice(&output).unwrap();
+            let _ = fs::remove_dir_all(&target);
+            let _ = fs::remove_file(manifest_path(&target));
+            let result = run(&source, &target, preflight_only, NOW);
+            assert_eq!(
+                old,
+                serde_json::json!([result.exit_code, result.stdout, result.stderr])
+            );
+        }
     }
 }
