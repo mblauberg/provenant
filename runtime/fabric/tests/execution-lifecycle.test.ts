@@ -27,14 +27,13 @@ import { psOutput } from "../src/ps.mjs";
 import { Store } from "../src/store.js";
 import {
   listRecordedRuns,
-  fabricStatus,
-  fabricOutput,
   OWNER_RECORD_NAME,
   processMatches,
   processStartedAt,
   reapOrphanedRuns,
   terminateRecordedRun,
 } from "../src/run-registry.js";
+import { fabricStatus, fabricOutput } from "../src/run-status.js";
 import type { Identity } from "../src/identity.js";
 import { describeLeaks, reapFixtureProcesses } from "./helpers/fixture-processes.js";
 import { scratchRoot } from "./helpers/temp-root.js";
@@ -2213,7 +2212,7 @@ it('reads v1 attempts verbatim from the shared run root with ledger fields', asy
  const row = JSON.parse(readFileSync(join(testDirectory,'fixtures/attempt.json'),'utf8'));
  row.cwd=workspace; row.worktree=workspace;
  writeFileSync(join(attempt,'attempt.json'),JSON.stringify(row));
- const {statusRows}=await import('../src/run-registry.js');
+ const {statusRows}=await import('../src/run-status.js');
  const status = (await statusRows(workspace,['mcp-a81f3c'],0,'all',undefined,'full')).runs![0]!;
  expect(status).toMatchObject({schema:'fabric.status.v1',run_id:row.run_id,status:'ok',digest:row.digest,attempts:[row],worktree:workspace,dirty:null,ahead:null});
  expect(status.provenance).toEqual(row.provenance);
@@ -2232,7 +2231,7 @@ it('reads a retained succeeded registry attempt as ok', async () => {
  const row = JSON.parse(readFileSync(join(testDirectory,'fixtures/attempt.json'),'utf8'));
  row.run_id='mcp-c81f3c';row.status='succeeded';
  writeFileSync(join(v1Attempt,'attempt.json'),JSON.stringify(row));
- const {statusRows}=await import('../src/run-registry.js');
+ const {statusRows}=await import('../src/run-status.js');
  const v1Status = await statusRows(workspace,[row.run_id],0,'all',undefined,'full');
  expect(v1Status.runs?.[0]).toMatchObject({status:'ok',attempts:[{status:'ok'}]});
 });
@@ -2280,7 +2279,7 @@ it('keeps unpublished batch tasks visible and honours receipt interruption', asy
 });
 
 it('bounds output slices, rejects escaped output, and waits for all requested tasks', async () => {
- const {statusRows,fabricOutput}=await import('../src/run-registry.js');
+ const {statusRows,fabricOutput}=await import('../src/run-status.js');
  const dir=join(workspace,'.agent-run/runs/20260923-1012-dispatch-fixture-b81f3c');
  const attempt=join(dir,'tasks/task-1/attempt-001');mkdirSync(attempt,{recursive:true});
  const row=JSON.parse(readFileSync(join(testDirectory,'fixtures/attempt.json'),'utf8'));
@@ -2480,7 +2479,7 @@ it('preserves a rejected resume and its fix without advising a terminal poll', a
 });
 
 it('paginates UTF-8 without replacement characters and reads bounded live tails', async () => {
- const {fabricOutput}=await import('../src/run-registry.js');
+ const {fabricOutput}=await import('../src/run-status.js');
  const dir=join(workspace,'.agent-run/runs/20260801-1200-dispatch-utf8-abcdef');const attempt=join(dir,'tasks/task-1/attempt-001');mkdirSync(attempt,{recursive:true});
  const row=JSON.parse(readFileSync(join(testDirectory,'fixtures/attempt.json'),'utf8'));
  row.run_id='mcp-utf8';row.paths.result='tasks/task-1/attempt-001/result.md';row.state='running';row.status=null;

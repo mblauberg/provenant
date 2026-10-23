@@ -10,13 +10,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cancelActiveExecutions, dispatchConfiguredProvider } from "../src/execution.js";
 import {
   DEFAULT_RETENTION_HOURS,
-  fabricStatus,
   OWNER_RECORD_NAME,
   processStartedAt,
   pruneDispatchRuns,
   retentionHours,
   reapOrphanedRuns,
 } from "../src/run-registry.js";
+import { fabricStatus } from "../src/run-status.js";
 import * as runRegistry from "../src/run-registry.js";
 import type { Identity } from "../src/identity.js";
 import { describeLeaks, reapFixtureProcesses } from "./helpers/fixture-processes.js";
