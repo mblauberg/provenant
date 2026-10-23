@@ -1,4 +1,4 @@
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from functools import partial
 from pathlib import Path
 import contextlib
@@ -136,7 +136,7 @@ def test_stats_auto_ingest_works_when_telemetry_is_loaded_by_file_path(tmp_path)
     from datetime import UTC, datetime
 
     receipt(tmp_path, 'file-path', status='ok', ended_at=datetime.now(UTC).isoformat())
-    result = cli(tmp_path, 'stats', '--json', scripts_path=False)
+    result = cli_process(tmp_path, 'stats', '--json')
     assert result.returncode == 0, result.stderr
     with sqlite3.connect(tmp_path / 'state/telemetry.sqlite3') as db:
         assert db.execute("SELECT COUNT(*) FROM usage WHERE source='fabric'").fetchone()[0] == 1
@@ -144,16 +144,38 @@ def test_stats_auto_ingest_works_when_telemetry_is_loaded_by_file_path(tmp_path)
 
 def test_concurrent_stats_auto_ingest_skips_a_held_lock_without_losing_rows(tmp_path):
     from datetime import UTC, datetime
+    import time
 
     for name in ('first', 'second'):
         receipt(tmp_path, name, status='ok', ended_at=datetime.now(UTC).isoformat())
-    workers = [subprocess.Popen([str(ROOT / 'scripts/provenant'), 'stats', '--json'],
-                                env=environment(tmp_path), cwd=tmp_path,
-                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-               for _ in range(2)]
-    results = [worker.communicate(timeout=10) + (worker.returncode,) for worker in workers]
-    assert all(code == 0 for _, _, code in results), results
-    assert all(json.loads(stdout)['schema_version'] == 2 for stdout, _, _ in results)
+    assert cli(tmp_path, 'telemetry', 'ingest').returncode == 0
+    ledger = tmp_path / 'state/telemetry.sqlite3'
+    with sqlite3.connect(ledger) as db:
+        db.execute("UPDATE sources SET last_ingest='2000-01-01T00:00:00Z' WHERE source='fabric'")
+    holder_code = (
+        'import fcntl, sqlite3, sys; '
+        'lock=open(sys.argv[1], "a"); fcntl.flock(lock.fileno(), fcntl.LOCK_EX); '
+        'db=sqlite3.connect(sys.argv[2], timeout=0); db.execute("BEGIN EXCLUSIVE"); '
+        'print("ready", flush=True); sys.stdin.readline(); db.rollback(); db.close()'
+    )
+    holder = subprocess.Popen([sys.executable, '-c', holder_code,
+                               str(tmp_path / 'state/telemetry.sqlite3.lock'), str(ledger)],
+                              cwd=tmp_path, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                              stderr=subprocess.PIPE, text=True)
+    try:
+        assert holder.stdout.readline().strip() == 'ready'
+        started = time.monotonic()
+        result = cli_process(tmp_path, 'stats', '--json')
+        elapsed = time.monotonic() - started
+        assert result.returncode == 0, result.stderr
+        assert json.loads(result.stdout)['schema_version'] == 2
+        assert 'ingest already running' in result.stderr
+        assert 'ledger is locked; reporting an empty ledger' in result.stderr
+        assert elapsed < 1.5
+    finally:
+        holder.stdin.write('\n')
+        holder.stdin.flush()
+        holder.communicate(timeout=5)
     with sqlite3.connect(tmp_path / 'state/telemetry.sqlite3') as db:
         assert db.execute("SELECT COUNT(*) FROM usage WHERE source='fabric'").fetchone()[0] == 2
 
@@ -175,17 +197,110 @@ def test_auto_ingest_failure_warns_but_query_returns_available_ledger(tmp_path):
     assert 'auto-ingest failed' in result.stderr
 
 
+def test_auto_ingest_interval_accepts_fractional_seconds(tmp_path):
+    from datetime import UTC, datetime, timedelta
+
+    receipt(tmp_path, 'fractional', status='ok', ended_at=datetime.now(UTC).isoformat())
+    assert cli(tmp_path, 'telemetry', 'ingest').returncode == 0
+    receipt(tmp_path, 'fractional-refresh', status='ok', ended_at=datetime.now(UTC).isoformat())
+    with sqlite3.connect(tmp_path / 'state/telemetry.sqlite3') as db:
+        db.execute("UPDATE sources SET last_ingest=? WHERE source='fabric'",
+                   ((datetime.now(UTC) - timedelta(seconds=1)).isoformat(),))
+    with patch.dict(os.environ, {'PROVENANT_TELEMETRY_AUTO_INGEST_SECONDS': '0.5'}):
+        result = cli(tmp_path, 'stats', '--json')
+    assert result.returncode == 0, result.stderr
+    with sqlite3.connect(tmp_path / 'state/telemetry.sqlite3') as db:
+        assert db.execute("SELECT COUNT(*) FROM usage WHERE source='fabric'").fetchone()[0] == 2
+
+
+def test_retro_and_changes_auto_ingest_stale_sources(tmp_path):
+    stamp = datetime.now(UTC) - timedelta(minutes=4)
+
+    receipt(tmp_path, 'before-retro', status='ok', ended_at=stamp.isoformat())
+    assert cli(tmp_path, 'telemetry', 'ingest').returncode == 0
+    receipt(tmp_path, 'from-retro', status='ok', ended_at=(stamp + timedelta(minutes=1)).isoformat())
+    with sqlite3.connect(tmp_path / 'state/telemetry.sqlite3') as db:
+        db.execute("UPDATE sources SET last_ingest=? WHERE source='fabric'",
+                   ((datetime.now(UTC) - timedelta(hours=2)).isoformat(),))
+    retro = cli(tmp_path, 'retro', '--since', (stamp - timedelta(days=1)).isoformat(), '--json')
+    assert retro.returncode == 0, retro.stderr
+    with sqlite3.connect(tmp_path / 'state/telemetry.sqlite3') as db:
+        assert db.execute("SELECT COUNT(*) FROM usage WHERE run_id='from-retro'").fetchone() == (1,)
+
+    receipt(tmp_path, 'from-changes', status='ok', ended_at=(stamp + timedelta(minutes=2)).isoformat())
+    with sqlite3.connect(tmp_path / 'state/telemetry.sqlite3') as db:
+        db.execute("UPDATE sources SET last_ingest=? WHERE source='fabric'",
+                   ((datetime.now(UTC) - timedelta(hours=2)).isoformat(),))
+    changes = cli(tmp_path, 'telemetry', 'changes', '--json')
+    assert changes.returncode == 0, changes.stderr
+    with sqlite3.connect(tmp_path / 'state/telemetry.sqlite3') as db:
+        assert db.execute("SELECT COUNT(*) FROM usage WHERE run_id='from-changes'").fetchone() == (1,)
+
+
+def test_delivery_receipt_fields_migration_rereads_unchanged_receipts(tmp_path):
+    run = tmp_path / '.agent-run/runs/delivery-migration/RUN.json'
+    write_json(run, {'run_id': 'delivery-migration', 'risk_tier': 'substantial',
+                     'writer_model': 'gpt-6-luna',
+                     'reviews': [{'id': 'review-1', 'role': 'targeted', 'status': 'failed',
+                                  'provider_family': 'anthropic', 'model': 'claude-sonnet',
+                                  'lenses': ['privacy']}]})
+    assert cli(tmp_path, 'telemetry', 'ingest').returncode == 0
+    ledger = tmp_path / 'state/telemetry.sqlite3'
+    with sqlite3.connect(ledger) as db:
+        assert db.execute("SELECT 1 FROM meta WHERE key='delivery_run_time_v2'").fetchone()
+        db.execute("UPDATE deliveries SET writer_model=NULL, review_verdicts='[]'")
+        db.execute("DELETE FROM meta WHERE key='delivery_receipt_fields_v1'")
+    result = cli(tmp_path, 'stats', '--json')
+    assert result.returncode == 0, result.stderr
+    report = json.loads(result.stdout)
+    delivery = next(row for row in report['deliveries'] if row['run_id'] == 'delivery-migration')
+    assert delivery['writer_model'] == 'gpt-6-luna'
+    assert delivery['review_verdicts'][0]['verdict'] == 'failed'
+
+
+def test_ingest_owner_ignores_cwd_module_shadowing(tmp_path):
+    shadow = tmp_path / 'telemetry_ingest.py'
+    shadow.write_text('raise AssertionError("cwd module was imported")\n')
+    spec = importlib.util.spec_from_file_location('telemetry_owner_path_test', ROOT / 'scripts/telemetry.py')
+    telemetry = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(telemetry)
+    original_cwd = Path.cwd()
+    telemetry.ingest_owner.cache_clear()
+    try:
+        os.chdir(tmp_path)
+        with patch.object(sys, 'path', [str(tmp_path), *sys.path]):
+            owner = telemetry.ingest_owner()
+        assert Path(owner.__file__).resolve() == (ROOT / 'scripts/telemetry_ingest.py').resolve()
+    finally:
+        telemetry.ingest_owner.cache_clear()
+        os.chdir(original_cwd)
+
+
 def test_otel_and_delivery_sources_ingest_safe_usage_and_structured_review_fields(tmp_path):
     from datetime import UTC, datetime
 
     stamp = datetime.now(UTC)
     nanos = str(int(stamp.timestamp() * 1_000_000_000))
     jsonl(tmp_path / 'state/otel/logs-current.ndjson', otlp_line('logs', {'resourceLogs': [{
-        'resource': {'attributes': []}, 'scopeLogs': [{'logRecords': [{
-            'timeUnixNano': nanos,
-            'attributes': otlp_attributes(**{'event.name': 'api_request', 'model': 'gpt-6-luna',
-                                              'input_tokens': 17, 'output_tokens': 4,
-                                              'prompt_text': 'PRIVATE_PROMPT', 'tool_output': 'PRIVATE_TOOL'})}]}]}]}))
+        'resource': {'attributes': []}, 'scopeLogs': [{'logRecords': [
+            {'timeUnixNano': nanos,
+             'attributes': otlp_attributes(**{'event.name': 'api_request', 'model': 'gpt-6-luna',
+                                               'input_tokens': 17, 'output_tokens': 4,
+                                               'mystery_count': 991, 'prompt_text': 'PRIVATE_PROMPT',
+                                               'tool_output': 'PRIVATE_TOOL'})},
+            {'timeUnixNano': nanos,
+             'attributes': otlp_attributes(**{'event.name': 'user_prompt', 'prompt_length': 23,
+                                               'prompt_text': 'PRIVATE_PROMPT'})},
+            {'timeUnixNano': nanos,
+             'attributes': otlp_attributes(**{'event.name': 'tool_decision', 'tool_name': 'Bash',
+                                               'decision': 'allow', 'tool_input': 'PRIVATE_TOOL'})}]}]}]}))
+    metric_point = {'asDouble': 2.0, 'timeUnixNano': nanos,
+                    'attributes': otlp_attributes(session='s1', **{'user.email': 'private@example.test'})}
+    metric = {'name': 'claude_code.active_time.total',
+              'sum': {'aggregationTemporality': 1, 'dataPoints': [metric_point]}}
+    metric_body = {'resourceMetrics': [{'resource': {'attributes': []},
+                                        'scopeMetrics': [{'metrics': [metric]}]}]}
+    jsonl(tmp_path / 'state/otel/metrics-current.ndjson', otlp_line('metrics', metric_body))
     run = tmp_path / '.agent-run/runs/delivery-fixture'
     receipt_data = json.loads((ROOT / 'skills/deliver/templates/RUN.template.json').read_text())
     receipt_data.update({
@@ -193,7 +308,7 @@ def test_otel_and_delivery_sources_ingest_safe_usage_and_structured_review_field
         'writer_model': 'gpt-6-luna', 'reviews': [
             {'id': 'review-a', 'role': 'targeted', 'status': 'pass', 'provider_family': 'anthropic',
              'model': 'claude-sonnet', 'lenses': ['correctness']},
-            {'id': 'review-b', 'role': 'targeted', 'status': 'fail', 'provider_family': 'openai',
+            {'id': 'review-b', 'role': 'targeted', 'status': 'failed', 'provider_family': 'openai',
              'model': 'gpt-review', 'lenses': ['privacy']}],
     })
     shape_spec = importlib.util.spec_from_file_location(
@@ -207,12 +322,24 @@ def test_otel_and_delivery_sources_ingest_safe_usage_and_structured_review_field
     report = json.loads(cli(tmp_path, 'stats', '--json').stdout)
     delivery = next(row for row in report['deliveries'] if row['run_id'] == 'delivery-fixture')
     assert delivery['writer_model'] == 'gpt-6-luna'
-    assert [row['verdict'] for row in delivery['review_verdicts']] == ['pass', 'fail']
+    assert [row['verdict'] for row in delivery['review_verdicts']] == ['pass', 'failed']
     with sqlite3.connect(tmp_path / 'state/telemetry.sqlite3') as db:
-        attrs = db.execute("SELECT attrs FROM events WHERE kind='otel.api_request'").fetchone()[0]
+        events = dict(db.execute("SELECT kind,attrs FROM events WHERE kind LIKE 'otel.%'"))
+        assert json.loads(events['otel.user_prompt'])['prompt_length'] == 23
+        assert json.loads(events['otel.tool_decision'])['tool_name'] == 'Bash'
+        assert json.loads(events['otel.tool_decision'])['decision'] == 'allow'
+        assert json.loads(events['otel.metric'])['name'] == 'claude_code.active_time.total'
+        attrs = events['otel.api_request']
     assert 'PRIVATE_PROMPT' not in attrs and 'PRIVATE_TOOL' not in attrs
-    assert 'prompt_text' not in attrs and 'tool_output' not in attrs
+    assert 'prompt_text' not in attrs and 'tool_output' not in attrs and 'mystery_count' not in attrs
+    assert 'prompt_text' not in events['otel.user_prompt'] and 'tool_input' not in events['otel.tool_decision']
+    assert 'user.email' not in events['otel.metric'] and 'private@example.test' not in events['otel.metric']
     assert json.loads(attrs)['input_tokens'] == 17
+    retro = cli(tmp_path, 'retro', '--since', stamp.isoformat(), '--json')
+    assert retro.returncode == 0, retro.stderr
+    attention = json.loads(retro.stdout)['attention']
+    assert attention['user_prompts'] == 1
+    assert attention['tool_decisions'] == 1
 
 
 @pytest.mark.parametrize('version,message', [
@@ -1047,7 +1174,7 @@ def test_legacy_rebuild_replaces_stale_usage_for_unchanged_message_id(tmp_path):
 def receipt(project, name, attempt=1, **values):
     path = project / f'.agent-run/runs/{name}/tasks/lane/attempt-{attempt:03d}/attempt.json'
     write_json(path, {'run_id': name, 'task_id': 'lane', 'attempt': attempt, 'cwd': '/repo',
-                      'ended_at': '2026-10-21T01:00:00Z', **values})
+                      'ended_at': datetime.now(UTC).isoformat(), **values})
     return path
 
 
@@ -2205,11 +2332,14 @@ def test_transcript_names_that_link_elsewhere_are_never_opened(tmp_path):
 
 
 def test_lane_events_carry_the_harness_profile_when_the_receipt_has_one(tmp_path):
+    stamp = datetime.now(UTC).replace(microsecond=0).isoformat().replace('+00:00', 'Z')
     receipt(tmp_path, 'run-p', 1, status='ok', provenance=route('codex', 'gpt-6.1-sol'),
+            ended_at=stamp,
             profile={'preset': 'thorough', 'digest': 'd1', 'knobs': {'reviewers': 3},
                      'risk_tier': 'substantial', 'floored': ['reviewers']})
     receipt(tmp_path, 'run-q', 1, status='ok', provenance=route('codex', 'gpt-6.1-sol'))
-    receipt(tmp_path, 'run-r', status='ok', profile={'preset': 'thorough', 'digest': 'd1',
+    receipt(tmp_path, 'run-r', status='ok', ended_at=stamp,
+            profile={'preset': 'thorough', 'digest': 'd1',
                                                   'knobs': {'reviewers': 3}})
     receipt(tmp_path, 'broken', status='ok', profile={'digest': 'd2'})
     assert cli(tmp_path, 'telemetry', 'ingest').returncode == 0
@@ -2219,7 +2349,7 @@ def test_lane_events_carry_the_harness_profile_when_the_receipt_has_one(tmp_path
     assert len(stamps) == 1
     assert stamps[0][:2] == ('d1', 'thorough')
     assert json.loads(stamps[0][2]) == {'reviewers': 3}
-    assert stamps[0][3] == '2026-10-21T01:00:00Z'
+    assert stamps[0][3] == stamp
     assert json.loads(rows['run-p'])['risk_tier'] == 'substantial'
     assert json.loads(rows['run-p'])['floored'] == ['reviewers']
     assert (json.loads(rows['run-p'])['profile'], json.loads(rows['run-p'])['profile_digest']) == ('thorough', 'd1')

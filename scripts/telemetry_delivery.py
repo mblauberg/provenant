@@ -58,8 +58,7 @@ def ingest_receipt(telemetry, db, path):
                      if isinstance(item, dict) and item.get('id') == canonical_id), {})
     revision = artifact.get('git_revision') or {}
     commit = revision.get('commit') if isinstance(revision, dict) else None
-    writer = receipt.get('writer') if isinstance(receipt.get('writer'), dict) else {}
-    writer_model = receipt.get('writer_model') or writer.get('model')
+    writer_model = receipt.get('writer_model')
     reviews = []
     for review in receipt.get('reviews') or ():
         if not isinstance(review, dict):

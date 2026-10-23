@@ -19,13 +19,17 @@ import re
 import sqlite3
 import subprocess
 import sys
+import time
 from types import SimpleNamespace
 
 
 SOURCES = ('fabric', 'route_health', 'cooldowns', 'claude', 'codex', 'opencode', 'otel', 'delivery')
 AUTO_INGEST_INTERVAL_ENV = 'PROVENANT_TELEMETRY_AUTO_INGEST_SECONDS'
 AUTO_INGEST_INTERVAL_DEFAULT = 3600
-SQLITE_BUSY_TIMEOUT_SECONDS = 2
+SQLITE_BUSY_TIMEOUT_SECONDS = 5
+SQLITE_PROBE_TIMEOUT_SECONDS = 0
+SQLITE_READ_RETRIES = 3
+SQLITE_READ_RETRY_SECONDS = 0.05
 
 
 def iso(moment):
@@ -130,31 +134,49 @@ class LedgerSchemaMismatch(ValueError):
     pass
 
 
-def connect(readonly=False, warn=False):
+def connect(readonly=False, warn=False, timeout=None):
     path = state_root() / 'telemetry.sqlite3'
     if readonly:
         if not path.is_file():
             return _empty_ledger(warn)
-        db = sqlite3.connect(path.resolve().as_uri() + '?mode=ro', uri=True,
-                             timeout=SQLITE_BUSY_TIMEOUT_SECONDS)
-        db.execute(f'PRAGMA busy_timeout = {int(SQLITE_BUSY_TIMEOUT_SECONDS * 1000)}')
-        db.row_factory = sqlite3.Row
-        try:
-            tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-            version = db.execute('PRAGMA user_version').fetchone()[0]
-            if version not in range(SCHEMA_VERSION + 1):
-                raise LedgerSchemaMismatch(f'unsupported telemetry schema version: {version}')
-            if version == 0 or 'sources' not in tables:
-                db.close()
-                return _empty_ledger(warn)
-            if version < SCHEMA_VERSION:
-                raise LedgerSchemaMismatch(
-                    f'telemetry schema version {version} needs migration; run provenant telemetry ingest')
-            load_hosts(db)
-        except BaseException:
-            db.close()
-            raise
-        return db
+        attempts = SQLITE_READ_RETRIES + 1 if timeout is None else 1
+        delay = SQLITE_READ_RETRY_SECONDS if timeout is None else 0
+        wait = SQLITE_READ_RETRY_SECONDS if timeout is None else timeout
+        for attempt in range(attempts):
+            db = None
+            try:
+                db = sqlite3.connect(path.resolve().as_uri() + '?mode=ro', uri=True, timeout=wait)
+                db.execute(f'PRAGMA busy_timeout = {int(wait * 1000)}')
+                db.row_factory = sqlite3.Row
+                tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+                version = db.execute('PRAGMA user_version').fetchone()[0]
+                if version not in range(SCHEMA_VERSION + 1):
+                    raise LedgerSchemaMismatch(f'unsupported telemetry schema version: {version}')
+                if version == 0 or 'sources' not in tables:
+                    db.close()
+                    return _empty_ledger(warn)
+                if version < SCHEMA_VERSION:
+                    raise LedgerSchemaMismatch(
+                        f'telemetry schema version {version} needs migration; run provenant telemetry ingest')
+                load_hosts(db)
+                return db
+            except sqlite3.OperationalError as exc:
+                if db is not None:
+                    db.close()
+                message = str(exc).lower()
+                if 'locked' not in message and 'busy' not in message:
+                    raise
+                if attempt + 1 < attempts:
+                    time.sleep(delay)
+                    continue
+                if warn:
+                    print('telemetry: ledger is locked; reporting an empty ledger', file=sys.stderr)
+                    return _empty_ledger(False)
+                raise
+            except BaseException:
+                if db is not None:
+                    db.close()
+                raise
     path.parent.mkdir(parents=True, exist_ok=True)
     db = sqlite3.connect(path, timeout=SQLITE_BUSY_TIMEOUT_SECONDS)
     db.execute(f'PRAGMA busy_timeout = {int(SQLITE_BUSY_TIMEOUT_SECONDS * 1000)}')
@@ -246,6 +268,9 @@ def _prepare(db):
     if db.execute("SELECT 1 FROM meta WHERE key='delivery_run_time_v2'").fetchone() is None:
         db.execute("DELETE FROM cursors WHERE source='delivery' AND path LIKE '%/RUN.json'")
         db.execute("INSERT OR IGNORE INTO meta VALUES ('delivery_run_time_v2', ?)", (now(),))
+    if db.execute("SELECT 1 FROM meta WHERE key='delivery_receipt_fields_v1'").fetchone() is None:
+        db.execute("DELETE FROM cursors WHERE source='delivery' AND path LIKE '%/RUN.json'")
+        db.execute("INSERT OR IGNORE INTO meta VALUES ('delivery_receipt_fields_v1', ?)", (now(),))
     observation_columns = {row[1] for row in db.execute('PRAGMA table_info(observations)')}
     if 'origin_path' not in observation_columns:
         db.execute('ALTER TABLE observations ADD COLUMN origin_path TEXT')
@@ -714,12 +739,6 @@ def this():
 
 @cache
 def ingest_owner():
-    try:
-        import telemetry_ingest
-        return telemetry_ingest
-    except ModuleNotFoundError as exc:
-        if exc.name != 'telemetry_ingest':
-            raise
     spec = importlib.util.spec_from_file_location(
         'provenant_telemetry_ingest', Path(__file__).with_name('telemetry_ingest.py'))
     module = importlib.util.module_from_spec(spec)
@@ -827,8 +846,8 @@ def auto_ingest_interval():
     if raw is None:
         return AUTO_INGEST_INTERVAL_DEFAULT
     try:
-        value = int(raw)
-        if value < 0:
+        value = float(raw)
+        if not math.isfinite(value) or value < 0:
             raise ValueError
         return value
     except ValueError:
@@ -843,7 +862,7 @@ def auto_ingest_due():
     if not path.is_file():
         return True
     try:
-        with connect(readonly=True) as db:
+        with connect(readonly=True, timeout=SQLITE_PROBE_TIMEOUT_SECONDS) as db:
             tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
             if 'sources' not in tables:
                 return True
@@ -853,6 +872,8 @@ def auto_ingest_due():
                 return True
             delivery_columns = {row[1] for row in db.execute('PRAGMA table_info(deliveries)')}
             if not {'writer_model', 'review_verdicts'}.issubset(delivery_columns):
+                return True
+            if db.execute("SELECT 1 FROM meta WHERE key='delivery_receipt_fields_v1'").fetchone() is None:
                 return True
             threshold = auto_ingest_interval()
             current = datetime.now(UTC)

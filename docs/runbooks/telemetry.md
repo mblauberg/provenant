@@ -238,12 +238,13 @@ Lane attrs retain the profile's preset, digest, `risk_tier` and `floored`.
 `harness_stamps` stores full resolved knobs once per digest, with preset and
 first-seen time. A digest without a knobs object creates no stamp row.
 
-Events never hold prompt, output or error text. OTLP attributes keep numeric
-values plus `model`, `effort`, `type`, `tool_name`, `decision`, `source`,
-`success` and `status_code`; every other string, including identity and email
-attributes, is dropped. Resource attributes `provenant.run_id`,
-`provenant.lane` and `provenant.harness_rev` link a record to its lane when the
-exporter sets them.
+Events never hold prompt, output or error text. OTLP `api_request` records keep
+allowlisted usage metrics and metadata. `user_prompt` records keep only
+`prompt_length`; `tool_decision` records keep only `tool_name` and `decision`.
+Metric points keep allowlisted numeric values and metadata. Every other
+attribute, including identity and email attributes, is dropped. Resource
+attributes `provenant.run_id`, `provenant.lane` and `provenant.harness_rev`
+link a record to its lane when the exporter sets them.
 
 `harness_rev` is the installed Provenant revision. Fabric lanes stamp it into
 attempt provenance (`provenance.harness_rev`); older receipts, sessions and
