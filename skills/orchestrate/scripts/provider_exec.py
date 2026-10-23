@@ -3742,10 +3742,10 @@ def main():
             return 0
         if args.mode == "worktree_write":
             # Direct CLI calls own the same registered-worktree lease as Fabric.
-            from dispatch_run import resolve_writer_worktree, acquire_worktree_lease
+            import writer_lease as writer_lease_owner
 
-            writer_lease = acquire_worktree_lease(
-                resolve_writer_worktree(Path(args.worktree))
+            writer_lease = writer_lease_owner.acquire_worktree_lease(
+                writer_lease_owner.resolve_writer_worktree(Path(args.worktree))
             )
         record = execute(
             plan,
@@ -3776,9 +3776,9 @@ def main():
         return 2
     finally:
         if writer_lease is not None:
-            from dispatch_run import release_worktree_lease
+            import writer_lease as writer_lease_owner
 
-            release_worktree_lease(writer_lease)
+            writer_lease_owner.release_worktree_lease(writer_lease)
         if args.cleanup_prompt:
             args.prompt_file.unlink(missing_ok=True)
         if args.cleanup_dir:
