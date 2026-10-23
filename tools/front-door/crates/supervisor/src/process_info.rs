@@ -144,27 +144,26 @@ pub fn shell_join_os<'a>(args: impl IntoIterator<Item = &'a OsStr>) -> OsString 
 }
 
 pub fn duration(seconds: f64, elapsed: bool, darwin: bool) -> Result<String, ProcessParseError> {
-    if !seconds.is_finite() || seconds >= i64::MAX as f64 {
+    use crate::pending::{divmod_decimal, float_whole};
+    let seconds = seconds.max(0.0);
+    if !seconds.is_finite() {
         return Err(ProcessParseError::Duration);
     }
-    let seconds = seconds.max(0.0);
-    let whole = seconds as i64;
-    let days = whole / 86400;
-    let hours = whole / 3600 % 24;
-    let minutes = whole / 60 % 60;
-    let secs = whole % 60;
+    let whole = float_whole(seconds);
+    let (total_minutes, secs) = divmod_decimal(&whole, 60);
+    let (total_hours, minutes) = divmod_decimal(&total_minutes, 60);
+    let (days, hours) = divmod_decimal(&total_hours, 24);
     if !elapsed {
-        let hundredths = (((seconds - whole as f64) * 100.0 + 0.5) as i64).min(99);
-        let total_hours = whole / 3600;
+        let hundredths = (((seconds - seconds.trunc()) * 100.0 + 0.5) as u32).min(99);
         return Ok(if darwin {
-            format!("{}:{secs:02}.{hundredths:02}", whole / 60)
-        } else if total_hours > 0 {
+            format!("{total_minutes}:{secs:02}.{hundredths:02}")
+        } else if total_hours != "0" {
             format!("{total_hours}:{minutes:02}:{secs:02}.{hundredths:02}")
         } else {
             format!("{minutes}:{secs:02}.{hundredths:02}")
         });
     }
-    Ok(if days > 0 {
+    Ok(if days != "0" {
         format!("{days}-{hours:02}:{minutes:02}:{secs:02}")
     } else if hours > 0 {
         format!("{hours:02}:{minutes:02}:{secs:02}")
@@ -206,10 +205,7 @@ mod tests {
         assert_eq!(duration(4185.86, false, false).unwrap(), "1:09:45.86");
         assert_eq!(duration(90061.0, true, false).unwrap(), "1-01:01:01");
         assert_eq!(duration(-1.0, true, false).unwrap(), "00:00");
-        assert_eq!(
-            duration(f64::NAN, true, false),
-            Err(ProcessParseError::Duration)
-        );
+        assert_eq!(duration(f64::NAN, true, false).unwrap(), "00:00");
     }
 
     #[test]
@@ -255,18 +251,18 @@ pub fn ps_process_output(
     lstart: Option<&str>,
     start_epoch: Option<f64>,
 ) -> Result<Option<ProcessInfo>, ProcessParseError> {
-    let text = stdout.trim();
+    let text = stdout.trim_matches(crate::pending::python_space);
     if text.is_empty() {
         return Ok(None);
     }
     let mut rest = text;
     let mut values = Vec::new();
     for _ in 0..7 {
-        let Some(end) = rest.find(char::is_whitespace) else {
+        let Some(end) = rest.find(crate::pending::python_space) else {
             return Ok(None);
         };
         values.push(&rest[..end]);
-        rest = rest[end..].trim_start();
+        rest = rest[end..].trim_start_matches(crate::pending::python_space);
     }
     if rest.is_empty() {
         return Ok(None);
@@ -275,8 +271,8 @@ pub fn ps_process_output(
         return Ok(None);
     };
     let first = rest
-        .split_whitespace()
-        .next()
+        .split(crate::pending::python_space)
+        .find(|value| !value.is_empty())
         .ok_or(ProcessParseError::Field("command"))?;
     let comm = std::path::Path::new(first)
         .file_name()
@@ -387,7 +383,12 @@ with tempfile.TemporaryDirectory() as directory:
 #[derive(Debug, Error)]
 pub enum ProcessError {
     #[error("{operation}: {path}")]
-    Io { operation: &'static str, path: std::path::PathBuf, #[source] source: std::io::Error },
+    Io {
+        operation: &'static str,
+        path: std::path::PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
     #[error(transparent)]
     Parse(#[from] ProcessParseError),
     #[error("{0}")]
@@ -397,10 +398,17 @@ pub enum ProcessError {
 }
 
 fn read_error(path: &std::path::Path) -> impl FnOnce(std::io::Error) -> ProcessError + '_ {
-    |source| ProcessError::Io { operation: "read process observation", path: path.into(), source }
+    |source| ProcessError::Io {
+        operation: "read process observation",
+        path: path.into(),
+        source,
+    }
 }
 
-pub fn linux_read_row(pid: i32, proc_root: &std::path::Path) -> Result<Option<ProcessRow>, ProcessError> {
+pub fn linux_read_row(
+    pid: i32,
+    proc_root: &std::path::Path,
+) -> Result<Option<ProcessRow>, ProcessError> {
     let path = proc_root.join(pid.to_string()).join("stat");
     linux_process_row(pid, &std::fs::read(&path).map_err(read_error(&path))?).map_err(Into::into)
 }
@@ -408,15 +416,20 @@ pub fn linux_read_row(pid: i32, proc_root: &std::path::Path) -> Result<Option<Pr
 /// A missing task/children interface requests a full census. A process that
 /// disappears during traversal is simply omitted. Include previously seen
 /// children so a reparented descendant remains observable.
-pub fn linux_tree_snapshot(root_pid: i32, known_pids: &[i32], proc_root: &std::path::Path)
-    -> Result<Option<std::collections::BTreeMap<i32, ProcessRow>>, ProcessError> {
+pub fn linux_tree_snapshot(
+    root_pid: i32,
+    known_pids: &[i32],
+    proc_root: &std::path::Path,
+) -> Result<Option<std::collections::BTreeMap<i32, ProcessRow>>, ProcessError> {
     use std::collections::{BTreeMap, BTreeSet, VecDeque};
     let mut queue = VecDeque::from([root_pid]);
     queue.extend(known_pids);
     let mut visited = BTreeSet::new();
     let mut rows = BTreeMap::new();
     while let Some(pid) = queue.pop_front() {
-        if !visited.insert(pid) { continue; }
+        if !visited.insert(pid) {
+            continue;
+        }
         let row = match linux_read_row(pid, proc_root) {
             Ok(Some(row)) => row,
             Ok(None) | Err(ProcessError::Io { .. }) => continue,
@@ -424,12 +437,22 @@ pub fn linux_tree_snapshot(root_pid: i32, known_pids: &[i32], proc_root: &std::p
         };
         rows.insert(pid, row);
         let task = proc_root.join(pid.to_string()).join("task");
-        let Ok(threads) = std::fs::read_dir(task) else { return Ok(None); };
+        let Ok(threads) = std::fs::read_dir(task) else {
+            return Ok(None);
+        };
         for thread in threads {
-            let Ok(thread) = thread else { return Ok(None); };
-            let Ok(children) = std::fs::read_to_string(thread.path().join("children")) else { return Ok(None); };
+            let Ok(thread) = thread else {
+                return Ok(None);
+            };
+            let Ok(children) = std::fs::read_to_string(thread.path().join("children")) else {
+                return Ok(None);
+            };
             for child in children.split_whitespace() {
-                queue.push_back(child.parse().map_err(|_| ProcessParseError::Field("child pid"))?);
+                queue.push_back(
+                    child
+                        .parse()
+                        .map_err(|_| ProcessParseError::Field("child pid"))?,
+                );
             }
         }
     }
@@ -438,10 +461,14 @@ pub fn linux_tree_snapshot(root_pid: i32, known_pids: &[i32], proc_root: &std::p
 
 pub fn tty_name(device: u32, dev_root: &std::path::Path) -> OsString {
     use std::os::unix::fs::{FileTypeExt, MetadataExt};
-    if device == 0 || device == u32::MAX { return "??".into(); }
+    if device == 0 || device == u32::MAX {
+        return "??".into();
+    }
     if let Ok(entries) = std::fs::read_dir(dev_root) {
         for entry in entries.flatten() {
-            if entry.metadata().is_ok_and(|metadata| metadata.file_type().is_char_device() && metadata.rdev() as u32 == device) {
+            if entry.metadata().is_ok_and(|metadata| {
+                metadata.file_type().is_char_device() && metadata.rdev() as u32 == device
+            }) {
                 return entry.file_name();
             }
         }
@@ -454,7 +481,10 @@ pub fn linux_boot_time(proc_root: &std::path::Path) -> Result<i64, ProcessError>
     let text = std::fs::read_to_string(&path).map_err(read_error(&path))?;
     for line in text.lines() {
         if line.starts_with("btime ") {
-            return line.split_whitespace().nth(1).and_then(|value| value.parse().ok())
+            return line
+                .split_whitespace()
+                .nth(1)
+                .and_then(|value| value.parse().ok())
                 .ok_or(ProcessParseError::Field("boot time").into());
         }
     }
@@ -464,18 +494,36 @@ pub fn linux_boot_time(proc_root: &std::path::Path) -> Result<i64, ProcessError>
 #[cfg(target_os = "macos")]
 pub fn darwin_process_row(pid: i32) -> Option<ProcessRow> {
     let info = crate::sys::process::darwin_bsd(pid)?;
-    Some(ProcessRow { pid, ppid: info.ppid, pgid: info.pgid,
-        started: format!("{}.{:06}", info.start_sec, info.start_usec), command: info.command,
-        zombie: info.status == 5, tty: tty_name(info.device, std::path::Path::new("/dev")).to_string_lossy().into_owned(), status: info.status })
+    Some(ProcessRow {
+        pid,
+        ppid: info.ppid,
+        pgid: info.pgid,
+        started: format!("{}.{:06}", info.start_sec, info.start_usec),
+        command: info.command,
+        zombie: info.status == 5,
+        tty: tty_name(info.device, std::path::Path::new("/dev"))
+            .to_string_lossy()
+            .into_owned(),
+        status: info.status,
+    })
 }
 
 pub fn probe_process_row(pid: i32) -> Option<ProcessRow> {
     #[cfg(target_os = "macos")]
-    { darwin_process_row(pid) }
+    {
+        darwin_process_row(pid)
+    }
     #[cfg(target_os = "linux")]
-    { linux_read_row(pid, std::path::Path::new("/proc")).ok().flatten() }
+    {
+        linux_read_row(pid, std::path::Path::new("/proc"))
+            .ok()
+            .flatten()
+    }
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-    { let _ = pid; None }
+    {
+        let _ = pid;
+        None
+    }
 }
 
 #[cfg(test)]
@@ -486,8 +534,19 @@ mod observation_tests {
     fn fixture_row(root: &Path, pid: i32, children: &str) {
         let directory = root.join(pid.to_string());
         std::fs::create_dir_all(directory.join("task").join(pid.to_string())).unwrap();
-        std::fs::write(directory.join("stat"), format!("{pid} (tool) S 1 2 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 1234")).unwrap();
-        std::fs::write(directory.join("task").join(pid.to_string()).join("children"), children).unwrap();
+        std::fs::write(
+            directory.join("stat"),
+            format!("{pid} (tool) S 1 2 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 1234"),
+        )
+        .unwrap();
+        std::fs::write(
+            directory
+                .join("task")
+                .join(pid.to_string())
+                .join("children"),
+            children,
+        )
+        .unwrap();
     }
 
     #[test]
@@ -496,7 +555,9 @@ mod observation_tests {
         fixture_row(root.path(), 42, "43 44");
         fixture_row(root.path(), 43, "42");
         fixture_row(root.path(), 45, "");
-        let rows = linux_tree_snapshot(42, &[45, 45, 999], root.path()).unwrap().unwrap();
+        let rows = linux_tree_snapshot(42, &[45, 45, 999], root.path())
+            .unwrap()
+            .unwrap();
         assert_eq!(rows.keys().copied().collect::<Vec<_>>(), [42, 43, 45]);
         std::fs::remove_file(root.path().join("43/task/43/children")).unwrap();
         assert!(linux_tree_snapshot(42, &[], root.path()).unwrap().is_none());
@@ -508,7 +569,10 @@ mod observation_tests {
         std::fs::write(root.path().join("stat"), "cpu 1 2 3\nbtime 1704067200\n").unwrap();
         assert_eq!(linux_boot_time(root.path()).unwrap(), 1704067200);
         std::fs::write(root.path().join("stat"), "cpu 1 2 3\n").unwrap();
-        assert_eq!(linux_boot_time(root.path()).unwrap_err().to_string(), "Linux boot time unavailable");
+        assert_eq!(
+            linux_boot_time(root.path()).unwrap_err().to_string(),
+            "Linux boot time unavailable"
+        );
         assert_eq!(tty_name(0, root.path()), "??");
         assert_eq!(tty_name(u32::MAX, root.path()), "??");
         assert_eq!(tty_name(12345, root.path()), "12345");
@@ -517,13 +581,20 @@ mod observation_tests {
     #[test]
     fn canonical_local_dates_match_python_with_explicit_epochs() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../..");
-        let Some(expected) = crate::test_support::python(&root, r#"
+        let Some(expected) = crate::test_support::python(
+            &root,
+            r#"
 import json
 from skills.orchestrate.scripts.process_info import _lstart
 print(json.dumps([_lstart(t) for t in [0, 1704067200, 1735689599, -1]]))
-"#) else { return; };
-        let actual: Vec<_> = [0.0, 1704067200.0, 1735689599.0, -1.0].into_iter()
-            .map(|epoch| crate::sys::process::lstart(epoch).unwrap()).collect();
+"#,
+        ) else {
+            return;
+        };
+        let actual: Vec<_> = [0.0, 1704067200.0, 1735689599.0, -1.0]
+            .into_iter()
+            .map(|epoch| crate::sys::process::lstart(epoch).unwrap())
+            .collect();
         assert_eq!(serde_json::to_value(actual).unwrap(), expected);
     }
 
@@ -535,10 +606,13 @@ print(json.dumps([_lstart(t) for t in [0, 1704067200, 1735689599, -1]]))
         raw[..8].copy_from_slice(&1704067200_i64.to_ne_bytes());
         raw[8..16].copy_from_slice(&123456_i64.to_ne_bytes());
         for (offset, value) in [(40, 42_i32), (420, 501), (560, 2), (564, 3)] {
-            raw[offset..offset+4].copy_from_slice(&value.to_ne_bytes());
+            raw[offset..offset + 4].copy_from_slice(&value.to_ne_bytes());
         }
         let facts = darwin_facts_bytes(42, &raw).unwrap();
-        assert_eq!((facts.pid, facts.ppid, facts.pgid, facts.uid), (42, 2, 3, 501));
+        assert_eq!(
+            (facts.pid, facts.ppid, facts.pgid, facts.uid),
+            (42, 2, 3, 501)
+        );
         assert_eq!(facts.start_epoch, 1704067200.123456);
         assert!(darwin_facts_bytes(43, &raw).is_none());
         assert!(darwin_facts_bytes(42, &raw[..647]).is_none());
@@ -552,7 +626,9 @@ mod os_text {
     use serde::{Deserialize, Deserializer, Serializer};
     use std::ffi::{OsStr, OsString};
     pub fn serialize<S: Serializer>(text: &OsStr, serializer: S) -> Result<S::Ok, S::Error> {
-        let text = text.to_str().ok_or_else(|| serde::ser::Error::custom("process text is not UTF-8"))?;
+        let text = text
+            .to_str()
+            .ok_or_else(|| serde::ser::Error::custom("process text is not UTF-8"))?;
         serializer.serialize_str(text)
     }
     pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<OsString, D::Error> {
@@ -570,7 +646,11 @@ pub struct LinuxClock {
 
 /// The filesystem and clock are values so the Linux path can be exercised on
 /// macOS too. A missing cmdline retains the kernel's comm, including kthreads.
-pub fn linux_process_at(pid: i32, proc_root: &std::path::Path, clock: LinuxClock) -> Option<ProcessInfo> {
+pub fn linux_process_at(
+    pid: i32,
+    proc_root: &std::path::Path,
+    clock: LinuxClock,
+) -> Option<ProcessInfo> {
     use std::os::unix::fs::MetadataExt;
     let row = linux_read_row(pid, proc_root).ok()??;
     let directory = proc_root.join(pid.to_string());
@@ -578,23 +658,44 @@ pub fn linux_process_at(pid: i32, proc_root: &std::path::Path, clock: LinuxClock
     let text = String::from_utf8_lossy(&raw);
     let end = text.rfind(") ")?;
     let fields: Vec<_> = text[end + 2..].split_whitespace().collect();
-    if clock.ticks <= 0 || clock.page_size <= 0 { return None; }
+    if clock.ticks <= 0 || clock.page_size <= 0 {
+        return None;
+    }
     let number = |index: usize| fields.get(index)?.parse::<i64>().ok();
     let epoch = clock.boot_epoch as f64 + row.started.parse::<f64>().ok()? / clock.ticks as f64;
     let cpu = number(11)?.checked_add(number(12)?)? as f64 / clock.ticks as f64;
     let rss = number(21)?.checked_mul(clock.page_size)?.div_euclid(1024);
-    let command = std::fs::read(directory.join("cmdline")).ok().and_then(|bytes| {
-        let start = bytes.iter().position(|&byte| byte != 0)?;
-        let end = bytes.iter().rposition(|&byte| byte != 0)? + 1;
-        Some(shell_join_os(bytes[start..end].split(|&byte| byte == 0).map(OsStr::from_bytes)))
-    }).unwrap_or_else(|| row.command.clone().into());
-    Some(ProcessInfo { pid, ppid: row.ppid, pgid: row.pgid,
+    let command = std::fs::read(directory.join("cmdline"))
+        .ok()
+        .and_then(|bytes| {
+            let start = bytes.iter().position(|&byte| byte != 0)?;
+            let end = bytes.iter().rposition(|&byte| byte != 0)? + 1;
+            Some(shell_join_os(
+                bytes[start..end]
+                    .split(|&byte| byte == 0)
+                    .map(OsStr::from_bytes),
+            ))
+        })
+        .unwrap_or_else(|| row.command.clone().into());
+    Some(ProcessInfo {
+        pid,
+        ppid: row.ppid,
+        pgid: row.pgid,
         lstart: crate::sys::process::lstart(epoch).ok()?,
         elapsed: duration(clock.now_epoch - epoch, true, false).ok()?,
-        cpu: duration(cpu, false, false).ok()?, command, comm: row.command.into(),
-        stat: fields.first()?.to_string(), rss,
-        tty: if *fields.get(4)? == "0" { "?".into() } else { fields[4].into() },
-        uid: directory.metadata().ok()?.uid().into(), start_epoch: Some(epoch) })
+        cpu: duration(cpu, false, false).ok()?,
+        command,
+        comm: row.command.into(),
+        stat: fields.first()?.to_string(),
+        rss,
+        tty: if *fields.get(4)? == "0" {
+            "?".into()
+        } else {
+            fields[4].into()
+        },
+        uid: directory.metadata().ok()?.uid().into(),
+        start_epoch: Some(epoch),
+    })
 }
 
 pub fn now_epoch() -> f64 {
@@ -604,7 +705,9 @@ pub fn now_epoch() -> f64 {
     }
 }
 
-pub fn process(pid: i32) -> Option<ProcessInfo> { process_at(pid, now_epoch()) }
+pub fn process(pid: i32) -> Option<ProcessInfo> {
+    process_at(pid, now_epoch())
+}
 
 pub fn process_at(pid: i32, now: f64) -> Option<ProcessInfo> {
     #[cfg(target_os = "macos")]
@@ -613,29 +716,65 @@ pub fn process_at(pid: i32, now: f64) -> Option<ProcessInfo> {
         let epoch = row.started.parse::<f64>().ok()?;
         let task = crate::sys::process::darwin_task(pid);
         let cpu = task.as_ref().map_or(0.0, |task| task.cpu_seconds);
-        let stat = match row.status { 4 => "T", 5 => "Z", _ => if task.as_ref().is_some_and(|task| task.running) { "R" } else { "S" } };
+        let stat = match row.status {
+            4 => "T",
+            5 => "Z",
+            _ => {
+                if task.as_ref().is_some_and(|task| task.running) {
+                    "R"
+                } else {
+                    "S"
+                }
+            }
+        };
         let uid = crate::sys::process::darwin_bsd(pid).map_or(-1, |info| info.uid);
         let command = crate::sys::process::darwin_command(pid);
-        Some(ProcessInfo { pid, ppid: row.ppid, pgid: row.pgid,
+        Some(ProcessInfo {
+            pid,
+            ppid: row.ppid,
+            pgid: row.pgid,
             lstart: crate::sys::process::lstart(epoch).ok()?,
-            elapsed: duration(now - epoch, true, true).ok()?, cpu: duration(cpu, false, true).ok()?,
-            command: if command.is_empty() { row.command.clone().into() } else { command },
-            comm: row.command.into(), stat: stat.into(), rss: task.map_or(0, |task| task.rss_kib),
-            tty: row.tty, uid, start_epoch: Some(epoch) })
+            elapsed: duration(now - epoch, true, true).ok()?,
+            cpu: duration(cpu, false, true).ok()?,
+            command: if command.is_empty() {
+                row.command.clone().into()
+            } else {
+                command
+            },
+            comm: row.command.into(),
+            stat: stat.into(),
+            rss: task.map_or(0, |task| task.rss_kib),
+            tty: row.tty,
+            uid,
+            start_epoch: Some(epoch),
+        })
     }
     #[cfg(target_os = "linux")]
     {
         let root = std::path::Path::new("/proc");
-        if !root.is_dir() { return ps_process(pid); }
-        let clock = LinuxClock { boot_epoch: linux_boot_time(root).ok()?, ticks: crate::sys::process::clock_ticks().ok()?,
-            page_size: crate::sys::process::page_size().ok()?, now_epoch: now };
+        if !root.is_dir() {
+            return ps_process(pid);
+        }
+        let clock = LinuxClock {
+            boot_epoch: linux_boot_time(root).ok()?,
+            ticks: crate::sys::process::clock_ticks().ok()?,
+            page_size: crate::sys::process::page_size().ok()?,
+            now_epoch: now,
+        };
         linux_process_at(pid, root, clock)
     }
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-    { let _ = now; ps_process(pid) }
+    {
+        let _ = now;
+        ps_process(pid)
+    }
 }
 
-fn ps_command(args: &[&str], timeout: f64, canonical: bool) -> Result<crate::capture::BoundedProcessResult, ProcessError> {
+fn ps_command(
+    args: &[&str],
+    timeout: f64,
+    canonical: bool,
+) -> Result<crate::capture::BoundedProcessResult, ProcessError> {
     let mut env: std::collections::BTreeMap<OsString, OsString> = std::env::vars_os().collect();
     if canonical {
         env.insert("LC_ALL".into(), "C".into());
@@ -644,11 +783,20 @@ fn ps_command(args: &[&str], timeout: f64, canonical: bool) -> Result<crate::cap
     let mut options = crate::bounded::Options::new(std::path::Path::new("."), timeout);
     options.env = Some(&env);
     options.merge_stderr = false;
-    let command: Vec<_> = std::iter::once("/bin/ps").chain(args.iter().copied()).map(OsString::from).collect();
+    let command: Vec<_> = std::iter::once("/bin/ps")
+        .chain(args.iter().copied())
+        .map(OsString::from)
+        .collect();
     let result = crate::bounded::run_bounded(&command, options)?;
-    if result.timed_out { return Err(ProcessError::Census("ps census failed: process timed out".into())); }
+    if result.timed_out {
+        return Err(ProcessError::Census(
+            "ps census failed: process timed out".into(),
+        ));
+    }
     if result.output_truncated || result.stderr_truncated == Some(true) {
-        return Err(ProcessError::Census("ps census output exceeds observation bound".into()));
+        return Err(ProcessError::Census(
+            "ps census output exceeds observation bound".into(),
+        ));
     }
     Ok(result)
 }
@@ -661,29 +809,54 @@ pub fn ps_start_time(pid: i32, canonical: bool) -> Option<String> {
 
 pub fn ps_process(pid: i32) -> Option<ProcessInfo> {
     let pid_arg = pid.to_string();
-    let result = ps_command(&["-o", "pid=,ppid=,pgid=,etime=,time=,stat=,rss=,command=", "-p", &pid_arg], 2.0, true).ok()?;
-    if result.returncode != 0 { return None; }
+    let result = ps_command(
+        &[
+            "-o",
+            "pid=,ppid=,pgid=,etime=,time=,stat=,rss=,command=",
+            "-p",
+            &pid_arg,
+        ],
+        2.0,
+        true,
+    )
+    .ok()?;
+    if result.returncode != 0 {
+        return None;
+    }
     let lstart = ps_start_time(pid, true)?;
     #[cfg(target_os = "macos")]
     let epoch = crate::sys::process::darwin_facts(pid).map(|facts| facts.start_epoch);
     #[cfg(not(target_os = "macos"))]
     let epoch = None;
-    ps_process_output(pid, &result.output, Some(&lstart), epoch).ok().flatten()
+    ps_process_output(pid, &result.output, Some(&lstart), epoch)
+        .ok()
+        .flatten()
 }
 
 pub fn start_time(pid: i32) -> Option<String> {
-    process(pid).map(|info| info.lstart).or_else(|| ps_start_time(pid, true))
+    process(pid)
+        .map(|info| info.lstart)
+        .or_else(|| ps_start_time(pid, true))
 }
 
 pub fn processes() -> Result<Vec<ProcessInfo>, ProcessError> {
     #[cfg(target_os = "macos")]
     let candidates = crate::sys::process::darwin_pids().ok();
     #[cfg(target_os = "linux")]
-    let candidates = std::fs::read_dir("/proc").ok().map(|entries| entries.flatten().filter_map(|entry| entry.file_name().to_str()?.parse().ok()).collect::<Vec<i32>>());
+    let candidates = std::fs::read_dir("/proc").ok().map(|entries| {
+        entries
+            .flatten()
+            .filter_map(|entry| entry.file_name().to_str()?.parse().ok())
+            .collect::<Vec<i32>>()
+    });
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     let candidates: Option<Vec<i32>> = None;
     match candidates {
-        Some(pids) => Ok(pids.into_iter().filter(|&pid| pid > 0).filter_map(process).collect()),
+        Some(pids) => Ok(pids
+            .into_iter()
+            .filter(|&pid| pid > 0)
+            .filter_map(process)
+            .collect()),
         None => ps_processes(),
     }
 }
@@ -691,13 +864,31 @@ pub fn processes() -> Result<Vec<ProcessInfo>, ProcessError> {
 pub fn ps_processes() -> Result<Vec<ProcessInfo>, ProcessError> {
     let result = ps_command(&["-axo", "pid="], 5.0, false)?;
     if result.returncode != 0 {
-        return Err(ProcessError::Census(result.stderr.as_deref().map(str::trim).filter(|text| !text.is_empty()).unwrap_or("ps census failed").into()));
+        return Err(ProcessError::Census(
+            result
+                .stderr
+                .as_deref()
+                .map(str::trim)
+                .filter(|text| !text.is_empty())
+                .unwrap_or("ps census failed")
+                .into(),
+        ));
     }
-    let pids: Vec<i32> = result.output.split_whitespace().filter(|value| value.bytes().all(|byte| byte.is_ascii_digit()))
-        .filter_map(|value| value.parse().ok()).collect();
-    if pids.is_empty() { return Err(ProcessError::Census("ps census returned no PIDs".into())); }
+    let pids: Vec<i32> = result
+        .output
+        .split_whitespace()
+        .filter(|value| value.bytes().all(|byte| byte.is_ascii_digit()))
+        .filter_map(|value| value.parse().ok())
+        .collect();
+    if pids.is_empty() {
+        return Err(ProcessError::Census("ps census returned no PIDs".into()));
+    }
     let rows: Vec<_> = pids.into_iter().filter_map(ps_process).collect();
-    if rows.is_empty() { return Err(ProcessError::Census("ps census could not inspect any PID".into())); }
+    if rows.is_empty() {
+        return Err(ProcessError::Census(
+            "ps census could not inspect any PID".into(),
+        ));
+    }
     Ok(rows)
 }
 
@@ -712,12 +903,30 @@ mod process_tests {
         let directory = root.path().join("42");
         std::fs::create_dir(&directory).unwrap();
         let mut fields = vec!["0".to_string(); 22];
-        for (index, value) in [(0, "S"), (1, "2"), (2, "3"), (4, "0"), (11, "120"), (12, "5"), (19, "100"), (21, "4")] {
+        for (index, value) in [
+            (0, "S"),
+            (1, "2"),
+            (2, "3"),
+            (4, "0"),
+            (11, "120"),
+            (12, "5"),
+            (19, "100"),
+            (21, "4"),
+        ] {
             fields[index] = value.into();
         }
-        std::fs::write(directory.join("stat"), format!("42 (tool) {}", fields.join(" "))).unwrap();
+        std::fs::write(
+            directory.join("stat"),
+            format!("42 (tool) {}", fields.join(" ")),
+        )
+        .unwrap();
         std::fs::write(directory.join("cmdline"), b"tool\0two words\0").unwrap();
-        let clock = LinuxClock { boot_epoch: 1704067200, ticks: 100, page_size: 4096, now_epoch: 1704067262.0 };
+        let clock = LinuxClock {
+            boot_epoch: 1704067200,
+            ticks: 100,
+            page_size: 4096,
+            now_epoch: 1704067262.0,
+        };
         let row = linux_process_at(42, root.path(), clock).unwrap();
         assert_eq!((row.ppid, row.pgid, row.rss), (2, 3, 16));
         assert_eq!(row.start_epoch, Some(1704067201.0));
@@ -726,7 +935,10 @@ mod process_tests {
         assert_eq!(row.command, "tool 'two words'");
         assert_eq!(row.stat, "S");
         std::fs::write(directory.join("cmdline"), b"").unwrap();
-        assert_eq!(linux_process_at(42, root.path(), clock).unwrap().command, "tool");
+        assert_eq!(
+            linux_process_at(42, root.path(), clock).unwrap().command,
+            "tool"
+        );
         std::fs::write(directory.join("cmdline"), b"tool\0bad\xff\0").unwrap();
         let row = linux_process_at(42, root.path(), clock).unwrap();
         assert_eq!(row.command.as_bytes(), b"tool 'bad\xff'");
@@ -740,16 +952,32 @@ mod process_tests {
             panic!("native self observation unavailable");
         };
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../..");
-        let script = format!(r#"
+        let script = format!(
+            r#"
 import json
 from skills.orchestrate.scripts import process_info as p
 row = p.process({pid})
 assert row is not None
 print(json.dumps([row.pid, row.ppid, row.pgid, row.lstart, row.command, row.comm, row.tty, row.uid, row.start_epoch]))
-"#);
-        let Some(expected) = crate::test_support::python(&root, &script) else { return; };
-        assert_eq!(serde_json::json!([row.pid, row.ppid, row.pgid, row.lstart, row.command.to_str().unwrap(),
-            row.comm.to_str().unwrap(), row.tty, row.uid, row.start_epoch]), expected);
+"#
+        );
+        let Some(expected) = crate::test_support::python(&root, &script) else {
+            return;
+        };
+        assert_eq!(
+            serde_json::json!([
+                row.pid,
+                row.ppid,
+                row.pgid,
+                row.lstart,
+                row.command.to_str().unwrap(),
+                row.comm.to_str().unwrap(),
+                row.tty,
+                row.uid,
+                row.start_epoch
+            ]),
+            expected
+        );
     }
 
     #[test]
@@ -757,5 +985,40 @@ print(json.dumps([row.pid, row.ppid, row.pgid, row.lstart, row.command, row.comm
         assert!(process(2_000_000_000).is_none());
         let rows = processes().unwrap();
         assert!(rows.iter().any(|row| row.pid == std::process::id() as i32));
+    }
+}
+
+#[cfg(test)]
+mod numeric_tests {
+    use super::*;
+
+    #[test]
+    fn differential_durations_retain_the_finite_python_float_domain() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../..");
+        let Some(expected) = crate::test_support::python(
+            &root,
+            r#"
+import json
+from skills.orchestrate.scripts import process_info as p
+values = [-float('inf'), float('nan'), 1e20, 1e100, float.fromhex('0x1.fffffffffffffp+1023')]
+out = []
+for platform in ['darwin', 'linux']:
+    p.sys.platform = platform
+    for elapsed in [False, True]:
+        out.extend(p._duration(value, elapsed=elapsed) for value in values)
+print(json.dumps(out))
+"#,
+        ) else {
+            return;
+        };
+        let mut actual = Vec::new();
+        for darwin in [true, false] {
+            for elapsed in [false, true] {
+                for value in [f64::NEG_INFINITY, f64::NAN, 1e20, 1e100, f64::MAX] {
+                    actual.push(duration(value, elapsed, darwin).unwrap());
+                }
+            }
+        }
+        assert_eq!(serde_json::to_value(actual).unwrap(), expected);
     }
 }

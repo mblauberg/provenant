@@ -6,6 +6,7 @@
 pub mod bounded;
 pub mod capture;
 pub mod identity;
+mod pending;
 pub mod process_info;
 pub mod ps;
 #[allow(unsafe_code)]
