@@ -69,8 +69,9 @@ pub(crate) mod tests {
     fn agy_clamps_timeout_and_selects_mode_permission() {
         let read = agy(&plan(Mode::ReadOnly));
         assert_eq!(
-            &read.argv[..6],
+            &read.argv[..7],
             &[
+                "agy",
                 "--output-format",
                 "stream-json",
                 "--disable-slash-commands",

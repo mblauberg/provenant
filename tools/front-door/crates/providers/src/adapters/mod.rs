@@ -70,9 +70,11 @@ pub(super) struct Metadata<'a> {
 }
 
 pub(super) fn profile(cli: &str, argv: Vec<String>, metadata: Metadata<'_>) -> AdapterProfile {
+    let mut command = vec![cli.into()];
+    command.extend(argv);
     AdapterProfile {
         cli: cli.into(),
-        argv,
+        argv: command,
         prompt_transport: metadata.transport,
         stdin: metadata.stdin,
         output_format: metadata.output.into(),
@@ -92,3 +94,77 @@ pub mod codex;
 pub mod copilot;
 pub mod cursor;
 pub mod kiro;
+
+#[cfg(test)]
+mod differential_tests {
+    use super::*;
+    use std::io::Write;
+    use std::path::PathBuf;
+    use std::process::{Command, Stdio};
+
+    #[test]
+    fn argv_profiles_match_python_on_shared_fixtures() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../../");
+        let probe = Command::new("python3").arg("--version").output();
+        if matches!(probe, Err(ref error) if error.kind() == std::io::ErrorKind::NotFound) {
+            eprintln!("skipping Python differential: python3 is unavailable");
+            return;
+        }
+        assert!(probe.unwrap().status.success(), "python3 --version failed");
+
+        for mode in [Mode::ReadOnly, Mode::WorktreeWrite] {
+            let plan = Plan {
+                mode,
+                prompt: "Compare the fixture exactly.".into(),
+                boundary_prompt: "Use file-reading tools only.".into(),
+                timeout_seconds: 30,
+                agy_sandbox: true,
+                resume_session: Some("session-fixture".into()),
+                model: Some("model-fixture".into()),
+                effort: Some("high".into()),
+                session_id: "session-id-fixture".into(),
+                cwd: "/workspace/fixture".into(),
+                add_dirs: vec!["/shared/fixture".into()],
+                claude_api_key: true,
+                context_ceiling: Some(12_000),
+            };
+            let rust_profiles = [
+                ("agy", agy::agy(&plan)),
+                ("claude", claude::claude(&plan)),
+                ("copilot", copilot::copilot(&plan)),
+                ("cursor", cursor::cursor(&plan)),
+                ("kiro", kiro::kiro(&plan)),
+            ];
+            let mut input = serde_json::to_value(&plan).unwrap();
+            input["applied"] = serde_json::json!({"add_dirs": plan.add_dirs});
+            input["route"] = serde_json::json!({"endpoint_base_url": "https://example.invalid"});
+            let encoded = serde_json::to_vec(&input).unwrap();
+            for (name, profile) in rust_profiles {
+                let mut child = match Command::new("python3")
+                    .args(["-c", "import importlib,json,sys; p=json.load(sys.stdin); print(json.dumps(importlib.import_module(sys.argv[1]).argv(p), ensure_ascii=False))", &format!("skills.orchestrate.scripts.adapters.{name}")])
+                    .current_dir(&root)
+                    .stdin(Stdio::piped())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped())
+                    .spawn()
+                {
+                    Ok(child) => child,
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                        eprintln!("skipping Python differential: python3 disappeared");
+                        return;
+                    }
+                    Err(error) => panic!("could not start Python adapter oracle: {error}"),
+                };
+                child.stdin.take().unwrap().write_all(&encoded).unwrap();
+                let output = child.wait_with_output().unwrap();
+                assert!(
+                    output.status.success(),
+                    "{name} Python oracle failed: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+                let expected: Vec<String> = serde_json::from_slice(&output.stdout).unwrap();
+                assert_eq!(profile.argv, expected, "{name} argv differs for {mode:?}");
+            }
+        }
+    }
+}
