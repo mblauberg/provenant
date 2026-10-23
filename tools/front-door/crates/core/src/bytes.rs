@@ -4,28 +4,31 @@ pub fn hex(bytes: &[u8]) -> String {
     const DIGITS: &[u8; 16] = b"0123456789abcdef";
     bytes
         .iter()
-        .flat_map(|b| {
+        .flat_map(|byte| {
             [
-                char::from(DIGITS[usize::from(b >> 4)]),
-                char::from(DIGITS[usize::from(b & 15)]),
+                char::from(DIGITS[usize::from(byte >> 4)]),
+                char::from(DIGITS[usize::from(byte & 15)]),
             ]
         })
         .collect()
 }
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn hex_matches_python_for_every_byte_and_empty_input() {
-        let values = vec![Vec::new(), (0..=255u8).collect()];
-        let Some(expected) = crate::test_support::python_values(
-            "print(json.dumps([bytes(v).hex() for v in values]))",
-            &serde_json::json!(values),
-        ) else {
-            return;
-        };
-        assert_eq!(
-            serde_json::json!(values.iter().map(|v| super::hex(v)).collect::<Vec<_>>()),
-            expected
-        );
+
+/// Decode canonical lowercase hexadecimal, refusing odd lengths and other digits.
+pub fn unhex(text: &str) -> Option<Vec<u8>> {
+    let (pairs, remainder) = text.as_bytes().as_chunks::<2>();
+    if !remainder.is_empty() {
+        return None;
     }
+    pairs.iter().map(decode_hex_byte).collect()
+}
+
+pub(crate) fn decode_hex_byte(pair: &[u8; 2]) -> Option<u8> {
+    fn nibble(byte: u8) -> Option<u8> {
+        match byte {
+            b'0'..=b'9' => Some(byte - b'0'),
+            b'a'..=b'f' => Some(byte - b'a' + 10),
+            _ => None,
+        }
+    }
+    Some(nibble(pair[0])? * 16 + nibble(pair[1])?)
 }

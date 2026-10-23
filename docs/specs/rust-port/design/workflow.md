@@ -272,7 +272,7 @@ Confinement supplies held directory handles and validated ID components.
 No old-root writes, directory scan to guess a session, lossy path conversion
 or `..` components. Git OIDs support SHA-1 and SHA-256. Records performs
 bounded decode and canonical JSON encoding: sorted object keys, UTF-8, integer
-UTC microseconds and final LF. Reject duplicate keys, unknown versions/tags,
+UTC microseconds and no final LF in canonical bytes. Files written to disk may append LF; digests cover the canonical bytes without it. Reject duplicate keys, unknown versions/tags,
 oversized input and invalid integers. Limits: receipt 64 KiB, 256 review refs,
 checkpoint 32 KiB and hook output 8 KiB. Reports have deterministic ordering.
 
@@ -840,7 +840,7 @@ workflow. No cross-crate private-constructor or reverse-dependency guarantee.
 | Owner crate/host | Ask and boundary |
 |---|---|
 | core | `ProjectId`, `DeliveryId`, `SessionId`, `AttemptId`, `ActorId`, `RepoId`, `GitOid` (SHA-1/SHA-256), `Digest`, `UtcMicros`, `Deadline`, `CancelToken`, `RelPath::parse`; production `CommitClock` via `jiff`. No `WorkScope` ask after cutting idle validation. |
-| records | Bounded decode, canonical encode (sorted keys/final LF), digest; minimal receipt, subject, risk/review policy and request records; `RouteProvenance`/`ReviewEligibility` with Observed/ChairAttested/Unknown. Facts serialise but do not deserialise. No checkpoint or writing-rule schema. |
+| records | Bounded decode, canonical encode (sorted keys, no final LF; disk files may append LF), digest; minimal receipt, subject, risk/review policy and request records; `RouteProvenance`/`ReviewEligibility` with Observed/ChairAttested/Unknown. Facts serialise but do not deserialise. No checkpoint or writing-rule schema. |
 | config/state | Typed risk/review settings and bounds from one root-owned `config.toml` plus compiled defaults, with optional `profile =`; no layers/project overlays/per-knob env or mutation verbs. Root `~/.local/share/provenant/v1`, `--state-dir` over `PROVENANT_STATE_DIR`; accept workflow subtree row. Own `install [--dry-run]`, `check install`, `uninstall`, `--legacy-checkout` inventory and authorised instruction updates; preserve unrelated/user-owned entries. Writing data stays with skills. |
 | supervisor | Safe FS: stable lock inode, no-follow open, atomic replace/no-replace, file/directory sync; expose bounded `FileHandle::lock(LockOptions)` polling non-blocking `flock` through confinement, with cancellation. `run_utility` for fixed git/gh reads. Test-only fixture launch/kill support. |
 | confinement | Own `Grant`, `Workspace`, `RepoHandle`; `open_workflow_store`, `open_artifact`, `narrow`, safe `git_facts` with replacement objects off/alternates ignored. `StoreRoot::lock(..., Deadline, CancelToken)` returns a held record for bounded `read`/atomic `publish`; ordinary path/phase/cause I/O diagnostics, no workflow uncertain-commit protocol. |
