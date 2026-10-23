@@ -49,7 +49,7 @@ pub(crate) fn has_dot_or_nul(path: &Path) -> bool {
 mod tests {
     use super::*;
     #[test]
-    fn relative_paths_reject_normalization_and_parent_traversal() {
+    fn relative_paths_reject_normalisation_and_parent_traversal() {
         assert_eq!(
             RelativePath::parse("a/b").unwrap().as_path(),
             Path::new("a/b")

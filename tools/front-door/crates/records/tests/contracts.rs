@@ -27,7 +27,7 @@ fn bounded_decode_accepts_v1_and_preserves_unsigned_integers() {
 }
 
 #[test]
-fn bounded_decode_normalizes_negative_zero_to_an_integer() {
+fn bounded_decode_normalises_negative_zero_to_an_integer() {
     let decoded: serde_json::Value =
         decode(Cursor::new(b"-0"), Limits::default()).expect("negative zero is an integer token");
     let number = decoded.as_number().expect("number");

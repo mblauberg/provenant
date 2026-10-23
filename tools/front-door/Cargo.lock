@@ -428,47 +428,14 @@ dependencies = [
 [[package]]
 name = "provenant-cli"
 version = "0.1.0"
-dependencies = [
- "clap",
- "provenant-core",
- "provenant-records",
- "provenant-supervisor",
- "regex",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror",
-]
 
 [[package]]
 name = "provenant-config"
 version = "0.1.0"
-dependencies = [
- "clap",
- "provenant-core",
- "provenant-records",
- "provenant-supervisor",
- "serde",
- "serde_json",
- "sha2",
- "tempfile",
- "thiserror",
- "toml_edit",
-]
 
 [[package]]
 name = "provenant-confinement"
 version = "0.1.0"
-dependencies = [
- "provenant-core",
- "provenant-records",
- "provenant-supervisor",
- "serde",
- "serde_json",
- "sha2",
- "tempfile",
- "thiserror",
-]
 
 [[package]]
 name = "provenant-core"
@@ -510,15 +477,6 @@ dependencies = [
 [[package]]
 name = "provenant-providers"
 version = "0.1.0"
-dependencies = [
- "jiff",
- "provenant-core",
- "provenant-records",
- "regex",
- "serde",
- "serde_json",
- "thiserror",
-]
 
 [[package]]
 name = "provenant-quota"
@@ -560,16 +518,6 @@ dependencies = [
 [[package]]
 name = "provenant-run"
 version = "0.1.0"
-dependencies = [
- "jiff",
- "provenant-core",
- "provenant-records",
- "provenant-supervisor",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror",
-]
 
 [[package]]
 name = "provenant-supervisor"
