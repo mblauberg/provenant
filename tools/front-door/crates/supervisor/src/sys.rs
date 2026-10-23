@@ -241,6 +241,7 @@ mod tests {
 }
 
 mod child;
+pub use child::ChildWaitError;
 pub(crate) use child::{anonymous_spool, OwnedChild};
 
 pub mod process;

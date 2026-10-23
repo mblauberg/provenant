@@ -141,3 +141,18 @@ remains a cut-over requirement under rulebook v3.
 - **Follow-up:** Agree the bounded refusal and complete edge error/OS-text
   encoding with the CLI/record owners before cut-over; add independent J1/J2
   failure cases and unrestricted Linux/macOS subprocess conformance.
+
+### RP-1301 v4 integer bounds
+
+Under rulebook v4 R4, PID selection is bounded to i64/u64. For example Python
+accepts `18446744073709551616`; Rust now refuses it with typed
+`PsParseError::NumberOutOfRange`, rather than representing an arbitrary Python
+integer. At the i32 OS PID/record boundary, `2147483648` is likewise a typed
+`NumberOutOfRange` (never rounded through f64 or silently dropped by the
+text decoder). Darwin task tick addition refuses u64 overflow with
+`ProcessParseError::NumberOutOfRange` before converting the duration to float.
+This is the rulebook's recorded **improvement**, not command cut-over authority.
+Rust Unicode/range and integer-addition fixtures cover these cases. Lookup
+and census APIs propagate the typed range errors rather than dropping rows;
+the filesystem fixture checks both ppid and pgid overflow and disappearance.
+The source revision above is unchanged; CLI rendering remains an edge task.

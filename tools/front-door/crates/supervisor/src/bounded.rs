@@ -4,7 +4,6 @@ use crate::capture::{
 };
 use crate::identity::Signal;
 use crate::sys::{anonymous_spool, OwnedChild};
-use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::io;
 use std::os::fd::BorrowedFd;
@@ -28,12 +27,14 @@ pub enum BoundedError {
     },
     #[error(transparent)]
     Capture(#[from] CaptureError),
+    #[error(transparent)]
+    Wait(#[from] crate::sys::ChildWaitError),
 }
 
 pub struct Options<'a> {
     pub cwd: &'a Path,
     pub timeout_seconds: f64,
-    pub env: Option<&'a BTreeMap<OsString, OsString>>,
+    pub env: Option<&'a [(OsString, OsString)]>,
     pub output_limit_bytes: i64,
     pub merge_stderr: bool,
     pub pass_fds: &'a [BorrowedFd<'a>],
@@ -164,39 +165,10 @@ fn run(
                 .try_clone()
                 .map_err(io_error("clone stderr spool"))?,
         ));
-    if let Some(env) = options.env {
-        launch.env_clear().envs(env);
-    }
     let mut child =
         OwnedChild::spawn(&mut launch, options.pass_fds, options.env).map_err(io_error("spawn"))?;
-    // Python starts its wait timeout after Popen has returned.
-    let waiting = Instant::now();
-    let mut state = State::Waiting;
-    let mut timed_out = false;
-    loop {
-        let exited = child.exited().map_err(io_error("observe child"))?;
-        match state.step(
-            waiting.elapsed().as_secs_f64(),
-            options.timeout_seconds,
-            exited,
-            child.group_exists(),
-        ) {
-            Effect::Wait => std::thread::sleep(Duration::from_millis(10)),
-            Effect::Terminate { timed_out: expired } => {
-                timed_out = expired;
-                if child.signal(Signal::Terminate).is_err() && !exited {
-                    child.kill_direct().map_err(io_error("kill direct child"))?;
-                }
-            }
-            Effect::Kill => {
-                if child.signal(Signal::Kill).is_err() && !exited {
-                    child.kill_direct().map_err(io_error("kill direct child"))?;
-                }
-            }
-            Effect::Reap => break,
-        }
-    }
-    let status = child.reap().map_err(io_error("reap child"))?;
+    let (stopped, timed_out) = wait_and_stop(&mut child, options.timeout_seconds)?;
+    let status = stopped.status;
     let output = mode.read(&mut stdout, options.output_limit_bytes)?;
     let error_output = stderr
         .as_mut()
@@ -220,19 +192,99 @@ fn run(
     })
 }
 
+/// An owned utility session. Only sessions created here can be stopped through
+/// this API; it cannot adopt a provider PID or a caller's arbitrary process.
+pub struct UtilityChild(OwnedChild);
+
+impl UtilityChild {
+    /// Spawn a private session. `env` is the full ordered environment; None
+    /// inherits the current environment. Command-specific env changes are ignored.
+    pub fn spawn(
+        command: &mut Command,
+        pass_fds: &[BorrowedFd<'_>],
+        env: Option<&[(OsString, OsString)]>,
+    ) -> Result<Self, BoundedError> {
+        OwnedChild::spawn(command, pass_fds, env)
+            .map(Self)
+            .map_err(io_error("spawn"))
+    }
+}
+
+#[derive(Debug)]
+pub struct GroupStop {
+    pub status: std::process::ExitStatus,
+    /// Whether cleanup attempted SIGKILL, including direct-child fallback.
+    pub escalated: bool,
+}
+
+/// SIGTERM, a bounded group grace, optional SIGKILL, and two bounded waits.
+/// This is bounded_process.stop_process_group's utility-only API.
+pub fn stop_process_group(child: &mut UtilityChild) -> Result<GroupStop, BoundedError> {
+    wait_and_stop(&mut child.0, 0.0).map(|(stopped, _)| stopped)
+}
+
+fn wait_and_stop(child: &mut OwnedChild, timeout: f64) -> Result<(GroupStop, bool), BoundedError> {
+    // Python starts its wait timeout after Popen has returned.
+    let waiting = Instant::now();
+    let mut state = State::Waiting;
+    let mut timed_out = false;
+    let mut escalated = false;
+    loop {
+        // Reap before group probing: a dead leader must not consume the grace.
+        let exited = child.exited().map_err(io_error("observe child"))?;
+        let group_exists = child.group_exists();
+        match state.step(
+            waiting.elapsed().as_secs_f64(),
+            timeout,
+            exited,
+            group_exists,
+        ) {
+            Effect::Wait => std::thread::sleep(Duration::from_millis(10)),
+            Effect::Terminate { timed_out: expired } => {
+                timed_out = expired;
+                if child.signal(Signal::Terminate).is_err() && !exited {
+                    escalated = true;
+                    child.kill_direct().map_err(io_error("kill direct child"))?;
+                }
+            }
+            Effect::Kill => {
+                escalated = true;
+                if child.signal(Signal::Kill).is_err() && !exited {
+                    child.kill_direct().map_err(io_error("kill direct child"))?;
+                }
+            }
+            Effect::Reap => break,
+        }
+    }
+    let grace = Duration::from_millis(250);
+    let status = match child.reap(grace) {
+        Ok(status) => Ok(status),
+        Err(crate::sys::ChildWaitError::Timeout { .. }) => {
+            escalated = true;
+            child.kill_direct().map_err(io_error("kill direct child"))?;
+            child.reap(grace)
+        }
+        Err(error) => Err(error),
+    };
+    // Both bounded waits are exhausted on a timeout; Drop must not add a third.
+    child.finish_cleanup();
+    let status = status?;
+    Ok((GroupStop { status, escalated }, timed_out))
+}
+
 /// Edge rendering for BudgetArgumentParser's one-line errors (exit status 2).
 pub fn argument_error(command: &str, message: &str) -> String {
     let clean = message.replace('\n', " ");
-    let clean = clean.trim();
+    let clean = crate::pending::python_strip(&clean);
     let fix = if let Some(args) = clean.strip_prefix("the following arguments are required:") {
-        format!("pass {}", args.trim())
+        format!("pass {}", crate::pending::python_strip(args))
     } else if clean.contains("one of the arguments") && clean.contains("is required") {
         let args = clean
             .split_once("arguments")
             .map_or("", |(_, rest)| rest)
             .split_once("is required")
             .map_or("", |(args, _)| args)
-            .trim();
+            .trim_matches(crate::pending::python_space);
         format!("pass {args}")
     } else {
         format!("provenant help {command}")
@@ -250,6 +302,35 @@ mod tests {
         options.merge_stderr = merge;
         options.output_limit_bytes = limit;
         run_bounded(&["/bin/sh".into(), "-c".into(), code.into()], options).unwrap()
+    }
+
+    #[test]
+    fn trivial_run_and_public_cleanup_do_not_escalate() {
+        let output = shell("exit 0", true, 128);
+        assert_eq!(output.returncode, 0);
+        assert_eq!(output.terminating_signal(), None);
+        assert!(!output.timed_out);
+        let mut child = UtilityChild::spawn(&mut Command::new("/usr/bin/true"), &[], None).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !child.0.exited().unwrap() {
+            assert!(Instant::now() < deadline, "fixture failed to exit");
+            std::thread::yield_now();
+        }
+        let stopped = stop_process_group(&mut child).unwrap();
+        assert!(!stopped.escalated);
+        assert_eq!(stopped.status.code(), Some(0));
+    }
+
+    #[test]
+    fn explicit_environment_retains_insertion_order() {
+        let env = vec![
+            ("Z_LAST".into(), "first".into()),
+            ("A_FIRST".into(), "second".into()),
+        ];
+        let mut options = Options::new(Path::new("/"), 5.0);
+        options.env = Some(&env);
+        let result = run_bounded(&["/usr/bin/env".into()], options).unwrap();
+        assert_eq!(result.output, "Z_LAST=first\nA_FIRST=second\n");
     }
 
     #[test]
@@ -333,7 +414,7 @@ mod tests {
         input.write_all(b"PASSED").unwrap();
         input.rewind().unwrap();
         let fds = [input.as_fd()];
-        let env = BTreeMap::from([("ONLY".into(), "kept".into())]);
+        let env = Vec::from([("ONLY".into(), "kept".into())]);
         let mut options = Options::new(dir.path(), 5.0);
         options.pass_fds = &fds;
         options.env = Some(&env);
@@ -361,8 +442,11 @@ mod tests {
             "error: unrecognized arguments: --unknown; fix: provenant help custom-cmd\n"
         );
         assert_eq!(
-            argument_error("cmd", "the following arguments are required: --arg"),
-            "error: the following arguments are required: --arg; fix: pass --arg\n"
+            argument_error(
+                "cmd",
+                "\u{1c}the following arguments are required: \u{1c}--arg\u{1c}"
+            ),
+            "error: the following arguments are required: \u{1c}--arg; fix: pass --arg\n"
         );
         assert_eq!(
             argument_error("cmd", "one of the arguments --a --b is required"),
@@ -437,7 +521,7 @@ mod spawn_tests {
         let program = dir.path().join("bin/tool");
         std::fs::write(&program, "#!/bin/sh\nprintf '%s' \"$KEPT\"\n").unwrap();
         std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let env = BTreeMap::from([
+        let env = Vec::from([
             ("PATH".into(), "bin".into()),
             ("KEPT".into(), "value".into()),
         ]);

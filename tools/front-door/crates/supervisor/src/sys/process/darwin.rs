@@ -65,7 +65,7 @@ pub struct DarwinTask {
     pub running: bool,
 }
 
-pub fn darwin_task(pid: i32) -> Option<DarwinTask> {
+pub fn darwin_task(pid: i32) -> Result<Option<DarwinTask>, crate::process_info::ProcessParseError> {
     let mut info = MaybeUninit::<libc::proc_taskinfo>::uninit();
     // SAFETY: flavour 4 and size match the live exclusive ABI buffer. An exact
     // return initialises this pointer-free C record, and no storage is retained.
@@ -79,16 +79,45 @@ pub fn darwin_task(pid: i32) -> Option<DarwinTask> {
         )
     };
     if read != size_of::<libc::proc_taskinfo>() as i32 {
-        return None;
+        return Ok(None);
     }
     // SAFETY: the complete read above initialised every field of the C record.
     let info = unsafe { info.assume_init() };
-    Some(DarwinTask {
-        cpu_seconds: (info.pti_total_user as f64 + info.pti_total_system as f64)
-            * mach_tick_seconds(),
+    Ok(Some(DarwinTask {
+        cpu_seconds: task_cpu_seconds(
+            info.pti_total_user,
+            info.pti_total_system,
+            mach_tick_seconds(),
+        )?,
         rss_kib: (info.pti_resident_size / 1024) as i64,
         running: info.pti_numrunning > 0,
-    })
+    }))
+}
+
+fn task_cpu_seconds(
+    user: u64,
+    system: u64,
+    tick_seconds: f64,
+) -> Result<f64, crate::process_info::ProcessParseError> {
+    let total = user.checked_add(system).ok_or(
+        crate::process_info::ProcessParseError::NumberOutOfRange("task CPU ticks"),
+    )?;
+    Ok(total as f64 * tick_seconds)
+}
+
+#[cfg(test)]
+mod task_tests {
+    use super::*;
+
+    #[test]
+    fn cpu_ticks_are_added_exactly_before_float_conversion() {
+        let actual = task_cpu_seconds((1 << 53) + 1, 1, 1.0).unwrap();
+        assert_eq!(actual.to_bits(), 9007199254740994_f64.to_bits());
+        assert_eq!(
+            task_cpu_seconds(u64::MAX, 1, 1.0).unwrap_err(),
+            crate::process_info::ProcessParseError::NumberOutOfRange("task CPU ticks")
+        );
+    }
 }
 
 // libc deprecates this in favour of a dependency outside the allowlist.

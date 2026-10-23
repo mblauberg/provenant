@@ -84,6 +84,8 @@ pub enum PsParseError {
     MissingValue(String),
     #[error("-p needs numeric PIDs")]
     NumericPids,
+    #[error("PID number out of range")]
+    NumberOutOfRange,
     #[error("unsupported field {0}")]
     Field(String),
 }
@@ -199,6 +201,9 @@ pub fn parse(argv: &[String]) -> Result<PsOptions, PsParseError> {
             for item in value.split(',') {
                 let value =
                     crate::pending::Integer::parse(item).ok_or(PsParseError::NumericPids)?;
+                if value.as_i64().is_none() && value.as_u64().is_none() {
+                    return Err(PsParseError::NumberOutOfRange);
+                }
                 result.selected.push(Pid(value));
             }
         } else {
@@ -401,7 +406,7 @@ pub enum PsError {
     #[error(transparent)]
     Parse(#[from] PsParseError),
     #[error("Python int too large to convert to C long")]
-    PidOverflow,
+    NumberOutOfRange,
     #[error(transparent)]
     Process(#[from] crate::process_info::ProcessError),
     #[error("could not format process start time")]
@@ -604,8 +609,8 @@ pub fn run(argv: &[String], locale: &str) -> Result<Output, PsError> {
             if !seen.insert(token) {
                 continue;
             }
-            let pid = token.as_os_pid().ok_or(PsError::PidOverflow)?;
-            if let Some(info) = crate::process_info::process(pid) {
+            let pid = token.as_os_pid().ok_or(PsError::NumberOutOfRange)?;
+            if let Some(info) = crate::process_info::process(pid)? {
                 rows.push(Row::Readable(info));
                 continue;
             }
@@ -774,6 +779,12 @@ mod render_tests {
                 .collect::<Vec<_>>(),
             ["9223372036854775808", "12", "0", "4"]
         );
+        for value in ["18446744073709551616", "-9223372036854775809"] {
+            assert_eq!(
+                parse(&args(&["-p", value])).unwrap_err(),
+                PsParseError::NumberOutOfRange
+            );
+        }
         for value in ["1__2", "1_", "_1", "²", "\u{1c}2", "1 2"] {
             assert_eq!(
                 parse(&args(&["-p", value])).unwrap_err(),

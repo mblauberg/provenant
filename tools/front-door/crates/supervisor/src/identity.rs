@@ -205,8 +205,6 @@ mod tests {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum StopReason {
-    Deadline,
-    ChildExited,
     CancelRequested,
     RunControl,
     OrphanReaper,
@@ -223,8 +221,14 @@ pub enum Signal {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GroupTermination {
     Ready,
-    Grace { deadline_ms: u64 },
-    Confirm { deadline_ms: u64 },
+    /// A non-ESRCH signal failure fences the group without further signals.
+    SignalFailed,
+    Grace {
+        deadline_ms: u64,
+    },
+    Confirm {
+        deadline_ms: u64,
+    },
     Done(GroupState),
 }
 
@@ -235,8 +239,25 @@ pub enum GroupEffect {
     Finished(GroupState),
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GroupSignalResult {
+    Sent,
+    NoSuchProcess,
+    Failed,
+}
+
 impl GroupTermination {
+    /// Feed back every OS signal result before the next observation step.
+    pub fn signal_result(&mut self, result: GroupSignalResult) {
+        if result == GroupSignalResult::Failed && !matches!(self, Self::Done(_)) {
+            *self = Self::SignalFailed;
+        }
+    }
+
     pub fn step(&mut self, now_ms: u64, observed: GroupState, grace_ms: u64) -> GroupEffect {
+        if *self == Self::SignalFailed {
+            *self = Self::Done(GroupState::Fenced);
+        }
         if let Self::Done(state) = *self {
             return GroupEffect::Finished(state);
         }
@@ -264,6 +285,7 @@ impl GroupTermination {
             Self::Grace { deadline_ms } | Self::Confirm { deadline_ms } => {
                 GroupEffect::ObserveAfter(50.min(deadline_ms.saturating_sub(now_ms)))
             }
+            Self::SignalFailed => GroupEffect::Finished(GroupState::Fenced),
             Self::Done(state) => GroupEffect::Finished(state),
         }
     }
@@ -320,6 +342,43 @@ mod interface_tests {
             state.step(200, GroupState::Attributable, 100),
             GroupEffect::Finished(GroupState::Fenced)
         );
+    }
+
+    #[test]
+    fn signal_failures_fence_instead_of_authorising_another_signal() {
+        for initial in [
+            GroupTermination::Ready,
+            GroupTermination::Grace { deadline_ms: 100 },
+            GroupTermination::Confirm { deadline_ms: 100 },
+        ] {
+            let mut state = initial;
+            state.signal_result(GroupSignalResult::Failed);
+            assert_eq!(
+                state.step(0, GroupState::Attributable, 100),
+                GroupEffect::Finished(GroupState::Fenced)
+            );
+            assert_eq!(
+                state.step(5000, GroupState::Attributable, 100),
+                GroupEffect::Finished(GroupState::Fenced)
+            );
+        }
+        let mut state = GroupTermination::Grace { deadline_ms: 100 };
+        state.signal_result(GroupSignalResult::NoSuchProcess);
+        assert_eq!(
+            state.step(0, GroupState::Exited, 100),
+            GroupEffect::Finished(GroupState::Exited)
+        );
+        assert!(serde_json::from_str::<StopReason>("\"deadline\"").is_err());
+        for (reason, wire) in [
+            (StopReason::CancelRequested, "cancel_requested"),
+            (StopReason::RunControl, "run_control"),
+            (StopReason::OrphanReaper, "orphan_reaper"),
+        ] {
+            assert_eq!(
+                serde_json::to_string(&reason).unwrap(),
+                format!("\"{wire}\"")
+            );
+        }
     }
 
     #[test]

@@ -1,6 +1,5 @@
 //! Child-only custody for the bounded utility runner, separate from S2 providers.
 use crate::identity::Signal;
-use std::collections::BTreeMap;
 use std::ffi::{CString, OsString};
 use std::fs::{File, OpenOptions};
 use std::io;
@@ -9,6 +8,16 @@ use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::process::CommandExt;
 use std::process::{Child, Command, ExitStatus};
+use std::time::{Duration, Instant};
+use thiserror::Error;
+
+#[derive(Debug, Error)]
+pub enum ChildWaitError {
+    #[error("utility child {pid} did not exit within {timeout:?}")]
+    Timeout { pid: u32, timeout: Duration },
+    #[error("utility child wait failed")]
+    Io(#[from] io::Error),
+}
 
 pub(crate) fn anonymous_spool() -> io::Result<File> {
     let mut bytes = [0_u8; 16];
@@ -33,22 +42,24 @@ pub(crate) fn anonymous_spool() -> io::Result<File> {
     Ok(file)
 }
 
-/// The direct child stays waitable (WNOWAIT) until group cleanup has finished.
-/// Its PID cannot be reused while this owner holds its unreaped exit identity.
+/// Private session custody for utilities. Like Popen.poll(), observation reaps
+/// the direct child so its zombie cannot keep the group probe alive. S2 provider
+/// custody is a separate owner and retains its WNOWAIT identity.
 pub(crate) struct OwnedChild {
     child: Child,
-    reaped: bool,
+    cleanup_complete: bool,
+    group_gone: bool,
 }
 
 impl OwnedChild {
     pub(crate) fn spawn(
         command: &mut Command,
         pass_fds: &[BorrowedFd<'_>],
-        env: Option<&BTreeMap<OsString, OsString>>,
+        env: Option<&[(OsString, OsString)]>,
     ) -> io::Result<Self> {
         let pass: Vec<_> = pass_fds.iter().map(AsRawFd::as_raw_fd).collect();
-        let env: BTreeMap<_, _> = env
-            .cloned()
+        let env: Vec<_> = env
+            .map(<[_]>::to_vec)
             .unwrap_or_else(|| std::env::vars_os().collect());
         let string = |bytes: &[u8]| {
             CString::new(bytes).map_err(|_| io::Error::from_raw_os_error(libc::EINVAL))
@@ -69,8 +80,9 @@ impl OwnedChild {
             vec![string(program)?]
         } else {
             let path = env
-                .get(std::ffi::OsStr::new("PATH"))
-                .map(|value| value.as_bytes())
+                .iter()
+                .find(|(key, _)| key == "PATH")
+                .map(|(_, value)| value.as_bytes())
                 .unwrap_or(b"/bin:/usr/bin");
             path.split(|&byte| byte == b':')
                 .map(|dir| {
@@ -115,42 +127,38 @@ impl OwnedChild {
         }
         Ok(Self {
             child: command.spawn()?,
-            reaped: false,
+            cleanup_complete: false,
+            group_gone: false,
         })
     }
 
-    pub(crate) fn exited(&self) -> io::Result<bool> {
-        // SAFETY: siginfo is zero-initialised for the WNOHANG/no-event case.
-        // waitid writes at most its size, borrows no other memory, and this
-        // owner alone waits for the positive child PID. WNOWAIT retains custody.
-        unsafe {
-            let mut info: libc::siginfo_t = std::mem::zeroed();
-            if libc::waitid(
-                libc::P_PID,
-                self.child.id(),
-                &mut info,
-                libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
-            ) < 0
-            {
-                return Err(io::Error::last_os_error());
-            }
-            Ok(info.si_pid() != 0)
+    pub(crate) fn exited(&mut self) -> io::Result<bool> {
+        // Child caches the reaped status. Repeated observation is safe.
+        Ok(self.child.try_wait()?.is_some())
+    }
+
+    pub(crate) fn group_exists(&mut self) -> bool {
+        if self.group_gone {
+            return false;
         }
-    }
-
-    pub(crate) fn group_exists(&self) -> bool {
-        // SAFETY: the unreaped child reserved this group ID with setsid before
-        // spawn returned. Signal 0 has no effect; only ESRCH proves absence.
+        // SAFETY: spawn created this private session/group. While it has any
+        // member its group ID cannot be reused. Signal 0 has no effect; only
+        // ESRCH proves absence. Cache absence to avoid probing a recycled ID.
         let status = unsafe { libc::kill(-(self.child.id() as i32), 0) };
-        status == 0 || io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
+        self.group_gone =
+            status != 0 && io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH);
+        !self.group_gone
     }
 
-    pub(crate) fn signal(&self, signal: Signal) -> io::Result<()> {
+    pub(crate) fn signal(&mut self, signal: Signal) -> io::Result<()> {
+        if self.group_gone {
+            return Ok(());
+        }
         let sig = match signal {
             Signal::Terminate => libc::SIGTERM,
             Signal::Kill => libc::SIGKILL,
         };
-        // SAFETY: the child's unreaped PID reserves its session/group ID. This
+        // SAFETY: the child's live group reserves its session/group ID. This
         // private handle cannot target an arbitrary provider or sibling group.
         // kill takes no ownership and reports errors through thread-local errno.
         if unsafe { libc::kill(-(self.child.id() as i32), sig) } == 0 {
@@ -158,6 +166,7 @@ impl OwnedChild {
         }
         let error = io::Error::last_os_error();
         if error.raw_os_error() == Some(libc::ESRCH) {
+            self.group_gone = true;
             return Ok(());
         }
         Err(error)
@@ -167,21 +176,38 @@ impl OwnedChild {
         self.child.kill()
     }
 
-    pub(crate) fn reap(&mut self) -> io::Result<ExitStatus> {
-        let status = self.child.wait()?;
-        self.reaped = true;
-        Ok(status)
+    pub(crate) fn reap(&mut self, timeout: Duration) -> Result<ExitStatus, ChildWaitError> {
+        let deadline = Instant::now() + timeout;
+        loop {
+            if let Some(status) = self.child.try_wait()? {
+                return Ok(status);
+            }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(ChildWaitError::Timeout {
+                    pid: self.child.id(),
+                    timeout,
+                });
+            }
+            std::thread::sleep(remaining.min(Duration::from_millis(10)));
+        }
+    }
+
+    pub(crate) fn finish_cleanup(&mut self) {
+        self.cleanup_complete = true;
     }
 }
 
 impl Drop for OwnedChild {
     fn drop(&mut self) {
-        // Best effort on unwinding only. The normal path reports errors and
-        // explicitly reaps last; Drop makes no guarantee on abort or SIGKILL.
-        if !self.reaped {
+        // Best effort on unwinding only, with a bounded wait even if the kernel
+        // cannot complete SIGKILL. No guarantee on abort or owner SIGKILL.
+        if !self.cleanup_complete {
             let _ = self.signal(Signal::Kill);
-            let _ = self.child.kill();
-            let _ = self.child.wait();
+            if !self.exited().unwrap_or(false) {
+                let _ = self.child.kill();
+            }
+            let _ = self.reap(Duration::from_millis(250));
         }
     }
 }
@@ -392,5 +418,50 @@ mod tests {
         .unwrap();
         assert_eq!(output.output, "CLOSED");
         drop(inherited);
+    }
+}
+
+#[cfg(test)]
+mod exit_tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn a_running_child_returns_a_typed_reap_timeout() {
+        let mut command = Command::new("/bin/sh");
+        command
+            .args(["-c", "read line"])
+            .stdin(std::process::Stdio::piped());
+        let mut child = OwnedChild::spawn(&mut command, &[], None).unwrap();
+        assert!(matches!(
+            child.reap(Duration::ZERO),
+            Err(ChildWaitError::Timeout {
+                timeout: Duration::ZERO,
+                ..
+            })
+        ));
+        child.kill_direct().unwrap();
+        child.reap(Duration::from_millis(250)).unwrap();
+        child.finish_cleanup();
+    }
+
+    #[test]
+    fn observed_trivial_exit_does_not_keep_its_group_alive() {
+        let mut command = Command::new("/usr/bin/true");
+        let mut child = OwnedChild::spawn(&mut command, &[], None).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !child.exited().unwrap() {
+            assert!(Instant::now() < deadline, "fixture did not exit");
+            std::thread::yield_now();
+        }
+        assert!(
+            !child.group_exists(),
+            "the zombie leader must be reaped before probing"
+        );
+        assert_eq!(
+            child.reap(Duration::from_millis(250)).unwrap().code(),
+            Some(0)
+        );
+        child.finish_cleanup();
     }
 }
