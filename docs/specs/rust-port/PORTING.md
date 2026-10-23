@@ -91,8 +91,9 @@ contention, cancel, malformed input and I/O cases. No production `unwrap`,
 path without exposing secret values. The binary edge wraps context with
 `Box<dyn Error>` and owns user-facing wording and exit codes. Expected
 operational failures are data: an I/O error or ENOSPC during bookkeeping can
-never become a provider stop request. The release profile uses
-`panic = "abort"`, so cleanup never relies on `Drop` running.
+never become a provider stop request. Publication and recovery never rely
+on `Drop` running: SIGKILL and owner death skip it whatever the panic
+strategy.
 
 ## R4. Serde records, exact numbers
 
