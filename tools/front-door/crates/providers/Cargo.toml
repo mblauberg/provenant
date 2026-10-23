@@ -12,3 +12,5 @@ serde_json.workspace = true
 jiff.workspace = true
 regex.workspace = true
 thiserror.workspace = true
+provenant-core = { workspace = true }
+provenant-records = { workspace = true }

@@ -1674,6 +1674,51 @@ interfaces are deliberately partial: observer.json restoration/replay,
 supervisor return codes 64 and 75, and the full dynamic observer record domain
 are not yet proved exact. Their IDs are removed from the completion ledger.
 
+### RP-PROVIDERS-3-OPENCODE: #1322 review repairs (fixed Rust bugs)
+
+- Class: `bug`. Rulebook v4; source/oracle baseline
+  `b527d675d15c50ee51701bb15db6439c95277918`;
+  author route `codex/gpt-6.1-sol@high`.
+- The first lookaround-valid version decides, even when >=2 or larger than
+  u64; Unicode decimal digits follow Python semantics. `opencode 2.0.0
+  (bun 1.1.3)` now returns None. Lowercase diagnostics compare levels after
+  uppercasing; empty models omit --model; EXIT_AFTER_OUTPUT is in the profile.
+- Registry rows now own metadata, constructor and optional output hooks once,
+  in source NAMES order. Differential fixtures pin each reported edge. No
+  intended Python behavior change.
+
+### RP-1302 / RP-1303 providers follow-up (fixed Rust bugs)
+
+- Class: `bug`. Same baseline/rulebook/route as above. Adopting core's Python
+  ISO parser closes Kiro's arbitrary Unicode separator gap. Timeout/context
+  inputs retain Python coercion and truthiness, including signed values,
+  bools, fractional numbers, Unicode digits, repr and nested dictionary order.
+- Python int(string) does not strip U+001C..U+001F even though str.strip does;
+  this is covered separately from ordinary whitespace. Integer overflows are
+  typed NumberOutOfRange, the already approved R4 `improvement`; no new
+  numeric narrowing is accepted.
+- Native review caught a truthy non-string event type triggering the `event`
+  fallback, reset-time object traversal losing insertion order, an invented
+  list for shared_write_paths, and receipt field order drift. All are fixed;
+  source oracles cover the repaired cases, including exact dispatch bytes.
+
+### RP-PROVIDERS-3-PARSER: remaining output parser coverage (open partial)
+
+- Class: `library`; unaccepted. Same source baseline and rulebook v4.
+- Python json.loads/json.dumps accept NaN/Infinity and deeper structures than
+  the workspace's strict serde/checked_json boundary. Example: a result event
+  containing NaN in an unrelated field is valid to the Python parser but
+  rejected as structured JSON by the current Rust codec. No silent parity
+  claim: both output port units remain partial and absent from ported.txt.
+- Jiff's UTC Timestamp cannot cover Python's entire final day of year 9999;
+  core's exact PythonTimestamp exists, but a full-range ISO renderer is not
+  public. Reset-time endpoint and ambiguous/DST-local edge coverage remains
+  incomplete. No cut-over or behavioral exception is approved.
+- Remaining effect work: Codex discovery/state-path integration and model
+  rollout scanning/OpenCode export need safe host APIs reachable through the
+  allowed R2 dependencies. Supervisor owns safe filesystem/bounded execution;
+  providers has no permitted direct edge or confinement bridge today. Keep
+  these source functions unclaimed rather than copying the OS owner.
 ## RP-core-3-01 — shared helper ownership and non-strict symlink loops
 
 - Rulebook v4; class `bug`, fixed in `port/core-3`. Author route:

@@ -2,224 +2,170 @@
 use serde_json::Value;
 
 // port: belongs in provenant-core
-// Extension of the CLI pending compatibility module; no JSON truth/equality
-// primitive exists there yet. Keep integers exact throughout comparisons.
-pub(crate) fn python_truth(value: &Value) -> bool {
-    match value {
-        Value::Null => false,
-        Value::Bool(value) => *value,
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum IntegerError {
+    #[error("integer is outside the i64/u64 range")]
+    NumberOutOfRange,
+    #[error("invalid Python int input")]
+    InvalidInteger,
+}
+
+// port: belongs in provenant-core
+/// Python int() for JSON inputs; retain signed integer values before clamping.
+fn python_integer(value: &Value) -> Result<i128, IntegerError> {
+    let integer: i128 = match value {
+        Value::Bool(value) => i128::from(*value),
+        Value::Number(value) if value.is_i64() => {
+            i128::from(value.as_i64().ok_or(IntegerError::InvalidInteger)?)
+        }
+        Value::Number(value) if value.is_u64() => {
+            i128::from(value.as_u64().ok_or(IntegerError::InvalidInteger)?)
+        }
         Value::Number(value) => {
-            if let Some(value) = value.as_i64() {
-                value != 0
-            } else if let Some(value) = value.as_u64() {
-                value != 0
+            let value = value.as_f64().ok_or(IntegerError::InvalidInteger)?.trunc();
+            if !(-9_223_372_036_854_775_808.0..18_446_744_073_709_551_616.0).contains(&value) {
+                return Err(IntegerError::NumberOutOfRange);
+            }
+            value as i128
+        }
+        Value::String(value) => {
+            let value = value.trim();
+            let (sign, digits) = if let Some(v) = value.strip_prefix('-') {
+                (-1, v)
             } else {
-                value.as_f64().is_some_and(|value| value != 0.0)
-            }
-        }
-        Value::String(value) => !value.is_empty(),
-        Value::Array(value) => !value.is_empty(),
-        Value::Object(value) => !value.is_empty(),
-    }
-}
-
-// port: belongs in provenant-core
-pub(crate) fn python_json_eq(left: &Value, right: &Value) -> bool {
-    fn integer(value: &Value) -> Option<i128> {
-        match value {
-            Value::Bool(value) => Some(i128::from(*value)),
-            Value::Number(number) => number
-                .as_i64()
-                .map(i128::from)
-                .or_else(|| number.as_u64().map(i128::from))
-                .or_else(|| {
-                    let float = number.as_f64()?;
-                    // Only integral floats in the JSON integer domain can equal
-                    // an integer. Conversion goes float -> integer, never back.
-                    (float.fract() == 0.0
-                        && (-9_223_372_036_854_775_808.0..18_446_744_073_709_551_616.0)
-                            .contains(&float))
-                    .then_some(float as i128)
-                }),
-            _ => None,
-        }
-    }
-    match (left, right) {
-        (Value::Bool(_) | Value::Number(_), Value::Bool(_) | Value::Number(_)) => {
-            match (integer(left), integer(right)) {
-                (Some(left), Some(right)) => left == right,
-                _ => left == right,
-            }
-        }
-        (Value::Array(left), Value::Array(right)) => {
-            left.len() == right.len() && left.iter().zip(right).all(|(l, r)| python_json_eq(l, r))
-        }
-        (Value::Object(left), Value::Object(right)) => {
-            left.len() == right.len()
-                && left
-                    .iter()
-                    .all(|(key, l)| right.get(key).is_some_and(|r| python_json_eq(l, r)))
-        }
-        _ => left == right,
-    }
-}
-
-// port: belongs in provenant-core
-// datetime.fromisoformat truncates arbitrary fractional precision to six
-// digits, including an offset's fraction. Jiff already accepts basic ISO forms.
-// Remaining parser differences are tracked in the divergence log.
-pub(crate) fn python_iso_timestamp(value: &str) -> Option<jiff::Timestamp> {
-    let mut normalized = String::new();
-    let mut chars = value.chars().peekable();
-    while let Some(c) = chars.next() {
-        normalized.push(if c == ',' { '.' } else { c });
-        if c == '.' || c == ',' {
-            let mut count = 0;
-            while chars.peek().is_some_and(char::is_ascii_digit) {
-                let digit = chars.next()?;
-                if count < 6 {
-                    normalized.push(digit);
+                (1, value.strip_prefix('+').unwrap_or(value))
+            };
+            let mut normalized = String::new();
+            let mut previous_digit = false;
+            for ch in digits.chars() {
+                if ch == '_' && previous_digit {
+                    previous_digit = false;
+                    continue;
                 }
-                count += 1;
+                let digit = decimal_digit(ch).ok_or(IntegerError::InvalidInteger)?;
+                normalized.push(char::from(b'0' + digit));
+                previous_digit = true;
             }
+            if !previous_digit {
+                return Err(IntegerError::InvalidInteger);
+            }
+            normalized
+                .parse::<i128>()
+                .map_err(|_| IntegerError::NumberOutOfRange)?
+                * sign
         }
+        _ => return Err(IntegerError::InvalidInteger),
+    };
+    if integer < i128::from(i64::MIN) || integer > i128::from(u64::MAX) {
+        return Err(IntegerError::NumberOutOfRange);
     }
-    // Jiff rounds fractional UTC offsets to whole seconds; Python preserves
-    // microseconds. Parse the integral offset, then apply the fraction exactly.
-    let offset = normalized.rfind(['+', '-']).filter(|&index| index > 9);
-    let mut offset_micros = 0i64;
-    if let Some(offset) = offset {
-        if let Some(dot) = normalized[offset..].find('.') {
-            let dot = offset + dot;
-            let integral = &normalized[offset + 1..dot];
-            // CPython requires explicit offset seconds before a fraction.
-            let extended = integral.len() == 8
-                && integral.as_bytes()[2] == b':'
-                && integral.as_bytes()[5] == b':'
-                && integral
-                    .bytes()
-                    .enumerate()
-                    .all(|(i, b)| i == 2 || i == 5 || b.is_ascii_digit());
-            let basic = integral.len() == 6 && integral.bytes().all(|b| b.is_ascii_digit());
-            if !extended && !basic {
-                return None;
-            }
-            let fraction = normalized.get(dot + 1..)?;
-            if fraction.is_empty() || !fraction.bytes().all(|b| b.is_ascii_digit()) {
-                return None;
-            }
-            offset_micros = fraction.parse::<i64>().ok()?
-                * 10i64.pow(6u32.checked_sub(fraction.len().try_into().ok()?)?);
-            if normalized.as_bytes()[offset] == b'-' {
-                offset_micros = -offset_micros;
-            }
-            normalized.truncate(dot);
-        }
+    Ok(integer)
+}
+
+// port: belongs in provenant-core
+/// Unicode decimal blocks (Nd); unlike char::to_digit this includes Python's digits.
+pub(crate) fn decimal_digit(ch: char) -> Option<u8> {
+    if ch.is_ascii_digit() {
+        return Some(ch as u8 - b'0');
     }
-    let timestamp: jiff::Timestamp = normalized.parse().ok()?;
-    timestamp
-        .checked_sub(jiff::SignedDuration::from_micros(offset_micros))
-        .ok()
+    // The Unicode regex crate owns the category table; contiguous decimal runs
+    // comprise one or more ordered sets of ten digits.
+    let re = regex::Regex::new(r"^\p{Nd}$").ok()?;
+    if !re.is_match(ch.encode_utf8(&mut [0; 4])) {
+        return None;
+    }
+    let scalar = u32::from(ch);
+    let mut start = scalar;
+    while start > 0
+        && char::from_u32(start - 1).is_some_and(|c| re.is_match(c.encode_utf8(&mut [0; 4])))
+    {
+        start -= 1;
+    }
+    Some(((scalar - start) % 10) as u8)
+}
+
+// port: belongs in provenant-core
+// Core owns the matching Unicode table privately; export an isprintable API
+// before cut-over and delete this category predicate.
+pub(crate) fn python_isprintable(value: &str) -> bool {
+    let Ok(non_printable) = regex::Regex::new(r"[\p{C}\p{Z}]") else {
+        return false;
+    };
+    value
+        .chars()
+        .all(|c| c == ' ' || !non_printable.is_match(c.encode_utf8(&mut [0; 4])))
+}
+
+// port: belongs in provenant-core
+pub fn positive_timeout(value: &Value) -> Result<u64, IntegerError> {
+    Ok(python_integer(value)?.max(1) as u64)
+}
+// port: belongs in provenant-core
+pub(crate) fn integer_string(value: &Value) -> Result<String, IntegerError> {
+    Ok(python_integer(value)?.to_string())
 }
 
 // port: belongs in provenant-records
-// Preflight integer tokens before serde_json can convert an oversized integer
-// to f64. Decimal/exponent tokens are Python floats and remain floats. Strings
-// are opaque, including escaped quotes and integer-looking credential values.
-pub(crate) fn check_json_integer_ranges(input: &[u8]) -> Result<(), crate::DecodeError> {
-    let mut index = 0;
-    while index < input.len() {
-        match input[index] {
-            b'"' => {
-                index += 1;
-                while index < input.len() {
-                    match input[index] {
-                        b'\\' => {
-                            index += 1;
-                        }
-                        b'"' => {
-                            index += 1;
-                            break;
-                        }
-                        _ => {}
+// checked_json::normalize is private on main. Validate with its public codec,
+// then apply only its -0 token normalization to retain object order while
+// deserializing typed maps. Delete when records exposes checked deserialization.
+pub(crate) fn normalize_negative_zero(input: &[u8]) -> Vec<u8> {
+    let mut result = Vec::with_capacity(input.len());
+    let mut i = 0;
+    while i < input.len() {
+        if input[i] == b'"' {
+            result.push(input[i]);
+            i += 1;
+            while i < input.len() {
+                let b = input[i];
+                result.push(b);
+                i += 1;
+                if b == b'\\' {
+                    if let Some(&b) = input.get(i) {
+                        result.push(b);
+                        i += 1;
                     }
-                    index += 1;
+                } else if b == b'"' {
+                    break;
                 }
             }
-            b'-' | b'0'..=b'9' => {
-                let start = index;
-                index += 1;
-                while index < input.len()
-                    && matches!(input[index], b'0'..=b'9' | b'.' | b'e' | b'E' | b'+' | b'-')
-                {
-                    index += 1;
-                }
-                let token = &input[start..index];
-                let digits = token.strip_prefix(b"-").unwrap_or(token);
-                if !digits.is_empty() && digits.iter().all(u8::is_ascii_digit) {
-                    // All bytes are ASCII here. Invalid JSON syntax remains
-                    // serde's responsibility after this numeric-range guard.
-                    let token = std::str::from_utf8(token)
-                        .map_err(|_| crate::DecodeError::NumberOutOfRange)?;
-                    let fits = if token.starts_with('-') {
-                        token.parse::<i64>().is_ok()
-                    } else {
-                        token.parse::<u64>().is_ok()
-                    };
-                    if !fits {
-                        return Err(crate::DecodeError::NumberOutOfRange);
-                    }
-                }
-            }
-            _ => index += 1,
+        } else if input[i..].starts_with(b"-0")
+            && input
+                .get(i + 2)
+                .is_none_or(|b| !matches!(b, b'0'..=b'9' | b'.' | b'e' | b'E'))
+        {
+            result.push(b'0');
+            i += 2;
+        } else {
+            result.push(input[i]);
+            i += 1;
         }
     }
-    Ok(())
+    result
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn iso_timestamp_conversion_matches_cpython_without_float_seconds() {
-        let stamps = serde_json::json!([
-            "20261023T120000.123456Z",
-            "2026-10-23T12:00:00.123456999999Z",
-            "2026-10-23T12:00:00,123456999Z",
-            // Sub-second UTC offsets (00:00:00.500000 either sign) are left out:
-            // CPython 3.14 patch releases disagree on them, so no oracle answer
-            // is stable.
-            "2026-10-23T12:00:00+05:30",
-            "2026-10-23T12:00:00+01:02.500000",
-            "2026-10-23T12:00:00+01.500000",
-            "2026-10-23T12:00:00+0102.500000",
-            "2026-10-23T12:00:00",
-            "bad"
-        ]);
-        let Some(expected): Option<Vec<Option<i64>>> = crate::oracle::python(
-            r#"
-import json, sys
-from datetime import UTC, datetime
-out = []
-for s in json.load(sys.stdin):
-    try:
-        dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
-        if dt.tzinfo is None: raise ValueError()
-        delta = dt.astimezone(UTC) - datetime(1970, 1, 1, tzinfo=UTC)
-        out.append((delta.days * 86400 + delta.seconds) * 1000000 + delta.microseconds)
-    except ValueError:
-        out.append(None)
-print(json.dumps(out))
-"#,
-            &stamps,
-            None,
-        ) else {
-            return;
-        };
-        for (stamp, expected) in stamps.as_array().unwrap().iter().zip(expected) {
-            let actual = python_iso_timestamp(stamp.as_str().unwrap()).map(|t| t.as_microsecond());
-            assert_eq!(actual, expected, "{stamp}");
+// port: belongs in provenant-core
+pub(crate) fn python_splitlines(text: &str, keepends: bool) -> Vec<&str> {
+    let mut out = Vec::new();
+    let mut start = 0;
+    let mut chars = text.char_indices().peekable();
+    while let Some((index, ch)) = chars.next() {
+        if matches!(
+            ch,
+            '\n' | '\r' | '\u{b}' | '\u{c}' | '\u{1c}'
+                ..='\u{1e}' | '\u{85}' | '\u{2028}' | '\u{2029}'
+        ) {
+            let mut end = index + ch.len_utf8();
+            if ch == '\r' && chars.peek().is_some_and(|(_, c)| *c == '\n') {
+                chars.next();
+                end += 1;
+            }
+            out.push(&text[start..if keepends { end } else { index }]);
+            start = end;
         }
     }
+    if start < text.len() {
+        out.push(&text[start..]);
+    }
+    out
 }

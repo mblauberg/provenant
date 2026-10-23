@@ -1,6 +1,6 @@
 use super::*;
 
-pub fn cursor(plan: &Plan) -> AdapterProfile {
+pub fn cursor(plan: &Plan) -> Result<AdapterProfile, BuildError> {
     let mut argv = vec![
         "-p".into(),
         "--output-format".into(),
@@ -29,18 +29,7 @@ pub fn cursor(plan: &Plan) -> AdapterProfile {
         argv.extend(["--model".into(), model.clone()]);
     }
     argv.push(plan.prompt.clone());
-    profile(
-        "cursor-agent",
-        argv,
-        Metadata {
-            transport: PromptTransport::Argv,
-            stdin: StdinMode::Pipe,
-            output: "stream-json",
-            effort_flag: None,
-            session_keys: &["session_id", "sessionId"],
-            model_source: Some("cursor:init.model"),
-        },
-    )
+    profile("cursor", argv)
 }
 
 #[cfg(test)]
@@ -51,9 +40,13 @@ mod tests {
     #[test]
     fn cursor_read_only_uses_ask_sandbox_and_open_pipe() {
         assert!(cursor(&plan(Mode::ReadOnly))
+            .unwrap()
             .argv
             .windows(2)
             .any(|v| v == ["--sandbox", "enabled"]));
-        assert_eq!(cursor(&plan(Mode::ReadOnly)).stdin, StdinMode::Pipe);
+        assert_eq!(
+            cursor(&plan(Mode::ReadOnly)).unwrap().stdin,
+            StdinMode::Pipe
+        );
     }
 }

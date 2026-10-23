@@ -34,11 +34,16 @@ skills/autopilot/scripts/validate_idle_pause.py#unit-01
 skills/deliver/scripts/authority_mapping.py#unit-02
 skills/deliver/scripts/delivery_run_shape.py#unit-01
 skills/natural-writing/scripts/style_lint.py#unit-02
+skills/orchestrate/scripts/adapters/__init__.py#unit-01
+skills/orchestrate/scripts/adapters/agy.py#unit-01
+skills/orchestrate/scripts/adapters/claude.py#unit-01
 skills/orchestrate/scripts/adapters/copilot.py#unit-01
 skills/orchestrate/scripts/adapters/cursor.py#unit-01
+skills/orchestrate/scripts/adapters/kiro.py#unit-01
 skills/orchestrate/scripts/adapters/opencode.py#unit-01
 skills/orchestrate/scripts/agy_home.py#interface
 skills/orchestrate/scripts/attempt_evidence.py#unit-01
+skills/orchestrate/scripts/cf_dispatch.py#interface
 skills/orchestrate/scripts/check_herdr_cli.py#unit-01
 skills/orchestrate/scripts/exec_routing.py#interface
 skills/orchestrate/scripts/fabric_records.py#interface
@@ -46,6 +51,7 @@ skills/orchestrate/scripts/instruction_quarantine.py#interface
 skills/orchestrate/scripts/lane_protection.py#interface
 skills/orchestrate/scripts/layout.py#interface
 skills/orchestrate/scripts/process_info.py#unit-01
+skills/orchestrate/scripts/provider_output.py#interface
 skills/orchestrate/scripts/run_lineage.py#interface
 skills/orchestrate/scripts/trusted_git.py#unit-01
 workspace:front-door-syscalls
