@@ -653,6 +653,13 @@ fn integer(value: Option<&Value>) -> Option<u64> {
     value?.as_number()?.as_u64()
 }
 
+fn missing_get_error(value: &Value) -> Error {
+    Error::Invalid(format!(
+        "'{}' object has no attribute 'get'",
+        crate::pending::python_type_name(value)
+    ))
+}
+
 fn sum(values: impl IntoIterator<Item = Option<u64>>) -> Result<Option<u64>> {
     let mut found = false;
     let mut total = 0_u64;
@@ -1243,18 +1250,17 @@ pub fn resume_warning(
     run_id: &Value,
     task_id: Option<&Value>,
 ) -> Result<Option<String>> {
-    if !previous.is_object() {
-        return Err(Error::Invalid("previous must be an object".into()));
-    }
-    let context = previous.get("context");
-    let context = if context.is_some_and(provenant_core::py::python_truth) {
-        context
-    } else {
-        None
+    let previous = previous
+        .as_object()
+        .ok_or_else(|| missing_get_error(previous))?;
+    let context = previous
+        .get("context")
+        .filter(|context| provenant_core::py::python_truth(context));
+    let context = match context {
+        None => None,
+        Some(Value::Object(context)) => Some(context),
+        Some(value) => return Err(missing_get_error(value)),
     };
-    if context.is_some_and(|context| !context.is_object()) {
-        return Err(Error::Invalid("previous.context must be an object".into()));
-    }
     let tokens = context.and_then(|context| integer(context.get("context_tokens")));
     if tokens.is_some_and(|tokens| tokens <= ceiling) {
         return Ok(None);
@@ -1988,5 +1994,80 @@ print(json.dumps(out))
         }
         let actual = json!({"ceilings":ceilings,"markers":markers,"warnings":warning_values,"plans":actual_plans});
         crate::differential::equal(&actual, &expected);
+    }
+
+    const WARNING_ERROR_ORACLE: &str = r#"
+import importlib.util,json,sys
+from pathlib import Path
+root=Path(sys.argv[1])
+spec=importlib.util.spec_from_file_location('context_usage',root/'skills/orchestrate/scripts/context_usage.py')
+ctx=importlib.util.module_from_spec(spec);spec.loader.exec_module(ctx)
+cases=json.load(sys.stdin)
+out={}
+for case in cases:
+ try:
+  result=ctx.resume_warning(case['previous'],'cursor',300000,'r')
+  out[case['name']]={'result':result}
+ except Exception as error:
+  out[case['name']]={'error':type(error).__name__,'message':str(error)}
+print(json.dumps(out))
+"#;
+
+    #[test]
+    fn differential_resume_warning_matches_python_mapping_errors_and_falsy_contexts() {
+        let mut cases = Vec::new();
+        for (name, previous) in [
+            ("none", Value::Null),
+            ("false", json!(false)),
+            ("zero", json!(0)),
+            ("float_zero", json!(0.0)),
+            ("empty_string", json!("")),
+            ("empty_list", json!([])),
+            ("empty_dict", json!({})),
+            ("true", json!(true)),
+            ("integer", json!(1)),
+            ("float", json!(1.5)),
+            ("string", json!("x")),
+            ("list", json!([1])),
+        ] {
+            cases.push(json!({"name":format!("previous_{name}"),"previous":previous}));
+        }
+        for (name, context) in [
+            ("none", Value::Null),
+            ("false", json!(false)),
+            ("zero", json!(0)),
+            ("float_zero", json!(0.0)),
+            ("empty_string", json!("")),
+            ("empty_list", json!([])),
+            ("empty_dict", json!({})),
+            ("true", json!(true)),
+            ("integer", json!(1)),
+            ("float", json!(1.5)),
+            ("string", json!("x")),
+            ("list", json!([1])),
+        ] {
+            cases.push(json!({
+                "name":format!("context_{name}"),
+                "previous":{"context":context}
+            }));
+        }
+        let input = Value::Array(cases.clone());
+        let Some(expected) = crate::differential::python(WARNING_ERROR_ORACLE, &input) else {
+            return;
+        };
+        let mut actual = Map::new();
+        for case in cases {
+            let name = case["name"].as_str().expect("case name");
+            let result = resume_warning(&case["previous"], "cursor", 300000, &json!("r"), None);
+            let result = match result {
+                Ok(result) => json!({"result":result}),
+                Err(Error::Invalid(message)) => {
+                    json!({"error":"AttributeError","message":message})
+                }
+                Err(error) => panic!("unexpected resume warning error: {error}"),
+            };
+            actual.insert(name.to_owned(), result);
+        }
+        crate::differential::equal(&Value::Object(actual), &expected);
     }
 }
