@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import dataclass
+from datetime import datetime, timezone
 import difflib
 import hashlib
 import json
@@ -88,10 +89,10 @@ def normalize(value: str, replacements: list[tuple[str, str]]) -> str:
 
     def shaped(match: re.Match[str]) -> str:
         token = match.group()
-        shape = ''.join('0' if c.isdigit() else 'a' if c.islower() else 'A' if c.isupper() else c for c in token)
+        shape = ''.join('x' if c.isalnum() else c for c in token)
         return f"<{shape}>"
 
-    value = re.sub(r"\b(?:run|task|attempt)[-_]\d{6,}[-_a-zA-Z0-9]*\b", shaped, value)
+    value = re.sub(r"\b(?:run|task|attempt)[-_]\d{6,}[-_a-zA-Z0-9]*\b|\b\d{8}-\d{4}-(?:dispatch|batch)-[A-Za-z0-9_.-]+\b|\bmcp-[a-zA-Z0-9]{6,}\b", shaped, value)
     value = re.sub(r"\b(?:[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}|sk-[A-Za-z0-9_-]{12,})\b", shaped, value)
     hostname = socket.gethostname()
     if hostname:
@@ -131,13 +132,12 @@ def check_manifest() -> None:
 
 
 def help_structure(text: str) -> dict[str, list[str]]:
-    """Extract declared command choices and option names, ignoring help prose."""
+    """Extract command declarations and option names, ignoring help prose."""
     flags = set(re.findall(r"(?<![\w-])--?[A-Za-z][\w-]*", text))
     commands: set[str] = set()
-    for choices in re.findall(r"\{([a-z][a-z0-9_,|-]+)\}", text):
-        commands.update(re.split(r"[,|]", choices))
+    lines = text.splitlines()
     in_commands = False
-    for line in text.splitlines():
+    for index, line in enumerate(lines):
         if line.strip() == "Commands":
             in_commands = True
             continue
@@ -147,18 +147,37 @@ def help_structure(text: str) -> dict[str, list[str]]:
                 commands.update(match[1].split("|"))
             elif line and not line.startswith(" "):
                 in_commands = False
-        # Shell-style usage and argparse subparser listings.
-        match = re.search(r"usage: (?:provenant|fabric)\s+([a-z][\w|-]*)(?:\s+([a-z][\w|-]*))?", line)
-        if match:
-            for group in match.groups():
-                if group:
-                    commands.update(group.split("|"))
-        match = re.match(r"^    ([a-z][\w|-]*)\s{2,}", line)
-        if match:
-            commands.update(match[1].split("|"))
+        # Argparse subparser descriptions and Fabric's two-space listings.
         match = re.match(r"^ {2,4}([a-z][\w|-]*)(?:\s{2,}|\s+(?:\[|--|<|\.\.\.))", line)
         if match:
             commands.update(match[1].split("|"))
+        if "usage:" not in line.lower():
+            continue
+        usage = re.split(r"usage:", line, maxsplit=1, flags=re.I)[1]
+        for continuation in lines[index + 1:]:
+            if not continuation.startswith(" ") or not continuation.strip():
+                break
+            usage += " " + continuation.strip()
+        # Remove optional arguments, including nested bracket groups. Choice
+        # values belonging to an option are not subcommands.
+        while re.search(r"\[[^\[\]]*\]", usage):
+            usage = re.sub(r"\[[^\[\]]*\]", " ", usage)
+        for match in re.finditer(r"[<{]([a-z][a-z0-9_,|-]*)[>}]", usage):
+            if match.group().startswith("<") and "|" not in match[1]:
+                continue  # A singular <command> is a placeholder, not a declaration.
+            prefix = usage[:match.start()].split()
+            if prefix and prefix[-1].startswith("-"):
+                continue
+            commands.update(re.split(r"[,|]", match[1]))
+        # Remove the executable, then read literal command words at the start
+        # of each usage alternative. Never scan delegate paths or prose pipes.
+        tail = usage.strip().split(maxsplit=1)
+        if len(tail) == 2:
+            for alternative in re.split(r"\s+\|\s+", tail[1]):
+                for word in alternative.split():
+                    if not re.fullmatch(r"[a-z][\w-]*(?:\|[a-z][\w-]*)*", word):
+                        break
+                    commands.update(word.split("|"))
     return {"subcommands": sorted(commands), "flags": sorted(flags)}
 
 
@@ -321,7 +340,7 @@ SUCCESS_CASES = [
     Case("worktree-remove", "worktree", ["worktree", "remove", "golden"], "machine", (CREATE_WORKTREE,)),
     Case("route-resolve", "route", ["route", "resolve", "--adapter", "codex", "--alias", "senior", "--role", "worker"], "machine"),
     Case("routes-catalog", "routes", ["routes", "--json"], "machine"),
-    Case("lint-branch", "lint", ["lint", "branch", "main"], "machine"),
+    Case("lint-branch", "lint", ["lint", "branch", "feat/cli-golden-fixture"], "machine"),
     Case("events-query", "events", ["events"], "machine"),
     Case("fabric-dispatch-list", "fabric", ["fabric", "dispatch", "list", "--json"], "machine"),
 ]
@@ -352,14 +371,19 @@ def run_case(binary: Path | str, case: Case, env: dict[str, str] | None = None) 
     fixture = Fixture(binary)
     try:
         if env:
+            reserved = env.keys() & (fixture.env.keys() | {"FABRIC_NODE"})
+            if reserved:
+                raise ValueError(f"implementation selector cannot override fixture variable(s): {', '.join(sorted(reserved))}")
             fixture.env.update(env)
         if case.name == "events-query":
-            attempt = fixture.runs / "fixture-run" / "tasks" / "golden" / "attempt-001"
+            attempt = fixture.runs / "20200101-0000-dispatch-golden-000000" / "tasks" / "golden" / "attempt-001"
             attempt.mkdir(parents=True)
+            # Events includes terminal attempts from the last day only.
+            stamp = datetime.now(timezone.utc).isoformat()
             (attempt / "attempt.json").write_text(json.dumps({
                 "schema": "fabric.attempt.v1", "run_id": "fixture-run", "task_id": "golden",
                 "attempt": 1, "state": "terminal", "status": "ok", "paths": {},
-                "started_at": "2020-01-01T00:00:00Z", "ended_at": "2020-01-01T00:00:01Z",
+                "started_at": stamp, "ended_at": stamp,
             }) + "\n")
         for argv in case.setup:
             setup = fixture.run(list(argv))

@@ -12,5 +12,5 @@
   ],
   "stderr": "",
   "stdin": "",
-  "stdout": ""
+  "stdout": "{\"schema\":\"fabric.event.v1\",\"type\":\"task_state\",\"id\":\"fixture-run:golden:1:ok\",\"run_id\":\"fixture-run\",\"task_id\":\"golden\",\"state\":\"terminal\",\"status\":\"ok\",\"result_path\":null}\n"
 }

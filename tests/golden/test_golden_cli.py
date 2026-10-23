@@ -22,6 +22,9 @@ def test_normalize_preserves_boundaries_and_shapes(monkeypatch):
     assert normalize("run-20261023-123456-abc123", []) == normalize("run-20251022-223455-def456", [])
     assert normalize("run-20261023-123456-abc123", []) != normalize("run-20261023-123456-abcd123", [])
     assert normalize("sk-abcdefghijkl", []) != normalize("sk-abcdefghijklm", [])
+    assert normalize("sk-abc1def2ghi3", []) == normalize("sk-ab12de34gh56", [])
+    assert normalize("20261023-0606-dispatch-test-a1B2c3", []) == normalize("20261024-0707-dispatch-test-abCD12", [])
+    assert normalize("20261023-0606-dispatch-test-a1B2c3", []) != normalize("20261023-0606-dispatch-test-a1B2c34", [])
     assert normalize("/private/var/tmp/x /var/tmp/x", [
         ("/private/var/tmp", "<FIXTURE>"), ("/var/tmp", "<FIXTURE>"),
     ]) == "<FIXTURE>/x <FIXTURE>/x"
@@ -48,3 +51,11 @@ def test_help_comparison_ignores_prose_but_detects_commands_and_flags():
     assert comparison_fields(a) == comparison_fields(b)
     assert comparison_fields(a) != comparison_fields(result("usage: tool {create} [-h] [--json]"))
     assert comparison_fields(a) != comparison_fields(result("usage: tool {create,list} [-h]"))
+    assert comparison_fields(result("usage: provenant <root|help|route>"))["help"]["subcommands"] == ["help", "root", "route"]
+    parsed = comparison_fields(result("Commands\n  clean|reap ... scripts/clean.py|reap.py\n"))["help"]
+    assert parsed["subcommands"] == ["clean", "reap"]
+    parsed = comparison_fields(result("fabric <command>\n  dispatch --route junior|senior|principal\n"))["help"]
+    assert parsed["subcommands"] == ["dispatch"]
+    parsed = comparison_fields(result("usage: tool [--mode {fast,slow}] {create,list}\n"))["help"]
+    assert parsed["subcommands"] == ["create", "list"]
+    assert comparison_fields(result("usage: provenant <command> [arguments...]"))["help"]["subcommands"] == []

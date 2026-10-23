@@ -2,12 +2,12 @@
   "argv": [
     "lint",
     "branch",
-    "main"
+    "feat/cli-golden-fixture"
   ],
   "class": "machine",
   "exit_code": 0,
   "files": [],
   "stderr": "",
   "stdin": "",
-  "stdout": "provenant lint: main is a default branch; skipping\n"
+  "stdout": ""
 }
