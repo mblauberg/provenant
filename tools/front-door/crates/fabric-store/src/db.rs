@@ -121,6 +121,10 @@ impl Store {
             }
         }
         private(&directory, root.as_path())?;
+        // Traversal from / may cross a local mount before the configured
+        // state root. Pin supervisor's device policy to this validated handle,
+        // without reopening ancestors or relaxing descendant checks.
+        let directory = directory.into_anchor()?;
         match directory.mkdir(OsStr::new("fabric"), 0o700) {
             Ok(()) => directory.sync()?,
             Err(error) if error.is_exists() => {}
