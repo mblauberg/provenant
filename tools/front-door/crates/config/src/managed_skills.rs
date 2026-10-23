@@ -1,5 +1,5 @@
 //! Skill source catalogues used by managed installation planning.
-use crate::{invalid, io, pending, Result};
+use crate::{invalid, io, Result};
 use std::{
     collections::BTreeSet,
     ffi::OsStr,
@@ -45,6 +45,11 @@ pub fn skills(
     if validate_content {
         let mut paths = vec![];
         descendants(source, &mut paths)?;
+        paths.sort_by_cached_key(|p| {
+            p.components()
+                .map(|c| crate::pending::path_sort_key(c.as_os_str()))
+                .collect::<Vec<_>>()
+        });
         for path in paths {
             if path.is_symlink() {
                 let relative = path
@@ -61,11 +66,13 @@ pub fn skills(
         .map_err(|e| io(source, e))?
         .map(|entry| entry.map(|entry| entry.path()).map_err(|e| io(source, e)))
         .collect::<Result<Vec<_>>>()?;
-    entries.sort();
+    entries.sort_by_cached_key(|p| crate::pending::path_sort_key(p.as_os_str()));
     let mut result = vec![];
     for child in entries {
         let marker = child.join("SKILL.md");
-        if !marker.is_file() {
+        // pathlib glob matches a named entry of any type, including a directory.
+        // The wildcard step includes hidden directories and follows directory links.
+        if !child.is_dir() || fs::symlink_metadata(&marker).is_err() {
             continue;
         }
         let Some(name) = child.file_name().and_then(OsStr::to_str) else {
@@ -74,7 +81,7 @@ pub fn skills(
         if !crate::manifest::is_skill_name(name) {
             return Err(invalid("source contains an invalid skill name"));
         }
-        result.push((name.into(), pending::resolve(&child)?));
+        result.push((name.into(), crate::resolve(&child)?));
     }
     Ok(result)
 }
@@ -84,7 +91,7 @@ fn shared(source: &Path) -> Result<Vec<(String, PathBuf)>> {
     for name in SHARED_NAMES {
         let path = source.join(name);
         if path.is_dir() && !path.is_symlink() {
-            result.push((name.into(), pending::resolve(&path)?));
+            result.push((name.into(), crate::resolve(&path)?));
         }
     }
     Ok(result)
@@ -149,7 +156,7 @@ pub fn catalogues(
             let allowed = allowed_collisions
                 .iter()
                 .find(|(candidate, _)| candidate == name)
-                .map(|(_, path)| pending::resolve(path))
+                .map(|(_, path)| crate::resolve(path))
                 .transpose()?;
             if allowed.as_ref() == Some(custom_path) {
                 custom.retain(|(candidate, _)| candidate != name);
@@ -253,5 +260,47 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("skill source contains a symlink: one/link"));
+    }
+}
+
+#[cfg(test)]
+mod glob_tests {
+    use super::*;
+    #[test]
+    fn skill_marker_glob_matches_directories_symlinked_dirs_hidden_dirs_and_sorting() {
+        let dir = tempfile::tempdir().unwrap();
+        let custom = dir.path().join("custom");
+        fs::create_dir(&custom).unwrap();
+        for name in ["zeta", "alpha", "directory-marker"] {
+            fs::create_dir_all(custom.join(name)).unwrap();
+        }
+        fs::write(custom.join("zeta/SKILL.md"), "z").unwrap();
+        fs::write(custom.join("alpha/SKILL.md"), "a").unwrap();
+        fs::create_dir(custom.join("directory-marker/SKILL.md")).unwrap();
+        let elsewhere = dir.path().join("elsewhere");
+        fs::create_dir(&elsewhere).unwrap();
+        fs::write(elsewhere.join("SKILL.md"), "link").unwrap();
+        std::os::unix::fs::symlink(&elsewhere, custom.join("linked")).unwrap();
+        let Some(old)=crate::oracle::python("scripts/manage_installation.py","import json\nprint(json.dumps([[k,str(v)] for k,v in m._skills(p,validate_content=False).items()]))",&custom)else{return;};
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&old).unwrap(),
+            serde_json::json!(skills(&custom, false, false).unwrap())
+        );
+        fs::create_dir(custom.join(".hidden")).unwrap();
+        fs::write(custom.join(".hidden/SKILL.md"), "h").unwrap();
+        let Some(old) = crate::oracle::python(
+            "scripts/manage_installation.py",
+            "try: m._skills(p,validate_content=False)\nexcept m.InstallError as e: print(str(e))",
+            &custom,
+        ) else {
+            return;
+        };
+        assert_eq!(
+            skills(&custom, false, false)
+                .unwrap_err()
+                .to_string()
+                .as_bytes(),
+            old.strip_suffix(b"\n").unwrap()
+        );
     }
 }
