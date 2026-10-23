@@ -159,6 +159,9 @@ def connect(readonly=False, warn=False, timeout=None):
                     raise LedgerSchemaMismatch(
                         f'telemetry schema version {version} needs migration; run provenant telemetry ingest')
                 load_hosts(db)
+                if timeout is None:
+                    # The short wait guards only the open; report queries wait like writers do.
+                    db.execute(f'PRAGMA busy_timeout = {int(SQLITE_BUSY_TIMEOUT_SECONDS * 1000)}')
                 return db
             except sqlite3.OperationalError as exc:
                 if db is not None:

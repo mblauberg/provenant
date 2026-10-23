@@ -180,6 +180,21 @@ def test_concurrent_stats_auto_ingest_skips_a_held_lock_without_losing_rows(tmp_
         assert db.execute("SELECT COUNT(*) FROM usage WHERE source='fabric'").fetchone()[0] == 2
 
 
+def test_read_only_connection_restores_the_query_lock_wait_after_opening(tmp_path):
+    receipt(tmp_path, 'opened', status='ok', ended_at=datetime.now(UTC).isoformat())
+    assert cli(tmp_path, 'telemetry', 'ingest').returncode == 0
+    spec = importlib.util.spec_from_file_location('telemetry_readonly_under_test', ROOT / 'scripts/telemetry.py')
+    telemetry = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(telemetry)
+    with patch.dict(os.environ, environment(tmp_path)):
+        db = telemetry.connect(readonly=True)
+    try:
+        wait = db.execute('PRAGMA busy_timeout').fetchone()[0]
+    finally:
+        db.close()
+    assert wait == telemetry.SQLITE_BUSY_TIMEOUT_SECONDS * 1000
+
+
 def test_auto_ingest_failure_warns_but_query_returns_available_ledger(tmp_path):
     from datetime import UTC, datetime, timedelta
 
@@ -293,7 +308,13 @@ def test_otel_and_delivery_sources_ingest_safe_usage_and_structured_review_field
                                                'prompt_text': 'PRIVATE_PROMPT'})},
             {'timeUnixNano': nanos,
              'attributes': otlp_attributes(**{'event.name': 'tool_decision', 'tool_name': 'Bash',
-                                               'decision': 'allow', 'tool_input': 'PRIVATE_TOOL'})}]}]}]}))
+                                               'decision': 'allow', 'tool_input': 'PRIVATE_TOOL'})},
+            {'timeUnixNano': nanos,
+             'attributes': otlp_attributes(**{'event.name': 'codex.user_prompt', 'prompt_length': 5,
+                                               'prompt': 'PRIVATE_PROMPT'})},
+            {'timeUnixNano': nanos,
+             'attributes': otlp_attributes(**{'event.name': 'codex.tool_decision', 'tool_name': 'shell',
+                                               'decision': 'approved', 'call_id': 'PRIVATE_CALL'})}]}]}]}))
     metric_point = {'asDouble': 2.0, 'timeUnixNano': nanos,
                     'attributes': otlp_attributes(session='s1', **{'user.email': 'private@example.test'})}
     metric = {'name': 'claude_code.active_time.total',
@@ -333,13 +354,15 @@ def test_otel_and_delivery_sources_ingest_safe_usage_and_structured_review_field
     assert 'PRIVATE_PROMPT' not in attrs and 'PRIVATE_TOOL' not in attrs
     assert 'prompt_text' not in attrs and 'tool_output' not in attrs and 'mystery_count' not in attrs
     assert 'prompt_text' not in events['otel.user_prompt'] and 'tool_input' not in events['otel.tool_decision']
+    assert json.loads(events['otel.codex.user_prompt']) == {'prompt_length': 5}
+    assert json.loads(events['otel.codex.tool_decision']) == {'tool_name': 'shell', 'decision': 'approved'}
     assert 'user.email' not in events['otel.metric'] and 'private@example.test' not in events['otel.metric']
     assert json.loads(attrs)['input_tokens'] == 17
     retro = cli(tmp_path, 'retro', '--since', stamp.isoformat(), '--json')
     assert retro.returncode == 0, retro.stderr
     attention = json.loads(retro.stdout)['attention']
-    assert attention['user_prompts'] == 1
-    assert attention['tool_decisions'] == 1
+    assert attention['user_prompts'] == 2
+    assert attention['tool_decisions'] == 2
 
 
 @pytest.mark.parametrize('version,message', [
@@ -1548,7 +1571,8 @@ def test_telemetry_reuses_loaded_quota_and_host_owners():
 
 
 def otlp_line(signal, body):
-    return {'received_at': '2026-10-21T03:00:00Z', 'signal': signal, 'body': body}
+    received = datetime.now(UTC) - timedelta(hours=1)
+    return {'received_at': received.strftime('%Y-%m-%dT%H:%M:%SZ'), 'signal': signal, 'body': body}
 
 
 def otlp_value(value):

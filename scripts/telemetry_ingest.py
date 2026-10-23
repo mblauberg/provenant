@@ -93,11 +93,12 @@ def codex_record(telemetry, db, row, state, path, offset, account=None, owner=No
 
 # Only known event kinds and telemetry fields are persisted. Exporters also
 # attach prompt, response, account and tool payloads to the same records.
-OTEL_ALLOWED_LOGS = frozenset({'api_request', 'codex.api_request', 'user_prompt', 'tool_decision'})
 OTEL_EVENT_ATTRIBUTES = {
     'user_prompt': frozenset({'prompt_length'}),
     'tool_decision': frozenset({'tool_name', 'decision'}),
 }
+OTEL_EVENT_ATTRIBUTES.update({f'codex.{name}': fields for name, fields in OTEL_EVENT_ATTRIBUTES.items()})
+OTEL_ALLOWED_LOGS = frozenset({'api_request', 'codex.api_request', *OTEL_EVENT_ATTRIBUTES})
 OTEL_STRING_ATTRIBUTES = frozenset({'model', 'effort', 'type', 'tool_name', 'decision'})
 OTEL_BOOL_ATTRIBUTES = frozenset({'success'})
 OTEL_NUMERIC_ATTRIBUTES = frozenset({
