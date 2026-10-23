@@ -413,3 +413,299 @@ pub fn migrate_directory_link(
     Ok(report)
 }
 
+pub fn plan(
+    catalogues: &Catalogues,
+    target: &Path,
+    receipt: &Manifest,
+    custom_source_provided: bool,
+) -> Result<Vec<Item>> {
+    use State::*;
+    let mut items = vec![];
+    for (name, source) in &catalogues.managed {
+        if !custom_source_provided && receipt.custom.contains_key(name) {
+            continue;
+        }
+        let destination = target.join(name);
+        let state = if let Some(entry) = receipt.managed.get(name) {
+            if same_link(&destination, source) {
+                if entry.source_sha256 == manifest::sha_skill(source)? {
+                    Managed
+                } else {
+                    Stale
+                }
+            } else if same_link(&destination, Path::new(&entry.source_target))
+                || !destination.exists()
+            {
+                Stale
+            } else {
+                Conflicting
+            }
+        } else if let Some(previous) = receipt
+            .custom
+            .get(name)
+            .filter(|_| !catalogues.custom.iter().any(|(n, _)| n == name))
+        {
+            if same_link(&destination, Path::new(&previous.source_target)) {
+                CustomToManaged
+            } else if occupied(&destination) {
+                Conflicting
+            } else {
+                Missing
+            }
+        } else if occupied(&destination) {
+            Unmanaged
+        } else {
+            Missing
+        };
+        items.push(Item::state(name, state));
+    }
+    let mut retired = receipt.managed.iter().collect::<Vec<_>>();
+    retired.sort_by(|a, b| a.0.cmp(&b.0));
+    for (name, entry) in retired {
+        if catalogues
+            .managed
+            .iter()
+            .chain(&catalogues.custom)
+            .any(|(n, _)| n == name)
+        {
+            continue;
+        }
+        let destination = target.join(name);
+        let state = if same_link(&destination, Path::new(&entry.source_target)) {
+            RetiredManaged
+        } else if !occupied(&destination) {
+            RetiredMissing
+        } else {
+            Conflicting
+        };
+        items.push(Item::state(name, state));
+    }
+    for (name, source) in &catalogues.custom {
+        let destination = target.join(name);
+        let state = if let Some(entry) = receipt.custom.get(name) {
+            let recorded = Path::new(&entry.source_target);
+            if crate::resolve(recorded)? != *source {
+                if same_link(&destination, recorded) {
+                    CustomRebind
+                } else {
+                    CustomConflicting
+                }
+            } else if same_link(&destination, source) {
+                Custom
+            } else {
+                CustomConflicting
+            }
+        } else if let Some(previous) = receipt
+            .managed
+            .get(name)
+            .filter(|_| !catalogues.managed.iter().any(|(n, _)| n == name))
+        {
+            if same_link(&destination, Path::new(&previous.source_target)) {
+                ManagedToCustom
+            } else {
+                Conflicting
+            }
+        } else if same_link(&destination, source) {
+            CustomUntracked
+        } else if occupied(&destination) {
+            Conflicting
+        } else {
+            CustomMissing
+        };
+        items.push(Item::state(name, state));
+    }
+    if custom_source_provided {
+        let mut retired = receipt.custom.iter().collect::<Vec<_>>();
+        retired.sort_by(|a, b| a.0.cmp(&b.0));
+        for (name, entry) in retired {
+            if catalogues
+                .managed
+                .iter()
+                .chain(&catalogues.custom)
+                .any(|(n, _)| n == name)
+            {
+                continue;
+            }
+            let destination = target.join(name);
+            let state = if same_link(&destination, Path::new(&entry.source_target)) {
+                CustomRetired
+            } else if !occupied(&destination) {
+                CustomRetiredMissing
+            } else {
+                CustomConflicting
+            };
+            items.push(Item::state(name, state));
+        }
+    }
+    Ok(items)
+}
+
+pub fn integrity(catalogues: &Catalogues, target: &Path) -> Result<Vec<Item>> {
+    let mut items = vec![];
+    // Catalogue merges preserve the managed position when a custom key replaces it.
+    let mut catalogue = catalogues.managed.clone();
+    for (name, path) in &catalogues.custom {
+        if let Some((_, old)) = catalogue.iter_mut().find(|(n, _)| n == name) {
+            *old = path.clone();
+        } else {
+            catalogue.push((name.clone(), path.clone()));
+        }
+    }
+    for (name, source) in &catalogue {
+        let destination = target.join(name);
+        let owner = if catalogues.custom.iter().any(|(n, _)| n == name) {
+            Owner::Custom
+        } else {
+            Owner::Managed
+        };
+        let state =
+            if owner == Owner::Custom && (!source.is_dir() || !source.join("SKILL.md").is_file()) {
+                State::MissingSource
+            } else if same_link(&destination, source) {
+                State::Present
+            } else if !occupied(&destination) {
+                State::Missing
+            } else if destination.is_symlink() {
+                State::Foreign
+            } else if owner == Owner::Custom {
+                State::Noncanonical
+            } else if manifest::sha_skill(&destination)
+                .ok()
+                .zip(manifest::sha_skill(source).ok())
+                .is_some_and(|(a, b)| a == b)
+            {
+                State::Present
+            } else {
+                State::Noncanonical
+            };
+        let mut item = Item::state(name, state);
+        item.owner = Some(owner);
+        item.scope = Some(Scope::Required);
+        item.source_target = Some(crate::pending::path_text(source)?);
+        items.push(item);
+    }
+    if target.is_dir() {
+        for destination in sorted_children(target)? {
+            let name = destination
+                .file_name()
+                .and_then(|n| n.to_str())
+                .ok_or_else(|| invalid("extra skill link name is not UTF-8"))?;
+            if name == ".DS_Store"
+                || catalogue.iter().any(|(n, _)| n == name)
+                || !destination.is_symlink()
+            {
+                continue;
+            }
+            let state = match crate::resolve(&destination) {
+                Ok(resolved)
+                    if catalogue.iter().any(|(_, p)| {
+                        p.parent()
+                            .is_some_and(|parent| resolved.starts_with(parent))
+                    }) =>
+                {
+                    State::Noncanonical
+                }
+                _ => State::Foreign,
+            };
+            let mut item = Item::state(name, state);
+            item.scope = Some(Scope::Extra);
+            items.push(item);
+        }
+    }
+    Ok(items)
+}
+
+pub fn raise_on_conflicts(
+    items: &[Item],
+    receipt: &Manifest,
+    reject_unmanaged: bool,
+) -> Result<()> {
+    let custom = items
+        .iter()
+        .filter(|i| i.state == Some(State::CustomConflicting))
+        .collect::<Vec<_>>();
+    if !custom.is_empty() {
+        let remedies=custom.iter().map(|i|receipt.custom.get(&i.name).map(|e|format!("manually restore {} from {} or provide --custom-source pointing to the intended custom skills directory",i.name,e.source_target)).ok_or_else(||invalid("custom conflict has no recorded source"))).collect::<Result<Vec<_>>>()?.join("; ");
+        return Err(invalid(format!(
+            "custom targets changed outside harness: {remedies}"
+        )));
+    }
+    let mut names = items
+        .iter()
+        .filter(|i| i.state == Some(State::Conflicting))
+        .map(|i| i.name.as_str())
+        .collect::<Vec<_>>();
+    if reject_unmanaged {
+        names.extend(
+            items
+                .iter()
+                .filter(|i| i.state == Some(State::Unmanaged))
+                .map(|i| i.name.as_str()),
+        );
+    }
+    if !names.is_empty() {
+        return Err(invalid(format!(
+            "conflicting managed targets changed outside harness: {}",
+            names.join(", ")
+        )));
+    }
+    Ok(())
+}
+
+fn legacy_check(source: &Path, target: &Path) -> Result<Report> {
+    let source = crate::resolve(source)?;
+    let catalogues = managed_skills::catalogues(&source, None, &[])?;
+    let mut report = Report::new(Action::CheckLegacyAgy);
+    if target.is_dir() {
+        for destination in sorted_children(target)? {
+            if !destination.is_symlink() {
+                continue;
+            }
+            let state = if !destination.exists() {
+                State::Dangling
+            } else if crate::resolve(&destination)
+                .ok()
+                .is_some_and(|r| catalogues.managed.iter().any(|(_, s)| s == &r))
+            {
+                State::Current
+            } else {
+                State::Foreign
+            };
+            if state != State::Current {
+                report.items.push(Item::state(
+                    crate::pending::path_text(Path::new(
+                        destination
+                            .file_name()
+                            .ok_or_else(|| invalid("legacy skill has no name"))?,
+                    ))?,
+                    state,
+                ));
+            }
+        }
+    }
+    let path = manifest::manifest_path(target);
+    if path.exists() {
+        let receipt = fs::read(&path)
+            .ok()
+            .and_then(|b| ordered::decode(&b, "installation manifest is unreadable", &path).ok());
+        if let Some(managed) = receipt.as_ref().and_then(|r| r["managed"].object()) {
+            let mut retired = managed
+                .iter()
+                .filter(|(n, _)| !catalogues.managed.iter().any(|(current, _)| current == n))
+                .map(|(n, _)| n)
+                .collect::<Vec<_>>();
+            retired.sort();
+            for name in retired {
+                report.items.push(Item::state(name, State::Retired));
+            }
+        } else {
+            report.items.push(Item::state(
+                manifest::MANIFEST_NAME,
+                State::UnreadableReceipt,
+            ));
+        }
+    }
+    report.ok = Some(report.items.is_empty());
+    Ok(report)
+}
+
