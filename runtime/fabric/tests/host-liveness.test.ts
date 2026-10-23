@@ -21,7 +21,8 @@ vi.mock("node:child_process", async (importOriginal) => {
 });
 // The setup file already loaded run-registry (via temp-root) with the real child_process; reload it under the mock.
 vi.resetModules();
-const { listRecordedRuns, processStartedAt } = await import("../src/run-registry.js");
+const { listRecordedRuns } = await import("../src/run-registry.js");
+const { processStartedAt } = await import("../src/process-identity.js");
 
 const roots: string[] = [];
 afterEach(() => {

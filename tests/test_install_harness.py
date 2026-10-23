@@ -166,6 +166,7 @@ def copy_product(template: Path, destination: Path) -> Path:
 
 
 def run_product(product: Path, platform: str, home: Path, *arguments: str, **extra_env):
+    use_front_door_default = extra_env.pop("_front_door_default", False)
     environment = os.environ.copy()
     environment.pop("AGENT_FABRIC_STATE_DIRECTORY", None)
     # Resolve the copied product through the pointer written by this install,
@@ -184,6 +185,8 @@ def run_product(product: Path, platform: str, home: Path, *arguments: str, **ext
         }
     )
     environment.update(extra_env)
+    if use_front_door_default:
+        environment.pop("PROVENANT_FRONT_DOOR", None)
     return subprocess.run(
         [str(product / "scripts/install-harness"), "--platform", platform, *arguments],
         cwd=product,
@@ -2246,6 +2249,7 @@ def install_fake_cargo(directory: Path, *, fail: bool = False) -> Path:
         "#!/bin/sh\n"
         f'echo "$@" >> "{log}"\n'
         f'echo "MACOSX_DEPLOYMENT_TARGET=${{MACOSX_DEPLOYMENT_TARGET-unset}}" >> "{log}"\n'
+        f'echo "CARGO_TARGET_DIR=$CARGO_TARGET_DIR" >> "{log}"\n'
     )
     if fail:
         body += "exit 101\n"
@@ -2298,6 +2302,18 @@ def test_rust_mode_builds_stamps_and_installs_the_binary(tmp_path, rust_product)
         assert "MACOSX_DEPLOYMENT_TARGET=15.0" in cargo_log
 
 
+def test_default_builds_rust_into_configured_persistent_target_directory(tmp_path, rust_product):
+    log = install_fake_cargo(tmp_path / "fake-bin")
+    target = tmp_path / "cargo-target"
+
+    result = run_product(rust_product, "codex", tmp_path, _front_door_default=True,
+                         **rust_env(tmp_path, CARGO_TARGET_DIR=str(target)))
+
+    assert result.returncode == 0, result.stderr
+    assert "front-door=rust" in result.stdout.splitlines()
+    assert f"CARGO_TARGET_DIR={target}" in log.read_text()
+
+
 def test_reinstalling_the_same_binary_is_idempotent(tmp_path, rust_product):
     install_fake_cargo(tmp_path / "fake-bin")
     environment = rust_env(tmp_path, PROVENANT_FRONT_DOOR="rust")
@@ -2322,11 +2338,11 @@ def test_python_mode_rolls_an_installed_binary_back_to_the_template(tmp_path, ru
     assert (tmp_path / "bin/provenant").read_bytes() == (rust_product / "scripts/provenant.template").read_bytes()
 
 
-def test_auto_mode_falls_back_to_the_template_when_the_build_fails(tmp_path, rust_product):
+def test_default_auto_mode_falls_back_to_the_template_when_the_build_fails(tmp_path, rust_product):
     install_fake_cargo(tmp_path / "fake-bin", fail=True)
 
     result = run_product(
-        rust_product, "codex", tmp_path, **rust_env(tmp_path, PROVENANT_FRONT_DOOR="auto")
+        rust_product, "codex", tmp_path, _front_door_default=True, **rust_env(tmp_path)
     )
 
     assert result.returncode == 0, result.stderr
@@ -2446,3 +2462,27 @@ def test_check_mode_rejects_utility_hook_changes(tmp_path, flag):
     result = run('', tmp_path, '--check-legacy-skills', flag)
     assert result.returncode == 2
     assert 'usage: install-harness' in result.stderr
+
+
+def test_rust_install_uses_private_snapshot_after_classification(tmp_path, rust_product):
+    from lib.front_door_build import source_digest
+
+    install_fake_cargo(tmp_path / "fake-bin")
+    target = tmp_path / "cargo-target"
+    publisher = rust_product / "scripts/install-provenant-command.py"
+    publisher.write_text(publisher.read_text().replace(
+        'result = classify(args.source, args.destination)',
+        'result = classify(args.source, args.destination)\n'
+        f'            Path({str(tmp_path / "selected-source")!r}).write_text(str(args.source))\n'
+        f'            Path({str(target / "release/provenant")!r}).write_text("swapped by another install")',
+    ))
+
+    result = run_product(rust_product, "codex", tmp_path,
+                         **rust_env(tmp_path, PROVENANT_FRONT_DOOR="rust", CARGO_TARGET_DIR=str(target)))
+
+    assert result.returncode == 0, result.stderr
+    installed = (tmp_path / "bin/provenant").read_text()
+    assert source_digest(rust_product / "tools/front-door") in installed
+    source = Path((tmp_path / "selected-source").read_text())
+    assert source != target / "release/provenant"
+    assert not source.parent.exists()  # the install's EXIT trap removes its private snapshot

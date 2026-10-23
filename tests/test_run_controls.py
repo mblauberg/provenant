@@ -561,12 +561,17 @@ def test_same_route_retry_runs_full_provider_free_chain_and_retains_risk_and_pro
     run_dir = make_run(tmp_path, "controls")
     prompt = tmp_path / "prompt.md"
     prompt.write_bytes(b"retry these exact bytes\n\n")
+    policy = tmp_path / ".agents/fabric-policy.json"
+    policy.parent.mkdir(exist_ok=True)
+    policy.write_text(json.dumps({"memory_floor_percent": {"read_only": 0, "worktree_write": 0}}))
     bin_dir = fake_bin(tmp_path)
     provider_count = tmp_path / "provider.count"
     received = tmp_path / "received.bin"
     fake_codex(
         bin_dir,
         f"""
+        if [ "$1" = "--version" ]; then echo 'codex-cli 1.0'; exit 0; fi
+        if [ "$1" = "--help" ]; then exit 0; fi
         if [ ! -f {provider_count} ]; then
           printf '1\n' > {provider_count}
           cat >/dev/null
@@ -576,6 +581,7 @@ def test_same_route_retry_runs_full_provider_free_chain_and_retains_risk_and_pro
         cat > {received}
         printf 'RETRY OK\n'
         """,
+        models={"gpt-6.1-sol": ("high",)},
     )
     env = {**os.environ, "PATH": f"{bin_dir}:{ROOT / 'scripts'}:{os.environ['PATH']}"}
     first = subprocess.run(

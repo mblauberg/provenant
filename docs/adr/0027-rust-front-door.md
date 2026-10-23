@@ -30,12 +30,11 @@ about 120 ms, against a fork-and-exec floor of about 6 ms
    door contract as executable assertions and passes against the Python
    implementation. The Rust binary must pass the same suite
    (`PROVENANT_PARITY_IMPL=rust`) before it is installed by default.
-4. **Python stays the fallback and the oracle.** `scripts/provenant.template`
-   and `scripts/provenant` remain until the Rust path has run in production long
-   enough to retire them. `install-harness` picks the front door with
-   `PROVENANT_FRONT_DOOR=auto|rust|python`. `auto` installs the binary when
-   `cargo` builds it and the smoke run passes, and otherwise installs the Python
-   stub without failing.
+4. **Python stays the fallback and the oracle during the trial.**
+   `scripts/provenant.template` and `scripts/provenant` remain while both Macs
+   run the Rust path for seven days. `install-harness` defaults to
+   `PROVENANT_FRONT_DOOR=auto`; the trial selects `PROVENANT_FRONT_DOOR=rust`
+   explicitly, and `PROVENANT_FRONT_DOOR=python` is the rollback path.
 5. **Identity is the source digest.** The binary embeds the managed-file marker
    and `provenant-front-door source-sha256=<hex>` as lines of their own. The
    digest covers `Cargo.toml`, `Cargo.lock`, `rust-toolchain.toml` and `src/**`.
@@ -44,8 +43,8 @@ about 120 ms, against a fork-and-exec floor of about 6 ms
    The existing installer's marker rule classifies a binary unchanged.
 6. **`check` custody stays in Python for now.** Registered-checkout custody for
    `provenant check` is security-relevant and already tested. The binary calls
-   `scripts/check_target.py`, which loads the Python dispatcher and returns the
-   checker and root, so no custody rule is written twice.
+   `scripts/check_target.py`, which owns the Python custody functions and
+   returns the checker and root.
 7. **Platforms.** The minimum is macOS 27, which both of the user's Macs run.
    macOS 15 and 26 are cheap, so darwin builds set
    `MACOSX_DEPLOYMENT_TARGET=15.0`. Linux is built and tested in CI. The

@@ -39,10 +39,11 @@ const product = resolve(import.meta.dirname, "../../..");
 const tsxLoader = createRequire(import.meta.url).resolve("tsx");
 
 function laneWaitForSeat(cwd: string, state: string, seat: string, ...ids: string[]) {
-  return spawnSync("python3", [join(product, "scripts/provenant"), "lanes", "--wait", ...ids], {
+  return spawnSync(join(product, "runtime/fabric/bin/fabric"), ["lanes", "--wait", ...ids], {
     cwd, encoding: "utf8", timeout: 15_000,
     env: { ...process.env, AGENT_FABRIC_PRODUCT_ROOT: product, AGENT_FABRIC_TSX_LOADER: tsxLoader,
-      AGENT_FABRIC_STATE_DIRECTORY: state, AGENT_FABRIC_SEAT: "codex", AGENT_FABRIC_LABEL: seat },
+      AGENT_FABRIC_STATE_DIRECTORY: state, AGENT_FABRIC_INSTANCE_ROOT: state,
+      AGENT_FABRIC_SEAT: "codex", AGENT_FABRIC_LABEL: seat },
   });
 }
 
@@ -69,11 +70,12 @@ it("reports failed transport attempts and partial output through status and lane
 
 function laneWaitEnv(state: string, seat = "wait-seat") {
   return { ...process.env, AGENT_FABRIC_PRODUCT_ROOT: product, AGENT_FABRIC_TSX_LOADER: tsxLoader,
-    AGENT_FABRIC_STATE_DIRECTORY: state, AGENT_FABRIC_SEAT: "codex", AGENT_FABRIC_LABEL: seat };
+    AGENT_FABRIC_STATE_DIRECTORY: state, AGENT_FABRIC_INSTANCE_ROOT: state,
+    AGENT_FABRIC_SEAT: "codex", AGENT_FABRIC_LABEL: seat };
 }
 
 function startWait(cwd: string, state: string, ...ids: string[]) {
-  const child = spawn("python3", [join(product, "scripts/provenant"), "lanes", "--wait", ...ids], {
+  const child = spawn(join(product, "runtime/fabric/bin/fabric"), ["lanes", "--wait", ...ids], {
     cwd, env: laneWaitEnv(state), stdio: ["ignore", "pipe", "pipe"],
   });
   const output = { stdout: "", stderr: "", code: undefined as number | null | undefined };
@@ -465,10 +467,11 @@ it("exits an event follower after its run becomes idle", () => {
   const workspace = fixture();
   attempt(workspace, "tasks", "finished", "terminal", "ok");
   const product = resolve(import.meta.dirname, "../../..");
-  const result = spawnSync("python3", [join(product, "scripts/provenant"), "events", "--follow", "--until-idle"], {
+  const result = spawnSync(join(product, "runtime/fabric/bin/fabric"), ["events", "--follow", "--until-idle"], {
     cwd: workspace, encoding: "utf8", timeout: 5000,
     env: { ...process.env, AGENT_FABRIC_PRODUCT_ROOT: product,
       AGENT_FABRIC_STATE_DIRECTORY: join(workspace, "state"),
+      AGENT_FABRIC_INSTANCE_ROOT: join(workspace, "state"),
       AGENT_FABRIC_TSX_LOADER: createRequire(import.meta.url).resolve("tsx") },
   });
   expect(result.status, result.stderr).toBe(0);
@@ -479,10 +482,11 @@ it("exits an event follower after an input_required attempt", () => {
   const workspace = fixture();
   attempt(workspace, "tasks", "needs-input", "input_required", "input_required");
   const product = resolve(import.meta.dirname, "../../..");
-  const result = spawnSync("python3", [join(product, "scripts/provenant"), "events", "--follow", "--until-idle"], {
+  const result = spawnSync(join(product, "runtime/fabric/bin/fabric"), ["events", "--follow", "--until-idle"], {
     cwd: workspace, encoding: "utf8", timeout: 10000,
     env: { ...process.env, AGENT_FABRIC_PRODUCT_ROOT: product,
       AGENT_FABRIC_STATE_DIRECTORY: join(workspace, "state"),
+      AGENT_FABRIC_INSTANCE_ROOT: join(workspace, "state"),
       AGENT_FABRIC_TSX_LOADER: createRequire(import.meta.url).resolve("tsx") },
   });
   expect(result.status, result.stderr).toBe(0);
@@ -493,10 +497,11 @@ it("keeps an event follower open by default", async () => {
   const workspace = fixture();
   attempt(workspace, "tasks", "finished", "terminal", "ok");
   const product = resolve(import.meta.dirname, "../../..");
-  const child = spawn("python3", [join(product, "scripts/provenant"), "events", "--follow"], {
+  const child = spawn(join(product, "runtime/fabric/bin/fabric"), ["events", "--follow"], {
     cwd: workspace,
     env: { ...process.env, AGENT_FABRIC_PRODUCT_ROOT: product,
       AGENT_FABRIC_STATE_DIRECTORY: join(workspace, "state"),
+      AGENT_FABRIC_INSTANCE_ROOT: join(workspace, "state"),
       AGENT_FABRIC_TSX_LOADER: createRequire(import.meta.url).resolve("tsx") },
     stdio: ["ignore", "pipe", "pipe"],
   });
@@ -515,7 +520,7 @@ it("exposes the same run schema through the provenant lanes command", () => {
   const workspace = fixture();
   const { row } = attempt(workspace, "tasks", "cli-task", "terminal", "ok");
   const product = resolve(import.meta.dirname, "../../..");
-  const result = spawnSync("python3", [join(product, "scripts/provenant"), "lanes", "--json"], {
+  const result = spawnSync(join(product, "runtime/fabric/bin/fabric"), ["lanes", "--json"], {
     cwd: workspace, encoding: "utf8", env: { ...process.env, AGENT_FABRIC_PRODUCT_ROOT: product,
       AGENT_FABRIC_TSX_LOADER: createRequire(import.meta.url).resolve("tsx") },
   });
@@ -534,12 +539,12 @@ it("reports omitted lanes in text and JSON and lets an id select a lane past the
   const product = resolve(import.meta.dirname, "../../..");
   const env = { ...process.env, AGENT_FABRIC_PRODUCT_ROOT: product,
     AGENT_FABRIC_TSX_LOADER: createRequire(import.meta.url).resolve("tsx") };
-  const text = spawnSync("python3", [join(product, "scripts/provenant"), "lanes"], {
+  const text = spawnSync(join(product, "runtime/fabric/bin/fabric"), ["lanes"], {
     cwd: workspace, encoding: "utf8", env,
   });
   expect(text.status, text.stderr).toBe(0);
   expect(text.stdout.split("\n", 1)[0]).toContain("must-show");
-  const json = spawnSync("python3", [join(product, "scripts/provenant"), "lanes", "--json"], {
+  const json = spawnSync(join(product, "runtime/fabric/bin/fabric"), ["lanes", "--json"], {
     cwd: workspace, encoding: "utf8", env,
   });
   expect(json.status, json.stderr).toBe(0);
@@ -548,7 +553,7 @@ it("reports omitted lanes in text and JSON and lets an id select a lane past the
   expect(listed.omitted_hint).toBeTruthy();
   expect(listed.runs[0]).toMatchObject({ task_id: "must-show", state: "running" });
 
-  const selected = spawnSync("python3", [join(product, "scripts/provenant"), "lanes", "--json", "cap-000"], {
+  const selected = spawnSync(join(product, "runtime/fabric/bin/fabric"), ["lanes", "--json", "cap-000"], {
     cwd: workspace, encoding: "utf8", env,
   });
   expect(selected.status, selected.stderr).toBe(0);
@@ -567,7 +572,7 @@ it("waits for a running lane to become terminal and prints one compact row", asy
   const { row, run } = attempt(workspace, "tasks", "wait-for-it", "running", "running");
   const resultFile = join(workspace, ".agent-run", "runs", run, "tasks", "wait-for-it", "attempt-001", "attempt.json");
   const state = join(workspace, "state");
-  const child = spawn("python3", [join(product, "scripts/provenant"), "lanes", "--wait", "wait-for-it"], {
+  const child = spawn(join(product, "runtime/fabric/bin/fabric"), ["lanes", "--wait", "--timeout", "8", "wait-for-it"], {
     cwd: workspace,
     env: laneWaitEnv(state),
     stdio: ["ignore", "pipe", "pipe"],
@@ -590,7 +595,7 @@ it("waits for a running lane to become terminal and prints one compact row", asy
   expect(stdout).not.toContain("newly-finished");
   expect(stdout).not.toContain("pre-existing-done");
   expect(stdout).toContain("result.md");
-}, 12_000);
+}, 20_000);
 
 it("reports lanes completed between waits once, then keeps the no-running message", async () => {
   const workspace = fixture();
@@ -598,7 +603,7 @@ it("reports lanes completed between waits once, then keeps the no-running messag
   const { row, run } = attempt(workspace, "tasks", "first-done", "running", "running");
   const firstReceipt = join(workspace, ".agent-run", "runs", run,
     "tasks", "first-done", "attempt-001", "attempt.json");
-  const child = spawn("python3", [join(product, "scripts/provenant"), "lanes", "--wait"], {
+  const child = spawn(join(product, "runtime/fabric/bin/fabric"), ["lanes", "--wait"], {
     cwd: workspace, env: laneWaitEnv(state), stdio: ["ignore", "pipe", "pipe"],
   });
   let stdout = "";
@@ -664,7 +669,7 @@ it("waits for project lanes when invoked from a registered worktree", async () =
   const receipt = join(project, ".agent-run", "runs", run,
     "tasks", "linked-wait", "attempt-001", "attempt.json");
   const state = join(workspace, "state");
-  const child = spawn("python3", [join(product, "scripts/provenant"), "lanes", "--wait"], {
+  const child = spawn(join(product, "runtime/fabric/bin/fabric"), ["lanes", "--wait"], {
     cwd: linked, env: laneWaitEnv(state), stdio: ["ignore", "pipe", "pipe"],
   });
   let stdout = "";
@@ -755,13 +760,13 @@ it("lists the project's lanes from a registered worktree and a subdirectory", ()
   const env = laneWaitEnv(join(workspace, "state"));
   for (const cwd of [linked, join(project, "sub", "dir")]) {
     const run = (...args: string[]) => {
-      const result = spawnSync("python3", [join(product, "scripts/provenant"), ...args], { cwd, encoding: "utf8", env });
+      const result = spawnSync(join(product, "runtime/fabric/bin/fabric"), args, { cwd, encoding: "utf8", env });
       expect(result.status, `${cwd} ${args.join(" ")}: ${result.stderr}`).toBe(0);
       return result.stdout;
     };
     expect(run("lanes", "--json")).toContain("project-lane");
-    expect(run("fabric", "status", "--runs")).toContain("project-lane");
-    expect(JSON.parse(run("fabric", "dispatch", "list", "--json")).workspace).toBe(realpathSync(project));
+    expect(run("status", "--runs")).toContain("project-lane");
+    expect(JSON.parse(run("dispatch", "list", "--json")).workspace).toBe(realpathSync(project));
   }
 }, 30_000);
 
@@ -770,7 +775,7 @@ it("writes a report larger than the pipe buffer in full before advancing the cur
   const state = join(workspace, "state");
   // Long task ids keep the lane count, and so the scan, small under load.
   for (let index = 0; index < 250; index += 1) attempt(workspace, "tasks", `pipe-${"x".repeat(90)}-${String(index).padStart(4, "0")}`, "terminal", "ok");
-  const wait = () => spawnSync("python3", [join(product, "scripts/provenant"), "lanes", "--wait"], {
+  const wait = () => spawnSync(join(product, "runtime/fabric/bin/fabric"), ["lanes", "--wait"], {
     cwd: workspace, encoding: "utf8", timeout: 55_000, env: laneWaitEnv(state),
   });
   const first = wait();

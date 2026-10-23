@@ -2045,7 +2045,7 @@ def terminal_contract(args,run_dir,legacy,adapter,number,attempt_dir,active=None
     refusal=route_refusal(adapter,args.tool)
     if refusal: status=refusal["status"]
     if status not in TERMINAL_STATUSES: status="failed"
-    for field in ("reason","session_id","retryable","reset_at","retry_after","fix","error","evidence","applied","context","usage_source","warnings","reaped","spared","children","provenance","pgid","pgid_started_at","last_progress_at","landable","quarantine","result_partial","empty_patch"):
+    for field in ("reason","session_id","retryable","reset_at","retry_after","fix","error","evidence","applied","context","usage_source","warnings","reaped","spared","children","provenance","pgid","pgid_started_at","last_progress_at","landable","quarantine","result_partial","empty_patch","model_check","model_check_detail","model_changes"):
         if field in adapter: row[field]=adapter[field]
     if row.get("task_class") and isinstance(row.get("provenance"), dict):
         row["provenance"]["requested"] = {**(row["provenance"].get("requested") or {}), "task_class": row["task_class"]}

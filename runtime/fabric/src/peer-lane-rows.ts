@@ -1,6 +1,6 @@
 import { resolve } from "node:path";
 import { runRoot } from "./identity.js";
-import { runProcessAlive } from "./run-registry.js";
+import { runProcessAlive } from "./process-identity.js";
 
 export function annotatePeerLaneRows(rows: Array<Record<string, any>>, project: string): void {
   for (const row of rows) {

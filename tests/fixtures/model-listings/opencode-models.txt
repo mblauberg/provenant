@@ -1,0 +1,4 @@
+opencode-go/beam-free
+opencode-go/claude-haiku-5-5
+openrouter/~anthropic/claude-fable-latest
+openrouter/~anthropic/claude-haiku-latest

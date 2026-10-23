@@ -21,7 +21,7 @@ it.each(["codex", "agy", "claude"])("exposes host list and peer doctor through t
   mkdirSync(join(peerHome, "Repos/project"), { recursive: true });
   execFileSync("git", ["-C", join(peerHome, "Repos/project"), "init", "-q"]);
   writeFileSync(join(peerHome, ".agents/.agent-fabric/hosts.json"), JSON.stringify({ schema_version: 1, local_host: "workshop" }));
-  writeFileSync(ssh, `#!${python}\nimport os,sys\nos.environ["HOME"]=${JSON.stringify(peerHome)}\nos.environ["AGENT_FABRIC_INSTANCE_ROOT"]=${JSON.stringify(join(peerHome, ".agents"))}\nos.chdir(os.environ["HOME"])\nos.execv(${JSON.stringify(resolve(import.meta.dirname, "../../../scripts/provenant"))},["provenant","peer"])\n`, { mode: 0o755 });
+  writeFileSync(ssh, `#!${python}\nimport os\nos.environ["HOME"]=${JSON.stringify(peerHome)}\nos.environ["AGENT_FABRIC_INSTANCE_ROOT"]=${JSON.stringify(join(peerHome, ".agents"))}\nos.chdir(os.environ["HOME"])\nos.execv(${JSON.stringify(resolve(import.meta.dirname, "../../../scripts/fabric-hosts"))},["fabric-hosts","peer"])\n`, { mode: 0o755 });
   mkdirSync(workspace, { recursive: true });
   execFileSync("git", ["-C", workspace, "init", "-q"]);
   mkdirSync(join(instance, ".agent-fabric"), { recursive: true });
