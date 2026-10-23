@@ -337,6 +337,31 @@ fn compact_json(value: &serde_json::Value) -> Option<String> {
     }
     number.as_f64().map(|n| compact(Some(n)))
 }
+fn python_general(value: f64) -> String {
+    if value == 0.0 {
+        return "0".into();
+    }
+    let scientific = format!("{value:.5e}");
+    let (mantissa, exponent) = scientific.split_once('e').unwrap_or((&scientific, "0"));
+    let exponent = exponent.parse::<i32>().unwrap_or(0);
+    if !(-4..6).contains(&exponent) {
+        let mantissa = mantissa.trim_end_matches('0').trim_end_matches('.');
+        format!(
+            "{mantissa}e{}{abs:02}",
+            if exponent < 0 { '-' } else { '+' },
+            abs = exponent.abs()
+        )
+    } else {
+        let rounded = scientific.parse::<f64>().unwrap_or(value);
+        let digits = (5 - exponent).max(0) as usize;
+        let fixed = format!("{rounded:.digits$}");
+        if fixed.contains('.') {
+            fixed.trim_end_matches('0').trim_end_matches('.').into()
+        } else {
+            fixed
+        }
+    }
+}
 fn array(value: &serde_json::Value) -> impl Iterator<Item = &serde_json::Value> {
     value.as_array().into_iter().flatten()
 }
@@ -558,7 +583,7 @@ pub fn render_stats(report: &serde_json::Value, detail: bool) -> Result<String> 
                         value_text(field(r, "window")),
                         field(r, "used_percent")
                             .as_f64()
-                            .map(|v| format!("{}%", significant(v)))
+                            .map(|v| format!("{}%", python_general(v)))
                             .unwrap_or_else(|| "None%".into()),
                         text_or(field(r, "reset_at"), "-"),
                         text_or(field(r, "timestamp"), "-"),
