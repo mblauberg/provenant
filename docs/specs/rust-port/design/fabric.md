@@ -215,7 +215,7 @@ request wait 0–30 seconds; lease 1–3,600 seconds; peer RPC deadline 30 secon
 Git bundle limit 64 MiB. Config may lower hard limits, never raise them.
 Prompts and artefact inputs also obey the run owner's aggregate request cap.
 Run admission enforces cross-process hard caps of 64 active attempts/host,
-16/project and 256 queued tasks/host, including graphs and every entry point.
+16 per project on each host and 256 queued tasks/host, including every entry point.
 Starting or uncertain live attempts retain capacity until reconciled. Admission
 and operation insertion are atomic in run's own durable registry; Fabric has no
 second capacity ledger. Reject excess queue work before acknowledging acceptance.
@@ -299,7 +299,7 @@ prompt bytes before service invocation; MCP accepts text and typed artefact refs
 | `events read\|note` | Cursor, limit, optional wait and append-only notes |
 | `claim acquire\|renew\|verify\|release\|list` | Advisory issue/path work ownership |
 | `landing acquire\|renew\|verify\|release\|push\|reconcile` | Branch/expected SHA/fence; push stays an explicit authorised CLI action |
-| `run submit\|list\|status\|wait\|cancel\|output\|fetch\|resume` | Delegates to the shared run owner; selectors are exact qualified IDs |
+| `run submit\|list\|status\|wait\|cancel\|output\|fetch\|resume\|reconcile` | Delegates to the shared run owner; selectors are exact qualified IDs |
 | `session list\|show\|turn\|forget` | Turn mode `continue` or `fresh`; forget refuses an active turn |
 | `graph submit\|show\|retry\|cancel` | Immutable DAG; retry names failed nodes and retains successful inputs |
 | `host list\|doctor` | Read-only peer and adapter readiness |
@@ -398,8 +398,11 @@ must acquire that lock and prove the previous owner and provider absent/dead.
 The owner persists provider-launch intent before spawning: after that boundary,
 recovery observes or reports unknown and never replays the attempt. Only accepted
 work with no provider-launch intent may resume startup. A held lock, live provider
-or uncertain identity means starting/unknown, never a second provider launch. Cancellation can durably close an unstarted
-operation and prevents recovery from spawning it. Test every acceptance/spawn/
+or uncertain identity means starting/unknown, never a second provider launch. For intent-without-start uncertainty, explicit `run reconcile` may abandon the
+attempt as `OutcomeUnknown` only after supervisor proves no owned process remains;
+retain evidence and release capacity, never infer whether work ran. Any retry is
+a new authorised operation. Without absence proof it remains unresolved.
+Cancellation can durably close an unstarted operation and prevents recovery from spawning it. Test every acceptance/spawn/
 identity-publication boundary, including a lost launch reply. Fabric never stores a bare PID as a
 cancellation capability. Status comes from `run::snapshot`, retaining separate
 owner state, provider state and publication state. A live provider with a dead
@@ -499,7 +502,7 @@ The other chair may choose names, but must preserve the ownership and semantics.
 | `supervisor` | `private_dir(&Path) -> Result<DirHandle, FsError>`; `publish(&DirHandle, &OsStr, &[u8], PublishMode) -> Result<(), FsError>` | No-follow, permissions, atomic/no-replace modes and explicit durability |
 | `supervisor` | `capture(CommandSpec, CaptureLimits, &CancelToken) -> Result<Captured, ProcessError>`; `spawn_owner(OwnerSpec) -> Result<OwnerHandle, ProcessError>` | Bounded pipes/deadline; exact OS identities; detached custody; `stop_owned(&OwnerHandle, CancelReason)` only |
 | `confinement` | `read_input(&Path, &Authority, InputLimit) -> Result<InputBytes, ConfinementError>`; `prepare(&TaskRequest, &ProjectPolicy, &AttemptTempPaths) -> Result<PreparedAccess, ConfinementError>` | Checked roots, symlink refusal, write ownership, secret and instruction policy; called by run |
-| `run` | `submit(Submission, OperationKey, &ExecutionContext) -> Result<SubmissionReceipt, RunError>`; `operation(ProjectId, OperationId) -> Result<Observed<SubmissionReceipt>, RunError>`; `recover(ProjectId, OperationId) -> Result<Observed<SubmissionReceipt>, RunError>` | Durable acceptance and exactly one owner per operation; resolved receipts, no `Value` request bags |
+| `run` | `submit(Submission, OperationKey, &ExecutionContext) -> Result<SubmissionReceipt, RunError>`; `operation(ProjectId, OperationId) -> Result<Observed<SubmissionReceipt>, RunError>`; `recover(ProjectId, OperationId) -> Result<Observed<SubmissionReceipt>, RunError>`; `reconcile(ProjectId, OperationId, ReconcileDecision) -> Result<RunSnapshot, RunError>` | Durable acceptance and exactly one owner per operation; resolved receipts, no `Value` request bags |
 | `run` | `query(RunQuery) -> Result<Page<RunSnapshot>, RunError>`; `snapshot(ProjectId, AttemptRef) -> Result<RunSnapshot, RunError>`; `wait(RunQuery, WaitBudget, &CancelToken) -> Result<Page<RunSnapshot>, RunError>` | Registry owns discovery/status; qualified local IDs only; Fabric routes remote calls |
 | `run` | `cancel(AttemptRef, OperationKey, CancelReason) -> Result<CancelReceipt, RunError>`; `resume(ResumeRequest, OperationKey) -> Result<SubmissionReceipt, RunError>` | Exact target and generation, preserved route/access, no implicit fresh continuation |
 | `run` | `read_output(AttemptRef, ArtifactPart, ByteRange) -> Result<OutputChunk, RunError>`; `export(AttemptRef, ExportLimits) -> Result<ArtifactManifest, RunError>` | Bounded regular files, stable manifest digest and immutable published output |
@@ -520,6 +523,7 @@ struct TaskRequest { id: TaskId, prompt: InputBytes, inputs: Vec<ArtifactRef>,
     route: RouteRequest, access: Authority, cwd: PathBuf, timeout: DurationMs }
 struct SubmissionReceipt { runs: Vec<AttemptRef>, routes: Vec<RouteReceipt> }
 struct ResumeRequest { target: AttemptRef, prompt: InputBytes, expected_generation: u64 }
+enum ReconcileDecision { AbandonUncertain }
 struct RunQuery { project: ProjectId, ids: Vec<AttemptRef>,
     states: Vec<RunState>, cursor: Option<Cursor>, limit: u16 }
 struct RunSnapshot { project: ProjectId, target: AttemptRef, state: RunState, owner: OwnerObservation,
