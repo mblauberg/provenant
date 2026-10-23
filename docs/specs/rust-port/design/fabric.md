@@ -211,8 +211,10 @@ tools define them. `PROVENANT_AGENT_LABEL` replaces `AGENT_FABRIC_LABEL`.
 No other `PROVENANT_*` or `AGENT_FABRIC_*` inputs are accepted. The installer
 writes explicit `fabric mcp --client <label>` arguments. Project policy moves
 from `fabric_policy.py` to typed config; confinement/run and CLI enforce it.
-Invalid safety policy refuses launch. CLI owns the one `check` verb and
-HookSpec table; installer reads that table for harness hook registrations.
+Invalid safety policy refuses launch. CLI owns `check` subjects config, install,
+harness, release and `writing PATHS`, plus HookSpec (harness, protocol event,
+matcher, timeout, handler). All areas register handlers as `hook <harness> <event>`;
+installer consumes that table. Guard hooks deny unreadable or unbounded input.
 
 Fabric defaults: body 64 KiB; input frame 1 MiB; JSON nesting 64; page 100 rows;
 output tails 500 lines/64 KiB per read; result envelope 1 MiB; lease 1–3,600 s;
