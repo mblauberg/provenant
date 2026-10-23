@@ -106,7 +106,7 @@ revision deduplication, event subscription or cursor. Stats reports terminal
 attempt outcomes and usage under their recorded routes; active work is reported
 separately from run's `snapshot`, not as a terminal task outcome. Dispatch may
 carry `delivery_id`, retained in the fact and in run's
-`completed_attempt(AttemptId)` lookup. Workflow owns acceptance evidence;
+`AttemptReader::attempt(AttemptId)` lookup. Workflow owns acceptance evidence;
 telemetry does not join delivery records or expose an upsert/report API.
 
 | API | Contract |
