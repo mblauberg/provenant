@@ -2165,9 +2165,17 @@ def add_fake_crate(product: Path) -> Path:
     # The product tree may already carry the real crate; the fake replaces it.
     shutil.rmtree(crate, ignore_errors=True)
     (crate / "src").mkdir(parents=True)
-    (crate / "Cargo.toml").write_text('[package]\nname = "provenant"\nversion = "0.0.0"\n')
+    (crate / "Cargo.toml").write_text(
+        '[workspace]\nmembers = [".", "crates/*"]\n'
+        '[package]\nname = "provenant"\nversion = "0.0.0"\n'
+    )
     (crate / "Cargo.lock").write_text("# lock\n")
+    (crate / "rust-toolchain.toml").write_text('[toolchain]\nchannel = "1.94.1"\n')
     (crate / "src/main.rs").write_text("fn main() {}\n")
+    (crate / "crates/core/src").mkdir(parents=True)
+    (crate / "crates/core/Cargo.toml").write_text('[package]\nname = "provenant-core"\n')
+    (crate / "crates/core/src/lib.rs").write_text("// library\n")
+    (crate / "crates/core/build.rs").write_text("fn main() {}\n")
     return crate
 
 
@@ -2298,13 +2306,19 @@ def test_prebuilt_binary_with_matching_sources_is_installed_without_cargo(tmp_pa
     assert not (tmp_path / "fake-bin/cargo.log").exists()
 
 
+@pytest.mark.parametrize("change_library", [False, True])
 def test_prebuilt_binary_from_other_sources_is_refused(
-    tmp_path, rust_product
+    tmp_path, rust_product, change_library
 ):
+    from lib.front_door_build import source_digest
+
     prebuilt = tmp_path / "prebuilt/provenant"
     prebuilt.parent.mkdir()
-    prebuilt.write_text(fake_binary_text("0" * 64))
+    digest = source_digest(rust_product / "tools/front-door") if change_library else "0" * 64
+    prebuilt.write_text(fake_binary_text(digest))
     prebuilt.chmod(0o755)
+    if change_library:
+        (rust_product / "tools/front-door/crates/core/src/lib.rs").write_text("// changed library\n")
     environment = {"PROVENANT_FRONT_DOOR_BINARY": str(prebuilt)}
 
     strict = run_product(
@@ -2313,6 +2327,8 @@ def test_prebuilt_binary_from_other_sources_is_refused(
     assert strict.returncode == 3
     assert "built from different sources" in strict.stderr
     assert not (tmp_path / "bin/provenant").exists()
+    assert not (tmp_path / "instance").exists()
+    assert not (tmp_path / "codex").exists()
 
 
 def test_unknown_front_door_mode_is_refused_before_any_mutation(tmp_path, rust_product):
@@ -2360,27 +2376,39 @@ def test_check_mode_rejects_utility_hook_changes(tmp_path, flag):
     assert 'usage: install-harness' in result.stderr
 
 
-def test_rust_install_uses_private_snapshot_after_classification(tmp_path, rust_product):
+@pytest.mark.parametrize("prebuilt", [False, True])
+def test_rust_install_uses_private_snapshot_after_classification(tmp_path, rust_product, prebuilt):
     from lib.front_door_build import source_digest
 
-    install_fake_cargo(tmp_path / "fake-bin")
+    log = install_fake_cargo(tmp_path / "fake-bin", fail=prebuilt)
     target = tmp_path / "cargo-target"
+    original_source = target / "release/provenant"
+    environment = rust_env(tmp_path, PROVENANT_FRONT_DOOR="rust", CARGO_TARGET_DIR=str(target))
+    if prebuilt:
+        original_source = tmp_path / "prebuilt/provenant"
+        original_source.parent.mkdir()
+        original_source.write_text(fake_binary_text(source_digest(rust_product / "tools/front-door")))
+        original_source.chmod(0o755)
+        environment["PROVENANT_FRONT_DOOR_BINARY"] = str(original_source)
     publisher = rust_product / "scripts/install-provenant-command.py"
     publisher.write_text(publisher.read_text().replace(
         'result = classify(args.source, args.destination)',
         'result = classify(args.source, args.destination)\n'
         f'            Path({str(tmp_path / "selected-source")!r}).write_text(str(args.source))\n'
-        f'            Path({str(target / "release/provenant")!r}).write_text("swapped by another install")',
+        f'            Path({str(original_source)!r}).write_text("swapped by another install")',
     ))
 
-    result = run_product(rust_product, "codex", tmp_path,
-                         **rust_env(tmp_path, PROVENANT_FRONT_DOOR="rust", CARGO_TARGET_DIR=str(target)))
+    result = run_product(rust_product, "codex", tmp_path, **environment)
 
     assert result.returncode == 0, result.stderr
     installed = (tmp_path / "bin/provenant").read_text()
     assert source_digest(rust_product / "tools/front-door") in installed
+    assert original_source.read_text() == "swapped by another install"
+    if prebuilt:
+        assert installed == fake_binary_text(source_digest(rust_product / "tools/front-door"))
+        assert not log.exists()
     source = Path((tmp_path / "selected-source").read_text())
-    assert source != target / "release/provenant"
+    assert source != original_source
     assert not source.parent.exists()  # the install's EXIT trap removes its private snapshot
 
 
@@ -2395,3 +2423,5 @@ def test_missing_cargo_exits_three_with_rustup_fix_before_installing(tmp_path, r
     assert "fix: curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh" in result.stderr.splitlines()
     assert not (tmp_path / "bin/provenant").exists()
     assert not (tmp_path / "instance/.agent-fabric/product-root.json").exists()
+    for destination in ("bin", "instance", "codex", "claude", "home"):
+        assert not (tmp_path / destination).exists(), destination
