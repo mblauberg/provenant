@@ -9,7 +9,8 @@ import { usesPool } from "./pools.js";
 import { dispatchConfiguredProvider, observeOwner, stagingPath, startOwner, rejectOwnSeatClaude, type LaunchObserver } from "./execution.js";
 import { executableOwner, productRoot } from "./run-root.js";
 import { projectRoot, type Identity } from "./identity.js";
-import { processMatches, readOwnerRecord } from "./run-registry.js";
+import { readOwnerRecord } from "./run-registry.js";
+import { processMatches } from "./process-identity.js";
 import { statusRows } from "./run-status.js";
 
 /** The whole injected handoff text, prefix and result tail together. */

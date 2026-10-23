@@ -53,16 +53,13 @@ import { runRoot, databasePath, projectRoot, withoutGitRedirects, type Identity 
 import {
   shortRunId,
   readOwnerRecord,
-  processStartedAt,
-  processMatches,
   pruneDispatchRuns,
-  reapOrphanedRuns,
   readProviderRecord,
-  terminateRecordedRun,
   writeOwnerRecord,
   type OwnerRecord,
   type RecordedRun,
 } from "./run-registry.js";
+import { processStartedAt, processMatches, reapOrphanedRuns, terminateRecordedRun } from "./process-identity.js";
 import { statusRows } from "./run-status.js";
 
 import { laneTaskId, Store } from "./store.js";

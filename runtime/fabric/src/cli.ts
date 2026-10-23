@@ -19,9 +19,8 @@ import { dispatchConfiguredProvider, hostOwnersInThemselves, type BatchInput, ty
 import { dispatchConfiguredBatch } from "./batch-execution.js";
 import { productRoot } from "./run-root.js";
 import type { RouteInput } from "./execution-input.js";
-import {
- findRecordedRun, listRecordedRuns, retentionHours, terminateRecordedRun,
-} from "./run-registry.js";
+import { findRecordedRun, listRecordedRuns, retentionHours } from "./run-registry.js";
+import { terminateRecordedRun } from "./process-identity.js";
 import { federatedStatusRows as statusRows, fabricStatus } from "./run-status.js";
 import { inspectDatabase, isSQLiteContention, Store } from "./store.js";
 import { waitForLanes } from "./lane-wait.js";

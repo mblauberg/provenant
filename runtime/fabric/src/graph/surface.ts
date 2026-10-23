@@ -6,7 +6,7 @@ import { join, resolve } from "node:path";
 import { catalogueSnapshot } from "../catalogue.js";
 import { productRoot } from "../run-root.js";
 import { databasePath, runRoot, type Identity } from "../identity.js";
-import { observedAlive } from "../run-registry.js";
+import { observedAlive } from "../process-identity.js";
 import { Store } from "../store.js";
 import { faultLines, newGraphId, validateGraph, type GraphDocument } from "./document.js";
 import { fabricCommand } from "./gates.js";

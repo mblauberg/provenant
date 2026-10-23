@@ -14,7 +14,8 @@ import { expandPools, nativeFirst, usesPool, withoutEmptySelectors, POOL_FIELDS 
 import { runRoot, projectRoot, type Identity } from "./identity.js";
 import { pythonOwner, pythonOwnerEnvironment } from "./python-owner.js";
 import { assertFixtureRunRoot, executableOwner, productRoot } from "./run-root.js";
-import { shortRunId, findRecordedRun, terminateRecordedRun } from "./run-registry.js";
+import { shortRunId, findRecordedRun } from "./run-registry.js";
+import { terminateRecordedRun } from "./process-identity.js";
 import { statusRows } from "./run-status.js";
 import { federatedLane } from "./hosts.js";
 import {

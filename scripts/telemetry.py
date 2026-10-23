@@ -15,7 +15,6 @@ import os
 from pathlib import Path
 import re
 import sqlite3
-from stat import S_ISREG
 import subprocess
 import sys
 from types import SimpleNamespace
@@ -309,25 +308,6 @@ def put_usage(db, source, event_id, origin_path, owner=None, **values):
                   **{key: values.get(key) for key in ('session', 'provider', 'account', 'model')})
 
 
-def claude_record(db, row, state, path, offset, account=None, owner=None):
-    delivery_owner().compact(this(), db, 'claude', row, state, path, offset)
-    message = row.get('message') or {}
-    usage = message.get('usage')
-    if row.get('type') != 'assistant' or not isinstance(usage, dict) or not message.get('id'):
-        return
-    reasoning = number((usage.get('output_tokens_details') or {}).get('thinking_tokens'))
-    output = number(usage.get('output_tokens'))
-    put_usage(db, 'claude', message['id'], origin_path=path, owner=owner, session=row.get('sessionId'),
-              adapter='claude', provider='anthropic', model=message.get('model'), observed_model=message.get('model'),
-              effort=row.get('perTurnEffort'), account=account or row.get('account'),
-              repository=row.get('cwd'), revision=row.get('gitRevision'), timestamp=row.get('timestamp'),
-              input_tokens=number(usage.get('input_tokens')),
-              cache_read_tokens=number(usage.get('cache_read_input_tokens')),
-              cache_write_tokens=number(usage.get('cache_creation_input_tokens')),
-              output_tokens=max(0, output - (reasoning or 0)) if output is not None else None,
-              reasoning_tokens=reasoning, usage_source='message.usage')
-
-
 def identity(*values):
     return hashlib.sha256(json.dumps(values, sort_keys=True).encode()).hexdigest()
 
@@ -492,119 +472,6 @@ def put_quota_series(db, provider, account, host, observed_at, windows, source=N
                   provider=provider, account=account)
 
 
-def codex_record(db, row, state, path, offset, account=None, owner=None):
-    delivery_owner().compact(this(), db, 'codex', row, state, path, offset)
-    if row.get('type') == 'compacted':
-        return
-    payload = row.get('payload') or {}
-    if row.get('type') == 'session_meta':
-        state.update(session=payload.get('id') or payload.get('session_id'),
-                     repository=payload.get('cwd'), account=payload.get('creator_account_id'),
-                     revision=(payload.get('git') or {}).get('commit_hash'))
-    elif row.get('type') == 'turn_context':
-        state.update(model=payload.get('model'), effort=payload.get('effort'),
-                     repository=payload.get('cwd') or state.get('repository'))
-    elif row.get('type') == 'event_msg' and payload.get('type') == 'token_count':
-        meta = {key: state.get(key) for key in ('session', 'repository', 'account', 'revision', 'model', 'effort')}
-        meta['account'] = account or meta['account']
-        timestamp = row.get('timestamp')
-        info = payload.get('info') or {}
-        total = info.get('total_token_usage')
-        if isinstance(total, dict):
-            total = {k: v for k, v in total.items() if k in {
-                'input_tokens', 'cached_input_tokens', 'cache_write_input_tokens',
-                'output_tokens', 'reasoning_output_tokens', 'total_tokens'} and number(v) is not None}
-            previous = state.get('total') or {}
-            reset = any(number(v) is not None and v < previous.get(k, 0) for k, v in total.items())
-            delta = {k: max(0, v - (0 if reset else previous.get(k, 0)))
-                     for k, v in total.items() if number(v) is not None}
-            state['total'] = total
-            event_id = identity(meta.get('session') or str(path), offset)
-        else:
-            delta = {k: v for k, v in (info.get('last_token_usage') or {}).items()
-                     if k in {'input_tokens', 'cached_input_tokens', 'cache_write_input_tokens',
-                              'output_tokens', 'reasoning_output_tokens', 'total_tokens'} and number(v) is not None}
-            event_id = identity(meta.get('session') or str(path), timestamp, delta)
-        if any(delta.values()):
-            cached = delta.get('cached_input_tokens')
-            written = delta.get('cache_write_input_tokens')
-            reasoning = delta.get('reasoning_output_tokens')
-            input_count, output = delta.get('input_tokens'), delta.get('output_tokens')
-            put_usage(db, 'codex', event_id, origin_path=path, owner=owner, **meta, adapter='codex', provider='openai',
-                      timestamp=timestamp, observed_model=meta.get('model'),
-                      input_tokens=max(0, input_count - (cached or 0) - (written or 0)) if input_count is not None else None,
-                      cache_read_tokens=cached, cache_write_tokens=written,
-                      output_tokens=max(0, output - (reasoning or 0)) if output is not None else None,
-                      reasoning_tokens=reasoning, usage_source='token_count')
-        limits = payload.get('rate_limits') or {}
-        for window, value in limits.items():
-            if isinstance(value, dict) and number(value.get('used_percent')) is not None:
-                reset_at = value.get('resets_at')
-                if isinstance(reset_at, (int, float)):
-                    reset_at = iso(datetime.fromtimestamp(reset_at, UTC))
-                observation(db, 'codex', origin_path=str(path), provider='openai', adapter='codex', model=state.get('model'),
-                            account=meta['account'], session=state.get('session'),
-                            timestamp=timestamp, window=window, used_percent=value['used_percent'],
-                            window_minutes=number(value.get('window_minutes')), reset_at=reset_at)
-
-
-# OTLP attributes kept beside every numeric one; any other string may carry content.
-OTEL_STRINGS = frozenset({'model', 'effort', 'type', 'tool_name', 'decision', 'source', 'success', 'status_code'})
-
-
-def otel_attributes(items):
-    values = {}
-    for item in items or ():
-        value = item.get('value') or {}
-        if 'intValue' in value:
-            values[item.get('key')] = int(value['intValue'])  # OTLP JSON sends int64 as a string
-        elif 'doubleValue' in value:
-            values[item.get('key')] = float(value['doubleValue'])
-        elif 'boolValue' in value:
-            values[item.get('key')] = bool(value['boolValue'])
-        elif 'stringValue' in value:
-            values[item.get('key')] = value['stringValue']
-    return values
-
-
-def otel_stamp(nanos, fallback):
-    try:
-        return iso(datetime.fromtimestamp(int(nanos) / 1e9, UTC))
-    except (TypeError, ValueError, OverflowError, OSError):
-        return fallback
-
-
-def otel_record(db, row, state, path, offset):
-    """One collector line becomes metadata events: log records by name, metric points by value."""
-    body, signal = row.get('body') or {}, row.get('signal')
-    resources = body.get('resourceLogs' if signal == 'logs' else 'resourceMetrics' if signal == 'metrics' else '') or ()
-    index = 0  # each record's position on its line, so identical records keep their multiplicity
-    for resource in resources:
-        context = otel_attributes((resource.get('resource') or {}).get('attributes'))
-        linked = {'run_id': context.get('provenant.run_id'), 'lane': context.get('provenant.lane'),
-                  'harness_rev': context.get('provenant.harness_rev')}
-        for scope in resource.get('scopeLogs' if signal == 'logs' else 'scopeMetrics') or ():
-            for record in scope.get('logRecords' if signal == 'logs' else 'metrics') or ():
-                points = ([record] if signal == 'logs' else
-                          ((record.get('sum') or record.get('gauge') or {}).get('dataPoints') or ()))
-                for point in points:
-                    index += 1
-                    attributes = otel_attributes(point.get('attributes'))
-                    kept = {key: value for key, value in attributes.items()
-                            if key in OTEL_STRINGS or isinstance(value, (int, float))}
-                    if signal == 'logs':
-                        name = re.sub(r'[^a-z0-9_.]', '_', str(attributes.get('event.name') or 'log').lower())
-                        kind = f'otel.{name}'
-                    else:
-                        kind, value = 'otel.metric', point.get('asInt', point.get('asDouble'))
-                        kept.update(name=record.get('name'), value=float(value) if value is not None else None,
-                                    temporality=(record.get('sum') or {}).get('aggregationTemporality'))
-                    put_event(db, kind, otel_stamp(point.get('timeUnixNano'), row.get('received_at')),
-                              f'{path}@{offset}#{index}', attrs=kept, session=attributes.get('session.id'),
-                              model=attributes.get('model') if isinstance(attributes.get('model'), str) else None,
-                              **linked)
-
-
 def backfill_session_events(db):
     """One `session.start` per session already in usage rows; later rows emit it on upsert."""
     for row in db.execute(
@@ -615,77 +482,6 @@ def backfill_session_events(db):
         put_event(db, 'session.start', row['ts'], row['ref'],
                   attrs={'source': row['source'], 'adapter': row['adapter']},
                   **{key: row[key] for key in ('session', 'provider', 'account', 'model')})
-
-
-def clear_file(db, source, path):
-    events = db.execute('SELECT event_id,host FROM usage_files WHERE source=? AND path=?',
-                        (source, str(path))).fetchall()
-    db.execute('DELETE FROM usage_files WHERE source=? AND path=?', (source, str(path)))
-    for event_id, host in events:
-        db.execute('DELETE FROM usage WHERE source=? AND event_id=? AND host=? AND NOT EXISTS '
-                   '(SELECT 1 FROM usage_files f WHERE f.source=usage.source '
-                   'AND f.event_id=usage.event_id AND f.host=usage.host)', (source, event_id, host))
-    db.execute('DELETE FROM observations WHERE source=? AND origin_path=?', (source, str(path)))
-
-
-def open_verified(path, inode=None):
-    """Open a regular file without following a final symlink, as the inode seen at discovery when given.
-
-    Discovery refuses links, but a file swapped for one before this open would otherwise be read.
-    """
-    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
-    stat = os.fstat(fd)
-    if not S_ISREG(stat.st_mode) or (inode and (stat.st_dev, stat.st_ino) != tuple(inode)):
-        os.close(fd)
-        raise OSError(f'{path} changed since discovery')
-    return os.fdopen(fd, 'rb'), stat
-
-
-def file_identity(stream, stat, length):
-    digest = hashlib.sha256()
-    stream.seek(0)
-    remaining = length
-    while remaining:
-        chunk = stream.read(min(remaining, 1024 * 1024))
-        if not chunk:
-            break
-        digest.update(chunk)
-        remaining -= len(chunk)
-    return [stat.st_dev, stat.st_ino, length, digest.hexdigest()]
-
-
-def ingest_jsonl(db, source, path, parse, inode=None):
-    stream, stat = open_verified(path, inode)
-    with stream:
-        ingest_stream(db, source, path, parse, stream, stat)
-
-
-def ingest_stream(db, source, path, parse, stream, stat):
-    old = db.execute('SELECT * FROM cursors WHERE source=? AND path=?', (source, str(path))).fetchone()
-    state = json.loads(old['state']) if old else {}
-    previous_file = state.get('_file')
-    unchanged = old and old['size'] == stat.st_size and old['mtime'] == stat.st_mtime_ns
-    current_id = [stat.st_dev, stat.st_ino]
-    if unchanged and previous_file and previous_file[:2] == current_id:
-        return
-    rewritten = bool(old and (stat.st_size < old['size'] or
-                     (previous_file and (previous_file[2] < old['size'] or
-                      file_identity(stream, stat, previous_file[2]) != previous_file))))
-    if rewritten:
-        clear_file(db, source, path)
-        state = {}
-    offset = old['offset'] if old and not rewritten else 0
-    stream.seek(offset)
-    while stream.tell() < stat.st_size:
-        line = stream.readline(stat.st_size - stream.tell())
-        if not line.endswith(b'\n'):
-            break
-        row = json.loads(line)
-        parse(db, row, state, path, offset)
-        offset = stream.tell()
-    state['_file'] = file_identity(stream, stat, stat.st_size)
-    db.execute('INSERT OR REPLACE INTO cursors VALUES (?,?,?,?,?,?)',
-               (source, str(path), stat.st_size, stat.st_mtime_ns, offset, json.dumps(state)))
 
 
 def readonly(path):
@@ -864,6 +660,12 @@ def this():
 
 
 @cache
+def ingest_owner():
+    import telemetry_ingest
+    return telemetry_ingest
+
+
+@cache
 def delivery_owner():
     spec = importlib.util.spec_from_file_location('provenant_telemetry_delivery', Path(__file__).with_name('telemetry_delivery.py'))
     module = importlib.util.module_from_spec(spec)
@@ -887,233 +689,6 @@ def report_owner():
     return module
 
 
-PROVIDERS = {'claude': 'anthropic', 'codex': 'openai', 'cursor': 'cursor',
-             'opencode': 'opencode', 'agy': 'google'}
-
-
-def stamp_ms(value):
-    try:
-        return datetime.fromisoformat(str(value).replace('Z', '+00:00')).timestamp() * 1000
-    except (TypeError, ValueError):
-        return None
-
-
-def ingest_document(db, source, path):
-    stat = path.stat()
-    old = db.execute('SELECT * FROM cursors WHERE source=? AND path=?', (source, str(path))).fetchone()
-    if old and old['size'] == stat.st_size and old['mtime'] == stat.st_mtime_ns:
-        return
-    row = json.loads(path.read_text())
-    if source == 'fabric':
-        provenance = row.get('provenance') or {}
-        requested = provenance.get('requested') or {}
-        adapter = requested.get('adapter')
-        usage = row.get('usage') or row.get('context') or {}
-        input_count = number(usage.get('input_tokens'))
-        cached = number(usage.get('cache_read_tokens', usage.get('cached_input_tokens')))
-        written = number(usage.get('cache_write_tokens', row.get('cache_write_tokens')))
-        output = number(usage.get('output_tokens'))
-        reasoning = number(usage.get('reasoning_tokens', row.get('reasoning_tokens')))
-        started, ended = stamp_ms(row.get('started_at')), stamp_ms(row.get('ended_at'))
-        provider_ms = number(((row.get('timing') or {}).get('phases') or {}).get('provider'))
-        requested_route = row.get('requested_route') or {}
-        parent = row.get('parent') or {}
-        if not row.get('usage'):
-            if input_count is not None:
-                input_count = max(0, input_count - (cached or 0) - (written or 0))
-            if output is not None and adapter in {'codex', 'claude', 'cursor'}:
-                output = max(0, output - (reasoning or 0))
-        fields = dict(session=row.get('session_id'), run_id=row.get('run_id'),
-                      delivery_run_id=row.get('delivery_run_id'),
-                      parent_run_id=parent.get('run_id'), parent_task_id=parent.get('task_id'),
-                      parent_attempt=parent.get('attempt'),
-                      task_id=row.get('task_id'), attempt=row.get('attempt'), lane='/'.join(str(row.get(k, '')) for k in ('run_id','task_id','attempt')),
-                      graph_node=row.get('graph_node'), adapter=adapter,
-                      provider=provenance.get('provider') or PROVIDERS.get(adapter, adapter),
-                      model=provenance.get('observed_model') or provenance.get('resolved_model') or requested.get('model'),
-                      requested_model=requested.get('model'), resolved_model=provenance.get('resolved_model'),
-                      observed_model=provenance.get('observed_model'),
-                      effort=provenance.get('effort_applied') or requested.get('effort'),
-                      account=row.get('account') or provenance.get('account'),
-                      repository=row.get('workspace_root') or row.get('cwd'),
-                      revision=row.get('repository_revision'), timestamp=row.get('ended_at') or row.get('started_at'),
-                      input_tokens=input_count, cache_read_tokens=cached, cache_write_tokens=written,
-                      output_tokens=output, reasoning_tokens=reasoning,
-                      usage_source=usage.get('usage_source') or row.get('usage_source') or usage.get('source'),
-                      status=row.get('status') or row.get('state'), error_class=receipt_error_class(row),
-                      task_class=row.get('task_class') or requested_route.get('task_class') or None,
-                      route=requested_route.get('alias') or None,
-                      duration_ms=round(ended - started) if started is not None and ended is not None and ended >= started else None,
-                      provider_ms=round(provider_ms) if provider_ms is not None else None)
-        put_usage(db, source, identity(str(path.resolve())), origin_path=path, **fields)
-        if row.get('ended_at') and fields['status'] not in (None, 'running'):
-            profile = row.get('profile') if isinstance(row.get('profile'), dict) else {}
-            retry_of = row.get('retry_of')
-            escalated_from = (f"{fields['run_id']}/{fields['task_id']}/{int(retry_of.removeprefix('attempt-'))}"
-                              if row.get('escalation_reason') and isinstance(retry_of, str)
-                              and re.fullmatch(r'attempt-\d+', retry_of) else None)
-            if profile.get('digest') and isinstance(profile.get('knobs'), dict):
-                db.execute('INSERT INTO harness_stamps(digest,preset,knobs,first_seen) VALUES (?,?,?,?) '
-                           'ON CONFLICT(digest) DO UPDATE SET first_seen=MIN(harness_stamps.first_seen,excluded.first_seen)',
-                           (profile['digest'], profile.get('preset'), json.dumps(profile['knobs'], sort_keys=True), fields['timestamp']))
-            put_event(db, 'lane.attempt', fields['timestamp'], str(path), refresh=True,
-                      # A receipt without a profile ran the default (balanced) harness profile.
-                      attrs={**{key: fields[key] for key in ('adapter', 'effort', 'attempt', 'status', 'error_class',
-                                                             'task_class', 'route', 'duration_ms')},
-                             'profile': profile.get('preset'), 'profile_digest': profile.get('digest'),
-                             'risk_tier': profile.get('risk_tier'), 'floored': profile.get('floored'),
-                             'empty_patch': row.get('empty_patch'), 'retry_of': retry_of,
-                             'escalation_reason': row.get('escalation_reason'), 'escalated_from': escalated_from,
-                             **({'parent': parent} if parent else {}),
-                             **({'children': [{key: child.get(key) for key in ('run_id', 'task_id', 'attempt', 'status')}
-                                              for child in row['children']]} if row.get('children') else {})},
-                      harness_rev=provenance.get('harness_rev'), **fields)
-    else:
-        entries = row.get('routes', {}) if source == 'route_health' else row.get('cooldowns', {})
-        for entry in entries.values():
-            for item in entry.get('recent', []) if source == 'route_health' else [entry]:
-                adapter = entry.get('adapter')
-                values = dict(adapter=adapter, provider=PROVIDERS.get(adapter, adapter),
-                              model=entry.get('model'), account=entry.get('account'),
-                              timestamp=item.get('at') or item.get('recorded_at'),
-                              run_id=item.get('run_id') or item.get('source_run'),
-                              status=item.get('status'), reset_at=item.get('cooling_until'))
-                observation(db, source, origin_path=str(path), **values)
-                kind = ('cooldown' if source == 'cooldowns' else
-                        f"limit.{values['status']}" if values['status'] in {'rate_limited', 'usage_limited'} else None)
-                if kind:
-                    put_event(db, kind, values['timestamp'], str(path),
-                              attrs={key: values[key] for key in ('adapter', 'status', 'reset_at')},
-                              **{key: values[key] for key in ('run_id', 'provider', 'account', 'model')})
-    db.execute('INSERT OR REPLACE INTO cursors VALUES (?,?,?,?,?,?)',
-               (source, str(path), stat.st_size, stat.st_mtime_ns, stat.st_size, '{}'))
-
-
-# OpenCode 2.0.30 moved assistant turns from `message` to `session_message`, keeping ids.
-# A turn in both tables is read only from `session_message`, so it has one usage row and source.
-# Skipped rows come back with NULL data rather than being filtered, so they still advance the watermark.
-OPENCODE_TABLES = {
-    'message': ("SELECT id,session_id,time_created,time_updated,CASE WHEN {migrated} THEN NULL ELSE data END,NULL "
-                "FROM message WHERE time_updated>=? ORDER BY time_updated,id"),
-    'session_message': ("SELECT m.id,m.session_id,m.time_created,m.time_updated,"
-                        "CASE WHEN m.type='assistant' THEN m.data END,s.directory "
-                        "FROM session_message m LEFT JOIN session_v2 s ON s.id=m.session_id "
-                        "WHERE m.time_updated>=? ORDER BY m.time_updated,m.id"),
-}
-
-
-def opencode_turn(row):
-    """Provider, model and repository from either message layout; None for a non-assistant row."""
-    model = row.get('model') if isinstance(row.get('model'), dict) else {}
-    if row.get('role', 'assistant') != 'assistant':
-        return None
-    return (row.get('providerID') or model.get('providerID'), row.get('modelID') or model.get('id'),
-            (row.get('path') or {}).get('cwd'))
-
-
-def ingest_opencode(db, path, account=None, owner=None, inode=None):
-    old = db.execute('SELECT state FROM cursors WHERE source=? AND path=?', ('opencode', str(path))).fetchone()
-    saved = json.loads(old['state']) if old else {}
-    marks = {'message': saved.get('max_updated', 0), **saved.get('tables', {})}
-    pinned, stat = open_verified(path, inode)
-    file_id = [stat.st_dev, stat.st_ino]
-    with pinned, readonly(path) as source:
-        source.execute('BEGIN')  # One snapshot for the watermarks and the rows they cover.
-        present = {name for (name,) in source.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-        # SQLite opens by name, so confirm the name still held the pinned file once it had.
-        open_verified(path, file_id)[0].close()
-        tables = [name for name in OPENCODE_TABLES if name in present]
-        latest = {name: source.execute(f'SELECT MAX(time_updated) FROM {name}').fetchone()[0] or 0 for name in tables}
-        if old and (saved.get('file_id') != file_id or any(latest[name] < marks.get(name, 0) for name in tables)):
-            clear_file(db, 'opencode', path)
-            marks = {}
-        for name in tables:
-            watermark = marks.get(name, 0)
-            # Inclusive watermark covers messages updated during an earlier ingest.
-            for message_id, session, created, updated, data, directory in source.execute(
-                    OPENCODE_TABLES[name].format(migrated='id IN (SELECT id FROM session_message)'
-                                                 if 'session_message' in present else '0'), (watermark,)):
-                watermark = max(watermark, updated)
-                if data is None:
-                    continue
-                row = json.loads(data)
-                turn = opencode_turn(row)
-                if turn is None:
-                    continue
-                provider, model, cwd = turn
-                usage = row.get('tokens') or {}
-                cache = usage.get('cache') or {}
-                stamp = (row.get('time') or {}).get('created') or created
-                timestamp = iso(datetime.fromtimestamp(stamp / 1000, UTC))
-                put_usage(db, 'opencode', message_id, origin_path=path, owner=owner, session=session, adapter='opencode',
-                          provider=provider, model=model, timestamp=timestamp, repository=cwd or directory,
-                          account=account or row.get('account'), input_tokens=number(usage.get('input')),
-                          output_tokens=number(usage.get('output')), reasoning_tokens=number(usage.get('reasoning')),
-                          cache_read_tokens=number(cache.get('read')), cache_write_tokens=number(cache.get('write')),
-                          reported_cost=number(row.get('cost')), usage_source=f'{name}.tokens')
-            marks[name] = watermark
-    stat = path.stat()
-    db.execute('INSERT OR REPLACE INTO cursors VALUES (?,?,?,?,?,?)',
-               ('opencode', str(path), stat.st_size, stat.st_mtime_ns, 0,
-                json.dumps({'max_updated': marks.get('message', 0), 'tables': marks, 'file_id': file_id})))
-
-
-def ingest(db):
-    with db:
-        attribute_accounts(db)
-    owners_by_source = owners()
-    for source, paths in source_paths().items():
-        errors = 0
-        # Fabric-rooted sources read the registry, so a bad registry marks only them as errors.
-        if source in {'fabric', 'delivery'}:
-            try:
-                paths = fabric_paths() if source == 'fabric' else delivery_owner().paths(this())
-            except (OSError, ValueError, sqlite3.Error):
-                errors += 1
-        for path in paths:
-            label, inode = paths[path] if isinstance(paths, dict) else (None, None)
-            owner = {'account': label, 'owner': owners_by_source[source]} if label else {}
-            try:
-                with db:
-                    if source == 'opencode':
-                        ingest_opencode(db, path, **owner, inode=inode)
-                    elif source in {'fabric', 'route_health', 'cooldowns'}:
-                        ingest_document(db, source, path)
-                    elif source == 'otel':
-                        ingest_jsonl(db, source, path, otel_record)
-                    elif source == 'delivery':
-                        if path.name == 'RUN.json':
-                            delivery_owner().ingest_receipt(this(), db, path)
-                        else:
-                            delivery_owner().prepare(db, path)
-                            ingest_jsonl(db, source, path, partial(delivery_owner().record, this()))
-                    else:
-                        ingest_jsonl(db, source, path, partial(
-                            {'codex': codex_record, 'claude': claude_record}[source], **owner), inode=inode)
-            except (OSError, ValueError, TypeError, AttributeError, sqlite3.Error):
-                errors += 1
-        rebuild = db.execute('SELECT paths FROM rebuilds WHERE source=?', (source,)).fetchone()
-        if rebuild and not errors and set(json.loads(rebuild['paths'])).issubset({str(path) for path in paths}):
-            db.execute('DELETE FROM usage WHERE source=? AND NOT EXISTS '
-                       '(SELECT 1 FROM usage_files f WHERE f.source=usage.source '
-                       'AND f.event_id=usage.event_id AND f.host=usage.host)', (source,))
-            db.execute('DELETE FROM observations WHERE source=? AND origin_path IS NULL', (source,))
-            db.execute('DELETE FROM rebuilds WHERE source=?', (source,))
-        if source == 'otel':
-            count = db.execute("SELECT COUNT(*) FROM events WHERE kind LIKE 'otel.%'").fetchone()[0]
-        elif source == 'delivery':
-            count = db.execute("SELECT COUNT(*) FROM deliveries").fetchone()[0] + db.execute(
-                "SELECT COUNT(*) FROM events WHERE kind IN ('repair.cycle','review.finding')").fetchone()[0]
-        else:
-            table = 'observations' if source in {'route_health', 'cooldowns'} else 'usage'
-            count = db.execute(f'SELECT COUNT(*) FROM {table} WHERE source=?', (source,)).fetchone()[0]
-        status = 'error' if errors else 'ok' if paths else 'absent'
-        db.execute('UPDATE sources SET last_ingest=?,status=?,row_count=? WHERE source=?',
-                   (now(), status, count, source))
-        db.commit()
-    return [dict(row) for row in db.execute('SELECT * FROM sources ORDER BY source')]
-
-
 PRODUCT_ROOT = Path(__file__).resolve().parents[1]
 PRICE_TABLE = PRODUCT_ROOT / 'config/telemetry-prices.json'
 ERROR_CLASS_BY_STATUS = {
@@ -1124,6 +699,10 @@ ERROR_CLASS_BY_STATUS = {
 }
 UNCLASSIFIED_FAILURES = {'failed', 'quarantined', 'partial', 'blocked', 'rejected', 'interrupted',
                          'writer_changed', 'tool_missing'}
+
+
+def ingest_document(db, source, path):
+    return ingest_owner().ingest_document(this(), db, source, path)
 
 
 def receipt_error_class(row):
@@ -1234,7 +813,7 @@ def main(argv=None):
                 return 0
             if args.command == 'accepted':
                 return delivery_owner().run_accepted(this(), db, args.since, args.json)
-            rows = ingest(db) if args.command == 'ingest' else [
+            rows = ingest_owner().ingest(this(), db) if args.command == 'ingest' else [
                 dict(row) for row in db.execute('SELECT * FROM sources ORDER BY source')]
         if args.json:
             print(json.dumps(rows, indent=2))
