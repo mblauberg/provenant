@@ -38,7 +38,6 @@ before validation.
 | `telemetry-quota-event-row.schema.json` | `quota_events` ledger rows; quota transition ingestion in `scripts/telemetry.py`. |
 | `model-routing.schema.json` | `config/model-routing.json`; read by `scripts/model_route.py` and `scripts/telemetry_costs.py`. |
 | `model-preferences.schema.json` | `config/model-preferences.json`; read and updated by `scripts/model_route_preferences.py`. |
-| `graph-reservation.schema.json` | Git worktree reservation; `reserve` in `runtime/fabric/src/graph/store.ts`. |
 | `graph-node-receipt.schema.json` | Graph node attempt `receipt.json`; `#receipt` in `runtime/fabric/src/graph/owner.ts`. |
 | `route-health.schema.json` | Route health store; `write_route_health` in `skills/orchestrate/scripts/fabric_records.py`. |
 | `cooldowns.schema.json` | Cooldown store; `_store_cooldowns` in `fabric_records.py`. |

@@ -40,7 +40,6 @@ NON_RECORD_SCHEMAS = {
     "fabric.events.v1": "CLI event page and cursor in run-reader",
     "fabric.graph.v1": "CLI single-graph projection in graph/surface",
     "fabric.graphs.v1": "CLI graph listing in graph/surface",
-    "fabric.inbox_digest.v1": "inbox summary response from store.inboxDigest",
     "fabric.catalogue.v1": "routing catalogue query response from model_route",
     "fabric.routes.v1": "route-pool listing response from model_route_pools",
     "fabric.cooldowns.active.v1": "active cooldown CLI report from model_route",
