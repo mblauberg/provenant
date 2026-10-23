@@ -9,6 +9,7 @@
 #![forbid(unsafe_code)]
 
 pub mod batch_execution;
+pub mod coordination;
 pub mod execution;
 pub mod fabric_policy;
 pub mod field;
