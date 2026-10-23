@@ -39,3 +39,9 @@ lineage, unavailable statuses and certification rules are ported. Typed worker
 and normalised result records use serde. Policy fixtures translate all 17 pure
 assertions in `tests/test_review_terminal.py`; the registry/YAML drift test
 remains an integration gap. Differential cases also cover every adapter.
+
+## Run gates unit 01
+
+Nested gate approval, release approval and the approved-release plus settled
+observation closed-run invariant are ported. Unknown and malformed fields do
+not grant approval. No receipt fields are rewritten.
