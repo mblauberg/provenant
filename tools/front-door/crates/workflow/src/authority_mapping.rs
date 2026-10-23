@@ -2,9 +2,13 @@
 //!
 //! This is the Rust port of `skills/deliver/scripts/authority_mapping.py`.
 
-use serde::{Deserialize, Serialize};
+use serde::de::{IgnoredAny, MapAccess, SeqAccess, Visitor};
+use serde::ser::SerializeMap;
+use serde::Deserializer;
+use serde::{Deserialize, Serialize, Serializer};
 use serde_json::{Map, Value};
-use std::collections::{BTreeMap, HashSet};
+use std::collections::HashSet;
+use std::fmt;
 
 const MAX_SAFE_INTEGER: u64 = (1_u64 << 53) - 1;
 const MAX_BUDGET_UNITS: usize = 128;
@@ -78,6 +82,7 @@ impl AuthorityMappingError {
     pub fn error_type(&self) -> &'static str {
         match self {
             Self::Unhashable { .. } => "TypeError",
+            Self::Json(_) => "JSONDecodeError",
             _ => "AuthorityMappingError",
         }
     }
@@ -128,6 +133,76 @@ pub struct Network {
     pub allowed_hosts: Option<Vec<String>>,
 }
 
+/// A JSON object that serialises validated budget units in sorted key order.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct OrderedBudget(Vec<(String, u64)>);
+
+impl OrderedBudget {
+    fn from_entries(entries: Vec<(String, u64)>) -> Self {
+        let mut entries = entries;
+        entries.sort_by(|(left, _), (right, _)| left.cmp(right));
+        Self(entries)
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = (&str, &u64)> {
+        self.0.iter().map(|(key, amount)| (key.as_str(), amount))
+    }
+
+    pub fn get(&self, key: &str) -> Option<&u64> {
+        self.0
+            .iter()
+            .find_map(|(candidate, amount)| (candidate == key).then_some(amount))
+    }
+}
+
+impl Serialize for OrderedBudget {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut map = serializer.serialize_map(Some(self.0.len()))?;
+        for (key, amount) in &self.0 {
+            map.serialize_entry(key, amount)?;
+        }
+        map.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for OrderedBudget {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct OrderedBudgetVisitor;
+
+        impl<'de> Visitor<'de> for OrderedBudgetVisitor {
+            type Value = OrderedBudget;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str("a JSON object of budget units")
+            }
+
+            fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+            where
+                A: MapAccess<'de>,
+            {
+                let mut entries: Vec<(String, u64)> = Vec::new();
+                while let Some((key, amount)) = map.next_entry::<String, u64>()? {
+                    if let Some(index) = entries.iter().position(|(candidate, _)| candidate == &key)
+                    {
+                        entries[index].1 = amount;
+                    } else {
+                        entries.push((key, amount));
+                    }
+                }
+                Ok(OrderedBudget::from_entries(entries))
+            }
+        }
+
+        deserializer.deserialize_map(OrderedBudgetVisitor)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct MappedAuthority {
@@ -144,7 +219,7 @@ pub struct MappedAuthority {
     pub irreversible_actions: IrreversibleActions,
     pub network: Network,
     pub expires_at: String,
-    pub budget: BTreeMap<String, u64>,
+    pub budget: OrderedBudget,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -477,20 +552,33 @@ fn timestamp(value: &Value, field: &str) -> Result<String, AuthorityMappingError
     Ok(text.to_owned())
 }
 
-fn budget(value: &Value, field: &str) -> Result<BTreeMap<String, u64>, AuthorityMappingError> {
+fn budget(
+    value: &Value,
+    field: &str,
+    ordered_keys: Option<&[String]>,
+) -> Result<OrderedBudget, AuthorityMappingError> {
     let input = object(value, field)?;
     if input.len() > MAX_BUDGET_UNITS {
         return Err(invalid(format!(
             "{field} must contain at most {MAX_BUDGET_UNITS} units"
         )));
     }
-    let mut result = BTreeMap::new();
-    // serde_json::Map is ordered by key in this crate configuration. The
-    // Python source reports the first invalid budget entry in insertion order;
-    // see PORT_STATUS for this diagnostic-order limitation.
-    for (key, amount) in input {
+    let mut result = Vec::with_capacity(input.len());
+    let ordered_entries: Vec<(&str, &Value)> = ordered_keys
+        .map(|keys| {
+            keys.iter()
+                .filter_map(|key| input.get(key).map(|value| (key.as_str(), value)))
+                .collect()
+        })
+        .unwrap_or_else(|| {
+            input
+                .iter()
+                .map(|(key, value)| (key.as_str(), value))
+                .collect()
+        });
+    for (key, amount) in ordered_entries {
         let allowed_provider_key = provider_token_budget(key);
-        if !GENERIC_BUDGET_UNITS.contains(&key.as_str()) && !allowed_provider_key {
+        if !GENERIC_BUDGET_UNITS.contains(&key) && !allowed_provider_key {
             return Err(invalid(format!("{field} contains an invalid budget unit")));
         }
         let integer = match amount {
@@ -502,9 +590,9 @@ fn budget(value: &Value, field: &str) -> Result<BTreeMap<String, u64>, Authority
         }
         .filter(|amount| *amount <= MAX_SAFE_INTEGER)
         .ok_or_else(|| invalid(format!("{field}.{key} must be a non-negative safe integer")))?;
-        result.insert(key.clone(), integer);
+        result.push((key.to_owned(), integer));
     }
-    Ok(result)
+    Ok(OrderedBudget::from_entries(result))
 }
 
 fn provider_token_budget(value: &str) -> bool {
@@ -527,6 +615,7 @@ fn map_scope(
     scope: &Map<String, Value>,
     approval: Approval,
     field: &str,
+    budget_order: Option<&[String]>,
 ) -> Result<MappedAuthority, AuthorityMappingError> {
     let version = scope.get("schema_version").unwrap_or(&Value::Null);
     let version_is_two = match version {
@@ -716,6 +805,7 @@ fn map_scope(
     let budget = budget(
         scope.get("budget").unwrap_or(&Value::Null),
         &format!("{field}.budget"),
+        budget_order,
     )?;
 
     Ok(MappedAuthority {
@@ -758,6 +848,13 @@ fn host_parser(value: &Value, field: &str) -> Result<String, AuthorityMappingErr
 
 /// Normalise one closed Delivery Authority V2 object.
 pub fn map_delivery_authority(authority: &Value) -> Result<MappedAuthority, AuthorityMappingError> {
+    map_delivery_authority_with_budget_order(authority, None)
+}
+
+fn map_delivery_authority_with_budget_order(
+    authority: &Value,
+    budget_order: Option<&[String]>,
+) -> Result<MappedAuthority, AuthorityMappingError> {
     let authority_object = object(authority, "authority")?;
     closed(authority_object, AUTHORITY_FIELDS, "authority")?;
     let approved_by = token(
@@ -784,11 +881,13 @@ pub fn map_delivery_authority(authority: &Value) -> Result<MappedAuthority, Auth
         evidence_id: evidence,
         evidence_digest,
     };
-    map_scope(authority_object, approval, "authority")
+    map_scope(authority_object, approval, "authority", budget_order)
 }
 
-/// Decode a raw JSON object with the crate's Python integer range guard, then
-/// normalise it as a Delivery Authority V2 value.
+/// Decode raw JSON with the shared Python integer range guard, retaining the
+/// insertion order needed for source-compatible first-invalid budget errors.
+/// Callers that start from an already-decoded `Value` cannot recover that
+/// original order and should use this boundary when exact diagnostics matter.
 pub fn map_delivery_authority_json(bytes: &[u8]) -> Result<MappedAuthority, AuthorityMappingError> {
     let value =
         provenant_records::checked_json::from_slice(bytes).map_err(|error| match error {
@@ -799,7 +898,260 @@ pub fn map_delivery_authority_json(bytes: &[u8]) -> Result<MappedAuthority, Auth
                 AuthorityMappingError::Json(error)
             }
         })?;
-    map_delivery_authority(&value)
+    let orders =
+        serde_json::from_slice::<BudgetOrderSet>(bytes).map_err(AuthorityMappingError::Json)?;
+    map_delivery_authority_with_budget_order(&value, orders.budget.as_deref())
+}
+
+/// Decode and map a raw authority while retaining budget insertion order for
+/// Python-compatible first-invalid diagnostics.
+pub fn map_delivery_delegations_json(
+    bytes: &[u8],
+) -> Result<Vec<MappedDelegation>, AuthorityMappingError> {
+    let value =
+        provenant_records::checked_json::from_slice(bytes).map_err(|error| match error {
+            provenant_records::checked_json::DecodeError::NumberOutOfRange(_) => {
+                AuthorityMappingError::NumberOutOfRange
+            }
+            provenant_records::checked_json::DecodeError::Json(error) => {
+                AuthorityMappingError::Json(error)
+            }
+        })?;
+    let orders =
+        serde_json::from_slice::<BudgetOrderSet>(bytes).map_err(AuthorityMappingError::Json)?;
+    map_delivery_delegations_with_orders(&value, &orders)
+}
+
+#[derive(Default)]
+struct BudgetOrderSet {
+    budget: Option<Vec<String>>,
+    delegations: Vec<Option<Vec<String>>>,
+}
+
+impl<'de> Deserialize<'de> for BudgetOrderSet {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct OrdersVisitor;
+
+        impl<'de> Visitor<'de> for OrdersVisitor {
+            type Value = BudgetOrderSet;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str("a JSON authority object")
+            }
+
+            fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+            where
+                A: MapAccess<'de>,
+            {
+                let mut result = BudgetOrderSet::default();
+                while let Some(key) = map.next_key::<String>()? {
+                    match key.as_str() {
+                        "budget" => result.budget = map.next_value::<BudgetKeys>()?.0,
+                        "delegations" => {
+                            result.delegations = map.next_value::<DelegationBudgetOrders>()?.0
+                        }
+                        _ => {
+                            let _: IgnoredAny = map.next_value()?;
+                        }
+                    }
+                }
+                Ok(result)
+            }
+
+            fn visit_bool<E: serde::de::Error>(self, _: bool) -> Result<Self::Value, E> {
+                Ok(BudgetOrderSet::default())
+            }
+
+            fn visit_i64<E: serde::de::Error>(self, _: i64) -> Result<Self::Value, E> {
+                Ok(BudgetOrderSet::default())
+            }
+
+            fn visit_u64<E: serde::de::Error>(self, _: u64) -> Result<Self::Value, E> {
+                Ok(BudgetOrderSet::default())
+            }
+
+            fn visit_f64<E: serde::de::Error>(self, _: f64) -> Result<Self::Value, E> {
+                Ok(BudgetOrderSet::default())
+            }
+
+            fn visit_str<E: serde::de::Error>(self, _: &str) -> Result<Self::Value, E> {
+                Ok(BudgetOrderSet::default())
+            }
+
+            fn visit_string<E: serde::de::Error>(self, _: String) -> Result<Self::Value, E> {
+                Ok(BudgetOrderSet::default())
+            }
+
+            fn visit_unit<E: serde::de::Error>(self) -> Result<Self::Value, E> {
+                Ok(BudgetOrderSet::default())
+            }
+
+            fn visit_none<E: serde::de::Error>(self) -> Result<Self::Value, E> {
+                Ok(BudgetOrderSet::default())
+            }
+
+            fn visit_seq<A>(self, mut sequence: A) -> Result<Self::Value, A::Error>
+            where
+                A: SeqAccess<'de>,
+            {
+                while sequence.next_element::<IgnoredAny>()?.is_some() {}
+                Ok(BudgetOrderSet::default())
+            }
+        }
+
+        deserializer.deserialize_any(OrdersVisitor)
+    }
+}
+
+struct BudgetKeys(Option<Vec<String>>);
+
+impl<'de> Deserialize<'de> for BudgetKeys {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct KeysVisitor;
+
+        impl<'de> Visitor<'de> for KeysVisitor {
+            type Value = BudgetKeys;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str("a JSON object of budget units")
+            }
+
+            fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+            where
+                A: MapAccess<'de>,
+            {
+                let mut keys = Vec::new();
+                let mut seen = HashSet::new();
+                while let Some(key) = map.next_key::<String>()? {
+                    let _: IgnoredAny = map.next_value()?;
+                    if seen.insert(key.clone()) {
+                        keys.push(key);
+                    }
+                }
+                Ok(BudgetKeys(Some(keys)))
+            }
+
+            fn visit_bool<E: serde::de::Error>(self, _: bool) -> Result<Self::Value, E> {
+                Ok(BudgetKeys(None))
+            }
+
+            fn visit_i64<E: serde::de::Error>(self, _: i64) -> Result<Self::Value, E> {
+                Ok(BudgetKeys(None))
+            }
+
+            fn visit_u64<E: serde::de::Error>(self, _: u64) -> Result<Self::Value, E> {
+                Ok(BudgetKeys(None))
+            }
+
+            fn visit_f64<E: serde::de::Error>(self, _: f64) -> Result<Self::Value, E> {
+                Ok(BudgetKeys(None))
+            }
+
+            fn visit_str<E: serde::de::Error>(self, _: &str) -> Result<Self::Value, E> {
+                Ok(BudgetKeys(None))
+            }
+
+            fn visit_string<E: serde::de::Error>(self, _: String) -> Result<Self::Value, E> {
+                Ok(BudgetKeys(None))
+            }
+
+            fn visit_unit<E: serde::de::Error>(self) -> Result<Self::Value, E> {
+                Ok(BudgetKeys(None))
+            }
+
+            fn visit_none<E: serde::de::Error>(self) -> Result<Self::Value, E> {
+                Ok(BudgetKeys(None))
+            }
+
+            fn visit_seq<A>(self, mut sequence: A) -> Result<Self::Value, A::Error>
+            where
+                A: SeqAccess<'de>,
+            {
+                while sequence.next_element::<IgnoredAny>()?.is_some() {}
+                Ok(BudgetKeys(None))
+            }
+        }
+
+        deserializer.deserialize_any(KeysVisitor)
+    }
+}
+
+struct DelegationBudgetOrders(Vec<Option<Vec<String>>>);
+
+impl<'de> Deserialize<'de> for DelegationBudgetOrders {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct DelegationsVisitor;
+
+        impl<'de> Visitor<'de> for DelegationsVisitor {
+            type Value = DelegationBudgetOrders;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str("a JSON delegation list")
+            }
+
+            fn visit_seq<A>(self, mut sequence: A) -> Result<Self::Value, A::Error>
+            where
+                A: SeqAccess<'de>,
+            {
+                let mut orders = Vec::new();
+                while let Some(order) = sequence.next_element::<BudgetOrderSet>()? {
+                    orders.push(order.budget);
+                }
+                Ok(DelegationBudgetOrders(orders))
+            }
+
+            fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+            where
+                A: MapAccess<'de>,
+            {
+                while map.next_entry::<IgnoredAny, IgnoredAny>()?.is_some() {}
+                Ok(DelegationBudgetOrders(Vec::new()))
+            }
+
+            fn visit_bool<E: serde::de::Error>(self, _: bool) -> Result<Self::Value, E> {
+                Ok(DelegationBudgetOrders(Vec::new()))
+            }
+
+            fn visit_i64<E: serde::de::Error>(self, _: i64) -> Result<Self::Value, E> {
+                Ok(DelegationBudgetOrders(Vec::new()))
+            }
+
+            fn visit_u64<E: serde::de::Error>(self, _: u64) -> Result<Self::Value, E> {
+                Ok(DelegationBudgetOrders(Vec::new()))
+            }
+
+            fn visit_f64<E: serde::de::Error>(self, _: f64) -> Result<Self::Value, E> {
+                Ok(DelegationBudgetOrders(Vec::new()))
+            }
+
+            fn visit_str<E: serde::de::Error>(self, _: &str) -> Result<Self::Value, E> {
+                Ok(DelegationBudgetOrders(Vec::new()))
+            }
+
+            fn visit_string<E: serde::de::Error>(self, _: String) -> Result<Self::Value, E> {
+                Ok(DelegationBudgetOrders(Vec::new()))
+            }
+
+            fn visit_unit<E: serde::de::Error>(self) -> Result<Self::Value, E> {
+                Ok(DelegationBudgetOrders(Vec::new()))
+            }
+
+            fn visit_none<E: serde::de::Error>(self) -> Result<Self::Value, E> {
+                Ok(DelegationBudgetOrders(Vec::new()))
+            }
+        }
+
+        deserializer.deserialize_any(DelegationsVisitor)
+    }
 }
 
 fn digest_valid(value: &str) -> bool {
@@ -814,8 +1166,15 @@ fn digest_valid(value: &str) -> bool {
 pub fn map_delivery_delegations(
     authority: &Value,
 ) -> Result<Vec<MappedDelegation>, AuthorityMappingError> {
+    map_delivery_delegations_with_orders(authority, &BudgetOrderSet::default())
+}
+
+fn map_delivery_delegations_with_orders(
+    authority: &Value,
+    orders: &BudgetOrderSet,
+) -> Result<Vec<MappedDelegation>, AuthorityMappingError> {
     let authority_object = object(authority, "authority")?;
-    let parent = map_delivery_authority(authority)?;
+    let parent = map_delivery_authority_with_budget_order(authority, orders.budget.as_deref())?;
     let delegations = authority_object
         .get("delegations")
         .and_then(Value::as_array)
@@ -829,7 +1188,12 @@ pub fn map_delivery_delegations(
             delegation.get("actor").unwrap_or(&Value::Null),
             &format!("{field}.actor"),
         )?;
-        let child = map_scope(delegation, parent.approval.clone(), &field)?;
+        let child = map_scope(
+            delegation,
+            parent.approval.clone(),
+            &field,
+            orders.delegations.get(index).and_then(Option::as_deref),
+        )?;
         if !authority_contained(&child, &parent)? {
             return Err(invalid(format!(
                 "delegation {index} broadens parent authority"
@@ -1007,6 +1371,9 @@ mod tests {
             Err(AuthorityMappingError::Unhashable { kind }) => {
                 crate::test_support::unhashable(kind)
             }
+            Err(AuthorityMappingError::Json(_)) => json!({
+                "error_type": "JSONDecodeError",
+            }),
             Err(error) => json!({
                 "error_type": error.error_type(),
                 "error": error.to_string(),
@@ -1015,7 +1382,11 @@ mod tests {
     }
 
     fn compare_map_cases(cases: Vec<Value>) {
-        let expected = crate::test_support::oracle("authority_mapping", &json!(cases));
+        let expected = crate::test_support::oracle_script(
+            "oracle_style_authority.py",
+            "authority_mapping",
+            &json!(cases),
+        );
         if let Some(expected) = expected {
             let actual: Vec<Value> = cases
                 .iter()
@@ -1030,6 +1401,112 @@ mod tests {
                 .collect();
             assert_eq!(json!(actual), expected);
         }
+    }
+
+    fn raw_budget_case(raw: &str, replacement: &str) -> String {
+        let start = raw.find("\"budget\":{").expect("fixture has budget");
+        let end = raw[start..]
+            .find('}')
+            .map(|offset| start + offset + 1)
+            .expect("budget object closes");
+        format!(
+            "{}\"budget\":{{{replacement}}}{}",
+            &raw[..start],
+            &raw[end..]
+        )
+    }
+
+    fn raw_outcome<T: Serialize>(result: Result<T, AuthorityMappingError>) -> Value {
+        match result {
+            Ok(value) => {
+                let wire = serde_json::to_string(&value).expect("typed authority serialises");
+                json!({"ok": value, "wire": wire})
+            }
+            Err(error) => outcome::<Value>(Err(error)),
+        }
+    }
+
+    #[test]
+    fn raw_json_keeps_budget_first_invalid_order_and_exact_wire() {
+        let authority = delivery_fixture();
+        let raw = serde_json::to_string(&authority).expect("authority fixture serialises");
+        let reversed_valid_budget = raw_budget_case(&raw, "\"turns\":3,\"provider_calls\":2");
+        let invalid_budget = raw_budget_case(&raw, "\"turns\":-1,\"cost:ZZZ\":1");
+        let cases = json!([
+            {"op":"raw_map", "raw":"{"},
+            {"op":"raw_map", "raw":raw},
+            {"op":"raw_map", "raw":reversed_valid_budget},
+            {"op":"raw_map", "raw":invalid_budget}
+        ]);
+        let expected = crate::test_support::oracle_script(
+            "oracle_style_authority.py",
+            "authority_mapping",
+            &cases,
+        );
+        if let Some(expected) = expected {
+            let actual: Vec<Value> = cases
+                .as_array()
+                .expect("case array")
+                .iter()
+                .map(|case| {
+                    let raw = case["raw"].as_str().expect("raw JSON string");
+                    raw_outcome(map_delivery_authority_json(raw.as_bytes()))
+                })
+                .collect();
+            assert_eq!(json!(actual), expected);
+        }
+    }
+
+    #[test]
+    fn raw_delegation_json_keeps_child_budget_order() {
+        let mut authority = delivery_fixture();
+        authority["delegations"] = json!([{
+            "actor":"worker-1", "schema_version":2, "workspace_roots":["."],
+            "allowed_source_paths":["input"], "allowed_artifact_paths":["output/worker-1"],
+            "denied_paths":[".git"], "prohibited_actions":["external-release"],
+            "disclosure":"local-only", "secrets_access":"none", "secret_refs":[],
+            "deployment":false, "deployment_targets":[], "irreversible_actions":false,
+            "irreversible_action_ids":[], "network":{"tool_egress":"none","allowed_hosts":[]},
+            "expires_at":"2026-07-19T00:00:00Z", "budget":{"turns":2}
+        }]);
+        let raw = serde_json::to_string(&authority).expect("authority fixture serialises");
+        let ordered_child = raw.replace(
+            "\"budget\":{\"turns\":2}",
+            "\"budget\":{\"provider_calls\":3,\"turns\":2}",
+        );
+        let invalid_child = ordered_child.replace(
+            "\"budget\":{\"provider_calls\":3,\"turns\":2}",
+            "\"budget\":{\"provider_calls\":-1,\"turns\":-2}",
+        );
+        let cases = json!([
+            {"op":"raw_delegations", "raw":ordered_child},
+            {"op":"raw_delegations", "raw":invalid_child}
+        ]);
+        let expected = crate::test_support::oracle_script(
+            "oracle_style_authority.py",
+            "authority_mapping",
+            &cases,
+        );
+        if let Some(expected) = expected {
+            let actual: Vec<Value> = cases
+                .as_array()
+                .expect("case array")
+                .iter()
+                .map(|case| {
+                    let raw = case["raw"].as_str().expect("raw JSON string");
+                    raw_outcome(map_delivery_delegations_json(raw.as_bytes()))
+                })
+                .collect();
+            assert_eq!(json!(actual), expected);
+        }
+    }
+
+    #[test]
+    fn raw_authority_decoder_refuses_integers_outside_python_range() {
+        assert!(matches!(
+            map_delivery_authority_json(b"18446744073709551616"),
+            Err(AuthorityMappingError::NumberOutOfRange)
+        ));
     }
 
     #[test]
@@ -1121,7 +1598,11 @@ mod tests {
                 json!({"op":"contained", "child":child, "parent":parent})
             })
             .collect();
-        let expected = crate::test_support::oracle("authority_mapping", &json!(cases));
+        let expected = crate::test_support::oracle_script(
+            "oracle_style_authority.py",
+            "authority_mapping",
+            &json!(cases),
+        );
         if let Some(expected) = expected {
             let actual: Vec<Value> = cases
                 .iter()
@@ -1253,7 +1734,11 @@ mod tests {
                 outcome(authority_contained(&child, &parent))
             })
             .collect();
-        if let Some(expected) = crate::test_support::oracle("authority_mapping", &json!(cases)) {
+        if let Some(expected) = crate::test_support::oracle_script(
+            "oracle_style_authority.py",
+            "authority_mapping",
+            &json!(cases),
+        ) {
             assert_eq!(json!(actual), expected);
         }
     }
