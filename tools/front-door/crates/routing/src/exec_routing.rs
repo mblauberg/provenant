@@ -957,6 +957,37 @@ pub fn candidates(
     Ok(answer)
 }
 
+fn cooldown_timestamp(
+    value: &str,
+) -> Result<provenant_core::py::PythonDateTime, ExecutionRoutingError> {
+    let normalized = value
+        .strip_suffix('Z')
+        .map(|head| format!("{head}+00:00"))
+        .unwrap_or_else(|| value.to_owned());
+    provenant_core::py::python_fromisoformat(&normalized)
+        .map_err(|_| ExecutionRoutingError::InvalidCoolingTimestamp)
+}
+
+fn compare_cooling_timestamps(
+    left: provenant_core::py::PythonDateTime,
+    right: provenant_core::py::PythonDateTime,
+) -> Result<std::cmp::Ordering, ExecutionRoutingError> {
+    match (left.offset_microseconds, right.offset_microseconds) {
+        (None, None) => Ok(left.datetime.cmp(&right.datetime)),
+        (Some(left_offset), Some(right_offset)) => {
+            let epoch = jiff::civil::Date::new(1970, 1, 1)
+                .map_err(|_| ExecutionRoutingError::InvalidCoolingTimestamp)?
+                .at(0, 0, 0, 0);
+            let left_utc =
+                left.datetime.duration_since(epoch).as_micros() - i128::from(left_offset);
+            let right_utc =
+                right.datetime.duration_since(epoch).as_micros() - i128::from(right_offset);
+            Ok(left_utc.cmp(&right_utc))
+        }
+        _ => Err(ExecutionRoutingError::IncompatibleCoolingTimestamps),
+    }
+}
+
 impl ExecutionRouting<'_> {
     pub fn claude_account_needs_reselection(&self, account: Option<&str>) -> bool {
         let (Some(quota), Some(account)) = (self.quota, account) else {
@@ -990,8 +1021,87 @@ impl ExecutionRouting<'_> {
         }
     }
 
-
+    pub fn cooling(
+        &self,
+        adapter: &str,
+        model: &str,
+        records: Option<&provenant_records::fabric_records::CooldownRows>,
+        account: Option<&str>,
+        explicit_account: bool,
+    ) -> Result<Option<provenant_records::fabric_records::RecordRow>, ExecutionRoutingError> {
+        use provenant_records::fabric_records::{Field, Scope};
+        let mut rows = if let Some(records) = records {
+            records.clone()
+        } else {
+            let scopes = account.map(|account| {
+                let mut scopes = BTreeMap::new();
+                scopes.insert(
+                    adapter.to_owned(),
+                    Scope {
+                        account: Field::Value(account.to_owned()),
+                        host: Field::Value(self.host.host_id()),
+                    },
+                );
+                scopes
+            });
+            self.store.read_cooldowns(scopes.as_ref())?
+        };
+        if records.is_none() {
+            if explicit_account {
+                rows.retain(|_, row| {
+                    row.get("source").and_then(Value::as_str) != Some("provider quota")
+                });
+            }
+            if let Some(quota) = self.quota {
+                if let Ok(updated) = quota.apply_to_cooldowns(
+                    &rows,
+                    account.map(|account| (adapter, account)),
+                    !explicit_account,
+                    self.now,
+                ) {
+                    rows = updated;
+                }
+            }
+        }
+        let catalog = None;
+        let canonical = registered_model(self.host, adapter, model, catalog, None);
+        let exact = format!("{adapter}/{canonical}");
+        let wildcard = format!("{adapter}/*");
+        let keys = [exact, wildcard];
+        let entries: Vec<_> = keys
+            .iter()
+            .filter_map(|key| {
+                rows.get(key)
+                    .filter(|row| !row.is_empty())
+                    .map(|row| (key.as_str(), row))
+            })
+            .collect();
+        let mut best: Option<(
+            &str,
+            &provenant_records::fabric_records::RecordRow,
+            provenant_core::py::PythonDateTime,
+        )> = None;
+        for (key, row) in entries {
+            let stamp = row
+                .get("cooling_until")
+                .and_then(Value::as_str)
+                .ok_or(ExecutionRoutingError::MissingCoolingTimestamp)?;
+            let parsed = cooldown_timestamp(stamp)?;
+            if let Some((_, _, old)) = best {
+                if compare_cooling_timestamps(parsed, old)? == std::cmp::Ordering::Greater {
+                    best = Some((key, row, parsed));
+                }
+            } else {
+                best = Some((key, row, parsed));
+            }
+        }
+        Ok(best.map(|(_, row, _)| row.clone()))
+    }
 }
+
+#[cfg(test)]
+#[path = "exec_routing/tests.rs"]
+mod runtime_tests;
 
 #[cfg(test)]
 mod tests {

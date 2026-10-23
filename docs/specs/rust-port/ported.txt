@@ -46,3 +46,4 @@ workspace:manifest-and-digest
 scripts/check-provenant-install.py#interface
 skills/_shared/bounded_process.py#unit-01
 workspace:front-door-syscalls
+skills/orchestrate/scripts/exec_routing.py#unit-02
