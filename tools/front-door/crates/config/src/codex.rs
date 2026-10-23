@@ -138,20 +138,23 @@ pub struct Proposal {
     pub outcome: Outcome,
 }
 
+fn read_config(target: &Path) -> Result<String> {
+    if !target.exists() {
+        return Ok(String::new());
+    }
+    let bytes = fs::read(target).map_err(|e| io(target, e))?;
+    Ok(String::from_utf8(bytes)
+        .map_err(|source| crate::Error::CodexEncoding {
+            path: target.into(),
+            source,
+        })?
+        .replace("\r\n", "\n")
+        .replace('\r', "\n"))
+}
+
 pub fn proposed_update(path: &Path) -> Result<Proposal> {
     let target = canonical_path(path)?;
-    let mut text = if target.exists() {
-        let bytes = fs::read(&target).map_err(|e| io(&target, e))?;
-        String::from_utf8(bytes)
-            .map_err(|source| crate::Error::CodexEncoding {
-                path: target.clone(),
-                source,
-            })?
-            .replace("\r\n", "\n")
-            .replace('\r', "\n")
-    } else {
-        String::new()
-    };
+    let mut text = read_config(&target)?;
     if state(&text)? == State::Disabled {
         return Ok(Proposal {
             target,
@@ -195,6 +198,11 @@ pub fn configure(path: &Path) -> Result<Outcome> {
 pub fn run(path: &Path, mode: CommandMode) -> CommandResult {
     match run_inner(path, mode) {
         Ok(result) => result,
+        Err(error @ crate::Error::CodexEncoding { .. }) => CommandResult {
+            exit_code: 1,
+            stdout: String::new(),
+            stderr: format!("UnicodeDecodeError: {error}\n"),
+        },
         Err(error @ crate::Error::CodexUnhashable { .. }) => CommandResult {
             exit_code: 1,
             stdout: String::new(),
@@ -213,14 +221,7 @@ fn run_inner(path: &Path, mode: CommandMode) -> Result<CommandResult> {
     match mode {
         CommandMode::Check => {
             let target = canonical_path(path)?;
-            let text = if target.exists() {
-                fs::read_to_string(&target)
-                    .map_err(|e| io(&target, e))?
-                    .replace("\r\n", "\n")
-                    .replace('\r', "\n")
-            } else {
-                String::new()
-            };
+            let text = read_config(&target)?;
             if state(&text)? == State::Disabled {
                 Ok(CommandResult {
                     exit_code: 0,
@@ -505,5 +506,32 @@ mod edge_tests {
             state(input),
             Err(crate::Error::CodexUnhashable { kind: "list" })
         ));
+    }
+}
+
+#[cfg(test)]
+mod encoding_status_tests {
+    use super::*;
+    #[test]
+    fn invalid_utf8_is_an_uncaught_error_status_and_never_writes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let input = b"# \xff\n";
+        fs::write(&path, input).unwrap();
+        for mode in [
+            CommandMode::Check,
+            CommandMode::Preflight,
+            CommandMode::Configure,
+        ] {
+            let result = run(&path, mode);
+            assert_eq!(result.exit_code, 1);
+            assert!(result.stderr.starts_with("UnicodeDecodeError:"));
+            assert_eq!(fs::read(&path).unwrap(), input);
+        }
+        let Some(old)=crate::oracle::python("scripts/configure-codex-skill-overrides.py","import json\ntry: m.main(['--config',str(p),'--check'])\nexcept Exception as e: print(json.dumps(type(e).__name__))",&path)else{return;};
+        assert_eq!(
+            serde_json::from_slice::<String>(&old).unwrap(),
+            "UnicodeDecodeError"
+        );
     }
 }
