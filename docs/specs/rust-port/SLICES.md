@@ -337,7 +337,7 @@ host identity delete at 48 after adapters have moved every old importer.
 
 **Contract / judges:** J1 root/help and install diagnostics; stale-checkout and install drift fixtures; R2 entire workspace digest before first linked library. **Missing cases / blockers:** Add J1 installed diagnostics, byte paths, corrupt marker and stale library/manifests/lockfile; check no SQLite/thread/provider on help/root.
 
-**Graph units:** `P/check-provenant-install.py#{interface,unit-01}`; `P/install-provenant-command.py#{unit-01}`; `P/lib/front_door_build.py#{unit-01}`; `P/lib/stale_checkout.py#{interface,unit-01}`; `workspace:manifest-and-digest`.
+**Graph units:** `P/check-provenant-install.py#{interface,unit-01}`; `P/install-provenant-command.py#{unit-01}`; `P/lib/front_door_build.py#{unit-01}`; `P/lib/stale_checkout.py#{interface,unit-01}`. Reuse prerequisite `workspace:manifest-and-digest` is already ported; do not claim or dispatch it again.
 
 **Delete source (762 lines):** `P/check-provenant-install.py`, `P/install-provenant-command.py`, `P/lib/front_door_build.py`, `P/lib/stale_checkout.py`.
 
