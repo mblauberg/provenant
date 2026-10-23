@@ -117,13 +117,13 @@ calls and 157 of the 224 signal and kill references in Python tests.
   - `test_nested_owner_accepts_canonical_ps_when_computed_start_differs`
   - `test_nested_fabric_owner_and_its_child_are_spared`
   - `test_terminal_grace_with_live_claude_skips_settle_and_eof_child`
-  - `test_all_adapters_stall_with_durable_diagnostics`
+  - `test_all_adapters_observe_silence_without_killing_live_provider`
   - `test_silent_provider_fails_as_startup_timeout_and_is_reaped`
   - `test_provider_output_before_startup_window_keeps_running`
   - `test_cursor_terminal_event_closes_open_stdin_and_reaps_descendants`
   - `test_wall_timeout_is_distinct_from_idle`
   - `test_capture_rollover_writes_linear_bytes_and_preserves_terminal_result`
-  - `test_writer_watchdog_does_not_count_its_own_warning_as_progress`
+  - `test_writer_watchdog_observation_does_not_reset_silence`
   - `test_cancel_allows_provider_session_flush`
   - `test_writer_progress_probe_is_bounded_and_reaches_late_files`
   - `test_writer_progress_uses_string_keys_for_large_tree_memory`
@@ -152,7 +152,7 @@ calls and 157 of the 224 signal and kill references in Python tests.
 - `tests/test_cf_dispatch.py` (4 tests, 113 lines):
   - `test_opencode_dispatch_group_signal_terminates_provider_and_grandchild`
   - `test_opencode_normal_exit_reaps_grandchild`
-  - `test_opencode_idle_watchdog_terminates_silent_provider`
+  - `test_opencode_silence_observation_keeps_provider_alive`
   - `test_opencode_stderr_progress_keeps_writer_alive`
 
 ## S2, conditional

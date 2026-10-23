@@ -39,6 +39,8 @@ import layout
 import context_usage
 import process_info
 import run_lineage
+import stall_watchdog
+from _shared import harness_profile
 from trusted_git import owner_location, prepare_writer_ref, writer_git_writes, writer_read_only
 
 
@@ -2140,9 +2142,13 @@ class BoundedCapture:
         # Append to disk only until the cap. Keep subsequent tail chunks in a
         # deque: every byte is copied a bounded number of times, even for JSONL.
         room = max(0, self.limit - self.total)
-        if room and self.write_error is None:
+        if data and self.write_error is None:
             try:
-                self.file.write(data[:room])
+                if room:
+                    self.file.write(data[:room])
+                else:
+                    # Retained bytes are capped; the timestamp still tracks provider output.
+                    os.utime(self.file.fileno(), None)
             except OSError as exc:
                 self.write_error = exc
         self.total += len(data)
@@ -3732,6 +3738,9 @@ def _run_attempt(
     diagnostics = BoundedCapture(stderr_path)
     started_at, started = now(), time.monotonic()
     last_progress, last_progress_at = started, started_at
+    resolution, _ = harness_profile.lenient(cwd=Path(plan["cwd"]), environ=control_environment)
+    silence_seconds = plan.get("silence_seconds", resolution.knobs["lanes.silence_seconds"] if resolution else 300)
+    last_output, next_watch = started, started + silence_seconds
     launched, produced = started, False
     process = None
     descendants = None
@@ -3930,7 +3939,6 @@ def _run_attempt(
             ):
                 os.set_blocking(stream.fileno(), False)
                 selector.register(stream, selectors.EVENT_READ, name)
-            warned = False
             excluded = {
                 path.resolve() for path in (output_path, events_path, stderr_path)
             }
@@ -3954,9 +3962,10 @@ def _run_attempt(
                     else:
                         diagnostics.write(data)
                     consume_diagnostic(data, key.data)
-                    last_progress = time.monotonic()
+                    last_output = time.monotonic()
+                    next_watch = last_output + silence_seconds
+                    last_progress = last_output
                     last_progress_at = now()
-                    warned = False
                     if on_progress:
                         on_progress(last_progress_at)
                 current = time.monotonic()
@@ -4002,30 +4011,17 @@ def _run_attempt(
                     if changed or (cpu and new_cpu and new_cpu != cpu):
                         last_progress = current
                         last_progress_at = now()
-                        warned = False
                         if on_progress:
                             on_progress(last_progress_at)
                     cpu = new_cpu
-                idle = current - last_progress
-                covered_idle = idle if workspace is None else max(
-                    0, (workspace.completed_pass_started_at or last_progress) - last_progress
-                )
-                if cpu is not None and covered_idle >= plan["idle_seconds"]:
-                    forced = "stalled"
-                    break
-                if idle >= plan["idle_seconds"] / 2 and not warned:
-                    raw.write(
-                        (
-                            json.dumps(
-                                {
-                                    "type": "fabric.idle_warning",
-                                    "silent_seconds": round(idle, 3),
-                                }
-                            )
-                            + "\n"
-                        ).encode()
-                    )
-                    warned = True
+                if current >= next_watch and not exited:
+                    # poll() observes this child directly; silence alone never authorises a signal.
+                    try:
+                        stall_watchdog.write_observation(output_path.parent, plan["cwd"], process.pid,
+                                                         True, current - last_output)
+                    except (OSError, ValueError) as exc:
+                        logging.warning("stall observation unavailable: %s", exc)
+                    next_watch = current + silence_seconds
     except FileNotFoundError as exc:
         forced = "tool_missing"
         diagnostics.write(str(exc).encode())

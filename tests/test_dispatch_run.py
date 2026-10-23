@@ -155,6 +155,11 @@ def test_reap_attempt_after_group_sigkill_is_terminal_and_idempotent(tmp_path):
         os.killpg(child.pid, signal.SIGKILL)
         child.wait(timeout=5)
         mod.reap_attempts(run)
+        checkpoint = json.loads((path.parent / "wip-checkpoint.json").read_text())
+        assert checkpoint["process_alive"] is False
+        assert checkpoint["diff_summary"]
+        assert "last_tool_call" in checkpoint
+        assert checkpoint["next_step"]
         lost = json.loads(path.read_text())
         assert lost["state"] == "terminal"
         assert lost["status"] == "lost"
@@ -7048,3 +7053,61 @@ print(json.dumps({{"type":"result", "result":"DONE"}}))
             "SELECT attrs FROM events WHERE kind='lane.attempt' ORDER BY json_extract(attrs,'$.attempt')")]
     assert rows[1]['escalated_from'].endswith('/dispatch-001/1')
     assert 'escalated_from' not in rows[2]
+
+
+def test_provider_death_checkpoints_partial_work_before_failure(tmp_path, monkeypatch):
+    subprocess.run(['git', 'init', '-q', str(tmp_path)], check=True)
+    subprocess.run(['git', '-C', str(tmp_path), '-c', 'user.name=Fixture',
+                    '-c', 'user.email=fixture@example.com', 'commit', '--allow-empty', '-qm', 'initial'], check=True)
+    run, prompt, command = real_owner_fixture(
+        tmp_path, monkeypatch,
+        'import sys,json\nfrom pathlib import Path\nsys.stdin.read()\n'
+        'Path("partial.txt").write_text("unfinished change")\n'
+        'print(json.dumps({"type":"assistant","message":{"content":'
+        '[{"type":"tool_use","name":"Bash","input":{"command":"write partial.txt"}}]}}), flush=True)\n'
+        'sys.exit(1)\n',
+    )
+    isolate_fabric_plan_env(monkeypatch, tmp_path)
+    monkeypatch.chdir(tmp_path)
+    mod = load_dispatch_module()
+    args = mod.parser().parse_args(command[2:])
+    assert mod.dispatch(args) != 0
+    path = next(run.glob('tasks/*/attempt-001/attempt.json'))
+    checkpoint_path = run / json.loads(path.read_text())['paths']['checkpoint']
+    checkpoint = json.loads(checkpoint_path.read_text())
+    assert checkpoint['process_alive'] is False
+    assert 'partial.txt' in checkpoint['diff_summary']
+    assert 'write partial.txt' in checkpoint['last_tool_call']
+    assert checkpoint_path.stat().st_mtime_ns <= path.stat().st_mtime_ns
+    assert json.loads(path.read_text())['status'] == 'failed'
+
+
+@pytest.mark.parametrize("threshold,observed", [(1, True), (3600, False)])
+def test_reaper_observes_silent_live_lane_with_stamped_knob(tmp_path, monkeypatch, threshold, observed):
+    mod = load_dispatch_module()
+    run = make_run(tmp_path, "silent")
+    path = run / "tasks/task-1/attempt-001/attempt.json"
+    path.parent.mkdir(parents=True)
+    row = json.loads((ROOT / "tests/fixtures/fabric-v1/attempt.json").read_text())
+    row.update(state="running", status=None, pgid=123456, pgid_started_at="recorded",
+               cwd=str(tmp_path), profile={"knobs": {"lanes.silence_seconds": threshold}})
+    path.write_text(json.dumps(row))
+    events = run / row['paths']['events']
+    events.write_text('{"type":"item.started"}\n')
+    os.utime(events, (time.time() - 10, time.time() - 10))
+    probes = []
+    monkeypatch.setattr(mod.os, "killpg", lambda pid, sig: probes.append((pid, sig)))
+    monkeypatch.setattr(mod.process_info, "start_time", lambda pid: "recorded")
+    before = path.read_bytes()
+    assert mod.reap_attempts(run) == []
+    assert path.read_bytes() == before
+    assert probes == [(123456, 0)]
+    observation_path = path.parent / "watchdog.json"
+    assert observation_path.exists() is observed
+    if observed:
+        record = json.loads(observation_path.read_text())
+        assert record['process_alive'] is True
+        assert record['last_event_at']
+        assert record['last_worktree_write_at']
+        assert record['silent_seconds'] >= 10
+    assert not (path.parent / 'wip-checkpoint.json').exists()

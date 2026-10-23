@@ -3893,7 +3893,7 @@ def _child_census_barrier(monkeypatch, pid_path, ready):
     return started
 
 
-@pytest.mark.parametrize("stop", ["cancelled", "timed_out", "normal", "stalled"])
+@pytest.mark.parametrize("stop", ["cancelled", "timed_out", "normal"])
 def test_new_session_grandchild_does_not_outlive_attempt(tmp_path, monkeypatch, stop):
     pid_path = tmp_path / "grandchild.pid"
     ready = tmp_path / "child-tracked"
@@ -3919,7 +3919,7 @@ else:
         tmp_path,
         code,
         timeout_seconds=3 if stop == "timed_out" else 8,
-        idle_seconds=1.6 if stop == "stalled" else 8,
+        idle_seconds=8,
     )
     if stop == "normal":
         plan["warnings"].append("route warning " + "x" * 240)
@@ -5062,23 +5062,21 @@ time.sleep(60)
 @pytest.mark.parametrize(
     "adapter", ["claude", "codex", "opencode", "cursor", "agy", "kiro", "copilot"]
 )
-def test_all_adapters_stall_with_durable_diagnostics(tmp_path, adapter):
-    plan = fixture_plan(
-        tmp_path,
-        "import time; time.sleep(30)",
-        adapter,
-        idle_seconds=0.2,
-        timeout_seconds=3,
-    )
+def test_all_adapters_observe_silence_without_killing_live_provider(tmp_path, adapter):
+    code = "import time; print('started', flush=True); time.sleep(1.4); print('finished', flush=True)"
+    plan = fixture_plan(tmp_path, code, adapter, idle_seconds=0.2, timeout_seconds=3)
     record = supervisor().execute(
-        plan,
-        tmp_path / "result.md",
-        env={**os.environ, "CF_DISPATCH_ENABLE_COPILOT": "1"},
+        plan, tmp_path / "result.md",
+        env={**os.environ, "CF_DISPATCH_ENABLE_COPILOT": "1",
+             "PROVENANT_KNOB_LANES_SILENCE_SECONDS": "1"},
     )
-    assert record["status"] == "stalled"
-    assert record["exit"] is not None
-    assert "idle_warning" in (tmp_path / "events.jsonl").read_text()
-    assert record["evidence"]["signature"] == "idle_watchdog"
+    observation = json.loads((tmp_path / "watchdog.json").read_text())
+    assert observation["process_alive"] is True
+    assert observation["last_event_at"] is not None
+    assert observation["last_worktree_write_at"] is not None
+    assert observation["silent_seconds"] >= 1
+    assert record["status"] != "stalled"
+    assert record["exit"] == 0
 
 
 def test_silent_provider_fails_as_startup_timeout_and_is_reaped(tmp_path):
@@ -5675,6 +5673,22 @@ def test_capture_is_bounded_but_result_is_complete(tmp_path, monkeypatch):
     capture.write(b"B" * 80)
     capture.close()
     assert path.read_bytes() == b"A" * 50 + b"B" * 50
+
+
+def test_capture_rollover_keeps_output_timestamp_current_for_watchdog(tmp_path):
+    module = supervisor()
+    path = tmp_path / "events.jsonl"
+    capture = module.BoundedCapture(path, limit=100)
+    try:
+        capture.write(b"A" * 100)
+        os.utime(path, (time.time() - 600, time.time() - 600))
+        capture.write(b"B" * 100)
+        module.stall_watchdog.observe_if_silent(tmp_path, tmp_path, os.getpid(), True,
+                                               "2000-01-01T00:00:00Z", 300)
+        assert not (tmp_path / "watchdog.json").exists()
+        assert path.stat().st_size == 100
+    finally:
+        capture.close()
 
 
 @pytest.mark.parametrize("failure", ["write", "flush"])
@@ -6596,7 +6610,7 @@ def test_kiro_enforcement_requires_fresh_version_bound_negative_probe(tmp_path):
     )
 
 
-def test_writer_watchdog_does_not_count_its_own_warning_as_progress(tmp_path):
+def test_writer_watchdog_observation_does_not_reset_silence(tmp_path):
     plan = fixture_plan(
         tmp_path,
         "import time; time.sleep(30)",
@@ -6604,8 +6618,12 @@ def test_writer_watchdog_does_not_count_its_own_warning_as_progress(tmp_path):
         idle_seconds=1.2,
         timeout_seconds=3.5,
     )
+    plan["silence_seconds"] = 1
     record = supervisor().execute(plan, tmp_path / "result.md")
-    assert record["status"] == "stalled"
+    assert record["status"] == "timed_out"
+    observation = json.loads((tmp_path / "watchdog.json").read_text())
+    assert observation["process_alive"] is True
+    assert observation["silent_seconds"] >= 2
 
 @pytest.mark.parametrize('api_key', [False, True])
 def test_claude_plan_isolates_settings_and_mcp(tmp_path, monkeypatch, api_key):

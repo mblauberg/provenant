@@ -3248,15 +3248,16 @@ def test_invalid_opencode_idle_limit_is_refused_before_provider_launch():
         assert not invoked.exists()
 
 
-def test_opencode_idle_watchdog_terminates_silent_provider():
+def test_opencode_silence_observation_keeps_provider_alive():
     with tempfile.TemporaryDirectory() as td:
         tmp = Path(td)
         bin_dir = tmp / "bin"
         bin_dir.mkdir()
-        write_executable(bin_dir / "opencode", '#!/usr/bin/env bash\n[ "$1" = "--version" ] && { echo 2.0.30; exit 0; }\nsleep 10\n')
+        write_executable(bin_dir / "opencode", '#!/usr/bin/env bash\n[ "$1" = "--version" ] && { echo 2.0.30; exit 0; }\necho started\nsleep 2\necho finished\n')
         env = fabric_free_env()
         env["PATH"] = f"{bin_dir}:{PRODUCT_ROOT / 'scripts'}:{env['PATH']}"
         env["CF_DISPATCH_IDLE_SECONDS"] = "1"
+        env["PROVENANT_KNOB_LANES_SILENCE_SECONDS"] = "1"
         out = tmp / "out.txt"
         result = run_bounded(
             [str(SCRIPT), "--intent", "ordinary", "--tool", "opencode",
@@ -3264,9 +3265,8 @@ def test_opencode_idle_watchdog_terminates_silent_provider():
             cwd=tmp, env=env, timeout_seconds=5, output_limit_bytes=1_048_576,
         )
         record = json.loads(result.output.splitlines()[-1])
-        assert record["status"] == "stalled"
-        assert record["fix"] or record["evidence"]["signature"]
-        assert "idle for 1s; try another model" in out.read_text()
+        assert record["status"] != "stalled"
+        assert "finished" in out.read_text()
 
 
 def test_opencode_stderr_progress_keeps_writer_alive():

@@ -69,6 +69,7 @@ import exec_routing
 import context_usage
 import attempt_storage
 import run_lineage
+import stall_watchdog
 from fabric_records import pacing_policy, identity_resolver, render_digest, write_cooldown, write_route_health, append_index, TERMINAL_STATUSES
 from _shared.custody import (
     OwnedFileError, OwnedLinkError, atomic_write_contained, contained_regular_path,
@@ -710,6 +711,11 @@ def reap_attempts(run_dir: Path) -> list[str]:
                     if not isinstance(row, dict) or row.get("schema") != "fabric.attempt.v1" or row.get("state") != "running":
                         continue
                     identity = reap_provider_identity(run_dir, path, row)
+                    events = (row.get("paths") or {}).get("events")
+                    try:
+                        evidence_dir = contained_regular_path(run_dir, events, "events")[1].parent if events else path.parent
+                    except (OSError, ValueError):
+                        evidence_dir = path.parent
                     pgid = identity.get("pgid")
                     if not isinstance(pgid, int) or pgid <= 0:
                         continue
@@ -727,6 +733,11 @@ def reap_attempts(run_dir: Path) -> list[str]:
                     else:
                         observed = process_info.start_time(pgid) if started else None
                         if not started or observed is None or observed == started:
+                            resolution, _ = harness_profile.lenient(cwd=Path(row.get("cwd") or run_workspace(run_dir)))
+                            seconds = (row.get("profile") or {}).get("knobs", {}).get("lanes.silence_seconds",
+                                resolution.knobs["lanes.silence_seconds"] if resolution else 300)
+                            stall_watchdog.observe_if_silent(evidence_dir, row.get("worktree") or row.get("cwd") or run_workspace(run_dir),
+                                pgid, True, row.get("started_at"), seconds)
                             continue
                         reason = "pgid_reused"
                     # A wedged publisher must not hold run custody through us.
@@ -738,6 +749,8 @@ def reap_attempts(run_dir: Path) -> list[str]:
                         status = reap_stop_status(run_dir, path, row)
                         if status is None:
                             continue
+                        stall_watchdog.checkpoint(evidence_dir, row.get("worktree") or row.get("cwd") or run_workspace(run_dir), pgid)
+                        row.setdefault("paths", {})["checkpoint"] = relative_path(run_dir, evidence_dir / "wip-checkpoint.json")
                         row.update(identity)
                         disk_error, space_hint = reap_disk_full(run_dir, row)
                         if disk_error and status == "lost":
@@ -2682,6 +2695,7 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
                     args.resume_warning=context_usage.resume_warning(previous_row,plan["adapter"],
                         context_usage.effective_ceiling(plan["applied"]),args.resume,task_id=advice_task)
                     if args.resume_warning: plan["warnings"].insert(0,args.resume_warning)
+                plan["silence_seconds"] = profile_knob(args, "lanes.silence_seconds", 300)
                 plan["_lineage_token"] = run_lineage.owner_token(run_dir)
                 plan["attempt_identity"] = {"run_id": run_identity(run_dir, run_receipt),
                     "task_id": args.task_id, "attempt": attempt_number, "run_dir": str(run_dir)}
@@ -3160,6 +3174,8 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
         record["question"] = question
     if process_error:
         record["process_error"] = process_error
+    if record["status"] == "failed" and process is not None and process.poll() is not None:
+        stall_watchdog.checkpoint(attempt_dir, getattr(args, "worktree", None) or workspace, process.pid)
     attempt_path = attempt_dir / "attempt.json"
     record["attempt_path"] = relative_path(run_dir, attempt_path)
     digest_path = attempt_dir / "attempt.sha256"
@@ -3187,6 +3203,8 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
     for sig, handler in old_handlers.items():
         signal.signal(sig, handler)
     row = terminal_contract(args,run_dir,record,adapter,attempt_number,attempt_dir,active)
+    if (attempt_dir / "wip-checkpoint.json").is_file():
+        row["paths"]["checkpoint"] = relative_path(run_dir, attempt_dir / "wip-checkpoint.json")
     def prune_tmp():
         left=attempt_storage.prune_private_tmp(run_dir,attempt_dir,row["status"])[1]
         if left: row["warnings"].append("attempt tmp left in place (mount or unremovable): "+", ".join(left[:3]))
