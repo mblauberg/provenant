@@ -244,9 +244,23 @@ impl SessionWorker for FixtureWorker {
         }
     }
     fn terminate_and_wait(&mut self) -> io::Result<()> {
-        self.0.kill()?;
+        // An unreaped owned child retains its PID; this fixture cannot target a
+        // recycled process. Production signalling belongs to supervisor::sys.
+        let signal = Command::new("/bin/kill")
+            .args(["-TERM", &self.0.id().to_string()])
+            .output()?;
         self.0.wait()?;
+        if !signal.status.success() && !signal.stderr.ends_with(b"No such process\n") {
+            return Err(io::Error::other("fixture SIGTERM failed"));
+        }
         Ok(())
+    }
+}
+impl Drop for FixtureWorker {
+    fn drop(&mut self) {
+        // Ensure a failed fixture assertion cannot leave an unreaped child.
+        let _ = self.0.kill();
+        let _ = self.0.wait();
     }
 }
 impl SessionHost for FixtureHost {
@@ -546,6 +560,7 @@ fn published_files_use_default_creation_permissions() {
 struct ObstructingHost {
     run: PathBuf,
     name: &'static str,
+    ready: Option<PathBuf>,
 }
 impl SessionHost for ObstructingHost {
     type Worker = FixtureWorker;
@@ -554,7 +569,14 @@ impl SessionHost for ObstructingHost {
     }
     fn spawn(&mut self, command: &[OsString], transcript: &File) -> io::Result<Self::Worker> {
         fs::create_dir(self.run.join(self.name))?;
-        FixtureHost.spawn(command, transcript)
+        let worker = FixtureHost.spawn(command, transcript)?;
+        if let Some(ready) = &self.ready {
+            // A FIFO read blocks until the worker has installed its SIGTERM trap.
+            if fs::read(ready)? != b"ready" {
+                return Err(io::Error::other("fixture handshake failed"));
+            }
+        }
+        Ok(worker)
     }
     fn spawn_error_text(&self, error: &io::Error) -> String {
         FixtureHost.spawn_error_text(error)
@@ -568,6 +590,7 @@ fn pid_publication_failure_is_explicit_and_reaps_launched_worker() {
     let mut host = ObstructingHost {
         run: run.clone(),
         name: "worker.pid",
+        ready: None,
     };
     let error = execute(
         &run,
@@ -590,6 +613,7 @@ fn completion_publication_failure_is_explicit_after_worker_exit() {
     let mut host = ObstructingHost {
         run: run.clone(),
         name: "done",
+        ready: None,
     };
     let error = execute(
         &run,
@@ -603,4 +627,34 @@ fn completion_publication_failure_is_explicit_after_worker_exit() {
     assert_eq!(error.exit_code(), 1);
     assert!(run.join("worker.pid").is_file());
     assert!(!run.join("done.tmp.999999").exists());
+}
+
+#[test]
+fn pid_publication_failure_sends_sigterm_to_owned_worker() {
+    let root = tempfile::tempdir().unwrap();
+    let run = root.path().join("run");
+    let ready = root.path().join("ready.fifo");
+    let marker = root.path().join("terminated");
+    assert!(Command::new("mkfifo")
+        .arg(&ready)
+        .status()
+        .unwrap()
+        .success());
+    let mut command = shell(
+        "trap 'printf term > \"$1\"; exit 0' TERM; printf ready > \"$2\"; while :; do :; done",
+    );
+    command.extend([
+        OsString::from("worker"),
+        marker.as_os_str().into(),
+        ready.as_os_str().into(),
+    ]);
+    let mut host = ObstructingHost {
+        run: run.clone(),
+        name: "worker.pid",
+        ready: Some(ready),
+    };
+    let error = execute(&run, &command, 999999, OsStr::new("helper"), &mut host).unwrap_err();
+    assert!(matches!(error, Error::WorkerPid { cleanup: None, .. }));
+    assert_eq!(fs::read_to_string(marker).unwrap(), "term");
+    assert!(!run.join("done").exists());
 }

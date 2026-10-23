@@ -206,6 +206,8 @@ pub trait SessionWorker {
     fn pid(&self) -> u32;
     fn wait(&mut self) -> io::Result<WorkerExit>;
     /// Used only if the worker PID cannot be persisted, matching the old wrapper.
+    /// Send SIGTERM to this owned worker (not SIGKILL or its process group), then
+    /// wait and reap it. An already-exited worker is still reaped successfully.
     fn terminate_and_wait(&mut self) -> io::Result<()>;
 }
 
