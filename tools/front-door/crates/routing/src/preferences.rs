@@ -136,10 +136,11 @@ pub fn normalise_candidates(
             && matches!(effort_order.get(effort), Some(actual) if matches!(effort_order.get(minimum_effort), Some(floor) if actual >= floor));
         let status = route.get("status").and_then(Value::as_str);
         let disposition = if status != Some("ok") {
-            status
-                .filter(|value| !value.is_empty())
-                .unwrap_or("hard_route_rejected")
-                .to_owned()
+            route
+                .get("status")
+                .filter(|value| crate::pending::value_truthy(value))
+                .map(python_string)
+                .unwrap_or_else(|| "hard_route_rejected".into())
         } else if !hard_policy_match {
             "hard_policy_mismatch".into()
         } else if matches!(availability, Availability::Observed { ref value } if value == "unavailable")
@@ -425,6 +426,186 @@ fn values_for_candidate<'a>(candidate: &'a Candidate, attribute: &str) -> &'a st
         "model_family" => &candidate.model_family,
         "adapter" => &candidate.adapter,
         _ => &candidate.model,
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PreferenceStatus {
+    Loaded,
+    Corrupt,
+    Unavailable,
+    Invalid,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum PreferenceReadError {
+    #[error("cannot read preferences at {path}: {source}")]
+    Io {
+        path: std::path::PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("preferences at {path} are not UTF-8: {source}")]
+    Encoding {
+        path: std::path::PathBuf,
+        #[source]
+        source: std::string::FromUtf8Error,
+    },
+    #[error(transparent)]
+    Json(#[from] crate::pending::JsonError),
+}
+pub fn read_json(
+    path: &std::path::Path,
+) -> Result<crate::ordered_json::OrderedValue, PreferenceReadError> {
+    let bytes = std::fs::read(path).map_err(|source| PreferenceReadError::Io {
+        path: path.into(),
+        source,
+    })?;
+    let text = String::from_utf8(bytes).map_err(|source| PreferenceReadError::Encoding {
+        path: path.into(),
+        source,
+    })?;
+    Ok(crate::pending::from_json(&text)?)
+}
+pub fn load_preferences(
+    path: &std::path::Path,
+) -> Result<(crate::ordered_json::OrderedObject, PreferenceStatus), PreferenceReadError> {
+    use crate::ordered_json::{OrderedObject, OrderedValue};
+    let (preferences, status) = match read_json(path) {
+        Ok(OrderedValue::Object(value)) => (value, PreferenceStatus::Loaded),
+        Ok(_) => (OrderedObject::default(), PreferenceStatus::Invalid),
+        Err(PreferenceReadError::Io { .. }) => {
+            (OrderedObject::default(), PreferenceStatus::Unavailable)
+        }
+        Err(PreferenceReadError::Json(crate::pending::JsonError::Invalid(_))) => {
+            (OrderedObject::default(), PreferenceStatus::Corrupt)
+        }
+        Err(error) => return Err(error),
+    };
+    Ok((preferences, status))
+}
+
+/// Preserve dictionary order in Python's string representation of unsupported policies.
+pub fn configuration_ignored_ordered(
+    preferences: &crate::ordered_json::OrderedValue,
+    task_class: &str,
+    role: &str,
+) -> Vec<Value> {
+    let mut ignored = configuration_ignored(&preferences.to_value(), task_class, role);
+    if let Some(policy) = preferences.get("spreading").and_then(|s| s.get("policy")) {
+        if let Some(item) = ignored
+            .iter_mut()
+            .find(|item| item.get("kind").and_then(Value::as_str) == Some("spreading_policy"))
+        {
+            item["value"] = Value::String(crate::pending::ordered_string(policy));
+        }
+    }
+    ignored
+}
+
+#[cfg(test)]
+mod differential_tests {
+    use super::*;
+    use serde_json::json;
+    #[test]
+    fn preferences_rank_only_admissible_routes_and_keep_python_status_spelling() {
+        let policy = BTreeMap::from([
+            ("role".into(), "worker".into()),
+            ("minimum_alias".into(), "senior".into()),
+            ("minimum_effort".into(), "high".into()),
+        ]);
+        let aliases = BTreeMap::from([
+            ("junior".into(), 0),
+            ("senior".into(), 1),
+            ("principal".into(), 2),
+        ]);
+        let efforts = BTreeMap::from([("low".into(), 0), ("high".into(), 1), ("ultra".into(), 2)]);
+        let good = json!({"schema_version":true,"status":"ok","task_class":"work","route_source":"task-class","role":"worker","alias":"senior","requested_effort":"high","effort":"high","adapter":"a","model_family":"f","resolved_model":"m"});
+        let mut cases = vec![];
+        for status in [
+            json!(null),
+            json!(false),
+            json!(true),
+            json!(2),
+            json!(["x"]),
+            json!("ok"),
+        ] {
+            let mut route = good.clone();
+            route["status"] = status;
+            cases.push(
+                json!({"schema_version":1,"candidates":[{"candidate_id":"x","route":route}]}),
+            );
+        }
+        for availability in [
+            json!(null),
+            json!({"observation":"Observed","value":"unavailable"}),
+            json!({"observation":"Unobserved"}),
+            json!({"observation":"Unknown","reason":""}),
+            json!({"observation":"Observed","value":"maybe"}),
+        ] {
+            cases.push(json!({"schema_version":1,"candidates":[{"candidate_id":"x","route":good,"availability":availability}]}));
+        }
+        cases.extend([json!({"schema_version":1,"candidates":[{"candidate_id":"x","route":good},{"candidate_id":"x","route":good}]}),json!([]),json!({"schema_version":1,"candidates":null})]);
+        let Some(expected): Option<Value> = crate::oracle::python(
+            r#"
+import importlib.util,json,pathlib,sys
+s=importlib.util.spec_from_file_location('preferences',pathlib.Path('scripts/model_route_preferences.py'));m=importlib.util.module_from_spec(s);s.loader.exec_module(m)
+d=json.load(sys.stdin);print(json.dumps([m._normalise_candidates(c,'work','worker',d['policy'],d['aliases'],d['efforts']) for c in d['cases']]))
+"#,
+            &json!({"cases":cases,"policy":policy,"aliases":aliases,"efforts":efforts}),
+        ) else {
+            return;
+        };
+        let actual: Vec<_> = cases
+            .iter()
+            .map(|raw| {
+                match normalise_candidates(raw, "work", "worker", &policy, &aliases, &efforts) {
+                    Ok(c) => json!([c, ""]),
+                    Err(e) => json!([[], e]),
+                }
+            })
+            .collect();
+        assert_eq!(json!(actual), expected);
+    }
+    #[test]
+    fn unknown_preferences_and_ordered_policy_repr_match_python() {
+        let raw = r#"{"z":true,"a":{},"task_classes":{"work":{"model_affinity":["m","m",3],"family_affinity":["f"],"zzz":false}},"roles":{"worker":{"adapter_affinity":["a"]}},"deprioritise":{"families":["f"],"models":["m"],"extra":true},"spreading":{"policy":{"z":true,"a":null}}}"#;
+        let preferences: crate::ordered_json::OrderedValue =
+            crate::pending::from_json(raw).unwrap();
+        let Some(expected): Option<Value> = crate::oracle::python(
+            r#"
+import importlib.util,json,pathlib,sys
+s=importlib.util.spec_from_file_location('preferences',pathlib.Path('scripts/model_route_preferences.py'));m=importlib.util.module_from_spec(s);s.loader.exec_module(m)
+p=json.loads(json.load(sys.stdin));print(json.dumps([m._preference_items(p,'work','worker'),m._configuration_ignored(p,'work','worker'),{k:sorted(v) for k,v in m._deprioritised(p).items()}]))
+"#,
+            &json!(raw),
+        ) else {
+            return;
+        };
+        let value = preferences.to_value();
+        assert_eq!(
+            json!([
+                preference_items(&value, "work", "worker"),
+                configuration_ignored_ordered(&preferences, "work", "worker"),
+                deprioritised(&value)
+            ]),
+            expected
+        );
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("prefs.json");
+        assert_eq!(
+            load_preferences(&path).unwrap().1,
+            PreferenceStatus::Unavailable
+        );
+        for (raw, status) in [
+            ("{", PreferenceStatus::Corrupt),
+            ("[]", PreferenceStatus::Invalid),
+            ("{}", PreferenceStatus::Loaded),
+        ] {
+            std::fs::write(&path, raw).unwrap();
+            assert_eq!(load_preferences(&path).unwrap().1, status);
+        }
     }
 }
 
