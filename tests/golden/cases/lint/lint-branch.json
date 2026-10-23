@@ -1,0 +1,13 @@
+{
+  "argv": [
+    "lint",
+    "branch",
+    "feat/cli-golden-fixture"
+  ],
+  "class": "machine",
+  "exit_code": 0,
+  "files": [],
+  "stderr": "",
+  "stdin": "",
+  "stdout": ""
+}
