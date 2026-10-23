@@ -14,8 +14,9 @@ mod help;
 use provenant_supervisor::sys::legacy_lane as lane;
 
 use exec::{Launch, replace_process};
-use std::ffi::OsString;
-use std::io::Write;
+use std::ffi::{OsStr, OsString};
+use std::fmt;
+use std::io::{self, Write};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -25,8 +26,9 @@ use std::process::ExitCode;
 fn version_json() -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     let version = provenant_records::VersionInfo {
         source_digest: provenant_records::SourceDigest::parse(env!("PROVENANT_SOURCE_DIGEST"))?,
-        target: env!("PROVENANT_TARGET_TRIPLE"),
-        toolchain: env!("PROVENANT_TOOLCHAIN"),
+        asset_digest: provenant_records::SourceDigest::parse(env!("PROVENANT_ASSET_DIGEST"))?,
+        target: env!("PROVENANT_TARGET_TRIPLE").into(),
+        toolchain: env!("PROVENANT_TOOLCHAIN").into(),
         record_schema_version: 1,
         config_schema_version: provenant_config::CONFIG_SCHEMA_VERSION,
     };
@@ -149,6 +151,9 @@ fn route(args: &[OsString], seat: bool) -> Route {
     if command == "lane" {
         return Route::Lane(rest);
     }
+    if command == "mcp" {
+        return if rest.is_empty() { Route::Mcp } else { usage() };
+    }
     if command == "root" {
         return if rest.is_empty() {
             Route::Root
@@ -187,43 +192,115 @@ const FABRIC_MCP: &str = "runtime/fabric/bin/fabric-mcp";
 fn is_file(path: &Path) -> bool {
     std::fs::metadata(path).is_ok_and(|m| m.is_file())
 }
-/// Pending owner verbs can only execute from their own checkout-local binary.
-/// Installed releases never consult a pointer, old root or runtime override.
-fn target(relative: &str) -> Result<(PathBuf, Option<PathBuf>), String> {
-    let executable = std::fs::canonicalize(std::env::current_exe().map_err(|e| e.to_string())?)
-        .map_err(|e| e.to_string())?;
-    let root = executable
-        .parent()
-        .and_then(Path::parent)
-        .ok_or("binary has no checkout parent")?;
-    if is_file(&root.join(FABRIC_MCP)) && is_file(&root.join(relative)) {
-        return Ok((root.join(relative), None));
-    }
-    Err("command awaits its Rust CLI owner".into())
-}
-fn state_root() -> Result<PathBuf, Box<dyn std::error::Error>> {
-    let home = std::env::var_os("HOME").ok_or("HOME must be captured explicitly")?;
-    let checkout = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .ancestors()
-        .nth(2)
-        .ok_or("missing checkout path")?;
-    let mut inputs = provenant_core::RootInputs::new(home.into(), checkout.into());
-    inputs.environment_state_dir =
-        std::env::var_os(provenant_core::STATE_DIRECTORY_ENV).map(PathBuf::from);
-    Ok(inputs
-        .resolve(&provenant_supervisor::fs::RootPathResolver)?
-        .state
-        .into_path_buf())
+/// Failures selecting the immutable release or an explicit build fixture.
+#[derive(Debug)]
+enum ProductRootError {
+    CurrentExecutable(io::Error),
+    MissingExecutableParent(PathBuf),
+    MissingExplicitRoot,
+    RelativeExplicitRoot(PathBuf),
+    ExplicitRoot { path: PathBuf, source: io::Error },
+    ExplicitRootNotDirectory(PathBuf),
 }
 
-fn launch(program: &Path, args: &[OsString], root: Option<&Path>, stale_checked: bool) -> u8 {
+impl fmt::Display for ProductRootError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::CurrentExecutable(error) => {
+                write!(formatter, "cannot resolve the current executable: {error}")
+            }
+            Self::MissingExecutableParent(path) => {
+                write!(
+                    formatter,
+                    "current executable has no parent: {}",
+                    path.display()
+                )
+            }
+            Self::MissingExplicitRoot => {
+                formatter.write_str("uninstalled binary requires an explicit PROVENANT_ROOT")
+            }
+            Self::RelativeExplicitRoot(path) => write!(
+                formatter,
+                "PROVENANT_ROOT must be an absolute directory: {}",
+                path.display()
+            ),
+            Self::ExplicitRoot { path, source } => write!(
+                formatter,
+                "cannot resolve PROVENANT_ROOT {}: {source}",
+                path.display()
+            ),
+            Self::ExplicitRootNotDirectory(path) => write!(
+                formatter,
+                "PROVENANT_ROOT is not a directory: {}",
+                path.display()
+            ),
+        }
+    }
+}
+
+impl std::error::Error for ProductRootError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::CurrentExecutable(error) => Some(error),
+            Self::ExplicitRoot { source, .. } => Some(source),
+            _ => None,
+        }
+    }
+}
+
+/// Installed executables live under `<release>/bin/provenant` (or at the
+/// release root). The manifest next to that location identifies the root.
+/// Build-tree binaries have no manifest and need an explicit fixture root.
+fn product_root() -> Result<PathBuf, ProductRootError> {
+    let executable = std::env::current_exe().map_err(ProductRootError::CurrentExecutable)?;
+    let executable =
+        std::fs::canonicalize(executable).map_err(ProductRootError::CurrentExecutable)?;
+    let parent = executable
+        .parent()
+        .ok_or_else(|| ProductRootError::MissingExecutableParent(executable.clone()))?;
+    let candidate = if parent.file_name() == Some(OsStr::new("bin")) {
+        parent
+            .parent()
+            .ok_or_else(|| ProductRootError::MissingExecutableParent(executable.clone()))?
+    } else {
+        parent
+    };
+    if is_file(&candidate.join("release.json")) {
+        return Ok(candidate.to_path_buf());
+    }
+
+    let Some(value) = std::env::var_os("PROVENANT_ROOT") else {
+        return Err(ProductRootError::MissingExplicitRoot);
+    };
+    let root = PathBuf::from(value);
+    if !root.is_absolute() {
+        return Err(ProductRootError::RelativeExplicitRoot(root));
+    }
+    let root = std::fs::canonicalize(&root)
+        .map_err(|source| ProductRootError::ExplicitRoot { path: root, source })?;
+    if !root.is_dir() {
+        return Err(ProductRootError::ExplicitRootNotDirectory(root));
+    }
+    Ok(root)
+}
+
+fn target(relative: &str) -> Result<PathBuf, ProductRootError> {
+    Ok(product_root()?.join(relative))
+}
+
+fn launch(program: &Path, args: &[OsString], scrub_git: bool) -> u8 {
     replace_process(&Launch {
         program,
         args,
-        root,
-        scrub_git: false,
-        stale_checked,
+        scrub_git,
     })
+}
+
+fn launch_target(relative: &str, args: &[OsString], scrub_git: bool) -> u8 {
+    match target(relative) {
+        Ok(program) => launch(&program, args, scrub_git),
+        Err(error) => fail(&error.to_string()),
+    }
 }
 
 fn run(args: &[OsString]) -> u8 {
@@ -262,7 +339,7 @@ fn run(args: &[OsString]) -> u8 {
             status
         }
         Route::Lane(rest) => lane::run(&rest),
-        Route::Root => match state_root() {
+        Route::Root => match product_root() {
             Ok(root) => {
                 let mut line = root.as_os_str().as_bytes().to_vec();
                 line.push(b'\n');
@@ -271,22 +348,10 @@ fn run(args: &[OsString]) -> u8 {
             }
             Err(message) => fail(&message.to_string()),
         },
-        Route::Mcp => match target(FABRIC_MCP) {
-            Ok((program, root)) => launch(&program, &[], root.as_deref(), false),
-            Err(message) => fail(&message),
-        },
-        Route::Check(rest) => match target("scripts/check-harness") {
-            Ok((program, root)) => replace_process(&Launch {
-                program: &program,
-                args: &rest,
-                root: root.as_deref(),
-                scrub_git: true,
-                stale_checked: false,
-            }),
-            Err(message) => fail(&message),
-        },
+        Route::Mcp => launch_target(FABRIC_MCP, &[], false),
+        Route::Check(rest) => launch_target("scripts/check-harness", &rest, true),
         Route::Owner { relative, args } => match target(relative) {
-            Ok((program, root)) => {
+            Ok(program) => {
                 if relative.ends_with(".py") && is_file(&program) && exec::is_executable(&program) {
                     let checkout = program
                         .ancestors()
@@ -303,12 +368,12 @@ fn run(args: &[OsString]) -> u8 {
                     }
                     let mut forwarded = vec![helper.into_os_string(), program.into_os_string()];
                     forwarded.extend(args);
-                    launch(Path::new("/bin/bash"), &forwarded, root.as_deref(), false)
+                    launch(Path::new("/bin/bash"), &forwarded, false)
                 } else {
-                    launch(&program, &args, root.as_deref(), false)
+                    launch(&program, &args, false)
                 }
             }
-            Err(message) => fail(&message),
+            Err(error) => fail(&error.to_string()),
         },
     }
 }

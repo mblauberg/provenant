@@ -144,6 +144,14 @@ def load_dispatch_module():
     return module
 
 
+@pytest.fixture(autouse=True)
+def _stub_provider_memory_probe(monkeypatch):
+    # Process contracts do not depend on this host's sysctl permission or load.
+    # Admission tests replace this default with their own boundary readings.
+    module = load_dispatch_module()
+    monkeypatch.setattr(module.memory_admission, "available_memory_mb", lambda: (100, 100))
+
+
 def load_secret_scan_module():
     import importlib
     load_dispatch_module()
@@ -1103,6 +1111,7 @@ def test_queued_receipt_is_published_where_admission_scans(tmp_path, monkeypatch
 
 
 def test_opencode_explicit_model_receipt_drops_implied_alias(tmp_path: Path) -> None:
+    disable_memory_admission_floor(tmp_path)
     run_dir = make_run(tmp_path, "opencode-explicit-model")
     prompt = tmp_path / "prompt.md"
     prompt.write_text("Reply exactly OK\n", encoding="utf-8")
@@ -1576,6 +1585,7 @@ def test_dispatch_fails_when_terminal_candidate_cannot_be_safely_reopened(
 
 
 def test_ordinary_dispatch_without_lead_family_is_not_certification(tmp_path: Path) -> None:
+    disable_memory_admission_floor(tmp_path)
     task_id = "no-family"
     run_dir = make_run(tmp_path, task_id)
     prompt = tmp_path / "prompt.md"
@@ -1598,6 +1608,7 @@ def test_ordinary_dispatch_without_lead_family_is_not_certification(tmp_path: Pa
 
 
 def test_attempt_rows_are_accepted_by_existing_finalizer(tmp_path: Path) -> None:
+    disable_memory_admission_floor(tmp_path)
     task_id = "finalizer"
     run_dir = make_run(tmp_path, task_id)
     prompt = tmp_path / "prompt.md"
@@ -1631,6 +1642,7 @@ def test_attempt_rows_are_accepted_by_existing_finalizer(tmp_path: Path) -> None
 
 
 def test_dispatch_owner_keeps_lifecycle_risk_separate_from_model_override(tmp_path: Path) -> None:
+    disable_memory_admission_floor(tmp_path)
     run_dir = make_run(tmp_path, "separate-route-metadata")
     prompt = tmp_path / "prompt.md"
     prompt.write_text("Synthesis\n", encoding="utf-8")
@@ -1770,6 +1782,7 @@ def test_route_failure_is_typed_and_provider_is_not_invoked(tmp_path: Path) -> N
 
 
 def test_nonzero_provider_exit_is_recorded_without_substitution(tmp_path: Path) -> None:
+    disable_memory_admission_floor(tmp_path)
     run_dir = make_run(tmp_path, "exit")
     prompt = tmp_path / "prompt.md"
     prompt.write_text("provider failure\n", encoding="utf-8")
@@ -1918,6 +1931,7 @@ def test_typed_adapter_auth_and_missing_tool_outcomes_are_preserved(tmp_path: Pa
 
 
 def test_timeout_records_reaped_exit(tmp_path: Path) -> None:
+    disable_memory_admission_floor(tmp_path)
     run_dir = make_run(tmp_path, "timeout")
     prompt = tmp_path / "prompt.md"
     prompt.write_text("timeout\n", encoding="utf-8")
@@ -2005,6 +2019,7 @@ def test_sigterm_interrupts_and_reaps_provider_group(tmp_path: Path) -> None:
 
 
 def test_late_signal_after_provider_exit_preserves_attempt_publication(tmp_path: Path) -> None:
+    disable_memory_admission_floor(tmp_path)
     run_dir = make_run(tmp_path, "late-signal")
     prompt = tmp_path / "prompt.md"
     prompt.write_text("late signal\n", encoding="utf-8")
@@ -2042,6 +2057,7 @@ def test_late_signal_after_provider_exit_preserves_attempt_publication(tmp_path:
 
 def test_signal_during_popen_return_reaps_provider_and_publishes_cancelled_attempt(tmp_path: Path) -> None:
     """A signal after spawn but before Popen returns cannot orphan the provider."""
+    disable_memory_admission_floor(tmp_path)
     run_dir = make_run(tmp_path, "popen-window")
     prompt = tmp_path / "prompt.md"
     prompt.write_text("popen window\n", encoding="utf-8")
@@ -2096,6 +2112,7 @@ def test_signal_during_popen_return_reaps_provider_and_publishes_cancelled_attem
 
 
 def test_external_task_cancel_reaps_only_owned_provider_group(tmp_path: Path) -> None:
+    disable_memory_admission_floor(tmp_path)
     run_dir = make_run(tmp_path, "external-cancel")
     prompt = tmp_path / "prompt.md"
     prompt.write_text("cancel\n", encoding="utf-8")
@@ -2725,6 +2742,7 @@ def run_writer_dispatch(
     tmp_path: Path, run_dir: Path, prompt: Path, *extra: str, task_id: str = "task-1",
     adapter: str = "claude",
 ) -> subprocess.CompletedProcess[str]:
+    disable_memory_admission_floor(tmp_path)
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir(exist_ok=True)
     write_success_adapter(bin_dir / "cf_dispatch_stub.sh")
@@ -2820,6 +2838,7 @@ def test_primary_checkout_writer_is_rejected(tmp_path: Path) -> None:
 
 
 def test_worktree_writer_route_reaches_the_adapter_and_the_attempt_record(tmp_path: Path) -> None:
+    disable_memory_admission_floor(tmp_path)
     run_dir = make_run(tmp_path, "writer")
     prompt = tmp_path / "prompt.md"
     prompt.write_text("Reply exactly OK\n", encoding="utf-8")
@@ -2951,6 +2970,7 @@ def test_provider_deadline_is_passed_below_the_owner_deadline(tmp_path: Path) ->
 
 
 def test_agy_arm_receives_the_deadline_and_reports_a_typed_timeout(tmp_path: Path) -> None:
+    disable_memory_admission_floor(tmp_path)
     run_dir = make_run(tmp_path, "agytimeout")
     prompt = tmp_path / "prompt.md"
     prompt.write_text("Reply exactly OK\n", encoding="utf-8")
@@ -2988,6 +3008,7 @@ def test_agy_arm_receives_the_deadline_and_reports_a_typed_timeout(tmp_path: Pat
 
 def test_provider_reported_timeout_is_typed_rather_than_an_empty_result(tmp_path: Path) -> None:
     """A deadline the provider enforced itself is a timeout, not a result defect."""
+    disable_memory_admission_floor(tmp_path)
     run_dir = make_run(tmp_path, "providertimeout")
     prompt = tmp_path / "prompt.md"
     prompt.write_text("Reply exactly OK\n", encoding="utf-8")
@@ -3021,6 +3042,7 @@ def test_provider_reported_timeout_is_typed_rather_than_an_empty_result(tmp_path
 
 
 def test_claude_arm_short_timeout_reports_a_timeout_not_a_receipt_failure(tmp_path: Path) -> None:
+    disable_memory_admission_floor(tmp_path)
     run_dir = make_run(tmp_path, "claudetimeout")
     prompt = tmp_path / "prompt.md"
     prompt.write_text("Reply exactly OK\n", encoding="utf-8")
@@ -3449,7 +3471,7 @@ def test_stale_instance_routing_uses_fresh_product_and_warns(tmp_path, monkeypat
     assert result['routes'][0]['resolved_model'] == 'sonnet'
     warning = result['routes'][0]['warnings'][-1]
     assert 'resolved against the fresh product snapshot' in warning
-    assert 'scripts/install-harness --platform all --refresh-routing' in warning
+    assert 'use the current release routing catalogue' in warning
 
 
 def test_effort_rejection_retries_once_at_nearest_lower_capability(tmp_path):

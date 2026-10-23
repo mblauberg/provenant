@@ -3,7 +3,8 @@
 use crate::release::{FILE_LIMIT, Release};
 use provenant_core::{CancelToken, Clock, RelativePath, Roots, WaitBudget};
 use provenant_records::{
-    AbsolutePath, CanonicalV1, Harness, InstallReceipt, Limits, OwnedEntry, OwnedValue, PathWire,
+    AbsolutePath, CanonicalV1, FileDigest, Harness, InstallReceipt, Limits, OwnedEntry, OwnedValue,
+    PathWire, ResolvedHarnessTarget, VersionInfo,
 };
 use provenant_supervisor::fs::{
     FileKind, FsError, LockMode, Metadata, Publication, PublishMode, SafeDir, SafeFs,
@@ -33,6 +34,14 @@ pub enum InstallError {
     Manifest(&'static str),
     #[error("release platform does not match selected target")]
     Platform,
+    #[error(
+        "release conflict: existing manifest {existing_manifest_digest}, requested manifest {requested_manifest_digest}; {recovery}"
+    )]
+    ReleaseConflict {
+        existing_manifest_digest: FileDigest,
+        requested_manifest_digest: FileDigest,
+        recovery: &'static str,
+    },
     #[error("release file bytes or mode differ: {0}")]
     Tampered(PathBuf),
     #[error("unmanaged destination conflicts: {0}")]
@@ -217,7 +226,7 @@ pub trait InstallReporter {
 /// Real process access belongs to binary composition/supervisor. Implementations
 /// must run version/help with a 30-second budget and capped output, no probes.
 pub trait ReleaseSmoke {
-    fn check(&self, release: &Release, cancel: &CancelToken) -> std::io::Result<()>;
+    fn check(&self, release: &Release, cancel: &CancelToken) -> std::io::Result<VersionInfo>;
 }
 
 impl Snapshots {
@@ -234,27 +243,38 @@ impl Snapshots {
             .as_path()
             .join("releases")
             .join(release.manifest.source_digest.to_string());
+        let manifest_path = installed.join("release.json");
+        let manifest_snapshot = snapshot(&manifest_path, fs)?;
+        let completed = match &manifest_snapshot {
+            None => false,
+            Some(Snapshot {
+                value: Value::File { bytes, mode: 0o600 },
+                ..
+            }) if bytes == &release.manifest_bytes => true,
+            Some(Snapshot {
+                value: Value::File { bytes, mode: 0o600 },
+                ..
+            }) => {
+                return Err(InstallError::ReleaseConflict {
+                    existing_manifest_digest: CanonicalV1::file_digest(bytes),
+                    requested_manifest_digest: CanonicalV1::file_digest(&release.manifest_bytes),
+                    recovery: "select a new source digest or manually remove the immutable release after checking its links",
+                });
+            }
+            Some(_) => return Err(InstallError::Tampered(manifest_path)),
+        };
         match crate::release::inventory(&installed, fs) {
             Ok(paths) => {
-                for p in paths {
-                    if !release.files.contains_key(&p) {
-                        return Err(InstallError::Tampered(installed.join(p)));
+                for path in paths {
+                    if !release.files.contains_key(&path) {
+                        return Err(InstallError::Tampered(installed.join(path)));
                     }
                 }
             }
-            Err(InstallError::Fs(e)) if e.is_not_found() => {}
-            Err(e) => return Err(e),
+            Err(InstallError::Fs(error)) if error.is_not_found() => {}
+            Err(error) => return Err(error),
         }
 
-        let completed = snapshot(&installed.join("release.json"), fs)?.is_some();
-        let mut entries = BTreeMap::new();
-        for path in desired.keys() {
-            let current = snapshot(path, fs)?;
-            if completed && path.starts_with(&installed) && current.is_none() {
-                return Err(InstallError::Tampered(path.clone()));
-            }
-            entries.insert(path.clone(), current);
-        }
         let receipt_path = targets.roots.state.as_path().join("install/receipt.json");
         let receipt_snapshot = snapshot(&receipt_path, fs)?;
         let receipt = match &receipt_snapshot {
@@ -262,13 +282,39 @@ impl Snapshots {
             Some(Snapshot {
                 value: Value::File { bytes, mode: 0o600 },
                 ..
-            }) => Some(decode_receipt(bytes)?),
-            Some(_) => return Err(InstallError::Conflict(receipt_path)),
+            }) => Some(decode_receipt(bytes, targets.roots.state.as_path())?),
+            Some(_) => return Err(InstallError::Conflict(receipt_path.clone())),
         };
+        let selected: BTreeSet<_> = targets.harnesses.iter().map(|h| h.harness).collect();
+        let mut paths: BTreeSet<_> = desired.keys().cloned().collect();
+        if let Some(previous) = &receipt {
+            for entry in &previous.entries {
+                if entry
+                    .harness
+                    .is_some_and(|harness| selected.contains(&harness))
+                {
+                    paths.insert(entry.path.to_path_buf()?);
+                }
+            }
+        }
+
+        let mut entries = BTreeMap::new();
+        for path in paths {
+            let current = if path == manifest_path {
+                manifest_snapshot.clone()
+            } else {
+                snapshot(&path, fs)?
+            };
+            if completed && path.starts_with(&installed) && current.is_none() {
+                return Err(InstallError::Tampered(path));
+            }
+            entries.insert(path, current);
+        }
         entries.insert(receipt_path, receipt_snapshot);
         Ok(Self { entries, receipt })
     }
 }
+
 fn desired(
     release: &Release,
     targets: &Targets,
@@ -326,23 +372,19 @@ fn desired(
         None,
         "release".into(),
     )?;
-    let (binary, mode) = release
-        .files
-        .get(Path::new("provenant"))
-        .ok_or(InstallError::Manifest("missing executable"))?;
+    if !release.files.contains_key(Path::new("bin/provenant")) {
+        return Err(InstallError::Manifest("missing executable"));
+    }
     insert(
         targets.bin_dir.join("provenant"),
-        Value::File {
-            bytes: binary.clone(),
-            mode: *mode,
-        },
+        Value::Link(root.join("bin/provenant")),
         None,
         "binary".into(),
     )?;
     for target in &targets.harnesses {
         let mut skills = BTreeSet::new();
         for path in release.files.keys() {
-            let Ok(tail) = path.strip_prefix("assets/skills") else {
+            let Ok(tail) = path.strip_prefix("skills") else {
                 continue;
             };
             let mut components = tail.components();
@@ -356,18 +398,15 @@ fn desired(
         for name in skills {
             insert(
                 target.skills_dir.join(&name),
-                Value::Link(root.join("assets/skills").join(&name)),
+                Value::Link(root.join("skills").join(&name)),
                 Some(target.harness),
                 "skill".into(),
             )?;
         }
         if let Some(path) = &target.instruction {
             for (destination, asset) in [
-                (path.clone(), "assets/instructions/AGENTS.md"),
-                (
-                    path.with_file_name("HARNESS.md"),
-                    "assets/instructions/HARNESS.md",
-                ),
+                (path.clone(), "instructions/AGENTS.md"),
+                (path.with_file_name("HARNESS.md"), "instructions/HARNESS.md"),
             ] {
                 if release.files.contains_key(Path::new(asset)) {
                     insert(
@@ -412,6 +451,7 @@ pub fn plan_install(
     snapshots: Snapshots,
 ) -> Result<InstallPlan, InstallError> {
     let desired = desired(&release, &targets)?;
+    let selected: BTreeSet<_> = targets.harnesses.iter().map(|h| h.harness).collect();
     let mut actions = Vec::new();
     let mut entries = Vec::new();
     let mut manual_includes = Vec::new();
@@ -420,13 +460,19 @@ pub fn plan_install(
             .entries
             .get(path)
             .ok_or_else(|| InstallError::Drift(path.clone()))?;
-        if previous.as_ref().is_none_or(|s| s.value != want.value) {
+        if previous
+            .as_ref()
+            .is_none_or(|snapshot| snapshot.value != want.value)
+        {
             let immutable = want.selector == "release";
             if let Some(current) = previous {
-                let was_owned = snapshots.receipt.as_ref().is_some_and(|r| {
-                    r.entries.iter().any(|e| {
-                        e.path.to_path_buf().is_ok_and(|p| &p == path)
-                            && matches_owned(&current.value, &e.expected)
+                let was_owned = snapshots.receipt.as_ref().is_some_and(|receipt| {
+                    receipt.entries.iter().any(|entry| {
+                        entry
+                            .path
+                            .to_path_buf()
+                            .is_ok_and(|owned_path| &owned_path == path)
+                            && matches_owned(&current.value, &entry.expected)
                     })
                 });
                 let adopt_binary = targets.adopt_existing
@@ -444,10 +490,20 @@ pub fn plan_install(
                     }
                     continue;
                 }
-                if immutable {
+                let release_root = targets
+                    .roots
+                    .state
+                    .as_path()
+                    .join("releases")
+                    .join(release.manifest.source_digest.to_string());
+                let complete = snapshots
+                    .entries
+                    .get(&release_root.join("release.json"))
+                    .is_some_and(Option::is_some);
+                if immutable && complete {
                     return Err(InstallError::Tampered(path.clone()));
                 }
-                if !was_owned && !adopt_binary {
+                if !immutable && !was_owned && !adopt_binary {
                     return Err(InstallError::Conflict(path.clone()));
                 }
             }
@@ -459,7 +515,9 @@ pub fn plan_install(
                     Disposition::Create
                 },
                 selector: want.selector.clone(),
-                before: previous.as_ref().and_then(|s| owned(&s.value).ok()),
+                before: previous
+                    .as_ref()
+                    .and_then(|snapshot| owned(&snapshot.value).ok()),
                 after: Some(owned(&want.value)?),
                 identity: identity(previous),
             });
@@ -473,26 +531,79 @@ pub fn plan_install(
             });
         }
     }
-    // Keep ownership for unselected clients and removed/edited skills so a
-    // later explicit uninstall can make an unchanged-only decision.
+
+    // A selected harness drops links that the new release no longer offers.
+    // Exact old links become Remove actions; edited links are left in place and
+    // relinquished as unmanaged state. Missing links are already settled.
     if let Some(previous) = &snapshots.receipt {
         for entry in &previous.entries {
-            if !entries.iter().any(|e| e.path == entry.path)
-                && !manual_includes.iter().any(|i| i.path == entry.path)
+            if entries.iter().any(|current| current.path == entry.path)
+                || manual_includes
+                    .iter()
+                    .any(|include| include.path == entry.path)
             {
+                continue;
+            }
+            let Some(harness) = entry.harness else {
+                continue;
+            };
+            if !selected.contains(&harness) {
                 entries.push(entry.clone());
+                continue;
+            }
+            let path = entry.path.to_path_buf()?;
+            let current = snapshots
+                .entries
+                .get(&path)
+                .ok_or_else(|| InstallError::Drift(path.clone()))?;
+            if let Some(before) = current
+                && matches_owned(&before.value, &entry.expected)
+            {
+                actions.push(Action {
+                    path: entry.path.clone(),
+                    disposition: Disposition::Remove,
+                    selector: entry.selector.clone(),
+                    before: Some(entry.expected.clone()),
+                    after: None,
+                    identity: identity(current),
+                });
             }
         }
     }
-    let mut harnesses: BTreeSet<_> = targets.harnesses.iter().map(|h| h.harness).collect();
+
+    let mut resolved_targets = BTreeMap::new();
     if let Some(previous) = &snapshots.receipt {
-        harnesses.extend(previous.harnesses.iter().copied());
+        for target in &previous.harness_targets {
+            if !selected.contains(&target.harness) {
+                resolved_targets.insert(target.harness, target.clone());
+            }
+        }
     }
+    for target in &targets.harnesses {
+        resolved_targets.insert(
+            target.harness,
+            ResolvedHarnessTarget {
+                harness: target.harness,
+                skills_dir: AbsolutePath::new(&target.skills_dir)?,
+                instruction: target
+                    .instruction
+                    .as_deref()
+                    .map(AbsolutePath::new)
+                    .transpose()?,
+            },
+        );
+    }
+    let harnesses: Vec<_> = resolved_targets.keys().copied().collect();
     let receipt = InstallReceipt {
         schema_version: 1,
         source_digest: release.manifest.source_digest,
         manifest_digest: CanonicalV1::file_digest(&release.manifest_bytes),
-        harnesses: harnesses.into_iter().collect(),
+        asset_digest: release.manifest.asset_digest,
+        target: release.manifest.target.clone(),
+        toolchain: release.manifest.toolchain.clone(),
+        bin_dir: AbsolutePath::new(&targets.bin_dir)?,
+        harnesses,
+        harness_targets: resolved_targets.into_values().collect(),
         entries,
     };
     let receipt_path = targets.roots.state.as_path().join("install/receipt.json");
@@ -504,8 +615,8 @@ pub fn plan_install(
         .entries
         .get(&receipt_path)
         .ok_or_else(|| InstallError::Drift(receipt_path.clone()))?;
-    if current.as_ref().is_none_or(|s| {
-        s.value
+    if current.as_ref().is_none_or(|snapshot| {
+        snapshot.value
             != (Value::File {
                 bytes: bytes.clone(),
                 mode: 0o600,
@@ -519,7 +630,9 @@ pub fn plan_install(
                 Disposition::Create
             },
             selector: "receipt".into(),
-            before: current.as_ref().and_then(|s| owned(&s.value).ok()),
+            before: current
+                .as_ref()
+                .and_then(|snapshot| owned(&snapshot.value).ok()),
             after: Some(OwnedValue::File {
                 digest: CanonicalV1::file_digest(&bytes),
                 mode: 0o600,
@@ -527,13 +640,24 @@ pub fn plan_install(
             identity: identity(current),
         });
     }
-    // Files are published before the binary, then links, then receipt, regardless
-    // of user-selected destination path ordering.
-    actions.sort_by_key(|a| match a.selector.as_str() {
-        "release" => 0,
-        "binary" => 1,
-        "receipt" => 3,
-        _ => 2,
+
+    // Publish release contents first, then release.json as its completion
+    // marker, then the stable command, selected harness links, and receipt.
+    actions.sort_by_key(|action| {
+        let path = action.path.to_path_buf().ok();
+        match action.selector.as_str() {
+            "release"
+                if path
+                    .as_deref()
+                    .is_some_and(|p| p.file_name() == Some(OsStr::new("release.json"))) =>
+            {
+                1
+            }
+            "release" => 0,
+            "binary" => 2,
+            "receipt" => 4,
+            _ => 3,
+        }
     });
     Ok(InstallPlan {
         targets,
@@ -569,9 +693,18 @@ pub fn install(
             dry_run: true,
         });
     }
-    smoke
+    let binary_info = smoke
         .check(&plan.release, context.cancel)
         .map_err(InstallError::Smoke)?;
+    if binary_info.source_digest != plan.release.manifest.source_digest
+        || binary_info.asset_digest != plan.release.manifest.asset_digest
+        || binary_info.target != plan.release.manifest.target
+        || binary_info.toolchain != plan.release.manifest.toolchain
+    {
+        return Err(InstallError::Manifest(
+            "binary identity differs from release manifest",
+        ));
+    }
     let fs = context.fs;
     let install_root = plan.targets.roots.state.as_path().join("install");
     let dir = directory(&install_root, true, fs)?;
@@ -582,23 +715,6 @@ pub fn install(
         context.cancel,
         context.clock,
     )?;
-    let parents: BTreeSet<_> = plan
-        .desired
-        .iter()
-        .filter(|(_, d)| d.selector != "release")
-        .filter_map(|(p, _)| p.parent().map(Path::to_path_buf))
-        .collect();
-    let mut locks = Vec::new();
-    for parent in parents {
-        let dir = directory(&parent, true, fs)?;
-        locks.push(dir.lock(
-            OsStr::new(".provenant-install.lock"),
-            LockMode::Exclusive,
-            context.budget,
-            context.cancel,
-            context.clock,
-        )?);
-    }
     // Validate the complete preview before the first authoritative file write.
     for (path, before) in &plan.before.entries {
         recheck(path, before, fs)?;
@@ -616,19 +732,23 @@ pub fn install(
                 .get(&path)
                 .ok_or_else(|| InstallError::Drift(path.clone()))?;
             recheck(&path, before, fs)?;
-            let value = if action.selector == "receipt" {
-                Value::File {
-                    bytes: provenant_records::encode(&plan.receipt)?,
-                    mode: 0o600,
-                }
+            if action.disposition == Disposition::Remove {
+                remove_entry(&path, fs)
             } else {
-                plan.desired
-                    .get(&path)
-                    .ok_or_else(|| InstallError::Drift(path.clone()))?
-                    .value
-                    .clone()
-            };
-            publish(&path, &value, before.is_some(), fs)
+                let value = if action.selector == "receipt" {
+                    Value::File {
+                        bytes: provenant_records::encode(&plan.receipt)?,
+                        mode: 0o600,
+                    }
+                } else {
+                    plan.desired
+                        .get(&path)
+                        .ok_or_else(|| InstallError::Drift(path.clone()))?
+                        .value
+                        .clone()
+                };
+                publish(&path, &value, before.is_some(), fs)
+            }
         })();
         if let Err(source) = result {
             return Err(InstallError::Partial {
@@ -687,6 +807,19 @@ fn publish(path: &Path, value: &Value, replace: bool, fs: &dyn SafeFs) -> Result
         Value::Other => Err(InstallError::Conflict(path.into())),
     }
 }
+fn remove_entry(path: &Path, fs: &dyn SafeFs) -> Result<(), InstallError> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| InstallError::Path(path.into()))?;
+    let name = path
+        .file_name()
+        .ok_or_else(|| InstallError::Path(path.into()))?;
+    let dir = directory(parent, false, fs)?;
+    dir.unlink(name)?;
+    dir.sync()?;
+    Ok(())
+}
+
 pub(crate) fn durable(publication: Publication) -> Result<(), InstallError> {
     match publication {
         Publication::Durable => Ok(()),
@@ -830,22 +963,49 @@ fn read_receipt(
         Some(Snapshot {
             value: Value::File { bytes, mode: 0o600 },
             ..
-        }) => Ok(Some(decode_receipt(&bytes)?)),
+        }) => Ok(Some(decode_receipt(&bytes, targets.roots.state.as_path())?)),
         Some(_) => Err(InstallError::Conflict(path)),
     }
 }
-fn decode_receipt(bytes: &[u8]) -> Result<InstallReceipt, InstallError> {
+fn decode_receipt(bytes: &[u8], state_root: &Path) -> Result<InstallReceipt, InstallError> {
     let receipt: InstallReceipt = provenant_records::decode_v1(bytes, Limits::CONFIG)?;
+    normal_absolute(&receipt.bin_dir.to_path_buf()?)?;
+    let mut harnesses = BTreeSet::new();
+    for harness in &receipt.harnesses {
+        if !harnesses.insert(*harness) {
+            return Err(InstallError::Manifest("duplicate receipt harness"));
+        }
+    }
+    let mut target_harnesses = BTreeSet::new();
+    for target in &receipt.harness_targets {
+        if !target_harnesses.insert(target.harness) {
+            return Err(InstallError::Manifest("duplicate receipt target"));
+        }
+        normal_absolute(&target.skills_dir.to_path_buf()?)?;
+        if let Some(path) = &target.instruction {
+            normal_absolute(&path.to_path_buf()?)?;
+        }
+    }
+    if harnesses != target_harnesses {
+        return Err(InstallError::Manifest(
+            "receipt harness targets do not match harnesses",
+        ));
+    }
     let mut paths = BTreeSet::new();
     for entry in &receipt.entries {
         if !paths.insert(entry.path.to_path_buf()?) {
             return Err(InstallError::Manifest("duplicate receipt path"));
         }
+        if !permitted_entry(entry, &receipt, state_root)? {
+            return Err(InstallError::Manifest(
+                "receipt entry outside resolved targets",
+            ));
+        }
     }
     if receipt
         .entries
         .iter()
-        .filter(|e| e.selector == "binary" && e.harness.is_none())
+        .filter(|entry| entry.selector == "binary" && entry.harness.is_none())
         .count()
         != 1
     {
@@ -853,29 +1013,96 @@ fn decode_receipt(bytes: &[u8]) -> Result<InstallReceipt, InstallError> {
     }
     Ok(receipt)
 }
-fn permitted_entry(entry: &OwnedEntry, targets: &Targets) -> Result<bool, InstallError> {
+fn asset_target(target: &Path, state_root: &Path, expected_tail: &Path) -> bool {
+    let releases = state_root.join("releases");
+    let Ok(relative) = target.strip_prefix(&releases) else {
+        return false;
+    };
+    let mut components = relative.components();
+    let Some(Component::Normal(digest)) = components.next() else {
+        return false;
+    };
+    if digest
+        .to_str()
+        .is_none_or(|text| provenant_records::SourceDigest::parse(text).is_err())
+    {
+        return false;
+    }
+    let mut tail = PathBuf::new();
+    for part in components {
+        tail.push(part.as_os_str());
+    }
+    tail == expected_tail
+}
+fn permitted_entry(
+    entry: &OwnedEntry,
+    receipt: &InstallReceipt,
+    state_root: &Path,
+) -> Result<bool, InstallError> {
     let path = entry.path.to_path_buf()?;
     normal_absolute(&path)?;
     if entry.harness.is_none() {
+        let binary = receipt.bin_dir.to_path_buf()?.join("provenant");
+        let expected_target = state_root
+            .join("releases")
+            .join(receipt.source_digest.to_string())
+            .join("bin/provenant");
         return Ok(entry.selector == "binary"
-            && path == targets.bin_dir.join("provenant")
-            && matches!(entry.expected, OwnedValue::File { mode: 0o755, .. }));
+            && path == binary
+            && matches!(
+                &entry.expected,
+                OwnedValue::Link { target }
+                    if target.to_path_buf()? == expected_target
+            ));
     }
-    for h in &targets.harnesses {
-        if Some(h.harness) != entry.harness {
-            continue;
-        }
-        if entry.selector == "skill"
-            && path.parent() == Some(h.skills_dir.as_path())
-            && matches!(entry.expected, OwnedValue::Link { .. })
-        {
-            return Ok(true);
-        }
-        if entry.selector == "instruction"
-            && h.instruction
-                .as_ref()
-                .is_some_and(|i| &path == i || path == i.with_file_name("HARNESS.md"))
-            && matches!(entry.expected, OwnedValue::Link { .. })
+    let Some(target) = receipt
+        .harness_targets
+        .iter()
+        .find(|target| Some(target.harness) == entry.harness)
+    else {
+        return Ok(false);
+    };
+    let skills_dir = target.skills_dir.to_path_buf()?;
+    if entry.selector == "skill"
+        && path.parent() == Some(skills_dir.as_path())
+        && path.file_name().is_some_and(|name| {
+            matches!(
+                &entry.expected,
+                OwnedValue::Link { target }
+                    if target.to_path_buf().is_ok_and(|link| {
+                        asset_target(
+                            &link,
+                            state_root,
+                            &Path::new("skills").join(name),
+                        )
+                    })
+            )
+        })
+    {
+        return Ok(true);
+    }
+    if entry.selector == "instruction"
+        && let Some(instruction) = &target.instruction
+    {
+        let instruction = instruction.to_path_buf()?;
+        let agents = path == instruction;
+        let harness = path == instruction.with_file_name("HARNESS.md");
+        if (agents || harness)
+            && matches!(
+                &entry.expected,
+                OwnedValue::Link { target }
+                    if target.to_path_buf().is_ok_and(|link| {
+                        asset_target(
+                            &link,
+                            state_root,
+                            Path::new(if agents {
+                                "instructions/AGENTS.md"
+                            } else {
+                                "instructions/HARNESS.md"
+                            }),
+                        )
+                    })
+            )
         {
             return Ok(true);
         }
@@ -883,13 +1110,32 @@ fn permitted_entry(entry: &OwnedEntry, targets: &Targets) -> Result<bool, Instal
     Ok(false)
 }
 /// Read-only digest comparison, without locks, repair or initialisation.
+fn verify_binary_identity(
+    release: &Release,
+    smoke: &dyn ReleaseSmoke,
+    cancel: &CancelToken,
+) -> Result<(), InstallError> {
+    let actual = smoke.check(release, cancel).map_err(InstallError::Smoke)?;
+    if actual.source_digest != release.manifest.source_digest
+        || actual.asset_digest != release.manifest.asset_digest
+        || actual.target != release.manifest.target
+        || actual.toolchain != release.manifest.toolchain
+    {
+        return Err(InstallError::Manifest(
+            "binary identity differs from release manifest",
+        ));
+    }
+    Ok(())
+}
+
 pub fn check_install(
     targets: &Targets,
     source: Option<&Release>,
     target: &str,
     fs: &dyn SafeFs,
+    smoke: &dyn ReleaseSmoke,
+    cancel: &CancelToken,
 ) -> Result<Vec<InstallFinding>, InstallError> {
-    targets.validate()?;
     let receipt_path = targets.roots.state.as_path().join("install/receipt.json");
     let Some(receipt) = read_receipt(targets, fs)? else {
         return Ok(vec![InstallFinding {
@@ -905,53 +1151,67 @@ pub fn check_install(
         .join("releases")
         .join(receipt.source_digest.to_string());
     match Release::read(&release_path, target, fs) {
-        Ok(release)
+        Ok(release) => {
+            verify_binary_identity(&release, smoke, cancel)?;
             if release.manifest.source_digest == receipt.source_digest
-                && CanonicalV1::file_digest(&release.manifest_bytes) == receipt.manifest_digest =>
-        {
-            let (bytes, mode) = release
-                .files
-                .get(Path::new("provenant"))
-                .ok_or(InstallError::Manifest("missing executable"))?;
-            let expected = OwnedValue::File {
-                digest: CanonicalV1::file_digest(bytes),
-                mode: *mode,
-            };
-            if !receipt.entries.iter().any(|entry| {
-                entry.selector == "binary" && entry.harness.is_none() && entry.expected == expected
-            }) {
-                return Err(InstallError::Manifest(
-                    "receipt binary differs from release",
-                ));
+                && release.manifest.target == receipt.target
+                && release.manifest.toolchain == receipt.toolchain
+                && release.manifest.asset_digest == receipt.asset_digest
+                && CanonicalV1::file_digest(&release.manifest_bytes) == receipt.manifest_digest
+            {
+                let expected = OwnedValue::Link {
+                    target: AbsolutePath::new(&release_path.join("bin/provenant"))?,
+                };
+                if !receipt.entries.iter().any(|entry| {
+                    entry.selector == "binary"
+                        && entry.harness.is_none()
+                        && entry.expected == expected
+                }) {
+                    return Err(InstallError::Manifest(
+                        "receipt binary differs from release",
+                    ));
+                }
+            } else {
+                findings.push(InstallFinding {
+                    rule: "release_drift".into(),
+                    path: AbsolutePath::new(&release_path)?,
+                });
             }
         }
-        Ok(_) | Err(InstallError::Tampered(_)) | Err(InstallError::Manifest(_)) => {
+        Err(InstallError::Tampered(_)) | Err(InstallError::Manifest(_)) => {
             findings.push(InstallFinding {
                 rule: "release_drift".into(),
                 path: AbsolutePath::new(&release_path)?,
             })
         }
-        Err(InstallError::Fs(e)) if e.is_not_found() => findings.push(InstallFinding {
+        Err(InstallError::Fs(error)) if error.is_not_found() => findings.push(InstallFinding {
             rule: "missing_release".into(),
             path: AbsolutePath::new(&release_path)?,
         }),
-        Err(e) => return Err(e),
+        Err(error) => return Err(error),
     }
-    if source.is_some_and(|s| {
-        s.manifest.source_digest != receipt.source_digest
-            || CanonicalV1::file_digest(&s.manifest_bytes) != receipt.manifest_digest
-    }) {
-        findings.push(InstallFinding {
-            rule: "source_digest".into(),
-            path: AbsolutePath::new(&receipt_path)?,
-        });
+    if let Some(source) = source {
+        verify_binary_identity(source, smoke, cancel)?;
+        if source.manifest.source_digest != receipt.source_digest
+            || source.manifest.asset_digest != receipt.asset_digest
+            || source.manifest.target != receipt.target
+            || source.manifest.toolchain != receipt.toolchain
+            || CanonicalV1::file_digest(&source.manifest_bytes) != receipt.manifest_digest
+        {
+            findings.push(InstallFinding {
+                rule: "source_digest".into(),
+                path: AbsolutePath::new(&receipt_path)?,
+            });
+        }
     }
     for entry in &receipt.entries {
-        if !permitted_entry(entry, targets)? {
+        if !permitted_entry(entry, &receipt, targets.roots.state.as_path())? {
             return Err(InstallError::Conflict(entry.path.to_path_buf()?));
         }
         let path = entry.path.to_path_buf()?;
-        if snapshot(&path, fs)?.is_none_or(|s| !matches_owned(&s.value, &entry.expected)) {
+        if snapshot(&path, fs)?
+            .is_none_or(|current| !matches_owned(&current.value, &entry.expected))
+        {
             findings.push(InstallFinding {
                 rule: "owned_entry_drift".into(),
                 path: entry.path.clone(),
@@ -960,8 +1220,10 @@ pub fn check_install(
     }
     Ok(findings)
 }
-/// Removes unchanged links for selected clients; keeps state, releases, edited
-/// entries and the running executable. Receipt paths cannot widen authority.
+
+/// Removes unchanged selected harness entries, preserves user edits, and
+/// forgets the selected harnesses in the receipt. State and the stable command
+/// remain installed.
 pub fn uninstall(
     targets: &Targets,
     context: &InstallContext<'_>,
@@ -969,7 +1231,8 @@ pub fn uninstall(
 ) -> Result<InstallOutcome, InstallError> {
     targets.validate()?;
     let fs = context.fs;
-    let receipt_path = targets.roots.state.as_path().join("install/receipt.json");
+    let state_root = targets.roots.state.as_path();
+    let receipt_path = state_root.join("install/receipt.json");
     let before_receipt = snapshot(&receipt_path, fs)?;
     let Some(mut receipt) = read_receipt(targets, fs)? else {
         reporter.preview(&[]).map_err(InstallError::Preview)?;
@@ -979,90 +1242,90 @@ pub fn uninstall(
             dry_run: false,
         });
     };
-    let mut settled = Vec::new();
+    let requested: BTreeSet<_> = targets
+        .harnesses
+        .iter()
+        .map(|target| target.harness)
+        .collect();
+    let registered: BTreeSet<_> = receipt.harnesses.iter().copied().collect();
+    let selected: BTreeSet<_> = requested.intersection(&registered).copied().collect();
+    if selected.is_empty() {
+        reporter.preview(&[]).map_err(InstallError::Preview)?;
+        return Ok(InstallOutcome {
+            actions: Vec::new(),
+            manual_includes: Vec::new(),
+            dry_run: false,
+        });
+    }
+
     let mut removals = Vec::new();
     let mut actions = Vec::new();
     for entry in &receipt.entries {
-        if entry.harness.is_none() || !permitted_entry(entry, targets)? {
+        if !entry
+            .harness
+            .is_some_and(|harness| selected.contains(&harness))
+        {
             continue;
         }
-        let path = entry.path.to_path_buf()?;
-        let current = snapshot(&path, fs)?;
-        if current.is_none() {
-            settled.push(path.clone());
+        if !permitted_entry(entry, &receipt, state_root)? {
+            return Err(InstallError::Conflict(entry.path.to_path_buf()?));
         }
-        if let Some(before) = current
+        let path = entry.path.to_path_buf()?;
+        if let Some(before) = snapshot(&path, fs)?
             && matches_owned(&before.value, &entry.expected)
         {
-            settled.push(path.clone());
             actions.push(Action {
                 path: entry.path.clone(),
                 disposition: Disposition::Remove,
                 selector: entry.selector.clone(),
                 before: Some(entry.expected.clone()),
                 after: None,
-                identity: Some(EntryIdentity {
-                    device: before.metadata.device,
-                    inode: before.metadata.inode,
-                }),
+                identity: identity(&Some(before.clone())),
             });
             removals.push((path, Some(before)));
         }
     }
-    if !settled.is_empty() {
-        let mut next = receipt.clone();
-        next.entries.retain(|e| {
-            !settled
-                .iter()
-                .any(|p| e.path.to_path_buf().is_ok_and(|path| &path == p))
-        });
-        let bytes = provenant_records::encode(&next)?;
-        actions.push(Action {
-            path: AbsolutePath::new(&receipt_path)?,
-            disposition: Disposition::Replace,
-            selector: "receipt".into(),
-            before: before_receipt.as_ref().and_then(|s| owned(&s.value).ok()),
-            after: Some(OwnedValue::File {
-                digest: CanonicalV1::file_digest(&bytes),
-                mode: 0o600,
-            }),
-            identity: identity(&before_receipt),
-        });
-    }
+
+    receipt.entries.retain(|entry| {
+        !entry
+            .harness
+            .is_some_and(|harness| selected.contains(&harness))
+    });
+    receipt
+        .harnesses
+        .retain(|harness| !selected.contains(harness));
+    receipt
+        .harness_targets
+        .retain(|target| !selected.contains(&target.harness));
+    let receipt_bytes = provenant_records::encode(&receipt)?;
+    actions.push(Action {
+        path: AbsolutePath::new(&receipt_path)?,
+        disposition: Disposition::Replace,
+        selector: "receipt".into(),
+        before: before_receipt
+            .as_ref()
+            .and_then(|snapshot| owned(&snapshot.value).ok()),
+        after: Some(OwnedValue::File {
+            digest: CanonicalV1::file_digest(&receipt_bytes),
+            mode: 0o600,
+        }),
+        identity: identity(&before_receipt),
+    });
+
     reporter.preview(&actions).map_err(InstallError::Preview)?;
-    if settled.is_empty() {
-        return Ok(InstallOutcome {
-            actions,
-            manual_includes: Vec::new(),
-            dry_run: false,
-        });
-    }
-    let dir = directory(&targets.roots.state.as_path().join("install"), false, fs)?;
-    let _lock = dir.lock(
+    let install_dir = directory(&state_root.join("install"), false, fs)?;
+    let _lock = install_dir.lock(
         OsStr::new("lock"),
         LockMode::Exclusive,
         context.budget,
         context.cancel,
         context.clock,
     )?;
-    let parents: BTreeSet<_> = removals
-        .iter()
-        .filter_map(|(p, _)| p.parent().map(Path::to_path_buf))
-        .collect();
-    let mut locks = Vec::new();
-    for p in parents {
-        locks.push(directory(&p, false, fs)?.lock(
-            OsStr::new(".provenant-install.lock"),
-            LockMode::Exclusive,
-            context.budget,
-            context.cancel,
-            context.clock,
-        )?);
-    }
     recheck(&receipt_path, &before_receipt, fs)?;
     for (path, before) in &removals {
         recheck(path, before, fs)?;
     }
+
     let mut completed = Vec::new();
     for (index, (path, before)) in removals.iter().enumerate() {
         let result = (|| {
@@ -1070,16 +1333,7 @@ pub fn uninstall(
                 return Err(InstallError::Fs(FsError::Cancelled { path: path.clone() }));
             }
             recheck(path, before, fs)?;
-            let parent = path
-                .parent()
-                .ok_or_else(|| InstallError::Path(path.clone()))?;
-            let name = path
-                .file_name()
-                .ok_or_else(|| InstallError::Path(path.clone()))?;
-            let dir = directory(parent, false, fs)?;
-            dir.unlink(name)?;
-            dir.sync()?;
-            Ok(())
+            remove_entry(path, fs)
         })();
         if let Err(source) = result {
             return Err(InstallError::Partial {
@@ -1088,20 +1342,13 @@ pub fn uninstall(
                 source: Box::new(source),
             });
         }
-        if let Some(action) = actions.get(index) {
-            completed.push(action.clone());
-        }
+        completed.push(actions[index].clone());
     }
-    receipt.entries.retain(|e| {
-        !settled
-            .iter()
-            .any(|p| e.path.to_path_buf().is_ok_and(|path| &path == p))
-    });
     let result = recheck(&receipt_path, &before_receipt, fs).and_then(|()| {
         publish(
             &receipt_path,
             &Value::File {
-                bytes: provenant_records::encode(&receipt)?,
+                bytes: receipt_bytes,
                 mode: 0o600,
             },
             true,
@@ -1115,8 +1362,8 @@ pub fn uninstall(
             source: Box::new(source),
         });
     }
-    if let Some(action) = actions.last() {
-        completed.push(action.clone());
+    if let Some(receipt_action) = actions.last() {
+        completed.push(receipt_action.clone());
     }
     Ok(InstallOutcome {
         actions: completed,

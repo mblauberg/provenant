@@ -72,7 +72,7 @@ Rust config checks and Node preflight:
 ```sh
 uv sync --locked --only-group test
 npm ci
-cargo test --manifest-path tools/front-door/Cargo.toml -p provenant-config
+(cd tools/front-door && cargo test -p provenant-config)
 npm run check
 ```
 

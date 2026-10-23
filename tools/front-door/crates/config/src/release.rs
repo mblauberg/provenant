@@ -1,7 +1,11 @@
 //! Verified staged releases and bounded packaging. Build orchestration calls
 //! `package_release` after linking; runtime startup never builds itself.
-use crate::managed::{InstallError, directory, normal_absolute, path_wire, snapshot};
-use provenant_records::{CanonicalV1, Limits, ReleaseFile, ReleaseManifest, SourceDigest};
+use crate::managed::{InstallError, ReleaseSmoke, directory, normal_absolute, path_wire, snapshot};
+use provenant_core::CancelToken;
+use provenant_records::{
+    CanonicalV1, Limits, ReleaseFile, ReleaseManifest, SourceDigest, SourceInput, VersionInfo,
+    source_digest,
+};
 use provenant_supervisor::fs::{FileKind, PublishMode, SafeFs};
 use std::{
     collections::BTreeMap,
@@ -41,6 +45,9 @@ impl Release {
         };
         let manifest: ReleaseManifest =
             provenant_records::decode_v1(bytes.as_slice(), Limits::CONFIG)?;
+        if manifest.schema_version != 1 {
+            return Err(InstallError::Manifest("unsupported schema version"));
+        }
         if manifest.target != target {
             return Err(InstallError::Platform);
         }
@@ -83,7 +90,7 @@ impl Release {
                 return Err(InstallError::Manifest("duplicate inventory path"));
             }
         }
-        if !files.contains_key(Path::new("provenant")) {
+        if !files.contains_key(Path::new("bin/provenant")) {
             return Err(InstallError::Manifest("missing executable"));
         }
         let actual = inventory(source, fs)?;
@@ -91,6 +98,11 @@ impl Release {
         if actual != expected {
             return Err(InstallError::Manifest(
                 "inventory differs from release tree",
+            ));
+        }
+        if asset_inventory_digest(&files)? != manifest.asset_digest {
+            return Err(InstallError::Manifest(
+                "asset inventory differs from release manifest",
             ));
         }
         Ok(Self {
@@ -101,93 +113,251 @@ impl Release {
         })
     }
 }
-fn validate_name(path: &Path, mode: u64) -> Result<(), InstallError> {
-    let allowed_mode = if path == Path::new("provenant") {
-        0o755
-    } else if path.starts_with("assets") && path != Path::new("assets") {
-        0o600
+
+fn is_product_asset(path: &Path) -> bool {
+    [
+        "skills",
+        "library",
+        "templates",
+        "config",
+        "instructions",
+        "scripts",
+        "runtime",
+    ]
+    .iter()
+    .any(|root| path.starts_with(root) && path != Path::new(root))
+}
+
+/// Asset modes are normalized for installation: executables become 0700 and
+/// other files 0600. The command binary retains its standard 0755 mode.
+fn source_mode(path: &Path, actual: u64) -> Result<u64, InstallError> {
+    if path == Path::new("bin/provenant") {
+        if actual & 0o111 == 0 || actual & 0o7000 != 0 {
+            return Err(InstallError::Manifest("binary must be executable"));
+        }
+        Ok(0o755)
+    } else if is_product_asset(path) {
+        if actual & 0o7000 != 0 {
+            return Err(InstallError::Manifest("invalid asset mode"));
+        }
+        Ok(if actual & 0o111 == 0 { 0o600 } else { 0o700 })
     } else {
-        return Err(InstallError::Manifest("file outside release layout"));
+        Err(InstallError::Manifest("file outside release layout"))
+    }
+}
+fn validate_name(path: &Path, mode: u64) -> Result<(), InstallError> {
+    let allowed_mode = if path == Path::new("bin/provenant") {
+        mode == 0o755
+    } else {
+        is_product_asset(path) && matches!(mode, 0o600 | 0o700)
     };
-    if mode != allowed_mode {
-        return Err(InstallError::Manifest("invalid file mode"));
+    if !allowed_mode {
+        return Err(InstallError::Manifest(
+            "file outside release layout or invalid mode",
+        ));
     }
     Ok(())
 }
-/// The staged tree is already populated by build orchestration. Refuses links,
-/// unexpected files and oversized trees; publishes the manifest with NoReplace.
-/// Repeating packaging requires exactly identical manifest bytes.
+
+pub(crate) fn asset_inventory_digest(
+    files: &BTreeMap<PathBuf, (Vec<u8>, u64)>,
+) -> Result<SourceDigest, InstallError> {
+    let mut encoded = Vec::<(String, Vec<u8>)>::new();
+    for (path, (bytes, mode)) in files {
+        if path == Path::new("bin/provenant") {
+            continue;
+        }
+        if !is_product_asset(path) || !matches!(mode, 0o600 | 0o700) {
+            return Err(InstallError::Manifest(
+                "file outside release asset inventory",
+            ));
+        }
+        let name = path
+            .to_str()
+            .ok_or(InstallError::Manifest("release asset path is not UTF-8"))?;
+        let mut contents = Vec::with_capacity(bytes.len() + 1);
+        contents.push(u8::from(*mode == 0o700));
+        contents.extend_from_slice(bytes);
+        encoded.push((name.to_owned(), contents));
+    }
+    if encoded.is_empty() {
+        return Err(InstallError::Manifest("release asset inventory is empty"));
+    }
+    let inputs: Vec<_> = encoded
+        .iter()
+        .map(|(name, bytes)| SourceInput { name, bytes })
+        .collect();
+    source_digest(&inputs).map_err(|_| InstallError::Manifest("invalid release asset inventory"))
+}
+
+/// Packages a staged tree only when its binary reports the expected build
+/// identity and its release assets match the build-script inventory digest.
+/// `release.json` is the completion marker and is always published last.
 pub fn package_release(
     source: &Path,
-    digest: SourceDigest,
-    target: &str,
-    toolchain: &str,
+    expected: &VersionInfo,
     fs: &dyn SafeFs,
+    smoke: &dyn ReleaseSmoke,
+    cancel: &CancelToken,
 ) -> Result<Release, InstallError> {
     normal_absolute(source)?;
     let names = inventory(source, fs)?;
-    let mut files = Vec::new();
+    let mut files = BTreeMap::new();
+    let mut release_files = Vec::new();
     for relative in names {
         let path = source.join(&relative);
         let current = snapshot(&path, fs)?.ok_or_else(|| InstallError::Tampered(path.clone()))?;
         let crate::managed::Value::File { bytes, mode } = current.value else {
             return Err(InstallError::Tampered(path));
         };
-        validate_name(&relative, mode)?;
-        files.push(ReleaseFile {
+        let mode = source_mode(&relative, mode)?;
+        release_files.push(ReleaseFile {
             path: path_wire(&relative)?,
             digest: CanonicalV1::file_digest(&bytes),
             bytes: bytes.len() as u64,
             mode,
         });
+        files.insert(relative, (bytes, mode));
     }
-    let manifest = ReleaseManifest {
-        schema_version: 1,
-        source_digest: digest,
-        target: target.into(),
-        toolchain: toolchain.into(),
-        files,
-    };
-    let bytes = provenant_records::encode(&manifest)?;
-    // Validate all fields/total bounds before publishing even the manifest.
-    if manifest.files.len() > ENTRY_LIMIT
-        || manifest
-            .files
-            .iter()
-            .try_fold(0u64, |n, f| n.checked_add(f.bytes))
-            .is_none_or(|n| n > RELEASE_LIMIT)
-        || target.is_empty()
-        || target.len() > 256
-        || toolchain.is_empty()
-        || toolchain.len() > 256
-        || !manifest
-            .files
-            .iter()
-            .any(|f| f.path.as_path_text() == Some("provenant"))
+    let asset_digest = asset_inventory_digest(&files)?;
+    if asset_digest != expected.asset_digest {
+        return Err(InstallError::Manifest(
+            "release assets differ from build inventory",
+        ));
+    }
+    let total = release_files
+        .iter()
+        .try_fold(0u64, |n, file| n.checked_add(file.bytes))
+        .ok_or(InstallError::Manifest("release byte bound"))?;
+    if release_files.len() > ENTRY_LIMIT
+        || total > RELEASE_LIMIT
+        || release_files.iter().any(|file| file.bytes > FILE_LIMIT)
+        || expected.target.is_empty()
+        || expected.target.len() > 256
+        || expected.toolchain.is_empty()
+        || expected.toolchain.len() > 256
+        || !files.contains_key(Path::new("bin/provenant"))
     {
         return Err(InstallError::Manifest("inventory bounds"));
     }
-    let path = source.join("release.json");
-    if let Some(old) = snapshot(&path, fs)? {
-        if old.value
-            != (crate::managed::Value::File {
-                bytes: bytes.clone(),
-                mode: 0o600,
-            })
-        {
-            return Err(InstallError::Tampered(path));
+    let manifest = ReleaseManifest {
+        schema_version: 1,
+        source_digest: expected.source_digest,
+        asset_digest,
+        target: expected.target.clone(),
+        toolchain: expected.toolchain.clone(),
+        files: release_files,
+    };
+    let bytes = provenant_records::encode(&manifest)?;
+    let candidate = Release {
+        manifest,
+        manifest_bytes: bytes.clone(),
+        files,
+        source: source.into(),
+    };
+    let manifest_path = source.join("release.json");
+    if let Some(old) = snapshot(&manifest_path, fs)? {
+        let crate::managed::Value::File {
+            bytes: old_bytes,
+            mode: 0o600,
+        } = old.value
+        else {
+            return Err(InstallError::Tampered(manifest_path));
+        };
+        if old_bytes != bytes {
+            return Err(InstallError::ReleaseConflict {
+                existing_manifest_digest: CanonicalV1::file_digest(&old_bytes),
+                requested_manifest_digest: CanonicalV1::file_digest(&bytes),
+                recovery: "keep the completed release immutable; use a fresh state root or a new source digest for the other build",
+            });
         }
-    } else {
-        crate::managed::durable(directory(source, false, fs)?.publish(
-            OsStr::new("release.json"),
-            &bytes,
-            0o600,
-            PublishMode::NoReplace,
-        )?)?;
+        let release = Release::read(source, &expected.target, fs)?;
+        check_binary_identity(&release, smoke, cancel)?;
+        return Ok(release);
     }
-    Release::read(source, target, fs)
+
+    check_binary_identity(&candidate, smoke, cancel)?;
+    normalize_staged_modes(source, &candidate.files, fs)?;
+    crate::managed::durable(directory(source, false, fs)?.publish(
+        OsStr::new("release.json"),
+        &bytes,
+        0o600,
+        PublishMode::NoReplace,
+    )?)?;
+    Release::read(source, &expected.target, fs)
 }
+
+fn normalize_staged_modes(
+    source: &Path,
+    files: &BTreeMap<PathBuf, (Vec<u8>, u64)>,
+    fs: &dyn SafeFs,
+) -> Result<(), InstallError> {
+    for (relative, (expected_bytes, expected_mode)) in files {
+        let path = source.join(relative);
+        let Some(current) = snapshot(&path, fs)? else {
+            return Err(InstallError::Tampered(path));
+        };
+        let crate::managed::Value::File { bytes, mode } = current.value else {
+            return Err(InstallError::Tampered(path));
+        };
+        if bytes != *expected_bytes {
+            return Err(InstallError::Drift(path));
+        }
+        if mode == *expected_mode {
+            continue;
+        }
+        let parent = path
+            .parent()
+            .ok_or_else(|| InstallError::Path(path.clone()))?;
+        let name = path
+            .file_name()
+            .ok_or_else(|| InstallError::Path(path.clone()))?;
+        let permissions = u32::try_from(*expected_mode)
+            .map_err(|_| InstallError::Manifest("invalid release mode"))?;
+        let published = directory(parent, false, fs)?.publish(
+            name,
+            expected_bytes,
+            permissions,
+            PublishMode::Replace,
+        )?;
+        crate::managed::durable(published)?;
+    }
+    Ok(())
+}
+
+fn check_binary_identity(
+    release: &Release,
+    smoke: &dyn ReleaseSmoke,
+    cancel: &CancelToken,
+) -> Result<(), InstallError> {
+    let actual = smoke.check(release, cancel).map_err(InstallError::Smoke)?;
+    if actual.source_digest != release.manifest.source_digest
+        || actual.asset_digest != release.manifest.asset_digest
+        || actual.target != release.manifest.target
+        || actual.toolchain != release.manifest.toolchain
+    {
+        return Err(InstallError::Manifest(
+            "binary build identity differs from release manifest",
+        ));
+    }
+    Ok(())
+}
+
 pub(crate) fn inventory(root: &Path, fs: &dyn SafeFs) -> Result<Vec<PathBuf>, InstallError> {
+    fn allowed_directory(path: &Path) -> bool {
+        path == Path::new("bin")
+            || [
+                "skills",
+                "library",
+                "templates",
+                "config",
+                "instructions",
+                "scripts",
+                "runtime",
+            ]
+            .iter()
+            .any(|root| path.starts_with(root))
+    }
     fn walk(
         root: &Path,
         tail: &Path,
@@ -209,7 +379,7 @@ pub(crate) fn inventory(root: &Path, fs: &dyn SafeFs) -> Result<Vec<PathBuf>, In
             let path = tail.join(&name);
             let metadata = dir.metadata_at(&name, false)?;
             match metadata.kind {
-                FileKind::Directory if path.starts_with("assets") => {
+                FileKind::Directory if allowed_directory(&path) => {
                     walk(root, &path, depth + 1, fs, output, count)?
                 }
                 FileKind::Regular if path == Path::new("release.json") => {}
@@ -224,3 +394,7 @@ pub(crate) fn inventory(root: &Path, fs: &dyn SafeFs) -> Result<Vec<PathBuf>, In
     output.sort();
     Ok(output)
 }
+
+#[cfg(test)]
+#[path = "release_tests.rs"]
+mod tests;

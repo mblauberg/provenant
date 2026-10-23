@@ -1,4 +1,4 @@
-//! Fixture checkouts with recording owners, built from std only.
+//! Fixture releases with recording owners, built from std only.
 #![allow(dead_code)]
 
 use std::fs;
@@ -8,18 +8,14 @@ use std::process::{Command, Output};
 
 pub const BINARY: &str = env!("CARGO_BIN_EXE_provenant");
 
-/// Prints what an owner was given, then exits with `PROVENANT_TEST_EXIT`.
+/// Prints the selected executable and arguments, then exits with the requested status.
 const RECORDER: &str = r#"#!/bin/sh
 printf 'argv0=%s\n' "$0"
 for a in "$@"; do printf 'arg=%s\n' "$a"; done
 printf 'cwd=%s\n' "$(pwd -P)"
 printf 'pid=%s\n' "$$"
-printf 'root=%s\n' "${AGENT_FABRIC_PRODUCT_ROOT-<unset>}"
-printf 'home=%s\n' "${AGENTS_HOME-<unset>}"
-printf 'instance=%s\n' "${AGENT_FABRIC_INSTANCE_ROOT-<unset>}"
 printf 'gitdir=%s\n' "${GIT_DIR-<unset>}"
 printf 'gitname=%s\n' "${GIT_AUTHOR_NAME-<unset>}"
-printf 'stale=%s\n' "${PROVENANT_STALE_CHECKED-<unset>}"
 exit "${PROVENANT_TEST_EXIT:-0}"
 "#;
 
@@ -32,10 +28,8 @@ for arg in sys.argv[1:]:
     print("arg=" + arg)
 print("cwd=" + os.getcwd())
 print("pid=" + str(os.getpid()))
-for field, name in [("root", "AGENT_FABRIC_PRODUCT_ROOT"), ("home", "AGENTS_HOME"),
-                    ("instance", "AGENT_FABRIC_INSTANCE_ROOT"), ("gitdir", "GIT_DIR"),
-                    ("gitname", "GIT_AUTHOR_NAME"), ("stale", "PROVENANT_STALE_CHECKED")]:
-    print(field + "=" + os.environ.get(name, "<unset>"))
+print("gitdir=" + os.environ.get("GIT_DIR", "<unset>"))
+print("gitname=" + os.environ.get("GIT_AUTHOR_NAME", "<unset>"))
 sys.exit(int(os.environ.get("PROVENANT_TEST_EXIT", "0")))
 "#;
 
@@ -46,17 +40,9 @@ pub const OWNERS: &[&str] = &[
     "scripts/worktree",
     "scripts/clean.py",
     "scripts/provenant_lint.py",
-    "runtime/fabric/src/landing-cli.ts",
     "scripts/check-harness",
-    "scripts/gate",
     "scripts/fabric-hosts",
-    "scripts/provenant-telemetry",
-    "scripts/provenant-quota",
-    "scripts/provenant-profile",
-    "skills/orchestrate/scripts/capabilities.py",
-    "skills/orchestrate/scripts/dispatch_run.py",
-    "skills/orchestrate/scripts/batch_run.py",
-    "skills/orchestrate/scripts/run_controls.py",
+    "scripts/gate",
 ];
 
 pub struct Sandbox {
@@ -65,7 +51,12 @@ pub struct Sandbox {
 
 impl Sandbox {
     pub fn new(label: &str) -> Self {
-        let dir = fs::canonicalize(std::env::temp_dir())
+        let temp = if cfg!(target_os = "macos") {
+            PathBuf::from("/private/tmp")
+        } else {
+            std::env::temp_dir()
+        };
+        let dir = fs::canonicalize(temp)
             .unwrap()
             .join(format!("fd-it-{label}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
@@ -77,9 +68,11 @@ impl Sandbox {
         self.dir.join("home")
     }
 
-    /// A checkout whose owners all record their invocation.
-    pub fn checkout(&self, name: &str) -> PathBuf {
+    /// A release fixture with a root manifest and recording owners.
+    pub fn release(&self, name: &str) -> PathBuf {
         let root = self.dir.join(name);
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("release.json"), b"{}\n").unwrap();
         for owner in OWNERS {
             let recorder = if owner.ends_with(".py") {
                 PYTHON_RECORDER
@@ -101,9 +94,18 @@ impl Sandbox {
         root
     }
 
-    /// The binary copied to `<dir>/<relative>`, mode 0755.
-    pub fn install_binary(&self, relative: &str) -> PathBuf {
-        let target = self.dir.join(relative);
+    /// The installed binary lives under `<release>/bin/provenant`.
+    pub fn install_binary(&self, release: &Path) -> PathBuf {
+        let target = release.join("bin/provenant");
+        fs::create_dir_all(target.parent().unwrap()).unwrap();
+        fs::copy(BINARY, &target).unwrap();
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o755)).unwrap();
+        target
+    }
+
+    /// A build binary without adjacent release metadata.
+    pub fn uninstalled_binary(&self, name: &str) -> PathBuf {
+        let target = self.dir.join(name).join("bin/provenant");
         fs::create_dir_all(target.parent().unwrap()).unwrap();
         fs::copy(BINARY, &target).unwrap();
         fs::set_permissions(&target, fs::Permissions::from_mode(0o755)).unwrap();

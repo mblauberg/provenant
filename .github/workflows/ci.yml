@@ -13,6 +13,9 @@ on:
 # declares exactly what it needs.
 permissions: {}
 
+env:
+  PROVENANT_ROOT: ${{ github.workspace }}
+
 # Concurrency policy (issue #170, deferred from #150/#168): PR runs cancel
 # their predecessor on the same ref — a superseded push means the stale run's
 # result can never matter, so cancelling it just frees runners faster.
@@ -166,10 +169,16 @@ jobs:
               - 'uv.lock'
             rust:
               - *ci-contract
+              - 'scripts/**'
+              - 'runtime/**'
+              - 'skills/**'
+              - 'library/**'
+              - 'config/**'
+              - 'templates/**'
+              - 'AGENTS.md'
+              - 'HARNESS.md'
               - 'tools/front-door/**'
               - 'tests/support/front_door.py'
-              - 'scripts/check_target.py'
-              - 'scripts/worktree.py'
             lane:
               - *ci-contract
               - 'tools/**'
@@ -262,7 +271,7 @@ jobs:
         # rustup reads rust-toolchain.toml from the working directory, not the manifest path.
         working-directory: tools/front-door
         run: |
-          cargo build --release --locked
+          cargo build --release --locked -p provenant --bin provenant
           printf 'PROVENANT_FRONT_DOOR_BIN=%s\n' "$GITHUB_WORKSPACE/tools/front-door/target/release/provenant" >> "$GITHUB_ENV"
       - name: Run Python test shard
         env:

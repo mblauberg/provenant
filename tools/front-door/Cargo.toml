@@ -114,6 +114,7 @@ opt-level = "z"
 lto = true
 codegen-units = 1
 panic = "unwind"
+debug = 0
 strip = true
 
 # Stripping a proc-macro dylib (serde_derive, thiserror-impl) on macOS leaves a

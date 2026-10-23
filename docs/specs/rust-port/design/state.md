@@ -50,11 +50,12 @@ removal. Confinement and custody requirements do not depend on CLI usage.
 | --- | --- |
 | Default root | `~/.local/share/provenant/v1`, one root per host on macOS and Linux |
 | Override | Global `--state-dir ABS`, then `PROVENANT_STATE_DIR`, then default; empty or relative explicit values fail. No XDG/old-root fallback. |
-| Environment | State owns the only product inputs: `PROVENANT_STATE_DIR` and `PROVENANT_AGENT_LABEL` (separate inboxes for agents of one provider, replacing `AGENT_FABRIC_LABEL`). Provider/harness variables pass through under their external contracts; no other `PROVENANT_*` or `AGENT_FABRIC_*` inputs. |
+| Environment | State owns the persistent state inputs: `PROVENANT_STATE_DIR` and `PROVENANT_AGENT_LABEL` (separate inboxes for agents of one provider, replacing `AGENT_FABRIC_LABEL`). Provider/harness variables pass through under their external contracts; no other `PROVENANT_*` or `AGENT_FABRIC_*` inputs. |
+| Build root | An uninstalled binary requires explicit absolute `PROVENANT_ROOT`; installed binaries use their release location, never this override |
 | User config | `<state>/config.toml`; optional, user-owned, only configuration file |
 | Host identity | `<state>/state.json` |
 | Install receipt and lock | `<state>/install/receipt.json`, `<state>/install/lock` |
-| Immutable release | `<state>/releases/<SourceDigest>/{provenant,release.json,assets/}` |
+| Immutable release | `<state>/releases/<SourceDigest>/{bin/provenant,release.json,skills/,library/,config/,templates/,instructions/,scripts/,runtime/}` |
 | Stable command | `<bin-dir>/provenant`; default bin directory `~/.local/bin` |
 | Project binding | `<state>/projects/<ProjectId>/project.json`; host-local identity only |
 | Runs | `<state>/runs/<RunId>/`; run owns its top-level registry store and this subtree |
@@ -250,7 +251,7 @@ A failed preview stream prevents writes.
 
 | Command | Inputs and behaviour |
 | --- | --- |
-| `root` | No flags; reports state, assets, global `--project` selection and installation together, without Git discovery. Missing assets reports missing installation. No SQLite, state creation, threads or provider/Git probes. |
+| `root` | No flags; prints the absolute release root as one newline-terminated path, so `$(provenant root)/skills/...` works. An uninstalled build requires explicit `PROVENANT_ROOT`. No Git discovery, SQLite, state creation, threads or provider probes. |
 | `config show`, `check config` | Effective config/origins or validation findings; only the global state selector. No mutation flags. |
 | `install [--dry-run]` | `--source ABS` identifies a staged release; `--harness NAME` repeatable and explicit; optional `--bin-dir ABS`, `--hooks on\|off` (default off), `--adopt-existing`, `--legacy-checkout ABS`. Validate all destinations and print every replace/remove/create before writes. Dry-run creates no root, lock or receipt. |
 | `check install` | Optional `--source ABS` staged release, as for `install`, for digest comparison; compare installed binary, assets, receipt and owned harness selectors without repair. Joins CLI's existing `check` subtree. |
@@ -262,25 +263,45 @@ CI/contributors build `cargo build --release --locked` in `tools/front-door`.
 A workspace `build.rs` uses records' pure source-digest module. The digest
 covers workspace/member manifests, lockfile, toolchain/config files when
 present, every member's source/build scripts and explicit bundled assets,
-including product skills/templates/instructions outside the Rust workspace.
+including product skills/templates/instructions and surviving script/runtime
+owners outside the Rust workspace.
 Hash sorted workspace-relative POSIX names, framed by big-endian u64 name
 length, name bytes, u64 content length and exact contents; prefix
 `provenant-source-v1\0`. Reject duplicate, missing or symlink/escaping inputs.
 Cargo rerun directives track additions/deletions; no digest environment override.
 
-Build packaging emits typed `release.json` beside `provenant` and `assets/`,
+Build packaging emits typed `release.json` beside `bin/provenant` and the
+product asset directories,
 with source digest, target triple, toolchain and bounded file inventory/digests.
 This is a build artefact, not a second executable or installer command.
 `--version --json` reports the embedded digest and record/config versions.
+Release builds trim source paths so checkout and registry paths do not affect
+binary bytes. Packaging and source-aware install checks compare the binary's
+reported source digest, target, toolchain and asset inventory with the manifest.
+Executable assets retain mode 0700; other assets are 0600.
+
+An installed binary resolves its own `bin/provenant` location to the release
+root holding `release.json`; `provenant root` prints that root. The release
+contains `skills`, `library`, `templates`, `config`, `instructions`, `scripts`
+and `runtime` directly so `$(provenant root)/skills/...` remains usable. An uninstalled
+build requires an explicit absolute `PROVENANT_ROOT`; it refuses without it.
+These reads never create state.
 Install verifies manifest, platform, file bytes and modes, then asks the
 binary composition edge to run bounded version/help smoke checks through
 supervisor (30 s, capped output, no provider access). A digest proves identity,
 not publisher trust. Runtime startup never compiles itself.
 
 Install copies verified files into the immutable release directory, then
-atomically publishes a regular executable at the stable bin path and per-entry
+atomically publishes a link to `bin/provenant` at the stable bin path and per-entry
 links to release skills/instructions. Re-application accepts exact desired
-bytes/links as no-ops, including writes completed before a crash. Receipt
+bytes/links as no-ops, including writes completed before a crash. Until
+`release.json` is published, mismatching unfinished files may be replaced.
+That manifest is published after all other release entries; afterwards the
+release is immutable. Equal source digests with different manifest bytes fail
+with typed `ReleaseConflict`, naming both manifest digests and recovery.
+Upgrades remove unchanged owned entries dropped by each selected harness;
+changed or unmanaged entries remain. The sole installation lock is
+`<state>/install/lock`; no locks are left in harness or bin directories. Receipt
 records release identity, resolved targets, selectors, expected owned
 values and the optional absolute `legacy_checkout` substitution root plus
 compiled manifest digest, so `check install` can repeat exact legacy checks. Publish it last. No cross-file or two-host atomicity is claimed.
@@ -553,6 +574,14 @@ The old inert Rust config/knob implementation was already deleted by slice 1
 (PR #1367); it stays deleted. The three config-owned policy preset assets and
 `Preset` policy types introduced during slice 2 are withdrawn before landing,
 so they are not deletions relative to `origin/main`.
+
+Slice 3 retires the Python installation entrypoints `scripts/install-harness`,
+`scripts/install-skills` and `scripts/check-provenant-install.py` as explicit
+exit-3 stubs. Slice 4 owns deleting those stubs when its command wiring replaces
+them. The last file retains the read-only `provider_registration_status` query
+until Fabric's consumer is replaced. Its query tests and the live OTel
+installer tests remain; OTel tests move to `tests/test_install_otel_collector.py`.
+Tests are removed only when their subject retires.
 
 Slice 5 removes `skills/_shared/harness_profile.py`,
 `scripts/harness_profile.py`, `config/harness-knobs.json`,

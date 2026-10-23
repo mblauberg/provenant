@@ -50,6 +50,7 @@ pub struct ReleaseFile {
 pub struct ReleaseManifest {
     pub schema_version: u64,
     pub source_digest: SourceDigest,
+    pub asset_digest: SourceDigest,
     pub target: String,
     pub toolchain: String,
     pub files: Vec<ReleaseFile>,
@@ -70,20 +71,33 @@ pub struct OwnedEntry {
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct ResolvedHarnessTarget {
+    pub harness: Harness,
+    pub skills_dir: AbsolutePath,
+    pub instruction: Option<AbsolutePath>,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct InstallReceipt {
     pub schema_version: u64,
     pub source_digest: SourceDigest,
     pub manifest_digest: FileDigest,
+    pub asset_digest: SourceDigest,
+    pub target: String,
+    pub toolchain: String,
+    pub bin_dir: AbsolutePath,
     pub harnesses: Vec<Harness>,
+    pub harness_targets: Vec<ResolvedHarnessTarget>,
     pub entries: Vec<OwnedEntry>,
 }
 
 /// Build identity emitted at the binary edge without ambient source discovery.
-#[derive(Debug, Serialize)]
-pub struct VersionInfo<'a> {
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct VersionInfo {
     pub source_digest: SourceDigest,
-    pub target: &'a str,
-    pub toolchain: &'a str,
+    pub asset_digest: SourceDigest,
+    pub target: String,
+    pub toolchain: String,
     pub record_schema_version: u64,
     pub config_schema_version: u64,
 }

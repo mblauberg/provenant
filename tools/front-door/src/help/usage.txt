@@ -1,1 +1,1 @@
-usage: provenant <help|root|route|routes|digest|classify|extract|capabilities|worktree|clean|reap|lint|check|gate|telemetry|stats|retro|quota|profile|fabric|lease|hosts|peer|lanes|events|graph|dispatch|batch|run|pr> [arguments...]
+usage: provenant <help|root|mcp|route|routes|digest|classify|extract|capabilities|worktree|clean|reap|lint|check|gate|telemetry|stats|retro|quota|profile|fabric|lease|hosts|peer|lanes|events|graph|dispatch|batch|run|pr> [arguments...]

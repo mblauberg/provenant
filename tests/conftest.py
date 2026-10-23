@@ -68,6 +68,7 @@ def pytest_configure(config) -> None:
     _keep_tmpdir_outside_git()
     # Before collection: modules cache the product root at import. Per-test
     # monkeypatch overrides still apply on top of this.
+    os.environ["PROVENANT_ROOT"] = str(ROOT)
     os.environ["AGENT_FABRIC_PRODUCT_ROOT"] = str(ROOT)
     for inherited in ("PROVENANT_SCRIPTS_ROOT", "PROVENANT_SKILLS_ROOT", "PROVENANT_TESTS_ROOT"):
         os.environ.pop(inherited, None)
@@ -120,6 +121,7 @@ def pytest_unconfigure(config) -> None:
 @pytest.fixture(autouse=True)
 def _checkout_under_test_is_product_root(monkeypatch):
     """Resolve the product root to this checkout, never an inherited live one."""
+    monkeypatch.setenv("PROVENANT_ROOT", str(ROOT))
     monkeypatch.setenv("AGENT_FABRIC_PRODUCT_ROOT", str(ROOT))
 
 

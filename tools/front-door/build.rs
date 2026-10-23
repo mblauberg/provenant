@@ -1,9 +1,10 @@
 use provenant_records::{SourceDigest, SourceInput, source_digest};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::env;
 use std::error::Error;
 use std::fs;
 use std::io::{self, Read, Write};
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Component, Path, PathBuf};
 use toml_edit::{DocumentMut, Item};
 
@@ -13,26 +14,33 @@ const MAX_SOURCE_FILE_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_SOURCE_FILES: usize = 100_000;
 const MAX_SOURCE_TOTAL_BYTES: u64 = 256 * 1024 * 1024;
 
+struct InputFile {
+    name: String,
+    bytes: Vec<u8>,
+    executable: bool,
+}
+
 #[derive(Default)]
 struct Inputs {
-    files: BTreeMap<String, Vec<u8>>,
+    files: Vec<InputFile>,
     total_bytes: u64,
 }
 
 impl Inputs {
     fn get(&self, name: &str) -> Option<&Vec<u8>> {
-        self.files.get(name)
+        self.files
+            .iter()
+            .find(|file| file.name == name)
+            .map(|file| &file.bytes)
     }
 
-    fn iter(&self) -> impl Iterator<Item = (&String, &Vec<u8>)> {
-        self.files.iter()
+    fn iter(&self) -> impl Iterator<Item = (&String, &Vec<u8>, bool)> {
+        self.files
+            .iter()
+            .map(|file| (&file.name, &file.bytes, file.executable))
     }
 
     fn read_file(&mut self, path: &Path, name: String) -> BuildResult<()> {
-        validate_name(&name)?;
-        if self.files.contains_key(&name) {
-            return Err(invalid("source inventory contains duplicate names").into());
-        }
         if self.files.len() >= MAX_SOURCE_FILES {
             return Err(invalid("source inventory exceeds the file-count limit").into());
         }
@@ -44,6 +52,11 @@ impl Inputs {
         let read_limit = limit
             .checked_add(1)
             .ok_or_else(|| invalid("source inventory byte limit overflowed"))?;
+        let metadata = fs::symlink_metadata(path)?;
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            return Err(invalid("source inventory input is not a regular file").into());
+        }
+        let executable = metadata.permissions().mode() & 0o111 != 0;
         let file = fs::File::open(path)?;
         let mut bytes = Vec::new();
         file.take(read_limit).read_to_end(&mut bytes)?;
@@ -56,9 +69,11 @@ impl Inputs {
             .total_bytes
             .checked_add(byte_count)
             .ok_or_else(|| invalid("source inventory total-byte count overflowed"))?;
-        if self.files.insert(name, bytes).is_some() {
-            return Err(invalid("source inventory contains duplicate names").into());
-        }
+        self.files.push(InputFile {
+            name,
+            bytes,
+            executable,
+        });
         Ok(())
     }
 }
@@ -131,10 +146,12 @@ fn main() -> BuildResult<()> {
     // External product inputs are assigned their release asset names so the
     // pure digest API only sees normal relative POSIX paths (never ../ paths).
     for (source, release_name) in [
-        ("skills", "assets/skills"),
-        ("library", "assets/library"),
-        ("templates", "assets/templates"),
-        ("config", "assets/config"),
+        ("skills", "skills"),
+        ("library", "library"),
+        ("templates", "templates"),
+        ("config", "config"),
+        ("scripts", "scripts"),
+        ("runtime", "runtime"),
     ] {
         let directory = repository.join(source);
         watch(&mut watched, directory.clone())?;
@@ -142,8 +159,8 @@ fn main() -> BuildResult<()> {
         collect_external_tree(&directory, release_name, &mut inputs, required)?;
     }
     for (source, release_name) in [
-        ("AGENTS.md", "assets/instructions/AGENTS.md"),
-        ("HARNESS.md", "assets/instructions/HARNESS.md"),
+        ("AGENTS.md", "instructions/AGENTS.md"),
+        ("HARNESS.md", "instructions/HARNESS.md"),
     ] {
         let path = repository.join(source);
         watch(&mut watched, path.clone())?;
@@ -157,10 +174,21 @@ fn main() -> BuildResult<()> {
     validate_metadata_value(&target)?;
     validate_metadata_value(&toolchain)?;
 
-    let borrowed_inputs: Vec<SourceInput<'_>> = inputs
+    let encoded_assets = release_asset_inputs(&inputs)?;
+    let borrowed_assets: Vec<SourceInput<'_>> = encoded_assets
         .iter()
         .map(|(name, bytes)| SourceInput { name, bytes })
         .collect();
+    let asset_stamp = source_digest(&borrowed_assets)?;
+    let asset_stamp_text = asset_stamp.to_string();
+    let mut borrowed_inputs: Vec<SourceInput<'_>> = inputs
+        .iter()
+        .map(|(name, bytes, _)| SourceInput { name, bytes })
+        .collect();
+    borrowed_inputs.push(SourceInput {
+        name: "provenant-release/asset-digest",
+        bytes: asset_stamp_text.as_bytes(),
+    });
     let source_stamp: SourceDigest = source_digest(&borrowed_inputs)?;
 
     for path in watched {
@@ -170,9 +198,40 @@ fn main() -> BuildResult<()> {
         "rustc-env",
         &format!("PROVENANT_SOURCE_DIGEST={source_stamp}"),
     )?;
+    emit_instruction(
+        "rustc-env",
+        &format!("PROVENANT_ASSET_DIGEST={asset_stamp}"),
+    )?;
     emit_instruction("rustc-env", &format!("PROVENANT_TARGET_TRIPLE={target}"))?;
     emit_instruction("rustc-env", &format!("PROVENANT_TOOLCHAIN={toolchain}"))?;
     Ok(())
+}
+
+fn release_asset_inputs(inputs: &Inputs) -> BuildResult<Vec<(String, Vec<u8>)>> {
+    let mut result = Vec::new();
+    for (name, bytes, executable) in inputs.iter() {
+        if [
+            "skills/",
+            "library/",
+            "templates/",
+            "config/",
+            "instructions/",
+            "scripts/",
+            "runtime/",
+        ]
+        .iter()
+        .any(|prefix| name.starts_with(prefix))
+        {
+            let mut fingerprint = Vec::with_capacity(bytes.len() + 1);
+            fingerprint.push(u8::from(executable));
+            fingerprint.extend_from_slice(bytes);
+            result.push((name.clone(), fingerprint));
+        }
+    }
+    if result.is_empty() {
+        return Err(invalid("release asset inventory is empty").into());
+    }
+    Ok(result)
 }
 
 fn discover_members(
@@ -188,7 +247,6 @@ fn discover_members(
         .and_then(Item::as_array)
         .ok_or_else(|| invalid("workspace manifest has no string members array"))?;
     let mut result = Vec::new();
-    let mut logical_names = BTreeSet::new();
 
     for member in members.iter() {
         let pattern = member
@@ -196,9 +254,6 @@ fn discover_members(
             .ok_or_else(|| invalid("workspace member pattern is not a string"))?;
         match pattern {
             "." => {
-                if !logical_names.insert(".".to_owned()) {
-                    return Err(invalid("workspace member is listed more than once").into());
-                }
                 result.push(Member {
                     directory: workspace.to_path_buf(),
                     logical_directory: String::new(),
@@ -226,9 +281,6 @@ fn discover_members(
                         .into_string()
                         .map_err(|_| invalid("workspace member name is not UTF-8"))?;
                     let logical_directory = format!("crates/{name}");
-                    if !logical_names.insert(logical_directory.clone()) {
-                        return Err(invalid("workspace member is listed more than once").into());
-                    }
                     let directory = child.path();
                     result.push(Member {
                         directory,
@@ -258,7 +310,7 @@ fn add_workspace_configuration(
     watched: &mut BTreeSet<PathBuf>,
     inputs: &mut Inputs,
 ) -> BuildResult<()> {
-    for config_name in ["config.toml", "config"] {
+    for config_name in ["config.toml", "config", "rustc-wrapper.sh"] {
         let workspace_path = workspace.join(".cargo").join(config_name);
         watch(watched, workspace_path.clone())?;
         add_optional_file(
@@ -433,6 +485,8 @@ fn is_generated_directory(name: &std::ffi::OsStr) -> bool {
                 | ".venv"
                 | "venv"
                 | "node_modules"
+                | "dist"
+                | "build"
                 | "target"
                 | ".agent-run"
         )
@@ -477,19 +531,6 @@ fn add_file(path: &Path, logical_name: String, inputs: &mut Inputs) -> BuildResu
         return Err(invalid("source inventory input is not a regular file").into());
     }
     inputs.read_file(path, logical_name)
-}
-
-fn validate_name(name: &str) -> BuildResult<()> {
-    if name.is_empty() || name.starts_with('/') || name.contains('\\') || name.contains('\0') {
-        return Err(invalid("source inventory name is not a normal POSIX path").into());
-    }
-    if name
-        .split('/')
-        .any(|component| component.is_empty() || component == "." || component == "..")
-    {
-        return Err(invalid("source inventory name is not a normal POSIX path").into());
-    }
-    Ok(())
 }
 
 fn optional_metadata(path: &Path) -> BuildResult<Option<fs::Metadata>> {

@@ -243,7 +243,7 @@ class Fixture:
             "GH_CONFIG_DIR": str(self.root / "gh"), "GH_TOKEN": "",
             "GIT_AUTHOR_DATE": "2020-01-01T00:00:00Z", "GIT_COMMITTER_DATE": "2020-01-01T00:00:00Z",
             "TMPDIR": str(self.root), "TMP": str(self.root), "TEMP": str(self.root),
-            "PROVENANT_STALE_CHECKED": "1",
+            "PROVENANT_ROOT": str(REPO),
         })
         # Fabric's real query paths need its installed Node runtime, pinned once.
         node = shutil.which("node")

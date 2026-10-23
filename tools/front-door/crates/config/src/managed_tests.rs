@@ -26,11 +26,12 @@ impl Fixture {
         let home = base.join("home");
         let source = base.join("staged");
         fs::create_dir(&home).unwrap();
-        fs::create_dir_all(source.join("assets/skills/example")).unwrap();
+        fs::create_dir_all(source.join("bin")).unwrap();
+        fs::create_dir_all(source.join("skills/example")).unwrap();
         for (path, bytes, mode) in [
-            ("provenant", b"fixture executable".as_slice(), 0o755),
+            ("bin/provenant", b"fixture executable".as_slice(), 0o755),
             (
-                "assets/skills/example/SKILL.md",
+                "skills/example/SKILL.md",
                 b"---\nname: example\n---\n".as_slice(),
                 0o600,
             ),
@@ -58,14 +59,7 @@ impl Fixture {
             bytes: b"fixture",
         }])
         .unwrap();
-        crate::package_release(
-            &self.source,
-            digest,
-            "fixture-target",
-            "fixture-toolchain",
-            &LocalFs,
-        )
-        .unwrap()
+        package_fixture_release(&self.source, digest)
     }
     fn plan(&self) -> InstallPlan {
         let r = self.release();
@@ -83,6 +77,33 @@ impl Fixture {
             .join("install/receipt.json")
     }
 }
+fn package_fixture_release(
+    source: &Path,
+    source_digest: provenant_records::SourceDigest,
+) -> Release {
+    let mut files = BTreeMap::new();
+    for relative in crate::release::inventory(source, &LocalFs).unwrap() {
+        let path = source.join(&relative);
+        let bytes = fs::read(&path).unwrap();
+        let actual_mode = fs::metadata(&path).unwrap().permissions().mode();
+        let mode = if relative == Path::new("bin/provenant") || actual_mode & 0o111 != 0 {
+            0o700
+        } else {
+            0o600
+        };
+        files.insert(relative, (bytes, mode));
+    }
+    let expected = VersionInfo {
+        source_digest,
+        asset_digest: crate::release::asset_inventory_digest(&files).unwrap(),
+        target: "fixture-target".into(),
+        toolchain: "fixture-toolchain".into(),
+        record_schema_version: 1,
+        config_schema_version: 1,
+    };
+    crate::package_release(source, &expected, &LocalFs, &Smoke, &CancelToken::new()).unwrap()
+}
+
 #[derive(Default)]
 struct Reporter {
     seen: usize,
@@ -100,8 +121,61 @@ impl InstallReporter for Reporter {
 }
 struct Smoke;
 impl ReleaseSmoke for Smoke {
-    fn check(&self, _: &Release, _: &CancelToken) -> io::Result<()> {
-        Ok(())
+    fn check(&self, release: &Release, _: &CancelToken) -> io::Result<VersionInfo> {
+        Ok(VersionInfo {
+            source_digest: release.manifest.source_digest,
+            asset_digest: release.manifest.asset_digest,
+            target: release.manifest.target.clone(),
+            toolchain: release.manifest.toolchain.clone(),
+            record_schema_version: 1,
+            config_schema_version: 1,
+        })
+    }
+}
+fn check_install_for(
+    targets: &Targets,
+    source: Option<&Release>,
+    target: &str,
+    fs: &dyn SafeFs,
+) -> Result<Vec<InstallFinding>, InstallError> {
+    let cancel = CancelToken::new();
+    check_install(targets, source, target, fs, &Smoke, &cancel)
+}
+#[derive(Clone, Copy)]
+enum IdentityField {
+    SourceDigest,
+    AssetDigest,
+    Target,
+    Toolchain,
+}
+struct MismatchedSmoke {
+    digest: provenant_records::SourceDigest,
+    field: IdentityField,
+}
+impl ReleaseSmoke for MismatchedSmoke {
+    fn check(&self, release: &Release, cancel: &CancelToken) -> io::Result<VersionInfo> {
+        let mut version = Smoke.check(release, cancel)?;
+        if release.manifest.source_digest == self.digest {
+            match self.field {
+                IdentityField::SourceDigest => {
+                    version.source_digest = source_digest(&[SourceInput {
+                        name: "src/other.rs",
+                        bytes: b"other",
+                    }])
+                    .unwrap();
+                }
+                IdentityField::AssetDigest => {
+                    version.asset_digest = source_digest(&[SourceInput {
+                        name: "assets/other",
+                        bytes: b"other",
+                    }])
+                    .unwrap();
+                }
+                IdentityField::Target => version.target = "wrong-target".into(),
+                IdentityField::Toolchain => version.toolchain = "wrong-toolchain".into(),
+            }
+        }
+        Ok(version)
     }
 }
 fn context<'a>(clock: &'a SystemClock, cancel: &'a CancelToken) -> InstallContext<'a> {
@@ -176,7 +250,7 @@ fn reapplication_and_post_file_crash_do_not_rewrite_exact_desired_entries() {
     )
     .unwrap();
     assert!(
-        check_install(&f.targets, Some(&f.release()), "fixture-target", &LocalFs)
+        check_install_for(&f.targets, Some(&f.release()), "fixture-target", &LocalFs)
             .unwrap()
             .is_empty()
     );
@@ -235,25 +309,25 @@ fn crash_after_any_publication_reapplies_without_a_receipt() {
 fn bytes_and_modes_are_verified_and_existing_release_is_immutable() {
     let f = Fixture::new();
     f.release();
-    fs::write(f.source.join("provenant"), b"tampered").unwrap();
+    fs::write(f.source.join("bin/provenant"), b"tampered").unwrap();
     assert_eq!(
         Release::read(&f.source, "fixture-target", &LocalFs)
             .unwrap_err()
             .to_string(),
         format!(
             "release file bytes or mode differ: {}",
-            f.source.join("provenant").display()
+            f.source.join("bin/provenant").display()
         )
     );
     let f = Fixture::new();
     f.release();
     fs::set_permissions(
-        f.source.join("provenant"),
-        fs::Permissions::from_mode(0o777),
+        f.source.join("bin/provenant"),
+        fs::Permissions::from_mode(0o600),
     )
     .unwrap();
     assert!(
-        matches!(Release::read(&f.source, "fixture-target", &LocalFs), Err(InstallError::Tampered(p)) if p == f.source.join("provenant"))
+        matches!(Release::read(&f.source, "fixture-target", &LocalFs), Err(InstallError::Tampered(p)) if p == f.source.join("bin/provenant"))
     );
     let f = Fixture::new();
     let plan = f.plan();
@@ -274,7 +348,7 @@ fn bytes_and_modes_are_verified_and_existing_release_is_immutable() {
         .as_path()
         .join("releases")
         .join(plan.release.manifest.source_digest.to_string())
-        .join("provenant");
+        .join("bin/provenant");
     fs::write(&path, b"changed").unwrap();
     let r = f.release();
     let s = Snapshots::capture(&r, &f.targets, &LocalFs).unwrap();
@@ -285,7 +359,7 @@ fn bytes_and_modes_are_verified_and_existing_release_is_immutable() {
         format!("release file bytes or mode differ: {}", path.display())
     );
     assert_eq!(
-        check_install(&f.targets, None, "fixture-target", &LocalFs)
+        check_install_for(&f.targets, None, "fixture-target", &LocalFs)
             .unwrap()
             .first()
             .unwrap()
@@ -310,42 +384,29 @@ fn uninstall_keeps_edited_links_and_unmanaged_siblings_and_binary() {
     fs::write(&sibling, b"personal").unwrap();
     fs::remove_file(f.link()).unwrap();
     symlink("/foreign/skill", f.link()).unwrap();
-    assert!(
-        uninstall(
-            &f.targets,
-            &context(&clock, &cancel),
-            &mut Reporter::default()
-        )
-        .unwrap()
-        .actions
-        .is_empty()
-    );
-    assert_eq!(
-        fs::read_link(f.link()).unwrap(),
-        PathBuf::from("/foreign/skill")
-    );
-    assert_eq!(fs::read(&sibling).unwrap(), b"personal");
-    assert!(f.targets.bin_dir.join("provenant").is_file());
-    fs::remove_file(f.link()).unwrap();
-    let r = f.release();
-    let path = f
-        .targets
-        .roots
-        .state
-        .as_path()
-        .join("releases")
-        .join(r.manifest.source_digest.to_string())
-        .join("assets/skills/example");
-    symlink(path, f.link()).unwrap();
     let outcome = uninstall(
         &f.targets,
         &context(&clock, &cancel),
         &mut Reporter::default(),
     )
     .unwrap();
-    assert_eq!(outcome.actions.len(), 2);
-    assert!(!f.link().exists());
-    assert!(f.receipt().exists());
+    assert!(
+        outcome
+            .actions
+            .iter()
+            .all(|action| { action.disposition != Disposition::Remove })
+    );
+    assert!(
+        outcome
+            .actions
+            .iter()
+            .any(|action| action.selector == "receipt")
+    );
+    assert_eq!(
+        fs::read_link(f.link()).unwrap(),
+        PathBuf::from("/foreign/skill")
+    );
+    assert_eq!(fs::read(&sibling).unwrap(), b"personal");
     assert!(f.targets.bin_dir.join("provenant").is_file());
 }
 #[test]
@@ -394,8 +455,8 @@ fn explicit_harnesses_platform_links_and_schema_refuse_before_mutation() {
     assert!(!f.targets.roots.state.as_path().exists());
     let f = Fixture::new();
     f.release();
-    fs::remove_file(f.source.join("provenant")).unwrap();
-    symlink("/never/open", f.source.join("provenant")).unwrap();
+    fs::remove_file(f.source.join("bin/provenant")).unwrap();
+    symlink("/never/open", f.source.join("bin/provenant")).unwrap();
     assert!(matches!(
         Release::read(&f.source, "fixture-target", &LocalFs),
         Err(InstallError::Tampered(_))
@@ -473,8 +534,14 @@ impl FaultDir {
             state: self.state.clone(),
         })
     }
-    fn link_changed(&self, result: TestFsResult<()>) -> TestFsResult<()> {
-        if result.is_ok() && self.state.mode == FaultMode::SkillLinkSync {
+    fn link_changed(&self, name: &OsStr, result: TestFsResult<()>) -> TestFsResult<()> {
+        if result.is_ok()
+            && self.state.mode == FaultMode::SkillLinkSync
+            && self
+                .inner
+                .read_link(name)
+                .is_ok_and(|target| target.components().any(|part| part.as_os_str() == "skills"))
+        {
             self.state.link_published.store(true, Ordering::Release);
         }
         result
@@ -525,10 +592,13 @@ impl SafeDir for FaultDir {
         self.inner.rmdir(name)
     }
     fn replace(&self, source: &OsStr, destination: &OsStr) -> TestFsResult<()> {
-        self.link_changed(self.inner.replace(source, destination))
+        self.link_changed(destination, self.inner.replace(source, destination))
     }
     fn rename_noreplace(&self, source: &OsStr, destination: &OsStr) -> TestFsResult<()> {
-        self.link_changed(self.inner.rename_noreplace(source, destination))
+        self.link_changed(
+            destination,
+            self.inner.rename_noreplace(source, destination),
+        )
     }
     fn symlink(&self, target: &Path, name: &OsStr) -> TestFsResult<()> {
         self.inner.symlink(target, name)
@@ -645,7 +715,7 @@ fn receipt_publish_failure_reports_partial_actions_and_reapplies() {
     .unwrap();
     assert!(f.plan().actions().is_empty());
     assert!(
-        check_install(&f.targets, Some(&f.release()), "fixture-target", &LocalFs)
+        check_install_for(&f.targets, Some(&f.release()), "fixture-target", &LocalFs)
             .unwrap()
             .is_empty()
     );
@@ -773,6 +843,80 @@ fn adopt_existing_binary_does_not_adopt_a_symlink() {
 }
 
 #[test]
+fn check_install_smokes_installed_and_requested_release_identity() {
+    let f = Fixture::new();
+    let installed = f.release();
+    let installed_digest = installed.manifest.source_digest;
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    install(
+        &f.plan(),
+        &context(&clock, &cancel),
+        &mut Reporter::default(),
+        &Smoke,
+        false,
+    )
+    .unwrap();
+
+    for field in [
+        IdentityField::SourceDigest,
+        IdentityField::AssetDigest,
+        IdentityField::Target,
+        IdentityField::Toolchain,
+    ] {
+        let smoke = MismatchedSmoke {
+            digest: installed_digest,
+            field,
+        };
+        let error = check_install(
+            &f.targets,
+            None,
+            "fixture-target",
+            &LocalFs,
+            &smoke,
+            &cancel,
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "invalid release manifest: binary identity differs from release manifest"
+        );
+    }
+
+    let other = Fixture::new();
+    let other_digest = source_digest(&[SourceInput {
+        name: "src/lib.rs",
+        bytes: b"different fixture",
+    }])
+    .unwrap();
+    let other_source = package_fixture_release(&other.source, other_digest);
+    for field in [
+        IdentityField::SourceDigest,
+        IdentityField::AssetDigest,
+        IdentityField::Target,
+        IdentityField::Toolchain,
+    ] {
+        let smoke = MismatchedSmoke {
+            digest: other_source.manifest.source_digest,
+            field,
+        };
+        let error = check_install(
+            &f.targets,
+            Some(&other_source),
+            "fixture-target",
+            &LocalFs,
+            &smoke,
+            &cancel,
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "invalid release manifest: binary identity differs from release manifest"
+        );
+    }
+}
+
+#[test]
 fn check_install_compares_the_requested_source_digest() {
     let f = Fixture::new();
     let clock = SystemClock::new();
@@ -791,16 +935,9 @@ fn check_install_compares_the_requested_source_digest() {
     }])
     .unwrap();
     let other = Fixture::new();
-    let other_source = crate::package_release(
-        &other.source,
-        other_digest,
-        "fixture-target",
-        "fixture-toolchain",
-        &LocalFs,
-    )
-    .unwrap();
+    let other_source = package_fixture_release(&other.source, other_digest);
     let findings =
-        check_install(&f.targets, Some(&other_source), "fixture-target", &LocalFs).unwrap();
+        check_install_for(&f.targets, Some(&other_source), "fixture-target", &LocalFs).unwrap();
     assert_eq!(
         findings
             .iter()
@@ -851,7 +988,7 @@ fn uninstall_reconciles_entries_removed_before_receipt_publication() {
             .all(|e| e.harness != Some(Harness::Codex))
     );
     assert!(
-        check_install(&f.targets, None, "fixture-target", &LocalFs)
+        check_install_for(&f.targets, None, "fixture-target", &LocalFs)
             .unwrap()
             .is_empty()
     );
@@ -864,7 +1001,7 @@ fn uninstall_reconciles_entries_removed_before_receipt_publication() {
         .as_path()
         .join("releases")
         .join(release.manifest.source_digest.to_string())
-        .join("assets/skills/example");
+        .join("skills/example");
     symlink(&path, f.link()).unwrap();
     assert!(
         uninstall(
@@ -882,7 +1019,7 @@ fn uninstall_reconciles_entries_removed_before_receipt_publication() {
 #[test]
 fn regular_user_instructions_are_preserved_with_manual_include_advice() {
     let f = Fixture::new();
-    let assets = f.source.join("assets/instructions");
+    let assets = f.source.join("instructions");
     fs::create_dir_all(&assets).unwrap();
     for name in ["AGENTS.md", "HARNESS.md"] {
         let p = assets.join(name);
@@ -940,7 +1077,7 @@ fn completed_immutable_release_missing_a_file_is_not_repaired() {
         .as_path()
         .join("releases")
         .join(plan.release.manifest.source_digest.to_string())
-        .join("provenant");
+        .join("bin/provenant");
     fs::remove_file(&missing).unwrap();
     assert_eq!(
         Snapshots::capture(&f.release(), &f.targets, &LocalFs)
@@ -968,27 +1105,432 @@ fn receipt_cannot_omit_binary_ownership_or_bless_a_foreign_binary_digest() {
     receipt.entries.clear();
     fs::write(f.receipt(), provenant_records::encode(&receipt).unwrap()).unwrap();
     assert_eq!(
-        check_install(&f.targets, None, "fixture-target", &LocalFs)
+        check_install_for(&f.targets, None, "fixture-target", &LocalFs)
             .unwrap_err()
             .to_string(),
         "invalid release manifest: receipt requires one binary entry"
     );
     let mut receipt = original;
-    let binary = f.targets.bin_dir.join("provenant");
-    fs::write(&binary, b"foreign").unwrap();
     for entry in &mut receipt.entries {
         if entry.selector == "binary" {
-            entry.expected = OwnedValue::File {
-                digest: CanonicalV1::file_digest(b"foreign"),
-                mode: 0o755,
+            entry.expected = OwnedValue::Link {
+                target: AbsolutePath::new(Path::new("/foreign/provenant")).unwrap(),
             };
         }
     }
     fs::write(f.receipt(), provenant_records::encode(&receipt).unwrap()).unwrap();
     assert_eq!(
-        check_install(&f.targets, None, "fixture-target", &LocalFs)
+        check_install_for(&f.targets, None, "fixture-target", &LocalFs)
             .unwrap_err()
             .to_string(),
-        "invalid release manifest: receipt binary differs from release"
+        "invalid release manifest: receipt entry outside resolved targets"
     );
+}
+
+impl Fixture {
+    fn release_variant(&self, name: &str, skills: &[&str]) -> Release {
+        let source = self._tmp.path().join(format!("staged-{name}"));
+        for skill in skills {
+            fs::create_dir_all(source.join("skills").join(skill)).unwrap();
+        }
+        fs::create_dir_all(source.join("bin")).unwrap();
+        fs::write(
+            source.join("bin/provenant"),
+            format!("fixture executable {name}"),
+        )
+        .unwrap();
+        fs::set_permissions(
+            source.join("bin/provenant"),
+            fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
+        for skill in skills {
+            let path = source.join("skills").join(skill).join("SKILL.md");
+            fs::write(&path, format!("---\nname: {skill}\n---\n")).unwrap();
+            fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        let digest = source_digest(&[SourceInput {
+            name: "src/lib.rs",
+            bytes: name.as_bytes(),
+        }])
+        .unwrap();
+        package_fixture_release(&source, digest)
+    }
+
+    fn plan_for(&self, release: Release) -> InstallPlan {
+        let snapshots = Snapshots::capture(&release, &self.targets, &LocalFs).unwrap();
+        plan_install(release, self.targets.clone(), snapshots).unwrap()
+    }
+
+    fn skill_link(&self, name: &str) -> PathBuf {
+        self.home.join(".codex/skills").join(name)
+    }
+}
+
+#[test]
+fn upgrade_removes_only_unchanged_dropped_links_and_recovers_after_first_replacement() {
+    let f = Fixture::new();
+    let release_a = f.release_variant("a", &["common", "obsolete", "edited"]);
+    let release_b = f.release_variant("b", &["common", "added"]);
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let plan_a = f.plan_for(release_a.clone());
+    install(
+        &plan_a,
+        &context(&clock, &cancel),
+        &mut Reporter::default(),
+        &Smoke,
+        false,
+    )
+    .unwrap();
+
+    fs::remove_file(f.skill_link("edited")).unwrap();
+    symlink("/foreign/edited", f.skill_link("edited")).unwrap();
+    let unmanaged = f.skill_link("personal");
+    fs::write(&unmanaged, b"personal").unwrap();
+
+    let plan_b = f.plan_for(release_b.clone());
+    let obsolete = AbsolutePath::new(&f.skill_link("obsolete")).unwrap();
+    assert!(
+        plan_b
+            .actions()
+            .iter()
+            .any(|action| { action.path == obsolete && action.disposition == Disposition::Remove })
+    );
+    assert!(!plan_b.actions().iter().any(|action| {
+        action.path == AbsolutePath::new(&f.skill_link("edited")).unwrap()
+            && action.disposition == Disposition::Remove
+    }));
+
+    // Publish through the same atomic boundary until the first harness link is
+    // replaced, then leave the old receipt behind as a crashed process would.
+    let first_replacement = plan_b
+        .actions
+        .iter()
+        .position(|action| {
+            action.selector == "skill"
+                && action.path.to_path_buf().unwrap() == f.skill_link("common")
+        })
+        .unwrap();
+    for action in &plan_b.actions[..=first_replacement] {
+        let path = action.path.to_path_buf().unwrap();
+        if action.disposition == Disposition::Remove {
+            break;
+        }
+        let desired = &plan_b.desired.get(&path).unwrap().value;
+        let replace = plan_b.before.entries.get(&path).unwrap().is_some();
+        publish(&path, desired, replace, &LocalFs).unwrap();
+    }
+    let receipt_after_crash: InstallReceipt =
+        provenant_records::decode_v1(fs::read(f.receipt()).unwrap().as_slice(), Limits::CONFIG)
+            .unwrap();
+    assert_eq!(
+        receipt_after_crash.source_digest,
+        release_a.manifest.source_digest
+    );
+
+    let recovery = f.plan_for(release_b.clone());
+    install(
+        &recovery,
+        &context(&clock, &cancel),
+        &mut Reporter::default(),
+        &Smoke,
+        false,
+    )
+    .unwrap();
+    assert!(fs::symlink_metadata(f.skill_link("obsolete")).is_err());
+    assert_eq!(
+        fs::read_link(f.skill_link("edited")).unwrap(),
+        PathBuf::from("/foreign/edited")
+    );
+    assert_eq!(fs::read(&unmanaged).unwrap(), b"personal");
+    let receipt: InstallReceipt =
+        provenant_records::decode_v1(fs::read(f.receipt()).unwrap().as_slice(), Limits::CONFIG)
+            .unwrap();
+    assert_eq!(receipt.source_digest, release_b.manifest.source_digest);
+    assert!(receipt.entries.iter().all(|entry| entry.path != obsolete));
+    assert!(f.plan_for(release_b).actions().is_empty());
+}
+
+#[test]
+fn receipt_targets_cover_two_harnesses_and_uninstall_uses_recorded_paths() {
+    let mut f = Fixture::new();
+    let custom = f.home.join("custom");
+    let codex_skills = custom.join("codex/skills");
+    let codex_instruction = custom.join("codex/AGENTS.md");
+    let claude_skills = custom.join("claude/skills");
+    let claude_instruction = custom.join("claude/CLAUDE.md");
+    f.targets.bin_dir = custom.join("bin");
+    f.targets.harnesses[0].skills_dir = codex_skills.clone();
+    f.targets.harnesses[0].instruction = Some(codex_instruction.clone());
+    f.targets.harnesses.push(HarnessTarget {
+        harness: Harness::Claude,
+        skills_dir: claude_skills.clone(),
+        instruction: Some(claude_instruction.clone()),
+    });
+    fs::create_dir_all(f.source.join("instructions")).unwrap();
+    for name in ["AGENTS.md", "HARNESS.md"] {
+        let path = f.source.join("instructions").join(name);
+        fs::write(path, b"release instruction").unwrap();
+        fs::set_permissions(
+            f.source.join("instructions").join(name),
+            fs::Permissions::from_mode(0o600),
+        )
+        .unwrap();
+    }
+
+    let release = f.release();
+    let plan = f.plan_for(release);
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    install(
+        &plan,
+        &context(&clock, &cancel),
+        &mut Reporter::default(),
+        &Smoke,
+        false,
+    )
+    .unwrap();
+
+    let receipt = read_receipt(&f.targets, &LocalFs).unwrap().unwrap();
+    assert_eq!(receipt.bin_dir.to_path_buf().unwrap(), f.targets.bin_dir);
+    assert_eq!(receipt.harnesses, vec![Harness::Claude, Harness::Codex]);
+    assert_eq!(
+        receipt
+            .harness_targets
+            .iter()
+            .find(|target| target.harness == Harness::Claude)
+            .unwrap()
+            .skills_dir
+            .to_path_buf()
+            .unwrap(),
+        claude_skills
+    );
+
+    // Current CLI path resolution can differ from install time. Check and
+    // uninstall must use the recorded locations from the receipt.
+    let mut changed = f.targets.clone();
+    changed.bin_dir = custom.join("changed-bin");
+    for target in &mut changed.harnesses {
+        target.skills_dir = custom
+            .join("changed")
+            .join(format!("{:?}/skills", target.harness));
+        target.instruction = None;
+    }
+    assert!(
+        check_install_for(&changed, None, "fixture-target", &LocalFs)
+            .unwrap()
+            .is_empty()
+    );
+
+    changed.harnesses = vec![HarnessTarget {
+        harness: Harness::Claude,
+        skills_dir: custom.join("changed/claude/skills"),
+        instruction: None,
+    }];
+    uninstall(
+        &changed,
+        &context(&clock, &cancel),
+        &mut Reporter::default(),
+    )
+    .unwrap();
+    assert!(fs::symlink_metadata(claude_skills.join("example")).is_err());
+    assert!(fs::symlink_metadata(codex_skills.join("example")).is_ok());
+    assert!(fs::symlink_metadata(claude_instruction).is_err());
+    assert!(fs::symlink_metadata(codex_instruction).is_ok());
+    let shrunk = read_receipt(&changed, &LocalFs).unwrap().unwrap();
+    assert_eq!(shrunk.harnesses, vec![Harness::Codex]);
+    assert_eq!(shrunk.harness_targets.len(), 1);
+    assert_eq!(shrunk.harness_targets[0].harness, Harness::Codex);
+    assert!(
+        check_install_for(&changed, None, "fixture-target", &LocalFs)
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
+fn receipt_targets_drive_check_and_uninstall_and_uninstall_shrinks_harnesses() {
+    let f = Fixture::new();
+    let release = f.release();
+    let plan = f.plan_for(release.clone());
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    install(
+        &plan,
+        &context(&clock, &cancel),
+        &mut Reporter::default(),
+        &Smoke,
+        false,
+    )
+    .unwrap();
+
+    let receipt = read_receipt(&f.targets, &LocalFs).unwrap().unwrap();
+    assert_eq!(receipt.bin_dir.to_path_buf().unwrap(), f.targets.bin_dir);
+    assert_eq!(receipt.harnesses, vec![Harness::Codex]);
+    assert_eq!(
+        receipt.harness_targets[0].skills_dir.to_path_buf().unwrap(),
+        f.home.join(".codex/skills")
+    );
+    assert_eq!(
+        receipt.harness_targets[0]
+            .instruction
+            .as_ref()
+            .unwrap()
+            .to_path_buf()
+            .unwrap(),
+        f.home.join(".codex/AGENTS.md")
+    );
+    for lock in [
+        f.targets.bin_dir.join(".provenant-install.lock"),
+        f.home.join(".codex/.provenant-install.lock"),
+        f.home.join(".codex/skills/.provenant-install.lock"),
+    ] {
+        assert!(
+            !lock.exists(),
+            "unexpected destination lock at {}",
+            lock.display()
+        );
+    }
+
+    let mut changed_targets = f.targets.clone();
+    changed_targets.bin_dir = f.home.join("elsewhere/bin");
+    changed_targets.harnesses[0].skills_dir = f.home.join("elsewhere/skills");
+    changed_targets.harnesses[0].instruction = Some(f.home.join("elsewhere/AGENTS.md"));
+    assert!(
+        check_install_for(&changed_targets, Some(&release), "fixture-target", &LocalFs,)
+            .unwrap()
+            .is_empty()
+    );
+    let outcome = uninstall(
+        &changed_targets,
+        &context(&clock, &cancel),
+        &mut Reporter::default(),
+    )
+    .unwrap();
+    assert!(outcome.actions.iter().any(|action| {
+        action.disposition == Disposition::Remove
+            && action.path == AbsolutePath::new(&f.link()).unwrap()
+    }));
+    assert!(!f.link().exists());
+    let receipt = read_receipt(&changed_targets, &LocalFs).unwrap().unwrap();
+    assert!(receipt.harnesses.is_empty());
+    assert!(receipt.harness_targets.is_empty());
+    assert_eq!(
+        receipt
+            .entries
+            .iter()
+            .filter(|entry| entry.selector == "binary")
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn a_completed_release_with_a_different_manifest_is_a_typed_conflict() {
+    let f = Fixture::new();
+    let first = f.release();
+    let first_digest = CanonicalV1::file_digest(&first.manifest_bytes);
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    install(
+        &f.plan_for(first.clone()),
+        &context(&clock, &cancel),
+        &mut Reporter::default(),
+        &Smoke,
+        false,
+    )
+    .unwrap();
+
+    let mut second = f.release();
+    second.manifest.toolchain = "different-toolchain".into();
+    second.manifest_bytes = provenant_records::encode(&second.manifest).unwrap();
+    let second_digest = CanonicalV1::file_digest(&second.manifest_bytes);
+    let error = Snapshots::capture(&second, &f.targets, &LocalFs).unwrap_err();
+    assert!(matches!(
+        error,
+        InstallError::ReleaseConflict {
+            existing_manifest_digest,
+            requested_manifest_digest,
+            ..
+        } if existing_manifest_digest == first_digest
+            && requested_manifest_digest == second_digest
+    ));
+    assert!(error.to_string().contains(&first_digest.to_string()));
+    assert!(error.to_string().contains(&second_digest.to_string()));
+    assert!(error.to_string().contains("select a new source digest"));
+}
+
+#[test]
+fn unfinished_release_replaces_a_partial_file_and_publishes_manifest_last() {
+    let f = Fixture::new();
+    let release = f.release();
+    let release_root = f
+        .targets
+        .roots
+        .state
+        .as_path()
+        .join("releases")
+        .join(release.manifest.source_digest.to_string());
+    let binary = release_root.join("bin/provenant");
+    fs::create_dir_all(binary.parent().unwrap()).unwrap();
+    fs::write(&binary, b"interrupted old bytes").unwrap();
+    fs::set_permissions(&binary, fs::Permissions::from_mode(0o755)).unwrap();
+
+    let plan = f.plan_for(release);
+    let mut release_actions: Vec<_> = plan
+        .actions()
+        .iter()
+        .filter(|action| action.selector == "release")
+        .collect();
+    assert!(release_actions.iter().any(|action| {
+        action.disposition == Disposition::Replace && action.path.to_path_buf().unwrap() == binary
+    }));
+    release_actions.sort_by_key(|action| {
+        action
+            .path
+            .to_path_buf()
+            .unwrap()
+            .file_name()
+            .is_some_and(|name| name == "release.json")
+    });
+    assert_ne!(
+        release_actions.last().unwrap().path.to_path_buf().unwrap(),
+        binary
+    );
+    assert_eq!(
+        release_actions.last().unwrap().path.to_path_buf().unwrap(),
+        release_root.join("release.json")
+    );
+}
+
+struct WrongSmoke;
+impl ReleaseSmoke for WrongSmoke {
+    fn check(&self, release: &Release, _: &CancelToken) -> io::Result<VersionInfo> {
+        let mut info = Smoke.check(release, &CancelToken::new())?;
+        info.target = "wrong-target".into();
+        Ok(info)
+    }
+}
+
+#[test]
+fn install_refuses_a_binary_whose_version_identity_differs_from_manifest() {
+    let f = Fixture::new();
+    let plan = f.plan();
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let error = install(
+        &plan,
+        &context(&clock, &cancel),
+        &mut Reporter::default(),
+        &WrongSmoke,
+        false,
+    )
+    .unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "invalid release manifest: binary identity differs from release manifest"
+    );
+    assert!(!f.targets.roots.state.as_path().exists());
+    assert!(!f.targets.bin_dir.exists());
 }
