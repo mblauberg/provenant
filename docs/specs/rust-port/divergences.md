@@ -967,3 +967,15 @@ The source revision above is unchanged; CLI rendering remains an edge task.
   stays a JSON value. The raw-input public report regression failed before
   repair and now covers reordered, nested and duplicate-key objects without
   adding `preserve_order` or a dependency.
+
+### RP-1302 follow-up: Linux census iteration errors (fixed Rust bug)
+
+- Class: `bug`. Source/oracle: `7475ff01e437ec51c760b852516c21a5281cf9c6`;
+  rulebook v4. `process_info.processes()` consumes the `/proc` iterator outside
+  its open-error fallback. A later iteration OSError propagates to callers.
+- Rust used `ReadDir::flatten()`, silently converting an incomplete census to
+  success. It now preserves the underlying I/O error through the observation
+  decoder. A fixture with one readable PID followed by EACCES failed before
+  repair and passes afterwards; it runs on macOS as well as Linux.
+- No intentional source behavior change. The wider RP-1302 fallback error and
+  size-bound differences remain open; this does not complete the unit.
