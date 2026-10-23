@@ -3,7 +3,7 @@
 //! Desired state is path-free and committed; pointers and installation receipts
 //! are machine-local. Routing reconciliation and seeded-file publication remain
 //! with the later implementation/integration units, never in the pointer owner.
-use crate::{invalid, io, pending, Result};
+use crate::{invalid, pending, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{
@@ -30,19 +30,32 @@ pub enum InstallMode {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Product {
     pub name: String,
     pub version: String,
     // Retains the difference between absent ref and explicit null.
-    #[serde(flatten)]
-    reference: BTreeMap<String, Value>,
+    #[serde(
+        rename = "ref",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present_reference"
+    )]
+    reference: Option<Value>,
 }
 
 impl Product {
     /// None means absent; Some(Value::Null) retains an explicit null reference.
     pub fn reference(&self) -> Option<&Value> {
-        self.reference.get("ref")
+        self.reference.as_ref()
     }
+}
+
+// Unlike Option's default deserializer, preserve an explicit JSON null.
+fn present_reference<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<Option<Value>, D::Error> {
+    Value::deserialize(deserializer).map(Some)
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -176,8 +189,11 @@ pub fn custom_skill_names(instance_root: &Path) -> Result<Vec<std::ffi::OsString
         return Ok(vec![]);
     }
     let mut names = Vec::new();
-    for entry in fs::read_dir(&directory).map_err(|e| io(&directory, e))? {
-        let entry = entry.map_err(|e| io(&directory, e))?;
+    // pathlib's glob ignores directory scan errors, including permission denial.
+    let Ok(entries) = fs::read_dir(&directory) else {
+        return Ok(names);
+    };
+    for entry in entries.flatten() {
         if entry.path().join("SKILL.md").is_file() {
             names.push(entry.file_name());
         }
@@ -317,6 +333,23 @@ mod tests {
         }
     }
     #[test]
+    fn every_product_decode_rejects_unknown_keys() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut value =
+            serde_json::to_value(build_desired_state("1", InstallMode::Split).unwrap()).unwrap();
+        value["product"]["unexpected"] = Value::from("extra");
+        let bytes = serde_json::to_vec(&value).unwrap();
+        assert!(serde_json::from_value::<Product>(value["product"].clone()).is_err());
+        assert!(serde_json::from_value::<DesiredState>(value.clone()).is_err());
+        assert!(serde_json::from_slice::<DesiredState>(&bytes).is_err());
+        assert!(validate_desired_state(&bytes).is_err());
+        let path = dir.path().join(DESIRED_STATE_RELATIVE);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, &bytes).unwrap();
+        assert!(load_desired_state(dir.path()).is_err());
+    }
+
+    #[test]
     fn environment_precedence_never_uses_product_root() {
         let home = Path::new("/example");
         let mut env = BTreeMap::from([("AGENTS_HOME".into(), "/product".into())]);
@@ -351,6 +384,40 @@ mod tests {
             InstallMode::Fused
         );
     }
+    #[test]
+    fn unreadable_custom_skill_directory_is_empty_like_python_glob() {
+        use std::os::unix::fs::PermissionsExt;
+        let user = provenant_supervisor::sys::account(provenant_supervisor::sys::Account::Current)
+            .unwrap()
+            .unwrap();
+        let root =
+            provenant_supervisor::sys::account(provenant_supervisor::sys::Account::Uid(0)).unwrap();
+        if root.as_ref().is_some_and(|root| root.name == user.name) {
+            eprintln!("skip: root can read chmod 000 directories");
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let custom = dir.path().join(CUSTOM_SKILLS_DIRECTORY);
+        fs::create_dir_all(custom.join("skill")).unwrap();
+        fs::write(custom.join("skill/SKILL.md"), "skill").unwrap();
+        let permissions = fs::metadata(&custom).unwrap().permissions();
+        fs::set_permissions(&custom, fs::Permissions::from_mode(0o000)).unwrap();
+        let actual = custom_skill_names(dir.path());
+        let expected = crate::oracle::python(
+            "scripts/instance_installation.py",
+            "import json\nprint(json.dumps(m.custom_skill_names(p)))",
+            dir.path(),
+        );
+        fs::set_permissions(&custom, permissions).unwrap();
+        assert!(actual.unwrap().is_empty());
+        if let Some(expected) = expected {
+            assert_eq!(
+                serde_json::from_slice::<Value>(&expected).unwrap(),
+                serde_json::json!([])
+            );
+        }
+    }
+
     #[test]
     fn custom_skill_name_order_preserves_os_bytes() {
         use std::os::unix::ffi::OsStringExt;

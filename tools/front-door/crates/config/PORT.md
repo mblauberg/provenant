@@ -3,9 +3,9 @@
 Rulebook: `docs/specs/rust-port/PORTING.md` version 4. Author route:
 `codex/gpt-6.1-sol@high`. Initial source/oracle revision:
 `7021182d535f6c730c29713e77d5bca76893fd06`; merged fetched main
-`b527d675d15c50ee51701bb15db6439c95277918` without rebasing. The assigned Python
-sources are unchanged between those revisions. Python oracle: 3.14.8; Cargo:
-1.94.1, under the workspace toolchain pin. Tests/judges in this PR are the crate
+`49a1cc3bceedcd0fb4c14183f6afff3ea01f6a84` without rebasing for the PR #1336
+repair. The initial batch merged `b527d675d15c50ee51701bb15db6439c95277918`.
+Python oracle: 3.14.8; Cargo: 1.94.1, under the workspace toolchain pin. Tests/judges in this PR are the crate
 unit and differential fixtures; independently owned J1/J2 coverage gates cutover.
 
 No command switches owner. No Python/TypeScript source or stable installation is
@@ -19,8 +19,8 @@ are explicit inputs; fixture mutations stay under isolated temporary roots.
 | `scripts/configure-codex-skill-overrides.py#unit-01` | Partial | State/proposal/preflight/configure/check, symlink protection, atomic publication, newline conversion, Python whitespace, collection-error precedence, typed command options. Exact tomllib diagnostics and the uncaught TypeError/Unicode traceback boundary remain (RP-config-3/4). |
 | `scripts/install-provenant-command.py#unit-01` | Partial | Classification, exclusive stage/hardlink installation, atomic exchange, guarded rollback, displaced-file recovery retention, fsync/chmod, expected-state validation and command rendering. Platform/race conformance, non-UTF-8 diagnostics and syscall-specific error forms remain; ordinary missing-source errno output is differential-tested. |
 | `scripts/install-workflows#unit-01` | Partial | All install/repair/retire/preflight/integrity and command policy branches represented, shared publication owner adopted, ordered validation and strict entry keys fixed. Extended JSON/path domain and exact decode diagnostics remain (RP-config-2/4/6). |
-| `scripts/instance_installation.py#interface` | Ported contract | Typed action/request, desired-state, pointer, seed, routing and untagged execute result contracts, with an `InstanceOwner` cycle seam. Every real execute result shape round-trips against Python. This claims the interface only; instance seeding/routing implementations and extended path encoding remain outside it. |
-| `scripts/lib/front_door_build.py#unit-01` | Partial | Digest, embedded identity, prebuilt validation, build plans, build/smoke/select policy and command rendering. `FrontDoorHost` owns execution; `ExecutableAccess` requires X_OK for PATH and fallback, with no mode-bit approximation. A safe supervisor `access(X_OK)` adapter and an execution adapter preserving cargo progress/capture/deadline policy are not on main yet. |
+| `scripts/instance_installation.py#interface` | Partial | Typed action/request, desired-state, pointer, seed, routing and untagged execute result contracts, with an `InstanceOwner` cycle seam. Execute result shapes round-trip against Python and all serde product decoders reject unknown keys. Extended record/path domains and integration evidence remain open (RP-config-6). |
+| `scripts/lib/front_door_build.py#unit-01` | Partial | Digest, embedded identity, prebuilt validation, build plans, build/smoke/select policy and command rendering. `FrontDoorHost` owns execution; `ExecutableAccess` requires X_OK for PATH and fallback, with no mode-bit approximation. Production cargo lookup uses supervisor's safe `access(X_OK)` wrapper; the execution adapter preserving cargo progress/capture/deadline policy remains pending. |
 | `scripts/managed_installation_manifest.py#unit-01` | Partial | Validation, tree digests, opaque history, exact integer decoding, insertion-ordered ownership, ordered first-error diagnostics and sorted atomic persistence. Nonfinite/lone-surrogate JSON, Unix byte paths and exact decode diagnostics remain. |
 | `scripts/manage_installation.py#unit-01` | Partial | Exact skill-marker glob discovery, source/library/custom collision policy, link identity, legacy agent validation/retirement, staged directory conversion with restore-on-publication-failure and typed reports. Legacy receipt/path codec edge cases and platform publication conformance remain. |
 | `scripts/manage_installation.py#unit-02` | Partial | Managed/custom plan transitions, integrity, remediation/refusals, read-only source/legacy reports, all early execute branches. Extra/legacy names with non-UTF-8 bytes and lenient extended JSON receipts remain. |
@@ -29,8 +29,8 @@ are explicit inputs; fixture mutations stay under isolated temporary roots.
 | `skills/_shared/harness_profile.py#unit-02` | Partial | Ordered assignments, current/lenient/value, pinned instance context, validated atomic edits and empty-class cleanup. Inherits the profile reader's decode/path limitations; strengthened directory durability is RP-config-7. |
 | `scripts/harness_profile.py#unit-01` | Partial | List/show/use/set/reset/diff options, text/JSON output and validated edits. Descriptions retain arbitrary Python str/repr forms, including nested object order. Inherits resolver codec/path limits; argparse abbreviation/error/help integration is not claimed. |
 
-No listed unit was skipped. Partial units are deliberately absent from
-`ported.txt`; the only new completion is the cycle interface contract.
+No listed unit was skipped. All assigned units remain partial and are absent
+from `ported.txt` and PR `Units:`.
 
 ## Shared owners and pending items
 
@@ -49,10 +49,14 @@ public API is on the merged main snapshot:
   (`schema_one`), plus exact Unix byte-path record text (`path_text`).
 - `provenant-core`: Python surrogateescape filename ordering (`path_sort_key`)
   and Unicode decimal integer parsing (`pending::parse_int`, `DECIMAL_STARTS`).
-- `provenant-supervisor`: live executable-access implementation for the
-  `ExecutableAccess` host capability. Front-door process execution remains
-  injected; the existing bounded runner does not preserve the source's
-  inherited cargo progress and raw smoke/capture policy without an adapter.
+- `provenant-supervisor`: front-door process execution remains injected; the
+  existing bounded runner does not preserve the source's inherited cargo progress and raw smoke/capture policy without an adapter.
+
+Production `cargo_path` adopts `provenant_supervisor::sys::is_executable`;
+`cargo_path_with_access` retains the injected seam. Real executable/non-executable
+files test both PATH and fallback lookup. The merged records crate still has no
+public equivalent of the five pending helpers listed above; `digest_bytes` is
+a framed SHA-256 digest rather than a raw hex encoder.
 
 The public `OrderedMap` is the minimum typed map needed by manifest consumers;
 its implementation stays in the private ordered module, marked for records.
@@ -79,10 +83,12 @@ publication lenses under the requested route `codex/gpt-6.1-sol@high`.
 Repairs address diagnostic order/context, arbitrary description rendering,
 environment order, universal newlines and common errno rendering. Non-UTF-8
 record/output findings remain explicitly partial under RP-config-6/8.
-The chair owns the cross-family review; auto-merge is not armed.
+A targeted read-only review of the PR #1336 repair delta returned clean under
+`codex/gpt-6.1-sol@high`. The chair owns the cross-family review; auto-merge is
+not armed.
 
-Required local fmt and clippy pass; **85 crate tests pass** with the Python
-differential required (34 added tests over batch 2). Results are recorded
+Required local fmt and clippy pass; **88 crate tests pass** with the Python
+differential required (37 added tests over batch 2). Results are recorded
 in the PR. The separate layering fixture currently fails `config -> supervisor`:
 the user explicitly requested the safe supervisor dependency, while R2's table
 still allows config only core/records. The chair was notified through Fabric;

@@ -1154,13 +1154,15 @@ The source revision above is unchanged; CLI rendering remains an edge task.
   - Set `AGENT_FABRIC_INSTANCE_ROOT=~mikey/instance` on a host where `mikey`
     exists. Python `Path.expanduser()` returns that account's absolute home
     path; Rust expands only `~` and `~/`, then refuses the relative value.
-- Evidence: source review at `scripts/instance_installation.py:191-203,737-743`
-  and candidate implementation at `instance.rs:57-67,134,188-194`. Existing
-  desired-state differential cases cover representable values but not these
-  two cases; a retained exact differential remains to be added.
-- Follow-up: expose an ordered JSON input representation and platform home
-  directory lookup before claiming this interface complete. No caller
-  cut-over is included in this lane.
+- Repair status (PR #1336): ordered byte validation and explicit named-home
+  inputs now have regressions. Direct serde decoding of `Product` and
+  `DesiredState` also rejects extra product keys; the closed product shape
+  preserves both absent and explicit-null `ref`. The validating byte and file
+  loaders retain Python's validation order.
+- Disposition remains partial/open: the records codec and non-UTF-8 path/output
+  domains are not complete. Remove the interface from `ported.txt` and PR
+  `Units:` until those boundaries and integration evidence are complete. No
+  caller cut-over is included in this lane.
 
 ## RP-FR2-001: Fabric policy ordered mappings and Python repr (open, library)
 
@@ -1605,6 +1607,7 @@ PORTING.md v4 R4 improvement; Python's unbounded integer domain is unchanged.
   Rust dropped `prune_merged` and `since_revision`; `PlanContext` now retains
   both source fields. This updates only the retained shape, not cleanup policy
   or process/deletion ownership.
+
 ### RP-1302 follow-up: Linux census iteration errors (fixed Rust bug)
 
 - Class: `bug`. Source/oracle: `7475ff01e437ec51c760b852516c21a5281cf9c6`;
@@ -1707,17 +1710,18 @@ boundaries). Rulebook v4; author `codex/gpt-6.1-sol@high`; source/oracle
   macOS/Linux filesystem-domain conformance is claimed. TOML/parser and
   interpreter traceback wording also remain partial; no exception is approved.
 - The front-door host contract requires an X_OK observation for both cargo
-  search paths. Main has no safe executable-access syscall wrapper; the crate
-  supplies lookup/build/smoke/select policy with injected host capabilities,
-  and cannot activate them yet. This is an explicit missing owner API, not an
-  existence-only or mode-bit approximation of `os.access`.
+  search paths. Production `cargo_path` now uses
+  `provenant_supervisor::sys::is_executable`, the safe `access(X_OK)` wrapper
+  on merged main. `ExecutableAccess` remains an injectable test seam; real-file
+  regressions cover executable and non-executable PATH and fallback files.
+  The front-door process execution adapter remains pending.
 - The R2 table has not yet granted config the requested supervisor safe OS
   edge. The layering regression reports `config -> supervisor`. The chair
   was notified; no rulebook/graph weakening or scope-external edit is made.
 
-Disposition: all non-interface units remain partial. The instance cycle unit
-claims only its real typed input/output contract; no instance command owner or
-source is replaced. Exact-head CI, cross-family review, J1/J2 cutover coverage
+Disposition: all assigned units, including the instance interface, remain
+partial and absent from `ported.txt` and PR `Units:`. No instance command owner
+or source is replaced. Exact-head CI, cross-family review, J1/J2 cutover coverage
 and publication conformance remain promotion gates.
 
 RP-config-8 follow-up: native review found that literal `.rs` files were absent
@@ -1740,6 +1744,14 @@ Native repair review also found CPython's default 4,300-decimal-digit conversion
 limit (including leading zeros). The pending parser now applies that default,
 with a 5,000-zero Python differential. Non-default interpreter digit-limit
 overrides remain an explicit host/codec boundary of the partial profile unit.
+
+RP-config-8 PR #1336 repair: unreadable custom-skill directory scans now return
+an empty list as Python's glob does; a chmod 000 real-directory differential
+covers permission denial and skips root. Merged main
+`49a1cc3bceedcd0fb4c14183f6afff3ea01f6a84` was checked for public records
+helpers equivalent to `json_bytes`, `json_string`, `path_text`, `schema_one` and
+`hex`; none exists, so those owner-marked pending helpers remain. The records
+`digest_bytes` helper includes SHA-256 framing and is not raw hex formatting.
 
 ### RP-CLI3-01: shared checked JSON and numeric bounds (inert partial scope)
 

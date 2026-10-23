@@ -43,7 +43,6 @@ skills/orchestrate/scripts/process_info.py#unit-01
 skills/orchestrate/scripts/run_lineage.py#interface
 skills/orchestrate/scripts/trusted_git.py#unit-01
 workspace:manifest-and-digest
-scripts/instance_installation.py#interface
 scripts/check-provenant-install.py#interface
 skills/_shared/bounded_process.py#unit-01
 workspace:front-door-syscalls

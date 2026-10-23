@@ -208,14 +208,26 @@ pub fn validate_mode(mode: &str) -> Result<()> {
     Ok(())
 }
 
-/// The syscall owner must implement this with access(X_OK), including ACLs and
-/// the current process credentials. Mode bits alone are not an X_OK check.
-// port: belongs in provenant-supervisor
+/// Executable lookup capability, including ACLs and real process credentials.
+/// Mode bits alone are not an X_OK check.
 pub trait ExecutableAccess {
     fn executable(&self, path: &Path) -> bool;
 }
 
-pub fn cargo_path(
+/// Production executable access through the supervisor's safe syscall wrapper.
+pub struct SystemExecutableAccess;
+
+impl ExecutableAccess for SystemExecutableAccess {
+    fn executable(&self, path: &Path) -> bool {
+        provenant_supervisor::sys::is_executable(path)
+    }
+}
+
+pub fn cargo_path(path: &std::ffi::OsStr, home: &Path) -> Option<PathBuf> {
+    cargo_path_with_access(path, home, &SystemExecutableAccess)
+}
+
+pub fn cargo_path_with_access(
     path: &std::ffi::OsStr,
     home: &Path,
     access: &impl ExecutableAccess,
@@ -710,11 +722,11 @@ mod host_tests {
         fs::create_dir_all(fallback.parent().unwrap()).unwrap();
         fs::write(&fallback, "").unwrap();
         assert_eq!(
-            cargo_path(path.as_os_str(), dir.path(), &Access { allowed: vec![] }),
+            cargo_path_with_access(path.as_os_str(), dir.path(), &Access { allowed: vec![] }),
             None
         );
         assert_eq!(
-            cargo_path(
+            cargo_path_with_access(
                 path.as_os_str(),
                 dir.path(),
                 &Access {
@@ -724,7 +736,7 @@ mod host_tests {
             Some(fallback)
         );
         assert_eq!(
-            cargo_path(
+            cargo_path_with_access(
                 path.as_os_str(),
                 dir.path(),
                 &Access {
@@ -734,6 +746,33 @@ mod host_tests {
             Some(path.join("cargo"))
         );
     }
+    #[test]
+    fn cargo_search_uses_real_execute_access_for_path_and_fallback() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("path");
+        fs::create_dir(&path).unwrap();
+        let candidate = path.join("cargo");
+        let fallback = dir.path().join(".cargo/bin/cargo");
+        fs::create_dir_all(fallback.parent().unwrap()).unwrap();
+        fs::write(&candidate, "not executable").unwrap();
+        fs::write(&fallback, "#!/bin/sh\n").unwrap();
+        fs::set_permissions(&candidate, fs::Permissions::from_mode(0o644)).unwrap();
+        fs::set_permissions(&fallback, fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(
+            cargo_path(path.as_os_str(), dir.path()),
+            Some(fallback.clone())
+        );
+        fs::set_permissions(&candidate, fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(
+            cargo_path(path.as_os_str(), dir.path()),
+            Some(candidate.clone())
+        );
+        fs::set_permissions(&candidate, fs::Permissions::from_mode(0o644)).unwrap();
+        fs::set_permissions(&fallback, fs::Permissions::from_mode(0o644)).unwrap();
+        assert_eq!(cargo_path(path.as_os_str(), dir.path()), None);
+    }
+
     struct Host {
         cargo: Option<PathBuf>,
         status: i32,
