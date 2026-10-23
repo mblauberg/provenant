@@ -263,17 +263,7 @@ impl Snapshots {
             }
             Some(_) => return Err(InstallError::Tampered(manifest_path)),
         };
-        match crate::release::inventory_with_cleanup(&installed, fs, !completed) {
-            Ok(paths) => {
-                for path in paths {
-                    if !release.files.contains_key(&path) {
-                        return Err(InstallError::Tampered(installed.join(path)));
-                    }
-                }
-            }
-            Err(InstallError::Fs(error)) if error.is_not_found() => {}
-            Err(error) => return Err(error),
-        }
+        validate_release_inventory(release, &installed, fs, false)?;
 
         let receipt_path = targets.roots.state.as_path().join("install/receipt.json");
         let receipt_snapshot = snapshot(&receipt_path, fs)?;
@@ -313,6 +303,26 @@ impl Snapshots {
         }
         entries.insert(receipt_path, receipt_snapshot);
         Ok(Self { entries, receipt })
+    }
+}
+
+fn validate_release_inventory(
+    release: &Release,
+    installed: &Path,
+    fs: &dyn SafeFs,
+    remove_staging: bool,
+) -> Result<(), InstallError> {
+    match crate::release::inventory_with_cleanup(installed, fs, remove_staging) {
+        Ok(paths) => {
+            for path in paths {
+                if !release.files.contains_key(&path) {
+                    return Err(InstallError::Tampered(installed.join(path)));
+                }
+            }
+            Ok(())
+        }
+        Err(InstallError::Fs(error)) if error.is_not_found() => Ok(()),
+        Err(error) => Err(error),
     }
 }
 
@@ -711,6 +721,21 @@ pub fn install(
     for (path, before) in &plan.before.entries {
         recheck(path, before, fs)?;
     }
+    let release_root = plan
+        .targets
+        .roots
+        .state
+        .as_path()
+        .join("releases")
+        .join(plan.release.manifest.source_digest.to_string());
+    let unfinished = plan
+        .before
+        .entries
+        .get(&release_root.join("release.json"))
+        .is_some_and(Option::is_none);
+    // Only the lock holder may collect abandoned staging files. A concurrent
+    // preview ignores those names so it cannot interrupt a live publication.
+    validate_release_inventory(&plan.release, &release_root, fs, unfinished)?;
     let mut completed = Vec::new();
     for (index, action) in plan.actions.iter().enumerate() {
         let result = (|| {
@@ -780,7 +805,13 @@ fn publish(path: &Path, value: &Value, replace: bool, fs: &dyn SafeFs) -> Result
         Value::File {
             bytes,
             mode: permissions,
-        } => durable(dir.publish(name, bytes, *permissions as u32, mode)?),
+        } => durable(dir.atomic_write(
+            name,
+            ".provenant-staging.",
+            bytes,
+            *permissions as u32,
+            mode,
+        )?),
         Value::Link(target) => {
             let temporary = fs.temporary_name()?;
             dir.symlink(target, &temporary)?;

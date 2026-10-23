@@ -8,6 +8,7 @@ publish = false
 
 [dependencies]
 provenant-core = { workspace = true }
+provenant-records = { workspace = true }
 jiff = { workspace = true }
 serde_json = { workspace = true }
 libc = { workspace = true }
@@ -20,7 +21,6 @@ tempfile = { workspace = true }
 
 [features]
 fixture = []
-fault-injection = []
 test-fixtures = ["fixture"]
 
 [[test]]
@@ -45,3 +45,15 @@ float_cmp = "deny"
 undocumented_unsafe_blocks = "deny"
 multiple_unsafe_ops_per_block = "deny"
 disallowed_methods = "deny"
+
+[[test]]
+name = "custody"
+path = "tests/custody.rs"
+harness = false
+required-features = ["fixture"]
+
+[[test]]
+name = "publication"
+path = "tests/publication.rs"
+harness = false
+required-features = ["fixture"]

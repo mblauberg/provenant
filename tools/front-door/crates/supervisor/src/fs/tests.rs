@@ -951,6 +951,52 @@ fn process_crash_at_publication_boundaries_leaves_old_or_new_complete_bytes() {
 }
 
 #[test]
+fn object_safe_atomic_write_preserves_requested_mode() {
+    let temp = tempfile::tempdir().unwrap();
+    let dir: &dyn SafeDir = &Directory::open_anchor(temp.path()).unwrap();
+    assert!(matches!(
+        dir.atomic_write(
+            OsStr::new("provenant"),
+            ".provenant-staging.",
+            b"binary bytes",
+            0o755,
+            PublishMode::NoReplace,
+        )
+        .unwrap(),
+        Publication::Durable
+    ));
+    assert_eq!(
+        dir.metadata_at(OsStr::new("provenant"), false)
+            .unwrap()
+            .mode
+            & 0o777,
+        0o755
+    );
+    let mut file = dir.open_read(OsStr::new("provenant")).unwrap();
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes).unwrap();
+    assert_eq!(bytes, b"binary bytes");
+}
+
+#[test]
+fn object_safe_read_link_uses_held_directory_and_rejects_noncomponents() {
+    let temp = tempfile::tempdir().unwrap();
+    let owner = Directory::open_anchor(temp.path()).unwrap();
+    owner
+        .symlink(Path::new("../target"), OsStr::new("managed-link"))
+        .unwrap();
+    let dir: &dyn SafeDir = &owner;
+    assert_eq!(
+        dir.read_link(OsStr::new("managed-link")).unwrap(),
+        PathBuf::from("../target")
+    );
+    assert!(matches!(
+        dir.read_link(OsStr::new("../escape")),
+        Err(FsError::InvalidComponent { .. })
+    ));
+}
+
+#[test]
 fn object_safe_consumers_can_use_real_and_mock_files() {
     fn read_file(file: &mut dyn SafeFile) -> io::Result<Vec<u8>> {
         let mut bytes = Vec::new();
@@ -960,8 +1006,14 @@ fn object_safe_consumers_can_use_real_and_mock_files() {
     let temp = tempfile::tempdir().unwrap();
     let fs: &dyn SafeFs = &LocalFs;
     let dir = fs.open_anchor(temp.path()).unwrap();
-    dir.atomic_write(OsStr::new("file"), ".test.", b"real", PublishMode::Replace)
-        .unwrap();
+    dir.atomic_write(
+        OsStr::new("file"),
+        ".test.",
+        b"real",
+        0o600,
+        PublishMode::Replace,
+    )
+    .unwrap();
     assert_eq!(
         read_file(&mut *dir.open_read(OsStr::new("file")).unwrap()).unwrap(),
         b"real"
@@ -1127,7 +1179,7 @@ fn stable_lock_namespace_refuses_every_mutation_without_splitting_exclusion() {
         dir.replace_link(name, Path::new("replacement")),
         Err(FsError::ReservedLockName { .. })
     ));
-    for alias in ["writer.LOCK", "writer.locK", "LOCK", "locK"] {
+    for alias in ["writer.LOCK", "writer.locK"] {
         assert!(matches!(
             dir.unlink(OsStr::new(alias)),
             Err(FsError::ReservedLockName { .. })
@@ -1168,58 +1220,6 @@ fn stable_lock_namespace_refuses_every_mutation_without_splitting_exclusion() {
             &clock
         ),
         Err(FsError::InvalidLockName { .. })
-    ));
-}
-
-#[test]
-fn publication_sets_mode_before_rename_and_accepts_stable_install_lock() {
-    use provenant_core::{CancelToken, Clock, WaitBudget};
-    let root = tempfile::tempdir().unwrap();
-    let dir = Directory::open_anchor(root.path()).unwrap();
-    let clock = crate::clock::SystemClock::new();
-    let _lock = dir
-        .lock(
-            OsStr::new("lock"),
-            LockMode::Exclusive,
-            WaitBudget::cli(clock.mono_now(), 1).unwrap(),
-            &CancelToken::new(),
-            &clock,
-        )
-        .unwrap();
-    assert!(matches!(
-        dir.publish(
-            OsStr::new("provenant"),
-            b"first",
-            0o755,
-            PublishMode::NoReplace
-        )
-        .unwrap(),
-        Publication::Durable
-    ));
-    assert_eq!(
-        dir.metadata_at(OsStr::new("provenant"), false)
-            .unwrap()
-            .mode
-            & 0o777,
-        0o755
-    );
-    assert!(
-        dir.publish(
-            OsStr::new("provenant"),
-            b"second",
-            0o600,
-            PublishMode::NoReplace
-        )
-        .unwrap_err()
-        .is_exists()
-    );
-    assert_eq!(
-        dir.read_bounded(OsStr::new("provenant"), 10).unwrap(),
-        b"first"
-    );
-    assert!(matches!(
-        dir.unlink(OsStr::new("lock")),
-        Err(FsError::ReservedLockName { .. })
     ));
 }
 
@@ -1277,4 +1277,38 @@ fn reanchor_rebinds_device_policy_without_reopening_the_directory() {
         ),
         Err(FsError::CrossDevice { .. })
     ));
+}
+
+#[test]
+fn a_handle_received_through_guardian_handoff_never_reanchors() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = Directory::open_anchor(temp.path()).unwrap();
+    let handoff = Directory::from_handoff(root.handoff_file().try_clone().unwrap()).unwrap();
+    assert!(matches!(
+        handoff.into_anchor(),
+        Err(FsError::Symlink { .. })
+    ));
+}
+
+#[test]
+fn a_handle_reached_through_a_followed_link_never_reanchors() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = Directory::open_anchor(temp.path()).unwrap();
+    root.mkdir(OsStr::new("directory"), 0o700).unwrap();
+    root.symlink(Path::new("directory"), OsStr::new("dir-link"))
+        .unwrap();
+    let linked = root
+        .open_directory_with_links(OsStr::new("dir-link"), true)
+        .unwrap();
+    let error = linked.into_anchor().unwrap_err();
+    assert!(matches!(error, FsError::Symlink { .. }));
+    assert_eq!(error.raw_os_error(), Some(errno::ELOOP));
+    let descendant = root
+        .open_directory_with_links(OsStr::new("dir-link"), true)
+        .unwrap();
+    descendant.mkdir(OsStr::new("child"), 0o700).unwrap();
+    let child = descendant.open_directory(OsStr::new("child")).unwrap();
+    assert!(matches!(child.into_anchor(), Err(FsError::Symlink { .. })));
+    let direct = root.open_directory(OsStr::new("directory")).unwrap();
+    direct.into_anchor().unwrap();
 }

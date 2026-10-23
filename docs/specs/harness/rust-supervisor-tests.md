@@ -5,7 +5,7 @@ Companion to [the spec](rust-supervisor.md). Measured on `origin/main` at
 TypeScript, the lines from one top-level `test(` to the next). File headers,
 imports and shared helpers are not counted. A test is deleted with its slice's
 Python fallback, never when Rust first lands. The baseline includes a 49-line
-S1 installer-template test group, removed with the release cut-over and omitted
+S1 installer-template test group, removed by release slice 3 and omitted
 below. Names include later watchdog regressions; counts otherwise remain based
 on the stated baseline.
 

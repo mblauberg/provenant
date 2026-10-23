@@ -263,8 +263,9 @@ pub fn package_release(
 
     verify_binary_identity(&candidate, smoke, cancel)?;
     normalise_staged_modes(source, &candidate.files, fs)?;
-    crate::managed::durable(directory(source, false, fs)?.publish(
+    crate::managed::durable(directory(source, false, fs)?.atomic_write(
         OsStr::new("release.json"),
+        ".provenant-staging.",
         &bytes,
         0o600,
         PublishMode::NoReplace,
@@ -299,8 +300,9 @@ fn normalise_staged_modes(
             .ok_or_else(|| InstallError::Path(path.clone()))?;
         let permissions = u32::try_from(*expected_mode)
             .map_err(|_| InstallError::Manifest("invalid release mode"))?;
-        let published = directory(parent, false, fs)?.publish(
+        let published = directory(parent, false, fs)?.atomic_write(
             name,
+            ".provenant-staging.",
             expected_bytes,
             permissions,
             PublishMode::Replace,

@@ -363,35 +363,23 @@ about 2,500 lines plus tests.
 
 ## Front door
 
-1. **Pinned local builds.** Each Mac carries rustup, and
-   `rust-toolchain.toml` pins 1.94.1. Contributors build with
-   `cargo build --release --locked` and install an accepted release with
-   `provenant install`, using a persistent `CARGO_TARGET_DIR`
-   (`~/.cache/provenant/cargo-target`) for incremental rebuilds. CI caches the
-   same directory keyed on `Cargo.lock` and the toolchain. The existing digest
-   identity makes a stale binary visible. No release pipeline, signing or
-   download path is needed. The lane module adds one crate dependency, `libc`,
-   locked in `Cargo.lock`; this amends ADR 0027's "no crate dependencies".
-2. **Moves before any deletion.** The behind-origin advisory
-   (`lib/stale_checkout.py`) fires from the binary on every route the Python
-   dispatcher scans today, with `test_stale.py` kept against the binary. The
-   `check` custody functions that `check_target.py` loads from the Python
-   dispatcher move into `check_target.py`. The TypeScript tests that run
-   the Python front door (`run-reader-events`, `hosts`) call the owner
-   scripts directly. Any resolution case in the deleted tests that the crate's
-   38 unit tests lack moves into them.
-3. **Switch:** once the S1 conformance rows are green, both Macs use the binary.
-   S1a (#1231) completed this switch.
-4. **Delete:** the Python checkout dispatcher and installed template, the `python`
-   and `auto` branches in the retired checkout installer and
-   `front_door_build.py`, the template branch of `check-provenant-install.py`,
-   and the S1 tests. `scripts/check-provenant-install.py` itself stays, because
-   `check-harness` and the provider and routing checks depend on it; S1 keeps
-   its Rust build and install-drift checks. The retired checkout entrypoint
-   exits 3 and directs users to an accepted packaged release.
+The front door is Rust. `tools/front-door/rust-toolchain.toml` pins the build
+with rustfmt and Clippy; build with `cargo build --release --locked` from that
+workspace. Release identity comes from tracked source and asset inventories.
+Runtime startup never builds the binary.
 
-`lane` is a built-in verb, handled in-process like `help` and `root`, and
-hidden from `help`. User-facing verbs keep their names.
+Installed binaries resolve `<release>/bin/provenant` beside `release.json`;
+uninstalled builds require explicit `PROVENANT_ROOT`. `check` selects the
+caller's Git toplevel, validates its Provenant markers and runs that checkout's
+`scripts/check-harness`. The old Python checkout resolver, stale-check advisory
+and build/installation helpers are retired. Legacy installer entrypoints exit
+3. Production install command composition belongs to release cut-over; the
+config crate currently supplies the typed release and managed-file APIs.
+
+S1a (#1231) completed the front-door switch. S2 (#1379) removes the legacy
+`lane` route and exposes `internal supervise` for the Rust supervisor. The
+historical slice plan below is superseded by the
+[current supervisor design](../rust-port/design/supervisor.md).
 
 ## Slices
 
@@ -425,7 +413,7 @@ after cutover.
 | `provider_exec.build_plan` and the confinement profile | No | Security-relevant string building, reviewed as Python; Rust adds nothing structural |
 | `fabric_git.py`, `fabric_hosts.py`, `bounded_process.py` | No | Short helper subprocesses whose defects are protocol, not supervision; a Rust hop per call costs more than it saves |
 | `scripts/reap.py` (explicit-PID reap) | No | It stops an arbitrary process the caller names, so it has no parent relationship for Rust to exploit |
-| `check` custody (`check_target.py`, 70 lines) | Maybe | Would make the front door self-contained; only if it starts to churn |
+| `check` checkout selection | Rust | Implemented by the front door; runs the caller checkout's checker |
 | `lanes --wait` and `events --follow` | Maybe, after S4 | A lock-probe wait is simple in Rust; only if wait defects recur |
 
 ## Risks

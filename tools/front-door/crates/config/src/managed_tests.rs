@@ -607,9 +607,10 @@ impl SafeDir for FaultDir {
     fn read_link(&self, name: &OsStr) -> TestFsResult<PathBuf> {
         self.inner.read_link(name)
     }
-    fn publish(
+    fn atomic_write(
         &self,
         name: &OsStr,
+        prefix: &str,
         bytes: &[u8],
         permissions: u32,
         mode: PublishMode,
@@ -640,7 +641,9 @@ impl SafeDir for FaultDir {
                 source: io::Error::other("injected receipt publication failure"),
             });
         }
-        let publication = self.inner.publish(name, bytes, permissions, mode)?;
+        let publication = self
+            .inner
+            .atomic_write(name, prefix, bytes, permissions, mode)?;
         if self.state.mode == FaultMode::CancelAfterFirstPublication
             && !self.state.fired.swap(true, Ordering::AcqRel)
             && let Some(cancel) = &self.state.cancel
@@ -660,15 +663,6 @@ impl SafeDir for FaultDir {
             });
         }
         self.inner.sync()
-    }
-    fn atomic_write(
-        &self,
-        name: &OsStr,
-        prefix: &str,
-        bytes: &[u8],
-        mode: PublishMode,
-    ) -> TestFsResult<Publication> {
-        self.inner.atomic_write(name, prefix, bytes, mode)
     }
     fn replace_link(&self, name: &OsStr, target: &Path) -> TestFsResult<Publication> {
         self.inner.replace_link(name, target)
@@ -1592,6 +1586,52 @@ fn interrupted_release_publish_leaves_no_manifest_and_reapplies_with_real_stagin
     .unwrap();
     assert!(!staging.exists());
     Release::read(&release_root, &release.manifest.target, &LocalFs).unwrap();
+}
+
+#[test]
+fn capture_does_not_unlink_an_active_install_staging_file() {
+    let f = Fixture::new();
+    let release = f.release();
+    let root = f
+        .targets
+        .roots
+        .state
+        .as_path()
+        .join("releases")
+        .join(release.manifest.source_digest.to_string());
+    let install_dir = directory(
+        &f.targets.roots.state.as_path().join("install"),
+        true,
+        &LocalFs,
+    )
+    .unwrap();
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let _lock = install_dir
+        .lock(
+            OsStr::new("install.lock"),
+            LockMode::Exclusive,
+            WaitBudget::cli(clock.mono_now(), 1).unwrap(),
+            &cancel,
+            &clock,
+        )
+        .unwrap();
+    let binary_dir = directory(&root.join("bin"), true, &LocalFs).unwrap();
+    let temporary = LocalFs.temporary_name().unwrap();
+    let mut file = binary_dir.create_new(&temporary).unwrap();
+    std::io::Write::write_all(&mut file, b"live staged bytes").unwrap();
+    file.sync().unwrap();
+
+    // A second caller can preview while the first writer owns the lock. Its
+    // inventory must leave that writer's open staging entry intact.
+    Snapshots::capture(&release, &f.targets, &LocalFs).unwrap();
+    binary_dir
+        .rename_noreplace(&temporary, OsStr::new("provenant"))
+        .unwrap();
+    assert_eq!(
+        fs::read(root.join("bin/provenant")).unwrap(),
+        b"live staged bytes"
+    );
 }
 
 #[test]

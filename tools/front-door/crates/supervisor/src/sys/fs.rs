@@ -204,42 +204,57 @@ pub(crate) fn rename(
 ) -> io::Result<()> {
     let source = string(source)?;
     let destination = string(destination)?;
-    // SAFETY: both fds are borrowed from live owners; both paths are live
-    // NUL-terminated single components. renameat* retains no pointers, follows
-    // no final symlinks, and atomically changes directory entries. Concurrent
-    // contenders are decided by the kernel; errors leave ownership unchanged.
-    retry(|| unsafe {
-        match mode {
-            Rename::Replace => libc::renameat(
-                from.as_raw_fd(),
-                source.as_ptr(),
-                to.as_raw_fd(),
-                destination.as_ptr(),
-            ),
-            #[cfg(target_os = "linux")]
-            Rename::NoReplace | Rename::Exchange => libc::renameat2(
-                from.as_raw_fd(),
-                source.as_ptr(),
-                to.as_raw_fd(),
-                destination.as_ptr(),
-                if matches!(mode, Rename::NoReplace) {
-                    libc::RENAME_NOREPLACE
-                } else {
-                    libc::RENAME_EXCHANGE
-                },
-            ),
-            #[cfg(target_os = "macos")]
-            Rename::NoReplace | Rename::Exchange => libc::renameatx_np(
-                from.as_raw_fd(),
-                source.as_ptr(),
-                to.as_raw_fd(),
-                destination.as_ptr(),
-                if matches!(mode, Rename::NoReplace) {
-                    libc::RENAME_EXCL
-                } else {
-                    libc::RENAME_SWAP
-                },
-            ),
+    retry(|| match mode {
+        Rename::Replace => {
+            // SAFETY: both fds are borrowed from live owners and both paths are
+            // live NUL-terminated components. renameat retains no pointers and
+            // atomically changes the directory entry.
+            unsafe {
+                libc::renameat(
+                    from.as_raw_fd(),
+                    source.as_ptr(),
+                    to.as_raw_fd(),
+                    destination.as_ptr(),
+                )
+            }
+        }
+        #[cfg(target_os = "linux")]
+        Rename::NoReplace | Rename::Exchange => {
+            // SAFETY: both fds are borrowed from live owners and both paths are
+            // live NUL-terminated components. renameat2 retains no pointers
+            // and atomically applies the selected exchange mode.
+            unsafe {
+                libc::renameat2(
+                    from.as_raw_fd(),
+                    source.as_ptr(),
+                    to.as_raw_fd(),
+                    destination.as_ptr(),
+                    if matches!(mode, Rename::NoReplace) {
+                        libc::RENAME_NOREPLACE
+                    } else {
+                        libc::RENAME_EXCHANGE
+                    },
+                )
+            }
+        }
+        #[cfg(target_os = "macos")]
+        Rename::NoReplace | Rename::Exchange => {
+            // SAFETY: both fds are borrowed from live owners and both paths are
+            // live NUL-terminated components. renameatx_np retains no pointers
+            // and atomically applies the selected exchange mode.
+            unsafe {
+                libc::renameatx_np(
+                    from.as_raw_fd(),
+                    source.as_ptr(),
+                    to.as_raw_fd(),
+                    destination.as_ptr(),
+                    if matches!(mode, Rename::NoReplace) {
+                        libc::RENAME_EXCL
+                    } else {
+                        libc::RENAME_SWAP
+                    },
+                )
+            }
         }
     })
     .map(|_| ())
@@ -277,29 +292,35 @@ impl Iterator for Entries {
             return None;
         }
         loop {
-            // SAFETY: &mut self gives exclusive access to the owned stream.
-            // readdir returns null at EOF/error, distinguished with this
-            // thread's errno. d_name is NUL-terminated and copied before the
-            // next call; no libc-owned memory or pointers escape.
-            unsafe {
-                #[cfg(target_os = "macos")]
-                let errno = libc::__error();
-                #[cfg(target_os = "linux")]
-                let errno = libc::__errno_location();
-                *errno = 0;
-                let entry = libc::readdir(self.stream);
-                if entry.is_null() {
-                    self.finished = true;
-                    return if *errno == 0 {
-                        None
-                    } else {
-                        Some(Err(io::Error::last_os_error()))
-                    };
-                }
-                let name = CStr::from_ptr((*entry).d_name.as_ptr()).to_bytes();
-                if name != b"." && name != b".." {
-                    return Some(Ok(OsString::from_vec(name.to_vec())));
-                }
+            // SAFETY: returns this thread's live errno slot, which is read and
+            // written only during this call to next().
+            #[cfg(target_os = "macos")]
+            let errno = unsafe { libc::__error() };
+            #[cfg(target_os = "linux")]
+            // SAFETY: returns this thread's live errno slot for this call.
+            let errno = unsafe { libc::__errno_location() };
+            // SAFETY: errno is the current thread's live errno slot.
+            unsafe { *errno = 0 };
+            // SAFETY: &mut self gives exclusive access to the owned stream;
+            // readdir's returned entry is borrowed until the next call.
+            let entry = unsafe { libc::readdir(self.stream) };
+            if entry.is_null() {
+                self.finished = true;
+                // SAFETY: errno remains the current thread's live errno slot.
+                return if unsafe { *errno } == 0 {
+                    None
+                } else {
+                    Some(Err(io::Error::last_os_error()))
+                };
+            }
+            // SAFETY: entry is non-null and valid until the next readdir call;
+            // d_name is the directory record's NUL-terminated byte array.
+            let name_ptr = unsafe { (*entry).d_name.as_ptr() };
+            // SAFETY: name_ptr points to the NUL-terminated d_name field of
+            // this live directory entry; bytes are copied before next().
+            let name = unsafe { CStr::from_ptr(name_ptr) }.to_bytes();
+            if name != b"." && name != b".." {
+                return Some(Ok(OsString::from_vec(name.to_vec())));
             }
         }
     }
@@ -423,15 +444,15 @@ pub(crate) mod tests {
         let result = retry(|| {
             calls += 1;
             if calls == 1 {
-                // SAFETY: platform errno accessor returns this thread's live
-                // errno slot. No pointer escapes or aliases another thread.
-                unsafe {
-                    #[cfg(target_os = "macos")]
-                    let slot = libc::__error();
-                    #[cfg(target_os = "linux")]
-                    let slot = libc::__errno_location();
-                    *slot = libc::EINTR;
-                }
+                // SAFETY: platform accessor returns this thread's live errno
+                // slot; no pointer escapes or aliases another thread.
+                #[cfg(target_os = "macos")]
+                let slot = unsafe { libc::__error() };
+                #[cfg(target_os = "linux")]
+                // SAFETY: returns this thread's live errno slot for this call.
+                let slot = unsafe { libc::__errno_location() };
+                // SAFETY: slot is the live thread-local errno location above.
+                unsafe { *slot = libc::EINTR };
                 -1
             } else {
                 7
@@ -443,14 +464,15 @@ pub(crate) mod tests {
         let mut calls = 0;
         let error = retry(|| {
             calls += 1;
-            // SAFETY: same thread-local errno slot as above.
-            unsafe {
-                #[cfg(target_os = "macos")]
-                let slot = libc::__error();
-                #[cfg(target_os = "linux")]
-                let slot = libc::__errno_location();
-                *slot = libc::EACCES;
-            }
+            // SAFETY: platform accessor returns this thread's live errno
+            // slot; no pointer escapes or aliases another thread.
+            #[cfg(target_os = "macos")]
+            let slot = unsafe { libc::__error() };
+            #[cfg(target_os = "linux")]
+            // SAFETY: returns this thread's live errno slot for this call.
+            let slot = unsafe { libc::__errno_location() };
+            // SAFETY: slot is the live thread-local errno location above.
+            unsafe { *slot = libc::EACCES };
             -1
         })
         .unwrap_err();

@@ -1,6 +1,6 @@
 //! Sans-IO process policy and the safe operating-system boundary.
 //!
-//! These APIs are inert until the command and S2 custody integration passes.
+//! Utilities run through bounded execution; providers remain in guardian custody.
 #![deny(unsafe_code)]
 
 pub mod clock;
@@ -9,15 +9,19 @@ pub mod fs;
 mod identity;
 pub mod pid;
 // This is the sole syscall boundary, including nonblocking child/lock waits.
-#[allow(
-    unsafe_code,
-    clippy::disallowed_methods,
-    clippy::multiple_unsafe_ops_per_block
-)]
+#[allow(unsafe_code, clippy::disallowed_methods)]
 pub mod sys;
 
+pub mod capture;
+pub mod census;
+pub mod custody;
 #[cfg(feature = "fixture")]
 pub mod fixture;
+mod guardian;
+pub mod machine;
+pub mod scratch;
 pub mod utility;
 
-mod legacy_json;
+#[cfg(feature = "fixture")]
+pub use guardian::ExitPublisher;
+pub use guardian::{ChildRegistry, GuardianHooks, RegisteredChild, supervise};

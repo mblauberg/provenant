@@ -510,8 +510,9 @@ Fabric defines its command and receipt. Install/startup never imports. Do not
 read transcripts, revive runs/processes/claims/leases/sessions, or import
 telemetry/quota history. The old ledger remains available to the old install;
 telemetry owns retirement of the OTel collector. `tests/test_host_identity.py`
-and the OTel slices of `tests/test_install_harness.py` are counted/deleted
-once by state, excluded from telemetry's count.
+and the old OTel cases in `tests/test_install_harness.py` are counted once by
+state. Those cases move to `tests/test_install_otel_collector.py`, so telemetry
+excludes them.
 
 Source reads must not write SQLite journals, SHM or checkpoints. Require a
 quiescent self-contained source or supplied consistent snapshot; refuse a

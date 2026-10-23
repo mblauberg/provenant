@@ -7,7 +7,7 @@ for the full contract.
 `build.rs` stamps the workspace source digest. Post-link build orchestration
 calls `package_release` to seal staged files with typed `release.json`. Installation verifies the manifest, file bytes and modes, then puts
 the release at `<state>/releases/<SourceDigest>/`. It applies managed files
-under `<state>/install/lock` and publishes `<state>/install/receipt.json` last.
+under `<state>/install/install.lock` and publishes `<state>/install/receipt.json` last.
 Exact desired bytes and links are no-ops, including after a crash before receipt
 publication. A dry run creates no root, lock or receipt; `check install` compares
 digests without repair; uninstall removes only unchanged owned entries.

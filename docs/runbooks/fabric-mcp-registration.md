@@ -3,9 +3,10 @@
 Status: legacy registry editor for existing client registrations
 Applies to: `scripts/configure-fabric-mcp.py`
 
-The `provenant` CLI owns release and managed-file operations. `provenant install`
-manages harness-specific MCP, hook and link entries; this page documents the
-separate legacy registry editor for existing registrations.
+The config crate supplies release and managed-file APIs. Production install
+command composition, MCP registration and hooks belong to client cut-over.
+This page documents the separate legacy registry editor for existing
+registrations.
 
 `scripts/configure-fabric-mcp.py` remains a separate legacy registry editor. It
 can add, check or repair registry entries when the stable shim is already
@@ -13,7 +14,6 @@ installed. Its `--agents-home` argument selects instruction source paths; it
 does not add a checkout path to registrations or follow a product-root pointer.
 Pass `--instance-root` when the registration needs an explicit instance root.
 
-## What gets registered
 ## What gets registered
 
 The legacy registration format names the stable shim at
@@ -59,12 +59,6 @@ adapter compatibility.
 | Cursor | `~/.cursor/mcp.json` |
 | Kiro | `~/.kiro/settings/mcp.json` |
 | OpenCode | `~/.config/opencode/opencode.jsonc` |
-
-When `CLAUDE_CONFIG_DIR` targets an alternate account directory, the Rust install
-command links its `settings.json` to `~/.claude/settings.json`. The shared
-`settings.json` link means settings changed in one account apply to all linked
-accounts, and if Claude replaces the link with a regular file the accounts stop
-sharing; rerunning `provenant install` does not overwrite it.
 
 Each client has its own seat (`claude`, `codex`, `cursor`, `agy`, `kiro`, or
 `opencode`) and therefore its own default inbox. A seat does not establish the

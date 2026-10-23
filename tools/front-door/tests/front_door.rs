@@ -92,12 +92,18 @@ fn installed_release_python_routes_are_unavailable_without_an_owner() {
     assert!(!installed_release.join(".git").exists());
 
     let cases: &[&[&str]] = &[
-        &["digest"], &["worktree"], &["mcp"], &["lease", "acquire", "seat-1"], &[],
+        &["digest"],
+        &["worktree"],
+        &["mcp"],
+        &["lease", "acquire", "seat-1"],
+        &[],
     ];
     for (index, arguments) in cases.iter().enumerate() {
         let mut route = command(&binary, &sandbox.home());
         route.args(*arguments);
-        if arguments.is_empty() { route.env("AGENT_FABRIC_SEAT", "chair"); }
+        if arguments.is_empty() {
+            route.env("AGENT_FABRIC_SEAT", "chair");
+        }
         let output = route.output().unwrap();
         assert_eq!(
             output.status.code(),
@@ -235,7 +241,7 @@ fn exec_failures_exit_3_without_a_panic() {
         ("peer", "No such file or directory"),
     ] {
         let output = command(&binary, &sandbox.home())
-        .env("HARNESS_PYTHON", harness_python())
+            .env("HARNESS_PYTHON", harness_python())
             .arg(verb)
             .output()
             .unwrap();

@@ -82,6 +82,8 @@ struct TrackedFiles {
 }
 
 impl TrackedFiles {
+    // Build-time Git metadata discovery, before the runtime supervisor exists.
+    #[allow(clippy::disallowed_methods)]
     fn load(workspace: &Path, repository: &Path) -> BuildResult<Self> {
         let top_level = Command::new("git")
             .args(["rev-parse", "--show-toplevel"])
@@ -846,6 +848,7 @@ mod tests {
         Ok(source_digest(&borrowed)?)
     }
 
+    #[allow(clippy::disallowed_methods)]
     fn run_git(repository: &Path, arguments: &[&str]) -> BuildResult<()> {
         let status = Command::new("git")
             .args(arguments)

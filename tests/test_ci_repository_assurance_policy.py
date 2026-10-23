@@ -63,7 +63,6 @@ JOB_PERMISSIONS = {
     "detect-changes": {"actions": "read", "contents": "read", "pull-requests": "read"},
     "harness-checks": {"contents": "read"},
     "python-tests": {"contents": "read"},
-    "lane-conformance": {"contents": "read"},
     "docs": {"contents": "read"},
     "rust": {"contents": "read"},
     "rust-macos-release": {"contents": "read"},
@@ -279,7 +278,7 @@ def test_every_tracked_path_matches_at_least_one_build_filter() -> None:
     outputs = _job(document, "detect-changes").get("outputs")
     assert isinstance(outputs, dict)
     assert set(outputs) == {
-        "harness", "docs", "workflows", "rust", "lane", "tree", "passed-tree"
+        "harness", "docs", "workflows", "rust", "tree", "passed-tree"
     }
     # `docs`, `tree` and `passed-tree` are computed from the PR file list or
     # tested checkout, not path filters. They do not cover tracked paths.
@@ -298,52 +297,6 @@ def test_every_tracked_path_matches_at_least_one_build_filter() -> None:
     assert unmatched == [], f"tracked paths outside every build filter: {unmatched}"
 
 
-def test_lane_conformance_runs_serially_on_linux_and_macos_for_lane_changes() -> None:
-    document = _workflow()
-    filters = _change_filters(document)
-    patterns = _flatten_patterns(filters["lane"])
-    for path in (
-        "tools/front-door/src/lane.rs",
-        "skills/orchestrate/scripts/cf_dispatch.py",
-        "skills/orchestrate/scripts/dispatch_run.py",
-        "skills/orchestrate/scripts/provider_exec.py",
-        "skills/orchestrate/scripts/run_controls.py",
-        "skills/orchestrate/scripts/run_lineage.py",
-        "skills/orchestrate/scripts/run_dir_init.sh",
-        "skills/_shared/bounded_process.py",
-        "skills/_shared/custody.py",
-        "skills/_shared/process_info.py",
-        "skills/_shared/attempt_storage.py",
-        "skills/_shared/attempt_evidence.py",
-        "skills/_shared/memory_admission.py",
-        "skills/_shared/layout.py",
-        "tests/lane_conformance/test_seed.py",
-        "tests/support/dispatch.py",
-        "tests/support/proc.py",
-        "tests/support/runs.py",
-        "tests/support/fake_cli.py",
-        "tests/support/git.py",
-        "config/model-routing.json",
-        "scripts/lib/jsonc.py",
-        "scripts/fabric_hosts.py",
-        "tests/cf_dispatch_support.py",
-        "tests/conftest.py",
-        ".github/workflows/ci.yml",
-    ):
-        assert any(_matches_filter(path, pattern) for pattern in patterns), path
-    assert not any(_matches_filter("docs/unrelated.md", pattern) for pattern in patterns)
-    job = _job(document, "lane-conformance")
-    assert job["needs"] == "detect-changes"
-    assert job["if"] == "needs.detect-changes.outputs.lane == 'true'"
-    assert job["runs-on"] == "${{ matrix.os }}"
-    assert job["strategy"]["matrix"]["os"] == ["ubuntu-latest", "macos-15"]
-    commands = [step["run"] for step in _steps(job) if "run" in step]
-    assert commands == ["uv sync --locked --only-group test",
-                        ".venv/bin/python -m pytest tests/lane_conformance -q"]
-    shards = "\n".join(str(step.get("run", "")) for step in _steps(_job(document, "python-tests")))
-    assert "--ignore=tests/lane_conformance" in shards
-
-
 def test_macos_smoke_builds_the_release_front_door_with_the_rust_filter() -> None:
     document = _workflow()
     job = _job(document, "rust-macos-release")
@@ -356,7 +309,10 @@ def test_macos_smoke_builds_the_release_front_door_with_the_rust_filter() -> Non
     assert len(builds) == 1
     assert builds[0]["working-directory"] == "tools/front-door"
     assert "cargo build --release --locked -p provenant --bin provenant" in builds[0]["run"]
-    assert not any("cargo test" in str(step.get("run", "")) for step in _steps(job))
+    custody_tests = [step for step in _steps(job) if "cargo test" in str(step.get("run", ""))]
+    assert len(custody_tests) == 1
+    assert custody_tests[0]["working-directory"] == "tools/front-door"
+    assert custody_tests[0]["run"] == "cargo test -p provenant-supervisor --locked"
 
 
 def test_ci_status_depends_on_every_other_job_and_fails_closed() -> None:
