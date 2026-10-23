@@ -48,8 +48,9 @@ cross-tracker routes, not a second current-work owner.
 ### Specifications
 
 - Owns: `non-derivable-intent`
-- Drift gate: `tests/test_projection.py` for retained runtime-graph projections;
-  other prose is review-checked
+- Drift gate: `tests/test_projection.py` checks the architecture risk table
+  against `config/risk-policy.json` and asserts escalation policy; other prose
+  is review-checked
 
 ### Merge policy
 
@@ -72,8 +73,9 @@ Documentation claims sit in three tiers, and the third is deliberate:
 
 1. **Source-owned.** Marked regions in the README and
    `docs/ARCHITECTURE.md` remain maintained documentation.
-   `tests/test_projection.py` binds the architecture regions to
-   `config/risk-policy.json` and the delivery lifecycle contract. The README
+   `tests/test_projection.py` binds the architecture risk table to
+   `config/risk-policy.json` and checks that internal data alone stays routine
+   while confidentiality and irreversible consequences escalate. The README
    skill count is machine-checked; its catalogue prose is review-owned.
 2. **Review-checked.** Runtime schema and migration structure is owned by code
    and tests. Specification prose, fenced commands, placeholders and unbound

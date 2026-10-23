@@ -1,7 +1,7 @@
 {
   "version": 6,
   "rulebook_version": 6,
-  "source_digest": "2c2d7759d2f7023ed64c110da44fa99aa15ce11d8c63be597ff85961a0f75264",
+  "source_digest": "821b6807fd11e1b2a7f97cd0a2d026a4ed2d6e7dca7ca79feec71098439a8487",
   "scope": "Git-tracked Python (including shebang entry points), TypeScript and imported production ps.mjs; tests inventory-only; planning scripts excluded",
   "gate_definitions": {
     "unit": "Target crate's unit tests, fmt and clippy; CI once the crate exists",
@@ -6711,40 +6711,6 @@
       "action": "ported"
     },
     {
-      "id": "scripts/lib/projection.py#unit-01",
-      "kind": "port",
-      "source_files": [
-        "scripts/lib/projection.py"
-      ],
-      "source_spans": [
-        {
-          "start": 1,
-          "end": 70,
-          "symbols": [
-            "projection"
-          ]
-        }
-      ],
-      "target_crate": "cli",
-      "depends_on": [
-        "prerequisite:J1",
-        "prerequisite:J2",
-        "prerequisite:adr",
-        "workspace:manifest-and-digest"
-      ],
-      "risk": "medium",
-      "recommended_model_tier": "junior",
-      "review_model_tier": "principal",
-      "gates": [
-        "unit",
-        "J1",
-        "J2",
-        "differential"
-      ],
-      "lane_days": 0.5,
-      "action": "ported"
-    },
-    {
       "id": "scripts/lib/roots.py#unit-01",
       "kind": "port",
       "source_files": [
@@ -12120,42 +12086,6 @@
           "end": 286,
           "symbols": [
             "reference_runs"
-          ]
-        }
-      ],
-      "target_crate": "workflow",
-      "depends_on": [
-        "prerequisite:J1",
-        "prerequisite:J2",
-        "prerequisite:adr",
-        "scripts/lib/roots.py#unit-01",
-        "skills/_shared/roots.py#unit-01",
-        "workspace:manifest-and-digest"
-      ],
-      "risk": "medium",
-      "recommended_model_tier": "junior",
-      "review_model_tier": "principal",
-      "gates": [
-        "unit",
-        "J1",
-        "J2",
-        "differential"
-      ],
-      "lane_days": 0.5,
-      "action": "ported"
-    },
-    {
-      "id": "skills/deliver/scripts/select_security_evidence.py#unit-01",
-      "kind": "port",
-      "source_files": [
-        "skills/deliver/scripts/select_security_evidence.py"
-      ],
-      "source_spans": [
-        {
-          "start": 1,
-          "end": 77,
-          "symbols": [
-            "select_security_evidence"
           ]
         }
       ],
@@ -18395,7 +18325,6 @@
       "scripts/lib/front_door_build.py#unit-01",
       "scripts/lib/jsonc.py#unit-01",
       "scripts/lib/product_root_resolver.py#unit-01",
-      "scripts/lib/projection.py#unit-01",
       "scripts/lib/stale_checkout.py#interface",
       "scripts/managed_installation_manifest.py#unit-01",
       "scripts/model_route.py#interface",
@@ -18557,7 +18486,6 @@
       "skills/_shared/review_plan.py#unit-01",
       "skills/deliver/scripts/delivery_policy_validation.py#unit-01",
       "skills/deliver/scripts/reference_runs.py#unit-01",
-      "skills/deliver/scripts/select_security_evidence.py#unit-01",
       "skills/deliver/scripts/software_delivery_validation.py#unit-01",
       "skills/implement/scripts/checkpoint_run.py#unit-01",
       "skills/legal-writing/scripts/lint_legal_style.py#unit-01",
@@ -18782,7 +18710,7 @@
     ]
   ],
   "estimated_lane_days_by_crate": {
-    "cli": 18.0,
+    "cli": 17.5,
     "config": 9.75,
     "confinement": 4.75,
     "core": 4.0,
@@ -18797,7 +18725,7 @@
     "run": 12.25,
     "supervisor": 8.25,
     "telemetry": 8.5,
-    "workflow": 31.25
+    "workflow": 30.75
   },
   "source_imports": {
     "apps/quota-menubar/Fixtures/make_fixtures.py": [
@@ -19364,7 +19292,6 @@
     "scripts/lib/front_door_build.py": [],
     "scripts/lib/jsonc.py": [],
     "scripts/lib/product_root_resolver.py": [],
-    "scripts/lib/projection.py": [],
     "scripts/lib/roots.py": [
       "skills/_shared/roots.py"
     ],
@@ -19568,10 +19495,6 @@
     ],
     "skills/deliver/scripts/reference_evaluation.py": [],
     "skills/deliver/scripts/reference_runs.py": [
-      "scripts/lib/roots.py",
-      "skills/_shared/roots.py"
-    ],
-    "skills/deliver/scripts/select_security_evidence.py": [
       "scripts/lib/roots.py",
       "skills/_shared/roots.py"
     ],
@@ -20048,10 +19971,6 @@
       "skills/implement/scripts/checkpoint_run.py",
       "tests/support/modules.py"
     ],
-    "tests/test_delivery_validator_structure.py": [
-      "skills/deliver/scripts/delivery_validation_common.py",
-      "skills/deliver/scripts/validate_delivery.py"
-    ],
     "tests/test_dispatch_run.py": [
       "scripts/fabric_lanes.py",
       "scripts/model_route.py",
@@ -20253,9 +20172,7 @@
       "skills/_shared/roots.py",
       "skills/deliver/scripts/delivery_receipt.py"
     ],
-    "tests/test_projection.py": [
-      "scripts/lib/projection.py"
-    ],
+    "tests/test_projection.py": [],
     "tests/test_provenant_lint.py": [
       "scripts/provenant_lint.py"
     ],
@@ -20299,7 +20216,6 @@
     ],
     "tests/test_pytest_console_entrypoint.py": [
       "tests/test_product_root_resolver.py",
-      "tests/test_projection.py",
       "tests/test_public_release_check.py",
       "tests/test_review_panel.py"
     ],
@@ -20384,10 +20300,6 @@
       "tests/support/modules.py"
     ],
     "tests/test_rust_port_layering.py": [],
-    "tests/test_security_evidence_selection.py": [
-      "skills/deliver/scripts/select_security_evidence.py",
-      "tests/support/modules.py"
-    ],
     "tests/test_session_state_check.py": [
       "skills/session/scripts/compact_reinject.py",
       "skills/session/scripts/state_check.py"
@@ -20495,7 +20407,6 @@
       "scripts/telemetry_report.py"
     ],
     "tools/front-door/crates/telemetry/src/pending/python/generate_unicode.py": [],
-    "tools/front-door/crates/workflow/tests/generate_policy_fixtures.py": [],
     "tools/front-door/crates/workflow/tests/oracle.py": [
       "skills/_shared/review_panel.py",
       "skills/autopilot/scripts/bootstrap-autopilot.py",
@@ -20879,18 +20790,6 @@
       "expression": "roots"
     },
     {
-      "source": "skills/deliver/scripts/select_security_evidence.py",
-      "line": 21,
-      "kind": "dynamic-loader-review",
-      "expression": "_roots_util.spec_from_file_location('provenant_roots', Path(__file__).resolve().parents[2] / '_shared' / 'roots.py')"
-    },
-    {
-      "source": "skills/deliver/scripts/select_security_evidence.py",
-      "line": 21,
-      "kind": "ambiguous-import",
-      "expression": "roots"
-    },
-    {
       "source": "skills/deliver/scripts/software_delivery_validation.py",
       "line": 27,
       "kind": "dynamic-loader-review",
@@ -21117,12 +21016,6 @@
       "line": 13,
       "kind": "dynamic-loader-review",
       "expression": "importlib.util.spec_from_file_location('worker_liveness', SCRIPT)"
-    },
-    {
-      "source": "tools/front-door/crates/workflow/tests/generate_policy_fixtures.py",
-      "line": 29,
-      "kind": "dynamic-loader-review",
-      "expression": "importlib.util.spec_from_file_location(f'policy_{unit}', source)"
     },
     {
       "source": "tools/front-door/crates/workflow/tests/oracle.py",
