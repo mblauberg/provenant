@@ -219,6 +219,9 @@ jobs:
               - 'tests/support/**'
               - 'tests/cf_dispatch_support.py'
               - 'tests/conftest.py'
+              - 'config/model-routing.json'
+              - 'scripts/lib/jsonc.py'
+              - 'scripts/fabric_hosts.py'
               - 'pyproject.toml'
               - 'uv.lock'
             workflows:
