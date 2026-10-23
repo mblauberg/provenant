@@ -1117,6 +1117,128 @@ The source revision above is unchanged; CLI rendering remains an edge task.
   `provenant-core` repr helper are available to this crate.
 
 
+## RP-core-2-01 — shared Python compatibility ownership and ISO repairs
+
+- Rulebook v4; class `bug` (fixed, no intentional source behavior change).
+- Source/oracle: Python sources at `7475ff01`; copied helpers from quota's
+  verified pending module at that revision and providers PR #1298 revision
+  `4155f202e01c9e275e24a9d188f9be5839c04008`. Local CPython 3.14.8,
+  Unicode 16.0.0; Rust oracle runner enforces Python >=3.12.
+- Reproducer: `py::tests::iso_grammar_and_offsets_match_python`, including
+  `2026-W43-5112`, Unicode separators, ISO week dates, fractional UTC offsets,
+  and `9999-12-31T12Z`. The copied Jiff adaptation did not cover this grammar
+  and Jiff's UTC timestamp range excludes Python's final twelve hours.
+- Repair: shared `py` parses Python civil datetimes and retains exact i64 UTC
+  microseconds in `PythonTimestamp`; `to_jiff` is explicitly checked. Week-date
+  separator disambiguation follows CPython's local `_pydatetime` implementation.
+  Float-second conversion retains quota's modf/half-even implementation.
+- Evidence: exact differential grammar matrix, 1,033 fromtimestamp fixtures,
+  numeric equality across bool/int/float, 512 deterministic float bit patterns,
+  and all Unicode scalar printable classifications. No epsilon, timestamp
+  normalisation, or integer-to-float comparison is used.
+- Disposition: source compatibility gathered into `provenant_core::py`;
+  other crates' copies remain for their owners to migrate. Checked JSON stays
+  in records. JSONC/host/pointer representation gaps remain separately open.
+
+### RP-1001 core-2 follow-up — byte encodings and slug inputs
+
+- Unit: `scripts/host_identity.py#unit-01`; rulebook v4; class `bug` (partial
+  repair, no intentional behavior change). Source/oracle `7475ff01` unchanged
+  at main `cc02dde4`; route `codex/gpt-6.1-sol@high`.
+- `configured` and lenient `peer_ids` now use Python's BOM and null-byte sniffing
+  for UTF-8/16/32, including BOM-less UTF-16/32. Decode errors preserve typed
+  causes and the source's stable `InvalidHost` message.
+- `slug_value` applies the shared Python truth/str helpers for JSON-shaped
+  inputs; the hostname observation API continues taking a string value.
+- Evidence: exact Python differential over eight valid byte encodings and
+  eight malformed/shape/duplicate cases, plus thirteen permissive slug inputs.
+- Remaining: nonfinite/overflow values and lone surrogate JSON strings (and
+  raw surrogate-pass byte decoding). The existing failing parity reproducer
+  remains ignored; this unit is still partial. No codec was moved from records.
+
+### RP-1002 core-2 follow-up — comment diagnostics and shared whitespace
+
+- Unit: `scripts/lib/jsonc.py#unit-01`; rulebook v4; class `bug` (partial
+  repair). Source/oracle `7475ff01`; route `codex/gpt-6.1-sol@high`.
+- Unterminated-comment error display now includes Python's exact line, column
+  and character offset. Unicode and CRLF differential fixtures compare all
+  four observable diagnostic values, including errors after earlier comments.
+- Trailing-comma lookahead uses the shared `py::python_whitespace`; control
+  whitespace is still rejected by the JSON grammar just as Python rejects it.
+- Remaining: extended JSON/surrogate/insertion-order representation, exact
+  integer ingress and generic JSONDecodeError diagnostics. Core cannot depend
+  on records under R2; no checked codec is moved or copied by this repair.
+  The unit remains partial and is excluded from `Units:`.
+
+### RP-1003 core-2 follow-up — native pointer writer bytes
+
+- Unit: `scripts/lib/product_root_resolver.py#unit-01`; rulebook v4; class `bug`
+  (partial repair). Source/oracle `7475ff01`; route `codex/gpt-6.1-sol@high`.
+- Pointer writing now emits Python's ASCII JSON spelling for native paths,
+  including U+007F and Unix surrogateescape for invalid UTF-8 bytes. It never
+  converts a path through replacement characters. Publication policy is unchanged.
+- Evidence: exact path-wire differential over 260 native byte fixtures, plus
+  pointer-writer differential for a real non-UTF-8 directory when supported.
+  The pure byte fixtures always run even if the filesystem refuses that name.
+- Pending: the small private `pending::path_json` and its error type belong in
+  records, whose current API cannot represent surrogateescaped JSON paths.
+  No checked integer codec is moved or copied; R2 prohibits a core->records
+  dependency. `pending::atomic_write` continues awaiting supervisor publication.
+- Remaining: pointer loading for surrogateescaped paths, extended JSON in
+  ignored fields, and exact integer ingress. The retained ignored differential
+  still documents these reader gaps; the unit remains partial.
+
+## RP-core-2-02 — scripts root facade completion
+
+- Unit: `scripts/lib/roots.py#unit-01`; rulebook v4; class `bug` (fixed).
+  Source/oracle `7475ff01`, unchanged at `cc02dde4`; route
+  `codex/gpt-6.1-sol@high`.
+- The Rust `roots` exports are the statically linked equivalent of the Python
+  facade's re-exported constant and two functions. Shared-root policy was already
+  present; direct facade differentials now cover unset/empty overrides, tilde,
+  lexical path spelling, unknown-user errors and native environment path bytes.
+- A right-reason failing differential exposed a missing final period in
+  `PathError::Home`; its wording now matches Python's expanduser RuntimeError.
+- All runtime policy is ported. Python importlib loading/defensive missing-module
+  branches are interpreter plumbing, replaced by Rust's compile-time module
+  linkage; no Python loader seam is copied. No command is switched.
+- Evidence: five roots tests pass, including the two direct-facade
+  differentials; default install paths use canonical paths on macOS.
+
+### RP-core-2-01 oracle patch-version clarification
+
+- CI uses CPython 3.14.4; local default is 3.14.8. Both accept midnight and
+  require explicit seconds before fractions, but disagree on `-00:00:00.5`:
+  3.14.4 discards the fractional offset, while 3.14.8 retains it. Requiring
+  >=3.14.8 initially caused the required CI differential to refuse its oracle.
+- Preserve both observed behaviors through `IsoformatSemantics` and
+  `python_fromisoformat_with`; the default matches pinned CI Python 3.14.4.
+  The exact differential chooses the source interpreter's explicit semantics
+  from an explicit datetime feature probe, never normalising timestamp results. Both 3.14.4 and
+  3.14.8 are installed/run locally. No Python bug is silently fixed.
+- The grammar fixture requires >=3.14; Python 3.12/3.13 remain valid for the
+  other oracle fixtures. A missing/incompatible required oracle still fails.
+
+### RP-1001 review correction — preserve slug input order
+
+The core-2 review found that the newly proposed `slug_value(&Value)` boundary
+would render sorted serde mappings rather than Python's insertion order
+(`{'z': 0, 'a': 0}` must slug to `z-0-a-0`). That generic API and its scalar-only
+fixture were removed before landing. The string/hostname slug API remains;
+generic Python input slugging awaits an ordered value representation and is
+explicitly part of this unit's remaining partial scope. The byte-encoding
+repair above is retained and independently covered.
+
+### RP-1003 review correction — unknown home errors
+
+A direct source differential exposed an ordinary pointer-loading error path:
+Python's `Path.expanduser` RuntimeError for an unknown user is not caught by the
+source reader. The old Rust reader discarded it as pointer absence. Both Rust
+load APIs now return `Result<Option<PathBuf>, PathError>` and preserve that error;
+malformed/missing pointers still return `Ok(None)`. No callers outside core use
+these inert APIs. The regression failed with `null` versus the source error,
+then passed after repair. Extended JSON/native-path reader gaps remain partial.
+
 ## RP-FS2-001: diagnostic count-key order (bug, fixed)
 
 - Units: `runtime/fabric/src/store.ts#unit-04` (partial), rulebook v4.

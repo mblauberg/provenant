@@ -47,7 +47,9 @@ outside this batch.
   no unsafe or ad hoc entropy implementation is supplied.
 - `pending` ECMAScript trim, numeric-key and UTF-16 slicing helpers belong in
   `provenant-core`, including `pending::js_iso` for full-range `Date.toISOString`. They are
-  JavaScript compatibility, not Python copies.
+  JavaScript compatibility, not Python copies. The `provenant-core::py`
+  helpers landed on main at `2420674b`; their Python trim, slicing, numeric
+  and datetime rules do not replace these ECMAScript contracts.
 
 ## Evidence and cut-over gaps
 
