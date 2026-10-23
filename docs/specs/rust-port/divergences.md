@@ -1399,3 +1399,50 @@ then passed after repair. Extended JSON/native-path reader gaps remain partial.
   adapters for the pending confinement/records/config/core contracts. Consumers
   remain unchanged; no graph unit or full conformance claim is added. README
   maps the remaining pending run and UUID contracts explicitly.
+
+### RP-SUP3-CENSUS: fallback failure rendering (bug, fixed; bound still open)
+
+- Source/oracle: `7021182d535f6c730c29713e77d5bca76893fd06`, Python 3.14.8,
+  rulebook v4. Author route: `codex/gpt-6.1-sol@high`.
+- Unit: `skills/orchestrate/scripts/process_info.py#unit-02` (partial).
+  The command adapter now preserves spawn errno/program and the timeout's
+  command/budget. Census rendering matches Python's OSError/TimeoutExpired
+  text; per-PID lookup and start-time still collapse these failures to absence.
+- Three injected command policy tests include a Python differential for spawn,
+  timeout, nonzero, empty census and unreadable PID failures. RP-1302's 1 MiB
+  stdout/stderr refusal remains open and blocks a full unit/ps-shim claim.
+
+### RP-SUP3-LIVENESS: diagnostic observation domain (library, open partial scope)
+
+- Same source/oracle and rulebook as RP-SUP3-CENSUS. Units:
+  `worker_liveness.py#unit-01` and `#unit-02`, both partial.
+- The read-only adapter uses bounded subprocess waits (15 seconds), bounded
+  output (16 MiB per stream), and a bounded session first line (64 MiB).
+  Python's corresponding waits/reads are unbounded. Oversize/timeout is a
+  typed refusal; this is not an accepted command behavior change.
+- `provenant_records::checked_json` owns JSON integer-range refusal, including
+  unknown fields, as the rulebook's approved `NumberOutOfRange` improvement.
+  Its missing extended JSON support (NaN and lone surrogate strings), and
+  core's missing surrogateescape string/path representation, prevent a full
+  claim. Native census refuses non-UTF-8 commands with a typed error retaining
+  the original OS string; it never silently changes command cwd extraction.
+  Native path rendering and exact non-strict symlink-loop behavior remain
+  partial too. Nothing calls this library yet.
+- Recursive glob does not follow directory links, retains root-before-nested
+  ordering for equal-mtime selection, and follows file links for reads.
+  A Python differential pins these behaviors. The typed main edge preserves
+  ordered/ASCII-escaped JSON, including CPython float spellings and non-finite
+  extensions, but raw argv/default/help parsing remains with the CLI owner.
+- Disposition: partial, absent from `Units:` and `ported.txt`; no divergence
+  approval is inferred. Shared-owner APIs and exact error/extended-input
+  fixtures are required before completing the affected domains.
+
+### RP-SUP3-REPAIR: rename endpoints and platform signal names (bug, fixed)
+
+- Same baseline and author route. Rename errors now retain source and
+  destination plus the OS cause; errno conversion remains unchanged. Boxed
+  safe filesystem traits require Send + Sync and have compile-time fixtures.
+- Node's platform-specific named signals now match the public Node constants
+  (SIGINFO on macOS; SIGSTKFLT/SIGPWR on Linux). A Node differential checks the
+  mapping. RP-SUP-PS-BUFFER's overflow contract remains open; this repair does
+  not complete the Fabric ps unit.
