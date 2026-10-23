@@ -364,18 +364,26 @@ pub fn route_command(host: &dyn RouterHost, product: &Path) -> Vec<OsString> {
 }
 
 /// Snapshot errors, malformed JSON, and a wrong schema all fall back to an empty catalogue.
-pub fn snapshot(host: &dyn RouterHost) -> Value {
+/// The ordered form is required by registered-model suffix matching, whose Python source
+/// short-circuits over suffix values in catalogue insertion order.
+pub fn snapshot_ordered(host: &dyn RouterHost) -> OrderedValue {
     let product = host.product_root();
     let mut argv = route_command(host, &product);
     argv.extend([OsString::from("snapshot"), OsString::from("--json")]);
     host.run_bounded(&argv, SNAPSHOT_TIMEOUT)
         .ok()
-        .and_then(|bytes| provenant_records::checked_json::from_slice(&bytes).ok())
+        .and_then(|bytes| String::from_utf8(bytes).ok())
+        .and_then(|text| crate::pending::from_json::<OrderedValue>(&text).ok())
         .filter(|data| {
-            data.is_object()
-                && data.get("schema").and_then(Value::as_str) == Some("fabric.catalogue.v1")
+            matches!(data, OrderedValue::Object(_))
+                && data.get("schema").and_then(OrderedValue::as_str) == Some("fabric.catalogue.v1")
         })
-        .unwrap_or_else(|| serde_json::json!({}))
+        .unwrap_or_else(|| OrderedValue::Object(OrderedObject::default()))
+}
+
+/// Value compatibility view for callers whose policy does not depend on key order.
+pub fn snapshot(host: &dyn RouterHost) -> Value {
+    snapshot_ordered(host).to_value()
 }
 
 /// Cooldown identity uses the router's registered id, without an effort selector.
@@ -386,12 +394,24 @@ pub fn registered_model(
     catalogue: Option<&Value>,
     warnings: Option<&mut Vec<String>>,
 ) -> String {
+    let catalogue = catalogue.cloned().map(OrderedValue::from);
+    registered_model_ordered(host, adapter, model, catalogue.as_ref(), warnings)
+}
+
+/// Cooldown identity resolution against an insertion-ordered router snapshot.
+pub fn registered_model_ordered(
+    host: &dyn RouterHost,
+    adapter: &str,
+    model: &str,
+    catalogue: Option<&OrderedValue>,
+    warnings: Option<&mut Vec<String>>,
+) -> String {
     let model = model.split_once('@').map_or(model, |(head, _)| head);
     if model == "*" {
         return model.to_owned();
     }
-    let raw_catalogue = catalogue.cloned().unwrap_or_else(|| snapshot(host));
-    let catalogue = match prepare_registered_catalogue(&raw_catalogue, adapter) {
+    let raw_catalogue = catalogue.cloned().unwrap_or_else(|| snapshot_ordered(host));
+    let catalogue = match prepare_registered_catalogue(&raw_catalogue, adapter, model) {
         Ok(Some(catalogue)) => catalogue,
         Ok(None) => return model.to_owned(),
         Err(kind) => {
@@ -453,15 +473,16 @@ pub fn model_families(
 /// Check the Python access/iteration shapes used by `_registered_match` and
 /// normalize the few iterable forms accepted there but not by the Rust matcher.
 fn prepare_registered_catalogue(
-    catalogue: &Value,
+    catalogue: &OrderedValue,
     adapter: &str,
+    requested_model: &str,
 ) -> Result<Option<Value>, &'static str> {
     let root = catalogue.as_object().ok_or("AttributeError")?;
     let Some(adapters) = root.get("adapters") else {
         return Ok(None);
     };
     let adapter_entry = match adapters {
-        Value::Object(adapters) => {
+        OrderedValue::Object(adapters) => {
             let Some(entry) = adapters.get(adapter) else {
                 return Ok(None);
             };
@@ -469,14 +490,14 @@ fn prepare_registered_catalogue(
         }
         // Python's initial `adapter in adapters` accepts lists and strings,
         // then `_registered_match` attempts to index them with a string.
-        Value::Array(adapters) => {
+        OrderedValue::Array(adapters) => {
             return if adapters.iter().any(|value| value.as_str() == Some(adapter)) {
                 Err("TypeError")
             } else {
                 Ok(None)
             };
         }
-        Value::String(adapters) => {
+        OrderedValue::String(adapters) => {
             return if adapters.contains(adapter) {
                 Err("TypeError")
             } else {
@@ -486,17 +507,11 @@ fn prepare_registered_catalogue(
         _ => return Err("TypeError"),
     };
     let adapter_entry = adapter_entry.as_object().ok_or("AttributeError")?;
-    let mut normalized = catalogue.clone();
-    let normalized_adapter = normalized
-        .get_mut("adapters")
-        .and_then(|value| value.get_mut(adapter))
-        .and_then(Value::as_object_mut)
-        .ok_or("AttributeError")?;
     let Some(models) = adapter_entry.get("models") else {
-        return Ok(Some(normalized));
+        return Ok(Some(catalogue.to_value()));
     };
     match models {
-        Value::Array(models) => {
+        OrderedValue::Array(models) => {
             for model in models {
                 let Some(fields) = model.as_object() else {
                     return Err("TypeError");
@@ -504,58 +519,123 @@ fn prepare_registered_catalogue(
                 let Some(id) = fields.get("id") else {
                     return Err("KeyError");
                 };
-                if !id.is_string() {
+                if id.as_str().is_none() {
                     return Err("AttributeError");
                 }
             }
-            let mut normalized_models = models.clone();
-            for model in &mut normalized_models {
-                let fields = model.as_object_mut().ok_or("TypeError")?;
-                if let Some(names) = fields.get("names").cloned() {
+            let mut normalized_models = models
+                .iter()
+                .map(OrderedValue::to_value)
+                .collect::<Vec<_>>();
+            for (index, model) in models.iter().enumerate() {
+                let fields = model.as_object().ok_or("TypeError")?;
+                if let Some(names) = fields.get("names") {
                     let names = match names {
-                        Value::Array(names) => {
-                            if names.iter().any(|name| !name.is_string()) {
-                                return Err("AttributeError");
+                        OrderedValue::Array(names) => {
+                            let mut inspected = Vec::new();
+                            for name in names {
+                                let name = name.as_str().ok_or("AttributeError")?;
+                                inspected.push(Value::String(name.to_owned()));
+                                if crate::casefold::fold(name)
+                                    == crate::casefold::fold(requested_model)
+                                {
+                                    break;
+                                }
                             }
-                            names
+                            inspected
                         }
-                        Value::String(names) => names
+                        OrderedValue::String(names) => names
                             .chars()
                             .map(|name| Value::String(name.to_string()))
                             .collect(),
-                        Value::Object(names) => names.keys().cloned().map(Value::String).collect(),
+                        OrderedValue::Object(names) => names
+                            .0
+                            .iter()
+                            .map(|(name, _)| Value::String(name.clone()))
+                            .collect(),
                         _ => return Err("TypeError"),
                     };
-                    fields.insert("names".into(), Value::Array(names));
+                    if let Some(fields) = normalized_models[index].as_object_mut() {
+                        fields.insert("names".into(), Value::Array(names));
+                    }
                 }
             }
-            for model in &normalized_models {
+            // Python completes the names comprehension for every entry before
+            // starting the variant comprehension, even when an earlier name matched.
+            for (index, model) in models.iter().enumerate() {
                 let fields = model.as_object().ok_or("TypeError")?;
-                if fields.get("effort_transport").and_then(Value::as_str) == Some("model-suffix") {
+                if fields
+                    .get("effort_transport")
+                    .and_then(OrderedValue::as_str)
+                    == Some("model-suffix")
+                {
                     match fields.get("suffix") {
                         None => {}
-                        Some(Value::Object(suffixes)) => {
-                            if suffixes.values().any(|suffix| !suffix.is_string()) {
-                                return Err("TypeError");
+                        Some(OrderedValue::Object(suffixes)) => {
+                            let model_id = fields
+                                .get("id")
+                                .and_then(OrderedValue::as_str)
+                                .ok_or("AttributeError")?;
+                            let requested = crate::casefold::fold(requested_model);
+                            let mut inspected = serde_json::Map::new();
+                            let mut matched = false;
+                            for (level, value) in &suffixes.0 {
+                                // Python's any() stops at the first matching suffix. Validate
+                                // only values it actually visits, in source key order.
+                                let suffix = value.as_str().ok_or("TypeError")?;
+                                inspected.insert(level.clone(), Value::String(suffix.to_owned()));
+                                if crate::casefold::fold(&format!("{model_id}{suffix}"))
+                                    == requested
+                                {
+                                    matched = true;
+                                    break;
+                                }
+                            }
+                            if matched {
+                                if let Some(fields) = normalized_models[index].as_object_mut() {
+                                    fields.insert("suffix".into(), Value::Object(inspected));
+                                }
                             }
                         }
                         Some(_) => return Err("AttributeError"),
                     }
                 }
             }
+            let mut normalized = catalogue.to_value();
+            let normalized_adapter = normalized
+                .get_mut("adapters")
+                .and_then(|value| value.get_mut(adapter))
+                .and_then(Value::as_object_mut)
+                .ok_or("AttributeError")?;
             normalized_adapter.insert("models".into(), Value::Array(normalized_models));
+            Ok(Some(normalized))
         }
-        Value::Object(models) if models.is_empty() => {
+        OrderedValue::Object(models) if models.0.is_empty() => {
+            let mut normalized = catalogue.to_value();
+            let normalized_adapter = normalized
+                .get_mut("adapters")
+                .and_then(|value| value.get_mut(adapter))
+                .and_then(Value::as_object_mut)
+                .ok_or("AttributeError")?;
             normalized_adapter.insert("models".into(), Value::Array(vec![]));
+            Ok(Some(normalized))
         }
-        Value::String(models) if models.is_empty() => {
+        OrderedValue::String(models) if models.is_empty() => {
+            let mut normalized = catalogue.to_value();
+            let normalized_adapter = normalized
+                .get_mut("adapters")
+                .and_then(|value| value.get_mut(adapter))
+                .and_then(Value::as_object_mut)
+                .ok_or("AttributeError")?;
             normalized_adapter.insert("models".into(), Value::Array(vec![]));
+            Ok(Some(normalized))
         }
-        Value::Object(_) | Value::String(_) | Value::Null | Value::Number(_) | Value::Bool(_) => {
-            return Err("TypeError");
-        }
+        OrderedValue::Object(_)
+        | OrderedValue::String(_)
+        | OrderedValue::Null
+        | OrderedValue::Number(_)
+        | OrderedValue::Bool(_) => Err("TypeError"),
     }
-    Ok(Some(normalized))
 }
 
 fn match_error_class(error: &crate::matching::MatchError) -> &'static str {

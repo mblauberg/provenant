@@ -300,7 +300,8 @@ fn extended_json_owner_gap_keeps_selection_partial() {
         r#"{"schema_version":1,"assignments":{},"selection_count":0,"extra":NaN}"#,
         r#"{"schema_version":1,"assignments":{},"selection_count":0,"extra":"\ud800"}"#,
     ];
-    let Some(expected) = crate::oracle::python::<Value>(r#"
+    let Some(expected) = crate::oracle::python::<Value>(
+        r#"
 import importlib.util,json,pathlib,sys,tempfile
 spec=importlib.util.spec_from_file_location('prefs',pathlib.Path.cwd()/'scripts/model_route_preferences.py')
 m=importlib.util.module_from_spec(spec);sys.modules[spec.name]=m;spec.loader.exec_module(m)
@@ -311,10 +312,17 @@ for raw in json.load(sys.stdin):
   state,status=m._load_spread_state(path)
   result.append(status)
 print(json.dumps(result))
-"#, &json!(fixtures)) else { return; };
+"#,
+        &json!(fixtures),
+    ) else {
+        return;
+    };
     assert_eq!(expected, json!(["loaded", "loaded"]));
     for raw in fixtures {
         // Explicit counterexamples: records lacks Python extended JSON values.
-        assert_eq!(load_spread_state(Some(raw)).unwrap().1, StateStatus::Invalid);
+        assert_eq!(
+            load_spread_state(Some(raw)).unwrap().1,
+            StateStatus::Invalid
+        );
     }
 }

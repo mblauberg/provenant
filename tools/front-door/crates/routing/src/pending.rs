@@ -49,6 +49,7 @@ pub(crate) fn truthy(value: &crate::ordered_json::OrderedValue) -> bool {
 pub(crate) fn python_one(value: Option<&serde_json::Value>) -> bool {
     value.is_some_and(|v| provenant_core::py::python_json_eq(v, &serde_json::Value::from(1)))
 }
+// port: belongs in provenant-core (ordered container repr API is absent).
 pub(crate) fn ordered_string(value: &crate::ordered_json::OrderedValue) -> String {
     use crate::ordered_json::OrderedValue;
     fn repr(value: &OrderedValue) -> String {

@@ -10,8 +10,9 @@ use serde_json::{json, Value};
 
 use super::{
     candidates, confidential_alternatives, disclosure_risk, model_families, registered_model,
-    route_command, snapshot, ExecutionCooldownStore, ExecutionRoutePlan, ExecutionRouting,
-    ExecutionRoutingError, ProviderQuota, QuotaUnavailable, RouterHost, RouterHostError,
+    route_command, snapshot, snapshot_ordered, ExecutionCooldownStore, ExecutionRoutePlan,
+    ExecutionRouting, ExecutionRoutingError, ProviderQuota, QuotaUnavailable, RouterHost,
+    RouterHostError,
 };
 
 struct Host {
@@ -307,6 +308,8 @@ fn registered_model_warning_classes_match_python_for_malformed_catalogues() {
         {"adapters": {"codex": {"models": [{"id": "model", "names": [7]}]}}},
         {"adapters": {"codex": {"models": [{"id": "model", "effort_transport": "model-suffix", "suffix": null}]}}},
         {"adapters": {"codex": {"models": [{"id": "model", "effort_transport": "model-suffix", "suffix": {"high": 7}}]}}},
+        {"adapters": {"codex": {"models": [{"id": "first", "effort_transport": "model-suffix", "suffix": null}, {"id": "second", "names": null}]}}},
+        {"adapters": {"codex": {"models": [{"id": "model", "names": ["wanted", 7]}]}}},
         {"adapters": {"codex": {"models": {}}}},
         {"adapters": {"codex": {"models": ""}}}
     ]);
@@ -327,6 +330,50 @@ fn registered_model_warning_classes_match_python_for_malformed_catalogues() {
                 &host,
                 "codex",
                 "wanted",
+                Some(catalogue),
+                Some(&mut warnings),
+            );
+            json!({"model":model,"warnings":warnings})
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(actual, expected);
+}
+
+#[test]
+fn registered_model_suffix_matching_short_circuits_in_source_key_order() {
+    let catalogues = json!([
+        {
+            "adapters": {"codex": {"models": [{
+                "id": "model",
+                "effort_transport": "model-suffix",
+                "suffix": {"a_match": "-x", "z_bad": 7}
+            }]}}
+        },
+        {
+            "adapters": {"codex": {"models": [{
+                "id": "model",
+                "effort_transport": "model-suffix",
+                "suffix": {"a_bad": 7, "z_match": "-x"}
+            }]}}
+        }
+    ]);
+    let Some(expected): Option<Vec<Value>> = crate::oracle::python(
+        "import json,pathlib,sys; sys.path.insert(0,str(pathlib.Path('skills/orchestrate/scripts').resolve())); import exec_routing as m\ncatalogues=json.load(sys.stdin); out=[]\nfor catalogue in catalogues:\n warnings=[]; result=m.registered_model('codex','model-x',catalogue,warnings); out.append({'model':result,'warnings':warnings})\nprint(json.dumps(out))",
+        &catalogues,
+    ) else {
+        return;
+    };
+    let host = Host::new(json!({}));
+    let actual = catalogues
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|catalogue| {
+            let mut warnings = Vec::new();
+            let model = registered_model(
+                &host,
+                "codex",
+                "model-x",
                 Some(catalogue),
                 Some(&mut warnings),
             );
@@ -560,6 +607,53 @@ fn cooling_failure_categories_match_python_for_missing_bad_and_mixed_timestamps(
                 _ => "none",
             }
             .to_owned()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(actual, expected);
+}
+
+#[test]
+fn cooling_preserves_suffix_order_from_the_host_snapshot() {
+    let snapshots = [
+        r#"{"schema":"fabric.catalogue.v1","adapters":{"codex":{"models":[{"id":"model","effort_transport":"model-suffix","suffix":{"z_match":"-x","a_bad":7}}]}},"models":{},"catalogue":{}}"#,
+        r#"{"schema":"fabric.catalogue.v1","adapters":{"codex":{"models":[{"id":"model","effort_transport":"model-suffix","suffix":{"a_bad":7,"z_match":"-x"}}]}},"models":{},"catalogue":{}}"#,
+    ];
+    let input = json!({"snapshots": snapshots});
+    let Some(expected): Option<Vec<Value>> = crate::oracle::python(
+        "import contextlib,io,json,pathlib,sys; sys.path.insert(0,str(pathlib.Path('skills/orchestrate/scripts').resolve())); import exec_routing as m\nd=json.load(sys.stdin); records={'codex/model': {'cooling_until':'2026-10-23T11:00:00Z'}}; out=[]\nfor text in d['snapshots']:\n m.snapshot=lambda text=text: json.loads(text); stderr=io.StringIO()\n with contextlib.redirect_stderr(stderr): result=m.cooling('codex','model-x',records)\n first=next(iter(json.loads(text)['adapters']['codex']['models'][0]['suffix']))\n out.append({'record':result,'warning':stderr.getvalue().strip(),'first_suffix':first})\nprint(json.dumps(out))",
+        &input,
+    ) else {
+        return;
+    };
+
+    let store = Store::default();
+    let rows = BTreeMap::from([("codex/model".into(), row("2026-10-23T11:00:00Z", None))]);
+    let actual = snapshots
+        .iter()
+        .map(|text| {
+            let mut host = Host::new(json!({}));
+            host.output = text.as_bytes().to_vec();
+            let ordered = snapshot_ordered(&host);
+            let suffixes = ordered
+                .get("adapters")
+                .and_then(|adapters| adapters.get("codex"))
+                .and_then(|adapter| adapter.get("models"))
+                .and_then(|models| match models {
+                    crate::ordered_json::OrderedValue::Array(models) => models.first(),
+                    _ => None,
+                })
+                .and_then(|model| model.get("suffix"))
+                .and_then(crate::ordered_json::OrderedValue::as_object)
+                .unwrap();
+            let first_suffix = suffixes.0.first().map(|(key, _)| key.as_str());
+            let found = runtime(&host, &store)
+                .cooling("codex", "model-x", Some(&rows), None, false)
+                .unwrap();
+            json!({
+                "record": found,
+                "warning": host.warnings.borrow().first().cloned().unwrap_or_default(),
+                "first_suffix": first_suffix,
+            })
         })
         .collect::<Vec<_>>();
     assert_eq!(actual, expected);
