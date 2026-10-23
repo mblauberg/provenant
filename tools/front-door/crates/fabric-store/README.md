@@ -72,11 +72,25 @@ be absolute; claim an existing parent for a future file. This deliberately small
 choice avoids inventing a filesystem resolution policy for nonexistent paths.
 Claims remain advisory and never replace run's writer lock. Expired claims cannot
 renew or verify, but the unchanged holder may explicitly release them. Lists omit
-tokens, include released/expired observations and use a bounded ID cursor.
+tokens, include retained released/expired observations and use a bounded ID cursor.
+Acquire prunes at most 100 released claim payloads and their paths in its project,
+only when no push operation references them. Migration 4 retains compact scope
+identity/generation counters, including counters for pruned records, so reacquiring
+never revives an older fence or reuses its generation. Expired unreleased claims
+and every operation-referenced claim remain available. Prefix overlap uses the
+project/path index for exact ancestors and binary descendant ranges.
+
+On case-insensitive filesystems, overlap detection relies on canonicalisation
+returning the same spelling for case aliases such as `/x/Foo` and `/x/foo`.
+If the filesystem preserves different spellings through canonicalisation, both
+advisory claims can succeed. No case folding is applied: filesystem case and
+Unicode rules vary by volume. Run's writer lock remains the writing authority.
 
 `lock_landing` returns a non-cloneable `LandingGuard` backed by supervisor's safe
 exclusive OS lock in `fabric/locks/`. It binds database directory identity,
-project and fully-qualified branch ref. Hold it across the entire push or
+project and fully-qualified branch ref. Validation checks the lock directory's
+identity, not the identity of the locked file; F7 must re-verify that binding.
+Hold it across the entire push or
 reconciliation operation, including Git, and pass it to every landing mutation.
 Lock acquisition is bounded by the request budget and never holds a transaction.
 A lock holder can read/mutate through another connection to the same database.
@@ -99,14 +113,20 @@ and fences never expose tokens in observations or diagnostics.
 | Pushing or Unknown | Reconcile without proof | Unknown |
 
 All other transitions return a typed error. Pushing and Unknown pin ownership
-regardless of TTL and prevent release or takeover. The unchanged holder may renew
-an expired landing fence; it cannot resurrect a superseded generation. Retryable
+regardless of TTL and prevent release or takeover. Renewal requires a live fence;
+an unchanged expired holder may release only after any unresolved push is closed.
+Retryable
 requires explicit Begin and a live fence, never an automatic transport retry.
 Conflict records divergent remote proof and permits explicit release; no Git is
 performed by this crate. F7 owns fast-forward proof, the exact Git lease and
 transport, F6b owns home routing, and F8/F9 own tool/CLI integration.
 
+Identical live acquire retries by the same actor/token return the existing fence
+without renewing it or appending an event. Landing retries also match frozen OIDs;
+a changed expected or candidate OID conflicts, including during an unresolved push.
+
 Migration 3 adds claims, paths and push operations after the two F1 migrations.
+Migration 4 adds persistent counters and indexed path lookup/pruning.
 All mutations and their events share F1's immediate transaction, injected clock,
 budget and BUSY retry. Tests use temporary roots, barrier handshakes, exact clock
 boundaries and real SQLite BUSY/FULL failures; no old store or install is opened.
