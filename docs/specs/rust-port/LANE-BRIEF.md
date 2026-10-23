@@ -30,16 +30,18 @@ How to work:
 
 - Write scope: only `tools/front-door/crates/CRATE/**`, that crate's
   `Cargo.toml` (dependencies from `[workspace.dependencies]` only, as
-  `{ workspace = true }`), appends to `docs/specs/rust-port/divergences.md`,
-  and a regenerated `Cargo.lock`. Do not edit other crates, the root binary,
-  Python or TypeScript sources, CI or the graph.
-- Use other crates' APIs where they exist on main. Prefer
-  `provenant-core` Python-compatibility helpers and the
-  `provenant_records::checked_json` codec over local copies, and delete this
-  crate's `pending` copies once main has the shared owner. If a type you need
-  belongs to another crate and is not on main yet, define a minimal private
-  version in a `pending` module, mark each item
-  `// port: belongs in provenant-<crate>`, and list it in the PR.
+  `{ workspace = true }`), appends to `docs/specs/rust-port/divergences.md`
+  and `ported.txt`, and a regenerated `Cargo.lock`. Do not edit other crates,
+  the root binary, Python or TypeScript sources, CI or the graph.
+- Depend on other crates directly: internal crates are workspace
+  dependencies (`provenant-core = { workspace = true }`), limited to the edges
+  PORTING.md R2 allows; `tests/test_rust_port_layering.py` enforces them. Use
+  the shared owners on main, including `provenant_core::py`,
+  `provenant_records::checked_json` and the supervisor's safe filesystem API,
+  and delete this crate's `pending` copies they replace. Only when the owner
+  has no such API on main yet, define a minimal private version in `pending`,
+  mark each item `// port: belongs in provenant-<crate>`, and list it in the
+  PR.
 - Refactor as you go, not line for line. Keep every observable behaviour
   (outputs, record fields, errors, exit codes and effects) and use idiomatic
   Rust: typed errors (thiserror), serde records, no global mutable state, no
@@ -56,9 +58,15 @@ How to work:
   delete Python or TS sources.
 - One logical commit per unit, with the unit id in the commit body.
 - Port as many units as you can in this lane; this is a large batch on
-  purpose. If a unit is too big, port a coherent part and note what remains.
-  If it is blocked on another crate, skip it and say why. Do not stop the
-  batch for one unit.
+  purpose. Do not stop after the first finished unit: keep going until every
+  listed unit is fully ported or blocked by a named missing API on main. If a
+  unit is too big, port a coherent part and note what remains. Do not stop
+  the batch for one unit.
+- Design for extension. Put a trait at each seam where the source already
+  varies (adapters, providers, stores, hosts), and describe per-variant
+  behaviour in data tables with one source of truth, so a new variant is a
+  table row plus a small impl rather than another branch in a central
+  match.
 - Checks in `tools/front-door`: `cargo fmt --all`,
   `cargo clippy -p provenant-CRATE --all-targets -- -D warnings`,
   `PROVENANT_PORT_DIFF_REQUIRED=1 cargo test -p provenant-CRATE`. Use the
@@ -66,8 +74,8 @@ How to work:
 - Before opening the PR, have one native subagent review the diff against the
   source, assuming the port is wrong. Fix what it finds.
 - Leave no rebase, cherry-pick or merge in progress.
-- Open a PR to main titled `port(CRATE): <short summary>` and arm
-  `gh pr merge --squash --auto`. In the body, a line
+- Open a PR to main titled `port(CRATE): <short summary>`. Do not arm
+  auto-merge: the chair arms it after the cross-family review. In the body, a line
   `Units: <id>, <id>, ...` lists only fully ported units; then partial and
   skipped units with reasons, `pending` items, divergences and test counts.
   Also append the fully ported ids to `docs/specs/rust-port/ported.txt`.
