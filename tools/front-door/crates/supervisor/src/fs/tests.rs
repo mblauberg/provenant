@@ -1,6 +1,6 @@
 use super::*;
 use std::os::unix::ffi::OsStringExt;
-use std::os::unix::fs::{symlink, PermissionsExt};
+use std::os::unix::fs::{PermissionsExt, symlink};
 use std::sync::{Arc, Barrier};
 
 fn names(dir: &Directory) -> Vec<OsString> {

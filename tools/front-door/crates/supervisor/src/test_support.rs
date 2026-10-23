@@ -1,5 +1,5 @@
 //! One bounded, explicit-environment helper for each differential interpreter.
-use crate::bounded::{run_bounded, BoundedError, Options};
+use crate::bounded::{BoundedError, Options, run_bounded};
 use std::ffi::OsString;
 use std::path::Path;
 

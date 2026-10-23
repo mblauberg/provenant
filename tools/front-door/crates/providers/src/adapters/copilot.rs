@@ -35,10 +35,12 @@ mod tests {
 
     #[test]
     fn copilot_read_only_uses_plan_mode() {
-        assert!(copilot(&plan(Mode::ReadOnly))
-            .unwrap()
-            .argv
-            .windows(2)
-            .any(|v| v == ["--mode", "plan"]));
+        assert!(
+            copilot(&plan(Mode::ReadOnly))
+                .unwrap()
+                .argv
+                .windows(2)
+                .any(|v| v == ["--mode", "plan"])
+        );
     }
 }

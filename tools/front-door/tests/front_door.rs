@@ -1,11 +1,18 @@
 //! End-to-end behaviour of the built binary against fixture checkouts.
 
+// Rewrite pending: remove when this crate is rewritten.
+#![allow(
+    clippy::disallowed_methods,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::unwrap_used
+)]
 mod common;
 
 use common::*;
 use std::fs;
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::{symlink, PermissionsExt};
+use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::Path;
 use std::process::Stdio;
 

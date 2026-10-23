@@ -1,4 +1,11 @@
 //! Shared identity, root and path policy. Environment and host observations are values.
+// Rewrite pending: remove when this crate is rewritten.
+#![allow(
+    clippy::chunks_exact_to_as_chunks,
+    clippy::collapsible_if,
+    clippy::disallowed_methods,
+    clippy::print_stderr
+)]
 #![forbid(unsafe_code)]
 
 pub mod bytes;

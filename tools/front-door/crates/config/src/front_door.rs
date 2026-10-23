@@ -1,5 +1,5 @@
 //! Front-door source identity and build policy; execution belongs to supervisor.
-use crate::{invalid, io, pending, Result};
+use crate::{Result, invalid, io, pending};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
@@ -193,7 +193,11 @@ pub fn validate_prebuilt(binary: &Path, digest: &str) -> Result<()> {
     })?;
     let stamped = embedded_digest(&bytes);
     if stamped != Some(digest) {
-        return Err(invalid(format!("prebuilt front door {} was built from different sources (embeds {}, checkout is {digest}); rebuild it from this checkout", binary.display(), stamped.unwrap_or("None"))));
+        return Err(invalid(format!(
+            "prebuilt front door {} was built from different sources (embeds {}, checkout is {digest}); rebuild it from this checkout",
+            binary.display(),
+            stamped.unwrap_or("None")
+        )));
     }
     Ok(())
 }
@@ -855,10 +859,12 @@ mod host_tests {
         );
         assert_eq!((host.builds, host.smokes), (1, 2));
         host.status = 7;
-        assert!(select(dir.path(), "rust", &target, None, &mut host)
-            .unwrap_err()
-            .to_string()
-            .contains("cargo build failed (exit 7)"));
+        assert!(
+            select(dir.path(), "rust", &target, None, &mut host)
+                .unwrap_err()
+                .to_string()
+                .contains("cargo build failed (exit 7)")
+        );
         assert_eq!(host.smokes, 2);
         let command = Command::Select {
             product_root: dir.path().into(),

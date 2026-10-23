@@ -1,4 +1,10 @@
 //! Versioned records, canonical encoders and digest contracts.
+// Rewrite pending: remove when this crate is rewritten.
+#![allow(
+    clippy::collapsible_if,
+    clippy::disallowed_methods,
+    clippy::print_stderr
+)]
 #![forbid(unsafe_code)]
 
 pub mod attempt_evidence;

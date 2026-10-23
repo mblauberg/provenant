@@ -1,8 +1,8 @@
 //! Allowlisted native/OTLP metadata parsers and snapshot-bounded JSONL cursors.
 //! Opening a verified, non-symlink file remains the supervisor's safe OS boundary.
-use crate::{delivery, number, pending, Error, Event, Numeric, Observation, Result, Sink, Usage};
+use crate::{Error, Event, Numeric, Observation, Result, Sink, Usage, delivery, number, pending};
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeMap,
@@ -433,12 +433,13 @@ pub fn otel_record(sink: &mut impl Sink, row: &Value, path: &Path, offset: u64) 
                         let value = if v.is_null() {
                             Value::Null
                         } else {
-                            json!(v
-                                .as_f64()
-                                .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
-                                .ok_or_else(|| Error::Invalid(
-                                    "invalid OTLP metric value".into()
-                                ))?)
+                            json!(
+                                v.as_f64()
+                                    .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
+                                    .ok_or_else(|| Error::Invalid(
+                                        "invalid OTLP metric value".into()
+                                    ))?
+                            )
                         };
                         kept.insert("name".into(), record["name"].clone());
                         kept.insert("value".into(), value);
@@ -621,9 +622,11 @@ pub(crate) mod tests {
         claude_record(&mut sink,&json!({"type":"assistant","message":{"id":"m","model":"observed","content":"secret","usage":{"input_tokens":12,"output_tokens":10,"output_tokens_details":{"thinking_tokens":3}}}}),Path::new("fixture"),0,None).unwrap();
         assert_eq!(sink.usage[0].output_tokens, Some(7.into()));
         assert_eq!(sink.usage[0].reasoning_tokens, Some(3.into()));
-        assert!(!serde_json::to_string(&sink.usage)
-            .unwrap()
-            .contains("secret"));
+        assert!(
+            !serde_json::to_string(&sink.usage)
+                .unwrap()
+                .contains("secret")
+        );
     }
     #[test]
     fn codex_cumulative_reset_and_compaction() {

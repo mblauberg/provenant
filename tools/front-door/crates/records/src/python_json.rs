@@ -779,8 +779,8 @@ pub fn identity(values: &[serde_json::Value]) -> Result<String, EncodeError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde::ser::SerializeMap;
     use serde::Serialize;
+    use serde::ser::SerializeMap;
     use std::process::Command;
 
     enum MapKey<'a> {
@@ -986,9 +986,11 @@ mod tests {
             ),
             Err(EncodeError::NaNKey)
         ));
-        assert!(dumps(&map, DumpsOptions::default())
-            .unwrap()
-            .contains("NaN"));
+        assert!(
+            dumps(&map, DumpsOptions::default())
+                .unwrap()
+                .contains("NaN")
+        );
         let Some(mut command) = crate::oracle::python() else {
             return;
         };

@@ -44,10 +44,10 @@ pub fn oracle(unit: &str, cases: &Value) -> Option<Value> {
             return unavailable(&format!(
                 "interpreter version check failed ({})",
                 output.status
-            ))
+            ));
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return unavailable("interpreter is absent")
+            return unavailable("interpreter is absent");
         }
         Err(error) => return unavailable(&format!("cannot inspect interpreter: {error}")),
     };

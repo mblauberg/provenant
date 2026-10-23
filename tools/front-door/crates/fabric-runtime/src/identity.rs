@@ -258,9 +258,13 @@ pub fn run_root(cwd: &Path, env: &Environment) -> io::Result<PathBuf> {
 
 #[derive(Debug, Error)]
 pub enum CommitShaError {
-    #[error("\"{input}\" is not a commit SHA of at least 7 hex digits; pass the full 40-digit commit SHA (git rev-parse <branch>)")]
+    #[error(
+        "\"{input}\" is not a commit SHA of at least 7 hex digits; pass the full 40-digit commit SHA (git rev-parse <branch>)"
+    )]
     Invalid { input: String },
-    #[error("\"{input}\" is unknown or ambiguous in {cwd}; pass the full 40-digit commit SHA (git rev-parse <branch>)")]
+    #[error(
+        "\"{input}\" is unknown or ambiguous in {cwd}; pass the full 40-digit commit SHA (git rev-parse <branch>)"
+    )]
     Unresolved { input: String, cwd: PathBuf },
 }
 impl CommitShaError {

@@ -226,8 +226,8 @@ impl Store {
         self.transaction(true, || {
             let now = at.unwrap_or_else(|| self.now());
             let row = self.db.query_row("SELECT holder, generation, expires_at, pushing_until, released_at FROM landing_leases WHERE project = ?", [&who.project], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?, r.get::<_, i64>(2)?, r.get::<_, Option<i64>>(3)?, r.get::<_, Option<i64>>(4)?))).optional()?;
-            let Some((current, gen, expires, pushing, released)) = row else { return Ok(LandingRelease::refused(ReleaseReason::NotHeld)); };
-            if current != owner || gen != generation || released.is_some() { return Ok(LandingRelease::refused(ReleaseReason::NotHeld)); }
+            let Some((current, r#gen, expires, pushing, released)) = row else { return Ok(LandingRelease::refused(ReleaseReason::NotHeld)); };
+            if current != owner || r#gen != generation || released.is_some() { return Ok(LandingRelease::refused(ReleaseReason::NotHeld)); }
             if pushing.unwrap_or(0) > now { return Ok(LandingRelease::refused(ReleaseReason::Pushing)); }
             if expires <= now { return Ok(LandingRelease::refused(ReleaseReason::Expired)); }
             self.db.execute("UPDATE landing_leases SET released_at = ? WHERE project = ? AND generation = ?", params![now, who.project, generation])?;

@@ -102,8 +102,11 @@ mod tests {
                 .collect();
             let Some(expected): Option<Vec<bool>> = crate::oracle::python(
                 "import json,sys; from skills.orchestrate.scripts.adapters.claude import uses_api_key; print(json.dumps([uses_api_key(r) for r in json.load(sys.stdin)]))",
-                &routes, api_key,
-            ) else { return; };
+                &routes,
+                api_key,
+            ) else {
+                return;
+            };
             assert_eq!(actual, expected);
         }
     }

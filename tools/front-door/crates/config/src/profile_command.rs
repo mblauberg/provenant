@@ -1,10 +1,10 @@
 //! Inert `provenant profile` command: presentation and editing share one resolver.
 use crate::{
+    Result,
     codex::CommandResult,
     invalid,
     ordered::{self, Json},
     profiles::{self, Context, Registry},
-    Result,
 };
 
 #[derive(Debug, clap::Parser)]
@@ -480,7 +480,10 @@ mod tests {
         ]);
         let path = space.join("cases");
         fs::write(&path, serde_json::to_vec(&cases).unwrap()).unwrap();
-        let body=format!("import json,os,contextlib,io\nos.environ['PROVENANT_PROFILE_ROOT']=str(p.parent/'instance')\nos.environ['AGENT_FABRIC_PRODUCT_ROOT']={:?}\nos.chdir(p.parent/'project')\nout=[]\nfor args in json.loads(p.read_text()):\n stdout=io.StringIO();stderr=io.StringIO()\n with contextlib.redirect_stdout(stdout),contextlib.redirect_stderr(stderr): code=m.main(args)\n out.append([code,stdout.getvalue(),stderr.getvalue()])\nprint(json.dumps(out))",root().to_str().unwrap());
+        let body = format!(
+            "import json,os,contextlib,io\nos.environ['PROVENANT_PROFILE_ROOT']=str(p.parent/'instance')\nos.environ['AGENT_FABRIC_PRODUCT_ROOT']={:?}\nos.chdir(p.parent/'project')\nout=[]\nfor args in json.loads(p.read_text()):\n stdout=io.StringIO();stderr=io.StringIO()\n with contextlib.redirect_stdout(stdout),contextlib.redirect_stderr(stderr): code=m.main(args)\n out.append([code,stdout.getvalue(),stderr.getvalue()])\nprint(json.dumps(out))",
+            root().to_str().unwrap()
+        );
         let Some(old) = crate::oracle::python("scripts/harness_profile.py", &body, &path) else {
             return;
         };
@@ -542,8 +545,10 @@ mod description_tests {
             homes: &homes,
         };
         let output = run(&registry, &Command::List { json: false }, &context);
-        assert!(output
-            .stdout
-            .contains("  balanced: 7\n  other: None\n  array: [True]\n"));
+        assert!(
+            output
+                .stdout
+                .contains("  balanced: 7\n  other: None\n  array: [True]\n")
+        );
     }
 }

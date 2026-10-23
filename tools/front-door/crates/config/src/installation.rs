@@ -1,10 +1,9 @@
 //! Managed skills: ownership, retirement, planning and reconciliation.
 use crate::{
-    invalid, io,
+    Result, invalid, io,
     managed_skills::{self, Catalogues},
     manifest::{self, Manifest},
     ordered::{self},
-    Result,
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -1150,7 +1149,7 @@ pub fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::{json, Value};
+    use serde_json::{Value, json};
     const NOW: &str = "2026-10-23T12:00:00Z";
     struct Fixture {
         _dir: tempfile::TempDir,
@@ -1211,16 +1210,19 @@ mod tests {
             fs::read_to_string(f.target.join("alpha/SKILL.md")).unwrap(),
             "user"
         );
-        assert!(!manifest::load_manifest(&f.target, NOW)
-            .unwrap()
-            .managed
-            .contains_key("alpha"));
+        assert!(
+            !manifest::load_manifest(&f.target, NOW)
+                .unwrap()
+                .managed
+                .contains_key("alpha")
+        );
         let before = fs::read(manifest::manifest_path(&f.target)).unwrap();
-        assert!(f
-            .execute(Action::Install, false)
-            .unwrap()
-            .changed
-            .is_empty());
+        assert!(
+            f.execute(Action::Install, false)
+                .unwrap()
+                .changed
+                .is_empty()
+        );
         assert_eq!(
             fs::read(manifest::manifest_path(&f.target)).unwrap(),
             before
@@ -1244,11 +1246,12 @@ mod tests {
         );
         fs::remove_file(f.target.join("personal")).unwrap();
         let before = fs::read(manifest::manifest_path(&f.target)).unwrap();
-        assert!(f
-            .execute(Action::Install, true)
-            .unwrap_err()
-            .to_string()
-            .contains("custom targets changed outside harness"));
+        assert!(
+            f.execute(Action::Install, true)
+                .unwrap_err()
+                .to_string()
+                .contains("custom targets changed outside harness")
+        );
         assert_eq!(
             fs::read(manifest::manifest_path(&f.target)).unwrap(),
             before
@@ -1260,21 +1263,23 @@ mod tests {
         f.skill("personal", true);
         f.execute(Action::Install, true).unwrap();
         let before = fs::read(manifest::manifest_path(&f.target)).unwrap();
-        assert!(f
-            .execute(Action::Install, false)
-            .unwrap()
-            .changed
-            .is_empty());
+        assert!(
+            f.execute(Action::Install, false)
+                .unwrap()
+                .changed
+                .is_empty()
+        );
         assert_eq!(
             fs::read(manifest::manifest_path(&f.target)).unwrap(),
             before
         );
         f.skill("personal", false);
-        assert!(f
-            .execute(Action::Install, false)
-            .unwrap()
-            .changed
-            .is_empty());
+        assert!(
+            f.execute(Action::Install, false)
+                .unwrap()
+                .changed
+                .is_empty()
+        );
         assert!(same_link(
             &f.target.join("personal"),
             &f.custom.join("personal")
@@ -1340,7 +1345,9 @@ mod tests {
     fn full_action_sequence_matches_python_results_and_retained_receipt() {
         let f = Fixture::new();
         f.skill("personal", true);
-        let body=format!("import json\nm.manifest_io.now=lambda: {NOW:?}\nsource=p.parent.parent/'skills';custom=p.parent.parent/'custom'\nout=[]\nfor action in ['validate-sources','plan','preflight','install','check','reconcile','uninstall-managed','check','install']:\n try: out.append(m.execute(action,source,p,custom))\n except m.InstallError as e: out.append(str(e))\nprint(json.dumps([out,m._load_manifest(p)]))");
+        let body = format!(
+            "import json\nm.manifest_io.now=lambda: {NOW:?}\nsource=p.parent.parent/'skills';custom=p.parent.parent/'custom'\nout=[]\nfor action in ['validate-sources','plan','preflight','install','check','reconcile','uninstall-managed','check','install']:\n try: out.append(m.execute(action,source,p,custom))\n except m.InstallError as e: out.append(str(e))\nprint(json.dumps([out,m._load_manifest(p)]))"
+        );
         let Some(old) = crate::oracle::python("scripts/manage_installation.py", &body, &f.target)
         else {
             return;
@@ -1373,7 +1380,10 @@ mod tests {
         for summary in [false, true] {
             let f = Fixture::new();
             f.skill("personal", true);
-            let body=format!("import json,contextlib,io\nm.manifest_io.now=lambda: {NOW:?}\nout=[]\nfor action in ['plan','preflight','install','check','reconcile','uninstall-managed','check','check-legacy-agy']:\n a=['--target',str(p),'--source',str(p.parent.parent/'skills'),'--custom-source',str(p.parent.parent/'custom'),action]+({}*['--summary'])\n stdout=io.StringIO();stderr=io.StringIO()\n with contextlib.redirect_stdout(stdout),contextlib.redirect_stderr(stderr): code=m.main(a)\n out.append([code,stdout.getvalue(),stderr.getvalue()])\nprint(json.dumps(out))",u8::from(summary));
+            let body = format!(
+                "import json,contextlib,io\nm.manifest_io.now=lambda: {NOW:?}\nout=[]\nfor action in ['plan','preflight','install','check','reconcile','uninstall-managed','check','check-legacy-agy']:\n a=['--target',str(p),'--source',str(p.parent.parent/'skills'),'--custom-source',str(p.parent.parent/'custom'),action]+({}*['--summary'])\n stdout=io.StringIO();stderr=io.StringIO()\n with contextlib.redirect_stdout(stdout),contextlib.redirect_stderr(stderr): code=m.main(a)\n out.append([code,stdout.getvalue(),stderr.getvalue()])\nprint(json.dumps(out))",
+                u8::from(summary)
+            );
             let Some(old) =
                 crate::oracle::python("scripts/manage_installation.py", &body, &f.target)
             else {

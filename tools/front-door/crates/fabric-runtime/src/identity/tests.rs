@@ -161,10 +161,12 @@ fn identity_defaults_and_state_path() {
     let identity = identify(&Environment::new(), root.path()).unwrap();
     assert_eq!(identity.agent_id, "agent");
     assert_eq!(identity.provider, "agent");
-    assert!(serde_json::to_value(identity)
-        .unwrap()
-        .get("registeredProjects")
-        .is_none());
+    assert!(
+        serde_json::to_value(identity)
+            .unwrap()
+            .get("registeredProjects")
+            .is_none()
+    );
     assert_eq!(
         database_path(&Environment::new(), root.path()).unwrap(),
         root.path()
@@ -343,7 +345,7 @@ fn differential_against_typescript_identity_when_interpreter_is_available() {
         std::os::unix::fs::symlink(target.join("child"), lexical.join("link")).unwrap();
         paths.push(lexical.join("link/../x"));
     }
-    let script="const m=await import(requireUrl(process.argv[1])); function requireUrl(p){return new URL('file://'+p).href}; const env={AGENT_FABRIC_SEAT:'fixture',AGENT_FABRIC_LABEL:'worker'}; process.stdout.write(JSON.stringify(process.argv.slice(2).map(p=>({identity:m.identify(env,p),run:m.runRoot(p,env),project:m.projectRoot(p,env)}))))";
+    let script = "const m=await import(requireUrl(process.argv[1])); function requireUrl(p){return new URL('file://'+p).href}; const env={AGENT_FABRIC_SEAT:'fixture',AGENT_FABRIC_LABEL:'worker'}; process.stdout.write(JSON.stringify(process.argv.slice(2).map(p=>({identity:m.identify(env,p),run:m.runRoot(p,env),project:m.projectRoot(p,env)}))))";
     let output = match Command::new("node")
         .args([
             "--experimental-transform-types",

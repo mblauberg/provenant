@@ -113,7 +113,9 @@ pub(crate) fn python(module: &str, body: &str, path: &Path) -> Option<Vec<u8>> {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../..");
     let root = root.canonicalize().expect("repository root exists");
     let program = interpreter(&root)?;
-    let script = format!("import importlib.util,importlib.machinery,sys\nfrom pathlib import Path\nsys.path.insert(0, str(Path(sys.argv[1]).parent))\ns=importlib.util.spec_from_file_location('oracle',sys.argv[1],loader=importlib.machinery.SourceFileLoader('oracle',sys.argv[1]));m=importlib.util.module_from_spec(s);sys.modules[s.name]=m;s.loader.exec_module(m)\np=Path(sys.argv[2])\n{body}");
+    let script = format!(
+        "import importlib.util,importlib.machinery,sys\nfrom pathlib import Path\nsys.path.insert(0, str(Path(sys.argv[1]).parent))\ns=importlib.util.spec_from_file_location('oracle',sys.argv[1],loader=importlib.machinery.SourceFileLoader('oracle',sys.argv[1]));m=importlib.util.module_from_spec(s);sys.modules[s.name]=m;s.loader.exec_module(m)\np=Path(sys.argv[2])\n{body}"
+    );
     let module_path = root.join(module);
     let args = [
         OsString::from("-I"),

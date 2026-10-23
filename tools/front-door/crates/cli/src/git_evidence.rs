@@ -272,8 +272,11 @@ mod tests {
         use serde_json::json;
         let source = json!({"PATH":"/bin", "HOME":"", "TMPDIR":"/tmp", "GIT_DIR":"/wrong", "GIT_CONFIG_COUNT":"broken", "LC_ALL":"bad", "TOKEN":"excluded"});
         let Some(expected): Option<BTreeMap<String, String>> = crate::oracle::python(
-            "import json,sys; from scripts.git_evidence import sanitized_git_environment; print(json.dumps(sanitized_git_environment(json.load(sys.stdin))))", &source
-        ) else { return; };
+            "import json,sys; from scripts.git_evidence import sanitized_git_environment; print(json.dumps(sanitized_git_environment(json.load(sys.stdin))))",
+            &source,
+        ) else {
+            return;
+        };
         let source: BTreeMap<String, String> = serde_json::from_value(source).unwrap();
         let source = source
             .into_iter()
@@ -300,7 +303,12 @@ mod tests {
             encoding: "utf-8-replacement".into(),
         };
         let status = b" M invalid\xff\0?? unicode-\xf0\x9f\xa6\x80\0";
-        let Some(expected):Option<Vec<u8>>=crate::oracle::python("import json,sys; x=json.load(sys.stdin); print(json.dumps(list(json.dumps(x['metadata'],sort_keys=True,separators=(',',':')).encode('utf-8')+b'\\n--- status ---\\n'+bytes(x['status']).decode('utf-8','replace').replace('\\x00','\\n').encode('utf-8')+b'--- diff ---\\n')))",&serde_json::json!({"metadata":metadata,"status":status.as_slice()})) else {return;};
+        let Some(expected): Option<Vec<u8>> = crate::oracle::python(
+            "import json,sys; x=json.load(sys.stdin); print(json.dumps(list(json.dumps(x['metadata'],sort_keys=True,separators=(',',':')).encode('utf-8')+b'\\n--- status ---\\n'+bytes(x['status']).decode('utf-8','replace').replace('\\x00','\\n').encode('utf-8')+b'--- diff ---\\n')))",
+            &serde_json::json!({"metadata":metadata,"status":status.as_slice()}),
+        ) else {
+            return;
+        };
         assert_eq!(packet_prefix(&metadata, status).unwrap(), expected);
     }
 }

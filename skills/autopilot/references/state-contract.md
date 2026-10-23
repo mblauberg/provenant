@@ -1,7 +1,7 @@
 # State contract: the durable spine of a mission
 
 > **context-window = RAM, filesystem = disk.** A multi-week mission will be
-> summarized, compacted, crash, or hit transient failures many times. Nothing
+> summarised, compacted, crash, or hit transient failures many times. Nothing
 > in the conversation survives. The conductor does no deep work in its own
 > context — it delegates, persists every meaningful result to a file, and
 > keeps only a one-line pointer in-head. A fresh session (or a user) must be

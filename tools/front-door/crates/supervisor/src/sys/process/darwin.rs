@@ -1,6 +1,6 @@
 use std::ffi::OsString;
 use std::io;
-use std::mem::{size_of, MaybeUninit};
+use std::mem::{MaybeUninit, size_of};
 
 pub struct DarwinBsd {
     pub pid: i32,

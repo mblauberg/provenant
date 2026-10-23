@@ -1,6 +1,6 @@
 use jiff::{
-    civil::{Date, DateTime, ISOWeekDate, Weekday},
     Timestamp,
+    civil::{Date, DateTime, ISOWeekDate, Weekday},
 };
 use thiserror::Error;
 

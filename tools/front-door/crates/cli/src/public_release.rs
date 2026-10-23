@@ -367,7 +367,7 @@ pub fn personal_email_errors(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::{json, Value};
+    use serde_json::{Value, json};
     #[test]
     fn byte_registry_and_prefilter_match_source_including_invalid_utf8() {
         let scanner = Scanner::new().unwrap();
@@ -395,9 +395,12 @@ mod tests {
                 }
             }
         }
-        let Some(expected): Option<(Vec<BTreeSet<String>>,Vec<String>)> = crate::oracle::python(
-            "import json,sys; from scripts.public_release_check import classify,GREP_ARGUMENTS; x=json.load(sys.stdin); print(json.dumps([[sorted(classify(bytes(v))) for v in x],GREP_ARGUMENTS]))", &json!(cases)
-        ) else { return; };
+        let Some(expected): Option<(Vec<BTreeSet<String>>, Vec<String>)> = crate::oracle::python(
+            "import json,sys; from scripts.public_release_check import classify,GREP_ARGUMENTS; x=json.load(sys.stdin); print(json.dumps([[sorted(classify(bytes(v))) for v in x],GREP_ARGUMENTS]))",
+            &json!(cases),
+        ) else {
+            return;
+        };
         assert_eq!(scanner.grep_arguments(), expected.1);
         for (case, expected) in cases.iter().zip(expected.0) {
             assert_eq!(scanner.classify(case), expected, "{case:?}");
@@ -468,8 +471,11 @@ mod tests {
             "\u{1c}a@outlook.com\u{1f}",
         ];
         let Some(expected): Option<(Vec<String>, Vec<String>, Vec<String>)> = crate::oracle::python(
-            "import json,sys; from scripts.public_release_check import publication_tree_errors,personal_email_errors,forbidden_paths; x=json.load(sys.stdin); print(json.dumps([publication_tree_errors(x['entries'],x['findings']),personal_email_errors(x['emails'],'history'),forbidden_paths(x['paths'])]))", &json!({"entries":entries,"findings":findings,"emails":emails,"paths":[".agent-run/x",".agent-run/x",".agent-run","skills/clean-writing/a","safe"]})
-        ) else { return; };
+            "import json,sys; from scripts.public_release_check import publication_tree_errors,personal_email_errors,forbidden_paths; x=json.load(sys.stdin); print(json.dumps([publication_tree_errors(x['entries'],x['findings']),personal_email_errors(x['emails'],'history'),forbidden_paths(x['paths'])]))",
+            &json!({"entries":entries,"findings":findings,"emails":emails,"paths":[".agent-run/x",".agent-run/x",".agent-run","skills/clean-writing/a","safe"]}),
+        ) else {
+            return;
+        };
         assert_eq!(publication_tree_errors(&entries, &findings), expected.0);
         assert_eq!(
             personal_email_errors(emails.into_iter().map(str::to_owned), "history").unwrap(),
@@ -524,8 +530,11 @@ mod tests {
             .set_len(MAX_PUBLIC_FILE_BYTES + 1)
             .unwrap();
         let Some(expected): Option<Vec<String>> = crate::oracle::python(
-            "import json,sys; from pathlib import Path; from scripts.public_release_check import scan_paths; x=json.load(sys.stdin); print(json.dumps(scan_paths(x['paths'],Path(x['root']))))", &json!({"paths":paths,"root":dir.path()})
-        ) else { return; };
+            "import json,sys; from pathlib import Path; from scripts.public_release_check import scan_paths; x=json.load(sys.stdin); print(json.dumps(scan_paths(x['paths'],Path(x['root']))))",
+            &json!({"paths":paths,"root":dir.path()}),
+        ) else {
+            return;
+        };
         assert_eq!(
             Scanner::new()
                 .unwrap()

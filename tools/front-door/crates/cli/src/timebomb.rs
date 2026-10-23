@@ -77,7 +77,7 @@ mod tests {
     #[test]
     fn javascript_date_and_context_policy_matches_source() {
         let dir = tempfile::tempdir().unwrap();
-        let sources=[
+        let sources = [
             "const fixture = '2026-10-23';\n",
             "// new Date()\nconst fixture = '2026-99-99';\n",
             "const now = Date.now();\nconst a='2026-10-23T12:34:56.1+0100'; const b=\"2026-10-24\";\n",

@@ -1,7 +1,7 @@
 //! Provider event JSON keeps Python dictionary insertion order and duplicate evidence.
 use serde::{
-    de::{self, MapAccess, SeqAccess, Visitor},
     Deserialize, Deserializer,
+    de::{self, MapAccess, SeqAccess, Visitor},
 };
 use serde_json::Value;
 use std::fmt;

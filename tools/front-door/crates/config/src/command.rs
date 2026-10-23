@@ -1,5 +1,5 @@
 //! Managed command classification and race-detecting atomic publication.
-use crate::{invalid, io, Error, Result};
+use crate::{Error, Result, invalid, io};
 use serde::{Deserialize, Serialize};
 use std::{
     fs,
@@ -268,7 +268,7 @@ pub fn publish_expected(source: &Path, destination: &Path, expected: &str) -> Re
         _ => {
             return Err(invalid(format!(
                 "invalid expected Provenant command state: {expected}"
-            )))
+            )));
         }
     };
     publish(source, destination, state)
@@ -324,20 +324,24 @@ mod tests {
         let dest = dir.path().join("dest");
         fs::write(&source, b"same").unwrap();
         symlink(&source, &dest).unwrap();
-        assert!(classify(&source, &dest)
-            .unwrap_err()
-            .to_string()
-            .contains("remove or repoint"));
+        assert!(
+            classify(&source, &dest)
+                .unwrap_err()
+                .to_string()
+                .contains("remove or repoint")
+        );
         fs::remove_file(source).unwrap();
         assert!(classify(&dir.path().join("source"), &dest).is_err());
     }
     #[test]
     fn directories_and_relative_paths_are_refused() {
         let dir = tempfile::tempdir().unwrap();
-        assert!(classify(&dir.path().join("source"), dir.path())
-            .unwrap_err()
-            .to_string()
-            .contains("remove the file"));
+        assert!(
+            classify(&dir.path().join("source"), dir.path())
+                .unwrap_err()
+                .to_string()
+                .contains("remove the file")
+        );
         assert_eq!(
             validate_paths(Path::new("source"), dir.path())
                 .unwrap_err()
@@ -357,7 +361,13 @@ mod tests {
             b"foreign".to_vec(),
         ] {
             fs::write(&dest, bytes).unwrap();
-            let Some(output) = crate::oracle::python("scripts/install-provenant-command.py", "try: print(m.classify(p.parent/'source', p))\nexcept m.Collision: print('collision')", &dest) else { return; };
+            let Some(output) = crate::oracle::python(
+                "scripts/install-provenant-command.py",
+                "try: print(m.classify(p.parent/'source', p))\nexcept m.Collision: print('collision')",
+                &dest,
+            ) else {
+                return;
+            };
             let actual = match classify(&source, &dest) {
                 Ok(State::Existing) => "existing",
                 Ok(State::ManagedFile) => "managed-file",
@@ -456,14 +466,18 @@ mod publication_tests {
             Published::Updated
         );
         assert_eq!(fs::read(&target).unwrap(), fs::read(&source).unwrap());
-        assert!(publish_expected(&source, &target, "foreign")
-            .unwrap_err()
-            .to_string()
-            .contains("invalid expected"));
-        assert!(publish(&source, &target, State::Absent)
-            .unwrap_err()
-            .to_string()
-            .contains("changed after preflight (absent -> existing)"));
+        assert!(
+            publish_expected(&source, &target, "foreign")
+                .unwrap_err()
+                .to_string()
+                .contains("invalid expected")
+        );
+        assert!(
+            publish(&source, &target, State::Absent)
+                .unwrap_err()
+                .to_string()
+                .contains("changed after preflight (absent -> existing)")
+        );
         assert_eq!(fs::read_dir(target.parent().unwrap()).unwrap().count(), 1);
     }
     #[test]
@@ -499,7 +513,15 @@ mod publication_tests {
                     }
                 };
                 reset();
-                let Some(old) = crate::oracle::python("scripts/install-provenant-command.py", &format!("import json\ntry: r=m.publish(p.parent/'source',p,{expected:?}); print(json.dumps([r,p.read_bytes().hex(),p.stat().st_mode & 0o777]))\nexcept m.Collision as e: print(json.dumps(str(e)))"),&target) else {return;};
+                let Some(old) = crate::oracle::python(
+                    "scripts/install-provenant-command.py",
+                    &format!(
+                        "import json\ntry: r=m.publish(p.parent/'source',p,{expected:?}); print(json.dumps([r,p.read_bytes().hex(),p.stat().st_mode & 0o777]))\nexcept m.Collision as e: print(json.dumps(str(e)))"
+                    ),
+                    &target,
+                ) else {
+                    return;
+                };
                 reset();
                 let actual = match publish_expected(&source, &target, expected) {
                     Ok(outcome) => serde_json::json!([
@@ -531,7 +553,13 @@ mod diagnostic_tests {
         let source = dir.path().join("source");
         let destination = dir.path().join("destination");
         fs::write(&destination, "foreign").unwrap();
-        let Some(old)=crate::oracle::python("scripts/install-provenant-command.py","import io,json,contextlib\no=io.StringIO();e=io.StringIO()\nwith contextlib.redirect_stdout(o),contextlib.redirect_stderr(e): code=m.main(['classify','--source',str(p.parent/'source'),'--destination',str(p)])\nprint(json.dumps([code,o.getvalue(),e.getvalue()]))",&destination)else{return;};
+        let Some(old) = crate::oracle::python(
+            "scripts/install-provenant-command.py",
+            "import io,json,contextlib\no=io.StringIO();e=io.StringIO()\nwith contextlib.redirect_stdout(o),contextlib.redirect_stderr(e): code=m.main(['classify','--source',str(p.parent/'source'),'--destination',str(p)])\nprint(json.dumps([code,o.getvalue(),e.getvalue()]))",
+            &destination,
+        ) else {
+            return;
+        };
         let output = run(&Command::Classify {
             source,
             destination,

@@ -1,6 +1,6 @@
 //! Shared, risk-scaled review coverage checks. Independence remains the caller's job.
-use crate::policy::{hashable, strip};
 use crate::PolicyError;
+use crate::policy::{hashable, strip};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeSet;

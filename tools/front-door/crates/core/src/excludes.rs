@@ -99,9 +99,11 @@ mod tests {
             b"# keep\r\n/.worktrees/\r\n\xff\n/.agent-run/\n/.agent-run/\n"
         );
         write_exclude_rules(dir.path(), &["/.agent-run/"]).unwrap();
-        assert!(fs::read(&exclude)
-            .unwrap()
-            .ends_with(b"/.agent-run/\n/.agent-run/\n"));
+        assert!(
+            fs::read(&exclude)
+                .unwrap()
+                .ends_with(b"/.agent-run/\n/.agent-run/\n")
+        );
     }
     #[cfg(unix)]
     #[test]

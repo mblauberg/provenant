@@ -193,9 +193,10 @@ fn cli_parser_and_renderer_keep_install_and_verify_wire_shapes() {
 
     let help = run_cli_fixed(["output_custody", "--help"]);
     assert_eq!(help.exit_code, 0);
-    assert!(help
-        .stdout
-        .contains("Install and verify one identity-bound dispatch output."));
+    assert!(
+        help.stdout
+            .contains("Install and verify one identity-bound dispatch output.")
+    );
     assert!(help.stderr.is_empty());
 }
 

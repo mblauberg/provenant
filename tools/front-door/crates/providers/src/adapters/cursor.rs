@@ -39,11 +39,13 @@ mod tests {
 
     #[test]
     fn cursor_read_only_uses_ask_sandbox_and_open_pipe() {
-        assert!(cursor(&plan(Mode::ReadOnly))
-            .unwrap()
-            .argv
-            .windows(2)
-            .any(|v| v == ["--sandbox", "enabled"]));
+        assert!(
+            cursor(&plan(Mode::ReadOnly))
+                .unwrap()
+                .argv
+                .windows(2)
+                .any(|v| v == ["--sandbox", "enabled"])
+        );
         assert_eq!(
             cursor(&plan(Mode::ReadOnly)).unwrap().stdin,
             StdinMode::Pipe

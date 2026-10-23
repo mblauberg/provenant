@@ -373,7 +373,10 @@ x=json.load(sys.stdin); print(json.dumps(m._provider_lines(Path(x['home']))))
             &[],
         );
         assert_eq!(out.exit_code, 1);
-        assert_eq!(out.stderr, "warning: routing catalogue bad data; repair=install-harness --platform all --refresh-routing\nrouting drift=unreadable repair=install-harness --platform all --refresh-routing\n");
+        assert_eq!(
+            out.stderr,
+            "warning: routing catalogue bad data; repair=install-harness --platform all --refresh-routing\nrouting drift=unreadable repair=install-harness --platform all --refresh-routing\n"
+        );
     }
 
     #[test]
@@ -419,7 +422,9 @@ x=json.load(sys.stdin); print(json.dumps(m._provider_lines(Path(x['home']))))
             let Some(expected): Option<Vec<u8>> = crate::oracle::python(
                 "import os,json,sys; x=json.load(sys.stdin); p=os.fsdecode(bytes(x['path'])); messages={'pointer':f'FAIL: product-root pointer is invalid or stale at {p}\\n','unmanaged':f'FAIL: {p} must be a regular managed copy; re-run install-harness\\n','executable':f'FAIL: {p} is not executable; re-run install-harness\\n','installed':f'provenant installed stub=ok path={p}\\n'}; print(json.dumps(list((messages[x['mode']] + ('front-door=rust\\n' + ''.join(f'provider {p} present=no\\n' for p in ['claude','codex','opencode','agy','cursor','kiro']) if x['mode']=='installed' else '')).encode('utf-8','surrogateescape'))))",
                 &serde_json::json!({"path": b"/tmp/bad\xff\nname".to_vec(), "mode":mode}),
-            ) else { return; };
+            ) else {
+                return;
+            };
             let output = render_bytes(&status, false, &[]);
             if mode == "installed" {
                 assert_eq!(output.stdout, expected);

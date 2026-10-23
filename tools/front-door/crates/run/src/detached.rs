@@ -159,11 +159,7 @@ pub enum Validation {
 
 impl Validation {
     pub fn exit_code(&self) -> i32 {
-        if matches!(self, Self::Starting) {
-            1
-        } else {
-            0
-        }
+        if matches!(self, Self::Starting) { 1 } else { 0 }
     }
     pub fn stdout(&self) -> String {
         match self {

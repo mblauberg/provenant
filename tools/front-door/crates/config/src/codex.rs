@@ -1,5 +1,5 @@
 //! Conflict override for Codex's bundled skill-creator.
-use crate::{invalid, io, Result};
+use crate::{Result, invalid, io};
 use serde::{Deserialize, Serialize};
 use std::{
     ffi::OsStr,
@@ -79,7 +79,7 @@ pub fn state(text: &str) -> Result<State> {
         _ => {
             return Err(invalid(
                 "Codex config skills.config value must be an array of tables",
-            ))
+            ));
         }
     };
     let mut found = false;
@@ -272,9 +272,11 @@ mod tests {
     #[test]
     fn invalid_toml_keeps_python_prefix_and_typed_source() {
         let error = state("[skills").unwrap_err();
-        assert!(error
-            .to_string()
-            .starts_with("Codex config is invalid TOML: "));
+        assert!(
+            error
+                .to_string()
+                .starts_with("Codex config is invalid TOML: ")
+        );
         assert!(matches!(error, crate::Error::Toml(_)));
     }
     #[test]
@@ -326,9 +328,11 @@ mod tests {
         let link = dir.path().join("config");
         symlink(dir.path().join("absent"), &link).unwrap();
         let error = configure(&link).unwrap_err();
-        assert!(error
-            .to_string()
-            .starts_with("Codex config symlink cannot be resolved: "));
+        assert!(
+            error
+                .to_string()
+                .starts_with("Codex config symlink cannot be resolved: ")
+        );
         assert!(error.to_string().contains(link.to_str().unwrap()));
         assert!(matches!(error, crate::Error::CodexSymlink { .. }));
         fs::remove_file(&link).unwrap();
@@ -354,7 +358,13 @@ mod tests {
             let dir = tempfile::tempdir().unwrap();
             let path = dir.path().join("config");
             fs::write(&path, original).unwrap();
-            let Some(output) = crate::oracle::python("scripts/configure-codex-skill-overrides.py", "import json;\ntry:\n t,s,r=m.proposed_update(p); print(json.dumps([s,r]))\nexcept (OSError,ValueError): print('null')", &path) else { return; };
+            let Some(output) = crate::oracle::python(
+                "scripts/configure-codex-skill-overrides.py",
+                "import json;\ntry:\n t,s,r=m.proposed_update(p); print(json.dumps([s,r]))\nexcept (OSError,ValueError): print('null')",
+                &path,
+            ) else {
+                return;
+            };
             let old: serde_json::Value = serde_json::from_slice(&output).unwrap();
             match proposed_update(&path) {
                 Ok(proposal) => assert_eq!(
@@ -426,8 +436,7 @@ mod tests {
             let dir = tempfile::tempdir().unwrap();
             let path = dir.path().join("config.toml");
             fs::write(&path, &input).unwrap();
-            let body =
-                "try: m.state(p.read_text())\nexcept Exception as e: print(type(e).__name__ + ':' + str(e))";
+            let body = "try: m.state(p.read_text())\nexcept Exception as e: print(type(e).__name__ + ':' + str(e))";
             let Some(output) =
                 crate::oracle::python("scripts/configure-codex-skill-overrides.py", body, &path)
             else {
@@ -494,14 +503,20 @@ mod edge_tests {
             "[[skills.config]]\rname='skill-creator'\renabled=false\r",
         ] {
             fs::write(&path, original).unwrap();
-            let Some(old)=crate::oracle::python("scripts/configure-codex-skill-overrides.py","import json,io,contextlib\no=io.StringIO()\nwith contextlib.redirect_stdout(o): code=m.main(['--config',str(p),'--check'])\nprint(json.dumps([code,o.getvalue()]))",&path)else{return;};
+            let Some(old) = crate::oracle::python(
+                "scripts/configure-codex-skill-overrides.py",
+                "import json,io,contextlib\no=io.StringIO()\nwith contextlib.redirect_stdout(o): code=m.main(['--config',str(p),'--check'])\nprint(json.dumps([code,o.getvalue()]))",
+                &path,
+            ) else {
+                return;
+            };
             let result = run(&path, CommandMode::Check);
             assert_eq!(
                 serde_json::from_slice::<serde_json::Value>(&old).unwrap(),
                 serde_json::json!([result.exit_code, result.stdout])
             );
         }
-        let input="[[skills.config]]\nname='skill-creator'\nenabled=true\n[[skills.config]]\nname='skill-creator'\nenabled=[]\n";
+        let input = "[[skills.config]]\nname='skill-creator'\nenabled=true\n[[skills.config]]\nname='skill-creator'\nenabled=[]\n";
         assert!(matches!(
             state(input),
             Err(crate::Error::CodexUnhashable { kind: "list" })
@@ -528,7 +543,13 @@ mod encoding_status_tests {
             assert!(result.stderr.starts_with("UnicodeDecodeError:"));
             assert_eq!(fs::read(&path).unwrap(), input);
         }
-        let Some(old)=crate::oracle::python("scripts/configure-codex-skill-overrides.py","import json\ntry: m.main(['--config',str(p),'--check'])\nexcept Exception as e: print(json.dumps(type(e).__name__))",&path)else{return;};
+        let Some(old) = crate::oracle::python(
+            "scripts/configure-codex-skill-overrides.py",
+            "import json\ntry: m.main(['--config',str(p),'--check'])\nexcept Exception as e: print(json.dumps(type(e).__name__))",
+            &path,
+        ) else {
+            return;
+        };
         assert_eq!(
             serde_json::from_slice::<String>(&old).unwrap(),
             "UnicodeDecodeError"

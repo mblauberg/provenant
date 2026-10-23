@@ -1,5 +1,5 @@
 //! Schema-v1 managed-skill receipts and the full skill-tree digest.
-use crate::{invalid, io, pending, workflows::valid_sha, Result};
+use crate::{Result, invalid, io, pending, workflows::valid_sha};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -325,10 +325,12 @@ mod tests {
         assert_eq!(serde_json::to_value(parsed).unwrap(), value);
         assert!(validate_manifest(value.clone(), &dir.path().join("other")).is_err());
         value["custom"]["skill"] = serde_json::json!({"source_target":"/custom"});
-        assert!(validate_manifest(value, &target)
-            .unwrap_err()
-            .to_string()
-            .contains("overlapping"));
+        assert!(
+            validate_manifest(value, &target)
+                .unwrap_err()
+                .to_string()
+                .contains("overlapping")
+        );
     }
     #[test]
     fn missing_custom_defaults_but_bad_history_and_entry_keys_refuse() {
@@ -336,22 +338,28 @@ mod tests {
         let target = dir.path().join("skills");
         let mut value = serde_json::to_value(empty_manifest(&target, NOW).unwrap()).unwrap();
         value.as_object_mut().unwrap().remove("custom");
-        assert!(validate_manifest(value.clone(), &target)
-            .unwrap()
-            .custom
-            .is_empty());
+        assert!(
+            validate_manifest(value.clone(), &target)
+                .unwrap()
+                .custom
+                .is_empty()
+        );
         value["managed"]["skill"] =
             serde_json::to_value(entry(dir.path(), vec![], NOW).unwrap()).unwrap();
         value["managed"]["skill"]["history"] = Value::Null;
-        assert!(validate_manifest(value.clone(), &target)
-            .unwrap_err()
-            .to_string()
-            .contains("history"));
+        assert!(
+            validate_manifest(value.clone(), &target)
+                .unwrap_err()
+                .to_string()
+                .contains("history")
+        );
         value["managed"]["skill"]["extra"] = 1.into();
-        assert!(validate_manifest(value, &target)
-            .unwrap_err()
-            .to_string()
-            .contains("entry is invalid"));
+        assert!(
+            validate_manifest(value, &target)
+                .unwrap_err()
+                .to_string()
+                .contains("entry is invalid")
+        );
     }
     #[test]
     fn digest_covers_reference_content_and_executable_mode() {
@@ -384,10 +392,12 @@ mod tests {
         assert_eq!(sha_skill(dir.path()).unwrap(), base);
         std::os::unix::fs::symlink(dir.path().join("missing"), dir.path().join("reference"))
             .unwrap();
-        assert!(sha_skill(dir.path())
-            .unwrap_err()
-            .to_string()
-            .contains("symlink: reference"));
+        assert!(
+            sha_skill(dir.path())
+                .unwrap_err()
+                .to_string()
+                .contains("symlink: reference")
+        );
     }
     #[test]
     fn writes_sorted_ascii_json_with_newline_and_explicit_time() {
@@ -403,7 +413,13 @@ mod tests {
             load_manifest(&target, NOW).unwrap().extra["updated_at"],
             NOW
         );
-        let Some(old) = crate::oracle::python("scripts/managed_installation_manifest.py", "import json\nd=json.loads(m.manifest_path(p).read_text()); print(json.dumps(d,indent=2,sort_keys=True))", &target) else { return; };
+        let Some(old) = crate::oracle::python(
+            "scripts/managed_installation_manifest.py",
+            "import json\nd=json.loads(m.manifest_path(p).read_text()); print(json.dumps(d,indent=2,sort_keys=True))",
+            &target,
+        ) else {
+            return;
+        };
         assert_eq!(bytes, old);
     }
     #[test]
@@ -452,7 +468,10 @@ mod ordered_validation_tests {
     fn first_invalid_receipt_entry_matches_python_insertion_order() {
         let dir = tempfile::tempdir().unwrap();
         let target = dir.path().canonicalize().unwrap().join("skills");
-        let text=format!("{{\"schema_version\":1,\"owner\":\"agent-harness\",\"target_root\":{},\"managed\":{{\"z\":{{}},\"a\":{{}}}}}}",serde_json::to_string(&target).unwrap());
+        let text = format!(
+            "{{\"schema_version\":1,\"owner\":\"agent-harness\",\"target_root\":{},\"managed\":{{\"z\":{{}},\"a\":{{}}}}}}",
+            serde_json::to_string(&target).unwrap()
+        );
         fs::write(manifest_path(&target), text).unwrap();
         let Some(old) = crate::oracle::python(
             "scripts/managed_installation_manifest.py",

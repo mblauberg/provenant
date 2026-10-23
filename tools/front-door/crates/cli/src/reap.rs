@@ -182,9 +182,12 @@ mod tests {
         let ages = [
             -100.0, -0.1, 0.0, 0.9, 59.9, 60.0, 3599.99, 3600.0, 86399.0, 86400.9, 90061.0,
         ];
-        let Some(expected):Option<(Vec<serde_json::Value>,Vec<String>)>=crate::oracle::python(
-            "import json,sys; from scripts.reap import format_age; x=json.load(sys.stdin); print(json.dumps([[int(v) if v.isascii() and v.isdigit() else None for v in x['pids']],[format_age(v) for v in x['ages']]]))",&json!({"pids":values,"ages":ages})
-        ) else {return;};
+        let Some(expected): Option<(Vec<serde_json::Value>, Vec<String>)> = crate::oracle::python(
+            "import json,sys; from scripts.reap import format_age; x=json.load(sys.stdin); print(json.dumps([[int(v) if v.isascii() and v.isdigit() else None for v in x['pids']],[format_age(v) for v in x['ages']]]))",
+            &json!({"pids":values,"ages":ages}),
+        ) else {
+            return;
+        };
         for (value, expected) in values.iter().zip(expected.0) {
             assert_eq!(json!(parse_pid(value).ok()), expected);
         }
@@ -249,9 +252,11 @@ mod tests {
         assert_eq!(result.victims, [13, 12, 10]);
         assert_eq!(result.exit_code, 1);
         assert!(result.stdout.contains("pid 11 already gone\n"));
-        assert!(result
-            .stdout
-            .contains("refused pid 20: started after --started-before"));
+        assert!(
+            result
+                .stdout
+                .contains("refused pid 20: started after --started-before")
+        );
         // Source includes zombie descendants and applies cutoff to named PIDs;
         // do not silently add a different child-selection policy.
         assert_eq!(result.identity[&12], 120.0);

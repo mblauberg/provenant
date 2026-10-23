@@ -425,8 +425,13 @@ pub struct Output {
 }
 
 pub fn error_output(message: &str) -> Output {
-    Output { stdout: String::new(), exit_code: 2,
-        stderr: format!("ps: {message}; supported subset: -p PID[,PID], -a/-x/-e/-A, -f, BSD aux, -o/-O pid,ppid,pgid,uid,user,lstart,etime,time,command,args,comm,stat,rss,tty\n") }
+    Output {
+        stdout: String::new(),
+        exit_code: 2,
+        stderr: format!(
+            "ps: {message}; supported subset: -p PID[,PID], -a/-x/-e/-A, -f, BSD aux, -o/-O pid,ppid,pgid,uid,user,lstart,etime,time,command,args,comm,stat,rss,tty\n"
+        ),
+    }
 }
 
 /// Python's fsdecode/surrogateescape then unicode_escape for nonprintables.
@@ -502,7 +507,7 @@ fn field(row: &Row, field: Field, locale: &str, darwin: bool) -> Result<String, 
                 |epoch| {
                     crate::sys::process::locale_start(epoch, locale, darwin).map_err(PsError::Time)
                 },
-            )
+            );
         }
         _ => {}
     }
@@ -599,7 +604,7 @@ pub fn run(argv: &[String], locale: &str) -> Result<Output, PsError> {
                     stdout: String::new(),
                     stderr: format!("ps: cannot inspect processes: {error}\n"),
                     exit_code: 1,
-                })
+                });
             }
         }
     } else {
@@ -734,12 +739,16 @@ mod render_tests {
                 "ps: 42: exists but cannot be read here; fields show ?\n"
             );
         }
-        assert!(unreadable_row(42, Presence::Gone, None, Presence::Alive)
-            .0
-            .is_none());
-        assert!(unreadable_row(42, Presence::Alive, None, Presence::Gone)
-            .0
-            .is_none());
+        assert!(
+            unreadable_row(42, Presence::Gone, None, Presence::Alive)
+                .0
+                .is_none()
+        );
+        assert!(
+            unreadable_row(42, Presence::Alive, None, Presence::Gone)
+                .0
+                .is_none()
+        );
         let facts = PublicFacts {
             ppid: 2,
             pgid: 3,
@@ -833,12 +842,14 @@ mod render_tests {
             .unwrap(),
             0
         );
-        assert!(write_output(
-            &output,
-            &mut Broken(std::io::ErrorKind::StorageFull),
-            &mut Vec::new()
-        )
-        .is_err());
+        assert!(
+            write_output(
+                &output,
+                &mut Broken(std::io::ErrorKind::StorageFull),
+                &mut Vec::new()
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -898,12 +909,14 @@ print(json.dumps(values))
             serde_json::json!(visible(&std::ffi::OsString::from_vec(
                 b"bad\xff\xf0\x80".to_vec()
             ))),
-            serde_json::json!(parse(&args(&["-p", "٩٢٢٣٣٧٢٠٣٦٨٥٤٧٧٥٨٠٨,+١_٢,-000,0004"]))
-                .unwrap()
-                .selected
-                .iter()
-                .map(ToString::to_string)
-                .collect::<Vec<_>>()),
+            serde_json::json!(
+                parse(&args(&["-p", "٩٢٢٣٣٧٢٠٣٦٨٥٤٧٧٥٨٠٨,+١_٢,-000,0004"]))
+                    .unwrap()
+                    .selected
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+            ),
         ];
         assert_eq!(serde_json::to_value(values).unwrap(), expected);
     }

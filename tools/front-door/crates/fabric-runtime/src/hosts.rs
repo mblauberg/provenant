@@ -1,6 +1,6 @@
 //! Federation placement policy. Transport and group cancellation remain with supervisor.
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 
 pub const HOST_STDOUT_LIMIT: usize = 4 * 1024 * 1024;
 pub const HOST_STDERR_LIMIT: usize = 4096;
@@ -153,14 +153,16 @@ mod tests {
     #[test]
     fn local_response_replaces_input_and_preserves_fallback() {
         let mut input = object(json!({"host":"peer","operation_id":"op","prompt":"before"}));
-        assert!(apply_lane_response(
-            &mut input,
-            object(
-                json!({"local":true,"input":{"prompt":"after"},"fallback":{"reason":"offline"}})
+        assert!(
+            apply_lane_response(
+                &mut input,
+                object(
+                    json!({"local":true,"input":{"prompt":"after"},"fallback":{"reason":"offline"}})
+                )
             )
-        )
-        .unwrap()
-        .is_none());
+            .unwrap()
+            .is_none()
+        );
         assert_eq!(
             input,
             object(json!({"prompt":"after","placement_fallback":{"reason":"offline"}}))

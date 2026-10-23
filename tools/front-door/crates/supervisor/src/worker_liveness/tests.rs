@@ -56,10 +56,12 @@ fn silence_never_stops_a_live_worker_and_deadlines_rearm() {
         rearm_poll_deadline(60.0, -0.0, false),
         Err(LivenessError::PollBudget)
     );
-    assert!(rearm_poll_deadline(60.0, f64::NAN, true)
-        .unwrap()
-        .unwrap()
-        .is_nan());
+    assert!(
+        rearm_poll_deadline(60.0, f64::NAN, true)
+            .unwrap()
+            .unwrap()
+            .is_nan()
+    );
     assert_eq!(
         rearm_poll_deadline(60.0, f64::INFINITY, true).unwrap(),
         Some(f64::INFINITY)
@@ -285,12 +287,16 @@ fn stalls_are_advisory_and_require_a_unique_cwd_owned_baseline() {
     processes[0].process.elapsed = "01:00".into();
     processes.push(located(45, "/repo", "01:00"));
     let workers = collect(&processes, &logs, None, Some(&previous)).unwrap();
-    assert!(workers
-        .iter()
-        .all(|w| w.output_size.is_none() && !w.stalled));
-    assert!(workers
-        .iter()
-        .all(|w| w.session_log == "/log" && w.worktree == "writer-live"));
+    assert!(
+        workers
+            .iter()
+            .all(|w| w.output_size.is_none() && !w.stalled)
+    );
+    assert!(
+        workers
+            .iter()
+            .all(|w| w.session_log == "/log" && w.worktree == "writer-live")
+    );
     processes[1].repository_id = Some("other-repo".into());
     let scope = RepositoryScope {
         path: "/repo".into(),

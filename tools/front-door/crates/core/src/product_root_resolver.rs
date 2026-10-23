@@ -1,6 +1,6 @@
 //! Partial port: RP-1003 records the remaining Python compatibility work.
 //! Machine-local product-root pointers. Loading a stale path supports relocation.
-use crate::paths::{expand_user, resolve, Homes, PathError};
+use crate::paths::{Homes, PathError, expand_user, resolve};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io;
@@ -19,9 +19,7 @@ struct ProductPointer {
 pub enum PointerError {
     #[error(transparent)]
     Path(#[from] PathError),
-    #[error(
-        "product pointer directory escapes the instance root: {parent} resolves to {resolved}"
-    )]
+    #[error("product pointer directory escapes the instance root: {parent} resolves to {resolved}")]
     Escape { parent: PathBuf, resolved: PathBuf },
     #[error("product pointer directory must not be a symlink")]
     Symlink,
@@ -233,11 +231,13 @@ mod tests {
                 thread.join().unwrap().unwrap();
             }
         });
-        assert!(products.contains(
-            &load_pointer_file(&instance, &Homes::default())
-                .unwrap()
-                .unwrap()
-        ));
+        assert!(
+            products.contains(
+                &load_pointer_file(&instance, &Homes::default())
+                    .unwrap()
+                    .unwrap()
+            )
+        );
         assert_eq!(
             fs::read_dir(instance.join(".agent-fabric"))
                 .unwrap()

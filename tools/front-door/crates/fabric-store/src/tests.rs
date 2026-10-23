@@ -60,12 +60,14 @@ fn sessions_fence_active_turns_and_keep_last_clean_pointer() {
     store
         .settle_session_turn(&who, "Review", "wrong", "failed", None)
         .unwrap();
-    assert!(store
-        .session("p", "Review")
-        .unwrap()
-        .unwrap()
-        .turn_status
-        .is_none());
+    assert!(
+        store
+            .session("p", "Review")
+            .unwrap()
+            .unwrap()
+            .turn_status
+            .is_none()
+    );
     let pointer = SessionPointer {
         adapter: Some("codex".into()),
         provider_session_id: Some("native".into()),
@@ -224,16 +226,18 @@ fn message_log_failure_rolls_back_message_and_all_deliveries() {
     store.announce(&a).unwrap();
     store.announce(&b).unwrap();
     store.db.execute_batch("CREATE TRIGGER fail_log BEFORE INSERT ON activity BEGIN SELECT RAISE(ABORT,'log blocked'); END").unwrap();
-    assert!(store
-        .send(
-            &a,
-            "bob",
-            "hello",
-            SendOptions::default(),
-            RecipientContext::default(),
-            "m"
-        )
-        .is_err());
+    assert!(
+        store
+            .send(
+                &a,
+                "bob",
+                "hello",
+                SendOptions::default(),
+                RecipientContext::default(),
+                "m"
+            )
+            .is_err()
+    );
     assert_eq!(
         store
             .db
@@ -252,16 +256,18 @@ fn message_log_failure_rolls_back_message_and_all_deliveries() {
             "m",
         )
         .unwrap();
-    assert!(store
-        .inbox(
-            &b,
-            InboxOptions {
-                busy_timeout_ms: 1,
-                ..Default::default()
-            },
-            &NoEntropy
-        )
-        .is_err());
+    assert!(
+        store
+            .inbox(
+                &b,
+                InboxOptions {
+                    busy_timeout_ms: 1,
+                    ..Default::default()
+                },
+                &NoEntropy
+            )
+            .is_err()
+    );
     assert!(store.db.is_autocommit());
     assert_eq!(
         store
@@ -321,10 +327,12 @@ fn digest_truncates_groups_preserves_null_tasks_and_ignores_expired_messages() {
     let digest = store.inbox_digest(&b, None).unwrap();
     assert_eq!(digest.total, 20);
     assert!(!digest.truncated);
-    assert!(digest
-        .groups
-        .iter()
-        .all(|g| g.task_id.is_none() && g.summary.chars().count() == 80));
+    assert!(
+        digest
+            .groups
+            .iter()
+            .all(|g| g.task_id.is_none() && g.summary.chars().count() == 80)
+    );
     store
         .db
         .execute(
@@ -392,9 +400,11 @@ fn alias_routing_uses_explicit_chair_parent_and_excludes_sender_from_teams() {
         ["chair"]
     );
     store.create_team(&a, "self", &["alice".into()]).unwrap();
-    assert!(store
-        .send(&a, "self", "hi", SendOptions::default(), context(), "m4")
-        .is_err());
+    assert!(
+        store
+            .send(&a, "self", "hi", SendOptions::default(), context(), "m4")
+            .is_err()
+    );
 }
 
 #[test]

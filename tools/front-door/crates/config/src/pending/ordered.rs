@@ -1,9 +1,9 @@
 //! Minimal insertion-ordered JSON while the records owner has no ordered codec.
 // port: belongs in provenant-records
 use serde::{
+    Deserialize, Deserializer, Serialize, Serializer,
     de::{MapAccess, SeqAccess, Visitor},
     ser::{SerializeMap, SerializeSeq},
-    Deserialize, Deserializer, Serialize, Serializer,
 };
 use serde_json::{Number, Value};
 use std::{fmt, ops::Index};

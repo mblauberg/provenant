@@ -170,7 +170,7 @@ pub fn configured(path: &Path) -> Result<Option<String>, InvalidHost> {
             return Err(InvalidHost::Read {
                 path: path.into(),
                 source,
-            })
+            });
         }
     };
     let text = decode_bytes(&raw).map_err(|source| InvalidHost::Encoding {

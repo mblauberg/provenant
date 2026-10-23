@@ -289,10 +289,12 @@ mod tests {
         ));
         if let Some(expected) = crate::test_support::oracle("lane_exit_raw", &json!([{"raw":raw}]))
         {
-            assert!(expected[0]["wire"]
-                .as_str()
-                .unwrap()
-                .contains("1180591620717411303424"));
+            assert!(
+                expected[0]["wire"]
+                    .as_str()
+                    .unwrap()
+                    .contains("1180591620717411303424")
+            );
         }
     }
     #[test]

@@ -402,9 +402,11 @@ fn signal_exit_is_128_plus_signal() {
         .unwrap(),
         143
     );
-    assert!(fs::read_to_string(path.join("done"))
-        .unwrap()
-        .ends_with("exit=143\n"));
+    assert!(
+        fs::read_to_string(path.join("done"))
+            .unwrap()
+            .ends_with("exit=143\n")
+    );
 }
 #[test]
 fn invalid_parent_is_refused_without_a_worker() {
@@ -445,9 +447,11 @@ fn failed_exec_diagnostic_and_fallback_worker_are_durable() {
             missing.display()
         )
     );
-    assert!(fs::read_to_string(path.join("done"))
-        .unwrap()
-        .ends_with("exit=127\n"));
+    assert!(
+        fs::read_to_string(path.join("done"))
+            .unwrap()
+            .ends_with("exit=127\n")
+    );
 }
 #[test]
 fn non_executable_worker_uses_126() {
@@ -660,11 +664,13 @@ fn pid_publication_failure_sends_sigterm_to_owned_worker() {
     let run = root.path().join("run");
     let ready = root.path().join("ready.fifo");
     let marker = root.path().join("terminated");
-    assert!(Command::new("mkfifo")
-        .arg(&ready)
-        .status()
-        .unwrap()
-        .success());
+    assert!(
+        Command::new("mkfifo")
+            .arg(&ready)
+            .status()
+            .unwrap()
+            .success()
+    );
     let mut command = shell(
         "trap 'printf term > \"$1\"; exit 0' TERM; printf ready > \"$2\"; while :; do :; done",
     );

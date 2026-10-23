@@ -1,5 +1,5 @@
 //! Workspace containment and authority scope for receipt paths.
-use crate::paths::{resolve, PathError};
+use crate::paths::{PathError, resolve};
 use serde_json::Value;
 use std::path::{Component, Path, PathBuf};
 use thiserror::Error;
@@ -311,9 +311,11 @@ except ValueError as e:
             return;
         };
         assert_eq!(
-            serde_json::json!(safe_workspace_path(&double, "file", "path")
-                .unwrap_err()
-                .to_string()),
+            serde_json::json!(
+                safe_workspace_path(&double, "file", "path")
+                    .unwrap_err()
+                    .to_string()
+            ),
             expected
         );
     }

@@ -179,8 +179,11 @@ mod tests {
             .map(str::to_owned),
         );
         let Some(expected): Option<Vec<(String, String)>> = crate::oracle::python(
-            "import json,sys; print(json.dumps([(repr(s),s.strip()) for s in json.load(sys.stdin)]))", &serde_json::json!(values)
-        ) else { return; };
+            "import json,sys; print(json.dumps([(repr(s),s.strip()) for s in json.load(sys.stdin)]))",
+            &serde_json::json!(values),
+        ) else {
+            return;
+        };
         for (value, (repr, strip)) in values.iter().zip(expected) {
             assert_eq!(python_repr(value), repr, "{value:?}");
             assert_eq!(python_strip(value), strip, "{value:?}");
@@ -191,7 +194,9 @@ mod tests {
 // port: belongs in provenant-core
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum IntegerError {
-    #[error("Exceeds the limit (4300 digits) for integer string conversion: value has {digits} digits; use sys.set_int_max_str_digits() to increase the limit")]
+    #[error(
+        "Exceeds the limit (4300 digits) for integer string conversion: value has {digits} digits; use sys.set_int_max_str_digits() to increase the limit"
+    )]
     DigitLimit { digits: usize },
     #[error("integer outside i64/u64 range")]
     NumberOutOfRange,

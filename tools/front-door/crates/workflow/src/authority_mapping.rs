@@ -976,7 +976,7 @@ pub fn authority_contained(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::{json, Value};
+    use serde_json::{Value, json};
     use std::path::PathBuf;
 
     fn root() -> PathBuf {
@@ -1200,9 +1200,11 @@ mod tests {
         }
         for count in [128, 129] {
             let mut input = delivery_fixture();
-            input["budget"] = json!((0..count)
-                .map(|i| (format!("input_tokens:provider-{i}"), json!(1)))
-                .collect::<Map<_, _>>());
+            input["budget"] = json!(
+                (0..count)
+                    .map(|i| (format!("input_tokens:provider-{i}"), json!(1)))
+                    .collect::<Map<_, _>>()
+            );
             cases.push(json!({"op":"map","authority":input}));
         }
         compare_map_cases(cases);

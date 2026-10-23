@@ -8,7 +8,9 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum Error {
-    #[error("{name} needs exactly one {start_marker} / {end_marker} pair, found {starts} start and {ends} end markers")]
+    #[error(
+        "{name} needs exactly one {start_marker} / {end_marker} pair, found {starts} start and {ends} end markers"
+    )]
     MarkerCount {
         name: String,
         start_marker: String,
@@ -352,9 +354,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("doc.md");
         fs::write(&path, DOC).unwrap();
-        assert!(project(&path, "sample", DOC, true, None)
-            .unwrap()
-            .is_empty());
+        assert!(
+            project(&path, "sample", DOC, true, None)
+                .unwrap()
+                .is_empty()
+        );
         let rendered = DOC.replace("old body", "new body");
         let report = project(&path, "sample", &rendered, true, Some("skills/")).unwrap();
         assert_eq!(report[0], "--- doc.md (on disk)\n");
@@ -410,8 +414,11 @@ mod tests {
             cases.push((make(), make()));
         }
         let Some(expected): Option<Vec<Vec<String>>> = crate::oracle::python(
-            "import difflib,json,sys; print(json.dumps([list(difflib.unified_diff(a.splitlines(True),b.splitlines(True),fromfile='old',tofile='new')) for a,b in json.load(sys.stdin)]))", &serde_json::json!(cases)
-        ) else { return; };
+            "import difflib,json,sys; print(json.dumps([list(difflib.unified_diff(a.splitlines(True),b.splitlines(True),fromfile='old',tofile='new')) for a,b in json.load(sys.stdin)]))",
+            &serde_json::json!(cases),
+        ) else {
+            return;
+        };
         for ((before, after), expected) in cases.iter().zip(expected) {
             assert_eq!(
                 unified_diff(before, after, "old", "new"),
@@ -434,8 +441,11 @@ mod tests {
                 for check in [true, false] {
                     fs::write(&path, &current).unwrap();
                     let Some(expected): Option<serde_json::Value> = crate::oracle::python(
-                        "import json,sys; from pathlib import Path; from scripts.lib.projection import project,ProjectionError; x=json.load(sys.stdin); p=Path(x['path']); p.write_bytes(x['current'].encode());\ntry: r={'report':project(p,'sample',x['rendered'],x['check'],source='skills/')}\nexcept ProjectionError as e: r={'error':str(e)}\nr['bytes']=list(p.read_bytes()); print(json.dumps(r))", &json!({"path":path, "current":current, "rendered":rendered, "check":check})
-                    ) else { return; };
+                        "import json,sys; from pathlib import Path; from scripts.lib.projection import project,ProjectionError; x=json.load(sys.stdin); p=Path(x['path']); p.write_bytes(x['current'].encode());\ntry: r={'report':project(p,'sample',x['rendered'],x['check'],source='skills/')}\nexcept ProjectionError as e: r={'error':str(e)}\nr['bytes']=list(p.read_bytes()); print(json.dumps(r))",
+                        &json!({"path":path, "current":current, "rendered":rendered, "check":check}),
+                    ) else {
+                        return;
+                    };
                     fs::write(&path, &current).unwrap();
                     let actual = match project(&path, "sample", &rendered, check, Some("skills/")) {
                         Ok(report) => json!({"report":report,"bytes":fs::read(&path).unwrap()}),

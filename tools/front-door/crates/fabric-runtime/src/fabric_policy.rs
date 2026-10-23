@@ -17,7 +17,7 @@ fn load(workspace_root: &Path) -> (Map<String, Value>, Vec<String>) {
             return (
                 Map::new(),
                 vec![format!("{POLICY} is unreadable; using defaults")],
-            )
+            );
         }
     };
     let text = match std::str::from_utf8(&bytes) {
@@ -26,7 +26,7 @@ fn load(workspace_root: &Path) -> (Map<String, Value>, Vec<String>) {
             return (
                 Map::new(),
                 vec![format!("{POLICY} is unreadable; using defaults")],
-            )
+            );
         }
     };
     match crate::pending::checked_json(text) {
@@ -212,11 +212,16 @@ mod tests {
             r#"{"tools":{"default_branch":null,"lint":{"areas":"api","forbid_attribution":0}}}"#,
         );
         let (_, warnings) = tools_policy(root.path());
-        assert_eq!(warnings, [
-            format!("{POLICY} tools.default_branch must be a non-empty string; using main"),
-            format!("{POLICY} tools.lint.areas must be a list of lowercase words; allowing any area"),
-            format!("{POLICY} tools.lint.forbid_attribution must be true or false; using true"),
-        ]);
+        assert_eq!(
+            warnings,
+            [
+                format!("{POLICY} tools.default_branch must be a non-empty string; using main"),
+                format!(
+                    "{POLICY} tools.lint.areas must be a list of lowercase words; allowing any area"
+                ),
+                format!("{POLICY} tools.lint.forbid_attribution must be true or false; using true"),
+            ]
+        );
     }
 
     #[test]
@@ -232,7 +237,15 @@ mod tests {
         assert_eq!(paths, [root.path().join("allowed")]);
         assert_eq!(warnings.len(), 3);
         write_policy(root.path(), r#"{"instruction_changes":null}"#);
-        assert_eq!(instruction_changes(root.path()), ("quarantine".into(), vec![format!("{POLICY} instruction_changes must be quarantine, allow or deny; using quarantine")]));
+        assert_eq!(
+            instruction_changes(root.path()),
+            (
+                "quarantine".into(),
+                vec![format!(
+                    "{POLICY} instruction_changes must be quarantine, allow or deny; using quarantine"
+                )]
+            )
+        );
     }
 
     #[test]

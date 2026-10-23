@@ -1,5 +1,5 @@
 //! Product-root precedence. The install supplies its fallback root as a value.
-use crate::paths::{expand_user, Homes, PathError};
+use crate::paths::{Homes, PathError, expand_user};
 use std::path::{Path, PathBuf};
 
 pub const ENVIRONMENT_VARIABLE: &str = "AGENT_FABRIC_PRODUCT_ROOT";

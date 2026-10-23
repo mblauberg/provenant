@@ -147,7 +147,7 @@ pub fn render(document: &OrderedValue, full: bool) -> Result<String, RenderError
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::{json, Value};
+    use serde_json::{Value, json};
     #[test]
     fn listing_bytes_match_python_with_hidden_cooling_quota_unicode_and_presence() {
         let raw = r#"{"routes":{"senior":[{"model":"codex/gpt-6@high","weight":4,"availability":"available"},{"model":"日本語","weight":1.0,"availability":"available","effort":null,"traits":[],"quota":{"state":"deficit","summary":"low"}},{"model":"z","weight":"off","availability":"disabled"},{"model":"b","availability":"cooling until 2026-10-24"},{"model":"a","availability":"cooling until 2026-10-24"}],"empty":[]},"synonyms":{"z":"senior","a":"empty","q":"senior"}}"#;

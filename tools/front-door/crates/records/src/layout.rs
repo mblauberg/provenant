@@ -3,7 +3,7 @@
 //! remains with the process and run owners, rather than importing them here.
 use std::path::{Path, PathBuf};
 
-use jiff::{tz::TimeZone, Timestamp};
+use jiff::{Timestamp, tz::TimeZone};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -163,5 +163,5 @@ pub trait LayoutIo {
         owner: Option<bool>,
     ) -> Result<PathBuf, LayoutError>;
     fn reap_orphans(&self, cwd: Option<&Path>, at: Option<f64>)
-        -> Result<Vec<String>, LayoutError>;
+    -> Result<Vec<String>, LayoutError>;
 }

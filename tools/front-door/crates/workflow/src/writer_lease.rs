@@ -1,5 +1,5 @@
 //! Writer retry and branch-name policy. Lease effects remain with the safe OS owner.
-use crate::{policy::hashable, PolicyError};
+use crate::{PolicyError, policy::hashable};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -21,7 +21,7 @@ pub const STARTUP_WALK_SKIP: &[&str] = &[
 ];
 pub const STARTUP_WALK_MAX_ENTRIES: u64 = 200_000;
 pub const STARTUP_WALK_MAX_SECONDS: f64 = 5.0;
-const RETRY_FIX:&str="inspect the worktree: it changed or was dirty when the writer stopped; then dispatch again on another model or adapter";
+const RETRY_FIX: &str = "inspect the worktree: it changed or was dirty when the writer stopped; then dispatch again on another model or adapter";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorktreeSnapshot {
@@ -72,7 +72,9 @@ pub fn branch_warning(branch: &str) -> Result<Option<String>, regex::Error> {
     if branch.chars().count() <= 48 && pattern.is_match(branch) {
         Ok(None)
     } else {
-        Ok(Some(format!("branch {branch} is outside <type>/<area>-<slug> (or land/, proto/); rename for repository convention")))
+        Ok(Some(format!(
+            "branch {branch} is outside <type>/<area>-<slug> (or land/, proto/); rename for repository convention"
+        )))
     }
 }
 

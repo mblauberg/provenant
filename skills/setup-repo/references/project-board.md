@@ -54,7 +54,7 @@ mutation {
 ```
 
 `description` is a required (non-empty-allowed) string on each option; omitting
-it errors. Either way, re-run `field-list` afterward and record the resulting
+it errors. Either way, re-run `field-list` afterwards and record the resulting
 option ids — the runbook's day-to-day commands need them.
 
 ## Moving an item (for the copied runbook)

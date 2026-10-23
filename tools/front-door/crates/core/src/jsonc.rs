@@ -234,10 +234,12 @@ print(json.dumps(results))
             return;
         };
         assert_eq!(
-            serde_json::json!(fixtures
-                .iter()
-                .map(|v| parse_jsonc(v).is_ok())
-                .collect::<Vec<_>>()),
+            serde_json::json!(
+                fixtures
+                    .iter()
+                    .map(|v| parse_jsonc(v).is_ok())
+                    .collect::<Vec<_>>()
+            ),
             expected
         );
     }

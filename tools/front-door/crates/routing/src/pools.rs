@@ -332,7 +332,9 @@ fn settle(
 ) -> Result<(), MigrationConflict> {
     if target.get(name).is_some_and(|current| current != value) {
         let current = target.get(name).map(Value::to_string).unwrap_or_default();
-        return Err(MigrationConflict(format!("{old_path} = {value} conflicts with {new_path} = {current}; keep one, delete the other, then refresh again")));
+        return Err(MigrationConflict(format!(
+            "{old_path} = {value} conflicts with {new_path} = {current}; keep one, delete the other, then refresh again"
+        )));
     }
     target
         .entry(name.to_owned())
@@ -500,7 +502,7 @@ fn executable_in(path: &Path) -> bool {
     }
 }
 
-pub use crate::render::{render, RenderError};
+pub use crate::render::{RenderError, render};
 
 /// Resolve explicit adapter prefixes before inferring an owner from a bare id.
 pub fn resolve_model(
@@ -633,8 +635,8 @@ mod tests {
     use std::collections::BTreeMap;
 
     use super::{
-        effort_band, entry_is_valid, merge_route, migrate_renamed, reject_renamed, weight_value,
-        PoolError, RenamedNameError,
+        PoolError, RenamedNameError, effort_band, entry_is_valid, merge_route, migrate_renamed,
+        reject_renamed, weight_value,
     };
 
     #[test]

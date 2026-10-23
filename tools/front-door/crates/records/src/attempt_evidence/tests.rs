@@ -398,14 +398,16 @@ fn output_paths_resolve_links_and_missing_components() {
     symlink("real", run.path().join("link")).unwrap();
     let (_, _, mut adapter) = fixture(run.path());
     adapter["output_path"] = json!(run.path().join("missing/../link/result.md"));
-    assert!(successful_adapter_error(
-        &adapter,
-        &json!("codex"),
-        &json!("ordinary"),
-        &run.path().join("real/result.md"),
-        &digest_bytes(b"result\n")
-    )
-    .is_none());
+    assert!(
+        successful_adapter_error(
+            &adapter,
+            &json!("codex"),
+            &json!("ordinary"),
+            &run.path().join("real/result.md"),
+            &digest_bytes(b"result\n")
+        )
+        .is_none()
+    );
 }
 
 #[test]

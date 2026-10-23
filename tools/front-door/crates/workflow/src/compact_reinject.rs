@@ -79,7 +79,9 @@ pub fn render_text(path: &str, text: &str) -> String {
     if chars.next().is_some() {
         retained.push_str(&format!("\n[... truncated; read the rest from {path}]"));
     }
-    format!("Context was just compacted. This session's state file is {path} (re-injected below). Its standing directions still bind; keep maintaining this file.\n\n{retained}")
+    format!(
+        "Context was just compacted. This session's state file is {path} (re-injected below). Its standing directions still bind; keep maintaining this file.\n\n{retained}"
+    )
 }
 
 #[cfg(test)]

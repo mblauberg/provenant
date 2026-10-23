@@ -169,9 +169,12 @@ mod tests {
                 }
             }
         }
-        let Some(oracle):Option<Vec<(Vec<Check>,Outcome)>>=crate::oracle::python(
-            "import json,sys; from scripts.provenant_pr import judge; print(json.dumps([judge(rows,None if required is None else set(required),previous) for rows,required,previous in json.load(sys.stdin)]))",&json!(cases)
-        ) else {return;};
+        let Some(oracle): Option<Vec<(Vec<Check>, Outcome)>> = crate::oracle::python(
+            "import json,sys; from scripts.provenant_pr import judge; print(json.dumps([judge(rows,None if required is None else set(required),previous) for rows,required,previous in json.load(sys.stdin)]))",
+            &json!(cases),
+        ) else {
+            return;
+        };
         assert_eq!(cases.len(), oracle.len());
         for ((rows, expected, previous), oracle) in cases.into_iter().zip(oracle) {
             assert_eq!(judge(&rows, expected.as_ref(), previous.as_deref()), oracle);
@@ -258,7 +261,12 @@ mod normalization_tests {
     #[test]
     fn normalization_matches_python_truthiness_scalar_str_and_retained_links() {
         let cases=["invalid".to_owned(),"{}".into(),"null".into(), r#"[{"name":-0,"bucket":[-0,-0.0]}]"#.into(),"[]".into(), r#"[{"name":{"z":true,"a":null,"z":false},"bucket":[{"z":1,"a":2}]}]"#.into(),serde_json::to_string(&json!([null,false,1,"row",{}, {"name":null,"bucket":0,"link":false},{"name":true,"bucket":1.0,"link":[1]},{"name":9007199254740993u64,"bucket":"pass","link":{"a":null}},{"name":"é","bucket":[],"link":{}}])).unwrap()];
-        let Some(expected):Option<Vec<Option<Vec<Check>>>>=crate::oracle::python("import json,sys; from scripts.provenant_pr import parse_checks; print(json.dumps([parse_checks(v) for v in json.load(sys.stdin)]))",&json!(cases)) else{return;};
+        let Some(expected): Option<Vec<Option<Vec<Check>>>> = crate::oracle::python(
+            "import json,sys; from scripts.provenant_pr import parse_checks; print(json.dumps([parse_checks(v) for v in json.load(sys.stdin)]))",
+            &json!(cases),
+        ) else {
+            return;
+        };
         for (raw, expected) in cases.iter().zip(expected) {
             assert_eq!(parse_checks(raw).unwrap(), expected);
         }

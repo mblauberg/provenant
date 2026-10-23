@@ -616,8 +616,8 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        configuration_ignored, normalise_candidates, preference_items, preference_rank,
-        Availability,
+        Availability, configuration_ignored, normalise_candidates, preference_items,
+        preference_rank,
     };
 
     #[test]
@@ -679,15 +679,17 @@ mod tests {
     #[test]
     fn integer_like_python_schema_versions_and_unknown_policy_values_match_the_oracle() {
         let raw = json!({"schema_version":1.0,"candidates":[]});
-        assert!(normalise_candidates(
-            &raw,
-            "work",
-            "worker",
-            &BTreeMap::new(),
-            &BTreeMap::new(),
-            &BTreeMap::new()
-        )
-        .is_ok());
+        assert!(
+            normalise_candidates(
+                &raw,
+                "work",
+                "worker",
+                &BTreeMap::new(),
+                &BTreeMap::new(),
+                &BTreeMap::new()
+            )
+            .is_ok()
+        );
         let ignored = configuration_ignored(
             &json!({"spreading":{"policy":"weighted"}}),
             "work",

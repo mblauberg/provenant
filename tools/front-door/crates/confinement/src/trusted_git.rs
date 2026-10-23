@@ -350,20 +350,24 @@ mod tests {
             let file = location.private.join(name);
             let _ = fs::remove_file(&file);
             symlink("missing", file).unwrap();
-            assert!(location
-                .validate()
-                .unwrap_err()
-                .to_string()
-                .contains("is a link"));
+            assert!(
+                location
+                    .validate()
+                    .unwrap_err()
+                    .to_string()
+                    .contains("is a link")
+            );
         }
         let (_tmp, location) = fixture();
         fs::create_dir_all(location.common.join("objects/info")).unwrap();
         symlink("missing", location.common.join("objects/info/alternates")).unwrap();
-        assert!(location
-            .validate()
-            .unwrap_err()
-            .to_string()
-            .starts_with("alternate object stores"));
+        assert!(
+            location
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .starts_with("alternate object stores")
+        );
     }
 
     #[test]
@@ -401,9 +405,11 @@ mod tests {
                 location.common.join("logs/refs/heads/lane")
             ]
         );
-        assert!(writer_git_writes(&location.private, &location.common, None)
-            .1
-            .is_empty());
+        assert!(
+            writer_git_writes(&location.private, &location.common, None)
+                .1
+                .is_empty()
+        );
         assert_eq!(
             writer_read_only(&location.worktree, &location.private, &location.common).len(),
             5
@@ -420,10 +426,12 @@ mod tests {
             location.common.join("refs/heads"),
         )
         .unwrap();
-        assert!(prepare_writer_ref(&location.common, "refs/heads/lane")
-            .unwrap_err()
-            .to_string()
-            .ends_with("is a link"));
+        assert!(
+            prepare_writer_ref(&location.common, "refs/heads/lane")
+                .unwrap_err()
+                .to_string()
+                .ends_with("is a link")
+        );
     }
 
     #[test]

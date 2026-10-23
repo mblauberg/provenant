@@ -327,7 +327,7 @@ pub struct Checked {
 mod tests {
     use super::*;
     use clap::Parser;
-    use serde_json::{json, Value};
+    use serde_json::{Value, json};
     use std::os::unix::ffi::OsStrExt;
     fn record_json(record: &WorktreeRecord) -> Value {
         Value::Object(
@@ -430,11 +430,13 @@ print(json.dumps(result))
         };
         for (raw, expected) in expected {
             assert_eq!(
-                json!(parse_records(&raw)
-                    .unwrap()
-                    .iter()
-                    .map(record_json)
-                    .collect::<Vec<_>>()),
+                json!(
+                    parse_records(&raw)
+                        .unwrap()
+                        .iter()
+                        .map(record_json)
+                        .collect::<Vec<_>>()
+                ),
                 expected
             );
         }
@@ -465,9 +467,12 @@ print(json.dumps(result))
                 claims.push((commit.map(str::to_owned), base.map(str::to_owned)));
             }
         }
-        let Some(expected): Option<(Vec<bool>,Vec<Value>)> = crate::oracle::python(
-            "import json,sys; from pathlib import Path; from scripts.worktree import ignored_path_is_generated,verify_claim; x=json.load(sys.stdin); print(json.dumps([[ignored_path_is_generated(p) for p in x['paths']],[verify_claim(Path('/absent'),Path('/absent'),c,base_revision=b) if not c or len(c) not in (40,64) or not b or len(b) not in (40,64) else None for c,b in x['claims']]]))", &json!({"paths":paths,"claims":claims})
-        ) else { return; };
+        let Some(expected): Option<(Vec<bool>, Vec<Value>)> = crate::oracle::python(
+            "import json,sys; from pathlib import Path; from scripts.worktree import ignored_path_is_generated,verify_claim; x=json.load(sys.stdin); print(json.dumps([[ignored_path_is_generated(p) for p in x['paths']],[verify_claim(Path('/absent'),Path('/absent'),c,base_revision=b) if not c or len(c) not in (40,64) or not b or len(b) not in (40,64) else None for c,b in x['claims']]]))",
+            &json!({"paths":paths,"claims":claims}),
+        ) else {
+            return;
+        };
         assert_eq!(paths.map(ignored_path_is_generated).to_vec(), expected.0);
         for ((commit, base), expected) in claims.iter().zip(expected.1) {
             assert_eq!(
