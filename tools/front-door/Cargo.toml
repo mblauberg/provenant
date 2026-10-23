@@ -52,6 +52,7 @@ ignored = [
   "provenant-fabric-store",
   "provenant-providers",
   "provenant-quota",
+  "provenant-records",
   "provenant-routing",
   "provenant-run",
   "provenant-telemetry",
