@@ -1180,7 +1180,7 @@ def test_check_lists_stale_legacy_agy_skill_links_without_removing_them(tmp_path
         "schema_version": 1,
         "owner": "agent-harness",
         # An older install may record a previous home directory.
-        "target_root": str(legacy.resolve()) if receipt_root == "current" else "/Users/previous/.gemini/config/skills",
+        "target_root": str(legacy.resolve()) if receipt_root == "current" else str(tmp_path / "previous-home/.gemini/config/skills"),
         "updated_at": utc_timestamp(),
         "managed": {
             "retired-skill": {
