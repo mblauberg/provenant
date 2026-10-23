@@ -473,6 +473,7 @@ pub fn otel_record(sink: &mut impl Sink, row: &Value, path: &Path, offset: u64) 
                     let get = |m: &BTreeMap<String, Value>, k: &str| {
                         m.get(k).and_then(Value::as_str).map(str::to_owned)
                     };
+                    kept.retain(|_, value| !value.is_null());
                     sink.event(Event {
                         kind: if logs {
                             format!("otel.{name}")
