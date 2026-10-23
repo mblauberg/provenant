@@ -18,6 +18,8 @@ if unit == "lane_launch_contract":
     source = root / "skills/orchestrate/scripts/lane_launch.py"
 if unit == "observer_contract":
     source = root / "skills/orchestrate/scripts/provider_observer.py"
+if unit == "authority_mapping":
+    source = root / "skills/deliver/scripts/authority_mapping.py"
 spec = importlib.util.spec_from_file_location("oracle", source)
 module = importlib.util.module_from_spec(spec)
 if unit != "review_panel":
@@ -37,7 +39,20 @@ def type_error(error):
     return {"error_type": "TypeError", "unhashable_type": kind}
 
 for case in cases:
-    if unit == "review_panel":
+    if unit == "authority_mapping":
+        try:
+            if case["op"] == "map":
+                result = module.map_delivery_authority(case["authority"])
+            elif case["op"] == "delegations":
+                result = module.map_delivery_delegations(case["authority"])
+            elif case["op"] == "contained":
+                result = module.authority_contained(case["child"], case["parent"])
+            results.append({"ok": result})
+        except module.AuthorityMappingError as error:
+            results.append({"error_type":"AuthorityMappingError", "error":str(error)})
+        except TypeError as error:
+            results.append(type_error(error))
+    elif unit == "review_panel":
         try:
             op = case["op"]
             if op == "resolve":

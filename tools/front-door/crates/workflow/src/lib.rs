@@ -21,3 +21,4 @@ pub mod lane_exit;
 pub mod lane_launch;
 pub mod provider_observer;
 pub mod review_panel;
+pub mod authority_mapping;
