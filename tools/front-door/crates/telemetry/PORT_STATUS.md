@@ -23,6 +23,16 @@ ownership, deduplication and event-ID rules before retaining parser output.
 | `scripts/telemetry_ingest.py#unit-01` | Partial | Claude/Codex allowlisted parsers, cumulative reset policy, quota observations, OTLP metadata privacy and record multiplicity, snapshot-bound JSONL rewrite/append engine, millisecond stamps | Verified no-follow file opening and the SQLite cursor/clear-file adapter |
 | `scripts/telemetry_report.py#unit-01` | Partial | Outcome aggregation, nearest-rank percentiles, latest-attempt selection, peer outcome projection, compact numbers and bounded tables | Ledger stats selection/deduplication, full peer summary and quota snapshot projection |
 | `scripts/telemetry_report.py#unit-02` | Complete | Stats text renderer, including summary/detail tables and omission notices | None |
+| `scripts/telemetry_changes.py#unit-02` | Skipped | None | Depends on the unfinished comparison/retro report assembly in unit-01 |
+| `scripts/telemetry_ingest.py#unit-02` | Skipped | None | SQLite OpenCode snapshot/watermark ingestion and shared cursor/file operations belong to the store and supervisor owners, not yet available in this checkout |
+| `skills/orchestrate/scripts/context_usage.py#unit-01` | Skipped | None | Reads provider context events plus Codex rollout files, environment, product config and argv; the crate has no established context/dispatch configuration API |
+| `skills/orchestrate/scripts/context_usage.py#unit-02` | Skipped | None | Depends on the missing context meter and resume/dispatch contracts from unit-01 |
+
+This batch completed only `scripts/telemetry_report.py#unit-02`. The listed
+cost, delivery, changes, ingest and report unit-01 work remains partial where
+batch-1 already delivered pure policy; this batch adds no SQLite, GitHub,
+verified-file or command integration. The other batch-2 units are skipped for
+the dependency reasons above. No intended behaviour changes or new divergences.
 
 The implementation units exceed this slice when their database, transport
 and cyclic owner integration is included. Their delivered policy parts remain

@@ -337,7 +337,7 @@ fn compact_json(value: &serde_json::Value) -> Option<String> {
     }
     number.as_f64().map(|n| compact(Some(n)))
 }
-fn array<'a>(value: &'a serde_json::Value) -> impl Iterator<Item = &'a serde_json::Value> {
+fn array(value: &serde_json::Value) -> impl Iterator<Item = &serde_json::Value> {
     value.as_array().into_iter().flatten()
 }
 fn text_row(values: impl IntoIterator<Item = String>) -> String {
