@@ -1336,7 +1336,7 @@ class LaneLoopbackContracts(unittest.TestCase):
             (copied_run / 'RUN_RECEIPT.json').write_bytes((Path(launched['paths']['run_dir']) / 'RUN_RECEIPT.json').read_bytes())
             with patch.dict(os.environ, {**self.env, 'HOME': str(self.peer_home),
                     'AGENT_FABRIC_INSTANCE_ROOT': str(self.peer_home / '.agents'), 'PROVENANT_REMOTE_LANE': '1'}):
-                owner = hosts._load_module('provenant_lane_prompt_reader', ROOT / 'skills/orchestrate/scripts/dispatch_run.py')
+                owner = hosts._load_module('provenant_lane_resume_owner_under_test', ROOT / 'skills/orchestrate/scripts/dispatch_run.py')
                 args = owner.parser().parse_args(['--run-dir', str(copied_run), '--resume', prior['run_id'],
                     '--task-id', 'reader-resume', '--cwd', str(target), '--prompt-stdin'])
                 owner.prepare_resume(args)
