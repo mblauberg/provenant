@@ -20,3 +20,5 @@ pub use yaml::{
     Span as YamlSpan, SpannedYaml, YamlError, YamlErrorKind, YamlValue, parse_frontmatter,
     parse_sidecar,
 };
+
+pub mod workflow;

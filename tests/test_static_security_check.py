@@ -239,10 +239,10 @@ def test_pipe_wait_rule_is_clean_across_current_execution_sites():
     sites = (
         ROOT / "scripts" / "public_release_check.py",
         ROOT / "skills" / "_shared" / "bounded_process.py",
-        ROOT / "skills" / "orchestrate" / "evals" / "test_cf_dispatch.py",
-        ROOT / "tests" / "test_software_delivery_continuity.py",
+        ROOT / "skills" / "deliver" / "scripts" / "delivery_receipt_process.py",
     )
 
+    assert all(site.is_file() for site in sites)
     findings = [
         finding
         for site in sites

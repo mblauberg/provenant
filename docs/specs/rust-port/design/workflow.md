@@ -493,8 +493,8 @@ test coverage or future patch size.
 | `skills/deliver/scripts/delivery_validation_reviews.py` | 146 |
 | `skills/deliver/scripts/delivery_validation_security.py` | 207 |
 | `skills/deliver/scripts/delivery_validation_shape.py` | 85 |
-| `skills/deliver/scripts/reference_evaluation.py` | 419 |
-| `skills/deliver/scripts/reference_runs.py` | 286 |
+| `skills/deliver/scripts/reference_evaluation.py` (G, with last validator/test consumer) | 419 |
+| `skills/deliver/scripts/reference_runs.py` (G, with last validator/test consumer) | 286 |
 | `skills/deliver/scripts/select_security_evidence.py` | 77 |
 | `skills/deliver/scripts/software_delivery_validation.py` | 350 |
 | `skills/deliver/scripts/validate_delivery.py` | 206 |
@@ -514,10 +514,10 @@ test coverage or future patch size.
 | `workflows/cross-verify.js` | 455 |
 | `workflows/implement-run.js` | 885 |
 | `skills/setup-repo/templates/claude-tracker-settings.json` | 15 |
-| `skills/deliver/templates/RUN.template.json` | 112 |
-| `config/delivery-profiles.json` | 109 |
-| `schemas/delivery-profiles.schema.json` | 174 |
-| `evals/delivery-profile-scenarios.yaml` | 306 |
+| `skills/deliver/templates/RUN.template.json` (G, with last validator/test consumer) | 112 |
+| `config/delivery-profiles.json` (G, with last validator/test consumer) | 109 |
+| `schemas/delivery-profiles.schema.json` (G, with last validator/test consumer) | 174 |
+| `evals/delivery-profile-scenarios.yaml` (G, with last validator/test consumer) | 306 |
 | `skills/deliver/portable-workflow.v1.json` | 1 |
 | `skills/grill-me/portable-workflow.v1.json` | 1 |
 | `skills/implement/portable-workflow.v1.json` | 1 |
@@ -755,10 +755,10 @@ the same lane that retires their target, without compatibility wrappers.
 
 | Caller file:line | New text/verb or deletion | Owner |
 |---|---|---|
-| `deliver/SKILL.md:16-20`; `docs/specs/harness/profiles.md:41,49` | Delete five-profile/overlay/minimum-repetitions registry claims. State scoped criteria in the PR or skill document; evaluate owns repetition protocols. Keep repair ceilings as guidance. | B |
+| `deliver/SKILL.md:16-20`; `docs/specs/harness/profiles.md:41,49` | Delete five-profile/overlay/minimum-repetitions registry claims with the live registry. State scoped criteria in the PR or skill document; evaluate owns repetition protocols. Keep repair ceilings as guidance. | G |
 | `deliver/SKILL.md:25-43,63-65` | Replace RUN.json setup and validation with minimal `workflow receipt save` and `workflow review`; record subject/authors/risk/review attempt refs/decision. For PR work cite the PR and exact-head CI. | G |
 | `deliver/SKILL.md:21-31`; `runtime/fabric/src/execution-input.ts:81,150,302-304,415` | Replace old path/`delivery_run_id` hand-off with typed `DeliveryId` carried in dispatch. No second run-directory receipt. | G prose; other chair run for dispatch |
-| `deliver/references/contract.md:9-22,35-41,53-59` | Replace producer/accept/repair commands with minimal receipt save/review. Put findings and repair reasons in PR/document; retain 2/4/5/5 repair ceilings and return-to-scope rule as prose. | B profiles; G receipt/repair |
+| `deliver/references/contract.md:9-22,35-41,53-59` | Replace producer/accept/repair commands with minimal receipt save/review. Put findings and repair reasons in PR/document; retain 2/4/5/5 repair ceilings and return-to-scope rule as prose. | G |
 | `deliver/references/contract.md:124-175,179-197`; `deliver/SKILL.md:49-53,70-72` | Delete universal outcome/evaluation/observation rules and merge binder. “Evaluate and release own their evidence; the PR records exact-head CI and repository merge.” Preserve domain security/user approval duties. | G |
 | `code-review/references/finding-contract.md:41` | Delete `delivery_receipt.py finding`; record severity, file:line, impact and fix in the PR or review artefact. | G |
 | `implement/SKILL.md:65,74-75` | Replace `repair --failing` and validator call with PR repair notes and `workflow review`; preserve bounded repair and required checks. | G |
@@ -770,14 +770,14 @@ the same lane that retires their target, without compatibility wrappers.
 | `evaluate/references/receipt.md:3-7,20-22` | Replace enclosing delivery-run schema/path anchors with subject plus optional DeliveryId/PR reference; evaluate retains protocol, evidence and acceptance of its own evaluation result. No workflow Evaluation rule. | Evaluate skill owner, coordinated by G |
 | `docs/runbooks/telemetry.md:175-195`; `tests/test_telemetry.py:320` | Replace RUN.json/delivery_acceptance/merge_commit joins, `--delivery-run-id` and RUN.template fixture with terminal run records carrying `DeliveryId` and minimal test constructors. `telemetry stats` applies prices; preserve missingness and receipt decision references without ledger ingestion. | Other chair telemetry; I integration |
 | `docs/specs/harness/lifecycle.md:98,168-178,434` | Replace canonical delivery-run v1/RUN.json and all-gates kernel claims with minimal receipt and PR evidence; evaluate/release own domain evidence. Retain explicit user gates and frozen-install rule. | G lifecycle text; other chair run for retired run-directory contract |
-| `tests/test_record_schemas.py:335-339,372` | Remove delivery-profiles registry/schema cases while preserving unrelated config/schema coverage; native minimal-record tests replace only retired workflow assertions. | B |
+| `tests/test_record_schemas.py:335-339,372` | Remove delivery-profiles registry/schema cases with the registry's last consumer; preserve unrelated config/schema coverage. | G |
 | `orchestrate/references/verification.md:134-158` | Delete panel preset/axis/membership/reducer registry instructions; request named independent lenses and synthesise their findings directly. | C |
 | `orchestrate/references/orchestration-contract.md:7-22,29,75` | Remove accelerator bindings and run-directory ledger claim; native skill orchestration uses run-owned files and the session checkpoint. | H accelerator text; other chair run files |
 | `orchestrate/references/dynamic-workflows.md:1` | Retire our three-accelerator adapter instructions; preserve host-independent review/authority guidance in orchestration-contract. No claim that Provenant owns Claude's Workflow host. | H |
 | `grill-me/SKILL.md:37`; `orchestrate/SKILL.md:76`; `retrospect/SKILL.md:78`; `release/SKILL.md:84`; `scope/SKILL.md:88`; `work-map/SKILL.md:73` | Delete portable-wrapper schema links; point to the skill's existing project document or PR. No replacement context-stamping command. | B |
 | `deliver/SKILL.md:91`; `implement/SKILL.md:101`; `session/SKILL.md:83` | Delete wrapper schema links; use minimal receipt for delivery/implementation and Markdown checkpoint for session. | B deletes wrappers; G/E rewrite text |
 | `deliver/scripts/delivery_receipt.py:653-690`; `deliver/scripts/delivery_receipt_commands.py:324-333` | Delete evidence subprocess runner and its internal calls; retain results in the PR/document from run or an authorised command. | G |
-| `tests/test_delivery_contract.py:1`; `tests/test_security_evidence_selection.py:1` | Delete synthetic builder/selector assumptions with their source; retain required security/evaluation obligations as domain policy tests. Reference builders have no replacement CLI. | B/G |
+| `tests/test_delivery_contract.py:1`; `tests/test_security_evidence_selection.py:1` | Delete synthetic builder/selector assumptions with their source; retain required security/evaluation obligations as domain policy tests. Reference builders remain test fixtures until the validator is deleted; no replacement CLI. | G |
 | `session/references/chair-state.md:64-110` | Replace state checker/install-hook/transcript instructions with `workflow session save <session-id> --file <checkpoint.md>` and SessionStart key injection. Managed hook changes occur at final install. | E |
 | `session/references/context-hygiene.md:59,66` | Delete context audit/cleanup-script calls; save bounded checkpoint; scratch retention is the run guardian's settlement and merged worktrees use `worktree remove --merged`, without old-root deletion authority. | E; J cleanup integration |
 | `autopilot/SKILL.md:32`; `autopilot/references/state-contract.md:11-35,55-67` | Delete bootstrap/knob parser and Markdown queue/lease mechanics. Retain user mission/STOP constraints; use lanes/tasks for live work and session Markdown for resumption. | E |
@@ -791,7 +791,7 @@ the same lane that retires their target, without compatibility wrappers.
 | `ui-ux-design/SKILL.md:3,22-23`; `ui-ux-design/references/review.md:25`; `ui-ux-design/references/visual-qa.md:25`; `ui-ux-design/references/live.md:10-22,38` | Remove live-iteration/detector promises and every live command. “Read-only UI review by default; pair source changes with implement and use external browser evidence with app-owned preview.” | H |
 | `ui-ux-design/evals/boundary_cases.yaml:95-103`; `ui-ux-design/evals/regression_cases.yaml:79-85`; `ui-ux-design/evals/reference_disposition.yaml:26`; `ui-ux-design/evals/provenance_components.yaml:24` | Replace live/detector expectations and runtime dispositions with external-browser review cases. Preserve read-only authority and retained skill provenance. | H |
 | `docs/runbooks/github-workflow.md:202,309-321,349` | Replace receipt-directory/binder/validator requirements with PR evidence and exact-head CI. Replace primary-checkout sync at merge with the frozen-install rule until cut-over. | G; J final install wording |
-| `docs/ARCHITECTURE.md:88,165-197,292,413`; `schemas/README.md:46` | Replace delivery kernel/profile projection with minimal receipt/review; remove retired profile-schema index row and detector command. Preserve review/user gates and skill provenance. | B index; G lifecycle; H UI |
+| `docs/ARCHITECTURE.md:88,165-197,292,413`; `schemas/README.md:46` | Replace delivery kernel/profile projection with minimal receipt/review; remove retired profile-schema index row and detector command. Preserve review/user gates and skill provenance. | G index/lifecycle; H UI |
 
 Lane J owns a CI **retired-script-name grep gate**. Generate the literal name
 list from the approved deletion inventory, including the other chair's run and
@@ -818,12 +818,12 @@ caller deletions integrate only in the dependency order below.
 |---|---:|---|---|
 | A. Contract freeze and live-install check | 1 | Both chairs | Verify frozen primary checkouts, record their revisions and live link inventory; freeze shared types, root, fact/FS contracts and commands. No symlink/settings edits. |
 | H. UI and accelerator retirement | 1 | A | First pure deletion: UI sources/bundles/tests, JS accelerators, tracker hook/settings companion, steward and Herdr checker. Own UI/setup/tracker text and eval rewrites; config removes install registrations at cut-over. |
-| B. Minimal records | 1 | A, records/config | Receipt/risk/review records and constructors; delete reference builders, portable schemas/stamper, RUN template and profile registry/schema/scenarios. Own deliver profile/portable text. |
+| B. Minimal records | 1 | A, records/config | Receipt/risk/review records and constructors; delete portable schemas/stamper with no live consumers, except session's wrapper (E). Reference builders remain fixtures for live validator tests until G. Own portable text for deleted files. |
 | C. Review | 1.5 | A; run-directory contract retired before deletion | Pure coverage validator and adversarial tests; delete ladder/plan/panel/terminal Python and route-map copies. Own panel/review caller text. |
 | D. Writing | 1 | A, lint command freeze | Small matcher and skill-owned JSON rules; delete three Python linters and retired wrapper tests. Own legal/natural writing instructions. |
 | E. Session/hooks | 1 | A; safe-FS/host-session interfaces | Markdown checkpoint and key/save-command injection, built against fake handles/host events first. Delete session/autopilot helpers and idle validator. Own session/autopilot text; no run/runtime frontier dependency. |
 | F. Store | 1 | B, confinement/supervisor | Lock/revision/atomic replacement and fault tests; delete producer write/process modules. |
-| G. Receipt/review binding | 1 | B/C/F; run fact interface | Minimal decision and review-attempt binding against fake run facts first. Delete validator cone and old `skills/implement` merge-binder/checkpoint scripts; E owns replacement checkpoints. Own deliver/implement evidence/repair/merge text. |
+| G. Receipt/review binding | 1 | B/C/F; run fact interface | Minimal decision and review-attempt binding against fake run facts first. Delete validator cone, its reference-builder fixtures/tests, RUN template and profile registry/schema/scenarios (including artifact-type surface data), and old `skills/implement` merge-binder/checkpoint scripts; E owns replacement checkpoints. Own deliver/implement evidence/repair/merge text. |
 | I. CLI/telemetry integration | 1.5 | C/D/E/G, real run/FS/host APIs, command freeze | Replace fakes with real owner reads; CLI/hook snapshots, run `DeliveryId` links and terminal-record stats with prices. No telemetry ledger or summary ingestion. No MCP adapter. |
 | J. Closure and final install | 1.5 | H/I, all product owners | Own final retired-name CI grep gate, mixed docs/tests and package closure; clean-state native gates and final link rewrite/install on both Macs. |
 | **Total** | **11.5** | Shared owner effort excluded | Integration waits never justify compatibility layers or pulling the frozen primary. |

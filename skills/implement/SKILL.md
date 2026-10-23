@@ -96,6 +96,7 @@ reconciliation run.
   [issue #1025](https://github.com/mblauberg/provenant/issues/1025) for retained
   code gates.
 
-## Portable artifact
+## Project record
 
-Use the skill-owned [implementation checkpoint schema](portable-workflow.v1.json).
+Keep the scoped criteria, evidence and outcome in the existing project document
+or PR.

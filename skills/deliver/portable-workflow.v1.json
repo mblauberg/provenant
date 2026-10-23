@@ -1,1 +1,0 @@
-{"artifact_basis":"project-artifacts","artifact_kind":"delivery-receipt","required_context_fields":["project","source","authority","accepted_artifact_identity"],"schema_version":1,"skill":"deliver"}
