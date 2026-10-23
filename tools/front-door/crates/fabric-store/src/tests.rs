@@ -397,3 +397,23 @@ fn alias_routing_uses_explicit_chair_parent_and_excludes_sender_from_teams() {
         .is_err());
 }
 
+#[test]
+fn diagnostic_incomplete_claim_schema_and_foreign_keys_are_reported() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("db");
+    let store = Store::open(&path, 5000, Fixed(1000)).unwrap();
+    store.db.execute_batch("DROP TABLE delivery_claims; CREATE TABLE delivery_claims(message_id TEXT, project TEXT);").unwrap();
+    let report = inspect_snapshot(&store.db, "fixture", "p", DiagnosticMode::Doctor);
+    assert_eq!(report.status, "error");
+    let claim = report
+        .checks
+        .unwrap()
+        .into_iter()
+        .find(|c| c.name == "delivery-claim-schema")
+        .unwrap();
+    assert!(!claim.ok);
+    assert_eq!(
+        claim.detail,
+        "missing columns: recipient_id, claim_id, claimed_at, expires_at"
+    );
+}

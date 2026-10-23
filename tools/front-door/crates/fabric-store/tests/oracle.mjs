@@ -13,7 +13,11 @@ const Database = createRequire(pathToFileURL(source))('better-sqlite3');
 const a = { project: 'p', agentId: 'alice', provider: 'codex' };
 const b = { ...a, agentId: 'bob' };
 const out = [];
-const capture = (f) => { try { out.push({ ok: f() ?? null }); } catch (e) { out.push({ error: e.message }); } };
+const capture = (f) => {
+  let entry; try { entry = {ok: f() ?? null}; } catch (e) { entry = {error: e.message}; }
+  if (entry.ok?.database) entry.ok.database = '<fixture-db>';
+  out.push({...entry, wire: JSON.stringify(entry)});
+};
 if (scenario === 'legacy') {
   const db = new Database(database);
   db.exec(`CREATE TABLE messages(message_id TEXT PRIMARY KEY, project TEXT NOT NULL, sender_id TEXT NOT NULL,
@@ -128,6 +132,12 @@ if (scenario === 'leases') {
   capture(() => store.inbox(b, {taskId:''}));
   capture(() => store.activityAfter('p', -1));
   capture(() => store.activity('p', 0));
+} else if (scenario === 'dates') {
+  store.note(a, 'date fixture');
+  for (const at of [-8640000000000001, -8640000000000000, -62167219200000, -1, 0, 951782400000, 253402300800000, 8640000000000000, 8640000000000001]) {
+    raw.prepare('UPDATE activity SET at=?').run(at);
+    capture(() => store.activity('p', 50));
+  }
 } else if (scenario === 'contention') {
   store.announce(a); store.announce(b); store.send(a, 'bob', 'claim me');
   raw.exec('BEGIN IMMEDIATE');

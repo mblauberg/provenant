@@ -1,12 +1,14 @@
 //! Inert Fabric SQLite owner. Connections stay on their creating thread.
 #![forbid(unsafe_code)]
 
+mod diagnostics;
 mod landing;
 mod messages;
 pub mod pending;
 mod sessions;
 mod tasks;
 
+pub use diagnostics::*;
 pub use landing::*;
 pub use messages::*;
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
@@ -159,8 +161,7 @@ fn validate_timeout(ms: u64) -> Result<()> {
     Ok(())
 }
 fn iso(ms: i64) -> Result<String> {
-    let stamp = jiff::Timestamp::from_millisecond(ms).map_err(|_| Error::InvalidTime)?;
-    Ok(format!("{stamp:.3}"))
+    pending::js_iso(ms)
 }
 fn holder(who: &Identity, session: &str) -> Result<String> {
     if session.trim_matches(pending::js_whitespace).is_empty()

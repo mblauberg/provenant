@@ -31,9 +31,27 @@ fn b() -> Identity {
     }
 }
 fn capture<T: Serialize>(out: &mut Vec<Value>, result: Result<T>) {
+    #[derive(Serialize)]
+    struct OkWire<T> {
+        ok: T,
+    }
+    #[derive(Serialize)]
+    struct ErrorWire {
+        error: String,
+    }
     out.push(match result {
-        Ok(value) => json!({"ok":value}),
-        Err(error) => json!({"error":error.to_string()}),
+        Ok(value) => {
+            let wire = serde_json::to_string(&OkWire { ok: &value }).unwrap();
+            json!({"ok":value, "wire":wire})
+        }
+        Err(error) => {
+            let error = error.to_string();
+            let wire = serde_json::to_string(&ErrorWire {
+                error: error.clone(),
+            })
+            .unwrap();
+            json!({"error":error, "wire":wire})
+        }
     });
 }
 fn snapshot(store: &Store, out: Vec<Value>) -> Value {
@@ -641,4 +659,65 @@ fn legacy_nullable_column_migration_differential() {
         ),
     );
     compare("legacy", snapshot(&store, out));
+}
+#[test]
+fn diagnostic_policy_differential() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("db");
+    let store = Store::open(&path, 5000, FixtureClock(Rc::new(Cell::new(1000)))).unwrap();
+    store.announce(&a()).unwrap();
+    store.note(&a(), "seed").unwrap();
+    let mut out = Vec::new();
+    let private = Connection::open(&path).unwrap();
+    capture(
+        &mut out,
+        Ok(inspect_snapshot(
+            &private,
+            "<fixture-db>",
+            "p",
+            DiagnosticMode::Doctor,
+        )),
+    );
+    store
+        .db
+        .execute_batch("INSERT INTO teams VALUES ('p','alice',1000)")
+        .unwrap();
+    capture(
+        &mut out,
+        Ok(inspect_snapshot(
+            &private,
+            "<fixture-db>",
+            "p",
+            DiagnosticMode::Doctor,
+        )),
+    );
+    compare("diagnostics", snapshot(&store, out));
+}
+
+#[test]
+fn javascript_date_range_and_signed_year_differential() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(
+        &dir.path().join("db"),
+        5000,
+        FixtureClock(Rc::new(Cell::new(1000))),
+    )
+    .unwrap();
+    store.note(&a(), "date fixture").unwrap();
+    let mut out = Vec::new();
+    for at in [
+        -8_640_000_000_000_001_i64,
+        -8_640_000_000_000_000,
+        -62_167_219_200_000,
+        -1,
+        0,
+        951_782_400_000,
+        253_402_300_800_000,
+        8_640_000_000_000_000,
+        8_640_000_000_000_001,
+    ] {
+        store.db.execute("UPDATE activity SET at=?", [at]).unwrap();
+        capture(&mut out, store.activity("p", 50));
+    }
+    compare("dates", snapshot(&store, out));
 }
