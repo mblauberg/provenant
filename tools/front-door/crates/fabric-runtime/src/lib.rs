@@ -11,6 +11,7 @@ pub mod host_protocol;
 pub mod hosts;
 pub mod identity;
 pub mod json_subprocess;
+pub mod lane_federation;
 pub mod lane_watch;
 pub mod ps;
 pub mod run_registry;
