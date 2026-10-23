@@ -31,6 +31,12 @@ the corresponding `Clock`. It samples remaining budget once and derives a local
 `Instant` deadline. The clock owner is passed explicitly; there is no global
 clock coordinate or unbounded `None` path.
 
+Direct-child custody requires default `SIGCHLD` without `SA_NOCLDWAIT` and no
+independent host reaper. Every spawn queries and refuses an incompatible host
+policy before creating a child. The process edge must keep that policy fixed
+while children are owned; blocked `SIGCHLD` alone remains supported. This
+preserves the unreaped PID reservation used for direct-child signalling.
+
 Utility policy is supplied as a supervisor API for confinement's S3 facade.
 No workflow-to-supervisor dependency is introduced.
 

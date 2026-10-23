@@ -20,6 +20,11 @@ fn decoder_sees_terminal_beyond_retention_and_refuses_oversized_frame() {
 #[test]
 fn tee_has_a_fixed_queue_and_reports_full_and_closed() {
     let (sink, receiver) = tee_queue(1).unwrap();
+    assert_eq!(
+        sink.try_send(&vec![b'x'; FRAME_LIMIT + 1]),
+        Err(QueueLoss::Full)
+    );
+    assert!(receiver.try_recv().is_err());
     assert_eq!(sink.try_send(b"one"), Ok(()));
     assert_eq!(sink.try_send(b"two"), Err(QueueLoss::Full));
     assert_eq!(receiver.try_recv().unwrap(), b"one");
@@ -36,6 +41,67 @@ fn reaper_reserves_before_spawn_and_releases_unused_admission() {
     assert_eq!(reaper.occupied(), 1);
     drop(first);
     assert!(reaper.reserve().is_some());
+}
+
+#[test]
+fn decoder_and_filter_failures_are_observable_without_fabricating_frames() {
+    struct ClosedDecoder;
+    impl FrameSink for ClosedDecoder {
+        fn try_frame(&self, _: &[u8]) -> Result<(), QueueLoss> {
+            Err(QueueLoss::Closed)
+        }
+    }
+    let mut frames = Frames::default();
+    let mut capture = CapturedStream::default();
+    frames.decode(b"terminal\n", Some(&ClosedDecoder), &mut capture);
+    assert_eq!(capture.decoder_lost_frames, 1);
+
+    struct FailedFilter;
+    impl CaptureFilter for FailedFilter {
+        fn filter(&mut self, _: &[u8]) -> Result<Vec<u8>, FilterError> {
+            Err(FilterError)
+        }
+    }
+    let decoder = Decoder(Mutex::new(Vec::new()));
+    let mut filter = FailedFilter;
+    let mut pump = Pump {
+        policy: StreamPolicy::Capture { limit: 32 },
+        decoder: Some(&decoder),
+        filter: Some(&mut filter),
+        frames: Frames::default(),
+    };
+    let mut pipe = Some(io::Cursor::new(b"terminal\n"));
+    let mut capture = CapturedStream::default();
+    pump.read(&mut pipe, &mut capture);
+    pump.read(&mut pipe, &mut capture);
+    assert!(pipe.is_none());
+    assert!(capture.filter_failed);
+    assert_eq!(capture.total_bytes, 9);
+    assert!(capture.bytes.is_empty());
+    assert_eq!(*decoder.0.lock().unwrap(), vec![b"terminal".to_vec()]);
+}
+
+#[test]
+fn pipe_read_failure_is_observable_and_closes_the_failed_stream() {
+    struct FailedRead;
+    impl Read for FailedRead {
+        fn read(&mut self, _: &mut [u8]) -> io::Result<usize> {
+            Err(io::Error::other("injected read failure"))
+        }
+    }
+    let mut pump = Pump {
+        policy: StreamPolicy::default(),
+        decoder: None,
+        filter: None,
+        frames: Frames::default(),
+    };
+    let mut pipe = Some(FailedRead);
+    let mut capture = CapturedStream::default();
+    pump.read(&mut pipe, &mut capture);
+    assert!(pipe.is_none());
+    assert!(capture.read_failed);
+    assert_eq!(capture.total_bytes, 0);
+    assert!(capture.bytes.is_empty());
 }
 #[test]
 fn bounds_and_pre_cancel_refuse_without_spawn() {

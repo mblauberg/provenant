@@ -53,6 +53,15 @@ fn suite() -> Result<()> {
     assert!(outcome.stdout.truncated);
     assert_eq!(outcome.stderr.bytes, b"err\r\n");
     assert!(!outcome.timed_out);
+    let mut options = ExecOptions::new(&args, root.path(), Duration::from_secs(3));
+    options.env = Some(&env);
+    assert!(matches!(
+        run_text(&executor, options),
+        Err(TextError::Utf8 {
+            stream: "stdout",
+            ..
+        })
+    ));
     assert!(
         decoder
             .0
@@ -93,6 +102,29 @@ fn suite() -> Result<()> {
     cancellation_is_scoped_to_the_owned_child(root.path(), &env, true)?;
     natural_exit_beats_pipe_drain_expiry(root.path(), &env)?;
     reaper_transfers_and_polls_fairly(root.path())?;
+    inherited_wait_policy_preserves_pid_reservation(&executor, root.path(), &env)?;
+    Ok(())
+}
+
+fn inherited_wait_policy_preserves_pid_reservation(
+    executor: &SystemExecutor,
+    root: &Path,
+    env: &[(OsString, OsString)],
+) -> Result<()> {
+    for policy in [
+        "wait-policy-ignore",
+        "wait-policy-no-wait",
+        "wait-policy-handler",
+        "wait-policy-blocked",
+    ] {
+        let marker = root.join(policy);
+        let argv = fixture::argv_with_args(policy, &[fixture_arg(&marker)])?;
+        let mut options = ExecOptions::new(&argv, root, Duration::from_secs(5));
+        options.env = Some(env);
+        let outcome = executor.execute(options)?;
+        assert_eq!(outcome.termination, Termination::Exit(0));
+        assert_eq!(marker.exists(), policy == "wait-policy-blocked");
+    }
     Ok(())
 }
 

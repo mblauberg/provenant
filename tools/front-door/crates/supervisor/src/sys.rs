@@ -329,6 +329,46 @@ pub(crate) fn fixture_ignore_term() -> io::Result<()> {
     Ok(())
 }
 
+/// Used only in a dedicated, single-threaded fixture process before any spawn.
+#[cfg(feature = "fixture")]
+pub(crate) fn fixture_wait_policy(mode: &str) -> io::Result<()> {
+    extern "C" fn handler(_: libc::c_int) {}
+    // SAFETY: libc's sigaction record permits zeroed integers, pointer-sized
+    // handler and mask storage. sigemptyset below initialises its platform mask.
+    let mut action: libc::sigaction = unsafe { std::mem::zeroed() };
+    // SAFETY: action owns writable, aligned mask storage; no pointer is retained.
+    if unsafe { libc::sigemptyset(&mut action.sa_mask) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    match mode {
+        "wait-policy-ignore" => action.sa_sigaction = libc::SIG_IGN,
+        "wait-policy-no-wait" => action.sa_flags = libc::SA_NOCLDWAIT,
+        "wait-policy-handler" => action.sa_sigaction = handler as *const () as usize,
+        "wait-policy-blocked" => {
+            // SAFETY: the fixture exclusively owns this thread's signal mask.
+            // Both calls borrow live mask storage and retain no pointer. Blocking
+            // SIGCHLD does not discard wait status; child pre-exec resets masks.
+            unsafe {
+                if libc::sigaddset(&mut action.sa_mask, libc::SIGCHLD) != 0
+                    || libc::sigprocmask(libc::SIG_BLOCK, &action.sa_mask, std::ptr::null_mut())
+                        != 0
+                {
+                    return Err(io::Error::last_os_error());
+                }
+            }
+            return Ok(());
+        }
+        _ => return Err(io::ErrorKind::InvalidInput.into()),
+    }
+    // SAFETY: the dedicated fixture sets its own process disposition before
+    // starting threads or children. Handler constants/function are valid; libc
+    // copies the live record and retains no pointer. No shared host is changed.
+    if unsafe { libc::sigaction(libc::SIGCHLD, &action, std::ptr::null_mut()) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
 // Existing lane subjects remain until S2 replaces custody. These narrow
 // allowances cover inherited diagnostics and pre-R7 unsafe grouping only.
 #[allow(

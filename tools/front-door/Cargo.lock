@@ -418,8 +418,6 @@ dependencies = [
 name = "provenant"
 version = "0.1.0"
 dependencies = [
- "jiff",
- "provenant-core",
  "provenant-supervisor",
  "serde_json",
  "toml_edit",

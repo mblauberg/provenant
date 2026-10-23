@@ -9,6 +9,28 @@ use std::os::unix::process::ExitStatusExt;
 use std::path::Path;
 use std::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command, Stdio};
 
+/// The process edge must keep this policy fixed and never independently reap
+/// owned children. A blocked SIGCHLD is safe: polling still consumes status.
+pub(crate) fn verify_child_wait_policy() -> io::Result<()> {
+    let mut action = std::mem::MaybeUninit::<libc::sigaction>::uninit();
+    // SAFETY: a null input only queries SIGCHLD. The output points to writable,
+    // correctly aligned storage; libc retains no pointer and changes no action.
+    // Concurrent queries are independent. The process owner must serialise any
+    // disposition changes against child custody (documented at SystemExecutor).
+    if unsafe { libc::sigaction(libc::SIGCHLD, std::ptr::null(), action.as_mut_ptr()) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: successful sigaction initialises the complete output record.
+    let action = unsafe { action.assume_init() };
+    if action.sa_sigaction != libc::SIG_DFL || action.sa_flags & libc::SA_NOCLDWAIT != 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "child custody requires default SIGCHLD without SA_NOCLDWAIT",
+        ));
+    }
+    Ok(())
+}
+
 pub struct OwnedPid {
     child: Option<Child>,
     permit: Option<Permit>,
@@ -41,6 +63,7 @@ impl OwnedPid {
         capture_stdout: bool,
         capture_stderr: bool,
     ) -> io::Result<Self> {
+        verify_child_wait_policy()?;
         let (program, args) = argv
             .split_first()
             .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidInput))?;

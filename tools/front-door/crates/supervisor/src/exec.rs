@@ -56,6 +56,9 @@ pub trait NonblockingSink: Send + Sync {
 pub struct TeeQueue(SyncSender<Vec<u8>>);
 impl NonblockingSink for TeeQueue {
     fn try_send(&self, bytes: &[u8]) -> Result<(), QueueLoss> {
+        if bytes.len() > FRAME_LIMIT {
+            return Err(QueueLoss::Full);
+        }
         self.0
             .try_send(bytes.to_vec())
             .map_err(|error| match error {
@@ -160,6 +163,8 @@ pub enum ExecError {
     Busy,
     #[error("utility cancelled before spawn")]
     Cancelled,
+    #[error("host child-wait policy cannot preserve utility custody")]
+    ChildWaitPolicy(#[source] io::Error),
     #[error("utility cleanup transferred to the reserved reaper")]
     CleanupPending,
     #[error("utility {operation} failed")]
@@ -176,6 +181,9 @@ pub trait Executor: Send + Sync {
     fn execute(&self, options: ExecOptions<'_>) -> Result<ExecOutcome, ExecError>;
 }
 /// Construct once at the process edge; all clones share one admission queue.
+/// The host must retain default SIGCHLD without SA_NOCLDWAIT, never change its
+/// disposition during custody, and never independently wait for owned children.
+/// Each spawn refuses an incompatible inherited policy before creating a child.
 #[derive(Clone, Debug)]
 pub struct SystemExecutor {
     reaper: Reaper,
@@ -303,6 +311,7 @@ fn run(reaper: &Reaper, options: ExecOptions<'_>) -> Result<ExecOutcome, ExecErr
     if options.cancel.is_some_and(CancelToken::is_cancelled) {
         return Err(ExecError::Cancelled);
     }
+    crate::sys::raw_exec::verify_child_wait_policy().map_err(ExecError::ChildWaitPolicy)?;
     let started = Instant::now();
     let deadline = started
         .checked_add(options.timeout)

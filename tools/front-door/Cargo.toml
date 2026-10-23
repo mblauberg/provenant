@@ -86,8 +86,6 @@ license.workspace = true
 fault-injection = ["provenant-supervisor/fault-injection"]
 
 [dependencies]
-jiff.workspace = true
-provenant-core.workspace = true
 provenant-supervisor = { workspace = true }
 
 [dev-dependencies]

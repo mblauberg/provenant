@@ -186,6 +186,30 @@ pub fn dispatch() -> io::Result<bool> {
             wait_for_eof(&mut stream)?;
         }
         "exit" => {}
+        "marker" => std::fs::write(fixture_path(&args, 3)?, b"spawned")?,
+        "wait-policy-ignore"
+        | "wait-policy-no-wait"
+        | "wait-policy-handler"
+        | "wait-policy-blocked" => {
+            crate::sys::fixture_wait_policy(scenario)?;
+            let marker = fixture_path(&args, 3)?;
+            let argv = argv_with_args("marker", &[marker.into_os_string()])?;
+            let root = std::env::current_dir()?;
+            let env = environment(&root);
+            let executor = crate::exec::SystemExecutor::new(1).map_err(io::Error::other)?;
+            let mut options =
+                crate::exec::ExecOptions::new(&argv, &root, std::time::Duration::from_secs(2));
+            options.env = Some(&env);
+            use crate::exec::Executor;
+            match executor.execute(options) {
+                Err(crate::exec::ExecError::ChildWaitPolicy(_))
+                    if scenario != "wait-policy-blocked" => {}
+                Ok(outcome)
+                    if scenario == "wait-policy-blocked"
+                        && outcome.termination == crate::exec::Termination::Exit(0) => {}
+                _ => return Err(io::Error::other("unexpected child-wait policy result")),
+            }
+        }
         _ => return Err(io::ErrorKind::InvalidInput.into()),
     }
     Ok(true)
