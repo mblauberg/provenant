@@ -54,21 +54,36 @@ fn context() -> Context {
         ..Default::default()
     }
 }
-fn python_available() -> bool {
-    match Command::new("python3").arg("--version").output() {
-        Ok(result) => {
-            assert!(result.status.success());
-            true
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            eprintln!("SKIP differential oracle: python3 is absent");
-            false
-        }
-        Err(e) => panic!("python3: {e}"),
-    }
+fn supported_python_version(output: &str) -> bool {
+    let Some(version) = output.trim().strip_prefix("Python ") else { return false; };
+    let mut parts = version.split('.');
+    matches!((parts.next().and_then(|n| n.parse::<u32>().ok()), parts.next().and_then(|n| n.parse::<u32>().ok())),
+        (Some(3), Some(minor)) if minor >= 11)
 }
+fn python_interpreter() -> Option<&'static std::path::PathBuf> {
+    static PYTHON: std::sync::OnceLock<Option<std::path::PathBuf>> = std::sync::OnceLock::new();
+    let selected = PYTHON.get_or_init(|| {
+        let candidates = if let Some(path) = std::env::var_os("PROVENANT_PORT_PYTHON") {
+            vec![std::path::PathBuf::from(path)]
+        } else {
+            ["python3", "python3.14", "python3.13", "python3.12", "python3.11"]
+                .into_iter().map(std::path::PathBuf::from).collect()
+        };
+        candidates.into_iter().find(|path| {
+            Command::new(path).arg("--version").output().is_ok_and(|out|
+                out.status.success() && supported_python_version(&String::from_utf8_lossy(&out.stdout)))
+        })
+    });
+    if selected.is_none() {
+        let reason = "differential oracle requires Python 3.11+; no supported interpreter was found";
+        assert!(std::env::var("PROVENANT_PORT_DIFF_REQUIRED").as_deref() != Ok("1"), "{reason}");
+        eprintln!("SKIP {reason}");
+    }
+    selected.as_ref()
+}
+fn python_available() -> bool { python_interpreter().is_some() }
 fn oracle<T: DeserializeOwned>(request: Value) -> T {
-    let mut child = Command::new("python3")
+    let mut child = Command::new(python_interpreter().unwrap())
         .arg("-B")
         .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/tests/oracle.py"))
         .env("TZ", "UTC")
@@ -89,7 +104,7 @@ fn oracle<T: DeserializeOwned>(request: Value) -> T {
         "oracle: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    serde_json::from_slice(&output.stdout).unwrap()
+    decode_record(&output.stdout).unwrap()
 }
 /// Python supplies only dependencies outside this batch. Rust owns all display decisions.
 struct OraclePolicy {
@@ -141,11 +156,7 @@ impl QuotaPolicy for OraclePolicy {
         self.call("normalise_resets", json!([r]))
     }
     fn window_pool(&self, p: &str, n: &str) -> Option<String> {
-        if p == "agy" {
-            n.split_once('.').map(|p| p.0.into())
-        } else {
-            None
-        }
+        self.call("window_pool", json!([p, n]))
     }
     fn fingerprinted(&self, p: &str, l: &str) -> bool {
         p == "agy" && l.starts_with("google-")
@@ -1198,4 +1209,42 @@ fn schedule_tolerates_unreadable_percent_null_failures_and_empty_credits() {
         let r = compare_report(&[s], &context());
         assert!(r.accounts[0].credits.is_none());
     }
+}
+
+#[test]
+fn interpreter_version_and_required_differential_contract() {
+    for (version, supported) in [("Python 3.9.6", false), ("Python 3.10.16", false),
+        ("Python 3.11.0", true), ("Python 3.14.3\n", true), ("not Python", false)] {
+        assert_eq!(supported_python_version(version), supported, "{version}");
+    }
+    for required in ["0", "1"] {
+        let out = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "policy_tests::differential_interpreter_probe", "--nocapture"])
+            .env("PROVENANT_PORT_PYTHON", "/nonexistent/provenant-quota-python")
+            .env("PROVENANT_PORT_DIFF_REQUIRED", required)
+            .output().unwrap();
+        assert_eq!(out.status.success(), required == "0", "{}", String::from_utf8_lossy(&out.stdout));
+        let diagnostic = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+        assert!(diagnostic.contains("requires Python 3.11+"), "{diagnostic}");
+        if required == "0" { assert!(diagnostic.contains("SKIP")); }
+    }
+}
+
+#[test]
+fn differential_interpreter_probe() {
+    let _ = python_available();
+}
+
+#[test]
+fn provider_pool_oracle_uses_the_real_hook() {
+    if !python_available() { return; }
+    let policy = OraclePolicy { context:context() };
+    assert_eq!(policy.window_pool("agy", ".x"), None);
+    assert_eq!(policy.window_pool("agy", "claude.weekly").as_deref(), Some("claude"));
+}
+
+#[test]
+#[should_panic]
+fn exact_record_comparison_rejects_integer_float_mutants() {
+    assert_record_eq(&json!({"n":50}), &json!({"n":50.0}));
 }

@@ -121,3 +121,19 @@ They form the current baseline; they are not newly discovered port mismatches.
   credits dictionary loads and falls back as Python does. These tolerant
   reader cases do not make malformed producer output schema-valid. The
   existing independent J2 schema still rejects string usage percentages.
+
+## RP-6: differential interpreter and numeric comparison gates (fixed)
+
+- Units: quota crate differential fixtures; PORTING.md version 3.
+- Class: `bug`. A present but unsupported Python interpreter failed at import,
+  while a missing interpreter silently passed the differential cases. A
+  hand-written pool stub also accepted an empty prefix unlike the source.
+- Disposition: require a version-checked Python 3.11+ interpreter. With
+  `PROVENANT_PORT_DIFF_REQUIRED=1`, missing or unsupported interpreters fail;
+  otherwise they print a skip reason. `PROVENANT_PORT_PYTHON` selects an
+  explicit interpreter. Pool calls use the real Python provider hook.
+- Evidence: `interpreter_version_and_required_differential_contract` checks
+  version selection and both missing-interpreter subprocess outcomes;
+  `provider_pool_oracle_uses_the_real_hook` covers `.x`.
+  `exact_record_comparison_rejects_integer_float_mutants` ensures `50` and
+  `50.0` cannot compare equal. No epsilon or f64 comparison normalises records.
