@@ -1,16 +1,23 @@
 //! The provenant front door: resolve the product checkout, pick the owner of
 //! a verb, and replace this process with it. Owners keep their own logic.
 
+// Rewrite pending: remove when this crate is rewritten.
+#![allow(
+    clippy::collapsible_if,
+    clippy::disallowed_methods,
+    clippy::print_stderr,
+    clippy::unwrap_used
+)]
 mod check;
 mod exec;
 mod help;
 mod json;
-mod lane;
+use provenant_supervisor::sys::legacy_lane as lane;
 mod resolve;
 mod stale;
 
-use exec::{replace_process, Launch};
-use resolve::{is_file, Settings, FABRIC_MCP};
+use exec::{Launch, replace_process};
+use resolve::{FABRIC_MCP, Settings, is_file};
 use std::ffi::OsString;
 use std::io::Write;
 use std::os::unix::ffi::OsStrExt;
@@ -127,7 +134,7 @@ fn route(args: &[OsString], seat: bool) -> Route {
                     text: lease.to_string(),
                     stderr: false,
                     status: 0,
-                }
+                };
             }
             Some(verb) if LEASE_VERBS.contains(&verb) => {
                 rest[0] = format!("landing-{verb}").into();
@@ -138,7 +145,7 @@ fn route(args: &[OsString], seat: bool) -> Route {
                     text: help::first_line(lease).to_string(),
                     stderr: true,
                     status: 2,
-                }
+                };
             }
         }
     }

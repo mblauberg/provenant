@@ -58,11 +58,7 @@ impl Numeric {
         }
     }
     pub fn non_negative(self) -> Self {
-        if self < Self::ZERO {
-            Self::ZERO
-        } else {
-            self
-        }
+        if self < Self::ZERO { Self::ZERO } else { self }
     }
     pub fn is_zero(self) -> bool {
         self == Self::ZERO

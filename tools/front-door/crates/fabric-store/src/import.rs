@@ -133,7 +133,7 @@ impl Store {
                     return Err(Error::Io {
                         path: plan.snapshot.clone(),
                         source,
-                    })
+                    });
                 }
             }
         }

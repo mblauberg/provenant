@@ -136,19 +136,23 @@ fn immutable_mail_and_recipient_scoped_monotonic_durable_cursors() {
         rows
     );
     let seq = rows[0].seq;
-    assert!(store
-        .mark_mail_read(project(), actor(3), seq + 100, f.now(), &req)
-        .is_err());
+    assert!(
+        store
+            .mark_mail_read(project(), actor(3), seq + 100, f.now(), &req)
+            .is_err()
+    );
     store
         .mark_mail_read(project(), actor(3), seq, f.now(), &req)
         .unwrap();
     store
         .mark_mail_read(project(), actor(3), 0, f.now(), &req)
         .unwrap();
-    assert!(store
-        .read_mail(project(), actor(3), None, 100, &req)
-        .unwrap()
-        .is_empty());
+    assert!(
+        store
+            .read_mail(project(), actor(3), None, 100, &req)
+            .unwrap()
+            .is_empty()
+    );
     assert_eq!(
         store
             .read_mail(project(), actor(4), None, 100, &req)
@@ -168,10 +172,12 @@ fn immutable_mail_and_recipient_scoped_monotonic_durable_cursors() {
     assert!(matches!(store.send(&changed, &req), Err(Error::Conflict)));
     drop(store);
     let store = f.open();
-    assert!(store
-        .read_mail(project(), actor(3), None, 100, &req)
-        .unwrap()
-        .is_empty());
+    assert!(
+        store
+            .read_mail(project(), actor(3), None, 100, &req)
+            .unwrap()
+            .is_empty()
+    );
     assert_eq!(
         store
             .events(project(), 0, 100, &req)
@@ -293,14 +299,18 @@ fn sqlite_full_rolls_back_messages_deliveries_and_events() {
             .unwrap(),
         0
     );
-    assert!(store
-        .events(project(), 0, 100, &f.request())
-        .unwrap()
-        .is_empty());
-    assert!(store
-        .read_mail(project(), actor(3), Some(0), 100, &f.request())
-        .unwrap()
-        .is_empty());
+    assert!(
+        store
+            .events(project(), 0, 100, &f.request())
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        store
+            .read_mail(project(), actor(3), Some(0), 100, &f.request())
+            .unwrap()
+            .is_empty()
+    );
 }
 #[test]
 fn future_schema_refuses_without_journal_mutation() {
@@ -343,9 +353,11 @@ fn event_failure_rolls_back_task_and_mail_mutations() {
     store.create_task(&task(&f), &f.request()).unwrap();
     let fence = store.claim_task(&claim(&f, 3), &f.request()).unwrap();
     store.db.execute_batch("CREATE TRIGGER fail_events BEFORE INSERT ON events BEGIN SELECT RAISE(ABORT,'injected event failure'); END").unwrap();
-    assert!(store
-        .finish_task(project(), &fence, TaskState::Done, f.now(), &f.request())
-        .is_err());
+    assert!(
+        store
+            .finish_task(project(), &fence, TaskState::Done, f.now(), &f.request())
+            .is_err()
+    );
     assert_eq!(
         store
             .task(project(), fence.task, &f.request())
@@ -377,9 +389,11 @@ fn event_replay_deduplication_and_durable_cursor() {
         store.note(&conflict, Some("note-1"), &f.request()),
         Err(Error::Conflict)
     ));
-    assert!(store
-        .mark_events_read(project(), actor(3), seq + 1, &f.request())
-        .is_err());
+    assert!(
+        store
+            .mark_events_read(project(), actor(3), seq + 1, &f.request())
+            .is_err()
+    );
     store
         .mark_events_read(project(), actor(3), seq, &f.request())
         .unwrap();
@@ -404,10 +418,12 @@ fn event_replay_deduplication_and_durable_cursor() {
         store.events(project(), 0, 1, &f.request()).unwrap().len(),
         1
     );
-    assert!(store
-        .events(ProjectId::from_bytes([9; 16]), 0, 1, &f.request())
-        .unwrap()
-        .is_empty());
+    assert!(
+        store
+            .events(ProjectId::from_bytes([9; 16]), 0, 1, &f.request())
+            .unwrap()
+            .is_empty()
+    );
 }
 struct BusyHandshake {
     entered: Arc<Barrier>,
@@ -618,10 +634,12 @@ fn bounded_import_preserves_subset_links_boundary_cursors_and_source_bytes() {
     );
     assert_eq!(std::fs::read(&path).unwrap(), before);
     assert_eq!(std::fs::read_dir(f.temp.path()).unwrap().count(), 2);
-    assert!(store
-        .read_mail(project(), actor(3), None, 100, &f.request())
-        .unwrap()
-        .is_empty());
+    assert!(
+        store
+            .read_mail(project(), actor(3), None, 100, &f.request())
+            .unwrap()
+            .is_empty()
+    );
     let mail = store
         .read_mail(project(), actor(3), Some(0), 100, &f.request())
         .unwrap();
@@ -646,9 +664,11 @@ fn bounded_import_preserves_subset_links_boundary_cursors_and_source_bytes() {
     let tasks = store
         .tasks(project(), None, None, 100, &f.request())
         .unwrap();
-    assert!(tasks
-        .iter()
-        .all(|t| t.state == TaskState::Open && t.owner.is_none()));
+    assert!(
+        tasks
+            .iter()
+            .all(|t| t.state == TaskState::Open && t.owner.is_none())
+    );
     assert!(tasks.iter().any(|t| t.note.is_some()));
     std::fs::remove_file(path).unwrap();
     assert!(store.import_snapshot(&plan, &f.request()).unwrap().skipped);
@@ -728,7 +748,7 @@ fn cold_open_race_serializes_schema_setup() {
 #[cfg(unix)]
 #[test]
 fn state_symlinks_and_non_private_components_are_refused() {
-    use std::os::unix::fs::{symlink, PermissionsExt};
+    use std::os::unix::fs::{PermissionsExt, symlink};
     for name in ["fabric.sqlite3", "fabric.sqlite3-wal", "fabric.sqlite3-shm"] {
         let f = Fixture::new();
         drop(f.open());
@@ -770,9 +790,11 @@ fn input_bounds_and_malformed_persisted_records_fail_without_panics() {
     m = message(&f, 5);
     m.artifacts[0].path = PathWire::Utf8("../escape".into());
     assert!(store.send(&m, &f.request()).is_err());
-    assert!(store
-        .read_mail(project(), actor(3), Some(-1), 100, &f.request())
-        .is_err());
+    assert!(
+        store
+            .read_mail(project(), actor(3), Some(-1), 100, &f.request())
+            .is_err()
+    );
     assert!(store.events(project(), 0, 101, &f.request()).is_err());
     store.send(&message(&f, 5), &f.request()).unwrap();
     store

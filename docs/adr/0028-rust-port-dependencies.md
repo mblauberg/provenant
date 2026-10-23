@@ -37,12 +37,12 @@ pieces to be written in-house so the dependency set stays lean.
 | `serde` (derive) | 1.0 | Typed records, config and protocol messages |
 | `serde_json` | 1.0 | JSON everywhere; replaces the hand-written `json.rs` |
 | `thiserror` | 2.0 | Typed library errors; compile time only |
-| `rusqlite` (`bundled`) | 0.40 | Fabric store; bundling pins one SQLite version on every Mac and in CI |
+| `rusqlite` (`bundled`) | 0.40 | Fabric and run stores; bundling pins one SQLite version on every Mac and in CI |
 | `sha2` | 0.11 | Source, record and evidence digests; no hand-written cryptography |
 | `regex` | 1.13 | Pattern rules ported from Python's `re` |
 | `jiff` | 0.2 | Timestamps, durations and local-time quota schedules from the system tz database |
 | `clap` (derive) | 4.6 | Argument parsing for every verb; J1 compares help structurally |
-| `toml_edit` | 0.25 | Reading and editing Codex `config.toml` without losing user formatting |
+| `toml_edit` (`serde`) | 0.25 | Reading and editing Codex `config.toml` without losing user formatting; typed config deserialisation |
 | `libc` | 0.2 | Supervisor syscall layer only (already allowed by the supervisor spec) |
 | `tempfile` (dev only) | 3 | Test fixtures |
 

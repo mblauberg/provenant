@@ -4,7 +4,7 @@ use std::ffi::OsString;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
 pub enum RiskTier {
@@ -216,7 +216,7 @@ pub fn health_record(catalog: &Value, route_health: Option<Value>) -> Value {
 mod tests {
     use serde_json::json;
 
-    use super::{health_record, parse_command, ParsedCommand, RouteCommand};
+    use super::{ParsedCommand, RouteCommand, health_record, parse_command};
 
     #[test]
     fn subcommands_parse_and_bare_route_names_remain_supported() {

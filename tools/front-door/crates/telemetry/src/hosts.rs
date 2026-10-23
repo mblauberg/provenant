@@ -1,7 +1,7 @@
 //! Read-only peer boundary. Transport, host configuration and quota display have separate owners.
 use crate::{
-    costs::{Group, SUMMED, TOKEN_FIELDS},
     Error, Numeric, Result,
+    costs::{Group, SUMMED, TOKEN_FIELDS},
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;

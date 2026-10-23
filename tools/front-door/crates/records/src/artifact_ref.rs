@@ -41,9 +41,11 @@ mod tests {
             let value = serde_json::json!({"path":{"encoding":"utf8","path":"a"},"digest":digest});
             assert!(serde_json::from_value::<ArtifactRef>(value).is_err());
         }
-        assert!(serde_json::from_value::<ArtifactRef>(serde_json::json!({
-            "path":{"encoding":"utf8","path":"a"},"digest":null,"extra":true
-        }))
-        .is_err());
+        assert!(
+            serde_json::from_value::<ArtifactRef>(serde_json::json!({
+                "path":{"encoding":"utf8","path":"a"},"digest":null,"extra":true
+            }))
+            .is_err()
+        );
     }
 }

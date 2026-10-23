@@ -6,7 +6,7 @@ fn failure(pid: i32, source: io::Error) -> PidError {
     PidError::Io { pid, source }
 }
 pub(crate) fn signal(pid: i32, signal: Option<Signal>) -> Result<PidResult, PidError> {
-    // Defense in depth: this function must never turn a PID into group authority.
+    // Defence in depth: this function must never turn a PID into group authority.
     if pid <= 1 {
         return Err(PidError::Refused {
             pid: i64::from(pid),

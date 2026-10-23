@@ -231,7 +231,7 @@ records. Rows include `host` and qualified IDs. On failure, rows preserve
 `unreachable` for transport failures or `read_error` with the typed owner
 error when the host is reachable; neither can satisfy a terminal wait.
 Independent peer reads run concurrently. Default reads cap rows per host
-and then apply the combined 20-row cap, prioritizing unknown launches,
+and then apply the combined 20-row cap, prioritising unknown launches,
 failed nonterminal lanes and one failure row per host before active work.
 Other cached terminal rows retain their terminal ranking, newest first across
 hosts. Explicit IDs are resolved
