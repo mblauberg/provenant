@@ -77,7 +77,7 @@ def stage_agy_home(plan, tmp_fd, private_tmp):
     if plan["adapter"] != "agy" or plan["applied"].get("confinement") != "sandbox-exec":
         return None
     provider_exec._prepare_state_directories(plan)
-    real_fd = provider_exec._open_canonical_dir(provider_exec._provider_state(plan)["resolved_home"] / "antigravity-cli")
+    real_fd = provider_exec._open_canonical_dir(provider_exec.provider_confinement._provider_state(plan)["resolved_home"] / "antigravity-cli")
     try:
         # SQLite resolves a link to its database; with no database to link, it would make one in
         # the overlay that cleanup then discards. An empty file is a valid empty database.
@@ -195,7 +195,7 @@ def finish_agy_home(plan, tmp_fd, home):
         fds.append(os.open(home.name, provider_exec.DIRECTORY_FLAGS, dir_fd=tmp_fd))
         for part in AGY_PRIVATE_BIN.parts[:-1]:
             fds.append(os.open(part, provider_exec.DIRECTORY_FLAGS, dir_fd=fds[-1]))
-        fds.append(provider_exec._open_canonical_dir(provider_exec._provider_state(plan)["resolved_home"] / "antigravity-cli"))
+        fds.append(provider_exec._open_canonical_dir(provider_exec.provider_confinement._provider_state(plan)["resolved_home"] / "antigravity-cli"))
         lane_fd, real_fd = fds[-2], fds[-1]
         # Concurrent finishers take turns, so each compares and installs against the last install.
         # A confined lane may read, and so lock, the file too: wait a bounded time, never forever.

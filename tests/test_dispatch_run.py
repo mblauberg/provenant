@@ -20,6 +20,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from tests.support.confinement import force_sandbox
+
 from tests.support.dispatch import disable_memory_admission_floor, real_owner_fixture
 from tests.support.fake_cli import fake_codex, write_executable
 from tests.support.runs import make_run as _make_run
@@ -3193,14 +3195,14 @@ def test_front_door_capability_preflight_fails_closed(monkeypatch, tmp_path, fie
     monkeypatch.setenv("AGENT_FABRIC_PRODUCT_ROOT", str(ROOT))
     monkeypatch.setenv("AGENT_FABRIC_INSTANCE_ROOT", str(tmp_path / ".agents"))
     monkeypatch.setattr(module.provider_exec.sys, "platform", "darwin")
-    monkeypatch.setattr(module.provider_exec, "_sandbox_exec_path", lambda: "/usr/bin/sandbox-exec")
+    force_sandbox(monkeypatch, "/usr/bin/sandbox-exec")
     task = {"id": "capability", "adapter": "codex", "access_mode": "worktree_write",
             "network": True, "capabilities": ["postgres"], "prompt": "hello"}
     if field == "adapter": task["adapter"] = value
     elif field == "access_mode": task["access_mode"] = value
     elif field == "sandbox": task["sandbox"] = value
     elif field == "platform": monkeypatch.setattr(module.provider_exec.sys, "platform", value)
-    elif field == "sandbox_exec": monkeypatch.setattr(module.provider_exec, "_sandbox_exec_path", lambda: value)
+    elif field == "sandbox_exec": force_sandbox(monkeypatch, value)
     elif field == "network": task["network"] = value
 
     result = module.preflight_tasks([task], tmp_path)

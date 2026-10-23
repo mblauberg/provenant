@@ -322,12 +322,12 @@ class DoctorContracts(unittest.TestCase):
             environment = {**os.environ, 'PATH': str(root), 'PROVENANT_NO_OS_CONFINEMENT': '0'}
             try:
                 with patch.dict(os.environ, environment, clear=True), patch.object(provider_exec.sys, 'platform', 'darwin'), patch.object(subprocess, 'run', side_effect=run):
-                    provider_exec._sandbox_exec_usable.cache_clear()
+                    provider_exec.provider_confinement._sandbox_exec_usable.cache_clear()
                     value = hosts.adapter_doctor('kiro', root)
                     self.assertEqual(value['confinement']['status'], 'unknown')
                     self.assertEqual(hosts.signin_status('claude', str(root / 'claude'))['status'], 'unknown')
             finally:
-                provider_exec._sandbox_exec_usable.cache_clear()
+                provider_exec.provider_confinement._sandbox_exec_usable.cache_clear()
 
     def test_peer_doctor_reports_host_local_checks_and_bounds_project_paths(self):
         with tempfile.TemporaryDirectory() as directory:
