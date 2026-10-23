@@ -23,7 +23,11 @@ pub enum Error {
         end_marker: String,
     },
     #[error("projection UTF-8 decode at {path}: {source}")]
-    Decode { path: PathBuf, #[source] source: std::string::FromUtf8Error },
+    Decode {
+        path: PathBuf,
+        #[source]
+        source: std::string::FromUtf8Error,
+    },
     #[error("projection I/O at {path}: {source}")]
     Io {
         path: PathBuf,
@@ -69,12 +73,15 @@ pub fn project(
     check: bool,
     source: Option<&str>,
 ) -> Result<Vec<String>, Error> {
-    let bytes = fs::read(path)
-        .map_err(|source| Error::Io {
+    let bytes = fs::read(path).map_err(|source| Error::Io {
+        path: path.into(),
+        source,
+    })?;
+    let current = String::from_utf8(bytes)
+        .map_err(|source| Error::Decode {
             path: path.into(),
             source,
-        })?;
-    let current = String::from_utf8(bytes).map_err(|source| Error::Decode { path: path.into(), source })?
+        })?
         .replace("\r\n", "\n")
         .replace('\r', "\n");
     let name = path.file_name().unwrap_or_default().to_string_lossy();

@@ -60,9 +60,16 @@ pub fn sidecar_errors(
 /// verbatim, rather than mistaking invalid YAML for a missing interface mapping.
 #[derive(Debug, thiserror::Error)]
 #[error("{diagnostic}")]
-pub struct YamlError { pub diagnostic: String }
+pub struct YamlError {
+    pub diagnostic: String,
+}
 
-pub fn validate_sidecar(display: &Path, skill: &str, document: Result<&Value, &YamlError>, asset_exists: impl Fn(&str) -> bool) -> Vec<String> {
+pub fn validate_sidecar(
+    display: &Path,
+    skill: &str,
+    document: Result<&Value, &YamlError>,
+    asset_exists: impl Fn(&str) -> bool,
+) -> Vec<String> {
     match document {
         Ok(document) => sidecar_errors(display, skill, document, asset_exists),
         Err(error) => vec![format!("{}: invalid YAML: {error}", display.display())],
@@ -78,31 +85,71 @@ mod tests {
     fn sidecar_policy_and_invalid_yaml_match_the_source() {
         use std::fs;
         let dir = tempfile::tempdir().unwrap();
-        let scripts=dir.path().join("scripts"); fs::create_dir(&scripts).unwrap();
-        fs::copy(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../../scripts/check_harness.py"), scripts.join("check_harness.py")).unwrap();
-        let sidecar=dir.path().join("skills/build/agents/openai.yaml"); fs::create_dir_all(sidecar.parent().unwrap()).unwrap();
-        for document in [json!([]),json!({"interface":{}}),json!({"interface":{"display_name":"Build", "short_description":"x".repeat(25),"default_prompt":[true,null,"$build"],"icon_small":"./missing"}})] {
-            fs::write(&sidecar,serde_json::to_vec(&document).unwrap()).unwrap();
-            let Some(expected): Option<Vec<String>> = crate::oracle::python(r#"
+        let scripts = dir.path().join("scripts");
+        fs::create_dir(&scripts).unwrap();
+        fs::copy(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../../scripts/check_harness.py"),
+            scripts.join("check_harness.py"),
+        )
+        .unwrap();
+        let sidecar = dir.path().join("skills/build/agents/openai.yaml");
+        fs::create_dir_all(sidecar.parent().unwrap()).unwrap();
+        for document in [
+            json!([]),
+            json!({"interface":{}}),
+            json!({"interface":{"display_name":"Build", "short_description":"x".repeat(25),"default_prompt":[true,null,"$build"],"icon_small":"./missing"}}),
+        ] {
+            fs::write(&sidecar, serde_json::to_vec(&document).unwrap()).unwrap();
+            let Some(expected): Option<Vec<String>> = crate::oracle::python(
+                r#"
 import json,sys,importlib.util
 from pathlib import Path
 x=json.load(sys.stdin); p=Path(x['root'])/'scripts/check_harness.py'
 spec=importlib.util.spec_from_file_location('harness_oracle',p); m=importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
 print(json.dumps(m.openai_sidecar_errors()))
-"#,&json!({"root":dir.path()})) else {return;};
-            assert_eq!(sidecar_errors(Path::new("skills/build/agents/openai.yaml"),"build",&document, |_|false),expected);
+"#,
+                &json!({"root":dir.path()}),
+            ) else {
+                return;
+            };
+            assert_eq!(
+                sidecar_errors(
+                    Path::new("skills/build/agents/openai.yaml"),
+                    "build",
+                    &document,
+                    |_| false
+                ),
+                expected
+            );
         }
-        fs::write(&sidecar,"interface: [\n").unwrap();
-        let Some(expected): Option<Vec<String>> = crate::oracle::python(r#"
+        fs::write(&sidecar, "interface: [\n").unwrap();
+        let Some(expected): Option<Vec<String>> = crate::oracle::python(
+            r#"
 import json,sys,importlib.util
 from pathlib import Path
 x=json.load(sys.stdin); p=Path(x['root'])/'scripts/check_harness.py'
 spec=importlib.util.spec_from_file_location('harness_oracle',p); m=importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
 print(json.dumps(m.openai_sidecar_errors()))
-"#,&json!({"root":dir.path()})) else {return;};
-        let diagnostic=expected[0].split_once(": invalid YAML: ").unwrap().1.to_owned();
-        let error=YamlError {diagnostic};
-        assert_eq!(validate_sidecar(Path::new("skills/build/agents/openai.yaml"),"build",Err(&error), |_|true),expected);
+"#,
+            &json!({"root":dir.path()}),
+        ) else {
+            return;
+        };
+        let diagnostic = expected[0]
+            .split_once(": invalid YAML: ")
+            .unwrap()
+            .1
+            .to_owned();
+        let error = YamlError { diagnostic };
+        assert_eq!(
+            validate_sidecar(
+                Path::new("skills/build/agents/openai.yaml"),
+                "build",
+                Err(&error),
+                |_| true
+            ),
+            expected
+        );
     }
 
     #[test]
