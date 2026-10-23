@@ -299,6 +299,31 @@ pub fn dispatch_prefix(
     Ok(Dispatch::Complete(result))
 }
 
+/// The probe branch at the start of CLI unit-02 shares an explicit monotonic
+/// clock and passes listing-only's exact 30-second deadline to its process owner.
+pub trait RoutingProbeHost {
+    fn probe(
+        &mut self,
+        adapter: &str,
+        executable: &str,
+        deadline: Option<f64>,
+        listing_only: bool,
+    ) -> Result<(Value, i32), CommandError>;
+}
+pub fn dispatch_probe(
+    args: &cli::ProbeArgs,
+    now_monotonic: f64,
+    host: &mut impl RoutingProbeHost,
+) -> Result<CommandOutput, CommandError> {
+    let (record, code) = host.probe(
+        &args.adapter,
+        &args.executable,
+        args.listing_only.then_some(now_monotonic + 30.0),
+        args.listing_only,
+    )?;
+    Ok(output(record, false, code))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -497,5 +522,44 @@ print(json.dumps(out))
             serde_json::from_str::<Value>(&result.stdout).unwrap()["routes"],
             json!({})
         );
+    }
+    #[test]
+    fn probe_branch_passes_the_explicit_deadline_and_provider_exit_code() {
+        struct ProbeHost;
+        impl RoutingProbeHost for ProbeHost {
+            fn probe(
+                &mut self,
+                adapter: &str,
+                executable: &str,
+                deadline: Option<f64>,
+                listing_only: bool,
+            ) -> Result<(Value, i32), CommandError> {
+                assert_eq!(adapter, "kiro");
+                assert_eq!(executable, "kiro-cli");
+                assert_eq!(deadline, listing_only.then_some(42.25));
+                Ok((json!({"status":"denied"}), 7))
+            }
+        }
+        for listing_only in [false, true] {
+            let out = dispatch_probe(
+                &cli::ProbeArgs {
+                    adapter: "kiro".into(),
+                    executable: "kiro-cli".into(),
+                    json: false,
+                    listing_only,
+                },
+                12.25,
+                &mut ProbeHost,
+            )
+            .unwrap();
+            assert_eq!(
+                out,
+                CommandOutput {
+                    code: 7,
+                    stdout: "{\"status\": \"denied\"}\n".into(),
+                    stderr: String::new()
+                }
+            );
+        }
     }
 }
