@@ -88,14 +88,15 @@ start). The crate remains inert.
 | `runtime/fabric/src/json-subprocess.ts#unit-01` | batch-1 bounded capture, failure precedence and response parsing | spawn/stdin transport, explicit deadlines and pre-spawn abort; arbitrary AbortSignal reasons and nullish defaults |
 | `runtime/fabric/src/lane-watch.ts#unit-01` | batch-1 relevant-file filter and explicit-clock wake/debounce policy | recursive watch registration, recovery, root refresh, cleanup and bounded wait transport |
 | `runtime/fabric/src/run-root.ts#unit-01` | canonical product root and fixture temp/scratch containment policy | executable-owner `X_OK` check and exact error behaviour |
-| `skills/orchestrate/scripts/fabric_policy.py#unit-01` | policy defaults/validation, exclusion containment, and warning generation | Python dict insertion order and exact `repr()` formatting; see RP-FR2-001 |
+| `skills/orchestrate/scripts/fabric_policy.py#unit-01` | policy defaults/validation, exclusion containment, warning generation, and Python non-finite constants on typed policy fields | Python dict insertion order, exact `repr()` formatting, and non-finite values in generic/unknown fields; see RP-FR2-001 |
 | `runtime/fabric/src/run-registry.ts#unit-01` | record contract is complete above | safe record reads/writes, process identity/liveness, cleanup and signal effects |
 
-The policy crate carries marked `pending` copies of core path resolution,
-ECMAScript trimming and Python-compatible checked JSON decoding because those
-APIs are not yet exposed as workspace dependencies. Remove them when their
-shared owners become usable here. `fabric-store` and supervisor transport are
-not duplicated.
+The crate carries marked `pending` copies of core path resolution,
+ECMAScript trimming, Python-compatible checked JSON decoding and Python repr
+formatting because those APIs are not yet exposed as workspace dependencies.
+The run-root unit has a local source-compatible real-path fallback for dangling
+symlinks. Remove pending copies when their shared owners become usable here.
+`fabric-store` and supervisor transport are not duplicated.
 
 ### Skipped units and disposition
 
@@ -125,7 +126,7 @@ this lane added no Python-owner port.
 
 Python and Node differentials ran on this host with
 `PROVENANT_PORT_DIFF_REQUIRED=1`. `cargo fmt --all`, crate clippy with
-`-D warnings`, and the crate test suite passed. There are 53 unit tests, zero
+`-D warnings`, and the crate test suite passed. There are 56 unit tests, zero
 failures and zero doc tests. The open policy mismatch is recorded in
 `docs/specs/rust-port/divergences.md`; no intentional behaviour change is
 proposed. J1/J2/J3 and the skipped owner implementations remain outside this

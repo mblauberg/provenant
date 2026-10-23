@@ -1094,9 +1094,15 @@ The source revision above is unchanged; CLI rendering remains an edge task.
   and renders `1e-7` as `1e-07`; this crate's `serde_json::Map` sorts keys and
   its current Python repr helper does not preserve source object order or
   CPython float spelling.
+- A second open edge is a non-finite JSON number in an unknown policy field.
+  Python's JSON decoder accepts `NaN` and infinities. The pending checked JSON
+  adapter maps them to `null` so the source-compatible typed `default_branch`
+  warning is preserved, but that changes unknown-field values and is not a
+  general Python JSON number representation.
 - Evidence: policy differential tests cover defaults, invalid scalar entries,
-  containment and warning text, but do not exercise the above ordered/repr
-  cases. The difference is visible in returned tool settings and warnings.
+  containment, warning text and `NaN` on the typed `default_branch` field, but
+  do not exercise the above ordered/repr cases or non-finite unknown values.
+  The difference is visible in returned tool settings and warnings.
 - Disposition: open; no behaviour change is accepted. Keep the unit partial
   until the `provenant-records` ordered Python-value codec and
   `provenant-core` repr helper are available to this crate.
