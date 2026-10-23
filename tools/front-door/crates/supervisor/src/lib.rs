@@ -6,3 +6,6 @@
 pub mod identity;
 #[allow(unsafe_code)]
 pub mod sys;
+pub mod capture;
+#[cfg(test)]
+mod test_support;

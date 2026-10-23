@@ -1,0 +1,150 @@
+//! Bounded head/tail views over file-backed output; never read the whole spool.
+
+use serde::{Deserialize, Serialize};
+use std::io::{self, Read, Seek, SeekFrom};
+use thiserror::Error;
+
+const MARKER: &[u8] = b"\n...[output truncated]...\n";
+
+#[derive(Debug, Error)]
+pub enum CaptureError {
+    #[error("could not read bounded output")]
+    Read(#[source] io::Error),
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct BoundedProcessResult {
+    pub returncode: i32,
+    pub output: String,
+    pub output_bytes: u64,
+    pub output_truncated: bool,
+    pub timed_out: bool,
+    pub elapsed_seconds: f64,
+    pub stdout: Option<String>,
+    pub stderr: Option<String>,
+    pub stdout_bytes: Option<u64>,
+    pub stderr_bytes: Option<u64>,
+    pub stdout_truncated: Option<bool>,
+    pub stderr_truncated: Option<bool>,
+}
+
+impl BoundedProcessResult {
+    pub fn terminating_signal(&self) -> Option<u32> {
+        (self.returncode < 0).then(|| self.returncode.unsigned_abs())
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CapturedOutput {
+    pub text: String,
+    pub bytes: u64,
+    pub truncated: bool,
+}
+
+pub fn read_bounded_output(spool: &mut (impl Read + Seek), limit: i64) -> Result<CapturedOutput, CaptureError> {
+    read_output(spool, limit.max(0) as u64).map_err(CaptureError::Read)
+}
+
+fn read_output(spool: &mut (impl Read + Seek), limit: u64) -> io::Result<CapturedOutput> {
+    let bytes = spool.seek(SeekFrom::End(0))?;
+    let truncated = bytes > limit;
+    let mut retained = Vec::new();
+    spool.rewind()?;
+    if !truncated {
+        spool.take(bytes).read_to_end(&mut retained)?;
+    } else {
+        let marker = if limit > MARKER.len() as u64 { MARKER } else { &[] };
+        let available = limit - marker.len() as u64;
+        let head = available / 2;
+        let tail = available - head;
+        spool.take(head).read_to_end(&mut retained)?;
+        retained.extend_from_slice(marker);
+        if tail != 0 {
+            // tail <= i64::MAX: the public limit has that bound.
+            spool.seek(SeekFrom::End(-(tail as i64)))?;
+            spool.take(tail).read_to_end(&mut retained)?;
+        }
+    }
+    Ok(CapturedOutput { text: String::from_utf8_lossy(&retained).into_owned(), bytes, truncated })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Cursor;
+
+    #[test]
+    fn head_and_tail_survive_large_output() {
+        let mut bytes = b"HEAD-".to_vec();
+        bytes.extend(vec![b'x'; 4096]);
+        bytes.extend(b"-TAIL");
+        let view = read_bounded_output(&mut Cursor::new(bytes), 128).unwrap();
+        assert!(view.text.starts_with("HEAD-"));
+        assert!(view.text.ends_with("-TAIL"));
+        assert_eq!(view.text.len(), 128);
+        assert_eq!(view.bytes, 4106);
+        assert!(view.truncated);
+    }
+
+    #[test]
+    fn zero_negative_and_small_limits_preserve_python_policy() {
+        for limit in [-1, 0, 1, 2, 24, 25] {
+            let view = read_bounded_output(&mut Cursor::new(vec![b'x'; 50]), limit).unwrap();
+            assert_eq!(view.text.len(), limit.max(0) as usize);
+            assert!(view.truncated);
+        }
+        let view = read_bounded_output(&mut Cursor::new(b"ok"), 2).unwrap();
+        assert!(!view.truncated);
+        assert_eq!(view.text, "ok");
+    }
+
+    #[test]
+    fn utf8_replacement_occurs_after_the_byte_limit() {
+        let view = read_bounded_output(&mut Cursor::new("λλ".as_bytes()), 2).unwrap();
+        assert_eq!(view.text, "��");
+        assert_eq!(view.bytes, 4);
+    }
+
+    #[test]
+    fn broken_spool_is_a_typed_failure() {
+        struct Broken;
+        impl Read for Broken {
+            fn read(&mut self, _: &mut [u8]) -> io::Result<usize> { Err(io::Error::other("lost spool")) }
+        }
+        impl Seek for Broken {
+            fn seek(&mut self, _: SeekFrom) -> io::Result<u64> { Err(io::Error::other("lost spool")) }
+        }
+        assert!(matches!(read_bounded_output(&mut Broken, 1), Err(CaptureError::Read(_))));
+    }
+
+    #[test]
+    fn result_record_keeps_null_streams_and_negative_signal_status() {
+        let value = BoundedProcessResult { returncode: -15, output: "OUTERR".into(), output_bytes: 6, output_truncated: false,
+            timed_out: false, elapsed_seconds: 1.0, stdout: None, stderr: None, stdout_bytes: None,
+            stderr_bytes: None, stdout_truncated: None, stderr_truncated: None };
+        assert_eq!(value.terminating_signal(), Some(15));
+        let json = serde_json::to_value(value).unwrap();
+        assert!(json.get("stdout").unwrap().is_null());
+        assert_eq!(json["returncode"], -15);
+    }
+
+    #[test]
+    fn differential_capture_matches_python() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../..");
+        let Some(output) = crate::test_support::python(&root, r#"
+import io, json
+from skills._shared.bounded_process import _read_bounded_output
+cases = [b'HEAD-' + b'x' * 4096 + b'-TAIL', b'', bytes([0xf0, 0x9f, 0x92, 0xa9, 0xff]), 'λλ'.encode()]
+print(json.dumps([_read_bounded_output(io.BytesIO(data), limit) for data in cases for limit in [-1, 0, 1, 2, 24, 25, 26, 64, 10000]]))
+"#) else { return };
+        let cases = [ [b"HEAD-".as_slice(), &vec![b'x'; 4096], b"-TAIL"].concat(), vec![], vec![0xf0, 0x9f, 0x92, 0xa9, 0xff], "λλ".as_bytes().to_vec() ];
+        let mut actual = Vec::new();
+        for data in cases {
+            for limit in [-1, 0, 1, 2, 24, 25, 26, 64, 10000] {
+                let view = read_bounded_output(&mut Cursor::new(&data), limit).unwrap();
+                actual.push(serde_json::json!([view.text, view.bytes, view.truncated]));
+            }
+        }
+        assert_eq!(serde_json::Value::Array(actual), output);
+    }
+}
