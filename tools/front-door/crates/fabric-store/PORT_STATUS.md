@@ -116,5 +116,44 @@ The reviewer independently ran the persisted-path required Node differential
 prefix, no main completion IDs were lost, and only units 02/03 were added.
 Final crate run after that source repair:
 `test result: ok. 32 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.81s`
-Doc tests: 0 passed, 0 failed. Native review artifacts are retained at
-`/tmp/fs3-native-review.md` and `/tmp/fs3-native-rereview.md` for this run.
+Doc tests: 0 passed, 0 failed. The findings, repair and verification evidence
+are summarised above; temporary review files are not durable evidence.
+
+
+## PR #1332 repair pass
+
+The chair supplied a Claude Sonnet cross-family review confirming units 02/03
+and the earlier repairs, with the remaining seam, ledger and integer-deadline
+work addressed here. This pass keeps the same two complete unit claims.
+
+| Item | Commit or disposition |
+| --- | --- |
+| 1. Caller push errors | `752a1899` adds `PushError<E>` and removes the test-only error variant. A caller-owned Git error regression checks hold cleanup. `84f28dca` boxes the combined cleanup cause to pass Clippy without discarding either error. |
+| 2. API-shape ledger | `f1348cba` records explicit context/ID/clock/cancellation/now inputs in RP-FS3-008, restores activity defaults 50/200 and deletes the duplicate typed terminal acknowledgement. |
+| 3. Numeric run directory | `5080c513` verifies pinned better-sqlite3 13.0.3 binds every Number as REAL. Numeric directory differentials pass; changing int32 Numbers to INTEGER would break this oracle. RP-FS3-009 records the evidence and BigInt distinction. |
+| 4. Release states | `114fd626` makes invalid states unrepresentable and rejects invalid wire combinations, retaining valid release/refusal bytes and reasons. |
+| 5. Contention causes | `7caaabcf` follows `Error::source`; `8a3acd57` handles transparent wrappers that expose SQLite's underlying cause. Exact plain BUSY/LOCKED classification survives both wrapper forms. |
+| 6. Session REAL rows | `738f5730` records the chair-offered v4 integer refusal in RP-FS3-010. Both read APIs reject persisted fractional attempts/PIDs with a typed column error. |
+| 7. Wait deadlines | `7d9f8dbf` converts fractional seconds once to checked ceil milliseconds, then uses integer deadline, difference and poll-budget arithmetic. The appended RP-FS3-004 amendment supersedes its original deadline exception and cites the chair decision. |
+| 8. Durable evidence | This section replaces temporary-file citations with inline findings, dispositions and verification results. |
+
+Current local checks: `cargo fmt --all` and
+`cargo clippy -p provenant-fabric-store --all-targets -- -D warnings` pass.
+`PROVENANT_PORT_DIFF_REQUIRED=1 cargo test -p provenant-fabric-store` passes
+36 tests, including 16 Node differentials; zero doc tests. Added regressions
+cover caller-owned push errors, default limits, persisted REAL refusals and
+integer wait boundaries. The existing release and contention regressions now
+also cover invalid wire states and nested causes. The numeric-directory cases
+extend the required legacy differential. All databases remain temporary.
+
+`ported.txt` is sorted and unique, contains every ID on origin/main, and adds
+only units 02/03. No merge is in progress. Exact-head CI remains the landing
+gate; auto-merge is not armed.
+
+Native review of this repair delta is clean through `8a3acd57`, including the
+transparent-cause follow-up. It independently checked the pinned binding source
+and accepted retaining REAL. Its initial ledger wording concern was withdrawn:
+the append-only amendment explicitly supersedes the historical deadline claim.
+The reviewer did not run checks; the writer ran the prescribed checks above.
+Final required crate result:
+`test result: ok. 36 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.97s`
