@@ -115,3 +115,99 @@ fn display_report_parity_headlines_priority_and_reserves() {
         let r=compare_report(&[s],&context());assert!(r.accounts[0].summary.contains("banked reset") || drawing);assert_eq!(r.accounts[0].drawing_credits, drawing.then_some(true));
     }
 }
+
+#[test]
+fn schedule_plan_policy_matrix_and_differential() {
+    use crate::schedule::*;
+    let cases = [
+        ("claude",None,None,"timer","ac",None,"first_fetch",1800.0,true),
+        ("claude",Some(-600.0),None,"timer","ac",None,"idle",1800.0,false),
+        ("claude",Some(-2400.0),None,"timer","ac",None,"idle",1800.0,true),
+        ("claude",Some(-360.0),None,"timer","ac",Some(-60.0),"active",300.0,true),
+        ("claude",Some(-120.0),None,"timer","ac",Some(-60.0),"active",300.0,false),
+        ("claude",Some(-360.0),None,"timer","ac",Some(-358.0),"idle",1800.0,false),
+        ("claude",Some(-360.0),None,"timer","ac",Some(-7200.0),"idle",1800.0,false),
+        ("claude",Some(-1200.0),Some((90.0,10800.0,false)),"timer","ac",None,"near_exhaustion",900.0,true),
+        ("claude",Some(-300.0),Some((60.0,16200.0,false)),"timer","ac",None,"near_exhaustion",900.0,false),
+        ("claude",Some(-2400.0),None,"timer","battery",None,"idle",3600.0,false),
+        ("codex",Some(-2400.0),None,"timer","low",None,"idle",14400.0,false),
+        ("agy",Some(-10800.0),None,"timer","low",None,"low_power",21600.0,false),
+        ("agy",Some(-60.0),None,"manual","low",None,"idle",7200.0,true),
+        ("claude",Some(-2400.0),Some((100.0,7200.0,false)),"timer","ac",None,"exhausted_until_reset",1800.0,false),
+        ("claude",Some(-600.0),Some((100.0,-60.0,false)),"timer","ac",None,"reset_passed",1800.0,true),
+        ("claude",Some(-600.0),Some((100.0,7200.0,true)),"timer","ac",None,"idle",1800.0,false),
+        ("claude",Some(-180.0),None,"panel","ac",None,"idle",1800.0,true),
+        ("claude",Some(-60.0),None,"panel","ac",None,"idle",1800.0,false),
+        ("claude",Some(-20.0),None,"manual","ac",None,"idle",1800.0,false),
+        ("codex",Some(-90.0),None,"event","ac",None,"idle",3600.0,true),
+        ("codex",Some(-30.0),None,"wake","ac",None,"idle",3600.0,false),
+        ("claude",Some(-10800.0),None,"power","ac",None,"idle",1800.0,false),
+    ];
+    let differential=python_available();
+    for (provider,attempt,win,trigger,power,activity,reason,ttl,due) in cases {
+        let mut s=snapshot(provider,"a",win.map(|(used,reset,advisory)| {let mut w=window("w",used,Some(300.0),Some(reset));w.advisory=advisory.then_some(true);vec![w]}).unwrap_or_default());
+        s.attempted_at=attempt.map(|v|json!(at(v)));
+        if activity==Some(-358.0) { s.fetch=Some(Fetch{last_duration_ms:Some(3000.0),..Default::default()}); }
+        let (c,notes)=resolve(provider,&Value::Null,&Value::Null).unwrap();
+        let activity_at=activity.map(|d| now().as_second() as f64+d);
+        let id=format!("{provider}/a");
+        let (block,is_due)=plan(PlanInput{account_id:&id,snapshot:Some(&s),now:now(),config:&c,trigger,power,activity_at,ignore_backoff:false,notes:&notes}).unwrap();
+        assert_eq!((&*block.reason,block.ttl_seconds,is_due),(reason,ttl,due),"{provider} {trigger} {attempt:?} {activity:?}");
+        if differential {
+            let expected:Value=oracle(json!({"operation":"schedule","provider":provider,"account_id":id,"snapshot":s,"now":NOW,"trigger":trigger,"power":power,"activity_at":activity_at}));
+            assert_eq!(serde_json::to_value(&c).unwrap(),expected[0]);assert_eq!(serde_json::to_value(&block).unwrap(),expected[2]);assert_eq!(json!(is_due),expected[3]);
+        }
+    }
+}
+#[test]
+fn schedule_backoff_and_auth_activity() {
+    use crate::schedule::*;
+    let differential=python_available();
+    let (c,notes)=resolve("claude",&Value::Null,&Value::Null).unwrap();
+    for (kind,trigger,ignore,activity,due) in [("network","timer",false,None,false),("network","manual",false,None,true),("rate_limited","manual",false,None,false),("rate_limited","manual",true,None,true),("rate_limited","timer",true,None,false),("auth","timer",false,None,false),("auth","timer",false,Some(-60.0),true),("missing","panel",false,None,false)] {
+        let mut s=snapshot("claude","a",vec![]);s.attempted_at=Some(json!(at(-120.0)));s.fetch=Some(Fetch{failures:2.0,error_kind:Some(kind.into()),backoff_until:Some(json!(at(300.0))),trigger:Some("timer".into()),..Default::default()});
+        let activity_at=activity.map(|s| now().as_second() as f64+s);
+        let (b,d)=plan(PlanInput{account_id:"claude/a",snapshot:Some(&s),now:now(),config:&c,trigger,power:"ac",activity_at,ignore_backoff:ignore,notes:&notes}).unwrap();assert_eq!(d,due,"{kind} {trigger} {ignore}");
+        if differential { let expected:Value=oracle(json!({"operation":"schedule","provider":"claude","account_id":"claude/a","snapshot":s,"now":NOW,"trigger":trigger,"activity_at":activity_at,"ignore_backoff":ignore}));assert_eq!(json!(b),expected[2]);assert_eq!(json!(d),expected[3]); }
+    }
+    for (kind,failures,retry,low,high) in [("network",1,None,108.0,132.0),("network",2,None,216.0,264.0),("other",3,None,432.0,528.0),("network",9,None,3240.0,3960.0),("rate_limited",1,Some(900.0),900.0,900.0),("rate_limited",5,Some(30.0),1728.0,2112.0),("auth",4,None,3240.0,3960.0),("missing",1,None,77760.0,95040.0)] {
+        let wait=backoff_seconds(ErrorKind::from_name(kind),failures,retry,&c,"claude/a");assert!((low..=high).contains(&wait));
+        if differential { let expected:f64=oracle(json!({"operation":"backoff","provider":"claude","seed":"claude/a","args":[kind,failures,retry]}));assert_eq!(wait,expected); }
+    }
+}
+#[test]
+fn schedule_configuration_precedence_and_validation() {
+    use crate::schedule::*;
+    let settings=json!({"schedule":{"min_interval_seconds":90,"jitter_fraction":5,"ttl_idle_seconds":999,"base_seconds":1},"backoff":{"base_seconds":60,"max_seconds":"x","min_interval_seconds":5},"providers":{"claude":{"ttl_idle_seconds":1200,"ttl_active_seconds":-1}}});
+    let (config,mut notes)=resolve("claude",&json!({"ttl_idle_seconds":600}),&settings).unwrap();
+    assert_eq!((config.ttl_idle_seconds,config.ttl_active_seconds,config.min_interval_seconds,config.jitter_fraction,config.max_seconds,config.base_seconds),(600.0,300.0,90.0,0.1,3600.0,60.0));
+    notes.sort();assert_eq!(notes,vec!["quota.backoff.max_seconds is invalid; using the default","quota.providers.claude.ttl_active_seconds is invalid; using the default","quota.schedule.jitter_fraction is invalid; using the default"]);
+    let (c,notes)=resolve("claude",&Value::Null,&json!({"schedule":{"min_interval_seconds":900,"max_interval_seconds":600}})).unwrap();assert_eq!((c.min_interval_seconds,c.max_interval_seconds),(60.0,21600.0));assert_eq!(notes.len(),1);
+    for invalid in [json!(true),json!("3"),json!(0),json!(1.5)] { let (c,notes)=resolve("claude",&json!({"max_parallel":invalid}),&Value::Null).unwrap();assert_eq!(c.max_parallel,3);assert_eq!(notes.len(),1); }
+    let (c,_)=resolve("opencode",&json!({"ttl_active_seconds":10}),&Value::Null).unwrap();
+    let mut s=snapshot("opencode","a",vec![]);s.attempted_at=Some(json!(at(-180.0)));
+    let (b,d)=plan(PlanInput{account_id:"opencode/a",snapshot:Some(&s),now:now(),config:&c,trigger:"timer",power:"ac",activity_at:Some(now().as_second() as f64-30.0),ignore_backoff:false,notes:&[]}).unwrap();assert_eq!(b.ttl_seconds,60.0);assert!(d);
+}
+#[test]
+fn time_boundaries_match_python_and_overflow_is_unset() {
+    let inputs=vec![json!("1e30"),json!(1e30),json!(-1e30),json!("-1e30"),json!("nan"),json!("inf"),json!(true),json!(0),json!("2026-10-23T06:00:00+10:00"),json!("2026-10-23"),json!("2026-10-23 06:00:00.123456"),json!(1792735200000_i64),json!(1792735200.123456)];
+    let actual:Vec<_>=inputs.iter().map(|v|parse_time(v).map(iso)).collect();
+    assert!(actual[..8].iter().all(Option::is_none));
+    if python_available() { let expected:Vec<Option<String>>=oracle(json!({"operation":"time","args":inputs}));assert_eq!(actual,expected); }
+}
+#[test]
+fn activity_reads_only_metadata_and_respects_identity_and_local_dates() {
+    use crate::schedule::*;
+    let temp=tempfile::tempdir().unwrap();let root=temp.path();
+    let modified=std::time::UNIX_EPOCH+std::time::Duration::from_secs(now().as_second() as u64-120);
+    for path in ["claude/history.jsonl","claude/projects/p/session.jsonl","codex/sessions/2026/10/23/rollout.jsonl","oc/opencode.db-wal",".gemini/antigravity-cli/log/cli.log"] {
+        let path=root.join(path);std::fs::create_dir_all(path.parent().unwrap()).unwrap();let file=std::fs::File::create(&path).unwrap();file.set_modified(modified).unwrap();
+    }
+    assert_eq!(activity("claude",&root.join("claude"),now(),root,&TimeZone::UTC),Some(now().as_second() as f64-120.0));
+    assert_eq!(activity("codex",&root.join("codex"),now(),root,&TimeZone::UTC),Some(now().as_second() as f64-120.0));
+    assert_eq!(activity("opencode",&root.join("oc"),now(),root,&TimeZone::UTC),Some(now().as_second() as f64-120.0));
+    assert!(activity("agy",&root.join("unused"),now(),root,&TimeZone::UTC).is_some());assert_eq!(activity("cursor",root,now(),root,&TimeZone::UTC),None);assert_eq!(activity("claude",&root.join("missing"),now(),root,&TimeZone::UTC),None);
+    // In Brisbane this UTC instant has crossed into the next local day.
+    let local="2026-10-23T15:00:00Z".parse().unwrap();let next=root.join("codex/sessions/2026/10/24/next.jsonl");std::fs::create_dir_all(next.parent().unwrap()).unwrap();std::fs::write(&next,[]).unwrap();
+    assert!(activity_paths("codex",&root.join("codex"),local,root,&TimeZone::get("Australia/Brisbane").unwrap()).contains(&next));
+}
