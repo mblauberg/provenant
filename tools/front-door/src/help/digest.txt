@@ -1,5 +1,0 @@
-usage: provenant digest FILE QUESTION [--non-confidential]
-
-Short answer with FILE:L<number> pointers. Confidential by default.
-Uses utility, retries invalid output once, then escalates to junior.
---non-confidential is only for public or synthetic input; permits free models.

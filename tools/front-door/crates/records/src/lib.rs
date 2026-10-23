@@ -34,3 +34,8 @@ pub use install::{
     AbsolutePath, Harness, InstallReceipt, OwnedEntry, OwnedValue, ReleaseFile, ReleaseManifest,
     ResolvedHarnessTarget, VersionInfo,
 };
+
+mod command_result;
+pub use command_result::{
+    CommandError, CommandResult, HelpArgument, HelpCatalogue, HelpCommand, HelpGroup, Outcome,
+};

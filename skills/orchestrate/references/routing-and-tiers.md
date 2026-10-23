@@ -51,7 +51,7 @@ The tier pools form a hierarchy ([tiered-council.md](tiered-council.md)): `utili
 
 Mixed selectors settle by precedence rather than rejection, and a warning names every ignored field: `models` beats `route`, `alias`, `model`, `council` and `rotate`; an explicit `model` beats `route`, `council` and `rotate`; `route` beats `alias`; `council` beats `rotate`; an `alias` without a `route` ignores `council` and `rotate`. `adapter` with `route` narrows the pool to that adapter's entries.
 
-`confidential: true` is a disclosure filter, not a selector: it works with a route, alias, model, adapter alone or task class, and removes every prompt-training model (`model_traits`, or a free model, that is a zero plan cap or `free_pattern` id, unless its own `trains_on_prompts` is `false`) from the resolved candidates, fallbacks included, even under `fallback: "any"`. An alias or task class whose first member is unsafe steps to its first safe member; dispatch refuses, with a fix, only when nothing safe remains. A resume or handoff of a confidential run stays confidential unless the caller passes `confidential: false`. Without it, such models stay in the pool; the warning appears only when one is actually selected. Task classes map onto routes through `route_synonyms` (`mid`, `second-opinion` and `implementation` → `senior`; `legwork`, `lens`, `mechanical`, `research` and `screenshots` → `junior`; `top`, `decision`, `critical-review` and `orchestration` → `principal`). The retired tier names `scout`, `bulk`, `workhorse`, `strong`, `review` and `flagship` are rejected with an error naming the replacement (`junior`, `senior` or `principal`), in a route, an alias or an overlay. The route line names the pick, for example `Route: opencode/deepseek-v4.1-flash (deepseek; observed; design council 2/3)`. `provenant routes` prints available models in full with live availability and
+`confidential: true` is a disclosure filter, not a selector: it works with a route, alias, model, adapter alone or task class, and removes every prompt-training model (`model_traits`, or a free model, that is a zero plan cap or `free_pattern` id, unless its own `trains_on_prompts` is `false`) from the resolved candidates, fallbacks included, even under `fallback: "any"`. An alias or task class whose first member is unsafe steps to its first safe member; dispatch refuses, with a fix, only when nothing safe remains. A resume or handoff of a confidential run stays confidential unless the caller passes `confidential: false`. Without it, such models stay in the pool; the warning appears only when one is actually selected. Task classes map onto routes through `route_synonyms` (`mid`, `second-opinion` and `implementation` → `senior`; `legwork`, `lens`, `mechanical`, `research` and `screenshots` → `junior`; `top`, `decision`, `critical-review` and `orchestration` → `principal`). The retired tier names `scout`, `bulk`, `workhorse`, `strong`, `review` and `flagship` are rejected with an error naming the replacement (`junior`, `senior` or `principal`), in a route, an alias or an overlay. The route line names the pick, for example `Route: opencode/deepseek-v4.1-flash (deepseek; observed; design council 2/3)`. `scripts/model-route routes` prints available models in full with live availability and
 collapses each pool's unavailable or cooling models to a count line, with
 `--all` for the full list; `--health` adds task-class routes and recent health (the same view as `provenant help routes`).
 
@@ -82,7 +82,7 @@ The first configured candidate is the default and later candidates remain
 admissible. `docs/model-dossier.md` records advisory preferences, so prose
 alone does not move a default.
 
-The live roster is `provenant routes`; pools and tiers live in
+The live roster is `scripts/model-route routes`; pools and tiers live in
 `config/model-routing.json`.
 
 Task-class order, minimum effort and role policy also live in
@@ -139,7 +139,7 @@ catalogue line; the native Agent tool's `sonnet`/`opus` already track the latest
 
 ## Cooldowns
 
-After the user says usage is back or switches accounts, run `provenant route reset <adapter>`.
+After the user says usage is back or switches accounts, run `scripts/model-route reset <adapter>`.
 
 ## Choosing among admissible routes
 

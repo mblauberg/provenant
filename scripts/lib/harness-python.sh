@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 
-# Public API: run_stdlib, exec_stdlib, run_yaml and run_test. Each call selects
+# Public API: run_stdlib, run_yaml and run_test. Each call selects
 # and probes exactly one interpreter before invoking it.
 
 _run_harness_python() {
-  local mode="$1" probe="$2"
-  shift 2
+  local probe="$1"
+  shift
   local product_root candidate primary_root common_dir path_variable
   product_root="${AGENT_FABRIC_PRODUCT_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
   candidate="${HARNESS_PYTHON:-$product_root/.venv/bin/python}"
@@ -43,10 +43,6 @@ _run_harness_python() {
     printf 'repair: uv sync --project %s --locked --only-group test\n' "$product_root" >&2
     return 3
   fi
-  if [[ "$mode" == exec ]]; then
-    export PYTHONNOUSERSITE=1
-    exec "$candidate" "$@"
-  fi
   PYTHONNOUSERSITE=1 "$candidate" "$@"
 }
 
@@ -56,22 +52,13 @@ _run_harness_python() {
 _VERSION_FLOOR='import sys; sys.version_info >= (3, 11) or sys.exit(1)'
 
 run_stdlib() {
-  _run_harness_python run "$_VERSION_FLOOR" "$@"
+  _run_harness_python "$_VERSION_FLOOR" "$@"
 }
 
 run_yaml() {
-  _run_harness_python run "$_VERSION_FLOOR; import yaml" "$@"
+  _run_harness_python "$_VERSION_FLOOR; import yaml" "$@"
 }
 
 run_test() {
-  _run_harness_python run "$_VERSION_FLOOR; import pytest, yaml" "$@"
+  _run_harness_python "$_VERSION_FLOOR; import pytest, yaml" "$@"
 }
-
-exec_stdlib() {
-  _run_harness_python exec "$_VERSION_FLOOR" "$@"
-}
-
-# Front doors use the same selector and replace themselves with the owner.
-if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
-  exec_stdlib "$@"
-fi

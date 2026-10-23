@@ -14,10 +14,7 @@ SCRIPT = ROOT / "skills/orchestrate/scripts/dispatch_run.py"
 
 
 def owner_command():
-    """Select the supervisor entry point; Rust is not wired up until S2."""
-    impl = os.environ.get("PROVENANT_LANE_IMPL", "python")
-    if impl != "python":
-        raise ValueError(f"unsupported PROVENANT_LANE_IMPL={impl!r}; only python is available until S2")
+    """Invoke the remaining Python dispatch owner directly."""
     return [sys.executable, str(SCRIPT)]
 
 

@@ -74,7 +74,7 @@ and branch/detached state. It does not emit the supplied repo path as
 run contract requires them. A removal receipt emits only `status`, `name` and
 `primary_root`.
 For branch worktrees, the default name is the branch with `/` replaced by `-`.
-The helper warns when an explicit name differs, and `provenant clean` sends
+The helper warns when an explicit name differs, and `scripts/clean.py` sends
 such a worktree to triage rather than guessing its branch.
 
 ### npm dependencies
@@ -103,7 +103,7 @@ preflight message; they never install automatically.
 
 ## Ownership and cleanup
 
-Run `provenant clean` from the project for a dry-run classification and plan
+Run `scripts/clean.py` from the project for a dry-run classification and plan
 digest. It protects dirty, unmerged, open-PR and active worktrees; `--apply
 --plan <digest>` delegates eligible removal to `scripts/worktree remove`
 after merge proof. The digest names a saved plan (valid for one day); apply deletes only its rows that are still
@@ -159,7 +159,7 @@ verified and pushed, or where the project's landing tool already prunes after
 the push: the hook would fire on the local merge, before verification and push.
 To opt in, run this command in the primary checkout; it refuses to overwrite
 any existing hook. The hook passes
-`ORIG_HEAD` to `provenant clean --prune-merged --merged-since ORIG_HEAD`, so it
+`ORIG_HEAD` to `scripts/clean.py --prune-merged --merged-since ORIG_HEAD`, so it
 prunes only branches the merge brought in. It quietly skips cleanup if
 `ORIG_HEAD` is missing. Merge commits are proven by ancestry. Squash merges are
 proven by a merged pull request whose head SHA exactly matches the local branch
@@ -188,7 +188,7 @@ never replace an existing hook.
 For a manual prune after one merge, name each branch that merge brought in:
 
 ```sh
-provenant clean --prune-merged --branch <merged-branch> --repo <primary-root>
+scripts/clean.py --prune-merged --branch <merged-branch> --repo <primary-root>
 ```
 
 `--prune-merged` requires `--branch` (repeatable) or `--merged-since`; it refuses

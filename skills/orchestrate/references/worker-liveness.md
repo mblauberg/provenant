@@ -70,7 +70,7 @@ Responding to a blocked attempt starts a new invocation and attempt, retaining
 the original question and attempt unchanged.
 
 For cross-terminal cancellation, write one empty `cancel.request` in the exact
-attempt or batch directory through `provenant run cancel`. The external command
+attempt or batch directory through `skills/orchestrate/scripts/run_controls.py cancel`. The external command
 never signals a PID or writes terminal evidence. The live dispatch owner polls
 the marker during its bounded wait, stops its provider and tracked descendants
 across process groups and sessions, and writes the normal cancelled attempt.

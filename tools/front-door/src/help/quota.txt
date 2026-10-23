@@ -1,6 +1,0 @@
-usage: provenant quota [--refresh] [--json] | tick [--trigger T] [--power P] [--json] [--ignore-backoff]
-       | schedule [--json] | trace [--since 24h] [--json] | path [--json]
-       | credit list | credit <provider> [--account L] add|use
-
-Delegates to scripts/provenant-quota.
-Provider-reported quota windows and pace per account; PROVENANT_QUOTA=0 disables fetching.

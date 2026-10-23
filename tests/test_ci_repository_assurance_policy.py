@@ -297,6 +297,21 @@ def test_every_tracked_path_matches_at_least_one_build_filter() -> None:
     assert unmatched == [], f"tracked paths outside every build filter: {unmatched}"
 
 
+def test_cli_retirement_keeps_live_port_oracles_without_golden_builds() -> None:
+    document = _workflow()
+    rust_steps = _steps(_job(document, "rust"))
+    rust_commands = "\n".join(str(step.get("run", "")) for step in rust_steps)
+    assert "tests/golden" not in rust_commands
+    assert "PROVENANT_GOLDEN_" not in rust_commands
+    assert "cargo build --release" not in rust_commands
+    for variable in ("PROVENANT_PORT_DIFF_REQUIRED", "PROVENANT_PORT_PYTHON", "PROVENANT_PORT_NODE"):
+        assert variable in rust_commands
+    python_commands = "\n".join(str(step.get("run", "")) for step in _steps(_job(document, "python-tests")))
+    assert "PROVENANT_FRONT_DOOR_BIN" not in python_commands
+    assert "cargo build" not in python_commands
+    assert "tests/support/front_door.py" not in _flatten_patterns(_change_filters(document)["rust"])
+
+
 def test_macos_smoke_builds_the_release_front_door_with_the_rust_filter() -> None:
     document = _workflow()
     job = _job(document, "rust-macos-release")

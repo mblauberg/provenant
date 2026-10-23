@@ -13,8 +13,6 @@ import sys
 import pytest
 
 
-from tests.support.front_door import front_door_binary
-
 ROOT = Path(__file__).resolve().parents[1]
 SEED = json.loads((ROOT / "config" / "model-routing.json").read_text())
 # The selection tests pin their own senior and design pools, so reweighting the seed never moves their arithmetic.

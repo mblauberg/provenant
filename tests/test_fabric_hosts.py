@@ -15,10 +15,9 @@ from unittest.mock import patch
 
 from tests.support.git import git
 
-from tests.support.front_door import front_door_binary
-
 ROOT = Path(__file__).resolve().parents[1]
 REPOSITORY_ROOT = ROOT.parent.parent
+PEER_COMMAND = str(ROOT / "scripts/fabric-hosts") + " peer"
 
 
 def default_host(config=None):
@@ -86,7 +85,7 @@ class PeerContracts(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / 'hosts.json'
             path.write_text(json.dumps({'schema_version': 1, 'local_host': 'laptop',
-                'peers': {'workshop': {'ssh_destination': 'workshop'}},
+                'peers': {'workshop': {'ssh_destination': 'workshop', 'peer_command': PEER_COMMAND}},
                 'projects': {'Repos/project': {'default_host': 'workshop',
                     'modes': {'read_only': 'laptop'}}}}))
             config = hosts.load_config(path)
@@ -131,7 +130,7 @@ class PeerContracts(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             environment = {**os.environ, 'HOME': directory,
                            'AGENT_FABRIC_INSTANCE_ROOT': directory, **env}
-            return subprocess.run([str(front_door_binary()), 'peer'],
+            return subprocess.run([sys.executable, str(ROOT / 'scripts/fabric_hosts.py'), 'peer'],
                                   input=request, capture_output=True, env=environment)
 
 
@@ -204,7 +203,8 @@ class ClientContracts(unittest.TestCase):
                 'peers': {'workshop': {'ssh_destination': 'workshop', 'response_deadline': 5}}}))
             pid_file, shim = root / 'ssh.pid', root / 'ssh'
             shim.write_text('#!' + sys.executable + '\nimport os,time\n'
-                            'open(' + repr(str(pid_file)) + ',"w").write(str(os.getpid()))\n'
+                            'with open(' + repr(str(pid_file) + '.tmp') + ',"w") as output: output.write(str(os.getpid()))\n'
+                            'os.replace(' + repr(str(pid_file) + '.tmp') + ',' + repr(str(pid_file)) + ')\n'
                             'time.sleep(30)\n')
             shim.chmod(0o755)
             owner = subprocess.Popen([sys.executable, str(ROOT / 'scripts/fabric_hosts.py'),
@@ -243,7 +243,7 @@ class ClientContracts(unittest.TestCase):
                             'print(\'{"protocol_version":1,"ok":true,"result":{"protocol_version":1,'
                             '"host":"workshop","revision":"fixture","extra":1e999}}\')\n')
             shim.chmod(0o755)
-            response = hosts.PeerClient('workshop', hosts.PeerConfig('workshop'),
+            response = hosts.PeerClient('workshop', hosts.PeerConfig('workshop', PEER_COMMAND),
                                         ssh_program=str(shim)).call('hello')
             self.assertEqual(response.get('error', {}).get('code'), 'bad_response')
 
@@ -263,7 +263,7 @@ class ClientContracts(unittest.TestCase):
                                     'if r["verb"]=="hello" else ' + repr(diagnostic) + '\n'
                                     'print(json.dumps({"protocol_version":1,"ok":True,"result":result}))\n')
                     shim.chmod(0o755)
-                    response = hosts.PeerClient('workshop', hosts.PeerConfig('workshop'),
+                    response = hosts.PeerClient('workshop', hosts.PeerConfig('workshop', PEER_COMMAND),
                                                 ssh_program=str(shim)).call('doctor', {'project_path': 'Repos/project'})
                     self.assertEqual(response.get('error', {}).get('code'), 'bad_response')
 
@@ -275,7 +275,7 @@ class ClientContracts(unittest.TestCase):
             def client(program, deadline=1):
                 shim.write_text('#!' + sys.executable + '\n' + program)
                 shim.chmod(0o755)
-                return hosts.PeerClient('workshop', hosts.PeerConfig('user@workshop', response_deadline=deadline), ssh_program=str(shim))
+                return hosts.PeerClient('workshop', hosts.PeerConfig('user@workshop', PEER_COMMAND, response_deadline=deadline), ssh_program=str(shim))
             unreachable = client('import sys; sys.exit(255)')
             self.assertEqual(unreachable.call('doctor')['error']['code'], 'unreachable')
             missing = client('import sys; print("provenant: command not found", file=sys.stderr); sys.exit(127)').call('doctor')
@@ -319,7 +319,7 @@ class ClientContracts(unittest.TestCase):
                 + 'if r["verb"]=="hello" else ' + repr(diagnostic) + '\n'
                 + 'print(json.dumps({"protocol_version":1,"ok":True,"result":result}))\n')
             shim.chmod(0o755)
-            response = hosts.PeerClient('workshop', hosts.PeerConfig('workshop'),
+            response = hosts.PeerClient('workshop', hosts.PeerConfig('workshop', PEER_COMMAND),
                 ssh_program=str(shim)).call('doctor', {'project_path': 'Repos/project'})
             self.assertTrue(response['ok'], response)
             self.assertTrue(response['compatible'], response)
@@ -352,7 +352,7 @@ class ClientContracts(unittest.TestCase):
                     shim.write_text('#!' + sys.executable + '\n' +
                         'import sys,json; r=json.load(sys.stdin); result={"protocol_version":1,"host":"workshop","revision":"fixture"} if r["verb"]=="hello" else ' + repr(diagnostic) + '; print(json.dumps({"protocol_version":1,"ok":True,"result":result}))')
                     shim.chmod(0o755)
-                    response = hosts.PeerClient('workshop', hosts.PeerConfig('workshop'), ssh_program=str(shim)).call('doctor')
+                    response = hosts.PeerClient('workshop', hosts.PeerConfig('workshop', PEER_COMMAND), ssh_program=str(shim)).call('doctor')
                     self.assertEqual(response['error']['code'], 'bad_response')
 
     def test_openssh_arguments_and_first_contact_hello(self):
@@ -365,12 +365,12 @@ class ClientContracts(unittest.TestCase):
                 'with open(' + repr(str(log)) + ',"a") as f: f.write(json.dumps([sys.argv[1:],r])+"\\n")\n' +
                 'print(json.dumps({"protocol_version":1,"ok":True,"result":{"protocol_version":1,"host":"workshop","revision":"fixture"}}))\n')
             shim.chmod(0o755)
-            peer = hosts.PeerClient('workshop', hosts.PeerConfig('workshop'), ssh_program=str(shim))
+            peer = hosts.PeerClient('workshop', hosts.PeerConfig('workshop', PEER_COMMAND), ssh_program=str(shim))
             self.assertEqual(peer.call('hello')['reachability'], 'reachable')
             self.assertEqual(peer.call('hello')['reachability'], 'reachable')
             calls = [json.loads(line) for line in log.read_text().splitlines()]
             self.assertEqual(len(calls), 1)
-            self.assertEqual(calls[0][0], ['-o', 'BatchMode=yes', '-o', 'ConnectTimeout=5', '--', 'workshop', '.local/bin/provenant peer'])
+            self.assertEqual(calls[0][0], ['-o', 'BatchMode=yes', '-o', 'ConnectTimeout=5', '--', 'workshop', PEER_COMMAND])
             self.assertEqual(calls[0][1]['verb'], 'hello')
 
     def test_ssh_end_of_options_keeps_destination_and_remote_command_out_of_option_parsing(self):
@@ -379,11 +379,11 @@ class ClientContracts(unittest.TestCase):
             shim, log = Path(directory) / 'ssh', Path(directory) / 'argv.json'
             shim.write_text('#!' + sys.executable + '\nimport json,sys; open(' + repr(str(log)) + ',"w").write(json.dumps(sys.argv[1:]))\n')
             shim.chmod(0o755)
-            client = hosts.PeerClient('workshop', hosts.PeerConfig('workshop'), ssh_program=str(shim))
+            client = hosts.PeerClient('workshop', hosts.PeerConfig('workshop', PEER_COMMAND), ssh_program=str(shim))
             client.call('hello')
             args = json.loads(log.read_text())
             self.assertEqual(args[4], '--')
-            self.assertEqual(args[5:], ['workshop', '.local/bin/provenant peer'])
+            self.assertEqual(args[5:], ['workshop', PEER_COMMAND])
             parsed = subprocess.run(['ssh', '-F', os.devnull, '-G', *args], capture_output=True, text=True)
             self.assertEqual(parsed.returncode, 0, parsed.stderr)
             self.assertIn('hostname workshop', parsed.stdout.lower())
@@ -391,7 +391,7 @@ class ClientContracts(unittest.TestCase):
     def test_peer_command_and_destination_cannot_start_with_an_ssh_option(self):
         import fabric_hosts as hosts
         configs = [
-            {'schema_version': 1, 'local_host': 'laptop', 'peers': {'workshop': {'ssh_destination': '-oProxyCommand=touch'}}},
+            {'schema_version': 1, 'local_host': 'laptop', 'peers': {'workshop': {'ssh_destination': '-oProxyCommand=touch', 'peer_command': PEER_COMMAND}}},
             {'schema_version': 1, 'local_host': 'laptop', 'peers': {'workshop': {'ssh_destination': 'workshop', 'peer_command': '-oProxyCommand peer'}}},
         ]
         with tempfile.TemporaryDirectory() as directory:
@@ -407,7 +407,7 @@ class ClientContracts(unittest.TestCase):
             shim = Path(directory) / 'ssh'
             shim.write_text('#!' + sys.executable + '\nopen(' + repr(str(invoked)) + ',"w").write("called")\n')
             shim.chmod(0o755)
-            for peer in [hosts.PeerConfig('-oProxyCommand=touch marker'),
+            for peer in [hosts.PeerConfig('-oProxyCommand=touch marker', PEER_COMMAND),
                          hosts.PeerConfig('workshop', '-oProxyCommand peer')]:
                 response = hosts.PeerClient('workshop', peer, ssh_program=str(shim)).call('hello')
                 self.assertEqual(response['error']['code'], 'invalid_config')
@@ -427,8 +427,8 @@ class ClientContracts(unittest.TestCase):
                 '{"protocol_version":1,"host":"healthy","revision":None,"project":{"path":"Repos/project","present":True},"adapters":{},"fabric_registrations":{},"python":{"version":"3.11.0","minimum":"3.11","supported":true},"lane_temporary_paths":{"fits":True,"max_path_bytes":90,"limit_bytes":103}}\n'
                 ' print(json.dumps({"protocol_version":1,"ok":True,"result":result}))\n')
             shim.chmod(0o755)
-            config = hosts.HostsConfig('laptop', {'broken': hosts.PeerConfig('broken'),
-                                                   'healthy': hosts.PeerConfig('healthy')})
+            config = hosts.HostsConfig('laptop', {'broken': hosts.PeerConfig('broken', PEER_COMMAND),
+                                                   'healthy': hosts.PeerConfig('healthy', PEER_COMMAND)})
             with patch.dict(os.environ, {'AGENT_FABRIC_SSH_PROGRAM': str(shim)}), \
                  patch.object(hosts, 'project_identity', return_value='Repos/project'):
                 value = hosts.hosts_doctor(config, ['broken', 'healthy'])
@@ -438,7 +438,7 @@ class ClientContracts(unittest.TestCase):
 
     def test_local_doctor_error_is_a_row_and_peer_rows_survive(self):
         import fabric_hosts as hosts
-        config = hosts.HostsConfig('laptop', {'workshop': hosts.PeerConfig('workshop')})
+        config = hosts.HostsConfig('laptop', {'workshop': hosts.PeerConfig('workshop', PEER_COMMAND)})
         peer_row = {'host': 'workshop', 'reachability': 'reachable', 'ok': True, 'result': {'fixture': True}}
         with patch.object(hosts, 'project_identity', return_value='Repos/project'), \
              patch.object(hosts, 'doctor', side_effect=hosts.HostError('doctor_unavailable', 'catalogue unavailable')), \
@@ -499,7 +499,8 @@ class ConfigContracts(unittest.TestCase):
             if config is not None:
                 (root / '.agent-fabric').mkdir()
                 (root / '.agent-fabric/hosts.json').write_text(json.dumps(config))
-            return subprocess.run([str(front_door_binary()), 'hosts', 'list', '--json'],
+            return subprocess.run([sys.executable, str(ROOT / 'scripts/fabric_hosts.py'),
+                                  'hosts', 'list', '--json'],
                                   capture_output=True, text=True,
                                   env={**os.environ, 'AGENT_FABRIC_INSTANCE_ROOT': directory})
 
@@ -768,7 +769,7 @@ class SshdAcceptance(unittest.TestCase):
             (remote_home / 'Repos/project').mkdir(parents=True)
             (remote_home / '.agents/.agent-fabric/hosts.json').write_text(
                 json.dumps({'schema_version': 1, 'local_host': 'workshop'}))
-            shutil.copy2(front_door_binary(), remote_home / '.local/bin/provenant')
+            remote_peer = ROOT / 'scripts/fabric-hosts'
 
             host_key, client_key = root / 'host_key', root / 'client_key'
             ssh_binary = shutil.which('ssh')
@@ -779,9 +780,8 @@ class SshdAcceptance(unittest.TestCase):
                 self.assertEqual(generated.returncode, 0, generated.stderr)
             requested_marker = root / 'malicious-command-ran'
             forced = ('env HOME=' + shlex.quote(str(remote_home)) + ' AGENT_FABRIC_INSTANCE_ROOT='
-                      + shlex.quote(str(remote_home / '.agents')) + ' PROVENANT_ROOT='
-                      + shlex.quote(str(ROOT)) + ' '
-                      + shlex.quote(str(remote_home / '.local/bin/provenant')) + ' peer')
+                      + shlex.quote(str(remote_home / '.agents')) + ' '
+                      + shlex.quote(str(remote_peer)) + ' peer')
             forced_option = forced.replace('\\', '\\\\').replace('"', '\\"')
             authorized = root / 'authorized_keys'
             authorized.write_text('command="' + forced_option + '",restrict '
@@ -815,7 +815,8 @@ class SshdAcceptance(unittest.TestCase):
                                 + repr('touch ' + str(requested_marker)) + '])\n')
                 shim.chmod(0o755)
                 local_config = {'schema_version': 1, 'local_host': 'laptop',
-                                'peers': {'workshop': {'ssh_destination': 'fabric-acceptance'}}}
+                                'peers': {'workshop': {'ssh_destination': 'fabric-acceptance',
+                                                       'peer_command': PEER_COMMAND}}}
                 (local_home / '.agents/.agent-fabric/hosts.json').write_text(json.dumps(local_config))
                 environment = {**os.environ, 'HOME': str(local_home),
                                'AGENT_FABRIC_INSTANCE_ROOT': str(local_home / '.agents'),
@@ -829,7 +830,8 @@ class SshdAcceptance(unittest.TestCase):
                     except OSError:
                         pass
                     time.sleep(.05)
-                result = subprocess.run([str(front_door_binary()), 'hosts', 'doctor', '--json'],
+                result = subprocess.run([sys.executable, str(ROOT / 'scripts/fabric_hosts.py'),
+                                         'hosts', 'doctor', '--json'],
                                         cwd=workspace, capture_output=True, text=True, env=environment, timeout=20)
                 self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
                 rows = {row['host']: row for row in json.loads(result.stdout)['hosts']}

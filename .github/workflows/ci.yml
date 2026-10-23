@@ -177,7 +177,6 @@ jobs:
               - 'AGENTS.md'
               - 'HARNESS.md'
               - 'tools/front-door/**'
-              - 'tests/support/front_door.py'
             workflows:
               - '.github/workflows/**'
               - '.github/actions/**'
@@ -252,12 +251,6 @@ jobs:
           cache-dependency-glob: uv.lock
       - name: Install locked harness test dependencies
         run: uv sync --locked --only-group test
-      - name: Build Rust front door before parallel test collection
-        # rustup reads rust-toolchain.toml from the working directory, not the manifest path.
-        working-directory: tools/front-door
-        run: |
-          cargo build --release --locked -p provenant --bin provenant
-          printf 'PROVENANT_FRONT_DOOR_BIN=%s\n' "$GITHUB_WORKSPACE/tools/front-door/target/release/provenant" >> "$GITHUB_ENV"
       - name: Run Python test shard
         env:
           AGENT_FABRIC_PRODUCT_ROOT: ${{ github.workspace }}
@@ -370,12 +363,6 @@ jobs:
           name: rust-nextest-junit
           path: tools/front-door/target/nextest/ci/junit.xml
           if-no-files-found: warn
-      - name: Build release binary
-        working-directory: tools/front-door
-        run: |
-          cargo build --release --locked
-      - name: Run the golden CLI suite
-        run: PROVENANT_GOLDEN_REQUIRED=1 PROVENANT_GOLDEN_BIN="$CARGO_TARGET_DIR/release/provenant" .venv/bin/python -m pytest tests/golden -q
 
   rust-dependencies:
     name: Rust dependency policy

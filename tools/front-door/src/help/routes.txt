@@ -1,6 +1,0 @@
-usage: provenant routes [--all] [--json] [--health]
-
-Delegates to scripts/model-route routes ...
-Each global route pool with live availability; unavailable or cooling
-models collapse to a per-pool count line, --all lists every entry, and
---health adds task-class routes and recent health.

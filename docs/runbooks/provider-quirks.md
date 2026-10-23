@@ -1,7 +1,7 @@
 # Provider CLI quirks
 
 Durable behaviours of the external CLIs behind Fabric lanes. Model ids, efforts
-and flags change often: discover them at runtime (`provenant routes`,
+and flags change often: discover them at runtime (`scripts/model-route routes`,
 `fabric_adapters`, `agy models`) and never trust a written slug. Mechanics live
 in `skills/orchestrate`; this page records the traps.
 

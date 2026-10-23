@@ -19,10 +19,10 @@ The command is pending CLI integration:
 provenant telemetry stats [--since DATE_OR_RFC3339] [--until DATE_OR_RFC3339] [--detail] [--json]
 ```
 
-Until run and CLI integration lands, the old telemetry, stats and retro routes
-point at the retired wrapper. Legacy quota, utility and Fabric peer paths also
-still import the removed telemetry owner. Their owners remove those calls in
-later steps. There is no working replacement command in this first crate step.
+Until run integration lands, this command parses fully and returns
+`OWNER_UNAVAILABLE` with exit 4. The old telemetry, stats and retro forwarding
+routes are removed. Legacy quota, utility and Fabric peer paths still import
+the removed telemetry owner; their owners remove those calls in later steps.
 
 ## Measurements and estimates
 
@@ -77,15 +77,15 @@ step does not change account eligibility, probes or cooldown policy. Ledger
 window history and plan-change events are retired.
 
 ```sh
-provenant quota                 # fetches only the accounts that are due
-provenant quota --json
-provenant quota --refresh       # explicitly bypass the schedule
-provenant quota tick --json     # fetch what is due, write report.json, print it
-provenant quota schedule        # each account's next due time and reason; never fetches
-provenant quota trace --since 24h
-provenant quota path [--json]   # the quota state directory
-provenant quota forget agy/google-<hash>   # drop a signed-out account's remembered reading
-provenant routes --json         # cached quota only; never fetches
+scripts/provenant-quota                 # fetches only the accounts that are due
+scripts/provenant-quota --json
+scripts/provenant-quota --refresh       # explicitly bypass the schedule
+scripts/provenant-quota tick --json     # fetch what is due, write report.json, print it
+scripts/provenant-quota schedule        # each account's next due time and reason; never fetches
+scripts/provenant-quota trace --since 24h
+scripts/provenant-quota path [--json]   # the quota state directory
+scripts/provenant-quota forget agy/google-<hash>   # drop a signed-out account's remembered reading
+scripts/model-route routes --json         # cached quota only; never fetches
 ```
 
 Codex prefers the credential-free `codex app-server` JSON-RPC rate-limit read,
@@ -151,7 +151,7 @@ a window is exhausted until just after its reset. Every report row carries a
 `source_kind`; the report adds the earliest `next_due_at` and `refreshing`, the
 `provider/account` ids being fetched now. Activity is read from file times only.
 
-`provenant quota tick` takes `--trigger timer|panel|manual|event|wake|power` and
+`scripts/provenant-quota tick` takes `--trigger timer|panel|manual|event|wake|power` and
 `--power ac|battery|low`, supplied by the caller. It holds
 `quota/refresh.lock` without waiting: a second tick prints the current report
 and fetches nothing. Up to `max_parallel` accounts fetch at once; agy runs alone.
@@ -217,7 +217,7 @@ fetch in a tick fails to connect, the report sets `offline: true`.
 
 Each attempt appends one line to `quota/fetches.jsonl`: `at`, `provider`,
 `account`, `trigger`, `outcome`, `error_kind`, `duration_ms`, `retry_after_s`
-and a scrubbed `error`. `provenant quota trace --since 24h [--json]` totals
+and a scrubbed `error`. `scripts/provenant-quota trace --since 24h [--json]` totals
 fetches, failures by kind and duration percentiles per account. Lines older than
 `quota.trace.retention_days` (default 30) are pruned at most once a day.
 
@@ -297,7 +297,7 @@ balance is unknown, not zero. The table adds one line per account that has
 either, for example `codex/default: 27,406 credits available; 1 banked reset
 (expires 7 Nov)`. Codex reports both through `account/rateLimits/read`. Claude
 reports a `spend.balance`, shown when positive, and no banked resets. A reset
-recorded with `provenant quota credit` appears with `source: manual` when the
+recorded with `scripts/provenant-quota credit` appears with `source: manual` when the
 provider reports no count.
 
 The legacy quota classifier distinguishes `natural`, `granted_date_kept`,
@@ -385,9 +385,9 @@ Mileage (API-equivalent USD per 1% of a window), upgrade gain and value per plan
 read these tables; see #1071.
 
 ```sh
-provenant quota credit codex --account work add
-provenant quota credit list --json
-provenant quota credit codex --account work use
+scripts/provenant-quota credit codex --account work add
+scripts/provenant-quota credit list --json
+scripts/provenant-quota credit codex --account work use
 ```
 
 This example banks one Codex reset credit. `use` records a credit the user has
@@ -474,7 +474,7 @@ A balance that the latest reading does not report is unknown, never usable.
 3. Use the bounded `io` HTTP/process functions and fixed, sanitised failures.
    Return only quota metadata. Keep tokens inside the provider call chain.
 4. Register a fake module and mock all process/network boundaries in tests.
-   Add the account to config and verify it appears in `provenant quota`.
+   Add the account to config and verify it appears in `scripts/provenant-quota`.
 
 OpenCode has no usage or limits endpoint and documents no reset semantics.
 Go limits are plan-wide dollar amounts (5 hour 20%, weekly 50%, monthly 100% of

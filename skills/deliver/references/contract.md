@@ -197,7 +197,7 @@ The profile gate uses independently authored positive, negative and boundary
 cases rather than receipts emitted by the reference generator:
 
 ```sh
-provenant check
+scripts/check-harness
 ```
 
 The harness gate includes the delivery scenario replay. Every expected outcome

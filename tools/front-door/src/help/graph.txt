@@ -1,7 +1,0 @@
-usage: provenant graph run --file F
-       provenant graph status [ID] [--json] [--wait [--timeout N]]
-       provenant graph cancel ID [--node N] | resume ID
-
-Delegates to runtime/fabric/bin/fabric graph ...
-Runs a JSON plan graph of dispatch nodes under a detached owner;
-the chair hears about failures and the end through Fabric messages.

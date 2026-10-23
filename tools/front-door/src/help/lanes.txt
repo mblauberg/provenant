@@ -1,9 +1,0 @@
-usage: provenant lanes [--json] [--all] [id…]
-       provenant lanes --wait [--all] [--summary] [--timeout N] [id…]
-
-Delegates to runtime/fabric/bin/fabric lanes ...
-Default shows active lanes plus the 5 most recent terminal ones;
-use --all to list all lanes.
-`lanes --wait` waits for a lane to finish or need input. It exits 1 when a
-lane it reports, or a lane it names, ended without success; 124 on timeout;
-otherwise 0. --summary prints one bounded line per lane at the end.

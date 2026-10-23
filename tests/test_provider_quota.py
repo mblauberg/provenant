@@ -21,8 +21,6 @@ import quota_display
 from tests.support.quota import NOW, configure, quota, snapshot as build_snapshot, window
 
 
-from tests.support.front_door import front_door_binary
-
 ROOT = Path(__file__).resolve().parents[1]
 WEEK = 7 * 24 * 60
 TOKEN = 'SECRET-TOKEN-VALUE'
@@ -1812,14 +1810,11 @@ def test_choose_claude_account_without_usable_cache_uses_stable_labels(quota, va
 
 
 @pytest.mark.parametrize('reading', [None, {'status': 'error', 'windows': []}])
-def test_uncached_multiple_claude_accounts_match_the_dispatch_help(quota, reading):
+def test_uncached_multiple_claude_accounts_use_stable_labels(quota, reading):
     values = {'pro': reading, 'max': reading, 'default': reading}
     assert quota.choose_claude_account(values, NOW) == 'default'
     values.pop('default')
     assert quota.choose_claude_account(values, NOW) == 'max'
-    help_text = subprocess.check_output([str(front_door_binary()), 'help', 'dispatch'], text=True)
-    assert 'When all eligible accounts lack usable cached quota,' in help_text
-    assert 'labels sort alphabetically.' in help_text
 
 
 @pytest.mark.parametrize('selected,exhausted', [('pro', True), ('max', False)])

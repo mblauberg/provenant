@@ -1,5 +1,0 @@
-usage: provenant classify --labels a,b,c ITEMS_FILE [--non-confidential]
-
-JSON array of labels, one per item in order. Input: JSON string array or lines.
-Exact labels use plain code; otherwise utility, one retry, then junior.
-Confidential by default; --non-confidential permits free models for public/synthetic input.

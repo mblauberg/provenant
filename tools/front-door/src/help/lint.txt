@@ -1,6 +1,0 @@
-usage: provenant lint branch [NAME]
-       provenant lint commit-msg FILE
-
-Delegates to scripts/provenant_lint.py ...
-Branch shape, session markers, agent attribution and closing keywords.
-commit-msg works directly as a git commit-msg hook; see docs/runbooks/lint.md.
