@@ -295,8 +295,8 @@ pub fn report(
     since: Option<&str>,
     until: Option<&str>,
 ) -> Result<Vec<Compactions>> {
-    let low = since.map(parse_time).transpose()?;
-    let high = until.map(parse_time).transpose()?;
+    let low = since.filter(|s| !s.is_empty()).map(parse_time).transpose()?;
+    let high = until.filter(|s| !s.is_empty()).map(parse_time).transpose()?;
     let mut counts = BTreeMap::<String, u64>::new();
     let mut query=db.prepare("SELECT DISTINCT usage.lane,events.event_id,events.ts FROM events JOIN usage ON usage.session=events.session WHERE events.kind='session.compaction' AND usage.lane IS NOT NULL")?;
     for row in query.query_map([], |r| {
@@ -351,7 +351,7 @@ pub fn cost_per_accepted(
         rows: u64,
         unpriced: u64,
     }
-    let boundary = since.map(parse_time).transpose()?;
+    let boundary = since.filter(|s| !s.is_empty()).map(parse_time).transpose()?;
     let mut groups = BTreeMap::<Option<String>, Group>::new();
     let mut run_groups = BTreeMap::new();
     let mut deliveries: Vec<_> = deliveries.iter().collect();
@@ -516,5 +516,15 @@ mod tests {
     }
 
 
+
+    #[test]
+    fn review_regression_empty_since_is_ignored() {
+        let db = rusqlite::Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE events(kind TEXT,event_id TEXT,ts TEXT,session TEXT); CREATE TABLE usage(lane TEXT,session TEXT); INSERT INTO events VALUES ('session.compaction','id','2026-01-01','s'); INSERT INTO usage VALUES ('lane','s');").unwrap();
+        assert_eq!(report(&db, Some(""), Some("")).unwrap(), report(&db, None, None).unwrap());
+        let run = Delivery {run_dir:"dir".into(),..Delivery::default()};
+        let identity = HostIdentity::new("h".into(),BTreeSet::new(),&BTreeSet::new());
+        assert_eq!(cost_per_accepted(std::slice::from_ref(&run), &[], &BTreeSet::new(), &identity, Some(""), &costs::Prices::default(), &BTreeMap::new()).unwrap(), cost_per_accepted(&[run], &[], &BTreeSet::new(), &identity, None, &costs::Prices::default(), &BTreeMap::new()).unwrap());
+    }
 
 }
