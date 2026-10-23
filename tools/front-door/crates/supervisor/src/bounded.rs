@@ -81,6 +81,23 @@ impl State {
         child_exited: bool,
         group_exists: bool,
     ) -> Effect {
+        self.step_with_output_limit(now, timeout, child_exited, group_exists, false)
+    }
+
+    fn step_with_output_limit(
+        &mut self,
+        now: f64,
+        timeout: f64,
+        child_exited: bool,
+        group_exists: bool,
+        output_exceeded: bool,
+    ) -> Effect {
+        if output_exceeded && *self == Self::Waiting {
+            *self = Self::Grace {
+                deadline: now + 0.25,
+            };
+            return Effect::Terminate { timed_out: false };
+        }
         match *self {
             Self::Waiting if child_exited || now >= timeout => {
                 *self = Self::Grace {
@@ -170,13 +187,18 @@ fn run(
         .stdout(Stdio::from(
             stdout.try_clone().map_err(io_error("clone stdout spool"))?,
         ))
-        .stderr(Stdio::from(
-            stderr
-                .as_ref()
-                .unwrap_or(&stdout)
-                .try_clone()
-                .map_err(io_error("clone stderr spool"))?,
-        ));
+        .stderr(if stop_on_output_limit {
+            // execFileSync's ps bridge ignores stderr, even on failure.
+            Stdio::null()
+        } else {
+            Stdio::from(
+                stderr
+                    .as_ref()
+                    .unwrap_or(&stdout)
+                    .try_clone()
+                    .map_err(io_error("clone stderr spool"))?,
+            )
+        });
     if options.null_stdin {
         launch.stdin(Stdio::null());
     }
@@ -266,14 +288,8 @@ fn wait_and_stop(
             }
             _ => false,
         };
-        let effect = if output_exceeded {
-            state = State::Grace {
-                deadline: now + 0.25,
-            };
-            Effect::Terminate { timed_out: false }
-        } else {
-            state.step(now, timeout, exited, group_exists)
-        };
+        let effect =
+            state.step_with_output_limit(now, timeout, exited, group_exists, output_exceeded);
         match effect {
             Effect::Wait => std::thread::sleep(Duration::from_millis(10)),
             Effect::Terminate { timed_out: expired } => {
