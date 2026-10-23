@@ -22,7 +22,7 @@ before validation.
 | `attempt-digest-sidecar.schema.json` | `attempt.sha256`, represented by its digest and target filename; `dispatch_run.py` and `run_records.py`. |
 | `batch-summary.schema.json` | `dispatch/batches/batch-NNN/summary.json`; summary writer in `batch_run.py`. |
 | `manifest-row.schema.json` | One eight-column row in `MANIFEST.md`; `manifest_rows` and `append_manifest_to` in `run_records.py`, plus batch indexing in `batch_run.py`. |
-| `dispatch-status.schema.json` | `dispatch-status.json`; initial write in `runtime/fabric/src/execution.ts`, terminal update in `dispatch_run.py`. |
+| `dispatch-status.schema.json` | `dispatch-status.json`; terminal update in `dispatch_run.py`. |
 | `dispatch-owner.schema.json` | `dispatch-owner.json`; `record_owner` and `ensure_nested_owner` in `run_lineage.py`. |
 | `run-receipt.schema.json` | `RUN_RECEIPT.json`; initial writer `run_dir_init.sh`, review/pair/pane updates in `review_plan.py` and `run_dir_finalize.py`, plus dispatch close updates. |
 | `supervisor-state.schema.json` | Future `supervisor.json` state record, as specified in `docs/specs/harness/rust-supervisor.md`. |
@@ -38,8 +38,6 @@ before validation.
 | `telemetry-quota-event-row.schema.json` | `quota_events` ledger rows; quota transition ingestion in `scripts/telemetry.py`. |
 | `model-routing.schema.json` | `config/model-routing.json`; read by `scripts/model_route.py` and `scripts/telemetry_costs.py`. |
 | `model-preferences.schema.json` | `config/model-preferences.json`; read and updated by `scripts/model_route_preferences.py`. |
-| `graph-reservation.schema.json` | Git worktree reservation; `reserve` in `runtime/fabric/src/graph/store.ts`. |
-| `graph-node-receipt.schema.json` | Graph node attempt `receipt.json`; `#receipt` in `runtime/fabric/src/graph/owner.ts`. |
 | `route-health.schema.json` | Route health store; `write_route_health` in `skills/orchestrate/scripts/fabric_records.py`. |
 | `cooldowns.schema.json` | Cooldown store; `_store_cooldowns` in `fabric_records.py`. |
 | `log-reduction.schema.json` | Optional log reduction receipt; `main` in `log_reducer.py`. |
@@ -89,7 +87,7 @@ an OS lock file and has no JSON Schema.
 Writer-derived fixtures cover persisted inventory additions and the launcher
 status shape. Tests pair each `NAME.valid.json` with `NAME.invalid.json`.
 The inventory scans Python, TypeScript and shell source throughout `scripts/`,
-`skills/` and `runtime/fabric/src` in both directions. CLI and report identifiers
+`skills/` in both directions. CLI and report identifiers
 have individual reasons in `NON_RECORD_SCHEMAS` in the test, including the
 transient execution plan; future version IDs are explicitly separated from
 current writers.

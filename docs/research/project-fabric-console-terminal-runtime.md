@@ -4,7 +4,7 @@ Status: Historical pre-ADR-0020 terminal-runtime decision; implementation
 evidence cut off on 13 July 2026
 
 Current owners: [ADR 0020](../adr/0020-retire-the-daemon-fabric.md),
-[`runtime/fabric/README.md`](../../runtime/fabric/README.md), and
+[Fabric Rust design](../specs/rust-port/design/fabric.md), and
 [`HARNESS.md`](../../HARNESS.md). The Console runtime and specifications named
 below were retired; this note preserves decision-time evidence only.
 

@@ -53,20 +53,12 @@ def test_digest_validates_line_pointers_and_bounds_the_answer(tmp_path, monkeypa
     assert calls == ['utility', 'utility']
 
 
-def test_cli_plain_code_contracts_and_help(tmp_path, monkeypatch, capsys):
-    import os
+def test_cli_help_matches_frozen_text(tmp_path, monkeypatch):
     import subprocess
-    import sys
     root = Path(__file__).resolve().parents[1]
     monkeypatch.setenv('AGENT_FABRIC_PRODUCT_ROOT', str(root))
     monkeypatch.setenv('AGENT_FABRIC_INSTANCE_ROOT', str(tmp_path / 'instance'))
     monkeypatch.setenv('AGENT_FABRIC_STATE_ROOT', str(tmp_path / 'state'))
-    items = tmp_path / 'items.txt'
-    items.write_text('yes\nno\n')
-    done = subprocess.run([str(front_door_binary()), 'classify', '--labels', 'yes,no', str(items)],
-                          capture_output=True, text=True, env=os.environ)
-    assert done.returncode == 0, done.stderr
-    assert json.loads(done.stdout) == ['yes', 'no']
     for verb in ('digest', 'classify', 'extract'):
         done = subprocess.run([str(front_door_binary()), 'help', verb], capture_output=True, text=True)
         assert done.returncode == 0

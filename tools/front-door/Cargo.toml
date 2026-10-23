@@ -43,6 +43,16 @@ provenant-cli = { path = "crates/cli" }
 # Rewrite lanes land inert (ADR 0028). Keep their shared path declarations
 # until cutover gives each a consumer; remove its ignore at that point.
 [workspace.metadata.cargo-shear]
+# Empty rewrite crates and the retained CLI-owned generated scaffold are
+# deliberate until their owner slices land. Remove each path as it gains code.
+ignored-paths = [
+  "crates/cli/src/lib.rs",
+  "crates/confinement/src/lib.rs",
+  "crates/fabric-mcp/src/lib.rs",
+  "crates/providers/src/lib.rs",
+  "crates/run/src/lib.rs",
+  "crates/workflow/src/pending/python_word.rs",
+]
 ignored = [
   "provenant-cli",
   "provenant-config",
@@ -56,18 +66,6 @@ ignored = [
   "provenant-run",
   "provenant-telemetry",
   "provenant-workflow",
-]
-
-# Empty library roots are intentional inert rewrite lanes. The workflow word
-# table is parked for its owning lane; neither is an abandoned source file.
-ignored-paths = [
-  "crates/cli/src/lib.rs",
-  "crates/config/src/lib.rs",
-  "crates/confinement/src/lib.rs",
-  "crates/fabric-mcp/src/lib.rs",
-  "crates/providers/src/lib.rs",
-  "crates/run/src/lib.rs",
-  "crates/workflow/src/pending/python_word.rs",
 ]
 
 [workspace.lints.rust]

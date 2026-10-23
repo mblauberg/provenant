@@ -70,9 +70,11 @@ one.
    exactly as a standalone `implement` run would (its scaled repair-budget per
    risk tier: routine 2, substantial 4, crucial/terminal 5 cycles); this mode
    does not retry past that boundary or route around it.
-6. **FINISH** when the ready/accepted queue snapshot is empty. There is no
-   STOP file, no cross-session resume state, and no continuation past a
-   user decision — each run is bounded to the queue it started with.
+6. **FINISH** this bounded pass when its ready/accepted work is exhausted.
+   This does not close an open-ended autopilot mission: run `resume` and
+   `reconcile` own execution continuation, while a host-keyed session Markdown
+   checkpoint carries concise context across compaction. Only the user can end
+   an autopilot mission with `STATUS: STOP`.
 
 ## Distinguishing from autopilot
 
@@ -81,7 +83,7 @@ one.
 | Scope source | pre-scoped accepted/ready issues only; never scopes | self-scopes open-ended missions |
 | Duration | one bounded pass over the current queue snapshot | persistent, survives sessions/crashes, until user `STATUS: STOP` |
 | User gate | scope and one-way doors; final acceptance only for `terminal` or approved scope; repository merge policy governs landing | user-out-of-loop during the loop; reaches users only at hard/one-way-door gates |
-| State | uses `implement`/`deliver` receipts only, no durable lab state | `GOAL.md`/`STATE.md`/`QUEUE.md`/`HANDOFF.md` durable cross-session state; decision records delegated to `implement`/`deliver` |
+| State | uses `implement`/`deliver` evidence, no separate mission ledger | run lanes and Fabric tasks own live state; `resume`/`reconcile` continue execution, and a bounded host-keyed Markdown checkpoint carries session context; the user-owned goal retains the STOP gate |
 | Authority | lower — never proceeds past the per-issue merge gate its repository's policy sets | higher — authorised to keep driving without per-item user sign-off |
 
 Trigger this mode only on an explicit **bounded, pre-scoped issue queue**

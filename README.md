@@ -87,13 +87,12 @@ npm ci
 
 scripts/install-harness --platform all
 
-# discover commands, then verify the daemonless Fabric bus
+# discover the command tree
 provenant help
-provenant fabric whoami
 
 # run the repository gates when changing Provenant
 provenant check   # harness policy gate
-npm run check     # TypeScript gates
+npm run check     # checkout-local Node dependency preflight
 ```
 
 Each installer command registers the Fabric MCP server for the platform it
@@ -145,12 +144,13 @@ whether `uv` is on `PATH`.
 To move the product checkout while retaining a small instance root, follow the
 [split-product relocation runbook](docs/runbooks/split-product-relocation.md).
 
-`provenant fabric whoami` creates the project-local Fabric identity and shared
-SQLite bus on first use. There is no daemon, trust record, initial provisioning or
-warm/build step. `provenant check` runs the harness policy gate from the registered
-checkout containing the caller, so a linked-worktree check cannot certify the
-primary checkout. `npm run check` covers the Fabric typecheck and tests. It
-first reports missing dependencies for that exact checkout and tells the
+During the Rust rewrite, this checkout's TS Fabric CLI and MCP runtime are
+retired. The [Rust Fabric design](docs/specs/rust-port/design/fabric.md) owns
+their replacements; the stable install remains frozen until cut-over.
+`provenant check` runs the harness policy gate from the registered checkout
+containing the caller, so a linked-worktree check cannot certify the primary
+checkout. `npm run check` validates checkout-local Node dependencies. It
+reports missing dependencies for that exact checkout and tells the
 operator to run `npm ci`; it never installs or borrows another checkout's tree.
 
 <details>
@@ -183,12 +183,6 @@ From the product checkout,
 `scripts/manage_installation.py uninstall-managed --target <skills-dir>`
 reclaims the harness-owned skill links and nothing else. The bootstrap line and
 the Codex block remain until removed by hand.
-
-Fabric derives the project from the current working directory. Run
-`provenant fabric whoami` from the project you mean; the first call creates its
-database and registers the caller without a separate activation step. A
-repository's ordinary registered linked worktrees share that Fabric project
-while each caller retains its resolved working directory.
 
 </details>
 

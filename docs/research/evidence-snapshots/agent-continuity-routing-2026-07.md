@@ -3,7 +3,7 @@
 Status: Dated pre-ADR-0020 descriptive evidence; not implementation authority
 
 Current owners: [ADR 0020](../../adr/0020-retire-the-daemon-fabric.md),
-[`runtime/fabric/README.md`](../../../runtime/fabric/README.md),
+[Fabric Rust design](../../specs/rust-port/design/fabric.md),
 [`config/adapter-compatibility.yaml`](../../../config/adapter-compatibility.yaml),
 and [`HARNESS.md`](../../../HARNESS.md). Daemon and Console references below
 are retained as evidence, not current paths.

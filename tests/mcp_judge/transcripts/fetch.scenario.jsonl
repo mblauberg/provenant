@@ -1,2 +1,0 @@
-{"label":"fetch:fixture-peer","kind":"happy","fixture":"fetch","request":{"name":"fabric_fetch","arguments":{"id":"writer-once@judge-peer"}}}
-{"label":"fetch:error","kind":"error","request":{"name":"fabric_fetch","arguments":{"id":"writer-once","not_a_field":true}}}
