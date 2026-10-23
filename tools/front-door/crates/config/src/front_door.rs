@@ -108,10 +108,10 @@ pub fn source_digest(krate: &Path) -> Result<String> {
         }
         let mut rust_files = vec![];
         files(&package, &mut rust_files, true)?;
-        for path in rust_files
-            .into_iter()
-            .filter(|path| path.extension().is_some_and(|e| e == "rs"))
-        {
+        for path in rust_files.into_iter().filter(|path| {
+            path.file_name()
+                .is_some_and(|n| n.as_encoded_bytes().ends_with(b".rs"))
+        }) {
             let relative = path
                 .strip_prefix(&package)
                 .map_err(|e| invalid(e.to_string()))?;
@@ -349,6 +349,8 @@ mod tests {
         fs::create_dir_all(root.join("tests/nested")).unwrap();
         fs::write(root.join("tests/nested/case.rs"), "case").unwrap();
         fs::write(root.join("tests/notes.txt"), "ignored").unwrap();
+        fs::write(root.join("tests/.rs"), "hidden Rust target").unwrap();
+        fs::write(root.join("src/.rs"), "hidden Rust source").unwrap();
         fs::create_dir_all(root.join("crates/member/src")).unwrap();
         fs::write(root.join("crates/member/Cargo.toml"), "member manifest").unwrap();
         fs::write(root.join("crates/member/src/lib.rs"), "member source").unwrap();
@@ -829,5 +831,34 @@ mod host_tests {
         let result = run(&command, &mut host);
         assert_eq!(result.exit_code, 3);
         assert!(result.stderr.ends_with(&format!("{RUSTUP_FIX}\n")));
+    }
+}
+
+#[cfg(test)]
+mod dot_source_tests {
+    use super::*;
+    #[test]
+    fn literal_dot_rs_is_a_rust_glob_input_even_inside_src() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        fs::create_dir(root.join("src")).unwrap();
+        fs::write(root.join("Cargo.toml"), "manifest").unwrap();
+        let before = source_digest(root).unwrap();
+        fs::write(root.join("src/.rs"), "first").unwrap();
+        let first = source_digest(root).unwrap();
+        assert_ne!(first, before);
+        fs::write(root.join("src/.rs"), "second").unwrap();
+        assert_ne!(source_digest(root).unwrap(), first);
+        let Some(expected) = crate::oracle::python(
+            "scripts/lib/front_door_build.py",
+            "print(m.source_digest(p))",
+            root,
+        ) else {
+            return;
+        };
+        assert_eq!(
+            format!("{}\n", source_digest(root).unwrap()).as_bytes(),
+            expected
+        );
     }
 }
