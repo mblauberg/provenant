@@ -245,3 +245,13 @@ pub use child::ChildWaitError;
 pub(crate) use child::{anonymous_spool, OwnedChild};
 
 pub mod process;
+
+pub(crate) mod fs;
+
+/// Named platform errno values; consumers must not import libc.
+pub mod errno {
+    pub use libc::{
+        EACCES, EEXIST, EINTR, EINVAL, EISDIR, ELOOP, ENOENT, ENOEXEC, ENOSYS, ENOTDIR, ENOTSUP,
+        EOPNOTSUPP, EPERM, EXDEV,
+    };
+}
