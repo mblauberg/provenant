@@ -1,5 +1,5 @@
-# Partial units are not listed; ready.py treats every line here as done.
 # Units fully ported to Rust and merged on main, one id per line.
+# Partial units are not listed; ready.py treats every line here as done.
 runtime/fabric/src/batch-execution.ts#interface
 runtime/fabric/src/execution.ts#interface
 runtime/fabric/src/identity.ts#unit-01
@@ -9,15 +9,17 @@ runtime/fabric/src/success-status.ts#unit-01
 scripts/lane_safety_guard.py#unit-01
 scripts/lib/projection.py#unit-01
 scripts/lib/roots.py#unit-01
-scripts/model_route.py#interface
 scripts/model_route_live.py#interface
+scripts/model_route_live.py#unit-02
+scripts/model_route_pools.py#unit-03
+scripts/model_route.py#interface
 scripts/provider_quota.py#interface
 scripts/quota_display.py#unit-01
 scripts/quota_display.py#unit-02
 scripts/quota_schedule.py#unit-01
-scripts/telemetry.py#interface
 scripts/telemetry_hosts.py#interface
 scripts/telemetry_report.py#unit-02
+scripts/telemetry.py#interface
 skills/_shared/excludes.py#unit-01
 skills/_shared/review_ladder.py#unit-01
 skills/_shared/review_panel.py#unit-01

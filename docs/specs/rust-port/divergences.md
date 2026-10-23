@@ -1195,6 +1195,32 @@ The source revision above is unchanged; CLI rendering remains an edge task.
   until the `provenant-records` ordered Python-value codec and
   `provenant-core` repr helper are available to this crate.
 
+## RP-ROUTING-2: continued routing parity and remaining boundaries
+
+- Rulebook v4; source/policy oracle revision
+  `7475ff01e437ec51c760b852516c21a5281cf9c6`; author route
+  `codex/gpt-6.1-sol@high`. Candidate: the port/routing-2 PR head.
+- Class: `bug` (fixed): batch-1 preference normalization converted truthy
+  non-string route statuses to `hard_route_rejected`; Python uses `str(status)`.
+  The candidate differentials cover booleans, integers, lists, empty values,
+  duplicate candidate IDs, availability observations and hard-admissibility.
+- Class: `bug` (fixed): batch-1 catalogue override validation swallowed invalid
+  model-pattern regex errors and returned false. The library now propagates a
+  typed CatalogError, with a dedicated malformed-pattern regression.
+- No new intentional divergence. RP-130402 remains open: both the catalogue
+  and capability loader remain partial for multi-adapter family aliases.
+  Partial preference ingress and pool migration still need Python dictionary
+  order/equality work; live suffix-level ingestion must preserve source order
+  when suffixes are shared. These are not accepted behavior changes.
+- Exact listing-byte differentials cover Unicode padding, null effort,
+  cooling ordering, hidden counts, synonym ordering and quota caveats. Live
+  identity, inherited privacy, fallback consent, capability/listing failures,
+  ISO offsets/microseconds and close-match decisions compare against imported
+  Python modules with isolated state and explicit clocks. No source-text exec
+  or eval is used in fixture generators.
+- The crate stays inert. PORT_STATUS.md lists full, partial/skipped units,
+  pending core/records helpers and integration-only judge gaps. No unit with
+  an acknowledged remaining behavior is listed as fully ported.
 ## RP-CLI2-01: typed cleanup and PID integer bounds
 
 - Class: `improvement`, authorised by PORTING.md v4 R4's i64/u64 rule.
