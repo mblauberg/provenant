@@ -24,6 +24,7 @@ pub mod idle_pause;
 pub mod lane_exit;
 pub mod lane_launch;
 pub mod provider_observer;
+pub mod reference_evaluation;
 pub mod review_panel;
 pub mod style_lint;
 pub mod writer_lease;
