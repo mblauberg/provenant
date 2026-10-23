@@ -187,9 +187,9 @@ mod tests {
             "20261023T120000.123456Z",
             "2026-10-23T12:00:00.123456999999Z",
             "2026-10-23T12:00:00,123456999Z",
-            // Sub-second UTC offsets (+00:00:00.500000) are left out: CPython
-            // 3.14 patch releases disagree on them, so no oracle answer is stable.
-            "2026-10-23T12:00:00-00:00:00.500000",
+            // Sub-second UTC offsets (00:00:00.500000 either sign) are left out:
+            // CPython 3.14 patch releases disagree on them, so no oracle answer
+            // is stable.
             "2026-10-23T12:00:00+05:30",
             "2026-10-23T12:00:00+01:02.500000",
             "2026-10-23T12:00:00+01.500000",
