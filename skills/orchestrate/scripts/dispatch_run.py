@@ -30,7 +30,7 @@ import tempfile
 import uuid
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, NoReturn
+from typing import Any, NamedTuple, NoReturn
 
 # The shared library sits one level above this skill. Resolving it from the
 # skill rather than from a repository root two levels further up keeps the
@@ -914,7 +914,123 @@ def prepare_resume(args):
     receipt.update(status="active",closed_at=None)
     run_records.write_owned(args.run_dir,args.run_dir/"RUN_RECEIPT.json",json.dumps(receipt,indent=2)+"\n")
 
-def _dispatch(args: argparse.Namespace, custody=None) -> int:
+class _DispatchPlan(NamedTuple):
+    owner_started_ms: Any
+    run_dir: Path
+    workspace: Path
+    workspace_observation: dict[str, Any]
+    run_receipt: dict[str, Any]
+    batch_dir: Path | None
+    original_prompt: str | None
+    secret_scan_result: secret_scan.ScanResult
+    git_evidence_requested: bool
+    git_evidence_identity: dict[str, Any] | None
+    retry_of: str | None
+    attempt_number: int
+    attempt_id: str
+    attempt_dir: Path
+    prompt_path: Path
+    result_path: Path
+    adapter_path: Path
+    stderr_path: Path
+    evidence_dir: Path | None
+    evidence_path: Path | None
+    git_evidence_digest: str | None
+    command: list[str]
+    requested_route: dict[str, Any]
+    worktree_lease: Any
+
+class _DispatchLaunch(NamedTuple):
+    started_at: str
+    started: float
+    observed_exit: bool
+    exit_code: int | None
+    process_error: str
+    process_errno: int | None
+    process: subprocess.Popen[Any] | None
+    active: dict[str, Any] | None
+    old_handlers: dict[int, Any]
+
+class _DispatchSettlement(NamedTuple):
+    finalize_started: float
+    adapter: dict[str, Any]
+    status: str
+    record: dict[str, Any]
+    checkpoint_written: bool
+
+def classify_attempt(
+    *,
+    process_error,
+    process_errno,
+    process,
+    observed_exit,
+    result_invalid,
+    adapter_status,
+    deadline_reached,
+    completed_cleanly,
+    receipt_error,
+    result_integrity_error,
+    terminal_envelope_error,
+    adapter,
+    question,
+    exit_code,
+    result_nonempty,
+) -> tuple[str, str, dict[str, Any] | None]:
+    if process_error in {"memory_unavailable", "host_disk_full"}:
+        status = "failed"
+        outcome = process_error
+    elif process_error == "timeout":
+        status = "timed_out"
+        outcome = "timeout"
+    elif process_error == "cancelled":
+        status = "cancelled"
+        outcome = "cancelled"
+    elif not observed_exit:
+        status = "failed"
+        outcome = "host_disk_full" if process_errno == errno.ENOSPC else "process_spawn_error" if process is None else "provider_lost"
+    elif result_invalid:
+        status = "failed"
+        outcome = "result_invalid_path"
+    elif adapter_status in {"timeout","timed_out"}:
+        # The provider reached its own deadline first, which is what the smaller
+        # provider timeout is for.
+        status = "timed_out"
+        outcome = "provider_timeout"
+    elif deadline_reached and not completed_cleanly:
+        status = "timed_out"
+        outcome = "deadline_exceeded"
+    elif adapter_status in {"ok", "quarantined"} and receipt_error:
+        status = "failed"
+        outcome = "adapter_receipt_invalid"
+    elif result_integrity_error:
+        status = "failed"
+        outcome = "result_integrity_error"
+    elif terminal_envelope_error:
+        status = "failed"
+        outcome = "terminal_envelope_invalid"
+    elif adapter_status == "input_required":
+        question={"code":"needs_input","prompt":adapter.get("question") or "Input required"}
+        status="blocked"
+        outcome="question"
+    elif question is not None:
+        status = "blocked"
+        outcome = "question"
+    elif adapter_status == "quarantined" and adapter.get("exit") == 0 and result_nonempty:
+        status = "quarantined"
+        outcome = "quarantined"
+    elif exit_code == 0 and adapter_status == "ok" and result_nonempty:
+        status = "ok"
+        outcome = "ok"
+    elif exit_code == 0 and adapter_status == "ok":
+        status = "failed"
+        outcome = "result_missing_or_empty"
+    else:
+        status = "failed"
+        outcome = adapter_status or ("adapter_exit" if exit_code else "empty_result")
+
+    return status, outcome, question
+
+def _plan_dispatch(args: argparse.Namespace, custody=None) -> int | _DispatchPlan:
     args._last_plan={}
     args._last_row=None
     args._attempt_scopes={}
@@ -1176,6 +1292,52 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
         except hosts.HostError as exc:
             writer_lease.release_worktree_lease(worktree_lease)
             return fail(run_dir, exc.code, str(exc))
+    return _DispatchPlan(
+        owner_started_ms=owner_started_ms,
+        run_dir=run_dir,
+        workspace=workspace,
+        workspace_observation=workspace_observation,
+        run_receipt=run_receipt,
+        batch_dir=batch_dir,
+        original_prompt=original_prompt,
+        secret_scan_result=secret_scan_result,
+        git_evidence_requested=git_evidence_requested,
+        git_evidence_identity=git_evidence_identity,
+        retry_of=retry_of,
+        attempt_number=attempt_number,
+        attempt_id=attempt_id,
+        attempt_dir=attempt_dir,
+        prompt_path=prompt_path,
+        result_path=result_path,
+        adapter_path=adapter_path,
+        stderr_path=stderr_path,
+        evidence_dir=evidence_dir,
+        evidence_path=evidence_path,
+        git_evidence_digest=git_evidence_digest if git_evidence_identity is not None else None,
+        command=command,
+        requested_route=requested_route,
+        worktree_lease=worktree_lease,
+    )
+
+def _launch_dispatch(args: argparse.Namespace, *, plan: _DispatchPlan) -> _DispatchLaunch:
+    adapter_path = plan.adapter_path
+    attempt_dir = plan.attempt_dir
+    attempt_number = plan.attempt_number
+    batch_dir = plan.batch_dir
+    command = plan.command
+    evidence_dir = plan.evidence_dir
+    git_evidence_requested = plan.git_evidence_requested
+    original_prompt = plan.original_prompt
+    owner_started_ms = plan.owner_started_ms
+    prompt_path = plan.prompt_path
+    requested_route = plan.requested_route
+    result_path = plan.result_path
+    run_dir = plan.run_dir
+    run_receipt = plan.run_receipt
+    stderr_path = plan.stderr_path
+    workspace = plan.workspace
+    workspace_observation = plan.workspace_observation
+    worktree_lease = plan.worktree_lease
     started_at = now()
     started = time.monotonic()
     observed_exit = False
@@ -1673,7 +1835,44 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
             writer_lease.release_worktree_lease(worktree_lease)
             if provider_temporary is not None:
                 provider_temporary.cleanup()
+    return _DispatchLaunch(
+        started_at=started_at,
+        started=started,
+        observed_exit=observed_exit,
+        exit_code=exit_code,
+        process_error=process_error,
+        process_errno=process_errno,
+        process=process,
+        active=active,
+        old_handlers=old_handlers,
+    )
 
+def _settle_dispatch(args: argparse.Namespace, *, plan: _DispatchPlan, launched: _DispatchLaunch) -> _DispatchSettlement:
+    adapter_path = plan.adapter_path
+    attempt_dir = plan.attempt_dir
+    attempt_id = plan.attempt_id
+    attempt_number = plan.attempt_number
+    command = plan.command
+    evidence_path = plan.evidence_path
+    exit_code = launched.exit_code
+    git_evidence_digest = plan.git_evidence_digest
+    git_evidence_identity = plan.git_evidence_identity
+    observed_exit = launched.observed_exit
+    original_prompt = plan.original_prompt
+    process = launched.process
+    process_errno = launched.process_errno
+    process_error = launched.process_error
+    prompt_path = plan.prompt_path
+    requested_route = plan.requested_route
+    result_path = plan.result_path
+    retry_of = plan.retry_of
+    run_dir = plan.run_dir
+    secret_scan_result = plan.secret_scan_result
+    started = launched.started
+    started_at = launched.started_at
+    stderr_path = plan.stderr_path
+    workspace = plan.workspace
+    workspace_observation = plan.workspace_observation
     finalize_started = time.monotonic()
     finished_at = now()
     duration_seconds = round(time.monotonic() - started, 6)
@@ -1728,57 +1927,23 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
         and not result_integrity_error and not terminal_envelope_error
     )
     deadline_reached = duration_seconds >= dispatch_preflight.provider_timeout_seconds(args.timeout_seconds)
-    if process_error in {"memory_unavailable", "host_disk_full"}:
-        status = "failed"
-        outcome = process_error
-    elif process_error == "timeout":
-        status = "timed_out"
-        outcome = "timeout"
-    elif process_error == "cancelled":
-        status = "cancelled"
-        outcome = "cancelled"
-    elif not observed_exit:
-        status = "failed"
-        outcome = "host_disk_full" if process_errno == errno.ENOSPC else "process_spawn_error" if process is None else "provider_lost"
-    elif result_invalid:
-        status = "failed"
-        outcome = "result_invalid_path"
-    elif adapter_status in {"timeout","timed_out"}:
-        # The provider reached its own deadline first, which is what the smaller
-        # provider timeout is for.
-        status = "timed_out"
-        outcome = "provider_timeout"
-    elif deadline_reached and not completed_cleanly:
-        status = "timed_out"
-        outcome = "deadline_exceeded"
-    elif adapter_status in {"ok", "quarantined"} and receipt_error:
-        status = "failed"
-        outcome = "adapter_receipt_invalid"
-    elif result_integrity_error:
-        status = "failed"
-        outcome = "result_integrity_error"
-    elif terminal_envelope_error:
-        status = "failed"
-        outcome = "terminal_envelope_invalid"
-    elif adapter_status == "input_required":
-        question={"code":"needs_input","prompt":adapter.get("question") or "Input required"}
-        status="blocked"
-        outcome="question"
-    elif question is not None:
-        status = "blocked"
-        outcome = "question"
-    elif adapter_status == "quarantined" and adapter.get("exit") == 0 and result_nonempty:
-        status = "quarantined"
-        outcome = "quarantined"
-    elif exit_code == 0 and adapter_status == "ok" and result_nonempty:
-        status = "ok"
-        outcome = "ok"
-    elif exit_code == 0 and adapter_status == "ok":
-        status = "failed"
-        outcome = "result_missing_or_empty"
-    else:
-        status = "failed"
-        outcome = adapter_status or ("adapter_exit" if exit_code else "empty_result")
+    status, outcome, question = classify_attempt(
+        process_error=process_error,
+        process_errno=process_errno,
+        process=process,
+        observed_exit=observed_exit,
+        result_invalid=result_invalid,
+        adapter_status=adapter_status,
+        deadline_reached=deadline_reached,
+        completed_cleanly=completed_cleanly,
+        receipt_error=receipt_error,
+        result_integrity_error=result_integrity_error,
+        terminal_envelope_error=terminal_envelope_error,
+        adapter=adapter,
+        question=question,
+        exit_code=exit_code,
+        result_nonempty=result_nonempty,
+    )
 
     try:
         preflight_route = json.loads(os.environ.get("PROVENANT_PREFLIGHT_ROUTES", "{}"))[args.task_id]
@@ -1864,6 +2029,25 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
             args._bookkeeping_warnings.append("checkpoint unavailable: " + str(exc))
         else:
             checkpoint_written = True
+    return _DispatchSettlement(
+        finalize_started=finalize_started,
+        adapter=adapter,
+        status=status,
+        record=record,
+        checkpoint_written=checkpoint_written,
+    )
+
+def _publish_dispatch(args: argparse.Namespace, custody=None, *, plan: _DispatchPlan, launched: _DispatchLaunch, settled: _DispatchSettlement) -> int:
+    active = launched.active
+    adapter = settled.adapter
+    attempt_dir = plan.attempt_dir
+    attempt_number = plan.attempt_number
+    checkpoint_written = settled.checkpoint_written
+    finalize_started = settled.finalize_started
+    old_handlers = launched.old_handlers
+    record = settled.record
+    run_dir = plan.run_dir
+    status = settled.status
     attempt_path = attempt_dir / "attempt.json"
     record["attempt_path"] = run_records.relative_path(run_dir, attempt_path)
     digest_path = attempt_dir / "attempt.sha256"
@@ -1923,6 +2107,15 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
     # The MCP front door consumes the canonical attempt as its terminal row.
     print(json.dumps(row if os.environ.get("PROVENANT_RUN_TOKEN") and not args.batch_child else output_record, sort_keys=True))
     return 0 if status == "ok" and not manifest_error else 1
+
+def _dispatch(args: argparse.Namespace, custody=None) -> int:
+    plan = _plan_dispatch(args, custody)
+    if isinstance(plan, int):
+        return plan
+    launched = _launch_dispatch(args, plan=plan)
+    settled = _settle_dispatch(args, plan=plan, launched=launched)
+    return _publish_dispatch(args, custody, plan=plan, launched=launched, settled=settled)
+
 
 def close_mcp_run(run_dir: Path) -> None:
     """Close execution custody only; this is not a delivery/assurance final gate."""
