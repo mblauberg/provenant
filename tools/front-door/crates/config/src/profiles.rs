@@ -987,3 +987,270 @@ mod tests {
         );
     }
 }
+
+#[derive(Debug, Clone)]
+pub struct Assignments {
+    pub(crate) values: Json,
+}
+impl Serialize for Assignments {
+    fn serialize<S: Serializer>(&self, s: S) -> std::result::Result<S::Ok, S::Error> {
+        self.values.serialize(s)
+    }
+}
+impl Assignments {
+    pub fn iter(&self) -> impl Iterator<Item = (&str, Value)> {
+        self.values
+            .object()
+            .unwrap_or(&[])
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.value()))
+    }
+    pub fn dispatch_layer(&self) -> Layer {
+        Layer {
+            origin: "dispatch".into(),
+            document: Json::Object(vec![("knobs".into(), self.values.clone())]),
+        }
+    }
+}
+pub fn parse_assignments(
+    registry: &Registry,
+    assignments: &[String],
+    origin: &str,
+) -> Result<Assignments> {
+    let mut values = Json::default();
+    for item in assignments {
+        let (name, raw) = item
+            .split_once('=')
+            .ok_or_else(|| invalid(format!("{origin} {}: pass NAME=VALUE", python_repr(item))))?;
+        let name = python_strip(name);
+        values.set(name, Json::from_value(registry.parse(name, raw, origin)?))?;
+    }
+    Ok(Assignments { values })
+}
+
+/// Instance roots, environment and the host's home observations are caller-owned.
+/// Routing may repoint AGENT_FABRIC_INSTANCE_ROOT; PROFILE_ROOT_ENV stays pinned.
+pub struct Context<'a> {
+    pub cwd: &'a Path,
+    pub environment: &'a BTreeMap<String, String>,
+    pub homes: &'a provenant_core::paths::Homes,
+}
+pub fn current(
+    registry: &Registry,
+    context: &Context<'_>,
+    task_class: Option<&str>,
+    risk_tier: Option<&str>,
+    dispatch: Option<&Assignments>,
+) -> Result<Resolution> {
+    let mut layers = vec![
+        registry.read_layer(&user_path(context.environment, context.homes)?, "user")?,
+        registry.read_layer(&project_path(context.cwd)?, "project")?,
+        registry.env_layer(context.environment)?,
+    ];
+    if let Some(assignments) = dispatch {
+        layers.push(assignments.dispatch_layer());
+    }
+    let risk = risk_tier.filter(|s| !s.is_empty()).or_else(|| {
+        context
+            .environment
+            .get(RISK_TIER_ENV)
+            .map(String::as_str)
+            .filter(|s| !s.is_empty())
+    });
+    registry.resolve(task_class.filter(|s| !s.is_empty()), risk, &layers)
+}
+pub fn lenient(
+    registry: &Registry,
+    context: &Context<'_>,
+    task_class: Option<&str>,
+    risk_tier: Option<&str>,
+    dispatch: Option<&Assignments>,
+) -> (Option<Resolution>, Option<String>) {
+    match current(registry, context, task_class, risk_tier, dispatch) {
+        Ok(resolution) => (Some(resolution), None),
+        Err(error) => (None, Some(format!("harness profile ignored: {error}"))),
+    }
+}
+pub fn value(
+    registry: &Registry,
+    context: &Context<'_>,
+    name: &str,
+    fallback: Value,
+    task_class: Option<&str>,
+    risk_tier: Option<&str>,
+    dispatch: Option<&Assignments>,
+) -> Value {
+    lenient(registry, context, task_class, risk_tier, dispatch)
+        .0
+        .and_then(|r| r.knob(name))
+        .unwrap_or(fallback)
+}
+
+pub(crate) fn edit_ordered(
+    registry: &Registry,
+    path: &Path,
+    change: impl FnOnce(&mut Json) -> Result<()>,
+) -> Result<Json> {
+    let mut document = match read(path) {
+        Err(crate::Error::Read { source, .. }) if source.kind() == std::io::ErrorKind::NotFound => {
+            Json::Object(vec![(
+                "schema_version".into(),
+                Json::from_value(Value::from(1)),
+            )])
+        }
+        other => other?,
+    };
+    let origin = path.display().to_string();
+    registry.check_layer_json(&document, &origin, true)?;
+    change(&mut document)?;
+    if let Some(Json::Object(classes)) = document.get("task_classes").cloned() {
+        let mut cleaned = vec![];
+        for (name, mut part) in classes {
+            if !part["knobs"].truth() {
+                part.remove("knobs");
+            }
+            if part.truth() {
+                cleaned.push((name, part));
+            }
+        }
+        if cleaned.is_empty() {
+            document.remove("task_classes");
+        } else {
+            document.set("task_classes", Json::Object(cleaned))?;
+        }
+    }
+    registry.check_layer_json(&document, &origin, true)?;
+    let bytes = format!("{}\n", ordered::dumps(&document, true, true)?).into_bytes();
+    crate::filesystem::atomic_write(path, ".harness-profile.", &bytes)?;
+    Ok(document)
+}
+pub fn edit_file(
+    registry: &Registry,
+    path: &Path,
+    change: impl FnOnce(&mut Value) -> Result<()>,
+) -> Result<Value> {
+    Ok(edit_ordered(registry, path, |document| {
+        let mut value = document.value();
+        change(&mut value)?;
+        *document = Json::from_value(value);
+        Ok(())
+    })?
+    .value())
+}
+
+#[cfg(test)]
+mod editing_tests {
+    use super::*;
+    fn root() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../..")
+            .canonicalize()
+            .unwrap()
+    }
+    #[test]
+    fn assignments_keep_first_insertion_and_last_value() {
+        let registry = Registry::load(&root()).unwrap();
+        let items = [
+            " effort.shift =-1",
+            "council.junior_size=2",
+            "effort.shift=0",
+        ]
+        .map(str::to_owned);
+        let parsed = parse_assignments(&registry, &items, "set").unwrap();
+        assert_eq!(
+            parsed.iter().collect::<Vec<_>>(),
+            [
+                ("effort.shift", Value::from(0)),
+                ("council.junior_size", Value::from(2))
+            ]
+        );
+        assert!(
+            parse_assignments(&registry, &["effort.shift".into()], "--knob")
+                .unwrap_err()
+                .to_string()
+                .contains("pass NAME=VALUE")
+        );
+    }
+    #[test]
+    fn current_pins_profile_root_applies_dispatch_and_lenient_falls_back() {
+        let registry = Registry::load(&root()).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let homes = provenant_core::paths::Homes {
+            current: Some(dir.path().into()),
+            ..Default::default()
+        };
+        let environment =
+            BTreeMap::from([(PROFILE_ROOT_ENV.into(), dir.path().display().to_string())]);
+        let context = Context {
+            cwd: dir.path(),
+            environment: &environment,
+            homes: &homes,
+        };
+        let dispatch =
+            parse_assignments(&registry, &["lanes.max_concurrency=3".into()], "--knob").unwrap();
+        assert_eq!(
+            current(&registry, &context, None, None, Some(&dispatch))
+                .unwrap()
+                .knob("lanes.max_concurrency"),
+            Some(Value::from(3))
+        );
+        fs::create_dir_all(dir.path().join("config")).unwrap();
+        fs::write(dir.path().join(USER_FILE), "[]").unwrap();
+        let (resolved, error) = lenient(&registry, &context, None, None, None);
+        assert!(resolved.is_none());
+        assert!(error.unwrap().starts_with("harness profile ignored:"));
+        assert_eq!(
+            value(
+                &registry,
+                &context,
+                "lanes.max_concurrency",
+                Value::from(99),
+                None,
+                None,
+                None
+            ),
+            Value::from(99)
+        );
+    }
+    #[test]
+    fn edit_is_atomic_validates_before_mutation_and_cleans_empty_class_parts() {
+        let registry = Registry::load(&root()).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("profile");
+        let value=edit_file(&registry,&path,|v|{v["preset"]="economy".into();v["task_classes"]=serde_json::json!({"review":{"knobs":{}},"legwork":{"preset":"rigorous","knobs":{}}});Ok(())}).unwrap();
+        assert_eq!(
+            value,
+            serde_json::json!({"schema_version":1,"preset":"economy","task_classes":{"legwork":{"preset":"rigorous"}}})
+        );
+        let before = fs::read(&path).unwrap();
+        assert!(edit_file(&registry, &path, |v| {
+            v["knobs"] = serde_json::json!({"effort.shift":99});
+            Ok(())
+        })
+        .is_err());
+        assert_eq!(fs::read(&path).unwrap(), before);
+        fs::write(&path, "[]").unwrap();
+        let mut called = false;
+        assert!(edit_file(&registry, &path, |_| {
+            called = true;
+            Ok(())
+        })
+        .is_err());
+        assert!(!called);
+    }
+    #[test]
+    fn edit_bytes_and_cleanup_match_python() {
+        let registry = Registry::load(&root()).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("profile");
+        let body=format!("r=m.load_registry(Path({:?}))\ndef change(d):\n d['preset']='economy'\n d['task_classes']={{'review':{{'knobs':{{}}}},'legwork':{{'preset':'rigorous','knobs':{{}}}}}}\nm.edit_file(r,p,change)\nprint(p.read_text(),end='')",root().to_str().unwrap());
+        let Some(expected) =
+            crate::oracle::python("skills/_shared/harness_profile.py", &body, &path)
+        else {
+            return;
+        };
+        fs::remove_file(&path).unwrap();
+        edit_file(&registry,&path,|v|{v["preset"]="economy".into();v["task_classes"]=serde_json::json!({"review":{"knobs":{}},"legwork":{"preset":"rigorous","knobs":{}}});Ok(())}).unwrap();
+        assert_eq!(fs::read(&path).unwrap(), expected);
+    }
+}
