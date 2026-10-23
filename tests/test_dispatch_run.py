@@ -7212,3 +7212,6 @@ def test_terminal_receipt_persists_model_check_and_changes(tmp_path, check):
     assert saved['paths']['watchdog'] == 'tasks/task-1/attempt-001/watchdog.json'
     for key, value in fields.items():
         assert saved[key] == value
+    if check == "invalid":
+        assert saved["model_check"] == "invalid"
+        assert saved["model_check_detail"] == "listing evidence"

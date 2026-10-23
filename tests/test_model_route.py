@@ -853,7 +853,12 @@ def test_routing_discovery_failed_refresh_preserves_last_good_listing(tmp_path, 
         assert code == 0 and record["models"] == ["last-good"] and record["refresh_failed"]
     else:
         assert code == 1 and record["status"] == "probe_unavailable" and not record.get("models")
-    assert json.loads(state.read_text()) == previous
+    cached = json.loads(state.read_text())
+    if adapter == "opencode" and cache_failures and failure == "listing":
+        assert cached[adapter].pop("refresh_failed_at", None)
+        assert cached[adapter] == previous[adapter]
+    else:
+        assert cached == previous
 
 
 def test_discovery_keeps_colon_variants_beside_their_base_id():
@@ -1086,6 +1091,18 @@ def test_cursor_plain_text_model_probe_records_model_ids(tmp_path):
                                  "AGENT_FABRIC_STATE_ROOT": str(tmp_path)})
     assert result.returncode == 0, result.stderr
     assert json.loads(result.stdout)["models"] == ["auto", "grok-4.7", "composer-2.5"]
+
+
+def test_cursor_plain_text_model_probe_ignores_reworded_footer(tmp_path):
+    router = load_router()
+    listing = (ROOT / "tests/fixtures/model-listings/cursor-models.txt").read_text()
+    listing = listing.replace(
+        "Tip: use --model <id>",
+        "Choose one of these models with the --model option",
+    )
+    assert router._listed_models(listing, "cursor") == [
+        "auto", "gpt-5.3-codex-low", "gpt-5.3-codex-low-fast",
+    ]
 
 
 def test_codex_json_model_map_probe_records_ids(tmp_path):
@@ -5035,6 +5052,62 @@ def test_failed_opencode_refresh_keeps_the_last_good_listing(tmp_path, monkeypat
     assert code == 0 and failed["models"] == ["a/one", "a/two"] and failed["refresh_failed"]
     cached, code = router.probe_capabilities("opencode", str(cli), listing_only=True)
     assert code == 0 and cached["cache_hit"] and cached["models"] == ["a/one", "a/two"]
+
+
+def test_opencode_resolve_caches_a_timed_out_refresh(tmp_path, monkeypatch):
+    router = load_router()
+    monkeypatch.setenv("AGENT_FABRIC_STATE_ROOT", str(tmp_path))
+    monkeypatch.setenv("PATH", f"{tmp_path}:/usr/bin:/bin")
+    cli = tmp_path / "opencode"
+    cli.write_text("#!/bin/sh\nif [ \"$1\" = --version ]; then echo 2.0.30; exit; fi\n"
+                   "if [ \"$1\" = --help ]; then exit; fi\nprintf 'a/one\\na/two\\n'\n")
+    cli.chmod(0o755)
+    record, code = router.probe_capabilities("opencode", str(cli), listing_only=True)
+    assert code == 0 and record["models"] == ["a/one", "a/two"]
+
+    original_run = router.subprocess.run
+    refresh_calls = []
+
+    def run(command, *args, **kwargs):
+        if command[-1:] == ["models"]:
+            refresh_calls.append(command)
+            raise router.subprocess.TimeoutExpired(command, kwargs.get("timeout"))
+        return original_run(command, *args, **kwargs)
+
+    monkeypatch.setattr(router.subprocess, "run", run)
+    for _ in range(2):
+        with redirect_stdout(io.StringIO()):
+            router.main(["resolve", "--adapter", "opencode", "--role", "worker",
+                         "--model", "missing-model"])
+    assert len(refresh_calls) == 1
+
+
+def test_failed_opencode_refresh_does_not_replace_a_newer_listing(tmp_path, monkeypatch):
+    router = load_router()
+    monkeypatch.setenv("AGENT_FABRIC_STATE_ROOT", str(tmp_path))
+    cli = tmp_path / "opencode"
+    cli.write_text("#!/bin/sh\nif [ \"$1\" = --version ]; then echo 2.0.30; exit; fi\n"
+                   "if [ \"$1\" = --help ]; then exit; fi\nprintf 'a/one\\n'\n")
+    cli.chmod(0o755)
+    original, code = router.probe_capabilities("opencode", str(cli), listing_only=True)
+    assert code == 0 and original["models"] == ["a/one"]
+    cache_path = tmp_path / "capabilities.json"
+    original_run = router.subprocess.run
+
+    def run(command, *args, **kwargs):
+        if command[-1:] == ["models"]:
+            cache = json.loads(cache_path.read_text())
+            cache["opencode"].update(
+                models=["a/new"], observed_at=(datetime.now(timezone.utc) + timedelta(seconds=1)).isoformat(),
+            )
+            cache_path.write_text(json.dumps(cache))
+            raise router.subprocess.TimeoutExpired(command, kwargs.get("timeout"))
+        return original_run(command, *args, **kwargs)
+
+    monkeypatch.setattr(router.subprocess, "run", run)
+    refreshed, code = router.probe_capabilities("opencode", str(cli), listing_only=True, refresh=True)
+    assert code == 0 and refreshed["models"] == ["a/new"]
+    assert json.loads(cache_path.read_text())["opencode"]["models"] == ["a/new"]
 
 
 def test_opencode_refresh_is_skipped_when_the_shared_budget_is_nearly_spent(monkeypatch):

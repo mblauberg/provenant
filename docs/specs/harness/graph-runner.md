@@ -23,10 +23,10 @@ goes through the existing dispatch owner.
 | Need | Existing owner reused | What the runner adds |
 |---|---|---|
 | Start a provider process | `dispatchConfiguredProvider` (`execution.ts`): route normalisation, workspace boundaries, `dispatch_run.py` | Calls it in-process, once per attempt, with a hashed `task_id` and an `onLaunch` observer |
-| Owner survival | `hostOwnersInThemselves()` (`execution.ts:106`), as the CLI already does | Called at graph-owner start, so orphan reaping (`run-registry.ts:392`) never stops a lane because the graph owner died |
+| Owner survival | `hostOwnersInThemselves()` in `execution.ts`, as the CLI already does | Called at graph-owner start, so `reapOrphanedRuns` in `process-identity.ts` never stops a lane because the graph owner died |
 | Observe, cancel | Run registry liveness (`findRecordedRun`, `runProcessAlive`, `processMatches`), `cancelConfiguredRun`, `cancel.request` | Decides when. Never uses `observeOwner`, which needs the in-process child handle |
 | Lane listing and waits | Run registry, `provenant lanes`, `lanes --wait` | Nothing: attempts are ordinary lanes |
-| Artefact retention | `pruneDispatchRuns` skips a run directory holding `KEEP` (`run-registry.ts:463`) | Pins every referenced run until the graph is terminal |
+| Artefact retention | `pruneDispatchRuns` in `run-registry.ts` skips a run directory holding `KEEP` | Pins every referenced run until the graph is terminal |
 | Receipts and route health | `fabric_records.py` attempt receipts | One graph-node receipt that references them |
 | Liveness and exit fence | [worker-liveness](../../../skills/orchestrate/references/worker-liveness.md) | Extends the fence to gate processes |
 | Worktree writer lease | `acquire_worktree_lease` (`dispatch_run.py:900`) | A reservation spanning the attempt and its gates, which dispatch also honours |
@@ -201,8 +201,8 @@ wrapper run the argv as a child in its group. If the owner dies first, the
 wrapper reads EOF and exits having run nothing, so no gate runs unrecorded. A
 gate without a recorded exit status never counts as passed.
 
-**Group termination** (slice-1 code requirement). `signalRecordedProcess`
-signals only the PID (`run-registry.ts:266`), so the registry gains
+**Group termination** (slice-1 code requirement). `signalRecordedProcess` in
+`process-identity.ts` signals only the PID, so the registry gains
 `signalRecordedGroup`, which signals `-pgid` only while the group is
 attributable: the leader matches its recorded start time, or the leader has
 exited and no live process has pid equal to the pgid. SIGTERM, then SIGKILL

@@ -725,7 +725,7 @@ def _listed_models(raw: str, adapter: str | None = None) -> list[str]:
         # IDs alone, or an ID followed by a display-name column.
         match = re.fullmatch(r"(?:[-*]\s+)?([A-Za-z][A-Za-z0-9._/~-]*(?::[A-Za-z0-9._~-]+)*)(?:(?:\t| {2,}| - )\S.*)?", line)
         if not match or (match[1] != "auto" and not re.search(r"[-/.\d]", match[1])):
-            return []
+            continue
         if adapter == "opencode" and "/" not in match[1]:
             return []
         listed.append(match[1])
@@ -764,12 +764,23 @@ def probe_capabilities(adapter: str, executable: str, deadline: float | None = N
     previous = cache.get(adapter)
     executable_path = str(Path(executable).resolve())
     last_good = None
+    refresh_failure_cached = False
+    cache_superseded = False
     if (cache_failures and (listing_only or adapter == "opencode")
             and isinstance(previous, dict) and previous.get("listing_format") == 1
             and previous.get("executable") == executable_path
             and previous.get("status") != "probe_unavailable" and previous.get("models")):
         last_good = {**previous, "cache_hit": False,
                      "refresh_failed": "Model list refresh failed; using the last good listing"}
+    if refresh and adapter == "opencode" and last_good is not None:
+        try:
+            failed_at = datetime.fromisoformat(
+                str(previous.get("refresh_failed_at", "")).replace("Z", "+00:00")
+            )
+            if 0 <= (datetime.now(timezone.utc) - failed_at).total_seconds() < OPENCODE_REFRESH_FAILURE_TTL:
+                return {**last_good, "cache_hit": True}, 0
+        except (ValueError, TypeError):
+            pass
     try:
         version = subprocess.run([executable, "--version"], capture_output=True, text=True,
                                  timeout=remaining(5), check=True, env=env).stdout.strip()
@@ -808,13 +819,19 @@ def probe_capabilities(adapter: str, executable: str, deadline: float | None = N
                                    timeout=remaining(3), check=False, env=env).stdout
     except (OSError, ValueError, subprocess.SubprocessError):
         if last_good is not None:
-            # A failed refresh must not replace the last good listing.
-            return last_good, 0
-        record = {"status": "probe_unavailable", "adapter": adapter, "version": version,
-                  "executable": executable_path,
-                  "observed_at": datetime.now(timezone.utc).isoformat(), "models": [],
-                  "message": "Model list unavailable; fix: check CLI authentication"}
-        code = 1
+            if adapter == "opencode" and refresh:
+                # Keep the last good listing and briefly cache the failed refresh.
+                record = {**previous, "refresh_failed_at": datetime.now(timezone.utc).isoformat()}
+                refresh_failure_cached = True
+                code = 0
+            else:
+                return last_good, 0
+        else:
+            record = {"status": "probe_unavailable", "adapter": adapter, "version": version,
+                      "executable": executable_path,
+                      "observed_at": datetime.now(timezone.utc).isoformat(), "models": [],
+                      "message": "Model list unavailable; fix: check CLI authentication"}
+            code = 1
     else:
         record = {"adapter": adapter, "version": version, "executable": executable_path,
                   "listing_format": 1,
@@ -847,6 +864,20 @@ def probe_capabilities(adapter: str, executable: str, deadline: float | None = N
                 cache = latest if isinstance(latest, dict) else {}
             except (OSError, ValueError):
                 cache = {}
+            latest_record = cache.get(adapter)
+            if (refresh_failure_cached and isinstance(latest_record, dict)
+                    and latest_record.get("listing_format") == 1
+                    and latest_record.get("executable") == executable_path
+                    and latest_record.get("models")):
+                try:
+                    previous_at = datetime.fromisoformat(str(previous.get("observed_at", "")).replace("Z", "+00:00"))
+                    latest_at = datetime.fromisoformat(str(latest_record.get("observed_at", "")).replace("Z", "+00:00"))
+                    if latest_at > previous_at:
+                        record = latest_record
+                        refresh_failure_cached = False
+                        cache_superseded = True
+                except (ValueError, TypeError):
+                    pass
             cache[adapter] = record
             with tempfile.NamedTemporaryFile(mode="w", dir=path.parent, prefix="capabilities-", suffix=".tmp", delete=False) as temporary:
                 json.dump(cache, temporary, sort_keys=True)
@@ -858,7 +889,10 @@ def probe_capabilities(adapter: str, executable: str, deadline: float | None = N
                     os.unlink(temporary_name)
         finally:
             fcntl.flock(guard, fcntl.LOCK_UN)
-    return {**record, "cache_hit": False}, code
+    result = {**record, "cache_hit": cache_superseded}
+    if refresh_failure_cached:
+        result["refresh_failed"] = last_good["refresh_failed"]
+    return result, code
 
 
 def _probe_kiro_read_only(executable: str, version: str, deadline: float | None,
@@ -996,6 +1030,7 @@ def _fallback_candidates(
 # Discovery shares one budget that fits inside dispatch preflight's 15 s routing timeout.
 OPENCODE_DISCOVERY_BUDGET = 12.0
 OPENCODE_REFRESH_MIN_REMAINING = 4.0
+OPENCODE_REFRESH_FAILURE_TTL = 30
 
 
 def _opencode_live_models(refresh: bool = False, deadline: float | None = None) -> tuple[list[str], bool]:
