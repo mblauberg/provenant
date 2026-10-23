@@ -1,0 +1,7 @@
+diff --git a/.agents/guide.md b/.agents/guide.md
+index a32571c..168c0ee 100644
+--- a/.agents/guide.md
++++ b/.agents/guide.md
+@@ -1 +1 @@
+-staged third version
++unstaged fourth version

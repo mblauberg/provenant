@@ -7,6 +7,42 @@ use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::Path;
 
+pub(crate) fn canonicalize(path: &Path) -> io::Result<std::path::PathBuf> {
+    std::fs::canonicalize(path)
+}
+
+pub(crate) fn resolve_existing_ancestor(path: &Path) -> io::Result<std::path::PathBuf> {
+    let mut existing = path;
+    let mut missing = Vec::new();
+    loop {
+        match canonicalize(existing) {
+            Ok(mut bound) => {
+                for name in missing.iter().rev() {
+                    bound.push(name);
+                }
+                return Ok(bound);
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                let name = existing.file_name().ok_or(error)?;
+                if !matches!(
+                    existing.components().next_back(),
+                    Some(std::path::Component::Normal(_))
+                ) {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "invalid missing path component",
+                    ));
+                }
+                missing.push(name.to_os_string());
+                existing = existing.parent().ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::InvalidInput, "missing path parent")
+                })?;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
 fn string(name: &OsStr) -> io::Result<CString> {
     CString::new(name.as_bytes()).map_err(|_| io::Error::from_raw_os_error(libc::EINVAL))
 }

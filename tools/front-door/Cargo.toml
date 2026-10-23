@@ -47,7 +47,6 @@ provenant-cli = { path = "crates/cli" }
 # deliberate until their owner slices land. Remove each path as it gains code.
 ignored-paths = [
   "crates/cli/src/lib.rs",
-  "crates/confinement/src/lib.rs",
   "crates/fabric-mcp/src/lib.rs",
   "crates/providers/src/lib.rs",
   "crates/run/src/lib.rs",
@@ -55,7 +54,6 @@ ignored-paths = [
 ignored = [
   "provenant-cli",
   "provenant-config",
-  "provenant-confinement",
   "provenant-fabric-mcp",
   "provenant-fabric-runtime",
   "provenant-fabric-store",
@@ -92,7 +90,12 @@ publish = false
 license.workspace = true
 
 [dependencies]
+clap = { workspace = true }
+serde = { workspace = true }
 serde_json = { workspace = true }
+sha2 = { workspace = true }
+provenant-core = { workspace = true }
+provenant-confinement = { workspace = true }
 provenant-supervisor = { workspace = true }
 
 [dev-dependencies]

@@ -14,6 +14,7 @@ mod exec;
 mod help;
 mod resolve;
 mod stale;
+mod worktree_cli;
 
 use exec::{Launch, replace_process};
 use resolve::{FABRIC_MCP, Settings, is_file};
@@ -63,7 +64,6 @@ const OWNERS: &[(&str, &str)] = &[
     ("extract", "scripts/utility.py"),
     ("route", "scripts/model-route"),
     ("capabilities", "skills/orchestrate/scripts/capabilities.py"),
-    ("worktree", "scripts/worktree"),
     ("clean", "scripts/clean.py"),
     ("reap", "scripts/reap.py"),
     ("pr", "scripts/provenant-pr"),
@@ -229,6 +229,9 @@ fn run(args: &[OsString]) -> u8 {
             Ok(()) => 0,
             Err(error) => fail(&error.to_string()),
         };
+    }
+    if worktree_cli::is_worktree_invocation(args) {
+        return worktree_cli::run(args);
     }
     let settings = Settings::from_process();
     match route(args, std::env::var_os("AGENT_FABRIC_SEAT").is_some()) {
@@ -414,7 +417,7 @@ mod tests {
                 matches!(
                     route(&args(&[verb]), false),
                     Route::Owner { .. } | Route::Check(_)
-                ),
+                ) || worktree_cli::is_worktree_invocation(&args(&[verb])),
                 "{verb}"
             );
         }

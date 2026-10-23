@@ -1047,6 +1047,11 @@ fn darwin_cpu_micros_from_values(ticks: Option<u64>, timebase: Option<(u32, u32)
     u64::try_from(nanos / 1_000).ok()
 }
 
+/// Native identity of this management process; not a custody handle.
+pub fn current_process() -> crate::census::ProcessObservation {
+    SystemProcessObserver.observe(i64::from(std::process::id()))
+}
+
 #[cfg(test)]
 mod native_tests {
     use super::*;

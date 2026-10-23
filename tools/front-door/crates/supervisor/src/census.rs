@@ -544,6 +544,12 @@ impl SparingTracker {
 
 pub use crate::sys::census::SystemProcessObserver;
 
+/// Current-process observation for excluding the management caller from a
+/// repository worker census. This grants no signal or adoption authority.
+pub fn current_process() -> ProcessObservation {
+    crate::sys::census::current_process()
+}
+
 pub trait ProcessObserver {
     fn boot_identity(&self) -> Result<String, CensusError>;
     fn observe(&self, pid: i64) -> ProcessObservation;

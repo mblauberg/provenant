@@ -39,6 +39,37 @@ pub trait SafeDir: Send + Sync {
     fn rmdir(&self, name: &OsStr) -> Result<()>;
     fn replace(&self, source: &OsStr, destination: &OsStr) -> Result<()>;
     fn rename_noreplace(&self, source: &OsStr, destination: &OsStr) -> Result<()>;
+    /// Atomically move an entry between held directories without replacement.
+    /// Unsupported adapters refuse; never copy/unlink or cross-device fallback.
+    fn rename_noreplace_to(
+        &self,
+        source: &OsStr,
+        destination_dir: &dyn SafeDir,
+        destination: &OsStr,
+    ) -> Result<()> {
+        let _ = (destination_dir, destination);
+        Err(FsError::Io {
+            operation: "cross-directory rename unsupported",
+            path: source.into(),
+            source: io::Error::from(io::ErrorKind::Unsupported),
+        })
+    }
+    /// Safe double-dispatch for a native source capability. No descriptor escapes.
+    #[doc(hidden)]
+    fn rename_noreplace_from(
+        &self,
+        source_dir: &Directory,
+        source: &OsStr,
+        destination: &OsStr,
+    ) -> Result<()> {
+        let _ = (source_dir, destination);
+        Err(FsError::Io {
+            operation: "cross-directory rename unsupported",
+            path: source.into(),
+            source: io::Error::from(io::ErrorKind::Unsupported),
+        })
+    }
+
     fn symlink(&self, target: &Path, name: &OsStr) -> Result<()>;
     fn sync(&self) -> Result<()>;
     fn atomic_write(
@@ -137,6 +168,22 @@ impl SafeDir for Directory {
     }
     fn rename_noreplace(&self, source: &OsStr, destination: &OsStr) -> Result<()> {
         Directory::rename_noreplace(self, source, self, destination)
+    }
+    fn rename_noreplace_to(
+        &self,
+        source: &OsStr,
+        destination_dir: &dyn SafeDir,
+        destination: &OsStr,
+    ) -> Result<()> {
+        destination_dir.rename_noreplace_from(self, source, destination)
+    }
+    fn rename_noreplace_from(
+        &self,
+        source_dir: &Directory,
+        source: &OsStr,
+        destination: &OsStr,
+    ) -> Result<()> {
+        Directory::rename_noreplace(source_dir, source, self, destination)
     }
     fn symlink(&self, target: &Path, name: &OsStr) -> Result<()> {
         Directory::symlink(self, target, name)
