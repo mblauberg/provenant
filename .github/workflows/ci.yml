@@ -536,7 +536,7 @@ jobs:
       # Port differential tests run the Python/TS oracles and must not skip
       # in CI (PORTING R9).
       - name: Set up Node.js workspace
-        uses: ./.github/actions/setup-node-workspace
+        uses: $/.github/actions/setup-node-workspace
       - name: Require port differential oracles
         run: |
           {
