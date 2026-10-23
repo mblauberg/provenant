@@ -561,8 +561,9 @@ All of it is additive to `provenant.quota.report.v1`.
   above `quota.display.short_window_alert_percent` (default 90, echoed in the
   report's `display`); else the longest. A window carries `reset_passed: true`
   and never shows as current use when its reset passed after `observed_at`, or
-  when the reading is fresh but the window has reset below 100% and no refusal
-  names it; the table shows `-` and "reset since".
+  when the reading is fresh but the window has reset below 100% and is not
+  refused (by name, or by an unnamed refusal); the table shows `-` and "reset
+  since".
 - `headline` names the account the menu bar shows, set by
   `quota.menubar.headline`: `recent` (default), the usable account with the
   latest local activity, or the highest priority without any; `worst`, the
@@ -661,12 +662,12 @@ Readers retain `deficit` for old receipts; new readings do not emit it.
 
 A window is stale only when `observed_at < reset_at <= now`: its reset passed
 after the reading. In a fresh reading, a window with a past reset binds only
-while it is exhausted or a refusal names it; otherwise the remaining windows
-decide, and an account whose windows have all reset reads `unknown` until a
-fresh reading arrives. A cached refusal expires with its named window, or, when no window
-is named, after every reported window has reset and none is unreported. Spend
-caps and refusals for unreported windows remain. Other current windows still
-bind.
+while it is exhausted or refused, by name or by an unnamed refusal; otherwise
+the remaining windows decide, and an account with no current window left reads
+`unknown` until a fresh reading arrives. A cached refusal expires with its named
+window, or, when no window is named, after every reported window has reset and
+none is unreported. Spend caps and refusals for unreported windows remain.
+Other current windows still bind.
 
 An account whose allowance is spent can stay usable on credits. The allowance is
 spent when a window is exhausted or the provider reports `ordinary_usage_allowed:
