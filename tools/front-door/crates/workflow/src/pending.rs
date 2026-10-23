@@ -198,6 +198,7 @@ pub(crate) fn python_json(value: &serde_json::Value) -> String {
         result
     }
     match value {
+        Value::Number(n) if n.is_f64() => provenant_core::py::python_str(value),
         Value::String(s) => string(s),
         Value::Array(a) => format!(
             "[{}]",
@@ -211,46 +212,6 @@ pub(crate) fn python_json(value: &serde_json::Value) -> String {
                 .join(", ")
         ),
         _ => value.to_string(),
-    }
-}
-
-/// Temporary finite JSON reader. Non-finite values and lone surrogates remain
-/// parser integration gaps; integer overflow uses typed NumberOutOfRange.
-pub(crate) fn read_python_object(
-    path: &std::path::Path,
-) -> Result<serde_json::Map<String, serde_json::Value>, crate::portable_workflow::PortableError> {
-    use crate::portable_workflow::PortableError;
-    use serde_json::Value;
-    use std::fs;
-
-    let bytes = fs::read(path).map_err(|source| PortableError::Io {
-        path: path.into(),
-        source,
-    })?;
-    let value: Value =
-        provenant_records::checked_json::from_slice(&bytes).map_err(|error| match error {
-            provenant_records::checked_json::DecodeError::NumberOutOfRange(_) => {
-                PortableError::NumberOutOfRange { path: path.into() }
-            }
-            provenant_records::checked_json::DecodeError::Json(source) => PortableError::Json {
-                path: path.into(),
-                source,
-            },
-        })?;
-    value.as_object().cloned().ok_or_else(|| {
-        PortableError::Invalid(format!("{} must contain one JSON object", path.display()))
-    })
-}
-
-// port: belongs in provenant-core
-pub(crate) fn equals_one(value: &serde_json::Value) -> bool {
-    use serde_json::Value;
-    match value {
-        Value::Bool(value) => *value,
-        Value::Number(number) => {
-            number.as_i64() == Some(1) || (number.is_f64() && number.as_f64() == Some(1.0))
-        }
-        _ => false,
     }
 }
 
@@ -299,6 +260,16 @@ pub(crate) fn python_word(c: char) -> bool {
 #[derive(Debug, Clone, PartialEq)]
 pub struct OrderedMap<T>(Vec<(String, T)>);
 impl<T> OrderedMap<T> {
+    pub fn get(&self, key: &str) -> Option<&T> {
+        self.0.iter().find(|(k, _)| k == key).map(|(_, v)| v)
+    }
+    pub fn insert(&mut self, key: String, value: T) {
+        if let Some((_, old)) = self.0.iter_mut().find(|(k, _)| k == &key) {
+            *old = value;
+        } else {
+            self.0.push((key, value));
+        }
+    }
     pub(crate) fn entries_mut(&mut self) -> impl Iterator<Item = (&str, &mut T)> {
         self.0.iter_mut().map(|(k, v)| (k.as_str(), v))
     }
@@ -459,6 +430,58 @@ impl<T> Default for OrderedMap<T> {
     }
 }
 impl OrderedValue {
+    /// Python json.dumps(ensure_ascii=False, separators=(",", ":")), including
+    /// CPython's finite float spelling. A byte-sensitive boundary uses this
+    /// encoder instead of serde_json's different exponent notation.
+    pub fn python_wire(&self) -> String {
+        match self {
+            Self::Array(values) => format!(
+                "[{}]",
+                values
+                    .iter()
+                    .map(Self::python_wire)
+                    .collect::<Vec<_>>()
+                    .join(",")
+            ),
+            Self::Object(values) => format!(
+                "{{{}}}",
+                values
+                    .entries()
+                    .map(|(key, value)| format!(
+                        "{}:{}",
+                        Self::String(key.into()).python_wire(),
+                        value.python_wire()
+                    ))
+                    .collect::<Vec<_>>()
+                    .join(",")
+            ),
+            Self::String(text) => {
+                // Serialising an in-memory UTF-8 string cannot fail.
+                let mut result = String::from("\"");
+                for c in text.chars() {
+                    match c {
+                        '\"' => result.push_str("\\\""),
+                        '\\' => result.push_str("\\\\"),
+                        '\n' => result.push_str("\\n"),
+                        '\r' => result.push_str("\\r"),
+                        '\t' => result.push_str("\\t"),
+                        '\u{8}' => result.push_str("\\b"),
+                        '\u{c}' => result.push_str("\\f"),
+                        c if c < ' ' => result.push_str(&format!("\\u{:04x}", u32::from(c))),
+                        c => result.push(c),
+                    }
+                }
+                result.push('\"');
+                result
+            }
+            Self::Number(n) if n.is_f64() => {
+                provenant_core::py::python_str(&serde_json::Value::Number(n.clone()))
+            }
+            Self::Number(n) => n.to_string(),
+            Self::Bool(value) => value.to_string(),
+            Self::Null => "null".into(),
+        }
+    }
     pub fn as_str(&self) -> Option<&str> {
         match self {
             Self::String(value) => Some(value),
@@ -545,3 +568,83 @@ pub(crate) fn checked_ordered_decode<T: serde::de::DeserializeOwned>(
     normalise(&mut value, &checked);
     Ok(serde_json::from_slice(&serde_json::to_vec(&value)?)?)
 }
+
+// port: belongs in provenant-records
+/// Preserve serde field order and render Python-compatible compact JSON bytes.
+pub(crate) fn python_wire<T: serde::Serialize>(value: &T) -> Result<String, serde_json::Error> {
+    let ordered: OrderedValue = serde_json::from_slice(&serde_json::to_vec(value)?)?;
+    Ok(ordered.python_wire())
+}
+
+// port: belongs in provenant-records
+/// Python dict.update can introduce scalar keys from a sequence of pairs.
+/// Keep key identity separate from its JSON spelling: 1 and "1" coexist, while
+/// 1, 1.0 and True name the same Python dictionary entry.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct PythonDictionary(Vec<(OrderedValue, OrderedValue)>);
+impl PythonDictionary {
+    pub(crate) fn insert(&mut self, key: OrderedValue, value: OrderedValue) {
+        fn equal(left: &OrderedValue, right: &OrderedValue) -> bool {
+            use OrderedValue as V;
+            let scalar = |value: &V| match value {
+                V::Null => Some(serde_json::Value::Null),
+                V::Bool(b) => Some(serde_json::Value::Bool(*b)),
+                V::Number(n) => Some(serde_json::Value::Number(n.clone())),
+                V::String(s) => Some(serde_json::Value::String(s.clone())),
+                _ => None,
+            };
+            match (scalar(left), scalar(right)) {
+                (Some(left), Some(right)) => provenant_core::py::python_json_eq(&left, &right),
+                _ => false,
+            }
+        }
+        if let Some((_, old)) = self.0.iter_mut().find(|(old, _)| equal(old, &key)) {
+            *old = value;
+        } else {
+            self.0.push((key, value));
+        }
+    }
+    fn json_key(key: &OrderedValue) -> String {
+        match key {
+            OrderedValue::String(text) => text.clone(),
+            _ => key.python_wire(),
+        }
+    }
+    pub fn python_wire(&self) -> String {
+        format!(
+            "{{{}}}",
+            self.0
+                .iter()
+                .map(|(key, value)| format!(
+                    "{}:{}",
+                    OrderedValue::String(Self::json_key(key)).python_wire(),
+                    value.python_wire()
+                ))
+                .collect::<Vec<_>>()
+                .join(",")
+        )
+    }
+}
+impl serde::Serialize for PythonDictionary {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        let mut map = serializer.serialize_map(Some(self.0.len()))?;
+        for (key, value) in &self.0 {
+            map.serialize_entry(&Self::json_key(key), value)?;
+        }
+        map.end()
+    }
+}
+
+// port: belongs in provenant-core
+pub(crate) fn equals_one(value: &serde_json::Value) -> bool {
+    use serde_json::Value;
+    match value {
+        Value::Bool(value) => *value,
+        Value::Number(number) => {
+            number.as_i64() == Some(1) || (number.is_f64() && number.as_f64() == Some(1.0))
+        }
+        _ => false,
+    }
+}
+

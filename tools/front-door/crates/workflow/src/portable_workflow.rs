@@ -1,5 +1,6 @@
 //! Skill-owned project-artifact fallback, without optional adapters.
 use crate::policy::strip;
+use provenant_core::py::python_json_eq;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
@@ -142,7 +143,65 @@ pub fn digest(path: &Path) -> Result<String, PortableError> {
     Ok(format!("sha256:{hex}"))
 }
 pub fn read_object(path: &Path) -> Result<Map<String, Value>, PortableError> {
-    crate::pending::read_python_object(path)
+    let bytes = fs::read(path).map_err(|source| PortableError::Io {
+        path: path.into(),
+        source,
+    })?;
+    let value =
+        provenant_records::checked_json::from_slice(&bytes).map_err(|error| match error {
+            provenant_records::checked_json::DecodeError::NumberOutOfRange(_) => {
+                PortableError::NumberOutOfRange { path: path.into() }
+            }
+            provenant_records::checked_json::DecodeError::Json(source) => PortableError::Json {
+                path: path.into(),
+                source,
+            },
+        })?;
+    value.as_object().cloned().ok_or_else(|| {
+        PortableError::Invalid(format!("{} must contain one JSON object", path.display()))
+    })
+}
+
+fn json_string(value: &str) -> String {
+    let mut encoded = String::from("\"");
+    for character in value.chars() {
+        match character {
+            '"' => encoded.push_str("\\\""),
+            '\\' => encoded.push_str("\\\\"),
+            '\u{08}' => encoded.push_str("\\b"),
+            '\t' => encoded.push_str("\\t"),
+            '\n' => encoded.push_str("\\n"),
+            '\u{0c}' => encoded.push_str("\\f"),
+            '\r' => encoded.push_str("\\r"),
+            c if c <= '\u{1f}' => encoded.push_str(&format!("\\u{:04x}", u32::from(c))),
+            c if !c.is_ascii() => {
+                let code = u32::from(c);
+                if code <= 0xffff {
+                    encoded.push_str(&format!("\\u{code:04x}"));
+                } else {
+                    let scalar = code - 0x1_0000;
+                    let high = 0xd800 + (scalar >> 10);
+                    let low = 0xdc00 + (scalar & 0x3ff);
+                    encoded.push_str(&format!("\\u{high:04x}\\u{low:04x}"));
+                }
+            }
+            c => encoded.push(c),
+        }
+    }
+    encoded.push('"');
+    encoded
+}
+
+/// Match `json.dumps(..., sort_keys=True)` for the fixed fallback record.
+fn artifact_json(artifact: &PortableArtifact) -> String {
+    format!(
+        "{{\"adapters_used\": [], \"artifact_basis\": {}, \"artifact_kind\": {}, \"schema_version\": 1, \"skill\": {}, \"source_digest\": {}, \"status\": {}}}",
+        json_string(&artifact.artifact_basis),
+        json_string(&artifact.artifact_kind),
+        json_string(&artifact.skill),
+        json_string(&artifact.source_digest),
+        json_string(&artifact.status),
+    )
 }
 
 #[cfg(test)]
@@ -183,12 +242,7 @@ pub fn execute(
     // Python accepts True and 1.0 as equal to 1.
     if contract.len() != keys.len()
         || !keys.iter().all(|key| contract.contains_key(*key))
-        || !version.is_some_and(|v| {
-            v == &Value::Bool(true)
-                || v.as_i64() == Some(1)
-                || v.as_u64() == Some(1)
-                || (v.is_f64() && v.as_f64() == Some(1.0))
-        })
+        || !version.is_some_and(|v| python_json_eq(v, &Value::from(1)))
     {
         return Err(invalid("portable workflow contract is invalid"));
     }
@@ -220,9 +274,12 @@ pub fn execute(
     if !skill_root.join("SKILL.md").is_file() {
         return Err(invalid("portable workflow has no owning skill"));
     }
+    let Some(skill) = contract.get("skill").and_then(Value::as_str) else {
+        return Err(invalid("portable workflow contract identity is invalid"));
+    };
     let artifact = PortableArtifact {
         schema_version: 1,
-        skill: contract["skill"].as_str().unwrap_or_default().into(),
+        skill: skill.into(),
         artifact_kind: kind.into(),
         artifact_basis: "project-artifacts".into(),
         source_digest: digest(context_path)?,
@@ -235,15 +292,9 @@ pub fn execute(
             source,
         })?;
     }
-    let value = serde_json::to_value(&artifact).map_err(|source| PortableError::Json {
+    fs::write(output, artifact_json(&artifact) + "\n").map_err(|source| PortableError::Io {
         path: output.into(),
         source,
-    })?;
-    fs::write(output, crate::pending::python_json(&value) + "\n").map_err(|source| {
-        PortableError::Io {
-            path: output.into(),
-            source,
-        }
     })?;
     Ok(artifact)
 }
@@ -300,7 +351,11 @@ mod tests {
             serde_json::to_value(validate_artifact_identity(&cases[4]).unwrap()).unwrap(),
             cases[4]
         );
-        if let Some(expected) = crate::test_support::oracle("portable_workflow", &json!(cases)) {
+        if let Some(expected) = crate::test_support::oracle_script(
+            "oracle_portable.py",
+            "portable_workflow",
+            &json!(cases),
+        ) {
             assert_eq!(json!(actual), expected);
         }
     }
@@ -382,7 +437,8 @@ mod tests {
                 Ok(_) => json!({"artifact":fs::read_to_string(&output).unwrap()}),
                 Err(error) => json!({"error":error.to_string()}),
             };
-            if let Some(expected) = crate::test_support::oracle(
+            if let Some(expected) = crate::test_support::oracle_script(
+                "oracle_portable.py",
                 "portable_workflow",
                 &json!([{"op":"execute","skill":skill,"context":context_path,"output":python_output}]),
             ) {

@@ -4,6 +4,10 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 pub fn oracle(unit: &str, cases: &Value) -> Option<Value> {
+    oracle_script("oracle.py", unit, cases)
+}
+
+pub fn oracle_script(script: &str, unit: &str, cases: &Value) -> Option<Value> {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../..");
     let interpreter = std::env::var_os("PROVENANT_PORT_PYTHON").unwrap_or_else(|| "python3".into());
     let required = std::env::var("PROVENANT_PORT_DIFF_REQUIRED").as_deref() == Ok("1");
@@ -62,7 +66,10 @@ pub fn oracle(unit: &str, cases: &Value) -> Option<Value> {
     let output = bounded_output(
         Command::new(&interpreter)
             .arg("-I")
-            .arg(root.join("tools/front-door/crates/workflow/tests/oracle.py"))
+            .arg(
+                root.join("tools/front-door/crates/workflow/tests")
+                    .join(script),
+            )
             .arg(&root)
             .arg(unit)
             .env_clear()
