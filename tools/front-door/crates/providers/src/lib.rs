@@ -1,8 +1,6 @@
 //! Adapter profiles, argv and environment builders, output classification and continuation.
 #![forbid(unsafe_code)]
 
-#![forbid(unsafe_code)]
-
 pub mod adapters;
 pub mod dispatch_contract;
 pub mod exec_contract;
