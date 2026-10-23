@@ -74,8 +74,8 @@ How to work:
 - Before opening the PR, have one native subagent review the diff against the
   source, assuming the port is wrong. Fix what it finds.
 - Leave no rebase, cherry-pick or merge in progress.
-- Open a PR to main titled `port(CRATE): <short summary>` and arm
-  `gh pr merge --squash --auto`. In the body, a line
+- Open a PR to main titled `port(CRATE): <short summary>`. Do not arm
+  auto-merge: the chair arms it after the cross-family review. In the body, a line
   `Units: <id>, <id>, ...` lists only fully ported units; then partial and
   skipped units with reasons, `pending` items, divergences and test counts.
   Also append the fully ported ids to `docs/specs/rust-port/ported.txt`.
