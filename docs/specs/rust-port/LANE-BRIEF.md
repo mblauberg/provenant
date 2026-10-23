@@ -75,7 +75,8 @@ and `divergences.md`. Not CI workflows, not other slices' code.
 - Leave no rebase, cherry-pick or merge in progress.
 - Open a PR to main titled `port(CRATE): <slice>`. Do not arm auto-merge. In
   the body: `Units:` with the fully replaced graph units, `Deleted:` with the
-  removed files and line counts, the contract surface and its judges,
+  removed files and line counts, `Net lines:` across Python, TypeScript and
+  Rust (negative, or explain why not), the contract surface and its judges,
   contract-visible divergences, and anything left for a later slice. Append
   the replaced ids to `docs/specs/rust-port/ported.txt`.
 
