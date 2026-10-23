@@ -755,11 +755,14 @@ They form the current baseline; they are not newly discovered port mismatches.
   Python's lexical relative path permits traversal outside the anchor.
 - Evidence: native review and isolated fixture reproduction. No live owner or
   user data was involved; no independent mutant proof claimed.
-- Disposition: open. Inert Rust refuses non-normal relative path components;
-  no caller is switched. Storage is reported partial, with this proposed
-  correction awaiting explicit boundary authority before cut-over.
-- Follow-up: settle the compatibility decision, integrate supervisor's safe OS
-  binding, and run descriptor-based adversarial conformance on both platforms.
+- Disposition: accepted as a correction (chair, 2026-10-23, user informed).
+  Callers are `clean.py` run and attempt cleanup and attempt `tmp/` pruning,
+  whose planned paths never contain `..`; worktree pruning goes through
+  `scripts/worktree remove`, not `remove_tree`, so automatic post-merge pruning
+  is unaffected. The refusal only removes the ability to delete outside the
+  anchor, which the containment promise already forbids.
+- Follow-up: integrate supervisor's safe OS binding and run descriptor-based
+  adversarial conformance on both platforms.
 
 ## RP-records-004 — Decode error causes
 
