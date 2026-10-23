@@ -463,10 +463,10 @@ No pending message queue, distributed task claim, merged clock ordering or
 home-host auto-election.
 With the current laptop home, workshop coordination requires SSH back to the
 laptop, Remote Login enabled there, and the laptop awake and reachable.
-Recommendation: remote workers return results only through runs, with no remote
-mail or tasks; the home chair reads/pulls their results and events. Alternative,
-open for the user: allow remote coordination with this SSH and awake-laptop
-requirement. The current config defaults both projects to laptop; 786 distinct
+Decided by the chairs (R11 feature scope): remote workers return results only
+through runs, with no remote mail or tasks; the home chair reads and pulls their
+results and events. The host transport sits behind one trait, so remote mail
+could later be added as one module without a second consistency model. The current config defaults both projects to laptop; 786 distinct
 workshop run IDs show that this dependency matters.
 Home reassignment refuses active ownership and requires an explicit new-state
 transfer decision. This is the main federation scope reduction to approve.
@@ -917,7 +917,6 @@ are source cleanup targets.
 |---|---|---|
 | MCP implementation | Keep the small stdio server and no async; no rmcp dependency amendment | Chairs; user approval needed only if proposing to reverse the dependency/no-async decision |
 | MCP protocol profiles | Build dual-era 2025-11-25 and 2026-07-28 now; older profile only on demonstrated need | MCP/config owners; verify installed clients before cut-over |
-| Remote coordination | Recommend run-only remote workers with no remote mail/tasks; alternatively allow home coordination requiring SSH and an awake laptop | User decision open; remove offline replicas/outbox either way |
 | Shared policy/Node cleanup | Move project policy to config/confinement; leave root npm/Ajv deletion to its actual caller owner | Both chairs; never delete a shared manifest while a retained caller needs it |
 
 No change to the binding table is proposed. Merging this document changes no
