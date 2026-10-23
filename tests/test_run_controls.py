@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-import hashlib
 import io
-import importlib.util
 import json
 import os
 import stat
@@ -16,6 +14,10 @@ from pathlib import Path
 
 import pytest
 
+from tests.support.fake_cli import fake_bin, fake_codex
+from tests.support.modules import load_script
+from tests.support.runs import file_digest, make_run, write_attempt
+
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "skills/orchestrate/scripts/run_controls.py"
 FINALIZE = ROOT / "skills/orchestrate/scripts/run_dir_finalize.py"
@@ -23,99 +25,10 @@ INIT = ROOT / "skills/orchestrate/scripts/run_dir_init.sh"
 CLI = ROOT / "scripts/provenant"
 
 
-def make_run(tmp_path: Path) -> Path:
-    return Path(subprocess.check_output([str(INIT), str(tmp_path / ".agent-run" / "controls")], text=True).strip())
-
-
-def write_attempt(
-    run_dir: Path,
-    task_id: str = "task-1",
-    attempt_id: str = "attempt-001",
-    *,
-    status: str = "ok",
-    result: str | None = "result\n",
-    question: dict[str, str] | None = None,
-    observed_exit: bool = True,
-    delivery_run_id: str | None = None,
-) -> Path:
-    attempt_dir = run_dir / "dispatch/tasks" / task_id / attempt_id
-    attempt_dir.mkdir(parents=True)
-    prompt_path = attempt_dir / "prompt.md"
-    prompt_path.write_text("prompt\n", encoding="utf-8")
-    stderr_path = attempt_dir / "stderr.log"
-    stderr_path.write_text("diagnostic\n", encoding="utf-8")
-    adapter_path = attempt_dir / "adapter-receipt.json"
-    result_path = attempt_dir / "result.md"
-    result_ref = None
-    if status == "blocked" and question is not None and result in (None, "question\n"):
-        result = json.dumps({
-            "schema_version": 1, "record_type": "provenant-worker-terminal",
-            "classification": "question", "question": question,
-        }, separators=(",", ":")) + "\n"
-    if result is not None:
-        result_path.write_text(result, encoding="utf-8")
-        result_ref = {"path": str(result_path.relative_to(run_dir)), "digest": file_digest(result_path)}
-    adapter = {}
-    if status in {"ok", "succeeded"}:
-        adapter = {
-            "tool": "codex", "adapter": "codex", "execution_intent": "ordinary",
-            "resolved_model": "fixture-model", "provider_family": "fixture-provider",
-            "model_family": "fixture-model", "endpoint_provider": "fixture-provider",
-            "identity_source": "fixture", "output_path": str(result_path),
-            "output_digest": result_ref["digest"] if result_ref is not None else "",
-            "read_only_guarantee": "none", "status": "ok", "exit": 0,
-            "cross_family": False, "certification_eligible": False,
-        }
-    adapter_path.write_text(json.dumps(adapter) + "\n", encoding="utf-8")
-    record = {
-        "schema_version": 1,
-        "record_type": "dispatch-attempt",
-        "run_id": run_dir.name,
-        "task_id": task_id,
-        "attempt_id": attempt_id,
-        "status": status,
-        "outcome": "ok" if status in {"ok", "succeeded"} else status,
-        "requested_route": {
-            "intent": "ordinary", "adapter": "codex", "alias": "junior",
-            "task_class": "", "model": "", "role": "worker", "orchestrator_family": "openai",
-            "risk_tier": "substantial", "model_override_tier": "",
-            "reviewer_id": "reviewer-1", "effort": "high",
-        },
-        "route": {
-            **({field: adapter[field] for field in ("adapter", "execution_intent", "provider_family", "resolved_model")}
-               if status in {"ok", "succeeded"} else {}),
-            "adapter_receipt": {"path": str(adapter_path.relative_to(run_dir)), "digest": file_digest(adapter_path)},
-        },
-        "prompt": {"path": str(prompt_path.relative_to(run_dir)), "digest": file_digest(prompt_path)},
-        "stderr": {"path": str(stderr_path.relative_to(run_dir)), "digest": file_digest(stderr_path)},
-        "result": result_ref,
-        "process": {"observed_exit": observed_exit, "exit_code": 0},
-        "started_at": "2026-08-29T00:00:00.000Z",
-        "finished_at": "2026-08-29T00:00:01.000Z",
-    }
-    if question is not None:
-        record["question"] = question
-    if delivery_run_id is not None:
-        record["delivery_run_id"] = delivery_run_id
-    attempt_path = attempt_dir / "attempt.json"
-    record["attempt_path"] = str(attempt_path.relative_to(run_dir))
-    attempt_path.write_text(json.dumps(record, sort_keys=True) + "\n", encoding="utf-8")
-    digest_path = attempt_dir / "attempt.sha256"
-    digest_path.write_text(f"{file_digest(attempt_path)}  attempt.json\n", encoding="utf-8")
-    return attempt_path
-
-
-def file_digest(path: Path) -> str:
-    return "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
-
-
 def test_retained_legacy_success_is_valid_and_cannot_be_retried(tmp_path: Path) -> None:
-    run_dir = make_run(tmp_path)
+    run_dir = make_run(tmp_path, "controls")
     write_attempt(run_dir, status="succeeded")
-    spec = importlib.util.spec_from_file_location("legacy_run_controls", SCRIPT)
-    assert spec and spec.loader
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    module = load_script(SCRIPT, "legacy_run_controls")
 
     assert module.validate_retained_dispatch(run_dir) == []
     result = invoke(
@@ -128,16 +41,14 @@ def test_retained_legacy_success_is_valid_and_cannot_be_retried(tmp_path: Path) 
 
 @pytest.mark.parametrize("outcome,pid", [("host_disk_full", 12345), ("host_disk_full", None), ("provider_lost", 12345), ("process_spawn_error", None)])
 def test_retained_host_failure_accepts_unobserved_exit(tmp_path, outcome, pid):
-    run_dir = make_run(tmp_path)
+    run_dir = make_run(tmp_path, "controls")
     attempt = write_attempt(run_dir, status="failed", result=None, observed_exit=False)
     row = json.loads(attempt.read_text())
     row.update(outcome=outcome)
     row["process"].update(pid=pid, exit_code=None)
     attempt.write_text(json.dumps(row) + "\n")
     attempt.with_name("attempt.sha256").write_text(f"{file_digest(attempt)}  attempt.json\n")
-    spec = importlib.util.spec_from_file_location("run_controls_host_failure", SCRIPT)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    module = load_script(SCRIPT, "run_controls_host_failure")
     assert module.validate_retained_dispatch(run_dir) == []
     summary = run_dir / "dispatch/batches/batch-001/summary.json"
     summary.parent.mkdir(parents=True)
@@ -150,7 +61,7 @@ def test_retained_host_failure_accepts_unobserved_exit(tmp_path, outcome, pid):
 
 
 def test_retained_git_evidence_path_digest_and_payload_are_validated(tmp_path: Path):
-    run_dir = make_run(tmp_path)
+    run_dir = make_run(tmp_path, "controls")
     attempt = write_attempt(run_dir, status="failed", result=None)
     attempt_dir = attempt.parent
     packet = attempt_dir / "evidence" / "git-evidence.md"
@@ -172,10 +83,7 @@ def test_retained_git_evidence_path_digest_and_payload_are_validated(tmp_path: P
     attempt.write_text(json.dumps(record, sort_keys=True) + "\n", encoding="utf-8")
     (attempt_dir / "attempt.sha256").write_text(f"{file_digest(attempt)}  attempt.json\n", encoding="utf-8")
     valid_packet = packet.read_bytes()
-    module_spec = importlib.util.spec_from_file_location("run_controls_git_evidence", SCRIPT)
-    assert module_spec and module_spec.loader
-    module = importlib.util.module_from_spec(module_spec)
-    module_spec.loader.exec_module(module)
+    module = load_script(SCRIPT, "run_controls_git_evidence")
 
     module._attempt(run_dir, "task-1", "attempt-001")
     assert module.validate_retained_dispatch(run_dir) == []
@@ -199,7 +107,7 @@ def test_retained_git_evidence_path_digest_and_payload_are_validated(tmp_path: P
 
 def test_retained_success_rejects_malformed_adapter_receipt(tmp_path: Path) -> None:
     """Controls and finalisation must not trust a success record by itself."""
-    run_dir = make_run(tmp_path)
+    run_dir = make_run(tmp_path, "controls")
     attempt = write_attempt(run_dir)
     adapter = attempt.with_name("adapter-receipt.json")
     adapter.write_text("{}\n", encoding="utf-8")
@@ -209,10 +117,7 @@ def test_retained_success_rejects_malformed_adapter_receipt(tmp_path: Path) -> N
     attempt.with_name("attempt.sha256").write_text(
         f"{file_digest(attempt)}  attempt.json\n", encoding="utf-8"
     )
-    module_spec = importlib.util.spec_from_file_location("run_controls_invalid_success", SCRIPT)
-    assert module_spec and module_spec.loader
-    module = importlib.util.module_from_spec(module_spec)
-    module_spec.loader.exec_module(module)
+    module = load_script(SCRIPT, "run_controls_invalid_success")
 
     errors = module.validate_retained_dispatch(run_dir)
 
@@ -220,17 +125,14 @@ def test_retained_success_rejects_malformed_adapter_receipt(tmp_path: Path) -> N
         "dispatch attempt dispatch/tasks/task-1/attempt-001/attempt.json: "
         "successful adapter receipt is invalid"
     ]
-    finalizer_spec = importlib.util.spec_from_file_location("run_dir_finalize_invalid_success", FINALIZE)
-    assert finalizer_spec and finalizer_spec.loader
-    finalizer = importlib.util.module_from_spec(finalizer_spec)
-    finalizer_spec.loader.exec_module(finalizer)
+    finalizer = load_script(FINALIZE, "run_dir_finalize_invalid_success")
     assert finalizer._validate_dispatch_evidence(run_dir) == errors
 
 
 @pytest.mark.parametrize("exit_code", [1, False])
 def test_retained_success_rejects_a_non_zero_exit(tmp_path: Path, exit_code: object) -> None:
     """Controls and finalisation reject a success without exit 0 (own check and shared validator)."""
-    run_dir = make_run(tmp_path)
+    run_dir = make_run(tmp_path, "controls")
     attempt = write_attempt(run_dir)
     record = json.loads(attempt.read_text(encoding="utf-8"))
     record["process"]["exit_code"] = exit_code
@@ -238,10 +140,7 @@ def test_retained_success_rejects_a_non_zero_exit(tmp_path: Path, exit_code: obj
     attempt.with_name("attempt.sha256").write_text(
         f"{file_digest(attempt)}  attempt.json\n", encoding="utf-8"
     )
-    module_spec = importlib.util.spec_from_file_location("run_controls_invalid_exit", SCRIPT)
-    assert module_spec and module_spec.loader
-    module = importlib.util.module_from_spec(module_spec)
-    module_spec.loader.exec_module(module)
+    module = load_script(SCRIPT, "run_controls_invalid_exit")
 
     errors = module.validate_retained_dispatch(run_dir)
 
@@ -249,16 +148,8 @@ def test_retained_success_rejects_a_non_zero_exit(tmp_path: Path, exit_code: obj
         "dispatch attempt dispatch/tasks/task-1/attempt-001/attempt.json: "
         "successful attempt does not prove exit 0"
     ]
-    finalizer_spec = importlib.util.spec_from_file_location("run_dir_finalize_invalid_exit", FINALIZE)
-    assert finalizer_spec and finalizer_spec.loader
-    finalizer = importlib.util.module_from_spec(finalizer_spec)
-    finalizer_spec.loader.exec_module(finalizer)
+    finalizer = load_script(FINALIZE, "run_dir_finalize_invalid_exit")
     assert finalizer._validate_dispatch_evidence(run_dir) == errors
-
-
-def write_executable(path: Path, body: str) -> None:
-    path.write_text(textwrap.dedent(body), encoding="utf-8")
-    path.chmod(path.stat().st_mode | stat.S_IXUSR)
 
 
 def write_success_adapter(path: Path) -> None:
@@ -322,7 +213,7 @@ def invoke(*args: str, cwd: Path, env: dict[str, str] | None = None) -> subproce
 
 
 def test_inspect_reports_exact_attempt_artifacts_without_reconciling_manifest(tmp_path: Path) -> None:
-    run_dir = make_run(tmp_path)
+    run_dir = make_run(tmp_path, "controls")
     write_attempt(run_dir)
     before = (run_dir / "MANIFEST.md").read_bytes()
 
@@ -337,7 +228,7 @@ def test_inspect_reports_exact_attempt_artifacts_without_reconciling_manifest(tm
 
 
 def test_artifact_commands_require_exact_attempt_and_emit_raw_content(tmp_path: Path) -> None:
-    run_dir = make_run(tmp_path)
+    run_dir = make_run(tmp_path, "controls")
     write_attempt(run_dir)
 
     result = invoke("run", "result", "--run-dir", str(run_dir), "--task-id", "task-1", "--attempt-id", "attempt-001", cwd=tmp_path)
@@ -347,7 +238,7 @@ def test_artifact_commands_require_exact_attempt_and_emit_raw_content(tmp_path: 
 
 
 def test_cancel_writes_one_empty_attempt_marker_without_terminal_evidence(tmp_path: Path) -> None:
-    run_dir = make_run(tmp_path)
+    run_dir = make_run(tmp_path, "controls")
     attempt_dir = run_dir / "dispatch/tasks/task-1/attempt-001"
     attempt_dir.mkdir(parents=True)
 
@@ -364,15 +255,12 @@ def test_cancel_writes_one_empty_attempt_marker_without_terminal_evidence(tmp_pa
 
 
 def test_cancel_after_natural_completion_reports_already_terminal(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    run_dir = make_run(tmp_path)
+    run_dir = make_run(tmp_path, "controls")
     prompt = tmp_path / "prompt.md"
     prompt.write_text("natural\n", encoding="utf-8")
     adapter = tmp_path / "adapter"
     write_success_adapter(adapter)
-    module_spec = importlib.util.spec_from_file_location("dispatch_for_cancel_natural", ROOT / "skills/orchestrate/scripts/dispatch_run.py")
-    assert module_spec and module_spec.loader
-    dispatch = importlib.util.module_from_spec(module_spec)
-    module_spec.loader.exec_module(dispatch)
+    dispatch = load_script(ROOT / "skills/orchestrate/scripts/dispatch_run.py", "dispatch_for_cancel_natural")
     monkeypatch.setattr(dispatch, "CF_DISPATCH", adapter)
     monkeypatch.chdir(tmp_path)
     args = dispatch.parser().parse_args([
@@ -392,7 +280,7 @@ def test_cancel_after_natural_completion_reports_already_terminal(tmp_path: Path
 
 
 def test_cancel_removes_stale_marker_after_validated_terminal_attempt(tmp_path: Path) -> None:
-    run_dir = make_run(tmp_path)
+    run_dir = make_run(tmp_path, "controls")
     attempt = write_attempt(run_dir, status="failed", result=None)
     marker = attempt.parent / "cancel.request"
     marker.touch()
@@ -408,15 +296,12 @@ def test_cancel_removes_stale_marker_after_validated_terminal_attempt(tmp_path: 
 
 
 def test_cancel_waits_through_attempt_sidecar_gap(tmp_path: Path) -> None:
-    run_dir = make_run(tmp_path)
+    run_dir = make_run(tmp_path, "controls")
     attempt = write_attempt(run_dir, status="failed", result=None)
     sidecar = attempt.with_name("attempt.sha256")
     sidecar_bytes = sidecar.read_bytes()
     sidecar.unlink()
-    module_spec = importlib.util.spec_from_file_location("run_controls_sidecar_gap", SCRIPT)
-    assert module_spec and module_spec.loader
-    module = importlib.util.module_from_spec(module_spec)
-    module_spec.loader.exec_module(module)
+    module = load_script(SCRIPT, "run_controls_sidecar_gap")
 
     def publish_sidecar() -> None:
         time.sleep(0.1)
@@ -433,15 +318,12 @@ def test_cancel_waits_through_attempt_sidecar_gap(tmp_path: Path) -> None:
 
 
 def test_attempt_terminal_tolerates_receipt_renamed_before_its_digest_sidecar(tmp_path: Path) -> None:
-    run_dir = make_run(tmp_path)
+    run_dir = make_run(tmp_path, "controls")
     attempt = write_attempt(run_dir, status="failed", result=None)
     sidecar = attempt.with_name("attempt.sha256")
     fresh = sidecar.read_bytes()
     sidecar.write_bytes(b"sha256:" + b"0" * 64 + b"  attempt.json\n")  # previous receipt's digest
-    module_spec = importlib.util.spec_from_file_location("run_controls_stale_sidecar", SCRIPT)
-    assert module_spec and module_spec.loader
-    module = importlib.util.module_from_spec(module_spec)
-    module_spec.loader.exec_module(module)
+    module = load_script(SCRIPT, "run_controls_stale_sidecar")
 
     def publish_sidecar() -> None:
         time.sleep(0.1)
@@ -462,7 +344,7 @@ def test_attempt_terminal_tolerates_receipt_renamed_before_its_digest_sidecar(tm
 
 
 def test_cancel_waits_through_late_summary_bundle_completion(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    run_dir = make_run(tmp_path)
+    run_dir = make_run(tmp_path, "controls")
     attempt = write_attempt(run_dir, status="failed", result=None)
     sidecar = attempt.with_name("attempt.sha256")
     sidecar_bytes = sidecar.read_bytes()
@@ -489,10 +371,7 @@ def test_cancel_waits_through_late_summary_bundle_completion(tmp_path: Path, mon
             "result_path": None,
         }],
     }) + "\n", encoding="utf-8")
-    module_spec = importlib.util.spec_from_file_location("run_controls_late_summary", SCRIPT)
-    assert module_spec and module_spec.loader
-    module = importlib.util.module_from_spec(module_spec)
-    module_spec.loader.exec_module(module)
+    module = load_script(SCRIPT, "run_controls_late_summary")
     monkeypatch.chdir(tmp_path)
 
     def publish_sidecar() -> None:
@@ -512,7 +391,7 @@ def test_cancel_waits_through_late_summary_bundle_completion(tmp_path: Path, mon
 
 
 def test_cancel_rejects_unobserved_terminal_attempt_evidence(tmp_path: Path) -> None:
-    run_dir = make_run(tmp_path)
+    run_dir = make_run(tmp_path, "controls")
     write_attempt(run_dir, status="cancelled", observed_exit=False)
 
     result = invoke(
@@ -526,7 +405,7 @@ def test_cancel_rejects_unobserved_terminal_attempt_evidence(tmp_path: Path) -> 
 
 
 def test_retry_requires_observed_provider_exit(tmp_path: Path) -> None:
-    run_dir = make_run(tmp_path)
+    run_dir = make_run(tmp_path, "controls")
     write_attempt(run_dir, status="failed", result=None, observed_exit=False)
 
     result = invoke(
@@ -540,7 +419,7 @@ def test_retry_requires_observed_provider_exit(tmp_path: Path) -> None:
 
 
 def test_blocked_retry_requires_exact_retained_question_envelope(tmp_path: Path) -> None:
-    run_dir = make_run(tmp_path)
+    run_dir = make_run(tmp_path, "controls")
     parent_question = {"code": "needs_input", "prompt": "Which source?"}
     retained_question = {"code": "needs_input", "prompt": "A different source?"}
     envelope = json.dumps({
@@ -563,7 +442,7 @@ def test_blocked_retry_requires_exact_retained_question_envelope(tmp_path: Path)
 
 
 def test_cancel_rejects_closed_run_without_writing_marker(tmp_path: Path) -> None:
-    run_dir = make_run(tmp_path)
+    run_dir = make_run(tmp_path, "controls")
     attempt_dir = run_dir / "dispatch/tasks/task-1/attempt-001"
     attempt_dir.mkdir(parents=True)
     receipt_path = run_dir / "RUN_RECEIPT.json"
@@ -582,7 +461,7 @@ def test_cancel_rejects_closed_run_without_writing_marker(tmp_path: Path) -> Non
 
 
 def test_cancel_rejects_internally_incomplete_batch_summary(tmp_path: Path) -> None:
-    run_dir = make_run(tmp_path)
+    run_dir = make_run(tmp_path, "controls")
     batch_dir = run_dir / "dispatch/batches/batch-001"
     batch_dir.mkdir(parents=True)
     (batch_dir / "summary.json").write_text(json.dumps({
@@ -606,7 +485,7 @@ def test_cancel_rejects_internally_incomplete_batch_summary(tmp_path: Path) -> N
 
 
 def test_artifact_command_rejects_tampered_retained_digest(tmp_path: Path) -> None:
-    run_dir = make_run(tmp_path)
+    run_dir = make_run(tmp_path, "controls")
     write_attempt(run_dir)
     (run_dir / "dispatch/tasks/task-1/attempt-001/result.md").write_text("tampered\n", encoding="utf-8")
 
@@ -617,7 +496,7 @@ def test_artifact_command_rejects_tampered_retained_digest(tmp_path: Path) -> No
 
 
 def test_artifact_command_rejects_attempt_copied_from_another_run(tmp_path: Path) -> None:
-    run_dir = make_run(tmp_path)
+    run_dir = make_run(tmp_path, "controls")
     attempt = write_attempt(run_dir)
     record = json.loads(attempt.read_text(encoding="utf-8"))
     record["run_id"] = "different-run"
@@ -631,7 +510,7 @@ def test_artifact_command_rejects_attempt_copied_from_another_run(tmp_path: Path
 
 
 def test_retry_requires_one_route_choice_and_delegates_parent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    run_dir = make_run(tmp_path)
+    run_dir = make_run(tmp_path, "controls")
     write_attempt(run_dir, status="failed", result=None)
     fake = tmp_path / "dispatch-run"
     invoked = tmp_path / "invoked.json"
@@ -641,10 +520,7 @@ def test_retry_requires_one_route_choice_and_delegates_parent(tmp_path: Path, mo
     )
     fake.chmod(fake.stat().st_mode | stat.S_IXUSR)
 
-    module_spec = importlib.util.spec_from_file_location("run_controls_under_test", SCRIPT)
-    assert module_spec and module_spec.loader
-    module = importlib.util.module_from_spec(module_spec)
-    module_spec.loader.exec_module(module)
+    module = load_script(SCRIPT, "run_controls_under_test")
     monkeypatch.setattr(module, "DISPATCH_RUN", fake)
     args = module.parser().parse_args([
         "retry", "--run-dir", str(run_dir), "--task-id", "task-1", "--attempt-id", "attempt-001", "--same-route",
@@ -661,21 +537,15 @@ def test_retry_requires_one_route_choice_and_delegates_parent(tmp_path: Path, mo
 
 
 def test_same_route_retry_runs_full_provider_free_chain_and_retains_risk_and_prompt(tmp_path: Path) -> None:
-    run_dir = make_run(tmp_path)
+    run_dir = make_run(tmp_path, "controls")
     prompt = tmp_path / "prompt.md"
     prompt.write_bytes(b"retry these exact bytes\n\n")
-    bin_dir = tmp_path / "bin"
-    bin_dir.mkdir()
+    bin_dir = fake_bin(tmp_path)
     provider_count = tmp_path / "provider.count"
     received = tmp_path / "received.bin"
-    write_executable(
-        bin_dir / "codex",
-        f"""#!/usr/bin/env bash
-        if [ "$1" = "mcp" ]; then printf '[]'; exit 0; fi
-        if [ "$1" = "debug" ] && [ "$2" = "models" ]; then
-          printf '%s\n' '{{"models":[{{"slug":"gpt-6-luna","supported_reasoning_levels":[{{"effort":"high"}}]}}]}}'
-          exit 0
-        fi
+    fake_codex(
+        bin_dir,
+        f"""
         if [ ! -f {provider_count} ]; then
           printf '1\n' > {provider_count}
           cat >/dev/null
@@ -720,7 +590,7 @@ def test_same_route_retry_runs_full_provider_free_chain_and_retains_risk_and_pro
 
 
 def test_retry_reroute_requires_a_complete_new_route(tmp_path: Path) -> None:
-    run_dir = make_run(tmp_path)
+    run_dir = make_run(tmp_path, "controls")
     write_attempt(run_dir, status="failed", result=None)
 
     result = invoke("run", "retry", "--run-dir", str(run_dir), "--task-id", "task-1",
@@ -731,7 +601,7 @@ def test_retry_reroute_requires_a_complete_new_route(tmp_path: Path) -> None:
 
 
 def test_blocked_inspection_exposes_question_and_continuation_reference(tmp_path: Path) -> None:
-    run_dir = make_run(tmp_path)
+    run_dir = make_run(tmp_path, "controls")
     write_attempt(run_dir, status="blocked", result=None,
                   question={"code": "needs_input", "prompt": "Which source?"})
 
@@ -745,7 +615,7 @@ def test_blocked_inspection_exposes_question_and_continuation_reference(tmp_path
 
 
 def test_blocked_retry_requires_response_and_retains_new_attempt_prompt(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    run_dir = make_run(tmp_path)
+    run_dir = make_run(tmp_path, "controls")
     question = {"code": "needs_input", "prompt": "Which source should I use?"}
     envelope = json.dumps({
         "schema_version": 1, "record_type": "provenant-worker-terminal",
@@ -760,10 +630,7 @@ def test_blocked_retry_requires_response_and_retains_new_attempt_prompt(tmp_path
         encoding="utf-8",
     )
     fake.chmod(fake.stat().st_mode | stat.S_IXUSR)
-    module_spec = importlib.util.spec_from_file_location("run_controls_blocked_retry", SCRIPT)
-    assert module_spec and module_spec.loader
-    module = importlib.util.module_from_spec(module_spec)
-    module_spec.loader.exec_module(module)
+    module = load_script(SCRIPT, "run_controls_blocked_retry")
     monkeypatch.setattr(module, "DISPATCH_RUN", fake)
     response = tmp_path / "response.md"
     response.write_text("Use the primary archive.\n", encoding="utf-8")
@@ -782,7 +649,7 @@ def test_blocked_retry_requires_response_and_retains_new_attempt_prompt(tmp_path
 
 
 def test_inspect_displays_real_worker_question_and_canonical_continuation(tmp_path: Path) -> None:
-    run_dir = make_run(tmp_path)
+    run_dir = make_run(tmp_path, "controls")
     prompt = tmp_path / "prompt.md"
     prompt.write_text("Need a source choice\n", encoding="utf-8")
     adapter = tmp_path / "question-adapter"
@@ -803,7 +670,7 @@ def test_inspect_displays_real_worker_question_and_canonical_continuation(tmp_pa
 
 
 def test_blocked_retry_accepts_response_stdin_and_nonblocked_rejects_response(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    run_dir = make_run(tmp_path)
+    run_dir = make_run(tmp_path, "controls")
     question = {"code": "needs_input", "prompt": "Which source?"}
     parent = write_attempt(run_dir, status="blocked", result=json.dumps({
         "schema_version": 1, "record_type": "provenant-worker-terminal",
@@ -816,10 +683,7 @@ def test_blocked_retry_accepts_response_stdin_and_nonblocked_rejects_response(tm
         encoding="utf-8",
     )
     fake.chmod(fake.stat().st_mode | stat.S_IXUSR)
-    module_spec = importlib.util.spec_from_file_location("run_controls_stdin_retry", SCRIPT)
-    assert module_spec and module_spec.loader
-    module = importlib.util.module_from_spec(module_spec)
-    module_spec.loader.exec_module(module)
+    module = load_script(SCRIPT, "run_controls_stdin_retry")
     monkeypatch.setattr(module, "DISPATCH_RUN", fake)
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(module.sys, "stdin", io.TextIOWrapper(io.BytesIO(b"stdin response\n")))
@@ -831,7 +695,7 @@ def test_blocked_retry_accepts_response_stdin_and_nonblocked_rejects_response(tm
     assert "stdin response" in captured.read_text(encoding="utf-8")
     assert parent.exists()
 
-    nonblocked = make_run(tmp_path / "nonblocked")
+    nonblocked = make_run(tmp_path / "nonblocked", "controls")
     write_attempt(nonblocked, status="failed", result=None)
     rejected = module.parser().parse_args([
         "retry", "--run-dir", str(nonblocked), "--task-id", "task-1", "--attempt-id", "attempt-001",
@@ -841,13 +705,10 @@ def test_blocked_retry_accepts_response_stdin_and_nonblocked_rejects_response(tm
 
 
 def test_blocked_retry_without_response_is_rejected(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    run_dir = make_run(tmp_path)
+    run_dir = make_run(tmp_path, "controls")
     write_attempt(run_dir, status="blocked", result="question\n",
                   question={"code": "needs_input", "prompt": "Which source?"})
-    module_spec = importlib.util.spec_from_file_location("run_controls_missing_response", SCRIPT)
-    assert module_spec and module_spec.loader
-    module = importlib.util.module_from_spec(module_spec)
-    module_spec.loader.exec_module(module)
+    module = load_script(SCRIPT, "run_controls_missing_response")
     monkeypatch.chdir(tmp_path)
     args = module.parser().parse_args([
         "retry", "--run-dir", str(run_dir), "--task-id", "task-1", "--attempt-id", "attempt-001",
@@ -861,15 +722,12 @@ def test_blocked_retry_without_response_is_rejected(tmp_path: Path, monkeypatch:
 def test_blocked_retry_rejects_invalid_response_file_bytes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, response: bytes
 ) -> None:
-    run_dir = make_run(tmp_path)
+    run_dir = make_run(tmp_path, "controls")
     write_attempt(run_dir, status="blocked", result="question\n",
                   question={"code": "needs_input", "prompt": "Which source?"})
     response_file = tmp_path / "response"
     response_file.write_bytes(response)
-    module_spec = importlib.util.spec_from_file_location("run_controls_bad_response", SCRIPT)
-    assert module_spec and module_spec.loader
-    module = importlib.util.module_from_spec(module_spec)
-    module_spec.loader.exec_module(module)
+    module = load_script(SCRIPT, "run_controls_bad_response")
     monkeypatch.chdir(tmp_path)
     args = module.parser().parse_args([
         "retry", "--run-dir", str(run_dir), "--task-id", "task-1", "--attempt-id", "attempt-001",
@@ -880,7 +738,7 @@ def test_blocked_retry_rejects_invalid_response_file_bytes(
 
 
 def test_blocked_retry_rejects_oversized_response_before_dispatch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    run_dir = make_run(tmp_path)
+    run_dir = make_run(tmp_path, "controls")
     write_attempt(run_dir, status="blocked", result="question\n",
                   question={"code": "needs_input", "prompt": "Which source?"})
     response_file = tmp_path / "response"
@@ -889,10 +747,7 @@ def test_blocked_retry_rejects_oversized_response_before_dispatch(tmp_path: Path
     fake = tmp_path / "dispatch-run"
     fake.write_text(f"#!/bin/sh\ntouch {invoked}\n", encoding="utf-8")
     fake.chmod(fake.stat().st_mode | stat.S_IXUSR)
-    module_spec = importlib.util.spec_from_file_location("run_controls_large_response", SCRIPT)
-    assert module_spec and module_spec.loader
-    module = importlib.util.module_from_spec(module_spec)
-    module_spec.loader.exec_module(module)
+    module = load_script(SCRIPT, "run_controls_large_response")
     monkeypatch.setattr(module, "DISPATCH_RUN", fake)
     monkeypatch.chdir(tmp_path)
     args = module.parser().parse_args([
@@ -905,17 +760,14 @@ def test_blocked_retry_rejects_oversized_response_before_dispatch(tmp_path: Path
 
 
 def test_blocked_retry_rejects_oversized_response_stdin_before_dispatch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    run_dir = make_run(tmp_path)
+    run_dir = make_run(tmp_path, "controls")
     write_attempt(run_dir, status="blocked", result="question\n",
                   question={"code": "needs_input", "prompt": "Which source?"})
     invoked = tmp_path / "invoked"
     fake = tmp_path / "dispatch-run"
     fake.write_text(f"#!/bin/sh\ntouch {invoked}\n", encoding="utf-8")
     fake.chmod(fake.stat().st_mode | stat.S_IXUSR)
-    module_spec = importlib.util.spec_from_file_location("run_controls_large_stdin", SCRIPT)
-    assert module_spec and module_spec.loader
-    module = importlib.util.module_from_spec(module_spec)
-    module_spec.loader.exec_module(module)
+    module = load_script(SCRIPT, "run_controls_large_stdin")
     monkeypatch.setattr(module, "DISPATCH_RUN", fake)
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(module.sys, "stdin", io.TextIOWrapper(io.BytesIO(b"x" * (64 * 1024 + 1))))
@@ -929,7 +781,7 @@ def test_blocked_retry_rejects_oversized_response_stdin_before_dispatch(tmp_path
 
 
 def test_blocked_retry_escapes_lone_surrogate_in_question_prompt(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    run_dir = make_run(tmp_path)
+    run_dir = make_run(tmp_path, "controls")
     question = {"code": "needs_input", "prompt": "bad\ud800"}
     write_attempt(run_dir, status="blocked", result=json.dumps({
         "schema_version": 1, "record_type": "provenant-worker-terminal",
@@ -944,10 +796,7 @@ def test_blocked_retry_escapes_lone_surrogate_in_question_prompt(tmp_path: Path,
     fake.chmod(fake.stat().st_mode | stat.S_IXUSR)
     response = tmp_path / "response"
     response.write_text("answer\n", encoding="utf-8")
-    module_spec = importlib.util.spec_from_file_location("run_controls_surrogate", SCRIPT)
-    assert module_spec and module_spec.loader
-    module = importlib.util.module_from_spec(module_spec)
-    module_spec.loader.exec_module(module)
+    module = load_script(SCRIPT, "run_controls_surrogate")
     monkeypatch.setattr(module, "DISPATCH_RUN", fake)
     monkeypatch.chdir(tmp_path)
     args = module.parser().parse_args([
@@ -960,7 +809,7 @@ def test_blocked_retry_escapes_lone_surrogate_in_question_prompt(tmp_path: Path,
 
 
 def test_inspect_keeps_preterminal_batch_task_conservative_when_receipt_is_absent(tmp_path: Path) -> None:
-    run_dir = make_run(tmp_path)
+    run_dir = make_run(tmp_path, "controls")
     summary = run_dir / "dispatch/batches/batch-001/summary.json"
     summary.parent.mkdir(parents=True)
     summary.write_text(json.dumps({
@@ -977,7 +826,7 @@ def test_inspect_keeps_preterminal_batch_task_conservative_when_receipt_is_absen
 
 
 def test_inspect_does_not_publish_terminal_batch_claim_without_valid_attempt(tmp_path: Path) -> None:
-    run_dir = make_run(tmp_path)
+    run_dir = make_run(tmp_path, "controls")
     summary = run_dir / "dispatch/batches/batch-001/summary.json"
     summary.parent.mkdir(parents=True)
     summary.write_text(json.dumps({
@@ -994,7 +843,7 @@ def test_inspect_does_not_publish_terminal_batch_claim_without_valid_attempt(tmp
 
 
 def test_inspect_rejects_non_string_batch_attempt_path(tmp_path: Path) -> None:
-    run_dir = make_run(tmp_path)
+    run_dir = make_run(tmp_path, "controls")
     summary = run_dir / "dispatch/batches/batch-001/summary.json"
     summary.parent.mkdir(parents=True)
     summary.write_text(json.dumps({
@@ -1009,7 +858,7 @@ def test_inspect_rejects_non_string_batch_attempt_path(tmp_path: Path) -> None:
 
 
 def test_inspect_rejects_invalid_batch_task_id(tmp_path: Path) -> None:
-    run_dir = make_run(tmp_path)
+    run_dir = make_run(tmp_path, "controls")
     summary = run_dir / "dispatch/batches/batch-001/summary.json"
     summary.parent.mkdir(parents=True)
     summary.write_text(json.dumps({
@@ -1024,7 +873,7 @@ def test_inspect_rejects_invalid_batch_task_id(tmp_path: Path) -> None:
 
 
 def test_inspect_reports_incomplete_attempt_directory_without_inventing_liveness(tmp_path: Path) -> None:
-    run_dir = make_run(tmp_path)
+    run_dir = make_run(tmp_path, "controls")
     (run_dir / "dispatch/tasks/task-1/attempt-001").mkdir(parents=True)
 
     result = invoke("run", "inspect", "--run-dir", str(run_dir), cwd=tmp_path)
@@ -1038,16 +887,13 @@ def test_inspect_reports_incomplete_attempt_directory_without_inventing_liveness
 
 
 def test_evidence_reader_rejects_intermediate_directory_symlink(tmp_path: Path) -> None:
-    run_dir = make_run(tmp_path)
+    run_dir = make_run(tmp_path, "controls")
     outside = tmp_path / "outside"
     outside.mkdir()
     (outside / "evidence.txt").write_text("secret", encoding="utf-8")
     (run_dir / "dispatch").mkdir()
     (run_dir / "dispatch/link").symlink_to(outside, target_is_directory=True)
-    spec = importlib.util.spec_from_file_location("run_controls_reader", SCRIPT)
-    assert spec and spec.loader
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    module = load_script(SCRIPT, "run_controls_reader")
 
     with pytest.raises(module.ControlError):
         module._read_regular(run_dir, "dispatch/link/evidence.txt", "evidence")
@@ -1061,10 +907,7 @@ def test_prompt_file_rejects_intermediate_parent_swap(tmp_path: Path, monkeypatc
     outside = tmp_path / "outside"
     outside.mkdir()
     (outside / "operator.md").write_text("outside\n", encoding="utf-8")
-    spec = importlib.util.spec_from_file_location("run_controls_prompt_reader", SCRIPT)
-    assert spec and spec.loader
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    module = load_script(SCRIPT, "run_controls_prompt_reader")
     original_open = module.os.open
     swapped = False
 
@@ -1084,10 +927,10 @@ def test_prompt_file_rejects_intermediate_parent_swap(tmp_path: Path, monkeypatc
 
 
 def test_reduce_requires_explicit_successes_and_names_batch_omissions(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    run_dir = make_run(tmp_path)
-    selected = write_attempt(run_dir, task_id="one")
-    omitted = write_attempt(run_dir, task_id="two")
-    failed = write_attempt(run_dir, task_id="three", status="failed", result=None)
+    run_dir = make_run(tmp_path, "controls")
+    selected = write_attempt(run_dir, task="one")
+    omitted = write_attempt(run_dir, task="two")
+    failed = write_attempt(run_dir, task="three", status="failed", result=None)
     summary = run_dir / "dispatch/batches/batch-001/summary.json"
     summary.parent.mkdir(parents=True)
     summary.write_text(json.dumps({
@@ -1112,10 +955,7 @@ def test_reduce_requires_explicit_successes_and_names_batch_omissions(tmp_path: 
         encoding="utf-8",
     )
     fake.chmod(fake.stat().st_mode | stat.S_IXUSR)
-    spec = importlib.util.spec_from_file_location("run_controls_reduce", SCRIPT)
-    assert spec and spec.loader
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    module = load_script(SCRIPT, "run_controls_reduce")
     monkeypatch.setattr(module, "DISPATCH_RUN", fake)
     monkeypatch.chdir(tmp_path)
     args = module.parser().parse_args([
@@ -1140,9 +980,9 @@ def test_reduce_requires_explicit_successes_and_names_batch_omissions(tmp_path: 
 def test_reduce_forwards_delivery_run_id_only_when_selected_attempts_agree(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, second_delivery: str | None, expected_delivery: str | None,
 ) -> None:
-    run_dir = make_run(tmp_path)
-    first = write_attempt(run_dir, task_id="one", delivery_run_id="delivery:1202")
-    second = write_attempt(run_dir, task_id="two", delivery_run_id=second_delivery)
+    run_dir = make_run(tmp_path, "controls")
+    first = write_attempt(run_dir, task="one", delivery_run_id="delivery:1202")
+    second = write_attempt(run_dir, task="two", delivery_run_id=second_delivery)
     summary = run_dir / "dispatch/batches/batch-001/summary.json"
     summary.parent.mkdir(parents=True)
     summary.write_text(json.dumps({
@@ -1157,10 +997,7 @@ def test_reduce_forwards_delivery_run_id_only_when_selected_attempts_agree(
     captured = tmp_path / "captured.json"
     fake.write_text(f"#!/usr/bin/env python3\nimport json,sys\njson.dump(sys.argv[1:],open({str(captured)!r},'w'))\n", encoding="utf-8")
     fake.chmod(fake.stat().st_mode | stat.S_IXUSR)
-    spec = importlib.util.spec_from_file_location("run_controls_reduce_delivery", SCRIPT)
-    assert spec and spec.loader
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    module = load_script(SCRIPT, "run_controls_reduce_delivery")
     monkeypatch.setattr(module, "DISPATCH_RUN", fake)
     monkeypatch.chdir(tmp_path)
     args = module.parser().parse_args([
@@ -1178,9 +1015,9 @@ def test_reduce_forwards_delivery_run_id_only_when_selected_attempts_agree(
 
 
 def test_reduce_does_not_conflate_repeated_task_across_batch_summaries(tmp_path: Path) -> None:
-    run_dir = make_run(tmp_path)
-    first = write_attempt(run_dir, task_id="same", attempt_id="attempt-001")
-    second = write_attempt(run_dir, task_id="same", attempt_id="attempt-002")
+    run_dir = make_run(tmp_path, "controls")
+    first = write_attempt(run_dir, task="same", attempt=1)
+    second = write_attempt(run_dir, task="same", attempt=2)
     for batch_id, attempt in (("batch-001", first), ("batch-002", second)):
         summary = run_dir / "dispatch/batches" / batch_id / "summary.json"
         summary.parent.mkdir(parents=True, exist_ok=True)
@@ -1206,13 +1043,10 @@ def test_retry_and_reduce_use_real_dispatch_owner_and_retain_new_attempts(tmp_pa
     dispatch = tmp_path / "dispatch-wrapper"
     write_success_adapter(adapter)
     write_dispatch_wrapper(dispatch, adapter)
-    module_spec = importlib.util.spec_from_file_location("run_controls_e2e", SCRIPT)
-    assert module_spec and module_spec.loader
-    module = importlib.util.module_from_spec(module_spec)
-    module_spec.loader.exec_module(module)
+    module = load_script(SCRIPT, "run_controls_e2e")
     monkeypatch.setattr(module, "DISPATCH_RUN", dispatch)
 
-    retry_run = make_run(tmp_path / "retry")
+    retry_run = make_run(tmp_path / "retry", "controls")
     parent = write_attempt(retry_run, status="failed", result=None)
     parent_before = parent.read_bytes()
     monkeypatch.chdir(tmp_path / "retry")
@@ -1225,8 +1059,8 @@ def test_retry_and_reduce_use_real_dispatch_owner_and_retain_new_attempts(tmp_pa
     assert retry_record["retry_of"] == "attempt-001" and retry_record["status"] == "ok"
 
     reduce_root = tmp_path / "reduce"
-    reduce_run = make_run(reduce_root)
-    selected = write_attempt(reduce_run, task_id="source")
+    reduce_run = make_run(reduce_root, "controls")
+    selected = write_attempt(reduce_run, task="source")
     summary = reduce_run / "dispatch/batches/batch-001/summary.json"
     summary.parent.mkdir(parents=True)
     summary.write_text(json.dumps({
@@ -1261,8 +1095,8 @@ def test_retry_and_reduce_use_real_dispatch_owner_and_retain_new_attempts(tmp_pa
 
 @pytest.mark.parametrize("name", [".env", ".ssh/known_hosts"])
 def test_reduce_rejects_credential_or_auth_prompt_before_read(tmp_path: Path, name: str) -> None:
-    run_dir = make_run(tmp_path)
-    write_attempt(run_dir, task_id="one")
+    run_dir = make_run(tmp_path, "controls")
+    write_attempt(run_dir, task="one")
     prompt = tmp_path / name
     prompt.parent.mkdir(parents=True, exist_ok=True)
     prompt.write_text("secret prompt", encoding="utf-8")
@@ -1276,8 +1110,8 @@ def test_reduce_rejects_credential_or_auth_prompt_before_read(tmp_path: Path, na
 
 
 def test_reduce_rejects_original_prompt_symlink_before_resolving(tmp_path: Path) -> None:
-    run_dir = make_run(tmp_path)
-    write_attempt(run_dir, task_id="one")
+    run_dir = make_run(tmp_path, "controls")
+    write_attempt(run_dir, task="one")
     target = tmp_path / "ordinary-prompt.md"
     target.write_text("prompt", encoding="utf-8")
     supplied = tmp_path / "prompt-link.md"
