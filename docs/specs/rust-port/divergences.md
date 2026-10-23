@@ -26,3 +26,23 @@ new behaviour becomes the contract. No lane can approve its own exception.
 Existing front-door exceptions D1–D3 are already recorded in
 [ADR 0027](../../adr/0027-rust-front-door.md#intentional-divergences-from-the-python-front-door).
 They form the current baseline; they are not newly discovered port mismatches.
+
+## RP-1001 — host identity JSON input (partial unit)
+
+- Unit: `scripts/host_identity.py#unit-01`; rulebook v2 with the inert-crate
+  judge-gate override from rulebook v3 / PR #1294.
+- Class: `library`. Source/oracle revision:
+  `e897b10d58b27a46544969594eed08a5ed64c72c`.
+- Reproducer: in `tools/front-door`, run
+  `cargo test -j 2 -p provenant-core python_extended_host_json -- --ignored`.
+  Uses isolated temporary hosts files and the repository's Python module.
+- Expected/actual: Python accepts UTF-8 BOM, UTF-16/32 byte encodings, nonfinite
+  numbers, and lone surrogate escapes in otherwise unused members. The current
+  UTF-8/serde reader rejects these and falls back to the hostname slug.
+- Evidence: executable Python differential reproducer retained as an ignored,
+  failing parity test. Ordinary host policy and duplicate-member fixtures pass.
+  No independent old-pass/mutant-fail judge evidence is claimed.
+- Disposition: open; this unit is partial and must not cut over. Slugs, name
+  validation, strict duplicate detection, fallback, aliases and peer exclusion
+  are ported. A compatibility representation/input decoder remains; no
+  feature expansion or new dependency is authorised by this entry.

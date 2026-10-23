@@ -1,1 +1,8 @@
-//! Pure IDs, roots, paths, clock values and shared enums.
+//! Shared identity, root and path policy. Environment and host observations are values.
+#![forbid(unsafe_code)]
+
+pub mod host_identity;
+mod json_support;
+pub mod paths;
+#[cfg(test)]
+mod test_support;
