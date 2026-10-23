@@ -259,8 +259,10 @@ jobs:
       - name: Install locked harness test dependencies
         run: uv sync --locked --only-group test
       - name: Build Rust front door before parallel test collection
+        # rustup reads rust-toolchain.toml from the working directory, not the manifest path.
+        working-directory: tools/front-door
         run: |
-          cargo build --release --locked --manifest-path tools/front-door/Cargo.toml
+          cargo build --release --locked
           printf 'PROVENANT_FRONT_DOOR_BIN=%s\n' "$GITHUB_WORKSPACE/tools/front-door/target/release/provenant" >> "$GITHUB_ENV"
       - name: Run Python test shard
         env:
