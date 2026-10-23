@@ -6,6 +6,9 @@ use provenant_records::RecordHeader;
 use provenant_supervisor::fs::{LockGuard, LockMode};
 use std::ffi::OsStr;
 
+/// Holds the lock returned by `lock_landing`. Store validation proves only
+/// that the lock directory matches; it does not prove that a lock is held on
+/// a particular file. F7 must re-verify the file binding before Git operations.
 pub struct LandingGuard {
     _lock: LockGuard,
     project: ProjectId,
@@ -237,9 +240,25 @@ impl Store {
             return Err(Error::Invalid("landing OIDs"));
         }
         self.write(request, |tx| {
-            let (at, expires) = lease_expiry(request, claim.lease)?;
+            let at = request.clock.wall_now()?;
+            let expires = lease_expiry(at, claim.lease)?;
             let previous = by_scope(tx, claim.project, "landing", &claim.reference)?;
             if let Some(row) = &previous {
+                if row.holder == Some(claim.actor)
+                    && row.token.as_deref() == Some(claim.token.as_slice())
+                    && row.expires.is_some_and(|t| t > at)
+                {
+                    let value: Landing = decode(&row.bytes)?;
+                    if value.expected != claim.expected || value.candidate != claim.candidate {
+                        return Err(Error::Conflict);
+                    }
+                    return Ok(ClaimFence {
+                        id: row.id,
+                        actor: claim.actor,
+                        generation: row.generation,
+                        token: claim.token,
+                    });
+                }
                 if let Some(operation) = unresolved(tx, claim.project, row.id)? {
                     return Err(Error::PushUnresolved { operation });
                 }
@@ -298,9 +317,11 @@ impl Store {
     ) -> Result<Option<Landing>> {
         reference(branch)?;
         request.retry(|| {
-            by_scope(&self.db, project, "landing", branch)?
-                .map(|r| decode(&r.bytes))
-                .transpose()
+            let bytes: Option<Vec<u8>> = self.db.query_row(
+                "SELECT substr(record,1,262145) FROM claims WHERE project=? AND kind='landing' AND scope_key=?",
+                params![project.to_string(), branch], |row| row.get(0),
+            ).optional()?;
+            bytes.map(|bytes| decode(&bytes)).transpose()
         })
     }
     pub fn renew_landing(
@@ -328,18 +349,16 @@ impl Store {
         request: &Request<'_>,
     ) -> Result<()> {
         self.write(request, |tx| {
-            // The unchanged owner may renew or release after expiry. A new
-            // generation always fences it out; unresolved pushes prevent release.
-            let mut value = self.landing_fence(tx, guard, fence, None)?;
+            let at = request.clock.wall_now()?;
+            // Only release may use an expired fence; unresolved pushes pin it.
+            let mut value = self.landing_fence(tx, guard, fence, lease.map(|_| at))?;
             if lease.is_none()
                 && let Some(operation) = unresolved(tx, guard.project, fence.id)?
             {
                 return Err(Error::PushUnresolved { operation });
             }
-            value.updated_at = request.clock.wall_now()?;
-            value.expires_at = lease
-                .map(|d| lease_expiry(request, d).map(|(_, t)| t))
-                .transpose()?;
+            value.updated_at = at;
+            value.expires_at = lease.map(|d| lease_expiry(at, d)).transpose()?;
             value.holder = lease.map(|_| fence.actor);
             self.save_landing(tx, &value, lease.map(|_| fence.token.as_slice()))?;
             claim_event(

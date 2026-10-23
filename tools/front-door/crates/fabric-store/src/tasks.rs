@@ -257,7 +257,8 @@ impl Store {
         request: &Request<'_>,
     ) -> Result<()> {
         self.write(request, |tx| {
-            let (at, expires) = crate::claims::lease_expiry(request, lease)?;
+            let at = request.clock.wall_now()?;
+            let expires = crate::claims::lease_expiry(at, lease)?;
             let mut task = fenced(tx, project, fence, at, true)?;
             task.expires_at = Some(expires);
             task.updated_at = at;
