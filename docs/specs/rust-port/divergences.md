@@ -964,3 +964,26 @@ The source revision above is unchanged; CLI rendering remains an edge task.
   stays a JSON value. The raw-input public report regression failed before
   repair and now covers reordered, nested and duplicate-key objects without
   adding `preserve_order` or a dependency.
+
+## RP-core-2-01 — shared Python compatibility ownership and ISO repairs
+
+- Rulebook v4; class `bug` (fixed, no intentional source behavior change).
+- Source/oracle: Python sources at `7475ff01`; copied helpers from quota's
+  verified pending module at that revision and providers PR #1298 revision
+  `4155f202e01c9e275e24a9d188f9be5839c04008`. Local CPython 3.14.8,
+  Unicode 16.0.0; Rust oracle runner enforces Python >=3.12.
+- Reproducer: `py::tests::iso_grammar_and_offsets_match_python`, including
+  `2026-W43-5112`, Unicode separators, ISO week dates, fractional UTC offsets,
+  and `9999-12-31T12Z`. The copied Jiff adaptation did not cover this grammar
+  and Jiff's UTC timestamp range excludes Python's final twelve hours.
+- Repair: shared `py` parses Python civil datetimes and retains exact i64 UTC
+  microseconds in `PythonTimestamp`; `to_jiff` is explicitly checked. Week-date
+  separator disambiguation follows CPython's local `_pydatetime` implementation.
+  Float-second conversion retains quota's modf/half-even implementation.
+- Evidence: exact differential grammar matrix, 1,033 fromtimestamp fixtures,
+  numeric equality across bool/int/float, 512 deterministic float bit patterns,
+  and all Unicode scalar printable classifications. No epsilon, timestamp
+  normalisation, or integer-to-float comparison is used.
+- Disposition: source compatibility gathered into `provenant_core::py`;
+  other crates' copies remain for their owners to migrate. Checked JSON stays
+  in records. JSONC/host/pointer representation gaps remain separately open.
