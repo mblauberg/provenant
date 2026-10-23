@@ -152,10 +152,12 @@ impl Directory {
     /// policy authorises it (e.g. the confinement resolver's link expansion).
     pub fn open_directory_with_links(&self, name: &OsStr, follow: bool) -> Result<Self> {
         let name = component(name)?;
-        Self::from_file(
+        let mut child = Self::from_file(
             os::open_directory(&self.file, name, follow)
                 .map_err(error("openat directory", Path::new(name)))?,
-        )
+        )?;
+        child.device = self.device;
+        Ok(child)
     }
     /// Refuse replacement between stat/open/stat and cross-device traversal.
     /// The returned handle keeps that verified identity even after a rename.

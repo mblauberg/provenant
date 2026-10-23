@@ -252,3 +252,25 @@ pub(crate) fn entries(dir: &File) -> io::Result<Vec<OsString>> {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn anchors_opened_directories_and_files_are_all_cloexec() {
+        let temp = tempfile::tempdir().unwrap();
+        let anchor = open_anchor(temp.path()).unwrap();
+        mkdir(&anchor, OsStr::new("child"), 0o700).unwrap();
+        let child = open_directory(&anchor, OsStr::new("child"), false).unwrap();
+        let new = create_new(&child, OsStr::new("file")).unwrap();
+        let read = open_read(&child, OsStr::new("file")).unwrap();
+        let source = open_source(&temp.path().join("child/file")).unwrap();
+        for file in [&anchor, &child, &new, &read, &source] {
+            // SAFETY: file owns a live descriptor and remains borrowed through
+            // this read-only fcntl; no ownership transfers or concurrent close.
+            let flags = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETFD) };
+            assert!(flags >= 0);
+            assert_ne!(flags & libc::FD_CLOEXEC, 0);
+        }
+    }
+}
