@@ -22,6 +22,7 @@ ownership, deduplication and event-ID rules before retaining parser output.
 | `scripts/telemetry_hosts.py#unit-01` | Partial | v1 summary validation | SSH collection, snapshot validation and host merge |
 | `scripts/telemetry_ingest.py#unit-01` | Partial | Claude/Codex allowlisted parsers, cumulative reset policy, quota observations, OTLP metadata privacy and record multiplicity, snapshot-bound JSONL rewrite/append engine, millisecond stamps | Verified no-follow file opening and the SQLite cursor/clear-file adapter |
 | `scripts/telemetry_report.py#unit-01` | Partial | Outcome aggregation, nearest-rank percentiles, latest-attempt selection, peer outcome projection, compact numbers and bounded tables | Ledger stats selection/deduplication, full peer summary and quota snapshot projection |
+| `scripts/telemetry_report.py#unit-02` | Complete | Stats text renderer, including summary/detail tables and omission notices | None |
 
 The implementation units exceed this slice when their database, transport
 and cyclic owner integration is included. Their delivered policy parts remain

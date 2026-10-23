@@ -567,3 +567,27 @@ fn table_trailing_whitespace_matches_python() {
     };
     equal(&json!(report::table(&headers, &rows).unwrap()), &expected);
 }
+
+#[test]
+fn stats_renderer_matches_python() {
+    let report = json!({
+        "host":"local", "since":"2026-01-01", "usage":[{"provider":"openai","adapter":"codex","model":"m","rows":2,"input_tokens":1000,"cache_read_tokens":100,"cache_write_tokens":null,"output_tokens":20,"reasoning_tokens":0,"cache_read_share":0.1,"estimated_cost_usd":0.123,"billing":"api"}],
+        "outcomes":[{"adapter":"codex","model":"m","effort":"high","task_class":"review","route":"alias","lanes":2,"success_rate":0.5,"retries":1,"error_classes":{"provider_timeout":1},"known_cost_usd":0.25,"missing_cost_rows":0,"cost_per_success_usd":0.25,"latency_p50_s":1.25,"latency_p90_s":2.5,"output_tokens_per_s":10.0}],
+        "lanes":[{"status":"ok","error_class":null,"lanes":2}], "compactions_per_lane":[],
+        "limits_per_day":[{"day":"2026-01-02","provider":"openai","status":"rate_limited","events":1}],
+        "last_limit_events":[{"provider":"openai","account":null,"timestamp":"2026-01-02T00:00:00Z","age_seconds":10}],
+        "quota_observations":[{"provider":"openai","window":"5h","used_percent":20.0,"reset_at":null,"timestamp":"2026-01-02T00:00:00Z"}],
+        "unattributed":[],"excluded_rows":{"test_fixture":1},"hosts":[{"host":"peer","status":"offline","reason":"timeout"}]
+    });
+    for detail in [false, true] {
+        let input = json!({"report":report,"detail":detail});
+        let source = format!("{LOAD}\nreport=load('telemetry_report')\nimport contextlib,io\nout=io.StringIO()\nwith contextlib.redirect_stdout(out): report.render_stats(t,input['report'],input['detail'])\nprint(json.dumps(out.getvalue()))");
+        let Some(expected) = python(&source, &input) else {
+            return;
+        };
+        assert_eq!(
+            report::render_stats(&input["report"], detail).unwrap(),
+            expected.as_str().unwrap()
+        );
+    }
+}
