@@ -1674,6 +1674,51 @@ interfaces are deliberately partial: observer.json restoration/replay,
 supervisor return codes 64 and 75, and the full dynamic observer record domain
 are not yet proved exact. Their IDs are removed from the completion ledger.
 
+### RP-CLI3-01: shared checked JSON and numeric bounds (inert partial scope)
+
+- Class: `improvement`, under PORTING.md v4 R4's existing integer-range rule.
+  Author route: `codex/gpt-6.1-sol@high`. Source/oracle:
+  `1884954ef414e60cc6b160c636fe1add9f7784dd`; merged main `b527d675`.
+- PR-check parsing and decoded hook events now use the records owner's checked
+  codec. An unused hook field containing `18446744073709551616` is a typed
+  NumberOutOfRange, while Python accepts and ignores that field. Reap's pure
+  PID/age helpers also refuse integers outside i64/u64 rather than round them.
+  No command is switched; raw JSON non-finite/surrogate handling and complete
+  process boundaries remain partial. The private ordered representation reuses
+  checked scalars, including integer -0, and retains duplicate-key positions.
+
+### RP-CLI3-02: exact text/JSON boundary repairs
+
+- Class: `bug`, fixed before delivery. Same source/oracle as RP-CLI3-01.
+- Path::display loses invalid Unix bytes. Installation's byte output boundary
+  now writes raw OS bytes and accepts byte advisories. Embedded path newlines
+  are covered by whole-output comparisons, including provider rows.
+- Rust regex case folding misses Python IGNORECASE's dotted/dotless I. The
+  publication personal-email classifier explicitly folds Python's four special
+  ASCII-case equivalents; source differentials include the dotted-I case.
+- Packet metadata is typed and encoded with sorted keys, compact separators,
+  ensure_ascii and exact status/diff framing. Hook output has its source's
+  field order, separators and ensure_ascii. The latter remains partial under
+  RP-CLI2-03: malformed/raw surrogate JSON is an explicit decoder error here,
+  while source main catches malformed JSON and accepts escaped surrogates.
+  New fixtures keep those gaps visible; neither hook unit-02 nor Git packet
+  materialisation is declared complete.
+
+### RP-CLI3-03: publication file growth at the bounded read (open)
+
+- Class: `library`; not accepted as a command behavior change. Same source/oracle
+  as RP-CLI3-01. Both public-release units remain absent from `ported.txt`.
+- Source checks a path's size and then reads its entire text. A replacement or
+  growth between stat/open can make that text exceed 5 MiB. Rust's initial
+  bounded read silently omitted the tail, potentially missing a finding; native
+  review caught this. The repaired adapter detects max+1 bytes and returns a
+  typed ChangedDuringRead refusal before decoding, rather than accepting a
+  prefix or mistaking a split UTF-8 character for an unreadable file.
+- Evidence: growth_between_stat_and_open_is_an_explicit_partial_scope_refusal
+  supplies a small stat target and a larger opened safe file without racing.
+  Source-compatible complete streaming text classification is still needed;
+  the inert library refusal is explicit, not approval to change publication
+  behavior at cut-over. No live command uses this adapter.
 ### RP-SUP3-CENSUS: fallback failure rendering (bug, fixed; bound still open)
 
 - Source/oracle: `7021182d535f6c730c29713e77d5bca76893fd06`, Python 3.14.8,

@@ -200,3 +200,137 @@ print(json.dumps(m.openai_sidecar_errors()))
         }
     }
 }
+
+/// Unit-02 orchestration seam: each implementation owns exactly the checker
+/// named in the source; YAML/Markdown decoders can be integrated independently.
+pub trait Checks {
+    type Error;
+    fn skills(&mut self) -> Result<Vec<String>, Self::Error>;
+    fn markdown_links(&mut self, paths: &[std::path::PathBuf]) -> Result<Vec<String>, Self::Error>;
+    fn issue_forms(&mut self, paths: &[std::path::PathBuf]) -> Result<Vec<String>, Self::Error>;
+    fn sidecars(&mut self) -> Result<Vec<String>, Self::Error>;
+}
+
+fn markdown_paths(base: &Path, result: &mut Vec<std::path::PathBuf>) {
+    // pathlib rglob suppresses directory-enumeration OSErrors. It does not
+    // recurse into symlink directories, but yields a matching symlink itself.
+    let Ok(entries) = std::fs::read_dir(base) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().is_some_and(|s| s == "md") {
+            result.push(path.clone());
+        }
+        if entry.file_type().is_ok_and(|t| t.is_dir()) {
+            markdown_paths(&path, result);
+        }
+    }
+}
+pub fn input_paths(root: &Path) -> (Vec<std::path::PathBuf>, Vec<std::path::PathBuf>) {
+    let mut docs = Vec::new();
+    markdown_paths(&root.join("docs"), &mut docs);
+    docs.sort();
+    let mut forms = Vec::new();
+    for base in [
+        ".github/ISSUE_TEMPLATE",
+        "skills/setup-repo/templates/ISSUE_TEMPLATE",
+    ] {
+        let mut paths = Vec::new();
+        if let Ok(entries) = std::fs::read_dir(root.join(base)) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().is_some_and(|s| s == "yml")
+                    && path.file_name().is_none_or(|s| s != "config.yml")
+                {
+                    paths.push(path);
+                }
+            }
+        }
+        paths.sort();
+        forms.extend(paths);
+    }
+    (docs, forms)
+}
+
+pub fn render(errors: &[String]) -> crate::CommandOutput {
+    if errors.is_empty() {
+        crate::CommandOutput {
+            stdout: "PASS: frontmatter, fixtures, links, issue forms and sidecars clean\n".into(),
+            ..Default::default()
+        }
+    } else {
+        crate::CommandOutput {
+            stderr: errors.iter().map(|e| format!("FAIL: {e}\n")).collect(),
+            exit_code: 1,
+            ..Default::default()
+        }
+    }
+}
+pub fn run<C: Checks>(root: &Path, checks: &mut C) -> Result<crate::CommandOutput, C::Error> {
+    let (docs, forms) = input_paths(root);
+    let mut errors = checks.skills()?;
+    errors.extend(checks.markdown_links(&docs)?);
+    errors.extend(checks.issue_forms(&forms)?);
+    errors.extend(checks.sidecars()?);
+    Ok(render(&errors))
+}
+
+#[cfg(test)]
+mod orchestration_tests {
+    use super::*;
+    use serde_json::json;
+    #[test]
+    fn path_selection_and_output_order_match_source_main_contract() {
+        let dir = tempfile::tempdir().unwrap();
+        for file in [
+            "docs/b.md",
+            "docs/nested/a.md",
+            "docs/skip.txt",
+            ".github/ISSUE_TEMPLATE/z.yml",
+            ".github/ISSUE_TEMPLATE/config.yml",
+            ".github/ISSUE_TEMPLATE/no.yaml",
+            "skills/setup-repo/templates/ISSUE_TEMPLATE/a.yml",
+        ] {
+            let path = dir.path().join(file);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, "").unwrap();
+        }
+        let Some(expected):Option<(Vec<std::path::PathBuf>,Vec<std::path::PathBuf>)>=crate::oracle::python("import json,sys; from pathlib import Path; r=Path(json.load(sys.stdin)['root']); print(json.dumps([[str(p) for p in sorted((r/'docs').rglob('*.md'))],[str(p) for p in [*sorted((r/'.github/ISSUE_TEMPLATE').glob('*.yml')),*sorted((r/'skills/setup-repo/templates/ISSUE_TEMPLATE').glob('*.yml'))] if p.name!='config.yml']]))",&json!({"root":dir.path()})) else{return;};
+        assert_eq!(input_paths(dir.path()), expected);
+        struct Fixture;
+        impl Checks for Fixture {
+            type Error = std::convert::Infallible;
+            fn skills(&mut self) -> Result<Vec<String>, Self::Error> {
+                Ok(vec!["skills".into()])
+            }
+            fn markdown_links(
+                &mut self,
+                _: &[std::path::PathBuf],
+            ) -> Result<Vec<String>, Self::Error> {
+                Ok(vec!["links".into()])
+            }
+            fn issue_forms(
+                &mut self,
+                _: &[std::path::PathBuf],
+            ) -> Result<Vec<String>, Self::Error> {
+                Ok(vec!["forms".into()])
+            }
+            fn sidecars(&mut self) -> Result<Vec<String>, Self::Error> {
+                Ok(vec!["sidecars".into()])
+            }
+        }
+        assert_eq!(
+            run(dir.path(), &mut Fixture).unwrap(),
+            crate::CommandOutput {
+                stderr: "FAIL: skills\nFAIL: links\nFAIL: forms\nFAIL: sidecars\n".into(),
+                exit_code: 1,
+                ..Default::default()
+            }
+        );
+        assert_eq!(
+            render(&[]).stdout,
+            "PASS: frontmatter, fixtures, links, issue forms and sidecars clean\n"
+        );
+    }
+}
