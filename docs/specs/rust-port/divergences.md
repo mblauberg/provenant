@@ -1122,3 +1122,17 @@ The source revision above is unchanged; CLI rendering remains an edge task.
 - Remaining: nonfinite/overflow values and lone surrogate JSON strings (and
   raw surrogate-pass byte decoding). The existing failing parity reproducer
   remains ignored; this unit is still partial. No codec was moved from records.
+
+### RP-1002 core-2 follow-up — comment diagnostics and shared whitespace
+
+- Unit: `scripts/lib/jsonc.py#unit-01`; rulebook v4; class `bug` (partial
+  repair). Source/oracle `7475ff01`; route `codex/gpt-6.1-sol@high`.
+- Unterminated-comment error display now includes Python's exact line, column
+  and character offset. Unicode and CRLF differential fixtures compare all
+  four observable diagnostic values, including errors after earlier comments.
+- Trailing-comma lookahead uses the shared `py::python_whitespace`; control
+  whitespace is still rejected by the JSON grammar just as Python rejects it.
+- Remaining: extended JSON/surrogate/insertion-order representation, exact
+  integer ingress and generic JSONDecodeError diagnostics. Core cannot depend
+  on records under R2; no checked codec is moved or copied by this repair.
+  The unit remains partial and is excluded from `Units:`.
