@@ -151,12 +151,12 @@ features; member crates use `{ workspace = true }`.
 |---|---|
 | `serde` (derive), `serde_json` | Typed records, config and JSON protocols; explicit encoders where bytes matter |
 | `thiserror` | Typed library errors |
-| `rusqlite` (`bundled`) | Fabric store; preserve transactions, WAL, busy timeout, pragmas and migration order |
+| `rusqlite` (`bundled`) | Fabric and run stores; preserve transactions, WAL, busy timeout, pragmas and migration order |
 | `sha2` | Existing SHA-256 identity and digest contracts |
 | `regex` | Pattern rules ported from Python `re`; check each pattern for syntax differences |
 | `jiff` | Timestamps, durations and local-time quota schedules |
 | `clap` (derive) | Argument parsing; J1 compares help structurally, machine output byte for byte |
-| `toml_edit` | Reading and editing Codex `config.toml` without reformatting it |
+| `toml_edit` (`serde`) | Reading and editing Codex `config.toml` without reformatting it; typed config deserialisation |
 | `libc` | Supervisor syscall layer only (R7) |
 | `tempfile` (dev only) | Test fixtures, never live state |
 

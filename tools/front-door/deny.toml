@@ -1,5 +1,5 @@
-# ADR 0028: approved direct crates and the current lockfile transitive closure.
-# A new crate must be reviewed against PORTING.md R6 before joining this list.
+# ADR 0028: licences, advisories, sources and the approved transitive set.
+# tests/workspace_policy.rs separately enforces the direct dependency list.
 [advisories]
 db-urls = ["https://github.com/RustSec/advisory-db"]
 
@@ -93,6 +93,7 @@ allow = [
   "serde_core",
   "serde_derive",
   "serde_json",
+  "serde_spanned",
   "sha2",
   "shlex",
   "smallvec",
