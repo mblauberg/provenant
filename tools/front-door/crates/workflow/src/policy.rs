@@ -23,8 +23,8 @@ pub(crate) fn hashable(value: &serde_json::Value, field: &'static str) -> Result
 }
 
 pub(crate) fn strip(value: &str) -> &str {
-    crate::pending::python_strip(value)
+    provenant_core::py::python_strip(value)
 }
 pub(crate) fn whitespace(c: char) -> bool {
-    crate::pending::python_whitespace(c)
+    provenant_core::py::python_whitespace(c)
 }

@@ -1,6 +1,5 @@
 //! Temporary shared types and Python compatibility helpers awaiting their owners.
 
-mod python_unicode;
 
 // port: belongs in provenant-core
 // Unicode decimal digits, as accepted by Python re \d and int.
@@ -20,42 +19,6 @@ pub(crate) fn decimal_digit(c: char) -> Option<u8> {
     ZEROS
         .iter()
         .find_map(|&zero| code.checked_sub(zero).filter(|&d| d < 10).map(|d| d as u8))
-}
-
-// port: belongs in provenant-core
-#[allow(dead_code)]
-pub(crate) fn python_repr(text: &str) -> String {
-    let quote = if text.contains('\'') && !text.contains('"') {
-        '"'
-    } else {
-        '\''
-    };
-    let mut result = String::from(quote);
-    for c in text.chars() {
-        match c {
-            '\\' => result.push_str("\\\\"),
-            '\n' => result.push_str("\\n"),
-            '\r' => result.push_str("\\r"),
-            '\t' => result.push_str("\\t"),
-            c if c == quote => {
-                result.push('\\');
-                result.push(c);
-            }
-            c if !python_unicode::printable(c) => {
-                let code = u32::from(c);
-                if code < 256 {
-                    result.push_str(&format!("\\x{code:02x}"));
-                } else if code <= 0xffff {
-                    result.push_str(&format!("\\u{code:04x}"));
-                } else {
-                    result.push_str(&format!("\\U{code:08x}"));
-                }
-            }
-            c => result.push(c),
-        }
-    }
-    result.push(quote);
-    result
 }
 
 // port: belongs in provenant-core
@@ -194,17 +157,6 @@ pub(crate) fn python_digit(c: char) -> bool {
         )
 }
 
-// port: belongs in provenant-core
-#[allow(dead_code)]
-pub(crate) fn python_whitespace(c: char) -> bool {
-    c.is_whitespace() || matches!(c, '\u{1c}'..='\u{1f}')
-}
-
-// port: belongs in provenant-core
-pub(crate) fn python_strip(text: &str) -> &str {
-    text.trim_matches(python_whitespace)
-}
-
 // port: belongs in provenant-confinement
 #[derive(Debug, thiserror::Error)]
 pub enum OwnedFileError {
@@ -263,58 +215,6 @@ pub(crate) fn python_json(value: &serde_json::Value) -> String {
     }
 }
 
-// port: belongs in provenant-records
-pub(crate) enum PythonJsonError {
-    NumberOutOfRange,
-    Invalid(serde_json::Error),
-}
-
-// port: belongs in provenant-records
-// Pending copy of main's checked_json boundary until it is a workspace dependency.
-pub(crate) fn parse_python_json(bytes: &[u8]) -> Result<serde_json::Value, PythonJsonError> {
-    serde_json::from_slice::<serde::de::IgnoredAny>(bytes).map_err(PythonJsonError::Invalid)?;
-    let text = match std::str::from_utf8(bytes) {
-        Ok(text) => text,
-        Err(_) => return serde_json::from_slice(bytes).map_err(PythonJsonError::Invalid),
-    };
-    let mut normalized = String::with_capacity(text.len());
-    let mut chars = text.char_indices().peekable();
-    while let Some((start, ch)) = chars.next() {
-        normalized.push(ch);
-        if ch == '"' {
-            while let Some((_, ch)) = chars.next() {
-                normalized.push(ch);
-                if ch == '\\' {
-                    if let Some((_, next)) = chars.next() {
-                        normalized.push(next);
-                    }
-                } else if ch == '"' {
-                    break;
-                }
-            }
-        } else if ch == '-' || ch.is_ascii_digit() {
-            let mut end = start + ch.len_utf8();
-            while let Some(&(index, next)) = chars.peek() {
-                if !(next.is_ascii_digit() || matches!(next, '.' | 'e' | 'E' | '+' | '-')) {
-                    break;
-                }
-                end = index + next.len_utf8();
-                chars.next();
-            }
-            let token = &text[start..end];
-            if !token.contains(['.', 'e', 'E'])
-                && token.parse::<i64>().is_err()
-                && token.parse::<u64>().is_err()
-            {
-                return Err(PythonJsonError::NumberOutOfRange);
-            }
-            normalized.pop();
-            normalized.push_str(if token == "-0" { "0" } else { token });
-        }
-    }
-    serde_json::from_str(&normalized).map_err(PythonJsonError::Invalid)
-}
-
 /// Temporary finite JSON reader. Non-finite values and lone surrogates remain
 /// parser integration gaps; integer overflow uses typed NumberOutOfRange.
 pub(crate) fn read_python_object(
@@ -328,9 +228,9 @@ pub(crate) fn read_python_object(
         path: path.into(),
         source,
     })?;
-    let value: Value = parse_python_json(&bytes).map_err(|error| match error {
-        PythonJsonError::NumberOutOfRange => PortableError::NumberOutOfRange { path: path.into() },
-        PythonJsonError::Invalid(source) => PortableError::Json {
+    let value: Value = provenant_records::checked_json::from_slice(&bytes).map_err(|error| match error {
+        provenant_records::checked_json::DecodeError::NumberOutOfRange(_) => PortableError::NumberOutOfRange { path: path.into() },
+        provenant_records::checked_json::DecodeError::Json(source) => PortableError::Json {
             path: path.into(),
             source,
         },
@@ -382,53 +282,6 @@ pub(crate) fn splitlines(text: &str) -> Vec<&str> {
         result.push(&text[start..]);
     }
     result
-}
-
-// port: belongs in provenant-core
-/// Exact JSON-domain Python equality, including bool/int/float comparisons.
-pub(crate) fn python_json_equal(left: &serde_json::Value, right: &serde_json::Value) -> bool {
-    use serde_json::Value;
-    if let Some(integer) = python_integer_value(left) {
-        if let Some(other) = self::python_integer_value(right) {
-            return integer == other;
-        }
-        if let Some(float) = right
-            .as_number()
-            .filter(|n| n.is_f64())
-            .and_then(|n| n.as_f64())
-        {
-            return float.fract() == 0.0
-                && (-9223372036854775808.0..18446744073709551616.0).contains(&float)
-                && float as i128 == integer;
-        }
-        return false;
-    }
-    if python_integer_value(right).is_some() {
-        return python_json_equal(right, left);
-    }
-    match (left, right) {
-        (Value::Array(a), Value::Array(b)) => {
-            a.len() == b.len() && a.iter().zip(b).all(|(a, b)| python_json_equal(a, b))
-        }
-        (Value::Object(a), Value::Object(b)) => {
-            a.len() == b.len()
-                && a.iter()
-                    .all(|(k, v)| b.get(k).is_some_and(|b| python_json_equal(v, b)))
-        }
-        _ => left == right,
-    }
-}
-
-// port: belongs in provenant-core
-fn python_integer_value(value: &serde_json::Value) -> Option<i128> {
-    match value {
-        serde_json::Value::Bool(b) => Some(i128::from(*b)),
-        serde_json::Value::Number(n) if !n.is_f64() => n
-            .as_i64()
-            .map(i128::from)
-            .or_else(|| n.as_u64().map(i128::from)),
-        _ => None,
-    }
 }
 
 mod python_word;

@@ -101,12 +101,12 @@ impl PacketScanner {
                 return Ok(());
             };
             std::str::from_utf8(&self.header[..separator])?;
-            self.metadata = crate::pending::parse_python_json(&self.header[..separator]).map_err(
+            self.metadata = provenant_records::checked_json::from_slice(&self.header[..separator]).map_err(
                 |e| match e {
-                    crate::pending::PythonJsonError::NumberOutOfRange => {
+                    provenant_records::checked_json::DecodeError::NumberOutOfRange(_) => {
                         PacketError::NumberOutOfRange
                     }
-                    crate::pending::PythonJsonError::Invalid(e) => PacketError::Json(e),
+                    provenant_records::checked_json::DecodeError::Json(e) => PacketError::Json(e),
                 },
             )?;
             if self.validate_on_feed && !validate_header(&self.metadata).unwrap_or(false) {

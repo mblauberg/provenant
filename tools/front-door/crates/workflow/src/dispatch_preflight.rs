@@ -148,9 +148,9 @@ impl FastRoute {
     /// Raw input must enter here. Serde deserialisation of retained, already
     /// checked values is a separate record conversion, not a raw JSON decoder.
     pub fn from_json(raw: &str) -> Result<Self, RouteDecodeError> {
-        let value = crate::pending::parse_python_json(raw.as_bytes()).map_err(|e| match e {
-            crate::pending::PythonJsonError::NumberOutOfRange => RouteDecodeError::NumberOutOfRange,
-            crate::pending::PythonJsonError::Invalid(e) => RouteDecodeError::Json(e),
+        let value = provenant_records::checked_json::from_slice(raw.as_bytes()).map_err(|e| match e {
+            provenant_records::checked_json::DecodeError::NumberOutOfRange(_) => RouteDecodeError::NumberOutOfRange,
+            provenant_records::checked_json::DecodeError::Json(e) => RouteDecodeError::Json(e),
         })?;
         if let Err(error) = serde_json::from_str::<UniqueMembers>(raw) {
             let message = error.to_string();
@@ -177,7 +177,7 @@ impl FastRoute {
                 if value
                     .get(key)
                     .and_then(serde_json::Value::as_str)
-                    .is_none_or(|s| crate::pending::python_strip(s).is_empty())
+                    .is_none_or(|s| provenant_core::py::python_strip(s).is_empty())
                 {
                     return Err(RouteDecodeError::InvalidField(format!(
                         "successful route requires non-empty {key}"

@@ -1,5 +1,5 @@
 //! Idle-frontier pause validation. Markdown policy is independent of file access.
-use crate::pending::python_strip as strip;
+use provenant_core::py::python_strip as strip;
 use regex::Regex;
 use std::{collections::BTreeSet, path::Path};
 
@@ -120,7 +120,7 @@ pub fn validate_text(text: &str, queue: &str) -> Result<Vec<String>, regex::Erro
         errors.push("idle pause requires an empty dry next-up frontier sentinel".into());
     }
     let resume = resume
-        .split(crate::pending::python_whitespace)
+        .split(provenant_core::py::python_whitespace)
         .filter(|s| !s.is_empty())
         .collect::<Vec<_>>()
         .join(" ")

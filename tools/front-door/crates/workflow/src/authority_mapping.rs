@@ -169,7 +169,7 @@ fn object<'a>(
 fn py_list(values: &[String]) -> String {
     let rendered = values
         .iter()
-        .map(|value| crate::pending::python_repr(value))
+        .map(|value| provenant_core::py::python_repr(value))
         .collect::<Vec<_>>()
         .join(", ");
     format!("[{rendered}]")
@@ -790,11 +790,11 @@ pub fn map_delivery_authority(authority: &Value) -> Result<MappedAuthority, Auth
 /// Decode a raw JSON object with the crate's Python integer range guard, then
 /// normalise it as a Delivery Authority V2 value.
 pub fn map_delivery_authority_json(bytes: &[u8]) -> Result<MappedAuthority, AuthorityMappingError> {
-    let value = crate::pending::parse_python_json(bytes).map_err(|error| match error {
-        crate::pending::PythonJsonError::NumberOutOfRange => {
+    let value = provenant_records::checked_json::from_slice(bytes).map_err(|error| match error {
+        provenant_records::checked_json::DecodeError::NumberOutOfRange(_) => {
             AuthorityMappingError::NumberOutOfRange
         }
-        crate::pending::PythonJsonError::Invalid(error) => AuthorityMappingError::Json(error),
+        provenant_records::checked_json::DecodeError::Json(error) => AuthorityMappingError::Json(error),
     })?;
     map_delivery_authority(&value)
 }

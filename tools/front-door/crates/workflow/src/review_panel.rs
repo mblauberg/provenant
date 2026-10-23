@@ -1,6 +1,5 @@
 //! Declarative review panel presets, validation and reducer output.
 
-use crate::pending;
 use crate::review_ladder::{REVIEW_PLAN_STATUSES, SKIPPED_STATUSES};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
@@ -387,7 +386,7 @@ pub fn validate_panel_result_with(
         }
     };
     let actual = result_object.get("shortfall").unwrap_or(&Value::Null);
-    if !pending::python_json_equal(actual, &expected) {
+    if !provenant_core::py::python_json_eq(actual, &expected) {
         errors.push("panel result.shortfall does not match completed membership".to_owned());
     }
 
@@ -399,7 +398,7 @@ pub fn validate_panel_result_with(
     };
     match registry.reduce(reduction, output) {
         Err(error) => errors.push(format!("panel result.output is invalid: {error}")),
-        Ok(normalized) if !pending::python_json_equal(&normalized, output) => {
+        Ok(normalized) if !provenant_core::py::python_json_eq(&normalized, output) => {
             errors.push("panel result.output is not normalized by its declared reducer".to_owned())
         }
         Ok(_) => {}

@@ -538,7 +538,7 @@ fn latex_inline_verb_spans(text: &str) -> Result<Vec<(usize, usize)>, StyleError
             continue;
         }
         if first.is_ascii_alphabetic()
-            || crate::pending::python_whitespace(first)
+            || provenant_core::py::python_whitespace(first)
             || matches!(first, '*' | '{')
         {
             continue;
@@ -772,7 +772,7 @@ pub fn is_table_separator_line(text: &str, index: usize) -> bool {
     let line_end = after
         .find('\n')
         .map_or(text.len(), |newline| byte + newline);
-    let line = crate::pending::python_strip(&text[line_start..line_end]);
+    let line = provenant_core::py::python_strip(&text[line_start..line_end]);
     !line.is_empty()
         && line
             .chars()
@@ -897,7 +897,7 @@ pub fn scan_text(
 
 fn phrase_pattern(phrase: &str) -> Result<Regex, StyleError> {
     let parts: Vec<String> = phrase
-        .split(crate::pending::python_whitespace)
+        .split(provenant_core::py::python_whitespace)
         .filter(|part| !part.is_empty())
         .map(|part| {
             let mut escaped = String::new();
