@@ -20,3 +20,5 @@ pub mod git_evidence;
 pub mod lane_safety;
 
 pub mod projection;
+
+pub mod stale_checkout;
