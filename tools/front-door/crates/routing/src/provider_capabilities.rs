@@ -719,3 +719,233 @@ fn contains_foreign_family(family: &str) -> bool {
         .any(|marker| family.contains(marker))
 }
 
+/// Validate the small argparse surface used by this command.
+pub fn parse_args(argv: &[String]) -> Result<Option<CaptureArgs>, ArgumentError> {
+    let mut provider_name = None;
+    let mut out = None;
+    let mut binary = None;
+    let mut alias = None;
+    let mut effort = None;
+    let mut options_enabled = true;
+    let mut i = 0;
+    while i < argv.len() {
+        let token = argv[i].as_str();
+        if options_enabled && (token == "-h" || token == "--help") {
+            return Ok(None);
+        }
+        if options_enabled && token == "--" {
+            options_enabled = false;
+            i += 1;
+            continue;
+        }
+        if options_enabled && looks_like_option(token) {
+            let (option, inline) = token
+                .split_once('=')
+                .map_or((token, None), |(a, b)| (a, Some(b)));
+            let option = resolve_option(option)
+                .map_err(|candidates| {
+                    ArgumentError::from(format!(
+                        "ambiguous option: {option} could match {}",
+                        candidates.join(", ")
+                    ))
+                })?
+                .ok_or_else(|| format!("unrecognized arguments: {token}"))?;
+            let value = if let Some(value) = inline {
+                value.to_owned()
+            } else {
+                i += 1;
+                argv.get(i)
+                    .filter(|next| !looks_like_option(next))
+                    .cloned()
+                    .ok_or_else(|| format!("argument {option}: expected one argument"))?
+            };
+            match option {
+                "--out" => {
+                    out = Some(if value.is_empty() {
+                        PathBuf::from(".")
+                    } else {
+                        PathBuf::from(value)
+                    })
+                }
+                "--bin" => binary = Some(value),
+                "--alias" => alias = Some(value),
+                "--effort" => {
+                    if !EFFORTS.contains(&value.as_str()) {
+                        return Err(format!(
+                            "argument --effort: invalid choice: {} (choose from {})",
+                            python_repr(&value),
+                            EFFORT_CHOICES
+                                .iter()
+                                .map(|v| python_repr(v))
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        )
+                        .into());
+                    }
+                    effort = Some(value);
+                }
+                _ => return Err(format!("unrecognized arguments: {token}").into()),
+            }
+        } else if provider_name.is_none() {
+            if provider(token).is_none() {
+                return Err(format!(
+                    "argument provider: invalid choice: {} (choose from {})",
+                    python_repr(token),
+                    PROVIDERS
+                        .iter()
+                        .map(|item| python_repr(item.spec().name))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+                .into());
+            }
+            provider_name = Some(token.to_owned());
+        } else {
+            return Err(format!("unrecognized arguments: {token}").into());
+        }
+        i += 1;
+    }
+    let Some(provider_name) = provider_name else {
+        return Err("the following arguments are required: provider".into());
+    };
+    let adapter = provider(&provider_name).ok_or_else(|| "unknown provider".to_owned())?;
+    let spec = adapter.spec();
+    if spec.output_required && out.is_none() {
+        return Err(format!("--out is required for {}", spec.name).into());
+    }
+    if spec.needs_route {
+        if alias
+            .as_deref()
+            .is_none_or(|value| python_strip(value).is_empty())
+        {
+            return Err("--alias must be non-empty".into());
+        }
+        if effort.is_none() {
+            return Err(format!("--effort is required for {}", spec.name).into());
+        }
+    } else if alias.is_some() || effort.is_some() {
+        return Err(format!("--alias and --effort do not apply to {}", spec.name).into());
+    }
+    Ok(Some(CaptureArgs {
+        provider: provider_name,
+        out,
+        binary,
+        alias,
+        effort,
+    }))
+}
+
+fn looks_like_option(token: &str) -> bool {
+    token.starts_with('-') && token != "-" && !is_negative_number(token)
+}
+
+fn is_negative_number(token: &str) -> bool {
+    let Some(number) = token.strip_prefix('-') else {
+        return false;
+    };
+    if !number.is_empty() && number.bytes().all(|byte| byte.is_ascii_digit()) {
+        return true;
+    }
+    let Some((whole, fraction)) = number.split_once('.') else {
+        return false;
+    };
+    (whole.is_empty() || whole.bytes().all(|byte| byte.is_ascii_digit()))
+        && !fraction.is_empty()
+        && fraction.bytes().all(|byte| byte.is_ascii_digit())
+}
+
+fn resolve_option(option: &str) -> Result<Option<&'static str>, Vec<&'static str>> {
+    const OPTIONS: &[&str] = &["--out", "--bin", "--alias", "--effort"];
+    let options = OPTIONS;
+    if options.contains(&option) {
+        return Ok(options
+            .iter()
+            .copied()
+            .find(|candidate| *candidate == option));
+    }
+    resolve_option_from(option, options)
+}
+
+fn resolve_option_from<'a>(
+    option: &str,
+    options: &'a [&'a str],
+) -> Result<Option<&'a str>, Vec<&'a str>> {
+    let mut matches = options
+        .iter()
+        .copied()
+        .filter(|candidate| candidate.starts_with(option));
+    let Some(first) = matches.next() else {
+        return Ok(None);
+    };
+    let mut candidates = vec![first];
+    candidates.extend(matches);
+    match candidates.as_slice() {
+        [only] => Ok(Some(only)),
+        _ => Err(candidates),
+    }
+}
+
+fn help_text() -> &'static str {
+    "usage: capabilities.py [-h] [--out OUT] [--bin BIN] [--alias ALIAS]\n                       [--effort {high,low,max,medium,xhigh}]\n                       {agy,claude,codex}\n\nCapture a runtime capability snapshot for one provider.\n\npositional arguments:\n  {agy,claude,codex}\n\noptions:\n  -h, --help            show this help message and exit\n  --out OUT\n  --bin BIN             provider executable; defaults to the provider name\n  --alias ALIAS\n  --effort {high,low,max,medium,xhigh}\n"
+}
+
+/// Run command policy through injected process and output owners.
+pub fn run(
+    argv: &[String],
+    host: &mut dyn CapabilityProcessHost,
+    writer: &mut dyn CapabilityOutputWriter,
+    context: &DiscoveryContext<'_>,
+) -> Result<i32, CapabilityError> {
+    let args = match parse_args(argv) {
+        Ok(Some(args)) => args,
+        Ok(None) => {
+            writer
+                .stdout(help_text())
+                .map_err(CapabilityError::Output)?;
+            return Ok(0);
+        }
+        Err(error) => {
+            writer
+                .stderr(&format!("{USAGE}\ncapabilities.py: error: {error}\n"))
+                .map_err(CapabilityError::Output)?;
+            return Ok(2);
+        }
+    };
+    let adapter = provider(&args.provider).ok_or_else(|| discovery("unknown provider"))?;
+    let spec = adapter.spec();
+    let binary = args
+        .binary
+        .as_deref()
+        .filter(|binary| !binary.is_empty())
+        .unwrap_or(spec.default_bin);
+    let (snapshot, warning) = match adapter.discover(binary, &args, host, context) {
+        Ok(result) => result,
+        Err(error) => {
+            writer
+                .stderr(&format!("capability discovery failed: {error}\n"))
+                .map_err(CapabilityError::Output)?;
+            return Ok(1);
+        }
+    };
+    if let Some(warning) = warning {
+        writer
+            .stderr(&format!("{warning}\n"))
+            .map_err(CapabilityError::Output)?;
+    }
+    let encoded = python_json_dumps(&snapshot);
+    if let Some(path) = &args.out {
+        writer
+            .write_file(path, &encoded, spec.restrict_output)
+            .map_err(CapabilityError::Output)?;
+    } else {
+        writer.stdout(&encoded).map_err(CapabilityError::Output)?;
+    }
+    Ok(0)
+}
+
+fn python_json_dumps(value: &OrderedValue) -> String {
+    format!("{}\n", crate::pending::json_dumps(value, true, Some(2)))
+}
+
+#[cfg(test)]
+mod tests;
