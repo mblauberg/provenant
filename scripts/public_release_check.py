@@ -23,7 +23,6 @@ REQUIRED_LEGAL_FILES = frozenset({
     "THIRD_PARTY_NOTICES.md",
     "LICENSES/grill-me-pocock-MIT.txt",
     "LICENSES/impeccable-APACHE-2.0.txt",
-    "LICENSES/modern-screenshot-MIT.txt",
     "LICENSES/skill-optimizer-MIT.txt",
     "LICENSES/ui-ux-pro-max-MIT.txt",
 })

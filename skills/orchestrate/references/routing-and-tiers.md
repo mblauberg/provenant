@@ -236,9 +236,8 @@ two different-family passes where practical. Prefer the safest adapter that can 
 artifact. If no safe external adapter is available under the host data policy, use objective local
 checks and record `CROSS-FAMILY-NOT-RUN` instead of pretending it happened.
 
-In dynamic workflows, bind every stage from its task class. Route
-scan/extract stages to the `junior` tier and reserve `principal` for synthesis/adjudication
-(`dynamic-workflows.md`).
+Bind each native stage to its task class. Route scan/extract stages to the
+`junior` tier and reserve `principal` for synthesis/adjudication.
 
 ## Adaptive review topology
 

@@ -1,15 +1,11 @@
-import hashlib
 from pathlib import Path
 import subprocess
 
-import pytest
 import yaml
 
 
 ROOT = Path(__file__).resolve().parents[1]
 SKILL = ROOT / "skills" / "ui-ux-design"
-UI_EVIDENCE = ROOT / "runtime" / "ui-evidence"
-UI_LIVE = ROOT / "runtime" / "ui-live"
 
 
 def _component_for(relative: str, components: list[dict]) -> list[str]:
@@ -23,16 +19,9 @@ def _component_for(relative: str, components: list[dict]) -> list[str]:
     return owners
 
 
-@pytest.mark.parametrize(
-    ("directory", "ledger_path"),
-    (
-        (SKILL, SKILL / "evals" / "provenance_components.yaml"),
-        (UI_EVIDENCE, UI_EVIDENCE / "provenance_components.yaml"),
-        (UI_LIVE, UI_LIVE / "provenance_components.yaml"),
-    ),
-    ids=("skill", "ui-evidence", "ui-live"),
-)
-def test_every_shipped_provenance_file_has_exactly_one_component(directory, ledger_path):
+def test_every_shipped_provenance_file_has_exactly_one_component():
+    directory = SKILL
+    ledger_path = SKILL / "evals" / "provenance_components.yaml"
     components = yaml.safe_load(ledger_path.read_text())["components"]
     files = [
         path.relative_to(directory).as_posix()
@@ -48,6 +37,7 @@ def test_every_shipped_provenance_file_has_exactly_one_component(directory, ledg
 def test_skill_provenance_component_metadata_and_paths():
     ledger = yaml.safe_load((SKILL / "evals" / "provenance_components.yaml").read_text())
     components = ledger["components"]
+    assert _component_for("SKILL.md", components) == ["harness-original-material"]
     for component in components:
         assert component["origin"] in {"third-party", "harness-original"}
         if component["origin"] == "third-party":
@@ -61,22 +51,10 @@ def test_skill_provenance_component_metadata_and_paths():
             assert _component_for(relative, components), relative
 
 
-def test_unmodified_modern_screenshot_bundle_matches_its_pinned_digest():
-    ledger = yaml.safe_load((UI_LIVE / "provenance_components.yaml").read_text())
-    component = next(
-        item for item in ledger["components"] if item["id"] == "modern-screenshot-runtime"
-    )
-    bundle = UI_LIVE / component["exact"][0]
-
-    assert hashlib.sha256(bundle.read_bytes()).hexdigest() == component["sha256"]
-
-
 def test_third_party_components_resolve_to_notices_and_local_licences():
     notices = (ROOT / "THIRD_PARTY_NOTICES.md").read_text()
     ledgers = (
         SKILL / "evals" / "provenance_components.yaml",
-        UI_EVIDENCE / "provenance_components.yaml",
-        UI_LIVE / "provenance_components.yaml",
     )
     for ledger_path in ledgers:
         ledger = yaml.safe_load(ledger_path.read_text())
@@ -91,38 +69,6 @@ def test_third_party_components_resolve_to_notices_and_local_licences():
                 if len(word.strip('".,;()')) == 40
             ]
             assert not revisions or all(revision in notices for revision in revisions)
-
-
-def test_ui_evidence_modification_markers():
-    ledger = yaml.safe_load((UI_EVIDENCE / "provenance_components.yaml").read_text())
-    components = ledger["components"]
-    third_party = next(
-        component
-        for component in components
-        if component["id"] == "impeccable-ui-evidence-runtime"
-    )
-    for key in ("source_url", "source_ref", "licence", "local_licence", "modification"):
-        assert third_party[key]
-
-    baseline = third_party["modification_baseline"]
-    modified = set()
-    for path in (UI_EVIDENCE / "detector").rglob("*"):
-        if not path.is_file():
-            continue
-        relative = path.relative_to(UI_EVIDENCE).as_posix()
-        original = f"skills/ui-ux-design/scripts/{relative}"
-        baseline_file = subprocess.run(
-            ["git", "show", f"{baseline}:{original}"],
-            cwd=ROOT,
-            check=False,
-            capture_output=True,
-        )
-        if baseline_file.returncode != 0 or baseline_file.stdout != path.read_bytes():
-            modified.add(relative)
-
-    assert modified == set(third_party["marker_required_exact"])
-    for relative in modified:
-        assert "Modified for Provenant" in (UI_EVIDENCE / relative).read_text()[:500], relative
 
 
 def test_modified_impeccable_sources_have_local_modification_notices():
@@ -162,52 +108,3 @@ def test_modified_impeccable_sources_have_local_modification_notices():
     assert covered == derived_modified
     for relative in derived_modified:
         assert "Modified for Provenant" in (SKILL / relative).read_text()[:500], relative
-
-
-def test_ui_live_modification_markers():
-    ledger = yaml.safe_load((UI_LIVE / "provenance_components.yaml").read_text())
-    components = ledger["components"]
-    third_party = next(
-        component for component in components
-        if component["id"] == "impeccable-ui-live-runtime"
-    )
-    modified = set()
-    for relative in third_party["exact"]:
-        baseline_file = subprocess.run(
-            [
-                "git",
-                "show",
-                f"{third_party['modification_baseline']}:skills/ui-ux-design/scripts/{relative}",
-            ],
-            cwd=ROOT,
-            check=False,
-            capture_output=True,
-        )
-        if baseline_file.returncode != 0 or baseline_file.stdout != (UI_LIVE / relative).read_bytes():
-            modified.add(relative)
-
-    assert modified == set(third_party["marker_required_exact"])
-    for relative in modified:
-        assert "Modified for Provenant" in (UI_LIVE / relative).read_text()[:500], relative
-
-
-def test_harness_original_runtime_and_test_files_are_not_overattributed_to_impeccable():
-    ledger = yaml.safe_load((SKILL / "evals" / "provenance_components.yaml").read_text())
-    components = ledger["components"]
-    for relative in (
-        "SKILL.md",
-        "scripts/ui-evidence-paths.mjs",
-        "scripts/ui-live-paths.mjs",
-        "scripts/ui-runtime-paths.mjs",
-    ):
-        assert _component_for(relative, components) == ["harness-original-material"]
-
-    live_ledger = yaml.safe_load((UI_LIVE / "provenance_components.yaml").read_text())
-    live_components = live_ledger["components"]
-    for relative in (
-        "contained-source.mjs",
-        "jsx-tag-scanner.mjs",
-        "live-server-startup.mjs",
-        "tests/live-server-startup.test.mjs",
-    ):
-        assert _component_for(relative, live_components) == ["ui-live-runtime-shell"]

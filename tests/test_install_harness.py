@@ -16,16 +16,7 @@ from tests.support.front_door import front_door_binary
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts" / "install-harness"
 PROVENANT_BINARY = front_door_binary()
-WORKFLOW_SCRIPT = ROOT / "scripts" / "install-workflows"
-WORKFLOW_NAMES = {
-    "codebase-polish.js",
-    "cross-verify.js",
-    "implement-run.js",
-}
-UNMANAGED_WORKFLOW_BYTES = (
-    b"export const meta = { name: 'mine' };\r\n"
-    b"// User-owned workflow with no trailing newline"
-)
+
 def instance_root_for(home: Path) -> Path:
     """Where `install-harness` seeds the instance under a scratch HOME."""
     return home / ".agents"
@@ -227,13 +218,6 @@ def test_install_harness_requires_acknowledgement_for_a_linked_worktree(tmp_path
     assert "linked worktree" in result.stderr
 
 
-def run_workflow_installer(target: Path):
-    return run_cli(
-        [str(WORKFLOW_SCRIPT), "--target", str(target)],
-        cwd=ROOT,
-    )
-
-
 def expected_skills():
     return {
         path.parent.name
@@ -267,15 +251,6 @@ def test_installs_claude_skills_and_global_instructions_idempotently(tmp_path):
         "schema_version": 1,
     }
     assert {path.name for path in (config / "skills").iterdir()} == expected_installed_entries()
-    workflows = config / "workflows"
-    assert {path.name for path in workflows.iterdir()} == WORKFLOW_NAMES
-    for name in WORKFLOW_NAMES:
-        assert (workflows / name).is_symlink()
-        assert (workflows / name).resolve() == ROOT / "workflows" / name
-    workflow_manifest = json.loads(
-        (config / ".agent-harness-workflows-installation.json").read_text()
-    )
-    assert set(workflow_manifest["managed"]) == WORKFLOW_NAMES
     instructions = config / "CLAUDE.md"
     content = instructions.read_text()
     # Doctrine is read from the seeded instance copy; the harness constitution
@@ -437,28 +412,6 @@ def test_refuses_receiptless_skill_entry_before_pointer(tmp_path):
     assert not (config / "AGENTS.md").exists()
 
 
-def test_refuses_receiptless_workflow_entry_before_pointer(tmp_path):
-    config = tmp_path / "claude-config"
-    foreign_workflow = tmp_path / "old-product/workflows/codebase-polish.js"
-    foreign_workflow.parent.mkdir(parents=True)
-    foreign_workflow.write_text("// old workflow\n")
-    (config / "workflows").mkdir(parents=True)
-    (config / "workflows/codebase-polish.js").symlink_to(foreign_workflow)
-    instance = instance_root_for(tmp_path)
-    pointer = instance / ".agent-fabric/product-root.json"
-    pointer.parent.mkdir(parents=True)
-    original = '{"product_root": "/old/product", "schema_version": 1}\n'
-    pointer.write_text(original)
-
-    result = run("claude", tmp_path, CLAUDE_CONFIG_DIR=str(config))
-
-    assert result.returncode == 3
-    assert "conflicting managed targets" in result.stderr
-    assert pointer.read_text() == original
-    assert (config / "workflows/codebase-polish.js").is_symlink()
-    assert not (config / "AGENTS.md").exists()
-
-
 def test_refuses_self_targeting_pointer_directory_before_seed(tmp_path):
     config = tmp_path / "codex-home"
     config.mkdir()
@@ -482,15 +435,13 @@ def test_accepts_canonical_directory_links_for_claude_surfaces(tmp_path):
     config = tmp_path / "claude-config"
     config.mkdir()
     (config / "skills").symlink_to(ROOT / "skills", target_is_directory=True)
-    (config / "workflows").symlink_to(ROOT / "workflows", target_is_directory=True)
 
     result = run("claude", tmp_path, CLAUDE_CONFIG_DIR=str(config))
 
     assert result.returncode == 0, result.stderr
     # The personal library sits beside skills/, so the skills link converts to
-    # per-entry links; the workflows link is left as a directory link.
+    # per-entry links.
     assert (config / "skills").is_dir() and not (config / "skills").is_symlink()
-    assert (config / "workflows").resolve() == (ROOT / "workflows").resolve()
 
 
 def test_codex_install_projects_instance_custom_skill_without_managed_ownership(
@@ -562,197 +513,6 @@ def test_claude_directory_link_layout_converts_to_carry_the_library(
     assert (config / "skills").is_dir() and not (config / "skills").is_symlink()
     assert (config / "skills" / "tanstack-query").is_symlink()
     assert (config / ".agent-harness-installation.json").exists()
-
-
-def test_claude_workflow_upgrade_relinks_a_previously_managed_file(tmp_path):
-    config = tmp_path / "claude-config"
-    first = run("claude", tmp_path, CLAUDE_CONFIG_DIR=str(config))
-    assert first.returncode == 0, first.stderr
-
-    name = "cross-verify.js"
-    previous_source = tmp_path / "previous-checkout" / "workflows" / name
-    previous_source.parent.mkdir(parents=True)
-    previous_source.write_bytes((ROOT / "workflows" / name).read_bytes())
-    destination = config / "workflows" / name
-    destination.unlink()
-    destination.symlink_to(previous_source)
-    manifest_path = config / ".agent-harness-workflows-installation.json"
-    manifest = json.loads(manifest_path.read_text())
-    manifest["managed"][name]["source_target"] = str(previous_source)
-    manifest_path.write_text(json.dumps(manifest))
-
-    upgraded = run("claude", tmp_path, CLAUDE_CONFIG_DIR=str(config))
-
-    assert upgraded.returncode == 0, upgraded.stderr
-    assert destination.is_symlink()
-    assert destination.resolve() == ROOT / "workflows" / name
-    installed = json.loads(manifest_path.read_text())
-    assert installed["managed"][name]["source_target"] == str(
-        ROOT / "workflows" / name
-    )
-
-
-def test_claude_workflow_install_preserves_an_unmanaged_file_byte_identically(
-    tmp_path,
-):
-    config = tmp_path / "claude-config"
-    workflows = config / "workflows"
-    workflows.mkdir(parents=True)
-    name = "codebase-polish.js"
-    unmanaged = workflows / name
-    unmanaged.write_bytes(UNMANAGED_WORKFLOW_BYTES)
-
-    result = run("claude", tmp_path, CLAUDE_CONFIG_DIR=str(config))
-
-    assert result.returncode == 3
-    assert unmanaged.read_bytes() == UNMANAGED_WORKFLOW_BYTES
-    assert not unmanaged.is_symlink()
-    assert "codebase-polish.js" in result.stderr
-    assert not (config / ".agent-harness-workflows-installation.json").exists()
-    for managed_name in WORKFLOW_NAMES - {name}:
-        assert not (workflows / managed_name).exists()
-
-
-@pytest.mark.parametrize("kind", ["copy", "symlink"])
-def test_claude_workflow_install_rejects_an_equivalent_unmanaged_file(
-    tmp_path, kind
-):
-    config = tmp_path / "claude-config"
-    workflows = config / "workflows"
-    workflows.mkdir(parents=True)
-    name = "codebase-polish.js"
-    unmanaged = workflows / name
-    source = ROOT / "workflows" / name
-    if kind == "copy":
-        unmanaged.write_bytes(source.read_bytes())
-    else:
-        unmanaged.symlink_to(source)
-
-    result = run("claude", tmp_path, CLAUDE_CONFIG_DIR=str(config))
-
-    assert result.returncode == 3
-    if kind == "copy":
-        assert unmanaged.read_bytes() == source.read_bytes()
-        assert not unmanaged.is_symlink()
-    else:
-        assert unmanaged.is_symlink()
-        assert unmanaged.resolve() == source
-    assert "codebase-polish.js" in result.stderr
-    assert not (config / ".agent-harness-workflows-installation.json").exists()
-
-
-def test_claude_workflow_install_rejects_a_foreign_broken_symlink_at_a_managed_path(
-    tmp_path,
-):
-    # A managed link replaced by a foreign symlink that resolves to neither the
-    # current nor the recorded source is foreign tampering, not a repairable
-    # managed link, even though a broken symlink reports exists()==False. It must
-    # conflict (exit 3) and leave every workflow target unmutated.
-    config = tmp_path / "claude-config"
-    first = run("claude", tmp_path, CLAUDE_CONFIG_DIR=str(config))
-    assert first.returncode == 0, first.stderr
-
-    name = "cross-verify.js"
-    destination = config / "workflows" / name
-    foreign_target = tmp_path / "foreign" / "missing.js"  # never created: broken
-    destination.unlink()
-    destination.symlink_to(foreign_target)
-
-    result = run("claude", tmp_path, CLAUDE_CONFIG_DIR=str(config))
-
-    assert result.returncode == 3
-    assert name in result.stderr
-    # Zero mutation: the foreign broken symlink is preserved, not relinked.
-    assert destination.is_symlink()
-    assert os.readlink(destination) == str(foreign_target)
-    assert not destination.exists()
-
-
-def test_workflow_install_does_not_publish_links_when_ownership_write_fails(tmp_path):
-    config = tmp_path / "claude-config"
-    target = config / "workflows"
-    target.mkdir(parents=True)
-    config.chmod(0o500)
-    try:
-        failed = run_workflow_installer(target)
-    finally:
-        config.chmod(0o700)
-
-    assert failed.returncode == 3
-    assert not any((target / name).exists() for name in WORKFLOW_NAMES)
-
-    retried = run_workflow_installer(target)
-    assert retried.returncode == 0, retried.stderr
-    assert all((target / name).is_symlink() for name in WORKFLOW_NAMES)
-
-
-def test_workflow_install_recovers_after_interruption_during_link_publication(
-    tmp_path,
-):
-    config = tmp_path / "claude-config"
-    target = config / "workflows"
-    target.mkdir(parents=True)
-    interrupt = run_cli(
-        [
-            sys.executable,
-            "-c",
-            "\n".join(
-                (
-                    "import os, runpy",
-                    "from pathlib import Path",
-                    f"module = runpy.run_path({str(WORKFLOW_SCRIPT)!r}, run_name='interrupt_test')",
-                    "publish = module['_replace_link']",
-                    "def interrupt(destination, source):",
-                    "    publish(destination, source)",
-                    "    os._exit(99)",
-                    "module['install'].__globals__['_replace_link'] = interrupt",
-                    f"module['install'](Path({str(target)!r}))",
-                )
-            ),
-        ],
-        cwd=ROOT,
-    )
-
-    assert interrupt.returncode == 99
-    manifest_path = config / ".agent-harness-workflows-installation.json"
-    assert manifest_path.is_file()
-    interrupted_manifest = json.loads(manifest_path.read_text())
-    assert set(interrupted_manifest["managed"]) == WORKFLOW_NAMES
-
-    retried = run_workflow_installer(target)
-    assert retried.returncode == 0, retried.stderr
-    assert all((target / name).is_symlink() for name in WORKFLOW_NAMES)
-    assert set(json.loads(manifest_path.read_text())["managed"]) == WORKFLOW_NAMES
-
-
-def test_workflow_installer_preserves_a_directory_link_to_canonical_sources(
-    tmp_path,
-):
-    fixture_root = tmp_path / "workflow-fixture"
-    scripts = fixture_root / "scripts"
-    scripts.mkdir(parents=True)
-    shutil.copy2(WORKFLOW_SCRIPT, scripts / "install-workflows")
-    shutil.copytree(ROOT / "workflows", fixture_root / "workflows")
-    platform_home = tmp_path / "claude"
-    platform_home.mkdir()
-    target = platform_home / "workflows"
-    target.symlink_to(fixture_root / "workflows", target_is_directory=True)
-
-    result = run_cli(
-        [str(scripts / "install-workflows"), "--target", str(target)],
-        cwd=fixture_root,
-    )
-
-    assert result.returncode == 0, result.stderr
-    assert target.is_symlink()
-    assert target.resolve() == fixture_root / "workflows"
-    assert "workflows existing=directory-link" in result.stdout
-    assert not (
-        fixture_root / ".agent-harness-workflows-installation.json"
-    ).exists()
-    assert not (
-        platform_home / ".agent-harness-workflows-installation.json"
-    ).exists()
 
 
 @pytest.mark.parametrize(
@@ -888,7 +648,11 @@ def test_all_without_skipped_platforms_runs_under_bash_3(tmp_path):
     )
 
     assert result.returncode == 0, result.stderr
-    assert "skipped=" not in result.stdout + result.stderr
+    assert not any(
+        "skipped=" in line
+        for line in (result.stdout + result.stderr).splitlines()
+        if line.startswith("provider ")
+    )
     assert (tmp_path / ".claude/skills/orchestrate/SKILL.md").is_file()
     assert (tmp_path / ".codex/skills/orchestrate/SKILL.md").is_file()
 
@@ -1420,7 +1184,7 @@ def test_check_lists_stale_legacy_agy_skill_links_without_removing_them(tmp_path
         "schema_version": 1,
         "owner": "agent-harness",
         # An older install may record a previous home directory.
-        "target_root": str(legacy.resolve()) if receipt_root == "current" else "/Users/previous/.gemini/config/skills",
+        "target_root": str(legacy.resolve()) if receipt_root == "current" else str(tmp_path / "previous-home/.gemini/config/skills"),
         "updated_at": utc_timestamp(),
         "managed": {
             "retired-skill": {
@@ -1839,7 +1603,6 @@ def test_all_primary_install_configures_both_surfaces_and_publishes_once(
     assert result.returncode == 0, result.stderr
     assert result.stdout.count("product root pointer updated=") == 1
     assert (tmp_path / "claude/skills/scope/SKILL.md").is_file()
-    assert (tmp_path / "claude/workflows/implement-run.js").is_file()
     assert (tmp_path / "codex/skills/scope/SKILL.md").is_file()
     assert (tmp_path / "claude/CLAUDE.md").read_text().find(str(product / "HARNESS.md")) >= 0
     assert (tmp_path / "codex/AGENTS.md").read_text().find(str(product / "HARNESS.md")) >= 0
@@ -1894,7 +1657,6 @@ def test_all_primary_install_uses_selected_python_when_path_has_no_python3(
     result = run_product(product, "all", tmp_path, PATH=str(tool_bin))
 
     assert result.returncode == 0, result.stderr
-    assert (tmp_path / "claude/workflows/implement-run.js").is_file()
     assert (tmp_path / "codex/skills/scope/SKILL.md").is_file()
 
 
@@ -2427,3 +2189,36 @@ def test_missing_cargo_exits_three_with_rustup_fix_before_installing(tmp_path, r
     assert not (tmp_path / "instance/.agent-fabric/product-root.json").exists()
     for destination in ("bin", "instance", "codex", "claude", "home"):
         assert not (tmp_path / destination).exists(), destination
+
+
+@pytest.mark.parametrize("source_exists", [False, True], ids=["absent", "empty"])
+@pytest.mark.parametrize("preflight", [False, True], ids=["install", "preflight"])
+def test_workflow_installer_skips_retired_sources_without_touching_target(
+    tmp_path, source_exists, preflight
+):
+    product = tmp_path / "product"
+    scripts = product / "scripts"
+    scripts.mkdir(parents=True)
+    installer = scripts / "install-workflows"
+    shutil.copy2(ROOT / "scripts/install-workflows", installer)
+    if source_exists:
+        (product / "workflows").mkdir()
+    target = tmp_path / "claude/workflows"
+    target.mkdir(parents=True)
+    owned = target / "user.js"
+    owned.write_bytes(b"// user-owned\r\n")
+    manifest = target.parent / ".agent-harness-workflows-installation.json"
+    manifest.write_bytes(b"user-owned receipt\n")
+
+    result = run_cli(
+        [sys.executable, str(installer), "--target", str(target),
+         *(["--preflight"] if preflight else [])],
+        cwd=product,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "workflows skipped=" in result.stdout
+    assert ("empty" if source_exists else "absent") in result.stdout
+    assert {path.name for path in target.iterdir()} == {"user.js"}
+    assert owned.read_bytes() == b"// user-owned\r\n"
+    assert manifest.read_bytes() == b"user-owned receipt\n"
