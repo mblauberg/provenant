@@ -1,6 +1,7 @@
 //! The provenant front door: resolve the product checkout, pick the owner of
 //! a verb, and replace this process with it. Owners keep their own logic.
 
+#![forbid(unsafe_code)]
 // Rewrite pending: remove when this crate is rewritten.
 #![allow(
     clippy::collapsible_if,

@@ -119,7 +119,7 @@ macOS uses kqueue plus SIGCHLD. Explicit cleanup precedes consuming reap; abort
 or `Drop` is never a provider cleanup mechanism.
 
 Reuse S2's machine/census/capture, `SafeFs` and #1348's `Executor`, raw outcome,
-strict text decoding, `OwnedPid`, CWD, append/lock and marker APIs. Correct
+strict text decoding, private direct-child custody, CWD, append/lock and marker APIs. Correct
 #1348 before its consumers land:
 
 - Each stream is `Capture { limit }`, `Discard`, or `Tee { limit, sink }`.
@@ -398,7 +398,7 @@ confinement adds config and supervisor's safe OS API. No library imports cli.
 | `stop(handle, StopReason) -> StopReceipt` | Run maps an authorised generation-bound cancel to ExplicitCancellation, wall expiry to WallDeadline, provider rejection to ProtocolRejected; guardian signal and post-terminal cleanup use their closed reasons. Durable attempt-bound request/receipt; guardian alone signals. Acknowledgement does not prove death; channel loss is unknown. |
 | `recover(CustodyRef) -> Reattached\|Exited\|Unknown` | Run supplies a validated stored custody reference with bounded observation context. Verify guardian session/PGID and native identity; free lock alone proves nothing. Unknown preserves fence pending authorised typed reconcile. Recovery never kills by PID. |
 | `acquire_custody(RunRef, WaitBudget, &CancelToken)`; `acquire_writer(VerifiedWorktree, ReservationPermit, WaitBudget, &CancelToken)` | Opaque custody, controlled duplicate handoff, lock plus reservation checks; no TTL takeover or SQLite access. Fabric supplies graph permits. |
-| `exec::Executor::execute(ExecOptions)`; `run_text`; `pid::{OwnedPid,CwdObserver,ProcessObserver}` | Bounded utility execution/strict UTF-8, stream enums and direct-owned-child authority. Observed identities/CWD grant no signal authority. |
+| `exec::Executor::execute(ExecOptions)`; `run_text`; `pid::{CwdObserver,SystemCwdObserver}` | Bounded utility execution/strict UTF-8 and stream enums. Direct-child custody stays private to Executor; CWD observations grant no signal authority. |
 | `fs::{SafeFs,SafeDir,SafeFile,PathIo}`; `lock(Mode, WaitBudget, &CancelToken) -> LockGuard` | Config, confinement and fabric-store use held-directory bounded/following reads, append and nonblocking lock polling. No public unlock of a shared custody description. |
 | `publish(SafeDir, Name, Bytes, PublishMode::{Replace,NoReplace}) -> Publication` | Sync file, atomically publish, sync directory. Returns Durable, VisibleDurabilityUnconfirmed or pre-publication error. NoReplace conflict preserves existing bytes; reconcile generation/digest and retry sync, retaining custody. |
 | `confinement::{lock(Mode, WaitBudget, &CancelToken), publish(..., Replace\|NoReplace)}` | Safe facade/re-exports for workflow, preserving its R2 dependency edge; same bounded lock and publication semantics, no blocking-lock option. |
@@ -607,8 +607,8 @@ coupled run controls/facade steps 4+5; no adapters are added while waiting.
 
 | PR-sized step | Land and delete together |
 | --- | --- |
-| S1. Safe OS owner | Reuse #1348; correct streams, timeout/CWD, reaper and `SafeFs`. Move lane unsafe into sys; land the wrapper inventory, bounded locks/publication and fixture module. Delete parity wrappers, `execve_strict` and supervisor `clap`. Old Python leaves remain with their old subjects. |
-| S2. Provider custody | Move S2 machine/census/capture; land guardian handoff, persistent reservation, scratch settlement and exit publication. Rebuild custody tests before deleting conformance subjects. Run owns old launch/control caller removal in R4+R5. |
+| S1. Safe OS owner | Reuse #1348; correct streams, timeout/CWD, reaper and `SafeFs`. Move lane unsafe into sys; land the wrapper inventory, bounded locks/publication and fixture module. Delete parity wrappers, `execve_strict` and supervisor `clap`. Old Python leaves remain with their old subjects. Explicit S2 exemptions in `legacy_lane`: census-based numeric-PID kills in `group.rs` and Python start-string emulation (`files.rs::canonical_start`, `fixtures.rs` `localtime_r`/`strftime`). |
+| S2. Provider custody | Move S2 machine/census/capture; land guardian handoff, persistent reservation, scratch settlement and exit publication. Rebuild custody tests before deleting conformance subjects. Replace the S1-exempt numeric-PID census kills and remove `canonical_start` plus fixture `localtime_r`/`strftime` start-string emulation here. Run owns old launch/control caller removal in R4+R5. |
 | S3. Permissions, evidence and worktrees | Land backend trait/SBPL, redactor, Git/output custody, quarantine, tip verification and create/list/remove with merged pruning. Delete confinement emulation and obsolete Rust command copies; surviving Python helpers wait for R4+R5's last importer. CLI updates hooks/skills to frozen commands. |
 | R4+R5. Run controls/facade deletion PR | Run's steps 4+5 remove provider/control/finaliser importers with their owners; delete each leaf and subject tests only when its matrix gate is met. Run cuts scaffold and git_evidence_packet; Fabric/cli/workflow delete/count their own files. No tests of deleted subjects survive and no Python bridge lands. |
 

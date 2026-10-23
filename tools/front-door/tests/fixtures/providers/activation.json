@@ -1,0 +1,282 @@
+{
+  "schema_version": 1,
+  "author_route": "codex/gpt-6.1-sol@high",
+  "default_enabled": false,
+  "required_evidence": [
+    "cli_version_and_platform",
+    "exact_selector_and_effort_controls",
+    "codex_default_service_and_no_conflicting_inherited_override_if_applicable",
+    "recorded_accepted_fresh_or_resume_argv",
+    "recorded_accepted_access_and_confinement_form",
+    "independent_disclosure_and_confinement_readiness"
+  ],
+  "execution_modes": [
+    {
+      "adapter": "claude",
+      "access_mode": "read_only",
+      "session_mode": "fresh",
+      "enabled": false,
+      "reason": "missing_complete_invocation_and_confinement_recording",
+      "capture_refs": [
+        "claude-model-mismatch",
+        "claude-fresh",
+        "claude-resume",
+        "claude-direct-model",
+        "claude-structured-error"
+      ]
+    },
+    {
+      "adapter": "claude",
+      "access_mode": "read_only",
+      "session_mode": "resume",
+      "enabled": false,
+      "reason": "missing_complete_invocation_and_confinement_recording",
+      "capture_refs": [
+        "claude-model-mismatch",
+        "claude-fresh",
+        "claude-resume",
+        "claude-direct-model",
+        "claude-structured-error"
+      ]
+    },
+    {
+      "adapter": "claude",
+      "access_mode": "worktree_write",
+      "session_mode": "fresh",
+      "enabled": false,
+      "reason": "missing_complete_invocation_and_confinement_recording",
+      "capture_refs": [
+        "claude-model-mismatch",
+        "claude-fresh",
+        "claude-resume",
+        "claude-direct-model",
+        "claude-structured-error"
+      ]
+    },
+    {
+      "adapter": "claude",
+      "access_mode": "worktree_write",
+      "session_mode": "resume",
+      "enabled": false,
+      "reason": "missing_complete_invocation_and_confinement_recording",
+      "capture_refs": [
+        "claude-model-mismatch",
+        "claude-fresh",
+        "claude-resume",
+        "claude-direct-model",
+        "claude-structured-error"
+      ]
+    },
+    {
+      "adapter": "codex",
+      "access_mode": "read_only",
+      "session_mode": "fresh",
+      "enabled": false,
+      "reason": "missing_complete_invocation_and_confinement_recording",
+      "capture_refs": [
+        "codex-success",
+        "codex-failure",
+        "codex-partial"
+      ]
+    },
+    {
+      "adapter": "codex",
+      "access_mode": "read_only",
+      "session_mode": "resume",
+      "enabled": false,
+      "reason": "missing_complete_invocation_and_confinement_recording",
+      "capture_refs": [
+        "codex-success",
+        "codex-failure",
+        "codex-partial"
+      ]
+    },
+    {
+      "adapter": "codex",
+      "access_mode": "worktree_write",
+      "session_mode": "fresh",
+      "enabled": false,
+      "reason": "missing_complete_invocation_and_confinement_recording",
+      "capture_refs": [
+        "codex-success",
+        "codex-failure",
+        "codex-partial"
+      ]
+    },
+    {
+      "adapter": "codex",
+      "access_mode": "worktree_write",
+      "session_mode": "resume",
+      "enabled": false,
+      "reason": "missing_complete_invocation_and_confinement_recording",
+      "capture_refs": [
+        "codex-success",
+        "codex-failure",
+        "codex-partial"
+      ]
+    },
+    {
+      "adapter": "cursor",
+      "access_mode": "read_only",
+      "session_mode": "fresh",
+      "enabled": false,
+      "reason": "missing_complete_invocation_and_confinement_recording",
+      "capture_refs": [
+        "cursor-fresh",
+        "cursor-resume"
+      ]
+    },
+    {
+      "adapter": "cursor",
+      "access_mode": "read_only",
+      "session_mode": "resume",
+      "enabled": false,
+      "reason": "missing_complete_invocation_and_confinement_recording",
+      "capture_refs": [
+        "cursor-fresh",
+        "cursor-resume"
+      ]
+    },
+    {
+      "adapter": "cursor",
+      "access_mode": "worktree_write",
+      "session_mode": "fresh",
+      "enabled": false,
+      "reason": "missing_complete_invocation_and_confinement_recording",
+      "capture_refs": [
+        "cursor-fresh",
+        "cursor-resume"
+      ]
+    },
+    {
+      "adapter": "cursor",
+      "access_mode": "worktree_write",
+      "session_mode": "resume",
+      "enabled": false,
+      "reason": "missing_complete_invocation_and_confinement_recording",
+      "capture_refs": [
+        "cursor-fresh",
+        "cursor-resume"
+      ]
+    },
+    {
+      "adapter": "agy",
+      "access_mode": "read_only",
+      "session_mode": "fresh",
+      "enabled": false,
+      "reason": "missing_complete_invocation_and_confinement_recording",
+      "capture_refs": [
+        "agy-success",
+        "agy-error"
+      ]
+    },
+    {
+      "adapter": "agy",
+      "access_mode": "read_only",
+      "session_mode": "resume",
+      "enabled": false,
+      "reason": "missing_complete_invocation_and_confinement_recording",
+      "capture_refs": [
+        "agy-success",
+        "agy-error"
+      ]
+    },
+    {
+      "adapter": "agy",
+      "access_mode": "worktree_write",
+      "session_mode": "fresh",
+      "enabled": false,
+      "reason": "missing_complete_invocation_and_confinement_recording",
+      "capture_refs": [
+        "agy-success",
+        "agy-error"
+      ]
+    },
+    {
+      "adapter": "agy",
+      "access_mode": "worktree_write",
+      "session_mode": "resume",
+      "enabled": false,
+      "reason": "missing_complete_invocation_and_confinement_recording",
+      "capture_refs": [
+        "agy-success",
+        "agy-error"
+      ]
+    },
+    {
+      "adapter": "opencode",
+      "access_mode": "read_only",
+      "session_mode": "fresh",
+      "enabled": false,
+      "reason": "missing_complete_invocation_and_confinement_recording",
+      "capture_refs": [
+        "opencode-unversioned-success",
+        "opencode-error",
+        "opencode-step-finish-nonzero"
+      ]
+    },
+    {
+      "adapter": "opencode",
+      "access_mode": "read_only",
+      "session_mode": "resume",
+      "enabled": false,
+      "reason": "missing_complete_invocation_and_confinement_recording",
+      "capture_refs": [
+        "opencode-unversioned-success",
+        "opencode-error",
+        "opencode-step-finish-nonzero"
+      ]
+    },
+    {
+      "adapter": "opencode",
+      "access_mode": "worktree_write",
+      "session_mode": "fresh",
+      "enabled": false,
+      "reason": "missing_complete_invocation_and_confinement_recording",
+      "capture_refs": [
+        "opencode-unversioned-success",
+        "opencode-error",
+        "opencode-step-finish-nonzero"
+      ]
+    },
+    {
+      "adapter": "opencode",
+      "access_mode": "worktree_write",
+      "session_mode": "resume",
+      "enabled": false,
+      "reason": "missing_complete_invocation_and_confinement_recording",
+      "capture_refs": [
+        "opencode-unversioned-success",
+        "opencode-error",
+        "opencode-step-finish-nonzero"
+      ]
+    }
+  ],
+  "quota_sources": [
+    {
+      "adapter": "claude",
+      "enabled": false,
+      "reason": "missing_redacted_quota_recordings_and_runtime_authority"
+    },
+    {
+      "adapter": "codex",
+      "enabled": false,
+      "reason": "missing_redacted_quota_recordings_and_runtime_authority"
+    },
+    {
+      "adapter": "cursor",
+      "enabled": false,
+      "reason": "missing_redacted_quota_recordings_and_runtime_authority"
+    },
+    {
+      "adapter": "agy",
+      "enabled": false,
+      "reason": "missing_redacted_quota_recordings_and_runtime_authority"
+    },
+    {
+      "adapter": "opencode",
+      "enabled": false,
+      "reason": "missing_redacted_quota_recordings_and_runtime_authority"
+    }
+  ]
+}
