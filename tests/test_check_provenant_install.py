@@ -248,8 +248,14 @@ def crate_product(tmp_path_factory) -> Path:
     )
     (crate / "src/main.rs").write_text("fn main() {}\n")
     (crate / "crates/core/src").mkdir(parents=True)
-    (crate / "crates/core/Cargo.toml").write_text('[package]\nname = "provenant-core"\n')
-    (crate / "crates/core/src/lib.rs").write_text("// library\n")
+    (crate / "crates/core/Cargo.toml").write_text(
+        '[package]\nname = "provenant-core"\n'
+        'build = "scripts/build.rs"\n'
+        '[lib]\npath = "library.rs"\n'
+    )
+    (crate / "crates/core/scripts").mkdir()
+    (crate / "crates/core/scripts/build.rs").write_text("fn main() {}\n")
+    (crate / "crates/core/library.rs").write_text("// library\n")
     return product
 
 
@@ -317,7 +323,7 @@ def test_check_reports_a_rebuild_when_the_binary_predates_the_sources(
 def test_check_detects_a_library_change_without_a_new_stamp(tmp_path, crate_product):
     binary = install_binary(tmp_path, current_digest(crate_product))
     stamped = binary.read_bytes()
-    source = crate_product / "tools/front-door/crates/core/src/lib.rs"
+    source = crate_product / "tools/front-door/crates/core/library.rs"
     original = source.read_bytes()
     assert run_check_in(crate_product, tmp_path).returncode == 0
     try:

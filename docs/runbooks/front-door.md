@@ -41,8 +41,10 @@ libraries that the binary does not yet link. Inputs are hashed in this order:
 
 1. `Cargo.toml`, `Cargo.lock`, `rust-toolchain.toml`, when present, in that order.
 2. The remaining inputs in workspace-relative POSIX path order: root `build.rs`
-   and `src/**`, plus each `crates/*/Cargo.toml` and its sibling `build.rs` and
-   `src/**`. All files under `src/` count, including help text and other assets.
+   and `src/**`, plus each `crates/*/Cargo.toml`, its sibling `build.rs`, and
+   `src/**`. Every Rust source (`*.rs`) anywhere under a workspace package also
+   counts, covering custom target and build-script paths. All files under
+   `src/` count, including help text and other assets.
 
 Each file contributes UTF-8 `path\0byte-length\0` followed by its unchanged
 bytes. Paths are relative to `tools/front-door/`; filesystem traversal order

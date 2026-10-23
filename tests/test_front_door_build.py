@@ -154,6 +154,27 @@ def test_digest_notices_added_renamed_and_removed_members_and_build_scripts(tmp_
     assert build.source_digest(crate) == base
 
 
+def test_digest_covers_custom_target_and_build_script_paths(tmp_path):
+    crate = make_crate(tmp_path)
+    member = crate / "crates/core"
+    manifest = member / "Cargo.toml"
+    manifest.write_text(
+        '[package]\nname = "provenant-core"\nbuild = "scripts/build.rs"\n'
+        '[lib]\npath = "library.rs"\n'
+    )
+    (member / "scripts").mkdir()
+    (member / "scripts/build.rs").write_text("fn main() {}\n")
+    (member / "library.rs").write_text("pub fn value() -> u8 { 1 }\n")
+    base = build.source_digest(crate)
+
+    (member / "library.rs").write_text("pub fn value() -> u8 { 2 }\n")
+    assert build.source_digest(crate) != base
+    changed_library = build.source_digest(crate)
+
+    (member / "scripts/build.rs").write_text("fn main() { println!(\"rerun\"); }\n")
+    assert build.source_digest(crate) != changed_library
+
+
 def test_digest_without_sources_is_a_missing_file_error(tmp_path):
     with pytest.raises(FileNotFoundError):
         build.source_digest(tmp_path)

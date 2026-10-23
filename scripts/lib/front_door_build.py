@@ -52,8 +52,11 @@ def source_digest(crate: Path) -> str:
     """Hash the R2 workspace layout without requiring Cargo.
 
     Start with HASHED_FILES in their listed order (when present), then all
-    remaining inputs sorted by workspace-relative POSIX path. Each input is
-    framed as UTF-8 `path\0byte-length\0` followed by its unmodified bytes.
+    remaining inputs sorted by workspace-relative POSIX path. The latter
+    include every package manifest, every file under its `src/`, every Rust
+    source under the package (including custom target and build-script paths),
+    and any conventional `build.rs`. Each input is framed as UTF-8
+    `path\0byte-length\0` followed by its unmodified bytes.
     """
     manifest = crate / "Cargo.toml"
     sources = crate / "src"
@@ -73,6 +76,12 @@ def source_digest(crate: Path) -> str:
         inputs.update(
             path.relative_to(crate).as_posix()
             for path in (package / "src").rglob("*") if path.is_file()
+        )
+        inputs.update(
+            path.relative_to(crate).as_posix()
+            for path in package.rglob("*.rs")
+            if path.is_file()
+            and not {"target", ".git"}.intersection(path.relative_to(package).parts)
         )
     names += sorted(inputs.difference(names))
     digest = hashlib.sha256()
