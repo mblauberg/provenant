@@ -432,9 +432,9 @@ after cutover.
   branch.
 - **Two implementations before conformance.** The cutover deletes the Python
   path as soon as its conformance rows are green; rollback is a git revert.
-- **Toolchain drift.** Source changes under `tools/` make installed binaries
-  stale until `provenant install` runs; `provenant check install` reports the
-  mismatch, and launch spec versioning refuses a mismatched binary.
+- **Toolchain drift.** A release retains its packaged source digest after
+  checkout updates. Install and install-check command composition belongs to
+  release cut-over; runtime startup never rebuilds an installed binary.
 
 ## Decisions
 
