@@ -86,6 +86,7 @@ link to it but never replace its canonical acceptance evidence.
 For audience-ready HTML, apply the
 [interactive-document boundary](references/interactive-documents.md).
 
-## Portable artifact
+## Project record
 
-Use the skill-owned [delivery receipt schema](portable-workflow.v1.json).
+Keep the scoped criteria, evidence and outcome in the existing project document
+or PR.
