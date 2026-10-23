@@ -225,8 +225,10 @@ def describe(quota, value, banked, now, entries=None, alert=None):
     dated = [row for row in rows if row.get('reset_at') and row.get('window_minutes')]
     longest = max(dated, key=lambda row: row['window_minutes'], default=None)
     signed_out = value.get('status') == 'signed_out'
+    # Reported windows that all reset since are unknown, not unreported.
+    lapsed = any(row.get('reset_passed') for row in rows)
     state = 'signed_out' if signed_out else 'credit_only' if drawing else 'exhausted' if spent else \
-        worst['pace']['state'] if worst else 'unknown' if stale else 'unreported'
+        worst['pace']['state'] if worst else 'unknown' if stale or lapsed else 'unreported'
     shown = display(quota, [row for row in rows if row.get('pool') in (None, (worst or {}).get('pool'))], now,
                     alert_percent(quota) if alert is None else alert)
     # A signed-out account's return is history too: "back since" once its reset has passed.
@@ -237,6 +239,8 @@ def describe(quota, value, banked, now, entries=None, alert=None):
     detail = summary(quota, value, worst, spent, drawing, rate)
     if stale:
         detail = 'stale; window reset since reading; ' + (detail if worst else 'awaiting a fresh reading')
+    elif lapsed and not worst and not spent and not drawing:
+        detail = 'reset passed; awaiting a fresh reading'
     return {key: value.get(key) for key in ('provider', 'account', 'plan', 'host', 'active', 'priority',
                                             'observed_at', 'attempted_at', 'status', 'error', 'source')} | {
         'provider_name': provider_name(name),

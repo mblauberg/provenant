@@ -558,6 +558,14 @@ def test_fresh_non_exhausted_lapsed_window_does_not_bind_the_account(quota, used
     assert account['display_window'] == 'secondary'
 
 
+def test_fresh_reading_whose_windows_all_reset_is_unknown_not_unreported(quota):
+    reading = value(quota, 'codex', 'default', [window(30, 300, -timedelta(hours=1), 'primary'),
+                                              window(40, WEEK, -timedelta(hours=1), 'secondary')])
+    account = row(quota, reading)
+    assert account['state'] == 'unknown'
+    assert account['summary'] == 'reset passed; awaiting a fresh reading'
+
+
 @pytest.mark.parametrize('used,reached', [(100, None), (30, 'primary'), (30, 'five_hour'), (30, None)])
 def test_fresh_exhaustion_or_refusal_still_binds_a_lapsed_window(quota, used, reached):
     reading = value(quota, 'codex', 'default', [window(used, 300, -timedelta(hours=1), 'primary', raw_kind='five_hour'),
@@ -599,3 +607,12 @@ def test_credit_runway_uses_the_anchor_while_credits_are_being_drawn(quota):
     account = row(quota, reading)
     assert account['state'] == 'credit_only'
     assert 'then about 26h on credits' in account['windows'][0]['pace']['summary']
+
+
+def test_allowance_lasting_to_reset_does_not_append_credit_runway(quota):
+    reading = value(quota, 'codex', 'default', [window(90, WEEK, timedelta(hours=1), 'primary')],
+                    usage_credits=[{'balance': 26000, 'unit': 'credits'}])
+    account = row(quota, reading)
+    assert account['windows'][0]['pace']['will_last_to_reset'] is True
+    assert 'allowance lasts until reset' in account['summary']
+    assert 'then' not in account['summary'] and 'credit runway' not in account['summary']
