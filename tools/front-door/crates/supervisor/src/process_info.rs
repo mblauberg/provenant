@@ -1057,7 +1057,7 @@ mod process_tests {
     fn linux_census_preserves_directory_iteration_failure() {
         let result = linux_census_pids([
             Ok("42".into()),
-            Err(std::io::Error::from_raw_os_error(libc::EACCES)),
+            Err(std::io::Error::from_raw_os_error(crate::sys::errno::EACCES)),
         ]);
         assert!(
             result.is_err(),

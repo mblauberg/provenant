@@ -561,7 +561,7 @@ mod spawn_tests {
             BoundedError::Io {
                 source,
                 operation: "spawn",
-            } => assert_eq!(source.raw_os_error(), Some(libc::ENOEXEC)),
+            } => assert_eq!(source.raw_os_error(), Some(crate::sys::errno::ENOEXEC)),
             other => panic!("expected spawn ENOEXEC, got {other:?}"),
         }
     }
