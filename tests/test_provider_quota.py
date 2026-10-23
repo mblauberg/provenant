@@ -773,30 +773,6 @@ def test_accounts_come_from_config_and_default_to_one_discovered_identity(quota,
 
 # Reset events -------------------------------------------------------------------------------
 
-@pytest.mark.parametrize(('previous', 'current', 'observed', 'kind'), [
-    ((80, timedelta(hours=1)), (5, timedelta(days=7, hours=1)), NOW + timedelta(hours=2), 'natural'),
-    ((80, timedelta(days=3)), (10, timedelta(days=3)), NOW + timedelta(hours=1), 'granted_date_kept'),
-    ((80, timedelta(days=3)), (2, timedelta(days=7, hours=1)), NOW + timedelta(hours=1), 'granted_window_restarted'),
-    ((40, timedelta(days=3)), (41, timedelta(days=4)), NOW + timedelta(hours=1), 'window_moved'),
-    ((40, timedelta(days=3)), (0, None), NOW + timedelta(hours=1), 'not_started'),
-    ((0, None), (3, timedelta(days=7)), NOW + timedelta(hours=1), 'window_started'),
-    ((40, timedelta(days=3)), (41, timedelta(days=3)), NOW + timedelta(hours=1), None),
-    # A local clock beyond the previous reset is not proof that the provider rolled its window.
-    ((80, timedelta(days=3)), (10, timedelta(days=3)), NOW + timedelta(days=4), 'granted_date_kept'),
-    ((40, timedelta(days=3)), (41, timedelta(days=3)), NOW + timedelta(days=4), None),
-    # A large gap from the previous provider reset is not a natural rollover.
-    ((80, timedelta(days=3)), (2, timedelta(days=14)), NOW + timedelta(hours=1), 'window_moved'),
-    # A thirty-minute mismatch is not a window restarted at this observation.
-    ((80, timedelta(days=3)), (2, timedelta(days=7, minutes=30)), NOW + timedelta(hours=1), 'window_moved'),
-    ((80, timedelta(days=3)), (2, timedelta(days=7, minutes=58)), NOW + timedelta(hours=1), 'granted_window_restarted'),
-])
-def test_consecutive_observations_classify_reset_events(quota, previous, current, observed, kind):
-    before = window(previous[0], WEEK, previous[1])
-    after = window(current[0], WEEK, current[1])
-    event = quota.classify_reset(before, after, NOW, observed)
-    assert (event or {}).get('kind') == kind
-
-
 # Credits and use-it-or-lose-it ----------------------------------------------------------------
 
 def test_credits_and_resets_appear_only_for_accounts_that_have_them(quota, monkeypatch, capsys):

@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import json
 import os
-from pathlib import Path
 import queue
 import re
 import threading
@@ -162,13 +161,4 @@ def _balance(raw):
 
 
 def fetch(account, io, now):
-    try:
-        return {**parse(app_server(account, io), now), 'source': 'codex app-server'}
-    except io.Unavailable:
-        # Only the default home falls back; the ledger read is scoped to its account label.
-        if account.identity_dir != Path.home() / '.codex':
-            raise
-    observed = io.ledger_windows(ADAPTER, now, account.label)
-    if not observed['windows']:
-        raise io.Unavailable('Codex reported no rate limits')
-    return {**observed, 'source': 'codex rollout rate-limit events'}
+    return {**parse(app_server(account, io), now), 'source': 'codex app-server'}
