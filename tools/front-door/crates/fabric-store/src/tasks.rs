@@ -144,6 +144,7 @@ fn fenced(
     project: ProjectId,
     fence: &TaskFence,
     at: WallTime,
+    require_live: bool,
 ) -> Result<Task> {
     let task = load(tx, project, fence.task)?;
     let token: Option<Vec<u8>> = tx.query_row(
@@ -154,7 +155,7 @@ fn fenced(
     if task.state != TaskState::Active
         || task.owner != Some(fence.actor)
         || task.generation != fence.generation
-        || task.expires_at.is_none_or(|expiry| expiry <= at)
+        || (require_live && task.expires_at.is_none_or(|expiry| expiry <= at))
         || token.as_deref() != Some(fence.token.as_slice())
     {
         return Err(Error::StaleFence);
@@ -234,6 +235,48 @@ impl Store {
             })
         })
     }
+    pub fn verify_task(
+        &self,
+        project: ProjectId,
+        fence: &TaskFence,
+        request: &Request<'_>,
+    ) -> Result<Task> {
+        request.retry(|| {
+            // A short read transaction gives one snapshot for record and token.
+            let tx = self.db.unchecked_transaction()?;
+            let task = fenced(&tx, project, fence, request.clock.wall_now()?, true)?;
+            tx.commit()?;
+            Ok(task)
+        })
+    }
+    pub fn renew_task(
+        &self,
+        project: ProjectId,
+        fence: &TaskFence,
+        lease: DurationMicros,
+        request: &Request<'_>,
+    ) -> Result<()> {
+        self.write(request, |tx| {
+            let (at, expires) = crate::claims::lease_expiry(request, lease)?;
+            let mut task = fenced(tx, project, fence, at, true)?;
+            task.expires_at = Some(expires);
+            task.updated_at = at;
+            save(tx, &task, Some(&fence.token))?;
+            append(
+                tx,
+                &event(
+                    project,
+                    Some(fence.actor),
+                    EventKind::TaskRenewed,
+                    Some(fence.task.to_string()),
+                    "renewed".into(),
+                    at,
+                ),
+                None,
+            )?;
+            Ok(())
+        })
+    }
     pub fn update_task(
         &self,
         project: ProjectId,
@@ -248,7 +291,7 @@ impl Store {
         }
         self.write(request, |tx| {
             let at = request.clock.wall_now()?;
-            let mut task = fenced(tx, project, fence, at)?;
+            let mut task = fenced(tx, project, fence, at, true)?;
             task.objective = objective.into();
             task.note = note.map(Into::into);
             task.updated_at = at;
@@ -297,7 +340,7 @@ impl Store {
     ) -> Result<()> {
         self.write(request, |tx| {
             let at = request.clock.wall_now()?;
-            let mut task = fenced(tx, project, fence, at)?;
+            let mut task = fenced(tx, project, fence, at, false)?;
             task.state = state;
             task.owner = None;
             task.expires_at = None;
