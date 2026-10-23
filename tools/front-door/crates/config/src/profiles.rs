@@ -306,7 +306,7 @@ impl Registry {
             if spec["nullable"].truth() && matches!(lower.as_str(), "null" | "none" | "default") {
                 Value::Null
             } else if spec["type"].string() == Some("int") {
-                parse_int(text).unwrap_or_else(|| Value::String(text.into()))
+                crate::pending::parse_int(text)?.unwrap_or_else(|| Value::String(text.into()))
             } else if spec["type"].string() == Some("bool") {
                 match lower.as_str() {
                     "true" | "1" | "on" => Value::Bool(true),
@@ -762,53 +762,6 @@ fn compact_sorted(value: &Json) -> Result<String> {
     }
 }
 
-// port: belongs in provenant-core
-fn parse_int(text: &str) -> Option<Value> {
-    let (negative, digits) = if let Some(rest) = text.strip_prefix('-') {
-        (true, rest)
-    } else {
-        (false, text.strip_prefix('+').unwrap_or(text))
-    };
-    if digits.is_empty()
-        || digits.starts_with('_')
-        || digits.ends_with('_')
-        || digits.contains("__")
-    {
-        return None;
-    }
-    let mut ascii = String::new();
-    if negative {
-        ascii.push('-');
-    }
-    // Python int accepts Unicode decimal digits and single underscores.
-    for c in digits.chars() {
-        if c == '_' {
-            continue;
-        }
-        let code = c as u32;
-        let digit = DECIMAL_STARTS
-            .iter()
-            .find_map(|start| code.checked_sub(*start).filter(|v| *v < 10))?;
-        ascii.push(char::from(b'0' + digit as u8));
-    }
-    if let Ok(v) = ascii.parse::<i64>() {
-        Some(Value::from(v))
-    } else {
-        ascii.parse::<u64>().ok().map(Value::from)
-    }
-}
-// Unicode 16 Nd starts, including the five mathematical digit sets.
-// port: belongs in provenant-core
-const DECIMAL_STARTS: &[u32] = &[
-    0x30, 0x660, 0x6f0, 0x7c0, 0x966, 0x9e6, 0xa66, 0xae6, 0xb66, 0xbe6, 0xc66, 0xce6, 0xd66,
-    0xde6, 0xe50, 0xed0, 0xf20, 0x1040, 0x1090, 0x17e0, 0x1810, 0x1946, 0x19d0, 0x1a80, 0x1a90,
-    0x1b50, 0x1bb0, 0x1c40, 0x1c50, 0xa620, 0xa8d0, 0xa900, 0xa9d0, 0xa9f0, 0xaa50, 0xabf0, 0xff10,
-    0x104a0, 0x10d30, 0x10d40, 0x11066, 0x110f0, 0x11136, 0x111d0, 0x112f0, 0x11450, 0x114d0,
-    0x11650, 0x116c0, 0x116d0, 0x116da, 0x11730, 0x118e0, 0x11950, 0x11bf0, 0x11c50, 0x11d50,
-    0x11da0, 0x11f50, 0x16130, 0x16a60, 0x16ac0, 0x16b50, 0x16d70, 0x1ccf0, 0x1d7ce, 0x1d7d8,
-    0x1d7e2, 0x1d7ec, 0x1d7f6, 0x1e140, 0x1e2f0, 0x1e4f0, 0x1e5f1, 0x1e950, 0x1fbf0,
-];
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1182,8 +1135,10 @@ mod editing_tests {
             current: Some(dir.path().into()),
             ..Default::default()
         };
-        let environment =
-            BTreeMap::from([(PROFILE_ROOT_ENV.into(), dir.path().display().to_string())]);
+        let environment: crate::OrderedMap<String> =
+            [(PROFILE_ROOT_ENV.into(), dir.path().display().to_string())]
+                .into_iter()
+                .collect();
         let context = Context {
             cwd: dir.path(),
             environment: &environment,

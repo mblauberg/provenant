@@ -9,6 +9,7 @@ use serde_json::{Number, Value};
 use std::{fmt, ops::Index};
 
 #[derive(Debug, Clone, PartialEq)]
+// port: belongs in provenant-records
 pub(crate) enum Json {
     Null,
     Bool(bool),
@@ -17,11 +18,13 @@ pub(crate) enum Json {
     Array(Vec<Json>),
     Object(Vec<(String, Json)>),
 }
+// port: belongs in provenant-records
 impl Default for Json {
     fn default() -> Self {
         Self::Object(vec![])
     }
 }
+// port: belongs in provenant-records
 impl Serialize for Json {
     fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
         match self {
@@ -46,6 +49,7 @@ impl Serialize for Json {
         }
     }
 }
+// port: belongs in provenant-records
 impl<'de> Deserialize<'de> for Json {
     fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
         struct JsonVisitor;
@@ -99,6 +103,7 @@ impl<'de> Deserialize<'de> for Json {
         d.deserialize_any(JsonVisitor)
     }
 }
+// port: belongs in provenant-records
 impl Json {
     pub fn get(&self, key: &str) -> Option<&Self> {
         self.object()?
@@ -191,12 +196,14 @@ impl Json {
         }
     }
 }
+// port: belongs in provenant-records
 impl Index<&str> for Json {
     type Output = Self;
     fn index(&self, k: &str) -> &Self {
         self.get(k).unwrap_or(&Json::Null)
     }
 }
+// port: belongs in provenant-records
 pub(crate) fn decode(
     bytes: &[u8],
     context: &'static str,
@@ -219,6 +226,7 @@ pub(crate) fn decode(
 }
 
 /// Python json.dumps layout with order retained, ascii escaping and exact numbers.
+// port: belongs in provenant-records
 pub(crate) fn dumps(value: &Json, pretty: bool, sorted: bool) -> crate::Result<String> {
     fn encode(
         value: &Json,
@@ -281,6 +289,7 @@ pub(crate) fn dumps(value: &Json, pretty: bool, sorted: bool) -> crate::Result<S
     Ok(out)
 }
 
+// port: belongs in provenant-records
 pub(crate) fn serialize_pairs<S: Serializer, T: Serialize>(
     items: &[(String, T)],
     s: S,
@@ -291,6 +300,7 @@ pub(crate) fn serialize_pairs<S: Serializer, T: Serialize>(
     }
     map.end()
 }
+// port: belongs in provenant-records
 pub(crate) fn deserialize_pairs<'de, D: Deserializer<'de>, T: Deserialize<'de>>(
     d: D,
 ) -> Result<Vec<(String, T)>, D::Error> {
@@ -315,6 +325,7 @@ pub(crate) fn deserialize_pairs<'de, D: Deserializer<'de>, T: Deserialize<'de>>(
     d.deserialize_map(Pairs(std::marker::PhantomData))
 }
 
+// port: belongs in provenant-records
 pub(crate) fn entries<'a>(
     map: &'a serde_json::Map<String, Value>,
     original: Option<&'a Json>,
@@ -339,11 +350,13 @@ pub struct OrderedMap<T>(
     )]
     Vec<(String, T)>,
 );
+// port: belongs in provenant-records
 impl<T> Default for OrderedMap<T> {
     fn default() -> Self {
         Self(vec![])
     }
 }
+// port: belongs in provenant-records
 impl<T> OrderedMap<T> {
     pub fn new() -> Self {
         Self::default()
@@ -379,6 +392,7 @@ impl<T> OrderedMap<T> {
         self.0.len()
     }
 }
+// port: belongs in provenant-records
 impl<'a, T> IntoIterator for &'a OrderedMap<T> {
     type Item = &'a (String, T);
     type IntoIter = std::slice::Iter<'a, (String, T)>;
@@ -387,6 +401,7 @@ impl<'a, T> IntoIterator for &'a OrderedMap<T> {
     }
 }
 
+// port: belongs in provenant-records
 impl<T> FromIterator<(String, T)> for OrderedMap<T> {
     fn from_iter<I: IntoIterator<Item = (String, T)>>(iter: I) -> Self {
         let mut map = Self::new();
@@ -397,6 +412,7 @@ impl<T> FromIterator<(String, T)> for OrderedMap<T> {
     }
 }
 
+// port: belongs in provenant-records
 impl Json {
     pub(crate) fn python_str(&self) -> String {
         if let Self::String(text) = self {

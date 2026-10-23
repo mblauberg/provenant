@@ -1656,3 +1656,54 @@ The review-panel and authority-mapping unit claims hold. All three cycle
 interfaces are deliberately partial: observer.json restoration/replay,
 supervisor return codes 64 and 75, and the full dynamic observer record domain
 are not yet proved exact. Their IDs are removed from the completion ledger.
+
+### RP-config-8 — Config batch 3 compatibility evidence and remaining domains
+
+Class: `bug` (fixed ordering/newline defects) and `library` (open codec/host
+boundaries). Rulebook v4; author `codex/gpt-6.1-sol@high`; source/oracle
+`7021182d535f6c730c29713e77d5bca76893fd06`, Python 3.14.8. Fetched main
+`b527d675d15c50ee51701bb15db6439c95277918` leaves these Python sources unchanged.
+
+- Fixed Rust bugs: skill-marker discovery follows Python's directory glob
+  semantics (hidden/symlinked directories and a directory-valued SKILL.md);
+  first-invalid manifest entries and path-free pointers retain input order;
+  Codex check translates universal newlines and honors Python-only whitespace;
+  profile environments, assignments, nested description repr and preset/knob
+  traversal retain order. New differential fixtures assert these cases.
+- Adopted shared core Python/path helpers, records checked JSON and supervisor
+  safe atomic/link/exchange APIs. The local checked scanner, resolver,
+  publication functions and Unicode table are deleted. V4-approved oversized
+  integer refusal is now the shared typed `NumberOutOfRange` error.
+- RP-config-2/4/6 remain open for Python nonfinite/lone-surrogate JSON and
+  surrogateescaped Unix paths/entry names. The new manager's extra/legacy
+  link reports inherit this limitation, so those units stay partial. A
+  non-UTF-8 live symlink fixture was refused by the local filesystem; no
+  macOS/Linux filesystem-domain conformance is claimed. TOML/parser and
+  interpreter traceback wording also remain partial; no exception is approved.
+- The front-door host contract requires an X_OK observation for both cargo
+  search paths. Main has no safe executable-access syscall wrapper; the crate
+  supplies lookup/build/smoke/select policy with injected host capabilities,
+  and cannot activate them yet. This is an explicit missing owner API, not an
+  existence-only or mode-bit approximation of `os.access`.
+- The R2 table has not yet granted config the requested supervisor safe OS
+  edge. The layering regression reports `config -> supervisor`. The chair
+  was notified; no rulebook/graph weakening or scope-external edit is made.
+
+Disposition: all non-interface units remain partial. The instance cycle unit
+claims only its real typed input/output contract; no instance command owner or
+source is replaced. Exact-head CI, cross-family review, J1/J2 cutover coverage
+and publication conformance remain promotion gates.
+
+RP-config-8 follow-up: native review found that literal `.rs` files were absent
+from the digest because Rust's `Path::extension()` differs from Python's
+`rglob("*.rs")`. Matching basename suffix bytes repairs that bug; mutation and
+Python digest regressions cover both `src/.rs` and `tests/.rs`. The Codex partial
+also includes strict symlink-resolution diagnostic wording and invalid-UTF-8
+exception/traceback bytes. UTF-8 failures now preserve exit 1 and a typed encoding
+cause on every mode, but the synthesized final exception line does not reproduce
+Python's traceback. These are open diagnostic limitations, not approved changes.
+
+RP-config-8 integer-boundary correction: profile text integers now use the same
+v4-approved typed `NumberOutOfRange` refusal as record integers, including
+Unicode decimal input, instead of silently falling back to a string validation
+error. The shared records error is reused; no f64 conversion is involved.

@@ -420,7 +420,7 @@ mod tests {
                     .unwrap();
             value["product"]["ref"] = reference;
             fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
-            let Some(output) = crate::oracle::python("scripts/instance_installation.py", "import json\ntry: print(json.dumps(m.validate_desired_state_value(json.loads(p.read_text()))))\nexcept m.InstallError as e: print(json.dumps(str(e)))", &path) else { return; };
+            let Some(output) = crate::oracle::python("scripts/instance_installation.py", "import json\ntry: print(json.dumps(m.validate_desired_state(json.loads(p.read_text()))))\nexcept m.InstallError as e: print(json.dumps(str(e)))", &path) else { return; };
             let old: Value = serde_json::from_slice(&output).unwrap();
             match validate_desired_state_value(value) {
                 Ok(v) => assert_eq!(old, serde_json::to_value(v).unwrap()),

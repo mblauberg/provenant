@@ -41,3 +41,4 @@ skills/orchestrate/scripts/process_info.py#unit-01
 skills/orchestrate/scripts/run_lineage.py#interface
 skills/orchestrate/scripts/trusted_git.py#unit-01
 workspace:manifest-and-digest
+scripts/instance_installation.py#interface

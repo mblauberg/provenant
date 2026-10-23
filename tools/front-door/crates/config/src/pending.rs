@@ -1,5 +1,6 @@
 //! Temporary shared primitives until their owners land on main.
 use crate::Result;
+use serde_json::Value;
 use std::path::Path;
 
 // port: belongs in provenant-records
@@ -80,6 +81,58 @@ pub(crate) fn path_sort_key(name: &std::ffi::OsStr) -> Vec<u32> {
     result
 }
 
+// port: belongs in provenant-core
+pub(crate) fn parse_int(text: &str) -> Result<Option<Value>> {
+    let (negative, digits) = if let Some(rest) = text.strip_prefix('-') {
+        (true, rest)
+    } else {
+        (false, text.strip_prefix('+').unwrap_or(text))
+    };
+    if digits.is_empty()
+        || digits.starts_with('_')
+        || digits.ends_with('_')
+        || digits.contains("__")
+    {
+        return Ok(None);
+    }
+    let mut ascii = String::new();
+    if negative {
+        ascii.push('-');
+    }
+    // Python int accepts Unicode decimal digits and single underscores.
+    for c in digits.chars() {
+        if c == '_' {
+            continue;
+        }
+        let code = c as u32;
+        let Some(digit) = DECIMAL_STARTS
+            .iter()
+            .find_map(|start| code.checked_sub(*start).filter(|v| *v < 10))
+        else {
+            return Ok(None);
+        };
+        ascii.push(char::from(b'0' + digit as u8));
+    }
+    if let Ok(v) = ascii.parse::<i64>() {
+        Ok(Some(Value::from(v)))
+    } else if let Ok(v) = ascii.parse::<u64>() {
+        Ok(Some(Value::from(v)))
+    } else {
+        Err(provenant_records::checked_json::NumberOutOfRange { value: ascii }.into())
+    }
+}
+// Unicode 16 Nd starts, including the five mathematical digit sets.
+// port: belongs in provenant-core
+const DECIMAL_STARTS: &[u32] = &[
+    0x30, 0x660, 0x6f0, 0x7c0, 0x966, 0x9e6, 0xa66, 0xae6, 0xb66, 0xbe6, 0xc66, 0xce6, 0xd66,
+    0xde6, 0xe50, 0xed0, 0xf20, 0x1040, 0x1090, 0x17e0, 0x1810, 0x1946, 0x19d0, 0x1a80, 0x1a90,
+    0x1b50, 0x1bb0, 0x1c40, 0x1c50, 0xa620, 0xa8d0, 0xa900, 0xa9d0, 0xa9f0, 0xaa50, 0xabf0, 0xff10,
+    0x104a0, 0x10d30, 0x10d40, 0x11066, 0x110f0, 0x11136, 0x111d0, 0x112f0, 0x11450, 0x114d0,
+    0x11650, 0x116c0, 0x116d0, 0x116da, 0x11730, 0x118e0, 0x11950, 0x11bf0, 0x11c50, 0x11d50,
+    0x11da0, 0x11f50, 0x16130, 0x16a60, 0x16ac0, 0x16b50, 0x16d70, 0x1ccf0, 0x1d7ce, 0x1d7d8,
+    0x1d7e2, 0x1d7ec, 0x1d7f6, 0x1e140, 0x1e2f0, 0x1e4f0, 0x1e5f1, 0x1e950, 0x1fbf0,
+];
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -123,6 +176,28 @@ mod tests {
             read_json(&path, "unreadable").unwrap()["n"].as_u64(),
             Some(u64::MAX)
         );
+    }
+    #[test]
+    fn profile_integer_overflow_is_typed_instead_of_becoming_a_string() {
+        for text in [
+            "18446744073709551616",
+            "-9223372036854775809",
+            "１８４４６７４４０７３７０９５５１６１６",
+        ] {
+            assert!(matches!(
+                parse_int(text),
+                Err(crate::Error::NumberOutOfRange(_))
+            ));
+        }
+        assert_eq!(
+            parse_int("18446744073709551615").unwrap(),
+            Some(Value::from(u64::MAX))
+        );
+        assert_eq!(
+            parse_int("-9223372036854775808").unwrap(),
+            Some(Value::from(i64::MIN))
+        );
+        assert_eq!(parse_int("12__3").unwrap(), None);
     }
     #[test]
     fn non_utf8_paths_never_silently_change_the_receipt() {

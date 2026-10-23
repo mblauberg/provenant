@@ -10,6 +10,7 @@ pub mod installation;
 pub mod instance;
 pub mod managed_skills;
 pub mod manifest;
+#[path = "pending/ordered.rs"]
 mod ordered;
 pub use ordered::OrderedMap;
 mod pending;
@@ -19,6 +20,8 @@ pub mod workflows;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
+    #[error(transparent)]
+    NumberOutOfRange(#[from] provenant_records::checked_json::NumberOutOfRange),
     #[error(transparent)]
     Path(#[from] provenant_core::paths::PathError),
     #[error("cargo is not on PATH (looked in ~/.cargo/bin too)")]
