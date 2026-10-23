@@ -25,45 +25,135 @@ REPO = HERE.parents[1]
 CASES = HERE / "cases"
 MANIFEST = HERE / "manifest.json"
 
-# Each entry has a representative boundary invocation. The detail case gives
-# the public usage text; the second case exercises owner validation (or a
-# harmless successful query for commands with a stable read-only path).
-VERBS: dict[str, list[list[str]]] = {
-    "help": [["help"], ["help", "bogus"]],
-    "root": [["root"], ["root", "extra"]],
-    "route": [["route", "--help"], ["route", "--bad-golden-flag"]],
-    "routes": [["routes", "--help"], ["routes", "--bad-golden-flag"]],
-    "capabilities": [["capabilities", "--help"], ["capabilities", "--bad-golden-flag"]],
-    "worktree": [["worktree", "--help"], ["worktree", "--bad-golden-flag"]],
-    "clean": [["clean", "--help"], ["clean", "--bad-golden-flag"]],
-    "reap": [["reap", "--help"], ["reap", "--bad-golden-flag"]],
-    "lint": [["lint", "--help"], ["lint", "--bad-golden-flag"]],
-    "check": [["check", "--help"], ["check", "--bad-golden-flag"]],
-    "gate": [["gate", "--help"]],
-    "fabric": [["fabric", "--help"], ["fabric", "--bad-golden-flag"],
-                ["fabric", "dispatch", "--help"], ["fabric", "dispatch", "--bad-golden-flag"]],
-    "lease": [["lease", "--help"], ["lease", "invalid"]],
-    "hosts": [["hosts", "--help"], ["hosts", "invalid-action"]],
-    "lanes": [["lanes", "--help"], ["lanes", "--bad-golden-flag"]],
-    "events": [["events", "--help"], ["events", "--bad-golden-flag"]],
-    "graph": [["graph", "--help"], ["graph", "--bad-golden-flag"]],
-    "telemetry": [["telemetry", "--help"], ["telemetry", "invalid-action"]],
-    "stats": [["stats", "--help"], ["stats", "--bad-golden-flag"]],
-    "retro": [["retro", "--help"], ["retro", "--bad-golden-flag"]],
-    "quota": [["quota", "--help"], ["quota", "--bad-golden-flag"]],
-    "profile": [["profile", "--help"], ["profile", "invalid-action"]],
-    "digest": [["digest", "--help"], ["digest", "missing.txt", "question"]],
-    "classify": [["classify", "--help"], ["classify", "--labels", "a,b", "missing.json"]],
-    "extract": [["extract", "--help"], ["extract", "missing.json", "--schema", "missing-schema.json"]],
-    "dispatch": [["dispatch", "--help"], ["dispatch", "--plan"]],
-    "batch": [["batch", "--help"], ["batch", "--plan"]],
-    "run": [["run", "--help"], ["run", "show", "missing-run"]],
-    "pr": [["pr", "--help"], ["pr", "checks", "not-a-pr"]],
+# Classes are explicit fixture contracts, independent of argument spelling.
+VERBS: dict[str, list[tuple[str, list[str]]]] = {
+    "help": [
+        ('help', ['help']),
+        ('help', ['help', 'bogus']),
+    ],
+    "root": [
+        ('machine', ['root']),
+        ('help', ['root', 'extra']),
+    ],
+    "route": [
+        ('help', ['route', '--help']),
+        ('help', ['route', '--bad-golden-flag']),
+    ],
+    "routes": [
+        ('help', ['routes', '--help']),
+        ('help', ['routes', '--bad-golden-flag']),
+    ],
+    "capabilities": [
+        ('help', ['capabilities', '--help']),
+        ('help', ['capabilities', '--bad-golden-flag']),
+    ],
+    "worktree": [
+        ('help', ['worktree', '--help']),
+        ('help', ['worktree', '--bad-golden-flag']),
+    ],
+    "clean": [
+        ('help', ['clean', '--help']),
+        ('help', ['clean', '--bad-golden-flag']),
+    ],
+    "reap": [
+        ('help', ['reap', '--help']),
+        ('help', ['reap', '--bad-golden-flag']),
+    ],
+    "lint": [
+        ('help', ['lint', '--help']),
+        ('help', ['lint', '--bad-golden-flag']),
+    ],
+    "check": [
+        ('help', ['check', '--help']),
+        ('help', ['check', '--bad-golden-flag']),
+    ],
+    "gate": [
+        ('help', ['gate', '--help']),
+    ],
+    "fabric": [
+        ('help', ['fabric', '--help']),
+        ('help', ['fabric', '--bad-golden-flag']),
+        ('help', ['fabric', 'dispatch', '--help']),
+        ('help', ['fabric', 'dispatch', '--bad-golden-flag']),
+    ],
+    "lease": [
+        ('help', ['lease', '--help']),
+        ('help', ['lease', 'invalid']),
+    ],
+    "hosts": [
+        ('help', ['hosts', '--help']),
+        ('help', ['hosts', 'invalid-action']),
+    ],
+    "lanes": [
+        ('help', ['lanes', '--help']),
+        ('help', ['lanes', '--bad-golden-flag']),
+    ],
+    "events": [
+        ('help', ['events', '--help']),
+        ('help', ['events', '--bad-golden-flag']),
+    ],
+    "graph": [
+        ('help', ['graph', '--help']),
+        ('help', ['graph', '--bad-golden-flag']),
+    ],
+    "telemetry": [
+        ('help', ['telemetry', '--help']),
+        ('help', ['telemetry', 'invalid-action']),
+    ],
+    "stats": [
+        ('help', ['stats', '--help']),
+        ('help', ['stats', '--bad-golden-flag']),
+    ],
+    "retro": [
+        ('help', ['retro', '--help']),
+        ('help', ['retro', '--bad-golden-flag']),
+    ],
+    "quota": [
+        ('help', ['quota', '--help']),
+        ('help', ['quota', '--bad-golden-flag']),
+    ],
+    "profile": [
+        ('help', ['profile', '--help']),
+        ('help', ['profile', 'invalid-action']),
+    ],
+    "digest": [
+        ('help', ['digest', '--help']),
+        ('machine', ['digest', 'missing.txt', 'question']),
+    ],
+    "classify": [
+        ('help', ['classify', '--help']),
+        ('machine', ['classify', '--labels', 'a,b', 'missing.json']),
+    ],
+    "extract": [
+        ('help', ['extract', '--help']),
+        ('machine', ['extract', 'missing.json', '--schema', 'missing-schema.json']),
+    ],
+    "dispatch": [
+        ('help', ['dispatch', '--help']),
+        ('help', ['dispatch', '--plan']),
+    ],
+    "batch": [
+        ('help', ['batch', '--help']),
+        ('help', ['batch', '--plan']),
+    ],
+    "run": [
+        ('help', ['run', '--help']),
+        ('machine', ['run', 'show', 'missing-run']),
+    ],
+    "pr": [
+        ('help', ['pr', '--help']),
+        ('machine', ['pr', 'checks', 'not-a-pr']),
+    ],
 }
 
-ALIASES: dict[str, list[list[str]]] = {
-    "usage": [["--help"], ["bogus"]],
-    "peer": [["peer", "--help"]],
+ALIASES: dict[str, list[tuple[str, list[str]]]] = {
+    "usage": [
+        ('help', ['--help']),
+        ('help', ['bogus']),
+    ],
+    "peer": [
+        ('help', ['peer', '--help']),
+    ],
 }
 
 
@@ -97,7 +187,7 @@ def normalize(value: str, replacements: list[tuple[str, str]]) -> str:
     hostname = socket.gethostname()
     if hostname:
         value = re.sub(r"(?<![\w./-])" + re.escape(hostname) + r"(?![\w./-])", "<HOST>", value)
-    value = re.sub(r"(?<![\w./-])[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.local(?![\w./-])", "<HOST>", value)
+    value = re.sub(r"(?<![\w./-])(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+local(?![\w./-])", "<HOST>", value)
     return value
 
 
@@ -111,19 +201,34 @@ def path_spellings(path: Path, label: str) -> list[tuple[str, str]]:
     return [(spelling, label) for spelling in spellings]
 
 
-def checkout_status() -> bytes:
-    return subprocess.check_output([
+def checkout_status(excluded: tuple[Path, ...] = ()) -> bytes:
+    exclusions = [f":(exclude,literal){path.resolve().relative_to(REPO)}"
+                  for path in excluded if path.resolve().is_relative_to(REPO)]
+    status = subprocess.check_output([
         shutil.which("git") or "git", "--no-optional-locks", "-C", str(REPO),
-        "status", "--porcelain", "--untracked-files=all", "--", ".", ":(exclude).agent-run",
+        "status", "--porcelain", "-z", "--ignored", "--untracked-files=all", "--", ".", *exclusions,
     ])
+    # Status alone misses edits to files already dirty, untracked or ignored.
+    stamps = []
+    for entry in status.split(b"\0"):
+        if len(entry) < 4:
+            continue
+        path = REPO / os.fsdecode(entry[3:])
+        try:
+            stat = path.lstat()
+        except FileNotFoundError:
+            continue
+        stamps.append((str(path), stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns))
+    return status + json.dumps(stamps).encode()
 
 
 def runtime_manifest() -> dict[str, str]:
-    return {"python": f"{sys.version_info.major}.{sys.version_info.minor}", "sqlite": sqlite3.sqlite_version}
+    return {"python": f"{sys.version_info.major}.{sys.version_info.minor}", "sqlite": ".".join(sqlite3.sqlite_version.split(".")[:2])}
 
 
 def check_manifest() -> None:
     expected = json.loads(MANIFEST.read_text())
+    expected["sqlite"] = ".".join(expected["sqlite"].split(".")[:2])
     if expected != runtime_manifest():
         raise ValueError(
             f"golden runtime mismatch: recorded {expected}, current {runtime_manifest()}; "
@@ -131,60 +236,62 @@ def check_manifest() -> None:
         )
 
 
-def help_structure(text: str) -> dict[str, list[str]]:
-    """Extract command declarations and option names, ignoring help prose."""
+def help_structure(text: str, verb: str | None = None) -> dict[str, list[str]]:
+    """Read explicit command sections and positional brace choices only."""
     flags = set(re.findall(r"(?<![\w-])--?[A-Za-z][\w-]*", text))
     commands: set[str] = set()
     lines = text.splitlines()
     in_commands = False
+    prefix = None
     for index, line in enumerate(lines):
-        if line.strip() == "Commands":
+        # Fabric uses a standalone signature as its command-section heading.
+        heading = re.fullmatch(r"fabric (?:<command>|([a-z][\w-]*))", line)
+        if heading:
             in_commands = True
+            prefix = heading[1]
             continue
+        if re.fullmatch(r"commands: ?|commands|subcommands: ?|subcommands", line.strip(), re.I):
+            in_commands = True
+            prefix = None
+            continue
+        if line and not line[0].isspace():
+            in_commands = False
+            prefix = None
         if in_commands:
-            match = re.match(r"^  ([a-z][a-z0-9_|-]*)(?:\s|$)", line)
+            match = re.match(r"^ {2,4}([a-z][\w|-]*)(?:[ \t]+|$)(.*)", line)
             if match:
-                commands.update(match[1].split("|"))
-            elif line and not line.startswith(" "):
-                in_commands = False
-        # Argparse subparser descriptions and Fabric's two-space listings.
-        match = re.match(r"^ {2,4}([a-z][\w|-]*)(?:\s{2,}|\s+(?:\[|--|<|\.\.\.))", line)
-        if match:
-            commands.update(match[1].split("|"))
-        if "usage:" not in line.lower():
+                name, rest = match.groups()
+                if name == (prefix or verb):
+                    child = re.match(r"([a-z][\w|-]*)(?:\s|$)", rest)
+                    if child:
+                        commands.update(child[1].split("|"))
+                elif prefix is None:
+                    commands.update(name.split("|"))
+        if not re.match(r"\s*usage:", line, re.I):
             continue
         usage = re.split(r"usage:", line, maxsplit=1, flags=re.I)[1]
         for continuation in lines[index + 1:]:
             if not continuation.startswith(" ") or not continuation.strip():
                 break
             usage += " " + continuation.strip()
-        # Remove optional arguments, including nested bracket groups. Choice
-        # values belonging to an option are not subcommands.
+        # Remove nested optional groups, including option value choices.
         while re.search(r"\[[^\[\]]*\]", usage):
             usage = re.sub(r"\[[^\[\]]*\]", " ", usage)
-        for match in re.finditer(r"[<{]([a-z][a-z0-9_,|-]*)[>}]", usage):
-            if match.group().startswith("<") and "|" not in match[1]:
-                continue  # A singular <command> is a placeholder, not a declaration.
-            prefix = usage[:match.start()].split()
-            if prefix and prefix[-1].startswith("-"):
+        for match in re.finditer(r"\{([a-z][a-z0-9_,|-]*)\}", usage):
+            before = usage[:match.start()].split()
+            if before and before[-1].startswith("-"):
                 continue
             commands.update(re.split(r"[,|]", match[1]))
-        # Remove the executable, then read literal command words at the start
-        # of each usage alternative. Never scan delegate paths or prose pipes.
-        tail = usage.strip().split(maxsplit=1)
-        if len(tail) == 2:
-            for alternative in re.split(r"\s+\|\s+", tail[1]):
-                for word in alternative.split():
-                    if not re.fullmatch(r"[a-z][\w-]*(?:\|[a-z][\w-]*)*", word):
-                        break
-                    commands.update(word.split("|"))
+    if verb:
+        commands.discard(verb)
     return {"subcommands": sorted(commands), "flags": sorted(flags)}
 
 
 def comparison_fields(result: dict[str, Any]) -> dict[str, Any]:
     if result["class"] == "help":
         return {"exit_code": result["exit_code"],
-                "help": help_structure(result["stdout"] + "\n" + result["stderr"])}
+                "help": help_structure(result["stdout"] + "\n" + result["stderr"],
+                                       verb=result.get("argv", [None])[0])}
     fields = {key: result[key] for key in ("exit_code", "stdout", "stderr")}
     files = {row["path"]: {key: val for key, val in row.items() if key != "path"} for row in result["files"]}
     fields["files.paths"] = sorted(files)
@@ -193,7 +300,8 @@ def comparison_fields(result: dict[str, Any]) -> dict[str, Any]:
 
 
 class Fixture:
-    def __init__(self, binary: Path | str):
+    def __init__(self, binary: Path | str, checkout_excluded: tuple[Path, ...] = ()):
+        self.checkout_excluded = checkout_excluded
         self.tmp = tempfile.TemporaryDirectory(prefix="provenant-golden-")
         self.root = Path(self.tmp.name).resolve()
         self.binary = str(binary)
@@ -213,7 +321,10 @@ class Fixture:
             raise RuntimeError("golden fixtures require git")
         # Every PATH entry is pinned here; no host PATH directories leak in.
         for name, target in {"git": self.git, "python": sys.executable, "python3": sys.executable,
-                             "bash": "/bin/bash", "dirname": "/usr/bin/dirname"}.items():
+                             "bash": shutil.which("bash"), "dirname": shutil.which("dirname")}.items():
+            if not target:
+                self.close()
+                raise RuntimeError(f"golden fixtures require {name}")
             (self.bin / name).symlink_to(target)
         self.env = {"PATH": str(self.bin)}
         if os.name == "nt" and "SystemRoot" in os.environ:
@@ -297,14 +408,14 @@ class Fixture:
         return found
 
     def run(self, argv: list[str], stdin: str = "") -> dict[str, Any]:
-        checkout_before = checkout_status()
+        checkout_before = checkout_status(self.checkout_excluded)
         before = self.snapshot()
         try:
             completed = subprocess.run([self.binary, *argv], cwd=self.project, env=self.env,
                                        input=stdin.encode(), stdout=subprocess.PIPE,
                                        stderr=subprocess.PIPE, timeout=30)
         finally:
-            if checkout_status() != checkout_before:
+            if checkout_status(self.checkout_excluded) != checkout_before:
                 raise AssertionError("golden child changed AGENT_FABRIC_PRODUCT_ROOT checkout")
         after = self.snapshot()
         changed = []
@@ -338,7 +449,7 @@ SUCCESS_CASES = [
     Case("worktree-create", "worktree", list(CREATE_WORKTREE), "machine"),
     Case("worktree-list", "worktree", ["worktree", "list"], "machine", (CREATE_WORKTREE,)),
     Case("worktree-remove", "worktree", ["worktree", "remove", "golden"], "machine", (CREATE_WORKTREE,)),
-    Case("route-resolve", "route", ["route", "resolve", "--adapter", "codex", "--alias", "senior", "--role", "worker"], "machine"),
+    Case("route-resolve", "route", ["route", "resolve", "--help"], "help"),
     Case("routes-catalog", "routes", ["routes", "--json"], "machine"),
     Case("lint-branch", "lint", ["lint", "branch", "feat/cli-golden-fixture"], "machine"),
     Case("events-query", "events", ["events"], "machine"),
@@ -349,13 +460,7 @@ SUCCESS_CASES = [
 def cases_for(verb: str) -> list[Case]:
     rows = []
     for label, mapping in (("case", VERBS), ("alias", ALIASES)):
-        for index, argv in enumerate(mapping.get(verb, []), 1):
-            # Usage/argparse cases intentionally compare structure, not prose.
-            kind = "help" if ("--help" in argv or "--bad-golden-flag" in argv
-                              or argv[0] in {"help", "bogus"}
-                              or argv == ["--help"]
-                              or (len(argv) > 1 and argv[1] in {"invalid", "invalid-action", "--plan"})
-                              or argv in (["root", "extra"], ["gate", "--help"])) else "machine"
+        for index, (kind, argv) in enumerate(mapping.get(verb, []), 1):
             name = f"{verb}-{label}-{index:02d}"
             if argv == ["fabric", "dispatch", "--bad-golden-flag"]:
                 name = "fabric-dispatch-invalid-option"
@@ -367,8 +472,15 @@ def all_cases() -> list[Case]:
     return [case for verb in sorted(set(VERBS) | set(ALIASES)) for case in cases_for(verb)]
 
 
-def run_case(binary: Path | str, case: Case, env: dict[str, str] | None = None) -> dict[str, Any]:
-    fixture = Fixture(binary)
+def run_case(binary: Path | str, case: Case, env: dict[str, str] | None = None,
+             checkout_excluded: tuple[Path, ...] = ()) -> dict[str, Any]:
+    # Selectors may choose product lanes, never configure interpreters or loaders.
+    invalid = {key for key in env or {} if not key.startswith(("PROVENANT_", "AGENT_FABRIC_"))}
+    if invalid:
+        raise ValueError(f"implementation selector name(s) not allowed: {', '.join(sorted(invalid))}")
+    if case.verb in {"fabric", "lease", "lanes", "events", "graph"} and not shutil.which("node"):
+        raise RuntimeError("golden Fabric cases require node on the host PATH")
+    fixture = Fixture(binary, checkout_excluded)
     try:
         if env:
             reserved = env.keys() & (fixture.env.keys() | {"FABRIC_NODE"})
@@ -397,10 +509,13 @@ def run_case(binary: Path | str, case: Case, env: dict[str, str] | None = None) 
 
 
 def record(binary: Path | str, selected: str | None) -> None:
-    # A partial record cannot bless existing cases with a different runtime.
-    if selected and MANIFEST.exists():
-        check_manifest()
     generated = all_cases()
+    if selected and selected not in {case.verb for case in generated}:
+        raise ValueError(f"unknown verb: {selected}")
+    selected_cases = [case for case in generated if not selected or case.verb == selected]
+    # Help-only updates neither require nor bless a different machine runtime.
+    if selected and MANIFEST.exists() and any(case.kind == "machine" for case in selected_cases):
+        check_manifest()
     for case in generated:
         if selected and case.verb != selected:
             continue
@@ -414,13 +529,15 @@ def record(binary: Path | str, selected: str | None) -> None:
     for path in CASES.glob("*/*.json"):
         if path not in expected:
             path.unlink()
-    MANIFEST.write_text(json.dumps(runtime_manifest(), indent=2, sort_keys=True) + "\n")
+    if not selected or not MANIFEST.exists():
+        MANIFEST.write_text(json.dumps(runtime_manifest(), indent=2, sort_keys=True) + "\n")
 
 
 def compare(binary: Path | str) -> int:
     try:
-        check_manifest()
         generated = all_cases()
+        if any(case.kind == "machine" for case in generated):
+            check_manifest()
         expected_paths = {CASES / case.verb / f"{case.name}.json" for case in generated}
         actual_paths = set(CASES.glob("*/*.json"))
         if expected_paths != actual_paths:

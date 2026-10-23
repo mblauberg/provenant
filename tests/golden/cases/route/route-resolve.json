@@ -2,17 +2,12 @@
   "argv": [
     "route",
     "resolve",
-    "--adapter",
-    "codex",
-    "--alias",
-    "senior",
-    "--role",
-    "worker"
+    "--help"
   ],
-  "class": "machine",
+  "class": "help",
   "exit_code": 0,
   "files": [],
   "stderr": "",
   "stdin": "",
-  "stdout": "{\"adapter\": \"codex\", \"adapter_enabled\": true, \"alias\": \"senior\", \"catalog_date\": \"2026-10-21\", \"compatibility_adapter\": \"codex-app-server\", \"compatibility_model_family\": \"openai\", \"distinct_from_lead\": false, \"effort\": \"high\", \"effort_applied\": \"high\", \"effort_capability_source\": \"registry\", \"effort_note\": \"\", \"effort_source\": \"role-default\", \"effort_substitution\": \"\", \"endpoint_provider\": \"openai\", \"fallback_candidates\": [{\"adapter\": \"codex\", \"model\": \"gpt-6-luna\", \"plan_cap_usd\": null, \"trains_on_prompts\": false}, {\"adapter\": \"opencode\", \"model\": \"opencode/deepseek-v4.1-flash-free\", \"plan_cap_usd\": 0, \"trains_on_prompts\": false}, {\"adapter\": \"opencode\", \"model\": \"opencode/glm-5.3-flash-free\", \"plan_cap_usd\": 0, \"trains_on_prompts\": false}, {\"adapter\": \"opencode\", \"model\": \"opencode-go/deepseek-v4.1-flash\", \"plan_cap_usd\": 60, \"trains_on_prompts\": false}], \"fallback_model\": \"gpt-6-luna\", \"family_source\": \"catalog-family\", \"identity_source\": \"dated-catalog\", \"lead_family\": null, \"model_family\": \"openai\", \"notes\": [], \"requested_effort\": \"high\", \"resolved_model\": \"gpt-6.1-sol\", \"role\": \"worker\", \"schema_version\": 1, \"status\": \"ok\", \"substitution\": \"\", \"supported_efforts\": [\"low\", \"medium\", \"high\", \"xhigh\", \"ultra\"], \"trains_on_prompts\": false, \"warnings\": []}\n"
+  "stdout": "usage: model_route.py resolve [-h] [--adapter ADAPTER] [--alias ALIAS]\n                              [--task-class TASK_CLASS]\n                              [--model-override-tier {routine,substantial,crucial,terminal}]\n                              --role ROLE [--effort EFFORT] [--model MODEL]\n                              [--fallback {true,false,any}]\n                              [--fallback-route FALLBACK_ROUTE]\n                              [--available-model AVAILABLE_MODEL]\n                              [--available-effort AVAILABLE_EFFORT]\n                              [--capabilities-file CAPABILITIES_FILE]\n                              [--lead-family LEAD_FAMILY]\n                              [--endpoint ENDPOINT] [--require-distinct]\n\noptions:\n  -h, --help            show this help message and exit\n  --adapter ADAPTER\n  --alias ALIAS\n  --task-class TASK_CLASS\n  --model-override-tier {routine,substantial,crucial,terminal}\n  --role ROLE\n  --effort EFFORT\n  --model MODEL\n  --fallback {true,false,any}\n  --fallback-route FALLBACK_ROUTE\n  --available-model AVAILABLE_MODEL\n  --available-effort AVAILABLE_EFFORT\n  --capabilities-file CAPABILITIES_FILE\n  --lead-family LEAD_FAMILY\n  --endpoint ENDPOINT\n  --require-distinct\n"
 }

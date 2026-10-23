@@ -3,6 +3,8 @@
 import os
 from pathlib import Path
 import socket
+import json
+import subprocess
 import sys
 
 import pytest
@@ -13,8 +15,8 @@ from run import binary_path, compare, normalize  # noqa: E402
 
 def test_normalize_preserves_boundaries_and_shapes(monkeypatch):
     monkeypatch.setattr(socket, "gethostname", lambda: "cat")
-    assert normalize("cat concatenate /cat/file cat.local x.local/path", []) == (
-        "<HOST> concatenate /cat/file <HOST> x.local/path"
+    assert normalize("cat concatenate /cat/file cat.local x.local/path foo.bar.local foo.bar.local/path", []) == (
+        "<HOST> concatenate /cat/file <HOST> x.local/path <HOST> foo.bar.local/path"
     )
     assert normalize('rapid 12 pid 12 "pid": 42 pid=99', []) == (
         'rapid 12 pid 12 "pid": <PID> pid=<PID>'
@@ -51,7 +53,7 @@ def test_help_comparison_ignores_prose_but_detects_commands_and_flags():
     assert comparison_fields(a) == comparison_fields(b)
     assert comparison_fields(a) != comparison_fields(result("usage: tool {create} [-h] [--json]"))
     assert comparison_fields(a) != comparison_fields(result("usage: tool {create,list} [-h]"))
-    assert comparison_fields(result("usage: provenant <root|help|route>"))["help"]["subcommands"] == ["help", "root", "route"]
+    assert comparison_fields(result("usage: provenant <root|help|route>"))["help"]["subcommands"] == []
     parsed = comparison_fields(result("Commands\n  clean|reap ... scripts/clean.py|reap.py\n"))["help"]
     assert parsed["subcommands"] == ["clean", "reap"]
     parsed = comparison_fields(result("fabric <command>\n  dispatch --route junior|senior|principal\n"))["help"]
@@ -59,3 +61,129 @@ def test_help_comparison_ignores_prose_but_detects_commands_and_flags():
     parsed = comparison_fields(result("usage: tool [--mode {fast,slow}] {create,list}\n"))["help"]
     assert parsed["subcommands"] == ["create", "list"]
     assert comparison_fields(result("usage: provenant <command> [arguments...]"))["help"]["subcommands"] == []
+
+
+@pytest.mark.parametrize(("text", "commands"), [
+    ("usage: tool [-h] file question", []),
+    ("usage: utility.py digest [-h] file question", []),
+    ("  use --force to overwrite\n  see <file> for more", []),
+    ("Commands:\n  run     Run a task\n  status  Show status\n\nArguments:\n  file    Input file\n  question  Question", ["run", "status"]),
+    ("Commands\n  graph run --file F  start\n  graph status [ID]\n  graph cancel ID\n", ["cancel", "run", "status"]),
+    ("usage: tool [--mode {fast,slow}] {create,list}\n\noptions:\n  --mode {fast,slow}", ["create", "list"]),
+    ("usage: tool {hosts} {list,doctor} [hosts ...]", ["doctor", "list"]),
+])
+def test_help_structure_command_boundaries(text, commands):
+    from run import help_structure
+    assert help_structure(text, verb="graph" if "graph run" in text else "hosts")["subcommands"] == commands
+
+
+def test_fabric_help_subcommands():
+    from run import comparison_fields
+    here = Path(__file__).resolve().parent
+    graph = json.loads((here / "cases/graph/graph-case-01.json").read_text())
+    assert comparison_fields(graph)["help"]["subcommands"] == ["cancel", "resume", "run", "status"]
+    fabric = json.loads((here / "cases/fabric/fabric-case-01.json").read_text())
+    assert {"graph", "events"} <= set(comparison_fields(fabric)["help"]["subcommands"])
+    events = json.loads((here / "cases/events/events-case-01.json").read_text())
+    assert comparison_fields(events)["help"]["subcommands"] == []
+
+
+def test_manifest_ignores_sqlite_patch(monkeypatch, tmp_path):
+    import run
+    manifest = tmp_path / "manifest.json"
+    manifest.write_text(json.dumps({"python": "3.12", "sqlite": "3.50.4"}))
+    monkeypatch.setattr(run, "MANIFEST", manifest)
+    monkeypatch.setattr(run.sys, "version_info", type("Version", (), {"major": 3, "minor": 12}))
+    monkeypatch.setattr(run.sqlite3, "sqlite_version", "3.50.9")
+    run.check_manifest()
+    monkeypatch.setattr(run.sqlite3, "sqlite_version", "3.51.0")
+    with pytest.raises(ValueError, match="runtime mismatch"):
+        run.check_manifest()
+
+
+def test_help_only_compare_does_not_check_runtime(monkeypatch, tmp_path):
+    import run
+    case = run.Case("help-case-01", "help", ["help"], "help")
+    data = {"argv": ["help"], "stdin": "", "class": "help", "exit_code": 0,
+            "stdout": "Commands\n  help  show help\n", "stderr": "", "files": []}
+    (tmp_path / "help").mkdir()
+    (tmp_path / "help/help-case-01.json").write_text(json.dumps(data))
+    monkeypatch.setattr(run, "CASES", tmp_path)
+    monkeypatch.setattr(run, "all_cases", lambda: [case])
+    monkeypatch.setattr(run, "run_case", lambda *args: data)
+    def mismatch():
+        raise ValueError("runtime mismatch")
+    monkeypatch.setattr(run, "check_manifest", mismatch)
+    assert run.compare("unused") == 0
+    monkeypatch.setattr(run, "all_cases", lambda: [run.Case("root-case-01", "root", ["root"], "machine")])
+    assert run.compare("unused") == 1
+
+
+def test_unknown_record_verb():
+    import run
+    result = subprocess.run([sys.executable, str(run.HERE / "run.py"), "--record", "--verb", "typo"],
+                            capture_output=True, text=True)
+    assert result.returncode == 2
+    assert "invalid choice" in result.stderr and "recorded" not in result.stdout
+    with pytest.raises(ValueError, match="unknown verb"):
+        run.record("unused", "typo")
+
+
+@pytest.mark.parametrize("name", ["PYTHONPATH", "BASH_ENV", "LD_PRELOAD", "GIT_DIR", "GH_CONFIG_DIR", "AGENT_FABRIC_PRODUCT_ROOT"])
+def test_selector_env_allowlist(name):
+    from run import Case, run_case
+    with pytest.raises(ValueError, match="selector"):
+        run_case("/does-not-run", Case("test", "root", ["root"], "machine"), {name: "outside"})
+
+
+def test_fabric_requires_node(monkeypatch):
+    import run
+    which = run.shutil.which
+    monkeypatch.setattr(run.shutil, "which", lambda name: None if name == "node" else which(name))
+    with pytest.raises(RuntimeError, match="require node"):
+        run.run_case("/does-not-run", run.Case("test", "fabric", ["fabric", "--help"], "help"))
+
+
+def test_checkout_guard_includes_ignored_and_agent_run(monkeypatch, tmp_path):
+    import run
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    (tmp_path / ".gitignore").write_text("ignored/\n.agent-run/\nreports/\n")
+    monkeypatch.setattr(run, "REPO", tmp_path)
+    before = run.checkout_status()
+    for folder in ("ignored", ".agent-run"):
+        (tmp_path / folder).mkdir()
+        (tmp_path / folder / "child-write").write_text("unexpected")
+        after = run.checkout_status()
+        assert after != before
+        before = after
+    output = tmp_path / "reports"
+    output.mkdir()
+    before = run.checkout_status()
+    (tmp_path / "ignored/child-write").write_text("changed existing ignored file")
+    assert run.checkout_status() != before
+    baseline = run.checkout_status((output,))
+    (output / "summary.json").write_text("{}")
+    assert run.checkout_status((output,)) == baseline
+
+
+@pytest.mark.parametrize("name", ["bash", "dirname"])
+def test_missing_fixture_tools_fail_loudly(monkeypatch, name):
+    import run
+    which = run.shutil.which
+    monkeypatch.setattr(run.shutil, "which", lambda tool: None if tool == name else which(tool))
+    with pytest.raises(RuntimeError, match=f"require {name}"):
+        run.run_case("/does-not-run", run.Case("test", "root", ["root"], "machine"))
+
+
+def test_partial_help_record_preserves_machine_runtime(monkeypatch, tmp_path):
+    import run
+    manifest = tmp_path / "manifest.json"
+    original = '{"python": "0.0", "sqlite": "0.0"}\n'
+    manifest.write_text(original)
+    monkeypatch.setattr(run, "MANIFEST", manifest)
+    monkeypatch.setattr(run, "CASES", tmp_path / "cases")
+    case = run.Case("route-resolve", "route", ["route", "resolve", "--help"], "help")
+    monkeypatch.setattr(run, "all_cases", lambda: [case])
+    monkeypatch.setattr(run, "run_case", lambda *args: {"exit_code": 0})
+    run.record("unused", "route")
+    assert manifest.read_text() == original

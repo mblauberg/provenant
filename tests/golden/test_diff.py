@@ -6,6 +6,7 @@ from pathlib import Path
 import shlex
 import subprocess
 import sys
+import tempfile
 
 import pytest
 
@@ -40,6 +41,17 @@ def test_differential_runner_same_changed_and_allowed(tmp_path):
         assert output.is_dir(), completed.stderr
         rows = [json.loads(line) for line in (output / "divergences.jsonl").read_text().splitlines()]
         return completed, rows, json.loads((output / "summary.json").read_text())
+
+    # Reports inside the checkout must not trip guards in parallel children.
+    with tempfile.TemporaryDirectory(prefix="golden-report-", dir=HERE) as directory:
+        output = Path(directory) / "reports"
+        local = subprocess.run([
+            sys.executable, str(HERE / "diff.py"), "--a", str(binary), "--b", str(binary),
+            "--case", "root-case-01", "--case", "help-case-01", "--jobs", "2",
+            "--output-dir", str(output),
+        ], capture_output=True, text=True, timeout=60)
+        assert local.returncode == 0, local.stdout + local.stderr
+        assert json.loads((output / "summary.json").read_text())["unexpected"] == 0
 
     same, rows, summary = run("same", binary)
     assert same.returncode == 0, same.stderr
@@ -114,3 +126,18 @@ def test_differential_runner_same_changed_and_allowed(tmp_path):
     failures = [json.loads(line) for line in (failure_output / "divergences.jsonl").read_text().splitlines()]
     assert len(failures) == 1 and failures[0]["field"] == "execution_error"
     assert failures[0]["allowed"] is False
+
+
+def test_unexpected_case_exception_is_reported(monkeypatch):
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("golden_diff", HERE / "diff.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    def broken(*args, **kwargs):
+        raise KeyError("unexpected case failure")
+    monkeypatch.setattr(module, "run_case", broken)
+    from run import Case
+    case = Case("test", "root", ["root"], "machine")
+    _, fields = module.compare_case(case, Path("a"), Path("b"), {}, {})
+    assert len(fields) == 1 and fields[0][0] == "execution_error"
+    assert "KeyError" in fields[0][1] and fields[0][1] == fields[0][2]

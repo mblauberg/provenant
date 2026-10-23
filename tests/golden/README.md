@@ -6,12 +6,17 @@ uses a temporary HOME, XDG and Fabric directories, a Git repository with a
 fixed initial commit, fake providers and an offline `gh`. PATH contains only
 fixture tools: pinned Git, the harness's Python, Bash and dirname. Delegates
 also receive that Python through `HARNESS_PYTHON`; bytecode writes are disabled.
-Fabric queries use the installed Node executable pinned through `FABRIC_NODE`.
-Credentials and host configuration are excluded. The product checkout's Git
-status must remain unchanged, excluding `.agent-run`.
+Fabric cases require a host Node executable, pinned through `FABRIC_NODE`;
+missing Node fails before execution. Bash and dirname resolve through
+`shutil.which` and missing fixture tools fail explicitly.
+Credentials and host configuration are excluded. The product checkout guard
+includes ignored files and detects edits to existing dirty or ignored files. J5 excludes only its selected report directory.
 
-`help` cases cover help, usage and argument errors. They compare exit code and
-the sets of subcommands and flags parsed from combined output; stdout/stderr
+`help` cases cover help, usage and argument errors. Command sets come from
+explicit Commands/Subcommands sections, Fabric command headings and positional
+`{a,b}` choices; usage positionals and prose never declare commands. A command
+is excluded from its own subcommand set. Help cases compare exit code and the
+sets of subcommands and flags parsed from combined output; stdout/stderr
 are retained as reference text. `machine` cases compare exit code, normalised
 stdout/stderr and changed files byte for byte. Text files retain normalised
 content and binary files retain SHA-256 digests. Git's internal index and object
@@ -19,9 +24,10 @@ metadata are excluded; worktree `.git` pointer files are included. SQLite
 snapshots contain sorted `sqlite_master` schema SQL and rows ordered by every
 column, rather than `iterdump()` output.
 
-`manifest.json` pins Python major.minor and SQLite version. CI selects Python
-3.12 through uv and invokes the suite with its `.venv/bin/python`; a runtime
-mismatch fails before case comparison with a re-record instruction.
+`manifest.json` pins Python and SQLite major.minor for machine cases only. CI
+selects Python 3.12 through uv and invokes the suite with its `.venv/bin/python`; a runtime
+mismatch fails comparisons containing machine cases with a re-record instruction.
+Help-only comparisons and partial recordings do not require that runtime.
 `PROVENANT_GOLDEN_BIN` selects the binary, otherwise only the Cargo release
 output is accepted (`CARGO_TARGET_DIR` is honoured). A missing binary fails;
 `PROVENANT_GOLDEN_ALLOW_SKIP=1` explicitly permits skipping, unless
@@ -29,10 +35,11 @@ output is accepted (`CARGO_TARGET_DIR` is honoured). A missing binary fails;
 
 Every public command listed by `provenant help` must have a case, and the
 recorded file set must exactly match the generated set. Real success paths
-cover worktree create/list/remove, catalog route resolution and route listing,
-branch lint, event reading and Fabric dispatch listing. Worktree list/remove
+cover worktree create/list/remove, route listing, branch lint, event reading
+and Fabric dispatch listing. Worktree list/remove
 cases have fixture-local setup commands, and events reads a seeded terminal
-attempt receipt in `run.py`. Gate's only
+attempt receipt in `run.py`. Route resolution uses `resolve --help` as a help
+case, avoiding byte comparisons against the changing live catalog. Gate's only
 execution mode runs the heavy composite suite, so it has help coverage only.
 Fabric dispatch has no public plan/dry-run mode: `fabric-dispatch-invalid-option`
 covers an invalid flag and `fabric-dispatch-list` is a real read-only query.
@@ -53,8 +60,8 @@ uv run --python 3.12 --group test python tests/golden/run.py --record
 ```
 
 Recording prunes orphan case files. Partial updates require the existing
-manifest's runtime; use a full record when changing the runtime. Review
-`git diff -- tests/golden` for changed exit codes, machine output, file effects,
+manifest's runtime when machine cases are selected; use a full record when
+changing the runtime. Review `git diff -- tests/golden` for changed exit codes, machine output, file effects,
 help command/flag sets and manifest versions. Then compare:
 
 ```sh
@@ -89,7 +96,8 @@ Machine fields are `exit_code`, `stdout`, `stderr`, `files.paths` and
 `files.<path>`; help cases compare `exit_code` and the parsed `help` sets.
 Setup/execution failures appear as `execution_error` and always fail, including
 when both sides fail identically or the field is allowlisted. Implementation
-selectors cannot override fixture-owned environment variables.
+selectors must use `PROVENANT_*` or `AGENT_FABRIC_*` names and cannot override
+fixture-owned environment variables.
 
 `diff-allow.json` is an array of intended divergences. Each entry needs an
 exact case name, field and reason; optional `a` and `b` regular expressions

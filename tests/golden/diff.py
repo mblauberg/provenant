@@ -12,7 +12,6 @@ from itertools import islice
 import os
 from pathlib import Path
 import re
-import subprocess
 import sys
 from typing import Any
 
@@ -61,17 +60,18 @@ def allowed_by(entry: dict[str, str], case: Case, field: str, a: Any, b: Any) ->
                     for side, value in (("a", a), ("b", b))))
 
 
-def case_fields(binary: Path, case: Case, env: dict[str, str]) -> dict[str, Any]:
+def case_fields(binary: Path, case: Case, env: dict[str, str], checkout_excluded: tuple[Path, ...] = ()) -> dict[str, Any]:
     try:
-        return comparison_fields(run_case(binary, case, env))
-    except (OSError, ValueError, AssertionError, RuntimeError, subprocess.SubprocessError) as exc:
+        return comparison_fields(run_case(binary, case, env, checkout_excluded=checkout_excluded))
+    except Exception as exc:
         # Infrastructure/setup errors must never become a vacuous match.
         return {"execution_error": f"{type(exc).__name__}: {exc}"}
 
 
-def compare_case(case: Case, a: Path, b: Path, env_a: dict[str, str], env_b: dict[str, str]):
-    left = case_fields(a, case, env_a)
-    right = case_fields(b, case, env_b)
+def compare_case(case: Case, a: Path, b: Path, env_a: dict[str, str], env_b: dict[str, str],
+                 checkout_excluded: tuple[Path, ...] = ()):
+    left = case_fields(a, case, env_a, checkout_excluded)
+    right = case_fields(b, case, env_b, checkout_excluded)
     fields = []
     for field in sorted(left.keys() | right.keys()):
         av, bv = left.get(field, MISSING), right.get(field, MISSING)
@@ -147,7 +147,7 @@ def main() -> int:
                                "env_a": env_a, "env_b": env_b}
     matched: set[int] = set()
     with ThreadPoolExecutor(max_workers=args.jobs) as pool, (output / "divergences.jsonl").open("w") as log:
-        results = pool.map(lambda case: compare_case(case, a, b, env_a, env_b), cases)
+        results = pool.map(lambda case: compare_case(case, a, b, env_a, env_b, (output,)), cases)
         for case, divergences in results:
             counts = summary["per_verb"].setdefault(case.verb, {"cases": 0, "divergences": 0, "allowed": 0, "unexpected": 0})
             counts["cases"] += 1
