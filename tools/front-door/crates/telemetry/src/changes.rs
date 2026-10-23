@@ -1,8 +1,8 @@
 //! Change comparison policy, independent of GitHub transport and ledger queries.
 use crate::{Error, Result};
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use std::{collections::BTreeMap, path::PathBuf, time::Duration};
 
 pub const MIN_SAMPLE: u64 = 10;
@@ -567,13 +567,11 @@ mod tests {
         let rust = serde_json::to_value(&report).unwrap()["active_time_s"].clone();
         assert_eq!(rust["total"], json!(2));
 
-        let fixture = json!(
-            events
-                .iter()
-                .map(serde_json::to_value)
-                .collect::<std::result::Result<Vec<_>, _>>()
-                .unwrap()
-        );
+        let fixture = json!(events
+            .iter()
+            .map(serde_json::to_value)
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .unwrap());
         let oracle = crate::differential::python(
             "import json,sys\nevents=json.load(sys.stdin)\nactive={}\nfor event in events:\n attrs=event['attrs']\n if attrs.get('name') != 'claude_code.active_time.total' or attrs.get('value') is None: continue\n key=(event.get('session'),attrs.get('type') or 'total')\n active[key]=max(active.get(key,0),attrs['value']) if attrs.get('temporality') == 2 else active.get(key,0)+attrs['value']\ntotals={}\nfor (_,kind),seconds in active.items(): totals[kind]=totals.get(kind,0)+seconds\nprint(json.dumps({'active_time_s':dict(sorted((kind,round(seconds)) for kind,seconds in totals.items()))}))",
             &fixture,
@@ -600,12 +598,10 @@ mod tests {
         let rust = serde_json::to_value(&report).unwrap()["active_time_s"].clone();
         assert_eq!(rust["total"], json!(10_000_000_000_000_002u64));
 
-        let fixture = json!(
-            events
-                .iter()
-                .map(|event| serde_json::to_value(event).unwrap())
-                .collect::<Vec<_>>()
-        );
+        let fixture = json!(events
+            .iter()
+            .map(|event| serde_json::to_value(event).unwrap())
+            .collect::<Vec<_>>());
         let oracle = crate::differential::python(
             "import json,sys\nevents=json.load(sys.stdin)\nactive={}\nfor event in events:\n attrs=event['attrs']\n if attrs.get('name') != 'claude_code.active_time.total' or attrs.get('value') is None: continue\n key=(event.get('session'),attrs.get('type') or 'total')\n active[key]=max(active.get(key,0),attrs['value']) if attrs.get('temporality') == 2 else active.get(key,0)+attrs['value']\ntotals={}\nfor (_,kind),seconds in active.items(): totals[kind]=totals.get(kind,0)+seconds\nprint(json.dumps({'active_time_s':dict(sorted((kind,round(seconds)) for kind,seconds in totals.items()))}))",
             &fixture,
@@ -708,13 +704,29 @@ pub struct LimitTotal {
     pub events: u64,
 }
 
-/// The subset of `telemetry_report.stats` consumed by compare.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct AttemptTotal {
+    pub error_class: Option<String>,
+    pub attempts: u64,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct LaneStatusTotal {
+    pub status: String,
+    pub lanes: u64,
+}
+
+/// The subset of `telemetry_report.stats` consumed by compare and retro.
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct StatsReport {
     pub lane_totals: Vec<LaneTotal>,
     pub usage_totals: Vec<UsageTotal>,
     pub limits_per_day: Vec<LimitTotal>,
+    pub attempts: Vec<AttemptTotal>,
+    pub lanes: Vec<LaneStatusTotal>,
 }
 
 /// Statistics and outcomes from `telemetry_report.stats`.
@@ -1188,6 +1200,27 @@ pub struct CompareReport {
     pub before: Side,
     pub after: Side,
     pub metrics: Vec<MetricResult>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct RetroChange {
+    #[serde(flatten)]
+    pub change: ChangeRecord,
+    pub compare: CompareReport,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct RetroReport {
+    pub schema: String,
+    pub since: String,
+    pub until: String,
+    pub window: String,
+    pub overall: Side,
+    pub lanes_input_required: u64,
+    pub changes: Vec<RetroChange>,
+    pub top_error_classes: OrderedCounts,
+    pub attention: Attention,
+    pub events_by_kind: OrderedCounts,
 }
 
 fn timestamp_from_micros(value: i64) -> ChangeResult<jiff::Timestamp> {
@@ -1883,6 +1916,258 @@ pub fn attention_since<S: ChangeStore, C: ChangeClock>(
     attention(&events, since).map_err(ChangeError::from)
 }
 
+pub fn retro<S: ChangeStore, C: ChangeClock>(
+    clock: &C,
+    store: &mut S,
+    since: Option<&str>,
+    span: &str,
+    now: Option<jiff::Timestamp>,
+) -> ChangeResult<RetroReport> {
+    let current = match now {
+        Some(value) => value,
+        None => floor_second(clock.now())?,
+    };
+    let start = match since.filter(|value| !value.is_empty()) {
+        Some(value) => clock.parse_time(value)?,
+        None => plus_micros(current, -604_800_000_000)?,
+    };
+    let overall = side(clock, store, start, current)?;
+    let start_text = clock.iso(start);
+    let report = store.stats(&start_text, None)?;
+    let mut errors = Vec::<(String, u64)>::new();
+    for row in &report.attempts {
+        if let Some(class) = row.error_class.as_deref().filter(|class| !class.is_empty()) {
+            let entry = errors.iter_mut().find(|(name, _)| name == class);
+            if let Some((_, count)) = entry {
+                *count = count
+                    .checked_add(row.attempts)
+                    .ok_or(ChangeError::NumberOutOfRange)?;
+            } else {
+                errors.push((class.to_owned(), row.attempts));
+            }
+        }
+    }
+    errors.sort_by(|(_, count_a), (_, count_b)| count_b.cmp(count_a));
+    // Preserve Python Counter.most_common's first-seen tie ordering.
+    let top_order = errors.iter().take(5).cloned().collect::<Vec<_>>();
+    let top = top_order.iter().cloned().collect::<OrderedCounts>();
+    let marked = changes(store, Some(&start_text))?;
+    let mut marked_with_comparison = Vec::with_capacity(marked.len());
+    for change in marked {
+        let at = clock.parse_time(&change.merged_at)?;
+        let compared = compare_at(clock, store, Some(change.clone()), at, span, Some(current))?;
+        marked_with_comparison.push(RetroChange {
+            change,
+            compare: compared,
+        });
+    }
+    let lanes_input_required = report
+        .lanes
+        .iter()
+        .filter(|row| row.status == "input_required")
+        .try_fold(0u64, |sum, row| sum.checked_add(row.lanes))
+        .ok_or(ChangeError::NumberOutOfRange)?;
+    let events = store.events_since(&start_text)?;
+    let mut event_counts = BTreeMap::<String, u64>::new();
+    for event in events {
+        let count = event_counts.entry(event.kind).or_default();
+        *count = count.checked_add(1).ok_or(ChangeError::NumberOutOfRange)?;
+    }
+    let mut event_order = event_counts.iter().collect::<Vec<_>>();
+    event_order.sort_by(|(name_a, count_a), (name_b, count_b)| {
+        count_b.cmp(count_a).then_with(|| name_a.cmp(name_b))
+    });
+    let events_by_kind = event_order
+        .into_iter()
+        .map(|(name, count)| (name.clone(), *count))
+        .collect::<OrderedCounts>();
+    Ok(RetroReport {
+        schema: "provenant.telemetry.retro.v1".into(),
+        since: start_text.clone(),
+        until: clock.iso(current),
+        window: span.into(),
+        overall,
+        lanes_input_required,
+        changes: marked_with_comparison,
+        top_error_classes: top,
+        attention: attention_since(clock, store, &start_text)?,
+        events_by_kind,
+    })
+}
+
+fn marker(verdict: Verdict) -> char {
+    VERDICT_SPECS
+        .iter()
+        .find(|(candidate, _, _)| *candidate == verdict)
+        .map_or('?', |(_, _, mark)| *mark)
+}
+
+pub fn render_retro(report: &RetroReport, limit: usize) -> ChangeResult<String> {
+    let overall = &report.overall;
+    let mut lines = vec![format!(
+        "Retro {}..{}: lanes={} ok={} usage_rows={} usd={} limit_events={}",
+        report.since,
+        report.until,
+        overall.lanes,
+        show(overall.success_rate, Some(Metric::SuccessRate)),
+        crate::report::compact(Some(overall.usage_rows as f64)),
+        show(overall.cost_usd, None),
+        overall.limit_events
+    )];
+    if !report.changes.is_empty() {
+        lines.push(format!(
+            "Changes (newest first; {} each side; + improved, - regressed, = within noise, ? inconclusive n<{}):",
+            report.window, MIN_SAMPLE
+        ));
+        for change in report.changes.iter().take(limit) {
+            let mut summary = Vec::new();
+            for spec in METRICS.iter().filter(|spec| spec.short.is_some()) {
+                let metric = spec.metric;
+                let short = spec.short.unwrap_or_default();
+                let row = change
+                    .compare
+                    .metrics
+                    .iter()
+                    .find(|row| row.metric == metric)
+                    .ok_or_else(|| ChangeError::MalformedReport("metric missing".into()))?;
+                summary.push(format!(
+                    "{short} {}->{}{}",
+                    show(row.before, Some(metric)),
+                    show(row.after, Some(metric)),
+                    marker(row.verdict)
+                ));
+            }
+            let reference = change
+                .change
+                .pr
+                .map(|pr| format!("#{pr}"))
+                .unwrap_or_else(|| "marker".into());
+            let title = change
+                .change
+                .title
+                .as_deref()
+                .unwrap_or("")
+                .chars()
+                .take(40)
+                .collect::<String>();
+            lines.push(format!(
+                "  {reference} {} {title}: {} lanes={}/{}",
+                change.change.merged_at.chars().take(10).collect::<String>(),
+                summary.join(" "),
+                change.compare.before.lanes,
+                change.compare.after.lanes
+            ));
+        }
+        if report.changes.len() > limit {
+            lines.push(format!(
+                "  {} more; use --json",
+                report.changes.len() - limit
+            ));
+        }
+    } else {
+        lines.push(
+            "No change markers in this window; run `provenant telemetry changes --sync`.".into(),
+        );
+    }
+    if !report.top_error_classes.is_empty() {
+        lines.push(format!(
+            "Top error classes (attempts): {}",
+            report
+                .top_error_classes
+                .iter()
+                .map(|(name, count)| format!("{name}:{count}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+    let seen = &report.attention;
+    let mut parts = vec![
+        format!("sessions started {}", seen.sessions_started),
+        format!("lanes awaiting input {}", report.lanes_input_required),
+    ];
+    if let Some(value) = seen.user_prompts {
+        parts.push(format!("user prompts {value}"));
+    }
+    if let Some(value) = seen.tool_decisions {
+        parts.push(format!("tool decisions {value}"));
+    }
+    if let Some(active) = &seen.active_time_s {
+        if !active.is_empty() {
+            let mut entries = Vec::new();
+            for (kind, seconds) in active {
+                entries.push(format!("{kind} {:.1}h", seconds.as_f64() / 3600.0));
+            }
+            parts.push(format!("active {}", entries.join(" ")));
+        }
+    }
+    lines.push(format!("Attention: {}", parts.join("; ")));
+    if !report.events_by_kind.is_empty() {
+        let kinds = report.events_by_kind.iter().collect::<Vec<_>>();
+        let shown = kinds
+            .iter()
+            .take(limit)
+            .map(|(kind, count)| format!("{kind}:{count}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        lines.push(format!(
+            "Events: {shown}{}",
+            if kinds.len() > limit {
+                format!(" (+{} kinds)", kinds.len() - limit)
+            } else {
+                String::new()
+            }
+        ));
+    }
+    lines.push("Detail: provenant stats --compare <PR#|rev|date> [--window 7d] [--json]".into());
+    Ok(fit(&lines, BUDGET))
+}
+
+pub fn render_changes(rows: &[ChangeRecord], limit: usize) -> ChangeResult<String> {
+    let cells = rows
+        .iter()
+        .map(|row| {
+            vec![
+                Some(row.merged_at.clone()),
+                Some(if row.pr.is_some() {
+                    reference(row)
+                } else {
+                    "manual".into()
+                }),
+                row.merge_commit
+                    .as_deref()
+                    .map(|commit| commit.chars().take(10).collect::<String>())
+                    .filter(|commit| !commit.is_empty()),
+                {
+                    let labels = row.labels.join(",").chars().take(30).collect::<String>();
+                    (!labels.is_empty()).then_some(labels)
+                },
+                Some(
+                    row.title
+                        .as_deref()
+                        .unwrap_or("")
+                        .chars()
+                        .take(60)
+                        .collect(),
+                ),
+            ]
+        })
+        .collect::<Vec<_>>();
+    let mut lines = if rows.is_empty() {
+        vec!["No change markers; run `provenant telemetry changes --sync`.".into()]
+    } else {
+        bounded_table(
+            &["merged_at", "change", "commit", "labels", "title"],
+            &cells,
+            Some(limit),
+            &[],
+        )?
+    };
+    if rows.len() > limit {
+        lines.push(format!("{} more; use --json", rows.len() - limit));
+    }
+    Ok(fit(&lines, BUDGET))
+}
+
 #[cfg(test)]
 mod composition_tests {
     use super::*;
@@ -2136,6 +2421,14 @@ for index, row in enumerate(input.get('events', [])):
                 cache_share_read: 50,
             }],
             limits_per_day: vec![LimitTotal { events: 3 }],
+            attempts: vec![AttemptTotal {
+                error_class: Some("provider_timeout".into()),
+                attempts: 4,
+            }],
+            lanes: vec![LaneStatusTotal {
+                status: "input_required".into(),
+                lanes: 2,
+            }],
         }
     }
 
@@ -2478,7 +2771,7 @@ for index, row in enumerate(input.get('events', [])):
     }
 
     #[test]
-    fn comparison_render_keeps_sample_counts_and_untruncated_json() {
+    fn comparison_and_retro_render_keep_sample_counts_and_untruncated_json() {
         let clock = clock();
         let mut store = MemoryStore {
             report: report(12),
@@ -2503,6 +2796,82 @@ for index, row in enumerate(input.get('events', [])):
         assert!(text.contains("12/12 lanes"));
         if let Some(oracle) = compare_oracle {
             crate::differential::equal(&json!({"report":compared,"text":text}), &oracle);
+        }
+
+        for index in 0..15 {
+            let stamp = format!("2026-10-{:02}T00:00:00Z", 1 + index);
+            let mut row = pull(100 + index as i64, stamp.clone(), "long title");
+            row["mergedAt"] = Value::String(stamp);
+            let _ = upsert(&clock, &mut store, &[row]).unwrap();
+        }
+        store.events = vec![
+            crate::Event {
+                kind: "session.start".into(),
+                ts: Some("2026-10-12T01:00:00Z".into()),
+                session: Some("session-a".into()),
+                attrs: json!({}),
+                ..crate::Event::default()
+            },
+            crate::Event {
+                kind: "otel.user_prompt".into(),
+                ts: Some("2026-10-12T01:01:00Z".into()),
+                session: Some("session-a".into()),
+                attrs: json!({}),
+                ..crate::Event::default()
+            },
+            crate::Event {
+                kind: "otel.metric".into(),
+                ts: Some("2026-10-12T01:02:00Z".into()),
+                session: Some("session-a".into()),
+                attrs: json!({
+                    "name":"claude_code.active_time.total",
+                    "value":2.5,
+                    "type":"user",
+                    "temporality":1
+                }),
+                ..crate::Event::default()
+            },
+        ];
+        let retro_input = json!({
+            "now":clock.iso(clock.now()),
+            "since":"2026-10-01",
+            "span":"7d",
+            "stats":serde_json::to_value(&store.report).unwrap(),
+            "markers":store.markers,
+            "events":store.events
+        });
+        let retro_oracle = python_oracle(
+            "report=owner.retro(t,db,input['since'],input['span'],now=telemetry.since_time(input['now']))\nrows=owner.changes(db)\nprint(json.dumps({'report':report,'text':owner.render_retro(t,report,12),'changes_text':owner.render_changes(t,rows,12)},sort_keys=True))",
+            &retro_input,
+        );
+        let retro = retro(
+            &clock,
+            &mut store,
+            Some("2026-10-01"),
+            "7d",
+            Some(clock.now()),
+        )
+        .unwrap();
+        assert_eq!(retro.changes.len(), 15);
+        let rendered = render_retro(&retro, 12).unwrap();
+        assert!(rendered.contains("3 more; use --json"));
+        assert!(
+            serde_json::to_value(&retro).unwrap()["changes"]
+                .as_array()
+                .unwrap()
+                .len()
+                == 15
+        );
+        let changes_text = render_changes(&changes(&mut store, None).unwrap(), 12).unwrap();
+        if let Some(oracle) = retro_oracle {
+            crate::differential::equal(
+                &json!({
+                    "report":retro,
+                    "text":rendered,
+                    "changes_text":changes_text
+                }),
+                &oracle,
+            );
         }
     }
 
