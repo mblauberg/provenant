@@ -645,7 +645,7 @@ CLI owns shared port-tooling deletion. No schema/Unicode emulation is retained.
 
 Measured S1-S3: **+19,155 net Rust lines including tests**: S1
 **+2,564** (#1370), S2 **+6,248** (#1379), S3 **+10,343** against main
-`54b611bb2f9dcd39522a8c3ab74d9b2e83aa46d7`. S3's library and config binding
+`90c4a1affdd86997ded4b0541a4c2c8d74eda82f`. S3's library and config binding
 contain **11,084 Rust lines including tests**, above the roughly 6,000-line
 target. The chair accepts this size after the shared-helper and dead-code
 cuts: no behaviour-preserving route reaches 6,000 while retaining confinement's
