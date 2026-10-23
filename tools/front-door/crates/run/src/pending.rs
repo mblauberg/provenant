@@ -183,3 +183,63 @@ pub struct ChildReport {
 /// A custody capability owns its lock and cannot be constructed from a recorded PID.
 /// Implementations must retain it through publication and terminal cleanup.
 pub trait OwnerCustody: std::fmt::Debug {}
+// port: belongs in provenant-supervisor
+/// Safe process-census boundary. Match kill(pid, 0): permission errors are false.
+/// This is an existence probe, never authority to signal a recorded PID.
+pub trait ProcessProbe {
+    fn process_exists(&mut self, pid: &str) -> bool;
+}
+
+// port: belongs in provenant-supervisor
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WorkerExit {
+    Exited(i32),
+    Signalled(i32),
+}
+
+// port: belongs in provenant-supervisor
+/// The handle owns only the worker it launched, including reaping responsibility.
+pub trait SessionWorker {
+    fn pid(&self) -> u32;
+    fn wait(&mut self) -> io::Result<WorkerExit>;
+    /// Used only if the worker PID cannot be persisted, matching the old wrapper.
+    fn terminate_and_wait(&mut self) -> io::Result<()>;
+}
+
+// port: belongs in provenant-supervisor
+/// Spawn in a fresh session with /dev/null stdin and both output streams attached
+/// to the same append-only file description. No detached threads or inherited stdin.
+/// Dropping the wrapper must not kill the worker. A failed spawn creates no worker.
+pub trait SessionHost {
+    type Worker: SessionWorker;
+    fn writable(&mut self, path: &Path) -> bool;
+    fn spawn(
+        &mut self,
+        command: &[std::ffi::OsString],
+        transcript: &File,
+    ) -> io::Result<Self::Worker>;
+    /// strerror without Rust's '(os error N)' suffix; needed for the retained transcript.
+    fn spawn_error_text(&self, error: &io::Error) -> String;
+}
+
+// port: belongs in provenant-supervisor
+/// Detached markers deliberately use the source's deterministic .tmp.<pid> name,
+/// default creation permissions and rename, without the lease writer's fsync.
+pub(crate) fn publish_marker(path: &Path, wrapper_pid: u32, bytes: &[u8]) -> io::Result<()> {
+    let mut name = path
+        .file_name()
+        .ok_or_else(|| io::Error::other("missing marker filename"))?
+        .to_owned();
+    name.push(format!(".tmp.{wrapper_pid}"));
+    let temporary = parent(path).join(name);
+    let result = fs::write(&temporary, bytes).and_then(|()| fs::rename(&temporary, path));
+    if let Err(error) = result {
+        match fs::remove_file(&temporary) {
+            Ok(()) => (),
+            Err(cleanup) if cleanup.kind() == io::ErrorKind::NotFound => (),
+            Err(cleanup) => return Err(cleanup),
+        }
+        return Err(error);
+    }
+    Ok(())
+}

@@ -46,3 +46,22 @@ They form the current baseline; they are not newly discovered port mismatches.
 - Disposition: open; partial unit, inert only. These limits are not approved
   boundary changes and must be reconciled before cut-over. CLI argparse and
   exact parser/I/O diagnostics remain with the future CLI owner/J1.
+
+### RP-RUN-2 — detached-worker integration and reader limits (open)
+
+- Unit: `skills/orchestrate/scripts/run_worker_detached.py#unit-01`;
+  rulebook v2 with the v3/PR #1294 inert-crate gate override.
+- Class: `library`. Oracle: `e897b10d58b27a46544969594eed08a5ed64c72c`.
+- Reproducer: feed non-ASCII digit PID fields, invalid UTF-8, or files over
+  1 MiB to the evidence reader. The first Rust API accepts ASCII digits,
+  treats non-UTF-8/oversized evidence as unavailable and bounds reads;
+  Python uses `str.isdigit`, locale UTF-8 decoding and unbounded `read_text`.
+- Evidence: fixed-clock Python validation matrix, real child wait/reap,
+  merged descriptors, null stdin, signal exits, concurrent claim, exec
+  failure fallback, permissions and failed publication fixtures in the crate.
+- Disposition: open; partial unit, inert only. Safe fresh-session spawning,
+  process-existence probes, access checks and exact OS error text are
+  `pending` supervisor contracts. Fixture child processes verify lifecycle
+  and descriptor policy, not session isolation or wrapper-death survival.
+  The production supervisor adapter and surviving OS conformance remain
+  before cut-over. This does not approve a boundary change.
