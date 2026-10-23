@@ -162,6 +162,40 @@ impl Reservation {
         {
             return Err(CustodyError::InvalidRecord);
         }
+        let empty_tree =
+            self.provider.is_none() && self.descendants.is_empty() && self.omitted_descendants == 0;
+        let valid_state = match self.launch_state {
+            LaunchState::Prepared => {
+                empty_tree
+                    && self.guardian.is_none()
+                    && self.attempt_device.is_none()
+                    && self.unresolved_cleanup
+                    && self.census_incomplete
+            }
+            LaunchState::NeverSpawned => {
+                empty_tree
+                    && self.attempt_device.is_some()
+                    && !self.unresolved_cleanup
+                    && !self.census_incomplete
+            }
+            LaunchState::HandingOff => {
+                empty_tree
+                    && self.attempt_device.is_some()
+                    && self.unresolved_cleanup
+                    && self.census_incomplete
+            }
+            LaunchState::Spawned => {
+                self.guardian.is_some()
+                    && self.attempt_device.is_some()
+                    && (self.unresolved_cleanup
+                        || (!self.census_incomplete && self.omitted_descendants == 0))
+                    && (self.provider.is_some()
+                        || (self.unresolved_cleanup && self.census_incomplete))
+            }
+        };
+        if !valid_state {
+            return Err(CustodyError::InvalidRecord);
+        }
         for identity in self
             .guardian
             .iter()
@@ -402,6 +436,7 @@ pub struct ProviderCommand {
     pub resolved_route: String,
     pub permission_plan_digest: Digest,
     pub task: provenant_core::TaskId,
+    pub requester: ActorId,
     pub argv: Vec<OsString>,
     pub environment: Vec<(OsString, OsString)>,
     pub cwd: PathBuf,
@@ -478,6 +513,7 @@ pub struct OwnedLaunch<'a> {
 pub struct CustodyHandle {
     pub(crate) directory: Directory,
     pub(crate) scope: Scope,
+    pub(crate) requester: ActorId,
 }
 impl CustodyHandle {
     pub fn scope(&self) -> Scope {
@@ -488,6 +524,7 @@ impl CustodyHandle {
 pub struct LaunchFailure {
     pub error: CustodyError,
     pub custody: PublicationReservation,
+    pending_exit: Option<Box<ProcessExit>>,
 }
 impl std::fmt::Display for LaunchFailure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -495,16 +532,76 @@ impl std::fmt::Display for LaunchFailure {
     }
 }
 impl std::error::Error for LaunchFailure {}
+impl LaunchFailure {
+    /// Retry the bounded never-spawned outcome while retaining attempt custody.
+    /// Conflicting terminal bytes are never replaced.
+    pub fn retry_exit_publication(&self) -> Result<Publication> {
+        let record = self
+            .pending_exit
+            .as_ref()
+            .ok_or(CustodyError::HandoffUnknown)?;
+        let bytes = serde_json::to_vec(record).map_err(|_| CustodyError::InvalidRecord)?;
+        if bytes.len() as u64 > EXIT_LIMIT {
+            return Err(CustodyError::InvalidRecord);
+        }
+        let publish = || {
+            self.custody.directory.atomic_write(
+                OsStr::new("process-exit.json"),
+                ".custody-",
+                &bytes,
+                PublishMode::NoReplace,
+            )
+        };
+        let mut result = publish();
+        if result
+            .as_ref()
+            .is_err_and(|error| error.raw_os_error() == Some(crate::sys::errno::ENOSPC))
+        {
+            match self.custody.directory.unlink(OsStr::new("reserve")) {
+                Ok(()) => {
+                    let _ = self.custody.directory.sync();
+                    result = publish();
+                }
+                Err(error) if error.is_not_found() => {
+                    result = publish();
+                }
+                Err(_) => {}
+            }
+        }
+        match result {
+            Ok(publication) => Ok(publication),
+            Err(error) if error.is_exists() => {
+                let previous = self
+                    .custody
+                    .directory
+                    .read_bounded(OsStr::new("process-exit.json"), EXIT_LIMIT)?;
+                if previous != bytes {
+                    return Err(CustodyError::InvalidRecord);
+                }
+                Ok(match self.custody.directory.sync() {
+                    Ok(()) => Publication::Durable,
+                    Err(sync_error) => Publication::VisibleDurabilityUnconfirmed { sync_error },
+                })
+            }
+            Err(error) => Err(error.into()),
+        }
+    }
+}
 pub fn launch(
     owned: OwnedLaunch<'_>,
     capture: CapturePlan,
     publication: PublicationReservation,
 ) -> std::result::Result<CustodyHandle, LaunchFailure> {
-    let failure = |error, custody| LaunchFailure { error, custody };
+    let failure = |error, custody| LaunchFailure {
+        error,
+        custody,
+        pending_exit: None,
+    };
     if owned.writer.launched {
         return Err(failure(CustodyError::Fenced, publication));
     }
     let scope = owned.writer.scope();
+    let requester = owned.command.requester;
     let metadata = match publication.directory.metadata() {
         Ok(metadata) => metadata,
         Err(error) => return Err(failure(error.into(), publication)),
@@ -528,6 +625,12 @@ pub fn launch(
             never_spawned: true,
             stop_reason: reason,
             delivered_signals: vec![],
+            reaped: vec![],
+            omitted_reaped: 0,
+            spared: vec![],
+            omitted_spared: 0,
+            failed_deliveries: vec![],
+            omitted_failed_deliveries: 0,
             terminal_observed: false,
             unresolved_cleanup: false,
             stdout: CaptureTotals::default(),
@@ -556,7 +659,11 @@ pub fn launch(
             Ok(()) if reason.is_some() => CustodyError::Cancelled,
             Ok(()) => CustodyError::InvalidRecord,
         };
-        return Err(failure(error, publication));
+        return Err(LaunchFailure {
+            error,
+            custody: publication,
+            pending_exit: Some(Box::new(record)),
+        });
     }
     owned.writer.launched = true;
     owned.writer.reservation.launch_state = LaunchState::HandingOff;
@@ -574,6 +681,7 @@ pub fn launch(
         Ok(()) => Ok(CustodyHandle {
             directory: publication.directory,
             scope,
+            requester,
         }),
         Err(error) => Err(failure(error, publication)),
     }
@@ -584,6 +692,8 @@ pub fn launch(
 pub(crate) struct CancelRequest {
     pub schema_version: u64,
     pub scope: Scope,
+    pub request_id: provenant_core::OperationId,
+    pub requester: ActorId,
     pub reason: StopReason,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -595,6 +705,12 @@ pub fn stop(handle: &CustodyHandle, reason: StopReason) -> Result<StopReceipt> {
     let request = CancelRequest {
         schema_version: 1,
         scope: handle.scope,
+        request_id: provenant_core::OperationId::parse(&format!(
+            "{}.{}.{}.cancel",
+            handle.scope.run, handle.scope.attempt, handle.scope.generation
+        ))
+        .map_err(|_| CustodyError::InvalidRecord)?,
+        requester: handle.requester,
         reason,
     };
     match write_record(
@@ -618,6 +734,14 @@ pub fn stop(handle: &CustodyHandle, reason: StopReason) -> Result<StopReceipt> {
         Err(error) => Err(error),
     }
 }
+/// A failed attempt to deliver a signal to a pinned provider identity.
+#[derive(Clone, Debug, Serialize)]
+pub struct FailedSignalDelivery {
+    pub identity: Option<ProcessIdentity>,
+    pub reason: StopReason,
+    pub signal: i64,
+    pub failure: crate::machine::DeliveryFailure,
+}
 /// Bounded, immutable OS facts. No field certifies its own publication durability.
 #[derive(Clone, Debug, Serialize)]
 pub struct ProcessExit {
@@ -627,12 +751,41 @@ pub struct ProcessExit {
     pub never_spawned: bool,
     pub stop_reason: Option<StopReason>,
     pub delivered_signals: Vec<i64>,
+    pub reaped: Vec<ProcessIdentity>,
+    pub omitted_reaped: u64,
+    pub spared: Vec<ProcessIdentity>,
+    pub omitted_spared: u64,
+    pub failed_deliveries: Vec<FailedSignalDelivery>,
+    pub omitted_failed_deliveries: u64,
     pub terminal_observed: bool,
     pub unresolved_cleanup: bool,
     pub stdout: CaptureTotals,
     pub stderr: CaptureTotals,
     pub warnings: Vec<String>,
     pub omitted_warnings: u64,
+}
+impl ProcessExit {
+    pub(crate) fn bounded_bytes(&self) -> Result<Vec<u8>> {
+        let mut bounded = self.clone();
+        loop {
+            let bytes = serde_json::to_vec(&bounded).map_err(|_| CustodyError::InvalidRecord)?;
+            if bytes.len() as u64 <= EXIT_LIMIT {
+                return Ok(bytes);
+            }
+            if bounded.warnings.pop().is_some() {
+                bounded.omitted_warnings = bounded.omitted_warnings.saturating_add(1);
+            } else if bounded.failed_deliveries.pop().is_some() {
+                bounded.omitted_failed_deliveries =
+                    bounded.omitted_failed_deliveries.saturating_add(1);
+            } else if bounded.spared.pop().is_some() {
+                bounded.omitted_spared = bounded.omitted_spared.saturating_add(1);
+            } else if bounded.reaped.pop().is_some() {
+                bounded.omitted_reaped = bounded.omitted_reaped.saturating_add(1);
+            } else {
+                return Err(CustodyError::InvalidRecord);
+            }
+        }
+    }
 }
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct CaptureTotals {
@@ -662,6 +815,13 @@ struct StoredExit {
     termination: Option<Termination>,
     never_spawned: bool,
     stop_reason: Option<StopReason>,
+    delivered_signals: Vec<i64>,
+    reaped: Vec<ProcessIdentity>,
+    omitted_reaped: u64,
+    spared: Vec<ProcessIdentity>,
+    omitted_spared: u64,
+    warnings: Vec<String>,
+    omitted_warnings: u64,
     terminal_observed: bool,
     unresolved_cleanup: bool,
     stdout: CaptureTotals,
@@ -674,6 +834,13 @@ pub struct ExitObservation {
     pub termination: Option<Termination>,
     pub never_spawned: bool,
     pub stop_reason: Option<StopReason>,
+    pub delivered_signals: Vec<i64>,
+    pub reaped: Vec<ProcessIdentity>,
+    pub omitted_reaped: u64,
+    pub spared: Vec<ProcessIdentity>,
+    pub omitted_spared: u64,
+    pub warnings: Vec<String>,
+    pub omitted_warnings: u64,
     pub terminal_observed: bool,
     pub unresolved_cleanup: bool,
     pub stdout: CaptureTotals,
@@ -698,7 +865,7 @@ struct StoredObservation {
 pub enum Observation {
     Live,
     PublicationPending,
-    Exited(ExitObservation),
+    Exited(Box<ExitObservation>),
     Unknown,
 }
 pub fn observe(
@@ -722,17 +889,24 @@ pub fn observe(
                 } else {
                     PublicationState::VisibleDurabilityUnconfirmed
                 };
-                return Ok(Observation::Exited(ExitObservation {
+                return Ok(Observation::Exited(Box::new(ExitObservation {
                     publication,
                     scope: record.scope,
                     termination: record.termination,
                     never_spawned: record.never_spawned,
                     stop_reason: record.stop_reason,
+                    delivered_signals: record.delivered_signals,
+                    reaped: record.reaped,
+                    omitted_reaped: record.omitted_reaped,
+                    spared: record.spared,
+                    omitted_spared: record.omitted_spared,
+                    warnings: record.warnings,
+                    omitted_warnings: record.omitted_warnings,
                     terminal_observed: record.terminal_observed,
                     unresolved_cleanup: record.unresolved_cleanup,
                     stdout: record.stdout,
                     stderr: record.stderr,
-                }));
+                })));
             }
             Ok(_) => return Err(CustodyError::InvalidRecord),
             Err(CustodyError::Filesystem(error)) if error.is_not_found() => {}
@@ -798,6 +972,11 @@ pub enum RecoveryState {
     Unknown,
 }
 impl Recovery {
+    /// As for WriterLease::scratch, confinement must exclude this generated
+    /// directory from provider access and Run retains its own exclusion.
+    pub fn scratch(&mut self, directory: Directory) -> Result<crate::scratch::Scratch> {
+        Ok(crate::scratch::Scratch::new(directory)?)
+    }
     pub fn scope(&self) -> Scope {
         self.reservation.scope
     }
@@ -841,7 +1020,7 @@ fn classify_reservation(
         {
             RecoveryState::Reattached
         }
-        // Complete native session census below is required even after guardian death.
+        // A durable unresolved fence survives guardian death in this boot.
         ProcessObservation::Unknown(_) => RecoveryState::Unknown,
         _ => crate::guardian::session_absence(reservation, observer),
     }
@@ -1019,12 +1198,17 @@ pub fn reattach(directory: Directory, scope: Scope) -> Result<CustodyHandle> {
     #[derive(Deserialize)]
     struct Summary {
         scope: Scope,
+        requester: ActorId,
     }
     let summary: Summary = read_record(&directory, "launch.json", RECORD_LIMIT)?;
     if summary.scope != scope || scope.generation == 0 {
         return Err(CustodyError::InvalidRecord);
     }
-    Ok(CustodyHandle { directory, scope })
+    Ok(CustodyHandle {
+        directory,
+        scope,
+        requester: summary.requester,
+    })
 }
 
 /// Trusted Run service composition seam for its permissions owner. This trait

@@ -52,3 +52,9 @@ name = "custody"
 path = "tests/custody.rs"
 harness = false
 required-features = ["fixture"]
+
+[[test]]
+name = "publication"
+path = "tests/publication.rs"
+harness = false
+required-features = ["fixture"]

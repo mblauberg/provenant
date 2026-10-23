@@ -4,6 +4,71 @@ use std::error::Error;
 use std::os::unix::fs::PermissionsExt;
 
 type TestResult = std::result::Result<(), Box<dyn Error>>;
+#[test]
+fn exit_publication_bounds_escaped_facts_and_counts_every_omission() -> TestResult {
+    let identity = ProcessIdentity {
+        boot: "ffffffff-ffff-ffff-ffff-ffffffffffff".into(),
+        pid: i64::MAX,
+        native_start: u64::MAX,
+        group_id: i64::MAX,
+        session_id: i64::MAX,
+    };
+    let exit = ProcessExit {
+        schema_version: 1,
+        scope: scope(),
+        termination: Some(Termination::Exit(0)),
+        never_spawned: false,
+        stop_reason: None,
+        delivered_signals: vec![i64::from(libc::SIGTERM), i64::from(libc::SIGKILL)],
+        reaped: vec![identity.clone(); 16],
+        omitted_reaped: 2,
+        spared: vec![identity.clone(); 16],
+        omitted_spared: 3,
+        failed_deliveries: vec![
+            FailedSignalDelivery {
+                identity: Some(identity),
+                reason: StopReason::PostTerminalCleanup,
+                signal: i64::from(libc::SIGKILL),
+                failure: crate::machine::DeliveryFailure::PermissionDenied,
+            };
+            16
+        ],
+        omitted_failed_deliveries: 4,
+        terminal_observed: true,
+        unresolved_cleanup: true,
+        stdout: CaptureTotals::default(),
+        stderr: CaptureTotals::default(),
+        warnings: vec!["\u{0001}".repeat(160); 24],
+        omitted_warnings: 5,
+    };
+    assert!(serde_json::to_vec(&exit)?.len() as u64 > EXIT_LIMIT);
+    let bytes = exit.bounded_bytes()?;
+    assert!(bytes.len() as u64 <= EXIT_LIMIT);
+    assert_eq!(bytes, exit.bounded_bytes()?);
+    let stored: serde_json::Value = serde_json::from_slice(&bytes)?;
+    for (list, omitted, expected) in [
+        ("reaped", "omitted_reaped", 18),
+        ("spared", "omitted_spared", 19),
+        ("failed_deliveries", "omitted_failed_deliveries", 20),
+        ("warnings", "omitted_warnings", 29),
+    ] {
+        let retained = stored
+            .get(list)
+            .and_then(serde_json::Value::as_array)
+            .ok_or("missing bounded list")?
+            .len() as u64;
+        let omitted = stored
+            .get(omitted)
+            .and_then(serde_json::Value::as_u64)
+            .ok_or("missing omission count")?;
+        assert_eq!(retained + omitted, expected);
+    }
+    assert_eq!(
+        stored.get("unresolved_cleanup"),
+        Some(&serde_json::Value::Bool(true))
+    );
+    Ok(())
+}
 fn scope() -> Scope {
     Scope {
         run: RunId::from_bytes([1; 16]),
@@ -103,6 +168,9 @@ fn settlement_checks_exact_attempt_and_both_digests_before_scratch() -> TestResu
     let unknown = tempfile::tempdir()?;
     let mut writer = acquire(root.path())?;
     let meta = Directory::open_anchor(attempt.path())?.metadata()?;
+    writer.reservation.launch_state = LaunchState::NeverSpawned;
+    writer.reservation.unresolved_cleanup = false;
+    writer.reservation.census_incomplete = false;
     writer.reservation.attempt_device = Some(meta.device);
     writer.reservation.attempt_inode = Some(meta.inode);
     require_durable(write_record(
@@ -194,5 +262,164 @@ fn two_recoverers_cannot_hold_the_same_writer_exclusion() -> TestResult {
         Err(CustodyError::Filesystem(FsError::LockTimeout { .. }))
     ));
     drop(first);
+    Ok(())
+}
+
+#[test]
+fn prelaunch_publication_failure_keeps_outcome_for_exact_retry() -> TestResult {
+    let root = tempfile::tempdir()?;
+    let attempt = tempfile::tempdir()?;
+    let mut writer = acquire(root.path())?;
+    let clock = SystemClock::new();
+    let token = CancelToken::new();
+    let publication = PublicationReservation::prepare(
+        Directory::open_anchor(attempt.path())?,
+        WaitBudget::cli(clock.mono_now(), 1)?,
+        &token,
+        &clock,
+    )?;
+    std::fs::create_dir(attempt.path().join("process-exit.json"))?;
+    token.cancel();
+    let failure = launch(
+        OwnedLaunch {
+            command: ProviderCommand {
+                resolved_route: "fixture/provider".into(),
+                permission_plan_digest: Digest::from_bytes([0; 32]),
+                task: provenant_core::TaskId::from_bytes([3; 16]),
+                requester: ActorId::from_bytes([4; 16]),
+                argv: vec!["/nonexistent-never-executed".into()],
+                environment: crate::fixture::environment(root.path()),
+                cwd: root.path().into(),
+                stdin: vec![],
+            },
+            writer: &mut writer,
+            handshake: WaitBudget::cli(clock.mono_now(), 1)?,
+            cancel: &token,
+            clock: &clock,
+        },
+        CapturePlan::default(),
+        publication,
+    )
+    .err()
+    .ok_or("cancelled launch succeeded")?;
+    assert!(failure.retry_exit_publication().is_err());
+    std::fs::remove_dir(attempt.path().join("process-exit.json"))?;
+    assert!(matches!(
+        failure.retry_exit_publication()?,
+        Publication::Durable
+    ));
+    let before = std::fs::read(attempt.path().join("process-exit.json"))?;
+    assert!(matches!(
+        failure.retry_exit_publication()?,
+        Publication::Durable
+    ));
+    assert_eq!(
+        before,
+        std::fs::read(attempt.path().join("process-exit.json"))?
+    );
+    assert!(root.path().join("reservation.json").is_file());
+    Ok(())
+}
+
+#[test]
+fn contradictory_never_spawned_records_never_prove_absence() -> TestResult {
+    let root = tempfile::tempdir()?;
+    let writer = acquire(root.path())?;
+    let mut record = writer.reservation.clone();
+    record.descendants.push(ProcessIdentity {
+        boot: record.boot.clone(),
+        pid: 1,
+        native_start: 1,
+        group_id: 1,
+        session_id: 1,
+    });
+    assert!(record.validate().is_err());
+    assert_eq!(
+        classify_reservation(&record, &crate::fixture::RecordedBootObserver),
+        RecoveryState::Unknown
+    );
+    record.descendants.clear();
+    record.omitted_descendants = 1;
+    assert!(record.validate().is_err());
+    record.omitted_descendants = 0;
+    record.launch_state = LaunchState::NeverSpawned;
+    record.attempt_device = Some(1);
+    record.attempt_inode = Some(1);
+    assert!(record.validate().is_err());
+    record.unresolved_cleanup = false;
+    record.census_incomplete = false;
+    assert!(record.validate().is_ok());
+    record.provider = Some(ProcessIdentity {
+        boot: record.boot.clone(),
+        pid: 1,
+        native_start: 1,
+        group_id: 1,
+        session_id: 1,
+    });
+    assert!(record.validate().is_err());
+    Ok(())
+}
+
+struct EmptyNativeWorld;
+impl ProcessObserver for EmptyNativeWorld {
+    fn boot_identity(&self) -> std::result::Result<String, crate::census::CensusError> {
+        Ok("fixture-recorded-boot-v1".into())
+    }
+    fn observe(&self, _: i64) -> ProcessObservation {
+        ProcessObservation::Absent
+    }
+    fn census(
+        &self,
+        _: usize,
+    ) -> std::result::Result<crate::census::Census, crate::census::CensusError> {
+        crate::census::Census::from_observations([], [], [], true, false, 1)
+    }
+}
+#[test]
+fn an_unrecorded_escape_cannot_be_cleared_by_an_empty_census() -> TestResult {
+    let root = tempfile::tempdir()?;
+    let writer = acquire(root.path())?;
+    let mut record = writer.reservation.clone();
+    record.launch_state = LaunchState::Spawned;
+    record.attempt_device = Some(1);
+    record.attempt_inode = Some(1);
+    record.guardian = Some(ProcessIdentity {
+        boot: record.boot.clone(),
+        pid: 100,
+        native_start: 1,
+        group_id: 100,
+        session_id: 100,
+    });
+    record.provider = Some(ProcessIdentity {
+        boot: record.boot.clone(),
+        pid: 101,
+        native_start: 2,
+        group_id: 101,
+        session_id: 100,
+    });
+    record.census_incomplete = false;
+    assert!(record.validate().is_ok());
+    assert_eq!(
+        classify_reservation(&record, &EmptyNativeWorld),
+        RecoveryState::Unknown
+    );
+    record.unresolved_cleanup = false;
+    assert_eq!(
+        classify_reservation(&record, &EmptyNativeWorld),
+        RecoveryState::Absent
+    );
+    record.census_incomplete = true;
+    assert!(record.validate().is_err());
+    assert_eq!(
+        classify_reservation(&record, &EmptyNativeWorld),
+        RecoveryState::Unknown
+    );
+    record.census_incomplete = false;
+    record.omitted_descendants = 1;
+    assert!(record.validate().is_err());
+    assert_eq!(
+        classify_reservation(&record, &EmptyNativeWorld),
+        RecoveryState::Unknown
+    );
     Ok(())
 }

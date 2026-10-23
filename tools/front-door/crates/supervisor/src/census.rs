@@ -143,7 +143,8 @@ pub enum CensusError {
 
 impl Census {
     /// Build a bounded observation from native facts or recorded fixtures.
-    /// A partial listing never implies absence.
+    /// Only explicit per-PID absence observations imply absence; native process
+    /// listings are not atomic, so an omitted PID remains unknown.
     pub fn from_observations(
         facts: impl IntoIterator<Item = ProcessFact>,
         unknown_pids: impl IntoIterator<Item = (i64, ObservationIssue)>,
@@ -212,7 +213,7 @@ impl Census {
         if self.unknown_pids.contains_key(&pid) {
             return ProcessLookup::Unknown;
         }
-        if self.absent_pids.contains(&pid) || (self.process_list_complete && !self.truncated) {
+        if self.absent_pids.contains(&pid) {
             return ProcessLookup::Absent;
         }
         ProcessLookup::Unknown
@@ -228,6 +229,68 @@ impl Census {
 
     pub fn bound(&self) -> usize {
         self.bound
+    }
+
+    /// Replace an omitted/unknown listing result with a direct observation of
+    /// a PID already known through custody. No caller may infer absence from
+    /// omission, and this bounded update never grants signalling authority.
+    pub(crate) fn observe_known(
+        &mut self,
+        pid: i64,
+        expected_boot: &str,
+        observation: ProcessObservation,
+    ) -> Result<(), CensusError> {
+        if pid <= 0 || expected_boot.is_empty() || expected_boot.len() > MAX_BOOT_ID_BYTES {
+            return Err(CensusError::InvalidRecord);
+        }
+
+        let observation = match observation {
+            ProcessObservation::Present(fact)
+                if fact.validate().is_ok()
+                    && fact.identity.pid == pid
+                    && fact.identity.boot == expected_boot =>
+            {
+                ProcessObservation::Present(fact)
+            }
+            ProcessObservation::Present(_) => {
+                ProcessObservation::Unknown(ObservationIssue::Malformed)
+            }
+            ProcessObservation::Absent => ProcessObservation::Absent,
+            ProcessObservation::Unknown(issue) => ProcessObservation::Unknown(issue),
+        };
+        let already_counted = self.processes.contains_key(&pid)
+            || self.unknown_pids.contains_key(&pid)
+            || self.absent_pids.contains(&pid);
+        let observed = self
+            .processes
+            .len()
+            .saturating_add(self.unknown_pids.len())
+            .saturating_add(self.absent_pids.len());
+        if !already_counted && observed >= self.bound {
+            self.mark_truncated();
+            return Ok(());
+        }
+
+        self.processes.remove(&pid);
+        self.unknown_pids.remove(&pid);
+        self.absent_pids.remove(&pid);
+        match observation {
+            ProcessObservation::Present(fact) => {
+                self.processes.insert(pid, fact);
+            }
+            ProcessObservation::Absent => {
+                self.absent_pids.insert(pid);
+            }
+            ProcessObservation::Unknown(issue) => {
+                self.unknown_pids.insert(pid, issue);
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn mark_truncated(&mut self) {
+        self.truncated = true;
+        self.process_list_complete = false;
     }
 
     pub fn facts(&self) -> impl Iterator<Item = &ProcessFact> {
@@ -341,7 +404,6 @@ impl OwnerRegistration {
 pub struct SparingTracker {
     spared: BTreeSet<ProcessIdentity>,
     parents: BTreeMap<ProcessIdentity, ProcessIdentity>,
-    roots: BTreeMap<ProcessIdentity, ProcessIdentity>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Error)]
@@ -380,8 +442,6 @@ impl SparingTracker {
             return Err(SparingError::NotDescendant);
         }
         self.spared.insert(registration.identity.clone());
-        self.roots
-            .insert(registration.identity.clone(), custody_root.clone());
         self.record_lineage(census, &registration.identity, custody_root);
         self.refresh(census);
         Ok(())
@@ -426,29 +486,6 @@ impl SparingTracker {
                 ProcessLookup::Absent => false,
                 ProcessLookup::Unknown => true,
             });
-        self.roots
-            .retain(|identity, _| self.spared.contains(identity));
-        let no_longer_descendant: Vec<_> = self
-            .spared
-            .iter()
-            .filter_map(|identity| {
-                let root = self.roots.get(identity)?;
-                let exact = match census.process(identity.pid) {
-                    ProcessLookup::Present(fact) => fact.identity == *identity,
-                    ProcessLookup::Absent => false,
-                    ProcessLookup::Unknown => return None,
-                };
-                if !exact || census.ancestry(identity, root) == Ancestry::No {
-                    Some(identity.clone())
-                } else {
-                    None
-                }
-            })
-            .collect();
-        for identity in no_longer_descendant {
-            self.spared.remove(&identity);
-            self.roots.remove(&identity);
-        }
         self.parents.retain(|child, parent| {
             let child_live = match census.process(child.pid) {
                 ProcessLookup::Present(fact) if fact.identity == *child => {
@@ -485,16 +522,13 @@ impl SparingTracker {
                 .filter(|(child, parent)| {
                     !self.spared.contains(*child) && self.spared.contains(*parent)
                 })
-                .map(|(child, parent)| (child.clone(), self.roots.get(parent).cloned()))
+                .map(|(child, _)| child.clone())
                 .collect();
             if additions.is_empty() {
                 break;
             }
-            for (child, root) in additions {
-                self.spared.insert(child.clone());
-                if let Some(root) = root {
-                    self.roots.insert(child, root);
-                }
+            for child in additions {
+                self.spared.insert(child);
             }
         }
     }
@@ -553,6 +587,57 @@ mod tests {
     }
 
     #[test]
+    fn known_pid_observation_resolves_omission_and_rejects_other_boots() {
+        let snapshot_result = Census::from_observations([fact(1, 100, 0)], [], [], true, false, 4);
+        assert!(snapshot_result.is_ok(), "valid census fixture was rejected");
+        let Ok(mut snapshot) = snapshot_result else {
+            return;
+        };
+
+        assert!(
+            snapshot
+                .observe_known(2, "test-boot", ProcessObservation::Present(fact(2, 200, 1)))
+                .is_ok()
+        );
+        assert!(matches!(snapshot.process(2), ProcessLookup::Present(_)));
+        assert!(
+            snapshot
+                .observe_known(2, "test-boot", ProcessObservation::Absent)
+                .is_ok()
+        );
+        assert_eq!(snapshot.process(2), ProcessLookup::Absent);
+
+        let mut wrong_boot = fact(3, 300, 1);
+        wrong_boot.identity.boot = "other-boot".into();
+        assert!(
+            snapshot
+                .observe_known(3, "test-boot", ProcessObservation::Present(wrong_boot))
+                .is_ok()
+        );
+        assert_eq!(snapshot.process(3), ProcessLookup::Unknown);
+        assert!(!snapshot.is_complete());
+    }
+
+    #[test]
+    fn known_pid_observation_respects_the_census_bound() {
+        let snapshot_result = Census::from_observations([fact(1, 100, 0)], [], [], true, false, 1);
+        assert!(snapshot_result.is_ok(), "valid census fixture was rejected");
+        let Ok(mut snapshot) = snapshot_result else {
+            return;
+        };
+        assert!(
+            snapshot
+                .observe_known(2, "test-boot", ProcessObservation::Absent)
+                .is_ok()
+        );
+        assert_eq!(snapshot.process(2), ProcessLookup::Unknown);
+        assert_eq!(
+            snapshot.completeness(),
+            CensusCompleteness::PartialAndTruncated
+        );
+    }
+
+    #[test]
     fn ancestry_requires_exact_identities_and_strictly_older_parent_stamps() {
         let root = identity(1, 100);
         let owner = identity(2, 200);
@@ -605,7 +690,7 @@ mod tests {
     }
 
     #[test]
-    fn prior_sparing_survives_unknown_and_clears_on_pid_reuse() {
+    fn prior_sparing_survives_unknown_reparenting_and_clears_on_pid_reuse() {
         let spared = identity(2, 200);
         let mut tracker = SparingTracker::default();
         tracker.spared.insert(spared.clone());
@@ -631,22 +716,50 @@ mod tests {
         tracker.refresh(&reused);
         assert!(!tracker.is_spared(&spared));
 
-        let root = identity(1, 100);
         let owner = identity(2, 200);
-        let moved = make_census(
-            vec![fact(1, 100, 0), fact(2, 200, 4), fact(4, 150, 9)],
-            vec![],
-            true,
+        let mut reparented_tracker = SparingTracker::default();
+        reparented_tracker.spared.insert(owner.clone());
+        let reparented = make_census(vec![fact(2, 200, 4), fact(4, 150, 9)], vec![], true);
+        assert!(
+            reparented.is_some(),
+            "valid reparented-owner fixture was rejected"
         );
-        assert!(moved.is_some(), "valid moved-owner fixture was rejected");
-        let Some(moved) = moved else {
+        let Some(reparented) = reparented else {
             return;
         };
-        tracker.spared.insert(owner.clone());
-        tracker.roots.insert(owner.clone(), root.clone());
-        tracker.parents.insert(owner.clone(), root);
-        tracker.refresh(&moved);
-        assert!(!tracker.is_spared(&owner));
+        reparented_tracker.refresh(&reparented);
+        assert!(reparented_tracker.is_spared(&owner));
+    }
+
+    #[test]
+    fn group_and_session_changes_do_not_change_native_process_identity() {
+        let original = identity(7, 700);
+        let mut moved = original.clone();
+        moved.group_id = 70;
+        moved.session_id = 71;
+        assert_eq!(original, moved);
+        assert_eq!(original.cmp(&moved), std::cmp::Ordering::Equal);
+    }
+
+    #[test]
+    fn completed_enumeration_does_not_guess_absence_for_an_omitted_pid() {
+        let complete = make_census(vec![fact(1, 100, 0)], vec![], true);
+        assert!(
+            complete.is_some(),
+            "valid complete census fixture was rejected"
+        );
+        let Some(complete) = complete else {
+            return;
+        };
+        assert!(complete.is_complete());
+        assert_eq!(complete.process(2), ProcessLookup::Unknown);
+
+        let explicit = Census::from_observations([fact(1, 100, 0)], [], [2], true, false, 16);
+        assert!(explicit.is_ok(), "valid explicit absence was rejected");
+        let Some(explicit) = explicit.ok() else {
+            return;
+        };
+        assert_eq!(explicit.process(2), ProcessLookup::Absent);
     }
 
     #[test]

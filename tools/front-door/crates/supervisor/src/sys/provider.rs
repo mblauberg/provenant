@@ -1,7 +1,7 @@
 //! Provider-process custody in the short-lived guardian.
 //!
 //! This module owns only the provider child, its pipes, and census-proven
-//! descendants. Utility execution remains in `exec`. Root/group signals use
+//! descendants. Utility execution remains in `exec`. Provider signals use
 //! `ProviderGroup::stop`; adopted-child signals require exact tracked identity
 //! and a live direct-child wait relationship.
 use super::{
@@ -18,7 +18,11 @@ use crate::{
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 use std::io;
+#[cfg(target_os = "linux")]
+use std::io::Read;
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd};
+#[cfg(target_os = "linux")]
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command, Stdio};
@@ -26,6 +30,10 @@ use std::time::{Duration, Instant};
 
 const EINTR_RETRIES: usize = 8;
 const MAX_REACTOR_WAIT: Duration = Duration::from_secs(1);
+#[cfg(target_os = "linux")]
+const MAX_GUARDIAN_THREADS: usize = 256;
+#[cfg(target_os = "linux")]
+const MAX_CHILD_LIST_BYTES: usize = 64 * 1024;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum PollInterest {
@@ -414,21 +422,19 @@ pub(crate) struct AdoptedDelivery {
 
 /// Provider owner. Dropping this value transfers the direct child to its
 /// pre-reserved bounded reaper without signalling it; normal cleanup must call
-/// `stop` and `cleanup` explicitly while the leader still reserves its PGID.
+/// `stop` and `cleanup` explicitly while the unreaped child reserves its PID.
 pub(crate) struct ProviderGroup {
     child: Option<Child>,
     permit: Option<Permit>,
     _reaper: Reaper,
     pid: i32,
-    group_allowed: bool,
     last_direct_signal: Option<i32>,
-    last_group_signal: Option<i32>,
     observed: Option<Termination>,
     provider_identity: Option<ProcessIdentity>,
     owned_descendants: BTreeSet<ProcessIdentity>,
     spared_descendants: BTreeSet<ProcessIdentity>,
     last_adopted_signal: BTreeMap<ProcessIdentity, i32>,
-    ownership_overflowed: bool,
+    ownership_uncertain: bool,
     pub(crate) stdin: Option<ChildStdin>,
     pub(crate) stdout: Option<ChildStdout>,
     pub(crate) stderr: Option<ChildStderr>,
@@ -479,15 +485,13 @@ impl ProviderGroup {
             permit: Some(permit),
             _reaper: reaper,
             pid,
-            group_allowed: false,
             last_direct_signal: None,
-            last_group_signal: None,
             observed: None,
             provider_identity: None,
             owned_descendants: BTreeSet::new(),
             spared_descendants: BTreeSet::new(),
             last_adopted_signal: BTreeMap::new(),
-            ownership_overflowed: false,
+            ownership_uncertain: false,
             stdin: None,
             stdout: None,
             stderr: None,
@@ -527,12 +531,6 @@ impl ProviderGroup {
         watches
     }
 
-    /// Called only with a decision from a complete, identity-checked census
-    /// proving every process in this PGID is owned and none is spared.
-    pub(crate) fn allow_group(&mut self, allowed: bool) {
-        self.group_allowed = allowed;
-    }
-
     /// Nonblocking WNOWAIT observation. Errors remain distinct from an absent
     /// status, so failed observation can never be mistaken for a live child.
     pub(crate) fn observe(&mut self) -> io::Result<Option<Termination>> {
@@ -545,13 +543,8 @@ impl ProviderGroup {
 
     /// The sole provider-signalling API. `escalation` selects KILL after the
     /// caller's bounded TERM grace. A failed observation refuses to signal.
-    pub(crate) fn stop(&mut self, reason: StopReason, escalation: bool) -> io::Result<bool> {
-        if self.child.is_none() {
-            return Ok(false);
-        }
-        let observed = self.observe()?;
-        if observed.is_some() && (reason != StopReason::PostTerminalCleanup || !self.group_allowed)
-        {
+    pub(crate) fn stop(&mut self, _reason: StopReason, escalation: bool) -> io::Result<bool> {
+        if self.child.is_none() || self.observe()?.is_some() {
             return Ok(false);
         }
         let signal = if escalation {
@@ -559,26 +552,14 @@ impl ProviderGroup {
         } else {
             libc::SIGTERM
         };
-        let group_target = self.group_allowed;
-        let last_signal = if group_target {
-            self.last_group_signal
-        } else {
-            self.last_direct_signal
-        };
-        if last_signal == Some(signal) {
+        if self.last_direct_signal == Some(signal) {
             return Ok(false);
         }
-        let target = if group_target { -self.pid } else { self.pid };
-        // SAFETY: for direct delivery the unreaped Child reserves its PID. For
-        // group delivery the same unreaped leader reserves its PGID, and the
-        // caller supplied an identity-checked whole-group census decision.
-        // No descriptor or process handle is transferred by kill.
-        if unsafe { libc::kill(target, signal) } == 0 {
-            if group_target {
-                self.last_group_signal = Some(signal);
-            } else {
-                self.last_direct_signal = Some(signal);
-            }
+        // SAFETY: the live Child is owned by this ProviderGroup and has not
+        // been reaped. Its kernel child identity reserves this positive PID;
+        // this signals only that provider, never its mutable process group.
+        if unsafe { libc::kill(self.pid, signal) } == 0 {
+            self.last_direct_signal = Some(signal);
             return Ok(true);
         }
         let error = io::Error::last_os_error();
@@ -605,17 +586,40 @@ impl ProviderGroup {
             ProcessLookup::Absent | ProcessLookup::Unknown => self.provider_identity.clone(),
         };
         if let Some(provider) = provider {
+            #[cfg(target_os = "linux")]
+            let guardian_pid = i64::from(std::process::id());
             for fact in census.facts() {
                 if fact.identity == provider {
                     continue;
                 }
-                if provider_ancestry(census, &fact.identity, &provider) == Ancestry::Yes {
+                let ancestry = provider_ancestry(census, &fact.identity, &provider);
+                #[cfg(target_os = "linux")]
+                let adopted_direct_child = fact.parent_pid == guardian_pid
+                    && fact.identity.pid != provider.pid
+                    && fact.identity.boot == provider.boot
+                    && match native_pid(fact.identity.pid)
+                        .and_then(|pid| wait_exit(pid, true).map(|_| ()))
+                    {
+                        // A successful WNOWAIT call (including si_pid == 0)
+                        // proves the exact PID is still this guardian's child.
+                        // The census row supplies its full boot/PID/start tuple;
+                        // the dedicated guardian has no unrelated child source.
+                        Ok(()) => true,
+                        Err(error) if error.raw_os_error() == Some(libc::ECHILD) => false,
+                        Err(_) => {
+                            self.ownership_uncertain = true;
+                            false
+                        }
+                    };
+                #[cfg(not(target_os = "linux"))]
+                let adopted_direct_child = false;
+                if ancestry == Ancestry::Yes || adopted_direct_child {
                     if self.owned_descendants.contains(&fact.identity)
                         || self.owned_descendants.len() < MAX_CENSUS_ENTRIES
                     {
                         self.owned_descendants.insert(fact.identity.clone());
                     } else {
-                        self.ownership_overflowed = true;
+                        self.ownership_uncertain = true;
                     }
                 }
             }
@@ -672,7 +676,7 @@ impl ProviderGroup {
         let identities: Vec<ProcessIdentity> = self.owned_descendants.iter().cloned().collect();
         let mut result = AdoptedCleanup {
             reaped: Vec::new(),
-            unresolved: self.ownership_overflowed || !census.is_complete(),
+            unresolved: self.ownership_uncertain || !census.is_complete(),
         };
         for identity in identities {
             if self.spared_descendants.contains(&identity) {
@@ -796,6 +800,26 @@ impl ProviderGroup {
         Ok(deliveries)
     }
 
+    /// Prove the guardian has no provider descendants left after the provider
+    /// itself is terminal. Linux's per-thread children lists cover direct
+    /// children created by every guardian thread; with the provider reaped only
+    /// by this guardian, any surviving descendant branch must have a direct
+    /// guardian child. macOS has no equivalent complete kernel list, so it
+    /// cannot make this proof.
+    pub(crate) fn quiescent_children(&self) -> io::Result<bool> {
+        #[cfg(target_os = "linux")]
+        {
+            if self.child.is_none() || wait_exit(self.pid, true)?.is_none() {
+                return Ok(false);
+            }
+            return linux_quiescent_children(self.pid);
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            Ok(false)
+        }
+    }
+
     /// Consume the provider's wait status only after it was observed with
     /// WNOWAIT and the caller's complete census proves all descendants settled.
     /// This is a WNOHANG wait, never an unbounded Child::wait.
@@ -819,6 +843,26 @@ impl ProviderGroup {
                 "provider wait status changed",
             )),
             None => Ok(None),
+        }
+    }
+    /// One-way retirement after bounded explicit cleanup and durable unresolved
+    /// reservation/exit publication. Consuming self releases the provider owner
+    /// only after the known-dead leader is reaped. Descendants are neither
+    /// signalled nor claimed settled: the persistent fence belongs to recovery.
+    pub(crate) fn finish_fenced(mut self) -> Result<Termination, Box<(Self, io::Error)>> {
+        let observed = match self.observe() {
+            Ok(Some(status)) => status,
+            Ok(None) => return Err(Box::new((self, io::ErrorKind::WouldBlock.into()))),
+            Err(error) => return Err(Box::new((self, error))),
+        };
+        match wait_exit(self.pid, false) {
+            Ok(Some(status)) if status == observed => {
+                self.child.take();
+                self.permit.take();
+                Ok(status)
+            }
+            Ok(_) => Err(Box::new((self, io::ErrorKind::WouldBlock.into()))),
+            Err(error) => Err(Box::new((self, error))),
         }
     }
 }
@@ -897,6 +941,108 @@ fn linux_provider_ancestry(
     Ancestry::Unknown
 }
 
+#[cfg(target_os = "linux")]
+fn linux_quiescent_children(provider_pid: i32) -> io::Result<bool> {
+    let before = linux_task_ids()?;
+    for tid in &before {
+        let path = std::path::Path::new("/proc/self/task")
+            .join(tid.to_string())
+            .join("children");
+        let contents = read_proc_file_bounded(&path, MAX_CHILD_LIST_BYTES)?;
+        if parse_child_ids(&contents)?
+            .into_iter()
+            .any(|child_pid| child_pid != i64::from(provider_pid))
+        {
+            return Ok(false);
+        }
+    }
+    let after = linux_task_ids()?;
+    if before != after {
+        return Err(io::Error::new(
+            io::ErrorKind::WouldBlock,
+            "guardian thread list changed during child census",
+        ));
+    }
+    Ok(true)
+}
+
+#[cfg(target_os = "linux")]
+fn linux_task_ids() -> io::Result<BTreeSet<i64>> {
+    let mut tids = BTreeSet::new();
+    for entry in std::fs::read_dir("/proc/self/task")? {
+        let entry = entry?;
+        let tid = parse_positive_id(entry.file_name().as_bytes())?;
+        if !tids.insert(tid) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "duplicate guardian thread ID",
+            ));
+        }
+        if tids.len() > MAX_GUARDIAN_THREADS {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "guardian thread census exceeded its bound",
+            ));
+        }
+    }
+    if tids.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "guardian thread census is empty",
+        ));
+    }
+    Ok(tids)
+}
+
+#[cfg(target_os = "linux")]
+fn read_proc_file_bounded(path: &std::path::Path, limit: usize) -> io::Result<Vec<u8>> {
+    let file = std::fs::File::open(path)?;
+    let mut bytes = Vec::with_capacity(limit.saturating_add(1));
+    file.take(limit.saturating_add(1) as u64)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() > limit {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "proc child list exceeded its bound",
+        ));
+    }
+    Ok(bytes)
+}
+
+#[cfg(target_os = "linux")]
+fn parse_child_ids(contents: &[u8]) -> io::Result<BTreeSet<i64>> {
+    let mut pids = BTreeSet::new();
+    for token in contents
+        .split(u8::is_ascii_whitespace)
+        .filter(|token| !token.is_empty())
+    {
+        let pid = parse_positive_id(token)?;
+        if !pids.insert(pid) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "duplicate child PID in proc list",
+            ));
+        }
+    }
+    Ok(pids)
+}
+
+#[cfg(target_os = "linux")]
+fn parse_positive_id(bytes: &[u8]) -> io::Result<i64> {
+    if bytes.is_empty() || !bytes.iter().all(u8::is_ascii_digit) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "proc process ID is not decimal",
+        ));
+    }
+    let text = std::str::from_utf8(bytes)
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "proc ID is not ASCII"))?;
+    text.parse::<i64>()
+        .ok()
+        .filter(|pid| *pid > 0)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "proc ID is outside i64 range"))
+}
+
 fn native_pid(pid: i64) -> io::Result<i32> {
     i32::try_from(pid)
         .ok()
@@ -964,5 +1110,33 @@ fn wait_exit(pid: i32, nowait: bool) -> io::Result<Option<Termination>> {
                 "unexpected waitid status",
             )),
         };
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod quiescence_tests {
+    use super::parse_child_ids;
+    use std::collections::BTreeSet;
+
+    #[test]
+    fn parses_bounded_proc_child_id_lists() {
+        assert_eq!(
+            parse_child_ids(b" 17\t23\n").ok(),
+            Some(BTreeSet::from([17, 23]))
+        );
+        assert_eq!(parse_child_ids(b"\n").ok(), Some(BTreeSet::new()));
+    }
+
+    #[test]
+    fn rejects_malformed_proc_child_id_lists() {
+        for contents in [
+            &b"0"[..],
+            &b"-1"[..],
+            &b"9223372036854775808"[..],
+            &b"7 duplicate"[..],
+            &b"7 7"[..],
+        ] {
+            assert!(parse_child_ids(contents).is_err());
+        }
     }
 }

@@ -121,6 +121,111 @@ pub fn fixture_read_byte(
     crate::sys::fixture_read_byte(stream, timeout)
 }
 
+/// Temporary-root marker driven publisher faults for the guardian integration test.
+/// The production path never constructs this type.
+pub struct ExitPublicationFaults {
+    state_dir: PathBuf,
+}
+pub const S2_EXIT_PUBLICATION_CONFIG: &str = "s2-exit-publication.config";
+pub const S2_EXIT_PUBLICATION_ENOSPC_ONCE: &str = "s2-exit-publication.enospc-once";
+pub const S2_EXIT_PUBLICATION_SYNC_BLOCKED: &str = "s2-exit-publication.sync-blocked";
+pub const S2_EXIT_PUBLICATION_DURABLE: &str = "s2-exit-publication.durable";
+
+impl ExitPublicationFaults {
+    pub fn from_state_dir(state_dir: &Path) -> io::Result<Option<Self>> {
+        match std::fs::read(state_dir.join(S2_EXIT_PUBLICATION_CONFIG)) {
+            Ok(config) if config == b"enospc-post-link-sync-v1\n" => Ok(Some(Self {
+                state_dir: state_dir.to_path_buf(),
+            })),
+            Ok(_) => Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "unknown exit publication fixture config",
+            )),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
+    fn marker(&self, name: &str) -> PathBuf {
+        self.state_dir.join(name)
+    }
+}
+impl crate::ExitPublisher for ExitPublicationFaults {
+    fn publish(
+        &self,
+        directory: &crate::fs::Directory,
+        bytes: &[u8],
+    ) -> crate::custody::Result<crate::fs::Publication> {
+        let once = self.marker(S2_EXIT_PUBLICATION_ENOSPC_ONCE);
+        match std::fs::remove_file(&once) {
+            Ok(()) => {
+                return Err(injected_fs_error(
+                    "fixture exit publication",
+                    PathBuf::from("process-exit.json"),
+                    libc::ENOSPC,
+                )
+                .into());
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+
+        let blocked = self.marker(S2_EXIT_PUBLICATION_SYNC_BLOCKED);
+        let publication = directory.atomic_write_with_sync(
+            std::ffi::OsStr::new("process-exit.json"),
+            ".exit-",
+            bytes,
+            crate::fs::PublishMode::NoReplace,
+            || match marker_present(&blocked) {
+                Ok(true) => Err(injected_fs_error(
+                    "fixture post-link directory sync",
+                    PathBuf::from("process-exit.json"),
+                    libc::ENOSPC,
+                )),
+                Ok(false) => directory.sync(),
+                Err(source) => Err(crate::fs::FsError::Io {
+                    operation: "read fixture sync marker",
+                    path: blocked.clone(),
+                    source,
+                }),
+            },
+        )?;
+        Ok(publication)
+    }
+
+    fn sync_visible(&self, directory: &crate::fs::Directory) -> crate::custody::Result<()> {
+        let blocked = self.marker(S2_EXIT_PUBLICATION_SYNC_BLOCKED);
+        if marker_present(&blocked)? {
+            return Err(injected_fs_error(
+                "fixture visible exit sync",
+                PathBuf::from("process-exit.json"),
+                libc::ENOSPC,
+            )
+            .into());
+        }
+        directory.sync()?;
+        std::fs::write(
+            self.marker(S2_EXIT_PUBLICATION_DURABLE),
+            b"directory sync completed",
+        )?;
+        Ok(())
+    }
+}
+fn marker_present(path: &Path) -> io::Result<bool> {
+    match std::fs::symlink_metadata(path) {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error),
+    }
+}
+fn injected_fs_error(operation: &'static str, path: PathBuf, errno: i32) -> crate::fs::FsError {
+    crate::fs::FsError::Io {
+        operation,
+        path,
+        source: io::Error::from_raw_os_error(errno),
+    }
+}
+
 pub fn dispatch() -> io::Result<bool> {
     let args: Vec<_> = std::env::args_os().collect();
     if args.get(1).is_none_or(|arg| arg != "--fixture") {
@@ -217,6 +322,86 @@ pub fn dispatch() -> io::Result<bool> {
             let _ = child.spawn()?;
             let mut exiting = std::os::unix::net::UnixStream::connect(exit_socket)?;
             exiting.write_all(b"E")?;
+        }
+        "s2-setsid-descendant" => {
+            crate::sys::fixture_ignore_term()?;
+            let mut ready = std::os::unix::net::UnixStream::connect(fixture_path(&args, 3)?)?;
+            ready.write_all(b"R")?;
+            ready.write_all(std::process::id().to_string().as_bytes())?;
+            ready.write_all(b"\n")?;
+            wait_for_eof(&mut ready)?;
+        }
+        "s2-setsid-provider" => {
+            let ready_socket = fixture_path(&args, 3)?.into_os_string();
+            let gate_socket = fixture_path(&args, 4)?;
+            let root = std::env::current_dir()?;
+            let mut descendant =
+                command_with_args("s2-setsid-descendant", &[ready_socket], &root, true)?;
+            let _ = descendant.spawn()?;
+            let mut gate = std::os::unix::net::UnixStream::connect(gate_socket)?;
+            gate.write_all(b"R")?;
+            wait_for_eof(&mut gate)?;
+        }
+        "s2-registered-owner" => {
+            let home = std::env::var_os("HOME")
+                .map(PathBuf::from)
+                .ok_or(io::ErrorKind::NotFound)?;
+            let directory = crate::fs::Directory::open_anchor(&home).map_err(io::Error::other)?;
+            let clock = crate::clock::SystemClock::new();
+            let cancel = provenant_core::CancelToken::new();
+            let lock = directory
+                .lock(
+                    std::ffi::OsStr::new("s2-owner.lock"),
+                    crate::fs::LockMode::Exclusive,
+                    provenant_core::WaitBudget::cli(provenant_core::Clock::mono_now(&clock), 5)
+                        .map_err(io::Error::other)?,
+                    &cancel,
+                    &clock,
+                )
+                .map_err(io::Error::other)?;
+            let identity = match crate::census::ProcessObserver::observe(
+                &RecordedBootObserver,
+                i64::from(std::process::id()),
+            ) {
+                crate::census::ProcessObservation::Present(fact) => fact.identity,
+                other => {
+                    return Err(io::Error::other(format!(
+                        "owner identity unavailable: {other:?}"
+                    )));
+                }
+            };
+            let bytes = serde_json::to_vec(&identity).map_err(io::Error::other)?;
+            std::fs::write(home.join("s2-owner.json"), bytes)?;
+            let mut ready = std::os::unix::net::UnixStream::connect(fixture_path(&args, 3)?)?;
+            ready.write_all(b"R")?;
+            wait_for_eof(&mut ready)?;
+            drop(lock);
+        }
+        "s2-registered-provider" => {
+            let ready_socket = fixture_path(&args, 3)?.into_os_string();
+            let gate_socket = fixture_path(&args, 4)?;
+            let root = std::env::current_dir()?;
+            let mut owner =
+                command_with_args("s2-registered-owner", &[ready_socket], &root, false)?;
+            let _ = owner.spawn()?;
+            let mut gate = std::os::unix::net::UnixStream::connect(gate_socket)?;
+            gate.write_all(b"R")?;
+            wait_for_eof(&mut gate)?;
+        }
+        "s2-late-registered-provider" => {
+            let ready_socket = fixture_path(&args, 3)?.into_os_string();
+            let launch_gate = fixture_path(&args, 4)?;
+            let hold_gate = fixture_path(&args, 5)?;
+            let root = std::env::current_dir()?;
+            let mut gate = std::os::unix::net::UnixStream::connect(launch_gate)?;
+            gate.write_all(b"R")?;
+            wait_for_eof(&mut gate)?;
+            let mut owner =
+                command_with_args("s2-registered-owner", &[ready_socket], &root, false)?;
+            let _ = owner.spawn()?;
+            let mut gate = std::os::unix::net::UnixStream::connect(hold_gate)?;
+            gate.write_all(b"R")?;
+            wait_for_eof(&mut gate)?;
         }
         "wait-on-socket" => {
             let path = fixture_path(&args, 3)?;

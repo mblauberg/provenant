@@ -668,6 +668,11 @@ fn darwin_process_ids(max_entries: usize) -> Result<(Vec<i32>, bool), CensusErro
         return Err(CensusError::ProcessList(io::Error::last_os_error()));
     }
     let written = usize::try_from(written).map_err(|_| CensusError::InvalidRecord)?;
+    if written == 0 {
+        return Err(CensusError::ProcessList(io::Error::other(
+            "empty process list",
+        )));
+    }
     if written > pids.len() {
         return Err(CensusError::InvalidRecord);
     }
@@ -675,6 +680,36 @@ fn darwin_process_ids(max_entries: usize) -> Result<(Vec<i32>, bool), CensusErro
     pids.truncate(written.min(pids.len()));
     pids.retain(|pid| *pid > 0);
     Ok((pids, truncated))
+}
+
+#[cfg(target_os = "macos")]
+fn darwin_zero_probe_session(pid: i32) -> (i32, Option<i32>) {
+    // SAFETY: __error returns this thread's live errno slot; writing zero
+    // ensures a failed getsid result cannot inherit stale errno.
+    unsafe { *libc::__error() = 0 };
+    // SAFETY: getsid reads only the scalar PID, retains no pointer, and reports
+    // failure through this thread's errno slot.
+    let session = unsafe { libc::getsid(pid) };
+    // SAFETY: __error returns the same live thread-local slot after the call;
+    // only the integer errno value is copied out.
+    let errno = unsafe { *libc::__error() };
+    (session, (errno != 0).then_some(errno))
+}
+
+fn classify_darwin_zero_probe(session: i32, errno: Option<i32>) -> ProcessObservation {
+    if session > 0 {
+        return ProcessObservation::Unknown(ObservationIssue::Io);
+    }
+    if session == -1 {
+        return match errno {
+            Some(libc::ESRCH) => ProcessObservation::Absent,
+            Some(libc::EACCES | libc::EPERM) => {
+                ProcessObservation::Unknown(ObservationIssue::PermissionDenied)
+            }
+            _ => ProcessObservation::Unknown(ObservationIssue::Io),
+        };
+    }
+    ProcessObservation::Unknown(ObservationIssue::Malformed)
 }
 
 #[cfg(target_os = "macos")]
@@ -699,16 +734,16 @@ fn darwin_process(pid: i32, boot: &str) -> ProcessObservation {
             requested,
         )
     };
+    if read == 0 {
+        let (session, errno) = darwin_zero_probe_session(pid);
+        return classify_darwin_zero_probe(session, errno);
+    }
+    if read < 0 {
+        // The public libproc wrapper returns zero on an underlying error. A
+        // negative result is outside that contract; errno may be stale.
+        return ProcessObservation::Unknown(ObservationIssue::Io);
+    }
     if read != requested {
-        if read < 0 {
-            let error = io::Error::last_os_error();
-            if error.raw_os_error() == Some(libc::ESRCH) {
-                return ProcessObservation::Absent;
-            }
-            if error.raw_os_error() == Some(libc::EACCES) {
-                return ProcessObservation::Unknown(ObservationIssue::PermissionDenied);
-            }
-        }
         return ProcessObservation::Unknown(ObservationIssue::Io);
     }
     // SAFETY: exact successful libproc read initialised the whole ABI record.
@@ -762,6 +797,7 @@ fn darwin_process(pid: i32, boot: &str) -> ProcessObservation {
     let verify_session = unsafe { libc::getsid(pid) };
     if verify.pbi_start_tvsec != bsd.pbi_start_tvsec
         || verify.pbi_start_tvusec != bsd.pbi_start_tvusec
+        || verify.pbi_ppid != bsd.pbi_ppid
         || verify.pbi_pgid != bsd.pbi_pgid
         || verify_session != session
     {
@@ -850,6 +886,38 @@ fn darwin_cpu_micros_from_values(ticks: Option<u64>, timebase: Option<(u32, u32)
 #[cfg(test)]
 mod native_tests {
     use super::*;
+
+    #[test]
+    fn darwin_zero_probe_requires_fresh_esrch_and_never_guesses_from_a_live_pid() {
+        assert_eq!(
+            classify_darwin_zero_probe(-1, Some(libc::ESRCH)),
+            ProcessObservation::Absent
+        );
+        assert_eq!(
+            classify_darwin_zero_probe(-1, Some(libc::EACCES)),
+            ProcessObservation::Unknown(ObservationIssue::PermissionDenied)
+        );
+        assert_eq!(
+            classify_darwin_zero_probe(-1, Some(libc::EPERM)),
+            ProcessObservation::Unknown(ObservationIssue::PermissionDenied)
+        );
+        assert_eq!(
+            classify_darwin_zero_probe(-1, Some(libc::EINVAL)),
+            ProcessObservation::Unknown(ObservationIssue::Io)
+        );
+        assert_eq!(
+            classify_darwin_zero_probe(-1, None),
+            ProcessObservation::Unknown(ObservationIssue::Io)
+        );
+        assert_eq!(
+            classify_darwin_zero_probe(42, None),
+            ProcessObservation::Unknown(ObservationIssue::Io)
+        );
+        assert_eq!(
+            classify_darwin_zero_probe(0, None),
+            ProcessObservation::Unknown(ObservationIssue::Malformed)
+        );
+    }
 
     #[cfg(target_os = "linux")]
     #[test]

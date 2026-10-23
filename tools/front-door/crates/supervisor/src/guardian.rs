@@ -3,21 +3,42 @@ use crate::census::{ProcessIdentity, ProcessObservation, ProcessObserver, System
 use crate::custody::*;
 use crate::exec::Termination;
 use crate::fs::{Directory, Publication, PublishMode};
-use crate::machine::{self, Budgets, Effect, Event, Phase, State, Tick};
+use crate::machine::{
+    self, Budgets, DeliveryFailure, DeliveryOutcome, DeliveryReceipt, Effect, Event, Phase, State,
+    Tick,
+};
 use provenant_core::CancelToken;
 use provenant_records::{Limits, decode_v1};
 use serde::{Deserialize, Serialize};
 use std::ffi::{OsStr, OsString};
 use std::io::{self, Write};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
-use std::path::PathBuf;
+use std::os::unix::fs::MetadataExt;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
+
+/// Advisory identity snapshot only; confinement does not yet supply an executable pin.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ExecutableSnapshot {
+    device: u64,
+    inode: u64,
+    length: u64,
+    modified_seconds: i64,
+    modified_nanoseconds: i64,
+}
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct LaunchMessage {
     schema_version: u64,
     scope: Scope,
+    resolved_route: String,
+    permission_plan_digest: provenant_core::Digest,
+    task: provenant_core::TaskId,
+    requester: provenant_core::ActorId,
+    binding: StoredWriterBinding,
+    executable_snapshot: ExecutableSnapshot,
     argv: Vec<Vec<u8>>,
     environment: Vec<(Vec<u8>, Vec<u8>)>,
     cwd: Vec<u8>,
@@ -29,9 +50,26 @@ pub(crate) fn handoff(
     capture: CapturePlan,
     publication: &PublicationReservation,
 ) -> Result<()> {
+    if !valid_resolved_route(&owned.command.resolved_route) {
+        return Err(CustodyError::InvalidRecord);
+    }
+    let executable_snapshot = snapshot_executable(
+        owned
+            .command
+            .argv
+            .first()
+            .ok_or(CustodyError::InvalidRecord)?
+            .as_os_str(),
+    )?;
     let message = LaunchMessage {
         schema_version: 1,
         scope: owned.writer.scope(),
+        resolved_route: owned.command.resolved_route,
+        permission_plan_digest: owned.command.permission_plan_digest,
+        task: owned.command.task,
+        requester: owned.command.requester,
+        binding: owned.writer.reservation.binding.clone(),
+        executable_snapshot,
         argv: owned
             .command
             .argv
@@ -78,6 +116,8 @@ pub struct GuardianHooks<'a> {
     pub children: Option<&'a dyn ChildRegistry>,
     #[cfg(feature = "fixture")]
     pub observer: Option<&'a dyn ProcessObserver>,
+    #[cfg(feature = "fixture")]
+    pub exit_publisher: Option<&'a dyn ExitPublisher>,
     pub stdout_tee: Option<&'a dyn crate::exec::NonblockingSink>,
     pub stderr_tee: Option<&'a dyn crate::exec::NonblockingSink>,
     pub stdout_decoder: Option<&'a dyn crate::capture::FrameDecoder>,
@@ -85,6 +125,35 @@ pub struct GuardianHooks<'a> {
     pub stdout_filter: Option<&'a mut dyn crate::exec::CaptureFilter>,
     pub stderr_filter: Option<&'a mut dyn crate::exec::CaptureFilter>,
 }
+/// Final reservation and immutable exit publication share one storage seam.
+pub trait ExitPublisher {
+    fn commit_reservation(&self, directory: &Directory, bytes: &[u8]) -> Result<Publication> {
+        Ok(directory.atomic_write(
+            OsStr::new("reservation.json"),
+            ".reservation-",
+            bytes,
+            PublishMode::Replace,
+        )?)
+    }
+
+    fn publish(&self, directory: &Directory, bytes: &[u8]) -> Result<Publication>;
+
+    fn sync_visible(&self, directory: &Directory) -> Result<()> {
+        directory.sync().map_err(Into::into)
+    }
+}
+struct SystemExitPublisher;
+impl ExitPublisher for SystemExitPublisher {
+    fn publish(&self, directory: &Directory, bytes: &[u8]) -> Result<Publication> {
+        Ok(directory.atomic_write(
+            OsStr::new("process-exit.json"),
+            ".exit-",
+            bytes,
+            PublishMode::NoReplace,
+        )?)
+    }
+}
+
 /// Run reads its generation-bound children journal at this real storage seam.
 pub trait ChildRegistry {
     fn registered_children(&self) -> io::Result<Vec<RegisteredChild>>;
@@ -126,7 +195,17 @@ pub fn supervise(args: &[OsString], hooks: GuardianHooks<'_>) -> Result<()> {
         RECORD_LIMIT,
     )?;
     reservation.validate()?;
-    if reservation.scope != message.scope || reservation.guardian.is_some() {
+    if !valid_resolved_route(&message.resolved_route) {
+        return Err(CustodyError::InvalidRecord);
+    }
+    let message_binding =
+        serde_json::to_value(&message.binding).map_err(|_| CustodyError::InvalidRecord)?;
+    let reservation_binding =
+        serde_json::to_value(&reservation.binding).map_err(|_| CustodyError::InvalidRecord)?;
+    if reservation.scope != message.scope
+        || reservation.guardian.is_some()
+        || message_binding != reservation_binding
+    {
         return Err(CustodyError::Fenced);
     }
     #[cfg(feature = "fixture")]
@@ -169,6 +248,12 @@ pub fn supervise(args: &[OsString], hooks: GuardianHooks<'_>) -> Result<()> {
     struct Summary<'a> {
         schema_version: u64,
         scope: Scope,
+        task: &'a provenant_core::TaskId,
+        resolved_route: &'a str,
+        permission_plan_digest: &'a provenant_core::Digest,
+        requester: provenant_core::ActorId,
+        binding: &'a StoredWriterBinding,
+        executable_snapshot: ExecutableSnapshot,
         executable_native_bytes: &'a [u8],
         environment_names_native_bytes: Vec<&'a [u8]>,
         capture: CapturePlan,
@@ -177,6 +262,12 @@ pub fn supervise(args: &[OsString], hooks: GuardianHooks<'_>) -> Result<()> {
     let summary = Summary {
         schema_version: 1,
         scope: message.scope,
+        task: &message.task,
+        resolved_route: &message.resolved_route,
+        permission_plan_digest: &message.permission_plan_digest,
+        requester: message.requester,
+        binding: &message.binding,
+        executable_snapshot: message.executable_snapshot,
         executable_native_bytes: argv
             .first()
             .map(|arg| arg.as_bytes())
@@ -193,6 +284,10 @@ pub fn supervise(args: &[OsString], hooks: GuardianHooks<'_>) -> Result<()> {
     let reactor = crate::sys::provider::GuardianReactor::install()?;
     #[cfg(target_os = "linux")]
     let subreaper = crate::sys::provider::SubreaperGuard::enable()?;
+    #[cfg(feature = "fixture")]
+    let exit_publisher = hooks.exit_publisher;
+    #[cfg(not(feature = "fixture"))]
+    let exit_publisher = None;
     // Both locks and the durable pre-spawn reservation are held before ACK.
     crate::sys::handoff::send(
         &mut inherited.channel,
@@ -204,16 +299,25 @@ pub fn supervise(args: &[OsString], hooks: GuardianHooks<'_>) -> Result<()> {
     let mut driver = Driver {
         spared: crate::census::SparingTracker::default(),
         tracked: std::collections::BTreeSet::new(),
+        reaped: Vec::new(),
+        omitted_reaped: 0,
+        delivered_signals: Vec::new(),
+        failed_deliveries: Vec::new(),
+        omitted_failed_deliveries: 0,
         protected: std::collections::BTreeSet::new(),
         registry: hooks.children,
+        descendant_stop_allowed: false,
         attempt: inherited.attempt_directory,
         writer_dir: inherited.writer_directory,
         reservation,
         _writer: inherited.writer,
         _custody: inherited.custody,
         guardian,
+        requester: message.requester,
+        executable_snapshot: message.executable_snapshot,
         reactor,
         observer,
+        exit_publisher,
     };
     let result = driver.run(&argv, &env, &cwd, &message.stdin, message.capture, hooks);
     if result.is_ok() {
@@ -231,12 +335,21 @@ struct Driver<'a> {
     _writer: crate::fs::LockGuard,
     _custody: crate::fs::LockGuard,
     guardian: ProcessIdentity,
+    requester: provenant_core::ActorId,
+    executable_snapshot: ExecutableSnapshot,
     reactor: crate::sys::provider::GuardianReactor,
     observer: &'a dyn ProcessObserver,
+    exit_publisher: Option<&'a dyn ExitPublisher>,
     spared: crate::census::SparingTracker,
     tracked: std::collections::BTreeSet<ProcessIdentity>,
+    reaped: Vec<ProcessIdentity>,
+    omitted_reaped: u64,
+    delivered_signals: Vec<i64>,
+    failed_deliveries: Vec<FailedSignalDelivery>,
+    omitted_failed_deliveries: u64,
     protected: std::collections::BTreeSet<ProcessIdentity>,
     registry: Option<&'a dyn ChildRegistry>,
+    descendant_stop_allowed: bool,
 }
 #[derive(Default)]
 struct Events {
@@ -282,16 +395,43 @@ impl Driver<'_> {
         let budgets =
             Budgets::with_cleanup(plan.wall_ms, plan.root_flush_ms, plan.descendant_grace_ms);
         let mut state = State::prepared(budgets);
-        let mut child = match crate::sys::provider::ProviderGroup::spawn(
-            argv,
-            env,
-            cwd,
-            !input.is_empty(),
-            plan.stdout.piped(),
-            plan.stderr.piped(),
-        ) {
+        let spawn_result = match argv.first() {
+            Some(executable) => match snapshot_executable(executable.as_os_str()) {
+                Ok(snapshot) if snapshot == self.executable_snapshot => {
+                    crate::sys::provider::ProviderGroup::spawn(
+                        argv,
+                        env,
+                        cwd,
+                        !input.is_empty(),
+                        plan.stdout.piped(),
+                        plan.stderr.piped(),
+                    )
+                }
+                Ok(_) => Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "provider executable snapshot changed",
+                )),
+                Err(error) => Err(error),
+            },
+            None => Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "provider executable path is missing",
+            )),
+        };
+        let mut child = match spawn_result {
             Ok(child) => child,
-            Err(_) => {
+            Err(error) => {
+                self.reservation.launch_state = LaunchState::NeverSpawned;
+                self.reservation.unresolved_cleanup = false;
+                self.reservation.census_incomplete = false;
+                self.reservation.descendants.clear();
+                self.reservation.omitted_descendants = 0;
+                require_durable(write_record(
+                    &self.writer_dir,
+                    "reservation.json",
+                    &self.reservation,
+                    PublishMode::Replace,
+                )?)?;
                 let record = ProcessExit {
                     schema_version: 1,
                     scope: self.reservation.scope,
@@ -299,16 +439,30 @@ impl Driver<'_> {
                     never_spawned: true,
                     stop_reason: None,
                     delivered_signals: vec![],
+                    reaped: vec![],
+                    omitted_reaped: 0,
+                    spared: vec![],
+                    omitted_spared: 0,
+                    failed_deliveries: vec![],
+                    omitted_failed_deliveries: 0,
                     terminal_observed: false,
                     unresolved_cleanup: false,
                     stdout: CaptureTotals::default(),
                     stderr: CaptureTotals::default(),
-                    warnings: vec!["provider spawn failed".into()],
+                    warnings: vec![
+                        if error.kind() == io::ErrorKind::InvalidData {
+                            "provider executable snapshot changed"
+                        } else {
+                            "provider spawn failed"
+                        }
+                        .into(),
+                    ],
                     omitted_warnings: 0,
                 };
                 return self.publish_until_durable(&record);
             }
         };
+        self.reservation.launch_state = LaunchState::Spawned;
         if let ProcessObservation::Present(fact) = self.observer.observe(child.id()) {
             self.reservation.provider = Some(fact.identity);
             self.reservation.launch_state = LaunchState::Spawned;
@@ -359,13 +513,20 @@ impl Driver<'_> {
         .map_err(|_| CustodyError::InvalidRecord)?;
         let mut input_offset = 0;
         let mut stop_reason = None;
-        let mut delivered = Vec::new();
         let mut exit = None;
         let mut stop_at = None;
         let mut killed = false;
         let mut terminal = false;
         let mut last_observation_ms = 0;
-        let unresolved;
+        let mut signal_pending = false;
+        let mut last_stdout_bytes = 0_u64;
+        let mut last_stderr_bytes = 0_u64;
+        let mut last_output_ms = None;
+        let mut provider_cpu_micros = None;
+        let mut previous_cpu_micros = None;
+        let mut last_cpu_progress_ms = None;
+        let mut census_warning_active = false;
+        let cleanup_complete;
         let mut drain_deadline = None;
         loop {
             let now = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
@@ -384,6 +545,31 @@ impl Driver<'_> {
             }
             out.read(&mut child.stdout);
             err.read(&mut child.stderr);
+            let stdout_bytes = out.outcome().total_bytes;
+            let stderr_bytes = err.outcome().total_bytes;
+            let output_progress =
+                stdout_bytes > last_stdout_bytes || stderr_bytes > last_stderr_bytes;
+            if output_progress {
+                last_output_ms = Some(now);
+            }
+            last_stdout_bytes = stdout_bytes;
+            last_stderr_bytes = stderr_bytes;
+            let cpu_sample_due = now.saturating_sub(last_observation_ms) >= 100;
+            let cpu_progress = if cpu_sample_due {
+                provider_cpu_micros = self.provider_cpu_micros();
+                let progressed = provider_cpu_micros
+                    .zip(previous_cpu_micros)
+                    .is_some_and(|(current, previous)| current > previous);
+                if let Some(current) = provider_cpu_micros {
+                    previous_cpu_micros = Some(current);
+                    if progressed {
+                        last_cpu_progress_ms = Some(now);
+                    }
+                }
+                progressed
+            } else {
+                false
+            };
             if let Some(stdin) = child.stdin.as_mut() {
                 if input_offset == input.len() {
                     child.stdin = None;
@@ -414,7 +600,14 @@ impl Driver<'_> {
             // can outlive capture. Reading the flags is added below after capture.
             let request =
                 match read_record::<CancelRequest>(&self.attempt, "cancel.json", RECORD_LIMIT) {
-                    Ok(request) if request.scope == self.reservation.scope => Some(request.reason),
+                    Ok(request)
+                        if request.scope == self.reservation.scope
+                            && request.requester == self.requester
+                            && provenant_core::OperationId::parse(request.request_id.as_str())
+                                .is_ok() =>
+                    {
+                        Some(request.reason)
+                    }
                     Ok(_) => {
                         warn(
                             &mut warnings,
@@ -433,7 +626,7 @@ impl Driver<'_> {
                         None
                     }
                 };
-            let signal = match self.reactor.wait(&[], Duration::ZERO) {
+            let polled_signal = match self.reactor.wait(&[], Duration::ZERO) {
                 Ok(event) => event.supervisor_signal,
                 Err(_) => {
                     warn(
@@ -444,6 +637,7 @@ impl Driver<'_> {
                     false
                 }
             };
+            let signal = std::mem::replace(&mut signal_pending, false) || polled_signal;
             use std::sync::atomic::Ordering;
             let newly_terminal = !terminal
                 && (out_events.terminal.load(Ordering::Relaxed)
@@ -460,11 +654,22 @@ impl Driver<'_> {
                     machine::StopReason::ExplicitCancellation => Event::Cancel,
                     machine::StopReason::ProtocolRejected => Event::ProtocolRejected,
                     machine::StopReason::SupervisorSignal => Event::SupervisorSignal,
-                    machine::StopReason::WallDeadline => Event::RetryStop(reason),
-                    machine::StopReason::PostTerminalCleanup => Event::RetryStop(reason),
+                    machine::StopReason::WallDeadline
+                    | machine::StopReason::PostTerminalCleanup
+                        if state.stop_attempts().iter().any(|attempt| {
+                            attempt.reason == reason
+                                && attempt.delivery == Some(DeliveryOutcome::Delivered)
+                        }) =>
+                    {
+                        Event::Silence
+                    }
+                    machine::StopReason::WallDeadline
+                    | machine::StopReason::PostTerminalCleanup => Event::RetryStop(reason),
                 }
             } else if newly_terminal {
                 Event::Terminal
+            } else if output_progress || cpu_progress {
+                Event::Progress
             } else {
                 Event::Silence
             };
@@ -481,12 +686,27 @@ impl Driver<'_> {
                     Effect::DeliverStop(reason) if exit.is_none() => {
                         stop_reason.get_or_insert(reason);
                         stop_at.get_or_insert(now);
-                        match child.stop(reason, false) {
-                            Ok(true) => delivered.push(15),
-                            Ok(false) => {}
-                            Err(_) => {
-                                warn(&mut warnings, &mut omitted_warnings, "TERM delivery failed")
-                            }
+                        let outcome = stop_delivery_outcome(child.stop(reason, false));
+                        self.record_delivery(
+                            self.reservation.provider.clone(),
+                            reason,
+                            libc::SIGTERM,
+                            outcome,
+                        );
+                        if outcome != DeliveryOutcome::Delivered {
+                            warn(&mut warnings, &mut omitted_warnings, "TERM delivery failed");
+                        }
+                        let mut receipt_tick = Tick::at(now);
+                        receipt_tick.delivery = Some(DeliveryReceipt { reason, outcome });
+                        let (next, receipt_effects) =
+                            machine::step(state, Event::Silence, receipt_tick);
+                        state = next;
+                        if !receipt_effects.is_empty() {
+                            warn(
+                                &mut warnings,
+                                &mut omitted_warnings,
+                                "TERM delivery receipt rejected",
+                            );
                         }
                     }
                     _ => {}
@@ -496,13 +716,27 @@ impl Driver<'_> {
                 && !killed
                 && now >= at.saturating_add(plan.root_flush_ms.max(plan.descendant_grace_ms))
             {
-                match child.stop(
-                    stop_reason.unwrap_or(machine::StopReason::PostTerminalCleanup),
-                    true,
-                ) {
-                    Ok(true) => delivered.push(9),
-                    Ok(false) => {}
-                    Err(_) => warn(&mut warnings, &mut omitted_warnings, "KILL delivery failed"),
+                let reason = stop_reason.unwrap_or(machine::StopReason::PostTerminalCleanup);
+                let outcome = stop_delivery_outcome(child.stop(reason, true));
+                self.record_delivery(
+                    self.reservation.provider.clone(),
+                    reason,
+                    libc::SIGKILL,
+                    outcome,
+                );
+                if outcome != DeliveryOutcome::Delivered {
+                    warn(&mut warnings, &mut omitted_warnings, "KILL delivery failed");
+                }
+                let mut receipt_tick = Tick::at(now);
+                receipt_tick.delivery = Some(DeliveryReceipt { reason, outcome });
+                let (next, receipt_effects) = machine::step(state, Event::Silence, receipt_tick);
+                state = next;
+                if !receipt_effects.is_empty() {
+                    warn(
+                        &mut warnings,
+                        &mut omitted_warnings,
+                        "KILL delivery receipt rejected",
+                    );
                 }
                 killed = true;
             }
@@ -518,14 +752,39 @@ impl Driver<'_> {
                     }
                     // Census grants no PID signal authority. The driver holds the
                     // leader until the group census and adopted children settle.
-                    unresolved = !self
-                        .cleanup(&mut child, plan, &mut warnings, &mut omitted_warnings)
-                        .unwrap_or(false);
+                    cleanup_complete = match self.cleanup(
+                        &mut child,
+                        plan,
+                        &mut warnings,
+                        &mut omitted_warnings,
+                    ) {
+                        Ok(complete) => complete,
+                        Err(_) => {
+                            warn(
+                                &mut warnings,
+                                &mut omitted_warnings,
+                                "provider cleanup observation failed",
+                            );
+                            false
+                        }
+                    };
                     let _ = status;
                     break;
                 }
             }
             if now.saturating_sub(last_observation_ms) >= 100 {
+                if self.refresh_census(&mut child).is_none() {
+                    if !census_warning_active {
+                        warn(
+                            &mut warnings,
+                            &mut omitted_warnings,
+                            "live process census incomplete",
+                        );
+                        census_warning_active = true;
+                    }
+                } else {
+                    census_warning_active = false;
+                }
                 #[derive(Serialize)]
                 struct Observed<'a> {
                     schema_version: u64,
@@ -535,6 +794,10 @@ impl Driver<'_> {
                     phase: Phase,
                     stdout_bytes: u64,
                     stderr_bytes: u64,
+                    last_output_ms: Option<u64>,
+                    last_progress_ms: Option<u64>,
+                    provider_cpu_micros: Option<u64>,
+                    last_cpu_progress_ms: Option<u64>,
                     publication_pending: bool,
                 }
                 self.persist_tracking();
@@ -546,6 +809,10 @@ impl Driver<'_> {
                     phase: state.phase(),
                     stdout_bytes: out.outcome().total_bytes,
                     stderr_bytes: err.outcome().total_bytes,
+                    last_output_ms,
+                    last_progress_ms: state.last_progress_ms(),
+                    provider_cpu_micros,
+                    last_cpu_progress_ms,
                     publication_pending: false,
                 };
                 if write_record(
@@ -566,12 +833,9 @@ impl Driver<'_> {
                 last_observation_ms = now;
             }
             let watches = child.watches();
-            if self
-                .reactor
-                .wait(&watches, Duration::from_millis(5))
-                .is_err()
-            {
-                warn(&mut warnings, &mut omitted_warnings, "guardian wait failed");
+            match self.reactor.wait(&watches, Duration::from_millis(5)) {
+                Ok(event) => signal_pending |= event.supervisor_signal,
+                Err(_) => warn(&mut warnings, &mut omitted_warnings, "guardian wait failed"),
             }
         }
         out.finish();
@@ -589,7 +853,7 @@ impl Driver<'_> {
                 oversized_frames: capture.oversized_frames,
                 decoder_lost_frames: capture.decoder_lost_frames,
                 lost_bytes: capture.sink_lost_bytes,
-                read_failed: false,
+                read_failed: capture.read_failed,
             };
             if self
                 .attempt
@@ -613,21 +877,20 @@ impl Driver<'_> {
             }
             totals.push(total);
         }
+        let unresolved = !cleanup_complete;
         self.reservation.unresolved_cleanup = unresolved;
-        if write_record(
-            &self.writer_dir,
-            "reservation.json",
-            &self.reservation,
-            PublishMode::Replace,
-        )
-        .and_then(require_durable)
-        .is_err()
-        {
+        if !self.persist_reservation() {
             warn(
                 &mut warnings,
                 &mut omitted_warnings,
                 "cleanup reservation publication failed",
             );
+            // The exit must agree with a durable reservation. A visible
+            // replacement followed by failed directory sync is not a durable
+            // transition; retain the locks and retry the same proven facts.
+            while !self.persist_reservation() {
+                let _ = self.reactor.wait(&[], Duration::from_millis(25));
+            }
         }
         let mut totals = totals.into_iter();
         let record = ProcessExit {
@@ -636,15 +899,36 @@ impl Driver<'_> {
             termination: exit,
             never_spawned: false,
             stop_reason,
-            delivered_signals: delivered,
+            delivered_signals: self.delivered_signals.clone(),
+            reaped: self.reaped.clone(),
+            omitted_reaped: self.omitted_reaped,
+            spared: self.spared.spared_identities().take(16).cloned().collect(),
+            omitted_spared: self.spared.spared_identities().count().saturating_sub(16) as u64,
+            failed_deliveries: self.failed_deliveries.clone(),
+            omitted_failed_deliveries: self.omitted_failed_deliveries,
             terminal_observed: terminal,
             unresolved_cleanup: unresolved,
             stdout: totals.next().unwrap_or_default(),
             stderr: totals.next().unwrap_or_default(),
-            warnings,
+            warnings: warnings.clone(),
             omitted_warnings,
         };
-        self.publish_until_durable(&record)
+        self.publish_until_durable(&record)?;
+        if !cleanup_complete {
+            // A durable unresolved fence permits recovery to reconcile after
+            // the guardian exits. It does not certify descendant absence.
+            loop {
+                match child.finish_fenced() {
+                    Ok(_) => break,
+                    Err(failure) => {
+                        let (retained, _) = *failure;
+                        child = retained;
+                        let _ = self.reactor.wait(&[], Duration::from_millis(25));
+                    }
+                }
+            }
+        }
+        Ok(())
     }
     fn persist_tracking(&mut self) {
         self.reservation.descendants = self.tracked.iter().take(128).cloned().collect();
@@ -657,22 +941,113 @@ impl Driver<'_> {
         )
         .and_then(require_durable);
     }
+    fn persist_reservation(&mut self) -> bool {
+        let Ok(bytes) = serde_json::to_vec(&self.reservation) else {
+            return false;
+        };
+        let system_publisher = SystemExitPublisher;
+        self.exit_publisher
+            .unwrap_or(&system_publisher)
+            .commit_reservation(&self.writer_dir, &bytes)
+            .and_then(require_durable)
+            .is_ok()
+    }
+
+    fn record_delivery(
+        &mut self,
+        identity: Option<ProcessIdentity>,
+        reason: machine::StopReason,
+        signal: i32,
+        outcome: DeliveryOutcome,
+    ) {
+        let signal = i64::from(signal);
+        match outcome {
+            DeliveryOutcome::Delivered => {
+                if !self.delivered_signals.contains(&signal) {
+                    self.delivered_signals.push(signal);
+                }
+            }
+            DeliveryOutcome::Failed(failure) => {
+                let prior_provider_delivery = identity.as_ref()
+                    == self.reservation.provider.as_ref()
+                    && failure == DeliveryFailure::NoSuchProcess
+                    && self.delivered_signals.contains(&signal);
+                if prior_provider_delivery {
+                    return;
+                }
+                if self.failed_deliveries.len() < 16 {
+                    self.failed_deliveries.push(FailedSignalDelivery {
+                        identity,
+                        reason,
+                        signal,
+                        failure,
+                    });
+                } else {
+                    self.omitted_failed_deliveries =
+                        self.omitted_failed_deliveries.saturating_add(1);
+                }
+            }
+        }
+    }
+
+    fn provider_cpu_micros(&self) -> Option<u64> {
+        let expected = self.reservation.provider.as_ref()?;
+        match self.observer.observe(expected.pid) {
+            ProcessObservation::Present(fact) if fact.identity == *expected => fact.cpu_micros,
+            ProcessObservation::Present(_)
+            | ProcessObservation::Absent
+            | ProcessObservation::Unknown(_) => None,
+        }
+    }
+
     fn refresh_census(
         &mut self,
         child: &mut crate::sys::provider::ProviderGroup,
     ) -> Option<crate::census::Census> {
-        let census = match self.observer.census(crate::census::MAX_CENSUS_ENTRIES) {
+        let mut census = match self.observer.census(crate::census::MAX_CENSUS_ENTRIES) {
             Ok(census) => census,
             Err(_) => {
-                child.allow_group(false);
+                self.descendant_stop_allowed = false;
                 self.reservation.census_incomplete = true;
                 return None;
             }
         };
+        let Some(root) = self.reservation.provider.as_ref() else {
+            self.descendant_stop_allowed = false;
+            self.reservation.census_incomplete = true;
+            return None;
+        };
+        let mut known_pids = std::collections::BTreeSet::from([root.pid, child.id()]);
+        known_pids.extend(self.tracked.iter().map(|identity| identity.pid));
+        known_pids.extend(self.protected.iter().map(|identity| identity.pid));
+        known_pids.extend(self.spared.spared_identities().map(|identity| identity.pid));
+        known_pids.extend(
+            self.reservation
+                .descendants
+                .iter()
+                .map(|identity| identity.pid),
+        );
+        let mut attempted = 0_usize;
+        for pid in known_pids {
+            if !matches!(census.process(pid), crate::census::ProcessLookup::Unknown) {
+                continue;
+            }
+            if attempted >= crate::census::MAX_CENSUS_ENTRIES {
+                census.mark_truncated();
+                break;
+            }
+            attempted = attempted.saturating_add(1);
+            let observation = self.observer.observe(pid);
+            if census
+                .observe_known(pid, &self.reservation.boot, observation)
+                .is_err()
+            {
+                census.mark_truncated();
+            }
+        }
         child.record_census(&census);
-        let root = self.reservation.provider.as_ref()?;
         self.spared.refresh(&census);
-        let mut registry_unknown = false;
+        let mut registry_unknown = self.registry.is_none();
         if let Some(registry) = self.registry {
             match registry.registered_children() {
                 Ok(children) if children.len() <= 4096 => {
@@ -684,12 +1059,19 @@ impl Driver<'_> {
                             registered.custody.handoff_file(),
                         ) {
                             Ok(proof) => {
-                                let _ = self.spared.spare_registered_owner(
-                                    &census,
-                                    root,
-                                    &registered.registration,
-                                    &proof,
-                                );
+                                if self
+                                    .spared
+                                    .spare_registered_owner(
+                                        &census,
+                                        root,
+                                        &registered.registration,
+                                        &proof,
+                                    )
+                                    .is_err()
+                                {
+                                    registry_unknown = true;
+                                    self.protected.insert(identity.clone());
+                                }
                             }
                             Err(_) => {
                                 registry_unknown = true;
@@ -721,18 +1103,7 @@ impl Driver<'_> {
         }
         self.tracked.retain(|identity|!matches!(census.process(identity.pid),crate::census::ProcessLookup::Absent) && !matches!(census.process(identity.pid),crate::census::ProcessLookup::Present(fact) if fact.identity!=*identity));
         self.protected.retain(|identity|!matches!(census.process(identity.pid),crate::census::ProcessLookup::Absent) && !matches!(census.process(identity.pid),crate::census::ProcessLookup::Present(fact) if fact.identity!=*identity));
-        let group_safe = census.is_complete()
-            && !registry_unknown
-            && census
-                .facts()
-                .filter(|fact| fact.identity.group_id == child.id())
-                .all(|fact| {
-                    fact.identity.pid == child.id()
-                        || (self.tracked.contains(&fact.identity)
-                            && !self.spared.is_spared(&fact.identity)
-                            && !self.protected.contains(&fact.identity))
-                });
-        child.allow_group(group_safe);
+        self.descendant_stop_allowed = !registry_unknown;
         self.reservation.census_incomplete = !census.is_complete();
         Some(census)
     }
@@ -740,8 +1111,8 @@ impl Driver<'_> {
         &mut self,
         child: &mut crate::sys::provider::ProviderGroup,
         plan: CapturePlan,
-        _warnings: &mut Vec<String>,
-        _omitted: &mut u64,
+        warnings: &mut Vec<String>,
+        omitted: &mut u64,
     ) -> Result<bool> {
         let deadline = Instant::now()
             + Duration::from_millis(
@@ -757,9 +1128,21 @@ impl Driver<'_> {
             let mut spared: std::collections::BTreeSet<_> =
                 self.spared.spared_identities().cloned().collect();
             spared.extend(self.protected.iter().cloned());
-            let reaped = child.reap_adopted(&census, &spared)?;
+            let reaped = if self.descendant_stop_allowed {
+                child.reap_adopted(&census, &spared)?
+            } else {
+                crate::sys::provider::AdoptedCleanup {
+                    reaped: vec![],
+                    unresolved: !self.tracked.is_empty(),
+                }
+            };
             for identity in reaped.reaped {
                 self.tracked.remove(&identity);
+                if self.reaped.len() < 16 {
+                    self.reaped.push(identity);
+                } else {
+                    self.omitted_reaped = self.omitted_reaped.saturating_add(1);
+                }
             }
             let outstanding =
                 self.tracked
@@ -774,25 +1157,40 @@ impl Driver<'_> {
             let complete = census.is_complete()
                 && !reaped.unresolved
                 && !outstanding
-                && session_absence_except_leader(&self.reservation, child.id(), self.observer);
+                && child.quiescent_children().unwrap_or(false);
             if complete {
                 let _ = child.cleanup(true)?;
                 self.persist_tracking();
                 return Ok(true);
             }
-            // Root exit does not authorise an arbitrary PID. The pinned provider
-            // group and kernel-confirmed adopted children are the only targets.
+            // Root exit does not authorise an arbitrary PID. Only the pinned
+            // provider and kernel-confirmed adopted children are targets.
             let escalation = began.elapsed() >= Duration::from_millis(plan.descendant_grace_ms);
-            let _ = child.stop(machine::StopReason::PostTerminalCleanup, escalation);
+            let reason = machine::StopReason::PostTerminalCleanup;
+            let signal = if escalation {
+                libc::SIGKILL
+            } else {
+                libc::SIGTERM
+            };
+            let outcome = stop_delivery_outcome(child.stop(reason, escalation));
+            self.record_delivery(self.reservation.provider.clone(), reason, signal, outcome);
+            if outcome != DeliveryOutcome::Delivered {
+                push_warning(warnings, omitted, "post-terminal provider signal failed");
+            }
             #[cfg(target_os = "linux")]
-            if let Ok(deliveries) = child.stop_adopted(
-                machine::StopReason::PostTerminalCleanup,
-                escalation,
-                &census,
-                &spared,
-            ) {
-                for delivery in deliveries {
-                    let _ = (delivery.identity, delivery.outcome);
+            if self.descendant_stop_allowed {
+                match child.stop_adopted(reason, escalation, &census, &spared) {
+                    Ok(deliveries) => {
+                        for delivery in deliveries {
+                            self.record_delivery(
+                                Some(delivery.identity),
+                                reason,
+                                signal,
+                                delivery.outcome,
+                            );
+                        }
+                    }
+                    Err(_) => push_warning(warnings, omitted, "adopted-child signal failed"),
                 }
             }
             self.persist_tracking();
@@ -801,32 +1199,34 @@ impl Driver<'_> {
             }
             let _ = self.reactor.wait(
                 &[],
-                Duration::from_millis(plan.descendant_grace_ms.min(20).max(1)),
+                Duration::from_millis(plan.descendant_grace_ms.clamp(1, 20)),
             );
         }
     }
     fn publish_until_durable(&mut self, record: &ProcessExit) -> Result<()> {
-        let bytes = serde_json::to_vec(record).map_err(|_| CustodyError::InvalidRecord)?;
+        let bytes = record.bounded_bytes()?;
         if bytes.len() as u64 > EXIT_LIMIT {
             return Err(CustodyError::InvalidRecord);
         }
         let mut released_reserve = false;
         let mut visible = false;
+        let system_exit_publisher = SystemExitPublisher;
+        let exit_publisher: &dyn ExitPublisher =
+            self.exit_publisher.unwrap_or(&system_exit_publisher);
         loop {
             let result = if visible {
-                self.attempt.sync().map(|()| Publication::Durable)
+                exit_publisher
+                    .sync_visible(&self.attempt)
+                    .map(|()| Publication::Durable)
             } else {
-                self.attempt.atomic_write(
-                    OsStr::new("process-exit.json"),
-                    ".exit-",
-                    &bytes,
-                    PublishMode::NoReplace,
-                )
+                exit_publisher.publish(&self.attempt, &bytes)
             };
             match result {
                 Ok(Publication::Durable) => return Ok(()),
                 Ok(Publication::VisibleDurabilityUnconfirmed { .. }) => visible = true,
-                Err(error) if error.is_exists() => {
+                Err(error)
+                    if filesystem_error(&error).is_some_and(crate::fs::FsError::is_exists) =>
+                {
                     // A recovery publisher may have won. Only identical bytes
                     // can share the durable publication; never overwrite facts.
                     if self
@@ -838,14 +1238,22 @@ impl Driver<'_> {
                     }
                 }
                 Err(error)
-                    if error.raw_os_error() == Some(crate::sys::errno::ENOSPC)
+                    if filesystem_error(&error).and_then(crate::fs::FsError::raw_os_error)
+                        == Some(crate::sys::errno::ENOSPC)
                         && !released_reserve =>
                 {
-                    if self.attempt.unlink(OsStr::new("reserve")).is_ok() {
-                        released_reserve = true;
-                        let _ = self.attempt.sync();
+                    match self.attempt.unlink(OsStr::new("reserve")) {
+                        Ok(()) => {
+                            released_reserve = true;
+                            let _ = self.attempt.sync();
+                            continue;
+                        }
+                        Err(error) if error.is_not_found() => {
+                            released_reserve = true;
+                            continue;
+                        }
+                        Err(_) => {}
                     }
-                    continue;
                 }
                 Err(_) => {}
             }
@@ -870,40 +1278,84 @@ impl Driver<'_> {
     }
 }
 
-pub(crate) fn session_absence(
-    reservation: &Reservation,
-    observer: &dyn ProcessObserver,
-) -> RecoveryState {
-    if reservation.omitted_descendants > 0 || reservation.census_incomplete {
-        return RecoveryState::Unknown;
-    }
-    if session_absence_except_leader(reservation, -1, observer) {
-        RecoveryState::Absent
-    } else {
-        RecoveryState::Unknown
+fn filesystem_error(error: &CustodyError) -> Option<&crate::fs::FsError> {
+    match error {
+        CustodyError::Filesystem(error) => Some(error),
+        _ => None,
     }
 }
-fn session_absence_except_leader(
+
+fn push_warning(warnings: &mut Vec<String>, omitted: &mut u64, label: &str) {
+    if warnings.len() < 24 {
+        warnings.push(label.to_owned());
+    } else {
+        *omitted = omitted.saturating_add(1);
+    }
+}
+
+fn snapshot_executable(path: &OsStr) -> io::Result<ExecutableSnapshot> {
+    if !Path::new(path).is_absolute() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "provider executable path must be absolute",
+        ));
+    }
+    let file = std::fs::File::open(path)?;
+    let metadata = file.metadata()?;
+    if !metadata.is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "provider executable is not a regular file",
+        ));
+    }
+    let modified_nanoseconds = metadata.mtime_nsec();
+    if !(0..1_000_000_000).contains(&modified_nanoseconds) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "provider executable timestamp is invalid",
+        ));
+    }
+    Ok(ExecutableSnapshot {
+        device: metadata.dev(),
+        inode: metadata.ino(),
+        length: metadata.len(),
+        modified_seconds: metadata.mtime(),
+        modified_nanoseconds,
+    })
+}
+
+fn valid_resolved_route(route: &str) -> bool {
+    !route.is_empty() && route.len() <= 512 && !route.bytes().any(|byte| byte.is_ascii_control())
+}
+
+fn stop_delivery_outcome(result: io::Result<bool>) -> DeliveryOutcome {
+    match result {
+        Ok(true) => DeliveryOutcome::Delivered,
+        Ok(false) => DeliveryOutcome::Failed(DeliveryFailure::NoSuchProcess),
+        Err(error) => {
+            let failure = match error.raw_os_error() {
+                Some(libc::EPERM) | Some(libc::EACCES) => DeliveryFailure::PermissionDenied,
+                Some(libc::ESRCH) => DeliveryFailure::NoSuchProcess,
+                Some(code) => DeliveryFailure::OsError(code),
+                None if error.kind() == io::ErrorKind::PermissionDenied => {
+                    DeliveryFailure::PermissionDenied
+                }
+                None => DeliveryFailure::OsError(libc::EIO),
+            };
+            DeliveryOutcome::Failed(failure)
+        }
+    }
+}
+
+pub(crate) fn session_absence(
     reservation: &Reservation,
-    leader: i64,
-    observer: &dyn ProcessObserver,
-) -> bool {
-    let Some(guardian) = &reservation.guardian else {
-        return false;
-    };
-    let Ok(census) = observer.census(65536) else {
-        return false;
-    };
-    // Implemented against the native census accessors below.
-    census.is_complete()
-        && reservation.omitted_descendants==0
-        && reservation.descendants.iter().all(|identity|matches!(census.process(identity.pid),crate::census::ProcessLookup::Absent)||matches!(census.process(identity.pid),crate::census::ProcessLookup::Present(fact) if fact.identity!=*identity||fact.zombie))
-        && !census.facts().any(|fact| {
-            fact.identity.session_id == guardian.session_id
-                && fact.identity.pid != guardian.pid
-                && fact.identity.pid != leader
-                && !fact.zombie
-        })
+    _observer: &dyn ProcessObserver,
+) -> RecoveryState {
+    if reservation.unresolved_cleanup {
+        RecoveryState::Unknown
+    } else {
+        RecoveryState::Absent
+    }
 }
 
 struct ClosedTee;

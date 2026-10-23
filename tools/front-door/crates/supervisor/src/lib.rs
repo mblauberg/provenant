@@ -26,4 +26,4 @@ pub mod machine;
 pub mod scratch;
 pub mod utility;
 
-pub use guardian::{ChildRegistry, GuardianHooks, RegisteredChild, supervise};
+pub use guardian::{ChildRegistry, ExitPublisher, GuardianHooks, RegisteredChild, supervise};

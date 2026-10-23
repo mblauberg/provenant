@@ -562,7 +562,7 @@ mod tests {
             return;
         };
         assert!(capture.push(b"hello").is_ok());
-        assert_eq!(capture.outcome().bytes, b"hel");
+        assert_eq!(capture.outcome().bytes, [b'h', b'e', b'l']);
         assert_eq!(capture.outcome().sink_lost_bytes, 5);
         assert!(capture.outcome().truncated);
         let _outcome = capture.into_outcome();

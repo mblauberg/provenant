@@ -527,7 +527,7 @@ impl Directory {
     ) -> Result<Publication> {
         self.atomic_write_with_sync(name, prefix, bytes, mode, || self.sync())
     }
-    fn atomic_write_with_sync(
+    pub(crate) fn atomic_write_with_sync(
         &self,
         name: &OsStr,
         prefix: &str,
