@@ -23,3 +23,4 @@ pub mod provider_observer;
 pub mod review_panel;
 pub mod authority_mapping;
 pub mod writer_lease;
+pub mod compact_reinject;
