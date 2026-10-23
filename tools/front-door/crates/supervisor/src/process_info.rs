@@ -466,7 +466,7 @@ pub fn tty_name(device: u32, dev_root: &std::path::Path) -> OsString {
     }
     if let Ok(entries) = std::fs::read_dir(dev_root) {
         for entry in entries.flatten() {
-            if entry.metadata().is_ok_and(|metadata| {
+            if entry.path().metadata().is_ok_and(|metadata| {
                 metadata.file_type().is_char_device() && metadata.rdev() as u32 == device
             }) {
                 return entry.file_name();
