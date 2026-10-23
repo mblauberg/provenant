@@ -45,8 +45,8 @@ pub struct Manifest {
     pub schema_version: Value,
     pub owner: String,
     pub target_root: String,
-    pub managed: BTreeMap<String, Entry>,
-    pub custom: BTreeMap<String, CustomLink>,
+    pub managed: crate::OrderedMap<Entry>,
+    pub custom: crate::OrderedMap<CustomLink>,
     #[serde(flatten)]
     pub extra: BTreeMap<String, Value>,
 }
@@ -126,13 +126,21 @@ pub fn empty_manifest(target: &Path, now: &str) -> Result<Manifest> {
         schema_version: Value::from(1),
         owner: "agent-harness".into(),
         target_root: pending::path_text(&crate::resolve(target)?)?,
-        managed: BTreeMap::new(),
-        custom: BTreeMap::new(),
+        managed: crate::OrderedMap::new(),
+        custom: crate::OrderedMap::new(),
         extra: BTreeMap::from([("updated_at".into(), now.into())]),
     })
 }
 
-pub fn validate_manifest(mut value: Value, target: &Path) -> Result<Manifest> {
+pub fn validate_manifest(value: Value, target: &Path) -> Result<Manifest> {
+    validate_ordered(value, target, None)
+}
+
+fn validate_ordered(
+    mut value: Value,
+    target: &Path,
+    original: Option<&crate::ordered::Json>,
+) -> Result<Manifest> {
     if !value.is_object()
         || !pending::schema_one(&value["schema_version"])
         || value["owner"] != "agent-harness"
@@ -155,7 +163,9 @@ pub fn validate_manifest(mut value: Value, target: &Path) -> Result<Manifest> {
         .as_object()
         .ok_or_else(|| invalid("installation manifest custom links are invalid"))?;
     if let Some(managed) = value["managed"].as_object() {
-        for (name, item) in managed {
+        for (name, item) in
+            crate::ordered::entries(managed, original.and_then(|v| v.get("managed")))
+        {
             if !is_managed_name(name) {
                 return Err(invalid(
                     "installation manifest contains an invalid skill name",
@@ -198,7 +208,7 @@ pub fn validate_manifest(mut value: Value, target: &Path) -> Result<Manifest> {
             }
         }
     }
-    for (name, item) in custom {
+    for (name, item) in crate::ordered::entries(custom, original.and_then(|v| v.get("custom"))) {
         if !is_skill_name(name) {
             return Err(invalid(
                 "installation manifest contains an invalid custom skill name",
@@ -229,7 +239,25 @@ pub fn validate_manifest(mut value: Value, target: &Path) -> Result<Manifest> {
             )));
         }
     }
-    serde_json::from_value(value).map_err(|e| invalid(e.to_string()))
+    let mut receipt: Manifest =
+        serde_json::from_value(value).map_err(|e| invalid(e.to_string()))?;
+    if let Some(original) = original {
+        fn reorder<T>(map: &mut crate::OrderedMap<T>, original: Option<&crate::ordered::Json>) {
+            let Some(items) = original.and_then(crate::ordered::Json::object) else {
+                return;
+            };
+            let mut result = crate::OrderedMap::new();
+            for (k, _) in items {
+                if let Some(value) = map.remove(k) {
+                    result.insert(k.clone(), value);
+                }
+            }
+            *map = result;
+        }
+        reorder(&mut receipt.managed, original.get("managed"));
+        reorder(&mut receipt.custom, original.get("custom"));
+    }
+    Ok(receipt)
 }
 
 pub fn load_manifest(target: &Path, now: &str) -> Result<Manifest> {
@@ -237,8 +265,13 @@ pub fn load_manifest(target: &Path, now: &str) -> Result<Manifest> {
     if !path.exists() {
         return empty_manifest(target, now);
     }
-    let value = pending::read_json(&path, "installation manifest is unreadable")?;
-    validate_manifest(value, target)
+    let bytes = fs::read(&path).map_err(|source| crate::Error::Read {
+        context: "installation manifest is unreadable",
+        path: path.clone(),
+        source,
+    })?;
+    let original = crate::ordered::decode(&bytes, "installation manifest is unreadable", &path)?;
+    validate_ordered(original.value(), target, Some(&original))
 }
 
 pub fn write_manifest(target: &Path, manifest: &mut Manifest, now: &str) -> Result<()> {
@@ -408,6 +441,29 @@ mod tests {
         assert_eq!(
             serde_json::from_slice::<Value>(&old).unwrap(),
             serde_json::to_value(load_manifest(&target, NOW).unwrap()).unwrap()
+        );
+    }
+}
+
+#[cfg(test)]
+mod ordered_validation_tests {
+    use super::*;
+    #[test]
+    fn first_invalid_receipt_entry_matches_python_insertion_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().canonicalize().unwrap().join("skills");
+        let text=format!("{{\"schema_version\":1,\"owner\":\"agent-harness\",\"target_root\":{},\"managed\":{{\"z\":{{}},\"a\":{{}}}}}}",serde_json::to_string(&target).unwrap());
+        fs::write(manifest_path(&target), text).unwrap();
+        let Some(old) = crate::oracle::python(
+            "scripts/managed_installation_manifest.py",
+            "try: m.load_manifest(p)\nexcept m.InstallError as e: print(str(e))",
+            &target,
+        ) else {
+            return;
+        };
+        assert_eq!(
+            format!("{}\n", load_manifest(&target, "NOW").unwrap_err()).as_bytes(),
+            old
         );
     }
 }
