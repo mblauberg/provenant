@@ -38,8 +38,11 @@ outside this batch.
 
 ## Pending shared owners
 
-- `pending::Identity`: minimal project/seat/provider view owned by
-  `provenant-fabric-runtime`.
+- `pending::Identity`: minimal project/seat/provider view of the runtime
+  caller. Main has the broader `fabric-runtime::identity::Identity`, but
+  importing that crate here would reverse R2's dependency direction and form
+  a cycle. Keep the private-module view until a lower-layer shared contract
+  exists; the runtime integration must convert its owned identity explicitly.
 - `pending::IdSource`: UUID entropy contract owned by `provenant-supervisor`;
   no unsafe or ad hoc entropy implementation is supplied.
 - `pending` ECMAScript trim, numeric-key and UTF-16 slicing helpers belong in

@@ -4,7 +4,7 @@
 mod diagnostics;
 mod landing;
 mod messages;
-pub mod pending;
+mod pending;
 mod sessions;
 mod tasks;
 
@@ -49,7 +49,7 @@ pub fn is_sqlite_contention(error: &Error) -> bool {
     matches!(error, Error::Sqlite(rusqlite::Error::SqliteFailure(e, _)) if matches!(e.code, rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked))
 }
 
-pub use pending::Identity;
+pub use pending::{IdSource, Identity};
 
 /// Time is sampled inside write transactions where the source samples it there.
 pub trait Clock {
