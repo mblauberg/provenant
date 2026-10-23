@@ -166,14 +166,25 @@ from pathlib import Path
 x=json.load(sys.stdin); root=Path(x['root']); p=root/'scripts/check-provenant-install.py'; instance=root/'instance'
 base={'PATH':os.environ.get('PATH',''),'HOME':str(root/'home'),'AGENT_FABRIC_INSTANCE_ROOT':str(instance),'PROVENANT_STALE_CHECKED':'1'}
 results=[]
-for mode in ['relative','invalid','unowned']:
+for mode in ['relative','invalid','unowned','binrelative','unmanaged','notexec','unstamped','stale','ok','warn','warn_strict']:
     env=dict(base)
     if mode=='relative': env['AGENT_FABRIC_INSTANCE_ROOT']='relative'
     pointer=instance/'.agent-fabric/product-root.json'
     if mode=='invalid': pointer.write_text('not json')
     if mode=='unowned': pointer.unlink()
-    code='import sys,runpy; sys.path.insert(0,sys.argv[1]); sys.argv=[sys.argv[2]]; runpy.run_path(sys.argv[0],run_name="__main__")'
-    r=subprocess.run([sys.executable,'-I','-c',code,str(p.parent),str(p)],env=env,capture_output=True,text=True,timeout=10)
+    env['PROVENANT_BIN_DIR']=str(root/'bin')
+    if mode not in {'relative','invalid','unowned'}: pointer.write_text(json.dumps({'schema_version':1,'product_root':str(root)}))
+    if mode=='binrelative': env['PROVENANT_BIN_DIR']='relative'
+    command=root/'bin/provenant'
+    if mode in {'notexec','unstamped','stale'}:
+        command.parent.mkdir(exist_ok=True); command.write_text('provenant-front-door source-sha256='+'0'*64+'\n' if mode=='stale' else 'no identity\n'); command.chmod(0o644 if mode=='notexec' else 0o755)
+    if mode=='ok':
+        from scripts.lib.front_door_build import source_digest
+        crate=root/'tools/front-door';(crate/'src').mkdir(parents=True);(crate/'Cargo.toml').write_text('[package]\nname="fixture"\n');(crate/'src/main.rs').write_text('fn main() {}\n')
+        command.write_text('provenant-front-door source-sha256='+source_digest(crate)+'\n')
+    if mode=='warn': (root/'home/.codex').mkdir(parents=True)
+    code='import sys,runpy; sys.path.insert(0,sys.argv[1]); script=sys.argv[2]; sys.argv=[script,*sys.argv[3:]]; runpy.run_path(script,run_name="__main__")' 
+    r=subprocess.run([sys.executable,'-I','-c',code,str(p.parent),str(p),*(['--strict'] if mode=='warn_strict' else [])],env=env,capture_output=True,text=True,timeout=10)
     results.append((r.stdout,r.stderr,r.returncode))
 print(json.dumps(results))
 "#,
@@ -185,10 +196,42 @@ print(json.dumps(results))
             Status::Failed(Failure::RelativeInstance),
             Status::Failed(Failure::InvalidPointer(pointer)),
             Status::NotOwned,
+            Status::Failed(Failure::RelativeBin),
+            Status::Failed(Failure::Unmanaged(dir.path().join("bin/provenant"))),
+            Status::Failed(Failure::NotExecutable(dir.path().join("bin/provenant"))),
+            Status::Failed(Failure::MissingIdentity),
+            Status::Failed(Failure::StaleIdentity {
+                stamped: "0".repeat(64),
+                current: None,
+            }),
+            Status::Installed {
+                command: dir.path().join("bin/provenant"),
+                providers: [ProviderStatus::default(); 6],
+                routing: Ok(vec![]),
+            },
+            Status::Installed {
+                command: dir.path().join("bin/provenant"),
+                providers: std::array::from_fn(|i| ProviderStatus {
+                    present: i == 1,
+                    ..ProviderStatus::default()
+                }),
+                routing: Ok(vec![]),
+            },
+            Status::Installed {
+                command: dir.path().join("bin/provenant"),
+                providers: std::array::from_fn(|i| ProviderStatus {
+                    present: i == 1,
+                    ..ProviderStatus::default()
+                }),
+                routing: Ok(vec![]),
+            },
         ];
-        for (status, (stdout, stderr, exit_code)) in statuses.iter().zip(expected) {
+        assert_eq!(statuses.len(), expected.len());
+        for (index, (status, (stdout, stderr, exit_code))) in
+            statuses.iter().zip(expected).enumerate()
+        {
             assert_eq!(
-                render(status, false, &[]),
+                render(status, index == 10, &[]),
                 CommandOutput {
                     stdout,
                     stderr,
@@ -208,11 +251,14 @@ x=json.load(sys.stdin); print(json.dumps(m._provider_lines(Path(x['home']))))
         ) else {
             return;
         };
-        assert!(!expected.1);
+        assert!(expected.1);
         let output = render(
             &Status::Installed {
                 command: "/bin/provenant".into(),
-                providers: [ProviderStatus::default(); 6],
+                providers: std::array::from_fn(|i| ProviderStatus {
+                    present: i == 1,
+                    ..ProviderStatus::default()
+                }),
                 routing: Ok(vec![]),
             },
             false,
