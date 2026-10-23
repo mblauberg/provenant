@@ -184,20 +184,6 @@ for case in cases:
             results.append([module.gate_approved(case, "human_gates", "release"), module.release_approved(case), module.run_closed(case)])
         except TypeError as error:
             results.append(type_error(error))
-    elif unit == "portable_workflow":
-        if isinstance(case, dict) and case.get("op") == "execute":
-            sys.argv = [str(source), "--skill-root", case["skill"], "--context", case["context"], "--output", case["output"]]
-            try:
-                module.main()
-                results.append({"artifact": Path(case["output"]).read_text()})
-            except (ValueError, KeyError) as error:
-                results.append({"error": str(error)})
-        else:
-            try:
-                module.validate_artifact_identity(case)
-                results.append(None)
-            except ValueError as error:
-                results.append(str(error))
     elif unit == "bootstrap":
         if case["op"] == "args":
             import contextlib, io

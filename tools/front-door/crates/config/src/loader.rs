@@ -6,13 +6,7 @@ use provenant_core::Roots;
 use provenant_records::Limits;
 use provenant_supervisor::fs::SafeFs;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
-use std::{
-    collections::BTreeMap,
-    ffi::OsStr,
-    io::{self, Read},
-    ops::Range,
-    path::Path,
-};
+use std::{collections::BTreeMap, ffi::OsStr, io::Read, ops::Range, path::Path};
 use toml_edit::{Document, DocumentMut, Item, Table, Value};
 
 #[derive(Deserialize)]
@@ -141,12 +135,12 @@ fn open(
     let path = roots.state.as_path().join("config.toml");
     let dir = match fs.open_anchor(roots.state.as_path()) {
         Ok(dir) => dir,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(e) if e.is_not_found() => return Ok(None),
         Err(source) => return Err(ConfigError::Read { path, source }),
     };
     match dir.open_read(OsStr::new("config.toml")) {
         Ok(file) => Ok(Some(file)),
-        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(e) if e.is_not_found() => Ok(None),
         Err(source) => Err(ConfigError::Read { path, source }),
     }
 }
@@ -658,7 +652,11 @@ fn bounded_text(reader: impl Read, path: &Path) -> Result<String, ConfigError> {
         .read_to_end(&mut bytes)
         .map_err(|source| ConfigError::Read {
             path: path.into(),
-            source,
+            source: provenant_supervisor::fs::FsError::Io {
+                operation: "read",
+                path: path.into(),
+                source,
+            },
         })?;
     if bytes.len() as u64 > Limits::CONFIG.max_bytes {
         return Err(ConfigError::TooLarge {

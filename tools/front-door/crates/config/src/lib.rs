@@ -19,7 +19,7 @@ pub use presets::Profile;
 pub use provenant_records::Finding;
 
 use serde::{Deserialize, Serialize, Serializer};
-use std::{collections::BTreeMap, fmt, io, path::PathBuf};
+use std::{collections::BTreeMap, fmt, path::PathBuf};
 use thiserror::Error;
 
 /// Errors never contain TOML text, rejected values or parser input excerpts.
@@ -35,7 +35,7 @@ pub enum ConfigError {
     Read {
         path: PathBuf,
         #[source]
-        source: io::Error,
+        source: provenant_supervisor::fs::FsError,
     },
     #[error("config at {path} exceeds the {limit}-byte limit")]
     TooLarge { path: PathBuf, limit: u64 },

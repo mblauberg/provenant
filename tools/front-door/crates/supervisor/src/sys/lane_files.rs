@@ -6,49 +6,6 @@ use std::os::fd::{AsRawFd, FromRawFd};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Component, Path};
 
-pub fn timestamp_epoch(sec: i64, millis: u32) -> String {
-    // SAFETY: reentrant libc date conversion borrows live time/tm allocations;
-    // no pointers escape, and the result is formatted before buffers drop.
-    unsafe {
-        let t = sec as libc::time_t;
-        let mut tm: libc::tm = std::mem::zeroed();
-        libc::gmtime_r(&t, &mut tm);
-        format!(
-            "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.{:03}Z",
-            i64::from(tm.tm_year) + 1900,
-            tm.tm_mon + 1,
-            tm.tm_mday,
-            tm.tm_hour,
-            tm.tm_min,
-            tm.tm_sec,
-            millis
-        )
-    }
-}
-pub fn canonical_start(epoch: u64) -> String {
-    // Match process_info._lstart and run-registry's C-locale ps identity.
-    // SAFETY: reentrant libc date conversion borrows live time/tm allocations;
-    // no pointers escape, and the result is formatted before buffers drop.
-    unsafe {
-        let t = epoch as libc::time_t;
-        let mut tm: libc::tm = std::mem::zeroed();
-        libc::localtime_r(&t, &mut tm);
-        let days = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
-        let months = [
-            "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
-        ];
-        format!(
-            "{} {} {:2} {:02}:{:02}:{:02} {}",
-            days.get(tm.tm_wday as usize).unwrap_or(&"?"),
-            months.get(tm.tm_mon as usize).unwrap_or(&"?"),
-            tm.tm_mday,
-            tm.tm_hour,
-            tm.tm_min,
-            tm.tm_sec,
-            i64::from(tm.tm_year) + 1900
-        )
-    }
-}
 fn cstr(s: &std::ffi::OsStr) -> io::Result<CString> {
     use std::os::unix::ffi::OsStrExt;
     CString::new(s.as_bytes())

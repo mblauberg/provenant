@@ -250,10 +250,10 @@ A failed preview stream prevents writes.
 
 | Command | Inputs and behaviour |
 | --- | --- |
-| `root` | `--kind state\|assets\|project` (default state). Project requires `--project ABS` and prints that selection without Git discovery. Missing assets reports missing installation. No SQLite, state creation, threads or provider/Git probes. |
+| `root` | No flags; reports state, assets, global `--project` selection and installation together, without Git discovery. Missing assets reports missing installation. No SQLite, state creation, threads or provider/Git probes. |
 | `config show`, `check config` | Effective config/origins or validation findings; only the global state selector. No mutation flags. |
 | `install [--dry-run]` | `--source ABS` identifies a staged release; `--harness NAME` repeatable and explicit; optional `--bin-dir ABS`, `--hooks on\|off` (default off), `--adopt-existing`, `--legacy-checkout ABS`. Validate all destinations and print every replace/remove/create before writes. Dry-run creates no root, lock or receipt. |
-| `check install` | Optional `--source ABS` source checkout for digest comparison; compare installed binary, assets, receipt and owned harness selectors without repair. Joins CLI's existing `check` subtree. |
+| `check install` | Optional `--source ABS` staged release, as for `install`, for digest comparison; compare installed binary, assets, receipt and owned harness selectors without repair. Joins CLI's existing `check` subtree. |
 | `uninstall` | Explicit `--harness NAME` repeatable; remove unchanged owned entries only. Keeps state, release assets, user skills/config and the running binary. No recursive deletion. |
 
 ### Release identity and bootstrap
@@ -472,7 +472,7 @@ capped at 14400 s CLI/55 s MCP.
 and completed-attempt facts with every field workflow consumed (terminal
 state/exit, subject, output, route, reviewer); dispatch carries optional
 `delivery_id`. The run-directory receipt/manifest/finaliser contract is cut
-in favour of run records plus `clean`. Telemetry drops `upsert_delivery` and
+in favour of run records plus guardian scratch settlement. Telemetry drops `upsert_delivery` and
 the legacy delivery/change reducers; its terminal-record `stats` reducer stays.
 Workflow owns writing-rule data and
 CLI freezes `check writing PATHS`. Use an in-house snapshot helper, no `insta`

@@ -75,4 +75,4 @@ owner/destination, status (`promote`, `experiment`, `defer`, `reject`).
 
 ## Portable artifact
 
-Use the skill-owned [retrospective receipt schema](portable-workflow.v1.json).
+Keep the criteria, evidence and outcome in the existing project document or PR.

@@ -226,7 +226,7 @@ fn bounded_reader_preserves_io_failures_and_consumes_at_most_limit_plus_one() {
         }
     }
     assert!(
-        matches!(load(&roots(), Some(Fails)), Err(ConfigError::Read { source, .. }) if source.kind() == io::ErrorKind::PermissionDenied)
+        matches!(load(&roots(), Some(Fails)), Err(ConfigError::Read { source: provenant_supervisor::fs::FsError::Io { operation: "read", source, .. }, .. }) if source.kind() == io::ErrorKind::PermissionDenied)
     );
     let mut stream = io::repeat(b' ');
     assert!(matches!(
