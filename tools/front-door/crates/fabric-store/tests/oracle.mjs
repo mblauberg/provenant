@@ -29,7 +29,57 @@ if (scenario === 'legacy') {
 const store = new Store(database);
 const other = new Store(database);
 const raw = new Database(database);
-if (scenario === 'leases') {
+if (scenario === 'review') {
+  store.announce(a);
+  capture(() => store.announce({...a, provider:'claude'}));
+  capture(() => store.createTeam(a, 'future', ['alice']));
+  capture(() => store.announce({...a, agentId:'future'}));
+  capture(() => store.announce({...a, agentId:'all'}));
+  for (const agentId of ['chair','leader','parent-seat']) store.announce({...a, agentId});
+  process.env.PROVENANT_CHAIR='leader'; process.env.PROVENANT_PARENT='parent-seat';
+  for (const alias of ['chair','parent','root','/root']) capture(() => store.send(a, alias, 'question'));
+  process.env.PROVENANT_CHAIR='missing'; process.env.PROVENANT_PARENT='missing';
+  capture(() => store.send(a, 'parent', 'fallback'));
+  const sha='a'.repeat(40);
+  capture(() => store.acquireLanding(a,'s',sha,1,1000));
+  raw.exec('UPDATE landing_leases SET pushing_until=151000');
+  capture(() => other.acquireLanding(b,'s',sha,60,2001));
+  capture(() => store.tryReleaseLanding(a,'s',1,2001));
+  capture(() => other.acquireLanding(b,'s',sha,60,151000));
+} else if (scenario === 'waits') {
+  const asyncCapture = async (f) => {
+    let entry; try { entry={ok:await f()}; } catch(e) { entry={error:e.message}; }
+    out.push({...entry,wire:JSON.stringify(entry)});
+  };
+  let onWait=()=>{};
+  globalThis.setTimeout=(done,ms)=>{ now+=ms; onWait(); done(); };
+  await asyncCapture(() => store.waitLanding('p',0.003,undefined,1));
+  await asyncCapture(() => store.waitLanding('p',1,AbortSignal.abort(),1));
+  now=1000;
+  store.acquireLanding(a,'s','a'.repeat(40),60,now);
+  let polls=0;
+  onWait=()=>{ if(++polls===1) raw.exec('UPDATE landing_leases SET pushing_until=151000');
+    else raw.exec('UPDATE landing_leases SET released_at=1002'); };
+  await asyncCapture(() => store.waitLanding('p',1,undefined,1));
+  store.acquireLanding(a,'s','a'.repeat(40),1,now);
+  onWait=()=>{};
+  await asyncCapture(() => store.waitLanding('p',2,undefined,500));
+  store.acquireLanding(a,'s','a'.repeat(40),60,now);
+  onWait=()=>{ raw.exec('UPDATE landing_leases SET generation=generation+1'); };
+  await asyncCapture(() => store.waitLanding('p',1,undefined,1));
+} else if (scenario === 'thread-contention') {
+  const { Worker } = await import('node:worker_threads');
+  const { once } = await import('node:events');
+  store.announce(a); store.announce(b); store.send(a,'bob','claim me');
+  const worker=new Worker(new URL('./lock-worker.mjs',import.meta.url), {workerData:{source,database}});
+  try {
+    await once(worker,'message');
+    capture(() => store.inbox(b,{busyTimeoutMs:1}));
+    capture(() => store.acknowledgeTerminal(b,{run_id:'r',task_id:'t',attempt:1,run_dir:'/r'},1));
+    const released=once(worker,'message'); worker.postMessage('release'); await released;
+  } finally { await worker.terminate(); }
+  capture(() => store.inbox(b));
+} else if (scenario === 'leases') {
   const sha = 'a'.repeat(40);
   capture(() => store.acquireLanding(a, 'a', sha, 1, 1000));
   capture(() => other.acquireLanding(b, 'b', sha, 60, 1000));

@@ -722,3 +722,76 @@ fn javascript_date_range_and_signed_year_differential() {
     }
     compare("dates", snapshot(&store, out));
 }
+
+#[test]
+fn review_routing_announce_failures_and_push_takeover_differential() {
+    let dir = tempfile::tempdir().unwrap();
+    let path=dir.path().join("db");
+    let store=Store::open(&path,5000,FixtureClock(Arc::new(TimeCell::new(1000)))).unwrap();
+    let other=Store::open(&path,5000,FixtureClock(Arc::new(TimeCell::new(1000)))).unwrap();
+    let ids=FixtureIds::default(); let mut out=Vec::new();
+    store.announce(&a()).unwrap();
+    capture(&mut out,store.announce(&Identity {provider:"claude".into(),..a()}));
+    capture(&mut out,store.create_team(&a(),"future",&["alice".into()]));
+    capture(&mut out,store.announce(&Identity {agent_id:"future".into(),..a()}));
+    capture(&mut out,store.announce(&Identity {agent_id:"all".into(),..a()}));
+    for seat in ["chair","leader","parent-seat"] {store.announce(&Identity {agent_id:seat.into(),..a()}).unwrap();}
+    for alias in ["chair","parent","root","/root"] {
+        capture(&mut out,store.send(&a(),alias,"question",SendOptions::default(),RecipientContext {chair:Some("leader"),parent:Some("parent-seat")},&ids));
+    }
+    capture(&mut out,store.send(&a(),"parent","fallback",SendOptions::default(),RecipientContext {chair:Some("missing"),parent:Some("missing")},&ids));
+    let sha="a".repeat(40);
+    capture(&mut out,store.acquire_landing(&a(),"s",&sha,1,1000));
+    store.db.execute_batch("UPDATE landing_leases SET pushing_until=151000").unwrap();
+    capture(&mut out,other.acquire_landing(&b(),"s",&sha,60,2001));
+    capture(&mut out,store.try_release_landing(&a(),"s",1,Some(2001)));
+    capture(&mut out,other.acquire_landing(&b(),"s",&sha,60,151000));
+    compare("review",snapshot(&store,out));
+}
+
+#[test]
+fn landing_wait_change_timeout_abort_expiry_and_generation_differential() {
+    let dir=tempfile::tempdir().unwrap();let path=dir.path().join("db");
+    let clock=FixtureClock(Arc::new(TimeCell::new(1000)));
+    let store=Store::open(&path,5000,clock.clone()).unwrap();
+    let raw=Connection::open(&path).unwrap();let mut out=Vec::new();
+    capture(&mut out,store.wait_landing("p",0.003,1,||false,|d|clock.0.set(clock.0.get()+d.as_millis() as i64)));
+    capture(&mut out,store.wait_landing("p",1.0,1,||true,|_|panic!("aborted")));
+    clock.0.set(1000);store.acquire_landing(&a(),"s",&"a".repeat(40),60,1000).unwrap();
+    let mut polls=0;
+    capture(&mut out,store.wait_landing("p",1.0,1,||false,|d|{
+        clock.0.set(clock.0.get()+d.as_millis() as i64);polls+=1;
+        raw.execute_batch(if polls==1 {"UPDATE landing_leases SET pushing_until=151000"} else {"UPDATE landing_leases SET released_at=1002"}).unwrap();
+    }));
+    store.acquire_landing(&a(),"s",&"a".repeat(40),1,clock.0.get()).unwrap();
+    capture(&mut out,store.wait_landing("p",2.0,500,||false,|d|clock.0.set(clock.0.get()+d.as_millis() as i64)));
+    store.acquire_landing(&a(),"s",&"a".repeat(40),60,clock.0.get()).unwrap();
+    capture(&mut out,store.wait_landing("p",1.0,1,||false,|d|{
+        clock.0.set(clock.0.get()+d.as_millis() as i64);raw.execute_batch("UPDATE landing_leases SET generation=generation+1").unwrap();
+    }));
+    compare("waits",snapshot(&store,out));
+}
+
+#[test]
+fn cross_thread_sqlite_contention_differential() {
+    use std::sync::mpsc;
+    let dir=tempfile::tempdir().unwrap();let path=dir.path().join("db");
+    let store=Store::open(&path,5000,FixtureClock(Arc::new(TimeCell::new(1000)))).unwrap();
+    let ids=FixtureIds::default();let mut out=Vec::new();
+    store.announce(&a()).unwrap();store.announce(&b()).unwrap();
+    store.send(&a(),"bob","claim me",SendOptions::default(),RecipientContext::default(),&ids).unwrap();
+    let (locked_tx,locked_rx)=mpsc::channel();let (release_tx,release_rx)=mpsc::channel();
+    std::thread::scope(|scope| {
+        let writer=scope.spawn(move ||{
+            let raw=Connection::open(&path).unwrap();raw.execute_batch("BEGIN IMMEDIATE").unwrap();
+            locked_tx.send(()).unwrap();release_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+            raw.execute_batch("ROLLBACK").unwrap();
+        });
+        locked_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        capture(&mut out,store.inbox(&b(),InboxOptions {busy_timeout_ms:1,..Default::default()},&ids));
+        capture(&mut out,store.acknowledge_terminal(&b(),"r","t",1,Some("/r"),1));
+        release_tx.send(()).unwrap();writer.join().unwrap();
+    });
+    capture(&mut out,store.inbox(&b(),InboxOptions::default(),&ids));
+    compare("thread-contention",snapshot(&store,out));
+}
