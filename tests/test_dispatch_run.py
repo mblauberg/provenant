@@ -640,7 +640,7 @@ def test_preflight_honours_policy_secret_scan_exclusions(tmp_path, monkeypatch):
     task = {'id': 'task-1', 'adapter': 'claude', 'alias': 'senior',
             'prompt': 'review shared files', 'add_dirs': [str(tmp_path / 'shared')]}
     module = load_dispatch_module()
-    assert module.preflight_tasks([task], tmp_path)['status'] == 'validated'
+    assert module.dispatch_preflight.preflight_tasks([task], tmp_path)['status'] == 'validated'
 
 
 def test_secret_scan_budget_skips_vendored_build_and_large_binary_before_counting(tmp_path, monkeypatch):
@@ -900,7 +900,7 @@ def test_secret_scan_unavailable_fix_includes_failing_path_and_reason(tmp_path: 
             "id": "task-1", "adapter": "codex", "model": "fixture",
             "prompt": "hello", "add_dirs": [str(unreadable_dir)],
         }]
-        res = module.preflight_tasks(tasks, workspace_root=workspace)
+        res = module.dispatch_preflight.preflight_tasks(tasks, workspace_root=workspace)
         assert res["status"] == "rejected"
         assert res["error"] == "secret_scan_unavailable"
         assert str(unreadable_dir) in res["fix"]
@@ -1149,7 +1149,7 @@ def test_batch_preflight_does_not_invent_an_explicit_alias_for_model_routes(tmp_
         }), "")
 
     monkeypatch.setattr(module.subprocess, "run", resolve)
-    result = module.preflight_tasks([
+    result = module.dispatch_preflight.preflight_tasks([
         {"id": "model-only", "adapter": "codex", "model": "gpt-6-luna", "prompt": "hi"},
         {"id": "explicit-both", "adapter": "codex", "alias": "senior", "model": "gpt-6-luna", "prompt": "hi"},
     ])
@@ -3013,8 +3013,8 @@ def test_provider_deadline_is_passed_below_the_owner_deadline(tmp_path: Path) ->
     assert passed == 895
     assert 0 < passed < args.timeout_seconds
     # A short deadline still leaves the provider a positive whole second.
-    assert module.provider_timeout_seconds(2.0) == 1
-    assert module.provider_timeout_seconds(0.25) == 1
+    assert module.dispatch_preflight.provider_timeout_seconds(2.0) == 1
+    assert module.dispatch_preflight.provider_timeout_seconds(0.25) == 1
 
 
 def test_agy_arm_receives_the_deadline_and_reports_a_typed_timeout(tmp_path: Path) -> None:
@@ -3203,7 +3203,7 @@ def test_front_door_capability_preflight_fails_closed(monkeypatch, tmp_path, fie
     elif field == "sandbox_exec": monkeypatch.setattr(module.provider_exec, "_sandbox_exec_path", lambda: value)
     elif field == "network": task["network"] = value
 
-    result = module.preflight_tasks([task], tmp_path)
+    result = module.dispatch_preflight.preflight_tasks([task], tmp_path)
 
     assert result["status"] == "rejected"
     assert result["error"] == error
@@ -3218,7 +3218,7 @@ def test_front_door_capability_preflight_accepts_other_adapters_and_full_sandbox
     monkeypatch.setattr(module.provider_exec.sys, "platform", "linux")
     task = {"id": "capability", "adapter": "codex", "access_mode": "worktree_write",
             "network": True, "capabilities": ["postgres"], "prompt": "hello", field: value}
-    result = module.preflight_tasks([task], tmp_path)
+    result = module.dispatch_preflight.preflight_tasks([task], tmp_path)
     # Later checks (here the missing worktree) may still refuse it, but not its capabilities.
     assert not result.get("error", "").startswith("capabilities"), result
 
@@ -3229,7 +3229,7 @@ def test_front_door_capability_preflight_rejects_malformed_values(monkeypatch, t
     monkeypatch.chdir(tmp_path)
     task = {"id": "capability", "adapter": "codex", "access_mode": "worktree_write",
             "network": True, "capabilities": capabilities, "prompt": "hello"}
-    result = module.preflight_tasks([task], tmp_path)
+    result = module.dispatch_preflight.preflight_tasks([task], tmp_path)
     assert result["status"] == "rejected"
     assert result["error"] == "capabilities_invalid"
     assert result["fix"].strip().endswith(".")
@@ -3252,7 +3252,7 @@ def test_dispatch_command_forwards_capabilities_as_json(tmp_path):
 def test_secret_in_inline_prompt_is_rejected_before_preflight_route(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     module = load_dispatch_module()
-    result = module.preflight_tasks([{
+    result = module.dispatch_preflight.preflight_tasks([{
         'id': 'task-1', 'adapter': 'claude', 'prompt': 'Bearer ' +
         'eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.' + 'a' * 43,
     }])
@@ -3269,10 +3269,10 @@ def test_preflight_secret_file_rejects_and_explicit_override_accepts(tmp_path, m
     prompt = tmp_path / 'prompt.md'
     prompt.write_text('hello\n' + 'AKIA' + 'A' * 16)
     task = {'id': 'task-1', 'adapter': 'claude', 'alias': 'senior', 'prompt_file': str(prompt)}
-    rejected = module.preflight_tasks([task])
+    rejected = module.dispatch_preflight.preflight_tasks([task])
     assert rejected['error'] == 'secret_detected'
     assert f'{prompt}:2' in rejected['fix']
-    assert module.preflight_tasks([{**task, 'allow_secrets': True}])['status'] == 'validated'
+    assert module.dispatch_preflight.preflight_tasks([{**task, 'allow_secrets': True}])['status'] == 'validated'
 
 
 def test_preflight_accepts_a_prompt_file_only_inside_a_read_root(tmp_path, monkeypatch):
@@ -3288,11 +3288,11 @@ def test_preflight_accepts_a_prompt_file_only_inside_a_read_root(tmp_path, monke
     prompt.write_text('read the other project')
     task = {'id': 'task-1', 'adapter': 'claude', 'alias': 'senior', 'prompt_file': str(prompt)}
 
-    rejected = module.preflight_tasks([task], workspace)
+    rejected = module.dispatch_preflight.preflight_tasks([task], workspace)
     assert rejected['error'] == 'prompt_path_forbidden'
     assert 'registered Fabric project' in rejected['fix']
     assert 'dispatch from it' in rejected['fix']
-    assert module.preflight_tasks([{**task, 'read_roots': [str(other)]}], workspace)['status'] == 'validated'
+    assert module.dispatch_preflight.preflight_tasks([{**task, 'read_roots': [str(other)]}], workspace)['status'] == 'validated'
 
 
 def test_preflight_accepts_temp_prompts_and_retains_secret_and_link_checks(tmp_path, monkeypatch):
@@ -3307,19 +3307,19 @@ def test_preflight_accepts_temp_prompts_and_retains_secret_and_link_checks(tmp_p
     prompt = scratch / 'brief.md'
     prompt.write_text('hello')
     task = {'id': 'task-1', 'adapter': 'claude', 'alias': 'senior', 'prompt_file': str(prompt)}
-    assert module.preflight_tasks([task], workspace)['status'] == 'validated'
+    assert module.dispatch_preflight.preflight_tasks([task], workspace)['status'] == 'validated'
     prompt.write_text('AKIA' + 'A' * 16)
-    assert module.preflight_tasks([task], workspace)['error'] == 'secret_detected'
+    assert module.dispatch_preflight.preflight_tasks([task], workspace)['error'] == 'secret_detected'
     auth = scratch / '.codex' / 'auth.json'
     auth.parent.mkdir()
     auth.write_text('{}')
-    assert module.preflight_tasks([{**task, 'prompt_file': str(auth)}], workspace)['error'] == 'credential_or_auth_store_denied'
+    assert module.dispatch_preflight.preflight_tasks([{**task, 'prompt_file': str(auth)}], workspace)['error'] == 'credential_or_auth_store_denied'
     link = scratch / 'linked.md'
     link.symlink_to(auth)
-    assert module.preflight_tasks([{**task, 'prompt_file': str(link)}], workspace)['error'] == 'credential_or_auth_store_denied'
+    assert module.dispatch_preflight.preflight_tasks([{**task, 'prompt_file': str(link)}], workspace)['error'] == 'credential_or_auth_store_denied'
     linked = scratch / 'hardlinked.md'
     linked.hardlink_to(prompt)
-    assert module.preflight_tasks([{**task, 'prompt_file': str(linked)}], workspace)['error'] == 'prompt_hard_link_denied'
+    assert module.dispatch_preflight.preflight_tasks([{**task, 'prompt_file': str(linked)}], workspace)['error'] == 'prompt_hard_link_denied'
 
 
 def test_preflight_scans_a_read_root_prompt_for_secrets(tmp_path, monkeypatch):
@@ -3334,7 +3334,7 @@ def test_preflight_scans_a_read_root_prompt_for_secrets(tmp_path, monkeypatch):
     prompt.write_text('hello\n' + 'AKIA' + 'A' * 16)
     task = {'id': 'task-1', 'adapter': 'claude', 'alias': 'senior', 'prompt_file': str(prompt),
             'read_roots': [str(other)]}
-    assert module.preflight_tasks([task], workspace)['error'] == 'secret_detected'
+    assert module.dispatch_preflight.preflight_tasks([task], workspace)['error'] == 'secret_detected'
 
 
 def test_preflight_refuses_a_credential_store_prompt_in_any_root(tmp_path, monkeypatch):
@@ -3351,7 +3351,7 @@ def test_preflight_refuses_a_credential_store_prompt_in_any_root(tmp_path, monke
     local.write_text('{"opaque": "value"}')
     task = {'id': 'task-1', 'adapter': 'claude', 'alias': 'senior'}
     for prompt, roots in ((auth, [str(other)]), (local, [])):
-        result = module.preflight_tasks([{**task, 'prompt_file': str(prompt), 'read_roots': roots}], workspace)
+        result = module.dispatch_preflight.preflight_tasks([{**task, 'prompt_file': str(prompt), 'read_roots': roots}], workspace)
         assert result['error'] == 'credential_or_auth_store_denied', prompt
 
 
@@ -3454,10 +3454,10 @@ def test_preflight_secret_in_add_dirs_rejects_and_override_accepts(tmp_path, mon
     task = {'id': 'task-1', 'adapter': 'claude', 'alias': 'senior',
             'prompt': 'review shared files', 'add_dirs': [str(directory)]}
     module = load_dispatch_module()
-    rejected = module.preflight_tasks([task])
+    rejected = module.dispatch_preflight.preflight_tasks([task])
     assert rejected['error'] == 'secret_detected'
     assert 'Stripe live key' in rejected['fix']
-    assert module.preflight_tasks([{**task, 'allow_secrets': True}])['status'] == 'validated'
+    assert module.dispatch_preflight.preflight_tasks([{**task, 'allow_secrets': True}])['status'] == 'validated'
 
 
 def test_preflight_and_dispatch_refuse_scan_budget_overrun_unless_overridden(tmp_path, monkeypatch, capsys):
@@ -3472,11 +3472,11 @@ def test_preflight_and_dispatch_refuse_scan_budget_overrun_unless_overridden(tmp
             'prompt': 'review shared files', 'add_dirs': [str(directory)]}
     module = load_dispatch_module()
 
-    rejected = module.preflight_tasks([task])
+    rejected = module.dispatch_preflight.preflight_tasks([task])
     assert rejected['status'] == 'rejected'
     assert rejected['error'] == 'secret_scan_budget_exceeded'
     assert str(directory) in rejected['fix'] and 'narrower path' in rejected['fix']
-    assert module.preflight_tasks([{**task, 'allow_secrets': True}])['status'] == 'validated'
+    assert module.dispatch_preflight.preflight_tasks([{**task, 'allow_secrets': True}])['status'] == 'validated'
 
     run_dir = make_run(tmp_path, 'scan-budget')
     adapter = tmp_path / 'adapter'
@@ -3508,7 +3508,7 @@ def test_stale_instance_routing_uses_fresh_product_and_warns(tmp_path, monkeypat
     monkeypatch.setenv('AGENT_FABRIC_PRODUCT_ROOT', str(ROOT))
     module = load_dispatch_module()
 
-    result = module.preflight_tasks([{
+    result = module.dispatch_preflight.preflight_tasks([{
         'id': 'fresh-route', 'adapter': 'claude', 'alias': 'senior', 'prompt': 'review this',
     }])
 
@@ -3532,11 +3532,11 @@ def test_effort_rejection_retries_once_at_nearest_lower_capability(tmp_path):
         'evidence': {'excerpt': '--effort is not supported for model fixture'},
     }
 
-    retry = module.effort_retry_plan(plan, rejected)
+    retry = module.dispatch_preflight.effort_retry_plan(plan, rejected)
 
     assert retry['effort'] == retry['route']['effort_applied'] == 'medium'
     assert retry['warnings'][-1] == 'adapter rejected high effort; retrying at medium'
-    assert module.effort_retry_plan(
+    assert module.dispatch_preflight.effort_retry_plan(
         plan, {**rejected, 'error': 'model_unavailable'}) is None
 
 
@@ -4414,10 +4414,10 @@ def test_fabric_fast_plan_matches_shell_for_explicit_model(tmp_path, monkeypatch
     result = run / 'result.md'
     shell = subprocess.run(
         [*mod.build_command(args, prompt, result), '--plan-only'],
-        cwd=tmp_path, env=mod.routing_environment(preserve_instance=True), capture_output=True, text=True,
+        cwd=tmp_path, env=mod.dispatch_preflight.routing_environment(preserve_instance=True), capture_output=True, text=True,
     )
     assert shell.returncode == 0, shell.stdout + shell.stderr
-    planned = mod.fast_fabric_plan(args, prompt, result, tmp_path)
+    planned = mod.dispatch_preflight.fast_fabric_plan(args, prompt, result, tmp_path)
     assert planned is not None
     expected = json.loads(shell.stdout)
     for value in (planned, expected):
@@ -4458,8 +4458,8 @@ def test_fabric_fast_plan_matches_or_delegates_shell_edge_routes(
     args.timeout_seconds = mod.DEFAULT_TIMEOUT_SECONDS
     result = run / 'result.md'
     shell = subprocess.run([*mod.build_command(args, prompt, result), '--plan-only'],
-                           cwd=tmp_path, env=mod.routing_environment(preserve_instance=True), capture_output=True, text=True)
-    planned = mod.fast_fabric_plan(args, prompt, result, tmp_path)
+                           cwd=tmp_path, env=mod.dispatch_preflight.routing_environment(preserve_instance=True), capture_output=True, text=True)
+    planned = mod.dispatch_preflight.fast_fabric_plan(args, prompt, result, tmp_path)
     if planned is None:
         return  # The shell planner owns routes outside the narrow fast path.
     assert shell.returncode == 0, shell.stderr
@@ -4483,7 +4483,7 @@ def test_fabric_fast_plan_delegates_shell_environment_knobs(tmp_path, monkeypatc
         'CF_DISPATCH_CODEX_NETWORK', 'CF_DISPATCH_AGY_SANDBOX',
     ):
         monkeypatch.setenv(name, '1')
-        assert mod.fast_fabric_plan(args, prompt, run / 'result.md', tmp_path) is None
+        assert mod.dispatch_preflight.fast_fabric_plan(args, prompt, run / 'result.md', tmp_path) is None
         monkeypatch.delenv(name)
 
 
@@ -4505,11 +4505,11 @@ def test_fabric_fast_plan_delegates_valid_shell_only_options(tmp_path, monkeypat
         args.fallback = 'true'
     result = run / 'result.md'
     shell = subprocess.run([*mod.build_command(args, prompt, result), '--plan-only'],
-                           cwd=tmp_path, env=mod.routing_environment(preserve_instance=True), capture_output=True, text=True)
+                           cwd=tmp_path, env=mod.dispatch_preflight.routing_environment(preserve_instance=True), capture_output=True, text=True)
     assert shell.returncode == 0, shell.stderr
     expected = json.loads(shell.stdout)
     assert expected['adapter'] == 'claude'
-    assert mod.fast_fabric_plan(args, prompt, result, tmp_path) is None
+    assert mod.dispatch_preflight.fast_fabric_plan(args, prompt, result, tmp_path) is None
     if variant == 'agy_add_dir':
         assert str(extra) in expected['applied']['add_dirs']
     elif variant == 'resume':
@@ -4525,7 +4525,7 @@ def test_fabric_fast_plan_delegates_missing_tmpdir(tmp_path, monkeypatch):
     args = mod.parser().parse_args(command[2:])
     args.timeout_seconds = mod.DEFAULT_TIMEOUT_SECONDS
     monkeypatch.setenv('TMPDIR', str(tmp_path / 'missing'))
-    assert mod.fast_fabric_plan(args, prompt, run / 'result.md', tmp_path) is None
+    assert mod.dispatch_preflight.fast_fabric_plan(args, prompt, run / 'result.md', tmp_path) is None
 
 
 def test_fabric_fast_plan_guard_covers_shell_environment_reads():
@@ -4533,7 +4533,7 @@ def test_fabric_fast_plan_guard_covers_shell_environment_reads():
     mod = load_dispatch_module()
     shell = (ROOT / 'skills/orchestrate/scripts/cf_dispatch.py').read_text()
     read_names = set(re.findall(r'"(CF_DISPATCH_[A-Z0-9_]+)"', shell))
-    assert read_names == mod.FAST_PLAN_SHELL_ENV_READS
+    assert read_names == mod.dispatch_preflight.FAST_PLAN_SHELL_ENV_READS
 
 
 @pytest.mark.parametrize('raw', [
@@ -4546,7 +4546,7 @@ def test_fabric_fast_plan_guard_covers_shell_environment_reads():
 def test_fabric_fast_route_validation_matches_shell_rejections(raw):
     mod = load_dispatch_module()
     with pytest.raises(ValueError):
-        mod.parse_fast_route_json(raw)
+        mod.dispatch_preflight.parse_fast_route_json(raw)
 
 
 def test_fabric_fast_route_validation_tracks_shell_fields():
@@ -4557,8 +4557,8 @@ def test_fabric_fast_route_validation_tracks_shell_fields():
     dispatcher = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = dispatcher
     spec.loader.exec_module(dispatcher)
-    assert set(dispatcher.ROUTE_REQUIRED_FIELDS) == set(mod.FAST_PLAN_ROUTE_REQUIRED)
-    assert set(dispatcher.ROUTE_FIELDS) == set(mod.FAST_PLAN_ROUTE_FIELDS)
+    assert set(dispatcher.ROUTE_REQUIRED_FIELDS) == set(mod.dispatch_preflight.FAST_PLAN_ROUTE_REQUIRED)
+    assert set(dispatcher.ROUTE_FIELDS) == set(mod.dispatch_preflight.FAST_PLAN_ROUTE_FIELDS)
 
 
 @pytest.mark.parametrize('failure', [
@@ -4578,7 +4578,7 @@ def test_fabric_fast_plan_delegates_import_and_router_failures(tmp_path, monkeyp
         raise failure
 
     monkeypatch.setattr(mod.importlib.util, 'spec_from_file_location', fail_import)
-    assert mod.fast_fabric_plan(args, prompt, run / 'result.md', tmp_path) is None
+    assert mod.dispatch_preflight.fast_fabric_plan(args, prompt, run / 'result.md', tmp_path) is None
 
 
 @pytest.mark.parametrize('adapter, idle', [('agy', None), ('claude', '0.5')])
@@ -4594,7 +4594,7 @@ def test_fabric_fast_plan_delegates_only_active_shell_checks(tmp_path, monkeypat
     args = mod.parser().parse_args(command[2:])
     args.tool = adapter
     args.timeout_seconds = mod.DEFAULT_TIMEOUT_SECONDS
-    plan = mod.fast_fabric_plan(args, prompt, run / 'result.md', tmp_path)
+    plan = mod.dispatch_preflight.fast_fabric_plan(args, prompt, run / 'result.md', tmp_path)
     assert (plan is None) is (adapter == 'agy')
 
 
@@ -4610,7 +4610,7 @@ def test_fabric_fast_plan_rejects_invalid_git_context(tmp_path, monkeypatch):
     mod = load_dispatch_module()
     args = mod.parser().parse_args(command[2:])
     args.timeout_seconds = mod.DEFAULT_TIMEOUT_SECONDS
-    assert mod.fast_fabric_plan(args, prompt, run / 'result.md', tmp_path) is None
+    assert mod.dispatch_preflight.fast_fabric_plan(args, prompt, run / 'result.md', tmp_path) is None
 
 
 @pytest.mark.parametrize('content', ['', 'hello\x00world'])
@@ -4623,7 +4623,7 @@ def test_fabric_fast_plan_preserves_shell_prompt_rejections(tmp_path, monkeypatc
     mod = load_dispatch_module()
     args = mod.parser().parse_args(command[2:])
     args.timeout_seconds = mod.DEFAULT_TIMEOUT_SECONDS
-    assert mod.fast_fabric_plan(args, prompt, run / 'result.md', tmp_path) is None
+    assert mod.dispatch_preflight.fast_fabric_plan(args, prompt, run / 'result.md', tmp_path) is None
 
 
 @pytest.mark.parametrize('previous_status', ['interrupted', 'timed_out', 'cancelled', 'stalled', 'lost'])
@@ -4827,18 +4827,18 @@ Path('partial.txt').write_text('unfinished edit')
 def test_planner_stopped_by_signal_is_interrupted_not_rejected():
     mod = load_dispatch_module()
     stopped = subprocess.CompletedProcess([], -15, stdout="", stderr="Terminated: 15")
-    assert mod.planner_result(stopped)["status"] == "interrupted"
+    assert mod.dispatch_preflight.planner_result(stopped)["status"] == "interrupted"
     broken = subprocess.CompletedProcess([], 0, stdout="not json", stderr="")
-    assert mod.planner_result(broken) == {"status": "rejected", "fix": "route planner returned invalid JSON"}
+    assert mod.dispatch_preflight.planner_result(broken) == {"status": "rejected", "fix": "route planner returned invalid JSON"}
 
 
 def test_planner_capability_statuses_become_typed_failures_with_fixes():
     mod = load_dispatch_module()
-    row = mod.router_failure("capability_model_unavailable", "codex")
+    row = mod.dispatch_preflight.router_failure("capability_model_unavailable", "codex")
     assert row["status"] == "model_unavailable"
     assert row["fix"].startswith("choose a registered model:") and "gpt-6-luna" in row["fix"]
     assert row["evidence"]["signature"] == "capability_model_unavailable"
-    assert mod.router_failure("capability_discovery_failed", "codex")["status"] == "failed"
+    assert mod.dispatch_preflight.router_failure("capability_discovery_failed", "codex")["status"] == "failed"
 
 
 @pytest.mark.parametrize("status,expected", [
@@ -4852,23 +4852,23 @@ def test_planner_capability_statuses_become_typed_failures_with_fixes():
 ])
 def test_every_router_status_reaches_the_caller_typed_with_a_fix(status, expected):
     mod = load_dispatch_module()
-    row = mod.router_failure(status, "codex")
+    row = mod.dispatch_preflight.router_failure(status, "codex")
     assert row["status"] == expected
     assert row["fix"] and row["evidence"]["signature"] == status
 
 
 def test_planner_crash_signal_is_not_an_interruption():
     mod = load_dispatch_module()
-    crashed = mod.planner_result(subprocess.CompletedProcess([], -11, stdout="", stderr=""))
+    crashed = mod.dispatch_preflight.planner_result(subprocess.CompletedProcess([], -11, stdout="", stderr=""))
     assert crashed["status"] == "failed" and "signal 11" in crashed["fix"]
 
 
 def test_provider_exec_failures_are_not_router_refusals():
     mod = load_dispatch_module()
-    assert mod.route_refusal({"status": "output_write_error", "provenance": {"line": "Route: x"}}, "codex") is None
-    assert mod.route_refusal({"status": "ok"}, "codex") is None
-    assert mod.route_refusal({"schema": "fabric.exec-plan.v1", "status": "odd"}, "codex") is None
-    assert mod.route_refusal({"status": "unknown_alias"}, "codex")["status"] == "rejected"
+    assert mod.dispatch_preflight.route_refusal({"status": "output_write_error", "provenance": {"line": "Route: x"}}, "codex") is None
+    assert mod.dispatch_preflight.route_refusal({"status": "ok"}, "codex") is None
+    assert mod.dispatch_preflight.route_refusal({"schema": "fabric.exec-plan.v1", "status": "odd"}, "codex") is None
+    assert mod.dispatch_preflight.route_refusal({"status": "unknown_alias"}, "codex")["status"] == "rejected"
 
 
 def _run_fake_codex(tmp_path: Path, name: str, body: str, extra_env: dict[str, str] | None = None):
@@ -4988,7 +4988,7 @@ def test_remote_writer_preflight_uses_host_signin_and_effective_writer_confineme
                 'provider_family': 'openai', 'execution_intent': 'ordinary', 'notes': []}), '')
         return original_run(command, **kwargs)
     monkeypatch.setattr(module.subprocess, 'run', process)
-    value = module.preflight_tasks([{'id': 'writer', 'adapter': 'codex', 'model': 'gpt-6.1-sol',
+    value = module.dispatch_preflight.preflight_tasks([{'id': 'writer', 'adapter': 'codex', 'model': 'gpt-6.1-sol',
         'access_mode': 'worktree_write', 'worktree': str(worktree), 'sandbox': sandbox, 'prompt': 'fixture only'}], repo)
     assert (value.get('error') or value['status']) == expected, value
 
@@ -5048,13 +5048,13 @@ def test_preflight_types_an_opencode_below_v2_as_unsupported_cli_version(monkeyp
     monkeypatch.setenv("AGENT_FABRIC_PRODUCT_ROOT", str(ROOT))
     monkeypatch.setenv("AGENT_FABRIC_INSTANCE_ROOT", str(tmp_path / ".agents"))
     monkeypatch.setenv("PROVENANT_REMOTE_LANE", "1")
-    monkeypatch.setattr(module, "_fabric_hosts_owner", lambda: SimpleNamespace(
+    monkeypatch.setattr(module.dispatch_preflight, "_fabric_hosts_owner", lambda: SimpleNamespace(
         adapter_doctor=lambda *_: {"signin": {"status": "ok"}}))
     monkeypatch.setattr(module.provider_exec, "_opencode_version_error",
                         lambda *_: "OpenCode 1.14.2 is unsupported; fix: upgrade OpenCode to v2")
     task = {"id": "old", "adapter": "opencode", "model": "opencode/deepseek-v4.1-flash-free", "prompt": "hello"}
 
-    result = module.preflight_tasks([task], tmp_path)
+    result = module.dispatch_preflight.preflight_tasks([task], tmp_path)
 
     assert result["status"] == "rejected"
     assert result["error"] == "unsupported_cli_version"
@@ -6445,7 +6445,7 @@ def call(verb,cwd,request):
     pathlib.Path({str(request_path)!r}).write_text(json.dumps(captured))
     return {{'runs':[{remote!r}]}}
 owner = SimpleNamespace(config=SimpleNamespace(peers={{'peer':{{}}}}), config_error=None, client_call=call)
-dispatch._fabric_hosts_owner = lambda: SimpleNamespace(lane_owner=lambda:owner, HostError=ValueError)
+dispatch.dispatch_preflight._fabric_hosts_owner = lambda: SimpleNamespace(lane_owner=lambda:owner, HostError=ValueError)
 raise SystemExit(dispatch.dispatch(dispatch.parser().parse_args()))
 ''')
     result = subprocess.run([sys.executable, str(wrapper), '--run-dir', str(child_dir), '--adapter', 'codex',
@@ -6466,7 +6466,7 @@ raise SystemExit(dispatch.dispatch(dispatch.parser().parse_args()))
     # Fabric owners carry this flag to avoid redispatching their own launch.
     # Their terminal child lookup must still reach the owning peer.
     monkeypatch.setenv('PROVENANT_HOST_LOCAL_ONLY', '1')
-    monkeypatch.setattr(mod, '_fabric_hosts_owner', lambda: SimpleNamespace(lane_owner=lambda: owner))
+    monkeypatch.setattr(mod.dispatch_preflight, '_fabric_hosts_owner', lambda: SimpleNamespace(lane_owner=lambda: owner))
     args = dispatch_args(task_id='writer')
     legacy = {'started_at': timestamp(), 'finished_at': timestamp(),
               'outcome': 'ok', 'status': 'ok', 'result': 'result.md',
@@ -6485,7 +6485,7 @@ def test_peer_placement_request_carries_delivery_run_id(tmp_path, monkeypatch, c
     owner = SimpleNamespace(config=SimpleNamespace(peers={'peer': {}}), config_error=None,
                             client_call=lambda _op, _cwd, request: seen.append(request) or {'status': 'ok', 'local': False})
     monkeypatch.delenv('PROVENANT_HOST_LOCAL_ONLY', raising=False)
-    monkeypatch.setattr(mod, '_fabric_hosts_owner', lambda: SimpleNamespace(lane_owner=lambda: owner, HostError=ValueError))
+    monkeypatch.setattr(mod.dispatch_preflight, '_fabric_hosts_owner', lambda: SimpleNamespace(lane_owner=lambda: owner, HostError=ValueError))
     monkeypatch.setattr(mod.run_lineage, 'register_external', lambda _result: None)
     monkeypatch.chdir(tmp_path)
     args = mod.parser().parse_args([
@@ -7120,3 +7120,134 @@ def test_terminal_receipt_persists_model_check_and_changes(tmp_path, check):
     if check == "invalid":
         assert saved["model_check"] == "invalid"
         assert saved["model_check_detail"] == "listing evidence"
+
+
+def _packet_metadata():
+    return {
+        "schema_version": 1, "record_type": "provenant-git-evidence",
+        "repository": "/fixture", "git_root": "/fixture", "head": "a" * 40,
+        "diff_base": "b" * 40, "working_tree": "clean", "diff_from": "HEAD",
+        "paths": [], "encoding": "utf-8-replacement",
+    }
+
+
+_PACKET_HEADER_MUTATIONS = [
+    ("schema_version", 2), ("record_type", "other"), ("repository", None),
+    ("git_root", None), ("head", None), ("head", "A" * 40),
+    ("head", "a" * 39), ("head", "a" * 65), ("diff_base", None),
+    ("diff_base", "G" * 40), ("diff_base", "b" * 39), ("diff_base", "b" * 65),
+    ("working_tree", "unknown"), ("working_tree", []), ("diff_from", None), ("diff_from", ""),
+    ("paths", None), ("paths", [1]), ("encoding", "utf-8"),
+]
+
+
+def _packet_bytes(case):
+    metadata = _packet_metadata()
+    body = b"--- status ---\n--- diff ---\n"
+    if case == "empty": return b""
+    if case == "no-newline": return json.dumps(metadata).encode()
+    if case == "oversize-no-newline": return b"x" * (65536 + 1)
+    if case == "oversize-newline": return b"x" * (65536 + 1) + b"\n" + body
+    if case == "bad-json": return b"{\n" + body
+    if case == "bad-utf8": return b"\xff\n" + body
+    if case == "null": return b"null\n" + body
+    if case == "non-object": return b"[]\n" + body
+    if case == "missing-key": del metadata["head"]
+    if case == "extra-key": metadata["extra"] = True
+    if case == "wrong-status": body = b"--- wrong ----\n--- diff ---\n"
+    if case == "short-status": body = b"--- status"
+    if case == "no-body": body = b""
+    if case == "missing-diff": body = b"--- status ---\nno diff\n"
+    if case == "late-diff": body = b"--- status ---\n" + b"x" * 100 + b"\n--- diff ---\n" + b"x" * 100
+    if case == "header-at-limit":
+        header = json.dumps(metadata).encode()
+        return header + b" " * (65536 - len(header)) + b"\n" + body
+    return json.dumps(metadata).encode() + b"\n" + body
+
+
+@pytest.mark.parametrize("field,value", _PACKET_HEADER_MUTATIONS)
+def test_git_evidence_copy_rejects_each_header_field(tmp_path, field, value):
+    module = load_dispatch_module()
+    metadata = _packet_metadata()
+    metadata[field] = value
+    source, destination = tmp_path / "source", tmp_path / "destination"
+    source.write_bytes(json.dumps(metadata).encode() + b"\n--- status ---\n--- diff ---\n")
+    with pytest.raises(module.run_records.AttemptEvidenceError) as error:
+        module._copy_git_evidence(tmp_path, tmp_path, source, destination)
+    assert str(error.value) == "Git evidence packet header is invalid"
+    assert not destination.exists()
+
+
+@pytest.mark.parametrize("case,message", [
+    ("empty", "has no JSON header"), ("no-newline", "has no JSON header"),
+    ("oversize-no-newline", "header exceeds its 64 KiB limit"),
+    ("oversize-newline", "header exceeds its 64 KiB limit"),
+    ("bad-json", "has an invalid JSON header"), ("bad-utf8", "has an invalid JSON header"),
+    ("null", "header is invalid"), ("non-object", "header is invalid"),
+    ("missing-key", "header is invalid"), ("extra-key", "header is invalid"),
+    ("wrong-status", "is missing its status section"),
+    ("short-status", "is missing its status section"), ("no-body", "is missing its status section"),
+    ("missing-diff", "is missing its diff section"),
+])
+def test_git_evidence_copy_rejection_messages_and_cleanup(tmp_path, case, message):
+    module = load_dispatch_module()
+    source, destination = tmp_path / "source", tmp_path / "destination"
+    source.write_bytes(_packet_bytes(case))
+    with pytest.raises(module.run_records.AttemptEvidenceError) as error:
+        module._copy_git_evidence(tmp_path, tmp_path, source, destination)
+    assert str(error.value) == "Git evidence packet " + message
+    assert not destination.exists()
+
+
+@pytest.mark.parametrize("case,chunk_size", [("late-diff", 1), ("late-diff", 7), ("late-diff", 64), ("header-at-limit", 1048576)])
+def test_git_evidence_copy_stream_boundaries(tmp_path, monkeypatch, case, chunk_size):
+    module = load_dispatch_module()
+    source, destination = tmp_path / "source", tmp_path / "destination"
+    payload = _packet_bytes(case)
+    source.write_bytes(payload)
+    read = module.os.read
+    monkeypatch.setattr(module.os, "read", lambda fd, size: read(fd, min(size, chunk_size)))
+    metadata, digest = module._copy_git_evidence(tmp_path, tmp_path, source, destination)
+    assert metadata == _packet_metadata()
+    assert digest == "sha256:" + hashlib.sha256(payload).hexdigest()
+    assert destination.read_bytes() == payload
+
+
+@pytest.mark.parametrize("outside", ["source", "destination"])
+def test_git_evidence_copy_rejects_paths_outside_run(tmp_path, outside):
+    module = load_dispatch_module()
+    root = tmp_path / "run"
+    root.mkdir()
+    source = (tmp_path if outside == "source" else root) / "source"
+    destination = (tmp_path if outside == "destination" else root) / "destination"
+    source.write_bytes(_packet_bytes("late-diff"))
+    with pytest.raises(module.run_records.AttemptEvidenceError) as error:
+        module._copy_git_evidence(tmp_path, root, source, destination)
+    assert str(error.value) == "Git evidence must be materialised inside the run directory"
+    assert not destination.exists()
+
+
+@pytest.mark.parametrize("target", ["source", "destination"])
+def test_git_evidence_copy_containment_errors_preserve_message(tmp_path, monkeypatch, target):
+    module = load_dispatch_module()
+    source, destination = tmp_path / "source", tmp_path / "destination"
+    source.write_bytes(_packet_bytes("late-diff"))
+    open_regular = module.open_contained_regular
+    def refuse(root, relative, flags, **kwargs):
+        if relative == Path(target):
+            raise module.OwnedLinkError("fixture containment rejection")
+        return open_regular(root, relative, flags, **kwargs)
+    monkeypatch.setattr(module, "open_contained_regular", refuse)
+    with pytest.raises(module.run_records.AttemptEvidenceError) as error:
+        module._copy_git_evidence(tmp_path, tmp_path, source, destination)
+    assert str(error.value) == "fixture containment rejection"
+    assert not destination.exists()
+
+
+def test_git_evidence_copy_invalid_metadata_precedes_status(tmp_path):
+    module = load_dispatch_module()
+    source, destination = tmp_path / "source", tmp_path / "destination"
+    source.write_bytes(b"[]\n--- wrong ----\n")
+    with pytest.raises(module.run_records.AttemptEvidenceError) as error:
+        module._copy_git_evidence(tmp_path, tmp_path, source, destination)
+    assert str(error.value) == "Git evidence packet header is invalid"

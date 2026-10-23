@@ -365,7 +365,7 @@ class LaneFederation:
             if not path.is_absolute():
                 path = Path(cwd or Path.cwd()) / path
             path = path.parent.resolve() / path.name
-            owner = self.h._load_module('provenant_lane_prompt_reader', self.h.PRODUCT_ROOT / 'skills/orchestrate/scripts/dispatch_run.py')
+            owner = self.h._load_module('provenant_lane_prompt_reader', self.h.PRODUCT_ROOT / 'skills/orchestrate/scripts/dispatch_preflight.py')
             try:
                 raw = owner.read_prompt_input(path, Path(cwd or Path.cwd()).resolve(), Path(cwd or Path.cwd()).resolve(),
                     read_roots=(path.parent,), max_bytes=self.h.MAX_REQUEST_BYTES)
