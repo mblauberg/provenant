@@ -2421,3 +2421,28 @@ def test_check_reports_an_unreadable_legacy_agy_receipt_and_still_lists_links(tm
     assert result.returncode == 1
     assert "legacy agy skill stale=dangling-skill (dangling)" in result.stdout
     assert "legacy agy skill stale=.agent-harness-installation.json (unreadable receipt)" in result.stdout
+
+
+def test_installs_optional_utility_output_hook_and_removes_only_its_entry(tmp_path):
+    config = tmp_path / 'claude-config'
+    config.mkdir()
+    settings = config / 'settings.json'
+    foreign = {'matcher': 'Read', 'hooks': [{'type': 'command', 'command': 'keep'}]}
+    settings.write_text(json.dumps({'hooks': {'PostToolUse': [foreign]}, 'user': 'preserved'}))
+    result = run('claude', tmp_path, '--utility-output-hooks', CLAUDE_CONFIG_DIR=str(config))
+    assert result.returncode == 0, result.stderr
+    data = json.loads(settings.read_text())
+    assert data['user'] == 'preserved'
+    assert data['hooks']['PostToolUse'][0] == foreign
+    assert data['hooks']['PostToolUse'][1]['matcher'] == 'Bash'
+    assert 'utility_output_hook.py' in data['hooks']['PostToolUse'][1]['hooks'][0]['command']
+    result = run('claude', tmp_path, '--no-utility-output-hooks', CLAUDE_CONFIG_DIR=str(config))
+    assert result.returncode == 0, result.stderr
+    assert json.loads(settings.read_text()) == {'hooks': {'PostToolUse': [foreign]}, 'user': 'preserved'}
+
+
+@pytest.mark.parametrize('flag', ['--utility-output-hooks', '--no-utility-output-hooks'])
+def test_check_mode_rejects_utility_hook_changes(tmp_path, flag):
+    result = run('', tmp_path, '--check-legacy-skills', flag)
+    assert result.returncode == 2
+    assert 'usage: install-harness' in result.stderr

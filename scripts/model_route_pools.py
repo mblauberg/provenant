@@ -82,7 +82,7 @@ def merge_route(base: list[Any], overlay: list[Any], path: str, drift: list[str]
 # Names the tiers had before they became junior, senior and principal. None is accepted any more.
 RENAMED_TIERS = {"scout": "junior", "bulk": "junior", "workhorse": "senior", "strong": "senior",
                  "review": "senior", "flagship": "principal"}
-TIER_ROUTES = ("junior", "senior", "principal")
+TIER_ROUTES = ("utility", "junior", "senior", "principal")
 
 
 class RenamedNameError(ValueError):
@@ -385,6 +385,8 @@ def pool(router: Any, catalog: dict[str, Any], name: str, effort_order: dict[str
     for raw in catalog.get("routes", {}).get(name, []):
         if not entry_is_valid(raw, effort_order):
             continue
+        if "confidential" in raw and type(raw["confidential"]) is not bool:
+            raise PoolError("confidential_invalid", f"{name} pool confidential must be a boolean")
         adapter, model = split_model(router, catalog, raw["model"])
         key = f"{adapter}/{model}"
         combined[key] = {**raw, **combined[key]} if key in combined else dict(raw)
@@ -393,6 +395,7 @@ def pool(router: Any, catalog: dict[str, Any], name: str, effort_order: dict[str
         adapter, model = key.split("/", 1)
         entries.append({
             "key": key, "adapter": adapter, "model": model,
+            "confidential": raw.get("confidential", True),
             "weight": weight_value(raw.get("weight")), "weight_label": raw.get("weight", DEFAULT_WEIGHT),
             "effort": effort_band(raw["effort"], effort_order) if "effort" in raw else None,
             "family": spread_family(router, catalog, model),
@@ -483,7 +486,12 @@ def pick(router: Any, catalog: dict[str, Any], request: dict[str, Any], *,
     # The caller's own adapter (Claude Code: claude, Codex: codex) runs as native subagents, not through Fabric.
     native = request.get("native") if isinstance(request.get("native"), str) else None
     models = request.get("models")
+    if "confidential" in request and type(request["confidential"]) is not bool:
+        raise PoolError("confidential_invalid", "confidential must be a boolean")
     confidential = request.get("confidential") is True
+    if "allow_free" in request and type(request["allow_free"]) is not bool:
+        raise PoolError("allow_free_invalid", "allow_free must be a boolean")
+    allow_free = request.get("allow_free", True)
     requested_effort = request.get("effort") or None
     if isinstance(requested_effort, str) and requested_effort.strip().casefold() == "max":
         raise PoolError("effort_invalid", "effort 'max' was retired; fix: use xhigh")
@@ -526,6 +534,13 @@ def pick(router: Any, catalog: dict[str, Any], request: dict[str, Any], *,
         if not request.get("route"):
             raise PoolError("route_required", ROUTE_REQUIRED.format(routes=", ".join(catalog.get("routes", {}))))
         label = route_name(catalog, str(request["route"]))
+        defaults = catalog.get("route_defaults", {}).get(label, {})
+        if "confidential" in defaults and type(defaults["confidential"]) is not bool:
+            raise PoolError("confidential_invalid", f"{label} default confidential must be a boolean")
+        if "allow_free" in defaults and type(defaults["allow_free"]) is not bool:
+            raise PoolError("allow_free_invalid", f"{label} default allow_free must be a boolean")
+        confidential = request.get("confidential", defaults.get("confidential", label == "utility"))
+        allow_free = request.get("allow_free", defaults.get("allow_free", label != "utility"))
         entries = pool(router, catalog, label, effort_order)
         rotate = request.get("rotate")
         if rotate is None:
@@ -546,6 +561,10 @@ def pick(router: Any, catalog: dict[str, Any], request: dict[str, Any], *,
         why = availability.reason(entry["adapter"], entry["model"], entry["weight"])
         if not why and confidential and PRIVATE_UNSAFE_TRAITS.intersection(entry["traits"]):
             why = "trains on prompts; task is confidential"
+        if not why and confidential and entry.get("confidential") is False:
+            why = "public-only pool member; task is confidential"
+        if not why and confidential and not allow_free and "free" in entry["traits"]:
+            why = "free tier; confidential route requires a paid model"
         if why:
             if why != "off":
                 warnings.append(f"skipped {entry['key']}: {why}")
@@ -601,7 +620,7 @@ def pick(router: Any, catalog: dict[str, Any], request: dict[str, Any], *,
         effort = _effort(entry, requested_effort, effort_order, label, warnings)
         picks.append({"adapter": entry["adapter"], "model": entry["model"], "family": entry["family"],
                       **({"effort": effort} if effort else {}), "reason": reason})
-    return {"status": "ok", "route": label, "mode": mode, "picks": picks,
+    return {"status": "ok", "route": label, "mode": mode, "picks": picks, "confidential": confidential,
             "warnings": list(dict.fromkeys(warnings))}
 
 

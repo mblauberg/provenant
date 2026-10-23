@@ -26,7 +26,7 @@ export interface Pick {
   reason: string;
 }
 type PickResult =
-  | { status: "ok"; picks: Pick[]; warnings: string[] }
+  | { status: "ok"; picks: Pick[]; warnings: string[]; route?: string; confidential?: boolean }
   | { status: "rejected"; error: string; fix: string };
 
 export function usesPool(input: RouteInput): boolean {
@@ -170,7 +170,7 @@ export async function expandPools(
       ...(task.rotate === undefined && knobRotate !== undefined ? { rotate: knobRotate } : {}),
       ...(task.adapter === undefined ? {} : { adapter: task.adapter }),
       ...(task.effort === undefined ? {} : { effort: task.effort }),
-      ...(task.confidential === true ? { confidential: true } : {}),
+      ...(task.confidential === undefined ? {} : { confidential: task.confidential }),
       ...(nativeAdapter(identity) === undefined ? {} : { native: nativeAdapter(identity) }),
       project: identity.project,
     } });
@@ -197,6 +197,8 @@ export async function expandPools(
     const { alias: _alias, native_default: _default, ...rest } = withoutPool(task);
     return answer.picks.map((choice, member) => ({
       ...rest,
+      ...(answer.confidential === true ? { confidential: true } : {}),
+      ...(answer.route === "utility" ? { fallback: false } : {}),
       id: members ? `${id}-${member + 1}` : id,
       adapter: choice.adapter,
       model: choice.model,

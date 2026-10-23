@@ -62,7 +62,7 @@ def models(result):
 
 def test_seed_routes_name_registered_models_with_the_tiny_weight_vocabulary():
     CATALOG = SEED
-    assert set(CATALOG["routes"]) == {"principal", "senior", "junior", "design", "writing"}
+    assert set(CATALOG["routes"]) == {"principal", "senior", "junior", "utility", "design", "writing"}
     for name, entries in CATALOG["routes"].items():
         for entry in entries:
             assert entry["weight"] in {"high", "normal", "sparing"}
@@ -436,7 +436,7 @@ def test_routes_prints_each_pool_with_live_availability(tmp_path):
                                text=True, capture_output=True, check=False,
                                env={**env, "PATH": os.environ["PATH"]})
     assert provenant.returncode == 0, provenant.stderr
-    assert set(json.loads(provenant.stdout)["routes"]) >= {"principal", "senior", "junior", "design", "writing"}
+    assert set(json.loads(provenant.stdout)["routes"]) >= {"principal", "senior", "junior", "utility", "design", "writing"}
 
 
 def test_route_line_names_why_the_pool_picked_the_model():
@@ -913,3 +913,58 @@ def test_attempt_scope_is_frozen_before_identity_environment_changes(tmp_path, m
     if adapter == 'claude':
         following = mod.contract_row(args, tmp_path, 2, tmp_path / 'attempt-2', {}, 'now')
         assert following['account'] != running['account']
+
+
+def test_utility_defaults_private_and_never_admits_free_or_training_models(tmp_path):
+    assert 'utility' in SEED['routes']
+    for entry in SEED['routes']['utility']:
+        if entry.get('confidential', True):
+            adapter, model = pools.split_model(router, SEED, entry['model'])
+            traits = pools.model_traits(router, SEED, adapter, model)
+            assert not {'free', 'trains-on-prompts'}.intersection(traits), entry['model']
+    private = pick({'route': 'utility', 'council': 8}, tmp_path, catalog=SEED)
+    assert private['confidential'] is True
+    assert set(models(private)) == {'claude/claude-haiku-5-5'}
+    for member in private['picks']:
+        traits = pools.model_traits(router, SEED, member['adapter'], member['model'])
+        assert not {'free', 'trains-on-prompts'}.intersection(traits)
+        assert member['effort'] == 'low'
+    with pytest.raises(pools.PoolError, match='No available model'):
+        pick({'route': 'digest'}, tmp_path, catalog=SEED, installed=lambda a: a == 'opencode')
+    public = pick({'route': 'classify', 'confidential': False}, tmp_path,
+                  catalog=SEED, installed=lambda a: a == 'opencode')
+    assert public['picks'][0]['adapter'] == 'opencode'
+
+
+def test_utility_rejects_malformed_confidentiality_in_requests_and_defaults(tmp_path):
+    for malformed in ('true', 'false', None, 0):
+        with pytest.raises(pools.PoolError, match='confidential must be a boolean'):
+            pick({'route': 'utility', 'confidential': malformed}, tmp_path, catalog=SEED)
+        catalog = json.loads(json.dumps(SEED))
+        catalog['route_defaults']['utility']['confidential'] = malformed
+        with pytest.raises(pools.PoolError, match='confidential must be a boolean'):
+            pick({'route': 'utility'}, tmp_path, catalog=catalog)
+
+
+def test_utility_stays_private_without_catalogue_defaults(tmp_path):
+    catalog = json.loads(json.dumps(SEED))
+    catalog.pop('route_defaults')
+    private = pick({'route': 'utility', 'council': 8}, tmp_path, catalog=catalog)
+    assert private['confidential'] is True
+    assert set(models(private)) == {'claude/claude-haiku-5-5'}
+
+
+@pytest.mark.parametrize('malformed', ['true', 'false', None, 0, 1])
+@pytest.mark.parametrize('location', ['request', 'default', 'entry'])
+def test_utility_rejects_non_boolean_pool_policy(tmp_path, malformed, location):
+    catalog = json.loads(json.dumps(SEED))
+    request = {'route': 'utility'}
+    if location == 'request':
+        request['allow_free'] = malformed
+    elif location == 'default':
+        catalog['route_defaults']['utility']['allow_free'] = malformed
+    else:
+        catalog['routes']['utility'][0]['confidential'] = malformed
+    field = 'confidential' if location == 'entry' else 'allow_free'
+    with pytest.raises(pools.PoolError, match=field + ' must be a boolean'):
+        pick(request, tmp_path, catalog=catalog)
