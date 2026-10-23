@@ -533,6 +533,17 @@ jobs:
           cache-dependency-glob: uv.lock
       - name: Install locked harness test dependencies
         run: uv sync --locked --only-group test
+      # Port differential tests run the Python/TS oracles and must not skip
+      # in CI (PORTING R9).
+      - name: Set up Node.js workspace
+        uses: $/.github/actions/setup-node-workspace
+      - name: Require port differential oracles
+        run: |
+          {
+            echo "PROVENANT_PORT_DIFF_REQUIRED=1"
+            echo "PROVENANT_PORT_PYTHON=$GITHUB_WORKSPACE/.venv/bin/python"
+            echo "PROVENANT_PORT_NODE=$(command -v node)"
+          } >> "$GITHUB_ENV"
       - name: Check formatting
         working-directory: tools/front-door
         run: cargo fmt --all --check
@@ -541,8 +552,6 @@ jobs:
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - name: Run unit tests
         working-directory: tools/front-door
-        env:
-          PROVENANT_PORT_DIFF_REQUIRED: "1"
         run: cargo test --workspace --locked
       - name: Build release binary
         working-directory: tools/front-door
