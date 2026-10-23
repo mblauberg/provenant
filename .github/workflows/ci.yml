@@ -549,9 +549,23 @@ jobs:
       - name: Lint
         working-directory: tools/front-door
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
-      - name: Run unit tests
+      - name: Install nextest
+        uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2.87.30
+        with:
+          tool: cargo-nextest@0.9.149
+      - name: Run workspace tests
         working-directory: tools/front-door
-        run: cargo test --workspace --locked
+        run: cargo nextest run --profile ci --workspace --locked
+      - name: Run documentation tests
+        working-directory: tools/front-door
+        run: cargo test --doc --workspace --locked
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: rust-nextest-junit
+          path: tools/front-door/target/nextest/ci/junit.xml
+          if-no-files-found: warn
       - name: Build release binary
         working-directory: tools/front-door
         run: |
