@@ -8,7 +8,7 @@ fn unavailable(message: &str) -> Option<Value> {
     assert_ne!(
         std::env::var("PROVENANT_PORT_DIFF_REQUIRED").as_deref(),
         Ok("1"),
-        "required Python oracle unavailable: {message}"
+        "required oracle unavailable: {message}"
     );
     None
 }
@@ -31,8 +31,6 @@ if sys.argv[2]:
     m = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(m)
 "#;
-    let stdout = tempfile::tempfile().unwrap();
-    let stderr = tempfile::tempfile().unwrap();
     let mut command = Command::new(interpreter);
     command
         .env_clear()
@@ -43,15 +41,23 @@ if sys.argv[2]:
         .arg(root)
         .arg(module)
         .args(paths)
-        .stdin(Stdio::null())
+        .stdin(Stdio::null());
+
+    run(command, "Python")
+}
+
+fn run(mut command: Command, name: &str) -> Option<Value> {
+    let stdout = tempfile::tempfile().unwrap();
+    let stderr = tempfile::tempfile().unwrap();
+    command
         .stdout(stdout.try_clone().unwrap())
         .stderr(stderr.try_clone().unwrap());
     let mut child = match command.spawn() {
         Ok(child) => child,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            return unavailable("Python interpreter absent")
+            return unavailable(&format!("{name} interpreter absent"))
         }
-        Err(e) => panic!("cannot launch Python oracle: {e}"),
+        Err(e) => panic!("cannot launch {name} oracle: {e}"),
     };
     let deadline = Instant::now() + Duration::from_secs(30);
     let status = loop {
@@ -65,7 +71,7 @@ if sys.argv[2]:
             while child.try_wait().unwrap().is_none() && Instant::now() < cleanup {
                 std::thread::park_timeout(Duration::from_millis(5));
             }
-            panic!("Python oracle exceeded 30 seconds");
+            panic!("{name} oracle exceeded 30 seconds");
         }
         std::thread::park_timeout(Duration::from_millis(5));
     };
@@ -86,7 +92,7 @@ if sys.argv[2]:
     }
     assert!(
         status.success(),
-        "Python oracle failed: {}",
+        "{name} oracle failed: {}",
         String::from_utf8_lossy(&error)
     );
     Some(serde_json::from_slice(&read(stdout)).unwrap())
@@ -101,4 +107,27 @@ pub(crate) fn python_values(body: &str, input: &Value) -> Option<Value> {
         &format!("values=json.loads(pathlib.Path(sys.argv[3]).read_text())\n{body}"),
         &[&path],
     )
+}
+
+pub(crate) fn node_values(body: &str, input: &Value) -> Option<Value> {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("input.json");
+    std::fs::write(&path, serde_json::to_vec(input).unwrap()).unwrap();
+    let interpreter = std::env::var_os("PROVENANT_PORT_NODE").unwrap_or_else(|| "node".into());
+    let prefix = r#"
+if (Number(process.versions.node.split('.')[0]) < 24) {
+    process.stderr.write('Node 24 or newer required'); process.exit(77);
+}
+const values = JSON.parse(require('node:fs').readFileSync(process.argv[1], 'utf8'));
+"#;
+    let mut command = Command::new(interpreter);
+    command
+        .env_clear()
+        .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+        .env("HOME", "/nonexistent-port-fixture")
+        .env("TZ", "UTC")
+        .args(["--input-type=commonjs", "-e", &format!("{prefix}\n{body}")])
+        .arg(path)
+        .stdin(Stdio::null());
+    run(command, "Node")
 }
