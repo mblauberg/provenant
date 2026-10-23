@@ -1,8 +1,8 @@
 # Rust port rulebook
 
-Version: **1**. Status: proposed. Applies to whole-project port lanes after
-the plan is accepted. Existing accepted ADRs prevail until explicitly amended.
-The [plan](README.md) owns the boundary, phases and pending landing decision.
+Version: **2**. Status: accepted 2026-10-23 with
+[ADR 0028](../../adr/0028-rust-port-dependencies.md). Applies to every port
+lane. The [plan](README.md) owns the boundary, phases and landing method.
 
 ## R1. Version the rules and regenerate their consequences
 
@@ -44,8 +44,8 @@ dependencies and commit one `Cargo.lock`.
 
 The package `provenant` composes `cli` and `fabric-mcp`; it owns install identity
 and process-level setup. Keep `help` and root resolution cheap: they must not
-start Tokio, open SQLite or probe providers. Crate names are proposed targets,
-not scaffolding already present. Source-group placement in the inventory is
+start threads, open SQLite or probe providers. Crates are scaffolded under
+`tools/front-door/crates/`. Source-group placement in the inventory is
 the initial owner; a large module can feed several crates, as `provider_exec`
 does. Extract decisions and typed events to break cycles. Do not copy today's
 cross-module global assignments into Rust or solve a cycle by importing `run`
@@ -101,12 +101,14 @@ owner is ported. Rust checks sidecars before publishing and never silently
 rewrites them. Match existing atomic/no-replace publication, permissions and
 fsync policy through the supervisor's safe OS API.
 
-## R5. Async at network/transport edges; supervisor stays sans-IO
+## R5. Threads at transport edges; supervisor stays sans-IO
 
-Recommend Tokio for MCP transport, bounded HTTP requests and facade waits,
-with explicit cancellation and queue bounds. Keep config parsing, route and
-quota decisions, reducers and record codecs synchronous. Keep SQLite on a
-bounded blocking owner; do not hold a SQLite transaction across an `await`.
+There is no async runtime. The MCP server reads stdin on one thread and runs
+each tool call on a bounded worker thread, so a cancellation notification can
+reach a running call. Facade waits use bounded condition-variable or poll
+loops with explicit deadlines and queue bounds. Keep config parsing, route
+and quota decisions, reducers and record codecs synchronous. One thread owns
+each SQLite connection; never hold a transaction across a wait.
 There is no daemon, global background scheduler or second provider owner.
 
 The supervisor is `step(state, event) -> effects`, using explicit time values
@@ -115,54 +117,45 @@ and typed handles, with no filesystem, clock, process or async access in
 accepts a closed `StopReason`; silence and bookkeeping errors have no such
 conversion. Register child observation before spawn, preserve WNOWAIT identity
 until cleanup and reap last, as the supervisor spec requires. Do not replace
-that custody with a detached Tokio task or `Child::try_wait`.
+that custody with a detached thread or `Child::try_wait`.
 
 Conserve one owner for process lifecycle through S2–S4. Reuse the accepted S2
 implementation and its observer protocol; move observer policy into Rust as
-a later provider unit, validated by recorded adapter transcripts. Cancellation
-of an MCP future must not drop custody, release a writer lease early or kill
+a later provider unit, validated by recorded adapter transcripts. Cancelling
+an MCP tool call must not drop custody, release a writer lease early or kill
 a sibling lane. A parent asks children to cancel through their markers;
 it does not signal them by an inferred PID.
 
-## R6. Proposed direct dependency allowlist
+## R6. Direct dependency allowlist
 
-**User approval to amend ADR 0027 is required before adopting this list.**
-The current front door has no crate dependencies. The proposed supervisor
-spec's `libc` allowance is narrower than this whole-project proposal.
-This rulebook neither edits the ADR nor treats its own proposal as approval.
-Review exact versions, features, licences and transitive lockfile changes
-when approval is given; pin them rather than relying on `latest`.
+[ADR 0028](../../adr/0028-rust-port-dependencies.md) sets the list. Declare
+each crate once in `[workspace.dependencies]` with its pinned version and
+features; member crates use `{ workspace = true }`.
 
-| Dependency | Proposed reason and scope |
+| Dependency | Scope |
 |---|---|
-| `serde`, `serde_json` | Typed records/config/JSON protocol throughout; explicit encoding where bytes matter |
+| `serde` (derive), `serde_json` | Typed records, config and JSON protocols; explicit encoders where bytes matter |
 | `thiserror` | Typed library errors |
-| `anyhow` | Binary-edge diagnostic context only |
-| `rusqlite` | Fabric's existing SQLite model; preserve transactions, WAL, busy timeout, pragmas and migration ordering |
-| `reqwest` | One HTTP client for quota/catalogue/provider probes; explicit timeouts, redirects, proxies and TLS behaviour |
-| `rmcp` | Official MCP Rust SDK for stdio transport; J3 decides compatibility, never SDK defaults |
-| `tokio` | Async edge runtime only, with the minimum features needed by transport/HTTP |
-| `libc` | Supervisor syscall layer only, for process observation, signals, locks and safe publication |
-| `tracing`, `tracing-subscriber` | Structured internal diagnostics with controlled sinks and filters |
-| `sha2` | Existing SHA-256 identity and record digest contracts; no custom cryptographic implementation |
-| `tempfile` (dev only) | Isolated unit/integration fixtures, never a live state directory |
+| `rusqlite` (`bundled`) | Fabric store; preserve transactions, WAL, busy timeout, pragmas and migration order |
+| `sha2` | Existing SHA-256 identity and digest contracts |
+| `regex` | Pattern rules ported from Python `re`; check each pattern for syntax differences |
+| `jiff` | Timestamps, durations and local-time quota schedules |
+| `clap` (derive) | Argument parsing; J1 compares help structurally, machine output byte for byte |
+| `toml_edit` | Reading and editing Codex `config.toml` without reformatting it |
+| `libc` | Supervisor syscall layer only (R7) |
+| `tempfile` (dev only) | Test fixtures, never live state |
 
-Library capability references: [Serde](https://serde.rs/),
-[rusqlite](https://github.com/rusqlite/rusqlite),
-[reqwest](https://docs.rs/reqwest/latest/reqwest/) and
-[rmcp](https://github.com/modelcontextprotocol/rust-sdk). These support the
-selection, not a claim that their defaults match Provenant.
+Written in-house, per the ADR: HTTP through `curl` with headers on stdin; the
+MCP stdio JSON-RPC server; error context at the binary edge; stderr
+diagnostics; random IDs from `getentropy`. There is no async runtime: use
+threads. Provenant's own YAML data moves to JSON; the lane that needs to read
+external YAML proposes a reader under the ADR's criteria.
 
-Start with the existing hand-written front-door parser and explicit parsing
-for ported commands. `clap` is **not initially allowlisted**: add it only by
-rule change if its flag/help/error behaviour can reproduce J1 byte for byte.
-YAML/TOML codecs, regex, date/time and UUID helpers are also not implicitly
-allowed. The first config/codec lane must propose the minimum maintained
-codec set, prove old-input compatibility and amend this rule with approval
-before dispatch; do not hand-roll a general YAML parser to avoid review.
 Any new direct crate, feature expansion or material transitive addition needs
-a rulebook/lockfile review with a reason and affected gates. An addition beyond
-the approved ADR envelope returns to the user. No per-lane dependency shopping.
+a rule change here with a reason and the affected gates. No per-lane
+dependency shopping. When parallel PRs conflict on `Cargo.lock`, take
+`main`'s lockfile and run `cargo metadata --format-version 1 >/dev/null` in
+`tools/front-door` to add your crate's entries back.
 
 ## R7. Unsafe has one address
 

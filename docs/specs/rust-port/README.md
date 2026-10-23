@@ -1,9 +1,10 @@
 # Whole-project Rust port
 
 Status: proposed, 2026-10-23. The user has decided to replace Provenant's
-Python and TypeScript implementation with Rust. This plan proposes the crate
-boundaries and delivery method; it does not approve dependency additions,
-change an external contract or select the still-pending landing method.
+Python and TypeScript implementation with Rust. This plan sets the crate
+boundaries and delivery method; [ADR 0028](../../adr/0028-rust-port-dependencies.md)
+records the landing method and dependency allowlist. It does not change an
+external contract.
 GitHub owns assignments and delivery state. This directory owns port rules,
 the derived work breakdown and compatibility decisions.
 
@@ -119,24 +120,15 @@ Reviews follow `HARNESS.md`; the chair supplies cross-family coverage through
 Fabric. Record only routes actually resolved in receipts. Mechanical mapping
 belongs in deterministic scripts, never repeated model judgement.
 
-## Landing method: recommend continuous PRs to main
+## Landing method: continuous PRs to main
 
-The user's landing decision remains pending. Prefer small continuous PRs:
-first the judges, then inert library crates, then gated command ownership,
-then removal. Main remains usable throughout. Each PR gets its own CI and
-review; S2 can land without months of branch drift; rulebook fixes benefit
-later lanes immediately. Keep old/new selection at command or owner
-boundaries only and bound each dual-implementation trial by a removal date.
-Never run both owners over the same live attempt or SQLite state.
-
-A long-lived `rust` integration branch with one cut-over PR also works.
-Use the same units, review and CI against that branch; regularly merge main
-into it, regenerate the graph and rerun differential gates. Do not rewrite
-history. Before its one PR to main, rebase the *evidence* onto the current
-main contract by rerunning all judges, resolve every divergence, and verify
-the installer and rollback with the exact proposed tree. It reduces temporary
-selection code on main, but concentrates integration, drift and final review
-risk. Its big PR is no substitute for per-unit review evidence.
+Decided 2026-10-23 ([ADR 0028](../../adr/0028-rust-port-dependencies.md)):
+small continuous PRs. First the judges, then inert library crates, then gated
+command ownership, then removal. Main remains usable throughout. Each PR gets
+its own CI and review, and rulebook fixes reach later lanes immediately. Keep
+old/new selection at command or owner boundaries only, and delete the old
+owner as soon as its judges pass on the new one. Never run both owners over
+the same live attempt or SQLite state.
 
 For either method, a lane has one writer per worktree. Parallelise disjoint
 crates after their interfaces are accepted. Crate manifest, workspace lockfile,

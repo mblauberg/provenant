@@ -533,13 +533,13 @@ jobs:
         run: uv sync --locked --only-group test
       - name: Check formatting
         working-directory: tools/front-door
-        run: cargo fmt --check
+        run: cargo fmt --all --check
       - name: Lint
         working-directory: tools/front-door
-        run: cargo clippy --all-targets --locked -- -D warnings
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - name: Run unit tests
         working-directory: tools/front-door
-        run: cargo test --locked
+        run: cargo test --workspace --locked
       - name: Build release binary
         working-directory: tools/front-door
         run: |

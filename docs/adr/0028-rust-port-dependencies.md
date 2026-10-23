@@ -1,0 +1,79 @@
+# ADR 0028 - Port the whole project to Rust with a small crate allowlist
+
+**Status:** Accepted 2026-10-23 (user direction in session)
+
+**Amends:** [ADR 0027](0027-rust-front-door.md), decision 1 ("no crate
+dependencies"). Plan and rulebook: [Whole-project Rust port](../specs/rust-port/README.md),
+[PORTING.md](../specs/rust-port/PORTING.md).
+
+## Context
+
+ADR 0027 kept the front door std-only because it only resolved a root and
+execed an owner. The port moves every Python and TypeScript owner into the
+same Rust workspace, including Fabric's runtime, SQLite store and MCP server.
+Doing that with the standard library alone would mean hand-writing a JSON
+codec, an SQLite binding, a TOML editor, regular expressions, time zones and
+an argument parser. Each is a known source of bugs that mature crates have
+already paid for.
+
+The user asked for staple, modern crates only, and for small or replaceable
+pieces to be written in-house so the dependency set stays lean.
+
+## Decision
+
+1. **Land continuously.** Port units merge to `main` as small PRs. New crates
+   land inert; each command switches owner behind a selector at a command
+   boundary, then the old owner is deleted. There is no long-lived port branch.
+2. **Fabric's TypeScript runtime is in scope.** The end state has no Node
+   runtime; `runtime/fabric` is ported with the rest.
+3. **Direct dependencies are limited to this list.** Versions are pinned in
+   `[workspace.dependencies]` and `Cargo.lock`.
+
+| Crate | Version | Use |
+|---|---|---|
+| `serde` (derive) | 1.0 | Typed records, config and protocol messages |
+| `serde_json` | 1.0 | JSON everywhere; replaces the hand-written `json.rs` |
+| `thiserror` | 2.0 | Typed library errors; compile time only |
+| `rusqlite` (`bundled`) | 0.40 | Fabric store; bundling pins one SQLite version on every Mac and in CI |
+| `sha2` | 0.11 | Source, record and evidence digests; no hand-written cryptography |
+| `regex` | 1.13 | Pattern rules ported from Python's `re` |
+| `jiff` | 0.2 | Timestamps, durations and local-time quota schedules from the system tz database |
+| `clap` (derive) | 4.6 | Argument parsing for every verb; J1 compares help structurally |
+| `toml_edit` | 0.25 | Reading and editing Codex `config.toml` without losing user formatting |
+| `libc` | 0.2 | Supervisor syscall layer only (already allowed by the supervisor spec) |
+| `tempfile` (dev only) | 3 | Test fixtures |
+
+4. **Written in-house instead of adding a crate.**
+   - **HTTP.** Only two HTTPS GETs exist (Claude and Cursor usage). They run
+     `curl` with headers passed on stdin, so tokens never reach argv. This
+     uses the system trust store and proxy settings and avoids a TLS stack.
+     Revisit if HTTP use grows.
+   - **MCP.** Fabric serves one stdio transport. A small JSON-RPC 2.0 server
+     over newline-delimited stdin and stdout replaces the TypeScript SDK; J3's
+     transcripts pin its behaviour. This removes any need for `rmcp`.
+   - **No async runtime.** Without `rmcp` and an HTTP client there is no
+     need for Tokio. Concurrency uses threads.
+   - **Errors at the edge** use `Box<dyn Error>`, not `anyhow`.
+   - **Diagnostics** use a small stderr module, not `tracing`.
+   - **Random identifiers** take 16 bytes from `getentropy` through `libc`,
+     not `uuid` or `getrandom`.
+5. **YAML.** Provenant's own YAML data files move to JSON. Validating GitHub
+   issue forms and skill eval cases needs a YAML reader; `serde_yaml` is
+   unmaintained, so that lane proposes a maintained parser (`saphyr` is the
+   current candidate) or a restricted reader under the same criteria.
+6. **Adding to the list.** A new direct crate, a feature expansion or a
+   material transitive addition needs a PORTING.md rule change with a reason.
+   A crate must be widely used, actively maintained, MIT or Apache-2.0
+   licensed, and not cheaply replaceable in-house. No per-lane additions.
+
+## Consequences
+
+- The install digest must cover every workspace crate, manifest and the
+  lockfile before any library is linked into the binary.
+- `rusqlite`'s bundled build compiles SQLite's C source, which adds about
+  half a minute to a clean build. The cached Cargo target keeps reinstalls
+  fast.
+- `help` and root resolution stay cheap: they must not open SQLite or start
+  threads.
+- Rejected: `reqwest`, `ureq`, `rmcp`, `tokio`, `anyhow`, `tracing`, `uuid`
+  and `serde_yaml`, for the reasons above.
