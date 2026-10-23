@@ -223,12 +223,12 @@ def checkout_status(excluded: tuple[Path, ...] = ()) -> bytes:
 
 
 def runtime_manifest() -> dict[str, str]:
-    return {"python": f"{sys.version_info.major}.{sys.version_info.minor}", "sqlite": ".".join(sqlite3.sqlite_version.split(".")[:2])}
+    return {"python": f"{sys.version_info.major}.{sys.version_info.minor}", "sqlite": sqlite3.sqlite_version.split(".")[0]}
 
 
 def check_manifest() -> None:
     expected = json.loads(MANIFEST.read_text())
-    expected["sqlite"] = ".".join(expected["sqlite"].split(".")[:2])
+    expected["sqlite"] = expected["sqlite"].split(".")[0]
     if expected != runtime_manifest():
         raise ValueError(
             f"golden runtime mismatch: recorded {expected}, current {runtime_manifest()}; "

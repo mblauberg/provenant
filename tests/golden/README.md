@@ -24,7 +24,8 @@ metadata are excluded; worktree `.git` pointer files are included. SQLite
 snapshots contain sorted `sqlite_master` schema SQL and rows ordered by every
 column, rather than `iterdump()` output.
 
-`manifest.json` pins Python and SQLite major.minor for machine cases only. CI
+`manifest.json` pins Python major.minor and the SQLite major for machine cases
+only; schema snapshots store SQL text, which SQLite minor releases leave unchanged. CI
 selects Python 3.12 through uv and invokes the suite with its `.venv/bin/python`; a runtime
 mismatch fails comparisons containing machine cases with a re-record instruction.
 Help-only comparisons and partial recordings do not require that runtime.
