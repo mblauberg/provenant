@@ -117,7 +117,7 @@ mod tests {
         );
         assert_eq!(
             parse_time("2026-01-01T00:00:00").unwrap(),
-            parse_time("2026-01-01Z").unwrap_or(parse_time("2026-01-01").unwrap())
+            parse_time("2026-01-01Z").unwrap()
         );
         assert_eq!(number(&serde_json::json!(true)), None);
     }

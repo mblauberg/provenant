@@ -100,7 +100,7 @@ pub fn parse_time(value: &str) -> crate::Result<jiff::Timestamp> {
             .map(|t| t.timestamp())
             .map_err(|_| crate::Error::Timestamp(value.into()));
     }
-    value
+    value.strip_suffix('Z').unwrap_or(value)
         .parse::<jiff::civil::Date>()
         .ok()
         .and_then(|t| t.at(0, 0, 0, 0).to_zoned(jiff::tz::TimeZone::UTC).ok())
