@@ -38,9 +38,9 @@ layout = provider_exec.layout
 
 def input_path(path: Path, *, workspace: Path | None = None) -> Path:
     path = path.expanduser().resolve()
-    if provider_exec.credential_path(path):
+    if provider_exec.provider_confinement.credential_path(path):
         raise ValueError('credential or protected input path')
-    if any(path.is_relative_to(root) for root in provider_exec.protected_paths(workspace or Path.cwd(), cwd=path.parent)):
+    if any(path.is_relative_to(root) for root in provider_exec.provider_confinement.protected_paths(workspace or Path.cwd(), cwd=path.parent)):
         raise ValueError('input is under a protected path')
     return path
 
