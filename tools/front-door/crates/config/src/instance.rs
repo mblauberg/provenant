@@ -92,6 +92,10 @@ fn path_free(value: &Value, pointer: &str) -> Result<()> {
 }
 
 pub fn validate_desired_state(value: Value) -> Result<DesiredState> {
+    validate_desired_state_inner(value, true)
+}
+
+fn validate_desired_state_inner(value: Value, check_paths: bool) -> Result<DesiredState> {
     let map = value
         .as_object()
         .ok_or_else(|| invalid("desired state must be an object"))?;
@@ -131,7 +135,9 @@ pub fn validate_desired_state(value: Value) -> Result<DesiredState> {
             return Err(invalid(format!("desired state product {field} is invalid")));
         }
     }
-    path_free(&value, "")?;
+    if check_paths {
+        path_free(&value, "")?;
+    }
     serde_json::from_value(value).map_err(|e| invalid(e.to_string()))
 }
 
@@ -156,8 +162,8 @@ pub fn load_desired_state(instance_root: &Path) -> Result<Option<DesiredState>> 
     if !path.exists() {
         return Ok(None);
     }
-    let value = pending::read_json(&path, "desired state is unreadable")?;
-    validate_desired_state(value).map(Some)
+    let bytes = fs::read(&path).map_err(|e| io(&path, e))?;
+    validate_desired_state_bytes(&bytes).map(Some)
 }
 
 pub fn custom_skill_names(instance_root: &Path) -> Result<Vec<std::ffi::OsString>> {
@@ -181,25 +187,37 @@ pub fn default_instance_root(
     environment: &BTreeMap<String, String>,
     home: &Path,
 ) -> Result<PathBuf> {
+    default_instance_root_with_homes(
+        environment,
+        &provenant_core::paths::Homes {
+            current: Some(home.into()),
+            ..Default::default()
+        },
+    )
+}
+
+pub fn default_instance_root_with_homes(
+    environment: &BTreeMap<String, String>,
+    homes: &provenant_core::paths::Homes,
+) -> Result<PathBuf> {
     if let Some(value) = environment
         .get("AGENT_FABRIC_INSTANCE_ROOT")
         .filter(|s| !s.is_empty())
     {
-        let root = if value == "~" {
-            home.to_path_buf()
-        } else if let Some(rest) = value.strip_prefix("~/") {
-            home.join(rest)
-        } else {
-            PathBuf::from(value)
-        };
+        let root = provenant_core::paths::expand_user(Path::new(value), homes)?;
         if !root.is_absolute() {
             return Err(invalid(format!(
-                "AGENT_FABRIC_INSTANCE_ROOT must be an absolute path, not {value:?}"
+                "AGENT_FABRIC_INSTANCE_ROOT must be an absolute path, not {}",
+                provenant_core::py::python_repr(value)
             )));
         }
         return Ok(root);
     }
-    Ok(home.join(".agents"))
+    Ok(homes
+        .current
+        .as_ref()
+        .ok_or(provenant_core::paths::PathError::Home)?
+        .join(".agents"))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -214,7 +232,7 @@ pub enum Action {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProductPointer {
-    pub schema_version: u32,
+    pub schema_version: Value,
     pub product_root: PathBuf,
 }
 
@@ -405,5 +423,160 @@ mod tests {
                 Err(e) => assert_eq!(old, e.to_string()),
             }
         }
+    }
+}
+
+/// Decode before validating so diagnostic traversal retains Python object order.
+pub fn validate_desired_state_bytes(bytes: &[u8]) -> Result<DesiredState> {
+    let document = crate::ordered::decode(
+        bytes,
+        "desired state is unreadable",
+        Path::new(DESIRED_STATE_RELATIVE),
+    )?;
+    let result = validate_desired_state_inner(document.value(), false)?;
+    fn walk(value: &crate::ordered::Json, pointer: &str) -> Result<()> {
+        match value {
+            crate::ordered::Json::Object(items) => {
+                for (k, v) in items {
+                    walk(v, &format!("{pointer}/{k}"))?;
+                }
+            }
+            crate::ordered::Json::Array(items) => {
+                for (i, v) in items.iter().enumerate() {
+                    walk(v, &format!("{pointer}/{i}"))?;
+                }
+            }
+            _ => path_free(&value.value(), pointer)?,
+        }
+        Ok(())
+    }
+    walk(&document, "")?;
+    Ok(result)
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InstallationReport {
+    pub schema_version: Value,
+    pub action: Action,
+    pub mode: InstallMode,
+    pub desired_state: Option<DesiredState>,
+    pub desired_state_state: SeedState,
+    pub product_pointer: Option<ProductPointer>,
+    pub seeded: Vec<SeededFile>,
+    pub custom_skills: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub routing_drift: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub changed: Option<Vec<String>>,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RoutingReport {
+    pub schema_version: Value,
+    pub action: Action,
+    pub routing: RoutingRefresh,
+    pub routing_drift: Vec<String>,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum InstallationResult {
+    State(InstallationReport),
+    Routing(RoutingReport),
+}
+
+/// Cycle boundary: instance seeding owns intent/templates; the managed installer
+/// only consumes these results and never writes the instance's desired state.
+pub struct InstallationRequest<'a> {
+    pub action: Action,
+    pub product_root: &'a Path,
+    pub instance_root: &'a Path,
+    pub write_product_pointer: bool,
+}
+pub trait InstanceOwner {
+    fn execute(&mut self, request: InstallationRequest<'_>) -> Result<InstallationResult>;
+}
+
+#[cfg(test)]
+mod contract_tests {
+    use super::*;
+    #[test]
+    fn byte_validation_reports_first_inserted_path_and_named_homes_expand() {
+        let raw=br#"{"schema_version":1,"contract":"installation-desired-state","mode":"split","product":{"version":"/version","name":"/name"}}"#;
+        assert_eq!(
+            validate_desired_state_bytes(raw).unwrap_err().to_string(),
+            "desired state must stay path-free: /product/version is a absolute path"
+        );
+        let homes = provenant_core::paths::Homes {
+            current: Some("/home/me".into()),
+            named: BTreeMap::from([("other".into(), "/home/other".into())]),
+        };
+        let env = BTreeMap::from([(
+            "AGENT_FABRIC_INSTANCE_ROOT".into(),
+            "~other/instance".into(),
+        )]);
+        assert_eq!(
+            default_instance_root_with_homes(&env, &homes).unwrap(),
+            Path::new("/home/other/instance")
+        );
+    }
+    #[test]
+    fn all_real_execute_result_shapes_roundtrip_without_wrapper_fields() {
+        let dir = tempfile::tempdir().unwrap();
+        let product = dir.path().join("product");
+        let instance = dir.path().join("instance");
+        fs::create_dir_all(product.join("config")).unwrap();
+        fs::create_dir(&instance).unwrap();
+        fs::write(product.join("package.json"), r#"{"version":"1"}"#).unwrap();
+        for relative in SEEDED_FILES {
+            fs::write(
+                product.join(relative),
+                if relative.ends_with(".json") {
+                    "{\"schema_version\":1}"
+                } else {
+                    "agents"
+                },
+            )
+            .unwrap();
+        }
+        let body="import json\nroot=p/'product'; instance=p/'instance'\nout=[]\nfor action in ['show','validate','seed','show','validate','refresh-routing']:\n out.append(m.execute(action,root,instance,write_product_pointer=False))\nprint(json.dumps(out))";
+        let Some(output) =
+            crate::oracle::python("scripts/instance_installation.py", body, dir.path())
+        else {
+            return;
+        };
+        for old in serde_json::from_slice::<Value>(&output)
+            .unwrap()
+            .as_array()
+            .unwrap()
+        {
+            let contract: InstallationResult = serde_json::from_value(old.clone()).unwrap();
+            assert_eq!(&serde_json::to_value(contract).unwrap(), old);
+        }
+    }
+    #[test]
+    fn custom_discovery_matches_hidden_symlinked_and_non_file_markers() {
+        let dir = tempfile::tempdir().unwrap();
+        let custom = dir.path().join(CUSTOM_SKILLS_DIRECTORY);
+        for name in [".hidden", "zeta", "directory-marker"] {
+            fs::create_dir_all(custom.join(name)).unwrap();
+        }
+        fs::write(custom.join(".hidden/SKILL.md"), "hidden").unwrap();
+        fs::write(custom.join("zeta/SKILL.md"), "z").unwrap();
+        fs::create_dir(custom.join("directory-marker/SKILL.md")).unwrap();
+        std::os::unix::fs::symlink(custom.join("zeta"), custom.join("alpha")).unwrap();
+        let Some(output) = crate::oracle::python(
+            "scripts/instance_installation.py",
+            "import json\nprint(json.dumps(m.custom_skill_names(p)))",
+            dir.path(),
+        ) else {
+            return;
+        };
+        assert_eq!(
+            serde_json::from_slice::<Value>(&output).unwrap(),
+            serde_json::json!(custom_skill_names(dir.path())
+                .unwrap()
+                .iter()
+                .map(|s| s.to_str().unwrap())
+                .collect::<Vec<_>>())
+        );
     }
 }
