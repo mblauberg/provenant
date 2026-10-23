@@ -6886,17 +6886,6 @@ print(json.dumps({{"type":"result", "result":"DONE"}}))
     assert automatic['escalation_reason'] is None
     assert automatic['provenance']['fallback_from']['status'] == 'rate_limited'
 
-    spec = importlib.util.spec_from_file_location('telemetry_retry_test', ROOT / 'scripts/telemetry.py')
-    telemetry = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(telemetry)
-    with telemetry.connect() as db:
-        for path in paths:
-            telemetry.ingest_document(db, 'fabric', path)
-        rows = [json.loads(row[0]) for row in db.execute(
-            "SELECT attrs FROM events WHERE kind='lane.attempt' ORDER BY json_extract(attrs,'$.attempt')")]
-    assert rows[1]['escalated_from'].endswith('/dispatch-001/1')
-    assert 'escalated_from' not in rows[2]
-
 
 @pytest.mark.parametrize('checkpoint_error', [None, PermissionError('checkpoint denied'), ValueError('unsafe checkpoint')])
 def test_provider_death_checkpoints_partial_work_before_failure(tmp_path, monkeypatch, checkpoint_error):

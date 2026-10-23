@@ -359,8 +359,14 @@ def reset_text(quota, resets):
     return f"{count} banked reset{'s' if count != 1 else ''}" + (f' ({lead} {day(quota, expiries[0])})' if expiries else '')
 
 
+def table(headers, rows):
+    cells = [[str(cell) for cell in row] for row in rows]
+    widths = [max([len(str(header)), *(len(row[i]) for row in cells)]) for i, header in enumerate(headers)]
+    return [' '.join(str(cell).ljust(width) for cell, width in zip(row, widths)).rstrip()
+            for row in [headers, *cells]]
+
+
 def render(quota, value, verbose=False):
-    table = quota['_telemetry']().report_owner().table
     lines = [f"Provider quota on {value['host']}" + ('' if value['enabled'] else ' (fetching disabled)')]
     rows = []
     for row in value['accounts']:

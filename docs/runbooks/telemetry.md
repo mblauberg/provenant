@@ -1,324 +1,80 @@
 # Telemetry and provider quota
 
-The ledger implements the first ingestion and reporting slice of
-[R4](../specs/harness/operating-model.md#r4-local-telemetry-ledger). It stores
-usage and routing metadata locally, with no message text, prompts, tool
-output or file contents. OTel ingestion stores only allowlisted usage and
-metric fields; prompt, response and tool-content attributes are discarded.
-Ingestion reads provider stores without modifying
-them. Ledger ingestion does not contact providers or fetch prices. The separate quota
-command contacts provider quota services on demand.
+Telemetry reduces supervised terminal attempt records into usage and
+API-equivalent cost estimates. Its accepted contract is the
+[Rust telemetry design](../specs/rust-port/design/telemetry.md).
 
-1. Run `provenant telemetry ingest` to refresh the ledger. Repeated runs are
-   incremental and idempotent. A missing source is `absent`; a parsing or
-   discovery failure is `error` and makes ingest exit 1. Other sources still
-   ingest. Error output excludes source contents.
-2. Run `provenant telemetry sources` (or add `--json`) to inspect each source's
-   path pattern, parser version, last ingest attempt, stored row count and
-   status. Row counts refer to usage rows, except route health and cooldowns,
-   where they refer to observations. Codex quota observations are reported
-   separately by stats.
-3. Run `provenant stats --since 2026-10-21` (or add `--json` or `--detail`) for provider,
-   adapter and model token totals, cache-read share, estimated cost, latest
-   lane status, attempt outcomes, daily provider/account usage, daily limit
-   events, observed Codex quota windows, and JSON delivery records with writer
-   model and review verdicts when recorded. The default output is the summary
-   tables only; per-account rows (last limit events, quota observations) and
-   uncapped tables are behind `--detail`, and `--json` prints the full report.
-   `--since` accepts an ISO date or
-   timestamp, inclusive; dates and daily buckets use UTC. Undated records are
-   included only when no date filter is supplied. `stats`, `retro`, and read-only
-   `changes` refresh all sources first when any source has not been ingested or
-   its last attempt is older than one hour. They then open the ledger read-only.
-   An ingest error or another active ingest is reported on stderr and the
-   available ledger is still reported. SQLite waits briefly for a reader or
-   writer; a second ingest skips immediately while the first holds the ingest
-   lock.
+## Rewrite status
 
-   The outcomes table groups route results by adapter, model, effort, task
-   class and route. Costs are API-equivalent estimates from recorded usage;
-   `$/ok` is blank when any attempt lacks usage or a price, or when the group
-   has no successful lanes.
-4. Run `provenant telemetry changes --sync` to record merged PRs as change
-   markers, then `provenant stats --compare <PR#|rev|date>` for before/after
-   metrics or `provenant retro` for a digest. See
-   [Events, change markers and comparison](#events-change-markers-and-comparison).
+Step 1 supplies the pure `provenant-telemetry` reducer and its typed
+[TOML price asset](../../config/telemetry-prices.toml). It removes the Python
+ledger, transcript and OTel ingestion, sources, delivery-cost joins, changes,
+comparison and retro reports. Collector source and installer support remain
+until state slice 4 (harness cut-over) removes them with the installer flags. Old ledger and collector data
+stay untouched. There is no history import or transition adapter.
 
-Set `PROVENANT_TELEMETRY_AUTO_INGEST_SECONDS` to change the one-hour refresh
-interval for those report commands. It accepts a non-negative number of seconds;
-the default is `3600`. The interval is an environment setting, not a harness
-profile knob. `provenant telemetry ingest` remains available for an immediate
-refresh.
+The command is pending CLI integration:
 
-## Storage and inputs
-
-The versioned SQLite database is
-`$AGENT_FABRIC_STATE_ROOT/telemetry.sqlite3`, defaulting to
-`~/.local/state/agent-harness/fabric/telemetry.sqlite3`. Schema version 4
-migrates versions 1–3 metadata; unknown newer schemas are refused. The
-`events`, `changes`, `quota_series` and `harness_stamps` tables are additive
-and keep version 4, so peers on this version still read the ledger.
-
-| Source | Discovery and cursor |
-|---|---|
-| Fabric | Current workspace plus projects registered in the Fabric `agents` table; shared Git run roots; receipt size and mtime |
-| Route health | `AGENT_FABRIC_ROUTE_HEALTH_PATH`, otherwise the state root's `route-health.json`; size and mtime |
-| Cooldowns | `FABRIC_COOLDOWNS_PATH`, otherwise the state root's `cooldowns.json`; size and mtime |
-| Claude Code | `<identity>/projects/**/*.jsonl` for every Claude identity directory, including subagents; byte offset, file identity and consumed-prefix digest |
-| Codex | `<identity>/sessions/**/rollout-*.jsonl` for every Codex identity directory; byte offset, file identity, consumed-prefix digest and cumulative token counters |
-| OpenCode | `<identity>/opencode.db` (default `~/.local/share/opencode`), opened with SQLite `mode=ro`; assistant turns from `message` and, since OpenCode 2.0.30, `session_message`; an inclusive `time_updated` watermark per table and file identity |
-| OTLP collector | `$AGENT_FABRIC_STATE_ROOT/otel/*.ndjson` when the optional collector ran; byte offset as for JSONL. Feeds events only |
-
-Identity directories are the provider default (`~/.claude`, `~/.codex`) plus
-every `identity_dir` and `aliases` entry under `accounts.<provider>` in the
-telemetry config (see [Provider quota](#provider-quota)). Each native usage row's
-`account` is the label of the directory its file lives in, so usage joins
-quota, cooldowns and receipts on one label. The default directory is `default`
-unless an account claims it. Codex rows use that label, never the provider's
-`creator_account_id`. A file nested in several identity directories belongs to
-the deepest one. A message found in several files, such as a resumed Claude
-session, takes the owner of its first file by path, in ingest and relabelling
-alike. When the configured directories change, the next ingest relabels this
-host's usage rows, Codex observations and `session.start` events together from
-their recorded file paths.
-
-Discovery skips any transcript name that is a symlink or resolves outside its
-identity directory. Ingest then opens each file with `O_NOFOLLOW` and reads it
-only if it is still the regular file, by device and inode, that discovery saw.
-
-The Fabric registry follows its existing `AGENT_FABRIC_STATE_DIRECTORY`
-setting, defaulting to the same state directory. This differs from the
-`AGENT_FABRIC_STATE_ROOT` setting used by route records and telemetry.
-
-Unchanged JSONL files are skipped. Changed files verify the consumed prefix
-before parsing new complete lines; an incomplete final line waits for the next
-run. A detected rewrite reconciles the file's previous usage rows. Claude
-messages deduplicate by `message.id`, retaining the more complete output when
-a later duplicate contains partial usage. Codex cumulative counters become
-per-event deltas; repeated totals contribute no new tokens. OpenCode messages
-upsert by ID, so completion updates do not add another message. A turn that
-OpenCode's 2.0.30 migration copied into `session_message` is read only from
-there, so it keeps one row. A replaced
-OpenCode database resets its cursor and reconciles its previous rows.
-
-An older ledger rebuilds file ownership from its source paths on the next
-ingest. Unassociated historical rows remain until every previous path is
-available and parses successfully; `pending_source_rebuilds` in stats names
-incomplete rebuilds.
-
-## Interpretation and cost
-
-`usage.model` keeps the folded model (`COALESCE(observed, resolved, requested)`).
-`requested_model`, `resolved_model` and `observed_model` preserve the receipt's
-raw provider strings separately. Native Claude and Codex usage records set
-only `observed_model`. Existing ledgers re-read surviving Fabric receipts once;
-pruned receipts keep NULL components and their existing folded model.
-
-Before launch, dispatch checks the resolved slug against a validated cached
-adapter listing and refreshes once on a miss. Unknown slugs are refused with the
-nearest listed IDs. Adapter receipts record `model_check` as `passed`, `invalid`,
-`unavailable` (listing failure), `unsupported` (no listing command) or `skipped`
-(check not attempted or provider-selected model), with a reason in `model_check_detail`.
-Only listing failures warn; unavailable listings permit execution. `model_changes`
-records observed transitions as `from`/`to` pairs, including switches back to the
-requested model. Changes the provider does not report remain unknown.
-
-Token buckets are disjoint: input excludes known cache reads and writes;
-output excludes known reasoning tokens. Missing categories remain unknown.
-For legacy receipts that omit categories, residual input/output can still
-include those unreported categories; `missing_token_fields` identifies the
-incomplete breakdown. Aggregates sum known values and mark fields null when
-all values are unknown. Cache-read share uses read / (input + read + write)
-over rows with complete input categories. `cache_share_rows` reports that coverage;
-rows with unknown categories do not erase the known share.
-
-For an adapter/session with native usage in the requested period, stats uses
-that usage instead of the Fabric receipt's aggregate. Receipt statuses remain
-visible. `receipt_usage_rows_excluded` reports this choice. Limit outcomes in
-route health and cooldowns are deduplicated against matching receipt outcomes,
-then against each other by route, run, status and day. These snapshots retain
-only the events still present at ingest time; the ledger cannot recover older
-observations that vanished before its first ingest.
-
-Nested Fabric attempts retain their `parent` identity in the ledger's
-`parent_run_id`, `parent_task_id` and `parent_attempt` columns. Lane events also
-carry parent and child identities, without copying child error text. Local
-`provenant stats --json` includes `usage_by_parent`, grouped by the exact parent
-attempt. This view uses child receipt usage, including retries, and is separate
-from the native-session deduplication used for overall usage totals.
-
-[telemetry-prices.json](../../config/telemetry-prices.json) owns USD rates per
-million input, cached-input, cache-write and output tokens. Its dated entries cite the local `claude-api` skill references for Anthropic and
-official provider pages for other prices. Token Meter's reviewed catalogue is a
-secondary cross-check. Unverified model prices remain null. Free and subscription
-routes are marked explicitly. Prices are static, standard API-equivalent rates;
-context-dependent, peak-hour and cache-TTL adjustments are not inferred. OpenCode
-route keys retain the upstream namespace, for example
-`opencode/opencode-go/<model>`.
-
-Estimated cost charges each bucket once, using the output rate for reasoning.
-It is labelled `api_equivalent_estimate`, including subscription routes, and
-remains null if a required price or token category is unknown. An incomplete
-aggregate's estimated cost stays null; `missing_cost_rows` gives its coverage.
-OpenCode's reported cost is retained separately from the estimate.
-
-Stats normalises model names against the routing catalogue and keeps raw names
-in `model_raw`. Test and fixture rows are excluded; unattributed rows are listed
-separately. Outcomes group by model, effort, task class and route alias, with
-success rate, retries, error classes, wall-time percentiles and output tokens per
-provider second where recorded. The ingested sources do not currently supply a
-first-token timestamp, so time to first token is unreported. `last_limit_events` reports the latest
-recorded limit and its age per provider, account and host; accounts missing in a
-source remain unattributed. Fabric `ok` records
-execution success, not user acceptance or a passed delivery gate.
-
-`provenant telemetry accepted [--since ISO-DATE] [--json]` reports deliveries
-by risk tier and harness digest (currently null). `--since` filters on the run's
-earliest recorded timestamp, falling back to the `RUN.json` mtime when no
-timestamp is recorded. Folder names and ingest time are not used. A run is accepted when its `RUN.json` has
-`delivery_acceptance` with basis `checks-and-review`, `project-landing` or
-`user`. A run is merged only when the commit on its
-`software_delivery.canonical_artifact_id` artifact matches a
-`changes.merge_commit` row populated by `telemetry changes --sync`; this only
-matches PRs in the product repository because sync covers that checkout only.
-Runs without acceptance stay in the run count and never enter the accepted
-denominator. The ledger stores receipt facts in `deliveries`; `accepted` and
-`merged` are report labels.
-
-The chair passes `delivery_run_id` equal to the delivery's `RUN.json` run_id on
-each dispatch, including reviewers (`provenant fabric dispatch --delivery-run-id ID`).
-Batch tasks inherit the batch-level id unless they supply their own; retries
-keep the id. The dispatcher stamps it into `attempt.json`, and the ledger joins
-lane usage to deliveries on that fact. `cost_usd_lower_bound` sums known priced
-cost across linked attempts, including retries and unaccepted runs;
-`unpriced_rows` counts attempts with unknown cost. `usage_rows` counts linked
-attempts once across host aliases. Cost per accepted divides that total by the
-accepted count, or stays null when none are accepted. `--since` selects deliveries,
-including their lanes that started earlier. Groups with any linked usage report
-`cost_basis: "linked"`; otherwise cost fields stay null with `cost_basis: "unlinked"`.
-
-
-## Events, change markers and comparison
-
-Ingest appends metadata events to the `events` table: `(event_id, host, kind,
-ts, session, run_id, lane, task_id, pr, provider, account, model, harness_rev,
-attrs, source_ref)`. `kind` is a free string, so a new kind needs no migration;
-`EVENT_KINDS` in `scripts/telemetry.py` names the known ones. `source_ref`
-points back to the receipt, snapshot, transcript or collector line
-(`path@offset`). An event's ID derives from fields stored in its own row,
-never the host name: source and session for `session.start`; the receipt's
-resolved path for `lane.attempt`, so projects sharing run ids stay apart;
-provider, account and normalised plan pair for `plan.mismatch`; otherwise
-`source_ref`, time, linked fields and attributes. Collector refs are
-`path@offset#record`, so identical records on one line keep their count.
-Re-ingest therefore adds no duplicate rows, even after a `local_host` rename,
-which leaves earlier rows under their old id for readers to map. Opening a
-ledger from an earlier build re-keys its events once under a write lock,
-keeping the earliest of any duplicates, so concurrent openers cannot race.
-
-| Kind | From |
-|---|---|
-| `lane.attempt` | A terminal Fabric receipt: adapter, effort, attempt, status, error class, task class, route alias, wall time, retry/escalation lineage, `empty_patch`, and profile stamp metadata when known (absent profile means balanced) |
-| `limit.rate_limited`, `limit.usage_limited`, `cooldown` | Route-health and cooldown snapshots |
-| `session.start` | The first ingested usage row of a Claude, Codex or OpenCode session; one event per session, not per message |
-| `plan.mismatch` | Configured `plan` and `plan_detected` disagree; one warning per provider, account and normalised pair, with both values in attrs |
-| `plan.change` | A quota reading whose `plan`, `plan_detected` or `plan_tier` differs from the account's previous reading; attrs hold each `<field>_from` and `<field>_to`. Spelling-only differences and unknown values are not changes |
-| `otel.<event.name>`, `otel.metric` | Collector log records and metric data points |
-
-Re-reading a lane receipt merges its attrs into the existing event, preserving
-other history. `empty_patch` comes from the writer's Git snapshot: true only
-when a clean starting worktree keeps the same HEAD and porcelain after the
-provider returns. Read-only lanes omit it; a dirty start or unreadable Git
-state stays unknown.
-Success with no diff selects successful lane events with
-`json_extract(attrs,'$.empty_patch')=1`; missing values do not count as false.
-
-`retry_of` names the predecessor attempt. A task may also set
-`escalation_reason` to `gate_failed`, `review_blocked`, `capability` or
-`quota_or_limit`, requiring `retry_of`. Only these escalations get
-`escalated_from` in `<run_id>/<task_id>/<n>` form; a plain retry stays a retry.
-Automatic provider fallback retains its separate `fallback_from` provenance.
-
-Lane attrs retain the profile's preset, digest, `risk_tier` and `floored`.
-`harness_stamps` stores full resolved knobs once per digest, with preset and
-first-seen time. A digest without a knobs object creates no stamp row.
-
-Events never hold prompt, output or error text. OTLP `api_request` records keep
-allowlisted usage metrics and metadata. `user_prompt` records keep only
-`prompt_length`; `tool_decision` records keep only `tool_name` and `decision`.
-Metric points keep allowlisted numeric values and metadata. Every other
-attribute, including identity and email attributes, is dropped. Resource
-attributes `provenant.run_id`, `provenant.lane` and `provenant.harness_rev`
-link a record to its lane when the exporter sets them.
-
-`harness_rev` is the installed Provenant revision. Fabric lanes stamp it into
-attempt provenance (`provenance.harness_rev`); older receipts, sessions and
-unlinked OTLP records leave it null. An existing ledger re-reads its receipts
-and snapshots once to backfill events; transcripts are not re-read, because
-session events derive from usage rows already stored.
-
-The future OTel exporter mapping is pinned here while `gen_ai.*` remains a
-Development convention. Keep it in one constant in the exporter module when
-that module exists; the map is documentation only until then.
-
-| Ledger field | OTel export attribute |
-|---|---|
-| `requested_model` | `gen_ai.request.model` |
-| `resolved_model`, `observed_model` | `gen_ai.response.model` (observed preferred); resolved also as `provenant.model.resolved` |
-| `provider` | `gen_ai.provider.name` |
-| `session` | `gen_ai.conversation.id` |
-| input and output tokens | `gen_ai.usage.input_tokens`, `gen_ai.usage.output_tokens` |
-| `review.finding` disposition | `gen_ai.evaluation.result` event (score label = disposition); otherwise `provenant.*` |
-| `empty_patch` | `provenant.empty_patch` |
-| `escalation_reason`, `escalated_from` | `provenant.escalation.reason`, `provenant.escalation.from` |
-| `repair_cycle` | `provenant.repair.cycle` |
-| compaction count | `provenant.session.compactions` |
-| profile preset and digest | `provenant.profile.preset`, `provenant.profile.digest` |
-| `harness_rev` | `provenant.harness_rev` (also used on inbound records) |
-
-```sh
-provenant telemetry accepted [--since ISO-DATE] [--json]
-provenant telemetry changes --sync           # merged PRs via gh, incremental
-provenant telemetry changes --add "switched default reviewer" --at 2026-10-20
-provenant telemetry changes [--since DATE] [--json]
-provenant stats --compare 1050 [--window 7d] [--json]
-provenant retro [--since DATE] [--window 7d] [--json]
+```text
+provenant telemetry stats [--since DATE_OR_RFC3339] [--until DATE_OR_RFC3339] [--detail] [--json]
 ```
 
-`changes --sync` runs `gh pr list --state merged` in the product checkout over
-a merge-time range: the first sweep from 2008, later sweeps from a day before
-the last completed sweep. Search results are not ordered by merge time, so a
-page that reaches the 200-row limit splits its range at the median merge time
-and reads both halves, down to single seconds. A full single second is re-read up to GitHub
-search's 1,000-result cap; if that is full too, the range stays listed as
-incomplete and every `--sync` warns about it. Pending ranges persist in the ledger, so a sweep capped
-at 25 queries, or stopped by a `gh` failure, resumes on the next `--sync`. It
-stores PR number, merge commit, merge time, title and labels; a re-sync
-updates a renamed PR in place. Manual markers record a label and time.
+Until run and CLI integration lands, the old telemetry, stats and retro routes
+point at the retired wrapper. Legacy quota, utility and Fabric peer paths also
+still import the removed telemetry owner. Their owners remove those calls in
+later steps. There is no working replacement command in this first crate step.
 
-`--compare` pivots on a PR's merge time, a merge commit or other revision's
-commit time, or an ISO date, and compares the window before with the window
-after (default 7 days each; the after side stops at now). Metrics come from
-the same row selection as stats: lane success rate, retries per lane, p50
-wall time, cache-read share, known API-equivalent cost per day and limit
-events per day. Each metric's n counts the observations that produce it:
-lanes for success and retries, attempts with a start time for latency, rows
-with every input field for cache share, priced rows for cost and usage rows
-for limits. A metric with n below 10 on either side (`MIN_SAMPLE` in
-`scripts/telemetry_changes.py`) is `inconclusive`, never a win. Cost is also
-`inconclusive` whenever either side has unpriced rows, because those would
-read as free; `cost_coverage` gives the priced share. Otherwise success rate is `within_noise` when the
-difference is within two pooled standard errors, and other metrics when it is
-within 10%; the rest are `improved` or `regressed`.
+## Measurements and estimates
 
-`provenant retro` defaults to the last 7 days: overall lanes and cost, each
-change marker in the period with its compare summary, top error classes by
-attempt, and attention proxies already in the ledger (sessions started, lanes
-awaiting input, and OTLP user prompts, tool decisions and active time when the
-collector ran). Text output of `changes`, `--compare` and `retro` stays under
-4 KB of UTF-8 and says how many lines it omitted; `--json` is the full report.
+Run supplies validated `AttemptFact` values. The reducer selects `finished_at`
+in `[since, until)`, with an optional project scope. CLI will parse dates as
+midnight UTC and require an offset on timestamps. Every selected retry
+contributes usage once; task outcomes use the highest selected attempt number.
+Active attempts come separately from run's `snapshot`.
+
+Usage has five disjoint categories: uncached input, cache read, cache write,
+output excluding reasoning, and reasoning. Missing categories remain unknown.
+Each sum includes its missing count; a measured zero needs no price. Groups use
+exact resolved provider/model/effort/account labels, with missing keys last.
+Detail adds UTC daily account groups. Requested routes and parent references do
+not add usage or supply missing identity.
+
+The price asset contains exact provider/model entries with recorded source
+references and a review date. Rates are integer USD microdollars per million
+tokens. Omitted rates are unknown; zero rates require explicit verification.
+Reasoning uses the reviewed output rate once. There are no model regexes,
+account inference, runtime price fetches or per-user price overlays. State owns
+bundled asset loading; telemetry validates the schema.
+
+Costs use checked integer arithmetic and round half-up once at output. Reports
+include a nullable complete estimate, the known-cost lower bound and the number
+of attempts with missing cost. Subscription routes without prices are unpriced.
+These are API-equivalent standard-rate estimates, not bills; context, peak-hour
+and cache-TTL adjustments are outside the recorded price table.
+
+Coverage is `supervised_terminal_attempts` on the selected host/project/window.
+Unsupervised activity, old-ledger history and other hosts are outside it.
+Missing data never implies zero use. A failed read or reduction produces no
+partial totals. Reduction refuses more than 100,000 selected attempts, 10,000
+combined groups or 1 MiB of retained group keys. CLI will enforce its separate
+1 MiB envelope limit and bounded human output.
+
+## Collector retirement
+
+Source deletion does not uninstall an existing collector or edit harness
+configuration. State and telemetry own the user-authorised two-Mac cut-over in
+[the collector retirement checklist](../specs/rust-port/design/telemetry.md#collector-retirement-at-cut-over).
+The retained legacy install supplies the uninstall helper at that cut-over.
+Preserve all old ledger, transcript and collector data and unrelated user
+configuration.
 
 ## Provider quota
+
+The following is the legacy quota owner's reference during the rewrite. Its
+telemetry imports, state paths and renderer are unavailable after step 1 removes
+the ledger. Quota and execution-route own their replacements; this telemetry
+step does not change account eligibility, probes or cooldown policy. Ledger
+window history and plan-change events are retired.
 
 ```sh
 provenant quota                 # fetches only the accounts that are due
@@ -544,12 +300,12 @@ reports a `spend.balance`, shown when positive, and no banked resets. A reset
 recorded with `provenant quota credit` appears with `source: manual` when the
 provider reports no count.
 
-Successive observations record `natural`, `granted_date_kept`,
-`granted_window_restarted`, `window_moved`, `not_started` or `window_started`
-events in `quota_events`, per provider, account, host and window. These describe
-observed changes, not a presumed billing calendar. Natural rollover compares
-the new provider window start against the previous provider reset. Restarted
-windows must start within five minutes of the observation.
+The legacy quota classifier distinguishes `natural`, `granted_date_kept`,
+`granted_window_restarted`, `window_moved`, `not_started` and `window_started`
+changes. Natural rollover compares the new provider window start against the
+previous provider reset. Restarted windows must start within five minutes of
+the observation. These classification rules remain with quota; their retired
+ledger events provide no history in the Rust rewrite.
 
 ### Display
 
@@ -598,20 +354,7 @@ All of it is additive to `provenant.quota.report.v1`.
               "agy": {"google-<hash>": {"display_name": "Michael"}}}}
 ```
 
-### Quota history and plan prices
-
-Every fetch (not a cached or failed reading) also lands in `quota_series`, one
-row per provider, account, host and window: `observed_at`, `last_seen_at`,
-`source`, `used_percent`, `window_minutes`, `reset_at`, `plan` (configured label,
-else detected), `plan_detected` (Claude `subscriptionType`, Codex `planType`,
-Cursor `membershipType`), `plan_tier` (Claude `rateLimitTier`, which separates
-Max 5x from 20x), `credit_balance` (Codex usage credits drawn after the plan
-allowance) and `reset_credits`. A reading identical to the window's previous
-row only advances that row's `last_seen_at`, so the menu bar's two-minute polling
-adds a row only when something changed. A changed plan field emits
-`plan.change`. A configured plan that disagrees with the detected plan emits
-`plan.mismatch` once per account and normalised pair. No new provider call is
-made for this history.
+### Plan prices and routing advice
 
 Plan prices are user configuration, read at report time and never fetched.
 List them under `plans.<provider>.<plan>` in the same file. `<plan>` matches a
@@ -763,151 +506,14 @@ its SQLite store for authentication, then obtains allowance from the endpoint;
 it does not supply a local token-usage ledger. Cursor usage tokens therefore
 remain receipt-only. Neither missing coverage is represented as zero use.
 
-## Multiple hosts
+## Retained OTLP collector
 
-```sh
-provenant stats --hosts all --since 2026-10-21
-provenant stats --hosts studio peer --json
-```
-
-Host IDs come from the existing `hosts.json` `local_host`, defaulting to the
-hostname's slug as for fabric (see [fabric hosts](fabric-hosts.md)). With no selectors, stats remains local. With no peers,
-`--hosts all` also remains local. SSH uses the existing peer transport and its
-configured deadlines; no daemon, HTTP server or sync service is required.
-
-The versioned read-only `telemetry.stats` peer operation returns aggregates,
-not raw event rows, paths, prompts or credentials. Session aggregates are
-identified by `(host, source, session)` and grouped further by day and model;
-repeated host selectors do not duplicate them. Usage totals merge across hosts;
-route outcomes retain host labels so percentiles are never averaged. Offline,
-old, malformed or unknown peers yield typed `partial` host rows, and the command
-still returns local results successfully. Narrow `--since` if a peer summary
-exceeds the transport's 1 MiB bound. Ingest on a peer before requesting stats;
-the peer read never creates or migrates its ledger.
-
-Quota is account-scoped: a provider fetch on either host includes the account's
-use on both hosts, so quotas need no usage sync. Peer stats includes cached
-quota metadata and selects the freshest observation for each provider/account,
-without adding percentages or importing peer state into local routing. Use the
-same non-secret account label for the same account on each host.
-
-## Storage check
-
-On 2026-10-22, separate disposable SQLite databases with 10,000 synthetic Codex
-usage rows (100 sessions, one transcript ownership path, unique event IDs,
-known token buckets), committed and vacuumed, measured:
-
-| Measure | Before W12 (`5afeeb25`, schema 3) | W12 (schema 4) |
-| --- | ---: | ---: |
-| Whole database bytes | 3,862,528 | 3,932,160 |
-| Bytes per usage row, including indexes and ownership | 386.25 | 393.22 |
-| Usage record payload bytes per row (`dbstat`) | 138 | 142 |
-| `usage_time` index bytes | 286,720 | 286,720 |
-| Usage primary-key index bytes | 520,192 | 520,192 |
-| Ownership primary-key index bytes | 782,336 | 782,336 |
-
-The four added receipt columns cost four payload bytes on rows where they are
-null; empty metadata/event tables also add pages. No usage indexes or rollups
-changed. Ownership and indexes account for much of the footprint. Daily rollups
-could reduce older detail, but would remove per-session evidence needed for
-reconciliation and outcomes. This slice preserves that evidence; it makes no
-size-reduction claim. No live database was opened for this measurement.
-
-## Optional OTLP collector
-
-Transcript and receipt ingestion above remains the baseline. When the
-collector is absent nothing changes. The collector is an opt-in, on-demand
-macOS receiver for OTLP/HTTP JSON that Claude Code and Codex can export to.
-The collector stores what it receives; `provenant telemetry ingest` turns its
-lines into metadata events (see
-[Events, change markers and comparison](#events-change-markers-and-comparison)).
-
-Source: [tools/otlp-collector](../../tools/otlp-collector/otlp-collector.swift),
-Swift with no packages. It listens on `127.0.0.1` only, on port 4318 unless
-`PROVENANT_OTEL_PORT` names another, through launchd socket activation, so it
-costs nothing while idle. It exits after
-`PROVENANT_OTEL_IDLE_MINUTES` (default 10) without a connection and launchd
-starts it again on the next one. Foreground mode for hosts without launchd and
-for tests: `otlp-collector --listen 127.0.0.1:PORT [--idle-seconds N]`.
-
-Enable and disable:
-
-```sh
-scripts/install-harness --platform claude --otel-collector   # builds with swiftc, installs
-scripts/install-harness --uninstall-otel-collector           # removes agent and binary
-```
-
-The installer writes `~/Library/LaunchAgents/com.provenant.otlp-collector.plist`,
-installs `provenant-otlp-collector` beside the `provenant` command and loads the
-agent with `launchctl bootstrap`. `PROVENANT_OTEL_PORT` (an integer from 1 to
-65535, default 4318) sets the listening port in the plist; change it by
-reinstalling. `PROVENANT_OTEL_NO_LAUNCHCTL=1` writes the files without touching
-launchd. Install exits non-zero, with the reason, on a host other than macOS,
-when `swiftc` is missing (install the Xcode command line tools) or when the
-port is invalid. Uninstall works on any host and keeps stored data. The installer never
-edits `~/.claude/settings.json` or `~/.codex/config.toml`; add the exports
-yourself.
-
-Stored data: `POST /v1/{logs,metrics,traces}` with `Content-Type:
-application/json` is validated as JSON and appended, untransformed, as one line
-`{"received_at","signal","body"}` to
-`$AGENT_FABRIC_STATE_ROOT/otel/<signal>-YYYYMMDD.ndjson` (UTC day, mode 0600,
-directory 0700; state root as in `scripts/telemetry.py`). Replies are `200 {}`,
-`415` for protobuf or compressed bodies, `400` for invalid JSON, `413` above
-`PROVENANT_OTEL_MAX_BODY_BYTES` (default 4 MiB) and `411` for chunked bodies.
-Files older than `PROVENANT_OTEL_RETENTION_DAYS` (default 30) are pruned at
-start and when the day changes.
-
-The examples below use the default port; with `PROVENANT_OTEL_PORT` set, use
-that port instead.
-
-Claude Code (environment, for example in a shell profile):
-
-```sh
-export CLAUDE_CODE_ENABLE_TELEMETRY=1
-export OTEL_METRICS_EXPORTER=otlp
-export OTEL_LOGS_EXPORTER=otlp
-export OTEL_EXPORTER_OTLP_PROTOCOL=http/json
-export OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4318
-```
-
-Codex (`~/.codex/config.toml`):
-
-```toml
-[otel]
-log_user_prompt = false
-exporter = { otlp-http = { endpoint = "http://127.0.0.1:4318/v1/logs", protocol = "json" } }
-trace_exporter = "none"
-metrics_exporter = "none"
-```
-
-Privacy defaults: leave `OTEL_LOG_USER_PROMPTS` and `OTEL_LOG_TOOL_DETAILS`
-unset or `0`, and keep Codex `log_user_prompt = false`. Do not enable either.
-
-Verification status: codex-cli 0.159.0 binary strings confirm the `[otel]` keys
-`environment`, `exporter`, `trace_exporter`, `metrics_exporter` and
-`log_user_prompt`, the exporter kinds `none`, `statsig`, `otlp-http` and
-`otlp-grpc`, and the `endpoint`, `protocol` (`binary` or `json`), `headers` and
-`tls` fields. The exact TOML shape above (inline table keyed by exporter kind)
-and whether Codex appends signal paths to `endpoint` were not verified against
-a running Codex; the Codex endpoint is therefore given as the full `/v1/logs`
-URL, and Codex metrics and traces stay off.
-
-Verified on 2026-10-22 (laptop, Claude Code 2.1.306): a throwaway agent under
-the real launchd had no process before the first request, started on it (0.56 s
-for the first load, 72 ms on a later wake, 15 ms warm), exited when idle and
-woke again on the next request, at about 7 MB RSS. The source also compiles with
-Swift 6.1 (workshop). A `claude -p` run with the Claude Code exports above wrote
-logs (`user_prompt`, `api_request`, `assistant_response`, hook and MCP events)
-and metrics (`active_time.total`, `cost.usage`, `session.count`,
-`token.usage`). `api_request` carries model, effort, input, output and cache
-tokens (5-minute and 1-hour writes separately), cost, duration, time to first
-token and request id. Prompt and response text arrived as `<REDACTED>`, with
-lengths only. Every record carries account and user identity attributes,
-including the account email, so the files stay local and private.
-
-Lane linkage (follow-up, not implemented): the dispatcher should set
-`OTEL_RESOURCE_ATTRIBUTES=provenant.run_id=<run>,provenant.lane=<lane>,provenant.account=<account>`
-in each lane's environment so exported events join to Fabric runs. It touches
-the lane process environment in `scripts/fabric_lanes.py` and the adapters, so
-it is left for its own change.
+The legacy [Swift collector](../../tools/otlp-collector/otlp-collector.swift),
+plist template and `scripts/install-otel-collector` remain live through state
+slice 4 (harness cut-over), including split-root installation. The collector
+accepts OTLP/HTTP JSON on loopback, stores NDJSON under the state root's `otel/`
+directory and supports launchd socket activation. Install with
+`scripts/install-harness --platform claude --otel-collector`; uninstall with
+`scripts/install-harness --uninstall-otel-collector`. Uninstall preserves data.
+The Python ingest consumer is retired; collector retention supplies the legacy
+installer and the authorised cut-over checklist, not new report ingestion.

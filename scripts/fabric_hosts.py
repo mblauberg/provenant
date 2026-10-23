@@ -676,18 +676,11 @@ def parse_request(raw):
         raise HostError('invalid_request', 'Verb must be a string')
     lane_verbs = {'dispatch', 'lanes', 'status', 'cancel', 'resume', 'handoff', 'output', 'operation',
                   'git-have', 'git-upload', 'git-result', 'git-download'}
-    if verb not in {'hello', 'doctor', 'telemetry.stats', *lane_verbs}:
+    if verb not in {'hello', 'doctor', *lane_verbs}:
         raise HostError('unknown_verb', 'Unsupported peer verb')
     if verb != 'hello' and request['protocol_version'] != PROTOCOL_VERSION:
         raise HostError('protocol_mismatch', 'Peer protocol version differs')
     params = request.get('params', {})
-    if verb == 'telemetry.stats':
-        fields(params, {'schema_version', 'since'}, {'schema_version'}, 'invalid_request')
-        if type(params['schema_version']) is not int or params['schema_version'] != 1:
-            raise HostError('protocol_mismatch', 'Unsupported telemetry summary schema')
-        if params.get('since') is not None and not isinstance(params['since'], str):
-            raise HostError('invalid_request', 'since must be an ISO date or timestamp')
-        return verb, params
     fields(params, {'project_path', 'input'} if verb in lane_verbs else set() if verb == 'hello' else {'project_path'},
            {'project_path'} if verb in lane_verbs else set(), 'invalid_request')
     return verb, params
@@ -700,7 +693,7 @@ def envelope(result=None, error=None):
 def peer():
     try:
         verb, params = parse_request(sys.stdin.buffer.read(MAX_REQUEST_BYTES + 1))
-        result = hello() if verb == 'hello' else doctor(**params) if verb == 'doctor' else telemetry_summary(params) if verb == 'telemetry.stats' else lane_owner().peer_call(verb, params)
+        result = hello() if verb == 'hello' else doctor(**params) if verb == 'doctor' else lane_owner().peer_call(verb, params)
         response = envelope(result)
     except HostError as exc:
         response = envelope(error=exc)
@@ -709,26 +702,6 @@ def peer():
     print(json.dumps(response, allow_nan=False))
     return 0 if response['ok'] else 1
 
-
-def telemetry_summary(params):
-    telemetry = _load_module('provenant_peer_telemetry', PRODUCT_ROOT / 'scripts/telemetry.py')
-    if params.get('since'):
-        telemetry.since_time(params['since'])
-    path = telemetry.state_root() / 'telemetry.sqlite3'
-    if not path.is_file():
-        raise HostError('telemetry_unavailable', 'Ingest telemetry on this host first')
-    # A peer read never creates, migrates or ingests the remote ledger.
-    try:
-        with telemetry.readonly(path) as db:
-            db.row_factory = telemetry.sqlite3.Row
-            if db.execute('PRAGMA user_version').fetchone()[0] != 4:
-                raise HostError('telemetry_schema_mismatch', 'Upgrade and ingest telemetry on this host')
-            value = telemetry.report_owner().peer_summary(telemetry, db, params.get('since'))
-    except telemetry.sqlite3.Error:
-        raise HostError('telemetry_unavailable', 'The peer ledger could not be read') from None
-    if len(json.dumps(value).encode()) > MAX_RESPONSE_BYTES - 1024:
-        raise HostError('telemetry_too_large', 'Narrow the telemetry period with --since')
-    return value
 
 def lane_owner():
     module = _load_module('provenant_fabric_lanes', PRODUCT_ROOT / 'scripts/fabric_lanes.py')

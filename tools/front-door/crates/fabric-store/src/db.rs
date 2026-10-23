@@ -17,16 +17,19 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     include_str!("migrations/003-claims-landing.sql"),
 ];
 fn schema_version(db: &Connection) -> Result<usize> {
-    let version: i64 = db.pragma_query_value(None, "user_version", |row| row.get(0))?;
+    // One statement reads both values from one snapshot, so a concurrent first
+    // migration cannot show tables without their version.
+    let (version, has_schema): (i64, bool) = db.query_row(
+        "SELECT (SELECT user_version FROM pragma_user_version), \
+         EXISTS(SELECT 1 FROM sqlite_schema)",
+        [],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
     let version = usize::try_from(version)
         .ok()
         .filter(|v| *v <= MIGRATIONS.len())
         .ok_or(Error::SchemaVersion(version))?;
-    if version == 0
-        && db.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_schema)", [], |r| {
-            r.get::<_, bool>(0)
-        })?
-    {
+    if version == 0 && has_schema {
         return Err(Error::UnversionedDatabase);
     }
     Ok(version)

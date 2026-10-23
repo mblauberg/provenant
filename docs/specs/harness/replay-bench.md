@@ -190,7 +190,8 @@ reliability; the two-SE rule is #1056's observational noise filter.
    `telemetry.py` folds them into one column. `empty_patch` is computed from
    the final diff. Attention events are `input_required`,
    `permission_blocked` and escalation-to-user events.
-4. **Cost** is weighted tokens: uncached input + output + reasoning +
+4. Retired: the JSON price-file citation below; [state/CLI integration step 3](../rust-port/design/telemetry.md#tests-and-build-sequence) owns bundled TOML loading.
+   **Cost** is weighted tokens: uncached input + output + reasoning +
    0.1 x cache read + 1.25 x cache write, joined from `usage`. USD from
    `config/telemetry-prices.json` is reported where a rate exists; 1,393 of
    1,414 `ok` Fabric lanes since 2026-09-01 have none, so USD cannot be the
