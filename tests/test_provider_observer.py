@@ -43,6 +43,7 @@ def synthetic_cases():
         return ("out", json.dumps(value))
     done = event(type="result", is_error=False, result="DONE", num_turns=1)
     return [
+        ("copilot-result", "copilot", [done], 1, None),
         ("claude-preamble", "claude", [event(type="result", is_error=False, result="", num_turns=0), done], 1, None),
         ("claude-reopened", "claude", [done, event(type="user", message={"content": "next"}), done], 2, None),
         ("claude-retry", "claude", [event(type="api_retry", error={"message": "rate limit 429"}), done], 1, None),
@@ -90,7 +91,7 @@ def test_transcripts_replay_the_same_semantics(tmp_path, name, adapter, lines, t
         if isinstance(value, list):
             return [normalize(item) for item in value]
         return value
-    if result.get("live_failure", {}).get("reset_at") if result.get("live_failure") else False:
+    if result.get("live_failure") and result["live_failure"].get("reset_at"):
         difference = (datetime.fromisoformat(result["live_failure"]["reset_at"]) -
                       datetime.fromisoformat(expected["live_failure"]["reset_at"])).total_seconds()
         assert abs(difference) < 5
@@ -125,7 +126,8 @@ def test_live_attempt_matches_observer_decisions(tmp_path, name, adapter, lines,
     if stop or result["terminal_event_seen"]:
         code += "import signal; signal.pause()\n"
     module, plan = fixture_plan(tmp_path, adapter, code)
-    record = module.execute(plan, tmp_path / "result.md", env={**os.environ, "PROVENANT_LANE_IMPL": "python"})
+    record = module.execute(plan, tmp_path / "result.md", env={**os.environ, "PROVENANT_LANE_IMPL": "python",
+                                                               "CF_DISPATCH_ENABLE_COPILOT": "1"})
     if stop:
         assert record["status"] == stop
         assert record["evidence"]["termination_source"] == stop

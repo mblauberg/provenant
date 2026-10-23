@@ -99,11 +99,18 @@ class Capture:
     def write(self, data):
         self.total += len(data)
         try:
-            descriptor = os.open(self.path, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW, 0o600)
-            with os.fdopen(descriptor, "ab") as stream:
+            descriptor = os.open(self.path, os.O_RDWR | os.O_CREAT | os.O_NONBLOCK | os.O_NOFOLLOW, 0o600)
+            with os.fdopen(descriptor, "r+b") as stream:
                 if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
                     raise ValueError("lane capture is not a regular file")
-                stream.write(data)
+                limit = provider_observer.MAX_EVENTS_BYTES
+                retained = stream.read(limit) + data
+                if len(retained) > limit:
+                    half = limit // 2
+                    retained = retained[:half] + retained[-(limit - half):]
+                stream.seek(0)
+                stream.write(retained)
+                stream.truncate()
         except OSError as exc:
             self.write_error = exc
 
@@ -119,4 +126,5 @@ class Capture:
             return stream.read(provider_observer.MAX_EVENTS_BYTES).decode(errors="replace")
 
     def close(self):
-        pass
+        if not self.path.exists():
+            self.write(b"")

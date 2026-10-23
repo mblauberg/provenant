@@ -55,3 +55,52 @@ def test_lost_observer_replays_capture_and_ignores_stale_summary(tmp_path):
     assert observer.result()["session_id"] == "fresh"
     assert observer.terminal_text == "DONE"
     assert observer.terminal_at is not None
+
+
+def test_observer_summary_preserves_early_semantics_and_context(tmp_path):
+    plan = {"adapter": "claude", "model": "fixture", "run_dir": str(tmp_path)}
+    observer = supervisor.provider_observer.LiveObserver(plan)
+    observer.feed_stdout((json.dumps({"type": "system", "subtype": "init", "session_id": "retained", "model": "fixture"}) + "\n").encode())
+    observer.feed_stdout((json.dumps({"type": "assistant", "message": {"model": "answered", "content": [{"type": "text", "text": "DONE"}],
+                                                                      "usage": {"input_tokens": 4, "output_tokens": 2}}}) + "\n").encode())
+    observer.feed_stdout((json.dumps({"type": "result", "result": "DONE", "is_error": False}) + "\n").encode())
+    (tmp_path / "observer.json").write_text(json.dumps(observer.result()))
+    (tmp_path / "events.jsonl").write_text("capture no longer has early semantics\n")
+    (tmp_path / "stderr.log").write_text("")
+    restored = lane_exit.settle_observer(plan, exit_record(), tmp_path / "events.jsonl", tmp_path / "stderr.log")
+    assert restored.result() == observer.result()
+
+
+def test_incomplete_summary_cannot_leak_state_into_capture_fallback(tmp_path):
+    plan = {"adapter": "claude", "model": "fixture", "run_dir": str(tmp_path)}
+    (tmp_path / "observer.json").write_text(json.dumps({"session_id": "stale"}))
+    (tmp_path / "events.jsonl").write_text(json.dumps({"type": "result", "result": "DONE", "is_error": False}))
+    (tmp_path / "stderr.log").write_text("")
+    restored = lane_exit.settle_observer(plan, exit_record(), tmp_path / "events.jsonl", tmp_path / "stderr.log")
+    assert "session_id" not in restored.result()
+    assert restored.terminal_text == "DONE"
+
+
+def test_exit_records_are_bounded_and_symlinks_are_refused(tmp_path):
+    record = tmp_path / "exit.json"
+    record.write_text(json.dumps(exit_record()))
+    assert lane_exit.read_json(record)["pid"] == 123
+    with pytest.raises(ValueError):
+        lane_exit.read_json(record, limit=10)
+    link = tmp_path / "linked.json"
+    link.symlink_to(record)
+    with pytest.raises(OSError):
+        lane_exit.read_json(link)
+
+
+def test_settlement_diagnostics_keep_the_capture_byte_limit(tmp_path, monkeypatch):
+    monkeypatch.setattr(supervisor.provider_observer, "MAX_EVENTS_BYTES", 128)
+    path = tmp_path / "stderr.log"
+    path.write_bytes(b"a" * 128)
+    capture = lane_exit.Capture(path)
+    capture.total = 1000
+    capture.write(b"deadline exceeded\n")
+    assert path.stat().st_size == 128
+    assert capture.total == 1018
+    assert capture.text().startswith("a")
+    assert capture.text().endswith("deadline exceeded\n")
