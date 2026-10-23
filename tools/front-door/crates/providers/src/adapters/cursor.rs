@@ -18,10 +18,14 @@ pub fn cursor(plan: &Plan) -> AdapterProfile {
             "enabled".into(),
         ]);
     }
-    if let Some(session) = &plan.resume_session {
+    if let Some(session) = plan
+        .resume_session
+        .as_ref()
+        .filter(|value| !value.is_empty())
+    {
         argv.extend(["--resume".into(), session.clone()]);
     }
-    if let Some(model) = &plan.model {
+    if let Some(model) = plan.model.as_ref().filter(|value| !value.is_empty()) {
         argv.extend(["--model".into(), model.clone()]);
     }
     argv.push(plan.prompt.clone());

@@ -19,10 +19,10 @@ pub fn copilot(plan: &Plan) -> AdapterProfile {
             "--disallow-temp-dir".into(),
         ]);
     }
-    if let Some(model) = &plan.model {
+    if let Some(model) = plan.model.as_ref().filter(|value| !value.is_empty()) {
         argv.extend(["--model".into(), model.clone()]);
     }
-    if let Some(effort) = &plan.effort {
+    if let Some(effort) = plan.effort.as_ref().filter(|value| !value.is_empty()) {
         argv.extend(["--effort".into(), effort.clone()]);
     }
     profile(

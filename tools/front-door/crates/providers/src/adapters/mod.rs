@@ -30,6 +30,7 @@ pub struct Plan {
     pub cwd: String,
     pub add_dirs: Vec<String>,
     pub claude_api_key: bool,
+    pub endpoint_base_url: Option<String>,
     pub context_ceiling: Option<u64>,
 }
 
@@ -112,21 +113,27 @@ mod differential_tests {
         }
         assert!(probe.unwrap().status.success(), "python3 --version failed");
 
-        for mode in [Mode::ReadOnly, Mode::WorktreeWrite] {
+        for (mode, empty_options) in [
+            (Mode::ReadOnly, false),
+            (Mode::WorktreeWrite, false),
+            (Mode::ReadOnly, true),
+            (Mode::WorktreeWrite, true),
+        ] {
             let plan = Plan {
                 mode,
                 prompt: "Compare the fixture exactly.".into(),
                 boundary_prompt: "Use file-reading tools only.".into(),
                 timeout_seconds: 30,
                 agy_sandbox: true,
-                resume_session: Some("session-fixture".into()),
-                model: Some("model-fixture".into()),
-                effort: Some("high".into()),
+                resume_session: Some(if empty_options { "" } else { "session-fixture" }.into()),
+                model: Some(if empty_options { "" } else { "model-fixture" }.into()),
+                effort: Some(if empty_options { "" } else { "high" }.into()),
                 session_id: "session-id-fixture".into(),
                 cwd: "/workspace/fixture".into(),
                 add_dirs: vec!["/shared/fixture".into()],
-                claude_api_key: true,
-                context_ceiling: Some(12_000),
+                claude_api_key: false,
+                endpoint_base_url: Some("https://example.invalid".into()),
+                context_ceiling: Some(if empty_options { 0 } else { 12_000 }),
             };
             let rust_profiles = [
                 ("agy", agy::agy(&plan)),
@@ -137,7 +144,7 @@ mod differential_tests {
             ];
             let mut input = serde_json::to_value(&plan).unwrap();
             input["applied"] = serde_json::json!({"add_dirs": plan.add_dirs});
-            input["route"] = serde_json::json!({"endpoint_base_url": "https://example.invalid"});
+            input["route"] = serde_json::json!({"endpoint_base_url": plan.endpoint_base_url});
             let encoded = serde_json::to_vec(&input).unwrap();
             for (name, profile) in rust_profiles {
                 let mut child = match Command::new("python3")

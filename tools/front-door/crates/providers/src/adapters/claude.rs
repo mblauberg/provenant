@@ -3,7 +3,12 @@ use super::*;
 pub fn claude(plan: &Plan) -> AdapterProfile {
     let mut argv = vec![
         "-p".into(),
-        if plan.claude_api_key {
+        if plan.claude_api_key
+            || plan
+                .endpoint_base_url
+                .as_ref()
+                .is_some_and(|url| !url.is_empty())
+        {
             "--bare"
         } else {
             "--safe-mode"
@@ -17,7 +22,11 @@ pub fn claude(plan: &Plan) -> AdapterProfile {
         "stream-json".into(),
         "--verbose".into(),
     ];
-    if let Some(session) = &plan.resume_session {
+    if let Some(session) = plan
+        .resume_session
+        .as_ref()
+        .filter(|value| !value.is_empty())
+    {
         argv.extend(["--resume".into(), session.clone()]);
     } else {
         argv.extend(["--session-id".into(), plan.session_id.clone()]);
@@ -50,13 +59,13 @@ pub fn claude(plan: &Plan) -> AdapterProfile {
     for directory in &plan.add_dirs {
         argv.extend(["--add-dir".into(), directory.clone()]);
     }
-    if let Some(model) = &plan.model {
+    if let Some(model) = plan.model.as_ref().filter(|value| !value.is_empty()) {
         argv.extend(["--model".into(), model.clone()]);
     }
-    if let Some(effort) = &plan.effort {
+    if let Some(effort) = plan.effort.as_ref().filter(|value| !value.is_empty()) {
         argv.extend(["--effort".into(), effort.clone()]);
     }
-    if let Some(ceiling) = plan.context_ceiling {
+    if let Some(ceiling) = plan.context_ceiling.filter(|value| *value > 0) {
         argv.extend(["--autocompact".into(), ceiling.to_string()]);
     }
     profile(
@@ -91,5 +100,14 @@ mod tests {
         let writer = claude(&plan(Mode::WorktreeWrite));
         assert!(writer.argv.contains(&"acceptEdits".into()));
         assert!(writer.argv.contains(&"/repo".into()));
+    }
+
+    #[test]
+    fn empty_endpoint_does_not_select_api_key_mode() {
+        let mut p = plan(Mode::ReadOnly);
+        p.endpoint_base_url = Some(String::new());
+        let profile = claude(&p);
+        assert!(profile.argv.contains(&"--safe-mode".into()));
+        assert!(!profile.argv.contains(&"--bare".into()));
     }
 }

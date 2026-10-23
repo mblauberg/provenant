@@ -14,13 +14,21 @@ pub fn kiro(plan: &Plan) -> AdapterProfile {
     } else {
         argv.push("--trust-tools=fs_read,grep,glob".into());
     }
-    if let Some(session) = &plan.resume_session {
+    if let Some(session) = plan
+        .resume_session
+        .as_ref()
+        .filter(|value| !value.is_empty())
+    {
         argv.extend(["--resume-id".into(), session.clone()]);
     }
-    if let Some(model) = plan.model.as_ref().filter(|model| model.as_str() != "auto") {
+    if let Some(model) = plan
+        .model
+        .as_ref()
+        .filter(|model| !model.is_empty() && model.as_str() != "auto")
+    {
         argv.extend(["--model".into(), model.clone()]);
     }
-    if let Some(effort) = &plan.effort {
+    if let Some(effort) = plan.effort.as_ref().filter(|value| !value.is_empty()) {
         argv.extend(["--effort".into(), effort.clone()]);
     }
     argv.push(format!("{}\n\n{}", plan.boundary_prompt, plan.prompt));

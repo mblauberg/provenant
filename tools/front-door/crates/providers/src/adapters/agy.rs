@@ -13,13 +13,17 @@ pub fn agy(plan: &Plan) -> AdapterProfile {
     } else if plan.agy_sandbox {
         argv.push("--sandbox".into());
     }
-    if let Some(session) = &plan.resume_session {
+    if let Some(session) = plan
+        .resume_session
+        .as_ref()
+        .filter(|value| !value.is_empty())
+    {
         argv.extend(["--conversation".into(), session.clone()]);
     }
-    if let Some(model) = &plan.model {
+    if let Some(model) = plan.model.as_ref().filter(|value| !value.is_empty()) {
         argv.extend(["--model".into(), model.clone()]);
     }
-    if let Some(effort) = &plan.effort {
+    if let Some(effort) = plan.effort.as_ref().filter(|value| !value.is_empty()) {
         argv.extend(["--effort".into(), effort.clone()]);
     }
     for directory in &plan.add_dirs {
@@ -61,6 +65,7 @@ pub(crate) mod tests {
             cwd: "/repo".into(),
             add_dirs: vec!["/shared".into()],
             claude_api_key: false,
+            endpoint_base_url: None,
             context_ceiling: Some(1000),
         }
     }
