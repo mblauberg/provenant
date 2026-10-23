@@ -1,0 +1,574 @@
+//! Safe descriptor-relative filesystem capabilities for custody and publication.
+//!
+//! An anchor is opened once from a trusted path. Every operation after that uses
+//! its held descriptor and exactly one normal component; renaming the anchor or
+//! replacing an ancestor with a symlink cannot redirect an operation. Callers
+//! retain responsibility for directory ownership and permissions: an attacker
+//! with write access to a held directory can replace entries between syscalls.
+//! No check-then-unlink or conditional-rename atomicity is promised.
+use crate::sys::{errno, fs as os};
+use std::ffi::{OsStr, OsString};
+use std::fs::File;
+use std::io::{self, Read, Seek, SeekFrom, Write};
+use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::MetadataExt;
+use std::path::{Path, PathBuf};
+use thiserror::Error;
+
+#[derive(Debug, Error)]
+pub enum FsError {
+    #[error("expected one normal relative path component: {name:?}")]
+    InvalidComponent { name: OsString },
+    #[error("filesystem {operation} failed for {path:?}")]
+    Io {
+        operation: &'static str,
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+    #[error("symlink or link loop refused for {path:?}")]
+    Symlink {
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+    #[error("entry crossed the anchor device: {path:?}")]
+    CrossDevice { path: PathBuf },
+    #[error("entry changed identity: {name:?}")]
+    RaceRefused { name: OsString },
+    #[error("entry is not a regular file: {name:?}")]
+    NotRegular { name: OsString },
+    #[error("file exceeds byte limit {limit}")]
+    TooLarge { limit: u64 },
+}
+pub type Result<T> = std::result::Result<T, FsError>;
+
+impl FsError {
+    pub fn raw_os_error(&self) -> Option<i32> {
+        match self {
+            Self::Io { source, .. } | Self::Symlink { source, .. } => source.raw_os_error(),
+            Self::CrossDevice { .. } => Some(errno::EXDEV),
+            _ => None,
+        }
+    }
+    pub fn is_not_found(&self) -> bool {
+        self.raw_os_error() == Some(errno::ENOENT)
+    }
+    pub fn is_exists(&self) -> bool {
+        self.raw_os_error() == Some(errno::EEXIST)
+    }
+    pub fn is_symlink(&self) -> bool {
+        matches!(self, Self::Symlink { .. }) || self.is_loop()
+    }
+    pub fn is_loop(&self) -> bool {
+        self.raw_os_error() == Some(errno::ELOOP)
+    }
+    pub fn is_cross_device(&self) -> bool {
+        self.raw_os_error() == Some(errno::EXDEV)
+    }
+    pub fn is_not_directory(&self) -> bool {
+        self.raw_os_error() == Some(errno::ENOTDIR)
+    }
+    pub fn is_unsupported(&self) -> bool {
+        self.raw_os_error().is_some_and(|code| {
+            [
+                errno::EINVAL,
+                errno::ENOTSUP,
+                errno::EOPNOTSUPP,
+                errno::ENOSYS,
+            ]
+            .contains(&code)
+        })
+    }
+}
+/// OS failures retain their original io::Error (including errno and kind).
+/// Inspect FsError before conversion when operation/path context is needed.
+impl From<FsError> for io::Error {
+    fn from(error: FsError) -> Self {
+        match error {
+            FsError::Io { source, .. } | FsError::Symlink { source, .. } => source,
+            FsError::CrossDevice { .. } => Self::from_raw_os_error(errno::EXDEV),
+            error => Self::new(
+                match &error {
+                    FsError::InvalidComponent { .. } => io::ErrorKind::InvalidInput,
+                    FsError::NotRegular { .. } | FsError::TooLarge { .. } => {
+                        io::ErrorKind::InvalidData
+                    }
+                    _ => io::ErrorKind::Other,
+                },
+                error,
+            ),
+        }
+    }
+}
+fn error<'a>(operation: &'static str, path: &'a Path) -> impl FnOnce(io::Error) -> FsError + 'a {
+    move |source| {
+        if source.raw_os_error() == Some(errno::ELOOP) {
+            FsError::Symlink {
+                path: path.into(),
+                source,
+            }
+        } else {
+            FsError::Io {
+                operation,
+                path: path.into(),
+                source,
+            }
+        }
+    }
+}
+fn component(name: &OsStr) -> Result<&OsStr> {
+    let bytes = name.as_bytes();
+    // Check bytes, not Path::components(): that API normalises `a/.` and `a//`.
+    if bytes.is_empty()
+        || bytes == b"."
+        || bytes == b".."
+        || bytes.contains(&b'/')
+        || bytes.contains(&0)
+    {
+        return Err(FsError::InvalidComponent { name: name.into() });
+    }
+    Ok(name)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FileKind {
+    Regular,
+    Directory,
+    Symlink,
+    Other,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Metadata {
+    pub kind: FileKind,
+    pub device: u64,
+    pub inode: u64,
+    pub links: u64,
+    pub size: u64,
+    pub allocated: u64,
+    pub modified_ns: i128,
+    pub uid: u32,
+    pub mode: u32,
+}
+impl Metadata {
+    pub(crate) fn from_std(m: std::fs::Metadata) -> Self {
+        Self {
+            kind: if m.is_file() {
+                FileKind::Regular
+            } else if m.is_dir() {
+                FileKind::Directory
+            } else if m.file_type().is_symlink() {
+                FileKind::Symlink
+            } else {
+                FileKind::Other
+            },
+            device: m.dev(),
+            inode: m.ino(),
+            links: m.nlink(),
+            size: m.size(),
+            allocated: m.blocks().saturating_mul(512),
+            modified_ns: i128::from(m.mtime()) * 1_000_000_000 + i128::from(m.mtime_nsec()),
+            uid: m.uid(),
+            mode: m.mode(),
+        }
+    }
+    pub fn same_identity(&self, other: &Self) -> bool {
+        self.device == other.device && self.inode == other.inode
+    }
+}
+
+/// Destination policy for atomic publication. Neither mode follows final links.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PublishMode {
+    NoReplace,
+    Replace,
+}
+
+/// Owning directory handle. It deliberately implements neither AsRawFd nor Deref.
+#[derive(Debug)]
+pub struct Directory {
+    file: File,
+    device: u64,
+    // Diagnostic only; never used to resolve an operation. Relative to anchor.
+    path: PathBuf,
+}
+impl Directory {
+    /// The initial path is trusted; symlinks in ancestors (e.g. macOS /var) are
+    /// permitted. The final component must be a directory, never a symlink.
+    pub fn open_anchor(path: &Path) -> Result<Self> {
+        Self::from_file(
+            os::open_anchor(path).map_err(error("open anchor", path))?,
+            PathBuf::new(),
+        )
+    }
+    /// Open / or . without resolving a held directory back to a pathname.
+    pub fn root(absolute: bool) -> Result<Self> {
+        Self::open_anchor(Path::new(if absolute { "/" } else { "." }))
+    }
+    fn from_file(file: File, path: PathBuf) -> Result<Self> {
+        let device = file
+            .metadata()
+            .map_err(error("fstat directory", &path))?
+            .dev();
+        Ok(Self { file, device, path })
+    }
+    pub fn metadata(&self) -> Result<Metadata> {
+        self.file
+            .metadata()
+            .map(Metadata::from_std)
+            .map_err(error("fstat directory", &self.path))
+    }
+    /// Stat a single entry. Following a final link requires explicit authority
+    /// from the caller; it does not affect the default no-follow open methods.
+    pub fn metadata_at(&self, name: &OsStr, follow: bool) -> Result<Metadata> {
+        let name = component(name)?;
+        os::metadata_at(&self.file, name, follow).map_err(error("fstatat", &self.path.join(name)))
+    }
+    pub fn open_directory(&self, name: &OsStr) -> Result<Self> {
+        self.open_directory_with_links(name, false)
+    }
+    /// Explicitly permit following the final symlink for callers whose path
+    /// policy authorises it (e.g. the confinement resolver's link expansion).
+    pub fn open_directory_with_links(&self, name: &OsStr, follow: bool) -> Result<Self> {
+        let name = component(name)?;
+        let mut child = Self::from_file(
+            os::open_directory(&self.file, name, follow)
+                .map_err(error("openat directory", &self.path.join(name)))?,
+            self.path.join(name),
+        )?;
+        child.device = self.device;
+        Ok(child)
+    }
+    /// Refuse observed identity differences across stat/open/stat and traversal
+    /// off the original anchor device. This cannot detect ABA replacement or
+    /// prevent entry mutation after the final stat; callers own directory access
+    /// policy. The returned descriptor retains its opened identity after rename.
+    pub fn open_verified_directory(&self, name: &OsStr) -> Result<Self> {
+        let before = self.metadata_at(name, false)?;
+        let child = self.open_directory(name)?;
+        let opened = child.metadata()?;
+        let after = self.metadata_at(name, false)?;
+        verify_directory_identity(
+            self.path.join(name).as_os_str(),
+            before,
+            opened,
+            after,
+            self.device,
+        )?;
+        Ok(child)
+    }
+    pub fn open_read(&self, name: &OsStr) -> Result<FileHandle> {
+        let name = component(name)?;
+        FileHandle::regular(
+            os::open_read(&self.file, name).map_err(error("openat read", &self.path.join(name)))?,
+            &self.path.join(name),
+        )
+    }
+    /// Exclusive create, mode 0600 subject to umask, O_NOFOLLOW | O_CLOEXEC.
+    pub fn create_new(&self, name: &OsStr) -> Result<FileHandle> {
+        let name = component(name)?;
+        FileHandle::regular(
+            os::create_new(&self.file, name)
+                .map_err(error("openat create", &self.path.join(name)))?,
+            &self.path.join(name),
+        )
+    }
+    pub fn mkdir(&self, name: &OsStr, mode: u32) -> Result<()> {
+        let name = component(name)?;
+        os::mkdir(&self.file, name, mode).map_err(error("mkdirat", &self.path.join(name)))
+    }
+    pub fn unlink(&self, name: &OsStr) -> Result<()> {
+        self.remove(name, false)
+    }
+    pub fn rmdir(&self, name: &OsStr) -> Result<()> {
+        self.remove(name, true)
+    }
+    fn remove(&self, name: &OsStr, directory: bool) -> Result<()> {
+        let name = component(name)?;
+        os::unlink(&self.file, name, directory).map_err(error("unlinkat", &self.path.join(name)))
+    }
+    /// Atomic same-filesystem publication; existing destinations are refused.
+    /// This never falls back to a check-then-rename sequence.
+    pub fn rename_noreplace(
+        &self,
+        source: &OsStr,
+        destination_dir: &Self,
+        destination: &OsStr,
+    ) -> Result<()> {
+        self.rename(source, destination_dir, destination, os::Rename::NoReplace)
+    }
+    pub fn exchange(
+        &self,
+        source: &OsStr,
+        destination_dir: &Self,
+        destination: &OsStr,
+    ) -> Result<()> {
+        self.rename(source, destination_dir, destination, os::Rename::Exchange)
+    }
+    pub fn replace(
+        &self,
+        source: &OsStr,
+        destination_dir: &Self,
+        destination: &OsStr,
+    ) -> Result<()> {
+        self.rename(source, destination_dir, destination, os::Rename::Replace)
+    }
+    fn rename(
+        &self,
+        source: &OsStr,
+        destination_dir: &Self,
+        destination: &OsStr,
+        mode: os::Rename,
+    ) -> Result<()> {
+        component(source)?;
+        component(destination)?;
+        os::rename(&self.file, source, &destination_dir.file, destination, mode)
+            .map_err(error("renameat", &destination_dir.path.join(destination)))
+    }
+    pub fn symlink(&self, target: &Path, name: &OsStr) -> Result<()> {
+        let name = component(name)?;
+        os::symlink(target, &self.file, name).map_err(error("symlinkat", &self.path.join(name)))
+    }
+    pub fn sync(&self) -> Result<()> {
+        self.file
+            .sync_all()
+            .map_err(error("fsync directory", &self.path))
+    }
+    pub fn make_writable(&self) -> Result<()> {
+        use std::os::unix::fs::PermissionsExt;
+        let permissions = self
+            .file
+            .metadata()
+            .map_err(error("fstat directory", &self.path))?
+            .permissions();
+        self.file
+            .set_permissions(std::fs::Permissions::from_mode(permissions.mode() | 0o700))
+            .map_err(error("fchmod directory", &self.path))
+    }
+    /// A fresh descriptor stream on each call, independent of prior enumeration.
+    pub fn entries(&self) -> Result<Entries> {
+        os::entries(&self.file)
+            .map(Entries)
+            .map_err(error("opendir", &self.path))
+    }
+    /// Stage mode-0600 bytes in this directory, fsync the file, atomically
+    /// publish, then fsync the directory. A post-rename sync error means the
+    /// entry is visible but durability is unconfirmed. The directory must be
+    /// writable only by trusted actors. Failed staging is cleaned up best-effort;
+    /// a cleanup failure never replaces the original error.
+    pub fn atomic_write(
+        &self,
+        name: &OsStr,
+        prefix: &str,
+        bytes: &[u8],
+        mode: PublishMode,
+    ) -> Result<()> {
+        component(name)?;
+        component(OsStr::new(prefix))?;
+        for _ in 0..128 {
+            let temporary = staging_name(prefix)?;
+            let mut file = match self.create_new(&temporary) {
+                Ok(file) => file,
+                Err(error) if error.is_exists() => continue,
+                Err(error) => return Err(error),
+            };
+            let result = file
+                .write_all(bytes)
+                .map_err(error("write staging file", &self.path.join(&temporary)))
+                .and_then(|()| file.sync());
+            drop(file);
+            let result = result.and_then(|()| match mode {
+                PublishMode::NoReplace => self.rename_noreplace(&temporary, self, name),
+                PublishMode::Replace => self.replace(&temporary, self, name),
+            });
+            return self.finish_publication(&temporary, result);
+        }
+        Err(error("reserve staging file", &self.path.join(name))(
+            io::Error::from_raw_os_error(errno::EEXIST),
+        ))
+    }
+    /// Atomically replace an entry with a staged symlink and fsync the directory.
+    /// Target bytes are stored verbatim; this operation does not follow them.
+    /// The same trusted-directory and post-rename durability rules apply.
+    pub fn replace_link(&self, name: &OsStr, target: &Path) -> Result<()> {
+        component(name)?;
+        for _ in 0..128 {
+            let temporary = staging_name(".workflow.")?;
+            match self.symlink(target, &temporary) {
+                Ok(()) => {}
+                Err(error) if error.is_exists() => continue,
+                Err(error) => return Err(error),
+            }
+            return self.finish_publication(&temporary, self.replace(&temporary, self, name));
+        }
+        Err(error("reserve staging link", &self.path.join(name))(
+            io::Error::from_raw_os_error(errno::EEXIST),
+        ))
+    }
+    fn finish_publication(&self, temporary: &OsStr, result: Result<()>) -> Result<()> {
+        if let Err(error) = result {
+            let _ = self.unlink(temporary);
+            return Err(error);
+        }
+        // A successful rename already consumed temporary. Never unlink its name
+        // after publication: a subsequent creator could now own that entry.
+        self.sync()
+    }
+    pub fn read_bounded(&self, name: &OsStr, limit: u64) -> Result<Vec<u8>> {
+        self.open_read(name)?.read_bounded(limit)
+    }
+}
+
+/// Pure refusal policy over stat/open/stat observations. This grants no handle
+/// authority: the OS adapter must retain the opened descriptor through use.
+pub fn verify_directory_identity(
+    name: &OsStr,
+    before: Metadata,
+    opened: Metadata,
+    after: Metadata,
+    anchor_device: u64,
+) -> Result<()> {
+    if opened.device != anchor_device {
+        return Err(FsError::CrossDevice { path: name.into() });
+    }
+    if before.kind != FileKind::Directory
+        || opened.kind != FileKind::Directory
+        || after.kind != FileKind::Directory
+        || !before.same_identity(&opened)
+        || !opened.same_identity(&after)
+    {
+        return Err(FsError::RaceRefused { name: name.into() });
+    }
+    Ok(())
+}
+
+/// Lazy, owning directory stream. Each item retains the original OS error;
+/// it directly satisfies StorageFs's Iterator<Item = io::Result<OsString>>.
+/// Dropping the anchor does not close this stream's independent descriptor.
+pub struct Entries(os::Entries);
+impl Iterator for Entries {
+    type Item = io::Result<OsString>;
+    fn next(&mut self) -> Option<Self::Item> {
+        self.0.next()
+    }
+}
+
+/// File capability; no raw owning descriptor escapes the supervisor boundary.
+#[derive(Debug)]
+pub struct FileHandle {
+    file: File,
+    path: PathBuf,
+}
+impl FileHandle {
+    fn regular(file: File, path: &Path) -> Result<Self> {
+        if !file
+            .metadata()
+            .map_err(error("fstat file", path))?
+            .is_file()
+        {
+            return Err(FsError::NotRegular {
+                name: path.as_os_str().into(),
+            });
+        }
+        os::clear_nonblocking(&file).map_err(error("clear nonblocking", path))?;
+        Ok(Self {
+            file,
+            path: path.into(),
+        })
+    }
+    /// Trusted initial source path; O_NOFOLLOW applies to its final component.
+    pub fn open_source(path: &Path) -> Result<Self> {
+        Self::regular(
+            os::open_source(path).map_err(error("open source", path))?,
+            path,
+        )
+    }
+    /// Like dup: shared file offset; descriptor remains close-on-exec.
+    pub fn duplicate(&self) -> Result<Self> {
+        self.file
+            .try_clone()
+            .map(|file| Self {
+                file,
+                path: self.path.clone(),
+            })
+            .map_err(error("duplicate file", &self.path))
+    }
+    pub fn metadata(&self) -> Result<Metadata> {
+        self.file
+            .metadata()
+            .map(Metadata::from_std)
+            .map_err(error("fstat file", &self.path))
+    }
+    pub fn sync(&self) -> Result<()> {
+        self.file
+            .sync_all()
+            .map_err(error("fsync file", &self.path))
+    }
+    /// Read at most limit+1 bytes from the current offset, then refuse oversize.
+    /// Metadata alone is never used to enforce the cap (files can grow).
+    pub fn read_bounded(&mut self, limit: u64) -> Result<Vec<u8>> {
+        let mut bytes = Vec::new();
+        (&mut self.file)
+            .take(limit.saturating_add(1))
+            .read_to_end(&mut bytes)
+            .map_err(error("read file", &self.path))?;
+        if bytes.len() as u64 > limit {
+            return Err(FsError::TooLarge { limit });
+        }
+        Ok(bytes)
+    }
+    /// Nonblocking lock acquisition; callers own their bounded retry/deadline.
+    pub fn try_lock(&self) -> Result<bool> {
+        match self.file.try_lock() {
+            Ok(()) => Ok(true),
+            Err(std::fs::TryLockError::WouldBlock) => Ok(false),
+            Err(std::fs::TryLockError::Error(e)) => Err(error("lock file", &self.path)(e)),
+        }
+    }
+    pub fn unlock(&self) -> Result<()> {
+        self.file.unlock().map_err(error("unlock file", &self.path))
+    }
+}
+impl Read for FileHandle {
+    fn read(&mut self, b: &mut [u8]) -> io::Result<usize> {
+        self.file.read(b)
+    }
+}
+impl Write for FileHandle {
+    fn write(&mut self, b: &[u8]) -> io::Result<usize> {
+        self.file.write(b)
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        self.file.flush()
+    }
+}
+impl Seek for FileHandle {
+    fn seek(&mut self, p: SeekFrom) -> io::Result<u64> {
+        self.file.seek(p)
+    }
+}
+
+/// OS entropy, no global counter or clock; callers use exclusive creation too.
+pub fn temporary_name() -> Result<OsString> {
+    let bytes = os::entropy().map_err(error("getentropy", Path::new("<temporary name>")))?;
+    let mut name = String::from(".cf-dispatch-output.");
+    for byte in bytes {
+        name.push_str(&format!("{byte:02x}"));
+    }
+    Ok(name.into())
+}
+
+#[cfg(test)]
+mod tests;
+
+fn staging_name(prefix: &str) -> Result<OsString> {
+    let random = temporary_name()?;
+    let mut name = OsString::from(prefix);
+    name.push(random);
+    name.push(".tmp");
+    component(&name)?;
+    Ok(name)
+}
+
+mod traits;
+pub use traits::{LocalFs, SafeDir, SafeFile, SafeFs};

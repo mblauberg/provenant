@@ -24,6 +24,7 @@ skills/_shared/roots.py#unit-01
 skills/_shared/run_gates.py#unit-01
 skills/_shared/workspace_paths.py#unit-01
 skills/autopilot/scripts/bootstrap-autopilot.py#unit-01
+skills/deliver/scripts/delivery_run_shape.py#unit-01
 skills/orchestrate/scripts/adapters/copilot.py#unit-01
 skills/orchestrate/scripts/adapters/cursor.py#unit-01
 skills/orchestrate/scripts/adapters/opencode.py#unit-01

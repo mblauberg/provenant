@@ -5,6 +5,8 @@
 
 pub mod bounded;
 pub mod capture;
+pub mod fabric_ps;
+pub mod fs;
 pub mod identity;
 mod pending;
 pub mod process_info;
@@ -13,3 +15,4 @@ pub mod ps;
 pub mod sys;
 #[cfg(test)]
 mod test_support;
+pub mod worker_liveness;
