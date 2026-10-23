@@ -234,3 +234,68 @@ pub fn timestamp_seconds(seconds: f64) -> crate::Result<jiff::Timestamp> {
         .and_then(|timestamp| timestamp.to_jiff())
         .map_err(|_| crate::Error::Timestamp(seconds.to_string()))
 }
+
+// port: belongs in provenant-core
+pub(crate) fn python_type_name(value: &Value) -> &'static str {
+    match value {
+        Value::Null => "NoneType",
+        Value::Bool(_) => "bool",
+        Value::Number(number) if number.is_f64() => "float",
+        Value::Number(_) => "int",
+        Value::String(_) => "str",
+        Value::Array(_) => "list",
+        Value::Object(_) => "dict",
+    }
+}
+
+// port: belongs in provenant-core
+pub(crate) fn python_less(left: &Value, right: &Value) -> crate::Result<bool> {
+    let incompatible = || {
+        crate::Error::Invalid(format!(
+            "'<' not supported between instances of '{}' and '{}'",
+            python_type_name(left),
+            python_type_name(right)
+        ))
+    };
+    match (left, right) {
+        (Value::String(left), Value::String(right)) => Ok(left < right),
+        (Value::Bool(_) | Value::Number(_), Value::Bool(_) | Value::Number(_)) => {
+            let number = |value: &Value| -> Option<crate::Numeric> {
+                match value {
+                    Value::Bool(value) => Some(crate::Numeric::from(i32::from(*value))),
+                    Value::Number(value) => Some(crate::Numeric::from(value.clone())),
+                    _ => None,
+                }
+            };
+            number(left)
+                .zip(number(right))
+                .and_then(|(left, right)| left.partial_cmp(&right))
+                .map(|order| order.is_lt())
+                .ok_or_else(incompatible)
+        }
+        (Value::Array(left), Value::Array(right)) => {
+            for (left, right) in left.iter().zip(right) {
+                if crate::pending::python_equal(left, right) {
+                    continue;
+                }
+                return python_less(left, right);
+            }
+            Ok(left.len() < right.len())
+        }
+        _ => Err(incompatible()),
+    }
+}
+
+// port: belongs in provenant-core
+pub(crate) fn python_sort_values(labels: &mut [Value]) -> crate::Result<()> {
+    // Successful values retain Python's stable ordering. Comparison failure
+    // ordering differs from CPython's sort; RP-TEL-SORT-ERROR keeps its caller partial.
+    for index in 1..labels.len() {
+        let mut current = index;
+        while current > 0 && python_less(&labels[current], &labels[current - 1])? {
+            labels.swap(current, current - 1);
+            current -= 1;
+        }
+    }
+    Ok(())
+}

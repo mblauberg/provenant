@@ -1,5 +1,8 @@
 //! Change comparison policy, independent of GitHub transport and ledger queries.
-use crate::{Error, Result};
+use crate::{
+    pending::{python_sort_values, python_type_name},
+    Error, Result,
+};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -1262,68 +1265,6 @@ fn date_error(value: &str, what: &str) -> ChangeError {
     ))
 }
 
-fn python_type(value: &Value) -> &'static str {
-    match value {
-        Value::Null => "NoneType",
-        Value::Bool(_) => "bool",
-        Value::Number(number) if number.is_f64() => "float",
-        Value::Number(_) => "int",
-        Value::String(_) => "str",
-        Value::Array(_) => "list",
-        Value::Object(_) => "dict",
-    }
-}
-
-fn python_less(left: &Value, right: &Value) -> ChangeResult<bool> {
-    let incompatible = || {
-        ChangeError::Invalid(format!(
-            "'<' not supported between instances of '{}' and '{}'",
-            python_type(left),
-            python_type(right)
-        ))
-    };
-    match (left, right) {
-        (Value::String(left), Value::String(right)) => Ok(left < right),
-        (Value::Bool(_) | Value::Number(_), Value::Bool(_) | Value::Number(_)) => {
-            let number = |value: &Value| -> Option<crate::Numeric> {
-                match value {
-                    Value::Bool(value) => Some(crate::Numeric::from(i32::from(*value))),
-                    Value::Number(value) => Some(crate::Numeric::from(value.clone())),
-                    _ => None,
-                }
-            };
-            number(left)
-                .zip(number(right))
-                .and_then(|(left, right)| left.partial_cmp(&right))
-                .map(|order| order.is_lt())
-                .ok_or_else(incompatible)
-        }
-        (Value::Array(left), Value::Array(right)) => {
-            for (left, right) in left.iter().zip(right) {
-                if crate::pending::python_equal(left, right) {
-                    continue;
-                }
-                return python_less(left, right);
-            }
-            Ok(left.len() < right.len())
-        }
-        _ => Err(incompatible()),
-    }
-}
-
-fn python_sort_labels(labels: &mut [Value]) -> ChangeResult<()> {
-    // Insertion sort returns Python's comparison failure instead of using a
-    // Rust total order for mixed JSON types.
-    for index in 1..labels.len() {
-        let mut current = index;
-        while current > 0 && python_less(&labels[current], &labels[current - 1])? {
-            labels.swap(current, current - 1);
-            current -= 1;
-        }
-    }
-    Ok(())
-}
-
 /// Bind a scalar into a SQLite TEXT-affinity column and retain the text SQLite
 /// stores. Python sqlite3 rejects containers and over-range integers here.
 fn sqlite_text_binding(value: Option<&Value>, parameter: usize) -> ChangeResult<Option<String>> {
@@ -1354,7 +1295,7 @@ fn sqlite_text_binding(value: Option<&Value>, parameter: usize) -> ChangeResult<
         }
         Value::Array(_) | Value::Object(_) => Err(ChangeError::Invalid(format!(
             "Error binding parameter {parameter}: type '{}' is not supported",
-            python_type(value)
+            python_type_name(value)
         ))),
     }
 }
@@ -1411,12 +1352,12 @@ pub fn upsert<S: ChangeStore, C: ChangeClock>(
                 value => {
                     return Err(ChangeError::Invalid(format!(
                         "'{}' object is not iterable",
-                        python_type(value)
+                        python_type_name(value)
                     )));
                 }
             }
         }
-        python_sort_labels(&mut labels)?;
+        python_sort_values(&mut labels)?;
         let merge_commit_value = match object
             .get("mergeCommit")
             .filter(|value| crate::pending::python_truthy(value))
@@ -1425,7 +1366,7 @@ pub fn upsert<S: ChangeStore, C: ChangeClock>(
             Some(value) => {
                 return Err(ChangeError::Invalid(format!(
                     "'{}' object has no attribute 'get'",
-                    python_type(value)
+                    python_type_name(value)
                 )));
             }
             None => None,
@@ -1433,7 +1374,7 @@ pub fn upsert<S: ChangeStore, C: ChangeClock>(
         let Some(merged_at) = merged_at_value.as_str() else {
             return Err(ChangeError::Invalid(format!(
                 "'{}' object has no attribute 'replace'",
-                python_type(merged_at_value)
+                python_type_name(merged_at_value)
             )));
         };
         let parsed = clock.parse_time(merged_at)?;
@@ -2230,7 +2171,7 @@ pub fn render_changes(rows: &[ChangeRecord], limit: usize) -> ChangeResult<Strin
                     label.as_str().ok_or_else(|| {
                         ChangeError::Invalid(format!(
                             "sequence item {index}: expected str instance, {} found",
-                            python_type(label)
+                            python_type_name(label)
                         ))
                     })
                 })
