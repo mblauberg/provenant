@@ -259,7 +259,7 @@ jobs:
       - name: Set up uv and Python
         uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
         with:
-          python-version: "3.12"
+          python-version: "3.14"
           enable-cache: true
           cache-dependency-glob: uv.lock
       - name: Install locked harness test dependencies
@@ -299,7 +299,7 @@ jobs:
       - name: Set up uv and Python
         uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
         with:
-          python-version: "3.12"
+          python-version: "3.14"
           enable-cache: true
           cache-dependency-glob: uv.lock
       - name: Install locked harness test dependencies
@@ -336,7 +336,7 @@ jobs:
       - name: Set up uv and Python
         uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
         with:
-          python-version: "3.12"
+          python-version: "3.14"
           enable-cache: true
           cache-dependency-glob: uv.lock
       - name: Install locked harness test dependencies
@@ -367,7 +367,7 @@ jobs:
       - name: Set up uv and Python
         uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
         with:
-          python-version: "3.12"
+          python-version: "3.14"
           enable-cache: true
           cache-dependency-glob: uv.lock
       - name: Install locked harness test dependencies
@@ -398,7 +398,7 @@ jobs:
       - name: Set up uv and Python
         uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
         with:
-          python-version: "3.12"
+          python-version: "3.14"
           enable-cache: true
           cache-dependency-glob: uv.lock
       - name: Install locked orchestration dependencies
@@ -439,7 +439,7 @@ jobs:
       - name: Set up uv
         uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
         with:
-          python-version: "3.12"
+          python-version: "3.14"
           enable-cache: true
           cache-dependency-glob: uv.lock
       - name: Install locked harness test dependencies
@@ -523,10 +523,12 @@ jobs:
           key: ${{ runner.os }}-cargo-${{ hashFiles('tools/front-door/Cargo.lock', 'tools/front-door/rust-toolchain.toml') }}
       - name: Set persistent Cargo target directory
         run: echo "CARGO_TARGET_DIR=$HOME/.cache/provenant/cargo-target" >> "$GITHUB_ENV"
+      - name: Set up Node.js workspace
+        uses: $/.github/actions/setup-node-workspace
       - name: Set up uv and Python
         uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
         with:
-          python-version: "3.12"
+          python-version: "3.14"
           enable-cache: true
           cache-dependency-glob: uv.lock
       - name: Install locked harness test dependencies
@@ -558,6 +560,8 @@ jobs:
             cargo build --release --locked
       - name: Run stale-checkout coverage against the binary
         run: PROVENANT_FRONT_DOOR_BIN="$CARGO_TARGET_DIR/release/provenant" .venv/bin/python -m pytest tests/test_stale.py -q
+      - name: Run the golden CLI suite
+        run: PROVENANT_GOLDEN_REQUIRED=1 PROVENANT_GOLDEN_BIN="$CARGO_TARGET_DIR/release/provenant" .venv/bin/python -m pytest tests/golden -q
 
   zizmor:
     name: Workflow security lint
