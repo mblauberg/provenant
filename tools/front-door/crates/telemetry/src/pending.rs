@@ -1,10 +1,49 @@
-mod python;
-pub(crate) use python::{
-    decimal_digit, python_alpha, python_equal, python_repr, python_str, python_strip,
-    python_truthy, python_whitespace,
+// port: belongs in provenant-core
+// Unicode decimal digits, as accepted by Python re \d and int.
+pub(crate) fn decimal_digit(c: char) -> Option<u8> {
+    let code = u32::from(c);
+    // port: belongs in provenant-core
+    const ZEROS: &[u32] = &[
+        0x30, 0x660, 0x6f0, 0x7c0, 0x966, 0x9e6, 0xa66, 0xae6, 0xb66, 0xbe6, 0xc66, 0xce6, 0xd66,
+        0xde6, 0xe50, 0xed0, 0xf20, 0x1040, 0x1090, 0x17e0, 0x1810, 0x1946, 0x19d0, 0x1a80, 0x1a90,
+        0x1b50, 0x1bb0, 0x1c40, 0x1c50, 0xa620, 0xa8d0, 0xa900, 0xa9d0, 0xa9f0, 0xaa50, 0xabf0,
+        0xff10, 0x104a0, 0x10d30, 0x10d40, 0x11066, 0x110f0, 0x11136, 0x111d0, 0x112f0, 0x11450,
+        0x114d0, 0x11650, 0x116c0, 0x116d0, 0x116da, 0x11730, 0x118e0, 0x11950, 0x11bf0, 0x11c50,
+        0x11d50, 0x11da0, 0x11f50, 0x16130, 0x16a60, 0x16ac0, 0x16b50, 0x16d70, 0x1ccf0, 0x1d7ce,
+        0x1d7d8, 0x1d7e2, 0x1d7ec, 0x1d7f6, 0x1e140, 0x1e2f0, 0x1e4f0, 0x1e5f1, 0x1e950, 0x1fbf0,
+    ];
+    ZEROS
+        .iter()
+        .find_map(|&zero| code.checked_sub(zero).filter(|&d| d < 10).map(|d| d as u8))
+}
+
+pub(crate) use provenant_core::py::{
+    python_json_eq as python_equal, python_repr, python_str, python_strip, python_truthy,
+    python_whitespace,
 };
-mod decode;
-pub use decode::decode_json;
+
+/// Crate bound and error mapping around the records owner's checked codec.
+pub fn decode_json<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> crate::Result<T> {
+    if bytes.len() > crate::MAX_JSON_BYTES {
+        return Err(crate::Error::InputTooLarge {
+            limit: crate::MAX_JSON_BYTES,
+        });
+    }
+    let value =
+        provenant_records::checked_json::from_slice(bytes).map_err(|error| match error {
+            provenant_records::DecodeError::NumberOutOfRange(_) => crate::Error::NumberOutOfRange,
+            provenant_records::DecodeError::Json(error) => crate::Error::Json(error),
+        })?;
+    Ok(serde_json::from_value(value)?)
+}
+
+// port: belongs in provenant-core
+pub(crate) fn python_alpha(text: &str) -> bool {
+    static LETTERS: std::sync::LazyLock<std::result::Result<regex::Regex, regex::Error>> =
+        std::sync::LazyLock::new(|| regex::Regex::new(r"\A\p{L}+\z"));
+    LETTERS.as_ref().is_ok_and(|r| r.is_match(text))
+}
+
 mod numeric;
 pub use numeric::Numeric;
 // Temporary contracts until the records/core owners are ported.
@@ -96,23 +135,15 @@ pub struct Observation {
 }
 // port: belongs in provenant-core
 pub fn parse_time(value: &str) -> crate::Result<jiff::Timestamp> {
-    if let Ok(t) = value.parse::<jiff::Timestamp>() {
-        return Ok(t);
+    let mut parsed = provenant_core::py::python_fromisoformat(&value.replace('Z', "+00:00"))
+        .map_err(|_| crate::Error::Timestamp(value.into()))?;
+    if parsed.offset_microseconds.is_none() {
+        parsed.offset_microseconds = Some(0);
     }
-    if let Ok(t) = value.parse::<jiff::civil::DateTime>() {
-        return t
-            .to_zoned(jiff::tz::TimeZone::UTC)
-            .map(|t| t.timestamp())
-            .map_err(|_| crate::Error::Timestamp(value.into()));
-    }
-    value
-        .strip_suffix('Z')
-        .unwrap_or(value)
-        .parse::<jiff::civil::Date>()
-        .ok()
-        .and_then(|t| t.at(0, 0, 0, 0).to_zoned(jiff::tz::TimeZone::UTC).ok())
-        .map(|t| t.timestamp())
-        .ok_or_else(|| crate::Error::Timestamp(value.into()))
+    parsed
+        .timestamp()
+        .and_then(|t| t.to_jiff())
+        .map_err(|_| crate::Error::Timestamp(value.into()))
 }
 // port: belongs in provenant-records
 // Python json.dumps(sort_keys=True) defaults: ASCII escapes and spaced separators.
@@ -199,22 +230,7 @@ pub fn hex(bytes: &[u8]) -> String {
 
 // port: belongs in provenant-core
 pub fn timestamp_seconds(seconds: f64) -> crate::Result<jiff::Timestamp> {
-    if !seconds.is_finite() {
-        return Err(crate::Error::Timestamp(seconds.to_string()));
-    }
-    // CPython uses modf, then rounds only the fractional seconds to microseconds.
-    // Bound the whole seconds before casting or multiplying external input.
-    const MIN: i128 = -62_135_596_800; // datetime year 1
-    const END: i128 = 253_402_300_800; // datetime year 10000 (exclusive)
-    let whole = seconds.trunc();
-    if whole < (MIN - 1) as f64 || whole > END as f64 {
-        return Err(crate::Error::Timestamp(seconds.to_string()));
-    }
-    let micros = (seconds.fract() * 1_000_000.0).round_ties_even() as i128;
-    let nanos = whole as i128 * 1_000_000_000 + micros * 1000;
-    if !(MIN * 1_000_000_000..END * 1_000_000_000).contains(&nanos) {
-        return Err(crate::Error::Timestamp(seconds.to_string()));
-    }
-    jiff::Timestamp::from_nanosecond(nanos)
+    provenant_core::py::from_timestamp(seconds)
+        .and_then(|timestamp| timestamp.to_jiff())
         .map_err(|_| crate::Error::Timestamp(seconds.to_string()))
 }

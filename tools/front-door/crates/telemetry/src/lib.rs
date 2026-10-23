@@ -25,6 +25,10 @@ pub enum Error {
         source: std::io::Error,
     },
     #[error(transparent)]
+    Sqlite(#[from] rusqlite::Error),
+    #[error("invalid numeric report cell: {field}")]
+    InvalidReportNumber { field: &'static str },
+    #[error(transparent)]
     Json(#[from] serde_json::Error),
     #[error("JSON input exceeds {limit} bytes")]
     InputTooLarge { limit: usize },

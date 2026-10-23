@@ -310,15 +310,14 @@ pub fn bounded_table(
 fn field<'a>(value: &'a serde_json::Value, name: &str) -> &'a serde_json::Value {
     value.get(name).unwrap_or(&serde_json::Value::Null)
 }
+fn nullable_text(value: &serde_json::Value) -> Option<String> {
+    (!value.is_null()).then(|| value_text(value))
+}
 fn value_text(value: &serde_json::Value) -> String {
-    match value {
-        serde_json::Value::Null => "None".into(),
-        serde_json::Value::String(s) => s.clone(),
-        _ => value.to_string(),
-    }
+    crate::pending::python_str(value)
 }
 fn text_or(value: &serde_json::Value, fallback: &str) -> String {
-    if value.is_null() || value.as_str().is_some_and(str::is_empty) {
+    if !crate::pending::python_truthy(value) {
         fallback.into()
     } else {
         value_text(value)
@@ -375,7 +374,7 @@ pub fn render_stats(report: &serde_json::Value, detail: bool) -> Result<String> 
     let mut lines = vec![format!(
         "Usage on {}{}: costs are API-equivalent USD estimates; - marks missing usage or prices.",
         value_text(field(report, "host")),
-        if field(report, "since").is_null() || field(report, "since") == "" {
+        if !crate::pending::python_truthy(field(report, "since")) {
             String::new()
         } else {
             format!(" since {}", value_text(field(report, "since")))
@@ -387,9 +386,9 @@ pub fn render_stats(report: &serde_json::Value, detail: bool) -> Result<String> 
         .map(|row| {
             let mut cells = vec![
                 Some(text_or(field(row, "provider"), "-")),
-                Some(text_or(field(row, "adapter"), "None")),
-                Some(text_or(field(row, "model"), "None")),
-                Some(value_text(field(row, "rows"))),
+                nullable_text(field(row, "adapter")),
+                nullable_text(field(row, "model")),
+                nullable_text(field(row, "rows")),
             ];
             cells.extend(
                 TOKEN_FIELDS
@@ -441,8 +440,8 @@ pub fn render_stats(report: &serde_json::Value, detail: bool) -> Result<String> 
         .map(|row| {
             let route = format!(
                 "{}/{}{}",
-                text_or(field(row, "adapter"), "None"),
-                text_or(field(row, "model"), "None"),
+                value_text(field(row, "adapter")),
+                value_text(field(row, "model")),
                 field(row, "effort")
                     .as_str()
                     .filter(|s| !s.is_empty())
@@ -472,11 +471,11 @@ pub fn render_stats(report: &serde_json::Value, detail: bool) -> Result<String> 
                 Some(route),
                 Some(text_or(field(row, "task_class"), "-")),
                 Some(text_or(field(row, "route"), "-")),
-                Some(value_text(field(row, "lanes"))),
+                nullable_text(field(row, "lanes")),
                 field(row, "success_rate")
                     .as_f64()
                     .map(|v| format!("{:.0}%", v * 100.0)),
-                Some(value_text(field(row, "retries"))),
+                nullable_text(field(row, "retries")),
                 Some(errors),
                 cost,
                 field(row, "cost_per_success_usd")
@@ -562,7 +561,7 @@ pub fn render_stats(report: &serde_json::Value, detail: bool) -> Result<String> 
                     vec![
                         value_text(field(r, "lane")),
                         value_text(field(r, "compactions")),
-                        text_or(field(r, "host"), "-"),
+                        r.get("host").map(value_text).unwrap_or_else(|| "-".into()),
                     ]
                 })
                 .collect(),
@@ -578,18 +577,20 @@ pub fn render_stats(report: &serde_json::Value, detail: bool) -> Result<String> 
             "Latest quota observations",
             array(field(report, "quota_observations"))
                 .map(|r| {
-                    vec![
+                    let used = field(r, "used_percent").as_f64().ok_or(
+                        crate::Error::InvalidReportNumber {
+                            field: "used_percent",
+                        },
+                    )?;
+                    Ok(vec![
                         text_or(field(r, "provider"), "-"),
                         value_text(field(r, "window")),
-                        field(r, "used_percent")
-                            .as_f64()
-                            .map(|v| format!("{}%", python_general(v)))
-                            .unwrap_or_else(|| "None%".into()),
+                        format!("{}%", python_general(used)),
                         text_or(field(r, "reset_at"), "-"),
                         text_or(field(r, "timestamp"), "-"),
-                    ]
+                    ])
                 })
-                .collect(),
+                .collect::<Result<Vec<_>>>()?,
         ));
     }
     for (title, rows) in sections {
@@ -641,10 +642,11 @@ pub fn render_stats(report: &serde_json::Value, detail: bool) -> Result<String> 
             "host {}: {}{}",
             value_text(field(host, "host")),
             value_text(field(host, "status")),
-            field(host, "reason")
-                .as_str()
-                .map(|s| format!(" ({s})"))
-                .unwrap_or_default()
+            if crate::pending::python_truthy(field(host, "reason")) {
+                format!(" ({})", value_text(field(host, "reason")))
+            } else {
+                String::new()
+            }
         ));
     }
     Ok(format!("{}\n", lines.join("\n")))

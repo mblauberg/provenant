@@ -7,6 +7,71 @@ use std::{
     path::Path,
     process::{Command, Stdio},
 };
+/// One bounded foreground oracle runner, with regular files to avoid pipe stalls.
+fn bounded_output(mut command: Command, input: &[u8]) -> std::io::Result<std::process::Output> {
+    use std::{
+        io::{Read, Seek, SeekFrom},
+        time::{Duration, Instant},
+    };
+    let home = tempfile::tempdir()?;
+    let mut stdin = tempfile::tempfile()?;
+    stdin.write_all(input)?;
+    stdin.seek(SeekFrom::Start(0))?;
+    let stdout = tempfile::tempfile()?;
+    let stderr = tempfile::tempfile()?;
+    command
+        .env_clear()
+        .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+        .env("HOME", home.path())
+        .env("TMPDIR", home.path())
+        .env("TZ", "UTC")
+        .env("LC_ALL", "C.UTF-8")
+        .env("PYTHONDONTWRITEBYTECODE", "1")
+        .stdin(Stdio::from(stdin))
+        .stdout(Stdio::from(stdout.try_clone()?))
+        .stderr(Stdio::from(stderr.try_clone()?));
+    let mut child = command.spawn()?;
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let status = loop {
+        if let Some(status) = child.try_wait()? {
+            break status;
+        }
+        if Instant::now() >= deadline {
+            child.kill()?;
+            let reap_deadline = Instant::now() + Duration::from_secs(2);
+            loop {
+                if child.try_wait()?.is_some() {
+                    break;
+                }
+                if Instant::now() >= reap_deadline {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "oracle exceeded 30 seconds",
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    };
+    fn read(mut file: std::fs::File) -> std::io::Result<Vec<u8>> {
+        file.seek(SeekFrom::Start(0))?;
+        let mut bytes = Vec::new();
+        file.take((crate::MAX_JSON_BYTES + 1) as u64)
+            .read_to_end(&mut bytes)?;
+        if bytes.len() > crate::MAX_JSON_BYTES {
+            return Err(std::io::Error::other("oracle output too large"));
+        }
+        Ok(bytes)
+    }
+    Ok(std::process::Output {
+        status,
+        stdout: read(stdout)?,
+        stderr: read(stderr)?,
+    })
+}
+
 fn oracle_available(availability: std::result::Result<(), String>, required: bool) -> bool {
     match availability {
         Ok(()) => true,
@@ -52,9 +117,12 @@ fn interpreter_version(
         "{} {}.{}+",
         interpreter.name, interpreter.floor.0, interpreter.floor.1
     );
-    let out = Command::new(program)
-        .args([interpreter.eval, interpreter.probe])
-        .output()
+    let mut command = Command::new(program);
+    if interpreter.variable == "PROVENANT_PORT_PYTHON" {
+        command.arg("-I").arg("-B");
+    }
+    command.args([interpreter.eval, interpreter.probe]);
+    let out = bounded_output(command, &[])
         .map_err(|e| format!("{required} interpreter unavailable: {e}"))?;
     let version = String::from_utf8_lossy(&out.stdout);
     let parts: Vec<_> = version
@@ -69,7 +137,7 @@ fn interpreter_version(
         ))
     }
 }
-fn python(source: &str, input: &Value) -> Option<Value> {
+pub(crate) fn python(source: &str, input: &Value) -> Option<Value> {
     oracle(&PYTHON, source, input)
 }
 fn oracle(interpreter: &Interpreter, source: &str, input: &Value) -> Option<Value> {
@@ -80,23 +148,13 @@ fn oracle(interpreter: &Interpreter, source: &str, input: &Value) -> Option<Valu
         return None;
     }
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../..");
-    let mut child = Command::new(program)
-        .arg(interpreter.eval)
-        .arg(source)
-        .arg(root)
-        .env("PYTHONDONTWRITEBYTECODE", "1")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("checked Python oracle could not start");
-    child
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(serde_json::to_string(input).unwrap().as_bytes())
-        .unwrap();
-    let out = child.wait_with_output().unwrap();
+    let mut command = Command::new(program);
+    if interpreter.variable == "PROVENANT_PORT_PYTHON" {
+        command.arg("-I").arg("-B");
+    }
+    command.arg(interpreter.eval).arg(source).arg(root);
+    let out = bounded_output(command, serde_json::to_string(input).unwrap().as_bytes())
+        .expect("checked oracle failed");
     assert!(
         out.status.success(),
         "{}",
@@ -144,7 +202,7 @@ fn required_oracles_refuse_missing_or_old_interpreters() {
         }
     }
 }
-fn equal(a: &Value, b: &Value) {
+pub(crate) fn equal(a: &Value, b: &Value) {
     match (a, b) {
         (Value::Number(a), Value::Number(b)) => assert_eq!(a.to_string(), b.to_string()),
         (Value::Array(a), Value::Array(b)) => {
@@ -162,7 +220,7 @@ fn equal(a: &Value, b: &Value) {
         _ => assert_eq!(a, b),
     }
 }
-const LOAD: &str = r#"
+pub(crate) const LOAD: &str = r#"
 import importlib.util,json,sys,types
 from pathlib import Path
 root=Path(sys.argv[1])
@@ -579,15 +637,92 @@ fn stats_renderer_matches_python() {
         "quota_observations":[{"provider":"openai","window":"5h","used_percent":20.12345,"reset_at":null,"timestamp":"2026-01-02T00:00:00Z"},{"provider":"other","window":"1h","used_percent":999999.9,"reset_at":null,"timestamp":"2026-01-02T00:00:00Z"},{"provider":"tiny","window":"1h","used_percent":0.00009999999,"reset_at":null,"timestamp":"2026-01-02T00:00:00Z"},{"provider":"negative-zero","window":"1h","used_percent":-0.0,"reset_at":null,"timestamp":"2026-01-02T00:00:00Z"}],
         "unattributed":[],"excluded_rows":{"test_fixture":1},"hosts":[{"host":"peer","status":"offline","reason":"timeout"}]
     });
-    for detail in [false, true] {
-        let input = json!({"report":report,"detail":detail});
-        let source = format!("{LOAD}\nreport=load('telemetry_report')\nimport contextlib,io\nout=io.StringIO()\nwith contextlib.redirect_stdout(out): report.render_stats(t,input['report'],input['detail'])\nprint(json.dumps(out.getvalue()))");
-        let Some(expected) = python(&source, &input) else {
-            return;
-        };
-        assert_eq!(
-            report::render_stats(&input["report"], detail).unwrap(),
-            expected.as_str().unwrap()
-        );
+    let mut variants = vec![report.clone()];
+    let mut edge = report.clone();
+    edge["since"] = json!("");
+    edge["usage"] = json!((0..15)
+        .map(|i| {
+            let mut row = report["usage"][0].clone();
+            row["provider"] = json!(null);
+            row["adapter"] = if i == 0 { json!("") } else { json!(null) };
+            row["model"] = if i == 1 { json!("") } else { json!(null) };
+            row["input_tokens"] = json!(null);
+            row["cache_read_share"] = json!(null);
+            row["estimated_cost_usd"] = json!(null);
+            row
+        })
+        .collect::<Vec<_>>());
+    edge["outcomes"] = json!((0..15)
+        .map(|i| {
+            let mut row = report["outcomes"][0].clone();
+            row["adapter"] = if i % 2 == 0 { json!(null) } else { json!("") };
+            row["model"] = if i % 2 == 0 { json!("") } else { json!(null) };
+            row["lanes"] = json!(null);
+            row["effort"] = json!("");
+            row["missing_cost_rows"] = json!(1);
+            row["latency_p50_s"] = json!(null);
+            row["latency_p90_s"] = json!(null);
+            row["cost_per_success_usd"] = json!(null);
+            row
+        })
+        .collect::<Vec<_>>());
+    edge["hosts"] = json!([
+        {"host":"empty","status":"ok","reason":""},
+        {"host":"null","status":"ok","reason":null},
+        {"host":"absent","status":"ok"},
+        {"host":"false","status":"ok","reason":false},
+        {"host":"true","status":"ok","reason":true},
+        {"host":"number","status":"ok","reason":1},
+        {"host":"array","status":"ok","reason":["detail"]}
+    ]);
+    edge["compactions_per_lane"] = json!([
+        {"lane":"null","compactions":1,"host":null},
+        {"lane":"empty","compactions":2,"host":""},
+        {"lane":"missing","compactions":3}
+    ]);
+    edge["unattributed"] = json!([
+        {"source":"fabric","adapter":null,"rows":1},
+        {"source":"codex","adapter":"","rows":2}
+    ]);
+    edge["last_limit_events"] = json!((0..15)
+        .map(|i| json!({"provider":null,"account":"","timestamp":"2026-01-02","age_seconds":i}))
+        .collect::<Vec<_>>());
+    variants.push(edge.clone());
+    // An all-null identifier column is dropped even when summary truncation applies.
+    for row in edge["usage"].as_array_mut().unwrap() {
+        row["adapter"] = json!(null);
+        row["model"] = json!(null);
+    }
+    variants.push(edge);
+    for since in [json!(false), json!(0), json!(0.0), json!([]), json!({})] {
+        let mut falsy = report.clone();
+        falsy["since"] = since;
+        variants.push(falsy);
+    }
+    for report in variants {
+        for detail in [false, true] {
+            let input = json!({"report":report,"detail":detail});
+            let source = format!("{LOAD}\nreport=load('telemetry_report')\nimport contextlib,io\nout=io.StringIO()\nwith contextlib.redirect_stdout(out): report.render_stats(t,input['report'],input['detail'])\nprint(json.dumps(out.getvalue()))");
+            let Some(expected) = python(&source, &input) else {
+                return;
+            };
+            assert_eq!(
+                report::render_stats(&input["report"], detail).unwrap(),
+                expected.as_str().unwrap()
+            );
+        }
+    }
+    let mut invalid = report;
+    invalid["quota_observations"][0]["used_percent"] = json!(null);
+    assert!(report::render_stats(&invalid, false).is_ok());
+    assert!(matches!(
+        report::render_stats(&invalid, true),
+        Err(crate::Error::InvalidReportNumber {
+            field: "used_percent"
+        })
+    ));
+    let source = format!("{LOAD}\nreport=load('telemetry_report')\nimport contextlib,io\ntry:\n with contextlib.redirect_stdout(io.StringIO()): report.render_stats(t,input,True)\nexcept TypeError: print(json.dumps('TypeError'))");
+    if let Some(expected) = python(&source, &invalid) {
+        assert_eq!(expected, json!("TypeError"));
     }
 }

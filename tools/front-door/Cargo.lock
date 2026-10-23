@@ -567,7 +567,10 @@ name = "provenant-telemetry"
 version = "0.1.0"
 dependencies = [
  "jiff",
+ "provenant-core",
+ "provenant-records",
  "regex",
+ "rusqlite",
  "serde",
  "serde_json",
  "sha2",
