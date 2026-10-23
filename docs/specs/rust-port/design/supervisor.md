@@ -643,10 +643,10 @@ copies into the owners above; delete their old modules and parity-only tests.
 R0 also removes their oracle generators/golden judges with those subjects;
 CLI owns shared port-tooling deletion. No schema/Unicode emulation is retained.
 
-Measured S1-S3: **+18,965 net Rust lines including tests**: S1
-**+2,564** (#1370), S2 **+6,248** (#1379), S3 **+10,153** against main
+Measured S1-S3: **+19,196 net Rust lines including tests**: S1
+**+2,564** (#1370), S2 **+6,248** (#1379), S3 **+10,384** against main
 `54b611bb2f9dcd39522a8c3ab74d9b2e83aa46d7`. S3's library and config binding
-contain **10,894 Rust lines including tests**, above the roughly 6,000-line
+contain **11,125 Rust lines including tests**, above the roughly 6,000-line
 target. The original +4,000 estimate omitted much of the native custody,
 permission and hostile-filesystem coverage, while last-importer gates defer
 Python deletion savings. Every build PR reports measured `Net lines:`; do not

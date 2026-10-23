@@ -37,9 +37,14 @@ const MAX_NETWORK_GRANTS: usize = 128;
 #[cfg(target_os = "macos")]
 const MAX_GIT_HEAD_BYTES: u64 = 1024;
 #[cfg(target_os = "macos")]
+const MAX_WRITABLE_TREE_ENTRIES: usize = 100_000;
+#[cfg(target_os = "macos")]
+const MAX_WRITABLE_TREE_DEPTH: usize = 128;
+#[cfg(target_os = "macos")]
 const SANDBOX_EXEC: &str = "/usr/bin/sandbox-exec";
 #[cfg(target_os = "macos")]
 const DYLD_BOOTSTRAP_RULES: &str = r#"
+(deny file-link)
 (allow file-read* (subpath "/System/Library"))
 (allow file-read* (subpath "/usr/bin"))
 (allow file-read* (subpath "/usr/lib"))
@@ -130,6 +135,8 @@ pub enum PermissionError {
     ProtectedOverlap,
     #[error("required held path anchor is missing or changed")]
     AnchorMismatch,
+    #[error("writable tree contains a hard-linked regular file")]
+    HardLinkedWritableFile,
     #[error("path is not valid UTF-8 for the SBPL source format")]
     NonUtf8Path,
     #[error("profile or fixture record is malformed")]
@@ -530,7 +537,7 @@ impl Anchors<'_> {
                     .ok_or(PermissionError::AnchorMismatch)?;
                 anchor.verify(self.safe_fs)?;
                 match anchor.directory.metadata_at(name, false) {
-                    Ok(metadata) if metadata.kind == FileKind::Regular && metadata.links == 1 => {}
+                    Ok(metadata) if metadata.kind == FileKind::Regular => {}
                     Ok(_) => return Err(PermissionError::AnchorMismatch),
                     Err(error) if error.is_not_found() => {}
                     Err(error) => return Err(PermissionError::Filesystem(error)),
@@ -559,6 +566,26 @@ impl Anchors<'_> {
             Err(error) => Err(PermissionError::Filesystem(error)),
         }
     }
+
+    fn verify_single_link_grant(&self, grant: &PathGrant) -> Result<(), PermissionError> {
+        self.verify_grant_held(grant)?;
+        if grant.scope != PathScope::Exact {
+            return Err(PermissionError::InvalidPath);
+        }
+        let parent = grant.path.parent().ok_or(PermissionError::InvalidPath)?;
+        let name = grant.path.file_name().ok_or(PermissionError::InvalidPath)?;
+        let anchor = self
+            .directories
+            .iter()
+            .find(|anchor| anchor.path == parent)
+            .ok_or(PermissionError::AnchorMismatch)?;
+        match anchor.directory.metadata_at(name, false) {
+            Ok(metadata) if metadata.kind == FileKind::Regular && metadata.links == 1 => Ok(()),
+            Ok(_) => Err(PermissionError::AnchorMismatch),
+            Err(error) if error.is_not_found() => Ok(()),
+            Err(error) => Err(PermissionError::Filesystem(error)),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -566,6 +593,8 @@ pub enum Enforcement {
     MacOsSandboxExec,
 }
 
+/// A compiled launch profile. Discard and recompile it after any writable root
+/// changes; callers hold writer exclusion from compilation through handoff.
 pub struct ConfinedLaunch {
     pub enforcement: Enforcement,
     pub profile: Vec<u8>,
@@ -584,6 +613,10 @@ pub struct BackendContext<'a> {
 pub trait ConfinementBackend: Send + Sync {
     fn probe(&self, context: &BackendContext<'_>) -> Result<Availability, PermissionError>;
 
+    /// Compile immediately before launch while holding writer exclusion over
+    /// every writable root through the child handoff. The pathname sandbox
+    /// denies child-created hard links but cannot stop an external writer from
+    /// adding an alias after this census.
     fn compile(
         &self,
         plan: &PlanPermissions,
@@ -822,6 +855,10 @@ fn compile_sbpl(
             Some(verify_worktree_authority(authority, anchors)?)
         }
     };
+    if let Some(grants) = &worktree_grants {
+        verify_writable_tree(&grants.worktree.path, anchors)?;
+        verify_writable_tree(&grants.objects.path, anchors)?;
+    }
     let mut read_grants = plan.read_roots.clone();
     if let Some(grants) = &worktree_grants {
         read_grants.push(grants.worktree.clone());
@@ -965,6 +1002,10 @@ fn compile_sbpl(
     if let AccessMode::WorktreeWrite(authority) = &plan.mode {
         verify_worktree_authority(authority, anchors)?;
     }
+    if let Some(grants) = &worktree_grants {
+        verify_writable_tree(&grants.worktree.path, anchors)?;
+        verify_writable_tree(&grants.objects.path, anchors)?;
+    }
     verify_private_scratch(&plan.scratch, &scratch_exclusions, anchors)?;
     anchors.verify_all()?;
     // Avoid retaining a second mutable representation of the profile.
@@ -1001,6 +1042,88 @@ fn verify_private_scratch(
         || metadata.mode & 0o077 != 0
     {
         return Err(PermissionError::AnchorMismatch);
+    }
+    verify_writable_tree(&scratch.path, anchors)?;
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn verify_writable_tree(path: &Path, anchors: &Anchors<'_>) -> Result<(), PermissionError> {
+    let root = anchors
+        .directories
+        .iter()
+        .find(|anchor| anchor.path == path)
+        .ok_or(PermissionError::AnchorMismatch)?;
+    root.verify(anchors.safe_fs)?;
+    let identity = root
+        .directory
+        .metadata()
+        .map_err(PermissionError::Filesystem)?;
+    if identity.kind != FileKind::Directory {
+        return Err(PermissionError::AnchorMismatch);
+    }
+    let mut entries = 0;
+    inspect_writable_directory(root.directory.as_ref(), 0, &mut entries)?;
+    let after = root
+        .directory
+        .metadata()
+        .map_err(PermissionError::Filesystem)?;
+    root.verify(anchors.safe_fs)?;
+    if !crate::stable_read::same_metadata(&identity, &after) || after.kind != FileKind::Directory {
+        return Err(PermissionError::AnchorMismatch);
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn inspect_writable_directory(
+    directory: &dyn SafeDir,
+    depth: usize,
+    count: &mut usize,
+) -> Result<(), PermissionError> {
+    if depth > MAX_WRITABLE_TREE_DEPTH {
+        return Err(PermissionError::ProfileTooLarge);
+    }
+    for name in directory.entries().map_err(PermissionError::Filesystem)? {
+        let name = name.map_err(PermissionError::Filesystem)?;
+        *count += 1;
+        if *count > MAX_WRITABLE_TREE_ENTRIES {
+            return Err(PermissionError::ProfileTooLarge);
+        }
+        let before = directory
+            .metadata_at(&name, false)
+            .map_err(PermissionError::Filesystem)?;
+        if before.kind == FileKind::Regular && before.links != 1 {
+            return Err(PermissionError::HardLinkedWritableFile);
+        }
+        if before.kind == FileKind::Directory {
+            let child = directory
+                .open_verified_directory(&name)
+                .map_err(PermissionError::Filesystem)?;
+            let opened = child.metadata().map_err(PermissionError::Filesystem)?;
+            if !crate::stable_read::same_metadata(&before, &opened) {
+                return Err(PermissionError::AnchorMismatch);
+            }
+            inspect_writable_directory(child.as_ref(), depth + 1, count)?;
+            let after = directory
+                .metadata_at(&name, false)
+                .map_err(PermissionError::Filesystem)?;
+            if after.kind != FileKind::Directory
+                || !crate::stable_read::same_metadata(&opened, &after)
+            {
+                return Err(PermissionError::AnchorMismatch);
+            }
+        } else {
+            let after = directory
+                .metadata_at(&name, false)
+                .map_err(PermissionError::Filesystem)?;
+            if !crate::stable_read::same_metadata(&before, &after) {
+                return Err(PermissionError::AnchorMismatch);
+            }
+            if after.kind == FileKind::Regular && after.links != 1 {
+                return Err(PermissionError::HardLinkedWritableFile);
+            }
+        }
     }
     Ok(())
 }
@@ -1172,12 +1295,17 @@ fn verify_worktree_authority(
     verify_selected_head(verified, selected_ref.short_name())?;
     for grant in std::iter::once(&grants.worktree)
         .chain([&grants.private_git_dir, &grants.common_git_dir])
-        .chain(grants.index.iter())
-        .chain(grants.head.iter())
         .chain(std::iter::once(&grants.objects))
-        .chain(grants.selected_ref.iter())
     {
         anchors.verify_grant_held(grant)?;
+    }
+    for grant in grants
+        .index
+        .iter()
+        .chain(grants.head.iter())
+        .chain(grants.selected_ref.iter())
+    {
+        anchors.verify_single_link_grant(grant)?;
     }
     Ok(grants)
 }
@@ -1891,6 +2019,11 @@ mod tests {
 
         let scratch = root.join("scratch");
         std::fs::create_dir(&scratch)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&scratch, std::fs::Permissions::from_mode(0o700))?;
+        }
         let protected_parent = root.join("protected-parent");
         let protected = protected_parent.join("protected");
         std::fs::create_dir_all(&protected)?;
@@ -1903,17 +2036,30 @@ mod tests {
         std::fs::write(&inside, b"")?;
         let symlink_path = linked.path().join("symlink");
         symlink(&protected_file, &symlink_path)?;
-        let hardlink_path = linked.path().join("hardlink");
-        std::fs::hard_link(&protected_file, &hardlink_path)?;
+        let private = linked.repo().private_git_dir().to_owned();
+        let common = linked.repo().common_git_dir().to_owned();
+        let private_logs = private.join("logs");
+        let common_heads = common.join("refs/heads/s3");
+        let common_logs = common.join("logs/refs/heads/s3");
+        for directory in [&private_logs, &common_heads, &common_logs] {
+            std::fs::create_dir_all(directory)?;
+        }
+        let executables = [
+            provenant_supervisor::fs::canonicalize(Path::new("/usr/bin/touch"))?,
+            provenant_supervisor::fs::canonicalize(Path::new("/bin/mv"))?,
+            provenant_supervisor::fs::canonicalize(Path::new("/bin/ln"))?,
+        ];
 
         let profile = ProviderProfile {
             spec: ProviderProfileSpec {
-                process_executables: ["/usr/bin/touch", "/usr/bin/mv"]
+                process_executables: executables
+                    .iter()
+                    .cloned()
                     .map(|path| PathGrant {
-                        path: PathBuf::from(path),
+                        path,
                         scope: PathScope::Exact,
                     })
-                    .to_vec(),
+                    .collect(),
                 allow_process_fork: false,
                 runtime_reads: Vec::new(),
                 authentication: Vec::new(),
@@ -1923,18 +2069,43 @@ mod tests {
                 capabilities: Vec::new(),
                 native_controls: Vec::new(),
             },
-            observations: BTreeMap::new(),
+            observations: [
+                (FixtureOperation::DeclaredRead, FixtureOutcome::Allowed),
+                (FixtureOperation::UndeclaredRead, FixtureOutcome::Denied),
+                (FixtureOperation::UndeclaredWrite, FixtureOutcome::Denied),
+                (FixtureOperation::SecretRead, FixtureOutcome::Denied),
+                (FixtureOperation::ProtectedWrite, FixtureOutcome::Denied),
+                (FixtureOperation::OtherNetwork, FixtureOutcome::Denied),
+                (
+                    FixtureOperation::DeclaredProcessExec,
+                    FixtureOutcome::Allowed,
+                ),
+                (
+                    FixtureOperation::UndeclaredProcessExec,
+                    FixtureOutcome::Denied,
+                ),
+                (FixtureOperation::ProcessFork, FixtureOutcome::Denied),
+                (
+                    FixtureOperation::ProtectedInstructionRead,
+                    FixtureOutcome::Allowed,
+                ),
+                (FixtureOperation::WorktreeWrite, FixtureOutcome::Allowed),
+                (FixtureOperation::GitIndexWrite, FixtureOutcome::Allowed),
+                (FixtureOperation::GitHeadWrite, FixtureOutcome::Allowed),
+                (FixtureOperation::GitObjectsWrite, FixtureOutcome::Allowed),
+                (FixtureOperation::SelectedRefWrite, FixtureOutcome::Allowed),
+                (FixtureOperation::GitConfigWrite, FixtureOutcome::Denied),
+                (FixtureOperation::OtherRefWrite, FixtureOutcome::Denied),
+            ]
+            .into(),
         };
         let plan = PlanPermissions {
             mode: AccessMode::WorktreeWrite(Box::new(authority)),
             scratch: PathGrant {
-                path: scratch,
+                path: scratch.clone(),
                 scope: PathScope::Subtree,
             },
-            read_roots: vec![PathGrant {
-                path: root.clone(),
-                scope: PathScope::Subtree,
-            }],
+            read_roots: Vec::new(),
             protected_roots: [protected.clone(), nested_git.clone()]
                 .map(|path| PathGrant {
                     path,
@@ -1948,12 +2119,48 @@ mod tests {
             capabilities: Vec::new(),
             nested_confinement: false,
         };
-        let sbpl = String::from_utf8(render_profile(
-            &plan,
-            &profile,
-            &plan.read_roots,
-            Some(&grants),
-        )?)?;
+        let safe_fs = LocalFs;
+        let mut anchor_paths = vec![
+            root.clone(),
+            scratch.clone(),
+            protected.clone(),
+            nested_git.clone(),
+            linked.path().to_owned(),
+            private.clone(),
+            common.clone(),
+            grants.objects.path.clone(),
+            private_logs,
+            common_heads,
+            common_logs,
+        ];
+        let executable_directories = executables
+            .iter()
+            .filter_map(|path| path.parent().map(Path::to_owned))
+            .collect::<BTreeSet<_>>();
+        anchor_paths.extend(executable_directories);
+        let directories = anchor_paths
+            .iter()
+            .map(|path| AnchoredDirectory::open_canonical(&safe_fs, path))
+            .collect::<Result<Vec<_>, _>>()?;
+        let anchors = Anchors {
+            directories: &directories,
+            safe_fs: &safe_fs,
+            worktree: Some((&linked, &selected_ref)),
+        };
+        let backend = MacOsSandboxBackend { ready: true };
+        let hardlink_path = linked.path().join("hardlink");
+        for writable_path in [&grants.worktree.path, &grants.objects.path, &scratch] {
+            let alias = writable_path.join("hardlink-probe");
+            std::fs::hard_link(&protected_file, &alias)?;
+            assert!(matches!(
+                backend.compile(&plan, &profile, &anchors),
+                Err(PermissionError::HardLinkedWritableFile)
+            ));
+            std::fs::remove_file(alias)?;
+        }
+        let compiled = backend.compile(&plan, &profile, &anchors)?;
+        let sbpl = String::from_utf8(compiled.profile)?;
+        assert!(sbpl.contains("(deny file-link)"));
         let executor = SystemExecutor::new(2)?;
         let cancel = CancelToken::new();
         let env = [
@@ -1980,12 +2187,12 @@ mod tests {
             );
             return Ok(());
         }
-        let run = |program: &str, args: &[&Path]| {
+        let run = |program: &Path, args: &[&Path]| {
             let mut argv = vec![
                 OsString::from(SANDBOX_EXEC),
                 OsString::from("-p"),
                 OsString::from(&sbpl),
-                OsString::from(program),
+                OsString::from(program.as_os_str()),
             ];
             argv.extend(args.iter().map(|path| path.as_os_str().to_owned()));
             let mut options = ExecOptions::new(&argv, Path::new("/"), Duration::from_secs(3));
@@ -1998,31 +2205,39 @@ mod tests {
             executor.execute(options).expect("bounded sandbox child")
         };
 
-        let inside_outcome = run("/usr/bin/touch", &[&inside]);
+        let inside_outcome = run(&executables[0], &[&inside]);
         assert!(
             successful_probe(&inside_outcome),
             "worktree write failed: {:?}; stderr={}",
             inside_outcome.termination,
             String::from_utf8_lossy(&inside_outcome.stderr.bytes)
         );
-        assert!(denied_probe(&run("/usr/bin/touch", &[&protected_file])));
-        assert!(denied_probe(&run("/usr/bin/touch", &[&symlink_path])));
-        assert!(denied_probe(&run("/usr/bin/touch", &[&hardlink_path])));
-        assert!(denied_probe(&run(
-            "/usr/bin/touch",
-            &[&nested_git.join("config")],
-        )));
+        let mut probes = vec![
+            ("protected write", run(&executables[0], &[&protected_file])),
+            ("symlink write", run(&executables[0], &[&symlink_path])),
+            (
+                "new hardlink",
+                run(&executables[2], &[&protected_file, &hardlink_path]),
+            ),
+            (
+                "nested git write",
+                run(&executables[0], &[&nested_git.join("config")]),
+            ),
+        ];
         let moved_protected_parent = root.join("protected-parent-moved");
-        assert!(denied_probe(&run(
-            "/usr/bin/mv",
-            &[&protected_parent, &moved_protected_parent]
-        )));
+        probes.push((
+            "protected ancestor rename",
+            run(
+                &executables[1],
+                &[&protected_parent, &moved_protected_parent],
+            ),
+        ));
         let moved_worktree = root.join("linked-moved");
-        assert!(denied_probe(&run(
-            "/usr/bin/mv",
-            &[&worktree_path, &moved_worktree]
-        )));
-        assert!(protected_parent.exists() && worktree_path.exists());
+        probes.push((
+            "worktree root rename",
+            run(&executables[1], &[&worktree_path, &moved_worktree]),
+        ));
+        let roots_remained = protected_parent.exists() && worktree_path.exists();
 
         // Simulate a root swap in the gap between compiling the pathname
         // policy and starting its child: the authorised worktree spelling now
@@ -2030,10 +2245,26 @@ mod tests {
         std::fs::rename(&worktree_path, &moved_worktree)?;
         symlink(&protected, &worktree_path)?;
         let swapped_probe = worktree_path.join("root-swap-probe");
-        assert!(denied_probe(&run("/usr/bin/touch", &[&swapped_probe])));
-        assert!(!protected.join("root-swap-probe").exists());
+        probes.push((
+            "worktree root swap",
+            run(&executables[0], &[&swapped_probe]),
+        ));
+        let root_swap_did_not_write = !protected.join("root-swap-probe").exists();
         std::fs::remove_file(&worktree_path)?;
         std::fs::rename(&moved_worktree, &worktree_path)?;
+        assert!(
+            roots_remained
+                && root_swap_did_not_write
+                && !hardlink_path.exists()
+                && probes.iter().all(|(_, outcome)| denied_probe(outcome)),
+            "native sandbox probes failed: {:?}; roots_remained={roots_remained}; root_swap_did_not_write={root_swap_did_not_write}; hardlink_absent={}",
+            probes
+                .iter()
+                .filter(|(_, outcome)| !denied_probe(outcome))
+                .map(|(name, outcome)| (*name, outcome.termination))
+                .collect::<Vec<_>>(),
+            !hardlink_path.exists(),
+        );
         Ok(())
     }
 
