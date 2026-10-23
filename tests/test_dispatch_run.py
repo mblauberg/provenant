@@ -6677,3 +6677,24 @@ print(json.dumps({{"type":"result", "result":"DONE"}}))
             "SELECT attrs FROM events WHERE kind='lane.attempt' ORDER BY json_extract(attrs,'$.attempt')")]
     assert rows[1]['escalated_from'].endswith('/dispatch-001/1')
     assert 'escalated_from' not in rows[2]
+
+
+@pytest.mark.parametrize("check", ["passed", "invalid", "unavailable"])
+def test_terminal_receipt_persists_model_check_and_changes(tmp_path, check):
+    module = load_dispatch_module()
+    run = make_run(tmp_path, "run")
+    args = SimpleNamespace(tool="agy", alias="", model="fixture", effort="",
+                           task_id="task-1", access_mode="read_only", worktree=None, _last_plan={})
+    status = "model_unavailable" if check == "invalid" else "ok"
+    legacy = {"started_at": "2026-10-23T00:00:00Z", "finished_at": "2026-10-23T00:00:01Z",
+              "outcome": status, "status": status, "result": None,
+              "attempt_path": "tasks/task-1/attempt-001", "requested_route": {}}
+    fields = {"model_check": check, "model_check_detail": "listing evidence",
+              "model_changes": [{"from": "fixture", "to": "other"},
+                                {"from": "other", "to": "fixture"}]}
+    row = module.terminal_contract(args, run, legacy, {"status": status, **fields}, 1,
+                                   run / "tasks/task-1/attempt-001")
+    module.publish_contract(run, row)
+    saved = json.loads((run / row["paths"]["receipt"]).read_text())
+    for key, value in fields.items():
+        assert saved[key] == value
