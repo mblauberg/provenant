@@ -411,9 +411,9 @@ mod tests {
             r#"
 import os,json,sys,subprocess
 from pathlib import Path
-from scripts.worktree import worktree_records
+from scripts.worktree import worktree_records,git_environment
 p=Path(json.load(sys.stdin)['root']); repo=p/'repo'; repo.mkdir()
-def git(root,*args): return subprocess.run(['git','-C',str(root),*args],check=True,capture_output=True,timeout=10).stdout
+def git(root,*args): return subprocess.run(['git','-C',str(root),*args],check=True,capture_output=True,timeout=10,env=git_environment()).stdout
 git(repo,'init','-q');git(repo,'config','user.name','Fixture');git(repo,'config','user.email','fixture@example.test');git(repo,'commit','-q','--allow-empty','-m','fixture')
 for name in ['space path','line\nbreak'] + ([os.fsdecode(b'invalid-\xff')] if sys.platform != 'darwin' else []): git(repo,'worktree','add','-q','--detach',str(p/name),'HEAD')
 bare=p/'bare'; git(p,'clone','-q','--bare',str(repo),str(bare))
@@ -593,17 +593,18 @@ mod environment_tests {
     #[test]
     fn closed_and_hardened_environment_match_source_with_real_filters() {
         let dir = tempfile::tempdir().unwrap();
-        let Some(expected): Option<(
+        type Expected = (
             std::collections::BTreeMap<String, String>,
             std::collections::BTreeMap<String, String>,
             Vec<String>,
-        )> = crate::oracle::python(
+        );
+        let Some(expected): Option<Expected> = crate::oracle::python(
             r#"
 import json,sys,subprocess
 from pathlib import Path
 from scripts.worktree import git_environment
 p=Path(json.load(sys.stdin)['root'])
-def git(*a):return subprocess.run(['git','-C',str(p),*a],check=True,capture_output=True,timeout=10).stdout
+def git(*a):return subprocess.run(['git','-C',str(p),*a],check=True,capture_output=True,timeout=10,env=git_environment()).stdout
 git('init','-q');git('config','filter.z.clean','cat');git('config','filter.a.required','true');git('config','filter.z.process','cat');git('config','filter.a.smudge','cat')
 names=git('config','--null','--name-only','--get-regexp',r'^filter\..*\.(clean|smudge|process|required)$').decode(errors='replace').split('\0')
 print(json.dumps([git_environment(),git_environment(p,hardened=True),[n for n in names if n]]))
