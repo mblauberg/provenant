@@ -2,13 +2,11 @@
 
 from __future__ import annotations
 
-from datetime import timedelta
 from functools import lru_cache
 import json
 import os
 from pathlib import Path
 import re
-import sqlite3
 import subprocess
 import sys
 
@@ -19,7 +17,6 @@ from tests.support.dispatch import disable_memory_admission_floor
 from tests.support.fake_cli import fake_bin, fake_codex
 from tests.support.git import git_repo
 from tests.support.modules import load_script
-from tests.support.quota import snapshot as quota_snapshot, window as quota_window
 from tests.support.runs import make_run
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -41,9 +38,6 @@ NON_RECORD_SCHEMAS = {
     "fabric.hosts.v1": "host listing response from fabric_hosts",
     "fabric.hosts.doctor.v1": "host diagnostic report from fabric_hosts",
     "provenant.quota.report.v1": "rendered quota report/cache, separate from account snapshots",
-    "provenant.telemetry.summary.v1": "telemetry summary report exchanged between hosts",
-    "provenant.telemetry.compare.v1": "telemetry before/after comparison report",
-    "provenant.telemetry.retro.v1": "telemetry retrospective report",
 }
 FUTURE_SCHEMA_IDS: set[str] = set()
 RECORD_PATTERNS = {
@@ -254,8 +248,6 @@ def test_schema_inventory():
     covered = set(RECORD_PATTERNS) | fixture_names | {
         "model-routing", "model-preferences", "delivery-profiles", "quota-snapshot",
         "worker-terminal-envelope", "attempt-digest-sidecar", "manifest-row",
-        "telemetry-usage-row", "telemetry-event-row", "telemetry-quota-series-row",
-        "telemetry-quota-event-row",
     }
     assert set(SCHEMA_FILES) == covered, "each schema needs a flow or paired fixtures"
     assert NON_RECORD_SCHEMAS.keys() <= observed, "remove stale report exceptions"

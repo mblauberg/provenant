@@ -234,7 +234,8 @@ mod tests {
         );
         assert_eq!(instruction_changes(root.path()), ("deny".into(), vec![]));
         let (paths, warnings) = secret_scan_exclude(root.path());
-        assert_eq!(paths, [root.path().join("allowed")]);
+        let canonical = root.path().canonicalize().unwrap();
+        assert_eq!(paths, [canonical.join("allowed")]);
         assert_eq!(warnings.len(), 3);
         write_policy(root.path(), r#"{"instruction_changes":null}"#);
         assert_eq!(

@@ -1,15 +1,19 @@
 //! Project-scoped mail, tasks and events. One concrete connection per worker.
 #![forbid(unsafe_code)]
 
+mod claims;
 mod db;
 mod events;
 mod import;
+mod landing;
 mod messages;
 mod tasks;
 
+pub use claims::*;
 pub use db::{Request, RetryWait, Store, ThreadWait};
 pub use events::*;
 pub use import::*;
+pub use landing::*;
 pub use messages::*;
 pub use tasks::*;
 
@@ -49,6 +53,16 @@ pub enum Error {
     NotFound,
     #[error("record conflicts with existing state")]
     Conflict,
+    #[error("push operation {operation} requires reconciliation")]
+    PushUnresolved {
+        operation: provenant_core::OperationId,
+    },
+    #[error("invalid push transition from {from:?} using {action:?}")]
+    PushTransition { from: PushPhase, action: PushAction },
+    #[error("claim overlaps active ownership {claim}")]
+    Overlap { claim: provenant_core::ClaimId },
+    #[error("path cannot be represented as UTF-8")]
+    PathEncoding,
     #[error("task ownership fence is stale")]
     StaleFence,
     #[error("SQLite remained busy until the request deadline")]

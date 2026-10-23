@@ -1309,10 +1309,7 @@ fn store_clock_controls_fence_checks_mutation_times_and_acknowledgements() {
         store.update_task(project(), &fence, "too late", None, &f.request()),
         Err(Error::StaleFence)
     ));
-    assert!(matches!(
-        store.release_task(project(), &fence, &f.request()),
-        Err(Error::StaleFence)
-    ));
+    store.release_task(project(), &fence, &f.request()).unwrap();
     assert!(matches!(
         store.finish_task(project(), &fence, TaskState::Done, &f.request()),
         Err(Error::StaleFence)
@@ -1324,7 +1321,7 @@ fn ordered_migrations_upgrade_existing_rows_and_do_not_reapply() {
     let f = Fixture::new();
     drop(f.open());
     let db = rusqlite::Connection::open(f.path()).unwrap();
-    db.execute_batch("ALTER TABLE imports DROP COLUMN skipped_rows; PRAGMA user_version=1; INSERT INTO imports VALUES('prior','project','legacy',0,1,2);").unwrap();
+    db.execute_batch("DROP TABLE operations; DROP TABLE claim_paths; DROP TABLE claims; ALTER TABLE imports DROP COLUMN skipped_rows; PRAGMA user_version=1; INSERT INTO imports VALUES('prior','project','legacy',0,1,2);").unwrap();
     drop(db);
     let store = f.open();
     assert_eq!(
@@ -1465,3 +1462,36 @@ fn oversized_legacy_id_is_skipped_without_exhausting_selected_text_budget() {
         std::collections::BTreeMap::from([(ImportSkipReason::OversizeText, 2)])
     );
 }
+
+#[test]
+fn owner_can_close_its_expired_active_task_but_cannot_update_it() {
+    for state in [TaskState::Open, TaskState::Done, TaskState::Cancelled] {
+        let mut f = Fixture::new();
+        let store = f.open();
+        store.create_task(&task(&f), &f.request()).unwrap();
+        let fence = store.claim_task(&claim(&f, 3), &f.request()).unwrap();
+        f.clock
+            .advance(DurationMicros::from_seconds(1).unwrap())
+            .unwrap();
+        assert!(matches!(
+            store.update_task(project(), &fence, "changed", None, &f.request()),
+            Err(Error::StaleFence)
+        ));
+        if state == TaskState::Open {
+            store.release_task(project(), &fence, &f.request()).unwrap();
+        } else {
+            store
+                .finish_task(project(), &fence, state, &f.request())
+                .unwrap();
+        }
+        assert_eq!(
+            store
+                .task(project(), fence.task, &f.request())
+                .unwrap()
+                .state,
+            state
+        );
+    }
+}
+
+mod f2;
