@@ -34,5 +34,6 @@ skills/orchestrate/scripts/trusted_git.py#unit-01
 workspace:manifest-and-digest
 skills/orchestrate/scripts/adapters/copilot.py#unit-01
 skills/orchestrate/scripts/adapters/cursor.py#unit-01
-scripts/lane_safety_guard.py#unit-01
+skills/orchestrate/scripts/adapters/opencode.py#unit-01
 scripts/telemetry_report.py#unit-02
+scripts/lane_safety_guard.py#unit-01
