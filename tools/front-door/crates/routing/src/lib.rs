@@ -12,6 +12,7 @@ pub mod matching;
 pub mod model_route;
 pub mod pools;
 pub mod preferences;
+pub mod probe;
 
 pub mod ordered_json;
 pub mod pending;
