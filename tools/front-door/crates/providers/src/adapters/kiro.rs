@@ -32,23 +32,7 @@ pub fn kiro(plan: &Plan) -> AdapterProfile {
         argv.extend(["--effort".into(), effort.clone()]);
     }
     argv.push(format!("{}\n\n{}", plan.boundary_prompt, plan.prompt));
-    profile(
-        "kiro-cli",
-        argv,
-        Metadata {
-            transport: PromptTransport::Argv,
-            stdin: StdinMode::Null,
-            output: "stream-json",
-            effort_flag: Some("--effort"),
-            session_keys: &[
-                "sessionId",
-                "session_id",
-                "conversation_id",
-                "conversationId",
-            ],
-            model_source: Some("kiro:stream"),
-        },
-    )
+    profile("kiro", argv)
 }
 
 /// Whether the router's version-bound negative write probe is still fresh.
