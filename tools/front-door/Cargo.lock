@@ -14,3 +14,63 @@ version = "0.1.0"
 dependencies = [
  "libc",
 ]
+
+[[package]]
+name = "provenant-cli"
+version = "0.1.0"
+
+[[package]]
+name = "provenant-config"
+version = "0.1.0"
+
+[[package]]
+name = "provenant-confinement"
+version = "0.1.0"
+
+[[package]]
+name = "provenant-core"
+version = "0.1.0"
+
+[[package]]
+name = "provenant-fabric-mcp"
+version = "0.1.0"
+
+[[package]]
+name = "provenant-fabric-runtime"
+version = "0.1.0"
+
+[[package]]
+name = "provenant-fabric-store"
+version = "0.1.0"
+
+[[package]]
+name = "provenant-providers"
+version = "0.1.0"
+
+[[package]]
+name = "provenant-quota"
+version = "0.1.0"
+
+[[package]]
+name = "provenant-records"
+version = "0.1.0"
+
+[[package]]
+name = "provenant-routing"
+version = "0.1.0"
+
+[[package]]
+name = "provenant-run"
+version = "0.1.0"
+
+[[package]]
+name = "provenant-supervisor"
+version = "0.1.0"
+
+[[package]]
+name = "provenant-telemetry"
+version = "0.1.0"
+
+[[package]]
+name = "provenant-workflow"
+version = "0.1.0"

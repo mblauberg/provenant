@@ -1,17 +1,41 @@
+[workspace]
+members = [".", "crates/*"]
+resolver = "2"
+
+[workspace.package]
+edition = "2021"
+rust-version = "1.94"
+license = "MIT"
+
+# The only direct dependencies allowed (ADR 0028, PORTING.md R6). Member crates
+# use `{ workspace = true }`; an entry here enters Cargo.lock only once used.
+[workspace.dependencies]
+clap = { version = "4.6", default-features = false, features = ["std", "derive", "help", "usage", "error-context"] }
+jiff = "0.2"
+libc = "0.2"
+regex = "1.13"
+rusqlite = { version = "0.40", features = ["bundled"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sha2 = "0.11"
+tempfile = "3"
+thiserror = "2.0"
+toml_edit = "0.25"
+
 [package]
 name = "provenant"
 version = "0.1.0"
-edition = "2021"
-rust-version = "1.94"
+edition.workspace = true
+rust-version.workspace = true
 description = "Provenant front door: resolves the product checkout and execs the owner of each verb"
 publish = false
-license = "MIT"
+license.workspace = true
 
 [features]
 fault-injection = []
 
 [dependencies]
-libc = "0.2"
+libc.workspace = true
 
 [profile.release]
 opt-level = "z"
