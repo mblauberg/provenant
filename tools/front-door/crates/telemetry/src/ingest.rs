@@ -283,8 +283,19 @@ fn timestamp_seconds(seconds: f64) -> Result<jiff::Timestamp> {
     if !seconds.is_finite() {
         return Err(Error::Timestamp(seconds.to_string()));
     }
-    // datetime.fromtimestamp rounds to the nearest microsecond.
-    let nanos = (seconds * 1_000_000.0).round_ties_even() as i128 * 1000;
+    // CPython uses modf, then rounds only the fractional seconds to microseconds.
+    // Bound the whole seconds before casting or multiplying external input.
+    const MIN: i128 = -62_135_596_800; // datetime year 1
+    const END: i128 = 253_402_300_800; // datetime year 10000 (exclusive)
+    let whole = seconds.trunc();
+    if whole < (MIN - 1) as f64 || whole > END as f64 {
+        return Err(Error::Timestamp(seconds.to_string()));
+    }
+    let micros = (seconds.fract() * 1_000_000.0).round_ties_even() as i128;
+    let nanos = whole as i128 * 1_000_000_000 + micros * 1000;
+    if !(MIN * 1_000_000_000..END * 1_000_000_000).contains(&nanos) {
+        return Err(Error::Timestamp(seconds.to_string()));
+    }
     jiff::Timestamp::from_nanosecond(nanos).map_err(|_| Error::Timestamp(seconds.to_string()))
 }
 pub fn otel_attributes(items: &Value) -> Result<BTreeMap<String, Value>> {
@@ -732,6 +743,27 @@ pub(crate) mod tests {
             let result = ingest_stream(&mut MemoryCursor::default(), "test", Path::new("fixture"), &mut stream, Snapshot {device:1,inode:2,size:text.len() as u64,mtime_ns:1}, |_,_,_| Ok(()));
             assert!(result.is_err(), "integer was silently rounded");
             assert!(matches!(result, Err(Error::NumberOutOfRange)));
+        }
+    }
+
+    #[test]
+    fn review_regression_timestamp_fraction_rounds_like_cpython() {
+        let n = 1735689600791625390i128;
+        assert_eq!(otel_stamp(&json!(n.to_string()), None).as_deref(), Some("2025-01-01T00:00:00.791625Z"));
+        let mut sink = Capture::default();
+        codex_record(&mut sink, &json!({"type":"event_msg","payload":{"type":"token_count","rate_limits":{"primary":{"used_percent":0,"resets_at":n as f64 / 1e9}}}}), &mut ParserState::default(), Path::new("fixture"), 0, None).unwrap();
+        assert_eq!(sink.observations[0].reset_at.as_deref(), Some("2025-01-01T00:00:00.791625Z"));
+        for (seconds, expected) in [(0.0000005,"1970-01-01T00:00:00Z"),(0.0000015,"1970-01-01T00:00:00.000002Z"),(-0.0000015,"1969-12-31T23:59:59.999998Z"),(0.9999996,"1970-01-01T00:00:01Z")] {
+            assert_eq!(pending::iso(timestamp_seconds(seconds).unwrap()), expected);
+        }
+    }
+    #[test]
+    fn review_regression_huge_timestamp_is_an_error() {
+        let mut sink = Capture::default();
+        let result = codex_record(&mut sink, &json!({"type":"event_msg","payload":{"type":"token_count","rate_limits":{"primary":{"used_percent":0,"resets_at":1e30}}}}), &mut ParserState::default(), Path::new("fixture"), 0, None);
+        assert!(matches!(result, Err(Error::Timestamp(_))));
+        for seconds in [f64::MAX, -f64::MAX, f64::INFINITY, f64::NAN, 253_402_300_800.0, -62_135_596_801.0] {
+            assert!(matches!(timestamp_seconds(seconds), Err(Error::Timestamp(_))));
         }
     }
 
