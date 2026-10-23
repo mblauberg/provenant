@@ -175,10 +175,11 @@ pub fn assert_fixture_run_root(
         return Ok(());
     }
     let root = real_path(agent_run)?;
-    let mut temp_roots = vec![temp.to_path_buf(), PathBuf::from("/tmp")];
+    let mut temp_roots = vec![temp.to_path_buf()];
     if let Some(path) = fabric_test_tmpdir.filter(|path| !path.as_os_str().is_empty()) {
         temp_roots.push(path.to_path_buf());
     }
+    temp_roots.push(PathBuf::from("/tmp"));
     let mut real_roots = Vec::new();
     for path in temp_roots {
         let path = real_path(&path)?;
@@ -333,6 +334,7 @@ mod tests {
         ]);
         let script = r#"import * as m from './src/run-root.ts';
 const [paths,cases,temp,configured,defaultRoot] = process.argv.slice(1).map(JSON.parse);
+process.env.FABRIC_TEST_TMPDIR = configured;
 const capture = f => {try { return f() ?? null; } catch(e) {return e.message;}};
 console.log(JSON.stringify({
  roots: paths.map(m.acceptableFixtureTempRoot),
@@ -356,9 +358,14 @@ console.log(JSON.stringify({
             .iter()
             .map(|case| {
                 let routes: Vec<FixtureRoute> = serde_json::from_value(case[1].clone()).unwrap();
-                assert_fixture_run_root(Path::new(case[0].as_str().unwrap()), &routes, &repo, None)
-                    .err()
-                    .map(|error| error.to_string())
+                assert_fixture_run_root(
+                    Path::new(case[0].as_str().unwrap()),
+                    &routes,
+                    &repo,
+                    Some(root.path()),
+                )
+                .err()
+                .map(|error| error.to_string())
             })
             .collect();
         assert_eq!(
