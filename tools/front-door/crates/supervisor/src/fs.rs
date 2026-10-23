@@ -26,6 +26,13 @@ pub enum FsError {
         #[source]
         source: io::Error,
     },
+    #[error("filesystem rename failed from {from_path:?} to {to_path:?}")]
+    Rename {
+        from_path: PathBuf,
+        to_path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
     #[error("symlink or link loop refused for {path:?}")]
     Symlink {
         path: PathBuf,
@@ -46,7 +53,9 @@ pub type Result<T> = std::result::Result<T, FsError>;
 impl FsError {
     pub fn raw_os_error(&self) -> Option<i32> {
         match self {
-            Self::Io { source, .. } | Self::Symlink { source, .. } => source.raw_os_error(),
+            Self::Io { source, .. }
+            | Self::Symlink { source, .. }
+            | Self::Rename { source, .. } => source.raw_os_error(),
             Self::CrossDevice { .. } => Some(errno::EXDEV),
             _ => None,
         }
@@ -86,7 +95,9 @@ impl FsError {
 impl From<FsError> for io::Error {
     fn from(error: FsError) -> Self {
         match error {
-            FsError::Io { source, .. } | FsError::Symlink { source, .. } => source,
+            FsError::Io { source, .. }
+            | FsError::Symlink { source, .. }
+            | FsError::Rename { source, .. } => source,
             FsError::CrossDevice { .. } => Self::from_raw_os_error(errno::EXDEV),
             error => Self::new(
                 match &error {
@@ -322,8 +333,13 @@ impl Directory {
     ) -> Result<()> {
         component(source)?;
         component(destination)?;
-        os::rename(&self.file, source, &destination_dir.file, destination, mode)
-            .map_err(error("renameat", &destination_dir.path.join(destination)))
+        os::rename(&self.file, source, &destination_dir.file, destination, mode).map_err(
+            |source_error| FsError::Rename {
+                from_path: self.path.join(source),
+                to_path: destination_dir.path.join(destination),
+                source: source_error,
+            },
+        )
     }
     pub fn symlink(&self, target: &Path, name: &OsStr) -> Result<()> {
         let name = component(name)?;
