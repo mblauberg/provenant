@@ -426,7 +426,10 @@ def test_ci_runs_complete_harness_and_fabric_gates() -> None:
     pin_index = next(
         index for index, command in enumerate(setup_commands) if "npm install --global npm@11.12.1" in command
     )
-    install_index = next(index for index, command in enumerate(setup_commands) if command.strip() == "npm ci")
+    install_index = next(
+        index for index, command in enumerate(setup_commands)
+        if "retry-npm-install.py -- npm ci" in command
+    )
     assert pin_index < install_index
 
     for job_name in ("harness-checks", "python-tests", "fabric", "split-root"):
