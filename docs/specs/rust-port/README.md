@@ -96,6 +96,11 @@ Its promises about locking, WNOWAIT identity, never killing on silence or
 bookkeeping failure, bounded observation and terminal publication survive.
 Its lists of components remaining in Python/TS are no longer final exclusions.
 
+Python-AST tooling is `retired`, with a deletion criterion on every graph unit
+(PORTING.md R6). It stays outside the Rust port. Security checks remain in
+Python CI while tracked Python sources exist; date lint is retargeted to Rust
+tests through a separate unit. Retired units are excluded by `ready.py`.
+
 ## Phases and acceptance
 
 | Phase | Work | Exit evidence |
@@ -208,7 +213,7 @@ from dividing by the number of models.
 
 | Crate | Base lane-days | Planning range |
 |---|---:|---:|
-| cli | 17.5 | 17.5–31 |
+| cli | 18.5 | 18.5–32.5 |
 | config | 9.75 | 9.75–17.5 |
 | confinement | 4.75 | 4.75–8.5 |
 | core | 3.5 | 3.5–6.5 |
@@ -216,15 +221,15 @@ from dividing by the number of models.
 | fabric-mcp | 2 | 2–3.5 |
 | fabric-runtime | 25.5 | 25.5–45 |
 | fabric-store | 3 | 3–5.5 |
-| providers | 11.25 | 11.25–20 |
+| providers | 9.75 | 9.75–17.5 |
 | quota | 6.75 | 6.75–12 |
-| records | 4.5 | 4.5–8 |
+| records | 5.5 | 5.5–10 |
 | routing | 11.25 | 11.25–20 |
 | run | 12.25 | 12.25–21.5 |
-| supervisor | 7.25 | 7.25–13 |
+| supervisor | 8.25 | 8.25–14.5 |
 | telemetry | 8 | 8–14 |
-| workflow | 29 | 29–51 |
-| **Total** | **157.75** | **157.75–276.5** |
+| workflow | 31.25 | 31.25–55 |
+| **Total** | **161.5** | **161.5–283** |
 
 <!-- estimates:end -->
 

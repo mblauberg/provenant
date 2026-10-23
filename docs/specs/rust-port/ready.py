@@ -5,6 +5,7 @@ Usage: python3 docs/specs/rust-port/ready.py CRATE [MAX_LANE_DAYS] [EXTRA_LEDGER
 A unit is ready when it targets CRATE, is not listed in ported.txt (or the
 optional extra ledger of in-flight ids), and every dependency is done or
 already in the batch. Partial units stay ready, so a later batch continues them.
+Retired units are outside the port; their deletion criteria remain in the graph.
 """
 import json
 import sys
@@ -22,11 +23,11 @@ taken = {
     if line.strip() and not line.startswith("#")
 }
 nodes = {node["id"]: node for node in graph["nodes"]}
-done = taken | {i for i in nodes if i.startswith("prerequisite:")} | {"workspace:manifest-and-digest"}
+done = taken | {i for i in nodes if i.startswith("prerequisite:") or nodes[i].get("action") == "retired"} | {"workspace:manifest-and-digest"}
 batch, spent = [], 0.0
 for unit in (i for wave in graph["leaves_first_waves"] for i in wave):
     node = nodes[unit]
-    if node.get("target_crate") != crate or unit in done:
+    if node.get("target_crate") != crate or unit in done or node.get("dispatchable") is False:
         continue
     if not set(node["depends_on"]) <= done | set(batch):
         continue

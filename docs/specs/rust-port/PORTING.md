@@ -1,9 +1,11 @@
 # Rust port rulebook
 
-Version: **4**. Status: accepted 2026-10-23 with
+Version: **5**. Status: accepted 2026-10-23 with
 [ADR 0028](../../adr/0028-rust-port-dependencies.md); version 3 scopes the
 judge gates to cut-over, version 4 fixes number, timestamp and differential
-rules from wave-1 review. Applies to every port lane. The [plan](README.md) owns the boundary, phases and landing method.
+rules from wave-1 review. Version 5 settles YAML, retires Python-AST tooling
+and records fixture and macOS release checks. Applies to every port lane.
+The [plan](README.md) owns the boundary, phases and landing method.
 
 ## R1. Version the rules and regenerate their consequences
 
@@ -161,8 +163,30 @@ features; member crates use `{ workspace = true }`.
 Written in-house, per the ADR: HTTP through `curl` with headers on stdin; the
 MCP stdio JSON-RPC server; error context at the binary edge; stderr
 diagnostics; random IDs from `getentropy`. There is no async runtime: use
-threads. Provenant's own YAML data moves to JSON; the lane that needs to read
-external YAML proposes a reader under the ADR's criteria.
+threads. Provenant's own YAML data moves to JSON through the graph's separate
+`records:yaml-data-to-json` migration, including runtime consumers and fixtures.
+External YAML uses the fail-closed subset reader in `provenant-records` defined
+by ADR 0028 decision 5; no YAML parser crate is added. The reader's CI gate
+parses every tracked external file and, while Python exists, compares accepted
+values with PyYAML. Exact PyYAML error wording is excluded from parity.
+Record refusal of unsupported YAML constructs, ambiguous plain scalars and
+duplicate keys as an approved `improvement` divergence: for example,
+`enabled: on` must report the construct and line with `quote this`, rather
+than silently become a boolean. Reader diagnostic wording differences are a
+`library` divergence; retain construct and line information.
+
+Python-AST tooling stays outside the port. No Python parser crate is allowed.
+The graph's `retired` disposition records a deletion criterion for every unit;
+these units are not dispatched as Rust ports. Delete each tool when its target
+glob is empty. `scripts/static-security-check.py` keeps running in Python CI
+until no tracked Python sources remain. Its Rust replacement is the R7 unsafe
+guard plus a workspace `clippy.toml` `disallowed-methods` entry for
+`std::process::Command::new` outside supervisor. The command lint is graph
+work, including existing callers and scoped allowances, not a local exemption.
+`scripts/lint-timebomb-fixtures.py` retires for Python and JS/TS when no
+`tests/*.py` and no `*.test.ts` remain. A separate graph unit retargets its
+date policy to Rust `#[test]` sources using the textual engine in
+`provenant-cli`; it does not port Python AST analysis.
 
 Any new direct crate, feature expansion or material transitive addition needs
 a rule change here with a reason and the affected gates. No per-lane
@@ -181,9 +205,12 @@ callers elsewhere use its safe API. Audit dependency unsafe separately through
 lockfile review; this rule applies to first-party source, not a claim that
 dependencies contain none.
 
-The existing front door has unsafe in `src/exec.rs` and `src/resolve.rs`.
+The existing front door has unsafe in `src/exec.rs`, `src/resolve.rs` and
+`src/lane/`.
 The graph's `workspace:front-door-syscalls` unit relocates it without changing
-root resolution or exec behaviour; reuse is not an exemption from this rule.
+root resolution or exec behaviour. `workspace:front-door-unsafe-guard` moves
+the remaining lane syscalls into supervisor and forbids unsafe in the binary.
+Reuse is not an exemption from this rule.
 
 Each unsafe block states validity, ownership, lifetime, concurrency and error
 conditions. A second reviewer checks syscall effects and failure paths.
@@ -225,8 +252,17 @@ through one helper that takes the interpreter from `PROVENANT_PORT_PYTHON`
 (default `python3`, at least 3.12) or `PROVENANT_PORT_NODE` (default `node`,
 at least 24). A missing or older interpreter skips with a `skip:` line, but
 fails the test when `PROVENANT_PORT_DIFF_REQUIRED=1`, which CI sets. On macOS
-`/var` is a symlink to `/private/var`: compare canonicalized temporary paths,
-because CI runs the Rust job on Linux only.
+`/var` is a symlink to `/private/var`: compare canonicalised temporary paths.
+The full Rust test job runs on Linux; a macOS release-build smoke job shares
+its path filter. Keep that release build: stripping proc-macro dylibs broke
+macOS installation while debug and Linux checks passed (#1339).
+
+Repo-file fixtures use `include_str!(concat!(env!("CARGO_MANIFEST_DIR"),
+"/..."))`. Deep relative `include_str!` paths can escape a nested `.worktrees/`
+checkout into the primary checkout and pass locally, then fail in CI.
+Fractional-second UTC offsets differ across CPython point releases. Use the
+core `py` fromisoformat helper, which probes the interpreter, rather than
+fixed oracle fixtures.
 
 Locally run only targeted tests, fmt, lint/type checks and the graph fixtures.
 Full suites, `scripts/check-harness`, platform conformance and stress run in CI.

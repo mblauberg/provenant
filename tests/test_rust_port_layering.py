@@ -44,3 +44,9 @@ def test_every_internal_crate_is_a_workspace_dependency():
     declared = {name.removeprefix("provenant-") for name in data["workspace"]["dependencies"]
                 if name.startswith("provenant-")}
     assert declared == {path.parent.name for path in (WORKSPACE / "crates").glob("*/Cargo.toml")}
+
+
+def test_every_non_supervisor_library_forbids_unsafe():
+    for manifest in (WORKSPACE / "crates").glob("*/Cargo.toml"):
+        if manifest.parent.name != "supervisor":
+            assert "#![forbid(unsafe_code)]" in (manifest.parent / "src/lib.rs").read_text(), manifest

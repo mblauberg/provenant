@@ -1,4 +1,5 @@
 //! Adapter profiles, argv and environment builders, output classification and continuation.
+#![forbid(unsafe_code)]
 
 pub mod adapters;
 
