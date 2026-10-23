@@ -6,8 +6,12 @@ import math
 from pathlib import Path
 import sys
 
-import quota_display
-
+quota_display = sys.modules.get('quota_display')
+if quota_display is None:
+    _display_spec = importlib.util.spec_from_file_location('quota_display', Path(__file__).with_name('quota_display.py'))
+    quota_display = importlib.util.module_from_spec(_display_spec)
+    sys.modules['quota_display'] = quota_display
+    _display_spec.loader.exec_module(quota_display)
 
 USAGE_KEYS = ('provider', 'adapter', 'model')
 DAY_KEYS = ('day', 'provider', 'adapter', 'account')

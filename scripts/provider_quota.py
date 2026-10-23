@@ -31,7 +31,6 @@ import tempfile
 from time import monotonic
 from urllib.error import HTTPError, URLError
 
-import quota_display
 
 
 _OPENER = []
@@ -94,6 +93,12 @@ if schedule is None:
     schedule = importlib.util.module_from_spec(_schedule_spec)
     sys.modules['quota_schedule'] = schedule
     _schedule_spec.loader.exec_module(schedule)
+quota_display = sys.modules.get('quota_display')
+if quota_display is None:
+    _display_spec = importlib.util.spec_from_file_location('quota_display', HERE / 'quota_display.py')
+    quota_display = importlib.util.module_from_spec(_display_spec)
+    sys.modules['quota_display'] = quota_display
+    _display_spec.loader.exec_module(quota_display)
 RETRY_AFTER_CAP = 86400
 TRACE_RETENTION_DAYS = 30
 TRACE_TEXT = 200
