@@ -6,8 +6,10 @@ pub mod command;
 
 pub mod front_door;
 pub mod instance;
+pub mod managed_skills;
 pub mod manifest;
 mod pending;
+mod python_unicode;
 pub mod workflows;
 
 #[derive(Debug, thiserror::Error)]
@@ -55,6 +57,8 @@ pub enum Error {
         #[source]
         source: std::string::FromUtf8Error,
     },
+    #[error("cannot use '{kind}' as a set element (unhashable type: '{kind}')")]
+    CodexUnhashable { kind: &'static str },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

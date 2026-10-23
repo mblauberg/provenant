@@ -1083,3 +1083,237 @@ The source revision above is unchanged; CLI rendering remains an edge task.
   stays a JSON value. The raw-input public report regression failed before
   repair and now covers reordered, nested and duplicate-key objects without
   adding `preserve_order` or a dependency.
+## RP-config-4 — config command edge rendering gaps
+
+- Units: `scripts/configure-codex-skill-overrides.py#unit-01`,
+  `scripts/install-workflows#unit-01`; rulebook v4.
+- Class: `bug`. Disposition: open; affected units remain partial. These
+  mismatches are not approved contract changes.
+- Compared revisions: Python source revision
+  `7475ff01e437ec51c760b852516c21a5281cf9c6`; Rust command boundaries are
+  commits `8638ee4ab59b8581b7a7ca80d06ed1c26cefb435` and
+  `4dc3cc45ea474754deb828f4d76a559ada9addc3`. Python 3.14.3. Fixture roots
+  are isolated temporary directories; no live config is read or written.
+- Reproducers and expected/actual:
+  - Codex config with `enabled = []`: Python exits 1 with an uncaught
+    `TypeError` traceback; the Rust command result exits 1 with a short
+    `TypeError` line.
+  - On Unix, a `--config` or workflow `--target` path containing a non-UTF-8
+    byte is preserved in Python's printed bytes; current Rust `Path::display`
+    replaces it with U+FFFD, and command result strings cannot preserve that
+    byte sequence.
+- Evidence: reviewer source comparison against
+  `scripts/configure-codex-skill-overrides.py:44,132-134`, and
+  `scripts/install-workflows:290-292`; Rust implementations are in `codex.rs`
+  and `workflows.rs`. `codex::tests::unhashable_enabled_values_keep_python_type_error_and_exit_status`
+  compares the source exception and verifies status, while
+  `workflows::tests::conflicting_preflight_command_matches_python` compares
+  command streams and status. The traceback bytes and non-UTF-8 path output
+  remain uncovered.
+- Follow-up: add exact command edge rendering and OS-path compatibility before
+  claiming these units complete. No command cut-over is included in this lane.
+
+## RP-config-5 — workflow JSON parse diagnostic wording
+
+- Unit: `scripts/install-workflows#unit-01`; rulebook v4.
+- Class: `library`. Disposition: open; the unit remains partial. This is not
+  an approved contract change.
+- Compared revisions: Python source revision
+  `7475ff01e437ec51c760b852516c21a5281cf9c6`; Rust workflow reader commit
+  `4dc3cc45ea474754deb828f4d76a559ada9addc3`. Python 3.14.3. Fixture roots are
+  isolated temporary directories; no live receipt is read or written.
+- Reproducer: create an empty `.agent-harness-workflows-installation.json`
+  beside the target and load it through `_load_manifest` and `workflows::load`.
+- Expected / actual: both reject the receipt. Python reports
+  `Expecting value: line 1 column 1 (char 0)`; serde_json reports its EOF
+  parse diagnostic and byte offset. The command status remains 3.
+- Evidence: source handling is at `scripts/install-workflows:67-70`; Rust
+  parsing is at `workflows.rs:78` through `pending::read_json`. The malformed
+  receipt differential remains to be added; only successful receipt and
+  command cases plus conflict refusal are covered in this batch.
+- Follow-up: reconcile Python JSON diagnostic rendering at the command edge
+  and add malformed receipt failure differentials before claiming the unit
+  complete.
+
+## RP-config-6 — instance interface input ordering and home expansion
+
+- Unit: `scripts/instance_installation.py#interface`; rulebook v4.
+- Class: `bug`. Disposition: open; the interface remains partial. These are
+  not approved contract changes.
+- Compared revisions: Python source revision
+  `7475ff01e437ec51c760b852516c21a5281cf9c6`; Rust interface commit
+  `742ce1d92ac8632e3a673e63cdc2999594d5bdec`. Python
+  3.14.3. The path traversal case uses an in-memory fixture; the `~username`
+  case depends on the host account database and does not touch instance files.
+- Reproducers and expected/actual:
+  - Validate the JSON text
+    `{"schema_version":1,"contract":"installation-desired-state","product":{"version":"${ROOT}","name":"~/product"},"mode":"split"}`.
+    Python retains product insertion order and reports `/product/version`
+    first; conversion into serde_json's default sorted object reports
+    `/product/name` first.
+  - Set `AGENT_FABRIC_INSTANCE_ROOT=~mikey/instance` on a host where `mikey`
+    exists. Python `Path.expanduser()` returns that account's absolute home
+    path; Rust expands only `~` and `~/`, then refuses the relative value.
+- Evidence: source review at `scripts/instance_installation.py:191-203,737-743`
+  and candidate implementation at `instance.rs:57-67,134,188-194`. Existing
+  desired-state differential cases cover representable values but not these
+  two cases; a retained exact differential remains to be added.
+- Follow-up: expose an ordered JSON input representation and platform home
+  directory lookup before claiming this interface complete. No caller
+  cut-over is included in this lane.
+
+## RP-FR2-001: Fabric policy ordered mappings and Python repr (open, library)
+
+- Unit: `skills/orchestrate/scripts/fabric_policy.py#unit-01` (partial),
+  rulebook v4.
+- Compared source/oracle revision: `600dec09bcda3b6a86272e391420e89d38777953`.
+- Reproducer: configure `tools` with keys in the order `z`, then `a`, or use
+  an invalid `secret_scan_exclude` entry containing the float `1e-7` or a
+  nested object with reordered keys. CPython preserves dict insertion order
+  and renders `1e-7` as `1e-07`; this crate's `serde_json::Map` sorts keys and
+  its current Python repr helper does not preserve source object order or
+  CPython float spelling.
+- A second open edge is a non-finite JSON number in an unknown policy field.
+  Python's JSON decoder accepts `NaN` and infinities. The pending checked JSON
+  adapter maps them to `null` so the source-compatible typed `default_branch`
+  warning is preserved, but that changes unknown-field values and is not a
+  general Python JSON number representation.
+- Non-finite values in `secret_scan_exclude` also remain different: for
+  `secret_scan_exclude: [NaN]`, Python warns with `nan`, while the Rust warning
+  currently renders `None` after the adapter maps the value to null.
+- Exact `repr()` parity also remains open for quote selection and control
+  escapes. For example, Python uses double quotes for a value containing an
+  apostrophe when that avoids escaping, and renders U+0001 as `\x01`; the
+  pending helper always uses single quotes and does not encode all control
+  characters this way.
+- Evidence: policy differential tests cover defaults, invalid scalar entries,
+  containment, warning text and `NaN` on the typed `default_branch` field, but
+  do not exercise the above ordered/repr cases, non-finite exclusion entries
+  or non-finite unknown values.
+  The difference is visible in returned tool settings and warnings.
+- Disposition: open; no behaviour change is accepted. Keep the unit partial
+  until the `provenant-records` ordered Python-value codec and
+  `provenant-core` repr helper are available to this crate.
+
+
+## RP-core-2-01 — shared Python compatibility ownership and ISO repairs
+
+- Rulebook v4; class `bug` (fixed, no intentional source behavior change).
+- Source/oracle: Python sources at `7475ff01`; copied helpers from quota's
+  verified pending module at that revision and providers PR #1298 revision
+  `4155f202e01c9e275e24a9d188f9be5839c04008`. Local CPython 3.14.8,
+  Unicode 16.0.0; Rust oracle runner enforces Python >=3.12.
+- Reproducer: `py::tests::iso_grammar_and_offsets_match_python`, including
+  `2026-W43-5112`, Unicode separators, ISO week dates, fractional UTC offsets,
+  and `9999-12-31T12Z`. The copied Jiff adaptation did not cover this grammar
+  and Jiff's UTC timestamp range excludes Python's final twelve hours.
+- Repair: shared `py` parses Python civil datetimes and retains exact i64 UTC
+  microseconds in `PythonTimestamp`; `to_jiff` is explicitly checked. Week-date
+  separator disambiguation follows CPython's local `_pydatetime` implementation.
+  Float-second conversion retains quota's modf/half-even implementation.
+- Evidence: exact differential grammar matrix, 1,033 fromtimestamp fixtures,
+  numeric equality across bool/int/float, 512 deterministic float bit patterns,
+  and all Unicode scalar printable classifications. No epsilon, timestamp
+  normalisation, or integer-to-float comparison is used.
+- Disposition: source compatibility gathered into `provenant_core::py`;
+  other crates' copies remain for their owners to migrate. Checked JSON stays
+  in records. JSONC/host/pointer representation gaps remain separately open.
+
+### RP-1001 core-2 follow-up — byte encodings and slug inputs
+
+- Unit: `scripts/host_identity.py#unit-01`; rulebook v4; class `bug` (partial
+  repair, no intentional behavior change). Source/oracle `7475ff01` unchanged
+  at main `cc02dde4`; route `codex/gpt-6.1-sol@high`.
+- `configured` and lenient `peer_ids` now use Python's BOM and null-byte sniffing
+  for UTF-8/16/32, including BOM-less UTF-16/32. Decode errors preserve typed
+  causes and the source's stable `InvalidHost` message.
+- `slug_value` applies the shared Python truth/str helpers for JSON-shaped
+  inputs; the hostname observation API continues taking a string value.
+- Evidence: exact Python differential over eight valid byte encodings and
+  eight malformed/shape/duplicate cases, plus thirteen permissive slug inputs.
+- Remaining: nonfinite/overflow values and lone surrogate JSON strings (and
+  raw surrogate-pass byte decoding). The existing failing parity reproducer
+  remains ignored; this unit is still partial. No codec was moved from records.
+
+### RP-1002 core-2 follow-up — comment diagnostics and shared whitespace
+
+- Unit: `scripts/lib/jsonc.py#unit-01`; rulebook v4; class `bug` (partial
+  repair). Source/oracle `7475ff01`; route `codex/gpt-6.1-sol@high`.
+- Unterminated-comment error display now includes Python's exact line, column
+  and character offset. Unicode and CRLF differential fixtures compare all
+  four observable diagnostic values, including errors after earlier comments.
+- Trailing-comma lookahead uses the shared `py::python_whitespace`; control
+  whitespace is still rejected by the JSON grammar just as Python rejects it.
+- Remaining: extended JSON/surrogate/insertion-order representation, exact
+  integer ingress and generic JSONDecodeError diagnostics. Core cannot depend
+  on records under R2; no checked codec is moved or copied by this repair.
+  The unit remains partial and is excluded from `Units:`.
+
+### RP-1003 core-2 follow-up — native pointer writer bytes
+
+- Unit: `scripts/lib/product_root_resolver.py#unit-01`; rulebook v4; class `bug`
+  (partial repair). Source/oracle `7475ff01`; route `codex/gpt-6.1-sol@high`.
+- Pointer writing now emits Python's ASCII JSON spelling for native paths,
+  including U+007F and Unix surrogateescape for invalid UTF-8 bytes. It never
+  converts a path through replacement characters. Publication policy is unchanged.
+- Evidence: exact path-wire differential over 260 native byte fixtures, plus
+  pointer-writer differential for a real non-UTF-8 directory when supported.
+  The pure byte fixtures always run even if the filesystem refuses that name.
+- Pending: the small private `pending::path_json` and its error type belong in
+  records, whose current API cannot represent surrogateescaped JSON paths.
+  No checked integer codec is moved or copied; R2 prohibits a core->records
+  dependency. `pending::atomic_write` continues awaiting supervisor publication.
+- Remaining: pointer loading for surrogateescaped paths, extended JSON in
+  ignored fields, and exact integer ingress. The retained ignored differential
+  still documents these reader gaps; the unit remains partial.
+
+## RP-core-2-02 — scripts root facade completion
+
+- Unit: `scripts/lib/roots.py#unit-01`; rulebook v4; class `bug` (fixed).
+  Source/oracle `7475ff01`, unchanged at `cc02dde4`; route
+  `codex/gpt-6.1-sol@high`.
+- The Rust `roots` exports are the statically linked equivalent of the Python
+  facade's re-exported constant and two functions. Shared-root policy was already
+  present; direct facade differentials now cover unset/empty overrides, tilde,
+  lexical path spelling, unknown-user errors and native environment path bytes.
+- A right-reason failing differential exposed a missing final period in
+  `PathError::Home`; its wording now matches Python's expanduser RuntimeError.
+- All runtime policy is ported. Python importlib loading/defensive missing-module
+  branches are interpreter plumbing, replaced by Rust's compile-time module
+  linkage; no Python loader seam is copied. No command is switched.
+- Evidence: five roots tests pass, including the two direct-facade
+  differentials; default install paths use canonical paths on macOS.
+
+### RP-core-2-01 oracle patch-version clarification
+
+- CI uses CPython 3.14.4; local default is 3.14.8. Both accept midnight and
+  require explicit seconds before fractions, but disagree on `-00:00:00.5`:
+  3.14.4 discards the fractional offset, while 3.14.8 retains it. Requiring
+  >=3.14.8 initially caused the required CI differential to refuse its oracle.
+- Preserve both observed behaviors through `IsoformatSemantics` and
+  `python_fromisoformat_with`; the default matches pinned CI Python 3.14.4.
+  The exact differential chooses the source interpreter's explicit semantics
+  from an explicit datetime feature probe, never normalising timestamp results. Both 3.14.4 and
+  3.14.8 are installed/run locally. No Python bug is silently fixed.
+- The grammar fixture requires >=3.14; Python 3.12/3.13 remain valid for the
+  other oracle fixtures. A missing/incompatible required oracle still fails.
+
+### RP-1001 review correction — preserve slug input order
+
+The core-2 review found that the newly proposed `slug_value(&Value)` boundary
+would render sorted serde mappings rather than Python's insertion order
+(`{'z': 0, 'a': 0}` must slug to `z-0-a-0`). That generic API and its scalar-only
+fixture were removed before landing. The string/hostname slug API remains;
+generic Python input slugging awaits an ordered value representation and is
+explicitly part of this unit's remaining partial scope. The byte-encoding
+repair above is retained and independently covered.
+
+### RP-1003 review correction — unknown home errors
+
+A direct source differential exposed an ordinary pointer-loading error path:
+Python's `Path.expanduser` RuntimeError for an unknown user is not caught by the
+source reader. The old Rust reader discarded it as pointer absence. Both Rust
+load APIs now return `Result<Option<PathBuf>, PathError>` and preserve that error;
+malformed/missing pointers still return `Ok(None)`. No callers outside core use
+these inert APIs. The regression failed with `null` versus the source error,
+then passed after repair. Extended JSON/native-path reader gaps remain partial.
