@@ -32,6 +32,11 @@ Modeling = "Modeling"
 [default.extend-identifiers]
 # Proper name of the upstream Skill Optimizer.
 Optimizer = "Optimizer"
+# Upstream API names: serde's trait, MCP lifecycle methods, a retired Python helper.
+Serialize = "Serialize"
+initialize = "initialize"
+initialized = "initialized"
+run_dir_finalize = "run_dir_finalize"
 
 [type.js.extend-identifiers]
 "Carbonize" = "Carbonize"
