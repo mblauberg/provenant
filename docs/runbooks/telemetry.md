@@ -34,6 +34,11 @@ command contacts provider quota services on demand.
    available ledger is still reported. SQLite waits briefly for a reader or
    writer; a second ingest skips immediately while the first holds the ingest
    lock.
+
+   The outcomes table groups route results by adapter, model, effort, task
+   class and route. Costs are API-equivalent estimates from recorded usage;
+   `$/ok` is blank when any attempt lacks usage or a price, or when the group
+   has no successful lanes.
 4. Run `provenant telemetry changes --sync` to record merged PRs as change
    markers, then `provenant stats --compare <PR#|rev|date>` for before/after
    metrics or `provenant retro` for a digest. See

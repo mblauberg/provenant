@@ -24,15 +24,23 @@ def percentile(values, share):
 OUTCOME_KEYS = ('adapter', 'model', 'effort', 'task_class', 'route')
 
 
-def outcomes(rows):
+def outcomes(rows, telemetry, costs, prices, free_patterns, outcome_keys=OUTCOME_KEYS):
     """Route quality per adapter/model@effort, task class and route from Fabric attempts."""
-    keys = OUTCOME_KEYS
+    keys = outcome_keys
     groups = {}
     latest = {}
     for row in rows:
         key = tuple(row.get(k) or None for k in keys)
-        group = groups.setdefault(key, {'attempts': 0, 'errors': Counter(), 'latency': [], 'speed': []})
+        group = groups.setdefault(key, {'attempts': 0, 'errors': Counter(), 'latency': [], 'speed': [],
+                                        'known_cost_usd': 0.0, 'missing_cost_rows': 0})
         group['attempts'] += 1
+        entry = costs.price_entry(row, prices, free_patterns)
+        cost = (costs.estimated_cost(telemetry, row, prices, entry)
+                if all(field in row for field in costs.TOKEN_FIELDS) else None)
+        if cost is None:
+            group['missing_cost_rows'] += 1
+        else:
+            group['known_cost_usd'] += cost
         if row['status'] not in SUCCESS and row['error_class']:
             group['errors'][row['error_class']] += 1
         if row['duration_ms'] is not None:
@@ -51,9 +59,14 @@ def outcomes(rows):
     report = []
     for key, group in sorted(groups.items(), key=lambda item: tuple(str(v or '') for v in item[0])):
         lanes = group.get('lanes', 0)
-        report.append({**dict(zip(keys, key)), 'lanes': lanes, 'succeeded': group.get('succeeded', 0),
+        report.append({**dict.fromkeys(OUTCOME_KEYS), **dict(zip(keys, key)),
+                       'lanes': lanes, 'succeeded': group.get('succeeded', 0),
                        'success_rate': round(group.get('succeeded', 0) / lanes, 3) if lanes else None,
                        'attempts': group['attempts'], 'retries': group.get('retries', 0),
+                       'known_cost_usd': costs.micro(group['known_cost_usd']),
+                       'missing_cost_rows': group['missing_cost_rows'],
+                       'cost_per_success_usd': (costs.micro(group['known_cost_usd'] / group['succeeded'])
+                                                if group.get('succeeded', 0) and not group['missing_cost_rows'] else None),
                        'error_classes': dict(sorted(group['errors'].items())),
                        'latency_samples': len(group['latency']),
                        'latency_p50_s': percentile(group['latency'], 0.5),
@@ -201,10 +214,11 @@ def stats(telemetry, db, since=None, prices=None, *, summary=False, until=None):
             'usage_per_day': costs.finalise(groups(('day', 'provider', 'adapter', 'account')), ('day', 'provider', 'adapter', 'account')),
             'usage_by_parent': costs.aggregate(telemetry, [row for row in attributed if row['source'] == 'fabric' and row.get('parent_run_id')],
                                          ('parent_run_id', 'parent_task_id', 'parent_attempt'), prices, free_patterns),
-            'outcomes': outcomes([row for row in attributed if row['source'] == 'fabric']),
+            'outcomes': outcomes([row for row in attributed if row['source'] == 'fabric'],
+                                 telemetry, costs, prices, free_patterns),
             # One overall group each, for before/after comparison; percentiles are never averaged.
-            'lane_totals': outcomes([{**row, **dict.fromkeys(OUTCOME_KEYS)}
-                                     for row in attributed if row['source'] == 'fabric']),
+            'lane_totals': outcomes([row for row in attributed if row['source'] == 'fabric'],
+                                    telemetry, costs, prices, free_patterns, outcome_keys=()),
             'usage_totals': [{**group, 'known_cost_usd': costs.micro(group['known_cost_usd']),
                               'reported_cost_usd': costs.micro(group['reported_cost_usd'])} for group in groups(())],
             'lanes': [{'status': status, 'error_class': error, 'lanes': count}
@@ -240,6 +254,12 @@ def peer_summary(telemetry, db, since=None, host=None):
         report['host'] = host
         for row in report['session_usage']:
             row['host'] = host
+    # The v1 peer contract predates outcome pricing and validates unknown fields
+    # as strings. Keep cost enrichment in the local report until that contract
+    # is explicitly extended.
+    for row in report['outcomes']:
+        for field in ('known_cost_usd', 'missing_cost_rows', 'cost_per_success_usd'):
+            row.pop(field, None)
     report['schema'] = 'provenant.telemetry.summary.v1'
     report['quota_snapshots'] = [public_snapshot(telemetry, {**value, 'host': report['host'] if host else telemetry.host_id()})
                                  for value in telemetry.quota_owner().snapshots() if telemetry.same_host(value.get('host')) == telemetry.host_id()]
@@ -333,14 +353,18 @@ def render_stats(telemetry, report, detail=False):
                  row['task_class'] or '-', row['route'] or '-', row['lanes'],
                  None if row['success_rate'] is None else f"{row['success_rate']:.0%}", row['retries'],
                  ','.join(f'{name}:{count}' for name, count in row['error_classes'].items()) or '-',
+                 f"{row['known_cost_usd']:.2f}"
+                 if row.get('known_cost_usd') is not None and not row.get('missing_cost_rows') else None,
+                 f"{row['cost_per_success_usd']:.2f}"
+                 if row.get('cost_per_success_usd') is not None else None,
                  *map(_nullable_compact, (row['latency_p50_s'], row['latency_p90_s'],
                                           row['output_tokens_per_s'])))
                 for row in report['outcomes']]
     if outcomes:
         lines += ['', 'Outcomes by route (latest attempt per lane):']
         lines += bounded_table(
-            ('route', 'task_class', 'alias', 'lanes', 'ok', 'retries', 'errors',
-             'p50_s', 'p90_s', 'out_tok/s'), outcomes, limit)
+            ('route', 'task_class', 'alias', 'lanes', 'ok', 'retries', 'errors', 'cost_usd', '$/ok',
+             'p50_s', 'p90_s', 'out_tok/s'), outcomes, limit, always=('cost_usd', '$/ok'))
         if not detail and len(outcomes) > ROW_LIMIT:
             lines.append(f"{len(outcomes) - ROW_LIMIT} more; use --detail/--json")
     last_limits = [(row['provider'] or '-', row['account'] or 'unattributed', row['timestamp'], f"{row['age_seconds']}s ago")
