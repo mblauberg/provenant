@@ -684,6 +684,59 @@ pub fn executable_text(command: &str) -> Result<String, Error> {
 pub fn deny_reason(command: &str) -> Result<Option<String>, Error> {
     Guard::new()?.deny_reason(command, 0)
 }
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub struct HookEnvelope {
+    #[serde(rename = "hookSpecificOutput")]
+    pub output: HookDecision,
+}
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub struct HookDecision {
+    #[serde(rename = "hookEventName")]
+    pub event: String,
+    #[serde(rename = "permissionDecision")]
+    pub decision: String,
+    #[serde(rename = "permissionDecisionReason")]
+    pub reason: String,
+}
+#[derive(Debug, thiserror::Error)]
+pub enum HookError {
+    #[error(transparent)]
+    Decode(#[from] provenant_records::DecodeError),
+    #[error(transparent)]
+    Policy(#[from] Error),
+    #[error(transparent)]
+    Encode(#[from] serde_json::Error),
+}
+/// Decoded Unicode hook boundary. Invalid shapes and non-Bash tools are silent.
+/// Raw lone-surrogate JSON still needs the records owner's Python string codec;
+/// callers must keep decode errors explicit until that integration is available.
+pub fn hook_input(input: &[u8]) -> Result<crate::CommandOutput, HookError> {
+    let event = provenant_records::checked_json::from_slice(input)?;
+    hook_event(&event)
+}
+pub fn hook_event(event: &serde_json::Value) -> Result<crate::CommandOutput, HookError> {
+    let Some(command) = event
+        .get("tool_input")
+        .and_then(|v| v.get("command"))
+        .and_then(serde_json::Value::as_str)
+    else {
+        return Ok(crate::CommandOutput::default());
+    };
+    if event.get("tool_name").and_then(serde_json::Value::as_str) != Some("Bash") {
+        return Ok(crate::CommandOutput::default());
+    }
+    let Some(reason) = deny_reason(command)? else {
+        return Ok(crate::CommandOutput::default());
+    };
+    let record=HookEnvelope {output:HookDecision {event:"PreToolUse".into(),decision:"deny".into(),reason:format!("Refused: {reason}. A pattern, group or expanded kill can hit another lane's process. Stop explicit PIDs with `provenant reap <pid>… [--tree]`.")}};
+    let quote = crate::pending::ascii_json_string;
+    let stdout=format!("{{\"hookSpecificOutput\": {{\"hookEventName\": {}, \"permissionDecision\": {}, \"permissionDecisionReason\": {}}}}}\n",quote(&record.output.event)?,quote(&record.output.decision)?,quote(&record.output.reason)?);
+    Ok(crate::CommandOutput {
+        stdout,
+        ..Default::default()
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -921,5 +974,37 @@ print(json.dumps(errors))
         for (argv, expected) in cases.iter().zip(expected) {
             assert_eq!(kill_reason(argv), expected, "{argv:?}");
         }
+    }
+    #[test]
+    fn decoded_hook_output_matches_actual_source_main() {
+        let events = [
+            serde_json::json!(null),
+            serde_json::json!([]),
+            serde_json::json!({}),
+            serde_json::json!({"tool_name":"Read","tool_input":{"command":"pkill x"}}),
+            serde_json::json!({"tool_name":"Bash","tool_input":{"command":false}}),
+            serde_json::json!({"tool_name":"Bash","tool_input":{"command":"echo safe"}}),
+            serde_json::json!({"tool_name":"Bash","tool_input":{"command":"kill 😀"}}),
+            serde_json::json!({"tool_name":"Bash","tool_input":{"command":"pkill x"}}),
+        ];
+        let Some(expected):Option<Vec<(String,String,u8)>>=crate::oracle::python(
+            "import json,sys,subprocess; events=json.load(sys.stdin); print(json.dumps([(r.stdout,r.stderr,r.returncode) for event in events for r in [subprocess.run([sys.executable,'scripts/lane_safety_guard.py'],input=json.dumps(event),capture_output=True,text=True,timeout=10)]]))", &serde_json::json!(events)
+        ) else {return;};
+        for (event, (stdout, stderr, exit_code)) in events.iter().zip(expected) {
+            assert_eq!(
+                hook_input(&serde_json::to_vec(event).unwrap()).unwrap(),
+                crate::CommandOutput {
+                    stdout,
+                    stderr,
+                    exit_code
+                }
+            );
+        }
+        assert!(matches!(
+            hook_input(b"{\"ignored\":18446744073709551616}"),
+            Err(HookError::Decode(
+                provenant_records::DecodeError::NumberOutOfRange(_)
+            ))
+        ));
     }
 }
