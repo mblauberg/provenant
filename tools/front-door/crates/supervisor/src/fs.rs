@@ -45,6 +45,11 @@ pub enum FsError {
     RaceRefused { name: OsString },
     #[error("entry is not a regular file: {name:?}")]
     NotRegular { name: OsString },
+    #[error("flock timed out for {path:?} after {timeout:?}")]
+    LockTimeout {
+        path: PathBuf,
+        timeout: std::time::Duration,
+    },
     #[error("file exceeds byte limit {limit}")]
     TooLarge { limit: u64 },
 }
@@ -588,3 +593,6 @@ fn staging_name(prefix: &str) -> Result<OsString> {
 
 mod traits;
 pub use traits::{LocalFs, SafeDir, SafeFile, SafeFs};
+
+mod path_io;
+pub use path_io::*;

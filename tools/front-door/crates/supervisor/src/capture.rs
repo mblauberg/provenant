@@ -57,6 +57,7 @@ pub fn read_bounded_output(
 }
 
 /// subprocess.run(text=True): strict UTF-8 plus universal newline translation.
+#[cfg(test)]
 pub(crate) fn read_bounded_text(
     spool: &mut (impl Read + Seek),
     limit: i64,
