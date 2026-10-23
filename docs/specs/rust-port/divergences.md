@@ -1774,3 +1774,18 @@ are not yet proved exact. Their IDs are removed from the completion ledger.
   BigInt has no JSON representation in `TerminalRow`; accepting a runtime
   BigInt requires a separate typed boundary, not treating JSON integers as
   BigInts. No BigInt compatibility claim is made for that JSON API.
+
+## RP-FS3-010: persisted session integer refusal (improvement)
+
+- PR #1332 repair 6, rulebook v4. `NamedSession.attempt`, `turn_attempt`
+  and `turn_pid` remain `Option<i64>`. Source `namedSession` passes a persisted
+  REAL through as a JavaScript number; Rust deliberately refuses SQLite REAL
+  values in these integer counters/PIDs with typed
+  `Error::Sqlite(InvalidColumnType)` rather than rounding or serialising a
+  fractional counter/PID. NULL remains absent and INTEGER stays exact.
+- This is the chair's offered v4 refusal disposition, not source parity for
+  malformed historical rows. Normal INTEGER-affinity inserts of integral
+  numbers already persist as INTEGER; a REAL in a legacy REAL-affinity column
+  is also refused even when numerically integral. The regression persists 2.5
+  in each field separately and checks both session read APIs and the exact
+  failing column. No migration or live-data rewrite is performed.

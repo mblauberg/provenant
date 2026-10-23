@@ -680,3 +680,35 @@ fn activity_preserves_the_source_default_limits() {
     assert_eq!(store.activity("p", Some(1)).unwrap().len(), 1);
     assert_eq!(store.activity_after("p", 0, Some(1)).unwrap().len(), 1);
 }
+
+#[test]
+fn persisted_fractional_session_counters_and_pid_are_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(&dir.path().join("db"), 5000, Fixed(1000)).unwrap();
+    let who = Identity {
+        project: "p".into(),
+        agent_id: "a".into(),
+        provider: "codex".into(),
+    };
+    store
+        .claim_session_turn_with_id(&who, "name", None, SessionTurnKind::Start, 123, "claim")
+        .unwrap();
+    for column in ["attempt", "turn_attempt", "turn_pid"] {
+        store
+            .db
+            .execute(&format!("UPDATE sessions SET {column}=2.5"), [])
+            .unwrap();
+        for result in [
+            store.session("p", "name").map(|_| ()),
+            store.sessions("p").map(|_| ()),
+        ] {
+            assert!(
+                matches!(result, Err(Error::Sqlite(rusqlite::Error::InvalidColumnType(_, name, rusqlite::types::Type::Real))) if name == column)
+            );
+        }
+        store
+            .db
+            .execute(&format!("UPDATE sessions SET {column}=NULL"), [])
+            .unwrap();
+    }
+}
