@@ -52,7 +52,7 @@ rerun both against the new head.
 
 | gate | command or artifact | result | head SHA | N/A reason |
 | --- | --- | --- | --- | --- |
-| Harness style | `scripts/check-harness` | | | |
+| Harness style | `provenant check harness` | | | |
 | Node dependency preflight | `npm run check` | | | |
 | Production dependency audit | `npm run audit` | | | |
 | Contract and cutover | | | | |

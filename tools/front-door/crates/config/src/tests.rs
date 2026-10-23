@@ -886,3 +886,54 @@ fn malformed_value_reports_its_recoverable_dotted_key_path() {
         matches!(error, ConfigError::Syntax { location: Location { key_path, line: 3, column, .. } } if key_path == "domains.sample.enabled" && column > 0)
     );
 }
+
+#[test]
+fn inspect_config_returns_all_findings_and_binds_bytes_and_presence() {
+    let files = Files::new();
+    let fs = provenant_supervisor::fs::LocalFs;
+    let absent = inspect_config(&files.roots, &fs, &domains::NO_DOMAINS).unwrap();
+    std::fs::create_dir_all(files.roots.state.as_path()).unwrap();
+    std::fs::write(files.config(), "schema_version=1\n").unwrap();
+    let present = inspect_config(&files.roots, &fs, &domains::NO_DOMAINS).unwrap();
+    assert_eq!(absent.check.findings, present.check.findings);
+    assert_ne!(absent.input_digest, present.input_digest);
+    let mut text = String::from("schema_version=1\n");
+    for index in 0_u64..150 {
+        text.push_str(&format!("unknown_{index}=true\n"));
+    }
+    std::fs::write(files.config(), &text).unwrap();
+    let first = inspect_config(&files.roots, &fs, &domains::NO_DOMAINS).unwrap();
+    assert_eq!(first.check.findings.len(), 150);
+    assert_eq!(first.check.count, 150);
+    assert!(!first.check.truncated);
+    assert_eq!(
+        check_config(&files.roots, &fs, &domains::NO_DOMAINS, 100)
+            .unwrap()
+            .findings
+            .len(),
+        100
+    );
+    text.push_str("# changed bytes, same findings\n");
+    std::fs::write(files.config(), text).unwrap();
+    let second = inspect_config(&files.roots, &fs, &domains::NO_DOMAINS).unwrap();
+    assert_eq!(first.check, second.check);
+    assert_ne!(first.input_digest, second.input_digest);
+}
+
+#[test]
+fn inspect_config_preserves_malformed_input_digest_without_rereading() {
+    let files = Files::new();
+    let fs = provenant_supervisor::fs::LocalFs;
+    std::fs::create_dir_all(files.roots.state.as_path()).unwrap();
+    std::fs::write(files.config(), "schema_version=1\nbroken=[").unwrap();
+    let first = inspect_config(&files.roots, &fs, &domains::NO_DOMAINS).unwrap();
+    assert!(matches!(first.error, Some(ConfigError::Syntax { .. })));
+    assert!(matches!(
+        check_config(&files.roots, &fs, &domains::NO_DOMAINS, 50),
+        Err(ConfigError::Syntax { .. })
+    ));
+    std::fs::write(files.config(), "schema_version=1\nbroken={").unwrap();
+    let second = inspect_config(&files.roots, &fs, &domains::NO_DOMAINS).unwrap();
+    assert!(matches!(second.error, Some(ConfigError::Syntax { .. })));
+    assert_ne!(first.input_digest, second.input_digest);
+}

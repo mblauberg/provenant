@@ -1,5 +1,6 @@
 //! Managed files use supervisor capabilities exclusively. Plans retain bounded
 //! snapshots; every publication rechecks identity and bytes under owner locks.
+use crate::inspection::InspectionEvidence;
 use crate::release::{FILE_LIMIT, Release};
 use provenant_core::{CancelToken, Clock, RelativePath, Roots, WaitBudget};
 use provenant_records::{
@@ -894,6 +895,13 @@ pub(crate) fn directory(
     Ok(dir)
 }
 pub(crate) fn snapshot(path: &Path, fs: &dyn SafeFs) -> Result<Option<Snapshot>, InstallError> {
+    snapshot_inspected(path, fs, None)
+}
+pub(crate) fn snapshot_inspected(
+    path: &Path,
+    fs: &dyn SafeFs,
+    mut evidence: Option<&mut InspectionEvidence>,
+) -> Result<Option<Snapshot>, InstallError> {
     let Some(parent) = path.parent() else {
         return Err(InstallError::Path(path.into()));
     };
@@ -902,14 +910,27 @@ pub(crate) fn snapshot(path: &Path, fs: &dyn SafeFs) -> Result<Option<Snapshot>,
         .ok_or_else(|| InstallError::Path(path.into()))?;
     let dir = match directory(parent, false, fs) {
         Ok(dir) => dir,
-        Err(InstallError::Fs(e)) if e.is_not_found() => return Ok(None),
+        Err(InstallError::Fs(e)) if e.is_not_found() => {
+            if let Some(evidence) = evidence.as_deref_mut() {
+                evidence.observe(b"snapshot", path, None);
+            }
+            return Ok(None);
+        }
         Err(e) => return Err(e),
     };
     let metadata = match dir.metadata_at(name, false) {
         Ok(m) => m,
-        Err(e) if e.is_not_found() => return Ok(None),
+        Err(e) if e.is_not_found() => {
+            if let Some(evidence) = evidence.as_deref_mut() {
+                evidence.observe(b"snapshot", path, None);
+            }
+            return Ok(None);
+        }
         Err(e) => return Err(e.into()),
     };
+    if let Some(evidence) = evidence.as_deref_mut() {
+        evidence.metadata(path, metadata);
+    }
     let limit = if name == "release.json" || name == "receipt.json" {
         Limits::CONFIG.max_bytes
     } else {
@@ -939,6 +960,9 @@ pub(crate) fn snapshot(path: &Path, fs: &dyn SafeFs) -> Result<Option<Snapshot>,
             if file.metadata()? != metadata {
                 return Err(InstallError::Drift(path.into()));
             }
+            if let Some(evidence) = evidence.as_deref_mut() {
+                evidence.observe(b"file", path, Some(&bytes));
+            }
             Value::File {
                 bytes,
                 mode: u64::from(metadata.mode & 0o7777),
@@ -946,6 +970,9 @@ pub(crate) fn snapshot(path: &Path, fs: &dyn SafeFs) -> Result<Option<Snapshot>,
         }
         FileKind::Symlink => {
             let target = dir.read_link(name)?;
+            if let Some(evidence) = evidence {
+                evidence.observe(b"link", path, Some(target.as_os_str().as_encoded_bytes()));
+            }
             let absolute = if target.is_absolute() {
                 target
             } else {
@@ -980,8 +1007,15 @@ fn read_receipt(
     targets: &Targets,
     fs: &dyn SafeFs,
 ) -> Result<Option<InstallReceipt>, InstallError> {
+    read_receipt_inspected(targets, fs, None)
+}
+fn read_receipt_inspected(
+    targets: &Targets,
+    fs: &dyn SafeFs,
+    evidence: Option<&mut InspectionEvidence>,
+) -> Result<Option<InstallReceipt>, InstallError> {
     let path = targets.roots.state.as_path().join("install/receipt.json");
-    match snapshot(&path, fs)? {
+    match snapshot_inspected(&path, fs, evidence)? {
         None => Ok(None),
         Some(Snapshot {
             value: Value::File { bytes, mode: 0o600 },
@@ -1141,8 +1175,75 @@ pub fn check_install(
     smoke: &dyn ReleaseSmoke,
     cancel: &CancelToken,
 ) -> Result<Vec<InstallFinding>, InstallError> {
+    let inspection = inspect_install(targets, source, target, fs, smoke, cancel)?;
+    match inspection.error {
+        Some(error) => Err(error),
+        None => Ok(inspection.findings),
+    }
+}
+
+/// Complete findings plus the bytes, metadata, links, absence and inventory
+/// actually inspected. No locks, repair, extra filesystem reads or state writes.
+#[derive(Debug)]
+pub struct InstallInspection {
+    pub error: Option<InstallError>,
+    pub findings: Vec<InstallFinding>,
+    pub input_digest: FileDigest,
+}
+
+pub fn inspect_install(
+    targets: &Targets,
+    source: Option<&Release>,
+    target: &str,
+    fs: &dyn SafeFs,
+    smoke: &dyn ReleaseSmoke,
+    cancel: &CancelToken,
+) -> Result<InstallInspection, InstallError> {
+    let mut evidence = InspectionEvidence::default();
+    // Requested releases are immutable verified snapshots, supplied by caller.
+    if let Some(source) = source {
+        evidence.observe(
+            b"source-manifest",
+            &source.source,
+            Some(&source.manifest_bytes),
+        );
+        for (path, (bytes, mode)) in &source.files {
+            let path = source.source.join(path);
+            evidence.observe(b"source-file", &path, Some(bytes));
+            evidence.observe(b"source-mode", &path, Some(&mode.to_be_bytes()));
+        }
+    }
+    let (findings, error) =
+        match check_install_inspected(targets, source, target, fs, smoke, cancel, &mut evidence) {
+            Ok(findings) => (findings, None),
+            Err(
+                error @ (InstallError::Decode(_)
+                | InstallError::Manifest(_)
+                | InstallError::Tampered(_)
+                | InstallError::Conflict(_)
+                | InstallError::Platform
+                | InstallError::Path(_)),
+            ) => (Vec::new(), Some(error)),
+            Err(error) => return Err(error),
+        };
+    Ok(InstallInspection {
+        error,
+        findings,
+        input_digest: evidence.finish(),
+    })
+}
+
+fn check_install_inspected(
+    targets: &Targets,
+    source: Option<&Release>,
+    target: &str,
+    fs: &dyn SafeFs,
+    smoke: &dyn ReleaseSmoke,
+    cancel: &CancelToken,
+    evidence: &mut InspectionEvidence,
+) -> Result<Vec<InstallFinding>, InstallError> {
     let receipt_path = targets.roots.state.as_path().join("install/receipt.json");
-    let Some(receipt) = read_receipt(targets, fs)? else {
+    let Some(receipt) = read_receipt_inspected(targets, fs, Some(evidence))? else {
         return Ok(vec![InstallFinding {
             rule: "missing_receipt".into(),
             path: AbsolutePath::new(&receipt_path)?,
@@ -1155,7 +1256,7 @@ pub fn check_install(
         .as_path()
         .join("releases")
         .join(receipt.source_digest.to_string());
-    match Release::read(&release_path, target, fs) {
+    match Release::read_inspected(&release_path, target, fs, Some(evidence)) {
         Ok(release) => {
             crate::release::verify_binary_identity(&release, smoke, cancel)?;
             if release.manifest.source_digest == receipt.source_digest
@@ -1214,7 +1315,7 @@ pub fn check_install(
             return Err(InstallError::Conflict(entry.path.to_path_buf()?));
         }
         let path = entry.path.to_path_buf()?;
-        if snapshot(&path, fs)?
+        if snapshot_inspected(&path, fs, Some(evidence))?
             .is_none_or(|current| !matches_owned(&current.value, &entry.expected))
         {
             findings.push(InstallFinding {

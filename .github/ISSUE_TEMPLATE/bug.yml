@@ -49,16 +49,16 @@ body:
     attributes:
       label: Harness commit
       description: 'From the Provenant product checkout, run: git rev-parse --short HEAD'
-      placeholder: 0ea935f
+      placeholder: "0ea935f"
     validations:
       required: true
 
   - type: textarea
-    id: check-harness
+    id: check-output
     attributes:
-      label: scripts/check-harness output
+      label: provenant check harness output
       description: >-
-        Run scripts/check-harness at the harness root and paste the output,
+        Run provenant check harness with the affected project selected and paste the output,
         whether it passes or fails. A bug that the gate already catches is a
         different bug from one it misses, and we cannot tell which you have
         without this.

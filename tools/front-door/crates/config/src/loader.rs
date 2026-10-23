@@ -1,6 +1,6 @@
 use crate::{
-    ConfigCheck, ConfigError, DomainSections, Finding, Location, Origin, Profile, ResolvedConfig,
-    SectionError, domains::NO_DOMAINS,
+    ConfigCheck, ConfigError, ConfigInspection, DomainSections, Finding, Location, Origin, Profile,
+    ResolvedConfig, SectionError, domains::NO_DOMAINS,
 };
 use provenant_core::Roots;
 use provenant_records::Limits;
@@ -98,16 +98,66 @@ pub fn check_config<T: DeserializeOwned + Serialize>(
     if !(1..=100).contains(&limit) {
         return Err(ConfigError::InvalidLimit);
     }
+    let inspection = inspect_config(roots, fs, sections)?;
+    if let Some(error) = inspection.error {
+        return Err(error);
+    }
+    let inspection = inspection.check;
+    let count = inspection.findings.len();
+    Ok(ConfigCheck {
+        schema_version: inspection.schema_version,
+        profile: inspection.profile,
+        findings: inspection.findings.into_iter().take(limit).collect(),
+        count,
+        truncated: count > limit,
+    })
+}
+
+/// Inspect every finding within the existing config bounds. The digest binds
+/// exact file bytes and presence, including edits that preserve every finding.
+pub fn inspect_config<T: DeserializeOwned + Serialize>(
+    roots: &Roots,
+    fs: &impl SafeFs,
+    sections: &DomainSections<T>,
+) -> Result<ConfigInspection, ConfigError> {
     let text = open(roots, fs)?
         .map(|r| bounded_text(r, &roots.state.as_path().join("config.toml")))
         .transpose()?;
-    let inspection = inspect(text.as_deref(), sections)?;
-    let count = inspection.issues.len();
+    let mut evidence = crate::inspection::InspectionEvidence::default();
+    evidence.observe(
+        b"config",
+        Path::new("config.toml"),
+        text.as_ref().map(String::as_bytes),
+    );
+    let input_digest = evidence.finish();
+    let inspection = match inspect(text.as_deref(), sections) {
+        Ok(inspection) => inspection,
+        Err(
+            error @ (ConfigError::Syntax { .. }
+            | ConfigError::MissingVersion { .. }
+            | ConfigError::UnsupportedVersion { .. }
+            | ConfigError::Schema { .. }
+            | ConfigError::CollectionLimit { .. }
+            | ConfigError::Domain { .. }),
+        ) => {
+            return Ok(ConfigInspection {
+                check: ConfigCheck {
+                    schema_version: crate::CONFIG_SCHEMA_VERSION,
+                    profile: Profile::Balanced,
+                    findings: Vec::new(),
+                    count: 0,
+                    truncated: false,
+                },
+                error: Some(error),
+                input_digest,
+            });
+        }
+        Err(error) => return Err(error),
+    };
     let path = user_path()?;
-    let findings = inspection
+    let findings: Vec<Finding> = inspection
         .issues
         .into_iter()
-        .take(limit)
         .map(|issue| {
             // Bound the message even for a hostile, nearly 1 MiB key. Never include
             // values, parser excerpts or domain-provided prose.
@@ -120,12 +170,16 @@ pub fn check_config<T: DeserializeOwned + Serialize>(
             }
         })
         .collect();
-    Ok(ConfigCheck {
-        schema_version: inspection.snapshot.schema_version,
-        profile: inspection.snapshot.profile,
-        findings,
-        count,
-        truncated: count > limit,
+    Ok(ConfigInspection {
+        error: None,
+        check: ConfigCheck {
+            schema_version: inspection.snapshot.schema_version,
+            profile: inspection.snapshot.profile,
+            count: findings.len(),
+            findings,
+            truncated: false,
+        },
+        input_digest,
     })
 }
 fn open(

@@ -1684,3 +1684,69 @@ fn install_refuses_a_binary_whose_version_identity_differs_from_manifest() {
     assert!(!f.targets.roots.state.as_path().exists());
     assert!(!f.targets.bin_dir.exists());
 }
+
+#[test]
+fn inspect_install_binds_changed_tampered_bytes_with_identical_metadata_and_findings() {
+    let fixture = Fixture::new();
+    let plan = fixture.plan();
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    install(
+        &plan,
+        &context(&clock, &cancel),
+        &mut Reporter::default(),
+        &Smoke,
+        false,
+    )
+    .unwrap();
+    let inspect = || {
+        inspect_install(
+            &fixture.targets,
+            None,
+            "fixture-target",
+            &LocalFs,
+            &Smoke,
+            &cancel,
+        )
+        .unwrap()
+    };
+    let clean = inspect();
+    assert!(clean.findings.is_empty());
+    let repeated = inspect();
+    assert_eq!(clean.findings, repeated.findings);
+    assert_eq!(clean.input_digest, repeated.input_digest);
+    assert!(repeated.error.is_none());
+    let asset = fixture
+        .targets
+        .roots
+        .state
+        .as_path()
+        .join("releases")
+        .join(plan.release.manifest.source_digest.to_string())
+        .join("skills/example/SKILL.md");
+    let before = fs::metadata(&asset).unwrap();
+    let modified = before.modified().unwrap();
+    let file = fs::OpenOptions::new().write(true).open(&asset).unwrap();
+    let set_bytes = |byte| {
+        fs::write(&asset, vec![byte; before.len() as usize]).unwrap();
+        file.set_times(fs::FileTimes::new().set_modified(modified))
+            .unwrap();
+    };
+    set_bytes(b'a');
+    let first = inspect();
+    let metadata = snapshot(&asset, &LocalFs).unwrap().unwrap().metadata;
+    set_bytes(b'b');
+    assert_eq!(
+        metadata,
+        snapshot(&asset, &LocalFs).unwrap().unwrap().metadata
+    );
+    let second = inspect();
+    assert_eq!(first.findings, second.findings);
+    assert!(
+        first
+            .findings
+            .iter()
+            .any(|finding| finding.rule == "release_drift")
+    );
+    assert_ne!(first.input_digest, second.input_digest);
+}

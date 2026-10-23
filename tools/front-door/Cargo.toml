@@ -51,7 +51,6 @@ ignored-paths = [
   "crates/run/src/lib.rs",
 ]
 ignored = [
-  "provenant-confinement",
   "provenant-fabric-mcp",
   "provenant-fabric-runtime",
   "provenant-fabric-store",
@@ -96,6 +95,7 @@ thiserror = { workspace = true }
 provenant-records = { workspace = true }
 provenant-config = { workspace = true }
 provenant-supervisor = { workspace = true }
+provenant-confinement = { workspace = true }
 
 [build-dependencies]
 provenant-records = { workspace = true }
