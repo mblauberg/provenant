@@ -137,7 +137,7 @@ fn digits(word: &str) -> bool {
     !word.is_empty() && word.chars().all(crate::pending::python_digit)
 }
 
-pub fn kill_reason(args: &[String]) -> Result<Option<String>, crate::pending::IntegerError> {
+pub fn kill_reason(args: &[String]) -> Result<Option<String>, crate::IntegerError> {
     let mut targets = Vec::new();
     let (mut options_done, mut signalled, mut i) = (false, false, 0);
     while let Some(word) = args.get(i) {
@@ -461,13 +461,13 @@ pub fn parse(text: &str) -> (Vec<ShellCommand>, Vec<String>) {
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error(transparent)]
-    Integer(#[from] crate::pending::IntegerError),
+    Integer(#[from] crate::IntegerError),
     #[error(transparent)]
     Pattern(#[from] regex::Error),
 }
 
 fn word_character(c: char) -> bool {
-    c.is_alphanumeric() || c == '_'
+    crate::pending::python_word_character(c)
 }
 
 struct Guard {
@@ -707,6 +707,8 @@ print(json.dumps([(s,([{'words':c.words,'bodies':c.bodies} for c in parse(s)[0]]
                 "cat <<'EOF'\npkill x\nEOF\npkill x",
                 "echo pkill\u{0300}",
                 "sudo pkill\u{0300}",
+                "pkill\u{0345}",
+                "sudo pkill\u{05bf}",
                 "<<EOF\nbody\nEOF",
                 "echo \"\\\n$(kill 0)\"",
                 "cat <<A <<B\nx\nA\ny\nB",
@@ -740,11 +742,11 @@ print(json.dumps([(s,([{'words':c.words,'bodies':c.bodies} for c in parse(s)[0]]
     fn integer_bounds_are_typed_and_python_digit_limit_is_preserved() {
         assert!(matches!(
             kill_reason(&["7".repeat(4301)]),
-            Err(crate::pending::IntegerError::DigitLimit { digits: 4301 })
+            Err(crate::IntegerError::DigitLimit { digits: 4301 })
         ));
         assert!(matches!(
             kill_reason(&["18446744073709551616".into()]),
-            Err(crate::pending::IntegerError::NumberOutOfRange)
+            Err(crate::IntegerError::NumberOutOfRange)
         ));
         assert_eq!(
             kill_reason(&["0".repeat(4300)]).unwrap(),

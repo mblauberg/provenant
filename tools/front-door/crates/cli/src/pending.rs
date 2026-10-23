@@ -310,3 +310,8 @@ pub(crate) fn python_splitlines(text: &str) -> Vec<&str> {
     }
     lines
 }
+
+// port: belongs in provenant-core
+pub(crate) fn python_word_character(c: char) -> bool {
+    c == '_' || python_unicode::alphanumeric(c)
+}

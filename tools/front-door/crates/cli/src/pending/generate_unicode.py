@@ -26,4 +26,21 @@ lines += [
     "    NONPRINTABLE.get(index).is_none_or(|&(start, _)| start > code)",
     "}",
 ]
+ranges = []
+for code in range(0x110000):
+    if chr(code).isalnum():
+        if ranges and code == ranges[-1][1] + 1:
+            ranges[-1][1] = code
+        else:
+            ranges.append([code, code])
+lines += [
+    "",
+    "// port: belongs in provenant-core",
+    "pub(super) fn alphanumeric(c: char) -> bool {",
+    "    // port: belongs in provenant-core",
+    "    const ALPHANUMERIC: &[(u32, u32)] = &["]
+lines += [f"        (0x{start:x}, 0x{end:x})," for start, end in ranges]
+lines += ["    ];", "    let code = u32::from(c);",
+          "    let index = ALPHANUMERIC.partition_point(|&(_, end)| end < code);",
+          "    ALPHANUMERIC.get(index).is_some_and(|&(start, _)| start <= code)", "}"]
 Path(__file__).with_name("python_unicode.rs").write_text("\n".join(lines) + "\n")
