@@ -94,7 +94,7 @@ def registered_model(adapter, model, catalogue=None, warnings=None):
             return model
         # The router owns alias, retired-name and provider-suffix resolution.
         module = _model_route_module()
-        entry, _ = module._registered_match(adapter, model, catalogue)
+        entry, _ = module.model_route_live._registered_match(adapter, model, catalogue)
         return entry["id"] if entry else model
     except (KeyError, AttributeError, TypeError, ValueError) as exc:
         warning = f"catalogue malformed for {adapter}/{model}; using raw model ({type(exc).__name__})"
@@ -147,7 +147,7 @@ def _registered_training(adapter, model, meta):
     try:
         route = _model_route_module()
         catalog = route.load_catalog()
-        registered = route._registered_match(adapter, str(model), catalog)[0]
+        registered = route.model_route_live._registered_match(adapter, str(model), catalog)[0]
         flag = (registered or {}).get("trains_on_prompts")
         return flag if type(flag) is bool else None
     except (OSError, ValueError, AttributeError, TypeError, KeyError, ImportError):

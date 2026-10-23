@@ -2627,8 +2627,8 @@ def _check_model(plan, env):
             if code or listing.get("refresh_failed") or not models:
                 return "unavailable", listing.get("message") or "Model list unavailable"
             catalog = router.load_catalog()
-            model_ids = {router._live_base(plan["adapter"], model, catalog).casefold() for model in models}
-            if router._live_base(plan["adapter"], plan["model"], catalog).casefold() in model_ids:
+            model_ids = {router.model_route_live._live_base(plan["adapter"], model, catalog).casefold() for model in models}
+            if router.model_route_live._live_base(plan["adapter"], plan["model"], catalog).casefold() in model_ids:
                 return "passed", ""
             if not listing.get("cache_hit"):
                 break

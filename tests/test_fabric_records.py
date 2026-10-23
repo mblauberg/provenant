@@ -495,7 +495,7 @@ def test_limit_outcomes_never_become_empty_output_failures(tmp_path, monkeypatch
     assert item["recent"][0]["status"] == status
     assert item["recent_failures"] == 0
     assert item["rate_limits"] == 1
-    assert not model_route._recent_failed_task_class_models("codex", "mechanical")
+    assert not model_route.model_route_live._recent_failed_task_class_models("codex", "mechanical")
 
 
 @pytest.mark.parametrize('adapter,switch', [
@@ -526,7 +526,7 @@ def test_account_and_host_switches_preserve_cooldowns_and_health(tmp_path, monke
     original = records().read_cooldowns(path)
     assert next(iter(original.values()))['account'] == 'a'
     assert exec_routing.cooling(adapter, 'test-model')
-    assert model_route._cooling(adapter, 'test-model', model_route._cooldowns({}), {})
+    assert model_route.model_route_live._cooling(adapter, 'test-model', model_route.model_route_live._cooldowns({}), {})
     if switch == 'host':
         monkeypatch.setattr(resolver, 'host_id', lambda: 'host-b')
     elif adapter in ('claude', 'codex'):
@@ -539,7 +539,7 @@ def test_account_and_host_switches_preserve_cooldowns_and_health(tmp_path, monke
             'a': {'identity_dir': str(first)}, 'b': {'identity_dir': str(second)}}}}))
     assert records().read_cooldowns(path) == {}
     assert exec_routing.cooling(adapter, 'test-model') is None
-    assert not model_route._cooling(adapter, 'test-model', model_route._cooldowns({}), {})
+    assert not model_route.model_route_live._cooling(adapter, 'test-model', model_route.model_route_live._cooldowns({}), {})
     assert not next(iter(records().read_route_health(health, cooldowns_path=path).values()))['cooling_until']
     # Success in B must leave A's limit intact; a new B limit must coexist with it.
     row.update(status='ok')
@@ -554,7 +554,7 @@ def test_account_and_host_switches_preserve_cooldowns_and_health(tmp_path, monke
         monkeypatch.delenv(name, raising=False)
     assert records().read_cooldowns(path) == original
     assert exec_routing.cooling(adapter, 'test-model')
-    assert model_route._cooling(adapter, 'test-model', model_route._cooldowns({}), {})
+    assert model_route.model_route_live._cooling(adapter, 'test-model', model_route.model_route_live._cooldowns({}), {})
 
 
 def test_legacy_null_scope_migrates_once_to_default_identity_not_selected_alternate(tmp_path, monkeypatch):

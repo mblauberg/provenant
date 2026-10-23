@@ -2172,7 +2172,7 @@ def test_daily_catalogue_notes_are_not_promoted_back_to_dispatch_warnings(tmp_pa
     router = importlib.import_module('scripts.model_route')
     monkeypatch.setenv('AGENT_FABRIC_STATE_ROOT', str(tmp_path / 'state'))
     monkeypatch.setenv('PROVENANT_NO_OS_CONFINEMENT', '1')
-    note = router._NEWER_NOTE.format('fixture-new-model')
+    note = router.model_route_live._NEWER_NOTE.format('fixture-new-model')
     for first in (True, False):
         router.emit({'status': 'ok', 'resolved_model': 'fixture', 'notes': ['ordinary route note'],
                      'warnings': [note]}, 0)
