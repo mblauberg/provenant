@@ -37,6 +37,8 @@ pub struct Options<'a> {
     pub env: Option<&'a [(OsString, OsString)]>,
     pub output_limit_bytes: i64,
     pub merge_stderr: bool,
+    /// Fabric utilities ignore stdin; Python bounded_process inherits it.
+    pub null_stdin: bool,
     pub pass_fds: &'a [BorrowedFd<'a>],
 }
 
@@ -48,6 +50,7 @@ impl<'a> Options<'a> {
             env: None,
             output_limit_bytes: 1_048_576,
             merge_stderr: true,
+            null_stdin: false,
             pass_fds: &[],
         }
     }
@@ -109,14 +112,22 @@ pub fn run_bounded(
     command: &[OsString],
     options: Options<'_>,
 ) -> Result<BoundedProcessResult, BoundedError> {
-    run(command, options, CaptureMode::Replace)
+    run(command, options, CaptureMode::Replace, false)
 }
 
 pub(crate) fn run_bounded_text(
     command: &[OsString],
     options: Options<'_>,
 ) -> Result<BoundedProcessResult, BoundedError> {
-    run(command, options, CaptureMode::Text)
+    run(command, options, CaptureMode::Text, false)
+}
+
+/// Node's execFileSync aborts when its stdout buffer crosses maxBuffer.
+pub(crate) fn run_bounded_limited(
+    command: &[OsString],
+    options: Options<'_>,
+) -> Result<BoundedProcessResult, BoundedError> {
+    run(command, options, CaptureMode::Replace, true)
 }
 
 #[derive(Clone, Copy)]
@@ -137,6 +148,7 @@ fn run(
     command: &[OsString],
     options: Options<'_>,
     mode: CaptureMode,
+    stop_on_output_limit: bool,
 ) -> Result<BoundedProcessResult, BoundedError> {
     let Some(program) = command.first() else {
         return Err(BoundedError::EmptyCommand);
@@ -165,9 +177,16 @@ fn run(
                 .try_clone()
                 .map_err(io_error("clone stderr spool"))?,
         ));
+    if options.null_stdin {
+        launch.stdin(Stdio::null());
+    }
     let mut child =
         OwnedChild::spawn(&mut launch, options.pass_fds, options.env).map_err(io_error("spawn"))?;
-    let (stopped, timed_out) = wait_and_stop(&mut child, options.timeout_seconds)?;
+    let (stopped, timed_out) = wait_and_stop(
+        &mut child,
+        options.timeout_seconds,
+        stop_on_output_limit.then_some((&stdout, options.output_limit_bytes.max(0) as u64)),
+    )?;
     let status = stopped.status;
     let output = mode.read(&mut stdout, options.output_limit_bytes)?;
     let error_output = stderr
@@ -220,10 +239,14 @@ pub struct GroupStop {
 /// SIGTERM, a bounded group grace, optional SIGKILL, and two bounded waits.
 /// This is bounded_process.stop_process_group's utility-only API.
 pub fn stop_process_group(child: &mut UtilityChild) -> Result<GroupStop, BoundedError> {
-    wait_and_stop(&mut child.0, 0.0).map(|(stopped, _)| stopped)
+    wait_and_stop(&mut child.0, 0.0, None).map(|(stopped, _)| stopped)
 }
 
-fn wait_and_stop(child: &mut OwnedChild, timeout: f64) -> Result<(GroupStop, bool), BoundedError> {
+fn wait_and_stop(
+    child: &mut OwnedChild,
+    timeout: f64,
+    stdout_limit: Option<(&std::fs::File, u64)>,
+) -> Result<(GroupStop, bool), BoundedError> {
     // Python starts its wait timeout after Popen has returned.
     let waiting = Instant::now();
     let mut state = State::Waiting;
@@ -233,12 +256,25 @@ fn wait_and_stop(child: &mut OwnedChild, timeout: f64) -> Result<(GroupStop, boo
         // Reap before group probing: a dead leader must not consume the grace.
         let exited = child.exited().map_err(io_error("observe child"))?;
         let group_exists = child.group_exists();
-        match state.step(
-            waiting.elapsed().as_secs_f64(),
-            timeout,
-            exited,
-            group_exists,
-        ) {
+        let now = waiting.elapsed().as_secs_f64();
+        let output_exceeded = match stdout_limit {
+            Some((file, limit)) if state == State::Waiting => {
+                file.metadata()
+                    .map_err(io_error("observe stdout size"))?
+                    .len()
+                    > limit
+            }
+            _ => false,
+        };
+        let effect = if output_exceeded {
+            state = State::Grace {
+                deadline: now + 0.25,
+            };
+            Effect::Terminate { timed_out: false }
+        } else {
+            state.step(now, timeout, exited, group_exists)
+        };
+        match effect {
             Effect::Wait => std::thread::sleep(Duration::from_millis(10)),
             Effect::Terminate { timed_out: expired } => {
                 timed_out = expired;

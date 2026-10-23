@@ -121,3 +121,17 @@ concurrent no-replace publication, exchange/replace across held directories,
 metadata, duplicate offsets, bounded reads, FIFO refusal and lock contention.
 Invalid UTF-8 names are passed unchanged to the OS; when macOS refuses one,
 the fixture verifies the same refusal from direct standard-library creation.
+
+`fabric_ps` ports `runtime/fabric/src/ps.mjs#unit-01`: system ps first, retry
+only spawn EPERM/EACCES/ENOENT while the bundled shim exists, and fallback-only
+PATH defaulting. It retains the five-second deadline, ignored stdin/stderr,
+Node UTF-8 replacement, nonzero/signal failures, raw newlines and the default
+1 MiB stdout failure. The utility loop has an opt-in spool-size stop so overflow
+followed by a running process reports output-limit failure instead of waiting
+for the timeout. The Python bounded runner keeps its existing defaults.
+The caller provides its installed shim path; no runtime caller switches here.
+
+All supervisor Python differentials now use `-I`, an explicit allowlisted
+environment and bounded utility waits; Node uses the same shared helper and
+requires version 24. Missing/old interpreters print `skip:` and fail when
+`PROVENANT_PORT_DIFF_REQUIRED=1`.
