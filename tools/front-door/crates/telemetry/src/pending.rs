@@ -21,6 +21,8 @@ pub struct Usage {
     pub adapter: Option<String>,
     pub provider: Option<String>,
     pub model: Option<String>,
+    /// Original spelling retained by the selection/normalisation owner.
+    pub model_raw: Option<String>,
     pub effort: Option<String>,
     pub account: Option<String>,
     pub repository: Option<String>,

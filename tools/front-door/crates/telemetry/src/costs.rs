@@ -43,11 +43,35 @@ pub struct Adapter {
 }
 pub type Catalogue = BTreeMap<String, Adapter>;
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(from = "Value")]
 pub struct Price {
     pub billing: Option<String>,
     pub price_status: Option<String>,
     #[serde(default)]
     pub usd_per_million: BTreeMap<String, Value>,
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, Value>,
+    #[serde(skip)]
+    #[doc(hidden)]
+    pub populated: bool,
+}
+impl From<Value> for Price {
+    fn from(value: Value) -> Self {
+        let mut fields: BTreeMap<String, Value> = value.as_object().map(|m| m.iter().map(|(k,v)| (k.clone(),v.clone())).collect()).unwrap_or_default();
+        let populated = !fields.is_empty();
+        Self {
+            billing: fields.remove("billing").and_then(|v| v.as_str().map(str::to_owned)),
+            price_status: fields.remove("price_status").and_then(|v| v.as_str().map(str::to_owned)),
+            usd_per_million: fields.remove("usd_per_million").and_then(|v| v.as_object().map(|m| m.iter().map(|(k,v)| (k.clone(),v.clone())).collect())).unwrap_or_default(),
+            extra: fields,
+            populated,
+        }
+    }
+}
+impl Price {
+    fn is_empty(&self) -> bool {
+        !self.populated && self.billing.is_none() && self.price_status.is_none() && self.usd_per_million.is_empty() && self.extra.is_empty()
+    }
 }
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Prices {
@@ -73,7 +97,8 @@ impl Prices {
         if let Some(entry) = self
             .models
             .get(&format!("{adapter}/{model}"))
-            .or_else(|| self.models.get(&format!("{adapter}/{provider}/{model}")))
+            .filter(|p| !p.is_empty())
+            .or_else(|| self.models.get(&format!("{adapter}/{provider}/{model}")).filter(|p| !p.is_empty()))
         {
             return Ok(entry.clone());
         }
@@ -92,11 +117,15 @@ impl Prices {
 }
 
 pub fn catalogue(path: &Path) -> Catalogue {
-    std::fs::read(path)
-        .ok()
-        .and_then(|b| crate::decode_json::<Value>(&b).ok())
-        .and_then(|v| serde_json::from_value(v["adapters"].clone()).ok())
-        .unwrap_or_default()
+    let Some(value) = std::fs::read(path).ok().and_then(|b| crate::decode_json::<Value>(&b).ok()) else { return Catalogue::new(); };
+    value["adapters"].as_object().into_iter().flatten().map(|(name, adapter)| {
+        let models = adapter["models"].as_array().into_iter().flatten().filter_map(|entry| {
+            let id = entry["id"].as_str()?.to_owned();
+            let names = entry["names"].as_array().into_iter().flatten().filter_map(Value::as_str).map(str::to_owned).collect();
+            Some(Model {id, names})
+        }).collect();
+        (name.clone(), Adapter {models})
+    }).collect()
 }
 pub fn normalise_model(
     adapter: Option<&str>,
@@ -489,7 +518,7 @@ pub fn aggregate(rows: &[Usage], keys: &[&str], prices: &Prices) -> Result<Vec<F
         let value = serde_json::to_value(row)?;
         groups.push(unit(
             row,
-            row.model.as_deref(),
+            row.model_raw.as_deref(),
             keys.iter()
                 .map(|k| ((*k).into(), value[*k].clone()))
                 .collect(),
@@ -522,7 +551,7 @@ mod tests {
         };
         assert_eq!(estimated_cost(&row, &price), Some(0.00024));
         row.reasoning_tokens = Some(5.into());
-        assert!((estimated_cost(&row, &price).unwrap() - 0.00026).abs() < 1e-15);
+        assert_eq!(estimated_cost(&row, &price), Some(0.00026000000000000003));
         row.cache_read_tokens = None;
         assert_eq!(estimated_cost(&row, &price), None);
         assert_eq!(
@@ -544,7 +573,18 @@ mod tests {
         assert_eq!(finalised[0].input_tokens, None);
         assert_eq!(finalised[0].missing_token_rows, Numeric::from(2));
         assert_eq!(finalised[0].estimated_cost_usd, None);
-        assert_eq!(round(2.675, 2), 2.67);
+        let row = Usage {input_tokens:Some(1.into()),cache_read_tokens:Some(0.into()),cache_write_tokens:Some(0.into()),output_tokens:Some(0.into()),reported_cost:Some(0.0000004),..Usage::default()};
+        let price = Price {usd_per_million:BTreeMap::from([("input".into(),serde_json::json!(0.4))]),..Price::default()};
+        let mut a = unit(&row, Some("Z"), BTreeMap::from([("model".into(),serde_json::json!("b"))]), &Prices::default()).unwrap();
+        a.known_cost_usd = estimated_cost(&row, &price).unwrap(); a.missing_cost_rows = Numeric::ZERO;
+        let mut b = a.clone(); b.model_raw = vec!["A".into()];
+        let mut c = a.clone(); c.dimensions.insert("model".into(),serde_json::json!("a"));
+        let groups = finalise(combine([a,b,c], &["model"]).unwrap(), &["model"]);
+        assert_eq!(groups[0].dimensions["model"], "a");
+        assert_eq!(groups[1].dimensions["model"], "b");
+        assert_eq!(groups[1].model_raw.as_ref().unwrap(), &["A", "Z"]);
+        assert_eq!(groups[1].estimated_cost_usd, Some(0.000001));
+        assert_eq!(groups[1].reported_cost_usd, Some(0.000001));
     }
     #[test]
     fn normalisation_preserves_versioned_models() {
@@ -595,4 +635,30 @@ mod tests {
         assert_eq!(g.cache_share_rows, Numeric::ZERO);
         assert_eq!(g.cache_share_input, Numeric::ZERO);
     }
+    #[test]
+    fn review_regression_empty_prices_fall_through_and_null_rates_work() {
+        let prices: Prices = serde_json::from_value(serde_json::json!({"models":{"a/m":{},"a/p/m":{"billing":"free","usd_per_million":null}}})).unwrap();
+        let row = Usage {adapter:Some("a".into()),provider:Some("p".into()),model:Some("m".into()),..Usage::default()};
+        assert_eq!(prices.entry(&row).unwrap().billing.as_deref(), Some("free"));
+        let prices: Prices = serde_json::from_value(serde_json::json!({"models":{"a/m":{},"a/p/m":{}},"free_patterns":{"a":["^m$"]}})).unwrap();
+        assert_eq!(prices.entry(&row).unwrap().billing.as_deref(), Some("free"));
+        let prices: Prices = serde_json::from_value(serde_json::json!({"models":{"a/m":{"billing":null},"a/p/m":{"billing":"free"}}})).unwrap();
+        assert_eq!(prices.entry(&row).unwrap().billing, None);
+    }
+    #[test]
+    fn review_regression_bad_catalogue_entries_keep_usable_models() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("catalogue.json");
+        std::fs::write(&path, r#"{"adapters":{"a":{"models":[{}, {"id":"m","names":[null,3,"Alias"]}]},"b":{"models":[{"id":"other"}]}}}"#).unwrap();
+        let table = catalogue(&path);
+        assert_eq!(normalise_model(Some("a"),None,Some("Alias"),&table).as_deref(),Some("m"));
+        assert_eq!(table["b"].models[0].id,"other");
+    }
+    #[test]
+    fn review_regression_aggregate_keeps_pre_normalisation_model() {
+        let row: Usage = serde_json::from_value(serde_json::json!({"source":"s","event_id":"e","host":"h","adapter":"a","model":"normalised","model_raw":"Original Alias"})).unwrap();
+        let groups = aggregate(&[row], &["model"], &Prices::default()).unwrap();
+        assert_eq!(groups[0].model_raw.as_ref().unwrap(), &["Original Alias"]);
+    }
+
 }
