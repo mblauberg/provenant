@@ -38,11 +38,7 @@ pub fn parse_time(value: &Value) -> Option<Timestamp> {
         if seconds <= 0.0 || seconds >= 253402300800.0 {
             return None;
         }
-        // CPython rounds the fractional part, independently of the epoch's magnitude.
-        let micros = (seconds.trunc() as i64)
-            .checked_mul(1_000_000)?
-            .checked_add((seconds.fract() * 1_000_000.0).round_ties_even() as i64)?;
-        return Timestamp::from_microsecond(micros).ok();
+        return from_timestamp(seconds).ok();
     }
     python_iso(value.as_str()?.trim())
 }
@@ -87,14 +83,13 @@ fn python_iso(text: &str) -> Option<Timestamp> {
         };
         date_text.parse::<ISOWeekDate>().ok()?.date()
     } else {
-        let month = date_text
-            .get(if extended { 5..7 } else { 4..6 })?
-            .parse()
-            .ok()?;
-        let day = date_text
-            .get(if extended { 8..10 } else { 6..8 })?
-            .parse()
-            .ok()?;
+        let month = date_text.get(if extended { 5..7 } else { 4..6 })?;
+        let day = date_text.get(if extended { 8..10 } else { 6..8 })?;
+        if !month.bytes().chain(day.bytes()).all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        let month = month.parse().ok()?;
+        let day = day.parse().ok()?;
         if extended && (bytes.get(4) != Some(&b'-') || bytes.get(7) != Some(&b'-')) {
             return None;
         }
@@ -217,6 +212,18 @@ pub fn iso(moment: Timestamp) -> String {
 }
 pub fn seconds_between(a: Timestamp, b: Timestamp) -> f64 {
     (a.as_microsecond() - b.as_microsecond()) as f64 / 1_000_000.0
+}
+/// CPython datetime.fromtimestamp splits with modf before rounding half-even.
+/// Duration arithmetic intentionally uses a separate timedelta-style conversion.
+pub fn from_timestamp(seconds: f64) -> Result<Timestamp, crate::QuotaError> {
+    if !seconds.is_finite() || seconds < i64::MIN as f64 || seconds >= i64::MAX as f64 {
+        return Err(crate::QuotaError::TimeRange);
+    }
+    let micros = (seconds.trunc() as i64)
+        .checked_mul(1_000_000)
+        .and_then(|whole| whole.checked_add((seconds.fract() * 1_000_000.0).round_ties_even() as i64))
+        .ok_or(crate::QuotaError::TimeRange)?;
+    Timestamp::from_microsecond(micros).map_err(|_| crate::QuotaError::TimeRange)
 }
 pub fn add_seconds(at: Timestamp, seconds: f64) -> Result<Timestamp, crate::QuotaError> {
     if !seconds.is_finite() {

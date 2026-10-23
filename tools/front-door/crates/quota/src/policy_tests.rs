@@ -1103,3 +1103,29 @@ fn snapshot_wire_nulls_and_j2_contract() {
         }
     }
 }
+
+#[test]
+fn review_regression_signed_date_components_are_rejected() {
+    for text in ["2026+105", "2026-+1-05", "2026-01-+5"] {
+        assert_eq!(parse_time(&json!(text)), None, "{text}");
+    }
+}
+
+#[test]
+fn review_regression_activity_uses_fromtimestamp_fraction_rounding() {
+    use crate::schedule::*;
+    for (seconds, later) in [
+        (1700000000.0 + 6.0 * 2.0_f64.powi(-22), "2023-11-14T22:13:20.000002Z"),
+        (1735689600791625390_u64 as f64 / 1e9, "2025-01-01T00:00:00.791626Z"),
+    ] {
+        let mut c = Config::for_provider("claude");
+        c.active_window_seconds = 0.0;
+        let s = snapshot("claude", "a", vec![]);
+        let (block, _) = plan(PlanInput { account_id:"claude/a", snapshot:Some(&s),
+            now:later.parse().unwrap(), config:&c, trigger:"timer", power:"ac",
+            activity_at:Some(seconds), ignore_backoff:false, notes:&[] }).unwrap();
+        assert_eq!(block.ttl_seconds, 1800.0);
+        assert_eq!(parse_time(&json!(seconds)).map(iso).as_deref(),
+            Some(if seconds < 1730000000.0 { "2023-11-14T22:13:20.000001Z" } else { "2025-01-01T00:00:00.791625Z" }));
+    }
+}

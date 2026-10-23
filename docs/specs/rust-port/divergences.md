@@ -68,3 +68,18 @@ They form the current baseline; they are not newly discovered port mismatches.
 - Disposition: fixed with typed absent/null/value blocks and explicit currency
   presence. No intentional behaviour change; record ownership remains marked
   `pending` until the records crate integration pass.
+
+## RP-3: quota date signs and activity precision (fixed)
+
+- Unit: `scripts/quota_schedule.py#unit-01`; PORTING.md version 3.
+- Class: `bug`. Signed month/day digits were accepted by integer parsing.
+  Activity seconds were rounded after scaling the entire epoch rather than
+  splitting the fraction as CPython `datetime.fromtimestamp` does.
+- Oracle: Python source revision `e897b10d58b27a46544969594eed08a5ed64c72c`.
+- Evidence: `review_regression_signed_date_components_are_rejected` and
+  `review_regression_activity_uses_fromtimestamp_fraction_rounding` both failed
+  on the pre-fix tree. The latter covers 1735689600791625390 ns converted to
+  float seconds, requiring `2025-01-01T00:00:00.791625Z`, and an active-window
+  boundary that detects a one-microsecond error.
+- Disposition: fixed with ASCII date digits and shared fractional half-even
+  timestamp conversion. Duration addition retains Python timedelta rounding.

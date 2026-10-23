@@ -1,6 +1,6 @@
 //! Adaptive refresh scheduling. No clock reads; activity discovery only reads metadata.
 use crate::{
-    time::{add_seconds, iso, parse_time, seconds_between, stamp},
+    time::{add_seconds, from_timestamp, iso, parse_time, seconds_between, stamp},
     *,
 };
 use jiff::{tz::TimeZone, Timestamp};
@@ -289,7 +289,7 @@ pub fn plan(input: PlanInput<'_>) -> Result<(Schedule, bool), QuotaError> {
         / 1000.0;
     let seen = activity_at
         .filter(|v| v.is_finite())
-        .map(|s| add_seconds(Timestamp::UNIX_EPOCH, s))
+        .map(from_timestamp)
         .transpose()?;
     let own = attempted
         .zip(seen)
