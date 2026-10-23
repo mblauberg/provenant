@@ -86,3 +86,12 @@ Native adversarial reviews use separate syscall/custody and source-parity
 lenses. Their findings and final exact-head counts are retained in the PR;
 cross-family review, Linux/macOS CI matrix and J1/J2/J3 cut-over judges remain
 with the chair. Auto-merge is not armed.
+
+Final local evidence after merging `origin/main` at
+`114e3331ebf6b767baadac1069d4b900ae7d91d2`: 150 supervisor unit tests and
+1 compile-fail doctest passed with required differentials; 2 touched root lane
+file tests and both layering policy checks passed. Workspace fmt and supervisor
+clippy with warnings denied passed. The five Python/TS oracle source files are
+unchanged from the intake revision. Both native reviewers confirmed no unresolved
+introduced defect after repairs; they do not replace the chair's cross-family
+review or PR CI gate. The containment fixture was observed red before repair.
