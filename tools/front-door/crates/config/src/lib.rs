@@ -8,6 +8,7 @@ pub mod front_door;
 pub mod instance;
 pub mod manifest;
 mod pending;
+mod python_unicode;
 pub mod workflows;
 
 #[derive(Debug, thiserror::Error)]
