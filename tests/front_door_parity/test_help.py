@@ -13,15 +13,12 @@ from parity_support import (
     FABRIC_MCP,
     HELP_BUDGET,
     IMPL,
+    PYTHON_DETAILS,
     assert_matches_reference,
     reference_run,
 )
 
-MAIN_TOPICS = (
-    "root route routes capabilities worktree clean reap lint check gate fabric lease hosts peer "
-    "lanes events telemetry stats retro quota profile dispatch batch run pr help"
-).split()
-TOPICS = MAIN_TOPICS
+TOPICS = sorted(PYTHON_DETAILS)
 USAGE_PREFIX = "usage: provenant <help|root|route|"
 
 

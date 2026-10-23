@@ -123,13 +123,23 @@ pub fn write_executable(path: &Path, text: &str) {
     fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
 }
 
-/// A command with a minimal environment: PATH and HOME only.
+/// A command with a minimal environment plus its caller's writable temp root.
 pub fn command(binary: &Path, home: &Path) -> Command {
     let mut command = Command::new(binary);
+    let temp = if cfg!(target_os = "macos") {
+        PathBuf::from("/private/tmp")
+    } else {
+        std::env::temp_dir()
+    };
+    let python = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../.venv/bin")
+        .canonicalize()
+        .expect("harness Python environment is installed");
     command
         .env_clear()
-        .env("PATH", "/usr/bin:/bin")
-        .env("HOME", home);
+        .env("PATH", format!("{}:/usr/bin:/bin", python.display()))
+        .env("HOME", home)
+        .env("TMPDIR", temp);
     command
 }
 

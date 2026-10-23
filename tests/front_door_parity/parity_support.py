@@ -5,7 +5,8 @@ The suite drives whichever implementation `PROVENANT_PARITY_IMPL` names:
 * `python` (default): `scripts/provenant.template` is the stub role and
   `scripts/provenant` is the dispatcher role.
 * `rust`: one compiled binary plays both roles. Its path is
-  `PROVENANT_FRONT_DOOR_BIN`, else `tools/front-door/target/release/provenant`.
+  `PROVENANT_FRONT_DOOR_BIN`, else `$CARGO_TARGET_DIR/release/provenant` when
+  set, or `tools/front-door/target/release/provenant`.
 
 Stub role means the binary sits in a bin directory outside any checkout, as
 installed. Dispatcher role means a copy lives at `<checkout>/scripts/provenant`.
@@ -18,6 +19,7 @@ and a hash of stdin without the front door being involved in reading any of it.
 
 from __future__ import annotations
 
+import ast
 import hashlib
 import json
 import os
@@ -37,6 +39,43 @@ if IMPL not in ("python", "rust"):
 #: Checkout whose Python dispatcher is the byte-for-byte reference for help
 #: text. Defaults to the current checkout.
 REFERENCE_ROOT = Path(os.environ.get("PROVENANT_PARITY_REFERENCE_ROOT") or ROOT)
+
+
+def python_contract():
+    """Read dispatch and help tables from the Python owner, failing on shape drift."""
+    tree = ast.parse((REFERENCE_ROOT / "scripts/provenant").read_text())
+    main = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "main")
+    constants = {
+        node.targets[0].id: ast.literal_eval(node.value)
+        for node in tree.body
+        if isinstance(node, ast.Assign) and isinstance(node.targets[0], ast.Name)
+        and isinstance(node.value, ast.Constant)
+    }
+    table = next(node.value for node in main.body if isinstance(node, ast.Assign)
+                 and any(isinstance(target, ast.Name) and target.id == "owners" for target in node.targets))
+    owners = {ast.literal_eval(key): constants[value.id] if isinstance(value, ast.Name)
+              else ast.literal_eval(value) for key, value in zip(table.keys, table.values)}
+    aliases, prefixed = set(), set()
+    for node in main.body:
+        if (isinstance(node, ast.If) and isinstance(node.test, ast.Compare)
+                and isinstance(node.test.left, ast.Name) and node.test.left.id == "command"
+                and isinstance(node.test.ops[0], ast.In) and isinstance(node.test.comparators[0], ast.Set)):
+            verbs = ast.literal_eval(node.test.comparators[0])
+            if any(isinstance(statement, ast.Assign)
+                   and any(isinstance(target, ast.Name) and target.id == "command"
+                           for target in statement.targets) for statement in node.body):
+                aliases.update(verbs)
+            else:
+                prefixed.update(verbs)
+    assert aliases and prefixed, "Python dispatch shape changed; update the parity contract reader"
+    details = next(ast.literal_eval(node.value) for node in tree.body
+                   if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name)
+                   and node.target.id == "COMMAND_DETAILS")
+    return owners, aliases, prefixed, details
+
+
+PYTHON_OWNERS, PYTHON_ALIASES, PYTHON_PREFIXED, PYTHON_DETAILS = python_contract()
+
 
 GIT_REDIRECT_VARIABLES = (
     "GIT_DIR",
@@ -71,27 +110,9 @@ REPAIR = (
 )
 
 #: Every owner path the front door can reach, relative to a checkout.
-OWNER_PATHS = (
-    "scripts/model-route",
-    "scripts/worktree",
-    "scripts/clean.py",
-    "scripts/reap.py",
-    "scripts/provenant-pr",
-    "scripts/provenant_lint.py",
-    "runtime/fabric/src/landing-cli.ts",
-    "scripts/check-harness",
-    "scripts/gate",
-    "scripts/fabric-hosts",
-    "scripts/provenant-telemetry",
-    "scripts/provenant-quota",
-    "scripts/provenant-profile",
-    "skills/orchestrate/scripts/capabilities.py",
-    "skills/orchestrate/scripts/dispatch_run.py",
-    "skills/orchestrate/scripts/batch_run.py",
-    "skills/orchestrate/scripts/run_controls.py",
-    "runtime/fabric/bin/fabric",
-    FABRIC_MCP,
-)
+OWNER_PATHS = tuple(sorted(set(PYTHON_OWNERS.values()) | {
+    "runtime/fabric/src/landing-cli.ts", FABRIC_MCP,
+}))
 
 RECORDER = """#!{python}
 import hashlib
@@ -115,7 +136,8 @@ raise SystemExit(int(os.environ.get("PROVENANT_TEST_EXIT", "0")))
 
 def front_door_binary() -> Path:
     configured = os.environ.get("PROVENANT_FRONT_DOOR_BIN")
-    path = Path(configured) if configured else ROOT / "tools/front-door/target/release/provenant"
+    target = Path(os.environ.get("CARGO_TARGET_DIR", ROOT / "tools/front-door/target"))
+    path = Path(configured) if configured else target / "release/provenant"
     if not path.is_file():
         pytest.fail(
             f"PROVENANT_PARITY_IMPL=rust but no binary at {path}; build it with "
