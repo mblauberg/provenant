@@ -36,7 +36,7 @@ def test_free_opencode_models_are_derived_from_the_free_pattern():
     assert adapter["free_pattern"]
     for model in adapter["models"]:
         free = router.is_free_model(adapter, model["id"])
-        training = router.training_flag(adapter, model)
+        training = router.model_route_live.training_flag(adapter, model)
         # Free ids default to training unless flagged zero-retention; paid ids train only when flagged.
         assert training is ((model.get("trains_on_prompts") is not False) if free
                             else model.get("trains_on_prompts") is True)
@@ -106,13 +106,13 @@ def test_fallback_inherits_adapter_training_flag_without_false_default():
                 "aliases": {"senior": ["primary", "candidate"]},
                 "models": [{"id": "primary", "plan_cap_usd": 1},
                            {"id": "candidate", "plan_cap_usd": 1}]}}}
-    assert module._fallback_candidates("fixture", "senior", "primary", catalog, {}) == []
+    assert module.model_route_live._fallback_candidates("fixture", "senior", "primary", catalog, {}) == []
     catalog["adapters"]["fixture"]["trains_on_prompts"] = False
-    candidates = module._fallback_candidates("fixture", "senior", "primary", catalog, {})
+    candidates = module.model_route_live._fallback_candidates("fixture", "senior", "primary", catalog, {})
     assert len(candidates) == 1
     assert candidates[0]["trains_on_prompts"] is False
     del catalog["adapters"]["fixture"]["trains_on_prompts"]
-    candidates = module._fallback_candidates("fixture", "senior", "primary", catalog, {})
+    candidates = module.model_route_live._fallback_candidates("fixture", "senior", "primary", catalog, {})
     assert len(candidates) == 1
     assert candidates[0]["trains_on_prompts"] is None
 CRUCIAL_RISK_OVERRIDE = CATALOG["families"]["anthropic"]["risk_tier_overrides"]["crucial"]
@@ -294,11 +294,11 @@ def test_training_flag_survives_model_overlay_and_free_override(tmp_path, monkey
     for adapter, model in (("claude", "claude-opus-5-5"), ("codex", "gpt-6.1-sol"),
                            ("agy", "gemini-3.8-flash")):
         entry = next(item for item in catalog["adapters"][adapter]["models"] if item["id"] == model)
-        assert router.training_flag(catalog["adapters"][adapter], entry) is False
+        assert router.model_route_live.training_flag(catalog["adapters"][adapter], entry) is False
     free = next(item for item in catalog["adapters"]["opencode"]["models"]
                 if item["id"] == "opencode/mimo-v2.6-flash-free")
-    assert router.training_flag(catalog["adapters"]["opencode"], free) is True
-    assert router.training_flag({}, {}) is None
+    assert router.model_route_live.training_flag(catalog["adapters"]["opencode"], free) is True
+    assert router.model_route_live.training_flag({}, {}) is None
 
 
 def test_resolved_routes_expose_training_flag():
@@ -4732,12 +4732,12 @@ def test_family_keys_resolve_to_the_highest_catalogue_version(tmp_path, monkeypa
             ("codex", "gpt-sol", "gpt-6.1-sol"), ("codex", "sol", "gpt-6.1-sol"),
             ("claude", "claude-sonnet", "claude-sonnet-5-5"), ("claude", "claude-opus", "claude-opus-5-5"),
             ("claude", "sonnet", "claude-sonnet-5-5"), ("agy", "sonnet", "claude-sonnet-4-6")):
-        entry, notes = router._registered_match(adapter, requested, catalog)
+        entry, notes = router.model_route_live._registered_match(adapter, requested, catalog)
         assert entry and entry["id"] == expected and not notes, (adapter, requested)
     # Explicit versions stay exact, and adapters that do not opt in are untouched.
-    assert router._registered_match("claude", "claude-sonnet-5", catalog)[0]["id"] == "claude-sonnet-5-5"
+    assert router.model_route_live._registered_match("claude", "claude-sonnet-5", catalog)[0]["id"] == "claude-sonnet-5-5"
     catalog["adapters"]["codex"]["latest_aliases"] = False
-    assert router._registered_match("codex", "gpt-sol", catalog)[0] is None
+    assert router.model_route_live._registered_match("codex", "gpt-sol", catalog)[0] is None
 
 
 def test_family_alias_picks_a_newer_live_model_with_a_note_and_never_upgrades_explicit_ids(tmp_path, monkeypatch):
@@ -4746,17 +4746,17 @@ def test_family_alias_picks_a_newer_live_model_with_a_note_and_never_upgrades_ex
     _live_cache(tmp_path, "codex", ["gpt-6.2-sol", "gpt-6.1-sol", "gpt-6.2-luna"])
     catalog = router.load_catalog()
     for requested in ("gpt-sol", "sol"):
-        entry, notes = router._registered_match("codex", requested, catalog)
+        entry, notes = router.model_route_live._registered_match("codex", requested, catalog)
         assert entry["id"] == "gpt-6.2-sol"
         assert notes == ["gpt-6.2-sol is newer than the catalogue; run provenant refresh-routing "
                          "or add it to config/model-routing.json"]
     base = next(item for item in catalog["adapters"]["codex"]["models"] if item["id"] == "gpt-6.1-sol")
     assert entry["efforts"] == base["efforts"]
-    assert router._registered_match("codex", "gpt-6.1-sol", catalog)[0]["id"] == "gpt-6.1-sol"
+    assert router.model_route_live._registered_match("codex", "gpt-6.1-sol", catalog)[0]["id"] == "gpt-6.1-sol"
     _live_cache(tmp_path, "codex", ["gpt-6.2-sol"], age=timedelta(days=2))
-    assert router._registered_match("codex", "sol", catalog)[0]["id"] == "gpt-6.1-sol"
+    assert router.model_route_live._registered_match("codex", "sol", catalog)[0]["id"] == "gpt-6.1-sol"
     _live_cache(tmp_path, "codex", ["gpt-6.1-sol"])
-    assert router._registered_match("codex", "sol", catalog)[1] == []
+    assert router.model_route_live._registered_match("codex", "sol", catalog)[1] == []
 
 
 def test_resolve_applies_effort_and_cooldown_gates_to_a_live_family_pick(tmp_path, monkeypatch):
@@ -4784,7 +4784,7 @@ def _resolve_env(state):
 def test_newer_catalogue_warning_is_daily_and_always_kept_in_notes(tmp_path, monkeypatch, capsys):
     router = load_router()
     monkeypatch.setenv("AGENT_FABRIC_STATE_ROOT", str(tmp_path))
-    note = router._NEWER_NOTE.format("gpt-6.2-sol")
+    note = router.model_route_live._NEWER_NOTE.format("gpt-6.2-sol")
 
     def emit():
         router.emit({"status": "ok", "warnings": [note], "notes": []}, 0)
@@ -4853,7 +4853,7 @@ def test_spelling_variants_of_a_family_name_resolve_like_gpt_sol(tmp_path, monke
     monkeypatch.setenv("AGENT_FABRIC_STATE_ROOT", str(tmp_path))
     catalog = router.load_catalog()
     for spelling in ("GPT_SOL", "s_o_l", "Gpt Sol", "SOL"):
-        assert router._registered_match("codex", spelling, catalog)[0]["id"] == "gpt-6.1-sol", spelling
+        assert router.model_route_live._registered_match("codex", spelling, catalog)[0]["id"] == "gpt-6.1-sol", spelling
 
 
 def _agy_live(state, models):
@@ -4930,7 +4930,7 @@ def test_positional_route_tier_shorthand_picks_from_the_pool(tier, route, monkey
                 "warnings": []}]}
 
     monkeypatch.setattr(router, "route_pick", route_pick)
-    monkeypatch.setattr(router, "_quota_states", lambda: {"codex": {
+    monkeypatch.setattr(router.model_route_live, "_quota_states", lambda: {"codex": {
         "account": "work", "state": "deficit", "summary": "window over pace", "observed_at": "now"
     }})
     assert router.main([tier]) == 0
@@ -4950,14 +4950,14 @@ LIVE_OPENCODE = ["opencode/big-pickle", "opencode-go/qwen3.8-flash", "opencode-g
                                         ("big-pickle", "opencode/big-pickle"),
                                         ("qwen", "opencode-go/qwen3.8-flash")])
 def test_opencode_bare_name_resolves_against_live_listing(name, model):
-    resolved, notes, refusal = load_router()._resolve_opencode_name(name, LIVE_OPENCODE)
+    resolved, notes, refusal = load_router().model_route_live._resolve_opencode_name(name, LIVE_OPENCODE)
     assert (resolved, refusal) == (model, None) and notes
 
 
 @pytest.mark.parametrize("name,status", [("kimi", "model_ambiguous"), ("mimo", "model_ambiguous"),
                                          ("zzzzzz", "model_not_found")])
 def test_opencode_bare_name_refusals_are_typed_with_a_fix(name, status):
-    resolved, _, refusal = load_router()._resolve_opencode_name(name, LIVE_OPENCODE)
+    resolved, _, refusal = load_router().model_route_live._resolve_opencode_name(name, LIVE_OPENCODE)
     assert resolved is None and refusal["status"] == status and "fix:" in refusal["message"]
     if status == "model_ambiguous":
         assert "opencode-go/kimi-k3" in refusal["message"] or "mimo-v2.6-flash" in refusal["message"]
@@ -4965,8 +4965,8 @@ def test_opencode_bare_name_refusals_are_typed_with_a_fix(name, status):
 
 def test_opencode_bare_name_passes_through_without_a_listing_or_with_a_provider_path():
     router = load_router()
-    assert router._resolve_opencode_name("kimi", []) == (None, [], None)
-    assert router._resolve_opencode_name("opencode/anything", LIVE_OPENCODE) == (None, [], None)
+    assert router.model_route_live._resolve_opencode_name("kimi", []) == (None, [], None)
+    assert router.model_route_live._resolve_opencode_name("opencode/anything", LIVE_OPENCODE) == (None, [], None)
 
 
 def test_opencode_resolve_end_to_end_with_a_fake_cli(tmp_path):
@@ -5120,9 +5120,9 @@ def test_opencode_refresh_is_skipped_when_the_shared_budget_is_nearly_spent(monk
     router = load_router()
     calls = []
     monkeypatch.setattr(router.model_route_probe, "probe_capabilities", lambda *a, **k: calls.append(k) or ({"models": ["x/y"]}, 0))
-    assert router._opencode_live_models(refresh=True, deadline=router.time.monotonic() + 1) == ([], False)
+    assert router.model_route_live._opencode_live_models(refresh=True, deadline=router.model_route_live.time.monotonic() + 1) == ([], False)
     assert not calls
-    assert router._opencode_live_models(refresh=True, deadline=router.time.monotonic() + 10)[0] == ["x/y"]
+    assert router.model_route_live._opencode_live_models(refresh=True, deadline=router.model_route_live.time.monotonic() + 10)[0] == ["x/y"]
 
 
 def test_effort_shift_never_climbs_to_retired_max_or_ultra():
@@ -5177,7 +5177,7 @@ def test_provider_quota_cooldown_skips_models_outside_the_plan_it_covers():
     until = (datetime.now(timezone.utc) + timedelta(days=3)).isoformat()
     cooldowns = {"opencode/*": {"status": "quota_exhausted", "cooling_until": until, "source": "provider quota",
                                 "covers": ["opencode-go/"]}}
-    assert router._cooling("opencode", "opencode-go/glm-5.3-flash", cooldowns, catalog) == until
-    assert not router._cooling("opencode", "opencode/glm-5.3-flash-free", cooldowns, catalog)
+    assert router.model_route_live._cooling("opencode", "opencode-go/glm-5.3-flash", cooldowns, catalog) == until
+    assert not router.model_route_live._cooling("opencode", "opencode/glm-5.3-flash-free", cooldowns, catalog)
     own = {**cooldowns, "opencode/opencode/glm-5.3-flash-free": {"cooling_until": until}}
-    assert router._cooling("opencode", "opencode/glm-5.3-flash-free", own, catalog) == until
+    assert router.model_route_live._cooling("opencode", "opencode/glm-5.3-flash-free", own, catalog) == until
