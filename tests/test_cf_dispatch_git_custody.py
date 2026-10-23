@@ -9,7 +9,9 @@ from types import SimpleNamespace
 
 import pytest
 
-from cf_dispatch_support import PRODUCT_ROOT, SCRIPT, fabric_free_env, write_executable
+from cf_dispatch_support import PRODUCT_ROOT, SCRIPT, fabric_free_env
+from tests.support.fake_cli import fake_bin, write_executable
+from tests.support.git import git_repo, linked_worktree
 
 
 GIT_CONTEXT_VARIABLES = (
@@ -36,23 +38,9 @@ GIT_CONTEXT_VARIABLES = (
 
 
 def make_fixture(tmp_path):
-    repo = tmp_path / "project"
-    repo.mkdir()
-    subprocess.run(["git", "init", "-q", str(repo)], check=True)
-    subprocess.run(["git", "-C", str(repo), "config", "user.name", "Test"], check=True)
-    subprocess.run(
-        ["git", "-C", str(repo), "config", "user.email", "test@example.com"],
-        check=True,
-    )
-    (repo / "tracked.txt").write_text("base\n", encoding="utf-8")
-    subprocess.run(["git", "-C", str(repo), "add", "tracked.txt"], check=True)
-    subprocess.run(["git", "-C", str(repo), "commit", "-qm", "base"], check=True)
+    repo = git_repo(tmp_path / "project", files={"tracked.txt": "base\n"}, message="base")
 
-    source = tmp_path / "source-worktree"
-    subprocess.run(
-        ["git", "-C", str(repo), "worktree", "add", "-qb", "fixture", str(source)],
-        check=True,
-    )
+    source = linked_worktree(repo, "source-worktree", branch="fixture")
     copied = tmp_path / "copied-worktree"
     shutil.copytree(source, copied)
     index_path = Path(subprocess.check_output(
@@ -69,8 +57,7 @@ def make_fixture(tmp_path):
             ),
         }
 
-    bin_dir = tmp_path / "bin"
-    bin_dir.mkdir()
+    bin_dir = fake_bin(tmp_path)
     invoked = tmp_path / "provider.invoked"
     write_executable(
         bin_dir / "claude",

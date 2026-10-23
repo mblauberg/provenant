@@ -4,37 +4,21 @@ The per-provider expectations are the ones the three separate suites asserted
 before the module was folded together, so a changed snapshot fails here.
 """
 
-import importlib.util
 import json
-import sys
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+
+from tests.support.fake_cli import write_executable
+from tests.support.modules import load_script
 
 
 ROOT = Path(__file__).resolve().parents[1]
 PATH = ROOT / "skills" / "orchestrate" / "scripts" / "capabilities.py"
 
 
-def load_module():
-    spec = importlib.util.spec_from_file_location("capabilities", PATH)
-    assert spec and spec.loader
-    module = importlib.util.module_from_spec(spec)
-    # dataclasses resolves annotations through sys.modules, so a module loaded
-    # straight off a path has to be registered before it executes.
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    return module
-
-
-MODULE = load_module()
-
-
-def write_executable(path: Path, body: str) -> Path:
-    path.write_text(body)
-    path.chmod(0o700)
-    return path
+MODULE = load_script(PATH, "capabilities", register=True)
 
 
 def fake_codex(tmp_path, *, stderr="", catalogue=None):

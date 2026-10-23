@@ -2,12 +2,9 @@
 
 from __future__ import annotations
 
-import importlib.util
-import inspect
 import json
 import os
 import signal
-import stat
 import subprocess
 import sys
 import time
@@ -15,23 +12,16 @@ from pathlib import Path
 
 import pytest
 
+from tests.support.fake_cli import fake_bin, fake_codex, write_executable
+from tests.support.git import git_repo, linked_worktree
+from tests.support.modules import load_script
+from tests.support.runs import make_run
+
 ROOT = Path(__file__).resolve().parents[1]
 BATCH = ROOT / "skills/orchestrate/scripts/batch_run.py"
 INIT = ROOT / "skills/orchestrate/scripts/run_dir_init.sh"
 FINALIZE = ROOT / "skills/orchestrate/scripts/run_dir_finalize.py"
 CURRENT_ROUTING_FIXTURE = ROOT / "tests/fixtures/current-routing-eval/dispatch_fixture.py"
-
-
-def write_executable(path: Path, body: str) -> None:
-    normalized = inspect.cleandoc(body)
-    if normalized.lstrip().startswith("#!"):
-        assert normalized.startswith("#!"), "executable fixture shebang must start at byte zero"
-    path.write_text(normalized, encoding="utf-8")
-    path.chmod(path.stat().st_mode | stat.S_IXUSR)
-
-
-def make_run(tmp_path: Path, name: str) -> Path:
-    return Path(subprocess.check_output([str(INIT), str(tmp_path / ".agent-run" / name)], text=True).strip())
 
 
 def attempt_diagnostics(run_dir: Path) -> str:
@@ -42,20 +32,12 @@ def attempt_diagnostics(run_dir: Path) -> str:
     return "\n".join(evidence)
 
 
-def load_module():
-    spec = importlib.util.spec_from_file_location("batch_run_under_test", BATCH)
-    assert spec and spec.loader
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
-
 def test_batch_accepts_prompt_files_in_caller_temp_directories(tmp_path, monkeypatch):
     workspace = tmp_path / 'workspace'
     workspace.mkdir()
     monkeypatch.chdir(workspace)
     monkeypatch.setenv('TMPDIR', str(tmp_path))
-    module = load_module()
+    module = load_script(BATCH, "batch_run_under_test")
     manifest = task_manifest(tmp_path, [task(tmp_path, 'temp-prompt')])
     loaded = module.load_manifest(manifest)
     assert len(loaded) == 1 and loaded[0]['id'] == 'temp-prompt'
@@ -214,7 +196,7 @@ def test_batch_keeps_valid_task_when_another_task_is_rejected(tmp_path, monkeypa
     run_dir = make_run(tmp_path, 'task-local-rejection')
     dispatch = tmp_path / 'fake-dispatch'
     fake_dispatch(dispatch)
-    module = load_module()
+    module = load_script(BATCH, "batch_run_under_test")
     module.DISPATCH_RUN = dispatch
     counter = tmp_path / 'counter'
     counter.write_text('0', encoding='utf-8')
@@ -252,7 +234,7 @@ def test_fixed_batch_caps_eight_tasks_and_produces_reducer_inputs(tmp_path, monk
     run_dir = make_run(tmp_path, 'eight')
     dispatch = tmp_path / 'fake-dispatch'
     fake_dispatch(dispatch)
-    module = load_module()
+    module = load_script(BATCH, "batch_run_under_test")
     module.DISPATCH_RUN = dispatch
     counter = tmp_path / 'counter'
     counter.write_text('0')
@@ -303,7 +285,7 @@ def test_current_routing_fixture_runs_real_dispatch_and_retains_partial_batch(tm
         for task_id, family, _status in task_specs
     ])
 
-    module = load_module()
+    module = load_script(BATCH, "batch_run_under_test")
     module.DISPATCH_RUN = CURRENT_ROUTING_FIXTURE
     assert module.batch(args(module, run_dir, manifest, 2)) == 1
 
@@ -333,7 +315,7 @@ def test_default_concurrency_scales_down_for_small_manifest(tmp_path, monkeypatc
     run_dir = make_run(tmp_path, 'small-default')
     dispatch = tmp_path / 'fake-dispatch'
     fake_dispatch(dispatch)
-    module = load_module()
+    module = load_script(BATCH, "batch_run_under_test")
     module.DISPATCH_RUN = dispatch
     counter = tmp_path / 'counter'
     counter.write_text('0')
@@ -350,7 +332,7 @@ def test_default_concurrency_scales_down_for_small_manifest(tmp_path, monkeypatc
 
 
 def test_batch_help_states_the_writer_boundary(tmp_path, monkeypatch):
-    module = load_module()
+    module = load_script(BATCH, "batch_run_under_test")
     help_text = module.parser().format_help()
     assert 'default to read_only access' in help_text
     assert 'access_mode worktree_write' in help_text
@@ -367,7 +349,7 @@ def test_batch_forwards_lifecycle_risk_and_model_override_separately(tmp_path, m
         'model': 'claude-fable-5-1', 'role': 'synthesis', 'risk_tier': 'routine',
         'model_override_tier': 'crucial',
     }])
-    module = load_module()
+    module = load_script(BATCH, "batch_run_under_test")
     dispatch = tmp_path / 'fake-dispatch'
     fake_dispatch(dispatch)
     module.DISPATCH_RUN = dispatch
@@ -396,7 +378,7 @@ def test_batch_accepts_a_prompt_file_in_a_read_root_and_forwards_the_root(tmp_pa
     workspace.mkdir()
     other.mkdir()
     monkeypatch.chdir(workspace)
-    module = load_module()
+    module = load_script(BATCH, "batch_run_under_test")
     monkeypatch.setattr(module, 'prompt_temp_roots', lambda: ())
     prompt = other / 'brief.md'
     prompt.write_text('read the other project\n', encoding='utf-8')
@@ -413,7 +395,7 @@ def test_batch_accepts_a_prompt_file_in_a_read_root_and_forwards_the_root(tmp_pa
 
 def test_batch_forwards_run_owned_agy_git_evidence_path(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
-    module = load_module()
+    module = load_script(BATCH, "batch_run_under_test")
     run_dir = make_run(tmp_path, 'batch-evidence')
     prompt = tmp_path / 'prompt.md'
     prompt.write_text('review\n', encoding='utf-8')
@@ -431,7 +413,7 @@ def test_batch_forwards_run_owned_agy_git_evidence_path(tmp_path, monkeypatch):
 
 def test_batch_rejects_symlink_git_evidence_source(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
-    module = load_module()
+    module = load_script(BATCH, "batch_run_under_test")
     run_dir = make_run(tmp_path, 'batch-evidence-symlink')
     evidence = run_dir / 'evidence.md'
     evidence.write_text('packet\n', encoding='utf-8')
@@ -454,8 +436,7 @@ def test_real_full_chain_keeps_lifecycle_risk_separate_from_model_override(
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv('AGENT_FABRIC_INSTANCE_ROOT', str(ROOT))
     run_dir = make_run(tmp_path, 'real-route-metadata')
-    bin_dir = tmp_path / 'bin'
-    bin_dir.mkdir()
+    bin_dir = fake_bin(tmp_path)
     claude_args = tmp_path / 'claude.args'
     write_executable(bin_dir / 'claude', f"""
         #!/usr/bin/env bash
@@ -475,7 +456,7 @@ def test_real_full_chain_keeps_lifecycle_risk_separate_from_model_override(
         'risk_tier': 'routine',
         'model_override_tier': 'crucial',
     }])
-    module = load_module()
+    module = load_script(BATCH, "batch_run_under_test")
     module.DISPATCH_RUN = BATCH.parent / 'dispatch_run.py'
 
     assert module.batch(args(module, run_dir, manifest, 1)) == 0, attempt_diagnostics(run_dir)
@@ -504,20 +485,13 @@ def test_real_dispatch_children_defer_manifest_race_and_preserve_route_identity(
         json.dumps({'memory_floor_percent': {'read_only': 0}}), encoding='utf-8'
     )
     run_dir = make_run(tmp_path, 'real-eight')
-    bin_dir = tmp_path / 'bin'
-    bin_dir.mkdir()
-    write_executable(bin_dir / 'codex', """
-        #!/usr/bin/env bash
-        if [ "$1" = "mcp" ]; then printf '[]'; exit 0; fi
-        if [ "$1" = "debug" ] && [ "$2" = "models" ]; then
-          printf '{"models":[{"slug":"gpt-6-luna","supported_reasoning_levels":[{"effort":"low"},{"effort":"medium"},{"effort":"high"}]}]}'
-          exit 0
-        fi
+    bin_dir = fake_bin(tmp_path)
+    fake_codex(bin_dir, """
         cat >/dev/null
         printf 'OK\\n'
-        """)
+        """, efforts=("low", "medium", "high"))
     monkeypatch.setenv('PATH', f"{bin_dir}:{ROOT / 'scripts'}:{os.environ['PATH']}")
-    module = load_module()
+    module = load_script(BATCH, "batch_run_under_test")
     module.DISPATCH_RUN = BATCH.parent / 'dispatch_run.py'
     manifest = task_manifest(tmp_path, [task(tmp_path, f'task-{i}', sleep='0') for i in range(8)])
     document = json.loads(manifest.read_text())
@@ -547,7 +521,7 @@ def test_late_batch_cancel_does_not_override_natural_all_terminal_completion(tmp
     run_dir = make_run(tmp_path, 'late-cancel')
     dispatch = tmp_path / 'fake-dispatch'
     fake_dispatch(dispatch)
-    module = load_module()
+    module = load_script(BATCH, "batch_run_under_test")
     module.DISPATCH_RUN = dispatch
     counter = tmp_path / 'counter'
     counter.write_text('0')
@@ -574,7 +548,7 @@ def test_late_batch_cancel_does_not_override_natural_all_terminal_completion(tmp
 def test_retained_non_success_attempt_allows_partial_route_and_question(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     run_dir = make_run(tmp_path, 'partial-receipt')
-    module = load_module()
+    module = load_script(BATCH, "batch_run_under_test")
     prompt = tmp_path / 'question.md'
     prompt.write_text('question\n', encoding='utf-8')
     current = task(tmp_path, 'partial')
@@ -641,7 +615,7 @@ def test_batch_rejects_incomplete_success_evidence_before_summary(tmp_path, monk
     run_dir = make_run(tmp_path, f'incomplete-success-{failure}')
     dispatch = tmp_path / 'fake-dispatch'
     fake_dispatch(dispatch)
-    module = load_module()
+    module = load_script(BATCH, "batch_run_under_test")
     module.DISPATCH_RUN = dispatch
     counter = tmp_path / 'counter'
     counter.write_text('0', encoding='utf-8')
@@ -661,19 +635,12 @@ def test_batch_rejects_incomplete_success_evidence_before_summary(tmp_path, monk
 def test_real_dispatch_timeout_retains_typed_non_success_attempt(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     run_dir = make_run(tmp_path, 'real-timeout')
-    bin_dir = tmp_path / 'bin'
-    bin_dir.mkdir()
-    write_executable(bin_dir / 'codex', """
-        #!/usr/bin/env bash
-        if [ "$1" = "mcp" ]; then printf '[]'; exit 0; fi
-        if [ "$1" = "debug" ] && [ "$2" = "models" ]; then
-          printf '{"models":[{"slug":"gpt-6-luna","supported_reasoning_levels":[{"effort":"low"},{"effort":"medium"},{"effort":"high"}]}]}'
-          exit 0
-        fi
+    bin_dir = fake_bin(tmp_path)
+    fake_codex(bin_dir, """
         sleep 10
-        """)
+        """, efforts=("low", "medium", "high"))
     monkeypatch.setenv('PATH', f"{bin_dir}:{ROOT / 'scripts'}:{os.environ['PATH']}")
-    module = load_module()
+    module = load_script(BATCH, "batch_run_under_test")
     module.DISPATCH_RUN = BATCH.parent / 'dispatch_run.py'
     slow_prompt = tmp_path / 'slow.md'
     slow_prompt.write_text('slow\n', encoding='utf-8')
@@ -696,7 +663,7 @@ def test_parent_watchdog_stops_hung_child_even_with_prior_wait(tmp_path, monkeyp
         old.write_text(json.dumps({'state': 'terminal', 'timing': {'queued_seconds': 100}}))
     child = tmp_path / 'hung-child'
     write_executable(child, '#!/usr/bin/env python3\nimport time\ntime.sleep(10)\n')
-    module = load_module()
+    module = load_script(BATCH, "batch_run_under_test")
     module.DISPATCH_RUN = child
     monkeypatch.setattr(module, 'DISPATCH_WATCHDOG_GRACE_SECONDS', 0.05)
     prompt = tmp_path / 'prompt.md'
@@ -722,7 +689,7 @@ time.sleep(0.3)
 path.write_text(json.dumps({'state': 'running', 'timing': {'queued_seconds': 0.3}}))
 time.sleep(1)
 ''')
-    module = load_module()
+    module = load_script(BATCH, "batch_run_under_test")
     module.DISPATCH_RUN = child
     monkeypatch.setattr(module, 'DISPATCH_WATCHDOG_GRACE_SECONDS', 0.05)
     prompt = tmp_path / 'prompt.md'
@@ -737,22 +704,15 @@ time.sleep(1)
 def test_real_dispatch_cancellation_reaps_provider_process(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     run_dir = make_run(tmp_path, 'real-cancel')
-    bin_dir = tmp_path / 'bin'
-    bin_dir.mkdir()
+    bin_dir = fake_bin(tmp_path)
     provider_pid = tmp_path / 'provider.pid'
-    write_executable(bin_dir / 'codex', f"""
-        #!/usr/bin/env bash
-        if [ "$1" = "mcp" ]; then printf '[]'; exit 0; fi
-        if [ "$1" = "debug" ] && [ "$2" = "models" ]; then
-          printf '{{"models":[{{"slug":"gpt-6-luna","supported_reasoning_levels":[{{"effort":"low"}},{{"effort":"medium"}},{{"effort":"high"}}]}}]}}'
-          exit 0
-        fi
+    fake_codex(bin_dir, f"""
         printf '%s' "$$" > "{provider_pid}"
         trap '' TERM HUP
         while :; do sleep 1; done
-    """)
+    """, efforts=("low", "medium", "high"))
     monkeypatch.setenv('PATH', f"{bin_dir}:{ROOT / 'scripts'}:{os.environ['PATH']}")
-    module = load_module()
+    module = load_script(BATCH, "batch_run_under_test")
     module.DISPATCH_RUN = BATCH.parent / 'dispatch_run.py'
     prompt = tmp_path / 'cancel.md'
     prompt.write_text('cancel\n', encoding='utf-8')
@@ -781,7 +741,7 @@ def test_real_dispatch_cancellation_reaps_provider_process(tmp_path, monkeypatch
 
 def test_batch_signal_handler_is_reentrant_while_state_lock_is_held():
     """A SIGTERM delivered while custody is locked must return immediately."""
-    module = load_module()
+    module = load_script(BATCH, "batch_run_under_test")
     module._cancel_requested = False
     with module._state_lock:
         module._signal_handler(signal.SIGTERM, None)
@@ -792,23 +752,16 @@ def test_batch_signal_handler_is_reentrant_while_state_lock_is_held():
 def test_external_batch_marker_cancels_active_child_and_skips_queued_provider(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     run_dir = make_run(tmp_path, 'external-batch-cancel')
-    bin_dir = tmp_path / 'bin'
-    bin_dir.mkdir()
+    bin_dir = fake_bin(tmp_path)
     provider_pid = tmp_path / 'provider.pid'
     launches = tmp_path / 'launches'
-    write_executable(bin_dir / 'codex', f"""
-        #!/usr/bin/env bash
-        if [ "$1" = "mcp" ]; then printf '[]'; exit 0; fi
-        if [ "$1" = "debug" ] && [ "$2" = "models" ]; then
-          printf '{{"models":[{{"slug":"gpt-6-luna","supported_reasoning_levels":[{{"effort":"low"}}]}}]}}'
-          exit 0
-        fi
+    fake_codex(bin_dir, f"""
         printf '%s\\n' "$1" >> "{launches}"
         printf '%s' "$$" > "{provider_pid}"
         sleep 30
-    """)
+    """, efforts=("low",))
     monkeypatch.setenv('PATH', f"{bin_dir}:{ROOT / 'scripts'}:{os.environ['PATH']}")
-    module = load_module()
+    module = load_script(BATCH, "batch_run_under_test")
     module.DISPATCH_RUN = BATCH.parent / 'dispatch_run.py'
     first_prompt = tmp_path / 'first.md'
     second_prompt = tmp_path / 'second.md'
@@ -855,7 +808,7 @@ def test_inline_prompt_is_temporary_but_attempt_prompt_is_retained(tmp_path, mon
     run_dir = make_run(tmp_path, 'inline')
     dispatch = tmp_path / 'fake-dispatch'
     fake_dispatch(dispatch)
-    module = load_module()
+    module = load_script(BATCH, "batch_run_under_test")
     module.DISPATCH_RUN = dispatch
     counter = tmp_path / 'counter'
     counter.write_text('0')
@@ -878,7 +831,7 @@ def test_batch_rejects_secret_task_but_runs_valid_task_without_retaining_prompt_
 ):
     monkeypatch.chdir(tmp_path)
     run_dir = make_run(tmp_path, 'secret-batch')
-    module = load_module()
+    module = load_script(BATCH, "batch_run_under_test")
     dispatch = tmp_path / 'fake-dispatch'
     fake_dispatch(dispatch)
     module.DISPATCH_RUN = dispatch
@@ -921,20 +874,13 @@ def test_retry_creates_new_attempt_without_replacing_attempt_one(tmp_path, monke
     (policy_dir / 'fabric-policy.json').write_text(
         json.dumps({'memory_floor_percent': {'read_only': 0}}), encoding='utf-8')
     run_dir = make_run(tmp_path, 'retry')
-    bin_dir = tmp_path / 'bin'
-    bin_dir.mkdir()
-    write_executable(bin_dir / 'codex', """
-        #!/usr/bin/env bash
-        if [ "$1" = "mcp" ]; then printf '[]'; exit 0; fi
-        if [ "$1" = "debug" ] && [ "$2" = "models" ]; then
-          printf '{"models":[{"slug":"gpt-6-luna","supported_reasoning_levels":[{"effort":"low"},{"effort":"medium"},{"effort":"high"}]}]}'
-          exit 0
-        fi
+    bin_dir = fake_bin(tmp_path)
+    fake_codex(bin_dir, """
         cat >/dev/null
         printf 'OK\\n'
-        """)
+        """, efforts=("low", "medium", "high"))
     monkeypatch.setenv('PATH', f"{bin_dir}:{ROOT / 'scripts'}:{os.environ['PATH']}")
-    module = load_module()
+    module = load_script(BATCH, "batch_run_under_test")
     module.DISPATCH_RUN = BATCH.parent / 'dispatch_run.py'
     prompt = tmp_path / 'retry.md'
     prompt.write_text('retry\n', encoding='utf-8')
@@ -959,7 +905,7 @@ def test_batch_continues_after_mixed_success_failure_empty_and_timeout(tmp_path,
     run_dir = make_run(tmp_path, 'mixed')
     dispatch = tmp_path / 'fake-dispatch'
     fake_dispatch(dispatch)
-    module = load_module()
+    module = load_script(BATCH, "batch_run_under_test")
     module.DISPATCH_RUN = dispatch
     counter = tmp_path / 'counter'
     counter.write_text('0')
@@ -982,7 +928,7 @@ def test_batch_preserves_blocked_question_for_later_continuation(tmp_path, monke
     run_dir = make_run(tmp_path, 'blocked-question')
     dispatch = tmp_path / 'fake-dispatch'
     fake_dispatch(dispatch)
-    module = load_module()
+    module = load_script(BATCH, "batch_run_under_test")
     module.DISPATCH_RUN = dispatch
     counter = tmp_path / 'counter'
     counter.write_text('0')
@@ -1003,19 +949,12 @@ def test_batch_preserves_blocked_question_for_later_continuation(tmp_path, monke
 def test_real_dispatch_child_propagates_worker_question_envelope(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     run_dir = make_run(tmp_path, 'real-blocked-question')
-    bin_dir = tmp_path / 'bin'
-    bin_dir.mkdir()
-    write_executable(bin_dir / 'codex', """
-        #!/usr/bin/env bash
-        if [ "$1" = "mcp" ]; then printf '[]'; exit 0; fi
-        if [ "$1" = "debug" ] && [ "$2" = "models" ]; then
-          printf '{"models":[{"slug":"gpt-6-luna","supported_reasoning_levels":[{"effort":"low"}]}]}'
-          exit 0
-        fi
+    bin_dir = fake_bin(tmp_path)
+    fake_codex(bin_dir, """
         printf '{"schema_version":1,"record_type":"provenant-worker-terminal","classification":"question","question":{"code":"needs_input","prompt":"Which source should I use?"}}\\n'
-        """)
+        """, efforts=("low",))
     monkeypatch.setenv('PATH', f"{bin_dir}:{ROOT / 'scripts'}:{os.environ['PATH']}")
-    module = load_module()
+    module = load_script(BATCH, "batch_run_under_test")
     module.DISPATCH_RUN = BATCH.parent / 'dispatch_run.py'
     manifest = task_manifest(tmp_path, [task(tmp_path, 'blocked-real', model='gpt-6-luna')])
 
@@ -1036,7 +975,7 @@ def test_real_dispatch_child_propagates_worker_question_envelope(tmp_path, monke
     [{'id': 'bad id', 'prompt_file': 'a', 'adapter': 'codex', 'alias': 'junior', 'role': 'worker'}],
 ])
 def test_batch_rejects_duplicate_or_malformed_task_schema(tmp_path, bad_tasks):
-    module = load_module()
+    module = load_script(BATCH, "batch_run_under_test")
     manifest = task_manifest(tmp_path, bad_tasks)
     with pytest.raises(module.BatchInputError):
         module.load_manifest(manifest)
@@ -1045,7 +984,7 @@ def test_batch_rejects_duplicate_or_malformed_task_schema(tmp_path, bad_tasks):
 @pytest.mark.parametrize('scope', ['batch', 'task'])
 @pytest.mark.parametrize('value', ['../delivery', 'x' * 129, None])
 def test_batch_rejects_invalid_delivery_id_before_launch(tmp_path, scope, value):
-    module = load_module()
+    module = load_script(BATCH, "batch_run_under_test")
     manifest = task_manifest(tmp_path, [task(tmp_path, 'writer')])
     document = json.loads(manifest.read_text())
     target = document if scope == 'batch' else document['tasks'][0]
@@ -1058,7 +997,7 @@ def test_batch_rejects_invalid_delivery_id_before_launch(tmp_path, scope, value)
 def test_batch_custody_lock_rejects_simultaneous_batch(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     run_dir = make_run(tmp_path, 'locked')
-    module = load_module()
+    module = load_script(BATCH, "batch_run_under_test")
     first = module._acquire_batch_lock(run_dir)
     try:
         with pytest.raises(module.BatchInputError, match='another batch'):
@@ -1072,7 +1011,7 @@ def test_batch_custody_lock_rejects_simultaneous_batch(tmp_path, monkeypatch):
 def test_run_finalizer_rejects_active_batch_custody(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     run_dir = make_run(tmp_path, 'active-finalizer')
-    module = load_module()
+    module = load_script(BATCH, "batch_run_under_test")
     lock = module._acquire_batch_lock(run_dir)
     try:
         finalized = subprocess.run([
@@ -1093,14 +1032,14 @@ def test_batch_custody_rejects_batches_symlink(tmp_path, monkeypatch):
     outside.mkdir()
     (run_dir / 'dispatch').mkdir()
     (run_dir / 'dispatch/batches').symlink_to(outside, target_is_directory=True)
-    module = load_module()
+    module = load_script(BATCH, "batch_run_under_test")
     with pytest.raises(module.BatchInputError):
         module._acquire_batch_lock(run_dir)
 
 
 def test_batch_rejects_source_writer_when_parallel(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
-    module = load_module()
+    module = load_script(BATCH, "batch_run_under_test")
     value = task(tmp_path, 'writer', source_writing=True)
     with pytest.raises(module.BatchInputError, match='unsupported'):
         module.load_manifest(task_manifest(tmp_path, [value]), concurrency=2)
@@ -1108,7 +1047,7 @@ def test_batch_rejects_source_writer_when_parallel(tmp_path, monkeypatch):
 
 def test_batch_rejects_declarative_writer_isolation_claim(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
-    module = load_module()
+    module = load_script(BATCH, "batch_run_under_test")
     value = task(tmp_path, 'writer', source_writing=True)
     value['non_overlapping'] = True
     value['provider_family'] = 'gemini'
@@ -1118,7 +1057,7 @@ def test_batch_rejects_declarative_writer_isolation_claim(tmp_path, monkeypatch)
 
 def test_batch_rejects_source_writer_in_read_only_release(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
-    module = load_module()
+    module = load_script(BATCH, "batch_run_under_test")
     value = task(tmp_path, 'writer', source_writing=True)
     with pytest.raises(module.BatchInputError, match='unsupported'):
         module.load_manifest(task_manifest(tmp_path, [value]), concurrency=1)
@@ -1132,7 +1071,7 @@ def test_malformed_prior_attempt_blocks_all_batch_launches(tmp_path, monkeypatch
     (prior / 'attempt.json').write_text('{"record_type":"dispatch-attempt"}\n', encoding='utf-8')
     dispatch = tmp_path / 'fake-dispatch'
     fake_dispatch(dispatch)
-    module = load_module()
+    module = load_script(BATCH, "batch_run_under_test")
     module.DISPATCH_RUN = dispatch
     manifest = task_manifest(tmp_path, [task(tmp_path, 'next')])
     counter = tmp_path / 'counter'
@@ -1149,7 +1088,7 @@ def test_non_v1_prior_attempt_blocks_reentry_before_launch(tmp_path, monkeypatch
     run_dir = make_run(tmp_path, 'non-v1-prior')
     dispatch = tmp_path / 'fake-dispatch'
     fake_dispatch(dispatch)
-    module = load_module()
+    module = load_script(BATCH, "batch_run_under_test")
     module.DISPATCH_RUN = dispatch
     counter = tmp_path / 'counter'
     counter.write_text('0')
@@ -1173,7 +1112,7 @@ def test_tampered_prior_evidence_digest_blocks_reentry_before_launch(tmp_path, m
     run_dir = make_run(tmp_path, 'tampered-prior')
     dispatch = tmp_path / 'fake-dispatch'
     fake_dispatch(dispatch)
-    module = load_module()
+    module = load_script(BATCH, "batch_run_under_test")
     module.DISPATCH_RUN = dispatch
     counter = tmp_path / 'counter'
     counter.write_text('0')
@@ -1199,7 +1138,7 @@ def test_tampered_attempt_sidecar_blocks_reentry_before_launch(tmp_path, monkeyp
     run_dir = make_run(tmp_path, 'tampered-sidecar')
     dispatch = tmp_path / 'fake-dispatch'
     fake_dispatch(dispatch)
-    module = load_module()
+    module = load_script(BATCH, "batch_run_under_test")
     module.DISPATCH_RUN = dispatch
     counter = tmp_path / 'counter'
     counter.write_text('0')
@@ -1220,7 +1159,7 @@ def test_standalone_dispatch_is_blocked_by_batch_custody(tmp_path, monkeypatch):
     run_dir = make_run(tmp_path, 'standalone-blocked')
     prompt = tmp_path / 'prompt.md'
     prompt.write_text('blocked\n', encoding='utf-8')
-    batch_module = load_module()
+    batch_module = load_script(BATCH, "batch_run_under_test")
     lock = batch_module._acquire_batch_lock(run_dir)
     try:
         blocked = subprocess.run([
@@ -1245,7 +1184,7 @@ def test_batch_child_flag_cannot_bypass_unrelated_run_custody(tmp_path, monkeypa
     run_dir = make_run(tmp_path, 'unrelated-child')
     prompt = tmp_path / 'prompt.md'
     prompt.write_text('blocked\n', encoding='utf-8')
-    module = load_module()
+    module = load_script(BATCH, "batch_run_under_test")
     lock = module._acquire_batch_lock(run_dir)
     # This live owner is not the process launching the dispatch. Even knowing
     # its token and asking for --batch-child must not grant shared custody.
@@ -1276,7 +1215,7 @@ def test_batch_cancellation_reaps_active_dispatches(tmp_path, monkeypatch):
     run_dir = make_run(tmp_path, 'cancel')
     dispatch = tmp_path / 'fake-dispatch'
     fake_dispatch(dispatch)
-    module = load_module()
+    module = load_script(BATCH, "batch_run_under_test")
     module.DISPATCH_RUN = dispatch
     counter = tmp_path / 'counter'
     counter.write_text('0')
@@ -1304,7 +1243,7 @@ def test_artifact_failure_cleans_unindexed_batch_directory_and_releases_lock(tmp
     run_dir = make_run(tmp_path, 'artifact-failure')
     dispatch = tmp_path / 'fake-dispatch'
     fake_dispatch(dispatch)
-    module = load_module()
+    module = load_script(BATCH, "batch_run_under_test")
     module.DISPATCH_RUN = dispatch
     counter = tmp_path / 'counter'
     counter.write_text('0')
@@ -1329,22 +1268,10 @@ def test_artifact_failure_cleans_unindexed_batch_directory_and_releases_lock(tmp
         reopened.close()
 
 
-def make_worktree(root: Path, name: str) -> Path:
-    """A linked worktree: writers refuse a primary checkout."""
-    primary = root / f'{name}-primary'
-    primary.mkdir()
-    subprocess.run(['git', 'init', '-q'], cwd=primary, check=True)
-    subprocess.run(['git', '-c', 'user.name=Test', '-c', 'user.email=test@example.invalid',
-                    'commit', '-q', '--allow-empty', '-m', 'initial'], cwd=primary, check=True)
-    worktree = root / name
-    subprocess.run(['git', 'worktree', 'add', '-q', '-b', name, str(worktree)], cwd=primary, check=True)
-    return worktree.resolve()
-
-
 def test_batch_rejects_two_writer_tasks_sharing_one_worktree(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
-    module = load_module()
-    worktree = make_worktree(tmp_path, 'shared')
+    module = load_script(BATCH, "batch_run_under_test")
+    worktree = linked_worktree(git_repo(tmp_path / 'shared-primary'), 'shared')
     tasks = [
         task(tmp_path, name, access_mode='worktree_write', worktree=str(worktree))
         for name in ('writer-a', 'writer-b')
@@ -1357,8 +1284,8 @@ def test_batch_rejects_two_writer_tasks_sharing_one_worktree(tmp_path, monkeypat
 
 def test_batch_forwards_the_writer_route_and_defaults_to_read_only(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
-    module = load_module()
-    worktree = make_worktree(tmp_path, 'owned')
+    module = load_script(BATCH, "batch_run_under_test")
+    worktree = linked_worktree(git_repo(tmp_path / 'owned-primary'), 'owned')
     writer = task(tmp_path, 'writer', access_mode='worktree_write', worktree=str(worktree))
     reader = task(tmp_path, 'reader')
     loaded = module.load_manifest(task_manifest(tmp_path, [writer, reader]), concurrency=2)
@@ -1380,8 +1307,8 @@ def test_batch_forwards_the_writer_route_and_defaults_to_read_only(tmp_path, mon
 
 def test_batch_rejects_a_worktree_without_the_writer_access_mode(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
-    module = load_module()
-    worktree = make_worktree(tmp_path, 'unclaimed')
+    module = load_script(BATCH, "batch_run_under_test")
+    worktree = linked_worktree(git_repo(tmp_path / 'unclaimed-primary'), 'unclaimed')
     value = task(tmp_path, 'reader', worktree=str(worktree))
     with pytest.raises(module.BatchInputError, match='requires worktree_write'):
         module.load_manifest(task_manifest(tmp_path, [value]), concurrency=1)
@@ -1391,8 +1318,7 @@ def test_real_batch_passes_each_task_cwd_and_absolute_prompt(tmp_path, monkeypat
     policy = tmp_path / '.agents/fabric-policy.json'
     policy.parent.mkdir()
     policy.write_text('{"memory_floor_percent":{"read_only":0,"worktree_write":0}}')
-    bindir = tmp_path / 'bin'
-    bindir.mkdir()
+    bindir = fake_bin(tmp_path)
     write_executable(bindir / 'claude', '''#!/usr/bin/env python3
 import json, os, sys
 sys.stdin.read()
@@ -1431,7 +1357,7 @@ def test_batch_rejects_invalid_fallback_before_launch(tmp_path, monkeypatch, fal
     monkeypatch.chdir(tmp_path)
     manifest = tmp_path / 'tasks.json'
     manifest.write_text(json.dumps({'schema_version':1,'tasks':[{'id':'one','adapter':'claude','model':'opus','prompt':'hello','fallback':fallback}]}))
-    mod = load_module()
+    mod = load_script(BATCH, "batch_run_under_test")
     with pytest.raises(mod.BatchInputError, match='fallback'):
         mod.load_manifest(manifest)
 
@@ -1457,7 +1383,7 @@ def test_batch_usage_error_is_one_line_and_exits_2():
 ])
 def test_batch_refuses_invalid_escalation_before_launch(tmp_path, monkeypatch, lineage):
     monkeypatch.chdir(tmp_path)
-    module = load_module()
+    module = load_script(BATCH, "batch_run_under_test")
     manifest = task_manifest(tmp_path, [{**task(tmp_path, 'escalate'), **lineage}])
     with pytest.raises(module.BatchInputError, match='escalation_reason'):
         module.load_manifest(manifest)
