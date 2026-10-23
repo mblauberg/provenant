@@ -1444,3 +1444,15 @@ codec and returns typed `NumberOutOfRange` above u64 (including
 `Option<u64>`; negative, bool and fractional retained tokens are rejected because
 Python never emits them. Only `context_percent` is floating point. This follows
 PORTING.md v4 R4; the Python source remains unchanged.
+
+## RP-WF2-006: supervisor rows and legacy receipt acceptance (bug, repaired)
+
+`src/lane/files.rs:367-403` emits `reaped` and `spared` as lists of rows
+(`pid`, `start_time`, `command`), plus numeric `observer_dropped` and
+`*_truncated` counts. `schemas/supervisor-exit.schema.json` instead declares
+boolean `reaped` and non-negative integer `spared`. The schema is unchanged.
+The workflow models real descendant rows separately from open legacy receipt
+inputs. Raw-input differentials preserve `spared: true`, negative counts,
+string length, string reaped evidence and character-wise warning iteration.
+The old output-fed-back oracle was removed. Observer restore/replay effects
+remain partial; `lane_exit.py#interface` will not be claimed complete.

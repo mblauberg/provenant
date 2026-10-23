@@ -104,7 +104,7 @@ for case in cases:
         plan = {"adapter":"claude","model":"m","cwd":str(directory),"run_dir":str(directory),"mode":case["mode"],"timeout_seconds":1.125,"startup_seconds":0.025,"grace_seconds":0.050,"silence_seconds":0.125,"_lineage_token":"token","batch_id":"batch-001","attempt_identity":{"run_dir":str(directory / "run")}}
         results.append(module.build_spec(plan, {"PATH":"/bin","SECRET_REFERENCE":"synthetic-value"}, argv=["/bin/claude","-p"], stdin_path=directory / "prompt.md" if case["stdin"] else None, events_path=directory / "events.jsonl", stderr_path=directory / "stderr.log", max_bytes=2048))
     elif unit == "lane_exit_contract":
-        results.append(module.receipt_fields(case))
+        results.append(json.dumps(module.receipt_fields(case), ensure_ascii=False, separators=(",", ":")))
     elif unit == "preflight_decode":
         try:
             results.append({"wire": json.dumps(module.parse_fast_route_json(case["raw"]), ensure_ascii=False, separators=(",", ":"))})
