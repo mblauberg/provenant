@@ -25,10 +25,17 @@ pub struct Team {
     pub members: Vec<String>,
 }
 
+#[derive(Default)]
+pub struct CreateTaskOptions<'a> {
+    pub task_id: Option<&'a str>,
+    pub owner: Option<&'a str>,
+    pub depends_on: &'a [String],
+}
+
 impl Store {
     pub fn create_team(&self, who: &Identity, team_id: &str, members: &[String]) -> Result<Team> {
         if team_id == "all" || members.iter().any(|m| m == "all") {
-            return Err(invalid("recipient id \"all\" is reserved for broadcast"));
+            return Err(Error::ReservedRecipient);
         }
         let now = self.now();
         let mut effective = Vec::new();
@@ -57,10 +64,7 @@ impl Store {
                     .optional()?
                     .is_some()
             {
-                return Err(invalid(format!(
-                    "team id {team_id} collides with an agent label in {}",
-                    who.project
-                )));
+                return Err(Error::TeamAgentCollision { team: team_id.into(), project: who.project.clone() });
             }
             self.db.execute(
                 "INSERT OR IGNORE INTO teams(project, team_id, created_at) VALUES (?, ?, ?)",
@@ -83,8 +87,16 @@ impl Store {
             members: effective,
         })
     }
+    pub fn create_task(&self, who: &Identity, objective: &str, options: CreateTaskOptions<'_>, ids: &dyn IdSource) -> Result<Task> {
+        let generated;
+        let task = match options.task_id {
+            Some(id) => id,
+            None => { generated = pending::js_slice(&ids.uuid()?, 8); &generated }
+        };
+        self.create_task_with_id(who, objective, task, options.owner, options.depends_on)
+    }
     /// The runtime supplies the task id, using an eight-character UUID prefix by default.
-    pub fn create_task(
+    pub(crate) fn create_task_with_id(
         &self,
         who: &Identity,
         objective: &str,
@@ -93,7 +105,7 @@ impl Store {
         depends_on: &[String],
     ) -> Result<Task> {
         if task_id.is_empty() {
-            return Err(invalid("task id must not be empty"));
+            return Err(Error::EmptyTaskId);
         }
         let now = self.now();
         self.transaction(false, || {
@@ -117,7 +129,7 @@ impl Store {
         note: Option<&str>,
     ) -> Result<Task> {
         if state == "claimed" {
-            return Err(invalid("state claimed is reserved for atomic task claim"));
+            return Err(Error::ReservedClaimedState);
         }
         self.transaction(false, || {
             if self.db.execute(
@@ -125,7 +137,7 @@ impl Store {
                 params![state, self.now(), who.project, task_id],
             )? == 0
             {
-                return Err(invalid(format!("no task {task_id} in {}", who.project)));
+                return Err(Error::TaskMissing { task: task_id.into(), project: who.project.clone() });
             }
             self.log(
                 who,
@@ -144,8 +156,8 @@ impl Store {
             if changed != 1 {
                 let current = self.task(&who.project, task_id)?;
                 if current.state == "open" && current.owner.as_deref() == Some(&who.agent_id) { return Ok(current); }
-                if current.state == "open" { if let Some(owner) = current.owner { return Err(invalid(format!("task {task_id} is already assigned to {owner}"))); } }
-                return Err(invalid(format!("task {task_id} is not open and unowned in {}", who.project)));
+                if current.state == "open" { if let Some(owner) = current.owner { return Err(Error::TaskAssigned { task: task_id.into(), owner }); } }
+                return Err(Error::TaskNotOpen { task: task_id.into(), project: who.project.clone() });
             }
             self.log(who, "task", &format!("{task_id} claimed by {}", who.agent_id))?;
             self.task(&who.project, task_id)
@@ -168,7 +180,7 @@ impl Store {
         self.tasks(project, None)?
             .into_iter()
             .find(|t| t.task_id == task_id)
-            .ok_or_else(|| invalid(format!("task {task_id} vanished during update")))
+            .ok_or_else(|| Error::TaskVanished { task: task_id.into() })
     }
     pub fn note(&self, who: &Identity, detail: &str) -> Result<()> {
         self.log(who, "note", detail)
@@ -183,7 +195,7 @@ impl Store {
         limit: i64,
     ) -> Result<Vec<Activity>> {
         if !(0..=MAX_SAFE_INTEGER).contains(&after_seq) {
-            return Err(invalid("activity cursor must be a non-negative integer"));
+            return Err(Error::ActivityCursor);
         }
         self.read_activity(project, Some(after_seq), limit)
     }
@@ -194,7 +206,7 @@ impl Store {
         limit: i64,
     ) -> Result<Vec<Activity>> {
         if !(1..=MAX_SAFE_INTEGER).contains(&limit) {
-            return Err(invalid("activity limit must be positive"));
+            return Err(Error::ActivityLimit);
         }
         let query = if after.is_some() {
             "SELECT seq, at, agent_id, kind, detail FROM activity WHERE project = ? AND seq > ? ORDER BY seq LIMIT ?"

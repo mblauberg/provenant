@@ -121,9 +121,7 @@ impl Store {
                 .bytes()
                 .all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c))
         {
-            return Err(invalid(
-                "expected integration SHA must be 40 lowercase hex digits",
-            ));
+            return Err(Error::ExpectedSha);
         }
         self.transaction(true, || {
             if let Some(live) = self.landing_lease(&who.project, now)? { return Err(Error::LandingHeld { holder: live.holder, until: iso(live.expires_at_ms.max(live.pushing_until_ms.unwrap_or(0)))? }); }
@@ -156,7 +154,7 @@ impl Store {
             return Err(Error::StaleLanding);
         }
         if lease.expected_sha != expected_sha {
-            return Err(invalid("integration SHA does not match landing lease"));
+            return Err(Error::ShaMismatch);
         }
         Ok(lease)
     }
@@ -202,7 +200,7 @@ impl Store {
             let now = self.now();
             let until = now.checked_add(PUSH_HOLD_MS).ok_or(Error::NumberOutOfRange)?;
             let changed = self.db.execute("UPDATE landing_leases SET pushing_until = ? WHERE project = ? AND generation = ? AND (pushing_until IS NULL OR pushing_until <= ?)", params![until, who.project, generation, now])?;
-            if changed != 1 { return Err(invalid("landing push already in progress")); } Ok(())
+            if changed != 1 { return Err(Error::PushInProgress); } Ok(())
         })?;
         let mut hold = PushHold { store: self, project: &who.project, owner: &owner, generation, armed: true };
         let result = match push() {

@@ -88,6 +88,15 @@ pub struct LaneAttempt {
 
 impl Store {
     pub fn send(
+        &self, who: &Identity, to: &str, body: &str, options: SendOptions<'_>,
+        context: RecipientContext<'_>, ids: &dyn IdSource,
+    ) -> Result<Sent> {
+        if options.task_id == Some("") { return Err(Error::EmptyTaskId); }
+        if options.output_path == Some("") { return Err(Error::EmptyOutputPath); }
+        let id = ids.uuid()?;
+        self.send_with_id(who, to, body, options, context, &id)
+    }
+    pub(crate) fn send_with_id(
         &self,
         who: &Identity,
         to: &str,
@@ -97,19 +106,19 @@ impl Store {
         message_id: &str,
     ) -> Result<Sent> {
         if options.task_id == Some("") {
-            return Err(invalid("task id must not be empty"));
+            return Err(Error::EmptyTaskId);
         }
         if options.output_path == Some("") {
-            return Err(invalid("output path must not be empty"));
+            return Err(Error::EmptyOutputPath);
         }
         let now = self.now();
         self.transaction(true, || {
             let recipients = self.resolve_recipients(who, to, context)?;
-            if recipients.is_empty() { return Err(invalid(self.recipient_fix(who, to)?)); }
+            if recipients.is_empty() { return Err(self.recipient_fix(who, to)?); }
             let parent = options.reply_to.map(|id| self.db.query_row("SELECT conversation_id FROM messages WHERE project = ? AND message_id = ?", params![who.project, id], |r| r.get::<_, String>(0)).optional()).transpose()?;
-            if let Some(id) = options.reply_to { if parent.as_ref().is_none_or(Option::is_none) { return Err(invalid(format!("reply parent {id} does not exist in project {}", who.project))); } }
+            if let Some(id) = options.reply_to { if parent.as_ref().is_none_or(Option::is_none) { return Err(Error::ReplyParentMissing { id: id.into(), project: who.project.clone() }); } }
             if let Some(task) = options.task_id {
-                if self.db.query_row("SELECT 1 FROM tasks WHERE project = ? AND task_id = ?", params![who.project, task], |_| Ok(())).optional()?.is_none() { return Err(invalid(format!("task {task} does not exist in project {}", who.project))); }
+                if self.db.query_row("SELECT 1 FROM tasks WHERE project = ? AND task_id = ?", params![who.project, task], |_| Ok(())).optional()?.is_none() { return Err(Error::LinkedTaskMissing { task: task.into(), project: who.project.clone() }); }
             }
             let conversation = parent.flatten().unwrap_or_else(|| message_id.into());
             self.db.execute("INSERT INTO messages(message_id, project, sender_id, body, kind, conversation_id, reply_to, task_id, output_path, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -134,18 +143,16 @@ impl Store {
         &self,
         who: &Identity,
         options: InboxOptions<'_>,
-        ids: &impl pending::IdSource,
+        ids: &dyn IdSource,
     ) -> Result<Vec<Message>> {
         if !(1..=MAX_SAFE_INTEGER).contains(&options.limit) {
-            return Err(invalid("inbox limit must be positive"));
+            return Err(Error::InboxLimit);
         }
         if options.task_id == Some("") {
-            return Err(invalid("task id must not be empty"));
+            return Err(Error::EmptyTaskId);
         }
         if !(1..=3_600_000).contains(&options.claim_ttl_ms) {
-            return Err(invalid(
-                "claim TTL must be between 1 and 3600000 milliseconds",
-            ));
+            return Err(Error::ClaimTtl);
         }
         if options.peek {
             let now = self.now();
@@ -190,7 +197,7 @@ impl Store {
             .ids
             .map(serde_json::to_string)
             .transpose()
-            .map_err(|e| invalid(e.to_string()))?;
+            ?;
         let rows = self.db.prepare("SELECT m.message_id, m.sender_id, m.body, m.kind, m.conversation_id, m.reply_to, m.task_id, m.output_path, m.created_at, c.expires_at
             FROM deliveries d JOIN messages m ON m.message_id = d.message_id LEFT JOIN delivery_claims c ON c.message_id = d.message_id AND c.recipient_id = d.recipient_id
             WHERE d.project = ? AND d.recipient_id = ? AND d.read_at IS NULL AND m.created_at >= ?
@@ -237,11 +244,11 @@ impl Store {
     ) -> Result<Acknowledgement> {
         self.transaction(true, || {
             let row = self.db.query_row("SELECT d.read_at, c.claim_id, c.expires_at FROM deliveries d LEFT JOIN delivery_claims c ON c.message_id = d.message_id AND c.recipient_id = d.recipient_id WHERE d.project = ? AND d.recipient_id = ? AND d.message_id = ?", params![who.project, who.agent_id, message_id], |r| Ok((r.get::<_, Option<i64>>(0)?, r.get::<_, Option<String>>(1)?, r.get::<_, Option<i64>>(2)?))).optional()?;
-            let Some((read, claim, expires)) = row else { return Err(invalid(format!("no delivery {message_id} for {} in {}", who.agent_id, who.project))); };
-            if claim.as_deref() != Some(claim_id) { return Err(invalid(format!("claim {claim_id} does not own delivery {message_id}"))); }
+            let Some((read, claim, expires)) = row else { return Err(Error::DeliveryMissing { message: message_id.into(), agent: who.agent_id.clone(), project: who.project.clone() }); };
+            if claim.as_deref() != Some(claim_id) { return Err(Error::DeliveryNotOwned { claim: claim_id.into(), message: message_id.into() }); }
             if let Some(at) = read { return Ok(Acknowledgement { message_id: message_id.into(), acknowledged_at: iso(at)?, already_acknowledged: true }); }
             let now = self.now();
-            if expires.is_none_or(|at| at <= now) { return Err(invalid(format!("claim {claim_id} for delivery {message_id} has expired"))); }
+            if expires.is_none_or(|at| at <= now) { return Err(Error::DeliveryExpired { claim: claim_id.into(), message: message_id.into() }); }
             self.db.execute("UPDATE deliveries SET read_at = ? WHERE project = ? AND recipient_id = ? AND message_id = ? AND read_at IS NULL", params![now, who.project, who.agent_id, message_id])?;
             self.log(who, "ack", message_id)?;
             Ok(Acknowledgement { message_id: message_id.into(), acknowledged_at: iso(now)?, already_acknowledged: false })
@@ -292,7 +299,7 @@ impl Store {
         busy_timeout_ms: u64,
     ) -> Result<()> {
         if !(1..=5000).contains(&busy_timeout_ms) {
-            return Err(invalid("invalid notice busy timeout"));
+            return Err(Error::NoticeTimeout);
         }
         let prefix = format!("{run}:{task}:");
         self.db
@@ -312,14 +319,14 @@ impl Store {
     /// Prerequisite from unit-01, needed by recipient resolution and tests.
     pub fn announce(&self, who: &Identity) -> Result<()> {
         if who.agent_id == "all" {
-            return Err(invalid("recipient id \"all\" is reserved for broadcast"));
+            return Err(Error::ReservedRecipient);
         }
         let now = self.now();
         self.transaction(true, || {
             let provider = self.db.query_row("SELECT provider FROM agents WHERE project = ? AND agent_id = ?", params![who.project, who.agent_id], |r| r.get::<_, String>(0)).optional()?;
-            if provider.is_none() && self.db.query_row("SELECT 1 FROM teams WHERE project = ? AND team_id = ?", params![who.project, who.agent_id], |_| Ok(())).optional()?.is_some() { return Err(invalid(format!("agent label {} collides with an existing team id in {}", who.agent_id, who.project))); }
+            if provider.is_none() && self.db.query_row("SELECT 1 FROM teams WHERE project = ? AND team_id = ?", params![who.project, who.agent_id], |_| Ok(())).optional()?.is_some() { return Err(Error::AgentTeamCollision { agent: who.agent_id.clone(), project: who.project.clone() }); }
             let changed = self.db.execute("INSERT INTO agents(project, agent_id, provider, first_seen, last_seen) VALUES (?, ?, ?, ?, ?) ON CONFLICT(project, agent_id) DO UPDATE SET last_seen = excluded.last_seen WHERE agents.provider = excluded.provider", params![who.project, who.agent_id, who.provider, now, now])?;
-            if changed == 0 { return Err(invalid(format!("agent label {} in {} already belongs to client seat {}; refusing seat {}", who.agent_id, who.project, provider.as_deref().unwrap_or("unknown"), who.provider))); } Ok(())
+            if changed == 0 { return Err(Error::SeatMismatch { agent: who.agent_id.clone(), project: who.project.clone(), existing: provider.unwrap_or_else(|| "unknown".into()), refused: who.provider.clone() }); } Ok(())
         })
     }
     fn agent_ids(&self, project: &str) -> Result<Vec<String>> {
@@ -329,11 +336,11 @@ impl Store {
             .query_map([project], |r| r.get(0))?
             .collect::<std::result::Result<Vec<_>, _>>()?)
     }
-    fn recipient_fix(&self, who: &Identity, to: &str) -> Result<String> {
+    fn recipient_fix(&self, who: &Identity, to: &str) -> Result<Error> {
         let mut agents = self.agent_ids(&who.project)?;
         agents.sort_by_cached_key(|a| a.encode_utf16().collect::<Vec<_>>());
         let teams = self.db.prepare("SELECT DISTINCT team_id FROM team_members WHERE project = ? AND agent_id != ? ORDER BY team_id")?.query_map(params![who.project, who.agent_id], |r| r.get::<_, String>(0))?.collect::<std::result::Result<Vec<_>, _>>()?;
-        Ok(format!("unbound recipient \"{to}\"; fix: pass to:<seat> from these valid recipients: labels/seats: {}; teams: {}; all", if agents.is_empty() { "none".into() } else { agents.join(", ") }, if teams.is_empty() { "none".into() } else { teams.join(", ") }))
+        Ok(Error::UnboundRecipient { to: to.into(), agents, teams })
     }
     fn resolve_recipients(
         &self,
@@ -357,9 +364,7 @@ impl Store {
                     .or(chair)
             };
             seat.ok_or_else(|| {
-                self.recipient_fix(who, to)
-                    .map(invalid)
-                    .unwrap_or_else(|e| e)
+                self.recipient_fix(who, to).unwrap_or_else(|e| e)
             })?
         } else {
             to

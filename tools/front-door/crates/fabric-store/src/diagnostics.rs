@@ -24,10 +24,13 @@ const REQUIRED_CLAIM_COLUMNS: &[&str] = &[
     "claimed_at",
     "expires_at",
 ];
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DiagnosticStatus { Absent, Ok, Error }
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DatabaseDiagnostic {
-    pub status: String,
+    pub status: DiagnosticStatus,
     pub exists: bool,
     pub read_only: bool,
     pub database: String,
@@ -70,7 +73,7 @@ pub fn inspect_snapshot(
     mode: DiagnosticMode,
 ) -> DatabaseDiagnostic {
     let mut report = DatabaseDiagnostic {
-        status: "ok".into(),
+        status: DiagnosticStatus::Ok,
         exists: true,
         read_only: true,
         database: database.into(),
@@ -82,13 +85,13 @@ pub fn inspect_snapshot(
     match inspect_policy(db, project, mode) {
         Ok((counts, checks)) => {
             if checks.as_ref().is_some_and(|c| c.iter().any(|c| !c.ok)) {
-                report.status = "error".into();
+                report.status = DiagnosticStatus::Error;
             }
             report.counts = Some(counts);
             report.checks = checks;
         }
         Err(error) => {
-            report.status = "error".into();
+            report.status = DiagnosticStatus::Error;
             report.error = Some(error.to_string());
         }
     }

@@ -124,7 +124,7 @@ impl Store {
         let changed = self.db.execute("UPDATE sessions SET turn_run_id = ?, turn_task_id = ?, turn_attempt = ?, updated_at = ?
             WHERE project = ? AND name = ? AND turn_claim = ? AND turn_status IS NULL", params![turn.run_id, turn.task_id, turn.attempt, self.now(), who.project, name, claim])?;
         if changed != 1 {
-            return Err(invalid(format!("session {name} no longer holds this turn")));
+            return Err(Error::SessionTurnLost { name: name.into() });
         }
         Ok(())
     }

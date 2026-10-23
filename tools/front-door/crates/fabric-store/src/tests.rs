@@ -105,9 +105,9 @@ fn sessions_fence_active_turns_and_keep_last_clean_pointer() {
 
 #[test]
 fn wait_ignores_push_start_and_observes_release_without_a_transaction() {
-    use std::{cell::Cell, rc::Rc};
+    use std::sync::Arc;
     #[derive(Clone)]
-    struct Time(Rc<Cell<i64>>);
+    struct Time(Arc<TimeCell>);
     impl Clock for Time {
         fn now_ms(&self) -> i64 {
             self.0.get()
@@ -115,7 +115,7 @@ fn wait_ignores_push_start_and_observes_release_without_a_transaction() {
     }
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("db");
-    let time = Time(Rc::new(Cell::new(1000)));
+    let time = Time(Arc::new(TimeCell::new(1000)));
     let store = Store::open(&path, 5000, time.clone()).unwrap();
     let raw = Connection::open(&path).unwrap();
     let who = Identity {
@@ -225,7 +225,7 @@ fn message_log_failure_rolls_back_message_and_all_deliveries() {
     store.announce(&b).unwrap();
     store.db.execute_batch("CREATE TRIGGER fail_log BEFORE INSERT ON activity BEGIN SELECT RAISE(ABORT,'log blocked'); END").unwrap();
     assert!(store
-        .send(
+        .send_with_id(
             &a,
             "bob",
             "hello",
@@ -243,7 +243,7 @@ fn message_log_failure_rolls_back_message_and_all_deliveries() {
     );
     store.db.execute_batch("DROP TRIGGER fail_log").unwrap();
     store
-        .send(
+        .send_with_id(
             &a,
             "bob",
             "hello",
@@ -301,7 +301,7 @@ fn digest_truncates_groups_preserves_null_tasks_and_ignores_expired_messages() {
             ..a.clone()
         };
         store
-            .send(
+            .send_with_id(
                 &sender,
                 "b",
                 &format!("line{n}\r\n{}", "🙂".repeat(100)),
@@ -362,21 +362,21 @@ fn alias_routing_uses_explicit_chair_parent_and_excludes_sender_from_teams() {
     };
     assert_eq!(
         store
-            .send(&a, "chair", "hi", SendOptions::default(), context(), "m1")
+            .send_with_id(&a, "chair", "hi", SendOptions::default(), context(), "m1")
             .unwrap()
             .recipients,
         ["leader"]
     );
     assert_eq!(
         store
-            .send(&a, "/root", "hi", SendOptions::default(), context(), "m2")
+            .send_with_id(&a, "/root", "hi", SendOptions::default(), context(), "m2")
             .unwrap()
             .recipients,
         ["parent-seat"]
     );
     assert_eq!(
         store
-            .send(
+            .send_with_id(
                 &a,
                 "parent",
                 "hi",
@@ -393,7 +393,7 @@ fn alias_routing_uses_explicit_chair_parent_and_excludes_sender_from_teams() {
     );
     store.create_team(&a, "self", &["alice".into()]).unwrap();
     assert!(store
-        .send(&a, "self", "hi", SendOptions::default(), context(), "m4")
+        .send_with_id(&a, "self", "hi", SendOptions::default(), context(), "m4")
         .is_err());
 }
 
@@ -404,7 +404,7 @@ fn diagnostic_incomplete_claim_schema_and_foreign_keys_are_reported() {
     let store = Store::open(&path, 5000, Fixed(1000)).unwrap();
     store.db.execute_batch("DROP TABLE delivery_claims; CREATE TABLE delivery_claims(message_id TEXT, project TEXT);").unwrap();
     let report = inspect_snapshot(&store.db, "fixture", "p", DiagnosticMode::Doctor);
-    assert_eq!(report.status, "error");
+    assert_eq!(report.status, DiagnosticStatus::Error);
     let claim = report
         .checks
         .unwrap()
@@ -463,4 +463,21 @@ fn landing_wait_is_bounded_when_the_clock_is_frozen() {
     for seconds in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, f64::MAX] {
         assert!(matches!(store.wait_landing("p", seconds, 1, || false, |_| {}), Err(Error::NumberOutOfRange)));
     }
+}
+
+// Thread-safe fixture time is an explicit clock boundary, not global state.
+pub(super) struct TimeCell(std::sync::atomic::AtomicI64);
+impl TimeCell {
+    pub(super) fn new(ms: i64) -> Self { Self(std::sync::atomic::AtomicI64::new(ms)) }
+    pub(super) fn get(&self) -> i64 { self.0.load(std::sync::atomic::Ordering::SeqCst) }
+    pub(super) fn set(&self, ms: i64) { self.0.store(ms, std::sync::atomic::Ordering::SeqCst); }
+}
+
+#[test]
+fn connection_can_transfer_to_its_only_worker_owner() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(&dir.path().join("db"), 5000, Fixed(1000)).unwrap();
+    std::thread::spawn(move || store.note(&Identity {
+        project: "p".into(), agent_id: "worker".into(), provider: "codex".into(),
+    }, "one owner")).join().unwrap().unwrap();
 }

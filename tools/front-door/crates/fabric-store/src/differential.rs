@@ -1,9 +1,10 @@
+use crate::tests::TimeCell;
 use crate::pending::IdSource;
 use crate::*;
 use serde_json::{json, Value};
-use std::{cell::Cell, rc::Rc};
+use std::{cell::Cell, sync::Arc};
 #[derive(Clone)]
-struct FixtureClock(Rc<Cell<i64>>);
+struct FixtureClock(Arc<TimeCell>);
 impl Clock for FixtureClock {
     fn now_ms(&self) -> i64 {
         self.0.get()
@@ -136,7 +137,7 @@ fn compare(scenario: &str, result: Value) {
 fn landing_database_and_failure_differential() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("db");
-    let clock = FixtureClock(Rc::new(Cell::new(1000)));
+    let clock = FixtureClock(Arc::new(TimeCell::new(1000)));
     let store = Store::open(&path, 5000, clock.clone()).unwrap();
     let other = Store::open(&path, 5000, clock.clone()).unwrap();
     let a = a();
@@ -200,7 +201,7 @@ fn session_database_differential() {
     let store = Store::open(
         &dir.path().join("db"),
         5000,
-        FixtureClock(Rc::new(Cell::new(1000))),
+        FixtureClock(Arc::new(TimeCell::new(1000))),
     )
     .unwrap();
     let a = a();
@@ -310,7 +311,7 @@ fn session_database_differential() {
 #[test]
 fn delivery_task_and_observation_database_differential() {
     let dir = tempfile::tempdir().unwrap();
-    let clock = FixtureClock(Rc::new(Cell::new(1000)));
+    let clock = FixtureClock(Arc::new(TimeCell::new(1000)));
     let store = Store::open(&dir.path().join("db"), 5000, clock.clone()).unwrap();
     let a = a();
     let b = b();
@@ -326,7 +327,7 @@ fn delivery_task_and_observation_database_differential() {
     );
     capture(
         &mut out,
-        store.create_task(
+        store.create_task_with_id(
             &a,
             "work",
             "task",
@@ -336,7 +337,7 @@ fn delivery_task_and_observation_database_differential() {
     );
     capture(
         &mut out,
-        store.send(
+        store.send_with_id(
             &a,
             "missing",
             "refused",
@@ -347,7 +348,7 @@ fn delivery_task_and_observation_database_differential() {
     );
     capture(
         &mut out,
-        store.send(
+        store.send_with_id(
             &a,
             "bob",
             "missing parent",
@@ -361,7 +362,7 @@ fn delivery_task_and_observation_database_differential() {
     );
     capture(
         &mut out,
-        store.send(
+        store.send_with_id(
             &a,
             "bob",
             "missing task",
@@ -375,7 +376,7 @@ fn delivery_task_and_observation_database_differential() {
     );
     capture(
         &mut out,
-        store.send(
+        store.send_with_id(
             &a,
             "team",
             "hello\nworld",
@@ -389,7 +390,7 @@ fn delivery_task_and_observation_database_differential() {
     );
     capture(
         &mut out,
-        store.send(
+        store.send_with_id(
             &a,
             "all",
             "reply",
@@ -503,7 +504,7 @@ fn delivery_task_and_observation_database_differential() {
     );
     capture(
         &mut out,
-        store.send(
+        store.send_with_id(
             &a,
             "bob",
             "already observed",
@@ -518,7 +519,7 @@ fn delivery_task_and_observation_database_differential() {
     );
     capture(
         &mut out,
-        store.send(
+        store.send_with_id(
             &a,
             "bob",
             "new attempt",
@@ -598,7 +599,7 @@ fn delivery_task_and_observation_database_differential() {
 fn sqlite_contention_rolls_back_and_restores_timeout_differential() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("db");
-    let store = Store::open(&path, 5000, FixtureClock(Rc::new(Cell::new(1000)))).unwrap();
+    let store = Store::open(&path, 5000, FixtureClock(Arc::new(TimeCell::new(1000)))).unwrap();
     let raw = Connection::open(&path).unwrap();
     let a = a();
     let b = b();
@@ -607,7 +608,7 @@ fn sqlite_contention_rolls_back_and_restores_timeout_differential() {
     store.announce(&a).unwrap();
     store.announce(&b).unwrap();
     store
-        .send(
+        .send_with_id(
             &a,
             "bob",
             "claim me",
@@ -645,7 +646,7 @@ fn legacy_nullable_column_migration_differential() {
     reply_to TEXT REFERENCES messages(message_id), created_at INTEGER NOT NULL);
     INSERT INTO messages VALUES ('old', 'p', 'alice', 'retained', 'note', 'old', NULL, 1000)").unwrap();
     drop(raw);
-    let store = Store::open(&path, 5000, FixtureClock(Rc::new(Cell::new(1000)))).unwrap();
+    let store = Store::open(&path, 5000, FixtureClock(Arc::new(TimeCell::new(1000)))).unwrap();
     let mut out = Vec::new();
     capture(
         &mut out,
@@ -664,7 +665,7 @@ fn legacy_nullable_column_migration_differential() {
 fn diagnostic_policy_differential() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("db");
-    let store = Store::open(&path, 5000, FixtureClock(Rc::new(Cell::new(1000)))).unwrap();
+    let store = Store::open(&path, 5000, FixtureClock(Arc::new(TimeCell::new(1000)))).unwrap();
     store.announce(&a()).unwrap();
     store.note(&a(), "seed").unwrap();
     let mut out = Vec::new();
@@ -700,7 +701,7 @@ fn javascript_date_range_and_signed_year_differential() {
     let store = Store::open(
         &dir.path().join("db"),
         5000,
-        FixtureClock(Rc::new(Cell::new(1000))),
+        FixtureClock(Arc::new(TimeCell::new(1000))),
     )
     .unwrap();
     store.note(&a(), "date fixture").unwrap();

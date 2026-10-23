@@ -1,4 +1,4 @@
-//! Inert Fabric SQLite owner. Connections stay on their creating thread.
+//! Inert Fabric SQLite owner. Each connection has one owning thread at a time.
 #![forbid(unsafe_code)]
 
 mod diagnostics;
@@ -7,6 +7,8 @@ mod messages;
 mod pending;
 mod sessions;
 mod tasks;
+mod backend;
+pub use backend::*;
 
 pub use diagnostics::*;
 pub use landing::*;
@@ -15,9 +17,7 @@ use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 pub use sessions::*;
 use std::{
-    marker::PhantomData,
     path::Path,
-    rc::Rc,
     time::{Duration, Instant},
 };
 pub use tasks::*;
@@ -33,8 +33,13 @@ pub enum Error {
     Sqlite(#[from] rusqlite::Error),
     #[error(transparent)]
     Io(#[from] std::io::Error),
+    #[error(transparent)]
+    Json(#[from] serde_json::Error),
+    #[error("identifier source failed: {0}")]
+    IdSource(String),
+    #[cfg(test)]
     #[error("{0}")]
-    Invalid(String),
+    Callback(String),
     #[error("{STALE_LANDING}")]
     StaleLanding,
     #[error("landing lease held by {holder} until {until}")]
@@ -43,6 +48,69 @@ pub enum Error {
     NumberOutOfRange,
     #[error("Invalid time value")]
     InvalidTime,
+    #[error("busy timeout must be between 1 and 5000 milliseconds")]
+    BusyTimeout,
+    #[error("session id must be 1 to 128 characters")]
+    SessionLength,
+    #[error("session id must not contain /")]
+    SessionSlash,
+    #[error("lease seconds must be between 1 and 3600")]
+    LeaseSeconds,
+    #[error("expected integration SHA must be 40 lowercase hex digits")]
+    ExpectedSha,
+    #[error("integration SHA does not match landing lease")]
+    ShaMismatch,
+    #[error("landing push already in progress")]
+    PushInProgress,
+    #[error("task id must not be empty")]
+    EmptyTaskId,
+    #[error("output path must not be empty")]
+    EmptyOutputPath,
+    #[error("inbox limit must be positive")]
+    InboxLimit,
+    #[error("claim TTL must be between 1 and 3600000 milliseconds")]
+    ClaimTtl,
+    #[error("invalid notice busy timeout")]
+    NoticeTimeout,
+    #[error("recipient id \"all\" is reserved for broadcast")]
+    ReservedRecipient,
+    #[error("state claimed is reserved for atomic task claim")]
+    ReservedClaimedState,
+    #[error("activity cursor must be a non-negative integer")]
+    ActivityCursor,
+    #[error("activity limit must be positive")]
+    ActivityLimit,
+    #[error("session {name} no longer holds this turn")]
+    SessionTurnLost { name: String },
+    #[error("reply parent {id} does not exist in project {project}")]
+    ReplyParentMissing { id: String, project: String },
+    #[error("task {task} does not exist in project {project}")]
+    LinkedTaskMissing { task: String, project: String },
+    #[error("no delivery {message} for {agent} in {project}")]
+    DeliveryMissing { message: String, agent: String, project: String },
+    #[error("claim {claim} does not own delivery {message}")]
+    DeliveryNotOwned { claim: String, message: String },
+    #[error("claim {claim} for delivery {message} has expired")]
+    DeliveryExpired { claim: String, message: String },
+    #[error("agent label {agent} collides with an existing team id in {project}")]
+    AgentTeamCollision { agent: String, project: String },
+    #[error("agent label {agent} in {project} already belongs to client seat {existing}; refusing seat {refused}")]
+    SeatMismatch { agent: String, project: String, existing: String, refused: String },
+    #[error("team id {team} collides with an agent label in {project}")]
+    TeamAgentCollision { team: String, project: String },
+    #[error("no task {task} in {project}")]
+    TaskMissing { task: String, project: String },
+    #[error("task {task} is already assigned to {owner}")]
+    TaskAssigned { task: String, owner: String },
+    #[error("task {task} is not open and unowned in {project}")]
+    TaskNotOpen { task: String, project: String },
+    #[error("task {task} vanished during update")]
+    TaskVanished { task: String },
+    #[error("unbound recipient \"{to}\"; fix: pass to:<seat> from these valid recipients: labels/seats: {}; teams: {}; all", recipient_list(.agents), recipient_list(.teams))]
+    UnboundRecipient { to: String, agents: Vec<String>, teams: Vec<String> },
+}
+fn recipient_list(values: &[String]) -> String {
+    if values.is_empty() { "none".into() } else { values.join(", ") }
 }
 
 pub fn is_sqlite_contention(error: &Error) -> bool {
@@ -52,7 +120,7 @@ pub fn is_sqlite_contention(error: &Error) -> bool {
 pub use pending::{IdSource, Identity};
 
 /// Time is sampled inside write transactions where the source samples it there.
-pub trait Clock {
+pub trait Clock: Send {
     fn now_ms(&self) -> i64;
 }
 pub struct SystemClock;
@@ -65,8 +133,6 @@ impl Clock for SystemClock {
 pub struct Store {
     pub(crate) db: Connection,
     clock: Box<dyn Clock>,
-    // rusqlite connections can move threads; Fabric's owner contract is stronger.
-    _thread_owner: PhantomData<Rc<()>>,
 }
 impl Store {
     /// The runtime owns directory creation. This opens exactly the supplied path.
@@ -77,7 +143,6 @@ impl Store {
         let store = Self {
             db,
             clock: Box::new(clock),
-            _thread_owner: PhantomData,
         };
         let deadline = Instant::now() + Duration::from_millis(busy_timeout_ms);
         loop {
@@ -149,14 +214,13 @@ impl Store {
         Ok(())
     }
 }
+#[cfg(test)]
 fn invalid(message: impl Into<String>) -> Error {
-    Error::Invalid(message.into())
+    Error::Callback(message.into())
 }
 fn validate_timeout(ms: u64) -> Result<()> {
     if !(1..=5000).contains(&ms) {
-        return Err(invalid(
-            "busy timeout must be between 1 and 5000 milliseconds",
-        ));
+        return Err(Error::BusyTimeout);
     }
     Ok(())
 }
@@ -167,16 +231,16 @@ fn holder(who: &Identity, session: &str) -> Result<String> {
     if session.trim_matches(pending::js_whitespace).is_empty()
         || session.encode_utf16().count() > 128
     {
-        return Err(invalid("session id must be 1 to 128 characters"));
+        return Err(Error::SessionLength);
     }
     if session.contains('/') {
-        return Err(invalid("session id must not contain /"));
+        return Err(Error::SessionSlash);
     }
     Ok(format!("{}/{session}", who.agent_id))
 }
 fn expiry(seconds: i64, now: i64) -> Result<i64> {
     if !(1..=3600).contains(&seconds) {
-        return Err(invalid("lease seconds must be between 1 and 3600"));
+        return Err(Error::LeaseSeconds);
     }
     now.checked_add(seconds * 1000)
         .ok_or(Error::NumberOutOfRange)
