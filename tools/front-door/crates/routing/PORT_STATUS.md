@@ -1,101 +1,118 @@
 # Routing port status
 
-Rulebook: PORTING.md v4 / ADR 0028. Inert library; no command changes owner.
-Author route: `codex/gpt-6.1-sol@high`, as supplied by the Fabric worker contract.
-Source and policy oracle baseline: `7475ff01e437ec51c760b852516c21a5281cf9c6`.
-Python differentials run through `oracle.rs` using `-I`, an explicit isolated
-HOME/state environment, file-backed streams and bounded child observation.
-The local oracle is CPython 3.14.8; interpreters must be at least 3.12.
+Rulebook: PORTING.md v4 / ADR 0028. Inert library; no command cut-over.
+Author and native review route: `codex/gpt-6.1-sol@high` (the supplied Fabric route).
+Source/oracle baseline: `49a1cc3bceedcd0fb4c14183f6afff3ea01f6a84`.
+Owner integration baseline: `114e3331ebf6b767baadac1069d4b900ae7d91d2`.
+Main was merged, never rebased. Python differentials use `oracle.rs`, `-I`, an
+explicit isolated environment, file-backed streams and bounded observation.
+The local interpreter is CPython 3.14.8. ISO offset fixtures probe interpreter
+behavior and choose core's explicit 3.14.4/3.14.8 compatibility mode.
 
-## Completed in this batch
+## Fully ported and retained
 
-- `scripts/model_route_live.py#unit-02`: fallback generation, OpenCode discovery
-  deadline/cache decisions, and bare-name resolution, including ambiguity,
-  suggestions and Python SequenceMatcher's autojunk policy. The discovery
-  function sends the exact adapter/executable/deadline/listing-only/refresh
-  request to a synchronous provider-listing callback and takes an explicit
-  monotonic clock; it does not launch a provider.
-- `scripts/model_route_pools.py#unit-03`: exact human listing rendering, ordered
-  routes/synonyms, Unicode padding, hidden/cooling summaries and quota caveats.
+- Retained from the preceding batch: `scripts/model_route_live.py#unit-02`
+  (fallback/OpenCode discovery decisions) and
+  `scripts/model_route_pools.py#unit-03` (human listing rendering). Their tests
+  remain in the required routing suite. These IDs were already in ported.txt.
 
-Completion describes each unit's implementation, not a command cut-over. The
-injected discovery edge still needs the process probe owner before use by a CLI.
+## Continued units and exact blockers
 
-## Continued partial units
+No additional full-unit claim is made in this continuation. Every assigned unit
+has either retained full coverage or a coherent implementation slice below;
+codec and composing-owner gaps prevent broader acceptance.
 
-- `scripts/model_route_catalog.py#unit-01`: all batch-1 validators retained;
-  malformed-role/override differentials and typed regex-error propagation added.
-  Still blocked by RP-130402: Python's expanding set-based alias candidates can
-  depend on the iteration order of multiple adapters sharing one family. This
-  batch does not choose a new policy or claim that mismatch is accepted.
-- `scripts/model_route_live.py#unit-01`: `matching.rs` ports registered names,
-  default/ambiguity precedence, retired GPT identities, family/version matching,
-  live inheritance, suffix efforts, owner inference and training/free policy.
-  `live.rs` adds cache filtering, cooldown normalization/coverage and recent
-  failures with explicit clocks. Remaining: filesystem readers, quota adapter
-  integration, and ordered suffix-level ingestion when multiple levels have the
-  same suffix. No global mutable caches or Python loader seams are retained.
-- `scripts/model_route_pools.py#unit-01`: resolve/split model, privacy traits
-  (including inherited live traits), and spread family now join the existing
-  validation/migration helpers. Remaining: migrate/reject ordered ingress and
-  Python numeric equality for conflicting renamed values. Existing exact weight
-  behavior follows the already-approved RP-130403 improvement.
-- `scripts/model_route_preferences.py#unit-01`: loading/statuses and ordered
-  unsupported-policy representation now join batch-1 admissibility/ranking.
-  Non-string route statuses use Python spelling. Remaining: ordered candidate
-  ingress (including nested non-string status representation), typed candidate
-  refusal API and CLI-owned default-path application for the selection parser.
-- `scripts/model_route_probe.py#unit-01`: model-list parsers for structured/plain
-  listings, Kiro evidence predicate and duplicate-rejecting JSON loader added.
-  Remaining: process probes, cache locks/publication, Kiro read-only chat and
-  executable/version-bound metadata. No live provider is run by this batch.
-- `scripts/model_route_probe.py#unit-02`: snapshot loading/refusals, source and
-  Claude provenance trust, exact age cutoffs, effort checks, case-folded identity
-  collision checks, and normalized-key insertion order are implemented and
-  differentially tested. Remains partial because family alias validation inherits
-  RP-130402. The ISO reader in pending is also awaiting its core owner.
+- `scripts/model_route_catalog.py#unit-01`: validators retained; shared core
+  compatibility owners adopted. RP-130402's expanding set-based family alias
+  policy remains unresolved. No new acceptance is inferred.
+- `scripts/model_route_cli.py#unit-01`: defaults and command dispatch prefix now
+  cover legacy picks, selection, snapshots, health, listings, cooldowns, reset
+  and picks, with exact output/exit differential fixtures. Still partial for
+  argparse edge behavior (including unique long-option abbreviations), JSON
+  extended values and the resolver continuation.
+- `scripts/model_route_cli.py#unit-02`: the probe branch now passes explicit
+  listing-only deadlines and preserves output/exit codes. The resolve and
+  classification tail needs the unfinished model_route resolver; it remains an
+  explicit continuation rather than a fake successful command.
+- `scripts/model_route_pools.py#unit-01`: ordered merge/migration/reject policy,
+  numeric equality, source hashability failures, privacy/model resolution and
+  installed-binary lookup are implemented. Full Python object ingress awaits
+  records' non-finite/lone-surrogate JSON value support.
+- `scripts/model_route_pools.py#unit-02`: availability, compatibility filtering,
+  effort, council, rotation, pick/pick_many and describe policies are present.
+  A raw state transaction owns source schema reset/project/route/cursor policy.
+  Still needs a concrete safe lock/publication adapter in an allowed composing
+  crate, plus config's adapter-compatibility document loader. Routing cannot
+  depend on supervisor under R2. No second filesystem or YAML parser is added.
+- `scripts/model_route_preferences.py#unit-01`: ordered candidate ingress,
+  source-order hard admission, typed refusals, status repr, preferences and CLI
+  default paths are implemented. Full claim is blocked on records' Python
+  extended JSON ingress (loaded-versus-corrupt differs for NaN/surrogates).
+- `scripts/model_route_preferences.py#unit-02`: receipts, exact spreading-state
+  validation, fair selection and publication-before-success are implemented
+  through one locked transaction. Concurrency and publication failure tests
+  survive. Extended JSON ingress and concrete safe filesystem composition remain.
+- `scripts/model_route_live.py#unit-01`: ordered suffix precedence, model
+  matching, advisory reader/quota seams, cooldowns and recent failures are
+  implemented. Core timestamps retain Python's complete datetime year range;
+  records owns cooldown reads. Extended JSON advisory ingress and safe reader
+  composition remain, so this unit is still partial.
+- `scripts/model_route_probe.py#unit-01`: listing parsers, JSON duplicate
+  refusal, state-root policy and Kiro read-only request/event/metadata policy
+  are implemented. The all-adapter probe/cache state machine remains a coherent
+  follow-up needing permitted bounded process/env and safe scratch/cache APIs.
+- `scripts/model_route_probe.py#unit-02`: provenance/age/effort/identity/order
+  validation retained; timestamps now use core. Still inherits RP-130402 and
+  records' extended JSON value gap.
+- `skills/orchestrate/scripts/capabilities.py#unit-01`: table-driven Codex,
+  AGY and Claude discovery, normalizers, auth/canary decisions, bounded process
+  requests and scrubbed failures are implemented. Missing records APIs for
+  Python extended JSON and JSONDecodeError wording keep it partial.
+- `skills/orchestrate/scripts/capabilities.py#unit-02`: argument policy,
+  dispatch, warnings, output permission requests and exits are implemented.
+  It remains partial for the discovery JSON error/extended-value gaps.
+- `skills/orchestrate/scripts/exec_routing.py#unit-01`: route/snapshot requests,
+  registered identities and exact malformed-catalogue warning classes, candidate
+  expansion, training/confidentiality and account reselection are implemented.
+  Snapshot JSON extended values still require the records owner.
 
-## Skipped implementation units
+- `skills/orchestrate/scripts/exec_routing.py#unit-02`: scoped records reads,
+  advisory quota reconciliation, explicit pin behavior and exact Python datetime
+  maximum selection are implemented and differentially tested. Canonical model
+  lookup still inherits unit 01's extended JSON snapshot gap, so cooldown results
+  can differ on those inputs. This unit also remains partial.
 
-- Both `scripts/model_route_cli.py` units: parser/health records from batch 1
-  remain; command execution depends on the unfinished route resolver and owners.
-- `scripts/model_route_pools.py#unit-02`: availability, random council, rotation,
-  pick/pick_many and describe require compatibility/quota and safe state owners.
-- `scripts/model_route_preferences.py#unit-02`: receipt/selection and locked
-  spreading-state publication remain for a subsequent coherent persistence pass.
-- Both `skills/orchestrate/scripts/exec_routing.py` implementation units:
-  batch-1 fallback contracts/parsers remain; execution plans, account reselection
-  and scoped cooldown effects still need quota/records integration.
-- Batch-1 `scripts/model_route.py` implementation units remain partial; this
-  batch adds their free-pattern/privacy dependencies but does not claim resolve,
-  catalogue loading, snapshot, or emit are implemented.
+## Shared owners and pending APIs
 
-## Pending owners and shared dependencies
+Core owns strip/truthiness/equality/str/repr/decimal digits/splitlines and ISO
+parsing. Records owns checked JSON grammar/range and scoped cooldown records.
+Their replaced routing copies were deleted. The remaining private copies are
+marked with their owner:
 
-- `pending.rs`: Python strip, truthiness, numeric equality-to-one, string/repr,
-  ordered container repr, Unicode decimal digits and ISO timestamp parsing belong
-  to `provenant-core`. This is an ISO reader, not a float-second converter.
-- `casefold.rs`: pre-existing Python Unicode casefold/printability tables await
-  a shared compatibility API.
-- `ordered_json.rs` and the checked ingress in `pending.rs` belong to
-  `provenant-records`. Its checked codec exists on the baseline, but internal
-  crates are not exposed in `[workspace.dependencies]`. This lane may only add
-  dependencies from that table and cannot edit the workspace manifest. Retain
-  the private copy until the integration owner exposes the owner dependency;
-  then use checked_json while preserving order in the ordered deserializer.
+- `pending/casefold.rs`: core has no Unicode casefold API yet.
+- `pending/ordered_json.rs`: records has no public ordered generic value codec.
+- `pending.rs`: a checked generic ordered decoder bridge, ordered container repr,
+  and Python-compatible ordered JSON text encoding. Records' Value-only codec
+  cannot supply these order/byte contracts; core primitive renderers are reused.
+- Quota route/account advice has explicit traits; those operations are absent
+  from quota's public display/schedule API. No quota implementation is copied.
+- `CompatibilityDocumentLoader` is the single YAML/current or JSON/future seam.
+  Config has no public adapter-compatibility loader on the integration baseline.
+- Selection/rotation/process/scratch interfaces request effects from an allowed
+  composing owner. They do not use unsafe, own a child, or duplicate supervisor.
 
-No new behavior change is intended. J1/J2/J3, independent mutant judges,
-platform conformance and command cut-over remain with the integration owners.
+No intentional behavior change beyond the already-authorized exact weight and
+R4 integer-range improvements. Remaining mismatches are recorded as open in
+`divergences.md`; partial IDs are not appended to `ported.txt`.
 
 ## Verification and review
 
-- `cargo fmt --all`: passed with the pinned toolchain.
+- `cargo fmt --all`: passed.
 - `cargo clippy -p provenant-routing --all-targets -- -D warnings`: passed.
-- `PROVENANT_PORT_DIFF_REQUIRED=1 cargo test -p provenant-routing`: 49 passed,
-  zero failed/skipped. Only the targeted routing crate suite ran locally.
-- Independent native source review by `codex/gpt-6.1-sol@high`: clean after
-  repairs. Findings repaired a relocated fixture path, stale split-module
-  imports, missing training/default/refresh policy fixtures, and the typed
-  provider request boundary. The fallback oracle now exercises 72 combinations;
-  the deadline oracle compares complete probe requests and failure outcomes.
-- Main was merged into the lane; no rebase. CI remains the PR landing gate.
+- `PROVENANT_PORT_DIFF_REQUIRED=1 cargo test -p provenant-routing`: 128 passed,
+  zero failures, zero ignored; zero doc tests.
+- Two direct layering-policy checks passed (pytest is not installed).
+Independent native policy/runtime source reviews found concrete failure-path
+and wire differences; repaired cases have surviving differential fixtures.
+J1/J2/J3, platform conformance, CI and chair-owned cross-family review remain
+landing/cut-over gates. Auto-merge is not armed.

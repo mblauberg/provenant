@@ -2001,3 +2001,79 @@ helpers equivalent to `json_bytes`, `json_string`, `path_text`, `schema_one` and
 - Python's `process.wait(timeout=nan)` never expires, so a NaN budget waits
   forever. Rust refuses NaN with `BoundedError::InvalidTimeout` before
   spawning. An infinite timeout keeps Python's behaviour: no deadline.
+
+## RP-ROUTING3-JSON — Python extended JSON and diagnostic ingress (library, open)
+
+- Rulebook v4; source/oracle `49a1cc3bceedcd0fb4c14183f6afff3ea01f6a84`,
+  CPython 3.14.8; author route `codex/gpt-6.1-sol@high`.
+- Affects partial preferences units 01/02, pools units 01/02, live unit 01,
+  probe units 01/02, capabilities units 01/02, CLI units and exec_routing unit 01.
+  Python accepts NaN/Infinity and escaped lone surrogates. Shared
+  `provenant_records::checked_json` currently represents standard serde JSON.
+  For valid spread state with an ignored `extra: NaN` or `extra: "\ud800"`,
+  Python returns `loaded`; Rust returns invalid state. A valid Codex model list
+  with an ignored NaN field normalizes in Python but fails checked ingress.
+  Serde syntax diagnostics also differ from Python JSONDecodeError wording.
+- Required-oracle fixtures preserve these counterexamples explicitly. They do
+  not assert parity or infer approval. Partial units stay out of `Units:` and
+  `ported.txt` until records supplies extended values and a Python diagnostic
+  renderer. The checked owner is used now; its missing APIs are not copied.
+
+## RP-ROUTING3-CLI — abbreviated long options (bug, open partial scope)
+
+- Same source/oracle, rulebook and author route as RP-ROUTING3-JSON.
+- Python argparse accepts `routes --j` as `routes --json`; the current Clap
+  surface rejects it. The dispatch prefix is ported, but parser edge behavior
+  and the resolver/classification tail remain partial. No changed command is
+  exposed and no acceptance of the difference is inferred.
+
+## RP-ROUTING3-VERSION — model version integer range (improvement, R4)
+
+- Same source/oracle, rulebook and author route. Applies to live unit 01 and
+  execution model matching. Python `_version` accepts arbitrary-size digit
+  groups such as `gpt-18446744073709551616`; Rust returns typed
+  `MatchError::NumberOutOfRange`, never rounds through f64. The existing
+  `matching` range regression pins this refusal. This is the R4-required
+  integer-range improvement, not approval for other narrowing.
+
+## RP-ROUTING3-OWNERS — owner adoption and review repairs (bug, fixed)
+
+- Same source/oracle, rulebook and author route. Shared owner integration
+  includes main `114e3331ebf6b767baadac1069d4b900ae7d91d2`.
+- Replaced routing's ISO/strip/str/repr/truthiness/equality/decimal/splitlines
+  implementations with `provenant_core::py`, and checked JSON/range plus scoped
+  cooldown persistence with records. Remaining ordered JSON/encoder/casefold
+  APIs are marked pending and listed in the PR. Routing cannot depend directly
+  on supervisor under R2; safe transaction/process effects remain injected
+  until the allowed composing owner supplies those bindings.
+- The `+00:00:00.5` / `+00:00:01.5` fixtures probe the oracle and use core's
+  explicit interpreter semantics. Core timestamps preserve the last twelve
+  hours of year 9999, outside jiff's timestamp range. Ordered suffix duplicate
+  values retain the source's first level position.
+- Native source review caught wrong malformed-catalogue warning classes:
+  `models:null` must produce TypeError, missing id KeyError, and a non-string
+  id AttributeError. Differential failure fixtures now preserve these classes.
+- Ordered overlay tests preserve CPython hashability failures and numeric
+  equality. Receipt/state tests cover exact wire numbers, concurrent serialized
+  selection and failed publication without a success receipt. No command is
+  switched over by these repairs.
+- Pool review repairs preserve Python's explicit float cursor coercion and
+  persisted rotation-state bytes while retaining RP-130403's exact weight
+  values. Truthy unhashable effort values now return typed failures at the
+  source membership check. Error construction retains repeated warnings;
+  successful output alone deduplicates them as Python's dict.fromkeys does.
+  Required Python differentials cover all three cases.
+- Runtime snapshot parsing now retains suffix insertion order all the way to
+  canonical cooldown lookup. The source short-circuits a matching suffix before
+  later malformed values; reversing their order must instead warn TypeError.
+  A two-order end-to-end cooldown differential pins both outcomes. Both exec
+  units remain partial for extended JSON snapshots; an earlier tentative
+  completion entry from this branch was removed before publication.
+- Final local checks: fmt, clippy with warnings denied, 128 required-oracle
+  routing tests and two layering checks passed. Native policy/runtime reviews
+  inspected the source and repair deltas. No cross-family or CI result is
+  inferred, and no auto-merge is armed.
+- A final source-order fixture preserves the all-model names pass before suffix
+  checks, plus names-generator short circuiting before a later malformed name.
+  Native delta review accepted these repairs; the final required suite remains
+  128 tests with zero failures or skips.
