@@ -5,8 +5,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{
     collections::{BTreeMap, BTreeSet},
-    path::Path,
     io::Read,
+    path::Path,
 };
 
 pub const TOKEN_FIELDS: [&str; 5] = [
@@ -58,12 +58,25 @@ pub struct Price {
 }
 impl From<Value> for Price {
     fn from(value: Value) -> Self {
-        let mut fields: BTreeMap<String, Value> = value.as_object().map(|m| m.iter().map(|(k,v)| (k.clone(),v.clone())).collect()).unwrap_or_default();
+        let mut fields: BTreeMap<String, Value> = value
+            .as_object()
+            .map(|m| m.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
+            .unwrap_or_default();
         let populated = !fields.is_empty();
         Self {
-            billing: fields.remove("billing").and_then(|v| v.as_str().map(str::to_owned)),
-            price_status: fields.remove("price_status").and_then(|v| v.as_str().map(str::to_owned)),
-            usd_per_million: fields.remove("usd_per_million").and_then(|v| v.as_object().map(|m| m.iter().map(|(k,v)| (k.clone(),v.clone())).collect())).unwrap_or_default(),
+            billing: fields
+                .remove("billing")
+                .and_then(|v| v.as_str().map(str::to_owned)),
+            price_status: fields
+                .remove("price_status")
+                .and_then(|v| v.as_str().map(str::to_owned)),
+            usd_per_million: fields
+                .remove("usd_per_million")
+                .and_then(|v| {
+                    v.as_object()
+                        .map(|m| m.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
+                })
+                .unwrap_or_default(),
             extra: fields,
             populated,
         }
@@ -71,7 +84,11 @@ impl From<Value> for Price {
 }
 impl Price {
     fn is_empty(&self) -> bool {
-        !self.populated && self.billing.is_none() && self.price_status.is_none() && self.usd_per_million.is_empty() && self.extra.is_empty()
+        !self.populated
+            && self.billing.is_none()
+            && self.price_status.is_none()
+            && self.usd_per_million.is_empty()
+            && self.extra.is_empty()
     }
 }
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -96,7 +113,11 @@ impl Prices {
             .models
             .get(&format!("{adapter}/{model}"))
             .filter(|p| !p.is_empty())
-            .or_else(|| self.models.get(&format!("{adapter}/{provider}/{model}")).filter(|p| !p.is_empty()))
+            .or_else(|| {
+                self.models
+                    .get(&format!("{adapter}/{provider}/{model}"))
+                    .filter(|p| !p.is_empty())
+            })
         {
             return Ok(entry.clone());
         }
@@ -115,22 +136,55 @@ impl Prices {
 }
 
 fn read_bounded(path: &Path) -> Result<Vec<u8>> {
-    let file = std::fs::File::open(path).map_err(|source| crate::Error::Io { path: path.into(), source })?;
+    let file = std::fs::File::open(path).map_err(|source| crate::Error::Io {
+        path: path.into(),
+        source,
+    })?;
     let mut bytes = Vec::new();
-    file.take((crate::MAX_JSON_BYTES + 1) as u64).read_to_end(&mut bytes).map_err(|source| crate::Error::Io { path: path.into(), source })?;
-    if bytes.len() > crate::MAX_JSON_BYTES { return Err(crate::Error::InputTooLarge {limit:crate::MAX_JSON_BYTES}); }
+    file.take((crate::MAX_JSON_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)
+        .map_err(|source| crate::Error::Io {
+            path: path.into(),
+            source,
+        })?;
+    if bytes.len() > crate::MAX_JSON_BYTES {
+        return Err(crate::Error::InputTooLarge {
+            limit: crate::MAX_JSON_BYTES,
+        });
+    }
     Ok(bytes)
 }
 pub fn catalogue(path: &Path) -> Catalogue {
-    let Some(value) = read_bounded(path).ok().and_then(|b| crate::decode_json::<Value>(&b).ok()) else { return Catalogue::new(); };
-    value["adapters"].as_object().into_iter().flatten().map(|(name, adapter)| {
-        let models = adapter["models"].as_array().into_iter().flatten().filter_map(|entry| {
-            let id = entry["id"].as_str()?.to_owned();
-            let names = entry["names"].as_array().into_iter().flatten().filter_map(Value::as_str).map(str::to_owned).collect();
-            Some(Model {id, names})
-        }).collect();
-        (name.clone(), Adapter {models})
-    }).collect()
+    let Some(value) = read_bounded(path)
+        .ok()
+        .and_then(|b| crate::decode_json::<Value>(&b).ok())
+    else {
+        return Catalogue::new();
+    };
+    value["adapters"]
+        .as_object()
+        .into_iter()
+        .flatten()
+        .map(|(name, adapter)| {
+            let models = adapter["models"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|entry| {
+                    let id = entry["id"].as_str()?.to_owned();
+                    let names = entry["names"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(Value::as_str)
+                        .map(str::to_owned)
+                        .collect();
+                    Some(Model { id, names })
+                })
+                .collect();
+            (name.clone(), Adapter { models })
+        })
+        .collect()
 }
 pub fn normalise_model(
     adapter: Option<&str>,
@@ -138,7 +192,7 @@ pub fn normalise_model(
     model: Option<&str>,
     adapters: &Catalogue,
 ) -> Option<String> {
-    let mut model = model?.trim().to_owned();
+    let mut model = crate::pending::python_strip(model?).to_owned();
     if model.is_empty() {
         return None;
     }
@@ -165,7 +219,7 @@ pub fn normalise_model(
     let mut aliases = BTreeMap::new();
     for entry in entries {
         for name in &entry.names {
-            if !name.is_empty() && name.chars().all(char::is_alphabetic) {
+            if crate::pending::python_alpha(name) {
                 aliases.insert(name.to_lowercase(), entry.id.clone());
             }
         }
@@ -176,7 +230,7 @@ pub fn normalise_model(
     let mut candidate = String::new();
     let mut dash = false;
     for c in model.to_lowercase().chars() {
-        if c.is_whitespace() || c == '-' {
+        if crate::pending::python_whitespace(c) || c == '-' {
             if !dash {
                 candidate.push('-');
             }
@@ -193,14 +247,21 @@ pub fn normalise_model(
     for kind in [0, 1, 2] {
         if let Some((prefix, suffix)) = candidate.rsplit_once('-') {
             let remove = match kind {
-                0 => suffix.len() == 8 && suffix.bytes().all(|c| c.is_ascii_digit()),
+                0 => {
+                    suffix.chars().count() == 8
+                        && suffix
+                            .chars()
+                            .all(|c| crate::pending::decimal_digit(c).is_some())
+                }
                 1 => matches!(
                     suffix,
                     "minimal" | "low" | "medium" | "high" | "xhigh" | "max"
                 ),
-                _ => suffix
-                    .strip_suffix('k')
-                    .is_some_and(|n| !n.is_empty() && n.bytes().all(|c| c.is_ascii_digit())),
+                _ => suffix.strip_suffix('k').is_some_and(|n| {
+                    !n.is_empty()
+                        && n.chars()
+                            .all(|c| crate::pending::decimal_digit(c).is_some())
+                }),
             };
             if remove {
                 candidate = prefix.into();
@@ -255,7 +316,11 @@ pub fn estimated_cost(row: &Usage, entry: &Price) -> Option<f64> {
             continue;
         }
         let count = count?.as_f64();
-        let price = entry.usd_per_million.get(rate).and_then(number).map(Numeric::as_f64);
+        let price = entry
+            .usd_per_million
+            .get(rate)
+            .and_then(number)
+            .map(Numeric::as_f64);
         if count > 0.0 && price.is_none() {
             return None;
         }
@@ -367,7 +432,13 @@ fn key(group: &Group, keys: &[&str]) -> Vec<Value> {
 fn sort_key(group: &Group, keys: &[&str]) -> Vec<String> {
     key(group, keys)
         .iter()
-        .map(|v| v.as_str().unwrap_or("").to_owned())
+        .map(|v| {
+            if crate::pending::python_truthy(v) {
+                crate::pending::python_str(v)
+            } else {
+                String::new()
+            }
+        })
         .collect()
 }
 pub fn combine(groups: impl IntoIterator<Item = Group>, keys: &[&str]) -> Result<Vec<Group>> {
@@ -375,7 +446,12 @@ pub fn combine(groups: impl IntoIterator<Item = Group>, keys: &[&str]) -> Result
     let mut merged: Vec<Group> = Vec::new();
     for mut group in groups {
         let k = key(&group, keys);
-        if let Some(target) = merged.iter_mut().find(|g| key(g, keys) == k) {
+        if let Some(target) = merged.iter_mut().find(|g| {
+            key(g, keys)
+                .iter()
+                .zip(&k)
+                .all(|(a, b)| crate::pending::python_equal(a, b))
+        }) {
             target.rows = target.rows.checked_add(group.rows)?;
             let mut sums = [Numeric::ZERO; 5];
             for (i, sum) in sums.iter_mut().enumerate() {
@@ -578,13 +654,32 @@ mod tests {
         assert_eq!(finalised[0].input_tokens, None);
         assert_eq!(finalised[0].missing_token_rows, Numeric::from(2));
         assert_eq!(finalised[0].estimated_cost_usd, None);
-        let row = Usage {input_tokens:Some(1.into()),cache_read_tokens:Some(0.into()),cache_write_tokens:Some(0.into()),output_tokens:Some(0.into()),reported_cost:Some(0.0000004),..Usage::default()};
-        let price = Price {usd_per_million:BTreeMap::from([("input".into(),serde_json::json!(0.4))]),..Price::default()};
-        let mut a = unit(&row, Some("Z"), BTreeMap::from([("model".into(),serde_json::json!("b"))]), &Prices::default()).unwrap();
-        a.known_cost_usd = estimated_cost(&row, &price).unwrap(); a.missing_cost_rows = Numeric::ZERO;
-        let mut b = a.clone(); b.model_raw = vec!["A".into()];
-        let mut c = a.clone(); c.dimensions.insert("model".into(),serde_json::json!("a"));
-        let groups = finalise(combine([a,b,c], &["model"]).unwrap(), &["model"]);
+        let row = Usage {
+            input_tokens: Some(1.into()),
+            cache_read_tokens: Some(0.into()),
+            cache_write_tokens: Some(0.into()),
+            output_tokens: Some(0.into()),
+            reported_cost: Some(0.0000004),
+            ..Usage::default()
+        };
+        let price = Price {
+            usd_per_million: BTreeMap::from([("input".into(), serde_json::json!(0.4))]),
+            ..Price::default()
+        };
+        let mut a = unit(
+            &row,
+            Some("Z"),
+            BTreeMap::from([("model".into(), serde_json::json!("b"))]),
+            &Prices::default(),
+        )
+        .unwrap();
+        a.known_cost_usd = estimated_cost(&row, &price).unwrap();
+        a.missing_cost_rows = Numeric::ZERO;
+        let mut b = a.clone();
+        b.model_raw = vec!["A".into()];
+        let mut c = a.clone();
+        c.dimensions.insert("model".into(), serde_json::json!("a"));
+        let groups = finalise(combine([a, b, c], &["model"]).unwrap(), &["model"]);
         assert_eq!(groups[0].dimensions["model"], "a");
         assert_eq!(groups[1].dimensions["model"], "b");
         assert_eq!(groups[1].model_raw.as_ref().unwrap(), &["A", "Z"]);
@@ -643,11 +738,22 @@ mod tests {
     #[test]
     fn review_regression_empty_prices_fall_through_and_null_rates_work() {
         let prices: Prices = serde_json::from_value(serde_json::json!({"models":{"a/m":{},"a/p/m":{"billing":"free","usd_per_million":null}}})).unwrap();
-        let row = Usage {adapter:Some("a".into()),provider:Some("p".into()),model:Some("m".into()),..Usage::default()};
+        let row = Usage {
+            adapter: Some("a".into()),
+            provider: Some("p".into()),
+            model: Some("m".into()),
+            ..Usage::default()
+        };
         assert_eq!(prices.entry(&row).unwrap().billing.as_deref(), Some("free"));
-        let prices: Prices = serde_json::from_value(serde_json::json!({"models":{"a/m":{},"a/p/m":{}},"free_patterns":{"a":["^m$"]}})).unwrap();
+        let prices: Prices = serde_json::from_value(
+            serde_json::json!({"models":{"a/m":{},"a/p/m":{}},"free_patterns":{"a":["^m$"]}}),
+        )
+        .unwrap();
         assert_eq!(prices.entry(&row).unwrap().billing.as_deref(), Some("free"));
-        let prices: Prices = serde_json::from_value(serde_json::json!({"models":{"a/m":{"billing":null},"a/p/m":{"billing":"free"}}})).unwrap();
+        let prices: Prices = serde_json::from_value(
+            serde_json::json!({"models":{"a/m":{"billing":null},"a/p/m":{"billing":"free"}}}),
+        )
+        .unwrap();
         assert_eq!(prices.entry(&row).unwrap().billing, None);
     }
     #[test]
@@ -656,8 +762,11 @@ mod tests {
         let path = dir.path().join("catalogue.json");
         std::fs::write(&path, r#"{"adapters":{"a":{"models":[{}, {"id":"m","names":[null,3,"Alias"]}]},"b":{"models":[{"id":"other"}]}}}"#).unwrap();
         let table = catalogue(&path);
-        assert_eq!(normalise_model(Some("a"),None,Some("Alias"),&table).as_deref(),Some("m"));
-        assert_eq!(table["b"].models[0].id,"other");
+        assert_eq!(
+            normalise_model(Some("a"), None, Some("Alias"), &table).as_deref(),
+            Some("m")
+        );
+        assert_eq!(table["b"].models[0].id, "other");
     }
     #[test]
     fn review_regression_aggregate_keeps_pre_normalisation_model() {
@@ -665,7 +774,6 @@ mod tests {
         let groups = aggregate(&[row], &["model"], &Prices::default()).unwrap();
         assert_eq!(groups[0].model_raw.as_ref().unwrap(), &["Original Alias"]);
     }
-
 
     #[test]
     fn review_regression_catalogue_and_price_reads_are_bounded() {
@@ -676,5 +784,4 @@ mod tests {
         assert!(Prices::load(&path).is_err());
         assert!(catalogue(&path).is_empty());
     }
-
 }

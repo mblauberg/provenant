@@ -41,8 +41,9 @@ impl Numeric {
         match (self, other) {
             (Self::Integer(a), Self::Integer(b)) => a
                 .checked_add(b)
+                .filter(|n| (i64::MIN as i128..=u64::MAX as i128).contains(n))
                 .map(Self::Integer)
-                .ok_or_else(|| Error::Invalid("counter overflow".into())),
+                .ok_or(Error::NumberOutOfRange),
             _ => Ok(Self::Float(self.as_f64() + other.as_f64())),
         }
     }
@@ -50,8 +51,9 @@ impl Numeric {
         match (self, other) {
             (Self::Integer(a), Self::Integer(b)) => a
                 .checked_sub(b)
+                .filter(|n| (i64::MIN as i128..=u64::MAX as i128).contains(n))
                 .map(Self::Integer)
-                .ok_or_else(|| Error::Invalid("counter overflow".into())),
+                .ok_or(Error::NumberOutOfRange),
             _ => Ok(Self::Float(self.as_f64() - other.as_f64())),
         }
     }
@@ -165,12 +167,32 @@ impl<'de> Deserialize<'de> for Numeric {
                 Ok(Numeric::Integer(v.into()))
             }
             fn visit_i128<E: serde::de::Error>(self, v: i128) -> std::result::Result<Numeric, E> {
-                Ok(Numeric::Integer(v))
+                if (i64::MIN as i128..=u64::MAX as i128).contains(&v) {
+                    Ok(Numeric::Integer(v))
+                } else {
+                    Err(E::custom("JSON integer outside i64/u64 range"))
+                }
             }
             fn visit_f64<E: serde::de::Error>(self, v: f64) -> std::result::Result<Numeric, E> {
                 Ok(Numeric::Float(v))
             }
         }
         deserializer.deserialize_any(Visitor)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn arithmetic_refuses_integers_outside_wire_range() {
+        assert!(matches!(
+            Numeric::from(u64::MAX).checked_add(Numeric::ONE),
+            Err(Error::NumberOutOfRange)
+        ));
+        assert!(matches!(
+            Numeric::from(i64::MIN).subtract(Numeric::ONE),
+            Err(Error::NumberOutOfRange)
+        ));
     }
 }

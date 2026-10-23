@@ -98,6 +98,32 @@ They form the current baseline; they are not newly discovered port mismatches.
 - Follow-up: shared records/integration owner must supply an exact lexical
   number codec or obtain the rulebook/ADR authority for a serde_json feature
   expansion, then add independently owned large-counter conformance fixtures.
+### RP-1013 resolution under rulebook v4
+
+- Unit: checked JSON/record boundaries for telemetry and its pending records
+  codec; rulebook v4 R4, class `improvement` (supersedes the open v2 disposition
+  above). Approved by the rulebook and the PR #1295 follow-up instructions.
+- Rulebook revision: `41b1219cc3fb1a3febc0a47a851dc57d165bee78` (PR #1297).
+  Python source/policy oracle remains `e897b10d58b27a46544969594eed08a5ed64c72c`;
+  compared Rust WIP is `3e17af47`, repaired candidate is this PR's head.
+- Expected/actual: Python accepts unbounded lexical integers; Rust now retains
+  every i64/u64 integer exactly and refuses larger integers with typed
+  `NumberOutOfRange`, before serde_json can approximate them as f64. Arithmetic
+  also refuses integer results outside that wire range. No arbitrary-precision
+  workspace feature is enabled.
+- Reproducer/evidence: `cargo test -p provenant-telemetry -j 2` from
+  `tools/front-door`, macOS arm64, Python 3.14.8 and
+  `PROVENANT_PORT_DIFF_REQUIRED=1`. Surviving fixtures:
+  `pending::decode::tests::checked_decode_retains_spelling_at_integer_boundaries`,
+  `ingest::tests::review_regression_oversized_integer_is_a_typed_error` and
+  `pending::numeric::tests::arithmetic_refuses_integers_outside_wire_range`.
+  The arithmetic regression failed before repair; all 55 crate tests pass
+  after repair. Independently owned mutant-fail evidence is not claimed.
+- Disposition: resolved by the v4-approved refusal; no longer blocks the typed
+  peer interface. Peer transport/merge implementation remains partial.
+- Follow-up: move the marked checked codec and numeric contracts from `pending`
+  into `provenant-records` at integration; retain boundary/error regressions.
+
 ## RP-1001 - Python refusal string escaping
 
 - Unit: `scripts/lane_safety_guard.py#unit-01`, rulebook version 2.
@@ -144,3 +170,34 @@ They form the current baseline; they are not newly discovered port mismatches.
   listed as partial, not claimed as ported by this test.
 - Disposition: fixed in `a79987fe`; native repair review is clean. Independent
   J1 acceptance remains pending. No intentional exception is requested.
+
+## RP-1014: telemetry Python value and Unicode semantics
+
+- Units: `scripts/telemetry_changes.py#unit-01`,
+  `scripts/telemetry_costs.py#unit-01`, `scripts/telemetry_report.py#unit-01`;
+  rulebook v4, class `bug` (fixed; no contract change).
+- Compared revisions: Python source/policy oracle
+  `e897b10d58b27a46544969594eed08a5ed64c72c`; faulty WIP `3e17af47`,
+  repaired candidate is this PR's head. Canonical Unicode oracle is CPython
+  3.14.8 / Unicode 16.0.0, matching main's copied CLI compatibility tables.
+- Expected/actual: Python strips U+001C–U+001F, accepts Unicode decimal window
+  and model suffix digits, and rejects U+0345 as an alphabetic alias. The old
+  Rust paths differed. Python merges equal numeric keys `1`/`1.0` and sorts
+  numeric dimensions using Python string spellings; Rust separated them and
+  mapped numeric sort keys to an empty string. Active-time integer
+  `9007199254740993` became `9007199254740992` through an f64 accumulator.
+- Reproducer/evidence: the `unicode_windows_and_refusals_match_python`,
+  `unicode_model_attribution_matches_python`,
+  `numeric_group_keys_and_order_match_python`,
+  `table_trailing_whitespace_matches_python` differential fixtures and
+  `changes::tests::active_time_preserves_large_integer_values` all failed
+  before their repairs and pass afterwards. Letter classification also
+  matches CPython over all Unicode scalar values. Run
+  `PROVENANT_PORT_DIFF_REQUIRED=1 cargo test -p provenant-telemetry -j 2`
+  in `tools/front-door` on macOS arm64; 55 tests pass.
+- Disposition: fixed with copied/extended compatibility primitives in `pending`
+  and exact numeric accumulation/comparison. Independent native source review
+  identified the model, cost-key and table defects. Independently owned
+  old-pass/mutant-fail judge receipts are not claimed.
+- Follow-up: integrate the marked helpers into `provenant-core`; ledger query
+  adapters remain with the store owner and implementation units stay partial.

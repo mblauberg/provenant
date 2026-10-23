@@ -263,7 +263,7 @@ pub fn table(headers: &[String], rows: &[Vec<String>]) -> Result<Vec<String>> {
                 })
                 .collect::<Vec<_>>()
                 .join(" ")
-                .trim_end()
+                .trim_end_matches(crate::pending::python_whitespace)
                 .to_owned()
         })
         .collect())

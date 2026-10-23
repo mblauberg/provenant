@@ -110,48 +110,28 @@ pub fn verdict(metric: Metric, before: &Side, after: &Side) -> Verdict {
     }
 }
 
-fn python_repr(value: &str) -> String {
-    let quote = if value.contains('\'') && !value.contains('"') {
-        '"'
-    } else {
-        '\''
-    };
-    let mut result = String::from(quote);
-    for c in value.chars() {
-        if c == quote || c == '\\' {
-            result.push('\\');
-            result.push(c);
-        } else {
-            match c {
-                '\n' => result.push_str("\\n"),
-                '\r' => result.push_str("\\r"),
-                '\t' => result.push_str("\\t"),
-                c if c.is_control() && (c as u32) <= 255 => {
-                    result.push_str(&format!("\\x{:02x}", c as u32))
-                }
-                _ => result.push(c),
-            }
-        }
-    }
-    result.push(quote);
-    result
-}
-
 /// Hours in a comparison window. Overflow is a typed refusal, never a wrap.
 pub fn window(value: &str) -> Result<u64> {
     let invalid = || {
         Error::Invalid(format!(
             "window must look like 24h, 7d or 2w, got {}",
-            python_repr(value)
+            crate::pending::python_repr(value)
         ))
     };
     let Some((suffix, digits)) = value.as_bytes().split_last() else {
         return Err(invalid());
     };
-    if digits.is_empty() || !digits.iter().all(u8::is_ascii_digit) {
+    if digits.is_empty() || !matches!(suffix, b'h' | b'd' | b'w') {
         return Err(invalid());
     }
-    let count: u64 = value[..value.len() - 1].parse().map_err(|_| invalid())?;
+    let count = value[..value.len() - 1]
+        .chars()
+        .try_fold(0u64, |count, c| {
+            count
+                .checked_mul(10)?
+                .checked_add(crate::pending::decimal_digit(c)?.into())
+        })
+        .ok_or_else(invalid)?;
     let factor = match suffix {
         b'h' => 1,
         b'd' => 24,
@@ -195,31 +175,39 @@ pub struct Attention {
     pub active_time_s: Option<BTreeMap<String, crate::Numeric>>,
 }
 /// Attention proxies only use metadata already retained by the ledger.
-pub fn attention(db: &rusqlite::Connection, since: &str) -> Result<Attention> {
+pub fn attention(events: &[crate::Event], since: &str) -> Result<Attention> {
+    let retained = || {
+        events
+            .iter()
+            .filter(|event| event.ts.as_deref().is_some_and(|ts| ts >= since))
+    };
     let mut counts = BTreeMap::<String, u64>::new();
-    let mut query = db.prepare("SELECT kind, COUNT(*) FROM events WHERE ts >= ? AND kind IN ('session.start','otel.user_prompt','otel.tool_decision','otel.codex.user_prompt','otel.codex.tool_decision') GROUP BY kind")?;
-    for row in query.query_map([since], |r| {
-        Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
-    })? {
-        let (kind, count) = row?;
-        let count =
-            u64::try_from(count).map_err(|_| Error::Invalid("invalid event count".into()))?;
+    for event in retained().filter(|event| {
+        matches!(
+            event.kind.as_str(),
+            "session.start"
+                | "otel.user_prompt"
+                | "otel.tool_decision"
+                | "otel.codex.user_prompt"
+                | "otel.codex.tool_decision"
+        )
+    }) {
         *counts
-            .entry(kind.replace("otel.codex.", "otel."))
-            .or_default() += count;
+            .entry(event.kind.replace("otel.codex.", "otel."))
+            .or_default() += 1;
     }
-    let mut active = BTreeMap::<(Option<String>, String), f64>::new();
-    let mut query =
-        db.prepare("SELECT session,attrs FROM events WHERE kind='otel.metric' AND ts >= ?")?;
-    for row in query.query_map([since], |r| {
-        Ok((r.get::<_, Option<String>>(0)?, r.get::<_, String>(1)?))
-    })? {
-        let (session, attrs) = row?;
-        let attrs: serde_json::Value = crate::decode_json(attrs.as_bytes())?;
+    let mut active = BTreeMap::<(Option<String>, String), crate::Numeric>::new();
+    for event in retained().filter(|event| event.kind == "otel.metric") {
+        let session = event.session.clone();
+        let attrs = &event.attrs;
         if attrs["name"] != "claude_code.active_time.total" {
             continue;
         }
-        let Some(value) = attrs["value"].as_f64() else {
+        let Some(value) = attrs["value"]
+            .as_number()
+            .cloned()
+            .map(crate::Numeric::from)
+        else {
             continue;
         };
         let key = (
@@ -231,23 +219,34 @@ pub fn attention(db: &rusqlite::Connection, since: &str) -> Result<Attention> {
                 .into(),
         );
         let entry = active.entry(key).or_default();
-        if attrs["temporality"] == 2 {
-            *entry = entry.max(value);
+        if crate::pending::python_equal(&attrs["temporality"], &serde_json::json!(2)) {
+            if value > *entry {
+                *entry = value;
+            }
         } else {
-            *entry += value;
+            *entry = entry.checked_add(value)?;
         }
     }
-    let mut totals = BTreeMap::<String, f64>::new();
+    let mut totals = BTreeMap::<String, crate::Numeric>::new();
     for ((_, kind), seconds) in active {
-        *totals.entry(kind).or_default() += seconds;
+        let total = totals.entry(kind).or_default();
+        *total = total.checked_add(seconds)?;
     }
-    let totals = totals.into_iter().map(|(kind, seconds)| {
-        let value = seconds.round_ties_even();
-        if !value.is_finite() || !(-9_223_372_036_854_775_808.0..18_446_744_073_709_551_616.0).contains(&value) {
-            return Err(Error::NumberOutOfRange);
-        }
-        Ok((kind, crate::Numeric::Integer(value as i128)))
-    }).collect::<Result<BTreeMap<_, _>>>()?;
+    let totals = totals
+        .into_iter()
+        .map(|(kind, seconds)| {
+            let crate::Numeric::Float(seconds) = seconds else {
+                return Ok((kind, seconds));
+            };
+            let value = seconds.round_ties_even();
+            if !value.is_finite()
+                || !(-9_223_372_036_854_775_808.0..18_446_744_073_709_551_616.0).contains(&value)
+            {
+                return Err(Error::NumberOutOfRange);
+            }
+            Ok((kind, crate::Numeric::Integer(value as i128)))
+        })
+        .collect::<Result<BTreeMap<_, _>>>()?;
     Ok(Attention {
         sessions_started: counts.get("session.start").copied().unwrap_or(0),
         user_prompts: counts.get("otel.user_prompt").copied(),
@@ -326,13 +325,34 @@ mod tests {
     }
     #[test]
     fn review_regression_active_time_is_an_integer() {
-        let db = rusqlite::Connection::open_in_memory().unwrap();
-        db.execute_batch("CREATE TABLE events(kind TEXT, ts TEXT, session TEXT, attrs TEXT);").unwrap();
-        for (session, seconds) in [("a",6.25),("b",6.25)] {
-            db.execute("INSERT INTO events VALUES ('otel.metric','2026-01-01',?,?)", rusqlite::params![session,serde_json::json!({"name":"claude_code.active_time.total","value":seconds}).to_string()]).unwrap();
-        }
-        let report = attention(&db, "2026-01-01").unwrap();
-        assert_eq!(serde_json::to_value(report).unwrap()["active_time_s"]["total"].to_string(), "12");
+        let events: Vec<_> = [("a", 6.25), ("b", 6.25)]
+            .into_iter()
+            .map(|(session, seconds)| crate::Event {
+                kind: "otel.metric".into(),
+                ts: Some("2026-01-01".into()),
+                session: Some(session.into()),
+                attrs: serde_json::json!({"name":"claude_code.active_time.total","value":seconds}),
+                ..crate::Event::default()
+            })
+            .collect();
+        let report = attention(&events, "2026-01-01").unwrap();
+        assert_eq!(
+            serde_json::to_value(report).unwrap()["active_time_s"]["total"].to_string(),
+            "12"
+        );
     }
-
+    #[test]
+    fn active_time_preserves_large_integer_values() {
+        let event = crate::Event {
+            kind: "otel.metric".into(),
+            ts: Some("2026-01-01".into()),
+            attrs: serde_json::json!({"name":"claude_code.active_time.total","value":9007199254740993u64}),
+            ..crate::Event::default()
+        };
+        let result = attention(&[event], "2026-01-01").unwrap();
+        assert_eq!(
+            serde_json::to_value(result).unwrap()["active_time_s"]["total"].to_string(),
+            "9007199254740993"
+        );
+    }
 }

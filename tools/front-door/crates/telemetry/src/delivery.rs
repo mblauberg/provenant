@@ -97,7 +97,7 @@ pub fn receipt(
             }
             let verdict = r
                 .get("verdict")
-                .filter(|v| truthy(v))
+                .filter(|v| crate::pending::python_truthy(v))
                 .or_else(|| r.get("status"))
                 .filter(|v| !v.is_null())?;
             Some(Review {
@@ -124,16 +124,6 @@ pub fn receipt(
         started_at: Some(run_timestamp(receipt, mtime)),
         writer_model: text(receipt, "writer_model"),
         review_verdicts,
-    }
-}
-fn truthy(v: &Value) -> bool {
-    match v {
-        Value::Null => false,
-        Value::Bool(v) => *v,
-        Value::String(v) => !v.is_empty(),
-        Value::Number(v) => v.as_f64() != Some(0.0),
-        Value::Array(v) => !v.is_empty(),
-        Value::Object(v) => !v.is_empty(),
     }
 }
 
@@ -235,7 +225,7 @@ pub fn record(
         ] {
             if let Some(v) = review
                 .and_then(|r| r.get(source))
-                .filter(|v| truthy(v))
+                .filter(|v| crate::pending::python_truthy(v))
                 .or_else(|| row.get(key))
                 .filter(|v| !v.is_null())
             {
@@ -290,24 +280,36 @@ pub struct Compactions {
     pub lane: String,
     pub compactions: u64,
 }
+/// A ledger owner joins compaction events to usage lanes before passing these rows.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+pub struct CompactionRow {
+    pub lane: String,
+    pub event_id: String,
+    pub ts: Option<String>,
+}
 pub fn report(
-    db: &rusqlite::Connection,
+    rows: &[CompactionRow],
     since: Option<&str>,
     until: Option<&str>,
 ) -> Result<Vec<Compactions>> {
-    let low = since.filter(|s| !s.is_empty()).map(parse_time).transpose()?;
-    let high = until.filter(|s| !s.is_empty()).map(parse_time).transpose()?;
+    let low = since
+        .filter(|s| !s.is_empty())
+        .map(parse_time)
+        .transpose()?;
+    let high = until
+        .filter(|s| !s.is_empty())
+        .map(parse_time)
+        .transpose()?;
     let mut counts = BTreeMap::<String, u64>::new();
-    let mut query=db.prepare("SELECT DISTINCT usage.lane,events.event_id,events.ts FROM events JOIN usage ON usage.session=events.session WHERE events.kind='session.compaction' AND usage.lane IS NOT NULL")?;
-    for row in query.query_map([], |r| {
-        Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(2)?))
-    })? {
-        let (lane, stamp) = row?;
+    // Match SELECT DISTINCT lane,event_id,ts, including repeated joined usage rows.
+    for row in rows.iter().collect::<BTreeSet<_>>() {
+        let lane = row.lane.clone();
+        let stamp = row.ts.as_deref();
         if low.is_some() || high.is_some() {
             let Some(stamp) = stamp else {
                 continue;
             };
-            let stamp = parse_time(&stamp)?;
+            let stamp = parse_time(stamp)?;
             if low.is_some_and(|l| stamp < l) || high.is_some_and(|h| stamp >= h) {
                 continue;
             }
@@ -351,7 +353,10 @@ pub fn cost_per_accepted(
         rows: u64,
         unpriced: u64,
     }
-    let boundary = since.filter(|s| !s.is_empty()).map(parse_time).transpose()?;
+    let boundary = since
+        .filter(|s| !s.is_empty())
+        .map(parse_time)
+        .transpose()?;
     let mut groups = BTreeMap::<Option<String>, Group>::new();
     let mut run_groups = BTreeMap::new();
     let mut deliveries: Vec<_> = deliveries.iter().collect();
@@ -493,38 +498,131 @@ mod tests {
     }
     #[test]
     fn review_regression_linked_costs_follow_first_seen_order() {
-        let run = Delivery {run_dir:"dir".into(),run_id:Some("run".into()),accepted:true,..Delivery::default()};
-        let rows:Vec<_> = [("c",1),("b",2),("a",3)].into_iter().map(|(id,n)| Usage {source:"fabric".into(),event_id:id.into(),host:"h".into(),delivery_run_id:Some("run".into()),adapter:Some("a".into()),model:Some("m".into()),input_tokens:Some((n*100_000).into()),cache_read_tokens:Some(0.into()),cache_write_tokens:Some(0.into()),output_tokens:Some(0.into()),..Usage::default()}).collect();
-        let prices = costs::Prices {models:BTreeMap::from([("a/m".into(),costs::Price {usd_per_million:BTreeMap::from([("input".into(),json!(1))]),..costs::Price::default()})]),..costs::Prices::default()};
-        let report = cost_per_accepted(&[run], &rows, &BTreeSet::new(), &HostIdentity::new("h".into(), BTreeSet::new(), &BTreeSet::new()), None, &prices, &BTreeMap::new()).unwrap();
-        assert_eq!(serde_json::to_value(&report[0]).unwrap()["cost_usd_lower_bound"].to_string(), "0.6000000000000001");
-        assert_eq!(report[0].cost_per_accepted_usd_lower_bound, Some(0.6000000000000001));
+        let run = Delivery {
+            run_dir: "dir".into(),
+            run_id: Some("run".into()),
+            accepted: true,
+            ..Delivery::default()
+        };
+        let rows: Vec<_> = [("c", 1), ("b", 2), ("a", 3)]
+            .into_iter()
+            .map(|(id, n)| Usage {
+                source: "fabric".into(),
+                event_id: id.into(),
+                host: "h".into(),
+                delivery_run_id: Some("run".into()),
+                adapter: Some("a".into()),
+                model: Some("m".into()),
+                input_tokens: Some((n * 100_000).into()),
+                cache_read_tokens: Some(0.into()),
+                cache_write_tokens: Some(0.into()),
+                output_tokens: Some(0.into()),
+                ..Usage::default()
+            })
+            .collect();
+        let prices = costs::Prices {
+            models: BTreeMap::from([(
+                "a/m".into(),
+                costs::Price {
+                    usd_per_million: BTreeMap::from([("input".into(), json!(1))]),
+                    ..costs::Price::default()
+                },
+            )]),
+            ..costs::Prices::default()
+        };
+        let report = cost_per_accepted(
+            &[run],
+            &rows,
+            &BTreeSet::new(),
+            &HostIdentity::new("h".into(), BTreeSet::new(), &BTreeSet::new()),
+            None,
+            &prices,
+            &BTreeMap::new(),
+        )
+        .unwrap();
+        assert_eq!(
+            serde_json::to_value(&report[0]).unwrap()["cost_usd_lower_bound"].to_string(),
+            "0.6000000000000001"
+        );
+        assert_eq!(
+            report[0].cost_per_accepted_usd_lower_bound,
+            Some(0.6000000000000001)
+        );
     }
 
     #[test]
     fn review_regression_missing_and_null_ids_match() {
-        let run = receipt(&json!({"artifacts":[{"git_revision":{"commit":"abc"}}]}), "dir".into(), "host".into(), "now".into(), parse_time("2026-01-01").unwrap());
+        let run = receipt(
+            &json!({"artifacts":[{"git_revision":{"commit":"abc"}}]}),
+            "dir".into(),
+            "host".into(),
+            "now".into(),
+            parse_time("2026-01-01").unwrap(),
+        );
         assert_eq!(run.merge_commit.as_deref(), Some("abc"));
     }
     #[test]
     fn review_regression_review_missing_and_null_ids_match() {
-        for (review, finding) in [(json!({"provider_family":"family"}), json!({"review_id":null})), (json!({"id":null,"provider_family":"family"}), json!({}))] {
+        for (review, finding) in [
+            (
+                json!({"provider_family":"family"}),
+                json!({"review_id":null}),
+            ),
+            (json!({"id":null,"provider_family":"family"}), json!({})),
+        ] {
             let mut sink = crate::ingest::tests::Capture::default();
-            record(&mut sink, "findings.jsonl", &finding, &mut SidecarState::default(), &json!({"reviews":[review]}), "ref".into()).unwrap();
+            record(
+                &mut sink,
+                "findings.jsonl",
+                &finding,
+                &mut SidecarState::default(),
+                &json!({"reviews":[review]}),
+                "ref".into(),
+            )
+            .unwrap();
             assert_eq!(sink.events[0].attrs["reviewer_family"], "family");
         }
     }
 
-
-
     #[test]
     fn review_regression_empty_since_is_ignored() {
-        let db = rusqlite::Connection::open_in_memory().unwrap();
-        db.execute_batch("CREATE TABLE events(kind TEXT,event_id TEXT,ts TEXT,session TEXT); CREATE TABLE usage(lane TEXT,session TEXT); INSERT INTO events VALUES ('session.compaction','id','2026-01-01','s'); INSERT INTO usage VALUES ('lane','s');").unwrap();
-        assert_eq!(report(&db, Some(""), Some("")).unwrap(), report(&db, None, None).unwrap());
-        let run = Delivery {run_dir:"dir".into(),..Delivery::default()};
-        let identity = HostIdentity::new("h".into(),BTreeSet::new(),&BTreeSet::new());
-        assert_eq!(cost_per_accepted(std::slice::from_ref(&run), &[], &BTreeSet::new(), &identity, Some(""), &costs::Prices::default(), &BTreeMap::new()).unwrap(), cost_per_accepted(&[run], &[], &BTreeSet::new(), &identity, None, &costs::Prices::default(), &BTreeMap::new()).unwrap());
+        let row = CompactionRow {
+            lane: "lane".into(),
+            event_id: "id".into(),
+            ts: Some("2026-01-01".into()),
+        };
+        let rows = [row.clone(), row];
+        assert_eq!(
+            report(&rows, Some(""), Some("")).unwrap(),
+            report(&rows, None, None).unwrap()
+        );
+        assert_eq!(report(&rows, None, None).unwrap()[0].compactions, 1);
+        let run = Delivery {
+            run_dir: "dir".into(),
+            ..Delivery::default()
+        };
+        let identity = HostIdentity::new("h".into(), BTreeSet::new(), &BTreeSet::new());
+        assert_eq!(
+            cost_per_accepted(
+                std::slice::from_ref(&run),
+                &[],
+                &BTreeSet::new(),
+                &identity,
+                Some(""),
+                &costs::Prices::default(),
+                &BTreeMap::new()
+            )
+            .unwrap(),
+            cost_per_accepted(
+                &[run],
+                &[],
+                &BTreeSet::new(),
+                &identity,
+                None,
+                &costs::Prices::default(),
+                &BTreeMap::new()
+            )
+            .unwrap()
+        );
     }
-
 }

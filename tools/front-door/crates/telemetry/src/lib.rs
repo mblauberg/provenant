@@ -26,8 +26,6 @@ pub enum Error {
     },
     #[error(transparent)]
     Json(#[from] serde_json::Error),
-    #[error(transparent)]
-    Sql(#[from] rusqlite::Error),
     #[error("JSON input exceeds {limit} bytes")]
     InputTooLarge { limit: usize },
     #[error("JSON integer outside i64/u64 range")]
@@ -124,8 +122,16 @@ mod tests {
 
     #[test]
     fn review_regression_number_preserves_integer_spelling() {
-        for value in [serde_json::json!(0), serde_json::json!(300), serde_json::json!(9007199254740993u64), serde_json::json!(0.0)] {
-            assert_eq!(serde_json::to_string(&number(&value)).unwrap(), value.to_string());
+        for value in [
+            serde_json::json!(0),
+            serde_json::json!(300),
+            serde_json::json!(9007199254740993u64),
+            serde_json::json!(0.0),
+        ] {
+            assert_eq!(
+                serde_json::to_string(&number(&value)).unwrap(),
+                value.to_string()
+            );
         }
     }
 
@@ -137,5 +143,4 @@ mod tests {
         sink.event(event).unwrap();
         assert_eq!(serde_json::to_value(&sink.events[0]).unwrap(), value);
     }
-
 }

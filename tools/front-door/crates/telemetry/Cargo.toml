@@ -13,7 +13,6 @@ thiserror = { workspace = true }
 sha2 = { workspace = true }
 regex = { workspace = true }
 jiff = { workspace = true }
-rusqlite = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

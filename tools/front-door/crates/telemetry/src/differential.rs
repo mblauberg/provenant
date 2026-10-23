@@ -11,50 +11,137 @@ fn oracle_available(availability: std::result::Result<(), String>, required: boo
     match availability {
         Ok(()) => true,
         Err(reason) => {
-            assert!(!required, "required differential interpreter unavailable: {reason}");
-            eprintln!("SKIP: {reason}");
+            assert!(
+                !required,
+                "required differential interpreter unavailable: {reason}"
+            );
+            eprintln!("skip: {reason}");
             false
         }
     }
 }
-fn python_version(program: &std::ffi::OsStr) -> std::result::Result<(), String> {
-    let out = Command::new(program).args(["-c", "import sys; print(sys.version_info.major, sys.version_info.minor)"]).output().map_err(|e| format!("Python 3.11+ interpreter unavailable: {e}"))?;
+struct Interpreter {
+    name: &'static str,
+    variable: &'static str,
+    default: &'static str,
+    floor: (u32, u32),
+    eval: &'static str,
+    probe: &'static str,
+}
+const PYTHON: Interpreter = Interpreter {
+    name: "Python",
+    variable: "PROVENANT_PORT_PYTHON",
+    default: "python3",
+    floor: (3, 12),
+    eval: "-c",
+    probe: "import sys; print(sys.version_info.major, sys.version_info.minor)",
+};
+const NODE: Interpreter = Interpreter {
+    name: "Node",
+    variable: "PROVENANT_PORT_NODE",
+    default: "node",
+    floor: (24, 0),
+    eval: "-e",
+    probe: "console.log(process.versions.node.split('.').slice(0, 2).join(' '))",
+};
+fn interpreter_version(
+    interpreter: &Interpreter,
+    program: &std::ffi::OsStr,
+) -> std::result::Result<(), String> {
+    let required = format!(
+        "{} {}.{}+",
+        interpreter.name, interpreter.floor.0, interpreter.floor.1
+    );
+    let out = Command::new(program)
+        .args([interpreter.eval, interpreter.probe])
+        .output()
+        .map_err(|e| format!("{required} interpreter unavailable: {e}"))?;
     let version = String::from_utf8_lossy(&out.stdout);
-    let parts: Vec<_> = version.split_whitespace().filter_map(|s| s.parse::<u32>().ok()).collect();
-    if out.status.success() && parts.len() == 2 && (parts[0],parts[1]) >= (3,11) {
+    let parts: Vec<_> = version
+        .split_whitespace()
+        .filter_map(|s| s.parse::<u32>().ok())
+        .collect();
+    if out.status.success() && parts.len() == 2 && (parts[0], parts[1]) >= interpreter.floor {
         Ok(())
     } else {
-        Err(format!("Python 3.11+ required; interpreter reported {version:?}"))
+        Err(format!(
+            "{required} required; interpreter reported {version:?}"
+        ))
     }
 }
 fn python(source: &str, input: &Value) -> Option<Value> {
-    let program = std::env::var_os("PROVENANT_PORT_PYTHON").unwrap_or_else(|| "python3".into());
+    oracle(&PYTHON, source, input)
+}
+fn oracle(interpreter: &Interpreter, source: &str, input: &Value) -> Option<Value> {
+    let program =
+        std::env::var_os(interpreter.variable).unwrap_or_else(|| interpreter.default.into());
     let required = std::env::var("PROVENANT_PORT_DIFF_REQUIRED").as_deref() == Ok("1");
-    if !oracle_available(python_version(&program), required) { return None; }
+    if !oracle_available(interpreter_version(interpreter, &program), required) {
+        return None;
+    }
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../..");
-    let mut child = Command::new(program).arg("-c").arg(source).arg(root)
+    let mut child = Command::new(program)
+        .arg(interpreter.eval)
+        .arg(source)
+        .arg(root)
         .env("PYTHONDONTWRITEBYTECODE", "1")
-        .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped())
-        .spawn().expect("checked Python oracle could not start");
-    child.stdin.take().unwrap().write_all(serde_json::to_string(input).unwrap().as_bytes()).unwrap();
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("checked Python oracle could not start");
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(serde_json::to_string(input).unwrap().as_bytes())
+        .unwrap();
     let out = child.wait_with_output().unwrap();
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     Some(crate::decode_json(&out.stdout).unwrap())
 }
 #[test]
 fn required_oracles_refuse_missing_or_old_interpreters() {
     let missing = std::ffi::OsStr::new("/no-such-provenant-python");
-    assert!(python_version(missing).is_err());
-    assert!(!oracle_available(python_version(missing), false));
-    assert!(std::panic::catch_unwind(|| oracle_available(python_version(missing), true)).is_err());
-    #[cfg(unix)] {
+    assert!(interpreter_version(&PYTHON, missing).is_err());
+    assert!(!oracle_available(
+        interpreter_version(&PYTHON, missing),
+        false
+    ));
+    assert!(std::panic::catch_unwind(|| oracle_available(
+        interpreter_version(&PYTHON, missing),
+        true
+    ))
+    .is_err());
+    #[cfg(unix)]
+    {
         use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
         let program = dir.path().join("python39");
         std::fs::write(&program, "#!/bin/sh\nprintf '3 9\\n'\n").unwrap();
         std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
-        assert!(python_version(program.as_os_str()).is_err());
-        assert!(std::panic::catch_unwind(|| oracle_available(python_version(program.as_os_str()), true)).is_err());
+        assert!(interpreter_version(&PYTHON, program.as_os_str()).is_err());
+        assert!(std::panic::catch_unwind(|| oracle_available(
+            interpreter_version(&PYTHON, program.as_os_str()),
+            true
+        ))
+        .is_err());
+        for (interpreter, version, accepted) in [
+            (&PYTHON, "3 11", false),
+            (&PYTHON, "3 12", true),
+            (&NODE, "23 9", false),
+            (&NODE, "24 0", true),
+        ] {
+            std::fs::write(&program, format!("#!/bin/sh\nprintf '{version}\\n'\n")).unwrap();
+            assert_eq!(
+                interpreter_version(interpreter, program.as_os_str()).is_ok(),
+                accepted
+            );
+        }
     }
 }
 fn equal(a: &Value, b: &Value) {
@@ -146,12 +233,26 @@ fn retained_event(event: &crate::Event) -> Value {
     value["host"] = json!("fixture-host");
     let mut parts = vec![json!("event"), json!(event.kind)];
     if event.kind == "session.compaction" {
-        if event.session.as_deref().is_some_and(|s| !s.is_empty()) && event.ts.as_deref().is_some_and(|s| !s.is_empty()) {
-            parts.extend([json!(event.session),json!(event.ts)]);
-        } else { parts.push(json!(event.source_ref)); }
+        if event.session.as_deref().is_some_and(|s| !s.is_empty())
+            && event.ts.as_deref().is_some_and(|s| !s.is_empty())
+        {
+            parts.extend([json!(event.session), json!(event.ts)]);
+        } else {
+            parts.push(json!(event.source_ref));
+        }
     } else {
-        parts.extend([json!(event.source_ref),json!(event.ts)]);
-        for field in ["session","run_id","lane","task_id","pr","provider","account","model","harness_rev"] {
+        parts.extend([json!(event.source_ref), json!(event.ts)]);
+        for field in [
+            "session",
+            "run_id",
+            "lane",
+            "task_id",
+            "pr",
+            "provider",
+            "account",
+            "model",
+            "harness_rev",
+        ] {
             parts.push(value[field].clone());
         }
         parts.push(event.attrs.clone());
@@ -176,28 +277,44 @@ fn native_parser_and_hashes_match_python() {
     let api = json!({"timeUnixNano":"1735689600791625390","attributes":[{"key":"event.name","value":{"stringValue":"api_request"}},{"key":"session.id","value":{"stringValue":"otel-session"}},{"key":"input_tokens","value":{"intValue":"9007199254740993"}},{"key":"duration_ms","value":{"doubleValue":12.0}},{"key":"success","value":{"boolValue":true}},{"key":"prompt","value":{"stringValue":"secret"}}]});
     cases.push(json!({"parser":"otel","row":{"signal":"logs","body":{"resourceLogs":[{"resource":context,"scopeLogs":[{"logRecords":[{"attributes":[]},api.clone(),api,{"timeUnixNano":"bad","attributes":[{"key":"event.name","value":{"stringValue":"user_prompt"}},{"key":"prompt_length","value":{"intValue":"23"}},{"key":"prompt","value":{"stringValue":"secret"}}]}]}]}]},"received_at":"2026-01-01T00:00:00Z"}}));
     cases.push(json!({"parser":"otel","row":{"signal":"metrics","body":{"resourceMetrics":[{"resource":context,"scopeMetrics":[{"metrics":[{"name":"claude_code.active_time.total","sum":{"aggregationTemporality":2,"dataPoints":[{"asInt":"3","timeUnixNano":"1735689600791625390"}]}},{"name":"gauge","gauge":{"dataPoints":[{"asDouble":3.5}]}}]}]}]},"received_at":"fallback"}}));
-    let input = json!({"cases":cases,"usage_template":Usage::default()});
+    let dir = tempfile::tempdir().unwrap();
+    let origin = dir.path().canonicalize().unwrap().join("fixture");
+    let input = json!({"cases":cases,"usage_template":Usage::default(),"origin_path":origin});
     let source = format!("{LOAD}\n{NATIVE_ORACLE}");
-    let Some(expected) = python(&source, &input) else { return; };
+    let Some(expected) = python(&source, &input) else {
+        return;
+    };
     let mut sink = ingest::tests::Capture::default();
     let mut state = ingest::ParserState::default();
     for (offset, case) in cases.iter().enumerate() {
         let row = &case["row"];
         match case["parser"].as_str().unwrap() {
-            "codex" => ingest::codex_record(&mut sink,row,&mut state,Path::new("fixture"),offset as u64,None).unwrap(),
-            "claude" => ingest::claude_record(&mut sink,row,Path::new("fixture"),offset as u64,None).unwrap(),
-            "otel" => ingest::otel_record(&mut sink,row,Path::new("fixture"),offset as u64).unwrap(),
+            "codex" => {
+                ingest::codex_record(&mut sink, row, &mut state, &origin, offset as u64, None)
+                    .unwrap()
+            }
+            "claude" => {
+                ingest::claude_record(&mut sink, row, &origin, offset as u64, None).unwrap()
+            }
+            "otel" => ingest::otel_record(&mut sink, row, &origin, offset as u64).unwrap(),
             _ => unreachable!(),
         }
     }
-    let observations: Vec<_> = sink.observations.iter().map(|row| {
-        let mut value = serde_json::to_value(row).unwrap();
-        value["host"] = json!("fixture-host");
-        value["event_id"] = json!(crate::pending::identity(&[value.clone()]));
-        value
-    }).collect();
+    let observations: Vec<_> = sink
+        .observations
+        .iter()
+        .map(|row| {
+            let mut value = serde_json::to_value(row).unwrap();
+            value["host"] = json!("fixture-host");
+            value["event_id"] = json!(crate::pending::identity(&[value.clone()]));
+            value
+        })
+        .collect();
     let events: Vec<_> = sink.events.iter().map(retained_event).collect();
-    equal(&json!({"usage":sink.usage,"observations":observations,"events":events}), &expected);
+    equal(
+        &json!({"usage":sink.usage,"observations":observations,"events":events}),
+        &expected,
+    );
 }
 const NATIVE_ORACLE: &str = r#"
 parser=load('telemetry_ingest'); delivery=load('telemetry_delivery')
@@ -218,7 +335,7 @@ class DB:
   captured[table].append(value)
 db=DB();state={}
 for offset,case in enumerate(input['cases']):
- getattr(parser,case['parser']+'_record')(t,db,case['row'],state,Path('fixture'),offset)
+ getattr(parser,case['parser']+'_record')(t,db,case['row'],state,Path(input['origin_path']),offset)
 print(json.dumps(captured))
 "#;
 #[test]
@@ -281,7 +398,10 @@ fn numeric_boundaries_and_python_float_hash_spelling() {
         json!(18014398509481986u64)
     );
     let roundtrip: Usage = serde_json::from_value(serde_json::to_value(row).unwrap()).unwrap();
-    equal(&serde_json::to_value(roundtrip.input_tokens).unwrap(), &json!(9007199254740993u64));
+    equal(
+        &serde_json::to_value(roundtrip.input_tokens).unwrap(),
+        &json!(9007199254740993u64),
+    );
     let lower = Usage {
         attempt: Some(Numeric::Float(9007199254740992.0)),
         status: Some("failed".into()),
@@ -323,4 +443,127 @@ fn peer_integral_floats_remain_accepted() {
     let mut large = summary.clone();
     large["session_usage"][0]["rows"] = json!(1e20);
     assert!(crate::hosts::validate(&large, "local").is_ok());
+}
+
+#[test]
+fn unicode_windows_and_refusals_match_python() {
+    let values = json!(["٢w", "２d", "1h", "\u{200b}", "\u{a0}", "\u{10ffff}"]);
+    let source = format!(
+        r#"{LOAD}
+changes=load('telemetry_changes')
+def check(value):
+ try: return int(changes.window(value).total_seconds() // 3600)
+ except changes.ChangeError as error: return str(error)
+print(json.dumps([check(v) for v in input]))
+"#
+    );
+    let Some(expected) = python(&source, &values) else {
+        return;
+    };
+    let actual: Vec<_> = values
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(
+            |value| match crate::changes::window(value.as_str().unwrap()) {
+                Ok(hours) => json!(hours),
+                Err(error) => json!(error.to_string()),
+            },
+        )
+        .collect();
+    equal(&json!(actual), &expected);
+}
+
+#[test]
+fn unicode_model_attribution_matches_python() {
+    let adapters =
+        json!({"a":{"models":[{"id":"model","names":[]},{"id":"alias","names":["\u{345}"]}]}});
+    let models = json!([
+        "\u{1c}model\u{1f}",
+        "model\u{1c}high",
+        "model-٢٠٢٦١٠٢٣",
+        "model-١٢٨k",
+        "\u{345}"
+    ]);
+    let source = format!("{LOAD}\nprint(json.dumps([costs.normalise_model('a',None,m,input['adapters']) for m in input['models']]))");
+    let Some(expected) = python(&source, &json!({"adapters":adapters,"models":models})) else {
+        return;
+    };
+    let adapters: costs::Catalogue = serde_json::from_value(adapters).unwrap();
+    let actual: Vec<_> = models
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| costs::normalise_model(Some("a"), None, m.as_str(), &adapters))
+        .collect();
+    equal(&json!(actual), &expected);
+}
+
+#[test]
+fn letter_classification_matches_python_over_all_code_points() {
+    use sha2::{Digest, Sha256};
+    let letters: String = (0..=0x10ffff)
+        .filter_map(char::from_u32)
+        .filter(|c| {
+            let mut bytes = [0; 4];
+            crate::pending::python_alpha(c.encode_utf8(&mut bytes))
+        })
+        .collect();
+    let Some(expected) = python("import sys,json,hashlib; json.load(sys.stdin); print(json.dumps(hashlib.sha256(''.join(chr(c) for c in range(0x110000) if chr(c).isalpha()).encode()).hexdigest()))", &Value::Null) else { return; };
+    assert_eq!(
+        crate::pending::hex(&Sha256::digest(letters.as_bytes())),
+        expected.as_str().unwrap()
+    );
+}
+
+#[test]
+fn numeric_group_keys_and_order_match_python() {
+    let values = json!([
+        2,
+        10,
+        1,
+        1.0,
+        0,
+        -0.0,
+        null,
+        "",
+        false,
+        true,
+        9007199254740993u64,
+        9007199254740992.0
+    ]);
+    let groups: Vec<_> = values
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|value| {
+            costs::unit(
+                &Usage::default(),
+                None,
+                BTreeMap::from([("parent_attempt".into(), value.clone())]),
+                &costs::Prices::default(),
+            )
+            .unwrap()
+        })
+        .collect();
+    let source = format!("{LOAD}\nprint(json.dumps(costs.combine(input, ['parent_attempt'])))");
+    let Some(expected) = python(&source, &json!(groups)) else {
+        return;
+    };
+    equal(
+        &json!(costs::combine(groups, &["parent_attempt"]).unwrap()),
+        &expected,
+    );
+}
+#[test]
+fn table_trailing_whitespace_matches_python() {
+    let headers = vec!["name".to_string()];
+    let rows: Vec<Vec<String>> = (0x1c..=0x1f)
+        .map(|c| vec![format!("value{}", char::from_u32(c).unwrap())])
+        .collect();
+    let source = format!("{LOAD}\nreport=load('telemetry_report')\nprint(json.dumps(report.table(input['headers'], input['rows'])))");
+    let Some(expected) = python(&source, &json!({"headers":headers,"rows":rows})) else {
+        return;
+    };
+    equal(&json!(report::table(&headers, &rows).unwrap()), &expected);
 }

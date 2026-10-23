@@ -1,3 +1,8 @@
+mod python;
+pub(crate) use python::{
+    decimal_digit, python_alpha, python_equal, python_repr, python_str, python_strip,
+    python_truthy, python_whitespace,
+};
 mod decode;
 pub use decode::decode_json;
 mod numeric;
@@ -100,7 +105,9 @@ pub fn parse_time(value: &str) -> crate::Result<jiff::Timestamp> {
             .map(|t| t.timestamp())
             .map_err(|_| crate::Error::Timestamp(value.into()));
     }
-    value.strip_suffix('Z').unwrap_or(value)
+    value
+        .strip_suffix('Z')
+        .unwrap_or(value)
         .parse::<jiff::civil::Date>()
         .ok()
         .and_then(|t| t.at(0, 0, 0, 0).to_zoned(jiff::tz::TimeZone::UTC).ok())
@@ -188,4 +195,26 @@ pub fn iso(value: jiff::Timestamp) -> String {
 // port: belongs in provenant-records
 pub fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+// port: belongs in provenant-core
+pub fn timestamp_seconds(seconds: f64) -> crate::Result<jiff::Timestamp> {
+    if !seconds.is_finite() {
+        return Err(crate::Error::Timestamp(seconds.to_string()));
+    }
+    // CPython uses modf, then rounds only the fractional seconds to microseconds.
+    // Bound the whole seconds before casting or multiplying external input.
+    const MIN: i128 = -62_135_596_800; // datetime year 1
+    const END: i128 = 253_402_300_800; // datetime year 10000 (exclusive)
+    let whole = seconds.trunc();
+    if whole < (MIN - 1) as f64 || whole > END as f64 {
+        return Err(crate::Error::Timestamp(seconds.to_string()));
+    }
+    let micros = (seconds.fract() * 1_000_000.0).round_ties_even() as i128;
+    let nanos = whole as i128 * 1_000_000_000 + micros * 1000;
+    if !(MIN * 1_000_000_000..END * 1_000_000_000).contains(&nanos) {
+        return Err(crate::Error::Timestamp(seconds.to_string()));
+    }
+    jiff::Timestamp::from_nanosecond(nanos)
+        .map_err(|_| crate::Error::Timestamp(seconds.to_string()))
 }
