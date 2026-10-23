@@ -13,6 +13,8 @@ import sys
 import types
 from unittest.mock import patch
 
+import pytest
+
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -108,6 +110,29 @@ def test_sources_query_reads_a_read_only_ledger(tmp_path):
         'fabric', 'route_health', 'cooldowns', 'claude', 'codex', 'opencode', 'otel', 'delivery'}
     assert stats.returncode == 0, stats.stderr
     assert isinstance(json.loads(stats.stdout), dict)
+
+
+@pytest.mark.parametrize('version,message', [
+    (3, 'telemetry: telemetry schema version 3 needs migration; run provenant telemetry ingest'),
+    (9, 'telemetry: unsupported telemetry schema version: 9'),
+], ids=['older', 'newer'])
+def test_query_reports_schema_version_mismatch(tmp_path, version, message):
+    seeded = cli(tmp_path, 'telemetry', 'ingest')
+    assert seeded.returncode == 0, seeded.stderr
+    ledger = tmp_path / 'state/telemetry.sqlite3'
+    with sqlite3.connect(ledger) as db:
+        db.execute(f'PRAGMA user_version = {version}')
+    result = cli(tmp_path, 'telemetry', 'sources', '--json')
+    assert result.returncode == 1
+    assert result.stderr.strip() == message
+
+
+def test_query_reports_missing_ledger_without_creating_it(tmp_path):
+    (tmp_path / 'state').mkdir()
+    result = cli(tmp_path, 'telemetry', 'sources', '--json')
+    assert result.returncode == 1
+    assert result.stderr.strip() == 'telemetry: ledger not initialised'
+    assert not (tmp_path / 'state/telemetry.sqlite3').exists()
 
 
 def test_query_reports_uninitialised_ledger_without_creating_schema(tmp_path):
