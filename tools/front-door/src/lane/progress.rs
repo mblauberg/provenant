@@ -132,3 +132,26 @@ impl Progress {
         self.stack.is_empty() && self.complete
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn writer_scan_observes_changes_and_deletions_but_not_excluded_trees() {
+        let root = std::env::temp_dir().join(format!("lane-progress-{}", std::process::id()));
+        fs::create_dir_all(root.join("ignored")).unwrap();
+        fs::create_dir_all(root.join("capture")).unwrap();
+        fs::write(root.join("file"), b"initial").unwrap();
+        let mut p = Progress::new(root.clone(), vec!["ignored".into()], &root.join("capture"));
+        assert!(!p.probe());
+        assert!(p.scan_complete());
+        fs::write(root.join("ignored/changed"), b"ignored").unwrap();
+        fs::write(root.join("capture/events"), b"capture").unwrap();
+        assert!(!p.probe());
+        fs::write(root.join("file"), b"a new version").unwrap();
+        assert!(p.probe());
+        fs::remove_file(root.join("file")).unwrap();
+        assert!(p.probe());
+        fs::remove_dir_all(root).unwrap();
+    }
+}

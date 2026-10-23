@@ -41,6 +41,48 @@ pub fn parse(text: &str) -> Result<Value, String> {
     Ok(value)
 }
 
+/// Replace only the named top-level member's value spans. All other bytes,
+/// including numeric spelling and whitespace, stay unchanged. Duplicate
+/// members are all redacted so an ignored earlier value cannot leak secrets.
+pub fn redact_member(text: &str, member: &str, replacement: &str) -> Result<String, String> {
+    parse(text)?;
+    parse(replacement)?;
+    let mut reader = Reader {
+        bytes: text.as_bytes(),
+        at: 0,
+    };
+    reader.skip_space();
+    if !reader.eat(b'{') {
+        return Err("expected object".into());
+    }
+    let mut out = String::new();
+    let mut copied = 0;
+    reader.skip_space();
+    if !reader.eat(b'}') {
+        loop {
+            reader.skip_space();
+            let key = reader.string()?;
+            reader.skip_space();
+            reader.eat(b':');
+            reader.skip_space();
+            let start = reader.at;
+            reader.value(1)?;
+            if key == member {
+                out.push_str(&text[copied..start]);
+                out.push_str(replacement);
+                copied = reader.at;
+            }
+            reader.skip_space();
+            if reader.eat(b'}') {
+                break;
+            }
+            reader.eat(b',');
+        }
+    }
+    out.push_str(&text[copied..]);
+    Ok(out)
+}
+
 struct Reader<'a> {
     bytes: &'a [u8],
     at: usize,
@@ -269,6 +311,15 @@ mod tests {
         parse(text).unwrap()
     }
 
+    #[test]
+    fn redaction_preserves_opaque_bytes_and_all_duplicate_members() {
+        let input = r#"{ "env": {"OLD":"secret"}, "opaque": 1.250e+2, "nested":{"env":"untouched"}, "env" : {"NEW":"secret2"} }"#;
+        let redacted = redact_member(input, "env", r#"["NEW"]"#).unwrap();
+        assert_eq!(
+            redacted,
+            r#"{ "env": ["NEW"], "opaque": 1.250e+2, "nested":{"env":"untouched"}, "env" : ["NEW"] }"#
+        );
+    }
     #[test]
     fn reads_the_pointer_shape() {
         let value = pointer("{\"schema_version\": 1, \"product_root\": \"/a/b\"}\n");

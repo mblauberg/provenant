@@ -63,9 +63,6 @@ fn custody(row: &Row, path: &Path) -> bool {
         && platform::process(row.id.pid).is_some_and(|r| r.id == row.id)
 }
 fn registered_owner(row: &Row, attempt: &Path) -> bool {
-    if row.pgid != row.id.pid {
-        return false;
-    }
     let Ok(entries) = std::fs::read_dir(attempt.join("tmp/children")) else {
         return false;
     };
@@ -88,7 +85,6 @@ fn registered_owner(row: &Row, attempt: &Path) -> bool {
         if integer(&owner, "schema_version") != Some(1)
             || !matches!(text(&owner, "kind"), Some("dispatch" | "batch"))
             || integer(&owner, "owner_pid") != Some(row.id.pid as i64)
-            || integer(&owner, "owner_pgid") != Some(row.id.pid as i64)
             || text(&owner, "run_token").is_none()
             || text(&owner, "run_token") != text(&child, "run_token")
             || text(&owner, "run_dir").map(Path::new) != Some(dir.as_path())
@@ -129,6 +125,7 @@ pub struct ProviderGroup {
     pub pid: i32,
     root: Option<Identity>,
     tracked: BTreeMap<Identity, Row>,
+    owned: BTreeSet<Identity>,
     parents: BTreeMap<Identity, Identity>,
     spared: BTreeSet<Identity>,
     owners: BTreeSet<Identity>,
@@ -178,6 +175,7 @@ impl ProviderGroup {
             pid,
             root: platform::process(pid).map(|r| r.id),
             tracked: BTreeMap::new(),
+            owned: BTreeSet::new(),
             parents: BTreeMap::new(),
             spared: BTreeSet::new(),
             owners: BTreeSet::new(),
@@ -201,6 +199,11 @@ impl ProviderGroup {
         let _ = previous_subreaper;
         group.sample();
         group
+    }
+    pub fn exclude_owned_child(&mut self, pid: i32) {
+        if let Some(row) = platform::process(pid) {
+            self.owned.insert(row.id);
+        }
     }
     pub fn observed_exit(&mut self) -> bool {
         if self.status.is_some() {
@@ -238,7 +241,7 @@ impl ProviderGroup {
     }
     pub fn sample(&mut self) {
         self.last_sample = Instant::now();
-        let rows = match platform::snapshot() {
+        let rows = match platform::snapshot(self.pid, self.tracked.keys().map(|id| id.pid)) {
             Ok(r) => r,
             Err(e) => {
                 self.warnings.add(format!("census: {e}"));
@@ -247,6 +250,22 @@ impl ProviderGroup {
         };
         if self.root.is_none() {
             self.root = rows.get(&self.pid).map(|r| r.id.clone());
+        }
+        // Our only direct children are the provider and the observer. On
+        // Linux, every other direct child was adopted through subreaping.
+        #[cfg(target_os = "linux")]
+        if let Some(root) = &self.root {
+            for row in rows.values().filter(|r| {
+                r.ppid == std::process::id() as i32
+                    && r.id.pid != self.pid
+                    && !self.owned.contains(&r.id)
+                    && !self.owned.iter().any(|id| r.pgid == id.pid)
+            }) {
+                self.parents
+                    .entry(row.id.clone())
+                    .or_insert_with(|| root.clone());
+                self.tracked.insert(row.id.clone(), row.clone());
+            }
         }
         let mut known: BTreeSet<Identity> = self.tracked.keys().cloned().collect();
         if let Some(root) = &self.root {
@@ -292,11 +311,7 @@ impl ProviderGroup {
                 self.shared.insert(row.id.clone());
                 self.spared.insert(row.id.clone());
             }
-            if !self.spared.contains(&row.id)
-                && row.pgid != self.pid
-                && row.pgid != unsafe { libc::getpgrp() }
-                && registered_owner(row, &self.attempt)
-            {
+            if !self.spared.contains(&row.id) && registered_owner(row, &self.attempt) {
                 self.owners.insert(row.id.clone());
                 self.spared.insert(row.id.clone());
             }
@@ -323,6 +338,18 @@ impl ProviderGroup {
                 *row = new.clone();
             }
         }
+    }
+    pub fn cpu_stamp(&self) -> Vec<(Identity, u64)> {
+        self.root
+            .iter()
+            .chain(self.tracked.keys())
+            .filter(|id| !self.spared.contains(*id))
+            .filter_map(|id| {
+                platform::process(id.pid)
+                    .filter(|r| r.id == *id && !r.zombie)
+                    .map(|r| (r.id, r.cpu))
+            })
+            .collect()
     }
     fn live(&self) -> Vec<Row> {
         self.tracked
@@ -419,8 +446,12 @@ impl ProviderGroup {
         }
         #[cfg(target_os = "linux")]
         for id in self.tracked.keys().filter(|id| !self.spared.contains(*id)) {
-            unsafe {
-                libc::waitpid(id.pid, std::ptr::null_mut(), libc::WNOHANG);
+            if platform::process(id.pid)
+                .is_some_and(|r| r.id == *id && r.ppid == std::process::id() as i32)
+            {
+                unsafe {
+                    libc::waitpid(id.pid, std::ptr::null_mut(), libc::WNOHANG);
+                }
             }
         }
         self.done = true;

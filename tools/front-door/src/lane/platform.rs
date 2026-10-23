@@ -40,7 +40,13 @@ extern "C" fn signal_event(sig: i32) {
     if fd >= 0 {
         let byte = sig as u8;
         unsafe {
+            #[cfg(target_os = "macos")]
+            let errno = libc::__error();
+            #[cfg(target_os = "linux")]
+            let errno = libc::__errno_location();
+            let saved = *errno;
             libc::write(fd, (&byte as *const u8).cast(), 1);
+            *errno = saved;
         }
     }
 }
@@ -251,11 +257,15 @@ pub fn process(pid: i32) -> Option<Row> {
     let end = text.rfind(") ")?;
     let f: Vec<_> = text[end + 2..].split_whitespace().collect();
     let start = f.get(19)?.parse().ok()?;
-    let boot = std::fs::read_to_string("/proc/stat")
-        .ok()?
-        .lines()
-        .find_map(|l| l.strip_prefix("btime ").and_then(|s| s.parse::<u64>().ok()))?;
-    let ticks = unsafe { libc::sysconf(libc::_SC_CLK_TCK) } as u64;
+    static CLOCK: std::sync::OnceLock<Option<(u64, u64)>> = std::sync::OnceLock::new();
+    let (boot, ticks) = (*CLOCK.get_or_init(|| {
+        let boot = std::fs::read_to_string("/proc/stat")
+            .ok()?
+            .lines()
+            .find_map(|l| l.strip_prefix("btime ").and_then(|s| s.parse::<u64>().ok()))?;
+        let ticks = unsafe { libc::sysconf(libc::_SC_CLK_TCK) } as u64;
+        (ticks > 0).then_some((boot, ticks))
+    }))?;
     Some(Row {
         id: Identity { pid, start },
         ppid: f.get(1)?.parse().ok()?,
@@ -335,11 +345,54 @@ pub fn process(pid: i32) -> Option<Row> {
         cpu: if count >= 32 { task[2] + task[3] } else { 0 },
     })
 }
-pub fn snapshot() -> io::Result<BTreeMap<i32, Row>> {
+pub fn snapshot(root: i32, known: impl Iterator<Item = i32>) -> io::Result<BTreeMap<i32, Row>> {
     #[cfg(target_os = "linux")]
-    let pids: Vec<i32> = std::fs::read_dir("/proc")?
-        .filter_map(|e| e.ok()?.file_name().to_str()?.parse().ok())
-        .collect();
+    let pids: Vec<i32> = {
+        use std::collections::{BTreeSet, VecDeque};
+        let mut queue: VecDeque<_> = std::iter::once(root)
+            .chain(known)
+            .chain(std::iter::once(std::process::id() as i32))
+            .collect();
+        let mut visited = BTreeSet::new();
+        let mut unavailable = false;
+        while let Some(pid) = queue.pop_front() {
+            if !visited.insert(pid) {
+                continue;
+            }
+            let tasks = match std::fs::read_dir(format!("/proc/{pid}/task")) {
+                Ok(t) => t,
+                Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
+                Err(_) => {
+                    unavailable = true;
+                    break;
+                }
+            };
+            for task in tasks.filter_map(Result::ok) {
+                match std::fs::read_to_string(task.path().join("children")) {
+                    Ok(s) => {
+                        queue.extend(s.split_whitespace().filter_map(|s| s.parse::<i32>().ok()))
+                    }
+                    Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+                    Err(_) => {
+                        unavailable = true;
+                        break;
+                    }
+                }
+            }
+            if unavailable {
+                break;
+            }
+        }
+        if unavailable {
+            std::fs::read_dir("/proc")?
+                .filter_map(|e| e.ok()?.file_name().to_str()?.parse().ok())
+                .collect()
+        } else {
+            visited.into_iter().collect()
+        }
+    };
+    #[cfg(target_os = "macos")]
+    let _ = (root, known);
     #[cfg(target_os = "macos")]
     let pids: Vec<i32> = unsafe {
         let count = proc_listallpids(std::ptr::null_mut(), 0);
@@ -416,5 +469,109 @@ pub fn has_file(pid: i32, file: &File) -> bool {
             }
         }
         false
+    }
+}
+
+/// A single writer owns stdout. Check the kernel's free pipe space before a
+/// nonblocking write larger than PIPE_BUF, so backpressure drops whole events.
+pub fn write_event(fd: RawFd, line: &[u8]) {
+    unsafe {
+        let mut stat: libc::stat = std::mem::zeroed();
+        if libc::fstat(fd, &mut stat) != 0 {
+            return;
+        }
+        if stat.st_mode & libc::S_IFMT == libc::S_IFIFO {
+            let atomic = libc::fpathconf(fd, libc::_PC_PIPE_BUF);
+            if atomic <= 0 {
+                return;
+            }
+            if line.len() > atomic as usize {
+                #[cfg(target_os = "linux")]
+                {
+                    let capacity = libc::fcntl(fd, libc::F_GETPIPE_SZ);
+                    let mut used = 0i32;
+                    if capacity < 0
+                        || libc::ioctl(fd, libc::FIONREAD, &mut used) != 0
+                        || (capacity.saturating_sub(used) as usize) < line.len()
+                    {
+                        return;
+                    }
+                }
+                #[cfg(target_os = "macos")]
+                {
+                    let queue = libc::kqueue();
+                    if queue < 0 {
+                        return;
+                    }
+                    let change = libc::kevent {
+                        ident: fd as usize,
+                        filter: libc::EVFILT_WRITE,
+                        flags: libc::EV_ADD | libc::EV_ONESHOT,
+                        fflags: 0,
+                        data: 0,
+                        udata: std::ptr::null_mut(),
+                    };
+                    let mut event: libc::kevent = std::mem::zeroed();
+                    let zero = libc::timespec {
+                        tv_sec: 0,
+                        tv_nsec: 0,
+                    };
+                    let n = libc::kevent(queue, &change, 1, &mut event, 1, &zero);
+                    libc::close(queue);
+                    if n != 1
+                        || event.flags & libc::EV_ERROR != 0
+                        || event.data < line.len() as isize
+                    {
+                        return;
+                    }
+                }
+            }
+        }
+        // FIFO writes have enough room, or are <= PIPE_BUF (all-or-EAGAIN).
+        // Other descriptors are best effort; regular files do not backpressure.
+        loop {
+            let n = libc::write(fd, line.as_ptr().cast(), line.len());
+            if n < 0 && io::Error::last_os_error().kind() == io::ErrorKind::Interrupted {
+                continue;
+            }
+            break;
+        }
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn backpressure_drops_a_large_event_without_partial_json() {
+        unsafe {
+            let mut fds = [0; 2];
+            assert_eq!(libc::pipe(fds.as_mut_ptr()), 0);
+            let read = File::from_raw_fd(fds[0]);
+            let write = File::from_raw_fd(fds[1]);
+            nonblocking(write.as_raw_fd()).unwrap();
+            nonblocking(read.as_raw_fd()).unwrap();
+            let filler = [b'x'; 512];
+            while libc::write(write.as_raw_fd(), filler.as_ptr().cast(), filler.len()) > 0 {}
+            let mut discard = [0u8; 512];
+            assert_eq!(
+                libc::read(read.as_raw_fd(), discard.as_mut_ptr().cast(), 512),
+                512
+            );
+            let record = format!(
+                "{{\"event\":\"exited\",\"data\":\"{}\"}}\n",
+                "z".repeat(10000)
+            );
+            write_event(write.as_raw_fd(), record.as_bytes());
+            let mut received = Vec::new();
+            let mut buf = [0u8; 65536];
+            loop {
+                let n = libc::read(read.as_raw_fd(), buf.as_mut_ptr().cast(), buf.len());
+                if n <= 0 {
+                    break;
+                }
+                received.extend_from_slice(&buf[..n as usize]);
+            }
+            assert!(received.iter().all(|b| *b == b'x'));
+        }
     }
 }

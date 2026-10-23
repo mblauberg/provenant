@@ -201,7 +201,15 @@ impl Attempt {
             if rc != 0 {
                 return Err(io::Error::last_os_error());
             }
-            self.dir.sync_all()?;
+            if no_replace {
+                // link is the publication boundary. A later durability error
+                // must not retry link and misreport this visible record as lost.
+                if let Err(error) = fault("exit-sync").and_then(|_| self.dir.sync_all()) {
+                    eprintln!("provenant lane: exit record linked; directory sync: {error}");
+                }
+            } else {
+                self.dir.sync_all()?;
+            }
             Ok(())
         })();
         self.remove(&temp);
@@ -387,7 +395,7 @@ impl ExitRecord {
                 warnings=array(self.warnings.items[..sizes[2]].iter().map(|s|quote(s))),io=array(self.io.items[..sizes[3]].iter().map(|s|quote(s))),out=self.out,err=self.err,
                 lost=self.observer_lost,dropped=self.observer_dropped,rt=self.reaped.len()-sizes[0],st=self.spared.len()-sizes[1],
                 wt=self.warnings.items.len()-sizes[2]+self.warnings.omitted,it=self.io.items.len()-sizes[3]+self.io.omitted);
-            if s.len() <= 16 * 1024 {
+            if s.len() <= 16 * 1024 - 64 {
                 return s;
             }
             if let Some((i, _)) = sizes

@@ -15,7 +15,7 @@ use spec::Spec;
 use state::{step, Action, Event, Phase, State, StopReason};
 use std::ffi::OsString;
 use std::fs::OpenOptions;
-use std::io::{self, BufRead, Read, Write};
+use std::io::{self, BufRead, Read};
 use std::marker::PhantomData;
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::OpenOptionsExt;
@@ -47,7 +47,7 @@ fn emit(kind: &str, fields: &str) {
     );
     // Nonblocking, bounded writes. A disconnected or stalled owner has no
     // influence over the provider's lifetime.
-    let _ = std::io::stdout().write(line.as_bytes());
+    platform::write_event(std::io::stdout().as_raw_fd(), line.as_bytes());
 }
 fn apply(s: &mut State, event: Event) -> Vec<Action> {
     let (next, a) = step(std::mem::take(s), event);
@@ -81,6 +81,7 @@ pub fn run(args: &[OsString]) -> u8 {
         }
     };
     // Credentials only lived in the input string; never persist that string.
+    let redacted = spec.redacted(&line).expect("validated launch object");
     drop(line);
     let input = match &spec.input {
         Some(path) => match OpenOptions::new()
@@ -118,7 +119,7 @@ pub fn run(args: &[OsString]) -> u8 {
     let _ = platform::nonblocking(std::io::stdout().as_raw_fd());
     io.result(
         "launch",
-        attempt.atomic("launch.json", spec.redacted().as_bytes(), false),
+        attempt.atomic("launch.json", redacted.as_bytes(), false),
     );
     let mut out = Capture::new(attempt.create(&spec.events), spec.cap);
     let mut err = Capture::new(attempt.create(&spec.stderr), spec.cap);
@@ -206,6 +207,9 @@ pub fn run(args: &[OsString]) -> u8 {
                 );
                 emit("started", &start);
                 let mut observer = Observer::start(&spec);
+                if let Some(pid) = observer.pid() {
+                    group.exclude_owned_child(pid);
+                }
                 let mut out_lines = Lines::new();
                 let mut err_lines = Lines::new();
                 let began = Instant::now();
@@ -218,7 +222,7 @@ pub fn run(args: &[OsString]) -> u8 {
                 let mut grace = None;
                 let mut settle = None;
                 let mut finished = None;
-                let mut cpu = platform::process(group.pid).map(|r| r.cpu);
+                let mut cpu = group.cpu_stamp();
                 let mut workspace = spec.writer.as_ref().map(|(root, exclude)| {
                     progress::Progress::new(root.clone(), exclude.clone(), &spec.attempt)
                 });
@@ -295,6 +299,15 @@ pub fn run(args: &[OsString]) -> u8 {
                             }
                         }
                     }
+                    if group.observed_exit()
+                        && !matches!(
+                            state.phase,
+                            Phase::Settling | Phase::Stopping | Phase::Exited
+                        )
+                    {
+                        apply(&mut state, Event::ChildExit);
+                        settle = Some(add_deadline(Instant::now(), spec.settle));
+                    }
                     events.extend(observer.pump());
                     let current = Instant::now();
                     if state.phase != Phase::Exited {
@@ -356,8 +369,8 @@ pub fn run(args: &[OsString]) -> u8 {
                     if current >= next_progress && state.phase != Phase::Exited {
                         next_progress = add_deadline(current, 1000);
                         let changed = workspace.as_mut().is_some_and(|w| w.probe());
-                        let new_cpu = platform::process(group.pid).map(|r| r.cpu);
-                        if changed || (cpu.is_some() && new_cpu.is_some() && cpu != new_cpu) {
+                        let new_cpu = group.cpu_stamp();
+                        if changed || (!cpu.is_empty() && !new_cpu.is_empty() && cpu != new_cpu) {
                             last_progress = current;
                             record.progress = files::timestamp();
                         }

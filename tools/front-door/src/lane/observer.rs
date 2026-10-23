@@ -70,6 +70,9 @@ impl Observer {
         }
         o
     }
+    pub fn pid(&self) -> Option<i32> {
+        self.child.as_ref().map(|c| c.id() as i32)
+    }
     fn lose(&mut self) {
         self.lost = true;
         self.input = None;
@@ -89,6 +92,7 @@ impl Observer {
         .into_bytes();
         if self.bytes + data.len() > QUEUE {
             self.dropped += 1;
+            self.lose();
             return;
         }
         self.bytes += data.len();
@@ -97,6 +101,7 @@ impl Observer {
     pub fn drop_line(&mut self) {
         if self.child.is_some() {
             self.dropped += 1;
+            self.lose();
         }
     }
     pub fn fds(&self) -> Vec<(RawFd, bool)> {
@@ -198,6 +203,7 @@ impl Observer {
             }
         }
         if self.lost || self.dropped > 0 {
+            events.clear();
             events.push(Event::ObserverLost);
         }
         events

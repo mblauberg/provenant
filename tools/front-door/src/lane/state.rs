@@ -90,17 +90,26 @@ pub enum Action {
 pub fn step(mut s: State, event: Event) -> (State, Vec<Action>) {
     let mut actions = Vec::new();
     if s.phase == Phase::Exited {
+        match event {
+            Event::Terminal => s.terminal = true,
+            Event::ObserverLost => s.observer_lost = true,
+            _ => {}
+        }
         return (s, actions);
     }
     match event {
         Event::Stdout => s.produced = true,
         Event::ObserverLost => s.observer_lost = true,
         Event::IoError => {}
-        Event::Silence => actions.push(Action::Observe),
-        Event::Terminal if s.phase == Phase::Running => {
+        Event::Silence if matches!(s.phase, Phase::Running | Phase::TerminalGrace) => {
+            actions.push(Action::Observe)
+        }
+        Event::Terminal => {
             s.terminal = true;
-            s.phase = Phase::TerminalGrace;
-            actions.extend([Action::CloseStdin, Action::StartGrace]);
+            if s.phase == Phase::Running {
+                s.phase = Phase::TerminalGrace;
+                actions.extend([Action::CloseStdin, Action::StartGrace]);
+            }
         }
         Event::ChildExit if matches!(s.phase, Phase::Running | Phase::TerminalGrace) => {
             s.phase = Phase::Settling;
@@ -149,6 +158,17 @@ pub fn step(mut s: State, event: Event) -> (State, Vec<Action>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn late_terminal_facts_survive_process_exit() {
+        let (s, _) = step(State::default(), Event::ChildExit);
+        let (s, a) = step(s, Event::Terminal);
+        assert!(s.terminal);
+        assert!(a.is_empty());
+        assert!(step(s.clone(), Event::Silence).1.is_empty());
+        let (s, _) = step(s, Event::SettleDeadline);
+        let (s, _) = step(s, Event::CleanupDone);
+        assert!(step(s, Event::Terminal).0.terminal);
+    }
     #[test]
     fn transition_table() {
         let rows = [

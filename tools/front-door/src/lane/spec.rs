@@ -140,12 +140,18 @@ impl Spec {
     pub fn cancelled(&self) -> bool {
         self.markers.iter().any(|p| self.attempt.join(p).exists())
     }
-    /// A new Rust-owned projection, never a rewrite of the Python document.
-    pub fn redacted(&self) -> String {
-        use super::files::{array, quote};
-        format!("{{\"schema\":\"provenant.lane.launch.v1\",\"argv\":{},\"cwd\":{},\"attempt_dir\":{},\"run_token\":{},\"env\":{}}}\n",
-            array(self.argv.iter().map(|s| quote(s))), quote(&self.cwd.to_string_lossy()),
-            quote(&self.attempt.to_string_lossy()), quote(&self.token), array(self.env.keys().map(|s| quote(s))))
+    /// Redact only environment values; never re-serialise the Python spec.
+    pub fn redacted(&self, source: &str) -> Result<String, String> {
+        use super::files::quote;
+        let env = format!(
+            "{{{}}}",
+            self.env
+                .keys()
+                .map(|s| format!("{}:{}", quote(s), quote(s)))
+                .collect::<Vec<_>>()
+                .join(",")
+        );
+        json::redact_member(source, "env", &env)
     }
 }
 
