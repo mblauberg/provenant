@@ -116,7 +116,8 @@ def main() -> int:
         return 0
 
     result = subprocess.run(
-        ["npm", "ci", "--prefer-offline", "--no-audit", "--no-fund"],
+        [sys.executable, str(Path(__file__).resolve().parent / "retry-npm-install.py"), "--",
+         "npm", "ci", "--prefer-offline", "--no-audit", "--no-fund"],
         cwd=worktree, env=os.environ.copy(), check=False,
     )
     if result.returncode != 0:

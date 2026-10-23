@@ -25,7 +25,7 @@ def linked_project(tmp_path):
     (primary / "scripts" / "node-workspace-preflight.mjs").write_bytes(
         (ROOT / "scripts" / "node-workspace-preflight.mjs").read_bytes()
     )
-    for filename in ("node-workspace-provision.py", "worktree.py"):
+    for filename in ("node-workspace-provision.py", "retry-npm-install.py", "worktree.py"):
         (primary / "scripts" / filename).write_bytes((ROOT / "scripts" / filename).read_bytes())
     manifest = json.loads((primary / "package.json").read_text())
     manifest["scripts"] = {
