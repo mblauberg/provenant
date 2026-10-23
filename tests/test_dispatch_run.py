@@ -20,6 +20,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from tests.support.dispatch import disable_memory_admission_floor, real_owner_fixture
+
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "skills/orchestrate/scripts/dispatch_run.py"
 INIT = ROOT / "skills/orchestrate/scripts/run_dir_init.sh"
@@ -101,13 +103,6 @@ def make_run(tmp_path: Path, name: str) -> Path:
     return Path(
         subprocess.check_output([str(INIT), str(tmp_path / ".agent-run" / name)], text=True).strip()
     ).resolve()
-
-
-def disable_memory_admission_floor(workspace: Path) -> None:
-    """Keep process contract tests independent of host memory probes."""
-    policy = workspace / ".agents/fabric-policy.json"
-    policy.parent.mkdir(parents=True, exist_ok=True)
-    policy.write_text(json.dumps({"memory_floor_percent": {"read_only": 0, "worktree_write": 0}}))
 
 
 def load_dispatch_module():
@@ -3789,25 +3784,6 @@ else:
     # The provider tmp lives inside its attempt and is pruned once the attempt is terminal.
     assert scratch.is_relative_to(run_dir.resolve()) and not scratch.exists()
     assert json.loads((run_dir / 'RUN_RECEIPT.json').read_text())['status'] == 'ok'
-
-
-def real_owner_fixture(tmp_path, monkeypatch, code):
-    """Exercise cf_dispatch --plan-only and the production supervisor, no owner stub."""
-    disable_memory_admission_floor(tmp_path)
-    bindir = tmp_path / 'provider-bin'
-    bindir.mkdir()
-    write_executable(bindir / 'claude', '#!/usr/bin/env python3\n' + code)
-    monkeypatch.setenv('PATH', str(bindir) + os.pathsep + os.environ['PATH'])
-    monkeypatch.setenv('AGENT_FABRIC_PRODUCT_ROOT', str(ROOT))
-    monkeypatch.setenv('AGENT_FABRIC_INSTANCE_ROOT', str(tmp_path / '.agents'))
-    monkeypatch.setenv('FABRIC_COOLDOWNS_PATH', str(tmp_path / 'cooldowns.json'))
-    monkeypatch.delenv('PROVENANT_RUN_TOKEN', raising=False)
-    run = Path(subprocess.check_output([str(INIT), '--kind', 'dispatch'], cwd=tmp_path, text=True).strip())
-    prompt = tmp_path / 'caller-prompt.md'
-    prompt.write_text('hello')
-    command = [sys.executable, str(SCRIPT), '--run-dir', str(run), '--adapter', 'claude',
-               '--model', 'opus', '--prompt-file', str(prompt), '--fallback', 'false']
-    return run, prompt, command
 
 
 @pytest.mark.parametrize("floor,free,mode,blocked", [
