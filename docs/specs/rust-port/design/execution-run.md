@@ -101,15 +101,15 @@ Every command accepts `--json` and the state override from the shared decisions.
 
 | Verb | Inputs and behaviour |
 | --- | --- |
-| `dispatch` | Exactly one prompt file/stdin input or `--manifest PATH`; optional task/operation ID, host and `--delivery-id`. Route/access controls below; `--timeout N`, separate `--admission-timeout N`, `--wait N`. Manifest submits 1–64 tasks, concurrency default 4, maximum 8. Detached by default (wait 0); return exact IDs, route, state and artifact paths. |
-| `lanes` | Exact selectors or current actor/project lanes; `--all`, `--limit`, pagination cursor and optional bounded tail. Read-only unless `--wait` is supplied; `--timeout N`, `--summary` and `--all` select wait budget/rendering/All condition. No implicit repair. |
-| `output` | Exact attempt, `--part result\|prompt\|stdout\|stderr`, offset or tail (default 40, maximum 500 lines), byte cap default/maximum 20000. Return offsets, EOF, clipping, encoding and completeness. Prompt reads require dispatch-equivalent authority. |
+| `dispatch` | Exactly one prompt file/stdin input or `--manifest PATH`; required `--operation-id ID`, optional task ID, host and `--delivery-id`. Route/access controls below; `--timeout N`, separate `--admission-timeout N`, `--wait N`. Manifest submits 1–64 tasks, concurrency default 4, maximum 8. Detached by default (wait 0); return exact IDs, route, state and artifact paths. |
+| `lanes` | Exact selectors or current actor/project lanes; `--all`, `--limit`, pagination cursor and optional bounded tail. Read-only unless `--wait` is supplied; `--timeout SECONDS` (required with `--wait`), `--summary` and `--condition any|all` (default any); `--all` includes retained terminal lanes. No implicit repair. |
+| `output` | Exact attempt, `--part result\|prompt\|stderr\|events`, offset or tail (default 40, maximum 500 lines), byte cap 1–65536, default 65536. Return offsets, EOF, clipping, encoding and completeness. Prompt reads require dispatch-equivalent authority. |
 | `cancel` | Exact run/task/attempt scope, operation ID, reason (maximum 256 bytes) and optional wait. Return requested/already-terminal/unobservable plus custody; accepted cancellation does not prove exit. |
 | `resume` | Exact prior attempt, operation ID, `expected_generation`, new prompt and explicit continued or fresh turn. Continued turns preserve route/access/session; fresh turns may select a new route. Return a new run and `retry_of`; closed runs stay immutable. |
 | `reconcile` | Exact project/operation ID or project-scoped recovery scan, explicit budget and optional typed decision for uncertain work. Recover queued scheduler work, reattach/check holders, finish pending publication and repair summaries/events; never blindly replay an uncertain launch. |
 
-CLI waits accept 0–14400 seconds (default 55 when waiting); MCP accepts 0–55.
-Zero is a poll. Fabric's earlier 3600/30 caps are superseded by the shared Waits
+CLI waits take an explicit 1–14400 seconds; MCP 1–55. There is no default,
+and zero is not a wait budget. `design/cli.md` owns the exact flags. Fabric's earlier 3600/30 caps are superseded by the shared Waits
 row. `wait(Any|All)` snapshots the selected set at entry, excluding caller and
 ancestors; later launches belong to the next wait. Any returns on the next
 unseen terminal/InputRequired; All returns when all are terminal **or any is
@@ -314,7 +314,7 @@ retains a transaction between calls.
 | run / CLI, Fabric | `cancel(AttemptRef, OperationKey, CancelReason, &ExecutionContext) -> Result<CancelReceipt, RunError>`; aggregate scopes expand to exact attempts. `resume(ResumeRequest, OperationKey, &ExecutionContext) -> Result<SubmissionReceipt, RunError>`; request includes `expected_generation`, exact previous attempt, prompt and continued/fresh mode. |
 | run / CLI, Fabric | `read_output(AttemptRef, ArtifactPart, ByteRange, &ExecutionContext) -> Result<OutputChunk, RunError>`; `export(AttemptRef, ExportLimits, &ExecutionContext) -> Result<ArtifactManifest, RunError>`. Bounded confined regular files and stable digests. |
 | run / Fabric, confinement edge | `capabilities() -> Result<ExecutionCapabilities, RunError>`; `temporary_paths(ProjectId, AttemptRef) -> Result<AttemptTempPaths, RunError>`. Read-only host-local observations/paths, checked against handle authority. |
-| run / workflow composition edge | `completed_attempt(AttemptId) -> Result<AttemptFact, RunError>` returns the shared terminal fact; nonterminal attempts are a typed error. `work_snapshot(WorkScope) -> Result<RunWorkSnapshot, RunError>` carries generation, observed time, active count/attempts and held leases. |
+| run / workflow composition edge | `AttemptReader::attempt(AttemptId) -> Result<AttemptFact, RunError>` and `attempts(filter)` returns the shared terminal fact; nonterminal attempts are a typed error. `work_snapshot(WorkScope) -> Result<RunWorkSnapshot, RunError>` carries generation, observed time, active count/attempts and held leases. |
 | run / CLI composition edge | `AttemptReader::attempts(filter) -> impl Iterator<Item = Result<AttemptFact>>` lazily yields validated terminal facts from the scoped store with bounded pages; read/validation failures are surfaced. The CLI passes facts to telemetry's `stats(facts, &PriceTable, window) -> Stats`, which accepts any iterator of `AttemptFact`. |
 | routing / run | `resolve(&RouteRequest, &RoutingContext) -> Result<ResolvedRoute, RoutingError>`; optional bounded plan of at most two alternatives, applied effort, eligibility, readiness and confidentiality. No candidate reconstruction in run. |
 | quota / run | `admit(&ResolvedRoute, &OperationId) -> Result<AdmissionPermit, QuotaError>`; provider/account quota readiness only. Run records the permit with its capacity/resource reservation, consumed by that exact attempt; quota owns no second host admission ledger. |
@@ -645,7 +645,7 @@ Python/V8 emulation, selector, bridge or old-output judge is introduced.
    it is never called by Rust or adapted to the new store.
 5. **Facade, run-directory cut and shared leaves.** Fabric replaces/counts its
    TS facade and mixed tests, routing remote queries/events to run; workflow
-   consumes completed_attempt/work_snapshot at the composition edge. The seam
+   consumes `AttemptReader::attempt` at the composition edge (workflow does not use `work_snapshot`). The seam
    is the tested library from step 4: this PR adds federation/MCP composition
    and removes the remaining old consumers together. Delete run_controls and
    its tests with run_dir_finalize and the Fabric execution/batch/resume
