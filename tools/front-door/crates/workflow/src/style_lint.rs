@@ -5,6 +5,7 @@
 //! then convert them to Python-compatible Unicode scalar offsets for findings.
 
 use regex::{Regex, RegexBuilder};
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 
@@ -184,6 +185,31 @@ pub enum StyleError {
         #[source]
         source: std::io::Error,
     },
+}
+
+pub type Finding = (usize, usize, String, String);
+
+/// Domain wrappers may add checks after the shared scan. The trait keeps that
+/// source variation at the caller seam instead of coupling this engine to a
+/// particular writing domain.
+pub trait ExtraScanner {
+    fn scan(&self, path: &Path) -> Result<Vec<Finding>, StyleError>;
+}
+
+impl<F> ExtraScanner for F
+where
+    F: Fn(&Path) -> Result<Vec<Finding>, StyleError>,
+{
+    fn scan(&self, path: &Path) -> Result<Vec<Finding>, StyleError> {
+        self(path)
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CliOutput {
+    pub exit_code: i32,
+    pub stdout: String,
+    pub stderr: String,
 }
 
 impl PatternRule {
@@ -1053,10 +1079,241 @@ fn read_utf8(path: &Path) -> Result<String, StyleError> {
     })
 }
 
+/// Run the shared style command against explicit argv, returning its output
+/// and status for the binary edge to render. `argv` includes the program name,
+/// as `argparse`'s `sys.argv` does.
+pub fn run_cli(
+    argv: &[OsString],
+    description: &str,
+    phrases: Option<&[PhraseGroup]>,
+    patterns: Option<&[PatternRule]>,
+    latex: bool,
+    extra_scan: Option<&dyn ExtraScanner>,
+) -> Result<CliOutput, StyleError> {
+    let program = argv.first().map_or_else(
+        || "-".to_owned(),
+        |value| {
+            value
+                .to_string_lossy()
+                .rsplit('/')
+                .next()
+                .unwrap_or_default()
+                .to_owned()
+        },
+    );
+    let args = argv.get(1..).unwrap_or_default();
+    let mut paths = Vec::new();
+    let mut wordcount = false;
+    let mut positional_only = false;
+    let mut positional_closed = false;
+    let mut unknown = Vec::new();
+
+    for argument in args {
+        let Some(text) = argument.to_str() else {
+            if positional_closed {
+                unknown.push(argument.to_string_lossy().into_owned());
+            } else if positional_only || !argument.to_string_lossy().starts_with('-') {
+                paths.push(PathBuf::from(argument));
+            } else {
+                positional_closed = !paths.is_empty();
+                unknown.push(argument.to_string_lossy().into_owned());
+            }
+            continue;
+        };
+        if positional_only {
+            if positional_closed {
+                unknown.push(text.to_owned());
+            } else {
+                paths.push(PathBuf::from(argument));
+            }
+        } else if text == "--" {
+            positional_only = true;
+        } else if text == "-h"
+            || text == "--help"
+            || (text.starts_with("--") && "--help".starts_with(text))
+            || (text.starts_with("-h") && !text.starts_with("--") && !text.starts_with("-h="))
+        {
+            return Ok(CliOutput {
+                exit_code: 0,
+                stdout: style_help(&program, description),
+                stderr: String::new(),
+            });
+        } else if text == "--wordcount"
+            || (text.starts_with("--") && "--wordcount".starts_with(text) && text.len() > 2)
+        {
+            positional_closed |= !paths.is_empty();
+            wordcount = true;
+        } else if text == "-" || is_negative_number_argument(text) {
+            if positional_closed {
+                unknown.push(text.to_owned());
+            } else {
+                paths.push(PathBuf::from(argument));
+            }
+        } else if let Some((option, value)) = text.split_once('=') {
+            if option == "--" {
+                return Ok(cli_parse_error(
+                    &program,
+                    &format!("ambiguous option: {text} could match --help, --wordcount"),
+                ));
+            }
+            let canonical = if option == "-h" || "--help".starts_with(option) {
+                Some("-h/--help")
+            } else if option.starts_with("--") && "--wordcount".starts_with(option) {
+                Some("--wordcount")
+            } else {
+                None
+            };
+            if let Some(canonical) = canonical {
+                return Ok(cli_parse_error(
+                    &program,
+                    &format!(
+                        "argument {canonical}: ignored explicit argument {}",
+                        provenant_core::py::python_repr(value)
+                    ),
+                ));
+            }
+            positional_closed |= !paths.is_empty();
+            unknown.push(text.to_owned());
+        } else if text.starts_with('-') {
+            positional_closed |= !paths.is_empty();
+            unknown.push(text.to_owned());
+        } else if positional_closed {
+            unknown.push(text.to_owned());
+        } else {
+            paths.push(PathBuf::from(argument));
+        }
+    }
+
+    if paths.is_empty() {
+        return Ok(cli_parse_error(
+            &program,
+            "the following arguments are required: paths",
+        ));
+    }
+    if !unknown.is_empty() {
+        return Ok(cli_parse_error(
+            &program,
+            &format!("unrecognized arguments: {}", unknown.join(" ")),
+        ));
+    }
+
+    let mut stdout = String::new();
+    if wordcount {
+        let mut missing = false;
+        for path in paths {
+            if !path.exists() {
+                stdout.push_str(&format!("{}: missing\n", path.display()));
+                missing = true;
+                continue;
+            }
+            let count = prose_word_count(&path, latex)?;
+            stdout.push_str(&format!("{}: {count} prose words\n", path.display()));
+        }
+        return Ok(CliOutput {
+            exit_code: if missing { 1 } else { 0 },
+            stdout,
+            stderr: String::new(),
+        });
+    }
+
+    let mut any_findings = false;
+    for path in paths {
+        if !path.exists() {
+            stdout.push_str(&format!("{}: missing\n", path.display()));
+            any_findings = true;
+            continue;
+        }
+        let mut findings = scan(&path, phrases, patterns, latex)?;
+        if let Some(extra_scan) = extra_scan {
+            findings.extend(extra_scan.scan(&path)?);
+            findings.sort();
+        }
+        if findings.is_empty() {
+            stdout.push_str(&format!("{}: no findings\n", path.display()));
+            continue;
+        }
+        any_findings = true;
+        stdout.push_str(&format!(
+            "{}: {} finding(s)\n",
+            path.display(),
+            findings.len()
+        ));
+        for (line, column, label, snippet) in findings {
+            stdout.push_str(&format!(
+                "  {line}:{column}: {label}: {}\n",
+                provenant_core::py::python_repr(&snippet)
+            ));
+        }
+    }
+    Ok(CliOutput {
+        exit_code: if any_findings { 1 } else { 0 },
+        stdout,
+        stderr: String::new(),
+    })
+}
+
+fn cli_parse_error(program: &str, message: &str) -> CliOutput {
+    CliOutput {
+        exit_code: 2,
+        stdout: String::new(),
+        stderr: format!(
+            "usage: {program} [-h] [--wordcount] paths [paths ...]\n{program}: error: {message}\n"
+        ),
+    }
+}
+
+fn style_help(program: &str, description: &str) -> String {
+    let usage = format!("usage: {program} [-h] [--wordcount] paths [paths ...]");
+    let description = wrap_description(description);
+    let mut output = usage;
+    if !description.is_empty() {
+        output.push_str("\n\n");
+        output.push_str(&description);
+    }
+    output.push_str(
+        "\n\npositional arguments:\n  paths\n\noptions:\n  -h, --help   show this help message and exit\n  --wordcount  print the prose word count instead of style findings\n",
+    );
+    output
+}
+
+fn wrap_description(description: &str) -> String {
+    let mut lines = Vec::new();
+    let mut line = String::new();
+    for word in description.split_whitespace() {
+        if !line.is_empty() && line.chars().count() + 1 + word.chars().count() > 80 {
+            lines.push(std::mem::take(&mut line));
+        }
+        if !line.is_empty() {
+            line.push(' ');
+        }
+        line.push_str(word);
+    }
+    if !line.is_empty() {
+        lines.push(line);
+    }
+    lines.join("\n")
+}
+
+fn is_negative_number_argument(text: &str) -> bool {
+    // CPython 3.14's argparse matcher is `-\\.?\\d` and accepts a numeric
+    // prefix even when the rest of the positional path is not numeric.
+    let Some(number) = text.strip_prefix('-') else {
+        return false;
+    };
+    number
+        .strip_prefix('.')
+        .unwrap_or(number)
+        .chars()
+        .next()
+        .is_some_and(|character| crate::pending::decimal_digit(character).is_some())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::{Value, json};
+    use serde_json::{json, Value};
+    use std::collections::BTreeSet;
+    use std::ffi::OsString;
 
     fn actual(case: &Value) -> Value {
         let text = case["text"].as_str().unwrap_or_default();
@@ -1071,6 +1328,74 @@ mod tests {
                 json!(scan_text(text, suffix, None, None, latex).expect("static patterns compile"))
             }
         }
+    }
+
+    fn actual_cli(case: &Value) -> Value {
+        let directory = tempfile::tempdir().expect("fixture directory");
+        let root = directory.path();
+        if let Some(files) = case["files"].as_object() {
+            for (name, text) in files {
+                let path = root.join(name);
+                if let Some(parent) = path.parent() {
+                    std::fs::create_dir_all(parent).expect("fixture parent");
+                }
+                std::fs::write(path, text.as_str().unwrap_or_default()).expect("fixture file");
+            }
+        }
+        if let Some(files) = case["binary_files"].as_object() {
+            for (name, contents) in files {
+                let bytes = contents
+                    .as_array()
+                    .expect("binary fixture is a byte list")
+                    .iter()
+                    .map(|byte| {
+                        u8::try_from(byte.as_u64().expect("binary fixture byte is unsigned"))
+                            .expect("binary fixture byte is in range")
+                    })
+                    .collect::<Vec<_>>();
+                let path = root.join(name);
+                if let Some(parent) = path.parent() {
+                    std::fs::create_dir_all(parent).expect("fixture parent");
+                }
+                std::fs::write(path, bytes).expect("binary fixture file");
+            }
+        }
+        let argv: Vec<OsString> = case["argv"]
+            .as_array()
+            .expect("argv list")
+            .iter()
+            .map(|argument| {
+                let argument = argument.as_str().expect("argv string");
+                if let Some(name) = argument.strip_prefix("<file>/") {
+                    root.join(name).into_os_string()
+                } else if let Some(name) = argument.strip_prefix("<missing>/") {
+                    root.join(name).into_os_string()
+                } else {
+                    OsString::from(argument)
+                }
+            })
+            .collect();
+        let result = run_cli(
+            &argv,
+            case["description"].as_str().unwrap_or(""),
+            fixture_phrases(case).as_deref(),
+            fixture_patterns(case).as_deref(),
+            case["latex"].as_bool().unwrap_or(false),
+            None,
+        );
+        let result = match result {
+            Ok(result) => result,
+            Err(StyleError::UnicodeDecode { .. }) => {
+                return json!({"error_type":"UnicodeDecodeError"});
+            }
+            Err(error) => panic!("fixture CLI input failed unexpectedly: {error}"),
+        };
+        let temporary_path = root.to_string_lossy();
+        json!({
+            "exit_code": result.exit_code,
+            "stdout": result.stdout.replace(temporary_path.as_ref(), "<tmp>"),
+            "stderr": result.stderr.replace(temporary_path.as_ref(), "<tmp>"),
+        })
     }
 
     fn fixture_phrases(case: &Value) -> Option<Vec<PhraseGroup>> {
@@ -1115,16 +1440,14 @@ mod tests {
     fn actual_overlay(case: &Value) -> Value {
         let phrases = fixture_phrases(case);
         let patterns = fixture_patterns(case);
-        json!(
-            scan_text(
-                case["text"].as_str().unwrap_or_default(),
-                case["suffix"].as_str().unwrap_or(".md"),
-                phrases.as_deref(),
-                patterns.as_deref(),
-                case["latex"].as_bool().unwrap_or(false),
-            )
-            .expect("overlay scans")
+        json!(scan_text(
+            case["text"].as_str().unwrap_or_default(),
+            case["suffix"].as_str().unwrap_or(".md"),
+            phrases.as_deref(),
+            patterns.as_deref(),
+            case["latex"].as_bool().unwrap_or(false),
         )
+        .expect("overlay scans"))
     }
 
     #[test]
@@ -1287,5 +1610,190 @@ mod tests {
     fn bad_path_is_a_typed_error() {
         let result = scan("/definitely/missing/style-lint-input.md", None, None, false);
         assert!(matches!(result, Err(StyleError::Read { .. })));
+    }
+
+    #[test]
+    fn shared_cli_matches_python_outputs_and_statuses() {
+        let cases = json!([
+            {
+                "op":"cli", "description":"Small command.",
+                "argv":["style_lint.py", "<file>/report.md"],
+                "files":{"report.md":"A robust result.\n"}
+            },
+            {
+                "op":"cli", "description":"Small command.",
+                "argv":["style_lint.py", "--wordcount", "<file>/report.md"],
+                "files":{"report.md":"Count these words and `hide these`.\n"}
+            },
+            {
+                "op":"cli", "description":"Small command.",
+                "argv":["style_lint.py", "<file>/first.md", "<file>/second.md", "--wordcount", "--wordcount"],
+                "files":{"first.md":"Count the first file.\n", "second.md":"Count the second file.\n"}
+            },
+            {
+                "op":"cli", "description":"Small command.",
+                "argv":["style_lint.py", "<file>/first.md", "--wordcount", "<file>/second.md"],
+                "files":{"first.md":"Count the first file.\n", "second.md":"Count the second file.\n"}
+            },
+            {
+                "op":"cli", "description":"Small command.",
+                "argv":["style_lint.py", "<missing>/gone.md"],
+                "files":{}
+            },
+            {
+                "op":"cli", "description":"Small command.",
+                "argv":["style_lint.py", "--wordcount", "<missing>/gone.md"],
+                "files":{}
+            },
+            {
+                "op":"cli", "description":"Small command.",
+                "argv":["style_lint.py", "--help"], "files":{}
+            },
+            {
+                "op":"cli", "description":"Small command.",
+                "argv":["style_lint.py"], "files":{}
+            },
+            {
+                "op":"cli", "description":"Small command.",
+                "argv":["style_lint.py", "--wordcount=false", "<file>/report.md"],
+                "files":{"report.md":"Count these words.\n"}
+            },
+            {
+                "op":"cli", "description":"Small command.",
+                "argv":["style_lint.py", "-1"], "files":{}
+            },
+            {
+                "op":"cli", "description":"Small command.",
+                "argv":["style_lint.py", "--wordcount", "-.5"], "files":{}
+            },
+            {
+                "op":"cli", "description":"Small command.",
+                "argv":["style_lint.py", "-1e3"], "files":{}
+            },
+            {
+                "op":"cli", "description":"Small command.",
+                "argv":["style_lint.py", "-٠١"], "files":{}
+            },
+            {
+                "op":"cli", "description":"Small command.",
+                "argv":["style_lint.py", "--wo", "<file>/report.md"],
+                "files":{"report.md":"Count these words.\n"}
+            },
+            {
+                "op":"cli", "description":"one\nline\n\nanother paragraph with more words.",
+                "argv":["skills/natural-writing/scripts/style_lint.py", "--h"]
+            },
+            {
+                "op":"cli", "description":"Small command.",
+                "argv":["style_lint.py", "-hfoo"]
+            },
+            {
+                "op":"cli", "description":"Small command.",
+                "argv":["style_lint.py", "--", "<file>/--wordcount"],
+                "files":{"--wordcount":"A robust result.\n"}
+            },
+            {
+                "op":"cli", "description":"Small command.",
+                "argv":["style_lint.py", "--unknown"]
+            },
+            {
+                "op":"cli", "description":"Small command.",
+                "argv":["style_lint.py", "--=value"]
+            },
+            {
+                "op":"cli", "description":"Small command.",
+                "argv":["style_lint.py", "--unknown", "<file>/report.md"],
+                "files":{"report.md":"Plain prose.\n"}
+            },
+            {
+                "op":"cli", "description":"Small command.",
+                "argv":["style_lint.py", "<file>/report.md", "--unknown", "<file>/second.md"],
+                "files":{"report.md":"Plain prose.\n", "second.md":"Still unrecognised.\n"}
+            },
+            {
+                "op":"cli", "description":"Small command.",
+                "argv":["style_lint.py", "<file>/résumé.md", "--wordc"],
+                "files":{"résumé.md":"Count these words.\n"}
+            },
+            {
+                "op":"cli", "description":"Small command.",
+                "argv":["style_lint.py", "<file>/report.md"],
+                "files":{"report.md":"A robust result.\n"},
+                "phrases":[{"label":"custom phrase", "phrases":["robust"]}],
+                "patterns":[]
+            },
+            {
+                "op":"cli", "description":"Small command.",
+                "argv":["style_lint.py", "<file>/broken.md"],
+                "binary_files":{"broken.md":[255]}
+            }
+        ]);
+        let expected =
+            crate::test_support::oracle_script("oracle_style_authority.py", "style_lint", &cases);
+        if let Some(expected) = expected {
+            let actual: Vec<Value> = cases
+                .as_array()
+                .expect("CLI cases")
+                .iter()
+                .map(actual_cli)
+                .collect();
+            let expected = expected.as_array().expect("oracle CLI result list");
+            let cases = cases.as_array().expect("CLI case list");
+            for (case, (actual, expected)) in cases.iter().zip(actual.iter().zip(expected.iter())) {
+                if has_help_shape(actual) || has_help_shape(expected) {
+                    assert_eq!(help_shape(actual), help_shape(expected));
+                } else {
+                    assert_eq!(actual, expected, "CLI case: {case}");
+                }
+            }
+        }
+    }
+
+    fn has_help_shape(value: &Value) -> bool {
+        value["stdout"]
+            .as_str()
+            .is_some_and(|output| output.contains("options:") && output.contains("paths"))
+    }
+
+    fn help_shape(value: &Value) -> Value {
+        let output = value["stdout"].as_str().unwrap_or_default();
+        let options = output
+            .lines()
+            .skip_while(|line| line.trim() != "options:")
+            .skip(1)
+            .take_while(|line| !line.trim().is_empty())
+            .flat_map(|line| line.split_whitespace())
+            .map(|word| word.trim_end_matches(','))
+            .filter(|word| word.starts_with('-'))
+            .collect::<BTreeSet<_>>();
+        let positionals = output.contains("positional arguments:") && output.contains("  paths");
+        json!({
+            "exit_code": value["exit_code"],
+            "positionals": if positionals { vec!["paths"] } else { Vec::new() },
+            "options": options,
+        })
+    }
+
+    #[test]
+    fn cli_extra_scan_is_an_explicit_extension_seam() {
+        let directory = tempfile::tempdir().expect("fixture directory");
+        let path = directory.path().join("report.md");
+        std::fs::write(&path, "Plain prose.\n").expect("fixture text");
+        let scanner =
+            |_path: &Path| Ok(vec![(2, 1, "domain rule".to_owned(), "special".to_owned())]);
+        let result = run_cli(
+            &[
+                OsString::from("style_lint.py"),
+                path.clone().into_os_string(),
+            ],
+            "Small command.",
+            None,
+            None,
+            false,
+            Some(&scanner),
+        )
+        .expect("fixture CLI scan succeeds");
+        assert_eq!(result.exit_code, 1);
+        assert!(result.stdout.contains("2:1: domain rule: 'special'"));
     }
 }
