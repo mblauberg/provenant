@@ -190,7 +190,11 @@ fn is_lock_name(name: &OsStr) -> bool {
     // Case-insensitive filesystems also accept case and Unicode spellings of
     // an existing leaf. Inspect just the extension so non-UTF-8 prefixes retain
     // their native bytes (e.g. Kelvin sign canonically aliases ASCII K).
-    let extension = name.as_bytes().rsplit(|byte| *byte == b'.').next().unwrap_or_default();
+    let extension = name
+        .as_bytes()
+        .rsplit(|byte| *byte == b'.')
+        .next()
+        .unwrap_or_default();
     std::str::from_utf8(extension).is_ok_and(|text| text.to_lowercase() == "lock")
 }
 fn mutable_component(name: &OsStr) -> Result<&OsStr> {

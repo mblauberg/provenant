@@ -771,8 +771,14 @@ fn stable_lock_namespace_refuses_every_mutation_without_splitting_exclusion() {
         Err(FsError::ReservedLockName { .. })
     ));
     for alias in ["writer.LOCK", "writer.locK"] {
-        assert!(matches!(dir.unlink(OsStr::new(alias)), Err(FsError::ReservedLockName { .. })));
-        assert!(matches!(dir.replace(OsStr::new("replacement"), &dir, OsStr::new(alias)), Err(FsError::ReservedLockName { .. })));
+        assert!(matches!(
+            dir.unlink(OsStr::new(alias)),
+            Err(FsError::ReservedLockName { .. })
+        ));
+        assert!(matches!(
+            dir.replace(OsStr::new("replacement"), &dir, OsStr::new(alias)),
+            Err(FsError::ReservedLockName { .. })
+        ));
     }
     assert!(inode.same_identity(&dir.metadata_at(name, false).unwrap()));
     assert!(matches!(
