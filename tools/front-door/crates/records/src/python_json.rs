@@ -952,10 +952,17 @@ mod tests {
 
     #[test]
     fn equal_numeric_map_keys_overwrite_without_moving_the_first_key() {
-        let map = KeyMap(vec![(MapKey::Integer(1), "int"), (MapKey::Text("x"), "x"), (MapKey::Bool(true), "bool"), (MapKey::Float(1.0), "float")]);
+        let map = KeyMap(vec![
+            (MapKey::Integer(1), "int"),
+            (MapKey::Text("x"), "x"),
+            (MapKey::Bool(true), "bool"),
+            (MapKey::Float(1.0), "float"),
+        ]);
         let actual = dumps(&map, DumpsOptions::default()).unwrap();
         assert_eq!(actual, r#"{"1": "float", "x": "x"}"#);
-        let Some(mut command) = crate::oracle::python() else { return; };
+        let Some(mut command) = crate::oracle::python() else {
+            return;
+        };
         let output = crate::oracle::run(command.args(["-c", "import json; d={1:'int','x':'x'}; d[True]='bool'; d[1.0]='float'; print(json.dumps(d))"])).unwrap();
         assert!(output.status.success());
         assert_eq!(String::from_utf8(output.stdout).unwrap().trim(), actual);

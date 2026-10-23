@@ -749,8 +749,14 @@ fn parse_cli_integer(name: &'static str, value: &str) -> Result<Number, ArgsErro
 
 fn negative_number_argument(value: &str) -> bool {
     // Python 3.14 argparse recognizes the prefix -\.?\d, not the whole token.
-    let Some(value) = value.strip_prefix('-') else { return false; };
-    value.strip_prefix('.').unwrap_or(value).chars().next()
+    let Some(value) = value.strip_prefix('-') else {
+        return false;
+    };
+    value
+        .strip_prefix('.')
+        .unwrap_or(value)
+        .chars()
+        .next()
         .is_some_and(|ch| python_decimal_digit(ch).is_some())
 }
 fn option_argument(value: &str) -> bool {
