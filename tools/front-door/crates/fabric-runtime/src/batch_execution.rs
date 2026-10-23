@@ -1,4 +1,5 @@
 //! Batch boundary for the cyclic execution facade. Owner implementation is a later unit.
+use crate::field::Field;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
@@ -11,14 +12,14 @@ pub struct RouteInput(pub BTreeMap<String, Value>);
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct BatchTaskInput {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub prompt: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub prompt_file: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub timeout_seconds: Option<f64>,
+    #[serde(default, skip_serializing_if = "Field::is_missing")]
+    pub id: Field<String>,
+    #[serde(default, skip_serializing_if = "Field::is_missing")]
+    pub prompt: Field<String>,
+    #[serde(default, skip_serializing_if = "Field::is_missing")]
+    pub prompt_file: Field<String>,
+    #[serde(default, skip_serializing_if = "Field::is_missing")]
+    pub timeout_seconds: Field<serde_json::Number>,
     #[serde(flatten)]
     pub route: RouteInput,
 }
@@ -26,12 +27,12 @@ pub struct BatchTaskInput {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct BatchInput {
     pub tasks: Vec<BatchTaskInput>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub concurrency: Option<f64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub wait_seconds: Option<f64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub timeout_seconds: Option<f64>,
+    #[serde(default, skip_serializing_if = "Field::is_missing")]
+    pub concurrency: Field<serde_json::Number>,
+    #[serde(default, skip_serializing_if = "Field::is_missing")]
+    pub wait_seconds: Field<serde_json::Number>,
+    #[serde(default, skip_serializing_if = "Field::is_missing")]
+    pub timeout_seconds: Field<serde_json::Number>,
     #[serde(flatten)]
     pub route: RouteInput,
 }
@@ -41,10 +42,10 @@ pub struct BatchInput {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct CancelRequest {
     pub id: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub reason: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub operation_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Field::is_missing")]
+    pub reason: Field<String>,
+    #[serde(default, skip_serializing_if = "Field::is_missing")]
+    pub operation_id: Field<String>,
 }
 
 #[cfg(test)]
@@ -63,6 +64,28 @@ mod tests {
     #[test]
     fn cancellation_does_not_invent_optional_fields() {
         let wire = json!({"id":"task-1"});
+        let input: CancelRequest = serde_json::from_value(wire.clone()).unwrap();
+        assert_eq!(serde_json::to_value(input).unwrap(), wire);
+    }
+}
+
+#[cfg(test)]
+mod presence_tests {
+    use super::*;
+    #[test]
+    fn null_fields_survive_round_trip() {
+        let wire = serde_json::json!({"tasks":[{"prompt":null,"prompt_file":null,"timeout_seconds":null}],"concurrency":null,"wait_seconds":null});
+        let input: BatchInput = serde_json::from_value(wire.clone()).unwrap();
+        assert_eq!(serde_json::to_value(input).unwrap(), wire);
+    }
+}
+
+#[cfg(test)]
+mod cancel_presence_tests {
+    use super::*;
+    #[test]
+    fn cancellation_nulls_are_preserved() {
+        let wire = serde_json::json!({"id":"task","reason":null,"operation_id":null});
         let input: CancelRequest = serde_json::from_value(wire.clone()).unwrap();
         assert_eq!(serde_json::to_value(input).unwrap(), wire);
     }

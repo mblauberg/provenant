@@ -26,3 +26,21 @@ new behaviour becomes the contract. No lane can approve its own exception.
 Existing front-door exceptions D1–D3 are already recorded in
 [ADR 0027](../../adr/0027-rust-front-door.md#intentional-divergences-from-the-python-front-door).
 They form the current baseline; they are not newly discovered port mismatches.
+
+## RP-FR1-001: generic gate-extension JSON numbers (open, library)
+
+- Unit: `runtime/fabric/src/graph/gates.ts#unit-01` (partial), rulebook v2.
+- Compared source/oracle: `e897b10d58b27a46544969594eed08a5ed64c72c`;
+  candidate: the `port/fabric-runtime-1` batch, `gates::parse_gate_exit`.
+- Reproducer: an exit record with a matching token, string `finished_at` and
+  an extension field `"n":1e400`. Node `JSON.parse` accepts the number as
+  Infinity; generic `serde_json::Value` rejects it. Large finite integers also
+  have different JavaScript rounding semantics. This is not an accepted change.
+- Expected/actual: TS returns the record; the current partial Rust decoder can
+  return no record for an out-of-range number. Normal typed gate exit codes do
+  not exercise this extension-field case.
+- Evidence: the parser probe recorded in the batch's local verification log;
+  no independent mutant judge is claimed for this remaining boundary.
+- Disposition: open and blocking completion/cut-over of the gate unit. Preserve
+  the partial designation. The integration owner must settle the response codec
+  and add the boundary judge before claiming this unit fully ported.

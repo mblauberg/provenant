@@ -2,9 +2,10 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
-use std::{fs, path::Path};
 
-pub const GATE_ENV: &[&str] = &["PATH", "HOME", "USER", "LOGNAME", "LANG", "LC_ALL", "TMPDIR", "SHELL", "TERM"];
+pub const GATE_ENV: &[&str] = &[
+    "PATH", "HOME", "USER", "LOGNAME", "LANG", "LC_ALL", "TMPDIR", "SHELL", "TERM",
+];
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GateOrder {
@@ -27,11 +28,18 @@ pub struct GateExit {
 }
 
 pub fn argv_hash(argv: &[String]) -> Result<String, serde_json::Error> {
-    Ok(format!("{:x}", Sha256::digest(serde_json::to_vec(argv)?)))
+    let digest = Sha256::digest(serde_json::to_vec(argv)?);
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut hex = String::with_capacity(64);
+    for byte in digest {
+        hex.push(char::from(HEX[usize::from(byte >> 4)]));
+        hex.push(char::from(HEX[usize::from(byte & 15)]));
+    }
+    Ok(hex)
 }
 
-pub fn read_gate_exit(path: &Path, token: &str) -> Option<GateExit> {
-    let value: GateExit = serde_json::from_slice(&fs::read(path).ok()?).ok()?;
+pub fn parse_gate_exit(bytes: &[u8], token: &str) -> Option<GateExit> {
+    let value: GateExit = serde_json::from_str(&String::from_utf8_lossy(bytes)).ok()?;
     (value.token == token).then_some(value)
 }
 
@@ -39,9 +47,16 @@ pub fn read_gate_exit(path: &Path, token: &str) -> Option<GateExit> {
 /// refusal (wrapper exit 3). Remaining order fields belong to the launch edge.
 pub fn authorised_go(input: &[u8], token: &str) -> Option<Map<String, Value>> {
     let end = input.iter().position(|b| *b == b'\n')?;
-    let Value::Object(order) = serde_json::from_str(&String::from_utf8_lossy(&input[..end])).ok()? else { return None };
+    let Value::Object(order) =
+        serde_json::from_str(&String::from_utf8_lossy(&input[..end])).ok()?
+    else {
+        return None;
+    };
     let argv = order.get("argv")?.as_array()?;
-    if order.get("token")?.as_str()? != token || argv.is_empty() || !argv.iter().all(Value::is_string) {
+    if order.get("token")?.as_str()? != token
+        || argv.is_empty()
+        || !argv.iter().all(Value::is_string)
+    {
         return None;
     }
     Some(order)
@@ -51,33 +66,65 @@ pub fn authorised_go(input: &[u8], token: &str) -> Option<Map<String, Value>> {
 mod tests {
     use super::*;
     use serde_json::json;
+    use std::path::Path;
     #[test]
     fn no_command_without_complete_matching_go() {
-        for input in [b"".as_slice(), b"{}", b"{}\n", b"null\n", b"{\"token\":\"other\",\"argv\":[\"sh\"]}\n",
-            b"{\"token\":\"t\",\"argv\":[]}\n", b"{\"token\":\"t\",\"argv\":[1]}\n"] {
+        for input in [
+            b"".as_slice(),
+            b"{}",
+            b"{}\n",
+            b"null\n",
+            b"{\"token\":\"other\",\"argv\":[\"sh\"]}\n",
+            b"{\"token\":\"t\",\"argv\":[]}\n",
+            b"{\"token\":\"t\",\"argv\":[1]}\n",
+        ] {
             assert!(authorised_go(input, "t").is_none());
         }
         assert!(authorised_go(b"{\"token\":\"t\",\"argv\":[\"sh\"]}\nignored", "t").is_some());
     }
     #[test]
-    fn receipt_reader_checks_token_and_timestamp_only() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("exit");
-        assert!(read_gate_exit(&path,"t").is_none());
-        let wire=json!({"token":"t","finished_at":"clock","exit_code":7,"signal":null,"extra":true});
-        fs::write(&path,serde_json::to_vec(&wire).unwrap()).unwrap();
-        assert_eq!(serde_json::to_value(read_gate_exit(&path,"t").unwrap()).unwrap(),wire);
-        assert!(read_gate_exit(&path,"other").is_none());
-        fs::write(&path,b"{\"token\":\"t\",\"finished_at\":1}").unwrap();
-        assert!(read_gate_exit(&path,"t").is_none());
+    fn receipt_decoder_checks_token_and_timestamp_only() {
+        assert!(parse_gate_exit(b"", "t").is_none());
+        let wire =
+            json!({"token":"t","finished_at":"clock","exit_code":7,"signal":null,"extra":true});
+        let bytes = serde_json::to_vec(&wire).unwrap();
+        assert_eq!(
+            serde_json::to_value(parse_gate_exit(&bytes, "t").unwrap()).unwrap(),
+            wire
+        );
+        assert!(parse_gate_exit(&bytes, "other").is_none());
+        assert!(parse_gate_exit(b"{\"token\":\"t\",\"finished_at\":1}", "t").is_none());
     }
     #[test]
     fn hash_matches_node_on_unicode_and_escaping_when_available() {
-        let argv=vec!["sh".into(),"café\n\"\\".into(),"🦀".into()];
-        let output=match std::process::Command::new("node").args(["-e", "process.stdout.write(require('crypto').createHash('sha256').update(JSON.stringify(JSON.parse(process.argv[1]))).digest('hex'))", &serde_json::to_string(&argv).unwrap()]).output() {
+        let argv = vec!["sh".into(), "café\n\"\\".into(), "🦀".into()];
+        let output=match std::process::Command::new("node").args(["--experimental-transform-types", "--input-type=module", "-e", "const {argvHash}=await import(new URL('file://'+process.argv[1])); process.stdout.write(argvHash(JSON.parse(process.argv[2])))", &Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../../runtime/fabric/src/graph/gates.ts").to_string_lossy(), &serde_json::to_string(&argv).unwrap()]).output() {
             Ok(output)=>output, Err(error) if error.kind()==std::io::ErrorKind::NotFound=>return, Err(error)=>panic!("{error}")
         };
-        assert!(output.status.success());
-        assert_eq!(argv_hash(&argv).unwrap(),String::from_utf8(output.stdout).unwrap());
+        if !output.status.success()
+            && String::from_utf8_lossy(&output.stderr).contains("bad option")
+        {
+            eprintln!("skipped TS differential: node lacks TypeScript transform support");
+            return;
+        }
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            argv_hash(&argv).unwrap(),
+            String::from_utf8(output.stdout).unwrap()
+        );
+    }
+}
+
+#[cfg(test)]
+mod integration_boundary_tests {
+    #[test]
+    fn out_of_range_extension_number_is_an_open_codec_boundary() {
+        // RP-FR1-001 documents why the gate unit must remain partial. This is
+        // evidence of the library boundary, not permission to change the reader.
+        assert!(serde_json::from_str::<serde_json::Value>(r#"{"n":1e400}"#).is_err());
     }
 }
