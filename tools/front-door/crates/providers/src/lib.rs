@@ -1,5 +1,7 @@
 //! Adapter profiles, argv and environment builders, output classification and continuation.
 
+#![forbid(unsafe_code)]
+
 pub mod adapters;
 
 mod pending;
@@ -19,8 +21,11 @@ pub enum DecodeError {
 /// Decode dynamic provider input without rounding Python integers to floats.
 /// Use this boundary for `Plan` and JSON routes passed to the adapter builders.
 pub fn decode_json<T: serde::de::DeserializeOwned>(input: &[u8]) -> Result<T, DecodeError> {
-    pending::check_json_integer_ranges(input)?;
-    Ok(serde_json::from_slice(input)?)
+    let value = provenant_records::checked_json::from_slice(input).map_err(|error| match error {
+        provenant_records::checked_json::DecodeError::NumberOutOfRange(_) => DecodeError::NumberOutOfRange,
+        provenant_records::checked_json::DecodeError::Json(error) => DecodeError::InvalidJson(error),
+    })?;
+    Ok(serde_json::from_value(value)?)
 }
 
 #[cfg(test)]

@@ -53,7 +53,7 @@ pub fn transport_executes(transport: &Value) -> Result<bool, AdapterError> {
     Ok(match kind.and_then(Value::as_str) {
         Some("stdio") => true,
         Some("streamable_http") => fields.iter().any(|(key, value)| {
-            !INERT.contains(&key.as_str()) && crate::pending::python_truth(value)
+            !INERT.contains(&key.as_str()) && provenant_core::py::python_truth(value)
         }),
         _ => true,
     })

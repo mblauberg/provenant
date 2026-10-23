@@ -59,15 +59,15 @@ pub fn kiro(plan: &Plan) -> AdapterProfile {
 pub fn read_only_guarantee(route: &serde_json::Value, now: jiff::Timestamp) -> &'static str {
     let valid = (|| {
         let probe = route.get("read_only_probe")?;
-        let checked_at = crate::pending::python_iso_timestamp(
+        let checked_at = provenant_core::py::python_iso_timestamp(
             &probe.get("checked_at")?.as_str()?.replace('Z', "+00:00"),
         )?;
-        let age = now.as_nanosecond() - checked_at.as_nanosecond();
+        let age = now.as_nanosecond() - i128::from(checked_at.as_microsecond()) * 1000;
         Some(
-            crate::pending::python_json_eq(
+            provenant_core::py::python_json_eq(
                 probe.get("cli_version").unwrap_or(&serde_json::Value::Null),
                 route.get("cli_version").unwrap_or(&serde_json::Value::Null),
-            ) && crate::pending::python_truth(
+            ) && provenant_core::py::python_truth(
                 route.get("cli_version").unwrap_or(&serde_json::Value::Null),
             ) && (0..86_400_000_000_000i128).contains(&age)
                 && probe.get("attempted_write")?.as_bool()?
@@ -153,9 +153,8 @@ print(json.dumps([now.isoformat(), routes, [read_only_guarantee(r) for r in rout
     }
 
     #[test]
-    fn recorded_fromisoformat_divergences_remain_visible() {
-        // RP-1302 is open: these accepted Python spellings still need an
-        // adaptation before this unit can be claimed complete or cut over.
+    fn arbitrary_iso_separator_matches_python() {
+        // The shared owner accepts any single Unicode separator, as CPython does.
         let code = r#"
 import json
 from datetime import UTC, datetime, timedelta
@@ -174,7 +173,7 @@ print(json.dumps([now.isoformat(), routes, [read_only_guarantee(r) for r in rout
         let now = now.parse().unwrap();
         assert_eq!(expected, ["enforced"]);
         for route in routes {
-            assert_eq!(read_only_guarantee(&route, now), "prompt_only", "{route}");
+            assert_eq!(read_only_guarantee(&route, now), "enforced", "{route}");
         }
     }
 

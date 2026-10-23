@@ -6,7 +6,7 @@ pub fn uses_api_key(route: &serde_json::Value, anthropic_api_key: Option<&str>) 
     anthropic_api_key.is_some_and(|key| !key.is_empty())
         || route
             .get("endpoint_base_url")
-            .is_some_and(crate::pending::python_truth)
+            .is_some_and(provenant_core::py::python_truth)
 }
 
 pub fn claude(plan: &Plan, anthropic_api_key: Option<&str>) -> AdapterProfile {
