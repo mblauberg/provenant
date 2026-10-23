@@ -10,9 +10,10 @@ import { projectRoot, runRoot, withoutGitRedirects } from "./identity.js";
 import { federatedLane } from "./hosts.js";
 import { canonicalSuccessStatus } from "./success-status.js";
 import {
-  liveness, newestMtimeMs, observedAlive, positiveInteger, readJson, readOwnerRecord,
-  reapAttemptRuns, runDirectoryNames, runOwners, shortRunId, type ProcessIdentity,
+  newestMtimeMs, positiveInteger, readJson, readOwnerRecord,
+  runDirectoryNames, shortRunId,
 } from "./run-registry.js";
+import { liveness, observedAlive, reapAttemptRuns, runOwners, type ProcessIdentity } from "./process-identity.js";
 
 const execFileAsync = promisify(execFile);
 

@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { afterEach, expect, it } from "vitest";
 
 import { runRoot, type Identity } from "../src/identity.js";
-import { reapOrphanedRuns } from "../src/run-registry.js";
+import { reapOrphanedRuns } from "../src/process-identity.js";
 import { actAsMcpServer, findSeat, recordSeatRun } from "../src/seat-index.js";
 import { laneIdentity, laneReader, readSeatRuns } from "../src/seat-lanes.js";
 import type { RunRead, RunReadResponse } from "../src/run-reader.js";
