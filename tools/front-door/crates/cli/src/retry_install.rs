@@ -133,6 +133,26 @@ impl RetryPolicy {
     }
 }
 
+/// argv remains OS text through launch, including non-UTF-8 executable paths.
+pub fn command(
+    arguments: &[std::ffi::OsString],
+) -> Result<&[std::ffi::OsString], crate::CommandOutput> {
+    let command = if arguments.first().is_some_and(|s| s == "--") {
+        &arguments[1..]
+    } else {
+        arguments
+    };
+    if command.is_empty() {
+        Err(crate::CommandOutput {
+            stderr: "usage: retry-npm-install.py -- <npm install command>\n".into(),
+            exit_code: 2,
+            ..Default::default()
+        })
+    } else {
+        Ok(command)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -235,5 +255,16 @@ print(json.dumps([bool(m.RETRYABLE.search(s)) for s in json.load(sys.stdin)]))
             policy.decide(3, 1, ""),
             Err(RetryError::InvalidAttempt(3))
         ));
+    }
+    #[test]
+    fn empty_command_usage_and_separator_follow_main() {
+        for args in [vec![], vec!["--"]] {
+            let values: Vec<_> = args.iter().map(std::ffi::OsString::from).collect();
+            let Some(expected):Option<(String,String,u8)>=crate::oracle::python("import json,sys,subprocess; args=json.load(sys.stdin); r=subprocess.run([sys.executable,'scripts/retry-npm-install.py',*args],capture_output=True,text=True,timeout=10); print(json.dumps([r.stdout,r.stderr,r.returncode]))",&serde_json::json!(args)) else {return;};
+            let error = command(&values).unwrap_err();
+            assert_eq!((error.stdout, error.stderr, error.exit_code), expected);
+        }
+        let values = ["--", "--", "npm"].map(std::ffi::OsString::from);
+        assert_eq!(command(&values).unwrap(), &values[1..]);
     }
 }
