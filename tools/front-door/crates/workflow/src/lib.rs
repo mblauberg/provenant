@@ -16,3 +16,4 @@ mod policy;
 pub use policy::PolicyError;
 pub mod git_evidence_packet;
 pub mod idle_pause;
+pub mod dispatch_preflight;

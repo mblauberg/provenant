@@ -10,6 +10,8 @@ if unit in {"git_evidence_packet", "git_evidence_header"}:
     source = root / "skills/orchestrate/scripts/git_evidence_packet.py"
 if unit == "idle_pause":
     source = root / "skills/autopilot/scripts/validate_idle_pause.py"
+if unit == "preflight_contract":
+    source = root / "skills/orchestrate/scripts/dispatch_preflight.py"
 spec = importlib.util.spec_from_file_location("oracle", source)
 module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
@@ -25,7 +27,9 @@ def type_error(error):
     return {"error_type": "TypeError", "unhashable_type": kind}
 
 for case in cases:
-    if unit == "idle_pause":
+    if unit == "preflight_contract":
+        results.append(module.parse_fast_route_json(json.dumps(case)))
+    elif unit == "idle_pause":
         import tempfile
         with tempfile.TemporaryDirectory() as directory:
             state = Path(directory) / "STATE.md"
