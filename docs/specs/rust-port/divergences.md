@@ -64,3 +64,28 @@ They form the current baseline; they are not newly discovered port mismatches.
   members, malformed syntax and trailing commas. Judge evidence is deferred.
 - Disposition: open; partial syntax port only. Value representation and edge
   error rendering remain. No changed contract is approved.
+
+## RP-1003 — product pointer JSON/path encoding (partial unit)
+
+- Unit: `scripts/lib/product_root_resolver.py#unit-01`; same rulebook and oracle
+  as RP-1001.
+- Class: `library`.
+- Reproducer: `cargo test -j 2 -p provenant-core python_extended_pointer_json_and_non_utf8_paths
+  -- --ignored` in `tools/front-door` on Unix. The fixture creates a product
+  directory with byte `0xff` in its name when the filesystem permits it; the
+  numeric fixture is independent of filename support.
+- Expected/actual: Python writes the path using surrogateescape and JSON ASCII
+  escapes, then reads it back. Rust currently returns `PointerError::Encoding`
+  for that path and cannot read lone surrogate escapes. Nonfinite/overflow
+  numbers or lone surrogates in unused JSON members likewise cause Rust to
+  reject a pointer Python accepts.
+- Evidence: the numeric differential fails; non-UTF-8 filename creation was
+  refused by the local filesystem and that subcase is unverified locally.
+  Active byte comparison covers Unicode
+  paths. Policy tests cover stale pointers, invalid versions/types, containment,
+  linked-directory refusals, linked-file replacement, private file modes and
+  concurrent publication. Judge evidence is deferred.
+- Disposition: open; pointer loading/writing for ordinary UTF-8 JSON paths is
+  ported, including atomic publication. Non-UTF-8 record encoding and the shared
+  JSON adaptation remain. The private `pending::atomic_write` belongs in
+  `provenant-supervisor` once its safe publication API exists on main.
