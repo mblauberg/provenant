@@ -35,7 +35,9 @@ How to work:
    MCP tools) and every in-repo caller (`grep` skills, hooks, scripts,
    `tools/front-door/src`, docs, tests). List what you will delete: the
    Python/TS modules, their tests, helpers left without callers, and code
-   that is dead or test-only (delete it rather than port it).
+   that is dead or test-only (delete it rather than port it). A lint,
+   validator or test that a Rust type, enum, newtype or the compiler makes
+   redundant is deleted, not ported: encode the rule in the type.
 2. Make sure a language-neutral judge covers the contract surface: J1
    golden cases (`tests/golden/`), J2 schemas (`schemas/`), J3 transcripts or
    lane conformance. Add missing cases and record them against the current

@@ -38,7 +38,16 @@ and the chair decides it.
 **Prune before porting.** A unit whose only callers are tests, retired tools,
 compatibility shims, superseded code paths or unused features is deleted, not
 ported. Tests that exercise Python seams, monkeypatches or private helpers are
-deleted with their subject. Each lane lists its deletions first.
+deleted with their subject. A lint, validator or test that a Rust type,
+enum, newtype or the compiler makes redundant (shape, field presence, type,
+exhaustiveness, null or unknown-variant checks) is deleted, not ported: make
+the invalid state unrepresentable instead. Each lane lists its deletions
+first.
+
+**Shrink the codebase.** The port should leave much less code than it found.
+Every slice PR reports its net line change across Python, TypeScript and
+Rust (code and tests). A slice that does not reduce the total explains why
+in its PR body.
 
 **Cut over in vertical slices.** A slice is a command, entry point or subsystem
 with its callers. One slice PR ports it, switches every in-repo caller to the
