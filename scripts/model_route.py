@@ -2309,7 +2309,7 @@ def parser() -> argparse.ArgumentParser:
     )
     routes = commands.add_parser(
         "routes", help="print each route pool with live availability",
-        description="Print every global route pool (junior, senior, principal, design, writing) with each model's weight, "
+        description="Print every global route pool (utility, junior, senior, principal, design, writing) with each model's weight, "
                     "effort band, caveats and live availability. By default available models print in full and the "
                     "unavailable or cooling ones collapse to a per-pool count line; `--all` lists every entry.")
     routes.add_argument("--all", action="store_true",
