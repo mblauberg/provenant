@@ -64,11 +64,12 @@ pub enum Error {
 }
 
 fn encode<T: Serialize>(record: &T) -> Result<Vec<u8>> {
-    let bytes = CanonicalV1::bytes(record)?;
+    let canonical = CanonicalV1::bytes(record)?;
+    let bytes = canonical.as_bytes();
     if bytes.len() > MAX_RECORD_BYTES {
         return Err(Error::Invalid("record size"));
     }
-    Ok(bytes)
+    Ok(bytes.to_vec())
 }
 fn decode<T: DeserializeOwned>(bytes: &[u8]) -> Result<T> {
     Ok(provenant_records::decode(

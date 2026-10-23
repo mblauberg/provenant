@@ -76,7 +76,10 @@ fn message(f: &Fixture, n: u8) -> Message {
         kind: MessageKind::Request,
         body: "Review this".into(),
         artifacts: vec![ArtifactRef {
-            path: PathWire::Utf8("result.txt".into()),
+            path: PathWire::from_relative(
+                &provenant_core::RelativePath::parse("result.txt").unwrap(),
+            )
+            .unwrap(),
             digest: None,
         }],
         reply_to: None,
@@ -787,9 +790,10 @@ fn input_bounds_and_malformed_persisted_records_fail_without_panics() {
     m = message(&f, 5);
     m.recipients.push(actor(3));
     assert!(store.send(&m, &f.request()).is_err());
-    m = message(&f, 5);
-    m.artifacts[0].path = PathWire::Utf8("../escape".into());
-    assert!(store.send(&m, &f.request()).is_err());
+    assert!(
+        decode::<ArtifactRef>(br#"{"path":{"encoding":"utf8","path":"../escape"},"digest":null}"#)
+            .is_err()
+    );
     assert!(
         store
             .read_mail(project(), actor(3), Some(-1), 100, &f.request())

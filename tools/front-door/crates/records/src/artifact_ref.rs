@@ -25,7 +25,10 @@ mod tests {
     fn stored_artifact_is_strict_and_round_trips_optional_digest() {
         for digest in [None, Some(FileDigest::from_bytes([7; 32]))] {
             let reference = ArtifactRef {
-                path: PathWire::Utf8("result.txt".into()),
+                path: PathWire::from_relative(
+                    &provenant_core::RelativePath::parse("result.txt").unwrap(),
+                )
+                .unwrap(),
                 digest,
             };
             let bytes = serde_json::to_vec(&reference).unwrap();
