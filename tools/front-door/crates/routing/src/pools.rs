@@ -502,7 +502,8 @@ mod tests {
     use std::collections::BTreeMap;
 
     use super::{
-        effort_band, entry_is_valid, merge_route, migrate_renamed, weight_value, PoolError,
+        effort_band, entry_is_valid, merge_route, migrate_renamed, reject_renamed, weight_value,
+        PoolError, RenamedNameError,
     };
 
     #[test]
@@ -553,5 +554,9 @@ mod tests {
         assert!(notes.len() >= 2);
         assert!(moved.contains(&"routes.senior".to_owned()));
         assert!(migrate_renamed(&json!({"routes":{"strong":[1],"senior":[2]}})).is_err());
+        assert!(matches!(
+            reject_renamed(&json!({"routes":{"strong":[]}}), "overlay"),
+            Err(RenamedNameError(message)) if message.contains("renamed to 'senior'")
+        ));
     }
 }
