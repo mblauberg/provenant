@@ -4,17 +4,17 @@ use serde_json::Value;
 mod datetime;
 pub mod numbers;
 pub use numbers::{
-    divmod_decimal, float_whole, python_float, shell_split, DecimalDivisionError, FloatWholeError,
-    Integer, NumberOutOfRange, ShellSplitError,
+    decimal_integer, divmod_decimal, float_whole, python_float, shell_split, DecimalDivisionError,
+    FloatWholeError, Integer, IntegerError, NumberOutOfRange, ShellSplitError,
 };
 pub mod unicode;
 pub use datetime::{
-    from_timestamp, python_fromisoformat, python_fromisoformat_with, python_iso_timestamp,
-    DateTimeError, IsoformatSemantics, PythonDateTime, PythonTimestamp,
+    from_timestamp, parse_time, python_fromisoformat, python_fromisoformat_with,
+    python_iso_timestamp, DateTimeError, IsoformatSemantics, PythonDateTime, PythonTimestamp,
 };
 pub use unicode::{
     decimal_digit, printable, python_alpha, python_digit, python_numeric, python_whitespace,
-    python_word,
+    python_word, python_word_character,
 };
 pub fn python_truth(value: &Value) -> bool {
     match value {

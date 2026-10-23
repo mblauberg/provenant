@@ -45,6 +45,32 @@ impl PythonTimestamp {
     pub fn to_jiff(self) -> Result<Timestamp, DateTimeError> {
         Timestamp::from_microsecond(self.0).map_err(|_| DateTimeError::TimeRange)
     }
+    /// UTC ISO 8601 with a Z suffix and Python's auto microsecond precision.
+    /// Civil arithmetic covers Python's entire range, including the final
+    /// twelve hours of year 9999 that Jiff Timestamp deliberately excludes.
+    pub fn iso_utc(self) -> Result<String, DateTimeError> {
+        let days = self.0.div_euclid(86_400_000_000);
+        let time = self.0.rem_euclid(86_400_000_000);
+        let date = Date::new(1970, 1, 1)
+            .map_err(|_| DateTimeError::TimeRange)?
+            .checked_add(jiff::Span::new().days(days))
+            .map_err(|_| DateTimeError::TimeRange)?;
+        let hour = time / 3_600_000_000;
+        let minute = time / 60_000_000 % 60;
+        let second = time / 1_000_000 % 60;
+        let micros = time % 1_000_000;
+        let mut text = format!(
+            "{:04}-{:02}-{:02}T{hour:02}:{minute:02}:{second:02}",
+            date.year(),
+            date.month(),
+            date.day()
+        );
+        if micros != 0 {
+            text.push_str(&format!(".{micros:06}"));
+        }
+        text.push('Z');
+        Ok(text)
+    }
 }
 fn timestamp_micros(micros: i64) -> Result<PythonTimestamp, DateTimeError> {
     if !(-62_135_596_800_000_000..253_402_300_800_000_000).contains(&micros) {
@@ -348,4 +374,59 @@ mod form_tests {
             );
         }
     }
+}
+
+#[cfg(test)]
+mod utc_tests {
+    use super::*;
+    #[test]
+    fn shared_utc_parse_and_format_match_source_telemetry() {
+        let inputs = serde_json::json!([
+            "2026-10-23",
+            "20261023T123000",
+            "2026-W43-5T12:30:00Z",
+            "2026-10-23 12:30:00.123456789-01:30",
+            "0001-01-01T00:00:00Z",
+            "9999-12-31T23:59:59.999999Z",
+            "1969-12-31T23:59:59.999999Z",
+            "2026-10-23Z12",
+            "bad"
+        ]);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("input.json");
+        std::fs::write(&path, serde_json::to_vec(&inputs).unwrap()).unwrap();
+        let Some(expected) = crate::test_support::python(
+            "scripts/telemetry.py",
+            r#"
+out=[]
+for s in json.loads(pathlib.Path(sys.argv[3]).read_text()):
+    try: out.append(m.iso(m.since_time(s)))
+    except (ValueError,OverflowError): out.append(None)
+print(json.dumps(out))
+"#,
+            &[&path],
+        ) else {
+            return;
+        };
+        let actual: Vec<_> = inputs
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| {
+                parse_time(v.as_str().unwrap())
+                    .and_then(PythonTimestamp::iso_utc)
+                    .ok()
+            })
+            .collect();
+        assert_eq!(serde_json::json!(actual), expected);
+    }
+}
+
+/// Source telemetry `since_time`: Python fromisoformat after replacing `Z`,
+/// treating a naive clock as UTC. Other policies should keep using the parser
+/// directly so their naive-clock policy stays explicit.
+pub fn parse_time(value: &str) -> Result<PythonTimestamp, DateTimeError> {
+    let mut parsed = python_fromisoformat(&value.replace('Z', "+00:00"))?;
+    parsed.offset_microseconds.get_or_insert(0);
+    parsed.timestamp()
 }

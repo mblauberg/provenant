@@ -18,6 +18,8 @@ selects these implementations yet. Rulebook: `PORTING.md` version 4.
 | `python_iso_timestamp(&str)` | Aware-only adapter returning `Option<PythonTimestamp>`. |
 | `from_timestamp(f64)` | The single float-second conversion: split integral/fractional seconds, round half-even to microseconds, then enforce Python years 1..9999. |
 
+`py::parse_time` implements telemetry's naive-as-UTC parsing policy;
+`PythonTimestamp::iso_utc` formats the shared UTC `Z` wire spelling.
 `PythonTimestamp::as_microsecond()` is exact across Python's entire datetime
 range. `to_jiff()` is a checked adapter: Jiff reserves the last twelve hours
 of year 9999, so it cannot represent every Python timestamp. ISO grammar is
@@ -90,7 +92,7 @@ with these public owners. No consumer is switched in this lane.
   terminators when requested.
 - `py::python_number_str` is public alongside the existing `python_str`,
   `python_value_repr`, `python_repr`, `python_truthy` and `python_json_eq`.
-- `py::numbers` owns `Integer`, typed range errors, `python_float`,
+- `py::numbers` owns `Integer`, `decimal_integer`/`IntegerError`, typed range errors, `python_float`,
   `float_whole`, `divmod_decimal` and `shell_split`, also re-exported by `py`.
   `Integer` retains decimal text for exact comparisons before checked machine
   integer conversion. Numeric whitespace excludes U+001C–U+001F.

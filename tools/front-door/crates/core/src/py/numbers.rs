@@ -596,3 +596,72 @@ print(json.dumps(out))
         assert_eq!(json!(actual), expected);
     }
 }
+
+/// Errors for a prevalidated Unicode decimal token (for example Python re `\d+`).
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum IntegerError {
+    #[error("Exceeds the limit (4300 digits) for integer string conversion: value has {digits} digits; use sys.set_int_max_str_digits() to increase the limit")]
+    DigitLimit { digits: usize },
+    #[error("integer outside i64/u64 range")]
+    NumberOutOfRange,
+}
+
+/// Convert a nonempty Unicode decimal token to u64. Signs, underscores and
+/// whitespace belong to `Integer::parse`, not this already-tokenized interface.
+pub fn decimal_integer(text: &str) -> Result<u64, IntegerError> {
+    let digits = text.chars().count();
+    if digits > 4300 {
+        return Err(IntegerError::DigitLimit { digits });
+    }
+    if digits == 0 || !text.chars().all(|c| super::decimal_digit(c).is_some()) {
+        return Err(IntegerError::NumberOutOfRange);
+    }
+    Integer::parse(text)
+        .ok_or(IntegerError::NumberOutOfRange)?
+        .as_u64()
+        .map_err(|_| IntegerError::NumberOutOfRange)
+}
+
+#[cfg(test)]
+mod decimal_token_tests {
+    use super::*;
+    #[test]
+    fn decimal_tokens_match_python_digit_limit_and_exact_u64_boundaries() {
+        let inputs = [
+            "0".to_string(),
+            "٠٢٤".into(),
+            "９００７１９９２５４７４０９９３".into(),
+            u64::MAX.to_string(),
+            "18446744073709551616".into(),
+            "0".repeat(4300),
+            "7".repeat(4301),
+            "0".repeat(4301),
+        ];
+        let Some(expected) = crate::test_support::python_values(
+            r#"
+out=[]
+for s in values:
+    try:
+        n=int(s)
+        out.append(['range'] if n>2**64-1 else ['ok',n])
+    except ValueError as e: out.append(['error',str(e)])
+print(json.dumps(out))
+"#,
+            &serde_json::json!(inputs),
+        ) else {
+            return;
+        };
+        let actual: Vec<_> = inputs
+            .iter()
+            .map(|s| match decimal_integer(s) {
+                Ok(n) => serde_json::json!(["ok", n]),
+                Err(IntegerError::NumberOutOfRange) => serde_json::json!(["range"]),
+                Err(e) => serde_json::json!(["error", e.to_string()]),
+            })
+            .collect();
+        assert_eq!(serde_json::json!(actual), expected);
+        for invalid in ["", "+1", "1_0", "²", "1x"] {
+            assert!(decimal_integer(invalid).is_err());
+        }
+    }
+}

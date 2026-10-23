@@ -106,3 +106,6 @@ pub fn python_whitespace(c: char) -> bool {
 pub fn python_word(c: char) -> bool {
     c == '_' || properties(c).1 & (2 | 16) != 0
 }
+
+/// Naming used by existing CLI consumers of Python re \w.
+pub use python_word as python_word_character;

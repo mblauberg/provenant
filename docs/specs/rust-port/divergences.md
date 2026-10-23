@@ -1575,3 +1575,21 @@ then passed after repair. Extended JSON/native-path reader gaps remain partial.
   extended JSON representation. Pointer loading for those values remains
   partial. `pending::path_json` and `PathEncodingError` remain records-owned;
   atomic writes are not a production pending item. Excluded from `Units:`.
+
+### Core-3 owner audit after merging main
+
+- Main `1884954ef414e60cc6b160c636fe1add9f7784dd` added CLI's decimal-token
+  integer parser during the lane. Core now owns `py::decimal_integer` and
+  `IntegerError`, retaining its Python digit-limit message and typed exact-u64
+  refusal; the Python differential covers Unicode digits and both boundaries.
+  `py::python_word_character` is an adoption alias for the same word predicate.
+- Telemetry's private parse/format wrappers now have shared owners:
+  `py::parse_time` follows source `since_time` (replace `Z`, naive clocks mean
+  UTC), while `PythonTimestamp::iso_utc` emits source ISO UTC bytes across the
+  complete Python year range. The source-module differential covers basic and
+  week forms, offset conversion, truncated fractions, both year bounds and
+  malformed input. Float-second conversion continues to use `py::from_timestamp`.
+- Checks on the merged candidate: fmt and clippy pass; the required-mode core
+  suite has 67 passing tests and four explicitly ignored pre-cut-over parity
+  gaps. Forced exit-77 fixtures prove that both oracle routes emit `skip:` and
+  pass optional mode but fail required mode. No new dependency or codec copy.
