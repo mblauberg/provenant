@@ -1083,3 +1083,66 @@ The source revision above is unchanged; CLI rendering remains an edge task.
   stays a JSON value. The raw-input public report regression failed before
   repair and now covers reordered, nested and duplicate-key objects without
   adding `preserve_order` or a dependency.
+
+## RP-CLI2-01: typed cleanup and PID integer bounds
+
+- Class: `improvement`, authorised by PORTING.md v4 R4's i64/u64 rule.
+- Units: `scripts/clean.py#interface`, `scripts/lane_safety_guard.py#unit-01`.
+  Source oracle: `7475ff01e437ec51c760b852516c21a5281cf9c6` (unchanged through
+  `cffeb4a54b6a702a008dbfee92bef5177803e8f3`). Author route:
+  `codex/gpt-6.1-sol@high`.
+- Python accepts `18446744073709551616d` and the PID string
+  `18446744073709551616`. Rust returns typed `IntegerError::NumberOutOfRange`
+  instead of storing unbounded decimal strings or rounding through f64.
+  Accepted day values now remain u64. Hour durations retain Python's float
+  multiplication after the exact integer range check.
+- Python's separate 4300-digit conversion guard is preserved, including
+  leading zeros and Unicode decimal digits, as `IntegerError::DigitLimit`.
+  `4301` decimal digits fail in both sources; this is not an improvement
+  divergence. Tests cover both typed failure classes and the accepted u64 edge.
+
+## RP-CLI2-02: batch-1 compatibility repairs
+
+- Class: `bug`; fixed in Rust. Same rulebook/oracle/route as RP-CLI2-01.
+- Wrapper assignment stripping now rejects embedded or trailing LF in the
+  value, matching Python's fullmatch `=.*`. Differential wrapper tests include
+  LF, CR and Unicode options.
+- Installation stale identity renders missing current sources as `None`;
+  `--strict` help starts with lowercase `fail on`. Eleven source scenarios
+  cover install failures, matching identity and strict provider warnings.
+- Sidecar non-string prompts use Python `None`/`True` representation for token
+  membership. Invalid-YAML diagnostics have a typed rendering branch. YAML
+  decoding itself remains unported; its diagnostic is an explicit owner input.
+- Invalid projection UTF-8 returns a typed decode error, preserving the file,
+  rather than being classified as filesystem I/O.
+- All CLI differential tests use one isolated, interpreter-selectable bounded
+  helper. Stale-checkout parity exercises the Rust Git collector on a real
+  fixture repository rather than manually constructing its expected snapshot.
+
+## RP-CLI2-03: incomplete Python path and hook codecs
+
+- Class: `library`; open and blocking completion/cut-over of the affected
+  interfaces. Same rulebook/oracle/route as RP-CLI2-01.
+- POSIX Python paths can contain surrogateescaped non-UTF-8 bytes. The current
+  cleanup record strings and install/stale output strings cannot represent
+  all of those values. `Path::display` is lossy and serde_json rejects lone
+  surrogate code points. Keep `clean.py#interface`,
+  `check-provenant-install.py#interface` and `lib/stale_checkout.py#interface`
+  partial; they are excluded from this PR's `Units:` and completion ledger.
+- Guard unit-02 also stays partial pending the raw hook JSON codec/main,
+  including lone-surrogate inputs. The complete unit-01 parser accepts Rust
+  Unicode shell text; no hook command has switched ownership.
+- Disposition: require the owning Python-compatible path/text/JSON boundary,
+  then add non-UTF-8/surrogate differentials before claiming these units.
+
+## RP-CLI2-04: retry boundary counterexamples
+
+- Class: `bug`; caught and fixed in the inert retry policy during this batch.
+- A consuming substitute for Python's zero-width `\b` matched
+  `npm error \nE503`, crossing the source's newline-bounded suffix. The policy
+  now checks token positions against an explicit line tail. Source/Rust
+  differentials include this counterexample and adjacent word characters.
+- Rust's derived Alphabetic property also includes combining characters such
+  as U+0345/U+05BF that Python `\w` excludes. Guard/retry boundaries now use
+  generated Python Unicode 16 alphanumeric ranges, with explicit cases in the
+  guard differential. No intended behaviour change remains.
