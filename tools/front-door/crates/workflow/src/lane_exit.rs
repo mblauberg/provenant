@@ -126,13 +126,19 @@ pub enum ExitError {
     InvalidCollection,
     #[error("signal negation is outside the integer range")]
     NumberOutOfRange,
+    #[error("lane exit process fields must be integers")]
+    ProcessFields,
+    #[error("unhashable type: '{0}'")]
+    UnhashableForced(&'static str),
 }
 
 impl ExitRecord {
     pub fn from_json(raw: &[u8]) -> Result<Self, provenant_records::checked_json::DecodeError> {
         Self::decode(raw)
     }
+}
 
+impl ExitRecordFields {
     pub fn receipt_fields(&self) -> Result<ReceiptFields, ExitError> {
         fn python_truth(value: &Value) -> bool {
             value.truthy()
@@ -178,6 +184,16 @@ impl ExitRecord {
             )),
             _ => process(&self.exit),
         };
+        // Python constructs the warnings iterable before looking up the forced
+        // key. A list/dict forced key raises TypeError even though the fallback
+        // argument to dict.get contains the same value.
+        let mut warnings = iterable(&self.census_warnings)?;
+        warnings.extend(iterable(&self.io_errors)?);
+        match &forced {
+            Value::Array(_) => return Err(ExitError::UnhashableForced("list")),
+            Value::Object(_) => return Err(ExitError::UnhashableForced("dict")),
+            _ => {}
+        }
         let spared = value(&self.spared);
         let spared = if !python_truth(&spared) {
             Value::Number(0.into())
@@ -191,8 +207,6 @@ impl ExitRecord {
                 _ => return Err(ExitError::InvalidCollection),
             }
         };
-        let mut warnings = iterable(&self.census_warnings)?;
-        warnings.extend(iterable(&self.io_errors)?);
         let reaped = value(&self.reaped);
         let capture = value(&self.capture);
         Ok(ReceiptFields {
@@ -229,6 +243,65 @@ impl ExitRecord {
             last_progress_at: value(&self.last_progress_at),
         })
     }
+}
+
+/// Receipt translation accepts an open source record, including unrelated
+/// supervisor extensions. Validate only the members the Python function reads.
+pub fn receipt_from_object(record: &OrderedMap<Value>) -> Result<ReceiptFields, ExitError> {
+    if record.get("schema").and_then(Value::as_str) != Some("provenant.lane.exit.v1") {
+        return Err(ExitError::Schema);
+    }
+    if record.get("forced").and_then(Value::as_str) == Some("stalled") {
+        return Err(ExitError::Silence);
+    }
+    let process = |name: &str| -> Result<Member<Option<ProcessInteger>>, ExitError> {
+        match record.get(name) {
+            None => Ok(Member::Absent),
+            Some(Value::Null) => Ok(Member::Present(None)),
+            Some(Value::Number(n)) if !n.is_f64() => {
+                if let Some(n) = n.as_i64() {
+                    Ok(Member::Present(Some(ProcessInteger::Signed(n))))
+                } else if let Some(n) = n.as_u64() {
+                    Ok(Member::Present(Some(ProcessInteger::Unsigned(n))))
+                } else {
+                    Err(ExitError::NumberOutOfRange)
+                }
+            }
+            _ => Err(ExitError::ProcessFields),
+        }
+    };
+    let member = |key: &str| {
+        record
+            .get(key)
+            .cloned()
+            .map_or(Member::Absent, Member::Present)
+    };
+    let fields = ExitRecordFields {
+        schema: "provenant.lane.exit.v1".into(),
+        pid: process("pid")?,
+        pgid: process("pgid")?,
+        exit: process("exit")?,
+        signal: process("signal")?,
+        forced: member("forced"),
+        terminal_event_seen: member("terminal_event_seen"),
+        reaped: member("reaped"),
+        spared: member("spared"),
+        capture: member("capture"),
+        census_warnings: member("census_warnings"),
+        io_errors: member("io_errors"),
+        started_at: member("started_at"),
+        ended_at: member("ended_at"),
+        last_progress_at: member("last_progress_at"),
+        observer_lost: Member::Absent,
+        observer_dropped: Member::Absent,
+        reaped_truncated: Member::Absent,
+        spared_truncated: Member::Absent,
+        census_warnings_truncated: Member::Absent,
+        io_errors_truncated: Member::Absent,
+        extra: OrderedMap::default(),
+    };
+    // Receipt translation needs no retained-record template.
+    fields.receipt_fields()
 }
 
 #[cfg(test)]
@@ -327,3 +400,4 @@ mod tests {
         }
     }
 }
+
