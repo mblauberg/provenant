@@ -4,9 +4,10 @@
 pub mod codex;
 pub mod command;
 
-pub mod workflows;
+pub mod front_door;
 pub mod instance;
 mod pending;
+pub mod workflows;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -25,11 +26,16 @@ pub enum Error {
 pub type Result<T> = std::result::Result<T, Error>;
 
 fn invalid(message: impl Into<String>) -> Error {
-    Error::Invalid { message: message.into() }
+    Error::Invalid {
+        message: message.into(),
+    }
 }
 
 fn io(path: &std::path::Path, source: std::io::Error) -> Error {
-    Error::Io { path: path.into(), source }
+    Error::Io {
+        path: path.into(),
+        source,
+    }
 }
 
 #[cfg(test)]

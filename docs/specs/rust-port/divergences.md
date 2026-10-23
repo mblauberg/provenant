@@ -26,3 +26,23 @@ new behaviour becomes the contract. No lane can approve its own exception.
 Existing front-door exceptions D1–D3 are already recorded in
 [ADR 0027](../../adr/0027-rust-front-door.md#intentional-divergences-from-the-python-front-door).
 They form the current baseline; they are not newly discovered port mismatches.
+
+## RP-config-1 — workspace source identity
+
+- Unit: `scripts/lib/front_door_build.py#unit-01`; rulebook version 2.
+- Class: `improvement`; required by R2 and ADR 0028's accepted workspace
+  digest expansion. The new library is inert; the active builder/checker are
+  unchanged and must switch together in the integration pass.
+- Compared revisions: Python oracle `5c48d4e5`; Rust branch `port/config-1`;
+  judge is `front_door::tests::digest_covers_workspace_libraries_and_build_inputs`.
+- Reproducer: edit a member's `src/lib.rs`, `Cargo.toml`, or `build.rs`, or
+  root `build.rs` / `.cargo/config.toml`, then recompute the source identity.
+- Expected / actual: Python's root-only digest stays unchanged; Rust's digest
+  changes. Existing framing and root-only fixtures match Python exactly.
+- Evidence: the targeted digest test changes and restores each named input;
+  `python_digest_differential_without_workspace_members` compares old/new.
+- Disposition: required design change, prepared only. Activation awaits the
+  workspace builder/checker integration and its stale-library gate.
+- Follow-up: carry the identical input set to the active builder and checker
+  before linking a library into the installed front door. Build, smoke and
+  select execution remain partial until supervisor's safe runner exists.
