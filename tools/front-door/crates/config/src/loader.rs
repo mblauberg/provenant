@@ -33,6 +33,14 @@ pub fn load_with_domains<R: Read, T: DeserializeOwned + Serialize>(
     sections: &DomainSections<T>,
 ) -> Result<ResolvedConfig<T>, ConfigError> {
     let path = roots.state.as_path().join("config.toml");
+    let user_origin = Origin::User {
+        path: provenant_records::PathWire::from_path(&path).map_err(|source| {
+            ConfigError::PathEncoding {
+                path: path.clone(),
+                source,
+            }
+        })?,
+    };
     let mut origins = BTreeMap::new();
     let mut user_domains = Table::new();
     let header = match reader {
@@ -50,7 +58,7 @@ pub fn load_with_domains<R: Read, T: DeserializeOwned + Serialize>(
             if header.schema_version != 1 {
                 return Err(ConfigError::UnsupportedVersion { path });
             }
-            origins.insert("schema_version".into(), Origin::User { path: path.clone() });
+            origins.insert("schema_version".into(), user_origin.clone());
             header
         }
         None => Header {
@@ -66,7 +74,7 @@ pub fn load_with_domains<R: Read, T: DeserializeOwned + Serialize>(
     origins.insert(
         "profile".into(),
         if header.profile.is_some() {
-            Origin::User { path: path.clone() }
+            user_origin.clone()
         } else {
             compiled.clone()
         },
@@ -80,12 +88,7 @@ pub fn load_with_domains<R: Read, T: DeserializeOwned + Serialize>(
     normalise_tables(defaults.as_table_mut());
     normalise_tables(&mut user_domains);
     record_origins(defaults.as_table(), "domains", &compiled, &mut origins);
-    record_origins(
-        &user_domains,
-        "domains",
-        &Origin::User { path: path.clone() },
-        &mut origins,
-    );
+    record_origins(&user_domains, "domains", &user_origin.clone(), &mut origins);
     merge(defaults.as_table_mut(), user_domains);
     // Decode the complete result once: unknown sections/fields cannot hide in
     // overrides, and a partial override still receives selected preset defaults.

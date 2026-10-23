@@ -1,10 +1,11 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use provenant_core::{RelativePath, RelativePathError};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-/// Portable tagged representation for a contained path in a durable record.
+/// Portable tagged representation for a native path in a durable record.
+/// Containment is checked separately by `RelativePath` or the root owner.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(
     tag = "encoding",
@@ -31,7 +32,14 @@ pub enum PathWireError {
 
 impl PathWire {
     pub fn from_relative(path: &RelativePath) -> Result<Self, PathWireError> {
-        let native = path.as_path();
+        Self::from_path(path.as_path())
+    }
+
+    /// Encode a native absolute or relative path without lossy conversion.
+    pub fn from_path(native: &Path) -> Result<Self, PathWireError> {
+        if native.as_os_str().as_encoded_bytes().contains(&0) {
+            return Err(PathWireError::InvalidNativePath);
+        }
         if let Some(text) = native.to_str() {
             Ok(Self::Utf8(text.to_owned()))
         } else {
@@ -48,11 +56,19 @@ impl PathWire {
     }
 
     pub fn to_relative_path(&self) -> Result<RelativePath, PathWireError> {
+        RelativePath::parse(self.to_path_buf()?).map_err(PathWireError::Relative)
+    }
+
+    /// Decode native bytes only; this does not grant filesystem authority.
+    pub fn to_path_buf(&self) -> Result<PathBuf, PathWireError> {
         let path = match self {
             Self::Utf8(text) => PathBuf::from(text),
             Self::NativeBytes(encoded) => decode_native_bytes(encoded)?,
         };
-        RelativePath::parse(path).map_err(PathWireError::Relative)
+        if path.as_os_str().as_encoded_bytes().contains(&0) {
+            return Err(PathWireError::InvalidNativePath);
+        }
+        Ok(path)
     }
 
     pub fn as_path_text(&self) -> Option<&str> {

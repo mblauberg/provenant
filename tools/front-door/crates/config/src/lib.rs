@@ -22,6 +22,12 @@ use thiserror::Error;
 /// Errors never contain TOML text, rejected values or a parser's input excerpt.
 #[derive(Debug, Error)]
 pub enum ConfigError {
+    #[error("cannot encode config path at {path}")]
+    PathEncoding {
+        path: PathBuf,
+        #[source]
+        source: provenant_records::PathWireError,
+    },
     #[error("cannot read config at {path}")]
     Read {
         path: PathBuf,
@@ -54,7 +60,7 @@ pub enum ConfigError {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Origin {
     Compiled { profile: Profile },
-    User { path: PathBuf },
+    User { path: provenant_records::PathWire },
 }
 
 /// The startup snapshot contains typed, validated values, never an untyped bag.

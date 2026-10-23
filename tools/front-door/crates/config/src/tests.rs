@@ -78,7 +78,10 @@ fn partial_inline_domain_override_keeps_selected_preset_defaults_and_leaf_origin
     assert_eq!(
         config.origins.get("domains.sample.enabled"),
         Some(&Origin::User {
-            path: roots().state.as_path().join("config.toml")
+            path: provenant_records::PathWire::from_path(
+                &roots().state.as_path().join("config.toml")
+            )
+            .unwrap()
         })
     );
 }
@@ -334,4 +337,32 @@ fn config_filesystem_boundary_refuses_links_non_files_and_unreadable_roots() {
         read(&fixture.roots, &fs),
         Err(ConfigError::Read { .. })
     ));
+}
+
+#[test]
+fn show_serialises_origins_for_non_utf8_state_paths() {
+    use std::os::unix::ffi::OsStringExt;
+    let fixture = Files::new();
+    let mut inputs = RootInputs::new(
+        fixture.roots.state.as_path().with_file_name("home"),
+        fixture.roots.state.as_path().with_file_name("checkout"),
+    );
+    inputs.state_dir = Some(
+        fixture
+            .roots
+            .state
+            .as_path()
+            .with_file_name(std::ffi::OsString::from_vec(b"state-\xff".to_vec())),
+    );
+    let roots = inputs.resolve(&Resolver).unwrap();
+    // APFS rejects creation of non-UTF-8 names. Inject a reader to prove the
+    // native-path wire contract on both supported operating systems.
+    let snapshot = load(&roots, Some(&b"schema_version=1\nprofile='economy'\n"[..])).unwrap();
+    let output = serde_json::to_value(&snapshot).unwrap();
+    let path_wire: provenant_records::PathWire =
+        serde_json::from_value(output.pointer("/origins/profile/path").unwrap().clone()).unwrap();
+    assert_eq!(
+        path_wire.to_path_buf().unwrap(),
+        roots.state.as_path().join("config.toml")
+    );
 }
