@@ -72,3 +72,24 @@ They form the current baseline; they are not newly discovered port mismatches.
 - Follow-up: records owner supplies a lossless wire codec under the allowlist,
   and J2 supplies the currently absent installation schemas. The chair owns
   that boundary decision; no command cut-over is included here.
+
+## RP-config-3 — Codex TOML parser diagnostic wording
+
+- Unit: `scripts/configure-codex-skill-overrides.py#unit-01`; rulebook version 3.
+- Class: `library`; Python uses `tomllib`, Rust uses `toml_edit`.
+- Compared revisions: Python oracle `5c48d4e5`; Rust branch `port/config-1`
+  repair of PR #1290. Regression:
+  `codex::tests::invalid_toml_keeps_python_prefix_and_typed_source`.
+- Reproducer: call Python `state("[skills")` and Rust `codex::state("[skills")`.
+- Expected / actual: both reject malformed TOML and carry the stable
+  `Codex config is invalid TOML: ` prefix. Parser explanation, source excerpt
+  and location formatting after that prefix may differ. Rust preserves the
+  typed `toml_edit::TomlError` as its error source.
+- Evidence: the regression asserts the prefix and typed variant; the compared
+  parser diagnostics are reproducible with the fixture above. This is library
+  evidence, not an old/new CLI judge run.
+- Disposition: open wording mismatch, recorded for CLI integration; no approved
+  boundary exception or cut-over is claimed. The unit remains partial.
+- Follow-up: reconcile or obtain approval for parser wording at the CLI edge;
+  implement Python's exit-3 `conflicting:` stderr wrapper there and run the
+  cut-over judge. The wrapper is not part of this inert library repair.

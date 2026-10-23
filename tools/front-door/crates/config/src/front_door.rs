@@ -292,7 +292,7 @@ mod tests {
             true,
         )
         .unwrap();
-        assert_eq!(plan.cwd, dir.path());
+        assert_eq!(plan.cwd, dir.path().canonicalize().unwrap());
         assert_eq!(plan.environment["CARGO_TARGET_DIR"], target.as_os_str());
         assert_eq!(plan.environment["MACOSX_DEPLOYMENT_TARGET"], "15.0");
         assert_eq!(

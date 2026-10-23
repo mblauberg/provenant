@@ -43,6 +43,18 @@ pub enum Error {
     },
     #[error("Codex config is invalid TOML: {0}")]
     Toml(#[from] toml_edit::TomlError),
+    #[error("Codex config symlink cannot be resolved: {path}: {source}")]
+    CodexSymlink {
+        path: std::path::PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("Codex config is not valid UTF-8: {source}")]
+    CodexEncoding {
+        path: std::path::PathBuf,
+        #[source]
+        source: std::string::FromUtf8Error,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

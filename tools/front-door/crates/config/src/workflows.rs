@@ -423,7 +423,7 @@ mod tests {
         assert_eq!(install(&next, &target, NOW).unwrap().linked, 2);
         assert_eq!(
             fs::read_link(target.join("one.js")).unwrap(),
-            next.join("one.js")
+            next.canonicalize().unwrap().join("one.js")
         );
     }
     #[test]

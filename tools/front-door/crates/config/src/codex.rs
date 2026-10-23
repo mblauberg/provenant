@@ -83,7 +83,10 @@ pub fn state(text: &str) -> Result<State> {
 
 pub fn canonical_path(path: &Path) -> Result<PathBuf> {
     if path.is_symlink() {
-        let target = fs::canonicalize(path).map_err(|e| io(path, e))?;
+        let target = fs::canonicalize(path).map_err(|source| crate::Error::CodexSymlink {
+            path: path.into(),
+            source,
+        })?;
         if !target.is_file() {
             return Err(invalid("Codex config symlink must target a regular file"));
         }
@@ -103,8 +106,12 @@ pub struct Proposal {
 pub fn proposed_update(path: &Path) -> Result<Proposal> {
     let target = canonical_path(path)?;
     let mut text = if target.exists() {
-        fs::read_to_string(&target)
-            .map_err(|e| io(&target, e))?
+        let bytes = fs::read(&target).map_err(|e| io(&target, e))?;
+        String::from_utf8(bytes)
+            .map_err(|source| crate::Error::CodexEncoding {
+                path: target.clone(),
+                source,
+            })?
             .replace("\r\n", "\n")
             .replace('\r', "\n")
     } else {
@@ -154,6 +161,27 @@ mod tests {
     use super::*;
     use std::os::unix::fs::symlink;
     #[test]
+    fn invalid_toml_keeps_python_prefix_and_typed_source() {
+        let error = state("[skills").unwrap_err();
+        assert!(error
+            .to_string()
+            .starts_with("Codex config is invalid TOML: "));
+        assert!(matches!(error, crate::Error::Toml(_)));
+    }
+    #[test]
+    fn proposed_update_rejects_non_utf8_without_modifying_input() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let bytes = b"# invalid byte: \xff\n";
+        fs::write(&path, bytes).unwrap();
+
+        let error = proposed_update(&path).unwrap_err();
+        let source = std::error::Error::source(&error).unwrap();
+        assert!(source.is::<std::string::FromUtf8Error>());
+        assert!(matches!(error, crate::Error::CodexEncoding { path: p, .. } if p == path));
+        assert_eq!(fs::read(&path).unwrap(), bytes);
+    }
+    #[test]
     fn conflicts_are_read_only() {
         for original in [
             "[[skills.config]]\nname='skill-creator'\nenabled=true\n",
@@ -188,7 +216,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let link = dir.path().join("config");
         symlink(dir.path().join("absent"), &link).unwrap();
-        assert!(configure(&link).is_err());
+        let error = configure(&link).unwrap_err();
+        assert!(error
+            .to_string()
+            .starts_with("Codex config symlink cannot be resolved: "));
+        assert!(error.to_string().contains(link.to_str().unwrap()));
+        assert!(matches!(error, crate::Error::CodexSymlink { .. }));
         fs::remove_file(&link).unwrap();
         symlink(dir.path(), &link).unwrap();
         assert!(configure(&link).is_err());
