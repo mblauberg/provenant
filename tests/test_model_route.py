@@ -100,9 +100,7 @@ def test_claude_sonnet_is_the_senior_default_and_opus_remains_principal():
 
 
 def test_fallback_inherits_adapter_training_flag_without_false_default():
-    spec = importlib.util.spec_from_file_location("route_under_test", ROOT / "scripts/model_route.py")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    module = load_script(ROOT / "scripts/model_route.py", "route_under_test")
     catalog = {"adapters": {"fixture": {"trains_on_prompts": True,
                 "aliases": {"senior": ["primary", "candidate"]},
                 "models": [{"id": "primary", "plan_cap_usd": 1},
@@ -2417,11 +2415,8 @@ def test_malformed_override_in_one_family_does_not_reject_another_family(
     router = load_router()
     catalog = product_catalog()
     catalog["families"]["anthropic"]["risk_tier_overrides"]["crucial"]["models"] = "fable"
-    catalog_path = tmp_path / "model-routing.json"
-    catalog_path.write_text(json.dumps(catalog))
     snapshot = write_codex_capability_snapshot(tmp_path)
-    monkeypatch.setattr(router, "CATALOG_PATH", catalog_path)
-    monkeypatch.setattr(router, "PRODUCT_CATALOG_PATH", catalog_path)
+    catalog_path = use_catalog(router, monkeypatch, tmp_path, catalog)
 
     result = router.main([
         "resolve", "--adapter", "codex", "--alias", "senior",
@@ -3304,14 +3299,11 @@ def test_role_default_cannot_lower_task_class_effort(tmp_path, monkeypatch, caps
     router = load_router()
     catalog = product_catalog()
     catalog["families"]["openai"]["role_effort_defaults"]["orchestrator"]["principal"] = "low"
-    catalog_path = tmp_path / "model-routing.json"
-    catalog_path.write_text(json.dumps(catalog))
     snapshot = tmp_path / "caps.json"
     snapshot.write_text(json.dumps(capability_snapshot({
         "gpt-6-astra": {"resolved_model": "gpt-6-astra", "supported_efforts": ["high"]},
     })))
-    monkeypatch.setattr(router, "CATALOG_PATH", catalog_path)
-    monkeypatch.setattr(router, "PRODUCT_CATALOG_PATH", catalog_path)
+    catalog_path = use_catalog(router, monkeypatch, tmp_path, catalog)
 
     result = router.main([
         "resolve", "--adapter", "codex", "--task-class", "orchestration",
@@ -3498,11 +3490,8 @@ def test_ultra_eligible_roles_must_be_a_list_of_role_names(
     router = load_router()
     catalog = product_catalog()
     catalog["families"]["openai"]["ultra_eligible_roles"] = "lead"
-    catalog_path = tmp_path / "model-routing.json"
-    catalog_path.write_text(json.dumps(catalog))
     snapshot = write_codex_capability_snapshot(tmp_path)
-    monkeypatch.setattr(router, "CATALOG_PATH", catalog_path)
-    monkeypatch.setattr(router, "PRODUCT_CATALOG_PATH", catalog_path)
+    catalog_path = use_catalog(router, monkeypatch, tmp_path, catalog)
 
     result = router.main([
         "resolve", "--adapter", "codex", "--alias", "principal", "--role", "lead",
