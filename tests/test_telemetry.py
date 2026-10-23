@@ -1282,6 +1282,42 @@ def test_outcomes_group_route_quality_with_retries_errors_latency_and_throughput
     assert 'codex/gpt-6.1-sol@high' in table and '100%' in table
 
 
+def test_ingest_records_classifier_stage_confidence_and_shadow_answers(tmp_path):
+    receipt(tmp_path, 'classified', status='ok', task_class='review', classified_by='rules',
+            classifier_confidence=0.9, shadow_answers={'model': {'class': 'review', 'confidence': 0.7}},
+            requested_route={'alias': 'principal', 'task_class': 'review'})
+    assert cli(tmp_path, 'telemetry', 'ingest').returncode == 0
+    with sqlite3.connect(tmp_path / 'state/telemetry.sqlite3') as db:
+        row = db.execute('SELECT classified_by,classifier_confidence,shadow_answers FROM usage').fetchone()
+    assert row == ('rules', 0.9, '{"model": {"class": "review", "confidence": 0.7}}')
+
+
+def test_classifier_metadata_backfills_v4_receipts_once(tmp_path):
+    kept = receipt(tmp_path, 'kept', status='ok', classified_by='rules', classifier_confidence=0.9,
+                   shadow_answers={'model': None})
+    pruned = receipt(tmp_path, 'pruned', status='ok')
+    assert cli(tmp_path, 'telemetry', 'ingest').returncode == 0
+    pruned.unlink()
+    ledger = tmp_path / 'state/telemetry.sqlite3'
+    with sqlite3.connect(ledger) as db:
+        for column in ('classified_by', 'classifier_confidence', 'shadow_answers'):
+            db.execute(f'ALTER TABLE usage DROP COLUMN {column}')
+        db.execute("DELETE FROM meta WHERE key='classifier_metadata_backfill'")
+        db.execute('PRAGMA user_version = 4')
+    assert cli(tmp_path, 'telemetry', 'ingest').returncode == 0
+    with sqlite3.connect(ledger) as db:
+        assert db.execute('SELECT run_id, classified_by, classifier_confidence, shadow_answers '
+                          'FROM usage ORDER BY run_id').fetchall() == [
+            ('kept', 'rules', 0.9, '{"model": null}'), ('pruned', None, None, None)]
+        assert db.execute('PRAGMA user_version').fetchone() == (4,)
+        cursor = db.execute("SELECT * FROM cursors WHERE path=?", (str(kept),)).fetchone()
+        db.execute("UPDATE usage SET classified_by='sentinel' WHERE run_id='kept'")
+    assert cli(tmp_path, 'telemetry', 'ingest').returncode == 0
+    with sqlite3.connect(ledger) as db:
+        assert db.execute("SELECT classified_by FROM usage WHERE run_id='kept'").fetchone() == ('sentinel',)
+        assert db.execute("SELECT * FROM cursors WHERE path=?", (str(kept),)).fetchone() == cursor
+
+
 def test_outcomes_report_api_cost_per_success_and_unknown_costs(tmp_path):
     def usage(input_tokens=1_000_000, output_tokens=1_000_000):
         return {'input_tokens': input_tokens, 'cache_read_tokens': 0, 'cache_write_tokens': 0,

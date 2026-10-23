@@ -34,8 +34,15 @@ def parser(model_route: Any) -> argparse.ArgumentParser:
     command.add_argument("--adapter")
     command.add_argument("--alias")
     command.add_argument("--task-class")
+    command.add_argument("--classify", help="comma-separated classifier stages for this call")
+    command.add_argument("--brief", default="", help=argparse.SUPPRESS)
+    command.add_argument("--mode", default="", help=argparse.SUPPRESS)
+    command.add_argument("--path", action="append", default=[], help=argparse.SUPPRESS)
+    command.add_argument("--size-files", type=int, help=argparse.SUPPRESS)
+    command.add_argument("--size-lines", type=int, help=argparse.SUPPRESS)
+    command.add_argument("--principal-reason", default="", help="record why this route escalates to principal")
     command.add_argument("--model-override-tier", choices=("routine", "substantial", "crucial", "terminal"))
-    command.add_argument("--role", required=True)
+    command.add_argument("--role", default="")
     command.add_argument("--effort")
     command.add_argument("--model")
     command.add_argument("--fallback", choices=("true", "false", "any"))
@@ -134,7 +141,13 @@ def _main(argv: list[str] | None, model_route: Any) -> int:
     if str(getattr(args, "effort", "") or "").casefold() == "max" and args.command in {"resolve", "select"}:
         return model_route.emit(model_route._max_retired(), 2)
     if args.command == "select":
-        return model_route._preferences.select(args, model_route.TASK_CLASS_POLICY, model_route.ALIAS_ORDER, model_route.EFFORT_ORDER)
+        catalog = model_route.load_catalog(Path(args.catalog) if args.catalog else None)
+        task_class_policy = {name: {"minimum_alias": route.get("alias"),
+                                    "minimum_effort": route.get("minimum_effort", route.get("effort")),
+                                    "role": args.role or "worker"}
+                             for name, route in catalog.get("task_class_routes", {}).items()
+                             if isinstance(route, dict)}
+        return model_route._preferences.select(args, task_class_policy, model_route.ALIAS_ORDER, model_route.EFFORT_ORDER)
     if args.command == "snapshot":
         record = model_route.catalogue_snapshot()
         record.pop("catalogue", None)
@@ -193,6 +206,35 @@ def _main(argv: list[str] | None, model_route: Any) -> int:
         "fix: run scripts/install-harness --platform all --refresh-routing"
     ] if args.command == "resolve" and snapshot.get("stale_routing") else [])
     if args.command == "resolve":
+        model_route.ROUTE_CLASSIFICATION = {}
+        if not args.role:
+            args.role = "worker"
+            model_route.ROUTE_WARNINGS.append("missing role; using worker label")
+        prompt = args.brief or os.environ.get("PROVENANT_TASK_BRIEF", "")
+        classify_context = bool(args.classify or prompt or os.environ.get("PROVENANT_TASK_CLASSIFY")
+                                or args.mode or args.path or args.size_files is not None or args.size_lines is not None
+                                or os.environ.get("PROVENANT_TASK_MODE") or os.environ.get("PROVENANT_TASK_SIZE_FILES")
+                                or os.environ.get("PROVENANT_TASK_SIZE_LINES") or os.environ.get("PROVENANT_TASK_PATHS"))
+        if args.task_class or classify_context:
+            classification = model_route.task_classifier.classify(
+                catalog,
+                {"prompt": prompt, "mode": args.mode or os.environ.get("PROVENANT_TASK_MODE", ""),
+                 "role": args.role, "paths": args.path,
+                 "size": {"files": args.size_files, "lines": args.size_lines}},
+                explicit=args.task_class, override=args.classify,
+            )
+            if not args.alias and not args.model and not args.model_override_tier:
+                args.task_class = classification["class"]
+            model_route.ROUTE_CLASSIFICATION = {
+                "task_class": classification["class"],
+                "classified_by": classification["classified_by"],
+                "classifier_confidence": classification["confidence"],
+                "shadow_answers": classification["shadow_answers"],
+                "size_tier": classification.get("size_tier"),
+            }
+        if args.principal_reason:
+            model_route.ROUTE_CLASSIFICATION["principal_reason"] = args.principal_reason
+            print(f"model-route: principal escalation: {args.principal_reason}", file=sys.stderr)
         # cf_dispatch defaults an alias beside a named model; that is not the caller's.
         args.alias_supplied = bool(args.alias) and os.environ.get("FABRIC_ALIAS_IMPLIED") != "1"
         if args.endpoint and args.model and not args.alias:
@@ -324,44 +366,43 @@ def _main(argv: list[str] | None, model_route: Any) -> int:
         if bool(args.alias) == bool(args.task_class):
             return reject("route_input_conflict" if args.alias else "route_input_missing")
         if args.task_class:
-            policy = model_route.TASK_CLASS_POLICY.get(args.task_class)
             route = catalog.get("task_class_routes", {}).get(args.task_class)
-            if policy is None or route is None:
+            if route is None:
                 return reject("unknown_task_class")
             if not isinstance(route, dict):
                 return reject("task_class_config_invalid")
             route_alias = route.get("alias")
-            route_effort = route.get("effort")
-            route_role = route.get("role")
+            configured_effort = route.get("effort")
+            minimum_effort = route.get("minimum_effort", configured_effort)
+            route_effort = configured_effort
+            size_tier = next((band for band in catalog.get("task_classification", {}).get("size_tiers", [])
+                              if band.get("name") == model_route.ROUTE_CLASSIFICATION.get("size_tier")), None)
+            size_escalated = False
+            if size_tier and size_tier.get("alias") in model_route.ALIAS_ORDER and route_alias in model_route.ALIAS_ORDER:
+                if model_route.ALIAS_ORDER[size_tier["alias"]] > model_route.ALIAS_ORDER[route_alias]:
+                    route_alias = size_tier["alias"]
+                    size_escalated = True
+                tier_effort = size_tier.get("effort")
+                if tier_effort in model_route.EFFORT_ORDER and route_effort in model_route.EFFORT_ORDER:
+                    if model_route.EFFORT_ORDER[tier_effort] > model_route.EFFORT_ORDER[route_effort]:
+                        route_effort = tier_effort
+                        size_escalated = True
             if (
                 route_alias not in model_route.ALIAS_ORDER
                 or route_effort not in model_route.EFFORT_ORDER
-                or model_route.ALIAS_ORDER[route_alias] < model_route.ALIAS_ORDER[policy["minimum_alias"]]
-                or route_role != policy["role"]
+                or minimum_effort not in model_route.EFFORT_ORDER
             ):
                 return reject(
                     "task_class_config_invalid",
                     alias=route_alias if isinstance(route_alias, str) else "",
                     effort=route_effort if isinstance(route_effort, str) else "",
                 )
-            if model_route.EFFORT_ORDER[route_effort] < model_route.EFFORT_ORDER[policy["minimum_effort"]]:
-                return reject(
-                    "task_class_config_invalid",
-                    alias=route_alias,
-                    effort=route_effort,
-                    message=(
-                        "configuration error: "
-                        f"task_class_routes.{args.task_class}.effort {route_effort!r} "
-                        "must meet probe policy minimum_effort "
-                        f"{policy['minimum_effort']!r}"
-                    ),
-                )
+            if model_route.EFFORT_ORDER[route_effort] < model_route.EFFORT_ORDER[minimum_effort]:
+                return reject("task_class_config_invalid", alias=route_alias, effort=route_effort)
             if args.effort:
                 return reject("task_class_effort_conflict", alias=route_alias, effort=route_effort)
             if args.model:
                 return reject("task_class_model_conflict", alias=route_alias, effort=route_effort)
-            if args.role != route_role:
-                return reject("task_class_role_mismatch", alias=route_alias, effort=route_effort)
             model_routes = route.get("models")
             if not isinstance(args.adapter, str) or args.adapter not in catalog.get("adapters", {}):
                 return reject("unknown_adapter")
@@ -375,7 +416,7 @@ def _main(argv: list[str] | None, model_route: Any) -> int:
                 entry, _ = model_route.model_route_live._registered_match(args.adapter, configured_model, catalog)
                 if (entry is None or configured_model != entry["id"]
                         or entry.get("effort_transport") == "none"
-                        or route_effort not in entry.get("efforts", [])):
+                        or configured_effort not in entry.get("efforts", [])):
                     return reject("task_class_config_invalid", alias=route_alias, effort=route_effort)
                 resolved_models.append(entry["id"])
                 resolved_entries.append(entry)
@@ -386,10 +427,11 @@ def _main(argv: list[str] | None, model_route: Any) -> int:
                 if failed_in_roster:
                     alternate = next((model for model in resolved_models if model not in failed_models), None)
                     resolved_models = [alternate] if alternate else []
-            args.task_class_models = resolved_models
+            args.task_class_models = None if size_escalated else resolved_models
             args.alias = route_alias
-            args.task_class_effort, args.task_class_effort_shift = model_route.shifted_task_class_effort(
-                args.task_class, route_effort, policy["minimum_effort"], resolved_entries)
+            args.task_class_effort, args.task_class_effort_shift = (
+                route_effort, 0) if size_escalated else model_route.shifted_task_class_effort(
+                    args.task_class, configured_effort, minimum_effort, resolved_entries)
             # A runtime fallback may not go below the lower of the configured and shifted effort.
             args.task_class_effort_floor = min(route_effort, args.task_class_effort, key=model_route.EFFORT_ORDER.__getitem__)
         elif args.alias not in {"principal", "senior", "junior"}:
@@ -426,3 +468,4 @@ def _main(argv: list[str] | None, model_route: Any) -> int:
             args.endpoint_profile = profile
         return model_route.resolve(args, catalog)
     return 2
+

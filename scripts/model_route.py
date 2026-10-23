@@ -67,20 +67,7 @@ COMPATIBILITY_ADAPTER_IDS = {
 # configuration error rather than a value to pass through to the CLI.
 ENDPOINT_WIRE_APIS = frozenset({"responses", "chat"})
 ROUTE_WARNINGS: list[str] = []
-TASK_CLASS_POLICY = {
-    "mechanical": {"minimum_alias": "junior", "minimum_effort": "low", "role": "worker"},
-    "legwork": {"minimum_alias": "senior", "minimum_effort": "medium", "role": "worker"},
-    "implementation": {"minimum_alias": "senior", "minimum_effort": "high", "role": "worker"},
-    "ui-taste": {"minimum_alias": "principal", "minimum_effort": "high", "role": "worker"},
-    "screenshots": {"minimum_alias": "senior", "minimum_effort": "high", "role": "worker"},
-    "review": {"minimum_alias": "principal", "minimum_effort": "high", "role": "reviewer"},
-    "second-opinion": {"minimum_alias": "principal", "minimum_effort": "high", "role": "reviewer"},
-    "research": {"minimum_alias": "senior", "minimum_effort": "medium", "role": "worker"},
-    "bulk": {"minimum_alias": "junior", "minimum_effort": "low", "role": "worker"},
-    "critical-review": {"minimum_alias": "principal", "minimum_effort": "high", "role": "critical-review"},
-    "orchestration": {"minimum_alias": "principal", "minimum_effort": "high", "role": "orchestrator"},
-}
-
+ROUTE_CLASSIFICATION: dict[str, Any] = {}
 # Path-loading avoids depending on `scripts/` being on `sys.path`. Tests reload
 # this router by path, so each sibling must be reused rather than re-executed.
 # Registering one module but binding names from another makes their globals
@@ -90,6 +77,7 @@ _catalog_validation = _sibling("model_route_catalog")
 _preferences = _sibling("model_route_preferences")
 _pools = _sibling("model_route_pools")
 model_route_probe = _sibling("model_route_probe")
+task_classifier = _sibling("task_classifier")
 model_route_live = _sibling("model_route_live")
 model_route_live.model_route_probe = model_route_probe
 
@@ -747,7 +735,9 @@ def resolve_endpoint_profile(
 
 
 def emit(record: dict[str, Any], code: int) -> int:
-    if record.get("status") == "ok" and ROUTE_WARNINGS:
+    if ROUTE_CLASSIFICATION:
+        record.update(ROUTE_CLASSIFICATION)
+    if ROUTE_WARNINGS:
         record["warnings"] = list(dict.fromkeys([*(record.get("warnings") or []), *ROUTE_WARNINGS]))
     warnings = record.get("warnings", [])
     newer = [note for note in warnings if " is newer than the catalogue;" in note]
