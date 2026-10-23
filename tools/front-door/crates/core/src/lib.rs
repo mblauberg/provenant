@@ -11,3 +11,4 @@ pub mod product_root_resolver;
 pub mod roots;
 #[cfg(test)]
 mod test_support;
+pub mod workspace_paths;
