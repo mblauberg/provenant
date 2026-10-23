@@ -8,6 +8,7 @@ mod render;
 
 pub mod selection;
 pub mod pool_migration;
+pub mod cli_dispatch;
 pub mod capability;
 pub mod catalog;
 pub mod cli;

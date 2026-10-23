@@ -14,7 +14,7 @@ use crate::{
 
 const BROKER_PREFIXES: [&str; 3] = ["opencode/", "opencode-go/", "openrouter/"];
 const EFFORTS: [&str; 5] = ["low", "medium", "high", "xhigh", "ultra"];
-const ALIASES: [&str; 3] = ["junior", "senior", "principal"];
+pub(crate) const ALIASES: [&str; 3] = ["junior", "senior", "principal"];
 
 #[derive(Debug, Error)]
 pub enum CatalogError {
