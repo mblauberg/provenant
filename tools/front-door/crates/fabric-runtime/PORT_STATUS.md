@@ -2,7 +2,7 @@
 
 Current batch: 3. Rulebook: `docs/specs/rust-port/PORTING.md` version 4 and
 ADR 0028. Source/oracle baseline: `a05bcb461f8a599a61637dc97153e65bc315ee81`;
-main integrations through `b527d675` retain the same source units. Previous
+main integrations through `8bf118d9` retain the same source units. Previous
 batch history remains in Git. This status supersedes the batch-1/2 completion
 claim for the run-registry interface. The crate is inert: no command has been
 switched over and no Python or TypeScript source has been removed.
@@ -103,14 +103,9 @@ pinned Rust 1.94.1. Full harness checks belong in GitHub Actions. Native
 adversarial review is source-parity evidence, not a cross-family review or
 J1/J2/J3 cut-over acceptance. The chair controls cross-family review and merge.
 
-Verified after the main integration: 81 unit tests passed, zero failed, and
-zero doc tests. Node and Python oracles ran in required-differential mode.
-Fmt, clippy and both R2 layering checks passed. The retained unsafe-integer
-fixture deliberately proves the documented mismatch; it is not parity evidence.
-
-Native adversarial repair re-review is clean for this stated partial scope.
-The reviewer did not reproduce the test run because its shared Cargo cache
-was read-only; the required writer run used the isolated cache above.
+The PR records the final repair checks and exact counts. The required run
+uses an isolated Cargo target directory and imports actual Node/Python sources.
+Mismatch fixtures are labelled and do not establish parity or restore claims.
 
 ## PR 1334 cross-family repair follow-up
 
@@ -153,3 +148,13 @@ undefined entries when supplying OS environments; property-presence semantics
 for arbitrary in-memory ProcessEnv objects are not modelled. This limitation
 also applies to the caller-supplied environment in the ps declaration contract.
 No additional identity/runtime completion claim is made.
+
+Latest main integration: `8bf118d9` (supervisor #1335), merged without rebasing.
+Both divergence append blocks were retained. The completion ledger is the
+sorted union of both sides, excluding the deliberately withdrawn run-registry
+interface. The p3-rrc lossless ordered codec remains absent at this main tip.
+
+Verified after that merge: 83 unit tests passed in required-differential mode,
+zero failed and zero doc tests. Fmt, crate clippy with warnings denied, both
+R2 layering assertions and `git diff --check` passed. No full harness suite or
+cut-over judge was run locally.
