@@ -1090,10 +1090,13 @@ def test_output_budget_defaults_stay_under_limits_on_fixture_state(tmp_path: Pat
     assert lines[-1] == "10 more; use --all"
 
     # 5. Budget: stats uses summary rows only and elides long fixture tables.
-    stats_seed = subprocess.run([sys.executable, str(provenant_script), "stats"], cwd=tmp_path,
+    # Read-only queries never create the ledger; a write connect seeds an empty one without ingesting.
+    seed = "import telemetry; telemetry.connect().close()"
+    stats_seed = subprocess.run([sys.executable, "-c", seed], cwd=provenant_script.parent,
                                 env=env, capture_output=True, text=True)
     assert stats_seed.returncode == 0, stats_seed.stderr
     stats_db = tmp_path / "fabric-state" / "telemetry.sqlite3"
+    used_at = (datetime.now(timezone.utc) - timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
     with sqlite3.connect(stats_db) as db:
         for i in range(40):
             db.execute(
@@ -1101,7 +1104,7 @@ def test_output_budget_defaults_stay_under_limits_on_fixture_state(tmp_path: Pat
                 "input_tokens,cache_read_tokens,cache_write_tokens,output_tokens,reasoning_tokens,usage_source) "
                 "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 ("fixture", f"event-{i:02d}", "fixture-host", f"session-{i:02d}", "codex", "openai",
-                 f"fixture-model-{i:02d}", f"account-{i:02d}", "2026-10-22T00:00:00Z",
+                 f"fixture-model-{i:02d}", f"account-{i:02d}", used_at,
                  1000, None, None, 500, None, "fixture"))
     stats_res = subprocess.run([sys.executable, str(provenant_script), "stats"], cwd=tmp_path,
                                env=env, capture_output=True, text=True)

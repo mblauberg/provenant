@@ -500,7 +500,7 @@ def ledger_windows(adapter, now, account=None):
     """The latest rate-limit observation per window that this host's ledger holds for one account."""
     try:
         telemetry = _telemetry()
-        with telemetry.connect() as db:
+        with telemetry.connect(readonly=True) as db:
             # Connecting loads the ids this ledger was written under, so a renamed host still reads its rows.
             hosts = sorted(set(local_hosts()) | telemetry.host_aliases())
             rows = db.execute('SELECT window,used_percent,window_minutes,reset_at,timestamp FROM observations '
