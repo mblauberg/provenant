@@ -3,8 +3,6 @@
 //! Linux and macOS share these libc interfaces. Account lookup uses the
 //! reentrant calls so the wrapper is safe even after transport threads start.
 
-use std::collections::BTreeMap;
-use std::convert::Infallible;
 use std::ffi::{CStr, CString, OsStr, OsString};
 use std::io;
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
@@ -28,53 +26,6 @@ pub fn is_executable(path: &Path) -> bool {
     // access borrows it, mutates no Rust memory, and returns -1 on failure.
     // No shared libc storage is exposed and concurrent calls are independent.
     unsafe { libc::access(path.as_ptr(), libc::X_OK) == 0 }
-}
-
-/// Strict execve: ENOEXEC is returned without Command::exec's shell fallback.
-/// The caller supplies argv[0], the full environment, and edge error rendering.
-pub fn execve_strict(
-    program: &Path,
-    argv: &[OsString],
-    env: &BTreeMap<OsString, OsString>,
-) -> Result<Infallible, SysError> {
-    let failure = |source| SysError {
-        operation: "execve",
-        path: Some(program.into()),
-        source,
-    };
-    let c_string = |bytes: &[u8]| {
-        CString::new(bytes).map_err(|_| failure(io::Error::from_raw_os_error(libc::EINVAL)))
-    };
-    let path = c_string(program.as_os_str().as_bytes())?;
-    let argv = argv
-        .iter()
-        .map(|arg| c_string(arg.as_bytes()))
-        .collect::<Result<Vec<_>, _>>()?;
-    let envp = env
-        .iter()
-        .map(|(name, value)| {
-            let mut bytes = name.as_bytes().to_vec();
-            bytes.push(b'=');
-            bytes.extend_from_slice(value.as_bytes());
-            c_string(&bytes)
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    let argv_ptrs = argv
-        .iter()
-        .map(|arg| arg.as_ptr())
-        .chain([std::ptr::null()])
-        .collect::<Vec<_>>();
-    let env_ptrs = envp
-        .iter()
-        .map(|entry| entry.as_ptr())
-        .chain([std::ptr::null()])
-        .collect::<Vec<_>>();
-    // SAFETY: all strings and the two null-terminated pointer arrays remain
-    // owned and live until execve returns or replaces this process. The call
-    // takes no Rust ownership; it either atomically replaces all threads or
-    // returns -1 with thread-local errno. No environment globals are mutated.
-    unsafe { libc::execve(path.as_ptr(), argv_ptrs.as_ptr(), env_ptrs.as_ptr()) };
-    Err(failure(io::Error::last_os_error()))
 }
 
 pub enum Account<'a> {
@@ -193,22 +144,6 @@ mod tests {
         assert!(is_executable(&dir.path().join("link")));
         assert!(!is_executable(&dir.path().join("gone")));
         assert!(!is_executable(Path::new(OsStr::from_bytes(b"bad\0path"))));
-        let error = execve_strict(&file, &[file.as_os_str().into()], &BTreeMap::new()).unwrap_err();
-        assert_eq!(error.source.raw_os_error(), Some(libc::ENOEXEC));
-    }
-
-    #[test]
-    fn exec_rejects_nuls_in_every_input() {
-        let bad = OsString::from_vec(b"bad\0arg".to_vec());
-        let file = Path::new("/no/such/file");
-        for (argv, env) in [
-            (vec![bad.clone()], BTreeMap::new()),
-            (vec![], BTreeMap::from([(bad.clone(), "value".into())])),
-            (vec![], BTreeMap::from([("key".into(), bad)])),
-        ] {
-            let error = execve_strict(file, &argv, &env).unwrap_err();
-            assert_eq!(error.source.raw_os_error(), Some(libc::EINVAL));
-        }
     }
 
     #[test]
@@ -223,27 +158,6 @@ mod tests {
             account(Account::Named(OsStr::new("provenant_missing_user_zz"))).unwrap(),
             None
         );
-    }
-
-    #[test]
-    fn exec_fixture() {
-        if std::env::var_os("PROVENANT_SUPERVISOR_EXEC_FIXTURE").is_none() {
-            return;
-        }
-        let env = BTreeMap::from([("KEPT".into(), "λ two words".into())]);
-        let args = ["/bin/sh".into(), "-c".into(), "test \"$KEPT\" = 'λ two words' && test -z \"$PROVENANT_SUPERVISOR_EXEC_FIXTURE\" && exit 37".into()];
-        let error = execve_strict(Path::new("/bin/sh"), &args, &env).unwrap_err();
-        panic!("exec failed: {error}");
-    }
-
-    #[test]
-    fn successful_exec_replaces_the_process_with_the_exact_environment() {
-        let status = std::process::Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", "sys::tests::exec_fixture", "--nocapture"])
-            .env("PROVENANT_SUPERVISOR_EXEC_FIXTURE", "1")
-            .status()
-            .unwrap();
-        assert_eq!(status.code(), Some(37));
     }
 }
 
@@ -263,6 +177,273 @@ pub mod errno {
     };
 }
 
-// Existing S2 implementation, pending the supervisor rewrite.
+pub(crate) mod reaper;
+
+/// Construct the fixture binary's only child command through the same strict
+/// post-fork boundary used by the supervisor.
+#[cfg(feature = "fixture")]
+#[allow(clippy::disallowed_methods)]
+pub fn fixture_command(
+    argv: &[OsString],
+    env: &[(OsString, OsString)],
+    cwd: &Path,
+    new_session: bool,
+) -> io::Result<std::process::Command> {
+    let program = argv
+        .first()
+        .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidInput))?;
+    if std::path::Path::new(program) != std::env::current_exe()? {
+        return Err(io::ErrorKind::InvalidInput.into());
+    }
+    let mut command = std::process::Command::new(program);
+    command
+        .args(argv.iter().skip(1))
+        .env_clear()
+        .envs(env.iter().cloned())
+        .current_dir(cwd);
+    child::configure_command(&mut command, &[], Some(env), new_session)?;
+    Ok(command)
+}
+
+/// Accept a fixture connection with one bounded poll of a held Unix listener.
+#[cfg(feature = "fixture")]
+pub fn fixture_accept(
+    listener: &std::os::unix::net::UnixListener,
+    timeout: std::time::Duration,
+) -> io::Result<std::os::unix::net::UnixStream> {
+    use std::os::fd::AsRawFd;
+    let deadline = std::time::Instant::now()
+        .checked_add(timeout)
+        .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidInput))?;
+    loop {
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        let micros = remaining.as_micros();
+        let millis = if remaining.is_zero() {
+            0
+        } else {
+            i32::try_from(micros.saturating_add(999) / 1_000).unwrap_or(i32::MAX)
+        };
+        let mut descriptor = libc::pollfd {
+            fd: listener.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        // SAFETY: descriptor is a live borrowed listener fd and descriptor's
+        // one-element storage stays writable through poll. The timeout is
+        // derived from one checked deadline; poll retains no pointers/ownership.
+        let result = unsafe { libc::poll(&mut descriptor, 1, millis) };
+        if result > 0 {
+            if descriptor.revents & (libc::POLLIN | libc::POLLHUP | libc::POLLERR) == 0 {
+                return Err(io::Error::from(io::ErrorKind::InvalidData));
+            }
+            return listener.accept().map(|(stream, _)| stream);
+        }
+        if result == 0 {
+            return Err(io::Error::from(io::ErrorKind::TimedOut));
+        }
+        let error = io::Error::last_os_error();
+        if error.kind() != io::ErrorKind::Interrupted {
+            return Err(error);
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err(io::Error::from(io::ErrorKind::TimedOut));
+        }
+    }
+}
+
+/// Read one fixture handshake byte with a bounded readiness wait.
+#[cfg(feature = "fixture")]
+pub fn fixture_read_byte(
+    stream: &mut std::os::unix::net::UnixStream,
+    timeout: std::time::Duration,
+) -> io::Result<u8> {
+    use std::io::Read;
+    use std::os::fd::AsRawFd;
+    let deadline = std::time::Instant::now()
+        .checked_add(timeout)
+        .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidInput))?;
+    loop {
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        let micros = remaining.as_micros();
+        let millis = if remaining.is_zero() {
+            0
+        } else {
+            i32::try_from(micros.saturating_add(999) / 1_000).unwrap_or(i32::MAX)
+        };
+        let mut descriptor = libc::pollfd {
+            fd: stream.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        // SAFETY: descriptor borrows a live stream fd and its one-element
+        // storage remains writable through poll. The timeout is bounded by a
+        // checked deadline; poll retains neither memory nor descriptor.
+        let result = unsafe { libc::poll(&mut descriptor, 1, millis) };
+        if result > 0 {
+            if descriptor.revents & (libc::POLLIN | libc::POLLHUP | libc::POLLERR) == 0 {
+                return Err(io::Error::from(io::ErrorKind::InvalidData));
+            }
+            let mut byte = [0];
+            return stream.read_exact(&mut byte).map(|()| byte[0]);
+        }
+        if result == 0 {
+            return Err(io::Error::from(io::ErrorKind::TimedOut));
+        }
+        let error = io::Error::last_os_error();
+        if error.kind() != io::ErrorKind::Interrupted {
+            return Err(error);
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err(io::Error::from(io::ErrorKind::TimedOut));
+        }
+    }
+}
+
+/// Replace the current process with a selected owner. Argument parsing remains
+/// at the binary edge; no shell fallback or Python delegation is introduced.
+pub fn replace_process(
+    program: &Path,
+    args: &[OsString],
+    env: &[(OsString, OsString)],
+) -> io::Error {
+    let mut command = std::process::Command::new(program);
+    command
+        .args(args)
+        .env_clear()
+        .envs(env.iter().map(|(key, value)| (key, value)));
+    child::replace_process(&command, env)
+}
+
+/// Create deliberately inheritable state only in the isolated fixture process.
+#[cfg(feature = "fixture")]
+pub(crate) fn fixture_parent_state() -> io::Result<std::os::fd::OwnedFd> {
+    use std::os::fd::{AsRawFd, FromRawFd};
+    let file = std::fs::File::open("/dev/null")?;
+    // SAFETY: file is live; F_DUPFD returns a distinct owned descriptor without
+    // CLOEXEC. A high minimum avoids incidental descriptor reuse in the probe.
+    let fd = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_DUPFD, 200) };
+    if fd < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: F_DUPFD succeeded and this is the sole owner of its new fd.
+    let fd = unsafe { std::os::fd::OwnedFd::from_raw_fd(fd) };
+    fixture_ignore_term()?;
+    // SAFETY: all bit patterns are valid for sigset_t; sigemptyset initialises
+    // it before use and both calls borrow exclusive live stack storage.
+    let mut mask: libc::sigset_t = unsafe { std::mem::zeroed() };
+    // SAFETY: mask is valid writable storage, no pointer is retained.
+    if unsafe { libc::sigemptyset(&mut mask) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: SIGUSR2 is valid and mask is initialised and exclusively borrowed.
+    if unsafe { libc::sigaddset(&mut mask, libc::SIGUSR2) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: only this dedicated fixture thread changes its own signal mask.
+    if unsafe { libc::sigprocmask(libc::SIG_BLOCK, &mask, std::ptr::null_mut()) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(fd)
+}
+
+#[cfg(feature = "fixture")]
+pub(crate) fn fixture_check_inherited_state(fd: i32, parent: bool) -> io::Result<()> {
+    // SAFETY: F_GETFD inspects an integer fd without taking ownership.
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+    let descriptor_ok = if parent {
+        flags >= 0 && flags & libc::FD_CLOEXEC == 0
+    } else {
+        flags < 0 && io::Error::last_os_error().raw_os_error() == Some(libc::EBADF)
+    };
+    let mut action = std::mem::MaybeUninit::<libc::sigaction>::uninit();
+    // SAFETY: this only queries SIGTERM into valid exclusive storage.
+    if unsafe { libc::sigaction(libc::SIGTERM, std::ptr::null(), action.as_mut_ptr()) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: successful sigaction initialised the record.
+    let action = unsafe { action.assume_init() };
+    let mut mask = std::mem::MaybeUninit::<libc::sigset_t>::uninit();
+    // SAFETY: null set queries the calling thread's mask into valid storage.
+    if unsafe { libc::sigprocmask(libc::SIG_SETMASK, std::ptr::null(), mask.as_mut_ptr()) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: the successful query initialised mask.
+    let mask = unsafe { mask.assume_init() };
+    // SAFETY: initialised mask and a valid signal are borrowed, not retained.
+    let blocked = unsafe { libc::sigismember(&mask, libc::SIGUSR2) };
+    let expected = if parent { libc::SIG_IGN } else { libc::SIG_DFL };
+    if descriptor_ok && action.sa_sigaction == expected && blocked == i32::from(parent) {
+        Ok(())
+    } else {
+        Err(io::Error::other(
+            "descriptor flags, signal disposition or mask changed incorrectly",
+        ))
+    }
+}
+
+#[cfg(feature = "fixture")]
+pub(crate) fn fixture_ignore_term() -> io::Result<()> {
+    // SAFETY: the dedicated fixture changes only its own disposition; SIG_IGN
+    // is a valid platform handler constant, no resource or pointer transfers,
+    // and failure reports thread-local errno. Never used in a shared host.
+    if unsafe { libc::signal(libc::SIGTERM, libc::SIG_IGN) } == libc::SIG_ERR {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+/// Used only in a dedicated, single-threaded fixture process before any spawn.
+#[cfg(feature = "fixture")]
+pub(crate) fn fixture_wait_policy(mode: &str) -> io::Result<()> {
+    extern "C" fn handler(_: libc::c_int) {}
+    // SAFETY: libc's sigaction record permits zeroed integers, pointer-sized
+    // handler and mask storage. sigemptyset below initialises its platform mask.
+    let mut action: libc::sigaction = unsafe { std::mem::zeroed() };
+    // SAFETY: action owns writable, aligned mask storage; no pointer is retained.
+    if unsafe { libc::sigemptyset(&mut action.sa_mask) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    match mode {
+        "wait-policy-ignore" => action.sa_sigaction = libc::SIG_IGN,
+        "wait-policy-no-wait" => action.sa_flags = libc::SA_NOCLDWAIT,
+        "wait-policy-handler" => action.sa_sigaction = handler as *const () as usize,
+        "wait-policy-blocked" => {
+            // SAFETY: the fixture exclusively owns this thread's signal mask.
+            // Both calls borrow live mask storage and retain no pointer. Blocking
+            // SIGCHLD does not discard wait status; child pre-exec resets masks.
+            unsafe {
+                if libc::sigaddset(&mut action.sa_mask, libc::SIGCHLD) != 0
+                    || libc::sigprocmask(libc::SIG_BLOCK, &action.sa_mask, std::ptr::null_mut())
+                        != 0
+                {
+                    return Err(io::Error::last_os_error());
+                }
+            }
+            return Ok(());
+        }
+        _ => return Err(io::ErrorKind::InvalidInput.into()),
+    }
+    // SAFETY: the dedicated fixture sets its own process disposition before
+    // starting threads or children. Handler constants/function are valid; libc
+    // copies the live record and retains no pointer. No shared host is changed.
+    if unsafe { libc::sigaction(libc::SIGCHLD, &action, std::ptr::null_mut()) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+// Existing lane subjects remain until S2 replaces custody. These narrow
+// allowances cover inherited diagnostics and pre-R7 unsafe grouping only.
+#[allow(clippy::print_stderr, clippy::collapsible_if, clippy::unwrap_used)]
 #[doc(hidden)]
 pub mod legacy_lane;
+
+/// All production clocks use this process-wide monotonic coordinate.
+pub(crate) fn monotonic_now() -> provenant_core::MonoTime {
+    static ORIGIN: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    let elapsed = ORIGIN
+        .get_or_init(std::time::Instant::now)
+        .elapsed()
+        .as_micros();
+    provenant_core::MonoTime::from_micros(u64::try_from(elapsed).unwrap_or(u64::MAX))
+}

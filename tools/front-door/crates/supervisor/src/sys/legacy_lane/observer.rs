@@ -53,7 +53,8 @@ impl Observer {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null());
-        let spawned = platform::prepare_child(&mut command).and_then(|_| command.spawn());
+        let spawned =
+            platform::prepare_child(&mut command, &spec.env).and_then(|_| command.spawn());
         match spawned {
             Ok(mut child) => {
                 o.input = child.stdin.take();

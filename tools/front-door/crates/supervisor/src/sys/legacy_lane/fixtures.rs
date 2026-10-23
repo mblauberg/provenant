@@ -13,6 +13,7 @@ pub fn new_session() -> i32 {
     // SAFETY: setsid takes no pointers and changes only the calling process.
     unsafe { libc::setsid() }
 }
+#[cfg(feature = "fixture")]
 pub fn signal(pid: i32, signal: i32) -> i32 {
     // SAFETY: kill takes scalar identifiers; the kernel validates them.
     unsafe { libc::kill(pid, signal) }
@@ -85,30 +86,40 @@ pub fn independent_start() -> String {
         assert!(ticks > 0);
         boot + start / ticks as u64
     };
-    // SAFETY: localtime_r writes only to our live tm; strftime writes at most
-    // the provided buffer length and receives a NUL-terminated format.
-    unsafe {
-        let epoch = epoch as libc::time_t;
-        let mut tm: libc::tm = std::mem::zeroed();
-        assert!(!libc::localtime_r(&epoch, &mut tm).is_null());
-        let mut buf = [0u8; 80];
-        let n = libc::strftime(buf.as_mut_ptr().cast(), 80, c"%a %b %e %T %Y".as_ptr(), &tm);
-        assert!(n > 0);
-        String::from_utf8_lossy(&buf[..n]).into_owned()
-    }
+    let epoch = epoch as libc::time_t;
+    // SAFETY: zero is a valid initial representation for tm; localtime_r
+    // overwrites the record before its fields are read.
+    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+    // SAFETY: epoch and tm are live for the call; localtime_r writes only to
+    // tm and retains neither pointer.
+    assert!(!unsafe { libc::localtime_r(&epoch, &mut tm) }.is_null());
+    let mut buf = [0u8; 80];
+    // SAFETY: buf is live writable storage of the declared size, the format is
+    // static NUL-terminated data, and tm is initialized by localtime_r.
+    let n = unsafe { libc::strftime(buf.as_mut_ptr().cast(), 80, c"%a %b %e %T %Y".as_ptr(), &tm) };
+    assert!(n > 0);
+    String::from_utf8_lossy(&buf[..n]).into_owned()
 }
 pub fn inherit_ignored_signals(command: &mut Command) {
-    // SAFETY: the closure calls only async-signal-safe libc functions after
-    // fork, uses stack storage, and neither allocates nor takes Rust locks.
-    unsafe {
-        command.pre_exec(|| {
-            libc::signal(libc::SIGCHLD, libc::SIG_IGN);
-            libc::signal(libc::SIGTERM, libc::SIG_IGN);
-            let mut mask: libc::sigset_t = std::mem::zeroed();
-            libc::sigemptyset(&mut mask);
-            libc::sigaddset(&mut mask, libc::SIGTERM);
-            libc::sigprocmask(libc::SIG_BLOCK, &mask, std::ptr::null_mut());
-            Ok(())
-        });
-    }
+    let prepare = || {
+        // SAFETY: signal takes scalar values and changes only this fixture
+        // child before exec.
+        unsafe { libc::signal(libc::SIGCHLD, libc::SIG_IGN) };
+        // SAFETY: signal takes scalar values and changes only this fixture
+        // child before exec.
+        unsafe { libc::signal(libc::SIGTERM, libc::SIG_IGN) };
+        // SAFETY: zero is a valid initial representation for sigset_t;
+        // sigemptyset initialises it before use.
+        let mut mask: libc::sigset_t = unsafe { std::mem::zeroed() };
+        // SAFETY: mask is live writable storage for sigemptyset.
+        unsafe { libc::sigemptyset(&mut mask) };
+        // SAFETY: mask is initialized and SIGTERM is a valid scalar signal.
+        unsafe { libc::sigaddset(&mut mask, libc::SIGTERM) };
+        // SAFETY: mask is initialized and no output storage is requested.
+        unsafe { libc::sigprocmask(libc::SIG_BLOCK, &mask, std::ptr::null_mut()) };
+        Ok(())
+    };
+    // SAFETY: the hook is installed before spawn and its callback uses only
+    // async-signal-safe libc calls with stack storage; it takes no Rust locks.
+    unsafe { command.pre_exec(prepare) };
 }

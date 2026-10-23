@@ -61,13 +61,8 @@ pub fn replace_process(launch: &Launch) -> u8 {
     if launch.stale_checked {
         env.insert("PROVENANT_STALE_CHECKED".into(), "1".into());
     }
-    let program: OsString = launch.program.as_os_str().to_owned();
-    let mut argv = vec![program];
-    argv.extend_from_slice(launch.args);
-    let error = match provenant_supervisor::sys::execve_strict(launch.program, &argv, &env) {
-        Err(error) => error.source,
-        Ok(never) => match never {},
-    };
+    let env: Vec<_> = env.into_iter().collect();
+    let error = provenant_supervisor::sys::replace_process(launch.program, launch.args, &env);
     eprintln!(
         "provenant: cannot execute {}: {}; {REPAIR}",
         launch.program.display(),

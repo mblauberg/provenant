@@ -59,6 +59,18 @@ ignored = [
   "provenant-workflow",
 ]
 
+# Empty library roots are intentional inert rewrite lanes. The workflow word
+# table is parked for its owning lane; neither is an abandoned source file.
+ignored-paths = [
+  "crates/cli/src/lib.rs",
+  "crates/config/src/lib.rs",
+  "crates/confinement/src/lib.rs",
+  "crates/fabric-mcp/src/lib.rs",
+  "crates/providers/src/lib.rs",
+  "crates/run/src/lib.rs",
+  "crates/workflow/src/pending/python_word.rs",
+]
+
 [workspace.lints.rust]
 unsafe_code = "forbid"
 unsafe_op_in_unsafe_fn = "deny"
