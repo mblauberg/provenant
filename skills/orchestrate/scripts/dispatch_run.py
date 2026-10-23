@@ -55,6 +55,7 @@ from layout import run_workspace, run_root, contains_run
 import run_records
 import writer_lease
 import dispatch_preflight
+import git_evidence_packet
 import provider_exec
 import provider_output
 import memory_admission
@@ -465,36 +466,6 @@ def incomplete_provider_turn(attempt: dict) -> bool:
     )
 
 
-def _validate_git_evidence_metadata(metadata: Any) -> dict[str, Any]:
-    """Validate the bounded JSON header of one Git evidence packet."""
-    try:
-        valid = (
-            isinstance(metadata, dict)
-            and set(metadata) == {
-                "schema_version", "record_type", "repository", "git_root", "head",
-                "diff_base", "working_tree", "diff_from", "paths", "encoding",
-            }
-            and metadata.get("schema_version") == 1
-            and metadata.get("record_type") == run_records.GIT_EVIDENCE_RECORD_TYPE
-            and isinstance(metadata.get("repository"), str)
-            and isinstance(metadata.get("git_root"), str)
-            and isinstance(metadata.get("head"), str)
-            and re.fullmatch(r"[0-9a-f]{40,64}", metadata["head"]) is not None
-            and isinstance(metadata.get("diff_base"), str)
-            and re.fullmatch(r"[0-9a-f]{40,64}", metadata["diff_base"]) is not None
-            and metadata.get("working_tree") in {"clean", "dirty"}
-            and isinstance(metadata.get("diff_from"), str)
-            and bool(metadata["diff_from"])
-            and isinstance(metadata.get("paths"), list)
-            and all(isinstance(path, str) for path in metadata["paths"])
-            and metadata.get("encoding") == "utf-8-replacement"
-        )
-    except (KeyError, TypeError):
-        valid = False
-    if not valid:
-        raise run_records.AttemptEvidenceError("Git evidence packet header is invalid")
-    return metadata
-
 def _copy_git_evidence(
     workspace: Path, run_dir: Path, source: Path, destination: Path
 ) -> tuple[dict[str, Any], str]:
@@ -521,12 +492,9 @@ def _copy_git_evidence(
             os.close(source_fd)
         raise run_records.AttemptEvidenceError(str(exc)) from exc
     hasher = hashlib.sha256()
-    header = bytearray()
-    metadata: dict[str, Any] | None = None
-    status_prefix = b"--- status ---\n"
-    body_prefix = bytearray()
-    marker = b"\n--- diff ---\n"
-    tail = b""
+    scanner = git_evidence_packet.PacketScanner(
+        run_records.AttemptEvidenceError, MAX_GIT_EVIDENCE_HEADER_BYTES, validate_on_feed=True
+    )
 
     def write_all(fd: int, value: bytes) -> None:
         offset = 0
@@ -537,34 +505,13 @@ def _copy_git_evidence(
         while chunk := os.read(source_fd, 1024 * 1024):
             hasher.update(chunk)
             write_all(destination_fd, chunk)
-            remaining = chunk
-            if metadata is None:
-                header.extend(remaining)
-                if len(header) > MAX_GIT_EVIDENCE_HEADER_BYTES and b"\n" not in header:
-                    raise run_records.AttemptEvidenceError("Git evidence packet header exceeds its 64 KiB limit")
-                separator = header.find(b"\n")
-                if separator < 0:
-                    continue
-                if separator > MAX_GIT_EVIDENCE_HEADER_BYTES:
-                    raise run_records.AttemptEvidenceError("Git evidence packet header exceeds its 64 KiB limit")
-                first_line = bytes(header[:separator])
-                metadata = _validate_git_evidence_metadata(
-                    json.loads(first_line.decode("utf-8"))
-                )
-                remaining = bytes(header[separator + 1:])
-            body_prefix.extend(remaining[: len(status_prefix) - len(body_prefix)])
-            if len(body_prefix) >= len(status_prefix) and bytes(body_prefix) != status_prefix:
-                raise run_records.AttemptEvidenceError("Git evidence packet is missing its status section")
-            combined = tail + remaining
-            if marker in combined:
-                tail = marker
-            else:
-                tail = combined[-(len(marker) - 1):]
+            scanner.feed(chunk)
+        metadata = scanner.finish()
         if metadata is None:
             raise run_records.AttemptEvidenceError("Git evidence packet has no JSON header")
-        if len(body_prefix) < len(status_prefix):
+        if not scanner.has_status:
             raise run_records.AttemptEvidenceError("Git evidence packet is missing its status section")
-        if marker not in tail:
+        if not scanner.has_diff:
             raise run_records.AttemptEvidenceError("Git evidence packet is missing its diff section")
         os.fsync(destination_fd)
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
