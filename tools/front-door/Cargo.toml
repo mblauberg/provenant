@@ -25,7 +25,6 @@ toml_edit = { version = "0.25", features = ["serde"] }
 # Internal crates. Each member may depend only on the crates PORTING.md R2
 # allows it, as `provenant-<name> = { workspace = true }`.
 provenant-core = { path = "crates/core" }
-provenant-records = { path = "crates/records" }
 provenant-config = { path = "crates/config" }
 provenant-supervisor = { path = "crates/supervisor" }
 provenant-confinement = { path = "crates/confinement" }

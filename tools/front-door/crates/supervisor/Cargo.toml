@@ -8,7 +8,6 @@ publish = false
 
 [dependencies]
 provenant-core = { workspace = true }
-provenant-records = { workspace = true }
 jiff = { workspace = true }
 serde_json = { workspace = true }
 libc = { workspace = true }
