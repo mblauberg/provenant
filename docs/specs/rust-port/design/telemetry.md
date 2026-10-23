@@ -111,7 +111,7 @@ telemetry does not join delivery records or expose an upsert/report API.
 
 | API | Contract |
 |---|---|
-| `stats(facts, &PriceTable, window) -> Stats` | Pure bounded reduction over any iterator of `AttemptFact`; `window` selects `finished_at` in `[since, until)`. `Stats` is the result of the reduction: `Result<StatsReport, TelemetryError>`. |
+| `stats(facts, &PriceTable, window) -> Stats` | Pure bounded reduction over any iterator of `AttemptFact`; `window` is `StatsWindow { since, until, detail }`: it selects `finished_at` in `[since, until)`, and `detail` adds daily groups. `Stats` is the result of the reduction: `Result<StatsReport, TelemetryError>`. |
 | `validate_prices(&ConfiguredPrices) -> Result<PriceTable, PriceError>` | Telemetry validates its price schema after state's bundled TOML loading. |
 
 Telemetry retains only the allowed `core`, `records`, `config` dependencies.

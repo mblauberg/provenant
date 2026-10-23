@@ -514,7 +514,8 @@ through the shared freeze, rather than adding per-edge JSON bags:
 ```rust
 struct Submission { tasks: Vec<TaskRequest>, concurrency: u16 }
 struct TaskRequest { id: RequestId, prompt: InputBytes, inputs: Vec<ArtifactRef>,
-    route: RouteRequest, access: Authority, cwd: PathBuf, timeout: DurationMs }
+    route: RouteRequest, access: Authority, cwd: PathBuf, timeout: DurationMs,
+    delivery_id: Option<DeliveryId> }
 struct SubmissionReceipt { runs: Vec<AttemptRef>, routes: Vec<RouteReceipt> }
 struct ResumeRequest { target: AttemptRef, prompt: InputBytes, expected_generation: u64 }
 enum ReconcileDecision { AbandonUncertain }
