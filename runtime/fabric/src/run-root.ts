@@ -94,4 +94,3 @@ function underScratch(root: string): boolean {
   const parts = root.split(sep);
   return parts.some((part, index) => part === ".agent-run" && parts[index + 1] === "scratch" && index + 2 < parts.length);
 }
-
