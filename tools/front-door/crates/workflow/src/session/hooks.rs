@@ -121,48 +121,46 @@ fn render(
     diagnostic: String,
     markdown: Option<String>,
 ) -> HookContext {
-    let mut retained = if event == HookEvent::SessionStart {
+    let retained = if event == HookEvent::SessionStart {
         markdown.unwrap_or_default()
     } else {
         String::new()
     };
-    let mut truncated = false;
-    let stdout = loop {
-        let mut text = diagnostic.clone();
-        if truncated {
-            text.push_str("\n[Checkpoint excerpt; use workflow session show with this ID for the complete Markdown.]");
+    let mut stdout = encode(event, &diagnostic, &retained, false);
+    if stdout.len() > HOOK_OUTPUT_LIMIT {
+        // Search UTF-8 boundaries against encoded bytes. Raw bytes and escaped
+        // JSON bytes are different measures; subtracting the excess can erase
+        // the entire checkpoint even when a useful prefix fits.
+        let boundaries: Vec<_> = retained
+            .char_indices()
+            .map(|(offset, _)| offset)
+            .chain(std::iter::once(retained.len()))
+            .collect();
+        let mut low = 0;
+        let mut high = boundaries.len().saturating_sub(1);
+        while low < high {
+            let middle = low + (high - low).div_ceil(2);
+            let end = boundaries.get(middle).copied().unwrap_or_default();
+            let candidate = encode(
+                event,
+                &diagnostic,
+                retained.get(..end).unwrap_or_default(),
+                true,
+            );
+            if candidate.len() <= HOOK_OUTPUT_LIMIT {
+                low = middle;
+            } else {
+                high = middle.saturating_sub(1);
+            }
         }
-        if !retained.is_empty() {
-            text.push_str("\n\n");
-            text.push_str(&retained);
-        }
-        let output = match event {
-            HookEvent::SessionStart => HostOutput::Start {
-                output: StartOutput {
-                    hook_event_name: event,
-                    additional_context: &text,
-                },
-            },
-            HookEvent::PreCompact => HostOutput::Compact { message: &text },
-        };
-        // These structs contain only strings and fixed enums: JSON encoding has no
-        // fallible map keys, numbers or custom serializers. Retain an advisory
-        // fallback if that ever changes.
-        let mut bytes = serde_json::to_vec(&output)
-            .unwrap_or_else(|_| b"{\"systemMessage\":\"checkpoint output unavailable\"}".to_vec());
-        bytes.push(b'\n');
-        if bytes.len() <= HOOK_OUTPUT_LIMIT {
-            break bytes;
-        }
-        let mut end = retained
-            .len()
-            .saturating_sub(bytes.len() - HOOK_OUTPUT_LIMIT);
-        while !retained.is_char_boundary(end) {
-            end = end.saturating_sub(1);
-        }
-        retained.truncate(end);
-        truncated = true;
-    };
+        let end = boundaries.get(low).copied().unwrap_or_default();
+        stdout = encode(
+            event,
+            &diagnostic,
+            retained.get(..end).unwrap_or_default(),
+            true,
+        );
+    }
     HookContext {
         session_id,
         status,
@@ -170,4 +168,30 @@ fn render(
         diagnostic,
         stdout,
     }
+}
+
+fn encode(event: HookEvent, diagnostic: &str, retained: &str, truncated: bool) -> Vec<u8> {
+    let mut text = diagnostic.to_owned();
+    if truncated {
+        text.push_str("\n[Checkpoint excerpt; use workflow session show with this ID for the complete Markdown.]");
+    }
+    if !retained.is_empty() {
+        text.push_str("\n\n");
+        text.push_str(retained);
+    }
+    let output = match event {
+        HookEvent::SessionStart => HostOutput::Start {
+            output: StartOutput {
+                hook_event_name: event,
+                additional_context: &text,
+            },
+        },
+        HookEvent::PreCompact => HostOutput::Compact { message: &text },
+    };
+    // Only strings and fixed enums: no fallible map keys, numbers or custom
+    // serializers. Retain an advisory fallback if that ever changes.
+    let mut bytes = serde_json::to_vec(&output)
+        .unwrap_or_else(|_| b"{\"systemMessage\":\"checkpoint output unavailable\"}".to_vec());
+    bytes.push(b'\n');
+    bytes
 }

@@ -486,6 +486,7 @@ mod tests {
             let context = wire["hookSpecificOutput"]["additionalContext"]
                 .as_str()
                 .unwrap();
+            assert!(context.contains(&text.chars().take(80).collect::<String>()));
             assert!(context.contains("Checkpoint excerpt"));
             assert!(context.contains("session save abc123 --file"));
         }
