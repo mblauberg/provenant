@@ -6,6 +6,7 @@ pub mod execution;
 pub mod fabric_policy;
 pub mod field;
 pub mod gates;
+pub mod host_protocol;
 pub mod hosts;
 pub mod identity;
 pub mod json_subprocess;
