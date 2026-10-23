@@ -92,3 +92,17 @@ mod tests {
         assert!(b.options.is_empty() && !b.active && !b.signed_out);
     }
 }
+
+pub mod time;
+pub mod display;
+
+#[derive(Debug, thiserror::Error)]
+pub enum QuotaError {
+    #[error("invalid quota record")] Record(#[source] serde_json::Error),
+    #[error("quota timestamp is out of range")] TimeRange,
+    #[error("invalid quota timestamp")] InvalidTimestamp,
+    #[error("could not write quota report")] Write(#[source] std::io::Error),
+}
+
+#[cfg(test)]
+mod policy_tests;

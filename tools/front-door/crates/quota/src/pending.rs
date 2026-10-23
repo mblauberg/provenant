@@ -90,3 +90,36 @@ pub struct Snapshot {
 // port: belongs in provenant-records
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct CreditAdvice { pub action: String, pub reset_credits: i64, #[serde(flatten)] pub details: BTreeMap<String, Value> }
+// port: belongs in provenant-records
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct DisplayAccount {
+    pub provider: String, pub account: String, pub plan: Option<String>, pub host: Option<String>,
+    pub active: Option<bool>, pub priority: Option<i64>, pub observed_at: Option<Value>, pub attempted_at: Option<Value>,
+    pub status: Option<String>, pub error: Option<String>, pub source: Option<String>, pub provider_name: String,
+    pub display_name: Option<String>, pub plan_label: Option<String>, pub display_window: Option<String>,
+    pub back_at: Option<String>, pub state: String, pub summary: String, pub windows: Vec<DisplayWindow>,
+    pub unreported: Vec<String>, pub coverage_note: String, pub credits: Option<BankedCredits>,
+    pub credit_advice: CreditAdvice, pub use_it_or_lose_it: Option<ExpiringHeadroom>,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)] pub usage_credits: Vec<UsageCredit>,
+    #[serde(skip_serializing_if = "Option::is_none")] pub resets: Option<Resets>,
+    #[serde(skip_serializing_if = "Option::is_none")] pub drawing_credits: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")] pub credit_burn_per_hour: Option<Option<f64>>,
+    #[serde(skip_serializing_if = "Option::is_none")] pub schedule: Option<Schedule>,
+}
+// port: belongs in provenant-records
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ExpiringHeadroom { pub window: String, pub reset_at: Option<String>, pub unused_percent: Value, pub expiring_headroom_percent: Value }
+// port: belongs in provenant-records
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Headline { pub mode: String, pub account: Option<String>, pub window: Option<String> }
+// port: belongs in provenant-records
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct DisplaySettings { pub short_window_alert_percent: f64 }
+// port: belongs in provenant-records
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Report {
+    pub schema: String, pub generated_at: String, pub host: String, pub enabled: bool,
+    pub next_due_at: Option<String>, pub refreshing: Vec<String>, pub providers: Vec<String>,
+    pub accounts: Vec<DisplayAccount>, pub display: DisplaySettings, pub headline: Headline,
+    pub placement_preference: BTreeMap<String, Vec<String>>,
+}
