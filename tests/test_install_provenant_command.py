@@ -7,9 +7,11 @@ import pytest
 
 from tests.support.modules import load_script
 
+from tests.support.front_door import front_door_binary
+
 ROOT = Path(__file__).resolve().parents[1]
 HELPER = ROOT / "scripts" / "install-provenant-command.py"
-SOURCE = ROOT / "scripts" / "provenant.template"
+SOURCE = front_door_binary()
 
 
 def load_helper():

@@ -7,6 +7,8 @@ import time
 import pytest
 
 IDENT = ["-c", "user.name=t", "-c", "user.email=t@example.com"]
+from tests.support.front_door import front_door_binary
+
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -25,12 +27,7 @@ def commit(repo: Path, name: str) -> None:
 
 @pytest.fixture(scope="session")
 def front_door():
-    configured = os.environ.get("PROVENANT_FRONT_DOOR_BIN")
-    if not configured:
-        pytest.skip("Rust stale-checkout integration tests require PROVENANT_FRONT_DOOR_BIN (set by Rust CI)")
-    binary = Path(configured)
-    assert binary.is_file(), f"PROVENANT_FRONT_DOOR_BIN does not name a binary: {binary}"
-    return binary
+    return front_door_binary()
 
 
 def install_product(front_door: Path, root: Path) -> None:
@@ -40,7 +37,8 @@ def install_product(front_door: Path, root: Path) -> None:
     wrapper.chmod(0o755)
     scripts = root / "scripts"
     scripts.mkdir(exist_ok=True)
-    binary = scripts / "provenant"
+    binary = root / "bin/provenant"
+    binary.parent.mkdir()
     shutil.copy2(front_door, binary)
     binary.chmod(0o755)
     owner = scripts / "provenant-profile"
@@ -56,12 +54,12 @@ def install_product(front_door: Path, root: Path) -> None:
 
 
 def invoke(root: Path, *, suppressed: bool = False) -> subprocess.CompletedProcess:
-    env = {**os.environ, "AGENT_FABRIC_PRODUCT_ROOT": str(root), "PROVENANT_TEST_BIN": str(root / "scripts/provenant")}
+    env = {**os.environ, "AGENT_FABRIC_PRODUCT_ROOT": str(root), "PROVENANT_TEST_BIN": str(root / "bin/provenant")}
     if suppressed:
         env["PROVENANT_STALE_CHECKED"] = "1"
     else:
         env.pop("PROVENANT_STALE_CHECKED", None)
-    return subprocess.run([str(root / "scripts/provenant"), "check"], cwd=root, env=env,
+    return subprocess.run([str(root / "bin/provenant"), "check"], cwd=root, env=env,
                           text=True, capture_output=True, check=False)
 
 
@@ -188,8 +186,8 @@ def test_behind_ignores_inherited_git_configuration(tmp_path, front_door, monkey
     assert "1 commits behind origin/main" in invoke(clone).stderr
 
 
-def test_python_fallback_warns_and_suppresses_duplicates(tmp_path, monkeypatch, capsys):
-    """The Python advisory remains live until S1b, including the install checker."""
+def test_install_checker_advisory_warns_and_suppresses_duplicates(tmp_path, monkeypatch, capsys):
+    """The install checker also uses the advisory and suppresses duplicate warnings."""
     from lib import stale_checkout
 
     monkeypatch.delenv("PROVENANT_STALE_CHECKED", raising=False)

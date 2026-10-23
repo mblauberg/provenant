@@ -63,16 +63,16 @@ the graph assigns its individual units.
 | [scripts/install-workflows](../../../scripts/install-workflows) | 315 | config | ported | P |
 | [scripts/instance_installation.py](../../../scripts/instance_installation.py) | 811 | config | ported | P |
 | [scripts/lane_safety_guard.py](../../../scripts/lane_safety_guard.py) | 456 | cli | ported | P |
-| [scripts/lib/front_door_build.py](../../../scripts/lib/front_door_build.py) | 229 | config | redesigned | S |
+| [scripts/lib/front_door_build.py](../../../scripts/lib/front_door_build.py) | 215 | config | redesigned | S |
 | [scripts/lint-timebomb-fixtures.py](../../../scripts/lint-timebomb-fixtures.py) | 311 | cli | ported | P |
 | [scripts/manage_installation.py](../../../scripts/manage_installation.py) | 850 | config | ported | P |
-| [scripts/model_route.py](../../../scripts/model_route.py) | 2023 | routing | ported | P |
+| [scripts/model_route.py](../../../scripts/model_route.py) | 1624 | routing | ported | P |
 | [scripts/model_route_catalog.py](../../../scripts/model_route_catalog.py) | 279 | routing | ported | P |
+| [scripts/model_route_cli.py](../../../scripts/model_route_cli.py) | 428 | routing | ported | P |
 | [scripts/model_route_live.py](../../../scripts/model_route_live.py) | 404 | routing | ported | P |
 | [scripts/model_route_pools.py](../../../scripts/model_route_pools.py) | 692 | routing | ported | P |
 | [scripts/model_route_preferences.py](../../../scripts/model_route_preferences.py) | 566 | routing | ported | P |
 | [scripts/model_route_probe.py](../../../scripts/model_route_probe.py) | 404 | routing | ported | P |
-| [scripts/provenant](../../../scripts/provenant) | 504 | cli | dropped | D |
 | [scripts/provenant_lint.py](../../../scripts/provenant_lint.py) | 209 | cli | ported | P |
 | [scripts/provenant_pr.py](../../../scripts/provenant_pr.py) | 223 | cli | ported | P |
 | [scripts/provider_quota.py](../../../scripts/provider_quota.py) | 1611 | quota | ported | P |
@@ -112,11 +112,12 @@ the graph assigns its individual units.
 | [skills/natural-writing/scripts/style_lint.py](../../../skills/natural-writing/scripts/style_lint.py) | 363 | workflow | ported | P |
 | [skills/orchestrate/scripts/adapters/codex.py](../../../skills/orchestrate/scripts/adapters/codex.py) | 313 | providers | ported | P |
 | [skills/orchestrate/scripts/agy_home.py](../../../skills/orchestrate/scripts/agy_home.py) | 268 | confinement | ported | P |
-| [skills/orchestrate/scripts/batch_run.py](../../../skills/orchestrate/scripts/batch_run.py) | 935 | run | ported | P |
+| [skills/orchestrate/scripts/batch_run.py](../../../skills/orchestrate/scripts/batch_run.py) | 933 | run | ported | P |
 | [skills/orchestrate/scripts/capabilities.py](../../../skills/orchestrate/scripts/capabilities.py) | 374 | routing | ported | P |
 | [skills/orchestrate/scripts/cf_dispatch.py](../../../skills/orchestrate/scripts/cf_dispatch.py) | 969 | providers | ported | P |
 | [skills/orchestrate/scripts/context_usage.py](../../../skills/orchestrate/scripts/context_usage.py) | 364 | telemetry | ported | P |
-| [skills/orchestrate/scripts/dispatch_run.py](../../../skills/orchestrate/scripts/dispatch_run.py) | 3112 | run | redesigned | S |
+| [skills/orchestrate/scripts/dispatch_preflight.py](../../../skills/orchestrate/scripts/dispatch_preflight.py) | 584 | workflow | ported | P |
+| [skills/orchestrate/scripts/dispatch_run.py](../../../skills/orchestrate/scripts/dispatch_run.py) | 2483 | run | redesigned | S |
 | [skills/orchestrate/scripts/exec_routing.py](../../../skills/orchestrate/scripts/exec_routing.py) | 370 | routing | ported | P |
 | [skills/orchestrate/scripts/fabric_records.py](../../../skills/orchestrate/scripts/fabric_records.py) | 647 | records | ported | P |
 | [skills/orchestrate/scripts/instruction_quarantine.py](../../../skills/orchestrate/scripts/instruction_quarantine.py) | 202 | confinement | ported | P |
@@ -126,25 +127,21 @@ the graph assigns its individual units.
 | [skills/orchestrate/scripts/memory_admission.py](../../../skills/orchestrate/scripts/memory_admission.py) | 340 | run | ported | P |
 | [skills/orchestrate/scripts/output_custody.py](../../../skills/orchestrate/scripts/output_custody.py) | 224 | confinement | ported | P |
 | [skills/orchestrate/scripts/process_info.py](../../../skills/orchestrate/scripts/process_info.py) | 452 | supervisor | ported | P |
-| [skills/orchestrate/scripts/provider_exec.py](../../../skills/orchestrate/scripts/provider_exec.py) | 3789 | providers | redesigned | S |
+| [skills/orchestrate/scripts/provider_exec.py](../../../skills/orchestrate/scripts/provider_exec.py) | 3763 | providers | redesigned | S |
 | [skills/orchestrate/scripts/provider_output.py](../../../skills/orchestrate/scripts/provider_output.py) | 548 | providers | ported | P |
-| [skills/orchestrate/scripts/run_controls.py](../../../skills/orchestrate/scripts/run_controls.py) | 1238 | run | ported | P |
+| [skills/orchestrate/scripts/run_controls.py](../../../skills/orchestrate/scripts/run_controls.py) | 1192 | run | ported | P |
 | [skills/orchestrate/scripts/run_dir_finalize.py](../../../skills/orchestrate/scripts/run_dir_finalize.py) | 654 | run | ported | P |
 | [skills/orchestrate/scripts/run_lineage.py](../../../skills/orchestrate/scripts/run_lineage.py) | 656 | run | redesigned | S |
 | [skills/orchestrate/scripts/run_records.py](../../../skills/orchestrate/scripts/run_records.py) | 455 | records | ported | P |
 | [skills/orchestrate/scripts/run_worker_detached.py](../../../skills/orchestrate/scripts/run_worker_detached.py) | 254 | run | ported | P |
 | [skills/orchestrate/scripts/secret_scan.py](../../../skills/orchestrate/scripts/secret_scan.py) | 223 | confinement | ported | P |
 | [skills/orchestrate/scripts/worker_liveness.py](../../../skills/orchestrate/scripts/worker_liveness.py) | 435 | supervisor | ported | P |
+| [skills/orchestrate/scripts/writer_lease.py](../../../skills/orchestrate/scripts/writer_lease.py) | 245 | workflow | ported | P |
 | [skills/session/scripts/cleanup_run_artifacts.py](../../../skills/session/scripts/cleanup_run_artifacts.py) | 202 | workflow | ported | P |
 | [skills/session/scripts/context_audit.py](../../../skills/session/scripts/context_audit.py) | 305 | workflow | ported | P |
 | [skills/session/scripts/state_check.py](../../../skills/session/scripts/state_check.py) | 282 | workflow | ported | P |
 | [tests/conftest.py](../../../tests/conftest.py) | 227 | cli (tests) | redesigned | T |
-| [tests/front_door_parity/parity_support.py](../../../tests/front_door_parity/parity_support.py) | 375 | cli (tests) | redesigned | T |
-| [tests/front_door_parity/test_check_custody.py](../../../tests/front_door_parity/test_check_custody.py) | 218 | cli (tests) | redesigned | T |
-| [tests/front_door_parity/test_dispatch.py](../../../tests/front_door_parity/test_dispatch.py) | 327 | cli (tests) | redesigned | T |
-| [tests/front_door_parity/test_env_exec.py](../../../tests/front_door_parity/test_env_exec.py) | 210 | cli (tests) | redesigned | T |
-| [tests/front_door_parity/test_resolution.py](../../../tests/front_door_parity/test_resolution.py) | 365 | cli (tests) | redesigned | T |
-| [tests/front_door_parity/test_stale.py](../../../tests/front_door_parity/test_stale.py) | 213 | cli (tests) | redesigned | T |
+| [tests/mcp_judge/client.py](../../../tests/mcp_judge/client.py) | 260 | cli (tests) | redesigned | T |
 | [tests/test_actual_effort.py](../../../tests/test_actual_effort.py) | 284 | cli (tests) | redesigned | T |
 | [tests/test_autopilot_bootstrap.py](../../../tests/test_autopilot_bootstrap.py) | 226 | cli (tests) | redesigned | T |
 | [tests/test_autopilot_pause.py](../../../tests/test_autopilot_pause.py) | 203 | cli (tests) | redesigned | T |
@@ -153,57 +150,56 @@ the graph assigns its individual units.
 | [tests/test_capabilities.py](../../../tests/test_capabilities.py) | 404 | routing (tests) | redesigned | T |
 | [tests/test_cf_dispatch.py](../../../tests/test_cf_dispatch.py) | 2905 | providers (tests) | redesigned | T |
 | [tests/test_cf_dispatch_git_custody.py](../../../tests/test_cf_dispatch_git_custody.py) | 211 | cli (tests) | redesigned | T |
-| [tests/test_check_provenant_install.py](../../../tests/test_check_provenant_install.py) | 373 | cli (tests) | redesigned | T |
+| [tests/test_check_provenant_install.py](../../../tests/test_check_provenant_install.py) | 329 | cli (tests) | redesigned | T |
 | [tests/test_ci_repository_assurance_policy.py](../../../tests/test_ci_repository_assurance_policy.py) | 756 | cli (tests) | redesigned | T |
-| [tests/test_clean.py](../../../tests/test_clean.py) | 1384 | cli (tests) | redesigned | T |
-| [tests/test_configure_fabric_mcp.py](../../../tests/test_configure_fabric_mcp.py) | 1308 | config (tests) | redesigned | T |
+| [tests/test_clean.py](../../../tests/test_clean.py) | 1374 | cli (tests) | redesigned | T |
+| [tests/test_configure_fabric_mcp.py](../../../tests/test_configure_fabric_mcp.py) | 1310 | config (tests) | redesigned | T |
 | [tests/test_context_audit.py](../../../tests/test_context_audit.py) | 272 | cli (tests) | redesigned | T |
 | [tests/test_context_usage.py](../../../tests/test_context_usage.py) | 363 | telemetry (tests) | redesigned | T |
 | [tests/test_delivery_contract.py](../../../tests/test_delivery_contract.py) | 1731 | cli (tests) | redesigned | T |
 | [tests/test_delivery_receipt_producer.py](../../../tests/test_delivery_receipt_producer.py) | 1291 | cli (tests) | redesigned | T |
-| [tests/test_dispatch_run.py](../../../tests/test_dispatch_run.py) | 7122 | run (tests) | redesigned | T |
-| [tests/test_fabric_hosts.py](../../../tests/test_fabric_hosts.py) | 3859 | fabric-runtime (tests) | redesigned | T |
+| [tests/test_dispatch_run.py](../../../tests/test_dispatch_run.py) | 7253 | run (tests) | redesigned | T |
+| [tests/test_fabric_hosts.py](../../../tests/test_fabric_hosts.py) | 3861 | fabric-runtime (tests) | redesigned | T |
 | [tests/test_fabric_records.py](../../../tests/test_fabric_records.py) | 816 | records (tests) | redesigned | T |
-| [tests/test_front_door_build.py](../../../tests/test_front_door_build.py) | 274 | config (tests) | redesigned | T |
+| [tests/test_front_door_build.py](../../../tests/test_front_door_build.py) | 245 | config (tests) | redesigned | T |
 | [tests/test_frontend_live_server_security.py](../../../tests/test_frontend_live_server_security.py) | 1658 | cli (tests) | redesigned | T |
 | [tests/test_frontend_source_security.py](../../../tests/test_frontend_source_security.py) | 2228 | cli (tests) | redesigned | T |
 | [tests/test_git_evidence.py](../../../tests/test_git_evidence.py) | 346 | cli (tests) | redesigned | T |
 | [tests/test_harness_contract.py](../../../tests/test_harness_contract.py) | 484 | cli (tests) | redesigned | T |
-| [tests/test_harness_profile.py](../../../tests/test_harness_profile.py) | 443 | config (tests) | redesigned | T |
+| [tests/test_harness_profile.py](../../../tests/test_harness_profile.py) | 445 | config (tests) | redesigned | T |
 | [tests/test_herdr_cli_contract.py](../../../tests/test_herdr_cli_contract.py) | 237 | cli (tests) | redesigned | T |
 | [tests/test_implement_run_workflow.py](../../../tests/test_implement_run_workflow.py) | 232 | cli (tests) | redesigned | T |
-| [tests/test_install_harness.py](../../../tests/test_install_harness.py) | 2447 | config (tests) | redesigned | T |
-| [tests/test_install_provenant_command.py](../../../tests/test_install_provenant_command.py) | 270 | config (tests) | redesigned | T |
+| [tests/test_install_harness.py](../../../tests/test_install_harness.py) | 2397 | config (tests) | redesigned | T |
+| [tests/test_install_provenant_command.py](../../../tests/test_install_provenant_command.py) | 272 | config (tests) | redesigned | T |
 | [tests/test_install_skills.py](../../../tests/test_install_skills.py) | 1311 | config (tests) | redesigned | T |
 | [tests/test_instance_installation.py](../../../tests/test_instance_installation.py) | 926 | config (tests) | redesigned | T |
 | [tests/test_issue_697_custody.py](../../../tests/test_issue_697_custody.py) | 507 | cli (tests) | redesigned | T |
 | [tests/test_lane_safety.py](../../../tests/test_lane_safety.py) | 515 | cli (tests) | redesigned | T |
 | [tests/test_log_reducer.py](../../../tests/test_log_reducer.py) | 248 | run (tests) | redesigned | T |
 | [tests/test_memory_admission.py](../../../tests/test_memory_admission.py) | 642 | run (tests) | redesigned | T |
-| [tests/test_model_route.py](../../../tests/test_model_route.py) | 5184 | routing (tests) | redesigned | T |
-| [tests/test_model_route_pools.py](../../../tests/test_model_route_pools.py) | 984 | routing (tests) | redesigned | T |
+| [tests/test_model_route.py](../../../tests/test_model_route.py) | 4684 | routing (tests) | redesigned | T |
+| [tests/test_model_route_pools.py](../../../tests/test_model_route_pools.py) | 986 | routing (tests) | redesigned | T |
 | [tests/test_node_workspace_provision.py](../../../tests/test_node_workspace_provision.py) | 207 | cli (tests) | redesigned | T |
 | [tests/test_npm_attestation_negative.py](../../../tests/test_npm_attestation_negative.py) | 276 | cli (tests) | redesigned | T |
 | [tests/test_otlp_collector.py](../../../tests/test_otlp_collector.py) | 213 | cli (tests) | redesigned | T |
 | [tests/test_process_info.py](../../../tests/test_process_info.py) | 286 | supervisor (tests) | redesigned | T |
-| [tests/test_provenant_cli.py](../../../tests/test_provenant_cli.py) | 1161 | cli (tests) | redesigned | T |
 | [tests/test_provenant_lint.py](../../../tests/test_provenant_lint.py) | 231 | cli (tests) | redesigned | T |
-| [tests/test_provider_exec.py](../../../tests/test_provider_exec.py) | 9276 | providers (tests) | redesigned | T |
-| [tests/test_provider_quota.py](../../../tests/test_provider_quota.py) | 2186 | quota (tests) | redesigned | T |
+| [tests/test_provider_exec.py](../../../tests/test_provider_exec.py) | 9235 | providers (tests) | redesigned | T |
+| [tests/test_provider_quota.py](../../../tests/test_provider_quota.py) | 2188 | quota (tests) | redesigned | T |
 | [tests/test_public_release_check.py](../../../tests/test_public_release_check.py) | 804 | cli (tests) | redesigned | T |
 | [tests/test_quota_display.py](../../../tests/test_quota_display.py) | 580 | quota (tests) | redesigned | T |
 | [tests/test_review_panel.py](../../../tests/test_review_panel.py) | 221 | workflow (tests) | redesigned | T |
 | [tests/test_review_terminal.py](../../../tests/test_review_terminal.py) | 278 | workflow (tests) | redesigned | T |
-| [tests/test_run_controls.py](../../../tests/test_run_controls.py) | 1193 | run (tests) | redesigned | T |
+| [tests/test_run_controls.py](../../../tests/test_run_controls.py) | 1348 | run (tests) | redesigned | T |
 | [tests/test_run_dir_finalize.py](../../../tests/test_run_dir_finalize.py) | 1112 | run (tests) | redesigned | T |
 | [tests/test_run_invariants_characterisation.py](../../../tests/test_run_invariants_characterisation.py) | 347 | cli (tests) | redesigned | T |
 | [tests/test_runtime_architecture.py](../../../tests/test_runtime_architecture.py) | 435 | cli (tests) | redesigned | T |
 | [tests/test_session_state_check.py](../../../tests/test_session_state_check.py) | 509 | cli (tests) | redesigned | T |
 | [tests/test_skill_eval_fixtures.py](../../../tests/test_skill_eval_fixtures.py) | 240 | cli (tests) | redesigned | T |
 | [tests/test_software_delivery_continuity.py](../../../tests/test_software_delivery_continuity.py) | 508 | cli (tests) | redesigned | T |
-| [tests/test_stale_checkout.py](../../../tests/test_stale_checkout.py) | 206 | cli (tests) | redesigned | T |
+| [tests/test_stale.py](../../../tests/test_stale.py) | 204 | cli (tests) | redesigned | T |
 | [tests/test_static_security_check.py](../../../tests/test_static_security_check.py) | 253 | cli (tests) | redesigned | T |
-| [tests/test_telemetry.py](../../../tests/test_telemetry.py) | 2929 | telemetry (tests) | redesigned | T |
+| [tests/test_telemetry.py](../../../tests/test_telemetry.py) | 2931 | telemetry (tests) | redesigned | T |
 | [tests/test_timebomb_fixture_lint.py](../../../tests/test_timebomb_fixture_lint.py) | 281 | cli (tests) | redesigned | T |
 | [tests/test_ui_ux_detector_cli.py](../../../tests/test_ui_ux_detector_cli.py) | 644 | cli (tests) | redesigned | T |
 | [tests/test_ui_ux_provenance_contract.py](../../../tests/test_ui_ux_provenance_contract.py) | 213 | cli (tests) | redesigned | T |
@@ -211,7 +207,7 @@ the graph assigns its individual units.
 | [tests/test_worker_liveness.py](../../../tests/test_worker_liveness.py) | 466 | supervisor (tests) | redesigned | T |
 | [tests/test_worktree_policy.py](../../../tests/test_worktree_policy.py) | 1018 | cli (tests) | redesigned | T |
 
-Source totals: 371 files, 156,183 lines; product 184 files, 65,383 lines.
+Source totals: 373 files, 153,578 lines; product 189 files, 65,479 lines.
 
 Partial deletions in large retained files are governed by the supervisor's
 [deletion list](../harness/rust-supervisor.md#deletable-tests) and

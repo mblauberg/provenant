@@ -1,7 +1,7 @@
 {
   "version": 1,
   "rulebook_version": 1,
-  "source_digest": "7f0e388e968795e236dfeaaa818470edd4accfb6194f1bbea5603b2e7421e8c5",
+  "source_digest": "9e2a5b6654d4af4cf415d93f8f7b16ec85ff6aef303c9a840889ecff44305d2c",
   "scope": "Git-tracked Python (including shebang entry points), TypeScript and imported production ps.mjs; tests inventory-only; planning scripts excluded",
   "gate_definitions": {
     "unit": "Target crate's unit tests, fmt and clippy; CI once the crate exists",
@@ -13,6 +13,87 @@
     "differential": "Pinned old/new isolated runs with reviewed divergences.md entries"
   },
   "nodes": [
+    {
+      "id": "integrate:31b9fba25e70",
+      "kind": "integration",
+      "source_files": [
+        "scripts/check-provenant-install.py",
+        "scripts/clean.py",
+        "scripts/fabric_git.py",
+        "scripts/fabric_hosts.py",
+        "scripts/fabric_lanes.py",
+        "scripts/instance_installation.py",
+        "scripts/lib/stale_checkout.py",
+        "scripts/model_route.py",
+        "scripts/model_route_live.py",
+        "scripts/provider_quota.py",
+        "scripts/telemetry.py",
+        "scripts/telemetry_hosts.py",
+        "scripts/worktree.py",
+        "skills/orchestrate/scripts/agy_home.py",
+        "skills/orchestrate/scripts/cf_dispatch.py",
+        "skills/orchestrate/scripts/dispatch_preflight.py",
+        "skills/orchestrate/scripts/exec_routing.py",
+        "skills/orchestrate/scripts/fabric_records.py",
+        "skills/orchestrate/scripts/instruction_quarantine.py",
+        "skills/orchestrate/scripts/lane_exit.py",
+        "skills/orchestrate/scripts/lane_launch.py",
+        "skills/orchestrate/scripts/lane_protection.py",
+        "skills/orchestrate/scripts/layout.py",
+        "skills/orchestrate/scripts/provider_exec.py",
+        "skills/orchestrate/scripts/provider_observer.py",
+        "skills/orchestrate/scripts/provider_output.py",
+        "skills/orchestrate/scripts/run_lineage.py"
+      ],
+      "target_crate": "cross-crate",
+      "depends_on": [
+        "prerequisite:J1",
+        "prerequisite:J2",
+        "prerequisite:J3",
+        "prerequisite:adr",
+        "scripts/check-provenant-install.py#unit-01",
+        "scripts/clean.py#unit-03",
+        "scripts/fabric_git.py#unit-04",
+        "scripts/fabric_hosts.py#unit-03",
+        "scripts/fabric_lanes.py#unit-04",
+        "scripts/instance_installation.py#unit-03",
+        "scripts/lib/stale_checkout.py#unit-01",
+        "scripts/model_route.py#unit-05",
+        "scripts/model_route_live.py#unit-02",
+        "scripts/provider_quota.py#unit-05",
+        "scripts/telemetry.py#unit-04",
+        "scripts/telemetry_hosts.py#unit-01",
+        "scripts/worktree.py#unit-03",
+        "skills/orchestrate/scripts/agy_home.py#unit-01",
+        "skills/orchestrate/scripts/cf_dispatch.py#unit-03",
+        "skills/orchestrate/scripts/dispatch_preflight.py#unit-02",
+        "skills/orchestrate/scripts/exec_routing.py#unit-02",
+        "skills/orchestrate/scripts/fabric_records.py#unit-02",
+        "skills/orchestrate/scripts/instruction_quarantine.py#unit-01",
+        "skills/orchestrate/scripts/lane_exit.py#unit-01",
+        "skills/orchestrate/scripts/lane_launch.py#unit-01",
+        "skills/orchestrate/scripts/lane_protection.py#unit-01",
+        "skills/orchestrate/scripts/layout.py#unit-01",
+        "skills/orchestrate/scripts/provider_exec.py#unit-12",
+        "skills/orchestrate/scripts/provider_observer.py#unit-01",
+        "skills/orchestrate/scripts/provider_output.py#unit-02",
+        "skills/orchestrate/scripts/run_lineage.py#unit-02",
+        "workspace:manifest-and-digest"
+      ],
+      "risk": "high",
+      "recommended_model_tier": "principal",
+      "gates": [
+        "unit",
+        "J1",
+        "J2",
+        "J3",
+        "lane",
+        "front-door",
+        "differential"
+      ],
+      "lane_days": 0.5,
+      "action": "redesigned"
+    },
     {
       "id": "integrate:496bc5e66c6b",
       "kind": "integration",
@@ -59,81 +140,6 @@
         "prerequisite:adr",
         "runtime/fabric/src/process-identity.ts#unit-02",
         "runtime/fabric/src/run-registry.ts#unit-01",
-        "workspace:manifest-and-digest"
-      ],
-      "risk": "high",
-      "recommended_model_tier": "principal",
-      "gates": [
-        "unit",
-        "J1",
-        "J2",
-        "J3",
-        "lane",
-        "front-door",
-        "differential"
-      ],
-      "lane_days": 0.5,
-      "action": "redesigned"
-    },
-    {
-      "id": "integrate:680ea17ec5d1",
-      "kind": "integration",
-      "source_files": [
-        "scripts/check-provenant-install.py",
-        "scripts/clean.py",
-        "scripts/fabric_git.py",
-        "scripts/fabric_hosts.py",
-        "scripts/fabric_lanes.py",
-        "scripts/instance_installation.py",
-        "scripts/lib/stale_checkout.py",
-        "scripts/model_route.py",
-        "scripts/model_route_live.py",
-        "scripts/provider_quota.py",
-        "scripts/telemetry.py",
-        "scripts/telemetry_hosts.py",
-        "scripts/worktree.py",
-        "skills/orchestrate/scripts/agy_home.py",
-        "skills/orchestrate/scripts/cf_dispatch.py",
-        "skills/orchestrate/scripts/dispatch_run.py",
-        "skills/orchestrate/scripts/exec_routing.py",
-        "skills/orchestrate/scripts/fabric_records.py",
-        "skills/orchestrate/scripts/instruction_quarantine.py",
-        "skills/orchestrate/scripts/lane_protection.py",
-        "skills/orchestrate/scripts/layout.py",
-        "skills/orchestrate/scripts/provider_exec.py",
-        "skills/orchestrate/scripts/provider_output.py",
-        "skills/orchestrate/scripts/run_lineage.py"
-      ],
-      "target_crate": "cross-crate",
-      "depends_on": [
-        "prerequisite:J1",
-        "prerequisite:J2",
-        "prerequisite:J3",
-        "prerequisite:adr",
-        "scripts/check-provenant-install.py#unit-01",
-        "scripts/clean.py#unit-03",
-        "scripts/fabric_git.py#unit-04",
-        "scripts/fabric_hosts.py#unit-03",
-        "scripts/fabric_lanes.py#unit-04",
-        "scripts/instance_installation.py#unit-03",
-        "scripts/lib/stale_checkout.py#unit-01",
-        "scripts/model_route.py#unit-07",
-        "scripts/model_route_live.py#unit-02",
-        "scripts/provider_quota.py#unit-05",
-        "scripts/telemetry.py#unit-04",
-        "scripts/telemetry_hosts.py#unit-01",
-        "scripts/worktree.py#unit-03",
-        "skills/orchestrate/scripts/agy_home.py#unit-01",
-        "skills/orchestrate/scripts/cf_dispatch.py#unit-03",
-        "skills/orchestrate/scripts/dispatch_run.py#unit-11",
-        "skills/orchestrate/scripts/exec_routing.py#unit-02",
-        "skills/orchestrate/scripts/fabric_records.py#unit-02",
-        "skills/orchestrate/scripts/instruction_quarantine.py#unit-01",
-        "skills/orchestrate/scripts/lane_protection.py#unit-01",
-        "skills/orchestrate/scripts/layout.py#unit-01",
-        "skills/orchestrate/scripts/provider_exec.py#unit-12",
-        "skills/orchestrate/scripts/provider_output.py#unit-02",
-        "skills/orchestrate/scripts/run_lineage.py#unit-02",
         "workspace:manifest-and-digest"
       ],
       "risk": "high",
@@ -267,7 +273,6 @@
       "target_crate": "fabric-runtime",
       "depends_on": [
         "integrate:5ef42cbe0051",
-        "integrate:680ea17ec5d1",
         "prerequisite:J1",
         "prerequisite:J2",
         "prerequisite:J3",
@@ -284,6 +289,7 @@
         "runtime/fabric/src/run-root.ts#unit-01",
         "runtime/fabric/src/run-status.ts#unit-03",
         "skills/orchestrate/scripts/batch_run.py#unit-03",
+        "skills/orchestrate/scripts/dispatch_run.py#unit-08",
         "skills/orchestrate/scripts/run_controls.py#unit-04",
         "workspace:manifest-and-digest"
       ],
@@ -454,9 +460,9 @@
       ],
       "target_crate": "cli",
       "depends_on": [
+        "integrate:31b9fba25e70",
         "integrate:496bc5e66c6b",
         "integrate:5ef42cbe0051",
-        "integrate:680ea17ec5d1",
         "prerequisite:J1",
         "prerequisite:J2",
         "prerequisite:J3",
@@ -633,9 +639,9 @@
       ],
       "target_crate": "cli",
       "depends_on": [
+        "integrate:31b9fba25e70",
         "integrate:496bc5e66c6b",
         "integrate:5ef42cbe0051",
-        "integrate:680ea17ec5d1",
         "prerequisite:J1",
         "prerequisite:J2",
         "prerequisite:J3",
@@ -788,9 +794,9 @@
       ],
       "target_crate": "cli",
       "depends_on": [
+        "integrate:31b9fba25e70",
         "integrate:496bc5e66c6b",
         "integrate:5ef42cbe0051",
-        "integrate:680ea17ec5d1",
         "prerequisite:J1",
         "prerequisite:J2",
         "prerequisite:J3",
@@ -1185,7 +1191,6 @@
       "target_crate": "fabric-runtime",
       "depends_on": [
         "integrate:5ef42cbe0051",
-        "integrate:680ea17ec5d1",
         "prerequisite:J1",
         "prerequisite:J2",
         "prerequisite:J3",
@@ -1204,6 +1209,7 @@
         "runtime/fabric/src/seat-index.ts#unit-01",
         "runtime/fabric/src/store.ts#unit-04",
         "runtime/fabric/src/surface.ts#unit-01",
+        "skills/orchestrate/scripts/dispatch_run.py#unit-08",
         "skills/orchestrate/scripts/run_controls.py#unit-04",
         "workspace:manifest-and-digest"
       ],
@@ -1318,7 +1324,6 @@
       "target_crate": "fabric-runtime",
       "depends_on": [
         "integrate:5ef42cbe0051",
-        "integrate:680ea17ec5d1",
         "prerequisite:J1",
         "prerequisite:J2",
         "prerequisite:J3",
@@ -1338,6 +1343,7 @@
         "runtime/fabric/src/seat-index.ts#unit-01",
         "runtime/fabric/src/store.ts#unit-04",
         "runtime/fabric/src/surface.ts#unit-01",
+        "skills/orchestrate/scripts/dispatch_run.py#unit-08",
         "skills/orchestrate/scripts/run_controls.py#unit-04",
         "workspace:manifest-and-digest"
       ],
@@ -1429,7 +1435,6 @@
       "target_crate": "fabric-runtime",
       "depends_on": [
         "integrate:5ef42cbe0051",
-        "integrate:680ea17ec5d1",
         "prerequisite:J1",
         "prerequisite:J2",
         "prerequisite:J3",
@@ -1449,6 +1454,7 @@
         "runtime/fabric/src/seat-index.ts#unit-01",
         "runtime/fabric/src/store.ts#unit-04",
         "runtime/fabric/src/surface.ts#unit-01",
+        "skills/orchestrate/scripts/dispatch_run.py#unit-08",
         "skills/orchestrate/scripts/run_controls.py#unit-04",
         "workspace:manifest-and-digest"
       ],
@@ -2813,7 +2819,6 @@
       ],
       "target_crate": "supervisor",
       "depends_on": [
-        "integrate:680ea17ec5d1",
         "prerequisite:J1",
         "prerequisite:J2",
         "prerequisite:J3",
@@ -2824,6 +2829,7 @@
         "runtime/fabric/src/ps.mjs#unit-01",
         "runtime/fabric/src/python-owner.ts#unit-01",
         "runtime/fabric/src/run-registry.ts#interface",
+        "skills/orchestrate/scripts/dispatch_run.py#unit-08",
         "workspace:manifest-and-digest"
       ],
       "risk": "high",
@@ -2871,7 +2877,6 @@
       ],
       "target_crate": "supervisor",
       "depends_on": [
-        "integrate:680ea17ec5d1",
         "prerequisite:J1",
         "prerequisite:J2",
         "prerequisite:J3",
@@ -2883,6 +2888,7 @@
         "runtime/fabric/src/ps.mjs#unit-01",
         "runtime/fabric/src/python-owner.ts#unit-01",
         "runtime/fabric/src/run-registry.ts#interface",
+        "skills/orchestrate/scripts/dispatch_run.py#unit-08",
         "workspace:manifest-and-digest"
       ],
       "risk": "high",
@@ -3030,7 +3036,6 @@
       "depends_on": [
         "integrate:496bc5e66c6b",
         "integrate:5ef42cbe0051",
-        "integrate:680ea17ec5d1",
         "prerequisite:J1",
         "prerequisite:J2",
         "prerequisite:J3",
@@ -3042,6 +3047,7 @@
         "runtime/fabric/src/python-owner.ts#unit-01",
         "runtime/fabric/src/run-root.ts#unit-01",
         "runtime/fabric/src/run-status.ts#unit-03",
+        "skills/orchestrate/scripts/dispatch_run.py#unit-08",
         "skills/orchestrate/scripts/run_controls.py#unit-04",
         "workspace:manifest-and-digest"
       ],
@@ -4590,7 +4596,7 @@
       "source_spans": [
         {
           "start": 1,
-          "end": 170,
+          "end": 165,
           "symbols": [
             "check-provenant-install"
           ]
@@ -4728,7 +4734,7 @@
       ],
       "target_crate": "cli",
       "depends_on": [
-        "integrate:680ea17ec5d1",
+        "integrate:31b9fba25e70",
         "prerequisite:J1",
         "prerequisite:J2",
         "prerequisite:adr",
@@ -5760,7 +5766,7 @@
         "scripts/fabric_git.py#interface",
         "scripts/fabric_lanes.py#interface",
         "skills/_shared/bounded_process.py#unit-01",
-        "skills/orchestrate/scripts/dispatch_run.py#interface",
+        "skills/orchestrate/scripts/dispatch_preflight.py#interface",
         "workspace:manifest-and-digest"
       ],
       "risk": "medium",
@@ -5804,7 +5810,7 @@
         "scripts/fabric_lanes.py#interface",
         "scripts/fabric_lanes.py#unit-01",
         "skills/_shared/bounded_process.py#unit-01",
-        "skills/orchestrate/scripts/dispatch_run.py#interface",
+        "skills/orchestrate/scripts/dispatch_preflight.py#interface",
         "workspace:manifest-and-digest"
       ],
       "risk": "medium",
@@ -5855,7 +5861,7 @@
         "scripts/fabric_lanes.py#interface",
         "scripts/fabric_lanes.py#unit-02",
         "skills/_shared/bounded_process.py#unit-01",
-        "skills/orchestrate/scripts/dispatch_run.py#interface",
+        "skills/orchestrate/scripts/dispatch_preflight.py#interface",
         "workspace:manifest-and-digest"
       ],
       "risk": "medium",
@@ -5908,7 +5914,7 @@
         "scripts/fabric_lanes.py#interface",
         "scripts/fabric_lanes.py#unit-03",
         "skills/_shared/bounded_process.py#unit-01",
-        "skills/orchestrate/scripts/dispatch_run.py#interface",
+        "skills/orchestrate/scripts/dispatch_preflight.py#interface",
         "workspace:manifest-and-digest"
       ],
       "risk": "medium",
@@ -6393,7 +6399,7 @@
       "source_spans": [
         {
           "start": 1,
-          "end": 229,
+          "end": 215,
           "symbols": [
             "front_door_build"
           ]
@@ -6957,6 +6963,7 @@
         "scripts/lib/roots.py#unit-01",
         "scripts/model_route.py#interface",
         "scripts/model_route_catalog.py#unit-01",
+        "scripts/model_route_cli.py#unit-02",
         "scripts/model_route_live.py#interface",
         "scripts/model_route_pools.py#unit-03",
         "scripts/model_route_preferences.py#unit-02",
@@ -7009,6 +7016,7 @@
         "scripts/model_route.py#interface",
         "scripts/model_route.py#unit-01",
         "scripts/model_route_catalog.py#unit-01",
+        "scripts/model_route_cli.py#unit-02",
         "scripts/model_route_live.py#interface",
         "scripts/model_route_pools.py#unit-03",
         "scripts/model_route_preferences.py#unit-02",
@@ -7076,6 +7084,7 @@
         "scripts/model_route.py#interface",
         "scripts/model_route.py#unit-02",
         "scripts/model_route_catalog.py#unit-01",
+        "scripts/model_route_cli.py#unit-02",
         "scripts/model_route_live.py#interface",
         "scripts/model_route_pools.py#unit-03",
         "scripts/model_route_preferences.py#unit-02",
@@ -7147,6 +7156,7 @@
         "scripts/model_route.py#interface",
         "scripts/model_route.py#unit-03",
         "scripts/model_route_catalog.py#unit-01",
+        "scripts/model_route_cli.py#unit-02",
         "scripts/model_route_live.py#interface",
         "scripts/model_route_pools.py#unit-03",
         "scripts/model_route_preferences.py#unit-02",
@@ -7177,7 +7187,7 @@
       "source_spans": [
         {
           "start": 1333,
-          "end": 1670,
+          "end": 1624,
           "symbols": [
             "resolve.Assign",
             "resolve.If",
@@ -7214,11 +7224,12 @@
             "resolve.If",
             "resolve.If",
             "resolve.Return",
-            "parser",
             "_router",
             "_fabric_records",
             "Assign",
-            "_health_record"
+            "route_pick",
+            "main",
+            "If"
           ]
         }
       ],
@@ -7232,124 +7243,7 @@
         "scripts/model_route.py#interface",
         "scripts/model_route.py#unit-04",
         "scripts/model_route_catalog.py#unit-01",
-        "scripts/model_route_live.py#interface",
-        "scripts/model_route_pools.py#unit-03",
-        "scripts/model_route_preferences.py#unit-02",
-        "scripts/model_route_probe.py#unit-02",
-        "skills/_shared/harness_profile.py#unit-02",
-        "skills/_shared/roots.py#unit-01",
-        "skills/orchestrate/scripts/fabric_records.py#interface",
-        "workspace:manifest-and-digest"
-      ],
-      "risk": "medium",
-      "recommended_model_tier": "junior",
-      "review_model_tier": "principal",
-      "gates": [
-        "unit",
-        "J1",
-        "J2",
-        "differential"
-      ],
-      "lane_days": 0.5,
-      "action": "ported"
-    },
-    {
-      "id": "scripts/model_route.py#unit-06",
-      "kind": "port",
-      "source_files": [
-        "scripts/model_route.py"
-      ],
-      "source_spans": [
-        {
-          "start": 1671,
-          "end": 2018,
-          "symbols": [
-            "route_pick",
-            "main",
-            "_main",
-            "_main.Assign",
-            "_main.Assign",
-            "_main.Assign",
-            "_main.If",
-            "_main.Assign",
-            "_main.Assign",
-            "_main.If",
-            "_main.If",
-            "_main.If",
-            "_main.If",
-            "_main.If",
-            "_main.If",
-            "_main.If",
-            "_main.If",
-            "_main.If",
-            "_main.If",
-            "_main.If",
-            "_main.Assign",
-            "_main.Assign",
-            "_main.If",
-            "_main.Global",
-            "_main.Assign",
-            "_main.If"
-          ]
-        }
-      ],
-      "target_crate": "routing",
-      "depends_on": [
-        "prerequisite:J1",
-        "prerequisite:J2",
-        "prerequisite:adr",
-        "scripts/harness_profile.py#unit-01",
-        "scripts/lib/roots.py#unit-01",
-        "scripts/model_route.py#interface",
-        "scripts/model_route.py#unit-05",
-        "scripts/model_route_catalog.py#unit-01",
-        "scripts/model_route_live.py#interface",
-        "scripts/model_route_pools.py#unit-03",
-        "scripts/model_route_preferences.py#unit-02",
-        "scripts/model_route_probe.py#unit-02",
-        "skills/_shared/harness_profile.py#unit-02",
-        "skills/_shared/roots.py#unit-01",
-        "skills/orchestrate/scripts/fabric_records.py#interface",
-        "workspace:manifest-and-digest"
-      ],
-      "risk": "medium",
-      "recommended_model_tier": "junior",
-      "review_model_tier": "principal",
-      "gates": [
-        "unit",
-        "J1",
-        "J2",
-        "differential"
-      ],
-      "lane_days": 0.5,
-      "action": "ported"
-    },
-    {
-      "id": "scripts/model_route.py#unit-07",
-      "kind": "port",
-      "source_files": [
-        "scripts/model_route.py"
-      ],
-      "source_spans": [
-        {
-          "start": 2019,
-          "end": 2023,
-          "symbols": [
-            "_main.Return",
-            "If"
-          ]
-        }
-      ],
-      "target_crate": "routing",
-      "depends_on": [
-        "prerequisite:J1",
-        "prerequisite:J2",
-        "prerequisite:adr",
-        "scripts/harness_profile.py#unit-01",
-        "scripts/lib/roots.py#unit-01",
-        "scripts/model_route.py#interface",
-        "scripts/model_route.py#unit-06",
-        "scripts/model_route_catalog.py#unit-01",
+        "scripts/model_route_cli.py#unit-02",
         "scripts/model_route_live.py#interface",
         "scripts/model_route_pools.py#unit-03",
         "scripts/model_route_preferences.py#unit-02",
@@ -7391,6 +7285,109 @@
         "prerequisite:J1",
         "prerequisite:J2",
         "prerequisite:adr",
+        "workspace:manifest-and-digest"
+      ],
+      "risk": "medium",
+      "recommended_model_tier": "junior",
+      "review_model_tier": "principal",
+      "gates": [
+        "unit",
+        "J1",
+        "J2",
+        "differential"
+      ],
+      "lane_days": 0.5,
+      "action": "ported"
+    },
+    {
+      "id": "scripts/model_route_cli.py#unit-01",
+      "kind": "port",
+      "source_files": [
+        "scripts/model_route_cli.py"
+      ],
+      "source_spans": [
+        {
+          "start": 1,
+          "end": 194,
+          "symbols": [
+            "Expr",
+            "ImportFrom",
+            "Import",
+            "Import",
+            "Import",
+            "ImportFrom",
+            "Import",
+            "Import",
+            "ImportFrom",
+            "_ModuleGlobals",
+            "parser",
+            "_health_record",
+            "_main",
+            "_main.Assign",
+            "_main.Assign",
+            "_main.Assign",
+            "_main.If",
+            "_main.Assign",
+            "_main.Assign",
+            "_main.If",
+            "_main.If",
+            "_main.If",
+            "_main.If",
+            "_main.If",
+            "_main.If",
+            "_main.If",
+            "_main.If",
+            "_main.If",
+            "_main.If",
+            "_main.If",
+            "_main.Assign",
+            "_main.Assign",
+            "_main.If",
+            "_main.Assign"
+          ]
+        }
+      ],
+      "target_crate": "routing",
+      "depends_on": [
+        "prerequisite:J1",
+        "prerequisite:J2",
+        "prerequisite:adr",
+        "workspace:manifest-and-digest"
+      ],
+      "risk": "medium",
+      "recommended_model_tier": "junior",
+      "review_model_tier": "principal",
+      "gates": [
+        "unit",
+        "J1",
+        "J2",
+        "differential"
+      ],
+      "lane_days": 0.5,
+      "action": "ported"
+    },
+    {
+      "id": "scripts/model_route_cli.py#unit-02",
+      "kind": "port",
+      "source_files": [
+        "scripts/model_route_cli.py"
+      ],
+      "source_spans": [
+        {
+          "start": 195,
+          "end": 428,
+          "symbols": [
+            "_main.If",
+            "_main.Return"
+          ]
+        }
+      ],
+      "target_crate": "routing",
+      "depends_on": [
+        "prerequisite:J1",
+        "prerequisite:J2",
+        "prerequisite:adr",
+        "scripts/model_route_cli.py#unit-01",
         "workspace:manifest-and-digest"
       ],
       "risk": "medium",
@@ -7931,7 +7928,7 @@
       ],
       "target_crate": "cli",
       "depends_on": [
-        "integrate:680ea17ec5d1",
+        "integrate:31b9fba25e70",
         "prerequisite:J1",
         "prerequisite:J2",
         "prerequisite:adr",
@@ -7949,153 +7946,6 @@
       ],
       "lane_days": 0.5,
       "action": "ported"
-    },
-    {
-      "id": "scripts/provenant#unit-01",
-      "kind": "port",
-      "source_files": [
-        "scripts/provenant"
-      ],
-      "source_spans": [
-        {
-          "start": 1,
-          "end": 338,
-          "symbols": [
-            "module",
-            "Expr",
-            "ImportFrom",
-            "Import",
-            "ImportFrom",
-            "Import",
-            "Import",
-            "ImportFrom",
-            "ImportFrom",
-            "ImportFrom",
-            "Assign",
-            "Assign",
-            "Assign",
-            "Assign",
-            "Assign",
-            "resolve_product_root",
-            "usage",
-            "help_text",
-            "AnnAssign"
-          ]
-        }
-      ],
-      "target_crate": "cli",
-      "depends_on": [
-        "integrate:680ea17ec5d1",
-        "prerequisite:J1",
-        "prerequisite:J2",
-        "prerequisite:adr",
-        "scripts/check_target.py#unit-01",
-        "scripts/lib/product_root_resolver.py#unit-01",
-        "scripts/provenant_lint.py#unit-01",
-        "scripts/reap.py#unit-01",
-        "scripts/utility.py#unit-01",
-        "skills/orchestrate/scripts/batch_run.py#unit-03",
-        "skills/orchestrate/scripts/capabilities.py#unit-02",
-        "skills/orchestrate/scripts/run_controls.py#unit-04",
-        "workspace:manifest-and-digest"
-      ],
-      "risk": "medium",
-      "recommended_model_tier": "junior",
-      "review_model_tier": "principal",
-      "gates": [
-        "unit",
-        "J1",
-        "J2",
-        "differential",
-        "front-door"
-      ],
-      "lane_days": 0.5,
-      "action": "dropped"
-    },
-    {
-      "id": "scripts/provenant#unit-02",
-      "kind": "port",
-      "source_files": [
-        "scripts/provenant"
-      ],
-      "source_spans": [
-        {
-          "start": 339,
-          "end": 504,
-          "symbols": [
-            "execute",
-            "dispatch_target",
-            "check_target",
-            "main",
-            "If"
-          ]
-        }
-      ],
-      "target_crate": "cli",
-      "depends_on": [
-        "integrate:680ea17ec5d1",
-        "prerequisite:J1",
-        "prerequisite:J2",
-        "prerequisite:adr",
-        "scripts/check_target.py#unit-01",
-        "scripts/lib/product_root_resolver.py#unit-01",
-        "scripts/provenant#unit-01",
-        "scripts/provenant_lint.py#unit-01",
-        "scripts/reap.py#unit-01",
-        "scripts/utility.py#unit-01",
-        "skills/orchestrate/scripts/batch_run.py#unit-03",
-        "skills/orchestrate/scripts/capabilities.py#unit-02",
-        "skills/orchestrate/scripts/run_controls.py#unit-04",
-        "workspace:manifest-and-digest"
-      ],
-      "risk": "medium",
-      "recommended_model_tier": "junior",
-      "review_model_tier": "principal",
-      "gates": [
-        "unit",
-        "J1",
-        "J2",
-        "differential",
-        "front-door"
-      ],
-      "lane_days": 0.5,
-      "action": "dropped"
-    },
-    {
-      "id": "scripts/provenant.template#unit-01",
-      "kind": "port",
-      "source_files": [
-        "scripts/provenant.template"
-      ],
-      "source_spans": [
-        {
-          "start": 1,
-          "end": 119,
-          "symbols": [
-            "provenant"
-          ]
-        }
-      ],
-      "target_crate": "cli",
-      "depends_on": [
-        "integrate:680ea17ec5d1",
-        "prerequisite:J1",
-        "prerequisite:J2",
-        "prerequisite:adr",
-        "workspace:manifest-and-digest"
-      ],
-      "risk": "medium",
-      "recommended_model_tier": "junior",
-      "review_model_tier": "principal",
-      "gates": [
-        "unit",
-        "J1",
-        "J2",
-        "differential",
-        "front-door"
-      ],
-      "lane_days": 0.5,
-      "action": "dropped"
     },
     {
       "id": "scripts/provenant_lint.py#unit-01",
@@ -9976,7 +9826,7 @@
       ],
       "target_crate": "cli",
       "depends_on": [
-        "integrate:680ea17ec5d1",
+        "integrate:31b9fba25e70",
         "prerequisite:J1",
         "prerequisite:J2",
         "prerequisite:adr",
@@ -12825,7 +12675,7 @@
       "source_spans": [
         {
           "start": 1,
-          "end": 349,
+          "end": 347,
           "symbols": [
             "module",
             "Expr",
@@ -12853,6 +12703,8 @@
             "ImportFrom",
             "ImportFrom",
             "ImportFrom",
+            "ImportFrom",
+            "Import",
             "Import",
             "Import",
             "ImportFrom",
@@ -12887,7 +12739,7 @@
       ],
       "target_crate": "run",
       "depends_on": [
-        "integrate:680ea17ec5d1",
+        "integrate:31b9fba25e70",
         "prerequisite:J1",
         "prerequisite:J2",
         "prerequisite:adr",
@@ -12895,8 +12747,10 @@
         "skills/_shared/custody.py#unit-01",
         "skills/_shared/harness_profile.py#unit-02",
         "skills/orchestrate/scripts/attempt_evidence.py#unit-01",
+        "skills/orchestrate/scripts/dispatch_run.py#unit-08",
         "skills/orchestrate/scripts/run_records.py#unit-02",
         "skills/orchestrate/scripts/secret_scan.py#unit-01",
+        "skills/orchestrate/scripts/writer_lease.py#unit-01",
         "workspace:manifest-and-digest"
       ],
       "risk": "high",
@@ -12920,8 +12774,8 @@
       ],
       "source_spans": [
         {
-          "start": 350,
-          "end": 639,
+          "start": 348,
+          "end": 637,
           "symbols": [
             "load_manifest",
             "_batch_number",
@@ -12938,7 +12792,7 @@
       ],
       "target_crate": "run",
       "depends_on": [
-        "integrate:680ea17ec5d1",
+        "integrate:31b9fba25e70",
         "prerequisite:J1",
         "prerequisite:J2",
         "prerequisite:adr",
@@ -12947,8 +12801,10 @@
         "skills/_shared/harness_profile.py#unit-02",
         "skills/orchestrate/scripts/attempt_evidence.py#unit-01",
         "skills/orchestrate/scripts/batch_run.py#unit-01",
+        "skills/orchestrate/scripts/dispatch_run.py#unit-08",
         "skills/orchestrate/scripts/run_records.py#unit-02",
         "skills/orchestrate/scripts/secret_scan.py#unit-01",
+        "skills/orchestrate/scripts/writer_lease.py#unit-01",
         "workspace:manifest-and-digest"
       ],
       "risk": "high",
@@ -12972,8 +12828,8 @@
       ],
       "source_spans": [
         {
-          "start": 640,
-          "end": 935,
+          "start": 638,
+          "end": 933,
           "symbols": [
             "_run_task",
             "_execute_batch",
@@ -12985,7 +12841,7 @@
       ],
       "target_crate": "run",
       "depends_on": [
-        "integrate:680ea17ec5d1",
+        "integrate:31b9fba25e70",
         "prerequisite:J1",
         "prerequisite:J2",
         "prerequisite:adr",
@@ -12994,8 +12850,10 @@
         "skills/_shared/harness_profile.py#unit-02",
         "skills/orchestrate/scripts/attempt_evidence.py#unit-01",
         "skills/orchestrate/scripts/batch_run.py#unit-02",
+        "skills/orchestrate/scripts/dispatch_run.py#unit-08",
         "skills/orchestrate/scripts/run_records.py#unit-02",
         "skills/orchestrate/scripts/secret_scan.py#unit-01",
+        "skills/orchestrate/scripts/writer_lease.py#unit-01",
         "workspace:manifest-and-digest"
       ],
       "risk": "high",
@@ -13480,18 +13338,18 @@
       "action": "ported"
     },
     {
-      "id": "skills/orchestrate/scripts/dispatch_run.py#interface",
+      "id": "skills/orchestrate/scripts/dispatch_preflight.py#interface",
       "kind": "interface",
       "source_files": [
-        "skills/orchestrate/scripts/dispatch_run.py"
+        "skills/orchestrate/scripts/dispatch_preflight.py"
       ],
-      "target_crate": "run",
+      "target_crate": "workflow",
       "depends_on": [
         "prerequisite:J2",
         "prerequisite:adr",
         "workspace:manifest-and-digest"
       ],
-      "risk": "high",
+      "risk": "medium",
       "recommended_model_tier": "principal",
       "gates": [
         "J2",
@@ -13499,6 +13357,162 @@
       ],
       "lane_days": 0.25,
       "action": "redesigned"
+    },
+    {
+      "id": "skills/orchestrate/scripts/dispatch_preflight.py#unit-01",
+      "kind": "port",
+      "source_files": [
+        "skills/orchestrate/scripts/dispatch_preflight.py"
+      ],
+      "source_spans": [
+        {
+          "start": 1,
+          "end": 333,
+          "symbols": [
+            "Expr",
+            "ImportFrom",
+            "Import",
+            "ImportFrom",
+            "Import",
+            "Import",
+            "Import",
+            "Import",
+            "Import",
+            "Import",
+            "Import",
+            "Import",
+            "Import",
+            "Import",
+            "ImportFrom",
+            "ImportFrom",
+            "Assign",
+            "Expr",
+            "Expr",
+            "Assign",
+            "ImportFrom",
+            "ImportFrom",
+            "ImportFrom",
+            "ImportFrom",
+            "Import",
+            "Import",
+            "Import",
+            "Import",
+            "Import",
+            "Import",
+            "Assign",
+            "Assign",
+            "Assign",
+            "provider_timeout_seconds",
+            "Assign",
+            "Assign",
+            "Assign",
+            "parse_fast_route_json",
+            "Assign",
+            "Assign",
+            "planner_result",
+            "route_refusal",
+            "router_failure",
+            "fast_fabric_plan",
+            "_read_prompt_once",
+            "Assign",
+            "PreflightError",
+            "read_prompt_input",
+            "routing_environment",
+            "Assign",
+            "effort_retry_plan"
+          ]
+        }
+      ],
+      "target_crate": "workflow",
+      "depends_on": [
+        "prerequisite:J1",
+        "prerequisite:J2",
+        "prerequisite:adr",
+        "scripts/fabric_hosts.py#interface",
+        "scripts/model_route.py#interface",
+        "scripts/worktree.py#interface",
+        "skills/_shared/custody.py#unit-01",
+        "skills/_shared/harness_profile.py#unit-02",
+        "skills/orchestrate/scripts/capabilities.py#unit-02",
+        "skills/orchestrate/scripts/cf_dispatch.py#interface",
+        "skills/orchestrate/scripts/dispatch_preflight.py#interface",
+        "skills/orchestrate/scripts/exec_routing.py#interface",
+        "skills/orchestrate/scripts/fabric_records.py#interface",
+        "skills/orchestrate/scripts/layout.py#interface",
+        "skills/orchestrate/scripts/provider_exec.py#interface",
+        "skills/orchestrate/scripts/provider_output.py#interface",
+        "skills/orchestrate/scripts/run_records.py#unit-02",
+        "skills/orchestrate/scripts/secret_scan.py#unit-01",
+        "skills/orchestrate/scripts/writer_lease.py#unit-01",
+        "workspace:manifest-and-digest"
+      ],
+      "risk": "medium",
+      "recommended_model_tier": "junior",
+      "review_model_tier": "principal",
+      "gates": [
+        "unit",
+        "J1",
+        "J2",
+        "differential"
+      ],
+      "lane_days": 0.5,
+      "action": "ported"
+    },
+    {
+      "id": "skills/orchestrate/scripts/dispatch_preflight.py#unit-02",
+      "kind": "port",
+      "source_files": [
+        "skills/orchestrate/scripts/dispatch_preflight.py"
+      ],
+      "source_spans": [
+        {
+          "start": 334,
+          "end": 584,
+          "symbols": [
+            "preflight_tasks",
+            "confidential_refusal",
+            "export_knob_overrides",
+            "profile_resolution",
+            "profile_knob",
+            "_fabric_hosts_owner"
+          ]
+        }
+      ],
+      "target_crate": "workflow",
+      "depends_on": [
+        "prerequisite:J1",
+        "prerequisite:J2",
+        "prerequisite:adr",
+        "scripts/fabric_hosts.py#interface",
+        "scripts/model_route.py#interface",
+        "scripts/worktree.py#interface",
+        "skills/_shared/custody.py#unit-01",
+        "skills/_shared/harness_profile.py#unit-02",
+        "skills/orchestrate/scripts/capabilities.py#unit-02",
+        "skills/orchestrate/scripts/cf_dispatch.py#interface",
+        "skills/orchestrate/scripts/dispatch_preflight.py#interface",
+        "skills/orchestrate/scripts/dispatch_preflight.py#unit-01",
+        "skills/orchestrate/scripts/exec_routing.py#interface",
+        "skills/orchestrate/scripts/fabric_records.py#interface",
+        "skills/orchestrate/scripts/layout.py#interface",
+        "skills/orchestrate/scripts/provider_exec.py#interface",
+        "skills/orchestrate/scripts/provider_output.py#interface",
+        "skills/orchestrate/scripts/run_records.py#unit-02",
+        "skills/orchestrate/scripts/secret_scan.py#unit-01",
+        "skills/orchestrate/scripts/writer_lease.py#unit-01",
+        "workspace:manifest-and-digest"
+      ],
+      "risk": "medium",
+      "recommended_model_tier": "junior",
+      "review_model_tier": "principal",
+      "gates": [
+        "unit",
+        "J1",
+        "J2",
+        "differential"
+      ],
+      "lane_days": 0.5,
+      "action": "ported"
     },
     {
       "id": "skills/orchestrate/scripts/dispatch_run.py#unit-01",
@@ -13509,7 +13523,7 @@
       "source_spans": [
         {
           "start": 1,
-          "end": 322,
+          "end": 303,
           "symbols": [
             "module",
             "Expr",
@@ -13534,7 +13548,6 @@
             "Import",
             "Import",
             "Import",
-            "Import",
             "ImportFrom",
             "ImportFrom",
             "ImportFrom",
@@ -13549,12 +13562,12 @@
             "Assign",
             "Assign",
             "Assign",
-            "Assign",
-            "Assign",
-            "Assign",
             "ImportFrom",
             "ImportFrom",
             "ImportFrom",
+            "Import",
+            "Import",
+            "Import",
             "Import",
             "Import",
             "Import",
@@ -13570,53 +13583,38 @@
             "ImportFrom",
             "now",
             "active_receipt_error",
-            "workspace_identity",
-            "Assign",
-            "Assign",
-            "Assign",
-            "writer_worktree_state",
-            "worktree_unchanged",
-            "modified_since",
-            "guard_writer_retry",
             "success_receipt_error",
             "fail",
             "timeout_value",
             "acquire_run_custody",
             "attempt_custody",
             "reap_run_evidence",
-            "reap_stop_status"
+            "reap_stop_status",
+            "process_evidence",
+            "reap_provider_identity",
+            "reap_disk_full"
           ]
         }
       ],
       "target_crate": "run",
       "depends_on": [
+        "integrate:31b9fba25e70",
         "prerequisite:J1",
         "prerequisite:J2",
         "prerequisite:adr",
-        "scripts/fabric_git.py#interface",
-        "scripts/fabric_hosts.py#interface",
-        "scripts/model_route.py#interface",
-        "scripts/worktree.py#interface",
         "skills/_shared/bounded_process.py#unit-01",
         "skills/_shared/custody.py#unit-01",
         "skills/_shared/harness_profile.py#unit-02",
         "skills/orchestrate/scripts/attempt_evidence.py#unit-01",
         "skills/orchestrate/scripts/attempt_storage.py#unit-01",
-        "skills/orchestrate/scripts/capabilities.py#unit-02",
-        "skills/orchestrate/scripts/cf_dispatch.py#interface",
         "skills/orchestrate/scripts/context_usage.py#unit-02",
-        "skills/orchestrate/scripts/dispatch_run.py#interface",
-        "skills/orchestrate/scripts/exec_routing.py#interface",
-        "skills/orchestrate/scripts/fabric_records.py#interface",
-        "skills/orchestrate/scripts/layout.py#interface",
+        "skills/orchestrate/scripts/git_evidence_packet.py#unit-01",
         "skills/orchestrate/scripts/memory_admission.py#unit-01",
         "skills/orchestrate/scripts/process_info.py#unit-02",
-        "skills/orchestrate/scripts/provider_exec.py#interface",
-        "skills/orchestrate/scripts/provider_output.py#interface",
-        "skills/orchestrate/scripts/run_lineage.py#interface",
         "skills/orchestrate/scripts/run_records.py#unit-02",
         "skills/orchestrate/scripts/secret_scan.py#unit-01",
         "skills/orchestrate/scripts/stall_watchdog.py#unit-01",
+        "skills/orchestrate/scripts/writer_lease.py#unit-01",
         "workspace:manifest-and-digest"
       ],
       "risk": "high",
@@ -13640,60 +13638,46 @@
       ],
       "source_spans": [
         {
-          "start": 323,
-          "end": 653,
+          "start": 304,
+          "end": 638,
           "symbols": [
-            "process_evidence",
-            "reap_provider_identity",
-            "reap_disk_full",
             "reap_attempts",
             "existing_attempt_number",
+            "build_command",
             "Assign",
-            "Assign",
-            "Assign",
-            "WorktreeLeaseError",
-            "_git_path",
-            "resolve_writer_worktree",
-            "branch_name_warning",
-            "acquire_worktree_lease",
-            "Assign",
-            "graph_reservation_refusal",
-            "release_worktree_lease",
-            "Assign",
-            "provider_timeout_seconds"
+            "incomplete_provider_turn",
+            "_copy_git_evidence",
+            "_record_provider_process",
+            "_retire_provider_process",
+            "with_pick_reason",
+            "attempt_scope",
+            "disk_floor_bytes",
+            "inherit_delivery_run_id",
+            "RetryReceiptInvalid",
+            "retry_receipt"
           ]
         }
       ],
       "target_crate": "run",
       "depends_on": [
+        "integrate:31b9fba25e70",
         "prerequisite:J1",
         "prerequisite:J2",
         "prerequisite:adr",
-        "scripts/fabric_git.py#interface",
-        "scripts/fabric_hosts.py#interface",
-        "scripts/model_route.py#interface",
-        "scripts/worktree.py#interface",
         "skills/_shared/bounded_process.py#unit-01",
         "skills/_shared/custody.py#unit-01",
         "skills/_shared/harness_profile.py#unit-02",
         "skills/orchestrate/scripts/attempt_evidence.py#unit-01",
         "skills/orchestrate/scripts/attempt_storage.py#unit-01",
-        "skills/orchestrate/scripts/capabilities.py#unit-02",
-        "skills/orchestrate/scripts/cf_dispatch.py#interface",
         "skills/orchestrate/scripts/context_usage.py#unit-02",
-        "skills/orchestrate/scripts/dispatch_run.py#interface",
         "skills/orchestrate/scripts/dispatch_run.py#unit-01",
-        "skills/orchestrate/scripts/exec_routing.py#interface",
-        "skills/orchestrate/scripts/fabric_records.py#interface",
-        "skills/orchestrate/scripts/layout.py#interface",
+        "skills/orchestrate/scripts/git_evidence_packet.py#unit-01",
         "skills/orchestrate/scripts/memory_admission.py#unit-01",
         "skills/orchestrate/scripts/process_info.py#unit-02",
-        "skills/orchestrate/scripts/provider_exec.py#interface",
-        "skills/orchestrate/scripts/provider_output.py#interface",
-        "skills/orchestrate/scripts/run_lineage.py#interface",
         "skills/orchestrate/scripts/run_records.py#unit-02",
         "skills/orchestrate/scripts/secret_scan.py#unit-01",
         "skills/orchestrate/scripts/stall_watchdog.py#unit-01",
+        "skills/orchestrate/scripts/writer_lease.py#unit-01",
         "workspace:manifest-and-digest"
       ],
       "risk": "high",
@@ -13717,57 +13701,41 @@
       ],
       "source_spans": [
         {
-          "start": 654,
-          "end": 925,
+          "start": 639,
+          "end": 960,
           "symbols": [
-            "build_command",
-            "Assign",
-            "incomplete_provider_turn",
-            "Assign",
-            "Assign",
-            "Assign",
-            "parse_fast_route_json",
-            "Assign",
-            "Assign",
-            "planner_result",
-            "route_refusal",
-            "router_failure",
-            "fast_fabric_plan",
-            "_read_prompt_once",
-            "_validate_git_evidence_metadata"
+            "contract_row",
+            "publish_contract",
+            "terminal_contract",
+            "resume_relaunch_context",
+            "ResumeError",
+            "prepare_resume",
+            "_DispatchPlan",
+            "_DispatchLaunch",
+            "_DispatchSettlement"
           ]
         }
       ],
       "target_crate": "run",
       "depends_on": [
+        "integrate:31b9fba25e70",
         "prerequisite:J1",
         "prerequisite:J2",
         "prerequisite:adr",
-        "scripts/fabric_git.py#interface",
-        "scripts/fabric_hosts.py#interface",
-        "scripts/model_route.py#interface",
-        "scripts/worktree.py#interface",
         "skills/_shared/bounded_process.py#unit-01",
         "skills/_shared/custody.py#unit-01",
         "skills/_shared/harness_profile.py#unit-02",
         "skills/orchestrate/scripts/attempt_evidence.py#unit-01",
         "skills/orchestrate/scripts/attempt_storage.py#unit-01",
-        "skills/orchestrate/scripts/capabilities.py#unit-02",
-        "skills/orchestrate/scripts/cf_dispatch.py#interface",
         "skills/orchestrate/scripts/context_usage.py#unit-02",
-        "skills/orchestrate/scripts/dispatch_run.py#interface",
         "skills/orchestrate/scripts/dispatch_run.py#unit-02",
-        "skills/orchestrate/scripts/exec_routing.py#interface",
-        "skills/orchestrate/scripts/fabric_records.py#interface",
-        "skills/orchestrate/scripts/layout.py#interface",
+        "skills/orchestrate/scripts/git_evidence_packet.py#unit-01",
         "skills/orchestrate/scripts/memory_admission.py#unit-01",
         "skills/orchestrate/scripts/process_info.py#unit-02",
-        "skills/orchestrate/scripts/provider_exec.py#interface",
-        "skills/orchestrate/scripts/provider_output.py#interface",
-        "skills/orchestrate/scripts/run_lineage.py#interface",
         "skills/orchestrate/scripts/run_records.py#unit-02",
         "skills/orchestrate/scripts/secret_scan.py#unit-01",
         "skills/orchestrate/scripts/stall_watchdog.py#unit-01",
+        "skills/orchestrate/scripts/writer_lease.py#unit-01",
         "workspace:manifest-and-digest"
       ],
       "risk": "high",
@@ -13791,51 +13759,96 @@
       ],
       "source_spans": [
         {
-          "start": 926,
-          "end": 1156,
+          "start": 961,
+          "end": 1294,
           "symbols": [
-            "_copy_git_evidence",
-            "_record_provider_process",
-            "_retire_provider_process",
-            "Assign",
-            "PreflightError",
-            "read_prompt_input",
-            "routing_environment",
-            "Assign",
-            "effort_retry_plan"
+            "classify_attempt",
+            "_plan_dispatch",
+            "_plan_dispatch.Assign",
+            "_plan_dispatch.Assign",
+            "_plan_dispatch.Assign",
+            "_plan_dispatch.Assign",
+            "_plan_dispatch.Assign",
+            "_plan_dispatch.Assign",
+            "_plan_dispatch.Try",
+            "_plan_dispatch.Assign",
+            "_plan_dispatch.Expr",
+            "_plan_dispatch.Assign",
+            "_plan_dispatch.Assign",
+            "_plan_dispatch.Assign",
+            "_plan_dispatch.Assign",
+            "_plan_dispatch.If",
+            "_plan_dispatch.If",
+            "_plan_dispatch.Try",
+            "_plan_dispatch.Try",
+            "_plan_dispatch.Try",
+            "_plan_dispatch.Assign",
+            "_plan_dispatch.If",
+            "_plan_dispatch.If",
+            "_plan_dispatch.Assign",
+            "_plan_dispatch.If",
+            "_plan_dispatch.Assign",
+            "_plan_dispatch.If",
+            "_plan_dispatch.Assign",
+            "_plan_dispatch.Try",
+            "_plan_dispatch.Try",
+            "_plan_dispatch.Try",
+            "_plan_dispatch.If",
+            "_plan_dispatch.If",
+            "_plan_dispatch.Assign",
+            "_plan_dispatch.Try",
+            "_plan_dispatch.Assign",
+            "_plan_dispatch.AnnAssign",
+            "_plan_dispatch.AnnAssign",
+            "_plan_dispatch.If",
+            "_plan_dispatch.If",
+            "_plan_dispatch.Try",
+            "_plan_dispatch.If",
+            "_plan_dispatch.Assign",
+            "_plan_dispatch.Try",
+            "_plan_dispatch.Assign",
+            "_plan_dispatch.If",
+            "_plan_dispatch.If",
+            "_plan_dispatch.Assign",
+            "_plan_dispatch.Assign",
+            "_plan_dispatch.Assign",
+            "_plan_dispatch.If",
+            "_plan_dispatch.Try",
+            "_plan_dispatch.Assign",
+            "_plan_dispatch.Assign",
+            "_plan_dispatch.Assign",
+            "_plan_dispatch.Assign",
+            "_plan_dispatch.Assign",
+            "_plan_dispatch.Assign",
+            "_plan_dispatch.If",
+            "_plan_dispatch.Try",
+            "_plan_dispatch.Assign",
+            "_plan_dispatch.Assign",
+            "_plan_dispatch.Assign",
+            "_plan_dispatch.If"
           ]
         }
       ],
       "target_crate": "run",
       "depends_on": [
+        "integrate:31b9fba25e70",
         "prerequisite:J1",
         "prerequisite:J2",
         "prerequisite:adr",
-        "scripts/fabric_git.py#interface",
-        "scripts/fabric_hosts.py#interface",
-        "scripts/model_route.py#interface",
-        "scripts/worktree.py#interface",
         "skills/_shared/bounded_process.py#unit-01",
         "skills/_shared/custody.py#unit-01",
         "skills/_shared/harness_profile.py#unit-02",
         "skills/orchestrate/scripts/attempt_evidence.py#unit-01",
         "skills/orchestrate/scripts/attempt_storage.py#unit-01",
-        "skills/orchestrate/scripts/capabilities.py#unit-02",
-        "skills/orchestrate/scripts/cf_dispatch.py#interface",
         "skills/orchestrate/scripts/context_usage.py#unit-02",
-        "skills/orchestrate/scripts/dispatch_run.py#interface",
         "skills/orchestrate/scripts/dispatch_run.py#unit-03",
-        "skills/orchestrate/scripts/exec_routing.py#interface",
-        "skills/orchestrate/scripts/fabric_records.py#interface",
-        "skills/orchestrate/scripts/layout.py#interface",
+        "skills/orchestrate/scripts/git_evidence_packet.py#unit-01",
         "skills/orchestrate/scripts/memory_admission.py#unit-01",
         "skills/orchestrate/scripts/process_info.py#unit-02",
-        "skills/orchestrate/scripts/provider_exec.py#interface",
-        "skills/orchestrate/scripts/provider_output.py#interface",
-        "skills/orchestrate/scripts/run_lineage.py#interface",
         "skills/orchestrate/scripts/run_records.py#unit-02",
         "skills/orchestrate/scripts/secret_scan.py#unit-01",
         "skills/orchestrate/scripts/stall_watchdog.py#unit-01",
+        "skills/orchestrate/scripts/writer_lease.py#unit-01",
         "workspace:manifest-and-digest"
       ],
       "risk": "high",
@@ -13859,54 +13872,72 @@
       ],
       "source_spans": [
         {
-          "start": 1157,
-          "end": 1497,
+          "start": 1295,
+          "end": 1684,
           "symbols": [
-            "preflight_tasks",
-            "confidential_refusal",
-            "with_pick_reason",
-            "attempt_scope",
-            "export_knob_overrides",
-            "profile_resolution",
-            "profile_knob",
-            "disk_floor_bytes",
-            "inherit_delivery_run_id",
-            "RetryReceiptInvalid",
-            "retry_receipt",
-            "contract_row"
+            "_plan_dispatch.Return",
+            "_launch_dispatch",
+            "_launch_dispatch.Assign",
+            "_launch_dispatch.Assign",
+            "_launch_dispatch.Assign",
+            "_launch_dispatch.Assign",
+            "_launch_dispatch.Assign",
+            "_launch_dispatch.Assign",
+            "_launch_dispatch.Assign",
+            "_launch_dispatch.Assign",
+            "_launch_dispatch.Assign",
+            "_launch_dispatch.Assign",
+            "_launch_dispatch.Assign",
+            "_launch_dispatch.Assign",
+            "_launch_dispatch.Assign",
+            "_launch_dispatch.Assign",
+            "_launch_dispatch.Assign",
+            "_launch_dispatch.Assign",
+            "_launch_dispatch.Assign",
+            "_launch_dispatch.Assign",
+            "_launch_dispatch.Assign",
+            "_launch_dispatch.Assign",
+            "_launch_dispatch.Assign",
+            "_launch_dispatch.AnnAssign",
+            "_launch_dispatch.Assign",
+            "_launch_dispatch.Assign",
+            "_launch_dispatch.Assign",
+            "_launch_dispatch.Assign",
+            "_launch_dispatch.Assign",
+            "_launch_dispatch.Assign",
+            "_launch_dispatch.Assign",
+            "_launch_dispatch.Assign",
+            "_launch_dispatch.AnnAssign",
+            "_launch_dispatch.admit_attempt",
+            "_launch_dispatch.If",
+            "_launch_dispatch.If.Assign",
+            "_launch_dispatch.If.cancel_owner",
+            "_launch_dispatch.If.Assign",
+            "_launch_dispatch.If.For",
+            "_launch_dispatch.If.Try"
           ]
         }
       ],
       "target_crate": "run",
       "depends_on": [
+        "integrate:31b9fba25e70",
         "prerequisite:J1",
         "prerequisite:J2",
         "prerequisite:adr",
-        "scripts/fabric_git.py#interface",
-        "scripts/fabric_hosts.py#interface",
-        "scripts/model_route.py#interface",
-        "scripts/worktree.py#interface",
         "skills/_shared/bounded_process.py#unit-01",
         "skills/_shared/custody.py#unit-01",
         "skills/_shared/harness_profile.py#unit-02",
         "skills/orchestrate/scripts/attempt_evidence.py#unit-01",
         "skills/orchestrate/scripts/attempt_storage.py#unit-01",
-        "skills/orchestrate/scripts/capabilities.py#unit-02",
-        "skills/orchestrate/scripts/cf_dispatch.py#interface",
         "skills/orchestrate/scripts/context_usage.py#unit-02",
-        "skills/orchestrate/scripts/dispatch_run.py#interface",
         "skills/orchestrate/scripts/dispatch_run.py#unit-04",
-        "skills/orchestrate/scripts/exec_routing.py#interface",
-        "skills/orchestrate/scripts/fabric_records.py#interface",
-        "skills/orchestrate/scripts/layout.py#interface",
+        "skills/orchestrate/scripts/git_evidence_packet.py#unit-01",
         "skills/orchestrate/scripts/memory_admission.py#unit-01",
         "skills/orchestrate/scripts/process_info.py#unit-02",
-        "skills/orchestrate/scripts/provider_exec.py#interface",
-        "skills/orchestrate/scripts/provider_output.py#interface",
-        "skills/orchestrate/scripts/run_lineage.py#interface",
         "skills/orchestrate/scripts/run_records.py#unit-02",
         "skills/orchestrate/scripts/secret_scan.py#unit-01",
         "skills/orchestrate/scripts/stall_watchdog.py#unit-01",
+        "skills/orchestrate/scripts/writer_lease.py#unit-01",
         "workspace:manifest-and-digest"
       ],
       "risk": "high",
@@ -13930,84 +13961,34 @@
       ],
       "source_spans": [
         {
-          "start": 1498,
-          "end": 1845,
+          "start": 1685,
+          "end": 1849,
           "symbols": [
-            "publish_contract",
-            "terminal_contract",
-            "resume_relaunch_context",
-            "ResumeError",
-            "prepare_resume",
-            "_dispatch",
-            "_dispatch.Assign",
-            "_dispatch.Assign",
-            "_dispatch.Assign",
-            "_dispatch.Assign",
-            "_dispatch.Assign",
-            "_dispatch.Assign",
-            "_dispatch.Try",
-            "_dispatch.Assign",
-            "_dispatch.Expr",
-            "_dispatch.Assign",
-            "_dispatch.Assign",
-            "_dispatch.Assign",
-            "_dispatch.Assign",
-            "_dispatch.If",
-            "_dispatch.If",
-            "_dispatch.Try",
-            "_dispatch.Try",
-            "_dispatch.Try",
-            "_dispatch.Assign",
-            "_dispatch.If",
-            "_dispatch.If",
-            "_dispatch.Assign",
-            "_dispatch.If",
-            "_dispatch.Assign",
-            "_dispatch.If",
-            "_dispatch.Assign",
-            "_dispatch.Try",
-            "_dispatch.Try",
-            "_dispatch.Try",
-            "_dispatch.If",
-            "_dispatch.If",
-            "_dispatch.Assign",
-            "_dispatch.Try",
-            "_dispatch.Assign",
-            "_dispatch.AnnAssign",
-            "_dispatch.AnnAssign"
+            "_launch_dispatch.If.orelse.Try",
+            "_launch_dispatch.Return"
           ]
         }
       ],
       "target_crate": "run",
       "depends_on": [
+        "integrate:31b9fba25e70",
         "prerequisite:J1",
         "prerequisite:J2",
         "prerequisite:adr",
-        "scripts/fabric_git.py#interface",
-        "scripts/fabric_hosts.py#interface",
-        "scripts/model_route.py#interface",
-        "scripts/worktree.py#interface",
         "skills/_shared/bounded_process.py#unit-01",
         "skills/_shared/custody.py#unit-01",
         "skills/_shared/harness_profile.py#unit-02",
         "skills/orchestrate/scripts/attempt_evidence.py#unit-01",
         "skills/orchestrate/scripts/attempt_storage.py#unit-01",
-        "skills/orchestrate/scripts/capabilities.py#unit-02",
-        "skills/orchestrate/scripts/cf_dispatch.py#interface",
         "skills/orchestrate/scripts/context_usage.py#unit-02",
-        "skills/orchestrate/scripts/dispatch_run.py#interface",
         "skills/orchestrate/scripts/dispatch_run.py#unit-05",
-        "skills/orchestrate/scripts/exec_routing.py#interface",
-        "skills/orchestrate/scripts/fabric_records.py#interface",
-        "skills/orchestrate/scripts/layout.py#interface",
+        "skills/orchestrate/scripts/git_evidence_packet.py#unit-01",
         "skills/orchestrate/scripts/memory_admission.py#unit-01",
         "skills/orchestrate/scripts/process_info.py#unit-02",
-        "skills/orchestrate/scripts/provider_exec.py#interface",
-        "skills/orchestrate/scripts/provider_output.py#interface",
-        "skills/orchestrate/scripts/run_lineage.py#interface",
         "skills/orchestrate/scripts/run_records.py#unit-02",
         "skills/orchestrate/scripts/secret_scan.py#unit-01",
         "skills/orchestrate/scripts/stall_watchdog.py#unit-01",
+        "skills/orchestrate/scripts/writer_lease.py#unit-01",
         "workspace:manifest-and-digest"
       ],
       "risk": "high",
@@ -14031,87 +14012,37 @@
       ],
       "source_spans": [
         {
-          "start": 1846,
-          "end": 2089,
+          "start": 1850,
+          "end": 2181,
           "symbols": [
-            "_dispatch.If",
-            "_dispatch.If",
-            "_dispatch.Try",
-            "_dispatch.If",
-            "_dispatch.Assign",
-            "_dispatch.Try",
-            "_dispatch.Assign",
-            "_dispatch.If",
-            "_dispatch.If",
-            "_dispatch.Assign",
-            "_dispatch.Assign",
-            "_dispatch.Assign",
-            "_dispatch.If",
-            "_dispatch.Try",
-            "_dispatch.Assign",
-            "_dispatch.Assign",
-            "_dispatch.Assign",
-            "_dispatch.Assign",
-            "_dispatch.Assign",
-            "_dispatch.Assign",
-            "_dispatch.If",
-            "_dispatch.Try",
-            "_dispatch.Assign",
-            "_dispatch.Assign",
-            "_dispatch.Assign",
-            "_dispatch.If",
-            "_dispatch.Assign",
-            "_dispatch.Assign",
-            "_dispatch.Assign",
-            "_dispatch.AnnAssign",
-            "_dispatch.Assign",
-            "_dispatch.Assign",
-            "_dispatch.Assign",
-            "_dispatch.Assign",
-            "_dispatch.Assign",
-            "_dispatch.Assign",
-            "_dispatch.Assign",
-            "_dispatch.Assign",
-            "_dispatch.AnnAssign",
-            "_dispatch.admit_attempt",
-            "_dispatch.If",
-            "_dispatch.If.Assign",
-            "_dispatch.If.cancel_owner",
-            "_dispatch.If.Assign",
-            "_dispatch.If.For"
+            "_settle_dispatch",
+            "_publish_dispatch",
+            "_dispatch",
+            "close_mcp_run",
+            "rate_limit_delay"
           ]
         }
       ],
       "target_crate": "run",
       "depends_on": [
+        "integrate:31b9fba25e70",
         "prerequisite:J1",
         "prerequisite:J2",
         "prerequisite:adr",
-        "scripts/fabric_git.py#interface",
-        "scripts/fabric_hosts.py#interface",
-        "scripts/model_route.py#interface",
-        "scripts/worktree.py#interface",
         "skills/_shared/bounded_process.py#unit-01",
         "skills/_shared/custody.py#unit-01",
         "skills/_shared/harness_profile.py#unit-02",
         "skills/orchestrate/scripts/attempt_evidence.py#unit-01",
         "skills/orchestrate/scripts/attempt_storage.py#unit-01",
-        "skills/orchestrate/scripts/capabilities.py#unit-02",
-        "skills/orchestrate/scripts/cf_dispatch.py#interface",
         "skills/orchestrate/scripts/context_usage.py#unit-02",
-        "skills/orchestrate/scripts/dispatch_run.py#interface",
         "skills/orchestrate/scripts/dispatch_run.py#unit-06",
-        "skills/orchestrate/scripts/exec_routing.py#interface",
-        "skills/orchestrate/scripts/fabric_records.py#interface",
-        "skills/orchestrate/scripts/layout.py#interface",
+        "skills/orchestrate/scripts/git_evidence_packet.py#unit-01",
         "skills/orchestrate/scripts/memory_admission.py#unit-01",
         "skills/orchestrate/scripts/process_info.py#unit-02",
-        "skills/orchestrate/scripts/provider_exec.py#interface",
-        "skills/orchestrate/scripts/provider_output.py#interface",
-        "skills/orchestrate/scripts/run_lineage.py#interface",
         "skills/orchestrate/scripts/run_records.py#unit-02",
         "skills/orchestrate/scripts/secret_scan.py#unit-01",
         "skills/orchestrate/scripts/stall_watchdog.py#unit-01",
+        "skills/orchestrate/scripts/writer_lease.py#unit-01",
         "workspace:manifest-and-digest"
       ],
       "risk": "high",
@@ -14135,247 +14066,12 @@
       ],
       "source_spans": [
         {
-          "start": 2090,
-          "end": 2335,
+          "start": 2182,
+          "end": 2483,
           "symbols": [
-            "_dispatch.If.Try"
-          ]
-        }
-      ],
-      "target_crate": "run",
-      "depends_on": [
-        "prerequisite:J1",
-        "prerequisite:J2",
-        "prerequisite:adr",
-        "scripts/fabric_git.py#interface",
-        "scripts/fabric_hosts.py#interface",
-        "scripts/model_route.py#interface",
-        "scripts/worktree.py#interface",
-        "skills/_shared/bounded_process.py#unit-01",
-        "skills/_shared/custody.py#unit-01",
-        "skills/_shared/harness_profile.py#unit-02",
-        "skills/orchestrate/scripts/attempt_evidence.py#unit-01",
-        "skills/orchestrate/scripts/attempt_storage.py#unit-01",
-        "skills/orchestrate/scripts/capabilities.py#unit-02",
-        "skills/orchestrate/scripts/cf_dispatch.py#interface",
-        "skills/orchestrate/scripts/context_usage.py#unit-02",
-        "skills/orchestrate/scripts/dispatch_run.py#interface",
-        "skills/orchestrate/scripts/dispatch_run.py#unit-07",
-        "skills/orchestrate/scripts/exec_routing.py#interface",
-        "skills/orchestrate/scripts/fabric_records.py#interface",
-        "skills/orchestrate/scripts/layout.py#interface",
-        "skills/orchestrate/scripts/memory_admission.py#unit-01",
-        "skills/orchestrate/scripts/process_info.py#unit-02",
-        "skills/orchestrate/scripts/provider_exec.py#interface",
-        "skills/orchestrate/scripts/provider_output.py#interface",
-        "skills/orchestrate/scripts/run_lineage.py#interface",
-        "skills/orchestrate/scripts/run_records.py#unit-02",
-        "skills/orchestrate/scripts/secret_scan.py#unit-01",
-        "skills/orchestrate/scripts/stall_watchdog.py#unit-01",
-        "workspace:manifest-and-digest"
-      ],
-      "risk": "high",
-      "recommended_model_tier": "senior",
-      "review_model_tier": "principal",
-      "gates": [
-        "unit",
-        "J1",
-        "J2",
-        "differential",
-        "lane"
-      ],
-      "lane_days": 0.5,
-      "action": "redesigned"
-    },
-    {
-      "id": "skills/orchestrate/scripts/dispatch_run.py#unit-09",
-      "kind": "port",
-      "source_files": [
-        "skills/orchestrate/scripts/dispatch_run.py"
-      ],
-      "source_spans": [
-        {
-          "start": 2336,
-          "end": 2685,
-          "symbols": [
-            "_dispatch.If.orelse.Try",
-            "_dispatch.Assign",
-            "_dispatch.Assign",
-            "_dispatch.Assign",
-            "_dispatch.AnnAssign",
-            "_dispatch.Assign",
-            "_dispatch.Try",
-            "_dispatch.Try",
-            "_dispatch.Assign",
-            "_dispatch.If",
-            "_dispatch.Assign",
-            "_dispatch.Assign",
-            "_dispatch.Assign",
-            "_dispatch.Assign",
-            "_dispatch.Assign",
-            "_dispatch.AnnAssign",
-            "_dispatch.Assign",
-            "_dispatch.Assign",
-            "_dispatch.If",
-            "_dispatch.Assign",
-            "_dispatch.Assign",
-            "_dispatch.If",
-            "_dispatch.Try",
-            "_dispatch.AnnAssign",
-            "_dispatch.Expr",
-            "_dispatch.If",
-            "_dispatch.If",
-            "_dispatch.If",
-            "_dispatch.Assign",
-            "_dispatch.If",
-            "_dispatch.Assign",
-            "_dispatch.Assign",
-            "_dispatch.Assign",
-            "_dispatch.Assign",
-            "_dispatch.Expr",
-            "_dispatch.Assign"
-          ]
-        }
-      ],
-      "target_crate": "run",
-      "depends_on": [
-        "prerequisite:J1",
-        "prerequisite:J2",
-        "prerequisite:adr",
-        "scripts/fabric_git.py#interface",
-        "scripts/fabric_hosts.py#interface",
-        "scripts/model_route.py#interface",
-        "scripts/worktree.py#interface",
-        "skills/_shared/bounded_process.py#unit-01",
-        "skills/_shared/custody.py#unit-01",
-        "skills/_shared/harness_profile.py#unit-02",
-        "skills/orchestrate/scripts/attempt_evidence.py#unit-01",
-        "skills/orchestrate/scripts/attempt_storage.py#unit-01",
-        "skills/orchestrate/scripts/capabilities.py#unit-02",
-        "skills/orchestrate/scripts/cf_dispatch.py#interface",
-        "skills/orchestrate/scripts/context_usage.py#unit-02",
-        "skills/orchestrate/scripts/dispatch_run.py#interface",
-        "skills/orchestrate/scripts/dispatch_run.py#unit-08",
-        "skills/orchestrate/scripts/exec_routing.py#interface",
-        "skills/orchestrate/scripts/fabric_records.py#interface",
-        "skills/orchestrate/scripts/layout.py#interface",
-        "skills/orchestrate/scripts/memory_admission.py#unit-01",
-        "skills/orchestrate/scripts/process_info.py#unit-02",
-        "skills/orchestrate/scripts/provider_exec.py#interface",
-        "skills/orchestrate/scripts/provider_output.py#interface",
-        "skills/orchestrate/scripts/run_lineage.py#interface",
-        "skills/orchestrate/scripts/run_records.py#unit-02",
-        "skills/orchestrate/scripts/secret_scan.py#unit-01",
-        "skills/orchestrate/scripts/stall_watchdog.py#unit-01",
-        "workspace:manifest-and-digest"
-      ],
-      "risk": "high",
-      "recommended_model_tier": "senior",
-      "review_model_tier": "principal",
-      "gates": [
-        "unit",
-        "J1",
-        "J2",
-        "differential",
-        "lane"
-      ],
-      "lane_days": 0.5,
-      "action": "redesigned"
-    },
-    {
-      "id": "skills/orchestrate/scripts/dispatch_run.py#unit-10",
-      "kind": "port",
-      "source_files": [
-        "skills/orchestrate/scripts/dispatch_run.py"
-      ],
-      "source_spans": [
-        {
-          "start": 2686,
-          "end": 3034,
-          "symbols": [
-            "_dispatch.Expr",
-            "_dispatch.Assign",
-            "_dispatch.Try",
-            "_dispatch.Expr",
-            "_dispatch.For",
-            "_dispatch.Assign",
-            "_dispatch.If",
-            "_dispatch.prune_tmp",
-            "_dispatch.Assign",
-            "_dispatch.Try",
-            "_dispatch.If",
-            "_dispatch.For",
-            "_dispatch.Assign",
-            "_dispatch.Try",
-            "_dispatch.Assign",
-            "_dispatch.Assign",
-            "_dispatch.Expr",
-            "_dispatch.Return",
-            "close_mcp_run",
-            "rate_limit_delay",
             "execute_attempt_sequence",
             "cleanup_settled_reader",
             "dispatch",
-            "_fabric_hosts_owner"
-          ]
-        }
-      ],
-      "target_crate": "run",
-      "depends_on": [
-        "prerequisite:J1",
-        "prerequisite:J2",
-        "prerequisite:adr",
-        "scripts/fabric_git.py#interface",
-        "scripts/fabric_hosts.py#interface",
-        "scripts/model_route.py#interface",
-        "scripts/worktree.py#interface",
-        "skills/_shared/bounded_process.py#unit-01",
-        "skills/_shared/custody.py#unit-01",
-        "skills/_shared/harness_profile.py#unit-02",
-        "skills/orchestrate/scripts/attempt_evidence.py#unit-01",
-        "skills/orchestrate/scripts/attempt_storage.py#unit-01",
-        "skills/orchestrate/scripts/capabilities.py#unit-02",
-        "skills/orchestrate/scripts/cf_dispatch.py#interface",
-        "skills/orchestrate/scripts/context_usage.py#unit-02",
-        "skills/orchestrate/scripts/dispatch_run.py#interface",
-        "skills/orchestrate/scripts/dispatch_run.py#unit-09",
-        "skills/orchestrate/scripts/exec_routing.py#interface",
-        "skills/orchestrate/scripts/fabric_records.py#interface",
-        "skills/orchestrate/scripts/layout.py#interface",
-        "skills/orchestrate/scripts/memory_admission.py#unit-01",
-        "skills/orchestrate/scripts/process_info.py#unit-02",
-        "skills/orchestrate/scripts/provider_exec.py#interface",
-        "skills/orchestrate/scripts/provider_output.py#interface",
-        "skills/orchestrate/scripts/run_lineage.py#interface",
-        "skills/orchestrate/scripts/run_records.py#unit-02",
-        "skills/orchestrate/scripts/secret_scan.py#unit-01",
-        "skills/orchestrate/scripts/stall_watchdog.py#unit-01",
-        "workspace:manifest-and-digest"
-      ],
-      "risk": "high",
-      "recommended_model_tier": "senior",
-      "review_model_tier": "principal",
-      "gates": [
-        "unit",
-        "J1",
-        "J2",
-        "differential",
-        "lane"
-      ],
-      "lane_days": 0.5,
-      "action": "redesigned"
-    },
-    {
-      "id": "skills/orchestrate/scripts/dispatch_run.py#unit-11",
-      "kind": "port",
-      "source_files": [
-        "skills/orchestrate/scripts/dispatch_run.py"
-      ],
-      "source_spans": [
-        {
-          "start": 3035,
-          "end": 3112,
-          "symbols": [
             "parser",
             "If"
           ]
@@ -14383,34 +14079,24 @@
       ],
       "target_crate": "run",
       "depends_on": [
+        "integrate:31b9fba25e70",
         "prerequisite:J1",
         "prerequisite:J2",
         "prerequisite:adr",
-        "scripts/fabric_git.py#interface",
-        "scripts/fabric_hosts.py#interface",
-        "scripts/model_route.py#interface",
-        "scripts/worktree.py#interface",
         "skills/_shared/bounded_process.py#unit-01",
         "skills/_shared/custody.py#unit-01",
         "skills/_shared/harness_profile.py#unit-02",
         "skills/orchestrate/scripts/attempt_evidence.py#unit-01",
         "skills/orchestrate/scripts/attempt_storage.py#unit-01",
-        "skills/orchestrate/scripts/capabilities.py#unit-02",
-        "skills/orchestrate/scripts/cf_dispatch.py#interface",
         "skills/orchestrate/scripts/context_usage.py#unit-02",
-        "skills/orchestrate/scripts/dispatch_run.py#interface",
-        "skills/orchestrate/scripts/dispatch_run.py#unit-10",
-        "skills/orchestrate/scripts/exec_routing.py#interface",
-        "skills/orchestrate/scripts/fabric_records.py#interface",
-        "skills/orchestrate/scripts/layout.py#interface",
+        "skills/orchestrate/scripts/dispatch_run.py#unit-07",
+        "skills/orchestrate/scripts/git_evidence_packet.py#unit-01",
         "skills/orchestrate/scripts/memory_admission.py#unit-01",
         "skills/orchestrate/scripts/process_info.py#unit-02",
-        "skills/orchestrate/scripts/provider_exec.py#interface",
-        "skills/orchestrate/scripts/provider_output.py#interface",
-        "skills/orchestrate/scripts/run_lineage.py#interface",
         "skills/orchestrate/scripts/run_records.py#unit-02",
         "skills/orchestrate/scripts/secret_scan.py#unit-01",
         "skills/orchestrate/scripts/stall_watchdog.py#unit-01",
+        "skills/orchestrate/scripts/writer_lease.py#unit-01",
         "workspace:manifest-and-digest"
       ],
       "risk": "high",
@@ -14728,6 +14414,40 @@
       "action": "ported"
     },
     {
+      "id": "skills/orchestrate/scripts/git_evidence_packet.py#unit-01",
+      "kind": "port",
+      "source_files": [
+        "skills/orchestrate/scripts/git_evidence_packet.py"
+      ],
+      "source_spans": [
+        {
+          "start": 1,
+          "end": 88,
+          "symbols": [
+            "git_evidence_packet"
+          ]
+        }
+      ],
+      "target_crate": "workflow",
+      "depends_on": [
+        "prerequisite:J1",
+        "prerequisite:J2",
+        "prerequisite:adr",
+        "workspace:manifest-and-digest"
+      ],
+      "risk": "medium",
+      "recommended_model_tier": "junior",
+      "review_model_tier": "principal",
+      "gates": [
+        "unit",
+        "J1",
+        "J2",
+        "differential"
+      ],
+      "lane_days": 0.5,
+      "action": "ported"
+    },
+    {
       "id": "skills/orchestrate/scripts/instruction_quarantine.py#interface",
       "kind": "interface",
       "source_files": [
@@ -14782,6 +14502,122 @@
         "J2",
         "differential",
         "lane"
+      ],
+      "lane_days": 0.5,
+      "action": "ported"
+    },
+    {
+      "id": "skills/orchestrate/scripts/lane_exit.py#interface",
+      "kind": "interface",
+      "source_files": [
+        "skills/orchestrate/scripts/lane_exit.py"
+      ],
+      "target_crate": "workflow",
+      "depends_on": [
+        "prerequisite:J2",
+        "prerequisite:adr",
+        "workspace:manifest-and-digest"
+      ],
+      "risk": "medium",
+      "recommended_model_tier": "principal",
+      "gates": [
+        "J2",
+        "unit"
+      ],
+      "lane_days": 0.25,
+      "action": "redesigned"
+    },
+    {
+      "id": "skills/orchestrate/scripts/lane_exit.py#unit-01",
+      "kind": "port",
+      "source_files": [
+        "skills/orchestrate/scripts/lane_exit.py"
+      ],
+      "source_spans": [
+        {
+          "start": 1,
+          "end": 130,
+          "symbols": [
+            "lane_exit"
+          ]
+        }
+      ],
+      "target_crate": "workflow",
+      "depends_on": [
+        "prerequisite:J1",
+        "prerequisite:J2",
+        "prerequisite:adr",
+        "skills/orchestrate/scripts/lane_exit.py#interface",
+        "skills/orchestrate/scripts/provider_observer.py#interface",
+        "workspace:manifest-and-digest"
+      ],
+      "risk": "medium",
+      "recommended_model_tier": "junior",
+      "review_model_tier": "principal",
+      "gates": [
+        "unit",
+        "J1",
+        "J2",
+        "differential"
+      ],
+      "lane_days": 0.5,
+      "action": "ported"
+    },
+    {
+      "id": "skills/orchestrate/scripts/lane_launch.py#interface",
+      "kind": "interface",
+      "source_files": [
+        "skills/orchestrate/scripts/lane_launch.py"
+      ],
+      "target_crate": "workflow",
+      "depends_on": [
+        "prerequisite:J2",
+        "prerequisite:adr",
+        "workspace:manifest-and-digest"
+      ],
+      "risk": "medium",
+      "recommended_model_tier": "principal",
+      "gates": [
+        "J2",
+        "unit"
+      ],
+      "lane_days": 0.25,
+      "action": "redesigned"
+    },
+    {
+      "id": "skills/orchestrate/scripts/lane_launch.py#unit-01",
+      "kind": "port",
+      "source_files": [
+        "skills/orchestrate/scripts/lane_launch.py"
+      ],
+      "source_spans": [
+        {
+          "start": 1,
+          "end": 190,
+          "symbols": [
+            "lane_launch"
+          ]
+        }
+      ],
+      "target_crate": "workflow",
+      "depends_on": [
+        "prerequisite:J1",
+        "prerequisite:J2",
+        "prerequisite:adr",
+        "skills/orchestrate/scripts/lane_exit.py#interface",
+        "skills/orchestrate/scripts/lane_launch.py#interface",
+        "skills/orchestrate/scripts/provider_exec.py#interface",
+        "skills/orchestrate/scripts/run_records.py#unit-02",
+        "workspace:manifest-and-digest"
+      ],
+      "risk": "medium",
+      "recommended_model_tier": "junior",
+      "review_model_tier": "principal",
+      "gates": [
+        "unit",
+        "J1",
+        "J2",
+        "differential"
       ],
       "lane_days": 0.5,
       "action": "ported"
@@ -15188,7 +15024,7 @@
       "source_spans": [
         {
           "start": 1,
-          "end": 344,
+          "end": 347,
           "symbols": [
             "module",
             "Expr",
@@ -15223,6 +15059,9 @@
             "ImportFrom",
             "ImportFrom",
             "ImportFrom",
+            "Import",
+            "Import",
+            "Import",
             "Import",
             "Import",
             "Import",
@@ -15278,18 +15117,21 @@
         "skills/orchestrate/scripts/agy_home.py#interface",
         "skills/orchestrate/scripts/attempt_storage.py#unit-01",
         "skills/orchestrate/scripts/context_usage.py#unit-02",
-        "skills/orchestrate/scripts/dispatch_run.py#interface",
         "skills/orchestrate/scripts/exec_routing.py#interface",
         "skills/orchestrate/scripts/fabric_policy.py#unit-01",
         "skills/orchestrate/scripts/instruction_quarantine.py#interface",
+        "skills/orchestrate/scripts/lane_exit.py#interface",
+        "skills/orchestrate/scripts/lane_launch.py#interface",
         "skills/orchestrate/scripts/layout.py#interface",
         "skills/orchestrate/scripts/output_custody.py#unit-01",
         "skills/orchestrate/scripts/process_info.py#unit-02",
         "skills/orchestrate/scripts/provider_exec.py#interface",
+        "skills/orchestrate/scripts/provider_observer.py#interface",
         "skills/orchestrate/scripts/provider_output.py#interface",
         "skills/orchestrate/scripts/run_lineage.py#interface",
         "skills/orchestrate/scripts/stall_watchdog.py#unit-01",
         "skills/orchestrate/scripts/trusted_git.py#unit-01",
+        "skills/orchestrate/scripts/writer_lease.py#unit-01",
         "workspace:manifest-and-digest"
       ],
       "risk": "medium",
@@ -15313,8 +15155,8 @@
       ],
       "source_spans": [
         {
-          "start": 345,
-          "end": 571,
+          "start": 348,
+          "end": 574,
           "symbols": [
             "_sandbox_exec_usable",
             "CapabilityError",
@@ -15352,19 +15194,22 @@
         "skills/orchestrate/scripts/agy_home.py#interface",
         "skills/orchestrate/scripts/attempt_storage.py#unit-01",
         "skills/orchestrate/scripts/context_usage.py#unit-02",
-        "skills/orchestrate/scripts/dispatch_run.py#interface",
         "skills/orchestrate/scripts/exec_routing.py#interface",
         "skills/orchestrate/scripts/fabric_policy.py#unit-01",
         "skills/orchestrate/scripts/instruction_quarantine.py#interface",
+        "skills/orchestrate/scripts/lane_exit.py#interface",
+        "skills/orchestrate/scripts/lane_launch.py#interface",
         "skills/orchestrate/scripts/layout.py#interface",
         "skills/orchestrate/scripts/output_custody.py#unit-01",
         "skills/orchestrate/scripts/process_info.py#unit-02",
         "skills/orchestrate/scripts/provider_exec.py#interface",
         "skills/orchestrate/scripts/provider_exec.py#unit-01",
+        "skills/orchestrate/scripts/provider_observer.py#interface",
         "skills/orchestrate/scripts/provider_output.py#interface",
         "skills/orchestrate/scripts/run_lineage.py#interface",
         "skills/orchestrate/scripts/stall_watchdog.py#unit-01",
         "skills/orchestrate/scripts/trusted_git.py#unit-01",
+        "skills/orchestrate/scripts/writer_lease.py#unit-01",
         "workspace:manifest-and-digest"
       ],
       "risk": "medium",
@@ -15388,8 +15233,8 @@
       ],
       "source_spans": [
         {
-          "start": 572,
-          "end": 919,
+          "start": 575,
+          "end": 922,
           "symbols": [
             "os_confinement_profile",
             "_claude_account_denies",
@@ -15428,19 +15273,22 @@
         "skills/orchestrate/scripts/agy_home.py#interface",
         "skills/orchestrate/scripts/attempt_storage.py#unit-01",
         "skills/orchestrate/scripts/context_usage.py#unit-02",
-        "skills/orchestrate/scripts/dispatch_run.py#interface",
         "skills/orchestrate/scripts/exec_routing.py#interface",
         "skills/orchestrate/scripts/fabric_policy.py#unit-01",
         "skills/orchestrate/scripts/instruction_quarantine.py#interface",
+        "skills/orchestrate/scripts/lane_exit.py#interface",
+        "skills/orchestrate/scripts/lane_launch.py#interface",
         "skills/orchestrate/scripts/layout.py#interface",
         "skills/orchestrate/scripts/output_custody.py#unit-01",
         "skills/orchestrate/scripts/process_info.py#unit-02",
         "skills/orchestrate/scripts/provider_exec.py#interface",
         "skills/orchestrate/scripts/provider_exec.py#unit-02",
+        "skills/orchestrate/scripts/provider_observer.py#interface",
         "skills/orchestrate/scripts/provider_output.py#interface",
         "skills/orchestrate/scripts/run_lineage.py#interface",
         "skills/orchestrate/scripts/stall_watchdog.py#unit-01",
         "skills/orchestrate/scripts/trusted_git.py#unit-01",
+        "skills/orchestrate/scripts/writer_lease.py#unit-01",
         "workspace:manifest-and-digest"
       ],
       "risk": "medium",
@@ -15464,13 +15312,11 @@
       ],
       "source_spans": [
         {
-          "start": 920,
-          "end": 1262,
+          "start": 923,
+          "end": 1261,
           "symbols": [
             "_toolchain_grant",
             "_runtime_component",
-            "Assign",
-            "Assign",
             "Assign",
             "_opencode_version_error",
             "_pyenv_version_dir",
@@ -15504,19 +15350,22 @@
         "skills/orchestrate/scripts/agy_home.py#interface",
         "skills/orchestrate/scripts/attempt_storage.py#unit-01",
         "skills/orchestrate/scripts/context_usage.py#unit-02",
-        "skills/orchestrate/scripts/dispatch_run.py#interface",
         "skills/orchestrate/scripts/exec_routing.py#interface",
         "skills/orchestrate/scripts/fabric_policy.py#unit-01",
         "skills/orchestrate/scripts/instruction_quarantine.py#interface",
+        "skills/orchestrate/scripts/lane_exit.py#interface",
+        "skills/orchestrate/scripts/lane_launch.py#interface",
         "skills/orchestrate/scripts/layout.py#interface",
         "skills/orchestrate/scripts/output_custody.py#unit-01",
         "skills/orchestrate/scripts/process_info.py#unit-02",
         "skills/orchestrate/scripts/provider_exec.py#interface",
         "skills/orchestrate/scripts/provider_exec.py#unit-03",
+        "skills/orchestrate/scripts/provider_observer.py#interface",
         "skills/orchestrate/scripts/provider_output.py#interface",
         "skills/orchestrate/scripts/run_lineage.py#interface",
         "skills/orchestrate/scripts/stall_watchdog.py#unit-01",
         "skills/orchestrate/scripts/trusted_git.py#unit-01",
+        "skills/orchestrate/scripts/writer_lease.py#unit-01",
         "workspace:manifest-and-digest"
       ],
       "risk": "medium",
@@ -15540,8 +15389,8 @@
       ],
       "source_spans": [
         {
-          "start": 1263,
-          "end": 1594,
+          "start": 1262,
+          "end": 1593,
           "symbols": [
             "_require_kiro_engine",
             "build_plan",
@@ -15638,19 +15487,22 @@
         "skills/orchestrate/scripts/agy_home.py#interface",
         "skills/orchestrate/scripts/attempt_storage.py#unit-01",
         "skills/orchestrate/scripts/context_usage.py#unit-02",
-        "skills/orchestrate/scripts/dispatch_run.py#interface",
         "skills/orchestrate/scripts/exec_routing.py#interface",
         "skills/orchestrate/scripts/fabric_policy.py#unit-01",
         "skills/orchestrate/scripts/instruction_quarantine.py#interface",
+        "skills/orchestrate/scripts/lane_exit.py#interface",
+        "skills/orchestrate/scripts/lane_launch.py#interface",
         "skills/orchestrate/scripts/layout.py#interface",
         "skills/orchestrate/scripts/output_custody.py#unit-01",
         "skills/orchestrate/scripts/process_info.py#unit-02",
         "skills/orchestrate/scripts/provider_exec.py#interface",
         "skills/orchestrate/scripts/provider_exec.py#unit-04",
+        "skills/orchestrate/scripts/provider_observer.py#interface",
         "skills/orchestrate/scripts/provider_output.py#interface",
         "skills/orchestrate/scripts/run_lineage.py#interface",
         "skills/orchestrate/scripts/stall_watchdog.py#unit-01",
         "skills/orchestrate/scripts/trusted_git.py#unit-01",
+        "skills/orchestrate/scripts/writer_lease.py#unit-01",
         "workspace:manifest-and-digest"
       ],
       "risk": "high",
@@ -15674,8 +15526,8 @@
       ],
       "source_spans": [
         {
-          "start": 1595,
-          "end": 1930,
+          "start": 1594,
+          "end": 1927,
           "symbols": [
             "build_plan.Assign",
             "build_plan.If",
@@ -15684,7 +15536,6 @@
             "build_plan.Assign",
             "build_plan.If",
             "build_plan.Return",
-            "Assign",
             "BoundedCapture",
             "ImportFrom",
             "_process_snapshot",
@@ -15715,19 +15566,22 @@
         "skills/orchestrate/scripts/agy_home.py#interface",
         "skills/orchestrate/scripts/attempt_storage.py#unit-01",
         "skills/orchestrate/scripts/context_usage.py#unit-02",
-        "skills/orchestrate/scripts/dispatch_run.py#interface",
         "skills/orchestrate/scripts/exec_routing.py#interface",
         "skills/orchestrate/scripts/fabric_policy.py#unit-01",
         "skills/orchestrate/scripts/instruction_quarantine.py#interface",
+        "skills/orchestrate/scripts/lane_exit.py#interface",
+        "skills/orchestrate/scripts/lane_launch.py#interface",
         "skills/orchestrate/scripts/layout.py#interface",
         "skills/orchestrate/scripts/output_custody.py#unit-01",
         "skills/orchestrate/scripts/process_info.py#unit-02",
         "skills/orchestrate/scripts/provider_exec.py#interface",
         "skills/orchestrate/scripts/provider_exec.py#unit-05",
+        "skills/orchestrate/scripts/provider_observer.py#interface",
         "skills/orchestrate/scripts/provider_output.py#interface",
         "skills/orchestrate/scripts/run_lineage.py#interface",
         "skills/orchestrate/scripts/stall_watchdog.py#unit-01",
         "skills/orchestrate/scripts/trusted_git.py#unit-01",
+        "skills/orchestrate/scripts/writer_lease.py#unit-01",
         "workspace:manifest-and-digest"
       ],
       "risk": "high",
@@ -15751,8 +15605,8 @@
       ],
       "source_spans": [
         {
-          "start": 1931,
-          "end": 2277,
+          "start": 1928,
+          "end": 2274,
           "symbols": [
             "_nested_fabric_owner_token",
             "_Descendants",
@@ -15786,19 +15640,22 @@
         "skills/orchestrate/scripts/agy_home.py#interface",
         "skills/orchestrate/scripts/attempt_storage.py#unit-01",
         "skills/orchestrate/scripts/context_usage.py#unit-02",
-        "skills/orchestrate/scripts/dispatch_run.py#interface",
         "skills/orchestrate/scripts/exec_routing.py#interface",
         "skills/orchestrate/scripts/fabric_policy.py#unit-01",
         "skills/orchestrate/scripts/instruction_quarantine.py#interface",
+        "skills/orchestrate/scripts/lane_exit.py#interface",
+        "skills/orchestrate/scripts/lane_launch.py#interface",
         "skills/orchestrate/scripts/layout.py#interface",
         "skills/orchestrate/scripts/output_custody.py#unit-01",
         "skills/orchestrate/scripts/process_info.py#unit-02",
         "skills/orchestrate/scripts/provider_exec.py#interface",
         "skills/orchestrate/scripts/provider_exec.py#unit-06",
+        "skills/orchestrate/scripts/provider_observer.py#interface",
         "skills/orchestrate/scripts/provider_output.py#interface",
         "skills/orchestrate/scripts/run_lineage.py#interface",
         "skills/orchestrate/scripts/stall_watchdog.py#unit-01",
         "skills/orchestrate/scripts/trusted_git.py#unit-01",
+        "skills/orchestrate/scripts/writer_lease.py#unit-01",
         "workspace:manifest-and-digest"
       ],
       "risk": "high",
@@ -15822,8 +15679,8 @@
       ],
       "source_spans": [
         {
-          "start": 2278,
-          "end": 2607,
+          "start": 2275,
+          "end": 2604,
           "symbols": [
             "WorkspaceProgress",
             "_cpu_stamp",
@@ -15855,19 +15712,22 @@
         "skills/orchestrate/scripts/agy_home.py#interface",
         "skills/orchestrate/scripts/attempt_storage.py#unit-01",
         "skills/orchestrate/scripts/context_usage.py#unit-02",
-        "skills/orchestrate/scripts/dispatch_run.py#interface",
         "skills/orchestrate/scripts/exec_routing.py#interface",
         "skills/orchestrate/scripts/fabric_policy.py#unit-01",
         "skills/orchestrate/scripts/instruction_quarantine.py#interface",
+        "skills/orchestrate/scripts/lane_exit.py#interface",
+        "skills/orchestrate/scripts/lane_launch.py#interface",
         "skills/orchestrate/scripts/layout.py#interface",
         "skills/orchestrate/scripts/output_custody.py#unit-01",
         "skills/orchestrate/scripts/process_info.py#unit-02",
         "skills/orchestrate/scripts/provider_exec.py#interface",
         "skills/orchestrate/scripts/provider_exec.py#unit-07",
+        "skills/orchestrate/scripts/provider_observer.py#interface",
         "skills/orchestrate/scripts/provider_output.py#interface",
         "skills/orchestrate/scripts/run_lineage.py#interface",
         "skills/orchestrate/scripts/stall_watchdog.py#unit-01",
         "skills/orchestrate/scripts/trusted_git.py#unit-01",
+        "skills/orchestrate/scripts/writer_lease.py#unit-01",
         "workspace:manifest-and-digest"
       ],
       "risk": "high",
@@ -15891,13 +15751,14 @@
       ],
       "source_spans": [
         {
-          "start": 2608,
-          "end": 2900,
+          "start": 2605,
+          "end": 2907,
           "symbols": [
             "_check_model",
             "execute",
             "Assign",
             "_preflight_opencode_mcp",
+            "attempt_environment",
             "_run_attempt",
             "_run_attempt.Expr",
             "_run_attempt.Import",
@@ -15909,15 +15770,6 @@
             "_run_attempt.Assign",
             "_run_attempt.Assign",
             "_run_attempt.Assign",
-            "_run_attempt.For",
-            "_run_attempt.Expr",
-            "_run_attempt.Expr",
-            "_run_attempt.Expr",
-            "_run_attempt.Expr",
-            "_run_attempt.Expr",
-            "_run_attempt.If",
-            "_run_attempt.Assign",
-            "_run_attempt.Assign",
             "_run_attempt.Assign",
             "_run_attempt.Assign",
             "_run_attempt.If",
@@ -15942,6 +15794,9 @@
             "_run_attempt.If",
             "_run_attempt.If",
             "_run_attempt.Assign",
+            "_run_attempt.If",
+            "_run_attempt.Assign",
+            "_run_attempt.If",
             "_run_attempt.Assign",
             "_run_attempt.Assign",
             "_run_attempt.Assign",
@@ -15965,17 +15820,27 @@
             "_run_attempt.Assign",
             "_run_attempt.Assign",
             "_run_attempt.Assign",
+            "_run_attempt.handle_signal",
+            "_run_attempt.If",
             "_run_attempt.Assign",
             "_run_attempt.Assign",
             "_run_attempt.Assign",
             "_run_attempt.Assign",
             "_run_attempt.Assign",
-            "_run_attempt.Assign",
-            "_run_attempt.Assign",
-            "_run_attempt.Assign",
-            "_run_attempt.Assign",
-            "_run_attempt.observe_model",
-            "_run_attempt.consume_diagnostic"
+            "_run_attempt.Try",
+            "_run_attempt.Try.Expr",
+            "_run_attempt.Try.If",
+            "_run_attempt.Try.Expr",
+            "_run_attempt.Try.Expr",
+            "_run_attempt.Try.Assign",
+            "_run_attempt.Try.If",
+            "_run_attempt.Try.If",
+            "_run_attempt.Try.If",
+            "_run_attempt.Try.Assign",
+            "_run_attempt.Try.Assign",
+            "_run_attempt.Try.Assign",
+            "_run_attempt.Try.Assign",
+            "_run_attempt.Try.If"
           ]
         }
       ],
@@ -15994,19 +15859,22 @@
         "skills/orchestrate/scripts/agy_home.py#interface",
         "skills/orchestrate/scripts/attempt_storage.py#unit-01",
         "skills/orchestrate/scripts/context_usage.py#unit-02",
-        "skills/orchestrate/scripts/dispatch_run.py#interface",
         "skills/orchestrate/scripts/exec_routing.py#interface",
         "skills/orchestrate/scripts/fabric_policy.py#unit-01",
         "skills/orchestrate/scripts/instruction_quarantine.py#interface",
+        "skills/orchestrate/scripts/lane_exit.py#interface",
+        "skills/orchestrate/scripts/lane_launch.py#interface",
         "skills/orchestrate/scripts/layout.py#interface",
         "skills/orchestrate/scripts/output_custody.py#unit-01",
         "skills/orchestrate/scripts/process_info.py#unit-02",
         "skills/orchestrate/scripts/provider_exec.py#interface",
         "skills/orchestrate/scripts/provider_exec.py#unit-08",
+        "skills/orchestrate/scripts/provider_observer.py#interface",
         "skills/orchestrate/scripts/provider_output.py#interface",
         "skills/orchestrate/scripts/run_lineage.py#interface",
         "skills/orchestrate/scripts/stall_watchdog.py#unit-01",
         "skills/orchestrate/scripts/trusted_git.py#unit-01",
+        "skills/orchestrate/scripts/writer_lease.py#unit-01",
         "workspace:manifest-and-digest"
       ],
       "risk": "high",
@@ -16030,22 +15898,17 @@
       ],
       "source_spans": [
         {
-          "start": 2901,
-          "end": 3244,
+          "start": 2908,
+          "end": 3257,
           "symbols": [
-            "_run_attempt.consume",
-            "_run_attempt.handle_signal",
-            "_run_attempt.If",
-            "_run_attempt.Assign",
-            "_run_attempt.Assign",
-            "_run_attempt.Assign",
-            "_run_attempt.Assign",
-            "_run_attempt.Assign",
-            "_run_attempt.Try",
+            "_run_attempt.Try.If",
+            "_run_attempt.Try.handlers.exc",
+            "_run_attempt.Try.handlers.exc",
+            "_run_attempt.Try.handlers.exc",
+            "_run_attempt.Try.finalbody.Try",
             "_run_attempt.Assign",
             "_run_attempt.If",
             "_run_attempt.Assign",
-            "_run_attempt.If",
             "_run_attempt.Expr",
             "_run_attempt.If",
             "_run_attempt.Assign",
@@ -16054,7 +15917,26 @@
             "_run_attempt.Assign",
             "_run_attempt.If",
             "_run_attempt.Assign",
-            "_run_attempt.Expr"
+            "_run_attempt.Expr",
+            "_run_attempt.If",
+            "_run_attempt.If",
+            "_run_attempt.Assign",
+            "_run_attempt.If",
+            "_run_attempt.If",
+            "_run_attempt.If",
+            "_run_attempt.If",
+            "_run_attempt.Assign",
+            "_run_attempt.Assign",
+            "_run_attempt.Assign",
+            "_run_attempt.Assign",
+            "_run_attempt.If",
+            "_run_attempt.For",
+            "_run_attempt.If",
+            "_run_attempt.Assign",
+            "_run_attempt.If",
+            "_run_attempt.If",
+            "_run_attempt.If",
+            "_run_attempt.If"
           ]
         }
       ],
@@ -16073,19 +15955,22 @@
         "skills/orchestrate/scripts/agy_home.py#interface",
         "skills/orchestrate/scripts/attempt_storage.py#unit-01",
         "skills/orchestrate/scripts/context_usage.py#unit-02",
-        "skills/orchestrate/scripts/dispatch_run.py#interface",
         "skills/orchestrate/scripts/exec_routing.py#interface",
         "skills/orchestrate/scripts/fabric_policy.py#unit-01",
         "skills/orchestrate/scripts/instruction_quarantine.py#interface",
+        "skills/orchestrate/scripts/lane_exit.py#interface",
+        "skills/orchestrate/scripts/lane_launch.py#interface",
         "skills/orchestrate/scripts/layout.py#interface",
         "skills/orchestrate/scripts/output_custody.py#unit-01",
         "skills/orchestrate/scripts/process_info.py#unit-02",
         "skills/orchestrate/scripts/provider_exec.py#interface",
         "skills/orchestrate/scripts/provider_exec.py#unit-09",
+        "skills/orchestrate/scripts/provider_observer.py#interface",
         "skills/orchestrate/scripts/provider_output.py#interface",
         "skills/orchestrate/scripts/run_lineage.py#interface",
         "skills/orchestrate/scripts/stall_watchdog.py#unit-01",
         "skills/orchestrate/scripts/trusted_git.py#unit-01",
+        "skills/orchestrate/scripts/writer_lease.py#unit-01",
         "workspace:manifest-and-digest"
       ],
       "risk": "high",
@@ -16109,28 +15994,9 @@
       ],
       "source_spans": [
         {
-          "start": 3245,
-          "end": 3538,
+          "start": 3258,
+          "end": 3583,
           "symbols": [
-            "_run_attempt.If",
-            "_run_attempt.If",
-            "_run_attempt.Assign",
-            "_run_attempt.If",
-            "_run_attempt.If",
-            "_run_attempt.If",
-            "_run_attempt.If",
-            "_run_attempt.Assign",
-            "_run_attempt.Assign",
-            "_run_attempt.Assign",
-            "_run_attempt.Assign",
-            "_run_attempt.If",
-            "_run_attempt.For",
-            "_run_attempt.If",
-            "_run_attempt.Assign",
-            "_run_attempt.If",
-            "_run_attempt.If",
-            "_run_attempt.If",
-            "_run_attempt.If",
             "_run_attempt.If",
             "_run_attempt.Assign",
             "_run_attempt.Expr",
@@ -16162,7 +16028,9 @@
             "_run_attempt.Assign",
             "_run_attempt.Assign",
             "_run_attempt.Assign",
-            "_run_attempt.If"
+            "_run_attempt.If",
+            "_run_attempt.Assign",
+            "_run_attempt.Return"
           ]
         }
       ],
@@ -16181,19 +16049,22 @@
         "skills/orchestrate/scripts/agy_home.py#interface",
         "skills/orchestrate/scripts/attempt_storage.py#unit-01",
         "skills/orchestrate/scripts/context_usage.py#unit-02",
-        "skills/orchestrate/scripts/dispatch_run.py#interface",
         "skills/orchestrate/scripts/exec_routing.py#interface",
         "skills/orchestrate/scripts/fabric_policy.py#unit-01",
         "skills/orchestrate/scripts/instruction_quarantine.py#interface",
+        "skills/orchestrate/scripts/lane_exit.py#interface",
+        "skills/orchestrate/scripts/lane_launch.py#interface",
         "skills/orchestrate/scripts/layout.py#interface",
         "skills/orchestrate/scripts/output_custody.py#unit-01",
         "skills/orchestrate/scripts/process_info.py#unit-02",
         "skills/orchestrate/scripts/provider_exec.py#interface",
         "skills/orchestrate/scripts/provider_exec.py#unit-10",
+        "skills/orchestrate/scripts/provider_observer.py#interface",
         "skills/orchestrate/scripts/provider_output.py#interface",
         "skills/orchestrate/scripts/run_lineage.py#interface",
         "skills/orchestrate/scripts/stall_watchdog.py#unit-01",
         "skills/orchestrate/scripts/trusted_git.py#unit-01",
+        "skills/orchestrate/scripts/writer_lease.py#unit-01",
         "workspace:manifest-and-digest"
       ],
       "risk": "high",
@@ -16217,23 +16088,21 @@
       ],
       "source_spans": [
         {
-          "start": 3539,
-          "end": 3789,
+          "start": 3584,
+          "end": 3763,
           "symbols": [
-            "_run_attempt.Assign",
-            "_run_attempt.Return",
+            "observe_main",
             "parser",
             "main",
             "If"
           ]
         }
       ],
-      "target_crate": "supervisor",
+      "target_crate": "providers",
       "depends_on": [
         "prerequisite:J1",
         "prerequisite:J2",
         "prerequisite:adr",
-        "prerequisite:s2",
         "scripts/fabric_hosts.py#interface",
         "scripts/lib/jsonc.py#unit-01",
         "scripts/provider_quota.py#interface",
@@ -16243,19 +16112,22 @@
         "skills/orchestrate/scripts/agy_home.py#interface",
         "skills/orchestrate/scripts/attempt_storage.py#unit-01",
         "skills/orchestrate/scripts/context_usage.py#unit-02",
-        "skills/orchestrate/scripts/dispatch_run.py#interface",
         "skills/orchestrate/scripts/exec_routing.py#interface",
         "skills/orchestrate/scripts/fabric_policy.py#unit-01",
         "skills/orchestrate/scripts/instruction_quarantine.py#interface",
+        "skills/orchestrate/scripts/lane_exit.py#interface",
+        "skills/orchestrate/scripts/lane_launch.py#interface",
         "skills/orchestrate/scripts/layout.py#interface",
         "skills/orchestrate/scripts/output_custody.py#unit-01",
         "skills/orchestrate/scripts/process_info.py#unit-02",
         "skills/orchestrate/scripts/provider_exec.py#interface",
         "skills/orchestrate/scripts/provider_exec.py#unit-11",
+        "skills/orchestrate/scripts/provider_observer.py#interface",
         "skills/orchestrate/scripts/provider_output.py#interface",
         "skills/orchestrate/scripts/run_lineage.py#interface",
         "skills/orchestrate/scripts/stall_watchdog.py#unit-01",
         "skills/orchestrate/scripts/trusted_git.py#unit-01",
+        "skills/orchestrate/scripts/writer_lease.py#unit-01",
         "workspace:manifest-and-digest"
       ],
       "risk": "high",
@@ -16270,6 +16142,65 @@
       ],
       "lane_days": 0.5,
       "action": "redesigned"
+    },
+    {
+      "id": "skills/orchestrate/scripts/provider_observer.py#interface",
+      "kind": "interface",
+      "source_files": [
+        "skills/orchestrate/scripts/provider_observer.py"
+      ],
+      "target_crate": "workflow",
+      "depends_on": [
+        "prerequisite:J2",
+        "prerequisite:adr",
+        "workspace:manifest-and-digest"
+      ],
+      "risk": "medium",
+      "recommended_model_tier": "principal",
+      "gates": [
+        "J2",
+        "unit"
+      ],
+      "lane_days": 0.25,
+      "action": "redesigned"
+    },
+    {
+      "id": "skills/orchestrate/scripts/provider_observer.py#unit-01",
+      "kind": "port",
+      "source_files": [
+        "skills/orchestrate/scripts/provider_observer.py"
+      ],
+      "source_spans": [
+        {
+          "start": 1,
+          "end": 175,
+          "symbols": [
+            "provider_observer"
+          ]
+        }
+      ],
+      "target_crate": "workflow",
+      "depends_on": [
+        "prerequisite:J1",
+        "prerequisite:J2",
+        "prerequisite:adr",
+        "skills/orchestrate/scripts/adapters/__init__.py#unit-01",
+        "skills/orchestrate/scripts/context_usage.py#unit-02",
+        "skills/orchestrate/scripts/provider_observer.py#interface",
+        "skills/orchestrate/scripts/provider_output.py#interface",
+        "workspace:manifest-and-digest"
+      ],
+      "risk": "medium",
+      "recommended_model_tier": "junior",
+      "review_model_tier": "principal",
+      "gates": [
+        "unit",
+        "J1",
+        "J2",
+        "differential"
+      ],
+      "lane_days": 0.5,
+      "action": "ported"
     },
     {
       "id": "skills/orchestrate/scripts/provider_output.py#interface",
@@ -16432,7 +16363,7 @@
       "source_spans": [
         {
           "start": 1,
-          "end": 335,
+          "end": 336,
           "symbols": [
             "module",
             "Expr",
@@ -16460,6 +16391,7 @@
             "Expr",
             "Expr",
             "Import",
+            "Import",
             "ImportFrom",
             "Import",
             "ImportFrom",
@@ -16485,12 +16417,14 @@
       ],
       "target_crate": "run",
       "depends_on": [
-        "integrate:680ea17ec5d1",
+        "integrate:31b9fba25e70",
         "prerequisite:J1",
         "prerequisite:J2",
         "prerequisite:adr",
         "skills/_shared/custody.py#unit-01",
         "skills/orchestrate/scripts/attempt_evidence.py#unit-01",
+        "skills/orchestrate/scripts/dispatch_run.py#unit-08",
+        "skills/orchestrate/scripts/git_evidence_packet.py#unit-01",
         "skills/orchestrate/scripts/run_records.py#unit-02",
         "workspace:manifest-and-digest"
       ],
@@ -16515,8 +16449,8 @@
       ],
       "source_spans": [
         {
-          "start": 336,
-          "end": 669,
+          "start": 337,
+          "end": 677,
           "symbols": [
             "_validate_git_evidence",
             "_attempt",
@@ -16525,18 +16459,23 @@
             "_inspect_batches",
             "_inspect",
             "_artifact",
-            "_route_selector"
+            "_route_selector",
+            "_dispatch_command",
+            "_run_child",
+            "_operator_response"
           ]
         }
       ],
       "target_crate": "run",
       "depends_on": [
-        "integrate:680ea17ec5d1",
+        "integrate:31b9fba25e70",
         "prerequisite:J1",
         "prerequisite:J2",
         "prerequisite:adr",
         "skills/_shared/custody.py#unit-01",
         "skills/orchestrate/scripts/attempt_evidence.py#unit-01",
+        "skills/orchestrate/scripts/dispatch_run.py#unit-08",
+        "skills/orchestrate/scripts/git_evidence_packet.py#unit-01",
         "skills/orchestrate/scripts/run_controls.py#unit-01",
         "skills/orchestrate/scripts/run_records.py#unit-02",
         "workspace:manifest-and-digest"
@@ -16562,29 +16501,31 @@
       ],
       "source_spans": [
         {
-          "start": 670,
-          "end": 997,
+          "start": 678,
+          "end": 1018,
           "symbols": [
-            "_dispatch_command",
-            "_run_child",
-            "_operator_response",
             "_continuation_prompt",
             "_retry",
             "_load_summary",
             "validate_retained_dispatch",
             "_input_ref",
-            "_prompt_file"
+            "_prompt_file",
+            "_reduce",
+            "Assign",
+            "Assign"
           ]
         }
       ],
       "target_crate": "run",
       "depends_on": [
-        "integrate:680ea17ec5d1",
+        "integrate:31b9fba25e70",
         "prerequisite:J1",
         "prerequisite:J2",
         "prerequisite:adr",
         "skills/_shared/custody.py#unit-01",
         "skills/orchestrate/scripts/attempt_evidence.py#unit-01",
+        "skills/orchestrate/scripts/dispatch_run.py#unit-08",
+        "skills/orchestrate/scripts/git_evidence_packet.py#unit-01",
         "skills/orchestrate/scripts/run_controls.py#unit-02",
         "skills/orchestrate/scripts/run_records.py#unit-02",
         "workspace:manifest-and-digest"
@@ -16610,12 +16551,9 @@
       ],
       "source_spans": [
         {
-          "start": 998,
-          "end": 1238,
+          "start": 1019,
+          "end": 1192,
           "symbols": [
-            "_reduce",
-            "Assign",
-            "Assign",
             "_find_run",
             "_tail_lines",
             "_read_json",
@@ -16628,12 +16566,14 @@
       ],
       "target_crate": "run",
       "depends_on": [
-        "integrate:680ea17ec5d1",
+        "integrate:31b9fba25e70",
         "prerequisite:J1",
         "prerequisite:J2",
         "prerequisite:adr",
         "skills/_shared/custody.py#unit-01",
         "skills/orchestrate/scripts/attempt_evidence.py#unit-01",
+        "skills/orchestrate/scripts/dispatch_run.py#unit-08",
+        "skills/orchestrate/scripts/git_evidence_packet.py#unit-01",
         "skills/orchestrate/scripts/run_controls.py#unit-03",
         "skills/orchestrate/scripts/run_records.py#unit-02",
         "workspace:manifest-and-digest"
@@ -17369,6 +17309,40 @@
       "action": "ported"
     },
     {
+      "id": "skills/orchestrate/scripts/writer_lease.py#unit-01",
+      "kind": "port",
+      "source_files": [
+        "skills/orchestrate/scripts/writer_lease.py"
+      ],
+      "source_spans": [
+        {
+          "start": 1,
+          "end": 245,
+          "symbols": [
+            "writer_lease"
+          ]
+        }
+      ],
+      "target_crate": "workflow",
+      "depends_on": [
+        "prerequisite:J1",
+        "prerequisite:J2",
+        "prerequisite:adr",
+        "workspace:manifest-and-digest"
+      ],
+      "risk": "medium",
+      "recommended_model_tier": "junior",
+      "review_model_tier": "principal",
+      "gates": [
+        "unit",
+        "J1",
+        "J2",
+        "differential"
+      ],
+      "lane_days": 0.5,
+      "action": "ported"
+    },
+    {
       "id": "skills/session/scripts/cleanup_run_artifacts.py#unit-01",
       "kind": "port",
       "source_files": [
@@ -17679,6 +17653,7 @@
       "scripts/managed_installation_manifest.py#unit-01",
       "scripts/model_route.py#interface",
       "scripts/model_route_catalog.py#unit-01",
+      "scripts/model_route_cli.py#unit-01",
       "scripts/model_route_live.py#interface",
       "scripts/model_route_pools.py#unit-01",
       "scripts/model_route_preferences.py#unit-01",
@@ -17727,21 +17702,26 @@
       "skills/orchestrate/scripts/cf_dispatch.py#interface",
       "skills/orchestrate/scripts/check_herdr_cli.py#unit-01",
       "skills/orchestrate/scripts/context_usage.py#unit-01",
-      "skills/orchestrate/scripts/dispatch_run.py#interface",
+      "skills/orchestrate/scripts/dispatch_preflight.py#interface",
       "skills/orchestrate/scripts/exec_routing.py#interface",
       "skills/orchestrate/scripts/fabric_policy.py#unit-01",
       "skills/orchestrate/scripts/fabric_records.py#interface",
+      "skills/orchestrate/scripts/git_evidence_packet.py#unit-01",
       "skills/orchestrate/scripts/instruction_quarantine.py#interface",
+      "skills/orchestrate/scripts/lane_exit.py#interface",
+      "skills/orchestrate/scripts/lane_launch.py#interface",
       "skills/orchestrate/scripts/lane_protection.py#interface",
       "skills/orchestrate/scripts/layout.py#interface",
       "skills/orchestrate/scripts/lease.py#unit-01",
       "skills/orchestrate/scripts/output_custody.py#unit-01",
       "skills/orchestrate/scripts/process_info.py#unit-01",
       "skills/orchestrate/scripts/provider_exec.py#interface",
+      "skills/orchestrate/scripts/provider_observer.py#interface",
       "skills/orchestrate/scripts/provider_output.py#interface",
       "skills/orchestrate/scripts/run_lineage.py#interface",
       "skills/orchestrate/scripts/run_worker_detached.py#unit-01",
       "skills/orchestrate/scripts/trusted_git.py#unit-01",
+      "skills/orchestrate/scripts/writer_lease.py#unit-01",
       "skills/session/scripts/compact_reinject.py#unit-01",
       "skills/session/scripts/context_audit.py#unit-01",
       "skills/setup-repo/templates/claude-tracker-hook.py#unit-01",
@@ -17761,6 +17741,7 @@
       "scripts/lib/roots.py#unit-01",
       "scripts/lib/stale_checkout.py#unit-01",
       "scripts/manage_installation.py#unit-01",
+      "scripts/model_route_cli.py#unit-02",
       "scripts/model_route_live.py#unit-01",
       "scripts/model_route_pools.py#unit-02",
       "scripts/model_route_preferences.py#unit-02",
@@ -17789,6 +17770,7 @@
       "skills/orchestrate/scripts/context_usage.py#unit-02",
       "skills/orchestrate/scripts/exec_routing.py#unit-01",
       "skills/orchestrate/scripts/instruction_quarantine.py#unit-01",
+      "skills/orchestrate/scripts/lane_exit.py#unit-01",
       "skills/orchestrate/scripts/lane_protection.py#unit-01",
       "skills/orchestrate/scripts/process_info.py#unit-02",
       "skills/orchestrate/scripts/run_records.py#unit-01",
@@ -17833,6 +17815,7 @@
       "skills/orchestrate/scripts/layout.py#unit-01",
       "skills/orchestrate/scripts/log_reducer.py#unit-01",
       "skills/orchestrate/scripts/memory_admission.py#unit-01",
+      "skills/orchestrate/scripts/provider_observer.py#unit-01",
       "skills/orchestrate/scripts/provider_output.py#unit-01",
       "skills/orchestrate/scripts/run_lineage.py#unit-01",
       "skills/orchestrate/scripts/run_records.py#unit-02",
@@ -17858,6 +17841,7 @@
       "skills/legal-writing/scripts/lint_legal_style.py#unit-02",
       "skills/orchestrate/scripts/cf_dispatch.py#unit-03",
       "skills/orchestrate/scripts/fabric_records.py#unit-02",
+      "skills/orchestrate/scripts/lane_launch.py#unit-01",
       "skills/orchestrate/scripts/provider_output.py#unit-02",
       "skills/orchestrate/scripts/run_lineage.py#unit-02",
       "skills/orchestrate/scripts/worker_liveness.py#unit-02"
@@ -17873,7 +17857,7 @@
       "scripts/provider_quota.py#unit-02",
       "scripts/telemetry.py#unit-03",
       "skills/deliver/scripts/delivery_validation_common.py#unit-01",
-      "skills/orchestrate/scripts/dispatch_run.py#unit-01",
+      "skills/orchestrate/scripts/dispatch_preflight.py#unit-01",
       "skills/orchestrate/scripts/provider_exec.py#unit-01"
     ],
     [
@@ -17892,7 +17876,7 @@
       "skills/deliver/scripts/delivery_validation_reviews.py#unit-01",
       "skills/deliver/scripts/delivery_validation_security.py#unit-01",
       "skills/deliver/scripts/delivery_validation_shape.py#unit-01",
-      "skills/orchestrate/scripts/dispatch_run.py#unit-02",
+      "skills/orchestrate/scripts/dispatch_preflight.py#unit-02",
       "skills/orchestrate/scripts/provider_exec.py#unit-02"
     ],
     [
@@ -17901,7 +17885,6 @@
       "scripts/model_route.py#unit-02",
       "scripts/provider_quota.py#unit-04",
       "skills/deliver/scripts/validate_delivery.py#unit-01",
-      "skills/orchestrate/scripts/dispatch_run.py#unit-03",
       "skills/orchestrate/scripts/provider_exec.py#unit-03"
     ],
     [
@@ -17911,7 +17894,6 @@
       "scripts/provider_quota.py#unit-05",
       "skills/deliver/scripts/delivery_receipt.py#unit-01",
       "skills/implement/scripts/bind_merged_delivery.py#unit-01",
-      "skills/orchestrate/scripts/dispatch_run.py#unit-04",
       "skills/orchestrate/scripts/provider_exec.py#unit-04",
       "skills/session/scripts/cleanup_run_artifacts.py#unit-01"
     ],
@@ -17920,62 +17902,76 @@
       "scripts/clean.py#unit-02",
       "scripts/model_route.py#unit-04",
       "skills/deliver/scripts/delivery_receipt.py#unit-02",
-      "skills/orchestrate/scripts/dispatch_run.py#unit-05",
       "skills/orchestrate/scripts/provider_exec.py#unit-05"
     ],
     [
       "scripts/clean.py#unit-03",
       "scripts/model_route.py#unit-05",
       "skills/deliver/scripts/delivery_receipt.py#unit-03",
-      "skills/orchestrate/scripts/dispatch_run.py#unit-06",
       "skills/orchestrate/scripts/provider_exec.py#unit-06"
     ],
     [
-      "scripts/model_route.py#unit-06",
-      "skills/orchestrate/scripts/dispatch_run.py#unit-07",
       "skills/orchestrate/scripts/provider_exec.py#unit-07"
     ],
     [
-      "scripts/model_route.py#unit-07",
-      "skills/orchestrate/scripts/dispatch_run.py#unit-08",
       "skills/orchestrate/scripts/provider_exec.py#unit-08"
     ],
     [
-      "skills/orchestrate/scripts/dispatch_run.py#unit-09",
       "skills/orchestrate/scripts/provider_exec.py#unit-09"
     ],
     [
-      "skills/orchestrate/scripts/dispatch_run.py#unit-10",
       "skills/orchestrate/scripts/provider_exec.py#unit-10"
     ],
     [
-      "skills/orchestrate/scripts/dispatch_run.py#unit-11",
       "skills/orchestrate/scripts/provider_exec.py#unit-11"
     ],
     [
       "skills/orchestrate/scripts/provider_exec.py#unit-12"
     ],
     [
-      "integrate:680ea17ec5d1"
+      "integrate:31b9fba25e70"
+    ],
+    [
+      "scripts/check_target.py#unit-01",
+      "scripts/node-workspace-provision.py#unit-01",
+      "scripts/utility.py#unit-01",
+      "skills/orchestrate/scripts/dispatch_run.py#unit-01"
+    ],
+    [
+      "scripts/utility_output_hook.py#unit-01",
+      "skills/orchestrate/scripts/dispatch_run.py#unit-02"
+    ],
+    [
+      "scripts/configure-claude-hooks.py#unit-01",
+      "skills/orchestrate/scripts/dispatch_run.py#unit-03"
+    ],
+    [
+      "skills/orchestrate/scripts/dispatch_run.py#unit-04"
+    ],
+    [
+      "skills/orchestrate/scripts/dispatch_run.py#unit-05"
+    ],
+    [
+      "skills/orchestrate/scripts/dispatch_run.py#unit-06"
+    ],
+    [
+      "skills/orchestrate/scripts/dispatch_run.py#unit-07"
+    ],
+    [
+      "skills/orchestrate/scripts/dispatch_run.py#unit-08"
     ],
     [
       "runtime/fabric/src/process-identity.ts#unit-01",
-      "scripts/check_target.py#unit-01",
-      "scripts/node-workspace-provision.py#unit-01",
-      "scripts/provenant.template#unit-01",
-      "scripts/utility.py#unit-01",
       "skills/orchestrate/scripts/batch_run.py#unit-01",
       "skills/orchestrate/scripts/run_controls.py#unit-01"
     ],
     [
       "runtime/fabric/src/process-identity.ts#unit-02",
-      "scripts/utility_output_hook.py#unit-01",
       "skills/orchestrate/scripts/batch_run.py#unit-02",
       "skills/orchestrate/scripts/run_controls.py#unit-02"
     ],
     [
       "integrate:5ef42cbe0051",
-      "scripts/configure-claude-hooks.py#unit-01",
       "skills/orchestrate/scripts/batch_run.py#unit-03",
       "skills/orchestrate/scripts/run_controls.py#unit-03"
     ],
@@ -17988,12 +17984,10 @@
     ],
     [
       "runtime/fabric/src/run-status.ts#unit-02",
-      "scripts/provenant#unit-01",
       "skills/orchestrate/scripts/run_dir_finalize.py#unit-01"
     ],
     [
       "runtime/fabric/src/run-status.ts#unit-03",
-      "scripts/provenant#unit-02",
       "skills/orchestrate/scripts/run_dir_finalize.py#unit-02"
     ],
     [
@@ -18038,7 +18032,7 @@
     ]
   ],
   "estimated_lane_days_by_crate": {
-    "cli": 19.0,
+    "cli": 17.5,
     "config": 9.75,
     "confinement": 4.75,
     "core": 3.5,
@@ -18046,14 +18040,14 @@
     "fabric-mcp": 2.0,
     "fabric-runtime": 25.5,
     "fabric-store": 3.0,
-    "providers": 10.75,
+    "providers": 11.25,
     "quota": 6.75,
     "records": 4.5,
     "routing": 11.25,
-    "run": 14.0,
-    "supervisor": 7.75,
+    "run": 12.25,
+    "supervisor": 7.25,
     "telemetry": 8.0,
-    "workflow": 24.5
+    "workflow": 29.0
   },
   "source_imports": {
     "apps/quota-menubar/Fixtures/make_fixtures.py": [
@@ -18601,7 +18595,7 @@
     "scripts/fabric_lanes.py": [
       "scripts/fabric_git.py",
       "skills/_shared/bounded_process.py",
-      "skills/orchestrate/scripts/dispatch_run.py"
+      "skills/orchestrate/scripts/dispatch_preflight.py"
     ],
     "scripts/git_evidence.py": [],
     "scripts/harness_profile.py": [
@@ -18637,6 +18631,7 @@
       "scripts/harness_profile.py",
       "scripts/lib/roots.py",
       "scripts/model_route_catalog.py",
+      "scripts/model_route_cli.py",
       "scripts/model_route_live.py",
       "scripts/model_route_pools.py",
       "scripts/model_route_preferences.py",
@@ -18646,6 +18641,7 @@
       "skills/orchestrate/scripts/fabric_records.py"
     ],
     "scripts/model_route_catalog.py": [],
+    "scripts/model_route_cli.py": [],
     "scripts/model_route_live.py": [
       "scripts/provider_quota.py"
     ],
@@ -18658,22 +18654,6 @@
     "scripts/node-workspace-provision.py": [
       "scripts/retry-npm-install.py",
       "scripts/worktree.py"
-    ],
-    "scripts/provenant": [
-      "scripts/check_target.py",
-      "scripts/clean.py",
-      "scripts/lib/product_root_resolver.py",
-      "scripts/lib/stale_checkout.py",
-      "scripts/provenant_lint.py",
-      "scripts/reap.py",
-      "scripts/utility.py",
-      "skills/orchestrate/scripts/batch_run.py",
-      "skills/orchestrate/scripts/capabilities.py",
-      "skills/orchestrate/scripts/dispatch_run.py",
-      "skills/orchestrate/scripts/run_controls.py"
-    ],
-    "scripts/provenant.template": [
-      "scripts/clean.py"
     ],
     "scripts/provenant_lint.py": [
       "skills/orchestrate/scripts/fabric_policy.py"
@@ -18901,11 +18881,13 @@
       "skills/_shared/custody.py",
       "skills/_shared/harness_profile.py",
       "skills/orchestrate/scripts/attempt_evidence.py",
+      "skills/orchestrate/scripts/dispatch_preflight.py",
       "skills/orchestrate/scripts/dispatch_run.py",
       "skills/orchestrate/scripts/layout.py",
       "skills/orchestrate/scripts/run_lineage.py",
       "skills/orchestrate/scripts/run_records.py",
-      "skills/orchestrate/scripts/secret_scan.py"
+      "skills/orchestrate/scripts/secret_scan.py",
+      "skills/orchestrate/scripts/writer_lease.py"
     ],
     "skills/orchestrate/scripts/bin/ps": [
       "skills/orchestrate/scripts/process_info.py"
@@ -18919,21 +18901,36 @@
     ],
     "skills/orchestrate/scripts/check_herdr_cli.py": [],
     "skills/orchestrate/scripts/context_usage.py": [],
-    "skills/orchestrate/scripts/dispatch_run.py": [
-      "scripts/fabric_git.py",
+    "skills/orchestrate/scripts/dispatch_preflight.py": [
       "scripts/fabric_hosts.py",
       "scripts/model_route.py",
       "scripts/worktree.py",
+      "skills/_shared/custody.py",
+      "skills/_shared/harness_profile.py",
+      "skills/orchestrate/scripts/capabilities.py",
+      "skills/orchestrate/scripts/cf_dispatch.py",
+      "skills/orchestrate/scripts/exec_routing.py",
+      "skills/orchestrate/scripts/fabric_records.py",
+      "skills/orchestrate/scripts/layout.py",
+      "skills/orchestrate/scripts/provider_exec.py",
+      "skills/orchestrate/scripts/provider_output.py",
+      "skills/orchestrate/scripts/run_records.py",
+      "skills/orchestrate/scripts/secret_scan.py",
+      "skills/orchestrate/scripts/writer_lease.py"
+    ],
+    "skills/orchestrate/scripts/dispatch_run.py": [
+      "scripts/fabric_git.py",
       "skills/_shared/bounded_process.py",
       "skills/_shared/custody.py",
       "skills/_shared/harness_profile.py",
       "skills/orchestrate/scripts/attempt_evidence.py",
       "skills/orchestrate/scripts/attempt_storage.py",
-      "skills/orchestrate/scripts/capabilities.py",
       "skills/orchestrate/scripts/cf_dispatch.py",
       "skills/orchestrate/scripts/context_usage.py",
+      "skills/orchestrate/scripts/dispatch_preflight.py",
       "skills/orchestrate/scripts/exec_routing.py",
       "skills/orchestrate/scripts/fabric_records.py",
+      "skills/orchestrate/scripts/git_evidence_packet.py",
       "skills/orchestrate/scripts/layout.py",
       "skills/orchestrate/scripts/memory_admission.py",
       "skills/orchestrate/scripts/process_info.py",
@@ -18942,7 +18939,8 @@
       "skills/orchestrate/scripts/run_lineage.py",
       "skills/orchestrate/scripts/run_records.py",
       "skills/orchestrate/scripts/secret_scan.py",
-      "skills/orchestrate/scripts/stall_watchdog.py"
+      "skills/orchestrate/scripts/stall_watchdog.py",
+      "skills/orchestrate/scripts/writer_lease.py"
     ],
     "skills/orchestrate/scripts/exec_routing.py": [
       "scripts/model_route.py",
@@ -18957,9 +18955,18 @@
       "skills/orchestrate/scripts/layout.py",
       "skills/orchestrate/scripts/output_custody.py"
     ],
+    "skills/orchestrate/scripts/git_evidence_packet.py": [],
     "skills/orchestrate/scripts/instruction_quarantine.py": [
       "skills/orchestrate/scripts/output_custody.py",
       "skills/orchestrate/scripts/provider_exec.py"
+    ],
+    "skills/orchestrate/scripts/lane_exit.py": [
+      "skills/orchestrate/scripts/provider_observer.py"
+    ],
+    "skills/orchestrate/scripts/lane_launch.py": [
+      "skills/orchestrate/scripts/lane_exit.py",
+      "skills/orchestrate/scripts/provider_exec.py",
+      "skills/orchestrate/scripts/run_records.py"
     ],
     "skills/orchestrate/scripts/lane_protection.py": [
       "skills/orchestrate/scripts/provider_exec.py",
@@ -18989,17 +18996,25 @@
       "skills/orchestrate/scripts/agy_home.py",
       "skills/orchestrate/scripts/attempt_storage.py",
       "skills/orchestrate/scripts/context_usage.py",
-      "skills/orchestrate/scripts/dispatch_run.py",
       "skills/orchestrate/scripts/exec_routing.py",
       "skills/orchestrate/scripts/fabric_policy.py",
       "skills/orchestrate/scripts/instruction_quarantine.py",
+      "skills/orchestrate/scripts/lane_exit.py",
+      "skills/orchestrate/scripts/lane_launch.py",
       "skills/orchestrate/scripts/layout.py",
       "skills/orchestrate/scripts/output_custody.py",
       "skills/orchestrate/scripts/process_info.py",
+      "skills/orchestrate/scripts/provider_observer.py",
       "skills/orchestrate/scripts/provider_output.py",
       "skills/orchestrate/scripts/run_lineage.py",
       "skills/orchestrate/scripts/stall_watchdog.py",
-      "skills/orchestrate/scripts/trusted_git.py"
+      "skills/orchestrate/scripts/trusted_git.py",
+      "skills/orchestrate/scripts/writer_lease.py"
+    ],
+    "skills/orchestrate/scripts/provider_observer.py": [
+      "skills/orchestrate/scripts/adapters/__init__.py",
+      "skills/orchestrate/scripts/context_usage.py",
+      "skills/orchestrate/scripts/provider_output.py"
     ],
     "skills/orchestrate/scripts/provider_output.py": [
       "skills/orchestrate/scripts/adapters/__init__.py",
@@ -19009,6 +19024,7 @@
       "skills/_shared/custody.py",
       "skills/orchestrate/scripts/attempt_evidence.py",
       "skills/orchestrate/scripts/dispatch_run.py",
+      "skills/orchestrate/scripts/git_evidence_packet.py",
       "skills/orchestrate/scripts/layout.py",
       "skills/orchestrate/scripts/run_records.py"
     ],
@@ -19039,6 +19055,7 @@
     "skills/orchestrate/scripts/worker_liveness.py": [
       "skills/orchestrate/scripts/process_info.py"
     ],
+    "skills/orchestrate/scripts/writer_lease.py": [],
     "skills/session/scripts/cleanup_run_artifacts.py": [
       "scripts/lib/roots.py",
       "skills/_shared/roots.py",
@@ -19067,47 +19084,6 @@
       "tests/fixtures/current-routing-eval/provider_fixture.py"
     ],
     "tests/fixtures/current-routing-eval/provider_fixture.py": [],
-    "tests/front_door_parity/bench_front_door.py": [
-      "tests/front_door_parity/parity_support.py"
-    ],
-    "tests/front_door_parity/conftest.py": [
-      "tests/front_door_parity/parity_support.py"
-    ],
-    "tests/front_door_parity/parity_support.py": [
-      "scripts/check_target.py",
-      "scripts/worktree.py"
-    ],
-    "tests/front_door_parity/test_check_custody.py": [
-      "tests/front_door_parity/parity_support.py"
-    ],
-    "tests/front_door_parity/test_dispatch.py": [
-      "scripts/clean.py",
-      "scripts/provenant_lint.py",
-      "scripts/reap.py",
-      "skills/orchestrate/scripts/batch_run.py",
-      "skills/orchestrate/scripts/capabilities.py",
-      "skills/orchestrate/scripts/dispatch_run.py",
-      "skills/orchestrate/scripts/run_controls.py",
-      "tests/front_door_parity/parity_support.py"
-    ],
-    "tests/front_door_parity/test_env_exec.py": [
-      "scripts/worktree.py",
-      "tests/front_door_parity/parity_support.py"
-    ],
-    "tests/front_door_parity/test_help.py": [
-      "scripts/provenant_lint.py",
-      "tests/front_door_parity/parity_support.py"
-    ],
-    "tests/front_door_parity/test_install.py": [
-      "scripts/install-provenant-command.py",
-      "tests/front_door_parity/parity_support.py"
-    ],
-    "tests/front_door_parity/test_resolution.py": [
-      "tests/front_door_parity/parity_support.py"
-    ],
-    "tests/front_door_parity/test_stale.py": [
-      "tests/front_door_parity/parity_support.py"
-    ],
     "tests/lane_conformance/__init__.py": [],
     "tests/lane_conformance/conftest.py": [
       "tests/lane_conformance/support.py",
@@ -19125,6 +19101,14 @@
       "tests/lane_conformance/support.py",
       "tests/support/proc.py"
     ],
+    "tests/lane_stub.py": [],
+    "tests/mcp_judge/client.py": [
+      "tests/support/front_door.py"
+    ],
+    "tests/mcp_judge/conftest.py": [],
+    "tests/mcp_judge/test_transcripts.py": [
+      "tests/mcp_judge/client.py"
+    ],
     "tests/support/__init__.py": [],
     "tests/support/dispatch.py": [
       "skills/orchestrate/scripts/dispatch_run.py",
@@ -19132,6 +19116,9 @@
       "tests/support/runs.py"
     ],
     "tests/support/fake_cli.py": [],
+    "tests/support/front_door.py": [
+      "scripts/lib/front_door_build.py"
+    ],
     "tests/support/git.py": [],
     "tests/support/modules.py": [],
     "tests/support/proc.py": [
@@ -19166,6 +19153,7 @@
     "tests/test_batch_run.py": [
       "skills/orchestrate/scripts/batch_run.py",
       "skills/orchestrate/scripts/dispatch_run.py",
+      "skills/orchestrate/scripts/run_controls.py",
       "skills/orchestrate/scripts/run_dir_finalize.py",
       "tests/fixtures/current-routing-eval/dispatch_fixture.py",
       "tests/support/fake_cli.py",
@@ -19222,9 +19210,9 @@
       "skills/orchestrate/scripts/run_lineage.py",
       "tests/cf_dispatch_support.py",
       "tests/conftest.py",
-      "tests/front_door_parity/conftest.py",
       "tests/lane_conformance/conftest.py",
       "tests/lane_conformance/test_seed.py",
+      "tests/mcp_judge/conftest.py",
       "tests/support/dispatch.py",
       "tests/support/fake_cli.py",
       "tests/support/git.py",
@@ -19239,6 +19227,7 @@
     "tests/test_command_docs.py": [],
     "tests/test_configure_fabric_mcp.py": [
       "scripts/configure-fabric-mcp.py",
+      "tests/support/front_door.py",
       "tests/support/modules.py"
     ],
     "tests/test_context_audit.py": [
@@ -19306,6 +19295,7 @@
       "skills/orchestrate/scripts/dispatch_run.py",
       "skills/orchestrate/scripts/provider_exec.py",
       "skills/orchestrate/scripts/run_controls.py",
+      "tests/support/front_door.py",
       "tests/support/git.py"
     ],
     "tests/test_fabric_node_discovery.py": [],
@@ -19342,6 +19332,7 @@
       "skills/_shared/harness_profile.py",
       "skills/orchestrate/scripts/batch_run.py",
       "skills/orchestrate/scripts/dispatch_run.py",
+      "tests/support/front_door.py",
       "tests/support/modules.py"
     ],
     "tests/test_herdr_cli_contract.py": [
@@ -19369,10 +19360,12 @@
       "scripts/install-provenant-command.py",
       "scripts/lib/front_door_build.py",
       "scripts/utility_output_hook.py",
+      "tests/support/front_door.py",
       "tests/support/proc.py"
     ],
     "tests/test_install_provenant_command.py": [
       "scripts/install-provenant-command.py",
+      "tests/support/front_door.py",
       "tests/support/modules.py"
     ],
     "tests/test_install_skills.py": [
@@ -19398,6 +19391,13 @@
       "skills/orchestrate/scripts/run_dir_finalize.py",
       "tests/support/modules.py"
     ],
+    "tests/test_lane_exit.py": [
+      "skills/orchestrate/scripts/provider_exec.py"
+    ],
+    "tests/test_lane_launch.py": [
+      "skills/orchestrate/scripts/provider_exec.py",
+      "tests/lane_stub.py"
+    ],
     "tests/test_lane_safety.py": [
       "scripts/configure-claude-hooks.py",
       "scripts/lane_safety_guard.py",
@@ -19415,7 +19415,7 @@
     ],
     "tests/test_live_sandbox_smoke.py": [
       "runtime/fabric/live-sandbox-smoke.py",
-      "skills/orchestrate/scripts/dispatch_run.py",
+      "skills/orchestrate/scripts/writer_lease.py",
       "tests/support/modules.py"
     ],
     "tests/test_log_reducer.py": [
@@ -19430,6 +19430,7 @@
     "tests/test_model_route.py": [
       "scripts/model_route.py",
       "scripts/model_route_catalog.py",
+      "scripts/model_route_cli.py",
       "tests/support/modules.py"
     ],
     "tests/test_model_route_pools.py": [
@@ -19437,7 +19438,8 @@
       "scripts/model_route.py",
       "skills/orchestrate/scripts/batch_run.py",
       "skills/orchestrate/scripts/dispatch_run.py",
-      "skills/orchestrate/scripts/exec_routing.py"
+      "skills/orchestrate/scripts/exec_routing.py",
+      "tests/support/front_door.py"
     ],
     "tests/test_movecheck.py": [
       "scripts/movecheck.py",
@@ -19466,14 +19468,6 @@
     "tests/test_projection.py": [
       "scripts/lib/projection.py"
     ],
-    "tests/test_provenant_cli.py": [
-      "scripts/check_target.py",
-      "scripts/worktree.py",
-      "skills/orchestrate/scripts/batch_run.py",
-      "skills/orchestrate/scripts/capabilities.py",
-      "skills/orchestrate/scripts/dispatch_run.py",
-      "skills/orchestrate/scripts/run_controls.py"
-    ],
     "tests/test_provenant_lint.py": [
       "scripts/provenant_lint.py"
     ],
@@ -19486,19 +19480,25 @@
       "skills/orchestrate/scripts/adapters/codex.py",
       "skills/orchestrate/scripts/adapters/opencode.py",
       "skills/orchestrate/scripts/cf_dispatch.py",
+      "skills/orchestrate/scripts/dispatch_preflight.py",
       "skills/orchestrate/scripts/dispatch_run.py",
       "skills/orchestrate/scripts/exec_routing.py",
       "skills/orchestrate/scripts/fabric_records.py",
       "skills/orchestrate/scripts/lane_protection.py",
       "skills/orchestrate/scripts/process_info.py",
       "skills/orchestrate/scripts/provider_exec.py",
-      "skills/orchestrate/scripts/provider_output.py"
+      "skills/orchestrate/scripts/provider_output.py",
+      "tests/support/git.py"
+    ],
+    "tests/test_provider_observer.py": [
+      "skills/orchestrate/scripts/provider_exec.py"
     ],
     "tests/test_provider_quota.py": [
       "scripts/provider_quota.py",
       "scripts/quota_display.py",
       "scripts/quota_providers/claude.py",
       "scripts/telemetry.py",
+      "tests/support/front_door.py",
       "tests/support/quota.py"
     ],
     "tests/test_provider_skill_boundaries.py": [
@@ -19516,13 +19516,15 @@
     ],
     "tests/test_pytest_sharding.py": [
       "tests/conftest.py",
-      "tests/front_door_parity/conftest.py",
       "tests/lane_conformance/conftest.py",
+      "tests/mcp_judge/conftest.py",
       "tests/support/git.py",
       "tests/support/modules.py",
       "tests/test_fabric_hosts.py"
     ],
-    "tests/test_quickstart_bootstrap.py": [],
+    "tests/test_quickstart_bootstrap.py": [
+      "tests/support/front_door.py"
+    ],
     "tests/test_quota_display.py": [
       "scripts/quota_display.py",
       "tests/support/quota.py"
@@ -19554,6 +19556,7 @@
       "skills/orchestrate/scripts/run_controls.py",
       "skills/orchestrate/scripts/run_dir_finalize.py",
       "tests/support/fake_cli.py",
+      "tests/support/front_door.py",
       "tests/support/modules.py",
       "tests/support/runs.py"
     ],
@@ -19600,13 +19603,15 @@
       "skills/natural-writing/scripts/check_academic_style.py"
     ],
     "tests/test_split_root_contract.py": [
-      "scripts/model_route.py"
+      "scripts/model_route.py",
+      "tests/support/front_door.py"
     ],
-    "tests/test_stale_checkout.py": [
+    "tests/test_stale.py": [
       "scripts/check_target.py",
       "scripts/lib/product_root_resolver.py",
       "scripts/lib/stale_checkout.py",
-      "scripts/worktree.py"
+      "scripts/worktree.py",
+      "tests/support/front_door.py"
     ],
     "tests/test_static_security_check.py": [
       "scripts/public_release_check.py",
@@ -19629,6 +19634,7 @@
       "scripts/telemetry_hosts.py",
       "scripts/telemetry_ingest.py",
       "skills/deliver/scripts/delivery_run_shape.py",
+      "tests/support/front_door.py",
       "tests/support/modules.py"
     ],
     "tests/test_timebomb_fixture_lint.py": [
@@ -19644,7 +19650,8 @@
     "tests/test_ui_ux_provenance_contract.py": [],
     "tests/test_ui_ux_reference_contract.py": [],
     "tests/test_utility.py": [
-      "scripts/utility.py"
+      "scripts/utility.py",
+      "tests/support/front_door.py"
     ],
     "tests/test_utility_hook.py": [
       "scripts/utility_output_hook.py"
@@ -19689,13 +19696,16 @@
       "scripts/worktree.py",
       "skills/orchestrate/scripts/agy_home.py",
       "skills/orchestrate/scripts/cf_dispatch.py",
-      "skills/orchestrate/scripts/dispatch_run.py",
+      "skills/orchestrate/scripts/dispatch_preflight.py",
       "skills/orchestrate/scripts/exec_routing.py",
       "skills/orchestrate/scripts/fabric_records.py",
       "skills/orchestrate/scripts/instruction_quarantine.py",
+      "skills/orchestrate/scripts/lane_exit.py",
+      "skills/orchestrate/scripts/lane_launch.py",
       "skills/orchestrate/scripts/lane_protection.py",
       "skills/orchestrate/scripts/layout.py",
       "skills/orchestrate/scripts/provider_exec.py",
+      "skills/orchestrate/scripts/provider_observer.py",
       "skills/orchestrate/scripts/provider_output.py",
       "skills/orchestrate/scripts/run_lineage.py"
     ]
@@ -19793,7 +19803,7 @@
     },
     {
       "source": "scripts/model_route.py",
-      "line": 1648,
+      "line": 1585,
       "kind": "dynamic-loader-review",
       "expression": "importlib.util.spec_from_file_location('provenant_fabric_records', path, submodule_search_locations=[str(path.parent)])"
     },
@@ -20098,20 +20108,20 @@
       "expression": "import_module(f'{__name__}.{name}')"
     },
     {
-      "source": "skills/orchestrate/scripts/dispatch_run.py",
-      "line": 821,
+      "source": "skills/orchestrate/scripts/dispatch_preflight.py",
+      "line": 166,
       "kind": "dynamic-loader-review",
       "expression": "importlib.util.spec_from_file_location('fabric_fast_worktree', product / 'scripts/worktree.py')"
     },
     {
-      "source": "skills/orchestrate/scripts/dispatch_run.py",
-      "line": 828,
+      "source": "skills/orchestrate/scripts/dispatch_preflight.py",
+      "line": 173,
       "kind": "dynamic-loader-review",
       "expression": "importlib.util.spec_from_file_location('fabric_fast_model_route', path)"
     },
     {
-      "source": "skills/orchestrate/scripts/dispatch_run.py",
-      "line": 3029,
+      "source": "skills/orchestrate/scripts/dispatch_preflight.py",
+      "line": 580,
       "kind": "dynamic-loader-review",
       "expression": "importlib.util.spec_from_file_location(name, Path(__file__).resolve().parents[3] / 'scripts/fabric_hosts.py')"
     },
@@ -20135,19 +20145,19 @@
     },
     {
       "source": "skills/orchestrate/scripts/provider_exec.py",
-      "line": 257,
+      "line": 260,
       "kind": "dynamic-loader-review",
       "expression": "importlib.util.spec_from_file_location(name, Path(__file__).resolve().parents[3] / 'scripts/fabric_hosts.py')"
     },
     {
       "source": "skills/orchestrate/scripts/provider_exec.py",
-      "line": 267,
+      "line": 270,
       "kind": "dynamic-loader-review",
       "expression": "importlib.util.spec_from_file_location('provenant_jsonc', Path(__file__).resolve().parents[3] / 'scripts/lib/jsonc.py')"
     },
     {
       "source": "skills/orchestrate/scripts/provider_exec.py",
-      "line": 1317,
+      "line": 1316,
       "kind": "dynamic-loader-review",
       "expression": "importlib.util.spec_from_file_location('provenant_lane_quota', Path(__file__).resolve().parents[3] / 'scripts/provider_quota.py')"
     },
@@ -20213,13 +20223,13 @@
     },
     {
       "source": "tests/test_model_route_pools.py",
-      "line": 32,
+      "line": 34,
       "kind": "dynamic-loader-review",
       "expression": "importlib.util.spec_from_file_location(name, path)"
     },
     {
       "source": "tests/test_model_route_pools.py",
-      "line": 869,
+      "line": 871,
       "kind": "dynamic-loader-review",
       "expression": "importlib.import_module(exec_routing.read_cooldowns.__module__)"
     },
@@ -20231,7 +20241,7 @@
     },
     {
       "source": "tests/test_provider_quota.py",
-      "line": 30,
+      "line": 32,
       "kind": "dynamic-loader-review",
       "expression": "importlib.util.spec_from_file_location(name, path)"
     },

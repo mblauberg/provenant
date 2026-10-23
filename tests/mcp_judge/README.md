@@ -1,10 +1,10 @@
 # Fabric MCP transcript judge
 
-This suite exercises the Fabric MCP stdio contract without importing any
-Provenant product module. `client.py` is a small Python standard-library JSON-RPC
-client. It starts the same stable `provenant` command registered by
+This suite exercises the Fabric MCP stdio contract through a small Python
+standard-library JSON-RPC client. Shared test support builds the Rust front
+door. The client starts the same stable `provenant` command registered by
 `scripts/configure-fabric-mcp.py`: the configured seat and state environment are
-set, and no arguments make the shim exec `runtime/fabric/bin/fabric-mcp`.
+set, and no arguments make the binary exec `runtime/fabric/bin/fabric-mcp`.
 
 The process runs with a temporary `HOME`, XDG directories, state database and
 project directory. Run fixtures are seeded in that project. No provider is
@@ -26,7 +26,7 @@ TMPDIR=/tmp .venv/bin/python -m pytest tests/mcp_judge --record -q
 To point the same judge at another MCP server, set
 `PROVENANT_MCP_SERVER_CMD` to its executable and any arguments, separated using
 shell-like quoting. The command receives the isolated environment and project
-working directory. The default command remains the installed-config shim.
+working directory. The default command is the Rust binary built by test support.
 
 ## Coverage
 

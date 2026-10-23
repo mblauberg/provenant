@@ -118,30 +118,12 @@ def test_smoke_requires_help_to_exit_zero_with_usage(tmp_path):
         build.smoke(tmp_path / "missing")
 
 
-def test_python_mode_never_looks_at_the_crate(tmp_path):
-    kind, source, note = build.select(tmp_path, "python", tmp_path / "b")
-    assert (kind, source, note) == ("python", tmp_path / "scripts/provenant.template", "")
-
-
-def test_auto_without_a_crate_is_the_template_with_no_note(tmp_path):
-    assert build.select(tmp_path, "auto", tmp_path / "b")[0::2] == ("python", "")
-
-
 def test_rust_without_a_crate_or_without_cargo_raises(tmp_path):
     with pytest.raises(build.FrontDoorError, match="no tools/front-door crate"):
         build.select(tmp_path, "rust", tmp_path / "b")
     make_crate(tmp_path)
     with pytest.raises(build.FrontDoorError, match="cargo is not on PATH"):
         build.select(tmp_path, "rust", tmp_path / "b", cargo_available=False)
-
-
-def test_auto_without_cargo_falls_back_with_the_reason(tmp_path):
-    make_crate(tmp_path)
-
-    kind, source, note = build.select(tmp_path, "auto", tmp_path / "b", cargo_available=False)
-
-    assert kind == "python" and source.name == "provenant.template"
-    assert note == "cargo is not on PATH (looked in ~/.cargo/bin too)"
 
 
 def test_build_stamps_the_digest_and_selects_the_binary(tmp_path, monkeypatch):
@@ -193,28 +175,24 @@ def test_relative_crate_and_target_paths_still_build(tmp_path, monkeypatch):
     assert binary.is_file() and (tmp_path / "rel-target/release/provenant").is_file()
 
 
-def test_unreadable_prebuilt_is_fatal_for_rust_and_a_fallback_for_auto(tmp_path):
+def test_unreadable_prebuilt_is_fatal(tmp_path):
     crate = make_crate(tmp_path)
     locked = stamped_binary(tmp_path / "pre/locked", build.source_digest(crate))
     locked.chmod(0)
     try:
         with pytest.raises(build.FrontDoorError, match="cannot read prebuilt"):
             build.select(tmp_path, "rust", tmp_path / "b", locked)
-        kind, source, note = build.select(tmp_path, "auto", tmp_path / "b", locked)
     finally:
         locked.chmod(0o755)
-    assert kind == "python" and source.name == "provenant.template" and "cannot read" in note
 
 
-def test_failed_build_is_fatal_for_rust_and_a_fallback_for_auto(tmp_path, monkeypatch):
+def test_failed_build_is_fatal(tmp_path, monkeypatch):
     make_crate(tmp_path)
     fake_cargo(tmp_path / "fake", fail=True)
     monkeypatch.setenv("PATH", f"{tmp_path / 'fake'}{os.pathsep}{os.environ['PATH']}")
 
     with pytest.raises(build.FrontDoorError, match="cargo build failed"):
         build.select(tmp_path, "rust", tmp_path / "b")
-    kind, _, note = build.select(tmp_path, "auto", tmp_path / "b")
-    assert kind == "python" and "cargo build failed" in note
 
 
 def test_prebuilt_must_be_absolute_regular_matching_and_healthy(tmp_path):
@@ -246,13 +224,6 @@ def test_command_line_prints_only_the_answer_on_stdout(tmp_path):
         [sys.executable, str(HELPER), "digest", str(crate)], capture_output=True, text=True, check=False
     )
     assert result.stdout == build.source_digest(crate) + "\n" and result.stderr == ""
-
-    chosen = subprocess.run(
-        [sys.executable, str(HELPER), "select", "--product-root", str(tmp_path),
-         "--mode", "python", "--build-dir", str(tmp_path / "b")],
-        capture_output=True, text=True, check=False,
-    )
-    assert chosen.stdout == f"python\t{tmp_path / 'scripts/provenant.template'}\n"
 
     missing = subprocess.run(
         [sys.executable, str(HELPER), "select", "--product-root", str(tmp_path / "none"),

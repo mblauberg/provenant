@@ -14,9 +14,11 @@ import shutil
 import subprocess
 import sys
 
+from tests.support.front_door import front_door_binary
+
 ROOT = Path(__file__).resolve().parents[1]
 MODEL_ROUTE = ROOT / "scripts" / "model_route.py"
-PROVENANT_TEMPLATE = ROOT / "scripts" / "provenant.template"
+PROVENANT_BINARY = front_door_binary()
 FUSED_SKILL_ROOT_COMMAND = re.compile(
     r"(?:\$\{AGENTS_HOME:-\$HOME/\.agents\}|~?/\.agents|\$HOME/\.agents)/skills/"
 )
@@ -106,7 +108,7 @@ def test_installed_wrapper_does_not_promote_default_instance_root_to_explicit_en
     product = tmp_path / "product"
     scripts = product / "scripts"
     scripts.mkdir(parents=True)
-    target = scripts / "provenant"
+    target = scripts / "model-route"
     target.write_text("#!/bin/sh\nprintf 'instance=%s\\n' \"${AGENT_FABRIC_INSTANCE_ROOT-<unset>}\"\n")
     target.chmod(0o755)
     mcp_target = product / "runtime" / "fabric" / "bin" / "fabric-mcp"
@@ -114,13 +116,13 @@ def test_installed_wrapper_does_not_promote_default_instance_root_to_explicit_en
     mcp_target.write_text("#!/bin/sh\nexit 0\n")
     mcp_target.chmod(0o755)
     wrapper = tmp_path / "provenant"
-    shutil.copy2(PROVENANT_TEMPLATE, wrapper)
+    shutil.copy2(PROVENANT_BINARY, wrapper)
     wrapper.chmod(0o755)
 
     environment = _clean_split_environment(tmp_path, product)
     environment["AGENTS_HOME"] = str(product)
     result = subprocess.run(
-        [str(wrapper), "probe"],
+        [str(wrapper), "route"],
         cwd=tmp_path,
         env=environment,
         capture_output=True,

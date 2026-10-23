@@ -15,6 +15,8 @@ import pytest
 
 from tests.support.modules import load_script
 
+from tests.support.front_door import front_door_binary
+
 ROOT = Path(__file__).resolve().parents[1]
 CLI = ROOT / "scripts/provenant-profile"
 
@@ -299,7 +301,7 @@ def test_cli_list_and_diff(space):
 
 
 def test_front_door_names_the_profile_command():
-    result = subprocess.run([sys.executable, str(ROOT / "scripts/provenant"), "help", "profile"],
+    result = subprocess.run([str(front_door_binary()), "help", "profile"],
                             capture_output=True, text=True, timeout=60)
     assert result.returncode == 0 and "scripts/provenant-profile" in result.stdout
 

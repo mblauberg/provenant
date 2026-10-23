@@ -375,19 +375,9 @@ def test_live_process_cwd_protects_a_merged_worktree(tmp_path):
         process.wait(timeout=5)
 
 
-def test_installed_template_routes_clean_to_product_owner(tmp_path):
-    environment = os.environ.copy()
-    environment["AGENT_FABRIC_PRODUCT_ROOT"] = str(SCRIPT.parent.parent)
-    result = subprocess.run([
-        "python3", str(SCRIPT.with_name("provenant.template")), "clean", "--repo", str(tmp_path), "--json",
-    ], env=environment, text=True, capture_output=True, check=False)
-    assert result.returncode == 0, result.stderr
-    assert json.loads(result.stdout)["root"] == str(tmp_path.resolve())
-
-
 def test_checkout_entry_point_routes_clean(tmp_path):
     result = subprocess.run([
-        "python3", str(SCRIPT.with_name("provenant")), "clean", "--repo", str(tmp_path), "--json",
+        "python3", str(SCRIPT), "--repo", str(tmp_path), "--json",
     ], text=True, capture_output=True, check=False)
     assert result.returncode == 0, result.stderr
     assert json.loads(result.stdout)["root"] == str(tmp_path.resolve())
