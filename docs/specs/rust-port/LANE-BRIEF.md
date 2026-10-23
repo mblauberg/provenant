@@ -106,6 +106,9 @@ Self-check before review:
 - Repo-file fixtures use `include_str!(concat!(env!("CARGO_MANIFEST_DIR"),
   "/..."))`. Deep relative `include_str!` paths can resolve through the
   primary checkout because worktrees nest under `.worktrees/`, then fail in CI.
+- Regex classes differ: Rust `\s` excludes U+001C to U+001F, which Python's
+  `\s` matches, and Rust `\w` differs from Python's on combining marks. Port
+  Python patterns with explicit classes from `provenant_core::py`.
 - Fractional-second UTC offsets differ across CPython point releases. Use
   the core `py` fromisoformat helper, which probes the interpreter, rather
   than fixed oracle fixtures.
