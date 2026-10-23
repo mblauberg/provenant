@@ -2,10 +2,19 @@
 //! Integer JSON decoding stays with `provenant_records::checked_json`.
 use serde_json::Value;
 mod datetime;
-mod unicode;
+pub mod numbers;
+pub use numbers::{
+    divmod_decimal, float_whole, python_float, shell_split, DecimalDivisionError, FloatWholeError,
+    Integer, NumberOutOfRange, ShellSplitError,
+};
+pub mod unicode;
 pub use datetime::{
     from_timestamp, python_fromisoformat, python_fromisoformat_with, python_iso_timestamp,
     DateTimeError, IsoformatSemantics, PythonDateTime, PythonTimestamp,
+};
+pub use unicode::{
+    decimal_digit, printable, python_alpha, python_digit, python_numeric, python_whitespace,
+    python_word,
 };
 pub fn python_truth(value: &Value) -> bool {
     match value {
@@ -66,10 +75,6 @@ pub fn python_json_eq(left: &Value, right: &Value) -> bool {
     }
 }
 
-pub fn python_whitespace(c: char) -> bool {
-    c.is_whitespace() || matches!(c, '\u{1c}'..='\u{1f}')
-}
-
 pub fn python_strip(text: &str) -> &str {
     text.trim_matches(python_whitespace)
 }
@@ -109,7 +114,7 @@ pub fn python_repr(text: &str) -> String {
 }
 
 /// Python's str/repr share shortest float digits but differ from JSON's notation.
-fn python_number_str(number: &serde_json::Number) -> String {
+pub fn python_number_str(number: &serde_json::Number) -> String {
     if !number.is_f64() {
         return number.to_string();
     }
@@ -502,5 +507,62 @@ print(json.dumps([probe,out]))
             };
             assert_eq!(&actual, expected, "{s:?}");
         }
+    }
+}
+
+/// Python str.splitlines(False), including CRLF and its Unicode boundaries.
+pub fn python_splitlines(text: &str) -> Vec<&str> {
+    python_splitlines_with(text, false)
+}
+pub fn python_splitlines_with(text: &str, keep_ends: bool) -> Vec<&str> {
+    let mut lines = Vec::new();
+    let mut start = 0;
+    let mut chars = text.char_indices().peekable();
+    while let Some((index, c)) = chars.next() {
+        if !matches!(
+            c,
+            '\n' | '\r' | '\u{b}' | '\u{c}' | '\u{1c}'
+                ..='\u{1e}' | '\u{85}' | '\u{2028}' | '\u{2029}'
+        ) {
+            continue;
+        }
+        let mut end = index + c.len_utf8();
+        if c == '\r' && chars.peek().is_some_and(|&(_, c)| c == '\n') {
+            if let Some((i, c)) = chars.next() {
+                end = i + c.len_utf8();
+            }
+        }
+        lines.push(&text[start..if keep_ends { end } else { index }]);
+        start = end;
+    }
+    if start < text.len() {
+        lines.push(&text[start..]);
+    }
+    lines
+}
+
+#[cfg(test)]
+mod line_tests {
+    use super::*;
+    #[test]
+    fn splitlines_matches_python_empty_trailing_crlf_and_unicode_boundaries() {
+        let mut values = vec!["".to_string(), "a\r\nb\r\n".into(), "\n\r\n\r".into()];
+        for c in (0..=255)
+            .filter_map(char::from_u32)
+            .chain(['\u{2028}', '\u{2029}', '😀'])
+        {
+            values.push(format!("a{c}b{c}"));
+        }
+        let Some(expected) = crate::test_support::python_values(
+            "print(json.dumps([[s.splitlines(),s.splitlines(True)] for s in values]))",
+            &serde_json::json!(values),
+        ) else {
+            return;
+        };
+        let actual: Vec<_> = values
+            .iter()
+            .map(|v| serde_json::json!([python_splitlines(v), python_splitlines_with(v, true)]))
+            .collect();
+        assert_eq!(serde_json::json!(actual), expected);
     }
 }

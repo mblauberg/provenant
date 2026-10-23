@@ -280,3 +280,72 @@ fn parse(value: &str, semantics: IsoformatSemantics) -> Option<PythonDateTime> {
 pub fn python_iso_timestamp(value: &str) -> Option<PythonTimestamp> {
     python_fromisoformat(value).ok()?.timestamp().ok()
 }
+
+#[cfg(test)]
+mod form_tests {
+    use super::*;
+    #[test]
+    fn documented_iso_forms_retain_wall_clock_fraction_and_offset() {
+        for (text, hour, minute, micros, offset) in [
+            ("2026-10-23", 0, 0, 0, None),
+            ("20261023", 0, 0, 0, None),
+            ("2026-W43-5", 0, 0, 0, None),
+            ("2026W435", 0, 0, 0, None),
+            ("2026-10-23T12", 12, 0, 0, None),
+            ("2026-10-23 12:30", 12, 30, 0, None),
+            ("20261023T1230", 12, 30, 0, None),
+            ("20261023T123000", 12, 30, 0, None),
+            ("2026-10-23💩12:30:00", 12, 30, 0, None),
+            ("2026-10-23T12:30:00.1", 12, 30, 100_000, None),
+            ("2026-10-23T12:30:00,123456789", 12, 30, 123_456, None),
+            ("2026-10-23T12Z", 12, 0, 0, Some(0)),
+            ("2026-10-23T12+01", 12, 0, 0, Some(3_600_000_000)),
+            ("2026-10-23T12-0130", 12, 0, 0, Some(-5_400_000_000)),
+            ("2026-10-23T12+01:30", 12, 0, 0, Some(5_400_000_000)),
+            ("2026-10-23T12+013000", 12, 0, 0, Some(5_400_000_000)),
+            (
+                "2026-10-23T12-01:02:03.123456789",
+                12,
+                0,
+                0,
+                Some(-3_723_123_456),
+            ),
+        ] {
+            let value = python_fromisoformat(text).unwrap();
+            assert_eq!(
+                (
+                    value.datetime.year(),
+                    value.datetime.month(),
+                    value.datetime.day()
+                ),
+                (2026, 10, 23),
+                "{text}"
+            );
+            assert_eq!(
+                (
+                    value.datetime.hour(),
+                    value.datetime.minute(),
+                    value.datetime.second(),
+                    value.datetime.subsec_nanosecond() / 1000
+                ),
+                (hour, minute, 0, micros),
+                "{text}"
+            );
+            assert_eq!(value.offset_microseconds, offset, "{text}");
+        }
+        for text in [
+            "2026-10",
+            "2026-296",
+            "2026-10-23T12.5",
+            "2026-10-23T12:30.5",
+            "2026-10-23T12:30:60",
+            "2026-10-23T12+24:00",
+        ] {
+            assert_eq!(
+                python_fromisoformat(text),
+                Err(DateTimeError::InvalidIso),
+                "{text}"
+            );
+        }
+    }
+}
