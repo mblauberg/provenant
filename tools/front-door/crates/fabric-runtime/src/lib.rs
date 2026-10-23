@@ -3,6 +3,7 @@
 
 pub mod batch_execution;
 pub mod execution;
+pub mod fabric_policy;
 pub mod field;
 pub mod gates;
 pub mod hosts;
