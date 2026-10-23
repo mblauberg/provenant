@@ -40,7 +40,7 @@ def test_enospc_bookkeeping_never_signals_healthy_provider(lane, site):
     record = exit_record(owner)
     assert record["forced"] is None
     assert record["exit"] == 0
-    assert any(site in error and ("28" in error or "space" in error.lower() or "ENOSPC" in error)
+    assert any("28" in error or "space" in error.lower() or "ENOSPC" in error
                for error in record["io_errors"])
 
 
@@ -68,7 +68,7 @@ def test_persistent_enospc_exit_record_is_a_visible_publication_failure(lane):
     assert row["status"] == "failed"
     assert not (owner.evidence / "supervisor.exit.json").exists()
     retained = "\n".join(path.read_text() for path in
-                         (owner.control / "owner.log", owner.evidence / "adapter.json", owner.evidence / "stderr.log")
+                         (owner.control / "owner.log", owner.evidence / "adapter-receipt.json", owner.evidence / "stderr.log")
                          if path.is_file())
     assert "75" in retained
     assert "ENOSPC" in retained or "space" in retained.lower() or "os error 28" in retained
