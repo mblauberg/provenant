@@ -73,6 +73,8 @@ const PATTERNS: &[(&str, &str)] = &[
 pub enum Error {
     #[error(transparent)]
     Pattern(#[from] regex::Error),
+    #[error("publication file grew beyond the bounded read limit: {path}")]
+    ChangedDuringRead { path: std::path::PathBuf },
     #[error("publication filesystem inspection failed for {path}: {source}")]
     Io {
         path: std::path::PathBuf,
@@ -148,12 +150,18 @@ impl Scanner {
             let read = (|| {
                 use std::io::Read;
                 let file = fs.open_source(&path)?;
-                let mut text = String::new();
+                let mut bytes = Vec::new();
                 file.take(MAX_PUBLIC_FILE_BYTES + 1)
-                    .read_to_string(&mut text)?;
-                Ok::<_, std::io::Error>(text)
+                    .read_to_end(&mut bytes)?;
+                Ok::<_, std::io::Error>(bytes)
             })();
-            let Ok(text) = read else {
+            let Ok(bytes) = read else {
+                continue;
+            };
+            if bytes.len() as u64 > MAX_PUBLIC_FILE_BYTES {
+                return Err(Error::ChangedDuringRead { path });
+            }
+            let Ok(text) = String::from_utf8(bytes) else {
                 continue;
             };
             // Regex over str in Python has Unicode word boundaries; use the
@@ -369,7 +377,7 @@ mod tests {
             [b"\xff/Users/".as_slice(), b"alice/private"].concat(),
         ];
         for text in [
-            "-----BEGIN OPENSSH PRIVATE KEY-----",
+            concat!("-----BEGIN OPENSSH ", "PRIVATE KEY-----"),
             "ghp_",
             "github_pat_",
             "sk-proj-",
@@ -539,9 +547,10 @@ mod tests {
 import json,sys,subprocess
 from pathlib import Path
 from scripts.public_release_check import commit_metadata,annotated_tag_metadata
+from scripts.git_evidence import sanitized_git_environment
 p=Path(json.load(sys.stdin)['root'])
 def git(*a):
- return subprocess.run(['git','-C',str(p),*a],check=True,capture_output=True,timeout=10).stdout
+ return subprocess.run(['git','-C',str(p),*a],check=True,capture_output=True,timeout=10,env=sanitized_git_environment()).stdout
 for a in [('init','-q'),('config','user.name','Fixture'),('config','user.email','fixture@gmail.com')]: git(*a)
 (p/'safe').write_text('safe')
 git('add','safe'); git('commit','-q','-m','message /home/'+'alice/private')
@@ -562,5 +571,39 @@ print(json.dumps({'commit_raw':list(git('log','--all','--format=%ae%n%ce%n%B%x00
             json!(scanner.annotated_tag_metadata(&bytes("tag_raw"))),
             expected["tag"]
         );
+    }
+    #[test]
+    fn growth_between_stat_and_open_is_an_explicit_partial_scope_refusal() {
+        use provenant_supervisor::fs::{FileHandle, SafeDir, SafeFile};
+        struct Replaced(std::path::PathBuf);
+        impl SafeFs for Replaced {
+            fn root(&self, _: bool) -> std::io::Result<Box<dyn SafeDir>> {
+                Err(std::io::ErrorKind::Unsupported.into())
+            }
+            fn open_anchor(&self, _: &Path) -> std::io::Result<Box<dyn SafeDir>> {
+                Err(std::io::ErrorKind::Unsupported.into())
+            }
+            fn open_source(&self, _: &Path) -> std::io::Result<Box<dyn SafeFile>> {
+                Ok(Box::new(FileHandle::open_source(&self.0)?))
+            }
+            fn temporary_name(&self) -> std::io::Result<std::ffi::OsString> {
+                Err(std::io::ErrorKind::Unsupported.into())
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("tracked"), "small at stat").unwrap();
+        let replacement = dir.path().join("replacement");
+        let mut contents = vec![b'x'; MAX_PUBLIC_FILE_BYTES as usize + 2];
+        contents.extend_from_slice(b"/home/");
+        contents.extend_from_slice(b"alice/private");
+        std::fs::write(&replacement, contents).unwrap();
+        assert!(matches!(
+            Scanner::new().unwrap().scan_paths(
+                dir.path(),
+                &["tracked".into()],
+                &Replaced(replacement)
+            ),
+            Err(Error::ChangedDuringRead { .. })
+        ));
     }
 }
