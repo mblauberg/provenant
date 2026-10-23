@@ -1,6 +1,8 @@
 # ADR 0028 - Port the whole project to Rust with a small crate allowlist
 
-**Status:** Accepted 2026-10-23 (user direction in session)
+**Status:** Accepted 2026-10-23 (user direction in session). Decisions 1, 5's
+PyYAML gate and migration lane, and 7's transition retention are superseded
+by [ADR 0029](0029-rust-rewrite-in-one-pass.md).
 
 **Amends:** [ADR 0027](0027-rust-front-door.md), decision 1 ("no crate
 dependencies"). Plan and rulebook: [Whole-project Rust port](../specs/rust-port/README.md),
@@ -21,9 +23,10 @@ pieces to be written in-house so the dependency set stays lean.
 
 ## Decision
 
-1. **Land continuously.** Port units merge to `main` as small PRs. New crates
-   land inert; each command switches owner behind a selector at a command
-   boundary, then the old owner is deleted. There is no long-lived port branch.
+1. **Land continuously.** Port units merge to `main` as small PRs. Each slice ports a
+   command or subsystem, switches its callers to Rust and deletes the old
+   owner in the same PR; a selector is used only where a slice cannot land
+   atomically (amended for rulebook v6 at the user's direction). There is no long-lived port branch.
 2. **Fabric's TypeScript runtime is in scope.** The end state has no Node
    runtime; `runtime/fabric` is ported with the rest.
 3. **Direct dependencies are limited to this list.** Versions are pinned in
