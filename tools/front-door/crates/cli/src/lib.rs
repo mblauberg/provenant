@@ -55,3 +55,5 @@ pub mod public_release;
 pub mod reap;
 
 pub mod timebomb;
+
+pub mod worktree;
