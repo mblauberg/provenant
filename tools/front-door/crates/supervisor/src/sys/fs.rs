@@ -3,7 +3,7 @@ use crate::fs::{FileKind, Metadata};
 use std::ffi::{CStr, CString, OsStr, OsString};
 use std::fs::File;
 use std::io;
-use std::os::fd::{AsRawFd, FromRawFd};
+use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::Path;
 
@@ -17,23 +17,61 @@ fn status(result: i32) -> io::Result<()> {
         Ok(())
     }
 }
+// Retry only calls whose failure has no completed result to consume.
+fn retry(mut call: impl FnMut() -> i32) -> io::Result<i32> {
+    loop {
+        let result = call();
+        if result >= 0 {
+            return Ok(result);
+        }
+        let error = io::Error::last_os_error();
+        if error.raw_os_error() != Some(libc::EINTR) {
+            return Err(error);
+        }
+    }
+}
 fn open_at(directory: i32, path: &OsStr, flags: i32, mode: u32) -> io::Result<File> {
     let path = string(path)?;
     // SAFETY: path is live and NUL-terminated; directory is a borrowed File's
     // descriptor or AT_FDCWD, valid through the call. openat retains no pointers
     // and atomically sets CLOEXEC. Each successful fd has one owner below;
     // concurrent calls are independent, failures are read from thread-local errno.
-    let fd = unsafe {
+    let fd = retry(|| unsafe {
         libc::openat(
             directory,
             path.as_ptr(),
             flags | libc::O_CLOEXEC,
             mode as libc::c_uint,
         )
-    };
-    if fd < 0 {
-        return Err(io::Error::last_os_error());
-    }
+    })
+    .map_err(|error| {
+        // Linux reports ENOTDIR for O_DIRECTORY|O_NOFOLLOW on a link, Darwin
+        // ELOOP. Inspect the final entry without following it and canonicalise
+        // only a positively identified symlink. Classification grants no access
+        // and the entry may still change after this observation.
+        if flags & libc::O_NOFOLLOW != 0
+            && matches!(error.raw_os_error(), Some(libc::ENOTDIR | libc::ELOOP))
+        {
+            let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
+            // SAFETY: live directory/name and correctly aligned output. Read the
+            // output only after success; no ownership or pointers escape.
+            if unsafe {
+                libc::fstatat(
+                    directory,
+                    path.as_ptr(),
+                    stat.as_mut_ptr(),
+                    libc::AT_SYMLINK_NOFOLLOW,
+                )
+            } == 0
+            {
+                // SAFETY: successful fstatat initialised stat.
+                if unsafe { stat.assume_init() }.st_mode & libc::S_IFMT == libc::S_IFLNK {
+                    return io::Error::from_raw_os_error(libc::ELOOP);
+                }
+            }
+        }
+        error
+    })?;
     // SAFETY: the successful openat transferred exactly one fresh fd to us.
     // No other owner exists; File closes it once on Drop.
     Ok(unsafe { File::from_raw_fd(fd) })
@@ -126,19 +164,21 @@ pub(crate) fn mkdir(dir: &File, name: &OsStr, mode: u32) -> io::Result<()> {
     let name = string(name)?;
     // SAFETY: borrowed fd and NUL-terminated name stay live; mkdirat retains
     // neither, transfers no ownership, and reports thread-local errno.
-    status(unsafe { libc::mkdirat(dir.as_raw_fd(), name.as_ptr(), mode as libc::mode_t) })
+    retry(|| unsafe { libc::mkdirat(dir.as_raw_fd(), name.as_ptr(), mode as libc::mode_t) })
+        .map(|_| ())
 }
 pub(crate) fn unlink(dir: &File, name: &OsStr, directory: bool) -> io::Result<()> {
     let name = string(name)?;
     // SAFETY: live borrowed fd/name; unlinkat acts on the directory entry, never
     // follows a final symlink, retains no memory and reports errno on failure.
-    status(unsafe {
+    retry(|| unsafe {
         libc::unlinkat(
             dir.as_raw_fd(),
             name.as_ptr(),
             if directory { libc::AT_REMOVEDIR } else { 0 },
         )
     })
+    .map(|_| ())
 }
 pub(crate) enum Rename {
     Replace,
@@ -158,7 +198,7 @@ pub(crate) fn rename(
     // NUL-terminated single components. renameat* retains no pointers, follows
     // no final symlinks, and atomically changes directory entries. Concurrent
     // contenders are decided by the kernel; errors leave ownership unchanged.
-    let result = unsafe {
+    retry(|| unsafe {
         match mode {
             Rename::Replace => libc::renameat(
                 from.as_raw_fd(),
@@ -191,8 +231,8 @@ pub(crate) fn rename(
                 },
             ),
         }
-    };
-    status(result)
+    })
+    .map(|_| ())
 }
 pub(crate) fn symlink(target: &Path, dir: &File, name: &OsStr) -> io::Result<()> {
     let target = string(target.as_os_str())?;
@@ -268,16 +308,72 @@ pub(crate) fn entries(dir: &File) -> io::Result<Entries> {
     if stream.is_null() {
         return Err(io::Error::last_os_error());
     }
-    std::mem::forget(fresh); // closedir owns its descriptor now.
+    let _ = fresh.into_raw_fd(); // closedir owns its descriptor now.
     Ok(Entries {
         stream,
         finished: false,
     })
 }
 
+/// Called only after fstat has verified a regular file; FIFOs are refused first.
+pub(crate) fn clear_nonblocking(file: &File) -> io::Result<()> {
+    // SAFETY: borrowed live fd; fcntl retains no pointers or ownership. The file
+    // has not escaped yet, so flags cannot race another user of this description.
+    let flags = retry(|| unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETFL) })?;
+    // SAFETY: same live fd, preserving all status flags other than O_NONBLOCK.
+    retry(|| unsafe { libc::fcntl(file.as_raw_fd(), libc::F_SETFL, flags & !libc::O_NONBLOCK) })
+        .map(|_| ())
+}
+
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+    pub(crate) fn is_nonblocking(file: &File) -> bool {
+        // SAFETY: read-only fcntl on a live borrowed fd, no ownership transfer.
+        let flags = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETFL) };
+        assert!(flags >= 0);
+        flags & libc::O_NONBLOCK != 0
+    }
+    #[test]
+    fn retry_repeats_only_interrupted_calls() {
+        let mut calls = 0;
+        let result = retry(|| {
+            calls += 1;
+            if calls == 1 {
+                // SAFETY: platform errno accessor returns this thread's live
+                // errno slot. No pointer escapes or aliases another thread.
+                unsafe {
+                    #[cfg(target_os = "macos")]
+                    let slot = libc::__error();
+                    #[cfg(target_os = "linux")]
+                    let slot = libc::__errno_location();
+                    *slot = libc::EINTR;
+                }
+                -1
+            } else {
+                7
+            }
+        })
+        .unwrap();
+        assert_eq!(result, 7);
+        assert_eq!(calls, 2);
+        let mut calls = 0;
+        let error = retry(|| {
+            calls += 1;
+            // SAFETY: same thread-local errno slot as above.
+            unsafe {
+                #[cfg(target_os = "macos")]
+                let slot = libc::__error();
+                #[cfg(target_os = "linux")]
+                let slot = libc::__errno_location();
+                *slot = libc::EACCES;
+            }
+            -1
+        })
+        .unwrap_err();
+        assert_eq!(calls, 1);
+        assert_eq!(error.raw_os_error(), Some(libc::EACCES));
+    }
     #[test]
     fn anchors_opened_directories_and_files_are_all_cloexec() {
         let temp = tempfile::tempdir().unwrap();

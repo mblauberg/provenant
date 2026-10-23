@@ -45,7 +45,11 @@ impl PsPrograms<'_> {
                 source,
             })) if matches!(
                 source.raw_os_error(),
-                Some(libc::EPERM | libc::EACCES | libc::ENOENT)
+                Some(
+                    crate::sys::errno::EPERM
+                        | crate::sys::errno::EACCES
+                        | crate::sys::errno::ENOENT
+                )
             ) && self.shim.exists() =>
             {
                 let mut env = env.to_vec();

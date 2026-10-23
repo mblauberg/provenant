@@ -198,3 +198,66 @@ blocked on that declaration. No path dependency bypass is introduced.
 
 Merged main again at `d8be7244ada4b5e7a9dadc565a7cab292e54890f`; its changes
 do not alter the supervisor source/oracle fixtures.
+
+## Filesystem consumer adapters (PR #1328 repair)
+
+Author route: `codex/gpt-6.1-sol@high`. `fs::{SafeFs, SafeDir, SafeFile}`
+are public, object-safe, `io::Result` contracts; `LocalFs`, `Directory` and
+`FileHandle` implement them. Consumers may inject `&dyn SafeFs` and use
+`Box<dyn SafeDir>` / `Box<dyn SafeFile>` as associated handle types, or use
+concrete handles. Tests can implement these traits without descriptors.
+`SafeFile` includes `Read + Write + Seek`; its duplicate shares the file offset.
+The trait publication methods operate within one held directory. Concrete
+`Directory` also supports rename/replace/exchange between held directories.
+
+The pending-contract inventory comes from
+`rg -n 'belongs in provenant-supervisor' tools/front-door/crates`.
+No consumer crate is changed in this repair.
+
+| Pending owner / contract | Supervisor adapter mapping |
+| --- | --- |
+| confinement `FileKind`, `Metadata` | Convert `fs::FileKind` variants and copy matching metadata fields; supervisor additionally supplies `allocated`. |
+| confinement `CustodyFs` initial access | `root`, `open_source`, `temporary_name` delegate to `SafeFs`; `LocalFs` supplies the OS implementation. |
+| confinement `CustodyFs` directory operations | `directory_metadata` → `SafeDir::metadata`; `metadata_at` → `metadata_at`; `open_directory(dir, name, follow)` → `open_directory(name, follow)`; `open_read`, `create_new`, `sync_directory`, `replace`, `unlink` → corresponding directory methods (`sync_directory` uses `sync`). |
+| confinement `CustodyFs` file operations | `duplicate`, `file_metadata`, `sync_file` → `SafeFile::{duplicate, metadata, sync}`. Boxed file handles implement the required read/write/seek traits. |
+| records `EntryInfo` | Copy device/inode/links/allocated from `fs::Metadata`; derive `directory` and `symlink` from `kind`. |
+| records `StorageFs` | `open_anchor` → `SafeFs::open_anchor`; `info` → `SafeDir::metadata`; `stat` → `metadata_at(name, false)`; `open_child` → `open_verified_directory`; `entries`, `make_writable`, `unlink`, `rmdir` → corresponding directory methods. `Entries` can be `Box<dyn Iterator<Item = io::Result<OsString>>>`. |
+| config/core `atomic_write` | Open the trusted parent once, then call `Directory::atomic_write(name, prefix, bytes, PublishMode::Replace)` (or its `SafeDir` method). Core's argument order differs; the adapter reorders it. Config retains its parent-creation policy; supervisor takes a held directory and does not create ancestors. |
+| config `replace_link` | Open the trusted destination parent, then call `replace_link(destination_name, source_path)`. Target bytes are stored verbatim. |
+| run `read_bounded`, `publish_lease`, `lock` | `Directory::read_bounded`; `atomic_write` with replace policy; held `FileHandle::{try_lock, unlock}` with caller-owned retry/deadline and create/open policy. This does not implement run's blocking append/read lock helper verbatim. |
+| run `OwnerCustody`, `ProcessProbe`, `WorkerExit`, `SessionWorker`, `SessionHost`, `publish_marker` | Still pending. Existing identity reducers, process observations and bounded utility runner are not drop-in S2/session custody adapters. Marker naming/permissions and no-fsync semantics require their own adapter; durable `atomic_write` is not a parity claim for markers. |
+| fabric-store `IdSource` | UUID formatting remains pending. `temporary_name` supplies 96 bits of entropy for staging names, not a UUID implementation. |
+
+`FsError` exposes `is_not_found`, `is_exists`, `is_symlink` / `is_loop`,
+`is_cross_device`, `is_unsupported` and `is_not_directory`. Unsupported errno
+classification includes EINVAL, ENOTSUP/EOPNOTSUPP and ENOSYS, including flagged
+rename refusals. No check-then-rename fallback is introduced. A no-follow open
+that returns ENOTDIR/ELOOP is classified with `fstatat(AT_SYMLINK_NOFOLLOW)`;
+a positively observed final symlink yields `FsError::Symlink` and canonical
+ELOOP on both Linux and macOS. A regular non-directory keeps ENOTDIR.
+`From<FsError> for io::Error` returns the underlying OS error, preserving errno
+and kind. Inspect the typed error before conversion for operation/path context;
+standard `io::Error` cannot retain both a raw errno and a custom context payload.
+Nested handle errors carry the full anchor-relative path, recorded only for
+diagnostics and never used to reopen a held capability.
+
+`atomic_write` exclusively creates a mode-0600 staging file in the held
+parent, writes and fsyncs it, performs no-replace or replacement rename, then
+fsyncs the parent. `replace_link` stages a fresh link, replaces the destination
+and fsyncs the parent. Both require trusted directory writers; failures before
+publication attempt staging cleanup while preserving the primary error. A
+post-rename directory-sync failure means publication is visible but durability
+is unconfirmed. The caller chooses the publication policy explicitly.
+
+`open_verified_directory` refuses observed stat/open/stat identity differences
+and crossing the original anchor device (typed `CrossDevice`, EXDEV). It cannot
+detect ABA replacement or prevent mutation after the last stat. Regular-file
+verification precedes clearing O_NONBLOCK; FIFO opens still cannot block waiting
+for a writer. Open/mkdir/rename/unlink retry EINTR in the syscall layer.
+`sys::errno` supplies named platform constants to callers, including fabric ps.
+Directory-stream ownership transfers with `into_raw_fd` after fdopendir succeeds.
+
+Local repair evidence: `cargo fmt --all`, supervisor clippy with warnings denied,
+and the required supervisor differential test command. The installed Rust
+targets omit `x86_64-unknown-linux-gnu`; Linux compilation and execution remain
+CI gates. No graph unit or consumer cut-over is newly claimed.

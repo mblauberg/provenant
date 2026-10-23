@@ -82,7 +82,7 @@ fn creates_reads_syncs_duplicates_and_preserves_non_utf8_names() {
     assert_eq!(byte, [b'b']);
     assert_eq!(names(&dir), std::slice::from_ref(&name));
     assert_eq!(names(&dir), std::slice::from_ref(&name));
-    assert!(dir.create_new(&name).is_err());
+    assert!(dir.create_new(&name).unwrap_err().is_exists());
     dir.unlink(&name).unwrap();
     assert_eq!(read.read_bounded(10).unwrap(), b"cdef");
 }
@@ -98,7 +98,9 @@ fn anchor_survives_ancestor_symlink_swap_without_writing_outside() {
     dir.create_new(OsStr::new("owned")).unwrap();
     assert!(root.join("held/owned").is_file());
     assert!(!root.join("outside/owned").exists());
-    assert!(Directory::open_anchor(&root.join("anchor")).is_err());
+    let error = Directory::open_anchor(&root.join("anchor")).unwrap_err();
+    assert!(matches!(error, FsError::Symlink { .. }));
+    assert_eq!(error.raw_os_error(), Some(errno::ELOOP));
 }
 #[test]
 fn final_symlinks_are_refused_and_unlinked_without_following() {
@@ -122,14 +124,22 @@ fn final_symlinks_are_refused_and_unlinked_without_following() {
             .kind,
         FileKind::Regular
     );
-    assert!(root.open_read(OsStr::new("file-link")).is_err());
-    assert!(root
-        .open_verified_directory(OsStr::new("dir-link"))
-        .is_err());
-    assert!(root.create_new(OsStr::new("file-link")).is_err());
+    for error in [
+        root.open_read(OsStr::new("file-link")).unwrap_err(),
+        root.open_verified_directory(OsStr::new("dir-link"))
+            .unwrap_err(),
+    ] {
+        assert!(matches!(error, FsError::Symlink { .. }));
+        assert_eq!(error.raw_os_error(), Some(errno::ELOOP));
+    }
+    let error = root.create_new(OsStr::new("file-link")).unwrap_err();
+    assert!(matches!(error, FsError::Io { .. }));
+    assert_eq!(error.raw_os_error(), Some(errno::EEXIST));
     root.unlink(OsStr::new("file-link")).unwrap();
     assert!(root.open_read(OsStr::new("target")).is_ok());
-    assert!(root.rmdir(OsStr::new("dir-link")).is_err());
+    let error = root.rmdir(OsStr::new("dir-link")).unwrap_err();
+    assert!(error.is_not_directory());
+    assert_eq!(error.raw_os_error(), Some(errno::ENOTDIR));
     root.unlink(OsStr::new("dir-link")).unwrap();
     root.rmdir(OsStr::new("directory")).unwrap();
 }
@@ -158,7 +168,7 @@ fn competing_noreplace_publishers_have_exactly_one_winner() {
             .iter()
             .filter(|o| o
                 .as_ref()
-                .is_err_and(|e| e.raw_os_error() == Some(libc::EEXIST)))
+                .is_err_and(|e| e.raw_os_error() == Some(crate::sys::errno::EEXIST)))
             .count(),
         1
     );
@@ -190,7 +200,7 @@ fn exchange_replace_and_cross_directory_operations_are_atomic_primitives() {
     root.replace(OsStr::new("a"), &child, OsStr::new("b"))
         .unwrap();
     assert_eq!(child.read_bounded(OsStr::new("b"), 1).unwrap(), b"B");
-    assert!(root.open_read(OsStr::new("a")).is_err());
+    assert!(root.open_read(OsStr::new("a")).unwrap_err().is_not_found());
     child.unlink(OsStr::new("b")).unwrap();
     root.rmdir(OsStr::new("child")).unwrap();
 }
@@ -297,7 +307,9 @@ fn trailing_separators_do_not_bypass_anchor_final_symlink_refusal() {
     symlink("target", path.join("link")).unwrap();
     let mut link = path.join("link").into_os_string();
     link.push("///");
-    assert!(Directory::open_anchor(Path::new(&link)).is_err());
+    let error = Directory::open_anchor(Path::new(&link)).unwrap_err();
+    assert!(matches!(error, FsError::Symlink { .. }));
+    assert_eq!(error.raw_os_error(), Some(errno::ELOOP));
     let mut target = path.join("target").into_os_string();
     target.push("///");
     assert!(Directory::open_anchor(Path::new(&target)).is_ok());
@@ -327,7 +339,7 @@ fn identity_observations_refuse_replacement_on_either_side_of_open() {
     }
     assert!(matches!(
         verify_directory_identity(name, before, before, before, before.device.wrapping_add(1)),
-        Err(FsError::RaceRefused { .. })
+        Err(FsError::CrossDevice { .. })
     ));
 }
 #[test]
@@ -339,6 +351,193 @@ fn verified_open_refuses_the_platform_device_mount() {
     assert_ne!(parent.device, device.device);
     assert!(matches!(
         root.open_verified_directory(OsStr::new("dev")),
-        Err(FsError::RaceRefused { .. })
+        Err(FsError::CrossDevice { .. })
     ));
+}
+
+#[test]
+fn directory_symlinks_have_a_portable_typed_errno_and_nested_context() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = Directory::open_anchor(temp.path()).unwrap();
+    root.mkdir(OsStr::new("child"), 0o700).unwrap();
+    let child = root.open_directory(OsStr::new("child")).unwrap();
+    child.symlink(Path::new("."), OsStr::new("link")).unwrap();
+    let error = child.open_directory(OsStr::new("link")).unwrap_err();
+    assert!(matches!(&error, FsError::Symlink { path, .. } if path == Path::new("child/link")));
+    assert!(error.is_symlink());
+    assert_eq!(error.raw_os_error(), Some(crate::sys::errno::ELOOP));
+    let converted: io::Error = error.into();
+    assert_eq!(converted.raw_os_error(), Some(crate::sys::errno::ELOOP));
+    assert_eq!(
+        converted.kind(),
+        io::Error::from_raw_os_error(crate::sys::errno::ELOOP).kind()
+    );
+    let missing = child.open_read(OsStr::new("missing")).unwrap_err();
+    assert!(missing.is_not_found());
+    assert!(matches!(&missing, FsError::Io { path, .. } if path == Path::new("child/missing")));
+}
+
+#[test]
+fn atomic_publication_replaces_or_refuses_and_always_removes_staging_entries() {
+    let temp = tempfile::tempdir().unwrap();
+    let dir = Directory::open_anchor(temp.path()).unwrap();
+    let name = OsStr::new("published");
+    dir.atomic_write(name, ".config.", b"old", PublishMode::NoReplace)
+        .unwrap();
+    let error = dir
+        .atomic_write(name, ".config.", b"refused", PublishMode::NoReplace)
+        .unwrap_err();
+    assert!(error.is_exists());
+    assert_eq!(dir.read_bounded(name, 10).unwrap(), b"old");
+    dir.atomic_write(name, ".core.", b"new", PublishMode::Replace)
+        .unwrap();
+    assert_eq!(dir.read_bounded(name, 10).unwrap(), b"new");
+    assert_eq!(names(&dir), [name]);
+    dir.mkdir(OsStr::new("directory"), 0o700).unwrap();
+    let error = dir
+        .atomic_write(
+            OsStr::new("directory"),
+            ".config.",
+            b"data",
+            PublishMode::Replace,
+        )
+        .unwrap_err();
+    assert_eq!(error.raw_os_error(), Some(crate::sys::errno::EISDIR));
+    assert_eq!(names(&dir).len(), 2);
+    dir.replace_link(name, Path::new("one")).unwrap();
+    dir.replace_link(name, Path::new("two")).unwrap();
+    assert_eq!(
+        std::fs::read_link(temp.path().join(name)).unwrap(),
+        Path::new("two")
+    );
+    assert_eq!(names(&dir).len(), 2);
+    assert!(matches!(
+        dir.atomic_write(name, "../invalid", b"data", PublishMode::Replace),
+        Err(FsError::InvalidComponent { .. })
+    ));
+}
+
+#[test]
+fn object_safe_consumers_can_use_real_and_mock_files() {
+    fn read_file(file: &mut dyn SafeFile) -> io::Result<Vec<u8>> {
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes)?;
+        Ok(bytes)
+    }
+    let temp = tempfile::tempdir().unwrap();
+    let fs: &dyn SafeFs = &LocalFs;
+    let dir = fs.open_anchor(temp.path()).unwrap();
+    dir.atomic_write(OsStr::new("file"), ".test.", b"real", PublishMode::Replace)
+        .unwrap();
+    assert_eq!(
+        read_file(&mut *dir.open_read(OsStr::new("file")).unwrap()).unwrap(),
+        b"real"
+    );
+    let mut mock = MockFile(std::io::Cursor::new(b"mock".to_vec()));
+    assert_eq!(read_file(&mut mock).unwrap(), b"mock");
+    assert_eq!(
+        dir.entries()
+            .unwrap()
+            .collect::<io::Result<Vec<_>>>()
+            .unwrap(),
+        [OsString::from("file")]
+    );
+}
+
+struct MockFile(io::Cursor<Vec<u8>>);
+impl Read for MockFile {
+    fn read(&mut self, bytes: &mut [u8]) -> io::Result<usize> {
+        self.0.read(bytes)
+    }
+}
+impl Write for MockFile {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        self.0.write(bytes)
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+impl Seek for MockFile {
+    fn seek(&mut self, position: SeekFrom) -> io::Result<u64> {
+        self.0.seek(position)
+    }
+}
+impl SafeFile for MockFile {
+    fn metadata(&self) -> io::Result<Metadata> {
+        Err(io::ErrorKind::Unsupported.into())
+    }
+    fn duplicate(&self) -> io::Result<Box<dyn SafeFile>> {
+        Ok(Box::new(Self(self.0.clone())))
+    }
+    fn sync(&self) -> io::Result<()> {
+        Ok(())
+    }
+    fn try_lock(&self) -> io::Result<bool> {
+        Ok(true)
+    }
+    fn unlock(&self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+#[test]
+fn typed_error_predicates_and_io_conversion_preserve_errno_and_kind() {
+    for code in [
+        errno::ENOENT,
+        errno::EEXIST,
+        errno::ELOOP,
+        errno::EXDEV,
+        errno::ENOTDIR,
+        errno::EINVAL,
+        errno::ENOTSUP,
+        errno::EOPNOTSUPP,
+        errno::ENOSYS,
+        errno::EACCES,
+    ] {
+        let error =
+            error("operation", Path::new("nested/entry"))(io::Error::from_raw_os_error(code));
+        assert_eq!(error.is_not_found(), code == errno::ENOENT);
+        assert_eq!(error.is_exists(), code == errno::EEXIST);
+        assert_eq!(error.is_symlink(), code == errno::ELOOP);
+        assert_eq!(error.is_loop(), code == errno::ELOOP);
+        assert_eq!(error.is_cross_device(), code == errno::EXDEV);
+        assert_eq!(error.is_not_directory(), code == errno::ENOTDIR);
+        assert_eq!(
+            error.is_unsupported(),
+            [
+                errno::EINVAL,
+                errno::ENOTSUP,
+                errno::EOPNOTSUPP,
+                errno::ENOSYS
+            ]
+            .contains(&code)
+        );
+        let converted: io::Error = error.into();
+        assert_eq!(converted.raw_os_error(), Some(code));
+        assert_eq!(converted.kind(), io::Error::from_raw_os_error(code).kind());
+    }
+    let custom =
+        error("read", Path::new("entry"))(io::Error::new(io::ErrorKind::UnexpectedEof, "short"));
+    let converted: io::Error = custom.into();
+    assert_eq!(converted.raw_os_error(), None);
+    assert_eq!(converted.kind(), io::ErrorKind::UnexpectedEof);
+    let temp = tempfile::tempdir().unwrap();
+    let dir = Directory::open_anchor(temp.path()).unwrap();
+    dir.create_new(OsStr::new("file")).unwrap();
+    let error = dir.open_directory(OsStr::new("file")).unwrap_err();
+    assert!(matches!(error, FsError::Io { .. }));
+    assert!(error.is_not_directory());
+    assert_eq!(error.raw_os_error(), Some(errno::ENOTDIR));
+}
+
+#[test]
+fn verified_regular_reads_clear_nonblocking_status() {
+    let temp = tempfile::tempdir().unwrap();
+    let dir = Directory::open_anchor(temp.path()).unwrap();
+    dir.create_new(OsStr::new("file")).unwrap();
+    let file = dir.open_read(OsStr::new("file")).unwrap();
+    assert!(!os::tests::is_nonblocking(&file.file));
+    let source = FileHandle::open_source(&temp.path().join("file")).unwrap();
+    assert!(!os::tests::is_nonblocking(&source.file));
 }

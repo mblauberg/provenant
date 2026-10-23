@@ -1375,3 +1375,27 @@ then passed after repair. Extended JSON/native-path reader gaps remain partial.
   No command uses the crate. Completing the unit requires a bounded pipe
   adapter and exact overflow/failure differentials before cut-over; no
   behavior change is accepted here.
+
+### RP-SUP-FS-ERRNO: portable filesystem error contract (fixed)
+
+- Class: `bug`; ungraphed supervisor filesystem foundation, PR #1328 repair.
+  Author route: `codex/gpt-6.1-sol@high`. Main baseline:
+  `d8be7244ada4b5e7a9dadc565a7cab292e54890f`.
+- Reproducer: no-follow directory open on a final symlink reports ENOTDIR on
+  Linux and ELOOP on macOS. The previous tests asserted only failure, leaving
+  consumers unable to distinguish links from ordinary non-directories.
+- Fixed contract: classify ENOTDIR/ELOOP with no-follow fstatat in the syscall
+  layer; a positively observed final symlink returns typed `FsError::Symlink`
+  and canonical ELOOP. Ordinary non-directories retain ENOTDIR. `io::Error`
+  conversion preserves the resulting errno/kind; typed errors retain complete
+  anchor-relative diagnostics. Observed anchor-device crossings report EXDEV.
+- Evidence: `directory_symlinks_have_a_portable_typed_errno_and_nested_context`,
+  `typed_error_predicates_and_io_conversion_preserve_errno_and_kind`, and
+  tightened final-link/anchor fixtures assert variants and errno. Publication
+  and regular-file flag regressions cover the same repair. Required local
+  supervisor tests pass on macOS; Linux execution remains a CI gate because
+  the cross-compilation target is not installed.
+- Scope: public filesystem traits and durable publication helpers now support
+  adapters for the pending confinement/records/config/core contracts. Consumers
+  remain unchanged; no graph unit or full conformance claim is added. README
+  maps the remaining pending run and UUID contracts explicitly.
