@@ -1083,6 +1083,39 @@ The source revision above is unchanged; CLI rendering remains an edge task.
   stays a JSON value. The raw-input public report regression failed before
   repair and now covers reordered, nested and duplicate-key objects without
   adding `preserve_order` or a dependency.
+## RP-FR2-001: Fabric policy ordered mappings and Python repr (open, library)
+
+- Unit: `skills/orchestrate/scripts/fabric_policy.py#unit-01` (partial),
+  rulebook v4.
+- Compared source/oracle revision: `600dec09bcda3b6a86272e391420e89d38777953`.
+- Reproducer: configure `tools` with keys in the order `z`, then `a`, or use
+  an invalid `secret_scan_exclude` entry containing the float `1e-7` or a
+  nested object with reordered keys. CPython preserves dict insertion order
+  and renders `1e-7` as `1e-07`; this crate's `serde_json::Map` sorts keys and
+  its current Python repr helper does not preserve source object order or
+  CPython float spelling.
+- A second open edge is a non-finite JSON number in an unknown policy field.
+  Python's JSON decoder accepts `NaN` and infinities. The pending checked JSON
+  adapter maps them to `null` so the source-compatible typed `default_branch`
+  warning is preserved, but that changes unknown-field values and is not a
+  general Python JSON number representation.
+- Non-finite values in `secret_scan_exclude` also remain different: for
+  `secret_scan_exclude: [NaN]`, Python warns with `nan`, while the Rust warning
+  currently renders `None` after the adapter maps the value to null.
+- Exact `repr()` parity also remains open for quote selection and control
+  escapes. For example, Python uses double quotes for a value containing an
+  apostrophe when that avoids escaping, and renders U+0001 as `\x01`; the
+  pending helper always uses single quotes and does not encode all control
+  characters this way.
+- Evidence: policy differential tests cover defaults, invalid scalar entries,
+  containment, warning text and `NaN` on the typed `default_branch` field, but
+  do not exercise the above ordered/repr cases, non-finite exclusion entries
+  or non-finite unknown values.
+  The difference is visible in returned tool settings and warnings.
+- Disposition: open; no behaviour change is accepted. Keep the unit partial
+  until the `provenant-records` ordered Python-value codec and
+  `provenant-core` repr helper are available to this crate.
+
 
 ## RP-core-2-01 — shared Python compatibility ownership and ISO repairs
 

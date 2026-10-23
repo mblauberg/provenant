@@ -65,3 +65,69 @@ null-versus-missing input fields, project-root lexical resolution, ECMAScript
 trimming and explicit unfinished host rewrite boundaries. Gate file I/O remains
 unported, so the decoder introduces no unbounded receipt read or file-size
 refusal policy. No full gate, host, helper or watch execution parity is claimed.
+
+## Fabric runtime batch 2
+
+Rulebook: `docs/specs/rust-port/PORTING.md` version 4. Source and oracle
+revision: `600dec09bcda3b6a86272e391420e89d38777953` (`origin/main` at lane
+start). The crate remains inert.
+
+### Complete units
+
+- `runtime/fabric/src/run-registry.ts#interface`: typed owner, provider and
+  recorded-run serde contracts with source wire names and missing/null
+  optional-field behaviour.
+- `runtime/fabric/src/success-status.ts#unit-01`: legacy `succeeded` alias and
+  success predicate, with Node differential coverage.
+
+### Partial units
+
+| Unit | Implemented | Remaining |
+|---|---|---|
+| `runtime/fabric/src/hosts.ts#unit-01` | batch-1 federation eligibility, placement rewrite policy and bounded stderr tail | host process transport, UUID allocation, stdout bounds, cancellation/reaping; unsupported non-object rewrite cases |
+| `runtime/fabric/src/json-subprocess.ts#unit-01` | batch-1 bounded capture, failure precedence and response parsing | spawn/stdin transport, explicit deadlines and pre-spawn abort; arbitrary AbortSignal reasons and nullish defaults |
+| `runtime/fabric/src/lane-watch.ts#unit-01` | batch-1 relevant-file filter and explicit-clock wake/debounce policy | recursive watch registration, recovery, root refresh, cleanup and bounded wait transport |
+| `runtime/fabric/src/run-root.ts#unit-01` | canonical product root and fixture temp/scratch containment policy | executable-owner `X_OK` check and exact error behaviour |
+| `skills/orchestrate/scripts/fabric_policy.py#unit-01` | policy defaults/validation, exclusion containment, warning generation, and Python non-finite constants on typed string policy fields | Python dict insertion order; exact `repr()` quote/control escaping; `nan`/infinity formatting in exclusions and generic values; see RP-FR2-001 |
+| `runtime/fabric/src/run-registry.ts#unit-01` | record contract is complete above | safe record reads/writes, process identity/liveness, cleanup and signal effects |
+
+The crate carries marked `pending` copies of core path resolution,
+ECMAScript trimming, Python-compatible checked JSON decoding and Python repr
+formatting because those APIs are not yet exposed as workspace dependencies.
+The run-root unit has a local source-compatible real-path fallback for dangling
+symlinks. Remove pending copies when their shared owners become usable here.
+`fabric-store` and supervisor transport are not duplicated.
+
+### Skipped units and disposition
+
+- `runtime/fabric/src/ps.d.mts#unit-01`: awaits the supervisor crate dependency
+  being exposed through the allowed workspace dependency surface.
+- `scripts/fabric_git.py#interface`: skipped as an oversized cross-owner Git
+  contract; needs an agreed Rust boundary before its dependent policy units.
+- `scripts/fabric_hosts.py#interface`: skipped pending the supervisor process
+  transport and host record contracts.
+- `scripts/fabric_lanes.py#interface`: skipped pending the Git/host contracts
+  and supervisor safe filesystem/process APIs.
+- `runtime/fabric/src/catalogue.ts#unit-01`: skipped; the source still calls
+  the dropped Python-owner unit, and there is no replacement process owner in
+  this crate.
+- `runtime/fabric/src/execution-input.ts#unit-01` and `#unit-02`: skipped as a
+  610-line policy unit dependent on catalogue, identity and process APIs; no
+  coherent bounded subunit was completed in this lane.
+- `runtime/fabric/src/pools.ts#unit-01`: skipped pending execution-input and
+  Python routing-owner contracts.
+- `runtime/fabric/src/graph/document.ts#unit-01` and `#unit-02`: skipped
+  pending catalogue, execution-input, run-root and graph document contracts.
+
+`runtime/fabric/src/python-owner.ts#unit-01` is **dropped** in `graph.json`;
+this lane added no Python-owner port.
+
+### Verification
+
+Python and Node differentials ran on this host with
+`PROVENANT_PORT_DIFF_REQUIRED=1`. `cargo fmt --all`, crate clippy with
+`-D warnings`, and the crate test suite passed. There are 56 unit tests, zero
+failures and zero doc tests. The open policy mismatch is recorded in
+`docs/specs/rust-port/divergences.md`; no intentional behaviour change is
+proposed. J1/J2/J3 and the skipped owner implementations remain outside this
+batch's acceptance claim.
