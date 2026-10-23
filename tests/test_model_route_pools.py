@@ -916,7 +916,7 @@ def test_utility_defaults_private_and_never_admits_free_or_training_models(tmp_p
             assert not {'free', 'trains-on-prompts'}.intersection(traits), entry['model']
     private = pick({'route': 'utility', 'council': 8}, tmp_path, catalog=SEED)
     assert private['confidential'] is True
-    assert set(models(private)) == {'claude/claude-haiku-5-5'}
+    assert set(models(private)) == {'claude/claude-haiku-5-5', 'codex/gpt-6-luna'}
     for member in private['picks']:
         traits = pools.model_traits(router, SEED, member['adapter'], member['model'])
         assert not {'free', 'trains-on-prompts'}.intersection(traits)
@@ -943,7 +943,7 @@ def test_utility_stays_private_without_catalogue_defaults(tmp_path):
     catalog.pop('route_defaults')
     private = pick({'route': 'utility', 'council': 8}, tmp_path, catalog=catalog)
     assert private['confidential'] is True
-    assert set(models(private)) == {'claude/claude-haiku-5-5'}
+    assert set(models(private)) == {'claude/claude-haiku-5-5', 'codex/gpt-6-luna'}
 
 
 @pytest.mark.parametrize('malformed', ['true', 'false', None, 0, 1])
