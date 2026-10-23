@@ -1454,7 +1454,7 @@ fn diagnostic_absence_stat_errors_invalid_db_and_wal_snapshot_differential() {
 
 struct MutatingFs {
     source: std::path::PathBuf,
-    copies: Cell<u64>,
+    copies: std::sync::atomic::AtomicU64,
     always: bool,
 }
 impl provenant_supervisor::fs::SafeFs for MutatingFs {
@@ -1476,14 +1476,19 @@ impl provenant_supervisor::fs::SafeFs for MutatingFs {
     ) -> std::io::Result<Box<dyn provenant_supervisor::fs::SafeFile>> {
         let file = provenant_supervisor::fs::LocalFs.open_source(path)?;
         if path == self.source {
-            self.copies.set(self.copies.get() + 1);
-            if self.always || self.copies.get() == 1 {
+            let copies = self
+                .copies
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                + 1;
+            if self.always || copies == 1 {
                 std::fs::OpenOptions::new()
                     .write(true)
                     .open(path)?
-                    .set_times(std::fs::FileTimes::new().set_modified(
-                        std::time::UNIX_EPOCH + Duration::from_secs(100 + self.copies.get()),
-                    ))?;
+                    .set_times(
+                        std::fs::FileTimes::new().set_modified(
+                            std::time::UNIX_EPOCH + Duration::from_secs(100 + copies),
+                        ),
+                    )?;
             }
         }
         Ok(file)
@@ -1500,7 +1505,7 @@ fn diagnostic_snapshot_retries_version_changes_and_has_a_three_attempt_bound() {
     for always in [false, true] {
         let fs = MutatingFs {
             source: path.clone(),
-            copies: Cell::new(0),
+            copies: std::sync::atomic::AtomicU64::new(0),
             always,
         };
         capture_report(
@@ -1514,7 +1519,10 @@ fn diagnostic_snapshot_retries_version_changes_and_has_a_three_attempt_bound() {
             ),
             &path,
         );
-        capture(&mut out, Ok(fs.copies.get()));
+        capture(
+            &mut out,
+            Ok(fs.copies.load(std::sync::atomic::Ordering::Relaxed)),
+        );
     }
     capture(
         &mut out,
