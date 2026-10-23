@@ -1,436 +1,434 @@
 # Command surface
 
 Status: **proposal for the command-tree freeze**, 2026-10-24. Covers
-`provenant-cli` and the `provenant` binary. The chair freezes this tree after
-reconciling the other area designs; a reserved subtree below is not an accepted
-feature list. Author route: `codex/gpt-6.1-sol@high`.
+`provenant-cli` and the `provenant` binary. Author route:
+`codex/gpt-6.1-sol@high`.
 
-## Purpose
+## Purpose and ownership
 
-The command surface gives people, skills, harness hooks and CI one executable
-for starting work, inspecting its durable result and applying explicit policy
-checks. `cli` parses arguments and renders typed results; the binary composes
-library owners and selects the transport. Neither owns provider execution,
-process custody, configuration storage or Fabric policy. The design follows
-[PORTING.md v7](https://github.com/mblauberg/provenant/blob/1b3d48e4c549811ce3636edc30b047f36fd24ada/docs/specs/rust-port/PORTING.md), especially R0, R1 and R9, and the dependency
-allowlist in [ADR 0028](../../../adr/0028-rust-port-dependencies.md).
+People, skills, hooks and CI use one executable to start work, inspect durable
+results and apply policy checks. `cli` parses arguments and renders typed
+results; the binary composes library owners and selects the transport.
+Provider execution, custody, storage and Fabric policy stay in their libraries.
+[PORTING.md v7](../PORTING.md), the [rewrite plan](../README.md) and the
+[Cross-area decisions](README.md#cross-area-decisions) bind this design.
+[ADR 0028](../../../adr/0028-rust-port-dependencies.md) supplies the dependency
+allowlist. This document owns the command contract every area cites.
 
-## Evidence and pruning
-
-Source baseline: `1b3d48e4c549811ce3636edc30b047f36fd24ada`. Inspected the
-front-door router, help, launch/resolution code and process tests; every module
-in `crates/cli`; the harness/release/security/date scripts and their tests;
-installer registrations, skill callers and CI. There is no top-level `hooks/`
-in this checkout: callbacks live in `scripts/hooks/`, Python hook scripts and
-`skills/session/scripts/`.
-
-Transcript snapshot (call timestamps 2026-10-13 to 2026-10-23 UTC):
-1,401 Claude project JSONL files and 1,046 Codex session JSONL files; 79,766
-Claude Bash calls and 37,431 literal `tools.exec_command` inputs inside Codex
-`exec` records. Parse only tool-call records, decode shell strings, remove
-heredoc bodies, split shell command positions and unwrap shell/env launchers.
-Exclude prose, file edits, quoted source and `which`/`command -v`. Count an
-attempt, not success: output/status was not paired. Dynamic argv, subprocesses
-inside scripts and harness-triggered callbacks are outside this count; two
-verbs were dynamic. No legacy direct Codex shell function calls were found.
-Active transcript files can grow; these numbers are one snapshot, not a
-project-wide lifetime census. No credentials were opened or copied.
-
-| Old root verb | Attempts | Proposed disposition |
-| --- | ---: | --- |
-| `help`, `root` | 153, 48 | Keep cheap discovery/identity. |
-| `fabric`, `lanes` | 199, 619 | Keep one Fabric subtree; move root `lanes` into it. |
-| `route`, `routes`, `quota`, `profile` | 8, 12, 5, 1 | Route listing/resolution includes quota and resolved controls; drop separate profile mutation and quota scheduling/credit commands. |
-| `telemetry`, `stats`, `retro` | 8, 5, 0 | One telemetry subtree; drop root report aliases and unused retro/change-marker surface. |
-| `hosts`, `peer`, `lease` | 8, 1, 1 | Fabric owns host/peer transport and landing operations; no root synonyms. Lease use was `status`. |
-| `dispatch`, `clean` | 4, 3 | Keep (dispatch includes two help calls; clean includes one). |
-| `check`, `pr` | 1, 1 | Keep content checks for CI; `pr` was help only, so remove the dedicated polling wrapper. |
-| `worktree`, `lint`, `capabilities` | 0, 0, 0 | Direct owners: worktree 56 (4 help); lint and capabilities one help each. Keep worktrees; internalise capabilities and lint policy. |
-| `digest`, `classify`, `extract`, `reap`, `gate`, `batch`, `run`, `lane`, `events`, `graph` | 0 each | Drop these root commands. No direct utility, reap or batch/run-controls script calls observed. Batch/graph/events need new owner evidence before any reservation becomes a feature. |
-
-Other attempts: unsupported `doctor` 1, no-verb `--version` 2, dynamic verb 2;
-total **1,082**. Nested Fabric calls include dispatch 58 (5 help), inbox 41,
-send 46 (5 help), whoami 22, status 3, landing-push 3 (1 help), and one each
-of adapters/note/peers/session/session-list/tasks. Fabric batch/graph/events:
-zero. Direct policy scripts: static-security 89, timebomb 52, check-harness 1
-(help only), release wrapper 1 (`--publication-range`); other harness/release
-entry points and `gate`: zero. Direct safety guard 2, session hook install 2,
-compact reinjection 1; no routing/output hook command. Automatic callbacks
-are not visible in shell-call counts.
-
-Complete observed CLI flag ledger (attempts, across all verbs):
-
-| Destination / decision | Old flag counts |
+| Keep | Drop / replacement |
 | --- | --- |
-| Shared output/discovery | `--help` 32; `--json` 19; `--version` 2. Keep. |
-| Fabric listing/waits | `--all` 192; `--summary` 12; `--wait` 493; `--timeout` 491; `--detail` 1. Owner proposes the minimal canonical grammar. Drop unsupported `--any` 2 and `--ids` 1. |
-| Dispatch/routing | `--access-mode` 2; `--adapter` 9; `--alias` 4; `--confidential` 1; `--effort` 51; `--id` 51; `--mode` 51; `--model` 55; `--operation-id` 51; `--prompt-file` 53; `--role` 7; `--task-class` 2; `--task-id` 3; `--tasks` 2; `--worktree` 50. Owner must collapse redundant IDs/modes; observation alone does not freeze an option. |
-| Fabric coordination | `--digest` 6; `--kind` 21; `--label` 2; `--limit` 35; `--peek` 36; `--reply-to` 3. Reserved to Fabric's proposal. |
-| Cleanup | `--merged-since` 2; `--prune-merged` 2. Preserve explicit merged-worktree cleanup through supervisor policy. |
-| Remove/replace | `--cwd` 3 becomes global project selection; `--resolved` 1 becomes resolved route data. Drop caller-selected `--run-dir` 2 and `--output-path` 1: owners choose custody-safe artifact paths. |
+| Cheap help, root and build identity | Implicit Git/probe/stale-checkout work on every invocation. |
+| Top-level dispatch and lane controls | `fabric dispatch`, `fabric run`, named sessions, root `run`, `batch`, `lane` and `reap`; use the run verbs below. Fabric has no run verbs. |
+| Route listing/resolution | Profile mutation, separate quota scheduling/credit commands and public capabilities plumbing. |
+| Fabric messaging, tasks, identity and peers | Root host/peer/lease synonyms; redundant CLI forwarding paths. |
+| `telemetry stats` | Ingest/report aliases, retro/change markers, ledger and ledger import. |
+| Worktree creation and explicit cleanup | Implicit post-merge deletion; separate PR polling wrapper. |
+| Checks and recorded hook protocols | Composite `gate`, public utility/schema/Ajv commands, output-digest and roster-advice hooks, npm retry and Python emulation/oracles. |
 
-Direct worktree flags: `--new-branch`/`--start-point` 42 each,
-`--existing-branch` 2, `--help` 4. Other direct-owner flags:
-`--candidates-file`/`--spread-state-file`/`--role`/`--task-class` one each in
-model routing; internalise snapshot/spread plumbing. Release
-`--publication-range` 1 becomes `check release --base OID --head OID`.
-Unobserved front-door help flags (zero): `--account`, `--add`, `--apply`,
-`--at`, `--branch`, `--compare`, `--expected-sha`, `--file`, `--follow`,
-`--grace`, `--health`, `--ignore-backoff`, `--labels`, `--node`,
-`--non-confidential`, `--plan`, `--power`, `--project`, `--refresh`,
-`--remote`, `--risk-tier`, `--schema`, `--seconds`, `--since`,
-`--started-before`, `--sync`, `--tail`, `--tree`, `--trigger`, `--window`.
-Do not carry old unobserved flags forward by default. New safety/isolation
-controls below have a stated requirement, not an invented usage count;
-other owners must justify exceptions at freeze.
+One internal dependency gates utility deletion: `task_classifier._run_model()`
+uses `utility("extract", …)` through routing's model/shadow chains. Before
+freezing routing flags or deleting that engine/schema, the routing owner must
+publish the missing execution-route design and accept explicit/rules/default
+classification with those calls/config/tests removed, or specify a typed
+internal replacement. No Python bridge or placeholder command may satisfy
+this gate.
 
-Caller search found 393 command mentions in 114 files, including examples;
-that is an inventory, not execution evidence. Required callers include CI's
-`check-harness --checks-only`, gate's release wrapper, orchestrate's lane
-waits, `docs/worktrees.md` helpers and installer hook registrations. Keep
-content/publication checks for those callers even without interactive use.
-Prune the remaining implementation weight as follows:
+## Command tree and conventions
 
-| Removal | Reason / replacement |
-| --- | --- |
-| Every root alias listed above; short/alternate flag spellings | One canonical owner path. Routing tier names are domain values, not command aliases. |
-| Public utility/schema/Ajv surface | Zero direct CLI use; drop the public commands. Internal classifier dependency below must be resolved before deleting the engine. Extract is already removed by the rewrite plan. |
-| Hidden `lane run`; no-argument MCP selected by environment | Supervisor owns its runner. MCP is explicit `fabric mcp`; no arguments always means usage. |
-| `check --doctor`, `--checks-only`; composite `gate` | Separate product checks from Cargo/CI orchestration. No pytest/npm, provider probes or home-workflow scan inside `check`. |
-| Stale-checkout advice on every command | Remove implicit Git subprocesses; expose installation identity through root/checks. |
-| Output-digest and roster-advice hooks | Optional registration/docs without demonstrated automated value; they add provider execution/output rewriting or repeat route data. |
-| Post-merge cleanup hook | Move implicit deletion into the explicit merge/worktree workflow under its existing authority. |
-| npm retry, Python AST tooling, old oracles/emulation | Their subjects disappear. R7 guards and new-design tests replace them. |
-
-One indirect caller prevents calling the utility engine unused:
-`task_classifier._run_model()` invokes `utility("extract", …)`, reached by
-`model_route_cli` and the default/shadow `model` chains in
-`config/model-routing.json`. These internal calls are outside the transcript
-command count. Propose explicit/rules/default classification only, removing
-implicit model/shadow provider calls. The execution-route owner must accept
-that change and remove the corresponding config/tests/callers, or supply a
-typed internal classifier replacement, **before** utility/schema deletion.
-This is a freeze dependency, not a Python compatibility bridge.
-
-## Proposed tree and conventions
-
-All names below have one spelling. There are no hidden aliases, abbreviated
-long flags, positional command rewrites or short flag synonyms, including
-`-h`. Every leaf has `--help`; `help [COMMAND…]` follows the same Clap command
-model. `help --json` emits the command catalogue, including options and value
-constraints. Help never resolves roots, opens SQLite, starts threads, probes
-providers or invokes a command. The dependency allowlist already includes
-Clap derive; do not add completion, colour or shell-parser dependencies.
+One spelling per name; no aliases, abbreviated long options or short flag
+synonyms, including `-h`. Every leaf has `--help`; `help [COMMAND…]` uses the
+same Clap model. `help --json` returns the catalogue with options, defaults,
+conflicts and bounds. Help does not resolve roots, open SQLite, start threads,
+probe providers or invoke a command. No arguments means usage, never implicit
+MCP selected by environment. Clap derive is already allowed; add no
+completion, colour or shell-parser dependency.
 
 ```text
 provenant
   help [COMMAND…]
   root
-  install                         [state.md reservation]
-  route                           [execution-route.md reservation]
-    list | resolve
-  dispatch                        [execution-run.md reservation]
-  fabric                          [fabric.md reservation]
-    mcp | …                       (messages/tasks/claims/lanes/hosts/lease)
-  telemetry                       [telemetry.md reservation]
-    ingest | report
-  worktree                        [supervisor.md reservation]
-    create | list | remove
-  clean                           [supervisor.md reservation]
-  workflow …                      [workflow.md reservation]
-  check
-    harness
-    release [--base OID --head OID]
-    dates
-  hook
-    claude safety
-    claude pre-compact            [workflow.md policy reservation]
-    claude compact                [workflow.md policy reservation]
-    git pre-push | commit-msg FILE
+  config show
+  install [--dry-run] [--legacy-checkout ABS]
+  uninstall
+  route list | resolve                    [routing freeze gate]
+  dispatch
+  lanes [--wait]
+  output
+  cancel
+  resume
+  reconcile
+  fabric …                                [messages/tasks/identity/peers/MCP]
+    mcp
+  telemetry stats
+  worktree create | list | remove          [supervisor freeze gate]
+  clean                                   [supervisor freeze gate]
+  workflow …                              [workflow freeze gate]
+  check config | install | harness | release
+  check writing PATHS… [--profile PROFILE]
+  hook claude PreToolUse | PreCompact | SessionStart
+  hook git pre-push REMOTE LOCATION
 ```
 
-`dispatch` is the single execution entry; remove `fabric dispatch` as a CLI
-forwarding synonym, while Fabric MCP may retain its typed execution tool.
-The ellipses reserve namespace ownership, not permission to ship every old
-verb. Area designs supply leaf grammar, flags, bounds and usage evidence;
-the chair reconciles them here before any parser lands. A disagreement about
-placement returns to the chair, not to an alias. MCP tools are owned and
-registered by `fabric-mcp`; CLI adds **no MCP tools**. CLI and MCP call the
-same typed library operations, never each other's text/JSON parser. The binary
-calls `fabric-mcp` directly for `fabric mcp`.
+The run grammar below is canonical even where area proposals still disagree.
+Other reserved leaves need owner request types, flags and bounds reconciled
+here before their parser lands; reservations do not authorise old verbs.
+Neither `workflow hook` nor `workflow lint` exists. MCP tools belong to
+`fabric-mcp`; CLI adds none. Both edges call typed library operations, never
+parse each other's output. The binary calls `fabric-mcp` directly for
+`fabric mcp`.
 
-Global options, accepted before or after a subcommand:
+Global options are accepted before or after subcommands:
 
 | Option | Meaning |
 | --- | --- |
-| `--help` | Pure help for the selected command, exit 0. |
-| `--version` | Package version and embedded workspace source digest, exit 0. New installation identity requirement; no root lookup. |
-| `--json` | One versioned result on stdout, including errors. Invalid for `hook` or `fabric mcp` execution; reject before reading stdin. Pure help remains available. |
-| `--state-root PATH` | Absolute fresh-state root; overrides `PROVENANT_STATE_ROOT`, then the state owner's default. New requirement for isolated tests and installations. |
-| `--project PATH` | Explicit project selection instead of the caller's cwd. Canonicalised and verified by the state/Git owners; does not change the process cwd or select a product checkout. |
+| `--help` | Pure help, exit 0. |
+| `--version` | Package version and embedded workspace source digest, exit 0; no root lookup. |
+| `--json` | One versioned result, including errors. Invalid for hook/MCP execution; reject before stdin. Pure help remains available. |
+| `--state-dir ABS` | Fresh-state root, overriding `PROVENANT_STATE_DIR`, then `~/.local/share/provenant/v1`. Refuse a root inside any legacy root. |
+| `--project PATH` | Select a canonical verified project instead of cwd; no process chdir or product-checkout selection. |
 
-No `--verbose`, `--quiet`, `--color`, arbitrary owner argv forwarding, root
-component overrides, legacy root environment fallbacks or machine-global
-provider settings switches. Unknown flags, duplicate singleton options and
-conflicting options are errors. Repeatable selectors must be declared as such
-by their owner. Durations use bounded non-negative integer seconds, counts
-are bounded integers, and IDs/revisions are newtypes. Paths remain `OsString`
-until a record needs text. Leaf help states input size and wait bounds.
+Product environment inputs are exactly `PROVENANT_STATE_DIR` and
+`PROVENANT_AGENT_LABEL`. The latter separates inboxes for agents of one
+provider, replacing `AGENT_FABRIC_LABEL`. Provider/harness variables pass
+through as those tools define them; there are no other `PROVENANT_*` or
+`AGENT_FABRIC_*` inputs. Config is one user-owned `config.toml`, optionally
+with `profile =`; no overlays, layering, mutation verbs or per-knob variables.
+`config show` renders the resolved typed config with secrets redacted.
 
-`root` reports product asset root, fresh state root, selected project and
-installation version/digest. Human output is labelled lines; JSON is a typed
-roots record. It is read-only and cheap: no threads, database or probes. It
-never searches the old roots for an installation. Installation selection,
-root precedence and managed files belong to `config`, not a second resolver
-in `cli`.
+Unknown/duplicate singleton/conflicting options fail. Only explicitly marked
+selectors repeat. Durations/counts are bounded integers; IDs are newtypes;
+paths stay `OsString` until a record requires text. Every wait requires an
+explicit budget: CLI 1–14400 seconds, MCP 1–55 seconds. Omitting a command's
+wait option means no wait; zero is not a wait budget. `lanes --wait` requires
+`--timeout SECONDS`; each `--wait SECONDS` elsewhere supplies its own budget.
+Expiry never cancels underlying work. A wait condition is satisfied by terminal
+or `InputRequired` state; that wait exits 0, with the observed outcome in data.
 
-### Results and failures
+`root` reports product asset root, state directory, selected project and
+installation version/digest. It is read-only: no threads, database, provider
+probes or old-root discovery. Config owns resolution and installation identity.
+
+### Run grammar
+
+Run owns admission, registry, attempts and status. Admission and operation
+insertion are atomic in run's durable store. `fabric-runtime` supplies agent
+identity, host-local project selection and federation routing; it owns no
+second run registry. Each command uses the caller's `ExecutionContext`;
+selector resolution never infers authority from a flag.
+Run scopes operation IDs by caller/project and binds each to the operation
+kind and canonical request digest. Reusing an ID with the same request returns
+the recorded acceptance/outcome (or current in-progress receipt) without
+repeating effects; a different request is invalid/2. This covers lost replies
+and concurrent duplicate submissions, including resume.
+
+`TARGET` is an exact `RUN[/TASK[/ATTEMPT]]`; commands that require an attempt
+reject shorter targets. IDs are opaque typed values. Ambiguous names fail
+with candidate IDs; never pick the newest match. For `lanes`, no selectors means
+the current agent's lanes in the selected project, excluding caller and
+ancestors. `reconcile` has the project scope below and requires matching caller
+authority; it does not inherit lane-selection defaults.
+
+| Verb | Flags and behaviour |
+| --- | --- |
+| `dispatch` | Exactly one of `--prompt-file PATH`, `--prompt-stdin`, `--manifest PATH`; required `--operation-id ID`; optional `--task-id ID`, `--delivery-id ID`, `--host HOST`, `--wait SECONDS`. Manifest-only `--concurrency N` defaults to 4, range 1–8; manifest has 1–64 independent typed tasks, unique IDs and one host. Single-prompt route/access flags below conflict with manifest task fields; `--task-id` is single-task only. Prompt/manifest input is at most 1 MiB. Acceptance returns IDs, exact route, state and artifact references after commit. |
+| `lanes` | Repeatable `--id TARGET`, `--all`, `--limit N` (1–100, default 50), `--cursor TOKEN`, `--summary`, `--wait`, `--timeout SECONDS`, `--condition any\|all` (default any). Without wait, list active plus five recent terminal lanes; `--all` includes retained terminal lanes. Timeout/condition require wait. Wait snapshots selected active/queued lanes plus unseen terminal/attention revisions at entry; later launches belong to the next wait. Empty selection succeeds immediately. No cursor while waiting. |
+| `output TARGET` | Exact attempt; `--part result\|prompt\|stderr\|events` (default result), mutually exclusive `--offset N` (default 0) and `--tail N` (1–500), `--max-bytes N` (1–65536, default 65536). Return byte offset, next offset, EOF, encoding and completeness; every unread byte remains accessible. Prompt reads require dispatch-equivalent project authority. |
+| `cancel TARGET` | Required `--operation-id ID`; optional `--reason TEXT` (at most 256 bytes), `--wait SECONDS`. Scoped request returns requested/already-terminal/unobservable and custody observation. Acknowledgement is not process exit. No sibling or chair cancellation. |
+| `resume TARGET` | Exact attempt and required `--operation-id ID`; optional one of `--prompt-file PATH` or `--prompt-stdin`, and `--wait SECONDS`. Input-required continuation or terminal continuation creates a new immutable attempt with prior-attempt reference and the exact retained provider handle/route. Missing continuation capability or conflicting active writer refuses. New prompt is required for a terminal continuation. No automatic writer replay or mutable completed receipt. |
+| `reconcile` | Repeatable `--id RUN`, required `--operation-id ID`; otherwise selected project's recoverable runs. Ask run to recover queued/orphaned scheduler work idempotently; report repaired/unchanged/refused items. No healthy-provider signal, inferred completion or released custody without owner evidence. |
+
+Single-prompt dispatch takes exactly one `--model ADAPTER/ID` or `--route POOL`;
+optional `--effort VALUE`, `--account LABEL`, `--confidential`,
+`--intent ordinary|assurance`, `--orchestrator-family FAMILY`,
+`--reviewer-id ID`, `--risk-tier TIER`. Routing validates assurance inputs and
+requested/applied route distinctions; its missing design gates final values.
+Access flags: `--mode read-only|worktree-write` (default read-only),
+`--worktree PATH` required for a writer, repeatable `--read-root PATH` and
+`--write-root PATH`, `--network on|off`, repeatable `--capability NAME`;
+`--fallback none|pool` defaults to none and pool is read-only only.
+The selected project supplies cwd. No raw provider argv or permission bypass.
+Confinement proves authority and rejects overlapping canonical writer scopes
+before admission. A manifest is strict versioned JSON with typed route/access
+fields per task, inline prompt or prompt-file reference and optional delivery
+ID; run/records own its schema. Facts are `Serialize` only and built at edges.
+
+Unreachable hosts remain unknown and cannot satisfy an all-lanes wait.
+Cancelling a wait ends only that reader. Seen revisions advance only for rows
+successfully delivered; pagination/oversize never acknowledges unseen rows.
+Run's cancel, resume, read_output and export APIs take `&ExecutionContext`;
+event reads use cursors. No separate public status/wait/retry/batch tree is
+needed: lanes, output, resume and manifest dispatch cover those operations.
+
+### Results, exits and size limits
 
 Human results go to stdout; failures use `provenant: CODE: message` on stderr,
-with a bounded cause and repair action when one exists. No traceback, ANSI
-sequence, prompt text, credentials or matched secret bytes. Findings name the
-path/object and rule, not the matching content. Internal diagnostics use R8's
-separate bounded stderr writer; logging failure cannot change command state.
-
-JSON is UTF-8, one object plus LF, never a progress stream:
+with bounded redacted cause/repair. Findings expose rule/path/line, never
+matched secret bytes. Internal R8 diagnostics stay separate; logging failure
+cannot change lifecycle state. JSON is UTF-8, one object plus LF:
 
 ```json
-{"schema_version":1,"command":"fabric.lanes","status":"ok","data":{},"error":null}
+{"schema_version":1,"command":"lanes","status":"ok","data":{},"error":null}
 ```
 
-`status` is `ok`, `failed`, `refused`, `cancelled`, `timeout` or
-`error`. Non-success results may retain useful typed `data`; `error`, when
-present, contains a stable code, redacted message, cause and optional repair.
-No library returns pre-rendered stderr or chooses an exit code. Parse errors
-also use this envelope when an exact `--json` token occurs before `--`;
-pre-scan only that transport selection, then let Clap validate all arguments.
-Help's JSON data is the catalogue; version's is the build identity.
-A running/pending job is query data under `ok`; only a requested wait can
-expire with 124.
+Every area uses this envelope, including MCP tool result data inside its
+external JSON-RPC framing. Area fields (`changes`, `partial`, `diagnostics`,
+IDs, provider exits, observed run outcomes) belong inside `data`, never beside
+it. `error` is null or `{code,message,cause,repair}` with nullable cause/repair.
+The following mapping is exhaustive; `error` status cannot choose two exits.
 
-| Exit | Meaning |
+| Status | Exit | Meaning / data |
+| --- | ---: | --- |
+| `ok` | 0 | Accepted operation or successful query, including running/pending state, partial coverage and a wait satisfied by terminal or `InputRequired` state. Underlying failed runs are query data. |
+| `failed` | 1 | Requested operation failed or a check returned findings. |
+| `refused` | 1 | Policy/authority refusal. |
+| `invalid` | 2 | Invalid input/flags, missing or ambiguous target, unsupported record/config version. |
+| `error` | 3 | Cannot proceed: setup, I/O, contention, unavailable required evidence or result too large. |
+| `timeout` | 124 | Explicit reader wait deadline; run continues. |
+| `cancelled` | 130 | Invocation cancelled; owner acknowledgement precedes custody release. |
+
+There is **no exit 4**. Partial data states coverage and unavailable sources;
+if required evidence prevents the operation, use `error`/3. Hook/Git protocol
+exits below and MCP's JSON-RPC errors obey their external protocols, not this
+process-exit table. An MCP wait ending on its deadline reports `timeout` in
+the tool result without ending the server.
+
+| Result shape | Bound and oversize action |
 | --- | --- |
-| 0 | Successful completed operation; informational query may describe a running job. |
-| 1 | Operation failed, policy refused or check findings exist. |
-| 2 | Invalid command/input/configuration version or incompatible transport flags. |
-| 3 | Operation cannot proceed: setup/I/O failure, contention, unavailable required evidence. Never success. |
-| 124 | Explicit wait deadline expired. Does not cancel the underlying run. |
-| 130 | This invocation was cancelled; owner acknowledgement precedes custody release. |
+| Any ordinary result, human or JSON | At most 1 MiB of encoded result bytes, including envelope/LF for JSON. Buffer/size-check before stdout. Any result exceeding this fails with `error`/3 (`RESULT_TOO_LARGE`) and a bounded pointer to an owner-published file or a paged-read command. Never silently truncate or rerun a mutation. |
+| Lists/check findings | Page to fit the same cap with `next_cursor` and total/coverage data. Checks retain exit 1 if any finding exists, including on later pages. If even one item cannot fit, fail as above with a file/paged-read pointer. |
+| Output/artifact reads | Explicit byte/line window above, with next offset and EOF; this is a requested slice, never silent clipping. A non-list result over 1 MiB still fails with 3. |
 
-A provider's exit is result data, not the CLI's arbitrary process exit. SIGPIPE
-on a human read-only listing is success; failure writing a mutating command's
-result is an I/O failure after recording its outcome, never a second execution.
-A JSON write failure is 3; it cannot promise a complete envelope. Blocking
-waits have explicit deadlines and stop polling on cancellation. Streaming is
-restricted to externally defined MCP/hook channels; future follow operations
-need a separate, explicitly versioned transport proposal.
+The library publishes artifacts before returning references. Where a result
+has no existing artifact/read API, publish a redacted overflow result through
+supervisor safe FS in the new state root before emitting the bounded error.
+A publication failure is I/O/3, never success; a committed mutation remains
+committed. CLI owns no durable command journal.
 
-Results are at most 1 MiB; paginated list records carry `next_cursor`, and
-result tails are capped at 500 lines/64 KiB. Do not silently discard rows.
-`fabric lanes` must inspect and cancel direct dispatches as well as Fabric
-dispatches through one run registry; no second CLI status store.
-Non-UTF-8 paths use a records-owned tagged value (`utf8` string or `unix_bytes`
-lowercase hex); human rendering escapes raw bytes. Do not reproduce Python's
-surrogateescape, repr, whitespace, float or argparse behaviour.
+No library renders stderr or selects exits. Parse failures use the envelope
+when an exact `--json` occurs before `--`; pre-scan only that transport bit,
+then let Clap validate. JSON help/version data is catalogue/build identity.
+A JSON write failure exits 3 and cannot promise a complete envelope. SIGPIPE
+on a human read-only listing succeeds; failure writing a mutation result is
+I/O/3 after recording its outcome, never a second execution. Non-UTF-8 paths
+use records' tagged `utf8`/`unix_bytes` representation; human output escapes
+bytes. No Python repr/surrogateescape/argparse emulation.
 
-## Hook and check boundaries
+## Hooks and checks
 
-Hook processes bypass ordinary result envelopes and logging on stdout. Read
-at most 1 MiB stdin, accept additive harness fields, validate the fields the
-handler uses, and never persist the input. Existing registrations have a
-30-second host timeout for safety; handlers use a one-second local policy
-budget and never launch providers. A safety hook is an additional guard;
-confinement and process custody remain enforced by their library owners.
+One static `HookSpec` registry in cli drives parser dispatch, fixtures and
+state/config's installer list. Protocol event names are command names; workflow
+registers handlers here rather than adding verbs. The timeout column is a
+registration value, not a claim about an existing host default.
 
-| Handler | Input / output / exit and owner |
+| Harness | Protocol event | Matcher | Host timeout | Handler |
+| --- | --- | --- | --- | --- |
+| claude | `PreToolUse` | `Bash` | Unset; no outer host deadline | CLI stdin/deny codec; confinement shell-command policy, 1 s local read/policy budget. |
+| claude | `PreCompact` | None | 5 s | Workflow checkpoint validation; CLI codec, 1 s local budget. |
+| claude | `SessionStart` | `compact` | 5 s | Workflow new-root checkpoint context; CLI codec, 1 s local budget. |
+| git | `pre-push` | None | Not a Git protocol field | Supervisor/confinement trusted Git evidence and refusal policy. |
+
+Hook stdout carries only the protocol response, no ordinary result/logging.
+Claude input is at most 1 MiB, detected by a bounded read of cap+1 with a local
+deadline; accept additive fields and validate every field used. Never persist
+runtime stdin. For matched Bash `PreToolUse`, oversize, malformed/unparseable,
+unreadable or timed-out input **denies**, as does policy failure. Emit one JSON
+line with `hookSpecificOutput.hookEventName="PreToolUse"`,
+`permissionDecision="deny"`, `permissionDecisionReason`, exit 0. If the denial
+cannot be written, exit 2 with a bounded stderr block reason as Claude's
+blocking-error fallback; recorded fixtures must verify both paths. Allow emits
+nothing, exit 0. A validated non-Bash event makes no decision. Deny wording:
+“Direct process control is refused. Use `provenant cancel TARGET` for owned
+work.” Transport failures name the bounded-input error without echoing input.
+Confinement/custody remain authoritative even when a hook is absent.
+
+`PreCompact` reads validated cwd/session identity and emits advisory findings,
+always 0. `SessionStart` reads that session's already-published checkpoint from
+the new root and emits at most 8 KiB context, otherwise nothing, always 0.
+Workflow owns checkpoint publication; neither scans transcripts. Advisory
+oversize/bad input emits only bounded stderr diagnostics and no context.
+No hook launches a provider.
+
+Git pre-push takes remote name/location argv and stdin records
+`local-ref local-oid remote-ref remote-oid`; accept native SHA-1/SHA-256 and
+zero deletion IDs. No stdout; stderr findings and 1 refuse, 0 allows.
+Inspection/read/size failure refuses. Preserve default-branch deletion,
+non-fast-forward, linked-worktree push and conflict-marker guards. No
+`commit-msg` registration. Git launchers are quoted absolute `exec` commands;
+foreign hooks are preserved or reported as conflicts.
+
+Only recorded Claude protocols register today. No invented Codex/other harness
+hook equivalents. State owns config paths/editing, including
+`CLAUDE_CONFIG_DIR/settings.json`. Cut-over's compiled exact-command/link-target
+list under `--legacy-checkout ABS` includes:
+
+- Git links to `scripts/hooks/pre-push` (replace) and
+  `scripts/hooks/post-merge` (remove), resolved through the verified Git hooks
+  path, with `readlink` only for legacy links.
+- Provenant's `lane_safety_guard.py`, `utility_output_hook.py`,
+  `routing_context_hook.py`, `skills/session/scripts/state_check.py --hook`
+  and `skills/session/scripts/compact_reinject.py` registrations; replace kept
+  handlers and remove retired ones using exact command matches.
+- Legacy skill/workflow links, MCP entries and instruction links from state's
+  installer inventory. Preserve Herdr entries in `~/.codex/hooks.json` and
+  `~/.claude/settings.json`, every foreign entry and array order.
+
+The installer prints every harness-config change before applying it;
+`install --dry-run` prints the same plan without writes. No directory scan or
+substring match establishes ownership. `check install` verifies managed state;
+`uninstall` removes only still-owned values. Reapply `install` for recovery.
+These are build/cut-over requirements; this design lane never installs.
+
+All `check` subjects accept `--limit N` (1–100, default 50) and `--cursor TOKEN`.
+Each page deterministically rechecks the inputs; the cursor binds their digest,
+rule/bundle version and selectors and rejects changes, without a private CLI
+snapshot store. Checks return ordered records-owned
+`Finding { rule, path, line, message }` plus count and pagination; any findings
+exit 1. `check config` validates typed TOML/asset references; `check install`
+verifies managed identities/links without repair. Malformed check input is
+invalid/2; defects in the inspected config/install are findings/1, while
+unreadable required evidence is error/3.
+
+`check harness` inspects a verified project: external `SKILL.md` frontmatter,
+OpenAI sidecars/local assets, JSON skill-route fixtures, Markdown links/anchors
+and GitHub issue forms. Records supplies R6's external YAML subset reader.
+Traverse tracked inputs deterministically and refuse symlink escapes.
+Shell/remaining JS/Python syntax checks and runners stay in CI.
+
+`check release [--base OID --head OID]` scans tracked files/raw HEAD for legal
+files, forbidden private paths, symlinks, 5 MiB blob bounds, secrets and home
+paths. Both flags are required together; scan the nonempty ancestor range and
+head tree, including added-then-deleted blobs and author/committer/message
+bytes. No all-ref scan, fetch, publish or rewrite. Trusted Git reads disable
+inherited config/object redirects, replacements/grafts, fsmonitor, textconv,
+external diff and lazy fetch; support loose/packed objects, linked worktrees
+and native alternates. Missing/truncated objects, unreadable/bounded-out files
+or non-UTF-8 content never yield a clean result. One byte-rule registry;
+prefilters must prove a superset.
+
+`check writing PATHS… [--profile PROFILE]` calls workflow's data-driven writing
+rules beside each `SKILL.md`, reuses `Finding` and exits 1 on findings. PROFILE
+selects writing rules, not a config overlay. There is no `provenant lint`.
+Date lint is a workspace test over Rust `#[test]` sources (ADR 0028 decision 7),
+with injected clocks or a local `timebomb: allow REASON` for deliberate dates;
+no `check dates`, Python AST or JS matching.
+
+## State and crate seams
+
+CLI has no private database, cache, run registry or approval store.
+[Cross-area decisions](README.md#cross-area-decisions) binds root/layout;
+the [state design](https://github.com/mblauberg/provenant/blob/e0a3cf839757df0afd7e2efe8f7a87aec7f76bb4/docs/specs/rust-port/design/state.md)
+owns detailed paths, subject to that binding table: one host root, top-level
+`runs/`, `fabric/`, `install/`, `releases/` and `config.toml`, never per-project
+roots. The global state-dir override applies to CLI, MCP and hooks. Runtime
+never reads/migrates/deletes legacy state or transcripts. The only one-shot
+state import is Fabric's open/blocked tasks and unacknowledged requests from
+the last 14 days, read-only at cut-over; cursors start after import. No ledger
+import. Old telemetry history stays on disk and OTel retires at cut-over.
+
+`CommandResult<T>`, `Finding` and `HelpCatalog` are version-1 records-owned
+transport types. Strict owned input rejects unknown fields unless its owner
+specifies otherwise; additive output fields are allowed within v1. Fact types
+implement `Serialize` only. Owners commit atomic/transactional outcomes before
+success is printed; ENOSPC/diagnostic failure never requests a provider stop.
+
+`cli::parse(IntoIterator<Item=OsString>) -> ParseOutcome` produces typed
+`Invocation { globals, command }`, pure help/version or usage error.
+`cli::render(&CommandResult<T>, mode, writer)` and
+`cli::exit_status(&Outcome)` are binary-edge functions. No library imports cli.
+The binary's exhaustive match wires requests to owners; hook codecs live here,
+policy with confinement/workflow. Expose registry data to the composition root
+for config's installer; config never imports cli.
+
+| Needed API | Supplying owner |
 | --- | --- |
-| `hook claude safety` | Claude `PreToolUse`, matcher `Bash`; JSON `tool_name`, `tool_input.command`. Allow: empty stdout, 0. Deny: one JSON line with `hookSpecificOutput.hookEventName="PreToolUse"`, `permissionDecision="deny"`, `permissionDecisionReason`, exit 0. Non-Bash/malformed envelopes produce no decision and bounded diagnostics; preserve the current fail-open transport behaviour rather than claiming a malformed event was checked. `confinement` owns shell-command refusal policy. |
-| `hook claude pre-compact` | Claude `PreCompact`, JSON `cwd/session_id`, existing five-second host timeout. Workflow owns session-state validation; emit bounded advisory text only, always exit 0. No provider or transcript scan. |
-| `hook claude compact` | Claude `SessionStart`, matcher `compact`. Workflow provides the current session checkpoint from the **new** root; emit at most 8 KiB context, otherwise nothing, always 0. Drop `transcript_path` rummaging: R1 prohibits reading old transcripts at runtime. Workflow must define checkpoint publication before this reservation can ship. |
-| `hook git commit-msg FILE` | Git supplies the message-file argument, no stdin contract. Workflow validates the bounded file through safe FS; stdout empty, 0 permits, stderr findings and 1 refuses. Never rewrite the commit message. |
-| `hook git pre-push` | Git argv remote name/location plus stdin records `local-ref local-oid remote-ref remote-oid`. No stdout; stderr reason and 1 on refusal, otherwise 0. Validate Git's native 40/64-digit object IDs and all-zero deletion IDs. Keep default-branch deletion/non-FF/linked-worktree push and conflict-marker guards; inspection failure refuses. Supervisor/confinement owns verified Git evidence. |
+| Roots, project selection, install identity/assets, managed registrations | core/records/config (state) |
+| Safe bounded process/FS APIs, custody, cancellation, trusted Git/worktrees | supervisor/confinement; no cli `Command::new`, raw descriptors or unsafe |
+| Atomic admission/registry, attempts, waits, continuation, output and evidence packet | run; `completed_attempt(AttemptId) -> AttemptFact` includes all terminal/route/reviewer/output facts workflow needs |
+| Route listing/resolution | routing/providers/quota; execution-route design is a freeze gate |
+| Terminal-record reduction with bundled prices | telemetry; `telemetry stats`, no ledger |
+| Identity, federation, coordination and MCP lifecycle | fabric-runtime/fabric-mcp |
+| Writing/check/review policy and new-root session checkpoints | workflow |
 
-Only Claude hook protocols are registered in today's installer. Codex,
-Cursor, OpenCode, Kiro and agy installation paths do not thereby acquire a
-Claude hook contract; register no invented equivalent. State/config owns
-`~/.claude/settings.json` (or `CLAUDE_CONFIG_DIR/settings.json`) managed-entry
-updates, preserving unrelated entries. Other harness config locations and
-MCP registrations stay with state. Git hook files are tiny managed `exec`
-launchers to this binary, quoted with absolute paths; they replace no foreign
-hook. No Python interpreter or copied Rust source goes into a hook.
+Move cli's clean/worktree/Git/safety policy to those owners. Config owns install;
+retire reap/PR polling, projection/retry-install/pending/oracle/Unicode/stale
+scaffolding. Run owns git_evidence_packet via supervisor safe utility reads;
+legacy run-directory/receipt/manifest bookkeeping is cut in favour of run
+records and `clean`. Binary forbids unsafe; supervisor alone owns syscall
+wrappers. No async runtime or daemon.
 
-`check harness` inspects an explicit verified project checkout: external
-`SKILL.md` frontmatter, OpenAI sidecars and local asset references; skill route
-fixtures in their new JSON format; local Markdown links/anchors and GitHub
-issue forms. It returns ordered `Finding { rule, path, line, message }` rows
-and a count. `records` supplies R6's external YAML subset reader. Traverse
-tracked inputs deterministically, refuse unreadable inputs, and never follow
-symlinks out of the selected checkout. Shell syntax checks, any remaining
-JS/Python checks and test runners belong in CI while their subjects remain.
+## Fixtures and shared test harness
 
-`check release` scans tracked files and raw HEAD for required legal/public
-files, forbidden private paths, symlinks, size violations (5 MiB per blob),
-secrets and personal home paths. With both `--base` and `--head`, scan raw
-objects for the nonempty ancestor range and selected head tree, including
-added-then-deleted blobs, paths and complete author/committer/message data.
-This retains the observed publication-range use. Drop `--history`/all-ref
-traversal (zero invocations); the result names the exact attested range/tree.
-No publishing, fetching or rewriting. Use trusted Git and sanitised evidence
-reads: no inherited repository/object/config redirects, replacements, grafts,
-fsmonitor, textconv, external diff or lazy promisor fetch. Loose/packed objects,
-linked worktrees and native alternates work. Missing/truncated objects,
-unreadable/bounded-out files and non-UTF-8 content never become clean results.
-Scan bytes with one rule registry; any prefilter must prove it is a superset.
+External contracts are provider wire forms, harness hooks/config, `SKILL.md`
+YAML, MCP JSON-RPC 2.0 stdio and Git. Old owned output/layouts are not oracles.
+Store sanitised recordings under
+`tools/front-door/tests/fixtures/external/{providers,hooks,mcp,git}/`, with a
+manifest containing tool/version, date, direction, redactions and byte digest.
+CLI owns hook codecs and **records real Claude PreToolUse, PreCompact and
+SessionStart input first in build step 3**: use a disposable project and
+temporary `CLAUDE_CONFIG_DIR`, a tee hook delegating to the recorded handler,
+and a version manifest. Trigger actual protocol events; a synthetic payload
+is not a recording. Keep raw captures temporary, redact before committing and
+remove raw captures after verification. Any provider activity needed for
+capture requires separate live-run authority; no stable settings are edited.
 
-`check dates` scans tracked Rust test sources for fixed ISO-date literals used
-with a real-current-time expression. Reuse only the small textual engine's
-idea; remove JS syntax matching and Python AST inference. Require an injected
-clock in time-dependent tests, or a local `timebomb: allow REASON` comment for
-a deliberate fixed date. No inferred cross-file Python bindings, old-baseline
-diff filter or dependency on today's date. Unit tests document conservative
-textual matching; it is a lint, not proof of time independence.
-
-## Records and state
-
-CLI has no private database, cache, run registry, approval file or command
-journal. Proposed default root is
-`${XDG_STATE_HOME:-$HOME/.local/state}/provenant/rust-v1`; `state.md` owns its
-final spelling and must reconcile it before freeze. `--state-root` and
-`PROVENANT_STATE_ROOT` have identical semantics across CLI, MCP and hooks.
-Runtime code never reads, migrates or deletes `~/.agents`, `.agent-run/`, old
-telemetry stores or transcripts. Only the explicitly scoped Fabric/telemetry
-imports permitted by R1 may read their old message/task/ledger inputs.
-
-| Record / layout relative to new root | Owner and write rule |
-| --- | --- |
-| `installation.json`, `config.json` | Config's versioned installation identity and config. Atomic replace, file fsync and parent-directory fsync through supervisor safe FS. Root/help never create them. |
-| `projects/<project-id>/…` | State-owned project identity; run/Fabric/telemetry layouts are specified by those designs. CLI receives typed roots and IDs, never invents a second path convention. |
-| `projects/<id>/sessions/<session-id>/checkpoint.json` | Workflow proposal: version, project/session ID, source checkpoint ID, bounded context and publication timestamp. Atomic publish before compact callback can read it. No transcript path or prompt body. |
-| `CommandResult<T>` / `Finding` / `HelpCatalog` | Records-owned version-1 transport models, ephemeral by default. Declared fields; reject unsupported major versions. Additive output fields are allowed within v1; consumers ignore unknown fields. Strict owned input records reject unknown fields unless their owner specifies otherwise. |
-
-An explicitly requested report file, if later justified by a caller, uses the
-same atomic publisher; there is no generic output-file flag in this proposal.
-Run cancellation, claims, checkpoints and terminal results use their owning
-library's atomic/transaction protocol. Printing a success happens after the
-owner has committed. An ENOSPC, broken pipe or diagnostic failure cannot be
-turned into a provider stop request.
-
-## Crate seams
-
-`cli::parse(args: impl IntoIterator<Item=OsString>) -> ParseOutcome` returns a
-typed `Invocation`, pure help/version request or structured usage error.
-`Invocation` contains `Globals` and a closed `Command` enum; it has no loose
-JSON argv blob. `cli::render(result: &CommandResult<T>, mode, writer)` and
-`cli::exit_status(&Outcome)` are edge functions used by the binary only.
-No library imports `cli` (R2). There is no `cli` service API for other areas:
-they expose request/result/error types, and the binary's exhaustive match
-connects each parsed request to its owner. Hook codecs live at this edge;
-their policy types live with confinement/workflow.
-
-| Needed API | Supplying area |
-| --- | --- |
-| Typed roots, project selection, install identity/asset resolution, managed hook/MCP registrations | core/records/config (`state.md`) |
-| Bounded safe process runner and FS publisher, signals/cancellation handles, trusted Git object reads, verified worktree operations | supervisor/confinement (`supervisor.md`); cli never uses `Command::new`, raw descriptors or `unsafe` |
-| Dispatch/start/status/cancel requests and durable outcomes; route listing/resolution | run/routing/providers/quota (`execution-run.md`, `execution-route.md`) |
-| Ingest/report records and explicit ledger import | telemetry (`telemetry.md`) |
-| Fabric operations and MCP transport lifecycle, bounded cancellation with custody retained | fabric-runtime/fabric-mcp (`fabric.md`) |
-| Branch/commit/review/check policies, GitHub check evidence, session checkpoints | workflow (`workflow.md`) |
-
-Move existing `cli::{clean,worktree,git_evidence,lane_safety}` policy to
-those owners, leaving argument/output code here. `install` moves to config;
-`reap` and `pr_checks` retire with their unused commands. Retire `projection`,
-`retry_install`, `pending`,
-Unicode tables, `oracle`, and stale-checkout policy. Reuse useful typed policy
-and byte scanners after removing Python semantics and oracle tests. The binary
-has `#![forbid(unsafe_code)]`, an exhaustive command match, R8 diagnostics and
-release `panic="abort"`; supervisor alone owns syscall wrappers and custody.
-No async runtime or daemon is introduced.
-
-## Contract fixtures and shared test harness
-
-External contracts are provider CLI argv/environment/streams/results; harness
-hook stdin/stdout/exit/configuration; `SKILL.md` YAML; MCP JSON-RPC 2.0 over
-newline-delimited stdio; and Git. Our old help, argparse text, JSON shapes and
-paths are not external contracts. Current hook tests construct synthetic
-payloads; they do **not** constitute recorded external protocol evidence.
-
-Create `tools/front-door/tests/fixtures/external/{providers,hooks,mcp,git}/`.
-Each recording has a manifest with tool/version, capture date, direction,
-redactions and byte digest. Keep argv boundaries, non-secret environment keys,
-stream bytes and terminal status; never record credential values. Existing
-`tests/fixtures/fabric-v1/provider-*.json` and `fabric-context/*` are candidates
-for inspection, not automatically accepted recordings. Before enabling each
-provider/hook/MCP registration, its owner supplies a sanitised real recording
-and a fixture test; no live provider run is authorised by this design lane.
-Git tests create real repositories with the trusted Git executable and record
-NUL-delimited porcelain/object bytes, including SHA-256 where supported.
-YAML tests include every tracked external frontmatter/sidecar/issue form with
+Before enabling any hook/provider/MCP registration, its edge owner supplies
+real recorded input/output/exit fixtures. CLI's hook fixtures cover guard
+allow/deny, oversize, malformed, read deadline and blocked-write fallback,
+plus advisory events/config acceptance. Provider fixtures retain argv
+boundaries, allowed environment keys, stream bytes and terminal state, never
+credential values. Git fixtures use real temporary repos, NUL-delimited
+porcelain/object bytes and SHA-256 when supported. External YAML inputs use
 `include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/…"))`.
 
-The binary's `tests/support/` is the shared **test** API for all areas:
+Shared **test** support in the binary's `tests/support/` provides:
 
-- `TestRig` creates a `tempfile::TempDir`, empty HOME/XDG/config/cache/state
-  roots, a disposable project Git repository and explicit fake-provider
-  registrations. Clear ambient provider/Fabric/root variables; use only
-  fixture config and `--state-root`. Put sentinel old roots beside it and
-  assert byte-for-byte unchanged after each scenario. Canonicalise temp paths
-  on macOS (`/var` and `/private/var`). No test resolves a real installed CLI,
-  credentials, network endpoint or user configuration.
-- `FakeProvider` is a Rust **test target**, `harness=false`, never an installed
-  product binary or a new workspace library. Build it before running process
-  tests with `cargo test --no-run --message-format=json`; the test launcher
-  filters compiler-artifact records by package and `provider_fixture` test
-  target, then passes its exact executable path to `TestRig` (not a PATH search
-  or a guessed `CARGO_BIN_EXE_*` for a test target). Its own `main` exits 0 when
-  Cargo invokes it without a scenario; rig launches select an explicit fixture
-  scenario. The test launcher owns this prebuild step.
-  The only shipped executable remains `provenant`. Scenario plans control
-  recorded wire emission, malformed/truncated output, output flood, exit,
-  waiting for input, silence and descendants. It records only fixture argv
-  and permitted environment keys. All child creation uses supervisor's safe
-  runner, including test support; no `Command::new` exception outside it.
-- `TestRig::command` invokes `env!("CARGO_BIN_EXE_provenant")` through that
-  runner and captures bounded stdout/stderr/status separately.
-  `McpClient` starts `provenant fabric mcp`, performs initialize/initialized,
-  lists/calls tools, correlates IDs, sends cancellation and drives EOF. It
-  asserts stdout contains only JSON-RPC frames and drains stderr separately.
-  Bounded reader threads cannot deadlock on output floods.
-- `Barrier`/FIFO handshakes publish ready/spawn/terminal/cleanup events. Tests
-  advance only on those events, with watchdog deadlines for a broken fixture;
-  no sleep establishes ordering. Explicit teardown cancels only owned test
-  processes, waits for terminal publication, then reaps and removes temporary
-  files. Abort-profile cleanup cannot rely on `Drop`. A separate parent rig
-  retains custody while a test intentionally crashes its command child.
+- `TestRig`: temporary HOME, XDG config/cache/state roots, disposable Git repo,
+  fixture registrations and explicit `--state-dir`. Set `CLAUDE_CONFIG_DIR`,
+  `CODEX_HOME` and `GIT_CONFIG_GLOBAL` to temporary config paths;
+  `GIT_CONFIG_NOSYSTEM=1`, so system Git config is disabled. Clear ambient
+  product/provider credentials/config redirects; allow only fixture values.
+  Set `PROVENANT_STATE_DIR`/`PROVENANT_AGENT_LABEL` explicitly. Sentinel legacy
+  roots remain byte-for-byte unchanged. Canonicalise macOS temp paths.
+- `FakeProvider`: a `harness=false` integration test target. Without a scenario
+  argument, its `main` runs the process-test suite; scenario mode emits fixture
+  behaviour. The suite obtains `current_exe()` and passes that exact executable
+  and scenario argument to its rig for re-execution. All fake-provider process
+  scenarios live in this target, avoiding libtest argument handling, Cargo
+  output parsing, guessed `CARGO_BIN_EXE_*` paths or extra product binaries.
+  Scenarios cover malformed/truncated streams, output floods, input-required,
+  silence, exits and descendants, recording only fixture argv/environment.
+- `TestRig::command`: invokes `env!("CARGO_BIN_EXE_provenant")` through
+  supervisor's safe runner, separately captures bounded stdout/stderr/status.
+  All test child creation uses that API. `McpClient` drives initialize,
+  initialized, list/call, correlation, cancellation and EOF; bounded draining
+  threads keep floods from deadlocking and assert protocol-only stdout.
+- FIFO/barrier handshakes establish spawn/ready/terminal/cleanup ordering, with
+  watchdogs rather than sleeps. Explicit teardown cancels only owned processes,
+  waits for terminal publication and reaps last. A parent rig retains custody
+  when intentionally crashing a command child; abort cleanup never relies on
+  Drop. Use the in-house snapshot helper, not insta.
 
-Per R9, unit tests beside each module prove parse bounds, conflicts, refusal,
-result/error/exit mapping, byte paths, YAML bounds, release rule matching and
-clock injection. Binary integration tests exercise **every accepted leaf**,
-help catalogue completeness, human/JSON errors, no-root help, cheap root,
-isolated install/hook registrations and all retained external fixtures.
-Process tests on Linux and macOS prove: silence and logging/ENOSPC failures
-never kill a healthy provider; one writer per worktree; cancellation affects
-only its target; controller/MCP EOF does not abandon custody; a delayed reader
-cannot block terminal publication; PID reuse cannot target another process;
-publication survives controller exit, then cleanup reaps last. Re-express
-these invariants before deleting `tests/lane_conformance/`; never compare
-against the old implementation.
+Unit tests cover parse conflicts/bounds, all status/exit/oversize rows, partial
+and InputRequired data, byte paths, scanners, YAML bounds and injected clocks.
+Integration tests drive every accepted leaf/help entry, both wait maxima,
+no-root help, cheap root, config/install/hook isolation and real protocol
+fixtures. Linux/macOS process tests prove no healthy provider is killed by
+silence/bookkeeping/ENOSPC, one writer, scoped cancellation, retained custody
+on controller/MCP EOF, terminal publication despite delayed readers/controller
+exit, and PID-reuse-safe cleanup. Re-express these before deleting lane
+conformance; never compare with Python/TS.
 
-CI runs Linux fmt/Clippy/workspace tests, Linux and macOS process contracts,
-and a clean macOS release build with no Python/Node installed or invoked by
-product tests. R7 bans unsafe outside supervisor::sys and direct process
-creation outside supervisor; negative compile/lint fixtures prove both guards
-actually reject violations. Keep Python security/date checks and remaining
-Python/TS jobs until their target sets are empty, then remove their setup,
-oracle environment, npm jobs and package smoke. Rust integration/MCP/install
-smokes replace the covered behaviour before old tests disappear. Keep workflow
-security lint, exact-head checks and the fail-closed `ci-status` aggregate;
-update its needs to the new job graph, never bypass it. Local build work runs
-only fmt, Clippy and touched-crate/target tests; full gates run in Actions.
+CI owns full workspace/process tests and clean macOS release build without
+Python/Node product dependencies. Locally run only fast targeted checks.
+R7 compile/Clippy negative fixtures reject unsafe outside supervisor::sys and
+direct process creation outside supervisor. Preserve workflow security lint,
+exact-head checks and fail-closed `ci-status` with its updated job graph.
 
 ## Deletion accounting
 
-Counts below are physical lines (including comments/blanks) at the source
-baseline, not promises to retain old test assertions. The build deletes each
+Counts below are physical lines (including comments/blanks) at source baseline
+`1b3d48e4c549811ce3636edc30b047f36fd24ada`, not promises to retain old test
+assertions. The build deletes each
 subject's Python/TS tests/helpers in the same PR that lands its Rust owner.
 Mixed-owner files are claimed once at the final owner removal; earlier owners
 delete their sections without leaving adapters. No TypeScript is exclusively
@@ -482,7 +480,8 @@ net estimate. Shell launchers `scripts/worktree` (7) and `scripts/provenant-pr`
 | --- | --- |
 | state | `scripts/check-provenant-install.py` (165); `scripts/lib/front_door_build.py` (249); `scripts/install-provenant-command.py` (272); `scripts/lib/product_root_resolver.py` (107); `tests/test_check_provenant_install.py` (358); `tests/test_front_door_build.py` (342); `tests/test_install_provenant_command.py` (272); `scripts/install-harness` (702); `tests/test_install_harness.py` (2,427) |
 | supervisor | `scripts/clean.py` (953); `scripts/worktree.py` (982); `scripts/reap.py` (258); `tests/test_clean.py` (1,526); `tests/test_worktree_policy.py` (1,018); `tests/test_run_artifact_cleanup.py` (199) |
-| workflow | `scripts/git_evidence.py` (341); `tests/test_git_evidence.py` (346); `scripts/provenant_lint.py` (207); `tests/test_provenant_lint.py` (231); `scripts/provenant_pr.py` (223); `tests/test_provenant_pr.py` (186); `skills/session/scripts/state_check.py` (282); `skills/session/scripts/compact_reinject.py` (169); `tests/test_session_state_check.py` (509); `tests/test_ci_repository_assurance_policy.py` (772) |
+| run (Git reads via supervisor) | `scripts/git_evidence.py` (341); `tests/test_git_evidence.py` (346) |
+| workflow | `scripts/provenant_lint.py` (207); `tests/test_provenant_lint.py` (231); `scripts/provenant_pr.py` (223); `tests/test_provenant_pr.py` (186); `skills/session/scripts/state_check.py` (282); `skills/session/scripts/compact_reinject.py` (169); `tests/test_session_state_check.py` (509); `tests/test_ci_repository_assurance_policy.py` (772) |
 | execution-route/run (classifier decision above) | `scripts/utility.py` (241); `tests/test_utility.py` (154); JS helper `scripts/utility-schema.cjs` (16); `scripts/task_classifier.py` (190); `tests/test_task_classifier.py` (107) |
 | final CI | `tests/test_rust_port_layering.py` (52) |
 
@@ -512,31 +511,41 @@ Recount the actual diff in each PR; budget growth needs an explanation.
 
 ## Build order
 
-1. **Parser and rig.** Land the frozen Clap model, result/error/exit renderer,
-   typed binary composition and shared isolated rig/fake-provider/MCP client.
-   Delete the shell-owner router, hand-written JSON codec, duplicated help
-   files and Python launcher path; do not keep forwarding routes for owners
-   not yet built. Remove CLI pending/oracle/projection scaffolding. Root/help
-   tests replace front-door delegation tests. No install in this lane.
-2. **Checks.** With records/config and safe Git/FS available, land
-   `check harness`, release artifact scanning and Rust date lint. Delete the
-   replaced check selectors, Python validators/wrappers and their tests.
-   Move CI callers to the new checks in this PR. Remove `gate` rather than
-   wrapping Cargo in the binary; update canonical evidence callers with the
-   workflow owner. Remaining Python/TS security checks stay in CI explicitly.
-3. **Hooks.** With confinement and workflow checkpoint APIs available, land
-   retained hook handlers and recorded process tests; state owner lands
-   registration edits in the same slice. Delete Python hooks/configurer and
-   corresponding tests; remove discarded optional/post-merge registrations
-   and caller docs. No reader of old transcript/state roots.
-4. **Area bindings.** PR-sized owner slices connect dispatch/route,
-   worktree/cleanup, Fabric/MCP, telemetry and workflow operations. Each
-   slice lands the typed owner, CLI match arms and caller changes and deletes
-   its Python/TS subject/test/helper inventory. No dummy success, unsupported
-   command placeholders or compatibility dispatcher in a released build.
-5. **Final CI/cut-over gate.** Once tracked Python/TS target sets are empty,
-   delete their security/date/layering tooling, interpreter helpers and npm
-   retry path; remove obsolete CI jobs and prove the Rust replacements on
-   both OSes. The chairs perform the separately authorised installation only
-   after all end-to-end gates pass. Every build PR reports `Net lines:` across
-   Python, TS and Rust, names any growth and leaves main's Rust workspace green.
+Before step 1 freezes the full parser, the chair reconciles reserved owner
+grammars, including the missing execution-route classifier/flag decision and
+supervisor worktree flags. No parser freeze proceeds on unresolved reservations.
+
+1. **Parser and rig.** Land the frozen Clap model, exhaustive composition,
+   renderer/exit/oversize contract and isolated shared rig. Delete the shell
+   router, hand-written JSON/help, Python launcher and cli pending/oracle/
+   projection scaffolding; no forwarding routes for unbuilt owners. Root/help
+   tests replace delegation tests. Remove cli's last `// Rewrite pending`
+   disallowed-process allow under R7 when cli is rewritten; require no such
+   allow anywhere before the final gate. No stable install.
+2. **Checks.** With records/config and safe Git/FS, land all check subjects and
+   the Rust date workspace test. Delete replaced selectors/validators/wrappers
+   and their tests, update CI/writing callers with workflow, remove `gate`.
+   Keep remaining Python/TS checks only while their subjects exist.
+3. **Hooks.** First record the three real Claude events with temporary config,
+   tee hook and version manifest as specified above. With confinement and
+   workflow checkpoint APIs, land codecs/handlers and recorded process tests;
+   state uses the same HookSpec registry for installer edits. Delete old hooks,
+   configurer/tests and retired registrations/docs; hand state the exact legacy
+   git links/commands and Herdr preservation assertions. No old-root reader.
+4. **Area bindings.** Connect run/route, worktree/cleanup, Fabric/MCP, telemetry
+   and workflow in owner slices with caller updates and subject/test deletions.
+   The missing execution-route design must settle the classifier and route
+   flag gate before freeze/utility deletion; supervisor must settle worktree
+   flags. No placeholder success or compatibility dispatcher ships.
+5. **Final CI/cut-over gate.** Replace custody invariants before deleting
+   `tests/golden/`, `tests/mcp_judge/`, `tests/lane_conformance/` and
+   `tests/test_record_schemas.py` with their subjects. Remove their judge CI
+   steps and all `PROVENANT_PORT_*` oracle variables in
+   `.github/workflows/ci.yml`. Assert no `// Rewrite pending` allow remains.
+   When Python/TS target sets empty, remove their security/date/layering tools,
+   interpreter helpers, npm retry/jobs and obsolete setup/smokes. Rust negative
+   lint fixtures, integration/MCP/install smokes and both-OS custody tests must
+   pass in Actions; keep the aggregate gate intact. Chairs install only after
+   the isolated end-to-end suite passes on both Macs. Every build PR reports
+   Python/TS/Rust `Net lines:` and explains growth. Lanes do not merge or arm
+   auto-merge.
