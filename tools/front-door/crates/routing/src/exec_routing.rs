@@ -75,7 +75,7 @@ pub fn parse_candidate(
     let model = ["model", "resolved_model", "id"]
         .iter()
         .filter_map(|key| object.get(*key).and_then(Value::as_str))
-        .find(|model| !model.is_empty())
+        .find(|model| !model.trim().is_empty())
         .map(str::to_owned)
         .ok_or(FallbackError::MissingModel)?;
     let adapter = object
@@ -168,5 +168,6 @@ mod tests {
         );
         assert_eq!(validate_policy(&json!("any")).unwrap(), FallbackPolicy::Any);
         assert!(validate_policy(&json!([{"adapter":"bogus","model":"x"}])).is_err());
+        assert!(parse_candidate(&json!({"adapter":"codex","model":"  "}), "codex").is_err());
     }
 }
