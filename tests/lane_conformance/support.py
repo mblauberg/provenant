@@ -126,7 +126,7 @@ class Lane:
             if self.process is not None:
                 owner_pgid = self.process.pid  # start_new_session=True
             for pgid in {owner_pgid, self.attempt().get("pgid")} - {None}:
-                if pgid == os.getpgrp():
+                if not pgid or pgid == os.getpgrp():
                     continue
                 try:
                     os.killpg(pgid, signal.SIGKILL)
@@ -138,12 +138,13 @@ class Lane:
                 wait_for(lambda: process_stopped(owner["owner_pid"]), "killed nested owner exit")
             raise
         finally:
-            pgid = self.attempt().get("pgid")
-            if pgid and pgid != os.getpgrp() and process_group_pids(pgid):
-                try:
+            try:
+                pgid = self.attempt().get("pgid")
+                if pgid and pgid != os.getpgrp() and process_group_pids(pgid):
                     os.killpg(pgid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
-            os.close(self.fifo)
-            if self.log:
-                self.log.close()
+            except Exception:  # best effort; never mask the in-flight error
+                pass
+            finally:
+                os.close(self.fifo)
+                if self.log:
+                    self.log.close()
