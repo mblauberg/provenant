@@ -1,3 +1,4 @@
+#![allow(clippy::disallowed_methods, clippy::print_stderr)]
 use serde_json::Value;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::process::{Command, Stdio};

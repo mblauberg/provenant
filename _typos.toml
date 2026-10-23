@@ -471,13 +471,6 @@ extend-glob = ["test_provider_exec.py"]
 "unauthorized" = "unauthorized"
 "vlaid" = "vlaid"
 
-[type.fixture-7]
-extend-glob = ["test_session_state_check.py"]
-[type.fixture-7.extend-identifiers]
-"aNd" = "aNd"
-"test_hook_never_exits_status_2_on_unrecognized_arguments" = "test_hook_never_exits_status_2_on_unrecognized_arguments"
-"unrecognized" = "unrecognized"
-
 [type.fixture-8]
 extend-glob = ["legacy_json.rs"]
 [type.fixture-8.extend-identifiers]
