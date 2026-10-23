@@ -10,6 +10,8 @@ const MARKER: &[u8] = b"\n...[output truncated]...\n";
 pub enum CaptureError {
     #[error("could not read bounded output")]
     Read(#[source] io::Error),
+    #[error("process text is not UTF-8")]
+    Decode(#[source] std::string::FromUtf8Error),
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -45,10 +47,31 @@ pub fn read_bounded_output(
     spool: &mut (impl Read + Seek),
     limit: i64,
 ) -> Result<CapturedOutput, CaptureError> {
-    read_output(spool, limit.max(0) as u64).map_err(CaptureError::Read)
+    let (retained, bytes, truncated) =
+        read_bytes(spool, limit.max(0) as u64).map_err(CaptureError::Read)?;
+    Ok(CapturedOutput {
+        text: String::from_utf8_lossy(&retained).into_owned(),
+        bytes,
+        truncated,
+    })
 }
 
-fn read_output(spool: &mut (impl Read + Seek), limit: u64) -> io::Result<CapturedOutput> {
+/// subprocess.run(text=True): strict UTF-8 plus universal newline translation.
+pub(crate) fn read_bounded_text(
+    spool: &mut (impl Read + Seek),
+    limit: i64,
+) -> Result<CapturedOutput, CaptureError> {
+    let (retained, bytes, truncated) =
+        read_bytes(spool, limit.max(0) as u64).map_err(CaptureError::Read)?;
+    let text = String::from_utf8(retained).map_err(CaptureError::Decode)?;
+    Ok(CapturedOutput {
+        text: text.replace("\r\n", "\n").replace('\r', "\n"),
+        bytes,
+        truncated,
+    })
+}
+
+fn read_bytes(spool: &mut (impl Read + Seek), limit: u64) -> io::Result<(Vec<u8>, u64, bool)> {
     let bytes = spool.seek(SeekFrom::End(0))?;
     let truncated = bytes > limit;
     let mut retained = Vec::new();
@@ -72,11 +95,7 @@ fn read_output(spool: &mut (impl Read + Seek), limit: u64) -> io::Result<Capture
             spool.take(tail).read_to_end(&mut retained)?;
         }
     }
-    Ok(CapturedOutput {
-        text: String::from_utf8_lossy(&retained).into_owned(),
-        bytes,
-        truncated,
-    })
+    Ok((retained, bytes, truncated))
 }
 
 #[cfg(test)]
@@ -187,5 +206,38 @@ print(json.dumps([_read_bounded_output(io.BytesIO(data), limit) for data in case
             }
         }
         assert_eq!(serde_json::Value::Array(actual), output);
+    }
+}
+
+#[cfg(test)]
+mod text_tests {
+    use super::*;
+    use std::io::Cursor;
+
+    #[test]
+    fn subprocess_text_is_strict_and_translates_newlines_while_bounded_capture_replaces() {
+        let bytes = b"head\r\ntwo\rtail\n";
+        assert_eq!(
+            read_bounded_text(&mut Cursor::new(bytes), 128)
+                .unwrap()
+                .text,
+            "head\ntwo\ntail\n"
+        );
+        assert_eq!(
+            read_bounded_output(&mut Cursor::new(bytes), 128)
+                .unwrap()
+                .text,
+            "head\r\ntwo\rtail\n"
+        );
+        assert!(matches!(
+            read_bounded_text(&mut Cursor::new(b"bad\xff"), 128),
+            Err(CaptureError::Decode(_))
+        ));
+        assert_eq!(
+            read_bounded_output(&mut Cursor::new(b"bad\xff"), 128)
+                .unwrap()
+                .text,
+            "bad�"
+        );
     }
 }

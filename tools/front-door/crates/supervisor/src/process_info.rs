@@ -787,7 +787,7 @@ fn ps_command(
         .chain(args.iter().copied())
         .map(OsString::from)
         .collect();
-    let result = crate::bounded::run_bounded(&command, options)?;
+    let result = crate::bounded::run_bounded_text(&command, options)?;
     if result.timed_out {
         return Err(ProcessError::Census(
             "ps census failed: process timed out".into(),

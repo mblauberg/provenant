@@ -1,5 +1,7 @@
 //! File-backed bounded utility execution. Not the S2 provider lifecycle owner.
-use crate::capture::{read_bounded_output, BoundedProcessResult, CaptureError};
+use crate::capture::{
+    read_bounded_output, read_bounded_text, BoundedProcessResult, CaptureError, CapturedOutput,
+};
 use crate::identity::Signal;
 use crate::sys::{anonymous_spool, OwnedChild};
 use std::collections::BTreeMap;
@@ -106,6 +108,35 @@ pub fn run_bounded(
     command: &[OsString],
     options: Options<'_>,
 ) -> Result<BoundedProcessResult, BoundedError> {
+    run(command, options, CaptureMode::Replace)
+}
+
+pub(crate) fn run_bounded_text(
+    command: &[OsString],
+    options: Options<'_>,
+) -> Result<BoundedProcessResult, BoundedError> {
+    run(command, options, CaptureMode::Text)
+}
+
+#[derive(Clone, Copy)]
+enum CaptureMode {
+    Replace,
+    Text,
+}
+impl CaptureMode {
+    fn read(self, spool: &mut std::fs::File, limit: i64) -> Result<CapturedOutput, CaptureError> {
+        match self {
+            Self::Replace => read_bounded_output(spool, limit),
+            Self::Text => read_bounded_text(spool, limit),
+        }
+    }
+}
+
+fn run(
+    command: &[OsString],
+    options: Options<'_>,
+    mode: CaptureMode,
+) -> Result<BoundedProcessResult, BoundedError> {
     let Some(program) = command.first() else {
         return Err(BoundedError::EmptyCommand);
     };
@@ -166,10 +197,10 @@ pub fn run_bounded(
         }
     }
     let status = child.reap().map_err(io_error("reap child"))?;
-    let output = read_bounded_output(&mut stdout, options.output_limit_bytes)?;
+    let output = mode.read(&mut stdout, options.output_limit_bytes)?;
     let error_output = stderr
         .as_mut()
-        .map(|spool| read_bounded_output(spool, options.output_limit_bytes))
+        .map(|spool| mode.read(spool, options.output_limit_bytes))
         .transpose()?;
     Ok(BoundedProcessResult {
         returncode: status
