@@ -60,6 +60,7 @@ pub struct StreamState {
     session: Option<String>,
     model: Option<String>,
     model_conflict: bool,
+    expected_model: Option<String>,
     terminal: bool,
     error: bool,
     refusal: bool,
@@ -74,11 +75,16 @@ impl StreamState {
             session: None,
             model: None,
             model_conflict: false,
+            expected_model: None,
             terminal: false,
             error: false,
             refusal: false,
             malformed: false,
         }
+    }
+    pub(crate) fn bind_identity(&mut self, session: &str, model: &str) {
+        self.session = Some(session.into());
+        self.expected_model = Some(model.into());
     }
     pub(crate) fn check_adapter(&self, adapter: &str) -> Result<(), ProviderError> {
         if self.adapter == adapter {
@@ -136,6 +142,13 @@ impl StreamState {
                     self.session = Some(session.clone());
                 }
                 ProviderEvent::Model(model) => {
+                    if self
+                        .expected_model
+                        .as_ref()
+                        .is_some_and(|expected| expected != model)
+                    {
+                        return Err(ProviderError::IdentityMismatch);
+                    }
                     if model.is_empty() {
                         return Err(ProviderError::Malformed);
                     }

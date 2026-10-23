@@ -115,6 +115,17 @@ impl Continuation {
             grant_digest: grant_digest.into(),
         })
     }
+    pub(crate) fn bind_stream(
+        &self,
+        adapter: &str,
+        state: &mut StreamState,
+    ) -> Result<(), ProviderError> {
+        if self.adapter != adapter {
+            return Err(ProviderError::IdentityMismatch);
+        }
+        state.bind_identity(&self.session, &self.model);
+        Ok(())
+    }
     pub fn session(&self) -> &str {
         &self.session
     }
@@ -197,7 +208,7 @@ pub trait Adapter: Sync {
         capture: &[u8],
     ) -> Result<AvailabilityRecord, ProviderError>;
     fn prepare(&self, input: PrepareInput<'_>) -> Result<AdapterLaunchSpec, ProviderError>;
-    fn stream(&self) -> StreamState;
+    fn stream(&self, continuation: Option<&Continuation>) -> Result<StreamState, ProviderError>;
     fn observe(
         &self,
         state: &mut StreamState,

@@ -20,7 +20,7 @@ fn replay(
     bytes: &str,
     exit: ExitObservation,
 ) -> Result<(Vec<ProviderEvent>, ProviderOutcome), ProviderError> {
-    let mut state = adapter.stream();
+    let mut state = adapter.stream(None)?;
     let mut events = Vec::new();
     // Split inside UTF-8 and JSON tokens, not just at event boundaries.
     for chunk in bytes.as_bytes().chunks(17) {
@@ -322,7 +322,7 @@ fn malformed_partial_duplicate_overflow_and_identity_conflict_fail_closed()
         r#"{"type":"turn.completed","type":"turn.started"}"#,
         "\u{fffd}",
     ] {
-        let mut state = codex::Codex.stream();
+        let mut state = codex::Codex.stream(None)?;
         let observed = codex::Codex.observe(&mut state, format!("{raw}\n").as_bytes());
         assert!(matches!(observed, Err(ProviderError::Malformed)));
         assert_eq!(
@@ -334,7 +334,7 @@ fn malformed_partial_duplicate_overflow_and_identity_conflict_fail_closed()
         replay(&codex::Codex, "{\"type\":", EXIT)?.1.status(),
         OutcomeStatus::Malformed
     );
-    let mut state = codex::Codex.stream();
+    let mut state = codex::Codex.stream(None)?;
     assert!(matches!(
         codex::Codex.observe(&mut state, &vec![b'x'; 1_048_577]),
         Err(ProviderError::Overflow)
@@ -343,7 +343,7 @@ fn malformed_partial_duplicate_overflow_and_identity_conflict_fail_closed()
         codex::Codex.finish(state, EXIT)?.status(),
         OutcomeStatus::Malformed
     );
-    let mut state = codex::Codex.stream();
+    let mut state = codex::Codex.stream(None)?;
     codex::Codex.observe(
         &mut state,
         b"{\"type\":\"thread.started\",\"thread_id\":\"a\"}\n",
@@ -361,7 +361,7 @@ fn malformed_partial_duplicate_overflow_and_identity_conflict_fail_closed()
 #[test]
 fn structured_error_outranks_claimed_success_but_quota_prose_is_text() -> Result<(), ProviderError>
 {
-    let mut state = claude::Claude.stream();
+    let mut state = claude::Claude.stream(None)?;
     claude::Claude.observe(
         &mut state,
         fixture!("claude/structured-error.jsonl").as_bytes(),
@@ -379,7 +379,7 @@ fn structured_error_outranks_claimed_success_but_quota_prose_is_text() -> Result
     let (events, outcome) = replay(&codex::Codex, prose, EXIT)?;
     assert!(matches!(events.first(), Some(ProviderEvent::Text(_))));
     assert_eq!(outcome.status(), OutcomeStatus::Partial);
-    let mut state = cursor::Cursor.stream();
+    let mut state = cursor::Cursor.stream(None)?;
     cursor::Cursor.observe(&mut state, fixture!("cursor/fresh.jsonl").as_bytes())?;
     // apiKeySource=login identifies a mechanism, not a non-secret account.
     assert_eq!(cursor::Cursor.account(&state)?, AccountDetection::Unknown);
@@ -513,5 +513,34 @@ fn prepare_refuses_unrecorded_launches_and_checks_argv_bound() -> Result<(), Pro
     assert!(
         matches!(outcome.final_events().first(),Some(ProviderEvent::Text(text)) if text == "final line")
     );
+    Ok(())
+}
+
+#[test]
+fn resumed_stream_rejects_session_or_answering_model_changes() -> Result<(), ProviderError> {
+    let route = route("claude", "claude-haiku-4-5-20251001");
+    let direct = replay(&claude::Claude, fixture!("claude/direct-model.jsonl"), EXIT)?.1;
+    let continuation = claude::Claude.continuation(&direct, &route, "grants")?;
+    for changed in [
+        b"{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"changed\",\"model\":\"selector\"}\n".as_slice(),
+        b"{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"model\":\"changed\",\"content\":[]},\"session_id\":\"FIXTURE_SESSION_IDENTIFIER_004\",\"parent_tool_use_id\":null}\n".as_slice(),
+    ] {
+        let mut stream = claude::Claude.stream(Some(&continuation))?;
+        assert!(matches!(claude::Claude.observe(&mut stream, changed), Err(ProviderError::IdentityMismatch)));
+        assert_eq!(claude::Claude.finish(stream, EXIT)?.status(), OutcomeStatus::Malformed);
+    }
+    let mut stream = claude::Claude.stream(Some(&continuation))?;
+    claude::Claude.observe(
+        &mut stream,
+        fixture!("claude/direct-model.jsonl").as_bytes(),
+    )?;
+    assert_eq!(
+        claude::Claude.finish(stream, EXIT)?.status(),
+        OutcomeStatus::Success
+    );
+    assert!(matches!(
+        cursor::Cursor.stream(Some(&continuation)),
+        Err(ProviderError::IdentityMismatch)
+    ));
     Ok(())
 }

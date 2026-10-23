@@ -89,8 +89,15 @@ macro_rules! adapter {
                 }
                 Err(crate::ProviderError::Disabled { adapter: $id })
             }
-            fn stream(&self) -> crate::StreamState {
-                crate::StreamState::new($id, decode)
+            fn stream(
+                &self,
+                continuation: Option<&crate::Continuation>,
+            ) -> Result<crate::StreamState, crate::ProviderError> {
+                let mut state = crate::StreamState::new($id, decode);
+                if let Some(continuation) = continuation {
+                    continuation.bind_stream($id, &mut state)?;
+                }
+                Ok(state)
             }
             fn observe(
                 &self,
