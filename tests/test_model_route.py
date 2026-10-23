@@ -7,6 +7,7 @@ from pathlib import Path
 import shutil
 import subprocess
 import sys
+import time
 from contextlib import redirect_stderr, redirect_stdout
 from unittest.mock import patch
 
@@ -528,7 +529,7 @@ def test_probe_bare_executable_records_binary_found_on_path(tmp_path, monkeypatc
     monkeypatch.setenv("PATH", str(tmp_path))
     cli = tmp_path / "kiro-cli"
     cli.write_text("#!/bin/sh\nif [ \"$1\" = --version ]; then echo 1.2.3; exit; fi\n"
-                   "if [ \"$1\" = --help ]; then exit; fi\necho auto\n")
+                   "if [ \"$1\" = --help ]; then exit; fi\necho '{\"models\":[\"auto\"]}'\n")
     cli.chmod(0o755)
     record, code = router.probe_capabilities("kiro", "kiro-cli")
     assert code == 0
@@ -543,7 +544,7 @@ def test_explicit_kiro_probe_allows_model_response_budget(tmp_path, monkeypatch)
     def fake_run(argv, **kwargs):
         if "--no-interactive" in argv:
             budgets.append(kwargs["timeout"])
-        output = "1.2.3" if argv[-1] == "--version" else "auto"
+        output = "1.2.3" if argv[-1] == "--version" else '{"models":["auto"]}'
         return subprocess.CompletedProcess(argv, 0, output, "")
 
     monkeypatch.setattr(router.subprocess, "run", fake_run)
@@ -810,11 +811,125 @@ def test_capability_probe_lists_agy_and_codex_models_for_discovery(tmp_path, mon
         "gpt-6-luna", "gpt-6.1-sol"]
 
 
+@pytest.mark.parametrize("adapter,expected", [
+    ("cursor", ["auto", "gpt-5.3-codex-low", "gpt-5.3-codex-low-fast"]),
+    ("opencode", ["opencode-go/beam-free", "opencode-go/claude-haiku-5-5",
+                  "openrouter/~anthropic/claude-fable-latest", "openrouter/~anthropic/claude-haiku-latest"]),
+    ("kiro", ["auto", "claude-sonnet-4.5"]),
+])
+def test_discovery_accepts_captured_cli_listings(tmp_path, adapter, expected):
+    router = load_router()
+    suffix = "json" if adapter == "kiro" else "txt"
+    fixture = ROOT / "tests/fixtures/model-listings" / f"{adapter}-models.{suffix}"
+    cli = tmp_path / adapter
+    cli.write_text(f"#!{sys.executable}\nimport pathlib, sys\n"
+                   "if sys.argv[1:] == ['--version']: print('1.0')\n"
+                   "elif sys.argv[1:] == ['--help']: pass\n"
+                   f"else: print(pathlib.Path({str(fixture)!r}).read_text())\n")
+    cli.chmod(0o755)
+    record, code = router.probe_capabilities(adapter, str(cli), listing_only=True)
+    assert code == 0
+    assert record["models"] == expected
+    cached = json.loads((Path(os.environ["AGENT_FABRIC_STATE_ROOT"]) / "capabilities.json").read_text())
+    assert cached[adapter]["models"] == expected
+
+
+@pytest.mark.parametrize("adapter", ["cursor", "agy", "codex", "kiro", "opencode"])
+@pytest.mark.parametrize("failure", ["listing", "version"])
+@pytest.mark.parametrize("cache_failures", [True, False])
+def test_routing_discovery_failed_refresh_preserves_last_good_listing(tmp_path, adapter, failure, cache_failures):
+    router = load_router()
+    cli = tmp_path / adapter
+    cli.write_text("#!/bin/sh\n" + ("if [ \"$1\" = --version ]; then echo 1.0; exit; fi\n"
+                                  if failure == "listing" else "") + "exit 1\n")
+    cli.chmod(0o755)
+    state = Path(os.environ["AGENT_FABRIC_STATE_ROOT"]) / "capabilities.json"
+    previous = {adapter: {"listing_format": 1, "version": "1.0", "executable": str(cli),
+                          "models": ["last-good"], "observed_at": "2000-01-01T00:00:00Z"}}
+    state.write_text(json.dumps(previous))
+    record, code = router.probe_capabilities(adapter, str(cli), listing_only=True, refresh=True,
+                                             cache_failures=cache_failures)
+    if cache_failures:
+        assert code == 0 and record["models"] == ["last-good"] and record["refresh_failed"]
+    else:
+        assert code == 1 and record["status"] == "probe_unavailable" and not record.get("models")
+    assert json.loads(state.read_text()) == previous
+
+
 def test_discovery_keeps_colon_variants_beside_their_base_id():
     router = load_router()
     assert router._listed_models("openrouter/vendor/model\nopenrouter/vendor/model:free\n") == [
         "openrouter/vendor/model", "openrouter/vendor/model:free"]
     assert router._listed_models("gpt-6-luna  Luna\ngpt-6-luna:beta  Luna beta\n") == ["gpt-6-luna", "gpt-6-luna:beta"]
+
+
+@pytest.mark.parametrize("adapter,failure", [
+    ("agy", "hang"), ("agy", "version"), ("agy", "bad_version"), ("agy", "junk"),
+    ("agy", "mixed"), ("codex", "text"), ("kiro", "text"),
+    ("codex", "malformed_json"),
+    ("codex", "error_map"), ("kiro", "error_data_map"),
+    ("agy", "unexpected_json"), ("cursor", "unexpected_json"), ("opencode", "unexpected_json"),
+])
+def test_unreliable_listing_is_unavailable_without_replacing_cache(tmp_path, adapter, failure):
+    router = load_router()
+    cli = tmp_path / adapter
+    cli.write_text(
+        f"#!{sys.executable}\nimport sys, time\n"
+        f"failure = {failure!r}\n"
+        "if sys.argv[1:] == ['--version']:\n"
+        "    print('OK' if failure == 'bad_version' else '1.0'); sys.exit(1 if failure == 'version' else 0)\n"
+        "if failure == 'hang': time.sleep(60)\n"
+        "if failure == 'junk': print('Usage: agy models\\nfallback')\n"
+        "elif failure == 'mixed': print('gemini-3.8-flash-low\\nError: sign in again')\n"
+        "elif failure == 'malformed_json': print('{\"models\":[{\"id\":null},\"gpt-6-luna\"]}')\n"
+        "elif failure == 'error_map': print('{\"models\":{\"error\":\"not authenticated\"}}')\n"
+        "elif failure == 'error_data_map': print('{\"data\":{\"error\":\"login failed\"}}')\n"
+        "elif failure == 'unexpected_json': print('{\"models\":[\"fallback\"]}')\n"
+        "else: print('gpt-6-luna')\n"
+    )
+    cli.chmod(0o755)
+    state = Path(os.environ["AGENT_FABRIC_STATE_ROOT"]) / "capabilities.json"
+    previous = json.dumps({adapter: {"models": ["last-good"]}})
+    state.write_text(previous)
+    started = time.monotonic()
+    record, code = router.probe_capabilities(adapter, str(cli), listing_only=True,
+                                            deadline=started + 0.3, refresh=True, cache_failures=False)
+    assert code == 1 and record["status"] == "probe_unavailable"
+    assert not record.get("models")
+    assert time.monotonic() - started < 2
+    assert state.read_text() == previous
+
+
+def test_capability_probe_uses_supplied_environment(tmp_path):
+    router = load_router()
+    cli = tmp_path / "agy"
+    cli.write_text(
+        f"#!{sys.executable}\nimport os, sys\n"
+        "assert os.environ['HOME'] == '/staged-home'\n"
+        "assert os.environ['CODEX_HOME'] == '/capability-home'\n"
+        "assert os.environ['ADAPTER_ENV'] == 'attempt'\n"
+        "if sys.argv[1:] == ['--version']: print('agy v1.0')\n"
+        "elif sys.argv[1:] == ['--help']: print('--model')\n"
+        "else: print('gemini-3.8-flash-low')\n"
+    )
+    cli.chmod(0o755)
+    record, code = router.probe_capabilities("agy", str(cli), listing_only=True, env={
+        **os.environ, "HOME": "/staged-home", "CODEX_HOME": "/capability-home", "ADAPTER_ENV": "attempt"})
+    assert code == 0 and record["models"] == ["gemini-3.8-flash-low"]
+
+
+def test_failed_capability_probe_reuses_negative_cache(tmp_path):
+    router = load_router()
+    calls = tmp_path / "listing-calls"
+    cli = tmp_path / "agy"
+    cli.write_text("#!/bin/sh\nif [ \"$1\" = --version ]; then echo 1.0; exit; fi\n"
+                   f"echo call >> '{calls}'\nexit 1\n")
+    cli.chmod(0o755)
+    first, code = router.probe_capabilities("agy", str(cli), listing_only=True)
+    assert code == 1 and first["status"] == "probe_unavailable"
+    second, code = router.probe_capabilities("agy", str(cli), listing_only=True)
+    assert code == 1 and second["cache_hit"] is True
+    assert calls.read_text().splitlines() == ["call"]
 
 
 def test_listing_only_probe_skips_the_kiro_safety_chat_and_keeps_its_evidence(tmp_path, monkeypatch):
@@ -825,7 +940,7 @@ def test_listing_only_probe_skips_the_kiro_safety_chat_and_keeps_its_evidence(tm
     def fake_run(argv, **kwargs):
         if "--no-interactive" in argv:
             chats.append(argv)
-        output = "1.2.3" if argv[-1] == "--version" else "auto"
+        output = "1.2.3" if argv[-1] == "--version" else '{"models":["auto"]}'
         return subprocess.CompletedProcess(argv, 0, output, "")
 
     monkeypatch.setattr(router.subprocess, "run", fake_run)
@@ -842,7 +957,7 @@ def _fake_kiro(router, monkeypatch, chats):
     def fake_run(argv, **kwargs):
         if "--no-interactive" in argv:
             chats.append(argv)
-        output = "1.2.3" if argv[-1] == "--version" else "auto"
+        output = "1.2.3" if argv[-1] == "--version" else '{"models":["auto"]}'
         return subprocess.CompletedProcess(argv, 0, output, "")
     monkeypatch.setattr(router.subprocess, "run", fake_run)
 
@@ -937,9 +1052,10 @@ def test_concurrent_capability_probes_keep_both_adapters(tmp_path):
     executables = {}
     for adapter, model in (("codex", "gpt-7-luna"), ("opencode", "opencode-go/glm-5.3-flash")):
         executable = tmp_path / adapter
+        listing = json.dumps({"models": [model]}) if adapter == "codex" else model
         executable.write_text("#!/bin/sh\nif [ \"$1\" = --version ]; then echo 1.0; exit; fi\n"
                               "if [ \"$1\" = --help ]; then exit; fi\nsleep 0.1\n"
-                              f"echo {model}\n")
+                              f"echo '{listing}'\n")
         executable.chmod(0o755)
         executables[adapter] = executable
     env = {**os.environ, "HARNESS_PYTHON": sys.executable,
@@ -4896,7 +5012,8 @@ def test_opencode_requested_input_keeps_the_callers_bare_token(tmp_path):
     assert route["requested_input"] == "QWEN3.8-FLASH"
 
 
-def test_failed_opencode_refresh_keeps_the_last_good_listing(tmp_path, monkeypatch):
+@pytest.mark.parametrize("trusted", [False, True])
+def test_failed_opencode_refresh_keeps_the_last_good_listing(tmp_path, monkeypatch, trusted):
     router = load_router()
     monkeypatch.setenv("AGENT_FABRIC_STATE_ROOT", str(tmp_path))
     cli = tmp_path / "opencode"
@@ -4905,8 +5022,16 @@ def test_failed_opencode_refresh_keeps_the_last_good_listing(tmp_path, monkeypat
     cli.chmod(0o755)
     record, code = router.probe_capabilities("opencode", str(cli), listing_only=True)
     assert code == 0 and record["models"] == ["a/one", "a/two"]
+    if not trusted:
+        path = tmp_path / "capabilities.json"
+        cache = json.loads(path.read_text())
+        cache["opencode"].pop("listing_format")
+        path.write_text(json.dumps(cache))
     cli.write_text("#!/bin/sh\nif [ \"$1\" = --version ]; then echo 2.0.30; exit; fi\nexit 1\n")
     failed, code = router.probe_capabilities("opencode", str(cli), listing_only=True, refresh=True)
+    if not trusted:
+        assert code == 1 and failed["status"] == "probe_unavailable" and not failed["models"]
+        return
     assert code == 0 and failed["models"] == ["a/one", "a/two"] and failed["refresh_failed"]
     cached, code = router.probe_capabilities("opencode", str(cli), listing_only=True)
     assert code == 0 and cached["cache_hit"] and cached["models"] == ["a/one", "a/two"]

@@ -8999,3 +8999,179 @@ def test_cancelled_attempt_stops_nested_children_even_when_cleanup_fails(tmp_pat
         if child.poll() is None:
             child.kill()
         child.wait(timeout=5)
+
+
+@pytest.mark.parametrize("model,effort,listing_status,listing,expected", [
+    ("gemini-valid", "high", 0, "gemini-valid", "passed"),
+    ("gemini-vlaid", "high", 0, "gemini-valid", "invalid"),
+    ("gemini-valid", "high", 1, "gemini-valid", "unavailable"),
+    ("gemini-valid", "high", 0, "", "unavailable"),
+    ("GEMINI-3.8-FLASH", "low", 0, "gemini-3.8-flash-low", "passed"),
+    ("gemini-valid", "high", 0, "Usage: agy models\nfallback", "unavailable"),
+])
+def test_dispatch_checks_live_adapter_listing(tmp_path, monkeypatch, model, effort, listing_status, listing, expected):
+    monkeypatch.setenv("AGENT_FABRIC_STATE_ROOT", str(tmp_path / "state"))
+    monkeypatch.setenv("AGENT_FABRIC_PRODUCT_ROOT", str(ROOT))
+    launched = tmp_path / "launched"
+    adapter = tmp_path / "agy-stub"
+    adapter.write_text(
+        f"#!{sys.executable}\n"
+        "import json, pathlib, sys\n"
+        "if sys.argv[1:] == ['--version']: print('stub 1.0')\n"
+        "elif sys.argv[1:] == ['--help']: print('--model')\n"
+        "elif sys.argv[1:] == ['models']:\n"
+        f"    print({listing!r}); sys.exit({listing_status})\n"
+        "else:\n"
+        f"    pathlib.Path({str(launched)!r}).touch()\n"
+        "    print(json.dumps({'event':'result', 'result':{'status':'SUCCESS', 'response':'DONE'}}))\n"
+    )
+    adapter.chmod(0o755)
+    state = tmp_path / "state"
+    state.mkdir()
+    (state / "capabilities.json").write_text(json.dumps({"agy": {
+        "version": "stub 1.0", "executable": str(adapter.resolve()),
+        "observed_at": "2999-01-01T00:00:00+00:00", "models": ["gemini-old"],
+    }}))
+    plan = fixture_plan(tmp_path, "", "agy", requested_model=model)
+    plan["model"] = model
+    plan["effort"] = effort
+    plan["argv"] = [str(adapter), "--model", model]
+    record = supervisor().execute(plan, tmp_path / "result.md")
+    assert record["model_check"] == expected
+    if expected == "unavailable":
+        assert json.loads((state / "capabilities.json").read_text())["agy"]["models"] == ["gemini-old"]
+    if expected == "invalid":
+        assert record["status"] == "model_unavailable"
+        assert "gemini-vlaid" in record["fix"] and "gemini-valid" in record["fix"]
+        assert not launched.exists()
+    else:
+        assert record["status"] == "ok"
+        assert launched.exists()
+
+
+def test_receipt_keeps_model_changes_when_provider_switches_back(tmp_path):
+    models = ["gemini-valid", "gemini-cheap", "gemini-valid"]
+    events = [{"type": "assistant", "message": {"model": model, "content": []}}
+              for model in models]
+    events.append({"type": "result", "result": "DONE", "is_error": False})
+    plan = fixture_plan(tmp_path, f"import json; events={events!r}; [print(json.dumps(e)) for e in events]", "claude")
+    plan["model"] = models[0]
+    record = supervisor().execute(plan, tmp_path / "result.md")
+    assert record["provenance"]["observed_model"] == models[0]
+    assert record["model_changes"] == [
+        {"from": models[0], "to": models[1]},
+        {"from": models[1], "to": models[2]},
+    ]
+    assert not record["certification_eligible"]
+    assert "model changed during execution" in "\n".join(record["warnings"])
+
+
+def test_claude_subagent_model_does_not_change_parent_route(tmp_path):
+    events = [
+        {"type": "assistant", "message": {"model": "claude-sonnet-5-5", "content": []}},
+        {"type": "assistant", "parent_tool_use_id": "tool-1",
+         "message": {"model": "claude-haiku-4-5", "content": []}},
+        {"type": "result", "result": "DONE", "is_error": False},
+    ]
+    plan = fixture_plan(tmp_path, f"import json; events={events!r}; [print(json.dumps(e)) for e in events]", "claude")
+    plan["model"] = "claude-sonnet-5-5"
+    record = supervisor().execute(plan, tmp_path / "result.md")
+    assert record["status"] == "ok"
+    assert record["provenance"]["observed_model"] == plan["model"]
+    assert record["model_changes"] == []
+    assert record["model_check"] == "unsupported"
+    assert not any("model list" in warning.lower() for warning in record["warnings"])
+
+
+@pytest.mark.parametrize("mode", ["cache_hit", "cache_miss", "untrusted_cache", "cancel_during_probe", "cancel_before_probe", "auto"])
+def test_dispatch_listing_cache_environment_and_cancellation(tmp_path, mode):
+    listed, launched = tmp_path / "listed", tmp_path / "launched"
+    cli = tmp_path / "agy"
+    cli.write_text(
+        f"#!{sys.executable}\nimport json, os, pathlib, sys\n"
+        "assert os.environ['PROBE_ENV'] == 'attempt'\n"
+        "if sys.argv[1:] == ['--version']: print('1.0')\n"
+        "elif sys.argv[1:] == ['--help']: print('--model')\n"
+        "elif sys.argv[1:] == ['models']:\n"
+        f"    with open({str(listed)!r}, 'a') as calls: calls.write('listed\\n')\n"
+        "    print('gemini-3.8-flash-low')\n"
+        "else:\n"
+        f"    pathlib.Path({str(launched)!r}).touch()\n"
+        "    print(json.dumps({'event': 'result', 'result': {'status': 'SUCCESS', 'response': 'DONE'}}))\n"
+    )
+    cli.chmod(0o755)
+    cache = Path(os.environ["AGENT_FABRIC_STATE_ROOT"]) / "capabilities.json"
+    cache.write_text(json.dumps({"agy": {
+        "version": "1.0", "executable": str(cli.resolve()),
+        "observed_at": datetime.now(UTC).isoformat(),
+        "models": ["gemini-3.8-flash-low" if mode in {"cache_hit", "untrusted_cache"} else "gemini-old"],
+        **({"listing_format": 1} if mode != "untrusted_cache" else {}),
+    }}))
+    plan = fixture_plan(tmp_path, "", "agy")
+    plan["model"] = "auto" if mode == "auto" else "gemini-3.8-flash"
+    plan["effort"] = "low"
+    plan["argv"] = [str(cli), "--model", plan["model"]]
+    cancelled = lambda: mode == "cancel_before_probe" or (mode == "cancel_during_probe" and listed.exists())
+    record = supervisor().execute(plan, tmp_path / "result.md", cancelled=cancelled,
+                                  env={**os.environ, "PROBE_ENV": "attempt"})
+    assert (listed.read_text().splitlines() if listed.exists() else []) == (
+        ["listed"] if mode in {"cache_miss", "untrusted_cache", "cancel_during_probe"} else [])
+    cancelled = mode.startswith("cancel_")
+    assert record["status"] == ("cancelled" if cancelled else "ok")
+    assert launched.exists() is not cancelled
+    assert record["model_check"] == ("skipped" if mode in {"auto", "cancel_before_probe"} else "passed")
+    assert not any("model list" in warning.lower() for warning in record["warnings"])
+
+
+def test_agy_stderr_fallback_after_init_is_a_pinned_substitution(tmp_path):
+    code = """import json, sys, time
+print(json.dumps({'event': 'init', 'init': {'model': 'gemini-valid'}}), flush=True)
+time.sleep(0.1)
+sys.stderr.write('using mo'); sys.stderr.flush()
+time.sleep(0.1)
+sys.stderr.write('del gemini-cheap'); sys.stderr.flush()
+print(json.dumps({'event': 'result', 'result': {'status': 'SUCCESS', 'response': 'DONE'}}), flush=True)
+"""
+    plan = fixture_plan(tmp_path, code, "agy", requested_model="gemini-valid")
+    plan["model"] = "gemini-valid"
+    record = supervisor().execute(plan, tmp_path / "result.md")
+    assert record["status"] == "model_unavailable"
+    assert record["evidence"]["signature"] == "pinned_model_substitution"
+    assert record["provenance"]["observed_model"] == "gemini-cheap"
+    assert record["model_changes"] == [{"from": "gemini-valid", "to": "gemini-cheap"}]
+    assert not record["certification_eligible"]
+
+
+@pytest.mark.parametrize("diagnostic", [
+    'DEBUG request model=gemini-cheap',
+    'INFO model: gemini-cheap',
+    'notusing model gemini-cheap',
+])
+def test_agy_log_model_fields_do_not_substitute_pinned_route(tmp_path, diagnostic):
+    code = (f"import json, sys; print({diagnostic!r}, file=sys.stderr); "
+            "print(json.dumps({'event': 'result', 'result': {'status': 'SUCCESS', 'response': 'DONE'}}))")
+    plan = fixture_plan(tmp_path, code, "agy", requested_model="gemini-valid")
+    plan["model"] = "gemini-valid"
+    record = supervisor().execute(plan, tmp_path / "result.md")
+    assert record["status"] == "ok"
+    assert record["model_changes"] == []
+
+
+@pytest.mark.parametrize("synthetic_last", [False, True])
+@pytest.mark.parametrize("synthetic_kind", ["assistant", "init"])
+def test_claude_synthetic_model_does_not_change_parent_route(tmp_path, synthetic_last, synthetic_kind):
+    models = ["<synthetic>", "claude-sonnet-5-5"]
+    if synthetic_last:
+        models.reverse()
+    events = [{"type": "system", "subtype": "init", "model": model}
+              if model == "<synthetic>" and synthetic_kind == "init" else
+              {"type": "assistant", "message": {"model": model, "content": []}} for model in models]
+    events.append({"type": "result", "result": "DONE", "is_error": False})
+    plan = fixture_plan(tmp_path, f"import json; events={events!r}; [print(json.dumps(e)) for e in events]", "claude")
+    plan["model"] = "claude-sonnet-5-5"
+    record = supervisor().execute(plan, tmp_path / "result.md")
+    assert record["status"] == "ok"
+    assert record["provenance"]["observed_model"] == plan["model"]
+    assert record["model_changes"] == []
+    assert not any("mismatch" in warning or "model changed" in warning for warning in record["warnings"])
+    assert "<synthetic>" not in json.dumps(record["provenance"])
