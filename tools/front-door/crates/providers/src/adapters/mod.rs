@@ -90,3 +90,4 @@ pub mod agy;
 pub mod claude;
 pub mod copilot;
 pub mod cursor;
+pub mod kiro;
