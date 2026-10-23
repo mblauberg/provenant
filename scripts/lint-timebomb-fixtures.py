@@ -18,7 +18,9 @@ ISO_DATE_PREFIX = re.compile(r"^\d{4}-\d{2}-\d{2}")
 ISO_DATE_LITERAL = re.compile(
     r"['\"](\d{4}-\d{2}-\d{2}(?:T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?)?)['\"]"
 )
-WINDOW = re.compile(r"\b(?:now|today|utcnow)\s*\(|\btimedelta\s*\(|\bnow\b|\btoday\b")
+WINDOW = re.compile(r"\b(?:now|today|utcnow)\s*\(|\btimedelta\s*\(")
+# A bare `now` or `today` counts only where it is read; a parameter of that name alone is not a window.
+WINDOW_NAMES = {"now", "today"}
 
 
 def _functions(node: ast.AST):
@@ -51,6 +53,14 @@ def _assigned_names(tree: ast.AST, line: int) -> set[str]:
         for node in ast.walk(target)
         if isinstance(node, ast.Name)
     }
+
+
+def _reads_window_name(function: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
+    return any(
+        (isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load) and node.id in WINDOW_NAMES)
+        or (isinstance(node, ast.Attribute) and node.attr in WINDOW_NAMES)
+        for node in ast.walk(function)
+    )
 
 
 def _loaded_names(function: ast.FunctionDef | ast.AsyncFunctionDef) -> set[str]:
@@ -109,7 +119,7 @@ def scan_file(path: Path) -> list[tuple[int, str]]:
     functions = list(_functions(tree))
     window_functions = {
         function.name for function in functions
-        if WINDOW.search(ast.get_source_segment(source, function) or "")
+        if WINDOW.search(ast.get_source_segment(source, function) or "") or _reads_window_name(function)
     }
     referenced_helpers = {
         node.func.id
