@@ -72,17 +72,28 @@ pub fn parse_candidate(
         Value::Object(object) => object.clone(),
         _ => return Err(FallbackError::InvalidEntry),
     };
-    let model = ["model", "resolved_model", "id"]
+    // Python's `a or b or c` selects by truthiness before validating the type.
+    let selected_model = ["model", "resolved_model", "id"]
         .iter()
-        .filter_map(|key| object.get(*key).and_then(Value::as_str))
-        .find(|model| !model.trim().is_empty())
+        .filter_map(|key| object.get(*key))
+        .find(|value| match value {
+            Value::Null => false,
+            Value::Bool(value) => *value,
+            Value::Number(value) => value.as_f64().is_some_and(|number| number != 0.0),
+            Value::String(value) => !value.is_empty(),
+            Value::Array(value) => !value.is_empty(),
+            Value::Object(value) => !value.is_empty(),
+        });
+    let model = selected_model
+        .and_then(Value::as_str)
+        .filter(|model| !model.trim().is_empty())
         .map(str::to_owned)
         .ok_or(FallbackError::MissingModel)?;
-    let adapter = object
-        .get("adapter")
-        .and_then(Value::as_str)
-        .unwrap_or(default_adapter)
-        .to_owned();
+    let adapter = match object.get("adapter") {
+        Some(Value::String(adapter)) => adapter.clone(),
+        Some(_) => return Err(FallbackError::MissingModel),
+        None => default_adapter.to_owned(),
+    };
     if !ADAPTERS.contains(&adapter.as_str()) {
         return Err(FallbackError::MissingModel);
     }
@@ -111,9 +122,14 @@ pub fn validate_policy(raw: &Value) -> Result<FallbackPolicy, FallbackError> {
             return Ok(FallbackPolicy::Any);
         }
         let parsed: Value = serde_json::from_str(text).map_err(|_| FallbackError::InvalidPolicy)?;
-        return validate_policy(&parsed);
+        return validate_policy_value(&parsed);
     }
+    validate_policy_value(raw)
+}
+
+fn validate_policy_value(raw: &Value) -> Result<FallbackPolicy, FallbackError> {
     match raw {
+        Value::String(text) if text == "any" => Ok(FallbackPolicy::Any),
         Value::Null => Ok(FallbackPolicy::Default),
         Value::Bool(false) => Ok(FallbackPolicy::Disabled),
         Value::Bool(true) => Ok(FallbackPolicy::Enabled),
@@ -167,7 +183,38 @@ mod tests {
             FallbackPolicy::Disabled
         );
         assert_eq!(validate_policy(&json!("any")).unwrap(), FallbackPolicy::Any);
+        assert_eq!(
+            validate_policy(&json!(r#""any""#)).unwrap(),
+            FallbackPolicy::Any
+        );
+        assert_eq!(
+            validate_policy(&json!("false")).unwrap(),
+            FallbackPolicy::Disabled
+        );
+        assert_eq!(
+            validate_policy(&json!(r#""false""#)),
+            Err(super::FallbackError::InvalidPolicy)
+        );
         assert!(validate_policy(&json!([{"adapter":"bogus","model":"x"}])).is_err());
         assert!(parse_candidate(&json!({"adapter":"codex","model":"  "}), "codex").is_err());
+    }
+
+    #[test]
+    fn fallback_object_fields_match_python_truthiness_and_presence() {
+        assert!(parse_candidate(&json!({"adapter":null,"model":"x"}), "codex").is_err());
+        assert!(parse_candidate(&json!({"model":42,"id":"x"}), "codex").is_err());
+        assert!(parse_candidate(&json!({"model":" ","id":"x"}), "codex").is_err());
+        assert_eq!(
+            parse_candidate(&json!({"model":[],"id":"x"}), "codex")
+                .unwrap()
+                .model,
+            "x"
+        );
+        assert_eq!(
+            parse_candidate(&json!({"model":"x"}), "codex")
+                .unwrap()
+                .adapter,
+            "codex"
+        );
     }
 }

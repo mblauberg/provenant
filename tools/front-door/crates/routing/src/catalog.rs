@@ -6,6 +6,8 @@ use regex::Regex;
 use serde_json::{Map, Value};
 use thiserror::Error;
 
+use crate::casefold::fold;
+
 const BROKER_PREFIXES: [&str; 3] = ["opencode/", "opencode-go/", "openrouter/"];
 const EFFORTS: [&str; 5] = ["low", "medium", "high", "xhigh", "ultra"];
 const ALIASES: [&str; 3] = ["junior", "senior", "principal"];
@@ -88,19 +90,19 @@ pub fn attribute_model_family(
         .iter()
         .any(|prefix| lowered.starts_with(prefix))
     {
-        if let Some(family) = endpoint_family {
+        if let Some(family) = endpoint_family.filter(|family| !family.is_empty()) {
             return Ok((Some(family.into()), "endpoint-profile-fallback".into()));
         }
         return Ok((Some("generic-open".into()), "broker-default".into()));
     }
-    if let Some(family) = endpoint_family {
+    if let Some(family) = endpoint_family.filter(|family| !family.is_empty()) {
         return Ok((Some(family.into()), "endpoint-profile-fallback".into()));
     }
     Ok((None, "unresolved".into()))
 }
 
 pub fn model_has_alias(model: &str, alias: &str) -> bool {
-    model.to_lowercase().contains(&alias.to_lowercase())
+    fold(model).contains(&fold(alias))
 }
 
 pub fn risk_tier_override_reserves_model(model: &str, occupant: &str) -> bool {
@@ -108,8 +110,7 @@ pub fn risk_tier_override_reserves_model(model: &str, occupant: &str) -> bool {
         return true;
     }
     fn stable_name(identifier: &str) -> Vec<String> {
-        let words: Vec<_> = identifier
-            .to_lowercase()
+        let words: Vec<_> = fold(identifier)
             .split(|ch: char| !ch.is_ascii_lowercase())
             .filter(|word| !word.is_empty())
             .map(str::to_owned)
@@ -130,8 +131,8 @@ pub fn capability_key_matches_model(
     resolved_model: &str,
     is_alias: bool,
 ) -> bool {
-    let normalized_key = key.to_lowercase();
-    let normalized_model = resolved_model.to_lowercase();
+    let normalized_key = fold(key);
+    let normalized_model = fold(resolved_model);
     if adapter == "claude" {
         if is_alias {
             return normalized_model.starts_with(&format!("claude-{normalized_key}-"));
@@ -148,6 +149,9 @@ pub fn capability_key_matches_model(
 }
 
 pub fn ultra_eligible_roles_are_valid(family_config: &Value) -> bool {
+    if !family_config.is_object() {
+        return false;
+    }
     family_config
         .get("ultra_eligible_roles")
         .is_none_or(|roles| {
@@ -306,7 +310,9 @@ mod tests {
 
     use super::{
         attribute_model_family, capability_key_matches_model, family_is_assurance_eligible,
-        matching_model_families, model_slug_for_family, risk_tier_override_is_well_formed,
+        matching_model_families, model_has_alias, model_slug_for_family,
+        risk_tier_override_is_well_formed, risk_tier_override_reserves_model,
+        ultra_eligible_roles_are_valid,
     };
 
     #[test]
@@ -342,6 +348,30 @@ mod tests {
     }
 
     #[test]
+    fn ultra_eligible_roles_requires_a_family_object_and_valid_roles() {
+        assert!(!ultra_eligible_roles_are_valid(&json!(null)));
+        assert!(!ultra_eligible_roles_are_valid(&json!([])));
+        assert!(!ultra_eligible_roles_are_valid(&json!("family")));
+        assert!(ultra_eligible_roles_are_valid(&json!({})));
+        assert!(ultra_eligible_roles_are_valid(
+            &json!({"ultra_eligible_roles":["lead", "orchestrator"]})
+        ));
+        assert!(!ultra_eligible_roles_are_valid(
+            &json!({"ultra_eligible_roles":[" lead"]})
+        ));
+    }
+
+    #[test]
+    fn empty_endpoint_family_uses_the_same_fallback_as_python() {
+        let catalog = json!({"model_patterns": []});
+        let result = attribute_model_family("openrouter/unknown", &catalog, Some("")).unwrap();
+        assert_eq!(
+            result,
+            (Some("generic-open".into()), "broker-default".into())
+        );
+    }
+
+    #[test]
     fn effort_override_shape_and_claude_capability_binding_are_checked() {
         let override_value = json!({"alias":"principal","default_effort":"high","maximum_effort":"ultra","roles":["lead","orchestrator"],"models":["claude-opus-4"]});
         assert!(risk_tier_override_is_well_formed(&override_value));
@@ -356,6 +386,20 @@ mod tests {
         ));
         assert!(!capability_key_matches_model(
             "codex", "gpt-5", "gpt-5.6", false
+        ));
+        assert!(model_has_alias("claude-ſonnet-4", "sonnet"));
+        assert!(model_has_alias("ﬀ", "ff"));
+        assert!(model_has_alias("µ", "μ"));
+        assert!(capability_key_matches_model(
+            "codex", "strasse", "straße", false
+        ));
+        assert!(risk_tier_override_reserves_model(
+            "claude-straße-4",
+            "claude-strasse-5"
+        ));
+        assert!(risk_tier_override_reserves_model(
+            "claude-ǰ-4",
+            "claude-ǰ-5"
         ));
     }
 

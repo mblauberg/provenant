@@ -1,5 +1,7 @@
 //! Catalogue, preferences, live probes and route decisions.
 
+mod casefold;
+
 pub mod catalog;
 pub mod cli;
 pub mod exec_routing;

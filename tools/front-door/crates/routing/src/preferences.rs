@@ -302,7 +302,7 @@ pub fn configuration_ignored(preferences: &Value, task_class: &str, role: &str) 
             let policy_string = policy
                 .as_str()
                 .map(str::to_owned)
-                .unwrap_or_else(|| policy.to_string());
+                .unwrap_or_else(|| python_string(policy));
             ignored.push(ignored_item(
                 "spreading_policy",
                 "spreading",
@@ -312,6 +312,74 @@ pub fn configuration_ignored(preferences: &Value, task_class: &str, role: &str) 
         }
     }
     ignored
+}
+
+fn python_string(value: &Value) -> String {
+    match value {
+        Value::Null => "None".into(),
+        Value::Bool(true) => "True".into(),
+        Value::Bool(false) => "False".into(),
+        Value::Number(number) => {
+            let rendered = number.to_string();
+            if number.is_f64() {
+                if let Some((mantissa, exponent)) = rendered.split_once('e') {
+                    if let Ok(value) = exponent.parse::<i32>() {
+                        return format!("{mantissa}e{value:+03}").replace("e+", "e+");
+                    }
+                }
+            }
+            rendered
+        }
+        Value::String(text) => text.clone(),
+        Value::Array(items) => format!(
+            "[{}]",
+            items.iter().map(python_repr).collect::<Vec<_>>().join(", ")
+        ),
+        Value::Object(items) => format!(
+            "{{{}}}",
+            items
+                .iter()
+                .map(|(key, value)| format!(
+                    "{}: {}",
+                    python_repr(&Value::String(key.clone())),
+                    python_repr(value)
+                ))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    }
+}
+
+fn python_repr(value: &Value) -> String {
+    match value {
+        Value::String(text) => {
+            let quote = if text.contains('\'') && !text.contains('"') {
+                '"'
+            } else {
+                '\''
+            };
+            let mut result = String::from(quote);
+            for character in text.chars() {
+                match character {
+                    '\\' => result.push_str("\\\\"),
+                    '\n' => result.push_str("\\n"),
+                    '\r' => result.push_str("\\r"),
+                    '\t' => result.push_str("\\t"),
+                    value if value.is_control() && u32::from(value) <= 0xff => {
+                        result.push_str(&format!("\\x{:02x}", u32::from(value)));
+                    }
+                    value if value == quote => {
+                        result.push('\\');
+                        result.push(value);
+                    }
+                    value => result.push(value),
+                }
+            }
+            result.push(quote);
+            result
+        }
+        _ => python_string(value),
+    }
 }
 
 fn ignored_item(kind: &str, scope: &str, value: &str, reason: &str) -> Value {
@@ -512,5 +580,23 @@ mod tests {
         );
         assert_eq!(ignored[0]["value"], "weighted");
         assert_eq!(ignored[0]["reason"], "unsupported_policy");
+        let ignored =
+            configuration_ignored(&json!({"spreading":{"policy":true}}), "work", "worker");
+        assert_eq!(ignored[0]["value"], "True");
+        let ignored =
+            configuration_ignored(&json!({"spreading":{"policy":["x"]}}), "work", "worker");
+        assert_eq!(ignored[0]["value"], "['x']");
+        let ignored =
+            configuration_ignored(&json!({"spreading":{"policy":["a\nb"]}}), "work", "worker");
+        assert_eq!(ignored[0]["value"], "['a\\nb']");
+        let ignored =
+            configuration_ignored(&json!({"spreading":{"policy":["it's"]}}), "work", "worker");
+        assert_eq!(ignored[0]["value"], "[\"it's\"]");
+        let ignored =
+            configuration_ignored(&json!({"spreading":{"policy":["\u{0}"]}}), "work", "worker");
+        assert_eq!(ignored[0]["value"], "['\\x00']");
+        let ignored =
+            configuration_ignored(&json!({"spreading":{"policy":1e-7}}), "work", "worker");
+        assert_eq!(ignored[0]["value"], "1e-07");
     }
 }
