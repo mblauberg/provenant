@@ -15,6 +15,8 @@ pub struct CommandOutput {
 pub mod clean;
 mod pending;
 
+pub use pending::IntegerError;
+
 pub mod git_evidence;
 
 pub mod lane_safety;
@@ -25,3 +27,7 @@ pub mod stale_checkout;
 
 #[cfg(test)]
 mod oracle;
+
+pub mod pr_checks;
+
+pub mod retry_install;

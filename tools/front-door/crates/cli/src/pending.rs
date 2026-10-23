@@ -21,41 +21,6 @@ pub(crate) fn decimal_digit(c: char) -> Option<u8> {
 }
 
 // port: belongs in provenant-core
-pub(crate) fn python_repr(text: &str) -> String {
-    let quote = if text.contains('\'') && !text.contains('"') {
-        '"'
-    } else {
-        '\''
-    };
-    let mut result = String::from(quote);
-    for c in text.chars() {
-        match c {
-            '\\' => result.push_str("\\\\"),
-            '\n' => result.push_str("\\n"),
-            '\r' => result.push_str("\\r"),
-            '\t' => result.push_str("\\t"),
-            c if c == quote => {
-                result.push('\\');
-                result.push(c);
-            }
-            c if !python_unicode::printable(c) => {
-                let code = u32::from(c);
-                if code < 256 {
-                    result.push_str(&format!("\\x{code:02x}"));
-                } else if code <= 0xffff {
-                    result.push_str(&format!("\\u{code:04x}"));
-                } else {
-                    result.push_str(&format!("\\U{code:08x}"));
-                }
-            }
-            c => result.push(c),
-        }
-    }
-    result.push(quote);
-    result
-}
-
-// port: belongs in provenant-core
 pub(crate) fn python_digit(c: char) -> bool {
     decimal_digit(c).is_some()
         || matches!(
@@ -190,14 +155,9 @@ pub(crate) fn python_digit(c: char) -> bool {
         )
 }
 
-// port: belongs in provenant-core
-pub(crate) fn python_strip(text: &str) -> &str {
-    text.trim_matches(|c: char| c.is_whitespace() || matches!(c, '\u{1c}'..='\u{1f}'))
-}
-
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use provenant_core::py::{python_repr, python_strip};
 
     #[test]
     fn repr_and_strip_match_python_on_control_and_unicode_boundaries() {
@@ -226,4 +186,64 @@ mod tests {
             assert_eq!(python_strip(value), strip, "{value:?}");
         }
     }
+}
+
+// port: belongs in provenant-core
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum IntegerError {
+    #[error("Exceeds the limit (4300 digits) for integer string conversion: value has {digits} digits; use sys.set_int_max_str_digits() to increase the limit")]
+    DigitLimit { digits: usize },
+    #[error("integer outside i64/u64 range")]
+    NumberOutOfRange,
+}
+
+// port: belongs in provenant-core
+pub(crate) fn decimal_integer(text: &str) -> Result<u64, IntegerError> {
+    let digits = text.chars().count();
+    if digits > 4300 {
+        return Err(IntegerError::DigitLimit { digits });
+    }
+    text.chars().try_fold(0u64, |n, c| {
+        let d = decimal_digit(c).ok_or(IntegerError::NumberOutOfRange)?;
+        n.checked_mul(10)
+            .and_then(|n| n.checked_add(u64::from(d)))
+            .ok_or(IntegerError::NumberOutOfRange)
+    })
+}
+
+// port: belongs in provenant-core
+pub(crate) fn python_splitlines(text: &str) -> Vec<&str> {
+    let mut lines = Vec::new();
+    let mut start = 0;
+    let mut chars = text.char_indices().peekable();
+    while let Some((i, c)) = chars.next() {
+        if matches!(
+            c,
+            '\n' | '\r'
+                | '\u{b}'
+                | '\u{c}'
+                | '\u{1c}'
+                | '\u{1d}'
+                | '\u{1e}'
+                | '\u{85}'
+                | '\u{2028}'
+                | '\u{2029}'
+        ) {
+            lines.push(&text[start..i]);
+            start = i + c.len_utf8();
+            if c == '\r' && chars.peek().is_some_and(|(_, c)| *c == '\n') {
+                chars.next();
+                start += 1;
+            }
+        }
+    }
+    if start < text.len() {
+        lines.push(&text[start..]);
+    }
+    lines
+}
+
+// port: belongs in provenant-core
+pub(crate) fn python_word_character(c: char) -> bool {
+    c == '_' || python_unicode::alphanumeric(c)
 }
