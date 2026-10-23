@@ -92,7 +92,11 @@ pub fn executable_owner(root: &Path, relative: &Path) -> Result<PathBuf, RunRoot
     };
     // Node normalises components but retains a final separator. It changes
     // both filesystem lookup (a regular file becomes unavailable) and errors.
-    let last = if relative.as_os_str().is_empty() { root } else { relative };
+    let last = if relative.as_os_str().is_empty() {
+        root
+    } else {
+        relative
+    };
     if last.as_os_str().as_encoded_bytes().ends_with(b"/")
         && !path.as_os_str().as_encoded_bytes().ends_with(b"/")
     {

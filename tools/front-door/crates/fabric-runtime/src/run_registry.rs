@@ -282,9 +282,16 @@ console.log(JSON.stringify(JSON.parse(fixtures).map(text => {
         let extras = [
             (r#""x":1.0"#, r#""x":1"#, r#""x":1.0"#),
             (r#""x":1e21"#, r#""x":1e+21"#, r#""x":1e+21"#),
-            (r#""future":{"b":1,"a":2}"#, r#""future":{"b":1,"a":2}"#, r#""future":{"a":2,"b":1}"#),
+            (
+                r#""future":{"b":1,"a":2}"#,
+                r#""future":{"b":1,"a":2}"#,
+                r#""future":{"a":2,"b":1}"#,
+            ),
         ];
-        let fixtures: Vec<_> = extras.iter().map(|(extra, _, _)| format!("{prefix},{extra}}}")).collect();
+        let fixtures: Vec<_> = extras
+            .iter()
+            .map(|(extra, _, _)| format!("{prefix},{extra}}}"))
+            .collect();
         let Some(node) = crate::test_support::node(
             r#"import {readOwnerRecord,writeOwnerRecord} from './src/run-registry.ts';
 import {writeFileSync,readFileSync} from 'node:fs'; import {join} from 'node:path';
@@ -294,21 +301,27 @@ writeFileSync(join(dir,'dispatch-owner.json'),text); writeOwnerRecord(readOwnerR
 return JSON.stringify(JSON.parse(readFileSync(join(dir,'dispatch-owner.json'),'utf8')));
 })));"#,
             &[dir.into(), serde_json::to_string(&fixtures).unwrap()],
-        ) else { return; };
+        ) else {
+            return;
+        };
         let directory = serde_json::to_string(dir).unwrap();
         let wire = |extra: &str| format!("{prefix},{extra},\"run_dir\":{directory}}}");
         let expected_node: Vec<_> = extras.iter().map(|(_, extra, _)| wire(extra)).collect();
         assert_eq!(node, serde_json::json!(expected_node));
-        let rust: Vec<_> = fixtures.iter().map(|text| {
-            serde_json::to_string(&OwnerRecord::from_json(text, dir).unwrap()).unwrap()
-        }).collect();
+        let rust: Vec<_> = fixtures
+            .iter()
+            .map(|text| serde_json::to_string(&OwnerRecord::from_json(text, dir).unwrap()).unwrap())
+            .collect();
         let expected_rust: Vec<_> = extras.iter().map(|(_, _, extra)| wire(extra)).collect();
         assert_eq!(rust, expected_rust);
         for (index, (rust, node)) in rust.iter().zip(expected_node).enumerate() {
-            if index == 1 { assert_eq!(*rust, node); } else { assert_ne!(*rust, node); }
+            if index == 1 {
+                assert_eq!(*rust, node);
+            } else {
+                assert_ne!(*rust, node);
+            }
         }
     }
-
 }
 
 /// A provider record is rebuilt from validated fields; extras are intentionally
