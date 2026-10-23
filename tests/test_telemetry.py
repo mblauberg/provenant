@@ -130,8 +130,9 @@ def test_query_reports_schema_version_mismatch(tmp_path, version, message):
 def test_query_reports_missing_ledger_without_creating_it(tmp_path):
     (tmp_path / 'state').mkdir()
     result = cli(tmp_path, 'telemetry', 'sources', '--json')
-    assert result.returncode == 1
-    assert result.stderr.strip() == 'telemetry: ledger not initialised'
+    assert result.returncode == 0, result.stderr
+    assert result.stderr.strip() == 'telemetry: ledger not initialised; reporting an empty ledger'
+    assert all(row['row_count'] == 0 for row in json.loads(result.stdout))
     assert not (tmp_path / 'state/telemetry.sqlite3').exists()
 
 
@@ -142,8 +143,9 @@ def test_query_reports_uninitialised_ledger_without_creating_schema(tmp_path):
     with sqlite3.connect(ledger):
         pass
     result = cli(tmp_path, 'telemetry', 'sources', '--json')
-    assert result.returncode == 1
-    assert result.stderr.strip() == 'telemetry: ledger not initialised'
+    assert result.returncode == 0, result.stderr
+    assert result.stderr.strip() == 'telemetry: ledger not initialised; reporting an empty ledger'
+    assert all(row['row_count'] == 0 for row in json.loads(result.stdout))
     with sqlite3.connect(ledger) as db:
         assert db.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall() == []
 
