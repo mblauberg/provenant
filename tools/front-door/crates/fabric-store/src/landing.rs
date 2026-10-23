@@ -16,15 +16,40 @@ pub struct LandingLease {
     pub taken_over_from: Option<String>,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(untagged)]
+#[serde(try_from = "ReleaseWire", into = "ReleaseWire")]
 pub enum LandingRelease {
-    Refused {
-        released: bool,
-        reason: ReleaseReason,
-    },
-    Released {
-        released: bool,
-    },
+    Refused { reason: ReleaseReason },
+    Released,
+}
+#[derive(Serialize, Deserialize)]
+struct ReleaseWire {
+    released: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reason: Option<ReleaseReason>,
+}
+impl TryFrom<ReleaseWire> for LandingRelease {
+    type Error = &'static str;
+    fn try_from(wire: ReleaseWire) -> std::result::Result<Self, Self::Error> {
+        match (wire.released, wire.reason) {
+            (true, None) => Ok(Self::Released),
+            (false, Some(reason)) => Ok(Self::Refused { reason }),
+            _ => Err("a refused release requires a reason; a successful release has none"),
+        }
+    }
+}
+impl From<LandingRelease> for ReleaseWire {
+    fn from(value: LandingRelease) -> Self {
+        match value {
+            LandingRelease::Released => Self {
+                released: true,
+                reason: None,
+            },
+            LandingRelease::Refused { reason } => Self {
+                released: false,
+                reason: Some(reason),
+            },
+        }
+    }
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -35,13 +60,10 @@ pub enum ReleaseReason {
 }
 impl LandingRelease {
     fn refused(reason: ReleaseReason) -> Self {
-        Self::Refused {
-            released: false,
-            reason,
-        }
+        Self::Refused { reason }
     }
     pub fn released(&self) -> bool {
-        matches!(self, Self::Released { released: true })
+        matches!(self, Self::Released)
     }
 }
 /// Store failures and caller failures stay distinct, including failed cleanup.
@@ -267,7 +289,7 @@ impl Store {
             if expires <= now { return Ok(LandingRelease::refused(ReleaseReason::Expired)); }
             self.db.execute("UPDATE landing_leases SET released_at = ? WHERE project = ? AND generation = ?", params![now, who.project, generation])?;
             self.log(who, "landing_release", &format!("{owner} generation {generation}"))?;
-            Ok(LandingRelease::Released { released: true })
+            Ok(LandingRelease::Released)
         })
     }
     pub fn release_landing(&self, who: &Identity, session: &str, generation: i64) -> Result<()> {

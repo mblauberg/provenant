@@ -445,6 +445,21 @@ fn only_plain_busy_and_locked_are_retryable() {
 
 #[test]
 fn landing_release_refusals_round_trip_without_losing_reason() {
+    for wire in [
+        r#"{"released":false}"#,
+        r#"{"released":true,"reason":"pushing"}"#,
+    ] {
+        assert!(
+            serde_json::from_str::<LandingRelease>(wire).is_err(),
+            "{wire}"
+        );
+    }
+    let success: LandingRelease = serde_json::from_str(r#"{"released":true}"#).unwrap();
+    assert!(success.released());
+    assert_eq!(
+        serde_json::to_string(&success).unwrap(),
+        r#"{"released":true}"#
+    );
     for reason in ["pushing", "expired", "not_held"] {
         let wire = format!(r#"{{"released":false,"reason":"{reason}"}}"#);
         let release: LandingRelease = serde_json::from_str(&wire).unwrap();
