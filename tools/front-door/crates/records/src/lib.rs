@@ -4,6 +4,7 @@
 pub mod attempt_evidence;
 pub mod attempt_storage;
 pub mod fabric_records;
+pub mod layout;
 mod pending;
 
 /// SHA-256 over the exact retained bytes, including any final newline.
