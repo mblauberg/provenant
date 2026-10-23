@@ -1,6 +1,6 @@
 # Fabric Rust design
 
-Status: proposed, 23 October 2026. Audience: the two Rust chairs and Fabric
+Status: proposed, repaired 24 October 2026. Audience: the two Rust chairs and Fabric
 implementers. This document defines the replacement, its dependency requests and
 its deletions. It approves no install, import, live-provider run or landing.
 
@@ -9,8 +9,8 @@ its deletions. It approves no install, import, live-provider run or landing.
 Build Fabric as three libraries behind the single `provenant` executable:
 `fabric-store` owns transactions, `fabric-runtime` owns coordination and the
 execution facade, and `fabric-mcp` owns stdio MCP. Both CLI and MCP call the same
-typed service. Keep durable messages, tasks, fenced ownership, detached runs,
-named sessions, bounded DAGs and explicit SSH peers. Remove interpreter bridges,
+typed service. Keep durable messages, tasks, fenced ownership, detached runs
+and explicit SSH peers. Remove named sessions, graphs, interpreter bridges,
 parallel status engines, permissive input repair and duplicated routing policy.
 
 The v7 chair agreement supersedes the transition and parity portions of
@@ -20,8 +20,9 @@ allowlist, crate layering, typed errors, serde records, bounded inputs and
 `supervisor::sys` unsafe boundary still apply. There is no async runtime.
 Only provider wire forms, harness hook protocols, Agent Skills format, MCP and
 Git survive as external contracts. Our verbs, tools, records and layouts change
-together. Main may be red for removed Python/TS paths. Delete each old owner and
-its tests when its Rust replacement lands; install once after integration.
+together. Main may be red for removed Python/TS paths, but the installed product
+root stays frozen until cut-over under F0 below. Delete each old owner and its
+tests when its replacement and retained callers land; install once after integration.
 Do not build selectors, adapters, recorded old-runtime judges or differential
 oracles. For Fabric this replaces PORTING v5 R9/R10 J1/J2/J3 old-pass, mutant
 and differential gates with the native verification matrix below. Retained
@@ -52,32 +53,33 @@ and the resulting retention decisions are recorded below; static references do
 not establish that a feature is used. Local inspection reads metadata only,
 never credentials, prompt bodies or transcript content.
 
-Observed on 23 October 2026 by read-only SQLite aggregate queries against
-`~/.local/state/agent-harness/fabric/fabric.sqlite3` (about 21.8 MB):
+Rechecked on 24 October 2026 with one read-only SQLite snapshot of
+`~/.local/state/agent-harness/fabric/fabric.sqlite3`. Counts below exclude
+projects matching `project LIKE '%/T/%' OR project LIKE '%/tmp/%' OR
+project='/private/tmp'`, unless labelled raw. These temporary projects include
+lifecycle tests that wrote to the live root; they are not product adoption.
 
 | Observation | Count | Design implication |
 |---|---:|---|
-| Messages / delivery rows / delivery claims | 12,456 / 18,181 / 530 | Keep durable mail; a row-only import loses processing state |
-| Message kinds | 8,036 terminal, 2,777 response, 430 request | Put terminal notices in events; retain correlated mail |
-| Tasks | 475, including 25 open | Keep tasks; fresh state means intentional resubmission of open work |
-| Activity / work claims | 17,987 / 454 | Keep one journal and advisory ownership |
-| Landing activity | 1,386 acquires and 1,386 releases | Three current lease rows conceal substantial use |
-| Run observations / qualified remote observations | 8,242 / 3,327, with 2,003 distinct remote IDs | Keep federation and owning-host status |
-| Sessions / session events | 2 / 13 | Keep a small continuation alias |
-| Graphs / attempts / reservations | 3 / 11 / 0 | Retain a much smaller DAG; remove revision/gate/reservation machinery |
+| Messages / delivery rows / delivery claims | 10,955 / 16,680 / 541 | Keep durable mail, simplify its read state |
+| Message kinds | 6,535 terminal, 2,777 response, 431 request | Terminal notices become events; retain correlated mail |
+| Agents | 1,099 | Labels identify inboxes, not active providers |
+| Temporary-project pollution (raw subset) | 1,508 of 12,463 messages; 1,509 of 2,608 agents | Every test must use an isolated state root |
+| Mail processing (raw) | Response deliveries 5,336, unread 5,150; request 1,157, unread 1,084; 136 acks | Replace claim/ack with per-recipient read cursors |
+| Message metadata (raw) | All 4,422 non-terminal messages have kind; 1,176 have output_path | Preserve kind and typed artefact references |
+| Tasks | 475, including 25 open | Keep tasks; resubmit intentional open work |
+| Activity / work claims | 16,484 / 454 | Keep one journal and advisory ownership |
+| Landing activity | 1,386 acquires/releases; 1,355 acquires in sealle-app | Keep bounded landing wait |
+| Run observations / qualified remote observations | 8,252 / 3,338; 2,011 distinct remote IDs, including 786 workshop IDs | Keep federation and owning-host status |
+| Sessions / session events | 2 / 13 | Cut named sessions; run resume covers continuation |
+| Graphs / attempts / reservations | 3 / 11 / 0; two stopped, all created 22–23 October while building the runner | Cut graphs entirely |
 
-Counts establish recorded activity, not currently running work. Message/activity
-history spans August to 23 October 2026. The OTel directory has 22,329 log records
-and 419 metric records across four files totalling about 454 MB; this is raw
-telemetry, not proof of a trivially importable ledger. The telemetry chair must
-inspect its ledger separately. `~/.cache` contains runtime/build caches, with no
-Fabric state discovered. State-side seat/lane caches were counted, never imported.
-No credential, message body, prompt or transcript content was inspected.
-
-Reproduce counts with read-only SQLite (`mode=ro`), `count(*)` over messages,
-deliveries, delivery_claims, tasks, work_claims, sessions, graphs and graph_attempts;
-group activity by kind and count qualified IDs in run_observations. These are a
-bounded workstation observation, not a production metrics contract.
+Counts establish recorded activity, not current liveness. Reproduce with
+`mode=ro`, a read transaction, the predicate above and `count(*)` over the named
+tables; join deliveries to messages for kinds and read state. Group activity by
+kind, and count qualified IDs in run_observations. No bodies, prompts,
+transcripts or credentials were inspected. Telemetry ledger import belongs to
+its chair; these Fabric counts do not establish its feasibility.
 
 Additional closure evidence: `writer_lease.py:201–239` reads graph reservations
 directly; remove that DB coupling and rely on run's real writer lock.
@@ -96,35 +98,34 @@ requires caller edits in the same replacement lane, not an alias layer.
 | cwd identity, common Git project across worktrees | Keep | Derive one project key from canonical Git common directory; worktree remains execution identity | New IDs |
 | Seats, provider labels and agent inbox labels | Simplify | Explicit client label plus optional agent label; neither proves model family | Environment changes |
 | Mail, reply correlation, task links | Keep | Immutable message plus per-recipient delivery; bounded body and explicit references | Typed envelope |
-| Peek, claim, expiry, acknowledge | Keep | Receipt includes an opaque claim token; ack requires the current token | New inbox/ack shape |
+| Peek, claim, expiry, acknowledge | Simplify | Per-recipient read cursor; distinct labels separate consumers | `read --after seq`, `mark-read seq`; no claim/ack |
 | Terminal-run mail notices | Merge | Run completion emits an idempotent activity event; mail only when requested | Fewer unsolicited messages |
 | Teams and membership tables | Cut | Explicit recipient lists replace a second address registry | Team addressing removed |
-| Tasks, ownership, done and dependencies | Simplify | Four states and token-fenced ownership; graph owns execution dependencies | Task dependency API removed |
+| Tasks, ownership, done and dependencies | Simplify | Four states and token-fenced ownership; chair submits dependent runs explicitly | Task dependency API removed |
 | Notes, activity, events and watch | Merge | One append-only project event stream with bounded cursor reads | Four views become one |
 | Advisory issue/path work claims | Keep | Generation-fenced claims in the project home store; canonical path scopes | New claim operations |
 | Landing lease, generation and expected SHA | Keep | Store fencing plus a home-host push operation and Git lease | New landing subtree |
-| Run registry, seat index, recursive lane scans | Merge | Run owner supplies one indexed registry and typed snapshots | Old paths/selectors removed |
+| Run registry, seat index, recursive lane scans | Decide | `run` owns registry, attempts and status; runtime routes federated queries; other chair confirmation pending | PORTING:43 amendment required |
 | Status, lanes, runs, dispatch list and wait | Merge | One run query plus bounded wait; missing proof stays unknown | Aliases removed |
 | Output tails, events and receipts | Simplify | Named artefact enum, byte cursor and cap; no arbitrary path read | New output shape |
 | Local/remote fetch | Keep | Explicit verified copy of an allowlisted run artefact set | No whole-directory copy |
 | Single dispatch and batch | Merge | One submission containing 1–64 tasks; one run owner handles either | Scalar dispatch form removed |
 | Routing pools, councils, rotation and fallbacks in TS | Merge | `routing` resolves typed selections once; Fabric forwards the result | No Fabric-specific precedence |
-| Provider catalogue and cooldown reset | Cut from Fabric | `routing` and `quota` CLI own these; no adapter administration MCP tool | `fabric_adapters` removed |
+| Provider catalogue and cooldown reset | Cut from Fabric | Proposed `provenant routes models --adapter <id>` replaces live-ID discovery; routing/quota own administration | `fabric_adapters` removed |
 | Dispatch route and authority validation | Merge | `run`, `routing` and `confinement` own it; Fabric validates envelope and project only | Strict typed inputs |
 | Native-seat provider bans | Cut | No family inferred from a seat; shared run policy controls permitted dispatch | Same-provider dispatch possible |
-| Named sessions and native continuation | Keep | One active turn, route/authority pinned, explicit fresh turn | Separate session operation |
+| Named sessions | Cut | Only 2 sessions / 13 events ever recorded; native continuation stays in `run resume` | Remove session table/tool/flags and F4 |
 | Ad-hoc handoff prompt assembly | Cut | Chair submits an explicit new task with artefact inputs | `handoff` removed |
-| Bounded graph execution | Simplify | Immutable DAG, result edges, width cap, explicit retry and cancellation | No revisions/force resume |
+| Bounded graph execution | Cut | Only 3 graphs, created 22–23 October while building the runner; 2 stopped | Remove graph/node/edge tables, tool, owner and F5 |
 | Graph shell gates, gate workers, auto task mirroring | Cut | Verification is an ordinary authorised task or chair action | Gate document fields removed |
-| Graph account/pool admission | Merge | `run` owns admission across graph and ordinary tasks | One capacity ledger |
 | SSH hosts and diagnostics | Keep | Explicit trusted host list and one fixed peer command | Versioned new peer envelope |
 | Host auto-placement and local fallback | Cut | Default is local; remote placement always explicit | Placement defaults removed |
 | Remote launch/cancel/resume idempotency | Keep | Durable operation ID and request digest, unknown launch never retries locally | New operation receipt |
-| Remote PID probing | Cut | Only the owning host can report process identity/liveness | Remote stale is explicit |
+| Remote PID probing | Cut | Only the owning host can report process identity/liveness | Unreachable peer is `Unknown` |
 | Messages/tasks/activity federation | Simplify | Route coordination to one project home, never merge replicated stores | Offline remote coordination refused |
 | Offline outbound mailbox, inbox pull and merged host cursors | Cut | No outbox replicator or clock-skew merge; one authoritative sequence | Offline delivery removed |
 | Git bundles and bound writer results | Keep | Committed base, isolated refs, verified head and worktree ownership | Explicit transport request |
-| Registration, doctor and install smoke | Merge | Config owns edits; Fabric owns descriptor and runtime health | Explicit `fabric mcp` args |
+| Registration, doctor and install smoke | Merge | `fabric-mcp` owns registration and descriptor; config owns managed-file edits | Explicit `fabric mcp` args |
 | DB diagnostics and pruning | Simplify | Read-only health; explicit maintenance of new state only | No startup retention sweep |
 | Numeric coercion, synonym repair, fuzzy command hints | Cut | Refuse invalid fields with a stable error code and field path | Inputs become strict |
 | Python/Node discovery, subprocess RPC and package provisioning | Cut | In-process libraries and one executable | No runtime interpreters |
@@ -140,8 +141,8 @@ installed binary. Help and root resolution do not open SQLite or start threads.
 
 | Crate | Proposed modules | Responsibility |
 |---|---|---|
-| `fabric-store` | `db`, `mail`, `tasks`, `claims`, `sessions`, `graphs`, `events`, `operations` | SQL schema, atomic transitions, typed rows; no Git, provider or SSH processes |
-| `fabric-runtime` | `identity`, `service`, `runs`, `sessions`, `graph`, `peer`, `git_transport`, `health` | Resolve project, enforce scope, compose store/run/supervisor, bound federation |
+| `fabric-store` | `db`, `mail`, `tasks`, `claims`, `events`, `operations` | SQL schema, atomic transitions, typed rows; no Git, provider or SSH processes |
+| `fabric-runtime` | `identity`, `service`, `runs`, `peer`, `git_transport`, `health` | Resolve project, enforce scope, compose store/run/supervisor, bound federation |
 | `fabric-mcp` | `protocol`, `stdio`, `tools`, `render`, `registration` | MCP wire lifecycle, schemas, cancellation and compact rendering |
 | `cli` Fabric module | `args`, `render` | Clap subtree and text/JSON presentation, calling the same service |
 
@@ -165,9 +166,9 @@ struct Qualified<T> { host: HostId, id: T }
 struct OperationKey { id: OperationId, digest: Digest }
 struct Fence { id: ClaimId, generation: u64, token: SecretToken }
 struct Message { id: MessageId, from: Address, to: Vec<Address>,
-    body: String, reply_to: Option<Qualified<MessageId>>, task: Option<Qualified<TaskId>> }
+    kind: MessageKind, body: String, artifacts: Vec<ArtifactRef>,
+    reply_to: Option<Qualified<MessageId>>, task: Option<Qualified<TaskId>> }
 enum TaskState { Open, Active, Done, Cancelled }
-enum NodeState { Pending, Running, InputRequired, Passed, Failed, Blocked, Cancelled }
 enum Observed<T> { Current(T), Stale { value: T, observed_at: TimestampMs }, Unknown }
 struct Page<T> { items: Vec<T>, next: Option<Cursor> }
 struct OutputChunk { bytes: Vec<u8>, next_offset: u64, eof: bool, digest: Digest }
@@ -177,7 +178,7 @@ Message/task/run/operation IDs are opaque 128-bit values, hex encoded, generated
 by the safe supervisor entropy API. HostId is generated once in new config;
 ProjectId is the domain-separated SHA-256 repository key. AgentId is a bounded
 inbox label, defaulting to the client label; an explicit agent label separates
-concurrent inboxes. Shared labels intentionally compete for delivery claims.
+concurrent inboxes; a shared label shares one read cursor, never competing claims.
 Host IDs and display labels are separate. A route receipt comes
 from `run`, copied exactly as `adapter/model@effort`; absence is explicit.
 Client names, seats and model aliases never become invented route provenance.
@@ -210,8 +211,8 @@ from `fabric_policy.py` to `config::ProjectPolicy`; its enforcement remains in
 confinement/run and cli respectively. Invalid safety policy refuses launch.
 
 Defaults: body 64 KiB; input frame 1 MiB; JSON nesting 64; page 100 rows; output
-64 KiB per read, maximum 256 KiB; 64 tasks/nodes; graph width 4, hard maximum 16; submission concurrency 1–16;
-request wait 0–30 seconds; lease 1–3,600 seconds; peer RPC deadline 30 seconds;
+64 KiB per read, maximum 256 KiB; 64 tasks; submission concurrency 1–16;
+MCP wait 0–30 seconds; CLI wait 0–3,600 seconds; lease 1–3,600 seconds; peer RPC deadline 30 seconds;
 Git bundle limit 64 MiB. Config may lower hard limits, never raise them.
 Prompts and artefact inputs also obey the run owner's aggregate request cap.
 Run admission enforces cross-process hard caps of 64 active attempts/host,
@@ -224,7 +225,10 @@ second capacity ledger. Reject excess queue work before acknowledging acceptance
 
 One host-local SQLite database replaces the Fabric and host-operation databases.
 Use bundled rusqlite, WAL, `foreign_keys=ON`, `synchronous=FULL`, busy timeout
-at most 250 ms per transaction. Private root mode 0700, database and WAL/SHM
+at most 250 ms per attempt, capped by the remaining budget. Retry BUSY with backoff and
+cancellation until the request deadline, then return `busy`; replay the whole
+transaction only after rollback, with the same operation key. Never hold a lock
+during backoff or turn an uncertain commit into a new mutation. Private root mode 0700, database and WAL/SHM
 0600, created through supervisor safe filesystem APIs. Refuse symlinked state
 components. No network filesystem SQLite and no shared connection across threads.
 `Store` is a concrete connection owner, opened per worker; no generic backend
@@ -235,17 +239,15 @@ reject a future version before any mutation. First open serialises schema setup.
 |---|---|---|
 | `projects` | `id`, common-dir key, home host | Unique canonical key; home changes require no active ownership |
 | `agents` | `(project, host, agent)`, label, client, last_seen | Presence is observation, never process liveness |
-| `messages` | `id`, project, sender, body, reply/task refs, created | Immutable; references may be qualified external values |
-| `deliveries` | `(message, recipient)`, ack time, claim token/generation/expiry | Unique delivery; index recipient/unacked; claim and ack compare generation/token |
+| `messages` | `id`, project, sender, kind, body, artefact refs, reply/task refs, created | Immutable; references may be qualified external values |
+| `deliveries` | `(message, recipient)`, project-local delivery `seq` | Unique delivery; index `(project, recipient, seq)` |
+| `mail_cursors` | `(project, recipient)`, read-through `seq` | Monotonic max update; no claims or expiry |
 | `tasks` | `id`, project, objective, state, owner, generation/token/expiry | State CHECK; CAS ownership; no task dependency table |
 | `claims` | `id`, project, kind, scope, holder, generation/token/expiry, phase | Work scope rows canonicalised; one landing row per project/ref |
 | `claim_paths` | `(claim, path)` | Prefix overlap checked under immediate transaction; `/a` does not overlap `/ab` |
-| `sessions` | `(project, name)`, host, pinned route/access, continuation, last_clean, active operation, generation | One active turn; completion compares operation and generation |
-| `graphs` | `id`, project, canonical document/digest, state, width | Immutable document; single scheduler owner lock |
-| `nodes` | `(graph, node)`, request, state, run, attempt, input bindings | Dependencies in `edges(graph, from, to)`; unique edge; DAG validated before insert |
 | `operations` | `(project, id)`, kind, bounded frozen request, digest, phase, result | Same ID/different digest refused; prepared/sent/committed/unknown |
 | `events` | autoincrement `seq`, project, kind, entity, payload, time, dedup key | Unique dedup key; `(project, seq)` cursor index |
-| `peer_cache` | `(project, host, query)`, observation, bounded snapshot | Cache is never authority; replaced only by valid responses |
+| `run_cursors` | `(project, host)`, durable run cursor | Advance atomically with deduplicated event insertions |
 
 All related mutation and event insertion commit in one transaction. A failed
 event write rolls back the coordination mutation. No transaction stays open
@@ -253,35 +255,36 @@ while waiting, spawning a process, probing Git or making SSH calls. Generation
 increments survive release and expiry; never delete/recreate the counter row.
 Claims use the home host's clock only. Runtime waits use monotonic deadlines.
 Run snapshots and terminal records remain `run`'s authority; Fabric stores IDs
-and indexes, not another mutable run status. Missed completion events can be
-replayed from run's durable cursor using a unique dedup key.
+and event cursors, not another mutable run status. On `events read` and `run wait`,
+runtime lazily pulls project-scoped `run::events(cursor)` into the home store. Persist
+each per-host cursor with inserted events in one transaction, deduplicated by
+`(host, run-event-id)`. The home pulls remote completions through the peer; remote
+workers need no event push or local mail. No daemon is required: later reads
+replay missed events. An unreachable peer yields `Unknown` with host identity
+and leaves its cursor unchanged; partial results never claim complete coverage.
 
-A message claim is at-least-once processing. Peek has no mutation. Claim replaces
-only an absent or expired token atomically; ack compares recipient, token and
-generation. An expired claimant cannot acknowledge a redelivery. Task `finish`
-requires the active task fence; changing owner requires release or expiry.
+Mail `read --after seq` is non-mutating and returns ordered deliveries plus a
+next cursor. `mark-read seq` monotonically advances only the authenticated
+recipient's cursor, bounded by its highest delivered sequence. No ack or claim
+token is issued. Task `finish` requires the active task fence; changing owner
+requires release or expiry.
+
 Work claims are advisory coordination, never authority to write a worktree;
 `run` still obtains the actual supervisor writer lock.
 
-### Fresh state and optional import
+### Fresh state
 
 Start empty. Leave old `~/.agents`, `.agent-run`, telemetry databases and
 transcripts untouched, including during rollback and maintenance. Do not import
 runs, sessions, process handles, claims, leases, graphs, config or cooldowns.
 Recreate peers and labels through new config; resubmit intentional active work.
 
-Messages and tasks have user value, but a complete operational import is **not
-trivial**: project IDs and agent addresses change, deliveries have claims and
-external references, and old tasks have dependencies/ownership semantics we cut.
-Recommendation: omit the importer. If requested, a one-shot Rust command could
-read an explicit SQLite snapshot read-only and copy messages plus open task text
-as historical records with old IDs in metadata, no live claims or owners. Cost:
-0.5–1 lane-day for mapping, idempotence report and validation, plus decisions on
-address mapping. It must neither mutate the old store nor become a fallback reader.
-Telemetry ledger import belongs to the telemetry chair, is permitted only if
-trivial, and must not pull transcripts or reconstruct route identities. Fabric
-has no reason to read it at runtime. Fresh state is the acceptance default even
-if either optional import is rejected.
+The 25 previously observed open tasks can be handed to the user as a one-off
+read-only SQL listing; no importer or fallback reader is planned. Legacy
+`blocked` (5) maps to Open with a blocker note, `failed` (3) to Done with a failure
+note (Done means closed, not successful), and `superseded` (24) / `unavailable` (2) to Cancelled with a reason. These
+are resubmission semantics, not a state migration. Telemetry import belongs to
+its chair and must not reconstruct routes or read transcripts.
 
 ## CLI and MCP surfaces
 
@@ -294,27 +297,23 @@ prompt bytes before service invocation; MCP accepts text and typed artefact refs
 | Proposed `provenant fabric …` | Operations |
 |---|---|
 | `identity` | Project, worktree, host and inbox address |
-| `mail send\|read\|claim\|ack` | Explicit recipient(s), peek/list, fenced delivery processing |
+| `mail send\|read\|mark-read` | Explicit recipient(s), `--after seq`, per-recipient cursor |
 | `task create\|list\|claim\|update\|finish\|release` | Objective and lifecycle; update cannot bypass ownership |
 | `events read\|note` | Cursor, limit, optional wait and append-only notes |
 | `claim acquire\|renew\|verify\|release\|list` | Advisory issue/path work ownership |
-| `landing acquire\|renew\|verify\|release\|push\|reconcile` | Branch/expected SHA/fence; push stays an explicit authorised CLI action |
+| `landing acquire\|renew\|verify\|release\|wait\|push\|reconcile` | Branch/expected SHA/fence; push stays an explicit authorised CLI action |
 | `run submit\|list\|status\|wait\|cancel\|output\|fetch\|resume\|reconcile` | Delegates to the shared run owner; selectors are exact qualified IDs |
-| `session list\|show\|turn\|forget` | Turn mode `continue` or `fresh`; forget refuses an active turn |
-| `graph submit\|show\|retry\|cancel` | Immutable DAG; retry names failed nodes and retains successful inputs |
 | `host list\|doctor` | Read-only peer and adapter readiness |
 | `doctor` | Store health, owner/peer uncertainty, configuration faults |
 | `mcp` | stdio server mode of this executable |
-| hidden `peer`, `__graph-owner` | Fixed framed peer ingress and detached scheduler entry; no user command passthrough |
+| hidden `peer` | Fixed framed peer ingress; no user command passthrough |
 
 `run submit` uses one `Submission { tasks: Vec<TaskRequest>, concurrency }`;
 no scalar/list union. A single task is a one-item list. Resume is a separate
 `ResumeRequest { target: AttemptRef, prompt, expected_generation }`; it cannot
-change route, account or authority. Fresh session turns create new runs with an
-explicit submitted request. Graph retry creates a new attempt, not a mutable
-plan revision or a new authority grant.
+change route, account or authority.
 
-Expose 12 tools instead of today's 20. Each tool's tagged input enum rejects
+Expose 10 tools instead of today's 20. Each tool's tagged input enum rejects
 unknown fields; generate its checked JSON schema from an explicit shared field
 catalogue without another schema crate. Snapshot/schema tests bind the catalogue
 to serde acceptance. No `detail`, scalar/list aliases or numeric-string coercion.
@@ -322,16 +321,14 @@ to serde acceptance. No `detail`, scalar/list aliases or numeric-string coercion
 | Tool | Typed operations | Replaces |
 |---|---|---|
 | `fabric_identity` | inspect | whoami |
-| `fabric_mail` | send, read, claim, ack | send, inbox, acknowledge |
+| `fabric_mail` | send, read, mark-read | send, inbox, acknowledge |
 | `fabric_task` | create, list, claim, update, finish, release | task |
 | `fabric_events` | read, note | events, note, activity |
 | `fabric_claim` | acquire, renew, verify, release, list | work_claim |
-| `fabric_landing` | acquire, renew, verify, release | landing_lease; no push tool |
+| `fabric_landing` | acquire, renew, verify, release, wait | landing_lease; no push tool |
 | `fabric_submit` | submission | dispatch, including batch |
-| `fabric_run` | list, status, cancel, resume | runs, status, cancel |
+| `fabric_run` | list, status, wait, cancel, resume | runs, status, cancel |
 | `fabric_output` | read, fetch | output, fetch |
-| `fabric_session` | list, show, turn, forget | session plus named dispatch options |
-| `fabric_graph` | submit, show, retry, cancel | graph |
 | `fabric_hosts` | list, doctor | hosts |
 
 Responses contain typed `structuredContent` and a short text digest: IDs, state,
@@ -342,11 +339,21 @@ regular files, refuses symlinks/traversal and enforces total byte/file caps. It
 verifies a manifest digest before atomic publication below `fetch/<host>/<run>/`.
 No tool accepts an arbitrary source or destination filesystem path.
 
+CLI `run wait --any|--all --timeout N` replaces the chair's long
+`provenant lanes --wait --all --timeout 900` loop. Freeze `WaitCondition { Any, All }`:
+Any returns on a terminal target; All returns when all selected targets are
+terminal; either returns immediately on any `InputRequired`. Freeze the target
+set at invocation. CLI budgets reach 3,600 seconds, MCP at most 30 seconds.
+Landing `wait` observes a supplied generation and returns on release or holder/
+generation change; it never acquires the lease. Apply the same CLI/MCP bounds.
+Long CLI waits loop bounded owner/peer reads under one monotonic deadline,
+refreshing events between reads; a peer RPC never holds the full CLI budget.
+
 ### MCP protocol and SDK decision
 
 Recommend an in-house, bounded stdio JSON-RPC transport and **no rmcp amendment**.
-The official [rmcp manifest](https://github.com/modelcontextprotocol/rust-sdk/blob/main/crates/rmcp/Cargo.toml)
-currently requires Tokio, futures and tracing even with optional features disabled.
+The official [rmcp manifest](https://github.com/modelcontextprotocol/rust-sdk/blob/rmcp-v3.7.0/crates/rmcp/Cargo.toml)
+for 3.7.0 requires `tokio`, `tokio-util`, `futures` and `tracing` even with optional features disabled.
 Using it would require both a dependency amendment and reversal of no-async.
 Its maintained protocol types and lifecycle machinery are valuable, but the
 single stdio tools-only server does not justify that runtime expansion. Revisit
@@ -354,24 +361,27 @@ if HTTP transport, elicitation or subscriptions become actual requirements.
 Budget 700–1,000 production lines for framing, validation, lifecycle and schemas;
 if it grows materially beyond this, return the maintenance trade-off to the chairs.
 
-Pin the supported external MCP versions in one constant and native protocol
-fixtures. Initial recommendation: `2025-11-25` and `2025-06-18` lifecycle profiles,
-verified against installed clients before cut-over. The
-[2025-11-25 transport](https://modelcontextprotocol.io/specification/2025-11-25/basic/transports)
-requires UTF-8 newline JSON-RPC, protocol-only stdout and diagnostics on stderr.
-Handle initialise/initialised, version and capability negotiation, ping,
-`tools/list`, `tools/call`, cancellation notifications and EOF. No resources,
-prompts, sampling or task extension is advertised. Standard JSON-RPC parse,
-invalid request/params and method errors stay distinct from tool execution
-failures (`isError: true`). Preserve string/integer request IDs exactly.
+Build dual-era `2025-11-25` and `2026-07-28` profiles now, with fixtures for
+both. Add `2025-06-18` only for a demonstrated client requirement. Both use
+UTF-8 newline JSON-RPC, protocol-only stdout and diagnostics on stderr.
+The first request selects the era: `initialize` selects legacy; versioned
+`_meta` selects modern, including a `server/discover` probe. Refuse an era switch.
 
-The upstream [2026-07-28 stdio specification](https://github.com/modelcontextprotocol/modelcontextprotocol/blob/main/docs/specification/2026-07-28/basic/transports/stdio.mdx)
-uses per-request metadata rather than the older initialise lifecycle. Do not
-advertise it through the legacy handler. Add its separate small protocol profile
-only if client verification requires it; freeze that choice before MCP coding.
-Cancellation stops observation or a not-yet-committed operation, suppressing late
-responses according to the negotiated protocol; cancelling an MCP request never
-implicitly cancels a launched run. An explicit run cancel remains necessary.
+| Profile | Required wire behaviour |
+|---|---|
+| [2025-11-25](https://modelcontextprotocol.io/specification/2025-11-25/basic/lifecycle) | `initialize`, `notifications/initialized`, negotiated version/capabilities and `ping`; `tools/list`, `tools/call`, `notifications/cancelled` and EOF |
+| [2026-07-28](https://modelcontextprotocol.io/specification/2026-07-28/basic/versioning) | No `initialize`, `notifications/initialized` or `ping`; require per-request `_meta` keys `io.modelcontextprotocol/protocolVersion` and `io.modelcontextprotocol/clientCapabilities`; implement `server/discover` |
+
+Modern results require `resultType`; ordinary Fabric results use `"complete"`.
+Unsupported versions return `UnsupportedProtocolVersionError` with supported versions.
+Modern `tools/list` requires `ttlMs` and `cacheScope`; use a fixed catalogue
+and deterministic order, which upstream recommends (SHOULD). See the published
+[tools contract](https://modelcontextprotocol.io/specification/2026-07-28/server/tools).
+No resources, prompts, sampling, subscriptions or task extension is advertised.
+Keep JSON-RPC errors distinct from tool execution failures (`isError: true`);
+preserve string/integer IDs. Cancellation suppresses late responses per the
+[stdio rules](https://modelcontextprotocol.io/specification/2026-07-28/basic/transports/stdio),
+but never implicitly cancels a launched run; use explicit run cancel.
 
 ## Concurrency, custody and recovery
 
@@ -411,28 +421,6 @@ Silence, MCP disconnect, bookkeeping failure and ENOSPC never authorise killing 
 healthy provider. Only explicit cancellation, an authorised timeout or the run
 owner's established custody rules can stop it.
 
-Named sessions reserve `(project, name, generation)` before launch, then bind the
-operation/run. Recovery queries the operation after a lost response. Continuation
-pins provider session, applied route, authority and last clean attempt; an
-unsupported adapter returns `ContinuationUnsupported`, never silently starts
-fresh. A failed or cancelled turn does not overwrite the last clean pointer.
-Concurrent turns yield one winner. Forgetting a session deletes only its new
-pointer after active-turn refusal; run artefacts remain under run retention.
-
-A graph validates the whole immutable DAG before persisting: unique nodes,
-known edges, no cycles, maximum 64 nodes/depth 64, authority no broader than the
-chair, resolved worktrees, and bounded prompt/result inputs. One detached
-scheduler holds an OS lock per graph. It deterministically selects ready nodes
-by node ID, submits through `run`, records the operation before launch and
-reconciles every unfinished operation on restart. Run owns admission and writer
-locks. Failed nodes block descendants; independent branches continue.
-`InputRequired` pauses that branch with a visible run reference. Cancellation
-marks intent before requesting run cancellation and waits for publication before
-releasing logical ownership. Scheduler death cannot release a live writer lock
-or infer a node passed. Retry uses the same document and pinned passed inputs;
-new routing or authority requires a new graph. No automatic resubmission of an
-unknown launch and no shell gate process engine.
-
 ### Peers and Git
 
 Each configured peer is the same user's trusted host, accessed through system
@@ -441,18 +429,26 @@ argv and deadline. The forced remote command is `provenant fabric peer`; it
 accepts one versioned request, not a command string. SSH destination comes only
 from validated config. Provider credentials stay on the executing host.
 Handshake verifies protocol major, host ID and project key. Version mismatch
-refuses writes and marks cached reads incompatible. Peer fan-out uses at most
+refuses writes and reports incompatible reads. Peer fan-out uses at most
 four transport threads, never holds a DB transaction, and never recursively fans
 out from a peer request. Control cancellation stops the SSH child, not its remote
-run. Remote owner status is authoritative; stale snapshots include age.
+run. Remote owner status is authoritative; unreachable peers return `Unknown`,
+with no persisted peer snapshot cache.
 
 All project coordination routes to its configured home, default local. Messages,
 tasks, events, claims and landing share that authority; a non-home host does no
 local mirror writes. An unreachable home returns `HomeUnavailable`, including
 for mailbox send. Local run execution remains available. Recipient HostId identifies an inbox address, not its storage location: send,
-read, claim and ack all target the project home, including remote recipients.
+read and mark-read all target the project home, including remote recipients.
 No pending message queue, distributed task claim, merged clock ordering or
 home-host auto-election.
+With the current laptop home, workshop coordination requires SSH back to the
+laptop, Remote Login enabled there, and the laptop awake and reachable.
+Recommendation: remote workers return results only through runs, with no remote
+mail or tasks; the home chair reads/pulls their results and events. Alternative,
+open for the user: allow remote coordination with this SSH and awake-laptop
+requirement. The current config defaults both projects to laptop; 786 distinct
+workshop run IDs show that this dependency matters.
 Home reassignment refuses active ownership and requires an explicit new-state
 transfer decision. This is the main federation scope reduction to approve.
 
@@ -460,8 +456,8 @@ Remote mutations use `(OperationId, request digest)`. Persist prepared, mark sen
 before transport, and query the owning host on uncertainty. Same ID/different
 body is a conflict. No fallback after a request might have crossed the boundary.
 The peer persists operation acceptance before spawning a run; the run owner's
-own idempotency key closes the database/process gap. Read timeouts can return
-stale observations; writes never report success from a cache.
+own idempotency key closes the database/process gap. Read timeouts return
+`Unknown`; neither reads nor writes use a peer snapshot cache.
 
 Writer lanes receive a committed base through a bounded Git bundle. Retain
 `refs/provenant/transport/<operation>` isolation, validated ref names, hardened
@@ -492,34 +488,13 @@ These are requested signatures, not claims that the inert crates implement them.
 in core/records as indicated. Fabric must not grow private copies while waiting.
 The other chair may choose names, but must preserve the ownership and semantics.
 
-| Owner | Exact requested API | Types and promise |
-|---|---|---|
-| `core` | `ProjectId::from_common_dir(&Path, &Path) -> Result<ProjectId, IdentityError>`; `ProjectId::from_directory(&Path, &Path) -> Result<ProjectId, IdentityError>`; `TimestampMs::checked_add(Duration) -> Result<TimestampMs, TimeError>` | Opaque IDs, `HostId`, `RunId`, `AttemptRef`, `OperationId`, `Digest`, `GitOid`; no I/O or unsafe |
-| `records` | `encode_canonical<T: Serialize>(&T) -> Result<Vec<u8>, CodecError>`; `decode_bounded<T: DeserializeOwned>(&[u8], JsonLimits) -> Result<T, CodecError>` | Duplicate-key/depth/number refusal; `Authority`, `RouteReceipt`, `ArtifactRef`, `ArtifactManifest`, `RunSnapshot`, `RunEvent` |
-| `config` | `load(&ConfigLocation, &EnvSnapshot) -> Result<ResolvedConfig, ConfigError>`; `project_policy(&ResolvedConfig, &Path) -> Result<ProjectPolicy, ConfigError>` | `StateRoot`, `FabricConfig`, peers, policy and hard limits, immutable resolved values |
-| `config` | `reconcile_mcp(&RegistrationDescriptor, &[Client], ApplyMode) -> Result<RegistrationReport, ConfigError>` | Preserve unrelated config/comments; stale-file refusal and explicit partial-state report |
-| `supervisor` | `entropy_128() -> Result<[u8;16], OsError>`; `lock(&Path, LockMode) -> Result<OwnedLock, OsError>` | OS-owned handle, release only on close/death; no TTL substitute |
-| `supervisor` | `private_dir(&Path) -> Result<DirHandle, FsError>`; `publish(&DirHandle, &OsStr, &[u8], PublishMode) -> Result<(), FsError>` | No-follow, permissions, atomic/no-replace modes and explicit durability |
-| `supervisor` | `capture(CommandSpec, CaptureLimits, &CancelToken) -> Result<Captured, ProcessError>`; `spawn_owner(OwnerSpec) -> Result<OwnerHandle, ProcessError>` | Bounded pipes/deadline; exact OS identities; detached custody; `stop_owned(&OwnerHandle, CancelReason)` only |
-| `confinement` | `read_input(&Path, &Authority, InputLimit) -> Result<InputBytes, ConfinementError>`; `prepare(&TaskRequest, &ProjectPolicy, &AttemptTempPaths) -> Result<PreparedAccess, ConfinementError>` | Checked roots, symlink refusal, write ownership, secret and instruction policy; called by run |
-| `run` | `submit(Submission, OperationKey, &ExecutionContext) -> Result<SubmissionReceipt, RunError>`; `operation(ProjectId, OperationId) -> Result<Observed<SubmissionReceipt>, RunError>`; `recover(ProjectId, OperationId) -> Result<Observed<SubmissionReceipt>, RunError>`; `reconcile(ProjectId, OperationId, ReconcileDecision) -> Result<RunSnapshot, RunError>` | Durable acceptance and exactly one owner per operation; resolved receipts, no `Value` request bags |
-| `run` | `query(RunQuery) -> Result<Page<RunSnapshot>, RunError>`; `snapshot(ProjectId, AttemptRef) -> Result<RunSnapshot, RunError>`; `wait(RunQuery, WaitBudget, &CancelToken) -> Result<Page<RunSnapshot>, RunError>` | Registry owns discovery/status; qualified local IDs only; Fabric routes remote calls |
-| `run` | `cancel(AttemptRef, OperationKey, CancelReason) -> Result<CancelReceipt, RunError>`; `resume(ResumeRequest, OperationKey) -> Result<SubmissionReceipt, RunError>` | Exact target and generation, preserved route/access, no implicit fresh continuation |
-| `run` | `read_output(AttemptRef, ArtifactPart, ByteRange) -> Result<OutputChunk, RunError>`; `export(AttemptRef, ExportLimits) -> Result<ArtifactManifest, RunError>` | Bounded regular files, stable manifest digest and immutable published output |
-| `run` | `events(RunCursor, usize) -> Result<Page<RunEvent>, RunError>`; `capabilities() -> Result<ExecutionCapabilities, RunError>` | Replayable completion cursor; aggregate provider/routing readiness for Fabric doctor |
-| `providers` | `continuation(&AdapterId) -> ContinuationSupport`; `doctor(&AdapterId, ProbeBudget) -> Result<AdapterHealth, ProviderError>` | Used by run; typed session token, supported mode and host-local health, no Fabric dependency |
-| `routing` | `resolve(&RouteRequest, &RoutingContext) -> Result<ResolvedRoute, RoutingError>` | Used by run; exact applied route, fallback/confidentiality decisions, one pool implementation |
-| `quota` | `admit(&ResolvedRoute, &OperationId) -> Result<AdmissionPermit, QuotaError>` | Used by run; one admission owner, graph cannot bypass it; permit tied to actual attempt |
-| `telemetry` | `record(&RunEvent) -> Result<(), TelemetryError>` | Used by run, idempotent ledger attribution; telemetry failure is diagnostic, never a provider kill |
-| `cli` | `FabricArgs::execute(&FabricService) -> Result<CliOutput, CliError>` | Shared command-tree freeze; edge owns exit/text/JSON, no library imports cli |
-
 The principal shared request/result types are concrete serde records in
 `records`; numeric wrappers below are checked at construction. Extend these
 through the shared freeze, rather than adding per-edge JSON bags:
 
 ```rust
-struct Submission { project: ProjectId, tasks: Vec<TaskRequest>, concurrency: u16 }
-struct TaskRequest { id: TaskId, prompt: InputBytes, inputs: Vec<ArtifactRef>,
+struct Submission { tasks: Vec<TaskRequest>, concurrency: u16 }
+struct TaskRequest { id: RequestId, prompt: InputBytes, inputs: Vec<ArtifactRef>,
     route: RouteRequest, access: Authority, cwd: PathBuf, timeout: DurationMs }
 struct SubmissionReceipt { runs: Vec<AttemptRef>, routes: Vec<RouteReceipt> }
 struct ResumeRequest { target: AttemptRef, prompt: InputBytes, expected_generation: u64 }
@@ -527,7 +502,8 @@ enum ReconcileDecision { AbandonUncertain }
 struct ExecutionContext { project: ProjectId, actor: Address, authority: Authority }
 struct AttemptTempPaths { root: PathBuf, provider_tmp: PathBuf, browser_socket: Option<PathBuf> }
 struct RunQuery { project: ProjectId, ids: Vec<AttemptRef>,
-    states: Vec<RunState>, cursor: Option<Cursor>, limit: u16 }
+    states: Vec<RunState>, cursor: Option<Cursor>, limit: u16, condition: WaitCondition }
+enum WaitCondition { Any, All }
 struct RunSnapshot { project: ProjectId, target: AttemptRef, state: RunState, owner: OwnerObservation,
     provider: ProviderObservation, publication: PublicationState,
     route: Option<RouteReceipt>, artifacts: Vec<ArtifactRef>, observed_at: TimestampMs }
@@ -541,8 +517,8 @@ and cooperative `CancelToken` live in core; supervisor consumes them. Runtime's
 peer client takes `PeerRequest { version, target_host, project, operation, action }`;
 `action` is a closed enum for coordination, run, health and Git transfer. There
 is no arbitrary executable field. The target is the execution host for runs and the project home for coordination.
-Before submit, Fabric matches Submission.project to Identity.project; run checks
-the same binding against `ExecutionContext { project, actor, authority }`, reloads
+Fabric derives `ExecutionContext.project` from Identity.project; Submission
+carries no duplicate project. Run checks context project/actor/authority, reloads
 project policy and refuses broader access. Snapshots must match project scope.
 Host health includes run's typed
 `ExecutionCapabilities`. Run also supplies
@@ -554,8 +530,10 @@ Bounded stdout writing requires supervisor's safe
 blocking `write_all` cannot promise bounded EOF shutdown under backpressure.
 
 Fabric supplies `FabricService::open(ResolvedConfig, Identity)`, typed methods for
-the 12 tool domains, and `registration(executable: &Path, client: ClientLabel) ->
-RegistrationDescriptor`. `fabric-store::Store::open(StateRoot)` and transaction
+the 10 tool domains. `fabric-mcp::registration(executable: &Path, client: ClientLabel) ->
+RegistrationDescriptor` owns MCP registration; config supplies managed-file
+reconciliation and preserves unrelated client entries. This retains PORTING:44
+ownership; the CLI/installer invokes the descriptor and config operation together. `fabric-store::Store::open(StateRoot)` and transaction
 methods take explicit `TimestampMs`; clocks are injected at the service edge.
 `CancelToken`, `WaitBudget`, `CommandSpec` and filesystem handles are safe
 supervisor/core types. The CLI and MCP own no filesystem policy.
@@ -569,10 +547,12 @@ raw secret values. Expected contention, stale fences and uncertainty are data.
 Common service codes: `invalid_input`, `not_found`, `conflict`, `busy`,
 `stale_fence`, `home_unavailable`, `peer_version`, `launch_unknown`,
 `continuation_unsupported`, `confinement_refused`, `state_corrupt`,
-`publication_failed`, `cancelled`, `io`. Return retry advice only when safe.
+`publication_failed`, `cancelled`, `timeout`, `io`. Return retry advice only when safe.
 Include `operation_id` on uncertain mutations. CLI maps success to 0, invalid
 input to 2, contention/conflict to 3, unavailable/unknown to 4, other failures to 1,
-and interruption to 130; these values need the shared freeze. MCP preserves
+and interruption to 130. Freeze these plus CLI wait timeout 124; a reported
+failed/cancelled target returns 1, `InputRequired` returns 0 with explicit state,
+and a successful wait returns 0. MCP budget expiry returns typed timeout data. MCP preserves
 JSON-RPC errors separately from domain tool errors. Diagnostics go to stderr,
 with no panics, production unwraps or swallowed failed writes. Health checks do
 not repair, prune or acquire coordination claims.
@@ -582,8 +562,8 @@ not repair, prune or acquire coordination claims.
 | Material | Keep | Strip or rewrite |
 |---|---|---|
 | Existing `fabric-store` plus #1332 | Immediate transactions, token/fence checks, overlap tests, contention classification, atomic message+event writes, checked filesystem opening and push critical-section idea | Included TS schema, compatibility migrations, JS truthiness/number/date spelling, legacy terminal-row mapper, backend trait for one store, all oracle/differential machinery |
-| Existing `fabric-runtime` plus #1334 | Git redirect scrubbing, common-dir identity, bounded inputs, route/access validation invariants, peer version checks, Git object/ref validation, graph cycle/authority checks | Python owner argv builders, `.agent-run`/product-root/seat discovery, status dictionaries, `Value` field helpers, JS semantics in `pending`, subprocess JSON shims, duplicated pool/routing logic |
-| #1344 workflow | Bounded hook envelope parsing, typed authority validation, conservative reinjection and disclosure checks where workflow still owns them | Do not move receipt/session/review schemas into Fabric; no copied Python globals or oracle processes; graph events are not acceptance receipts |
+| Existing `fabric-runtime` plus #1334 | Git redirect scrubbing, common-dir identity, bounded inputs, route/access validation invariants, peer version checks, Git object/ref validation | Python owner argv builders, `.agent-run`/product-root/seat discovery, status dictionaries, `Value` field helpers, JS semantics in `pending`, subprocess JSON shims, duplicated pool/routing logic |
+| #1344 workflow | Bounded hook envelope parsing, typed authority validation, conservative reinjection and disclosure checks where workflow still owns them | Do not move receipt/session/review schemas into Fabric; no copied Python globals or oracle processes |
 | Existing supervisor/run/records | Safe process identity, custody and publication, writer lock, shared codecs and run records after interface review | Fabric-specific `ps` wrappers and speculative alternate run readers once run owns snapshots |
 | Empty `fabric-mcp` crate | Workspace slot and layering | Design implementation from the supported MCP profiles; there is no server code to preserve |
 
@@ -594,24 +574,25 @@ portable compatibility helpers merely to claim lines reused.
 ## Verification
 
 No new dependency is needed. Use `cargo test`, std test harness, `tempfile`,
-`rusqlite` and checked-in `.json`/`.txt` fixtures. Snapshot assertions compare new
-CLI/MCP results to hand-reviewed new-design fixtures; a small helper binds only
-fixture-injected IDs and clocks. No insta, proptest, loom or cargo-nextest
+`rusqlite` and checked-in `.json`/`.txt` fixtures. The in-house snapshot helper
+compares output against a checked-in file, rewrites only when
+`PROVENANT_UPDATE_SNAPSHOTS=1`, and prints a line diff on mismatch. Fixtures
+inject IDs and clocks, so no redactions are needed. Budget 60–100 lines; revisit
+only beyond about 150 lines or if inline snapshots become valuable. No insta, proptest, loom or cargo-nextest
 amendment is proposed. A separate property-testing dependency can be reconsidered
-if seeded deterministic graph/interleaving tests prove insufficient.
+if seeded deterministic interleaving tests prove insufficient.
 
 | Layer | Rust-native tests and fault cases |
 |---|---|
-| Store unit | Mail redelivery and stale ack, task owner CAS, path overlap boundaries, generation monotonicity, event rollback, schema future-version refusal, UTF-8/number limits |
-| Process contention | Spawn the same test executable as child workers, barrier via pipes; race cold opens, claim/ack, session turns and landing holders; exactly one winner, no timing-only sleeps |
-| State faults | Inject write/fsync/rename failure and SQLite busy/full errors through narrow safe-I/O seams; kill fixture owners between each recorded transition; reopen and reconcile |
+| Store unit | Mail cursor isolation, monotonic mark-read and replay, task owner CAS, path overlap boundaries, generation monotonicity, event rollback, schema future-version refusal, UTF-8/number limits |
+| Process contention | Spawn the same test executable as child workers, barrier via pipes; race cold opens, task/work claims and landing holders; exactly one winner, no timing-only sleeps |
+| State faults | Supervisor seams inject publication write/fsync/rename faults only; bundled SQLite owns its I/O. Force SQLITE_FULL with `PRAGMA max_page_count` and growth inserts; force BUSY with a second connection holding RESERVED (`BEGIN IMMEDIATE`); verify bounded retries and reopen after owner death |
 | Run facade | Fake run owner with durable operation IDs; lost launch reply, dead launcher/live provider, corrupt receipt, cancellation during publication; no duplicate launch or healthy-provider signal |
-| Sessions and graphs | Failed turn retains last clean pointer, concurrent turns, unsupported continuation, cycles, cap/authority refusal, blocked descendants, input required, scheduler death and explicit retry |
-| MCP | Duplex pipes to the built binary; every supported lifecycle, capabilities, tools/list schemas, strict calls, parse/oversize/depth errors, string/integer IDs, cancellation, full queue, EOF and broken stdout |
+| MCP | Duplex pipes to the built binary; both protocol eras, first-message selection, `server/discover`, required modern metadata/result/cache fields, capabilities, `tools/list` schemas, strict calls, parse/oversize/depth errors, string/integer IDs, cancellation, full queue, EOF and broken stdout |
 | CLI snapshots | Help is side-effect free; exact new subtree and errors, JSON schema/version, output caps/cursors and exit mapping; no Python/Node in PATH |
-| Federation | Fake SSH executable, protocol mismatch, skewed clocks, unreachable home, delayed/lost response, idempotent launch reconciliation and bounded cache reads; owning-host liveness only |
+| Federation | Fake SSH executable, protocol mismatch, skewed clocks, unreachable home, delayed/lost response, idempotent launch reconciliation and lazy run-event replay/cursor atomicity; owning-host liveness only |
 | Git and fetch | Local temporary repos and forced peer command; dirty writer refusal, wrong OID/ref, bundle cap, symlink traversal, digest mismatch, moved remote, push reply loss and blocked unresolved fence |
-| Install | Config-owned six-client fixtures, comments/unrelated entries preserved, explicit binary mode, partial-state recovery, stale install detection over every workspace source/manifests/lockfile |
+| Install | MCP-owned descriptor plus config-owned six-client fixtures, comments/unrelated entries preserved, explicit binary mode, partial-state recovery, stale install detection over every workspace source/manifests/lockfile |
 
 Run only fast touched-crate tests and static checks locally. CI owns full suites,
 Linux and macOS custody/concurrency tests and exact-head install integration.
@@ -762,8 +743,19 @@ the table; they are not silently included in the net savings.
 | `tests/test_fabric_v1_contract.py` | 123 |
 | `tests/test_live_sandbox_smoke.py` | 124 |
 | `tools/front-door/crates/fabric-store/tests/oracle.mjs` | 162 |
+| `tests/golden/cases/lanes/lanes-case-01.json` | 12 |
+| `tests/golden/cases/lanes/lanes-case-02.json` | 12 |
+| `tools/front-door/src/help/fabric.txt` | 5 |
+| `tools/front-door/src/help/hosts.txt` | 10 |
+| `tools/front-door/src/help/lanes.txt` | 9 |
+| `tools/front-door/crates/supervisor/src/fabric_ps.rs` | 367 |
+| `tools/front-door/crates/fabric-runtime/PORT_STATUS.md` | 133 |
+| `tools/front-door/crates/fabric-store/PORT_STATUS.md` | 80 |
+| `docs/specs/fabric-v2.md` | 387 |
+| `docs/specs/fabric-hosts.md` | 292 |
+| `skills/orchestrate/references/fabric-identity.md` | 31 |
 
-Whole-file total: **132 files, 35,915 lines**. This includes all
+Whole-file total: **143 files, 37,253 lines**. This includes all
 tracked files below `runtime/fabric/`, the old MCP judge and the named external
 Fabric helpers/tests. The root Node manifests are deliberately excluded.
 
@@ -791,10 +783,10 @@ records and quota; their owners remove them with their callers. Only Fabric's
 old tool-parameter fixture is included above; shared fixtures are excluded.
 
 Existing inert Rust at the baseline is 5,686 lines across 26 `.rs` files,
-including tests. The replacement budget is 13,000–17,000 Rust production/test
+including tests. The replacement budget after cutting sessions/graphs is 10,000–14,000 Rust production/test
 lines across the three crates, plus 1,000–2,000 lines in the CLI/config edges.
 That target includes retained Rust, not only newly authored lines. Removing the
-old files and replacing the existing Rust gives approximately 22,601–27,601 lines of
+old files and replacing the existing Rust gives approximately 26,939–31,939 lines of
 net reduction. These are design estimates, not measured delivered savings;
 shared Node manifests/policy/tests and other-chair run code are excluded.
 Rust test volume and the peer failure matrix are the main uncertainty. Delete
@@ -822,7 +814,7 @@ baseline. Rewritten files may be regrouped into the proposed modules.
 | `fabric-runtime/src/lane_watch.rs` | 136 | Rewrite, keep invariants |
 | `fabric-runtime/src/lib.rs` | 17 | Rewrite, keep invariants |
 | `fabric-runtime/src/pending.rs` | 201 | Delete; shared owner or compatibility machinery |
-| `fabric-runtime/src/run_registry.rs` | 150 | Rewrite, keep invariants |
+| `fabric-runtime/src/run_registry.rs` | 150 | Replace with query facade; registry moves to run |
 | `fabric-runtime/src/run_root.rs` | 315 | Delete; shared owner or compatibility machinery |
 | `fabric-runtime/src/success_status.rs` | 93 | Delete; shared owner or compatibility machinery |
 | `fabric-store/src/diagnostics.rs` | 223 | Rewrite, keep invariants |
@@ -832,38 +824,53 @@ baseline. Rewritten files may be regrouped into the proposed modules.
 | `fabric-store/src/messages.rs` | 384 | Rewrite, keep invariants |
 | `fabric-store/src/oracle.rs` | 106 | Delete; shared owner or compatibility machinery |
 | `fabric-store/src/pending.rs` | 94 | Delete; shared owner or compatibility machinery |
-| `fabric-store/src/sessions.rs` | 171 | Rewrite, keep invariants |
+| `fabric-store/src/sessions.rs` | 171 | Delete; named sessions cut |
 | `fabric-store/src/tasks.rs` | 227 | Rewrite, keep invariants |
 | `fabric-store/src/tests.rs` | 419 | Rewrite, keep invariants |
 
 
 ## Implementation lanes
 
+F0 freezes the installed product root returned by `~/.local/bin/provenant root`
+(currently `~/Repos/provenant`, the laptop primary checkout), including
+its installed binary, at the working pre-port snapshot until cut-over. Never pull
+that checkout or reinstall over its binary during the port. The front door
+executes owners from that root (`tools/front-door/src/main.rs:200–209`), so it
+must remain usable for dispatch, long waits and landing. All port work uses
+worktrees from `origin/main`; lanes must not update the installed root. Candidate
+binaries and state are isolated; integration cut-over requires its own authority.
+
+F0 decision, **pending the other chair's confirmation**: `run` owns the registry,
+attempts and status; fabric-runtime owns identity and federation routing of run
+queries. Amend `PORTING.md:43` to replace "run registry/status" with "run-query
+federation routing" and remove its bounded graph owner; add registry/status to
+the `run` row and remove sessions/graph persistence from the store row. `run`
+must never depend on a Fabric crate.
+
 These are replacement lanes, each 1–2 lane-days including targeted tests and one
 review/repair. They are not caller-switch slices. A lane deletes its old owner
-when its replacement lands; the final install waits for the integrated system.
+only when its replacement and retained callers land; the final install waits for the integrated system.
 One writer per worktree and crate; disjoint module partitions need explicit owner
 assignment. Workspace manifests, lockfile and shared type/command freezes have
 one integration writer. Estimates include reuse, not a line-for-line port.
 
 | Lane | Days | Depends on | Deliverable and deletions |
 |---|---:|---|---|
-| F0 shared freeze | 1 | Chairs | Core/records signatures, state/config roots, command subtree, protocol profiles; no runtime deletion |
-| F1 mail/task/event store | 2 | F0 | New SQL and atomic APIs; delete `store.ts`, old schema, mail/task concurrency workers and relevant TS store tests |
+| F0 shared freeze | 1 | Chairs | Core/records signatures, state/config roots, command subtree, dual-era profiles, registry decision/amendment and installed-root freeze; no runtime deletion |
+| F1 mail/task/event store | 2 | F0 | New SQL and atomic APIs; delete `store.ts`, old schema, sessions/graph persistence and their tests, mail/task workers and relevant TS tests |
 | F2 claims/landing store | 2 | F1 | Fences, overlap checks, push operation phases; delete `landing-cli.ts`, lease tests; safe supervisor lock API required |
-| F3 identity and run facade | 2 | F0, other-chair run API | Identity and single run query/submit/control; delete identity/run/seat readers, execution/input/batch/resume/owner bridges, pools/catalogue and their tests |
-| F4 sessions | 1 | F1, F3 | CAS turn reservation, reconciliation, continuation; delete `sessions.ts` and named-session tests |
-| F5 DAG | 2 | F1, F3 | Immutable scheduler, graph persistence/recovery; delete five `graph/*.ts` files, graph workers/tests and shell-gate machinery |
-| F6 peer control | 2 | F0, F3 | Fixed SSH protocol, idempotent operations/cache/home routing; delete hosts/peer TS and `fabric_hosts.py`, `fabric_lanes.py`, wrapper and host tests |
-| F7 Git/landing transport | 2 | F2, F6, supervisor safe API | Verified bundles/fetch and home-host fenced push; delete `fabric_git.py`; replace its cases from host tests |
-| F8 MCP | 2 | F0, F1, F3; then F2/F4/F5/F6/F7 integration | Tools, schemas, stdio transport and new protocol fixtures; delete server/surface/schema exporters, old MCP judge, tool tests and smoke |
+| F3 identity and run facade | 2 | F0, other-chair run API | Identity and single run query/submit/control; delete identity/run/seat readers; execution/input/batch/resume/owner bridge and pools/catalogue deletion is conditional on the shared run implementation landing with every caller moved |
+| F6a transport/operations | 2 | F0, F3 | Fixed SSH protocol, idempotent run operations and host diagnostics; replace transport cases before deleting host helpers |
+| F6b home routing | 2 | F1, F2, F6a | Route each coordination operation and pull remote run events at home; then delete hosts/peer TS, `fabric_hosts.py`, `fabric_lanes.py`, wrapper and remaining host tests |
+| F7 Git/landing transport | 2 | F2, F6b, supervisor safe API | Verified bundles/fetch and home-host fenced push; delete `fabric_git.py`; replace its cases from host tests |
+| F8 MCP | 2 | F0, F1, F3; then F2/F6b/F7 integration | Tools, schemas, stdio transport and new protocol fixtures; delete server/surface/schema exporters, session/graph tools and `__graph-owner`, graph workers/gates, old MCP judge, tool tests and smoke |
 | F9 CLI/config cleanup | 2 | F0, F3, config API; then all Fabric APIs | New subtree, explicit registration descriptor, caller/doc rewrites; delete `cli.ts`, bin wrappers, configure script/tests; shared loader/package deletion waits for its owners |
 | F10 integrated acceptance | 2 | F1–F9 | Native multi-process fault tests, installed candidate CI, no-interpreter proof; delete remaining Fabric fixtures/tests/manifests and oracle machinery |
 
-Total: 20 lane-days, planning range 20–28 for interface/fault-recovery repair,
-plus the optional importer only if requested. F1 and F3 can start in parallel
-following F0. F2 serialises behind F1's store writer. F4 and F5 need distinct
-runtime module partitions; F6 and F7 can use their own partitions. F8's transport
+Total: 19 lane-days, planning range 19–27 for interface/fault-recovery repair.
+Cutting F4/F5 saves 3 lane-days; splitting home routing adds 2. F1 and F3 can start in parallel
+following F0. F2 serialises behind F1's store writer. F6a/F6b and F7 require explicit
+runtime module partitions. F8's transport
 and schema work can start against frozen typed fakes after F0; only completion
 waits for all service operations. F9's argument/registration work can likewise
 start early. Heavy CI, review and the other chair's API availability determine
@@ -872,7 +879,9 @@ chair's crate without the repository workflow gate.
 
 Caller closure is part of F9/F10: edit skills and hook helpers to the new APIs,
 replace front-door help/routes, installer registrations, CI npm/gate invocations,
-MCP runbook and Fabric/hosts docs. Keep hook stdin/stdout protocols intact.
+MCP runbook and Fabric/hosts docs. Replace the `fabric_adapters` live-model
+callers with the proposed routing-owned `provenant routes models --adapter <id>`
+command and freeze that command in F0. Keep hook stdin/stdout protocols intact.
 `tests/test_runtime_architecture.py`, `tests/test_stale.py`, schema/layering tests,
 `tests/conftest.py` and mixed dispatch/provider/host identity tests lose only
 Fabric assertions whose callers disappear; their other owners retain them.
@@ -887,12 +896,37 @@ are source cleanup targets.
 |---|---|---|
 | Shared command and state/config freeze | Adopt the proposed Fabric subtree and explicit `fabric mcp`; keep common run execution owned by run | Both chairs; settle duplicate top-level run verbs before implementation |
 | MCP implementation | Keep the small stdio server and no async; no rmcp dependency amendment | Chairs; user approval needed only if proposing to reverse the dependency/no-async decision |
-| MCP protocol profiles | Verify installed clients, freeze legacy versions above; implement modern profile only when needed | MCP/config owners; MCP itself remains an external contract |
-| Offline federation | Use online project-home coordination and remove replicated mail/tasks/events/outbox | User/chairs; visible loss of offline cross-host send and merged task views buys substantial deletion |
-| Graph scope | Keep immutable bounded DAGs; cut shell gates, revisions and automatic task mirroring | Chairs; migrate verification tasks to ordinary run requests |
+| MCP protocol profiles | Build dual-era 2025-11-25 and 2026-07-28 now; older profile only on demonstrated need | MCP/config owners; verify installed clients before cut-over |
+| Remote coordination | Recommend run-only remote workers with no remote mail/tasks; alternatively allow home coordination requiring SSH and an awake laptop | User decision open; remove offline replicas/outbox either way |
+| Sessions and graphs | Cut entirely, including F4/F5; retain `run resume` and chair-submitted tasks | Chair decision accepted; usage evidence in Feature decisions |
 | Import | Start empty; omit message/task importer because complete semantics are not trivial | User; telemetry chair separately assesses a trivial ledger-only import |
 | Shared policy/Node cleanup | Move project policy to config/confinement; leave root npm/Ajv deletion to its actual caller owner | Both chairs; never delete a shared manifest while a retained caller needs it |
 | Dependency and rules amendment | Amend superseded transition/parity prose once, centrally; add no Fabric crates to the allowlist | Shared integration owner; all implementation PRs use the v7 authority recorded here |
 
-These recommendations are reviewable design choices. Merging this document
-alone changes no executable, external protocol, live state or installation.
+Merging this document changes no executable, live state or installation.
+
+## Cross-crate asks by owner
+
+This is the single dependency request list for the other chair; signatures are
+requested contracts, not claims that the current crates implement them.
+
+| Owner | Exact requested API | Types and promise |
+|---|---|---|
+| `core` | `ProjectId::from_common_dir(&Path, &Path) -> Result<ProjectId, IdentityError>`; `ProjectId::from_directory(&Path, &Path) -> Result<ProjectId, IdentityError>`; `TimestampMs::checked_add(Duration) -> Result<TimestampMs, TimeError>` | Opaque IDs including `RequestId`, `HostId`, `RunId`, `AttemptRef`, `OperationId`, `Digest`, `GitOid`; `WaitBudget`, cooperative `CancelToken`; no I/O or unsafe |
+| `records` | `encode_canonical<T: Serialize>(&T) -> Result<Vec<u8>, CodecError>`; `decode_bounded<T: DeserializeOwned>(&[u8], JsonLimits) -> Result<T, CodecError>` | Duplicate-key/depth/number refusal; `Authority`, `Submission`, `TaskRequest` (`id: RequestId`), `SubmissionReceipt`, `ResumeRequest`, `RunQuery`, `WaitCondition`, `RunSnapshot`, `RunEvent`, `RouteReceipt`, `ArtifactRef`, `ArtifactManifest`, `Page`, `Observed`, `OutputChunk`, `OperationKey`, `ExecutionContext`, `AttemptTempPaths`, `RegistrationDescriptor` |
+| `config` | `load(&ConfigLocation, &EnvSnapshot) -> Result<ResolvedConfig, ConfigError>`; `project_policy(&ResolvedConfig, &Path) -> Result<ProjectPolicy, ConfigError>` | `StateRoot`, `FabricConfig`, peers, policy and hard limits, immutable resolved values |
+| `config` | `reconcile_mcp(&RegistrationDescriptor, &[Client], ApplyMode) -> Result<RegistrationReport, ConfigError>` | Managed-file edits only; `fabric-mcp` retains registration/descriptor ownership (PORTING:44); preserve unrelated config/comments, refuse stale files, report partial state |
+| `supervisor` | `entropy_128() -> Result<[u8;16], OsError>`; `lock(&Path, LockMode) -> Result<OwnedLock, OsError>` | OS-owned handle, release only on close/death; no TTL substitute |
+| `supervisor` | `private_dir(&Path) -> Result<DirHandle, FsError>`; `publish(&DirHandle, &OsStr, &[u8], PublishMode) -> Result<(), FsError>` | No-follow, permissions, atomic/no-replace modes and explicit durability |
+| `supervisor` | `capture(CommandSpec, CaptureLimits, &CancelToken) -> Result<Captured, ProcessError>`; `spawn_owner(OwnerSpec) -> Result<OwnerHandle, ProcessError>` | Bounded pipes/deadline; exact OS identities; detached custody; `stop_owned(&OwnerHandle, CancelReason)` only; `write_frame(&StreamHandle, &[u8], WaitBudget) -> Result<(), IoError>` bounds stdout backpressure |
+| `confinement` | `read_input(&Path, &Authority, InputLimit) -> Result<InputBytes, ConfinementError>`; `prepare(&TaskRequest, &ProjectPolicy, &AttemptTempPaths) -> Result<PreparedAccess, ConfinementError>` | Checked roots, symlink refusal, write ownership, secret and instruction policy; called by run |
+| `run` | `submit(Submission, OperationKey, &ExecutionContext) -> Result<SubmissionReceipt, RunError>`; `operation(ProjectId, OperationId) -> Result<Observed<SubmissionReceipt>, RunError>`; `recover(ProjectId, OperationId) -> Result<Observed<SubmissionReceipt>, RunError>`; `reconcile(ProjectId, OperationId, ReconcileDecision) -> Result<RunSnapshot, RunError>` | Durable acceptance and exactly one owner per operation; resolved receipts, no `Value` request bags |
+| `run` | `query(RunQuery) -> Result<Page<RunSnapshot>, RunError>`; `snapshot(ProjectId, AttemptRef) -> Result<RunSnapshot, RunError>`; `wait(RunQuery, WaitBudget, &CancelToken) -> Result<Page<RunSnapshot>, RunError>` | `run` owns registry/attempts/status pending other chair confirmation; Any/All wakes on terminal or any `InputRequired`; CLI ≤3,600 s, MCP ≤30 s; Fabric routes remote calls |
+| `run` | `cancel(AttemptRef, OperationKey, CancelReason, &ExecutionContext) -> Result<CancelReceipt, RunError>`; `resume(ResumeRequest, OperationKey, &ExecutionContext) -> Result<SubmissionReceipt, RunError>` | Check project/actor/authority, exact target/generation and preserved route/access; no implicit fresh continuation |
+| `run` | `read_output(AttemptRef, ArtifactPart, ByteRange, &ExecutionContext) -> Result<OutputChunk, RunError>`; `export(AttemptRef, ExportLimits, &ExecutionContext) -> Result<ArtifactManifest, RunError>` | Check project/actor/authority; bounded regular files, stable manifest digest and immutable published output |
+| `run` | `events(RunCursor, usize) -> Result<Page<RunEvent>, RunError>`; `capabilities() -> Result<ExecutionCapabilities, RunError>`; `temporary_paths(ProjectId, AttemptRef) -> Result<AttemptTempPaths, RunError>` | Replayable completion/input-required events, lazy home-host pulls with per-host cursor; aggregate readiness and host-local confinement paths |
+| `providers` | `continuation(&AdapterId) -> ContinuationSupport`; `doctor(&AdapterId, ProbeBudget) -> Result<AdapterHealth, ProviderError>` | Used by run; typed session token, supported mode and host-local health, no Fabric dependency |
+| `routing` | `resolve(&RouteRequest, &RoutingContext) -> Result<ResolvedRoute, RoutingError>` | Used by run; exact applied route, fallback/confidentiality decisions, one pool implementation |
+| `quota` | `admit(&ResolvedRoute, &OperationId) -> Result<AdmissionPermit, QuotaError>` | Used by run; one admission owner across all entry points; permit tied to actual attempt |
+| `telemetry` | `record(&RunEvent) -> Result<(), TelemetryError>` | Used by run, idempotent ledger attribution; telemetry failure is diagnostic, never a provider kill |
+| `cli` | `FabricArgs::execute(&FabricService) -> Result<CliOutput, CliError>` | Freeze command tree including routing live-model command and exits 0, 1, 2, 3, 4, 124, 130; CLI owns rendering, no library imports cli |
