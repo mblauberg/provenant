@@ -46,3 +46,21 @@ They form the current baseline; they are not newly discovered port mismatches.
   validation, strict duplicate detection, fallback, aliases and peer exclusion
   are ported. A compatibility representation/input decoder remains; no
   feature expansion or new dependency is authorised by this entry.
+
+## RP-1002 — JSONC value representation and diagnostics (partial unit)
+
+- Unit: `scripts/lib/jsonc.py#unit-01`; same rulebook and oracle as RP-1001.
+- Class: `library`.
+- Reproducer: `cargo test -j 2 -p provenant-core python_extended_jsonc_values
+  -- --ignored` in `tools/front-door`.
+- Expected/actual: Python accepts `NaN`, infinities, arbitrary-size integers
+  (subject to its interpreter limit), overflow-to-infinity floats, and lone
+  surrogate escapes. The current serde value model rejects or rounds these.
+  Generic syntax errors also retain serde diagnostics rather than Python's
+  message, character offset, line and column. Unterminated block comments
+  already carry Python-compatible character positions.
+- Evidence: ignored differential test demonstrates the value acceptance gap;
+  active differential fixtures cover comments, escaped strings, duplicate
+  members, malformed syntax and trailing commas. Judge evidence is deferred.
+- Disposition: open; partial syntax port only. Value representation and edge
+  error rendering remain. No changed contract is approved.

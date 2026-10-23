@@ -3,6 +3,7 @@
 
 pub mod host_identity;
 mod json_support;
+pub mod jsonc;
 pub mod paths;
 #[cfg(test)]
 mod test_support;
