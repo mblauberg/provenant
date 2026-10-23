@@ -576,7 +576,7 @@ fn stats_renderer_matches_python() {
         "lanes":[{"status":"ok","error_class":null,"lanes":2}], "compactions_per_lane":[],
         "limits_per_day":[{"day":"2026-01-02","provider":"openai","status":"rate_limited","events":1}],
         "last_limit_events":[{"provider":"openai","account":null,"timestamp":"2026-01-02T00:00:00Z","age_seconds":10}],
-        "quota_observations":[{"provider":"openai","window":"5h","used_percent":20.12345,"reset_at":null,"timestamp":"2026-01-02T00:00:00Z"},{"provider":"other","window":"1h","used_percent":999999.9,"reset_at":null,"timestamp":"2026-01-02T00:00:00Z"},{"provider":"tiny","window":"1h","used_percent":0.00009999999,"reset_at":null,"timestamp":"2026-01-02T00:00:00Z"}],
+        "quota_observations":[{"provider":"openai","window":"5h","used_percent":20.12345,"reset_at":null,"timestamp":"2026-01-02T00:00:00Z"},{"provider":"other","window":"1h","used_percent":999999.9,"reset_at":null,"timestamp":"2026-01-02T00:00:00Z"},{"provider":"tiny","window":"1h","used_percent":0.00009999999,"reset_at":null,"timestamp":"2026-01-02T00:00:00Z"},{"provider":"negative-zero","window":"1h","used_percent":-0.0,"reset_at":null,"timestamp":"2026-01-02T00:00:00Z"}],
         "unattributed":[],"excluded_rows":{"test_fixture":1},"hosts":[{"host":"peer","status":"offline","reason":"timeout"}]
     });
     for detail in [false, true] {

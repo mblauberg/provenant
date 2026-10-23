@@ -339,7 +339,7 @@ fn compact_json(value: &serde_json::Value) -> Option<String> {
 }
 fn python_general(value: f64) -> String {
     if value == 0.0 {
-        return "0".into();
+        return if value.is_sign_negative() { "-0" } else { "0" }.into();
     }
     let scientific = format!("{value:.5e}");
     let (mantissa, exponent) = scientific.split_once('e').unwrap_or((&scientific, "0"));
