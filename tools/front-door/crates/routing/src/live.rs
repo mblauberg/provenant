@@ -3,10 +3,8 @@
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-pub(crate) fn parse_timestamp(raw: &str) -> Option<jiff::Timestamp> {
-    provenant_core::py::python_iso_timestamp(&raw.replace('Z', "+00:00"))?
-        .to_jiff()
-        .ok()
+pub(crate) fn parse_timestamp(raw: &str) -> Option<provenant_core::py::PythonTimestamp> {
+    provenant_core::py::python_iso_timestamp(&raw.replace('Z', "+00:00"))
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -37,8 +35,7 @@ impl CapabilitySnapshot {
     /// Python's datetime has microsecond precision, including for ISO input.
     pub fn is_fresh(&self, now: jiff::Timestamp) -> bool {
         parse_timestamp(&self.observed_at).is_some_and(|observed| {
-            let age =
-                now.as_nanosecond().div_euclid(1000) - observed.as_nanosecond().div_euclid(1000);
+            let age = now.as_nanosecond().div_euclid(1000) - i128::from(observed.as_microsecond());
             age <= i128::from(CAPABILITY_MAX_AGE_SECONDS) * 1_000_000
         })
     }
@@ -81,8 +78,7 @@ pub fn cached_live_models(
     else {
         return vec![];
     };
-    if now.as_nanosecond().div_euclid(1000) - observed.as_nanosecond().div_euclid(1000)
-        > 86_400_000_000
+    if now.as_nanosecond().div_euclid(1000) - i128::from(observed.as_microsecond()) > 86_400_000_000
     {
         return vec![];
     }
@@ -176,7 +172,9 @@ pub fn cooling(
         }
         if let Some(until) = item.get("cooling_until") {
             let raw = crate::pending::ordered_string(until);
-            if parse_timestamp(&raw).is_some_and(|stamp| stamp > now) {
+            if parse_timestamp(&raw).is_some_and(|stamp| {
+                i128::from(stamp.as_microsecond()) > now.as_nanosecond().div_euclid(1000)
+            }) {
                 return Ok(raw);
             }
         }
@@ -221,7 +219,7 @@ pub fn recent_failed_task_class_models(
         let Some(observed) = parse_timestamp(&raw) else {
             return std::collections::BTreeSet::new();
         };
-        let age = now.as_nanosecond().div_euclid(1000) - observed.as_nanosecond().div_euclid(1000);
+        let age = now.as_nanosecond().div_euclid(1000) - i128::from(observed.as_microsecond());
         if (0..=7 * 86_400_000_000).contains(&age) {
             let status = latest.get("status");
             if status.is_some_and(|s| s.is_object() || s.is_array()) {
@@ -323,5 +321,217 @@ print(json.dumps([records,m.model_route_live._cooling('codex','sol',records,d['c
         )
         .unwrap();
         assert_eq!(json!([normalized, until]), expected);
+    }
+}
+
+/// Cached quota advice is optional. Implementations never fetch from a provider
+/// while resolving a route. The quota owner does not yet expose this API.
+// port: belongs in provenant-quota
+pub trait LiveQuotaAdvice {
+    fn apply_to_cooldowns(
+        &self,
+        records: &crate::ordered_json::OrderedObject,
+    ) -> Result<crate::ordered_json::OrderedObject, LiveAdvisoryError>;
+    fn route_states(&self) -> Result<crate::ordered_json::OrderedObject, LiveAdvisoryError>;
+}
+#[derive(Debug, thiserror::Error)]
+pub enum LiveAdvisoryError {
+    #[error("advisory observation unavailable")]
+    Unavailable,
+    #[error("invalid quota route state")]
+    InvalidQuotaState,
+    #[error(transparent)]
+    Json(#[from] provenant_records::DecodeError),
+    #[error(transparent)]
+    Records(#[from] provenant_records::fabric_records::RecordError),
+    #[error(transparent)]
+    Match(#[from] crate::matching::MatchError),
+}
+pub trait AdvisoryDocumentSource {
+    /// Missing, unreadable and invalid UTF-8 advisory documents are unavailable.
+    fn read(&self, name: &str) -> Result<String, LiveAdvisoryError>;
+}
+fn advisory_document(
+    source: &dyn AdvisoryDocumentSource,
+    name: &str,
+) -> Result<crate::ordered_json::OrderedValue, LiveAdvisoryError> {
+    let raw = match source.read(name) {
+        Ok(raw) => raw,
+        Err(_) => return Ok(crate::ordered_json::OrderedValue::Null),
+    };
+    match crate::pending::from_json(&raw) {
+        Ok(value) => Ok(value),
+        Err(e @ provenant_records::DecodeError::NumberOutOfRange(_)) => Err(e.into()),
+        Err(_) => Ok(crate::ordered_json::OrderedValue::Null),
+    }
+}
+pub fn cached_live_models_from(
+    source: &dyn AdvisoryDocumentSource,
+    adapter: &str,
+    now: jiff::Timestamp,
+) -> Result<Vec<String>, LiveAdvisoryError> {
+    Ok(cached_live_models(
+        &advisory_document(source, "capabilities.json")?,
+        adapter,
+        now,
+    ))
+}
+pub fn recent_failed_models_from(
+    source: &dyn AdvisoryDocumentSource,
+    adapter: &str,
+    task_class: &str,
+    now: jiff::Timestamp,
+) -> Result<std::collections::BTreeSet<String>, LiveAdvisoryError> {
+    Ok(recent_failed_task_class_models(
+        &advisory_document(source, "route-health.json")?.to_value(),
+        adapter,
+        task_class,
+        now,
+    ))
+}
+pub fn with_quota(
+    records: &crate::ordered_json::OrderedObject,
+    quota: Option<&dyn LiveQuotaAdvice>,
+) -> crate::ordered_json::OrderedObject {
+    quota
+        .and_then(|q| q.apply_to_cooldowns(records).ok())
+        .unwrap_or_else(|| records.clone())
+}
+pub fn quota_states(
+    quota: Option<&dyn LiveQuotaAdvice>,
+) -> Result<crate::ordered_json::OrderedObject, LiveAdvisoryError> {
+    use crate::ordered_json::OrderedObject;
+    let Some(states) = quota.and_then(|q| q.route_states().ok()) else {
+        return Ok(OrderedObject::default());
+    };
+    let mut result = OrderedObject::default();
+    for (_, state) in states.0 {
+        let Some(adapter) = state.get("adapter").filter(|v| crate::pending::truthy(v)) else {
+            if state.as_object().is_none() {
+                return Err(LiveAdvisoryError::InvalidQuotaState);
+            }
+            continue;
+        };
+        let adapter = adapter
+            .as_str()
+            .ok_or(LiveAdvisoryError::InvalidQuotaState)?;
+        let adapter = adapter.to_owned();
+        result.insert(adapter, state);
+    }
+    Ok(result)
+}
+/// Use records' scoped reader, then optional quota reconciliation, then canonical
+/// identity merging. Store failures remain explicit, as in the Python caller.
+pub fn cooldown_records(
+    store: &dyn provenant_records::fabric_records::FabricRecordStore,
+    quota: Option<&dyn LiveQuotaAdvice>,
+    resolver: &crate::matching::ModelCatalog<'_>,
+    now: jiff::Timestamp,
+) -> Result<crate::ordered_json::OrderedObject, LiveAdvisoryError> {
+    use crate::ordered_json::{OrderedObject, OrderedValue};
+    let at = provenant_records::fabric_records::RecordDateTime::Aware(
+        now.to_zoned(jiff::tz::TimeZone::UTC),
+    );
+    let rows = store.read_cooldowns(None, Some(&at), None)?;
+    let records = OrderedObject(
+        rows.into_iter()
+            .map(|(key, row)| {
+                (
+                    key,
+                    OrderedValue::Object(OrderedObject(
+                        row.into_iter().map(|(k, v)| (k, v.into())).collect(),
+                    )),
+                )
+            })
+            .collect(),
+    );
+    Ok(normalise_cooldowns(&with_quota(&records, quota), resolver)?)
+}
+
+#[cfg(test)]
+mod owner_boundary_tests {
+    use super::*;
+    use crate::ordered_json::{OrderedObject, OrderedValue};
+    use serde_json::json;
+    struct Source(&'static str);
+    impl AdvisoryDocumentSource for Source {
+        fn read(&self, _: &str) -> Result<String, LiveAdvisoryError> {
+            Ok(self.0.into())
+        }
+    }
+    struct FailingQuota;
+    impl LiveQuotaAdvice for FailingQuota {
+        fn apply_to_cooldowns(
+            &self,
+            _: &OrderedObject,
+        ) -> Result<OrderedObject, LiveAdvisoryError> {
+            Err(LiveAdvisoryError::Unavailable)
+        }
+        fn route_states(&self) -> Result<OrderedObject, LiveAdvisoryError> {
+            Err(LiveAdvisoryError::Unavailable)
+        }
+    }
+    #[test]
+    fn advisory_read_failures_and_quota_failures_leave_routing_available() {
+        let now = "2026-10-23T00:00:00Z".parse().unwrap();
+        for source in [Source("{bad"), Source("null"), Source("[]")] {
+            assert!(cached_live_models_from(&source, "codex", now)
+                .unwrap()
+                .is_empty());
+            assert!(recent_failed_models_from(&source, "codex", "review", now)
+                .unwrap()
+                .is_empty());
+        }
+        let records = OrderedObject(vec![(
+            "codex/x".into(),
+            json!({"cooling_until":"later"}).into(),
+        )]);
+        assert_eq!(with_quota(&records, Some(&FailingQuota)), records);
+        assert_eq!(
+            quota_states(Some(&FailingQuota)).unwrap(),
+            OrderedObject::default()
+        );
+    }
+    #[test]
+    fn python_full_year_range_is_preserved_without_jiff_timestamp_conversion() {
+        let raw = "9999-12-31T23:59:59.999999Z";
+        let snapshot = CapabilitySnapshot {
+            observed_at: raw.into(),
+            models: vec!["x".into()],
+        };
+        let now = "2026-10-23T00:00:00Z".parse().unwrap();
+        assert!(snapshot.is_fresh(now));
+        let cache: OrderedValue = json!({"codex":{"observed_at":raw,"models":["x"]}}).into();
+        assert_eq!(cached_live_models(&cache, "codex", now), ["x"]);
+        let catalogue = json!({"adapters":{"codex":{"models":[]}}});
+        let cached = std::collections::BTreeMap::new();
+        let resolver = crate::matching::ModelCatalog {
+            catalog: &catalogue,
+            cached: &cached,
+        };
+        let cooldowns = OrderedObject(vec![(
+            "codex/*".into(),
+            json!({"cooling_until":raw}).into(),
+        )]);
+        assert_eq!(
+            cooling("codex", "x", &cooldowns, &resolver, now).unwrap(),
+            raw
+        );
+    }
+    #[test]
+    fn suffix_effort_keeps_order_when_two_levels_share_a_suffix() {
+        let catalog:OrderedValue=crate::pending::from_json(r#"{"adapters":{"agy":{"models":[{"id":"gemini-1","effort_transport":"model-suffix","suffix":{"high":"-x","low":"-x"}}]}}}"#).unwrap();
+        let cache = std::collections::BTreeMap::new();
+        let raw = catalog.to_value();
+        let resolver = crate::matching::ModelCatalog {
+            catalog: &raw,
+            cached: &cache,
+        };
+        assert_eq!(
+            resolver
+                .suffix_effort_ordered("agy", "gemini-1-x", &catalog)
+                .unwrap(),
+            "high"
+        );
     }
 }

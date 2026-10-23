@@ -101,7 +101,7 @@ pub fn load_capabilities(
     else {
         return Ok(refused(Untrusted));
     };
-    let age = now.as_nanosecond().div_euclid(1000) - observed.as_nanosecond().div_euclid(1000);
+    let age = now.as_nanosecond().div_euclid(1000) - i128::from(observed.as_microsecond());
     if !(-60_000_000..=300_000_000).contains(&age) {
         return Ok(refused(Stale));
     }

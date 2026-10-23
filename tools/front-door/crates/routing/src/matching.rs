@@ -53,7 +53,10 @@ fn version(model: &str) -> Result<Vec<u64>, MatchError> {
             let digits: String = m
                 .as_str()
                 .chars()
-                .map(crate::pending::decimal_digit)
+                .map(|c| {
+                    provenant_core::py::decimal_digit(c)
+                        .and_then(|d| char::from_digit(u32::from(d), 10))
+                })
                 .collect::<Option<String>>()
                 .ok_or(MatchError::NumberOutOfRange)?;
             digits.parse().map_err(|_| MatchError::NumberOutOfRange)
@@ -180,6 +183,51 @@ impl ModelCatalog<'_> {
             .into_iter()
             .find(|(_, v)| !tail.is_empty() && v == &tail)
             .map(|(l, _)| l)
+            .unwrap_or_default())
+    }
+    /// Ordered ingress for model-suffix transports. First level position is
+    /// retained while later occurrences replace its suffix, like a Python dict.
+    pub fn suffix_effort_ordered(
+        &self,
+        adapter: &str,
+        requested: &str,
+        catalog: &crate::ordered_json::OrderedValue,
+    ) -> Result<String, MatchError> {
+        use crate::ordered_json::OrderedValue;
+        let base = self.live_base(adapter, requested)?;
+        let tail = fold(
+            &requested
+                .chars()
+                .skip(base.chars().count())
+                .collect::<String>(),
+        );
+        let entries = catalog
+            .get("adapters")
+            .and_then(|a| a.get(adapter))
+            .and_then(|a| a.get("models"));
+        let mut levels: Vec<(String, String)> = Vec::new();
+        if let Some(OrderedValue::Array(entries)) = entries {
+            for entry in entries.iter().filter(|e| {
+                e.get("effort_transport").and_then(OrderedValue::as_str) == Some("model-suffix")
+            }) {
+                if let Some(suffixes) = entry.get("suffix").and_then(OrderedValue::as_object) {
+                    for (level, suffix) in &suffixes.0 {
+                        let suffix = suffix
+                            .as_str()
+                            .ok_or(MatchError::Catalog("effort suffix"))?;
+                        if let Some((_, old)) = levels.iter_mut().find(|(key, _)| key == level) {
+                            *old = fold(suffix);
+                        } else {
+                            levels.push((level.clone(), fold(suffix)));
+                        }
+                    }
+                }
+            }
+        }
+        Ok(levels
+            .into_iter()
+            .find(|(_, suffix)| !tail.is_empty() && suffix == &tail)
+            .map(|(level, _)| level)
             .unwrap_or_default())
     }
     fn latest(&self, adapter: &str, requested: &str) -> Result<ModelMatch, MatchError> {

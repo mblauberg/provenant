@@ -2,6 +2,7 @@
 
 #![forbid(unsafe_code)]
 
+#[path = "pending/casefold.rs"]
 mod casefold;
 mod render;
 
@@ -17,6 +18,7 @@ pub mod pools;
 pub mod preferences;
 pub mod probe;
 
+#[path = "pending/ordered_json.rs"]
 pub mod ordered_json;
 pub mod pending;
 

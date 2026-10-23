@@ -1,3 +1,4 @@
+// port: belongs in provenant-core (no casefold API on main yet).
 // Unicode default case-fold mappings generated from Python Unicode data.
 pub(crate) fn fold(value: &str) -> String {
     let mut result = String::with_capacity(value.len());
