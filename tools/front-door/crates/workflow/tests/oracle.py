@@ -16,6 +16,8 @@ if unit == "lane_exit_contract":
     source = root / "skills/orchestrate/scripts/lane_exit.py"
 if unit == "lane_launch_contract":
     source = root / "skills/orchestrate/scripts/lane_launch.py"
+if unit == "observer_contract":
+    source = root / "skills/orchestrate/scripts/provider_observer.py"
 spec = importlib.util.spec_from_file_location("oracle", source)
 module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
@@ -31,7 +33,12 @@ def type_error(error):
     return {"error_type": "TypeError", "unhashable_type": kind}
 
 for case in cases:
-    if unit == "lane_launch_contract":
+    if unit == "observer_contract":
+        observer = module.LiveObserver(case["plan"])
+        for line in case["lines"]:
+            observer.feed_stdout((json.dumps(line) + "\n").encode())
+        results.append(observer.result())
+    elif unit == "lane_launch_contract":
         directory = Path(case["root"])
         plan = {"adapter":"claude","model":"m","cwd":str(directory),"run_dir":str(directory),"mode":case["mode"],"timeout_seconds":1.125,"startup_seconds":0.025,"grace_seconds":0.050,"silence_seconds":0.125,"_lineage_token":"token","batch_id":"batch-001","attempt_identity":{"run_dir":str(directory / "run")}}
         results.append(module.build_spec(plan, {"PATH":"/bin","SECRET_REFERENCE":"synthetic-value"}, argv=["/bin/claude","-p"], stdin_path=directory / "prompt.md" if case["stdin"] else None, events_path=directory / "events.jsonl", stderr_path=directory / "stderr.log", max_bytes=2048))
