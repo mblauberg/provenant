@@ -51,7 +51,7 @@ subject to v7's abort profile and single Rust implementation:
   sync means `durability_unconfirmed`, not an absent record to overwrite.
 
 Keep bounded utility execution, native process facts/CWD, descriptor-relative
-SafeFs, writer retry evidence, provider permission plans, instruction quarantine,
+`SafeFs`, writer retry evidence, provider permission plans, instruction quarantine,
 protected-tip release checks, output installation/digest verification, safe Git
 evidence and scratch deletion at settlement. Their policy is specified below.
 
@@ -73,7 +73,7 @@ reserve process identity. Repository hooks and skills move to the frozen tree.
 | `worktree remove --force`, automatic dependency-tree cloning/linking | `worktree.py` can bypass live-writer checks and provision Node modules. A Rust product needs neither Node bootstrap nor a live-writer override. Keep clean linked-worktree creation/removal and merged-branch pruning only within supplied authority. |
 | Standalone writer lease, launch/exit wrappers and Git-evidence packet wrapper | `writer_lease.py`, `lane_launch.py`, `lane_exit.py`, `git_evidence_packet.py` duplicate decisions now shared by Run, confinement and workflow. Preserve their safety checks in library calls; run owns git_evidence_packet and completed-attempt facts, workflow owns review policy, and Fabric owns the landing lease. |
 | Cross-session transcript scanning and caller-supplied terminal-report CLI | `worker_liveness.py` correlates newest transcript by cwd and accepts an exit status from its caller; multiple workers make that correlation ambiguous. Keep native repo-scoped PID/start/CWD/CPU diagnostics, also consumed by custody and the documented direct-CLI fallback. Drop old-root transcript correlation under R1 and require owned wait evidence for managed terminal reports. |
-| System-ps replacement CLI | `bin/ps` and `ps.mjs` exist to work around process inspection in the old Python/Node paths. Internal callers use native ProcessObserver/CwdObserver; no general ps formatting/option emulation is needed. |
+| System-ps replacement CLI | `bin/ps` and `ps.mjs` exist to work around process inspection in the old Python/Node paths. Internal callers use native `ProcessObserver`/`CwdObserver`; no general ps formatting/option emulation is needed. |
 | Arbitrary-PID/tree signalling from `reap` | `reap.py` rechecks a start string before `kill`, which does not reserve identity between check and signal on macOS. Replace it with recovery/cancellation by managed run ID; external workers must enter through Run to obtain custody. This is a deliberate restriction even where the old command was used. |
 
 ## Process and permission design
@@ -118,7 +118,7 @@ Linux subreaping and process-wide signal setup run only in the guardian;
 macOS uses kqueue plus SIGCHLD. Explicit cleanup precedes consuming reap; abort
 or `Drop` is never a provider cleanup mechanism.
 
-Reuse S2's machine/census/capture, SafeFs and #1348's `Executor`, raw outcome,
+Reuse S2's machine/census/capture, `SafeFs` and #1348's `Executor`, raw outcome,
 strict text decoding, `OwnedPid`, CWD, append/lock and marker APIs. Correct
 #1348 before its consumers land:
 
@@ -145,7 +145,7 @@ strict text decoding, `OwnedPid`, CWD, append/lock and marker APIs. Correct
   `supervisor::sys`, including `Command::new`. Safe provider/utility handles
   expose neither raw owning descriptors nor numeric-PID grants. Delete
   `execve_strict` in `src/exec.rs`, the Python delegation shim, and remove
-  `clap` from supervisor's Cargo.toml; argument parsing belongs to cli.
+  `clap` from supervisor's `Cargo.toml`; argument parsing belongs to cli.
 
 Lock acquisition takes core `WaitBudget` and `CancelToken`, deriving a monotonic
 deadline once at entry. Delete `LockOptions.timeout: None` in `fs/path_io.rs`.
@@ -189,7 +189,7 @@ calls and the retained implementation:
 | Errno: `__error`, `__errno_location` | Read/write the current thread's live errno slot immediately; preserve it across signal handlers and distinguish readdir EOF from failure. No pointer escapes. |
 
 Delete parity-only `newlocale`, `freelocale`, `strftime_l`, `localtime_r` and
-`gmtime_r` wrappers in `sys/process.rs` and `sys/lane_files.rs`. Core's jiff
+`gmtime_r` wrappers in `sys/process.rs` and `sys/lane_files.rs`. Core's `jiff`
 clock supplies timestamps; no locale or Python-start-string emulation remains.
 
 ### Permission policy
@@ -264,7 +264,7 @@ passes only its just-merged scope; it cannot trigger an unscoped repository swee
 ## Commands and MCP
 
 The [cross-area decisions](README.md#cross-area-decisions) own the command
-contract, wait budgets, run verbs and HookSpec. CLI supplies its JSON envelope,
+contract, wait budgets, run verbs and `HookSpec`. CLI supplies its JSON envelope,
 1 MiB result cap, exits and exact flags; this area defines none separately.
 Diagnostics stay on redacted stderr. Supervisor adds no run verbs or MCP tools;
 Fabric's tools call Run, whose top-level `cancel` and `reconcile` own control
@@ -275,7 +275,7 @@ and recovery. Fabric's landing lease is separate from the writer lease.
 | `worktree create NAME` | New or existing branch, optional base/repo; create a clean linked tree under verified `.worktrees/`, return path, branch and pinned base. No Node provisioning. |
 | `worktree list` | Repo-scoped path, branch/head, dirty state and writer state free/live/unknown. |
 | `worktree remove NAME` / `worktree remove --merged` | Refuse primary, dirty, live or unknown writers; no force. Merged pruning requires explicit authority, a pinned integration tip and exact branch or since scope under cli's frozen flags. Recheck OID before ref deletion; a scoped post-merge hook cannot sweep other branches. |
-| `hook claude pre-tool-use` | Lane-safety handler registered in cli's HookSpec table. Bound stdin to 1 MiB; allow/non-Bash emits empty stdout/0, deny uses recorded harness decision JSON/0. Unreadable/malformed/oversized guard input fails closed with harness blocking exit 2 and content-free stderr. Installer consumes the same table. |
+| `hook claude pre-tool-use` | Lane-safety handler registered in cli's `HookSpec` table. Bound stdin to 1 MiB; allow/non-Bash emits empty stdout/0, deny uses recorded harness decision JSON/0. Unreadable, malformed, oversized or timed-out guard input emits deny JSON with exit 0. Only failure to write the denial uses blocking exit 2 and content-free stderr. Installer consumes the same table. |
 
 Drop worktree check/verify/prune, clean plan/apply, git evidence and run workers.
 Checks register findings under `check`'s binding subjects; workflow uses pinned
@@ -360,9 +360,9 @@ byte counts, native start stamps and clock values are integers.
 | `QuarantineManifest` / `GitEvidence` | Pinned OIDs, selected byte-paths, before/after fingerprints, file digests, view/restore status. Evidence files durable before no-replace manifest publication; no claim of success on partial capture. |
 
 Stored records deserialize only at validated storage edges. Edge-built facts
-implement Serialize only; consumers cannot construct them from arbitrary JSON.
+implement `Serialize` only; consumers cannot construct them from arbitrary JSON.
 
-All authoritative writes use held-directory SafeFs capabilities, exclusive
+All authoritative writes use held-directory `SafeFs` capabilities, exclusive
 0600 temporaries in 0700 owner directories, full writes, file sync, atomic
 rename/no-replace publication and parent sync. Lock/custody leaves must be
 regular, single-link, owner-controlled files. Following reads are explicit
@@ -450,17 +450,17 @@ nor pretends a diagnostic row gives it custody.
 
 ## External contracts and fixtures
 
-Provider wire forms, harness hooks, SKILL.md, MCP and Git remain fixed under R0.
+Provider wire forms, harness hooks, `SKILL.md`, MCP and Git remain fixed under R0.
 Our launch/receipt/CLI formats change freely; no Python/Node oracle or reader.
 The external hook/Git/OS recording directories below do not yet exist at this
 baseline: they are required build inputs, not evidence already collected.
 
 | External contract | Fixture and assertion |
 | --- | --- |
-| Provider argv/env, streams, results and continuation | Sanitised real streams in `tests/fixtures/fabric-context/{claude,codex,cursor,opencode,agy,kiro}.jsonl` seed decoder tests. Providers owns version/provenance manifests and missing launch/permission/continuation recordings, including Copilot if retained. Assert typed events beyond capture cap and no credential persistence. `fabric-v1/provider-*.json` are owned receipts, not provider-wire recordings. |
+| Provider argv/env, streams, results and continuation | Sanitised real streams in `tests/fixtures/fabric-context/{claude,codex,cursor,opencode,agy}.jsonl` seed decoder tests. Providers owns version/provenance manifests and missing launch/permission/continuation recordings. Assert typed events beyond capture cap and no credential persistence. `fabric-v1/provider-*.json` are owned receipts, not provider-wire recordings. |
 | Harness Bash pre-tool hook | CLI records real tool/session/cwd stdin and allow/deny stdout/exit under `tests/fixtures/external/hooks/`. `test_lane_safety.py` supplies scenarios, not recordings. Assert broad-kill denial, malformed-input handling and nesting bounds. Other harness mappings/installation stay with CLI. |
 | Git porcelain/OIDs/worktrees/ref/index/patch forms | Capture system-Git version plus raw NUL worktree/status/diff/index output under `tests/fixtures/external/git/`, including SHA-1/SHA-256 and linked trees. Also run temporary-repository tests for evidence races and redirects. |
-| SKILL.md and MCP | records owns R6's tracked frontmatter subset fixtures; confinement protects instruction bytes without another YAML reader. fabric-mcp owns recorded JSON-RPC 2.0 stdio/cancellation fixtures; integration proves clean stdout and retained custody after cancelled waiters. |
+| `SKILL.md` and MCP | records owns R6's tracked frontmatter subset fixtures; confinement protects instruction bytes without another YAML reader. fabric-mcp owns recorded JSON-RPC 2.0 stdio/cancellation fixtures; integration proves clean stdout and retained custody after cancelled waiters. |
 | OS and sandbox interfaces | Linux/macOS handshake fixtures record platform/backend and operation allowed/denied, not generated SBPL text equality. Fake providers cannot certify a real profile. Missing external recordings block that profile's support; live-provider capture needs user authority. |
 
 ## Tests and acceptance
@@ -488,12 +488,12 @@ arguments before running its suite, re-executing `current_exe()` for children.
 No extra binary or test crate is added; libtest never parses scenario arguments.
 The fixture module owns scenario dispatch/handshakes, fake providers and lock
 holders, with the only scoped `#[allow(clippy::disallowed_methods)]` permitting
-Command::new to re-exec that test executable. Production has no exception;
+`Command::new` to re-exec that test executable. Production has no exception;
 signals/descriptor setup use supervisor's safe APIs. Binary integration tests
 launch the real command/MCP through supervisor's safe runner, using the
 binary package's `CARGO_BIN_EXE_provenant` path; only self-re-exec uses the
-fixture module's scoped Command::new allow.
-Use Fabric's small in-house snapshot helper if needed; no insta dependency.
+fixture module's scoped `Command::new` allow.
+Use Fabric's small in-house snapshot helper if needed; no `insta` dependency.
 Test fixed Git/gh argv and arbitrary-operation refusal, lock budgets/cancellation,
 and both publication modes including post-rename sync failure.
 
@@ -551,12 +551,12 @@ Counts include tests/helpers, not just product code.
 | `tests/lane_conformance/`: `__init__.py`, `conftest.py`, `fake_provider.py`, `support.py` | 1; 66; 130; 256 |
 | Same directory: `test_seed.py`, `test_s2_capture.py`, `test_s2_lifecycle.py`, `test_s2_rust_faults.py` | 90; 28; 185; 119 |
 
-Whole-file subtotal: **11,659 Python lines** (chair's planning estimate:
-**about 11,639**). Fabric alone counts
-process-identity.ts (392), ps.mjs (20) and process-reaping.test.ts (278); cli
-counts lane_safety_guard.py (456); workflow counts git_evidence.py/test (341/346);
-run counts git_evidence_packet.py (88). None is in this subtotal. Remove
-`tests/lane_conformance/README.md` with its suite, and rewrite its custody
+Whole-file subtotal: **11,659 Python lines**. Fabric alone counts
+`process-identity.ts` (392), `ps.mjs` (20) and `process-reaping.test.ts` (278); cli
+counts `lane_safety_guard.py` (456); run counts `scripts/git_evidence.py` (341),
+`tests/test_git_evidence.py` (346) and `git_evidence_packet.py` (88). None is in
+this subtotal. Remove `tests/lane_conformance/README.md` with its suite, and
+rewrite its custody
 invariants into the Rust integration/process tests first. Shared custody and
 bounded execution helpers disappear with their last Rust consumer conversion;
 Fabric owns the process-identity/ps caller rewrites, not a new process engine.
@@ -583,7 +583,7 @@ counts identify the deletion surface; **none** is added to the subtotal above.
 
 Retire supervisor `pending.rs`, `test_support.rs`, ps/fabric_ps presentation and
 Python differential helpers/tests; retain only useful native observation code
-from process_info/worker_liveness. Retire confinement `pending.rs`,
+from `process_info`/`worker_liveness`. Retire confinement `pending.rs`,
 `pending/python_unicode.rs`, `python.rs` and Python-oracle tests in its modules.
 Move/reuse S2 Rust rather than count the move as new code. Rehome the inert
 cli worktree/clean/reap/git_evidence/lane_safety and workflow custody/writer_lease
@@ -592,7 +592,7 @@ R0 also removes their oracle generators/golden judges with those subjects;
 CLI owns shared port-tooling deletion. No schema/Unicode emulation is retained.
 
 Budget **+4,000 net Rust lines including new tests** after reuse; expected net
-across Python/TS/Rust is therefore **-7,639 lines or better**, before mixed-file
+across Python/TS/Rust is therefore **-7,659 lines or better**, before mixed-file
 and further Rust-emulation savings. This is an estimate,
 not a test quota; every build PR reports measured `Net lines:` and explains
 growth. Do not double-count shared-file totals as this area's savings.
@@ -607,7 +607,7 @@ coupled run controls/facade steps 4+5; no adapters are added while waiting.
 
 | PR-sized step | Land and delete together |
 | --- | --- |
-| S1. Safe OS owner | Reuse #1348; correct streams, timeout/CWD, reaper and SafeFs. Move lane unsafe into sys; land the wrapper inventory, bounded locks/publication and fixture module. Delete parity wrappers, execve_strict and supervisor clap. Old Python leaves remain with their old subjects. |
+| S1. Safe OS owner | Reuse #1348; correct streams, timeout/CWD, reaper and `SafeFs`. Move lane unsafe into sys; land the wrapper inventory, bounded locks/publication and fixture module. Delete parity wrappers, `execve_strict` and supervisor `clap`. Old Python leaves remain with their old subjects. |
 | S2. Provider custody | Move S2 machine/census/capture; land guardian handoff, persistent reservation, scratch settlement and exit publication. Rebuild custody tests before deleting conformance subjects. Run owns old launch/control caller removal in R4+R5. |
 | S3. Permissions, evidence and worktrees | Land backend trait/SBPL, redactor, Git/output custody, quarantine, tip verification and create/list/remove with merged pruning. Delete confinement emulation and obsolete Rust command copies; surviving Python helpers wait for R4+R5's last importer. CLI updates hooks/skills to frozen commands. |
 | R4+R5. Run controls/facade deletion PR | Run's steps 4+5 remove provider/control/finaliser importers with their owners; delete each leaf and subject tests only when its matrix gate is met. Run cuts scaffold and git_evidence_packet; Fabric/cli/workflow delete/count their own files. No tests of deleted subjects survive and no Python bridge lands. |
@@ -621,21 +621,21 @@ bridge to Rust.
 
 | Leaf | Importers/callers and last-importer deletion gate |
 | --- | --- |
-| `bounded_process.py` | dispatch_run, batch_run (R2+R3), capabilities (CLI), `scripts/fabric_lanes.py` (dynamic loader); R4+R5 after CLI/Fabric retire both remaining callers. |
-| `custody.py` | batch_run, dispatch_preflight, dispatch_run, layout, run_controls, run_dir_finalize, run_lineage, run_records, stall_watchdog and workflow's review_plan (10). Confinement deletes at R4+R5 only after workflow also replaces review_plan's import. |
-| `provider_confinement.py` | provider_exec; R4+R5 with providers' final caller cut, never S3 alone. |
-| `process_info.py` | dispatch_run, layout, memory_admission, provider_exec, run_lineage, worker_liveness, bin/ps; clean dynamically loads it and agy_home stages it. R4+R5 after clean/worktree, provider shim and diagnostic callers retire. |
-| `worker_liveness.py`, `bin/ps` | Direct CLI/skill diagnostic invocations; bin/ps imports process_info and agy_home stages both. Retire the shim with providers and R4+R5's managed controls and updated fallback/worker-liveness guidance. |
-| `writer_lease.py` | dispatch_run, dispatch_preflight, batch_run, provider_exec; R4+R5 removes last provider_exec importer. |
-| `secret_scan.py` | dispatch_run, dispatch_preflight, batch_run, log_reducer, stall_watchdog; R4+R5 after output/liveness callers retire. |
-| `output_custody.py` | cf_dispatch, fabric_records, instruction_quarantine, provider_exec; R4+R5 after providers/Fabric replace all four. |
-| `trusted_git.py` | lane_protection, provider_confinement, provider_exec; R4+R5 after all three retire. |
-| `attempt_storage.py` | dispatch_run, provider_exec; clean dynamically loads it. R4+R5 after provider and cleanup callers retire. |
-| `lane_launch.py`, `lane_exit.py` | provider_exec imports both; lane_launch imports lane_exit and dynamically calls run_records. Delete together at R4+R5 with provider_exec and that cancellation call. |
-| `agy_home.py`, `instruction_quarantine.py` | provider_exec; R4+R5 after providers retire it. |
-| `lane_protection.py` | worktree.py, Fabric CLI and orchestrate skill invoke it; R4+R5 after frozen worktree/hook callers replace these entrypoints. |
-| `scripts/worktree.py`, `scripts/worktree` | check_target, stale_checkout, node-workspace-provision import; fabric_hosts, fabric_git and dispatch_preflight load; cf_dispatch and the wrapper execute. R4+R5 after CLI/Fabric/state replace all callers and merged-pruning policy lands. |
-| `clean.py`, `reap.py` | CLI entrypoints and hook/skill callers; worktree dynamically loads clean. R4+R5 after CLI switches merged pruning and Run replaces reap with reconcile/cancel. |
+| `bounded_process.py` | `dispatch_run.py`, `batch_run.py` (R2+R3), `capabilities.py` (CLI), and dynamic loaders `scripts/fabric_lanes.py`, `scripts/fabric_git.py`, `scripts/fabric_hosts.py`; R4+R5 after CLI/Fabric retire every remaining caller. |
+| `custody.py` | `batch_run.py`, `dispatch_preflight.py`, `dispatch_run.py`, `layout.py`, `run_controls.py`, `run_dir_finalize.py`, `run_lineage.py`, `run_records.py`, `stall_watchdog.py`, workflow's `review_plan.py` and dynamic loader `scripts/fabric_git.py` (11). Confinement deletes at R4+R5 only after workflow/Fabric also retire their imports. |
+| `provider_confinement.py` | `provider_exec.py`; `cf_dispatch.py`, `dispatch_preflight.py`, `dispatch_run.py`, `utility.py` and `agy_home.py` also reach `provider_exec.provider_confinement`, with `utility_output_hook.py` reaching it through `utility.provider_exec`. R4+R5 only after every direct and facade caller retires, never S3 alone. |
+| `process_info.py` | `dispatch_run.py`, `layout.py`, `memory_admission.py`, `provider_exec.py`, `run_lineage.py`, `worker_liveness.py`, `bin/ps`; `clean.py` dynamically loads it and `agy_home.py` stages it. R4+R5 after clean/worktree, provider shim and diagnostic callers retire. |
+| `worker_liveness.py`, `bin/ps` | Direct CLI/skill diagnostic invocations; `bin/ps` imports `process_info.py` and `agy_home.py` stages both. Retire the shim with providers and R4+R5's managed controls and updated fallback/worker-liveness guidance. |
+| `writer_lease.py` | `dispatch_run.py`, `dispatch_preflight.py`, `batch_run.py`, `provider_exec.py`; R4+R5 removes last `provider_exec.py` importer. |
+| `secret_scan.py` | `dispatch_run.py`, `dispatch_preflight.py`, `batch_run.py`, `log_reducer.py`, `stall_watchdog.py`; R4+R5 after output/liveness callers retire. |
+| `output_custody.py` | `cf_dispatch.py`, `fabric_records.py`, `instruction_quarantine.py`, `provider_exec.py`; R4+R5 after providers/Fabric replace all four. |
+| `trusted_git.py` | `lane_protection.py`, `provider_confinement.py`, `provider_exec.py`; R4+R5 after all three retire. |
+| `attempt_storage.py` | `dispatch_run.py`, `provider_exec.py`; `clean.py` dynamically loads it. R4+R5 after provider and cleanup callers retire. |
+| `lane_launch.py`, `lane_exit.py` | `provider_exec.py` imports both; `lane_launch.py` imports `lane_exit.py` and dynamically calls `run_records.py`. Delete together at R4+R5 with `provider_exec.py` and that cancellation call. |
+| `agy_home.py`, `instruction_quarantine.py` | `provider_exec.py`; R4+R5 after providers retire it. |
+| `lane_protection.py` | `worktree.py`, Fabric CLI and orchestrate skill invoke it; R4+R5 after frozen worktree/hook callers replace these entrypoints. |
+| `scripts/worktree.py`, `scripts/worktree` | `check_target.py`, `stale_checkout.py`, `node-workspace-provision.py` import; `fabric_hosts.py`, `fabric_git.py` and `dispatch_preflight.py` load; `cf_dispatch.py` and the wrapper execute. R4+R5 after CLI/Fabric/state replace all callers and merged-pruning policy lands. |
+| `clean.py`, `reap.py` | CLI entrypoints and hook/skill callers; `worktree.py` dynamically loads `clean.py`. R4+R5 after CLI switches merged pruning and Run replaces reap with reconcile/cancel. |
 
 A step may be split by safe filesystem/utility, custody, permissions or worktree
 policy module. Old leaves serve only their old subjects until the coupled caller

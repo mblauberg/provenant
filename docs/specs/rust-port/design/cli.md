@@ -22,7 +22,7 @@ allowlist. This document owns the command contract every area cites.
 | Route listing/resolution | Profile mutation, separate quota scheduling/credit commands and public capabilities plumbing. |
 | Fabric messaging, tasks, identity and peers | Root host/peer/lease synonyms; redundant CLI forwarding paths. |
 | `telemetry stats` | Ingest/report aliases, retro/change markers, ledger and ledger import. |
-| Worktree creation and explicit cleanup | Implicit post-merge deletion; separate PR polling wrapper. |
+| Worktree create/list and scoped removal/merged pruning | Implicit post-merge deletion; separate PR polling wrapper. |
 | Checks and recorded hook protocols | Composite `gate`, public utility/schema/Ajv commands, output-digest and roster-advice hooks, npm retry and Python emulation/oracles. |
 
 One internal dependency gates utility deletion: `task_classifier._run_model()`
@@ -61,12 +61,15 @@ provenant
     mcp
   telemetry stats
   quota show | tick                       [routing freeze gate]
-  worktree create | list | remove [--merged]  [supervisor freeze gate]
+  worktree create NAME [--base REV] [--repo ABS]
+  worktree list [--repo ABS]
+  worktree remove NAME | --merged --integration REF [--branch NAME… | --since OID]
   workflow …                              [workflow freeze gate]
   check config | install | harness | release
   check writing PATHS… [--profile PROFILE]
   hook claude pre-tool-use | pre-compact | compact
   hook git pre-push REMOTE LOCATION
+  internal supervise                      [hidden; guardian handshake only]
 ```
 
 state.md owns the flags of `root`, `install`, `uninstall` and `check install`;
@@ -356,7 +359,7 @@ Move cli's clean/worktree/Git/safety policy to those owners. Config owns install
 retire reap/PR polling, projection/retry-install/pending/oracle/Unicode/stale
 scaffolding. Run owns git_evidence_packet via supervisor safe utility reads;
 legacy run-directory/receipt/manifest bookkeeping is cut in favour of run
-records and `clean`. Binary forbids unsafe; supervisor alone owns syscall
+records. Binary forbids unsafe; supervisor alone owns syscall
 wrappers. No async runtime or daemon.
 
 ## Fixtures and shared test harness
@@ -515,8 +518,8 @@ Recount the actual diff in each PR; budget growth needs an explanation.
 ## Build order
 
 Before step 1 freezes the full parser, the chair reconciles reserved owner
-grammars, including the missing execution-route classifier/flag decision and
-supervisor worktree flags. No parser freeze proceeds on unresolved reservations.
+grammars, including the missing execution-route classifier/flag decision. No
+parser freeze proceeds on unresolved reservations.
 
 1. **Parser and rig.** Land the frozen Clap model, exhaustive composition,
    renderer/exit/oversize contract and isolated shared rig. Delete the shell
@@ -538,8 +541,8 @@ supervisor worktree flags. No parser freeze proceeds on unresolved reservations.
 4. **Area bindings.** Connect run/route, worktree/cleanup, Fabric/MCP, telemetry
    and workflow in owner slices with caller updates and subject/test deletions.
    The missing execution-route design must settle the classifier and route
-   flag gate before freeze/utility deletion; supervisor must settle worktree
-   flags. No placeholder success or compatibility dispatcher ships.
+   flag gate before freeze/utility deletion. No placeholder success or
+   compatibility dispatcher ships.
 5. **Final CI/cut-over gate.** Replace custody invariants before deleting
    `tests/golden/`, `tests/mcp_judge/`, `tests/lane_conformance/` and
    `tests/test_record_schemas.py` with their subjects. Remove their judge CI
