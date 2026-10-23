@@ -1,457 +1,307 @@
 # Telemetry design
 
-Proposal for the workshop chair and build lane, under [PORTING.md v7](../PORTING.md)
-R0–R1 and R9. Author route: `codex/gpt-6.1-sol@high` via Fabric. Command names
-below are proposals for the command-tree freeze in `design/cli.md`.
+Build contract for the one-pass Rust rewrite under [PORTING.md v7](../PORTING.md).
+The [cross-area decisions](README.md#cross-area-decisions) bind state, commands,
+records and cut-over. Author route: `codex/gpt-6.1-sol@high` via Fabric.
 
-## Purpose and boundary
+## Purpose and removals
 
-`provenant-telemetry` answers how much supervised work used, which routes
-succeeded, and how complete those measurements are. It stores local,
-allowlisted usage and attempt facts, calculates exact API-equivalent cost
-estimates, and produces a compact table or a typed JSON report. Execution
-success is an outcome, never delivery acceptance. The ledger is advisory:
-its failure cannot stop a provider, lose a terminal receipt or change routing.
-Context occupancy, compaction and resume policy belong to **run**. Live quota
-collection, scheduling, account identity and quota reports belong to **quota**.
+`provenant-telemetry` reduces run's retained terminal attempt records with the
+bundled price table. It reports supervised usage, API-equivalent cost estimates,
+route outcomes and measurement coverage. Run owns durable records, admission,
+the registry and terminal publication. Telemetry owns no store, writer lock,
+background collection or provider lifecycle operation; a report failure cannot
+signal a provider or change a published outcome.
 
-## Evidence and feature decisions
+The council's evidence distinguishes activity from product demand: the four
+`stats --json` and five `telemetry sources --json` reads in the earlier workshop
+scan were telemetry lanes testing their own code. That host's ledger had zero
+usage rows, but the laptop's ledger was about **565 MB**, with **566,185 usage
+rows, 46,923 events and 13 deliveries**. This Mac's OTel collector was live,
+with about **724 MB** retained and **568 MB of logs from one day**. Those are
+collection volumes, not evidence of a product reader. The collector retires
+because it has **no reader**, not because it was inactive.
 
-Evidence at `1b3d48e4`, checked on 2026-10-23/24:
-
-- Tool-call arguments in 1,401 Claude project JSONL files (485,046 records)
-  and 1,044 Codex session files (329,245 records) yielded **four local
-  `provenant stats --json` reads**, **five `telemetry sources --json`
-  reads**, and two bare-script diagnostics in Provenant sessions. Matches
-  span 2026-10-23 02:14–03:47 UTC. The scan excluded prose, searches, edits,
-  heredoc bodies and test strings. No observed call used `--hosts`,
-  `--compare`, `--detail`, `accepted`, `changes`, `retro` or explicit ingest.
-  This sparse diagnostic sample is evidence of readers, not exhaustive
-  absence or sustained use; stats previously refreshed implicitly.
-- The documented local ledger, opened read-only, had zero `usage`,
-  `deliveries`, `changes` and `events` rows, 150 `quota_series` and four
-  `quota_events` rows; journal mode `delete`, no sidecars. This is one host.
-- Callers were searched in skills, `scripts/hooks/`, scripts, docs,
-  `tools/front-door/src` and Fabric. No skill/hook invokes a report. The
-  [retrospect skill](../../../../skills/retrospect/SKILL.md) reads retained
-  evidence directly; the [delivery reference](../../../../skills/deliver/references/contract.md)
-  promises stats without a reader. The [telemetry](../../../runbooks/telemetry.md),
-  [host](../../../runbooks/fabric-hosts.md) and
-  [routing](../../../runbooks/model-routing.md) runbooks describe broader
-  features; documentation alone does not establish use.
-
-| Decision | Build requirement and evidence |
+| Keep | Contract |
 |---|---|
-| Keep local usage/cost and outcomes | Four JSON report reads; receipts supply usage/route/status/timing. Keep provider/model and daily account totals, latest task outcome, attempts, retries, errors and latency samples. |
-| Keep source health and ingest | Five source-health reads. Explicit ingest repairs missed advisory writes from new-state attempt records. |
-| Keep old-ledger import | R1 permits it; history on other hosts may be useful. Read retained facts, never their referenced files. |
-| Drop old transcript/receipt discovery | R1 forbids old-root reads. No Claude/Codex transcript, OpenCode DB or `.agent-run/` crawl. Unsupervised native CLI usage becomes **outside coverage**, not zero. |
-| Drop delivery telemetry | Zero rows and no observed reader. Remove `accepted`, cost-per-accepted, writer/reviewer summaries and delivery/repair/finding joins. Workflow keeps acceptance evidence. |
-| Drop changes/compare/retro | Zero change rows, invocations and skill consumers. Remove GitHub scraping, markers, statistical verdicts and attention proxies. The retrospect skill remains. |
-| Drop cross-host summaries | No `--hosts` use; only telemetry's own `fabric_hosts.py::telemetry_summary` consumes them. Remove that operation; retain local host identity. |
-| Drop OTel ingestion/collector/export mapping | Zero events or readers; raw collector payloads duplicate collection. Prompt/tool logging stays **off**, including length/decision counters. Remove source/install options; preserve stores and leave installed-service changes to authorised cut-over. |
-| Drop telemetry quota history and rollout fallback | The 150/four historical rows prove collection, but no script/skill/report queries those histories. Quota keeps live snapshots and reset interpretation independently. Old histories remain untouched. |
-| Drop shadow blobs/model heuristics | Routing docs suggest SQL inspection, but no actual read was found. Keep task class and exact model components; remove alias/version guessing and model-regex fixture detection. |
-| Drop parent rollups/compaction telemetry | No reader found; run owns lineage/context. Retain parent references without another additive total. |
-| Drop read-time refresh/top-level aliases | Read commands never write. Advisory run writes plus explicit ingest replace the hourly setting; only the `telemetry` subtree survives. |
+| Supervised usage and route outcomes | Run already records usage, route and outcome; reduce those records on demand. Include all retries once. |
+| Exact cost estimates and missingness | Integer arithmetic and reviewed prices; unknown measurements remain unknown. |
+| Coverage | State the retained run snapshot and its omissions; never imply whole-account measurement. |
 
-The existing Rust crate and [closed PR #1340](https://github.com/mblauberg/provenant/pull/1340)
-were read as source material. Reuse ideas about allowlisting, missingness and
-idempotence. Replace the inert implementation, its float arithmetic,
-`pending` records/Unicode helpers and Python/Node differential tests. None
-of their output wording, sorting or runtime emulation is a contract.
+| Drop | Reason and consequence |
+|---|---|
+| SQLite ledger, writer lock, advisory writes, `record_attempt`, ingest and sources | Duplicate run's durable facts without a product reader. No telemetry supervisor edge or new database. |
+| Ledger import and history carry-forward | The new binary never opens, imports or deletes the old ledger. Its history stays on disk for the old install. No import command or receipt. |
+| Transcript/receipt discovery and OTel ingest/export/collector | No reader for the duplicate collection. Unsupervised CLI activity is outside coverage; old transcripts and collector data stay untouched. |
+| Delivery telemetry, accepted-cost reports and delivery joins | Workflow retains acceptance evidence. No telemetry `upsert_delivery` or `delivery_report`; optional dispatch `delivery_id` remains run/workflow correlation only. |
+| Changes, comparison and retro reports | No established product reader. Delete both reducers `scripts/telemetry_changes.py` and `scripts/telemetry_delivery.py`; the retrospect skill keeps using evidence directly. |
+| Cross-host summaries, aliases and read-time refresh | Stats is local and read-only. No SSH telemetry operation, top-level `stats`/`retro` aliases or implicit refresh. |
+| Weekly quota history and ledger fallback | History is not carried forward. Execution-route/quota owns any future window history, reset interpretation, probes and cooldowns. |
+| Model heuristics, parent rollups and compaction telemetry | Exact recorded identity suffices. Run owns context and lineage; parent references never add another usage total. |
 
-## Proposed command subtree
+## Command and report
 
-All commands accept `--json`. Root/state selection is the global CLI/config
-contract, not a telemetry-specific environment resolver.
-
-| Command | Flags | Human output | JSON result payload |
-|---|---|---|---|
-| `provenant telemetry ingest` | none | New/unchanged/failed attempt-record counts and source status | `IngestReport`: counts, source status, bounded diagnostics |
-| `provenant telemetry sources` | none | Source, record version, last attempt/success, committed rows, status | `SourceReport`: the same fields plus import receipt summary |
-| `provenant telemetry stats` | `--since DATE_OR_RFC3339`, `--until DATE_OR_RFC3339`, `--detail` | Usage/cost and route outcome tables; detail adds daily account rows | `StatsReport`: usage, daily usage, outcomes, coverage, sources |
-| `provenant telemetry import` | required `--from FILE` | Imported/suppressed/skipped row counts and immutable source fingerprint | `ImportReport`: schema, fingerprint, per-table counts, conversion warnings |
-
-No telemetry MCP tools are proposed. No `snapshot` command, SSH telemetry
-operation or MCP registration survives. Skills needing these figures call the
-canonical JSON CLI; they do not open SQLite. Installation/help must remain
-cheap and must not open the ledger.
-
-`stats` defaults to all available history. Bounds select `[since, until)`;
-dates mean midnight UTC, timestamps require an offset, `since >= until` is
-invalid. Undated imported facts appear only without bounds, counted
-separately. Every report declares `supervised_attempts` coverage plus any
-`legacy_import`, never whole-account coverage.
-
-Human tables show 12 rows per section (200 with `--detail`) and omitted
-counts; missing values print `-`. JSON ignores detail, never silently
-truncates, and refuses above 8 MiB with `report_too_large` and advice to narrow
-the period. Sort by group keys/day, missing last. Diagnostics use stderr.
-
-Each JSON response is one object:
-`{ "schema": "provenant.telemetry.<result>.v1", "partial": false,
-"result": ..., "diagnostics": [...] }`. Closed typed diagnostics have a
-code, source kind and optional opaque record ID, never raw input or error
-text. Source states are `not_ingested`, `ok`, `absent`, `partial`, `error`.
-A failed file does not erase successful files; partial results are explicit.
-
-Exit codes: **0** complete success (including empty state, absent sources and
-an identical repeated import); **1** I/O, corruption, unsupported schema,
-invalid input record, overflow, size/deadline limit, `already_imported`
-with a different snapshot, or an ingest with any failed file;
-**2** invalid CLI arguments; **3** writer contention or a changed/busy legacy
-source; **4** a usable report with partial collection coverage. Missing
-uninitialised state is an empty read with `not_ingested`, not a created DB.
-An existing incompatible/corrupt DB is an error, not an empty report. Fatal
-JSON errors use the same envelope with `result: null`; clap usage errors
-remain CLI-owned.
-
-## Records, layout and durability
-
-Use the **new `StateRoot` supplied by config**, at the location chosen by the
-state design. Do not honour old Fabric state-root variables or fall back to
-old files. Below that root:
+The sole telemetry command is:
 
 ```text
-telemetry/
-  ledger.sqlite3          # private, schema version 1
-  writer.lock             # supervisor-held, bounded acquisition
-  import.snapshot         # one reserved temporary slot, never historical state
-runs/...                  # new run-owned terminal attempt records; input only
+provenant telemetry stats [--since DATE_OR_RFC3339] [--until DATE_OR_RFC3339] [--detail] [--json]
 ```
 
-No copies of prompts, transcripts, raw receipts or arbitrary JSON attributes
-are stored. Directories are 0700 and files 0600. The new run layout is an API
-request to execution/state, not permission to scan the old `.agent-run/`.
+CLI owns clap, global root/project selection, rendering and the frozen command
+contract. Dates mean midnight UTC; timestamps require an offset. Select terminal
+times in `[since, until)`, defaulting to all retained history; reject invalid
+bounds or `since >= until`. Selection is host-local and respects the CLI's
+project scope. No telemetry MCP tool, import, ingest or sources command remains.
 
-`provenant-records` owns the serialised models. Own records deny unknown
-fields and carry `schema_version: 1`; absent optional measurements are null.
-Unknown versions fail closed. Identifier strings are at most 256 UTF-8 bytes;
-opaque core IDs retain their tighter type bounds. Reject oversized fields
-before retaining them, including legacy projections. The schema is small:
+JSON uses CLI's envelope, with `schema_version`, `command`, `status`, `data`
+and `error`, capped at **1 MiB for the complete result**. `data` is a
+`StatsReport`: selected scope and interval, run snapshot revision, price-table
+identity/review date, usage and cost totals, route groups, optional UTC daily
+account groups, outcomes and coverage. `--detail` adds daily groups in both
+formats. Human output shows at most 12 rows per section (200 with detail),
+with omitted counts and `-` for missing values. Sort groups by their exact keys,
+missing last. JSON never silently truncates; an oversized report returns the
+CLI's bounded error with advice to narrow the interval or scope.
 
-| Record/table | Key and retained fields |
+Coverage in `data` includes `scope = supervised_terminal_attempts`, selected
+attempt count, missing usage/category/price/account counts, excluded fixture
+count, active/nonterminal count, retained-history bounds and known omissions
+from run cleanup. Run supplies retention metadata; if it cannot establish the
+historical boundary, mark it unknown. Old-ledger history, unsupervised usage
+and other hosts are explicitly outside coverage. Missing data does not mean
+zero. A valid empty snapshot returns an empty report without creating state.
+A missing/uninitialised run store is empty; an existing unreadable, corrupt or
+incompatible store is an error, never silently skipped.
+
+Use the binding exits: **0** successful report, including partial measurement
+coverage in `data`; **1** failed/refused computation or findings; **2** invalid
+arguments, malformed input or unsupported record/config version; **3** cannot
+proceed because of setup, I/O or contention; **124** wait deadline; **130**
+cancelled. Stats does not wait for attempts and normally cannot return 124.
+There is **no exit 4**. CLI owns consistent envelope status/error mapping;
+internal diagnostics are bounded, redacted stderr under R8.
+
+## Run input and crate boundary
+
+Run exposes a consistent read-only snapshot of retained terminal attempts,
+plus coverage metadata and active counts, through its store handle. Admission
+and operation insertion stay atomic in run's durable store; fabric-runtime
+owns identity and federation routing, not another telemetry registry. Telemetry
+never crawls `runs/`, opens run's database or reads referenced output paths.
+The binary/CLI obtains the snapshot from run and passes its typed facts into
+the reducer, avoiding a telemetry-to-run dependency.
+
+Stored `AttemptRecord` is a versioned serde record decoded by run. Run's edge
+constructs an allowlisted `TelemetryAttemptFact` projection; facts and `StatsReport`
+implement **Serialize only**, not Deserialize. The projection contains:
+
+- Project, run, task and attempt IDs; attempt revision and retry/parent links.
+- Terminal timestamp, outcome/error class and optional integer duration.
+- Requested/resolved/observed provider/model, applied effort and exact route;
+  optional non-secret account label and explicit fixture origin.
+- Optional normalised `Usage`: disjoint uncached input, cache read, cache write,
+  output excluding reasoning, and reasoning tokens, each an optional `u64`
+  with source and unknown-breakdown flags.
+
+Dispatch may carry `delivery_id`; run retains it for workflow's
+`completed_attempt(AttemptId)` lookup. Delivery acceptance, receipt revisions,
+repair counts and findings stay in workflow's records. Telemetry drops those
+facts and the proposed delivery reducers/APIs rather than create a second
+acceptance projection. No workflow-to-telemetry retry/upsert path is needed.
+
+Run emits revisioned events, but telemetry has no event subscription or cursor.
+The run snapshot selects the highest terminal revision per attempt **before**
+date filtering or reduction. A replay adapter deduplicates `(AttemptId,
+revision)` and selects that highest revision; never add revisions together.
+The reducer ignores identical duplicates of the selected attempt/revision and
+rejects conflicting duplicates or multiple selected revisions. Retries have
+distinct attempt IDs and each contributes usage once. Select a task's latest
+attempt across the snapshot before filtering; count its terminal outcome only
+if that attempt is selected. Earlier selected attempts still contribute usage,
+attempt counts and failures under their actual routes. An active latest attempt
+has no terminal task outcome yet. Run supplies the task's latest-attempt ID,
+including active attempts, so an older success cannot appear current.
+
+| API | Contract |
 |---|---|
-| `AttemptFact` / `attempts` | `(host_id, project_id, run_id, task_id, attempt)`; optional parent attempt, terminal time, exact adapter/provider/account, requested/resolved/observed model, applied effort, task class, route label, status/error-class enums, wall/provider milliseconds, fixture origin, optional `Usage` |
-| `UsageFact` / `usage` | Stable source namespace and event ID; optional attempt/session reference, host/account/model identity, observation time, typed `Usage`; `live_attempt` or `legacy_native`/`legacy_receipt` provenance |
-| `Usage` | Optional integer input-uncached, cache-read, cache-write, output-without-reasoning and reasoning tokens; explicit unknown-breakdown flags and usage origin; no provider-reported floating cost |
-| `SourceState` / `sources` | Source kind (`attempt_records`, `legacy_import`), parser version, last attempted/successful UTC time, committed counts and bounded error codes |
-| `ImportedLedger` / `imports` | One accepted snapshot fingerprint, source schema, importer version, imported/suppressed/skipped counts and numeric-conversion warnings |
+| `stats(facts, StatsQuery, &PriceTable, Coverage) -> Result<StatsReport, TelemetryError>` | Pure bounded reduction over a run-owned snapshot; no files, clocks, providers or subprocesses. |
+| `validate_prices(&ConfiguredPrices) -> Result<PriceTable, PriceError>` | Validate exact keys, units and billing metadata after config's TOML decode. |
 
-The usage table is the sole additive token source; attempt facts supply
-outcomes, never a second usage sum. A live attempt and its usage projection
-commit together. Core/records IDs and canonical digests replace path/hostname identity.
-Stable host IDs survive renames; project IDs prevent same-run collisions.
-Report model is observed, otherwise resolved, otherwise requested, with its
-basis. Missing identity stays unattributed; explicit fixture origin excludes
-tests from production totals. No email/directory/model-suffix inference.
+Telemetry retains only the allowed `core`, `records`, `config` dependencies.
+No supervisor dependency is added. Run no longer calls telemetry; its build
+removes the now-unused `run -> telemetry` edge from R2. Telemetry's first build
+updates R2's responsibility from ingest to usage/cost reduction. Core supplies
+IDs and explicit timestamps; state owns shared codecs/config loading; providers
+owns usage normalisation; run owns snapshot consistency and decoding limits;
+CLI owns parsing, cancellation and output. Shared models live in records.
 
-SQLite is the ledger and transactional index, using the already allowlisted
-`rusqlite` with its existing `bundled` feature. Index observation time and
-attempt identity. Persist typed record JSON with a 64 KiB per-record bound;
-indexed timestamps are signed epoch milliseconds, counters inside records
-are `u64`. Do not route unsigned counts through SQLite REAL or SQL SUM:
-stream selected records and use checked Rust reductions. Before inserting a
-group, enforce both 10,000 groups and 1 MiB cumulative retained key bytes;
-fixed numeric accumulators have no per-event vectors. Output counting also
-stops at 8 MiB. Violations return `report_too_large` without retaining the
-extra key or allocating an oversized output buffer.
+Bound the reduction to 100,000 selected attempt IDs, 10,000 groups and 1 MiB
+of retained group-key bytes; enforce limits before insertion. Retain fixed
+numeric accumulators, not per-token/event vectors. Run's snapshot reader owns
+bounded record decoding and cancellation between records. Telemetry returns
+`TooLarge` rather than partial totals on a bound. Other typed errors are
+`InvalidFact`, `ConflictingFact`, `InvalidPrice` and `Overflow`; CLI maps invalid
+facts/prices to 2 and conflicts/overflow/size refusals to 1. Run read errors
+retain their own version/I/O classification. No successful totals accompany a
+failed reduction.
 
-The first build PR adds **only supervisor's safe filesystem/lock API** to
-telemetry's R2 internal dependency row, alongside core/records/config, and
-updates its layering check. This is a proposed subsystem edge change allowed
-by R2, not an additional external crate/feature under R6. Use verified private
-directories for SQLite's path-based open; reject symlinked entries and an
-untrusted/writable-by-others directory. Supervisor owns all unsafe code,
-verified file handles, locks and atomic file publication. Telemetry gets no
-process-control capability.
+## Prices, account ownership and exact arithmetic
 
-Use rollback-journal mode with `synchronous=FULL`, one connection per owning
-thread and one writer lock for ingest/import/advisory writes. Acquisition is
-nonblocking; SQLite waits at most 250 ms. No transaction spans a provider,
-process, network or user wait. Initial DB publication is atomic and fsync'd
-through supervisor. Schema changes, each source's successfully ingested fact
-and its checkpoint, and the import marker with all imported rows are committed
-atomically in SQLite. Normal reports open read-only and perform no migrations,
-refreshes, retention or journal maintenance.
+State/config owns the TOML format, deserialisation and release asset layout.
+Replace `config/telemetry-prices.json` with the bundled TOML asset
+`config/telemetry-prices.toml`, installed with the release at
+`releases/<SourceDigest>/assets/config/telemetry-prices.toml`. Config supplies
+the validated asset; stats writes no price copy or `telemetry/` subtree. State
+root and run layout follow the cross-area table: one host root, top-level
+`runs/<RunId>/` and run store, not project-nested runs or a telemetry ledger.
+There is one user-owned `config.toml`; no telemetry profile or overlay.
 
-Run publishes terminal state durably **before** advisory telemetry.
-`record_attempt` is idempotent; conflicting payloads for one terminal identity
-fail. Ingest reads only bounded (64 KiB), verified new-root terminal records,
-never embedded paths; each successful record commits independently. Missing
-files are not deletions. Report last reconciliation and known ingest errors;
-it cannot prove every attempt was collected. A failed advisory write is
-repairable from the retained terminal record.
+The price asset has `schema_version`, `reviewed_at` and `[[models]]` entries
+keyed by exact provider/model. Entries carry source references, billing kind
+(API, subscription or explicitly free) and optional `u64` rates for each usage
+category in **USD microdollars per million tokens**. Omitted rates mean unknown
+(TOML has no null); zero requires an explicitly verified zero rate. Reject
+duplicate keys, unknown versions and invalid units. No runtime fetch, model
+regex or inferred aliases. Group by observed model, otherwise resolved,
+otherwise requested, and report that basis. Fixtures remain excluded from
+production totals. Unknown identity stays unattributed.
 
-## Attribution, cost and import
+Account identity is a **providers/execution-route** responsibility, with typed
+config owned by state. Replace the old `config/telemetry.json` account/window
+configuration with a section in `config.toml`, for example:
 
-For new work, sum every attempt's usage, including retries; a task's latest
-attempt determines its outcome. Route groups use the exact route actually
-recorded on each attempt. Report task success once, under its latest route;
-keep earlier routes' attempt counts and failures separately. Parent/child
-relations are references, not another amount to add to overall totals.
+```toml
+[providers.codex.accounts.work]
+identity_dir = "/absolute/non-secret/provider-scope"
 
-Providers owns normalisation exactly once: subtract known cached/write input
-and reasoning output where its wire form is inclusive. Run supplies the
-resulting disjoint categories; telemetry validates them without subtracting
-again. An inconsistent breakdown is a typed invalid measurement. If a required category is unknown,
-keep the breakdown and cost unknown rather than clamping or inventing zero.
-Report each known token sum with its missing-row count. Cache share is an
-exact numerator/denominator over rows with complete input categories, with
-the included-row count. Percentiles use nearest rank over integer milliseconds
-and expose sample counts; do not average percentiles or manufacture throughput
-from missing provider time.
+[quota.windows.weekly]
+label = "weekly"
+```
 
-Retain the reviewed price asset at `config/telemetry-prices.json`, converting
-its schema to integer **USD microdollars per million tokens**, null for an
-unverified rate, with reviewed date, source references and explicit
-free/subscription/API billing. Config supplies the validated table; no runtime
-price fetch or catalogue heuristics. Exact model keys and explicit aliases
-in that asset select a price. No inferred free-model patterns. Use checked `u64` quotient/remainder
-arithmetic with denominator D=1,000,000: for tokens t and rate r, accumulate
-`(t/D)*r + (t%D)*(r/D) + ((t%D)*(r%D))/D` whole microdollars and retain
-`((t%D)*(r%D))%D` remainder. Each remainder product is below D². Carry
-remainders across buckets/rows and round half-up once at final output;
-never form t*r, which can overflow despite a representable result.
-Reasoning uses the output rate once. Final count/money overflow is a typed
-error. JSON money is a six-place decimal **string**, never `f64`.
+Providers resolves `--account` to a non-secret label and an authorised identity
+scope; quota owns provider-specific window/reset semantics. The example is a
+config-shape proposal for those owners, not permission to inspect credentials
+or old config. Do not infer account identity from email, tokens or model names.
+Telemetry consumes the recorded label only. Replace `scripts/provider_identity.py`
+in that owner's build, preserving its non-secret scope semantics for quota,
+routing and dispatch; telemetry has no account configuration reader.
 
-An aggregate estimate is null if any included row lacks a required token
-category or positive-count price. Expose known-cost lower bound and missing
-cost rows separately. A zero count needs no rate; zero total is not evidence
-that a subscription or unpriced model is free. Cost per successful task is
-null if any contributing attempt is unpriced or no task succeeded. It is an
-execution metric, not cost per accepted delivery.
+Providers normalises inclusive wire counts once, subtracting known cached/write
+input and reasoning output. Run records the disjoint result; telemetry never
+subtracts twice or clamps an inconsistent breakdown. Known token counts sum
+with checked `u64` addition; report missing counts alongside each sum.
 
-`telemetry import --from FILE` is the sole exception to fresh-state reads:
+For every known category, accumulate `t as u128 * r as u128` using **checked
+addition into a u128 numerator**. Each u64 product fits u128; a sum may not.
+Carry that numerator across categories, attempts and groups, and divide by
+**10^6 once at output**, rounding half-up once. Use quotient/remainder for
+rounding so adding half a denominator cannot overflow the numerator. Check
+rounding and conversion of the final microdollar value to `u64`. Format money
+as a six-place decimal string, never `f64`. Reasoning uses the reviewed output
+rate once; categories must not overlap. Compute overall totals from unrounded
+numerators, not rounded group values.
 
-1. Accept an explicit, regular, non-symlink SQLite **schema-4** ledger, at
-   most 1 GiB. Do not discover it, open old config, follow `source_ref` or
-   usage-file paths, or rescan any transcript/receipt. Other schemas are a
-   typed refusal; there is no old-schema migration engine.
-2. Require a quiescent main file: refuse any journal/WAL/SHM sibling. Pin
-   the regular source file with supervisor; hash it, copy from that same
-   handle into a private new-root temporary snapshot, and require the copy's
-   digest and a final source digest to match. Recheck source identity/size
-   and sidecar absence; changes return 3 without a destination commit.
-   The copy uses the single reserved `telemetry/import.snapshot` slot, under
-   the writer lock. Before each import, supervisor removes a stale regular
-   scratch file from that slot and creates it exclusively; no directory sweep
-   or Drop-based cleanup. Thus retries cannot accumulate copies. Reject a
-   source inside StateRoot or aliasing the destination/scratch file before
-   cleanup. No source checkpoint, recovery, lock/write or config read.
-3. Open **only the verified private copy**, using SQLite
-   `mode=ro&immutable=1` and `trusted_schema=OFF`, never reopen the old path
-   through SQLite. This closes replace-and-restore races. Unlink the private
-   slot after the immutable connection opens; its held SQLite descriptor
-   keeps the snapshot alive and the OS reclaims it even after a kill. A crash
-   before unlink leaves at most one scratch file, removed before retry.
-   Never unlink the source. Bound each row and the import to 60 seconds;
-   failure rolls back. A busy legacy store
-   needs a quiescent copy supplied by its owner, not importer repair.
-4. Project only `usage` facts, attempt metadata from `source=fabric`, and
-   host alias metadata necessary to deduplicate that ledger's own rows.
-   Read a fixed column allowlist, allowing schema-4 additive columns to be
-   absent. Required missing columns or conflicting duplicate identities fail
-   the transaction. Do not import cursors, arbitrary events, deliveries,
-   changes, quota histories, source paths or classifiers. Report their
-   skipped row counts explicitly; they remain available in the old ledger.
-5. Legacy integer token fields must be nonnegative SQLite INTEGER values
-   within `u64`; reject malformed retained rows, never round token counts.
-   Drop old REAL costs/confidences rather than emulate their floats;
-   recompute estimates from integer token fields and the reviewed price table.
-   Mark ambiguous old bucket breakdowns unknown. Preserve unknown model
-   components rather than invent requested/resolved values from the folded
-   field. Skip nonterminal receipt outcomes; unfamiliar terminal statuses become
-   `legacy_unknown`. Keep their usage coverage separate from known outcomes.
-6. For an imported `(host, adapter, account, session)` with native usage,
-   suppress receipt token totals for that **whole imported session**, retaining
-   receipt outcomes. Otherwise use receipt usage. Null session IDs never
-   match. Collapse repeated `(source,event_id)` across the ledger's recorded
-   local host aliases; preserve other hosts. `meta.host_ids` supplies aliases,
-   not a current-host ranking: identical projected facts collapse, conflicting
-   facts fail without guessing or consulting old host config. Fix this choice
-   at import, independently of later date filters, and expose suppressed-row
-   counts and partial native coverage. Never sum native and receipt totals.
-7. Commit all projections and the import fingerprint in one destination
-   transaction. An identical retry is a no-op; a different snapshot after
-   successful import is refused as `already_imported`. No merge/update mode,
-   destructive reset or source deletion exists.
+A complete estimate is null if any included attempt lacks required usage or a
+positive-count rate. Report the known-cost lower bound and missing-cost count
+separately. Zero tokens need no rate; an unpriced subscription is not free.
+Cost is an API-equivalent estimate, not a bill or cost per accepted delivery.
+Weekly quota history is not reconstructed from costs or retained old rows.
 
-## Crate interfaces and dependencies
+## Collector retirement at cut-over
 
-Proposed APIs, to settle with their owners before build:
+This is a future **user-authorised checklist for each Mac**, owned jointly by
+state's installer and telemetry. It does not authorise any installed changes
+in this design lane. Print the complete per-host plan, exact command and every
+harness-config key/table removal for the user **before applying**, and obtain
+authority covering both Macs. Preserve unrelated user configuration and all
+old ledger, transcript and collector data.
 
-| Telemetry API | Caller/contract |
+1. Before replacing the old install, quiesce old clients without signalling
+   healthy providers. From that Mac's retained legacy checkout, plan
+   `scripts/install-harness --uninstall-otel-collector`. This uninstalls the
+   LaunchAgent, plist and collector binary; it leaves stored data in place.
+   Keep the legacy helper available through cut-over even though rewrite
+   source retires it.
+2. Print the planned removals of `OTEL_*` and
+   `CLAUDE_CODE_ENABLE_TELEMETRY` entries from `~/.claude/settings.json`'s
+   `env` object, and Codex's `[otel]` table from `~/.codex/config.toml`.
+   Print key names and structural edits only, never environment values.
+3. After user authorisation, run the printed uninstall command and apply only
+   the printed config edits through the installer’s managed-file boundary.
+   Coordinate these removals with the installer's other cut-over harness edits.
+4. Verify on each Mac that `com.provenant.otlp-collector` is unloaded, its
+   managed plist/binary are absent, and the listed telemetry settings are gone.
+   Restart clients; check the new binary and a fake-provider stats report.
+   Report each host separately; a failure on Mac two remains incomplete work.
+
+No step deletes old data or migrates history. Rollback follows the shared
+`pre-rust-rewrite` reinstall contract; re-enabling collection is a separate
+user-authorised installed change.
+
+## Tests and build sequence
+
+No direct provider argv, hook, Git or MCP wire parser lives here. Providers
+owns recordings of real usage wire forms and its normaliser tests. Telemetry
+uses independent typed fixtures after normalisation, never Python/Node oracles,
+live provider calls or legacy-ledger fixtures. Use an in-house snapshot helper
+where useful; **no insta** dependency.
+
+- Unit tests: zero/unknown/free rates, missing categories, exact model basis,
+  inclusive-count normalisation at the provider boundary, u64 product overflow
+  avoided by u128, u128 sum/final-u64 overflow, half-up rounding only at output,
+  retries and revisions counted once, conflicting duplicates, latest task
+  outcome with an active retry, time/scope bounds, fixture exclusion and all
+  aggregation bounds. Supply explicit times and data.
+- Run integration: stable terminal snapshots during publication, highest
+  revision selected before filtering, duplicate events, retention metadata and
+  cancellation. No telemetry callback is needed for terminal publication.
+- CLI integration at tree landing: real envelope/exits, unsupported versions
+  exit 2, missing store creates nothing, corrupt store refuses, partial coverage
+  exits 0 with coverage in `data`, 1 MiB cap including envelope, cancellation
+  exits 130 and deterministic human rows. Test isolated HOME/state/config only.
+  Old-root tripwires prove stats never opens old stores or transcripts.
+- Installer integration: isolated fixtures for both Macs' collector/config
+  retirement plans, user-authorisation boundary, unrelated configuration
+  preservation and old-data byte preservation. Never test against real homes.
+
+1. **Telemetry crate and deletions only.** Build the pure reducer, records
+   projection and exact TOML price semantics; replace inert telemetry Rust and
+   delete telemetry Python, tests and schemas below. No clap subtree lands
+   here: CLI owns that later. Removing `scripts/telemetry.py` breaks
+   `scripts/provider_quota.py:217–220`'s dynamic import and
+   `scripts/utility.py:18`'s direct import: the **old quota path goes red**
+   until its Rust owner lands. Do not add adapters or preserve dead code to
+   keep old tests green (R0/R10).
+2. **Run and owner integration.** Run supplies the snapshot/projection and
+   removes advisory telemetry calls. Providers/execution-route replaces account
+   identity; quota removes ledger history/fallback; workflow removes delivery
+   upsert/report expectations. Each owner deletes its surviving shared callers.
+3. **CLI and install integration.** CLI lands the sole stats command and
+   removes aliases/help; state coordinates the printed two-Mac retirement
+   checklist at authorised cut-over. Heavy checks run in GitHub Actions;
+   locally run only fmt/clippy and targeted tests for touched crates.
+
+## Deletion inventory and budget
+
+Build PRs delete subjects and their tests together; the following is an owner
+inventory, not authority to edit old stores, installed files or whole shared
+modules. Count each deletion once, including workflow's reducer hand-off.
+
+| Owner | Delete or replace |
 |---|---|
-| `record_attempt(store, &AttemptFact) -> Result<WriteOutcome>` | Run, after durable terminal publication; bounded failure is diagnostic, never a stop reason. |
-| `ingest(store, AttemptRecordReader, now) -> Result<IngestReport>` | CLI; run supplies verified new-root records for repair. |
-| `stats(store, StatsQuery, &PriceTable) -> Result<StatsReport>` | CLI rendering; no SQLite access by skills. |
-| `sources(store) -> Result<SourceReport>` | CLI diagnostics, read-only. |
-| `import_legacy(store, VerifiedLegacyFile, deadline) -> Result<ImportReport>` | CLI's explicit one-shot import. |
+| Telemetry | `scripts/telemetry{,_ingest,_costs,_report,_changes,_delivery,_hosts}.py`, `scripts/provenant-telemetry`, `tests/test_telemetry.py`; all inert Rust under `tools/front-door/crates/telemetry/src/`, including `pending`, Unicode generator/tables and differential harness. |
+| Telemetry data | Four `schemas/telemetry-{usage,event,quota-series,quota-event}-row.schema.json` files, telemetry golden cases, and JSON price asset with its TOML replacement. Repair `schemas/README.md`; shared record-schema tests retire with their subjects. |
+| Telemetry/state | `scripts/install-otel-collector`, Swift collector and plist template under `tools/otlp-collector/`, `tests/test_otlp_collector.py`; state removes OTel flags/wiring from `scripts/install-harness` and OTel-only installation tests. Retained legacy install supplies the cut-over uninstall helper. |
+| Providers/execution-route | Replace `scripts/provider_identity.py`; update `scripts/quota_display.py:9`'s window-label configuration and telemetry renderer import, account help/`--account` in `skills/orchestrate/scripts/dispatch_run.py` and `cf_dispatch.py`, and identity/account tests including `runtime/fabric/tests/surface.test.ts:253`. Keep account selection in the new dispatch contract. |
+| Quota | Remove `_telemetry`, `state_root`, `ledger_windows`, `record_series` and telemetry writes in `scripts/provider_quota.py`; remove ledger fallback from `scripts/quota_providers/codex.py` and removed-subject quota tests/oracles. |
+| Run/utility/Fabric | Remove dispatch telemetry assertions and callbacks; telemetry import/`record_call` in `scripts/utility.py`; `telemetry_summary` and registration in `scripts/fabric_hosts.py`; telemetry-only host-identity tests. Do not remove unrelated identity/quota/peer behaviour. |
+| CLI | Replace telemetry command routing; remove root stats/retro aliases; replace/remove `tools/front-door/src/help/{telemetry,stats,retro}.txt`, stale telemetry fixture setup in `tools/front-door/tests/common/mod.rs:53`, and retired-command tests. |
+| Docs/skills | Update telemetry/host/routing runbooks, README and architecture references, delivery/retrospect promises and code-review's `multi-agent-review.md` plus orchestrate's `routing-and-tiers.md`, `worker-liveness.md` and `herdr-panes.md` references. Remove ledger, sources, ingest and accepted-cost instructions; preserve unrelated policy. |
 
-Typed errors: `Busy`, `Io`, `Corrupt`, `UnsupportedVersion`, `InvalidRecord`,
-`ConflictingFact`, `Overflow`, `TooLarge`, `DeadlineExceeded`, `LegacyChanged`,
-`AlreadyImported`. Busy/LegacyChanged map to 3; all other listed errors to 1.
-**Records/core** supply versioned facts, IDs, canonical encoding, timestamps
-and deadlines. **Run/providers** supply normalised optional usage and exact
-route/account/model provenance, without excerpts. **Config/state** supply
-StateRoot, stable host identity, private-directory ownership and validated
-prices; they own replacing legacy account configuration. **Supervisor**
-supplies safe handles, locks/publication and legacy-file verification.
-**CLI** supplies clocks/deadlines and renders exits/output. **Quota** keeps
-live snapshots independently; Fabric/workflow require no telemetry API.
-Telemetry imports none of run/quota/providers/workflow/fabric-store;
-`run -> telemetry` remains the dependency direction.
-
-## External contracts and fixtures
-
-No direct provider argv, hook, Git or MCP protocol is implemented here.
-Their owners retain R0 contracts; owned command removals do not change MCP
-itself. Keep external `SKILL.md` frontmatter intact and update surviving
-report references with their owners.
-
-Provider fixtures must pass through **providers**' normaliser into telemetry,
-not a second parser. Recorded source material includes
-`tests/fixtures/fabric-context/{claude.jsonl,codex-rollout.jsonl,opencode.jsonl}`
-and `tests/fixtures/fabric-v1/provider-{claude,codex,cursor,agy,opencode}.json`.
-Reuse verified fragments with capture version/provenance; synthetic attempt
-records and Python-generated oracles are not external recordings. Missing
-usage-shape recordings are a provider-lane prerequisite collected with
-appropriate authority. Telemetry tests make no live provider calls.
-
-For the **one legacy-input contract**, check in a sanitised schema-4 SQLite
-fixture made by SQLite tooling with the documented columns and representative
-retained rows, plus a capture manifest of a real old ledger's column/types.
-Cover additive/missing optional columns, mixed native/receipt sessions,
-host aliases, unknown models and REAL cost fields. Use independent expected
-facts and integer arithmetic; do not execute Python to decide results.
-No personal transcript, email, prompt or credential bytes enter fixtures.
-
-## Tests and acceptance
-
-Follow R9; delete removed-subject tests instead of translating them.
-
-- **Unit, beside modules:** exact rounding/final overflow and representable
-  products exceeding u64 (10¹² tokens × 10⁷ rate), unknown versus free
-  prices, missing buckets/coverage, UTC/undated bounds, exact model identity,
-  route-changing retries/latest task outcomes, nearest-rank samples,
-  aliases/sessions/fixtures, including host_ids-only conflicting aliases,
-  immutable-fact conflicts, versions and bounds, including many oversized
-  distinct keys rejected before aggregation allocation.
-  Inject clocks and data.
-- **Binary integration, isolated state:** real CLI human/JSON shapes/exits;
-  empty reads create nothing; corruption refuses; ingest repairs advisory
-  failures; repeat ingest/import deduplicates; source bytes/sidecars stay
-  unchanged; imported native/receipt selection is independent of filters;
-  oversize input/report refuses. Secret sentinels in discarded receipt fields
-  must never reach DB/output. Old-root tripwires permit only the explicit
-  import file and its sidecar checks.
-- **Process, Linux/macOS:** handshake/FIFO fixtures hold the writer lock and
-  verify bounded code 3, coherent reads, interrupted-import rollback/retry,
-  ENOSPC/fsync failure without partial facts/marker, stale-copy reclamation
-  after termination during copy/open and before retry, and source replacement/
-  symlink refusal, including replace-and-restore before SQLite open. A fake
-  provider remains alive under telemetry failure,
-  publishes terminal once and leaves ingestible evidence. No sleeps;
-  canonicalise macOS temporary paths.
-
-Build locally with fmt/clippy/targeted tests; CI runs workspace Linux and
-macOS release/process checks. This docs-only PR uses link/scope/whitespace
-checks and native review; the chair owns cross-family council acceptance.
-
-## Deletion inventory and line budget
-
-Physical line counts at `1b3d48e4`; partial ranges name the baseline only.
-Every listed deletion lands with its Rust replacement or the Rust command/
-installer integration that removes that surface. Do not delete stores,
-transcripts, installed files or another lane's whole shared module.
-
-| Python file or test/helper | Lines removed |
-|---|---:|
-| `scripts/telemetry.py` | 1,027 |
-| `scripts/telemetry_ingest.py` | 476 |
-| `scripts/telemetry_costs.py` | 263 |
-| `scripts/telemetry_report.py` | 396 |
-| `scripts/telemetry_changes.py` | 406 |
-| `scripts/telemetry_delivery.py` | 276 |
-| `scripts/telemetry_hosts.py` | 207 |
-| `tests/test_telemetry.py` | 2,967 |
-| `tools/front-door/crates/telemetry/src/pending/python/generate_unicode.py` | 29 |
-| `tests/test_otlp_collector.py` | 213 |
-| `tests/test_install_harness.py`, OTel helpers/tests, lines 38–124 only | 87 |
-| `tests/test_dispatch_run.py`, telemetry-only assertions, lines 6958–6967 only | 10 |
-| **Python total** | **6,357** |
-| **Telemetry-owned TypeScript files** | **0** |
-
-Replace all 13 current telemetry `.rs` files, **5,810 lines**, including the
-749-line generated Unicode table, the 593-line differential harness and all
-`pending` helpers. No `context.rs` from closed PR #1340 is adopted; context
-ownership stays in run. Budget the new telemetry production code plus unit,
-integration and process tests at **at most 3,000 Rust lines**: expected net
-Python/TS/Rust change is **at most −9,167 lines** (3,000 − 6,357 − 5,810).
-This is a design budget, not measured implementation savings; report actual
-`Net lines:` in each build PR and justify growth.
-
-Also retire `scripts/provenant-telemetry` (5 shell lines),
-`scripts/install-otel-collector` (46 shell),
-`tools/otlp-collector/otlp-collector.swift` (199), its
-`com.provenant.otlp-collector.plist.template` (26), the four
-`schemas/telemetry-{usage,event,quota-series,quota-event}-row.schema.json`
-files (298/110/110/83), and the two `tests/golden/cases/telemetry/*.json`
-files (12 each). These **901 additional lines** are outside the language
-budget; new recorded wire fixtures are separately measured.
-
-Shared-owner cleanup below is part of those owners' Rust PRs. Sizes are
-whole-file baseline lines for identification, **not deletion credits**:
-
-| Shared file | Current lines | Telemetry coupling removed/replaced |
-|---|---:|---|
-| `scripts/provider_quota.py` | 1,611 | `_telemetry` (8), `state_root` (2), `ledger_windows` (21), `record_series` (15); remove DB writes from `record_events`, retain reset interpretation. |
-| `scripts/quota_providers/codex.py` | 174 | Ledger fallback in `fetch`; retain app-server quota. |
-| `scripts/quota_display.py` | 399 | Telemetry table-renderer import in `render`. |
-| `scripts/fabric_hosts.py` | 807 | `telemetry_summary` (19) and verb registration. |
-| `scripts/utility.py` | 241 | `record_call` (11) and its telemetry import/calls. |
-| `tests/test_host_identity.py` | 129 | Telemetry subject only. |
-| `tests/test_provider_quota.py` | 2,188 | Removed history/fallback/peer-summary subjects only. |
-| `tests/test_record_schemas.py` | 387 | Telemetry schemas/subjects; registry retires per the plan. |
-| `tools/front-door/crates/quota/src/tests/oracle.py` | 84 | Telemetry renderer import; whole Python oracle retires with quota. |
-| `scripts/install-harness` | 702 | Collector flags/wiring; other installation belongs to state/CLI. |
-
-These shared files are not wholesale telemetry deletions. Their owners count
-actual removed lines once. Retain unrelated quota/identity/dispatch/peer
-tests; add no adapter or broken-test shim while owners wait (R10).
-
-Replace front-door dispatch/help entries for `telemetry`, `stats` and `retro`
-with the proposed subtree. State/CLI owns removal of collector installer
-flags/wiring in `scripts/install-harness` and its shared tests. Update the
-telemetry/host/routing runbooks and the surviving delivery/routing skill
-references. Keep the price asset, changing its number schema with its reader.
-
-## Build order
-
-1. **Local ledger and reports:** land the records, exact price reader,
-   transactional telemetry store, ingest/report/import APIs and CLI subtree
-   together, with the Rust tests above. Update R2's supervisor-safe-API edge
-   and layering check in this PR. Delete the seven telemetry Python modules,
-   wrapper, primary tests, old schemas/goldens and all inert telemetry Rust
-   and its generator. This is one coherent subsystem replacement, targeted
-   at the 3,000-line Rust budget; it is usable against fresh records and the
-   legacy fixture without a provider or a Python caller switch.
-2. **Run publication integration** (execution lane): land run's typed terminal
-   projection and bounded advisory call, using the already live telemetry
-   API; delete the old dispatch telemetry assertions and utility event
-   callback with their owners. Prove bookkeeping failure cannot affect
-   custody/publication. Real new-root attempts then populate the ledger;
-   the ingest repair path remains available.
-3. **Owner cut-over integration** (state/CLI, quota and Fabric lanes): land
-   their Rust installer/commands/quota/peer owners and delete the collector,
-   installer helper/flags/tests and remaining shared Python telemetry calls
-   named above. Remove telemetry peer/retro/acceptance promises from callers
-   in those same PRs. No Rust collector or replacement retrospective service
-   is built. Each owner's PR reports its own deletions without double credit.
-
-The workshop chair resolves the requested records/run/filesystem interfaces,
-reviews this proposal with the cross-family council, and freezes commands
-with the CLI owner before step 1. Build lanes open PRs; they do not merge.
+Baseline inventory at `1b3d48e4`: 6,357 telemetry-owned Python lines (including
+OTel-only/shared test slices) and 5,810 inert Rust lines, with zero telemetry
+TypeScript files. Target **at most 1,500 new Rust lines including tests** for
+the reducer and its command tests: forecast Python/TS/Rust net at most
+**−10,667 lines** (1,500 − 6,357 − 5,810), excluding additional shared-owner
+cleanup and data/shell/Swift deletions. This is a budget, not measured savings;
+each build PR reports actual `Net lines:` and justifies growth.
