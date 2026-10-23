@@ -382,7 +382,7 @@ def test_batch_accepts_a_prompt_file_in_a_read_root_and_forwards_the_root(tmp_pa
     other.mkdir()
     monkeypatch.chdir(workspace)
     module = load_batch()
-    monkeypatch.setattr(module, 'prompt_temp_roots', lambda: ())
+    monkeypatch.setattr(module.run_records, 'prompt_temp_roots', lambda: ())
     prompt = other / 'brief.md'
     prompt.write_text('read the other project\n', encoding='utf-8')
     task = {'id': 'reader', 'prompt_file': str(prompt), 'adapter': 'claude', 'model': 'opus',
@@ -530,7 +530,7 @@ def test_late_batch_cancel_does_not_override_natural_all_terminal_completion(tmp
     counter.write_text('0')
     monkeypatch.setenv('BATCH_COUNTER', str(counter))
     manifest = task_manifest(tmp_path, [task(tmp_path, 'natural', sleep='0.01')])
-    original_reconcile = module.reconcile_manifest
+    original_reconcile = module.run_records.reconcile_manifest
 
     calls = 0
 
@@ -541,7 +541,7 @@ def test_late_batch_cancel_does_not_override_natural_all_terminal_completion(tmp
             module.request_cancel()
         return original_reconcile(run_dir, custody)
 
-    monkeypatch.setattr(module, 'reconcile_manifest', late_cancel)
+    monkeypatch.setattr(module.run_records, 'reconcile_manifest', late_cancel)
     assert module.batch(args(module, run_dir, manifest, 1)) == 0
     summary = json.loads((run_dir / 'dispatch/batches/batch-001/summary.json').read_text())
     assert summary['status'] == 'completed'
@@ -575,7 +575,7 @@ def test_retained_non_success_attempt_allows_partial_route_and_question(tmp_path
               'task_id': 'partial', 'attempt_id': 'attempt-001',
               'status': 'timed_out', 'outcome': 'timeout',
               'question': question, 'attempt_path': attempt_rel,
-              'attempt_digest': module.digest(attempt_path)}
+              'attempt_digest': module.run_records.digest(attempt_path)}
 
     compact = module._validate_child_record(current, record, run_dir, -15)
     assert compact['status'] == 'timed_out'
@@ -588,14 +588,14 @@ def test_retained_non_success_attempt_allows_partial_route_and_question(tmp_path
 
     attempt['requested_route']['alias'] = 'principal'
     attempt_path.write_text(json.dumps(attempt, sort_keys=True) + '\n', encoding='utf-8')
-    record['attempt_digest'] = module.digest(attempt_path)
+    record['attempt_digest'] = module.run_records.digest(attempt_path)
     with pytest.raises(module.BatchInputError, match='selector'):
         module._validate_child_record(current, record, run_dir, -15)
 
     attempt['requested_route']['alias'] = 'junior'
     attempt['record_type'] = 'not-a-dispatch-attempt'
     attempt_path.write_text(json.dumps(attempt, sort_keys=True) + '\n', encoding='utf-8')
-    record['attempt_digest'] = module.digest(attempt_path)
+    record['attempt_digest'] = module.run_records.digest(attempt_path)
     with pytest.raises(module.BatchInputError, match='attempt receipt'):
         module._validate_child_record(current, record, run_dir, -15)
 
@@ -606,7 +606,7 @@ def test_retained_non_success_attempt_allows_partial_route_and_question(tmp_path
     attempt['attempt_path'] = wrong_rel
     wrong_path = run_dir / wrong_rel
     wrong_path.write_text(json.dumps(attempt, sort_keys=True) + '\n', encoding='utf-8')
-    wrong_record = {**record, 'attempt_path': wrong_rel, 'attempt_digest': module.digest(wrong_path)}
+    wrong_record = {**record, 'attempt_path': wrong_rel, 'attempt_digest': module.run_records.digest(wrong_path)}
     with pytest.raises(module.BatchInputError, match='identity'):
         module._validate_child_record(current, wrong_record, run_dir, -15)
 
@@ -1133,7 +1133,7 @@ def test_tampered_prior_evidence_digest_blocks_reentry_before_launch(tmp_path, m
     prior['prompt']['digest'] = 'sha256:' + '0' * 64
     prior_path.write_text(json.dumps(prior, sort_keys=True) + '\n', encoding='utf-8')
     sidecar = prior_path.with_name('attempt.sha256')
-    sidecar.write_text(f"{module.digest(prior_path)}  attempt.json\n", encoding='utf-8')
+    sidecar.write_text(f"{module.run_records.digest(prior_path)}  attempt.json\n", encoding='utf-8')
 
     second_manifest = task_manifest(tmp_path, [task(tmp_path, 'next')])
     assert module.batch(args(module, run_dir, second_manifest, 1)) == 2

@@ -1,7 +1,6 @@
 """Quota display vocabulary, pools, the display rule, the menu bar headline and signed-out accounts."""
 
-from datetime import UTC, datetime, timedelta
-import importlib.util
+from datetime import timedelta
 import io
 import json
 from pathlib import Path
@@ -12,55 +11,20 @@ import sys
 import pytest
 
 import quota_display
+from tests.support.quota import NOW, configure, quota, snapshot, window
 
 
 ROOT = Path(__file__).resolve().parents[1]
-NOW = datetime(2026, 10, 22, 12, 0, tzinfo=UTC)
 WEEK = 7 * 24 * 60
 ANESE, MICHAEL = 'anese@example.com', 'michael@example.com'
-
-
-@pytest.fixture
-def quota(tmp_path, monkeypatch):
-    home = tmp_path / 'home'
-    home.mkdir()
-    monkeypatch.setenv('HOME', str(home))
-    monkeypatch.setenv('AGENT_FABRIC_STATE_ROOT', str(tmp_path / 'state'))
-    monkeypatch.setenv('AGENT_FABRIC_INSTANCE_ROOT', str(home / '.agents'))
-    for name in ('PROVENANT_QUOTA', 'CLAUDE_CONFIG_DIR', 'CODEX_HOME', 'XDG_DATA_HOME'):
-        monkeypatch.delenv(name, raising=False)
-    spec = importlib.util.spec_from_file_location('provider_quota_display_under_test', ROOT / 'scripts/provider_quota.py')
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-
-    def refuse(*args, **kwargs):
-        raise AssertionError('tests never reach a real provider, CLI or credential store')
-    for name in ('run_process', 'open_process', 'urlopen', 'executable'):
-        monkeypatch.setattr(module, name, refuse)
-    monkeypatch.setattr(module, 'telemetry_host', lambda: 'studio')
-    return module
-
-
-def configure(tmp_path, value):
-    path = tmp_path / 'home/.agents/config/telemetry.json'
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(value))
 
 
 def iso(moment):
     return moment.isoformat().replace('+00:00', 'Z')
 
 
-def window(used, minutes, reset_in=None, name='seven_day', **extra):
-    return {'name': name, 'raw_kind': name, 'used_percent': used, 'window_minutes': minutes,
-            'reset_at': iso(NOW + reset_in) if reset_in is not None else None, **extra}
-
-
 def value(quota, provider, account, windows, observed=NOW, **extra):
-    return {'schema': quota.SCHEMA, 'provider': provider, 'account': account, 'plan': None, 'host': 'studio',
-            'active': True, 'priority': None, 'observed_at': iso(observed), 'attempted_at': iso(observed),
-            'source': 'test', 'status': 'ok', 'error': None, 'unreported': [], 'credits': None,
-            'windows': [quota.normalise_window(row) for row in windows], **extra}
+    return snapshot(quota, provider, windows, observed, account, **extra)
 
 
 def row(quota, *values, **settings):
@@ -419,27 +383,24 @@ def test_an_alias_on_a_shared_store_keeps_its_own_account_when_another_signs_in(
     assert accounts['work'].active and accounts[anese].signed_out and michael not in accounts
 
 
-def test_a_shared_store_reading_for_another_account_is_refused_under_a_bound_alias(quota, monkeypatch, tmp_path):
-    agy = Agy(quota, monkeypatch, tmp_path)
-    configure(tmp_path, {'accounts': {'agy': {'work': {}}}})
-    agy.sign_in(MICHAEL, agy_usage(0))
-    agy.tick(NOW - timedelta(hours=1))
-    work = agy.accounts()['work']
-    agy.email, agy.payload = ANESE, agy_usage()  # the sign-in changed after accounts were listed
-    value = quota.refresh(work, NOW, force=True)
-    assert value['status'] == 'stale' and value['windows'][1]['used_percent'] == 100
-
-
-def test_a_shared_store_reading_with_no_identity_is_refused_under_a_bound_alias(quota, monkeypatch, tmp_path):
+@pytest.mark.parametrize('email, expected_error, expect_fingerprint', [
+    (ANESE, None, False), (None, 'auth', True)],
+    ids=['another-account', 'no-account-identity'])
+def test_a_shared_store_reading_without_its_bound_account_is_refused(quota, monkeypatch, tmp_path,
+                                                                    email, expected_error, expect_fingerprint):
     agy = Agy(quota, monkeypatch, tmp_path)
     configure(tmp_path, {'accounts': {'agy': {'work': {}}}})
     michael = agy.sign_in(MICHAEL, agy_usage(0))
     agy.tick(NOW - timedelta(hours=1))
     work = agy.accounts()['work']
-    agy.email, agy.payload = None, agy_usage()  # whoever answered, the log does not say
+    agy.email, agy.payload = email, agy_usage()  # the sign-in changed after accounts were listed
     value = quota.refresh(work, NOW, force=True)
-    assert value['status'] == 'stale' and value['fetch']['error_kind'] == 'auth'
-    assert value['windows'][1]['used_percent'] == 100 and value['fingerprint'] == michael
+    assert value['status'] == 'stale'
+    if expected_error:
+        assert value['fetch']['error_kind'] == expected_error
+    assert value['windows'][1]['used_percent'] == 100
+    if expect_fingerprint:
+        assert value['fingerprint'] == michael
 
 
 def test_concurrent_refreshes_of_an_unbound_alias_bind_it_to_the_first_reading(quota, monkeypatch, tmp_path):
