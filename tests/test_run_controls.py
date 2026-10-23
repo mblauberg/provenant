@@ -11,6 +11,7 @@ import textwrap
 import threading
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -379,6 +380,7 @@ def test_cancel_waits_through_late_summary_bundle_completion(
     publisher_ready = threading.Event()
     publish_now = threading.Event()
     published = threading.Event()
+    fake_time = [0.0]
 
     def publish_sidecar() -> None:
         publisher_ready.set()
@@ -389,9 +391,11 @@ def test_cancel_waits_through_late_summary_bundle_completion(
     def release_publisher_during_wait(seconds: float) -> None:
         publish_now.set()
         assert published.wait(timeout=5)
+        fake_time[0] += seconds
 
-    monkeypatch.setattr(module.time, "monotonic", lambda: 0.0)
-    monkeypatch.setattr(module.time, "sleep", release_publisher_during_wait)
+    monkeypatch.setattr(module, "time", SimpleNamespace(
+        monotonic=lambda: fake_time[0], sleep=release_publisher_during_wait,
+    ))
 
     publisher = threading.Thread(target=publish_sidecar)
     publisher.start()
