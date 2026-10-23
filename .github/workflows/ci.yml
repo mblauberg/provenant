@@ -522,6 +522,8 @@ jobs:
           key: ${{ runner.os }}-cargo-${{ hashFiles('tools/front-door/Cargo.lock', 'tools/front-door/rust-toolchain.toml') }}
       - name: Set persistent Cargo target directory
         run: echo "CARGO_TARGET_DIR=$HOME/.cache/provenant/cargo-target" >> "$GITHUB_ENV"
+      - name: Set up Node.js workspace
+        uses: $/.github/actions/setup-node-workspace
       - name: Set up uv and Python
         uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
         with:
