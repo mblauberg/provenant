@@ -1007,4 +1007,13 @@ print(json.dumps(errors))
             ))
         ));
     }
+    #[test]
+    fn raw_decode_gaps_stay_explicit_until_the_record_owner_can_preserve_them() {
+        for raw in [
+            b"{invalid".as_slice(),
+            br#"{"tool_name":"Bash","tool_input":{"command":"pkill \ud800"}}"#,
+        ] {
+            assert!(matches!(hook_input(raw), Err(HookError::Decode(_))));
+        }
+    }
 }
