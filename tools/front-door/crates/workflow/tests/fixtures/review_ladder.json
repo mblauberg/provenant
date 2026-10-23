@@ -1,0 +1,1991 @@
+[
+  {
+    "input": {
+      "risk": "routine",
+      "legs": [],
+      "chair": "openai"
+    },
+    "expected": []
+  },
+  {
+    "input": {
+      "risk": "routine",
+      "legs": [
+        {
+          "role": "targeted",
+          "family": "anthropic",
+          "status": "failed",
+          "lenses": [
+            "correctness"
+          ]
+        }
+      ],
+      "chair": "openai"
+    },
+    "expected": []
+  },
+  {
+    "input": {
+      "risk": "substantial",
+      "legs": [
+        {
+          "role": "targeted",
+          "family": "anthropic",
+          "status": "pass",
+          "lenses": [
+            "correctness"
+          ]
+        },
+        {
+          "role": "targeted",
+          "family": "google",
+          "status": "pass",
+          "lenses": [
+            "security"
+          ]
+        }
+      ],
+      "chair": null
+    },
+    "expected": [
+      "chair_family is required"
+    ]
+  },
+  {
+    "input": {
+      "risk": "substantial",
+      "legs": [
+        {
+          "role": "targeted",
+          "family": "anthropic",
+          "status": "pass",
+          "lenses": [
+            "correctness"
+          ]
+        },
+        {
+          "role": "targeted",
+          "family": "google",
+          "status": "pass",
+          "lenses": [
+            "security"
+          ]
+        }
+      ],
+      "chair": ""
+    },
+    "expected": [
+      "chair_family is required"
+    ]
+  },
+  {
+    "input": {
+      "risk": "substantial",
+      "legs": [
+        {
+          "role": "targeted",
+          "family": "anthropic",
+          "status": "pass",
+          "lenses": [
+            "correctness"
+          ]
+        },
+        {
+          "role": "targeted",
+          "family": "google",
+          "status": "pass",
+          "lenses": [
+            "security"
+          ]
+        }
+      ],
+      "chair": "   "
+    },
+    "expected": [
+      "chair_family is required"
+    ]
+  },
+  {
+    "input": {
+      "risk": "crucial",
+      "legs": [
+        {
+          "role": "targeted",
+          "family": "anthropic",
+          "status": "pass",
+          "lenses": [
+            "correctness"
+          ]
+        },
+        {
+          "role": "targeted",
+          "family": "google",
+          "status": "pass",
+          "lenses": [
+            "security"
+          ]
+        }
+      ],
+      "chair": null
+    },
+    "expected": [
+      "chair_family is required"
+    ]
+  },
+  {
+    "input": {
+      "risk": "crucial",
+      "legs": [
+        {
+          "role": "targeted",
+          "family": "anthropic",
+          "status": "pass",
+          "lenses": [
+            "correctness"
+          ]
+        },
+        {
+          "role": "targeted",
+          "family": "google",
+          "status": "pass",
+          "lenses": [
+            "security"
+          ]
+        }
+      ],
+      "chair": ""
+    },
+    "expected": [
+      "chair_family is required"
+    ]
+  },
+  {
+    "input": {
+      "risk": "crucial",
+      "legs": [
+        {
+          "role": "targeted",
+          "family": "anthropic",
+          "status": "pass",
+          "lenses": [
+            "correctness"
+          ]
+        },
+        {
+          "role": "targeted",
+          "family": "google",
+          "status": "pass",
+          "lenses": [
+            "security"
+          ]
+        }
+      ],
+      "chair": "   "
+    },
+    "expected": [
+      "chair_family is required"
+    ]
+  },
+  {
+    "input": {
+      "risk": "terminal",
+      "legs": [
+        {
+          "role": "targeted",
+          "family": "anthropic",
+          "status": "pass",
+          "lenses": [
+            "correctness"
+          ]
+        },
+        {
+          "role": "targeted",
+          "family": "google",
+          "status": "pass",
+          "lenses": [
+            "security"
+          ]
+        }
+      ],
+      "chair": null
+    },
+    "expected": [
+      "chair_family is required"
+    ]
+  },
+  {
+    "input": {
+      "risk": "terminal",
+      "legs": [
+        {
+          "role": "targeted",
+          "family": "anthropic",
+          "status": "pass",
+          "lenses": [
+            "correctness"
+          ]
+        },
+        {
+          "role": "targeted",
+          "family": "google",
+          "status": "pass",
+          "lenses": [
+            "security"
+          ]
+        }
+      ],
+      "chair": ""
+    },
+    "expected": [
+      "chair_family is required"
+    ]
+  },
+  {
+    "input": {
+      "risk": "terminal",
+      "legs": [
+        {
+          "role": "targeted",
+          "family": "anthropic",
+          "status": "pass",
+          "lenses": [
+            "correctness"
+          ]
+        },
+        {
+          "role": "targeted",
+          "family": "google",
+          "status": "pass",
+          "lenses": [
+            "security"
+          ]
+        }
+      ],
+      "chair": "   "
+    },
+    "expected": [
+      "chair_family is required"
+    ]
+  },
+  {
+    "input": {
+      "risk": "substantial",
+      "legs": [
+        {
+          "role": "targeted",
+          "family": "anthropic",
+          "status": "pass",
+          "lenses": [
+            "correctness"
+          ]
+        }
+      ],
+      "chair": "openai"
+    },
+    "expected": []
+  },
+  {
+    "input": {
+      "risk": "substantial",
+      "legs": [
+        {
+          "role": "other-primary",
+          "family": "anthropic",
+          "status": "pass",
+          "lenses": [
+            "correctness"
+          ]
+        }
+      ],
+      "chair": "openai"
+    },
+    "expected": []
+  },
+  {
+    "input": {
+      "risk": "substantial",
+      "legs": [
+        {
+          "role": "distinct-family",
+          "family": "anthropic",
+          "status": "pass",
+          "lenses": [
+            "correctness"
+          ]
+        }
+      ],
+      "chair": "openai"
+    },
+    "expected": []
+  },
+  {
+    "input": {
+      "risk": "substantial",
+      "legs": [
+        {
+          "role": "targeted",
+          "family": "google",
+          "status": "pass",
+          "lenses": [
+            "correctness"
+          ]
+        }
+      ],
+      "chair": "openai"
+    },
+    "expected": []
+  },
+  {
+    "input": {
+      "risk": "substantial",
+      "legs": [
+        {
+          "role": "other-primary",
+          "family": "google",
+          "status": "pass",
+          "lenses": [
+            "correctness"
+          ]
+        }
+      ],
+      "chair": "openai"
+    },
+    "expected": []
+  },
+  {
+    "input": {
+      "risk": "substantial",
+      "legs": [
+        {
+          "role": "distinct-family",
+          "family": "google",
+          "status": "pass",
+          "lenses": [
+            "correctness"
+          ]
+        }
+      ],
+      "chair": "openai"
+    },
+    "expected": []
+  },
+  {
+    "input": {
+      "risk": "substantial",
+      "legs": [],
+      "chair": "openai"
+    },
+    "expected": [
+      "substantial review requires at least one passing independent leg",
+      "substantial review requires cross-family coverage or a recorded blocker with a reason",
+      "substantial fallback requires a passing same-family review with a lens"
+    ]
+  },
+  {
+    "input": {
+      "risk": "substantial",
+      "legs": [
+        {
+          "role": "targeted",
+          "family": "anthropic",
+          "status": "pass",
+          "lenses": []
+        }
+      ],
+      "chair": "openai"
+    },
+    "expected": [
+      "substantial review requires at least one passing independent leg",
+      "substantial review requires cross-family coverage or a recorded blocker with a reason",
+      "substantial fallback requires a passing same-family review with a lens"
+    ]
+  },
+  {
+    "input": {
+      "risk": "substantial",
+      "legs": [
+        {
+          "role": "targeted",
+          "family": "anthropic",
+          "status": "pass",
+          "lenses": [
+            ""
+          ]
+        }
+      ],
+      "chair": "openai"
+    },
+    "expected": [
+      "substantial review requires at least one passing independent leg",
+      "substantial review requires cross-family coverage or a recorded blocker with a reason",
+      "substantial fallback requires a passing same-family review with a lens"
+    ]
+  },
+  {
+    "input": {
+      "risk": "substantial",
+      "legs": [
+        {
+          "role": "targeted",
+          "family": "anthropic",
+          "status": "pass",
+          "lenses": [
+            "   "
+          ]
+        }
+      ],
+      "chair": "openai"
+    },
+    "expected": [
+      "substantial review requires at least one passing independent leg",
+      "substantial review requires cross-family coverage or a recorded blocker with a reason",
+      "substantial fallback requires a passing same-family review with a lens"
+    ]
+  },
+  {
+    "input": {
+      "risk": "substantial",
+      "legs": [
+        {
+          "role": "targeted",
+          "family": "openai",
+          "status": "pass",
+          "lenses": [
+            "correctness"
+          ]
+        }
+      ],
+      "chair": "openai"
+    },
+    "expected": [
+      "substantial review requires cross-family coverage or a recorded blocker with a reason"
+    ]
+  },
+  {
+    "input": {
+      "risk": "substantial",
+      "legs": [
+        {
+          "role": "targeted",
+          "family": "openai",
+          "status": "pass",
+          "lenses": []
+        },
+        {
+          "role": "targeted",
+          "family": "anthropic",
+          "status": "omitted",
+          "lenses": [
+            "correctness"
+          ],
+          "reason": "provider outage"
+        }
+      ],
+      "chair": "openai"
+    },
+    "expected": [
+      "substantial review requires at least one passing independent leg",
+      "substantial fallback requires a passing same-family review with a lens"
+    ]
+  },
+  {
+    "input": {
+      "risk": "substantial",
+      "legs": [
+        {
+          "role": "targeted",
+          "family": "openai",
+          "status": "pass",
+          "lenses": [
+            ""
+          ]
+        },
+        {
+          "role": "targeted",
+          "family": "anthropic",
+          "status": "omitted",
+          "lenses": [
+            "correctness"
+          ],
+          "reason": "provider outage"
+        }
+      ],
+      "chair": "openai"
+    },
+    "expected": [
+      "substantial review requires at least one passing independent leg",
+      "substantial fallback requires a passing same-family review with a lens"
+    ]
+  },
+  {
+    "input": {
+      "risk": "substantial",
+      "legs": [
+        {
+          "role": "targeted",
+          "family": "openai",
+          "status": "pass",
+          "lenses": [
+            "   "
+          ]
+        },
+        {
+          "role": "targeted",
+          "family": "anthropic",
+          "status": "omitted",
+          "lenses": [
+            "correctness"
+          ],
+          "reason": "provider outage"
+        }
+      ],
+      "chair": "openai"
+    },
+    "expected": [
+      "substantial review requires at least one passing independent leg",
+      "substantial fallback requires a passing same-family review with a lens"
+    ]
+  },
+  {
+    "input": {
+      "risk": "substantial",
+      "legs": [
+        {
+          "role": "targeted",
+          "family": "openai",
+          "status": "pass",
+          "lenses": [
+            "correctness"
+          ]
+        },
+        {
+          "role": "targeted",
+          "family": "   ",
+          "status": "omitted",
+          "lenses": [
+            "correctness"
+          ],
+          "reason": "provider unavailable"
+        }
+      ],
+      "chair": "openai"
+    },
+    "expected": [
+      "substantial review requires cross-family coverage or a recorded blocker with a reason"
+    ]
+  },
+  {
+    "input": {
+      "risk": "substantial",
+      "legs": [
+        {
+          "role": "targeted",
+          "family": "openai",
+          "status": "pass",
+          "lenses": [
+            "correctness"
+          ]
+        },
+        {
+          "role": "targeted",
+          "family": null,
+          "status": "omitted",
+          "lenses": [
+            "correctness"
+          ],
+          "reason": "provider unavailable"
+        }
+      ],
+      "chair": "openai"
+    },
+    "expected": [
+      "substantial review requires cross-family coverage or a recorded blocker with a reason"
+    ]
+  },
+  {
+    "input": {
+      "risk": "substantial",
+      "legs": [
+        {
+          "role": "targeted",
+          "family": "openai",
+          "status": "pass",
+          "lenses": [
+            "correctness"
+          ]
+        },
+        {
+          "role": "targeted",
+          "family": "google",
+          "status": "unavailable",
+          "lenses": [
+            "correctness"
+          ],
+          "reason": "   "
+        }
+      ],
+      "chair": "openai"
+    },
+    "expected": [
+      "substantial review requires cross-family coverage or a recorded blocker with a reason"
+    ]
+  },
+  {
+    "input": {
+      "risk": "substantial",
+      "legs": [
+        {
+          "role": "targeted",
+          "family": "openai",
+          "status": "pass",
+          "lenses": [
+            "correctness"
+          ]
+        },
+        {
+          "role": "targeted",
+          "family": "anthropic",
+          "status": "unavailable",
+          "lenses": [
+            "correctness"
+          ],
+          "reason": null
+        }
+      ],
+      "chair": "openai"
+    },
+    "expected": [
+      "substantial review requires cross-family coverage or a recorded blocker with a reason"
+    ]
+  },
+  {
+    "input": {
+      "risk": "substantial",
+      "legs": [
+        {
+          "role": "targeted",
+          "family": "openai",
+          "status": "pass",
+          "lenses": [
+            "correctness"
+          ]
+        },
+        {
+          "role": "targeted",
+          "family": "anthropic",
+          "status": "unavailable",
+          "lenses": [
+            "correctness"
+          ],
+          "reason": ""
+        }
+      ],
+      "chair": "openai"
+    },
+    "expected": [
+      "substantial review requires cross-family coverage or a recorded blocker with a reason"
+    ]
+  },
+  {
+    "input": {
+      "risk": "substantial",
+      "legs": [
+        {
+          "role": "targeted",
+          "family": "openai",
+          "status": "pass",
+          "lenses": [
+            "correctness"
+          ]
+        },
+        {
+          "role": "targeted",
+          "family": "openai",
+          "status": "omitted",
+          "lenses": [
+            "correctness"
+          ],
+          "reason": "provider unavailable"
+        }
+      ],
+      "chair": "openai"
+    },
+    "expected": [
+      "substantial review requires cross-family coverage or a recorded blocker with a reason"
+    ]
+  },
+  {
+    "input": {
+      "risk": "substantial",
+      "legs": [
+        {
+          "role": "targeted",
+          "family": "anthropic",
+          "status": "failed",
+          "lenses": [
+            "correctness"
+          ],
+          "reason": "review found defects"
+        }
+      ],
+      "chair": "openai"
+    },
+    "expected": [
+      "substantial review requires at least one passing independent leg",
+      "substantial review requires cross-family coverage or a recorded blocker with a reason",
+      "substantial fallback requires a passing same-family review with a lens"
+    ]
+  },
+  {
+    "input": {
+      "risk": "substantial",
+      "legs": [
+        {
+          "role": "targeted",
+          "family": "anthropic",
+          "status": "pass",
+          "lenses": [
+            "correctness"
+          ]
+        },
+        {
+          "role": "targeted",
+          "family": "google",
+          "status": "unavailable",
+          "lenses": [
+            "correctness"
+          ],
+          "reason": ""
+        }
+      ],
+      "chair": "openai"
+    },
+    "expected": []
+  },
+  {
+    "input": {
+      "risk": "substantial",
+      "legs": [
+        {
+          "role": "targeted",
+          "family": "anthropic",
+          "status": "pass",
+          "lenses": [
+            "correctness"
+          ],
+          "provider_family": "openai"
+        }
+      ],
+      "chair": "openai"
+    },
+    "expected": [
+      "substantial review requires cross-family coverage or a recorded blocker with a reason"
+    ]
+  },
+  {
+    "input": {
+      "risk": "substantial",
+      "legs": [
+        {
+          "role": "targeted",
+          "family": "",
+          "status": "pass",
+          "lenses": [
+            "correctness"
+          ],
+          "provider_family": "   "
+        }
+      ],
+      "chair": "openai"
+    },
+    "expected": [
+      "substantial review requires cross-family coverage or a recorded blocker with a reason",
+      "substantial fallback requires a passing same-family review with a lens"
+    ]
+  },
+  {
+    "input": {
+      "risk": "substantial",
+      "legs": [
+        {
+          "role": "targeted",
+          "family": "anthropic",
+          "status": "pass",
+          "lenses": [
+            "correctness"
+          ],
+          "provider_family": "   "
+        }
+      ],
+      "chair": "openai"
+    },
+    "expected": [
+      "substantial review requires cross-family coverage or a recorded blocker with a reason",
+      "substantial fallback requires a passing same-family review with a lens"
+    ]
+  },
+  {
+    "input": {
+      "risk": "substantial",
+      "legs": [
+        {
+          "role": "targeted",
+          "family": "openai",
+          "status": "pass",
+          "lenses": [
+            "correctness"
+          ]
+        },
+        {
+          "role": "targeted",
+          "family": "anthropic",
+          "status": "unavailable",
+          "lenses": [
+            "correctness"
+          ],
+          "reason": "provider quota"
+        }
+      ],
+      "chair": "openai"
+    },
+    "expected": []
+  },
+  {
+    "input": {
+      "risk": "substantial",
+      "legs": [
+        {
+          "role": "targeted",
+          "family": "openai",
+          "status": "pass",
+          "lenses": [
+            "correctness"
+          ]
+        },
+        {
+          "role": "targeted",
+          "family": "anthropic",
+          "status": "omitted",
+          "lenses": [
+            "correctness"
+          ],
+          "reason": "provider quota"
+        }
+      ],
+      "chair": "openai"
+    },
+    "expected": []
+  },
+  {
+    "input": {
+      "risk": "crucial",
+      "legs": [
+        {
+          "role": "targeted",
+          "family": "anthropic",
+          "status": "pass",
+          "lenses": [
+            "correctness",
+            "security"
+          ]
+        },
+        {
+          "role": "targeted",
+          "family": "google",
+          "status": "pass",
+          "lenses": [
+            "security"
+          ]
+        }
+      ],
+      "chair": "openai"
+    },
+    "expected": []
+  },
+  {
+    "input": {
+      "risk": "crucial",
+      "legs": [
+        {
+          "role": "targeted",
+          "family": "anthropic",
+          "status": "pass",
+          "lenses": [
+            "correctness",
+            "security"
+          ]
+        }
+      ],
+      "chair": "openai"
+    },
+    "expected": [
+      "crucial review requires at least two passing independent legs",
+      "crucial review requires distinct lens sets covering at least two lenses",
+      "crucial review requires two non-chair families or a recorded blocker with a reason for each missing family",
+      "crucial fallback requires a passing same-family review for each missing non-chair family"
+    ]
+  },
+  {
+    "input": {
+      "risk": "crucial",
+      "legs": [
+        {
+          "role": "targeted",
+          "family": "anthropic",
+          "status": "pass",
+          "lenses": [
+            "correctness"
+          ]
+        },
+        {
+          "role": "targeted",
+          "family": "google",
+          "status": "pass",
+          "lenses": [
+            "correctness"
+          ]
+        }
+      ],
+      "chair": "openai"
+    },
+    "expected": [
+      "crucial review requires distinct lens sets covering at least two lenses"
+    ]
+  },
+  {
+    "input": {
+      "risk": "crucial",
+      "legs": [
+        {
+          "role": "targeted",
+          "family": "anthropic",
+          "status": "pass",
+          "lenses": [
+            "correctness",
+            "security"
+          ]
+        },
+        {
+          "role": "targeted",
+          "family": "google",
+          "status": "pass",
+          "lenses": [
+            "correctness",
+            "security"
+          ]
+        }
+      ],
+      "chair": "openai"
+    },
+    "expected": [
+      "crucial review requires distinct lens sets covering at least two lenses"
+    ]
+  },
+  {
+    "input": {
+      "risk": "crucial",
+      "legs": [
+        {
+          "role": "targeted",
+          "family": "anthropic",
+          "status": "pass",
+          "lenses": []
+        },
+        {
+          "role": "targeted",
+          "family": "google",
+          "status": "pass",
+          "lenses": [
+            "correctness"
+          ]
+        }
+      ],
+      "chair": "openai"
+    },
+    "expected": [
+      "crucial review requires at least two passing independent legs",
+      "crucial review requires distinct lens sets covering at least two lenses",
+      "crucial review requires two non-chair families or a recorded blocker with a reason for each missing family",
+      "crucial fallback requires a passing same-family review for each missing non-chair family"
+    ]
+  },
+  {
+    "input": {
+      "risk": "crucial",
+      "legs": [
+        {
+          "role": "targeted",
+          "family": "anthropic",
+          "status": "pass",
+          "lenses": []
+        },
+        {
+          "role": "targeted",
+          "family": "google",
+          "status": "pass",
+          "lenses": [
+            "correctness",
+            "security"
+          ]
+        }
+      ],
+      "chair": "openai"
+    },
+    "expected": [
+      "crucial review requires at least two passing independent legs",
+      "crucial review requires distinct lens sets covering at least two lenses",
+      "crucial review requires two non-chair families or a recorded blocker with a reason for each missing family",
+      "crucial fallback requires a passing same-family review for each missing non-chair family"
+    ]
+  },
+  {
+    "input": {
+      "risk": "crucial",
+      "legs": [
+        {
+          "role": "targeted",
+          "family": "anthropic",
+          "status": "pass",
+          "lenses": [
+            ""
+          ]
+        },
+        {
+          "role": "targeted",
+          "family": "google",
+          "status": "pass",
+          "lenses": [
+            "security"
+          ]
+        },
+        {
+          "role": "targeted",
+          "family": "openai",
+          "status": "pass",
+          "lenses": [
+            "adversarial"
+          ]
+        }
+      ],
+      "chair": "openai"
+    },
+    "expected": [
+      "crucial review requires two non-chair families or a recorded blocker with a reason for each missing family"
+    ]
+  },
+  {
+    "input": {
+      "risk": "crucial",
+      "legs": [
+        {
+          "role": "targeted",
+          "family": "anthropic",
+          "status": "pass",
+          "lenses": [
+            "   "
+          ]
+        },
+        {
+          "role": "targeted",
+          "family": "google",
+          "status": "pass",
+          "lenses": [
+            "security"
+          ]
+        },
+        {
+          "role": "targeted",
+          "family": "openai",
+          "status": "pass",
+          "lenses": [
+            "adversarial"
+          ]
+        }
+      ],
+      "chair": "openai"
+    },
+    "expected": [
+      "crucial review requires two non-chair families or a recorded blocker with a reason for each missing family"
+    ]
+  },
+  {
+    "input": {
+      "risk": "crucial",
+      "legs": [
+        {
+          "role": "targeted",
+          "family": "anthropic",
+          "status": "pass",
+          "lenses": [
+            "correctness"
+          ]
+        },
+        {
+          "role": "targeted",
+          "family": "openai",
+          "status": "pass",
+          "lenses": [
+            "security"
+          ]
+        }
+      ],
+      "chair": "openai"
+    },
+    "expected": [
+      "crucial review requires two non-chair families or a recorded blocker with a reason for each missing family"
+    ]
+  },
+  {
+    "input": {
+      "risk": "crucial",
+      "legs": [
+        {
+          "role": "targeted",
+          "family": "anthropic",
+          "status": "pass",
+          "lenses": [
+            "correctness"
+          ]
+        },
+        {
+          "role": "targeted",
+          "family": "openai",
+          "status": "pass",
+          "lenses": [
+            "security"
+          ]
+        },
+        {
+          "role": "targeted",
+          "family": "google",
+          "status": "omitted",
+          "lenses": [
+            "correctness"
+          ],
+          "reason": "provider unavailable"
+        }
+      ],
+      "chair": "openai"
+    },
+    "expected": []
+  },
+  {
+    "input": {
+      "risk": "crucial",
+      "legs": [
+        {
+          "role": "targeted",
+          "family": "anthropic",
+          "status": "pass",
+          "lenses": [
+            "correctness"
+          ]
+        },
+        {
+          "role": "targeted",
+          "family": "google",
+          "status": "failed",
+          "lenses": [
+            "security"
+          ]
+        }
+      ],
+      "chair": "openai"
+    },
+    "expected": [
+      "crucial review requires at least two passing independent legs",
+      "crucial review requires distinct lens sets covering at least two lenses",
+      "crucial review requires two non-chair families or a recorded blocker with a reason for each missing family",
+      "crucial fallback requires a passing same-family review for each missing non-chair family"
+    ]
+  },
+  {
+    "input": {
+      "risk": "crucial",
+      "legs": [
+        {
+          "role": "targeted",
+          "family": "anthropic",
+          "status": "pass",
+          "lenses": [
+            "correctness"
+          ]
+        },
+        {
+          "role": "targeted",
+          "family": "openai",
+          "status": "pass",
+          "lenses": [
+            "security"
+          ]
+        },
+        {
+          "role": "targeted",
+          "family": "google",
+          "status": "failed",
+          "lenses": [
+            "correctness"
+          ],
+          "reason": "defects"
+        }
+      ],
+      "chair": "openai"
+    },
+    "expected": [
+      "crucial review requires two non-chair families or a recorded blocker with a reason for each missing family"
+    ]
+  },
+  {
+    "input": {
+      "risk": "crucial",
+      "legs": [
+        {
+          "role": "targeted",
+          "family": "anthropic",
+          "status": "pass",
+          "lenses": [
+            "correctness"
+          ]
+        },
+        {
+          "role": "targeted",
+          "family": "openai",
+          "status": "pass",
+          "lenses": [
+            "security"
+          ]
+        },
+        {
+          "role": "targeted",
+          "family": "google",
+          "status": "omitted",
+          "lenses": [
+            "correctness"
+          ],
+          "reason": ""
+        }
+      ],
+      "chair": "openai"
+    },
+    "expected": [
+      "crucial review requires two non-chair families or a recorded blocker with a reason for each missing family"
+    ]
+  },
+  {
+    "input": {
+      "risk": "crucial",
+      "legs": [
+        {
+          "role": "targeted",
+          "family": "anthropic",
+          "status": "pass",
+          "lenses": [
+            "correctness"
+          ]
+        },
+        {
+          "role": "targeted",
+          "family": "openai",
+          "status": "pass",
+          "lenses": [
+            "security"
+          ]
+        },
+        {
+          "role": "targeted",
+          "family": "google",
+          "status": "unavailable",
+          "lenses": [
+            "correctness"
+          ],
+          "reason": "   "
+        }
+      ],
+      "chair": "openai"
+    },
+    "expected": [
+      "crucial review requires two non-chair families or a recorded blocker with a reason for each missing family"
+    ]
+  },
+  {
+    "input": {
+      "risk": "crucial",
+      "legs": [
+        {
+          "role": "targeted",
+          "family": "anthropic",
+          "status": "pass",
+          "lenses": [
+            "correctness"
+          ]
+        },
+        {
+          "role": "targeted",
+          "family": "anthropic",
+          "status": "pass",
+          "lenses": [
+            "security"
+          ]
+        },
+        {
+          "role": "targeted",
+          "family": "anthropic",
+          "status": "omitted",
+          "lenses": [
+            "correctness"
+          ],
+          "reason": "second route unavailable"
+        }
+      ],
+      "chair": "openai"
+    },
+    "expected": [
+      "crucial review requires two non-chair families or a recorded blocker with a reason for each missing family",
+      "crucial fallback requires a passing same-family review for each missing non-chair family"
+    ]
+  },
+  {
+    "input": {
+      "risk": "crucial",
+      "legs": [
+        {
+          "role": "targeted",
+          "family": "anthropic",
+          "status": "pass",
+          "lenses": [
+            "correctness"
+          ]
+        },
+        {
+          "role": "targeted",
+          "family": "openai",
+          "status": "pass",
+          "lenses": [
+            "security"
+          ]
+        },
+        {
+          "role": "targeted",
+          "family": "anthropic",
+          "status": "omitted",
+          "lenses": [
+            "correctness"
+          ],
+          "reason": "second route unavailable"
+        }
+      ],
+      "chair": "openai"
+    },
+    "expected": [
+      "crucial review requires two non-chair families or a recorded blocker with a reason for each missing family"
+    ]
+  },
+  {
+    "input": {
+      "risk": "crucial",
+      "legs": [
+        {
+          "role": "targeted",
+          "family": "anthropic",
+          "status": "pass",
+          "lenses": [
+            "correctness"
+          ]
+        },
+        {
+          "role": "targeted",
+          "family": "anthropic",
+          "status": "pass",
+          "lenses": [
+            "security"
+          ]
+        },
+        {
+          "role": "targeted",
+          "family": "google",
+          "status": "omitted",
+          "lenses": [
+            "correctness"
+          ],
+          "reason": "provider quota"
+        }
+      ],
+      "chair": "openai"
+    },
+    "expected": [
+      "crucial fallback requires a passing same-family review for each missing non-chair family"
+    ]
+  },
+  {
+    "input": {
+      "risk": "crucial",
+      "legs": [
+        {
+          "role": "targeted",
+          "family": "openai",
+          "status": "pass",
+          "lenses": [
+            "correctness"
+          ]
+        },
+        {
+          "role": "targeted",
+          "family": "openai",
+          "status": "pass",
+          "lenses": [
+            "adversarial"
+          ]
+        },
+        {
+          "role": "targeted",
+          "family": "google",
+          "status": "unavailable",
+          "lenses": [
+            "correctness"
+          ],
+          "reason": "provider quota"
+        }
+      ],
+      "chair": "openai"
+    },
+    "expected": [
+      "crucial review requires two non-chair families or a recorded blocker with a reason for each missing family"
+    ]
+  },
+  {
+    "input": {
+      "risk": "crucial",
+      "legs": [
+        {
+          "role": "targeted",
+          "family": "openai",
+          "status": "pass",
+          "lenses": [
+            "correctness"
+          ]
+        },
+        {
+          "role": "targeted",
+          "family": "openai",
+          "status": "pass",
+          "lenses": [
+            "adversarial"
+          ]
+        },
+        {
+          "role": "targeted",
+          "family": "google",
+          "status": "unavailable",
+          "lenses": [
+            "correctness"
+          ],
+          "reason": "provider quota"
+        },
+        {
+          "role": "targeted",
+          "family": "google",
+          "status": "unavailable",
+          "lenses": [
+            "correctness"
+          ],
+          "reason": "provider quota"
+        }
+      ],
+      "chair": "openai"
+    },
+    "expected": [
+      "crucial review requires two non-chair families or a recorded blocker with a reason for each missing family"
+    ]
+  },
+  {
+    "input": {
+      "risk": "crucial",
+      "legs": [
+        {
+          "role": "targeted",
+          "family": "openai",
+          "status": "pass",
+          "lenses": [
+            "correctness"
+          ]
+        },
+        {
+          "role": "targeted",
+          "family": "openai",
+          "status": "pass",
+          "lenses": [
+            "adversarial"
+          ]
+        },
+        {
+          "role": "targeted",
+          "family": "google",
+          "status": "unavailable",
+          "lenses": [
+            "correctness"
+          ],
+          "reason": "provider quota"
+        },
+        {
+          "role": "targeted",
+          "family": "openai",
+          "status": "unavailable",
+          "lenses": [
+            "correctness"
+          ],
+          "reason": "provider quota"
+        }
+      ],
+      "chair": "openai"
+    },
+    "expected": [
+      "crucial review requires two non-chair families or a recorded blocker with a reason for each missing family"
+    ]
+  },
+  {
+    "input": {
+      "risk": "crucial",
+      "legs": [
+        {
+          "role": "targeted",
+          "family": "openai",
+          "status": "pass",
+          "lenses": [
+            "correctness"
+          ]
+        },
+        {
+          "role": "targeted",
+          "family": "openai",
+          "status": "pass",
+          "lenses": [
+            "adversarial"
+          ]
+        },
+        {
+          "role": "targeted",
+          "family": "google",
+          "status": "unavailable",
+          "lenses": [
+            "correctness"
+          ],
+          "reason": "provider quota"
+        },
+        {
+          "role": "targeted",
+          "family": "anthropic",
+          "status": "unavailable",
+          "lenses": [
+            "correctness"
+          ],
+          "reason": "provider quota"
+        }
+      ],
+      "chair": "openai"
+    },
+    "expected": []
+  },
+  {
+    "input": {
+      "risk": "terminal",
+      "legs": [
+        {
+          "role": "targeted",
+          "family": "openai",
+          "status": "pass",
+          "lenses": [
+            "correctness"
+          ]
+        },
+        {
+          "role": "targeted",
+          "family": "openai",
+          "status": "pass",
+          "lenses": [
+            "adversarial"
+          ]
+        },
+        {
+          "role": "targeted",
+          "family": "google",
+          "status": "unavailable",
+          "lenses": [
+            "correctness"
+          ],
+          "reason": "provider quota"
+        }
+      ],
+      "chair": "openai"
+    },
+    "expected": [
+      "terminal review requires two non-chair families or a recorded blocker with a reason for each missing family"
+    ]
+  },
+  {
+    "input": {
+      "risk": "terminal",
+      "legs": [
+        {
+          "role": "targeted",
+          "family": "openai",
+          "status": "pass",
+          "lenses": [
+            "correctness"
+          ]
+        },
+        {
+          "role": "targeted",
+          "family": "openai",
+          "status": "pass",
+          "lenses": [
+            "adversarial"
+          ]
+        },
+        {
+          "role": "targeted",
+          "family": "google",
+          "status": "unavailable",
+          "lenses": [
+            "correctness"
+          ],
+          "reason": "provider quota"
+        },
+        {
+          "role": "targeted",
+          "family": "google",
+          "status": "unavailable",
+          "lenses": [
+            "correctness"
+          ],
+          "reason": "provider quota"
+        }
+      ],
+      "chair": "openai"
+    },
+    "expected": [
+      "terminal review requires two non-chair families or a recorded blocker with a reason for each missing family"
+    ]
+  },
+  {
+    "input": {
+      "risk": "terminal",
+      "legs": [
+        {
+          "role": "targeted",
+          "family": "openai",
+          "status": "pass",
+          "lenses": [
+            "correctness"
+          ]
+        },
+        {
+          "role": "targeted",
+          "family": "openai",
+          "status": "pass",
+          "lenses": [
+            "adversarial"
+          ]
+        },
+        {
+          "role": "targeted",
+          "family": "google",
+          "status": "unavailable",
+          "lenses": [
+            "correctness"
+          ],
+          "reason": "provider quota"
+        },
+        {
+          "role": "targeted",
+          "family": "openai",
+          "status": "unavailable",
+          "lenses": [
+            "correctness"
+          ],
+          "reason": "provider quota"
+        }
+      ],
+      "chair": "openai"
+    },
+    "expected": [
+      "terminal review requires two non-chair families or a recorded blocker with a reason for each missing family"
+    ]
+  },
+  {
+    "input": {
+      "risk": "terminal",
+      "legs": [
+        {
+          "role": "targeted",
+          "family": "openai",
+          "status": "pass",
+          "lenses": [
+            "correctness"
+          ]
+        },
+        {
+          "role": "targeted",
+          "family": "openai",
+          "status": "pass",
+          "lenses": [
+            "adversarial"
+          ]
+        },
+        {
+          "role": "targeted",
+          "family": "google",
+          "status": "unavailable",
+          "lenses": [
+            "correctness"
+          ],
+          "reason": "provider quota"
+        },
+        {
+          "role": "targeted",
+          "family": "anthropic",
+          "status": "unavailable",
+          "lenses": [
+            "correctness"
+          ],
+          "reason": "provider quota"
+        }
+      ],
+      "chair": "openai"
+    },
+    "expected": []
+  },
+  {
+    "input": {
+      "risk": "terminal",
+      "legs": [
+        {
+          "role": "targeted",
+          "family": "anthropic",
+          "status": "pass",
+          "lenses": [
+            "correctness"
+          ]
+        },
+        {
+          "role": "targeted",
+          "family": "google",
+          "status": "pass",
+          "lenses": [
+            "adversarial"
+          ]
+        }
+      ],
+      "chair": "openai"
+    },
+    "expected": []
+  },
+  {
+    "input": {
+      "risk": "terminal",
+      "legs": [
+        {
+          "role": "targeted",
+          "family": "anthropic",
+          "status": "pass",
+          "lenses": [
+            "correctness"
+          ]
+        },
+        {
+          "role": "targeted",
+          "family": "google",
+          "status": "pass",
+          "lenses": [
+            "Challenge assumptions"
+          ]
+        }
+      ],
+      "chair": "openai"
+    },
+    "expected": []
+  },
+  {
+    "input": {
+      "risk": "terminal",
+      "legs": [
+        {
+          "role": "targeted",
+          "family": "anthropic",
+          "status": "pass",
+          "lenses": [
+            "correctness"
+          ]
+        },
+        {
+          "role": "targeted",
+          "family": "google",
+          "status": "pass",
+          "lenses": [
+            "security"
+          ]
+        },
+        {
+          "role": "targeted",
+          "family": "anthropic",
+          "status": "failed",
+          "lenses": [
+            "adversarial"
+          ]
+        }
+      ],
+      "chair": "openai"
+    },
+    "expected": [
+      "terminal review requires an adversarial or challenge lens"
+    ]
+  },
+  {
+    "input": {
+      "risk": "terminal",
+      "legs": [
+        {
+          "role": "targeted",
+          "family": "anthropic",
+          "status": "pass",
+          "lenses": [
+            "correctness",
+            "adversarial"
+          ]
+        }
+      ],
+      "chair": "openai"
+    },
+    "expected": [
+      "terminal review requires at least two passing independent legs",
+      "terminal review requires distinct lens sets covering at least two lenses",
+      "terminal review requires two non-chair families or a recorded blocker with a reason for each missing family",
+      "terminal fallback requires a passing same-family review for each missing non-chair family"
+    ]
+  },
+  {
+    "input": {
+      "risk": "terminal",
+      "legs": [
+        {
+          "role": "targeted",
+          "family": "anthropic",
+          "status": "pass",
+          "lenses": []
+        },
+        {
+          "role": "targeted",
+          "family": "google",
+          "status": "pass",
+          "lenses": [
+            "correctness",
+            "adversarial"
+          ]
+        }
+      ],
+      "chair": "openai"
+    },
+    "expected": [
+      "terminal review requires at least two passing independent legs",
+      "terminal review requires distinct lens sets covering at least two lenses",
+      "terminal review requires two non-chair families or a recorded blocker with a reason for each missing family",
+      "terminal fallback requires a passing same-family review for each missing non-chair family"
+    ]
+  },
+  {
+    "input": {
+      "risk": "terminal",
+      "legs": [
+        {
+          "role": "targeted",
+          "family": "anthropic",
+          "status": "pass",
+          "lenses": [
+            ""
+          ]
+        },
+        {
+          "role": "targeted",
+          "family": "google",
+          "status": "pass",
+          "lenses": [
+            "security"
+          ]
+        },
+        {
+          "role": "targeted",
+          "family": "openai",
+          "status": "pass",
+          "lenses": [
+            "adversarial"
+          ]
+        }
+      ],
+      "chair": "openai"
+    },
+    "expected": [
+      "terminal review requires two non-chair families or a recorded blocker with a reason for each missing family"
+    ]
+  },
+  {
+    "input": {
+      "risk": "terminal",
+      "legs": [
+        {
+          "role": "targeted",
+          "family": "anthropic",
+          "status": "pass",
+          "lenses": [
+            "   "
+          ]
+        },
+        {
+          "role": "targeted",
+          "family": "google",
+          "status": "pass",
+          "lenses": [
+            "security"
+          ]
+        },
+        {
+          "role": "targeted",
+          "family": "openai",
+          "status": "pass",
+          "lenses": [
+            "adversarial"
+          ]
+        }
+      ],
+      "chair": "openai"
+    },
+    "expected": [
+      "terminal review requires two non-chair families or a recorded blocker with a reason for each missing family"
+    ]
+  },
+  {
+    "input": {
+      "risk": "crucial",
+      "legs": [
+        {
+          "role": "targeted",
+          "family": "anthropic",
+          "status": "pass",
+          "lenses": [
+            "correctness"
+          ]
+        },
+        {
+          "role": "targeted",
+          "family": "google",
+          "status": "pass",
+          "lenses": [
+            " correctness "
+          ]
+        }
+      ],
+      "chair": "openai"
+    },
+    "expected": [
+      "crucial review requires distinct lens sets covering at least two lenses"
+    ]
+  }
+]

@@ -24,3 +24,10 @@ and fallback artifact writes are ported. CLI parsing remains for cut-over.
 The private `pending::python_json` encoder belongs in `provenant-records`;
 it preserves sorted keys, ASCII escaping, spaces and the final newline at
 this artifact boundary. It is not a general canonical floating-point codec.
+
+## Review ladder unit 01
+
+Risk tiers, lens sets, blocker reasons, provider lineage and fallback counts
+are ported. `tests/generate_policy_fixtures.py` expands the unchanged Python
+policy assertions into retained JSON fixtures; Rust compares the same cases
+with both their expected values and the live Python implementation.
