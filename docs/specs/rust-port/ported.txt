@@ -6,11 +6,14 @@ runtime/fabric/src/identity.ts#unit-01
 runtime/fabric/src/process-identity.ts#interface
 runtime/fabric/src/run-registry.ts#interface
 runtime/fabric/src/success-status.ts#unit-01
+scripts/check-provenant-install.py#interface
 scripts/lane_safety_guard.py#unit-01
 scripts/lib/projection.py#unit-01
 scripts/lib/roots.py#unit-01
 scripts/model_route.py#interface
 scripts/model_route_live.py#interface
+scripts/model_route_live.py#unit-02
+scripts/model_route_pools.py#unit-03
 scripts/provider_quota.py#interface
 scripts/quota_display.py#unit-01
 scripts/quota_display.py#unit-02
@@ -18,6 +21,7 @@ scripts/quota_schedule.py#unit-01
 scripts/telemetry.py#interface
 scripts/telemetry_hosts.py#interface
 scripts/telemetry_report.py#unit-02
+skills/_shared/bounded_process.py#unit-01
 skills/_shared/excludes.py#unit-01
 skills/_shared/review_ladder.py#unit-01
 skills/_shared/review_panel.py#unit-01
@@ -44,4 +48,5 @@ skills/orchestrate/scripts/layout.py#interface
 skills/orchestrate/scripts/process_info.py#unit-01
 skills/orchestrate/scripts/run_lineage.py#interface
 skills/orchestrate/scripts/trusted_git.py#unit-01
+workspace:front-door-syscalls
 workspace:manifest-and-digest

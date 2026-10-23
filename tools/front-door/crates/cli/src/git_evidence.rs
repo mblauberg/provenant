@@ -3,7 +3,6 @@ use std::{
     collections::BTreeMap,
     ffi::{OsStr, OsString},
     path::{Component, Path},
-    process::Command,
 };
 use thiserror::Error;
 
@@ -57,26 +56,40 @@ pub fn sanitized_environment(
     environment
 }
 
+/// A byte-preserving, bounded utility seam. The current supervisor's public
+/// bounded runner returns replacement-decoded text; it cannot bind this API yet.
+/// No local process lifecycle/capture implementation duplicates that owner.
+pub trait GitRead {
+    fn output(
+        &mut self,
+        repository: &Path,
+        arguments: &[&OsStr],
+        environment: &BTreeMap<OsString, OsString>,
+    ) -> Result<GitReadOutput, std::io::Error>;
+}
+#[derive(Debug, Default)]
+pub struct GitReadOutput {
+    pub returncode: i32,
+    pub stdout: Vec<u8>,
+    pub stderr: Vec<u8>,
+}
+
 pub fn git_output(
     repository: &Path,
     args: &[&OsStr],
     source: &BTreeMap<OsString, OsString>,
+    executor: &mut impl GitRead,
 ) -> Result<Vec<u8>, Error> {
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(repository)
-        .args(args)
-        .env_clear()
-        .envs(sanitized_environment(source))
-        .output()
+    let output = executor
+        .output(repository, args, &sanitized_environment(source))
         .map_err(|source| Error::Io {
             repository: repository.into(),
             source,
         })?;
-    if !output.status.success() {
+    if output.returncode != 0 {
         return Err(Error::Git {
             repository: repository.into(),
-            status: output.status.code().unwrap_or(-1),
+            status: output.returncode,
             stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
         });
     }
@@ -139,6 +152,45 @@ pub fn check_untracked(status: &[u8], selected: &[String]) -> Result<(), Error> 
     Ok(())
 }
 
+/// The source packet header, with the original field types and wire values.
+/// Filesystem path-to-JSON encoding is still an owner integration prerequisite.
+#[derive(Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct PacketMetadata {
+    pub schema_version: u64,
+    pub record_type: String,
+    pub repository: String,
+    pub git_root: String,
+    pub head: String,
+    pub diff_base: String,
+    pub working_tree: WorkingTree,
+    pub diff_from: String,
+    pub paths: Vec<String>,
+    pub encoding: String,
+}
+#[derive(Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum WorkingTree {
+    Clean,
+    Dirty,
+}
+/// Encode the exact retained header/status framing. Diff streaming and atomic
+/// publication must complete before any concrete materialise command is exposed.
+pub fn packet_prefix(
+    metadata: &PacketMetadata,
+    status: &[u8],
+) -> Result<Vec<u8>, serde_json::Error> {
+    let value = serde_json::to_value(metadata)?;
+    let mut bytes = crate::pending::ascii_json(&value)?.into_bytes();
+    bytes.extend_from_slice(b"\n--- status ---\n");
+    bytes.extend_from_slice(
+        String::from_utf8_lossy(status)
+            .replace('\0', "\n")
+            .as_bytes(),
+    );
+    bytes.extend_from_slice(b"--- diff ---\n");
+    Ok(bytes)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -186,25 +238,33 @@ mod tests {
     }
 
     #[test]
-    fn read_ignores_inherited_repository_redirects() {
-        let temp = tempfile::tempdir().unwrap();
-        assert!(Command::new("git")
-            .args(["init", "-q"])
-            .arg(temp.path())
-            .status()
-            .unwrap()
-            .success());
-        let mut env: BTreeMap<_, _> = std::env::vars_os().collect();
-        env.insert("GIT_DIR".into(), "/does/not/exist".into());
-        let output = git_output(
-            temp.path(),
-            &[OsStr::new("rev-parse"), OsStr::new("--show-toplevel")],
-            &env,
-        )
-        .unwrap();
+    fn read_request_closes_environment_without_owning_an_unbounded_child() {
+        struct Fixture;
+        impl GitRead for Fixture {
+            fn output(
+                &mut self,
+                repository: &Path,
+                arguments: &[&OsStr],
+                environment: &BTreeMap<OsString, OsString>,
+            ) -> Result<GitReadOutput, std::io::Error> {
+                assert_eq!(repository, Path::new("/fixture"));
+                assert_eq!(arguments, [OsStr::new("status")]);
+                assert!(!environment.contains_key(OsStr::new("GIT_DIR")));
+                Ok(GitReadOutput {
+                    stdout: b"raw\xff".to_vec(),
+                    ..Default::default()
+                })
+            }
+        }
         assert_eq!(
-            String::from_utf8(output).unwrap().trim(),
-            temp.path().canonicalize().unwrap().to_str().unwrap()
+            git_output(
+                Path::new("/fixture"),
+                &[OsStr::new("status")],
+                &BTreeMap::from([("GIT_DIR".into(), "/wrong".into())]),
+                &mut Fixture
+            )
+            .unwrap(),
+            b"raw\xff"
         );
     }
     #[test]
@@ -224,5 +284,23 @@ mod tests {
             .map(|(k, v)| (k.into_string().unwrap(), v.into_string().unwrap()))
             .collect();
         assert_eq!(actual, expected);
+    }
+    #[test]
+    fn packet_header_and_status_framing_match_exact_python_bytes() {
+        let metadata = PacketMetadata {
+            schema_version: 1,
+            record_type: "provenant-git-evidence".into(),
+            repository: "/fixture/é\nroot".into(),
+            git_root: "/fixture/root".into(),
+            head: "a".repeat(40),
+            diff_base: "b".repeat(40),
+            working_tree: WorkingTree::Dirty,
+            diff_from: "HEAD~1".into(),
+            paths: vec!["🦀\nfile".into(), "quote\"".into()],
+            encoding: "utf-8-replacement".into(),
+        };
+        let status = b" M invalid\xff\0?? unicode-\xf0\x9f\xa6\x80\0";
+        let Some(expected):Option<Vec<u8>>=crate::oracle::python("import json,sys; x=json.load(sys.stdin); print(json.dumps(list(json.dumps(x['metadata'],sort_keys=True,separators=(',',':')).encode('utf-8')+b'\\n--- status ---\\n'+bytes(x['status']).decode('utf-8','replace').replace('\\x00','\\n').encode('utf-8')+b'--- diff ---\\n')))",&serde_json::json!({"metadata":metadata,"status":status.as_slice()})) else {return;};
+        assert_eq!(packet_prefix(&metadata, status).unwrap(), expected);
     }
 }

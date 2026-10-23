@@ -45,6 +45,32 @@ impl PythonTimestamp {
     pub fn to_jiff(self) -> Result<Timestamp, DateTimeError> {
         Timestamp::from_microsecond(self.0).map_err(|_| DateTimeError::TimeRange)
     }
+    /// UTC ISO 8601 with a Z suffix and Python's auto microsecond precision.
+    /// Civil arithmetic covers Python's entire range, including the final
+    /// twelve hours of year 9999 that Jiff Timestamp deliberately excludes.
+    pub fn iso_utc(self) -> Result<String, DateTimeError> {
+        let days = self.0.div_euclid(86_400_000_000);
+        let time = self.0.rem_euclid(86_400_000_000);
+        let date = Date::new(1970, 1, 1)
+            .map_err(|_| DateTimeError::TimeRange)?
+            .checked_add(jiff::Span::new().days(days))
+            .map_err(|_| DateTimeError::TimeRange)?;
+        let hour = time / 3_600_000_000;
+        let minute = time / 60_000_000 % 60;
+        let second = time / 1_000_000 % 60;
+        let micros = time % 1_000_000;
+        let mut text = format!(
+            "{:04}-{:02}-{:02}T{hour:02}:{minute:02}:{second:02}",
+            date.year(),
+            date.month(),
+            date.day()
+        );
+        if micros != 0 {
+            text.push_str(&format!(".{micros:06}"));
+        }
+        text.push('Z');
+        Ok(text)
+    }
 }
 fn timestamp_micros(micros: i64) -> Result<PythonTimestamp, DateTimeError> {
     if !(-62_135_596_800_000_000..253_402_300_800_000_000).contains(&micros) {
@@ -279,4 +305,179 @@ fn parse(value: &str, semantics: IsoformatSemantics) -> Option<PythonDateTime> {
 /// have no UTC timestamp; use python_fromisoformat to preserve naive datetimes.
 pub fn python_iso_timestamp(value: &str) -> Option<PythonTimestamp> {
     python_fromisoformat(value).ok()?.timestamp().ok()
+}
+
+#[cfg(test)]
+mod form_tests {
+    use super::*;
+    #[test]
+    fn documented_iso_forms_retain_wall_clock_fraction_and_offset() {
+        for (text, hour, minute, micros, offset) in [
+            ("2026-10-23", 0, 0, 0, None),
+            ("20261023", 0, 0, 0, None),
+            ("2026-W43-5", 0, 0, 0, None),
+            ("2026W435", 0, 0, 0, None),
+            ("2026-10-23T12", 12, 0, 0, None),
+            ("2026-10-23 12:30", 12, 30, 0, None),
+            ("20261023T1230", 12, 30, 0, None),
+            ("20261023T123000", 12, 30, 0, None),
+            ("2026-10-23💩12:30:00", 12, 30, 0, None),
+            ("2026-10-23T12:30:00.1", 12, 30, 100_000, None),
+            ("2026-10-23T12:30:00,123456789", 12, 30, 123_456, None),
+            ("2026-10-23T12Z", 12, 0, 0, Some(0)),
+            ("2026-10-23T12+01", 12, 0, 0, Some(3_600_000_000)),
+            ("2026-10-23T12-0130", 12, 0, 0, Some(-5_400_000_000)),
+            ("2026-10-23T12+01:30", 12, 0, 0, Some(5_400_000_000)),
+            ("2026-10-23T12+013000", 12, 0, 0, Some(5_400_000_000)),
+            (
+                "2026-10-23T12-01:02:03.123456789",
+                12,
+                0,
+                0,
+                Some(-3_723_123_456),
+            ),
+        ] {
+            let value = python_fromisoformat(text).unwrap();
+            assert_eq!(
+                (
+                    value.datetime.year(),
+                    value.datetime.month(),
+                    value.datetime.day()
+                ),
+                (2026, 10, 23),
+                "{text}"
+            );
+            assert_eq!(
+                (
+                    value.datetime.hour(),
+                    value.datetime.minute(),
+                    value.datetime.second(),
+                    value.datetime.subsec_nanosecond() / 1000
+                ),
+                (hour, minute, 0, micros),
+                "{text}"
+            );
+            assert_eq!(value.offset_microseconds, offset, "{text}");
+        }
+        for text in [
+            "2026-10",
+            "2026-296",
+            "2026-10-23T12.5",
+            "2026-10-23T12:30.5",
+            "2026-10-23T12:30:60",
+            "2026-10-23T12+24:00",
+        ] {
+            assert_eq!(
+                python_fromisoformat(text),
+                Err(DateTimeError::InvalidIso),
+                "{text}"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod utc_tests {
+    use super::*;
+    #[test]
+    fn shared_utc_parse_and_format_match_source_telemetry() {
+        let inputs = serde_json::json!([
+            "2026-10-23",
+            "20261023T123000",
+            "2026-W43-5T12:30:00Z",
+            "2026-10-23 12:30:00.123456789-01:30",
+            "0001-01-01T00:00:00Z",
+            "9999-12-31T23:59:59.999999Z",
+            "1969-12-31T23:59:59.999999Z",
+            "2026-10-23Z12",
+            "bad"
+        ]);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("input.json");
+        std::fs::write(&path, serde_json::to_vec(&inputs).unwrap()).unwrap();
+        let Some(expected) = crate::test_support::python(
+            "scripts/telemetry.py",
+            r#"
+out=[]
+for s in json.loads(pathlib.Path(sys.argv[3]).read_text()):
+    try: out.append(m.iso(m.since_time(s)))
+    except (ValueError,OverflowError): out.append(None)
+print(json.dumps(out))
+"#,
+            &[&path],
+        ) else {
+            return;
+        };
+        let actual: Vec<_> = inputs
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| {
+                parse_time(v.as_str().unwrap())
+                    .and_then(PythonTimestamp::iso_utc)
+                    .ok()
+            })
+            .collect();
+        assert_eq!(serde_json::json!(actual), expected);
+    }
+}
+
+/// Source telemetry `since_time`: Python fromisoformat after replacing `Z`,
+/// treating a naive clock as UTC. Other policies should keep using the parser
+/// directly so their naive-clock policy stays explicit.
+pub fn parse_time(value: &str) -> Result<PythonTimestamp, DateTimeError> {
+    let mut parsed = python_fromisoformat(&value.replace('Z', "+00:00"))?;
+    parsed.offset_microseconds.get_or_insert(0);
+    parsed.timestamp()
+}
+
+#[cfg(test)]
+mod jiff_iso_tests {
+    use super::*;
+    #[test]
+    fn jiff_iso_adapter_preserves_negative_submicrosecond_floor_and_python_range() {
+        let nanos = [
+            -62_135_596_800_000_000_001_i128,
+            -62_135_596_800_000_000_000,
+            -1001,
+            -1000,
+            -1,
+            0,
+            999,
+            1000,
+            1_700_000_000_123_456_789,
+        ];
+        let inputs: Vec<_> = nanos.iter().map(ToString::to_string).collect();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("input.json");
+        std::fs::write(&path, serde_json::to_vec(&inputs).unwrap()).unwrap();
+        let Some(expected) = crate::test_support::python(
+            "scripts/telemetry.py",
+            r#"
+from datetime import datetime, timedelta, UTC
+out=[]
+for s in json.loads(pathlib.Path(sys.argv[3]).read_text()):
+    try: out.append(m.iso(datetime(1970,1,1,tzinfo=UTC)+timedelta(microseconds=int(s)//1000)))
+    except OverflowError: out.append(None)
+print(json.dumps(out))
+"#,
+            &[&path],
+        ) else {
+            return;
+        };
+        let actual: Vec<_> = nanos
+            .iter()
+            .map(|&n| iso(Timestamp::from_nanosecond(n).unwrap()).ok())
+            .collect();
+        assert_eq!(serde_json::json!(actual), expected);
+    }
+}
+
+/// Exact adapter for telemetry's Jiff timestamps. Python clocks have microsecond
+/// precision; discard lower nanoseconds within the civil second, including
+/// before the epoch. This preserves the source's datetime ISO spelling.
+pub fn iso(value: Timestamp) -> Result<String, DateTimeError> {
+    let micros = i64::try_from(value.as_nanosecond().div_euclid(1000))
+        .map_err(|_| DateTimeError::TimeRange)?;
+    timestamp_micros(micros)?.iso_utc()
 }

@@ -1195,6 +1195,32 @@ The source revision above is unchanged; CLI rendering remains an edge task.
   until the `provenant-records` ordered Python-value codec and
   `provenant-core` repr helper are available to this crate.
 
+## RP-ROUTING-2: continued routing parity and remaining boundaries
+
+- Rulebook v4; source/policy oracle revision
+  `7475ff01e437ec51c760b852516c21a5281cf9c6`; author route
+  `codex/gpt-6.1-sol@high`. Candidate: the port/routing-2 PR head.
+- Class: `bug` (fixed): batch-1 preference normalization converted truthy
+  non-string route statuses to `hard_route_rejected`; Python uses `str(status)`.
+  The candidate differentials cover booleans, integers, lists, empty values,
+  duplicate candidate IDs, availability observations and hard-admissibility.
+- Class: `bug` (fixed): batch-1 catalogue override validation swallowed invalid
+  model-pattern regex errors and returned false. The library now propagates a
+  typed CatalogError, with a dedicated malformed-pattern regression.
+- No new intentional divergence. RP-130402 remains open: both the catalogue
+  and capability loader remain partial for multi-adapter family aliases.
+  Partial preference ingress and pool migration still need Python dictionary
+  order/equality work; live suffix-level ingestion must preserve source order
+  when suffixes are shared. These are not accepted behavior changes.
+- Exact listing-byte differentials cover Unicode padding, null effort,
+  cooling ordering, hidden counts, synonym ordering and quota caveats. Live
+  identity, inherited privacy, fallback consent, capability/listing failures,
+  ISO offsets/microseconds and close-match decisions compare against imported
+  Python modules with isolated state and explicit clocks. No source-text exec
+  or eval is used in fixture generators.
+- The crate stays inert. PORT_STATUS.md lists full, partial/skipped units,
+  pending core/records helpers and integration-only judge gaps. No unit with
+  an acknowledged remaining behavior is listed as fully ported.
 ## RP-CLI2-01: typed cleanup and PID integer bounds
 
 - Class: `improvement`, authorised by PORTING.md v4 R4's i64/u64 rule.
@@ -1647,6 +1673,210 @@ The review-panel and authority-mapping unit claims hold. All three cycle
 interfaces are deliberately partial: observer.json restoration/replay,
 supervisor return codes 64 and 75, and the full dynamic observer record domain
 are not yet proved exact. Their IDs are removed from the completion ledger.
+
+## RP-core-3-01 — shared helper ownership and non-strict symlink loops
+
+- Rulebook v4; class `bug`, fixed in `port/core-3`. Author route:
+  `codex/gpt-6.1-sol@high`. Source/oracle and judge base:
+  `7021182d535f6c730c29713e77d5bca76893fd06`; local oracles CPython 3.14.8
+  (Unicode 16.0.0) and Node 24.21.0. All fixtures are isolated; no cut-over.
+- Core now owns the distinct Python Unicode, numeric, string, equality, line,
+  path and hexadecimal helpers, plus ECMAScript helpers under `core::js`.
+  Consumer copies are deliberately unchanged for their owning lanes to adopt.
+  The core README lists paths and semantics. Unicode data has one generated
+  table and one pinned generator under core.
+- Private copies disagree on Python digit/decimal classification, Unicode word
+  characters, radix numbers above u64, and valid symlink-chain lengths.
+  Differential fixtures compare against Python/Node rather than these copies.
+- `Path.resolve(strict=False)` on CPython >=3.13 retains an unresolved symlink
+  loop; core previously returned an error. A right-reason failing regression
+  and exact strict/non-strict Python differential now cover self-loops,
+  two-link loops, missing tails, parent components and existing targets.
+- Evidence: full-scalar Unicode property and decimal-value comparisons;
+  exact IEEE float-bit number comparisons; UTF-16 slices at the UTF-8 SQLite
+  boundary; TimeClip/calendar boundaries; Python numeric/shlex and path tests.
+  The oracle runner prints `skip:` for absence/version/exit-77 and fails required
+  mode. This is inert-library evidence; J1/J2/J3 remain cut-over gates.
+
+### RP-1001 core-3 follow-up — permissive hostname slug inputs
+
+- Unit: `scripts/host_identity.py#unit-01`; class `bug`, partial repair.
+- `host_identity::slug_value` now implements Python truthiness before `str()`
+  for serde JSON-shaped inputs. The thirteen-case Python differential includes
+  booleans, empty containers, zero, floats and Unicode lowercase expansion.
+- Remaining blocker on main: records has no extended Python JSON value/byte
+  decoder retaining non-finite values, lone surrogates and object insertion
+  order. `configured`/`peer_ids` cannot fully port through serde Value alone;
+  R2 prohibits a core -> records dependency. Raw surrogate-pass decoding also
+  needs that string representation. Excluded from `Units:`.
+
+### RP-1002 core-3 follow-up — records decoder composition
+
+- Unit: `scripts/lib/jsonc.py#unit-01`; class `library`, open/partial.
+- `jsonc::parse_jsonc_with` applies the existing comment/comma policy then
+  retains a supplied decoder's value and typed error. Consumers can supply
+  `provenant_records::checked_json::from_str` without reversing the R2 edge.
+- Remaining blocker on main: the records decoder lacks extended Python JSON
+  values, insertion order and Python JSONDecodeError diagnostics. The existing
+  finite serde convenience reader also still needs checked integer ingress;
+  an ignored right-reason regression pins overflow refusal and integer `-0`.
+  No second checked JSON codec has been introduced. Excluded from `Units:`.
+
+### RP-1003 core-3 follow-up — supervisor publication seam and platform tests
+
+- Unit: `scripts/lib/product_root_resolver.py#unit-01`; class `bug`, partial
+  repair. `PointerWriter` is the composition seam for supervisor's now-landed
+  safe filesystem API. Production core no longer compiles its atomic-write
+  copy; the std backend is test-only. R2 still forbids core -> supervisor.
+- macOS APFS invalid UTF-8 filename creation is asserted to fail with EPERM
+  (older releases) or EILSEQ (newer releases), with Python's errno asserted
+  equal to Rust's. Linux must create the filename and
+  compare pointer publication bytes. No filesystem-error skip remains.
+  The 260-fixture native-path byte differential always runs independently.
+- Replaced the old combined ignored JSON/path fixture with the isolated ignored
+  extended-JSON fixture and the active platform-specific native-path tests.
+- Remaining blocker on main: records has no surrogateescaped path decoder or
+  extended JSON representation. Pointer loading for those values remains
+  partial. `pending::path_json` and `PathEncodingError` remain records-owned;
+  atomic writes are not a production pending item. Excluded from `Units:`.
+
+### Core-3 owner audit after merging main
+
+- Main `1884954ef414e60cc6b160c636fe1add9f7784dd` added CLI's decimal-token
+  integer parser during the lane. Core now owns `py::decimal_integer` and
+  `IntegerError`, retaining its Python digit-limit message and typed exact-u64
+  refusal; the Python differential covers Unicode digits and both boundaries.
+  `py::python_word_character` is an adoption alias for the same word predicate.
+- Telemetry's private parse/format wrappers now have shared owners:
+  `py::parse_time` follows source `since_time` (replace `Z`, naive clocks mean
+  UTC), while `PythonTimestamp::iso_utc` emits source ISO UTC bytes across the
+  complete Python year range. The source-module differential covers basic and
+  week forms, offset conversion, truncated fractions, both year bounds and
+  malformed input. Float-second conversion continues to use `py::from_timestamp`.
+- Checks on the merged candidate: fmt and clippy pass; the required-mode core
+  suite has 68 passing tests and four explicitly ignored pre-cut-over parity
+  gaps. Forced exit-77 fixtures prove that both oracle routes emit `skip:` and
+  pass optional mode but fail required mode. No new dependency or codec copy.
+
+- The `py::iso(jiff::Timestamp)` adoption adapter keeps this path entirely in
+  integer nanoseconds/microseconds, including floor-within-second truncation
+  before the epoch. Its source differential also refuses datetimes before
+  Python year 1 without emitting a misleading wire value.
+### RP-CLI3-01: shared checked JSON and numeric bounds (inert partial scope)
+
+- Class: `improvement`, under PORTING.md v4 R4's existing integer-range rule.
+  Author route: `codex/gpt-6.1-sol@high`. Source/oracle:
+  `1884954ef414e60cc6b160c636fe1add9f7784dd`; merged main `b527d675`.
+- PR-check parsing and decoded hook events now use the records owner's checked
+  codec. An unused hook field containing `18446744073709551616` is a typed
+  NumberOutOfRange, while Python accepts and ignores that field. Reap's pure
+  PID/age helpers also refuse integers outside i64/u64 rather than round them.
+  No command is switched; raw JSON non-finite/surrogate handling and complete
+  process boundaries remain partial. The private ordered representation reuses
+  checked scalars, including integer -0, and retains duplicate-key positions.
+
+### RP-CLI3-02: exact text/JSON boundary repairs
+
+- Class: `bug`, fixed before delivery. Same source/oracle as RP-CLI3-01.
+- Path::display loses invalid Unix bytes. Installation's byte output boundary
+  now writes raw OS bytes and accepts byte advisories. Embedded path newlines
+  are covered by whole-output comparisons, including provider rows.
+- Rust regex case folding misses Python IGNORECASE's dotted/dotless I. The
+  publication personal-email classifier explicitly folds Python's four special
+  ASCII-case equivalents; source differentials include the dotted-I case.
+- Packet metadata is typed and encoded with sorted keys, compact separators,
+  ensure_ascii and exact status/diff framing. Hook output has its source's
+  field order, separators and ensure_ascii. The latter remains partial under
+  RP-CLI2-03: malformed/raw surrogate JSON is an explicit decoder error here,
+  while source main catches malformed JSON and accepts escaped surrogates.
+  New fixtures keep those gaps visible; neither hook unit-02 nor Git packet
+  materialisation is declared complete.
+
+### RP-CLI3-03: publication file growth at the bounded read (open)
+
+- Class: `library`; not accepted as a command behavior change. Same source/oracle
+  as RP-CLI3-01. Both public-release units remain absent from `ported.txt`.
+- Source checks a path's size and then reads its entire text. A replacement or
+  growth between stat/open can make that text exceed 5 MiB. Rust's initial
+  bounded read silently omitted the tail, potentially missing a finding; native
+  review caught this. The repaired adapter detects max+1 bytes and returns a
+  typed ChangedDuringRead refusal before decoding, rather than accepting a
+  prefix or mistaking a split UTF-8 character for an unreadable file.
+- Evidence: growth_between_stat_and_open_is_an_explicit_partial_scope_refusal
+  supplies a small stat target and a larger opened safe file without racing.
+  Source-compatible complete streaming text classification is still needed;
+  the inert library refusal is explicit, not approval to change publication
+  behavior at cut-over. No live command uses this adapter.
+### RP-SUP3-CENSUS: fallback failure rendering (bug, fixed; bound still open)
+
+- Source/oracle: `7021182d535f6c730c29713e77d5bca76893fd06`, Python 3.14.8,
+  rulebook v4. Author route: `codex/gpt-6.1-sol@high`.
+- Unit: `skills/orchestrate/scripts/process_info.py#unit-02` (partial).
+  The command adapter now preserves spawn errno/program and the timeout's
+  command/budget. Census rendering matches Python's OSError/TimeoutExpired
+  text; per-PID lookup and start-time still collapse these failures to absence.
+- Three injected command policy tests include a Python differential for spawn,
+  timeout, nonzero, empty census and unreadable PID failures. RP-1302's 1 MiB
+  stdout/stderr refusal remains open and blocks a full unit/ps-shim claim.
+
+### RP-SUP3-LIVENESS: diagnostic observation domain (library, open partial scope)
+
+- Same source/oracle and rulebook as RP-SUP3-CENSUS. Units:
+  `worker_liveness.py#unit-01` and `#unit-02`, both partial.
+- The read-only adapter uses bounded subprocess waits (15 seconds), bounded
+  output (16 MiB per stream), and a bounded session first line (64 MiB).
+  Python's corresponding waits/reads are unbounded. Oversize/timeout is a
+  typed refusal; this is not an accepted command behavior change.
+- `provenant_records::checked_json` owns JSON integer-range refusal, including
+  unknown fields, as the rulebook's approved `NumberOutOfRange` improvement.
+  Its missing extended JSON support (NaN and lone surrogate strings), and
+  core's missing surrogateescape string/path representation, prevent a full
+  claim. Native census refuses non-UTF-8 commands with a typed error retaining
+  the original OS string; it never silently changes command cwd extraction.
+  Native path rendering and exact non-strict symlink-loop behavior remain
+  partial too. Nothing calls this library yet.
+- Recursive glob does not follow directory links, retains root-before-nested
+  ordering for equal-mtime selection, and follows file links for reads.
+  A Python differential pins these behaviors. The typed main edge preserves
+  ordered/ASCII-escaped JSON, including CPython float spellings and non-finite
+  extensions, but raw argv/default/help parsing remains with the CLI owner.
+- Disposition: partial, absent from `Units:` and `ported.txt`; no divergence
+  approval is inferred. Shared-owner APIs and exact error/extended-input
+  fixtures are required before completing the affected domains.
+
+### RP-SUP3-REPAIR: rename endpoints and platform signal names (bug, fixed)
+
+- Same baseline and author route. Rename errors now retain source and
+  destination plus the OS cause; errno conversion remains unchanged. Boxed
+  safe filesystem traits require Send + Sync and have compile-time fixtures.
+- Node's platform-specific named signals now match the public Node constants
+  (SIGINFO on macOS; SIGSTKFLT/SIGPWR on Linux). A Node differential checks the
+  mapping. RP-SUP-PS-BUFFER's overflow contract remains open; this repair does
+  not complete the Fabric ps unit.
+
+### RP-SUP3-LIVENESS review repairs (bug, fixed)
+
+- Native review found an extra stat before selecting the first session log.
+  Python short-circuits that stat; if rotation removes the log after its read,
+  it still retains the selected path. The regression first failed with an
+  absent path and now passes with the retained path and missing metadata.
+- The typed main edge now catches failed home expansion as Python's
+  RuntimeError, emits `worker-liveness: Could not determine home directory.`
+  and returns 2. Its source differential first failed on an escaping error.
+  Empty HOME expands bare `~` to `/`, also confirmed by a failing-then-passing
+  regression. No source behavior changes are accepted by these repairs.
+- Final local evidence: 130 required-differential supervisor tests, 102
+  root-package tests and 2 layering policy checks passed; fmt and clippy with
+  warnings denied passed. Native syscall and source-parity review repairs are
+  complete. The partial domains above and chair-owned cross-family/CI gates
+  remain unchanged.
+
+### RP-SUP3-NAN-TIMEOUT: NaN bounded timeout (safety, open)
+
+- Unit: `skills/_shared/bounded_process.py#unit-01`. Source lines 167-170.
+- Python's `process.wait(timeout=nan)` never expires, so a NaN budget waits
+  forever. Rust refuses NaN with `BoundedError::InvalidTimeout` before
+  spawning. An infinite timeout keeps Python's behaviour: no deadline.
 
 ### RP-WF3-001: workflow boundary repairs (fixed Rust bugs)
 
