@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
 from pathlib import Path
 import subprocess
@@ -19,11 +20,20 @@ MARKER = "# Managed by scripts/install-harness; local edits to an installed copy
 def make_crate(product: Path) -> Path:
     crate = product / "tools/front-door"
     (crate / "src/help").mkdir(parents=True)
-    (crate / "Cargo.toml").write_text('[package]\nname = "provenant"\n')
+    (crate / "Cargo.toml").write_text(
+        '[workspace]\nmembers = [".", "crates/*"]\n[package]\nname = "provenant"\n'
+    )
     (crate / "Cargo.lock").write_text("# lock\n")
     (crate / "rust-toolchain.toml").write_text('[toolchain]\nchannel = "1.94.1"\n')
     (crate / "src/main.rs").write_text("fn main() {}\n")
     (crate / "src/help/general.txt").write_text("usage: provenant\n")
+    (crate / "build.rs").write_text("fn main() {}\n")
+    for name in ("records", "core"):
+        member = crate / "crates" / name
+        (member / "src").mkdir(parents=True)
+        (member / "Cargo.toml").write_text(f'[package]\nname = "provenant-{name}"\n')
+        (member / "src/lib.rs").write_text("// library\n")
+        (member / "build.rs").write_text("fn main() {}\n")
     return crate
 
 
@@ -66,6 +76,13 @@ def test_digest_is_stable_and_covers_every_input(tmp_path):
         ("rust-toolchain.toml", "# edit\n"),
         ("src/main.rs", "// edit\n"),
         ("src/help/general.txt", "edit\n"),
+        ("build.rs", "// edit\n"),
+        ("crates/core/Cargo.toml", "# edit\n"),
+        ("crates/core/src/lib.rs", "// edit\n"),
+        ("crates/core/build.rs", "// edit\n"),
+        ("crates/records/Cargo.toml", "# edit\n"),
+        ("crates/records/src/lib.rs", "// edit\n"),
+        ("crates/records/build.rs", "// edit\n"),
     ):
         path = crate / relative
         original = path.read_text()
@@ -75,20 +92,100 @@ def test_digest_is_stable_and_covers_every_input(tmp_path):
         assert build.source_digest(crate) == base
 
 
-def test_digest_notices_added_and_renamed_sources_but_ignores_target(tmp_path):
+def test_digest_order_and_framing_are_independent_of_checkout_location(tmp_path):
+    crate = make_crate(tmp_path / "one")
+    other = make_crate(tmp_path / "two")
+    names = (
+        "Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "build.rs",
+        "crates/core/Cargo.toml", "crates/core/build.rs", "crates/core/src/lib.rs",
+        "crates/records/Cargo.toml", "crates/records/build.rs", "crates/records/src/lib.rs",
+        "src/help/general.txt", "src/main.rs",
+    )
+    framed = b""
+    for name in names:
+        content = (crate / name).read_bytes()
+        framed += name.encode() + b"\0" + str(len(content)).encode() + b"\0" + content
+    assert build.source_digest(crate) == hashlib.sha256(framed).hexdigest()
+    assert build.source_digest(other) == build.source_digest(crate)
+
+
+@pytest.mark.parametrize("source_directory", ["src", "crates/core/src"])
+def test_digest_notices_added_and_renamed_sources_but_ignores_target(tmp_path, source_directory):
     crate = make_crate(tmp_path)
     base = build.source_digest(crate)
 
     (crate / "target/release").mkdir(parents=True)
     (crate / "target/release/provenant").write_bytes(b"artefact")
     (crate / "README.md").write_text("not an input")
+    (crate / "crates/core/target").mkdir()
+    (crate / "crates/core/target/generated.rs").write_text("not an input")
+    (crate / "crates/core/README.md").write_text("not an input")
     assert build.source_digest(crate) == base
 
-    (crate / "src/extra.rs").write_text("")
+    (crate / source_directory / "extra.rs").write_text("")
     added = build.source_digest(crate)
     assert added != base
-    (crate / "src/extra.rs").rename(crate / "src/other.rs")
+    (crate / source_directory / "extra.rs").rename(crate / source_directory / "other.rs")
     assert build.source_digest(crate) != added
+
+
+def test_digest_ignores_editor_litter_but_covers_cargo_config(tmp_path):
+    crate = make_crate(tmp_path)
+    base = build.source_digest(crate)
+    (crate / "src/.DS_Store").write_bytes(b"finder")
+    (crate / "crates/core/src/.lib.rs.swp").write_bytes(b"vim")
+    (crate / "crates/core/src/lib.rs~").write_text("backup")
+    assert build.source_digest(crate) == base
+
+    (crate / ".cargo").mkdir()
+    (crate / ".cargo/config.toml").write_text("[build]\nrustflags = []\n")
+    assert build.source_digest(crate) != base
+
+
+def test_digest_notices_added_renamed_and_removed_members_and_build_scripts(tmp_path):
+    crate = make_crate(tmp_path)
+    base = build.source_digest(crate)
+    member = crate / "crates/new"
+    (member / "src").mkdir(parents=True)
+    (member / "Cargo.toml").write_text('[package]\nname = "new"\n')
+    (member / "src/lib.rs").write_text("")
+    added = build.source_digest(crate)
+    assert added != base
+    renamed = member.rename(crate / "crates/renamed")
+    assert build.source_digest(crate) != added
+    (renamed / "src/lib.rs").unlink()
+    (renamed / "src").rmdir()
+    (renamed / "Cargo.toml").unlink()
+    renamed.rmdir()
+    assert build.source_digest(crate) == base
+
+    script = crate / "crates/core/build.rs"
+    content = script.read_bytes()
+    script.unlink()
+    assert build.source_digest(crate) != base
+    script.write_bytes(content)
+    assert build.source_digest(crate) == base
+
+
+def test_digest_covers_custom_target_and_build_script_paths(tmp_path):
+    crate = make_crate(tmp_path)
+    member = crate / "crates/core"
+    manifest = member / "Cargo.toml"
+    manifest.write_text(
+        '[package]\nname = "provenant-core"\nbuild = "scripts/build.rs"\n'
+        '[lib]\npath = "library.rs"\n'
+    )
+    (member / "scripts").mkdir()
+    (member / "scripts/build.rs").write_text("fn main() {}\n")
+    (member / "library.rs").write_text("pub fn value() -> u8 { 1 }\n")
+    base = build.source_digest(crate)
+
+    (member / "library.rs").write_text("pub fn value() -> u8 { 2 }\n")
+    assert build.source_digest(crate) != base
+    changed_library = build.source_digest(crate)
+
+    (member / "scripts/build.rs").write_text("fn main() { println!(\"rerun\"); }\n")
+    assert build.source_digest(crate) != changed_library
 
 
 def test_digest_without_sources_is_a_missing_file_error(tmp_path):
