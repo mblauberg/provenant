@@ -1,7 +1,7 @@
 {
   "version": 5,
   "rulebook_version": 5,
-  "source_digest": "45068335d15f5963172637e1bd4ba1563d63cae7cd50b6c709513a1464457417",
+  "source_digest": "b336af5307e3e54baa4a215b854201fe95cf3d341e1eea7633555ada5ee93efd",
   "scope": "Git-tracked Python (including shebang entry points), TypeScript and imported production ps.mjs; tests inventory-only; planning scripts excluded",
   "gate_definitions": {
     "unit": "Target crate's unit tests, fmt and clippy; CI once the crate exists",
@@ -17926,6 +17926,40 @@
       "action": "ported"
     },
     {
+      "id": "tools/front-door/crates/core/scripts/generate_unicode.py#unit-01",
+      "kind": "port",
+      "source_files": [
+        "tools/front-door/crates/core/scripts/generate_unicode.py"
+      ],
+      "source_spans": [
+        {
+          "start": 1,
+          "end": 29,
+          "symbols": [
+            "generate_unicode"
+          ]
+        }
+      ],
+      "target_crate": "cli",
+      "depends_on": [
+        "prerequisite:J1",
+        "prerequisite:J2",
+        "prerequisite:adr",
+        "workspace:manifest-and-digest"
+      ],
+      "risk": "medium",
+      "recommended_model_tier": "junior",
+      "review_model_tier": "principal",
+      "gates": [
+        "unit",
+        "J1",
+        "J2",
+        "differential"
+      ],
+      "lane_days": 0.5,
+      "action": "ported"
+    },
+    {
       "id": "tools/front-door/crates/telemetry/src/pending/python/generate_unicode.py#unit-01",
       "kind": "port",
       "source_files": [
@@ -18010,8 +18044,10 @@
         "tools/front-door/crates/confinement/src/pending/python_unicode.rs",
         "tools/front-door/crates/confinement/src/python.rs",
         "tools/front-door/crates/confinement/src/trusted_git.rs",
+        "tools/front-door/crates/core/src/bytes.rs",
         "tools/front-door/crates/core/src/excludes.rs",
         "tools/front-door/crates/core/src/host_identity.rs",
+        "tools/front-door/crates/core/src/js.rs",
         "tools/front-door/crates/core/src/json_support.rs",
         "tools/front-door/crates/core/src/jsonc.rs",
         "tools/front-door/crates/core/src/lib.rs",
@@ -18020,7 +18056,9 @@
         "tools/front-door/crates/core/src/product_root_resolver.rs",
         "tools/front-door/crates/core/src/py/datetime.rs",
         "tools/front-door/crates/core/src/py/mod.rs",
+        "tools/front-door/crates/core/src/py/numbers.rs",
         "tools/front-door/crates/core/src/py/unicode.rs",
+        "tools/front-door/crates/core/src/py/unicode_data.rs",
         "tools/front-door/crates/core/src/roots.rs",
         "tools/front-door/crates/core/src/test_support.rs",
         "tools/front-door/crates/core/src/workspace_paths.rs",
@@ -18427,6 +18465,7 @@
       "skills/setup-repo/templates/claude-tracker-hook.py#unit-01",
       "skills/tracker/scripts/steward.py#unit-01",
       "tools/front-door/crates/cli/src/pending/generate_unicode.py#unit-01",
+      "tools/front-door/crates/core/scripts/generate_unicode.py#unit-01",
       "tools/front-door/crates/telemetry/src/pending/python/generate_unicode.py#unit-01",
       "workspace:command-construction-lint",
       "workspace:front-door-syscalls"
@@ -18732,7 +18771,7 @@
     ]
   ],
   "estimated_lane_days_by_crate": {
-    "cli": 18.5,
+    "cli": 19.0,
     "config": 9.75,
     "confinement": 4.75,
     "core": 3.5,
@@ -20437,6 +20476,7 @@
       "tests/support/proc.py"
     ],
     "tools/front-door/crates/cli/src/pending/generate_unicode.py": [],
+    "tools/front-door/crates/core/scripts/generate_unicode.py": [],
     "tools/front-door/crates/quota/src/tests/oracle.py": [
       "scripts/provider_quota.py",
       "scripts/quota_display.py",

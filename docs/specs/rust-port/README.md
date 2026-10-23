@@ -213,7 +213,7 @@ from dividing by the number of models.
 
 | Crate | Base lane-days | Planning range |
 |---|---:|---:|
-| cli | 18.5 | 18.5–32.5 |
+| cli | 19 | 19–33.5 |
 | config | 9.75 | 9.75–17.5 |
 | confinement | 4.75 | 4.75–8.5 |
 | core | 3.5 | 3.5–6.5 |
@@ -229,7 +229,7 @@ from dividing by the number of models.
 | supervisor | 8.25 | 8.25–14.5 |
 | telemetry | 8 | 8–14 |
 | workflow | 31.25 | 31.25–55 |
-| **Total** | **161.5** | **161.5–283** |
+| **Total** | **162** | **162–283.5** |
 
 <!-- estimates:end -->
 

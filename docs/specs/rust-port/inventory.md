@@ -213,7 +213,7 @@ confinement and supervisor; the graph assigns its individual units.
 | [tests/test_worktree_policy.py](../../../tests/test_worktree_policy.py) | 1018 | cli (tests) | redesigned | T |
 | [tools/front-door/crates/workflow/tests/oracle.py](../../../tools/front-door/crates/workflow/tests/oracle.py) | 218 | cli (tests) | redesigned | T |
 
-Source totals: 391 files, 157,245 lines; product 193 files, 65,988 lines.
+Source totals: 392 files, 157,274 lines; product 194 files, 66,017 lines.
 
 Partial deletions in large retained files are governed by the supervisor's
 [deletion list](../harness/rust-supervisor.md#deletable-tests) and
