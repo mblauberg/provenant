@@ -1,5 +1,5 @@
 //! Conflict override for Codex's bundled skill-creator.
-use crate::{invalid, io, pending, Result};
+use crate::{invalid, io, Result};
 use serde::{Deserialize, Serialize};
 use std::{
     ffi::OsStr,
@@ -48,6 +48,9 @@ pub enum Outcome {
 }
 
 pub fn state(text: &str) -> Result<State> {
+    if provenant_core::py::python_strip(text).is_empty() {
+        return Ok(State::Missing);
+    }
     let doc: DocumentMut = text.parse()?;
     let Some(skills) = doc.get("skills") else {
         return Ok(State::Missing);
@@ -80,6 +83,7 @@ pub fn state(text: &str) -> Result<State> {
         }
     };
     let mut found = false;
+    let mut conflicting = false;
     for entry in entries {
         if entry.get("name").and_then(Item::as_str) != Some(SKILL_NAME) {
             continue;
@@ -98,11 +102,12 @@ pub fn state(text: &str) -> Result<State> {
         let disabled = enabled.is_some_and(|v| {
             v.as_bool() == Some(false) || v.as_integer() == Some(0) || v.as_float() == Some(0.0)
         });
-        if !disabled {
-            return Err(invalid(
-                "skill-creator has a conflicting enabled or malformed override",
-            ));
-        }
+        conflicting |= !disabled;
+    }
+    if conflicting {
+        return Err(invalid(
+            "skill-creator has a conflicting enabled or malformed override",
+        ));
     }
     Ok(if found {
         State::Disabled
@@ -133,20 +138,23 @@ pub struct Proposal {
     pub outcome: Outcome,
 }
 
+fn read_config(target: &Path) -> Result<String> {
+    if !target.exists() {
+        return Ok(String::new());
+    }
+    let bytes = fs::read(target).map_err(|e| io(target, e))?;
+    Ok(String::from_utf8(bytes)
+        .map_err(|source| crate::Error::CodexEncoding {
+            path: target.into(),
+            source,
+        })?
+        .replace("\r\n", "\n")
+        .replace('\r', "\n"))
+}
+
 pub fn proposed_update(path: &Path) -> Result<Proposal> {
     let target = canonical_path(path)?;
-    let mut text = if target.exists() {
-        let bytes = fs::read(&target).map_err(|e| io(&target, e))?;
-        String::from_utf8(bytes)
-            .map_err(|source| crate::Error::CodexEncoding {
-                path: target.clone(),
-                source,
-            })?
-            .replace("\r\n", "\n")
-            .replace('\r', "\n")
-    } else {
-        String::new()
-    };
+    let mut text = read_config(&target)?;
     if state(&text)? == State::Disabled {
         return Ok(Proposal {
             target,
@@ -182,7 +190,7 @@ pub fn configure(path: &Path) -> Result<Outcome> {
     if proposal.outcome == Outcome::Existing {
         return Ok(Outcome::Existing);
     }
-    pending::atomic_write(&proposal.target, ".codex-config.", proposal.text.as_bytes())?;
+    crate::filesystem::atomic_write(&proposal.target, ".codex-config.", proposal.text.as_bytes())?;
     Ok(Outcome::Configured)
 }
 
@@ -190,6 +198,11 @@ pub fn configure(path: &Path) -> Result<Outcome> {
 pub fn run(path: &Path, mode: CommandMode) -> CommandResult {
     match run_inner(path, mode) {
         Ok(result) => result,
+        Err(error @ crate::Error::CodexEncoding { .. }) => CommandResult {
+            exit_code: 1,
+            stdout: String::new(),
+            stderr: format!("UnicodeDecodeError: {error}\n"),
+        },
         Err(error @ crate::Error::CodexUnhashable { .. }) => CommandResult {
             exit_code: 1,
             stdout: String::new(),
@@ -208,11 +221,7 @@ fn run_inner(path: &Path, mode: CommandMode) -> Result<CommandResult> {
     match mode {
         CommandMode::Check => {
             let target = canonical_path(path)?;
-            let text = if target.exists() {
-                fs::read_to_string(&target).map_err(|e| io(&target, e))?
-            } else {
-                String::new()
-            };
+            let text = read_config(&target)?;
             if state(&text)? == State::Disabled {
                 Ok(CommandResult {
                     exit_code: 0,
@@ -441,5 +450,88 @@ mod tests {
             );
             assert_eq!(fs::read_to_string(path).unwrap(), input);
         }
+    }
+}
+
+#[derive(Debug, clap::Parser)]
+#[command(name = "configure-codex-skill-overrides.py")]
+pub struct Arguments {
+    #[arg(long)]
+    pub config: Option<PathBuf>,
+    #[arg(long, conflicts_with = "preflight")]
+    pub check: bool,
+    #[arg(long)]
+    pub preflight: bool,
+}
+impl Arguments {
+    pub fn run(&self, codex_home: Option<&OsStr>, home: &Path) -> CommandResult {
+        let path = self
+            .config
+            .clone()
+            .unwrap_or_else(|| default_config_path(codex_home, home));
+        run(
+            &path,
+            if self.check {
+                CommandMode::Check
+            } else if self.preflight {
+                CommandMode::Preflight
+            } else {
+                CommandMode::Configure
+            },
+        )
+    }
+}
+
+#[cfg(test)]
+mod edge_tests {
+    use super::*;
+    #[test]
+    fn bare_cr_check_whitespace_and_set_collection_precedence_match_python() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        for original in [
+            "\u{1c}\u{1f}",
+            "[[skills.config]]\rname='skill-creator'\renabled=false\r",
+        ] {
+            fs::write(&path, original).unwrap();
+            let Some(old)=crate::oracle::python("scripts/configure-codex-skill-overrides.py","import json,io,contextlib\no=io.StringIO()\nwith contextlib.redirect_stdout(o): code=m.main(['--config',str(p),'--check'])\nprint(json.dumps([code,o.getvalue()]))",&path)else{return;};
+            let result = run(&path, CommandMode::Check);
+            assert_eq!(
+                serde_json::from_slice::<serde_json::Value>(&old).unwrap(),
+                serde_json::json!([result.exit_code, result.stdout])
+            );
+        }
+        let input="[[skills.config]]\nname='skill-creator'\nenabled=true\n[[skills.config]]\nname='skill-creator'\nenabled=[]\n";
+        assert!(matches!(
+            state(input),
+            Err(crate::Error::CodexUnhashable { kind: "list" })
+        ));
+    }
+}
+
+#[cfg(test)]
+mod encoding_status_tests {
+    use super::*;
+    #[test]
+    fn invalid_utf8_is_an_uncaught_error_status_and_never_writes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let input = b"# \xff\n";
+        fs::write(&path, input).unwrap();
+        for mode in [
+            CommandMode::Check,
+            CommandMode::Preflight,
+            CommandMode::Configure,
+        ] {
+            let result = run(&path, mode);
+            assert_eq!(result.exit_code, 1);
+            assert!(result.stderr.starts_with("UnicodeDecodeError:"));
+            assert_eq!(fs::read(&path).unwrap(), input);
+        }
+        let Some(old)=crate::oracle::python("scripts/configure-codex-skill-overrides.py","import json\ntry: m.main(['--config',str(p),'--check'])\nexcept Exception as e: print(json.dumps(type(e).__name__))",&path)else{return;};
+        assert_eq!(
+            serde_json::from_slice::<String>(&old).unwrap(),
+            "UnicodeDecodeError"
+        );
     }
 }
