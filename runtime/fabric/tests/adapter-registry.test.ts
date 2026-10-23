@@ -6,7 +6,8 @@ import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { parse as parseYaml } from "yaml";
 
-import { DISPATCH_ADAPTERS, dispatchConfiguredBatch, dispatchConfiguredProvider } from "../src/execution.js";
+import { DISPATCH_ADAPTERS, dispatchConfiguredProvider } from "../src/execution.js";
+import { dispatchConfiguredBatch } from "../src/batch-execution.js";
 import { catalogueSnapshot } from "../src/catalogue.js";
 import { normaliseRoute } from "../src/execution-input.js";
 import type { Identity } from "../src/identity.js";
