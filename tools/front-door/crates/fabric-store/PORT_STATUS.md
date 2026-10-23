@@ -12,10 +12,17 @@ there was no batch-1 status or implementation on main.
 
 - `runtime/fabric/src/store.ts#unit-02`: **partial**. Landing reads, acquire,
   verify, renewal, push hold, release, bounded polling and named-session
-  policy are implemented. Message send/inbox policy follows in this batch.
+  policy are implemented. Message send/inbox policy is implemented with explicit recipient context and
+  atomic expiring claims.
   Native UUID defaults await the supervisor entropy API. IDs and clocks are
   explicit inputs in the inert library.
-- `runtime/fabric/src/store.ts#unit-03`: **pending this batch**.
+- `runtime/fabric/src/store.ts#unit-03`: **partial**. Inbox claim completion,
+  digest grouping, acknowledgements, observation cursors, teams, cooperative
+  tasks and activity are implemented. Legacy dynamic terminal-row coercion
+  and the default generated task id remain: the current API accepts typed,
+  already normalised terminal inputs and an explicit task id. The runtime
+  adapter must preserve `laneTaskId`, `String` and `Number` semantics before
+  this unit can be marked fully ported.
 - `runtime/fabric/src/store.ts#unit-04`: **pending this batch**.
 
 The crate is inert. No command calls it. Tests open temporary databases only.

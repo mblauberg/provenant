@@ -1,3 +1,4 @@
+use crate::pending::IdSource;
 use crate::*;
 use serde_json::{json, Value};
 use std::{cell::Cell, rc::Rc};
@@ -6,6 +7,14 @@ struct FixtureClock(Rc<Cell<i64>>);
 impl Clock for FixtureClock {
     fn now_ms(&self) -> i64 {
         self.0.get()
+    }
+}
+#[derive(Default)]
+struct FixtureIds(Cell<i64>);
+impl pending::IdSource for FixtureIds {
+    fn uuid(&self) -> Result<String> {
+        self.0.set(self.0.get() + 1);
+        Ok(format!("fixture-{}", self.0.get()))
     }
 }
 fn a() -> Identity {
@@ -279,4 +288,357 @@ fn session_database_differential() {
         ),
     );
     compare("sessions", snapshot(&store, out));
+}
+#[test]
+fn delivery_task_and_observation_database_differential() {
+    let dir = tempfile::tempdir().unwrap();
+    let clock = FixtureClock(Rc::new(Cell::new(1000)));
+    let store = Store::open(&dir.path().join("db"), 5000, clock.clone()).unwrap();
+    let a = a();
+    let b = b();
+    let ids = FixtureIds::default();
+    let mut out = Vec::new();
+    store.announce(&a).unwrap();
+    store.announce(&b).unwrap();
+    capture(&mut out, store.create_team(&a, "all", &[]));
+    capture(&mut out, store.create_team(&a, "bob", &[]));
+    capture(
+        &mut out,
+        store.create_team(&a, "team", &["bob".into(), "alice".into(), "bob".into()]),
+    );
+    capture(
+        &mut out,
+        store.create_task(
+            &a,
+            "work",
+            "task",
+            None,
+            &["z".into(), "a".into(), "z".into()],
+        ),
+    );
+    capture(
+        &mut out,
+        store.send(
+            &a,
+            "missing",
+            "refused",
+            SendOptions::default(),
+            RecipientContext::default(),
+            &ids.uuid().unwrap(),
+        ),
+    );
+    capture(
+        &mut out,
+        store.send(
+            &a,
+            "bob",
+            "missing parent",
+            SendOptions {
+                reply_to: Some("missing"),
+                ..Default::default()
+            },
+            RecipientContext::default(),
+            &ids.uuid().unwrap(),
+        ),
+    );
+    capture(
+        &mut out,
+        store.send(
+            &a,
+            "bob",
+            "missing task",
+            SendOptions {
+                task_id: Some("missing"),
+                ..Default::default()
+            },
+            RecipientContext::default(),
+            &ids.uuid().unwrap(),
+        ),
+    );
+    capture(
+        &mut out,
+        store.send(
+            &a,
+            "team",
+            "hello\nworld",
+            SendOptions {
+                task_id: Some("task"),
+                ..Default::default()
+            },
+            RecipientContext::default(),
+            &ids.uuid().unwrap(),
+        ),
+    );
+    capture(
+        &mut out,
+        store.send(
+            &a,
+            "all",
+            "reply",
+            SendOptions {
+                reply_to: Some("fixture-4"),
+                ..Default::default()
+            },
+            RecipientContext::default(),
+            &ids.uuid().unwrap(),
+        ),
+    );
+    capture(
+        &mut out,
+        store.inbox(
+            &b,
+            InboxOptions {
+                peek: true,
+                ids: Some(&[]),
+                ..Default::default()
+            },
+            &ids,
+        ),
+    );
+    capture(
+        &mut out,
+        store.inbox(
+            &b,
+            InboxOptions {
+                peek: true,
+                ..Default::default()
+            },
+            &ids,
+        ),
+    );
+    capture(&mut out, store.inbox_digest(&b, None));
+    capture(
+        &mut out,
+        store.inbox(
+            &b,
+            InboxOptions {
+                claim_ttl_ms: 50,
+                busy_timeout_ms: 1,
+                ..Default::default()
+            },
+            &ids,
+        ),
+    );
+    capture(&mut out, store.inbox(&b, InboxOptions::default(), &ids));
+    capture(&mut out, store.acknowledge(&b, "fixture-4", "wrong"));
+    clock.0.set(1050);
+    capture(&mut out, store.acknowledge(&b, "fixture-4", "fixture-6"));
+    capture(
+        &mut out,
+        store.inbox(
+            &b,
+            InboxOptions {
+                ids: Some(&["fixture-4".into()]),
+                ..Default::default()
+            },
+            &ids,
+        ),
+    );
+    capture(&mut out, store.acknowledge(&b, "fixture-4", "fixture-6"));
+    capture(&mut out, store.acknowledge(&b, "fixture-4", "fixture-8"));
+    capture(&mut out, store.acknowledge(&b, "fixture-4", "fixture-8"));
+    capture(
+        &mut out,
+        store.inbox(
+            &b,
+            InboxOptions {
+                peek: true,
+                ..Default::default()
+            },
+            &ids,
+        ),
+    );
+    capture(&mut out, store.claim_task(&a, "task"));
+    capture(&mut out, store.claim_task(&a, "task"));
+    capture(&mut out, store.claim_task(&b, "task"));
+    capture(&mut out, store.update_task(&a, "task", "claimed", None));
+    capture(&mut out, store.update_task(&a, "task", "done", Some("")));
+    capture(&mut out, store.claim_task(&a, "task"));
+    capture(&mut out, store.tasks("p", None));
+    capture(&mut out, store.tasks("p", Some("open")));
+    capture(&mut out, store.claim_task(&a, "missing"));
+    capture(&mut out, store.update_task(&a, "missing", "done", None));
+    capture(&mut out, store.activity_after("p", 2, 3));
+    capture(&mut out, store.activity("p", 2));
+    let lane = |task: &str, attempt| LaneAttempt {
+        run_id: "r".into(),
+        task_id: task.into(),
+        attempt,
+    };
+    capture(&mut out, store.mark_lanes_seen(&b, &[lane("t", 2)]));
+    capture(&mut out, store.mark_lanes_seen(&b, &[lane("t", 1)]));
+    capture(
+        &mut out,
+        store.unseen_lanes(
+            &b,
+            &[
+                lane("t", 1),
+                lane("t", 3),
+                lane("zero", 0),
+                LaneAttempt {
+                    run_id: "".into(),
+                    task_id: "t".into(),
+                    attempt: 1,
+                },
+            ],
+        ),
+    );
+    capture(
+        &mut out,
+        store.send(
+            &a,
+            "bob",
+            "already observed",
+            SendOptions {
+                kind: Some("run_terminal"),
+                output_path: Some("r:t:2"),
+                ..Default::default()
+            },
+            RecipientContext::default(),
+            &ids.uuid().unwrap(),
+        ),
+    );
+    capture(
+        &mut out,
+        store.send(
+            &a,
+            "bob",
+            "new attempt",
+            SendOptions {
+                kind: Some("run_terminal"),
+                output_path: Some("r:t:3"),
+                ..Default::default()
+            },
+            RecipientContext::default(),
+            &ids.uuid().unwrap(),
+        ),
+    );
+    capture(
+        &mut out,
+        store.acknowledge_terminal(&b, "r", "t", 3, Some("/legacy"), 1),
+    );
+    capture(
+        &mut out,
+        store.inbox(
+            &b,
+            InboxOptions {
+                peek: true,
+                ..Default::default()
+            },
+            &ids,
+        ),
+    );
+    capture(
+        &mut out,
+        store.inbox(
+            &b,
+            InboxOptions {
+                busy_timeout_ms: 0,
+                ..Default::default()
+            },
+            &ids,
+        ),
+    );
+    capture(
+        &mut out,
+        store.inbox(
+            &b,
+            InboxOptions {
+                limit: 0,
+                ..Default::default()
+            },
+            &ids,
+        ),
+    );
+    capture(
+        &mut out,
+        store.inbox(
+            &b,
+            InboxOptions {
+                claim_ttl_ms: 0,
+                ..Default::default()
+            },
+            &ids,
+        ),
+    );
+    capture(
+        &mut out,
+        store.inbox(
+            &b,
+            InboxOptions {
+                task_id: Some(""),
+                ..Default::default()
+            },
+            &ids,
+        ),
+    );
+    capture(&mut out, store.activity_after("p", -1, 200));
+    capture(&mut out, store.activity("p", 0));
+    compare("messages", snapshot(&store, out));
+}
+#[test]
+fn sqlite_contention_rolls_back_and_restores_timeout_differential() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("db");
+    let store = Store::open(&path, 5000, FixtureClock(Rc::new(Cell::new(1000)))).unwrap();
+    let raw = Connection::open(&path).unwrap();
+    let a = a();
+    let b = b();
+    let ids = FixtureIds::default();
+    let mut out = Vec::new();
+    store.announce(&a).unwrap();
+    store.announce(&b).unwrap();
+    store
+        .send(
+            &a,
+            "bob",
+            "claim me",
+            SendOptions::default(),
+            RecipientContext::default(),
+            &ids.uuid().unwrap(),
+        )
+        .unwrap();
+    raw.execute_batch("BEGIN IMMEDIATE").unwrap();
+    let claim = store.inbox(
+        &b,
+        InboxOptions {
+            busy_timeout_ms: 1,
+            ..Default::default()
+        },
+        &ids,
+    );
+    assert!(claim.as_ref().is_err_and(is_sqlite_contention));
+    capture(&mut out, claim);
+    capture(
+        &mut out,
+        store.acknowledge_terminal(&b, "r", "t", 1, Some("/r"), 1),
+    );
+    raw.execute_batch("ROLLBACK").unwrap();
+    capture(&mut out, store.inbox(&b, InboxOptions::default(), &ids));
+    compare("contention", snapshot(&store, out));
+}
+#[test]
+fn legacy_nullable_column_migration_differential() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("db");
+    let raw = Connection::open(&path).unwrap();
+    raw.execute_batch("CREATE TABLE messages(message_id TEXT PRIMARY KEY, project TEXT NOT NULL, sender_id TEXT NOT NULL,
+    body TEXT NOT NULL, kind TEXT NOT NULL DEFAULT 'note', conversation_id TEXT NOT NULL,
+    reply_to TEXT REFERENCES messages(message_id), created_at INTEGER NOT NULL);
+    INSERT INTO messages VALUES ('old', 'p', 'alice', 'retained', 'note', 'old', NULL, 1000)").unwrap();
+    drop(raw);
+    let store = Store::open(&path, 5000, FixtureClock(Rc::new(Cell::new(1000)))).unwrap();
+    let mut out = Vec::new();
+    capture(
+        &mut out,
+        store.inbox(
+            &a(),
+            InboxOptions {
+                peek: true,
+                ..Default::default()
+            },
+            &FixtureIds::default(),
+        ),
+    );
+    compare("legacy", snapshot(&store, out));
 }

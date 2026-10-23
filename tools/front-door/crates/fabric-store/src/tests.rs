@@ -202,3 +202,198 @@ fn push_hold_survives_expiry_and_takeover_waits_for_both_deadlines() {
     ));
 }
 
+#[test]
+fn message_log_failure_rolls_back_message_and_all_deliveries() {
+    struct NoEntropy;
+    impl pending::IdSource for NoEntropy {
+        fn uuid(&self) -> Result<String> {
+            Err(invalid("entropy failed"))
+        }
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(&dir.path().join("db"), 5000, Fixed(1000)).unwrap();
+    let a = Identity {
+        project: "p".into(),
+        agent_id: "alice".into(),
+        provider: "codex".into(),
+    };
+    let b = Identity {
+        agent_id: "bob".into(),
+        ..a.clone()
+    };
+    store.announce(&a).unwrap();
+    store.announce(&b).unwrap();
+    store.db.execute_batch("CREATE TRIGGER fail_log BEFORE INSERT ON activity BEGIN SELECT RAISE(ABORT,'log blocked'); END").unwrap();
+    assert!(store
+        .send(
+            &a,
+            "bob",
+            "hello",
+            SendOptions::default(),
+            RecipientContext::default(),
+            "m"
+        )
+        .is_err());
+    assert_eq!(
+        store
+            .db
+            .query_row("SELECT count(*) FROM messages", [], |r| r.get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+    store.db.execute_batch("DROP TRIGGER fail_log").unwrap();
+    store
+        .send(
+            &a,
+            "bob",
+            "hello",
+            SendOptions::default(),
+            RecipientContext::default(),
+            "m",
+        )
+        .unwrap();
+    assert!(store
+        .inbox(
+            &b,
+            InboxOptions {
+                busy_timeout_ms: 1,
+                ..Default::default()
+            },
+            &NoEntropy
+        )
+        .is_err());
+    assert!(store.db.is_autocommit());
+    assert_eq!(
+        store
+            .db
+            .query_row("SELECT count(*) FROM delivery_claims", [], |r| r
+                .get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        store
+            .db
+            .pragma_query_value(None, "busy_timeout", |r| r.get::<_, i64>(0))
+            .unwrap(),
+        5000
+    );
+}
+
+#[test]
+fn digest_truncates_groups_preserves_null_tasks_and_ignores_expired_messages() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(&dir.path().join("db"), 5000, Fixed(1_300_000_000)).unwrap();
+    let a = Identity {
+        project: "p".into(),
+        agent_id: "a".into(),
+        provider: "codex".into(),
+    };
+    let b = Identity {
+        agent_id: "b".into(),
+        ..a.clone()
+    };
+    store.announce(&a).unwrap();
+    store.announce(&b).unwrap();
+    for n in 0..21 {
+        let sender = Identity {
+            agent_id: format!("sender{n:02}"),
+            ..a.clone()
+        };
+        store
+            .send(
+                &sender,
+                "b",
+                &format!("line{n}\r\n{}", "🙂".repeat(100)),
+                SendOptions::default(),
+                RecipientContext::default(),
+                &format!("m{n:02}"),
+            )
+            .unwrap();
+    }
+    store
+        .db
+        .execute(
+            "UPDATE messages SET created_at=0 WHERE message_id='m00'",
+            [],
+        )
+        .unwrap();
+    let digest = store.inbox_digest(&b, None).unwrap();
+    assert_eq!(digest.total, 20);
+    assert!(!digest.truncated);
+    assert!(digest
+        .groups
+        .iter()
+        .all(|g| g.task_id.is_none() && g.summary.chars().count() == 80));
+    store
+        .db
+        .execute(
+            "UPDATE messages SET created_at=1300000000 WHERE message_id='m00'",
+            [],
+        )
+        .unwrap();
+    let digest = store.inbox_digest(&b, None).unwrap();
+    assert_eq!(digest.total, 21);
+    assert_eq!(digest.groups.len(), 20);
+    assert!(digest.truncated);
+    assert_eq!(store.inbox_digest(&b, Some("missing")).unwrap().total, 0);
+}
+
+#[test]
+fn alias_routing_uses_explicit_chair_parent_and_excludes_sender_from_teams() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(&dir.path().join("db"), 5000, Fixed(1000)).unwrap();
+    let a = Identity {
+        project: "p".into(),
+        agent_id: "alice".into(),
+        provider: "codex".into(),
+    };
+    for seat in ["alice", "chair", "leader", "parent-seat"] {
+        store
+            .announce(&Identity {
+                agent_id: seat.into(),
+                ..a.clone()
+            })
+            .unwrap();
+    }
+    let context = || RecipientContext {
+        chair: Some("leader"),
+        parent: Some("parent-seat"),
+    };
+    assert_eq!(
+        store
+            .send(&a, "chair", "hi", SendOptions::default(), context(), "m1")
+            .unwrap()
+            .recipients,
+        ["leader"]
+    );
+    assert_eq!(
+        store
+            .send(&a, "/root", "hi", SendOptions::default(), context(), "m2")
+            .unwrap()
+            .recipients,
+        ["parent-seat"]
+    );
+    assert_eq!(
+        store
+            .send(
+                &a,
+                "parent",
+                "hi",
+                SendOptions::default(),
+                RecipientContext {
+                    chair: Some("missing"),
+                    parent: Some("missing")
+                },
+                "m3"
+            )
+            .unwrap()
+            .recipients,
+        ["chair"]
+    );
+    store.create_team(&a, "self", &["alice".into()]).unwrap();
+    assert!(store
+        .send(&a, "self", "hi", SendOptions::default(), context(), "m4")
+        .is_err());
+}
+
