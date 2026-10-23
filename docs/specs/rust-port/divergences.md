@@ -1510,3 +1510,51 @@ then passed after repair. Extended JSON/native-path reader gaps remain partial.
   adapters for the pending confinement/records/config/core contracts. Consumers
   remain unchanged; no graph unit or full conformance claim is added. README
   maps the remaining pending run and UUID contracts explicitly.
+
+
+### RP-TEL-JSON-FLOAT: shared checked JSON float rounding (open)
+
+- Class: `bug`; not accepted. Rulebook v4, telemetry batch 3; route
+  `codex/gpt-6.1-sol@high via Fabric`, source snapshot
+  `7021182d535f6c730c29713e77d5bca76893fd06`.
+- After deleting telemetry's private decoder and adopting the records owner,
+  `checked_json::from_slice(b"0.09090909090909091")` yields the float rendered
+  as `0.09090909090909093`. CPython and Rust lexical float parsing retain
+  `0.09090909090909091`. The owner currently uses serde_json's default decoder.
+- Evidence: required `differential::costs_and_outcomes_match_python` fails with
+  these exact number spellings. The other 118 crate tests pass. No epsilon or
+  rewritten expectation is accepted. The shared owner must repair its float
+  decoding; the telemetry lane cannot change records or workspace features.
+- Disposition: costs unit-01 stays partial and absent from `ported.txt`/PR Units
+  until the owner fix lands and required differentials pass. Fabric requests
+  `fad697fb-94c5-4951-82a6-9a1ef2d68541` and
+  `ca894c3e-6f57-4321-a4a3-9fbe7302d20d` carry the reproducer to the chair.
+
+### RP-TEL-INPUT-BOUND: source-unbounded JSON inputs (open partial scope)
+
+- Class: `improvement`; not accepted as source parity. R4 requires bounded
+  input reads; the telemetry crate uses an 8 MiB JSON document/line budget.
+  Python's document loads and matching Codex rollout lines have no such bound.
+- Native review identified the new document wrapper's typed refusal for a
+  valid document above the bound. The context store streams complete rollouts
+  without a total-file cap but drains/ignores a logical JSON line above the
+  budget; Python can parse such a line and use its context metadata.
+- Evidence: context tests cover a rollout above 8 MiB total, an oversized
+  logical line, universal newlines and ordinary streaming source parity.
+- Disposition: no command is switched. Context unit-01 and ingest adapters
+  remain partial; source-compatible bounded parsing or explicit acceptance is
+  required before completion/cut-over. The inherited bounded price/catalogue
+  and JSONL readers retain the same crate budget and are not presented as
+  proof of source-unbounded input parity.
+
+### RP-TEL-REPORT-ORDER: ordered report records (open partial scope)
+
+- Class: `bug`; not accepted. Stats SQL/reduction and public peer projection
+  now have source differentials, but their serde_json::Value return records
+  sort object keys. Python constructs dictionaries in insertion order, and
+  telemetry report policy tests compare indented JSON bytes.
+- Ordered cost groups have explicit serde encoders and a Python byte
+  differential. Converting them into a Value-based report loses that order.
+- Disposition: report unit-01 remains partial. Complete typed ordered report
+  records and byte differentials before claiming or cutting over this unit;
+  no workspace serde_json feature is added by this lane.
