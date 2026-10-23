@@ -51,7 +51,7 @@ libraries that the binary does not yet link. Inputs are hashed in this order:
 Each file contributes UTF-8 `path\0byte-length\0` followed by its unchanged
 bytes. Paths are relative to `tools/front-door/`; filesystem traversal order
 and checkout location do not affect the hash. This follows the workspace
-layout fixed by [PORTING.md R2](../specs/rust-port/PORTING.md#r2-one-workspace-one-front-door-libraries-by-responsibility).
+layout fixed by [PORTING.md R2](../specs/rust-port/PORTING.md#r2-one-workspace-one-binary-libraries-by-responsibility).
 Build output under `target/` and files such as READMEs are excluded. Widening
 the digest to the workspace makes every existing install stale once; re-run
 the installer after upgrading.
