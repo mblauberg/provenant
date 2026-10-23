@@ -158,7 +158,7 @@ def test_process_evidence_without_start_time_is_unknown(tmp_path):
 def test_retire_provider_preserves_another_attempt_marker(tmp_path, task_id, attempt):
     mod = load_dispatch_module()
     marker = tmp_path / "dispatch-provider.json"
-    marker.write_text(json.dumps({"run_token": mod.run_identity(tmp_path), "provider_pid": 12345,
+    marker.write_text(json.dumps({"run_token": mod.run_records.run_identity(tmp_path), "provider_pid": 12345,
                                   "task_id": task_id, "attempt": attempt}))
     mod._retire_provider_process(tmp_path, SimpleNamespace(pid=12345, returncode=0), task_id="task-1", attempt=1)
     assert marker.exists() is ((task_id, attempt) != ("task-1", 1))
@@ -1301,7 +1301,7 @@ else:
     assert argv[argv.index("--add-dir") + 1] == str(evidence_path.parent)
     assert "Use file-reading tools only; do not invoke shell or Git" in effective_prompt
     assert effective_prompt.endswith(prompt.read_text())
-    module.reconcile_manifest(run_dir)
+    module.run_records.reconcile_manifest(run_dir)
 
 
 def test_agy_git_evidence_retains_denial_without_accepting_result(tmp_path: Path, monkeypatch) -> None:
@@ -1508,13 +1508,13 @@ def test_worker_question_candidate_is_bounded_and_digest_bound(tmp_path: Path) -
     }).encode() + b"\n"
     result.write_bytes(envelope)
 
-    with pytest.raises(module.TerminalEnvelopeIntegrityError):
-        module.worker_question_envelope(result, "sha256:not-the-result")
-    assert module.worker_question_envelope(result, module.digest(result)) == {
+    with pytest.raises(module.run_records.TerminalEnvelopeIntegrityError):
+        module.run_records.worker_question_envelope(result, "sha256:not-the-result")
+    assert module.run_records.worker_question_envelope(result, module.run_records.digest(result)) == {
         "code": "needs_input", "prompt": "Which source?"
     }
-    result.write_bytes(envelope + b"x" * (module.MAX_WORKER_TERMINAL_ENVELOPE_BYTES + 1))
-    assert module.worker_question_envelope(result, module.digest(result)) is None
+    result.write_bytes(envelope + b"x" * (module.run_records.MAX_WORKER_TERMINAL_ENVELOPE_BYTES + 1))
+    assert module.run_records.worker_question_envelope(result, module.run_records.digest(result)) is None
 
 
 def test_valid_maximum_astral_worker_question_envelope_is_blocked(tmp_path: Path, monkeypatch) -> None:
@@ -1881,8 +1881,8 @@ def test_reentry_rejects_tampered_success_adapter_receipt(tmp_path: Path, monkey
         encoding="utf-8",
     )
 
-    with pytest.raises(module.AttemptEvidenceError, match="successful adapter receipt is invalid"):
-        module.reconcile_manifest(run_dir)
+    with pytest.raises(module.run_records.AttemptEvidenceError, match="successful adapter receipt is invalid"):
+        module.run_records.reconcile_manifest(run_dir)
 
 
 def test_typed_adapter_auth_and_missing_tool_outcomes_are_preserved(tmp_path: Path, monkeypatch) -> None:
@@ -2015,7 +2015,7 @@ def test_late_signal_after_provider_exit_preserves_attempt_publication(tmp_path:
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
         module.CF_DISPATCH = __import__('pathlib').Path({str(adapter)!r})
-        original = module.write_owned
+        original = module.run_records.write_owned
         fired = False
         def publish(run_dir, path, content):
             global fired
@@ -2023,7 +2023,7 @@ def test_late_signal_after_provider_exit_preserves_attempt_publication(tmp_path:
             if path == run_dir / "dispatch/tasks/late/attempt-001/attempt.json" and not fired:
                 fired = True
                 os.kill(os.getpid(), signal.SIGTERM)
-        module.write_owned = publish
+        module.run_records.write_owned = publish
         raise SystemExit(module.dispatch(module.parser().parse_args(sys.argv[1:])))
     """), encoding="utf-8")
     result = subprocess.run([
@@ -2375,7 +2375,7 @@ def test_manifest_appendability_failure_is_typed_before_launch(tmp_path: Path, m
         if mode == "appendability":
             def refuse(_run_dir):
                 raise OSError("read-only fixture")
-            monkeypatch.setattr(module, "ensure_manifest_appendable", refuse)
+            monkeypatch.setattr(module.run_records, "ensure_manifest_appendable", refuse)
         else:
             manifest.chmod(0o444)
             try:
@@ -2405,7 +2405,7 @@ def test_manifest_append_failure_retains_terminal_attempt(tmp_path: Path, monkey
     write_success_adapter(adapter)
     module = load_dispatch_module()
     module.CF_DISPATCH = adapter
-    monkeypatch.setattr(module, "append_manifest", lambda *_: (_ for _ in ()).throw(OSError("append failed")))
+    monkeypatch.setattr(module.run_records, "append_manifest", lambda *_: (_ for _ in ()).throw(OSError("append failed")))
     args = module.parser().parse_args([
         "--run-dir", str(run_dir), "--task-id", "manifest-write", "--adapter", "codex",
         "--prompt-file", str(prompt), "--alias", "senior", "--role", "worker",
@@ -3283,7 +3283,7 @@ def test_preflight_accepts_a_prompt_file_only_inside_a_read_root(tmp_path, monke
     monkeypatch.chdir(workspace)
     monkeypatch.setenv('AGENT_FABRIC_INSTANCE_ROOT', str(tmp_path / '.agents'))
     module = load_dispatch_module()
-    monkeypatch.setattr(module, "prompt_temp_roots", lambda: ())
+    monkeypatch.setattr(module.run_records, "prompt_temp_roots", lambda: ())
     prompt = other / 'brief.md'
     prompt.write_text('read the other project')
     task = {'id': 'task-1', 'adapter': 'claude', 'alias': 'senior', 'prompt_file': str(prompt)}
@@ -3758,7 +3758,7 @@ def test_process_io_failure_classification_and_terminal_evidence(tmp_path, monke
     run, prompt, command = real_owner_fixture(tmp_path, monkeypatch, code)
     monkeypatch.chdir(tmp_path)
     mod = load_dispatch_module()
-    original_write = mod.write_owned
+    original_write = mod.run_records.write_owned
     original_open = os.open
     live = []
     injected = []
@@ -3780,7 +3780,7 @@ def test_process_io_failure_classification_and_terminal_evidence(tmp_path, monke
         if not started and Path(path).name == "events.jsonl":
             fail()
         return original_open(path, *args, **kwargs)
-    monkeypatch.setattr(mod, "write_owned", write)
+    monkeypatch.setattr(mod.run_records, "write_owned", write)
     monkeypatch.setattr(mod.os, "open", open_file)
     assert mod.dispatch(mod.parser().parse_args(command[2:])) == 1
     legacy = json.loads((run / "dispatch/tasks/dispatch-001/attempt-001/attempt.json").read_text())
@@ -3815,7 +3815,7 @@ print(json.dumps({'type':'result','result':'DONE'}), flush=True)
     run, prompt, command = real_owner_fixture(tmp_path, monkeypatch, code)
     monkeypatch.chdir(tmp_path)
     mod = load_dispatch_module()
-    original_write = mod.write_owned
+    original_write = mod.run_records.write_owned
     failed = []
     retried = []
     signals = []
@@ -3842,7 +3842,7 @@ print(json.dumps({'type':'result','result':'DONE'}), flush=True)
                 if failed:
                     retried.append(True)
         return original_write(run_dir, path, content)
-    monkeypatch.setattr(mod, "write_owned", write)
+    monkeypatch.setattr(mod.run_records, "write_owned", write)
     monkeypatch.setattr(mod.os, "killpg", killpg)
     assert mod.dispatch(mod.parser().parse_args(command[2:])) == 0
     legacy = json.loads((run / "dispatch/tasks/dispatch-001/attempt-001/attempt.json").read_text())
@@ -3895,7 +3895,7 @@ def test_reap_attempt_recovers_missing_pgid(tmp_path, monkeypatch, source, disk_
         (attempt / "pgid").write_text("123456\n")
     else:
         (run / "dispatch-provider.json").write_text(json.dumps({
-            "run_token": mod.run_identity(run), "provider_pgid": 123456,
+            "run_token": mod.run_records.run_identity(run), "provider_pgid": 123456,
             "provider_pid": 123456, "provider_started_at": "recorded",
         }))
     (path.parent / "stderr.log").write_text("No space left on device" if disk_full == "stderr" else "diagnostic")
@@ -3927,7 +3927,7 @@ def test_attempt_warnings_do_not_leak_between_attempts(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     mod = load_dispatch_module()
     original_open = os.open
-    original_write = mod.write_owned
+    original_write = mod.run_records.write_owned
     first = [True]
     def open_file(path, *args, **kwargs):
         if first[0] and Path(path).name == "admission.lock":
@@ -3938,7 +3938,7 @@ def test_attempt_warnings_do_not_leak_between_attempts(tmp_path, monkeypatch):
             raise OSError(28, "No space left on device")
         return original_write(run_dir, path, content)
     monkeypatch.setattr(mod.os, "open", open_file)
-    monkeypatch.setattr(mod, "write_owned", write)
+    monkeypatch.setattr(mod.run_records, "write_owned", write)
     monkeypatch.setattr(mod.memory_admission, "available_memory_mb", lambda: (100, 100))
     args = mod.parser().parse_args(command[2:] + ["--batch-child"])
     assert mod.dispatch(args) == 0
@@ -3978,7 +3978,7 @@ def test_terminal_io_is_best_effort(tmp_path, monkeypatch, failure):
     run, prompt, command = real_owner_fixture(tmp_path, monkeypatch, code)
     monkeypatch.chdir(tmp_path)
     mod = load_dispatch_module()
-    original_write = mod.write_owned
+    original_write = mod.run_records.write_owned
     original_open = os.open
     failed = []
     def open_file(path, *args, **kwargs):
@@ -3994,7 +3994,7 @@ def test_terminal_io_is_best_effort(tmp_path, monkeypatch, failure):
             raise mod.OwnedFileError("publication failed") from OSError(28, "No space left on device")
         return original_write(run_dir, path, content)
     monkeypatch.setattr(mod.os, "open", open_file)
-    monkeypatch.setattr(mod, "write_owned", write)
+    monkeypatch.setattr(mod.run_records, "write_owned", write)
     args = mod.parser().parse_args(command[2:])
     assert mod.dispatch(args) == (0 if failure.startswith("terminal") else 1)
     assert failed
@@ -4209,7 +4209,7 @@ time.sleep(30)
         if stop == 'SIGTERM':
             process.send_signal(signal.SIGTERM)
         elif stop == 'marker':
-            mod.create_cancellation_marker(run, run / 'dispatch/tasks/dispatch-001/attempt-001')
+            mod.run_records.create_cancellation_marker(run, run / 'dispatch/tasks/dispatch-001/attempt-001')
         stdout, stderr = process.communicate(timeout=10)
         row = json.loads((run / 'tasks/dispatch-001/attempt-001/attempt.json').read_text())
         expected_status = 'timed_out' if stop == 'timeout' else ('interrupted' if stop == 'SIGTERM' else 'cancelled')
@@ -5027,7 +5027,7 @@ def test_dispatch_retains_quarantined_result_without_clean_success(tmp_path, mon
         assert canonical['landable'] is False
         assert 'review quarantine' in canonical['digest']
         import batch_run
-        claimed = {**record, 'attempt_digest': module.digest(run_dir / record['attempt_path'])}
+        claimed = {**record, 'attempt_digest': module.run_records.digest(run_dir / record['attempt_path'])}
         child = batch_run._validate_child_record(
             {'id': 'review', 'adapter': 'codex', 'alias': 'junior', 'role': 'worker'}, claimed, run_dir, 1)
         assert child['status'] == 'quarantined'
@@ -5799,7 +5799,7 @@ else:
             owner = json.loads(path.read_text())
             attempt_dir = child_dir / 'dispatch/tasks/junior/attempt-001'
             if attempt_dir.exists():
-                mod.create_cancellation_marker(child_dir, attempt_dir)
+                mod.run_records.create_cancellation_marker(child_dir, attempt_dir)
             deadline = time.monotonic() + 5
             while time.monotonic() < deadline:
                 info = mod.process_info.process(owner['owner_pid'])
