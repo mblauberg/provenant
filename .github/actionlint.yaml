@@ -1,0 +1,7 @@
+# actionlint 1.7.12 predates GitHub's self-repository action syntax. Keep the
+# syntax required by zizmor, and remove this exception once actionlint supports
+# it. All other action validation and ShellCheck findings remain enabled.
+paths:
+  .github/workflows/ci.yml:
+    ignore:
+      - '^specifying action "\$/\.github/actions/setup-node-workspace" in invalid format because ref is missing\.'
