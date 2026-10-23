@@ -1342,3 +1342,12 @@ then passed after repair. Extended JSON/native-path reader gaps remain partial.
   The seven-scenario differential suite includes exact ISO output/errors at
   both bounds, year 0, year 10000, negative milliseconds and a leap date.
 - Fixed by adapting the formatter; no widened dependency or behaviour change.
+
+### RP-FR3-001: owner record integral numbers
+
+Class: `improvement` (R4 integer-domain restriction). Owner schema and PID
+readers accept integral float tokens such as `1.0` and `12.0`, matching
+JavaScript JSON.parse. Process IDs outside u64 remain refused rather than
+rounded into an integer. This inert boundary does not claim parity for
+JavaScript integers outside the Rust integer domain; no command is cut over.
+Unknown and mistyped unvalidated owner fields are retained verbatim.
