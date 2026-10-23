@@ -217,7 +217,14 @@ Locally run only targeted tests, fmt, lint/type checks and the graph fixtures.
 Full suites, `scripts/check-harness`, platform conformance and stress run in CI.
 No merge without the PR's exact-head required checks. A new head invalidates
 the old evidence. Stress supplements deterministic gates; it cannot replace
-them. Live provider trials require their own authority and stable installation.
+them. Live provider runs require the user's authority.
+
+Golden `machine` cases are byte-compared after normalisation and pin the
+Python and SQLite versions in `tests/golden/manifest.json`; the recorder and
+Python CI must use that interpreter. `help` cases compare structurally (exit
+code, subcommand and flag set), so the Rust CLI need not reproduce argparse
+text. Re-record with `python tests/golden/run.py --record --verb V` when a
+change alters CLI output on purpose, and list the change in `divergences.md`.
 
 ## R10. How to port one unit
 
@@ -251,7 +258,7 @@ them. Live provider trials require their own authority and stable installation.
 8. Commit generated changes, push the assigned branch and open the PR against
    the chosen integration branch. CI is the gate. Do not merge or cut over
    from a lane without repository workflow authority. Remove fallback/source
-   only after the relevant trial and surviving caller/test proof.
+   only after the relevant judges pass and surviving caller/test proof.
 
 ## R11. Escalation stops the affected unit
 

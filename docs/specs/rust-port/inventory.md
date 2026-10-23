@@ -9,7 +9,7 @@ inferred owning crate's test area; retained external judges need no Rust rewrite
 Qualifications: P = boundary preserved, internal redesign allowed; T = retain
 black-box judges, move internal assertions to Rust, delete only under S1-S4;
 S = partial replacement under S1-S4, keep policy; D = conditional bridge or
-front-door deletion after replacement and trial. No file is deemed dead from
+front-door deletion after replacement and judge gates. No file is deemed dead from
 an absent import. `provider_exec.py` spans providers, confinement and supervisor;
 the graph assigns its individual units.
 

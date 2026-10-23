@@ -87,7 +87,7 @@ Retirement is evidence-led:
   same boundary. Keep direct-CLI liveness while that supported path exists.
 - Delete the fake `CF_DISPATCH` transport seam, Python front-door fallbacks
   and TypeScript provider signalling only after their named replacement and
-  trial gates pass. Migrate policy tests behind fake providers first.
+  judge gates pass. Migrate policy tests behind fake providers first.
 
 The supervisor spec's split, "Python decides, Rust holds and commits", is a
 transition seam. This whole-project plan eventually moves the decisions too.
@@ -102,7 +102,7 @@ Its lists of components remaining in Python/TS are no longer final exclusions.
 | Judge first | J1 owns `tests/golden/`, J2 owns `schemas/`, J3 owns MCP transcript record/replay. Reuse `tests/lane_conformance/`; S2 rows are in flight. This lane builds none of them. | Each relevant judge passes on the pinned old implementation and fails on deliberate mutants, before the replacement is visible to its author. Save mutant definitions and failures. |
 | Port leaves | Agree interfaces, then port dependency leaves in small units using the rulebook. Integrate accepted `feat/s2-lane-run` rather than reimplementing it. | Unit tests and relevant judges pass; principal diff-only review, assuming the implementation is wrong; dependency and divergence records regenerated. |
 | Differential | Run isolated old/new commands, MCP transcripts, record readers/writers and process scenarios with identical fixture inputs. Repeat across all supported adapters and both platforms. | All mismatches classified and resolved or explicitly approved in [divergences.md](divergences.md); no unexplained output or state differences; old→new and new→old retained-state reads demonstrated. |
-| Cut-over | Change installer/default execution only after the whole boundary is covered. Run the existing staged S1–S4 trials and an end-to-end two-Mac trial for the complete Rust install. | Exact-head CI green, reversible install tested, seven-day complete-install trial with no unexplained boundary mismatch, external callers migrated, runtime Python/TS removed and required judge suites retained. |
+| Cut-over | Change installer/default execution only after the whole boundary is covered. Rehearse install and rollback of the complete Rust install on both Macs. | Exact-head CI green, install and rollback rehearsed, no unexplained divergence in the differential runs, external callers migrated, runtime Python/TS removed and required judge suites retained. |
 
 J1–J3 completion is an input gate, not an assumption that their paths already
 exist on this branch. Their owners supply the runner commands and coverage
@@ -163,13 +163,15 @@ registration only after that proof. Roll back by restoring the pinned install
 and pointers, then invoking help, root, a retained-state read and a fake lane.
 Do not roll back by restoring an old database over new writes. Incompatible
 state migration needs a separately approved, reversible migration plan.
-Retain the stable install throughout the trial even after source deletion.
+After source deletion, roll back by restoring the old implementation from Git
+history and reinstalling it.
 
-Keep the supervisor's per-slice trial and stop thresholds. Any healthy provider
+Timed trials are dropped (user decision, 2026-10-23); judges and differential
+runs are the promotion gate. Keep the stop conditions: any healthy provider
 killed, lost terminal record, weakened confinement or second live writer
-stops promotion and defaults back to the stable implementation. Investigate
-before resuming. The full-port schedule does not waive S2–S4 timeboxes or
-authorise a trial on the user's live providers.
+stops promotion and reverts to the previous install. Investigate before
+resuming. Runs against the user's live providers still need the user's
+authority.
 
 ## Work graph and estimates
 
@@ -235,7 +237,7 @@ from dividing by the number of models.
 <!-- estimates:end -->
 
 Add 10–20 lane-days for full differential coverage, installation and cut-over
-rehearsal, plus seven elapsed trial days. J1–J3 and the existing S2 lane are
+rehearsal. J1–J3 and the existing S2 lane are
 separate estimates and are not counted here. Existing Rust is reused; the
 graph counts only workspace/digest integration and unsafe relocation for it.
 Re-estimate after the first three representative
