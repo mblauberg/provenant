@@ -81,4 +81,4 @@ Agent may prepare and verify; it may execute only within explicit authority.
 
 ## Portable artifact
 
-Use the skill-owned [promotion receipt schema](portable-workflow.v1.json).
+Keep the criteria, evidence and outcome in the existing project document or PR.

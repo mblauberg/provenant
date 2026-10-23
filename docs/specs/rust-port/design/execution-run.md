@@ -590,7 +590,7 @@ subject. None of these partial edits is included in the reduction estimate.
 | --- | --- |
 | `tools/front-door/src/{main.rs,help.rs}`, execution help files, `tools/front-door/tests/common/mod.rs` | CLI, steps 1/2/4: native test rig and frozen verbs; remove old routes/oracle hooks |
 | `config/harness-knobs.json:19,25`, `tests/test_harness_profile.py` | State/config, step 2: replace knobs with typed config; remove retired context-ceiling settings |
-| `scripts/clean.py:233` | Supervisor/CLI cleanup, step 5: use new run store/layout; no run-directory contract |
+| `scripts/clean.py:233` | Supervisor S3 deletes `clean.py` with its tests; guardian scratch settlement and `worktree remove --merged` replace it. No `clean` verb or run-directory contract survives |
 | `tests/conftest.py` | Run + CLI + Fabric, each step: remove deleted fixtures; temporary HOME/state/harness paths |
 | `tests/test_model_route_pools.py` | Routing, step 2: replace obsolete dispatch/route assumptions |
 | `tests/test_issue_697_custody.py` | Run + supervisor, steps 2/4: replace old subject with native custody/fault cases |
@@ -650,7 +650,7 @@ Python/V8 emulation, selector, bridge or old-output judge is introduced.
    and removes the remaining old consumers together. Delete run_controls and
    its tests with `run_dir_finalize` and the Fabric execution/batch/resume
    callers. Run cuts run_dir_init, RUN_RECEIPT/MANIFEST and the driver lease
-   after the caller matrix is updated; run records plus clean replace them.
+   after the caller matrix is updated; run records plus guardian scratch settlement replace them.
    Delete git_evidence_packet with its last control and inert workflow oracle
    consumers; Git reads use supervisor run_utility. Update lane_launch's
    dynamic run_records cancellation call. Finish these last-importer groups:
