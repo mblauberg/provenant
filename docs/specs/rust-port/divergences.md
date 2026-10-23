@@ -83,3 +83,16 @@ They form the current baseline; they are not newly discovered port mismatches.
   boundary that detects a one-microsecond error.
 - Disposition: fixed with ASCII date digits and shared fractional half-even
   timestamp conversion. Duration addition retains Python timedelta rounding.
+
+## RP-4: dangling project links and explicit home expansion
+
+- Unit: `scripts/quota_schedule.py#unit-01`; PORTING.md version 3.
+- Class: `bug` for dangling links, `improvement` for explicit home expansion.
+- Oracle: Python source revision `e897b10d58b27a46544969594eed08a5ed64c72c`.
+- Evidence: `review_regression_dangling_project_symlink_keeps_real_activity`
+  failed before repair: a dead project link suppressed a real session file.
+- Disposition: dangling links are fixed by testing directory status before
+  reading metadata, matching Python's skip. The existing explicit `home`
+  argument expands `~` and `~/`; Python instead consults the process home and
+  supports `~user`. This dependency injection remains an intentional inert
+  library divergence and must be reconciled by the command cut-over owner.

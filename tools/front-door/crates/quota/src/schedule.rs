@@ -424,10 +424,11 @@ fn newest_files(directory: &Path, suffix: &str, limit: usize) -> Vec<PathBuf> {
         let Ok(entry) = entry else {
             return vec![];
         };
-        let Ok(metadata) = fs::metadata(entry.path()) else {
-            return vec![];
-        };
-        if metadata.is_dir() {
+        // DirEntry::is_dir in Python follows live links but skips dangling ones.
+        if entry.path().is_dir() {
+            let Ok(metadata) = fs::metadata(entry.path()) else {
+                return vec![];
+            };
             let Ok(modified) = metadata.modified() else {
                 return vec![];
             };

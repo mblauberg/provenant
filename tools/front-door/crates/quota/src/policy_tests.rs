@@ -1129,3 +1129,18 @@ fn review_regression_activity_uses_fromtimestamp_fraction_rounding() {
             Some(if seconds < 1730000000.0 { "2023-11-14T22:13:20.000001Z" } else { "2025-01-01T00:00:00.791625Z" }));
     }
 }
+
+#[cfg(unix)]
+#[test]
+fn review_regression_dangling_project_symlink_keeps_real_activity() {
+    use crate::schedule::*;
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    std::fs::create_dir_all(root.join("projects/real")).unwrap();
+    let session = root.join("projects/real/s.jsonl");
+    std::fs::write(&session, "").unwrap();
+    std::os::unix::fs::symlink(root.join("nonexistent"), root.join("projects/dead")).unwrap();
+    let paths = activity_paths("claude", root, now(), root, &TimeZone::UTC);
+    assert!(paths.contains(&session), "{paths:?}");
+    assert!(activity("claude", root, now(), root, &TimeZone::UTC).is_some());
+}
