@@ -40,7 +40,15 @@ pub struct PanelPreset {
     pub minimum_members: u64,
 }
 
-type Reducer = Arc<dyn Fn(&Value) -> Result<Value, String> + Send + Sync>;
+/// Reducer seam; source-varying reducer names stay in the registry table.
+pub trait PanelReducer: Send + Sync {
+    fn reduce(&self, output: &Value) -> Result<Value, String>;
+}
+impl<F> PanelReducer for F
+where F: Fn(&Value) -> Result<Value, String> + Send + Sync {
+    fn reduce(&self, output: &Value) -> Result<Value, String> { self(output) }
+}
+type Reducer = Arc<dyn PanelReducer>;
 
 /// An immutable-by-sharing set of presets and reducers.
 ///
@@ -89,10 +97,12 @@ impl PanelRegistry {
         self
     }
 
-    pub fn with_reducer<F>(mut self, name: impl Into<String>, reducer: F) -> Self
-    where
-        F: Fn(&Value) -> Result<Value, String> + Send + Sync + 'static,
-    {
+    pub fn with_reducer<F>(self, name: impl Into<String>, reducer: F) -> Self
+    where F: Fn(&Value) -> Result<Value, String> + Send + Sync + 'static {
+        self.with_reducer_impl(name, reducer)
+    }
+    pub fn with_reducer_impl<R: PanelReducer + 'static>(mut self, name: impl Into<String>, reducer: R) -> Self {
+
         self.reducers.insert(name.into(), Arc::new(reducer));
         self
     }
@@ -110,7 +120,7 @@ impl PanelRegistry {
             .reducers
             .get(name)
             .ok_or_else(|| PanelError::ReducerUnavailable(name.to_owned()))?;
-        reducer(output).map_err(PanelError::InvalidOutput)
+        reducer.reduce(output).map_err(PanelError::InvalidOutput)
     }
 
     fn preset(&self, name: &str) -> Option<&PanelPreset> {
