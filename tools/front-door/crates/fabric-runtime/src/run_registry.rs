@@ -11,8 +11,12 @@ pub const DEFAULT_RETENTION_HOURS: u64 = 168;
 #[serde(transparent)]
 pub struct ProcessId(u64);
 impl ProcessId {
-    pub fn get(self) -> u64 { self.0 }
-    pub fn new(value: u64) -> Option<Self> { (value > 1).then_some(Self(value)) }
+    pub fn get(self) -> u64 {
+        self.0
+    }
+    pub fn new(value: u64) -> Option<Self> {
+        (value > 1).then_some(Self(value))
+    }
 }
 impl<'de> Deserialize<'de> for ProcessId {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
@@ -22,20 +26,29 @@ impl<'de> Deserialize<'de> for ProcessId {
             (value.fract() == 0.0 && (2.0..18_446_744_073_709_551_616.0).contains(&value))
                 .then_some(value as u64)
         });
-        integer.and_then(Self::new).ok_or_else(|| serde::de::Error::custom("process id must be an integer greater than one in u64 range"))
+        integer.and_then(Self::new).ok_or_else(|| {
+            serde::de::Error::custom("process id must be an integer greater than one in u64 range")
+        })
     }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SchemaVersion;
 impl Serialize for SchemaVersion {
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> { serializer.serialize_u8(1) }
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_u8(1)
+    }
 }
 impl<'de> Deserialize<'de> for SchemaVersion {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let value = serde_json::Number::deserialize(deserializer)?;
-        if value.as_u64() == Some(1) || value.as_f64() == Some(1.0) { Ok(Self) }
-        else { Err(serde::de::Error::custom("unsupported run record schema version")) }
+        if value.as_u64() == Some(1) || value.as_f64() == Some(1.0) {
+            Ok(Self)
+        } else {
+            Err(serde::de::Error::custom(
+                "unsupported run record schema version",
+            ))
+        }
     }
 }
 
@@ -101,18 +114,70 @@ mod tests {
             "task_id":null,"workspace":17,"extra":{"future":true},"run_dir":false});
         let record = OwnerRecord::from_value(value, "/actual").unwrap();
         assert_eq!(record.owner_pid.get(), 12);
-        assert_eq!(serde_json::to_value(record).unwrap(), json!({"schema_version":1,"kind":"dispatch",
-            "owner_pid":12,"owner_pgid":13,"task_id":null,"workspace":17,"extra":{"future":true},"run_dir":"/actual"}));
+        assert_eq!(
+            serde_json::to_value(record).unwrap(),
+            json!({"schema_version":1,"kind":"dispatch",
+            "owner_pid":12,"owner_pgid":13,"task_id":null,"workspace":17,"extra":{"future":true},"run_dir":"/actual"})
+        );
     }
     #[test]
     fn owner_read_contract_refuses_only_validated_fields() {
         let base = json!({"schema_version":1,"kind":"batch","owner_pid":2,"owner_pgid":3});
         assert!(OwnerRecord::from_value(base.clone(), "/actual").is_ok());
-        for (key, value) in [("schema_version",json!(2)),("schema_version",json!(true)),
-            ("owner_pid",json!(1)),("owner_pgid",json!(0)),("owner_pid",json!(2.5)),
-            ("owner_pid",json!("12")),("kind",json!("provider"))] {
-            let mut invalid = base.clone(); invalid[key] = value;
-            assert!(OwnerRecord::from_value(invalid, "/actual").is_err(), "{key}");
+        for (key, value) in [
+            ("schema_version", json!(2)),
+            ("schema_version", json!(true)),
+            ("owner_pid", json!(1)),
+            ("owner_pgid", json!(0)),
+            ("owner_pid", json!(2.5)),
+            ("owner_pid", json!("12")),
+            ("kind", json!("provider")),
+        ] {
+            let mut invalid = base.clone();
+            invalid[key] = value;
+            assert!(
+                OwnerRecord::from_value(invalid, "/actual").is_err(),
+                "{key}"
+            );
         }
+    }
+    #[test]
+    fn node_differential_owner_records_cover_missing_null_invalid_and_extra_fields() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().to_str().unwrap();
+        let fixtures = [
+            r#"{"schema_version":1,"kind":"dispatch","owner_pid":12,"owner_pgid":12}"#,
+            r#"{"schema_version":1.0,"kind":"batch","owner_pid":12.0,"owner_pgid":12.0,"task_id":null,"batch_id":null}"#,
+            r#"{"schema_version":1,"kind":"dispatch","owner_pid":1,"owner_pgid":12}"#,
+            r#"{"schema_version":1,"kind":"dispatch","owner_pid":12,"owner_pgid":12,"run_dir":false,"workspace":17,"future":{"x":[1,true,null]}}"#,
+            r#"{"schema_version":2,"kind":"dispatch","owner_pid":12,"owner_pgid":12}"#,
+        ];
+        let script = r#"import {readOwnerRecord,writeOwnerRecord} from './src/run-registry.ts';
+import {writeFileSync,readFileSync} from 'node:fs';
+import {join} from 'node:path';
+const [dir, fixtures] = process.argv.slice(1);
+console.log(JSON.stringify(JSON.parse(fixtures).map(text => {
+ writeFileSync(join(dir,'dispatch-owner.json'),text);
+ const record=readOwnerRecord(dir);
+ if(record===undefined) return null;
+ writeOwnerRecord(record);
+ return JSON.parse(readFileSync(join(dir,'dispatch-owner.json'),'utf8'));
+})));"#;
+        let Some(expected) = crate::test_support::node(
+            script,
+            &[dir.into(), serde_json::to_string(&fixtures).unwrap()],
+        ) else {
+            return;
+        };
+        let actual: Vec<_> = fixtures
+            .iter()
+            .map(|text| {
+                OwnerRecord::from_value(serde_json::from_str(text).unwrap(), dir)
+                    .ok()
+                    .map(|record| serde_json::to_value(record).unwrap())
+                    .unwrap_or(serde_json::Value::Null)
+            })
+            .collect();
+        assert_eq!(serde_json::json!(actual), expected);
     }
 }

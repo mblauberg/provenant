@@ -15,3 +15,6 @@ pub mod run_root;
 pub mod success_status;
 
 mod pending;
+
+#[cfg(test)]
+mod test_support;
