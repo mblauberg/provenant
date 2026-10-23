@@ -338,19 +338,19 @@ def test_attempt_receipt_carries_the_profile_stamp(space, monkeypatch):
     write(space.user, {"preset": "economy"})
     args = dispatch_args(task_class="review", risk_tier="crucial",
                          knobs=["lanes.max_concurrency=3", "effort.shift=-1", "lanes.silence_seconds=120"])
-    dispatch.export_knob_overrides(args)
+    dispatch.dispatch_preflight.export_knob_overrides(args)
     assert os.environ["PROVENANT_KNOB_LANES_MAX_CONCURRENCY"] == "3"
     assert os.environ["PROVENANT_RISK_TIER"] == "crucial"
     stamp = dispatch.contract_row(args, space.project, 1, space.project / "attempt", {}, "now")["profile"]
     assert stamp["preset"] == "economy" and stamp["task_class"] == "review"
     assert stamp["knobs"]["lanes.max_concurrency"] == 3 and stamp["knobs"]["effort.shift"] == 0
     assert stamp["floored"] == ["effort.shift"]
-    assert dispatch.profile_knob(args, "context.ceiling_tokens") == 200000
+    assert dispatch.dispatch_preflight.profile_knob(args, "context.ceiling_tokens") == 200000
     assert stamp["knobs"]["lanes.silence_seconds"] == 120
     assert os.environ["PROVENANT_KNOB_LANES_SILENCE_SECONDS"] == "120"
 
     with pytest.raises(dispatch.harness_profile.ProfileError, match="unknown knob"):
-        dispatch.export_knob_overrides(dispatch_args(knobs=["no.such=1"]))
+        dispatch.dispatch_preflight.export_knob_overrides(dispatch_args(knobs=["no.such=1"]))
 
 
 def test_attempt_stamp_records_a_broken_profile_instead_of_failing(space, monkeypatch):
@@ -374,7 +374,7 @@ def test_routing_reads_the_same_user_profile_as_the_receipt(space, monkeypatch, 
     else:
         monkeypatch.setenv(hp.PROFILE_ROOT_ENV, profile_root)
     write(space.user, {"knobs": {"effort.shift": 1}})
-    environment = dispatch.routing_environment()
+    environment = dispatch.dispatch_preflight.routing_environment()
     assert environment["AGENT_FABRIC_INSTANCE_ROOT"] == str(ROOT)
     assert environment[hp.PROFILE_ROOT_ENV] == str(space.instance)
     assert hp.user_path(environment) == space.user == hp.user_path(os.environ)

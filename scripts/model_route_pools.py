@@ -258,15 +258,15 @@ def resolve_model(router: Any, catalog: dict[str, Any], text: str) -> tuple[str,
     head, separator, rest = text.partition("/")
     if separator and head in adapters:
         for candidate in (rest, text):
-            match, _ = router._registered_match(head, candidate, catalog)
+            match, _ = router.model_route_live._registered_match(head, candidate, catalog)
             if match:
                 return head, match["id"], True
         # `opencode/big-pickle` is itself an OpenCode provider path; `opencode/<provider>/x` is prefixed.
         if known_provider_path(text) and "/" not in rest:
             return head, text, False
         return head, rest, False
-    adapter = router._owner_adapter(text, catalog)
-    match = router._registered_match(adapter, text, catalog)[0] if adapter in adapters else None
+    adapter = router.model_route_live._owner_adapter(text, catalog)
+    match = router.model_route_live._registered_match(adapter, text, catalog)[0] if adapter in adapters else None
     return adapter, match["id"] if match else text, match is not None
 
 
@@ -279,7 +279,7 @@ def model_traits(router: Any, catalog: dict[str, Any], adapter: str, model: str)
     traits: set[str] = set()
     table = catalog.get("model_traits", {})
     adapter_entry = catalog.get("adapters", {}).get(adapter, {})
-    registered = router._registered_match(adapter, model, catalog)[0] if "models" in adapter_entry else None
+    registered = router.model_route_live._registered_match(adapter, model, catalog)[0] if "models" in adapter_entry else None
     # A live id the catalogue lacks inherits its family's traits, so it is never less private than its family.
     names = (model, *(((registered or {}).get("id"),) if (registered or {}).get("id") else ()),
              *((registered or {}).get("inherits", [])))
@@ -288,7 +288,7 @@ def model_traits(router: Any, catalog: dict[str, Any], adapter: str, model: str)
             value = table.get(key) if isinstance(table, dict) else None
             if isinstance(value, list):
                 traits.update(item for item in value if isinstance(item, str))
-    flag = router.training_flag(adapter_entry, registered, model)
+    flag = router.model_route_live.training_flag(adapter_entry, registered, model)
     if flag is True:
         traits.add("trains-on-prompts")
     if ((isinstance(registered, dict) and registered.get("plan_cap_usd") == 0) or router.is_free_model(adapter_entry, model)
@@ -319,7 +319,7 @@ class Availability:
         self.router = router
         self.catalog = catalog
         self.installed = installed
-        self.cooldowns = router._cooldowns(catalog) if cooldowns is None else cooldowns
+        self.cooldowns = router.model_route_live._cooldowns(catalog) if cooldowns is None else cooldowns
         self._quota: dict[str, Any] | None = None
         self._enabled: dict[str, str] = {}
         self._compatibility: dict[str, dict[str, Any] | None] = {}
@@ -355,7 +355,7 @@ class Availability:
     def last_resort(self, adapter: str) -> bool:
         """The adapter's selected account is drawing on credits under the `last_resort` credits policy."""
         if self._quota is None:
-            self._quota = getattr(self.router, "_quota_states", dict)()
+            self._quota = getattr(self.router.model_route_live, "_quota_states", dict)()
         return bool(self._quota.get(adapter, {}).get("last_resort"))
 
     def reason(self, adapter: str, model: str, weight: float = 1.0) -> str:
@@ -370,7 +370,7 @@ class Availability:
             return incompatible
         if not self.installed(adapter):
             return "not installed"
-        until = self.router._cooling(adapter, model, self.cooldowns, self.catalog)
+        until = self.router.model_route_live._cooling(adapter, model, self.cooldowns, self.catalog)
         return f"cooling until {until}" if until else ""
 
 
@@ -523,7 +523,7 @@ def pick(router: Any, catalog: dict[str, Any], request: dict[str, Any], *,
                                 + ", ".join(effort_order) + ".")
             if not registered:
                 warnings.append(f"{text} is not in the catalogue; passing it to {adapter} as given")
-            effort = effort or (router.suffix_effort(adapter, text.partition("/")[2] if separator and head in adapters else text,
+            effort = effort or (router.model_route_live.suffix_effort(adapter, text.partition("/")[2] if separator and head in adapters else text,
                                                     catalog) if adapter in adapters else "")
             entries.append({"key": f"{adapter}/{model}", "adapter": adapter, "model": model, "weight": 1.0,
                             "effort": [effort] if effort else None,
@@ -644,7 +644,7 @@ def describe(router: Any, catalog: dict[str, Any], availability: Availability,
     """Every pool with live availability, for `provenant routes`."""
     routes = {}
     # Provider pace is report-only here; only an exhausted window changes availability (as a cooldown).
-    quota = getattr(router, "_quota_states", dict)()
+    quota = getattr(router.model_route_live, "_quota_states", dict)()
     for name in catalog.get("routes", {}):
         routes[name] = [{
             "model": entry["key"], "weight": entry["weight_label"], "family": entry["family"],

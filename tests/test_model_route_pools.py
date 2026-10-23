@@ -67,7 +67,7 @@ def test_seed_routes_name_registered_models_with_the_tiny_weight_vocabulary():
         for entry in entries:
             assert entry["weight"] in {"high", "normal", "sparing"}
             adapter, model = pools.split_model(router, CATALOG, entry["model"])
-            registered, _ = router._registered_match(adapter, model, CATALOG)
+            registered, _ = router.model_route_live._registered_match(adapter, model, CATALOG)
             assert registered is not None, f"{name}: {entry['model']}"
             for effort in entry.get("effort", []):
                 assert effort in registered["efforts"]
@@ -80,7 +80,7 @@ def test_default_pools_hold_only_free_models_with_explicit_no_training():
         for entry in entries:
             adapter, model = pools.split_model(router, SEED, entry["model"])
             if "free" in pools.model_traits(router, SEED, adapter, model):
-                registered, _ = router._registered_match(adapter, model, SEED)
+                registered, _ = router.model_route_live._registered_match(adapter, model, SEED)
                 assert registered.get("trains_on_prompts") is False, f"{name}: {entry['model']}"
 
 
@@ -548,10 +548,10 @@ def test_confidential_filters_every_fallback_even_under_fallback_any():
 
 def test_confidential_refuses_a_resolved_route_that_trains_and_names_the_fix():
     dispatch_run = load("pools_dispatch_confidential_under_test", ROOT / "skills/orchestrate/scripts/dispatch_run.py")
-    refusal = dispatch_run.confidential_refusal("opencode", "opencode/mimo-v2.6-flash-free", {})
+    refusal = dispatch_run.dispatch_preflight.confidential_refusal("opencode", "opencode/mimo-v2.6-flash-free", {})
     assert refusal.startswith("opencode/opencode/mimo-v2.6-flash-free is a free tier")
     assert "fix:" in refusal
-    assert dispatch_run.confidential_refusal("codex", "gpt-6-luna", {"trains_on_prompts": False}) is None
+    assert dispatch_run.dispatch_preflight.confidential_refusal("codex", "gpt-6-luna", {"trains_on_prompts": False}) is None
     args = dispatch_run.parser().parse_args(["--run-dir", "/tmp/run", "--prompt-file", "p.md", "--adapter", "codex",
                                              "--confidential"])
     assert args.confidential is True
@@ -589,12 +589,12 @@ def test_confidential_preflight_uses_a_mixed_alias_and_refuses_only_when_nothing
     monkeypatch.chdir(tmp_path)
     dispatch_run = load("pools_dispatch_mixed_alias_under_test", ROOT / "skills/orchestrate/scripts/dispatch_run.py")
     task = {"id": "t", "adapter": "opencode", "alias": "junior", "prompt": "hi"}
-    ordinary = dispatch_run.preflight_tasks([task], tmp_path)
+    ordinary = dispatch_run.dispatch_preflight.preflight_tasks([task], tmp_path)
     assert ordinary.get("routes", [{}])[0].get("resolved_model") == "opencode/mimo-v2.6-flash-free", ordinary
-    private = dispatch_run.preflight_tasks([{**task, "confidential": True}], tmp_path)
+    private = dispatch_run.dispatch_preflight.preflight_tasks([{**task, "confidential": True}], tmp_path)
     assert private["status"] == "validated", private
     assert private["routes"][0]["resolved_model"] == "opencode-go/deepseek-v4.1-flash"
-    refused = dispatch_run.preflight_tasks([{**task, "alias": None, "model": "opencode/mimo-v2.6-flash-free",
+    refused = dispatch_run.dispatch_preflight.preflight_tasks([{**task, "alias": None, "model": "opencode/mimo-v2.6-flash-free",
                                              "confidential": True}], tmp_path)
     assert refused["error"] == "confidential_route" and "fix:" in refused["fix"]
 
@@ -792,9 +792,9 @@ def test_an_adapter_wide_no_training_default_never_clears_an_unknown_free_model(
     catalog = _free_catalog(None)
     adapter = {**catalog["adapters"]["opencode"], "trains_on_prompts": False}
     catalog = {**catalog, "adapters": {**catalog["adapters"], "opencode": adapter}}
-    assert router.training_flag(adapter, None, "opencode/rotating-free") is None
+    assert router.model_route_live.training_flag(adapter, None, "opencode/rotating-free") is None
     assert "trains-on-prompts" in pools.model_traits(router, catalog, "opencode", "opencode/rotating-free")
-    assert router.training_flag(adapter, None, "opencode-go/paid-model") is False
+    assert router.model_route_live.training_flag(adapter, None, "opencode-go/paid-model") is False
 
 
 def test_a_trait_on_the_canonical_id_follows_an_effort_suffixed_pick(monkeypatch):
@@ -811,7 +811,7 @@ def test_a_trait_on_the_canonical_id_follows_an_effort_suffixed_pick(monkeypatch
 def test_every_free_sign_keeps_an_adapter_wide_false_from_clearing_an_unknown_model():
     adapter = {**SEED["adapters"]["opencode"], "trains_on_prompts": False}
     for model in ("opencode/big-pickle", "openrouter/example:free", "opencode/rotating-free"):
-        assert router.training_flag(adapter, None, model) is None, model
+        assert router.model_route_live.training_flag(adapter, None, model) is None, model
         assert "trains-on-prompts" in pools.model_traits(
             router, {**SEED, "adapters": {**SEED["adapters"], "opencode": adapter}}, "opencode", model), model
 
@@ -860,11 +860,12 @@ def test_routes_preserve_weights_for_burst_with_reserves_and_block_real_shortage
     # Exercise the CLI entry point in process so every routing clock is fixed.
     quota_router = load("quota_pools_router_under_test", ROOT / "scripts/model_route.py")
     exec_routing = exec_routing_module()
+    monkeypatch.setattr(quota_router.model_route_live, "_quota", None)
     monkeypatch.setattr(exec_routing, "_QUOTA", None)
-    for quota in (quota_router._provider_quota(), exec_routing._provider_quota()):
+    for quota in (quota_router.model_route_live._provider_quota(), exec_routing._provider_quota()):
         monkeypatch.setattr(quota, "utcnow", lambda: now)
-    quota = quota_router._provider_quota()
-    monkeypatch.setattr(quota_router, "datetime", FixedDatetime)
+    quota = quota_router.model_route_live._provider_quota()
+    monkeypatch.setattr(quota_router.model_route_live, "datetime", FixedDatetime)
     fabric_records = importlib.import_module(exec_routing.read_cooldowns.__module__)
     monkeypatch.setattr(fabric_records, "datetime", FixedDatetime)
 

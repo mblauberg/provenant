@@ -20,9 +20,25 @@ from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
+from tests.support.git import git as run_git, git_repo, linked_worktree as make_linked_worktree
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "skills/orchestrate/scripts"
+
+
+def provider_home(monkeypatch, tmp_path, *, home=None, config_dir=None, state_root=None,
+                  instance_root=None):
+    """Set only the provider home variables requested by this test."""
+    values = {
+        "HOME": home,
+        "XDG_CONFIG_HOME": config_dir,
+        "AGENT_FABRIC_STATE_ROOT": state_root,
+        "AGENT_FABRIC_INSTANCE_ROOT": instance_root,
+    }
+    for name, value in values.items():
+        if value is not None:
+            monkeypatch.setenv(name, str(value))
+    return Path(home) if home is not None else None
 
 
 def test_plan_only_resolves_without_launch(tmp_path):
@@ -216,7 +232,7 @@ def test_opencode_read_only_discovery_skips_symlinks_to_credentials(monkeypatch,
 @pytest.mark.parametrize("adapter", ["agy", "claude", "cursor", "opencode", "kiro"])
 def test_writer_confinement_allows_owned_paths_and_add_dirs(monkeypatch, tmp_path, adapter):
     mod = supervisor()
-    primary, worktree = linked_worktree(tmp_path)
+    primary, worktree = sandbox_profile_worktree(tmp_path)
     attempt = tmp_path / "run" / "attempt"
     common = primary / ".git"
     private = common / "worktrees/lane"
@@ -255,21 +271,19 @@ def test_writer_confinement_allows_owned_paths_and_add_dirs(monkeypatch, tmp_pat
     assert "(deny file-read-data" not in profile
 
 
-def linked_worktree(tmp_path):
-    primary = tmp_path / "primary"
-    primary.mkdir()
-    git = ["git", "-C", str(primary), "-c", "user.email=a@b", "-c", "user.name=t"]
-    subprocess.run([*git[:3], "init", "-q"], check=True)
-    subprocess.run([*git, "commit", "-q", "--allow-empty", "-m", "init"], check=True)
-    worktree = primary / ".worktrees" / "lane"
-    subprocess.run([*git, "worktree", "add", "-q", "-b", "lane", str(worktree)], check=True)
-    return primary.resolve(), worktree.resolve()
+def sandbox_profile_worktree(tmp_path):
+    primary = git_repo(tmp_path / "primary", branch="main", commit=False)
+    run_git(primary, "config", "user.name", "t")
+    run_git(primary, "config", "user.email", "a@b")
+    run_git(primary, "commit", "-q", "--allow-empty", "-m", "init")
+    worktree = make_linked_worktree(primary, "lane", path=primary / ".worktrees/lane")
+    return primary, worktree
 
 
 @pytest.mark.parametrize("adapter", ["claude", "cursor", "opencode", "kiro"])
 def test_writer_profile_grants_project_locks_only(monkeypatch, tmp_path, adapter):
     mod = supervisor()
-    primary, worktree = linked_worktree(tmp_path)
+    primary, worktree = sandbox_profile_worktree(tmp_path)
     monkeypatch.setattr(mod, "_sandbox_exec_path", lambda: "/usr/bin/sandbox-exec")
     monkeypatch.setattr(mod, "_require_kiro_engine", lambda: None)
     plan = mod.build_plan(adapter, {}, "hello", cwd=worktree, workspace_root=worktree,
@@ -290,7 +304,7 @@ def test_writer_profile_grants_project_locks_only(monkeypatch, tmp_path, adapter
 
 def test_codex_writer_native_filesystem_grants_project_locks_and_runs_only(monkeypatch, tmp_path):
     mod = supervisor()
-    primary, worktree = linked_worktree(tmp_path)
+    primary, worktree = sandbox_profile_worktree(tmp_path)
     monkeypatch.setattr(mod, "_sandbox_exec_path", lambda: "/usr/bin/sandbox-exec")
     plan = mod.build_plan("codex", {}, "hello", cwd=worktree, workspace_root=worktree,
                           worktree=worktree, mode="worktree_write")
@@ -305,7 +319,7 @@ def test_codex_writer_native_filesystem_grants_project_locks_and_runs_only(monke
 
 def test_swapped_locks_link_is_not_granted_on_resume(monkeypatch, tmp_path):
     mod = supervisor()
-    primary, worktree = linked_worktree(tmp_path)
+    primary, worktree = sandbox_profile_worktree(tmp_path)
     monkeypatch.setattr(mod, "_sandbox_exec_path", lambda: "/usr/bin/sandbox-exec")
     first = mod.build_plan("claude", {}, "hello", cwd=worktree, workspace_root=worktree,
                            worktree=worktree, mode="worktree_write")
@@ -336,7 +350,7 @@ def test_writer_without_worktree_creates_no_locks(monkeypatch, tmp_path):
 @pytest.mark.skipif(not shutil.which("sandbox-exec"), reason="sandbox-exec unavailable")
 def test_sandbox_probe_locks_writable_sessions_and_scratch_denied(monkeypatch, tmp_path):
     mod = supervisor()
-    primary, worktree = linked_worktree(tmp_path)
+    primary, worktree = sandbox_profile_worktree(tmp_path)
     for name in ("sessions", "scratch"):
         (primary / ".agent-run" / name).mkdir(parents=True)
     plan = mod.build_plan("claude", {}, "hello", cwd=worktree, workspace_root=worktree,
@@ -356,7 +370,7 @@ def test_sandbox_probe_locks_writable_sessions_and_scratch_denied(monkeypatch, t
 
 def test_read_only_plan_gets_no_locks_grant(monkeypatch, tmp_path):
     mod = supervisor()
-    primary, worktree = linked_worktree(tmp_path)
+    primary, worktree = sandbox_profile_worktree(tmp_path)
     monkeypatch.setattr(mod, "_sandbox_exec_path", lambda: "/usr/bin/sandbox-exec")
     plan = mod.build_plan("claude", {}, "hello", cwd=worktree, workspace_root=worktree)
     assert not (primary / ".agent-run").exists()
@@ -365,7 +379,7 @@ def test_read_only_plan_gets_no_locks_grant(monkeypatch, tmp_path):
 
 def test_writer_protected_path_inside_add_dir_keeps_read_and_write_denied(monkeypatch, tmp_path):
     mod = supervisor()
-    _primary, worktree = linked_worktree(tmp_path)
+    _primary, worktree = sandbox_profile_worktree(tmp_path)
     add_dir = tmp_path / "extra"
     protected = add_dir / "private"
     protected.mkdir(parents=True)
@@ -529,11 +543,8 @@ def test_non_git_workspace_discovers_child_repo_policy_and_linked_worktree(monke
     workspace = tmp_path / "workspace"
     repo = workspace / "app"
     repo.mkdir(parents=True)
-    subprocess.run(["git", "init", "-q", str(repo)], check=True)
-    subprocess.run(["git", "-C", str(repo), "-c", "user.name=Test", "-c",
-                    "user.email=test@example.invalid", "commit", "-q", "--allow-empty", "-m", "initial"], check=True)
-    linked = repo / ".worktrees/linked"
-    subprocess.run(["git", "-C", str(repo), "worktree", "add", "-q", "-b", "linked", str(linked)], check=True)
+    git_repo(repo, branch="main")
+    linked = make_linked_worktree(repo, "linked", path=repo / ".worktrees/linked")
     (repo / ".agents").mkdir()
     (repo / ".agents/fabric-policy.json").write_text('{"protected_paths":["secret/"]}')
     for root in (repo, linked):
@@ -552,7 +563,7 @@ def test_non_git_workspace_discovers_child_repo_policy_and_linked_worktree(monke
     for root in (repo, linked):
         task = {"id": "one", "adapter": "opencode", "model": "opencode/mimo-v2.6-flash-free",
                 "prompt_file": str(root / "secret/prompt.md"), "cwd": str(workspace)}
-        result = importlib.import_module("skills.orchestrate.scripts.dispatch_run").preflight_tasks([task])
+        result = importlib.import_module("skills.orchestrate.scripts.dispatch_preflight").preflight_tasks([task])
         assert result["status"] == "rejected"
         assert "secret" in result["fix"] and "non-training route" in result["fix"]
 
@@ -603,7 +614,7 @@ def test_protected_preflight_refuses_training_inputs(monkeypatch, tmp_path, fiel
         task[field] = [str(repo / "private")]
     else:
         task[field] = str(repo / "private")
-    result = importlib.import_module("skills.orchestrate.scripts.dispatch_run").preflight_tasks([task])
+    result = importlib.import_module("skills.orchestrate.scripts.dispatch_preflight").preflight_tasks([task])
     assert result["status"] == "rejected"
     assert "private" in result["fix"] and "non-training route" in result["fix"]
 
@@ -624,7 +635,7 @@ def test_relative_protected_inputs_anchor_to_workspace(monkeypatch, tmp_path, fi
         task[field] = "private/prompt.md"
     else:
         task[field] = ["private"]
-    result = importlib.import_module("skills.orchestrate.scripts.dispatch_run").preflight_tasks([task], repo)
+    result = importlib.import_module("skills.orchestrate.scripts.dispatch_preflight").preflight_tasks([task], repo)
     assert result["status"] == "rejected"
     assert "protected path" in result["fix"]
 
@@ -642,12 +653,12 @@ def test_protected_preflight_rejects_unavailable_sandbox(monkeypatch, tmp_path):
     monkeypatch.chdir(repo)
     monkeypatch.setenv("AGENT_FABRIC_PRODUCT_ROOT", str(ROOT))
     monkeypatch.setenv("AGENT_FABRIC_INSTANCE_ROOT", str(ROOT))
-    dispatch_run = importlib.import_module("skills.orchestrate.scripts.dispatch_run")
-    # dispatch_run imports provider_exec by its script name; patch that module object.
-    monkeypatch.setattr(dispatch_run.provider_exec, "_sandbox_exec_path", lambda: None)
+    preflight = importlib.import_module("skills.orchestrate.scripts.dispatch_preflight")
+    # dispatch_preflight imports provider_exec by its script name; patch that module object.
+    monkeypatch.setattr(preflight.provider_exec, "_sandbox_exec_path", lambda: None)
     task = {"id": "one", "adapter": "opencode", "model": "opencode/mimo-v2.6-flash-free",
             "prompt": "hello", "cwd": str(repo / "safe")}
-    result = dispatch_run.preflight_tasks([task])
+    result = preflight.preflight_tasks([task])
     assert result["status"] == "rejected"
     assert "sandbox-exec" in result["fix"]
 
@@ -749,13 +760,11 @@ def test_build_plan_accepts_writer_worktree_outside_the_callers_tree(tmp_path):
     supervisor = importlib.import_module("skills.orchestrate.scripts.provider_exec")
     repo = tmp_path / "repo"
     repo.mkdir()
-    subprocess.run(["git", "init", "-q", str(repo)], check=True)
-    subprocess.run(["git", "-C", str(repo), "-c", "user.name=Test", "-c",
-                    "user.email=test@example.invalid", "commit", "-q", "--allow-empty", "-m", "initial"], check=True)
+    git_repo(repo, branch="main")
     caller = tmp_path / "caller"
     sibling = tmp_path / "sibling"
-    subprocess.run(["git", "-C", str(repo), "worktree", "add", "-q", "-b", "caller", str(caller)], check=True)
-    subprocess.run(["git", "-C", str(repo), "worktree", "add", "-q", "-b", "sibling", str(sibling)], check=True)
+    make_linked_worktree(repo, "caller", path=caller)
+    make_linked_worktree(repo, "sibling", path=sibling)
 
     plan = supervisor.build_plan(
         "codex", {"resolved_model": "fixture"}, "hello",
@@ -1568,7 +1577,7 @@ print(json.dumps({"type": "turn.completed"}), flush=True)
 def test_effort_retry_never_writes_through_links_the_first_lane_planted(monkeypatch, tmp_path):
     """A lane forges an unsupported-effort diagnostic, so the same attempt runs again in its tmp."""
     mod = supervisor()
-    dispatch_run = importlib.import_module("skills.orchestrate.scripts.dispatch_run")
+    preflight = importlib.import_module("skills.orchestrate.scripts.dispatch_preflight")
     monkeypatch.setattr(mod.agy_home, "needs_ps_shim", lambda plan: True)
     victim = tmp_path / "live-bin"
     victim.mkdir(mode=0o755)
@@ -1580,7 +1589,7 @@ def test_effort_retry_never_writes_through_links_the_first_lane_planted(monkeypa
     plan["route"]["supported_efforts"] = ["low", "high"]
 
     record = mod.execute(plan, attempt / "result.md")
-    retry = dispatch_run.effort_retry_plan(plan, record)
+    retry = preflight.effort_retry_plan(plan, record)
     assert retry is not None, record
     retry["argv"] = plan["argv"]
     mod.execute(retry, attempt / "result.md")
@@ -2061,54 +2070,34 @@ def test_agy_read_only_guarantee_tracks_os_confinement(monkeypatch, tmp_path):
     assert any("writes are unconfined" in warning for warning in unconfined["warnings"])
 
 
-@pytest.mark.parametrize("adapter", ["claude", "cursor", "kiro", "agy", "opencode"])
-def test_read_only_cwd_outside_workspace_warns_when_reads_are_unconfined(
-    monkeypatch, tmp_path, adapter,
-):
+@pytest.mark.parametrize(
+    "adapter,sandbox,expected",
+    [
+        pytest.param(adapter, None, "warn", id=f"{adapter}-unconfined")
+        for adapter in ("claude", "cursor", "kiro", "agy", "opencode")
+    ]
+    + [pytest.param("codex", None, "no-warning", id="codex-native")]
+    + [pytest.param(adapter, "/usr/bin/sandbox-exec", "no-warning", id=f"{adapter}-sandbox")
+       for adapter in ("agy", "opencode")],
+)
+def test_read_only_cwd_warning_tracks_adapter_and_confinement(monkeypatch, tmp_path, adapter, sandbox, expected):
     supervisor = importlib.import_module("skills.orchestrate.scripts.provider_exec")
     root = tmp_path / "workspace"
     cwd = root / "sub"
     cwd.mkdir(parents=True)
-    monkeypatch.setattr(supervisor, "_sandbox_exec_path", lambda: None)
+    monkeypatch.setattr(supervisor, "_sandbox_exec_path", lambda: sandbox)
 
     plan = supervisor.build_plan(
         adapter, {"resolved_model": "fixture"}, "prompt", cwd=cwd, workspace_root=root,
     )
 
     warning = f"{adapter} read_only: cwd is not a read boundary"
-    assert plan["warnings"].count(warning) == 1
-
-
-def test_codex_read_only_cwd_below_workspace_does_not_warn(monkeypatch, tmp_path):
-    """Codex's native read-only sandbox reads everywhere, so a cwd bounds nothing whatever it is."""
-    supervisor = importlib.import_module("skills.orchestrate.scripts.provider_exec")
-    root = tmp_path / "workspace"
-    cwd = root / "sub"
-    cwd.mkdir(parents=True)
-    monkeypatch.setattr(supervisor, "_sandbox_exec_path", lambda: None)
-
-    plan = supervisor.build_plan(
-        "codex", {"resolved_model": "fixture"}, "prompt", cwd=cwd, workspace_root=root,
-    )
-
-    assert not any("read boundary" in warning for warning in plan["warnings"])
-
-
-@pytest.mark.parametrize("adapter", ["agy", "opencode"])
-def test_read_only_cwd_warning_is_omitted_with_os_read_confinement(
-    monkeypatch, tmp_path, adapter,
-):
-    supervisor = importlib.import_module("skills.orchestrate.scripts.provider_exec")
-    root = tmp_path / "workspace"
-    cwd = root / "sub"
-    cwd.mkdir(parents=True)
-    monkeypatch.setattr(supervisor, "_sandbox_exec_path", lambda: "/usr/bin/sandbox-exec")
-
-    plan = supervisor.build_plan(
-        adapter, {"resolved_model": "fixture"}, "prompt", cwd=cwd, workspace_root=root,
-    )
-
-    assert f"{adapter} read_only: cwd is not a read boundary" not in plan["warnings"]
+    if expected == "warn":
+        assert plan["warnings"].count(warning) == 1
+    elif adapter == "codex":
+        assert not any("read boundary" in item for item in plan["warnings"])
+    else:
+        assert warning not in plan["warnings"]
 
 
 def test_os_confinement_opt_out_disables_sandbox_exec(monkeypatch):
@@ -2172,7 +2161,7 @@ def test_daily_catalogue_notes_are_not_promoted_back_to_dispatch_warnings(tmp_pa
     router = importlib.import_module('scripts.model_route')
     monkeypatch.setenv('AGENT_FABRIC_STATE_ROOT', str(tmp_path / 'state'))
     monkeypatch.setenv('PROVENANT_NO_OS_CONFINEMENT', '1')
-    note = router._NEWER_NOTE.format('fixture-new-model')
+    note = router.model_route_live._NEWER_NOTE.format('fixture-new-model')
     for first in (True, False):
         router.emit({'status': 'ok', 'resolved_model': 'fixture', 'notes': ['ordinary route note'],
                      'warnings': [note]}, 0)
@@ -2468,7 +2457,7 @@ def fixture_plan(tmp_path, code, adapter="codex", **controls):
 @pytest.mark.parametrize("ending", ["reconnect", "transport", "exit", "signal", "recovered"])
 def test_codex_progress_requires_a_successful_terminal_result(tmp_path, monkeypatch, rollover, ending):
     module = supervisor()
-    monkeypatch.setattr(module, "MAX_EVENTS_BYTES", 2048 if rollover else 20 * 1024 * 1024)
+    monkeypatch.setattr(module.provider_observer, "MAX_EVENTS_BYTES", 2048 if rollover else 20 * 1024 * 1024)
     events = [{"type": "item.completed", "item": {"type": "agent_message", "text": "Review in progress"}}]
     if ending in {"reconnect", "recovered"}:
         events.extend({"type": "error", "message": f"Reconnecting... {i}/5 (failed to load workspace requirements)"}
@@ -2506,7 +2495,7 @@ def test_codex_progress_requires_a_successful_terminal_result(tmp_path, monkeypa
 
 def test_codex_terminal_result_in_rolled_output_survives_later_signal(tmp_path, monkeypatch):
     module = supervisor()
-    monkeypatch.setattr(module, "MAX_EVENTS_BYTES", 2048)
+    monkeypatch.setattr(module.provider_observer, "MAX_EVENTS_BYTES", 2048)
     padding = [{"type": "telemetry", "data": "x" * 100}] * 1000
     events = padding + [
         {"type": "item.completed", "item": {"type": "agent_message", "text": "Final review"}},
@@ -2571,7 +2560,7 @@ def test_opencode_exit_after_output_reason_skips_info(tmp_path, logs, reason):
 
 @pytest.mark.parametrize("rollover", [False, True])
 def test_opencode_sandbox_denial_after_text_remains_a_failure(tmp_path, monkeypatch, rollover):
-    monkeypatch.setattr(supervisor(), "MAX_EVENTS_BYTES", 2048 if rollover else 20 * 1024 * 1024)
+    monkeypatch.setattr(supervisor().provider_observer, "MAX_EVENTS_BYTES", 2048 if rollover else 20 * 1024 * 1024)
     events = [
         *[{"type": "telemetry", "data": "x" * 100} for _ in range(100)],
         {"type": "text", "part": {"text": "Working narration"}},
@@ -2588,7 +2577,7 @@ def test_opencode_sandbox_denial_after_text_remains_a_failure(tmp_path, monkeypa
 @pytest.mark.parametrize("rollover", [False, True])
 def test_opencode_exit_after_output_keeps_final_step_text(tmp_path, monkeypatch, rollover):
     mod = supervisor()
-    monkeypatch.setattr(mod, "MAX_EVENTS_BYTES", 2048 if rollover else 20 * 1024 * 1024)
+    monkeypatch.setattr(mod.provider_observer, "MAX_EVENTS_BYTES", 2048 if rollover else 20 * 1024 * 1024)
     events = [
         {"type": "step_start", "part": {}},
         {"type": "text", "part": {"text": "Working narration"}},
@@ -2630,7 +2619,7 @@ def test_opencode_failure_reason_skips_info_only_stderr(tmp_path, log):
 
 @pytest.mark.parametrize("rollover", [False, True])
 def test_opencode_final_text_is_preserved_beside_a_structured_failure(tmp_path, monkeypatch, rollover):
-    monkeypatch.setattr(supervisor(), "MAX_EVENTS_BYTES", 2048 if rollover else 20 * 1024 * 1024)
+    monkeypatch.setattr(supervisor().provider_observer, "MAX_EVENTS_BYTES", 2048 if rollover else 20 * 1024 * 1024)
     events = [
         {"type": "error", "error": {"message": "shutdown failed"}},
         *[{"type": "telemetry", "data": "x" * 100} for _ in range(100)],
@@ -2666,7 +2655,7 @@ def test_opencode_discovery_eperm_is_sandbox_denied(tmp_path, structured_error):
 ])
 @pytest.mark.parametrize("rollover", [False, True])
 def test_opencode_structured_failure_wins_over_incidental_eperm(tmp_path, monkeypatch, message, status, rollover):
-    monkeypatch.setattr(supervisor(), "MAX_EVENTS_BYTES", 2048 if rollover else 20 * 1024 * 1024)
+    monkeypatch.setattr(supervisor().provider_observer, "MAX_EVENTS_BYTES", 2048 if rollover else 20 * 1024 * 1024)
     events = [
         {"type": "error", "error": {"message": message}},
         *[{"type": "telemetry", "data": "x" * 100} for _ in range(100)],
@@ -3025,7 +3014,7 @@ def test_codex_read_only_lane_disables_inherited_mcp_servers_and_writer_keeps_th
     assert mcp_table(reader) == {"fabric": {"enabled": False},
                                  "docs": {"default_tools_approval_mode": "approve"}}
     assert reader["applied"]["mcp_disabled"] == ["fabric"]
-    _, worktree = linked_worktree(tmp_path)
+    _, worktree = sandbox_profile_worktree(tmp_path)
     writer = mod.build_plan("codex", route, "hello", mode="worktree_write", worktree=worktree,
                             workspace_root=worktree, network=True)
     assert mcp_table(writer) == {"fabric": {"default_tools_approval_mode": "approve"},
@@ -3121,7 +3110,7 @@ def test_codex_plugin_servers_use_the_plugin_switch_not_a_server_override(monkey
     assert mcp_table(reader) == {"user": {"enabled": False}}
     assert reader["applied"]["plugins_disabled"] is True
     assert reader["applied"]["mcp_disabled"] == ["plug", "user"]
-    _, worktree = linked_worktree(tmp_path)
+    _, worktree = sandbox_profile_worktree(tmp_path)
     writer = mod.build_plan("codex", route, "hello", mode="worktree_write", worktree=worktree,
                             workspace_root=worktree, network=True)
     assert "features.plugins=false" not in codex_options(writer)
@@ -3141,7 +3130,7 @@ def test_codex_unspellable_server_name_makes_a_reader_go_clean_and_a_writer_skip
     route = {"resolved_model": "fixture"}
     reader = mod.build_plan("codex", route, "hello", cwd=tmp_path, network=True)
     assert reader["applied"]["config"] == "clean" and "cannot be overridden" in reader["applied"]["config_note"]
-    _, worktree = linked_worktree(tmp_path)
+    _, worktree = sandbox_profile_worktree(tmp_path)
     writer = mod.build_plan("codex", route, "hello", mode="worktree_write", worktree=worktree,
                             workspace_root=worktree, network=True)
     assert writer["applied"]["config"] == "inherited" and mcp_table(writer) == {}
@@ -3171,7 +3160,7 @@ def test_codex_writer_receipt_records_unconfined_hooks_and_stdio_servers(monkeyp
     monkeypatch.setattr(mod.profile("codex"), "_discover_mcp_servers",
                         lambda cwd: {"projsrv": {"exec": True, "plugin": False},
                                      "projurl": {"exec": False, "plugin": False}})
-    _, worktree = linked_worktree(tmp_path)
+    _, worktree = sandbox_profile_worktree(tmp_path)
     writer = mod.build_plan("codex", {"resolved_model": "fixture"}, "hello", mode="worktree_write",
                             worktree=worktree, workspace_root=worktree, network=True)
     options = codex_options(writer)
@@ -5363,12 +5352,18 @@ def test_observed_substitution_cannot_certify_the_resolved_family(tmp_path):
     assert not record["certification_eligible"]
 
 
-def test_catalogued_observed_substitution_records_answering_family_without_certifying(tmp_path):
-    code = """import json
+@pytest.mark.parametrize("observed,expected_family,catalogued", [
+    pytest.param("claude-sonnet-5-5", "anthropic", True, id="catalogued-family"),
+    pytest.param("gpt-claude-model", "unknown", False, id="ambiguous-family"),
+])
+def test_observed_substitution_records_only_a_verified_answering_family(
+    tmp_path, observed, expected_family, catalogued,
+):
+    code = f"""import json
 events = [
-    {"type":"system","subtype":"init","model":"claude-haiku-4-5-20251001","session_id":"s-1"},
-    {"type":"assistant","message":{"model":"claude-sonnet-5-5","content":[{"type":"text","text":"DONE"}]}},
-    {"type":"result","result":"DONE","is_error":False,"session_id":"s-1"},
+    {{"type":"system","subtype":"init","model":"claude-haiku-4-5-20251001","session_id":"s-1"}},
+    {{"type":"assistant","message":{{"model":{observed!r},"content":[{{"type":"text","text":"DONE"}}]}}}},
+    {{"type":"result","result":"DONE","is_error":False,"session_id":"s-1"}},
 ]
 for event in events:
     print(json.dumps(event), flush=True)
@@ -5382,10 +5377,11 @@ for event in events:
     )
     record = supervisor().execute(plan, tmp_path / "result.md")
     assert record["status"] == "ok"
-    assert record["provenance"]["observed_model"] == "claude-sonnet-5-5"
-    assert record["provenance"]["family"] == "anthropic"
-    assert record["provenance"]["identity"] == "observed"
-    assert "observed family anthropic inferred from catalogue" in record["provenance"]["notes"]
+    assert record["provenance"]["observed_model"] == observed
+    assert record["provenance"]["family"] == expected_family
+    if catalogued:
+        assert record["provenance"]["identity"] == "observed"
+        assert "observed family anthropic inferred from catalogue" in record["provenance"]["notes"]
     assert not record["cross_family"]
     assert not record["certification_eligible"]
 
@@ -5414,31 +5410,6 @@ for event in [
     assert record["status"] == "ok"
     assert record["provenance"]["family"] == "unknown"
     assert "observed model family unverified after substitution" in record["provenance"]["notes"]
-
-
-def test_ambiguous_catalogued_observed_substitution_keeps_family_unknown(tmp_path):
-    code = """import json
-events = [
-    {"type":"system","subtype":"init","model":"claude-haiku-4-5-20251001","session_id":"s-1"},
-    {"type":"assistant","message":{"model":"gpt-claude-model","content":[{"type":"text","text":"DONE"}]}},
-    {"type":"result","result":"DONE","is_error":False,"session_id":"s-1"},
-]
-for event in events:
-    print(json.dumps(event), flush=True)
-"""
-    plan = fixture_plan(
-        tmp_path,
-        code,
-        "claude",
-        intent="assurance",
-        orchestrator_family="openai",
-    )
-    record = supervisor().execute(plan, tmp_path / "result.md")
-    assert record["status"] == "ok"
-    assert record["provenance"]["observed_model"] == "gpt-claude-model"
-    assert record["provenance"]["family"] == "unknown"
-    assert not record["cross_family"]
-    assert not record["certification_eligible"]
 
 
 def test_preface_env_and_credential_path_controls(tmp_path):
@@ -5829,11 +5800,9 @@ def codex_access(table, path):
 def nested_lanes(tmp_path):
     """This repository's layout: linked worktrees nested at <repo>/.worktrees/<name>."""
     repo = tmp_path / "repo"
-    git(tmp_path, "init", "-q", "-b", "main", str(repo))
-    git(repo, "commit", "-q", "--allow-empty", "-m", "initial")
-    lane, other = repo / ".worktrees/lane", repo / ".worktrees/other"
-    git(repo, "worktree", "add", "-q", "-b", "lane", str(lane))
-    git(repo, "worktree", "add", "-q", "-b", "other", str(other))
+    git_repo(repo, branch="main")
+    lane = make_linked_worktree(repo, "lane", path=repo / ".worktrees/lane")
+    other = make_linked_worktree(repo, "other", path=repo / ".worktrees/other")
     return repo, lane, other
 
 
@@ -6030,14 +5999,11 @@ def git(root, *args):
 def instruction_lane(tmp_path):
     """A primary on main with a tracked skill, and a lane worktree cut before main moves."""
     repo = tmp_path / "repo"
-    git(tmp_path, "init", "-q", "-b", "main", str(repo))
-    (repo / SKILL).parent.mkdir(parents=True)
-    (repo / SKILL).write_text("v1\n")
-    (repo / "app.txt").write_text("app\n")
+    git_repo(repo, branch="main", files={SKILL: "v1\n", "app.txt": "app\n"}, commit=False)
     git(repo, "add", ".")
     git(repo, "commit", "-q", "-m", "initial")
     lane = repo / ".worktrees/lane"
-    git(repo, "worktree", "add", "-q", "-b", "lane", str(lane))
+    make_linked_worktree(repo, "lane", path=lane)
     (lane / "app.txt").write_text("lane\n")
     git(lane, "commit", "-q", "-am", "lane work")
     (repo / SKILL).write_text("v2\n")
@@ -6787,7 +6753,7 @@ def test_capture_rollover_writes_linear_bytes_and_preserves_terminal_result(tmp_
 
 def test_stream_capture_retains_early_semantic_events_with_bounded_storage(tmp_path, monkeypatch):
     mod = supervisor()
-    monkeypatch.setattr(mod, 'MAX_EVENTS_BYTES', 2048)
+    monkeypatch.setattr(mod.provider_observer, 'MAX_EVENTS_BYTES', 2048)
     code = '''import json
 print(json.dumps({'type':'system','model':'observed','session_id':'retained'}))
 print(json.dumps({'type':'result','result':'DONE'}))
@@ -6817,7 +6783,7 @@ def test_fallback_uses_router_candidates_and_parses_explicit_routes():
 
 @pytest.mark.parametrize('policy', ['yes', 'codex/gpt-6.1-sol', 3, {}, [''], [3], [{'adapter': [], 'model': 'sol'}]])
 def test_invalid_fallback_rejected_during_preflight(tmp_path, monkeypatch, policy):
-    mod = importlib.import_module('skills.orchestrate.scripts.dispatch_run')
+    mod = importlib.import_module('skills.orchestrate.scripts.dispatch_preflight')
     monkeypatch.chdir(tmp_path)
     result = mod.preflight_tasks([{'id':'one','adapter':'claude','model':'opus','prompt':'hello','fallback':policy}])
     assert result['status'] == 'rejected'
@@ -6958,7 +6924,7 @@ def test_writer_progress_ignores_new_excluded_and_ignored_paths(tmp_path):
 
 def test_stream_rollover_preserves_unclassified_structured_failure(tmp_path, monkeypatch):
     mod = supervisor()
-    monkeypatch.setattr(mod, 'MAX_EVENTS_BYTES', 2048)
+    monkeypatch.setattr(mod.provider_observer, 'MAX_EVENTS_BYTES', 2048)
     code = '''import json
 print(json.dumps({'type':'result','is_error':True,'result':'backend exploded'}))
 for i in range(1000): print(json.dumps({'type':'telemetry','data':'x'*100}))
@@ -6968,7 +6934,7 @@ for i in range(1000): print(json.dumps({'type':'telemetry','data':'x'*100}))
 
 
 def test_explicit_route_fallback_policy_reaches_router(tmp_path, monkeypatch):
-    mod = importlib.import_module('skills.orchestrate.scripts.dispatch_run')
+    mod = importlib.import_module('skills.orchestrate.scripts.dispatch_preflight')
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv('AGENT_FABRIC_PRODUCT_ROOT', str(ROOT))
     monkeypatch.setenv('AGENT_FABRIC_INSTANCE_ROOT', str(ROOT))
@@ -6979,7 +6945,7 @@ def test_explicit_route_fallback_policy_reaches_router(tmp_path, monkeypatch):
 
 def test_oversized_plain_result_is_partial_and_not_certifiable(tmp_path, monkeypatch):
     mod = supervisor()
-    monkeypatch.setattr(mod, 'MAX_EVENTS_BYTES', 2048)
+    monkeypatch.setattr(mod.provider_observer, 'MAX_EVENTS_BYTES', 2048)
     plan = fixture_plan(tmp_path, "print('a' * 10000)", intent='assurance', orchestrator_family='anthropic')
     record = mod.execute(plan, tmp_path / 'result.md')
     assert record['status'] == 'partial'
@@ -6990,7 +6956,7 @@ def test_oversized_plain_result_is_partial_and_not_certifiable(tmp_path, monkeyp
 
 def test_oversized_split_result_cannot_certify_preliminary_text(tmp_path, monkeypatch):
     mod = supervisor()
-    monkeypatch.setattr(mod, 'MAX_EVENTS_BYTES', 2048)
+    monkeypatch.setattr(mod.provider_observer, 'MAX_EVENTS_BYTES', 2048)
     code = '''import json,sys,time
 print(json.dumps({'type':'assistant','message':{'content':'preliminary'}}), flush=True)
 result = json.dumps({'type':'result','result':'a'*100000})+'\\n'
@@ -7011,7 +6977,7 @@ def test_malformed_router_fallback_does_not_crash_finished_attempt():
 @pytest.mark.parametrize('rollover', [False, True])
 def test_successful_terminal_result_supersedes_transient_retry_error(tmp_path, monkeypatch, rollover):
     mod = supervisor()
-    monkeypatch.setattr(mod, 'MAX_EVENTS_BYTES', 2048 if rollover else 20*1024*1024)
+    monkeypatch.setattr(mod.provider_observer, 'MAX_EVENTS_BYTES', 2048 if rollover else 20*1024*1024)
     code = '''import json
 print(json.dumps({'type':'api_retry','error':'529 overloaded'}))
 for i in range(1000): print(json.dumps({'type':'telemetry','data':'x'*100}))
@@ -7024,7 +6990,7 @@ print(json.dumps({'type':'result','is_error':False,'result':'DONE'}))
 @pytest.mark.parametrize('rollover', [False, True])
 def test_retry_success_never_erases_a_separate_hard_failure(tmp_path, monkeypatch, rollover):
     mod = supervisor()
-    monkeypatch.setattr(mod, 'MAX_EVENTS_BYTES', 2048 if rollover else 20*1024*1024)
+    monkeypatch.setattr(mod.provider_observer, 'MAX_EVENTS_BYTES', 2048 if rollover else 20*1024*1024)
     code = '''import json
 print(json.dumps({'type':'error','error':'permission denied'}))
 print(json.dumps({'type':'api_retry','error':'529 overloaded'}))
@@ -7225,12 +7191,11 @@ def test_confined_writer_merges_protected_paths_and_fills_its_caches(monkeypatch
 def first_instruction_lane(tmp_path):
     """A lane cut before main adds the repository's first skill."""
     repo = tmp_path / "repo"
-    git(tmp_path, "init", "-q", "-b", "main", str(repo))
-    (repo / "app.txt").write_text("app\n")
+    git_repo(repo, branch="main", files={"app.txt": "app\n"}, commit=False)
     git(repo, "add", ".")
     git(repo, "commit", "-q", "-m", "initial")
     lane = repo / ".worktrees/lane"
-    git(repo, "worktree", "add", "-q", "-b", "lane", str(lane))
+    make_linked_worktree(repo, "lane", path=lane)
     (repo / SKILL).parent.mkdir(parents=True)
     (repo / SKILL).write_text("v1\n")
     git(repo, "add", ".")
@@ -7388,7 +7353,7 @@ def test_opencode_read_only_profile_reads_project_config_above_its_cwd(tmp_path)
 
 @pytest.mark.parametrize("mode", ["read_only", "worktree_write"])
 def test_opencode_discovery_grants_only_ancestor_directory_metadata(tmp_path, mode):
-    repo, cwd = linked_worktree(tmp_path)
+    repo, cwd = sandbox_profile_worktree(tmp_path)
     plan = {"adapter": "opencode", "mode": mode, "workspace_root": str(cwd), "cwd": str(cwd),
             "applied": {"confinement": "sandbox-exec", "add_dirs": []}}
     plan["protected_paths"] = [str(repo / name) for name in (".claude", ".codex")]
@@ -7413,7 +7378,7 @@ def test_opencode_discovery_lstats_denied_ancestor_without_reading_contents(tmp_
     sandbox_exec = mod._sandbox_exec_path()
     if not sandbox_exec:
         pytest.skip("sandbox-exec is unavailable or disabled")
-    repo, cwd = linked_worktree(tmp_path)
+    repo, cwd = sandbox_profile_worktree(tmp_path)
     plan = {"adapter": "opencode", "mode": mode, "workspace_root": str(cwd), "cwd": str(cwd),
             "applied": {"confinement": "sandbox-exec", "add_dirs": []}}
     protected = [repo / name for name in (".claude", ".codex")]
@@ -8224,8 +8189,8 @@ def test_explicit_model_runs_despite_a_cooldown_with_a_warning(tmp_path):
 
 
 def test_opencode_v2_structured_error_log_lines_are_fatal_and_info_is_not():
-    fatal = supervisor().OPENCODE_FATAL_LOG
-    quiet = supervisor().OPENCODE_QUIET_LOG
+    fatal = supervisor().provider_observer.OPENCODE_FATAL_LOG
+    quiet = supervisor().provider_observer.OPENCODE_QUIET_LOG
     assert re.search(fatal, "timestamp=2026-10-16T07:38:10.410Z level=ERROR run=ab message=boom", re.I | re.M)
     assert not re.search(fatal, 'timestamp=2026-10-16T07:38:10.410Z level=INFO run=ab message="cli starting"', re.I | re.M)
     assert re.match(quiet, "timestamp=x level=WARN message=y")
@@ -8863,9 +8828,8 @@ def test_claude_account_binds_environment_sandbox_and_receipt(tmp_path, monkeypa
     mod = supervisor()
     home = tmp_path / 'home'
     home.mkdir()
-    monkeypatch.setenv('HOME', str(home))
-    monkeypatch.setenv('AGENT_FABRIC_INSTANCE_ROOT', str(home / '.agents'))
-    monkeypatch.setenv('AGENT_FABRIC_STATE_ROOT', str(tmp_path / 'state'))
+    provider_home(monkeypatch, tmp_path, home=home, instance_root=home / '.agents',
+                  state_root=tmp_path / 'state')
     monkeypatch.delenv('CLAUDE_CONFIG_DIR', raising=False)
     config = home / '.agents/config/telemetry.json'
     config.parent.mkdir(parents=True)
@@ -8915,9 +8879,8 @@ def test_claude_account_binds_environment_sandbox_and_receipt(tmp_path, monkeypa
 def test_claude_ambient_account_preserves_inherited_config_environment(tmp_path, monkeypatch, inherited):
     home = tmp_path / 'home'
     home.mkdir()
-    monkeypatch.setenv('HOME', str(home))
-    monkeypatch.setenv('AGENT_FABRIC_INSTANCE_ROOT', str(home / '.agents'))
-    monkeypatch.setenv('AGENT_FABRIC_STATE_ROOT', str(tmp_path / 'state'))
+    provider_home(monkeypatch, tmp_path, home=home, instance_root=home / '.agents',
+                  state_root=tmp_path / 'state')
     if inherited is None:
         monkeypatch.delenv('CLAUDE_CONFIG_DIR', raising=False)
     else:
@@ -8935,9 +8898,8 @@ def test_claude_ambient_account_preserves_inherited_config_environment(tmp_path,
 def test_claude_malformed_accounts_warn_and_launch_ambient_identity(tmp_path, monkeypatch, accounts, inherited):
     home = tmp_path / 'home'
     home.mkdir()
-    monkeypatch.setenv('HOME', str(home))
-    monkeypatch.setenv('AGENT_FABRIC_INSTANCE_ROOT', str(home / '.agents'))
-    monkeypatch.setenv('AGENT_FABRIC_STATE_ROOT', str(tmp_path / 'state'))
+    provider_home(monkeypatch, tmp_path, home=home, instance_root=home / '.agents',
+                  state_root=tmp_path / 'state')
     if inherited:
         monkeypatch.setenv('CLAUDE_CONFIG_DIR', str(home / '.claude-work'))
     else:
@@ -8959,9 +8921,8 @@ def test_claude_malformed_accounts_warn_and_launch_ambient_identity(tmp_path, mo
 def test_claude_malformed_accounts_refuse_an_explicit_account(tmp_path, monkeypatch, accounts, account):
     home = tmp_path / 'home'
     home.mkdir()
-    monkeypatch.setenv('HOME', str(home))
-    monkeypatch.setenv('AGENT_FABRIC_INSTANCE_ROOT', str(home / '.agents'))
-    monkeypatch.setenv('AGENT_FABRIC_STATE_ROOT', str(tmp_path / 'state'))
+    provider_home(monkeypatch, tmp_path, home=home, instance_root=home / '.agents',
+                  state_root=tmp_path / 'state')
     config = home / '.agents/config/telemetry.json'
     config.parent.mkdir(parents=True)
     config.write_text(json.dumps({'accounts': accounts}))
@@ -8988,9 +8949,8 @@ def test_claude_config_read_grants_follow_selected_identity(tmp_path, monkeypatc
 def test_claude_all_exhausted_refuses_plan_before_launch(tmp_path, monkeypatch):
     home = tmp_path / 'home'
     home.mkdir()
-    monkeypatch.setenv('HOME', str(home))
-    monkeypatch.setenv('AGENT_FABRIC_INSTANCE_ROOT', str(home / '.agents'))
-    monkeypatch.setenv('AGENT_FABRIC_STATE_ROOT', str(tmp_path / 'state'))
+    provider_home(monkeypatch, tmp_path, home=home, instance_root=home / '.agents',
+                  state_root=tmp_path / 'state')
     monkeypatch.delenv('CLAUDE_CONFIG_DIR', raising=False)
     config = home / '.agents/config/telemetry.json'
     config.parent.mkdir(parents=True)
@@ -9011,9 +8971,8 @@ def test_claude_all_exhausted_refuses_plan_before_launch(tmp_path, monkeypatch):
 def test_claude_switch_from_custom_ambient_to_default_unsets_config_dir(tmp_path, monkeypatch):
     home = tmp_path / 'home'
     home.mkdir()
-    monkeypatch.setenv('HOME', str(home))
-    monkeypatch.setenv('AGENT_FABRIC_INSTANCE_ROOT', str(home / '.agents'))
-    monkeypatch.setenv('AGENT_FABRIC_STATE_ROOT', str(tmp_path / 'state'))
+    provider_home(monkeypatch, tmp_path, home=home, instance_root=home / '.agents',
+                  state_root=tmp_path / 'state')
     monkeypatch.setenv('CLAUDE_CONFIG_DIR', str(home / '.claude-work'))
     config = home / '.agents/config/telemetry.json'
     config.parent.mkdir(parents=True)

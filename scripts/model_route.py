@@ -90,6 +90,8 @@ _catalog_validation = _sibling("model_route_catalog")
 _preferences = _sibling("model_route_preferences")
 _pools = _sibling("model_route_pools")
 model_route_probe = _sibling("model_route_probe")
+model_route_live = _sibling("model_route_live")
+model_route_live.model_route_probe = model_route_probe
 
 EFFORT_ORDER = _catalog_validation.EFFORT_ORDER
 # The effort ladder `effort.shift` steps along. `ultra` is opt-in only, so a shift never reaches it.
@@ -251,6 +253,9 @@ def looks_free(adapter: dict[str, Any], model: str) -> bool:
             or model.startswith("opencode/"))
 
 
+model_route_live.looks_free = looks_free
+
+
 def _apply_free_pattern(adapter: dict[str, Any]) -> None:
     """Free models are listed by id alone; the pattern supplies the cap and a default
     training flag; the warning follows the resolved flag, so an explicit `false` (zero-retention) wins."""
@@ -409,394 +414,6 @@ def registered_model_ids(adapter: dict[str, Any]) -> list[str]:
     return ids
 
 
-def _key(text: str) -> str:
-    """Case- and punctuation-blind comparison key: GPT_SOL, gpt-sol and s_o_l agree with gptsol and sol."""
-    return re.sub(r"[^a-z0-9]", "", text.casefold())
-
-
-def _family_parts(model_id: str) -> list[str]:
-    parts = [part for part in re.split(r"[-_\s]+", model_id.casefold()) if part and not re.fullmatch(r"v?\d+(?:\.\d+)*", part)]
-    return parts or [""]
-
-
-def _family_key(model_id: str) -> str:
-    """The id with its version tokens removed: gpt-6.1-sol -> gptsol, claude-sonnet-5-5 -> claudesonnet."""
-    return _key("".join(_family_parts(model_id)))
-
-
-def _version(model_id: str) -> tuple[int, ...]:
-    return tuple(int(part) for part in re.findall(r"\d+", model_id))
-
-
-def _cached_live_models(adapter: str) -> list[str]:
-    """Model ids from the fresh (under a day old) capabilities cache; never probes."""
-    try:
-        probed = json.loads((model_route_probe._state_root() / "capabilities.json").read_text()).get(adapter, {})
-        observed = datetime.fromisoformat(str(probed["observed_at"]).replace("Z", "+00:00"))
-        if (datetime.now(timezone.utc) - observed).total_seconds() > 86400:
-            return []
-        return [item for item in probed.get("models", []) if isinstance(item, str)]
-    except (OSError, ValueError, KeyError, TypeError, AttributeError):
-        return []
-
-
-_NEWER_NOTE = "{} is newer than the catalogue; run provenant refresh-routing or add it to config/model-routing.json"
-
-
-def _live_entry(base: dict[str, Any], model: str) -> dict[str, Any]:
-    """A live model the catalogue lacks: it inherits its family's newest entry, so every gate and trait still applies."""
-    return {**base, "id": model, "names": [], "default": False, "inherits": [base["id"], *base.get("names", [])]}
-
-
-def _live_base(adapter: str, model: str, catalog: dict[str, Any]) -> str:
-    """A live id without the effort suffix the catalogue defines for the adapter (gemini-3.9-flash-high -> gemini-3.9-flash)."""
-    suffixes = sorted({value for entry in catalog["adapters"][adapter].get("models", [])
-                       if entry.get("effort_transport") == "model-suffix" for value in entry.get("suffix", {}).values()},
-                      key=len, reverse=True)
-    return next((model[:-len(suffix)] for suffix in suffixes if suffix and model.casefold().endswith(suffix.casefold())), model)
-
-
-def suffix_effort(adapter: str, requested: str, catalog: dict[str, Any]) -> str:
-    """The effort an id's catalogue-defined suffix names (gemini-3.9-flash-low -> low), or ''."""
-    tail = requested[len(_live_base(adapter, requested, catalog)):].casefold()
-    levels = {level: value.casefold() for entry in catalog["adapters"][adapter].get("models", [])
-              if entry.get("effort_transport") == "model-suffix" for level, value in entry.get("suffix", {}).items()}
-    return next((level for level, value in levels.items() if tail and value == tail), "")
-
-
-def _latest_in_family(adapter: str, requested: str, catalog: dict[str, Any]) -> tuple[dict[str, Any] | None, list[str]]:
-    """Resolve a version-free name to the newest model of its family, catalogue or fresh live listing."""
-    entries = catalog["adapters"][adapter].get("models", [])
-    token = _key(requested)
-    if not token or re.search(r"\d", requested):
-        return None, []
-    named = [entry for entry in entries if token in (_key(name) for name in entry.get("names", []))]
-    pool = named or [entry for entry in entries if token in (_family_key(entry["id"]), _key(_family_parts(entry["id"])[-1]))]
-    keys = {_family_key(entry["id"]) for entry in pool}
-    if len(keys) != 1:
-        return None, []
-    key = keys.pop()
-    best = max((entry for entry in entries if _family_key(entry["id"]) == key), key=lambda item: _version(item["id"]))
-    live = [base for base in (_live_base(adapter, model, catalog) for model in _cached_live_models(adapter))
-            if _family_key(base) == key and _version(base) > _version(best["id"])]
-    if not live:
-        return best, []
-    newest = max(live, key=_version)
-    return _live_entry(best, newest), [_NEWER_NOTE.format(newest)]
-
-
-def _live_id(adapter: str, requested: str, catalog: dict[str, Any]) -> tuple[dict[str, Any] | None, list[str]]:
-    """An explicit id the catalogue lacks but the fresh live listing has: it inherits its family's catalogue entry."""
-    entries = catalog["adapters"][adapter].get("models", [])
-    base = _live_base(adapter, requested, catalog)
-    if any(entry["id"].casefold() == base.casefold() for entry in entries):
-        return None, []  # Registered already, so not newer than the catalogue.
-    live = base if any(_live_base(adapter, model, catalog).casefold() == base.casefold()
-                       for model in _cached_live_models(adapter)) else None
-    family = [entry for entry in entries if live and _family_key(entry["id"]) == _family_key(live)]
-    if not family:
-        return None, []
-    return _live_entry(max(family, key=lambda item: _version(item["id"])), live), [_NEWER_NOTE.format(live)]
-
-
-def _registered_match(adapter: str, requested: str, catalog: dict[str, Any]) -> tuple[dict[str, Any] | None, list[str]]:
-    entries = catalog["adapters"][adapter].get("models", [])
-    token = requested.casefold()
-    exact = [entry for entry in entries if entry["id"].casefold() == token]
-    named = [entry for entry in entries if token in (name.casefold() for name in entry.get("names", []))]
-    variant = [entry for entry in entries if entry.get("effort_transport") == "model-suffix" and
-               any(token == (entry["id"] + suffix).casefold() for suffix in entry.get("suffix", {}).values())]
-    retired = []
-    if not exact and not named and not variant:
-        version_match = re.fullmatch(r"gpt-(\d+(?:\.\d+)*)-(.+)", token)
-        if adapter == "codex" and version_match:
-            requested_version = tuple(int(part) for part in version_match.group(1).split("."))
-            for entry in entries:
-                registered = re.fullmatch(r"gpt-(\d+(?:\.\d+)*)-(.+)", entry["id"].casefold())
-                if (registered and registered.group(2) == version_match.group(2)
-                        and requested_version < tuple(int(part) for part in registered.group(1).split("."))):
-                    retired.append(entry)
-    if not exact and not variant and catalog["adapters"][adapter].get("latest_aliases") is True:
-        latest, latest_notes = _latest_in_family(adapter, requested, catalog)
-        if latest is not None:
-            if len(named) > 1:
-                latest_notes.insert(0, f"{requested} is ambiguous; used {latest['id']} "
-                                       f"(alternatives: {', '.join(item['id'] for item in named)})")
-            return latest, latest_notes
-    matches = exact or named or variant or retired
-    if not matches:
-        return _live_id(adapter, requested, catalog) if catalog["adapters"][adapter].get("latest_aliases") is True else (None, [])
-    chosen = next((item for item in matches if item.get("default")), None)
-    if chosen is None:
-        chosen = max(matches, key=lambda item: tuple(int(part) for part in re.findall(r"\d+", item["id"])))
-    notes = []
-    if len(matches) > 1:
-        notes.append(f"{requested} is ambiguous; used {chosen['id']} (alternatives: {', '.join(item['id'] for item in matches)})")
-    if retired:
-        notes.append(f"{requested} is retired; routed to {chosen['id']}")
-    return chosen, notes
-
-
-def training_flag(adapter: dict[str, Any], registered: dict[str, Any] | None, model: str = "") -> bool | None:
-    """The model's own flag, else the adapter's; an adapter-wide `false` never clears a free model,
-    whose terms only its own entry can vouch for."""
-    own = (registered or {}).get("trains_on_prompts")
-    if type(own) is bool:
-        return own
-    value = adapter.get("trains_on_prompts")
-    if value is False and model and looks_free(adapter, model):
-        return None
-    return value if type(value) is bool else None
-
-
-def _no_effort_control(entry: dict[str, Any] | None) -> bool:
-    """A registered model without an effort list takes none, whatever its adapter's transport."""
-    return isinstance(entry, dict) and (entry.get("effort_transport") == "none" or not entry.get("efforts"))
-
-
-def _effort_ignored(effort: str, model: str) -> str:
-    return f"effort {effort} ignored: {model} has no effort control"
-
-
-def _owner_adapter(requested: str, catalog: dict[str, Any]) -> str:
-    token = requested.casefold()
-    if token.startswith(("opencode/", "opencode-go/", "openrouter/")):
-        return "opencode"
-    for adapter in ("codex", "claude", "agy", "cursor", "opencode"):
-        if adapter in catalog["adapters"] and _registered_match(adapter, requested, catalog)[0]:
-            return adapter
-    if token.startswith(("gpt-", "o1", "o3", "o4")):
-        return "codex"
-    if token.startswith("claude-"):
-        return "claude"
-    if token.startswith("gemini-"):
-        return "agy"
-    if token.startswith(("grok-", "cursor-", "composer-")):
-        return "cursor"
-    return "opencode"
-
-
-def _canonical_model(adapter: str, model: str, catalog: dict[str, Any]) -> str:
-    if model == "*":
-        return model
-    if adapter not in catalog.get("adapters", {}):
-        return model
-    match, _ = _registered_match(adapter, model, catalog)
-    return match["id"] if match else model
-
-
-_QUOTA_PATH = Path(__file__).resolve().parent / "provider_quota.py"
-_quota: Any = None
-
-
-def _provider_quota() -> Any:
-    """The provider quota module, loaded once; None when it cannot load, so routing never fails on it."""
-    global _quota
-    if _quota is None:
-        try:
-            spec = importlib.util.spec_from_file_location("provenant_provider_quota", _QUOTA_PATH)
-            module = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(module)
-            _quota = module
-        except Exception:  # noqa: BLE001 - quota is advisory input to routing
-            _quota = False
-    return _quota or None
-
-
-def _with_quota(records: dict[str, Any]) -> dict[str, Any]:
-    """Cool exhausted providers until reset and drop usage cooldowns a newer quota reading contradicts."""
-    quota = _provider_quota()
-    try:
-        return quota.apply_to_cooldowns(records) if quota else records
-    except Exception:  # noqa: BLE001 - quota is advisory input to routing
-        return records
-
-
-def _quota_states() -> dict[str, Any]:
-    """Cached pace state per route adapter, for `provenant routes`; never fetches."""
-    quota = _provider_quota()
-    try:
-        states = quota.route_states() if quota else {}
-    except Exception:  # noqa: BLE001 - quota is advisory input to routing
-        return {}
-    return {state["adapter"]: state for state in states.values() if state.get("adapter")}
-
-
-def _cooldowns(catalog: dict[str, Any]) -> dict[str, Any]:
-    records = _fabric_records().read_cooldowns()
-    records = _with_quota(records)
-    normalised: dict[str, Any] = {}
-    for key, record in records.items():
-        if not isinstance(key, str) or "/" not in key:
-            continue
-        adapter, model = key.split("/", 1)
-        canonical = f"{adapter}/{_canonical_model(adapter, model, catalog)}"
-        if not isinstance(record, dict):
-            continue
-        previous = normalised.get(canonical)
-        if not isinstance(previous, dict) or str(record.get("cooling_until", "")) > str(previous.get("cooling_until", "")):
-            normalised[canonical] = record
-    return normalised
-
-
-def _recent_failed_task_class_models(adapter: str, task_class: str) -> set[str]:
-    path = model_route_probe._state_root() / "route-health.json"
-    try:
-        document = json.loads(path.read_text())
-        routes = document.get("routes", {}) if document.get("schema") == "fabric.route-health.v1" else {}
-        now = datetime.now(timezone.utc)
-        failed = set()
-        for record in routes.values():
-            if not isinstance(record, dict) or record.get("adapter") != adapter or record.get("task_class") != task_class:
-                continue
-            recent = record.get("recent", [])
-            if not isinstance(recent, list) or not recent:
-                continue
-            latest = recent[0]
-            if not isinstance(latest, dict):
-                continue
-            observed = datetime.fromisoformat(str(latest.get("at", "")).replace("Z", "+00:00"))
-            age = (now - observed).total_seconds()
-            if (0 <= age <= 7 * 86400
-                    and latest.get("status") in {"failed", "empty_output"}):
-                model = record.get("model")
-                if isinstance(model, str):
-                    failed.add(model)
-        return failed
-    except (OSError, ValueError, TypeError, AttributeError):
-        return set()
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-def _cooling(adapter: str, model: str, cooldowns: dict[str, Any], catalog: dict[str, Any]) -> str:
-    canonical = _canonical_model(adapter, model, catalog)
-    for key in (f"{adapter}/{canonical}", f"{adapter}/*"):
-        item = cooldowns.get(key)
-        if not isinstance(item, dict):
-            continue
-        until = item.get("cooling_until")
-        covers = item.get("covers")
-        # A plan's quota cooldown covers only the models billed to that plan.
-        if covers and not any(canonical.startswith(prefix) for prefix in covers):
-            continue
-        try:
-            if datetime.fromisoformat(str(until).replace("Z", "+00:00")) > datetime.now(timezone.utc):
-                return str(until)
-        except (ValueError, TypeError):
-            pass
-    return ""
-
-
-def _fallback_candidates(
-    adapter_name: str, tier: str, model: str, catalog: dict[str, Any],
-    cooldowns: dict[str, Any], fallback: str | None = None,
-    requested_routes: list[str] | None = None, explicit: bool = False,
-) -> list[dict[str, Any]]:
-    adapter = catalog["adapters"][adapter_name]
-    tiers = adapter.get("aliases", {})
-    if not tiers and adapter.get("fixed_model_family"):
-        tiers = catalog.get("families", {}).get(adapter["fixed_model_family"], {}).get("aliases", {})
-    own = tiers.get(tier, [])
-    if fallback == "false" or (explicit and fallback is None and not requested_routes):
-        return []
-    current = _canonical_model(adapter_name, model, catalog)
-    candidates = [(adapter_name, candidate) for candidate in own]
-    if adapter_name != "opencode":
-        # OpenCode has no principal tier, so a principal route falls back to its senior list.
-        opencode_tiers = catalog["adapters"].get("opencode", {}).get("aliases", {})
-        candidates += [("opencode", candidate) for candidate in
-                       opencode_tiers.get(tier) or opencode_tiers.get("senior", [])]
-    if fallback == "any":
-        candidates += [("opencode", item["id"]) for item in
-                       catalog["adapters"].get("opencode", {}).get("models", [])]
-    for route in requested_routes or []:
-        candidate_adapter = next((name for name in catalog["adapters"] if route.startswith(name + "/")), adapter_name)
-        candidate = route[len(candidate_adapter) + 1:] if route.startswith(candidate_adapter + "/") else route
-        candidates.append((candidate_adapter, candidate))
-    results = []
-    seen = {(adapter_name, current)}
-    for candidate_adapter, candidate in candidates:
-        canonical = _canonical_model(candidate_adapter, candidate, catalog)
-        if (candidate_adapter, canonical) in seen:
-            continue
-        seen.add((candidate_adapter, canonical))
-        entry, _ = _registered_match(candidate_adapter, candidate, catalog)
-        opt_in = fallback == "any" or f"{candidate_adapter}/{candidate}" in (requested_routes or []) or candidate in (requested_routes or [])
-        flag = training_flag(catalog["adapters"].get(candidate_adapter, {}), entry)
-        # Implicit fallbacks are paid or explicitly non-training (zero-retention free tiers).
-        if (entry and (opt_in or flag is False or (entry.get("plan_cap_usd", 1) > 0 and flag is not True))
-                and not _cooling(candidate_adapter, canonical, cooldowns, catalog)):
-            results.append({"adapter": candidate_adapter, "model": canonical,
-                            "plan_cap_usd": entry.get("plan_cap_usd"),
-                            "trains_on_prompts": flag})
-    return results
-
-
-# Discovery shares one budget that fits inside dispatch preflight's 15 s routing timeout.
-OPENCODE_DISCOVERY_BUDGET = 12.0
-OPENCODE_REFRESH_MIN_REMAINING = 4.0
-
-
-def _opencode_live_models(refresh: bool = False, deadline: float | None = None) -> tuple[list[str], bool]:
-    """Ids from the cached `opencode models` probe and whether the cache answered.
-
-    An unavailable probe or an empty listing means unknown, so the list is empty (and the cache
-    keeps such a record for an hour only).
-    """
-    if deadline is None:
-        deadline = time.monotonic() + OPENCODE_DISCOVERY_BUDGET
-    if refresh and deadline - time.monotonic() < OPENCODE_REFRESH_MIN_REMAINING:
-        return [], False
-    try:
-        record, _ = model_route_probe.probe_capabilities("opencode", "opencode", deadline, listing_only=True,
-                                       refresh=refresh)
-    except Exception:  # noqa: BLE001 - discovery must never break routing
-        return [], False
-    if not isinstance(record, dict) or record.get("status") == "probe_unavailable":
-        return [], False
-    models = record.get("models")
-    found = [item for item in models if isinstance(item, str)] if isinstance(models, list) else []
-    return found, bool(record.get("cache_hit"))
-
-
-def _resolve_opencode_name(requested: str, live: list[str]) -> tuple[str | None, list[str], dict[str, Any] | None]:
-    """Resolve a bare uncatalogued name (`kimi`, `qwen3.8-flash`) against the live listing.
-
-    Returns (model, notes, refusal). An exact name after the provider prefix wins; a unique
-    name-prefix match is allowed with a note; several matches or none are typed refusals.
-    """
-    token = requested.casefold()
-    if not live or "/" in requested or "#" in requested or not token:
-        return None, [], None
-    tails = [(item, item.split("/", 1)[-1].casefold()) for item in live]
-    exact = [item for item, tail in tails if tail == token]
-    near = exact or [item for item, tail in tails if tail.startswith(token)]
-    if len(near) == 1:
-        how = "" if exact else " (unique prefix match)"
-        return near[0], [f"{requested} resolved to {near[0]} from the live opencode listing{how}"], None
-    if near:
-        return None, [], {"status": "model_ambiguous", "candidates": near[:12],
-                          "message": f"{requested} matches several opencode models: {', '.join(near[:12])}; "
-                                     "fix: pass the full provider/model id"}
-    closest = difflib.get_close_matches(token, [tail for _, tail in tails], n=3)
-    names = [item for item, tail in tails if tail in closest]
-    hint = f" Closest: {', '.join(names)}." if names else ""
-    return None, [], {"status": "model_not_found", "candidates": names,
-                      "message": f"{requested} is not an opencode model.{hint} "
-                                 "fix: run `opencode models` and pass a full provider/model id"}
-
-
 _EFFORT_LIST_KEYS = {"efforts", "effort_fallback_order", "supported_efforts"}
 
 
@@ -818,7 +435,7 @@ def _max_retired(subject: str = "effort") -> dict[str, Any]:
 
 def resolve_ordinary(args: argparse.Namespace, catalog: dict[str, Any]) -> int:
     requested = args.model or (args.alias if args.alias not in ALIAS_ORDER else "")
-    adapter_name = args.adapter or (_owner_adapter(requested, catalog) if requested else "codex")
+    adapter_name = args.adapter or (model_route_live._owner_adapter(requested, catalog) if requested else "codex")
     adapter = catalog.get("adapters", {}).get(adapter_name)
     if not isinstance(adapter, dict):
         return emit({"schema_version": 1, "status": "unknown_adapter", "adapter": adapter_name,
@@ -862,30 +479,30 @@ def resolve_ordinary(args: argparse.Namespace, catalog: dict[str, Any]) -> int:
             args.explicit_variant = True
         elif variant:
             notes.append(f"#{variant} in the model id ignored: explicit effort {args.effort} wins")
-    registered, match_notes = _registered_match(adapter_name, requested, catalog)
+    registered, match_notes = model_route_live._registered_match(adapter_name, requested, catalog)
     notes.extend(match_notes)
     live_models: list[str] = []
     live_resolved = False
     if adapter_name == "opencode" and registered is None and requested.casefold() != "auto":
-        discovery_deadline = time.monotonic() + OPENCODE_DISCOVERY_BUDGET
-        live_models, from_cache = _opencode_live_models(deadline=discovery_deadline)
+        discovery_deadline = time.monotonic() + model_route_live.OPENCODE_DISCOVERY_BUDGET
+        live_models, from_cache = model_route_live._opencode_live_models(deadline=discovery_deadline)
         if not live_models and "/" not in requested:
             notes.append("the live opencode model listing is unavailable, so the name was not checked; "
                          "run `opencode models` and pass a full provider/model id if the model is rejected")
-        resolved_name, name_notes, refusal = _resolve_opencode_name(requested, live_models)
+        resolved_name, name_notes, refusal = model_route_live._resolve_opencode_name(requested, live_models)
         if refusal and refusal["status"] == "model_not_found" and from_cache:
             # A cached listing can predate the model; look once without the cache.
-            fresh, _ = _opencode_live_models(refresh=True, deadline=discovery_deadline)
+            fresh, _ = model_route_live._opencode_live_models(refresh=True, deadline=discovery_deadline)
             if fresh:  # a skipped or failed refresh keeps the cached listing
                 live_models = fresh
-            resolved_name, name_notes, refusal = _resolve_opencode_name(requested, live_models)
+            resolved_name, name_notes, refusal = model_route_live._resolve_opencode_name(requested, live_models)
         if refusal:
             return emit({"schema_version": 1, "adapter": adapter_name, **refusal}, 2)
         if resolved_name:
             requested = resolved_name
             live_resolved = True
             notes.extend(name_notes)
-            registered, match_notes = _registered_match(adapter_name, requested, catalog)
+            registered, match_notes = model_route_live._registered_match(adapter_name, requested, catalog)
             notes.extend(match_notes)
     model = registered["id"] if registered else requested
     aliases = adapter.get("aliases", {})
@@ -919,18 +536,18 @@ def resolve_ordinary(args: argparse.Namespace, catalog: dict[str, Any]) -> int:
           and not any(requested.casefold() == (model + suffix).casefold()
                       for suffix in registered.get("suffix", {}).values())):
         notes.append(f"{requested} routed to {model}")
-    cooldowns = _cooldowns(catalog)
-    until = _cooling(adapter_name, model, cooldowns, catalog)
+    cooldowns = model_route_live._cooldowns(catalog)
+    until = model_route_live._cooling(adapter_name, model, cooldowns, catalog)
     if until and explicit:
         warnings.append(f"{model} is cooling until {until}; explicit route continued")
     elif until:
         alternatives = aliases.get(tier, [])
         for alternative in alternatives:
-            if (_canonical_model(adapter_name, alternative, catalog) != _canonical_model(adapter_name, model, catalog)
-                    and not _cooling(adapter_name, alternative, cooldowns, catalog)):
+            if (model_route_live._canonical_model(adapter_name, alternative, catalog) != model_route_live._canonical_model(adapter_name, model, catalog)
+                    and not model_route_live._cooling(adapter_name, alternative, cooldowns, catalog)):
                 notes.append(f"{model} cooling until {until}; used {alternative}")
                 model = alternative
-                registered, _ = _registered_match(adapter_name, model, catalog)
+                registered, _ = model_route_live._registered_match(adapter_name, model, catalog)
                 break
         else:
             notes.append(f"{model} cooling until {until}; no available alternative in {tier} alias")
@@ -962,11 +579,11 @@ def resolve_ordinary(args: argparse.Namespace, catalog: dict[str, Any]) -> int:
         notes.append(f"{effort} sent as variant #{effort} to {model}; OpenCode rejects variants the model lacks")
     elif requested_effort:
         # Nothing reaches the provider, so nothing is claimed: applied stays empty.
-        notes.append(_effort_ignored(requested_effort, model)
+        notes.append(model_route_live._effort_ignored(requested_effort, model)
                      + ("; to force a variant pass model#variant" if adapter_name == "opencode" else ""))
     if registered and registered.get("effort_transport") == "model-suffix" and effort != "default":
         model += registered.get("suffix", {}).get(effort, "")
-    training_model = training_flag(adapter, registered)
+    training_model = model_route_live.training_flag(adapter, registered)
     warning = (registered or {}).get("warning")
     if warning:
         warnings.append(warning)
@@ -982,10 +599,10 @@ def resolve_ordinary(args: argparse.Namespace, catalog: dict[str, Any]) -> int:
             notes.append(f"{model} family unknown; treated as generic-open")
     fixed = adapter.get("fixed_model_family")
     if fixed and family != fixed:
-        owner = _owner_adapter(model, catalog)
+        owner = model_route_live._owner_adapter(model, catalog)
         warnings.append(f"{model} is {family} on the {fixed} {adapter_name} adapter; fix: use adapter {owner}")
     provider = model.split("/", 1)[0] if "/" in model else adapter.get("endpoint_provider", adapter_name)
-    fallback = _fallback_candidates(adapter_name, tier, model, catalog, cooldowns,
+    fallback = model_route_live._fallback_candidates(adapter_name, tier, model, catalog, cooldowns,
                                     args.fallback, args.fallback_route, explicit)
     return emit({"schema_version": 1, "status": "ok", "adapter": adapter_name,
                  "alias": "" if args.model and not getattr(args, "alias_supplied", True) else args.alias or "",
@@ -1195,9 +812,9 @@ def resolve_effort(
     elif args.capability_models and model.lower() not in args.capability_models:
         return None, "", "capability_model_unavailable", "runtime-model-catalog"
     # A model with no effort control is sent none: warn, don't block.
-    if (args.effort_transport != "none" and _no_effort_control(registered)
+    if (args.effort_transport != "none" and model_route_live._no_effort_control(registered)
             and not getattr(args, "explicit_variant", False)):
-        return "", _effort_ignored(requested_effort, model), "", "registry-no-effort-control"
+        return "", model_route_live._effort_ignored(requested_effort, model), "", "registry-no-effort-control"
 
     ultra_eligible = (
         openai_codex
@@ -1253,7 +870,7 @@ def resolve_effort(
         return derived, substitution, "", "model-id" if derived else "model-id-unresolved"
     if args.effort_transport == "none":
         if args.effort:
-            return "", _effort_ignored(requested_effort, model), "", "adapter-no-effort-control"
+            return "", model_route_live._effort_ignored(requested_effort, model), "", "adapter-no-effort-control"
         return "", "adapter does not expose effort control", "", "adapter-no-effort-control"
 
     capability_models = args.capability_models
@@ -1686,13 +1303,13 @@ def resolve(args: argparse.Namespace, catalog: dict[str, Any]) -> int:
     route_warnings: list[str] = []
     if args.model and args.alias and getattr(args, "alias_supplied", True):
         route_notes.append("alias and model both supplied; model won")
-    cooldowns = _cooldowns(catalog)
-    cooling_until = _cooling(args.adapter, model, cooldowns, catalog)
+    cooldowns = model_route_live._cooldowns(catalog)
+    cooling_until = model_route_live._cooling(args.adapter, model, cooldowns, catalog)
     if cooling_until and args.model:
         route_warnings.append(f"{model} is cooling until {cooling_until}; explicit route continued")
     elif cooling_until and not args.model:
         for candidate in candidates[1:] if isinstance(candidates, list) else []:
-            if (not _cooling(args.adapter, candidate, cooldowns, catalog)
+            if (not model_route_live._cooling(args.adapter, candidate, cooldowns, catalog)
                     and (not capability_models or candidate.casefold() in capability_models)):
                 route_notes.append(f"{model} cooling until {cooling_until}; used {candidate}")
                 model = candidate
@@ -1808,7 +1425,7 @@ def resolve(args: argparse.Namespace, catalog: dict[str, Any]) -> int:
             1,
         )
 
-    registered_model, _ = _registered_match(args.adapter, model, catalog)
+    registered_model, _ = model_route_live._registered_match(args.adapter, model, catalog)
     probed = capability_models.get(model.casefold(), {})
     supported = probed.get("supported_efforts") or (registered_model or {}).get("efforts", [])
     effort, effort_substitution, effort_status, capability_source = resolve_effort(
@@ -1905,14 +1522,14 @@ def resolve(args: argparse.Namespace, catalog: dict[str, Any]) -> int:
         "distinct_from_lead": distinct,
         "notes": route_notes,
         "warnings": route_warnings,
-        "fallback_candidates": _fallback_candidates(
+        "fallback_candidates": model_route_live._fallback_candidates(
             args.adapter, args.alias, model, catalog, cooldowns,
             args.fallback, args.fallback_route, bool(args.model) or bool(args.alias and args.alias not in ALIAS_ORDER),
         ),
-        "trains_on_prompts": training_flag(adapter, registered_model, model),
+        "trains_on_prompts": model_route_live.training_flag(adapter, registered_model, model),
     }
     if args.task_class in {"review", "critical-review", "second-opinion"}:
-        failed_models = _recent_failed_task_class_models(args.adapter, args.task_class)
+        failed_models = model_route_live._recent_failed_task_class_models(args.adapter, args.task_class)
         alternate = next((candidate for candidate in args.task_class_configured_models
                           if candidate != model and candidate not in failed_models), None)
         record["fallback_candidates"] = (
@@ -1955,69 +1572,6 @@ def resolve(args: argparse.Namespace, catalog: dict[str, Any]) -> int:
     return emit_route(record, 0)
 
 
-def parser() -> argparse.ArgumentParser:
-    root = argparse.ArgumentParser(description=__doc__)
-    commands = root.add_subparsers(dest="command", required=True)
-    command = commands.add_parser("resolve")
-    command.add_argument("--adapter")
-    command.add_argument("--alias")
-    command.add_argument("--task-class")
-    command.add_argument("--model-override-tier", choices=("routine", "substantial", "crucial", "terminal"))
-    command.add_argument("--role", required=True)
-    command.add_argument("--effort")
-    command.add_argument("--model")
-    command.add_argument("--fallback", choices=("true", "false", "any"))
-    command.add_argument("--fallback-route", action="append", default=[])
-    command.add_argument("--available-model", action="append", default=[])
-    command.add_argument("--available-effort", action="append", default=[])
-    command.add_argument("--capabilities-file")
-    command.add_argument("--lead-family")
-    command.add_argument("--endpoint")
-    command.add_argument("--require-distinct", action="store_true")
-    command.add_argument(
-        "--catalog",
-        default=None,
-        help=argparse.SUPPRESS,
-    )
-    command.add_argument(
-        "--adapter-compatibility",
-        default=str(COMPATIBILITY_PATH),
-        help=argparse.SUPPRESS,
-    )
-    snapshot = commands.add_parser("snapshot")
-    snapshot.add_argument("--json", action="store_true")
-    health = commands.add_parser("health")
-    health.add_argument("--json", action="store_true")
-    probe = commands.add_parser("probe")
-    probe.add_argument("--adapter", required=True)
-    probe.add_argument("--executable", required=True)
-    probe.add_argument("--json", action="store_true")
-    probe.add_argument("--listing-only", action="store_true",
-                       help="list models only, within a 30-second deadline (discovery)")
-    _preferences.add_selection_parser(
-        commands, INSTANCE_ROOT / "config" / "model-preferences.json",
-    )
-    routes = commands.add_parser(
-        "routes", help="print each route pool with live availability",
-        description="Print every global route pool (utility, junior, senior, principal, design, writing) with each model's weight, "
-                    "effort band, caveats and live availability. By default available models print in full and the "
-                    "unavailable or cooling ones collapse to a per-pool count line; `--all` lists every entry.")
-    routes.add_argument("--all", action="store_true",
-                        help="print every pool entry, including unavailable and cooling models")
-    routes.add_argument("--json", action="store_true", help="print one fabric.routes.v1 JSON document")
-    routes.add_argument("--health", action="store_true",
-                        help="also print task-class routes and recent route health (the `route health` view)")
-    cooldowns = commands.add_parser("cooldowns", help="show cooldowns for the selected accounts on this host")
-    cooldowns.add_argument("--json", action="store_true")
-    reset = commands.add_parser("reset", help="clear cooldowns: all, one adapter, or adapter/model")
-    reset.add_argument("selector", nargs="?", help="adapter or adapter/model; omit to clear every cooldown")
-    reset.add_argument("--account", help="clear only this account on this host")
-    reset.add_argument("--json", action="store_true")
-    pick = commands.add_parser("pick", help="pick models from route pools; JSON requests on stdin")
-    pick.add_argument("--seed", type=int, help=argparse.SUPPRESS)
-    return root
-
-
 def _router() -> Any:
     """This module as the pool picker's router, whether run as a script or loaded by path."""
     import types
@@ -2038,14 +1592,7 @@ def _fabric_records() -> Any:
     return module
 
 
-def _health_record(catalog: dict[str, Any]) -> dict[str, Any]:
-    """Task-class routes plus the recent outcome health Fabric records."""
-    record = {"schema": "fabric.route-health.v1", "task_class_routes": catalog.get("task_class_routes", {})}
-    try:
-        record["routes"] = _fabric_records().read_route_health()
-    except (ImportError, OSError, AttributeError, TypeError, ValueError):
-        record["routes"] = {}
-    return record
+model_route_live._fabric_records = _fabric_records
 
 
 def route_pick(requests: Any, seed: int | None = None) -> dict[str, Any]:
@@ -2065,338 +1612,12 @@ def route_pick(requests: Any, seed: int | None = None) -> dict[str, Any]:
 
 
 def main(argv: list[str] | None = None) -> int:
+    model_route_cli = _sibling("model_route_cli")
     try:
-        return _main(argv)
+        return model_route_cli._main(argv, model_route_cli._ModuleGlobals(globals()))
     except _pools.RenamedNameError as exc:
         print(f"model-route: {exc}", file=sys.stderr)
         return 2
-
-
-def _main(argv: list[str] | None = None) -> int:
-    argv = list(sys.argv[1:] if argv is None else argv)
-    argument_parser = parser()
-    subcommands = next(action.choices for action in argument_parser._actions
-                       if isinstance(action, argparse._SubParsersAction))
-    if argv and not argv[0].startswith("-") and argv[0] not in subcommands:
-        result = route_pick([{"route": argv[0]}])
-        pick_result = result.get("results", [{}])[0]
-        if pick_result.get("status") == "ok":
-            picks = pick_result.get("picks", [])
-            quota_states = _quota_states()
-            for pick in picks:
-                quota = quota_states.get(pick["adapter"])
-                if quota:
-                    pick["quota"] = {key: quota[key] for key in
-                                      ("account", "state", "summary", "observed_at") if key in quota}
-                    if quota.get("state") in ("ahead_of_pace", "deficit", "credit_only"):
-                        pick_result.setdefault("warnings", []).append(
-                            f"{pick['adapter']} quota: {quota['summary']}"
-                        )
-        print(json.dumps(result, sort_keys=True))
-        return 0 if pick_result.get("status") == "ok" else 2
-    args = argument_parser.parse_args(argv)
-    renamed = _pools.RENAMED_TIERS.get(str(getattr(args, "alias", "") or "").casefold())
-    if renamed:
-        print(f"model-route: alias '{args.alias}' was renamed to '{renamed}'; fix: pass {renamed}", file=sys.stderr)
-        return 2
-    if isinstance(getattr(args, "alias", None), str) and args.alias.casefold() in ALIAS_ORDER:
-        args.alias = args.alias.casefold()
-    if str(getattr(args, "effort", "") or "").casefold() == "max" and args.command in {"resolve", "select"}:
-        return emit(_max_retired(), 2)
-    if args.command == "select":
-        return _preferences.select(args, TASK_CLASS_POLICY, ALIAS_ORDER, EFFORT_ORDER)
-    if args.command == "snapshot":
-        record = catalogue_snapshot()
-        record.pop("catalogue", None)
-        print(json.dumps(record, sort_keys=True))
-        return 0
-    if args.command == "health":
-        record = _health_record(load_catalog())
-        print(json.dumps(record, sort_keys=True) if args.json else json.dumps(record, indent=2, sort_keys=True))
-        return 0
-    if args.command == "routes":
-        catalog = load_catalog()
-        document = _pools.describe(
-            _router(), catalog, _pools.Availability(_router(), catalog), EFFORT_ORDER)
-        if args.health:
-            document["health"] = _health_record(catalog)
-        if args.json:
-            print(json.dumps(document, sort_keys=True))
-        else:
-            print(_pools.render(document, full=args.all))
-            if args.health:
-                print("\ntask-class routes and recent health (route health --json):")
-                print(json.dumps(document["health"], indent=2, sort_keys=True))
-        return 0
-    if args.command == "cooldowns":
-        record = {"schema": "fabric.cooldowns.active.v1", "cooldowns": _fabric_records().read_cooldowns()}
-        print(json.dumps(record, sort_keys=True) if args.json else json.dumps(record, indent=2, sort_keys=True))
-        return 0
-    if args.command == "reset":
-        try:
-            removed = _fabric_records().clear_cooldowns(args.selector, account=args.account)
-        except ValueError as exc:
-            print(f"model-route reset: {exc}", file=sys.stderr)
-            return 2
-        print(json.dumps({"schema": "fabric.cooldown-reset.v1", "removed": removed}, sort_keys=True) if args.json
-              else "\n".join(removed) or "no cooldowns matched")
-        return 0
-    if args.command == "pick":
-        try:
-            requests = json.loads(sys.stdin.read() or "{}").get("requests")
-        except (ValueError, AttributeError):
-            requests = None
-        print(json.dumps(route_pick(requests, args.seed), sort_keys=True))
-        return 0
-    if args.command == "probe":
-        record, code = model_route_probe.probe_capabilities(
-            args.adapter, args.executable, time.monotonic() + 30 if args.listing_only else None,
-            listing_only=args.listing_only)
-        print(json.dumps(record, sort_keys=True))
-        return code
-    snapshot = catalogue_snapshot(Path(args.catalog) if args.catalog else None)
-    catalog = snapshot["catalogue"]
-    if getattr(args, "available_effort", None):
-        args.available_effort = _without_max({"efforts": list(args.available_effort)})["efforts"]
-    global ROUTE_WARNINGS
-    ROUTE_WARNINGS = ([
-        "routing catalogue was stale; resolved against the fresh product snapshot; "
-        "fix: run scripts/install-harness --platform all --refresh-routing"
-    ] if args.command == "resolve" and snapshot.get("stale_routing") else [])
-    if args.command == "resolve":
-        # cf_dispatch defaults an alias beside a named model; that is not the caller's.
-        args.alias_supplied = bool(args.alias) and os.environ.get("FABRIC_ALIAS_IMPLIED") != "1"
-        if args.endpoint and args.model and not args.alias:
-            args.alias = "senior"
-        ordinary_name = args.alias and args.alias not in ALIAS_ORDER
-        ordinary_model = args.model and not args.alias
-        ordinary_unknown = args.model and args.alias and not infer_family(args.model, catalog)
-        ordinary_broker_tier = args.adapter in {"opencode", "agy"}
-        families_for_ordinary = catalog.get("families")
-        ordinary_catalog_valid = isinstance(families_for_ordinary, dict) and all(
-            isinstance(config, dict) and risk_tier_overrides_are_valid(name, config, catalog)
-            for name, config in families_for_ordinary.items()
-        )
-        if ordinary_catalog_valid and not args.endpoint and not args.task_class and not args.model_override_tier and not args.require_distinct and (ordinary_name or ordinary_model or ordinary_unknown or ordinary_broker_tier or not args.adapter):
-            return resolve_ordinary(args, catalog)
-        # A plain route with an implied alias beside a model still gets a concrete id for a family name or newer live id.
-        latest_adapter = (catalog.get("adapters", {}).get(args.adapter) or {}).get("latest_aliases") is True
-        if (args.model and latest_adapter and not args.endpoint and not args.task_class
-                and not args.model_override_tier and not args.require_distinct):
-            family_match, family_notes = _latest_in_family(args.adapter, args.model, catalog)
-            if not family_match:
-                family_match, family_notes = _live_id(args.adapter, args.model, catalog)
-            if family_match:
-                args.model = family_match["id"]
-                ROUTE_WARNINGS.extend(family_notes)
-        def reject(
-            status: str,
-            *,
-            alias: str = "",
-            effort: str = "",
-            message: str = "",
-            code: int = 2,
-            **metadata: Any,
-        ) -> int:
-            record = {
-                "schema_version": 1,
-                "catalog_date": catalog.get("catalog_date", ""),
-                "status": status,
-                "adapter": args.adapter,
-                "role": args.role,
-                "alias": alias or args.alias or "",
-                "requested_effort": effort or args.effort or "",
-                "effort": "",
-                "lead_family": args.lead_family,
-            }
-            if args.task_class:
-                record.update({"task_class": args.task_class, "route_source": "task-class"})
-            if message:
-                record["message"] = message
-            record.update(metadata)
-            return emit(record, code)
-
-        args.task_class_effort = ""
-        args.task_class_effort_floor = ""
-        args.task_class_effort_shift = 0
-        args.model_override = {}
-        args.endpoint_profile = {}
-        if not args.alias and not args.task_class:
-            return reject("route_input_missing")
-        # A families table that is not a mapping reserves nothing, so a reservation
-        # scan finds no occupant and would route a reserved model. It is also the
-        # first thing every family lookup below dereferences. Reject it here, ahead
-        # of those lookups: an unusable catalogue must fail closed with the router's
-        # structured rejection, never fall open and never crash without one.
-        families = catalog.get("families")
-        if not isinstance(families, dict):
-            return reject("risk_tier_config_invalid", alias=args.alias)
-        adapter_config = catalog.get("adapters", {}).get(args.adapter, {})
-        adapter_family = (
-            adapter_config.get("fixed_model_family")
-            if isinstance(adapter_config, dict)
-            else None
-        )
-        if adapter_family and not risk_tier_overrides_are_valid(
-            adapter_family, families.get(adapter_family, {}), catalog
-        ):
-            return reject("risk_tier_config_invalid", alias=args.alias)
-        if adapter_family and not ultra_eligible_roles_are_valid(
-            families.get(adapter_family, {})
-        ):
-            return reject(
-                "effort_policy_config_invalid",
-                alias=args.alias,
-                message=(
-                    "configuration error: ultra_eligible_roles must be a list "
-                    "of non-empty role names"
-                ),
-            )
-        # Validate exactly the families the reservation scan will consult, and only
-        # when there is a model for it to scan against. An adapter without a fixed
-        # model family validates nothing above, so without this a malformed
-        # override was routed against instead of failing closed.
-        if args.model:
-            for scanned_family, scanned_config in override_scan_families(
-                args.model, catalog
-            ).items():
-                if not risk_tier_overrides_are_valid(
-                    scanned_family, scanned_config, catalog
-                ):
-                    return reject("risk_tier_config_invalid", alias=args.alias)
-        # Once catalogue integrity is known, a configured execution gate is the
-        # first route fact for a known adapter. Invalid selectors must not hide
-        # `enabled: false` or its typed reason, and this preflight never invokes a
-        # provider capability source.
-        if args.adapter in COMPATIBILITY_ADAPTER_IDS:
-            compatibility, compatibility_status = load_adapter_compatibility(
-                args.adapter, Path(args.adapter_compatibility),
-            )
-            if compatibility_status:
-                return reject(compatibility_status)
-            assert compatibility is not None
-            if not compatibility["enabled"]:
-                endpoint = (
-                    adapter_config.get("endpoint_provider", "")
-                    if isinstance(adapter_config, dict)
-                    else ""
-                )
-                return reject(
-                    "adapter_disabled",
-                    code=1,
-                    reason=compatibility["disabled_reason"],
-                    message=f"{compatibility['disabled_reason']} fix: choose an enabled adapter",
-                    endpoint_provider=endpoint,
-                    compatibility_adapter=compatibility["compatibility_adapter"],
-                    adapter_enabled=False,
-                )
-        if args.task_class and args.model_override_tier:
-            return reject("route_input_conflict")
-        if bool(args.alias) == bool(args.task_class):
-            return reject("route_input_conflict" if args.alias else "route_input_missing")
-        if args.task_class:
-            policy = TASK_CLASS_POLICY.get(args.task_class)
-            route = catalog.get("task_class_routes", {}).get(args.task_class)
-            if policy is None or route is None:
-                return reject("unknown_task_class")
-            if not isinstance(route, dict):
-                return reject("task_class_config_invalid")
-            route_alias = route.get("alias")
-            route_effort = route.get("effort")
-            route_role = route.get("role")
-            if (
-                route_alias not in ALIAS_ORDER
-                or route_effort not in EFFORT_ORDER
-                or ALIAS_ORDER[route_alias] < ALIAS_ORDER[policy["minimum_alias"]]
-                or route_role != policy["role"]
-            ):
-                return reject(
-                    "task_class_config_invalid",
-                    alias=route_alias if isinstance(route_alias, str) else "",
-                    effort=route_effort if isinstance(route_effort, str) else "",
-                )
-            if EFFORT_ORDER[route_effort] < EFFORT_ORDER[policy["minimum_effort"]]:
-                return reject(
-                    "task_class_config_invalid",
-                    alias=route_alias,
-                    effort=route_effort,
-                    message=(
-                        "configuration error: "
-                        f"task_class_routes.{args.task_class}.effort {route_effort!r} "
-                        "must meet probe policy minimum_effort "
-                        f"{policy['minimum_effort']!r}"
-                    ),
-                )
-            if args.effort:
-                return reject("task_class_effort_conflict", alias=route_alias, effort=route_effort)
-            if args.model:
-                return reject("task_class_model_conflict", alias=route_alias, effort=route_effort)
-            if args.role != route_role:
-                return reject("task_class_role_mismatch", alias=route_alias, effort=route_effort)
-            model_routes = route.get("models")
-            if not isinstance(args.adapter, str) or args.adapter not in catalog.get("adapters", {}):
-                return reject("unknown_adapter")
-            configured_models = model_routes.get(args.adapter) if isinstance(model_routes, dict) else None
-            if (not isinstance(configured_models, list) or not configured_models
-                    or any(not isinstance(model, str) or not model.strip() for model in configured_models)
-                    or len(set(configured_models)) != len(configured_models)):
-                return reject("task_class_config_invalid", alias=route_alias, effort=route_effort)
-            resolved_models, resolved_entries = [], []
-            for configured_model in configured_models:
-                entry, _ = _registered_match(args.adapter, configured_model, catalog)
-                if (entry is None or configured_model != entry["id"]
-                        or entry.get("effort_transport") == "none"
-                        or route_effort not in entry.get("efforts", [])):
-                    return reject("task_class_config_invalid", alias=route_alias, effort=route_effort)
-                resolved_models.append(entry["id"])
-                resolved_entries.append(entry)
-            args.task_class_configured_models = list(resolved_models)
-            if args.task_class in {"review", "critical-review", "second-opinion"}:
-                failed_models = _recent_failed_task_class_models(args.adapter, args.task_class)
-                failed_in_roster = [model for model in resolved_models if model in failed_models]
-                if failed_in_roster:
-                    alternate = next((model for model in resolved_models if model not in failed_models), None)
-                    resolved_models = [alternate] if alternate else []
-            args.task_class_models = resolved_models
-            args.alias = route_alias
-            args.task_class_effort, args.task_class_effort_shift = shifted_task_class_effort(
-                args.task_class, route_effort, policy["minimum_effort"], resolved_entries)
-            # A runtime fallback may not go below the lower of the configured and shifted effort.
-            args.task_class_effort_floor = min(route_effort, args.task_class_effort, key=EFFORT_ORDER.__getitem__)
-        elif args.alias not in {"principal", "senior", "junior"}:
-            return reject("unknown_alias")
-        if args.effort and args.effort not in EFFORT_ORDER:
-            if args.require_distinct or args.model_override_tier or args.task_class:
-                return reject("invalid_effort", alias=args.alias)
-            args.raw_effort = args.effort
-            args.effort = "medium"
-        if args.model_override_tier:
-            adapter = catalog.get("adapters", {}).get(args.adapter, {})
-            family = adapter.get("fixed_model_family")
-            family_config = catalog.get("families", {}).get(family, {})
-            override = family_config.get("risk_tier_overrides", {}).get(args.model_override_tier)
-            if not isinstance(override, dict):
-                return reject("risk_tier_override_unavailable", alias=args.alias)
-            if not risk_tier_override_is_well_formed(override):
-                return reject("risk_tier_config_invalid", alias=args.alias)
-            maximum_effort = override["maximum_effort"]
-            roles = override["roles"]
-            if args.role not in roles:
-                return reject("risk_tier_role_mismatch", alias=args.alias)
-            if args.alias != override.get("alias"):
-                return reject("risk_tier_alias_mismatch", alias=args.alias)
-            if args.effort and EFFORT_ORDER[args.effort] > EFFORT_ORDER[maximum_effort]:
-                return reject("risk_tier_effort_above_ceiling", alias=args.alias, effort=args.effort)
-            args.model_override = override
-        if args.endpoint:
-            profile, endpoint_status = resolve_endpoint_profile(
-                args.endpoint, args.adapter, catalog
-            )
-            if endpoint_status:
-                return reject(endpoint_status, alias=args.alias, endpoint=args.endpoint)
-            args.endpoint_profile = profile
-        return resolve(args, catalog)
-    return 2
 
 
 if __name__ == "__main__":

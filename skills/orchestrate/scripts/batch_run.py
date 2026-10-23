@@ -36,17 +36,15 @@ sys.path.insert(0, str(SCRIPT_ROOT.parents[1]))
 sys.path.insert(0, str(SCRIPT_ROOT))
 from _shared.bounded_process import BudgetArgumentParser, stop_process_group
 from _shared import harness_profile
+from dispatch_preflight import ACCESS_MODES
 from layout import contains_run
 from dispatch_run import (
     close_mcp_run,
-    ACCESS_MODES,
     ATTEMPT_ID_RE,
     ESCALATION_REASONS,
-    WORKTREE_WRITE_ADAPTERS,
-    WorktreeLeaseError,
-    resolve_writer_worktree,
 )
 import run_records
+import writer_lease
 import run_lineage
 from attempt_evidence import AttemptEvidenceError as SharedAttemptEvidenceError, canonical_success_status, validate_successful_attempt
 from secret_scan import scan_inputs
@@ -303,13 +301,13 @@ def _load_manifest(
             raise BatchInputError(f"task {task_id} access_mode must be one of {', '.join(ACCESS_MODES)}")
         worktree = task.get("worktree")
         if access_mode == "worktree_write":
-            if adapter not in WORKTREE_WRITE_ADAPTERS:
+            if adapter not in writer_lease.WORKTREE_WRITE_ADAPTERS:
                 raise BatchInputError(f"task {task_id} worktree_write is unsupported for adapter {adapter}")
             if not isinstance(worktree, str) or not worktree:
                 raise BatchInputError(f"task {task_id} worktree_write requires a worktree path")
             try:
-                resolved_worktree = resolve_writer_worktree(Path(worktree))
-            except WorktreeLeaseError as exc:
+                resolved_worktree = writer_lease.resolve_writer_worktree(Path(worktree))
+            except writer_lease.WorktreeLeaseError as exc:
                 raise BatchInputError(f"task {task_id} worktree is invalid: {exc}") from exc
             # One writer per worktree. Two tasks in the same batch naming the same
             # worktree are a shared write, and the batch is refused before launch

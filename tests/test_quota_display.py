@@ -448,6 +448,7 @@ def test_post_reset_burst_summary_includes_credit_and_banked_reset_runway(quota,
 @pytest.mark.parametrize('reset_in', [timedelta(0), timedelta(hours=-1)])
 @pytest.mark.parametrize('current', [False, True])
 def test_pre_reset_refusal_is_stale_and_never_claims_allowance_spent(quota, reset_in, current):
+    reset_in -= timedelta(seconds=quota.CLOCK_SKEW_SECONDS)
     windows = [window(100, WEEK, reset_in, 'primary')]
     if current:
         windows.append(window(20, 300, timedelta(hours=2), 'secondary'))
