@@ -84,7 +84,7 @@ pub fn source_digest(krate: &Path) -> Result<String> {
                     .map_err(|e| invalid(e.to_string()))?
                     .to_str()
                     .ok_or_else(|| invalid("source digest path is not UTF-8"))?
-                    .replace('\\', "/");
+                    .to_owned();
                 rest.insert(name, path);
             }
         }
@@ -384,6 +384,17 @@ mod tests {
         fs::create_dir_all(root.join("crates/member/src")).unwrap();
         fs::write(root.join("crates/member/Cargo.toml"), "member manifest").unwrap();
         fs::write(root.join("crates/member/src/lib.rs"), "member source").unwrap();
+        fs::create_dir_all(root.join("crates/a\\b/src")).unwrap();
+        fs::write(
+            root.join("crates/a\\b/Cargo.toml"),
+            "backslash member manifest",
+        )
+        .unwrap();
+        fs::write(
+            root.join("crates/a\\b/src/lib.rs"),
+            "backslash member source",
+        )
+        .unwrap();
         fs::create_dir_all(root.join("target/debug")).unwrap();
         fs::write(root.join("target/debug/noise.rs"), "excluded").unwrap();
         fs::write(root.join("src/.editor.rs"), "litter").unwrap();
