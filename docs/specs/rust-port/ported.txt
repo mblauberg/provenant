@@ -6,6 +6,7 @@ runtime/fabric/src/identity.ts#unit-01
 runtime/fabric/src/process-identity.ts#interface
 runtime/fabric/src/run-registry.ts#interface
 runtime/fabric/src/store.ts#unit-02
+runtime/fabric/src/store.ts#unit-03
 runtime/fabric/src/success-status.ts#unit-01
 scripts/lib/projection.py#unit-01
 scripts/lib/roots.py#unit-01

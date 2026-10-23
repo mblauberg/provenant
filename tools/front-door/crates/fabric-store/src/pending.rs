@@ -29,14 +29,22 @@ pub(crate) fn js_number(text: &str) -> Option<f64> {
     if text.is_empty() {
         return Some(0.0);
     }
-    if let Some(hex) = text.strip_prefix("0x").or_else(|| text.strip_prefix("0X")) {
-        return u64::from_str_radix(hex, 16).ok().map(|v| v as f64);
-    }
-    if let Some(bits) = text.strip_prefix("0b").or_else(|| text.strip_prefix("0B")) {
-        return u64::from_str_radix(bits, 2).ok().map(|v| v as f64);
-    }
-    if let Some(octal) = text.strip_prefix("0o").or_else(|| text.strip_prefix("0O")) {
-        return u64::from_str_radix(octal, 8).ok().map(|v| v as f64);
+    for (prefix, radix, width) in [("0x",16,4),("0b",2,1),("0o",8,3)] {
+        if text.get(..2).is_some_and(|p|p.eq_ignore_ascii_case(prefix)) {
+            let digits = text.get(2..)?;
+            if digits.is_empty() {return None;}
+            let mut bits=Vec::new();
+            for ch in digits.chars() {
+                let value=ch.to_digit(radix)?;
+                for bit in (0..width).rev() {bits.push(value & (1<<bit)!=0);}
+            }
+            let first=bits.iter().position(|b|*b).unwrap_or(bits.len());
+            let bits=&bits[first..];
+            if bits.len()>1024 {return Some(f64::INFINITY);}
+            let mut top=bits.iter().take(53).fold(0_u64,|n,b|(n<<1)|u64::from(*b));
+            if bits.len()>53 && bits[53] && (top&1!=0 || bits[54..].iter().any(|b|*b)) {top+=1;}
+            return Some(top as f64 * 2_f64.powi(bits.len().saturating_sub(53) as i32));
+        }
     }
     if text == "Infinity" || text == "+Infinity" {
         return Some(f64::INFINITY);
@@ -91,4 +99,29 @@ pub(crate) fn js_iso(ms: i64) -> crate::Result<String> {
     Ok(format!(
         "{year}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}.{millis:03}Z"
     ))
+}
+
+// port: belongs in provenant-core
+/// ECMAScript's decimal/scientific cutoffs over serde's shortest float digits.
+pub(crate) fn js_number_string(value:f64)->String {
+    if value==0.0 {return "0".into();}
+    let raw=value.abs().to_string();
+    let (mantissa,exp)=raw.split_once('e').map_or((raw.as_str(),0),|(m,e)|(m,e.parse::<i32>().unwrap_or(0)));
+    let dot=mantissa.find('.').unwrap_or(mantissa.len()) as i32;
+    let digits:String=mantissa.chars().filter(|c|*c!='.').collect();
+    let lead=digits.bytes().take_while(|b|*b==b'0').count();
+    let digits=digits.get(lead..).unwrap_or("").trim_end_matches('0');
+    let point=dot+exp-lead as i32;
+    let sign=if value<0.0 {"-"}else{""};
+    if point>0 && point<=21 {
+        let point=point as usize;
+        if point>=digits.len() {format!("{sign}{digits}{}","0".repeat(point-digits.len()))}
+        else {format!("{sign}{}.{}",&digits[..point],&digits[point..])}
+    } else if point<=0 && point> -6 {
+        format!("{sign}0.{}{digits}","0".repeat((-point) as usize))
+    } else {
+        let exponent=point-1;
+        let fraction=if digits.len()>1 {format!(".{}",&digits[1..])}else{String::new()};
+        format!("{sign}{}{fraction}e{}{exponent}",digits.get(..1).unwrap_or("0"),if exponent>=0 {"+"}else{""})
+    }
 }

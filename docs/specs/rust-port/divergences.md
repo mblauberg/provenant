@@ -1400,3 +1400,13 @@ then passed after repair. Extended JSON/native-path reader gaps remain partial.
   adapters for the pending confinement/records/config/core contracts. Consumers
   remain unchanged; no graph unit or full conformance claim is added. README
   maps the remaining pending run and UUID contracts explicitly.
+
+### RP-FS3-004 extension: dynamic terminal rows
+
+- The deliberate ECMAScript Number exception also covers `Number` coercion of
+  legacy terminal attempts, SQLite binding of those numbers and comparisons
+  against observation values. Fractional and infinite attempts are preserved;
+  NaN binds NULL and fails the source's NOT NULL constraint. Integer wire
+  fields remain serde integers. The legacy-row differential compares failures,
+  absent/null fallbacks, arrays, booleans, radix strings, decimal/scientific
+  String spellings, fractional cursor reads and all database rows.

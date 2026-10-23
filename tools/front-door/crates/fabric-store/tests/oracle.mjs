@@ -8,7 +8,7 @@ let now = 1000, serial = 0;
 Date.now = () => now;
 crypto.randomUUID = () => `fixture-${++serial}`;
 syncBuiltinESMExports();
-const { Store, inspectDatabase } = await import(pathToFileURL(source).href);
+const { Store, inspectDatabase, laneTaskId } = await import(pathToFileURL(source).href);
 const Database = createRequire(pathToFileURL(source))('better-sqlite3');
 const a = { project: 'p', agentId: 'alice', provider: 'codex' };
 const b = { ...a, agentId: 'bob' };
@@ -29,7 +29,22 @@ if (scenario === 'legacy') {
 const store = new Store(database);
 const other = new Store(database);
 const raw = new Database(database);
-if (scenario === 'ids') {
+if (scenario === 'legacy-rows') {
+  const rows=[{}, {run_id:null,task_id:'',attempt_count:'2'}, {run_id:42,task_id:0,attempt:null,attempt_count:true},
+    {run_id:['r',null,['x']],task_id:[],attempt:[]}, {run_id:{},task_id:'t',attempt:'2.5'},
+    {run_id:'r',task_id:'t',attempt:'0x10000000000000001'}, {run_id:'r',attempt:'invalid'},
+    {run_id:'r',attempt:'Infinity'}, {run_id:'r',attempt:'-Infinity'},
+    {run_id:{toString:null},attempt:1}, {run_id:'r',attempt:1,run_dir:false},
+    {run_id:'r',attempt:null}, {run_id:'r',attempt:'',run_dir:null},
+    {run_id:1e21,attempt:1},{run_id:1e-7,attempt:1},{run_id:1e20,attempt:1},
+    {run_id:true,attempt:['3']},{run_id:1e-6,attempt:1}];
+  for (const row of rows) {capture(()=>laneTaskId(row));capture(()=>store.acknowledgeTerminal(b,row,1));}
+  const lanes=[{runId:'r',taskId:'t',attempt:3},{runId:'r',taskId:'t',attempt:2.5},{runId:'zero',taskId:'t',attempt:0}];
+  capture(()=>store.unseenLanes(b,lanes));capture(()=>store.markLanesSeen(b,lanes));
+  capture(()=>store.unseenLanes(b,lanes));
+  store.announce(a);store.announce(b);
+  capture(()=>store.send(a,'bob','fraction seen',{kind:'run_terminal',outputPath:'r:t:2.5'}));
+} else if (scenario === 'ids') {
   store.announce(a); store.announce(b);
   capture(() => store.send(a,'bob','empty task',{taskId:''}));
   capture(() => store.send(a,'bob','empty output',{outputPath:''}));

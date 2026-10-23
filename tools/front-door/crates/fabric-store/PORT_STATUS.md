@@ -14,19 +14,18 @@ there was no batch-1 status or implementation on main.
   explicit close, issue/path work claims, renewal, verification and release are
   implemented with generation fencing, rollback and checked JSON from records.
   Remaining: safe recursive parent creation in `Store::open`, awaiting the
-  supervisor API, and `laneTaskId` (covered with unit-03's dynamic row boundary).
+  supervisor API. `laneTaskId` is now covered by unit-03's dynamic row boundary.
 - `runtime/fabric/src/store.ts#unit-02`: **ported**. Landing leases, bounded
   waits, push cleanup, named sessions, send and inbox policy are implemented.
   UUID generation is an injected `IdSource`, consumed at the source's system
   boundary, including failed sends and session conflicts. Native entropy stays
   with the supervisor; no unsafe implementation is copied into the store.
-- `runtime/fabric/src/store.ts#unit-03`: **partial**. Inbox claim completion,
-  digest grouping, acknowledgements, observation cursors, teams, cooperative
-  tasks and activity are implemented. Legacy dynamic terminal-row coercion
-  and the default generated task id remain: the current API accepts typed,
-  already normalised terminal inputs and an explicit task id. The runtime
-  adapter must preserve `laneTaskId`, `String` and `Number` semantics before
-  this unit can be marked fully ported.
+- `runtime/fabric/src/store.ts#unit-03`: **ported**. Claim completion, digest,
+  acknowledgements, observations, teams, cooperative tasks and activity are
+  implemented. `TerminalRow` retains absent versus null fields, `lane_task_id`
+  applies the source fallback, and terminal acknowledgement performs ECMAScript
+  String/Number coercion before SQLite binding. Generated task IDs take the
+  injected UUID prefix. Checked JSON uses the shared records owner.
 - `runtime/fabric/src/store.ts#unit-04`: **partial**. Nullable message-link
   migrations, recipient aliases/teams/broadcast policy and diagnostic status/
   doctor queries are implemented. The private main/WAL snapshot, inode/mtime

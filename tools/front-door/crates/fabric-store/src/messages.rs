@@ -83,7 +83,7 @@ pub struct DigestGroup {
 pub struct LaneAttempt {
     pub run_id: String,
     pub task_id: String,
-    pub attempt: i64,
+    pub attempt: serde_json::Number,
 }
 
 impl Store {
@@ -128,8 +128,8 @@ impl Store {
                 if options.kind == Some("run_terminal") {
                     if let Some(path) = options.output_path.filter(|p| !p.is_empty()) {
                         let mut parts = path.split(':'); let run = parts.next().unwrap_or(""); let task = parts.next().unwrap_or(""); let attempt = parts.next();
-                        let seen = self.db.query_row("SELECT attempt FROM run_observations WHERE project = ? AND recipient_id = ? AND run_id = ? AND task_id = ?", params![who.project, recipient, run, task], |r| r.get::<_, i64>(0)).optional()?;
-                        if seen.zip(attempt.and_then(pending::js_number)).is_some_and(|(seen, attempt)| seen as f64 >= attempt) {
+                        let seen = self.db.query_row("SELECT attempt FROM run_observations WHERE project = ? AND recipient_id = ? AND run_id = ? AND task_id = ?", params![who.project, recipient, run, task], |r| r.get::<_, f64>(0)).optional()?;
+                        if seen.zip(attempt.and_then(pending::js_number)).is_some_and(|(seen, attempt)| seen >= attempt) {
                             self.db.execute("UPDATE deliveries SET read_at = ? WHERE message_id = ? AND recipient_id = ?", params![now, message_id, recipient])?;
                         }
                     }
@@ -257,14 +257,15 @@ impl Store {
     pub fn unseen_lanes(&self, who: &Identity, rows: &[LaneAttempt]) -> Result<Vec<usize>> {
         let mut unseen = Vec::new();
         for (index, row) in rows.iter().enumerate() {
+            let attempt = row.attempt.as_f64().ok_or(Error::NumberOutOfRange)?;
             if row.run_id.is_empty()
                 || row.task_id.is_empty()
-                || !(0..=MAX_SAFE_INTEGER).contains(&row.attempt)
+                || attempt < 0.0 || attempt > MAX_SAFE_INTEGER as f64 || attempt.fract() != 0.0
             {
                 continue;
             }
-            let prior = self.db.query_row("SELECT attempt FROM run_observations WHERE project = ? AND recipient_id = ? AND run_id = ? AND task_id = ?", params![who.project, who.agent_id, row.run_id, row.task_id], |r| r.get::<_, i64>(0)).optional()?;
-            if prior.is_none_or(|a| a < row.attempt) {
+            let prior = self.db.query_row("SELECT attempt FROM run_observations WHERE project = ? AND recipient_id = ? AND run_id = ? AND task_id = ?", params![who.project, who.agent_id, row.run_id, row.task_id], |r| r.get::<_, f64>(0)).optional()?;
+            if prior.is_none_or(|a| a < attempt) {
                 unseen.push(index);
             }
         }
@@ -273,7 +274,7 @@ impl Store {
     pub fn mark_lanes_seen(&self, who: &Identity, rows: &[LaneAttempt]) -> Result<()> {
         self.transaction(true, || {
             for row in rows {
-                self.record_observation(who, &row.run_id, &row.task_id, row.attempt)?;
+                self.record_observation(who, &row.run_id, &row.task_id, row.attempt.as_f64().ok_or(Error::NumberOutOfRange)?)?;
             }
             Ok(())
         })
@@ -283,7 +284,7 @@ impl Store {
         who: &Identity,
         run: &str,
         task: &str,
-        attempt: i64,
+        attempt: f64,
     ) -> Result<()> {
         self.db.execute("INSERT INTO run_observations(project, recipient_id, run_id, task_id, attempt) VALUES (?, ?, ?, ?, ?) ON CONFLICT(project, recipient_id, run_id, task_id) DO UPDATE SET attempt = MAX(attempt, excluded.attempt)", params![who.project, who.agent_id, run, task, attempt])?;
         Ok(())
@@ -305,7 +306,7 @@ impl Store {
         self.db
             .busy_timeout(Duration::from_millis(busy_timeout_ms))?;
         let result = self.transaction(true, || {
-            self.record_observation(who, run, task, attempt)?;
+            self.record_observation(who, run, task, attempt as f64)?;
             let length = prefix.encode_utf16().count();
             self.db.execute("UPDATE deliveries SET read_at = ? WHERE project = ? AND recipient_id = ? AND read_at IS NULL AND message_id IN (SELECT message_id FROM messages WHERE project = ? AND kind = 'run_terminal' AND ((substr(output_path, 1, ?) = ? AND CAST(substr(output_path, ?) AS INTEGER) <= ?) OR output_path = ?))", params![self.now(), who.project, who.agent_id, who.project, length as i64, prefix, length as i64 + 1, attempt, run_dir])?;
             Ok(())

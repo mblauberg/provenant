@@ -68,6 +68,7 @@ fn snapshot(store: &Store, out: Vec<Value>) -> Value {
                 let value = match row.get_ref(index).unwrap() {
                     ValueRef::Null => Value::Null,
                     ValueRef::Integer(i) => json!(i),
+                    ValueRef::Real(f) => json!(f),
                     ValueRef::Text(t) => json!(std::str::from_utf8(t).unwrap()),
                     other => panic!("unexpected fixture value {other:?}"),
                 };
@@ -479,10 +480,10 @@ fn delivery_task_and_observation_database_differential() {
     capture(&mut out, store.update_task(&a, "missing", "done", None));
     capture(&mut out, store.activity_after("p", 2, 3));
     capture(&mut out, store.activity("p", 2));
-    let lane = |task: &str, attempt| LaneAttempt {
+    let lane = |task: &str, attempt: i64| LaneAttempt {
         run_id: "r".into(),
         task_id: task.into(),
-        attempt,
+        attempt: attempt.into(),
     };
     capture(&mut out, store.mark_lanes_seen(&b, &[lane("t", 2)]));
     capture(&mut out, store.mark_lanes_seen(&b, &[lane("t", 1)]));
@@ -497,7 +498,7 @@ fn delivery_task_and_observation_database_differential() {
                 LaneAttempt {
                     run_id: "".into(),
                     task_id: "t".into(),
-                    attempt: 1,
+                    attempt: 1.into(),
                 },
             ],
         ),
@@ -847,4 +848,29 @@ fn entropy_defaults_and_failure_order_differential() {
     capture(&mut out,store.send(&a(),"bob","generated",SendOptions::default(),RecipientContext::default(),&ids));
     capture(&mut out,store.inbox(&b(),InboxOptions::default(),&ids));
     compare("ids",snapshot(&store,out));
+}
+
+#[test]
+fn legacy_terminal_rows_preserve_missing_null_coercion_and_binding_errors() {
+    let dir=tempfile::tempdir().unwrap();
+    let store=Store::open(&dir.path().join("db"),5000,FixtureClock(Arc::new(TimeCell::new(1000)))).unwrap();
+    let mut out=Vec::new();
+    for text in [r#"{}"#,r#"{"run_id":null,"task_id":"","attempt_count":"2"}"#,r#"{"run_id":42,"task_id":0,"attempt":null,"attempt_count":true}"#,
+        r#"{"run_id":["r",null,["x"]],"task_id":[],"attempt":[]}"#,r#"{"run_id":{},"task_id":"t","attempt":"2.5"}"#,
+        r#"{"run_id":"r","task_id":"t","attempt":"0x10000000000000001"}"#,r#"{"run_id":"r","attempt":"invalid"}"#,
+        r#"{"run_id":"r","attempt":"Infinity"}"#,r#"{"run_id":"r","attempt":"-Infinity"}"#,
+        r#"{"run_id":{"toString":null},"attempt":1}"#,r#"{"run_id":"r","attempt":1,"run_dir":false}"#,
+        r#"{"run_id":"r","attempt":null}"#,r#"{"run_id":"r","attempt":"","run_dir":null}"#,
+        r#"{"run_id":1e21,"attempt":1}"#,r#"{"run_id":1e-7,"attempt":1}"#,r#"{"run_id":1e20,"attempt":1}"#,
+        r#"{"run_id":true,"attempt":["3"]}"#,r#"{"run_id":1e-6,"attempt":1}"#] {
+        let row=TerminalRow::from_json(text).unwrap();
+        capture(&mut out,lane_task_id(&row));
+        capture(&mut out,store.acknowledge_terminal_row(&b(),&row,1));
+    }
+    let lanes=vec![LaneAttempt {run_id:"r".into(),task_id:"t".into(),attempt:3.into()},LaneAttempt {run_id:"r".into(),task_id:"t".into(),attempt:serde_json::Number::from_f64(2.5).unwrap()},LaneAttempt {run_id:"zero".into(),task_id:"t".into(),attempt:0.into()}];
+    capture(&mut out,store.unseen_lanes(&b(),&lanes));capture(&mut out,store.mark_lanes_seen(&b(),&lanes));
+    capture(&mut out,store.unseen_lanes(&b(),&lanes));
+    store.announce(&a()).unwrap();store.announce(&b()).unwrap();
+    capture(&mut out,store.send(&a(),"bob","fraction seen",SendOptions {kind:Some("run_terminal"),output_path:Some("r:t:2.5"),..Default::default()},RecipientContext::default(),&FixtureIds::default()));
+    compare("legacy-rows",snapshot(&store,out));
 }

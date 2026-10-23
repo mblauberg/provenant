@@ -7,6 +7,8 @@ mod messages;
 mod pending;
 mod sessions;
 mod tasks;
+mod legacy;
+pub use legacy::*;
 mod work;
 pub use work::*;
 mod backend;
@@ -31,6 +33,10 @@ pub type Result<T> = std::result::Result<T, Error>;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
+    #[error("Cannot convert object to primitive value")]
+    PrimitiveConversion,
+    #[error("SQLite3 can only bind numbers, strings, bigints, buffers, and null")]
+    SqliteBindingType,
     #[error(transparent)]
     CheckedJson(#[from] provenant_records::checked_json::DecodeError),
     #[error("stale work claim")]
