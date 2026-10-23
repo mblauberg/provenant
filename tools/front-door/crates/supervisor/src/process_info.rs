@@ -178,3 +178,63 @@ print(json.dumps(out))
         assert_eq!(serde_json::to_value(actual).unwrap(), expected);
     }
 }
+
+/// Decode /bin/ps's eight-column fallback after the adapter checks exit status.
+/// A start time is mandatory; unavailable identity is never fabricated.
+pub fn ps_process_output(pid: i32, stdout: &str, lstart: Option<&str>, start_epoch: Option<f64>) -> Result<Option<ProcessInfo>, ProcessParseError> {
+    let text = stdout.trim();
+    if text.is_empty() { return Ok(None); }
+    let mut rest = text;
+    let mut values = Vec::new();
+    for _ in 0..7 {
+        let Some(end) = rest.find(char::is_whitespace) else { return Ok(None) };
+        values.push(&rest[..end]);
+        rest = rest[end..].trim_start();
+    }
+    if rest.is_empty() { return Ok(None); }
+    let Some(lstart) = lstart.filter(|value| !value.is_empty()) else { return Ok(None) };
+    let first = rest.split_whitespace().next().ok_or(ProcessParseError::Field("command"))?;
+    let comm = first.rsplit('/').next().unwrap_or(first);
+    Ok(Some(ProcessInfo {
+        pid,
+        ppid: values[1].parse().map_err(|_| ProcessParseError::Field("ppid"))?,
+        pgid: values[2].parse().map_err(|_| ProcessParseError::Field("pgid"))?,
+        lstart: lstart.into(),
+        elapsed: values[3].into(),
+        cpu: values[4].into(),
+        stat: values[5].into(),
+        rss: values[6].parse().map_err(|_| ProcessParseError::Field("rss"))?,
+        command: rest.into(),
+        comm: comm.into(),
+        tty: "??".into(),
+        uid: -1,
+        start_epoch,
+    }))
+}
+
+#[cfg(test)]
+mod fallback_tests {
+    use super::*;
+
+    #[test]
+    fn fallback_keeps_command_spacing_and_requires_start_identity() {
+        let output = " 42  2 3  00:10 0:00.01 S 123 /bin/tool  two words  \n";
+        let row = ps_process_output(42, output, Some("Mon Jan  1 00:00:00 2024"), None).unwrap().unwrap();
+        assert_eq!(row.command, "/bin/tool  two words");
+        assert_eq!(row.comm, "tool");
+        assert_eq!((row.ppid, row.pgid, row.rss, row.uid), (2, 3, 123, -1));
+        assert_eq!(row.tty, "??");
+        assert!(ps_process_output(42, output, None, None).unwrap().is_none());
+        assert!(ps_process_output(42, "42 2", Some("start"), None).unwrap().is_none());
+        assert!(ps_process_output(42, "42 bad 3 00:10 0:00 S 123 command", Some("start"), None).is_err());
+    }
+
+    #[test]
+    fn process_record_roundtrips_all_fields_including_null_epoch() {
+        let row = ps_process_output(42, "42 2 3 00:10 0:00 S 123 /bin/tool", Some("start"), None).unwrap().unwrap();
+        let json = serde_json::to_value(&row).unwrap();
+        assert_eq!(json.as_object().unwrap().len(), 13);
+        assert_eq!(json["start_epoch"], serde_json::Value::Null);
+        assert_eq!(serde_json::from_value::<ProcessInfo>(json).unwrap(), row);
+    }
+}
