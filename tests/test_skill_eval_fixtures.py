@@ -1,23 +1,14 @@
-from collections import Counter
-import importlib.util
 import json
-from pathlib import Path
 import subprocess
+from collections import Counter
+from pathlib import Path
 
 import pytest
 import yaml
 
+from tests.support.modules import load_script
 
 ROOT = Path(__file__).resolve().parents[1]
-
-
-def _harness_checker():
-    path = ROOT / "scripts" / "check_harness.py"
-    spec = importlib.util.spec_from_file_location("check_harness_route_fixtures", path)
-    assert spec and spec.loader
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
 
 
 FROZEN_CURRENT_ROUTING_PROTOCOL = {
@@ -94,7 +85,7 @@ def test_every_skill_has_canonical_positive_negative_and_boundary_routes():
 
 
 def test_generic_route_fixture_loader_consumes_ui_regressions() -> None:
-    checker = _harness_checker()
+    checker = load_script(ROOT / "scripts" / "check_harness.py", "check_harness_route_fixtures")
     skills = {path.parent.name for path in (ROOT / "skills").glob("*/SKILL.md")}
 
     cases = checker.load_route_cases(ROOT / "skills" / "ui-ux-design", skills)
@@ -112,7 +103,7 @@ def test_generic_route_fixture_loader_consumes_ui_regressions() -> None:
 def test_generic_route_fixture_loader_rejects_semantically_inverted_regressions(
     tmp_path: Path,
 ) -> None:
-    checker = _harness_checker()
+    checker = load_script(ROOT / "scripts" / "check_harness.py", "check_harness_route_fixtures")
     skills = {path.parent.name for path in (ROOT / "skills").glob("*/SKILL.md")}
     skill = tmp_path / "ui-ux-design"
     evals = skill / "evals"

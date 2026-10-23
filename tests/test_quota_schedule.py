@@ -1,20 +1,18 @@
 """Adaptive quota refresh policy: due times, reasons, backoff and config resolution."""
 
 import builtins
-from datetime import UTC, datetime, timedelta
-import importlib.util
 import os
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
 
+from tests.support.modules import load_script
 
 ROOT = Path(__file__).resolve().parents[1]
-NOW = datetime(2026, 10, 22, 12, 0, tzinfo=UTC)
+NOW = datetime.now(UTC)
 WEEK = 7 * 24 * 60
-spec = importlib.util.spec_from_file_location('quota_schedule_under_test', ROOT / 'scripts/quota_schedule.py')
-schedule = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(schedule)
+schedule = load_script(ROOT / 'scripts/quota_schedule.py', 'quota_schedule_under_test')
 
 
 def iso(moment):

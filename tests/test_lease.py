@@ -1,13 +1,11 @@
-import importlib.util
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from tests.support.modules import load_script
 
 ROOT = Path(__file__).resolve().parents[1]
 PATH = ROOT / "skills" / "orchestrate" / "scripts" / "lease.py"
-SPEC = importlib.util.spec_from_file_location("lease", PATH)
-LEASE = importlib.util.module_from_spec(SPEC)
-assert SPEC and SPEC.loader
-SPEC.loader.exec_module(LEASE)
+LEASE = load_script(PATH, "lease")
 
 
 def test_lease_has_one_holder_and_generation_checked_transfer(tmp_path):
@@ -38,9 +36,10 @@ def test_lease_has_one_holder_and_generation_checked_transfer(tmp_path):
 
 def test_expired_lease_requires_explicit_takeover_evidence(tmp_path):
     path = tmp_path / "LEASE.json"
+    expired = datetime.now(timezone.utc) - timedelta(seconds=1)
     LEASE.write_atomic(path, {
         "schema_version": 1, "status": "active", "holder": "claude", "previous_holder": "",
-        "generation": 1, "updated_at": "2000-01-01T00:00:00Z", "expires_at": "2000-01-01T00:00:01Z",
+        "generation": 1, "updated_at": expired.isoformat(), "expires_at": expired.isoformat(),
     })
     try:
         LEASE.mutate(path, "acquire", "codex", 60, None, "")
