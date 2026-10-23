@@ -16,7 +16,10 @@ switched over and no Python or TypeScript source has been removed.
   fences, exact diagnostics and optional-field presence. Node differentials
   cover successful and refused roots, configured fallback order, executable
   files, directories, links and missing owners. Temporary path assertions
-  canonicalise the root for macOS `/var`.
+  canonicalise the root for macOS `/var`. Owner differentials include trailing
+  separators on executable files and directories. Callers supply the source's
+  `tmpdir()` default as `temp` and its `import.meta.dirname`-relative default as
+  `product_root`'s `default_root`, as well as the environment fallback inputs.
 
 ## Review repairs from PR 1318
 

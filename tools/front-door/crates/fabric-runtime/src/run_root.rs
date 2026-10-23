@@ -70,7 +70,7 @@ pub fn executable_owner(root: &Path, relative: &Path) -> Result<PathBuf, RunRoot
     }
     spelling.push(relative.as_os_str());
     let joined = PathBuf::from(spelling);
-    let path = if joined.is_absolute() {
+    let mut path = if joined.is_absolute() {
         absolute_normal(&joined)?
     } else {
         let mut result = PathBuf::new();
@@ -90,6 +90,16 @@ pub fn executable_owner(root: &Path, relative: &Path) -> Result<PathBuf, RunRoot
         }
         result
     };
+    // Node normalises components but retains a final separator. It changes
+    // both filesystem lookup (a regular file becomes unavailable) and errors.
+    let last = if relative.as_os_str().is_empty() { root } else { relative };
+    if last.as_os_str().as_encoded_bytes().ends_with(b"/")
+        && !path.as_os_str().as_encoded_bytes().ends_with(b"/")
+    {
+        let mut spelling = path.into_os_string();
+        spelling.push("/");
+        path = PathBuf::from(spelling);
+    }
     let metadata =
         fs::symlink_metadata(&path).map_err(|_| RunRootError::OwnerUnavailable(path.clone()))?;
     if !provenant_supervisor::sys::is_executable(&path) {
@@ -400,6 +410,8 @@ console.log(JSON.stringify({
         symlink("missing", root.path().join("dangling")).unwrap();
         let paths = [
             "owner",
+            "owner/",
+            "directory/",
             "plain",
             "directory",
             "link",
