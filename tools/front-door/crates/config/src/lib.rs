@@ -6,10 +6,12 @@ pub mod command;
 
 mod filesystem;
 pub mod front_door;
+pub mod installation;
 pub mod instance;
 pub mod managed_skills;
 pub mod manifest;
 mod ordered;
+pub use ordered::OrderedMap;
 mod pending;
 pub mod profiles;
 pub mod workflows;
