@@ -60,11 +60,11 @@ provider.
 | Live reading of output: terminal events, Claude preamble, reopened turns, retry supersession, stderr failure rules, semantic retention | `consume`, `consume_diagnostic` in `_run_attempt` | The same Python code, run as the observer coprocess | S2 |
 | Startup and wall deadlines; silence observations; CPU and writer-tree progress | `_run_attempt`, `WorkspaceProgress` | Rust | S2 |
 | Descendant census, sparing, staged SIGTERM and SIGKILL, subreaper | `_Descendants`, `_enable_subreaper` | Rust | S2 |
-| Signalling a provider on cancel | TS `signalRecordedRun` signals owner and provider (`run-registry.ts:330-345`); Python owner | Only `lane run`; TS signals the owner group alone | S2 |
+| Signalling a provider on cancel | TS `signalRecordedRun` (`process-identity.ts`) signals owner and provider; Python owner | Only `lane run`; TS signals the owner group alone | S2 |
 | Process exit record | Adapter receipt fields `pgid`, `evidence.exit`, `reaped`, `spared` | `supervisor.exit.json`, mapped by Python | S2 |
 | Run custody, worktree and admission lease lifetimes; owner record; publication; `dispatch-status.json` close | `dispatch_run.py`, `run_lineage.py`, TS `execution.ts:513-527` | Rust `lane own`; Python steps render the bytes | S3 |
 | Retry waits, cancel-marker watch, nested child cancellation | `dispatch_run.py`, `run_lineage.cancel_children` | Rust `lane own` (asks children, never signals them) | S3 |
-| Liveness and orphan reaping | TS `run-registry.ts` process identity, `dispatch_run.reap_attempts` | Rust `lane status`, `lane reap` | S4 |
+| Liveness and orphan reaping | TS process identity (`process-identity.ts`), `dispatch_run.reap_attempts` | Rust `lane status`, `lane reap` | S4 |
 | Routing, catalogue, quota, cooldown, memory and disk admission decisions | `cf_dispatch.py --plan-only`, `model_route.py`, `memory_admission.py` | Python, unchanged | none |
 | Prompt building, adapter argv and environment, confinement, agy home staging | `provider_exec.build_plan` | Python, unchanged | none |
 | Output parsing, classification, quarantine, receipt and status content | `parse_output`, `classify_failure`, `terminal_contract`, `close_mcp_run`, `reap_stop_status` | Python | none |
@@ -237,7 +237,7 @@ synthesis from absence (`provider_lost`, `reap_attempts`).
   (`fabric.attempt.v1`, with `state`) and the legacy
   `dispatch/tasks/<task>/attempt-NNN/attempt.json` (`record_type:
   dispatch-attempt`, `finished_at`) are both in the bundle.
-  `run-registry.ts:625-631` reads the canonical record first and falls back to
+  `receiptTerminal` in `process-identity.ts` reads the canonical record first and falls back to
   the legacy one only when the canonical is absent. The active canonical
   record exists from launch, so a reader never falls back mid-bundle.
 - **Bundle order.** Adapter receipt, `result.md`, legacy envelope and its
@@ -358,7 +358,7 @@ Product code removed, approximately: `scripts/provenant` and the template (713
 lines); the process half of `provider_exec.py` (about 1,100) and the
 test-seam `Popen` branch (about 150); owner custody, cancel identity and
 reaper identity code in `dispatch_run.py` and `run_lineage.py` (about 700);
-the process-identity code in `run-registry.ts` (about 600). Rust added:
+the process-identity code in `process-identity.ts` (about 600). Rust added:
 about 2,500 lines plus tests.
 
 ## Front door
@@ -404,7 +404,7 @@ fortnight before this spec: about ten fixes or deflakes, so about five a week.
 | S1 | Rust as the only front door | `PROVENANT_FRONT_DOOR` (existing) | Both Macs on the binary 7 days; Python front door and S1 tests deleted | Two trial regressions that force Python back: keep Python installable and revisit distribution |
 | S2 | `lane run` and the observer replace the process half of `_run_attempt`, per adapter; TS stops signalling providers | `PROVENANT_LANE_IMPL=python\|rust` | S2 rows and transcript replay green for every adapter on both platforms; 7-day trial on `rust`; S2 code and tests deleted | Parity not reached in 8 lane-days, or the trial shows a healthy provider killed or an exit record lost, or more than two Rust-attributable supervision fixes: default back to `python`, stop S3 and S4 |
 | S3 | `lane own` replaces the `dispatch_run.py` owner; Python split into `plan`, `settle`, `close` | `PROVENANT_LANE_OWNER=python\|rust` | S3 rows green; 7-day trial; S3 code and tests deleted | Parity not reached in 10 lane-days, or the Python split needs more than about 600 changed lines of glue, or S2's thresholds are breached: stop at S2, which already removes the #1204 class |
-| S4 | `lane status` and `lane reap`; `run-registry.ts` calls them | `PROVENANT_LANE_CONTROL=python\|rust` | Fabric TS holds no process-identity code; graph runner unchanged at its call sites; S4 tests deleted | Not done in 5 lane-days, or any TS path still needs `processMatches`: keep TS control and stop |
+| S4 | `lane status` and `lane reap`; `statusRows` in `run-status.ts` and `reapAttemptRuns` in `process-identity.ts` | `PROVENANT_LANE_CONTROL=python\|rust` | Fabric TS holds no process-identity code; graph runner unchanged at its call sites; S4 tests deleted | Not done in 5 lane-days, or any TS path still needs `processMatches`: keep TS control and stop |
 
 S0 and S1 can run in parallel; S2 starts after S0. S3 starts automatically
 when S2 is done with no kill criterion hit and S2 has shown its benefit: its

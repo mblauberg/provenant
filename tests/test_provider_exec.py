@@ -9108,6 +9108,9 @@ def test_dispatch_checks_live_adapter_listing(tmp_path, monkeypatch, model, effo
         assert json.loads((state / "capabilities.json").read_text())["agy"]["models"] == ["gemini-old"]
     if expected == "invalid":
         assert record["status"] == "model_unavailable"
+        assert record["model_check"] == "invalid"
+        assert "gemini-vlaid" in record["model_check_detail"]
+        assert "gemini-valid" in record["model_check_detail"]
         assert "gemini-vlaid" in record["fix"] and "gemini-valid" in record["fix"]
         assert not launched.exists()
     else:
