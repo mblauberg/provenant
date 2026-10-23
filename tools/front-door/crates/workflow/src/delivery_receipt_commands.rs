@@ -632,6 +632,155 @@ pub fn command_review_add(
     })
 }
 
+pub fn command_show(
+    run_dir: &Path,
+    host: &impl ReceiptCommandHost,
+) -> Result<ReceiptValue, ReceiptCommandError> {
+    let (run_dir, _) = host.resolve_run_dir(run_dir)?;
+    Ok(ReceiptValue::Object(vec![(
+        "_raw_receipt".to_owned(),
+        host.show_locked(&run_dir)?,
+    )]))
+}
+
+pub fn command_repair(
+    args: &RepairArgs,
+    host: &impl ReceiptCommandHost,
+) -> Result<Value, ReceiptCommandError> {
+    if args.reason.is_empty() {
+        return Err(ReceiptCommandError::Refused(
+            "repair requires a reason".into(),
+        ));
+    }
+    let failing = args
+        .failing
+        .iter()
+        .map(|value| host.require_identifier(value, "failing check id"))
+        .collect::<Result<Vec<_>, _>>()?;
+    let run_dir = args.run_dir.clone();
+    host.mutate_run(&run_dir, |run, run_dir, _workspace| {
+        let cycles = nonnegative_integer(run.get("repair_cycles"))
+            .filter(|_| !run.get("repair_cycles").is_some_and(Value::is_boolean))
+            .ok_or_else(|| {
+                ReceiptCommandError::Refused("repair_cycles must be a non-negative integer".into())
+            })?;
+        let cycles = cycles
+            .checked_add(1)
+            .ok_or(ReceiptCommandError::NumberOutOfRange)?;
+        run.insert_object("repair_cycles", Value::Number(cycles.into()))?;
+        let checkpoint = run
+            .get_mut("checkpoint")
+            .and_then(Value::as_object_mut)
+            .ok_or_else(|| ReceiptCommandError::Refused("checkpoint is invalid".into()))?;
+        let generation_value = checkpoint
+            .get("generation")
+            .ok_or_else(|| ReceiptCommandError::Refused("checkpoint is invalid".into()))?;
+        // Python's isinstance(True, int) is true in this command.
+        let generation =
+            increment_python_integer(generation_value).map_err(|error| match error {
+                ReceiptCommandError::NumberOutOfRange => error,
+                _ => ReceiptCommandError::Refused("checkpoint is invalid".into()),
+            })?;
+        checkpoint.insert("generation".into(), Value::Number(generation.clone()));
+        checkpoint.insert("next_action".into(), Value::String(args.reason.clone()));
+        let mut unique = failing;
+        unique.sort();
+        unique.dedup();
+        host.append_jsonl(
+            &run_dir.join("repairs.jsonl"),
+            &ReceiptValue::Object(vec![
+                ("cycle".into(), ReceiptValue::Number(cycles.into())),
+                ("at".into(), ReceiptValue::String(host.utc_now())),
+                (
+                    "failing_before".into(),
+                    ReceiptValue::Array(unique.into_iter().map(ReceiptValue::String).collect()),
+                ),
+            ]),
+        )?;
+        Ok(serde_json::json!({"repair_cycles": cycles}))
+    })
+}
+
+pub fn command_finding(
+    args: &FindingArgs,
+    host: &impl ReceiptCommandHost,
+) -> Result<Value, ReceiptCommandError> {
+    host.require_identifier(&args.review, "review id")?;
+    host.require_identifier(&args.finding, "finding id")?;
+    for (value, field) in [
+        (args.reviewer_family.as_deref(), "reviewer-family"),
+        (args.model.as_deref(), "model"),
+        (args.reviewer_id.as_deref(), "reviewer-id"),
+    ] {
+        if let Some(value) = value {
+            host.require_identifier(value, field)?;
+        }
+    }
+    if let Some(value) = args
+        .duplicate_of
+        .as_deref()
+        .filter(|value| !value.is_empty())
+    {
+        host.require_identifier(value, "duplicate-of finding id")?;
+    }
+    if args.disposition == "duplicate"
+        && args
+            .duplicate_of
+            .as_deref()
+            .filter(|value| !value.is_empty())
+            .is_none()
+    {
+        return Err(ReceiptCommandError::Refused(
+            "duplicate disposition requires --duplicate-of".into(),
+        ));
+    }
+    if args.disposition != "duplicate"
+        && args
+            .duplicate_of
+            .as_deref()
+            .is_some_and(|value| !value.is_empty())
+    {
+        return Err(ReceiptCommandError::Refused(
+            "--duplicate-of requires duplicate disposition".into(),
+        ));
+    }
+    let run_dir = args.run_dir.clone();
+    host.mutate_run(&run_dir, |_run, run_dir, _workspace| {
+        let mut row = vec![
+            (
+                "review_id".into(),
+                ReceiptValue::String(args.review.clone()),
+            ),
+            ("finding".into(), ReceiptValue::String(args.finding.clone())),
+            (
+                "disposition".into(),
+                ReceiptValue::String(args.disposition.clone()),
+            ),
+        ];
+        if let Some(value) = &args.severity {
+            row.push(("severity".into(), ReceiptValue::String(value.clone())));
+        }
+        if let Some(value) = &args.duplicate_of {
+            row.push(("duplicate_of".into(), ReceiptValue::String(value.clone())));
+        }
+        row.push(("at".into(), ReceiptValue::String(host.utc_now())));
+        if let Some(value) = &args.reviewer_family {
+            row.push((
+                "reviewer_family".into(),
+                ReceiptValue::String(value.clone()),
+            ));
+        }
+        if let Some(value) = &args.model {
+            row.push(("model".into(), ReceiptValue::String(value.clone())));
+        }
+        if let Some(value) = &args.reviewer_id {
+            row.push(("reviewer_id".into(), ReceiptValue::String(value.clone())));
+        }
+        host.append_jsonl(&run_dir.join("findings.jsonl"), &ReceiptValue::Object(row))?;
+        Ok(serde_json::json!({"finding": args.finding, "disposition": args.disposition}))
+    })
+}
+
 fn find_artifact<'a>(run: &'a Value, artifact_id: &str) -> Result<&'a Value, ReceiptCommandError> {
     run.get("artifacts")
         .and_then(Value::as_array)
@@ -649,6 +798,31 @@ fn nonnegative_integer(value: Option<&Value>) -> Option<u64> {
     value
         .as_u64()
         .or_else(|| value.as_i64().and_then(|value| u64::try_from(value).ok()))
+}
+
+fn increment_python_integer(value: &Value) -> Result<Number, ReceiptCommandError> {
+    match value {
+        Value::Bool(value) => Ok(Number::from(u64::from(*value) + 1)),
+        Value::Number(number) if number.is_i64() => {
+            let value = number
+                .as_i64()
+                .ok_or(ReceiptCommandError::NumberOutOfRange)?;
+            if value == i64::MAX {
+                Ok(Number::from(i64::MAX as u64 + 1))
+            } else {
+                value
+                    .checked_add(1)
+                    .map(Number::from)
+                    .ok_or(ReceiptCommandError::NumberOutOfRange)
+            }
+        }
+        Value::Number(number) if number.is_u64() => number
+            .as_u64()
+            .and_then(|value| value.checked_add(1))
+            .map(Number::from)
+            .ok_or(ReceiptCommandError::NumberOutOfRange),
+        _ => Err(ReceiptCommandError::Refused("checkpoint is invalid".into())),
+    }
 }
 
 fn dedup_strings(values: &[String]) -> Vec<String> {
@@ -703,9 +877,138 @@ fn python_float_g(value: f64) -> String {
     }
 }
 
+trait ValueObjectMutation {
+    fn insert_object(&mut self, key: &str, value: Value) -> Result<(), ReceiptCommandError>;
+}
+
+impl ValueObjectMutation for Value {
+    fn insert_object(&mut self, key: &str, value: Value) -> Result<(), ReceiptCommandError> {
+        self.as_object_mut()
+            .ok_or_else(|| ReceiptCommandError::Refused("receipt must be an object".into()))?
+            .insert(key.to_owned(), value);
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::RefCell;
+
+    struct RepairHost {
+        run: RefCell<Value>,
+        appended: RefCell<Vec<ReceiptValue>>,
+    }
+
+    impl RepairHost {
+        fn unexpected(&self) -> ReceiptCommandError {
+            ReceiptCommandError::Refused("unexpected repair host operation".into())
+        }
+    }
+
+    impl ReceiptCommandHost for RepairHost {
+        fn require_identifier(
+            &self,
+            value: &str,
+            _field: &str,
+        ) -> Result<String, ReceiptCommandError> {
+            if value.is_empty() {
+                Err(ReceiptCommandError::Refused("identifier is empty".into()))
+            } else {
+                Ok(value.to_owned())
+            }
+        }
+
+        fn safe_workspace_path(
+            &self,
+            _workspace: &Path,
+            _value: &str,
+            _field: &str,
+        ) -> Result<(PathBuf, String), ReceiptCommandError> {
+            Err(self.unexpected())
+        }
+
+        fn ensure_allowed_source_target(
+            &self,
+            _run: &Value,
+            _workspace: &Path,
+            _target: &Path,
+        ) -> Result<(), ReceiptCommandError> {
+            Err(self.unexpected())
+        }
+
+        fn ensure_allowed_artifact_target(
+            &self,
+            _run: &Value,
+            _workspace: &Path,
+            _target: &Path,
+        ) -> Result<(), ReceiptCommandError> {
+            Err(self.unexpected())
+        }
+
+        fn read_file(&self, _path: &Path) -> Result<Option<Vec<u8>>, ReceiptCommandError> {
+            Err(self.unexpected())
+        }
+
+        fn path_exists(&self, _path: &Path) -> Result<bool, ReceiptCommandError> {
+            Err(self.unexpected())
+        }
+
+        fn path_is_file(&self, _path: &Path) -> Result<bool, ReceiptCommandError> {
+            Err(self.unexpected())
+        }
+
+        fn digest_bytes(&self, _bytes: &[u8]) -> String {
+            String::new()
+        }
+
+        fn utc_now(&self) -> String {
+            "2026-10-23T00:00:00Z".into()
+        }
+
+        fn profile_judgement_gate(&self, _profile: &str) -> Result<String, ReceiptCommandError> {
+            Err(self.unexpected())
+        }
+
+        fn ensure_new_evidence_id(
+            &self,
+            _run: &Value,
+            _evidence_id: &str,
+        ) -> Result<(), ReceiptCommandError> {
+            Err(self.unexpected())
+        }
+
+        fn append_jsonl(
+            &self,
+            _path: &Path,
+            row: &ReceiptValue,
+        ) -> Result<(), ReceiptCommandError> {
+            self.appended.borrow_mut().push(row.clone());
+            Ok(())
+        }
+
+        fn resolve_run_dir(
+            &self,
+            _value: &Path,
+        ) -> Result<(PathBuf, PathBuf), ReceiptCommandError> {
+            Err(self.unexpected())
+        }
+
+        fn show_locked(&self, _run_dir: &Path) -> Result<ReceiptValue, ReceiptCommandError> {
+            Err(self.unexpected())
+        }
+
+        fn mutate_run<F>(&self, _run_dir: &Path, apply: F) -> Result<Value, ReceiptCommandError>
+        where
+            F: FnOnce(&mut Value, &Path, &Path) -> Result<Value, ReceiptCommandError>,
+        {
+            apply(
+                &mut self.run.borrow_mut(),
+                Path::new("run"),
+                Path::new("workspace"),
+            )
+        }
+    }
 
     #[test]
     fn measurement_comparison_uses_python_integer_float_equality() {
@@ -798,5 +1101,78 @@ mod tests {
             })
             .collect::<Vec<_>>();
         assert_eq!(serde_json::json!(actual), expected);
+    }
+
+    #[test]
+    fn receipt_counters_cover_u64_range_and_python_bool_repair_generation() {
+        let first_upper_i64 = serde_json::json!(9_223_372_036_854_775_808_u64);
+        assert_eq!(
+            nonnegative_integer(Some(&first_upper_i64)),
+            Some(9_223_372_036_854_775_808)
+        );
+        assert_eq!(
+            increment_python_integer(&first_upper_i64).unwrap().as_u64(),
+            Some(9_223_372_036_854_775_809)
+        );
+        assert_eq!(
+            increment_python_integer(&Value::Bool(true))
+                .unwrap()
+                .as_u64(),
+            Some(2)
+        );
+        assert!(matches!(
+            increment_python_integer(&serde_json::json!(u64::MAX)),
+            Err(ReceiptCommandError::NumberOutOfRange)
+        ));
+    }
+
+    #[test]
+    fn command_repair_i64_boundary_matches_python_and_u64_overflow_is_typed() {
+        let cases = serde_json::json!([
+            {"run":{"repair_cycles":0,"checkpoint":{"generation":9223372036854775807_i64}}},
+            {"run":{"repair_cycles":0,"checkpoint":{"generation":18446744073709551615_u64}}}
+        ]);
+        let expected =
+            crate::test_support::oracle_script("oracle_receipts.py", "command_repair", &cases)
+                .expect("required by PROVENANT_PORT_DIFF_REQUIRED");
+
+        let first = &cases[0]["run"];
+        let host = RepairHost {
+            run: RefCell::new(first.clone()),
+            appended: RefCell::new(Vec::new()),
+        };
+        let args = RepairArgs {
+            run_dir: PathBuf::from("run"),
+            reason: "repair".into(),
+            failing: vec!["check-a".into()],
+        };
+        let result = command_repair(&args, &host).unwrap();
+        let run = host.run.borrow();
+        let rows = host
+            .appended
+            .borrow()
+            .iter()
+            .map(serde_json::to_value)
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        let actual = serde_json::json!({
+            "result":result,
+            "generation":run["checkpoint"]["generation"].to_string(),
+            "repair_cycles":run["repair_cycles"].to_string(),
+            "repairs":rows
+        });
+        assert_eq!(actual, expected[0]);
+
+        let second = &cases[1]["run"];
+        let overflow_host = RepairHost {
+            run: RefCell::new(second.clone()),
+            appended: RefCell::new(Vec::new()),
+        };
+        assert_eq!(expected[1]["generation"], "18446744073709551616");
+        assert!(matches!(
+            command_repair(&args, &overflow_host),
+            Err(ReceiptCommandError::NumberOutOfRange)
+        ));
+        assert!(overflow_host.appended.borrow().is_empty());
     }
 }
