@@ -290,6 +290,7 @@ def build_parser(api: dict[str, Any]) -> argparse.ArgumentParser:
     for name in ("run-dir", "run-id", "profile", "chair-family", "risk-assessment", "intent", "authority"):
         init.add_argument(f"--{name}", required=True)
     init.add_argument("--fabric-relationships")
+    init.add_argument("--writer-model", help="known model identifier used by the implementation writer")
     init.add_argument("--risk-tier", choices=api["RISKS"])
     init.add_argument("--risk-override")
     init.add_argument("--requires-user-acceptance", action="store_true")

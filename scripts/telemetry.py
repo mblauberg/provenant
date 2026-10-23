@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
+import fcntl
 import hashlib
 import importlib.util
 from collections import Counter
@@ -17,10 +19,17 @@ import re
 import sqlite3
 import subprocess
 import sys
+import time
 from types import SimpleNamespace
 
 
 SOURCES = ('fabric', 'route_health', 'cooldowns', 'claude', 'codex', 'opencode', 'otel', 'delivery')
+AUTO_INGEST_INTERVAL_ENV = 'PROVENANT_TELEMETRY_AUTO_INGEST_SECONDS'
+AUTO_INGEST_INTERVAL_DEFAULT = 3600
+SQLITE_BUSY_TIMEOUT_SECONDS = 5
+SQLITE_PROBE_TIMEOUT_SECONDS = 0
+SQLITE_READ_RETRIES = 3
+SQLITE_READ_RETRY_SECONDS = 0.05
 
 
 def iso(moment):
@@ -125,31 +134,56 @@ class LedgerSchemaMismatch(ValueError):
     pass
 
 
-def connect(readonly=False, warn=False):
+def connect(readonly=False, warn=False, timeout=None):
     path = state_root() / 'telemetry.sqlite3'
     if readonly:
         if not path.is_file():
             return _empty_ledger(warn)
-        db = sqlite3.connect(path.resolve().as_uri() + '?mode=ro', uri=True)
-        db.row_factory = sqlite3.Row
-        try:
-            tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-            version = db.execute('PRAGMA user_version').fetchone()[0]
-            if version not in range(SCHEMA_VERSION + 1):
-                raise LedgerSchemaMismatch(f'unsupported telemetry schema version: {version}')
-            if version == 0 or 'sources' not in tables:
-                db.close()
-                return _empty_ledger(warn)
-            if version < SCHEMA_VERSION:
-                raise LedgerSchemaMismatch(
-                    f'telemetry schema version {version} needs migration; run provenant telemetry ingest')
-            load_hosts(db)
-        except BaseException:
-            db.close()
-            raise
-        return db
+        attempts = SQLITE_READ_RETRIES + 1 if timeout is None else 1
+        delay = SQLITE_READ_RETRY_SECONDS if timeout is None else 0
+        wait = SQLITE_READ_RETRY_SECONDS if timeout is None else timeout
+        for attempt in range(attempts):
+            db = None
+            try:
+                db = sqlite3.connect(path.resolve().as_uri() + '?mode=ro', uri=True, timeout=wait)
+                db.execute(f'PRAGMA busy_timeout = {int(wait * 1000)}')
+                db.row_factory = sqlite3.Row
+                tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+                version = db.execute('PRAGMA user_version').fetchone()[0]
+                if version not in range(SCHEMA_VERSION + 1):
+                    raise LedgerSchemaMismatch(f'unsupported telemetry schema version: {version}')
+                if version == 0 or 'sources' not in tables:
+                    db.close()
+                    return _empty_ledger(warn)
+                if version < SCHEMA_VERSION:
+                    raise LedgerSchemaMismatch(
+                        f'telemetry schema version {version} needs migration; run provenant telemetry ingest')
+                load_hosts(db)
+                if timeout is None:
+                    # The short wait guards only the open; report queries wait like writers do.
+                    db.execute(f'PRAGMA busy_timeout = {int(SQLITE_BUSY_TIMEOUT_SECONDS * 1000)}')
+                return db
+            except sqlite3.OperationalError as exc:
+                if db is not None:
+                    db.close()
+                message = str(exc).lower()
+                if 'locked' not in message and 'busy' not in message:
+                    raise
+                if attempt + 1 < attempts:
+                    time.sleep(delay)
+                    continue
+                if warn:
+                    print('telemetry: ledger is locked; reporting an empty ledger', file=sys.stderr)
+                    return _empty_ledger(False)
+                raise
+            except BaseException:
+                if db is not None:
+                    db.close()
+                raise
     path.parent.mkdir(parents=True, exist_ok=True)
-    return _prepare(sqlite3.connect(path))
+    db = sqlite3.connect(path, timeout=SQLITE_BUSY_TIMEOUT_SECONDS)
+    db.execute(f'PRAGMA busy_timeout = {int(SQLITE_BUSY_TIMEOUT_SECONDS * 1000)}')
+    return _prepare(db)
 
 
 def _empty_ledger(warn):
@@ -223,14 +257,23 @@ def _prepare(db):
         CREATE TABLE IF NOT EXISTS deliveries (
             run_dir TEXT PRIMARY KEY, host TEXT, run_id TEXT, risk_tier TEXT, chair_family TEXT,
             repair_cycles INTEGER, acceptance_basis TEXT, accepted INTEGER NOT NULL DEFAULT 0,
-            merge_commit TEXT, ingested_at TEXT);
+            merge_commit TEXT, ingested_at TEXT, writer_model TEXT,
+            review_verdicts TEXT NOT NULL DEFAULT '[]');
     ''')
+    delivery_columns = {row[1] for row in db.execute('PRAGMA table_info(deliveries)')}
+    if 'writer_model' not in delivery_columns:
+        db.execute('ALTER TABLE deliveries ADD COLUMN writer_model TEXT')
+    if 'review_verdicts' not in delivery_columns:
+        db.execute("ALTER TABLE deliveries ADD COLUMN review_verdicts TEXT NOT NULL DEFAULT '[]'")
     delivery_columns = {row[1] for row in db.execute('PRAGMA table_info(deliveries)')}
     if 'started_at' not in delivery_columns:
         db.execute('ALTER TABLE deliveries ADD COLUMN started_at TEXT')
     if db.execute("SELECT 1 FROM meta WHERE key='delivery_run_time_v2'").fetchone() is None:
         db.execute("DELETE FROM cursors WHERE source='delivery' AND path LIKE '%/RUN.json'")
         db.execute("INSERT OR IGNORE INTO meta VALUES ('delivery_run_time_v2', ?)", (now(),))
+    if db.execute("SELECT 1 FROM meta WHERE key='delivery_receipt_fields_v1'").fetchone() is None:
+        db.execute("DELETE FROM cursors WHERE source='delivery' AND path LIKE '%/RUN.json'")
+        db.execute("INSERT OR IGNORE INTO meta VALUES ('delivery_receipt_fields_v1', ?)", (now(),))
     observation_columns = {row[1] for row in db.execute('PRAGMA table_info(observations)')}
     if 'origin_path' not in observation_columns:
         db.execute('ALTER TABLE observations ADD COLUMN origin_path TEXT')
@@ -699,8 +742,11 @@ def this():
 
 @cache
 def ingest_owner():
-    import telemetry_ingest
-    return telemetry_ingest
+    spec = importlib.util.spec_from_file_location(
+        'provenant_telemetry_ingest', Path(__file__).with_name('telemetry_ingest.py'))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 @cache
@@ -781,6 +827,90 @@ def changes_owner():
     return module
 
 
+@contextmanager
+def ingest_lock():
+    """Take the per-ledger writer lock without waiting behind another ingest."""
+    path = state_root() / 'telemetry.sqlite3.lock'
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open('a') as stream:
+        try:
+            fcntl.flock(stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            yield False
+            return
+        try:
+            yield True
+        finally:
+            fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
+
+
+def auto_ingest_interval():
+    raw = os.environ.get(AUTO_INGEST_INTERVAL_ENV)
+    if raw is None:
+        return AUTO_INGEST_INTERVAL_DEFAULT
+    try:
+        value = float(raw)
+        if not math.isfinite(value) or value < 0:
+            raise ValueError
+        return value
+    except ValueError:
+        print(f'telemetry: invalid {AUTO_INGEST_INTERVAL_ENV}; using {AUTO_INGEST_INTERVAL_DEFAULT}',
+              file=sys.stderr)
+        return AUTO_INGEST_INTERVAL_DEFAULT
+
+
+def auto_ingest_due():
+    """Whether an ordinary report should refresh the ledger before reading it."""
+    path = state_root() / 'telemetry.sqlite3'
+    if not path.is_file():
+        return True
+    try:
+        with connect(readonly=True, timeout=SQLITE_PROBE_TIMEOUT_SECONDS) as db:
+            tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+            if 'sources' not in tables:
+                return True
+            sources = {row['source']: row['last_ingest']
+                       for row in db.execute('SELECT source,last_ingest FROM sources')}
+            if set(sources) != set(SOURCES):
+                return True
+            delivery_columns = {row[1] for row in db.execute('PRAGMA table_info(deliveries)')}
+            if not {'writer_model', 'review_verdicts'}.issubset(delivery_columns):
+                return True
+            if db.execute("SELECT 1 FROM meta WHERE key='delivery_receipt_fields_v1'").fetchone() is None:
+                return True
+            threshold = auto_ingest_interval()
+            current = datetime.now(UTC)
+            for stamp in sources.values():
+                try:
+                    if stamp is None or (current - since_time(stamp)).total_seconds() > threshold:
+                        return True
+                except (TypeError, ValueError):
+                    return True
+            return False
+    except (OSError, ValueError, sqlite3.Error):
+        # Missing, uninitialised or out-of-date ledgers need the writable initializer.
+        return True
+
+
+def auto_ingest_before_query():
+    if not auto_ingest_due():
+        return
+    try:
+        with ingest_lock() as acquired:
+            if not acquired:
+                print('telemetry: ingest already running; reporting the available ledger', file=sys.stderr)
+                return
+            with connect() as db:
+                rows = ingest_owner().ingest(this(), db)
+        failed = [row['source'] for row in rows if row['status'] == 'error']
+        if failed:
+            print(f"telemetry: auto-ingest failed for {', '.join(failed)}; reporting the available ledger",
+                  file=sys.stderr)
+    except Exception as exc:
+        label = str(exc) if isinstance(exc, LedgerSchemaMismatch) else type(exc).__name__
+        print(f'telemetry: auto-ingest failed ({label}); reporting the available ledger', file=sys.stderr)
+
+
 def report_changes(db, args):
     """`changes`, `stats --compare` and `retro`; full reports with --json, compact text otherwise."""
     owner = changes_owner()
@@ -839,7 +969,27 @@ def main(argv=None):
     try:
         if args.since:
             since_time(args.since)
+        reads_report = (args.command in {'stats', 'retro'} or
+                        args.command == 'changes' and not (args.sync or args.add) or
+                        bool(args.compare))
+        if reads_report:
+            auto_ingest_before_query()
         read_only = args.command != 'ingest' and not (args.command == 'changes' and (args.sync or args.add))
+        if args.command == 'ingest':
+            with ingest_lock() as acquired:
+                if not acquired:
+                    print('telemetry: ingest already running; skipped', file=sys.stderr)
+                    return 0
+                with connect() as db:
+                    rows = ingest_owner().ingest(this(), db)
+            if args.json:
+                print(json.dumps(rows, indent=2))
+            else:
+                for row in rows:
+                    print(f"{row['source']}: {row['status']} rows={row['row_count']} "
+                          f"parser={row['parser_version']} last={row['last_ingest'] or '-'} "
+                          f"{row['path_pattern']}")
+            return int(any(row['status'] == 'error' for row in rows))
         with connect(readonly=read_only, warn=True) as db:
             if args.command in {'changes', 'retro'} or args.compare:
                 return report_changes(db, args)
@@ -852,8 +1002,7 @@ def main(argv=None):
                 return 0
             if args.command == 'accepted':
                 return delivery_owner().run_accepted(this(), db, args.since, args.json)
-            rows = ingest_owner().ingest(this(), db) if args.command == 'ingest' else [
-                dict(row) for row in db.execute('SELECT * FROM sources ORDER BY source')]
+            rows = [dict(row) for row in db.execute('SELECT * FROM sources ORDER BY source')]
         if args.json:
             print(json.dumps(rows, indent=2))
         else:

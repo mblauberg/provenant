@@ -91,8 +91,22 @@ def codex_record(telemetry, db, row, state, path, offset, account=None, owner=No
                             window_minutes=telemetry.number(value.get('window_minutes')), reset_at=reset_at)
 
 
-# OTLP attributes kept beside every numeric one; any other string may carry content.
-OTEL_STRINGS = frozenset({'model', 'effort', 'type', 'tool_name', 'decision', 'source', 'success', 'status_code'})
+# Only known event kinds and telemetry fields are persisted. Exporters also
+# attach prompt, response, account and tool payloads to the same records.
+OTEL_EVENT_ATTRIBUTES = {
+    'user_prompt': frozenset({'prompt_length'}),
+    'tool_decision': frozenset({'tool_name', 'decision'}),
+}
+OTEL_EVENT_ATTRIBUTES.update({f'codex.{name}': fields for name, fields in OTEL_EVENT_ATTRIBUTES.items()})
+OTEL_ALLOWED_LOGS = frozenset({'api_request', 'codex.api_request', *OTEL_EVENT_ATTRIBUTES})
+OTEL_STRING_ATTRIBUTES = frozenset({'model', 'effort', 'type', 'tool_name', 'decision'})
+OTEL_BOOL_ATTRIBUTES = frozenset({'success'})
+OTEL_NUMERIC_ATTRIBUTES = frozenset({
+    'input_tokens', 'output_tokens', 'cache_read_tokens', 'cache_creation_tokens',
+    'cache_creation_5m_tokens', 'cache_creation_1h_tokens', 'cost_usd', 'cost_usd_micros',
+    'duration_ms', 'ttft_ms', 'prompt_length', 'response_length', 'tool_input_size_bytes',
+    'tool_result_size_bytes', 'attempt', 'http.response.status_code',
+})
 
 
 def otel_attributes(items):
@@ -133,13 +147,24 @@ def otel_record(telemetry, db, row, state, path, offset):
                 for point in points:
                     index += 1
                     attributes = otel_attributes(point.get('attributes'))
-                    kept = {key: value for key, value in attributes.items()
-                            if key in OTEL_STRINGS or isinstance(value, (int, float))}
                     if signal == 'logs':
-                        name = re.sub(r'[^a-z0-9_.]', '_', str(attributes.get('event.name') or 'log').lower())
+                        raw_name = str(attributes.get('event.name') or 'log').lower()
+                        if raw_name not in OTEL_ALLOWED_LOGS:
+                            continue
+                        name = re.sub(r'[^a-z0-9_.]', '_', raw_name)
                         kind = f'otel.{name}'
                     else:
                         kind, value = 'otel.metric', point.get('asInt', point.get('asDouble'))
+                    if signal == 'logs' and raw_name in OTEL_EVENT_ATTRIBUTES:
+                        allowed = OTEL_EVENT_ATTRIBUTES[raw_name]
+                    else:
+                        allowed = (OTEL_STRING_ATTRIBUTES | OTEL_BOOL_ATTRIBUTES |
+                                   OTEL_NUMERIC_ATTRIBUTES)
+                    kept = {key: value for key, value in attributes.items()
+                            if key in allowed and (key in OTEL_STRING_ATTRIBUTES and isinstance(value, str) or
+                                                   key in OTEL_BOOL_ATTRIBUTES and isinstance(value, bool) or
+                                                   key in OTEL_NUMERIC_ATTRIBUTES and isinstance(value, (int, float)))}
+                    if signal != 'logs':
                         kept.update(name=record.get('name'), value=float(value) if value is not None else None,
                                     temporality=(record.get('sum') or {}).get('aggregationTemporality'))
                     telemetry.put_event(db, kind, otel_stamp(telemetry, point.get('timeUnixNano'), row.get('received_at')),

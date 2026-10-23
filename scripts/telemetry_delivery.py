@@ -58,20 +58,51 @@ def ingest_receipt(telemetry, db, path):
                      if isinstance(item, dict) and item.get('id') == canonical_id), {})
     revision = artifact.get('git_revision') or {}
     commit = revision.get('commit') if isinstance(revision, dict) else None
+    writer_model = receipt.get('writer_model')
+    reviews = []
+    for review in receipt.get('reviews') or ():
+        if not isinstance(review, dict):
+            continue
+        verdict = review.get('verdict') or review.get('status')
+        if verdict is None:
+            continue
+        reviews.append({key: review[key] for key in
+                        ('id', 'role', 'provider_family', 'model', 'lenses') if key in review} |
+                       {'verdict': verdict})
     started = _run_timestamp(telemetry, receipt, stat.st_mtime)
     db.execute('''INSERT INTO deliveries
-        (run_dir,host,run_id,risk_tier,chair_family,repair_cycles,acceptance_basis,accepted,merge_commit,ingested_at,started_at)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?)
+        (run_dir,host,run_id,risk_tier,chair_family,repair_cycles,acceptance_basis,accepted,merge_commit,ingested_at,started_at,
+         writer_model,review_verdicts)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
         ON CONFLICT(run_dir) DO UPDATE SET host=excluded.host,run_id=excluded.run_id,
         risk_tier=excluded.risk_tier,chair_family=excluded.chair_family,
         repair_cycles=excluded.repair_cycles,acceptance_basis=excluded.acceptance_basis,
         accepted=excluded.accepted,merge_commit=excluded.merge_commit,ingested_at=excluded.ingested_at,
-        started_at=excluded.started_at''',
+        started_at=excluded.started_at,writer_model=excluded.writer_model,
+        review_verdicts=excluded.review_verdicts''',
                (str(path.parent.resolve()), telemetry.host_id(), receipt.get('run_id'), receipt.get('risk_tier'),
                 receipt.get('chair_family'), receipt.get('repair_cycles'), basis, int(basis is not None),
-                commit, telemetry.now(), started))
+                commit, telemetry.now(), started, writer_model, json.dumps(reviews, sort_keys=True)))
     db.execute('INSERT OR REPLACE INTO cursors VALUES (?,?,?,?,?,?)',
                ('delivery', str(path), stat.st_size, stat.st_mtime_ns, stat.st_size, '{}'))
+
+
+def report_deliveries(telemetry, db, since=None):
+    """Structured writer and review outcomes recorded on delivery receipts."""
+    boundary = telemetry.since_time(since) if since else None
+    deliveries = []
+    for row in db.execute('''SELECT run_id,started_at,risk_tier,chair_family,writer_model,review_verdicts
+                             FROM deliveries ORDER BY started_at,run_id'''):
+        if boundary and (not row['started_at'] or telemetry.since_time(row['started_at']) < boundary):
+            continue
+        try:
+            reviews = json.loads(row['review_verdicts'] or '[]')
+        except (TypeError, ValueError):
+            reviews = []
+        deliveries.append({'run_id': row['run_id'], 'started_at': row['started_at'],
+                           'risk_tier': row['risk_tier'], 'chair_family': row['chair_family'],
+                           'writer_model': row['writer_model'], 'review_verdicts': reviews})
+    return deliveries
 
 
 def cost_per_accepted(telemetry, db, since=None):
