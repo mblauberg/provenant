@@ -350,7 +350,7 @@ def test_claude_limits_take_the_length_of_the_named_window_they_repeat(quota, mo
     assert lengths['anese'] == {'five_hour': 300, 'seven_day': WEEK, 'iguana_necktie': None, 'session:1': 300}
     assert lengths['pro'] == {'five_hour': 300, 'seven_day': WEEK, 'weekly_all:2': WEEK}
     replies = {'anese': anese, 'pro': pro}
-    monkeypatch.setattr(quota, 'fetch', lambda account, now: claude.parse(replies[account.label]))
+    monkeypatch.setattr(quota, 'fetch', lambda account, _now: claude.parse(replies[account.label]))
     values = [quota.refresh(quota.Account('claude', label, Path('/nowhere') / label, False), NOW, force=True)
               for label in replies]
     states = {row['account']: row['state'] for row in quota_display.report(vars(quota), values, NOW)['accounts']}
