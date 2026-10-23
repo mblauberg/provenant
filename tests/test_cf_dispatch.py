@@ -1535,7 +1535,7 @@ def test_unwritable_output_path_cannot_certify_success(tmp_path):
 @pytest.mark.parametrize(
     "case_args,models,expected_alias,expected_model,requested_effort,effort,extra_absent,check_effort_fields,check_catalog_fields,check_argv,check_unquoted_xhigh",
     [
-        pytest.param(["--role", "critical-review"], {"gpt-6-astra": ["high"]}, "principal", "gpt-6-astra", "xhigh", "high", [], True, True, False, True, id="critical-review-effort-substitution"),
+        pytest.param(["--role", "critical-review"], {"gpt-6-astra": ["high"]}, "principal", "gpt-6-astra", "xhigh", "high", [], True, True, True, True, id="critical-review-effort-substitution"),
         pytest.param([], {"gpt-6-luna": ["medium", "high"], "gpt-6.1-sol": ["medium", "high", "max"]}, "senior", "gpt-6.1-sol", "medium", "medium", ["gpt-6-luna", "gpt-6-astra"], True, False, True, False, id="bare-dispatch-defaults-to-senior"),
         pytest.param(["--role", "critical-review"], {"gpt-6-luna": ["medium"], "gpt-6-astra": ["xhigh"]}, "principal", "gpt-6-astra", "xhigh", "xhigh", [], False, False, False, False, id="critical-review-defaults-to-principal"),
     ],
