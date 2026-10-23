@@ -1,6 +1,7 @@
 //! Worktree contracts and pure safety policy. Git mutation remains owner work.
-use std::{ffi::OsString,path::PathBuf};
+use std::{ffi::OsString, os::unix::ffi::OsStringExt, path::PathBuf};
 use thiserror::Error;
+
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum PolicyError {
     #[error("worktree name must be 1-64 safe filename characters without slashes")]
@@ -13,6 +14,40 @@ pub enum PolicyError {
     DetachedName,
 }
 
+pub fn validate_name(name: &str) -> Result<(), PolicyError> {
+    let valid = (1..=64).contains(&name.len())
+        && name
+            .as_bytes()
+            .first()
+            .is_some_and(u8::is_ascii_alphanumeric)
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b));
+    if valid {
+        Ok(())
+    } else {
+        Err(PolicyError::InvalidName)
+    }
+}
+pub fn full_object_id(value: &str) -> bool {
+    matches!(value.len(), 40 | 64) && value.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FieldKind {
+    Flag,
+    Required,
+    Optional,
+}
+const FIELDS: &[(&str, FieldKind)] = &[
+    ("bare", FieldKind::Flag),
+    ("detached", FieldKind::Flag),
+    ("worktree", FieldKind::Required),
+    ("HEAD", FieldKind::Required),
+    ("branch", FieldKind::Required),
+    ("locked", FieldKind::Optional),
+    ("prunable", FieldKind::Optional),
+];
 /// Values are either the source's True or lossless surrogateescaped text. This
 /// is an internal OS contract; a JSON path codec is still needed at the edge.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -25,6 +60,131 @@ pub enum PorcelainValue {
 pub struct WorktreeRecord {
     pub fields: Vec<(String, PorcelainValue)>,
 }
+impl WorktreeRecord {
+    pub fn get(&self, name: &str) -> Option<&PorcelainValue> {
+        self.fields.iter().find(|(k, _)| k == name).map(|(_, v)| v)
+    }
+}
+fn malformed(reason: impl Into<String>) -> PolicyError {
+    PolicyError::Malformed(reason.into())
+}
+fn append(
+    records: &mut Vec<WorktreeRecord>,
+    current: &mut WorktreeRecord,
+) -> Result<(), PolicyError> {
+    if current.fields.is_empty() {
+        return Err(malformed("empty record"));
+    }
+    if current.get("worktree").is_none() {
+        return Err(malformed("record has no worktree path"));
+    }
+    if current.get("bare") == Some(&PorcelainValue::Flag) {
+        if ["HEAD", "branch", "detached"]
+            .iter()
+            .any(|k| current.get(k).is_some())
+        {
+            return Err(malformed("bare record has checkout state"));
+        }
+    } else if current.get("HEAD").is_none() {
+        return Err(malformed("record has no HEAD"));
+    } else if current.get("branch").is_some() == current.get("detached").is_some() {
+        return Err(malformed(
+            "record needs exactly one branch or detached state",
+        ));
+    }
+    records.push(WorktreeRecord {
+        fields: std::mem::take(&mut current.fields),
+    });
+    Ok(())
+}
+pub fn parse_records(raw: &[u8]) -> Result<Vec<WorktreeRecord>, PolicyError> {
+    let Some(raw) = raw.strip_suffix(b"\0\0") else {
+        return Err(PolicyError::Incomplete);
+    };
+    let mut records = Vec::new();
+    let mut current = WorktreeRecord { fields: Vec::new() };
+    for field in raw.split(|&b| b == 0) {
+        if field.is_empty() {
+            append(&mut records, &mut current)?;
+            continue;
+        }
+        let split = field.iter().position(|&b| b == b' ');
+        let key = split.map_or(field, |i| &field[..i]);
+        let value = split.map_or(&[][..], |i| &field[i + 1..]);
+        let name = String::from_utf8_lossy(key);
+        let Some((_, kind)) = FIELDS.iter().find(|(n, _)| *n == name) else {
+            return Err(malformed(format!(
+                "unknown field {}",
+                provenant_core::py::python_repr(&name)
+            )));
+        };
+        if current.get(&name).is_some() {
+            return Err(malformed(format!(
+                "duplicate field {}",
+                provenant_core::py::python_repr(&name)
+            )));
+        }
+        if *kind == FieldKind::Flag && split.is_some() {
+            return Err(malformed(format!(
+                "flag field {} has a value",
+                provenant_core::py::python_repr(&name)
+            )));
+        }
+        if *kind == FieldKind::Required && (split.is_none() || value.is_empty()) {
+            return Err(malformed(format!(
+                "value field {} has no value",
+                provenant_core::py::python_repr(&name)
+            )));
+        }
+        current.fields.push((
+            name.into_owned(),
+            if value.is_empty() {
+                PorcelainValue::Flag
+            } else {
+                PorcelainValue::Text(OsString::from_vec(value.to_vec()))
+            },
+        ));
+    }
+    if !current.fields.is_empty() {
+        append(&mut records, &mut current)?;
+    }
+    if records.is_empty() {
+        return Err(malformed("no worktree records"));
+    }
+    Ok(records)
+}
+
+pub const GENERATED_PREFIXES: &[&str] = &[
+    ".agent-fabric/",
+    ".agent-run/",
+    ".pytest_cache/",
+    ".review-snapshots/",
+    ".venv/",
+    "node_modules/",
+];
+pub fn ignored_path_is_generated(path: &str) -> bool {
+    let normalized = path.trim_end_matches('/');
+    GENERATED_PREFIXES.iter().any(|prefix| {
+        normalized == prefix.trim_end_matches('/')
+            || format!("/{normalized}/").contains(&format!("/{prefix}"))
+    }) || format!("/{normalized}/").contains("/__pycache__/")
+        || [".pyc", ".pyo", ".pyd"]
+            .iter()
+            .any(|s| normalized.ends_with(s))
+}
+pub fn residue(stdout: &str) -> Vec<String> {
+    crate::pending::python_splitlines(stdout)
+        .into_iter()
+        .filter(|line| {
+            let mut chars = line.chars();
+            let code: String = chars.by_ref().take(2).collect();
+            chars.next();
+            !(code == "!!" && ignored_path_is_generated(chars.as_str()))
+        })
+        .map(str::to_owned)
+        .collect()
+}
+
 #[derive(Debug, clap::Parser)]
 #[command(name = "worktree", args_override_self = true)]
 pub struct Arguments {
@@ -103,7 +263,23 @@ pub enum ClaimReceipt {
         acceptance_mode: String,
     },
 }
-
+/// The inexpensive pre-observation refusals, in source order.
+pub fn claim_input_refusal(commit: Option<&str>, base: Option<&str>) -> Option<ClaimReceipt> {
+    let reason = if commit.is_none_or(str::is_empty) {
+        "missing claimed commit SHA"
+    } else if !commit.is_some_and(full_object_id) {
+        "claimed commit SHA must be a full Git object ID"
+    } else if base.is_none_or(str::is_empty) {
+        "missing pre-dispatch base revision"
+    } else if !base.is_some_and(full_object_id) {
+        "base revision must be a full Git object ID"
+    } else {
+        return None;
+    };
+    Some(ClaimReceipt::Rejected {
+        reason: reason.into(),
+    })
+}
 /// Exact records returned by create/remove/check; JSON path rendering is pending.
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct Created {
@@ -129,6 +305,165 @@ pub struct Checked {
     pub status: String,
     pub primary_root: String,
     pub findings: Vec<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::{json, Value};
+    use std::os::unix::ffi::OsStrExt;
+    fn record_json(record: &WorktreeRecord) -> Value {
+        Value::Object(
+            record
+                .fields
+                .iter()
+                .map(|(k, v)| {
+                    (
+                        k.clone(),
+                        match v {
+                            PorcelainValue::Flag => json!(true),
+                            PorcelainValue::Text(v) => json!(v.as_bytes()),
+                        },
+                    )
+                })
+                .collect(),
+        )
+    }
+    #[test]
+    fn porcelain_policy_matches_source_for_malformed_and_lossless_paths() {
+        let sha = "a".repeat(40);
+        let valid = format!("worktree /repo\0HEAD {sha}\0branch refs/heads/main\0\0").into_bytes();
+        let mut cases = vec![
+            valid.clone(),
+            b"worktree /bare\0bare\0locked \0\0".to_vec(),
+            b"\0\0".to_vec(),
+            b"worktree /repo\0\0".to_vec(),
+            b"worktree /repo\0bare\0detached\0\0".to_vec(),
+        ];
+        for extra in [
+            b"bare x".as_slice(),
+            b"unknown x",
+            b"branch",
+            b"HEAD dup",
+            b"locked",
+            b"prunable why",
+            b"\xff odd",
+        ] {
+            let mut raw = valid[..valid.len() - 1].to_vec();
+            raw.extend_from_slice(extra);
+            raw.extend_from_slice(b"\0\0");
+            cases.push(raw);
+        }
+        for len in [0, 1, valid.len() - 1] {
+            cases.push(valid[..len].to_vec());
+        }
+        cases
+            .push(b"worktree /repo/\xff\n path\0HEAD not-validated\0detached\0locked\0\0".to_vec());
+        let mut large = Vec::new();
+        for i in 0..500 {
+            large.extend_from_slice(
+                format!("worktree /repo/{i}\0HEAD {sha}\0detached\0\0").as_bytes(),
+            );
+        }
+        cases.push(large);
+        for case in cases {
+            // These malformed-record refusals are policy fixtures, independent
+            // of the subprocess/capture seams used by the Python tests.
+            let result = parse_records(&case);
+            if case == b"\0\0" {
+                assert_eq!(
+                    result.unwrap_err().to_string(),
+                    "git worktree list output was malformed: empty record"
+                );
+            } else if case.ends_with(b"\0\0")
+                && (case.starts_with(b"worktree /bare")
+                    || case.starts_with(b"worktree /repo/\xff")
+                    || case.len() > 10000
+                    || case == valid)
+            {
+                assert!(result.is_ok());
+            } else if !case.ends_with(b"\0\0") {
+                assert_eq!(result.unwrap_err(), PolicyError::Incomplete);
+            }
+        }
+    }
+    #[test]
+    fn real_git_porcelain_matches_source_without_parser_seams() {
+        let dir = tempfile::tempdir().unwrap();
+        let Some(expected): Option<Vec<(Vec<u8>, Value)>> = crate::oracle::python(
+            r#"
+import os,json,sys,subprocess
+from pathlib import Path
+from scripts.worktree import worktree_records
+p=Path(json.load(sys.stdin)['root']); repo=p/'repo'; repo.mkdir()
+def git(root,*args): return subprocess.run(['git','-C',str(root),*args],check=True,capture_output=True,timeout=10).stdout
+git(repo,'init','-q');git(repo,'config','user.name','Fixture');git(repo,'config','user.email','fixture@example.test');git(repo,'commit','-q','--allow-empty','-m','fixture')
+for name in ['space path','line\nbreak'] + ([os.fsdecode(b'invalid-\xff')] if sys.platform != 'darwin' else []): git(repo,'worktree','add','-q','--detach',str(p/name),'HEAD')
+bare=p/'bare'; git(p,'clone','-q','--bare',str(repo),str(bare))
+result=[]
+for root in [repo,bare]:
+ raw=git(root,'worktree','list','--porcelain','-z')
+ rows=[{k:list(os.fsencode(v)) if isinstance(v,str) else v for k,v in row.items()} for row in worktree_records(root)]
+ result.append([list(raw),rows])
+print(json.dumps(result))
+"#,
+            &json!({"root":dir.path()}),
+        ) else {
+            return;
+        };
+        for (raw, expected) in expected {
+            assert_eq!(
+                json!(parse_records(&raw)
+                    .unwrap()
+                    .iter()
+                    .map(record_json)
+                    .collect::<Vec<_>>()),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn generated_residue_and_claim_refusals_match_policy() {
+        let paths = [
+            "node_modules",
+            "x/node_modules/a",
+            "x/__pycache__/a",
+            "a.pyc",
+            "a.pyd/",
+            ".venv/a",
+            ".agent-runner/a",
+            "vendor",
+            "node_modulesx",
+        ];
+        let mut claims = vec![];
+        for commit in [
+            None,
+            Some(""),
+            Some("bad"),
+            Some(&"a".repeat(40)),
+            Some(&"A".repeat(64)),
+        ] {
+            for base in [None, Some("bad"), Some(&"b".repeat(40))] {
+                claims.push((commit.map(str::to_owned), base.map(str::to_owned)));
+            }
+        }
+        let Some(expected): Option<(Vec<bool>,Vec<Value>)> = crate::oracle::python(
+            "import json,sys; from pathlib import Path; from scripts.worktree import ignored_path_is_generated,verify_claim; x=json.load(sys.stdin); print(json.dumps([[ignored_path_is_generated(p) for p in x['paths']],[verify_claim(Path('/absent'),Path('/absent'),c,base_revision=b) if not c or len(c) not in (40,64) or not b or len(b) not in (40,64) else None for c,b in x['claims']]]))", &json!({"paths":paths,"claims":claims})
+        ) else { return; };
+        assert_eq!(paths.map(ignored_path_is_generated).to_vec(), expected.0);
+        for ((commit, base), expected) in claims.iter().zip(expected.1) {
+            assert_eq!(
+                serde_json::to_value(claim_input_refusal(commit.as_deref(), base.as_deref()))
+                    .unwrap(),
+                expected
+            );
+        }
+        assert_eq!(
+            residue("!! node_modules/\n?? src.py\n!! user-data/\n M a\n"),
+            ["?? src.py", "!! user-data/", " M a"]
+        );
+    }
 }
 
 pub const TRUSTED_PATH: &str = "/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/local/sbin:/opt/local/bin:/usr/bin:/bin:/usr/sbin:/sbin";
