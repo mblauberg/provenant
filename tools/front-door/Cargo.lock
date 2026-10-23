@@ -324,6 +324,12 @@ version = "0.1.0"
 [[package]]
 name = "provenant-core"
 version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+]
 
 [[package]]
 name = "provenant-fabric-mcp"
@@ -332,6 +338,13 @@ version = "0.1.0"
 [[package]]
 name = "provenant-fabric-runtime"
 version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror",
+]
 
 [[package]]
 name = "provenant-fabric-store"
