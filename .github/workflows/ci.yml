@@ -614,7 +614,7 @@ jobs:
   # time. Share the Rust path filter and exercise the front door's release build.
   rust-macos-release:
     name: Rust macOS release smoke
-    runs-on: macos-latest
+    runs-on: macos-15
     timeout-minutes: 20
     permissions:
       contents: read
@@ -625,6 +625,10 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Set Rust temporary directory
+        env:
+          TMPDIR: ${{ runner.temp }}
+        run: printf 'TMPDIR=%s\n' "$TMPDIR" >> "$GITHUB_ENV"
       - name: Install pinned Rust toolchain
         run: rustup toolchain install 1.99.1 --profile minimal
       # No target cache: install builds from a clean target, and cached
