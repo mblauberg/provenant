@@ -48,7 +48,27 @@ def worktree_write(cwd):
     return timestamp(latest) if latest is not None else None, complete
 
 
+def register_capture(attempt_dir, events_path, stderr_path):
+    record = {'events.jsonl': os.path.relpath(events_path, attempt_dir),
+              'stderr.log': os.path.relpath(stderr_path, attempt_dir), 'started_at': timestamp()}
+    atomic_write_contained(attempt_dir, 'watchdog-streams.json', (json.dumps(record) + '\n').encode(),
+                           label='watchdog capture paths')
+
+
+def capture_paths(attempt_dir):
+    data, _ = event_tail(attempt_dir, 'watchdog-streams.json')
+    try:
+        record = json.loads(data)
+        return record if isinstance(record, dict) else {}
+    except ValueError:
+        return {}
+
+
 def event_tail(attempt_dir, name):
+    if name in {'events.jsonl', 'stderr.log'}:
+        active = capture_paths(attempt_dir).get(name)
+        if isinstance(active, str):
+            name = active
     try:
         fd, _, _ = open_contained_regular(attempt_dir, name, os.O_RDONLY, label='watchdog event')
         with os.fdopen(fd, 'rb') as stream:
@@ -78,7 +98,8 @@ def write_observation(attempt_dir, cwd, pid, alive, silent_seconds):
 
 def observe_if_silent(attempt_dir, cwd, pid, alive, started_at, seconds):
     times = [event_tail(attempt_dir, name)[1] for name in ('events.jsonl', 'stderr.log')]
-    last_output = max((value for value in times if value), default=started_at)
+    last_output = max((value for value in times if value),
+                      default=capture_paths(attempt_dir).get('started_at', started_at))
     if not isinstance(last_output, str):
         return
     silent = time.time() - datetime.fromisoformat(last_output.replace('Z', '+00:00')).timestamp()

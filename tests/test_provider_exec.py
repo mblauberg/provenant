@@ -5079,6 +5079,29 @@ def test_all_adapters_observe_silence_without_killing_live_provider(tmp_path, ad
     assert record["exit"] == 0
 
 
+def test_retry_watchdog_and_checkpoint_read_current_capture(tmp_path):
+    module = supervisor()
+    events = tmp_path / "events.jsonl"
+    events.write_text('{"type":"tool_call","name":"old"}\n')
+    (tmp_path / "stderr.log").write_text("old diagnostic")
+    os.utime(events, (time.time() - 600, time.time() - 600))
+    os.utime(tmp_path / "stderr.log", (time.time() - 600, time.time() - 600))
+    plan = fixture_plan(tmp_path,
+        'import time; print(\'{"type":"tool_call","name":"current"}\', flush=True); time.sleep(1.4)',
+        "claude", timeout_seconds=3)
+    plan["silence_seconds"] = 1
+    record = module.execute(plan, tmp_path / "result.md")
+    observation = json.loads((tmp_path / "watchdog.json").read_text())
+    assert observation["last_event_at"] != module.stall_watchdog.timestamp(events.stat().st_mtime)
+    (tmp_path / "watchdog.json").unlink()
+    module.stall_watchdog.observe_if_silent(tmp_path, tmp_path, record["pgid"], True,
+                                           "2000-01-01T00:00:00Z", 300)
+    assert not (tmp_path / "watchdog.json").exists()
+    module.stall_watchdog.checkpoint(tmp_path, tmp_path, record["pgid"])
+    checkpoint = json.loads((tmp_path / "wip-checkpoint.json").read_text())
+    assert '"name": "current"' in checkpoint["last_tool_call"]
+
+
 def test_silent_provider_fails_as_startup_timeout_and_is_reaped(tmp_path):
     child_pid = tmp_path / "child.pid"
     code = f"""import pathlib,subprocess,sys,time

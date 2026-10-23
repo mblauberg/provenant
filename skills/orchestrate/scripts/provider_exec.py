@@ -3777,6 +3777,7 @@ def _run_attempt(
         stderr_path = stderr_path.with_name(stderr_path.name + "." + suffix)
     raw = BoundedCapture(events_path)
     diagnostics = BoundedCapture(stderr_path)
+    stall_watchdog.register_capture(output_path.parent, events_path, stderr_path)
     started_at, started = now(), time.monotonic()
     last_progress, last_progress_at = started, started_at
     resolution, _ = harness_profile.lenient(cwd=Path(plan["cwd"]), environ=control_environment)
