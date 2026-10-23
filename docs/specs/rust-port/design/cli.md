@@ -19,19 +19,19 @@ allowlist. This document owns the command contract every area cites.
 | --- | --- |
 | Cheap help, root and build identity | Implicit Git/probe/stale-checkout work on every invocation. |
 | Top-level dispatch and lane controls | `fabric dispatch`, `fabric run`, named sessions, root `run`, `batch`, `lane` and `reap`; use the run verbs below. Fabric has no run verbs. |
-| Route listing/resolution | Profile mutation, separate quota scheduling/credit commands and public capabilities plumbing. |
+| Route listing/resolution and current quota show/tick | Profile mutation, quota history/credit commands and public capabilities plumbing. |
 | Fabric messaging, tasks, identity and peers | Root host/peer/lease synonyms; redundant CLI forwarding paths. |
 | `telemetry stats` | Ingest/report aliases, retro/change markers, ledger and ledger import. |
 | Worktree creation and explicit cleanup | Implicit post-merge deletion; separate PR polling wrapper. |
 | Checks and recorded hook protocols | Composite `gate`, public utility/schema/Ajv commands, output-digest and roster-advice hooks, npm retry and Python emulation/oracles. |
 
-One internal dependency gates utility deletion: `task_classifier._run_model()`
-uses `utility("extract", …)` through routing's model/shadow chains. Before
-freezing routing flags or deleting that engine/schema, the routing owner must
-publish the missing execution-route design and accept explicit/rules/default
-classification with those calls/config/tests removed, or specify a typed
-internal replacement. No Python bridge or placeholder command may satisfy
-this gate.
+Routing removes `task_classifier._run_model()`, model/shadow chains and their
+`utility("extract", …)` calls/config/tests. No classification selector or
+replacement model call remains.
+Execution-route deletes `utility.py`, `test_utility.py` and `utility-schema.cjs`
+in step 3, which removes `task_classifier`'s utility calls, gated on their last
+importer. CLI removes utility verbs and the output-digest hook at that gate.
+No Python bridge or placeholder command keeps it alive.
 
 ## Command tree and conventions
 
@@ -50,7 +50,7 @@ provenant
   config show
   install [--dry-run] [--legacy-checkout ABS]
   uninstall
-  route list | resolve                    [routing freeze gate]
+  route list | resolve
   dispatch
   lanes [--wait]
   output
@@ -60,7 +60,7 @@ provenant
   fabric …                                [messages/tasks/identity/peers/MCP]
     mcp
   telemetry stats
-  quota show | tick                       [routing freeze gate]
+  quota show | tick
   worktree create | list | remove [--merged]  [supervisor freeze gate]
   workflow …                              [workflow freeze gate]
   check config | install | harness | release
@@ -140,15 +140,20 @@ authority; it does not inherit lane-selection defaults.
 | `resume TARGET` | Exact attempt and required `--operation-id ID`; optional one of `--prompt-file PATH` or `--prompt-stdin`, and `--wait SECONDS`. Input-required continuation or terminal continuation creates a new immutable attempt with prior-attempt reference and the exact retained provider handle/route. Missing continuation capability or conflicting active writer refuses. New prompt is required for a terminal continuation. No automatic writer replay or mutable completed receipt. |
 | `reconcile` | Repeatable `--id RUN`, required `--operation-id ID`; otherwise selected project's recoverable runs. Ask run to recover queued/orphaned scheduler work idempotently; report repaired/unchanged/refused items. No healthy-provider signal, inferred completion or released custody without owner evidence. |
 
-Single-prompt dispatch takes exactly one `--model ADAPTER/ID` or `--route POOL`;
-optional `--effort VALUE`, `--confidential`,
-`--intent ordinary|assurance`, `--orchestrator-family FAMILY`,
-`--reviewer-id ID`, `--risk-tier TIER`. Routing validates assurance inputs and
-requested/applied route distinctions; its missing design gates final values.
+Single-prompt dispatch takes exactly one `--model ADAPTER/ID` or `--route NAME`,
+plus optional `--effort VALUE`. Routing owns eligibility; providers detect the
+account label and run records it. Confidentiality is always on, without a flag.
+Workflow owns assurance policy; no account pin, intent, reviewer, risk-tier,
+orchestrator-family, native-seat or classification selector is exposed here.
+The [execution-route design](execution-route.md#resolution-and-command-contract)
+freezes the same route inputs for `route resolve`, plus `route list` and
+`quota show|tick` flags/results. Tick remains because the live quota-menubar
+LaunchAgent calls it (QuotaModel.swift:123).
 Access flags: `--mode read-only|worktree-write` (default read-only),
 `--worktree PATH` required for a writer, repeatable `--read-root PATH` and
 `--write-root PATH`, `--network on|off`, repeatable `--capability NAME`;
-`--fallback none|pool` defaults to none and pool is read-only only.
+`--fallback none|ADAPTER/ID[,ADAPTER/ID]` defaults to none; the explicit list
+has at most two alternatives and is read-only only. No fallback pool exists.
 The selected project supplies cwd. No raw provider argv or permission bypass.
 Confinement proves authority and rejects overlapping canonical writer scopes
 before admission. A manifest is strict versioned JSON with typed route/access
@@ -347,7 +352,7 @@ for config's installer; config never imports cli.
 | Roots, project selection, install identity/assets, managed registrations | core/records/config (state) |
 | Safe bounded process/FS APIs, custody, cancellation, trusted Git/worktrees | supervisor/confinement; no cli `Command::new`, raw descriptors or unsafe |
 | Atomic admission/registry, attempts, waits, continuation, output and evidence packet | run; `AttemptReader::attempt(AttemptId) -> AttemptFact` and `attempts(filter)` carry all terminal/route/reviewer/output facts workflow needs; the CLI composes `attempts()` with `stats(facts, &PriceTable, window)` and adds the active count from `snapshot` |
-| Route listing/resolution | routing/providers/quota; execution-route design is a freeze gate |
+| Route listing/resolution and quota show/tick | routing/providers/quota; the execution-route design owns flags, typed requests and results |
 | Terminal-record reduction with bundled prices | telemetry; `telemetry stats`, no ledger |
 | Identity, federation, coordination and MCP lifecycle | fabric-runtime/fabric-mcp |
 | Writing/check/review policy and new-root session checkpoints | workflow |
@@ -485,7 +490,7 @@ net estimate. Shell launchers `scripts/worktree` (7) and `scripts/provenant-pr`
 | supervisor | `scripts/clean.py` (953); `scripts/worktree.py` (982); `scripts/reap.py` (258); `tests/test_clean.py` (1,526); `tests/test_worktree_policy.py` (1,018); `tests/test_run_artifact_cleanup.py` (199) |
 | run (Git reads via supervisor) | `scripts/git_evidence.py` (341); `tests/test_git_evidence.py` (346) |
 | workflow | `scripts/provenant_lint.py` (207); `tests/test_provenant_lint.py` (231); `scripts/provenant_pr.py` (223); `tests/test_provenant_pr.py` (186); `skills/session/scripts/state_check.py` (282); `skills/session/scripts/compact_reinject.py` (169); `tests/test_session_state_check.py` (509); `tests/test_ci_repository_assurance_policy.py` (772) |
-| execution-route/run (classifier decision above) | `scripts/utility.py` (241); `tests/test_utility.py` (154); JS helper `scripts/utility-schema.cjs` (16); `scripts/task_classifier.py` (190); `tests/test_task_classifier.py` (107) |
+| execution-route (step 3; last-importer gate above) | `scripts/utility.py` (241); `tests/test_utility.py` (154); JS helper `scripts/utility-schema.cjs` (16); `scripts/task_classifier.py` (190); `tests/test_task_classifier.py` (107) |
 | final CI | `tests/test_rust_port_layering.py` (52) |
 
 `tests/test_lane_safety.py` mixes guard, reap, Git and installer subjects;
@@ -515,7 +520,7 @@ Recount the actual diff in each PR; budget growth needs an explanation.
 ## Build order
 
 Before step 1 freezes the full parser, the chair reconciles reserved owner
-grammars, including the missing execution-route classifier/flag decision and
+grammars, including execution-route's classifier removal/route inputs and
 supervisor worktree flags. No parser freeze proceeds on unresolved reservations.
 
 1. **Parser and rig.** Land the frozen Clap model, exhaustive composition,
@@ -537,9 +542,9 @@ supervisor worktree flags. No parser freeze proceeds on unresolved reservations.
    git links/commands and Herdr preservation assertions. No old-root reader.
 4. **Area bindings.** Connect run/route, worktree/cleanup, Fabric/MCP, telemetry
    and workflow in owner slices with caller updates and subject/test deletions.
-   The missing execution-route design must settle the classifier and route
-   flag gate before freeze/utility deletion; supervisor must settle worktree
-   flags. No placeholder success or compatibility dispatcher ships.
+   Execution-route settles classifier removal and route flags for utility
+   deletion; supervisor must settle worktree flags before parser freeze.
+   No placeholder success or compatibility dispatcher ships.
 5. **Final CI/cut-over gate.** Replace custody invariants before deleting
    `tests/golden/`, `tests/mcp_judge/`, `tests/lane_conformance/` and
    `tests/test_record_schemas.py` with their subjects. Remove their judge CI
