@@ -129,6 +129,19 @@ def test_digest_notices_added_and_renamed_sources_but_ignores_target(tmp_path, s
     assert build.source_digest(crate) != added
 
 
+def test_digest_ignores_editor_litter_but_covers_cargo_config(tmp_path):
+    crate = make_crate(tmp_path)
+    base = build.source_digest(crate)
+    (crate / "src/.DS_Store").write_bytes(b"finder")
+    (crate / "crates/core/src/.lib.rs.swp").write_bytes(b"vim")
+    (crate / "crates/core/src/lib.rs~").write_text("backup")
+    assert build.source_digest(crate) == base
+
+    (crate / ".cargo").mkdir()
+    (crate / ".cargo/config.toml").write_text("[build]\nrustflags = []\n")
+    assert build.source_digest(crate) != base
+
+
 def test_digest_notices_added_renamed_and_removed_members_and_build_scripts(tmp_path):
     crate = make_crate(tmp_path)
     base = build.source_digest(crate)

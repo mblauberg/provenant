@@ -32,7 +32,7 @@ import subprocess
 import sys
 
 CRATE_RELATIVE = "tools/front-door"
-HASHED_FILES = ("Cargo.toml", "Cargo.lock", "rust-toolchain.toml")
+HASHED_FILES = ("Cargo.toml", "Cargo.lock", "rust-toolchain.toml", ".cargo/config.toml")
 MODES = ("rust",)
 RUSTUP_FIX = "fix: curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh"
 DEPLOYMENT_TARGET = "15.0"
@@ -48,12 +48,18 @@ class CargoUnavailable(FrontDoorError):
     """Install rustup before building the front door."""
 
 
+def _editor_litter(relative: Path) -> bool:
+    """Dotfiles (.DS_Store, .x.swp) and `~` backups never reach the compiler."""
+    return any(part.startswith(".") for part in relative.parts) or relative.name.endswith("~")
+
+
 def source_digest(crate: Path) -> str:
     """Hash the R2 workspace layout without requiring Cargo.
 
     Start with HASHED_FILES in their listed order (when present), then all
     remaining inputs sorted by workspace-relative POSIX path. The latter
-    include every package manifest, every file under its `src/`, every Rust
+    include every package manifest, every file under its `src/` except
+    dotfiles and `~` backups, every Rust
     source under the package (including custom target and build-script paths),
     and any conventional `build.rs`. Each input is framed as UTF-8
     `path\0byte-length\0` followed by its unmodified bytes.
@@ -75,7 +81,8 @@ def source_digest(crate: Path) -> str:
         )
         inputs.update(
             path.relative_to(crate).as_posix()
-            for path in (package / "src").rglob("*") if path.is_file()
+            for path in (package / "src").rglob("*")
+            if path.is_file() and not _editor_litter(path.relative_to(package))
         )
         inputs.update(
             path.relative_to(crate).as_posix()
