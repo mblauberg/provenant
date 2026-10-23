@@ -103,6 +103,17 @@ pub fn window_labels(context: &Context) -> BTreeMap<String, String> {
     }
     labels
 }
+// Python regex \d accepts decimal digits; str.isdigit also accepts these
+// non-decimal digit ranges (Unicode 16, the source interpreter's table).
+fn python_digit(c: char) -> bool {
+    c.is_ascii_digit() || crate::time::decimal_digit(c).is_some() || matches!(c as u32,
+        0x00b2..=0x00b3 | 0x00b9 | 0x1369..=0x1371 | 0x19da |
+        0x2070 | 0x2074..=0x2079 | 0x2080..=0x2089 | 0x2460..=0x2468 |
+        0x2474..=0x247c | 0x2488..=0x2490 | 0x24ea | 0x24f5..=0x24fd |
+        0x24ff | 0x2776..=0x277e | 0x2780..=0x2788 | 0x278a..=0x2792 |
+        0x10a40..=0x10a43 | 0x10e60..=0x10e68 | 0x11052..=0x1105a |
+        0x1f100..=0x1f10a)
+}
 pub fn window_label(row: &Window, labels: &BTreeMap<String, String>) -> String {
     if let Some(label) = labels.get(&row.name).filter(|s| !s.is_empty()) {
         return label.clone();
@@ -141,11 +152,11 @@ pub fn window_label(row: &Window, labels: &BTreeMap<String, String>) -> String {
             let lower = word.to_lowercase();
             let digits_unit = lower.chars().last().is_some_and(|c| "mhdw".contains(c))
                 && lower.len() > 1
-                && lower[..lower.len() - 1].chars().all(|c| c.is_numeric());
+                && lower[..lower.len() - 1].chars().all(|c| c.is_ascii_digit() || crate::time::decimal_digit(c).is_some());
             !LENGTH.contains(&lower.as_str()) && Some(*word) != row.pool.as_deref() && !digits_unit
         })
         .collect();
-    if !tag.is_empty() && !tag.chars().all(|c| c.is_numeric()) {
+    if !tag.is_empty() && !tag.chars().all(python_digit) {
         extra.extend(words(tag));
     }
     length
@@ -419,16 +430,17 @@ pub fn describe(
                 .iter()
                 .filter(|r| r.reset_passed != Some(true))
                 .collect::<Vec<_>>(),
-        )
-        .cloned();
+        );
     if worst.is_none()
         && effective
             .allowance
             .as_ref()
             .is_some_and(|a| a.ordinary_usage_allowed == Some(false))
     {
-        worst = policy.binding(&rows.iter().collect::<Vec<_>>()).cloned();
+        worst = policy.binding(&rows.iter().collect::<Vec<_>>());
     }
+    let worst_index = worst.and_then(|selected| rows.iter().position(|row| std::ptr::eq(row, selected)));
+    let worst = worst.cloned();
     let spent = policy.allowance_spent(&effective, worst.as_ref());
     let drawing = policy.credit_draw(value, spent);
     let rate = drawing
@@ -496,9 +508,7 @@ pub fn describe(
     }
     .filter(|w| w.window.used() >= 100.0);
     // Summaries use the enriched row, including reserve advice.
-    let worst = worst
-        .as_ref()
-        .and_then(|w| rows.iter().find(|r| r.window.name == w.window.name));
+    let worst = worst_index.and_then(|index| rows.get(index));
     let mut detail = if let Some(worst) = worst {
         if let Some(credit) = &drawing {
             format!(
@@ -564,9 +574,12 @@ pub fn describe(
                 value
                     .observed_at
                     .as_ref()
-                    .and_then(Value::as_str)
-                    .filter(|s| !s.is_empty())
-                    .unwrap_or("never")
+                    .and_then(|value| match value {
+                        Value::String(s) if !s.is_empty() => Some(s.clone()),
+                        Value::Number(n) if n.as_f64().is_some_and(|n| n != 0.0) => Some(n.to_string()),
+                        _ => None,
+                    })
+                    .unwrap_or_else(|| "never".into())
             )
         } else {
             detail
@@ -914,6 +927,7 @@ fn window_length(minutes: Option<f64>) -> String {
 }
 fn reset_cell(value: Option<&str>) -> String {
     value
+        .filter(|s| !s.is_empty())
         .unwrap_or("-")
         .chars()
         .take(16)

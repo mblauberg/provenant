@@ -36,6 +36,11 @@ if operation == 'schema':
         judge = jsonschema.Draft202012Validator(schema, format_checker=jsonschema.FormatChecker())
         result = {'available': True, 'valid': judge.is_valid(request['value']),
                   'mutant_rejected': not judge.is_valid(request['mutant'])}
+elif operation == 'headline_outcome':
+    try:
+        result = display.headline(vars(quota), args[0], context.get('activity', {}))
+    except TypeError:
+        result = {'error': 'TypeError'}
 elif operation == 'window_pool':
     hook = getattr(quota.provider(args[0]), 'window_pool', None)
     result = hook(args[1]) if hook else None

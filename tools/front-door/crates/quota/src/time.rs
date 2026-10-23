@@ -266,7 +266,7 @@ pub fn duration(seconds: f64) -> String {
     }
 }
 
-fn decimal_digit(c: char) -> Option<u8> {
+pub(crate) fn decimal_digit(c: char) -> Option<u8> {
     // Unicode decimal-zero table, generated from Python 16.0.0.
     const ZEROS: &[u32] = &[
         0x30, 0x660, 0x6f0, 0x7c0, 0x966, 0x9e6, 0xa66, 0xae6, 0xb66, 0xbe6, 0xc66, 0xce6, 0xd66,

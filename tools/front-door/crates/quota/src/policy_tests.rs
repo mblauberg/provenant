@@ -1248,3 +1248,56 @@ fn provider_pool_oracle_uses_the_real_hook() {
 fn exact_record_comparison_rejects_integer_float_mutants() {
     assert_record_eq(&json!({"n":50}), &json!({"n":50.0}));
 }
+
+#[test]
+fn display_review_regression_duplicate_names_and_numeric_signed_out_history() {
+    if !python_available() { return; }
+    let s = snapshot("claude", "a", vec![window("same", 10.0, Some(10080.0), Some(518400.0)),
+        window("same", 80.0, Some(300.0), Some(7200.0))]);
+    compare_report(&[s], &context());
+    for observed in [json!(1792735200), json!(1792735200.5), json!(0), json!("")] {
+        let mut s = snapshot("claude", "a", vec![]);
+        s.status = Some("signed_out".into());
+        s.observed_at = Some(observed);
+        compare_report(&[s], &context());
+    }
+}
+
+#[test]
+fn display_review_regression_empty_reset_cell_is_a_dash() {
+    if !python_available() { return; }
+    let mut s = snapshot("claude", "a", vec![window("w", 10.0, Some(300.0), None)]);
+    s.windows[0].reset_at = Some(String::new());
+    let r = compare_report(&[s], &context());
+    let expected: String = oracle(json!({"operation":"render", "value":r}));
+    assert_eq!(render(&r, false, &TimeZone::UTC).unwrap(), expected);
+}
+
+#[test]
+fn display_review_regression_window_label_uses_python_digit_classes() {
+    let labels = BTreeMap::new();
+    for (name, expected) in [("½h", "5-hour (½h)"), ("²h", "5-hour (²h)"),
+        ("١h", "5-hour"), ("123h", "5-hour"), ("weekly:Ⅻ", "5-hour (Ⅻ)"),
+        ("weekly:²", "5-hour"), ("weekly:١", "5-hour"), ("weekly:123", "5-hour")] {
+        assert_eq!(window_label(&window(name, 10.0, Some(300.0), None), &labels), expected, "{name}");
+    }
+}
+
+#[test]
+fn worst_headline_without_binding_is_an_explicit_python_bug_divergence() {
+    if !python_available() { return; }
+    let mut s = snapshot("claude", "a", vec![window("advisory", 10.0, Some(300.0), Some(3600.0))]);
+    s.windows[0].advisory = Some(true);
+    let mut c = context();
+    c.settings = json!({"menubar":{"headline":"worst"}});
+    let policy = OraclePolicy { context:c.clone() };
+    let mut row = describe(&policy, &c, &s, None, now()).unwrap();
+    // A usable-looking account whose policy has no binding row.
+    row.state = "unknown".into();
+    row.display_window = Some("advisory".into());
+    let rows = [row];
+    assert_eq!(headline(&policy, &c, &rows).account, None);
+    let expected: Value = oracle(json!({"operation":"headline_outcome", "args":[rows],
+        "context":{"settings":c.settings}}));
+    assert_eq!(expected, json!({"error":"TypeError"}));
+}

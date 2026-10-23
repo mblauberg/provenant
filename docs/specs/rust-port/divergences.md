@@ -137,3 +137,25 @@ They form the current baseline; they are not newly discovered port mismatches.
   `provider_pool_oracle_uses_the_real_hook` covers `.x`.
   `exact_record_comparison_rejects_integer_float_mutants` ensures `50` and
   `50.0` cannot compare equal. No epsilon or f64 comparison normalises records.
+
+## RP-7: quota display edge cases and missing headline binding
+
+- Units: `scripts/quota_display.py#unit-01` and `#unit-02`;
+  PORTING.md version 3. Oracle source revision:
+  `e897b10d58b27a46544969594eed08a5ed64c72c`.
+- Class: `bug` for empty resets, numeric history and duplicate names. Empty
+  reset cells now print `-`; signed-out numeric observation times retain
+  their spelling; summaries use the selected row's index after enrichment.
+  Window labels distinguish Python regex decimal digits and `isdigit` from
+  broader numeric characters such as fractions and Roman numerals.
+- Evidence: the three `display_review_regression_*` tests failed on the
+  pre-fix tree for duplicate-name summary selection, empty reset rendering
+  and a fraction treated as a digit. Fixtures also cover superscript and
+  Arabic digits and numeric signed-out history against the Python oracle.
+- Class: `python-bug` for worst-mode headlines with no binding. Python indexes
+  `None` and raises `TypeError`; Rust skips that candidate and returns no
+  headline if none remain. The owner explicitly requested recording this
+  divergence in the PR #1293 repair brief. The regression
+  `worst_headline_without_binding_is_an_explicit_python_bug_divergence`
+  verifies both outcomes. This exception affects the inert library only;
+  relevant independent judges still gate command cut-over under rulebook v3.
