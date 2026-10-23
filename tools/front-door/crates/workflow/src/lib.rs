@@ -28,6 +28,7 @@ pub mod lane_launch;
 pub mod provider_observer;
 pub mod reference_evaluation;
 pub mod review_panel;
+pub mod steward;
 pub mod style_lint;
 pub mod tracker_hook;
 pub mod writer_lease;
