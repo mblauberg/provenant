@@ -29,8 +29,9 @@ custody, receipt publication and registry integration stay with their owners.
 `pending` holds only private pure helpers marked `port: belongs in
 provenant-core`: Python whitespace, Unicode 16 decimal/printability tables,
 checked integer PID tokens and exact finite-float integer/division formatting.
-`decimal_digit` and `python_strip` are copied from main's private CLI pending
-helpers; supervisor must not import the CLI crate. Source dates use
+`decimal_digit` and `python_strip` originated in the CLI pending helpers;
+supervisor must not import CLI. Core now exports whitespace/strip/repr helpers,
+but their migration awaits the workspace dependency declaration described below. Source dates use
 `time.localtime` (floor seconds), not `datetime.fromtimestamp`; there is no
 float-to-datetime conversion in this slice. Any future such conversion must
 use core's CPython modf/half-even helper, or its marked pending copy.
@@ -155,7 +156,8 @@ terminal error precedence and exact error text.
 
 This unit remains partial: live cwd/lsof observation, canonical path expansion,
 recursive session discovery/checked JSON, git status/repository adapters and
-filesystem timestamp metadata are not ported here. Core now supplies public whitespace/strip/repr APIs, but their integration
+filesystem timestamp metadata are not ported here. Core now supplies public
+whitespace/strip/repr APIs, but their integration
 requires a root workspace dependency entry outside this lane's write scope.
 The marked copies remain pending that declaration. Float/shlex helpers still
 have no public owner API. This does not add a private timestamp or
@@ -193,3 +195,6 @@ Python compatibility helpers. The root workspace has no `provenant-core`
 dependency entry; this lane permits only inherited dependencies and cannot
 edit that manifest. Replacing the corresponding marked `pending` copies is
 blocked on that declaration. No path dependency bypass is introduced.
+
+Merged main again at `d8be7244ada4b5e7a9dadc565a7cab292e54890f`; its changes
+do not alter the supervisor source/oracle fixtures.

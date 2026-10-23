@@ -1318,6 +1318,31 @@ malformed/missing pointers still return `Ok(None)`. No callers outside core use
 these inert APIs. The regression failed with `null` versus the source error,
 then passed after repair. Extended JSON/native-path reader gaps remain partial.
 
+## RP-FS2-001: diagnostic count-key order (bug, fixed)
+
+- Units: `runtime/fabric/src/store.ts#unit-04` (partial), rulebook v4.
+- Source/oracle: `600dec09bcda3b6a86272e391420e89d38777953`, Node v24.15.0,
+  better-sqlite3 13.0.3. The source inserts `agents`, `messages`,
+  `pendingDeliveries`, `tasks`, `activity`; CLI JSON preserves that order.
+- Native source review caught Rust's initial sorted map changing these bytes.
+  `DiagnosticCounts` now serialises fields in source order. Every differential
+  result also carries the original record's serialised JSON for byte comparison,
+  so parsing the surrounding fixture JSON cannot hide record-key reordering.
+- Evidence: `fabric-store` diagnostic policy differential, including namespace
+  collision failure. Fixed; no intentional divergence or cut-over accepted.
+
+## RP-FS2-002: JavaScript Date ISO range (library, fixed)
+
+- Units: `runtime/fabric/src/store.ts#unit-02` and `#unit-03` (partial), v4.
+- Same source/oracle as RP-FS2-001. `Date.toISOString` accepts TimeClip's
+  inclusive +/-8640000000000000 ms limits and signed six-digit years outside
+  0000 through 9999. Jiff's timestamp range is narrower.
+- `pending::js_iso`, marked for `provenant-core`, formats integer Gregorian
+  dates across the source range and retains `Invalid time value` outside it.
+  The seven-scenario differential suite includes exact ISO output/errors at
+  both bounds, year 0, year 10000, negative milliseconds and a leap date.
+- Fixed by adapting the formatter; no widened dependency or behaviour change.
+
 ### RP-1302 follow-up: Linux census iteration errors (fixed Rust bug)
 
 - Class: `bug`. Source/oracle: `7475ff01e437ec51c760b852516c21a5281cf9c6`;
