@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import ast
 from collections import Counter, defaultdict
+import fnmatch
 import hashlib
 import json
 import math
@@ -16,8 +17,12 @@ import subprocess
 
 ROOT = Path(__file__).resolve().parents[3]
 HOME = Path(__file__).resolve().parent
-VERSION = 1
+VERSION = 5
 JS_SUFFIXES = {".ts", ".tsx", ".mts", ".cts", ".mjs"}
+RETIREMENTS = {
+    "scripts/static-security-check.py": "no tracked Python sources remain",
+    "scripts/lint-timebomb-fixtures.py": "no tests/*.py and no *.test.ts remain",
+}
 GATES = {
     "unit": "Target crate's unit tests, fmt and clippy; CI once the crate exists",
     "J1": "tests/golden/: old/new CLI bytes, status, argv and environment; pending J1",
@@ -57,6 +62,9 @@ def is_test(path):
 
 
 def crate(path):
+    workspace_crate = re.match(r"tools/front-door/crates/([^/]+)/", path)
+    if workspace_crate:
+        return workspace_crate[1]
     if is_test(path):
         if path.startswith("runtime/fabric/tests/"):
             path = path.replace("/tests/", "/src/").replace(".test.ts", ".ts")
@@ -106,6 +114,8 @@ def crate(path):
 
 
 def disposition(path):
+    if path in RETIREMENTS:
+        return "retired", RETIREMENTS[path]
     if path in {"scripts/provenant", "scripts/provenant.template"}:
         return "dropped", "S1 conditional deletion; Rust front door already exists; keep until trial passes"
     if path.endswith("/python-owner.ts"):
@@ -299,7 +309,7 @@ def generate():
     }
     for p, text in product.items():
         units[p] = []
-        action, _ = disposition(p)
+        action, reason = disposition(p)
         risk = "high" if crate(p) in {"confinement", "supervisor", "run", "fabric-store"} or "custody" in p or "worktree" in p else "medium"
         gates = ["unit", "J1", "J2", "differential"]
         if p.startswith("runtime/fabric/") or crate(p).startswith("fabric"):
@@ -322,8 +332,13 @@ def generate():
             if target in {"supervisor", "confinement"}:
                 risk = "high"
             nodes.append({"id": key, "kind": "port", "source_files": [p], "source_spans": [span], "target_crate": target, "depends_on": [], "risk": risk, "recommended_model_tier": "senior" if risk == "high" else "junior", "review_model_tier": "principal", "gates": gates, "lane_days": 0.5, "action": action})
+            if action == "retired":
+                nodes[-1].update(kind="retirement", deletion_criterion=reason,
+                                 dispatchable=False, lane_days=0, gates=[])
     by_id = {n["id"]: n for n in nodes}
     for p, keys in units.items():
+        if p in RETIREMENTS:
+            continue  # Deletion criteria replace Rust port prerequisites.
         dependencies = set()
         if p in cyclic:
             dependencies.add(p + "#interface")
@@ -344,6 +359,8 @@ def generate():
         "adr": ("User approval to amend ADR 0027's std-only dependency restriction", "cross-crate"),
     }
     for n in nodes:
+        if n["action"] == "retired":
+            continue
         requirements = {g for g in n["gates"] if g in {"J1", "J2", "J3"}} | {"adr"}
         if n["target_crate"] == "supervisor":
             requirements.add("s2")
@@ -352,6 +369,48 @@ def generate():
         {"id": "workspace:manifest-and-digest", "kind": "integration", "source_files": ["tools/front-door/Cargo.toml", "tools/front-door/Cargo.lock", "scripts/lib/front_door_build.py", "scripts/check-provenant-install.py"], "target_crate": "cli", "depends_on": ["prerequisite:adr", "prerequisite:J1", "prerequisite:J2"], "risk": "high", "recommended_model_tier": "senior", "review_model_tier": "principal", "gates": ["unit", "J1", "J2", "front-door", "differential"], "lane_days": 0.5, "action": "redesigned", "description": "Add workspace and crate-aware source digest before linking new libraries"},
         {"id": "workspace:front-door-syscalls", "kind": "port", "source_files": ["tools/front-door/src/exec.rs", "tools/front-door/src/resolve.rs"], "target_crate": "supervisor", "depends_on": ["workspace:manifest-and-digest", "prerequisite:s2"], "risk": "high", "recommended_model_tier": "senior", "review_model_tier": "principal", "gates": ["unit", "J1", "front-door", "lane", "differential"], "lane_days": 0.5, "action": "redesigned", "description": "Move existing execve/access/getpwuid unsafe into supervisor::sys and retain root/exec behaviour"},
     ])
+    tracked = subprocess.check_output(["git", "ls-files", "-z"], cwd=ROOT).decode().split("\0")
+
+    def planned_unit(key, target, patterns, description, dependencies=()):
+        return {
+            "id": key, "kind": "integration", "source_globs": patterns,
+            "source_files": sorted(p for p in tracked if p and any(fnmatch.fnmatchcase(p, g) for g in patterns)),
+            "target_crate": target,
+            "depends_on": sorted({"workspace:manifest-and-digest", *dependencies}),
+            "risk": "high" if target == "supervisor" else "medium", "recommended_model_tier": "senior",
+            "review_model_tier": "principal", "gates": ["unit", "J1", "J2", "differential"] + (["lane", "front-door"] if target == "supervisor" else []),
+            "lane_days": 0.5, "action": "redesigned", "description": description,
+        }
+
+    nodes.extend([
+        planned_unit("records:yaml-data-to-json", "records", [
+            "skills/*/evals/*.yaml", "library/*/evals/*.yaml", "evals/*.yaml",
+            "docs/evals/*.yaml", "config/adapter-compatibility.yaml",
+            "runtime/*/provenance_components.yaml", "tests/fixtures/*.yaml",
+        ], "Migrate Provenant-owned YAML to JSON with all readers, callers and fixtures, including scripts/model_route.py's runtime adapter compatibility input; preserve values and validate consumers"),
+        planned_unit("records:external-yaml-subset", "records", [
+            ".github/ISSUE_TEMPLATE/*.yml", ".github/ISSUE_TEMPLATE/*.yaml",
+            "skills/setup-repo/templates/*.yml", "skills/setup-repo/templates/*.yaml",
+            "*/agents/openai.yaml", "SKILL.md", "*/SKILL.md",
+        ], "Implement ADR 0028 decision 5's fail-closed YAML subset; CI parses every tracked external-group file and, while Python exists, differentially compares accepted values with PyYAML; refusals name construct and line, ambiguous plain scalars say quote this"),
+        planned_unit("workspace:front-door-unsafe-guard", "supervisor", [
+            "tools/front-door/src/lane/*.rs", "tools/front-door/src/main.rs",
+        ], "Move remaining front-door lane unsafe into supervisor::sys through safe APIs, then add #![forbid(unsafe_code)] to the binary; every non-supervisor library already forbids unsafe",
+            ["workspace:front-door-syscalls", "prerequisite:s2"]),
+        planned_unit("workspace:command-construction-lint", "supervisor", [
+            "tools/front-door/clippy.toml", "tools/front-door/src/*.rs",
+            "tools/front-door/crates/*/src/*.rs",
+            "tools/front-door/tests/*.rs", "tools/front-door/crates/*/tests/*.rs",
+        ], "Add workspace clippy.toml disallowed-methods for std::process::Command::new outside supervisor; migrate production callers to supervisor custody APIs and review narrowly scoped test-oracle allowances before denying the lint"),
+        planned_unit("cli:rust-test-date-lint", "cli", [
+            "tools/front-door/crates/cli/src/timebomb.rs", "scripts/lint-timebomb-fixtures.py",
+        ], "Retarget date lint to Rust #[test] sources using provenant-cli's existing textual date engine; cover discovery, changed-test context, traversal, diagnostics and CI binding without Python AST analysis"),
+    ])
+    for n in nodes:
+        if "scripts/check_harness.py" in n["source_files"]:
+            n["depends_on"] = sorted(set(n["depends_on"]) | {
+                "records:external-yaml-subset", "records:yaml-data-to-json",
+            })
     for key, (description, target) in prerequisites.items():
         nodes.append({"id": "prerequisite:" + key, "kind": "external-prerequisite", "source_files": [], "target_crate": target, "depends_on": [], "risk": "high", "recommended_model_tier": "principal", "gates": [key] if key in GATES else ["lane"] if key == "s2" else [], "lane_days": 0, "action": "redesigned", "description": description, "dispatchable": False})
     # Kahn waves, with leaves (no outstanding dependencies) first.
@@ -373,7 +432,7 @@ def generate():
     for n in nodes:
         totals[n["target_crate"]] += n["lane_days"]
     graph = {"version": VERSION, "rulebook_version": VERSION, "source_digest": digest.hexdigest(), "scope": "Git-tracked Python (including shebang entry points), TypeScript and imported production ps.mjs; tests inventory-only; planning scripts excluded", "gate_definitions": GATES, "nodes": sorted(nodes, key=lambda n: n["id"]), "leaves_first_waves": waves, "estimated_lane_days_by_crate": dict(sorted(totals.items())), "source_imports": all_edges, "cyclic_source_groups": [g for g in groups if len(g) > 1], "loader_review": unresolved}
-    inventory = ["# Source inventory", "", "Generated by `derive_graph.py`; do not edit. Physical lines, including comments", "and blanks. Every tracked Python/TypeScript source over 200 lines is listed,", "including shebang entry points and tests. Planning scripts are excluded.", "Actions are plans, not claims of completed Rust ports. Test targets name the", "inferred owning crate's test area; retained external judges need no Rust rewrite.", "", "Qualifications: P = boundary preserved, internal redesign allowed; T = retain", "black-box judges, move internal assertions to Rust, delete only under S1-S4;", "S = partial replacement under S1-S4, keep policy; D = conditional bridge or", "front-door deletion after replacement and judge gates. No file is deemed dead from", "an absent import. `provider_exec.py` spans providers, confinement and supervisor;", "the graph assigns its individual units.", "", "| Source | Lines | Target crate | Action | Note |", "|---|---:|---|---|---|"]
+    inventory = ["# Source inventory", "", "Generated by `derive_graph.py`; do not edit. Physical lines, including comments", "and blanks. Every tracked Python/TypeScript source over 200 lines is listed,", "including shebang entry points and tests. Planning scripts are excluded.", "Actions are plans, not claims of completed Rust ports. Test targets name the", "inferred owning crate's test area; retained external judges need no Rust rewrite.", "", "Qualifications: P = boundary preserved, internal redesign allowed; T = retain", "black-box judges, move internal assertions to Rust, delete only under S1-S4;", "S = partial replacement under S1-S4, keep policy; D = conditional bridge or", "front-door deletion after replacement and judge gates. R = retired tooling;", "each unit records its deletion criterion and is not dispatched as a Rust port.", "No file is deemed dead from an absent import. `provider_exec.py` spans providers,", "confinement and supervisor; the graph assigns its individual units.", "", "| Source | Lines | Target crate | Action | Note |", "|---|---:|---|---|---|"]
     for p, t in files.items():
         count = len(t.splitlines())
         if count > 200:
@@ -381,7 +440,7 @@ def generate():
             owner = crate(p)
             if is_test(p):
                 owner += " (tests)"
-            note = "D" if action == "dropped" else "T" if is_test(p) else "S" if action == "redesigned" else "P"
+            note = f"R: {reason}" if action == "retired" else "D" if action == "dropped" else "T" if is_test(p) else "S" if action == "redesigned" else "P"
             inventory.append(f"| [{p}](../../../{p}) | {count} | {owner} | {action} | {note} |")
     inventory.extend(["", f"Source totals: {len(files)} files, {sum(len(t.splitlines()) for t in files.values()):,} lines; product {len(product)} files, {sum(len(t.splitlines()) for t in product.values()):,} lines.", "", "Partial deletions in large retained files are governed by the supervisor's", "[deletion list](../harness/rust-supervisor.md#deletable-tests) and", "[test-by-test inventory](../harness/rust-supervisor-tests.md), not whole-file removal.", ""])
     outputs = {HOME / "graph.json": json.dumps(graph, indent=2, ensure_ascii=False) + "\n", HOME / "inventory.md": "\n".join(inventory)}
