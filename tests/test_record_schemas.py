@@ -52,9 +52,7 @@ NON_RECORD_SCHEMAS = {
     "provenant.telemetry.compare.v1": "telemetry before/after comparison report",
     "provenant.telemetry.retro.v1": "telemetry retrospective report",
 }
-FUTURE_SCHEMA_IDS = {
-    "provenant.lane.launch.v1", "provenant.lane.exit.v1",
-}
+FUTURE_SCHEMA_IDS: set[str] = set()
 RECORD_PATTERNS = {
     "canonical-attempt": "tasks/*/attempt-*/attempt.json",
     "dispatch-attempt": "dispatch/tasks/*/attempt-*/attempt.json",
@@ -287,8 +285,8 @@ def test_quota_and_telemetry_records(flow_root, monkeypatch):
     raw = {
         "source": "test", "plan": "pro", "windows": [quota_window(45, 60)],
         "usage_credits": [{"kind": "credits", "balance": 50, "currency": "USD",
-                           "unit": "credits", "expires_at": "2027-01-01T00:00:00Z"}],
-        "resets": {"available": 2, "expires_at": ["2027-01-01T00:00:00Z"], "source": "provider"},
+                           "unit": "credits", "expires_at": "2027-01-01T00:00:00Z"}],  # timebomb: allow schema fixture dates, never compared with now
+        "resets": {"available": 2, "expires_at": ["2027-01-01T00:00:00Z"], "source": "provider"},  # timebomb: allow schema fixture dates, never compared with now
         "allowance": {"ordinary_usage_allowed": True, "spend_control_reached": False},
         "credits": {"reset_credits": 2, "source": "provider"},
     }
@@ -304,16 +302,16 @@ def test_quota_and_telemetry_records(flow_root, monkeypatch):
     reject("quota-snapshot", {**populated, "resets": []})
     reject("quota-snapshot", {**populated, "allowance": {"ordinary_usage_allowed": "yes"}})
     quota.record_series(value, {"plan": "pro", "plan_tier": "pro", "credit_balance": 0})
-    previous = {**value, "observed_at": "2026-10-22T00:00:00Z",
+    previous = {**value, "observed_at": "2026-10-22T00:00:00Z",  # timebomb: allow schema fixture dates, never compared with now
                 "windows": [quota_window(95, 10080, reset_in=timedelta(days=1))]}
-    current = {**value, "observed_at": "2026-10-23T00:00:00Z",
+    current = {**value, "observed_at": "2026-10-23T00:00:00Z",  # timebomb: allow schema fixture dates, never compared with now
                "windows": [quota_window(10, 10080, reset_in=timedelta(days=2))]}
     quota.record_events(previous, current)
     source = run / "tasks/task-1/attempt-001/attempt.json"
     retained = flow_root / ".agent-run/runs/schema-success/tasks/task-1/attempt-001/attempt.json"
     retained.parent.mkdir(parents=True)
     retained.write_bytes(source.read_bytes())
-    result = run_command([str(ROOT / "scripts/provenant"), "telemetry", "ingest"], flow_root)
+    result = run_command([sys.executable, str(ROOT / "scripts/telemetry.py"), "ingest"], flow_root)
     assert result.returncode == 0, result.stderr[-4000:]
     with sqlite3.connect(flow_root / "state/telemetry.sqlite3") as db:
         db.row_factory = sqlite3.Row

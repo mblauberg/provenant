@@ -26,8 +26,8 @@ before validation.
 | `dispatch-owner.schema.json` | `dispatch-owner.json`; `record_owner` and `ensure_nested_owner` in `run_lineage.py`. |
 | `run-receipt.schema.json` | `RUN_RECEIPT.json`; initial writer `run_dir_init.sh`, review/pair/pane updates in `review_plan.py` and `run_dir_finalize.py`, plus dispatch close updates. |
 | `supervisor-state.schema.json` | Future `supervisor.json` state record, as specified in `docs/specs/harness/rust-supervisor.md`. |
-| `supervisor-exit.schema.json` | Future `supervisor.exit.json` terminal record (`provenant.lane.exit.v1`), as specified in `rust-supervisor.md`. |
-| `launch-spec.schema.json` | Future `launch.json` record of the `provenant.lane.launch.v1` launch spec, as specified in `rust-supervisor.md`. |
+| `supervisor-exit.schema.json` | `supervisor.exit.json` terminal record (`provenant.lane.exit.v1`), as specified in `rust-supervisor.md`. |
+| `launch-spec.schema.json` | `launch.json` record of the `provenant.lane.launch.v1` launch spec, as specified in `rust-supervisor.md`. |
 | `observer-record.schema.json` | Future `observer.json` output described in `rust-supervisor.md`. |
 | `watchdog-observation.schema.json` | `watchdog.json`; observation writer in `skills/orchestrate/scripts/stall_watchdog.py` (`fabric.watchdog.v1`). |
 | `wip-checkpoint.schema.json` | `wip-checkpoint.json`; checkpoint writer in `stall_watchdog.py` (`fabric.wip.v1`). |

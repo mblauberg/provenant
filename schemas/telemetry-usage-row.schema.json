@@ -188,6 +188,26 @@
       ],
       "minimum": 0
     },
+    "classified_by": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "classifier_confidence": {
+      "type": [
+        "number",
+        "null"
+      ],
+      "minimum": 0,
+      "maximum": 1
+    },
+    "shadow_answers": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "parent_run_id": {
       "type": [
         "string",
@@ -263,6 +283,9 @@
     "route",
     "duration_ms",
     "provider_ms",
+    "classified_by",
+    "classifier_confidence",
+    "shadow_answers",
     "parent_run_id",
     "parent_task_id",
     "parent_attempt",
