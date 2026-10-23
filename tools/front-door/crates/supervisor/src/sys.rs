@@ -306,16 +306,79 @@ pub fn replace_process(
     args: &[OsString],
     env: &[(OsString, OsString)],
 ) -> io::Error {
-    use std::os::unix::process::CommandExt;
     let mut command = std::process::Command::new(program);
     command
         .args(args)
         .env_clear()
         .envs(env.iter().map(|(key, value)| (key, value)));
-    if let Err(error) = child::configure_command(&mut command, &[], Some(env), false) {
-        return error;
+    child::replace_process(&command, env)
+}
+
+/// Create deliberately inheritable state only in the isolated fixture process.
+#[cfg(feature = "fixture")]
+pub(crate) fn fixture_parent_state() -> io::Result<std::os::fd::OwnedFd> {
+    use std::os::fd::{AsRawFd, FromRawFd};
+    let file = std::fs::File::open("/dev/null")?;
+    // SAFETY: file is live; F_DUPFD returns a distinct owned descriptor without
+    // CLOEXEC. A high minimum avoids incidental descriptor reuse in the probe.
+    let fd = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_DUPFD, 200) };
+    if fd < 0 {
+        return Err(io::Error::last_os_error());
     }
-    command.exec()
+    // SAFETY: F_DUPFD succeeded and this is the sole owner of its new fd.
+    let fd = unsafe { std::os::fd::OwnedFd::from_raw_fd(fd) };
+    fixture_ignore_term()?;
+    // SAFETY: all bit patterns are valid for sigset_t; sigemptyset initialises
+    // it before use and both calls borrow exclusive live stack storage.
+    let mut mask: libc::sigset_t = unsafe { std::mem::zeroed() };
+    // SAFETY: mask is valid writable storage, no pointer is retained.
+    if unsafe { libc::sigemptyset(&mut mask) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: SIGUSR2 is valid and mask is initialised and exclusively borrowed.
+    if unsafe { libc::sigaddset(&mut mask, libc::SIGUSR2) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: only this dedicated fixture thread changes its own signal mask.
+    if unsafe { libc::sigprocmask(libc::SIG_BLOCK, &mask, std::ptr::null_mut()) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(fd)
+}
+
+#[cfg(feature = "fixture")]
+pub(crate) fn fixture_check_inherited_state(fd: i32, parent: bool) -> io::Result<()> {
+    // SAFETY: F_GETFD inspects an integer fd without taking ownership.
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+    let descriptor_ok = if parent {
+        flags >= 0 && flags & libc::FD_CLOEXEC == 0
+    } else {
+        flags < 0 && io::Error::last_os_error().raw_os_error() == Some(libc::EBADF)
+    };
+    let mut action = std::mem::MaybeUninit::<libc::sigaction>::uninit();
+    // SAFETY: this only queries SIGTERM into valid exclusive storage.
+    if unsafe { libc::sigaction(libc::SIGTERM, std::ptr::null(), action.as_mut_ptr()) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: successful sigaction initialised the record.
+    let action = unsafe { action.assume_init() };
+    let mut mask = std::mem::MaybeUninit::<libc::sigset_t>::uninit();
+    // SAFETY: null set queries the calling thread's mask into valid storage.
+    if unsafe { libc::sigprocmask(libc::SIG_SETMASK, std::ptr::null(), mask.as_mut_ptr()) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: the successful query initialised mask.
+    let mask = unsafe { mask.assume_init() };
+    // SAFETY: initialised mask and a valid signal are borrowed, not retained.
+    let blocked = unsafe { libc::sigismember(&mask, libc::SIGUSR2) };
+    let expected = if parent { libc::SIG_IGN } else { libc::SIG_DFL };
+    if descriptor_ok && action.sa_sigaction == expected && blocked == i32::from(parent) {
+        Ok(())
+    } else {
+        Err(io::Error::other(
+            "descriptor flags, signal disposition or mask changed incorrectly",
+        ))
+    }
 }
 
 #[cfg(feature = "fixture")]
@@ -371,12 +434,16 @@ pub(crate) fn fixture_wait_policy(mode: &str) -> io::Result<()> {
 
 // Existing lane subjects remain until S2 replaces custody. These narrow
 // allowances cover inherited diagnostics and pre-R7 unsafe grouping only.
-#[allow(
-    clippy::print_stderr,
-    clippy::collapsible_if,
-    clippy::unwrap_used,
-    clippy::undocumented_unsafe_blocks,
-    clippy::multiple_unsafe_ops_per_block
-)]
+#[allow(clippy::print_stderr, clippy::collapsible_if, clippy::unwrap_used)]
 #[doc(hidden)]
 pub mod legacy_lane;
+
+/// All production clocks use this process-wide monotonic coordinate.
+pub(crate) fn monotonic_now() -> provenant_core::MonoTime {
+    static ORIGIN: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    let elapsed = ORIGIN
+        .get_or_init(std::time::Instant::now)
+        .elapsed()
+        .as_micros();
+    provenant_core::MonoTime::from_micros(u64::try_from(elapsed).unwrap_or(u64::MAX))
+}

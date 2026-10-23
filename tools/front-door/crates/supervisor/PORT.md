@@ -28,14 +28,18 @@ reintroduced as S1 public diagnostic APIs.
 
 Core's `WaitBudget` stores a monotonic deadline, so lock acquisition also needs
 the corresponding `Clock`. It samples remaining budget once and derives a local
-`Instant` deadline. The clock owner is passed explicitly; there is no global
-clock coordinate or unbounded `None` path.
+`Instant` deadline. The clock owner is passed explicitly, while all
+`SystemClock` instances share one process-wide monotonic origin. There is no
+unbounded `None` path.
 
-Direct-child custody requires default `SIGCHLD` without `SA_NOCLDWAIT` and no
-independent host reaper. Every spawn queries and refuses an incompatible host
-policy before creating a child. The process edge must keep that policy fixed
-while children are owned; blocked `SIGCHLD` alone remains supported. This
-preserves the unreaped PID reservation used for direct-child signalling.
+Direct-child custody refuses `SIG_IGN` and `SA_NOCLDWAIT` for `SIGCHLD`.
+Installed handlers are supported, but must not call `waitpid(-1)` or otherwise
+reap supervisor-owned children. Each utility invocation checks the policy once
+before spawning. The process edge must keep that policy fixed while children
+are owned; blocked `SIGCHLD` remains supported. This preserves the unreaped PID
+reservation used for direct-child signalling. One process-wide reaper parks on
+a condition variable when it holds no children; executor instances retain
+separate bounded admission queues.
 
 Utility policy is supplied as a supervisor API for confinement's S3 facade.
 No workflow-to-supervisor dependency is introduced.

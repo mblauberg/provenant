@@ -181,9 +181,11 @@ pub trait Executor: Send + Sync {
     fn execute(&self, options: ExecOptions<'_>) -> Result<ExecOutcome, ExecError>;
 }
 /// Construct once at the process edge; all clones share one admission queue.
-/// The host must retain default SIGCHLD without SA_NOCLDWAIT, never change its
-/// disposition during custody, and never independently wait for owned children.
-/// Each spawn refuses an incompatible inherited policy before creating a child.
+/// The process-wide reaper worker is shared by every instance. The host must
+/// never set SIGCHLD to SIG_IGN or enable SA_NOCLDWAIT, and must never
+/// independently wait for owned children. An installed SIGCHLD handler must
+/// not call waitpid(-1), which could steal a child before the reaper observes it.
+/// Each spawn checks the incompatible SIGCHLD policies before creating a child.
 #[derive(Clone, Debug)]
 pub struct SystemExecutor {
     reaper: Reaper,
@@ -365,7 +367,13 @@ fn run(reaper: &Reaper, options: ExecOptions<'_>) -> Result<ExecOutcome, ExecErr
     loop {
         // Exit observation wins over cancellation and wall expiry in this turn.
         if status.is_none() {
-            status = child.observe().map_err(io_error("observe"))?;
+            status = match child.observe() {
+                Ok(status) => status,
+                Err(error) => {
+                    child.fail_and_transfer();
+                    return Err(io_error("observe")(error));
+                }
+            };
             if status.is_some() {
                 drain_deadline = Instant::now().checked_add(options.reap_timeout);
             }
@@ -405,9 +413,13 @@ fn run(reaper: &Reaper, options: ExecOptions<'_>) -> Result<ExecOutcome, ExecErr
         let cancelled = options.cancel.is_some_and(CancelToken::is_cancelled);
         if status.is_none() && term_at.is_none() && (now >= deadline || overflow || cancelled) {
             stdin = None;
-            let delivered = child
-                .signal(Signal::Terminate)
-                .map_err(io_error("SIGTERM"))?;
+            let delivered = match child.signal(Signal::Terminate) {
+                Ok(delivered) => delivered,
+                Err(error) => {
+                    child.fail_and_transfer();
+                    return Err(io_error("SIGTERM")(error));
+                }
+            };
             output.timed_out = delivered && now >= deadline;
             output.overflow_stopped = delivered && overflow;
             output.cancelled = delivered && cancelled;
@@ -417,16 +429,20 @@ fn run(reaper: &Reaper, options: ExecOptions<'_>) -> Result<ExecOutcome, ExecErr
             && kill_at.is_none()
             && term_at.is_some_and(|at| now.duration_since(at) >= options.terminate_grace)
         {
-            child.signal(Signal::Kill).map_err(io_error("SIGKILL"))?;
+            if let Err(error) = child.signal(Signal::Kill) {
+                child.fail_and_transfer();
+                return Err(io_error("SIGKILL")(error));
+            }
             kill_at = Some(now);
         }
         if kill_at.is_some_and(|at| now.duration_since(at) >= options.reap_timeout) {
             // RawChild::drop transfers its pre-reserved slot without signalling.
             return Err(ExecError::CleanupPending);
         }
-        child
-            .ready(stdout.as_ref(), stderr.as_ref(), stdin.as_ref())
-            .map_err(io_error("poll"))?;
+        if let Err(error) = child.ready(stdout.as_ref(), stderr.as_ref(), stdin.as_ref()) {
+            child.fail_and_transfer();
+            return Err(io_error("poll")(error));
+        }
     }
 }
 #[derive(Clone, Debug, PartialEq, Eq)]

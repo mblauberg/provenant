@@ -1,4 +1,9 @@
 //! S2 attempt supervisor. Python decides; this process holds and publishes.
+#![deny(
+    clippy::undocumented_unsafe_blocks,
+    clippy::multiple_unsafe_ops_per_block
+)]
+
 mod files;
 mod group;
 mod observer;
@@ -179,7 +184,8 @@ pub fn run(args: &[OsString]) -> u8 {
             .stdin(input.map(Stdio::from).unwrap_or_else(Stdio::piped))
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        let spawned = platform::prepare_child(&mut command).and_then(|_| command.spawn());
+        let spawned =
+            platform::prepare_child(&mut command, &spec.env).and_then(|_| command.spawn());
         match spawned {
             Err(e) => io.add(format!("spawn: {e}")),
             Ok(mut child) => {
@@ -266,6 +272,8 @@ pub fn run(args: &[OsString]) -> u8 {
                         let mut data = [0u8; 65536];
                         let mut eof = false;
                         for _ in 0..4 {
+                            // SAFETY: data is live writable storage and fd is
+                            // borrowed from an owned child pipe for this call.
                             let n = unsafe { libc::read(fd, data.as_mut_ptr().cast(), data.len()) };
                             if n == 0 {
                                 eof = true;

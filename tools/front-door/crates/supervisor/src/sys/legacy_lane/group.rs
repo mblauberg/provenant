@@ -50,6 +50,8 @@ fn custody(row: &Row, path: &Path) -> bool {
     else {
         return false;
     };
+    // SAFETY: `f` owns the live descriptor; flock uses scalar flags and
+    // retains no pointer.
     if unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
         return false;
     }
@@ -152,11 +154,16 @@ pub struct ProviderGroup {
 impl ProviderGroup {
     pub fn enable_subreaper() -> io::Result<i32> {
         #[cfg(target_os = "linux")]
-        unsafe {
+        {
             let mut old = 0;
-            if libc::prctl(libc::PR_GET_CHILD_SUBREAPER, &mut old, 0, 0, 0) != 0
-                || libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) != 0
-            {
+            // SAFETY: `old` is live writable storage for the scalar subreaper
+            // query; prctl retains no pointer.
+            if unsafe { libc::prctl(libc::PR_GET_CHILD_SUBREAPER, &mut old, 0, 0, 0) } != 0 {
+                return Err(io::Error::last_os_error());
+            }
+            // SAFETY: prctl receives scalar arguments and changes only this
+            // dedicated supervisor process's subreaper state.
+            if unsafe { libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) } != 0 {
                 return Err(io::Error::last_os_error());
             }
             Ok(old)
@@ -214,33 +221,36 @@ impl ProviderGroup {
         if self.status.is_some() {
             return true;
         }
-        unsafe {
-            let mut info: libc::siginfo_t = std::mem::zeroed();
-            if libc::waitid(
+        // SAFETY: siginfo_t is a plain C output record initialized before use.
+        let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+        // SAFETY: info is live writable storage; self.pid is the owned unreaped
+        // direct child, and waitid retains no pointer.
+        if unsafe {
+            libc::waitid(
                 libc::P_PID,
                 self.pid as _,
                 &mut info,
                 libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
-            ) != 0
-            {
-                let e = io::Error::last_os_error();
-                if e.raw_os_error() != Some(libc::EINTR) {
-                    self.warnings.add(format!("waitid: {e}"));
-                }
-                return false;
+            )
+        } != 0
+        {
+            let e = io::Error::last_os_error();
+            if e.raw_os_error() != Some(libc::EINTR) {
+                self.warnings.add(format!("waitid: {e}"));
             }
-            #[cfg(target_os = "linux")]
-            let (pid, status) = (info.si_pid(), info.si_status());
-            #[cfg(target_os = "macos")]
-            let (pid, status) = (info.si_pid, info.si_status);
-            if pid == self.pid {
-                self.status = Some(if info.si_code == libc::CLD_EXITED {
-                    (Some(status), None)
-                } else {
-                    (None, Some(status))
-                });
-                return true;
-            }
+            return false;
+        }
+        #[cfg(target_os = "linux")]
+        let (pid, status) = (info.si_pid(), info.si_status());
+        #[cfg(target_os = "macos")]
+        let (pid, status) = (info.si_pid, info.si_status);
+        if pid == self.pid {
+            self.status = Some(if info.si_code == libc::CLD_EXITED {
+                (Some(status), None)
+            } else {
+                (None, Some(status))
+            });
+            return true;
         }
         false
     }
@@ -401,24 +411,25 @@ impl ProviderGroup {
         let group = root && !shared && !spared_groups.contains(&self.pid);
         // We still own the unreaped leader, so this group ID cannot be reused.
         if group {
-            unsafe {
-                libc::kill(-self.pid, sig);
-            }
+            // SAFETY: the unreaped owned leader reserves this PGID; kill takes
+            // scalar values and retains no pointers.
+            unsafe { libc::kill(-self.pid, sig) };
         }
         for row in live {
             if sig == libc::SIGTERM && group && row.pgid == self.pid {
                 continue;
             }
             if platform::process(row.id.pid).is_some_and(|r| r.id == row.id && !r.zombie) {
-                unsafe {
-                    libc::kill(row.id.pid, sig);
-                }
+                // SAFETY: this legacy census kill is intentionally retained
+                // for S2 replacement; the identity was just rechecked and the
+                // leader remains unreaped. kill takes only scalar arguments.
+                unsafe { libc::kill(row.id.pid, sig) };
             }
         }
         if root && (!group || sig == libc::SIGKILL) && !self.observed_exit() {
-            unsafe {
-                libc::kill(self.pid, sig);
-            }
+            // SAFETY: self.pid is the owned unreaped direct child and cannot
+            // be reused while its wait status remains unconsumed.
+            unsafe { libc::kill(self.pid, sig) };
         }
     }
     /// Silence and I/O errors cannot construct a reason or call this method.
@@ -504,9 +515,9 @@ impl ProviderGroup {
             if platform::process(id.pid)
                 .is_some_and(|r| r.id == *id && r.ppid == std::process::id() as i32)
             {
-                unsafe {
-                    libc::waitpid(id.pid, std::ptr::null_mut(), libc::WNOHANG);
-                }
+                // SAFETY: this is a direct child confirmed by the current
+                // census; WNOHANG consumes no status when it is still running.
+                unsafe { libc::waitpid(id.pid, std::ptr::null_mut(), libc::WNOHANG) };
             }
         }
         self.done = true;
@@ -530,22 +541,36 @@ impl Drop for ProviderGroup {
     fn drop(&mut self) {
         if !self.done {
             self.stop(StopReason::SupervisorSignal);
-            while !self.done {
+            // Destructor cleanup gets a short finite window even if census
+            // never converges or a descendant cannot be reaped. Explicit run
+            // shutdown owns longer grace periods; Drop is only a bounded guard.
+            let budget = Duration::from_millis(250);
+            let started = Instant::now();
+            while !self.done && started.elapsed() < budget {
                 self.tick();
-                unsafe {
-                    libc::poll(std::ptr::null_mut(), 0, 10);
-                }
+                // SAFETY: a null poll array with zero entries is a bounded
+                // 10ms kernel wait and retains no pointers.
+                unsafe { libc::poll(std::ptr::null_mut(), 0, 10) };
+            }
+            if !self.done {
+                // The group identity remains reserved by the unreaped leader.
+                // Make a final best-effort kill before the child handle drops.
+                self.signal(libc::SIGKILL, true, &BTreeSet::new(), None);
             }
         }
         #[cfg(target_os = "linux")]
-        unsafe {
-            libc::prctl(
-                libc::PR_SET_CHILD_SUBREAPER,
-                self.previous_subreaper,
-                0,
-                0,
-                0,
-            );
+        {
+            // SAFETY: prctl receives scalar values and restores the prior
+            // process-wide setting recorded by enable_subreaper.
+            unsafe {
+                libc::prctl(
+                    libc::PR_SET_CHILD_SUBREAPER,
+                    self.previous_subreaper,
+                    0,
+                    0,
+                    0,
+                )
+            };
         }
     }
 }

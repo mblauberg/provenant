@@ -434,7 +434,9 @@ impl Directory {
     ) -> Result<()> {
         self.rename(source, destination_dir, destination, os::Rename::NoReplace)
     }
-    pub fn exchange(
+    // Kept crate-private until an authorised caller lands.
+    #[allow(dead_code)]
+    pub(crate) fn exchange(
         &self,
         source: &OsStr,
         destination_dir: &Self,
@@ -490,7 +492,10 @@ impl Directory {
     /// A fresh descriptor stream on each call, independent of prior enumeration.
     pub fn entries(&self) -> Result<Entries> {
         os::entries(&self.file)
-            .map(Entries)
+            .map(|stream| Entries {
+                stream,
+                path: self.path.clone(),
+            })
             .map_err(error("opendir", &self.path))
     }
     /// Stage mode-0600 bytes in this directory, fsync the file, atomically
@@ -553,7 +558,7 @@ impl Directory {
     ) -> Result<Publication> {
         component(name)?;
         for _ in 0..128 {
-            let temporary = staging_name(".workflow.")?;
+            let temporary = staging_name(".provenant-staging.")?;
             match self.symlink(target, &temporary) {
                 Ok(()) => {}
                 Err(error) if error.is_exists() => continue,
@@ -685,14 +690,19 @@ pub fn verify_directory_identity(
     Ok(())
 }
 
-/// Lazy, owning directory stream. Each item retains the original OS error;
-/// it directly satisfies StorageFs's Iterator<Item = io::Result<OsString>>.
-/// Dropping the anchor does not close this stream's independent descriptor.
-pub struct Entries(os::Entries);
+/// Lazy, owning directory stream. Each item retains the original OS error and
+/// its directory context. Dropping the anchor does not close this stream's
+/// independent descriptor.
+pub struct Entries {
+    stream: os::Entries,
+    path: PathBuf,
+}
 impl Iterator for Entries {
-    type Item = io::Result<OsString>;
+    type Item = Result<OsString>;
     fn next(&mut self) -> Option<Self::Item> {
-        self.0.next()
+        self.stream
+            .next()
+            .map(|result| result.map_err(error("readdir", &self.path)))
     }
 }
 
@@ -783,7 +793,7 @@ impl Seek for FileHandle {
 /// OS entropy, no global counter or clock; callers use exclusive creation too.
 pub fn temporary_name() -> Result<OsString> {
     let bytes = os::entropy().map_err(error("getentropy", Path::new("<temporary name>")))?;
-    let mut name = String::from(".cf-dispatch-output.");
+    let mut name = String::from(".provenant-staging.");
     for byte in bytes {
         name.push_str(&format!("{byte:02x}"));
     }
