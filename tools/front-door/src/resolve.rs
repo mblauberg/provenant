@@ -505,4 +505,18 @@ mod tests {
         let settings = Settings::default();
         assert!(Path::new(&settings.expand_user(OsStr::new("~"))).is_absolute());
     }
+
+    #[test]
+    fn awkward_root_paths_resolve_without_creating_instance_state() {
+        let s = Scratch::new("awkward paths");
+        let root = s.checkout("home/checkout λ\nline");
+        let mut settings = s.settings();
+        settings.product_root = Some(root.clone().into_os_string());
+        assert_eq!(product_root(&settings).unwrap(), root);
+
+        let mut missing = s.settings();
+        missing.home = Some(s.0.join("empty-home").into_os_string());
+        assert!(product_root(&missing).is_err());
+        assert!(!s.0.join("empty-home/.agents").exists());
+    }
 }
