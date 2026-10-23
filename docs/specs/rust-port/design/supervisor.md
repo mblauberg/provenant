@@ -542,6 +542,7 @@ counts identify the deletion surface; **none** is added to the subtotal above.
 | `runtime/fabric/src/json-subprocess.ts`; `runtime/fabric/tests/json-subprocess.test.ts` | 107; 55. Fabric uses supervisor Executor; deletes Node child helper and its subjects. |
 | `runtime/fabric/tests/helpers/fixture-processes.ts`; `runtime/fabric/tests/fixture-processes.test.ts` | 68; 74. Fabric replaces shared Node process fixtures with Rust fixtures. |
 | `runtime/fabric/tests/host-liveness.test.ts`; `execution-lifecycle.test.ts`; `execution-pruning.test.ts`; `named-sessions.test.ts` | 92; 2,555; 375; 677. Fabric removes process/unknown-identity/pruning subjects and owns the remaining session/runtime tests. |
+| `runtime/fabric/tests/lane-reader.test.ts`; `runtime/fabric/tests/lanes-cli.test.ts` | 212; 259. Run/Fabric replace orphan-reap and watchdog-process subjects with Rust integration cases; Fabric/CLI deletes the TS files with its remaining reader/command subjects. |
 | `scripts/node-workspace-preflight.mjs`; `scripts/node-workspace-provision.py`; `tests/test_node_workspace_preflight.py`; `tests/test_node_workspace_provision.py` | 119; 130; 173; 207. Remove worktree bootstrap here; CLI/CI owns deleting these shared Node lifecycle helpers and tests when their remaining CI/package callers disappear. |
 
 Retire supervisor `pending.rs`, `test_support.rs`, ps/fabric_ps presentation and
