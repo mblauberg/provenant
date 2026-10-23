@@ -4,7 +4,7 @@ use std::os::unix::fs::{PermissionsExt, symlink};
 use std::sync::{Arc, Barrier};
 
 fn names(dir: &Directory) -> Vec<OsString> {
-    dir.entries().unwrap().collect::<io::Result<_>>().unwrap()
+    dir.entries().unwrap().collect::<Result<_>>().unwrap()
 }
 
 #[test]
@@ -224,17 +224,13 @@ fn empty_bounds_and_adversarial_file_types_do_not_block() {
         Err(FsError::NotRegular { .. })
     ));
     // mkfifo has no shell dependencies and the open must never wait for a writer.
-    let status = std::process::Command::new("/usr/bin/mkfifo")
-        .arg(temp.path().join("fifo"))
-        .status()
-        .unwrap();
-    assert!(status.success());
+    os::tests::mkfifo(&temp.path().join("fifo")).unwrap();
     assert!(matches!(
         dir.open_read(OsStr::new("fifo")),
         Err(FsError::NotRegular { .. })
     ));
     let name = temporary_name().unwrap();
-    assert_eq!(name.as_bytes().len(), b".cf-dispatch-output.".len() + 24);
+    assert_eq!(name.as_bytes().len(), b".provenant-staging.".len() + 24);
     assert_ne!(name, temporary_name().unwrap());
     std::fs::set_permissions(
         temp.path().join("empty"),
@@ -269,16 +265,186 @@ fn non_utf8_names_reach_the_os_without_replacement() {
         }
     }
 }
+#[derive(Clone, Copy)]
+struct FixedClock(provenant_core::MonoTime);
+impl Clock for FixedClock {
+    fn wall_now(&self) -> std::result::Result<provenant_core::WallTime, provenant_core::TimeError> {
+        Ok(provenant_core::UtcMicros::from_micros(0).unwrap())
+    }
+    fn mono_now(&self) -> provenant_core::MonoTime {
+        self.0
+    }
+}
+
+fn one_second_budget() -> WaitBudget {
+    WaitBudget::cli(provenant_core::MonoTime::from_micros(0), 1).unwrap()
+}
+
 #[test]
-fn independent_open_file_descriptions_contend_for_a_nonblocking_lock() {
+fn owner_lock_is_nonblocking_bounded_and_releases_only_when_its_guard_drops() {
     let temp = tempfile::tempdir().unwrap();
     let dir = Directory::open_anchor(temp.path()).unwrap();
-    let first = dir.create_new(OsStr::new("lock")).unwrap();
-    let second = dir.open_read(OsStr::new("lock")).unwrap();
-    assert!(first.try_lock().unwrap());
-    assert!(!second.try_lock().unwrap());
-    first.unlock().unwrap();
-    assert!(second.try_lock().unwrap());
+    let clock = FixedClock(provenant_core::MonoTime::from_micros(0));
+    let cancel = CancelToken::new();
+    let first = dir
+        .lock(
+            OsStr::new("owner.lock"),
+            LockMode::Shared,
+            one_second_budget(),
+            &cancel,
+            &clock,
+        )
+        .unwrap();
+    let second = dir
+        .lock(
+            OsStr::new("owner.lock"),
+            LockMode::Shared,
+            one_second_budget(),
+            &cancel,
+            &clock,
+        )
+        .unwrap();
+    assert!(matches!(
+        dir.lock(
+            OsStr::new("owner.lock"),
+            LockMode::Exclusive,
+            one_second_budget(),
+            &cancel,
+            &FixedClock(provenant_core::MonoTime::from_micros(1_000_000)),
+        ),
+        Err(FsError::LockTimeout { timeout, .. }) if timeout.is_zero()
+    ));
+    drop(first);
+    drop(second);
+    assert!(
+        dir.lock(
+            OsStr::new("owner.lock"),
+            LockMode::Exclusive,
+            one_second_budget(),
+            &cancel,
+            &clock
+        )
+        .is_ok()
+    );
+}
+
+#[test]
+fn object_safe_lock_preserves_typed_timeout_and_cancellation_errors() {
+    let temp = tempfile::tempdir().unwrap();
+    let dir = Directory::open_anchor(temp.path()).unwrap();
+    let object: &dyn SafeDir = &dir;
+    let missing = match object.open_read(OsStr::new("missing")) {
+        Err(error) => error,
+        Ok(_) => panic!("opening a missing entry unexpectedly succeeded"),
+    };
+    assert!(matches!(&missing, FsError::Io { .. }));
+    assert!(missing.is_not_found());
+    let clock = FixedClock(provenant_core::MonoTime::from_micros(0));
+    let cancelled = CancelToken::new();
+    cancelled.cancel();
+    assert!(matches!(
+        object.lock(
+            OsStr::new("typed.lock"),
+            LockMode::Exclusive,
+            one_second_budget(),
+            &cancelled,
+            &clock,
+        ),
+        Err(FsError::Cancelled { .. })
+    ));
+
+    let live = CancelToken::new();
+    let held = object
+        .lock(
+            OsStr::new("typed.lock"),
+            LockMode::Shared,
+            one_second_budget(),
+            &live,
+            &clock,
+        )
+        .unwrap();
+    assert!(matches!(
+        object.lock(
+            OsStr::new("typed.lock"),
+            LockMode::Exclusive,
+            one_second_budget(),
+            &live,
+            &FixedClock(provenant_core::MonoTime::from_micros(1_000_000)),
+        ),
+        Err(FsError::LockTimeout { .. })
+    ));
+    drop(held);
+}
+
+#[test]
+fn owner_lock_refuses_cancelled_requests_hardlinks_and_writable_anchors() {
+    let temp = tempfile::tempdir().unwrap();
+    let dir = Directory::open_anchor(temp.path()).unwrap();
+    let cancel = CancelToken::new();
+    cancel.cancel();
+    let clock = FixedClock(provenant_core::MonoTime::from_micros(0));
+    assert!(matches!(
+        dir.lock(
+            OsStr::new("cancelled.lock"),
+            LockMode::Exclusive,
+            one_second_budget(),
+            &cancel,
+            &clock
+        ),
+        Err(FsError::Cancelled { .. })
+    ));
+    assert!(!temp.path().join("cancelled.lock").exists());
+
+    let lock_path = temp.path().join("linked.lock");
+    drop(dir.create_new(OsStr::new("linked.lock")).unwrap());
+    std::fs::hard_link(&lock_path, temp.path().join("alias")).unwrap();
+    assert!(matches!(
+        dir.lock(
+            OsStr::new("linked.lock"),
+            LockMode::Exclusive,
+            one_second_budget(),
+            &CancelToken::new(),
+            &clock
+        ),
+        Err(FsError::LockRefused {
+            reason: LockRefusal::LinkCount,
+            ..
+        })
+    ));
+
+    std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o777)).unwrap();
+    let unsafe_dir = Directory::open_anchor(temp.path()).unwrap();
+    assert!(matches!(
+        unsafe_dir.lock(
+            OsStr::new("unsafe.lock"),
+            LockMode::Exclusive,
+            one_second_budget(),
+            &CancelToken::new(),
+            &clock
+        ),
+        Err(FsError::LockRefused {
+            reason: LockRefusal::AnchorPermissions,
+            ..
+        })
+    ));
+}
+
+#[test]
+fn owner_lock_refuses_symlinked_lock_entries() {
+    let temp = tempfile::tempdir().unwrap();
+    let dir = Directory::open_anchor(temp.path()).unwrap();
+    dir.create_new(OsStr::new("target")).unwrap();
+    symlink("target", temp.path().join("owner.lock")).unwrap();
+    assert!(matches!(
+        dir.lock(
+            OsStr::new("owner.lock"),
+            LockMode::Exclusive,
+            one_second_budget(),
+            &CancelToken::new(),
+            &FixedClock(provenant_core::MonoTime::from_micros(0)),
+        ),
+        Err(FsError::Symlink { .. })
+    ));
 }
 
 #[test]
@@ -382,15 +548,21 @@ fn atomic_publication_replaces_or_refuses_and_always_removes_staging_entries() {
     let temp = tempfile::tempdir().unwrap();
     let dir = Directory::open_anchor(temp.path()).unwrap();
     let name = OsStr::new("published");
-    dir.atomic_write(name, ".config.", b"old", PublishMode::NoReplace)
-        .unwrap();
+    assert!(matches!(
+        dir.atomic_write(name, ".config.", b"old", PublishMode::NoReplace)
+            .unwrap(),
+        Publication::Durable
+    ));
     let error = dir
         .atomic_write(name, ".config.", b"refused", PublishMode::NoReplace)
         .unwrap_err();
     assert!(error.is_exists());
     assert_eq!(dir.read_bounded(name, 10).unwrap(), b"old");
-    dir.atomic_write(name, ".core.", b"new", PublishMode::Replace)
-        .unwrap();
+    assert!(matches!(
+        dir.atomic_write(name, ".core.", b"new", PublishMode::Replace)
+            .unwrap(),
+        Publication::Durable
+    ));
     assert_eq!(dir.read_bounded(name, 10).unwrap(), b"new");
     assert_eq!(names(&dir), [name]);
     dir.mkdir(OsStr::new("directory"), 0o700).unwrap();
@@ -418,6 +590,59 @@ fn atomic_publication_replaces_or_refuses_and_always_removes_staging_entries() {
 }
 
 #[test]
+fn both_publication_modes_report_visible_directory_sync_failure_without_retrying() {
+    let temp = tempfile::tempdir().unwrap();
+    let dir = Directory::open_anchor(temp.path()).unwrap();
+    let sync_failure = || {
+        Err(error("fsync directory", temp.path())(io::Error::other(
+            "injected directory sync failure",
+        )))
+    };
+
+    let first = dir
+        .atomic_write_with_sync(
+            OsStr::new("created"),
+            ".stage.",
+            b"visible",
+            PublishMode::NoReplace,
+            sync_failure,
+        )
+        .unwrap();
+    assert!(matches!(
+        first,
+        Publication::VisibleDurabilityUnconfirmed { .. }
+    ));
+    assert_eq!(
+        dir.read_bounded(OsStr::new("created"), 7).unwrap(),
+        b"visible"
+    );
+    assert_eq!(names(&dir), [OsString::from("created")]);
+
+    dir.atomic_write(
+        OsStr::new("replaced"),
+        ".stage.",
+        b"old",
+        PublishMode::Replace,
+    )
+    .unwrap();
+    let second = dir
+        .atomic_write_with_sync(
+            OsStr::new("replaced"),
+            ".stage.",
+            b"new",
+            PublishMode::Replace,
+            sync_failure,
+        )
+        .unwrap();
+    assert!(matches!(
+        second,
+        Publication::VisibleDurabilityUnconfirmed { .. }
+    ));
+    assert_eq!(dir.read_bounded(OsStr::new("replaced"), 3).unwrap(), b"new");
+    assert_eq!(names(&dir).len(), 2);
+}
+
+#[test]
 fn object_safe_consumers_can_use_real_and_mock_files() {
     fn read_file(file: &mut dyn SafeFile) -> io::Result<Vec<u8>> {
         let mut bytes = Vec::new();
@@ -436,10 +661,7 @@ fn object_safe_consumers_can_use_real_and_mock_files() {
     let mut mock = MockFile(std::io::Cursor::new(b"mock".to_vec()));
     assert_eq!(read_file(&mut mock).unwrap(), b"mock");
     assert_eq!(
-        dir.entries()
-            .unwrap()
-            .collect::<io::Result<Vec<_>>>()
-            .unwrap(),
+        dir.entries().unwrap().collect::<Result<Vec<_>>>().unwrap(),
         [OsString::from("file")]
     );
 }
@@ -464,19 +686,17 @@ impl Seek for MockFile {
     }
 }
 impl SafeFile for MockFile {
-    fn metadata(&self) -> io::Result<Metadata> {
-        Err(io::ErrorKind::Unsupported.into())
+    fn metadata(&self) -> Result<Metadata> {
+        Err(FsError::Io {
+            operation: "mock metadata",
+            path: PathBuf::from("<mock>"),
+            source: io::ErrorKind::Unsupported.into(),
+        })
     }
-    fn duplicate(&self) -> io::Result<Box<dyn SafeFile>> {
+    fn duplicate(&self) -> Result<Box<dyn SafeFile>> {
         Ok(Box::new(Self(self.0.clone())))
     }
-    fn sync(&self) -> io::Result<()> {
-        Ok(())
-    }
-    fn try_lock(&self) -> io::Result<bool> {
-        Ok(true)
-    }
-    fn unlock(&self) -> io::Result<()> {
+    fn sync(&self) -> Result<()> {
         Ok(())
     }
 }
@@ -561,4 +781,84 @@ fn boxed_filesystem_capabilities_support_threads() {
     check::<dyn SafeFs>();
     check::<dyn SafeDir>();
     check::<dyn SafeFile>();
+}
+
+#[test]
+fn stable_lock_namespace_refuses_every_mutation_without_splitting_exclusion() {
+    let temp = tempfile::tempdir().unwrap();
+    let dir = Directory::open_anchor(temp.path()).unwrap();
+    let clock = FixedClock(provenant_core::MonoTime::from_micros(1_000_000));
+    let token = CancelToken::new();
+    let name = OsStr::new("writer.lock");
+    let guard = dir
+        .lock(
+            name,
+            LockMode::Exclusive,
+            one_second_budget(),
+            &token,
+            &clock,
+        )
+        .unwrap();
+    let inode = dir.metadata_at(name, false).unwrap();
+    dir.create_new(OsStr::new("replacement")).unwrap();
+    for result in [
+        dir.unlink(name),
+        dir.replace(OsStr::new("replacement"), &dir, name),
+        dir.replace(name, &dir, OsStr::new("other")),
+        dir.rename_noreplace(name, &dir, OsStr::new("other")),
+        dir.exchange(OsStr::new("replacement"), &dir, name),
+        dir.symlink(Path::new("replacement"), name),
+    ] {
+        assert!(matches!(result, Err(FsError::ReservedLockName { .. })));
+    }
+    assert!(matches!(
+        dir.atomic_write(name, ".stage", b"new", PublishMode::Replace),
+        Err(FsError::ReservedLockName { .. })
+    ));
+    assert!(matches!(
+        dir.replace_link(name, Path::new("replacement")),
+        Err(FsError::ReservedLockName { .. })
+    ));
+    for alias in ["writer.LOCK", "writer.locK"] {
+        assert!(matches!(
+            dir.unlink(OsStr::new(alias)),
+            Err(FsError::ReservedLockName { .. })
+        ));
+        assert!(matches!(
+            dir.replace(OsStr::new("replacement"), &dir, OsStr::new(alias)),
+            Err(FsError::ReservedLockName { .. })
+        ));
+    }
+    assert!(inode.same_identity(&dir.metadata_at(name, false).unwrap()));
+    assert!(matches!(
+        dir.lock(
+            name,
+            LockMode::Exclusive,
+            one_second_budget(),
+            &token,
+            &clock
+        ),
+        Err(FsError::LockTimeout { .. })
+    ));
+    drop(guard);
+    assert!(
+        dir.lock(
+            name,
+            LockMode::Exclusive,
+            one_second_budget(),
+            &token,
+            &clock
+        )
+        .is_ok()
+    );
+    assert!(matches!(
+        dir.lock(
+            OsStr::new("ambiguous"),
+            LockMode::Exclusive,
+            one_second_budget(),
+            &token,
+            &clock
+        ),
+        Err(FsError::InvalidLockName { .. })
+    ));
 }

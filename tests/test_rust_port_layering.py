@@ -31,7 +31,7 @@ def test_internal_dependencies_follow_r2():
         data = tomllib.loads(manifest.read_text())
         sections = [data.get("dependencies", {}), data.get("dev-dependencies", {})]
         used = {name.removeprefix("provenant-") for section in sections for name in section
-                if name.startswith("provenant-")}
+                if name.startswith("provenant-")} - {crate}  # a self dev-dependency enables test features
         allowed = edges[crate]
         if "*" in allowed:
             allowed = set(edges) - {"cli"}

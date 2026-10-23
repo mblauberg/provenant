@@ -98,6 +98,14 @@ pub(crate) fn open_directory(dir: &File, name: &OsStr, follow: bool) -> io::Resu
         0,
     )
 }
+pub(crate) fn open_lock(dir: &File, name: &OsStr) -> io::Result<File> {
+    open_at(
+        dir.as_raw_fd(),
+        name,
+        libc::O_RDWR | libc::O_CREAT | libc::O_NOFOLLOW | libc::O_NONBLOCK,
+        0o600,
+    )
+}
 pub(crate) fn open_read(dir: &File, name: &OsStr) -> io::Result<File> {
     open_at(
         dir.as_raw_fd(),
@@ -183,6 +191,8 @@ pub(crate) fn unlink(dir: &File, name: &OsStr, directory: bool) -> io::Result<()
 pub(crate) enum Rename {
     Replace,
     NoReplace,
+    // Kept crate-private until an authorised caller lands.
+    #[allow(dead_code)]
     Exchange,
 }
 pub(crate) fn rename(
@@ -343,21 +353,36 @@ pub(crate) fn open_following(path: &Path) -> io::Result<File> {
         .custom_flags(libc::O_CLOEXEC | libc::O_NONBLOCK)
         .open(path)
 }
-pub(crate) fn flock(file: &File, mode: crate::fs::LockMode, nonblocking: bool) -> io::Result<()> {
+pub(crate) fn try_flock(file: &File, mode: crate::fs::LockMode) -> io::Result<()> {
     let op = match mode {
         crate::fs::LockMode::Shared => libc::LOCK_SH,
         crate::fs::LockMode::Exclusive => libc::LOCK_EX,
-    } | if nonblocking { libc::LOCK_NB } else { 0 };
-    // SAFETY: file owns a live descriptor throughout this call. flock changes
-    // only this open file description's advisory lock, retains no pointers,
-    // transfers no ownership, and returns errno on refusal. Caller owns mode
-    // and any blocking policy; retry handles interrupted calls.
-    retry(|| unsafe { libc::flock(file.as_raw_fd(), op) }).map(|_| ())
+    } | libc::LOCK_NB;
+    // SAFETY: file owns a live descriptor throughout this single nonblocking
+    // flock call. It changes only that open file description's advisory lock,
+    // retains no pointers and transfers no ownership. EINTR is returned so the
+    // safe owner can retry within its WaitBudget.
+    status(unsafe { libc::flock(file.as_raw_fd(), op) })
+}
+pub(crate) fn effective_uid() -> u32 {
+    // SAFETY: geteuid reads only the calling process's effective UID and has no
+    // pointer, ownership, lifetime or concurrency requirements.
+    unsafe { libc::geteuid() }
+}
+
+pub(crate) fn wait(duration: std::time::Duration) {
+    std::thread::sleep(duration);
 }
 
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+    pub(crate) fn mkfifo(path: &Path) -> io::Result<()> {
+        let path = string(path.as_os_str())?;
+        // SAFETY: owned NUL-terminated path lives through mkfifo, which retains
+        // no pointer and creates no owning descriptor. Errors use thread errno.
+        status(unsafe { libc::mkfifo(path.as_ptr(), 0o600) })
+    }
     pub(crate) fn is_nonblocking(file: &File) -> bool {
         // SAFETY: read-only fcntl on a live borrowed fd, no ownership transfer.
         let flags = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETFL) };

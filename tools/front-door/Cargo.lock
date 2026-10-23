@@ -521,7 +521,10 @@ version = "0.1.0"
 name = "provenant-supervisor"
 version = "0.1.0"
 dependencies = [
+ "jiff",
  "libc",
+ "provenant-core",
+ "provenant-supervisor",
  "serde",
  "serde_json",
  "tempfile",

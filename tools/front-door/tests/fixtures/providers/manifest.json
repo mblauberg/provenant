@@ -1,0 +1,611 @@
+{
+  "schema_version": 1,
+  "design_step": 0,
+  "author_route": "codex/gpt-6.1-sol@high",
+  "purpose": "Sanitised wire-shape evidence only; no adapter or mode is activated.",
+  "captures": [
+    {
+      "id": "codex-success",
+      "fixture": "codex/success.jsonl",
+      "sha256": "5449be700818fd27c731b76aeaeb5902dee8ec0ca5e34ced3003290e8beefb94",
+      "kind": "recorded_projection",
+      "source": {
+        "kind": "tracked_stream",
+        "path": "tests/fixtures/fabric-context/codex.jsonl",
+        "revision": "38b234f2",
+        "capture_context": "Existing live-sample fixture; invocation and platform not recorded here."
+      },
+      "cli_version": null,
+      "platform": null,
+      "argv": null,
+      "session_mode": null,
+      "access_mode": null,
+      "process_exit": null,
+      "coverage": [
+        "success",
+        "terminal_usage"
+      ],
+      "projection": "All source records; string and numeric substitutions only.",
+      "substitution_classes": [
+        "event_request_or_message_identifier",
+        "numeric_measurement_or_timestamp",
+        "session_identifier",
+        "user_or_provider_text"
+      ],
+      "activation_eligible": false,
+      "missing_activation_evidence": [
+        "exact_argv_and_controls",
+        "platform",
+        "confinement_acceptance",
+        "cli_version"
+      ]
+    },
+    {
+      "id": "claude-model-mismatch",
+      "fixture": "claude/model-mismatch.jsonl",
+      "sha256": "bbef17114e96fc7244ecdb5feff60b3376fb4dca29632e63255a3a1f5b8ab28a",
+      "kind": "recorded_projection",
+      "source": {
+        "kind": "tracked_stream",
+        "path": "tests/fixtures/fabric-context/claude.jsonl",
+        "revision": "38b234f2",
+        "capture_context": "Existing live-sample fixture; invocation and platform not recorded here."
+      },
+      "cli_version": "2.1.280",
+      "platform": null,
+      "argv": null,
+      "session_mode": null,
+      "access_mode": null,
+      "process_exit": null,
+      "coverage": [
+        "success",
+        "init_vs_answering_model"
+      ],
+      "projection": "All source records; string and numeric substitutions only.",
+      "substitution_classes": [
+        "event_request_or_message_identifier",
+        "filesystem_path_or_snapshot",
+        "numeric_measurement_or_timestamp",
+        "session_identifier",
+        "timestamp",
+        "unclassified_string",
+        "user_or_provider_text"
+      ],
+      "activation_eligible": false,
+      "missing_activation_evidence": [
+        "exact_argv_and_controls",
+        "platform",
+        "confinement_acceptance"
+      ]
+    },
+    {
+      "id": "claude-fresh",
+      "fixture": "claude/fresh.jsonl",
+      "sha256": "34d303cb9058d81935704634595e8047995456f0a6f3427c6fae281a27bf1a69",
+      "kind": "recorded_projection",
+      "source": {
+        "kind": "tracked_stream",
+        "path": "tests/fixtures/fabric-context/kestrel-claude-1.jsonl",
+        "revision": "38b234f2",
+        "capture_context": "Existing live-sample fixture; invocation and platform not recorded here."
+      },
+      "cli_version": "2.1.280",
+      "platform": null,
+      "argv": null,
+      "session_mode": "fresh",
+      "access_mode": null,
+      "process_exit": null,
+      "coverage": [
+        "success",
+        "same_session_pair"
+      ],
+      "projection": "All source records; string and numeric substitutions only.",
+      "substitution_classes": [
+        "event_request_or_message_identifier",
+        "filesystem_path_or_snapshot",
+        "numeric_measurement_or_timestamp",
+        "session_identifier",
+        "timestamp",
+        "unclassified_string",
+        "user_or_provider_text"
+      ],
+      "activation_eligible": false,
+      "missing_activation_evidence": [
+        "exact_argv_and_controls",
+        "platform",
+        "confinement_acceptance"
+      ]
+    },
+    {
+      "id": "claude-resume",
+      "fixture": "claude/resume.jsonl",
+      "sha256": "1c4d95f4f1ae8be7402dbcf1f93f2565b0d018264922c3b9db88dd0742d4de7a",
+      "kind": "recorded_projection",
+      "source": {
+        "kind": "tracked_stream",
+        "path": "tests/fixtures/fabric-context/kestrel-claude-2.jsonl",
+        "revision": "38b234f2",
+        "capture_context": "Existing live-sample fixture; invocation and platform not recorded here."
+      },
+      "cli_version": "2.1.280",
+      "platform": null,
+      "argv": null,
+      "session_mode": "resume",
+      "access_mode": null,
+      "process_exit": null,
+      "coverage": [
+        "success",
+        "same_session_pair"
+      ],
+      "projection": "All source records; string and numeric substitutions only.",
+      "substitution_classes": [
+        "event_request_or_message_identifier",
+        "filesystem_path_or_snapshot",
+        "numeric_measurement_or_timestamp",
+        "session_identifier",
+        "timestamp",
+        "unclassified_string",
+        "user_or_provider_text"
+      ],
+      "activation_eligible": false,
+      "missing_activation_evidence": [
+        "exact_argv_and_controls",
+        "platform",
+        "confinement_acceptance"
+      ]
+    },
+    {
+      "id": "claude-direct-model",
+      "fixture": "claude/direct-model.jsonl",
+      "sha256": "d0d36d5be402d5797f7fc15d99d4b54704d925b3756614881e40b1864bc48016",
+      "kind": "recorded_projection",
+      "source": {
+        "kind": "tracked_stream",
+        "path": "tests/fixtures/fabric-context/claude-direct-haiku.jsonl",
+        "revision": "b9b824fc",
+        "capture_context": "Existing live-sample fixture; invocation and platform not recorded here."
+      },
+      "cli_version": "2.1.280",
+      "platform": null,
+      "argv": null,
+      "session_mode": null,
+      "access_mode": null,
+      "process_exit": null,
+      "coverage": [
+        "success",
+        "matching_answering_model"
+      ],
+      "projection": "All source records; string and numeric substitutions only.",
+      "substitution_classes": [
+        "event_request_or_message_identifier",
+        "filesystem_path_or_snapshot",
+        "numeric_measurement_or_timestamp",
+        "session_identifier",
+        "timestamp",
+        "unclassified_string",
+        "user_or_provider_text"
+      ],
+      "activation_eligible": false,
+      "missing_activation_evidence": [
+        "exact_argv_and_controls",
+        "platform",
+        "confinement_acceptance"
+      ]
+    },
+    {
+      "id": "cursor-fresh",
+      "fixture": "cursor/fresh.jsonl",
+      "sha256": "38dc8fbe25303e03d922b47dd893e55cc9f0093248c17ec0cc905c599c8bfdfa",
+      "kind": "recorded_projection",
+      "source": {
+        "kind": "tracked_stream",
+        "path": "tests/fixtures/fabric-context/kestrel-cursor-1.jsonl",
+        "revision": "38b234f2",
+        "capture_context": "Existing live-sample fixture; invocation and platform not recorded here."
+      },
+      "cli_version": null,
+      "platform": null,
+      "argv": null,
+      "session_mode": "fresh",
+      "access_mode": null,
+      "process_exit": null,
+      "coverage": [
+        "success",
+        "thinking",
+        "same_session_pair"
+      ],
+      "projection": "All source records; string and numeric substitutions only.",
+      "substitution_classes": [
+        "event_request_or_message_identifier",
+        "filesystem_path_or_snapshot",
+        "numeric_measurement_or_timestamp",
+        "session_identifier",
+        "user_or_provider_text"
+      ],
+      "activation_eligible": false,
+      "missing_activation_evidence": [
+        "exact_argv_and_controls",
+        "platform",
+        "confinement_acceptance",
+        "cli_version"
+      ]
+    },
+    {
+      "id": "cursor-resume",
+      "fixture": "cursor/resume.jsonl",
+      "sha256": "3e96fc7dc716aacd6b4b82d124d775adba20e4f2b503bff4ea6365b5f2661418",
+      "kind": "recorded_projection",
+      "source": {
+        "kind": "tracked_stream",
+        "path": "tests/fixtures/fabric-context/kestrel-cursor-2.jsonl",
+        "revision": "38b234f2",
+        "capture_context": "Existing live-sample fixture; invocation and platform not recorded here."
+      },
+      "cli_version": null,
+      "platform": null,
+      "argv": null,
+      "session_mode": "resume",
+      "access_mode": null,
+      "process_exit": null,
+      "coverage": [
+        "success",
+        "same_session_pair"
+      ],
+      "projection": "All source records; string and numeric substitutions only.",
+      "substitution_classes": [
+        "event_request_or_message_identifier",
+        "filesystem_path_or_snapshot",
+        "numeric_measurement_or_timestamp",
+        "session_identifier",
+        "user_or_provider_text"
+      ],
+      "activation_eligible": false,
+      "missing_activation_evidence": [
+        "exact_argv_and_controls",
+        "platform",
+        "confinement_acceptance",
+        "cli_version"
+      ]
+    },
+    {
+      "id": "agy-success",
+      "fixture": "agy/success.jsonl",
+      "sha256": "6d532bcdfe0bcb657da662cd6a2962db5e3c4e870082de9d139919fbd5a53c70",
+      "kind": "recorded_projection",
+      "source": {
+        "kind": "tracked_stream",
+        "path": "tests/fixtures/fabric-context/agy.jsonl",
+        "revision": "38b234f2",
+        "capture_context": "Existing live-sample fixture; invocation and platform not recorded here."
+      },
+      "cli_version": null,
+      "platform": null,
+      "argv": null,
+      "session_mode": null,
+      "access_mode": null,
+      "process_exit": null,
+      "coverage": [
+        "success",
+        "session_model",
+        "step_updates"
+      ],
+      "projection": "All source records; string and numeric substitutions only.",
+      "substitution_classes": [
+        "filesystem_path_or_snapshot",
+        "numeric_measurement_or_timestamp",
+        "session_identifier",
+        "unclassified_string",
+        "user_or_provider_text"
+      ],
+      "activation_eligible": false,
+      "missing_activation_evidence": [
+        "exact_argv_and_controls",
+        "platform",
+        "confinement_acceptance",
+        "cli_version"
+      ]
+    },
+    {
+      "id": "opencode-unversioned-success",
+      "fixture": "opencode/unversioned-success.jsonl",
+      "sha256": "0455c253579ef6a6b0f25bcd9263ef81f937e3b955639106d86f86ffeded2474",
+      "kind": "recorded_projection",
+      "source": {
+        "kind": "tracked_stream",
+        "path": "tests/fixtures/fabric-context/opencode.jsonl",
+        "revision": "38b234f2",
+        "capture_context": "Existing live-sample fixture; invocation and platform not recorded here."
+      },
+      "cli_version": null,
+      "platform": null,
+      "argv": null,
+      "session_mode": null,
+      "access_mode": null,
+      "process_exit": null,
+      "coverage": [
+        "success",
+        "step_finish",
+        "unverified_major_version"
+      ],
+      "projection": "All source records; string and numeric substitutions only.",
+      "substitution_classes": [
+        "event_request_or_message_identifier",
+        "numeric_measurement_or_timestamp",
+        "session_identifier",
+        "user_or_provider_text"
+      ],
+      "activation_eligible": false,
+      "missing_activation_evidence": [
+        "exact_argv_and_controls",
+        "platform",
+        "confinement_acceptance",
+        "cli_version"
+      ]
+    },
+    {
+      "id": "codex-failure",
+      "fixture": "codex/failure.jsonl",
+      "sha256": "9154158a1949206a1a72386bc127d4edaf4e436f6e8f64812eb0980db69928ed",
+      "kind": "recorded_projection",
+      "source": {
+        "kind": "local_attempt",
+        "path": ".agent-run/runs/<RUN_001>/dispatch/tasks/<TASK_001>/attempt-<ATTEMPT_001>/events.jsonl",
+        "companion": "adapter-receipt.json",
+        "locator_redaction_classes": [
+          "run_identifier",
+          "task_identifier",
+          "attempt_identifier"
+        ],
+        "capture_context": "Existing local attempt; receipt supplies access mode and exit, not exact argv, version or platform."
+      },
+      "cli_version": null,
+      "platform": null,
+      "argv": null,
+      "session_mode": null,
+      "access_mode": "worktree_write",
+      "process_exit": 1,
+      "coverage": [
+        "structured_failure",
+        "process_exit_nonzero"
+      ],
+      "projection": "Selected protocol records only; tool events and their payloads omitted. Strings and measurements substituted.",
+      "substitution_classes": [
+        "session_identifier",
+        "user_or_provider_text"
+      ],
+      "activation_eligible": false,
+      "missing_activation_evidence": [
+        "exact_argv_and_controls",
+        "platform",
+        "confinement_acceptance",
+        "cli_version"
+      ]
+    },
+    {
+      "id": "codex-partial",
+      "fixture": "codex/partial.jsonl",
+      "sha256": "2e4f6e21235c272222e01fd3014e91cf8c20aa4810925b2dfe8c4c6edbf4573c",
+      "kind": "recorded_projection",
+      "source": {
+        "kind": "local_attempt",
+        "path": ".agent-run/runs/<RUN_002>/dispatch/tasks/<TASK_002>/attempt-<ATTEMPT_002>/events.jsonl",
+        "companion": "adapter-receipt.json",
+        "locator_redaction_classes": [
+          "run_identifier",
+          "task_identifier",
+          "attempt_identifier"
+        ],
+        "capture_context": "Existing local attempt; receipt supplies access mode and exit, not exact argv, version or platform."
+      },
+      "cli_version": null,
+      "platform": null,
+      "argv": null,
+      "session_mode": null,
+      "access_mode": "worktree_write",
+      "process_exit": -15,
+      "coverage": [
+        "partial",
+        "no_terminal",
+        "process_signal_exit"
+      ],
+      "projection": "Selected protocol records only; tool events and their payloads omitted. Strings and measurements substituted.",
+      "substitution_classes": [
+        "session_identifier"
+      ],
+      "activation_eligible": false,
+      "missing_activation_evidence": [
+        "exact_argv_and_controls",
+        "platform",
+        "confinement_acceptance",
+        "cli_version"
+      ]
+    },
+    {
+      "id": "claude-structured-error",
+      "fixture": "claude/structured-error.jsonl",
+      "sha256": "3edb723ba8eba89c1d45131db25524eec43e1ff6c30f1114b203bc2ec7542995",
+      "kind": "recorded_projection",
+      "source": {
+        "kind": "local_attempt",
+        "path": ".agent-run/runs/<RUN_003>/dispatch/tasks/<TASK_003>/attempt-<ATTEMPT_003>/events.jsonl",
+        "companion": "adapter-receipt.json",
+        "locator_redaction_classes": [
+          "run_identifier",
+          "task_identifier",
+          "attempt_identifier"
+        ],
+        "capture_context": "Existing local attempt; receipt supplies access mode and exit, not exact argv, version or platform."
+      },
+      "cli_version": "2.1.303",
+      "platform": null,
+      "argv": null,
+      "session_mode": null,
+      "access_mode": "read_only",
+      "process_exit": 1,
+      "coverage": [
+        "authentication_refusal",
+        "structured_error_over_success_subtype",
+        "process_exit_nonzero"
+      ],
+      "projection": "Selected protocol records only; tool events and their payloads omitted. Strings and measurements substituted.",
+      "substitution_classes": [
+        "event_request_or_message_identifier",
+        "numeric_measurement_or_timestamp",
+        "session_identifier",
+        "unclassified_string",
+        "user_or_provider_text"
+      ],
+      "activation_eligible": false,
+      "missing_activation_evidence": [
+        "exact_argv_and_controls",
+        "platform",
+        "confinement_acceptance"
+      ]
+    },
+    {
+      "id": "agy-error",
+      "fixture": "agy/error.jsonl",
+      "sha256": "3b9f7853d7d4ba030c5c58415a43b3771451789b298f1ee0193f2436a31e92c1",
+      "kind": "recorded_projection",
+      "source": {
+        "kind": "local_attempt",
+        "path": ".agent-run/runs/<RUN_004>/dispatch/tasks/<TASK_004>/attempt-<ATTEMPT_004>/events.jsonl",
+        "companion": "adapter-receipt.json",
+        "locator_redaction_classes": [
+          "run_identifier",
+          "task_identifier",
+          "attempt_identifier"
+        ],
+        "capture_context": "Existing local attempt; receipt supplies access mode and exit, not exact argv, version or platform."
+      },
+      "cli_version": null,
+      "platform": null,
+      "argv": null,
+      "session_mode": null,
+      "access_mode": "read_only",
+      "process_exit": 1,
+      "coverage": [
+        "error",
+        "process_exit_nonzero"
+      ],
+      "projection": "Selected protocol records only; tool events and their payloads omitted. Strings and measurements substituted.",
+      "substitution_classes": [
+        "numeric_measurement_or_timestamp",
+        "user_or_provider_text"
+      ],
+      "activation_eligible": false,
+      "missing_activation_evidence": [
+        "exact_argv_and_controls",
+        "platform",
+        "confinement_acceptance",
+        "cli_version"
+      ]
+    },
+    {
+      "id": "opencode-error",
+      "fixture": "opencode/error.jsonl",
+      "sha256": "ec25bad032cbff15420f1c4c608fd522a64d253c3a07570e6730cba0c512af3d",
+      "kind": "recorded_projection",
+      "source": {
+        "kind": "local_attempt",
+        "path": ".agent-run/runs/<RUN_005>/dispatch/tasks/<TASK_005>/attempt-<ATTEMPT_005>/events.jsonl",
+        "companion": "adapter-receipt.json",
+        "locator_redaction_classes": [
+          "run_identifier",
+          "task_identifier",
+          "attempt_identifier"
+        ],
+        "capture_context": "Existing local attempt; receipt supplies access mode and exit, not exact argv, version or platform."
+      },
+      "cli_version": null,
+      "platform": null,
+      "argv": null,
+      "session_mode": null,
+      "access_mode": "read_only",
+      "process_exit": 1,
+      "coverage": [
+        "error",
+        "unverified_major_version"
+      ],
+      "projection": "Selected protocol records only; tool events and their payloads omitted. Strings and measurements substituted.",
+      "substitution_classes": [
+        "numeric_measurement_or_timestamp",
+        "user_or_provider_text"
+      ],
+      "activation_eligible": false,
+      "missing_activation_evidence": [
+        "exact_argv_and_controls",
+        "platform",
+        "confinement_acceptance",
+        "cli_version"
+      ]
+    },
+    {
+      "id": "opencode-step-finish-nonzero",
+      "fixture": "opencode/step-finish-nonzero.jsonl",
+      "sha256": "ae8a6f73869ee71f47600a5cd9cf2f30dc79c28ba4458c385881ddb3a755145c",
+      "kind": "recorded_projection",
+      "source": {
+        "kind": "local_attempt",
+        "path": ".agent-run/runs/<RUN_006>/dispatch/tasks/<TASK_006>/attempt-<ATTEMPT_006>/events.jsonl",
+        "companion": "adapter-receipt.json",
+        "locator_redaction_classes": [
+          "run_identifier",
+          "task_identifier",
+          "attempt_identifier"
+        ],
+        "capture_context": "Existing local attempt; receipt supplies access mode and exit, not exact argv, version or platform."
+      },
+      "cli_version": null,
+      "platform": null,
+      "argv": null,
+      "session_mode": null,
+      "access_mode": "read_only",
+      "process_exit": 130,
+      "coverage": [
+        "intermediate_tool_step_finish",
+        "no_terminal_stop",
+        "process_exit_nonzero",
+        "unverified_major_version"
+      ],
+      "projection": "Selected protocol records only; tool events and their payloads omitted. Strings and measurements substituted.",
+      "substitution_classes": [
+        "event_request_or_message_identifier",
+        "numeric_measurement_or_timestamp",
+        "session_identifier",
+        "user_or_provider_text"
+      ],
+      "activation_eligible": false,
+      "missing_activation_evidence": [
+        "exact_argv_and_controls",
+        "platform",
+        "confinement_acceptance",
+        "cli_version"
+      ]
+    }
+  ],
+  "inventory": {
+    "scope": "Existing tracked fabric-context streams for the five retained providers and local adapter receipts. Local event streams over 1 MiB were skipped; no prompt.md, result.md, auth store or provider process was opened. Counts describe this bounded inventory, not all historical runs.",
+    "local_receipts": {
+      "opencode": 10,
+      "codex": 150,
+      "claude": 7,
+      "agy": 6
+    },
+    "local_streams_skipped_over_1_mib": {
+      "codex": 10
+    },
+    "local_invalid_json_lines_seen": {
+      "codex": 3
+    },
+    "recovered_retry_recording": null,
+    "quota_recording": null,
+    "limitations": [
+      "No source proves the complete required selector/effort/default-service/confinement invocation.",
+      "No Cursor local receipt was present.",
+      "OpenCode streams lack evidence of v2; they cannot establish v2 acceptance.",
+      "Tracked fresh/resume labels follow existing continuation-test pairing, not independently recorded argv.",
+      "No recovered-retry or quota-window/401/429/Retry-After capture was promoted."
+    ]
+  }
+}

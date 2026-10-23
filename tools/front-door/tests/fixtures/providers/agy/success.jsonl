@@ -1,0 +1,5 @@
+{"event":"init","conversation_id":"FIXTURE_SESSION_IDENTIFIER_006","init":{"model":"gemini-3.8-flash","cwd":"FIXTURE_FILESYSTEM_PATH_OR_SNAPSHOT_001","permission_mode":"request-review"}}
+{"event":"step_update","step_update":{"conversation_id":"FIXTURE_SESSION_IDENTIFIER_006","step_index":0,"state":"DONE","step_type":"user_input"}}
+{"event":"step_update","step_update":{"conversation_id":"FIXTURE_SESSION_IDENTIFIER_006","step_index":0,"state":"ACTIVE","step_type":"agent_response","text_delta":"FIXTURE_UNCLASSIFIED_STRING_007"}}
+{"event":"step_update","step_update":{"conversation_id":"FIXTURE_SESSION_IDENTIFIER_006","step_index":0,"state":"DONE","step_type":"agent_response","text_delta":"FIXTURE_UNCLASSIFIED_STRING_008","duration_seconds":0.0,"usage":{"input_tokens":0,"output_tokens":0,"thinking_tokens":0,"cache_read_tokens":0,"total_tokens":0}}}
+{"event":"result","result":{"conversation_id":"FIXTURE_SESSION_IDENTIFIER_006","status":"SUCCESS","response":"FIXTURE_USER_OR_PROVIDER_TEXT_015","duration_seconds":0.0,"num_turns":0,"usage":{"input_tokens":0,"output_tokens":0,"thinking_tokens":0,"cache_read_tokens":0,"total_tokens":0}}}
