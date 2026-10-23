@@ -1,18 +1,15 @@
-//! Shared identity, root and path policy. Environment and host observations are values.
+//! Pure identities, paths, time values and cooperative cancellation.
 #![forbid(unsafe_code)]
 
-pub mod bytes;
+mod bytes;
+mod ids;
 pub use bytes::hex;
-pub mod excludes;
-pub mod host_identity;
-pub mod js;
-mod json_support;
-pub mod jsonc;
-pub mod paths;
-mod pending;
-pub mod product_root_resolver;
-pub mod py;
-pub mod roots;
-#[cfg(test)]
-mod test_support;
-pub mod workspace_paths;
+pub use ids::*;
+mod time;
+pub use time::*;
+mod work;
+pub use work::*;
+mod paths;
+pub use paths::*;
+mod roots;
+pub use roots::*;

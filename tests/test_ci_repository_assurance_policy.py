@@ -326,7 +326,6 @@ def test_lane_conformance_runs_serially_on_linux_and_macos_for_lane_changes() ->
         "tests/support/fake_cli.py",
         "tests/support/git.py",
         "config/model-routing.json",
-        "scripts/lib/jsonc.py",
         "scripts/fabric_hosts.py",
         "tests/cf_dispatch_support.py",
         "tests/conftest.py",

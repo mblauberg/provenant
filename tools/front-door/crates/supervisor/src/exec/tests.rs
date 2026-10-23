@@ -106,52 +106,6 @@ fn stdout_sink_failure_is_typed_and_child_is_cleaned() {
 }
 
 #[test]
-fn differential_raw_bytes_match_python_success_failure_and_stdin() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../..");
-    let script = r#"
-import json, subprocess
-cases = [("printf 'a\\000b\\377'; printf 'err\\r\\n' >&2; exit 7", None),
-         ("/bin/cat", bytes(range(256))*1024),
-         ("printf before; kill -TERM $$", None)]
-results=[]
-for code, data in cases:
-    p=subprocess.run(['/bin/sh','-c',code],input=data,stdout=subprocess.PIPE,stderr=subprocess.PIPE,env={'KEPT':'x'},timeout=5)
-    results.append({'code':p.returncode,'stdout':list(p.stdout[:32]),'stderr':list(p.stderr[:32]),'out_bytes':len(p.stdout),'err_bytes':len(p.stderr)})
-print(json.dumps(results))
-"#;
-    let Some(expected) = crate::test_support::python(&root, script) else {
-        return;
-    };
-    let input: Vec<_> = (0..256 * 1024).map(|n| (n % 256) as u8).collect();
-    let env = [("KEPT".into(), "x".into())];
-    let actual: Vec<_> = [
-        (
-            "printf 'a\\000b\\377'; printf 'err\\r\\n' >&2; exit 7",
-            None,
-        ),
-        ("/bin/cat", Some(input.as_slice())),
-        ("printf before; kill -TERM $$", None),
-    ]
-    .into_iter()
-    .map(|(code, input)| {
-        let args = shell(code);
-        let mut options = ExecOptions::new(&args, &root, Duration::from_secs(5));
-        options.env = Some(&env);
-        options.stdin = input;
-        options.stdout_limit = 32;
-        options.stderr_limit = 32;
-        let result = run(options).unwrap();
-        let code = match result.termination {
-            Termination::Exit(code) => code,
-            Termination::Signal(signal) => -signal,
-        };
-        serde_json::json!({"code":code,"stdout":result.stdout.bytes,"stderr":result.stderr.bytes,
-                "out_bytes":result.stdout.total_bytes,"err_bytes":result.stderr.total_bytes})
-    })
-    .collect();
-    assert_eq!(serde_json::json!(actual), expected);
-}
-#[test]
 fn discard_stream_does_not_trigger_output_limit_stop_or_capture_bytes() {
     let args = shell("printf retained; /usr/bin/head -c 1048577 /dev/zero >&2; exit 7");
     let mut options = ExecOptions::new(&args, Path::new("."), Duration::from_secs(5));

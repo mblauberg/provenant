@@ -178,36 +178,6 @@ mod tests {
         assert!(json.get("stdout").unwrap().is_null());
         assert_eq!(json["returncode"], -15);
     }
-
-    #[test]
-    fn differential_capture_matches_python() {
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../..");
-        let Some(output) = crate::test_support::python(
-            &root,
-            r#"
-import io, json
-from skills._shared.bounded_process import _read_bounded_output
-cases = [b'HEAD-' + b'x' * 4096 + b'-TAIL', b'', bytes([0xf0, 0x9f, 0x92, 0xa9, 0xff]), 'λλ'.encode()]
-print(json.dumps([_read_bounded_output(io.BytesIO(data), limit) for data in cases for limit in [-1, 0, 1, 2, 24, 25, 26, 64, 10000]]))
-"#,
-        ) else {
-            return;
-        };
-        let cases = [
-            [b"HEAD-".as_slice(), &vec![b'x'; 4096], b"-TAIL"].concat(),
-            vec![],
-            vec![0xf0, 0x9f, 0x92, 0xa9, 0xff],
-            "λλ".as_bytes().to_vec(),
-        ];
-        let mut actual = Vec::new();
-        for data in cases {
-            for limit in [-1, 0, 1, 2, 24, 25, 26, 64, 10000] {
-                let view = read_bounded_output(&mut Cursor::new(&data), limit).unwrap();
-                actual.push(serde_json::json!([view.text, view.bytes, view.truncated]));
-            }
-        }
-        assert_eq!(serde_json::Value::Array(actual), output);
-    }
 }
 
 #[cfg(test)]

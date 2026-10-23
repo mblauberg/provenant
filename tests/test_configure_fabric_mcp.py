@@ -512,7 +512,7 @@ def test_check_reports_only_agent_fabric_entry_status(tmp_path: Path) -> None:
     assert "AGENT_FABRIC_" not in checked.stdout + checked.stderr
 
 
-def test_opencode_commented_jsonc_fails_closed_without_rewriting(tmp_path: Path) -> None:
+def test_opencode_jsonc_is_rejected_pending_rust_config_owner(tmp_path: Path) -> None:
     config = tmp_path / "opencode.jsonc"
     original = '{\n  // user comment\n  "mcp": {},\n}\n'
     config.write_text(original)
@@ -520,24 +520,8 @@ def test_opencode_commented_jsonc_fails_closed_without_rewriting(tmp_path: Path)
     result = run_configure(tmp_path, "--platform", "opencode")
 
     assert result.returncode == 3
-    assert "warning: OpenCode JSONC comments must be preserved" in result.stderr
-    assert "mcp.fabric" in result.stderr
+    assert "JSONC is unsupported by the Python installer pending the Rust config owner" in result.stderr
     assert config.read_text() == original
-
-
-def test_opencode_existing_registration_accepts_commented_jsonc(tmp_path: Path) -> None:
-    config = tmp_path / "opencode.jsonc"
-    initial = run_configure(tmp_path, "--platform", "opencode")
-    assert initial.returncode == 0, initial.stderr
-    commented = config.read_text().replace("{\n", '{\n  // keep this note\n', 1)
-    commented = commented.removesuffix("}\n") + ",\n}\n"
-    config.write_text(commented)
-
-    result = run_configure(tmp_path, "--platform", "opencode")
-
-    assert result.returncode == 0, result.stderr
-    assert "existing platform=opencode" in result.stdout
-    assert config.read_text() == commented
 
 
 def test_opencode_removes_only_missing_legacy_agents_harness_entry(tmp_path: Path) -> None:

@@ -16,7 +16,6 @@ import sys
 import tomllib
 
 from lib.front_door_build import CRATE_RELATIVE, embedded_digest, source_digest
-from lib.jsonc import parse_jsonc
 from lib.product_root_resolver import POINTER_RELATIVE_PATH, load_pointer_file
 from lib.stale_checkout import warn_if_stale_checkout
 from instance_installation import InstallError, routing_drift
@@ -49,7 +48,8 @@ def provider_registration_status(home: Path) -> dict[str, dict[str, bool]]:
             if provider == "codex":
                 document = tomllib.loads(content)
             elif provider == "opencode":
-                document, _ = parse_jsonc(content)
+                # JSONC is refused here until the Rust config owner lands.
+                document = json.loads(content)
             else:
                 document = json.loads(content)
             key = "mcp_servers" if provider == "codex" else "mcp" if provider == "opencode" else "mcpServers"

@@ -1,0 +1,19 @@
+{
+  "tool": "git version 2.54.0 (Apple Git-157)",
+  "platform": "macOS",
+  "capture": "git init -q --object-format=sha1|sha256 TEMP; git -C TEMP hash-object --stdin",
+  "input_utf8": "provenant core GitOid contract\n",
+  "redactions": [
+    "temporary repository and home paths"
+  ],
+  "objects": [
+    {
+      "format": "sha1",
+      "oid": "1ef35244d4c7ef19acaeb54a80636e9cc33767d0"
+    },
+    {
+      "format": "sha256",
+      "oid": "132b5e37e9bafae99986eaf2a293e54a3e621f7047fcfcaebb6b376f8396db56"
+    }
+  ]
+}

@@ -320,8 +320,8 @@ def test_both_call_paths_raise_the_same_refusal_class(producer, checkpoint, tmp_
 # is safe while the invariants live inside a script the caller reloads, and
 # unsafe once they live in a shared module that stays cached in `sys.modules`
 # for the life of the process: the first importer's product root would be
-# frozen in for every later caller. `test_product_root_single_resolver` caught
-# it. This pins the shared module directly, which that test does not reach.
+# frozen in for every later caller. The deleted resolver test caught it.
+# This pins the shared module directly.
 def test_the_risk_policy_is_resolved_against_the_current_product_root(
     monkeypatch, tmp_path,
 ):

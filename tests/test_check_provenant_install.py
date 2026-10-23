@@ -99,7 +99,7 @@ def test_check_reports_invalid_provider_config_without_a_traceback(tmp_path: Pat
     assert "Traceback" not in result.stderr
 
 
-def test_check_accepts_commented_opencode_jsonc_registration(tmp_path: Path) -> None:
+def test_check_accepts_strict_json_opencode_registration(tmp_path: Path) -> None:
     command = tmp_path / "bin/provenant"
     command.parent.mkdir()
     command.write_bytes(installed_identity())
@@ -108,7 +108,7 @@ def test_check_accepts_commented_opencode_jsonc_registration(tmp_path: Path) -> 
     skill = root / "skills/orchestrate/SKILL.md"
     skill.parent.mkdir(parents=True)
     skill.write_text("# Test\n")
-    (root / "opencode.jsonc").write_text('{\n// keep\n"mcp": {"fabric": {}},\n}\n')
+    (root / "opencode.jsonc").write_text('{"mcp": {"fabric": {}}}')
 
     result = run_check(tmp_path)
 
