@@ -109,7 +109,7 @@ fn duplicate_nested_members_and_out_of_range_integers_cannot_enter_snapshots() {
     assert!(load_json(r#"{"a":{"x":1,"x":2}}"#).is_err());
     assert!(matches!(
         load_json("18446744073709551616"),
-        Err(JsonError::NumberOutOfRange)
+        Err(JsonError::NumberOutOfRange(_))
     ));
     let now = "2026-10-23T00:00:00Z".parse().unwrap();
     assert_eq!(
@@ -140,13 +140,15 @@ fn python_iso_dates_offsets_and_microseconds_match_the_snapshot_oracle() {
         "2026-10-23T00:00:00,000001Z",
         "2026-10-23T00:00:00.000000999Z",
         "2026-10-23T01:39:00+00:99",
+        "2026-10-23T00:00:00+00:00:00.5",
+        "2026-10-23T00:00:00+00:00:01.5",
         "2026-10-23T00:00:00",
         "bad",
         "2026-10-23T24:00:00Z",
         "0000-10-23T00:00:00Z",
         "2026-10-23T12.5Z",
     ];
-    let Some(expected): Option<Vec<Option<String>>> = crate::oracle::python(
+    let Some(expected): Option<(i64, Vec<Option<String>>)> = crate::oracle::python(
         r#"
 from datetime import datetime,timezone
 import json,sys
@@ -156,14 +158,25 @@ for raw in json.load(sys.stdin):
   d=datetime.fromisoformat(raw.replace('Z','+00:00'))
   out.append(d.astimezone(timezone.utc).isoformat(timespec='microseconds') if d.tzinfo else None)
  except ValueError:out.append(None)
-print(json.dumps(out))
+probe=datetime.fromisoformat('2026-10-23T00:00:00+00:00:00.5').utcoffset().microseconds
+print(json.dumps([probe,out]))
 "#,
         &json!(stamps),
     ) else {
         return;
     };
-    for (raw, expected) in stamps.into_iter().zip(expected) {
-        let actual = pending::timestamp(raw).map(|v| v.to_string());
+    let semantics = match expected.0 {
+        0 => provenant_core::py::IsoformatSemantics::Python3144,
+        500_000 => provenant_core::py::IsoformatSemantics::Python3148,
+        other => panic!("unrecognized Python fractional offset semantics: {other}"),
+    };
+    for (raw, expected) in stamps.into_iter().zip(expected.1) {
+        let actual =
+            provenant_core::py::python_fromisoformat_with(&raw.replace('Z', "+00:00"), semantics)
+                .ok()
+                .and_then(|v| v.timestamp().ok())
+                .and_then(|v| v.to_jiff().ok())
+                .map(|v| v.to_string());
         let expected = expected
             .and_then(|v| v.parse::<jiff::Timestamp>().ok())
             .map(|v| v.to_string());

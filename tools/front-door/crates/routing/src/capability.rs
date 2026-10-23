@@ -1,4 +1,5 @@
 //! Validated runtime capability snapshots. Source trust and age are explicit policy.
+use crate::live::parse_timestamp;
 use crate::{
     casefold::fold,
     catalog,
@@ -50,7 +51,7 @@ pub fn load_capabilities(
     use CapabilityFailure::*;
     let data = match load_json(raw) {
         Ok(v) => v,
-        Err(JsonError::NumberOutOfRange) => return Err(JsonError::NumberOutOfRange),
+        Err(error @ JsonError::NumberOutOfRange(_)) => return Err(error),
         Err(_) => return Ok(refused(DiscoveryFailed)),
     };
     let Some(object) = data.as_object() else {
@@ -96,7 +97,7 @@ pub fn load_capabilities(
     let Some(observed) = data
         .get("observed_at")
         .and_then(OrderedValue::as_str)
-        .and_then(pending::timestamp)
+        .and_then(parse_timestamp)
     else {
         return Ok(refused(Untrusted));
     };

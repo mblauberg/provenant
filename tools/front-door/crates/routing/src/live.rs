@@ -3,6 +3,12 @@
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+pub(crate) fn parse_timestamp(raw: &str) -> Option<jiff::Timestamp> {
+    provenant_core::py::python_iso_timestamp(&raw.replace('Z', "+00:00"))?
+        .to_jiff()
+        .ok()
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct LiveModel {
     pub id: String,
@@ -30,13 +36,11 @@ impl CapabilitySnapshot {
     /// The caller supplies its clock; this record never reads wall time.
     /// Python's datetime has microsecond precision, including for ISO input.
     pub fn is_fresh(&self, now: jiff::Timestamp) -> bool {
-        self.observed_at
-            .parse::<jiff::Timestamp>()
-            .is_ok_and(|observed| {
-                let age = now.as_nanosecond().div_euclid(1000)
-                    - observed.as_nanosecond().div_euclid(1000);
-                age <= i128::from(CAPABILITY_MAX_AGE_SECONDS) * 1_000_000
-            })
+        parse_timestamp(&self.observed_at).is_some_and(|observed| {
+            let age =
+                now.as_nanosecond().div_euclid(1000) - observed.as_nanosecond().div_euclid(1000);
+            age <= i128::from(CAPABILITY_MAX_AGE_SECONDS) * 1_000_000
+        })
     }
 }
 
@@ -73,7 +77,7 @@ pub fn cached_live_models(
     let Some(observed) = entry
         .get("observed_at")
         .and_then(OrderedValue::as_str)
-        .and_then(crate::pending::timestamp)
+        .and_then(parse_timestamp)
     else {
         return vec![];
     };
@@ -172,7 +176,7 @@ pub fn cooling(
         }
         if let Some(until) = item.get("cooling_until") {
             let raw = crate::pending::ordered_string(until);
-            if crate::pending::timestamp(&raw).is_some_and(|stamp| stamp > now) {
+            if parse_timestamp(&raw).is_some_and(|stamp| stamp > now) {
                 return Ok(raw);
             }
         }
@@ -214,7 +218,7 @@ pub fn recent_failed_task_class_models(
             .get("at")
             .map(crate::pending::python_string)
             .unwrap_or_default();
-        let Some(observed) = crate::pending::timestamp(&raw) else {
+        let Some(observed) = parse_timestamp(&raw) else {
             return std::collections::BTreeSet::new();
         };
         let age = now.as_nanosecond().div_euclid(1000) - observed.as_nanosecond().div_euclid(1000);

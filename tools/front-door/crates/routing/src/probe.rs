@@ -65,7 +65,7 @@ pub fn load_json(raw: &str) -> Result<OrderedValue, JsonError> {
 pub fn listed_models(raw: &str, adapter: Option<&str>) -> Result<Vec<String>, JsonError> {
     let parsed = match pending::from_json::<OrderedValue>(raw) {
         Ok(value) => Some(value),
-        Err(JsonError::NumberOutOfRange) => return Err(JsonError::NumberOutOfRange),
+        Err(error @ JsonError::NumberOutOfRange(_)) => return Err(error),
         Err(_) => None,
     };
     if parsed
@@ -96,7 +96,7 @@ pub fn listed_models(raw: &str, adapter: Option<&str>) -> Result<Vec<String>, Js
     }
     if let Some(OrderedValue::Array(items)) = data {
         let valid = regex::Regex::new(r"\A[A-Za-z0-9_./:~-]+\z")
-            .map_err(|e| JsonError::Invalid(<serde_json::Error as de::Error>::custom(e)))?;
+            .map_err(|e| JsonError::Json(<serde_json::Error as de::Error>::custom(e)))?;
         let mut models = vec![];
         for item in items {
             let name = match &item {
@@ -119,9 +119,9 @@ pub fn listed_models(raw: &str, adapter: Option<&str>) -> Result<Vec<String>, Js
     if matches!(adapter, Some("codex" | "kiro")) {
         return Ok(vec![]);
     }
-    let pattern=regex::Regex::new(r"\A(?:[-*][\s\x1c-\x1f]+)?([A-Za-z](?:[A-Za-z0-9._/~-]*[A-Za-z0-9])?(?::[A-Za-z0-9._~-]+)*)(?:(?:\t| {2,}| - )[^\s\x1c-\x1f].*)?\z").map_err(|e|JsonError::Invalid(<serde_json::Error as de::Error>::custom(e)))?;
+    let pattern=regex::Regex::new(r"\A(?:[-*][\s\x1c-\x1f]+)?([A-Za-z](?:[A-Za-z0-9._/~-]*[A-Za-z0-9])?(?::[A-Za-z0-9._~-]+)*)(?:(?:\t| {2,}| - )[^\s\x1c-\x1f].*)?\z").map_err(|e|JsonError::Json(<serde_json::Error as de::Error>::custom(e)))?;
     let has_number = regex::Regex::new(r"[-/.\d]")
-        .map_err(|e| JsonError::Invalid(<serde_json::Error as de::Error>::custom(e)))?;
+        .map_err(|e| JsonError::Json(<serde_json::Error as de::Error>::custom(e)))?;
     let mut listed = vec![];
     let mut gap = false;
     for line in raw.replace("\r\n", "\n").split([
