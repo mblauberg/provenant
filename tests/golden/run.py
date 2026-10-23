@@ -168,6 +168,15 @@ def binary_path() -> Path | None:
     return release.resolve() if release.is_file() else None
 
 
+def suite_binary() -> Path | None:
+    """The binary for end-to-end tests, only when a job names it explicitly.
+
+    Parallel test shards share the checkout, so the checkout guard cannot
+    tell a golden child's writes from another test's.
+    """
+    return binary_path() if os.environ.get("PROVENANT_GOLDEN_BIN") else None
+
+
 def normalize(value: str, replacements: list[tuple[str, str]]) -> str:
     for source, label in sorted(replacements, key=lambda item: len(item[0]), reverse=True):
         value = value.replace(source, label)

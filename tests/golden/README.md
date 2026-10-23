@@ -29,10 +29,13 @@ only; schema snapshots store SQL text, which SQLite minor releases leave unchang
 selects Python 3.12 through uv and invokes the suite with its `.venv/bin/python`; a runtime
 mismatch fails comparisons containing machine cases with a re-record instruction.
 Help-only comparisons and partial recordings do not require that runtime.
-`PROVENANT_GOLDEN_BIN` selects the binary, otherwise only the Cargo release
-output is accepted (`CARGO_TARGET_DIR` is honoured). A missing binary fails;
-`PROVENANT_GOLDEN_ALLOW_SKIP=1` explicitly permits skipping, unless
-`PROVENANT_GOLDEN_REQUIRED=1` is set.
+`PROVENANT_GOLDEN_BIN` selects the binary. `run.py` otherwise accepts only the
+Cargo release output (`CARGO_TARGET_DIR` is honoured); a missing binary fails,
+and `PROVENANT_GOLDEN_ALLOW_SKIP=1` permits skipping unless
+`PROVENANT_GOLDEN_REQUIRED=1` is set. The pytest end-to-end tests run only when
+`PROVENANT_GOLDEN_BIN` is set, because parallel test shards share the checkout
+and would trip its guard. CI's serial Rust front door job sets it with
+`PROVENANT_GOLDEN_REQUIRED=1`.
 
 Every public command listed by `provenant help` must have a case, and the
 recorded file set must exactly match the generated set. Real success paths
@@ -66,7 +69,8 @@ changing the runtime. Review `git diff -- tests/golden` for changed exit codes, 
 help command/flag sets and manifest versions. Then compare:
 
 ```sh
-uv run --python 3.12 --group test python -m pytest tests/golden/test_golden_cli.py -q
+PROVENANT_GOLDEN_BIN=tools/front-door/target/release/provenant \
+  uv run --python 3.12 --group test python -m pytest tests/golden -q
 ```
 
 ## Differential runs

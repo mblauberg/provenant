@@ -10,17 +10,19 @@ import tempfile
 
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-from run import binary_path  # noqa: E402
+from tests.support.modules import load_script
+
+# Register as `run` so in-test `import run` and diff.py share one module.
+golden = sys.modules.get("run") or load_script(Path(__file__).with_name("run.py"), "run", register=True)
 
 
 HERE = Path(__file__).resolve().parent
 
 
 def test_differential_runner_same_changed_and_allowed(tmp_path):
-    binary = binary_path()
+    binary = golden.suite_binary()
     if binary is None or not binary.is_file():
-        reason = "no CLI binary found (set PROVENANT_GOLDEN_BIN or build tools/front-door)"
+        reason = "end-to-end golden tests need PROVENANT_GOLDEN_BIN (CI's serial Rust front door job sets it)"
         if os.environ.get("PROVENANT_GOLDEN_REQUIRED") == "1":
             pytest.fail(reason)
         pytest.skip(reason)
