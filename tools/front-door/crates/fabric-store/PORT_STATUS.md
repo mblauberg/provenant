@@ -43,7 +43,7 @@ outside this batch.
 - `pending::IdSource`: UUID entropy contract owned by `provenant-supervisor`;
   no unsafe or ad hoc entropy implementation is supplied.
 - `pending` ECMAScript trim, numeric-key and UTF-16 slicing helpers belong in
-  `provenant-core`, including full-range `Date.toISOString`. They are
+  `provenant-core`, including `pending::js_iso` for full-range `Date.toISOString`. They are
   JavaScript compatibility, not Python copies.
 
 ## Evidence and cut-over gaps
