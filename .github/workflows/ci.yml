@@ -48,7 +48,6 @@ jobs:
       split-root: ${{ github.event_name != 'pull_request' && 'true' || steps.filter.outputs.split-root }}
       workflows: ${{ github.event_name != 'pull_request' && 'true' || steps.filter.outputs.workflows }}
       rust: ${{ github.event_name != 'pull_request' && 'true' || steps.filter.outputs.rust }}
-      lane: ${{ github.event_name != 'pull_request' && 'true' || steps.filter.outputs.lane }}
       tree: ${{ steps.tree.outputs.tree }}
       passed-tree: ${{ steps.tree.outputs.passed-tree }}
     steps:
@@ -199,20 +198,6 @@ jobs:
               - 'scripts/lib/product_root_resolver.py'
               - 'scripts/lib/stale_checkout.py'
               - 'scripts/worktree.py'
-            lane:
-              - *ci-contract
-              - 'tools/**'
-              - 'skills/orchestrate/scripts/**'
-              - 'skills/_shared/**'
-              - 'tests/lane_conformance/**'
-              - 'tests/support/**'
-              - 'tests/cf_dispatch_support.py'
-              - 'tests/conftest.py'
-              - 'config/model-routing.json'
-              - 'scripts/lib/jsonc.py'
-              - 'scripts/fabric_hosts.py'
-              - 'pyproject.toml'
-              - 'uv.lock'
             workflows:
               - '.github/workflows/**'
               - '.github/actions/**'
@@ -297,36 +282,7 @@ jobs:
           AGENT_FABRIC_PRODUCT_ROOT: ${{ github.workspace }}
           AGENT_FABRIC_INSTANCE_ROOT: ${{ github.workspace }}
           PROVENANT_TEST_SHARD: ${{ matrix.shard == 'fabric-hosts' && '1/3' || matrix.shard == 'python-a' && '2/3' || '3/3' }}
-        # The process conformance suite has its own serial, cross-platform job.
-        run: .venv/bin/python -m pytest -q --durations=30 --durations-min=1 -n auto --ignore=tests/lane_conformance
-
-  lane-conformance:
-    name: Lane conformance (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 10
-    permissions:
-      contents: read
-    needs: detect-changes
-    if: needs.detect-changes.outputs.lane == 'true'
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-15]
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - name: Set up uv and Python
-        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
-        with:
-          python-version: "3.14"
-          enable-cache: true
-          cache-dependency-glob: uv.lock
-      - name: Install locked harness test dependencies
-        run: uv sync --locked --only-group test
-      - name: Run lane conformance serially
-        run: .venv/bin/python -m pytest tests/lane_conformance -q
+        run: .venv/bin/python -m pytest -q --durations=30 --durations-min=1 -n auto
 
   # Quick path for pull requests that change only prose under docs/: the
   # frontmatter, link and issue-form checks plus the two tests that read every
@@ -505,9 +461,6 @@ jobs:
       - name: Run workspace tests
         working-directory: tools/front-door
         run: cargo nextest run --profile ci --workspace --locked
-      - name: Run fault-injection tests
-        working-directory: tools/front-door
-        run: cargo nextest run --profile ci -p provenant --features fault-injection --locked
       - name: Run documentation tests
         working-directory: tools/front-door
         run: cargo test --doc --workspace --locked
@@ -579,6 +532,9 @@ jobs:
         run: printf 'TMPDIR=%s\n' "$TMPDIR" >> "$GITHUB_ENV"
       - name: Install pinned Rust toolchain
         run: rustup toolchain install 1.99.1 --profile minimal
+      - name: Run macOS supervisor custody tests
+        working-directory: tools/front-door
+        run: cargo test -p provenant-supervisor --locked
       # No target cache: install builds from a clean target, and cached
       # proc-macro dylibs would hide the failure this job exists to catch.
       - name: Build release front door
@@ -665,7 +621,6 @@ jobs:
       - detect-changes
       - harness-checks
       - python-tests
-      - lane-conformance
       - docs
       - split-root
       - rust

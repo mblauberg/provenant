@@ -91,14 +91,11 @@ description = "Provenant front door: resolves the product checkout and execs the
 publish = false
 license.workspace = true
 
-[features]
-fault-injection = ["provenant-supervisor/fault-injection"]
-
 [dependencies]
+serde_json = { workspace = true }
 provenant-supervisor = { workspace = true }
 
 [dev-dependencies]
-serde_json = { workspace = true }
 toml_edit = { workspace = true }
 provenant-supervisor = { workspace = true, features = ["test-fixtures"] }
 

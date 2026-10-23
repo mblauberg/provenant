@@ -6,7 +6,6 @@
 //! error, never a fallback.
 
 use crate::exec::{REPAIR, is_executable};
-use crate::json::{self, Value};
 use std::env;
 use std::ffi::{OsStr, OsString};
 use std::fs;
@@ -150,10 +149,16 @@ fn pointer_product_root(settings: &Settings, instance: &Path) -> Result<Option<P
     };
     let bytes = fs::read(&pointer).map_err(|error| unreadable(&crate::exec::describe(&error)))?;
     let text = String::from_utf8(bytes).map_err(|_| unreadable(&"not valid UTF-8"))?;
-    let value = json::parse(&text).map_err(|error| unreadable(&error))?;
-    let (Some(Value::Int(1)), Some(Value::Str(root))) =
-        (value.get("schema_version"), value.get("product_root"))
-    else {
+    let value: serde_json::Value =
+        serde_json::from_str(&text).map_err(|error| unreadable(&error))?;
+    let (Some(1), Some(root)) = (
+        value
+            .get("schema_version")
+            .and_then(serde_json::Value::as_u64),
+        value
+            .get("product_root")
+            .and_then(serde_json::Value::as_str),
+    ) else {
         return Err(format!("product-root pointer is invalid at {at}; {REPAIR}"));
     };
     let candidate = PathBuf::from(settings.expand_user(OsStr::new(root)));

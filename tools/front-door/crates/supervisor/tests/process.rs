@@ -32,14 +32,17 @@ fn fixture_arg(path: &Path) -> OsString {
     path.as_os_str().to_owned()
 }
 
-fn suite() -> Result<()> {
-    let root = tempfile::Builder::new().prefix("s1-").tempdir_in("/tmp")?;
-    let env = fixture::environment(root.path());
+fn fixture_environment(root: &Path) -> Vec<(OsString, OsString)> {
+    fixture::environment(root)
+}
+
+fn captures_bytes_and_text_validation(root: &Path) -> Result<()> {
+    let env = fixture_environment(root);
     let executor = SystemExecutor::new(4)?;
     let args = fixture::argv("bytes")?;
     let decoder = Decoder(Mutex::new(Vec::new()));
     let (sink, _receiver) = tee_queue(1)?;
-    let mut options = ExecOptions::new(&args, root.path(), Duration::from_secs(3));
+    let mut options = ExecOptions::new(&args, root, Duration::from_secs(3));
     options.env = Some(&env);
     options.stdout = StreamPolicy::Tee {
         limit: 3,
@@ -53,7 +56,8 @@ fn suite() -> Result<()> {
     assert!(outcome.stdout.truncated);
     assert_eq!(outcome.stderr.bytes, b"err\r\n");
     assert!(!outcome.timed_out);
-    let mut options = ExecOptions::new(&args, root.path(), Duration::from_secs(3));
+
+    let mut options = ExecOptions::new(&args, root, Duration::from_secs(3));
     options.env = Some(&env);
     assert!(matches!(
         run_text(&executor, options),
@@ -70,17 +74,28 @@ fn suite() -> Result<()> {
             .iter()
             .any(|frame| frame == b"terminal")
     );
+    Ok(())
+}
+
+fn large_stdin_round_trip(root: &Path) -> Result<()> {
+    let env = fixture_environment(root);
+    let executor = SystemExecutor::new(4)?;
     let bytes = vec![0x9a; 256 * 1024];
     let args = fixture::argv("echo")?;
-    let mut options = ExecOptions::new(&args, root.path(), Duration::from_secs(5));
+    let mut options = ExecOptions::new(&args, root, Duration::from_secs(5));
     options.env = Some(&env);
     options.stdin = Some(&bytes);
     let outcome = executor.execute(options)?;
     assert_eq!(outcome.stdout.bytes, bytes);
     assert_eq!(outcome.stderr.bytes, b"done\r\n");
+    Ok(())
+}
 
+fn bounded_capture_retains_only_the_configured_limit(root: &Path) -> Result<()> {
+    let env = fixture_environment(root);
+    let executor = SystemExecutor::new(4)?;
     let args = fixture::argv("flood")?;
-    let mut options = ExecOptions::new(&args, root.path(), Duration::from_secs(5));
+    let mut options = ExecOptions::new(&args, root, Duration::from_secs(5));
     options.env = Some(&env);
     options.stderr = StreamPolicy::Discard;
     options.stdout = StreamPolicy::Capture { limit: 128 };
@@ -88,32 +103,70 @@ fn suite() -> Result<()> {
     assert_eq!(outcome.stdout.bytes.len(), 128);
     assert_eq!(outcome.stdout.total_bytes, 262144);
     assert_eq!(outcome.stderr.total_bytes, 0);
+    Ok(())
+}
 
+fn timeout_escalates_to_kill(root: &Path) -> Result<()> {
+    let env = fixture_environment(root);
+    let executor = SystemExecutor::new(4)?;
     let args = fixture::argv("blocked")?;
-    let mut options = ExecOptions::new(&args, root.path(), Duration::from_secs(1));
+    let mut options = ExecOptions::new(&args, root, Duration::from_secs(1));
     options.env = Some(&env);
     options.terminate_grace = Duration::from_millis(20);
     let outcome = executor.execute(options)?;
     assert!(outcome.timed_out);
     assert_eq!(outcome.termination, Termination::Signal(9));
+    Ok(())
+}
 
-    tee_loss_does_not_stall_capture(&executor, root.path(), &env)?;
-    cancellation_is_scoped_to_the_owned_child(root.path(), &env, false)?;
-    cancellation_is_scoped_to_the_owned_child(root.path(), &env, true)?;
-    natural_exit_beats_pipe_drain_expiry(root.path(), &env)?;
-    reaper_transfers_and_polls_fairly(root.path())?;
-    inherited_wait_policy_preserves_pid_reservation(&executor, root.path(), &env)?;
-    for scenario in ["inheritance-parent", "failed-replace"] {
-        let argv = fixture::argv(scenario)?;
-        let mut options = ExecOptions::new(&argv, root.path(), Duration::from_secs(5));
-        options.env = Some(&env);
-        let outcome = executor.execute(options)?;
-        assert_eq!(
-            outcome.termination,
-            Termination::Exit(0),
-            "{scenario}: {outcome:?}"
-        );
-    }
+fn tee_loss_does_not_stall_capture_test(root: &Path) -> Result<()> {
+    let env = fixture_environment(root);
+    let executor = SystemExecutor::new(4)?;
+    tee_loss_does_not_stall_capture(&executor, root, &env)
+}
+
+fn cancellation_is_scoped_to_the_owned_child_test(root: &Path) -> Result<()> {
+    cancellation_is_scoped_to_the_owned_child(root, &fixture_environment(root), false)
+}
+
+fn cancellation_reap_exhaustion_transfers_child(root: &Path) -> Result<()> {
+    cancellation_is_scoped_to_the_owned_child(root, &fixture_environment(root), true)
+}
+
+fn natural_exit_beats_pipe_drain_expiry_test(root: &Path) -> Result<()> {
+    natural_exit_beats_pipe_drain_expiry(root, &fixture_environment(root))
+}
+
+fn reaper_transfers_and_polls_fairly_test(root: &Path) -> Result<()> {
+    reaper_transfers_and_polls_fairly(root)
+}
+
+fn inherited_wait_policy_test(root: &Path) -> Result<()> {
+    let env = fixture_environment(root);
+    let executor = SystemExecutor::new(4)?;
+    inherited_wait_policy_preserves_pid_reservation(&executor, root, &env)
+}
+
+fn fixture_inheritance_parent_is_reaped(root: &Path) -> Result<()> {
+    run_fixture_scenario(root, "inheritance-parent")
+}
+
+fn failed_exec_replace_preserves_process_state(root: &Path) -> Result<()> {
+    run_fixture_scenario(root, "failed-replace")
+}
+
+fn run_fixture_scenario(root: &Path, scenario: &str) -> Result<()> {
+    let env = fixture_environment(root);
+    let executor = SystemExecutor::new(4)?;
+    let argv = fixture::argv(scenario)?;
+    let mut options = ExecOptions::new(&argv, root, Duration::from_secs(5));
+    options.env = Some(&env);
+    let outcome = executor.execute(options)?;
+    assert_eq!(
+        outcome.termination,
+        Termination::Exit(0),
+        "{scenario}: {outcome:?}"
+    );
     Ok(())
 }
 
@@ -311,9 +364,64 @@ fn reaper_transfers_and_polls_fairly(root: &Path) -> Result<()> {
     Ok(())
 }
 
+const TESTS: &[&str] = &[
+    "captures_bytes_and_text_validation",
+    "large_stdin_round_trip",
+    "bounded_capture_retains_only_the_configured_limit",
+    "timeout_escalates_to_kill",
+    "tee_loss_does_not_stall_capture",
+    "cancellation_is_scoped_to_the_owned_child",
+    "cancellation_reap_exhaustion_transfers_child",
+    "natural_exit_beats_pipe_drain_expiry",
+    "reaper_transfers_and_polls_fairly",
+    "inherited_wait_policy_preserves_pid_reservation",
+    "fixture_inheritance_parent_is_reaped",
+    "failed_exec_replace_preserves_process_state",
+];
+
+fn run_case(name: &str) -> Result<()> {
+    let root = tempfile::Builder::new().prefix("s1-").tempdir_in("/tmp")?;
+    let cleanup = fixture::ProcessCleanupGuard::new(root.path());
+    let result = match name {
+        "captures_bytes_and_text_validation" => captures_bytes_and_text_validation(root.path()),
+        "large_stdin_round_trip" => large_stdin_round_trip(root.path()),
+        "bounded_capture_retains_only_the_configured_limit" => {
+            bounded_capture_retains_only_the_configured_limit(root.path())
+        }
+        "timeout_escalates_to_kill" => timeout_escalates_to_kill(root.path()),
+        "tee_loss_does_not_stall_capture" => tee_loss_does_not_stall_capture_test(root.path()),
+        "cancellation_is_scoped_to_the_owned_child" => {
+            cancellation_is_scoped_to_the_owned_child_test(root.path())
+        }
+        "cancellation_reap_exhaustion_transfers_child" => {
+            cancellation_reap_exhaustion_transfers_child(root.path())
+        }
+        "natural_exit_beats_pipe_drain_expiry" => {
+            natural_exit_beats_pipe_drain_expiry_test(root.path())
+        }
+        "reaper_transfers_and_polls_fairly" => reaper_transfers_and_polls_fairly_test(root.path()),
+        "inherited_wait_policy_preserves_pid_reservation" => {
+            inherited_wait_policy_test(root.path())
+        }
+        "fixture_inheritance_parent_is_reaped" => fixture_inheritance_parent_is_reaped(root.path()),
+        "failed_exec_replace_preserves_process_state" => {
+            failed_exec_replace_preserves_process_state(root.path())
+        }
+        _ => return Err(io::Error::new(io::ErrorKind::NotFound, "unknown process test").into()),
+    };
+    if result.is_ok() {
+        cleanup.disarm();
+    }
+    result
+}
+
 fn main() -> Result<()> {
     if fixture::dispatch()? {
         return Ok(());
     }
-    suite()
+    let args: Vec<_> = std::env::args_os().skip(1).collect();
+    fixture::run_libtest(&args, TESTS, |name| {
+        run_case(name).map_err(|error| io::Error::other(error.to_string()))
+    })?;
+    Ok(())
 }

@@ -385,7 +385,19 @@ per-target continuation generation with the new operation; replay of the same
 operation returns its receipt before that check. The old terminal attempt is
 unchanged. Automatic read-only
 fallback alone appends an attempt inside the original run/task. All retries
-require observed prior exit and completed cleanup. Continued resume
+require observed prior exit and completed cleanup.
+On macOS, completed cleanup means a reaped provider, two complete libproc
+censuses at least 20 ms apart with no provider session/group member or surviving
+recorded descendant/ancestry (ppid with native start-time identity), and fresh
+nonblocking writer-lease acquisition after all guardian/requester copies close.
+Libproc enumeration supplements permission-limited short BSD records with
+the public `KERN_PROC_PID` start-time prefix, checked across two native reads.
+Failed or racing identity reads remain unknown. The provider inherits that
+lease description. Supervisor records
+`darwin_census_and_writer_lease` settlement evidence; any missing proof stays
+fenced. An unsampled `setsid` escape that closed the lease is the documented
+macOS residual. Run never converts an uncertain observation into absence.
+ Continued resume
 preserves route, account, confinement and exact provider session; unsupported
 or missing sessions fail without a fresh launch. A new route or fresh session
 is an explicit new dispatch. Replaying a successful attempt without new input is refused.
@@ -395,6 +407,20 @@ rate/quota/model-unavailable outcomes, within the original budget and at most
 three attempts. Authentication, permission denial, quarantine, partial output
 and unknown custody never trigger automatic retry. Writers require an explicit
 retry even after a transient failure, with fresh worktree evidence.
+
+Run produces the supervisor release contract after committing the canonical
+terminal transaction and quarantine. In Run-private directories excluded from
+provider mutation, durably publish v1 `terminal-commit.json` and
+`quarantine/manifest.json`, each containing `schema_version: 1`, exact `scope`
+(run, attempt, generation), and `kind` (`canonical_terminal` or
+`quarantine_manifest`). Then publish `release.json` with the same scope/version
+and `terminal_digest`/`quarantine_digest`, calculated as
+`CanonicalV1::file_digest` over the exact raw bytes. Each record is at most
+1 MiB and rejects duplicate/unknown fields. Supervisor verifies the original
+attempt inode and held custody lock, both digests and scoped records, and syncs
+the held files and directories before issuing `SettlementCommit`. Run retains
+writer exclusion through classified scratch settlement and fence clearing;
+missing, malformed or changed attestations keep the fence.
 
 Lineage uses explicit `AttemptRef` and a supervisor-verified inherited parent
 capability. Bad inherited ancestry is an error, not silently ignored metadata.
