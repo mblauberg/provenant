@@ -145,3 +145,11 @@ mutation. The expansion-only test was replaced with retained-input refusal
 coverage for arrays, strings and scalars. Numeric-key ordering in object
 rewrites remains a partial records boundary, not a JS-order claim. Hosts is
 still absent from the ledger and Units line.
+
+Item 6: `identity::Environment` is an OS environment snapshot represented by
+`BTreeMap<OsString, OsString>`. It cannot represent a present JavaScript
+`NodeJS.ProcessEnv` property whose value is `undefined`. Callers must omit
+undefined entries when supplying OS environments; property-presence semantics
+for arbitrary in-memory ProcessEnv objects are not modelled. This limitation
+also applies to the caller-supplied environment in the ps declaration contract.
+No additional identity/runtime completion claim is made.
