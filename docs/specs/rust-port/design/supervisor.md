@@ -141,6 +141,9 @@ The exit's `settlement_evidence` records
 `darwin_census_and_writer_lease`, `linux_kernel_children`, `never_spawned` or
 `unresolved`. Linux requires two identical complete per-thread kernel children
 snapshots, including stable thread membership, before cleanup settlement.
+The Linux global census skips rows whose process group or session is 0 (host
+kernel tasks and container shims; never a descendant of the guardian's
+session); a direct observation of such a PID stays unknown.
 
 A macOS daemon that escapes with `setsid` before ever being sampled and closes
 the inherited lease is the residual: libproc cannot reconstruct that missing
