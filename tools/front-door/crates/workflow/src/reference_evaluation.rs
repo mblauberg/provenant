@@ -7,6 +7,8 @@
 
 use provenant_core::py::python_fromisoformat;
 use provenant_records::delivery_run_shape::ReceiptValue;
+use serde_json::Value;
+use std::path::Path;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ReferenceEvaluationError {
@@ -18,6 +20,17 @@ pub enum ReferenceEvaluationError {
     Json(#[from] serde_json::Error),
     #[error("reference artifact host failed: {0}")]
     Host(String),
+}
+
+pub trait ReferenceArtifactHost {
+    /// Writes bytes relative to the supplied artifact root after validating
+    /// containment and artifact scope with the confinement owner.
+    fn write_artifact(
+        &self,
+        artifact_root: &Path,
+        relative_path: &str,
+        payload: &[u8],
+    ) -> Result<(), ReferenceEvaluationError>;
 }
 
 pub fn artifact(artifact_id: &str, suffix: &str) -> ReceiptValue {
@@ -542,9 +555,775 @@ fn civil_from_days(days: i64) -> (i64, i64, i64) {
     (year, month, day)
 }
 
+pub fn materialise_evaluation(
+    value: &mut ReceiptValue,
+    artifact_root: &Path,
+    host: &impl ReferenceArtifactHost,
+) -> Result<(), ReferenceEvaluationError> {
+    let artifact_rows = array(get(value, "artifacts")?)?.to_vec();
+    for item in &artifact_rows {
+        let id = string(get(item, "id")?)?;
+        let path = string(get(item, "path")?)?;
+        let plan_id = string(get(get(value, "plan")?, "artifact_id")?)?;
+        let payload = if id == plan_id {
+            let mut frozen = get(value, "plan")?.clone();
+            remove(&mut frozen, "artifact_id");
+            remove(&mut frozen, "digest");
+            let mut encoded = String::new();
+            write_compact_sorted_python_json(&frozen, &mut encoded)?;
+            let mut bytes = encoded.into_bytes();
+            bytes.push(b'\n');
+            bytes
+        } else {
+            format!("artifact:{id}\n").into_bytes()
+        };
+        host.write_artifact(artifact_root, path, &payload)?;
+        set_by_key(
+            get_mut(value, "artifacts")?,
+            "id",
+            id,
+            "digest",
+            text(provenant_records::digest_bytes(&payload)),
+        )?;
+    }
+    let artifacts = array(get(value, "artifacts")?)?;
+    let plan_id = string(get(get(value, "plan")?, "artifact_id")?)?;
+    let plan_artifact = find_in_slice(artifacts, "id", plan_id)?;
+    let plan_digest = string(get(plan_artifact, "digest")?)?.to_owned();
+    set(get_mut(value, "plan")?, "digest", text(&plan_digest))?;
+    let arms = array(get(get(value, "plan")?, "arms")?)?.to_vec();
+    let arms_value = ReceiptValue::Array(arms);
+    let artifact_rows = array(get(value, "artifacts")?)?.to_vec();
+    for attempt in array_mut(get_mut(value, "attempts")?)? {
+        let arm_id = string(get(attempt, "arm_id")?)?.to_owned();
+        let arm = find_in_array(&arms_value, "id", &arm_id)?;
+        let manifest_id = string(get(arm, "manifest_artifact_id")?)?;
+        let manifest = find_in_slice(&artifact_rows, "id", manifest_id)?;
+        let manifest_digest = string(get(manifest, "digest")?)?.to_owned();
+        set(attempt, "plan_digest", text(&plan_digest))?;
+        set(attempt, "arm_manifest_digest", text(&manifest_digest))?;
+    }
+    Ok(())
+}
+
+fn set_by_key(
+    value: &mut ReceiptValue,
+    search_key: &str,
+    search_value: &str,
+    key: &str,
+    replacement: ReceiptValue,
+) -> Result<(), ReferenceEvaluationError> {
+    let rows = array_mut(value)?;
+    let index = rows
+        .iter()
+        .rposition(|row| {
+            get(row, search_key)
+                .ok()
+                .and_then(|value| string(value).ok())
+                == Some(search_value)
+        })
+        .ok_or_else(|| {
+            ReferenceEvaluationError::Invalid(format!("artifact {search_value} is missing"))
+        })?;
+    set(&mut rows[index], key, replacement)
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct EvaluationBindingOptions<'a> {
+    pub evaluation_template: &'a str,
+    pub workspace_root: &'a Path,
+    pub artifact_root: &'a Path,
+    pub binding_index: usize,
+    pub repetitions: i64,
+    pub sample_size: i64,
+    pub time_offset_minutes: i64,
+}
+
+pub fn materialise_evaluation_binding(
+    run: &mut ReceiptValue,
+    options: &EvaluationBindingOptions<'_>,
+    host: &impl ReferenceArtifactHost,
+) -> Result<ReceiptValue, ReferenceEvaluationError> {
+    let binding = array(get(get(run, "assurance")?, "evaluations")?)?
+        .get(options.binding_index)
+        .ok_or_else(|| {
+            ReferenceEvaluationError::Invalid("evaluation binding index out of range".into())
+        })?;
+    let status = match string(get(binding, "status")?)? {
+        "complete" => "pass",
+        "failed" => "fail",
+        "incomplete" => "incomplete",
+        _ => {
+            return Err(ReferenceEvaluationError::Invalid(
+                "only complete or terminal evaluation bindings have artifacts".into(),
+            ));
+        }
+    };
+    let evaluation_artifact_id = string(get(binding, "evaluation_artifact_id")?)?.to_owned();
+    let evaluation_id = string(get(binding, "evaluation_id")?)?.to_owned();
+    let run_id = string(get(run, "run_id")?)?.to_owned();
+    let selected_artifact_index = artifact_index(run, &evaluation_artifact_id)?;
+    let artifact = array(get(run, "artifacts")?)?
+        .get(selected_artifact_index)
+        .ok_or_else(|| {
+            ReferenceEvaluationError::Invalid(format!(
+                "unknown artifact id: {evaluation_artifact_id}"
+            ))
+        })?
+        .clone();
+    let artifact_path = string(get(&artifact, "path")?)?.to_owned();
+    let mut evaluation = make_reference_evaluation(
+        options.evaluation_template,
+        &run_id,
+        options.repetitions,
+        options.sample_size,
+        &evaluation_id,
+        status,
+        options.time_offset_minutes,
+    )?;
+    materialise_evaluation(&mut evaluation, options.artifact_root, host)?;
+    let mut payload = pretty_json(&evaluation)?.into_bytes();
+    payload.push(b'\n');
+    let relative = options.workspace_root.join(&artifact_path);
+    let relative = relative.strip_prefix(options.workspace_root).map_err(|_| {
+        ReferenceEvaluationError::Invalid("evaluation artifact escapes workspace".into())
+    })?;
+    host.write_artifact(
+        options.workspace_root,
+        &relative.to_string_lossy(),
+        &payload,
+    )?;
+    let digest = provenant_records::digest_bytes(&payload);
+    set(
+        array_mut(get_mut(run, "artifacts")?)?
+            .get_mut(selected_artifact_index)
+            .ok_or_else(|| {
+                ReferenceEvaluationError::Invalid(format!(
+                    "unknown artifact id: {evaluation_artifact_id}"
+                ))
+            })?,
+        "digest",
+        text(&digest),
+    )?;
+    let binding = array_mut(get_mut(get_mut(run, "assurance")?, "evaluations")?)?
+        .get_mut(options.binding_index)
+        .ok_or_else(|| {
+            ReferenceEvaluationError::Invalid("evaluation binding index out of range".into())
+        })?;
+    set(binding, "evaluation_digest", text(&digest))?;
+    let plan_digest = string(get(get(&evaluation, "plan")?, "digest")?)?.to_owned();
+    set(binding, "plan_digest", text(&plan_digest))?;
+    let evidence_id = string(get(binding, "evidence_id")?)?.to_owned();
+    if let Some(linked) = array_mut(get_mut(run, "evidence")?)?
+        .iter_mut()
+        .find(|item| {
+            get(item, "id").ok().and_then(|value| string(value).ok()) == Some(evidence_id.as_str())
+        })
+    {
+        if string(get(linked, "kind")?)? == "deterministic" {
+            set(get_mut(linked, "result")?, "receipt_digest", text(&digest))?;
+        }
+    }
+    if let Some(bundle_index) = array(get(run, "artifacts")?)?.iter().rposition(|item| {
+        get(item, "id").ok().and_then(|value| string(value).ok()) == Some("evidence-bundle")
+    }) {
+        let mut bundle = array(get(run, "artifacts")?)?
+            .get(bundle_index)
+            .ok_or_else(|| {
+                ReferenceEvaluationError::Invalid("evidence-bundle artifact is missing".into())
+            })?
+            .clone();
+        materialise_deterministic_evidence_bundle(run, &mut bundle, options.workspace_root, host)?;
+        let bundle_digest = string(get(&bundle, "digest")?)?.to_owned();
+        set(
+            array_mut(get_mut(run, "artifacts")?)?
+                .get_mut(bundle_index)
+                .ok_or_else(|| {
+                    ReferenceEvaluationError::Invalid("evidence-bundle artifact is missing".into())
+                })?,
+            "digest",
+            text(&bundle_digest),
+        )?;
+    }
+    Ok(evaluation)
+}
+
+pub fn materialise_deterministic_evidence_bundle(
+    run: &mut ReceiptValue,
+    artifact: &mut ReceiptValue,
+    workspace_root: &Path,
+    host: &impl ReferenceArtifactHost,
+) -> Result<(), ReferenceEvaluationError> {
+    let artifact_id = string(get(artifact, "id")?)?.to_owned();
+    let mut checks = Vec::new();
+    for item in array(get(run, "evidence")?)? {
+        if string(get(item, "kind").unwrap_or(&ReceiptValue::Null))? != "deterministic"
+            || string(get(item, "artifact_id").unwrap_or(&ReceiptValue::Null))? != artifact_id
+        {
+            continue;
+        }
+        checks.push(object(vec![
+            ("id", get(item, "id")?.clone()),
+            ("gate", get(item, "gate")?.clone()),
+            ("status", get(item, "status")?.clone()),
+            ("method", get(item, "method")?.clone()),
+            ("source_paths", get(item, "source_paths")?.clone()),
+            ("exit_code", get(get(item, "result")?, "exit_code")?.clone()),
+        ]));
+    }
+    let bundle = object(vec![
+        ("schema_version", integer(1)),
+        ("contract", text("deterministic-evidence-bundle")),
+        ("checks", ReceiptValue::Array(checks)),
+    ]);
+    let bytes = crate::pending::python_json(&to_serde_value(&bundle)?).into_bytes();
+    let mut bytes = bytes;
+    bytes.push(b'\n');
+    let path = string(get(artifact, "path")?)?.to_owned();
+    host.write_artifact(workspace_root, &path, &bytes)?;
+    let digest = provenant_records::digest_bytes(&bytes);
+    set(artifact, "digest", text(&digest))?;
+    for item in array_mut(get_mut(run, "evidence")?)? {
+        if string(get(item, "kind").unwrap_or(&ReceiptValue::Null))? == "deterministic"
+            && string(get(item, "artifact_id").unwrap_or(&ReceiptValue::Null))? == artifact_id
+        {
+            set(get_mut(item, "result")?, "receipt_digest", text(&digest))?;
+        }
+    }
+    let approval_id = string(get(get(run, "authority")?, "evidence")?)?.to_owned();
+    if let Some(approval) = array_mut(get_mut(run, "evidence")?)?
+        .iter_mut()
+        .find(|item| {
+            get(item, "id").ok().and_then(|value| string(value).ok()) == Some(approval_id.as_str())
+        })
+    {
+        if string(get(approval, "artifact_id")?)? == artifact_id {
+            set(get_mut(run, "authority")?, "evidence_digest", text(&digest))?;
+        }
+    }
+    Ok(())
+}
+
+/// Materialise the complete synthetic delivery fixture. Every file write is
+/// delegated to the confinement-owned artifact host.
+pub fn materialise_reference_run(
+    run: &mut ReceiptValue,
+    evaluation_template: &str,
+    workspace_root: &Path,
+    evaluation_repetitions: i64,
+    evaluation_sample_size: i64,
+    host: &impl ReferenceArtifactHost,
+) -> Result<(), ReferenceEvaluationError> {
+    let design_artifact_id = string(get(get(run, "design")?, "artifact_id")?)?.to_owned();
+    let design_index = artifact_index(run, &design_artifact_id)?;
+    let design_artifact = array(get(run, "artifacts")?)?
+        .get(design_index)
+        .ok_or_else(|| ReferenceEvaluationError::Invalid("design artifact is missing".into()))?
+        .clone();
+    let design_path = string(get(&design_artifact, "path")?)?.to_owned();
+    let design_digest = write_delivery_artifact(
+        &design_artifact,
+        workspace_root,
+        b"approved synthetic reference intent\n",
+        host,
+    )?;
+    set(
+        array_mut(get_mut(run, "artifacts")?)?
+            .get_mut(design_index)
+            .ok_or_else(|| {
+                ReferenceEvaluationError::Invalid("design artifact is missing".into())
+            })?,
+        "digest",
+        text(&design_digest),
+    )?;
+    set(get_mut(run, "intent")?, "digest", text(&design_digest))?;
+    set(get_mut(run, "design")?, "digest", text(&design_digest))?;
+
+    let bindings = array(get(get(run, "assurance")?, "evaluations")?)?.to_vec();
+    for (index, binding) in bindings.iter().enumerate() {
+        if string(get(binding, "status")?)? == "planned" {
+            continue;
+        }
+        let artifact_id = string(get(binding, "evaluation_artifact_id")?)?.to_owned();
+        let artifact_path = string(get(
+            find_in_slice(array(get(run, "artifacts")?)?, "id", &artifact_id)?,
+            "path",
+        )?)?;
+        let artifact_root = artifact_root(workspace_root, artifact_path);
+        let options = EvaluationBindingOptions {
+            evaluation_template,
+            workspace_root,
+            artifact_root: &artifact_root,
+            binding_index: index,
+            repetitions: evaluation_repetitions,
+            sample_size: evaluation_sample_size,
+            time_offset_minutes: 0,
+        };
+        materialise_evaluation_binding(run, &options, host)?;
+    }
+
+    let bundle_index = artifact_index(run, "evidence-bundle")?;
+    let mut bundle = array(get(run, "artifacts")?)?
+        .get(bundle_index)
+        .ok_or_else(|| {
+            ReferenceEvaluationError::Invalid("evidence-bundle artifact is missing".into())
+        })?
+        .clone();
+    materialise_deterministic_evidence_bundle(run, &mut bundle, workspace_root, host)?;
+    let bundle_digest = string(get(&bundle, "digest")?)?.to_owned();
+    set(
+        array_mut(get_mut(run, "artifacts")?)?
+            .get_mut(bundle_index)
+            .ok_or_else(|| {
+                ReferenceEvaluationError::Invalid("evidence-bundle artifact is missing".into())
+            })?,
+        "digest",
+        text(&bundle_digest),
+    )?;
+
+    for (family, reviewer_id, adapter) in [
+        ("openai", "reference-openai-reviewer", "native-subagent"),
+        ("anthropic", "reference-anthropic-reviewer", "claude-code"),
+    ] {
+        let id = format!("review-route-{family}");
+        let index = artifact_index(run, &id)?;
+        let artifact = array(get(run, "artifacts")?)?
+            .get(index)
+            .ok_or_else(|| ReferenceEvaluationError::Invalid(format!("artifact {id} is missing")))?
+            .clone();
+        let path = string(get(&artifact, "path")?)?.to_owned();
+        let receipt = serde_json::json!({
+            "status": "ok",
+            "adapter": adapter,
+            "reviewer_id": reviewer_id,
+            "resolved_model": "runtime-resolved",
+            "model_family": family,
+            "provider_family": family,
+            "cross_family": family == "anthropic",
+            "certification_eligible": true
+        });
+        let mut payload = crate::pending::python_json(&receipt).into_bytes();
+        payload.push(b'\n');
+        let digest = write_delivery_artifact(&artifact, workspace_root, &payload, host)?;
+        set(
+            array_mut(get_mut(run, "artifacts")?)?
+                .get_mut(index)
+                .ok_or_else(|| {
+                    ReferenceEvaluationError::Invalid(format!("artifact {id} is missing"))
+                })?,
+            "digest",
+            text(&digest),
+        )?;
+        for evidence in array_mut(get_mut(run, "evidence")?)? {
+            if get(evidence, "route_receipt")
+                .ok()
+                .and_then(|route| get(route, "path").ok())
+                .and_then(|value| string(value).ok())
+                == Some(path.as_str())
+            {
+                set(get_mut(evidence, "route_receipt")?, "digest", text(&digest))?;
+            }
+        }
+        for review in array_mut(get_mut(run, "reviews")?)? {
+            if get(review, "provider_family")
+                .ok()
+                .and_then(|value| string(value).ok())
+                == Some(family)
+                && get(review, "status")
+                    .ok()
+                    .and_then(|value| string(value).ok())
+                    == Some("pass")
+            {
+                set(review, "route_receipt_digest", text(&digest))?;
+            }
+        }
+    }
+    let _ = design_path;
+    Ok(())
+}
+
+fn artifact_index(run: &ReceiptValue, id: &str) -> Result<usize, ReferenceEvaluationError> {
+    array(get(run, "artifacts")?)?
+        .iter()
+        .rposition(|item| get(item, "id").ok().and_then(|value| string(value).ok()) == Some(id))
+        .ok_or_else(|| ReferenceEvaluationError::Invalid(format!("unknown artifact id: {id}")))
+}
+
+fn artifact_root(workspace_root: &Path, artifact_path: &str) -> std::path::PathBuf {
+    workspace_root.join(
+        Path::new(artifact_path)
+            .parent()
+            .unwrap_or_else(|| Path::new("")),
+    )
+}
+
+fn write_delivery_artifact(
+    artifact: &ReceiptValue,
+    workspace_root: &Path,
+    payload: &[u8],
+    host: &impl ReferenceArtifactHost,
+) -> Result<String, ReferenceEvaluationError> {
+    let path = string(get(artifact, "path")?)?;
+    host.write_artifact(workspace_root, path, payload)?;
+    Ok(provenant_records::digest_bytes(payload))
+}
+
+fn pretty_json(value: &ReceiptValue) -> Result<String, ReferenceEvaluationError> {
+    let mut output = String::new();
+    write_pretty_json(value, 0, &mut output)?;
+    Ok(output)
+}
+
+fn write_pretty_json(
+    value: &ReceiptValue,
+    depth: usize,
+    output: &mut String,
+) -> Result<(), ReferenceEvaluationError> {
+    match value {
+        ReceiptValue::Null => output.push_str("null"),
+        ReceiptValue::Bool(false) => output.push_str("false"),
+        ReceiptValue::Bool(true) => output.push_str("true"),
+        ReceiptValue::Number(number) if number.is_f64() => output.push_str(
+            &provenant_core::py::python_str(&Value::Number(number.clone())),
+        ),
+        ReceiptValue::Number(number) => output.push_str(&number.to_string()),
+        ReceiptValue::String(value) => output.push_str(&python_json_string(value)?),
+        ReceiptValue::Array(items) if items.is_empty() => output.push_str("[]"),
+        ReceiptValue::Array(items) => {
+            output.push_str("[\n");
+            for (index, item) in items.iter().enumerate() {
+                write_indent(output, depth + 1);
+                write_pretty_json(item, depth + 1, output)?;
+                if index + 1 < items.len() {
+                    output.push(',');
+                }
+                output.push('\n');
+            }
+            write_indent(output, depth);
+            output.push(']');
+        }
+        ReceiptValue::Object(fields) if fields.is_empty() => output.push_str("{}"),
+        ReceiptValue::Object(fields) => {
+            output.push_str("{\n");
+            for (index, (key, item)) in fields.iter().enumerate() {
+                write_indent(output, depth + 1);
+                output.push_str(&python_json_string(key)?);
+                output.push_str(": ");
+                write_pretty_json(item, depth + 1, output)?;
+                if index + 1 < fields.len() {
+                    output.push(',');
+                }
+                output.push('\n');
+            }
+            write_indent(output, depth);
+            output.push('}');
+        }
+    }
+    Ok(())
+}
+
+fn write_indent(output: &mut String, depth: usize) {
+    output.push_str(&"  ".repeat(depth));
+}
+
+fn python_json_string(value: &str) -> Result<String, ReferenceEvaluationError> {
+    let encoded = serde_json::to_string(value)?;
+    let mut output = String::with_capacity(encoded.len());
+    for character in encoded.chars() {
+        if character <= '\u{7e}' {
+            output.push(character);
+        } else if character as u32 <= 0xffff {
+            output.push_str(&format!("\\u{:04x}", character as u32));
+        } else {
+            let scalar = character as u32 - 0x1_0000;
+            let high = 0xd800 + (scalar >> 10);
+            let low = 0xdc00 + (scalar & 0x3ff);
+            output.push_str(&format!("\\u{high:04x}\\u{low:04x}"));
+        }
+    }
+    Ok(output)
+}
+
+fn write_compact_sorted_python_json(
+    value: &ReceiptValue,
+    output: &mut String,
+) -> Result<(), ReferenceEvaluationError> {
+    match value {
+        ReceiptValue::Null => output.push_str("null"),
+        ReceiptValue::Bool(false) => output.push_str("false"),
+        ReceiptValue::Bool(true) => output.push_str("true"),
+        ReceiptValue::Number(number) if number.is_f64() => output.push_str(
+            &provenant_core::py::python_str(&Value::Number(number.clone())),
+        ),
+        ReceiptValue::Number(number) => output.push_str(&number.to_string()),
+        ReceiptValue::String(value) => output.push_str(&python_json_string(value)?),
+        ReceiptValue::Array(items) => {
+            output.push('[');
+            for (index, item) in items.iter().enumerate() {
+                if index > 0 {
+                    output.push(',');
+                }
+                write_compact_sorted_python_json(item, output)?;
+            }
+            output.push(']');
+        }
+        ReceiptValue::Object(fields) => {
+            let mut sorted = fields.iter().collect::<Vec<_>>();
+            sorted.sort_by(|left, right| left.0.cmp(&right.0));
+            output.push('{');
+            for (index, (key, item)) in sorted.into_iter().enumerate() {
+                if index > 0 {
+                    output.push(',');
+                }
+                output.push_str(&python_json_string(key)?);
+                output.push(':');
+                write_compact_sorted_python_json(item, output)?;
+            }
+            output.push('}');
+        }
+    }
+    Ok(())
+}
+
+fn to_serde_value(value: &ReceiptValue) -> Result<Value, ReferenceEvaluationError> {
+    Ok(serde_json::from_str(&serde_json::to_string(value)?)?)
+}
+
+fn get<'a>(
+    value: &'a ReceiptValue,
+    key: &str,
+) -> Result<&'a ReceiptValue, ReferenceEvaluationError> {
+    match value {
+        ReceiptValue::Object(fields) => fields
+            .iter()
+            .find(|(name, _)| name == key)
+            .map(|(_, value)| value)
+            .ok_or_else(|| {
+                ReferenceEvaluationError::Invalid(format!("required field is missing: {key}"))
+            }),
+        _ => Err(ReferenceEvaluationError::Invalid(
+            "expected JSON object".into(),
+        )),
+    }
+}
+
+fn get_mut<'a>(
+    value: &'a mut ReceiptValue,
+    key: &str,
+) -> Result<&'a mut ReceiptValue, ReferenceEvaluationError> {
+    match value {
+        ReceiptValue::Object(fields) => fields
+            .iter_mut()
+            .find(|(name, _)| name == key)
+            .map(|(_, value)| value)
+            .ok_or_else(|| {
+                ReferenceEvaluationError::Invalid(format!(
+                    "required template field is missing: {key}"
+                ))
+            }),
+        _ => Err(ReferenceEvaluationError::Invalid(
+            "expected JSON object".into(),
+        )),
+    }
+}
+
+fn set(
+    value: &mut ReceiptValue,
+    key: &str,
+    replacement: ReceiptValue,
+) -> Result<(), ReferenceEvaluationError> {
+    match value {
+        ReceiptValue::Object(fields) => {
+            if let Some((_, current)) = fields.iter_mut().find(|(name, _)| name == key) {
+                *current = replacement;
+            } else {
+                fields.push((key.to_owned(), replacement));
+            }
+            Ok(())
+        }
+        _ => Err(ReferenceEvaluationError::Invalid(
+            "expected JSON object".into(),
+        )),
+    }
+}
+
+fn remove(value: &mut ReceiptValue, key: &str) {
+    if let ReceiptValue::Object(fields) = value {
+        fields.retain(|(name, _)| name != key);
+    }
+}
+
+fn array(value: &ReceiptValue) -> Result<&[ReceiptValue], ReferenceEvaluationError> {
+    match value {
+        ReceiptValue::Array(items) => Ok(items),
+        _ => Err(ReferenceEvaluationError::Invalid(
+            "expected JSON list".into(),
+        )),
+    }
+}
+
+fn array_mut(value: &mut ReceiptValue) -> Result<&mut Vec<ReceiptValue>, ReferenceEvaluationError> {
+    match value {
+        ReceiptValue::Array(items) => Ok(items),
+        _ => Err(ReferenceEvaluationError::Invalid(
+            "expected JSON list".into(),
+        )),
+    }
+}
+
+fn find_in_array<'a>(
+    value: &'a ReceiptValue,
+    key: &str,
+    id: &str,
+) -> Result<&'a ReceiptValue, ReferenceEvaluationError> {
+    array(value)?
+        .iter()
+        .find(|item| get(item, key).ok().and_then(|value| string(value).ok()) == Some(id))
+        .ok_or_else(|| ReferenceEvaluationError::Invalid(format!("unknown {key}: {id}")))
+}
+
+fn find_in_slice<'a>(
+    values: &'a [ReceiptValue],
+    key: &str,
+    id: &str,
+) -> Result<&'a ReceiptValue, ReferenceEvaluationError> {
+    values
+        .iter()
+        .find(|item| get(item, key).ok().and_then(|value| string(value).ok()) == Some(id))
+        .ok_or_else(|| ReferenceEvaluationError::Invalid(format!("unknown {key}: {id}")))
+}
+
+fn string(value: &ReceiptValue) -> Result<&str, ReferenceEvaluationError> {
+    match value {
+        ReceiptValue::String(value) => Ok(value),
+        _ => Err(ReferenceEvaluationError::Invalid("expected string".into())),
+    }
+}
+
+fn integer(value: i64) -> ReceiptValue {
+    ReceiptValue::Number(value.into())
+}
+
+fn float(value: f64) -> Result<ReceiptValue, ReferenceEvaluationError> {
+    serde_json::Number::from_f64(value)
+        .map(ReceiptValue::Number)
+        .ok_or_else(|| ReferenceEvaluationError::Invalid("non-finite JSON number".into()))
+}
+
+fn text(value: impl Into<String>) -> ReceiptValue {
+    ReceiptValue::String(value.into())
+}
+
+fn strings(values: &[&str]) -> ReceiptValue {
+    ReceiptValue::Array(values.iter().map(|value| text(*value)).collect())
+}
+
+fn strings_owned(values: &[String]) -> ReceiptValue {
+    ReceiptValue::Array(values.iter().map(|value| text(value.clone())).collect())
+}
+
+fn object(values: Vec<(&str, ReceiptValue)>) -> ReceiptValue {
+    ReceiptValue::Object(
+        values
+            .into_iter()
+            .map(|(key, value)| (key.to_owned(), value))
+            .collect(),
+    )
+}
+
+fn checked_product(values: &[i64]) -> Result<i64, ReferenceEvaluationError> {
+    values
+        .iter()
+        .try_fold(1_i64, |product, value| product.checked_mul(*value))
+        .ok_or(ReferenceEvaluationError::NumberOutOfRange)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::RefCell;
+
+    struct MemoryHost {
+        workspace_root: std::path::PathBuf,
+        files: RefCell<Vec<(String, Vec<u8>)>>,
+    }
+
+    impl Default for MemoryHost {
+        fn default() -> Self {
+            Self {
+                workspace_root: std::path::PathBuf::from("."),
+                files: RefCell::new(Vec::new()),
+            }
+        }
+    }
+
+    impl ReferenceArtifactHost for MemoryHost {
+        fn write_artifact(
+            &self,
+            artifact_root: &Path,
+            relative_path: &str,
+            payload: &[u8],
+        ) -> Result<(), ReferenceEvaluationError> {
+            let target = artifact_root.join(relative_path);
+            let relative = target
+                .strip_prefix(&self.workspace_root)
+                .map_err(|_| {
+                    ReferenceEvaluationError::Invalid(
+                        "artifact path escapes memory workspace".into(),
+                    )
+                })?
+                .to_string_lossy()
+                .replace('\\', "/");
+            self.files.borrow_mut().push((relative, payload.to_vec()));
+            Ok(())
+        }
+    }
+
+    fn payload_map(host: &MemoryHost) -> serde_json::Map<String, Value> {
+        host.files
+            .borrow()
+            .iter()
+            .map(|(path, bytes)| {
+                (
+                    path.clone(),
+                    Value::String(bytes.iter().map(|byte| format!("{byte:02x}")).collect()),
+                )
+            })
+            .collect()
+    }
+
+    fn json_differences(actual: &Value, expected: &Value, path: &str, output: &mut Vec<String>) {
+        match (actual, expected) {
+            (Value::Object(actual), Value::Object(expected)) => {
+                for key in actual.keys().chain(expected.keys()) {
+                    if actual.get(key) != expected.get(key) {
+                        match (actual.get(key), expected.get(key)) {
+                            (Some(left), Some(right)) => {
+                                json_differences(left, right, &format!("{path}.{key}"), output)
+                            }
+                            (left, right) => output
+                                .push(format!("{path}.{key}: actual={left:?} expected={right:?}")),
+                        }
+                    }
+                }
+            }
+            (Value::Array(actual), Value::Array(expected)) => {
+                if actual.len() != expected.len() {
+                    output.push(format!(
+                        "{path}.length: actual={} expected={}",
+                        actual.len(),
+                        expected.len()
+                    ));
+                }
+                for (index, (left, right)) in actual.iter().zip(expected).enumerate() {
+                    if left != right {
+                        json_differences(left, right, &format!("{path}[{index}]"), output);
+                    }
+                }
+            }
+            _ => output.push(format!("{path}: actual={actual:?} expected={expected:?}")),
+        }
+    }
 
     fn template() -> &'static str {
         include_str!("../../../../../skills/evaluate/templates/EVALUATION.template.json")
@@ -596,5 +1375,165 @@ mod tests {
                 .as_deref(),
             Some("2026-07-10T01:02:00.123000Z")
         );
+    }
+
+    #[test]
+    fn evaluation_artifact_materialisation_matches_python_bytes_and_hashes() {
+        let cases = serde_json::json!([
+            {"run_id":"delivery-1","evaluation_id":"EVAL-1","status":"pass","repetitions":1,"sample_size":2,"offset":0},
+            {"run_id":"delivery-2","evaluation_id":"EVAL-2","status":"fail","repetitions":1,"sample_size":1,"offset":30}
+        ]);
+        let expected = crate::test_support::oracle_script(
+            "oracle_receipts.py",
+            "evaluation_materialise",
+            &cases,
+        )
+        .expect("required by PROVENANT_PORT_DIFF_REQUIRED");
+        let actual = cases
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|case| {
+                let mut evaluation = make_reference_evaluation(
+                    template(),
+                    case["run_id"].as_str().unwrap_or_default(),
+                    case["repetitions"].as_i64().unwrap_or_default(),
+                    case["sample_size"].as_i64().unwrap_or_default(),
+                    case["evaluation_id"].as_str().unwrap_or_default(),
+                    case["status"].as_str().unwrap_or_default(),
+                    case["offset"].as_i64().unwrap_or_default(),
+                )
+                .unwrap();
+                let host = MemoryHost::default();
+                materialise_evaluation(&mut evaluation, Path::new("."), &host).unwrap();
+                serde_json::json!({
+                    "evaluation": to_serde_value(&evaluation).unwrap(),
+                    "files": payload_map(&host)
+                })
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(serde_json::json!(actual), expected);
+    }
+
+    #[test]
+    fn custom_template_ascii_plan_bytes_and_iso_timestamp_match_python() {
+        let mut custom_template: Value = serde_json::from_str(template()).unwrap();
+        custom_template["plan"]["dataset"]["provenance"]["source"] = Value::String("雪".into());
+        custom_template["plan"]["custom_metric"] = serde_json::json!(1.0e-7);
+        custom_template["plan"]["custom_metric_upper"] = serde_json::json!(1.0e16);
+        custom_template["custom_timestamp"] = Value::String("2026-07-10 00:02:00.123Z".into());
+        let cases = serde_json::json!([{
+            "run_id":"delivery-custom",
+            "evaluation_id":"EVAL-CUSTOM",
+            "status":"pass",
+            "repetitions":1,
+            "sample_size":1,
+            "offset":60,
+            "template":custom_template
+        }]);
+        let expected = crate::test_support::oracle_script(
+            "oracle_receipts.py",
+            "evaluation_materialise",
+            &cases,
+        )
+        .expect("required by PROVENANT_PORT_DIFF_REQUIRED");
+        let case = cases.as_array().and_then(|items| items.first()).unwrap();
+        let template_json = serde_json::to_string(&case["template"]).unwrap();
+        let mut evaluation = make_reference_evaluation(
+            &template_json,
+            case["run_id"].as_str().unwrap_or_default(),
+            case["repetitions"].as_i64().unwrap_or_default(),
+            case["sample_size"].as_i64().unwrap_or_default(),
+            case["evaluation_id"].as_str().unwrap_or_default(),
+            case["status"].as_str().unwrap_or_default(),
+            case["offset"].as_i64().unwrap_or_default(),
+        )
+        .unwrap();
+        let host = MemoryHost::default();
+        materialise_evaluation(&mut evaluation, Path::new("."), &host).unwrap();
+        let actual = serde_json::json!({
+            "evaluation":to_serde_value(&evaluation).unwrap(),
+            "files":payload_map(&host)
+        });
+        assert_eq!(serde_json::json!([actual]), expected);
+    }
+
+    #[test]
+    fn deterministic_bundle_materialisation_matches_python_digest_bindings() {
+        let cases = serde_json::json!([
+            {
+                "run": {
+                    "evidence": [
+                        {"id":"check-1","kind":"deterministic","gate":"tests","status":"pass","method":"check","source_paths":["src"],"artifact_id":"bundle","result":{"exit_code":0,"receipt_digest":"old"}},
+                        {"id":"approval","kind":"human","gate":"approve","status":"pass","method":"approve","source_paths":[],"artifact_id":"bundle"}
+                    ],
+                    "authority":{"evidence":"approval","evidence_digest":"old"}
+                },
+                "artifact":{"id":"bundle","path":"evidence/bundle.json","digest":"old"}
+            }
+        ]);
+        let expected =
+            crate::test_support::oracle_script("oracle_receipts.py", "bundle_builder", &cases)
+                .expect("required by PROVENANT_PORT_DIFF_REQUIRED");
+        let case = cases.as_array().and_then(|items| items.first()).unwrap();
+        let mut run = ReceiptValue::from_json_str(&case["run"].to_string()).unwrap();
+        let mut artifact = ReceiptValue::from_json_str(&case["artifact"].to_string()).unwrap();
+        let host = MemoryHost::default();
+        materialise_deterministic_evidence_bundle(&mut run, &mut artifact, Path::new("."), &host)
+            .unwrap();
+        let payload_hex = payload_map(&host)
+            .get("evidence/bundle.json")
+            .cloned()
+            .unwrap_or(Value::Null);
+        assert_eq!(
+            serde_json::json!([{
+                "run": to_serde_value(&run).unwrap(),
+                "artifact": to_serde_value(&artifact).unwrap(),
+                "payload_hex": payload_hex
+            }]),
+            expected
+        );
+    }
+
+    #[test]
+    fn pretty_wire_keeps_insertion_order_and_python_ascii_escapes() {
+        let value = object(vec![
+            ("last_first", text("雪🙂")),
+            ("second", ReceiptValue::Array(vec![integer(1), text("ok")])),
+        ]);
+        assert_eq!(
+            pretty_json(&value).unwrap(),
+            "{\n  \"last_first\": \"\\u96ea\\ud83d\\ude42\",\n  \"second\": [\n    1,\n    \"ok\"\n  ]\n}"
+        );
+    }
+
+    #[test]
+    fn complete_reference_run_materialisation_matches_python() {
+        let cases = serde_json::json!([
+            {"profile":"agent-product","repetitions":1,"sample_size":2}
+        ]);
+        let expected = crate::test_support::oracle_script(
+            "oracle_receipts.py",
+            "reference_run_materialise",
+            &cases,
+        )
+        .expect("required by PROVENANT_PORT_DIFF_REQUIRED");
+        let expected_case = expected.as_array().and_then(|items| items.first()).unwrap();
+        let mut run = ReceiptValue::from_json_str(&expected_case["before"].to_string()).unwrap();
+        let host = MemoryHost::default();
+        materialise_reference_run(
+            &mut run,
+            template(),
+            Path::new("."),
+            cases[0]["repetitions"].as_i64().unwrap_or_default(),
+            cases[0]["sample_size"].as_i64().unwrap_or_default(),
+            &host,
+        )
+        .unwrap();
+        let actual_run = to_serde_value(&run).unwrap();
+        let mut differences = Vec::new();
+        json_differences(&actual_run, &expected_case["run"], "run", &mut differences);
+        assert!(differences.is_empty(), "run mismatches: {differences:?}");
+        assert_eq!(Value::Object(payload_map(&host)), expected_case["files"]);
     }
 }
