@@ -119,14 +119,15 @@ a reader ends only its wait. Run stores seen cursors keyed by core `ActorId`
 and selection; the edge acknowledges only displayed rows after successful
 output. Clipped rows remain unseen. Federated cursors are host-qualified.
 
-Route inputs are exactly one `--model ADAPTER/ID` or `--route POOL`, plus
-optional `--effort VALUE`; routing resolves accounts,
-eligibility and disclosure. There is no `--account` flag (0 of 1116 dispatches
-supplied one); each attempt records its resolved account label. Confidential is
-the default. Workflow owns assurance
+Route inputs are exactly one `--model ADAPTER/ID` or `--route NAME`, plus
+optional `--effort VALUE`; providers detect accounts, routing filters eligibility
+and disclosure. There is no `--account` flag (0 of 1116 dispatches
+supplied one); each attempt records its resolved account label. Confidentiality is
+always on. Workflow owns assurance
 inputs (intent, risk tier, reviewer and orchestrator family), rather than run
 flags. Drop `--context-ceiling`. No raw argv, unrestricted knobs, secret bypass
-or hidden downgrade. Read-only fallback is explicit (`none|pool`, default none).
+or hidden downgrade. Read-only fallback is explicit
+(`none|ADAPTER/ID[,ADAPTER/ID]`, at most two models, default none).
 Access requests carry mode (default read-only), cwd, a required writer worktree,
 read/write roots, network and capabilities. Confinement checks caller authority;
 flags cannot grant it, and provider access excludes custody/control files.
@@ -600,8 +601,9 @@ subject. None of these partial edits is included in the reduction estimate.
 | `runtime/fabric/src/{server.ts,cli.ts}`, schemas, sessions, lane wait/readers and surface modules | Fabric, step 5: direct run API calls; remove local registry/seen-cursor ownership |
 | `runtime/fabric/tests/execution-owner-fixture.mjs`, `lifecycle-owner-fixture.mjs`, `v2-owner-fixture.mjs` | Fabric, step 5: delete after last old-owner test |
 | `runtime/fabric/tests/execution-pruning.test.ts`, `graph-runner.test.ts`, `lean-surface.test.ts`, `named-sessions.test.ts`, `surface.test.ts` | Fabric, step 5: remove old cases; preserve fresh Rust facade/session/cancellation coverage |
-| `scripts/utility.py`, workflow JS run-directory callers | CLI/workflow, step 5: remove provider_exec.layout/scaffold use; no adapter |
-| `skills/orchestrate/SKILL.md`, `references/chair-loop.md`, `worker-liveness.md`, `routing-and-tiers.md`, `direct-cli-fallback.md:8`, `memory-scratchpad.md:16` | Run, steps 2–5: frozen commands, bounded waits and typed evidence instead of receipts/scaffold |
+| `scripts/utility.py` | Execution-route deletes it, `test_utility.py` and `utility-schema.cjs` in route step 3 with `task_classifier`'s utility calls, gated on their last importer; CLI removes utility verbs/hook. No run deletion/count claim. |
+| Workflow JS run-directory callers | Workflow, step 5: remove provider_exec.layout/scaffold use; no adapter |
+| `skills/orchestrate/SKILL.md`, `references/chair-loop.md`, `worker-liveness.md`, `direct-cli-fallback.md:8`, `memory-scratchpad.md:16` | Run, steps 2–5: frozen commands, bounded waits and typed evidence instead of receipts/scaffold |
 | `skills/implement/references/run-contract.md`, `skills/autopilot/references/codex-operator.md:43` | Workflow, step 5: consume completed facts and update command examples |
 
 The counted run replacement excludes Fabric's 5235 lines and supervisor's

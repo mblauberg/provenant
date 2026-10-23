@@ -27,8 +27,11 @@ allowlist. This document owns the command contract every area cites.
 
 Routing removes `task_classifier._run_model()`, model/shadow chains and their
 `utility("extract", …)` calls/config/tests. No classification selector or
-replacement model call remains. Delete the engine/schema with those subjects;
-no Python bridge or placeholder command keeps it alive.
+replacement model call remains.
+Execution-route deletes `utility.py`, `test_utility.py` and `utility-schema.cjs`
+in step 3, which removes `task_classifier`'s utility calls, gated on their last
+importer. CLI removes utility verbs and the output-digest hook at that gate.
+No Python bridge or placeholder command keeps it alive.
 
 ## Command tree and conventions
 
@@ -487,7 +490,7 @@ net estimate. Shell launchers `scripts/worktree` (7) and `scripts/provenant-pr`
 | supervisor | `scripts/clean.py` (953); `scripts/worktree.py` (982); `scripts/reap.py` (258); `tests/test_clean.py` (1,526); `tests/test_worktree_policy.py` (1,018); `tests/test_run_artifact_cleanup.py` (199) |
 | run (Git reads via supervisor) | `scripts/git_evidence.py` (341); `tests/test_git_evidence.py` (346) |
 | workflow | `scripts/provenant_lint.py` (207); `tests/test_provenant_lint.py` (231); `scripts/provenant_pr.py` (223); `tests/test_provenant_pr.py` (186); `skills/session/scripts/state_check.py` (282); `skills/session/scripts/compact_reinject.py` (169); `tests/test_session_state_check.py` (509); `tests/test_ci_repository_assurance_policy.py` (772) |
-| execution-route/run (classifier decision above) | `scripts/utility.py` (241); `tests/test_utility.py` (154); JS helper `scripts/utility-schema.cjs` (16); `scripts/task_classifier.py` (190); `tests/test_task_classifier.py` (107) |
+| execution-route (step 3; last-importer gate above) | `scripts/utility.py` (241); `tests/test_utility.py` (154); JS helper `scripts/utility-schema.cjs` (16); `scripts/task_classifier.py` (190); `tests/test_task_classifier.py` (107) |
 | final CI | `tests/test_rust_port_layering.py` (52) |
 
 `tests/test_lane_safety.py` mixes guard, reap, Git and installer subjects;

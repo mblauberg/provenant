@@ -62,11 +62,11 @@ which `tests/test_rust_port_layering.py` reads, in the same PR.
 | Crate | Owns | Allowed internal dependencies |
 |---|---|---|
 | core | Pure IDs, roots, paths, clocks as values, shared enums | None |
-| records | Versioned serde records, shared adapter interfaces, canonical byte encoders, digest contracts | core |
+| records | Versioned serde records, canonical byte encoders, digest contracts | core |
 | config | Config loading/precedence, profiles, installation and managed-file rules | core, records, supervisor's safe filesystem API |
 | supervisor | Sans-IO process state machine, syscall boundary, capture, custody-safe OS handles | core, records |
 | confinement | Plan permissions, quarantine, secret redaction, safe Git/path policy | core, records, config, supervisor's safe OS API |
-| providers | Adapter mechanics, account identity, verified lineage/availability, quota wire decoding, argv/environment, output classification and continuation | core, records, config, confinement |
+| providers | Adapter mechanics, account identity, verified lineage/availability, quota wire decoding, argv/environment, output classification and continuation | core, records, config, confinement, quota |
 | quota | Quota windows, reset schedules, refresh scheduling and admission advice | core, records, config |
 | telemetry | Ingest, usage/cost attribution, summaries and reports | core, records, config |
 | routing | Catalogue, named routes, eligibility and route decisions | core, records, config, quota, providers |

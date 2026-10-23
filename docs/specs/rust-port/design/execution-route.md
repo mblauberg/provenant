@@ -9,7 +9,7 @@ CLI invocations and interprets provider evidence; `quota` schedules current
 allowance reads and supplies admission advice. Run owns the registry, atomic
 admission/operation insertion, attempts, retries and publication. Supervisor owns
 process custody and signalling; confinement owns disclosure and access grants.
-These libraries add no daemon, dependency or second execution registry.
+These libraries add no daemon, third-party dependency or second execution registry.
 
 ## Evidence and feature decisions
 
@@ -114,7 +114,7 @@ providers-supplied identity; config neither detects nor pins accounts.
 Account detection failures remain unknown/auth-required, never guessed identities.
 
 Stored snapshots are typed, versioned serde records. Edge-built
-`FamilyLineage`, `AvailabilityReport` and `AdmissionPermit` facts implement
+`VerifiedLineage`, `ReviewAvailability` and `AdmissionPermit` facts implement
 `Serialize` only. Persist separate `AvailabilityRecord`, `FamilyEvidenceRecord`
 and run-owned `PermitRecord` projections (`Serialize, Deserialize`), never nested
 fact types. Permit records bind operation/attempt, quota snapshot revision and
@@ -160,9 +160,10 @@ below abbreviate `Result<T, ProviderError>`; failures are always typed.
 | routing / run | `resolve(&RouteRequest, &RoutingContext) -> Result<ResolvedRoute, RoutingError>`; primary plus at most two explicit alternatives, effort, eligibility, readiness and confidentiality. |
 | quota / run | `admit(&ResolvedRoute, &OperationId) -> Result<AdmissionPermit, QuotaError>`; provider/account readiness only. Run stores its `PermitRecord` projection and consumes the validated permit for the exact attempt with its own resource reservation; no second admission ledger. |
 | providers / run | `prepare(ResolvedRoute, ConfinedPlan, Prompt, Continuation) -> AdapterLaunchSpec`; incremental `observe(bytes) -> ProviderEvent` and `finish(ExitObservation, artifacts) -> ProviderOutcome`; exact continuation/session support, no context-ceiling input. |
-| providers / workflow composition edge | `family_lineage(&ObservedModelId, CatalogueRevision, &VerifiedModelEvidence) -> FamilyLineage`; exact observed ID and catalogue revision key every fact. `availability(&ProviderEvidence) -> AvailabilityReport` supplies activation, executable, fixture and confinement readiness, account label, source/time/expiry and unknown/unavailable reasons. Routing adds quota readiness when producing its report. |
+| providers / workflow composition edge | `validate_provenance(&RouteProvenance) -> VerifiedLineage`; exact observed ID and catalogue revision key every fact. Adapter preflight validates activation, executable, fixture and confinement readiness, account label, source/time/expiry and unknown/unavailable reasons. |
+| routing / workflow composition edge | `review_availability(&RoutingSnapshot, &ReviewDemand) -> ReviewAvailability`; cached tier/family coverage, expiry and quota/config/capability/family-slot blockers. No probes under a receipt lock. |
 
-`FamilyLineage` contains the exact observed model ID, catalogue revision,
+`VerifiedLineage` contains the exact observed model ID, catalogue revision,
 `family: Option<FamilyId>`, evidence reference and provenance. Only provider
 protocol evidence verified against that catalogue revision establishes a family;
 never infer it from model spelling, a broker name, requested ID or seat.
@@ -172,15 +173,18 @@ built at the composition edge from providers-verified evidence, never deserialis
 from caller claims. Availability reports are bounded, paginated projections of validated cached
 `AvailabilityRecord`s; list/resolve never starts a process to populate them.
 
-One `Adapter` trait exposes account detection, preflight planning/decoding,
-`prepare`, stream state/`observe`, `finish`, continuation and verified lineage.
+One `Adapter` trait in providers exposes account detection, preflight
+planning/decoding, `prepare`, stream state/`observe`, `finish`, continuation
+and verified lineage.
 One `QuotaSource` trait exposes `probe(&AccountScope, &QuotaProbeInput) ->
 Result<QuotaProbePlan, QuotaError>` and `decode(&QuotaProbePlan, &ProbeCapture)
--> Result<QuotaSnapshot, QuotaError>`. Both shared interfaces and boundary
-value/error types live in records (data only; confinement constructs validated
-`ConfinedPlan` values without a records-to-confinement dependency). Providers implements them in one module per
-provider and exports one static registry of `{ adapter, quota_source? }` entries;
-the binary injects the records-only registry view into quota. No per-crate
+-> Result<QuotaSnapshot, QuotaError>`. `QuotaSource`, `QuotaProbeInput`,
+`QuotaProbePlan`, `ProbeCapture`, `QuotaSnapshot` and `QuotaError` live in quota;
+`ResolvedRoute` is a records data type. Records owns no adapter traits.
+Confinement constructs validated `ConfinedPlan` values without a
+records-to-confinement dependency. Providers implements both traits in one
+module per provider and exports one static registry of `{ adapter, quota_source? }` entries;
+the binary injects providers' registry as `&[&dyn QuotaSource]` into quota. No per-crate
 adapter switches or quota-to-providers dependency. Adding an adapter changes
 one provider module, one registry entry and one bundled TOML row with its
 fixture/activation requirements. Config validates policy; registration cannot
@@ -204,9 +208,10 @@ and process exit are separate facts. OpenCode's exit-after-output exception
 requires recorded terminal evidence; Agy timeout text remains partial. Providers
 never signals a process or publishes run completion.
 
-Core/config supply roots, typed IDs, clocks and immutable policy; confinement
-supplies `ConfinedPlan`. Supervisor executes all launch/preflight/quota effects,
-locks and safe reads; these crates never call `Command::new` or own raw handles.
+Core/config supply roots, typed IDs, `ActorId`, `CancelToken`, `WorkScope`,
+SHA-1/SHA-256 `GitOid`, clocks as values and immutable policy; confinement supplies
+`ConfinedPlan`. Supervisor executes all launch/preflight/quota effects, locks
+and safe reads; these crates never call `Command::new` or own raw handles.
 Run owns custody handoff, continuation, retries, home finalisation and publication.
 Telemetry reads run's terminal facts; quota does not read/import telemetry.
 Workflow receives family/availability facts through the composition edge.
@@ -279,7 +284,8 @@ Replay recordings through actual decoders for nested identity, recovered retries
 terminal/exit combinations and bounded malformed input. Quota tests distinguish
 unknown/zero/stale, independent allowance pools, resets/DST, Retry-After and
 revision/claim expiry. Delete Python/V8 coercion, differential and old-output
-judges; types replace redundant validators.
+judges; types replace redundant validators. Use an in-house snapshot helper
+(about 80 lines), without `insta`.
 
 Every binary integration/process test sets `HOME`, `PROVENANT_STATE_DIR`,
 `CODEX_HOME`, `CLAUDE_CONFIG_DIR`, `XDG_CONFIG_HOME`, `XDG_DATA_HOME`,
@@ -308,8 +314,8 @@ checks; CI runs workspace/process and macOS release checks. No live smoke.
 ## Deletion ledger
 
 Counts are `wc -l` at the source baseline, including comments and blanks.
-Whole-file Python/TS removals below are this area's completion obligation;
-Fabric wrapper deletion lands with its Rust consumer, not an adapter bridge.
+Whole-file removals below are counted only by this area; deletion lands in
+the last-importer step below, including coupled run/Fabric PRs. No adapter bridge.
 Mixed files are assigned separately so two areas do not claim the same saving.
 
 | Python source removed | Lines |
@@ -322,6 +328,7 @@ Mixed files are assigned separately so two areas do not claim the same saving.
 | `scripts/model_route_preferences.py` | 567 |
 | `scripts/model_route_probe.py` | 404 |
 | `scripts/task_classifier.py` | 190 |
+| `scripts/utility.py` | 241 |
 | `skills/orchestrate/scripts/cf_dispatch.py` | 969 |
 | `skills/orchestrate/scripts/fabric_records.py` | 647 |
 | `scripts/provider_identity.py` | 133 |
@@ -351,6 +358,8 @@ Mixed files are assigned separately so two areas do not claim the same saving.
 | `tests/test_model_route_pools.py` | 986 |
 | `tests/test_task_classifier.py` | 107 |
 | `tests/test_cf_dispatch.py` | 2,905 |
+| `tests/cf_dispatch_support.py` | 31 |
+| `tests/test_utility.py` | 154 |
 | `tests/test_fabric_records.py` | 816 |
 | `tests/test_capabilities.py` | 404 |
 | `tests/test_actual_effort.py` | 284 |
@@ -361,7 +370,9 @@ Mixed files are assigned separately so two areas do not claim the same saving.
 | `apps/quota-menubar/Fixtures/make_fixtures.py` | 103 |
 | `tools/front-door/crates/quota/src/tests/oracle.py` | 84 |
 
-Whole-file Python total: **24,935 lines removed**. Fabric owns/counts
+Whole-file Python total: **25,361 lines removed**. Execution-route also deletes
+`scripts/utility-schema.cjs` (16 JavaScript lines) with utility below.
+Fabric owns/counts
 `catalogue.ts`, `pools.ts` and `catalogue.test.ts` (642); CLI owns/counts
 `routing_context_hook.py` (85). These 727 lines are excluded here.
 
@@ -409,9 +420,6 @@ belong to CLI's final golden retirement; remove these registrations there.
 | `skills/orchestrate/scripts/provider_exec.py` | 2,760 | Run/supervisor deletes the whole file once its lifecycle lands; adapter builders/observations above replace only the provider portion. |
 | `tests/test_provider_exec.py` | 9,272 | Run/supervisor removes this suite with that subject, after new custody/process tests exist. |
 | `skills/orchestrate/scripts/agy_home.py` | 268 | Confinement/run deletes the file after the safe home recipe and supervisor shim replacement land. Providers supplies adapter policy, not syscalls. |
-| `scripts/utility.py` | 241 | Remove extract/validation arms here. Run/workflow owns whole-file deletion or replacement for digest/string-label classify. |
-| `tests/test_utility.py` | 154 | Remove extract cases with the arm; remaining utility subject follows run/workflow. |
-| `scripts/utility-schema.cjs` | 16 | Remove entirely with extract; this is JavaScript, not TypeScript. |
 | `runtime/fabric/src/execution-input.ts` | 610 | Fabric/run replaces the mixed file. Delete route selector helpers and `routeArguments` here; do not count the entire file twice. |
 
 This area owns whole-file deletion of `cf_dispatch.py`, `fabric_records.py` and
@@ -420,7 +428,7 @@ coupled deletion PR. `provider_identity.py` moves to providers account detection
 and is counted above. Run owns surviving `test_dispatch_run` cases; CLI owns
 installation/front-door assertions and routing-hook registration removal.
 Shared fake-CLI/module helpers survive until their final caller is removed.
-The optional digest hook and its test stay with the utility/workflow decision.
+CLI removes the output-digest hook and its test before utility's deletion.
 
 The three existing crates contain **18,275 Rust lines** (routing 8,230,
 providers 4,519, quota 5,526), including inline tests. Replace these owners,
@@ -436,9 +444,10 @@ oracle's 84 lines are already in the Python table, not this Rust count.
 
 Planning ceiling: **4,000 new Rust lines**, including parsers, policy and
 unit/binary integration tests. Removal totals
-**24,935 Python + 18,275 existing Rust = 43,210 lines**. At the ceiling,
-expected net code/test change is **−39,210 lines or lower**. This excludes
-mixed-owner removals, data/schemas, shell, help/docs and new real recordings.
+**25,361 Python + 18,275 existing Rust = 43,636 lines**. At the ceiling,
+expected net Python/TS/Rust change is **−39,636 lines or lower**. This excludes
+the 16 JavaScript lines, mixed-owner removals, data/schemas, shell, help/docs
+and new real recordings.
 Each build PR reports measured `Net lines:`; the ceiling never weakens fixture,
 confinement or custody acceptance.
 
@@ -448,31 +457,56 @@ confinement or custody acceptance.
    recordings with provenance/redaction manifests and an activation matrix.
    Missing recordings keep the corresponding adapter/mode disabled; no live
    provider run. This is a concrete prerequisite for step 1.
-1. **Provider interfaces and registry.** After core/records/config/confinement,
-   land the shared interfaces, static registry, five provider modules and
-   fixture-backed parsers/account detection. Delete old adapter modules,
-   `provider_output.py`, `provider_identity.py` and providers' Rust emulation in
-   the same PR. Disabled wire forms have no pending implementation. Confinement
+1. **Provider interfaces and registry.** After core/records/config/confinement
+   and quota's trait/data API, land the providers-owned `Adapter`, static
+   registry, five provider modules and fixture-backed parsers/account detection.
+   Delete providers' Rust emulation and only old leaves/tests whose importers
+   are all retired in this area; shared Python waits for the matrix gate.
+   Disabled wire forms have no pending implementation. Confinement
    and supervisor land memory-only secret capture before quota auth is enabled.
 2. **Quota.** Land scheduling/admission, current snapshots/report intents and
-   fake-curl/security/database tests. Delete quota Python/tests/helpers and Rust
-   emulation/oracles, with their old golden subjects. Wire `quota show|tick` and
-   update Swift report/fixtures together. Runtime secret reads still require
+   fake-curl/security/database tests. Delete quota Rust emulation/oracles, old
+   golden judges and only Python leaves/tests with no outside importer.
+   `provider_quota.py` and its dependencies wait for the matrix gate.
+   Wire `quota show|tick` and update Swift report/fixtures together. Runtime secret reads still require
    recorded user authority; fixtures never grant it.
 3. **Routing.** Land explicit model/named-route resolution, at most two explicit
-   alternatives, family/availability facts and route CLI. Delete model_route
-   modules, classifier, exec_routing, capabilities, old config/schemas/help/docs
-   and routing Rust emulation with their tests. No preferences, rotation or pool
-   engine. CLI removes the routing hook and its registration; Fabric deletes
+   alternatives, family/availability facts and route CLI. Delete routing Rust
+   emulation, old golden judges and only leaves/config/schemas/help/docs whose
+   importers/callers are all retired in this area. Shared routing Python waits
+   for the matrix gate. No preferences, rotation or pool engine.
+   Execution-route deletes `utility.py`, `test_utility.py` and `utility-schema.cjs`
+   in step 3, which removes `task_classifier`'s utility calls, gated on their last
+   importer. This includes CLI removing utility verbs and the output-digest hook.
+   CLI removes the routing hook and its registration; Fabric deletes
    its own catalogue/pools, without counting them here.
 4. **Composition and final callers.** Run/Fabric consume the shared APIs and own
    atomic admission, attempt records, retries and publication. Couple deletion
-   of cf_dispatch/fabric_records and their tests with replacement of their final
-   importers; this area counts those files once. Run owns the run-directory
-   contract cut and git_evidence_packet; its `AttemptReader::attempt` facts replace
+   of `cf_dispatch.py`/`fabric_records.py` and their tests/helpers with replacement
+   of their final importers; this area counts those files once. Run owns the
+   run-directory contract cut and `git_evidence_packet`; its `AttemptReader::attempt` facts replace
    workflow receipt readers. No new scaffold or import is added here. Finish
    isolated fake-provider dispatch/MCP acceptance and remove shared leaves only
    when their last old caller is gone.
+
+Steps 1–3 land Rust primitives; they do not delete a still-imported Python leaf.
+R2+R3, R4 and R5 below name the numbered steps in execution-run's build order:
+**Durable dispatch and admission + Bounded batches**, **Controls and recovery
+library**, and **Facade, run-directory cut and shared leaves**. Execution-route
+alone counts/deletes the following leaves and subject tests in those coupled
+PRs; outside owners remove their callers first. Recheck direct, dynamic and CLI
+callers before deletion; a surviving importer moves the deletion later.
+
+| Leaf | Importers/callers and deletion gate |
+| --- | --- |
+| `provider_output.py` | `dispatch_run`/`dispatch_preflight` (R2+R3), `provider_exec` and `provider_observer` (R4+R5), plus `cf_dispatch`/`fabric_records`' transitive provider use. Delete in R5 with the last facade/provider caller. |
+| `provider_identity.py` | `provider_quota`, `quota_providers/*`, `telemetry.py` and `fabric_records`. Delete in R5 after telemetry and quota remove their imports and Fabric retires `fabric_records`. |
+| `exec_routing.py` | `dispatch_run`/`dispatch_preflight`/`batch_run` (R2+R3), `provider_exec` (R4+R5), `provider_output`, `utility.py` (route step 3) and `fabric_records`. Delete in R5 after all retire. |
+| `provider_quota.py` | `exec_routing`, `provider_exec`, `model_route_live`, `telemetry.py` and quota-menubar's fixture generator. Delete in R5 after these and old quota consumers retire; quota leaves stay until this gate. |
+| `capabilities.py` | `dispatch_run`/`dispatch_preflight`/`batch_run` (R2+R3), `provider_exec`, `provider_confinement`, Codex's old adapter and `cf_dispatch`. Delete in R5 with the last facade/provider caller. |
+| `model_route_live.py`, `model_route_probe.py` | `model_route.py` exposes both to `provider_exec` and `exec_routing`; preflight, `utility.py`, `cf_dispatch` and `fabric_records` use that router directly or dynamically. Delete in R5 with the last router caller, not route step 3. |
+| `utility.py`, `test_utility.py`, `utility-schema.cjs` | Execution-route step 3 removes `task_classifier`'s utility calls and deletes all three, after CLI removes utility verbs, the output-digest hook and all remaining direct callers/tests. No run/workflow deletion claim. |
+| `cf_dispatch.py`, `fabric_records.py`, their tests and `cf_dispatch_support.py` | R2+R3 removes dispatch/preflight/batch callers; R5 replaces Fabric's facade and last direct callers. Delete in R5; subject helpers retire with their last test. |
 
 Each build PR lands Rust and deletes its subjects/tests together; no Python→Rust
 bridge, selector or old-output oracle. Chairs arrange cross-family review and
