@@ -99,7 +99,7 @@ class Lane:
             self.run / "dispatch/tasks/seed/attempt-001/attempt.json"]
         provider = read_json(self.control / "provider.json")
         assert not process_state(provider["pid"]), "provider was not reaped"
-        assert not process_group_pids(row["pgid"]), "provider process group was not reaped"
+        wait_for(lambda: not process_group_pids(row["pgid"]), "provider process group exit")
         return row
 
     def cancel(self):
@@ -126,16 +126,24 @@ class Lane:
             if self.process is not None:
                 owner_pgid = self.process.pid  # start_new_session=True
             for pgid in {owner_pgid, self.attempt().get("pgid")} - {None}:
+                if pgid == os.getpgrp():
+                    continue
                 try:
                     os.killpg(pgid, signal.SIGKILL)
                 except ProcessLookupError:
                     pass
             if self.process is not None:
                 self.process.wait(timeout=5)
-            else:
+            elif owner:
                 wait_for(lambda: process_stopped(owner["owner_pid"]), "killed nested owner exit")
             raise
         finally:
+            pgid = self.attempt().get("pgid")
+            if pgid and pgid != os.getpgrp() and process_group_pids(pgid):
+                try:
+                    os.killpg(pgid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
             os.close(self.fifo)
             if self.log:
                 self.log.close()
