@@ -5,6 +5,7 @@
 mod casefold;
 
 pub mod catalog;
+pub mod capability;
 pub mod cli;
 pub mod exec_routing;
 pub mod live;
