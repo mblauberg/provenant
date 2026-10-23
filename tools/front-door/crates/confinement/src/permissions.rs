@@ -39,7 +39,56 @@ const MAX_GIT_HEAD_BYTES: u64 = 1024;
 #[cfg(target_os = "macos")]
 const SANDBOX_EXEC: &str = "/usr/bin/sandbox-exec";
 #[cfg(target_os = "macos")]
-const PROBE_PROFILE: &str = "(version 1)\n(deny default)\n(allow process-exec)\n(allow file-read* (subpath \"/System/Library\"))\n(allow file-read* (subpath \"/System/Volumes/Preboot/Cryptexes/OS/System/Library\"))\n(allow file-read* (subpath \"/usr/bin\"))\n(allow file-read* (subpath \"/usr/lib\"))\n(allow file-read* (subpath \"/usr/libexec\"))\n(allow file-read* (subpath \"/bin\"))\n";
+const DYLD_BOOTSTRAP_RULES: &str = r#"
+(allow file-read* (subpath "/System/Library"))
+(allow file-read* (subpath "/usr/bin"))
+(allow file-read* (subpath "/usr/lib"))
+(allow file-read* (subpath "/usr/libexec"))
+(allow file-read* (subpath "/bin"))
+(allow file-read* file-test-existence file-map-executable
+  (subpath "/System/Volumes/Preboot/Cryptexes/App/System")
+  (subpath "/System/Volumes/Preboot/Cryptexes/Incoming/OS")
+  (subpath "/System/Volumes/Preboot/Cryptexes/OS")
+  (subpath "/System/Volumes/Preboot/Cryptexes/Rosetta")
+  (subpath "/System/Cryptexes/App")
+  (subpath "/System/Cryptexes/OS")
+  (subpath "/System/Cryptexes/Rosetta"))
+(allow file-read* file-test-existence
+  (path-ancestors "/System/Volumes/Preboot/Cryptexes/App/System")
+  (path-ancestors "/System/Volumes/Preboot/Cryptexes/Incoming/OS")
+  (path-ancestors "/System/Volumes/Preboot/Cryptexes/OS")
+  (path-ancestors "/System/Volumes/Preboot/Cryptexes/Rosetta")
+  (path-ancestors "/System/Cryptexes/App")
+  (path-ancestors "/System/Cryptexes/OS")
+  (path-ancestors "/System/Cryptexes/Rosetta"))
+(allow file-read* file-test-existence (literal "/"))
+(allow file-map-executable
+  (subpath "/Library/Apple/System/Library/Frameworks")
+  (subpath "/Library/Apple/System/Library/PrivateFrameworks")
+  (subpath "/Library/Apple/usr/lib")
+  (subpath "/System/Library/Extensions")
+  (subpath "/System/Library/Frameworks")
+  (subpath "/System/Library/PrivateFrameworks")
+  (subpath "/System/Library/SubFrameworks")
+  (subpath "/System/iOSSupport/System/Library/Frameworks")
+  (subpath "/System/iOSSupport/System/Library/PrivateFrameworks")
+  (subpath "/System/iOSSupport/System/Library/SubFrameworks")
+  (subpath "/System/iOSSupport/usr/lib")
+  (subpath "/usr/lib"))
+(allow syscall-unix
+  (syscall-number SYS___mac_syscall)
+  (syscall-number SYS_getfsstat SYS_getfsstat64)
+  (syscall-number SYS_map_with_linking_np)
+  (syscall-number SYS_open SYS_openat)
+  (syscall-number SYS_fstatat SYS_fstatat64)
+  (syscall-number SYS_dup))
+(allow system-fcntl
+  (fcntl-command F_ADDFILESIGS_RETURN F_CHECK_LV F_GETPATH))
+(with-filter (mac-policy-name "Sandbox")
+  (allow system-mac-syscall (mac-syscall-number 2)))
+"#;
+#[cfg(target_os = "macos")]
+const PROBE_PROCESS_RULES: &str = "(allow process-exec (literal \"/usr/bin/true\"))\n(allow process-exec (literal \"/bin/cat\"))\n";
 #[cfg(target_os = "macos")]
 const PROFILE_LIMIT: usize = 64 * 1024;
 #[cfg(target_os = "macos")]
@@ -648,10 +697,13 @@ fn probe_sandbox_with_diagnostic(
         ));
     }
 
+    let mut probe_profile = String::from("(version 1)\n(deny default)\n");
+    probe_profile.push_str(DYLD_BOOTSTRAP_RULES);
+    probe_profile.push_str(PROBE_PROCESS_RULES);
     let argv = [
         OsString::from(SANDBOX_EXEC),
         OsString::from("-p"),
-        OsString::from(PROBE_PROFILE),
+        OsString::from(probe_profile.as_str()),
         OsString::from("/usr/bin/true"),
     ];
     let mut options = ExecOptions::new(&argv, Path::new("/"), PROBE_TIMEOUT);
@@ -687,7 +739,7 @@ fn probe_sandbox_with_diagnostic(
     let denied_argv = [
         OsString::from(SANDBOX_EXEC),
         OsString::from("-p"),
-        OsString::from(PROBE_PROFILE),
+        OsString::from(probe_profile.as_str()),
         OsString::from("/bin/cat"),
         OsString::from("/etc/passwd"),
     ];
@@ -961,24 +1013,9 @@ fn render_profile(
     worktree_grants: Option<&WorktreeWriteGrants>,
 ) -> Result<Vec<u8>, PermissionError> {
     let mut source = String::from("(version 1)\n(deny default)\n");
-    // These are operating-system runtime roots; provider state and user paths
-    // are granted only from the verified plan/profile data below.
-    for path in [
-        "/System/Library",
-        "/System/Volumes/Preboot/Cryptexes/OS/System/Library",
-        "/usr/bin",
-        "/usr/lib",
-        "/usr/libexec",
-        "/bin",
-    ] {
-        push_rule(
-            &mut source,
-            "allow",
-            "file-read*",
-            Path::new(path),
-            PathScope::Subtree,
-        )?;
-    }
+    // Apple dyld bootstrap rules are shared with the backend probe to keep
+    // launch prerequisites and provider profiles aligned.
+    source.push_str(DYLD_BOOTSTRAP_RULES);
     for grant in reads {
         push_rule(&mut source, "allow", "file-read*", &grant.path, grant.scope)?;
     }
