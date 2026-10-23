@@ -3,6 +3,8 @@
 runtime/fabric/src/batch-execution.ts#interface
 runtime/fabric/src/execution.ts#interface
 runtime/fabric/src/identity.ts#unit-01
+runtime/fabric/src/run-registry.ts#interface
+runtime/fabric/src/success-status.ts#unit-01
 runtime/fabric/src/process-identity.ts#interface
 scripts/lib/projection.py#unit-01
 scripts/model_route_live.py#interface
@@ -32,4 +34,5 @@ skills/orchestrate/scripts/trusted_git.py#unit-01
 workspace:manifest-and-digest
 skills/orchestrate/scripts/adapters/copilot.py#unit-01
 skills/orchestrate/scripts/adapters/cursor.py#unit-01
+skills/orchestrate/scripts/adapters/opencode.py#unit-01
 scripts/telemetry_report.py#unit-02

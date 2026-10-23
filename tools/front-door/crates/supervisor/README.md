@@ -136,7 +136,8 @@ pipe-based cap are not ported. The spool is sampled for overflow; it can grow
 beyond the threshold between observations, and retained failure stdout uses
 head/tail truncation rather than Node's overflow buffer. This is an open library
 mismatch, not an accepted divergence. It blocks completion/cut-over, and no
-runtime ps unit is added to the completion ledger.
+runtime ps unit is added to the completion ledger. Platform-specific signal
+name extensions also remain outside the current common-POSIX mapping.
 
 All supervisor Python differentials now use `-I`, an explicit allowlisted
 environment and bounded utility waits; Node uses the same shared helper and
