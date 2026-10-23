@@ -4,6 +4,10 @@
 pub mod attempt_evidence;
 pub mod attempt_storage;
 pub mod checked_json;
+pub mod delivery_run_shape;
+#[cfg(test)]
+#[path = "delivery_run_shape/tests.rs"]
+mod delivery_run_shape_tests;
 pub use checked_json::{DecodeError, NumberOutOfRange};
 pub mod fabric_records;
 pub mod layout;
