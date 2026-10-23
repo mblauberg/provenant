@@ -85,4 +85,4 @@ execution handoff is digest-bound; any change creates a new revision and gate.
 
 ## Portable artifact
 
-Use the skill-owned [scope handoff schema](portable-workflow.v1.json).
+Keep the criteria, evidence and outcome in the existing project document or PR.

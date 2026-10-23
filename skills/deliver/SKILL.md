@@ -13,12 +13,9 @@ Require an approved intent, acceptance criteria, minimum risk tier and bounded
 authority. Scope/design, disclosure, one-way doors and risk downgrades need
 explicit user approval. If intent is unsettled, use `scope`.
 
-Select base profile from `config/delivery-profiles.json`: `software`,
-`research`, `analysis`, `document` or `agent-product`. Add high-stakes
-overlay when source authority, privacy or qualified review matters. Projects
-may strengthen a profile, never weaken kernel gates silently. Use explicit
-independent `not_applicable` form for fabric_relationships rather than
-inventing.
+State scoped criteria in the PR or skill document. Evaluate owns repetition
+protocols; release and domain skills own their evidence and approval duties.
+Use risk-tier repair ceilings as guidance, without a delivery profile registry.
 
 ## Lifecycle
 
@@ -29,7 +26,7 @@ inventing.
    that primary checkout; source edits may remain in the linked worktree:
    ```sh
    "$(provenant root)/skills/deliver/scripts/delivery_receipt.py" init \
-     --run-dir ".agent-run/runs/<YYYYMMDD-HHMM>-delivery-<slug>-<rand6>" --run-id "<id>" --profile "<profile>" \
+     --run-dir ".agent-run/runs/<YYYYMMDD-HHMM>-delivery-<slug>-<rand6>" --run-id "<id>" \
      --chair-family "<family>" --risk-assessment "<risk-assessment.json>" \
      --intent "<approved-intent-file>" --authority "<authority.json>"
    ```
@@ -46,7 +43,7 @@ inventing.
 3. Execute through relevant skills. Software routes through `implement`;
    stochastic behaviour through `evaluate`; failures use `diagnose`;
    substantial parallel work uses `orchestrate`.
-4. Produce profile-required deterministic evidence before judgement evidence.
+4. Produce the scoped deterministic evidence before judgement evidence.
    Every gate links to a typed artifact or receipt. At acceptance, a stochastic
    gate must bind and hash-verify a passing canonical `evaluation-run` receipt;
    copied scores or sampling metadata are not evidence. Retain failed or
@@ -79,13 +76,15 @@ surface. Artifact manifests classify `canonical`, `evidence`, `handoff`,
 explicit authority. Filesystem receipts remain truth when Herdr or another
 transport is unavailable.
 
-`implement` uses this same receipt with profile `software`; no parallel
-implementation receipt format exists. Live task or membership projections may
+`implement` records the same minimal subject, authors, risk, review references
+and decision; no parallel implementation receipt format exists. Live task or
+membership projections may
 link to it but never replace its canonical acceptance evidence.
 
 For audience-ready HTML, apply the
 [interactive-document boundary](references/interactive-documents.md).
 
-## Portable artifact
+## Project record
 
-Use the skill-owned [delivery receipt schema](portable-workflow.v1.json).
+Keep the scoped criteria, evidence and outcome in the existing project document
+or PR. A context stamp does not establish acceptance or authority.

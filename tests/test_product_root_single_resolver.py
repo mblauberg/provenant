@@ -56,4 +56,3 @@ def test_delivery_receipt_honours_the_configured_product_root(monkeypatch, tmp_p
     )
 
     assert module.RISK_POLICY_PATH == tmp_path / "config" / "risk-policy.json"
-    assert module.PROFILE_PATH == tmp_path / "config" / "delivery-profiles.json"

@@ -177,11 +177,10 @@ Never claim or overwrite an unmanaged target.
 
 ## Change the delivery kernel
 
-Keep profile policy in `config/delivery-profiles.json`, surface-selected checks
-in `config/security-evidence.json` and machine invariants in the `deliver`
-validator. A new domain should compose an existing base profile and a domain
-skill first. Add a base profile only when its artifacts, deterministic gates,
-judgement gates and release meaning are materially distinct.
+Keep scoped delivery criteria in the PR or owning skill document. Domain skills
+own surface-selected evidence and evaluation protocols; the minimal receipt
+records subject, authors, risk, review references and the decision. A new domain
+should compose an existing skill before introducing shared machinery.
 
 Trigger fixtures remain mandatory. Contract tests follow the
 machine-enforced-invariant test in **Change a skill** step 7. The ADR 0014 eval

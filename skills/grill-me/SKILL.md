@@ -32,6 +32,7 @@ shared decision/acceptance contract is clear, the user asks to stop, or the next
 branch needs unavailable owner authority. Return the resolved register to
 `scope` for a digest-bound handoff; the interview itself is not approval.
 
-## Portable artifact
+## Project record
 
-Use the skill-owned [decision context schema](portable-workflow.v1.json).
+Keep the scoped criteria, evidence and outcome in the existing project document
+or PR. A context stamp does not establish acceptance or authority.

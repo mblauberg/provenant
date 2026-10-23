@@ -43,7 +43,6 @@ before validation.
 | `route-health.schema.json` | Route health store; `write_route_health` in `skills/orchestrate/scripts/fabric_records.py`. |
 | `cooldowns.schema.json` | Cooldown store; `_store_cooldowns` in `fabric_records.py`. |
 | `log-reduction.schema.json` | Optional log reduction receipt; `main` in `log_reducer.py`. |
-| `delivery-profiles.schema.json` | `config/delivery-profiles.json`; loaded by delivery profile handling in `skills/deliver/scripts/delivery_contract.py`. |
 
 ## Writer disagreements
 

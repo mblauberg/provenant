@@ -332,11 +332,11 @@ def test_quota_and_telemetry_records(flow_root, monkeypatch):
                 reject(name, dict.fromkeys(row.keys()))
 
 
-@pytest.mark.parametrize("name", ["model-routing", "model-preferences", "delivery-profiles"])
+@pytest.mark.parametrize("name", ["model-routing", "model-preferences"])
 def test_config_schemas(name):
     value = json.loads((ROOT / "config" / f"{name}.json").read_text())
     validate(name, value)
-    field = {"model-routing": "routes", "model-preferences": "roles", "delivery-profiles": "profiles"}[name]
+    field = {"model-routing": "routes", "model-preferences": "roles"}[name]
     reject(name, {**value, field: []})
 
 
@@ -369,7 +369,7 @@ def test_schema_inventory():
     fixture_names = {path.name.removesuffix(".valid.json")
                      for path in (SCHEMAS / "fixtures").glob("*.valid.json")}
     covered = set(RECORD_PATTERNS) | fixture_names | {
-        "model-routing", "model-preferences", "delivery-profiles", "quota-snapshot",
+        "model-routing", "model-preferences", "quota-snapshot",
         "worker-terminal-envelope", "attempt-digest-sidecar", "manifest-row",
         "telemetry-usage-row", "telemetry-event-row", "telemetry-quota-series-row",
         "telemetry-quota-event-row",

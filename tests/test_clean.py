@@ -1494,33 +1494,3 @@ def test_open_dir_closes_fd_when_fstat_fails(tmp_path, monkeypatch):
         leaked = False
     os.close(parent)
     assert not leaked
-
-
-def test_evidence_accepted_delivery_is_validated_before_retention_cleanup(tmp_path):
-    root = repo(tmp_path)
-    product = SCRIPT.parents[1]
-    def load_delivery(name):
-        return load_script(product / f"skills/deliver/scripts/{name}.py", name)
-    run = load_delivery("reference_runs").make_reference_run("software", product)
-    run["human_gates"]["acceptance"] = {"status": "pending", "approver": "", "evidence": ""}
-    run["delivery_acceptance"] = {"basis": "checks-and-review", "evidence_ids": ["tests", "code-review-openai", "code-review-anthropic"]}
-    load_delivery("reference_evaluation").materialise_reference_run(run, root, product)
-    delivery = root / ".agent-run/runs/20260801-1200-delivery-accepted-a1b2c3"
-    delivery.mkdir(parents=True)
-    receipt = delivery / "RUN.json"
-    receipt.write_text(json.dumps(run))
-    module = cleaner()
-    def verdict():
-        return next(row["verdict"] for row in module.plan(root, pr_bodies=[])["rows"]
-                    if row["path"] == str(delivery.relative_to(root)))
-    old(delivery, 20)
-    assert verdict() == "keep:retention-30d"
-    old(delivery, 40)
-    assert verdict() == "delete"
-    (delivery / "KEEP").write_text("pinned")
-    assert verdict() == "keep:KEEP"
-    (delivery / "KEEP").unlink()
-    run["reviews"] = []
-    receipt.write_text(json.dumps(run))
-    old(delivery, 40)
-    assert verdict() == "keep:unaccepted-delivery"

@@ -7,9 +7,9 @@ asks for it. A project may name its landing gate as acceptance. Record the
 acceptance basis separately from human approval.
 
 `RUN.json` with `contract: delivery-run` and `schema_version: 1` is the single
-canonical lifecycle receipt. The profile registry
-declares minimum deterministic and judgement gates; project profiles may add
-requirements. The receipt is flat: it records what the run did, not the order
+canonical lifecycle receipt. Scoped deterministic and judgement criteria belong
+in the PR or skill document. The receipt is flat: it records what the run did,
+not the order
 in which it did it. `delivery_run_shape.py` declares the field set and its
 types, and both the producer and the validator check it, so an unknown,
 missing or wrong-typed field is refused on write and on read. Progress is read
@@ -27,8 +27,8 @@ model is known; telemetry carries it into structured delivery stats.
 The optional schema-v1 `delivery_acceptance` object has exactly `basis` and
 non-empty, unique `evidence_ids`. Bases are `checks-and-review`,
 `project-landing` and `user`; every linked evidence row must pass. IDs cover
-required profile gates and every passing review; `user` also binds the human
-approval evidence. All bases activate the same profile, review, security, measures, evaluation and
+the scoped required checks and every passing review; `user` also binds the human
+approval evidence. All bases activate the same review, security, measures, evaluation and
 high-stakes checks and freeze the same bound sections. Legacy receipts with
 approved `human_gates.acceptance` remain valid without the new object.
 
@@ -137,9 +137,9 @@ Non-evaluation deterministic evidence must be a local JSON
 `deterministic-evidence-bundle`; its exact check IDs, gates, statuses, methods,
 source paths and exit codes must match the linked evidence rows.
 Judgement evidence records actual model lineage. Non-user evidence lists the
-source paths it consumed, all within authority. A digest-bound
-`--project-policy` may add a complete project profile or add requirements to a
-built-in profile, never remove them.
+source paths it consumed, all within authority. Scoped criteria belong directly
+in the PR or skill document; no profile
+overlay adds another registry.
 
 Stochastic assurance uses a lifecycle binding with exactly `status`,
 `anchored_at`, `evidence_id`, `evaluation_artifact_id`, `evaluation_id`,
@@ -156,7 +156,7 @@ The referenced local JSON artifact must be declared as evidence. With
 `--verify-hashes`, the delivery validator checks its live digest and invokes
 the canonical `evaluation-run` validator with the anchored evaluation ID,
 frozen plan digest and enclosing delivery run ID. It also verifies every
-artifact inside that evaluation receipt and checks profile minima against the
+artifact inside that evaluation receipt and checks the scoped criteria against the
 bound plan for complete candidates. Terminal nonpasses may fall below those
 minima because they are retained evidence, not acceptance candidates. For
 every materialised row, the plan must be frozen no later than `anchored_at`,
@@ -170,9 +170,9 @@ agent-product runs cannot reach acceptance without matching passing
 deterministic results. Agent products disposition the OWASP agentic risk
 catalogue; `not_applicable` needs a reason.
 
-Observation is profile-specific but always names window, signals, thresholds,
+Observation belongs to the domain skill and always names window, signals, thresholds,
 owner, containment, privacy and close condition. `not_applicable` requires a
-profile justification.
+scope justification.
 
 ## Merged software binding
 
@@ -193,14 +193,4 @@ validate for historical readability, but release rejects software promotion
 without the post-merge binding. A URI or a reconstructed post-acceptance draft
 cannot substitute for these local typed artifacts.
 
-The profile gate uses independently authored positive, negative and boundary
-cases rather than receipts emitted by the reference generator:
-
-```sh
-provenant check
-```
-
-The harness gate includes the delivery scenario replay. Every expected outcome
-must match. The dataset covers each base profile in both directions, exercises
-the high-stakes overlay twice, and repeats stochastic or boundary cases where
-reproducibility matters.
+Evaluate owns evaluation protocols and repetition requirements.

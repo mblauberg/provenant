@@ -68,6 +68,4 @@ What the route is intended to deliver. Link the owning specification.
 
 ## Portable artifact
 
-When the declared tracker is unavailable, use the named project-docs home or a
-link-only fallback; never invent rolling project state. Use the skill-owned
-[effort map schema](portable-workflow.v1.json).
+Keep the criteria, evidence and outcome in the existing project document or PR.

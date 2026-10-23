@@ -16,7 +16,7 @@ substantial+ work and lets routine minor work proceed without one (see
 `implement/SKILL.md`); an unattended queue has no user in the loop to
 notice a missing receipt, so this mode cannot rely on that per-issue
 discretion. It always directs `implement` to create the canonical
-`delivery-run` (`deliver/templates/RUN.template.json`) for **every** queued
+`delivery-run` for **every** queued
 issue, including routine minor ones, and only ever reads/reports the one
 receipt `implement` produces — it never creates, assumes, or forks a second
 one.
@@ -60,7 +60,7 @@ one.
    do not merge. Never promote, and do not carry
    that issue's `RUN.json` past the state `implement` leaves it in. **Never
    fork a new receipt** — the canonical `delivery-run` from
-   `deliver/templates/RUN.template.json`, created by `implement` at this
+   `implement`, created at this
    mode's direction for this specific issue, is the only receipt; this mode
    reads and reports it, it never replaces it and never keeps a shadow
    receipt of its own.
