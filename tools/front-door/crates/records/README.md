@@ -52,9 +52,11 @@ API in the integration pass. No arbitrary_precision feature is enabled.
 
 ## Pending integration
 
-`pending::python_strip` (copied from the CLI owner), `pending::resolve` and its
-component queue belong in `provenant-core`. They supply Python whitespace and
-non-strict path resolution until core exports them.
+Python whitespace uses `provenant_core::py`. `pending::resolve` and its
+component queue remain for CPython 3.13+ non-strict symlink-loop handling: the
+current core resolver returns an error for loops, while this source returns
+the unresolved path. This is a named owner API parity gap, not a path-based
+filesystem fallback.
 
 `pending::{EntryInfo, StorageFs}` belong in `provenant-supervisor`. The safe OS
 binding must provide owned directory handles, lazy descriptor-relative entries,
@@ -109,3 +111,14 @@ Lone-surrogate JSON string escapes are refused with a typed JSON cause, includin
 in ignored validation fields; CPython accepts them. RP-records-006 records this
 library divergence for resolution before cut-over. RP-records-005 records the
 rulebook v4 improvement refusal for integers outside i64/u64.
+
+## Lane rrc-3 storage boundary
+
+The lane starts at `7021182d535f6c730c29713e77d5bca76893fd06`, including the
+safe filesystem foundation from #1328. The storage unit remains partial.
+R2 forbids a records-to-supervisor dependency, so the supervisor's `SafeFs`
+traits cannot be imported into this crate. A legal shared storage capability
+contract/binding is still missing on main. Do not invert that dependency or
+add path-based deletion to make the crate callable. The chair must settle the
+contract's owner; RP-records-003 also remains a pending boundary decision.
+Other units and generic codec ownership can proceed independently.
