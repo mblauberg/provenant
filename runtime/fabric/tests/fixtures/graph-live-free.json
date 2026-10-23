@@ -9,7 +9,7 @@
         "alias": "glm-free"
       },
       "brief": {
-        "prompt": "Read the function signalRecordedGroup in runtime/fabric/src/run-registry.ts in this repository, or, if it is absent, the function terminateRecordedRun. In at most five bullet points, explain how it decides a recorded process group is safe to signal. Cite line numbers."
+        "prompt": "Read the function signalRecordedGroup in runtime/fabric/src/process-identity.ts in this repository, or, if it is absent, the function terminateRecordedRun. In at most five bullet points, explain how it decides a recorded process group is safe to signal. Cite line numbers."
       }
     },
     {
