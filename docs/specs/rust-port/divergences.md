@@ -1711,3 +1711,10 @@ are not yet proved exact. Their IDs are removed from the completion ledger.
   warnings denied passed. Native syscall and source-parity review repairs are
   complete. The partial domains above and chair-owned cross-family/CI gates
   remain unchanged.
+
+### RP-SUP3-NAN-TIMEOUT: NaN bounded timeout (safety, open)
+
+- Unit: `skills/_shared/bounded_process.py#unit-01`. Source lines 167-170.
+- Python's `process.wait(timeout=nan)` never expires, so a NaN budget waits
+  forever. Rust refuses NaN with `BoundedError::InvalidTimeout` before
+  spawning. An infinite timeout keeps Python's behaviour: no deadline.

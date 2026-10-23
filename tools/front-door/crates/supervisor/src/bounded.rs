@@ -17,6 +17,7 @@ use thiserror::Error;
 pub enum BoundedError {
     #[error("bounded command is empty")]
     EmptyCommand,
+    /// NaN: Python's wait never expires on NaN; refuse rather than hang.
     #[error("invalid timeout")]
     InvalidTimeout,
     #[error("bounded process {operation} failed")]
@@ -170,7 +171,8 @@ fn run(
     let Some(program) = command.first() else {
         return Err(BoundedError::EmptyCommand);
     };
-    if !options.timeout_seconds.is_finite() {
+    // Infinity waits without a deadline, as Python's wait(timeout=inf) does.
+    if options.timeout_seconds.is_nan() {
         return Err(BoundedError::InvalidTimeout);
     }
     let started = Instant::now();
@@ -433,6 +435,21 @@ mod tests {
         assert!(output.output.ends_with("TAIL"));
         assert_eq!(output.stdout_bytes, Some(262152));
         assert_eq!(output.stderr.as_deref(), Some("ERROR"));
+    }
+
+    #[test]
+    fn infinite_timeout_waits_like_python_and_nan_is_refused() {
+        let mut options = Options::new(Path::new("/"), f64::INFINITY);
+        options.merge_stderr = true;
+        let output =
+            run_bounded(&["/bin/sh".into(), "-c".into(), "exit 0".into()], options).unwrap();
+        assert_eq!(output.returncode, 0);
+        assert!(!output.timed_out);
+        let options = Options::new(Path::new("/"), f64::NAN);
+        assert!(matches!(
+            run_bounded(&["/bin/sh".into(), "-c".into(), "exit 0".into()], options),
+            Err(BoundedError::InvalidTimeout)
+        ));
     }
 
     #[test]
