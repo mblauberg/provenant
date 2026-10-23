@@ -3,7 +3,6 @@ import json
 import os
 from pathlib import Path
 import subprocess
-import time
 from urllib.parse import quote
 
 import pytest
