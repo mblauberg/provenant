@@ -166,6 +166,7 @@ def copy_product(template: Path, destination: Path) -> Path:
 
 
 def run_product(product: Path, platform: str, home: Path, *arguments: str, **extra_env):
+    use_front_door_default = extra_env.pop("_front_door_default", False)
     environment = os.environ.copy()
     environment.pop("AGENT_FABRIC_STATE_DIRECTORY", None)
     # Resolve the copied product through the pointer written by this install,
@@ -184,6 +185,8 @@ def run_product(product: Path, platform: str, home: Path, *arguments: str, **ext
         }
     )
     environment.update(extra_env)
+    if use_front_door_default:
+        environment.pop("PROVENANT_FRONT_DOOR", None)
     return subprocess.run(
         [str(product / "scripts/install-harness"), "--platform", platform, *arguments],
         cwd=product,
@@ -2246,6 +2249,7 @@ def install_fake_cargo(directory: Path, *, fail: bool = False) -> Path:
         "#!/bin/sh\n"
         f'echo "$@" >> "{log}"\n'
         f'echo "MACOSX_DEPLOYMENT_TARGET=${{MACOSX_DEPLOYMENT_TARGET-unset}}" >> "{log}"\n'
+        f'echo "CARGO_TARGET_DIR=$CARGO_TARGET_DIR" >> "{log}"\n'
     )
     if fail:
         body += "exit 101\n"
@@ -2296,6 +2300,18 @@ def test_rust_mode_builds_stamps_and_installs_the_binary(tmp_path, rust_product)
     assert "build --release --locked --manifest-path" in cargo_log
     if sys.platform == "darwin":
         assert "MACOSX_DEPLOYMENT_TARGET=15.0" in cargo_log
+
+
+def test_default_builds_rust_into_configured_persistent_target_directory(tmp_path, rust_product):
+    log = install_fake_cargo(tmp_path / "fake-bin")
+    target = tmp_path / "cargo-target"
+
+    result = run_product(rust_product, "codex", tmp_path, _front_door_default=True,
+                         **rust_env(tmp_path, CARGO_TARGET_DIR=str(target)))
+
+    assert result.returncode == 0, result.stderr
+    assert "front-door=rust" in result.stdout.splitlines()
+    assert f"CARGO_TARGET_DIR={target}" in log.read_text()
 
 
 def test_reinstalling_the_same_binary_is_idempotent(tmp_path, rust_product):

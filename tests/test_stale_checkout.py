@@ -1,11 +1,13 @@
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import time
 
-from lib.stale_checkout import check_stale_checkout, warn_if_stale_checkout
+import pytest
 
 IDENT = ["-c", "user.name=t", "-c", "user.email=t@example.com"]
+ROOT = Path(__file__).resolve().parents[1]
 
 
 def git(repo: Path, *args: str) -> str:
@@ -21,8 +23,53 @@ def commit(repo: Path, name: str) -> None:
     git(repo, "commit", "-qm", name)
 
 
-def make(tmp_path: Path, branch: str = "main"):
-    """Bare origin plus two clones; returns (clone, other) both at one shared commit."""
+@pytest.fixture(scope="session")
+def front_door(tmp_path_factory):
+    target = Path(os.environ.get("CARGO_TARGET_DIR", Path.home() / ".cache/provenant/cargo-target"))
+    cargo = shutil.which("cargo") or str(Path.home() / ".cargo/bin/cargo")
+    env = {**os.environ, "CARGO_TARGET_DIR": str(target)}
+    subprocess.run([cargo, "build", "--locked", "--manifest-path", str(ROOT / "tools/front-door/Cargo.toml")],
+                   cwd=ROOT / "tools/front-door", env=env, check=True, capture_output=True)
+    binary = target / "debug/provenant"
+    destination = tmp_path_factory.mktemp("front-door") / "provenant"
+    shutil.copy2(binary, destination)
+    return destination
+
+
+def install_product(front_door: Path, root: Path) -> None:
+    wrapper = root / "runtime/fabric/bin/fabric-mcp"
+    wrapper.parent.mkdir(parents=True)
+    wrapper.write_text("#!/bin/sh\nexit 0\n")
+    wrapper.chmod(0o755)
+    scripts = root / "scripts"
+    scripts.mkdir(exist_ok=True)
+    binary = scripts / "provenant"
+    shutil.copy2(front_door, binary)
+    binary.chmod(0o755)
+    owner = scripts / "provenant-profile"
+    owner.write_text("#!/bin/sh\nexit 0\n")
+    owner.chmod(0o755)
+    (scripts / "check-harness").write_text("#!/bin/sh\nexit 0\n")
+    (scripts / "check-harness").chmod(0o755)
+    shutil.copy2(ROOT / "scripts/check_target.py", scripts / "check_target.py")
+    shutil.copy2(ROOT / "scripts/worktree.py", scripts / "worktree.py")
+    lib = scripts / "lib"
+    lib.mkdir(exist_ok=True)
+    shutil.copy2(ROOT / "scripts/lib/product_root_resolver.py", lib / "product_root_resolver.py")
+
+
+def invoke(root: Path, *, suppressed: bool = False) -> subprocess.CompletedProcess:
+    env = {**os.environ, "AGENT_FABRIC_PRODUCT_ROOT": str(root), "PROVENANT_TEST_BIN": str(root / "scripts/provenant")}
+    if suppressed:
+        env["PROVENANT_STALE_CHECKED"] = "1"
+    else:
+        env.pop("PROVENANT_STALE_CHECKED", None)
+    return subprocess.run([str(root / "scripts/provenant"), "check"], cwd=root, env=env,
+                          text=True, capture_output=True, check=False)
+
+
+def make(tmp_path: Path, front_door: Path, branch: str = "main"):
+    """Bare origin plus two clones; returns both clones at one shared commit."""
     origin = tmp_path / "origin.git"
     subprocess.run(["git", "init", "-q", "--bare", f"--initial-branch={branch}", str(origin)], check=True)
     seed = tmp_path / "seed"
@@ -33,6 +80,8 @@ def make(tmp_path: Path, branch: str = "main"):
     clone, other = tmp_path / "clone", tmp_path / "other"
     git(tmp_path, "clone", "-q", str(origin), str(clone))
     git(tmp_path, "clone", "-q", str(origin), str(other))
+    install_product(front_door, clone)
+    install_product(front_door, other)
     return clone, other
 
 
@@ -41,93 +90,92 @@ def push_from(other: Path, name: str, branch: str = "main") -> None:
     git(other, "push", "-q", "origin", branch)
 
 
-def test_up_to_date_is_silent(tmp_path):
-    clone, _ = make(tmp_path)
-    assert check_stale_checkout(clone) == []
+def test_up_to_date_is_silent(tmp_path, front_door):
+    clone, _ = make(tmp_path, front_door)
+    assert invoke(clone).stderr == ""
 
 
-def test_behind(tmp_path):
-    clone, other = make(tmp_path)
+def test_behind(tmp_path, front_door):
+    clone, other = make(tmp_path, front_door)
     push_from(other, "b")
     git(clone, "fetch", "-q")
-    [line] = check_stale_checkout(clone)
-    assert "1 commits behind origin/main" in line
-    assert f"git -C {clone} pull --ff-only" in line
+    result = invoke(clone)
+    assert "1 commits behind origin/main" in result.stderr
+    assert f"git -C {clone} pull --ff-only" in result.stderr
 
 
-def test_ahead_only_is_silent(tmp_path):
-    clone, _ = make(tmp_path)
+def test_ahead_only_is_silent(tmp_path, front_door):
+    clone, _ = make(tmp_path, front_door)
     commit(clone, "local")
-    assert check_stale_checkout(clone) == []
+    assert invoke(clone).stderr == ""
 
 
-def test_off_default_branch(tmp_path):
-    clone, _ = make(tmp_path)
+def test_off_default_branch(tmp_path, front_door):
+    clone, _ = make(tmp_path, front_door)
     git(clone, "switch", "-q", "-c", "feature")
     commit(clone, "local")
-    [line] = check_stale_checkout(clone)
-    assert "on feature, not main" in line and f"git -C {clone} switch main" in line
+    assert "on feature, not main" in invoke(clone).stderr
     git(clone, "switch", "-q", "--detach")
-    [line] = check_stale_checkout(clone)
-    assert "detached HEAD" in line
+    assert "detached HEAD" in invoke(clone).stderr
 
 
-def test_diverged(tmp_path):
-    clone, other = make(tmp_path)
+def test_diverged(tmp_path, front_door):
+    clone, other = make(tmp_path, front_door)
     commit(clone, "local")
     push_from(other, "b")
     git(clone, "fetch", "-q")
-    [line] = check_stale_checkout(clone)
-    assert "diverged" in line and "origin/main" in line and "rebase" in line
+    result = invoke(clone)
+    assert "diverged" in result.stderr and "origin/main" in result.stderr and "rebase" in result.stderr
 
 
-def test_non_main_default_via_origin_head(tmp_path):
-    clone, other = make(tmp_path, branch="trunk")
+def test_non_main_default_via_origin_head(tmp_path, front_door):
+    clone, other = make(tmp_path, front_door, branch="trunk")
     push_from(other, "b", branch="trunk")
     git(clone, "fetch", "-q")
-    [line] = check_stale_checkout(clone)
-    assert "origin/trunk" in line and "origin/main" not in line
+    result = invoke(clone)
+    assert "origin/trunk" in result.stderr and "origin/main" not in result.stderr
 
 
-def test_linked_worktree_is_silent(tmp_path):
-    clone, other = make(tmp_path)
+def test_linked_worktree_is_silent(tmp_path, front_door):
+    clone, other = make(tmp_path, front_door)
     push_from(other, "b")
     git(clone, "fetch", "-q")
     linked = tmp_path / "linked"
     git(clone, "worktree", "add", "-q", "-b", "feature", str(linked))
-    assert check_stale_checkout(linked) == []
-    assert check_stale_checkout(clone) != []
+    install_product(front_door, linked)
+    assert invoke(linked).stderr == ""
+    assert invoke(clone).stderr
 
 
-def test_non_repo_and_missing_dir_are_silent(tmp_path):
+def test_non_repo_and_missing_dir_are_silent(tmp_path, front_door):
     plain = tmp_path / "plain"
     plain.mkdir()
-    assert check_stale_checkout(plain) == []
-    assert check_stale_checkout(tmp_path / "missing") == []
+    install_product(front_door, plain)
+    assert invoke(plain).stderr == ""
+    result = subprocess.run([str(front_door), "check"], cwd=tmp_path,
+                            env={**os.environ, "AGENT_FABRIC_PRODUCT_ROOT": str(tmp_path / "missing")},
+                            text=True, capture_output=True, check=False)
+    assert result.returncode == 3 and "warning:" not in result.stderr
 
 
-def test_stale_fetch_head_without_being_behind(tmp_path):
-    clone, _ = make(tmp_path)
+def test_stale_fetch_head_without_being_behind(tmp_path, front_door):
+    clone, _ = make(tmp_path, front_door)
     git(clone, "fetch", "-q")
-    fetch_head = clone / ".git" / "FETCH_HEAD"
+    fetch_head = clone / ".git/FETCH_HEAD"
     old = time.time() - 5 * 86400
     os.utime(fetch_head, (old, old))
-    [line] = check_stale_checkout(clone)
-    assert "last fetched 5d ago" in line and f"git -C {clone} fetch" in line
+    assert "last fetched 5d ago" in invoke(clone).stderr
 
 
-def test_missing_fetch_head_is_silent(tmp_path):
-    clone, _ = make(tmp_path)
-    (clone / ".git" / "FETCH_HEAD").unlink(missing_ok=True)
-    assert check_stale_checkout(clone) == []
+def test_missing_fetch_head_is_silent(tmp_path, front_door):
+    clone, _ = make(tmp_path, front_door)
+    (clone / ".git/FETCH_HEAD").unlink(missing_ok=True)
+    assert "last fetched" not in invoke(clone).stderr
 
 
-def test_dedupe_flag_suppresses_output(tmp_path, monkeypatch, capsys):
-    clone, other = make(tmp_path)
+def test_dedupe_flag_suppresses_output(tmp_path, front_door):
+    clone, other = make(tmp_path, front_door)
     push_from(other, "b")
     git(clone, "fetch", "-q")
-    monkeypatch.setenv("PROVENANT_STALE_CHECKED", "0")  # teardown restores the caller's value
-    assert warn_if_stale_checkout(clone)
-    assert "behind" in capsys.readouterr().err
-    assert warn_if_stale_checkout(clone) == []
-    assert capsys.readouterr().err == ""
+    result = invoke(clone, suppressed=True)
+    assert "warning:" not in result.stderr

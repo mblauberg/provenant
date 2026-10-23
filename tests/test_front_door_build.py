@@ -155,6 +155,19 @@ def test_build_stamps_the_digest_and_selects_the_binary(tmp_path, monkeypatch):
     assert build.embedded_digest(source) == build.source_digest(crate)
 
 
+def test_cargo_falls_back_to_rustup_bin_when_not_on_path(tmp_path, monkeypatch):
+    crate = make_crate(tmp_path)
+    cargo_home = tmp_path / "home/.cargo/bin"
+    fake_cargo(cargo_home)
+    monkeypatch.setattr(Path, "home", lambda: tmp_path / "home")
+    monkeypatch.setenv("PATH", "/usr/bin:/bin")
+
+    kind, source, note = build.select(tmp_path, "rust", tmp_path / "target")
+
+    assert (kind, note) == ("rust", "built")
+    assert source.is_file()
+
+
 def test_cargo_runs_in_the_crate_directory_so_the_toolchain_pin_applies(tmp_path, monkeypatch):
     crate = make_crate(tmp_path)
     fake = tmp_path / "fake"

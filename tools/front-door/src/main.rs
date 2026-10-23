@@ -6,6 +6,7 @@ mod exec;
 mod help;
 mod json;
 mod resolve;
+mod stale;
 
 use exec::{replace_process, Launch};
 use resolve::{is_file, Settings, FABRIC_MCP};
@@ -203,13 +204,13 @@ fn target(relative: &str, settings: &Settings) -> Result<(PathBuf, Option<PathBu
     Ok((root.join(relative), Some(root)))
 }
 
-fn launch(program: &Path, args: &[OsString], root: Option<&Path>) -> u8 {
+fn launch(program: &Path, args: &[OsString], root: Option<&Path>, stale_checked: bool) -> u8 {
     replace_process(&Launch {
         program,
         args,
         root,
         scrub_git: false,
-        stale_checked: false,
+        stale_checked,
     })
 }
 
@@ -237,17 +238,22 @@ fn run(args: &[OsString]) -> u8 {
             Err(message) => fail(&message),
         },
         Route::Mcp => match resolve::product_root(&settings) {
-            Ok(root) => launch(&root.join(FABRIC_MCP), &[], Some(&root)),
+            Ok(root) => launch(&root.join(FABRIC_MCP), &[], Some(&root), false),
             Err(message) => fail(&message),
         },
         Route::Check(rest) => match check::select(&settings) {
-            Ok(selection) => replace_process(&Launch {
-                program: &selection.checker,
-                args: &rest,
-                root: Some(&selection.root),
-                scrub_git: true,
-                stale_checked: true,
-            }),
+            Ok(selection) => {
+                if let Ok(product_root) = resolve::product_root(&settings) {
+                    stale::warn(&product_root);
+                }
+                replace_process(&Launch {
+                    program: &selection.checker,
+                    args: &rest,
+                    root: Some(&selection.root),
+                    scrub_git: true,
+                    stale_checked: true,
+                })
+            }
             Err(message) => message.map_or(3, |message| fail(&message)),
         },
         Route::Owner { relative, args } => match target(relative, &settings) {
@@ -268,9 +274,9 @@ fn run(args: &[OsString]) -> u8 {
                     }
                     let mut forwarded = vec![helper.into_os_string(), program.into_os_string()];
                     forwarded.extend(args);
-                    launch(Path::new("/bin/bash"), &forwarded, root.as_deref())
+                    launch(Path::new("/bin/bash"), &forwarded, root.as_deref(), false)
                 } else {
-                    launch(&program, &args, root.as_deref())
+                    launch(&program, &args, root.as_deref(), false)
                 }
             }
             Err(message) => fail(&message),
@@ -305,6 +311,7 @@ fn run_python(args: &[OsString], settings: &Settings) -> u8 {
         Path::new("/usr/bin/env"),
         &[&[OsString::from("python3")][..], &forwarded].concat(),
         Some(&root),
+        false,
     )
 }
 

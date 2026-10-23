@@ -93,7 +93,13 @@ def build(crate: Path, target_dir: Path, digest: str) -> Path:
     environment["PROVENANT_FD_SOURCE_SHA256"] = digest
     if sys.platform == "darwin":
         environment["MACOSX_DEPLOYMENT_TARGET"] = DEPLOYMENT_TARGET
-    command = ["cargo", "build", "--release", "--locked", "--manifest-path", str(crate / "Cargo.toml")]
+    cargo = shutil.which("cargo")
+    if cargo is None:
+        fallback = Path.home() / ".cargo/bin/cargo"
+        cargo = str(fallback) if fallback.is_file() else None
+    if cargo is None:
+        raise FrontDoorError("cargo is not on PATH (looked in ~/.cargo/bin too)")
+    command = [cargo, "build", "--release", "--locked", "--manifest-path", str(crate / "Cargo.toml")]
     try:
         # Cargo's own output is progress, not an answer: keep it off stdout.
         done = subprocess.run(
@@ -164,10 +170,11 @@ def select(
             smoke(prebuilt)
             return "rust", prebuilt, "prebuilt"
         if cargo_available is None:
-            cargo_available = shutil.which("cargo") is not None
+            cargo_available = shutil.which("cargo") is not None or (Path.home() / ".cargo/bin/cargo").is_file()
         if not cargo_available:
-            raise FrontDoorError("cargo is not on PATH")
-        binary = build(crate, build_dir / "target", digest)
+            raise FrontDoorError("cargo is not on PATH (looked in ~/.cargo/bin too)")
+        target_dir = Path(os.environ.get("CARGO_TARGET_DIR", build_dir))
+        binary = build(crate, target_dir, digest)
         smoke(binary)
         return "rust", binary, "built"
     except FrontDoorError as exc:
