@@ -118,13 +118,51 @@ def patterns():
     }
 
 
-def connect():
+SCHEMA_VERSION = 4
+
+
+class LedgerSchemaMismatch(ValueError):
+    pass
+
+
+def connect(readonly=False, warn=False):
     path = state_root() / 'telemetry.sqlite3'
+    if readonly:
+        if not path.is_file():
+            return _empty_ledger(warn)
+        db = sqlite3.connect(path.resolve().as_uri() + '?mode=ro', uri=True)
+        db.row_factory = sqlite3.Row
+        try:
+            tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+            version = db.execute('PRAGMA user_version').fetchone()[0]
+            if version not in range(SCHEMA_VERSION + 1):
+                raise LedgerSchemaMismatch(f'unsupported telemetry schema version: {version}')
+            if version == 0 or 'sources' not in tables:
+                db.close()
+                return _empty_ledger(warn)
+            if version < SCHEMA_VERSION:
+                raise LedgerSchemaMismatch(
+                    f'telemetry schema version {version} needs migration; run provenant telemetry ingest')
+            load_hosts(db)
+        except BaseException:
+            db.close()
+            raise
+        return db
     path.parent.mkdir(parents=True, exist_ok=True)
-    db = sqlite3.connect(path)
+    return _prepare(sqlite3.connect(path))
+
+
+def _empty_ledger(warn):
+    # Queries read an absent ledger as empty, built in memory so nothing is written.
+    if warn:
+        print('telemetry: ledger not initialised; reporting an empty ledger', file=sys.stderr)
+    return _prepare(sqlite3.connect(':memory:'))
+
+
+def _prepare(db):
     db.row_factory = sqlite3.Row
     version = db.execute('PRAGMA user_version').fetchone()[0]
-    if version not in (0, 1, 2, 3, 4):
+    if version not in range(SCHEMA_VERSION + 1):
         db.close()
         raise ValueError(f'unsupported telemetry schema version: {version}')
     db.executescript('''
@@ -218,7 +256,7 @@ def connect():
     if version in (1, 2, 3):
         # Version 4 reads route, task class and timing from receipts; re-read them in place.
         db.execute("DELETE FROM cursors WHERE source='fabric'")
-    db.execute('PRAGMA user_version = 4')
+    db.execute(f'PRAGMA user_version = {SCHEMA_VERSION}')
     if db.execute("SELECT 1 FROM meta WHERE key='model_split'").fetchone() is None:
         # Re-read surviving receipts; pruned receipts keep unknown model components.
         db.execute("DELETE FROM cursors WHERE source='fabric'")
@@ -801,7 +839,8 @@ def main(argv=None):
     try:
         if args.since:
             since_time(args.since)
-        with connect() as db:
+        read_only = args.command != 'ingest' and not (args.command == 'changes' and (args.sync or args.add))
+        with connect(readonly=read_only, warn=True) as db:
             if args.command in {'changes', 'retro'} or args.compare:
                 return report_changes(db, args)
             if args.command == 'stats':
@@ -824,7 +863,8 @@ def main(argv=None):
                       f"{row['path_pattern']}")
         return int(args.command == 'ingest' and any(row['status'] == 'error' for row in rows))
     except (OSError, ValueError, sqlite3.Error) as exc:
-        print(f'telemetry: {type(exc).__name__}', file=sys.stderr)
+        label = str(exc) if isinstance(exc, LedgerSchemaMismatch) else type(exc).__name__
+        print(f'telemetry: {label}', file=sys.stderr)
         return 1
 
 

@@ -13,6 +13,8 @@ import sys
 import types
 from unittest.mock import patch
 
+import pytest
+
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -85,6 +87,67 @@ def test_missing_sources_are_manifested_not_errors(tmp_path):
     assert all(row['parser_version'] == 2 and row['path_pattern'] for row in rows)
     with sqlite3.connect(tmp_path / 'state/telemetry.sqlite3') as db:
         assert db.execute("PRAGMA user_version").fetchone()[0] == 4
+
+
+def test_sources_query_reads_a_read_only_ledger(tmp_path):
+    seeded = cli(tmp_path, 'telemetry', 'ingest')
+    assert seeded.returncode == 0, seeded.stderr
+    ledger = tmp_path / 'state/telemetry.sqlite3'
+    directory_mode = ledger.parent.stat().st_mode & 0o777
+    file_mode = ledger.stat().st_mode & 0o777
+    try:
+        ledger.chmod(0o444)
+        ledger.parent.chmod(0o555)
+        result = cli(tmp_path, 'telemetry', 'sources', '--json')
+        stats = cli(tmp_path, 'telemetry', 'stats', '--json')
+    finally:
+        ledger.parent.chmod(directory_mode)
+        ledger.chmod(file_mode)
+    assert result.returncode == 0, result.stderr
+    rows = json.loads(result.stdout)
+    assert len(rows) == 8
+    assert {row['source'] for row in rows} == {
+        'fabric', 'route_health', 'cooldowns', 'claude', 'codex', 'opencode', 'otel', 'delivery'}
+    assert stats.returncode == 0, stats.stderr
+    assert isinstance(json.loads(stats.stdout), dict)
+
+
+@pytest.mark.parametrize('version,message', [
+    (3, 'telemetry: telemetry schema version 3 needs migration; run provenant telemetry ingest'),
+    (9, 'telemetry: unsupported telemetry schema version: 9'),
+], ids=['older', 'newer'])
+def test_query_reports_schema_version_mismatch(tmp_path, version, message):
+    seeded = cli(tmp_path, 'telemetry', 'ingest')
+    assert seeded.returncode == 0, seeded.stderr
+    ledger = tmp_path / 'state/telemetry.sqlite3'
+    with sqlite3.connect(ledger) as db:
+        db.execute(f'PRAGMA user_version = {version}')
+    result = cli(tmp_path, 'telemetry', 'sources', '--json')
+    assert result.returncode == 1
+    assert result.stderr.strip() == message
+
+
+def test_query_reports_missing_ledger_without_creating_it(tmp_path):
+    (tmp_path / 'state').mkdir()
+    result = cli(tmp_path, 'telemetry', 'sources', '--json')
+    assert result.returncode == 0, result.stderr
+    assert result.stderr.strip() == 'telemetry: ledger not initialised; reporting an empty ledger'
+    assert all(row['row_count'] == 0 for row in json.loads(result.stdout))
+    assert not (tmp_path / 'state/telemetry.sqlite3').exists()
+
+
+def test_query_reports_uninitialised_ledger_without_creating_schema(tmp_path):
+    state = tmp_path / 'state'
+    state.mkdir()
+    ledger = state / 'telemetry.sqlite3'
+    with sqlite3.connect(ledger):
+        pass
+    result = cli(tmp_path, 'telemetry', 'sources', '--json')
+    assert result.returncode == 0, result.stderr
+    assert result.stderr.strip() == 'telemetry: ledger not initialised; reporting an empty ledger'
+    assert all(row['row_count'] == 0 for row in json.loads(result.stdout))
+    with sqlite3.connect(ledger) as db:
+        assert db.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall() == []
 
 
 def test_delivery_sidecars_ingest_repair_transitions_and_finding_lineage(tmp_path):
