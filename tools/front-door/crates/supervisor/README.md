@@ -328,3 +328,8 @@ leaving a theoretical process-group ID reuse race; this batch does not change
 that implementation or S2 provider custody. Treat it as a cut-over design
 question, not proof of provider custody. The chair still owns cross-family
 review and exact-head CI/acceptance; no auto-merge is armed.
+
+Batch 4 adds reusable raw-exec, strict-text, owned-PID, native-CWD, append/flock,
+marker and following-read owners. See [PORT.md](PORT.md#owner-api) for the public
+API inventory, current partial-unit accounting and remaining blockers. The old
+batch descriptions above are historical; PORT.md owns batch-4 status.

@@ -57,74 +57,7 @@ impl OwnedChild {
         pass_fds: &[BorrowedFd<'_>],
         env: Option<&[(OsString, OsString)]>,
     ) -> io::Result<Self> {
-        let pass: Vec<_> = pass_fds.iter().map(AsRawFd::as_raw_fd).collect();
-        let env: Vec<_> = env
-            .map(<[_]>::to_vec)
-            .unwrap_or_else(|| std::env::vars_os().collect());
-        let string = |bytes: &[u8]| {
-            CString::new(bytes).map_err(|_| io::Error::from_raw_os_error(libc::EINVAL))
-        };
-        let arguments: Vec<_> = std::iter::once(command.get_program())
-            .chain(command.get_args())
-            .map(|arg| string(arg.as_bytes()))
-            .collect::<io::Result<_>>()?;
-        let environment: Vec<_> = env
-            .iter()
-            .map(|(key, value)| {
-                let bytes = [key.as_bytes(), b"=", value.as_bytes()].concat();
-                string(&bytes)
-            })
-            .collect::<io::Result<_>>()?;
-        let program = command.get_program().as_bytes();
-        let programs = if program.contains(&b'/') {
-            vec![string(program)?]
-        } else {
-            let path = env
-                .iter()
-                .find(|(key, _)| key == "PATH")
-                .map(|(_, value)| value.as_bytes())
-                .unwrap_or(b"/bin:/usr/bin");
-            path.split(|&byte| byte == b':')
-                .map(|dir| {
-                    string(&[dir, if dir.is_empty() { b"" } else { b"/" }, program].concat())
-                })
-                .collect::<io::Result<Vec<_>>>()?
-        };
-        let buffers = ExecBuffers::new(arguments, environment);
-        // SAFETY: this hook runs after fork, before exec. It only invokes
-        // async-signal-safe syscalls over preallocated vectors, does not lock,
-        // allocate or mutate parent state. Each borrowed passed fd stays live
-        // through spawn. Rust's exec-error pipe is already CLOEXEC. Failures
-        // return errno through that pipe and std reaps the failed child.
-        unsafe {
-            command.pre_exec(move || {
-                if libc::setsid() < 0 {
-                    return Err(io::Error::last_os_error());
-                }
-                cloexec_descriptors()?;
-                for &fd in &pass {
-                    let flags = libc::fcntl(fd, libc::F_GETFD);
-                    if flags < 0 || libc::fcntl(fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) < 0 {
-                        return Err(io::Error::last_os_error());
-                    }
-                }
-                let mut saved_error = None;
-                let mut last_error = libc::ENOENT;
-                for program in &programs {
-                    buffers.exec(program);
-                    let error = io::Error::last_os_error()
-                        .raw_os_error()
-                        .unwrap_or(libc::EIO);
-                    if !matches!(error, libc::ENOENT | libc::ENOTDIR) && saved_error.is_none() {
-                        saved_error = Some(error);
-                    }
-                    last_error = error;
-                }
-                Err(io::Error::from_raw_os_error(
-                    saved_error.unwrap_or(last_error),
-                ))
-            });
-        }
+        configure_command(command, pass_fds, env, true)?;
         Ok(Self {
             child: command.spawn()?,
             cleanup_complete: false,
@@ -210,6 +143,81 @@ impl Drop for OwnedChild {
             let _ = self.reap(Duration::from_millis(250));
         }
     }
+}
+
+/// Install the same strict argv/PATH/env syscall boundary for all utilities.
+pub(crate) fn configure_command(
+    command: &mut Command,
+    pass_fds: &[BorrowedFd<'_>],
+    env: Option<&[(OsString, OsString)]>,
+    new_session: bool,
+) -> io::Result<()> {
+    let pass: Vec<_> = pass_fds.iter().map(AsRawFd::as_raw_fd).collect();
+    let env: Vec<_> = env
+        .map(<[_]>::to_vec)
+        .unwrap_or_else(|| std::env::vars_os().collect());
+    let string =
+        |bytes: &[u8]| CString::new(bytes).map_err(|_| io::Error::from_raw_os_error(libc::EINVAL));
+    let arguments: Vec<_> = std::iter::once(command.get_program())
+        .chain(command.get_args())
+        .map(|arg| string(arg.as_bytes()))
+        .collect::<io::Result<_>>()?;
+    let environment: Vec<_> = env
+        .iter()
+        .map(|(key, value)| {
+            let bytes = [key.as_bytes(), b"=", value.as_bytes()].concat();
+            string(&bytes)
+        })
+        .collect::<io::Result<_>>()?;
+    let program = command.get_program().as_bytes();
+    let programs = if program.contains(&b'/') {
+        vec![string(program)?]
+    } else {
+        let path = env
+            .iter()
+            .find(|(key, _)| key == "PATH")
+            .map(|(_, value)| value.as_bytes())
+            .unwrap_or(b"/bin:/usr/bin");
+        path.split(|&byte| byte == b':')
+            .map(|dir| string(&[dir, if dir.is_empty() { b"" } else { b"/" }, program].concat()))
+            .collect::<io::Result<Vec<_>>>()?
+    };
+    let buffers = ExecBuffers::new(arguments, environment);
+    // SAFETY: this hook runs after fork, before exec. It only invokes
+    // async-signal-safe syscalls over preallocated vectors, does not lock,
+    // allocate or mutate parent state. Each borrowed passed fd stays live
+    // through spawn. Rust's exec-error pipe is already CLOEXEC. Failures
+    // return errno through that pipe and std reaps the failed child.
+    unsafe {
+        command.pre_exec(move || {
+            if new_session && libc::setsid() < 0 {
+                return Err(io::Error::last_os_error());
+            }
+            cloexec_descriptors()?;
+            for &fd in &pass {
+                let flags = libc::fcntl(fd, libc::F_GETFD);
+                if flags < 0 || libc::fcntl(fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) < 0 {
+                    return Err(io::Error::last_os_error());
+                }
+            }
+            let mut saved_error = None;
+            let mut last_error = libc::ENOENT;
+            for program in &programs {
+                buffers.exec(program);
+                let error = io::Error::last_os_error()
+                    .raw_os_error()
+                    .unwrap_or(libc::EIO);
+                if !matches!(error, libc::ENOENT | libc::ENOTDIR) && saved_error.is_none() {
+                    saved_error = Some(error);
+                }
+                last_error = error;
+            }
+            Err(io::Error::from_raw_os_error(
+                saved_error.unwrap_or(last_error),
+            ))
+        });
+    }
+    Ok(())
 }
 
 // The pointer arrays borrow immutable CString allocations owned by this object.
