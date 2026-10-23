@@ -80,8 +80,9 @@ existing ancestor/any symlink aliases before testing containment; when a root
 is missing, check the canonical parent plus normal relative tail. Named legacy
 roots include `~/.agents`, each selected workspace's `.agent-run`,
 `~/.local/state/agent-harness`, `~/.local/state/provenant`, and explicitly
-configured old roots. Guard equality as well as descendants; never initialise
-through a legacy-root alias.
+configured old roots. Also reject any `.agent-run` component in either the
+requested or canonical state path, even without a selected workspace. Guard
+equality as well as descendants; never initialise through a legacy-root alias.
 A missing root stays missing for reads, help and `root`; mutating commands
 initialise it explicitly with private permissions (directories 0700, files
 0600; installed executable 0755).
@@ -624,8 +625,11 @@ Keep shared `tests/support/{modules,front_door,proc}.py` until their last
 Python test consumer is deleted; CLI/final runtime removal owns that deletion,
 along with `scripts/lib/harness-python.sh` **77** and
 `scripts/lib/agent-fabric-tsx-loader.sh` **166**. Hook bodies/tests,
-`install-otel-collector`, JS workflows, provider account identity and schema
-files retire with CLI/telemetry/workflow/provider owners. `tests/test_record_schemas.py`, `scripts/lib/projection.py` (70 lines)
+`install-otel-collector`, JS workflows and provider account identity retire with
+CLI/telemetry/workflow/provider owners. State/config deletes no `schemas/`
+files: those are source material, and each domain owner decides the fate of its
+record schemas when its typed records land. No schema-file deletion is
+authorised or counted by this area's ledger. `tests/test_record_schemas.py`, `scripts/lib/projection.py` (70 lines)
 and old golden/oracle machinery follow the rewrite plan's other deletion owners. None is an unlisted
 State implementation to port. Config-data deletions are additional to the language totals: slice 2 removes
 `config/harness-knobs.json` (118 lines), replacing its executable registry with
