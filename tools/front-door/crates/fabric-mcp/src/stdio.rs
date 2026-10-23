@@ -18,12 +18,22 @@ use std::{
 const WORKERS: usize = 4;
 const QUEUE: usize = 32;
 const EVENT_QUEUE: usize = QUEUE + WORKERS + 8;
-const INPUT_READ_WAIT: Duration = Duration::from_secs(1);
-const EVENT_WAIT: Duration = Duration::from_secs(1);
-// The design uses a 30s bound for synchronous peer calls and stdout backpressure.
-const WRITE_WAIT: Duration = Duration::from_secs(30);
-const SHUTDOWN: Duration = Duration::from_secs(56);
-const CANCEL_GRACE: Duration = Duration::from_secs(1);
+#[derive(Clone, Copy)]
+struct Timeouts {
+    input_read: Duration,
+    event: Duration,
+    write: Duration,
+    shutdown: Duration,
+    cancel_grace: Duration,
+}
+const TIMEOUTS: Timeouts = Timeouts {
+    input_read: Duration::from_secs(1),
+    event: Duration::from_secs(1),
+    // The design bounds synchronous peer calls and stdout backpressure to 30s.
+    write: Duration::from_secs(30),
+    shutdown: Duration::from_secs(56),
+    cancel_grace: Duration::from_secs(1),
+};
 
 /// An OS boundary must return by `deadline`, using WouldBlock/TimedOut when
 /// no bytes arrive. Zero means EOF. Only the transport's reader calls this.
@@ -145,8 +155,8 @@ fn write_before(output: &mut impl Output, value: &Value, deadline: Instant) -> R
     bytes.push(b'\n');
     output.write_frame(&bytes, deadline).map_err(Error::Output)
 }
-fn write(output: &mut impl Output, value: &Value) -> Result<(), Error> {
-    write_before(output, value, Instant::now() + WRITE_WAIT)
+fn write(output: &mut impl Output, value: &Value, timeouts: Timeouts) -> Result<(), Error> {
+    write_before(output, value, Instant::now() + timeouts.write)
 }
 
 struct CompletionGuard {
@@ -179,12 +189,20 @@ impl Drop for CompletionGuard {
     }
 }
 
-fn read_input(input: &mut impl Input, events: &SyncSender<Event>, stop: &AtomicBool) {
+fn read_input(
+    input: &mut impl Input,
+    events: &SyncSender<Event>,
+    stop: &AtomicBool,
+    timeouts: Timeouts,
+) {
     let mut buffer = [0_u8; 8192];
     let mut framer = Framer::default();
     while !stop.load(Ordering::Acquire) {
         let capacity = framer.remaining().min(buffer.len());
-        match input.read(&mut buffer[..capacity], Instant::now() + INPUT_READ_WAIT) {
+        match input.read(
+            &mut buffer[..capacity],
+            Instant::now() + timeouts.input_read,
+        ) {
             Ok(0) => {
                 let _ = events.send(Event::InputEof(framer.incomplete()));
                 return;
@@ -239,6 +257,15 @@ pub fn serve(
     output: &mut impl Output,
     factory: impl Factory,
 ) -> Result<(), Error> {
+    serve_with_timeouts(input, output, factory, TIMEOUTS)
+}
+
+fn serve_with_timeouts(
+    input: &mut impl Input,
+    output: &mut impl Output,
+    factory: impl Factory,
+    timeouts: Timeouts,
+) -> Result<(), Error> {
     let factory = Arc::new(factory);
     let (jobs, receive) = mpsc::sync_channel::<Job>(QUEUE);
     let receive = Arc::new(Mutex::new(receive));
@@ -280,8 +307,8 @@ pub fn serve(
     let stop_reader = AtomicBool::new(false);
     let mut live = BTreeMap::<Id, CancelToken>::new();
     let run_result = thread::scope(|scope| {
-        let reader = scope.spawn(|| read_input(input, &reader_events, &stop_reader));
-        let run = serve_loop(&events, &jobs, output, &mut live, &workers);
+        let reader = scope.spawn(|| read_input(input, &reader_events, &stop_reader, timeouts));
+        let run = serve_loop(&events, &jobs, output, &mut live, &workers, timeouts);
         stop_reader.store(true, Ordering::Release);
         drop(jobs);
         let output_failed = matches!(&run, Err(Error::Output(_) | Error::OversizeReply));
@@ -291,9 +318,15 @@ pub fn serve(
             &mut live,
             &mut workers,
             output_failed || matches!(&run, Err(Error::Worker)),
+            timeouts,
         );
+        // Input::read must honour its deadline: after stop, at most one
+        // input_read interval remains. A reader blocked sending to the bounded
+        // event queue is released by this drain; no producer can refill it
+        // indefinitely once admission stops and the finite job queue drains.
+        // Polling adds at most one event interval before the scoped join.
         while !reader.is_finished() {
-            let _ = events.recv_timeout(EVENT_WAIT);
+            let _ = events.recv_timeout(timeouts.event);
         }
         if reader.join().is_err() {
             return Err(Error::Worker);
@@ -317,10 +350,11 @@ fn serve_loop(
     output: &mut impl Output,
     live: &mut BTreeMap<Id, CancelToken>,
     workers: &[thread::JoinHandle<()>],
+    timeouts: Timeouts,
 ) -> Result<(), Error> {
     let mut protocol = Protocol::default();
     loop {
-        match events.recv_timeout(EVENT_WAIT) {
+        match events.recv_timeout(timeouts.event) {
             Ok(Event::Frame(frame)) => match protocol.receive(&frame) {
                 Action::Ignore => {}
                 Action::Cancel(id) => {
@@ -336,9 +370,10 @@ fn serve_loop(
                         write(
                             output,
                             &protocol::error(id.as_ref(), -32600, "Duplicate live request ID"),
+                            timeouts,
                         )?;
                     } else {
-                        write(output, &reply)?;
+                        write(output, &reply, timeouts)?;
                     }
                 }
                 Action::Call { id, modern, call } => {
@@ -346,6 +381,7 @@ fn serve_loop(
                         write(
                             output,
                             &protocol::error(Some(&id), -32600, "Duplicate live request ID"),
+                            timeouts,
                         )?;
                         continue;
                     }
@@ -360,9 +396,11 @@ fn serve_loop(
                         Ok(()) => {
                             live.insert(id, cancel);
                         }
-                        Err(TrySendError::Full(_)) => {
-                            write(output, &protocol::result(&id, failure("busy"), modern))?
-                        }
+                        Err(TrySendError::Full(_)) => write(
+                            output,
+                            &protocol::result(&id, failure("busy"), modern),
+                            timeouts,
+                        )?,
                         Err(TrySendError::Disconnected(_)) => return Err(Error::Worker),
                     }
                 }
@@ -375,6 +413,7 @@ fn serve_loop(
                         "Request exceeds the frame limit",
                         protocol.modern(),
                     ),
+                    timeouts,
                 )?;
                 return Err(Error::Oversize);
             }
@@ -387,6 +426,7 @@ fn serve_loop(
                             "EOF inside a JSON frame",
                             protocol.modern(),
                         ),
+                        timeouts,
                     )?;
                 }
                 return Ok(());
@@ -396,7 +436,7 @@ fn serve_loop(
                 if let Some(cancel) = live.remove(&completion.id)
                     && !cancel.is_cancelled()
                 {
-                    write(output, &completion.reply)?;
+                    write(output, &completion.reply, timeouts)?;
                 }
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {}
@@ -414,13 +454,14 @@ fn shutdown_workers(
     live: &mut BTreeMap<Id, CancelToken>,
     workers: &mut Vec<thread::JoinHandle<()>>,
     cancel_now: bool,
+    timeouts: Timeouts,
 ) -> Result<(), Error> {
-    let deadline = Instant::now() + SHUTDOWN;
+    let deadline = Instant::now() + timeouts.shutdown;
     let mut cancelled = cancel_now;
     let mut output_error = None;
     loop {
         let now = Instant::now();
-        cancelled |= now >= deadline - CANCEL_GRACE;
+        cancelled |= now >= deadline - timeouts.cancel_grace;
         if cancelled {
             for cancel in live.values() {
                 cancel.cancel();
@@ -435,13 +476,13 @@ fn shutdown_workers(
         let wake = if cancelled {
             deadline
         } else {
-            deadline - CANCEL_GRACE
+            deadline - timeouts.cancel_grace
         };
         let event = if finished {
             events.try_recv().ok()
         } else {
             events
-                .recv_timeout(EVENT_WAIT.min(wake.saturating_duration_since(now)))
+                .recv_timeout(timeouts.event.min(wake.saturating_duration_since(now)))
                 .ok()
         };
         match event {
@@ -452,7 +493,7 @@ fn shutdown_workers(
                     && let Err(error) = write_before(
                         output,
                         &completion.reply,
-                        (Instant::now() + WRITE_WAIT).min(deadline),
+                        (Instant::now() + timeouts.write).min(deadline),
                     )
                 {
                     output_error = Some(error);

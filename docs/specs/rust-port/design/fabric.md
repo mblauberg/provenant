@@ -377,14 +377,31 @@ Using it would require both a dependency amendment and reversal of no-async.
 Its maintained protocol types and lifecycle machinery are valuable, but the
 single stdio tools-only server does not justify that runtime expansion. Revisit
 if HTTP transport, elicitation or subscriptions become actual requirements.
-Budget 700–1,000 production lines for framing, validation, lifecycle and schemas;
-if it grows materially beyond this, return the maintenance trade-off to the chairs.
+The original budget was 700–1,000 production lines for framing, validation,
+lifecycle and schemas. Both chairs accepted the overrun with no rmcp amendment:
+the `fabric-mcp` crate owns **1,438 production Rust lines**, and the typed bound
+checks in `fabric-runtime/src/coordination/input.rs` are **440 shared runtime
+lines**, counted separately from MCP. Counts include physical lines, blanks and
+comments before each file's `#[cfg(test)]`, excluding separate test files and
+fixtures. The framing/lifecycle/schema subtotal is 1,106 lines; with shared
+validation it is 1,546, exceeding the original upper bound by 546 lines.
+The schema catalogue stays explicit, with its serde agreement test, because
+deriving schemas from the typed params would require a new proc-macro crate.
 
-Build dual-era `2025-11-25` and `2026-07-28` profiles now, with fixtures for
-both. Add `2025-06-18` only for a demonstrated client requirement. Both use
-UTF-8 newline JSON-RPC, protocol-only stdout and diagnostics on stderr.
-The first request selects the era: `initialize` selects legacy; versioned
-`_meta` selects modern, including a `server/discover` probe. Refuse an era switch.
+Support `2025-11-25` and `2026-07-28`; do not add `2025-06-18` to the supported
+versions. Verbatim first-request stdio fixtures captured on 24 October 2026
+provide shipped-client evidence for each era:
+[Claude Code 2.1.309](../../../../tools/front-door/crates/fabric-mcp/tests/fixtures/claude-code-2.1.309-discover.json)
+negotiates `2026-07-28` through `server/discover`, with an
+[`initialize` fallback](../../../../tools/front-door/crates/fabric-mcp/tests/fixtures/claude-code-2.1.309-initialize.json).
+[Codex 0.159.0](../../../../tools/front-door/crates/fabric-mcp/tests/fixtures/codex-0.159.0-initialize.json)
+sends only `initialize`, requesting `2025-06-18`, and receives the supported
+`2025-11-25` version through legacy negotiation. Both eras therefore serve a
+shipped client; transport tests assert each fixture's reply.
+Both use UTF-8 newline JSON-RPC, protocol-only stdout and diagnostics on stderr.
+One negotiated-version enum (`Era`) at the framing edge selects legacy on
+`initialize` or modern on versioned `_meta`, including a `server/discover`
+probe; one shared request handler applies its era guards and refuses switches.
 
 | Profile | Required wire behaviour |
 |---|---|

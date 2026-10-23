@@ -387,6 +387,250 @@ fn oversized_tool_reply_is_replaced_by_an_error_result_before_write() {
     );
 }
 
+// All production deadlines are retained by TIMEOUTS; exercise shutdown in ms.
+const SHORT_TIMEOUTS: Timeouts = Timeouts {
+    input_read: Duration::from_millis(40),
+    event: Duration::from_millis(2),
+    write: Duration::from_millis(30),
+    shutdown: Duration::from_millis(80),
+    cancel_grace: Duration::from_millis(20),
+};
+
+fn completed(id: &Id) -> Event {
+    Event::Completed(Completion {
+        id: id.clone(),
+        reply: protocol::result(id, json!({"content":[],"isError":false}), false),
+    })
+}
+
+#[test]
+fn shutdown_deadline_cancels_a_straggler_and_never_writes_its_late_reply() {
+    let gate = Arc::new(Gate::default());
+    let server = Server::start_with_timeouts(FakeFactory::new(gate.clone()), false, SHORT_TIMEOUTS);
+    server.send(&initialize());
+    server.send(&notification("notifications/initialized", json!({})));
+    server.wait_for_frames(1, TEST_WAIT).unwrap();
+    server.send(&tool_call(
+        "straggler",
+        "fabric_identity",
+        json!({"op":"inspect"}),
+    ));
+    assert!(gate.wait_for_entered(1, TEST_WAIT));
+    let started = Instant::now();
+    server.close_input();
+    let result = server.wait_result(TEST_WAIT);
+    assert!(matches!(result, Err(Error::Shutdown)), "{result:?}");
+    assert!(started.elapsed() < Duration::from_millis(500));
+    {
+        let state = gate.state.lock().unwrap();
+        assert_eq!(state.returned, 0, "straggler must outlive the deadline");
+        assert!(state.tokens[0].is_cancelled());
+    }
+    gate.release();
+    assert!(gate.wait_for_returned(1, TEST_WAIT));
+    assert_eq!(server.captured_frames().len(), 1, "no late reply");
+}
+
+#[test]
+fn drain_write_failure_stops_writes_and_cancels_remaining_jobs() {
+    struct BrokenDrain(usize);
+    impl Output for BrokenDrain {
+        fn write_frame(&mut self, _: &[u8], _: Instant) -> io::Result<()> {
+            self.0 += 1;
+            Err(io::ErrorKind::BrokenPipe.into())
+        }
+    }
+    let (send, events) = mpsc::sync_channel(EVENT_QUEUE);
+    let first = Id::Text("first".into());
+    let mut live = BTreeMap::from([(first.clone(), CancelToken::new())]);
+    // This is already a completion when draining starts: failure is in the
+    // drain's writer, rather than the normal admission loop's writer.
+    send.send(completed(&first)).unwrap();
+    let mut tokens = Vec::new();
+    let mut workers = Vec::new();
+    for name in ["remaining-1", "remaining-2"] {
+        let id = Id::Text(name.into());
+        let cancel = CancelToken::new();
+        tokens.push(cancel.clone());
+        live.insert(id.clone(), cancel.clone());
+        let send = send.clone();
+        workers.push(thread::spawn(move || {
+            let deadline = Instant::now() + TEST_WAIT;
+            while !cancel.is_cancelled() && Instant::now() < deadline {
+                thread::park_timeout(Duration::from_millis(1));
+            }
+            send.send(completed(&id)).unwrap();
+        }));
+    }
+    let mut output = BrokenDrain(0);
+    let started = Instant::now();
+    let result = shutdown_workers(
+        &events,
+        &mut output,
+        &mut live,
+        &mut workers,
+        false,
+        Timeouts {
+            shutdown: Duration::from_millis(400),
+            ..SHORT_TIMEOUTS
+        },
+    );
+    assert!(
+        matches!(result, Err(Error::Output(error)) if error.kind() == io::ErrorKind::BrokenPipe)
+    );
+    assert!(
+        started.elapsed() < Duration::from_millis(200),
+        "cancellation must follow the write failure, not the shutdown deadline"
+    );
+    assert!(tokens.iter().all(CancelToken::is_cancelled));
+    assert!(live.is_empty());
+    assert!(workers.is_empty());
+    assert_eq!(
+        output.0, 1,
+        "late completions must not attempt another write"
+    );
+}
+
+#[test]
+fn reader_join_finishes_after_a_pending_read_honours_its_deadline() {
+    struct DeadlineInput {
+        first: Option<Vec<u8>>,
+        entered: mpsc::SyncSender<Instant>,
+        held: mpsc::Receiver<()>,
+    }
+    impl Input for DeadlineInput {
+        fn read(&mut self, bytes: &mut [u8], deadline: Instant) -> io::Result<usize> {
+            if let Some(first) = self.first.take() {
+                bytes[..first.len()].copy_from_slice(&first);
+                return Ok(first.len());
+            }
+            self.entered.send(deadline).unwrap();
+            assert!(matches!(
+                self.held
+                    .recv_timeout(deadline.saturating_duration_since(Instant::now())),
+                Err(mpsc::RecvTimeoutError::Timeout)
+            ));
+            Err(io::ErrorKind::TimedOut.into())
+        }
+    }
+    struct FailWhileReading(mpsc::Receiver<Instant>, Option<Instant>);
+    impl Output for FailWhileReading {
+        fn write_frame(&mut self, _: &[u8], _: Instant) -> io::Result<()> {
+            self.1 = Some(self.0.recv_timeout(TEST_WAIT).unwrap());
+            Err(io::ErrorKind::BrokenPipe.into())
+        }
+    }
+    let (entered, reading) = mpsc::sync_channel(1);
+    let (_release, held) = mpsc::sync_channel(1);
+    let mut input = DeadlineInput {
+        first: Some(encode_line(&initialize())),
+        entered,
+        held,
+    };
+    let mut output = FailWhileReading(reading, None);
+    let factory = FakeFactory::new(Arc::new(Gate::default()));
+    let started = Instant::now();
+    let result = serve_with_timeouts(&mut input, &mut output, factory, SHORT_TIMEOUTS);
+    assert!(matches!(result, Err(Error::Output(_))), "{result:?}");
+    assert!(
+        Instant::now() >= output.1.unwrap(),
+        "the pending read was joined"
+    );
+    assert!(started.elapsed() < Duration::from_millis(500));
+}
+
+#[test]
+fn maximum_fetch_payloads_fit_the_real_reply_frame_without_truncation() {
+    use provenant_fabric_runtime::coordination::input::MAX_FETCH_BYTES;
+    // NUL needs six JSON bytes per input byte; 255 needs three digits plus
+    // a separator in the invalid-UTF-8 byte-array representation.
+    for (byte, encoding) in [(0_u8, "utf8"), (255, "bytes")] {
+        for modern in [false, true] {
+            let gate = Arc::new(Gate::default());
+            gate.state.lock().unwrap().output_bytes =
+                vec![byte; usize::try_from(MAX_FETCH_BYTES).unwrap()];
+            let server = Server::start(FakeFactory::new(gate), false);
+            if modern {
+                server.send(&json!({"jsonrpc":"2.0","id":"discover","method":"server/discover","params":{"_meta":{protocol::VERSION:protocol::MODERN,protocol::CAPABILITIES:{}}}}));
+            } else {
+                server.send(&initialize());
+                server.send(&notification("notifications/initialized", json!({})));
+            }
+            let mut call = tool_call(
+                "fetch",
+                "fabric_output",
+                json!({
+                    "op":"fetch", "target":{"attempt":"00000000000000000000000000000001"},
+                    "artifact":{"path":{"encoding":"utf8","path":"result.txt"},"digest":null},
+                    "max_bytes":MAX_FETCH_BYTES
+                }),
+            );
+            if modern {
+                call["params"]["_meta"] =
+                    json!({protocol::VERSION:protocol::MODERN,protocol::CAPABILITIES:{}});
+            }
+            server.send(&call);
+            let frames = server.wait_for_frames(2, TEST_WAIT).unwrap();
+            let result = &frames[1]["result"];
+            assert_eq!(frames[1]["id"], "fetch");
+            assert_ne!(result["isError"], true, "{result}");
+            let bytes = &result["structuredContent"]["bytes"];
+            assert_eq!(bytes["encoding"], encoding);
+            if byte == 0 {
+                assert_eq!(
+                    bytes["data"].as_str().unwrap().as_bytes(),
+                    vec![byte; usize::try_from(MAX_FETCH_BYTES).unwrap()]
+                );
+            } else {
+                let data = bytes["data"].as_array().unwrap();
+                assert_eq!(data.len(), usize::try_from(MAX_FETCH_BYTES).unwrap());
+                assert!(data.iter().all(|value| *value == byte));
+            }
+            let output = server.shared.output.lock().unwrap();
+            assert!(output.frames[1].len() <= MAX_FRAME, "including newline");
+            drop(output);
+            assert!(matches!(server.finish(), Ok(())));
+        }
+    }
+}
+
+#[test]
+fn shipped_clients_first_requests_negotiate_the_supported_eras() {
+    // Verbatim first stdio frames captured on 24 October 2026.
+    for (fixture, modern) in [
+        (
+            include_bytes!("../tests/fixtures/claude-code-2.1.309-discover.json").as_slice(),
+            true,
+        ),
+        (
+            include_bytes!("../tests/fixtures/claude-code-2.1.309-initialize.json").as_slice(),
+            false,
+        ),
+        (
+            include_bytes!("../tests/fixtures/codex-0.159.0-initialize.json").as_slice(),
+            false,
+        ),
+    ] {
+        let server = Server::start(FakeFactory::new(Arc::new(Gate::default())), false);
+        server.send_bytes(fixture);
+        let frames = server.wait_for_frames(1, TEST_WAIT).unwrap();
+        let request: Value = serde_json::from_slice(fixture).unwrap();
+        assert_eq!(frames[0]["id"], request["id"]);
+        assert!(frames[0].get("error").is_none());
+        let expected = if modern {
+            json!({"supportedVersions":["2026-07-28","2025-11-25"],"capabilities":{"tools":{}},"ttlMs":300_000,"cacheScope":"public",
+                "resultType":"complete", "_meta":{"io.modelcontextprotocol/serverInfo":{"name":"provenant-fabric","version":env!("CARGO_PKG_VERSION")}}})
+        } else {
+            json!({"protocolVersion":"2025-11-25","capabilities":{"tools":{}},"serverInfo":{"name":"provenant-fabric","version":env!("CARGO_PKG_VERSION")}})
+        };
+        assert_eq!(
+            frames[0],
+            json!({"jsonrpc":"2.0", "id":request["id"], "result":expected})
+        );
+        assert!(matches!(server.finish(), Ok(())));
+    }
+}
+
 #[derive(Default)]
 struct Gate {
     state: Mutex<GateState>,
@@ -399,11 +643,14 @@ struct GateState {
     released: bool,
     panic_remaining: usize,
     run_cancel_calls: usize,
+    output_bytes: Vec<u8>,
+    tokens: Vec<CancelToken>,
 }
 impl Gate {
-    fn hold(&self) {
+    fn hold(&self, cancel: &CancelToken) {
         let mut state = self.state.lock().unwrap();
         state.entered += 1;
+        state.tokens.push(cancel.clone());
         self.changed.notify_all();
         let deadline = Instant::now() + TEST_WAIT;
         while !state.released {
@@ -536,10 +783,10 @@ impl F3Facade for FakeFacade {
         &mut self,
         _: IdentityInput,
         _: WaitBudget,
-        _: &CancelToken,
+        cancel: &CancelToken,
     ) -> Result<Fact, FacadeError> {
         self.0.maybe_panic();
-        self.0.hold();
+        self.0.hold(cancel);
         Err(FacadeError::NotFound)
     }
     fn submit(
@@ -554,21 +801,32 @@ impl F3Facade for FakeFacade {
         &mut self,
         input: RunInput,
         _: WaitBudget,
-        _: &CancelToken,
+        cancel: &CancelToken,
     ) -> Result<Fact, FacadeError> {
         if matches!(input, RunInput::Cancel { .. }) {
             self.0.run_cancel_call();
         }
-        self.0.hold();
+        self.0.hold(cancel);
         Ok(Fact { state: "running" })
     }
     fn output(
         &mut self,
-        _: OutputInput,
+        input: OutputInput,
         _: WaitBudget,
         _: &CancelToken,
     ) -> Result<OutputResult, FacadeError> {
-        Err(FacadeError::NotFound)
+        let OutputInput::Fetch {
+            target, artifact, ..
+        } = input
+        else {
+            return Err(FacadeError::NotFound);
+        };
+        Ok(OutputResult::Artifact {
+            target,
+            artifact,
+            digest: provenant_core::Digest::from_bytes([1; 32]),
+            bytes: OutputBytes::from_bytes(self.0.state.lock().unwrap().output_bytes.clone()),
+        })
     }
     fn hosts(
         &mut self,
@@ -701,13 +959,21 @@ struct Server {
 }
 impl Server {
     fn start(factory: FakeFactory, broken_output: bool) -> Self {
+        Self::start_with_timeouts(factory, broken_output, TIMEOUTS)
+    }
+    fn start_with_timeouts(factory: FakeFactory, broken_output: bool, timeouts: Timeouts) -> Self {
         let shared = Arc::new(Shared::default());
         shared.output.lock().unwrap().broken = broken_output;
         let gate = factory.0.gate.clone();
         let (send, result) = mpsc::sync_channel(1);
         let (mut reader, mut writer) = (PipeInput(shared.clone()), PipeOutput(shared.clone()));
         thread::spawn(move || {
-            let _ = send.send(serve(&mut reader, &mut writer, factory));
+            let _ = send.send(serve_with_timeouts(
+                &mut reader,
+                &mut writer,
+                factory,
+                timeouts,
+            ));
         });
         Self {
             shared,
