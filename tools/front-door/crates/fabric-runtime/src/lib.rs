@@ -2,7 +2,9 @@
 #![forbid(unsafe_code)]
 
 pub mod batch_execution;
+pub mod catalogue;
 pub mod execution;
+pub mod execution_input;
 pub mod fabric_policy;
 pub mod field;
 pub mod gates;
