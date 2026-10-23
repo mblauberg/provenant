@@ -1,5 +1,5 @@
-import importlib.util
 from pathlib import Path
+from tests.support.modules import load_script
 
 import pytest
 
@@ -9,11 +9,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def _checker():
     path = ROOT / "scripts" / "check_harness.py"
-    spec = importlib.util.spec_from_file_location("check_harness_docs", path)
-    assert spec and spec.loader
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
+    return load_script(path, "check_harness_docs")
 
 
 @pytest.mark.parametrize(

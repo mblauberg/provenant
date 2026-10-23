@@ -1,5 +1,4 @@
 from pathlib import Path
-import importlib.util
 import io
 import stat
 import subprocess
@@ -7,15 +6,13 @@ import sys
 from contextlib import redirect_stderr, redirect_stdout
 
 import pytest
+from tests.support.modules import load_script
 
 ROOT = Path(__file__).resolve().parents[1]
 CHECKER = ROOT / "skills" / "orchestrate" / "scripts" / "check_herdr_cli.py"
 REFERENCE = ROOT / "skills" / "orchestrate" / "references" / "herdr-panes.md"
 
-_checker_spec = importlib.util.spec_from_file_location("herdr_cli_checker_under_test", CHECKER)
-assert _checker_spec is not None and _checker_spec.loader is not None
-_checker = importlib.util.module_from_spec(_checker_spec)
-_checker_spec.loader.exec_module(_checker)
+_checker = load_script(CHECKER, "herdr_cli_checker_under_test")
 
 ROOT_HELP = """\
 herdr agent <subcommand>         Agent helpers

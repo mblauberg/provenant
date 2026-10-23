@@ -1,7 +1,10 @@
 import json
+import os
+import re
 from pathlib import Path
 import subprocess
-import re
+
+from tests.support.git import git
 
 ROOT = Path(__file__).resolve().parents[1]
 INIT = ROOT / "skills/orchestrate/scripts/run_dir_init.sh"
@@ -25,7 +28,7 @@ def test_default_run_name_and_owner_directory(tmp_path):
 def test_linked_worktree_shares_run_root(tmp_path):
     primary = tmp_path / "repo"
     primary.mkdir()
-    subprocess.run(["git", "init", str(primary)], check=True, capture_output=True)
+    git(Path.cwd(), "init", str(primary), env=os.environ)
     subprocess.run(
         [
             "git",
@@ -44,11 +47,7 @@ def test_linked_worktree_shares_run_root(tmp_path):
         capture_output=True,
     )
     linked = tmp_path / "lane"
-    subprocess.run(
-        ["git", "-C", str(primary), "worktree", "add", "-b", "lane", str(linked)],
-        check=True,
-        capture_output=True,
-    )
+    git(primary, "worktree", "add", "-b", "lane", str(linked), env=os.environ)
     result = subprocess.run([str(INIT)], cwd=linked, capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
     assert Path(result.stdout.strip()).parent == primary / ".agent-run/runs"

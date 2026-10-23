@@ -1,10 +1,10 @@
-import importlib.util
 import errno
 import os
 from pathlib import Path
 import subprocess
 
 import pytest
+from tests.support.modules import load_script
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -13,12 +13,7 @@ SOURCE = ROOT / "scripts" / "provenant.template"
 
 
 def load_helper():
-    spec = importlib.util.spec_from_file_location("install_provenant_command", HELPER)
-    assert spec is not None
-    assert spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
+    return load_script(HELPER, "install_provenant_command")
 
 
 def invoke(*arguments: str) -> subprocess.CompletedProcess[str]:

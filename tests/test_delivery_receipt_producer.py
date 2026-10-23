@@ -8,7 +8,6 @@ the independent validator suite; see #758.
 """
 
 import hashlib
-import importlib.util
 import json
 import os
 import signal
@@ -17,6 +16,7 @@ import sys
 import time
 from datetime import UTC, datetime
 from pathlib import Path
+from tests.support.modules import load_script
 
 import pytest
 
@@ -27,11 +27,7 @@ CHECKPOINT = ROOT / "skills" / "implement" / "scripts" / "checkpoint_run.py"
 
 
 def load(path: Path, name: str):
-    spec = importlib.util.spec_from_file_location(name, path)
-    module = importlib.util.module_from_spec(spec)
-    assert spec.loader
-    spec.loader.exec_module(module)
-    return module
+    return load_script(path, name)
 
 
 def load_producer():

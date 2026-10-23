@@ -1,18 +1,13 @@
-import importlib.util
 from datetime import datetime, timezone
 from pathlib import Path
 import hashlib
-import sys
+from tests.support.modules import load_script
 
 import pytest
 
 
 SCRIPT = Path(__file__).resolve().parents[1] / "skills" / "session" / "scripts" / "context_audit.py"
-SPEC = importlib.util.spec_from_file_location("context_audit", SCRIPT)
-context_audit = importlib.util.module_from_spec(SPEC)
-assert SPEC.loader
-sys.modules[SPEC.name] = context_audit
-SPEC.loader.exec_module(context_audit)
+context_audit = load_script(SCRIPT, "context_audit", register=True)
 
 
 def codes(findings):

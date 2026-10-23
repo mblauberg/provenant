@@ -1,5 +1,6 @@
 import os
 import json
+from tests.support.modules import load_script
 from pathlib import Path
 import shutil
 import subprocess
@@ -230,11 +231,8 @@ def test_check_treats_empty_root_variables_as_unset(tmp_path: Path) -> None:
 
 
 def test_registration_diagnostics_do_not_require_an_adapter_on_path(tmp_path, monkeypatch):
-    import importlib.util
     monkeypatch.syspath_prepend(str(ROOT / 'scripts'))
-    spec = importlib.util.spec_from_file_location('install_check_hosts_test', SCRIPT)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    module = load_script(SCRIPT, 'install_check_hosts_test')
     home = tmp_path / 'home'
     registry = home / '.gemini/config/mcp_config.json'
     registry.parent.mkdir(parents=True)

@@ -2,9 +2,9 @@
 from __future__ import annotations
 
 import hashlib
-import importlib.util
 import json
 from pathlib import Path
+from tests.support.modules import load_script
 
 import pytest
 
@@ -13,11 +13,7 @@ SCRIPT = ROOT / "skills/orchestrate/scripts/attempt_evidence.py"
 
 
 def load_validator():
-    spec = importlib.util.spec_from_file_location("attempt_evidence_matrix", SCRIPT)
-    assert spec and spec.loader
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
+    return load_script(SCRIPT, "attempt_evidence_matrix")
 
 
 def valid_evidence(tmp_path: Path):

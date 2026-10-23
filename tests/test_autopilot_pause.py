@@ -1,7 +1,7 @@
-import importlib.util
 from pathlib import Path
 
 import pytest
+from tests.support.modules import load_script
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -17,11 +17,7 @@ CLEAN_QUEUE = """# QUEUE
 
 
 def load_module():
-    spec = importlib.util.spec_from_file_location("validate_idle_pause", SCRIPT)
-    assert spec and spec.loader
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
+    return load_script(SCRIPT, "validate_idle_pause")
 
 
 def write_clean_queue(tmp_path, text=CLEAN_QUEUE):

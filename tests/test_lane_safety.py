@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import importlib.util
 import json
 import shlex
 import os
@@ -12,17 +11,14 @@ import sys
 import time
 
 import pytest
+from tests.support.modules import load_script
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "scripts"
 
 
 def load(name: str, filename: str):
-    spec = importlib.util.spec_from_file_location(name, SCRIPTS / filename)
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[name] = module
-    spec.loader.exec_module(module)
-    return module
+    return load_script(SCRIPTS / filename, name, register=True)
 
 
 guard = load("lane_safety_guard_test", "lane_safety_guard.py")

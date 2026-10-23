@@ -12,6 +12,7 @@ import shutil
 import subprocess
 
 import pytest
+from tests.support.modules import load_script
 
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "clean.py"
@@ -1357,10 +1358,7 @@ def test_evidence_accepted_delivery_is_validated_before_retention_cleanup(tmp_pa
     root = repo(tmp_path)
     product = SCRIPT.parents[1]
     def load_delivery(name):
-        spec = importlib.util.spec_from_file_location(name, product / f"skills/deliver/scripts/{name}.py")
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
-        return module
+        return load_script(product / f"skills/deliver/scripts/{name}.py", name)
     run = load_delivery("reference_runs").make_reference_run("software", product)
     run["human_gates"]["acceptance"] = {"status": "pending", "approver": "", "evidence": ""}
     run["delivery_acceptance"] = {"basis": "checks-and-review", "evidence_ids": ["tests", "code-review-openai", "code-review-anthropic"]}
