@@ -1,0 +1,11 @@
+{
+  "argv": [
+    "batch",
+    "--plan"
+  ],
+  "exit_code": 2,
+  "files": [],
+  "stderr": "error: the following arguments are required: --run-dir, --manifest; fix: pass --run-dir, --manifest\n",
+  "stdin": "",
+  "stdout": ""
+}

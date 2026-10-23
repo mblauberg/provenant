@@ -544,6 +544,8 @@ jobs:
             cargo build --release --locked
       - name: Run the parity suite against the binary
         run: PROVENANT_PARITY_IMPL=rust PROVENANT_FRONT_DOOR_BIN="$CARGO_TARGET_DIR/release/provenant" .venv/bin/python -m pytest tests/front_door_parity tests/test_stale_checkout.py -q
+      - name: Run the golden CLI suite
+        run: PROVENANT_GOLDEN_REQUIRED=1 PROVENANT_GOLDEN_BIN="$CARGO_TARGET_DIR/release/provenant" .venv/bin/python -m pytest tests/golden/test_golden_cli.py -q
 
   zizmor:
     name: Workflow security lint

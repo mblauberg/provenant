@@ -1,0 +1,11 @@
+{
+  "argv": [
+    "lanes",
+    "--bad-golden-flag"
+  ],
+  "exit_code": 2,
+  "files": [],
+  "stderr": "fabric: usage: fabric lanes [--json] [--all] [--project P] [id\u2026] | lanes --wait [--all] [--summary] [--timeout N] [id\u2026]\n",
+  "stdin": "",
+  "stdout": ""
+}

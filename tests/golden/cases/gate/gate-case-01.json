@@ -1,0 +1,11 @@
+{
+  "argv": [
+    "gate",
+    "--help"
+  ],
+  "exit_code": 2,
+  "files": [],
+  "stderr": "usage: gate\n",
+  "stdin": "",
+  "stdout": ""
+}

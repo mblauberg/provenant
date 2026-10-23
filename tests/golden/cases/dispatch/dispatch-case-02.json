@@ -1,0 +1,11 @@
+{
+  "argv": [
+    "dispatch",
+    "--plan"
+  ],
+  "exit_code": 2,
+  "files": [],
+  "stderr": "error: the following arguments are required: --run-dir; fix: pass --run-dir\n",
+  "stdin": "",
+  "stdout": ""
+}
