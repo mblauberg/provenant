@@ -2,7 +2,7 @@
 use crate::lane_exit::Member;
 pub use crate::pending::OrderedMap;
 use serde::{Deserialize, Serialize};
-use serde_json::{Map, Number, Value};
+use serde_json::{Map, Value};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ObserverPlan {
@@ -71,24 +71,32 @@ impl<'de> Deserialize<'de> for SemanticStop {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ContextUsage {
     #[serde(deserialize_with = "crate::pending::required_option")]
-    pub context_tokens: Option<Number>,
+    pub context_tokens: Option<u64>,
     #[serde(deserialize_with = "crate::pending::required_option")]
-    pub input_tokens: Option<Number>,
+    pub input_tokens: Option<u64>,
     #[serde(deserialize_with = "crate::pending::required_option")]
-    pub output_tokens: Option<Number>,
+    pub output_tokens: Option<u64>,
     #[serde(deserialize_with = "crate::pending::required_option")]
-    pub cached_input_tokens: Option<Number>,
+    pub cached_input_tokens: Option<u64>,
     #[serde(deserialize_with = "crate::pending::required_option")]
-    pub cache_write_tokens: Option<Number>,
+    pub cache_write_tokens: Option<u64>,
     #[serde(deserialize_with = "crate::pending::required_option")]
-    pub reasoning_tokens: Option<Number>,
+    pub reasoning_tokens: Option<u64>,
     #[serde(deserialize_with = "crate::pending::required_option")]
-    pub context_window_tokens: Option<Number>,
+    pub context_window_tokens: Option<u64>,
     #[serde(deserialize_with = "crate::pending::required_option")]
-    pub context_percent: Option<Number>,
+    pub context_percent: Option<f64>,
     #[serde(deserialize_with = "crate::pending::required_option")]
     pub source: Option<String>,
 }
+impl ContextUsage {
+    /// Untrusted wire records enter through the checked integer boundary.
+    pub fn from_json(raw: &[u8]) -> Result<Self, provenant_records::checked_json::DecodeError> {
+        provenant_records::checked_json::from_slice(raw)?;
+        Ok(serde_json::from_slice(raw)?)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ModelUsage {
     #[serde(deserialize_with = "crate::pending::required_option")]
@@ -145,6 +153,20 @@ pub struct ObserverSummary {
 mod tests {
     use super::*;
     use serde_json::json;
+    #[test]
+    fn token_fields_refuse_negative_and_fractional_usage() {
+        let raw = r#"{"context_tokens":null,"input_tokens":TOKEN,"output_tokens":null,"cached_input_tokens":null,"cache_write_tokens":null,"reasoning_tokens":null,"context_window_tokens":null,"context_percent":null,"source":null}"#;
+        for token in ["-1", "1.5", "true"] {
+            assert!(serde_json::from_str::<ContextUsage>(&raw.replace("TOKEN", token)).is_err());
+        }
+    }
+
+    #[test]
+    fn context_integer_overflow_is_typed_before_serde_can_round() {
+        let raw = br#"{"input_tokens":1180591620717411303424}"#;
+        assert!(matches!(ContextUsage::from_json(raw), Err(provenant_records::checked_json::DecodeError::NumberOutOfRange(_))));
+    }
+
     #[test]
     fn real_observer_summaries_round_trip_without_invented_wire_tags() {
         let mut cases = vec![];

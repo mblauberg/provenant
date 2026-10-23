@@ -1434,3 +1434,13 @@ then passed after repair. Extended JSON/native-path reader gaps remain partial.
 - Follow-up: domain overlay owners supply equivalent typed matchers and retained
   policy differentials, or agree an exact compatibility adapter, before this
   unit is declared complete. `run_cli` is outside this assigned source unit.
+
+## RP-WF2-005: observer token integer boundary (improvement)
+
+`context_usage._int` emits non-negative Python ints without a size limit.
+Workflow `ContextUsage::from_json` checks every integer with the shared records
+codec and returns typed `NumberOutOfRange` above u64 (including
+1180591620717411303424), rather than rounding through f64. Token fields are
+`Option<u64>`; negative, bool and fractional retained tokens are rejected because
+Python never emits them. Only `context_percent` is floating point. This follows
+PORTING.md v4 R4; the Python source remains unchanged.
