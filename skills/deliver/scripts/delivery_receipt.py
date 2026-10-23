@@ -420,6 +420,7 @@ def command_init(args: argparse.Namespace) -> dict[str, Any]:
         "risk_tier": declared,
         "initial_risk_tier": declared,
         "chair_family": args.chair_family,
+        "writer_model": args.writer_model,
         "risk_assessment": assessment,
         "risk_override": override,
         "authority": authority,

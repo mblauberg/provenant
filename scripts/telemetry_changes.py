@@ -310,8 +310,11 @@ def render_compare(telemetry, report):
 
 def attention(db, since):
     """Attention proxies already in the ledger; OTLP rows appear only when the collector ran."""
-    counts = dict(db.execute("SELECT kind, COUNT(*) FROM events WHERE ts >= ? AND kind IN "
-                             "('session.start','otel.user_prompt','otel.tool_decision') GROUP BY kind", (since,)))
+    counts = Counter()
+    for kind, count in db.execute("SELECT kind, COUNT(*) FROM events WHERE ts >= ? AND kind IN "
+                                  "('session.start','otel.user_prompt','otel.tool_decision',"
+                                  "'otel.codex.user_prompt','otel.codex.tool_decision') GROUP BY kind", (since,)):
+        counts[kind.replace('otel.codex.', 'otel.')] += count
     active = {}
     for row in db.execute("SELECT session, attrs FROM events WHERE kind='otel.metric' AND ts >= ?", (since,)):
         attrs = json.loads(row['attrs'])

@@ -18,6 +18,10 @@ from the gates the receipt records: `intent.approval`, `design.status`,
 `human_gates.release` and `observation.status`. Each gate demands its own evidence; none of them
 certifies an ordering the writer could not prove.
 
+`writer_model` is an optional model identifier for the implementation writer.
+Supply it to `delivery_receipt.py init --writer-model` only when the resolved
+model is known; telemetry carries it into structured delivery stats.
+
 ## Acceptance basis
 
 The optional schema-v1 `delivery_acceptance` object has exactly `basis` and
