@@ -2,6 +2,7 @@
 #![forbid(unsafe_code)]
 
 pub mod changes;
+pub mod context;
 pub mod costs;
 pub mod delivery;
 #[cfg(test)]
