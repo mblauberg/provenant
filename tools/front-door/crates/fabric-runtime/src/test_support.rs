@@ -115,12 +115,22 @@ registerHooks({resolve(specifier, context, next) {
         ])
         .args(args)
         .current_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../../runtime/fabric"));
-    Some(serde_json::from_slice(&output(&mut command)?).unwrap())
+    Some(
+        serde_json::from_slice(
+            &output(&mut command).expect("oracle interpreter disappeared after availability check"),
+        )
+        .unwrap(),
+    )
 }
 
 pub(crate) fn python(script: &str, args: &[String]) -> Option<Value> {
     let python = interpreter("PROVENANT_PORT_PYTHON", "python3", 312)?;
     let mut command = Command::new(python);
     command.args(["-I", "-c", script]).args(args);
-    Some(serde_json::from_slice(&output(&mut command)?).unwrap())
+    Some(
+        serde_json::from_slice(
+            &output(&mut command).expect("oracle interpreter disappeared after availability check"),
+        )
+        .unwrap(),
+    )
 }

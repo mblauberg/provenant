@@ -104,3 +104,7 @@ Verified after the main integration: 81 unit tests passed, zero failed, and
 zero doc tests. Node and Python oracles ran in required-differential mode.
 Fmt, clippy and both R2 layering checks passed. The retained unsafe-integer
 fixture deliberately proves the documented mismatch; it is not parity evidence.
+
+Native adversarial repair re-review is clean for this stated partial scope.
+The reviewer did not reproduce the test run because its shared Cargo cache
+was read-only; the required writer run used the isolated cache above.
