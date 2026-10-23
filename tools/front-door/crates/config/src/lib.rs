@@ -4,6 +4,7 @@
 pub mod codex;
 pub mod command;
 
+pub mod workflows;
 mod pending;
 
 #[derive(Debug, thiserror::Error)]
