@@ -1,5 +1,5 @@
-//! Delivery and review validators, session, tracker and writing tools.
-// Rewrite pending: remove when this crate is rewritten.
+//! Pure workflow policy and minimal receipt constructors.
+// Rewrite pending: E/G retain the subprocess oracle until their own steps.
 #![allow(
     clippy::collapsible_if,
     clippy::disallowed_methods,
@@ -8,6 +8,10 @@
 #![forbid(unsafe_code)]
 
 pub mod compact_reinject;
+pub mod receipt;
+pub mod review;
+pub mod risk;
 pub mod run_gates;
+
 #[cfg(test)]
 mod test_support;

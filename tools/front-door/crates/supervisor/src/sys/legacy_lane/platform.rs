@@ -6,62 +6,27 @@ use std::os::fd::{AsRawFd, FromRawFd, RawFd};
 use std::sync::atomic::{AtomicI32, Ordering};
 
 pub fn nonblocking(fd: RawFd) -> io::Result<()> {
-    unsafe {
-        let flags = libc::fcntl(fd, libc::F_GETFL);
-        if flags < 0 || libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) < 0 {
-            Err(io::Error::last_os_error())
-        } else {
-            Ok(())
-        }
+    // SAFETY: `fd` is borrowed from a live owner; F_GETFL retains no pointer.
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    if flags < 0 {
+        return Err(io::Error::last_os_error());
     }
-}
-fn reset_child() -> io::Result<()> {
-    unsafe {
-        let mut mask: libc::sigset_t = std::mem::zeroed();
-        libc::sigfillset(&mut mask);
-        if libc::sigprocmask(libc::SIG_SETMASK, &mask, std::ptr::null_mut()) != 0 {
-            return Err(io::Error::last_os_error());
-        }
-        for sig in 1..=64 {
-            if sig != libc::SIGKILL && sig != libc::SIGSTOP {
-                libc::signal(sig, libc::SIG_DFL);
-            }
-        }
-        if libc::setsid() < 0 {
-            return Err(io::Error::last_os_error());
-        }
-        libc::sigemptyset(&mut mask);
-        if libc::sigprocmask(libc::SIG_SETMASK, &mask, std::ptr::null_mut()) != 0 {
-            return Err(io::Error::last_os_error());
-        }
+    // SAFETY: `fd` remains owned by its caller; F_SETFL changes only its flags.
+    if unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
+        Err(io::Error::last_os_error())
+    } else {
         Ok(())
     }
 }
-pub fn prepare_child(command: &mut std::process::Command) -> io::Result<()> {
-    use std::os::unix::process::CommandExt;
-    let directory = if cfg!(target_os = "linux") {
-        "/proc/self/fd"
-    } else {
-        "/dev/fd"
-    };
-    // Allocate/inspect only in the parent. Rust's own later-created exec-error
-    // pipe and stdio pipes already carry CLOEXEC. Inherited custody never execs.
-    let inherited: Vec<i32> = std::fs::read_dir(directory)?
-        .filter_map(|e| e.ok()?.file_name().to_str()?.parse().ok())
-        .filter(|fd| *fd > 2)
+pub fn prepare_child(
+    command: &mut std::process::Command,
+    env: &BTreeMap<String, String>,
+) -> io::Result<()> {
+    let env: Vec<_> = env
+        .iter()
+        .map(|(key, value)| (key.into(), value.into()))
         .collect();
-    unsafe {
-        command.pre_exec(move || {
-            for fd in &inherited {
-                let flags = libc::fcntl(*fd, libc::F_GETFD);
-                if flags >= 0 && libc::fcntl(*fd, libc::F_SETFD, flags | libc::FD_CLOEXEC) < 0 {
-                    return Err(io::Error::last_os_error());
-                }
-            }
-            reset_child()
-        });
-    }
-    Ok(())
+    super::super::child::configure_command(command, &[], Some(&env), true)
 }
 const SIGNALS: [i32; 4] = [libc::SIGCHLD, libc::SIGTERM, libc::SIGINT, libc::SIGHUP];
 static SIGNAL_FD: AtomicI32 = AtomicI32::new(-1);
@@ -69,15 +34,19 @@ extern "C" fn signal_event(sig: i32) {
     let fd = SIGNAL_FD.load(Ordering::Relaxed);
     if fd >= 0 {
         let byte = sig as u8;
-        unsafe {
-            #[cfg(target_os = "macos")]
-            let errno = libc::__error();
-            #[cfg(target_os = "linux")]
-            let errno = libc::__errno_location();
-            let saved = *errno;
-            libc::write(fd, (&byte as *const u8).cast(), 1);
-            *errno = saved;
-        }
+        #[cfg(target_os = "macos")]
+        // SAFETY: __error returns the current thread's live errno slot.
+        let errno = unsafe { libc::__error() };
+        #[cfg(target_os = "linux")]
+        // SAFETY: __errno_location returns the current thread's live errno slot.
+        let errno = unsafe { libc::__errno_location() };
+        // SAFETY: `errno` points to the current thread's live errno slot.
+        let saved = unsafe { *errno };
+        // SAFETY: the byte is live for this one-byte async-signal-safe write;
+        // the registered self-pipe fd is process-owned and nonblocking.
+        unsafe { libc::write(fd, (&byte as *const u8).cast(), 1) };
+        // SAFETY: `errno` still points to this thread's live errno slot.
+        unsafe { *errno = saved };
     }
 }
 pub struct Reactor {
@@ -90,78 +59,110 @@ pub struct Reactor {
 }
 impl Reactor {
     pub fn new() -> io::Result<Self> {
-        unsafe {
-            // Inherited SIG_IGN would auto-reap and release the group identity.
-            libc::signal(libc::SIGCHLD, libc::SIG_DFL);
-            libc::signal(libc::SIGPIPE, libc::SIG_IGN);
-            let mut fds = [0; 2];
-            if libc::pipe(fds.as_mut_ptr()) != 0 {
+        // Inherited SIG_IGN would auto-reap and release the group identity.
+        // SAFETY: signal takes scalar values and changes this supervisor's
+        // process disposition before its lane spawns children.
+        unsafe { libc::signal(libc::SIGCHLD, libc::SIG_DFL) };
+        // SAFETY: signal takes scalar values and installs the intended SIGPIPE
+        // disposition for this supervisor process.
+        unsafe { libc::signal(libc::SIGPIPE, libc::SIG_IGN) };
+        let mut fds = [0; 2];
+        // SAFETY: `fds` points to two writable integers; pipe initialises both
+        // entries on success and retains no pointer.
+        if unsafe { libc::pipe(fds.as_mut_ptr()) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: pipe returned this unique read descriptor; File assumes its
+        // ownership exactly once.
+        let read = unsafe { File::from_raw_fd(fds[0]) };
+        // SAFETY: pipe returned this unique write descriptor; File assumes its
+        // ownership exactly once.
+        let write = unsafe { File::from_raw_fd(fds[1]) };
+        for fd in fds {
+            // SAFETY: `fd` is one of the live descriptors just transferred to
+            // these Files; F_SETFD retains ownership.
+            let _ = unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) };
+            nonblocking(fd)?;
+        }
+        SIGNAL_FD.store(write.as_raw_fd(), Ordering::Relaxed);
+        let mut old = Vec::new();
+        for sig in SIGNALS {
+            // SAFETY: zero is a valid initial representation for sigaction;
+            // sigemptyset below initialises its mask before use.
+            let mut action: libc::sigaction = unsafe { std::mem::zeroed() };
+            action.sa_sigaction = signal_event as *const () as usize;
+            // SAFETY: `action.sa_mask` is live writable storage for sigemptyset.
+            unsafe { libc::sigemptyset(&mut action.sa_mask) };
+            action.sa_flags = libc::SA_RESTART;
+            // SAFETY: zero is a valid output buffer for sigaction to fill.
+            let mut previous: libc::sigaction = unsafe { std::mem::zeroed() };
+            // SAFETY: both action records are live; the kernel copies the new
+            // action and writes the previous one without retaining pointers.
+            if unsafe { libc::sigaction(sig, &action, &mut previous) } != 0 {
                 return Err(io::Error::last_os_error());
             }
-            let read = File::from_raw_fd(fds[0]);
-            let write = File::from_raw_fd(fds[1]);
-            for fd in fds {
-                libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC);
-                nonblocking(fd)?;
-            }
-            SIGNAL_FD.store(write.as_raw_fd(), Ordering::Relaxed);
-            let mut old = Vec::new();
-            for sig in SIGNALS {
-                let mut action: libc::sigaction = std::mem::zeroed();
-                action.sa_sigaction = signal_event as *const () as usize;
-                libc::sigemptyset(&mut action.sa_mask);
-                action.sa_flags = libc::SA_RESTART;
-                let mut previous = std::mem::zeroed();
-                if libc::sigaction(sig, &action, &mut previous) != 0 {
-                    return Err(io::Error::last_os_error());
-                }
-                old.push((sig, previous));
-            }
-            let mut mask: libc::sigset_t = std::mem::zeroed();
-            libc::sigemptyset(&mut mask);
-            for sig in SIGNALS {
-                libc::sigaddset(&mut mask, sig);
-            }
-            let mut old_mask = std::mem::zeroed();
-            libc::sigprocmask(libc::SIG_UNBLOCK, &mask, &mut old_mask);
-            #[cfg(target_os = "macos")]
-            let queue = {
-                let fd = libc::kqueue();
-                if fd < 0 {
-                    return Err(io::Error::last_os_error());
-                }
-                let queue = File::from_raw_fd(fd);
-                libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC);
-                // Register SIGCHLD before any spawn. The pipe also preserves signals
-                // delivered while a different kernel operation is in progress.
-                for sig in SIGNALS {
-                    let ev = libc::kevent {
-                        ident: sig as usize,
-                        filter: libc::EVFILT_SIGNAL,
-                        flags: libc::EV_ADD,
-                        fflags: 0,
-                        data: 0,
-                        udata: std::ptr::null_mut(),
-                    };
-                    if libc::kevent(fd, &ev, 1, std::ptr::null_mut(), 0, std::ptr::null()) < 0 {
-                        return Err(io::Error::last_os_error());
-                    }
-                }
-                queue
-            };
-            Ok(Self {
-                read,
-                _write: write,
-                old,
-                old_mask,
-                #[cfg(target_os = "macos")]
-                queue,
-            })
+            old.push((sig, previous));
         }
+        // SAFETY: zero is a valid initial representation; sigemptyset below
+        // initialises this live mask before it is passed to libc.
+        let mut mask: libc::sigset_t = unsafe { std::mem::zeroed() };
+        // SAFETY: `mask` is live writable storage for sigemptyset.
+        unsafe { libc::sigemptyset(&mut mask) };
+        for sig in SIGNALS {
+            // SAFETY: `mask` is initialized live storage and `sig` is a signal
+            // number from the fixed supported set.
+            unsafe { libc::sigaddset(&mut mask, sig) };
+        }
+        // SAFETY: mask is initialized and old_mask is a live output record;
+        // sigprocmask retains neither pointer.
+        let mut old_mask: libc::sigset_t = unsafe { std::mem::zeroed() };
+        // SAFETY: the initialized mask updates this process's thread mask and
+        // writes its prior value into live `old_mask` storage.
+        unsafe { libc::sigprocmask(libc::SIG_UNBLOCK, &mask, &mut old_mask) };
+        #[cfg(target_os = "macos")]
+        let queue = {
+            // SAFETY: kqueue takes no pointers and returns a new owned fd.
+            let fd = unsafe { libc::kqueue() };
+            if fd < 0 {
+                return Err(io::Error::last_os_error());
+            }
+            // SAFETY: `fd` is the unique descriptor just returned by kqueue.
+            let queue = unsafe { File::from_raw_fd(fd) };
+            // SAFETY: `fd` remains live in `queue`; F_SETFD retains ownership.
+            let _ = unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) };
+            // Register SIGCHLD before any spawn. The pipe also preserves signals
+            // delivered while a different kernel operation is in progress.
+            for sig in SIGNALS {
+                let ev = libc::kevent {
+                    ident: sig as usize,
+                    filter: libc::EVFILT_SIGNAL,
+                    flags: libc::EV_ADD,
+                    fflags: 0,
+                    data: 0,
+                    udata: std::ptr::null_mut(),
+                };
+                // SAFETY: `ev` is a live initialized change record; the queue
+                // copies it and no output storage is requested.
+                if unsafe { libc::kevent(fd, &ev, 1, std::ptr::null_mut(), 0, std::ptr::null()) }
+                    < 0
+                {
+                    return Err(io::Error::last_os_error());
+                }
+            }
+            queue
+        };
+        Ok(Self {
+            read,
+            _write: write,
+            old,
+            old_mask,
+            #[cfg(target_os = "macos")]
+            queue,
+        })
     }
     pub fn watch_child(&self, pid: i32) -> io::Result<()> {
         #[cfg(target_os = "macos")]
-        unsafe {
+        {
             let ev = libc::kevent {
                 ident: pid as usize,
                 filter: libc::EVFILT_PROC,
@@ -170,14 +171,18 @@ impl Reactor {
                 data: 0,
                 udata: std::ptr::null_mut(),
             };
-            if libc::kevent(
-                self.queue.as_raw_fd(),
-                &ev,
-                1,
-                std::ptr::null_mut(),
-                0,
-                std::ptr::null(),
-            ) < 0
+            // SAFETY: `ev` is a live initialized change record; the queue
+            // copies it and no output buffer is supplied.
+            if unsafe {
+                libc::kevent(
+                    self.queue.as_raw_fd(),
+                    &ev,
+                    1,
+                    std::ptr::null_mut(),
+                    0,
+                    std::ptr::null(),
+                )
+            } < 0
             {
                 let e = io::Error::last_os_error();
                 if e.raw_os_error() != Some(libc::ESRCH) {
@@ -191,7 +196,7 @@ impl Reactor {
     }
     pub fn wait(&self, fds: &[(RawFd, bool)], millis: i32) -> io::Result<Vec<i32>> {
         #[cfg(target_os = "macos")]
-        unsafe {
+        {
             let mut changes = Vec::new();
             for (fd, write) in std::iter::once(&(self.read.as_raw_fd(), false)).chain(fds.iter()) {
                 changes.push(libc::kevent {
@@ -207,25 +212,31 @@ impl Reactor {
                     udata: std::ptr::null_mut(),
                 });
             }
-            let mut events: [libc::kevent; 32] = std::mem::zeroed();
+            // SAFETY: zero is a valid empty event record; kevent writes only
+            // the initialized entries reported by its return value.
+            let mut events: [libc::kevent; 32] = unsafe { std::mem::zeroed() };
             let timeout = libc::timespec {
                 tv_sec: (millis / 1000) as _,
                 tv_nsec: ((millis % 1000) * 1_000_000) as _,
             };
-            let rc = libc::kevent(
-                self.queue.as_raw_fd(),
-                changes.as_ptr(),
-                changes.len() as i32,
-                events.as_mut_ptr(),
-                32,
-                &timeout,
-            );
+            // SAFETY: changes and events remain live for the call, lengths
+            // match their arrays, and `timeout` is a valid relative duration.
+            let rc = unsafe {
+                libc::kevent(
+                    self.queue.as_raw_fd(),
+                    changes.as_ptr(),
+                    changes.len() as i32,
+                    events.as_mut_ptr(),
+                    32,
+                    &timeout,
+                )
+            };
             if rc < 0 && io::Error::last_os_error().kind() != io::ErrorKind::Interrupted {
                 return Err(io::Error::last_os_error());
             }
         }
         #[cfg(target_os = "linux")]
-        unsafe {
+        {
             let mut pollfds = vec![libc::pollfd {
                 fd: self.read.as_raw_fd(),
                 events: libc::POLLIN,
@@ -236,7 +247,9 @@ impl Reactor {
                 events: if *write { libc::POLLOUT } else { libc::POLLIN },
                 revents: 0,
             }));
-            let rc = libc::poll(pollfds.as_mut_ptr(), pollfds.len() as _, millis);
+            // SAFETY: pollfds is live writable storage for the supplied count;
+            // it contains borrowed descriptors and poll retains no pointers.
+            let rc = unsafe { libc::poll(pollfds.as_mut_ptr(), pollfds.len() as _, millis) };
             if rc < 0 && io::Error::last_os_error().kind() != io::ErrorKind::Interrupted {
                 return Err(io::Error::last_os_error());
             }
@@ -244,6 +257,8 @@ impl Reactor {
         let mut signals = Vec::new();
         let mut buf = [0u8; 256];
         loop {
+            // SAFETY: `buf` is live writable storage and `self.read` owns a
+            // valid pipe descriptor for the duration of the call.
             let n =
                 unsafe { libc::read(self.read.as_raw_fd(), buf.as_mut_ptr().cast(), buf.len()) };
             if n <= 0 {
@@ -256,13 +271,15 @@ impl Reactor {
 }
 impl Drop for Reactor {
     fn drop(&mut self) {
-        unsafe {
-            SIGNAL_FD.store(-1, Ordering::Relaxed);
-            for (sig, old) in &self.old {
-                libc::sigaction(*sig, old, std::ptr::null_mut());
-            }
-            libc::sigprocmask(libc::SIG_SETMASK, &self.old_mask, std::ptr::null_mut());
+        SIGNAL_FD.store(-1, Ordering::Relaxed);
+        for (sig, old) in &self.old {
+            // SAFETY: `old` is the live disposition saved for this signal;
+            // sigaction copies it and writes no previous action.
+            unsafe { libc::sigaction(*sig, old, std::ptr::null_mut()) };
         }
+        // SAFETY: old_mask is the live mask saved by Reactor::new; the kernel
+        // copies it and no output pointer is requested.
+        unsafe { libc::sigprocmask(libc::SIG_SETMASK, &self.old_mask, std::ptr::null_mut()) };
     }
 }
 
@@ -293,6 +310,7 @@ pub fn process(pid: i32) -> Option<Row> {
             .ok()?
             .lines()
             .find_map(|l| l.strip_prefix("btime ").and_then(|s| s.parse::<u64>().ok()))?;
+        // SAFETY: sysconf accepts this scalar selector and retains no pointer.
         let ticks = unsafe { libc::sysconf(libc::_SC_CLK_TCK) } as u64;
         (ticks > 0).then_some((boot, ticks))
     }))?;
@@ -343,6 +361,8 @@ unsafe extern "C" {
 pub fn process(pid: i32) -> Option<Row> {
     let mut info = BsdInfo::default();
     let size = std::mem::size_of::<BsdInfo>() as i32;
+    // SAFETY: `info` is live writable storage of the documented BsdInfo ABI
+    // size; proc_pidinfo retains no pointer after returning.
     if unsafe { proc_pidinfo(pid, 3, 0, (&mut info as *mut BsdInfo).cast(), size) } != size {
         return None;
     }
@@ -353,6 +373,8 @@ pub fn process(pid: i32) -> Option<Row> {
     };
     let command = String::from_utf8_lossy(bytes.split(|b| *b == 0).next()?).into_owned();
     let mut task = [0u64; 12];
+    // SAFETY: `task` is aligned writable storage and its byte size is passed;
+    // proc_pidinfo retains no pointer and the count bounds later reads.
     let count = unsafe {
         proc_pidinfo(
             pid,
@@ -424,13 +446,17 @@ pub fn snapshot(root: i32, known: impl Iterator<Item = i32>) -> io::Result<BTree
     #[cfg(target_os = "macos")]
     let _ = (root, known);
     #[cfg(target_os = "macos")]
-    let pids: Vec<i32> = unsafe {
-        let count = proc_listallpids(std::ptr::null_mut(), 0);
+    let pids: Vec<i32> = {
+        // SAFETY: the API permits a null buffer with size zero to query the
+        // current process count and retains no pointer.
+        let count = unsafe { proc_listallpids(std::ptr::null_mut(), 0) };
         if count <= 0 {
             return Err(io::Error::last_os_error());
         }
         let mut pids = vec![0i32; count as usize + 128];
-        let count = proc_listallpids(pids.as_mut_ptr().cast(), (pids.len() * 4) as i32);
+        // SAFETY: pids is live writable i32 storage with the byte capacity
+        // supplied; proc_listallpids retains no pointer.
+        let count = unsafe { proc_listallpids(pids.as_mut_ptr().cast(), (pids.len() * 4) as i32) };
         if count <= 0 {
             return Err(io::Error::last_os_error());
         }
@@ -484,7 +510,7 @@ pub fn has_file(pid: i32, file: &File) -> bool {
         })
     }
     #[cfg(target_os = "macos")]
-    unsafe {
+    {
         unsafe extern "C" {
             fn proc_pidfdinfo(
                 pid: i32,
@@ -496,24 +522,32 @@ pub fn has_file(pid: i32, file: &File) -> bool {
         }
         // proc_fdinfo is two 32-bit fields; vnode_fdinfo starts with the
         // 24-byte proc_fileinfo, then vinfo_stat.dev and .ino at 0 and 8.
-        let size = proc_pidinfo(pid, 1, 0, std::ptr::null_mut(), 0);
+        // SAFETY: proc_pidinfo permits this null-buffer size query and keeps
+        // no pointer after returning.
+        let size = unsafe { proc_pidinfo(pid, 1, 0, std::ptr::null_mut(), 0) };
         if size <= 0 || size > 1024 * 1024 {
             return false;
         }
         let mut fds = vec![0i32; (size as usize + 64) / 4];
-        let n = proc_pidinfo(pid, 1, 0, fds.as_mut_ptr().cast(), (fds.len() * 4) as i32);
-        for pair in fds[..(n.max(0) as usize / 4)].chunks_exact(2) {
+        // SAFETY: fds is live writable i32 storage with its byte capacity
+        // supplied; the result count bounds the following slice.
+        let n = unsafe { proc_pidinfo(pid, 1, 0, fds.as_mut_ptr().cast(), (fds.len() * 4) as i32) };
+        for pair in fds[..(n.max(0) as usize / 4)].as_chunks::<2>().0 {
             if pair[1] != 1 {
                 continue;
             }
             let mut buf = [0u64; 32];
-            let n = proc_pidfdinfo(
-                pid,
-                pair[0],
-                1,
-                buf.as_mut_ptr().cast(),
-                std::mem::size_of_val(&buf) as i32,
-            );
+            // SAFETY: buf is aligned live storage large enough for the
+            // proc_fileinfo/vnode fields read below; the call retains no pointer.
+            let n = unsafe {
+                proc_pidfdinfo(
+                    pid,
+                    pair[0],
+                    1,
+                    buf.as_mut_ptr().cast(),
+                    std::mem::size_of_val(&buf) as i32,
+                )
+            };
             // XNU exports fileglob.fg_flag as proc_fileinfo.fi_openflags.
             // FWASLOCKED (0x4000) is set on a successful flock. Custody is
             // monotonic: neither owner nor supervisor may call LOCK_UN; a
@@ -535,67 +569,79 @@ pub fn has_file(pid: i32, file: &File) -> bool {
 /// A single writer owns stdout. Check the kernel's free pipe space before a
 /// nonblocking write larger than PIPE_BUF, so backpressure drops whole events.
 pub fn write_event(fd: RawFd, line: &[u8]) -> usize {
-    unsafe {
-        let mut stat: libc::stat = std::mem::zeroed();
-        if libc::fstat(fd, &mut stat) != 0 {
+    // SAFETY: zero is a valid output buffer representation for fstat to fill.
+    let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+    // SAFETY: stat is live writable storage; fd is borrowed for this call and
+    // fstat retains no pointer.
+    if unsafe { libc::fstat(fd, &mut stat) } != 0 {
+        return 0;
+    }
+    if stat.st_mode & libc::S_IFMT == libc::S_IFIFO {
+        // SAFETY: fpathconf accepts this scalar query for the borrowed fd.
+        let atomic = unsafe { libc::fpathconf(fd, libc::_PC_PIPE_BUF) };
+        if atomic <= 0 {
             return 0;
         }
-        if stat.st_mode & libc::S_IFMT == libc::S_IFIFO {
-            let atomic = libc::fpathconf(fd, libc::_PC_PIPE_BUF);
-            if atomic <= 0 {
-                return 0;
-            }
-            if line.len() > atomic as usize {
-                #[cfg(target_os = "linux")]
-                {
-                    let capacity = libc::fcntl(fd, libc::F_GETPIPE_SZ);
-                    let mut used = 0i32;
-                    if capacity < 0
-                        || libc::ioctl(fd, libc::FIONREAD, &mut used) != 0
-                        || (capacity.saturating_sub(used) as usize) < line.len()
-                    {
-                        return 0;
-                    }
+        if line.len() > atomic as usize {
+            #[cfg(target_os = "linux")]
+            {
+                // SAFETY: fcntl reads flags from the borrowed descriptor and
+                // does not retain pointers.
+                let capacity = unsafe { libc::fcntl(fd, libc::F_GETPIPE_SZ) };
+                if capacity < 0 {
+                    return 0;
                 }
-                #[cfg(target_os = "macos")]
-                {
-                    let queue = libc::kqueue();
-                    if queue < 0 {
-                        return 0;
-                    }
-                    let change = libc::kevent {
-                        ident: fd as usize,
-                        filter: libc::EVFILT_WRITE,
-                        flags: libc::EV_ADD | libc::EV_ONESHOT,
-                        fflags: 0,
-                        data: 0,
-                        udata: std::ptr::null_mut(),
-                    };
-                    let mut event: libc::kevent = std::mem::zeroed();
-                    let zero = libc::timespec {
-                        tv_sec: 0,
-                        tv_nsec: 0,
-                    };
-                    let n = libc::kevent(queue, &change, 1, &mut event, 1, &zero);
-                    libc::close(queue);
-                    if n != 1
-                        || event.flags & libc::EV_ERROR != 0
-                        || event.data < line.len() as isize
-                    {
-                        return 0;
-                    }
+                let mut used = 0i32;
+                // SAFETY: used is live writable integer storage for FIONREAD;
+                // ioctl retains no pointer and fd remains borrowed.
+                let queried = unsafe { libc::ioctl(fd, libc::FIONREAD, &mut used) };
+                if queried != 0 || (capacity.saturating_sub(used) as usize) < line.len() {
+                    return 0;
+                }
+            }
+            #[cfg(target_os = "macos")]
+            {
+                // SAFETY: kqueue takes no pointers and returns a new owned fd.
+                let queue = unsafe { libc::kqueue() };
+                if queue < 0 {
+                    return 0;
+                }
+                let change = libc::kevent {
+                    ident: fd as usize,
+                    filter: libc::EVFILT_WRITE,
+                    flags: libc::EV_ADD | libc::EV_ONESHOT,
+                    fflags: 0,
+                    data: 0,
+                    udata: std::ptr::null_mut(),
+                };
+                // SAFETY: zero is a valid empty event output record.
+                let mut event: libc::kevent = unsafe { std::mem::zeroed() };
+                let zero = libc::timespec {
+                    tv_sec: 0,
+                    tv_nsec: 0,
+                };
+                // SAFETY: change, event and timeout are live records for the
+                // call; queue is owned here and the watched fd is borrowed.
+                let n = unsafe { libc::kevent(queue, &change, 1, &mut event, 1, &zero) };
+                // SAFETY: this block owns the fresh kqueue descriptor and no
+                // other owner has been created for it.
+                let _ = unsafe { libc::close(queue) };
+                if n != 1 || event.flags & libc::EV_ERROR != 0 || event.data < line.len() as isize {
+                    return 0;
                 }
             }
         }
-        // FIFO writes have enough room, or are <= PIPE_BUF (all-or-EAGAIN).
-        // Other descriptors are best effort; regular files do not backpressure.
-        loop {
-            let n = libc::write(fd, line.as_ptr().cast(), line.len());
-            if n < 0 && io::Error::last_os_error().kind() == io::ErrorKind::Interrupted {
-                continue;
-            }
-            return n.max(0) as usize;
+    }
+    // FIFO writes have enough room, or are <= PIPE_BUF (all-or-EAGAIN).
+    // Other descriptors are best effort; regular files do not backpressure.
+    loop {
+        // SAFETY: line is live readable storage for its length and fd is
+        // borrowed for this write; write retains no pointer.
+        let n = unsafe { libc::write(fd, line.as_ptr().cast(), line.len()) };
+        if n < 0 && io::Error::last_os_error().kind() == io::ErrorKind::Interrupted {
+            continue;
         }
+        return n.max(0) as usize;
     }
 }
 /// At most one incomplete event is retained. A later event can never be
@@ -640,9 +686,8 @@ impl EventOutput {
                 revents: 0,
             };
             let millis = budget.saturating_sub(started.elapsed()).as_millis().min(20) as i32;
-            unsafe {
-                libc::poll(&mut fd, 1, millis);
-            }
+            // SAFETY: fd is a live pollfd record and poll retains no pointer.
+            unsafe { libc::poll(&mut fd, 1, millis) };
         }
     }
     pub fn flush(&mut self) {
@@ -650,6 +695,8 @@ impl EventOutput {
             if self.pending.is_empty() || self.broken {
                 return;
             }
+            // SAFETY: the selected pending slice is live readable storage for
+            // this write, and the output descriptor remains borrowed.
             let n = unsafe {
                 libc::write(
                     self.fd,
@@ -690,6 +737,8 @@ mod tests {
         use std::os::unix::net::UnixStream;
         let (writer, mut reader) = UnixStream::pair().unwrap();
         let size = 1024i32;
+        // SAFETY: `size` is live integer storage of the SO_SNDBUF option size;
+        // writer owns the descriptor throughout the call.
         unsafe {
             assert_eq!(
                 libc::setsockopt(
@@ -720,35 +769,46 @@ mod tests {
     }
     #[test]
     fn backpressure_drops_a_large_event_without_partial_json() {
-        unsafe {
-            let mut fds = [0; 2];
-            assert_eq!(libc::pipe(fds.as_mut_ptr()), 0);
-            let read = File::from_raw_fd(fds[0]);
-            let write = File::from_raw_fd(fds[1]);
-            nonblocking(write.as_raw_fd()).unwrap();
-            nonblocking(read.as_raw_fd()).unwrap();
-            let filler = [b'x'; 512];
-            while libc::write(write.as_raw_fd(), filler.as_ptr().cast(), filler.len()) > 0 {}
-            let mut discard = [0u8; 512];
-            assert_eq!(
-                libc::read(read.as_raw_fd(), discard.as_mut_ptr().cast(), 512),
-                512
-            );
-            let record = format!(
-                "{{\"event\":\"exited\",\"data\":\"{}\"}}\n",
-                "z".repeat(10000)
-            );
-            write_event(write.as_raw_fd(), record.as_bytes());
-            let mut received = Vec::new();
-            let mut buf = [0u8; 65536];
-            loop {
-                let n = libc::read(read.as_raw_fd(), buf.as_mut_ptr().cast(), buf.len());
-                if n <= 0 {
-                    break;
-                }
-                received.extend_from_slice(&buf[..n as usize]);
+        let mut fds = [0; 2];
+        // SAFETY: fds is live writable storage for pipe's two returned ints.
+        assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
+        // SAFETY: pipe returned this unique read descriptor; File assumes it
+        // exactly once and closes it on drop.
+        let read = unsafe { File::from_raw_fd(fds[0]) };
+        // SAFETY: pipe returned this unique write descriptor; File assumes it
+        // exactly once and closes it on drop.
+        let write = unsafe { File::from_raw_fd(fds[1]) };
+        nonblocking(write.as_raw_fd()).unwrap();
+        nonblocking(read.as_raw_fd()).unwrap();
+        let filler = [b'x'; 512];
+        loop {
+            // SAFETY: filler is live readable storage and write owns the pipe
+            // descriptor for this call.
+            let count =
+                unsafe { libc::write(write.as_raw_fd(), filler.as_ptr().cast(), filler.len()) };
+            if count <= 0 {
+                break;
             }
-            assert!(received.iter().all(|b| *b == b'x'));
         }
+        let mut discard = [0u8; 512];
+        // SAFETY: discard is live writable storage and read owns the pipe fd.
+        let read_count = unsafe { libc::read(read.as_raw_fd(), discard.as_mut_ptr().cast(), 512) };
+        assert_eq!(read_count, 512);
+        let record = format!(
+            "{{\"event\":\"exited\",\"data\":\"{}\"}}\n",
+            "z".repeat(10000)
+        );
+        write_event(write.as_raw_fd(), record.as_bytes());
+        let mut received = Vec::new();
+        let mut buf = [0u8; 65536];
+        loop {
+            // SAFETY: buf is live writable storage and read owns the pipe fd.
+            let n = unsafe { libc::read(read.as_raw_fd(), buf.as_mut_ptr().cast(), buf.len()) };
+            if n <= 0 {
+                break;
+            }
+            received.extend_from_slice(&buf[..n as usize]);
+        }
+        assert!(received.iter().all(|b| *b == b'x'));
     }
 }

@@ -6,20 +6,30 @@ rust-version.workspace = true
 license.workspace = true
 publish = false
 
-[features]
-fault-injection = []
-test-fixtures = []
-
 [dependencies]
+provenant-core = { workspace = true }
+jiff = { workspace = true }
 serde_json = { workspace = true }
 libc = { workspace = true }
 serde = { workspace = true }
 thiserror = { workspace = true }
 
 [dev-dependencies]
+provenant-supervisor = { workspace = true, features = ["fixture"] }
 tempfile = { workspace = true }
 
-# Cargo does not support overriding one lint with lints.workspace = true.
+[features]
+fixture = []
+fault-injection = []
+test-fixtures = ["fixture"]
+
+[[test]]
+name = "process"
+path = "tests/process.rs"
+harness = false
+required-features = ["fixture"]
+
+# Cargo cannot override one lint with lints.workspace = true.
 # Mirror the workspace policy, lowering unsafe_code only so sys can allow it.
 [lints.rust]
 unsafe_code = "deny"
