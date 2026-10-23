@@ -62,3 +62,8 @@ lto = true
 codegen-units = 1
 panic = "unwind"
 strip = true
+
+# Stripping a proc-macro dylib (serde_derive, thiserror-impl) on macOS leaves a
+# malformed LINKEDIT that rustc cannot load (E0463). Strip only the binary.
+[profile.release.build-override]
+strip = false
