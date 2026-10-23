@@ -1,7 +1,43 @@
 //! Safe filesystem contract awaiting the supervisor syscall owner. No backend is shipped here.
+mod python_unicode;
 use std::ffi::{OsStr, OsString};
 use std::io::{self, Read, Seek, Write};
 use std::path::Path;
+
+// port: belongs in provenant-core
+pub(crate) fn python_repr(text: &str) -> String {
+    let quote = if text.contains('\'') && !text.contains('"') {
+        '"'
+    } else {
+        '\''
+    };
+    let mut result = String::from(quote);
+    for c in text.chars() {
+        match c {
+            '\\' => result.push_str("\\\\"),
+            '\n' => result.push_str("\\n"),
+            '\r' => result.push_str("\\r"),
+            '\t' => result.push_str("\\t"),
+            c if c == quote => {
+                result.push('\\');
+                result.push(c);
+            }
+            c if !python_unicode::printable(c) => {
+                let code = u32::from(c);
+                if code < 256 {
+                    result.push_str(&format!("\\x{code:02x}"));
+                } else if code <= 0xffff {
+                    result.push_str(&format!("\\u{code:04x}"));
+                } else {
+                    result.push_str(&format!("\\U{code:08x}"));
+                }
+            }
+            c => result.push(c),
+        }
+    }
+    result.push(quote);
+    result
+}
 
 // port: belongs in provenant-supervisor
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

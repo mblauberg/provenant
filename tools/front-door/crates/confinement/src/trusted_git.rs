@@ -243,11 +243,9 @@ fn check_ref_format(reference: &str) -> Result<bool, GitLocationError> {
 fn registrations(common: &Path) -> Result<Vec<PathBuf>, GitLocationError> {
     let path = common.join("worktrees");
     match fs::read_dir(&path) {
-        Ok(entries) => entries
-            .map(|entry| entry.map(|e| e.path()).map_err(|e| io_error(&path, e)))
-            .collect(),
-        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(Vec::new()),
-        Err(e) => Err(io_error(&path, e)),
+        Ok(entries) => Ok(entries.filter_map(Result::ok).map(|e| e.path()).collect()),
+        // Python's Path.glob yields no matches when worktrees is absent, unreadable or not a dir.
+        Err(_) => Ok(Vec::new()),
     }
 }
 
@@ -448,6 +446,39 @@ print(json.dumps({'record': loc.record(), 'ref': ref, 'dirs': list(map(str, dirs
             actual,
             serde_json::json!({"record": location, "ref": reference, "dirs": dirs,
             "files": files, "readonly": writer_read_only(&location.worktree, &location.private, &location.common)})
+        );
+    }
+
+    #[test]
+    fn non_directory_worktrees_error_path_matches_python_glob() {
+        let (_tmp, location) = fixture();
+        fs::remove_dir_all(location.common.join("worktrees")).unwrap();
+        fs::write(location.common.join("worktrees"), "not a directory").unwrap();
+        let Some(expected) = crate::python::oracle(
+            r#"
+import trusted_git
+try:
+    trusted_git.owner_location(fixture['worktree'], common=fixture['common'])
+except ValueError as exc:
+    print(json.dumps(str(exc)))
+else:
+    raise AssertionError('fixture unexpectedly registered')
+"#,
+            &serde_json::json!({
+                "worktree": location.worktree,
+                "common": location.common,
+            }),
+        ) else {
+            return;
+        };
+        assert_eq!(
+            serde_json::to_value(
+                owner_location(&location.worktree, Some(&location.common))
+                    .unwrap_err()
+                    .to_string()
+            )
+            .unwrap(),
+            expected
         );
     }
 }

@@ -4,17 +4,43 @@ use std::io::Write;
 use std::process::{Command, Stdio};
 
 pub fn oracle(script: &str, input: &Value) -> Option<Value> {
+    let python = std::env::var_os("PROVENANT_PORT_PYTHON").unwrap_or_else(|| "python3".into());
+    let required = std::env::var("PROVENANT_PORT_DIFF_REQUIRED").is_ok_and(|v| v == "1");
+    let unavailable = |reason: &str| {
+        if required {
+            panic!("PROVENANT_PORT_DIFF_REQUIRED=1 but Python oracle is unavailable: {reason}");
+        }
+        eprintln!("skip: Python oracle {reason}");
+    };
+    let version = Command::new(&python)
+        .args([
+            "-c",
+            "import sys; raise SystemExit(0 if sys.version_info >= (3, 12) else 1)",
+        ])
+        .output();
+    match version {
+        Ok(output) if output.status.success() => (),
+        Ok(_) => {
+            unavailable("requires Python >= 3.12");
+            return None;
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            unavailable("interpreter not found");
+            return None;
+        }
+        Err(error) => {
+            unavailable(&format!("could not start: {error}"));
+            return None;
+        }
+    }
     let scripts = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../../../skills/orchestrate/scripts");
-    let mut child = match Command::new("python3")
+    let mut child = match Command::new(&python)
         .args(["-c", &format!("import sys, json\nsys.path.insert(0, sys.argv[1])\nfixture=json.load(sys.stdin)\n{script}")])
         .arg(scripts)
         .env("PYTHONDONTWRITEBYTECODE", "1")
         .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn() {
         Ok(child) => child,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            eprintln!("SKIP: python3 oracle unavailable"); return None;
-        }
         Err(e) => panic!("cannot start oracle: {e}"),
     };
     child
