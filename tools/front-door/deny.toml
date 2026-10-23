@@ -7,9 +7,9 @@ db-urls = ["https://github.com/RustSec/advisory-db"]
 allow = [
   "MIT",          # Project licence and the ADR 0028 default.
   "Apache-2.0",   # The other ADR 0028 default; used across the dependency tree.
-  "Unicode-3.0",  # unicode-ident requires Unicode's data licence as well as MIT/Apache.
-  "Zlib",         # foldhash, pulled in by rusqlite's hashlink/hashbrown tables.
 ]
+
+exceptions = [{ crate = "unicode-ident", allow = ["Unicode-3.0"] }]
 
 [bans]
 multiple-versions = "warn"
