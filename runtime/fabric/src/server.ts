@@ -6,7 +6,8 @@ import { z } from "zod";
 
 import { federatedLane, fabricHosts, releaseHostChecks } from "./hosts.js";
 import { CommitShaError, databasePath, identify, resolveCommitSha } from "./identity.js";
-import { federatedStatusRows as statusRows, fabricOutput, resultTail, reapAttemptRuns } from "./run-registry.js";
+import { reapAttemptRuns } from "./process-identity.js";
+import { federatedStatusRows as statusRows, fabricOutput, resultTail } from "./run-status.js";
 import { reply, digest, serverBuild, mailboxView, adapterView, runView, fullView, lanesDigest, cancelDigest } from "./surface.js";
 import { catalogueSnapshot, liveModels, resetCooldowns } from "./catalogue.js";
 import { handoffDispatch, resumeConfiguredProvider } from "./resume.js";

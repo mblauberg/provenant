@@ -1,15 +1,17 @@
 import json
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
-import importlib.util
 import io
 import os
 from pathlib import Path
 import shutil
 import subprocess
 import sys
+import time
 from contextlib import redirect_stderr, redirect_stdout
 from unittest.mock import patch
+
+from tests.support.modules import load_script
 
 import pytest
 import yaml
@@ -99,9 +101,7 @@ def test_claude_sonnet_is_the_senior_default_and_opus_remains_principal():
 
 
 def test_fallback_inherits_adapter_training_flag_without_false_default():
-    spec = importlib.util.spec_from_file_location("route_under_test", ROOT / "scripts/model_route.py")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    module = load_script(ROOT / "scripts/model_route.py", "route_under_test")
     catalog = {"adapters": {"fixture": {"trains_on_prompts": True,
                 "aliases": {"senior": ["primary", "candidate"]},
                 "models": [{"id": "primary", "plan_cap_usd": 1},
@@ -529,7 +529,7 @@ def test_probe_bare_executable_records_binary_found_on_path(tmp_path, monkeypatc
     monkeypatch.setenv("PATH", str(tmp_path))
     cli = tmp_path / "kiro-cli"
     cli.write_text("#!/bin/sh\nif [ \"$1\" = --version ]; then echo 1.2.3; exit; fi\n"
-                   "if [ \"$1\" = --help ]; then exit; fi\necho auto\n")
+                   "if [ \"$1\" = --help ]; then exit; fi\necho '{\"models\":[\"auto\"]}'\n")
     cli.chmod(0o755)
     record, code = router.probe_capabilities("kiro", "kiro-cli")
     assert code == 0
@@ -544,7 +544,7 @@ def test_explicit_kiro_probe_allows_model_response_budget(tmp_path, monkeypatch)
     def fake_run(argv, **kwargs):
         if "--no-interactive" in argv:
             budgets.append(kwargs["timeout"])
-        output = "1.2.3" if argv[-1] == "--version" else "auto"
+        output = "1.2.3" if argv[-1] == "--version" else '{"models":["auto"]}'
         return subprocess.CompletedProcess(argv, 0, output, "")
 
     monkeypatch.setattr(router.subprocess, "run", fake_run)
@@ -556,7 +556,7 @@ def test_explicit_kiro_probe_allows_model_response_budget(tmp_path, monkeypatch)
 
 def test_compatibility_drift_rejection_names_a_fix(tmp_path):
     router = load_router()
-    catalog = json.loads((ROOT / "config" / "model-routing.json").read_text())
+    catalog = product_catalog()
     catalog["adapters"]["codex"].pop("default_model", None)
     path = tmp_path / "model-routing.json"
     path.write_text(json.dumps(catalog))
@@ -811,11 +811,125 @@ def test_capability_probe_lists_agy_and_codex_models_for_discovery(tmp_path, mon
         "gpt-6-luna", "gpt-6.1-sol"]
 
 
+@pytest.mark.parametrize("adapter,expected", [
+    ("cursor", ["auto", "gpt-5.3-codex-low", "gpt-5.3-codex-low-fast"]),
+    ("opencode", ["opencode-go/beam-free", "opencode-go/claude-haiku-5-5",
+                  "openrouter/~anthropic/claude-fable-latest", "openrouter/~anthropic/claude-haiku-latest"]),
+    ("kiro", ["auto", "claude-sonnet-4.5"]),
+])
+def test_discovery_accepts_captured_cli_listings(tmp_path, adapter, expected):
+    router = load_router()
+    suffix = "json" if adapter == "kiro" else "txt"
+    fixture = ROOT / "tests/fixtures/model-listings" / f"{adapter}-models.{suffix}"
+    cli = tmp_path / adapter
+    cli.write_text(f"#!{sys.executable}\nimport pathlib, sys\n"
+                   "if sys.argv[1:] == ['--version']: print('1.0')\n"
+                   "elif sys.argv[1:] == ['--help']: pass\n"
+                   f"else: print(pathlib.Path({str(fixture)!r}).read_text())\n")
+    cli.chmod(0o755)
+    record, code = router.probe_capabilities(adapter, str(cli), listing_only=True)
+    assert code == 0
+    assert record["models"] == expected
+    cached = json.loads((Path(os.environ["AGENT_FABRIC_STATE_ROOT"]) / "capabilities.json").read_text())
+    assert cached[adapter]["models"] == expected
+
+
+@pytest.mark.parametrize("adapter", ["cursor", "agy", "codex", "kiro", "opencode"])
+@pytest.mark.parametrize("failure", ["listing", "version"])
+@pytest.mark.parametrize("cache_failures", [True, False])
+def test_routing_discovery_failed_refresh_preserves_last_good_listing(tmp_path, adapter, failure, cache_failures):
+    router = load_router()
+    cli = tmp_path / adapter
+    cli.write_text("#!/bin/sh\n" + ("if [ \"$1\" = --version ]; then echo 1.0; exit; fi\n"
+                                  if failure == "listing" else "") + "exit 1\n")
+    cli.chmod(0o755)
+    state = Path(os.environ["AGENT_FABRIC_STATE_ROOT"]) / "capabilities.json"
+    previous = {adapter: {"listing_format": 1, "version": "1.0", "executable": str(cli),
+                          "models": ["last-good"], "observed_at": "2000-01-01T00:00:00Z"}}
+    state.write_text(json.dumps(previous))
+    record, code = router.probe_capabilities(adapter, str(cli), listing_only=True, refresh=True,
+                                             cache_failures=cache_failures)
+    if cache_failures:
+        assert code == 0 and record["models"] == ["last-good"] and record["refresh_failed"]
+    else:
+        assert code == 1 and record["status"] == "probe_unavailable" and not record.get("models")
+    assert json.loads(state.read_text()) == previous
+
+
 def test_discovery_keeps_colon_variants_beside_their_base_id():
     router = load_router()
     assert router._listed_models("openrouter/vendor/model\nopenrouter/vendor/model:free\n") == [
         "openrouter/vendor/model", "openrouter/vendor/model:free"]
     assert router._listed_models("gpt-6-luna  Luna\ngpt-6-luna:beta  Luna beta\n") == ["gpt-6-luna", "gpt-6-luna:beta"]
+
+
+@pytest.mark.parametrize("adapter,failure", [
+    ("agy", "hang"), ("agy", "version"), ("agy", "bad_version"), ("agy", "junk"),
+    ("agy", "mixed"), ("codex", "text"), ("kiro", "text"),
+    ("codex", "malformed_json"),
+    ("codex", "error_map"), ("kiro", "error_data_map"),
+    ("agy", "unexpected_json"), ("cursor", "unexpected_json"), ("opencode", "unexpected_json"),
+])
+def test_unreliable_listing_is_unavailable_without_replacing_cache(tmp_path, adapter, failure):
+    router = load_router()
+    cli = tmp_path / adapter
+    cli.write_text(
+        f"#!{sys.executable}\nimport sys, time\n"
+        f"failure = {failure!r}\n"
+        "if sys.argv[1:] == ['--version']:\n"
+        "    print('OK' if failure == 'bad_version' else '1.0'); sys.exit(1 if failure == 'version' else 0)\n"
+        "if failure == 'hang': time.sleep(60)\n"
+        "if failure == 'junk': print('Usage: agy models\\nfallback')\n"
+        "elif failure == 'mixed': print('gemini-3.8-flash-low\\nError: sign in again')\n"
+        "elif failure == 'malformed_json': print('{\"models\":[{\"id\":null},\"gpt-6-luna\"]}')\n"
+        "elif failure == 'error_map': print('{\"models\":{\"error\":\"not authenticated\"}}')\n"
+        "elif failure == 'error_data_map': print('{\"data\":{\"error\":\"login failed\"}}')\n"
+        "elif failure == 'unexpected_json': print('{\"models\":[\"fallback\"]}')\n"
+        "else: print('gpt-6-luna')\n"
+    )
+    cli.chmod(0o755)
+    state = Path(os.environ["AGENT_FABRIC_STATE_ROOT"]) / "capabilities.json"
+    previous = json.dumps({adapter: {"models": ["last-good"]}})
+    state.write_text(previous)
+    started = time.monotonic()
+    record, code = router.probe_capabilities(adapter, str(cli), listing_only=True,
+                                            deadline=started + 0.3, refresh=True, cache_failures=False)
+    assert code == 1 and record["status"] == "probe_unavailable"
+    assert not record.get("models")
+    assert time.monotonic() - started < 2
+    assert state.read_text() == previous
+
+
+def test_capability_probe_uses_supplied_environment(tmp_path):
+    router = load_router()
+    cli = tmp_path / "agy"
+    cli.write_text(
+        f"#!{sys.executable}\nimport os, sys\n"
+        "assert os.environ['HOME'] == '/staged-home'\n"
+        "assert os.environ['CODEX_HOME'] == '/capability-home'\n"
+        "assert os.environ['ADAPTER_ENV'] == 'attempt'\n"
+        "if sys.argv[1:] == ['--version']: print('agy v1.0')\n"
+        "elif sys.argv[1:] == ['--help']: print('--model')\n"
+        "else: print('gemini-3.8-flash-low')\n"
+    )
+    cli.chmod(0o755)
+    record, code = router.probe_capabilities("agy", str(cli), listing_only=True, env={
+        **os.environ, "HOME": "/staged-home", "CODEX_HOME": "/capability-home", "ADAPTER_ENV": "attempt"})
+    assert code == 0 and record["models"] == ["gemini-3.8-flash-low"]
+
+
+def test_failed_capability_probe_reuses_negative_cache(tmp_path):
+    router = load_router()
+    calls = tmp_path / "listing-calls"
+    cli = tmp_path / "agy"
+    cli.write_text("#!/bin/sh\nif [ \"$1\" = --version ]; then echo 1.0; exit; fi\n"
+                   f"echo call >> '{calls}'\nexit 1\n")
+    cli.chmod(0o755)
+    first, code = router.probe_capabilities("agy", str(cli), listing_only=True)
+    assert code == 1 and first["status"] == "probe_unavailable"
+    second, code = router.probe_capabilities("agy", str(cli), listing_only=True)
+    assert code == 1 and second["cache_hit"] is True
+    assert calls.read_text().splitlines() == ["call"]
 
 
 def test_listing_only_probe_skips_the_kiro_safety_chat_and_keeps_its_evidence(tmp_path, monkeypatch):
@@ -826,7 +940,7 @@ def test_listing_only_probe_skips_the_kiro_safety_chat_and_keeps_its_evidence(tm
     def fake_run(argv, **kwargs):
         if "--no-interactive" in argv:
             chats.append(argv)
-        output = "1.2.3" if argv[-1] == "--version" else "auto"
+        output = "1.2.3" if argv[-1] == "--version" else '{"models":["auto"]}'
         return subprocess.CompletedProcess(argv, 0, output, "")
 
     monkeypatch.setattr(router.subprocess, "run", fake_run)
@@ -843,7 +957,7 @@ def _fake_kiro(router, monkeypatch, chats):
     def fake_run(argv, **kwargs):
         if "--no-interactive" in argv:
             chats.append(argv)
-        output = "1.2.3" if argv[-1] == "--version" else "auto"
+        output = "1.2.3" if argv[-1] == "--version" else '{"models":["auto"]}'
         return subprocess.CompletedProcess(argv, 0, output, "")
     monkeypatch.setattr(router.subprocess, "run", fake_run)
 
@@ -938,9 +1052,10 @@ def test_concurrent_capability_probes_keep_both_adapters(tmp_path):
     executables = {}
     for adapter, model in (("codex", "gpt-7-luna"), ("opencode", "opencode-go/glm-5.3-flash")):
         executable = tmp_path / adapter
+        listing = json.dumps({"models": [model]}) if adapter == "codex" else model
         executable.write_text("#!/bin/sh\nif [ \"$1\" = --version ]; then echo 1.0; exit; fi\n"
                               "if [ \"$1\" = --help ]; then exit; fi\nsleep 0.1\n"
-                              f"echo {model}\n")
+                              f"echo '{listing}'\n")
         executable.chmod(0o755)
         executables[adapter] = executable
     env = {**os.environ, "HARNESS_PYTHON": sys.executable,
@@ -988,7 +1103,7 @@ def test_codex_json_model_map_probe_records_ids(tmp_path):
 
 
 def test_ambiguous_name_chooses_newest_when_no_default(tmp_path):
-    catalog = json.loads((ROOT / "config" / "model-routing.json").read_text())
+    catalog = product_catalog()
     catalog["adapters"]["agy"]["models"].extend([
         {"id": "claude-sonnet-4-6", "names": ["verse"]},
         {"id": "claude-sonnet-5-1", "names": ["verse"]},
@@ -1092,7 +1207,7 @@ def write_codex_capability_snapshot(tmp_path, *, observed_at=None, models=None):
 
 
 def write_account_default_catalog(tmp_path):
-    catalog = json.loads((ROOT / "config" / "model-routing.json").read_text())
+    catalog = product_catalog()
     catalog["adapters"]["account-default-fixture"] = {
         "endpoint_provider": "fixture",
         "fixed_model_family": "openai",
@@ -1118,13 +1233,23 @@ def write_codex_compatibility(tmp_path, *, requires_explicit_model):
 
 
 def load_router():
-    path = ROOT / "scripts" / "model_route.py"
-    spec = importlib.util.spec_from_file_location("model_route_under_test", path)
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    return module
+    return load_script(ROOT / "scripts" / "model_route.py", "model_route_under_test", register=True)
+
+
+def use_catalog(router, monkeypatch, tmp_path, catalog):
+    path = tmp_path / "model-routing.json"
+    path.write_text(json.dumps(catalog))
+    monkeypatch.setattr(router, "CATALOG_PATH", path)
+    monkeypatch.setattr(router, "PRODUCT_CATALOG_PATH", path)
+    return path
+
+
+def product_catalog():
+    return json.loads(json.dumps(CATALOG))
+
+
+def principal(family, **kw):
+    return route_candidate("anthropic-principal", adapter="claude", family=family, model="opus", **kw)
 
 
 def route_candidate(
@@ -1200,12 +1325,7 @@ def select_route(
 
 def test_critical_review_preference_cannot_lower_tier_or_effort(tmp_path):
     candidates = [
-        route_candidate(
-            "anthropic-principal",
-            adapter="claude",
-            family="anthropic",
-            model="opus",
-        ),
+        principal("anthropic"),
         route_candidate(
             "openai-cheaper",
             adapter="codex",
@@ -1238,12 +1358,7 @@ def test_critical_review_preference_cannot_lower_tier_or_effort(tmp_path):
 
 def test_disabled_adapter_and_outside_model_preferences_are_reported(tmp_path):
     candidates = [
-        route_candidate(
-            "anthropic-principal",
-            adapter="claude",
-            family="anthropic",
-            model="opus",
-        ),
+        principal("anthropic"),
         route_candidate(
             "disabled-google",
             adapter="agy",
@@ -1294,12 +1409,7 @@ def test_disabled_adapter_and_outside_model_preferences_are_reported(tmp_path):
 
 def test_fair_spreading_is_reproducible_from_persisted_state(tmp_path):
     candidates = [
-        route_candidate(
-            "anthropic-principal",
-            adapter="claude",
-            family="anthropic",
-            model="opus",
-        ),
+        principal("anthropic"),
         route_candidate(
             "openai-principal",
             adapter="codex",
@@ -1349,12 +1459,7 @@ def test_fair_spreading_is_reproducible_from_persisted_state(tmp_path):
 
 def test_concurrent_fan_out_serialises_persisted_spread_state(tmp_path):
     candidates = [
-        route_candidate(
-            "anthropic-principal",
-            adapter="claude",
-            family="anthropic",
-            model="opus",
-        ),
+        principal("anthropic"),
         route_candidate(
             "openai-principal",
             adapter="codex",
@@ -1393,12 +1498,7 @@ def test_concurrent_fan_out_serialises_persisted_spread_state(tmp_path):
 
 def test_unknown_availability_is_distinct_from_observed_unavailable(tmp_path):
     candidates = [
-        route_candidate(
-            "anthropic-principal",
-            adapter="claude",
-            family="anthropic",
-            model="opus",
-        ),
+        principal("anthropic"),
         route_candidate(
             "openai-unobserved",
             adapter="codex",
@@ -1474,12 +1574,7 @@ def test_malformed_observed_availability_rejects_candidate_set(
 
 def test_unknown_preference_entries_load_without_changing_route(tmp_path):
     candidates = [
-        route_candidate(
-            "anthropic-principal",
-            adapter="claude",
-            family="anthropic",
-            model="opus",
-        ),
+        principal("anthropic"),
         route_candidate(
             "openai-principal",
             adapter="codex",
@@ -1539,12 +1634,7 @@ def test_unknown_preference_keys_are_recorded_in_ignored(tmp_path):
     result, receipt, _ = select_route(
         tmp_path,
         [
-            route_candidate(
-                "anthropic-principal",
-                adapter="claude",
-                family="anthropic",
-                model="opus",
-            ),
+            principal("anthropic"),
         ],
         {
             "schema_version": 1,
@@ -1581,12 +1671,7 @@ def test_corrupt_preferences_file_has_distinct_receipt_status(tmp_path):
     result, receipt, _ = select_route(
         tmp_path,
         [
-            route_candidate(
-                "anthropic-principal",
-                adapter="claude",
-                family="anthropic",
-                model="opus",
-            ),
+            principal("anthropic"),
         ],
         '{"schema_version":1,,,',
     )
@@ -1599,12 +1684,7 @@ def test_unsupported_spreading_policy_is_recorded_as_ignored(tmp_path):
     result, receipt, _ = select_route(
         tmp_path,
         [
-            route_candidate(
-                "anthropic-principal",
-                adapter="claude",
-                family="anthropic",
-                model="opus",
-            ),
+            principal("anthropic"),
         ],
         {
             "schema_version": 1,
@@ -1624,12 +1704,7 @@ def test_unsupported_spreading_policy_is_recorded_as_ignored(tmp_path):
 
 def test_deprioritise_preference_changes_tie_break_and_is_recorded(tmp_path):
     candidates = [
-        route_candidate(
-            "anthropic-principal",
-            adapter="claude",
-            family="anthropic",
-            model="opus",
-        ),
+        principal("anthropic"),
         route_candidate(
             "openai-principal",
             adapter="codex",
@@ -1653,12 +1728,7 @@ def test_deprioritise_preference_changes_tie_break_and_is_recorded(tmp_path):
 
 def test_not_honoured_reason_distinguishes_higher_preference(tmp_path):
     candidates = [
-        route_candidate(
-            "anthropic-principal",
-            adapter="claude",
-            family="anthropic",
-            model="opus",
-        ),
+        principal("anthropic"),
         route_candidate(
             "openai-principal",
             adapter="codex",
@@ -1700,12 +1770,7 @@ def test_not_honoured_reason_distinguishes_fair_spreading(tmp_path):
     result, receipt, _ = select_route(
         tmp_path,
         [
-            route_candidate(
-                "anthropic-principal",
-                adapter="claude",
-                family="anthropic",
-                model="opus",
-            ),
+            principal("anthropic"),
             openai,
         ],
         {
@@ -1732,12 +1797,7 @@ def test_deprioritise_only_admissible_candidate_reports_why_not_honoured(tmp_pat
     result, receipt, _ = select_route(
         tmp_path,
         [
-            route_candidate(
-                "anthropic-principal",
-                adapter="claude",
-                family="anthropic",
-                model="opus",
-            ),
+            principal("anthropic"),
         ],
         {
             "schema_version": 1,
@@ -1756,12 +1816,7 @@ def test_deprioritise_only_admissible_candidate_reports_why_not_honoured(tmp_pat
 
 def test_selector_rejects_forged_ok_route_below_hard_floor(tmp_path):
     candidates = [
-        route_candidate(
-            "anthropic-principal",
-            adapter="claude",
-            family="anthropic",
-            model="opus",
-        ),
+        principal("anthropic"),
         route_candidate(
             "forged-cheap",
             adapter="codex",
@@ -1811,17 +1866,14 @@ def test_risk_tier_override_catalogue_retargets_single_model(
     tmp_path, monkeypatch, capsys
 ):
     router = load_router()
-    catalog = json.loads((ROOT / "config" / "model-routing.json").read_text())
+    catalog = product_catalog()
     override = catalog["families"]["anthropic"]["risk_tier_overrides"]["crucial"]
     override["models"] = ["claude-retargeted-model"]
     override["roles"] = ["reviewer-one", "reviewer-two"]
     override["alias"] = "senior"
     override["default_effort"] = "low"
     override["maximum_effort"] = "high"
-    catalog_path = tmp_path / "model-routing.json"
-    catalog_path.write_text(json.dumps(catalog))
-    monkeypatch.setattr(router, "CATALOG_PATH", catalog_path)
-    monkeypatch.setattr(router, "PRODUCT_CATALOG_PATH", catalog_path)
+    catalog_path = use_catalog(router, monkeypatch, tmp_path, catalog)
 
     result = router.main([
         "resolve", "--adapter", "claude", "--alias", override["alias"],
@@ -1870,13 +1922,10 @@ def test_retargeted_override_occupant_requires_explicit_risk_tier(
     tmp_path, monkeypatch, capsys
 ):
     router = load_router()
-    catalog = json.loads((ROOT / "config" / "model-routing.json").read_text())
+    catalog = product_catalog()
     override = catalog["families"]["anthropic"]["risk_tier_overrides"]["crucial"]
     override["models"] = ["claude-newcomer"]
-    catalog_path = tmp_path / "model-routing.json"
-    catalog_path.write_text(json.dumps(catalog))
-    monkeypatch.setattr(router, "CATALOG_PATH", catalog_path)
-    monkeypatch.setattr(router, "PRODUCT_CATALOG_PATH", catalog_path)
+    catalog_path = use_catalog(router, monkeypatch, tmp_path, catalog)
 
     result = router.main([
         "resolve", "--adapter", "claude", "--alias", "principal",
@@ -1892,14 +1941,11 @@ def test_retargeting_override_occupant_ungates_previous_occupant(
     tmp_path, monkeypatch, capsys
 ):
     router = load_router()
-    catalog = json.loads((ROOT / "config" / "model-routing.json").read_text())
+    catalog = product_catalog()
     overrides = catalog["families"]["anthropic"]["risk_tier_overrides"]
     for override in overrides.values():
         override["models"] = ["claude-newcomer"]
-    catalog_path = tmp_path / "model-routing.json"
-    catalog_path.write_text(json.dumps(catalog))
-    monkeypatch.setattr(router, "CATALOG_PATH", catalog_path)
-    monkeypatch.setattr(router, "PRODUCT_CATALOG_PATH", catalog_path)
+    catalog_path = use_catalog(router, monkeypatch, tmp_path, catalog)
 
     result = router.main([
         "resolve", "--adapter", "claude", "--alias", "principal",
@@ -1916,15 +1962,12 @@ def test_retargeting_one_tier_keeps_occupant_gated_by_another_tier(
     tmp_path, monkeypatch, capsys
 ):
     router = load_router()
-    catalog = json.loads((ROOT / "config" / "model-routing.json").read_text())
+    catalog = product_catalog()
     catalog["families"]["anthropic"]["risk_tier_overrides"]["crucial"]["models"] = [
         "claude-newcomer"
     ]
     terminal_model = catalog["families"]["anthropic"]["risk_tier_overrides"]["terminal"]["models"][0]
-    catalog_path = tmp_path / "model-routing.json"
-    catalog_path.write_text(json.dumps(catalog))
-    monkeypatch.setattr(router, "CATALOG_PATH", catalog_path)
-    monkeypatch.setattr(router, "PRODUCT_CATALOG_PATH", catalog_path)
+    catalog_path = use_catalog(router, monkeypatch, tmp_path, catalog)
 
     result = router.main([
         "resolve", "--adapter", "claude", "--alias", "principal",
@@ -1940,7 +1983,7 @@ def test_foreign_family_risk_override_does_not_gate_explicit_model(
     tmp_path, monkeypatch, capsys
 ):
     router = load_router()
-    catalog = json.loads((ROOT / "config" / "model-routing.json").read_text())
+    catalog = product_catalog()
     catalog["families"]["openai"]["risk_tier_overrides"] = {
         "crucial": {
             "roles": ["synthesis", "adjudication"],
@@ -1950,10 +1993,7 @@ def test_foreign_family_risk_override_does_not_gate_explicit_model(
             "maximum_effort": "medium",
         },
     }
-    catalog_path = tmp_path / "model-routing.json"
-    catalog_path.write_text(json.dumps(catalog))
-    monkeypatch.setattr(router, "CATALOG_PATH", catalog_path)
-    monkeypatch.setattr(router, "PRODUCT_CATALOG_PATH", catalog_path)
+    catalog_path = use_catalog(router, monkeypatch, tmp_path, catalog)
 
     result = router.main([
         "resolve", "--adapter", "claude", "--alias", "principal",
@@ -1971,14 +2011,11 @@ def test_risk_tier_override_occupant_cannot_be_reached_by_alias(
     tmp_path, monkeypatch, capsys, occupant
 ):
     router = load_router()
-    catalog = json.loads((ROOT / "config" / "model-routing.json").read_text())
+    catalog = product_catalog()
     catalog["families"]["anthropic"]["risk_tier_overrides"]["crucial"]["models"] = [
         occupant
     ]
-    catalog_path = tmp_path / "model-routing.json"
-    catalog_path.write_text(json.dumps(catalog))
-    monkeypatch.setattr(router, "CATALOG_PATH", catalog_path)
-    monkeypatch.setattr(router, "PRODUCT_CATALOG_PATH", catalog_path)
+    catalog_path = use_catalog(router, monkeypatch, tmp_path, catalog)
 
     result = router.main([
         "resolve", "--adapter", "claude", "--alias", "principal",
@@ -1994,15 +2031,12 @@ def test_risk_tier_override_occupant_cannot_match_versioned_alias_candidate(
     tmp_path, monkeypatch, capsys
 ):
     router = load_router()
-    catalog = json.loads((ROOT / "config" / "model-routing.json").read_text())
+    catalog = product_catalog()
     family = catalog["families"]["anthropic"]
     family["aliases"]["principal"] = ["claude-opus-4-6"]
     family["role_overrides"] = {}
     family["risk_tier_overrides"]["crucial"]["models"] = ["opus"]
-    catalog_path = tmp_path / "model-routing.json"
-    catalog_path.write_text(json.dumps(catalog))
-    monkeypatch.setattr(router, "CATALOG_PATH", catalog_path)
-    monkeypatch.setattr(router, "PRODUCT_CATALOG_PATH", catalog_path)
+    catalog_path = use_catalog(router, monkeypatch, tmp_path, catalog)
 
     result = router.main([
         "resolve", "--adapter", "claude", "--alias", "principal",
@@ -2018,14 +2052,11 @@ def test_versioned_fable_override_rejects_a_different_versioned_alias_candidate(
     tmp_path, monkeypatch, capsys
 ):
     router = load_router()
-    catalog = json.loads((ROOT / "config" / "model-routing.json").read_text())
+    catalog = product_catalog()
     family = catalog["families"]["anthropic"]
     family["aliases"]["principal"] = ["claude-fable-5-2"]
     family["role_overrides"] = {}
-    catalog_path = tmp_path / "model-routing.json"
-    catalog_path.write_text(json.dumps(catalog))
-    monkeypatch.setattr(router, "CATALOG_PATH", catalog_path)
-    monkeypatch.setattr(router, "PRODUCT_CATALOG_PATH", catalog_path)
+    catalog_path = use_catalog(router, monkeypatch, tmp_path, catalog)
 
     result = router.main([
         "resolve", "--adapter", "claude", "--alias", "principal", "--role", "worker",
@@ -2049,14 +2080,11 @@ def test_risk_tier_override_occupant_cannot_partially_match_explicit_model(
     tmp_path, monkeypatch, capsys, occupant, explicit_model
 ):
     router = load_router()
-    catalog = json.loads((ROOT / "config" / "model-routing.json").read_text())
+    catalog = product_catalog()
     catalog["families"]["anthropic"]["risk_tier_overrides"]["crucial"]["models"] = [
         occupant
     ]
-    catalog_path = tmp_path / "model-routing.json"
-    catalog_path.write_text(json.dumps(catalog))
-    monkeypatch.setattr(router, "CATALOG_PATH", catalog_path)
-    monkeypatch.setattr(router, "PRODUCT_CATALOG_PATH", catalog_path)
+    catalog_path = use_catalog(router, monkeypatch, tmp_path, catalog)
 
     result = router.main([
         "resolve", "--adapter", "claude", "--alias", "principal",
@@ -2072,14 +2100,11 @@ def test_risk_tier_override_occupant_cannot_be_reached_by_role_alias_override(
     tmp_path, monkeypatch, capsys
 ):
     router = load_router()
-    catalog = json.loads((ROOT / "config" / "model-routing.json").read_text())
+    catalog = product_catalog()
     family = catalog["families"]["anthropic"]
     family["role_overrides"]["worker"] = {"principal": ["claude-role-model"]}
     family["risk_tier_overrides"]["crucial"]["models"] = ["claude-role-model"]
-    catalog_path = tmp_path / "model-routing.json"
-    catalog_path.write_text(json.dumps(catalog))
-    monkeypatch.setattr(router, "CATALOG_PATH", catalog_path)
-    monkeypatch.setattr(router, "PRODUCT_CATALOG_PATH", catalog_path)
+    catalog_path = use_catalog(router, monkeypatch, tmp_path, catalog)
 
     result = router.main([
         "resolve", "--adapter", "claude", "--alias", "principal",
@@ -2095,7 +2120,7 @@ def test_foreign_family_override_collision_does_not_reject_adapter_route(
     tmp_path, monkeypatch, capsys
 ):
     router = load_router()
-    catalog = json.loads((ROOT / "config" / "model-routing.json").read_text())
+    catalog = product_catalog()
     catalog["families"]["anthropic"]["risk_tier_overrides"]["crucial"]["models"] = [
         "opus"
     ]
@@ -2120,14 +2145,11 @@ def test_missing_route_input_precedes_risk_tier_configuration_validation(
     tmp_path, monkeypatch, capsys
 ):
     router = load_router()
-    catalog = json.loads((ROOT / "config" / "model-routing.json").read_text())
+    catalog = product_catalog()
     catalog["families"]["anthropic"]["risk_tier_overrides"]["crucial"]["models"] = [
         "opus"
     ]
-    catalog_path = tmp_path / "model-routing.json"
-    catalog_path.write_text(json.dumps(catalog))
-    monkeypatch.setattr(router, "CATALOG_PATH", catalog_path)
-    monkeypatch.setattr(router, "PRODUCT_CATALOG_PATH", catalog_path)
+    catalog_path = use_catalog(router, monkeypatch, tmp_path, catalog)
 
     result = router.main([
         "resolve", "--adapter", "claude", "--role", "worker",
@@ -2421,12 +2443,9 @@ def test_risk_tier_override_configuration_is_closed_and_bounded(
     tmp_path, monkeypatch, capsys, field, value
 ):
     router = load_router()
-    catalog = json.loads((ROOT / "config" / "model-routing.json").read_text())
+    catalog = product_catalog()
     catalog["families"]["anthropic"]["risk_tier_overrides"]["crucial"][field] = value
-    catalog_path = tmp_path / "model-routing.json"
-    catalog_path.write_text(json.dumps(catalog))
-    monkeypatch.setattr(router, "CATALOG_PATH", catalog_path)
-    monkeypatch.setattr(router, "PRODUCT_CATALOG_PATH", catalog_path)
+    catalog_path = use_catalog(router, monkeypatch, tmp_path, catalog)
 
     result = router.main([
         "resolve", "--adapter", "claude", "--alias", CRUCIAL_RISK_OVERRIDE["alias"],
@@ -2442,12 +2461,9 @@ def test_non_dict_risk_tier_override_is_rejected_as_malformed(tmp_path, monkeypa
     # A tier that is present but not a mapping is a malformed catalogue, not an
     # absent tier: it must be reported as such rather than as `unavailable`.
     router = load_router()
-    catalog = json.loads((ROOT / "config" / "model-routing.json").read_text())
+    catalog = product_catalog()
     catalog["families"]["anthropic"]["risk_tier_overrides"]["crucial"] = []
-    catalog_path = tmp_path / "model-routing.json"
-    catalog_path.write_text(json.dumps(catalog))
-    monkeypatch.setattr(router, "CATALOG_PATH", catalog_path)
-    monkeypatch.setattr(router, "PRODUCT_CATALOG_PATH", catalog_path)
+    catalog_path = use_catalog(router, monkeypatch, tmp_path, catalog)
 
     result = router.main([
         "resolve", "--adapter", "claude", "--alias", "principal",
@@ -2462,12 +2478,9 @@ def test_non_dict_risk_tier_override_is_rejected_as_malformed(tmp_path, monkeypa
 def test_absent_risk_tier_is_still_reported_unavailable(tmp_path, monkeypatch, capsys):
     # The `unavailable` status stays reachable for the case it actually names.
     router = load_router()
-    catalog = json.loads((ROOT / "config" / "model-routing.json").read_text())
+    catalog = product_catalog()
     catalog["families"]["anthropic"]["risk_tier_overrides"].pop("crucial")
-    catalog_path = tmp_path / "model-routing.json"
-    catalog_path.write_text(json.dumps(catalog))
-    monkeypatch.setattr(router, "CATALOG_PATH", catalog_path)
-    monkeypatch.setattr(router, "PRODUCT_CATALOG_PATH", catalog_path)
+    catalog_path = use_catalog(router, monkeypatch, tmp_path, catalog)
 
     result = router.main([
         "resolve", "--adapter", "claude", "--alias", "principal",
@@ -2496,12 +2509,9 @@ def test_malformed_override_models_never_unreserve_the_occupant(
     # which left the tier unusable AND its occupant freely dispatchable — strictly
     # worse than either failure alone. It must fail closed instead.
     router = load_router()
-    catalog = json.loads((ROOT / "config" / "model-routing.json").read_text())
+    catalog = product_catalog()
     catalog["families"]["anthropic"]["risk_tier_overrides"]["crucial"]["models"] = malformed_models
-    catalog_path = tmp_path / "model-routing.json"
-    catalog_path.write_text(json.dumps(catalog))
-    monkeypatch.setattr(router, "CATALOG_PATH", catalog_path)
-    monkeypatch.setattr(router, "PRODUCT_CATALOG_PATH", catalog_path)
+    catalog_path = use_catalog(router, monkeypatch, tmp_path, catalog)
 
     result = router.main([
         "resolve", "--adapter", "claude", "--alias", "principal",
@@ -2519,13 +2529,10 @@ def test_malformed_override_in_one_family_does_not_reject_another_family(
     # The catalogue-wide pass is scoped to the adapter's own family, so an
     # Anthropic misconfiguration must not take OpenAI routing down with it.
     router = load_router()
-    catalog = json.loads((ROOT / "config" / "model-routing.json").read_text())
+    catalog = product_catalog()
     catalog["families"]["anthropic"]["risk_tier_overrides"]["crucial"]["models"] = "fable"
-    catalog_path = tmp_path / "model-routing.json"
-    catalog_path.write_text(json.dumps(catalog))
     snapshot = write_codex_capability_snapshot(tmp_path)
-    monkeypatch.setattr(router, "CATALOG_PATH", catalog_path)
-    monkeypatch.setattr(router, "PRODUCT_CATALOG_PATH", catalog_path)
+    catalog_path = use_catalog(router, monkeypatch, tmp_path, catalog)
 
     result = router.main([
         "resolve", "--adapter", "codex", "--alias", "senior",
@@ -2557,12 +2564,9 @@ def test_unusable_families_table_fails_closed(
     take different validation paths, and the first fix guarded only the second.
     """
     router = load_router()
-    catalog = json.loads((ROOT / "config" / "model-routing.json").read_text())
+    catalog = product_catalog()
     catalog["families"] = families
-    catalog_path = tmp_path / "model-routing.json"
-    catalog_path.write_text(json.dumps(catalog))
-    monkeypatch.setattr(router, "CATALOG_PATH", catalog_path)
-    monkeypatch.setattr(router, "PRODUCT_CATALOG_PATH", catalog_path)
+    catalog_path = use_catalog(router, monkeypatch, tmp_path, catalog)
 
     result = router.main([
         "resolve", "--adapter", adapter, "--model", "fable",
@@ -2636,12 +2640,9 @@ def test_unroutable_pinned_family_rejects_with_a_receipt(
     arrive as a receipt, whatever the catalogue looks like.
     """
     router = load_router()
-    catalog = json.loads((ROOT / "config" / "model-routing.json").read_text())
+    catalog = product_catalog()
     mutate(catalog["families"])
-    catalog_path = tmp_path / "model-routing.json"
-    catalog_path.write_text(json.dumps(catalog))
-    monkeypatch.setattr(router, "CATALOG_PATH", catalog_path)
-    monkeypatch.setattr(router, "PRODUCT_CATALOG_PATH", catalog_path)
+    catalog_path = use_catalog(router, monkeypatch, tmp_path, catalog)
 
     result = router.main([
         "resolve", "--adapter", "codex", "--alias", "principal",
@@ -2666,13 +2667,10 @@ def test_empty_routed_family_validates_every_family_the_scan_consults(
     agreement, which is the disagreement this issue exists to close.
     """
     router = load_router()
-    catalog = json.loads((ROOT / "config" / "model-routing.json").read_text())
+    catalog = product_catalog()
     catalog["families"]["openai"] = {}
     catalog["families"]["anthropic"]["risk_tier_overrides"]["crucial"]["models"] = "fable"
-    catalog_path = tmp_path / "model-routing.json"
-    catalog_path.write_text(json.dumps(catalog))
-    monkeypatch.setattr(router, "CATALOG_PATH", catalog_path)
-    monkeypatch.setattr(router, "PRODUCT_CATALOG_PATH", catalog_path)
+    catalog_path = use_catalog(router, monkeypatch, tmp_path, catalog)
 
     # Every family the catalogue defines, named from the catalogue rather than
     # repeated here: the invariant is that the scan widens to all of them, which
@@ -2701,7 +2699,7 @@ def test_unusable_alias_table_rejects_on_an_explicit_model_route(
     from one normalised load site.
     """
     router = load_router()
-    catalog = json.loads((ROOT / "config" / "model-routing.json").read_text())
+    catalog = product_catalog()
     catalog["adapters"]["account-default-fixture"] = {
         "endpoint_provider": "fixture",
         "fixed_model_family": "openai",
@@ -2709,10 +2707,7 @@ def test_unusable_alias_table_rejects_on_an_explicit_model_route(
         "model_selection": "account-default",
     }
     catalog["families"]["openai"]["aliases"] = aliases
-    catalog_path = tmp_path / "model-routing.json"
-    catalog_path.write_text(json.dumps(catalog))
-    monkeypatch.setattr(router, "CATALOG_PATH", catalog_path)
-    monkeypatch.setattr(router, "PRODUCT_CATALOG_PATH", catalog_path)
+    catalog_path = use_catalog(router, monkeypatch, tmp_path, catalog)
 
     result = router.main([
         "resolve", "--adapter", "account-default-fixture", "--alias", "principal",
@@ -2745,12 +2740,9 @@ def test_override_field_of_the_wrong_type_fails_closed(
     raises out of the ``in`` test rather than failing closed.
     """
     router = load_router()
-    catalog = json.loads((ROOT / "config" / "model-routing.json").read_text())
+    catalog = product_catalog()
     catalog["families"]["anthropic"]["risk_tier_overrides"]["crucial"][field] = value
-    catalog_path = tmp_path / "model-routing.json"
-    catalog_path.write_text(json.dumps(catalog))
-    monkeypatch.setattr(router, "CATALOG_PATH", catalog_path)
-    monkeypatch.setattr(router, "PRODUCT_CATALOG_PATH", catalog_path)
+    catalog_path = use_catalog(router, monkeypatch, tmp_path, catalog)
 
     result = router.main([
         "resolve", "--adapter", "claude", "--alias", "principal", "--role", "a",
@@ -2774,13 +2766,10 @@ def test_fixed_family_adapter_fails_closed_on_an_alias_route(
     a malformed catalogue and a routed alias.
     """
     router = load_router()
-    catalog = json.loads((ROOT / "config" / "model-routing.json").read_text())
+    catalog = product_catalog()
     for tier in catalog["families"]["anthropic"]["risk_tier_overrides"].values():
         tier["models"] = "fable"
-    catalog_path = tmp_path / "model-routing.json"
-    catalog_path.write_text(json.dumps(catalog))
-    monkeypatch.setattr(router, "CATALOG_PATH", catalog_path)
-    monkeypatch.setattr(router, "PRODUCT_CATALOG_PATH", catalog_path)
+    catalog_path = use_catalog(router, monkeypatch, tmp_path, catalog)
 
     result = router.main([
         "resolve", "--adapter", "claude", "--alias", "principal", "--role", "worker",
@@ -2804,13 +2793,10 @@ def test_malformed_override_fails_closed_without_a_fixed_model_family(
     unreserved the occupant and resolved it at exit 0.
     """
     router = load_router()
-    catalog = json.loads((ROOT / "config" / "model-routing.json").read_text())
+    catalog = product_catalog()
     for tier in catalog["families"]["anthropic"]["risk_tier_overrides"].values():
         tier["models"] = "fable"
-    catalog_path = tmp_path / "model-routing.json"
-    catalog_path.write_text(json.dumps(catalog))
-    monkeypatch.setattr(router, "CATALOG_PATH", catalog_path)
-    monkeypatch.setattr(router, "PRODUCT_CATALOG_PATH", catalog_path)
+    catalog_path = use_catalog(router, monkeypatch, tmp_path, catalog)
 
     result = router.main([
         "resolve", "--adapter", adapter, "--model", "fable",
@@ -2864,7 +2850,7 @@ def test_catalog_and_compatibility_mismatch_fails_closed(
     tmp_path, monkeypatch, capsys, catalog_account_default, requires_explicit_model
 ):
     router = load_router()
-    catalog = json.loads((ROOT / "config" / "model-routing.json").read_text())
+    catalog = product_catalog()
     adapter = catalog["adapters"]["codex"]
     if catalog_account_default:
         adapter["model_selection"] = "account-default"
@@ -2941,7 +2927,7 @@ def test_task_classes_bind_codex_runtime_identity(
 
 
 def test_task_class_uses_ordered_exact_models_from_catalogue(tmp_path):
-    catalog = json.loads((ROOT / "config" / "model-routing.json").read_text())
+    catalog = product_catalog()
     catalog["task_class_routes"]["implementation"] = {
         "alias": "senior", "effort": "high", "role": "worker",
         "models": {"codex": ["gpt-6-astra", "gpt-6.1-sol"]},
@@ -3002,7 +2988,7 @@ def test_claude_task_classes_resolve_the_first_catalogued_model(
 
 
 def test_task_class_rejects_adapter_alias_instead_of_exact_model_id(tmp_path):
-    catalog = json.loads((ROOT / "config" / "model-routing.json").read_text())
+    catalog = product_catalog()
     catalog["task_class_routes"]["implementation"]["models"]["codex"] = ["sol"]
     catalog_path = tmp_path / "catalog.json"
     catalog_path.write_text(json.dumps(catalog))
@@ -3015,7 +3001,7 @@ def test_task_class_rejects_adapter_alias_instead_of_exact_model_id(tmp_path):
 
 
 def test_failed_review_route_gets_one_exact_alternate(tmp_path, monkeypatch):
-    catalog = json.loads((ROOT / "config" / "model-routing.json").read_text())
+    catalog = product_catalog()
     catalog["task_class_routes"]["critical-review"]["models"]["codex"] = ["gpt-6-astra", "gpt-6.1-sol"]
     catalog_path = tmp_path / "catalog.json"
     catalog_path.write_text(json.dumps(catalog))
@@ -3353,12 +3339,9 @@ def test_task_class_rejects_effective_effort_below_policy_floor(tmp_path):
 
 def test_invalid_task_class_effort_vocabulary_fails_closed(tmp_path, monkeypatch, capsys):
     router = load_router()
-    catalog = json.loads((ROOT / "config" / "model-routing.json").read_text())
+    catalog = product_catalog()
     catalog["task_class_routes"]["critical-review"]["effort"] = "hgh"
-    catalog_path = tmp_path / "model-routing.json"
-    catalog_path.write_text(json.dumps(catalog))
-    monkeypatch.setattr(router, "CATALOG_PATH", catalog_path)
-    monkeypatch.setattr(router, "PRODUCT_CATALOG_PATH", catalog_path)
+    catalog_path = use_catalog(router, monkeypatch, tmp_path, catalog)
 
     result = router.main([
         "resolve", "--adapter", "claude", "--task-class", "critical-review",
@@ -3373,12 +3356,9 @@ def test_invalid_task_class_effort_vocabulary_fails_closed(tmp_path, monkeypatch
 
 def test_task_class_role_policy_cannot_be_reconfigured_to_worker(tmp_path, monkeypatch, capsys):
     router = load_router()
-    catalog = json.loads((ROOT / "config" / "model-routing.json").read_text())
+    catalog = product_catalog()
     catalog["task_class_routes"]["critical-review"]["role"] = "worker"
-    catalog_path = tmp_path / "model-routing.json"
-    catalog_path.write_text(json.dumps(catalog))
-    monkeypatch.setattr(router, "CATALOG_PATH", catalog_path)
-    monkeypatch.setattr(router, "PRODUCT_CATALOG_PATH", catalog_path)
+    catalog_path = use_catalog(router, monkeypatch, tmp_path, catalog)
 
     result = router.main([
         "resolve", "--adapter", "claude", "--task-class", "critical-review",
@@ -3398,12 +3378,9 @@ def test_critical_review_policy_rejects_valid_vocabulary_downgrade(
     tmp_path, monkeypatch, capsys, field, value
 ):
     router = load_router()
-    catalog = json.loads((ROOT / "config" / "model-routing.json").read_text())
+    catalog = product_catalog()
     catalog["task_class_routes"]["critical-review"][field] = value
-    catalog_path = tmp_path / "model-routing.json"
-    catalog_path.write_text(json.dumps(catalog))
-    monkeypatch.setattr(router, "CATALOG_PATH", catalog_path)
-    monkeypatch.setattr(router, "PRODUCT_CATALOG_PATH", catalog_path)
+    catalog_path = use_catalog(router, monkeypatch, tmp_path, catalog)
 
     result = router.main([
         "resolve", "--adapter", "claude", "--task-class", "critical-review",
@@ -3419,12 +3396,9 @@ def test_task_class_effort_overlay_may_raise_effort_above_policy_floor(
     tmp_path, monkeypatch, capsys
 ):
     router = load_router()
-    catalog = json.loads((ROOT / "config" / "model-routing.json").read_text())
+    catalog = product_catalog()
     catalog["task_class_routes"]["critical-review"]["effort"] = "xhigh"
-    catalog_path = tmp_path / "model-routing.json"
-    catalog_path.write_text(json.dumps(catalog))
-    monkeypatch.setattr(router, "CATALOG_PATH", catalog_path)
-    monkeypatch.setattr(router, "PRODUCT_CATALOG_PATH", catalog_path)
+    catalog_path = use_catalog(router, monkeypatch, tmp_path, catalog)
 
     result = router.main([
         "resolve", "--adapter", "claude", "--task-class", "critical-review",
@@ -3439,16 +3413,13 @@ def test_task_class_effort_overlay_may_raise_effort_above_policy_floor(
 
 def test_role_default_cannot_lower_task_class_effort(tmp_path, monkeypatch, capsys):
     router = load_router()
-    catalog = json.loads((ROOT / "config" / "model-routing.json").read_text())
+    catalog = product_catalog()
     catalog["families"]["openai"]["role_effort_defaults"]["orchestrator"]["principal"] = "low"
-    catalog_path = tmp_path / "model-routing.json"
-    catalog_path.write_text(json.dumps(catalog))
     snapshot = tmp_path / "caps.json"
     snapshot.write_text(json.dumps(capability_snapshot({
         "gpt-6-astra": {"resolved_model": "gpt-6-astra", "supported_efforts": ["high"]},
     })))
-    monkeypatch.setattr(router, "CATALOG_PATH", catalog_path)
-    monkeypatch.setattr(router, "PRODUCT_CATALOG_PATH", catalog_path)
+    catalog_path = use_catalog(router, monkeypatch, tmp_path, catalog)
 
     result = router.main([
         "resolve", "--adapter", "codex", "--task-class", "orchestration",
@@ -3555,7 +3526,7 @@ def test_noneligible_ultra_fallback_reports_runtime_capability_source(
     tmp_path, monkeypatch, capsys
 ):
     router = load_router()
-    catalog = json.loads((ROOT / "config" / "model-routing.json").read_text())
+    catalog = product_catalog()
     catalog["families"]["openai"]["role_effort_defaults"]["worker"] = {
         "principal": "ultra"
     }
@@ -3616,7 +3587,7 @@ def test_a_request_for_max_effort_fails_and_suggests_xhigh(argv):
 
 
 def test_an_overlay_that_still_lists_max_fails_fast(tmp_path):
-    catalog = json.loads((ROOT / "config" / "model-routing.json").read_text())
+    catalog = product_catalog()
     catalog["families"]["openai"]["effort_fallback_order"].append("max")
     instance = tmp_path / "instance"
     (instance / "config").mkdir(parents=True)
@@ -3633,13 +3604,10 @@ def test_ultra_eligible_roles_must_be_a_list_of_role_names(
     tmp_path, monkeypatch, capsys
 ):
     router = load_router()
-    catalog = json.loads((ROOT / "config" / "model-routing.json").read_text())
+    catalog = product_catalog()
     catalog["families"]["openai"]["ultra_eligible_roles"] = "lead"
-    catalog_path = tmp_path / "model-routing.json"
-    catalog_path.write_text(json.dumps(catalog))
     snapshot = write_codex_capability_snapshot(tmp_path)
-    monkeypatch.setattr(router, "CATALOG_PATH", catalog_path)
-    monkeypatch.setattr(router, "PRODUCT_CATALOG_PATH", catalog_path)
+    catalog_path = use_catalog(router, monkeypatch, tmp_path, catalog)
 
     result = router.main([
         "resolve", "--adapter", "codex", "--alias", "principal", "--role", "lead",
@@ -4237,14 +4205,8 @@ def test_kiro_model_slugs_attribute_upstream_families():
     """Kiro's catalogue attribution follows the slug, independent of execution."""
     from scripts import model_route_catalog as catalog_mod
 
-    # Load via the same loader model_route uses
-    import importlib.util
-    from pathlib import Path
-
-    path = Path(__file__).resolve().parents[1] / "scripts" / "model_route_catalog.py"
-    spec = importlib.util.spec_from_file_location("model_route_catalog", path)
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
+    # Load via the same loader model_route uses.
+    mod = load_script(ROOT / "scripts" / "model_route_catalog.py", "model_route_catalog")
 
     for model, family in (
         ("claude-sonnet-4.5", "anthropic"),
@@ -4298,7 +4260,7 @@ def test_require_distinct_rejects_ineligible_lead_family(monkeypatch):
 
 
 def test_optional_adapter_preference_policy_is_ordered_and_native_first_for_fallbacks():
-    catalog = json.loads((ROOT / "config" / "model-routing.json").read_text())
+    catalog = product_catalog()
 
     agy = catalog["adapters"]["agy"]["model_family_preferences"]
     cursor = catalog["adapters"]["cursor"]["model_family_preferences"]
@@ -4311,7 +4273,7 @@ def test_optional_adapter_preference_policy_is_ordered_and_native_first_for_fall
 
 
 def test_google_flash_defaults_track_the_current_agy_catalogue():
-    catalog = json.loads((ROOT / "config" / "model-routing.json").read_text())
+    catalog = product_catalog()
     google = catalog["families"]["google"]
 
     assert google["aliases"]["principal"] == ["gemini-3.8-flash"]
@@ -4685,7 +4647,7 @@ def test_claude_without_an_endpoint_stays_pinned_to_anthropic(monkeypatch):
     ({"base_url": "http://api.z.ai/api/anthropic"}, {"token_env": ""}, {"adapters": "claude"}),
 )
 def test_malformed_endpoint_profile_is_never_routed_against(monkeypatch, tmp_path, damage):
-    catalog = json.loads((ROOT / "config" / "model-routing.json").read_text())
+    catalog = product_catalog()
     catalog["endpoints"]["zai-glm"].update(damage)
     catalog_path = tmp_path / "model-routing.json"
     catalog_path.write_text(json.dumps(catalog))
@@ -5050,7 +5012,8 @@ def test_opencode_requested_input_keeps_the_callers_bare_token(tmp_path):
     assert route["requested_input"] == "QWEN3.8-FLASH"
 
 
-def test_failed_opencode_refresh_keeps_the_last_good_listing(tmp_path, monkeypatch):
+@pytest.mark.parametrize("trusted", [False, True])
+def test_failed_opencode_refresh_keeps_the_last_good_listing(tmp_path, monkeypatch, trusted):
     router = load_router()
     monkeypatch.setenv("AGENT_FABRIC_STATE_ROOT", str(tmp_path))
     cli = tmp_path / "opencode"
@@ -5059,8 +5022,16 @@ def test_failed_opencode_refresh_keeps_the_last_good_listing(tmp_path, monkeypat
     cli.chmod(0o755)
     record, code = router.probe_capabilities("opencode", str(cli), listing_only=True)
     assert code == 0 and record["models"] == ["a/one", "a/two"]
+    if not trusted:
+        path = tmp_path / "capabilities.json"
+        cache = json.loads(path.read_text())
+        cache["opencode"].pop("listing_format")
+        path.write_text(json.dumps(cache))
     cli.write_text("#!/bin/sh\nif [ \"$1\" = --version ]; then echo 2.0.30; exit; fi\nexit 1\n")
     failed, code = router.probe_capabilities("opencode", str(cli), listing_only=True, refresh=True)
+    if not trusted:
+        assert code == 1 and failed["status"] == "probe_unavailable" and not failed["models"]
+        return
     assert code == 0 and failed["models"] == ["a/one", "a/two"] and failed["refresh_failed"]
     cached, code = router.probe_capabilities("opencode", str(cli), listing_only=True)
     assert code == 0 and cached["cache_hit"] and cached["models"] == ["a/one", "a/two"]
@@ -5086,7 +5057,7 @@ def test_effort_shift_never_climbs_to_retired_max_or_ultra():
 
 
 def _write_catalog(tmp_path, mutate):
-    catalog = json.loads((ROOT / "config" / "model-routing.json").read_text())
+    catalog = product_catalog()
     mutate(catalog)
     path = tmp_path / "custom-catalog.json"
     path.write_text(json.dumps(catalog))

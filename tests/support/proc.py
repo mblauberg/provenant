@@ -60,3 +60,25 @@ def run_cf_dispatch(
     except ValueError:
         return result, None
     return result, record if isinstance(record, dict) else None
+
+
+def process_state(pid):
+    result = subprocess.run(["ps", "-p", str(pid), "-o", "stat="],
+                            capture_output=True, text=True, timeout=5)
+    assert result.returncode in {0, 1} and not result.stderr, result.stderr
+    return result.stdout.strip()
+
+
+def process_stopped(pid):
+    state = process_state(pid)
+    return not state or "Z" in state
+
+
+def process_group_pids(pgid):
+    # The headless host's ps supports a full table but not -g; filter the
+    # retained group explicitly, including any surviving descendants.
+    result = subprocess.run(["ps", "-A", "-o", "pgid=,pid="],
+                            capture_output=True, text=True, timeout=5)
+    assert result.returncode == 0 and not result.stderr, result.stderr
+    return [int(pid) for group, pid in (line.split() for line in result.stdout.splitlines())
+            if int(group) == pgid]

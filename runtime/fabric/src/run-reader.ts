@@ -3,7 +3,9 @@ import { createHash } from "node:crypto";
 import { basename, dirname, isAbsolute, relative, resolve, sep } from "node:path";
 
 import { runRoot } from "./identity.js";
-import { processMatches, processStartedAt, readOwnerRecord, readProviderRecord, statusRows } from "./run-registry.js";
+import { readOwnerRecord, readProviderRecord } from "./run-registry.js";
+import { processMatches, processStartedAt } from "./process-identity.js";
+import { statusRows } from "./run-status.js";
 import { type Message } from "./store.js";
 import { federatedLane } from "./hosts.js";
 

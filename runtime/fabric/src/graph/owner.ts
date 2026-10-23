@@ -12,10 +12,9 @@ import { isAbsolute, join, relative, resolve } from "node:path";
 import { pythonOwnerSync, pythonOwnerEnvironment } from "../python-owner.js";
 import { cancelConfiguredRun, dispatchConfiguredProvider, hostOwnersInThemselves, productRoot } from "../execution.js";
 import { databasePath, runRoot, withoutGitRedirects, type Identity } from "../identity.js";
-import {
-  listRecordedRuns, observedAlive, processStartedAt, readOwnerRecord, runProcessAlive,
-  signalRecordedGroup, statusRows, type RecordedGroup,
-} from "../run-registry.js";
+import { listRecordedRuns, readOwnerRecord } from "../run-registry.js";
+import { observedAlive, processStartedAt, runProcessAlive, signalRecordedGroup, type RecordedGroup } from "../process-identity.js";
+import { statusRows } from "../run-status.js";
 import { Store } from "../store.js";
 import { readGraphPromptFile, type GraphPlan, type PlannedNode } from "./document.js";
 import { argvHash, launchGate, readGateExit } from "./gates.js";

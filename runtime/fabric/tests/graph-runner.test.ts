@@ -13,7 +13,8 @@ import { catalogueSnapshot } from "../src/catalogue.js";
 import { validateGraph, type GraphDocument, type GraphNode } from "../src/graph/document.js";
 import { databasePath } from "../src/identity.js";
 import { GraphStore, RESERVATION_FILE, type Attempt, type Graph } from "../src/graph/store.js";
-import { listRecordedRuns, processStartedAt } from "../src/run-registry.js";
+import { listRecordedRuns } from "../src/run-registry.js";
+import { processStartedAt } from "../src/process-identity.js";
 import { scratchRoot } from "./helpers/temp-root.js";
 
 const testDirectory = dirname(fileURLToPath(import.meta.url));

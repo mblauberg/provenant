@@ -1,68 +1,162 @@
 #!/usr/bin/env python3
-"""Select the checker for `provenant check`, for front doors that are not Python.
-
-The compiled front door keeps registered-checkout custody and the stale-checkout
-advisory in the existing Python dispatcher (ADR 0027). This helper loads that
-dispatcher unchanged and calls its `check_target()` and
-`warn_if_stale_checkout()`, so no custody logic lives here.
-
-Contract: working directory and environment are the caller's. On success the
-helper writes `<checker path>\\0<selected root>\\0` to stdout and exits 0; the
-advisory warnings go to stderr. On refusal it prints `provenant: <message>` to
-stderr and exits 3 with empty stdout.
-"""
+"""Select the registered checkout that owns `provenant check`."""
 
 from __future__ import annotations
 
-from importlib.machinery import SourceFileLoader
-from importlib.util import module_from_spec, spec_from_loader
 import os
 from pathlib import Path
 import sys
 
-HERE = Path(__file__).resolve().parent
-# The Python dispatcher. In a checkout it is `scripts/provenant`; a tree whose
-# `scripts/provenant` is a compiled binary keeps the source beside it as
-# `scripts/provenant.py`.
-DISPATCHER_CANDIDATES = ("provenant", "provenant.py")
+from lib.product_root_resolver import POINTER_RELATIVE_PATH, load_pointer_file
+
+REPAIR = "repair: re-run install-harness from the product checkout, or set AGENT_FABRIC_PRODUCT_ROOT"
+FABRIC_MCP = "runtime/fabric/bin/fabric-mcp"
 
 
-def _is_python_source(path: Path) -> bool:
-    try:
-        with path.open("rb") as stream:
-            first = stream.readline(256)
-    except OSError:
-        return False
-    return first.startswith(b"#!") and b"python" in first
-
-
-def load_dispatcher():
-    for name in DISPATCHER_CANDIDATES:
-        path = HERE / name
-        if path.is_file() and _is_python_source(path):
-            break
+def resolve_product_root() -> Path:
+    configured = os.environ.get("AGENT_FABRIC_PRODUCT_ROOT") or None
+    agents_home = os.environ.get("AGENTS_HOME") or None
+    configured_instance = os.environ.get("AGENT_FABRIC_INSTANCE_ROOT") or None
+    instance = Path(configured_instance).expanduser() if configured_instance else Path.home() / ".agents"
+    if not instance.is_absolute():
+        raise ValueError(f"instance root must be an absolute path, got {instance}; {REPAIR}")
+    instance = instance.resolve()
+    pointer = instance / POINTER_RELATIVE_PATH
+    pointed = load_pointer_file(instance)
+    if configured is not None:
+        candidate = Path(configured).expanduser()
+        if not candidate.is_absolute():
+            raise ValueError(f"AGENT_FABRIC_PRODUCT_ROOT must be an absolute path, got {configured}; {REPAIR}")
+        candidate = candidate.resolve()
+    elif pointer.exists() or pointer.is_symlink():
+        if pointed is None:
+            raise ValueError(f"product-root pointer is invalid or stale at {pointer}; {REPAIR}")
+        candidate = pointed.resolve()
+    elif agents_home is not None:
+        candidate = Path(agents_home).expanduser()
+        if not candidate.is_absolute():
+            raise ValueError(f"AGENTS_HOME must be an absolute path, got {agents_home}; {REPAIR}")
+        candidate = candidate.resolve()
     else:
-        raise ValueError("Python dispatcher is unavailable beside check_target.py")
-    loader = SourceFileLoader("provenant_dispatcher", str(path))
-    module = module_from_spec(spec_from_loader(loader.name, loader))
-    loader.exec_module(module)
-    return module
+        candidate = (Path.home() / ".agents").resolve()
+    wrapper = candidate / FABRIC_MCP
+    if not wrapper.is_file() or not os.access(wrapper, os.X_OK):
+        raise ValueError(f"Fabric MCP launcher is missing or not executable at {wrapper}; {REPAIR}")
+    return candidate
+
+
+def nearest_git_metadata(root: Path) -> Path | None:
+    """Return the nearest .git entry without following or trusting it."""
+    requested = root.resolve()
+    for ancestor in (requested, *requested.parents):
+        candidate = ancestor / ".git"
+        try:
+            candidate.lstat()
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            raise ValueError(f"cannot inspect Git metadata at {candidate}: {exc}") from exc
+        return candidate
+    return None
+
+
+def registered_caller_checkout(product_root: Path) -> Path | None:
+    """Return the registered product checkout containing the caller, if any."""
+    try:
+        from worktree import PolicyError, common_git_dir, owning_root, worktree_records
+    except ImportError as exc:
+        raise ValueError(f"worktree policy owner is unavailable; {REPAIR}") from exc
+    try:
+        caller = Path.cwd().resolve()
+    except OSError as exc:
+        raise ValueError("cannot resolve the working directory; repair: cd into the checkout you intend to check") from exc
+    product_metadata = product_root.resolve() / ".git"
+    try:
+        product_metadata.lstat()
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise ValueError(f"cannot inspect product Git metadata at {product_metadata}: {exc}") from exc
+    try:
+        records = worktree_records(product_root)
+    except PolicyError as exc:
+        raise ValueError(f"cannot verify product checkout {product_root}: {exc}") from exc
+    registered = [(Path(str(record["worktree"])), Path(str(record["worktree"])).resolve())
+                  for record in records if record.get("worktree") is not None]
+    resolved_product = product_root.resolve()
+    product_records = [raw for raw, resolved in registered if resolved == resolved_product]
+    if not product_records or any(path.is_symlink() for path in product_records):
+        raise ValueError(f"product checkout {resolved_product} is not registered in its Git repository; "
+                         "repair: run ./scripts/check-harness from a registered checkout")
+    containing = [(raw, checkout) for raw, checkout in registered
+                  if caller == checkout or caller.is_relative_to(checkout)]
+    selected_record = max(containing, key=lambda item: len(item[1].parts)) if containing else None
+    if selected_record is not None and selected_record[0].is_symlink():
+        raise ValueError(f"registered checkout path is a symlink: {selected_record[0]}")
+    selected = selected_record[1] if selected_record is not None else None
+    if selected is not None:
+        try:
+            selected_root = owning_root(selected)
+            selected_common = common_git_dir(selected_root)
+            product_common = common_git_dir(resolved_product)
+        except PolicyError as exc:
+            raise ValueError(f"cannot verify Git ownership for {selected}: {exc}") from exc
+        if selected_root != selected:
+            raise ValueError(f"registered checkout identity does not match {selected}")
+        if selected_common != product_common:
+            raise ValueError(f"registered checkout {selected} belongs to another Git repository")
+    caller_metadata = nearest_git_metadata(caller)
+    if caller_metadata is None:
+        if selected is not None:
+            raise ValueError(f"registered checkout {selected} has no .git metadata")
+        return selected
+    if selected is not None and caller_metadata == selected / ".git":
+        return selected
+    try:
+        caller_root = owning_root(caller)
+    except PolicyError as exc:
+        raise ValueError(f"invalid Git metadata at {caller_metadata}; repair: run ./scripts/check-harness "
+                         "from the checkout you intend to check") from exc
+    try:
+        caller_common = common_git_dir(caller_root)
+        product_common = common_git_dir(resolved_product)
+    except PolicyError as exc:
+        raise ValueError(f"cannot verify caller Git ownership: {exc}") from exc
+    if caller_common == product_common:
+        raise ValueError(f"caller checkout {caller_root} is not a registered worktree of product root "
+                         f"{resolved_product}; repair: run ./scripts/check-harness from the checkout you "
+                         "intend to check")
+    return selected
+
+
+def checked_target(root: Path) -> Path:
+    """Require the selected checkout's own regular executable checker."""
+    target = root / "scripts/check-harness"
+    if target.is_symlink() or not target.is_file() or not os.access(target, os.X_OK):
+        raise ValueError(f"selected checkout {root} has no regular executable scripts/check-harness; "
+                         "repair: restore that checkout or run the checker directly from another checkout")
+    if not target.resolve().is_relative_to(root.resolve()):
+        raise ValueError(f"selected checker {target} resolves outside checkout {root}")
+    return target
+
+
+def check_target() -> tuple[Path, Path]:
+    local_root = Path(__file__).resolve().parent.parent
+    local_target = local_root / "scripts/check-harness"
+    local_available = (local_root / FABRIC_MCP).is_file() and local_target.is_file()
+    product_root = local_root if local_available else resolve_product_root()
+    caller_root = registered_caller_checkout(product_root)
+    selected = caller_root or (local_root if local_available else product_root)
+    return checked_target(selected), selected
 
 
 def main() -> int:
     try:
-        dispatcher = load_dispatcher()
-        target, selected = dispatcher.check_target()
+        checker, root = check_target()
     except (OSError, ValueError) as exc:
         print(f"provenant: {exc}", file=sys.stderr)
         return 3
-    try:
-        dispatcher.warn_if_stale_checkout(dispatcher.resolve_product_root())
-    except Exception as exc:  # advisory only; PROVENANT_DEBUG shows why it failed
-        if os.environ.get("PROVENANT_DEBUG"):
-            print(f"provenant: stale-checkout check failed: {exc!r}", file=sys.stderr)
-    sys.stdout.buffer.write(os.fsencode(target) + b"\0" + os.fsencode(selected) + b"\0")
-    sys.stdout.buffer.flush()
+    sys.stdout.buffer.write(os.fsencode(checker) + b"\0" + os.fsencode(root) + b"\0")
     return 0
 
 
