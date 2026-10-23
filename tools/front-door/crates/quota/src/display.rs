@@ -79,8 +79,12 @@ pub fn plan_label(plan: Option<&str>) -> Option<String> {
             _ => title_case(p),
         })
 }
-pub fn length_label(minutes: Option<f64>) -> Option<String> {
-    let minutes = minutes.filter(|m| *m != 0.0)?.round_ties_even() as i64;
+pub fn length_label(minutes: Option<Number>) -> Option<String> {
+    let minutes = minutes
+        .filter(|m| m.get() != 0.0)?
+        .rounded_integer()
+        .ok()?
+        .integer_value()?;
     Some(match minutes {
         60 => "Hourly".into(),
         300 => "5-hour".into(),
@@ -120,7 +124,7 @@ pub fn window_label(row: &Window, labels: &BTreeMap<String, String>) -> String {
     if let Some(label) = labels.get(&row.name).filter(|s| !s.is_empty()) {
         return label.clone();
     }
-    let Some(length) = length_label(row.window_minutes.map(Number::get)) else {
+    let Some(length) = length_label(row.window_minutes) else {
         return sentence_case(&row.name);
     };
     const LENGTH: &[&str] = &[
@@ -242,29 +246,26 @@ pub fn display<'a>(
     let longest = maximum(current.iter().copied(), |a, b| {
         a.window
             .window_minutes
-            .map(Number::get)
-            .unwrap_or(0.0)
-            .total_cmp(&b.window.window_minutes.map(Number::get).unwrap_or(0.0))
-            .then(a.window.used().total_cmp(&b.window.used()))
+            .unwrap_or_default()
+            .numeric_cmp(b.window.window_minutes.unwrap_or_default())
+            .then(a.window.compare_used(&b.window))
     })?;
     maximum(
         current.iter().copied().filter(|r| {
             r.window.used() >= alert
                 && !std::ptr::eq(*r, longest)
-                && r.window.window_minutes.map(Number::get).unwrap_or(0.0)
-                    < longest
-                        .window
-                        .window_minutes
-                        .map(Number::get)
-                        .unwrap_or(0.0)
+                && r.window
+                    .window_minutes
+                    .unwrap_or_default()
+                    .numeric_cmp(longest.window.window_minutes.unwrap_or_default())
+                    .is_lt()
         }),
         |a, b| {
-            a.window.used().total_cmp(&b.window.used()).then(
+            a.window.compare_used(&b.window).then(
                 b.window
                     .window_minutes
-                    .map(Number::get)
-                    .unwrap_or(0.0)
-                    .total_cmp(&a.window.window_minutes.map(Number::get).unwrap_or(0.0)),
+                    .unwrap_or_default()
+                    .numeric_cmp(a.window.window_minutes.unwrap_or_default()),
             )
         },
     )
@@ -275,9 +276,12 @@ pub fn repeats(window: &DisplayWindow, windows: &[DisplayWindow]) -> bool {
         && windows.iter().any(|other| {
             !other.window.name.contains(':')
                 && other.window.pool == window.window.pool
-                && other.window.window_minutes.map(Number::get)
-                    == window.window.window_minutes.map(Number::get)
-                && other.window.used() == window.window.used()
+                && match (other.window.window_minutes, window.window.window_minutes) {
+                    (Some(a), Some(b)) => a.numeric_cmp(b).is_eq(),
+                    (None, None) => true,
+                    _ => false,
+                }
+                && other.window.compare_used(&window.window).is_eq()
                 && stamp(other.window.reset_at.as_deref())
                     .zip(stamp(window.window.reset_at.as_deref()))
                     .is_some_and(|(a, b)| seconds_between(a, b).abs() <= 60.0)
@@ -480,9 +484,8 @@ pub fn describe(
         |a, b| {
             a.window
                 .window_minutes
-                .map(Number::get)
-                .unwrap_or(0.0)
-                .total_cmp(&b.window.window_minutes.map(Number::get).unwrap_or(0.0))
+                .unwrap_or_default()
+                .numeric_cmp(b.window.window_minutes.unwrap_or_default())
         },
     );
     let signed_out = value.status.as_deref() == Some("signed_out");
@@ -703,7 +706,7 @@ pub fn headline(policy: &impl QuotaPolicy, context: &Context, rows: &[DisplayAcc
             })
             .collect();
         let peak = peaks.into_iter().reduce(|a, b| {
-            if b.1.window.used() > a.1.window.used() {
+            if b.1.window.compare_used(&a.1.window).is_gt() {
                 b
             } else {
                 a
@@ -767,9 +770,8 @@ pub fn report(
         let longest = maximum(r.windows.iter(), |a, b| {
             a.window
                 .window_minutes
-                .map(Number::get)
-                .unwrap_or(0.0)
-                .total_cmp(&b.window.window_minutes.map(Number::get).unwrap_or(0.0))
+                .unwrap_or_default()
+                .numeric_cmp(b.window.window_minutes.unwrap_or_default())
         });
         (
             r.state == "exhausted",

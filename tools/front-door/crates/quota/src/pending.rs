@@ -303,6 +303,82 @@ impl Number {
             Self::Float(n) => n,
         }
     }
+    pub(crate) fn integer_value(self) -> Option<i128> {
+        match self {
+            Self::Int(n) => Some(n as i128),
+            Self::Unsigned(n) => Some(n as i128),
+            Self::Float(_) => None,
+        }
+    }
+    pub(crate) fn numeric_cmp(self, other: Self) -> std::cmp::Ordering {
+        fn integer_float(integer: i128, float: f64) -> std::cmp::Ordering {
+            let whole = float.trunc() as i128;
+            integer.cmp(&whole).then_with(|| {
+                if float.fract() > 0.0 {
+                    std::cmp::Ordering::Less
+                } else if float.fract() < 0.0 {
+                    std::cmp::Ordering::Greater
+                } else {
+                    std::cmp::Ordering::Equal
+                }
+            })
+        }
+        match (self.integer_value(), other.integer_value()) {
+            (Some(a), Some(b)) => a.cmp(&b),
+            (Some(a), None) => integer_float(a, other.get()),
+            (None, Some(b)) => integer_float(b, self.get()).reverse(),
+            _ => self
+                .get()
+                .partial_cmp(&other.get())
+                .unwrap_or(std::cmp::Ordering::Equal),
+        }
+    }
+    pub(crate) fn min(self, other: Self) -> Self {
+        if self.numeric_cmp(other).is_gt() {
+            other
+        } else {
+            self
+        }
+    }
+    pub(crate) fn max(self, other: Self) -> Self {
+        if self.numeric_cmp(other).is_lt() {
+            other
+        } else {
+            self
+        }
+    }
+    pub(crate) fn multiply(self, other: Self) -> Result<Self, crate::QuotaError> {
+        if let (Some(a), Some(b)) = (self.integer_value(), other.integer_value()) {
+            let product = a
+                .checked_mul(b)
+                .ok_or(crate::QuotaError::NumberOutOfRange)?;
+            if let Ok(n) = i64::try_from(product) {
+                return Ok(Self::Int(n));
+            }
+            if let Ok(n) = u64::try_from(product) {
+                return Ok(Self::Unsigned(n));
+            }
+            return Err(crate::QuotaError::NumberOutOfRange);
+        }
+        let product = self.get() * other.get();
+        if !product.is_finite() {
+            return Err(crate::QuotaError::NumberOutOfRange);
+        }
+        Ok(Self::Float(product))
+    }
+    pub(crate) fn rounded_integer(self) -> Result<Self, crate::QuotaError> {
+        match self {
+            Self::Float(n) => Self::checked_integer(n.round_ties_even()),
+            n => Ok(n),
+        }
+    }
+    pub(crate) fn from_value(value: &Value) -> Option<Self> {
+        let n = value.as_number()?;
+        n.as_i64()
+            .map(Self::Int)
+            .or_else(|| n.as_u64().map(Self::Unsigned))
+            .or_else(|| n.is_f64().then(|| n.as_f64().map(Self::Float)).flatten())
+    }
     pub fn integer_part(self) -> Result<Self, crate::QuotaError> {
         match self {
             Self::Float(n) => Self::checked_integer(n.trunc()),
@@ -342,32 +418,43 @@ impl<'de> Deserialize<'de> for Number {
 /// Decode before constructing typed records, including numbers in unknown fields.
 /// arbitrary_precision keeps oversized integer tokens intact until this check.
 pub fn decode_record<T: serde::de::DeserializeOwned>(input: &[u8]) -> Result<T, crate::QuotaError> {
-    fn check(value: &Value) -> Result<(), crate::QuotaError> {
-        match value {
-            Value::Number(n) if !n.is_i64() && !n.is_u64() && !n.is_f64() => {
-                return Err(crate::QuotaError::NumberOutOfRange);
-            }
-            Value::Array(items) => {
-                for value in items {
-                    check(value)?;
-                }
-            }
-            Value::Object(items) => {
-                for value in items.values() {
-                    check(value)?;
-                }
-            }
-            _ => {}
-        }
-        Ok(())
-    }
     let value: Value = serde_json::from_slice(input).map_err(crate::QuotaError::Record)?;
-    check(&value)?;
+    check_numbers(&value)?;
     serde_json::from_value(value).map_err(crate::QuotaError::Record)
 }
 
 impl Window {
+    pub(crate) fn compare_used(&self, other: &Self) -> std::cmp::Ordering {
+        match (
+            Number::from_value(&self.used_percent),
+            Number::from_value(&other.used_percent),
+        ) {
+            (Some(a), Some(b)) => a.numeric_cmp(b),
+            _ => self.used().total_cmp(&other.used()),
+        }
+    }
     pub fn used(&self) -> f64 {
         self.used_percent.as_f64().unwrap_or(f64::NAN)
     }
+}
+
+// port: belongs in provenant-records
+pub(crate) fn check_numbers(value: &Value) -> Result<(), crate::QuotaError> {
+    match value {
+        Value::Number(n) if !n.is_i64() && !n.is_u64() && !n.is_f64() => {
+            return Err(crate::QuotaError::NumberOutOfRange);
+        }
+        Value::Array(items) => {
+            for value in items {
+                check_numbers(value)?;
+            }
+        }
+        Value::Object(items) => {
+            for value in items.values() {
+                check_numbers(value)?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
 }

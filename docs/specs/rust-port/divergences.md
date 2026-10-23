@@ -206,3 +206,17 @@ They form the current baseline; they are not newly discovered port mismatches.
   `worst_headline_without_binding_is_an_explicit_python_bug_divergence`
   verifies both outcomes. This exception affects the inert library only;
   relevant independent judges still gate command cut-over under rulebook v3.
+
+### RP-5 follow-up: exact integer calculations and selection (fixed)
+
+- Independent repair review found that retaining integer fields alone still
+  allowed TTL arithmetic and interval/window comparisons to round through
+  f64. `schedule_keeps_large_integral_ttls_and_exact_interval_order` and
+  `display_compares_and_labels_large_integer_windows_exactly` both failed
+  before the follow-up repair on `9007199254740993`.
+- Integer multiplication, min/max, ordering, rounding and length labels now
+  retain exact integers. Mixed integer/float comparisons preserve integer
+  precision, and overflow remains typed. Configuration `Value` layers are
+  checked before deserialisation, including unknown nested numbers.
+- Python's explicit floating point formats (`:g` and `:,.0f`) still use float
+  calculation at the text boundary, as the source does. Wire integers do not.

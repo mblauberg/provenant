@@ -146,6 +146,8 @@ pub fn resolve(
     account: &Value,
     settings: &Value,
 ) -> Result<(Config, Vec<String>), QuotaError> {
+    crate::pending::check_numbers(account)?;
+    crate::pending::check_numbers(settings)?;
     let mut values =
         serde_json::to_value(Config::for_provider(provider)).map_err(QuotaError::Record)?;
     let mut notes = vec![];
@@ -177,7 +179,11 @@ pub fn resolve(
         }
     }
     let mut config: Config = serde_json::from_value(values).map_err(QuotaError::Record)?;
-    if config.max_interval_seconds.get() < config.min_interval_seconds.get() {
+    if config
+        .max_interval_seconds
+        .numeric_cmp(config.min_interval_seconds)
+        .is_lt()
+    {
         notes.push("max_interval_seconds is below min_interval_seconds; using the defaults".into());
         config.min_interval_seconds = Number::Int(60);
         config.max_interval_seconds = Number::Int(21600);
@@ -296,9 +302,9 @@ pub fn plan(input: PlanInput<'_>) -> Result<(Schedule, bool), QuotaError> {
         seen.is_some_and(|s| !own && seconds_between(now, s) <= config.active_window_seconds.get());
     let since_fetch = seen.zip(attempted).is_some_and(|(s, a)| !own && s > a);
     let base = if active {
-        config.ttl_active_seconds.get()
+        config.ttl_active_seconds
     } else {
-        config.ttl_idle_seconds.get()
+        config.ttl_idle_seconds
     };
     let mut reason = if active { "active" } else { "idle" };
     let rows: Vec<_> = snapshot
@@ -306,34 +312,34 @@ pub fn plan(input: PlanInput<'_>) -> Result<(Schedule, bool), QuotaError> {
         .iter()
         .filter(|r| r.used().is_finite() && sets_state(r))
         .collect();
-    let mut factor = 1.0;
-    if near(&rows, now, base, config) {
-        factor = config.near_exhaustion_factor.get();
+    let mut factor = Number::Int(1);
+    if near(&rows, now, base.get(), config) {
+        factor = config.near_exhaustion_factor;
         reason = "near_exhaustion";
     }
     if trigger != "manual" {
-        factor *= match power {
-            "battery" => config.battery_factor.get(),
-            "low" => config.low_power_factor.get(),
-            _ => 1.0,
-        };
+        factor = factor.multiply(match power {
+            "battery" => config.battery_factor,
+            "low" => config.low_power_factor,
+            _ => Number::Int(1),
+        })?;
     }
     let mut ttl = config
         .max_interval_seconds
-        .get()
-        .min(config.min_interval_seconds.get().max(base * factor));
+        .min(config.min_interval_seconds.max(base.multiply(factor)?));
     if power == "low" && trigger != "manual" && config.low_power_skip_costs.contains(&config.cost) {
-        ttl = config.max_interval_seconds.get();
+        ttl = config.max_interval_seconds;
         reason = "low_power";
     }
     let mut next_due = if let Some(attempted) = attempted {
         let mut due = add_seconds(
             attempted,
-            ttl * (1.0
-                + jitter(
-                    &format!("{account_id}|{}", iso(attempted)),
-                    config.jitter_fraction.get(),
-                )),
+            ttl.get()
+                * (1.0
+                    + jitter(
+                        &format!("{account_id}|{}", iso(attempted)),
+                        config.jitter_fraction.get(),
+                    )),
         )?;
         let exhausted: Vec<_> = rows
             .iter()
@@ -380,7 +386,7 @@ pub fn plan(input: PlanInput<'_>) -> Result<(Schedule, bool), QuotaError> {
     let age = attempted
         .map(|a| seconds_between(now, a))
         .unwrap_or(f64::INFINITY);
-    let coalesce = config.coalesce_seconds.get().min(0.25 * ttl);
+    let coalesce = config.coalesce_seconds.get().min(0.25 * ttl.get());
     let timer_due = seconds_between(next_due.min(plain), now) <= coalesce;
     let due = !blocked
         && match trigger {
@@ -402,7 +408,7 @@ pub fn plan(input: PlanInput<'_>) -> Result<(Schedule, bool), QuotaError> {
         Schedule {
             next_due_at: iso(next_due),
             reason: reason.into(),
-            ttl_seconds: Number::checked_integer(ttl.round_ties_even())?,
+            ttl_seconds: ttl.rounded_integer()?,
             trigger: state.trigger,
             failures,
             backoff_until: backoff.map(iso),

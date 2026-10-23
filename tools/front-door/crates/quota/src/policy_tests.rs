@@ -230,7 +230,10 @@ fn vocabulary_and_length_policy() {
     let mut pooled = window("claude.5h", 0.0, Some(300.0), None);
     pooled.pool = Some("claude".into());
     assert_eq!(window_label(&pooled, &labels), "5-hour");
-    assert_eq!(length_label(Some(90.5)), Some("90-minute".into()));
+    assert_eq!(
+        length_label(Some(Number::Float(90.5))),
+        Some("90-minute".into())
+    );
     assert_eq!(amount(1234.5, Some("USD")), "$1,234");
     assert_eq!(amount(1235.5, Some("AUD")), "1,236 AUD");
     assert_eq!(duration(172800.0 + 3600.0), "2d 1h");
@@ -1445,4 +1448,94 @@ fn worst_headline_without_binding_is_an_explicit_python_bug_divergence() {
     let expected: Value = oracle(json!({"operation":"headline_outcome", "args":[rows],
         "context":{"settings":c.settings}}));
     assert_eq!(expected, json!({"error":"TypeError"}));
+}
+
+#[test]
+fn schedule_keeps_large_integral_ttls_and_exact_interval_order() {
+    use crate::schedule::*;
+    let large = 9007199254740993_u64;
+    let (config, notes) = resolve(
+        "claude",
+        &json!({"ttl_idle_seconds":large, "max_interval_seconds":large}),
+        &Value::Null,
+    )
+    .unwrap();
+    let (block, _) = plan(PlanInput {
+        account_id: "claude/a",
+        snapshot: None,
+        now: now(),
+        config: &config,
+        trigger: "timer",
+        power: "ac",
+        activity_at: None,
+        ignore_backoff: false,
+        notes: &notes,
+    })
+    .unwrap();
+    assert_eq!(json!(block.ttl_seconds).to_string(), large.to_string());
+    let (config, notes) = resolve(
+        "claude",
+        &json!({"min_interval_seconds":large, "max_interval_seconds":large-1}),
+        &Value::Null,
+    )
+    .unwrap();
+    assert_eq!(json!(config.min_interval_seconds), json!(60));
+    assert_eq!(json!(config.max_interval_seconds), json!(21600));
+    assert_eq!(
+        notes,
+        ["max_interval_seconds is below min_interval_seconds; using the defaults"]
+    );
+    if python_available() {
+        let account = json!({"ttl_idle_seconds":large, "max_interval_seconds":large});
+        let (config, _) = resolve("claude", &account, &Value::Null).unwrap();
+        let expected: Value = oracle(
+            json!({"operation":"schedule","provider":"claude","account_id":"claude/a","account_quota":account,"now":NOW}),
+        );
+        assert_record_eq(&json!(config), &expected[0]);
+        assert_record_eq(&json!(block), &expected[2]);
+    }
+}
+
+#[test]
+fn display_compares_and_labels_large_integer_windows_exactly() {
+    if !python_available() {
+        return;
+    }
+    let mut rows = Vec::new();
+    for (name, minutes) in [
+        ("first", 9007199254740992_u64),
+        ("second", 9007199254740993),
+    ] {
+        let window: Window = decode_record(
+            serde_json::to_vec(&json!({"name":name,"used_percent":10,"window_minutes":minutes}))
+                .unwrap()
+                .as_slice(),
+        )
+        .unwrap();
+        assert_eq!(
+            window_label(&window, &BTreeMap::new()),
+            format!("{minutes}-minute ({})", sentence_case(name))
+        );
+        rows.push(DisplayWindow {
+            window,
+            pace: Pace::default(),
+            label: String::new(),
+            pool_label: None,
+            reset_passed: None,
+        });
+    }
+    let policy = OraclePolicy { context: context() };
+    assert_eq!(
+        display(&policy, &rows.iter().collect::<Vec<_>>(), now(), 90.0)
+            .unwrap()
+            .window
+            .name,
+        "second"
+    );
+    let oversized: Value =
+        serde_json::from_str("{\"ttl_idle_seconds\":18446744073709551616}").unwrap();
+    assert!(matches!(
+        crate::schedule::resolve("claude", &oversized, &Value::Null),
+        Err(QuotaError::NumberOutOfRange)
+    ));
 }
