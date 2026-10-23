@@ -2,7 +2,6 @@ from datetime import UTC, datetime, timedelta
 from functools import partial
 from pathlib import Path
 import contextlib
-import importlib.util
 import io
 import itertools
 import json
@@ -1359,7 +1358,6 @@ def test_ledger_rows_carry_the_configured_host_id_without_duplicates(tmp_path):
 
 
 def test_host_id_prefers_the_instance_config_over_home_and_hostname(tmp_path, monkeypatch):
-    import importlib.util
     telemetry = load_script(ROOT / 'scripts/telemetry.py', 'telemetry_host_precedence')
     monkeypatch.setenv('HOME', str(tmp_path / 'home'))
     monkeypatch.setenv('AGENT_FABRIC_INSTANCE_ROOT', str(tmp_path / 'instance'))
@@ -1428,7 +1426,6 @@ else:
 ''')
     shim.chmod(0o755)
     # Use the real aggregate encoder, then represent another host with the same session ID.
-    import importlib.util
     # The in-process encoder reads host id and quota snapshots from the environment: isolate it from the real ~/.agents.
     for key, value in environment(tmp_path).items():
         monkeypatch.setenv(key, value)
@@ -1875,7 +1872,7 @@ def filtering_gh(tmp_path, pulls):
     return bin_dir
 
 
-def hourly_pulls(count, start='2026-09-01T00:00:00'):
+def hourly_pulls(count, start='2026-09-01T00:00:00'):  # timebomb: allow sync reads SYNC_FLOOR..now, a past date never expires
     from datetime import datetime, timedelta
     first = datetime.fromisoformat(start)
     return [pull(1 + index, (first + timedelta(hours=index)).isoformat() + 'Z') for index in range(count)]
@@ -1958,7 +1955,6 @@ def test_rendered_reports_fit_four_kilobytes_of_utf8(tmp_path):
 
 
 def test_fit_keeps_whole_lines_within_the_byte_budget():
-    import importlib.util
     owner = load_script(ROOT / 'scripts/telemetry_changes.py', 'fit_changes_test')
     assert owner.fit(['short', 'lines']) == 'short\nlines'
     text = owner.fit([f'{index} ' + '🚀' * 200 for index in range(10)])
@@ -2355,7 +2351,6 @@ def test_a_message_in_several_identity_dirs_keeps_one_owner_across_ingest_and_re
 
 def test_a_transcript_swapped_for_a_link_after_discovery_is_never_read(tmp_path, monkeypatch):
     home = tmp_path / 'home'
-    import importlib.util
     for name, value in environment(tmp_path).items():
         monkeypatch.setenv(name, value)
     monkeypatch.chdir(tmp_path)
@@ -2707,7 +2702,6 @@ def legacy_stats(db, since=None, prices=None, *, summary=False, until=None):
 
 
 def load_telemetry(tmp_path, monkeypatch):
-    import importlib.util
     monkeypatch.setenv('AGENT_FABRIC_STATE_ROOT', str(tmp_path / 'state'))
     monkeypatch.setenv('HOME', str(tmp_path / 'home'))
     module = load_script(ROOT / 'scripts/telemetry.py', 'telemetry_golden')

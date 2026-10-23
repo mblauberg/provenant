@@ -1,13 +1,12 @@
 """Shared fixtures and builders for provider quota and display tests."""
 
-from datetime import UTC, datetime
 import json
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
 
 from tests.support.modules import load_script
-
 
 ROOT = Path(__file__).resolve().parents[2]
 NOW = datetime.now(UTC).replace(microsecond=0)
@@ -23,7 +22,8 @@ def quota(tmp_path, monkeypatch, request):
     for name in ('PROVENANT_QUOTA', 'CLAUDE_CONFIG_DIR', 'CODEX_HOME', 'XDG_DATA_HOME'):
         monkeypatch.delenv(name, raising=False)
     module_name = {'test_provider_quota.py': 'provider_quota_under_test',
-                   'test_quota_display.py': 'provider_quota_display_under_test'}[request.path.name]
+                   'test_quota_display.py': 'provider_quota_display_under_test'}.get(
+        request.path.name, f'{request.path.stem}_provider_quota_under_test')
     module = load_script(ROOT / 'scripts/provider_quota.py', module_name)
 
     def refuse(*args, **kwargs):
