@@ -118,8 +118,24 @@ def patterns():
     }
 
 
-def connect():
+class LedgerNotInitialised(ValueError):
+    pass
+
+
+def connect(readonly=False):
     path = state_root() / 'telemetry.sqlite3'
+    if readonly:
+        if not path.is_file():
+            raise LedgerNotInitialised('ledger not initialised')
+        db = sqlite3.connect(path.resolve().as_uri() + '?mode=ro', uri=True)
+        db.row_factory = sqlite3.Row
+        tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        version = db.execute('PRAGMA user_version').fetchone()[0]
+        if version != 4 or 'sources' not in tables:
+            db.close()
+            raise LedgerNotInitialised('ledger not initialised')
+        load_hosts(db)
+        return db
     path.parent.mkdir(parents=True, exist_ok=True)
     db = sqlite3.connect(path)
     db.row_factory = sqlite3.Row
@@ -801,7 +817,8 @@ def main(argv=None):
     try:
         if args.since:
             since_time(args.since)
-        with connect() as db:
+        read_only = args.command != 'ingest' and not (args.command == 'changes' and (args.sync or args.add))
+        with connect(readonly=read_only) as db:
             if args.command in {'changes', 'retro'} or args.compare:
                 return report_changes(db, args)
             if args.command == 'stats':
@@ -824,7 +841,8 @@ def main(argv=None):
                       f"{row['path_pattern']}")
         return int(args.command == 'ingest' and any(row['status'] == 'error' for row in rows))
     except (OSError, ValueError, sqlite3.Error) as exc:
-        print(f'telemetry: {type(exc).__name__}', file=sys.stderr)
+        label = str(exc) if isinstance(exc, LedgerNotInitialised) else type(exc).__name__
+        print(f'telemetry: {label}', file=sys.stderr)
         return 1
 
 
