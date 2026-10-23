@@ -17,6 +17,7 @@ pub use policy::PolicyError;
 pub mod authority_mapping;
 pub mod compact_reinject;
 pub mod delivery_receipt_commands;
+pub mod delivery_receipt_process;
 pub mod dispatch_preflight;
 pub mod git_evidence_packet;
 pub mod idle_pause;
