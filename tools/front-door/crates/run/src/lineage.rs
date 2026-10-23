@@ -2,7 +2,81 @@
 //!
 //! This unit defines the interface, not the journal/cancellation implementation.
 //! Process identities and lock custody must come from the supervisor's safe API.
-pub use crate::pending::{ChildReport, OwnerCustody, ParentAttempt};
+pub use crate::pending::OwnerCustody;
+use serde::{Deserialize, Serialize};
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "serde_json::Value")]
+pub struct ParentAttempt {
+    run_id: String,
+    task_id: String,
+    attempt: u64,
+    run_dir: std::path::PathBuf,
+}
+
+impl TryFrom<serde_json::Value> for ParentAttempt {
+    type Error = &'static str;
+    fn try_from(value: serde_json::Value) -> Result<Self, Self::Error> {
+        let run_id = value
+            .get("run_id")
+            .and_then(serde_json::Value::as_str)
+            .filter(|s| !s.is_empty())
+            .ok_or("invalid parent run id")?;
+        let task_id = value
+            .get("task_id")
+            .and_then(serde_json::Value::as_str)
+            .filter(|s| {
+                let bytes = s.as_bytes();
+                !bytes.is_empty()
+                    && bytes.len() <= 64
+                    && bytes[0].is_ascii_alphanumeric()
+                    && bytes
+                        .iter()
+                        .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(b))
+            })
+            .ok_or("invalid parent task id")?;
+        let attempt = value
+            .get("attempt")
+            .and_then(serde_json::Value::as_u64)
+            .filter(|n| *n > 0)
+            .ok_or("invalid parent attempt")?;
+        let run_dir = value
+            .get("run_dir")
+            .and_then(serde_json::Value::as_str)
+            .map(std::path::PathBuf::from)
+            .filter(|p| p.is_absolute())
+            .ok_or("invalid parent run directory")?;
+        Ok(Self {
+            run_id: run_id.into(),
+            task_id: task_id.into(),
+            attempt,
+            run_dir,
+        })
+    }
+}
+
+impl ParentAttempt {
+    pub fn run_id(&self) -> &str {
+        &self.run_id
+    }
+    pub fn task_id(&self) -> &str {
+        &self.task_id
+    }
+    pub fn attempt(&self) -> u64 {
+        self.attempt
+    }
+    pub fn run_dir(&self) -> &Path {
+        &self.run_dir
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ChildReport {
+    pub run_id: String,
+    #[serde(flatten)]
+    pub fields: std::collections::BTreeMap<String, serde_json::Value>,
+}
+
 use std::io;
 use std::path::{Path, PathBuf};
 use thiserror::Error;
@@ -13,7 +87,9 @@ pub const CUSTODY_ENV: &str = "PROVENANT_NESTED_CUSTODY_FD";
 
 /// Invalid inherited ancestry is ignored, as it is by the Python owner.
 pub fn parent_attempt(environment_value: Option<&str>) -> Option<ParentAttempt> {
-    environment_value.and_then(|s| serde_json::from_str(s).ok())
+    environment_value
+        .and_then(|s| provenant_records::checked_json::from_str(s).ok())
+        .and_then(|v| serde_json::from_value(v).ok())
 }
 
 pub fn journal(parent: &ParentAttempt) -> PathBuf {
@@ -160,7 +236,7 @@ pub fn child_errors(children: &[ChildReport]) -> Vec<String> {
                 .get("status")
                 .unwrap_or(&serde_json::Value::Null);
             let reaped = child.fields.get("reaped");
-            let has_reaped = reaped.is_some_and(crate::pending::json_truthy);
+            let has_reaped = reaped.is_some_and(provenant_core::py::python_truth);
             if (status.is_null() || matches!(status.as_str(), Some("running" | "ok" | "partial")))
                 && !has_reaped
             {
@@ -171,103 +247,40 @@ pub fn child_errors(children: &[ChildReport]) -> Vec<String> {
                 .get("task_id")
                 .map(python_string)
                 .unwrap_or_else(|| "?".into());
-            let detail = if let Some(reaped) = reaped.filter(|v| crate::pending::json_truthy(v)) {
-                format!(
-                    "{}; reaped {} leftover process(es)",
-                    python_string(status),
-                    match reaped {
-                        serde_json::Value::Array(values) => values.len(),
-                        serde_json::Value::Object(values) => values.len(),
-                        serde_json::Value::String(value) => value.chars().count(),
-                        // Python raises TypeError for len(number/bool). The
-                        // interface returns Vec, so preserve truthiness and
-                        // report the single truthy primitive as one item.
-                        _ => 1,
-                    }
-                )
-            } else {
-                child
-                    .fields
-                    .get("error")
-                    .filter(|v| crate::pending::json_truthy(v))
-                    .map(python_string)
-                    .unwrap_or_else(|| python_string(status))
-            };
+            let detail =
+                if let Some(reaped) = reaped.filter(|v| provenant_core::py::python_truth(v)) {
+                    format!(
+                        "{}; reaped {} leftover process(es)",
+                        python_string(status),
+                        match reaped {
+                            serde_json::Value::Array(values) => values.len(),
+                            serde_json::Value::Object(values) => values.len(),
+                            serde_json::Value::String(value) => value.chars().count(),
+                            // Python raises TypeError for len(number/bool). The
+                            // interface returns Vec, so preserve truthiness and
+                            // report the single truthy primitive as one item.
+                            _ => 1,
+                        }
+                    )
+                } else {
+                    child
+                        .fields
+                        .get("error")
+                        .filter(|v| provenant_core::py::python_truth(v))
+                        .map(python_string)
+                        .unwrap_or_else(|| python_string(status))
+                };
             Some(format!("child run {} task {task}: {detail}", child.run_id))
         })
         .collect()
 }
 
-fn python_string(value: &serde_json::Value) -> String {
-    match value {
-        serde_json::Value::Null => "None".into(),
-        serde_json::Value::Bool(true) => "True".into(),
-        serde_json::Value::Bool(false) => "False".into(),
-        serde_json::Value::String(s) => s.clone(),
-        serde_json::Value::Array(items) => format!(
-            "[{}]",
-            items
-                .iter()
-                .map(python_repr_value)
-                .collect::<Vec<_>>()
-                .join(", ")
-        ),
-        // serde_json's default Map is key-sorted; Python dict repr preserves
-        // input order. Nested object key order is a known boundary divergence.
-        serde_json::Value::Object(items) => format!(
-            "{{{}}}",
-            items
-                .iter()
-                .map(|(k, v)| format!(
-                    "{}: {}",
-                    crate::pending::python_repr(k),
-                    python_repr_value(v)
-                ))
-                .collect::<Vec<_>>()
-                .join(", ")
-        ),
-        serde_json::Value::Number(n) if n.is_i64() || n.is_u64() => n.to_string(),
-        serde_json::Value::Number(n) => python_float_string(n.as_f64().unwrap_or(0.0)),
-    }
-}
-
-fn python_repr_value(value: &serde_json::Value) -> String {
-    match value {
-        serde_json::Value::String(s) => crate::pending::python_repr(s),
-        other => python_string(other),
-    }
-}
-
-fn python_float_string(value: f64) -> String {
-    let raw = format!("{value:?}");
-    if let Some((mantissa, exponent)) = raw.split_once('e') {
-        let exponent: i32 = exponent.parse().unwrap_or(0);
-        format!(
-            "{mantissa}e{}{:#02}",
-            if exponent >= 0 { "+" } else { "" },
-            exponent.abs()
-        )
-    } else if raw.contains('.') {
-        raw
-    } else {
-        format!("{raw}.0")
-    }
-}
+use provenant_core::py::python_str as python_string;
 
 fn python_numeric_equal(value: Option<&serde_json::Value>, expected: u64) -> bool {
-    match value {
-        Some(serde_json::Value::Number(n)) if n.is_u64() || n.is_i64() => {
-            n.as_u64() == Some(expected)
-        }
-        Some(serde_json::Value::Number(n)) => n.as_f64().is_some_and(|v| {
-            v.is_finite()
-                && v.fract() == 0.0
-                && (0.0..18_446_744_073_709_551_616.0).contains(&v)
-                && v as u64 == expected
-        }),
-        Some(serde_json::Value::Bool(v)) => u64::from(*v) == expected,
-        _ => false,
-    }
+    value.is_some_and(|value| {
+        provenant_core::py::python_json_eq(value, &serde_json::Value::from(expected))
+    })
 }
 
 pub fn annotate_child_errors(error: Option<&str>, children: &[ChildReport]) -> Option<String> {
@@ -291,40 +304,8 @@ pub fn annotate_child_errors(error: Option<&str>, children: &[ChildReport]) -> O
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::oracle::CommandOutput;
     use serde_json::{json, Value};
-    pub(super) fn port_python() -> Option<std::ffi::OsString> {
-        let executable =
-            std::env::var_os("PROVENANT_PORT_PYTHON").unwrap_or_else(|| "python3".into());
-        let version_ok = std::process::Command::new(&executable)
-            .arg("--version")
-            .output()
-            .ok()
-            .filter(|o| o.status.success())
-            .and_then(|o| {
-                String::from_utf8(o.stdout)
-                    .ok()
-                    .or_else(|| String::from_utf8(o.stderr).ok())
-            })
-            .and_then(|s| {
-                s.split_whitespace()
-                    .last()?
-                    .split('.')
-                    .take(2)
-                    .map(str::parse::<u32>)
-                    .collect::<Result<Vec<_>, _>>()
-                    .ok()
-            })
-            .is_some_and(|v| v.len() == 2 && (v[0], v[1]) >= (3, 12));
-        if version_ok {
-            Some(executable)
-        } else {
-            if std::env::var("PROVENANT_PORT_DIFF_REQUIRED").as_deref() == Ok("1") {
-                panic!("PROVENANT_PORT_DIFF_REQUIRED=1 but Python >=3.12 oracle unavailable");
-            }
-            eprintln!("skip: Python >=3.12 oracle unavailable");
-            None
-        }
-    }
     fn value() -> Value {
         json!({"run_id":"mcp-parent","task_id":"writer","attempt":1,"run_dir":"/runs/parent"})
     }
@@ -450,10 +431,10 @@ mod tests {
             r#"{"run_id":"r","task_id":"t","attempt":18446744073709551616,"run_dir":"/r"}"#.into(),
         ])
         .unwrap();
-        let Some(python) = super::tests::port_python() else {
+        let Some(mut python) = crate::oracle::python() else {
             return;
         };
-        let result = std::process::Command::new(python)
+        let result = python
             .args([
                 "-c",
                 r#"
@@ -468,7 +449,7 @@ print(json.dumps(rows))
             ])
             .arg(script_root)
             .arg(&fixtures)
-            .output();
+            .bounded_output();
         let result = match result {
             Err(e) if e.kind() == io::ErrorKind::NotFound => {
                 eprintln!("SKIP: python3 absent");
@@ -494,6 +475,7 @@ print(json.dumps(rows))
 #[cfg(test)]
 mod review_regressions {
     use super::*;
+    use crate::oracle::CommandOutput;
     use serde_json::{json, Value};
     #[test]
     fn batch_owner_mode_preserves_execution_custody_decision() {
@@ -540,17 +522,17 @@ print(json.dumps(m.child_errors(json.loads(sys.argv[2]))))
 "#;
         let script_root =
             Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../../skills/orchestrate/scripts");
-        let Some(python) = super::tests::port_python() else {
+        let Some(mut python) = crate::oracle::python() else {
             return;
         };
-        let result = std::process::Command::new(python)
+        let result = python
             .args([
                 "-c",
                 script,
                 script_root.to_str().unwrap(),
                 &serde_json::to_string(&children).unwrap(),
             ])
-            .output();
+            .bounded_output();
         let result = match result {
             Err(e) if e.kind() == io::ErrorKind::NotFound => {
                 eprintln!("skip: python3 absent");
