@@ -18,7 +18,7 @@ the root by hand or hardcode a checkout path.
 3. **Otherwise open a second client.**
    1. Resolve `provenant root`. Through the MCP SDK stdio transport or an
       equivalent host API, create a client whose server process is
-      `<root>/runtime/fabric/bin/fabric-mcp`, with this repository or worktree
+      the installed `provenant` binary (MCP entry point), with this repository or worktree
       as its working directory and the same `AGENT_FABRIC_*` environment.
       Spawning the process alone gives no callable connection; if the host
       cannot create and hold a client, fail closed.

@@ -45,7 +45,6 @@ jobs:
       # classification step below.
       harness: ${{ github.event_name != 'pull_request' && 'true' || (steps.filter.outputs.harness == 'true' && steps.docs.outputs.docs-only != 'true') }}
       docs: ${{ github.event_name == 'pull_request' && steps.filter.outputs.harness == 'true' && steps.docs.outputs.docs-only == 'true' }}
-      fabric: ${{ github.event_name != 'pull_request' && 'true' || steps.filter.outputs.fabric }}
       split-root: ${{ github.event_name != 'pull_request' && 'true' || steps.filter.outputs.split-root }}
       workflows: ${{ github.event_name != 'pull_request' && 'true' || steps.filter.outputs.workflows }}
       rust: ${{ github.event_name != 'pull_request' && 'true' || steps.filter.outputs.rust }}
@@ -166,15 +165,6 @@ jobs:
               # Locked Python test tooling for this job's own gate.
               - 'pyproject.toml'
               - 'uv.lock'
-            fabric:
-              - *ci-contract
-              - *node-workspace
-              - 'config/**'
-              - 'pyproject.toml'
-              - 'scripts/**'
-              - 'skills/**'
-              - 'uv.lock'
-              - 'runtime/fabric/**'
             split-root:
               - *ci-contract
               - *node-workspace
@@ -355,7 +345,6 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      # test_fabric_skill_params exports the tool schemas with tsx.
       - name: Set up Node.js workspace
         uses: $/.github/actions/setup-node-workspace
       - name: Set up uv and Python
@@ -372,41 +361,7 @@ jobs:
           AGENT_FABRIC_INSTANCE_ROOT: ${{ github.workspace }}
         run: |
           .venv/bin/python scripts/check_harness.py
-          .venv/bin/python -m pytest -q tests/test_harness_document_contract.py tests/test_fabric_skill_params.py
-
-  fabric:
-    name: Fabric typecheck, tests and audit
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    permissions:
-      contents: read
-    needs: detect-changes
-    if: needs.detect-changes.outputs.fabric == 'true'
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - name: Set up Node.js workspace
-        uses: $/.github/actions/setup-node-workspace
-      - name: Set up uv and Python
-        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
-        with:
-          python-version: "3.14"
-          enable-cache: true
-          cache-dependency-glob: uv.lock
-      - name: Install locked orchestration dependencies
-        run: uv sync --locked --only-group test
-      - name: Run typecheck and tests
-        run: npm run check
-      - name: Verify packed Fabric CLI and MCP bins
-        run: npm run test:package-install --workspace @local/fabric
-      - name: Drive the registered MCP launcher end to end
-        env:
-          HARNESS_PYTHON: ${{ github.workspace }}/.venv/bin/python
-        run: node runtime/fabric/mcp-smoke.mjs
-      - name: Audit production dependencies
-        run: npm audit --workspace=@local/fabric --omit=dev --audit-level=high
+          .venv/bin/python -m pytest -q tests/test_harness_document_contract.py
 
   split-root:
     name: Split-root contract rig
@@ -486,10 +441,7 @@ jobs:
             tests/test_install_provenant_command.py \
             tests/test_install_skills.py tests/test_check_provenant_install.py \
             --deselect tests/test_instance_installation.py::test_the_repository_ships_a_valid_fused_desired_state -q
-      # The workspace suite already ran fused in the fabric job (`npm run
-      # check`); under split roots the same command re-proves the JS side
-      # against genuinely split product/instance roots without a second full
-      # `npm test` placement.
+      # Verify checkout-local Node dependencies under split product/instance roots.
       - name: Run workspace checks under split roots
         run: npm run check
 
@@ -715,7 +667,6 @@ jobs:
       - python-tests
       - lane-conformance
       - docs
-      - fabric
       - split-root
       - rust
       - rust-macos-release

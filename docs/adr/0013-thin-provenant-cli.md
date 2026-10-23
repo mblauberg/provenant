@@ -14,7 +14,7 @@ amended on 2026-10-22 to add the `lease` row (see
 > snapshot. Its daemon-era command and provider-execution ownership statements
 > are historical evidence, not current operational guidance. Current Fabric
 > commands and configuration are owned by
-> [`runtime/fabric/README.md`](../../runtime/fabric/README.md); Fabric now
+> [Fabric Rust design](../specs/rust-port/design/fabric.md); Fabric now
 > coordinates messages, tasks and activity, and its thin MCP façade can start
 > the same provider owners available through the direct CLI.
 > The current front door delegates `route`, `worktree`, `check`, `fabric`,

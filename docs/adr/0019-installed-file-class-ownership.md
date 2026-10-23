@@ -8,7 +8,7 @@ issue #561); applies [ADR 0001](0001-personal-first-product-compatible.md) and
 > current, but its daemon-era paths and command examples are a pre-ADR-0020
 > implementation snapshot. Do not use them as operational guidance. Current
 > Fabric commands and configuration are owned by
-> [`runtime/fabric/README.md`](../../runtime/fabric/README.md); ADR 0020 records
+> [Fabric Rust design](../specs/rust-port/design/fabric.md); ADR 0020 records
 > the runtime retirement.
 
 ## Context

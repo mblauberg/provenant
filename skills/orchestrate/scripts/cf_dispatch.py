@@ -83,9 +83,8 @@ When Fabric is used, the caller records any Fabric correlation.
 
 # The adapters with an executing arm in the supervisor. This is the only
 # adapter list kept here: dispatch state (implemented / dormant / unsupported)
-# is owned by `dispatch_registry` in config/adapter-compatibility.yaml, and
-# runtime/fabric/tests/adapter-registry.test.ts binds this list to the
-# registry's implemented set, so the two cannot drift. There are no dormant
+# is owned by `dispatch_registry` in config/adapter-compatibility.yaml.
+# There are no dormant
 # adapters today; a future dormant adapter must be refused here (absent from
 # this list) until its arm and safety boundary exist.
 DISPATCH_IMPLEMENTED_ADAPTERS = ("agy", "claude", "codex", "copilot", "cursor", "kiro", "opencode")

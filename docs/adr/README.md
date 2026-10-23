@@ -9,7 +9,7 @@ changed, so this index does not restate a ratification chronology.
 Pre-ADR-0020 implementation
 paths in retained decisions are
 historical evidence; the current Fabric owner is
-[`runtime/fabric/README.md`](../../runtime/fabric/README.md).
+[Fabric Rust design](../specs/rust-port/design/fabric.md).
 
 | ADR | Title | Status |
 |---|---|---|

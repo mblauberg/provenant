@@ -25,7 +25,7 @@ def git(*args: str, cwd: Path) -> subprocess.CompletedProcess[str]:
 
 
 def direct_dependencies(checkout: Path) -> set[str]:
-    manifests = [checkout / "package.json", checkout / "runtime/fabric/package.json"]
+    manifests = [checkout / "package.json"]
     dependencies: set[str] = set()
     for manifest in manifests:
         package = json.loads(manifest.read_text())
@@ -44,7 +44,7 @@ def provision_direct_dependencies(checkout: Path) -> None:
 def registered_worktree(tmp_path: Path) -> tuple[Path, Path]:
     primary = tmp_path / "primary"
     linked = tmp_path / "linked"
-    (primary / "runtime/fabric").mkdir(parents=True)
+    primary.mkdir()
     (primary / "scripts").mkdir()
 
     root_package = json.loads((ROOT / "package.json").read_text())
@@ -55,7 +55,6 @@ def registered_worktree(tmp_path: Path) -> tuple[Path, Path]:
         ),
     }
     (primary / "package.json").write_text(json.dumps(root_package, indent=2) + "\n")
-    shutil.copy2(ROOT / "runtime/fabric/package.json", primary / "runtime/fabric/package.json")
     shutil.copy2(PREFLIGHT, primary / "scripts/node-workspace-preflight.mjs")
 
     assert git("init", "-q", cwd=primary).returncode == 0
@@ -74,7 +73,7 @@ def test_root_check_runs_checkout_dependency_preflight() -> None:
     assert "precheck" not in package["scripts"]
     assert package["scripts"]["check"] == (
         "python3 scripts/node-workspace-provision.py && "
-        "node scripts/node-workspace-preflight.mjs && npm run typecheck && npm run test"
+        "node scripts/node-workspace-preflight.mjs"
     )
 
 
@@ -148,19 +147,6 @@ def test_package_marker_must_name_the_declared_dependency(tmp_path: Path) -> Non
     assert not (linked / "gate-ran").exists()
 
 
-def test_workspace_manifest_must_be_a_local_regular_file(tmp_path: Path) -> None:
-    _primary, linked = registered_worktree(tmp_path)
-    provision_direct_dependencies(linked)
-    external = tmp_path / "external-package.json"
-    external.write_text('{"name":"@local/fabric"}\n')
-    (linked / "runtime/fabric/package.json").unlink()
-    (linked / "runtime/fabric/package.json").symlink_to(external)
-
-    result = run("npm", "run", "check", cwd=linked)
-
-    assert result.returncode == 3
-    assert "workspace manifest" in result.stderr
-    assert not (linked / "gate-ran").exists()
 
 
 def test_locally_provisioned_worktree_continues_into_gate(tmp_path: Path) -> None:
