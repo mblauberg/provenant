@@ -68,3 +68,29 @@ def test_changed_comparison_covers_unchanged_fixture_literal(tmp_path):
         encoding="utf-8",
     )
     assert module._context_changed(path, 2, {3})
+
+
+def test_finds_module_fixture_when_test_context_uses_now(tmp_path):
+    module = load_module()
+    path = tmp_path / "test_fixture.py"
+    path.write_text(
+        'FIXTURE = "2026-10-23T12:00:00Z"\n'
+        'def test_window():\n'
+        '    assert datetime.now() > parse(FIXTURE)\n',
+        encoding="utf-8",
+    )
+    assert module.scan_file(path) == [(1, "2026-10-23T12:00:00Z")]
+    assert module._context_changed(path, 1, {3})
+
+
+def test_changed_typescript_test_covers_module_fixture(tmp_path):
+    module = load_module()
+    path = tmp_path / "lanes.test.ts"
+    path.write_text(
+        'const fixture = "2026-10-23";\n'
+        'it("uses fixture", () => {\n'
+        '  const cutoff = Date.now() - 60_000;\n'
+        '});\n',
+        encoding="utf-8",
+    )
+    assert module._context_changed(path, 1, {3})

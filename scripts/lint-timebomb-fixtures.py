@@ -37,22 +37,26 @@ def scan_file(path: Path) -> list[tuple[int, str]]:
         ]
     tree = ast.parse(source, filename=str(path))
     findings: list[tuple[int, str]] = []
-    for function in _functions(tree):
-        segment = ast.get_source_segment(source, function) or ""
-        if not WINDOW.search(segment):
+    functions = list(_functions(tree))
+    module_has_window = any(WINDOW.search(ast.get_source_segment(source, function) or "") for function in functions)
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Constant) or not isinstance(node.value, str):
             continue
-        for node in ast.walk(function):
-            if not isinstance(node, ast.Constant) or not isinstance(node.value, str):
-                continue
-            if not ISO_DATE.fullmatch(node.value):
-                continue
-            try:
-                date.fromisoformat(node.value[:10])
-            except ValueError:
-                continue
-            line = lines[node.lineno - 1]
-            if "timebomb: allow" not in line:
-                findings.append((node.lineno, node.value))
+        if not ISO_DATE.fullmatch(node.value):
+            continue
+        try:
+            date.fromisoformat(node.value[:10])
+        except ValueError:
+            continue
+        containing = [function for function in functions if function.lineno <= node.lineno <= (function.end_lineno or function.lineno)]
+        if containing:
+            function = min(containing, key=lambda item: (item.end_lineno or item.lineno) - item.lineno)
+            has_window = bool(WINDOW.search(ast.get_source_segment(source, function) or ""))
+        else:
+            has_window = module_has_window
+        line = lines[node.lineno - 1]
+        if has_window and "timebomb: allow" not in line:
+            findings.append((node.lineno, node.value))
     return findings
 
 
@@ -106,12 +110,16 @@ def _context_changed(path: Path, line: int, added_lines: set[int]) -> bool:
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
             and node.lineno <= line <= (node.end_lineno or node.lineno)
         ]
-        start, end = min(spans, key=lambda span: span[1] - span[0]) if spans else (line, line)
+        if not spans:
+            return bool(added_lines)
+        start, end = min(spans, key=lambda span: span[1] - span[0])
     else:
         lines = source.splitlines()
         starts = [index for index, text in enumerate(lines, 1) if re.search(r"\b(?:it|test)\s*(?:\.each\([^\n]*\)\s*)?\(", text)]
-        start = max((value for value in starts if value <= line), default=line)
+        start = max((value for value in starts if value <= line), default=0)
         end = min((value - 1 for value in starts if value > line), default=len(lines))
+    if start == 0:
+        return bool(added_lines)
     return any(start <= added <= end for added in added_lines)
 
 
