@@ -226,6 +226,13 @@ pub struct SeededFile {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
+pub enum RoutingState {
+    Existing,
+    Updated,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum SeedState {
     Created,
     Existing,
@@ -234,7 +241,7 @@ pub enum SeedState {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RoutingRefresh {
-    pub state: SeedState,
+    pub state: RoutingState,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub backup: Option<PathBuf>,
     pub conflicts: Vec<String>,
@@ -330,6 +337,50 @@ mod tests {
         let mut names = vec![invalid.clone(), "é".into(), "a".into()];
         names.sort_by_cached_key(|name| pending::path_sort_key(name));
         assert_eq!(names, [std::ffi::OsString::from("a"), "é".into(), invalid]);
+    }
+
+    #[test]
+    fn routing_refresh_wire_values_match_source_shapes() {
+        let existing = RoutingRefresh {
+            state: RoutingState::Existing,
+            backup: None,
+            conflicts: vec![],
+            schema_changed: false,
+            updated_from_product: vec![],
+            retained: vec![],
+            migrated: None,
+        };
+        assert_eq!(
+            serde_json::to_value(existing).unwrap(),
+            serde_json::json!({
+                "state":"existing",
+                "conflicts":[],
+                "schema_changed":false,
+                "updated_from_product":[],
+                "retained":[]
+            })
+        );
+        let updated = RoutingRefresh {
+            state: RoutingState::Updated,
+            backup: Some("/instance/config/model-routing.json.bak-2026-10-23".into()),
+            conflicts: vec!["models.foo".into()],
+            schema_changed: true,
+            updated_from_product: vec![],
+            retained: vec![],
+            migrated: Some(vec!["models.alias".into()]),
+        };
+        assert_eq!(
+            serde_json::to_value(updated).unwrap(),
+            serde_json::json!({
+                "state":"updated",
+                "backup":"/instance/config/model-routing.json.bak-2026-10-23",
+                "conflicts":["models.foo"],
+                "schema_changed":true,
+                "updated_from_product":[],
+                "retained":[],
+                "migrated":["models.alias"]
+            })
+        );
     }
 
     #[test]

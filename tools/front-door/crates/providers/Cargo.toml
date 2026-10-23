@@ -7,3 +7,8 @@ license.workspace = true
 publish = false
 
 [dependencies]
+serde.workspace = true
+serde_json.workspace = true
+jiff.workspace = true
+regex.workspace = true
+thiserror.workspace = true
