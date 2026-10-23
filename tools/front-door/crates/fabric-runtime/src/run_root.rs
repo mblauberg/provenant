@@ -1,4 +1,4 @@
-//! Fixture-root and product-root policy. Executable owner probing remains at the OS edge.
+//! Fixture roots, product roots and executable-owner policy.
 use crate::field::Field;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -13,6 +13,10 @@ pub enum RunRootError {
     ProductRootRelative,
     #[error("fixture run refused: {0} is not under an acceptable temp root ({1}) or a .agent-run/scratch tree; fixture attempts must not write into a project .agent-run (issue #1002)")]
     FixtureRefused(String, String),
+    #[error("execution owner is unavailable: {0}")]
+    OwnerUnavailable(PathBuf),
+    #[error("execution owner must be a regular local file: {0}")]
+    OwnerNotLocalFile(PathBuf),
     #[error(transparent)]
     Cwd(#[from] std::io::Error),
 }
@@ -54,6 +58,45 @@ pub fn product_root(
         None => default_root.to_path_buf(),
     };
     canonical(&path)
+}
+
+/// X_OK is owned by supervisor; symlinks remain refused even when executable.
+pub fn executable_owner(root: &Path, relative: &Path) -> Result<PathBuf, RunRootError> {
+    // Node path.join concatenates an absolute second operand rather than
+    // discarding the root as Path::join does.
+    let mut spelling = root.as_os_str().to_os_string();
+    if !spelling.is_empty() { spelling.push("/"); }
+    spelling.push(relative.as_os_str());
+    let joined = PathBuf::from(spelling);
+    let path = if joined.is_absolute() {
+        absolute_normal(&joined)?
+    } else {
+        let mut result = PathBuf::new();
+        for part in joined.components() {
+            match part {
+                std::path::Component::CurDir => {}
+                std::path::Component::ParentDir
+                    if result.file_name().is_some_and(|name| name != "..") =>
+                {
+                    result.pop();
+                }
+                part => result.push(part.as_os_str()),
+            }
+        }
+        if result.as_os_str().is_empty() {
+            result.push(".");
+        }
+        result
+    };
+    let metadata =
+        fs::symlink_metadata(&path).map_err(|_| RunRootError::OwnerUnavailable(path.clone()))?;
+    if !provenant_supervisor::sys::is_executable(&path) {
+        return Err(RunRootError::OwnerUnavailable(path));
+    }
+    if !metadata.is_file() || metadata.file_type().is_symlink() {
+        return Err(RunRootError::OwnerNotLocalFile(path));
+    }
+    Ok(path)
 }
 
 fn real_path(path: &Path) -> Result<PathBuf, RunRootError> {
@@ -149,7 +192,7 @@ pub fn assert_fixture_run_root(
     }
     let under_temp = acceptable
         .iter()
-        .any(|path| root.starts_with(path) && root != *path);
+        .any(|path| path != Path::new("/") && root.starts_with(path) && root != *path);
     if under_temp || under_scratch(&root) {
         return Ok(());
     }
@@ -333,5 +376,51 @@ console.log(JSON.stringify({
             serde_json::to_value(null).unwrap(),
             serde_json::json!({"model":null})
         );
+    }
+    #[cfg(unix)]
+    #[test]
+    fn executable_owner_matches_node_success_and_failure_order() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+        let root = tempfile::tempdir().unwrap();
+        fs::write(root.path().join("owner"), "#!/bin/sh\n").unwrap();
+        fs::set_permissions(root.path().join("owner"), fs::Permissions::from_mode(0o700)).unwrap();
+        fs::write(root.path().join("plain"), "plain").unwrap();
+        fs::set_permissions(root.path().join("plain"), fs::Permissions::from_mode(0o600)).unwrap();
+        fs::create_dir(root.path().join("directory")).unwrap();
+        symlink("owner", root.path().join("link")).unwrap();
+        symlink("missing", root.path().join("dangling")).unwrap();
+        let paths = [
+            "owner",
+            "plain",
+            "directory",
+            "link",
+            "dangling",
+            "missing",
+            "/owner",
+            "./owner",
+            "directory/../owner",
+        ];
+        let script = r#"import {executableOwner} from './src/run-root.ts';
+const [root,paths]=process.argv.slice(1); console.log(JSON.stringify(JSON.parse(paths).map(path=>{
+try{return {ok:executableOwner(root,path)}}catch(e){return {error:e.message}}})));"#;
+        let Some(expected) = crate::test_support::node(
+            script,
+            &[
+                root.path().to_str().unwrap().into(),
+                serde_json::to_string(&paths).unwrap(),
+            ],
+        ) else {
+            return;
+        };
+        let actual: Vec<_> = paths
+            .iter()
+            .map(
+                |path| match executable_owner(root.path(), Path::new(path)) {
+                    Ok(path) => serde_json::json!({"ok":path}),
+                    Err(error) => serde_json::json!({"error":error.to_string()}),
+                },
+            )
+            .collect();
+        assert_eq!(serde_json::json!(actual), expected);
     }
 }
