@@ -6,3 +6,4 @@ pub mod instruction_quarantine;
 pub mod lane_protection;
 mod pending;
 pub mod output_custody;
+pub mod trusted_git;
