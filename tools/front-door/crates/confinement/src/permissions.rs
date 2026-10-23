@@ -39,11 +39,13 @@ const MAX_GIT_HEAD_BYTES: u64 = 1024;
 #[cfg(target_os = "macos")]
 const SANDBOX_EXEC: &str = "/usr/bin/sandbox-exec";
 #[cfg(target_os = "macos")]
-const PROBE_PROFILE: &str = "(version 1)\n(deny default)\n(allow process-exec)\n(allow file-read* (subpath \"/System/Library\"))\n(allow file-read* (subpath \"/usr/bin\"))\n(allow file-read* (subpath \"/usr/lib\"))\n(allow file-read* (subpath \"/usr/libexec\"))\n(allow file-read* (subpath \"/bin\"))\n";
+const PROBE_PROFILE: &str = "(version 1)\n(deny default)\n(allow process-exec)\n(allow file-read* (subpath \"/System/Library\"))\n(allow file-read* (subpath \"/System/Volumes/Preboot/Cryptexes/OS/System/Library\"))\n(allow file-read* (subpath \"/usr/bin\"))\n(allow file-read* (subpath \"/usr/lib\"))\n(allow file-read* (subpath \"/usr/libexec\"))\n(allow file-read* (subpath \"/bin\"))\n";
 #[cfg(target_os = "macos")]
 const PROFILE_LIMIT: usize = 64 * 1024;
 #[cfg(target_os = "macos")]
 const PROBE_TIMEOUT: Duration = Duration::from_secs(2);
+#[cfg(target_os = "macos")]
+const PROBE_CAPTURE_LIMIT: usize = 1024;
 #[cfg(target_os = "macos")]
 const CLEANUP_TIMEOUT: Duration = Duration::from_millis(250);
 
@@ -596,15 +598,39 @@ impl ConfinementBackend for MacOsSandboxBackend {
 
 #[cfg(target_os = "macos")]
 fn probe_sandbox(context: &BackendContext<'_>) -> Result<Availability, PermissionError> {
+    probe_sandbox_with_diagnostic(context).map(|(availability, _)| availability)
+}
+
+#[cfg(target_os = "macos")]
+fn describe_sandbox_probe(phase: &str, outcome: &ExecOutcome) -> String {
+    format!(
+        "{phase}: termination={:?}, timed_out={}, drain_truncated={}, stdout_read_failed={}, stderr_read_failed={}, stdout_bytes={}, stderr={:?}",
+        outcome.termination,
+        outcome.timed_out,
+        outcome.drain_truncated,
+        outcome.stdout.read_failed,
+        outcome.stderr.read_failed,
+        outcome.stdout.bytes.len(),
+        String::from_utf8_lossy(&outcome.stderr.bytes),
+    )
+}
+
+#[cfg(target_os = "macos")]
+fn probe_sandbox_with_diagnostic(
+    context: &BackendContext<'_>,
+) -> Result<(Availability, Option<String>), PermissionError> {
     if context.cancel.is_cancelled() {
         return Err(PermissionError::Cancelled);
     }
     let executable = match context.safe_fs.open_source(Path::new(SANDBOX_EXEC)) {
         Ok(executable) => executable,
         Err(error) if error.is_not_found() => {
-            return Ok(Availability::Unavailable {
-                reason: AvailabilityReason::SandboxExecutableMissing,
-            });
+            return Ok((
+                Availability::Unavailable {
+                    reason: AvailabilityReason::SandboxExecutableMissing,
+                },
+                None,
+            ));
         }
         Err(error) => return Err(PermissionError::Filesystem(error)),
     };
@@ -614,9 +640,12 @@ fn probe_sandbox(context: &BackendContext<'_>) -> Result<Availability, Permissio
         || metadata.mode & 0o111 == 0
         || metadata.mode & 0o022 != 0
     {
-        return Ok(Availability::Unavailable {
-            reason: AvailabilityReason::SandboxExecutableUntrusted,
-        });
+        return Ok((
+            Availability::Unavailable {
+                reason: AvailabilityReason::SandboxExecutableUntrusted,
+            },
+            None,
+        ));
     }
 
     let argv = [
@@ -628,8 +657,12 @@ fn probe_sandbox(context: &BackendContext<'_>) -> Result<Availability, Permissio
     let mut options = ExecOptions::new(&argv, Path::new("/"), PROBE_TIMEOUT);
     options.env = Some(context.env);
     options.cancel = Some(context.cancel);
-    options.stdout = StreamPolicy::Discard;
-    options.stderr = StreamPolicy::Discard;
+    options.stdout = StreamPolicy::Capture {
+        limit: PROBE_CAPTURE_LIMIT,
+    };
+    options.stderr = StreamPolicy::Capture {
+        limit: PROBE_CAPTURE_LIMIT,
+    };
     options.terminate_grace = CLEANUP_TIMEOUT;
     options.reap_timeout = CLEANUP_TIMEOUT;
     match context.executor.execute(options) {
@@ -638,10 +671,16 @@ fn probe_sandbox(context: &BackendContext<'_>) -> Result<Availability, Permissio
             return Err(PermissionError::Cancelled);
         }
         Err(error) => return Err(PermissionError::Execution(error)),
-        Ok(_) => {
-            return Ok(Availability::Unavailable {
-                reason: AvailabilityReason::ProbeFailed,
-            });
+        Ok(outcome) => {
+            return Ok((
+                Availability::Unavailable {
+                    reason: AvailabilityReason::ProbeFailed,
+                },
+                Some(describe_sandbox_probe(
+                    "sandbox-exec allowed-command probe",
+                    &outcome,
+                )),
+            ));
         }
     };
 
@@ -655,19 +694,32 @@ fn probe_sandbox(context: &BackendContext<'_>) -> Result<Availability, Permissio
     let mut denied_options = ExecOptions::new(&denied_argv, Path::new("/"), PROBE_TIMEOUT);
     denied_options.env = Some(context.env);
     denied_options.cancel = Some(context.cancel);
-    denied_options.stdout = StreamPolicy::Discard;
-    denied_options.stderr = StreamPolicy::Discard;
+    denied_options.stdout = StreamPolicy::Capture {
+        limit: PROBE_CAPTURE_LIMIT,
+    };
+    denied_options.stderr = StreamPolicy::Capture {
+        limit: PROBE_CAPTURE_LIMIT,
+    };
     denied_options.terminate_grace = CLEANUP_TIMEOUT;
     denied_options.reap_timeout = CLEANUP_TIMEOUT;
     match context.executor.execute(denied_options) {
-        Ok(outcome) if denied_probe(&outcome) => Ok(Availability::Available {
-            backend: BackendKind::MacOsSbpl,
-        }),
+        Ok(outcome) if denied_probe(&outcome) => Ok((
+            Availability::Available {
+                backend: BackendKind::MacOsSbpl,
+            },
+            None,
+        )),
         Err(provenant_supervisor::exec::ExecError::Cancelled) => Err(PermissionError::Cancelled),
         Err(error) => Err(PermissionError::Execution(error)),
-        Ok(_) => Ok(Availability::Unavailable {
-            reason: AvailabilityReason::ProbeFailed,
-        }),
+        Ok(outcome) => Ok((
+            Availability::Unavailable {
+                reason: AvailabilityReason::ProbeFailed,
+            },
+            Some(describe_sandbox_probe(
+                "sandbox-exec denied-command probe",
+                &outcome,
+            )),
+        )),
     }
 }
 
@@ -1874,17 +1926,20 @@ mod tests {
             ("GIT_CONFIG_NOSYSTEM".into(), "1".into()),
             ("GIT_TERMINAL_PROMPT".into(), "0".into()),
         ];
-        let baseline = probe_sandbox(&BackendContext {
+        let (baseline, baseline_diagnostic) = probe_sandbox_with_diagnostic(&BackendContext {
             safe_fs: &LocalFs,
             executor: &fixture.executor,
             cancel: &CancelToken::new(),
             env: &env,
         })?;
         if !matches!(baseline, Availability::Available { .. }) {
+            let diagnostic = baseline_diagnostic
+                .as_deref()
+                .unwrap_or("no command outcome was captured");
             assert_ne!(
                 std::env::var("PROVENANT_CONFINEMENT_REQUIRED").as_deref(),
                 Ok("1"),
-                "the required native sandbox baseline is unavailable: {baseline:?}"
+                "the required native sandbox baseline is unavailable: {baseline:?}; {diagnostic}"
             );
             return Ok(());
         }
