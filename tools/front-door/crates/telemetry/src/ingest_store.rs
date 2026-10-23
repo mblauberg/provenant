@@ -1,8 +1,14 @@
 //! Cursor persistence and document/OpenCode source adapters.
 //!
-//! Filesystem ownership is injected. The current crate layering has no safe
-//! no-follow open API: callers must obtain verified handles from the future
-//! supervisor owner before calling these adapters.
+//! Filesystem ownership is injected. The current crate layering does not
+//! permit a telemetry dependency on the supervisor's safe no-follow API:
+//! callers must supply verified handles through these contracts.
+//!
+//! As with Python's inner ingest functions, these adapters do not commit or
+//! create a ledger transaction. Call them inside one per-file transaction:
+//! sink, cursor and ownership effects must all roll back together on failure.
+//! `IngestRuntime::process_file` requires this atomic boundary; a concrete
+//! runtime implementation remains outside this partial port.
 
 use crate::{
     ingest::{self, Cursor, CursorStore, ParserState, Snapshot},
