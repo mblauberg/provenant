@@ -1511,15 +1511,24 @@ class LaneLoopbackContracts(unittest.TestCase):
         self.assertTrue(result['code_transport_prelaunch_failure'])
         self.assertEqual(list(outside.iterdir()), [])
 
-    def test_knob_overrides_are_refused_for_a_remote_lane_and_kept_for_a_local_one(self):
+    def test_knob_overrides_are_forwarded_to_remote_lanes_and_kept_for_local_ones(self):
         import fabric_hosts as hosts
         request = {'mode': 'read_only', 'prompt': 'review', 'knobs': ['effort.shift=1']}
+        forwarded = {}
+        def exchange(verb, payload=None, **_kwargs):
+            if verb == 'hello':
+                return hosts.envelope({'ok': True})
+            if verb == 'dispatch':
+                forwarded.update(payload['input'])
+                return hosts.envelope({'status': 'running', 'id': 'knob-remote'})
+            raise AssertionError(verb)
         with patch.dict(os.environ, self.env):
             owner = hosts.lane_owner()
-            with self.assertRaises(hosts.HostError) as error:
-                owner.client_call('dispatch', str(self.workspace), {**request, 'operation_id': 'knob-remote'})
-            self.assertEqual(error.exception.code, 'knob_remote_unsupported')
-            self.assertIn('--host laptop', str(error.exception))
+            with patch.object(hosts.PeerClient, 'call', side_effect=exchange), \
+                    patch.object(type(owner.code()), 'outgoing', side_effect=lambda _project, clean, *_args: clean):
+                remote = owner.client_call('dispatch', str(self.workspace), {**request, 'host': 'workshop', 'operation_id': 'knob-remote'})
+            self.assertEqual(remote['status'], 'running', remote)
+            self.assertEqual(forwarded['knobs'], ['effort.shift=1'])
             local = owner.client_call('dispatch', str(self.workspace), {**request, 'host': 'laptop'})
             self.assertTrue(local['local'])
             self.assertEqual(local['input']['knobs'], ['effort.shift=1'])
