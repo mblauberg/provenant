@@ -87,6 +87,63 @@ pub enum Publication {
     VisibleDurabilityUnconfirmed { sync_error: FsError },
 }
 
+// Fixture consumers exercise the real staging, cleanup and publication path.
+mod atomic_write_operations {
+    use super::*;
+    pub trait AtomicWriteOperations {
+        fn write(&mut self, file: &mut FileHandle, bytes: &[u8], path: &Path) -> Result<()>;
+        fn sync_file(&mut self, file: &FileHandle) -> Result<()>;
+        fn rename(
+            &mut self,
+            directory: &Directory,
+            temporary: &OsStr,
+            name: &OsStr,
+            mode: PublishMode,
+        ) -> Result<()>;
+        fn sync_directory(&mut self, directory: &Directory) -> Result<()>;
+    }
+}
+#[cfg(feature = "fixture")]
+#[doc(hidden)]
+pub use atomic_write_operations::AtomicWriteOperations;
+#[cfg(not(feature = "fixture"))]
+use atomic_write_operations::AtomicWriteOperations;
+
+struct LocalAtomicWriteOperations;
+impl AtomicWriteOperations for LocalAtomicWriteOperations {
+    fn write(&mut self, file: &mut FileHandle, bytes: &[u8], path: &Path) -> Result<()> {
+        file.write_all(bytes)
+            .map_err(error("write staging file", path))
+    }
+    fn sync_file(&mut self, file: &FileHandle) -> Result<()> {
+        file.sync()
+    }
+    fn rename(
+        &mut self,
+        directory: &Directory,
+        temporary: &OsStr,
+        name: &OsStr,
+        mode: PublishMode,
+    ) -> Result<()> {
+        match mode {
+            PublishMode::NoReplace => directory.rename_noreplace(temporary, directory, name),
+            PublishMode::Replace => directory.replace(temporary, directory, name),
+        }
+    }
+    fn sync_directory(&mut self, directory: &Directory) -> Result<()> {
+        directory.sync()
+    }
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AtomicWritePhase {
+    Write,
+    FileSync,
+    Rename,
+    DirectorySync,
+}
+
 /// Owning, non-cloneable flock lease. Closing the last owner releases the lock;
 /// the API intentionally has no explicit unlock or descriptor duplication.
 #[derive(Debug)]
@@ -548,15 +605,30 @@ impl Directory {
         bytes: &[u8],
         mode: PublishMode,
     ) -> Result<Publication> {
-        self.atomic_write_with_sync(name, prefix, bytes, mode, || self.sync())
+        let mut operations = LocalAtomicWriteOperations;
+        self.atomic_write_with_operations(name, prefix, bytes, mode, &mut operations)
     }
-    fn atomic_write_with_sync(
+    /// Fixture entry for other crates' fault tests; the trait is public only
+    /// under `fixture`, so this cannot take the private method's place.
+    #[cfg(feature = "fixture")]
+    #[doc(hidden)]
+    pub fn atomic_write_with_faults(
         &self,
         name: &OsStr,
         prefix: &str,
         bytes: &[u8],
         mode: PublishMode,
-        sync_directory: impl FnOnce() -> Result<()>,
+        faults: &mut dyn AtomicWriteOperations,
+    ) -> Result<Publication> {
+        self.atomic_write_with_operations(name, prefix, bytes, mode, faults)
+    }
+    fn atomic_write_with_operations(
+        &self,
+        name: &OsStr,
+        prefix: &str,
+        bytes: &[u8],
+        mode: PublishMode,
+        operations: &mut dyn AtomicWriteOperations,
     ) -> Result<Publication> {
         component(name)?;
         component(OsStr::new(prefix))?;
@@ -567,16 +639,13 @@ impl Directory {
                 Err(error) if error.is_exists() => continue,
                 Err(error) => return Err(error),
             };
-            let result = file
-                .write_all(bytes)
-                .map_err(error("write staging file", &self.path.join(&temporary)))
-                .and_then(|()| file.sync());
+            let temporary_path = self.path.join(&temporary);
+            let result = operations
+                .write(&mut file, bytes, &temporary_path)
+                .and_then(|()| operations.sync_file(&file));
             drop(file);
-            let result = result.and_then(|()| match mode {
-                PublishMode::NoReplace => self.rename_noreplace(&temporary, self, name),
-                PublishMode::Replace => self.replace(&temporary, self, name),
-            });
-            return self.finish_publication(&temporary, result, sync_directory);
+            let result = result.and_then(|()| operations.rename(self, &temporary, name, mode));
+            return self.finish_publication(&temporary, result, || operations.sync_directory(self));
         }
         Err(error("reserve staging file", &self.path.join(name))(
             io::Error::from_raw_os_error(errno::EEXIST),
