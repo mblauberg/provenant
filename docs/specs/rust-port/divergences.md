@@ -1399,3 +1399,13 @@ then passed after repair. Extended JSON/native-path reader gaps remain partial.
   adapters for the pending confinement/records/config/core contracts. Consumers
   remain unchanged; no graph unit or full conformance claim is added. README
   maps the remaining pending run and UUID contracts explicitly.
+
+### RP-config-7 — Shared filesystem durability and executable cargo fallback
+
+Class: `improvement` (explicitly requested for config batch 3). Config uses the
+supervisor's safe `Directory::atomic_write` and `replace_link` APIs. These fsync
+the destination directory after publication in addition to the source scripts'
+file sync. An error at that point reports a visible publication whose durability
+is unconfirmed. The requested cargo lookup checks executability for the rustup
+fallback as well as PATH candidates; Python only tests the fallback's file type.
+No command is switched to this implementation.

@@ -74,7 +74,7 @@ pub fn skills(
         if !crate::manifest::is_skill_name(name) {
             return Err(invalid("source contains an invalid skill name"));
         }
-        result.push((name.into(), pending::resolve(&child)?));
+        result.push((name.into(), crate::resolve(&child)?));
     }
     Ok(result)
 }
@@ -84,7 +84,7 @@ fn shared(source: &Path) -> Result<Vec<(String, PathBuf)>> {
     for name in SHARED_NAMES {
         let path = source.join(name);
         if path.is_dir() && !path.is_symlink() {
-            result.push((name.into(), pending::resolve(&path)?));
+            result.push((name.into(), crate::resolve(&path)?));
         }
     }
     Ok(result)
@@ -149,7 +149,7 @@ pub fn catalogues(
             let allowed = allowed_collisions
                 .iter()
                 .find(|(candidate, _)| candidate == name)
-                .map(|(_, path)| pending::resolve(path))
+                .map(|(_, path)| crate::resolve(path))
                 .transpose()?;
             if allowed.as_ref() == Some(custom_path) {
                 custom.retain(|(candidate, _)| candidate != name);

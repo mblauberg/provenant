@@ -2,114 +2,8 @@
 use crate::{io, Result};
 use std::{
     fs,
-    io::Write,
-    path::{Component, Path, PathBuf},
+    path::Path,
 };
-
-// port: belongs in provenant-core
-pub(crate) fn resolve(path: &Path) -> Result<PathBuf> {
-    let absolute = if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        std::env::current_dir().map_err(|e| io(path, e))?.join(path)
-    };
-    resolve_inner(&absolute, 0)
-}
-
-// port: belongs in provenant-core
-fn resolve_inner(path: &Path, depth: usize) -> Result<PathBuf> {
-    if depth > 40 {
-        return Err(crate::invalid(format!("symlink loop: {}", path.display())));
-    }
-    let mut result = PathBuf::new();
-    for component in path.components() {
-        match component {
-            Component::ParentDir => {
-                result.pop();
-            }
-            Component::CurDir => {}
-            other => {
-                result.push(other.as_os_str());
-                match fs::symlink_metadata(&result) {
-                    Ok(meta) if meta.is_symlink() => {
-                        let link = fs::read_link(&result).map_err(|e| io(&result, e))?;
-                        let target = if link.is_absolute() {
-                            link
-                        } else {
-                            result.parent().unwrap_or(Path::new("/")).join(link)
-                        };
-                        result = resolve_inner(&target, depth + 1)?;
-                    }
-                    Ok(_) => {}
-                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                    Err(e) => return Err(io(&result, e)),
-                }
-            }
-        }
-    }
-    Ok(result)
-}
-
-// port: belongs in provenant-supervisor
-// Safe std-only staging. Create-new prevents clobbering another staging file.
-pub(crate) fn atomic_write(path: &Path, prefix: &str, bytes: &[u8]) -> Result<()> {
-    use std::os::unix::fs::OpenOptionsExt;
-    let parent = path.parent().unwrap_or(Path::new("."));
-    fs::create_dir_all(parent).map_err(|e| io(parent, e))?;
-    for sequence in 0..1024 {
-        let temp = parent.join(format!("{prefix}{}.{sequence}.tmp", std::process::id()));
-        let mut file = match fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(&temp)
-        {
-            Ok(file) => file,
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
-            Err(e) => return Err(io(&temp, e)),
-        };
-        let result = (|| {
-            file.write_all(bytes).map_err(|e| io(&temp, e))?;
-            file.sync_all().map_err(|e| io(&temp, e))?;
-            drop(file);
-            fs::rename(&temp, path).map_err(|e| io(path, e))
-        })();
-        let cleanup = fs::remove_file(&temp);
-        result?;
-        if let Err(e) = cleanup {
-            if e.kind() != std::io::ErrorKind::NotFound {
-                return Err(io(&temp, e));
-            }
-        }
-        return Ok(());
-    }
-    Err(crate::invalid(
-        "could not reserve an installation staging file",
-    ))
-}
-
-// port: belongs in provenant-supervisor
-pub(crate) fn replace_link(destination: &Path, source: &Path) -> Result<()> {
-    let parent = destination.parent().unwrap_or(Path::new("."));
-    for sequence in 0..1024 {
-        let temp = parent.join(format!(".workflow.{}.{sequence}.tmp", std::process::id()));
-        match std::os::unix::fs::symlink(source, &temp) {
-            Ok(()) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
-            Err(e) => return Err(io(&temp, e)),
-        }
-        let result = fs::rename(&temp, destination).map_err(|e| io(destination, e));
-        let cleanup = fs::remove_file(&temp);
-        result?;
-        if let Err(e) = cleanup {
-            if e.kind() != std::io::ErrorKind::NotFound {
-                return Err(io(&temp, e));
-            }
-        }
-        return Ok(());
-    }
-    Err(crate::invalid("could not reserve a workflow staging link"))
-}
 
 // port: belongs in provenant-records
 pub(crate) fn json_bytes<T: serde::Serialize>(record: &T) -> Result<Vec<u8>> {
@@ -209,7 +103,7 @@ pub(crate) fn path_text(path: &Path) -> Result<String> {
 
 // port: belongs in provenant-records
 pub(crate) fn schema_one(value: &serde_json::Value) -> bool {
-    value == &serde_json::Value::Bool(true) || value.as_f64() == Some(1.0)
+    provenant_core::py::python_json_eq(value, &serde_json::json!(1))
 }
 
 // port: belongs in provenant-records
@@ -233,46 +127,7 @@ pub(crate) fn read_json(path: &Path, context: &'static str) -> Result<serde_json
         path: path.into(),
         source,
     })?;
-    // serde_json's default number model would silently round larger Python ints.
-    // Refuse them until the records owner supplies its lossless wire codec.
-    let mut quoted = false;
-    let mut escaped = false;
-    let mut index = 0;
-    while index < bytes.len() {
-        let byte = bytes[index];
-        if quoted {
-            if escaped {
-                escaped = false;
-            } else if byte == b'\\' {
-                escaped = true;
-            } else if byte == b'"' {
-                quoted = false;
-            }
-        } else if byte == b'"' {
-            quoted = true;
-        } else if byte.is_ascii_digit() || byte == b'-' {
-            let start = index;
-            while index < bytes.len()
-                && (bytes[index].is_ascii_digit()
-                    || matches!(bytes[index], b'.' | b'e' | b'E' | b'+' | b'-'))
-            {
-                index += 1;
-            }
-            let token = &bytes[start..index];
-            if !token.iter().any(|b| matches!(b, b'.' | b'e' | b'E')) {
-                if let Ok(text) = std::str::from_utf8(token) {
-                    if text.parse::<i64>().is_err() && text.parse::<u64>().is_err() {
-                        return Err(crate::Error::PendingRecord {
-                            feature: "arbitrary-precision integer encoding",
-                        });
-                    }
-                }
-            }
-            continue;
-        }
-        index += 1;
-    }
-    serde_json::from_slice(&bytes).map_err(|source| crate::Error::Json {
+    provenant_records::checked_json::from_slice(&bytes).map_err(|source| crate::Error::CheckedJson {
         context,
         path: path.into(),
         source,
@@ -327,7 +182,7 @@ mod tests {
         fs::write(&path, b"{\"n\": 18446744073709551616}").unwrap();
         assert!(matches!(
             read_json(&path, "unreadable"),
-            Err(crate::Error::PendingRecord { .. })
+            Err(crate::Error::CheckedJson { source: provenant_records::checked_json::DecodeError::NumberOutOfRange(_), .. })
         ));
         fs::write(
             &path,
@@ -342,7 +197,7 @@ mod tests {
     #[test]
     fn non_utf8_paths_never_silently_change_the_receipt() {
         use std::os::unix::ffi::OsStringExt;
-        let path = PathBuf::from(std::ffi::OsString::from_vec(b"/tmp/invalid-\xff".to_vec()));
+        let path = std::path::PathBuf::from(std::ffi::OsString::from_vec(b"/tmp/invalid-\xff".to_vec()));
         assert!(matches!(
             path_text(&path),
             Err(crate::Error::PendingRecord { .. })

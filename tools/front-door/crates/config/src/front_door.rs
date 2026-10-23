@@ -203,48 +203,10 @@ pub fn validate_mode(mode: &str) -> Result<()> {
     if mode != "rust" {
         return Err(invalid(format!(
             "PROVENANT_FRONT_DOOR must be rust, got {}",
-            python_repr(mode)
+            provenant_core::py::python_repr(mode)
         )));
     }
     Ok(())
-}
-
-fn python_repr(value: &str) -> String {
-    let quote = if value.contains('\'') && !value.contains('"') {
-        '"'
-    } else {
-        '\''
-    };
-    let mut result = String::with_capacity(value.len() + 2);
-    result.push(quote);
-    for ch in value.chars() {
-        match ch {
-            '\\' => result.push_str("\\\\"),
-            '\n' => result.push_str("\\n"),
-            '\r' => result.push_str("\\r"),
-            '\t' => result.push_str("\\t"),
-            '\x08' => result.push_str("\\x08"),
-            '\x0c' => result.push_str("\\x0c"),
-            ch if ch == quote => {
-                result.push('\\');
-                result.push(ch);
-            }
-            ch if !crate::python_unicode::printable(ch) => {
-                use std::fmt::Write;
-                let code = u32::from(ch);
-                let _ = if code < 256 {
-                    write!(&mut result, "\\x{code:02x}")
-                } else if code <= 0xffff {
-                    write!(&mut result, "\\u{code:04x}")
-                } else {
-                    write!(&mut result, "\\U{code:08x}")
-                };
-            }
-            ch => result.push(ch),
-        }
-    }
-    result.push(quote);
-    result
 }
 
 pub fn cargo_path(path: &std::ffi::OsStr, home: &Path) -> Option<PathBuf> {
@@ -280,8 +242,8 @@ pub fn build_plan(
     mut environment: BTreeMap<String, std::ffi::OsString>,
     darwin: bool,
 ) -> Result<BuildPlan> {
-    let krate = pending::resolve(krate)?;
-    let target = pending::resolve(target)?;
+    let krate = crate::resolve(krate)?;
+    let target = crate::resolve(target)?;
     environment.insert("CARGO_TARGET_DIR".into(), target.as_os_str().into());
     environment.insert("PROVENANT_FD_SOURCE_SHA256".into(), digest.into());
     if darwin {

@@ -9,11 +9,13 @@ pub mod instance;
 pub mod managed_skills;
 pub mod manifest;
 mod pending;
-mod python_unicode;
+mod filesystem;
 pub mod workflows;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
+    #[error(transparent)]
+    Path(#[from] provenant_core::paths::PathError),
     #[error("{message}")]
     Invalid { message: String },
     #[error("{path}: {source}")]
@@ -42,6 +44,13 @@ pub enum Error {
         path: std::path::PathBuf,
         #[source]
         source: serde_json::Error,
+    },
+    #[error("{context}: {source}")]
+    CheckedJson {
+        context: &'static str,
+        path: std::path::PathBuf,
+        #[source]
+        source: provenant_records::checked_json::DecodeError,
     },
     #[error("Codex config is invalid TOML: {0}")]
     Toml(#[from] toml_edit::TomlError),
@@ -78,3 +87,7 @@ fn io(path: &std::path::Path, source: std::io::Error) -> Error {
 
 #[cfg(test)]
 mod oracle;
+
+fn resolve(path: &std::path::Path) -> Result<std::path::PathBuf> {
+    Ok(provenant_core::paths::resolve(path)?)
+}

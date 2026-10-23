@@ -125,7 +125,7 @@ pub fn empty_manifest(target: &Path, now: &str) -> Result<Manifest> {
     Ok(Manifest {
         schema_version: Value::from(1),
         owner: "agent-harness".into(),
-        target_root: pending::path_text(&pending::resolve(target)?)?,
+        target_root: pending::path_text(&crate::resolve(target)?)?,
         managed: BTreeMap::new(),
         custom: BTreeMap::new(),
         extra: BTreeMap::from([("updated_at".into(), now.into())]),
@@ -143,7 +143,7 @@ pub fn validate_manifest(mut value: Value, target: &Path) -> Result<Manifest> {
         ));
     }
     if value["target_root"].as_str()
-        != Some(pending::path_text(&pending::resolve(target)?)?.as_str())
+        != Some(pending::path_text(&crate::resolve(target)?)?.as_str())
     {
         return Err(invalid(
             "installation manifest belongs to a different target root",
@@ -244,7 +244,7 @@ pub fn load_manifest(target: &Path, now: &str) -> Result<Manifest> {
 
 pub fn write_manifest(target: &Path, manifest: &mut Manifest, now: &str) -> Result<()> {
     manifest.extra.insert("updated_at".into(), now.into());
-    pending::atomic_write(
+    crate::filesystem::atomic_write(
         &manifest_path(target),
         ".installation.",
         &pending::json_bytes(manifest)?,

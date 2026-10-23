@@ -70,7 +70,7 @@ fn load(target: &Path, now: &str) -> Result<Manifest> {
             schema_version: Value::from(1),
             owner: "agent-harness".into(),
             surface: "claude-workflows".into(),
-            target_root: pending::path_text(&pending::resolve(target)?)?,
+            target_root: pending::path_text(&crate::resolve(target)?)?,
             managed: BTreeMap::new(),
             extra: BTreeMap::from([("updated_at".into(), Value::from(now))]),
         });
@@ -81,7 +81,7 @@ fn load(target: &Path, now: &str) -> Result<Manifest> {
         && value["owner"] == "agent-harness"
         && value["surface"] == "claude-workflows"
         && value["target_root"].as_str()
-            == Some(pending::path_text(&pending::resolve(target)?)?.as_str())
+            == Some(pending::path_text(&crate::resolve(target)?)?.as_str())
         && value["managed"].is_object();
     if !valid_header {
         return Err(invalid("workflow installation manifest is invalid"));
@@ -109,7 +109,7 @@ fn load(target: &Path, now: &str) -> Result<Manifest> {
 
 fn write(target: &Path, manifest: &mut Manifest, now: &str) -> Result<()> {
     manifest.extra.insert("updated_at".into(), now.into());
-    pending::atomic_write(
+    crate::filesystem::atomic_write(
         &manifest_path(target),
         ".workflows-installation.",
         &pending::json_bytes(manifest)?,
@@ -136,7 +136,7 @@ fn sources(source: &Path) -> Result<BTreeMap<String, PathBuf>> {
         if !valid_name(name) || path.is_symlink() || !path.is_file() {
             return Err(invalid("source contains an invalid workflow"));
         }
-        paths.insert(name.into(), pending::resolve(&path)?);
+        paths.insert(name.into(), crate::resolve(&path)?);
     }
     if paths.is_empty() {
         return Err(invalid("source contains an invalid workflow"));
@@ -146,9 +146,9 @@ fn sources(source: &Path) -> Result<BTreeMap<String, PathBuf>> {
 
 fn same_link(destination: &Path, source: &Path) -> bool {
     destination.is_symlink()
-        && pending::resolve(destination)
+        && crate::resolve(destination)
             .ok()
-            .zip(pending::resolve(source).ok())
+            .zip(crate::resolve(source).ok())
             .is_some_and(|(a, b)| a == b)
 }
 
@@ -171,7 +171,7 @@ fn state(destination: &Path, source: &Path, entry: Option<&Entry>) -> Result<Sta
     };
     if same_link(destination, source) {
         return Ok(
-            if pending::resolve(Path::new(&entry.source_target))? == pending::resolve(source)?
+            if crate::resolve(Path::new(&entry.source_target))? == crate::resolve(source)?
                 && entry.source_sha256 == sha(source)?
             {
                 State::Managed
@@ -215,7 +215,7 @@ pub fn preflight(source: &Path, target: &Path, reject_unmanaged: bool, now: &str
         }
         return Err(invalid("target must not be a non-canonical symlink"));
     }
-    let target = pending::resolve(target)?;
+    let target = crate::resolve(target)?;
     let sources = sources(source)?;
     let manifest = load(&target, now)?;
     let mut conflicts = Vec::new();
@@ -260,7 +260,7 @@ pub struct CommandResult {
 /// Caller handles the canonical-directory-link fast path before invoking this.
 pub fn install(source: &Path, target: &Path, now: &str) -> Result<Installed> {
     preflight(source, target, false, now)?;
-    let target = pending::resolve(target)?;
+    let target = crate::resolve(target)?;
     let sources = sources(source)?;
     let mut manifest = load(&target, now)?;
     let states = sources
@@ -289,7 +289,7 @@ pub fn install(source: &Path, target: &Path, now: &str) -> Result<Installed> {
     let mut linked = 0;
     for (name, source) in &sources {
         if matches!(states[name], State::Missing | State::Stale) {
-            pending::replace_link(&target.join(name), source)?;
+            crate::filesystem::replace_link(&target.join(name), source)?;
             manifest.managed.insert(name.clone(), entry(source, now)?);
             linked += 1;
         }

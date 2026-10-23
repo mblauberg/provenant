@@ -1,5 +1,5 @@
 //! Conflict override for Codex's bundled skill-creator.
-use crate::{invalid, io, pending, Result};
+use crate::{invalid, io, Result};
 use serde::{Deserialize, Serialize};
 use std::{
     ffi::OsStr,
@@ -182,7 +182,7 @@ pub fn configure(path: &Path) -> Result<Outcome> {
     if proposal.outcome == Outcome::Existing {
         return Ok(Outcome::Existing);
     }
-    pending::atomic_write(&proposal.target, ".codex-config.", proposal.text.as_bytes())?;
+    crate::filesystem::atomic_write(&proposal.target, ".codex-config.", proposal.text.as_bytes())?;
     Ok(Outcome::Configured)
 }
 

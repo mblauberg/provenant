@@ -137,7 +137,7 @@ pub fn validate_desired_state(value: Value) -> Result<DesiredState> {
 
 pub fn install_mode(product_root: &Path, instance_root: &Path) -> Result<InstallMode> {
     Ok(
-        if pending::resolve(product_root)? == pending::resolve(instance_root)? {
+        if crate::resolve(product_root)? == crate::resolve(instance_root)? {
             InstallMode::Fused
         } else {
             InstallMode::Split
