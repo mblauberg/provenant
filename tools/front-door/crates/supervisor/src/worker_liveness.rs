@@ -9,17 +9,34 @@ use thiserror::Error;
 pub const STALL_WINDOW_SECONDS: f64 = 60.0;
 pub const TERMINAL_CLASSIFICATIONS: [&str; 5] =
     ["blocked", "question", "unavailable", "failed", "complete"];
+mod integer_seal {
+    pub trait Sealed {}
+    impl Sealed for i64 {}
+    impl Sealed for u64 {}
+    impl Sealed for super::edge::CommandInteger {}
+}
+/// The closed exact integer domain accepted by worker terminal records.
+///
+/// ```compile_fail
+/// use provenant_supervisor::worker_liveness::TerminalReport;
+/// let _ = TerminalReport { classification: "complete".into(), pid: "bad".to_string(),
+///     observed_exit: true, exit_status: "bad".to_string() };
+/// ```
+pub trait ReportInteger: integer_seal::Sealed + Copy + PartialEq + std::fmt::Display {}
+impl ReportInteger for i64 {}
+impl ReportInteger for u64 {}
+impl ReportInteger for edge::CommandInteger {}
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct WorkerExit {
-    pub pid: i64,
-    pub exit_status: i64,
+pub struct WorkerExit<I: ReportInteger = i64> {
+    pub pid: I,
+    pub exit_status: I,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TerminalReport {
+pub struct TerminalReport<I: ReportInteger = i64> {
     pub classification: String,
-    pub pid: i64,
+    pub pid: I,
     pub observed_exit: bool,
-    pub exit_status: i64,
+    pub exit_status: I,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Process {
@@ -49,7 +66,7 @@ pub enum LivenessError {
     #[error("unknown terminal classification: {0}")]
     Classification(String),
     #[error("cannot {action} while owned worker PID {pid} remains live")]
-    LiveWriter { pid: i64, action: String },
+    LiveWriter { pid: String, action: String },
     #[error("terminal report requires observed process exit for the owned PID")]
     MissingExit,
     #[error("poll budget must be positive")]
@@ -63,24 +80,24 @@ pub enum LivenessError {
 }
 
 pub fn require_worker_quiescent(
-    pid: i64,
+    pid: impl std::fmt::Display,
     process_live: bool,
     action: &str,
 ) -> Result<(), LivenessError> {
     if process_live {
         return Err(LivenessError::LiveWriter {
-            pid,
+            pid: pid.to_string(),
             action: action.into(),
         });
     }
     Ok(())
 }
-pub fn terminal_report(
+pub fn terminal_report<I: ReportInteger>(
     classification: &str,
-    pid: i64,
+    pid: I,
     process_live: bool,
-    exit: Option<WorkerExit>,
-) -> Result<TerminalReport, LivenessError> {
+    exit: Option<WorkerExit<I>>,
+) -> Result<TerminalReport<I>, LivenessError> {
     if !TERMINAL_CLASSIFICATIONS.contains(&classification) {
         return Err(LivenessError::Classification(classification.into()));
     }

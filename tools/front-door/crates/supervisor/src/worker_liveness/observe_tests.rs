@@ -195,9 +195,9 @@ fn worktree_fence_runs_before_git_and_git_status_matches_source_arguments() {
     assert!(matches!(
         worktree_state(&runner, "/repo/.worktrees/lane", Some(84), Some(&BTreeSet::from([84]))),
         Err(ObserveError::Liveness(LivenessError::LiveWriter {
-            pid: 84,
+            pid,
             action,
-        })) if action == "inspection"
+        })) if pid == "84" && action == "inspection"
     ));
     assert!(runner.calls().is_empty());
     assert!(matches!(
