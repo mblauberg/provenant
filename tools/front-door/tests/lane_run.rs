@@ -551,7 +551,7 @@ fn nested_owner_helper() {
         assert_eq!(fixtures::lock(&custody), 0);
     }
     let pid = std::process::id();
-    let start = fixtures::current_start();
+    let start = fixtures::independent_start();
     fs::write(dir.join("dispatch-owner.json"),format!("{{\"schema_version\":1,\"kind\":\"dispatch\",\"run_dir\":{},\"run_token\":\"nested\",\"owner_pid\":{pid},\"owner_pgid\":{},\"owner_started_at\":{}}}",quote(&dir.to_string_lossy()),fixtures::process_group(),quote(&start))).unwrap();
     fs::create_dir_all(attempt.join("tmp/children")).unwrap();
     fs::write(

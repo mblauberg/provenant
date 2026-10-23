@@ -37,10 +37,66 @@ pub fn process_group() -> i32 {
     // SAFETY: getpgrp takes no arguments and returns a process identifier.
     unsafe { libc::getpgrp() }
 }
-pub fn current_start() -> String {
-    let row =
-        super::platform::process(std::process::id() as i32).expect("fixture process is present");
-    super::files::canonical_start(row.epoch)
+/// Independent oracle: do not call production process or timestamp helpers.
+pub fn independent_start() -> String {
+    #[cfg(target_os = "macos")]
+    // SAFETY: the fixed libproc buffer has the requested ABI size, and the
+    // current PID remains alive throughout this synchronous query.
+    let epoch = unsafe {
+        #[link(name = "proc")]
+        unsafe extern "C" {
+            fn proc_pidinfo(
+                pid: i32,
+                flavor: i32,
+                arg: u64,
+                buffer: *mut libc::c_void,
+                size: i32,
+            ) -> i32;
+        }
+        let mut bsd = [0u64; 17];
+        assert_eq!(
+            proc_pidinfo(
+                std::process::id() as i32,
+                3,
+                0,
+                bsd.as_mut_ptr().cast(),
+                136
+            ),
+            136
+        );
+        bsd[15]
+    };
+    #[cfg(target_os = "linux")]
+    let epoch = {
+        let stat = fs::read_to_string("/proc/self/stat").unwrap();
+        let start = stat[stat.rfind(") ").unwrap() + 2..]
+            .split_whitespace()
+            .nth(19)
+            .unwrap()
+            .parse::<u64>()
+            .unwrap();
+        let boot = fs::read_to_string("/proc/stat")
+            .unwrap()
+            .lines()
+            .find_map(|s| s.strip_prefix("btime ").and_then(|s| s.parse::<u64>().ok()))
+            .unwrap();
+        // SAFETY: sysconf accepts this scalar key and returns clock ticks.
+        let ticks = unsafe { libc::sysconf(libc::_SC_CLK_TCK) };
+        assert!(ticks > 0);
+        boot + start / ticks as u64
+    };
+    // SAFETY: localtime_r writes only to our live tm; strftime writes at most
+    // the provided buffer length and receives a NUL-terminated format.
+    let start = unsafe {
+        let epoch = epoch as libc::time_t;
+        let mut tm: libc::tm = std::mem::zeroed();
+        assert!(!libc::localtime_r(&epoch, &mut tm).is_null());
+        let mut buf = [0u8; 80];
+        let n = libc::strftime(buf.as_mut_ptr().cast(), 80, c"%a %b %e %T %Y".as_ptr(), &tm);
+        assert!(n > 0);
+        String::from_utf8_lossy(&buf[..n]).into_owned()
+    };
+    start
 }
 pub fn inherit_ignored_signals(command: &mut Command) {
     // SAFETY: the closure calls only async-signal-safe libc functions after
