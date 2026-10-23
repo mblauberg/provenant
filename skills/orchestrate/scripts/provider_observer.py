@@ -171,4 +171,5 @@ class LiveObserver:
             "model_changes": self.model_changes,
             "last_model": self.last_model,
             "context": self.meter.result(),
+            "models": self.meter.models,
         }

@@ -3526,6 +3526,49 @@ def _run_attempt(
     return record
 
 
+def observe_main(argv):
+    """Read lane line envelopes and request only semantic terminal/stop actions."""
+    parser = argparse.ArgumentParser(description="Observe captured provider lines")
+    parser.add_argument("--adapter", required=True)
+    parser.add_argument("--model", default="")
+    parser.add_argument("--out", type=Path, required=True)
+    parser.add_argument("--max-bytes", type=int, default=provider_observer.MAX_EVENTS_BYTES)
+    args = parser.parse_args(argv)
+    provider_observer.MAX_EVENTS_BYTES = args.max_bytes
+    observer = provider_observer.LiveObserver({"adapter": args.adapter, "model": args.model})
+    terminal_at, stop = None, None
+    for envelope in sys.stdin:
+        message = json.loads(envelope)
+        data = message["line"].encode()
+        if not data.endswith(b"\n"):
+            data += b"\n"
+        if message["s"] == "out":
+            observer.feed_stdout(data)
+            observer.feed_stderr(data, "stdout")
+        elif message["s"] == "err":
+            observer.feed_stderr(data, "stderr")
+        else:
+            raise ValueError("unknown observer stream")
+        if observer.terminal_at is not None and observer.terminal_at != terminal_at:
+            print(json.dumps({"terminal": True}), flush=True)
+        terminal_at = observer.terminal_at
+        failure = observer.live_failure
+        if args.adapter == "opencode" and "usage_limited" in observer.semantic_failures:
+            failure = observer.semantic_failures["usage_limited"]
+            observer.live_failure = failure
+        if failure and failure["status"] != stop:
+            stop = failure["status"]
+            if stop == "stalled":
+                raise ValueError("silence cannot request a stop")
+            print(json.dumps({"stop": stop}), flush=True)
+    result = observer.result()
+    with tempfile.TemporaryFile() as staged:
+        staged.write((json.dumps(result) + "\n").encode())
+        staged.flush()
+        install(staged.fileno(), str(args.out.absolute()))
+    return 0
+
+
 def parser():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--route-file", type=Path, required=True)
@@ -3562,6 +3605,8 @@ def parser():
 
 
 def main():
+    if sys.argv[1:2] == ["observe"]:
+        return observe_main(sys.argv[2:])
     args = parser().parse_args()
     writer_lease = None
     try:
