@@ -121,7 +121,9 @@ output. Clipped rows remain unseen. Federated cursors are host-qualified.
 
 Route inputs are exactly one `--model ADAPTER/ID` or `--route POOL`, plus
 optional `--effort VALUE`; routing resolves accounts,
-eligibility and disclosure. Confidential is the default. Workflow owns assurance
+eligibility and disclosure. There is no `--account` flag (0 of 1116 dispatches
+supplied one); each attempt records its resolved account label. Confidential is
+the default. Workflow owns assurance
 inputs (intent, risk tier, reviewer and orchestrator family), rather than run
 flags. Drop `--context-ceiling`. No raw argv, unrestricted knobs, secret bypass
 or hidden downgrade. Read-only fallback is explicit (`none|pool`, default none).
@@ -188,8 +190,9 @@ This shared attempt path and these supervisor filenames are the run/supervisor
 contract, under the binding top-level Layout row; there is no
 `control.json`, `supervisor.json` or second events capture. Provider parsing
 uses the live stream, not a second on-disk copy. Structured run events live
-in SQLite. Retention never recursively deletes above `scratch/`; history,
-unclassified data and transcripts remain retained, never staged there.
+in SQLite. Retention policy is out of scope. `provenant clean` deletes only
+disposable `scratch/` data; history, unclassified data and transcripts remain
+retained, never staged there.
 Modes are 0700/0600 under state's verified root. Use rusqlite WAL,
 foreign keys and `synchronous=FULL`; each connection has one owning thread,
 bounded BUSY retries and no transaction spanning a wait, resource probe or
@@ -207,6 +210,13 @@ Run owns schema and transactions; shared typed records live in records:
   custody/session, timestamps, state/outcome/reason, usage/context with source,
   reviewer provenance when supplied by verified edge evidence, artifact
   paths/digests, clipping/redaction and publication errors.
+- `AttemptFact`: Serialize-only terminal projection in records, built by run
+  from validated store records: task, attempt number, operation, project,
+  terminal state, exit, `started_at`/`finished_at`, resolved route (provider,
+  model, effort, account label), usage counts (`u64`), output paths, reviewer
+  and optional `delivery_id`. It also carries workflow's subject/head, output
+  references/digests, requested/applied/observed route, verified owner, lineage
+  and reason, covering every execution field read from `RUN_RECEIPT`.
 - `OperationRecord`: project/actor scope, kind, request digest, IDs and
   `prepared|accepted|terminal|launch_unknown`. The digest excludes reader
   wait/rendering but includes prompt, route, authority and execution controls.
@@ -242,6 +252,8 @@ Other outcomes are `succeeded`, `failed`, `rejected`, `cancelled`, `timed_out`,
 `permission_denied`, `quarantined` and `lost`. A dead owner is not a failed
 provider: unresolved custody is an observation until supervisor proves exit
 or loss. Valid natural completion wins over a late cancellation or deadline.
+Terminal records are immutable. The latest attempt for a task is the one with
+the highest attempt number, never the latest timestamp or record revision.
 
 Publication order is load-bearing:
 
@@ -297,13 +309,13 @@ retains a transaction between calls.
 | --- | --- |
 | run / CLI, Fabric | `submit(Submission, OperationKey, &ExecutionContext) -> Result<SubmissionReceipt, RunError>`; Submission has 1–64 tasks and concurrency 1–8. Single dispatch and batch share this path. |
 | run / CLI, Fabric | `operation(ProjectId, OperationId)` and `recover(ProjectId, OperationId) -> Result<Observed<SubmissionReceipt>, RunError>`; `reconcile(ProjectId, OperationId, ReconcileDecision) -> Result<RunSnapshot, RunError>`. Recover resumes known queued/publication work; reconcile checks uncertain custody before an explicit decision. No implicit writer replay. |
-| run / CLI, Fabric | `query(RunQuery) -> Result<Page<RunSnapshot>, RunError>`; `snapshot(ProjectId, AttemptRef) -> Result<RunSnapshot, RunError>`; `wait(RunQuery, WaitBudget, &CancelToken) -> Result<Page<RunSnapshot>, RunError>`, with `WaitCondition::Any\|All` and the attention semantics above. |
+| run / CLI, Fabric | `query(RunQuery) -> Result<Page<RunSnapshot>, RunError>`; `snapshot(ProjectId, AttemptRef) -> Result<RunSnapshot, RunError>` reports the active count for its selection, including starting and custody-unknown reservations; `wait(RunQuery, WaitBudget, &CancelToken) -> Result<Page<RunSnapshot>, RunError>`, with `WaitCondition::Any\|All` and the attention semantics above. |
 | run / Fabric federation | `events(RunCursor, usize) -> Result<Page<RunEvent>, RunError>` and `ack_events(RunCursor)` on the scoped handle; lazy pulls, durable per-host cursors, no Fabric registry. |
 | run / CLI, Fabric | `cancel(AttemptRef, OperationKey, CancelReason, &ExecutionContext) -> Result<CancelReceipt, RunError>`; aggregate scopes expand to exact attempts. `resume(ResumeRequest, OperationKey, &ExecutionContext) -> Result<SubmissionReceipt, RunError>`; request includes `expected_generation`, exact previous attempt, prompt and continued/fresh mode. |
 | run / CLI, Fabric | `read_output(AttemptRef, ArtifactPart, ByteRange, &ExecutionContext) -> Result<OutputChunk, RunError>`; `export(AttemptRef, ExportLimits, &ExecutionContext) -> Result<ArtifactManifest, RunError>`. Bounded confined regular files and stable digests. |
 | run / Fabric, confinement edge | `capabilities() -> Result<ExecutionCapabilities, RunError>`; `temporary_paths(ProjectId, AttemptRef) -> Result<AttemptTempPaths, RunError>`. Read-only host-local observations/paths, checked against handle authority. |
-| run / workflow composition edge | `completed_attempt(AttemptId) -> Result<AttemptFact, RunError>`; `work_snapshot(WorkScope) -> Result<RunWorkSnapshot, RunError>`. Facts carry terminal state/exit, subject/head, exact output references/digests, requested/resolved/applied/observed route, verified reviewer/owner identity, `delivery_id`, lineage, timestamps, reason and usage. Snapshot carries generation, observed time, active attempts and held leases. |
-| run / telemetry composition edge | `AttemptRecordReader` yields verified terminal facts from this new store, with bounded pagination. Telemetry's `record_attempt(&mut StatsAccumulator, &AttemptFact, &PriceTable) -> Result<(), TelemetryError>` folds one fact into a request-local accumulator; stats uses this reader and reducer without a ledger. Failure is diagnostic and never changes lifecycle. |
+| run / workflow composition edge | `completed_attempt(AttemptId) -> Result<AttemptFact, RunError>` returns the shared terminal fact; nonterminal attempts are a typed error. `work_snapshot(WorkScope) -> Result<RunWorkSnapshot, RunError>` carries generation, observed time, active count/attempts and held leases. |
+| run / CLI composition edge | `AttemptReader::attempts(filter) -> impl Iterator<Item = Result<AttemptFact>>` lazily yields validated terminal facts from the scoped store with bounded pages; read/validation failures are surfaced. The CLI passes facts to telemetry's `stats(facts, &PriceTable, window) -> Stats`, which accepts any iterator of `AttemptFact`. |
 | routing / run | `resolve(&RouteRequest, &RoutingContext) -> Result<ResolvedRoute, RoutingError>`; optional bounded plan of at most two alternatives, applied effort, eligibility, readiness and confidentiality. No candidate reconstruction in run. |
 | quota / run | `admit(&ResolvedRoute, &OperationId) -> Result<AdmissionPermit, QuotaError>`; provider/account quota readiness only. Run records the permit with its capacity/resource reservation, consumed by that exact attempt; quota owns no second host admission ledger. |
 | providers / run | `prepare(ResolvedRoute, ConfinedPlan, Prompt, Continuation) -> AdapterLaunchSpec`; incremental `observe(bytes) -> ProviderEvent`; `finish(ExitObservation, artifacts) -> ProviderOutcome`; continuation capability and exact session token. No context-ceiling control or transcript reads. |
@@ -319,9 +331,10 @@ writer. Workflow receives edge-built facts for every execution field it read
 from `RUN_RECEIPT`; review plans, pane inventory and paired-primary policy stay
 workflow concerns, not provider assertions or a new run-directory contract.
 
-The shared Telemetry decision requires no ledger or import. `record_attempt`
-updates only the explicit in-memory accumulator, never durable lifecycle state. CLI composition supplies `AttemptRecordReader`, preserving
-`run -> telemetry` and avoiding a reverse dependency. Fabric must use the new
+The CLI composes the reader and pure stats reducer; run does not depend on
+telemetry. Telemetry owns the price schema (`PriceTable`); state owns loading
+bundled TOML assets. Stats filter on `finished_at`, with no revision dedupe:
+terminal records never change. There is no ledger or import. Fabric uses the
 wait caps, concurrency and exit envelope from the shared decisions.
 
 There are three process roles: the transient CLI/MCP caller, a detached run
@@ -441,7 +454,9 @@ user transcript contents or old state files enter the Rust test state root.
   pagination/offsets, UTF-8 cuts,
   wait Any/All (including InputRequired with a running sibling), 14400/55
   boundary validation, event replay/ack cursors, refusal/exit codes,
-  expected-generation conflicts, completed facts/readers, continuation and changed
+  expected-generation conflicts, terminal fact fields/immutability, latest by
+  attempt number, snapshot active counts, `finished_at` filtering, completed
+  facts/readers, continuation and changed
   route receipts. Place hostile sentinel old roots beside the new root and
   prove no reads, writes or migration occur.
 - Process tests run on Linux and macOS with FIFO/handshake synchronisation:
@@ -454,6 +469,7 @@ user transcript contents or old state files enter the Rust test state root.
   racing cancel; grandchild cleanup without stopping a sibling/shared chair;
   concurrent child registration and parent closure; remote uncertainty with no
   duplicate writer launch. Assert durable terminal facts/results before reaping.
+- Use an in-house snapshot helper (about 80 lines), not `insta`.
 - Re-express custody invariants from `tests/lane_conformance/` before deleting
   that suite. Delete judges against old Python/TS outputs, coercion tests,
   `pending` tests and validators replaced by Rust types. Real external wire
@@ -467,9 +483,9 @@ no full local harness run or live provider dispatch is required here.
 ## Deletion inventory and expected size
 
 Counts include blank/comment lines, measured with `wc -l` at the baseline
-above. This is an implementation deletion plan; this design PR changes only
-this document. A mixed helper is deleted only after each surviving concern has
-its Rust owner. Do not retain a Python/TS adapter while waiting for another
+above. This is an implementation deletion plan; this design PR changes this
+document and PORTING R2's run dependency row. A mixed helper is deleted only
+after each surviving concern has its Rust owner. Do not retain a Python/TS adapter while waiting for another
 owner; delete old-subject tests and update surviving callers as R10 requires.
 
 Whole run sources to remove (`skills/orchestrate/scripts/` prefix):
@@ -480,8 +496,8 @@ Whole run sources to remove (`skills/orchestrate/scripts/` prefix):
 | `dispatch_preflight.py` | 584 | 2+3, with dispatch/batch importers |
 | `memory_admission.py` | 340 | 2+3, with dispatch importer |
 | `batch_run.py` | 933 | 3 |
-| `run_controls.py` | 1192 | 4+5, with run_dir_finalize importer |
-| `run_lineage.py` | 656 | 4+5, after provider_exec and run callers |
+| `run_controls.py` | 1192 | 5, with run_dir_finalize and Fabric callers |
+| `run_lineage.py` | 656 | 4, after provider_exec and run callers |
 | `run_records.py` | 455 | 5, last importer |
 | `layout.py` | 245 | 5, last importer with state/confinement |
 | `attempt_evidence.py` | 107 | 5, after run-directory cut and run_records |
@@ -497,8 +513,8 @@ Whole old-subject tests to remove (`tests/` prefix):
 | `test_memory_admission.py` | 642 | 2 |
 | `test_run_invariants_characterisation.py` | 347 | 2 |
 | `test_batch_run.py` | 1397 | 3 |
-| `test_run_controls.py` | 1348 | 4 |
-| `test_context_resume.py` | 199 | 4 |
+| `test_run_controls.py` | 1348 | 5 |
+| `test_context_resume.py` | 199 | 5, with controls |
 | `test_context_usage.py` | 363 | 5, with last-importer deletion |
 | `test_worker_completion_guidance.py` | 274 | 4 |
 | `test_attempt_evidence.py` | 83 | 5 |
@@ -545,8 +561,10 @@ workflow and supervisor do not also claim run-directory or Git packet files.
 | `skills/orchestrate/scripts/lease.py` | 131 | Run, step 5: retire driver lease with run-directory cut; distinct from writer custody |
 | `tests/test_lease.py` | 56 | Run, step 5; delete inert lease/oracle consumers too |
 | `tests/test_run_dir_finalize.py` | 1112 | Run, step 5: delete old subject, retain Rust closure/custody coverage and workflow policy tests |
-| `skills/orchestrate/scripts/git_evidence_packet.py` | 88 | Run, steps 4+5 with last dispatch/control and Rust-oracle importer; Git reads use supervisor run_utility |
+| `skills/orchestrate/scripts/git_evidence_packet.py` | 88 | Run, step 5 with last dispatch/control and Rust-oracle importer; Git reads use supervisor run_utility |
 | `skills/orchestrate/scripts/attempt_storage.py` | 176 | Supervisor alone counts/deletes it with last provider/cleanup caller, no run claim |
+| `skills/_shared/roots.py`, `scripts/lib/roots.py`, `scripts/host_identity.py`, `skills/_shared/harness_profile.py`, `scripts/harness_profile.py` | Not counted here | State/config counts them; delete with each last importer in step 5, after providers/routing, workflow, Fabric and CLI retire their old consumers |
+| `tests/test_install_skills.py` | 1311 | State deletes the whole old-installer test; no run edit or count claim |
 | `tests/test_fabric_records.py` | 816 | Routing/Fabric replace mixed index, cooldown and health cases |
 | `tests/test_cf_dispatch.py` | 2905 | Providers/routing replace external-wire tests with real fixtures |
 | `tests/test_cf_dispatch_git_custody.py` | 211 | Confinement/Git contract |
@@ -575,7 +593,6 @@ subject. None of these partial edits is included in the reduction estimate.
 | `config/harness-knobs.json:19,25`, `tests/test_harness_profile.py` | State/config, step 2: replace knobs with typed config; remove retired context-ceiling settings |
 | `scripts/clean.py:233` | Supervisor/CLI cleanup, step 5: use new run store/layout; no run-directory contract |
 | `tests/conftest.py` | Run + CLI + Fabric, each step: remove deleted fixtures; temporary HOME/state/harness paths |
-| `tests/test_install_skills.py` | State installer, step 5: update installed orchestration inventory/fixtures |
 | `tests/test_model_route_pools.py` | Routing, step 2: replace obsolete dispatch/route assumptions |
 | `tests/test_issue_697_custody.py` | Run + supervisor, steps 2/4: replace old subject with native custody/fault cases |
 | `tests/test_ci_repository_assurance_policy.py:319` | Workflow/CI, step 5: update path policy with the run-directory/shared-leaf cuts |
@@ -596,7 +613,7 @@ run-owned cuts above are deliberately unbudgeted; each build PR reports actual
 
 ## Build order
 
-The numbered milestones land in three coupled PR groups: 1, 2+3 and 4+5.
+The numbered milestones land in four PRs: 1, 2+3, 4 and 5.
 Each group lands Rust and deletes its old subjects/tests together; no group
 lands an intermediate commit that removes a still-imported module. These steps
 begin only after records/config, confinement,
@@ -618,30 +635,37 @@ Python/V8 emulation, selector, bridge or old-output judge is introduced.
 3. **Bounded batches.** Implement manifest submission, task-local refusals,
    scope conflicts, concurrency and aggregate results through the same submit
    path. Delete batch_run and its tests. Use concurrent fake providers.
-4. **Controls and recovery.** Implement scoped cancellation, query/wait/output,
-   expected-generation resume, lineage, work facts and explicit reconcile.
-   In the coupled 4+5 PR delete run_controls, run_lineage, run_worker_detached
-   and their tests after worker/cleanup APIs land and run_dir_finalize/
-   provider_exec importers retire. Delete git_evidence_packet only with its
-   final dispatch/control and inert workflow oracle consumers. Update lane_launch's
-   dynamic run_records cancellation call. Prove sibling isolation, exact
-   continuation and no duplicate writer after uncertainty.
+4. **Controls and recovery library.** Implement scoped cancellation,
+   query/wait/output, expected-generation resume, lineage, work facts and
+   explicit reconcile. Delete run_lineage and run_worker_detached and their
+   tests after worker/cleanup APIs land and provider_exec importers retire.
+   Prove sibling isolation, exact continuation and no duplicate writer after
+   uncertainty. This PR completes the typed run API without Fabric glue.
+   Keep run_controls solely for its old Fabric/finaliser callers until step 5;
+   it is never called by Rust or adapted to the new store.
 5. **Facade, run-directory cut and shared leaves.** Fabric replaces/counts its
    TS facade and mixed tests, routing remote queries/events to run; workflow
-   consumes completed_attempt/work_snapshot at the composition edge. Run cuts
-   run_dir_init, RUN_RECEIPT/MANIFEST, run_dir_finalize and the driver lease
-   after the caller matrix is updated. New run records plus clean replace
-   them. Finish the following last-importer groups in the same deletion PR:
+   consumes completed_attempt/work_snapshot at the composition edge. The seam
+   is the tested library from step 4: this PR adds federation/MCP composition
+   and removes the remaining old consumers together. Delete run_controls and
+   its tests with run_dir_finalize and the Fabric execution/batch/resume
+   callers. Run cuts run_dir_init, RUN_RECEIPT/MANIFEST and the driver lease
+   after the caller matrix is updated; run records plus clean replace them.
+   Delete git_evidence_packet with its last control and inert workflow oracle
+   consumers; Git reads use supervisor run_utility. Update lane_launch's
+   dynamic run_records cancellation call. Finish these last-importer groups:
 
    | Leaf (run deletion owner) | Last-importer gate |
    | --- | --- |
-   | `run_records.py` | dispatch/preflight (2), batch (3), controls (4), lane_launch dynamic call and all old tests/oracles gone |
+   | `run_records.py` | dispatch/preflight (2), batch (3), controls (5), lane_launch dynamic call and all old tests/oracles gone |
    | `attempt_evidence.py` | run_records above, dispatch/batch/controls and run_dir_finalize (5), records/workflow Python oracle references gone |
    | `layout.py` | dispatch/preflight/batch/controls, provider_exec, provider_confinement, fabric_records, utility.py and run_dir_init.sh all removed/replaced by their owners |
    | `context_usage.py` | dispatch_run, provider_exec, provider_observer and fabric_records all removed/replaced by providers/routing/Fabric; then delete context usage tests |
 
    Supervisor alone deletes attempt_storage with its last provider/cleanup
-   importer. Routing/Fabric retire fabric_records with the mixed health/index
+   importer. State/config deletes roots, host_identity and harness_profile with
+   each last importer in step 5, not when its replacement first lands.
+   Routing/Fabric retire fabric_records with the mixed health/index
    tests. Retire conformance/support fixtures only after native custody tests
    replace them. CLI/MCP tests exercise one durable store through disconnect,
    scheduler restart, explicit reconcile and event cursor recovery.
