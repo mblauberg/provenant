@@ -1,0 +1,4 @@
+{"type":"thread.started","thread_id":"FIXTURE_SESSION_IDENTIFIER_001"}
+{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"FIXTURE_EVENT_REQUEST_OR_MESSAGE_IDENTIFIER_001","type":"agent_message","text":"FIXTURE_USER_OR_PROVIDER_TEXT_001"}}
+{"type":"turn.completed","usage":{"input_tokens":0,"cached_input_tokens":0,"cache_write_input_tokens":0,"output_tokens":0,"reasoning_output_tokens":0}}
