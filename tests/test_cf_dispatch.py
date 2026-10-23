@@ -191,18 +191,23 @@ def run_dispatch_with_stub(
     stub,
     role="reviewer",
     extra_args=None,
-    provenant_stub=None,
+    model_route_stub=None,
     extra_env=None,
 ):
     with tempfile.TemporaryDirectory() as td:
         tmp = Path(td)
         bin_dir = fake_bin(tmp)
         write_executable(bin_dir / "claude", stub)
-        if provenant_stub is not None:
-            write_executable(bin_dir / "provenant", provenant_stub)
+        if model_route_stub is not None:
+            product_root = tmp / "product"
+            (product_root / "scripts").mkdir(parents=True)
+            (product_root / "config").symlink_to(PRODUCT_ROOT / "config", target_is_directory=True)
+            write_executable(product_root / "scripts/model-route", model_route_stub)
         out = tmp / "out.txt"
         # PATH precedence keeps the checkout's stubs first.
         env = fabric_free_env()
+        if model_route_stub is not None:
+            env["AGENT_FABRIC_PRODUCT_ROOT"] = str(product_root)
         env.update(extra_env or {})
         env["PATH"] = f"{bin_dir}:{PRODUCT_ROOT / 'scripts'}:{env['PATH']}"
         command = [
@@ -238,7 +243,7 @@ def test_invalid_routing_output_returns_a_structured_failure_record():
     """
     result, record, _ = run_dispatch_with_stub(
         stub,
-        provenant_stub="""\
+        model_route_stub="""\
             #!/usr/bin/env bash
             exit 127
         """,
@@ -259,7 +264,7 @@ def test_non_ok_routing_record_never_launches_provider_even_with_zero_exit(tmp_p
     """
     result, record, _ = run_dispatch_with_stub(
         stub,
-        provenant_stub="""\
+        model_route_stub="""\
             #!/usr/bin/env bash
             printf '%s\n' '{"status":"adapter_disabled","reason":"configured off","adapter_enabled":false,"resolved_model":"opus","model_family":"anthropic","endpoint_provider":"disabled","identity_source":"runtime-configuration","alias":"senior"}'
             exit 0
@@ -300,7 +305,7 @@ def test_ok_routing_record_requires_complete_execution_identity(tmp_path):
         route_payload = shlex.quote(json.dumps(route, separators=(",", ":")))
         result, record, _ = run_dispatch_with_stub(
             stub,
-            provenant_stub=f"""\
+            model_route_stub=f"""\
                 #!/usr/bin/env bash
                 printf '%s\\n' {route_payload}
                 exit 0
@@ -930,12 +935,15 @@ def test_disabled_execution_routes_keep_configured_reason_and_never_launch_provi
     compatibility["adapters"]["kiro-acp"].update(enabled=False, disabled_reason=expected_reason)
     overlay = tmp / "adapter-compatibility.yaml"
     overlay.write_text(yaml.safe_dump(compatibility))
-    write_executable(bin_dir / "provenant", f"""#!/usr/bin/env bash
-        [ "$1" = route ] && [ "$2" = resolve ] || exit 2
-        shift 2
-        exec {shlex.quote(sys.executable)} {shlex.quote(str(PRODUCT_ROOT / 'scripts/model_route.py'))} resolve "$@" --adapter-compatibility {shlex.quote(str(overlay))}
+    product_root = tmp / "product"
+    (product_root / "scripts").mkdir(parents=True)
+    (product_root / "config").symlink_to(PRODUCT_ROOT / "config", target_is_directory=True)
+    write_executable(product_root / "scripts/model-route", f"""#!/usr/bin/env bash
+        [ "$1" = resolve ] || exit 2
+        exec {shlex.quote(sys.executable)} {shlex.quote(str(PRODUCT_ROOT / 'scripts/model_route.py'))} "$@" --adapter-compatibility {shlex.quote(str(overlay))}
     """)
     env = fabric_free_env()
+    env["AGENT_FABRIC_PRODUCT_ROOT"] = str(product_root)
     for tool, model, executable in (("kiro", "deepseek-v3.2", "kiro-cli"),):
         invoked = tmp / f"{tool}.invoked"
         write_executable(
@@ -979,14 +987,18 @@ def test_disabled_execution_routes_keep_configured_reason_and_never_launch_provi
 def test_disabled_capability_adapters_are_rejected_before_their_probe_runs(tmp_path):
     tmp = tmp_path
     bin_dir = fake_bin(tmp)
+    product_root = tmp / "product"
+    (product_root / "scripts").mkdir(parents=True)
+    (product_root / "config").symlink_to(PRODUCT_ROOT / "config", target_is_directory=True)
     write_executable(
-        bin_dir / "provenant",
+        product_root / "scripts/model-route",
         """#!/usr/bin/env bash
         printf '%s\n' '{"schema_version":1,"status":"adapter_disabled","reason":"configured off","adapter_enabled":false,"endpoint_provider":"disabled"}'
         exit 1
         """,
     )
     env = fabric_free_env()
+    env["AGENT_FABRIC_PRODUCT_ROOT"] = str(product_root)
 
     for tool, model in (("codex", "gpt-6-luna"), ("agy", "gemini-3.7-flash")):
         invoked = tmp / f"{tool}.invoked"
@@ -1358,7 +1370,7 @@ def test_task_class_route_preserves_effective_alias():
         stub,
         role="worker",
         extra_args=["--intent", "ordinary", "--task-class", "mechanical"],
-        provenant_stub="""#!/usr/bin/env bash
+        model_route_stub="""#!/usr/bin/env bash
             printf '{\"status\":\"ok\",\"alias\":\"junior\",\"resolved_model\":\"haiku\",\"model_family\":\"anthropic\",\"endpoint_provider\":\"anthropic\",\"identity_source\":\"test\"}\n'
         """,
     )
@@ -1380,7 +1392,7 @@ def test_route_json_fields_are_read_by_key_without_delimiter_shifting():
     result, record, output = run_dispatch_with_stub(
         stub,
         extra_args=["--intent", "ordinary"],
-        provenant_stub="""#!/usr/bin/env bash
+        model_route_stub="""#!/usr/bin/env bash
             printf '%s\n' '{"status":"ok","alias":"principal","resolved_model":"opus|candidate","model_family":"anthropic","endpoint_provider":"anthropic","identity_source":"test-route","requested_effort":"high","effort":"high","effort_source":"test","effort_capability_source":"test-capability"}'
         """,
     )
@@ -1828,9 +1840,9 @@ def test_run_dir_init_force_does_not_clobber_existing_manifest(tmp_path):
     assert (run_dir / "RUN_RECEIPT.json").exists()
 
 
-def test_non_git_fallback_routes_via_product_root_model_route(tmp_path):
-    # From a non-git copy of the product tree, with no provenant on PATH,
-    # dispatch must fall back to <product root>/scripts/model_route.py.
+def test_non_git_product_root_uses_its_model_route_wrapper(tmp_path):
+    # From a non-git copy of the product tree, dispatch uses that tree's
+    # interpreter-selecting scripts/model-route owner wrapper.
     tmp = tmp_path
     product = tmp / "product"
     shutil.copytree(
@@ -1839,21 +1851,11 @@ def test_non_git_fallback_routes_via_product_root_model_route(tmp_path):
     )
     shutil.copytree(PRODUCT_ROOT / "skills" / "_shared", product / "skills" / "_shared")
     shutil.copytree(PRODUCT_ROOT / "config", product / "config")
-    (product / "scripts").mkdir()
-    for name in (
-        "model_route.py",
-        "model_route_catalog.py",
-        "model_route_preferences.py",
-        "worktree.py",
-        "provider_quota.py",
-        "provider_identity.py",
-        "host_identity.py",
-        "quota_schedule.py",
-        "quota_display.py",
-    ):
-        shutil.copy2(PRODUCT_ROOT / "scripts" / name, product / "scripts" / name)
-    shutil.copytree(PRODUCT_ROOT / "scripts/quota_providers", product / "scripts/quota_providers")
+    shutil.copytree(PRODUCT_ROOT / "scripts", product / "scripts")
+    (product / ".venv/bin").mkdir(parents=True)
+    (product / ".venv/bin/python").symlink_to(sys.executable)
     bin_dir = fake_bin(tmp)
+    write_executable(bin_dir / "python3", f'#!/bin/sh\nexec {shlex.quote(sys.executable)} "$@"\n')
     write_executable(
         bin_dir / "claude",
         """\
@@ -1862,11 +1864,11 @@ def test_non_git_fallback_routes_via_product_root_model_route(tmp_path):
         echo "OK"
         """,
     )
-    write_executable(bin_dir / "python3", f'#!/bin/sh\nexec {sys.executable} "$@"\n')
     env = fabric_free_env()
+    env["AGENT_FABRIC_PRODUCT_ROOT"] = str(product)
     env["PATH"] = f"{bin_dir}:/usr/bin:/bin"
     # cf_dispatch.py appends $HOME/.local/bin and $HOME/bin to PATH;
-    # point HOME at the sandbox so an installed provenant cannot leak in.
+    # point HOME at the sandbox so no ambient command can take precedence.
     env["HOME"] = str(tmp)
     instance = tmp / "instance"
     (instance / "config").mkdir(parents=True)
@@ -1891,6 +1893,7 @@ def test_non_git_fallback_routes_via_product_root_model_route(tmp_path):
         cwd=str(tmp),
         env=env,
     )
+    assert result.stdout, result.stderr
     record = json.loads(result.stdout)
     assert result.returncode == 0, result.stderr
     assert record["status"] == "ok"

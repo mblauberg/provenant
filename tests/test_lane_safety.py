@@ -107,7 +107,7 @@ ALLOWED = [
     "sudo kill 4242",
     "env X=1 kill 4242",
     "FOO=1 kill 4242",
-    "provenant reap 4242 --tree",
+    "scripts/reap.py 4242 --tree",
     "pgrep -f node",
     "echo pkill",
     "echo 'pkill node; kill $(pgrep x)'",
@@ -167,7 +167,7 @@ def test_hook_emits_deny_decision_pointing_at_reap():
     output = json.loads(done.stdout)["hookSpecificOutput"]
     assert output["hookEventName"] == "PreToolUse"
     assert output["permissionDecision"] == "deny"
-    assert "provenant reap" in output["permissionDecisionReason"]
+    assert "scripts/reap.py" in output["permissionDecisionReason"]
 
 
 @pytest.mark.parametrize("payload", [

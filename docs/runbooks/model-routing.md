@@ -1,7 +1,7 @@
 # Model routing and cooldowns
 
-Use `provenant routes --health` (or `--json`) to inspect available route pools,
-quota and current cooldowns. `provenant route cooldowns --json` returns only
+Use `scripts/model-route routes --health` (or `--json`) to inspect available route pools,
+quota and current cooldowns. `scripts/model-route cooldowns --json` returns only
 the selected accounts on this host, using the same reader as MCP adapter status. Route configuration is instance-owned in
 `config/model-routing.json`; [the model dossier](../model-dossier.md) describes
 pool weights and model choices.
@@ -68,13 +68,13 @@ the second agy account and distinct host ids for the two Macs.
 
 ## Reset a cooldown
 
-1. Inspect `provenant routes --health` and confirm the intended account label.
+1. Inspect `scripts/model-route routes --health` and confirm the intended account label.
 2. Reset one model or adapter on this host:
 
    ```sh
-   provenant route reset claude/sonnet --account max-a
-   provenant route reset codex --account work
-   provenant route reset --account work
+   scripts/model-route reset claude/sonnet --account max-a
+   scripts/model-route reset codex --account work
+   scripts/model-route reset --account work
    ```
 
    Aliases are canonicalised. `--account` keeps other accounts and hosts intact.

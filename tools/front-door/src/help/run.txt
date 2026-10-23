@@ -1,9 +1,0 @@
-usage: provenant run show <run-id|task-id> [--task-id T] [--tail N] [--json]
-       provenant run cancel|inspect|retry|reduce ...
-
-Delegates to skills/orchestrate/scripts/run_controls.py ...
-`provenant run show` reads a lane's status and the last N lines (default 40,
-max 500) of its result.md from the run directory, resolved from a run id, a
-run directory name or the newest run holding the task id.
-`provenant run cancel` writes one cooperative cancellation request for an
-exact attempt or batch and waits boundedly for owner-written evidence.

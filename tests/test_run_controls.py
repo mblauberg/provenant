@@ -19,13 +19,10 @@ from tests.support.fake_cli import fake_bin, fake_codex
 from tests.support.modules import load_script
 from tests.support.runs import file_digest, make_run, write_attempt
 
-from tests.support.front_door import front_door_binary
-
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "skills/orchestrate/scripts/run_controls.py"
 FINALIZE = ROOT / "skills/orchestrate/scripts/run_dir_finalize.py"
 INIT = ROOT / "skills/orchestrate/scripts/run_dir_init.sh"
-CLI = front_door_binary()
 
 
 @pytest.mark.parametrize("outcome,pid", [("host_disk_full", 12345), ("host_disk_full", None), ("provider_lost", 12345), ("process_spawn_error", None)])
@@ -200,13 +197,6 @@ def write_dispatch_wrapper(path: Path, adapter: Path) -> None:
         encoding="utf-8",
     )
     path.chmod(path.stat().st_mode | stat.S_IXUSR)
-
-
-def invoke(*args: str, cwd: Path, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
-    merged = os.environ.copy()
-    if env:
-        merged.update(env)
-    return subprocess.run([str(CLI), *args], cwd=cwd, env=merged, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 
 
 def test_cancel_waits_through_attempt_sidecar_gap(tmp_path: Path) -> None:

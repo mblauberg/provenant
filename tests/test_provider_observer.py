@@ -126,7 +126,7 @@ def test_live_attempt_matches_observer_decisions(tmp_path, name, adapter, lines,
     if stop or result["terminal_event_seen"]:
         code += "import signal; signal.pause()\n"
     module, plan = fixture_plan(tmp_path, adapter, code)
-    record = module.execute(plan, tmp_path / "result.md", env={**os.environ, "PROVENANT_LANE_IMPL": "python",
+    record = module.execute(plan, tmp_path / "result.md", env={**os.environ,
                                                                "CF_DISPATCH_ENABLE_COPILOT": "1"})
     if stop:
         assert record["status"] == stop

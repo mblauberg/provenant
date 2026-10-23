@@ -844,7 +844,12 @@ def test_post_merge_hook_calls_clean_and_never_fails_merge(tmp_path):
     bin_dir.mkdir()
     marker = tmp_path / "called"
     env_marker = tmp_path / "git-env"
-    stub = bin_dir / "provenant"
+    product = tmp_path / "product"
+    (product / "scripts").mkdir(parents=True)
+    front = bin_dir / "provenant"
+    front.write_text(f'#!/bin/sh\n[ "$1" = root ] || exit 2\nprintf "%s\\n" "{product}"\n')
+    front.chmod(0o755)
+    stub = product / "scripts/clean.py"
     stub.write_text(f'#!/bin/sh\nprintf "%s\\n" "$*" > "{marker}"\n'
                     f'printf "%s|%s\\n" "${{GIT_DIR-unset}}" "${{GIT_WORK_TREE-unset}}" > "{env_marker}"\nexit 1\n')
     stub.chmod(0o755)
@@ -855,7 +860,7 @@ def test_post_merge_hook_calls_clean_and_never_fails_merge(tmp_path):
                             text=True, capture_output=True, check=False)
 
     assert result.returncode == 0
-    assert marker.read_text() == f"clean --prune-merged --merged-since ORIG_HEAD --repo {root}\n"
+    assert marker.read_text() == f"--prune-merged --merged-since ORIG_HEAD --repo {root}\n"
     assert env_marker.read_text() == "unset|unset\n"
     assert "cleanup failed" in result.stderr
 
@@ -867,7 +872,12 @@ def test_post_merge_hook_uses_local_master_without_origin_head(tmp_path):
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     marker = tmp_path / "called"
-    stub = bin_dir / "provenant"
+    product = tmp_path / "product"
+    (product / "scripts").mkdir(parents=True)
+    front = bin_dir / "provenant"
+    front.write_text(f'#!/bin/sh\n[ "$1" = root ] || exit 2\nprintf "%s\\n" "{product}"\n')
+    front.chmod(0o755)
+    stub = product / "scripts/clean.py"
     stub.write_text(f'#!/bin/sh\nprintf "%s\\n" "$*" > "{marker}"\n')
     stub.chmod(0o755)
     environment = {**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}"}
@@ -876,7 +886,7 @@ def test_post_merge_hook_uses_local_master_without_origin_head(tmp_path):
                             text=True, capture_output=True, check=False)
 
     assert result.returncode == 0, result.stderr
-    assert marker.read_text() == f"clean --prune-merged --merged-since ORIG_HEAD --repo {root}\n"
+    assert marker.read_text() == f"--prune-merged --merged-since ORIG_HEAD --repo {root}\n"
 
 
 def test_post_merge_hook_skips_quietly_without_orig_head(tmp_path):

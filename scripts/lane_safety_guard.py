@@ -15,7 +15,7 @@ import sys
 
 MESSAGE = (
     "Refused: {why}. A pattern, group or expanded kill can hit another lane's "
-    "process. Stop explicit PIDs with `provenant reap <pid>… [--tree]`."
+    "process. Stop explicit PIDs with `scripts/reap.py <pid>… [--tree]`."
 )
 PATTERN_KILLERS = {"pkill", "killall", "killall5", "skill"}
 WRAPPERS = {

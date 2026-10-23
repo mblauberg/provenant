@@ -245,10 +245,10 @@ if [[ "$DOCTOR" == true ]]; then
   else
     echo "herdr=WARN not found"
   fi
-  provenant route resolve --adapter claude --alias principal --role lead || true
+  "$PRODUCT_ROOT/scripts/model-route" resolve --adapter claude --alias principal --role lead || true
   caps="$(mktemp)"
   if "$SKILLS_ROOT/orchestrate/scripts/capabilities.py" codex --out "$caps"; then
-    provenant route resolve --adapter codex --alias principal --role lead --capabilities-file "$caps" || true
+    "$PRODUCT_ROOT/scripts/model-route" resolve --adapter codex --alias principal --role lead --capabilities-file "$caps" || true
   else
     echo "codex-capabilities=WARN discovery failed"
   fi

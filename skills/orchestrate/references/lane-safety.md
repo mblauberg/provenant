@@ -12,7 +12,7 @@ false report. Paste the first section into every lane and reviewer brief.
 - Never pattern-kill processes host-wide: no `pkill`, `killall`, `kill $(pgrep …)`,
   `kill -- -<pgid>` or other non-numeric kill target, bare or behind `sudo`,
   `env`, `xargs`, `timeout` or `bash -c`. Stop explicit PIDs you started with
-  `provenant reap <pid>… [--tree] [--grace S] [--started-before TIME]`; it
+  `scripts/reap.py <pid>… [--tree] [--grace S] [--started-before TIME]`; it
   prints each process's age, parent, cwd and command first, and
   `--started-before` refuses a PID that was reused after your process began.
 - Enforcement is opt-in. The lane-safety hook body is

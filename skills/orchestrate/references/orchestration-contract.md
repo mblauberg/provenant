@@ -133,7 +133,7 @@ The valid envelope is retained as `status=blocked`, `outcome=question` and
 response continues it through a new provider invocation and new attempt; it
 never mutates or resumes the blocked attempt in place.
 
-Cross-terminal cancellation is cooperative. `provenant run cancel` creates one
+Cross-terminal cancellation is cooperative. `skills/orchestrate/scripts/run_controls.py cancel` creates one
 empty `cancel.request` in the exact attempt or batch directory and waits
 boundedly for the existing owner to write terminal evidence. The command never
 selects or signals a PID and never writes an attempt or batch result. The owner

@@ -1,6 +1,9 @@
 # Spec: Rust lane supervisor and a single Rust front door
 
-Status: **proposed**, 2026-10-23, revised after a cross-family review. Builds
+Status: **superseded** by PORTING.md version 7 and the accepted Rust area
+designs. The rollout below is historical, not an operator procedure.
+
+Original proposal: 2026-10-23, revised after a cross-family review. Builds
 on `origin/main` at `59bb0ba4`, after
 [#1207](https://github.com/mblauberg/provenant/pull/1207) and
 [#1209](https://github.com/mblauberg/provenant/pull/1209), and preserves their

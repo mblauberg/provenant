@@ -288,7 +288,7 @@ build requires an explicit absolute `PROVENANT_ROOT`; it refuses without it.
 These reads never create state. An installed release launches no Python owner by default. Without a checkout
 Git entry, a local `.venv` interpreter or explicit `HARNESS_PYTHON`, each
 Python-owned route fails with typed `owner unavailable in installed release`
-and exit 3. Tests that exercise a Python owner set `HARNESS_PYTHON` explicitly.
+and exit 4. Tests that exercise a Python owner set `HARNESS_PYTHON` explicitly.
 Install verifies manifest, platform, file bytes and modes, then asks the
 binary composition edge to run bounded version/help smoke checks through
 supervisor (30 s, capped output, no provider access). A digest proves identity,
@@ -460,7 +460,7 @@ Rollback is an operator reinstall of `pre-rust-rewrite`, preserving old state.
 | --- | --- |
 | core | Distinct `HostId`, `ProjectId`, `WorkspaceId`, `RepoId`, `ActorId`, `RunId`, `TaskId`, `AttemptId`, `DeliveryId`, `SessionId`, `InstallId`, `ImportId`; `GitOid`, `Digest`, `WorkScope`, `CancelToken`; `RootInputs -> Result<Roots>`, `RelativePath::parse`; `WallTime`/`UtcMicros`, `MonoTime`, `DurationMicros`, `Deadline`, `Clock`. No ambient discovery or I/O. |
 | records | `decode<T: DeserializeOwned>(reader, Limits)`, `encode<T: Serialize>`; `CanonicalV1::bytes`, record/file/source digests; `PathWire`; bounded frontmatter/sidecar/JSONC parsers; state/install/import models. Stored records and `Serialize`-only facts are separate types. |
-| records (CLI contract) | `CommandResult<T> { schema_version, command, status, data: Option<T>, error: Option<CommandError> }`, closed status enum and redacted typed errors; `Finding` and `HelpCatalog`. Output supports additive fields within v1. CLI constructs/renders envelopes and maps exits; no library imports cli. |
+| records (CLI contract) | `CommandResult<T> { schema_version, command, status, data: T, error: Option<CommandError> }`, closed status enum and redacted typed errors; `Finding` and `HelpCatalogue`. Output supports additive fields within v1. CLI constructs/renders envelopes and maps exits; no library imports cli. |
 | config | `load(roots, reader) -> Result<ResolvedConfig>` with origins and selected compiled preset; `bind_project(roots, ProjectLocation, SafeFs) -> Result<ProjectBinding>`; pure `plan_install(Release, Targets, Snapshots) -> Result<InstallPlan>`; `install(plan, SafeFs, reporter) -> Result<InstallOutcome>`; `check_install`, `uninstall`. Plan is ephemeral, not a persisted recovery protocol. |
 | supervisor | Production `SystemClock` (`jiff` wall time), entropy, safe no-follow FS/locks/publication and bounded version/help smoke processes. `run_utility` for fixed Git/gh reads; test-only fixture binary with a scoped `Command::new` allow for process tests. |
 | confinement | `discover_project(Workspace, &DiscoveryAuthority) -> Result<ProjectLocation>` using supervisor Git reads; validates Git object format, repository/path membership and authority. Config consumes the result without a reverse dependency. |
@@ -594,6 +594,12 @@ help/golden and caller-test wiring only after the last Python importer retires.
 It also removes surviving profile/knob instructions then. The final deletion
 inventory belongs to that slice, not to this typed-loader PR.
 
+The CLI parser step retired `scripts/configure-fabric-mcp.py` (818 actual
+lines) and the remaining `tests/test_configure_fabric_mcp.py` (1,148 actual
+lines) with the implicit no-argument MCP route. The inventories below retain
+the original planning baseline; do not count those deletions again in later
+owner slices. The explicit transport and new registrations land at cut-over.
+
 | Slice | Python source/helper | Lines |
 | --- | --- | ---: |
 | 5 | `scripts/lib/roots.py` | 33 |
@@ -612,7 +618,7 @@ inventory belongs to that slice, not to this typed-loader PR.
 | 3 | `scripts/manage_installation.py` | 850 |
 | 3 | `scripts/instance_installation.py` | 811 |
 | 3 | `scripts/install-workflows` (Python) | 315 |
-| 4 | `scripts/configure-fabric-mcp.py` | 826 |
+| CLI parser, PR #1386 (deleted here; state owner accepted) | `scripts/configure-fabric-mcp.py` | 818 |
 | 4 | `scripts/configure-claude-hooks.py` | 134 |
 | 4 | `scripts/configure-codex-skill-overrides.py` | 140 |
 | 4 | `scripts/check-provenant-install.py` | 165 |
@@ -629,11 +635,14 @@ inventory belongs to that slice, not to this typed-loader PR.
 | 3 | `tests/test_instance_installation.py` | 931 |
 | 3 | `tests/test_install_provenant_command.py` | 272 |
 | 3 | `tests/test_install_skills.py` | 1,311 |
-| 3 | `tests/test_configure_fabric_mcp.py` (five tests trimmed; module retained) | 162 |
+| CLI parser, PR #1386 (remaining module deleted here) | `tests/test_configure_fabric_mcp.py` | 1,148 |
 | 4 | `tests/test_check_provenant_install.py` | 358 |
 | 3 | `tests/test_install_harness.py` (deleted) | 2,177 |
 
-Python total: **11,727 lines removed**. Shell entrypoints removed in the
+Planning baseline Python total: **12,705 lines removed**, of which the state
+slices remove **10,739**. PR #1386 deletes the remaining MCP configurer and its
+tests, **1,966 lines**, with state-owner acceptance and no live callers. These deletions belong to the CLI parser
+change and must not be counted again in a later state slice. Shell entrypoints removed in the
 corresponding slices: `scripts/provenant-profile` **5**, `scripts/install-skills`
 **87**, `scripts/install-harness` **702**; shell total **794**. The removed
 installation test module also covered collector, workflow and other hook

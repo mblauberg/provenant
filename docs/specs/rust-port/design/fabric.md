@@ -658,6 +658,12 @@ and final unterminated lines. Directory prefixes shorten paths without globs.
 No source is deleted by this documentation PR. Shared-owner exclusions follow
 the table; they are not silently included in the net savings.
 
+The CLI parser step retired `scripts/configure-fabric-mcp.py` (818 actual
+lines) and the remaining `tests/test_configure_fabric_mcp.py` (1,148 actual
+lines) with the implicit no-argument MCP route. The inventories below retain
+the original planning baseline; do not count those deletions again in later
+owner slices. The explicit transport and new registrations land at cut-over.
+
 | File | Lines |
 |---|---:|
 | `runtime/fabric/README.md` | 752 |

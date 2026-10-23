@@ -1,8 +1,0 @@
-usage: provenant reap <pid>… [--tree] [--grace S] [--started-before TIME]
-
-Delegates to scripts/reap.py ...
-Stop explicit PIDs: TERM, then KILL after the grace period (default 5s).
-Prints each process's age, parent, cwd and command first, and refuses one
-that started after --started-before (epoch or ISO time) so a reused PID is
-left alone. --tree adds descendants. Never signals a group or a pattern;
-the lane-safety hook refuses pkill, killall and non-numeric kill targets.

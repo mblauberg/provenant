@@ -1,8 +1,0 @@
-usage: provenant stats [--since ISO-DATE] [--json] [--detail]
-       provenant stats --compare <PR#|rev|date> [--window 7d] [--json]
-
-Delegates to scripts/provenant-telemetry.
-Usage, costs and outcomes. The default is the summary tables only;
-per-account rows and the full tables are behind --detail, and --json
-prints the full report. --compare gives before/after metrics with sample
-sizes; a side with fewer than 10 lanes or rows is inconclusive.

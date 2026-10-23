@@ -33,6 +33,6 @@ if ! command -v provenant >/dev/null 2>&1; then
     exit 0
 fi
 
-provenant clean --prune-merged --merged-since ORIG_HEAD --repo "$top" ||
+"$(provenant root)/scripts/clean.py" --prune-merged --merged-since ORIG_HEAD --repo "$top" ||
     printf '%s\n' 'post-merge: cleanup failed; merge remains successful' >&2
 exit 0

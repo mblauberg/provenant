@@ -1,4 +1,4 @@
-# `provenant lint`
+# `scripts/provenant_lint.py`
 
 Checks branch names and commit messages against the doctrine in
 [`setup-repo`](../../skills/setup-repo/references/doctrine.md). Owner:
@@ -6,11 +6,11 @@ Checks branch names and commit messages against the doctrine in
 2 is a usage error. Problems print to stderr.
 
 ```sh
-provenant lint branch [NAME]      # default: the current branch
-provenant lint commit-msg FILE    # works directly as a git commit-msg hook
+scripts/provenant_lint.py branch [NAME]      # default: the current branch
+scripts/provenant_lint.py commit-msg FILE    # works directly as a git commit-msg hook
 ```
 
-Hook: `.git/hooks/commit-msg` containing `exec provenant lint commit-msg "$1"`.
+Hook: `.git/hooks/commit-msg` containing `exec scripts/provenant_lint.py commit-msg "$1"`.
 
 ## Rules
 

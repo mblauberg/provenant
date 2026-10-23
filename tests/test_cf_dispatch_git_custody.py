@@ -71,14 +71,17 @@ def make_fixture(tmp_path):
         printf 'OK\\n'
         """,
     )
+    product_root = tmp_path / "route-product"
+    (product_root / "scripts").mkdir(parents=True)
     write_executable(
-        bin_dir / "provenant",
+        product_root / "scripts/model-route",
         """\
         #!/usr/bin/env bash
         printf '%s\\n' '{"status":"ok","alias":"senior","resolved_model":"sonnet","model_family":"anthropic","endpoint_provider":"anthropic","identity_source":"test","requested_effort":"","effort":"","effort_source":"route-default","effort_capability_source":"test"}'
         """,
     )
     env = fabric_free_env()
+    env["AGENT_FABRIC_PRODUCT_ROOT"] = str(product_root)
     env["PATH"] = f"{bin_dir}:{PRODUCT_ROOT / 'scripts'}:{env['PATH']}"
 
     def dispatch(cwd, out_name):

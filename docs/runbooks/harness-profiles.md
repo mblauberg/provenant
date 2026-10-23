@@ -7,28 +7,28 @@ behaves as it did before profiles existed.
 
 ## Switch
 
-1. Run `provenant profile list` to see each knob's default, allowed values,
+1. Run `scripts/provenant-profile list` to see each knob's default, allowed values,
    trade-off and whether it is `wired` (code or a skill reads it) or
    `advisory` (recorded, but the owning prose or constant still holds today's
-   value). `provenant profile diff balanced economy` shows what a preset
+   value). `scripts/provenant-profile diff balanced economy` shows what a preset
    changes, and `--task-class legwork` shows the result for one class.
-2. Pick a scope. `provenant profile use economy` writes your user file,
+2. Pick a scope. `scripts/provenant-profile use economy` writes your user file,
    `~/.agents/config/harness-profile.json`, and applies everywhere. Add
    `--project` to write `.agents/harness-profile.json` in the current checkout
    instead, so one repository can run `rigorous` while the rest stay
    `balanced`. Add `--task-class critical-review` to scope a preset or knob to
    one task class. A project file may raise `review.*` knobs but not lower
    them; lower them in your user file or the environment.
-3. Adjust single knobs with `provenant profile set lanes.max_concurrency=2`
+3. Adjust single knobs with `scripts/provenant-profile set lanes.max_concurrency=2`
    (the same `--project` and `--task-class` flags apply) and drop them again
-   with `provenant profile reset lanes.max_concurrency`, or `reset preset`.
+   with `scripts/provenant-profile reset lanes.max_concurrency`, or `reset preset`.
    Values are checked against the registry, so a typo is an error rather
    than a silent no-op.
 4. For one session or one experiment, use the environment instead of a file:
    `PROVENANT_PROFILE=rigorous` or `PROVENANT_KNOB_EFFORT_SHIFT=1`. For one
-   dispatch, pass `provenant dispatch --knob effort.shift=1`. Both beat the
+   dispatch, pass `skills/orchestrate/scripts/dispatch_run.py --knob effort.shift=1`. Both beat the
    files, including when the dispatch is placed on a peer host.
-5. Confirm with `provenant profile show --resolved` (add `--task-class` and
+5. Confirm with `scripts/provenant-profile show --resolved` (add `--task-class` and
    `--risk-tier` to see a specific lane). Each line names the layer that set
    the value; `floor:crucial` means a risk-tier floor overrode the profile.
 

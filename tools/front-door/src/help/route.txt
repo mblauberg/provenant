@@ -1,6 +1,0 @@
-usage: provenant route ...
-
-Delegates to scripts/model-route ...
-Low-level resolver; capability-bound aliases need a fresh snapshot,
-normally supplied by dispatch.
-`route reset [adapter[/model]] [--account LABEL]` clears cooldowns.
