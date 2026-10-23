@@ -213,10 +213,10 @@ from dividing by the number of models.
 
 | Crate | Base lane-days | Planning range |
 |---|---:|---:|
-| cli | 19 | 19–33.5 |
+| cli | 18 | 18–31.5 |
 | config | 9.75 | 9.75–17.5 |
 | confinement | 4.75 | 4.75–8.5 |
-| core | 3.5 | 3.5–6.5 |
+| core | 4 | 4–7 |
 | cross-crate | 1.5 | 1.5–3 |
 | fabric-mcp | 2 | 2–3.5 |
 | fabric-runtime | 25.5 | 25.5–45 |
@@ -227,7 +227,7 @@ from dividing by the number of models.
 | routing | 11.25 | 11.25–20 |
 | run | 12.25 | 12.25–21.5 |
 | supervisor | 8.25 | 8.25–14.5 |
-| telemetry | 8 | 8–14 |
+| telemetry | 8.5 | 8.5–15 |
 | workflow | 31.25 | 31.25–55 |
 | **Total** | **162** | **162–283.5** |
 

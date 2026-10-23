@@ -25,6 +25,12 @@ def test_graph_version_matches_the_rulebook(graph):
     assert graph["version"] == graph["rulebook_version"] == int(version[1])
 
 
+@pytest.mark.parametrize("crate", ["core", "cli"])
+def test_workspace_tooling_stays_with_its_crate(crate):
+    generator = load_script(PLAN / "derive_graph.py", "rust_port_graph_owner")
+    assert generator.crate(f"tools/front-door/crates/{crate}/scripts/generate_unicode.py") == crate
+
+
 def test_retired_units_keep_deletion_criteria_without_port_prerequisites(graph):
     criteria = {
         "scripts/static-security-check.py": "no tracked Python sources remain",

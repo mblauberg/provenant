@@ -1,7 +1,7 @@
 {
   "version": 5,
   "rulebook_version": 5,
-  "source_digest": "b336af5307e3e54baa4a215b854201fe95cf3d341e1eea7633555ada5ee93efd",
+  "source_digest": "2c2d7759d2f7023ed64c110da44fa99aa15ce11d8c63be597ff85961a0f75264",
   "scope": "Git-tracked Python (including shebang entry points), TypeScript and imported production ps.mjs; tests inventory-only; planning scripts excluded",
   "gate_definitions": {
     "unit": "Target crate's unit tests, fmt and clippy; CI once the crate exists",
@@ -17940,7 +17940,7 @@
           ]
         }
       ],
-      "target_crate": "cli",
+      "target_crate": "core",
       "depends_on": [
         "prerequisite:J1",
         "prerequisite:J2",
@@ -17974,7 +17974,7 @@
           ]
         }
       ],
-      "target_crate": "cli",
+      "target_crate": "telemetry",
       "depends_on": [
         "prerequisite:J1",
         "prerequisite:J2",
@@ -18771,10 +18771,10 @@
     ]
   ],
   "estimated_lane_days_by_crate": {
-    "cli": 19.0,
+    "cli": 18.0,
     "config": 9.75,
     "confinement": 4.75,
-    "core": 3.5,
+    "core": 4.0,
     "cross-crate": 1.5,
     "fabric-mcp": 2.0,
     "fabric-runtime": 25.5,
@@ -18785,7 +18785,7 @@
     "routing": 11.25,
     "run": 12.25,
     "supervisor": 8.25,
-    "telemetry": 8.0,
+    "telemetry": 8.5,
     "workflow": 31.25
   },
   "source_imports": {

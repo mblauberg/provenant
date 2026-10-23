@@ -62,6 +62,9 @@ def is_test(path):
 
 
 def crate(path):
+    workspace_crate = re.match(r"tools/front-door/crates/([^/]+)/", path)
+    if workspace_crate:
+        return workspace_crate[1]
     if is_test(path):
         if path.startswith("runtime/fabric/tests/"):
             path = path.replace("/tests/", "/src/").replace(".test.ts", ".ts")
