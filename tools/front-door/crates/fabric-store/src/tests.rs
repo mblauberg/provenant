@@ -720,7 +720,7 @@ fn failed_import_is_atomic_retryable_and_refuses_wal() {
 }
 
 #[test]
-fn cold_open_race_serializes_schema_setup() {
+fn cold_open_race_serialises_schema_setup() {
     let f = Fixture::new();
     let barrier = Arc::new(Barrier::new(2));
     std::thread::scope(|scope| {
