@@ -411,7 +411,10 @@ struct PrivateSnapshot {
 }
 impl PrivateSnapshot {
     fn create(fs: &dyn provenant_supervisor::fs::SafeFs, temp_root: &Path) -> Result<Self> {
-        let parent = filesystem::directory(fs, temp_root, false)?;
+        // The trusted temp root may be on a different device from /. Anchor
+        // there so verified children use its device. Appending . keeps a temp
+        // root symlink in the allowed ancestor path, preserving link following.
+        let parent = fs.open_anchor(&temp_root.join("."))?;
         for _ in 0..128 {
             let mut name = std::ffi::OsString::from("fabric-inspect-");
             name.push(fs.temporary_name()?);

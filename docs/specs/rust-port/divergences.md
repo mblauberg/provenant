@@ -1883,3 +1883,18 @@ are not yet proved exact. Their IDs are removed from the completion ledger.
   products, clocks above 2^53, positive/negative deadline overflow and the
   rounded i64 upper boundary. RP-FS3-001/005's finite/range refusals and
   independent poll ceiling remain intentional improvements.
+
+## RP-FS3-011: diagnostic snapshot anchor device (bug, fixed)
+
+- Linux CI job `120429209581`, head `b7e00bb7`, exposed `EXDEV` in the
+  private-WAL regression and both snapshot differentials. Traversal from `/`
+  retained its device as the supervisor anchor, so a temporary directory on
+  another mount failed verified child opening before any database copy.
+- Anchor the trusted temporary root directly through `SafeFs::open_anchor`,
+  appending `.` to preserve directory-symlink following. Snapshot children
+  retain the supervisor's stat/open/stat identity and anchor-device checks.
+  The existing regression also covers a symlinked temporary root, untouched
+  source main/WAL bytes, complete cleanup and retention of the symlink.
+- This restores TypeScript behaviour on Linux; no platform divergence is
+  accepted. Failure assertions retain report errors and differential output
+  JSON so future CI mismatches can be diagnosed from the job log.

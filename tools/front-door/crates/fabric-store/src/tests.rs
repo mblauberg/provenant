@@ -609,21 +609,26 @@ fn diagnostics_use_private_wal_snapshot_and_remove_every_temporary_file() {
     store.note(&who, "in WAL").unwrap();
     let before_main = std::fs::read(&path).unwrap();
     let before_wal = std::fs::read(temp.path().join("db-wal")).unwrap();
-    let report = inspect_database_with_filesystem(
-        &path,
-        "p",
-        DiagnosticMode::Doctor,
-        &provenant_supervisor::fs::LocalFs,
-        scratch.path(),
-    );
-    assert_eq!(report.status, DiagnosticStatus::Ok, "{report:#?}");
-    assert_eq!(report.counts.unwrap().activity, 1);
-    assert_eq!(std::fs::read(&path).unwrap(), before_main);
-    assert_eq!(
-        std::fs::read(temp.path().join("db-wal")).unwrap(),
-        before_wal
-    );
-    assert_eq!(std::fs::read_dir(scratch.path()).unwrap().count(), 0);
+    let scratch_link = temp.path().join("scratch-link");
+    std::os::unix::fs::symlink(scratch.path(), &scratch_link).unwrap();
+    for temp_root in [scratch.path(), scratch_link.as_path()] {
+        let report = inspect_database_with_filesystem(
+            &path,
+            "p",
+            DiagnosticMode::Doctor,
+            &provenant_supervisor::fs::LocalFs,
+            temp_root,
+        );
+        assert_eq!(report.status, DiagnosticStatus::Ok, "{report:#?}");
+        assert_eq!(report.counts.unwrap().activity, 1);
+        assert_eq!(std::fs::read(&path).unwrap(), before_main);
+        assert_eq!(
+            std::fs::read(temp.path().join("db-wal")).unwrap(),
+            before_wal
+        );
+        assert_eq!(std::fs::read_dir(scratch.path()).unwrap().count(), 0);
+    }
+    assert_eq!(std::fs::read_link(&scratch_link).unwrap(), scratch.path());
     let report = inspect_database_with_filesystem(
         &temp.path().join("absent/never"),
         "p",
