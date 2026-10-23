@@ -86,7 +86,7 @@ pub fn receipt(
         .as_array()
         .into_iter()
         .flatten()
-        .find(|v| v.is_object() && v.get("id") == Some(canonical));
+        .find(|v| v.is_object() && &v["id"] == canonical);
     let review_verdicts = receipt["reviews"]
         .as_array()
         .into_iter()
@@ -214,7 +214,7 @@ pub fn record(
             .as_array()
             .into_iter()
             .flatten()
-            .find(|r| r.is_object() && r.get("id") == row.get("review_id"));
+            .find(|r| r.is_object() && r["id"] == row["review_id"]);
         let mut attrs = serde_json::Map::new();
         for key in [
             "review_id",
@@ -498,6 +498,20 @@ mod tests {
         let report = cost_per_accepted(&[run], &rows, &BTreeSet::new(), &HostIdentity::new("h".into(), BTreeSet::new(), &BTreeSet::new()), None, &prices, &BTreeMap::new()).unwrap();
         assert_eq!(serde_json::to_value(&report[0]).unwrap()["cost_usd_lower_bound"].to_string(), "0.6000000000000001");
         assert_eq!(report[0].cost_per_accepted_usd_lower_bound, Some(0.6000000000000001));
+    }
+
+    #[test]
+    fn review_regression_missing_and_null_ids_match() {
+        let run = receipt(&json!({"artifacts":[{"git_revision":{"commit":"abc"}}]}), "dir".into(), "host".into(), "now".into(), parse_time("2026-01-01").unwrap());
+        assert_eq!(run.merge_commit.as_deref(), Some("abc"));
+    }
+    #[test]
+    fn review_regression_review_missing_and_null_ids_match() {
+        for (review, finding) in [(json!({"provider_family":"family"}), json!({"review_id":null})), (json!({"id":null,"provider_family":"family"}), json!({}))] {
+            let mut sink = crate::ingest::tests::Capture::default();
+            record(&mut sink, "findings.jsonl", &finding, &mut SidecarState::default(), &json!({"reviews":[review]}), "ref".into()).unwrap();
+            assert_eq!(sink.events[0].attrs["reviewer_family"], "family");
+        }
     }
 
 }
