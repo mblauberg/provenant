@@ -165,11 +165,10 @@ fn recipient_list(values: &[String]) -> String {
 
 pub fn is_sqlite_contention(mut error: &(dyn std::error::Error + 'static)) -> bool {
     loop {
-        let sqlite = match error.downcast_ref::<Error>() {
-            Some(Error::Sqlite(sqlite)) => Some(sqlite),
-            _ => error.downcast_ref::<rusqlite::Error>(),
-        };
-        if matches!(sqlite, Some(rusqlite::Error::SqliteFailure(e, _)) if matches!(e.extended_code, 5 | 6))
+        // Transparent wrappers may expose only SQLite's underlying cause.
+        if error
+            .downcast_ref::<rusqlite::ffi::Error>()
+            .is_some_and(|e| matches!(e.extended_code, 5 | 6))
         {
             return true;
         }

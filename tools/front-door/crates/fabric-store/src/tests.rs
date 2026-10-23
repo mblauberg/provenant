@@ -445,6 +445,14 @@ fn only_plain_busy_and_locked_are_retryable() {
         struct Context(#[source] Box<dyn std::error::Error>);
         let wrapped = Context(Box::new(Context(Box::new(error))));
         assert_eq!(is_sqlite_contention(&wrapped), expected);
+        #[derive(Debug, thiserror::Error)]
+        #[error(transparent)]
+        struct Transparent(rusqlite::Error);
+        let transparent = Transparent(rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(code),
+            None,
+        ));
+        assert_eq!(is_sqlite_contention(&transparent), expected);
     }
 }
 
