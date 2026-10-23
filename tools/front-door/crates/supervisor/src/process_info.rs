@@ -76,20 +76,10 @@ pub fn linux_process_row(pid: i32, stat: &[u8]) -> Result<Option<ProcessRow>, Pr
 
 /// Python shlex.join: quote only arguments outside the ASCII shell-safe set.
 pub fn shell_join<'a>(args: impl IntoIterator<Item = &'a str>) -> String {
-    args.into_iter()
-        .map(|arg| {
-            if !arg.is_empty()
-                && arg
-                    .bytes()
-                    .all(|c| c.is_ascii_alphanumeric() || b"_@%+=:,./-".contains(&c))
-            {
-                arg.to_string()
-            } else {
-                format!("'{}'", arg.replace('\'', "'\"'\"'"))
-            }
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
+    // UTF-8 input plus ASCII quoting always produces UTF-8 output.
+    shell_join_os(args.into_iter().map(OsStr::new))
+        .to_string_lossy()
+        .into_owned()
 }
 
 /// Decode KERN_PROCARGS2 without including the following environment block.
@@ -346,5 +336,48 @@ mod fallback_tests {
         assert_eq!(json.as_object().unwrap().len(), 13);
         assert_eq!(json["start_epoch"], serde_json::Value::Null);
         assert_eq!(serde_json::from_value::<ProcessInfo>(json).unwrap(), row);
+    }
+}
+
+#[cfg(test)]
+mod linux_fixture_tests {
+    use super::*;
+
+    #[test]
+    fn differential_stat_rows_match_python_on_fixture_proc_tree() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../..");
+        let Some(expected) = crate::test_support::python(
+            &root,
+            r#"
+import json, tempfile
+from dataclasses import asdict
+from pathlib import Path
+from skills.orchestrate.scripts.process_info import _linux_process_row
+cases = [b'42 (name ) with (parens)) Z 2 3 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 1234',
+         b'42 (bad\xffname) S 2 3 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 5678', b'bad stat', b'42 (short) S 2 3']
+with tempfile.TemporaryDirectory() as directory:
+    root = Path(directory)
+    (root / '42').mkdir()
+    rows = []
+    for raw in cases:
+        (root / '42' / 'stat').write_bytes(raw)
+        row = _linux_process_row(42, root)
+        rows.append(asdict(row) if row is not None else None)
+    print(json.dumps(rows))
+"#,
+        ) else {
+            return;
+        };
+        let cases: &[&[u8]] = &[
+            b"42 (name ) with (parens)) Z 2 3 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 1234",
+            b"42 (bad\xffname) S 2 3 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 5678",
+            b"bad stat",
+            b"42 (short) S 2 3",
+        ];
+        let actual = cases
+            .iter()
+            .map(|raw| linux_process_row(42, raw).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(serde_json::to_value(actual).unwrap(), expected);
     }
 }
