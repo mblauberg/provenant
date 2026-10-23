@@ -16,8 +16,8 @@ These libraries add no daemon, third-party dependency or second execution regist
 Source/count baseline: `1b3d48e4c549811ce3636edc30b047f36fd24ada`.
 The council's 24 October audit includes Claude and Codex transcript stores,
 Codex JavaScript exec calls and MCP calls. Its reproduction scripts are
-`route_{usage,tally,exec}.py` under the council scratch directory
-`/private/tmp/claude-503/-Users-mikey-Repos-provenant/1c21e420-fb1c-4a3f-be95-eb42e8489edb/scratchpad/port/w7/scripts/`.
+`route_{usage,tally,exec}.py` in the council's private scratch directory
+(not committed).
 Counts describe observed requests, not successful execution or global usage.
 Transcripts and run recordings are research inputs only, never runtime state.
 
@@ -470,7 +470,7 @@ confinement or custody acceptance.
    fake-curl/security/database tests. Delete quota Rust emulation/oracles, old
    golden judges and only Python leaves/tests with no outside importer.
    `provider_quota.py` and its dependencies wait for the matrix gate.
-   Wire `quota show|tick` and update Swift report/fixtures together. Runtime secret reads still require
+   Wire `quota show|tick` and update Swift report/fixtures together. A tick drops the snapshot of an account that detection no longer reports; there is no forget operation. Runtime secret reads still require
    recorded user authority; fixtures never grant it.
 3. **Routing.** Land explicit model/named-route resolution, at most two explicit
    alternatives, family/availability facts and route CLI. Delete routing Rust

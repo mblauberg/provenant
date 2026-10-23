@@ -55,11 +55,9 @@ several projects and is a usage sample, not a production counter.
 | Old `provenant run` verbs, `provenant batch`, direct `run_controls.py` | None found |
 | Direct `dispatch_run.py`, direct `cf_dispatch.py` | 7 and 1 command candidates; not evidence of a required public bypass |
 
-Reproduction locators, with prompts omitted: Claude project
-`-Users-mikey-Repos-provenant/1c21e420-fb1c-4a3f-be95-eb42e8489edb.jsonl`
-contains lane waits and Fabric dispatch/cancel on 23 October. Codex
-`sessions/2026/10/23/rollout-2026-10-23T12-12-51-01a16688-4ecc-71f2-92a4-3178987a3ffe.jsonl`
-contains the direct-dispatch command candidate. These are research locators,
+Reproduction locators are kept privately with the council records: one Claude
+project transcript with lane waits and Fabric dispatch/cancel on 23 October,
+and one Codex session with the direct-dispatch command candidate. These are research locators,
 never runtime dependencies. No credentials or authentication stores were read.
 
 ### Keep

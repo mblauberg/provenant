@@ -201,7 +201,8 @@ reject traversal, symlinked state/lock leaves, credential roots and broad home
 or tmp grants. Writers may change their linked tree, private Git index/HEAD,
 objects and exactly their branch/ref lock/reflog. Keep `.git`, `commondir`,
 `gitdir`, `config.worktree`, `objects/info`, other refs, provider configuration
-and protected instructions immutable. Read-only execution uses declared reads
+and protected instructions immutable. The task's network policy never blocks the
+selected provider's own API endpoints, which its profile permits. Read-only execution uses declared reads
 and private scratch. Browser/Postgres IPC is explicitly granted.
 
 Provider profiles contain fixture-proven runtime-state/authentication exceptions;
