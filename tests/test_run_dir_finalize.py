@@ -22,6 +22,7 @@ from _shared.review_ladder import (
     SKIPPED_STATUSES,
 )
 from _shared.review_panel import panel_result, resolve_panel
+from _shared.review_plan import validate_review_plan
 
 
 def init_run(tmp_path):
@@ -146,7 +147,7 @@ def test_real_run_accepts_targeted_cross_family_review_when_other_primary_is_una
     )
     bind_complete_reviews(tmp_path, plan)
 
-    assert run_dir_finalize._validate_review_plan(plan, tmp_path) == []
+    assert validate_review_plan(plan, tmp_path) == []
 
 
 def test_real_run_allows_recorded_targeted_omission(tmp_path):
@@ -160,7 +161,7 @@ def test_real_run_allows_recorded_targeted_omission(tmp_path):
     )
     bind_complete_reviews(tmp_path, plan)
 
-    assert run_dir_finalize._validate_review_plan(plan, tmp_path) == []
+    assert validate_review_plan(plan, tmp_path) == []
 
 
 def test_real_run_allows_recorded_crucial_second_family_omission(tmp_path):
@@ -173,7 +174,7 @@ def test_real_run_allows_recorded_crucial_second_family_omission(tmp_path):
     )
     bind_complete_reviews(tmp_path, plan)
 
-    assert run_dir_finalize._validate_review_plan(plan, tmp_path) == []
+    assert validate_review_plan(plan, tmp_path) == []
 
 
 def test_real_run_complete_primary_still_requires_route_receipt(tmp_path):
@@ -181,7 +182,7 @@ def test_real_run_complete_primary_still_requires_route_receipt(tmp_path):
     bind_complete_reviews(tmp_path, plan)
     (tmp_path / plan["reviews"][-1]["route_receipt"]["path"]).unlink()
 
-    errors = run_dir_finalize._validate_review_plan(plan, tmp_path)
+    errors = validate_review_plan(plan, tmp_path)
 
     assert any("route_receipt is missing or does not match" in error for error in errors)
 
@@ -197,7 +198,7 @@ def test_complete_review_requires_terminal_receipt_and_verdict(tmp_path):
         "sha256:" + __import__("hashlib").sha256(route_path.read_bytes()).hexdigest()
     )
 
-    errors = run_dir_finalize._validate_review_plan(plan, tmp_path)
+    errors = validate_review_plan(plan, tmp_path)
 
     assert any("terminal-unavailable" in error for error in errors)
 
@@ -206,7 +207,7 @@ def test_complete_review_requires_terminal_receipt_and_verdict(tmp_path):
     second_run.mkdir()
     bind_complete_reviews(second_run, plan)
     plan["reviews"][0]["verdict"] = ""
-    errors = run_dir_finalize._validate_review_plan(plan, second_run)
+    errors = validate_review_plan(plan, second_run)
 
     assert any("explicit verdict" in error for error in errors)
 
@@ -239,7 +240,7 @@ def test_nonempty_transcript_and_wrapper_verdict_do_not_replace_missing_worker_v
         "digest": "sha256:" + __import__("hashlib").sha256(forged.read_bytes()).hexdigest(),
     }
 
-    errors = run_dir_finalize._validate_review_plan(plan, tmp_path)
+    errors = validate_review_plan(plan, tmp_path)
 
     assert any("does not bind route output" in error for error in errors)
     assert any("certifying review leg" in error for error in errors)
@@ -263,7 +264,7 @@ def test_same_provider_different_model_family_does_not_satisfy_other_primary(tmp
         "sha256:" + __import__("hashlib").sha256(route_path.read_bytes()).hexdigest()
     )
 
-    errors = run_dir_finalize._validate_review_plan(plan, tmp_path)
+    errors = validate_review_plan(plan, tmp_path)
 
     assert any("endpoint/provider identity mismatch" in error for error in errors)
     assert any("not a certifying review leg" in error for error in errors)
@@ -282,7 +283,7 @@ def test_single_cross_family_targeted_review_requires_read_only_certification(tm
         "sha256:" + __import__("hashlib").sha256(route_path.read_bytes()).hexdigest()
     )
 
-    errors = run_dir_finalize._validate_review_plan(plan, tmp_path)
+    errors = validate_review_plan(plan, tmp_path)
 
     assert any("not certification eligible" in error for error in errors)
     assert any("passing independent leg" in error for error in errors)
@@ -296,7 +297,7 @@ def test_real_run_same_family_fallback_does_not_require_cross_family_certificati
     ]
     bind_complete_reviews(tmp_path, plan)
 
-    assert run_dir_finalize._validate_review_plan(plan, tmp_path) == []
+    assert validate_review_plan(plan, tmp_path) == []
 
 
 @pytest.mark.parametrize(("model_family", "provider_family", "passes"), [
@@ -322,7 +323,7 @@ def test_broker_review_certification_uses_provider_family(tmp_path, model_family
         "sha256:" + __import__("hashlib").sha256(route_path.read_bytes()).hexdigest()
     )
 
-    errors = run_dir_finalize._validate_review_plan(plan, tmp_path)
+    errors = validate_review_plan(plan, tmp_path)
 
     if passes:
         assert errors == []
@@ -348,7 +349,7 @@ def test_cross_family_review_requires_true_route_flag_regardless_of_scope(tmp_pa
 
     assert any(
         "cross-family route receipt" in error
-        for error in run_dir_finalize._validate_review_plan(plan, tmp_path)
+        for error in validate_review_plan(plan, tmp_path)
     )
 
 
@@ -360,7 +361,7 @@ def test_inline_fabricated_terminal_result_is_not_a_retained_worker_result(tmp_p
         "fabricated_by": "wrapper",
     }
 
-    errors = run_dir_finalize._validate_review_plan(plan, tmp_path)
+    errors = validate_review_plan(plan, tmp_path)
 
     assert any("terminal_result is invalid" in error for error in errors)
 
@@ -386,7 +387,7 @@ def test_overwritten_provider_output_does_not_replace_dispatch_time_terminal_dig
     route_path.write_text(json.dumps(route))
     row["route_receipt"]["digest"] = "sha256:" + __import__("hashlib").sha256(route_path.read_bytes()).hexdigest()
 
-    errors = run_dir_finalize._validate_review_plan(plan, tmp_path)
+    errors = validate_review_plan(plan, tmp_path)
 
     assert any("route output digest does not match dispatch receipt" in error for error in errors)
     assert any("certifying review leg" in error for error in errors)
@@ -407,7 +408,7 @@ def test_route_tool_and_adapter_mismatch_is_not_a_certifying_lineage(tmp_path):
     route_path.write_text(json.dumps(route))
     row["route_receipt"]["digest"] = "sha256:" + __import__("hashlib").sha256(route_path.read_bytes()).hexdigest()
 
-    errors = run_dir_finalize._validate_review_plan(plan, tmp_path)
+    errors = validate_review_plan(plan, tmp_path)
 
     assert any("tool/adapter identity mismatch" in error for error in errors)
     assert any("not a certifying review leg" in error for error in errors)
@@ -424,29 +425,29 @@ def test_endpoint_provider_must_match_the_dispatch_adapter(tmp_path):
         "sha256:" + __import__("hashlib").sha256(route_path.read_bytes()).hexdigest()
     )
 
-    errors = run_dir_finalize._validate_review_plan(plan, tmp_path)
+    errors = validate_review_plan(plan, tmp_path)
 
     assert any("endpoint/provider identity" in error for error in errors)
 
 
 def test_substantial_review_topology_is_machine_checked():
-    assert run_dir_finalize._validate_review_plan(substantial_plan()) == []
+    assert validate_review_plan(substantial_plan()) == []
     plan = substantial_plan()
     other_primary = plan["reviews"][3]
     plan["reviews"] = [plan["reviews"][0], plan["reviews"][1], other_primary]
-    assert run_dir_finalize._validate_review_plan(plan) == []
+    assert validate_review_plan(plan) == []
     plan["reviews"] = [plan["reviews"][0], other_primary]
-    assert run_dir_finalize._validate_review_plan(plan) == []
+    assert validate_review_plan(plan) == []
     plan["reviews"] = [other_primary]
-    assert run_dir_finalize._validate_review_plan(plan) == []
+    assert validate_review_plan(plan) == []
     plan["reviews"] = []
-    assert any("passing independent leg" in error for error in run_dir_finalize._validate_review_plan(plan))
+    assert any("passing independent leg" in error for error in validate_review_plan(plan))
 
 
 def test_cross_family_primary_review_can_use_senior_strength():
     plan = substantial_plan()
     plan["reviews"][3]["tier"] = "senior"
-    assert run_dir_finalize._validate_review_plan(plan) == []
+    assert validate_review_plan(plan) == []
 
 
 def test_same_family_primary_review_can_cover_a_reasoned_blocker():
@@ -455,25 +456,25 @@ def test_same_family_primary_review_can_cover_a_reasoned_blocker():
         review("same-family", "primary", "correctness", "openai", "senior"),
         review("primary-down", "primary", "other-primary", "anthropic", status="unavailable"),
     ]
-    assert run_dir_finalize._validate_review_plan(plan) == []
+    assert validate_review_plan(plan) == []
 
 
 def test_crucial_review_topology_records_unavailable_second_family():
     plan = substantial_plan("crucial")
     assert any(
-        "two non-chair families" in error for error in run_dir_finalize._validate_review_plan(plan)
+        "two non-chair families" in error for error in validate_review_plan(plan)
     )
     plan["reviews"].append(
         review("second-family-down", "primary", "terminal-challenge", "google", status="unavailable", substitution_for="additional-distinct-family", wave=2)
     )
-    assert run_dir_finalize._validate_review_plan(plan) == []
+    assert validate_review_plan(plan) == []
 
 
 def test_crucial_review_topology_blocks_with_no_distinct_family_or_recorded_skip():
     plan = substantial_plan("crucial")
     assert any(
         "two non-chair families or a recorded blocker" in error
-        for error in run_dir_finalize._validate_review_plan(plan)
+        for error in validate_review_plan(plan)
     )
 
 
@@ -482,24 +483,24 @@ def test_terminal_review_topology_blocks_with_no_distinct_family_or_recorded_ski
     plan["reviews"] = plan["reviews"][:-1]
     assert any(
         "two non-chair families or a recorded blocker" in error
-        for error in run_dir_finalize._validate_review_plan(plan)
+        for error in validate_review_plan(plan)
     )
 
 
 def test_terminal_review_topology_uses_adversarial_pressure_without_fixed_provider_count():
     plan = substantial_plan("terminal")
-    assert run_dir_finalize._validate_review_plan(plan) == []
+    assert validate_review_plan(plan) == []
     plan["reviews"][2]["lens"] = "authority"
-    assert any("adversarial" in error for error in run_dir_finalize._validate_review_plan(plan))
+    assert any("adversarial" in error for error in validate_review_plan(plan))
 
 
 def test_review_topology_rejects_invalid_concurrency_ceiling():
     plan = substantial_plan()
     plan["concurrency_ceiling"] = 0
-    assert any("concurrency_ceiling" in error for error in run_dir_finalize._validate_review_plan(plan))
+    assert any("concurrency_ceiling" in error for error in validate_review_plan(plan))
     plan = substantial_plan()
     plan["concurrency_ceiling"] = 3
-    assert any("observed wave" in error for error in run_dir_finalize._validate_review_plan(plan))
+    assert any("observed wave" in error for error in validate_review_plan(plan))
 
 
 def test_review_topology_binds_explicit_codex_route_and_review_evidence(tmp_path):
@@ -538,17 +539,17 @@ def test_review_topology_binds_explicit_codex_route_and_review_evidence(tmp_path
         "risk_tier": "routine", "chair_family": "", "concurrency_ceiling": 1,
         "panels": [], "reviews": [row],
     }
-    assert run_dir_finalize._validate_review_plan(plan, tmp_path) == []
+    assert validate_review_plan(plan, tmp_path) == []
     route_value = json.loads(route.read_text())
     route_value["status"] = "error"
     route.write_text(json.dumps(route_value))
     row["route_receipt"]["digest"] = "sha256:" + __import__("hashlib").sha256(route.read_bytes()).hexdigest()
-    assert any("identity does not match" in error for error in run_dir_finalize._validate_review_plan(plan, tmp_path))
+    assert any("identity does not match" in error for error in validate_review_plan(plan, tmp_path))
     route_value["status"] = "ok"
     route_value["reviewer_id"] = "different-reviewer"
     route.write_text(json.dumps(route_value))
     row["route_receipt"]["digest"] = "sha256:" + __import__("hashlib").sha256(route.read_bytes()).hexdigest()
-    assert any("identity does not match" in error for error in run_dir_finalize._validate_review_plan(plan, tmp_path))
+    assert any("identity does not match" in error for error in validate_review_plan(plan, tmp_path))
 
 
 @pytest.mark.parametrize("risk", ["routine", "substantial", "crucial", "terminal"])
@@ -556,13 +557,13 @@ def test_review_topology_binds_explicit_codex_route_and_review_evidence(tmp_path
 def test_completed_review_requires_non_blank_lens_and_family_at_every_tier(risk, field):
     plan = substantial_plan(risk)
     plan["reviews"][0][field] = "   "
-    assert any(f"{field} is required" in error for error in run_dir_finalize._validate_review_plan(plan))
+    assert any(f"{field} is required" in error for error in validate_review_plan(plan))
 
 
 def test_review_topology_rejects_malformed_fields_and_symlink_escape(tmp_path):
     plan = substantial_plan()
     plan["reviews"][0]["lens"] = []
-    assert any("lens is required" in error for error in run_dir_finalize._validate_review_plan(plan))
+    assert any("lens is required" in error for error in validate_review_plan(plan))
     run = tmp_path / "run"
     run.mkdir()
     outside = tmp_path / "outside.md"
@@ -600,7 +601,7 @@ def test_review_topology_rejects_malformed_fields_and_symlink_escape(tmp_path):
         "risk_tier": "routine", "chair_family": "", "concurrency_ceiling": 1,
         "panels": [], "reviews": [row],
     }
-    assert any("evidence is missing" in error for error in run_dir_finalize._validate_review_plan(routine, run))
+    assert any("evidence is missing" in error for error in validate_review_plan(routine, run))
 
 
 @pytest.mark.parametrize("risk", ["routine", "substantial", "crucial", "terminal"])
@@ -615,7 +616,7 @@ def test_completed_reviews_require_distinct_reviewer_and_artifact_identity(risk,
         row["reviewer_id"] = "same-reviewer"
         row["evidence"] = shared_evidence
         row["route_receipt"] = shared_route
-    errors = run_dir_finalize._validate_review_plan(plan)
+    errors = validate_review_plan(plan)
     assert any("distinct reviewer_id" in error for error in errors)
     assert any("distinct evidence" in error for error in errors)
     assert any("distinct route_receipt" in error for error in errors)
@@ -627,7 +628,7 @@ def test_completed_reviews_require_distinct_reviewer_and_artifact_identity(risk,
     for index, row in enumerate(plan["reviews"][:3]):
         row["evidence"] = {"path": f"reviews/copy-{index}.md", "digest": evidence_digest}
         row["route_receipt"] = {"path": f"reviews/copy-{index}.route.json", "digest": route_digest}
-    errors = run_dir_finalize._validate_review_plan(plan)
+    errors = validate_review_plan(plan)
     assert any("distinct evidence" in error for error in errors)
     assert any("distinct route_receipt" in error for error in errors)
 
@@ -638,7 +639,7 @@ def test_chair_or_already_passing_family_blocker_does_not_cover_missing_family(f
     plan["reviews"].append(
         review("invalid-extra", "primary", "terminal-challenge", family, tier=tier, status="omitted", substitution_for="additional-distinct-family", wave=0)
     )
-    assert any("two non-chair families" in error for error in run_dir_finalize._validate_review_plan(plan))
+    assert any("two non-chair families" in error for error in validate_review_plan(plan))
 
 
 def test_recorded_distinct_family_skip_counts_regardless_of_tier():
@@ -646,7 +647,7 @@ def test_recorded_distinct_family_skip_counts_regardless_of_tier():
     plan["reviews"].append(
         review("invalid-extra", "primary", "terminal-challenge", "google", tier="senior", status="omitted", substitution_for="additional-distinct-family", wave=0)
     )
-    assert run_dir_finalize._validate_review_plan(plan) == []
+    assert validate_review_plan(plan) == []
 
 
 def test_review_plan_status_vocabulary_matches_the_shared_ladder():
@@ -671,7 +672,7 @@ def test_review_plan_status_vocabulary_matches_the_shared_ladder():
 
         assert not any(
             ".status is invalid" in error
-            for error in run_dir_finalize._validate_review_plan(plan)
+            for error in validate_review_plan(plan)
         ), status
 
     assert REVIEW_PLAN_STATUSES == shared_statuses
@@ -687,7 +688,7 @@ def test_review_plan_status_vocabulary_matches_the_shared_ladder():
     )
     assert any(
         ".status is invalid" in error
-        for error in run_dir_finalize._validate_review_plan(plan)
+        for error in validate_review_plan(plan)
     )
 
 
@@ -697,13 +698,13 @@ def test_review_plan_and_review_records_remain_closed_after_panel_widening():
     del without_panels["panels"]
     assert any(
         "closed review topology schema" in error
-        for error in run_dir_finalize._validate_review_plan(without_panels)
+        for error in validate_review_plan(without_panels)
     )
 
     del plan["reviews"][0]["adapter_gate"]
     assert any(
         "closed review record schema" in error
-        for error in run_dir_finalize._validate_review_plan(plan)
+        for error in validate_review_plan(plan)
     )
 
 
@@ -714,7 +715,7 @@ def test_review_adapter_gate_is_explicit_and_closed(adapter_gate):
 
     assert any(
         ".adapter_gate is invalid" in error
-        for error in run_dir_finalize._validate_review_plan(plan)
+        for error in validate_review_plan(plan)
     )
 
 
@@ -731,7 +732,7 @@ def test_review_route_receipt_binds_adapter_gate(tmp_path):
 
     assert any(
         "identity does not match" in error
-        for error in run_dir_finalize._validate_review_plan(plan, tmp_path)
+        for error in validate_review_plan(plan, tmp_path)
     )
 
 
@@ -752,11 +753,11 @@ def test_panel_records_are_closed_and_reference_existing_reviews():
         )
     ]
 
-    assert run_dir_finalize._validate_review_plan(plan) == []
+    assert validate_review_plan(plan) == []
     plan["panels"][0]["extra"] = True
     assert any(
         "closed panel record schema" in error
-        for error in run_dir_finalize._validate_review_plan(plan)
+        for error in validate_review_plan(plan)
     )
 
 
@@ -777,7 +778,7 @@ def test_panel_member_must_reference_a_review_record():
 
     assert any(
         "unknown review id" in error
-        for error in run_dir_finalize._validate_review_plan(plan)
+        for error in validate_review_plan(plan)
     )
 
 
@@ -802,7 +803,7 @@ def test_panel_shortfall_is_explicit_but_does_not_block():
         )
     ]
 
-    errors = run_dir_finalize._validate_review_plan(plan)
+    errors = validate_review_plan(plan)
 
     assert not any("panel" in error for error in errors)
     assert plan["panels"][0]["result"]["shortfall"] == {
@@ -828,7 +829,7 @@ def test_panel_result_must_match_declared_reducer_and_membership():
 
     assert any(
         "result.output is invalid" in error
-        for error in run_dir_finalize._validate_review_plan(plan)
+        for error in validate_review_plan(plan)
     )
 
 
@@ -843,14 +844,14 @@ def test_fresh_run_receipt_declares_empty_panels(tmp_path):
 def test_review_topology_malformed_top_level_values_fail_closed(field, value):
     plan = substantial_plan()
     plan[field] = value
-    assert run_dir_finalize._validate_review_plan(plan)
+    assert validate_review_plan(plan)
 
 
 @pytest.mark.parametrize("field", ("scope", "tier", "status"))
 def test_review_topology_malformed_review_enums_fail_closed(field):
     plan = substantial_plan()
     plan["reviews"][0][field] = []
-    assert run_dir_finalize._validate_review_plan(plan)
+    assert validate_review_plan(plan)
 
 
 def test_failed_terminalisation_requires_reason(tmp_path):
@@ -1107,7 +1108,7 @@ def test_finalisation_fails_if_canonical_receipt_inode_is_replaced(tmp_path, mon
 def test_review_tier_accepts_tier_names(tier):
     plan = substantial_plan()
     plan["reviews"][3]["tier"] = tier
-    errors = run_dir_finalize._validate_review_plan(plan)
+    errors = validate_review_plan(plan)
     if tier == "senior":
         assert errors == []
     else:
