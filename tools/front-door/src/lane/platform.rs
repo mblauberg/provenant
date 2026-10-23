@@ -15,10 +15,10 @@ pub fn nonblocking(fd: RawFd) -> io::Result<()> {
         }
     }
 }
-pub fn reset_child() -> io::Result<()> {
+fn reset_child() -> io::Result<()> {
     unsafe {
         let mut mask: libc::sigset_t = std::mem::zeroed();
-        libc::sigemptyset(&mut mask);
+        libc::sigfillset(&mut mask);
         if libc::sigprocmask(libc::SIG_SETMASK, &mask, std::ptr::null_mut()) != 0 {
             return Err(io::Error::last_os_error());
         }
@@ -30,8 +30,38 @@ pub fn reset_child() -> io::Result<()> {
         if libc::setsid() < 0 {
             return Err(io::Error::last_os_error());
         }
+        libc::sigemptyset(&mut mask);
+        if libc::sigprocmask(libc::SIG_SETMASK, &mask, std::ptr::null_mut()) != 0 {
+            return Err(io::Error::last_os_error());
+        }
         Ok(())
     }
+}
+pub fn prepare_child(command: &mut std::process::Command) -> io::Result<()> {
+    use std::os::unix::process::CommandExt;
+    let directory = if cfg!(target_os = "linux") {
+        "/proc/self/fd"
+    } else {
+        "/dev/fd"
+    };
+    // Allocate/inspect only in the parent. Rust's own later-created exec-error
+    // pipe and stdio pipes already carry CLOEXEC. Inherited custody never execs.
+    let inherited: Vec<i32> = std::fs::read_dir(directory)?
+        .filter_map(|e| e.ok()?.file_name().to_str()?.parse().ok())
+        .filter(|fd| *fd > 2)
+        .collect();
+    unsafe {
+        command.pre_exec(move || {
+            for fd in &inherited {
+                let flags = libc::fcntl(*fd, libc::F_GETFD);
+                if flags >= 0 && libc::fcntl(*fd, libc::F_SETFD, flags | libc::FD_CLOEXEC) < 0 {
+                    return Err(io::Error::last_os_error());
+                }
+            }
+            reset_child()
+        });
+    }
+    Ok(())
 }
 const SIGNALS: [i32; 4] = [libc::SIGCHLD, libc::SIGTERM, libc::SIGINT, libc::SIGHUP];
 static SIGNAL_FD: AtomicI32 = AtomicI32::new(-1);
@@ -429,7 +459,27 @@ pub fn has_file(pid: i32, file: &File) -> bool {
             return false;
         };
         fds.filter_map(Result::ok).any(|e| {
-            std::fs::metadata(e.path())
+            if !std::fs::metadata(e.path())
+                .is_ok_and(|m| m.dev() == meta.dev() && m.ino() == meta.ino())
+            {
+                return false;
+            }
+            // fdinfo describes locks on this open file description, including
+            // descriptions shared across fork; matching only the inode is not proof.
+            std::fs::read_to_string(format!(
+                "/proc/{pid}/fdinfo/{}",
+                e.file_name().to_string_lossy()
+            ))
+            .is_ok_and(|info| {
+                info.lines().any(|line| {
+                    let mut words = line.split_whitespace();
+                    words.next() == Some("lock:")
+                        && words.next().is_some()
+                        && words.next() == Some("FLOCK")
+                        && words.next() == Some("ADVISORY")
+                        && words.next() == Some("WRITE")
+                })
+            }) && std::fs::metadata(e.path())
                 .is_ok_and(|m| m.dev() == meta.dev() && m.ino() == meta.ino())
         })
     }
@@ -464,7 +514,17 @@ pub fn has_file(pid: i32, file: &File) -> bool {
                 buf.as_mut_ptr().cast(),
                 std::mem::size_of_val(&buf) as i32,
             );
-            if n >= 40 && (buf[3] as u32 as u64) == meta.dev() && buf[4] == meta.ino() {
+            // XNU exports fileglob.fg_flag as proc_fileinfo.fi_openflags.
+            // FWASLOCKED (0x4000) is set on a successful flock. Custody is
+            // monotonic: neither owner nor supervisor may call LOCK_UN; a
+            // still-open flagged description therefore retains that custody.
+            // https://github.com/apple-oss-distributions/xnu/blob/main/bsd/kern/kern_descrip.c (sys_flock)
+            const FWASLOCKED: u32 = 0x4000;
+            if n >= 40
+                && (buf[0] as u32 & FWASLOCKED) != 0
+                && (buf[3] as u32 as u64) == meta.dev()
+                && buf[4] == meta.ino()
+            {
                 return true;
             }
         }
@@ -474,16 +534,16 @@ pub fn has_file(pid: i32, file: &File) -> bool {
 
 /// A single writer owns stdout. Check the kernel's free pipe space before a
 /// nonblocking write larger than PIPE_BUF, so backpressure drops whole events.
-pub fn write_event(fd: RawFd, line: &[u8]) {
+pub fn write_event(fd: RawFd, line: &[u8]) -> usize {
     unsafe {
         let mut stat: libc::stat = std::mem::zeroed();
         if libc::fstat(fd, &mut stat) != 0 {
-            return;
+            return 0;
         }
         if stat.st_mode & libc::S_IFMT == libc::S_IFIFO {
             let atomic = libc::fpathconf(fd, libc::_PC_PIPE_BUF);
             if atomic <= 0 {
-                return;
+                return 0;
             }
             if line.len() > atomic as usize {
                 #[cfg(target_os = "linux")]
@@ -494,14 +554,14 @@ pub fn write_event(fd: RawFd, line: &[u8]) {
                         || libc::ioctl(fd, libc::FIONREAD, &mut used) != 0
                         || (capacity.saturating_sub(used) as usize) < line.len()
                     {
-                        return;
+                        return 0;
                     }
                 }
                 #[cfg(target_os = "macos")]
                 {
                     let queue = libc::kqueue();
                     if queue < 0 {
-                        return;
+                        return 0;
                     }
                     let change = libc::kevent {
                         ident: fd as usize,
@@ -522,7 +582,7 @@ pub fn write_event(fd: RawFd, line: &[u8]) {
                         || event.flags & libc::EV_ERROR != 0
                         || event.data < line.len() as isize
                     {
-                        return;
+                        return 0;
                     }
                 }
             }
@@ -534,10 +594,75 @@ pub fn write_event(fd: RawFd, line: &[u8]) {
             if n < 0 && io::Error::last_os_error().kind() == io::ErrorKind::Interrupted {
                 continue;
             }
-            break;
+            return n.max(0) as usize;
         }
     }
 }
+/// At most one incomplete event is retained. A later event can never be
+/// appended to a predecessor's partial line. Permanent sink loss is best effort.
+pub struct EventOutput {
+    fd: RawFd,
+    pending: Vec<u8>,
+    at: usize,
+    broken: bool,
+}
+impl EventOutput {
+    pub fn new(fd: RawFd) -> Self {
+        Self {
+            fd,
+            pending: Vec::new(),
+            at: 0,
+            broken: false,
+        }
+    }
+    pub fn emit(&mut self, line: &[u8]) {
+        self.flush();
+        if self.broken || !self.pending.is_empty() {
+            return;
+        }
+        let n = write_event(self.fd, line);
+        if n > 0 && n < line.len() {
+            self.pending.extend_from_slice(line);
+            self.at = n;
+            self.flush();
+        }
+    }
+    pub fn flush(&mut self) {
+        for _ in 0..4 {
+            if self.pending.is_empty() || self.broken {
+                return;
+            }
+            let n = unsafe {
+                libc::write(
+                    self.fd,
+                    self.pending[self.at..].as_ptr().cast(),
+                    self.pending.len() - self.at,
+                )
+            };
+            if n > 0 {
+                self.at += n as usize;
+                if self.at == self.pending.len() {
+                    self.pending.clear();
+                    self.at = 0;
+                }
+                continue;
+            }
+            if n < 0 {
+                let e = io::Error::last_os_error();
+                if e.kind() == io::ErrorKind::Interrupted {
+                    continue;
+                }
+                if e.kind() == io::ErrorKind::WouldBlock {
+                    return;
+                }
+            }
+            self.broken = true;
+            self.pending.clear();
+            return;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

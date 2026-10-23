@@ -9,7 +9,6 @@ use crate::json::{self, Value};
 use std::collections::VecDeque;
 use std::io::{self, Read, Write};
 use std::os::fd::{AsRawFd, RawFd};
-use std::os::unix::process::CommandExt;
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 
 const QUEUE: usize = 256 * 1024;
@@ -52,10 +51,8 @@ impl Observer {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null());
-        unsafe {
-            command.pre_exec(platform::reset_child);
-        }
-        match command.spawn() {
+        let spawned = platform::prepare_child(&mut command).and_then(|_| command.spawn());
+        match spawned {
             Ok(mut child) => {
                 o.input = child.stdin.take();
                 o.output = child.stdout.take();

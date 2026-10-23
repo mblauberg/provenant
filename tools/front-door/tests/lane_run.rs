@@ -440,3 +440,151 @@ fn descendant_cpu_activity_advances_progress_without_output() {
     };
     assert!(value("last_progress_at") > value("started_at"), "{record}");
 }
+
+#[test]
+fn nested_owner_helper() {
+    use std::os::fd::AsRawFd;
+    let Ok(mode) = std::env::var("S2_NESTED") else {
+        return;
+    };
+    let attempt = std::path::PathBuf::from(std::env::var("S2_DIR").unwrap());
+    let dir = attempt.join("nested");
+    fs::create_dir_all(&dir).unwrap();
+    let custody = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(dir.join("MANIFEST.md"))
+        .unwrap();
+    if mode == "held" {
+        assert_eq!(
+            unsafe { libc::flock(custody.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
+            0
+        );
+    }
+    let pid = std::process::id();
+    #[cfg(target_os = "macos")]
+    let epoch = unsafe {
+        #[link(name = "proc")]
+        unsafe extern "C" {
+            fn proc_pidinfo(
+                pid: i32,
+                flavor: i32,
+                arg: u64,
+                buffer: *mut libc::c_void,
+                size: i32,
+            ) -> i32;
+        }
+        let mut bsd = [0u64; 17];
+        assert_eq!(
+            proc_pidinfo(pid as i32, 3, 0, bsd.as_mut_ptr().cast(), 136),
+            136
+        );
+        bsd[15]
+    };
+    #[cfg(target_os = "linux")]
+    let epoch = {
+        let stat = fs::read_to_string("/proc/self/stat").unwrap();
+        let start = stat[stat.rfind(") ").unwrap() + 2..]
+            .split_whitespace()
+            .nth(19)
+            .unwrap()
+            .parse::<u64>()
+            .unwrap();
+        let boot = fs::read_to_string("/proc/stat")
+            .unwrap()
+            .lines()
+            .find_map(|s| s.strip_prefix("btime ").and_then(|s| s.parse::<u64>().ok()))
+            .unwrap();
+        boot + start / unsafe { libc::sysconf(libc::_SC_CLK_TCK) } as u64
+    };
+    let start = unsafe {
+        let epoch = epoch as libc::time_t;
+        let mut tm: libc::tm = std::mem::zeroed();
+        libc::localtime_r(&epoch, &mut tm);
+        let mut buf = [0u8; 80];
+        let n = libc::strftime(buf.as_mut_ptr().cast(), 80, c"%a %b %e %T %Y".as_ptr(), &tm);
+        String::from_utf8_lossy(&buf[..n]).into_owned()
+    };
+    fs::write(dir.join("dispatch-owner.json"),format!("{{\"schema_version\":1,\"kind\":\"dispatch\",\"run_dir\":{},\"run_token\":\"nested\",\"owner_pid\":{pid},\"owner_pgid\":{},\"owner_started_at\":{}}}",quote(&dir.to_string_lossy()),unsafe {libc::getpgrp()},quote(&start))).unwrap();
+    fs::create_dir_all(attempt.join("tmp/children")).unwrap();
+    fs::write(
+        attempt.join("tmp/children/nested.json"),
+        format!(
+            "{{\"run_dir\":{},\"run_token\":\"nested\"}}",
+            quote(&dir.to_string_lossy())
+        ),
+    )
+    .unwrap();
+    fs::write(attempt.join("nested.ready"), pid.to_string()).unwrap();
+    let began = std::time::Instant::now();
+    while !attempt.join("nested.release").exists()
+        && began.elapsed() < std::time::Duration::from_secs(5)
+    {
+        unsafe {
+            libc::poll(std::ptr::null_mut(), 0, 10);
+        }
+    }
+}
+struct ReleaseNested(std::path::PathBuf);
+impl Drop for ReleaseNested {
+    fn drop(&mut self) {
+        let _ = fs::write(self.0.join("nested.release"), b"");
+        if let Ok(pid) = fs::read_to_string(self.0.join("nested.ready"))
+            .unwrap_or_default()
+            .parse::<i32>()
+        {
+            let start = std::time::Instant::now();
+            while unsafe { libc::kill(pid, 0) } == 0
+                && start.elapsed() < std::time::Duration::from_millis(750)
+            {
+                unsafe {
+                    libc::poll(std::ptr::null_mut(), 0, 10);
+                }
+            }
+        }
+    }
+}
+#[test]
+fn registered_nested_owner_with_custody_is_spared_inside_provider_group() {
+    let f=Fixture::new("lane-nested-held","S2_NESTED=held \"$S2_HELPER\" --exact nested_owner_helper --nocapture & while [ ! -f nested.ready ]; do :; done; printf ready; /bin/sleep 0.15; exit 0");
+    let _release = ReleaseNested(f.sandbox.dir.clone());
+    let record = f.run();
+    let pid = fs::read_to_string(f.sandbox.dir.join("nested.ready")).unwrap_or_else(|e| {
+        panic!(
+            "{e}: {record}: {:?}: {:?}",
+            fs::read_to_string(f.sandbox.dir.join("events.jsonl")),
+            fs::read_to_string(f.sandbox.dir.join("stderr.log"))
+        )
+    });
+    assert!(
+        record
+            .split("\"spared\":")
+            .nth(1)
+            .unwrap()
+            .starts_with(&format!("[{{\"pid\":{pid},")),
+        "{record}"
+    );
+    assert_eq!(unsafe { libc::kill(pid.parse().unwrap(), 0) }, 0);
+}
+#[test]
+fn registered_owner_with_only_an_unlocked_descriptor_is_not_spared() {
+    use std::os::fd::AsRawFd;
+    let f=Fixture::new("lane-nested-unlocked","S2_NESTED=unlocked \"$S2_HELPER\" --exact nested_owner_helper --nocapture & while [ ! -f nested.ready ]; do :; done; printf ready; /bin/sleep 0.15; exit 0");
+    fs::create_dir_all(f.sandbox.dir.join("nested")).unwrap();
+    let custody = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(f.sandbox.dir.join("nested/MANIFEST.md"))
+        .unwrap();
+    assert_eq!(
+        unsafe { libc::flock(custody.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
+        0
+    );
+    let _release = ReleaseNested(f.sandbox.dir.clone());
+    let record = f.run();
+    assert!(record.contains("\"spared\":[]"), "{record}");
+}

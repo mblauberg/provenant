@@ -19,7 +19,6 @@ use std::io::{self, BufRead, Read};
 use std::marker::PhantomData;
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::OpenOptionsExt;
-use std::os::unix::process::CommandExt;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -39,7 +38,7 @@ impl Lane<Exited> {
         }
     }
 }
-fn emit(kind: &str, fields: &str) {
+fn emit(output: &mut platform::EventOutput, kind: &str, fields: &str) {
     let line = format!(
         "{{\"event\":{},{}\n",
         files::quote(kind),
@@ -47,7 +46,7 @@ fn emit(kind: &str, fields: &str) {
     );
     // Nonblocking, bounded writes. A disconnected or stalled owner has no
     // influence over the provider's lifetime.
-    platform::write_event(std::io::stdout().as_raw_fd(), line.as_bytes());
+    output.emit(line.as_bytes());
 }
 fn apply(s: &mut State, event: Event) -> Vec<Action> {
     let (next, a) = step(std::mem::take(s), event);
@@ -117,6 +116,7 @@ pub fn run(args: &[OsString]) -> u8 {
         }
     };
     let _ = platform::nonblocking(std::io::stdout().as_raw_fd());
+    let mut output = platform::EventOutput::new(std::io::stdout().as_raw_fd());
     io.result(
         "launch",
         attempt.atomic("launch.json", redacted.as_bytes(), false),
@@ -167,10 +167,8 @@ pub fn run(args: &[OsString]) -> u8 {
             .stdin(input.map(Stdio::from).unwrap_or_else(Stdio::piped))
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        unsafe {
-            command.pre_exec(platform::reset_child);
-        }
-        match command.spawn() {
+        let spawned = platform::prepare_child(&mut command).and_then(|_| command.spawn());
+        match spawned {
             Err(e) => io.add(format!("spawn: {e}")),
             Ok(mut child) => {
                 let mut stdout = child.stdout.take();
@@ -205,7 +203,7 @@ pub fn run(args: &[OsString]) -> u8 {
                     group.pid,
                     files::nullable(canonical.as_deref())
                 );
-                emit("started", &start);
+                emit(&mut output, "started", &start);
                 let mut observer = Observer::start(&spec);
                 if let Some(pid) = observer.pid() {
                     group.exclude_owned_child(pid);
@@ -381,6 +379,7 @@ pub fn run(args: &[OsString]) -> u8 {
                             attempt.atomic("supervisor.json", live.as_bytes(), false),
                         );
                         emit(
+                            &mut output,
                             "progress",
                             &format!(
                                 "{{\"last_progress_at\":{}}}",
@@ -428,6 +427,7 @@ pub fn run(args: &[OsString]) -> u8 {
                     if let Some(s) = &stderr {
                         fds.push((s.as_raw_fd(), false));
                     }
+                    output.flush();
                     match reactor.wait(&fds, 20) {
                         Ok(s) => signals = s,
                         Err(e) => io.add(format!("event loop: {e}")),
@@ -475,6 +475,7 @@ pub fn run(args: &[OsString]) -> u8 {
             75
         }
     };
-    emit("exited", &encoded);
+    emit(&mut output, "exited", &encoded);
+    output.flush();
     status
 }

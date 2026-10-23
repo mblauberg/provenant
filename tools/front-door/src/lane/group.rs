@@ -139,6 +139,8 @@ pub struct ProviderGroup {
     child_grace: Duration,
     root_flush: Duration,
     desc_killed: bool,
+    deferred: BTreeSet<Identity>,
+    deferred_killed: bool,
     root_killed: bool,
     pub done: bool,
     pub status: Option<(Option<i32>, Option<i32>)>,
@@ -189,6 +191,8 @@ impl ProviderGroup {
             child_grace: Duration::from_millis(child_grace),
             root_flush: Duration::from_millis(root_flush),
             desc_killed: false,
+            deferred: BTreeSet::new(),
+            deferred_killed: false,
             root_killed: false,
             done: false,
             status: None,
@@ -358,9 +362,19 @@ impl ProviderGroup {
             .filter_map(|id| platform::process(id.pid).filter(|r| r.id == *id && !r.zombie))
             .collect()
     }
-    fn signal(&mut self, sig: i32, root: bool) {
+    fn signal(
+        &mut self,
+        sig: i32,
+        root: bool,
+        skip: &BTreeSet<Identity>,
+        only: Option<&BTreeSet<Identity>>,
+    ) {
         self.sample();
-        let live = self.live();
+        let live: Vec<_> = self
+            .live()
+            .into_iter()
+            .filter(|r| !skip.contains(&r.id) && only.is_none_or(|ids| ids.contains(&r.id)))
+            .collect();
         let shared = self.shared.iter().any(|id| self.spared.contains(id));
         let spared_groups: BTreeSet<_> = self
             .spared
@@ -395,14 +409,24 @@ impl ProviderGroup {
         }
     }
     /// Silence and I/O errors cannot construct a reason or call this method.
-    pub fn stop(&mut self, _reason: StopReason) {
+    pub fn stop(&mut self, reason: StopReason) {
         if self.stop_at.is_some() || self.done {
             return;
         }
         self.sample();
+        if reason == StopReason::PostExitCleanup && !self.observed_exit() {
+            // Terminal grace lets direct children in their own groups flush
+            // before starting their own staged stop (the Python pending rule).
+            self.deferred = self
+                .live()
+                .into_iter()
+                .filter(|r| r.ppid == self.pid && r.pgid != self.pid)
+                .map(|r| r.id)
+                .collect();
+        }
         self.remember_reaped();
         self.stop_at = Some(Instant::now());
-        self.signal(libc::SIGTERM, true);
+        self.signal(libc::SIGTERM, true, &self.deferred.clone(), None);
     }
     fn remember_reaped(&mut self) {
         for row in self.live() {
@@ -426,11 +450,29 @@ impl ProviderGroup {
         }
         self.remember_reaped();
         if !self.desc_killed && start.elapsed() >= self.child_grace {
-            self.signal(libc::SIGKILL, false);
+            let deferred = self.deferred.clone();
+            if !deferred.is_empty() {
+                self.signal(libc::SIGTERM, false, &BTreeSet::new(), Some(&deferred));
+            }
+            self.signal(libc::SIGKILL, false, &deferred, None);
             self.desc_killed = true;
         }
-        if !self.root_killed && start.elapsed() >= self.root_flush.max(self.child_grace) {
-            self.signal(libc::SIGKILL, true);
+        if !self.deferred_killed && start.elapsed() >= self.child_grace.saturating_mul(2) {
+            self.signal(
+                libc::SIGKILL,
+                false,
+                &BTreeSet::new(),
+                Some(&self.deferred.clone()),
+            );
+            self.deferred_killed = true;
+        }
+        let descendants_grace = if self.deferred.is_empty() {
+            self.child_grace
+        } else {
+            self.child_grace.saturating_mul(2)
+        };
+        if !self.root_killed && start.elapsed() >= self.root_flush.max(descendants_grace) {
+            self.signal(libc::SIGKILL, true, &BTreeSet::new(), None);
             self.root_killed = true;
         }
         if self.root_killed && self.observed_exit() && self.live().is_empty() {
