@@ -151,6 +151,17 @@ pub fn slug(raw: &str) -> String {
     }
 }
 
+/// Python `slug(value)`: falsy inputs become an empty string before `str`.
+/// JSON object iteration follows the input Value's order; callers needing
+/// insertion order must retain it before constructing a serde Value.
+pub fn slug_value(value: &Value) -> String {
+    if crate::py::python_truth(value) {
+        slug(&crate::py::python_str(value))
+    } else {
+        slug("")
+    }
+}
+
 pub fn configured(path: &Path) -> Result<Option<String>, InvalidHost> {
     let raw = match fs::read(path) {
         Ok(raw) => raw,
@@ -436,5 +447,42 @@ print(json.dumps(results))
             assert_eq!(actual, fixture[1], "{}", fixture[0]);
             assert_eq!(serde_json::json!(peer_ids(&path)), fixture[2]);
         }
+    }
+}
+
+#[cfg(test)]
+mod slug_value_tests {
+    use super::*;
+    #[test]
+    fn permissive_slug_inputs_follow_python_truth_and_str() {
+        let values = serde_json::json!([
+            null,
+            false,
+            true,
+            0,
+            0.0,
+            -1,
+            1e-5,
+            [],
+            {},
+            [true],
+            "İ_Box.local",
+            "a'b",
+            300
+        ]);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("values.json");
+        fs::write(&path, serde_json::to_vec(&values).unwrap()).unwrap();
+        let Some(expected) = crate::test_support::python(
+            "scripts/host_identity.py",
+            r#"
+print(json.dumps([m.slug(v) for v in json.loads(pathlib.Path(sys.argv[3]).read_text())]))
+"#,
+            &[&path],
+        ) else {
+            return;
+        };
+        let actual: Vec<_> = values.as_array().unwrap().iter().map(slug_value).collect();
+        assert_eq!(serde_json::json!(actual), expected);
     }
 }
