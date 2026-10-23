@@ -2,6 +2,7 @@
 use crate::{invalid, io, pending, Result};
 use serde::{Deserialize, Serialize};
 use std::{
+    ffi::OsStr,
     fs,
     path::{Path, PathBuf},
 };
@@ -9,6 +10,27 @@ use toml_edit::{DocumentMut, Item};
 
 pub const SKILL_NAME: &str = "skill-creator";
 pub const BLOCK: &str = "# agent-harness: disable overlapping bundled skill\n[[skills.config]]\nname = \"skill-creator\"\nenabled = false\n";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommandMode {
+    Check,
+    Preflight,
+    Configure,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommandResult {
+    pub exit_code: i32,
+    pub stdout: String,
+    pub stderr: String,
+}
+
+pub fn default_config_path(codex_home: Option<&OsStr>, home: &Path) -> PathBuf {
+    codex_home
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home.join(".codex"))
+        .join("config.toml")
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -64,6 +86,14 @@ pub fn state(text: &str) -> Result<State> {
         }
         found = true;
         let enabled = entry.get("enabled");
+        if let Some(enabled) = enabled {
+            if enabled.as_array().is_some() || matches!(enabled, Item::ArrayOfTables(_)) {
+                return Err(crate::Error::CodexUnhashable { kind: "list" });
+            }
+            if enabled.as_table_like().is_some() {
+                return Err(crate::Error::CodexUnhashable { kind: "dict" });
+            }
+        }
         // Python's False compares equal to integer/float zero.
         let disabled = enabled.is_some_and(|v| {
             v.as_bool() == Some(false) || v.as_integer() == Some(0) || v.as_float() == Some(0.0)
@@ -154,6 +184,76 @@ pub fn configure(path: &Path) -> Result<Outcome> {
     }
     pending::atomic_write(&proposal.target, ".codex-config.", proposal.text.as_bytes())?;
     Ok(Outcome::Configured)
+}
+
+/// The inert command boundary, including the script's output and exit policy.
+pub fn run(path: &Path, mode: CommandMode) -> CommandResult {
+    match run_inner(path, mode) {
+        Ok(result) => result,
+        Err(error @ crate::Error::CodexUnhashable { .. }) => CommandResult {
+            exit_code: 1,
+            stdout: String::new(),
+            stderr: format!("TypeError: {error}\n"),
+        },
+        Err(error) => CommandResult {
+            exit_code: 3,
+            stdout: String::new(),
+            stderr: format!("conflicting: {error}\n"),
+        },
+    }
+}
+
+fn run_inner(path: &Path, mode: CommandMode) -> Result<CommandResult> {
+    let path_display = path.display();
+    match mode {
+        CommandMode::Check => {
+            let target = canonical_path(path)?;
+            let text = if target.exists() {
+                fs::read_to_string(&target).map_err(|e| io(&target, e))?
+            } else {
+                String::new()
+            };
+            if state(&text)? == State::Disabled {
+                Ok(CommandResult {
+                    exit_code: 0,
+                    stdout: format!("skill override verified={path_display}\n"),
+                    stderr: String::new(),
+                })
+            } else {
+                Ok(CommandResult {
+                    exit_code: 1,
+                    stdout: format!("missing: {SKILL_NAME} disable override in {path_display}\n"),
+                    stderr: String::new(),
+                })
+            }
+        }
+        CommandMode::Preflight => {
+            let outcome = preflight(path)?;
+            let value = match outcome {
+                Outcome::Existing => "existing",
+                Outcome::Ready => "ready",
+                Outcome::Configured => "configured",
+            };
+            Ok(CommandResult {
+                exit_code: 0,
+                stdout: format!("skill override preflight {value}={path_display}\n"),
+                stderr: String::new(),
+            })
+        }
+        CommandMode::Configure => {
+            let outcome = configure(path)?;
+            let value = match outcome {
+                Outcome::Existing => "existing",
+                Outcome::Ready => "ready",
+                Outcome::Configured => "configured",
+            };
+            Ok(CommandResult {
+                exit_code: 0,
+                stdout: format!("skill override {value}={path_display}\n"),
+                stderr: String::new(),
+            })
+        }
+    }
 }
 
 #[cfg(test)]
@@ -261,6 +361,85 @@ mod tests {
                 ),
                 Err(_) => assert!(old.is_null()),
             }
+        }
+    }
+
+    #[test]
+    fn command_outputs_and_exit_codes_match_python() {
+        for (mode, args, original) in [
+            (CommandMode::Check, vec!["--check"], ""),
+            (CommandMode::Preflight, vec!["--preflight"], ""),
+            (CommandMode::Configure, vec![], ""),
+            (
+                CommandMode::Check,
+                vec!["--check"],
+                "[[skills.config]]\nname='skill-creator'\nenabled=false\n",
+            ),
+            (
+                CommandMode::Preflight,
+                vec!["--preflight"],
+                "[[skills.config]]\nname='skill-creator'\nenabled=true\n",
+            ),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let rust_path = dir.path().join("rust.toml");
+            fs::write(&rust_path, original).unwrap();
+            let script_args = args
+                .iter()
+                .map(|arg| format!("{arg:?}"))
+                .collect::<Vec<_>>()
+                .join(",");
+            let body = format!(
+                "import contextlib,io,json\nout=io.StringIO();err=io.StringIO()\nwith contextlib.redirect_stdout(out),contextlib.redirect_stderr(err): code=m.main(['--config',str(p),{script_args}])\nprint(json.dumps([code,out.getvalue(),err.getvalue()]))"
+            );
+            let Some(output) = crate::oracle::python(
+                "scripts/configure-codex-skill-overrides.py",
+                &body,
+                &rust_path,
+            ) else {
+                return;
+            };
+            let old: serde_json::Value = serde_json::from_slice(&output).unwrap();
+            fs::write(&rust_path, original).unwrap();
+            let result = run(&rust_path, mode);
+            assert_eq!(
+                old,
+                serde_json::json!([result.exit_code, result.stdout, result.stderr]),
+                "mode={mode:?}, original={original:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn unhashable_enabled_values_keep_python_type_error_and_exit_status() {
+        for (value, kind) in [("[]", "list"), ("{key=1}", "dict")] {
+            let input = format!("[[skills.config]]\nname='skill-creator'\nenabled={value}\n");
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("config.toml");
+            fs::write(&path, &input).unwrap();
+            let body =
+                "try: m.state(p.read_text())\nexcept Exception as e: print(type(e).__name__ + ':' + str(e))";
+            let Some(output) =
+                crate::oracle::python("scripts/configure-codex-skill-overrides.py", body, &path)
+            else {
+                return;
+            };
+            assert_eq!(
+                output,
+                format!(
+                    "TypeError:cannot use '{kind}' as a set element (unhashable type: '{kind}')\n"
+                )
+                .as_bytes()
+            );
+            let result = run(&path, CommandMode::Configure);
+            assert_eq!(result.exit_code, 1);
+            assert_eq!(
+                result.stderr,
+                format!(
+                    "TypeError: cannot use '{kind}' as a set element (unhashable type: '{kind}')\n"
+                )
+            );
+            assert_eq!(fs::read_to_string(path).unwrap(), input);
         }
     }
 }

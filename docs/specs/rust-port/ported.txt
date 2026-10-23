@@ -37,3 +37,4 @@ skills/orchestrate/scripts/adapters/cursor.py#unit-01
 skills/orchestrate/scripts/adapters/opencode.py#unit-01
 scripts/telemetry_report.py#unit-02
 scripts/lane_safety_guard.py#unit-01
+scripts/lib/roots.py#unit-01
