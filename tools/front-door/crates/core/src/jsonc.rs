@@ -301,3 +301,40 @@ print(json.dumps(results))
         }
     }
 }
+
+#[cfg(test)]
+mod integer_boundary_tests {
+    use super::*;
+    #[test]
+    #[ignore = "RP-core-3: records checked decoder integration is blocked by R2 and missing extended-value API"]
+    fn integer_ingress_never_rounds_an_out_of_range_token() {
+        assert!(parse_jsonc("18446744073709551616").is_err());
+        assert!(parse_jsonc("-9223372036854775809").is_err());
+        assert_eq!(
+            parse_jsonc("18446744073709551615").unwrap().0.as_u64(),
+            Some(u64::MAX)
+        );
+        assert_eq!(parse_jsonc("-0").unwrap().0.to_string(), "0");
+    }
+}
+
+/// Separate the pure JSONC transformation from the record owner's decoder.
+/// Callers can pass `provenant_records::checked_json::from_str` without adding
+/// an illegal core -> records dependency. A decoder's typed errors are retained.
+#[derive(Debug, Error)]
+pub enum JsoncDecodeError<E> {
+    #[error(transparent)]
+    Prepare(#[from] JsoncError),
+    #[error(transparent)]
+    Decode(E),
+}
+pub fn parse_jsonc_with<T, E>(
+    text: &str,
+    decode: impl FnOnce(&str) -> Result<T, E>,
+) -> Result<(T, bool), JsoncDecodeError<E>> {
+    let (prepared, comments) = prepare_jsonc(text)?;
+    Ok((
+        decode(&prepared).map_err(JsoncDecodeError::Decode)?,
+        comments,
+    ))
+}
