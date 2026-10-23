@@ -631,8 +631,11 @@ fn parse_linux_stat(
 
 #[cfg(target_os = "linux")]
 fn ticks_to_micros(ticks: u64, ticks_per_second: u64) -> Option<u64> {
-    let whole = (ticks / ticks_per_second).checked_mul(1_000_000)?;
-    let fractional = (ticks % ticks_per_second).checked_mul(1_000_000)? / ticks_per_second;
+    let whole = ticks.checked_div(ticks_per_second)?.checked_mul(1_000_000)?;
+    let fractional = ticks
+        .checked_rem(ticks_per_second)?
+        .checked_mul(1_000_000)?
+        .checked_div(ticks_per_second)?;
     whole.checked_add(fractional)
 }
 
