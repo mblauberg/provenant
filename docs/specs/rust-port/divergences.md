@@ -1673,3 +1673,74 @@ The review-panel and authority-mapping unit claims hold. All three cycle
 interfaces are deliberately partial: observer.json restoration/replay,
 supervisor return codes 64 and 75, and the full dynamic observer record domain
 are not yet proved exact. Their IDs are removed from the completion ledger.
+
+### RP-SUP3-CENSUS: fallback failure rendering (bug, fixed; bound still open)
+
+- Source/oracle: `7021182d535f6c730c29713e77d5bca76893fd06`, Python 3.14.8,
+  rulebook v4. Author route: `codex/gpt-6.1-sol@high`.
+- Unit: `skills/orchestrate/scripts/process_info.py#unit-02` (partial).
+  The command adapter now preserves spawn errno/program and the timeout's
+  command/budget. Census rendering matches Python's OSError/TimeoutExpired
+  text; per-PID lookup and start-time still collapse these failures to absence.
+- Three injected command policy tests include a Python differential for spawn,
+  timeout, nonzero, empty census and unreadable PID failures. RP-1302's 1 MiB
+  stdout/stderr refusal remains open and blocks a full unit/ps-shim claim.
+
+### RP-SUP3-LIVENESS: diagnostic observation domain (library, open partial scope)
+
+- Same source/oracle and rulebook as RP-SUP3-CENSUS. Units:
+  `worker_liveness.py#unit-01` and `#unit-02`, both partial.
+- The read-only adapter uses bounded subprocess waits (15 seconds), bounded
+  output (16 MiB per stream), and a bounded session first line (64 MiB).
+  Python's corresponding waits/reads are unbounded. Oversize/timeout is a
+  typed refusal; this is not an accepted command behavior change.
+- `provenant_records::checked_json` owns JSON integer-range refusal, including
+  unknown fields, as the rulebook's approved `NumberOutOfRange` improvement.
+  Its missing extended JSON support (NaN and lone surrogate strings), and
+  core's missing surrogateescape string/path representation, prevent a full
+  claim. Native census refuses non-UTF-8 commands with a typed error retaining
+  the original OS string; it never silently changes command cwd extraction.
+  Native path rendering and exact non-strict symlink-loop behavior remain
+  partial too. Nothing calls this library yet.
+- Recursive glob does not follow directory links, retains root-before-nested
+  ordering for equal-mtime selection, and follows file links for reads.
+  A Python differential pins these behaviors. The typed main edge preserves
+  ordered/ASCII-escaped JSON, including CPython float spellings and non-finite
+  extensions, but raw argv/default/help parsing remains with the CLI owner.
+- Disposition: partial, absent from `Units:` and `ported.txt`; no divergence
+  approval is inferred. Shared-owner APIs and exact error/extended-input
+  fixtures are required before completing the affected domains.
+
+### RP-SUP3-REPAIR: rename endpoints and platform signal names (bug, fixed)
+
+- Same baseline and author route. Rename errors now retain source and
+  destination plus the OS cause; errno conversion remains unchanged. Boxed
+  safe filesystem traits require Send + Sync and have compile-time fixtures.
+- Node's platform-specific named signals now match the public Node constants
+  (SIGINFO on macOS; SIGSTKFLT/SIGPWR on Linux). A Node differential checks the
+  mapping. RP-SUP-PS-BUFFER's overflow contract remains open; this repair does
+  not complete the Fabric ps unit.
+
+### RP-SUP3-LIVENESS review repairs (bug, fixed)
+
+- Native review found an extra stat before selecting the first session log.
+  Python short-circuits that stat; if rotation removes the log after its read,
+  it still retains the selected path. The regression first failed with an
+  absent path and now passes with the retained path and missing metadata.
+- The typed main edge now catches failed home expansion as Python's
+  RuntimeError, emits `worker-liveness: Could not determine home directory.`
+  and returns 2. Its source differential first failed on an escaping error.
+  Empty HOME expands bare `~` to `/`, also confirmed by a failing-then-passing
+  regression. No source behavior changes are accepted by these repairs.
+- Final local evidence: 130 required-differential supervisor tests, 102
+  root-package tests and 2 layering policy checks passed; fmt and clippy with
+  warnings denied passed. Native syscall and source-parity review repairs are
+  complete. The partial domains above and chair-owned cross-family/CI gates
+  remain unchanged.
+
+### RP-SUP3-NAN-TIMEOUT: NaN bounded timeout (safety, open)
+
+- Unit: `skills/_shared/bounded_process.py#unit-01`. Source lines 167-170.
+- Python's `process.wait(timeout=nan)` never expires, so a NaN budget waits
+  forever. Rust refuses NaN with `BoundedError::InvalidTimeout` before
+  spawning. An infinite timeout keeps Python's behaviour: no deadline.

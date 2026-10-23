@@ -2,9 +2,8 @@
 //! the PID, stdio, working directory and signals all reach the owner untouched.
 
 use std::collections::BTreeMap;
-use std::ffi::{c_char, c_int, CString, OsStr, OsString};
+use std::ffi::{OsStr, OsString};
 use std::io;
-use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 
 pub const REPAIR: &str =
@@ -23,24 +22,8 @@ pub const GIT_REDIRECTS: [&str; 8] = [
     "GIT_DISCOVERY_ACROSS_FILESYSTEM",
 ];
 
-unsafe extern "C" {
-    fn access(path: *const c_char, mode: c_int) -> c_int;
-    fn execve(path: *const c_char, argv: *const *const c_char, envp: *const *const c_char)
-        -> c_int;
-}
-
-const X_OK: c_int = 1;
-
 /// `os.access(path, X_OK)`: real uid and gid, symlinks followed.
-pub fn is_executable(path: &Path) -> bool {
-    let mut bytes = path.as_os_str().as_bytes().to_vec();
-    if bytes.contains(&0) {
-        return false;
-    }
-    bytes.push(0);
-    // SAFETY: `bytes` is a NUL-terminated buffer that outlives the call.
-    unsafe { access(bytes.as_ptr().cast(), X_OK) == 0 }
-}
+pub use provenant_supervisor::sys::is_executable;
 
 /// What to run and how to adjust its environment.
 pub struct Launch<'a> {
@@ -61,54 +44,6 @@ pub fn describe(error: &io::Error) -> String {
     }
 }
 
-/// `execve(2)` itself. `Command::exec` retries a shebangless file through
-/// `/bin/sh` on ENOEXEC (the `execvp` fallback); Python's `os.execve` does not,
-/// so a file the kernel cannot run is an error here too.
-fn execve_strict(
-    program: &Path,
-    argv: &[&OsString],
-    env: &BTreeMap<OsString, OsString>,
-) -> io::Error {
-    fn c_string(bytes: &[u8]) -> Result<CString, io::Error> {
-        CString::new(bytes).map_err(|_| io::Error::from_raw_os_error(22))
-    }
-    let build = || -> Result<_, io::Error> {
-        let path = c_string(program.as_os_str().as_bytes())?;
-        let argv = argv
-            .iter()
-            .map(|arg| c_string(arg.as_bytes()))
-            .collect::<Result<Vec<_>, _>>()?;
-        let envp = env
-            .iter()
-            .map(|(name, value)| {
-                let mut entry = name.as_bytes().to_vec();
-                entry.push(b'=');
-                entry.extend_from_slice(value.as_bytes());
-                c_string(&entry)
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        Ok((path, argv, envp))
-    };
-    let (path, argv, envp) = match build() {
-        Ok(parts) => parts,
-        Err(error) => return error,
-    };
-    let argv_ptrs: Vec<*const c_char> = argv
-        .iter()
-        .map(|a| a.as_ptr())
-        .chain([std::ptr::null()])
-        .collect();
-    let env_ptrs: Vec<*const c_char> = envp
-        .iter()
-        .map(|a| a.as_ptr())
-        .chain([std::ptr::null()])
-        .collect();
-    // SAFETY: every pointer is into a live NUL-terminated CString and both
-    // arrays end with a null pointer.
-    unsafe { execve(path.as_ptr(), argv_ptrs.as_ptr(), env_ptrs.as_ptr()) };
-    io::Error::last_os_error()
-}
-
 /// Replace this process. Returns only on failure, with the exit status to use.
 pub fn replace_process(launch: &Launch) -> u8 {
     let mut env: BTreeMap<OsString, OsString> = std::env::vars_os().collect();
@@ -127,9 +62,12 @@ pub fn replace_process(launch: &Launch) -> u8 {
         env.insert("PROVENANT_STALE_CHECKED".into(), "1".into());
     }
     let program: OsString = launch.program.as_os_str().to_owned();
-    let mut argv: Vec<&OsString> = vec![&program];
-    argv.extend(launch.args.iter());
-    let error = execve_strict(launch.program, &argv, &env);
+    let mut argv = vec![program];
+    argv.extend_from_slice(launch.args);
+    let error = match provenant_supervisor::sys::execve_strict(launch.program, &argv, &env) {
+        Err(error) => error.source,
+        Ok(never) => match never {},
+    };
     eprintln!(
         "provenant: cannot execute {}: {}; {REPAIR}",
         launch.program.display(),
