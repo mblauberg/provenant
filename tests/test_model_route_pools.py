@@ -113,6 +113,13 @@ def test_profile_pool_mode_rotates_when_request_does_not_choose_a_mode(tmp_path,
     assert models(first) != models(second)
 
 
+def test_economy_profile_rotates_without_a_pool_mode_knob(tmp_path, monkeypatch):
+    monkeypatch.delenv("PROVENANT_KNOB_ROUTING_POOL_MODE", raising=False)
+    monkeypatch.setenv("PROVENANT_PROFILE", "economy")
+    result = pick({"route": "senior"}, tmp_path)
+    assert result["mode"] == "rotate"
+
+
 def test_every_mode_filters_cooling_uninstalled_and_disabled_models(tmp_path):
     cooling = pick({"route": "senior"}, tmp_path, cooling=("claude/claude-opus-5-5",))
     assert models(cooling) == ["codex/gpt-6.1-sol"]

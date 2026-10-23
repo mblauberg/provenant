@@ -205,6 +205,6 @@ An A/B holds the work constant and varies one profile:
 - `provenant profile list|show|use|set|reset|diff` validate against the
   registry, and unknown knobs are errors.
 - Precedence, task-class overrides, environment parsing and floors are covered
-  by `tests/test_harness_profile.py`, as are the four wired readers and the
-  stamp.
+  by `tests/test_harness_profile.py`, as are the seven wired readers and the
+  stamp. `routing.pool_mode` is wired for #1119 so profiles can select rotation.
 - Every attempt receipt carries `profile.preset` and `profile.digest`.

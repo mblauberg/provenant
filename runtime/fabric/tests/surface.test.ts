@@ -12,7 +12,7 @@ import { catalogueSnapshot } from "../src/catalogue.js";
 import { normaliseRoute, routeArguments } from "../src/execution-input.js";
 import { batchDefaults, mergeBatchTask } from "../src/execution.js";
 import { inheritedDeliveryRunId } from "../src/resume.js";
-import { rotateOverrideFromKnobs } from "../src/pools.js";
+import { expandPools, rotateOverrideFromKnobs } from "../src/pools.js";
 import { scratchRoot } from "./helpers/temp-root.js";
 
 const fixturePidLogs = new Set<string>();
@@ -80,6 +80,35 @@ it("merges a batch delivery id into each task, preserving task overrides", () =>
     expect.objectContaining({ id: "one", delivery_run_id: "delivery:1202" }),
     expect.objectContaining({ id: "two", delivery_run_id: "delivery:other" }),
   ]);
+});
+
+it("merges a batch-level knob into each task", () => {
+  const knobs = ["effort.shift=1"];
+  const defaults = batchDefaults({ knobs, tasks: [] } as any);
+  expect(mergeBatchTask(defaults, { id: "one", prompt: "first" }, 0)).toMatchObject({ knobs });
+});
+
+it("sends a per-dispatch rotate knob to the pool picker", async () => {
+  const root = scratchRoot("fabric-pool-knob-");
+  fixtureRoots.add(root);
+  const requestPath = join(root, "pick-request.json");
+  const python = join(root, "python-stub");
+  writeFileSync(python, `#!/usr/bin/env node
+const fs = require("node:fs");
+let input = "";
+process.stdin.on("data", chunk => input += chunk);
+process.stdin.on("end", () => {
+  fs.writeFileSync(process.env.PICK_REQUEST_PATH, input);
+  process.stdout.write(JSON.stringify({ status: "ok", results: [{ status: "ok", route: "senior", mode: "rotate", warnings: [], picks: [{ adapter: "codex", model: "gpt-6-luna", reason: "senior rotate" }] }] }));
+});
+`);
+  chmodSync(python, 0o755);
+  const identity = { project: root, cwd: root, agentId: "surface-test", provider: "agent" };
+  const env = { ...process.env, PICK_REQUEST_PATH: requestPath };
+  const expanded = await expandPools([{ id: "one", prompt: "p", route: "senior", knobs: ["routing.pool_mode=rotate"] }],
+    python, resolve(import.meta.dirname, "../../.."), identity, env, new AbortController().signal);
+  expect(JSON.parse(readFileSync(requestPath, "utf8")).requests[0]).toMatchObject({ rotate: true });
+  expect(expanded.tasks[0]).toMatchObject({ pick_reason: "senior rotate" });
 });
 
 afterEach(async () => {

@@ -544,7 +544,7 @@ def pick(router: Any, catalog: dict[str, Any], request: dict[str, Any], *,
         entries = pool(router, catalog, label, effort_order)
         rotate = request.get("rotate")
         if rotate is None:
-            rotate = os.environ.get("PROVENANT_KNOB_ROUTING_POOL_MODE") == "rotate"
+            rotate = router._harness_profile().value("routing.pool_mode", "top") == "rotate"
         mode = "council" if council else "rotate" if rotate else "top"
         if request.get("adapter"):
             entries = [entry for entry in entries if entry["adapter"] == request["adapter"]]

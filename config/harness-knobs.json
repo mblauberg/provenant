@@ -92,9 +92,6 @@
         "routing.pool_mode": "rotate",
         "writing.final_polish": "off",
         "context.summary_tokens": 1000
-      },
-      "task_classes": {
-        "critical-review": {"knobs": {"effort.shift": 0}}
       }
     },
     "rigorous": {
