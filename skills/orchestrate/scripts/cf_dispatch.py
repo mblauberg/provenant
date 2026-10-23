@@ -698,11 +698,11 @@ class Dispatcher:
             for candidate in [route, *route.get("fallback_candidates", [])]:
                 protected = []
                 for prompt_file in dict.fromkeys((opts.original_prompt_file, opts.prompt_file)):
-                    protected = provider_exec.check_protected_inputs(
+                    protected = provider_exec.provider_confinement.check_protected_inputs(
                         candidate, os.getcwd(), provider_cwd, worktree=opts.worktree or None,
                         prompt_file=prompt_file or None, add_dirs=add_dirs,
                     )
-                if protected and (candidate.get("adapter") == "codex" or not provider_exec._sandbox_exec_path()):
+                if protected and (candidate.get("adapter") == "codex" or not provider_exec.provider_confinement._sandbox_exec_path()):
                     raise ValueError("protected paths require sandbox-exec read confinement; fix: use a non-training route")
         except (OSError, ValueError) as exc:
             append_text(diag, f"{exc}\n")

@@ -3,8 +3,8 @@
 
 Standard library only, so it runs before and without the harness virtualenv.
 
-The front door is either the managed Python template or a binary built from
-`tools/front-door/`. A built binary embeds the managed-file marker and the line
+The front door is a binary built from `tools/front-door/`. A built binary
+embeds the managed-file marker and the line
 `provenant-front-door source-sha256=<hex>` as lines of their own, so the
 installer's marker rule and the install check both work on it unchanged. The
 hash covers `Cargo.toml`, `Cargo.lock`, `rust-toolchain.toml` and `src/**`.
@@ -31,9 +31,9 @@ import subprocess
 import sys
 
 CRATE_RELATIVE = "tools/front-door"
-TEMPLATE_RELATIVE = "scripts/provenant.template"
 HASHED_FILES = ("Cargo.toml", "Cargo.lock", "rust-toolchain.toml")
-MODES = ("auto", "rust", "python")
+MODES = ("rust",)
+RUSTUP_FIX = "fix: curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh"
 DEPLOYMENT_TARGET = "15.0"
 IDENTITY = re.compile(rb"(?m)^provenant-front-door source-sha256=([0-9a-f]{64}|unknown)$")
 SMOKE_TIMEOUT_SECONDS = 30
@@ -41,6 +41,10 @@ SMOKE_TIMEOUT_SECONDS = 30
 
 class FrontDoorError(RuntimeError):
     """The Rust front door cannot be produced; the message says why."""
+
+
+class CargoUnavailable(FrontDoorError):
+    """Install rustup before building the front door."""
 
 
 def source_digest(crate: Path) -> str:
@@ -98,7 +102,7 @@ def build(crate: Path, target_dir: Path, digest: str) -> Path:
         fallback = Path.home() / ".cargo/bin/cargo"
         cargo = str(fallback) if fallback.is_file() else None
     if cargo is None:
-        raise FrontDoorError("cargo is not on PATH (looked in ~/.cargo/bin too)")
+        raise CargoUnavailable("cargo is not on PATH (looked in ~/.cargo/bin too)")
     command = [cargo, "build", "--release", "--locked", "--manifest-path", str(crate / "Cargo.toml")]
     try:
         # Cargo's own output is progress, not an answer: keep it off stdout.
@@ -127,57 +131,37 @@ def select(
     *,
     cargo_available: bool | None = None,
 ) -> tuple[str, Path, str]:
-    """Choose the artefact to install: `(kind, source path, note)`.
-
-    `python` always installs the template. `rust` raises `FrontDoorError` when
-    no binary can be produced. `auto` falls back to the template and returns the
-    reason as the note, which is empty when there was nothing to try (no crate
-    in this checkout).
-    """
+    """Produce the Rust artefact to install: `(kind, source path, note)`."""
     if mode not in MODES:
-        raise ValueError(f"PROVENANT_FRONT_DOOR must be one of {', '.join(MODES)}, got {mode!r}")
-    template = product_root / TEMPLATE_RELATIVE
-    if mode == "python":
-        return "python", template, ""
+        raise ValueError(f"PROVENANT_FRONT_DOOR must be rust, got {mode!r}")
     crate = product_root / CRATE_RELATIVE
 
-    def unavailable(reason: str, *, quiet: bool = False) -> tuple[str, Path, str]:
-        if mode == "rust":
-            raise FrontDoorError(reason)
-        return "python", template, "" if quiet else reason
-
     if not (crate / "Cargo.toml").is_file():
-        return unavailable(f"no {CRATE_RELATIVE} crate in {product_root}", quiet=True)
-    try:
-        digest = source_digest(crate)
-    except FileNotFoundError as exc:
-        return unavailable(str(exc))
-    try:
-        if prebuilt is not None:
-            if not prebuilt.is_absolute() or prebuilt.is_symlink() or not prebuilt.is_file():
-                raise FrontDoorError(
-                    f"PROVENANT_FRONT_DOOR_BINARY must be an absolute regular file: {prebuilt}"
-                )
-            try:
-                stamped = embedded_digest(prebuilt)
-            except OSError as exc:
-                raise FrontDoorError(f"cannot read prebuilt front door {prebuilt}: {exc}") from None
-            if stamped != digest:
-                raise FrontDoorError(
-                    f"prebuilt front door {prebuilt} was built from different sources "
-                    f"(embeds {stamped}, checkout is {digest}); rebuild it from this checkout"
-                )
-            smoke(prebuilt)
-            return "rust", prebuilt, "prebuilt"
-        if cargo_available is None:
-            cargo_available = shutil.which("cargo") is not None or (Path.home() / ".cargo/bin/cargo").is_file()
-        if not cargo_available:
-            raise FrontDoorError("cargo is not on PATH (looked in ~/.cargo/bin too)")
-        binary = build(crate, build_dir, digest)
-        smoke(binary)
-        return "rust", binary, "built"
-    except FrontDoorError as exc:
-        return unavailable(str(exc))
+        raise FrontDoorError(f"no {CRATE_RELATIVE} crate in {product_root}")
+    digest = source_digest(crate)
+    if prebuilt is not None:
+        if not prebuilt.is_absolute() or prebuilt.is_symlink() or not prebuilt.is_file():
+            raise FrontDoorError(
+                f"PROVENANT_FRONT_DOOR_BINARY must be an absolute regular file: {prebuilt}"
+            )
+        try:
+            stamped = embedded_digest(prebuilt)
+        except OSError as exc:
+            raise FrontDoorError(f"cannot read prebuilt front door {prebuilt}: {exc}") from None
+        if stamped != digest:
+            raise FrontDoorError(
+                f"prebuilt front door {prebuilt} was built from different sources "
+                f"(embeds {stamped}, checkout is {digest}); rebuild it from this checkout"
+            )
+        smoke(prebuilt)
+        return "rust", prebuilt, "prebuilt"
+    if cargo_available is None:
+        cargo_available = shutil.which("cargo") is not None or (Path.home() / ".cargo/bin/cargo").is_file()
+    if not cargo_available:
+        raise CargoUnavailable("cargo is not on PATH (looked in ~/.cargo/bin too)")
+    binary = build(crate, build_dir, digest)
+    smoke(binary)
+    return "rust", binary, "built"
 
 
 def parser() -> argparse.ArgumentParser:
@@ -213,9 +197,11 @@ def main(arguments: list[str] | None = None) -> int:
             print(build(args.crate, args.target_dir, source_digest(args.crate)))
         else:
             kind, source, note = select(args.product_root, args.mode, args.build_dir, args.prebuilt)
-            if note and kind == "python":
-                print(f"note: front door falls back to the Python template: {note}", file=sys.stderr)
             print(f"{kind}\t{source}")
+    except CargoUnavailable as exc:
+        print(f"front door: {exc}", file=sys.stderr)
+        print(RUSTUP_FIX, file=sys.stderr)
+        return 3
     except FrontDoorError as exc:
         print(f"front door: {exc}", file=sys.stderr)
         return 3

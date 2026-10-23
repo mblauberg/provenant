@@ -215,6 +215,7 @@ def _prepare(db):
             cache_write_tokens INTEGER, output_tokens INTEGER, reasoning_tokens INTEGER,
             usage_source TEXT, reported_cost REAL, status TEXT, error_class TEXT,
             task_class TEXT, route TEXT, duration_ms INTEGER, provider_ms INTEGER,
+            classified_by TEXT, classifier_confidence REAL, shadow_answers TEXT,
             PRIMARY KEY(source,event_id,host));
         CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS usage_files (
@@ -280,7 +281,8 @@ def _prepare(db):
     usage_columns = {row[1] for row in db.execute('PRAGMA table_info(usage)')}
     for name, kind in (('run_id', 'TEXT'), ('task_id', 'TEXT'), ('attempt', 'INTEGER'),
                        ('task_class', 'TEXT'), ('route', 'TEXT'), ('duration_ms', 'INTEGER'),
-                       ('provider_ms', 'INTEGER'), ('parent_run_id', 'TEXT'),
+                       ('provider_ms', 'INTEGER'), ('classified_by', 'TEXT'),
+                       ('classifier_confidence', 'REAL'), ('shadow_answers', 'TEXT'), ('parent_run_id', 'TEXT'),
                        ('parent_task_id', 'TEXT'), ('parent_attempt', 'INTEGER'),
                        ('requested_model', 'TEXT'), ('resolved_model', 'TEXT'), ('observed_model', 'TEXT'),
                        ('delivery_run_id', 'TEXT')):
@@ -300,6 +302,10 @@ def _prepare(db):
         # Version 4 reads route, task class and timing from receipts; re-read them in place.
         db.execute("DELETE FROM cursors WHERE source='fabric'")
     db.execute(f'PRAGMA user_version = {SCHEMA_VERSION}')
+    if db.execute("SELECT 1 FROM meta WHERE key='classifier_metadata_backfill'").fetchone() is None:
+        # Classifier columns are additive; keep v4 compatible with peer readers.
+        db.execute("DELETE FROM cursors WHERE source='fabric'")
+        db.execute("INSERT OR IGNORE INTO meta VALUES ('classifier_metadata_backfill', ?)", (now(),))
     if db.execute("SELECT 1 FROM meta WHERE key='model_split'").fetchone() is None:
         # Re-read surviving receipts; pruned receipts keep unknown model components.
         db.execute("DELETE FROM cursors WHERE source='fabric'")

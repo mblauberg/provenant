@@ -184,7 +184,7 @@ jobs:
               # skip split entirely (fail-open), and install-harness calls
               # helpers beyond install*/instance* (manage_installation,
               # configure-*, write-product-root-pointer, lib/**,
-              # provenant.template). tests/ narrows to exactly the contract
+              # the installed command). tests/ narrows to exactly the contract
               # files this job runs — every other test rides the harness
               # fused suite. Broader docs/skills changes skip split;
               # the harness filter stays near-total by design.
@@ -201,10 +201,8 @@ jobs:
             rust:
               - *ci-contract
               - 'tools/front-door/**'
-              - 'tests/front_door_parity/**'
-              - 'tests/test_stale_checkout.py'
-              - 'scripts/provenant'
-              - 'scripts/provenant.template'
+              - 'tests/test_stale.py'
+              - 'tests/support/front_door.py'
               - 'scripts/check_target.py'
               - 'scripts/lib/front_door_build.py'
               - 'scripts/lib/product_root_resolver.py'
@@ -305,6 +303,10 @@ jobs:
           cache-dependency-glob: uv.lock
       - name: Install locked harness test dependencies
         run: uv sync --locked --only-group test
+      - name: Build Rust front door before parallel test collection
+        run: |
+          binary="$(.venv/bin/python scripts/lib/front_door_build.py build tools/front-door tools/front-door/target)"
+          printf 'PROVENANT_FRONT_DOOR_BIN=%s\n' "$binary" >> "$GITHUB_ENV"
       - name: Run Python test shard
         env:
           AGENT_FABRIC_PRODUCT_ROOT: ${{ github.workspace }}
@@ -542,8 +544,8 @@ jobs:
         run: |
           PROVENANT_FD_SOURCE_SHA256="$(python3 ../../scripts/lib/front_door_build.py digest .)" \
             cargo build --release --locked
-      - name: Run the parity suite against the binary
-        run: PROVENANT_PARITY_IMPL=rust PROVENANT_FRONT_DOOR_BIN="$CARGO_TARGET_DIR/release/provenant" .venv/bin/python -m pytest tests/front_door_parity tests/test_stale_checkout.py -q
+      - name: Run stale-checkout coverage against the binary
+        run: PROVENANT_FRONT_DOOR_BIN="$CARGO_TARGET_DIR/release/provenant" .venv/bin/python -m pytest tests/test_stale.py -q
       - name: Run the golden CLI suite
         run: PROVENANT_GOLDEN_REQUIRED=1 PROVENANT_GOLDEN_BIN="$CARGO_TARGET_DIR/release/provenant" .venv/bin/python -m pytest tests/golden/test_golden_cli.py -q
 

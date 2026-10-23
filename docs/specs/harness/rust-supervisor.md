@@ -272,9 +272,8 @@ synthesis from absence (`provider_lost`, `reap_attempts`).
 | `dispatch-status.json` | TS and Python | TS initial record, Rust close (S3) | Same fields |
 | `cancel.request`, `termination-request.json` | Python, TS | Unchanged | None |
 
-A launch spec with an unknown major version is refused with exit 64. During a
-trial the Python owner then falls back to the Python supervisor and warns;
-afterwards it fails with `fix: scripts/install-harness`.
+A launch spec with an unknown major version is refused with exit 64 and
+`fix: scripts/install-harness`. The owner does not fall back to Python.
 
 ## Structural guarantees
 
@@ -354,7 +353,7 @@ batch custody proofs from #1209, and the 44 `CF_DISPATCH` policy tests,
 which move to the fake provider. The suite and the Rust unit tests add about
 1,400 lines.
 
-Product code removed, approximately: `scripts/provenant` and the template (713
+Product code removed, approximately: the Python front door and template (713
 lines); the process half of `provider_exec.py` (about 1,100) and the
 test-seam `Popen` branch (about 150); owner custody, cancel identity and
 reaper identity code in `dispatch_run.py` and `run_lineage.py` (about 700);
@@ -376,11 +375,12 @@ about 2,500 lines plus tests.
    dispatcher scans today, with `test_stale.py` kept against the binary. The
    `check` custody functions that `check_target.py` loads from the Python
    dispatcher move into `check_target.py`. The TypeScript tests that run
-   `python3 scripts/provenant` (`run-reader-events`, `hosts`) call the owner
+   the Python front door (`run-reader-events`, `hosts`) call the owner
    scripts directly. Any resolution case in the deleted tests that the crate's
    38 unit tests lack moves into them.
-3. **Trial:** 7 days with both Macs on the binary.
-4. **Delete:** `scripts/provenant`, `scripts/provenant.template`, the `python`
+3. **Switch:** once the S1 conformance rows are green, both Macs use the binary.
+   S1a (#1231) completed this switch.
+4. **Delete:** the Python checkout dispatcher and installed template, the `python`
    and `auto` branches in `install-harness` and `front_door_build.py`, the
    template branch of `check-provenant-install.py`, and the S1 tests.
    `scripts/check-provenant-install.py` itself stays, because
@@ -393,26 +393,25 @@ hidden from `help`. User-facing verbs keep their names.
 
 ## Slices
 
-Each slice is one or more pull requests, shippable alone, behind a knob whose
-Python path is the fallback until that slice's trial passes. A lane-day is one
-implementation lane's working day. The supervision defect baseline is the
-fortnight before this spec: about ten fixes or deflakes, so about five a week.
+Each slice is one or more pull requests, shippable alone. A knob selects the
+Rust implementation while conformance is established. Once its conformance
+rows are green, the slice switches its default and deletes its Python path,
+knob and superseded tests in the same cutover. There is no timed trial or
+post-trial deletion window. Rollback is a git revert; restore Python from git
+history if needed. A lane-day is one implementation lane's working day.
 
-| # | Slice | Knob | Done when | Kill criteria |
+| # | Slice | Knob before cutover | Done when | Kill criteria |
 |---|---|---|---|---|
 | S0 | Conformance seed: today's black-box invariants and synchronised fake providers, after #1207 merges | none | Green on Linux and macOS CI | Fake providers not deterministic within 2 lane-days: stop the supervisor work (S1 continues) |
-| S1 | Rust as the only front door | `PROVENANT_FRONT_DOOR` (existing) | Both Macs on the binary 7 days; Python front door and S1 tests deleted | Two trial regressions that force Python back: keep Python installable and revisit distribution |
-| S2 | `lane run` and the observer replace the process half of `_run_attempt`, per adapter; TS stops signalling providers | `PROVENANT_LANE_IMPL=python\|rust` | S2 rows and transcript replay green for every adapter on both platforms; 7-day trial on `rust`; S2 code and tests deleted | Parity not reached in 8 lane-days, or the trial shows a healthy provider killed or an exit record lost, or more than two Rust-attributable supervision fixes: default back to `python`, stop S3 and S4 |
-| S3 | `lane own` replaces the `dispatch_run.py` owner; Python split into `plan`, `settle`, `close` | `PROVENANT_LANE_OWNER=python\|rust` | S3 rows green; 7-day trial; S3 code and tests deleted | Parity not reached in 10 lane-days, or the Python split needs more than about 600 changed lines of glue, or S2's thresholds are breached: stop at S2, which already removes the #1204 class |
-| S4 | `lane status` and `lane reap`; `statusRows` in `run-status.ts` and `reapAttemptRuns` in `process-identity.ts` | `PROVENANT_LANE_CONTROL=python\|rust` | Fabric TS holds no process-identity code; graph runner unchanged at its call sites; S4 tests deleted | Not done in 5 lane-days, or any TS path still needs `processMatches`: keep TS control and stop |
+| S1 | Rust as the only front door | none after cutover | S1 conformance green; both Macs on the binary; Python front door and S1 tests deleted | A regression requiring Python: revert the slice and restore it from history |
+| S2 | `lane run` and the observer replace the process half of `_run_attempt`, per adapter; TS stops signalling providers | `PROVENANT_LANE_IMPL=python\|rust` | S2 rows and transcript replay green for every adapter on both platforms; Rust default; S2 Python path, knob and superseded tests deleted | Parity not reached in 8 lane-days, a healthy provider killed or an exit record lost, or more than two Rust-attributable supervision fixes: revert S2, stop S3 and S4 |
+| S3 | `lane own` replaces the `dispatch_run.py` owner; Python split into `plan`, `settle`, `close` | `PROVENANT_LANE_OWNER=python\|rust` | S3 rows green; Rust default; S3 Python owner path, knob and superseded tests deleted | Parity not reached in 10 lane-days, or the Python split needs more than about 600 changed lines of glue, or S2's thresholds are breached: stop at S2, which already removes the #1204 class |
+| S4 | `lane status` and `lane reap`; `statusRows` in `run-status.ts` and `reapAttemptRuns` in `process-identity.ts` | `PROVENANT_LANE_CONTROL=python\|rust` | S4 rows green; Rust default; Fabric TS holds no process-identity code; graph runner unchanged at its call sites; superseded control paths, knob and S4 tests deleted | Not done in 5 lane-days, or any TS path still needs `processMatches`: keep TS control and stop |
 
 S0 and S1 can run in parallel; S2 starts after S0. S3 starts automatically
-when S2 is done with no kill criterion hit and S2 has shown its benefit: its
-deletions merged and its trial needed at most one supervision fix of any
-origin, against a baseline of about five a week. Otherwise the work stops at
-S2. S4 starts automatically when S3 is done. Within 7 days of a trial
-passing, its knob and Python path are deleted; if that does not happen, Rust
-is reverted for that slice, so two implementations never linger.
+when S2 is done with no kill criterion hit and its deletions merged. S4 starts
+automatically when S3 is done. No slice retains an installable Python fallback
+after cutover.
 
 ## Other areas assessed
 
@@ -441,8 +440,8 @@ is reverted for that slice, so two implementations never linger.
 - **The test seam hides coverage.** The 44 `CF_DISPATCH` policy tests must
   move to the fake provider in S2; some may turn out to test only the dead
   branch.
-- **Two implementations during each trial.** Bounded by the 7-day deletion
-  rule.
+- **Two implementations before conformance.** The cutover deletes the Python
+  path as soon as its conformance rows are green; rollback is a git revert.
 - **Toolchain drift.** Source changes under `tools/` make installed binaries
   stale until `install-harness` runs; `check-provenant-install.py` says so,
   and launch spec versioning refuses a mismatched binary.
@@ -450,8 +449,10 @@ is reverted for that slice, so two implementations never linger.
 ## Decisions
 
 Decided by the user: rustup with the pinned toolchain on each Mac and local
-builds; 7-day trials; S3 and S4 proceed automatically once the preceding
-slice's criteria pass.
+builds; S3 and S4 proceed automatically once the preceding slice's criteria
+pass. On 2026-10-23 the user dropped the 7-day trials for every slice: switch
+the default and delete the Python path once conformance is green; rollback
+is a git revert.
 
 Workers outside Fabric: the [direct-CLI
 fallback](../../../skills/orchestrate/references/direct-cli-fallback.md) still

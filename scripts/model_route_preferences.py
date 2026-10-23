@@ -41,6 +41,7 @@ def add_selection_parser(
     default_preferences_path: Path,
 ) -> None:
     command = commands.add_parser("select")
+    command.add_argument("--catalog", default=None, help=argparse.SUPPRESS)
     command.add_argument("--task-class", required=True)
     command.add_argument("--role", required=True)
     command.add_argument("--candidates-file", required=True)

@@ -31,6 +31,12 @@ calls and 157 of the 224 signal and kill references in Python tests.
 
 ## S1, firm
 
+S1b removes the following Python-only tests and parity support after S1a's
+switch. The binary advisory coverage is retained as `tests/test_stale.py`;
+routing, resolution and exec cases are owned by `tools/front-door/tests/`.
+Installer and install-drift tests use Rust binaries or stamped build fixtures.
+The user dropped timed trials on 2026-10-23; see the supervisor spec.
+
 - `tests/front_door_parity/test_check_custody.py`: whole file, 14 tests, 148 lines
 - `tests/front_door_parity/test_dispatch.py`: whole file, 19 tests, 226 lines
 - `tests/front_door_parity/test_env_exec.py`: whole file, 15 tests, 156 lines

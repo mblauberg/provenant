@@ -370,7 +370,7 @@ The command/path detail below predates ADR 0020. It is retained as decision
 evidence; use the current Fabric README named in the cutover note above.
 
 The layering paragraph above names `provenant status`. No such command exists
-and none was ever accepted: `scripts/provenant` delegates `route`, `worktree`,
+and none was ever accepted: `provenant` delegates `route`, `worktree`,
 `check`, `fabric`, `dispatch`, `batch` and `run`, handles `help` and `root`
 itself, and exits 2 on anything else. That is the set [ADR
 0013](0013-thin-provenant-cli.md) carries as amended; `doctor` and `project`,

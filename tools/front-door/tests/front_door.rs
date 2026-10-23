@@ -73,7 +73,7 @@ fn checkout_binary_prefers_its_own_tree_and_leaves_the_environment_alone() {
     let sandbox = Sandbox::new("local");
     let checkout = sandbox.checkout("checkout");
     let other = sandbox.checkout("other");
-    let binary = sandbox.install_binary("checkout/scripts/provenant");
+    let binary = sandbox.install_binary("checkout/bin/provenant");
     let output = command(&binary, &sandbox.home())
         .env("AGENT_FABRIC_PRODUCT_ROOT", &other)
         .env("AGENTS_HOME", "/x")
@@ -98,10 +98,10 @@ fn checkout_binary_prefers_its_own_tree_and_leaves_the_environment_alone() {
 fn a_symlinked_binary_resolves_to_its_real_tree() {
     let sandbox = Sandbox::new("symlinked");
     let checkout = sandbox.checkout("checkout");
-    sandbox.install_binary("checkout/scripts/provenant");
+    sandbox.install_binary("checkout/bin/provenant");
     fs::create_dir_all(sandbox.dir.join("elsewhere")).unwrap();
     let link = sandbox.dir.join("elsewhere/provenant");
-    symlink(checkout.join("scripts/provenant"), &link).unwrap();
+    symlink(checkout.join("bin/provenant"), &link).unwrap();
     let output = command(&link, &sandbox.home())
         .arg("gate")
         .output()
@@ -118,7 +118,7 @@ fn a_checkout_without_the_launcher_falls_through_to_resolution() {
     let tree = sandbox.checkout("tree");
     fs::remove_file(tree.join("runtime/fabric/bin/fabric-mcp")).unwrap();
     let product = sandbox.checkout("product");
-    let binary = sandbox.install_binary("tree/scripts/provenant");
+    let binary = sandbox.install_binary("tree/bin/provenant");
     let output = command(&binary, &sandbox.home())
         .env("AGENT_FABRIC_PRODUCT_ROOT", &product)
         .arg("gate")
@@ -232,7 +232,7 @@ fn root_ignores_a_local_checkout_and_the_default_is_under_home() {
     let sandbox = Sandbox::new("rootdefault");
     let local = sandbox.checkout("local");
     let home_checkout = sandbox.checkout("home/.agents");
-    let binary = sandbox.install_binary("local/scripts/provenant");
+    let binary = sandbox.install_binary("local/bin/provenant");
     let output = command(&binary, &sandbox.home())
         .arg("root")
         .output()
@@ -511,43 +511,6 @@ fn check_helper_refusal_exits_3_and_lets_stderr_through() {
     assert_eq!(output.status.code(), Some(3));
     assert_eq!(stderr(&output), "provenant: copied worktree refused\n");
     assert!(output.stdout.is_empty());
-}
-
-#[test]
-fn rollback_switch_runs_the_preserved_python_dispatcher_without_looping() {
-    let sandbox = Sandbox::new("rollback");
-    let checkout = sandbox.checkout("checkout");
-    // Rust installed at scripts/provenant; the Python source is preserved beside it.
-    let binary = sandbox.install_binary("checkout/scripts/provenant");
-    write_executable(
-        &checkout.join("scripts/provenant.py"),
-        "#!/usr/bin/env python3\nimport os, sys\nprint('python', *sys.argv[1:], os.environ['AGENTS_HOME'])\n",
-    );
-    let output = command(&binary, &sandbox.home())
-        .env("AGENT_FABRIC_PRODUCT_ROOT", &checkout)
-        .env("PROVENANT_FRONT_DOOR", "python")
-        .args(["help", "x"])
-        .output()
-        .unwrap();
-    assert_eq!(
-        stdout(&output),
-        format!("python help x {}\n", real(&checkout))
-    );
-}
-
-#[test]
-fn rollback_switch_refuses_to_loop_into_a_rust_dispatcher() {
-    let sandbox = Sandbox::new("rollback-loop");
-    let checkout = sandbox.checkout("checkout");
-    let binary = sandbox.install_binary("checkout/scripts/provenant");
-    let output = command(&binary, &sandbox.home())
-        .env("AGENT_FABRIC_PRODUCT_ROOT", &checkout)
-        .env("PROVENANT_FRONT_DOOR", "python")
-        .arg("help")
-        .output()
-        .unwrap();
-    assert_eq!(output.status.code(), Some(3));
-    assert!(stderr(&output).contains("no Python dispatcher at "));
 }
 
 #[test]

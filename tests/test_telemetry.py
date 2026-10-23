@@ -16,6 +16,8 @@ import pytest
 from tests.support.modules import load_script
 
 
+from tests.support.front_door import front_door_binary
+
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -50,12 +52,12 @@ def cli(tmp_path, *args, scripts_path=True):
         else:
             sys.modules['telemetry_cli_under_test'] = previous_module
         os.chdir(original_cwd)
-    return subprocess.CompletedProcess([str(ROOT / 'scripts/provenant'), *args], code,
+    return subprocess.CompletedProcess([str(front_door_binary()), *args], code,
                                         stdout.getvalue(), stderr.getvalue())
 
 
 def cli_process(tmp_path, *args):
-    return subprocess.run([str(ROOT / 'scripts/provenant'), *args],
+    return subprocess.run([str(front_door_binary()), *args],
                           env=environment(tmp_path), cwd=tmp_path,
                           capture_output=True, text=True)
 
@@ -1280,6 +1282,42 @@ def test_outcomes_group_route_quality_with_retries_errors_latency_and_throughput
     assert 'codex/gpt-6.1-sol@high' in table and '100%' in table
 
 
+def test_ingest_records_classifier_stage_confidence_and_shadow_answers(tmp_path):
+    receipt(tmp_path, 'classified', status='ok', task_class='review', classified_by='rules',
+            classifier_confidence=0.9, shadow_answers={'model': {'class': 'review', 'confidence': 0.7}},
+            requested_route={'alias': 'principal', 'task_class': 'review'})
+    assert cli(tmp_path, 'telemetry', 'ingest').returncode == 0
+    with sqlite3.connect(tmp_path / 'state/telemetry.sqlite3') as db:
+        row = db.execute('SELECT classified_by,classifier_confidence,shadow_answers FROM usage').fetchone()
+    assert row == ('rules', 0.9, '{"model": {"class": "review", "confidence": 0.7}}')
+
+
+def test_classifier_metadata_backfills_v4_receipts_once(tmp_path):
+    kept = receipt(tmp_path, 'kept', status='ok', classified_by='rules', classifier_confidence=0.9,
+                   shadow_answers={'model': None})
+    pruned = receipt(tmp_path, 'pruned', status='ok')
+    assert cli(tmp_path, 'telemetry', 'ingest').returncode == 0
+    pruned.unlink()
+    ledger = tmp_path / 'state/telemetry.sqlite3'
+    with sqlite3.connect(ledger) as db:
+        for column in ('classified_by', 'classifier_confidence', 'shadow_answers'):
+            db.execute(f'ALTER TABLE usage DROP COLUMN {column}')
+        db.execute("DELETE FROM meta WHERE key='classifier_metadata_backfill'")
+        db.execute('PRAGMA user_version = 4')
+    assert cli(tmp_path, 'telemetry', 'ingest').returncode == 0
+    with sqlite3.connect(ledger) as db:
+        assert db.execute('SELECT run_id, classified_by, classifier_confidence, shadow_answers '
+                          'FROM usage ORDER BY run_id').fetchall() == [
+            ('kept', 'rules', 0.9, '{"model": null}'), ('pruned', None, None, None)]
+        assert db.execute('PRAGMA user_version').fetchone() == (4,)
+        cursor = db.execute("SELECT * FROM cursors WHERE path=?", (str(kept),)).fetchone()
+        db.execute("UPDATE usage SET classified_by='sentinel' WHERE run_id='kept'")
+    assert cli(tmp_path, 'telemetry', 'ingest').returncode == 0
+    with sqlite3.connect(ledger) as db:
+        assert db.execute("SELECT classified_by FROM usage WHERE run_id='kept'").fetchone() == ('sentinel',)
+        assert db.execute("SELECT * FROM cursors WHERE path=?", (str(kept),)).fetchone() == cursor
+
+
 def test_outcomes_report_api_cost_per_success_and_unknown_costs(tmp_path):
     def usage(input_tokens=1_000_000, output_tokens=1_000_000):
         return {'input_tokens': input_tokens, 'cache_read_tokens': 0, 'cache_write_tokens': 0,
@@ -1383,7 +1421,7 @@ def test_ledger_rows_carry_the_configured_host_id_without_duplicates(tmp_path):
         # A rename never rewrites the ledger: earlier rows keep their id and read as this host.
         assert sorted(db.execute('SELECT host, COUNT(*) FROM usage GROUP BY host')) == [('runner-ci', 2), ('studio', 1)]
         assert db.execute('SELECT DISTINCT host FROM quota_events').fetchall() == [('runner-ci',)]
-    result = subprocess.run([str(ROOT / 'scripts/provenant'), 'peer'],
+    result = subprocess.run([str(front_door_binary()), 'peer'],
                             input=json.dumps({'protocol_version': 1, 'verb': 'telemetry.stats',
                                               'params': {'schema_version': 1}}),
                             env=environment(tmp_path), capture_output=True, text=True)
@@ -1419,7 +1457,7 @@ def test_peer_stats_are_versioned_aggregates_and_read_only(tmp_path):
         'host': __import__('socket').gethostname(), 'access_token': 'PRIVATE_TOKEN',
         'credits': {'reset_credits': 1, 'credential': 'PRIVATE_TOKEN', 'source': {'token': 'PRIVATE_TOKEN'}},
         'windows': [{'name': 'custom', 'used_percent': 20, 'credential': 'PRIVATE_TOKEN'}]})
-    result = subprocess.run([str(ROOT / 'scripts/provenant'), 'peer'],
+    result = subprocess.run([str(front_door_binary()), 'peer'],
                             input=json.dumps({'protocol_version': 1, 'verb': 'telemetry.stats',
                                               'params': {'schema_version': 1, 'since': '2026-10-21'}}),
                             env=environment(tmp_path), capture_output=True, text=True)
@@ -1472,7 +1510,7 @@ else:
     Path(str(shim) + '.json').write_text(json.dumps(summary))
     env = {**environment(tmp_path), 'AGENT_FABRIC_SSH_PROGRAM': str(shim),
            'AGENT_FABRIC_INSTANCE_ROOT': str(tmp_path / 'home/.agents')}
-    result = subprocess.run([str(ROOT / 'scripts/provenant'), 'stats', '--hosts', 'all', '--json'],
+    result = subprocess.run([str(front_door_binary()), 'stats', '--hosts', 'all', '--json'],
                             env=env, capture_output=True, text=True)
     assert result.returncode == 0, result.stdout + result.stderr
     report = json.loads(result.stdout)
@@ -1483,7 +1521,7 @@ else:
     assert statuses['offline']['status'] == 'partial' and statuses['offline']['reason'] == 'unreachable'
     assert statuses['old']['status'] == 'partial' and statuses['old']['reason'] == 'unknown_verb'
     # Repeated selectors must not count one (host, source, session) twice.
-    result = subprocess.run([str(ROOT / 'scripts/provenant'), 'stats', '--hosts', 'peer', 'peer', '--json'],
+    result = subprocess.run([str(front_door_binary()), 'stats', '--hosts', 'peer', 'peer', '--json'],
                             env=env, capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
     assert json.loads(result.stdout)['usage'][0]['input_tokens'] == 10
@@ -1546,7 +1584,7 @@ def test_unreadable_peer_ledger_returns_a_typed_error(tmp_path):
     state.mkdir()
     with sqlite3.connect(state / 'telemetry.sqlite3') as db:
         db.execute('PRAGMA user_version=4')
-    result = subprocess.run([str(ROOT / 'scripts/provenant'), 'peer'],
+    result = subprocess.run([str(front_door_binary()), 'peer'],
                             input=json.dumps({'protocol_version': 1, 'verb': 'telemetry.stats',
                                               'params': {'schema_version': 1}}),
                             env=environment(tmp_path), capture_output=True, text=True)
@@ -1672,7 +1710,7 @@ print(page.read_text())
 def cli_with(tmp_path, bin_dir, *args):
     env = environment(tmp_path)
     env['PATH'] = os.pathsep.join((str(bin_dir), env['PATH']))
-    return subprocess.run([str(ROOT / 'scripts/provenant'), *args], env=env, cwd=tmp_path,
+    return subprocess.run([str(front_door_binary()), *args], env=env, cwd=tmp_path,
                           capture_output=True, text=True)
 
 
@@ -2537,7 +2575,7 @@ def test_stats_hosts_all_with_no_peers_stays_local_and_never_reaches_ssh(tmp_pat
             write_json(config, setup)
         assert cli(tmp_path, 'telemetry', 'ingest').returncode == 0
         env = {**environment(tmp_path), 'AGENT_FABRIC_SSH_PROGRAM': str(shim)}
-        result = subprocess.run([str(ROOT / 'scripts/provenant'), 'telemetry', 'stats', '--hosts', 'all', '--json'],
+        result = subprocess.run([str(front_door_binary()), 'telemetry', 'stats', '--hosts', 'all', '--json'],
                                 env=env, capture_output=True, text=True)
         assert result.returncode == 0, result.stdout + result.stderr
         report = json.loads(result.stdout)
@@ -2574,7 +2612,7 @@ else:
 ''')
     shim.chmod(0o755)
     env = {**environment(tmp_path), 'AGENT_FABRIC_SSH_PROGRAM': str(shim)}
-    result = subprocess.run([str(ROOT / 'scripts/provenant'), 'telemetry', 'stats', '--hosts', 'all', '--json'],
+    result = subprocess.run([str(front_door_binary()), 'telemetry', 'stats', '--hosts', 'all', '--json'],
                             env=env, capture_output=True, text=True)
     assert result.returncode == 0, result.stdout + result.stderr
     report = json.loads(result.stdout)

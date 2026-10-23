@@ -6,6 +6,30 @@ the selected accounts on this host, using the same reader as MCP adapter status.
 `config/model-routing.json`; [the model dossier](../model-dossier.md) describes
 pool weights and model choices.
 
+## Task classification
+
+`task_classification` in the routing config controls the advisory classifier
+chain (`explicit`, `rules`, `model`, `default`), its shadow stages and fallback.
+Rules match mode, role, prompt terms, paths and size. The model stage uses the
+utility classifier with the task summary and configured class names and
+descriptions; it caches results by prompt hash under the agent state directory.
+Errors, timeouts and low confidence fall through. A call can set
+`--classify rules,default`, or use `PROVENANT_TASK_CLASSIFY`, to replace the
+chain. Class names, descriptions and class-to-tier choices live in
+`task_class_routes`.
+
+Class and size determine tier; role is a label. Missing role uses the worker
+label with a warning. Claude can opt into routing context and the soft roster
+warning with `configure-claude-hooks.py --settings <path> --routing-hook
+scripts/routing_context_hook.py`; the SessionStart hook also runs after
+compaction. The PreToolUse warning never denies a tool call.
+
+To compare classifiers, leave rules and model in `shadow`, then inspect the
+`classified_by`, `classifier_confidence` and `shadow_answers` columns in the
+local `usage` ledger after `provenant telemetry ingest`. Compare agreement and
+outcomes by class before changing the active chain. The report view is not yet
+updated to summarise these fields.
+
 ## Account and host scope
 
 Quota and cooldowns share one resolver in `scripts/provider_identity.py`:

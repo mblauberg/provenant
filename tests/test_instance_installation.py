@@ -829,6 +829,9 @@ def test_refresh_migrates_retired_tier_names_and_the_router_accepts_the_result(t
     seed(product, root)
     legacy = legacy_copy(shipped)
     legacy["families"]["openai"]["aliases"]["flagship"] = ["custom-astra"]
+    legacy["task_classification"]["role_defaults"].pop("junior")
+    legacy["task_classification"]["role_defaults"]["scout"] = "workhorse"
+    legacy["task_classification"]["role_defaults"]["reviewer"] = "workhorse"
     target = root / "config/model-routing.json"
     target.write_text(json.dumps(legacy))
     base = root / "config/.model-routing.base.json"
@@ -844,6 +847,8 @@ def test_refresh_migrates_retired_tier_names_and_the_router_accepts_the_result(t
     refreshed = json.loads(target.read_text())
     assert refreshed["families"]["openai"]["aliases"]["principal"] == ["custom-astra"], "the edit is kept"
     assert "flagship" not in json.dumps(refreshed) and "scout" not in json.dumps(refreshed)
+    assert refreshed["task_classification"]["role_defaults"]["junior"] == "senior"
+    assert refreshed["task_classification"]["role_defaults"]["reviewer"] == "senior"
     env = {**os.environ, "AGENT_FABRIC_PRODUCT_ROOT": str(ROOT), "AGENT_FABRIC_INSTANCE_ROOT": str(root),
            "AGENT_FABRIC_STATE_ROOT": str(tmp_path / "state")}
     routes = subprocess.run([sys.executable, str(ROOT / "scripts" / "model_route.py"), "routes", "--json"],

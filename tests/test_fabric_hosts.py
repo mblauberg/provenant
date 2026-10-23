@@ -15,6 +15,8 @@ from unittest.mock import patch
 
 from tests.support.git import git
 
+from tests.support.front_door import front_door_binary
+
 ROOT = Path(__file__).resolve().parents[1]
 REPOSITORY_ROOT = ROOT.parent.parent
 
@@ -236,12 +238,12 @@ class PeerContracts(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             environment = {**os.environ, 'HOME': directory,
                            'AGENT_FABRIC_INSTANCE_ROOT': directory, **env}
-            return subprocess.run([str(ROOT / 'scripts/provenant'), 'peer'],
+            return subprocess.run([str(front_door_binary()), 'peer'],
                                   input=request, capture_output=True, env=environment)
 
     def test_peer_doctor_starts_with_a_nonlogin_system_path(self):
         with tempfile.TemporaryDirectory() as directory:
-            result = subprocess.run([str(ROOT / 'scripts/provenant'), 'peer'],
+            result = subprocess.run([str(front_door_binary()), 'peer'],
                 input=json.dumps({'protocol_version':1,'verb':'doctor','params':{'project_path':'Repos/project'}}),
                 capture_output=True, text=True, env={**os.environ,'HOME':directory,
                     'AGENT_FABRIC_INSTANCE_ROOT':directory, 'PATH':'/usr/bin:/bin'})
@@ -322,12 +324,12 @@ class DoctorContracts(unittest.TestCase):
             environment = {**os.environ, 'PATH': str(root), 'PROVENANT_NO_OS_CONFINEMENT': '0'}
             try:
                 with patch.dict(os.environ, environment, clear=True), patch.object(provider_exec.sys, 'platform', 'darwin'), patch.object(subprocess, 'run', side_effect=run):
-                    provider_exec._sandbox_exec_usable.cache_clear()
+                    provider_exec.provider_confinement._sandbox_exec_usable.cache_clear()
                     value = hosts.adapter_doctor('kiro', root)
                     self.assertEqual(value['confinement']['status'], 'unknown')
                     self.assertEqual(hosts.signin_status('claude', str(root / 'claude'))['status'], 'unknown')
             finally:
-                provider_exec._sandbox_exec_usable.cache_clear()
+                provider_exec.provider_confinement._sandbox_exec_usable.cache_clear()
 
     def test_peer_doctor_reports_host_local_checks_and_bounds_project_paths(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -348,7 +350,7 @@ class DoctorContracts(unittest.TestCase):
             for key in ['CODEX_HOME', 'CODEX_MCP_CONFIG', 'CLAUDE_CONFIG_DIR', 'CLAUDE_MCP_CONFIG']:
                 environment.pop(key, None)
             def peer(path):
-                return subprocess.run([str(ROOT / 'scripts/provenant'), 'peer'],
+                return subprocess.run([str(front_door_binary()), 'peer'],
                     input=json.dumps({'protocol_version':1,'verb':'doctor','params':{'project_path':path}}),
                     capture_output=True, text=True, env=environment)
             response = peer('Repos/project')
@@ -382,7 +384,7 @@ class DoctorContracts(unittest.TestCase):
                 (home / '.agents/.agent-fabric/hosts.json').write_text(json.dumps(config))
             (remote / '.local/bin').mkdir(parents=True)
             import shutil
-            shutil.copy2(ROOT / 'scripts/provenant.template', remote / '.local/bin/provenant')
+            shutil.copy2(front_door_binary(), remote / '.local/bin/provenant')
             (remote / '.agents/.agent-fabric/product-root.json').write_text(json.dumps({'schema_version':1,'product_root':str(ROOT)}))
             marker = root / 'injected'
             shim = root / 'ssh'
@@ -396,7 +398,7 @@ class DoctorContracts(unittest.TestCase):
                 'os.environ.pop("AGENT_FABRIC_PRODUCT_ROOT", None)\n' +
                 'os.execv(".local/bin/provenant",["provenant","peer"])\n')
             shim.chmod(0o755)
-            result = subprocess.run([str(ROOT / 'scripts/provenant'), 'hosts', 'doctor', '--json'],
+            result = subprocess.run([str(front_door_binary()), 'hosts', 'doctor', '--json'],
                 capture_output=True, text=True, cwd=local / 'Repos/project',
                 env={**{key: value for key, value in os.environ.items() if not key.startswith('GIT_')},
                      'HOME':str(local),'AGENT_FABRIC_INSTANCE_ROOT':str(local / '.agents'),
@@ -719,7 +721,7 @@ class ConfigContracts(unittest.TestCase):
             if config is not None:
                 (root / '.agent-fabric').mkdir()
                 (root / '.agent-fabric/hosts.json').write_text(json.dumps(config))
-            return subprocess.run([str(ROOT / 'scripts/provenant'), 'hosts', 'list', '--json'],
+            return subprocess.run([str(front_door_binary()), 'hosts', 'list', '--json'],
                                   capture_output=True, text=True,
                                   env={**os.environ, 'AGENT_FABRIC_INSTANCE_ROOT': directory})
 
@@ -729,7 +731,7 @@ class ConfigContracts(unittest.TestCase):
         self.assertEqual(json.loads(result.stdout)['hosts'], [{'host': default_host(), 'local': True}])
 
     def test_instance_root_must_be_absolute(self):
-        result = subprocess.run([str(ROOT / 'scripts/provenant'), 'hosts', 'list', '--json'],
+        result = subprocess.run([str(ROOT / 'scripts/fabric-hosts'), 'hosts', 'list', '--json'],
             capture_output=True, text=True, env={**os.environ, 'AGENT_FABRIC_INSTANCE_ROOT': '.'})
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual(json.loads(result.stdout)['error']['code'], 'invalid_config')
@@ -779,7 +781,7 @@ class HostDiagnosticsContracts(unittest.TestCase):
             for action in ('list', 'doctor'):
                 for json_output in (False, True):
                     with self.subTest(action=action, json=json_output):
-                        command = [str(ROOT / 'scripts/provenant'), 'hosts', action]
+                        command = [str(front_door_binary()), 'hosts', action]
                         if json_output:
                             command.append('--json')
                         result = subprocess.run(command, capture_output=True, text=True,
@@ -1070,7 +1072,7 @@ class LaneLoopbackContracts(unittest.TestCase):
             + 'os.environ["AGENT_FABRIC_INSTANCE_ROOT"]=' + repr(str(self.peer_home / '.agents')) + '\n'
             + 'os.environ["AGENT_FABRIC_STATE_DIRECTORY"]=' + repr(str(self.peer_home / 'state')) + '\n'
             + 'os.chdir(os.environ["HOME"])\n'
-            + 'os.execv(' + repr(str(ROOT / 'scripts/provenant')) + ',["provenant","peer"])\n')
+            + 'os.execv(' + repr(str(front_door_binary())) + ',["provenant","peer"])\n')
         self.ssh.chmod(0o755)
         self.env = {**os.environ, 'HOME': str(self.local_home),
             'HARNESS_PYTHON': sys.executable, 'TMPDIR': str(self.root),
@@ -1161,7 +1163,7 @@ class LaneLoopbackContracts(unittest.TestCase):
         return run_id
 
     def lanes(self, *selectors):
-        process = subprocess.run([str(ROOT / 'scripts/provenant'), 'lanes', '--json', *selectors],
+        process = subprocess.run([str(front_door_binary()), 'lanes', '--json', *selectors],
             cwd=self.workspace, env=self.env, capture_output=True, text=True, timeout=30)
         self.assertEqual(process.returncode, 0, process.stderr + process.stdout)
         return json.loads(process.stdout)
@@ -1182,7 +1184,7 @@ class LaneLoopbackContracts(unittest.TestCase):
         environment = {**self.env, 'HOME': str(self.peer_home),
             'AGENT_FABRIC_INSTANCE_ROOT': str(self.peer_home / '.agents'),
             'AGENT_FABRIC_STATE_DIRECTORY': str(self.peer_home / 'state')}
-        process = subprocess.run([str(ROOT / 'scripts/provenant'), 'peer'],
+        process = subprocess.run([str(front_door_binary()), 'peer'],
             input=json.dumps({'protocol_version': 1, 'verb': verb,
                 'params': {'project_path': 'Repos/project', 'input': request}}),
             cwd=self.peer_home, env=environment, capture_output=True, text=True, timeout=30)
@@ -1744,7 +1746,7 @@ class LaneLoopbackContracts(unittest.TestCase):
         self.assertEqual((local / 'code.txt').read_text(), 'uncommitted chair edit\n')
         replay = self.launch_writer(local, 'writer-once')
         self.assertEqual(replay['id'], launched['id'])
-        cli = subprocess.run([str(ROOT / 'scripts/provenant'), 'fabric', 'fetch', 'writer-once@workshop'],
+        cli = subprocess.run([str(front_door_binary()), 'fabric', 'fetch', 'writer-once@workshop'],
             cwd=self.workspace, env=self.env, capture_output=True, text=True, timeout=30)
         self.assertEqual(cli.returncode, 0, cli.stdout + cli.stderr)
         self.assertEqual(json.loads(cli.stdout)['verification']['head_revision'], head)
@@ -3291,7 +3293,7 @@ class LaneLoopbackContracts(unittest.TestCase):
             + 'os.environ["HOME"]=' + repr(str(self.peer_home)) + '\n'
             + 'os.environ["AGENT_FABRIC_INSTANCE_ROOT"]=' + repr(str(self.peer_home / '.agents')) + '\n'
             + 'os.environ["AGENT_FABRIC_STATE_DIRECTORY"]=' + repr(str(self.peer_home / 'state')) + '\n'
-            + 'result=subprocess.run([' + repr(str(ROOT / 'scripts/provenant'))
+            + 'result=subprocess.run([' + repr(str(front_door_binary()))
             + ',"peer"],input=raw,capture_output=True,cwd=os.environ["HOME"])\n'
             + 'sys.stdout.buffer.write(result.stdout);sys.stderr.buffer.write(result.stderr);sys.exit(result.returncode)\n')
         view = self.client('lanes')
@@ -3710,7 +3712,7 @@ class LaneLoopbackContracts(unittest.TestCase):
     def test_unreachable_wait_times_out_and_names_the_host(self):
         self.lanes()
         self.offline.touch()
-        result = subprocess.run([str(ROOT / 'scripts/provenant'), 'lanes', '--wait', '--all', '--timeout', '0', 'shared-task@workshop'],
+        result = subprocess.run([str(front_door_binary()), 'lanes', '--wait', '--all', '--timeout', '0', 'shared-task@workshop'],
             cwd=self.workspace, env=self.env, capture_output=True, text=True, timeout=30)
         self.assertEqual(result.returncode, 124, result.stdout + result.stderr)
         self.assertIn('unreachable hosts: workshop', result.stdout)
@@ -3735,7 +3737,7 @@ class SshdAcceptance(unittest.TestCase):
             (remote_home / 'Repos/project').mkdir(parents=True)
             (remote_home / '.agents/.agent-fabric/hosts.json').write_text(
                 json.dumps({'schema_version': 1, 'local_host': 'workshop'}))
-            shutil.copy2(ROOT / 'scripts/provenant.template', remote_home / '.local/bin/provenant')
+            shutil.copy2(front_door_binary(), remote_home / '.local/bin/provenant')
             (remote_home / '.agents/.agent-fabric/product-root.json').write_text(
                 json.dumps({'schema_version': 1, 'product_root': str(ROOT)}))
 
@@ -3797,7 +3799,7 @@ class SshdAcceptance(unittest.TestCase):
                     except OSError:
                         pass
                     time.sleep(.05)
-                result = subprocess.run([str(ROOT / 'scripts/provenant'), 'hosts', 'doctor', '--json'],
+                result = subprocess.run([str(front_door_binary()), 'hosts', 'doctor', '--json'],
                                         cwd=workspace, capture_output=True, text=True, env=environment, timeout=20)
                 self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
                 rows = {row['host']: row for row in json.loads(result.stdout)['hosts']}

@@ -38,7 +38,7 @@ goes through the existing dispatch owner.
 New code is confined to `runtime/fabric/src/graph/` (schema, validation,
 scheduler, gate runner, receipts), additive tables in
 `runtime/fabric/schema.sql`, one `graph` command in `cli.ts`, one MCP tool, one
-delegate row in `scripts/provenant`, and a reservation check in
+delegate row in the Rust front door, and a reservation check in
 `dispatch_run.py`. No new adapter, daemon or Python owner.
 
 ## Graph document
@@ -404,7 +404,7 @@ Acceptance: two restarts then pass; exceeding the maximum enters the ladder.
 
 Example: `provenant graph run fanout "survey how each adapter retries" --set n=5`.
 
-`graph` is a plain delegate row in `scripts/provenant`, like `lanes`, so the
+`graph` is a plain delegate row in the Rust front door, like `lanes`, so the
 Rust front door ports it as one row.
 
 ### MCP
