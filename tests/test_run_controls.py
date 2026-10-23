@@ -386,13 +386,11 @@ def test_cancel_waits_through_late_summary_bundle_completion(
         sidecar.write_bytes(sidecar_bytes)
         published.set()
 
-    original_sleep = time.sleep
-
     def release_publisher_during_wait(seconds: float) -> None:
         publish_now.set()
         assert published.wait(timeout=5)
-        original_sleep(0)
 
+    monkeypatch.setattr(module.time, "monotonic", lambda: 0.0)
     monkeypatch.setattr(module.time, "sleep", release_publisher_during_wait)
 
     publisher = threading.Thread(target=publish_sidecar)
