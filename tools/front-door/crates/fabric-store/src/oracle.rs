@@ -8,9 +8,9 @@ use std::{
     time::{Duration, Instant},
 };
 
-fn unavailable(reason: impl std::fmt::Display) -> Option<Value> {
+fn unavailable(reason: impl std::fmt::Display, required: bool) -> Option<Value> {
     assert!(
-        std::env::var("PROVENANT_PORT_DIFF_REQUIRED").as_deref() != Ok("1"),
+        !required,
         "required Node differential unavailable: {reason}"
     );
     eprintln!("skip: {reason}");
@@ -54,16 +54,20 @@ fn bounded(command: &mut Command, directory: &Path) -> std::io::Result<(bool, St
 }
 pub(super) fn node(scenario: &str) -> Option<Value> {
     let interpreter = std::env::var_os("PROVENANT_PORT_NODE").unwrap_or_else(|| "node".into());
+    let required = std::env::var("PROVENANT_PORT_DIFF_REQUIRED").as_deref() == Ok("1");
+    node_with(scenario, &interpreter, required)
+}
+fn node_with(scenario: &str, interpreter: &std::ffi::OsStr, required: bool) -> Option<Value> {
     let directory = tempfile::tempdir().unwrap();
-    let mut probe = Command::new(&interpreter);
+    let mut probe = Command::new(interpreter);
     probe
         .env_clear()
         .env("PATH", std::env::var_os("PATH").unwrap_or_default())
         .arg("--version");
     let version = match bounded(&mut probe, directory.path()) {
         Ok((true, text, _)) => text,
-        Ok(_) => return unavailable("Node version probe failed"),
-        Err(e) => return unavailable(e),
+        Ok(_) => return unavailable("Node version probe failed", required),
+        Err(e) => return unavailable(e, required),
     };
     if version
         .trim()
@@ -73,7 +77,7 @@ pub(super) fn node(scenario: &str) -> Option<Value> {
         .and_then(|v| v.parse::<u64>().ok())
         .is_none_or(|v| v < 24)
     {
-        return unavailable("Node >=24 is required");
+        return unavailable("Node >=24 is required", required);
     }
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../../..")
@@ -81,10 +85,9 @@ pub(super) fn node(scenario: &str) -> Option<Value> {
         .unwrap();
     let source = root.join("runtime/fabric/src/store.ts");
     let loader = root.join("node_modules/tsx/dist/loader.mjs");
-    assert!(
-        loader.exists(),
-        "oracle requires the checkout's installed tsx dependency"
-    );
+    if !loader.exists() {
+        return unavailable("oracle requires the checkout's installed tsx dependency", required);
+    }
     let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/oracle.mjs");
     let mut command = Command::new(interpreter);
     command
@@ -97,10 +100,20 @@ pub(super) fn node(scenario: &str) -> Option<Value> {
         .arg(source)
         .arg(directory.path().join("source.sqlite3"))
         .arg(scenario);
-    let (ok, stdout, stderr) = bounded(&mut command, directory.path()).unwrap();
+    let (ok, stdout, stderr) = match bounded(&mut command, directory.path()) {
+        Ok(output) => output,
+        Err(error) => return unavailable(error, required),
+    };
     assert!(ok, "Node oracle failed: {stderr}");
     Some(
         serde_json::from_str(&stdout)
             .unwrap_or_else(|e| panic!("oracle JSON: {e}\n{stdout}\n{stderr}")),
     )
+}
+
+#[test]
+fn missing_node_skips_optional_but_fails_required_mode() {
+    let missing = Path::new("/no-such-fabric-oracle/node").as_os_str();
+    assert!(node_with("leases", missing, false).is_none());
+    assert!(std::panic::catch_unwind(|| node_with("leases", missing, true)).is_err());
 }
