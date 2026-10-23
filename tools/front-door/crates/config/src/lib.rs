@@ -5,6 +5,7 @@ pub mod codex;
 pub mod command;
 
 pub mod front_door;
+pub mod manifest;
 pub mod instance;
 mod pending;
 pub mod workflows;
