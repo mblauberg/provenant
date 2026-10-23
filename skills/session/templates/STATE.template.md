@@ -1,31 +1,26 @@
+# Session checkpoint
+
+> Optional Markdown prompt for a concise host-session checkpoint. The headings
+> are guidance, not a required schema. Keep the complete file within 32 KiB.
+
 ## Goal and authority
 
-<Goal. Authority source and limits.>
+<Current goal, source of authority, limits, expiry, and links to owner directions.>
 
-Chair session: <host session id>
+## Verified progress
 
-## Stage and blockers
-
-<Current stage; blockers or none.>
-
-## Active lanes
-
-| id | route | worktree | issue | state | since |
-| --- | --- | --- | --- | --- | --- |
-| <id> | <adapter/model@effort> | <path> | <issue> | <state> | <time> |
-
-## Queue
-
-<Queued work or none.>
-
-## Last checkpoint
-
-<What changed and when.>
+<Completed work with evidence paths or exact artifact identifiers. Mark claims
+that still need verification.>
 
 ## Next actions
 
-- <One concrete next action.>
+<Ordered, concrete actions that remain in scope.>
 
-## Links
+## Blockers and user gates
 
-<Relevant paths, runs, or issues.>
+<Questions, unavailable work, owners, and the decision needed to proceed.>
+
+## Resume trigger
+
+<What event or instruction should resume the work, and which run or task to
+reconcile first.>

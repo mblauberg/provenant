@@ -159,7 +159,8 @@ HTTP/browser server, generated UI bundle or UI-specific MCP tool.
 ## Rust owner and core model
 
 Keep `tools/front-door/crates/workflow`, with `#![forbid(unsafe_code)]`.
-Allowed dependencies remain core, records, config and confinement. External
+Allowed dependencies are core, records, config, confinement and supervisor's
+safe filesystem API (the lane E chair decision; no process API). External
 crates remain serde, serde_json, thiserror, regex and sha2. No SQLite, process
 runner, scheduler, MCP tool or new external dependency belongs to workflow.
 
@@ -378,6 +379,31 @@ for host field names and omission/error behaviour. Cut the idle-pause validator 
 autopilot guidance reads lanes/tasks directly and run owns pause/admission.
 Config retires the tracker hook in the final install while preserving unrelated
 and user-owned config.
+
+Lane E makes the following small choices where the design left policy open:
+`HostSessionId` is a workflow newtype, since core's `SessionId` accepts only
+32 lowercase hex digits. Host IDs accept 1 to 128 ASCII letters, digits,
+periods, underscores and hyphens, starting alphanumeric, with no `..`. This
+also makes the injected command safe to copy without shell interpolation.
+Freshness uses the opened checkpoint file's modification time and a
+caller-supplied `DurationMicros` maximum age against core's injected `Clock`.
+A future timestamp is stale; stale content is withheld. The edge selects the
+age policy, rather than workflow inventing a hidden timeout. Save replaces
+the complete Markdown and preserves its bytes, including line endings.
+
+A checkpoint can exceed the 8 KiB hook output cap. SessionStart emits an
+explicit excerpt marker and a keyed `workflow session show` remedy when the
+JSON-encoded output would exceed that cap. The cap includes escaping and LF.
+PreCompact returns a typed save-needed status and an advisory `systemMessage`;
+Claude discards that field, so CLI may also print the bounded diagnostic to
+stderr. Neither event emits a blocking decision. The lane E implementation
+exceeds the 150-line session estimate to include native hook decoding, bounded
+rendering and descriptor-relative directory creation while confinement is empty.
+It adds no filesystem or clock emulation trait. The final cancellation check
+before `atomic_write` is the local publication boundary; once it passes, finish
+the bounded staging/replacement/sync operation without observing later token
+changes.
+
 
 ## State reset and useful reuse
 

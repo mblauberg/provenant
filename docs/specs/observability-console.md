@@ -62,9 +62,10 @@ sessions.
   request through normal review and still waits for the Slice 5 measurement
   trigger.
 - The telemetry ledger (R4) stays the single writer of usage rows.
-- The `session` skill's `STATE.md` and its `SessionStart:compact` hook
-  (`skills/session/scripts/compact_reinject.py`) stay as they are. This spec
-  reads what the hook injected and adds no state-file convention.
+- The `session` skill saves bounded Markdown under the explicit project and
+  host-session key. SessionStart injects only that checkpoint, or a missing or
+  stale status; this spec adds no state-file convention. Managed hook
+  registration changes occur at the final Rust install.
 
 ## Architecture
 

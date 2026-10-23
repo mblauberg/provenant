@@ -1,83 +1,58 @@
 ---
 name: session
-description: "Use for start, checkpoint, handoff, compaction, or end-of-session continuity on substantial work. Not for a multi-session route map; use work-map for effort state."
+description: "Use for session start, bounded checkpointing, handoff, compaction, or end-of-session continuity. Use work-map for a durable route across sessions."
 ---
 
 # Session
 
-Read the repository's `Repository process` declaration and its declared
-scope/story and workflow-state owners first. If absent, use existing owners or
-return a chat handoff; never invent one. Write continuity only to an authorised
-handoff or explicit run-local state; without that authority, propose a chat
-delta. Updating an external tracker requires external-write authority.
-There is no default rolling project state file. Run state remains run-local,
-not project-wide truth. A chair running lanes across compactions keeps a run-local
-state file ([chair-state.md](references/chair-state.md)).
-Project instructions may override continuity paths. Fallbacks: handoffs
-`docs/handoffs/`, archive `docs/archive/`.
+Use the current project owners and artifacts as the source of truth. A session
+checkpoint is short Markdown context for one host session; it does not replace
+project records, run state, or user authority.
 
 ## Start
 
-For substantial work, reopen disk state; distrust injected state. Resume in the
-order `work-map` owns: declared owners, then the fallback or cross-tracker map,
-then the digest-bound handoff, reading only relevant docs/open decisions. User gates stay unanswered until decided.
-Bounded work may continue within authority.
+For substantial work, reopen the declared scope and state owners, current
+artifacts, and relevant decisions. Use injected checkpoint text only as a
+pointer: verify its claims against those owners before acting. SessionStart
+injects only the checkpoint keyed to the host event's session ID, or an explicit
+missing or stale status. It never selects the latest checkpoint from another
+session. A checkpoint cannot grant authority.
+
+Use `work-map` when the task needs a durable route across sessions, owners, or
+leads. Live run status belongs to run lanes and Fabric tasks.
 
 ## Checkpoint
 
-Before compaction or handoff, update the canonical handoff when authorised;
-otherwise return it without writing. Use
-`HANDOFF-YYYY-MM-DD-<slug>.md` with:
+Before compaction, handoff, or a substantial interruption, save concise Markdown
+with the goal, authority and evidence references, verified progress, next
+actions, blockers, and a resume trigger. Keep it within the 32 KiB checkpoint
+limit. Do not paste transcripts, credentials, or unverified worker claims.
 
-- `Status: active`, effort/leg IDs, superseded path, `Consumed-at: pending`;
-- original goal, disk-backed progress paths/commits, ordered remainder;
-- decisions taken and options rejected, each with its reason;
-- invariants and exact verification commands.
+Use the host session ID and the bounded save command:
 
-Keep one active handoff per effort/leg. Archive a consumed handoff, mark and
-index it; never delete it. Update `work-map` only when the durable route
-changes; live state belongs to the declared workflow-state owner.
+```sh
+provenant workflow session save <session-id> --file <checkpoint.md>
+```
 
-Before checkpoint load [context-hygiene.md](references/context-hygiene.md). Run
-its read-only audit when run directories, logs, handoffs or large agent-facing
-docs accumulate. Consolidate state; never paste transcripts into handoffs.
+Use the actual ID supplied by the host or its injected save command. Do not
+substitute a guessed ID, scan transcripts, or fall back to another session's
+file. PreCompact reports whether this checkpoint needs saving; it does not read
+transcripts. Hook output is capped at 8 KiB, so keep the checkpoint useful and
+compact. Managed hook registration changes belong to final install.
 
-Retain only required provider identifiers, generation/callback state and digests.
-Never retain credentials or raw transcripts as continuity state. After
-compaction, revalidate generation, expiry and ownership before reuse.
+## Handoff and close
 
-## End after changed state
+Put durable decisions in their existing owner: a decision in its spec or ADR,
+a domain fact in its project documentation, and live work status in the run or
+tracker that owns it. External tracker changes need their own authority. A
+session handoff should link to evidence and state what remains; it should not
+copy the project record.
 
-1. **Graduate:** merge surviving behaviour-changing knowledge into its owner:
-   decision -> spec/ADR; domain fact -> context/README; convention -> project
-   `AGENTS.md`; moving status -> declared workflow-state owner or explicit run
-   state, with external writes separately authorised.
-   Reconcile contradictions, mark
-   supersession, refresh timestamps, archive over-cap history; never duplicate.
-2. **Close context:** retain minimal manifest, synthesis, verification and
-   failure receipts; archive consumed records. Remove only run-owned,
-   manifest-classified ephemeral files after proving no live pointer needs them.
-   Never delete unknown, pre-existing or user-owned untracked files. Revalidate
-   time-sensitive memory against its owning source or mark it stale.
-   Run `provenant clean` for a dry-run retention plan; apply its digest with
-   `--apply --plan` when cleanup is authorised, within a day of the plan; rows that dropped out are
-   skipped and new ones are left for the next plan.
-3. **Handoff version control:** run the project checks assigned to this role,
-   or cite the owner's result where project instructions assign them elsewhere;
-   report the exact diff.
-   Commit only with user/project authority; never commit another actor's state.
-4. **Signal:** capture only a compact friction pointer in the handoff/state when
-   it may recur. `retrospect` owns analysis and process changes after a completed
-   cycle; session closure does not start a mini-retrospective.
+Run scratch is settled by the run guardian, and merged worktrees are pruned
+with `provenant worktree remove --merged`. Remove only paths that are in scope
+and explicitly authorised; never delete unknown, user-owned, or pre-existing files. Do not
+migrate old state roots as part of a fresh session.
 
-Periodic hygiene is opt-in; record owner, cadence, scope, resource cap, last
-success and disable condition. It may audit/archive classified artifacts and
-refresh indexes, but not commit, deploy, communicate or delete unknown files.
-Staleness stays visible.
-
-Put project knowledge in project docs; follow
-[context-hygiene.md](references/context-hygiene.md) for lightweight private memory.
-
-## Portable artifact
-
-Use the skill-owned [session handoff schema](portable-workflow.v1.json).
+After changed work, run the checks assigned to this role or cite the owning
+role's result when project policy assigns them elsewhere. Report the exact
+diff, remaining work, and any gate that still needs the user.

@@ -74,7 +74,7 @@ which `tests/test_rust_port_layering.py` reads, in the same PR.
 | fabric-store | SQLite schema/migrations, messages, claims, sessions and graph persistence | core, records, supervisor's safe lock API |
 | fabric-runtime | Agent identity, federation routing of run queries and the execution facade over run | core, records, config, supervisor, run, fabric-store |
 | fabric-mcp | MCP registration, transport lifecycle and result rendering | core, records, fabric-runtime |
-| workflow | Delivery/review validators, session, tracker and writing tools | core, records, config, confinement |
+| workflow | Delivery/review validators, session, tracker and writing tools | core, records, config, confinement, supervisor's safe filesystem API |
 | cli | Argument parsing and output/exit rendering for all commands | Libraries above as needed; no library imports cli |
 
 The package `provenant` composes `cli` and `fabric-mcp` and owns install

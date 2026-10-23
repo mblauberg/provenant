@@ -1,121 +1,32 @@
-# Chair state file
+# Chair continuity
 
-A chair that runs lanes across compactions and wakes keeps one run-local state
-file. It is the recovery anchor after compaction, not project truth: tracked
-owners (issues, board, specs, ADRs) still win.
+The run owns live execution state. Use `provenant lanes` to inspect active work,
+Fabric tasks to follow assignments and results, and the run's `output` command
+to read returned artifacts. After interruption, use `provenant reconcile` to
+recover queued or orphaned work and `provenant resume` to continue the run.
+Do not keep a parallel queue, lease ledger, or per-chair live status file.
 
-## Run layout
-
-One `.agent-run/` per Git common directory, shared by its linked worktrees,
-unless project instructions name another root. Its top level holds only these
-four entries; add no others:
-
-| Path | Owner | Holds | Retention |
-|---|---|---|---|
-| `runs/<run-id>/` | Fabric | Receipts, results and logs; read them through Fabric, not by path | Per [Fabric v2](../../../docs/specs/fabric-v2.md#layout-and-retention) |
-| `sessions/<session-id>/` | One chair | `STATE.md`, assumption ledger, lane briefs, scripts the session resumes with, and evidence the chair collects | Triage-only |
-| `locks/` | Project | Lock files and small lock-guarded shared state, nothing else | Kept |
-| `scratch/` | Anyone | Disposable chair-side temp and probes | One day |
-
-A lane's temp is its attempt's `tmp/`, already its `TMPDIR`; lane evidence goes
-in its attempt or run directory. Never point `TMPDIR` at `locks/`. Fabric grants
-every write-confined lane write access to `locks/` and to no other top-level
-entry.
-
-Each chair keeps exactly one `STATE.md`; no `NOW.md`, `PICKUP.md` or parallel
-status files. A host scratchpad or temporary directory is for disposable probes
-only: anything a later wake or successor needs lives under the session
-directory. Retention and cleanup go through `provenant clean`, never manual
-deletion.
-
-## Shape
-
-Keep `STATE.md` untracked, at or under 6 KB, starting from
-[the template](../templates/STATE.template.md), with these level-2 sections:
-
-- **Goal and authority:** the goal in one or two lines; the authority source,
-  its limits and expiry; links to the owner directions in force; the line
-  `Chair session: <host session id>` so checks can tell chairs apart.
-- **Stage and blockers:** current stage; each blocker with its owner.
-- **Active lanes:** a table `id | route | worktree | issue | state | since`,
-  one row per live lane or native subagent. Remove a row when its work lands or
-  is abandoned. `worktree` names the directory a writer lane owns, per
-  `setup-repo`'s branch naming doctrine (the branch with `/` replaced by `-`);
-  `id` is this table's own lane label, not that branch name.
-- **Queue:** a pointer to the frontier (board query, queue file), not a copy.
-- **Last checkpoint:** time, base revision and what changed since the previous
-  checkpoint.
-- **Next actions:** one to three concrete actions.
-- **Links:** run directories, assumption ledger, briefs, open pull requests.
-
-Rewrite the file in place; do not append history. Anything durable graduates to
-its owner (see **End after changed state** in the skill). When the file
-approaches the cap, move detail into linked files rather than trimming live
-lanes.
-
-## Checkpoint
-
-Rewrite the state file at the end of every wake, before any manual compaction,
-and before a handoff. It supplements the canonical handoff rather than
-replacing it: a handoff is still written when the session ends or passes the
-work to another owner. Then check it:
+A host-session checkpoint is separate, bounded Markdown saved for its explicit
+session key. Include only context that helps the same session resume: goal,
+authority and evidence references, verified progress, next actions, blockers,
+and a resume trigger. The storage location is selected by the validated project
+and host-session IDs; do not construct paths or search for another session's
+latest file.
 
 ```sh
-python3 "<installed-session-skill>/scripts/state_check.py" .agent-run/sessions/<session-id>/STATE.md
+provenant workflow session save <session-id> --file <checkpoint.md>
 ```
 
-It is the single state validator; project checkpoint scripts call it rather
-than re-implementing it. It reports size, missing sections, the top-level
-next-action count and staleness (over 30 minutes), exiting non-zero on a
-problem. Several chairs can share one project, so without a path it checks
-only a state file this session identifies: the `PROVENANT_SESSION_STATE`
-environment variable, or, in hook mode, a recent state file whose directory is
-the host session id or whose `Chair session:` line names it. Otherwise it
-prints nothing.
+SessionStart injects that key's checkpoint and save command, or an explicit
+missing or stale status. PreCompact reports whether the checkpoint needs a
+save. Hook output is limited to 8 KiB; checkpoint content is limited to 32 KiB.
+Neither hook reads transcripts, and injected text remains subject to owner and
+authority checks.
 
-## Compaction
+For compaction instructions, retain the current goal, authority limits,
+evidence pointers, blockers, next actions, and resume trigger. Drop tool output,
+resolved discussion, and file contents that can be reopened. Save before
+compacting when the PreCompact status says it is needed.
 
-After compaction, re-read the state file and reconcile it against live
-evidence before dispatching anything.
-
-Where the host accepts compaction instructions (Claude Code reads a
-`Compact instructions` section from project instructions and accepts text after
-`/compact`), keep them short:
-
-```markdown
-## Compact instructions
-
-Keep: the state file path, active lane ids with routes and worktrees, owner
-directions in force, open decisions and the next actions. Drop tool output,
-file contents, diffs, images and resolved threads; they are on disk.
-```
-
-Claude Code runs the check before every compaction once the hooks are
-installed, and installing them is part of setting up a Claude Code chair;
-hosts without such a hook run the check at each checkpoint instead. The command
-adds two entries to `~/.claude/settings.json` (or the settings file given),
-keeps everything else and is idempotent: a `PreCompact` check, and a
-`SessionStart` entry with matcher `compact` running `compact_reinject.py`. Both
-always exit 0, so neither blocks compaction or the session:
-
-```sh
-python3 "<installed-session-skill>/scripts/state_check.py" --install-hook
-```
-
-`--hook-config` prints the same fragment for manual merging.
-
-After compaction `compact_reinject.py` reads the hook's `transcript_path`
-backwards for the last `STATE.md` this session wrote (Write, Edit, MultiEdit,
-or a Bash command that writes it; relative paths resolve against the command's
-`cd` targets, then the transcript line's cwd and its parents). Reads never
-count. It prints that file, capped at 8 KB, under a one-line header naming its
-absolute path, and prints nothing when the session wrote none. It finds the
-chair's file from any working directory and with several sessions on one
-machine.
-
-Because the file is re-injected whole, a short `Standing directions` section
-(owner directions in force) keeps them bound across compaction. It is
-recommended, not a required heading.
-
-Hosts without a pre-compaction hook run the check as part of the checkpoint
-above.
+Managed hook registration is handled by final install. Do not hand-edit
+installed hooks or harness settings during ordinary session work.
