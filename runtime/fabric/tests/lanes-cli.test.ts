@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { createRequire } from "node:module";
 import { afterAll, expect, it } from "vitest";
@@ -60,6 +60,22 @@ it("shows retained silence observations in lanes and their digest", async () => 
   const { digest, lanesDigest } = await import("../src/surface.js");
   expect(digest(json.runs[0])).toContain("watchdog: silent 301s; alive");
   expect(lanesDigest(json)).toContain("watchdog: silent 301s; alive");
+});
+
+it.each(["file", "parent"])("ignores a watchdog path with a linked %s", (kind) => {
+  const repo = join(root, `repo-watchdog-link-${kind}`);
+  mkdirSync(repo, { recursive: true });
+  spawnSync("git", ["init", "-q", repo]);
+  const dir = createAttempt(repo, "silent", "running", null, new Date().toISOString(), {
+    paths: { watchdog: `tasks/silent/attempt-001/${kind === "file" ? "watchdog.json" : "linked/watchdog.json"}` },
+  });
+  const target = join(dir, "target");
+  mkdirSync(target);
+  writeFileSync(join(target, "watchdog.json"), JSON.stringify({ schema: "fabric.watchdog.v1",
+    checked_at: new Date().toISOString(), process_alive: true, silent_seconds: 301 }));
+  symlinkSync(kind === "file" ? join(target, "watchdog.json") : target,
+    join(dir, kind === "file" ? "watchdog.json" : "linked"));
+  expect(JSON.parse(lanes(repo, "--json").out).runs[0].watchdog).toBeUndefined();
 });
 
 it("says which project an empty lane listing resolved to, and accepts --project", () => {

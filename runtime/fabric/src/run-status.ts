@@ -22,7 +22,15 @@ function readWatchdog(runDir: string, value: unknown): Record<string, unknown> |
   let path: string;
   try {
     const root = realpathSync.native(runDir);
-    path = realpathSync.native(resolve(root, value));
+    const candidate = resolve(root, value);
+    const local = relative(root, candidate);
+    if (isAbsolute(local) || local === ".." || local.startsWith(`..${sep}`)) return undefined;
+    let component = root;
+    for (const part of local.split(sep)) {
+      component = join(component, part);
+      if (lstatSync(component).isSymbolicLink()) return undefined;
+    }
+    path = realpathSync.native(candidate);
     const rel = relative(root, path);
     if (isAbsolute(rel) || rel === ".." || rel.startsWith(`..${sep}`)) return undefined;
     if (lstatSync(path).size > 64 * 1024) return undefined;
