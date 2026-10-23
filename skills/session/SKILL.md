@@ -80,5 +80,4 @@ Put project knowledge in project docs; follow
 
 ## Portable artifact
 
-Keep resumable progress and originating authority references in a Markdown
-checkpoint for the host session ID.
+Use the skill-owned [session handoff schema](portable-workflow.v1.json).

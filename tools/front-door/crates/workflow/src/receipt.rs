@@ -3,7 +3,7 @@ use crate::{review, risk};
 use provenant_core::{DeliveryId, Digest, ProjectId, UtcMicros};
 use provenant_records::workflow::*;
 use provenant_records::{CanonicalBytes, CanonicalV1, DecodeError, Limits, decode_v1};
-use std::{collections::BTreeSet, io::Read};
+use std::io::Read;
 
 pub const MAX_RECEIPT_BYTES: u64 = 64 * 1024;
 pub const MAX_REVIEW_REFS: usize = 256;
@@ -22,14 +22,12 @@ pub enum ReceiptError {
     Risk(#[from] risk::RiskError),
     #[error(transparent)]
     Review(#[from] review::ReviewError),
+    #[error(transparent)]
+    Record(#[from] RecordError),
     #[error("unsupported receipt schema version")]
     Version,
     #[error("receipt exceeds its byte or review-reference limit")]
     Limit,
-    #[error("receipt requires unique authors and review attempt references")]
-    Duplicate,
-    #[error("receipt has an invalid subject, revision, timestamp or decision")]
-    Malformed,
 }
 #[derive(Debug, Clone)]
 pub struct ReceiptInput {
@@ -49,19 +47,14 @@ pub fn new(
 ) -> Result<DeliveryReceipt, ReceiptError> {
     risk::validate(&input.risk, risk_policy, downgrade)?;
     review::validate_policy(review_policy)?;
-    let receipt = DeliveryReceipt {
-        schema_version: 1,
-        delivery_id: input.delivery_id,
-        project_id: input.project_id,
-        revision: 1,
-        subject: input.subject,
-        authors: input.authors,
-        risk: input.risk,
-        review_attempts: vec![],
-        decision: Decision::Pending,
-        created_at: now,
-        updated_at: now,
-    };
+    let receipt = DeliveryReceipt::new(
+        input.delivery_id,
+        input.project_id,
+        input.subject,
+        input.authors,
+        input.risk,
+        now,
+    )?;
     validate(&receipt)?;
     Ok(receipt)
 }
@@ -90,35 +83,16 @@ pub fn validate(receipt: &DeliveryReceipt) -> Result<(), ReceiptError> {
     canonical(receipt).map(|_| ())
 }
 fn validate_shape(receipt: &DeliveryReceipt) -> Result<(), ReceiptError> {
-    if receipt.schema_version != 1 {
+    if receipt.schema_version() != 1 {
         return Err(ReceiptError::Version);
     }
-    if receipt.review_attempts.len() > MAX_REVIEW_REFS {
+    if receipt.review_attempts().len() > MAX_REVIEW_REFS {
         return Err(ReceiptError::Limit);
     }
-    if receipt.authors.is_empty()
-        || receipt.revision == 0
-        || receipt.updated_at < receipt.created_at
-        || matches!(&receipt.subject, Subject::Pr { number: 0, .. })
-    {
-        return Err(ReceiptError::Malformed);
-    }
-    let authors: BTreeSet<_> = receipt.authors.iter().map(Author::actor_id).collect();
-    let reviews: BTreeSet<_> = receipt.review_attempts.iter().collect();
-    if authors.len() != receipt.authors.len() || reviews.len() != receipt.review_attempts.len() {
-        return Err(ReceiptError::Duplicate);
-    }
-    for author in &receipt.authors {
+    receipt.validate_shape()?;
+    for author in receipt.authors() {
         if let Author::Agent { route, .. } = author {
             review::validate_provenance(route)?;
-        }
-    }
-    match &receipt.decision {
-        Decision::Pending => {}
-        Decision::Accepted { at, reason, .. } | Decision::Abandoned { at, reason, .. } => {
-            if *at < receipt.created_at || *at > receipt.updated_at || reason.trim().is_empty() {
-                return Err(ReceiptError::Malformed);
-            }
         }
     }
     Ok(())
@@ -196,27 +170,56 @@ mod tests {
             );
         }
     }
-    #[test]
-    fn document_identity_binds_path_and_digest_without_blob_storage() {
-        let mut receipt = receipt();
-        receipt.subject = Subject::Document {
-            path: PathWire::from_relative(&RelativePath::parse("docs/result.md").unwrap()).unwrap(),
-            digest: Digest::from_bytes([9; 32]),
-        };
-        let previous = digest(&receipt).unwrap();
-        let mut changed = receipt.clone();
-        changed.subject = Subject::Document {
-            path: PathWire::from_relative(&RelativePath::parse("docs/result.md").unwrap()).unwrap(),
-            digest: Digest::from_bytes([8; 32]),
-        };
-        assert_ne!(previous, digest(&changed).unwrap());
-        assert_eq!(
-            read(canonical(&receipt).unwrap().as_bytes()).unwrap(),
-            receipt
-        );
+    fn changed(change: impl FnOnce(&mut serde_json::Value)) -> DeliveryReceipt {
+        let mut value = serde_json::to_value(receipt()).unwrap();
+        change(&mut value);
+        serde_json::from_value(value).unwrap()
     }
     #[test]
-    fn bounds_versions_unknown_fields_and_duplicate_keys_fail_closed() {
+    fn stored_risk_requires_approval_exactly_for_a_downgrade() {
+        for r in [
+            changed(|v| v["risk"]["derived"] = "terminal".into()),
+            changed(|v| {
+                v["risk"]["downgrade_approval"] = serde_json::to_value(approval_ref()).unwrap()
+            }),
+        ] {
+            assert!(validate(&r).is_err());
+            assert!(read(serde_json::to_vec(&r).unwrap().as_slice()).is_err());
+        }
+        let r = changed(|v| {
+            v["risk"]["derived"] = "terminal".into();
+            v["risk"]["downgrade_approval"] = serde_json::to_value(approval_ref()).unwrap();
+        });
+        assert!(validate(&r).is_ok());
+    }
+    fn approval_ref() -> ApprovalRef {
+        ApprovalRef {
+            actor_id: ActorId::from_bytes([8; 16]),
+            evidence: EvidenceRef {
+                path: PathWire::from_relative(&RelativePath::parse("approval.md").unwrap())
+                    .unwrap(),
+                digest: Digest::from_bytes([9; 32]),
+            },
+        }
+    }
+    #[test]
+    fn document_identity_binds_path_and_digest() {
+        let r = changed(|v| {
+            v["subject"] = serde_json::to_value(Subject::Document {
+                path: PathWire::from_relative(&RelativePath::parse("docs/result.md").unwrap())
+                    .unwrap(),
+                digest: Digest::from_bytes([9; 32]),
+            })
+            .unwrap()
+        });
+        assert_eq!(read(canonical(&r).unwrap().as_bytes()).unwrap(), r);
+        let mut value = serde_json::to_value(&r).unwrap();
+        value["subject"]["digest"] = serde_json::to_value(Digest::from_bytes([8; 32])).unwrap();
+        let other = serde_json::from_value(value).unwrap();
+        assert_ne!(digest(&r).unwrap(), digest(&other).unwrap());
+    }
+    #[test]
+    fn bounds_versions_unknown_tags_fields_and_duplicate_keys_fail_closed() {
         let bytes = canonical(&receipt()).unwrap();
         let text = std::str::from_utf8(bytes.as_bytes()).unwrap();
         for bad in [
@@ -225,6 +228,7 @@ mod tests {
             text.replacen('{', "{\"revision\":1,", 1),
             text.replace("\"created_at\":1234567", "\"created_at\":1.5"),
             text.replace("\"revision\":1", "\"revision\":18446744073709551616"),
+            text.replace("\"pending\"", "\"unknown\""),
         ] {
             assert!(read(bad.as_bytes()).is_err());
         }
@@ -232,62 +236,77 @@ mod tests {
             read(vec![b' '; MAX_RECEIPT_BYTES as usize + 1].as_slice()),
             Err(ReceiptError::Decode(DecodeError::TooLarge { .. }))
         ));
-        let mut r = receipt();
-        r.review_attempts = (0..256_u64)
-            .map(|i| {
-                let mut b = [0; 16];
-                b[..8].copy_from_slice(&i.to_be_bytes());
-                AttemptId::from_bytes(b)
-            })
-            .collect();
-        assert!(canonical(&r).is_ok());
-        r.review_attempts.push(AttemptId::from_bytes([255; 16]));
-        assert!(matches!(canonical(&r), Err(ReceiptError::Limit)));
+        let r = changed(|v| {
+            v["review_attempts"] = serde_json::to_value(
+                (0..257_u64)
+                    .map(|i| {
+                        let mut b = [0; 16];
+                        b[..8].copy_from_slice(&i.to_be_bytes());
+                        AttemptId::from_bytes(b)
+                    })
+                    .collect::<Vec<_>>(),
+            )
+            .unwrap()
+        });
+        assert!(matches!(validate(&r), Err(ReceiptError::Limit)));
     }
     #[test]
-    fn malformed_receipts_and_duplicate_identities_are_rejected() {
-        let mut r = receipt();
-        r.authors.push(r.authors[0].clone());
-        assert!(matches!(validate(&r), Err(ReceiptError::Duplicate)));
-        let mut r = receipt();
-        r.review_attempts = vec![AttemptId::from_bytes([1; 16]); 2];
-        assert!(matches!(validate(&r), Err(ReceiptError::Duplicate)));
-        let mut r = receipt();
-        r.updated_at = UtcMicros::from_micros(0).unwrap();
-        assert!(matches!(validate(&r), Err(ReceiptError::Malformed)));
-        let mut r = receipt();
-        r.revision = 0;
-        assert!(matches!(validate(&r), Err(ReceiptError::Malformed)));
-        let mut i = input();
-        i.authors.clear();
-        assert!(
-            new(
-                i,
-                time(),
-                &RiskPolicy::default(),
-                &ReviewPolicy::default(),
-                None
-            )
-            .is_err()
-        );
-        let mut i = input();
-        i.risk.derived = RiskTier::Terminal;
-        assert!(matches!(
-            new(
-                i,
-                time(),
-                &RiskPolicy::default(),
-                &ReviewPolicy::default(),
-                None
-            ),
-            Err(ReceiptError::Risk(risk::RiskError::Mismatch))
-        ));
-        let mut r = receipt();
-        r.decision = Decision::Abandoned {
-            actor_id: ActorId::from_bytes([1; 16]),
-            at: time(),
-            reason: "x".repeat(65536),
-        };
-        assert!(matches!(canonical(&r), Err(ReceiptError::Limit)));
+    fn malformed_receipts_and_decisions_are_rejected() {
+        for r in [
+            changed(|v| {
+                let author = v["authors"][0].clone();
+                v["authors"].as_array_mut().unwrap().push(author);
+            }),
+            changed(|v| {
+                v["review_attempts"] =
+                    serde_json::to_value(vec![AttemptId::from_bytes([1; 16]); 2]).unwrap()
+            }),
+            changed(|v| v["revision"] = 0.into()),
+            changed(|v| v["updated_at"] = 0.into()),
+            changed(|v| v["authors"] = serde_json::json!([])),
+        ] {
+            assert!(validate(&r).is_err());
+        }
+        for at in [1_234_566, 1_234_568] {
+            let r = changed(
+                |v| v["decision"] = serde_json::json!({"status":"accepted", "actor_id": ActorId::from_bytes([1;16]), "at": at, "reason":"done", "user_approval":null}),
+            );
+            assert!(validate(&r).is_err());
+        }
+    }
+    #[test]
+    fn attested_and_unknown_authors_are_stored_without_promoting_lineage() {
+        for route in [
+            RouteProvenance::Unknown {},
+            RouteProvenance::ChairAttested {
+                route: "codex/gpt-6.1-sol@high".into(),
+                tier: ModelTier::Principal,
+                declared_family: None,
+                evidence: approval_ref().evidence,
+            },
+        ] {
+            let r = changed(|v| {
+                v["authors"] = serde_json::to_value(vec![Author::Agent {
+                    actor_id: ActorId::from_bytes([1; 16]),
+                    route: route.clone(),
+                }])
+                .unwrap()
+            });
+            assert!(validate(&r).is_ok());
+            assert_eq!(read(canonical(&r).unwrap().as_bytes()).unwrap(), r);
+        }
+        let r = changed(|v| {
+            v["authors"] = serde_json::to_value(vec![Author::Agent {
+                actor_id: ActorId::from_bytes([1; 16]),
+                route: RouteProvenance::ChairAttested {
+                    route: " ".into(),
+                    tier: ModelTier::Principal,
+                    declared_family: None,
+                    evidence: approval_ref().evidence,
+                },
+            }])
+            .unwrap()
+        });
+        assert!(validate(&r).is_err());
     }
 }

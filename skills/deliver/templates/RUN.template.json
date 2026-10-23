@@ -1,0 +1,112 @@
+{
+  "schema_version": 1,
+  "contract": "delivery-run",
+  "run_id": "DEL-001",
+  "fabric_relationships": {
+    "mode": "independent",
+    "delivery_run_id": "DEL-001",
+    "project_session_id": "not_applicable",
+    "coordination_run_id": "not_applicable",
+    "workstream_id": "not_applicable",
+    "lead_agent_id": "not_applicable"
+  },
+  "profile": "research",
+  "risk_tier": "substantial",
+  "initial_risk_tier": "substantial",
+  "chair_family": "openai",
+  "writer_model": null,
+  "risk_assessment": {
+    "blast_radius": "multi-module",
+    "reversibility": "moderate",
+    "data_sensitivity": "internal",
+    "migration": "none",
+    "oracle_quality": "mixed",
+    "external_effects": "none",
+    "critical_surface": "none"
+  },
+  "risk_override": {"status": "not-required", "approved_by": "", "evidence": "", "reason": ""},
+  "high_stakes": false,
+  "intent": {
+    "artifact": ".agent-run/runs/20260923-1000-delivery-del-001-a1b2c3/intent.md",
+    "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "decision_owner": "human-maintainer",
+    "approval": {
+      "status": "pending",
+      "approver": "",
+      "evidence": ""
+    }
+  },
+  "authority": {
+    "schema_version": 2,
+    "approved_by": "",
+    "evidence": "",
+    "evidence_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "workspace_roots": ["."],
+    "expires_at": "2026-07-11T00:00:00Z",
+    "allowed_source_paths": ["."],
+    "allowed_artifact_paths": [".agent-run/runs/20260923-1000-delivery-del-001-a1b2c3"],
+    "denied_paths": [],
+    "prohibited_actions": ["external-publish", "deployment", "irreversible-action"],
+    "disclosure": "local-only",
+    "secrets_access": "none",
+    "secret_refs": [],
+    "deployment": false,
+    "deployment_targets": [],
+    "irreversible_actions": false,
+    "irreversible_action_ids": [],
+    "network": {"tool_egress": "none", "allowed_hosts": []},
+    "budget": {},
+    "delegations": []
+  },
+  "artifacts": [{
+    "id": "intent",
+    "path": ".agent-run/runs/20260923-1000-delivery-del-001-a1b2c3/intent.md",
+    "media_type": "text/markdown",
+    "artifact_type": "report",
+    "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "class": "canonical",
+    "owner": "human-maintainer",
+    "retention": "project-policy"
+  }],
+  "design": {
+    "status": "draft",
+    "artifact_id": "intent",
+    "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "approver": "",
+    "evidence": "",
+    "alternatives": ["retain-current-loop"],
+    "failure_analysis": "bounded",
+    "containment": "revert-receipt",
+    "one_way_doors": []
+  },
+  "evidence": [],
+  "measures": {"outcome": [], "trajectory": []},
+  "assurance": {
+    "stochastic_required": false,
+    "reason": "declare from the approved verification plan",
+    "evaluations": []
+  },
+  "reviews": [],
+  "security": {
+    "status": "not_applicable",
+    "reason": "research profile",
+    "policy_sha256": "sha256:5e676cd3aa31aea76402bce7bb1b3b8ed89d7d3c41bb9fc25cbb77d7fd87c1d0",
+    "changed_surfaces": [],
+    "artifact_surfaces": [],
+    "checks": [],
+    "agentic_risks": []
+  },
+  "high_stakes_controls": null,
+  "human_gates": {
+    "acceptance": {"status": "pending", "approver": "", "evidence": ""},
+    "release": {"status": "pending", "approver": "", "evidence": ""}
+  },
+  "observation": {"status": "planned", "window": {"kind": "event-count", "minimum": 1}, "signals": ["citation-audit"], "thresholds": {"citation-audit": {"direction": "gte", "limit": 1}}, "owner": "human-maintainer", "containment": "withdraw-artifact", "privacy": "aggregate-redacted", "close_condition": "citation audit passes", "started_at": "", "ended_at": "", "observed_events": 0, "evidence_ids": []},
+  "incident": null,
+  "retrospective": null,
+  "repair_cycles": 0,
+  "escaped_defect": false,
+  "human_corrections": [],
+  "checkpoint": {"generation": 0, "current_slice": "scope", "next_action": "complete scope and authority", "in_flight": [], "artifact_paths": ["RUN.json"]},
+  "degradation": null
+}

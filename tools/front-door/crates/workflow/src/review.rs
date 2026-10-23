@@ -7,11 +7,14 @@ pub enum ReviewError {
     Policy,
     #[error("review lens or route provenance is incomplete")]
     Incomplete,
+    #[error("review verdict contradicts its findings or output subject")]
+    Output,
     #[error("only observed provenance can carry verified model-family lineage")]
     UnverifiedFamily,
 }
 pub fn validate_policy(policy: &ReviewPolicy) -> Result<(), ReviewError> {
-    if policy.substantial < 1
+    if policy.routine != 0
+        || policy.substantial < 1
         || policy.crucial < 2
         || policy.terminal < policy.crucial
         || policy.crucial < policy.substantial
@@ -48,15 +51,30 @@ pub fn validate_provenance(route: &RouteProvenance) -> Result<(), ReviewError> {
                     .as_ref()
                     .is_some_and(|s| s.trim().is_empty())
         }
-        RouteProvenance::Unknown => false,
+        RouteProvenance::Unknown {} => false,
     };
     if incomplete {
         return Err(ReviewError::Incomplete);
     }
     Ok(())
 }
-pub fn fact(fact: ReviewFact, policy: &ReviewPolicy) -> Result<ReviewFact, ReviewError> {
+/// The composition edge reads output_subject from the retained review output.
+pub fn fact(
+    fact: ReviewFact,
+    output_subject: &Subject,
+    policy: &ReviewPolicy,
+) -> Result<ReviewFact, ReviewError> {
     validate_policy(policy)?;
+    if &fact.subject != output_subject
+        || match fact.verdict {
+            ReviewVerdict::Approve | ReviewVerdict::ApproveWithNits => {
+                !fact.blocking_findings.is_empty()
+            }
+            ReviewVerdict::RequestChanges => fact.blocking_findings.is_empty(),
+        }
+    {
+        return Err(ReviewError::Output);
+    }
     validate_provenance(&fact.eligibility.provenance)?;
     if fact.lens.trim().is_empty() {
         return Err(ReviewError::Incomplete);
@@ -106,20 +124,51 @@ mod tests {
             lens: "correctness".into(),
         }
     }
+    fn checked(review: ReviewFact, policy: &ReviewPolicy) -> Result<ReviewFact, ReviewError> {
+        super::fact(review.clone(), &review.subject, policy)
+    }
+    #[test]
+    fn output_subject_must_match_reviewed_subject() {
+        let review = fact();
+        let subject = Subject::Document {
+            path: review.output.path.clone(),
+            digest: Digest::from_bytes([9; 32]),
+        };
+        assert_eq!(
+            super::fact(review, &subject, &ReviewPolicy::default()),
+            Err(ReviewError::Output)
+        );
+    }
     #[test]
     fn attestation_never_becomes_verified_family_and_failures_remain_facts() {
         let policy = ReviewPolicy::default();
-        let review = super::fact(fact(), &policy).unwrap();
+        let review = checked(fact(), &policy).unwrap();
         assert_eq!(review.verdict, ReviewVerdict::RequestChanges);
         let mut invented = review.clone();
         invented.eligibility.verified_model_family = Some("declared".into());
         assert_eq!(
-            super::fact(invented, &policy),
+            checked(invented, &policy),
             Err(ReviewError::UnverifiedFamily)
         );
         let mut unknown = review;
-        unknown.eligibility.provenance = RouteProvenance::Unknown;
-        assert!(super::fact(unknown, &policy).is_ok());
+        unknown.eligibility.provenance = RouteProvenance::Unknown {};
+        assert!(checked(unknown, &policy).is_ok());
+    }
+    #[test]
+    fn verdict_must_agree_with_blocking_findings() {
+        let mut review = fact();
+        review.verdict = ReviewVerdict::Approve;
+        assert!(checked(review, &ReviewPolicy::default()).is_err());
+        let mut review = fact();
+        review.blocking_findings.clear();
+        assert!(checked(review, &ReviewPolicy::default()).is_err());
+        assert!(
+            validate_policy(&ReviewPolicy {
+                routine: 1,
+                ..ReviewPolicy::default()
+            })
+            .is_err()
+        );
     }
     #[test]
     fn weakened_policy_blank_lens_and_missing_route_are_refused() {
@@ -127,11 +176,11 @@ mod tests {
             substantial: 0,
             ..ReviewPolicy::default()
         };
-        assert_eq!(super::fact(fact(), &policy), Err(ReviewError::Policy));
+        assert_eq!(checked(fact(), &policy), Err(ReviewError::Policy));
         let mut review = fact();
         review.lens = " ".into();
         assert_eq!(
-            super::fact(review, &ReviewPolicy::default()),
+            checked(review, &ReviewPolicy::default()),
             Err(ReviewError::Incomplete)
         );
         let mut review = fact();
@@ -144,7 +193,7 @@ mod tests {
             evidence: review.output.clone(),
         };
         assert_eq!(
-            super::fact(review, &ReviewPolicy::default()),
+            checked(review, &ReviewPolicy::default()),
             Err(ReviewError::Incomplete)
         );
     }

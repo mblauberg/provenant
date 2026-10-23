@@ -35,4 +35,4 @@ branch needs unavailable owner authority. Return the resolved register to
 ## Project record
 
 Keep the scoped criteria, evidence and outcome in the existing project document
-or PR. A context stamp does not establish acceptance or authority.
+or PR.

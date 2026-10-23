@@ -163,10 +163,11 @@ stream of micro-approvals.
 ## Neutral delivery kernel
 
 `deliver` is the cross-domain lifecycle front door and `delivery-run` schema v1
-is its portable receipt. Scoped criteria belong in the PR or skill document.
-Evaluate and domain skills
-own repetition protocols, source-authority, privacy and qualified-review evidence;
-explicit user approval duties remain in force.
+is its portable receipt. It selects one profile from
+`config/delivery-profiles.json`: software, research, analysis, document or
+agent product. The high-stakes overlay adds source-authority, privacy,
+qualified-review and explicit user-action controls without multiplying the
+base profiles.
 
 `RUN.json` is a flat record, not a state machine. It holds what the run did:
 the approved intent and design, the authority envelope, the declared artifacts

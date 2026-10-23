@@ -1,0 +1,174 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://provenant.dev/schemas/delivery-profiles.schema.json",
+  "title": "Delivery Profiles",
+  "type": "object",
+  "properties": {
+    "schema_version": {
+      "const": 1,
+      "type": "integer"
+    },
+    "profiles": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "properties": {
+          "artifact_types": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "minItems": 1
+          },
+          "required_evidence": {
+            "type": "object",
+            "properties": {
+              "deterministic": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              },
+              "judgement": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              }
+            },
+            "required": [
+              "deterministic",
+              "judgement"
+            ],
+            "additionalProperties": true
+          },
+          "conditional_evidence": {
+            "type": "object",
+            "properties": {},
+            "required": [],
+            "additionalProperties": true
+          },
+          "required_measures": {
+            "type": "object",
+            "properties": {
+              "outcome": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              },
+              "trajectory": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              }
+            },
+            "required": [
+              "outcome",
+              "trajectory"
+            ],
+            "additionalProperties": true
+          },
+          "stochastic_policy": {
+            "type": "object",
+            "properties": {
+              "required": {
+                "type": "boolean"
+              },
+              "minimum_repetitions": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "minimum_sample_size": {
+                "type": "integer",
+                "minimum": 1
+              }
+            },
+            "required": [
+              "required",
+              "minimum_repetitions",
+              "minimum_sample_size"
+            ],
+            "additionalProperties": true
+          },
+          "security_surface_policy": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "boundary_checks": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "evidence_policy": {
+            "type": "object",
+            "properties": {
+              "retention": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              },
+              "redaction": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "required": [
+              "retention",
+              "redaction"
+            ],
+            "additionalProperties": true
+          },
+          "release_semantics": {
+            "type": "string",
+            "minLength": 1
+          },
+          "observation_examples": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        },
+        "required": [
+          "artifact_types",
+          "required_evidence",
+          "required_measures",
+          "stochastic_policy",
+          "security_surface_policy",
+          "boundary_checks",
+          "evidence_policy",
+          "release_semantics",
+          "observation_examples"
+        ],
+        "additionalProperties": true
+      }
+    },
+    "artifact_type_surfaces": {
+      "type": "object",
+      "properties": {},
+      "required": [],
+      "additionalProperties": true
+    }
+  },
+  "required": [
+    "schema_version",
+    "profiles",
+    "artifact_type_surfaces"
+  ],
+  "additionalProperties": true
+}

@@ -63,4 +63,47 @@ mod tests {
             Err(GateError::UnhashableStatus("list"))
         );
     }
+    #[test]
+    fn malformed_missing_and_unknown_gate_fields_match_python() {
+        let mut cases = vec![
+            json!({}),
+            json!({"human_gates":null}),
+            json!({"human_gates":[]}),
+            json!({"human_gates":{"release":true}}),
+        ];
+        for release in [
+            json!("approved"),
+            json!("pass"),
+            json!("Approved"),
+            Value::Null,
+            json!(true),
+            json!(4),
+        ] {
+            for observation in [
+                json!("pass"),
+                json!("not_applicable"),
+                json!("pending"),
+                json!([]),
+                Value::Null,
+                json!({}),
+                json!("approved"),
+            ] {
+                cases.push(json!({"human_gates":{"release":{"status":release}},"observation":{"status":observation}}));
+            }
+        }
+        let actual: Vec<_> = cases
+            .iter()
+            .map(|c| match run_closed(c) {
+                Ok(closed) => json!([
+                    gate_approved(c, &["human_gates", "release"]),
+                    release_approved(c),
+                    closed
+                ]),
+                Err(GateError::UnhashableStatus(kind)) => crate::test_support::unhashable(kind),
+            })
+            .collect();
+        if let Some(expected) = crate::test_support::oracle("run_gates", &json!(cases)) {
+            assert_eq!(json!(actual), expected);
+        }
+    }
 }

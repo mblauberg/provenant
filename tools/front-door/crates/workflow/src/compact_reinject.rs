@@ -87,8 +87,9 @@ pub fn render_text(path: &str, text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
     #[test]
-    fn reverse_lines_handles_chunks_and_empty_ends() {
+    fn reverse_lines_matches_python_across_chunks_and_empty_ends() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().canonicalize().unwrap().join("transcript.jsonl");
         for bytes in [
@@ -103,25 +104,43 @@ mod tests {
                 .unwrap()
                 .collect::<Result<Vec<_>, _>>()
                 .unwrap();
-            let mut expected: Vec<_> = if bytes.is_empty() {
-                vec![]
-            } else {
-                bytes
-                    .split(|&b| b == b'\n')
-                    .rev()
-                    .map(<[u8]>::to_vec)
-                    .collect()
-            };
-            if bytes.starts_with(b"\n") {
-                expected.pop();
+            if let Some(expected) =
+                crate::test_support::oracle("compact_reverse", &json!([{"path":path}]))
+            {
+                let actual: Vec<_> = actual
+                    .iter()
+                    .map(|line| {
+                        use sha2::{Digest, Sha256};
+                        let digest = format!(
+                            "sha256:{}",
+                            Sha256::digest(line)
+                                .iter()
+                                .map(|b| format!("{b:02x}"))
+                                .collect::<String>()
+                        );
+                        json!({"length":line.len(),"digest":digest})
+                    })
+                    .collect();
+                assert_eq!(json!(actual), expected[0]);
             }
-            assert_eq!(actual, expected);
         }
     }
     #[test]
-    fn state_truncation_counts_unicode_scalars() {
-        let output = render_text("STATE.md", &"é🦀".repeat(4001));
-        assert!(output.contains(&"é🦀".repeat(4000)));
-        assert!(output.ends_with("[... truncated; read the rest from STATE.md]"));
+    fn state_truncation_counts_unicode_scalars_and_replaces_invalid_utf8() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().canonicalize().unwrap().join(NAME);
+        for bytes in [
+            b"line\r\nsecond\rthird".to_vec(),
+            "é🦀".repeat(4001).into_bytes(),
+            vec![255, 255, 0xe2, 0x82],
+            vec![],
+        ] {
+            std::fs::write(&path, &bytes).unwrap();
+            if let Some(expected) =
+                crate::test_support::oracle("compact_render", &json!([{"path":path}]))
+            {
+                assert_eq!(json!(render(&path).unwrap()), expected[0]);
+            }
+        }
     }
 }

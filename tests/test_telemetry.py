@@ -285,6 +285,77 @@ def test_ingest_owner_ignores_cwd_module_shadowing(tmp_path):
         os.chdir(original_cwd)
 
 
+def test_otel_and_delivery_sources_ingest_safe_usage_and_structured_review_fields(tmp_path):
+    from datetime import UTC, datetime
+
+    stamp = datetime.now(UTC)
+    nanos = str(int(stamp.timestamp() * 1_000_000_000))
+    jsonl(tmp_path / 'state/otel/logs-current.ndjson', otlp_line('logs', {'resourceLogs': [{
+        'resource': {'attributes': []}, 'scopeLogs': [{'logRecords': [
+            {'timeUnixNano': nanos,
+             'attributes': otlp_attributes(**{'event.name': 'api_request', 'model': 'gpt-6-luna',
+                                               'input_tokens': 17, 'output_tokens': 4,
+                                               'mystery_count': 991, 'prompt_text': 'PRIVATE_PROMPT',
+                                               'tool_output': 'PRIVATE_TOOL'})},
+            {'timeUnixNano': nanos,
+             'attributes': otlp_attributes(**{'event.name': 'user_prompt', 'prompt_length': 23,
+                                               'prompt_text': 'PRIVATE_PROMPT'})},
+            {'timeUnixNano': nanos,
+             'attributes': otlp_attributes(**{'event.name': 'tool_decision', 'tool_name': 'Bash',
+                                               'decision': 'allow', 'tool_input': 'PRIVATE_TOOL'})},
+            {'timeUnixNano': nanos,
+             'attributes': otlp_attributes(**{'event.name': 'codex.user_prompt', 'prompt_length': 5,
+                                               'prompt': 'PRIVATE_PROMPT'})},
+            {'timeUnixNano': nanos,
+             'attributes': otlp_attributes(**{'event.name': 'codex.tool_decision', 'tool_name': 'shell',
+                                               'decision': 'approved', 'call_id': 'PRIVATE_CALL'})}]}]}]}))
+    metric_point = {'asDouble': 2.0, 'timeUnixNano': nanos,
+                    'attributes': otlp_attributes(session='s1', **{'user.email': 'private@example.test'})}
+    metric = {'name': 'claude_code.active_time.total',
+              'sum': {'aggregationTemporality': 1, 'dataPoints': [metric_point]}}
+    metric_body = {'resourceMetrics': [{'resource': {'attributes': []},
+                                        'scopeMetrics': [{'metrics': [metric]}]}]}
+    jsonl(tmp_path / 'state/otel/metrics-current.ndjson', otlp_line('metrics', metric_body))
+    run = tmp_path / '.agent-run/runs/delivery-fixture'
+    receipt_data = json.loads((ROOT / 'skills/deliver/templates/RUN.template.json').read_text())
+    receipt_data.update({
+        'run_id': 'delivery-fixture', 'risk_tier': 'substantial', 'chair_family': 'openai',
+        'writer_model': 'gpt-6-luna', 'reviews': [
+            {'id': 'review-a', 'role': 'targeted', 'status': 'pass', 'provider_family': 'anthropic',
+             'model': 'claude-sonnet', 'lenses': ['correctness']},
+            {'id': 'review-b', 'role': 'targeted', 'status': 'failed', 'provider_family': 'openai',
+             'model': 'gpt-review', 'lenses': ['privacy']}],
+    })
+    shape = load_script(ROOT / 'skills/deliver/scripts/delivery_run_shape.py', 'delivery_run_shape_test')
+    assert shape.shape_errors(receipt_data) == []
+    write_json(run / 'RUN.json', receipt_data)
+    result = cli(tmp_path, 'telemetry', 'ingest')
+    assert result.returncode == 0, result.stderr
+    report = json.loads(cli(tmp_path, 'stats', '--json').stdout)
+    delivery = next(row for row in report['deliveries'] if row['run_id'] == 'delivery-fixture')
+    assert delivery['writer_model'] == 'gpt-6-luna'
+    assert [row['verdict'] for row in delivery['review_verdicts']] == ['pass', 'failed']
+    with sqlite3.connect(tmp_path / 'state/telemetry.sqlite3') as db:
+        events = dict(db.execute("SELECT kind,attrs FROM events WHERE kind LIKE 'otel.%'"))
+        assert json.loads(events['otel.user_prompt'])['prompt_length'] == 23
+        assert json.loads(events['otel.tool_decision'])['tool_name'] == 'Bash'
+        assert json.loads(events['otel.tool_decision'])['decision'] == 'allow'
+        assert json.loads(events['otel.metric'])['name'] == 'claude_code.active_time.total'
+        attrs = events['otel.api_request']
+    assert 'PRIVATE_PROMPT' not in attrs and 'PRIVATE_TOOL' not in attrs
+    assert 'prompt_text' not in attrs and 'tool_output' not in attrs and 'mystery_count' not in attrs
+    assert 'prompt_text' not in events['otel.user_prompt'] and 'tool_input' not in events['otel.tool_decision']
+    assert json.loads(events['otel.codex.user_prompt']) == {'prompt_length': 5}
+    assert json.loads(events['otel.codex.tool_decision']) == {'tool_name': 'shell', 'decision': 'approved'}
+    assert 'user.email' not in events['otel.metric'] and 'private@example.test' not in events['otel.metric']
+    assert json.loads(attrs)['input_tokens'] == 17
+    retro = cli(tmp_path, 'retro', '--since', stamp.isoformat(), '--json')
+    assert retro.returncode == 0, retro.stderr
+    attention = json.loads(retro.stdout)['attention']
+    assert attention['user_prompts'] == 2
+    assert attention['tool_decisions'] == 2
+
+
 @pytest.mark.parametrize('version,message', [
     (3, 'telemetry: telemetry schema version 3 needs migration; run provenant telemetry ingest'),
     (9, 'telemetry: unsupported telemetry schema version: 9'),
@@ -2894,58 +2965,3 @@ def test_model_split_migration_rereads_only_surviving_receipts_once(tmp_path):
     with sqlite3.connect(ledger) as db:
         assert db.execute("SELECT requested_model FROM usage WHERE run_id='kept'").fetchone() == ('sentinel',)
         assert db.execute("SELECT * FROM cursors WHERE path=?", (str(kept),)).fetchone() == cursor
-
-
-def test_otel_sources_ingest_safe_usage_and_structured_fields(tmp_path):
-    from datetime import UTC, datetime
-
-    stamp = datetime.now(UTC)
-    nanos = str(int(stamp.timestamp() * 1_000_000_000))
-    jsonl(tmp_path / 'state/otel/logs-current.ndjson', otlp_line('logs', {'resourceLogs': [{
-        'resource': {'attributes': []}, 'scopeLogs': [{'logRecords': [
-            {'timeUnixNano': nanos,
-             'attributes': otlp_attributes(**{'event.name': 'api_request', 'model': 'gpt-6-luna',
-                                               'input_tokens': 17, 'output_tokens': 4,
-                                               'mystery_count': 991, 'prompt_text': 'PRIVATE_PROMPT',
-                                               'tool_output': 'PRIVATE_TOOL'})},
-            {'timeUnixNano': nanos,
-             'attributes': otlp_attributes(**{'event.name': 'user_prompt', 'prompt_length': 23,
-                                               'prompt_text': 'PRIVATE_PROMPT'})},
-            {'timeUnixNano': nanos,
-             'attributes': otlp_attributes(**{'event.name': 'tool_decision', 'tool_name': 'Bash',
-                                               'decision': 'allow', 'tool_input': 'PRIVATE_TOOL'})},
-            {'timeUnixNano': nanos,
-             'attributes': otlp_attributes(**{'event.name': 'codex.user_prompt', 'prompt_length': 5,
-                                               'prompt': 'PRIVATE_PROMPT'})},
-            {'timeUnixNano': nanos,
-             'attributes': otlp_attributes(**{'event.name': 'codex.tool_decision', 'tool_name': 'shell',
-                                               'decision': 'approved', 'call_id': 'PRIVATE_CALL'})}]}]}]}))
-    metric_point = {'asDouble': 2.0, 'timeUnixNano': nanos,
-                    'attributes': otlp_attributes(session='s1', **{'user.email': 'private@example.test'})}
-    metric = {'name': 'claude_code.active_time.total',
-              'sum': {'aggregationTemporality': 1, 'dataPoints': [metric_point]}}
-    metric_body = {'resourceMetrics': [{'resource': {'attributes': []},
-                                        'scopeMetrics': [{'metrics': [metric]}]}]}
-    jsonl(tmp_path / 'state/otel/metrics-current.ndjson', otlp_line('metrics', metric_body))
-    result = cli(tmp_path, 'telemetry', 'ingest')
-    assert result.returncode == 0, result.stderr
-    report = json.loads(cli(tmp_path, 'stats', '--json').stdout)
-    with sqlite3.connect(tmp_path / 'state/telemetry.sqlite3') as db:
-        events = dict(db.execute("SELECT kind,attrs FROM events WHERE kind LIKE 'otel.%'"))
-        assert json.loads(events['otel.user_prompt'])['prompt_length'] == 23
-        assert json.loads(events['otel.tool_decision'])['tool_name'] == 'Bash'
-        assert json.loads(events['otel.tool_decision'])['decision'] == 'allow'
-        assert json.loads(events['otel.metric'])['name'] == 'claude_code.active_time.total'
-        attrs = events['otel.api_request']
-    assert 'PRIVATE_PROMPT' not in attrs and 'PRIVATE_TOOL' not in attrs
-    assert 'prompt_text' not in attrs and 'tool_output' not in attrs and 'mystery_count' not in attrs
-    assert 'prompt_text' not in events['otel.user_prompt'] and 'tool_input' not in events['otel.tool_decision']
-    assert json.loads(events['otel.codex.user_prompt']) == {'prompt_length': 5}
-    assert json.loads(events['otel.codex.tool_decision']) == {'tool_name': 'shell', 'decision': 'approved'}
-    assert 'user.email' not in events['otel.metric'] and 'private@example.test' not in events['otel.metric']
-    assert json.loads(attrs)['input_tokens'] == 17
-    retro = cli(tmp_path, 'retro', '--since', stamp.isoformat(), '--json')
-    assert retro.returncode == 0, retro.stderr
-    attention = json.loads(retro.stdout)['attention']
-    assert attention['user_prompts'] == 2
-    assert attention['tool_decisions'] == 2

@@ -46,6 +46,7 @@ and the owning prose or constant still holds today's value until it is wired.
 | Quota pacing tolerance | `scripts/provider_quota.py` `PACE_TOLERANCE` | 4 points | Early pacing against bursts | `quota.pace_tolerance`, advisory |
 | Pool membership and weights | `config/model-routing.json` `routes.*` | per pool | Model cost against quality | not a knob: edit the catalogue or `~/.agents/config/model-routing.json` overlay |
 | Task-class model affinity | `~/.agents/config/model-preferences.json` | per user | Family and model choice | not a knob: already user configuration |
+| Stochastic repetitions | `config/delivery-profiles.json` `minimum_repetitions` | 2 or 3 | Evaluation confidence against runs | not a knob: evidence contract |
 | Review ladder minimums | `HARNESS.md`; `skills/_shared/review_ladder.py` | routine 0, substantial 1, crucial 2 (two families), terminal +adversarial | Safety | fixed |
 | Task-class routing and effort-shift minimums | `config/model-routing.json` `task_class_routes` | per class | Routing | configurable; `effort.shift` never steps below `minimum_effort` |
 | Repair validator ceiling | `REPAIR_BUDGETS` | 2 / 4 / 5 / 5 | Safety | fixed |
@@ -56,9 +57,6 @@ and the owning prose or constant still holds today's value until it is wired.
 On the shipped catalogue every task-class route already sits at its policy
 minimum effort, so `effort.shift: -1` saves nothing until a route is
 configured above its minimum. `+1` takes effect at once.
-
-Evaluation repetition protocols belong to evaluate. Scoped delivery criteria belong
-in the PR or skill document; there is no delivery-profile registry.
 
 ## Registry
 

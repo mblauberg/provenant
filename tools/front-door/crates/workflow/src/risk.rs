@@ -5,6 +5,8 @@ use provenant_records::workflow::*;
 pub enum RiskError {
     #[error("lowering derived risk requires originating user approval")]
     ApprovalRequired,
+    #[error(transparent)]
+    Record(#[from] RecordError),
     #[error("stored risk does not match the current factors and policy")]
     Mismatch,
 }
@@ -38,12 +40,7 @@ pub fn assess(
     } else {
         None
     };
-    Ok(RiskRecord {
-        factors,
-        derived,
-        tier,
-        downgrade_approval,
-    })
+    Ok(RiskRecord::new(factors, derived, tier, downgrade_approval)?)
 }
 /// Recompute under the current settings; decoded claims never supply authority.
 pub fn validate(
@@ -51,7 +48,7 @@ pub fn validate(
     policy: &RiskPolicy,
     approval: Option<&UserApproval>,
 ) -> Result<(), RiskError> {
-    if assess(record.factors.clone(), record.tier, policy, approval)? != *record {
+    if assess(record.factors().clone(), record.tier(), policy, approval)? != *record {
         return Err(RiskError::Mismatch);
     }
     Ok(())
@@ -121,7 +118,7 @@ mod approval_tests {
             },
         };
         let record = assess(factors, RiskTier::Substantial, &policy, Some(&approval)).unwrap();
-        assert_eq!(record.derived, RiskTier::Terminal);
+        assert_eq!(record.derived(), RiskTier::Terminal);
         assert!(validate(&record, &policy, Some(&approval)).is_ok());
         assert_eq!(
             validate(&record, &policy, None),
