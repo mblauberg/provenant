@@ -27,14 +27,13 @@ impl Mode {
 /// (such as `agy_sandbox`) are supplied by the caller.
 ///
 /// This is an inert builder API, not the persisted dispatch-plan schema.
-/// Unsigned timeout/context inputs intentionally remain a partial port; see
-/// RP-1303 in the divergence log before wiring a dynamic plan decoder.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+/// Numeric coercions occur at the adapter seam, retaining Python JSON types.
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Plan {
     pub mode: Mode,
     pub prompt: String,
     pub boundary_prompt: String,
-    pub timeout_seconds: u64,
+    pub timeout_seconds: serde_json::Value,
     pub agy_sandbox: bool,
     pub resume_session: Option<String>,
     pub model: Option<String>,
@@ -43,7 +42,9 @@ pub struct Plan {
     pub cwd: String,
     pub add_dirs: Vec<String>,
     pub endpoint_base_url: Option<serde_json::Value>,
-    pub context_ceiling: Option<u64>,
+    pub context_ceiling: Option<crate::ContextCeiling>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub codex: Option<codex::BuildInputs>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -71,6 +72,7 @@ pub struct AdapterProfile {
     pub effort_flag: Option<String>,
     pub session_keys: Vec<String>,
     pub model_source: Option<String>,
+    pub exit_after_output: bool,
 }
 
 /// Data that describes the stable transport and identity capabilities of an adapter.
@@ -86,134 +88,221 @@ pub struct Capabilities {
     pub effort_flag: Option<&'static str>,
     pub session_keys: &'static [&'static str],
     pub model_source: Option<&'static str>,
+    pub exit_after_output: bool,
+    pub empty_failure: &'static str,
 }
 
-pub const CAPABILITIES: &[Capabilities] = &[
-    Capabilities {
-        name: "agy",
-        cli: "agy",
-        prompt_transport: PromptTransport::Argv,
-        stdin: StdinMode::Null,
-        output_format: "stream-json",
-        effort_flag: Some("--effort"),
-        session_keys: &["session_id", "conversation_id", "conversationId"],
-        model_source: Some("agy:init.model|log"),
+#[derive(Debug, thiserror::Error)]
+pub enum BuildError {
+    #[error("unknown adapter: {0}")]
+    UnknownAdapter(String),
+    #[error(transparent)]
+    Integer(#[from] crate::IntegerError),
+    #[error("Codex requires a configuration decision, permissions and host facts")]
+    CodexContextRequired,
+    #[error(transparent)]
+    Codex(#[from] codex::AdapterError),
+}
+
+type Constructor = fn(&Plan, Option<&str>) -> Result<AdapterProfile, BuildError>;
+
+/// One row owns provider identity, all capabilities and its constructor.
+pub struct Registration {
+    pub capabilities: Capabilities,
+    constructor: Constructor,
+    continues_turn: fn(&serde_json::Value) -> Result<bool, opencode::OutputError>,
+    diagnostics: fn(&str) -> (String, String),
+}
+
+pub static REGISTRY: &[Registration] = &[
+    Registration {
+        capabilities: Capabilities {
+            name: "claude",
+            cli: "claude",
+            prompt_transport: PromptTransport::Stdin,
+            stdin: StdinMode::Prompt,
+            output_format: "stream-json",
+            effort_flag: Some("--effort"),
+            session_keys: &["session_id"],
+            model_source: Some("claude:init.model"),
+            exit_after_output: false,
+            empty_failure: "",
+        },
+        constructor: claude::claude,
+        continues_turn: default_continues,
+        diagnostics: default_diagnostics,
     },
-    Capabilities {
-        name: "claude",
-        cli: "claude",
-        prompt_transport: PromptTransport::Stdin,
-        stdin: StdinMode::Prompt,
-        output_format: "stream-json",
-        effort_flag: Some("--effort"),
-        session_keys: &["session_id"],
-        model_source: Some("claude:init.model"),
+    Registration {
+        capabilities: Capabilities {
+            name: "codex",
+            cli: "codex",
+            prompt_transport: PromptTransport::Stdin,
+            stdin: StdinMode::Prompt,
+            output_format: "jsonl",
+            effort_flag: Some("model_reasoning_effort"),
+            session_keys: &["thread_id"],
+            model_source: Some("codex:rollout.turn_context.model"),
+            exit_after_output: false,
+            empty_failure: "",
+        },
+        constructor: |plan, _| {
+            codex::codex(
+                plan,
+                plan.codex
+                    .as_ref()
+                    .ok_or(BuildError::CodexContextRequired)?,
+            )
+        },
+        continues_turn: default_continues,
+        diagnostics: default_diagnostics,
     },
-    Capabilities {
-        name: "kiro",
-        cli: "kiro-cli",
-        prompt_transport: PromptTransport::Argv,
-        stdin: StdinMode::Null,
-        output_format: "stream-json",
-        effort_flag: Some("--effort"),
-        session_keys: &[
-            "sessionId",
-            "session_id",
-            "conversation_id",
-            "conversationId",
-        ],
-        model_source: Some("kiro:stream"),
+    Registration {
+        capabilities: Capabilities {
+            name: "opencode",
+            cli: "opencode",
+            prompt_transport: PromptTransport::Argv,
+            stdin: StdinMode::Null,
+            output_format: "jsonl",
+            effort_flag: Some("#variant"),
+            session_keys: &["sessionID", "session_id"],
+            model_source: Some("opencode:session-export.info.model"),
+            exit_after_output: opencode::EXIT_AFTER_OUTPUT,
+            empty_failure: opencode::EMPTY_FAILURE,
+        },
+        constructor: |plan, _| opencode::opencode(plan),
+        continues_turn: opencode::continues_turn,
+        diagnostics: opencode::diagnostics,
     },
-    Capabilities {
-        name: "opencode",
-        cli: "opencode",
-        prompt_transport: PromptTransport::Argv,
-        stdin: StdinMode::Null,
-        output_format: "jsonl",
-        effort_flag: Some("#variant"),
-        session_keys: &["sessionID", "session_id"],
-        model_source: Some("opencode:session-export.info.model"),
+    Registration {
+        capabilities: Capabilities {
+            name: "cursor",
+            cli: "cursor-agent",
+            prompt_transport: PromptTransport::Argv,
+            stdin: StdinMode::Pipe,
+            output_format: "stream-json",
+            effort_flag: None,
+            session_keys: &["session_id", "sessionId"],
+            model_source: Some("cursor:init.model"),
+            exit_after_output: false,
+            empty_failure: "",
+        },
+        constructor: |plan, _| cursor::cursor(plan),
+        continues_turn: default_continues,
+        diagnostics: default_diagnostics,
     },
-    Capabilities {
-        name: "copilot",
-        cli: "copilot",
-        prompt_transport: PromptTransport::Argv,
-        stdin: StdinMode::Null,
-        output_format: "json",
-        effort_flag: Some("--effort"),
-        session_keys: &["session_id"],
-        model_source: None,
+    Registration {
+        capabilities: Capabilities {
+            name: "agy",
+            cli: "agy",
+            prompt_transport: PromptTransport::Argv,
+            stdin: StdinMode::Null,
+            output_format: "stream-json",
+            effort_flag: Some("--effort"),
+            session_keys: &["session_id", "conversation_id", "conversationId"],
+            model_source: Some("agy:init.model|log"),
+            exit_after_output: false,
+            empty_failure: "",
+        },
+        constructor: |plan, _| agy::agy(plan),
+        continues_turn: default_continues,
+        diagnostics: default_diagnostics,
     },
-    Capabilities {
-        name: "cursor",
-        cli: "cursor-agent",
-        prompt_transport: PromptTransport::Argv,
-        stdin: StdinMode::Pipe,
-        output_format: "stream-json",
-        effort_flag: None,
-        session_keys: &["session_id", "sessionId"],
-        model_source: Some("cursor:init.model"),
+    Registration {
+        capabilities: Capabilities {
+            name: "kiro",
+            cli: "kiro-cli",
+            prompt_transport: PromptTransport::Argv,
+            stdin: StdinMode::Null,
+            output_format: "stream-json",
+            effort_flag: Some("--effort"),
+            session_keys: &[
+                "sessionId",
+                "session_id",
+                "conversation_id",
+                "conversationId",
+            ],
+            model_source: Some("kiro:stream"),
+            exit_after_output: false,
+            empty_failure: "",
+        },
+        constructor: |plan, _| kiro::kiro(plan),
+        continues_turn: default_continues,
+        diagnostics: default_diagnostics,
+    },
+    Registration {
+        capabilities: Capabilities {
+            name: "copilot",
+            cli: "copilot",
+            prompt_transport: PromptTransport::Argv,
+            stdin: StdinMode::Null,
+            output_format: "json",
+            effort_flag: Some("--effort"),
+            session_keys: &["session_id"],
+            model_source: None,
+            exit_after_output: false,
+            empty_failure: "",
+        },
+        constructor: |plan, _| copilot::copilot(plan),
+        continues_turn: default_continues,
+        diagnostics: default_diagnostics,
     },
 ];
 
 pub fn capabilities(name: &str) -> Option<&'static Capabilities> {
-    CAPABILITIES.iter().find(|entry| entry.name == name)
+    REGISTRY
+        .iter()
+        .find(|r| r.capabilities.name == name)
+        .map(|r| &r.capabilities)
 }
 
-/// Common adapter seam consumed by planners that select a provider by name.
 pub trait Adapter: Sync {
-    fn name(&self) -> &'static str;
-    fn build(&self, plan: &Plan, api_key: Option<&str>) -> AdapterProfile;
+    fn capabilities(&self) -> &Capabilities;
+    fn build(&self, plan: &Plan, api_key: Option<&str>) -> Result<AdapterProfile, BuildError>;
+    fn continues_turn(&self, event: &serde_json::Value) -> Result<bool, opencode::OutputError> {
+        let _ = event;
+        Ok(false)
+    }
+    fn diagnostics(&self, stderr: &str) -> (String, String) {
+        (stderr.to_owned(), String::new())
+    }
 }
-
-pub(super) struct Metadata<'a> {
-    pub transport: PromptTransport,
-    pub stdin: StdinMode,
-    pub output: &'a str,
-    pub effort_flag: Option<&'a str>,
-    pub session_keys: &'a [&'a str],
-    pub model_source: Option<&'a str>,
-}
-
-pub(super) fn profile(cli: &str, argv: Vec<String>, metadata: Metadata<'_>) -> AdapterProfile {
-    let capabilities = capabilities_by_cli(cli);
-    let mut command = vec![cli.into()];
-    command.extend(argv);
-    let fallback = AdapterProfile {
-        cli: cli.into(),
-        argv: command,
-        prompt_transport: metadata.transport,
-        stdin: metadata.stdin,
-        output_format: metadata.output.into(),
-        effort_flag: metadata.effort_flag.map(str::to_owned),
-        session_keys: metadata
-            .session_keys
-            .iter()
-            .map(|key| (*key).into())
-            .collect(),
-        model_source: metadata.model_source.map(str::to_owned),
-    };
-    let Some(capabilities) = capabilities else {
-        return fallback;
-    };
-    AdapterProfile {
-        cli: capabilities.cli.to_owned(),
-        argv: fallback.argv,
-        prompt_transport: capabilities.prompt_transport,
-        stdin: capabilities.stdin,
-        output_format: capabilities.output_format.to_owned(),
-        effort_flag: capabilities.effort_flag.map(str::to_owned),
-        session_keys: capabilities
-            .session_keys
-            .iter()
-            .map(|key| (*key).to_owned())
-            .collect(),
-        model_source: capabilities.model_source.map(str::to_owned),
+impl Adapter for Registration {
+    fn capabilities(&self) -> &Capabilities {
+        &self.capabilities
+    }
+    fn build(&self, plan: &Plan, key: Option<&str>) -> Result<AdapterProfile, BuildError> {
+        (self.constructor)(plan, key)
+    }
+    fn continues_turn(&self, event: &serde_json::Value) -> Result<bool, opencode::OutputError> {
+        (self.continues_turn)(event)
+    }
+    fn diagnostics(&self, stderr: &str) -> (String, String) {
+        (self.diagnostics)(stderr)
     }
 }
 
-fn capabilities_by_cli(cli: &str) -> Option<&'static Capabilities> {
-    CAPABILITIES.iter().find(|entry| entry.cli == cli)
+pub(super) fn profile(name: &str, argv: Vec<String>) -> Result<AdapterProfile, BuildError> {
+    let c = capabilities(name).ok_or_else(|| BuildError::UnknownAdapter(name.into()))?;
+    let mut command = vec![c.cli.into()];
+    command.extend(argv);
+    Ok(AdapterProfile {
+        cli: c.cli.into(),
+        argv: command,
+        prompt_transport: c.prompt_transport,
+        stdin: c.stdin,
+        output_format: c.output_format.into(),
+        effort_flag: c.effort_flag.map(str::to_owned),
+        session_keys: c.session_keys.iter().map(|s| (*s).into()).collect(),
+        model_source: c.model_source.map(str::to_owned),
+        exit_after_output: c.exit_after_output,
+    })
+}
+
+fn default_continues(_: &serde_json::Value) -> Result<bool, opencode::OutputError> {
+    Ok(false)
+}
+fn default_diagnostics(s: &str) -> (String, String) {
+    (s.into(), String::new())
 }
 
 pub mod agy;
@@ -224,84 +313,16 @@ pub mod cursor;
 pub mod kiro;
 pub mod opencode;
 
-struct Agy;
-struct Claude;
-struct Copilot;
-struct Cursor;
-struct Kiro;
-struct OpenCode;
-
-impl Adapter for Agy {
-    fn name(&self) -> &'static str {
-        "agy"
-    }
-    fn build(&self, plan: &Plan, _: Option<&str>) -> AdapterProfile {
-        agy::agy(plan)
-    }
-}
-impl Adapter for Claude {
-    fn name(&self) -> &'static str {
-        "claude"
-    }
-    fn build(&self, plan: &Plan, api_key: Option<&str>) -> AdapterProfile {
-        claude::claude(plan, api_key)
-    }
-}
-impl Adapter for Copilot {
-    fn name(&self) -> &'static str {
-        "copilot"
-    }
-    fn build(&self, plan: &Plan, _: Option<&str>) -> AdapterProfile {
-        copilot::copilot(plan)
-    }
-}
-impl Adapter for Cursor {
-    fn name(&self) -> &'static str {
-        "cursor"
-    }
-    fn build(&self, plan: &Plan, _: Option<&str>) -> AdapterProfile {
-        cursor::cursor(plan)
-    }
-}
-impl Adapter for Kiro {
-    fn name(&self) -> &'static str {
-        "kiro"
-    }
-    fn build(&self, plan: &Plan, _: Option<&str>) -> AdapterProfile {
-        kiro::kiro(plan)
-    }
-}
-impl Adapter for OpenCode {
-    fn name(&self) -> &'static str {
-        "opencode"
-    }
-    fn build(&self, plan: &Plan, _: Option<&str>) -> AdapterProfile {
-        opencode::opencode(plan)
-    }
-}
-
-static AGY_ADAPTER: Agy = Agy;
-static CLAUDE_ADAPTER: Claude = Claude;
-static COPILOT_ADAPTER: Copilot = Copilot;
-static CURSOR_ADAPTER: Cursor = Cursor;
-static KIRO_ADAPTER: Kiro = Kiro;
-static OPENCODE_ADAPTER: OpenCode = OpenCode;
-
-pub static ADAPTERS: &[&dyn Adapter] = &[
-    &AGY_ADAPTER,
-    &CLAUDE_ADAPTER,
-    &COPILOT_ADAPTER,
-    &CURSOR_ADAPTER,
-    &KIRO_ADAPTER,
-    &OPENCODE_ADAPTER,
-];
-
 pub fn adapter(name: &str) -> Option<&'static dyn Adapter> {
-    ADAPTERS.iter().copied().find(|entry| entry.name() == name)
+    REGISTRY
+        .iter()
+        .find(|r| r.capabilities.name == name)
+        .map(|r| r as &dyn Adapter)
 }
-
-pub fn build(name: &str, plan: &Plan, api_key: Option<&str>) -> Option<AdapterProfile> {
-    adapter(name).map(|provider| provider.build(plan, api_key))
+pub fn build(name: &str, plan: &Plan, key: Option<&str>) -> Result<AdapterProfile, BuildError> {
+    adapter(name)
+        .ok_or_else(|| BuildError::UnknownAdapter(name.into()))?
+        .build(plan, key)
 }
 
 #[cfg(test)]
@@ -311,11 +332,21 @@ mod registry_tests {
 
     #[test]
     fn registry_and_capabilities_are_data_driven_and_consistent() {
+        assert_eq!(
+            REGISTRY
+                .iter()
+                .map(|r| r.capabilities.name)
+                .collect::<Vec<_>>(),
+            ["claude", "codex", "opencode", "cursor", "agy", "kiro", "copilot"]
+        );
         let plan = plan(Mode::ReadOnly);
-        assert_eq!(ADAPTERS.len(), CAPABILITIES.len());
-        for capabilities in CAPABILITIES {
+        for row in REGISTRY {
+            let capabilities = &row.capabilities;
+            if capabilities.name == "codex" {
+                continue;
+            }
             let provider = adapter(capabilities.name).expect("capability has adapter");
-            let profile = provider.build(&plan, None);
+            let profile = provider.build(&plan, None).unwrap();
             assert_eq!(profile.cli, capabilities.cli);
             assert_eq!(profile.prompt_transport, capabilities.prompt_transport);
             assert_eq!(profile.stdin, capabilities.stdin);
@@ -324,7 +355,10 @@ mod registry_tests {
             assert_eq!(profile.session_keys, capabilities.session_keys);
             assert_eq!(profile.model_source.as_deref(), capabilities.model_source);
         }
-        assert!(build("unknown", &plan, None).is_none());
+        assert!(matches!(
+            build("unknown", &plan, None),
+            Err(BuildError::UnknownAdapter(_))
+        ));
     }
 }
 
@@ -348,7 +382,8 @@ mod differential_tests {
                             mode,
                             prompt: "Compare the fixture exactly.".into(),
                             boundary_prompt: "Use file-reading tools only.".into(),
-                            timeout_seconds: 30,
+                            codex: None,
+                            timeout_seconds: serde_json::json!(30),
                             agy_sandbox: true,
                             resume_session: Some(
                                 if empty_options { "" } else { "session-fixture" }.into(),
@@ -359,7 +394,9 @@ mod differential_tests {
                             cwd: "/workspace/fixture".into(),
                             add_dirs: vec!["/shared/fixture".into()],
                             endpoint_base_url: endpoint,
-                            context_ceiling: Some(if empty_options { 0 } else { 12_000 }),
+                            context_ceiling: Some(
+                                serde_json::json!(if empty_options { 0 } else { 12_000 }).into(),
+                            ),
                         };
                         let mut input = serde_json::to_value(&plan).unwrap();
                         input["applied"] = serde_json::json!({"add_dirs": plan.add_dirs});
@@ -369,11 +406,11 @@ mod differential_tests {
                         };
                         fixtures.push(input);
                         actual.push([
-                            agy::agy(&plan).argv,
-                            claude::claude(&plan, api_key).argv,
-                            copilot::copilot(&plan).argv,
-                            cursor::cursor(&plan).argv,
-                            kiro::kiro(&plan).argv,
+                            agy::agy(&plan).unwrap().argv,
+                            claude::claude(&plan, api_key).unwrap().argv,
+                            copilot::copilot(&plan).unwrap().argv,
+                            cursor::cursor(&plan).unwrap().argv,
+                            kiro::kiro(&plan).unwrap().argv,
                         ]);
                     }
                 }

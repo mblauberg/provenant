@@ -1,9 +1,11 @@
 use super::*;
+use provenant_core::py::python_strip;
 use regex::Regex;
 use serde_json::{json, Value};
 use std::path::Path;
 
 pub const MIN_MAJOR: u64 = 2;
+pub const EXIT_AFTER_OUTPUT: bool = true;
 pub const UPGRADE_FIX: &str =
     "upgrade OpenCode to v2 (`opencode upgrade`); Fabric no longer drives v1";
 pub const EMPTY_FAILURE: &str = "provider exited {exit_code} without final assistant output";
@@ -44,13 +46,24 @@ pub fn version_error(text: Option<&str>) -> Option<String> {
         {
             continue;
         }
-        let major = found.get(1)?.as_str().parse::<u64>().ok()?;
-        if major < MIN_MAJOR {
+        let digits = found
+            .get(1)?
+            .as_str()
+            .chars()
+            .map(crate::pending::decimal_digit)
+            .collect::<Option<Vec<_>>>()?;
+        let significant = digits
+            .iter()
+            .skip_while(|&&d| d == 0)
+            .copied()
+            .collect::<Vec<_>>();
+        if significant.len() <= 1 && significant.first().copied().unwrap_or(0) < MIN_MAJOR as u8 {
             return Some(format!(
                 "OpenCode {} is unsupported; fix: {UPGRADE_FIX}",
                 span.as_str()
             ));
         }
+        return None;
     }
     None
 }
@@ -63,7 +76,7 @@ pub fn model_with_variant(model: Option<&str>, effort: Option<&str>) -> Option<S
     Some(format!("{model}#{}", effort?))
 }
 
-pub fn opencode(plan: &Plan) -> AdapterProfile {
+pub fn opencode(plan: &Plan) -> Result<AdapterProfile, BuildError> {
     let mut argv = vec![
         "run".into(),
         "--standalone".into(),
@@ -81,22 +94,14 @@ pub fn opencode(plan: &Plan) -> AdapterProfile {
     {
         argv.extend(["-s".into(), session.into()]);
     }
-    if let Some(model) = model_with_variant(plan.model.as_deref(), plan.effort.as_deref()) {
+    if let Some(model) = model_with_variant(
+        plan.model.as_deref().filter(|s| !s.is_empty()),
+        plan.effort.as_deref(),
+    ) {
         argv.extend(["--model".into(), model]);
     }
     argv.push(plan.prompt.clone());
-    profile(
-        "opencode",
-        argv,
-        Metadata {
-            transport: PromptTransport::Argv,
-            stdin: StdinMode::Null,
-            output: "jsonl",
-            effort_flag: Some("#variant"),
-            session_keys: &["sessionID", "session_id"],
-            model_source: Some("opencode:session-export.info.model"),
-        },
-    )
+    profile("opencode", argv)
 }
 
 const LOG_LEVEL: &str = r"(?:^|\s|\[)(?:level=)?(DEBUG|INFO|WARN|ERROR)\b";
@@ -110,19 +115,19 @@ pub fn diagnostics(stderr: &str) -> (String, String) {
     let mut warning = String::new();
     let mut error = String::new();
     let mut lines = Vec::new();
-    for line in python_splitlines(stderr) {
+    for line in crate::pending::python_splitlines(stderr, false) {
         let level = level_re
             .captures(line)
             .and_then(|capture| capture.get(1))
-            .map(|m| m.as_str());
-        if matches!(level, Some("INFO" | "DEBUG")) {
+            .map(|m| m.as_str().to_ascii_uppercase());
+        if matches!(level.as_deref(), Some("INFO" | "DEBUG")) {
             continue;
         }
         lines.push(line);
-        if warning.is_empty() && level == Some("WARN") {
+        if warning.is_empty() && level.as_deref() == Some("WARN") {
             warning = python_strip(line).to_owned();
         }
-        if error.is_empty() && level == Some("ERROR") {
+        if error.is_empty() && level.as_deref() == Some("ERROR") {
             error = python_strip(line).to_owned();
         }
     }
@@ -130,36 +135,6 @@ pub fn diagnostics(stderr: &str) -> (String, String) {
         lines.join("\n"),
         if error.is_empty() { warning } else { error },
     )
-}
-
-fn python_strip(value: &str) -> &str {
-    value.trim_matches(|ch: char| ch.is_whitespace() || ('\u{1c}'..='\u{1f}').contains(&ch))
-}
-
-fn python_splitlines(value: &str) -> Vec<&str> {
-    let mut lines = Vec::new();
-    let mut start = 0;
-    let mut chars = value.char_indices().peekable();
-    while let Some((index, ch)) = chars.next() {
-        let boundary = matches!(
-            ch,
-            '\n' | '\r' | '\u{0b}' | '\u{0c}' | '\u{1c}'
-                ..='\u{1e}' | '\u{85}' | '\u{2028}' | '\u{2029}'
-        );
-        if !boundary {
-            continue;
-        }
-        lines.push(&value[start..index]);
-        start = index + ch.len_utf8();
-        if ch == '\r' && chars.peek().is_some_and(|(_, next)| *next == '\n') {
-            let (lf, _) = chars.next().unwrap_or((start, '\n'));
-            start = lf + 1;
-        }
-    }
-    if start < value.len() {
-        lines.push(&value[start..]);
-    }
-    lines
 }
 
 pub fn text_event(text: impl Into<String>) -> Value {
@@ -238,7 +213,7 @@ fn python_json_string(value: &str) -> String {
     let encoded = serde_json::to_string(value).unwrap_or_else(|_| "\"\"".into());
     let mut result = String::with_capacity(encoded.len());
     for ch in encoded.chars() {
-        if ch.is_ascii() {
+        if ch.is_ascii() && ch != '\u{7f}' {
             result.push(ch);
         } else if u32::from(ch) <= 0xffff {
             result.push_str(&format!(r#"\u{:04x}"#, u32::from(ch)));
@@ -263,7 +238,7 @@ mod tests {
         plan.model = Some("provider/model".into());
         plan.effort = Some("high".into());
         plan.resume_session = Some("session-id".into());
-        let actual = opencode(&plan);
+        let actual = opencode(&plan).unwrap();
         assert_eq!(actual.cli, "opencode");
         assert_eq!(
             actual.argv,
@@ -338,11 +313,11 @@ mod tests {
                 {"type":"step_finish","part":{"reason":"stop"}}
             ],
             "malformed_events": [[], null, {"type":[]}, {"type":{}}],
-            "versions": [null,"v1.0.0","opencode 1.9.8","2.0.0","Version 12.2.1","x1.0.0"],
+            "versions": [null,"v1.0.0","opencode 1.9.8","2.0.0","Version 12.2.1","x1.0.0","opencode 2.0.0 (bun 1.1.3)","9999999999999999999999999.0.0 1.1.0","١.٢.٣","٢.٠.٠ 1.0.0"],
             "variants": [["provider/model","high"],["provider/model#old","high"],[null,"high"],["m",null],["","high"]],
-            "logs": "INFO startup\rWARN warning\u{2028}level=ERROR failed\u{001c}DEBUG hidden\nplain line",
-            "writer_config": {"mode":"worktree_write","prompt":"fixture","boundary_prompt":"","cwd":"/workspace","timeout_seconds":30,"agy_sandbox":false,"resume_session":null,"model":null,"effort":null,"session_id":"session","add_dirs":[],"endpoint_base_url":null,"context_ceiling":null,"applied":{},"network_requested":false},
-            "reader_config": {"mode":"read_only","prompt":"fixture","boundary_prompt":"","cwd":"/workspace","timeout_seconds":30,"agy_sandbox":false,"resume_session":null,"model":null,"effort":null,"session_id":"session","add_dirs":[],"endpoint_base_url":null,"context_ceiling":null,"applied":{"confinement":"sandbox-exec"}},
+            "logs": "info startup\rwarn warning\u{2028}level=ERROR failed\u{001c}DEBUG hidden\nplain line",
+            "writer_config": {"mode":"worktree_write","prompt":"fixture","boundary_prompt":"","cwd":"/workspace","timeout_seconds":30,"agy_sandbox":false,"resume_session":null,"model":"","effort":null,"session_id":"session","add_dirs":[],"endpoint_base_url":null,"context_ceiling":null,"applied":{},"network_requested":false},
+            "reader_config": {"mode":"read_only","prompt":"fixture","boundary_prompt":"","cwd":"/workspace","timeout_seconds":30,"agy_sandbox":false,"resume_session":null,"model":"","effort":null,"session_id":"session","add_dirs":[],"endpoint_base_url":null,"context_ceiling":null,"applied":{"confinement":"sandbox-exec"}},
             "network_requested": false
         });
         let plan: Plan = serde_json::from_value(input["writer_config"].clone()).unwrap();
@@ -356,6 +331,7 @@ mod tests {
             .unwrap();
         let reader_plan: Plan = serde_json::from_value(input["reader_config"].clone()).unwrap();
         let actual = json!({
+            "empty_argv": opencode(&plan).unwrap().argv,
             "continues": input["events"].as_array().unwrap().iter().map(|event| continues_turn(event).unwrap()).collect::<Vec<_>>(),
             "malformed": input["malformed_events"].as_array().unwrap().iter().map(|event| continues_turn(event).is_err()).collect::<Vec<_>>(),
             "versions": input["versions"].as_array().unwrap().iter().map(|v| version_error(v.as_str())).collect::<Vec<_>>(),
@@ -369,7 +345,7 @@ mod tests {
 for e in p['malformed_events']:
     try: m.continues_turn(e); malformed.append(False)
     except (AttributeError,TypeError): malformed.append(True)
-print(json.dumps({'continues':[m.continues_turn(x) for x in p['events']], 'malformed':malformed, 'versions':[m.version_error(x) for x in p['versions']], 'variants':[m.model_with_variant(*x) for x in p['variants']], 'diagnostics':m.diagnostics(p['logs']), 'environment':m.environment(plan), 'reader_environment':m.environment(p['reader_config'])}))"#,
+print(json.dumps({'empty_argv':m.argv(plan), 'continues':[m.continues_turn(x) for x in p['events']], 'malformed':malformed, 'versions':[m.version_error(x) for x in p['versions']], 'variants':[m.model_with_variant(*x) for x in p['variants']], 'diagnostics':m.diagnostics(p['logs']), 'environment':m.environment(plan), 'reader_environment':m.environment(p['reader_config'])}))"#,
             &input,
             None,
         ) else {

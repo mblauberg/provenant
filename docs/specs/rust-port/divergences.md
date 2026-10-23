@@ -1154,13 +1154,15 @@ The source revision above is unchanged; CLI rendering remains an edge task.
   - Set `AGENT_FABRIC_INSTANCE_ROOT=~mikey/instance` on a host where `mikey`
     exists. Python `Path.expanduser()` returns that account's absolute home
     path; Rust expands only `~` and `~/`, then refuses the relative value.
-- Evidence: source review at `scripts/instance_installation.py:191-203,737-743`
-  and candidate implementation at `instance.rs:57-67,134,188-194`. Existing
-  desired-state differential cases cover representable values but not these
-  two cases; a retained exact differential remains to be added.
-- Follow-up: expose an ordered JSON input representation and platform home
-  directory lookup before claiming this interface complete. No caller
-  cut-over is included in this lane.
+- Repair status (PR #1336): ordered byte validation and explicit named-home
+  inputs now have regressions. Direct serde decoding of `Product` and
+  `DesiredState` also rejects extra product keys; the closed product shape
+  preserves both absent and explicit-null `ref`. The validating byte and file
+  loaders retain Python's validation order.
+- Disposition remains partial/open: the records codec and non-UTF-8 path/output
+  domains are not complete. Remove the interface from `ported.txt` and PR
+  `Units:` until those boundaries and integration evidence are complete. No
+  caller cut-over is included in this lane.
 
 ## RP-FR2-001: Fabric policy ordered mappings and Python repr (open, library)
 
@@ -1605,6 +1607,7 @@ PORTING.md v4 R4 improvement; Python's unbounded integer domain is unchanged.
   Rust dropped `prune_merged` and `since_revision`; `PlanContext` now retains
   both source fields. This updates only the retained shape, not cleanup policy
   or process/deletion ownership.
+
 ### RP-1302 follow-up: Linux census iteration errors (fixed Rust bug)
 
 - Class: `bug`. Source/oracle: `7475ff01e437ec51c760b852516c21a5281cf9c6`;
@@ -1662,6 +1665,15 @@ PORTING.md v4 R4 improvement; Python's unbounded integer domain is unchanged.
   remain unchanged; no graph unit or full conformance claim is added. README
   maps the remaining pending run and UUID contracts explicitly.
 
+### RP-config-7 — Shared filesystem durability and executable cargo fallback
+
+Class: `improvement` (explicitly requested for config batch 3). Config uses the
+supervisor's safe `Directory::atomic_write` and `replace_link` APIs. These fsync
+the destination directory after publication in addition to the source scripts'
+file sync. An error at that point reports a visible publication whose durability
+is unconfirmed. The requested cargo lookup checks executability for the rustup
+fallback as well as PATH candidates; Python only tests the fallback's file type.
+No command is switched to this implementation.
 ### RP-WF2-006 repair evidence and claim correction
 
 Independent repair review found two further bugs, now fixed with raw-wire
@@ -1674,6 +1686,118 @@ interfaces are deliberately partial: observer.json restoration/replay,
 supervisor return codes 64 and 75, and the full dynamic observer record domain
 are not yet proved exact. Their IDs are removed from the completion ledger.
 
+### RP-config-8 — Config batch 3 compatibility evidence and remaining domains
+
+Class: `bug` (fixed ordering/newline defects) and `library` (open codec/host
+boundaries). Rulebook v4; author `codex/gpt-6.1-sol@high`; source/oracle
+`7021182d535f6c730c29713e77d5bca76893fd06`, Python 3.14.8. Fetched main
+`b527d675d15c50ee51701bb15db6439c95277918` leaves these Python sources unchanged.
+
+- Fixed Rust bugs: skill-marker discovery follows Python's directory glob
+  semantics (hidden/symlinked directories and a directory-valued SKILL.md);
+  first-invalid manifest entries and path-free pointers retain input order;
+  Codex check translates universal newlines and honors Python-only whitespace;
+  profile environments, assignments, nested description repr and preset/knob
+  traversal retain order. New differential fixtures assert these cases.
+- Adopted shared core Python/path helpers, records checked JSON and supervisor
+  safe atomic/link/exchange APIs. The local checked scanner, resolver,
+  publication functions and Unicode table are deleted. V4-approved oversized
+  integer refusal is now the shared typed `NumberOutOfRange` error.
+- RP-config-2/4/6 remain open for Python nonfinite/lone-surrogate JSON and
+  surrogateescaped Unix paths/entry names. The new manager's extra/legacy
+  link reports inherit this limitation, so those units stay partial. A
+  non-UTF-8 live symlink fixture was refused by the local filesystem; no
+  macOS/Linux filesystem-domain conformance is claimed. TOML/parser and
+  interpreter traceback wording also remain partial; no exception is approved.
+- The front-door host contract requires an X_OK observation for both cargo
+  search paths. Production `cargo_path` now uses
+  `provenant_supervisor::sys::is_executable`, the safe `access(X_OK)` wrapper
+  on merged main. `ExecutableAccess` remains an injectable test seam; real-file
+  regressions cover executable and non-executable PATH and fallback files.
+  The front-door process execution adapter remains pending.
+- The R2 table has not yet granted config the requested supervisor safe OS
+  edge. The layering regression reports `config -> supervisor`. The chair
+  was notified; no rulebook/graph weakening or scope-external edit is made.
+
+Disposition: all assigned units, including the instance interface, remain
+partial and absent from `ported.txt` and PR `Units:`. No instance command owner
+or source is replaced. Exact-head CI, cross-family review, J1/J2 cutover coverage
+and publication conformance remain promotion gates.
+
+RP-config-8 follow-up: native review found that literal `.rs` files were absent
+from the digest because Rust's `Path::extension()` differs from Python's
+`rglob("*.rs")`. Matching basename suffix bytes repairs that bug; mutation and
+Python digest regressions cover both `src/.rs` and `tests/.rs`. The Codex partial
+also includes strict symlink-resolution diagnostic wording and invalid-UTF-8
+exception/traceback bytes. UTF-8 failures now preserve exit 1 and a typed encoding
+cause on every mode, but the synthesized final exception line does not reproduce
+Python's traceback. These are open diagnostic limitations, not approved changes.
+
+RP-config-8 integer-boundary correction: profile text integers now use the same
+v4-approved typed `NumberOutOfRange` refusal as record integers, including
+Unicode decimal input, instead of silently falling back to a string validation
+error. The shared records error is reused; no f64 conversion is involved.
+The profile command retains the source's knob-range diagnostic for these
+oversized values while carrying `NumberOutOfRange` as its typed cause; the
+failure-edge differential includes this case. No CLI diagnostic change is needed.
+Native repair review also found CPython's default 4,300-decimal-digit conversion
+limit (including leading zeros). The pending parser now applies that default,
+with a 5,000-zero Python differential. Non-default interpreter digit-limit
+overrides remain an explicit host/codec boundary of the partial profile unit.
+
+RP-config-8 PR #1336 repair: unreadable custom-skill directory scans now return
+an empty list as Python's glob does; a chmod 000 real-directory differential
+covers permission denial and skips root. Merged main
+`49a1cc3bceedcd0fb4c14183f6afff3ea01f6a84` was checked for public records
+helpers equivalent to `json_bytes`, `json_string`, `path_text`, `schema_one` and
+`hex`; none exists, so those owner-marked pending helpers remain. The records
+`digest_bytes` helper includes SHA-256 framing and is not raw hex formatting.
+
+### RP-PROVIDERS-3-OPENCODE: #1322 review repairs (fixed Rust bugs)
+
+- Class: `bug`. Rulebook v4; source/oracle baseline
+  `b527d675d15c50ee51701bb15db6439c95277918`;
+  author route `codex/gpt-6.1-sol@high`.
+- The first lookaround-valid version decides, even when >=2 or larger than
+  u64; Unicode decimal digits follow Python semantics. `opencode 2.0.0
+  (bun 1.1.3)` now returns None. Lowercase diagnostics compare levels after
+  uppercasing; empty models omit --model; EXIT_AFTER_OUTPUT is in the profile.
+- Registry rows now own metadata, constructor and optional output hooks once,
+  in source NAMES order. Differential fixtures pin each reported edge. No
+  intended Python behavior change.
+
+### RP-1302 / RP-1303 providers follow-up (fixed Rust bugs)
+
+- Class: `bug`. Same baseline/rulebook/route as above. Adopting core's Python
+  ISO parser closes Kiro's arbitrary Unicode separator gap. Timeout/context
+  inputs retain Python coercion and truthiness, including signed values,
+  bools, fractional numbers, Unicode digits, repr and nested dictionary order.
+- Python int(string) does not strip U+001C..U+001F even though str.strip does;
+  this is covered separately from ordinary whitespace. Integer overflows are
+  typed NumberOutOfRange, the already approved R4 `improvement`; no new
+  numeric narrowing is accepted.
+- Native review caught a truthy non-string event type triggering the `event`
+  fallback, reset-time object traversal losing insertion order, an invented
+  list for shared_write_paths, and receipt field order drift. All are fixed;
+  source oracles cover the repaired cases, including exact dispatch bytes.
+
+### RP-PROVIDERS-3-PARSER: remaining output parser coverage (open partial)
+
+- Class: `library`; unaccepted. Same source baseline and rulebook v4.
+- Python json.loads/json.dumps accept NaN/Infinity and deeper structures than
+  the workspace's strict serde/checked_json boundary. Example: a result event
+  containing NaN in an unrelated field is valid to the Python parser but
+  rejected as structured JSON by the current Rust codec. No silent parity
+  claim: both output port units remain partial and absent from ported.txt.
+- Jiff's UTC Timestamp cannot cover Python's entire final day of year 9999;
+  core's exact PythonTimestamp exists, but a full-range ISO renderer is not
+  public. Reset-time endpoint and ambiguous/DST-local edge coverage remains
+  incomplete. No cut-over or behavioral exception is approved.
+- Remaining effect work: Codex discovery/state-path integration and model
+  rollout scanning/OpenCode export need safe host APIs reachable through the
+  allowed R2 dependencies. Supervisor owns safe filesystem/bounded execution;
+  providers has no permitted direct edge or confinement bridge today. Keep
+  these source functions unclaimed rather than copying the OS owner.
 ## RP-core-3-01 — shared helper ownership and non-strict symlink loops
 
 - Rulebook v4; class `bug`, fixed in `port/core-3`. Author route:
