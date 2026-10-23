@@ -500,6 +500,133 @@ fn executable_in(path: &Path) -> bool {
     }
 }
 
+pub use crate::render::{render, RenderError};
+
+/// Resolve explicit adapter prefixes before inferring an owner from a bare id.
+pub fn resolve_model(
+    resolver: &crate::matching::ModelCatalog<'_>,
+    text: &str,
+) -> Result<(String, String, bool), crate::matching::MatchError> {
+    let text = python_strip(text);
+    let adapters = resolver.catalog.get("adapters");
+    if let Some((head, rest)) = text.split_once('/') {
+        if adapters.and_then(|a| a.get(head)).is_some() {
+            for candidate in [rest, text] {
+                if let Some(entry) = resolver.registered_match(head, candidate)?.0 {
+                    let model = entry
+                        .get("id")
+                        .and_then(Value::as_str)
+                        .ok_or(crate::matching::MatchError::Catalog("model id"))?;
+                    return Ok((head.into(), model.into(), true));
+                }
+            }
+            return Ok((
+                head.into(),
+                if known_provider_path(text) && !rest.contains('/') {
+                    text.into()
+                } else {
+                    rest.into()
+                },
+                false,
+            ));
+        }
+    }
+    let adapter = resolver.owner_adapter(text)?;
+    let entry = if adapters.and_then(|a| a.get(&adapter)).is_some() {
+        resolver.registered_match(&adapter, text)?.0
+    } else {
+        None
+    };
+    let model = entry
+        .as_ref()
+        .and_then(|e| e.get("id"))
+        .and_then(Value::as_str)
+        .unwrap_or(text)
+        .to_owned();
+    Ok((adapter, model, entry.is_some()))
+}
+pub fn split_model(
+    resolver: &crate::matching::ModelCatalog<'_>,
+    text: &str,
+) -> Result<(String, String), crate::matching::MatchError> {
+    let (a, m, _) = resolve_model(resolver, text)?;
+    Ok((a, m))
+}
+pub fn model_traits(
+    resolver: &crate::matching::ModelCatalog<'_>,
+    adapter: &str,
+    model: &str,
+) -> Result<Vec<String>, crate::matching::MatchError> {
+    use crate::matching::{is_free_model, looks_free, training_flag};
+    let mut traits = BTreeSet::new();
+    let config = resolver
+        .catalog
+        .get("adapters")
+        .and_then(|a| a.get(adapter))
+        .unwrap_or(&Value::Null);
+    let registered = if config.get("models").is_some() {
+        resolver.registered_match(adapter, model)?.0
+    } else {
+        None
+    };
+    let mut names = vec![model.to_owned()];
+    if let Some(entry) = &registered {
+        if let Some(name) = entry
+            .get("id")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+        {
+            names.push(name.into());
+        }
+        if let Some(inherits) = entry.get("inherits").and_then(Value::as_array) {
+            names.extend(inherits.iter().filter_map(Value::as_str).map(str::to_owned));
+        }
+    }
+    for name in names {
+        for key in [format!("{adapter}/{name}"), name] {
+            if let Some(values) = resolver
+                .catalog
+                .get("model_traits")
+                .and_then(|t| t.get(&key))
+                .and_then(Value::as_array)
+            {
+                traits.extend(values.iter().filter_map(Value::as_str).map(str::to_owned));
+            }
+        }
+    }
+    if training_flag(config, registered.as_ref(), model)? == Some(true) {
+        traits.insert("trains-on-prompts".into());
+    }
+    let cap = registered.as_ref().and_then(|e| e.get("plan_cap_usd"));
+    let zero = cap.is_some_and(|v| match v {
+        Value::Bool(b) => !*b,
+        Value::Number(n) if n.is_f64() => n.as_f64() == Some(0.0),
+        Value::Number(n) => n.as_i64() == Some(0) || n.as_u64() == Some(0),
+        _ => false,
+    });
+    if zero || is_free_model(config, model)? || (registered.is_none() && looks_free(config, model)?)
+    {
+        traits.insert("free".into());
+    }
+    if traits.contains("free")
+        && registered.as_ref().and_then(|e| e.get("trains_on_prompts")) != Some(&Value::Bool(false))
+    {
+        traits.insert("trains-on-prompts".into());
+    }
+    Ok(traits.into_iter().collect())
+}
+pub fn spread_family(model: &str, catalog: &Value) -> Result<String, crate::catalog::CatalogError> {
+    Ok(crate::catalog::infer_family(model, catalog)?
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| {
+            crate::catalog::model_slug_for_family(model)
+                .split('-')
+                .next()
+                .unwrap_or_default()
+                .to_owned()
+        }))
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::json;
@@ -584,5 +711,78 @@ mod tests {
             reject_renamed(&json!({"routes":{"strong":[]}}), "overlay"),
             Err(RenamedNameError(message)) if message.contains("renamed to 'senior'")
         ));
+    }
+}
+
+#[cfg(test)]
+mod model_policy_tests {
+    use super::*;
+    use crate::matching::ModelCatalog;
+    use serde_json::json;
+    #[test]
+    fn adapter_paths_and_live_inherited_privacy_match_python() {
+        let mut catalog: Value = serde_json::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../../../config/model-routing.json"
+        )))
+        .unwrap();
+        catalog["model_traits"] =
+            json!({"codex/gpt-6.1-sol":["trains-on-prompts"],"agy/gemini-3.8-flash":["private"]});
+        let cached = BTreeMap::from([
+            ("codex".into(), vec!["gpt-6.2-sol".into()]),
+            ("agy".into(), vec!["gemini-3.9-flash-high".into()]),
+        ]);
+        let resolver = ModelCatalog {
+            catalog: &catalog,
+            cached: &cached,
+        };
+        let models = [
+            "codex/sol",
+            "gpt-6.2-sol",
+            "claude/sonnet",
+            "opencode/big-pickle",
+            "opencode/opencode-go/kimi-k2",
+            "opencode-go/kimi-k2",
+            "openrouter/unknown",
+            "unknown",
+            "agy/gemini-3.9-flash-high",
+        ];
+        let Some(expected): Option<Value> = crate::oracle::python(
+            r#"
+import json,sys,pathlib,tempfile
+from datetime import datetime,timezone
+sys.path.insert(0,str(pathlib.Path('scripts').resolve()))
+import model_route as m
+d=json.load(sys.stdin)
+class Clock(datetime):
+ @classmethod
+ def now(cls,tz=None): return cls(2026,10,23,tzinfo=timezone.utc)
+m.model_route_live.datetime=Clock
+with tempfile.TemporaryDirectory() as home:
+ root=pathlib.Path(home);(root/'capabilities.json').write_text(json.dumps({a:{'observed_at':'2026-10-23T00:00:00Z','models':v} for a,v in d['cached'].items()}))
+ m.model_route_probe._state_root=lambda:root
+ result=[]
+ for model in d['models']:
+  a,model,known=m._pools.resolve_model(m,d['catalog'],model)
+  result.append([a,model,known,m._pools.model_traits(m,d['catalog'],a,model)])
+ print(json.dumps(result))
+"#,
+            &json!({"catalog":catalog,"cached":cached,"models":models}),
+        ) else {
+            return;
+        };
+        let actual: Vec<_> = models
+            .iter()
+            .map(|model| {
+                let (a, m, known) = crate::pools::resolve_model(&resolver, model).unwrap();
+                json!([
+                    a,
+                    m,
+                    known,
+                    crate::pools::model_traits(&resolver, &a, &m).unwrap()
+                ])
+            })
+            .collect();
+        assert_eq!(json!(actual), expected);
     }
 }

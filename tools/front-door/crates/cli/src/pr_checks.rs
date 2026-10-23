@@ -178,3 +178,113 @@ mod tests {
         }
     }
 }
+
+fn normalize_checks(value: &crate::pending::OrderedValue) -> Option<Vec<Check>> {
+    use crate::pending::OrderedValue as O;
+    use provenant_core::py::python_truth;
+    let O::Array(items) = value else {
+        return None;
+    };
+    Some(
+        items
+            .iter()
+            .filter_map(|row| {
+                let O::Object(row) = row else {
+                    return None;
+                };
+                Some(row)
+            })
+            .map(|row| {
+                let get = |key| row.iter().find(|(k, _)| k == key).map(|(_, v)| v);
+                let name = get("name").map(O::python_str).unwrap_or_default();
+                let bucket = get("bucket")
+                    .filter(|v| python_truth(&v.value()))
+                    .map(O::python_str)
+                    .unwrap_or_else(|| "pending".into());
+                let link = get("link")
+                    .map(O::value)
+                    .filter(python_truth)
+                    .unwrap_or_else(|| serde_json::Value::String(String::new()));
+                Check { name, bucket, link }
+            })
+            .collect(),
+    )
+}
+/// Preserve the shared integer range check. Syntax errors are gh's unknown
+/// answer; out-of-range integer tokens stay an explicit typed refusal.
+pub fn parse_checks(raw: &str) -> Result<Option<Vec<Check>>, provenant_records::DecodeError> {
+    match crate::pending::OrderedValue::checked(raw) {
+        Ok(value) => Ok(normalize_checks(&value)),
+        Err(provenant_records::DecodeError::Json(_)) => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+/// No-required-checks fallback policy is independent of subprocess exit code:
+/// gh reports a completed failing check set with a nonzero status too.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Fetch {
+    Rows(Vec<Check>),
+    AllChecks,
+    Unknown,
+}
+pub fn required_response(
+    stdout: &str,
+    stderr: &str,
+) -> Result<Fetch, provenant_records::DecodeError> {
+    if let Some(rows) = parse_checks(stdout)? {
+        return Ok(Fetch::Rows(rows));
+    }
+    let message = stderr.to_lowercase();
+    Ok(if message.contains("no required checks") {
+        Fetch::AllChecks
+    } else if message.contains("no checks reported") {
+        Fetch::Rows(vec![])
+    } else {
+        Fetch::Unknown
+    })
+}
+pub fn all_response(stdout: &str, stderr: &str) -> Result<Fetch, provenant_records::DecodeError> {
+    Ok(match parse_checks(stdout)? {
+        Some(rows) => Fetch::Rows(rows),
+        None if stderr.to_lowercase().contains("no checks reported") => Fetch::Rows(vec![]),
+        None => Fetch::Unknown,
+    })
+}
+
+#[cfg(test)]
+mod normalization_tests {
+    use super::*;
+    use serde_json::json;
+    #[test]
+    fn normalization_matches_python_truthiness_scalar_str_and_retained_links() {
+        let cases=["invalid".to_owned(),"{}".into(),"null".into(), r#"[{"name":-0,"bucket":[-0,-0.0]}]"#.into(),"[]".into(), r#"[{"name":{"z":true,"a":null,"z":false},"bucket":[{"z":1,"a":2}]}]"#.into(),serde_json::to_string(&json!([null,false,1,"row",{}, {"name":null,"bucket":0,"link":false},{"name":true,"bucket":1.0,"link":[1]},{"name":9007199254740993u64,"bucket":"pass","link":{"a":null}},{"name":"é","bucket":[],"link":{}}])).unwrap()];
+        let Some(expected):Option<Vec<Option<Vec<Check>>>>=crate::oracle::python("import json,sys; from scripts.provenant_pr import parse_checks; print(json.dumps([parse_checks(v) for v in json.load(sys.stdin)]))",&json!(cases)) else{return;};
+        for (raw, expected) in cases.iter().zip(expected) {
+            assert_eq!(parse_checks(raw).unwrap(), expected);
+        }
+        assert!(matches!(
+            parse_checks("[{\"unused\":18446744073709551616}]"),
+            Err(provenant_records::DecodeError::NumberOutOfRange(_))
+        ));
+    }
+    #[test]
+    fn fallback_classification_preserves_no_required_vs_no_registered_checks() {
+        assert_eq!(
+            required_response("bad", "No required checks reported").unwrap(),
+            Fetch::AllChecks
+        );
+        assert_eq!(
+            required_response("bad", "No checks reported").unwrap(),
+            Fetch::Rows(vec![])
+        );
+        assert_eq!(
+            required_response("[]", "HTTP failure").unwrap(),
+            Fetch::Rows(vec![])
+        );
+        assert_eq!(all_response("bad", "HTTP failure").unwrap(), Fetch::Unknown);
+        assert_eq!(
+            all_response("bad", "No checks reported").unwrap(),
+            Fetch::Rows(vec![])
+        );
+    }
+}
