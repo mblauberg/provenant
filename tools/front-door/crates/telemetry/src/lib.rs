@@ -70,6 +70,7 @@ impl HostIdentity {
 pub trait Sink {
     fn usage(&mut self, row: Usage, origin: &std::path::Path) -> Result<()>;
     fn observation(&mut self, row: Observation) -> Result<()>;
+    /// Append an event, or merge attributes on an ID conflict when `row.refresh` is true.
     fn event(&mut self, row: Event) -> Result<()>;
     fn update_event(
         &mut self,
@@ -121,6 +122,15 @@ mod tests {
         for value in [serde_json::json!(0), serde_json::json!(300), serde_json::json!(9007199254740993u64), serde_json::json!(0.0)] {
             assert_eq!(serde_json::to_string(&number(&value)).unwrap(), value.to_string());
         }
+    }
+
+    #[test]
+    fn review_regression_event_carries_every_field_and_refresh() {
+        let value = serde_json::json!({"kind":"lane.attempt","ts":"2026-01-01T00:00:00Z","source_ref":"receipt","session":"s","run_id":"r","lane":"l","task_id":"t","pr":1295,"provider":"openai","account":"a","model":"m","harness_rev":"rev","refresh":true,"attrs":{}});
+        let event: Event = serde_json::from_value(value.clone()).unwrap();
+        let mut sink = ingest::tests::Capture::default();
+        sink.event(event).unwrap();
+        assert_eq!(serde_json::to_value(&sink.events[0]).unwrap(), value);
     }
 
 }

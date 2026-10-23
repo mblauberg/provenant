@@ -474,6 +474,7 @@ pub fn otel_record(sink: &mut impl Sink, row: &Value, path: &Path, offset: u64) 
                         run_id: get(&context, "provenant.run_id"),
                         lane: get(&context, "provenant.lane"),
                         harness_rev: get(&context, "provenant.harness_rev"),
+                        ..Event::default()
                     })?;
                 }
             }

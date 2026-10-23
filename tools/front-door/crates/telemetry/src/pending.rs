@@ -60,9 +60,16 @@ pub struct Event {
     pub session: Option<String>,
     pub run_id: Option<String>,
     pub lane: Option<String>,
+    pub task_id: Option<String>,
+    pub pr: Option<serde_json::Value>,
+    pub provider: Option<String>,
+    pub account: Option<String>,
     pub model: Option<String>,
     pub harness_rev: Option<String>,
     pub attrs: Value,
+    /// Merge refreshed attributes when the existing ledger event ID conflicts.
+    #[serde(default)]
+    pub refresh: bool,
 }
 // port: belongs in provenant-records
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
