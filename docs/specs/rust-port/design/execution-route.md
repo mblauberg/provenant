@@ -16,8 +16,8 @@ These libraries add no daemon, third-party dependency or second execution regist
 Source/count baseline: `1b3d48e4c549811ce3636edc30b047f36fd24ada`.
 The council's 24 October audit includes Claude and Codex transcript stores,
 Codex JavaScript exec calls and MCP calls. Its reproduction scripts are
-`route_{usage,tally,exec}.py` under the council scratch directory
-`/private/tmp/claude-503/-Users-mikey-Repos-provenant/1c21e420-fb1c-4a3f-be95-eb42e8489edb/scratchpad/port/w7/scripts/`.
+`route_{usage,tally,exec}.py` in the council's private scratch directory
+(not committed).
 Counts describe observed requests, not successful execution or global usage.
 Transcripts and run recordings are research inputs only, never runtime state.
 
@@ -77,10 +77,12 @@ Redacted diagnostics go to stderr. No library chooses exits or renders JSON.
 | Command | Inputs and result |
 | --- | --- |
 | `route list` | Optional `--adapter ADAPTER`; catalogue revision, exact models/efforts, named routes and cached availability with reasons/age. No probe. |
-| `route resolve` | Exactly one `--model ADAPTER/ID` or `--route NAME`; optional `--effort VALUE`, `--fallback none\|ADAPTER/ID[,ADAPTER/ID]`. Returns `ResolvedRoute`, alternatives and reasons; pure, no admission or state mutation. Dispatch uses the same route fields. |
-| `quota show` | Optional `--provider ADAPTER`; cached windows/reset/source/age, coverage and `report_path`. No refresh. |
-| `quota tick` | Optional `--provider ADAPTER`; `--trigger timer\|panel\|manual\|wake\|power` (default manual), `--power ac\|battery\|low` (default ac). Refresh due sources, publish the current report, return per-source results and next due without sleeping. |
+| `route resolve` | Exactly one `--model ADAPTER/ID` or `--route NAME`; optional `--effort VALUE`, `--fallback ADAPTER/ID[,ADAPTER/ID]` (omitted means none). Returns `ResolvedRoute`, alternatives and reasons; pure, no admission or state mutation. Dispatch uses the same route fields. |
+| `quota show` | Optional `--adapter ADAPTER`; cached windows/reset/source/age, coverage and `report_path`. No refresh. |
+| `quota tick` | Optional `--adapter ADAPTER`; `--trigger timer\|panel\|manual\|wake\|power` (default manual), `--power ac\|battery\|low` (default ac). Refresh due sources, publish the current report, return per-source results and next due without sleeping. |
 
+Requests are `RouteListQuery { adapter }`, `RouteRequest`, `QuotaQuery { adapter }`
+and `QuotaTick { adapter, trigger, power }`; cli's reconciled table freezes the flags.
 Route preview uses a read-only context; dispatch supplies its separately
 validated access/confinement context to the same resolver.
 Every verb accepts `--json`. No account, confidential, native, task-class,
@@ -468,7 +470,7 @@ confinement or custody acceptance.
    fake-curl/security/database tests. Delete quota Rust emulation/oracles, old
    golden judges and only Python leaves/tests with no outside importer.
    `provider_quota.py` and its dependencies wait for the matrix gate.
-   Wire `quota show|tick` and update Swift report/fixtures together. Runtime secret reads still require
+   Wire `quota show|tick` and update Swift report/fixtures together. A tick drops the snapshot of an account that detection no longer reports; there is no forget operation. Runtime secret reads still require
    recorded user authority; fixtures never grant it.
 3. **Routing.** Land explicit model/named-route resolution, at most two explicit
    alternatives, family/availability facts and route CLI. Delete routing Rust
