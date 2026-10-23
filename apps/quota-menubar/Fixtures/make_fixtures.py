@@ -1,7 +1,7 @@
-"""Builds the menu bar fixture reports from provider_quota.report() with synthetic readings.
+"""Builds the menu bar fixture reports from quota_display.report() with synthetic readings.
 
 Usage: python3 apps/quota-menubar/Fixtures/make_fixtures.py . apps/quota-menubar/Fixtures (from the repo root)."""
-import importlib.util, json, os, sys, tempfile
+import json, os, sys, tempfile
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -12,9 +12,9 @@ os.environ.update(HOME=str(temp / 'home'), AGENT_FABRIC_STATE_ROOT=str(temp / 's
 config = temp / 'home/.agents/config/telemetry.json'
 config.parent.mkdir(parents=True)
 config.write_text(json.dumps({'accounts': {'agy': {'google-4e7d2a91c05b': {'display_name': 'Michael'}}}}))
-spec = importlib.util.spec_from_file_location('pq', repo / 'scripts/provider_quota.py')
-q = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(q)
+sys.path.insert(0, str((repo / 'scripts').resolve()))
+import provider_quota as q
+import quota_display
 q.telemetry_host = lambda: 'laptop'
 # Synthetic: no reading, date or amount here is a real account's.
 NOW = datetime(2030, 3, 14, 1, 0, tzinfo=UTC)
@@ -77,7 +77,7 @@ activity = {'claude/anese': iso(NOW - timedelta(minutes=10)), 'agy/google-4e7d2a
 
 
 def build(values):
-    return q.report(values, NOW, activity=activity)
+    return quota_display.report(vars(q), values, NOW, activity=activity)
 
 
 def old(report):

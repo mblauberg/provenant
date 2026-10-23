@@ -6,6 +6,8 @@ import math
 from pathlib import Path
 import sys
 
+import quota_display
+
 
 USAGE_KEYS = ('provider', 'adapter', 'model')
 DAY_KEYS = ('day', 'provider', 'adapter', 'account')
@@ -48,7 +50,7 @@ def merge(telemetry, summaries, statuses, since):
             result['excluded_rows'][reason] = result['excluded_rows'].get(reason, 0) + count
     result['receipt_usage_rows_excluded'] = sum(report['receipt_usage_rows_excluded'] for report in reports.values())
     quota = telemetry.quota_owner()
-    result['quota'] = quota.report([value for report in reports.values() for value in report.get('quota_snapshots', [])])
+    result['quota'] = quota_display.report(vars(quota), [value for report in reports.values() for value in report.get('quota_snapshots', [])])
     result['pending_source_rebuilds'] = [f'{host}/{source}' for host, report in reports.items()
                                         for source in report['pending_source_rebuilds']]
     return result
