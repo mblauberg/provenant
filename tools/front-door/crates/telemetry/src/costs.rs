@@ -6,6 +6,7 @@ use serde_json::Value;
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::Path,
+    io::Read,
 };
 
 pub const TOKEN_FIELDS: [&str; 5] = [
@@ -82,10 +83,7 @@ pub struct Prices {
 }
 impl Prices {
     pub fn load(path: &Path) -> Result<Self> {
-        let bytes = std::fs::read(path).map_err(|source| crate::Error::Io {
-            path: path.into(),
-            source,
-        })?;
+        let bytes = read_bounded(path)?;
         crate::decode_json(&bytes)
     }
     pub fn entry(&self, row: &Usage) -> Result<Price> {
@@ -116,8 +114,15 @@ impl Prices {
     }
 }
 
+fn read_bounded(path: &Path) -> Result<Vec<u8>> {
+    let file = std::fs::File::open(path).map_err(|source| crate::Error::Io { path: path.into(), source })?;
+    let mut bytes = Vec::new();
+    file.take((crate::MAX_JSON_BYTES + 1) as u64).read_to_end(&mut bytes).map_err(|source| crate::Error::Io { path: path.into(), source })?;
+    if bytes.len() > crate::MAX_JSON_BYTES { return Err(crate::Error::InputTooLarge {limit:crate::MAX_JSON_BYTES}); }
+    Ok(bytes)
+}
 pub fn catalogue(path: &Path) -> Catalogue {
-    let Some(value) = std::fs::read(path).ok().and_then(|b| crate::decode_json::<Value>(&b).ok()) else { return Catalogue::new(); };
+    let Some(value) = read_bounded(path).ok().and_then(|b| crate::decode_json::<Value>(&b).ok()) else { return Catalogue::new(); };
     value["adapters"].as_object().into_iter().flatten().map(|(name, adapter)| {
         let models = adapter["models"].as_array().into_iter().flatten().filter_map(|entry| {
             let id = entry["id"].as_str()?.to_owned();
@@ -659,6 +664,17 @@ mod tests {
         let row: Usage = serde_json::from_value(serde_json::json!({"source":"s","event_id":"e","host":"h","adapter":"a","model":"normalised","model_raw":"Original Alias"})).unwrap();
         let groups = aggregate(&[row], &["model"], &Prices::default()).unwrap();
         assert_eq!(groups[0].model_raw.as_ref().unwrap(), &["Original Alias"]);
+    }
+
+
+    #[test]
+    fn review_regression_catalogue_and_price_reads_are_bounded() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("table.json");
+        let text = format!("{{\"models\":{{}},\"padding\":\"{}\",\"adapters\":{{\"a\":{{\"models\":[{{\"id\":\"m\"}}]}}}}}}", "x".repeat(8 * 1024 * 1024));
+        std::fs::write(&path, text).unwrap();
+        assert!(Prices::load(&path).is_err());
+        assert!(catalogue(&path).is_empty());
     }
 
 }

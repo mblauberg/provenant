@@ -12,6 +12,8 @@ use std::{
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct ParserState {
+    #[serde(flatten)]
+    pub sidecar: delivery::SidecarState,
     pub session: Option<String>,
     pub repository: Option<String>,
     pub account: Option<String>,
@@ -573,12 +575,15 @@ pub fn ingest_stream(
     while offset < stat.size {
         let mut line = Vec::new();
         let read = stream
-            .take(stat.size - offset)
+            .take((stat.size - offset).min((crate::MAX_JSON_BYTES + 1) as u64))
             .read_until(b'\n', &mut line)
             .map_err(|source| Error::Io {
                 path: path.into(),
                 source,
             })?;
+        if line.len() > crate::MAX_JSON_BYTES {
+            return Err(Error::InputTooLarge {limit:crate::MAX_JSON_BYTES});
+        }
         if !line.ends_with(b"\n") {
             break;
         }
@@ -765,6 +770,24 @@ pub(crate) mod tests {
         for seconds in [f64::MAX, -f64::MAX, f64::INFINITY, f64::NAN, 253_402_300_800.0, -62_135_596_801.0] {
             assert!(matches!(timestamp_seconds(seconds), Err(Error::Timestamp(_))));
         }
+    }
+
+
+    #[test]
+    fn review_regression_cursor_keeps_python_previous() {
+        let previous = json!({"source_ref":"repairs#0","attrs":{"repair_cycle":1}});
+        let mut cursor: Cursor = serde_json::from_value(json!({"source":"delivery","path":"repairs.jsonl","size":0,"mtime":1,"offset":0,"state":{"previous":previous}})).unwrap();
+        assert_eq!(serde_json::to_value(&cursor).unwrap()["state"]["previous"], previous);
+        let mut sink = Capture::default();
+        delivery::record(&mut sink,"repairs.jsonl",&json!({"cycle":2,"failing_before":[]}),&mut cursor.state.sidecar,&json!({}),"repairs#1".into()).unwrap();
+        assert_eq!(sink.updates[0].1,"repairs#0");
+    }
+    #[test]
+    fn review_regression_cursor_bounds_one_json_line() {
+        let bytes = format!("{{\"x\":\"{}\"}}\n", "x".repeat(8 * 1024 * 1024));
+        let mut stream = std::io::Cursor::new(bytes.as_bytes());
+        let result = ingest_stream(&mut MemoryCursor::default(), "test", Path::new("fixture"), &mut stream, Snapshot {device:1,inode:2,size:bytes.len() as u64,mtime_ns:1}, |_,_,_| Ok(()));
+        assert!(result.is_err(), "oversized line was accepted");
     }
 
 }

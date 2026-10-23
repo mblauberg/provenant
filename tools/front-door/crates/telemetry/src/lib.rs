@@ -28,6 +28,8 @@ pub enum Error {
     Json(#[from] serde_json::Error),
     #[error(transparent)]
     Sql(#[from] rusqlite::Error),
+    #[error("JSON input exceeds {limit} bytes")]
+    InputTooLarge { limit: usize },
     #[error("JSON integer outside i64/u64 range")]
     NumberOutOfRange,
     #[error("invalid timestamp: {0}")]
@@ -35,6 +37,9 @@ pub enum Error {
     #[error("{0}")]
     Invalid(String),
 }
+/// Maximum bytes read for one JSON document or JSONL record.
+pub const MAX_JSON_BYTES: usize = 8 * 1024 * 1024;
+
 pub type Result<T> = std::result::Result<T, Error>;
 
 /// Explicit per-ledger identity, replacing the Python module's cached globals.

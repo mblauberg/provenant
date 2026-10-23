@@ -139,6 +139,7 @@ fn truthy(v: &Value) -> bool {
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct SidecarState {
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub previous: Option<PreviousRepair>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -513,5 +514,7 @@ mod tests {
             assert_eq!(sink.events[0].attrs["reviewer_family"], "family");
         }
     }
+
+
 
 }
