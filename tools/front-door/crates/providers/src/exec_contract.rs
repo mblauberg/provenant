@@ -79,6 +79,8 @@ pub struct AppliedPlan {
     pub confinement: String,
     pub write_boundary: WriteBoundary,
     pub capabilities: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub browser_tmpdir: Option<String>,
     pub protected_paths: Vec<String>,
     #[serde(flatten)]
     pub metadata: Metadata,
@@ -116,10 +118,25 @@ pub struct ExecPlan {
     pub requested_effort: Option<String>,
     pub intent: String,
     pub applied: AppliedPlan,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub codex_home: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub codex_auth_path: Option<String>,
     pub agy_sandbox: bool,
     #[serde(flatten)]
     pub metadata: Metadata,
     pub argv: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_path: Option<String>,
+}
+
+impl ExecPlan {
+    /// Source CLI's default JSON separators, ASCII escaping and print newline.
+    /// The interface remains partial for execute/rejection response records.
+    pub fn encode_line(&self) -> Result<String, crate::DecodeError> {
+        let raw = serde_json::to_string(self)?;
+        Ok(crate::ordered_json::parse(&raw)?.dumps(true) + "\n")
+    }
 }
 
 #[cfg(test)]
@@ -127,7 +144,7 @@ mod tests {
     use super::*;
     #[test]
     fn exec_plan_contract_round_trips_real_planner_output() {
-        let Some(plans): Option<Vec<Value>> = crate::oracle::python(
+        let Some(plans): Option<Vec<String>> = crate::oracle::python(
             r#"
 import json,sys,os,tempfile
 from pathlib import Path
@@ -136,16 +153,29 @@ os.environ['PROVENANT_NO_OS_CONFINEMENT']='1'
 with tempfile.TemporaryDirectory() as td:
  root=str(Path(td).resolve())
  plans=[build_plan(adapter,{'resolved_model':'fixture','effort':'high'},'hello',cwd=root,workspace_root=root,preface=False,timeout_seconds=30,startup_seconds=5,instruction_policy='deny',custom={'sentinel':True}) for adapter in ['copilot','cursor']]
- print(json.dumps(plans))
+ texts=[]
+ for plan in plans:
+  texts.append(json.dumps(plan)+'\n')
+  plan['applied']['browser_tmpdir']='/tmp/browser-fixture'
+  plan['codex_home']='/tmp/codex-home-fixture';plan['codex_auth_path']='/tmp/codex-auth-fixture'
+  # Reorder optional fields exactly as source build_plan's conditional entries.
+  applied=plan['applied']; plan['applied']={k:v for k,v in applied.items() if k not in ['browser_tmpdir','protected_paths','context_ceiling_requested','context_ceiling','context_ceiling_tokens']}
+  plan['applied']['browser_tmpdir']=applied['browser_tmpdir'];plan['applied']['protected_paths']=applied['protected_paths']
+  for k in ['context_ceiling_requested','context_ceiling','context_ceiling_tokens']: plan['applied'][k]=applied[k]
+  plan={**{k:v for k,v in plan.items() if k not in ['codex_home','codex_auth_path','agy_sandbox','instruction_policy','custom','context_ceiling','argv']},'codex_home':plan['codex_home'],'codex_auth_path':plan['codex_auth_path'],'agy_sandbox':plan['agy_sandbox'],'instruction_policy':plan['instruction_policy'],'custom':plan['custom'],'context_ceiling':plan['context_ceiling'],'argv':plan['argv']}
+  plan['output_path']=root+'/result.md'
+  plan_text=json.dumps(plan)+'\n'
+  texts.append(plan_text)
+ print(json.dumps(texts))
 "#,
             &Value::Null,
             None,
         ) else {
             return;
         };
-        for value in plans {
-            let plan: ExecPlan = crate::decode_json(&serde_json::to_vec(&value).unwrap()).unwrap();
-            assert_eq!(serde_json::to_value(plan).unwrap(), value);
+        for raw in plans {
+            let plan: ExecPlan = crate::decode_json(raw.as_bytes()).unwrap();
+            assert_eq!(plan.encode_line().unwrap(), raw);
         }
     }
     #[test]

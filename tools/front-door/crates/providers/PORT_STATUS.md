@@ -45,13 +45,15 @@ text, huge majors, Unicode digits and empty model argv.
   R2 forbids a direct providers->supervisor dependency, and confinement has
   no bridge for these operations. This lane neither copies nor bypasses the
   existing safe OS implementation. BuildInputs are execution facts, not an
-  invented persisted plan shape. Its endpoint_profile None means missing;
-  a present null/empty source value must be projected as Some("").
+  invented persisted plan shape. Its endpoint profile
+  preserves missing versus present null/empty values explicitly.
 - `skills/orchestrate/scripts/provider_exec.py#interface`: typed real
   `fabric.exec-plan.v1`, applied grants and internally tagged write boundary.
-  Real source planner outputs round-trip, including the ordered path->bool
+  Source planner outputs round-trip (with exact CLI plan bytes for optional
+  field fixtures), including the ordered path->bool
   `shared_write_paths` object and unknown metadata. Remaining: request/execute
-  response contracts, including execution and rejection records; these must
+  response contracts, including execution and rejection records, and nested
+  dynamic metadata/override byte semantics; these must
   be reconciled with records' owner/J2 before claiming this interface.
 - `skills/orchestrate/scripts/provider_output.py#unit-01`: ordered failure
   rules and telemetry classes; variant/model fixes, quota windows, reset
@@ -94,5 +96,6 @@ Private pending items, each marked with its owner:
 - `PROVENANT_PORT_DIFF_REQUIRED=1 cargo test -p provenant-providers`: 33 passed.
 - Native adversarial source review found event-kind truthiness, reset traversal
   order, shared-write mapping shape and receipt/metadata field-order errors;
-  repairs have exact regression/oracle coverage. Chair owns cross-family review.
+  repairs have exact regression/oracle coverage. Final native repair-delta
+  review is clean. Chair owns cross-family review.
 - J1/J2/J3, full suites and CI remain landing/cut-over gates; not claimed here.
