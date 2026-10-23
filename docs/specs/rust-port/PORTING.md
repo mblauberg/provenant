@@ -1,8 +1,8 @@
 # Rust port rulebook
 
-Version: **2**. Status: accepted 2026-10-23 with
-[ADR 0028](../../adr/0028-rust-port-dependencies.md). Applies to every port
-lane. The [plan](README.md) owns the boundary, phases and landing method.
+Version: **3**. Status: accepted 2026-10-23 with
+[ADR 0028](../../adr/0028-rust-port-dependencies.md); version 3 scopes the
+judge gates to cut-over. Applies to every port lane. The [plan](README.md) owns the boundary, phases and landing method.
 
 ## R1. Version the rules and regenerate their consequences
 
@@ -228,9 +228,16 @@ change alters CLI output on purpose, and list the change in `divergences.md`.
 2. Read the Python/TS source and its tests, including neighbours and callers.
    List observable behaviours, errors, effects, config/env inputs and retained
    record fields. Separate policy tests from test seams and approved retirements.
-3. Check each behaviour has an independent old-pass/mutant-fail judge. Ask the
-   judge owner to fill a gap before coding that behaviour. Refine an oversized
-   unit into cohesive half-day units and regenerate graph/dependants first.
+3. Check each behaviour has an independent old-pass/mutant-fail judge. A
+   library port into an inert crate (nothing calls it yet) does not wait for
+   the J1/J2/J3 judges: it proceeds with crate unit tests translated from the
+   policy tests plus differential tests against the Python/TS code where
+   cheap, and the PR lists the judge gaps. The judges gate cut-over: no
+   command switches to Rust and no Python/TS source is deleted until the
+   relevant judges pass. If the unit needs another crate's API that is not
+   on main yet, define a minimal private version in a `pending` module and
+   list it in the PR. Refine an oversized unit into cohesive half-day units;
+   a lane may port a coherent part and report the rest.
 4. Port the behaviour through the agreed crate API. Delete duplicate/private
    machinery when the new owner makes it unnecessary. Automate repetitive
    symbol/record mapping in a deterministic, reviewed script. Keep one small
@@ -256,11 +263,13 @@ change alters CLI output on purpose, and list the change in `divergences.md`.
 ## R11. Escalation stops the affected unit
 
 Escalate to the chair for an uncovered boundary, ambiguous dynamic dependency,
-missing judge runner, survived mutant, source cycle without an agreed API,
+missing judge runner at cut-over, survived mutant, source cycle without an
+agreed API (a `pending` module is the agreed API for inert crates),
 unit exceeding its half-day scope, repeated repair, or overlap with S2.
 Escalate immediately for confinement/custody weakening, a healthy process
 signalled, lost terminal publication, unverifiable rollback or a live database
-schema change. Do not continue promotion while those remain unresolved.
+schema change. Do not continue promotion while those remain unresolved. Escalation stops
+only the affected unit; the lane continues with the rest of its batch.
 
 Return to the user for an external boundary change, intentional Python-bug
 fix/improvement, unapproved dependency/ADR amendment, unresolved landing
