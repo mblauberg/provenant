@@ -15,7 +15,7 @@ owner. The installed `provenant root` remains `/Users/mikey/Repos/provenant`.
 | `scripts/telemetry_delivery.py#unit-01` | Partial | Concrete SQLite cursor/delivery/report/accepted-cost adapter; receipt and sidecar policy; discovery/read contracts; output and malformed-input differentials | A permitted adapter to supervisor safe filesystem/discovery APIs; R2 excludes a telemetry-to-supervisor dependency |
 | `scripts/telemetry_ingest.py#unit-01` | Partial | Concrete SQLite cursor/clear-file adapter and verified JSONL seam; shared semantic owners | Concrete supervisor-backed no-follow adapter is outside the current R2 edges; input-limit decision remains open |
 | `scripts/telemetry_report.py#unit-01` | Partial | SQL selection, bounds, deduplication, native suppression, attribution, limits, quota and delivery projection, peer summary and redaction | Ordered typed report/public-snapshot encoding; current Value reports sort object keys |
-| `skills/orchestrate/scripts/context_usage.py#unit-01` | Partial | All adapter meters, rollout search/enrichment, streaming reads, model/ceiling policy, environment/store/provider seams, Unicode float semantics | Oversized rollout-line behavior needs a source-compatible resolution or acceptance; RP-TEL-INPUT-BOUND |
+| `skills/orchestrate/scripts/context_usage.py#unit-01` | Partial | All adapter meters, rollout search/enrichment, streaming reads, model/ceiling policy, environment/store/provider seams, Unicode float semantics | Oversized rollout-line behavior and ordered `Meter.observe(Value)` model keys need resolution; RP-TEL-INPUT-BOUND / RP-TEL-REPORT-ORDER |
 | `scripts/telemetry_changes.py#unit-02` | Complete | Retro assembly and retro/change text rendering | None |
 | `scripts/telemetry_ingest.py#unit-02` | Partial | Document effects, SQLite/OpenCode snapshots and watermarks, streaming production row visitation, typed source/runtime orchestration | Concrete filesystem/registry/transaction adapter; partial API contracts require the source's per-file transaction boundary |
 | `skills/orchestrate/scripts/context_usage.py#unit-02` | Complete | Marker and resume-warning policy | None |
@@ -51,7 +51,7 @@ Pinned Rust toolchain and Python 3.14.8; isolated `-I -B` oracle with explicit
 environment and bounded child observation. `cargo fmt --all` and
 `cargo clippy -p provenant-telemetry --all-targets -- -D warnings` pass.
 `PROVENANT_PORT_DIFF_REQUIRED=1 cargo test -p provenant-telemetry` currently
-reports **118 passed, 1 failed**: the pre-existing cost/outcome differential
+reports **119 passed, 1 failed**: the pre-existing cost/outcome differential
 exposes RP-TEL-JSON-FLOAT after shared-owner adoption. No tolerance, skip,
 private decoder restoration or expected-value change masks it. The shared
 owner request was sent to the chair through Fabric; its fix is outside this

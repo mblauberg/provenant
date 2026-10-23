@@ -1636,6 +1636,17 @@ PORTING.md v4 R4 improvement; Python's unbounded integer domain is unchanged.
   remain unchanged; no graph unit or full conformance claim is added. README
   maps the remaining pending run and UUID contracts explicitly.
 
+### RP-WF2-006 repair evidence and claim correction
+
+Independent repair review found two further bugs, now fixed with raw-wire
+Python comparisons: receipt warning dictionaries and nested reaped/capture
+objects retain insertion order; `signal: -9223372036854775808` negates to the
+valid unsigned integer 9223372036854775808. The checked ordered decoder also
+applies the shared owner's integer `-0` normalisation without sorting objects.
+The review-panel and authority-mapping unit claims hold. All three cycle
+interfaces are deliberately partial: observer.json restoration/replay,
+supervisor return codes 64 and 75, and the full dynamic observer record domain
+are not yet proved exact. Their IDs are removed from the completion ledger.
 
 ### RP-TEL-JSON-FLOAT: shared checked JSON float rounding (open)
 
@@ -1647,7 +1658,7 @@ PORTING.md v4 R4 improvement; Python's unbounded integer domain is unchanged.
   as `0.09090909090909093`. CPython and Rust lexical float parsing retain
   `0.09090909090909091`. The owner currently uses serde_json's default decoder.
 - Evidence: required `differential::costs_and_outcomes_match_python` fails with
-  these exact number spellings. The other 118 crate tests pass. No epsilon or
+  these exact number spellings. The other 119 crate tests pass. No epsilon or
   rewritten expectation is accepted. The shared owner must repair its float
   decoding; the telemetry lane cannot change records or workspace features.
 - Disposition: costs unit-01 stays partial and absent from `ported.txt`/PR Units
@@ -1680,18 +1691,9 @@ PORTING.md v4 R4 improvement; Python's unbounded integer domain is unchanged.
   telemetry report policy tests compare indented JSON bytes.
 - Ordered cost groups have explicit serde encoders and a Python byte
   differential. Converting them into a Value-based report loses that order.
+- The Value-based context meter entry point also sees sorted Claude
+  `modelUsage` keys; only `observe_json_line` recovers input key order. Context
+  unit-01 remains partial until its typed input contract preserves that order.
 - Disposition: report unit-01 remains partial. Complete typed ordered report
   records and byte differentials before claiming or cutting over this unit;
   no workspace serde_json feature is added by this lane.
-
-### RP-WF2-006 repair evidence and claim correction
-
-Independent repair review found two further bugs, now fixed with raw-wire
-Python comparisons: receipt warning dictionaries and nested reaped/capture
-objects retain insertion order; `signal: -9223372036854775808` negates to the
-valid unsigned integer 9223372036854775808. The checked ordered decoder also
-applies the shared owner's integer `-0` normalisation without sorting objects.
-The review-panel and authority-mapping unit claims hold. All three cycle
-interfaces are deliberately partial: observer.json restoration/replay,
-supervisor return codes 64 and 75, and the full dynamic observer record domain
-are not yet proved exact. Their IDs are removed from the completion ledger.
