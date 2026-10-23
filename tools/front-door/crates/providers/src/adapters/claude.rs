@@ -72,21 +72,17 @@ pub fn claude(plan: &Plan, anthropic_api_key: Option<&str>) -> AdapterProfile {
     if let Some(effort) = plan.effort.as_ref().filter(|value| !value.is_empty()) {
         argv.extend(["--effort".into(), effort.clone()]);
     }
-    if let Some(ceiling) = plan.context_ceiling.filter(|value| *value > 0) {
-        argv.extend(["--autocompact".into(), ceiling.to_string()]);
+    if let Some(ceiling) = plan
+        .context_ceiling
+        .as_ref()
+        .filter(|value| provenant_core::py::python_truth(value))
+    {
+        argv.extend([
+            "--autocompact".into(),
+            provenant_core::py::python_str(ceiling),
+        ]);
     }
-    profile(
-        "claude",
-        argv,
-        Metadata {
-            transport: PromptTransport::Stdin,
-            stdin: StdinMode::Prompt,
-            output: "stream-json",
-            effort_flag: Some("--effort"),
-            session_keys: &["session_id"],
-            model_source: Some("claude:init.model"),
-        },
-    )
+    profile("claude", argv)
 }
 
 #[cfg(test)]
@@ -141,5 +137,29 @@ mod tests {
         let profile = claude(&p, None);
         assert!(profile.argv.contains(&"--safe-mode".into()));
         assert!(!profile.argv.contains(&"--bare".into()));
+    }
+}
+
+#[cfg(test)]
+mod coercion_tests {
+    use super::*;
+    #[test]
+    fn context_ceiling_preserves_python_truth_and_string_coercions() {
+        let values = serde_json::json!([null,false,true,0,-1,1.5,"", "300",[],[true],{}, {"x":null}]);
+        let actual: Vec<_> = values.as_array().unwrap().iter().map(|value| {
+            let mut p = super::tests::plan(Mode::ReadOnly);
+            p.context_ceiling = Some(value.clone());
+            claude(&p, None).argv
+        }).collect();
+        let Some(expected): Option<Vec<Vec<String>>> = crate::oracle::python(r#"
+import json,sys
+from skills.orchestrate.scripts.adapters.claude import argv
+out=[]
+for v in json.load(sys.stdin):
+    p=dict(context_ceiling=v,route={},mode='read_only',resume_session=None,session_id='session-1',cwd='/repo',model='model-x',effort='high',applied={'add_dirs':['/shared']},boundary_prompt='Read only',prompt='do it')
+    out.append(argv(p))
+print(json.dumps(out))
+"#, &values, None) else { return; };
+        assert_eq!(actual, expected);
     }
 }
