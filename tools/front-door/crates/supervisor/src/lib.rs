@@ -10,3 +10,4 @@ pub mod capture;
 #[cfg(test)]
 mod test_support;
 pub mod process_info;
+pub mod ps;
