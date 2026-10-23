@@ -370,14 +370,18 @@ print(json.dumps([json.dumps(os.fsdecode(bytes(v))) for v in values]))
             .join(std::ffi::OsStr::from_bytes(b"product-\xff"));
         #[cfg(target_os = "macos")]
         {
-            // APFS rejects invalid UTF-8 names with EPERM. This is an asserted
-            // platform result, not a skipped test. The byte codec oracle above
-            // always covers the surrogateescape wire form without file creation.
+            // APFS rejects invalid UTF-8 names: EPERM on older releases,
+            // EILSEQ (92) on newer ones. This is an asserted platform result,
+            // not a skipped test; Python must see the same errno. The byte
+            // codec oracle above always covers the surrogateescape wire form
+            // without file creation.
+            const EPERM: i32 = 1;
+            const EILSEQ: i32 = 92;
             let error = fs::create_dir(&product).unwrap_err();
-            assert_eq!(
-                error.raw_os_error(),
-                Some(1),
-                "APFS invalid UTF-8 filename refusal"
+            let errno = error.raw_os_error();
+            assert!(
+                matches!(errno, Some(EPERM | EILSEQ)),
+                "APFS invalid UTF-8 filename refusal: {errno:?}"
             );
             let Some(expected) = crate::test_support::python(
                 "",
@@ -390,7 +394,7 @@ except OSError as e: print(json.dumps({'errno':e.errno}))
             ) else {
                 return;
             };
-            assert_eq!(expected, serde_json::json!({"errno":1}));
+            assert_eq!(expected, serde_json::json!({ "errno": errno }));
         }
         #[cfg(not(target_os = "macos"))]
         fs::create_dir(&product).unwrap();

@@ -1702,8 +1702,9 @@ are not yet proved exact. Their IDs are removed from the completion ledger.
   repair. `PointerWriter` is the composition seam for supervisor's now-landed
   safe filesystem API. Production core no longer compiles its atomic-write
   copy; the std backend is test-only. R2 still forbids core -> supervisor.
-- macOS APFS invalid UTF-8 filename creation is asserted to fail with EPERM,
-  with the same Python errno asserted. Linux must create the filename and
+- macOS APFS invalid UTF-8 filename creation is asserted to fail with EPERM
+  (older releases) or EILSEQ (newer releases), with Python's errno asserted
+  equal to Rust's. Linux must create the filename and
   compare pointer publication bytes. No filesystem-error skip remains.
   The 260-fixture native-path byte differential always runs independently.
 - Replaced the old combined ignored JSON/path fixture with the isolated ignored
