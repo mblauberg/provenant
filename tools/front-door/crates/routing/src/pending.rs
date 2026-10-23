@@ -215,16 +215,6 @@ pub(crate) fn decimal_digit(c: char) -> Option<char> {
 }
 
 // port: belongs in provenant-core
-pub(crate) fn python_one(value: Option<&serde_json::Value>) -> bool {
-    match value {
-        Some(Value::Bool(v)) => *v,
-        Some(Value::Number(n)) if n.is_f64() => n.as_f64() == Some(1.0),
-        Some(Value::Number(n)) => n.as_i64() == Some(1) || n.as_u64() == Some(1),
-        _ => false,
-    }
-}
-
-// port: belongs in provenant-core
 pub(crate) fn timestamp(raw: &str) -> Option<jiff::Timestamp> {
     use jiff::civil::{Date, ISOWeekDate, Time, Weekday};
     let normalized = raw.replace('Z', "+00:00");
