@@ -55,11 +55,9 @@ several projects and is a usage sample, not a production counter.
 | Old `provenant run` verbs, `provenant batch`, direct `run_controls.py` | None found |
 | Direct `dispatch_run.py`, direct `cf_dispatch.py` | 7 and 1 command candidates; not evidence of a required public bypass |
 
-Reproduction locators, with prompts omitted: Claude project
-`-Users-mikey-Repos-provenant/1c21e420-fb1c-4a3f-be95-eb42e8489edb.jsonl`
-contains lane waits and Fabric dispatch/cancel on 23 October. Codex
-`sessions/2026/10/23/rollout-2026-10-23T12-12-51-01a16688-4ecc-71f2-92a4-3178987a3ffe.jsonl`
-contains the direct-dispatch command candidate. These are research locators,
+Reproduction locators are kept privately with the council records: one Claude
+project transcript with lane waits and Fabric dispatch/cancel on 23 October,
+and one Codex session with the direct-dispatch command candidate. These are research locators,
 never runtime dependencies. No credentials or authentication stores were read.
 
 ### Keep
@@ -81,7 +79,7 @@ never runtime dependencies. No credentials or authentication stores were read.
 | --- | --- |
 | Direct `cf_dispatch.py`, `--chain`, `--plan-only`, `--doctor` | The rewrite README explicitly retires the direct entry. `dispatch_preflight.py` shells out to it and also has an in-process fast planner. Replace both paths with routing and providers library calls; move utility callers to run or delete them with their owner. |
 | Duplicate legacy and Fabric attempt trees, digest sidecars and Markdown manifest bookkeeping | `dispatch_run.py` publishes both `dispatch/tasks` and `tasks`; controls validate bundles across rename gaps. One typed attempt record publishes references and digests atomically. These files are product-owned, not external contracts. |
-| Run-directory scaffolding, `RUN_RECEIPT.json`, `MANIFEST.md`, pane inventory, paired-primary driver lease and manual finaliser | Cut the run-directory contract (about 43 observed executions). Run owns deleting `run_dir_init.sh`, `run_dir_finalize.py`, `lease.py` and their tests with their last callers; run records and `provenant clean` replace execution evidence/cleanup. Workflow keeps delivery/review policy, not these files or a replacement scaffold. |
+| Run-directory scaffolding, `RUN_RECEIPT.json`, `MANIFEST.md`, pane inventory, paired-primary driver lease and manual finaliser | Cut the run-directory contract (about 43 observed executions). Run owns deleting `run_dir_init.sh`, `run_dir_finalize.py`, `lease.py` and their tests with their last callers; run records and guardian scratch settlement replace execution evidence/cleanup; no `clean` verb survives. Workflow keeps delivery/review policy, not these files or a replacement scaffold. |
 | `inspect`, `show`, `prompt`, `result`, `diagnostic-log` as separate verbs | Their implementation overlaps status and artifact reads. Consolidate into `lanes` and `output --part`; actual use of a spelling does not require an alias in the new tree. |
 | `reduce` and synthetic reduction prompts | No transcript invocation or skill caller was found beyond help/tests. `run_controls._reduce` constructs a special prompt. Dispatch a normal read-only task with explicit retained result references. A batch reports every failed/omitted task; it never implies a successful council. |
 | Arbitrary detached commands, PID text markers and `--validate` | `run_worker_detached.py` and Rust `detached.rs` implement a second completion protocol. The facade needs durable provider runs, not an arbitrary argv launcher. Use supervisor-owned workers and typed completion. |
@@ -93,7 +91,7 @@ never runtime dependencies. No credentials or authentication stores were read.
 
 ## Commands and MCP
 
-The binding subtree is top-level `provenant dispatch`, `lanes [--wait]`,
+The binding subtree is top-level `provenant dispatch`, `lanes [--wait SECONDS]`,
 `output`, `cancel`, `resume` and `reconcile`. There is no `run`, `fabric run`,
 `fabric lanes` or supervisor control subtree. `design/cli.md` freezes flags;
 Fabric owns MCP registration/rendering and routes requests to the same run API.
@@ -101,12 +99,12 @@ Every command accepts `--json` and the state override from the shared decisions.
 
 | Verb | Inputs and behaviour |
 | --- | --- |
-| `dispatch` | Exactly one prompt file/stdin input or `--manifest PATH`; required `--operation-id ID`, optional task ID, host and `--delivery-id`. Route/access controls below; `--timeout N`, separate `--admission-timeout N`, `--wait N`. Manifest submits 1–64 tasks, concurrency default 4, maximum 8. Detached by default (wait 0); return exact IDs, route, state and artifact paths. |
-| `lanes` | Exact selectors or current actor/project lanes; `--all`, `--limit`, pagination cursor and optional bounded tail. Read-only unless `--wait` is supplied; `--timeout SECONDS` (required with `--wait`), `--summary` and `--condition any|all` (default any); `--all` includes retained terminal lanes. No implicit repair. |
-| `output` | Exact attempt, `--part result\|prompt\|stderr\|events`, offset or tail (default 40, maximum 500 lines), byte cap 1–65536, default 65536. Return offsets, EOF, clipping, encoding and completeness. Prompt reads require dispatch-equivalent authority. |
+| `dispatch` | Exactly one prompt file/stdin input or `--manifest PATH`; required `--operation-id ID`, optional task ID, host and `--delivery-id`. Route/access controls below; `--provider-timeout SECONDS` (the provider runtime budget), `--wait SECONDS`. Manifest submits 1–64 tasks, concurrency default 4, maximum 8. Detached unless `--wait` is given; return exact IDs, route, state and artifact paths. |
+| `lanes` | Exact selectors or current actor/project lanes; `--all`, `--limit` and pagination cursor. Read-only unless `--wait SECONDS` is supplied, with `--condition any|all` (default any); `--all` includes retained terminal lanes. No implicit repair. |
+| `output` | Exact attempt, `--part result\|prompt\|stderr\|events`, offset (default 0) or tail (1–500 lines, no default), byte cap 1–65536, default 65536. Return offsets, EOF, clipping, encoding and completeness. Prompt reads require dispatch-equivalent authority. |
 | `cancel` | Exact run/task/attempt scope, operation ID, reason (maximum 256 bytes) and optional wait. Return requested/already-terminal/unobservable plus custody; accepted cancellation does not prove exit. |
-| `resume` | Exact prior attempt, operation ID, `expected_generation`, new prompt and explicit continued or fresh turn. Continued turns preserve route/access/session; fresh turns may select a new route. Return a new run and `retry_of`; closed runs stay immutable. |
-| `reconcile` | Exact project/operation ID or project-scoped recovery scan, explicit budget and optional typed decision for uncertain work. Recover queued scheduler work, reattach/check holders, finish pending publication and repair summaries/events; never blindly replay an uncertain launch. |
+| `resume` | Exact prior attempt, operation ID, `expected_generation` (CLI sends 0) and new prompt. Continued turns preserve route/access/session; a fresh turn or new route is a new `dispatch`. Return a new run and `retry_of`; closed runs stay immutable. |
+| `reconcile` | Exact runs (mapped to their operations) or project-scoped recovery scan, and optional typed decision for uncertain work. Recover queued scheduler work, reattach/check holders, finish pending publication and repair summaries/events; never blindly replay an uncertain launch. |
 
 CLI waits take an explicit 1–14400 seconds; MCP 1–55. There is no default,
 and zero is not a wait budget. `design/cli.md` owns the exact flags. Fabric's earlier 3600/30 caps are superseded by the shared Waits
@@ -127,9 +125,9 @@ always on. Workflow owns assurance
 inputs (intent, risk tier, reviewer and orchestrator family), rather than run
 flags. Drop `--context-ceiling`. No raw argv, unrestricted knobs, secret bypass
 or hidden downgrade. Read-only fallback is explicit
-(`none|ADAPTER/ID[,ADAPTER/ID]`, at most two models, default none).
+(`ADAPTER/ID[,ADAPTER/ID]`, at most two models; omitted means none).
 Access requests carry mode (default read-only), cwd, a required writer worktree,
-read/write roots, network and capabilities. Confinement checks caller authority;
+read roots, network (default off) and capabilities; writes stay in the worktree. Confinement checks caller authority;
 flags cannot grant it, and provider access excludes custody/control files.
 
 A manifest is strict JSON `{schema_version:1,tasks:[...]}` with unique task IDs
@@ -191,7 +189,7 @@ This shared attempt path and these supervisor filenames are the run/supervisor
 contract, under the binding top-level Layout row; there is no
 `control.json`, `supervisor.json` or second events capture. Provider parsing
 uses the live stream, not a second on-disk copy. Structured run events live
-in SQLite. Retention policy is out of scope. `provenant clean` deletes only
+in SQLite. Retention policy is out of scope. Guardian settlement deletes only
 disposable `scratch/` data; history, unclassified data and transcripts remain
 retained, never staged there.
 Modes are 0700/0600 under state's verified root. Use rusqlite WAL,
@@ -312,7 +310,7 @@ retains a transaction between calls.
 | run / CLI, Fabric | `operation(ProjectId, OperationId)` and `recover(ProjectId, OperationId) -> Result<Observed<SubmissionReceipt>, RunError>`; `reconcile(ProjectId, OperationId, ReconcileDecision) -> Result<RunSnapshot, RunError>`. Recover resumes known queued/publication work; reconcile checks uncertain custody before an explicit decision. No implicit writer replay. |
 | run / CLI, Fabric | `query(RunQuery) -> Result<Page<RunSnapshot>, RunError>`; `snapshot(ProjectId, AttemptRef) -> Result<RunSnapshot, RunError>` reports the active count for its selection, including starting and custody-unknown reservations; `wait(RunQuery, WaitBudget, &CancelToken) -> Result<Page<RunSnapshot>, RunError>`, with `WaitCondition::Any\|All` and the attention semantics above. |
 | run / Fabric federation | `events(RunCursor, usize) -> Result<Page<RunEvent>, RunError>` and `ack_events(RunCursor)` on the scoped handle; lazy pulls, durable per-host cursors, no Fabric registry. |
-| run / CLI, Fabric | `cancel(AttemptRef, OperationKey, CancelReason, &ExecutionContext) -> Result<CancelReceipt, RunError>`; aggregate scopes expand to exact attempts. `resume(ResumeRequest, OperationKey, &ExecutionContext) -> Result<SubmissionReceipt, RunError>`; request includes `expected_generation`, exact previous attempt, prompt and continued/fresh mode. |
+| run / CLI, Fabric | `cancel(AttemptRef, OperationKey, CancelReason, &ExecutionContext) -> Result<CancelReceipt, RunError>`; aggregate scopes expand to exact attempts. `resume(ResumeRequest, OperationKey, &ExecutionContext) -> Result<SubmissionReceipt, RunError>`; request includes `expected_generation`, exact previous attempt and prompt; it cannot change route or access. |
 | run / CLI, Fabric | `read_output(AttemptRef, ArtifactPart, ByteRange, &ExecutionContext) -> Result<OutputChunk, RunError>`; `export(AttemptRef, ExportLimits, &ExecutionContext) -> Result<ArtifactManifest, RunError>`. Bounded confined regular files and stable digests. |
 | run / Fabric, confinement edge | `capabilities() -> Result<ExecutionCapabilities, RunError>`; `temporary_paths(ProjectId, AttemptRef) -> Result<AttemptTempPaths, RunError>`. Read-only host-local observations/paths, checked against handle authority. |
 | run / workflow composition edge | `AttemptReader::attempt(AttemptId) -> Result<AttemptFact, RunError>` and `attempts(filter)` returns the shared terminal fact; nonterminal attempts are a typed error. `work_snapshot(WorkScope) -> Result<RunWorkSnapshot, RunError>` carries generation, observed time, active count/attempts and held leases. |
@@ -375,14 +373,14 @@ available memory for readers, ten for writers and 500 MiB disk headroom for eith
 20-second startup spacing window to avoid simultaneous memory spikes. A
 failed probe or unavailable lock queues until the request's admission deadline,
 then refuses, rather than launching unchecked. Admission has its own deadline
-(default 3600 seconds read-only, 10800 writer, overridable independently). The provider runtime budget retains the old defaults
+(default 3600 seconds read-only, 10800 writer; not caller-set). The provider runtime budget retains the old defaults
 3600/10800 seconds and counts provider execution across automatic retries only;
 queueing, routing and admission consume none of it. Record each duration.
 Batch concurrency remains 4/8 with 64 tasks, distinct from host admission caps.
 No live provider is stopped because a later memory or disk sample falls below a threshold.
 
-Manual retry and continuation allocate a new RunId, with `retry_of` pointing
-to the exact old AttemptRef. Closed runs never reopen. Resume atomically compares/advances a separate
+Continuation allocates a new RunId, with `retry_of` pointing to the exact old
+AttemptRef; a manual retry is a new `dispatch`. Closed runs never reopen. Resume atomically compares/advances a separate
 per-target continuation generation with the new operation; replay of the same
 operation returns its receipt before that check. The old terminal attempt is
 unchanged. Automatic read-only
@@ -390,7 +388,7 @@ fallback alone appends an attempt inside the original run/task. All retries
 require observed prior exit and completed cleanup. Continued resume
 preserves route, account, confinement and exact provider session; unsupported
 or missing sessions fail without a fresh launch. A new route or fresh session
-is explicit. Replaying a successful attempt without new input is refused.
+is an explicit new dispatch. Replaying a successful attempt without new input is refused.
 Input-required continuation retains the question and answer in
 its new prompt. Opted-in read-only fallback follows only typed transient
 rate/quota/model-unavailable outcomes, within the original budget and at most
@@ -592,7 +590,7 @@ subject. None of these partial edits is included in the reduction estimate.
 | --- | --- |
 | `tools/front-door/src/{main.rs,help.rs}`, execution help files, `tools/front-door/tests/common/mod.rs` | CLI, steps 1/2/4: native test rig and frozen verbs; remove old routes/oracle hooks |
 | `config/harness-knobs.json:19,25`, `tests/test_harness_profile.py` | State/config, step 2: replace knobs with typed config; remove retired context-ceiling settings |
-| `scripts/clean.py:233` | Supervisor/CLI cleanup, step 5: use new run store/layout; no run-directory contract |
+| `scripts/clean.py:233` | Supervisor S3 deletes `clean.py` with its tests; guardian scratch settlement and `worktree remove --merged` replace it. No `clean` verb or run-directory contract survives |
 | `tests/conftest.py` | Run + CLI + Fabric, each step: remove deleted fixtures; temporary HOME/state/harness paths |
 | `tests/test_model_route_pools.py` | Routing, step 2: replace obsolete dispatch/route assumptions |
 | `tests/test_issue_697_custody.py` | Run + supervisor, steps 2/4: replace old subject with native custody/fault cases |
@@ -652,7 +650,7 @@ Python/V8 emulation, selector, bridge or old-output judge is introduced.
    and removes the remaining old consumers together. Delete run_controls and
    its tests with `run_dir_finalize` and the Fabric execution/batch/resume
    callers. Run cuts run_dir_init, RUN_RECEIPT/MANIFEST and the driver lease
-   after the caller matrix is updated; run records plus clean replace them.
+   after the caller matrix is updated; run records plus guardian scratch settlement replace them.
    Delete git_evidence_packet with its last control and inert workflow oracle
    consumers; Git reads use supervisor run_utility. Update lane_launch's
    dynamic run_records cancellation call. Finish these last-importer groups:
