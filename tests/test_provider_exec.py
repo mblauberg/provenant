@@ -158,11 +158,9 @@ def test_opencode_read_only_grants_configured_instruction_files(monkeypatch, tmp
     config = home / ".config/opencode"
     config.mkdir(parents=True)
     (config / "HARNESS.md").symlink_to(product / "HARNESS.md")
-    (config / "opencode.json").write_text(
-        json.dumps({
-            "$schema": "https://opencode.ai/config.json",
-            "instructions": [str(config / "HARNESS.md"), str(home / ".ssh/id_ed25519"), "docs/*.md"],
-        }),
+    (config / "opencode.jsonc").write_text(
+        '{\n  // global rules\n  "$schema": "https://opencode.ai/config.json", /* inline */\n'
+        f'  "instructions": ["{config / "HARNESS.md"}", "{home / ".ssh/id_ed25519"}", "docs/*.md",],\n}}\n',
         encoding="utf-8",
     )
     monkeypatch.setattr(supervisor.Path, "home", lambda: home)
@@ -198,6 +196,16 @@ def test_read_only_state_link_into_a_credential_store_is_not_granted(monkeypatch
     assert f'(subpath "{home / ".opencode"}")' not in profile
     assert f'(subpath "{home / ".ssh"}")' not in profile
     assert f'(subpath "{home / ".config/opencode"}")' in profile
+
+
+def test_jsonc_reader_keeps_comment_and_comma_text_inside_strings():
+    supervisor = importlib.import_module("skills.orchestrate.scripts.provider_exec")
+    text = '{"a": "x,}y // not a comment /* nor this */", "b": [1, 2, /* c */ ], // tail\n}'
+    assert supervisor.provider_confinement._jsonc_loads(text) == {
+        "a": "x,}y // not a comment /* nor this */", "b": [1, 2],
+    }
+    with pytest.raises(ValueError):
+        supervisor.provider_confinement._jsonc_loads('{"a": 1} /* unterminated')
 
 
 def test_opencode_read_only_discovery_skips_symlinks_to_credentials(monkeypatch, tmp_path):

@@ -18,6 +18,7 @@ import tempfile
 import tomllib
 from typing import Any
 
+from lib.jsonc import parse_jsonc
 from lib.product_root_resolver import POINTER_RELATIVE_PATH, load_pointer_path
 
 
@@ -36,6 +37,10 @@ CLIENT_SEATS = {"cursor": "cursor", "agy": "agy", "kiro": "kiro", "opencode": "o
 
 
 class RegistrationError(ValueError):
+    pass
+
+
+class RegistrationManualEditError(RegistrationError):
     pass
 
 
@@ -226,11 +231,9 @@ def opencode_update(
     snapshot = _capture(path, label)
     text = _text(snapshot, label)
     try:
-        value = json.loads(text) if snapshot.source_kind != "absent" else {}
+        value, has_comments = parse_jsonc(text) if snapshot.source_kind != "absent" else ({}, False)
     except json.JSONDecodeError as exc:
-        raise RegistrationError(
-            f"{label} JSONC is unsupported by the Python installer pending the Rust config owner: {exc}"
-        ) from exc
+        raise RegistrationError(f"{label} config is invalid JSONC: {exc}") from exc
     if not isinstance(value, dict):
         raise RegistrationError(f"{label} config root must be an object")
     original = json.loads(json.dumps(value))
@@ -261,6 +264,13 @@ def opencode_update(
     if servers.get(SERVER_NAME) == entry and value == original:
         return ConfigProposal(client, snapshot, text, "existing")
     servers[SERVER_NAME] = entry
+    if has_comments:
+        instructions = json.dumps(value.get("instructions", []), separators=(",", ":"))
+        fabric = json.dumps(entry, separators=(",", ":"))
+        raise RegistrationManualEditError(
+            "OpenCode JSONC comments must be preserved; add by hand "
+            f"instructions={instructions} and mcp.fabric={fabric} in {path}"
+        )
     return ConfigProposal(client, snapshot, json.dumps(value, indent=2, sort_keys=True) + "\n", "ready")
 
 
@@ -804,6 +814,9 @@ def main(argv: list[str] | None = None) -> int:
                     )
                     return 4
             return 0
+    except RegistrationManualEditError as exc:
+        print(f"warning: {exc}", file=sys.stderr)
+        return 3
     except (OSError, RegistrationError) as exc:
         print(f"conflicting: {exc}", file=sys.stderr)
         return 3

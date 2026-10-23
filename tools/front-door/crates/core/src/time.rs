@@ -14,6 +14,10 @@ pub enum TimeError {
 }
 
 /// A UTC timestamp of exact microsecond precision. No system clock is read.
+/// Uses jiff's timestamp range, narrowed to RFC3339's nonnegative four-digit
+/// years: 0000-01-01T00:00:00.000000Z through jiff::Timestamp::MAX
+/// rounded down to microseconds (9999-12-31T11:59:59.999999Z).
+/// Jiff enforces the upper bound; construction rejects its signed-year range.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
 pub struct UtcMicros(jiff::Timestamp);

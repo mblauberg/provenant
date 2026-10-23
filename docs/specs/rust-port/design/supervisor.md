@@ -643,3 +643,5 @@ cut; no selector or second public launch path is introduced.
 Every build PR reports measured `Net lines:` across Python, TS and Rust,
 including deletions and tests. Design acceptance precedes those build PRs;
 opening this design PR does not accept it or arm auto-merge.
+
+The rehome/reuse list above, including native `process_info`/`worker_liveness` and `sys/process/darwin.rs`, is recoverable from `e0613438` after deletion from this skeleton.

@@ -9,9 +9,10 @@ mod path_wire;
 mod yaml;
 
 pub use attempt_fact::{
-    AttemptFact, AttemptOutcome, OutputRef, ReviewerFact, RouteFact, UsageCounts,
+    AttemptFact, AttemptOutcome, OutputRef, ReviewerFact, ReviewerProvenance, RouteFact, Usage,
+    UsageCounts,
 };
-pub use canonical::{CanonicalError, CanonicalV1, FileDigest, record_digest};
+pub use canonical::{CanonicalBytes, CanonicalError, CanonicalV1, FileDigest, record_digest};
 pub use json::{DecodeError, EncodeError, Limits, RecordHeader, decode, decode_v1, encode};
 pub use jsonc::{JsoncDocument, JsoncToken, JsoncTokenKind, decode_jsonc};
 pub use path_wire::{PathWire, PathWireError};

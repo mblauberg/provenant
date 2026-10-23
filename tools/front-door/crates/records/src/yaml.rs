@@ -33,6 +33,7 @@ pub enum YamlErrorKind {
     InvalidIndentation,
     DuplicateKey,
     AmbiguousScalar,
+    BlockSequenceAfterMapping,
     Anchor,
     Alias,
     Tag,
@@ -53,6 +54,9 @@ impl std::fmt::Display for YamlErrorKind {
             Self::InvalidIndentation => "invalid indentation",
             Self::DuplicateKey => "duplicate key",
             Self::AmbiguousScalar => "ambiguous scalar; quote this value",
+            Self::BlockSequenceAfterMapping => {
+                "block sequence cannot follow an empty mapping value"
+            }
             Self::Anchor => "anchor is not supported",
             Self::Alias => "alias is not supported",
             Self::Tag => "tag is not supported",
@@ -499,9 +503,10 @@ impl<'a> Parser<'a> {
             return Ok(YamlValue::String(value));
         }
         if contains_yaml_directive_token(text) {
-            let kind = if text.split_whitespace().any(|part| part.starts_with('&')) {
+            let first = text.split_whitespace().next().unwrap_or("");
+            let kind = if first.starts_with('&') {
                 YamlErrorKind::Anchor
-            } else if text.split_whitespace().any(|part| part.starts_with('*')) {
+            } else if first.starts_with('*') {
                 YamlErrorKind::Alias
             } else {
                 YamlErrorKind::Tag
@@ -529,6 +534,9 @@ impl<'a> Parser<'a> {
             ));
         }
         if text.starts_with('|') || text.starts_with('>') {
+            return Err(error(YamlErrorKind::InvalidSyntax, span.line, span.column));
+        }
+        if starts_with_plain_scalar_indicator(text) || contains_forbidden_plain_colon(text) {
             return Err(error(YamlErrorKind::InvalidSyntax, span.line, span.column));
         }
         Ok(YamlValue::String(text.to_owned()))
@@ -658,6 +666,12 @@ impl<'a> Parser<'a> {
                 span.column,
             ));
         }
+        if starts_with_plain_scalar_indicator(text)
+            || text.starts_with(['[', '|', '>'])
+            || contains_forbidden_plain_colon(text)
+        {
+            return Err(error(YamlErrorKind::InvalidSyntax, span.line, span.column));
+        }
         Ok(text.to_owned())
     }
 
@@ -726,6 +740,19 @@ impl<'a> Parser<'a> {
                 } else if next_line.is_empty() {
                     // The blank-line run supplies its own break. A folded
                     // normal line before a blank is one output newline.
+                    let mut after_blanks = content_index.saturating_add(1);
+                    while content
+                        .get(after_blanks)
+                        .is_some_and(|(text, _)| text.is_empty())
+                    {
+                        after_blanks = after_blanks.saturating_add(1);
+                    }
+                    if content
+                        .get(after_blanks)
+                        .is_some_and(|(_, more_indented)| *more_indented)
+                    {
+                        output.push('\n');
+                    }
                 } else {
                     output.push(' ');
                 }
@@ -736,11 +763,13 @@ impl<'a> Parser<'a> {
             while output.ends_with('\n') {
                 output.pop();
             }
-        } else if !content.is_empty() {
+        } else if content.iter().any(|(line, _)| !line.is_empty()) {
             while output.ends_with('\n') {
                 output.pop();
             }
             output.push('\n');
+        } else {
+            output.clear();
         }
         Ok(output)
     }
@@ -754,6 +783,13 @@ impl<'a> Parser<'a> {
         self.skip_trivia();
         match self.lines.get(self.index).copied() {
             Some(child) if child.indent > parent_indent => Ok(child.indent),
+            Some(child) if child.indent == parent_indent && is_sequence_line(child.text) => {
+                Err(error(
+                    YamlErrorKind::BlockSequenceAfterMapping,
+                    child.number,
+                    child.indent + 1,
+                ))
+            }
             Some(_) | None => Err(error(YamlErrorKind::AmbiguousScalar, line, span.column)),
         }
     }
@@ -1052,7 +1088,25 @@ fn is_document_marker(line: SourceLine<'_>) -> bool {
 
 fn contains_yaml_directive_token(text: &str) -> bool {
     text.split_whitespace()
-        .any(|part| part.starts_with('&') || part.starts_with('*') || part.starts_with('!'))
+        .next()
+        .is_some_and(|part| part.starts_with('&') || part.starts_with('*') || part.starts_with('!'))
+}
+
+fn starts_with_plain_scalar_indicator(text: &str) -> bool {
+    matches!(
+        text.as_bytes().first(),
+        Some(b'-' | b'?' | b':' | b',' | b']' | b'}' | b'%' | b'@' | b'`')
+    )
+}
+
+fn contains_forbidden_plain_colon(text: &str) -> bool {
+    let bytes = text.as_bytes();
+    bytes.iter().enumerate().any(|(index, byte)| {
+        *byte == b':'
+            && bytes
+                .get(index + 1)
+                .is_none_or(|next| next.is_ascii_whitespace())
+    })
 }
 
 fn ambiguous_word(text: &str) -> bool {

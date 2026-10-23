@@ -59,8 +59,13 @@ pub enum ConfigError {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Origin {
-    Compiled { profile: Profile },
-    User { path: provenant_records::PathWire },
+    Compiled {
+        profile: Profile,
+    },
+    /// Config file path relative to the explicitly selected state root.
+    User {
+        path: provenant_records::PathWire,
+    },
 }
 
 /// The startup snapshot contains typed, validated values, never an untyped bag.

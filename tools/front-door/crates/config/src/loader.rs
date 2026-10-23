@@ -33,8 +33,17 @@ pub fn load_with_domains<R: Read, T: DeserializeOwned + Serialize>(
     sections: &DomainSections<T>,
 ) -> Result<ResolvedConfig<T>, ConfigError> {
     let path = roots.state.as_path().join("config.toml");
+    // Origins identify the sole config file relative to the selected state
+    // root. Never serialise the native root as UTF-8 or weaken PathWire's
+    // containment invariant to carry an absolute path.
+    let relative = provenant_core::RelativePath::parse("config.toml").map_err(|source| {
+        ConfigError::PathEncoding {
+            path: path.clone(),
+            source: source.into(),
+        }
+    })?;
     let user_origin = Origin::User {
-        path: provenant_records::PathWire::from_path(&path).map_err(|source| {
+        path: provenant_records::PathWire::from_relative(&relative).map_err(|source| {
             ConfigError::PathEncoding {
                 path: path.clone(),
                 source,

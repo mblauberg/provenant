@@ -1,5 +1,3 @@
-use std::collections::BTreeMap;
-
 use provenant_core::{
     ActorId, AttemptId, DeliveryId, GitOid, OperationId, ProjectId, TaskId, WallTime,
 };
@@ -36,16 +34,33 @@ pub struct RouteFact {
     pub account_label: Option<String>,
 }
 
-/// Named usage counts stay unsigned and retain only values observed by a
-/// trusted provider adapter.
+/// Disjoint provider usage counts. Unknown categories remain absent.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
-pub struct UsageCounts {
-    pub counts: BTreeMap<String, u64>,
+pub struct Usage {
+    pub uncached_input: Option<u64>,
+    pub cache_read: Option<u64>,
+    pub cache_write: Option<u64>,
+    /// Output tokens excluding reasoning.
+    pub output_excluding_reasoning: Option<u64>,
+    pub reasoning: Option<u64>,
+}
+
+/// Compatibility name for consumers of the original attempt projection.
+pub type UsageCounts = Usage;
+
+/// Evidence supporting reviewer attribution, as required by workflow policy.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReviewerProvenance {
+    Observed,
+    ChairAttested,
+    Unknown,
 }
 
 /// Verified reviewer attribution included when the run owner has evidence.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct ReviewerFact {
+    pub provenance: ReviewerProvenance,
     pub actor_id: ActorId,
     pub family: Option<String>,
     pub model: Option<String>,
@@ -64,6 +79,7 @@ pub struct OutputRef {
 /// implementation.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct AttemptFact {
+    pub attempt_id: AttemptId,
     pub task_id: TaskId,
     pub attempt_number: u64,
     pub operation_id: OperationId,
@@ -73,7 +89,7 @@ pub struct AttemptFact {
     pub started_at: WallTime,
     pub finished_at: WallTime,
     pub resolved_route: Option<RouteFact>,
-    pub usage: UsageCounts,
+    pub usage: Usage,
     pub output_paths: Vec<PathWire>,
     pub reviewer: Option<ReviewerFact>,
     pub delivery_id: Option<DeliveryId>,

@@ -78,8 +78,8 @@ fn partial_inline_domain_override_keeps_selected_preset_defaults_and_leaf_origin
     assert_eq!(
         config.origins.get("domains.sample.enabled"),
         Some(&Origin::User {
-            path: provenant_records::PathWire::from_path(
-                &roots().state.as_path().join("config.toml")
+            path: provenant_records::PathWire::from_relative(
+                &provenant_core::RelativePath::parse("config.toml").unwrap()
             )
             .unwrap()
         })
@@ -362,7 +362,7 @@ fn show_serialises_origins_for_non_utf8_state_paths() {
     let path_wire: provenant_records::PathWire =
         serde_json::from_value(output.pointer("/origins/profile/path").unwrap().clone()).unwrap();
     assert_eq!(
-        path_wire.to_path_buf().unwrap(),
-        roots.state.as_path().join("config.toml")
+        path_wire.to_relative_path().unwrap().as_path(),
+        Path::new("config.toml")
     );
 }
