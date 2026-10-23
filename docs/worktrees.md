@@ -163,8 +163,11 @@ To opt in, run this command in the primary checkout; it refuses to overwrite
 any existing hook. The hook passes
 `ORIG_HEAD` to `provenant clean --prune-merged --merged-since ORIG_HEAD`, so it
 prunes only branches the merge brought in. It quietly skips cleanup if
-`ORIG_HEAD` is missing. Squash merges fail the ancestry proof. Only selected
-branches receive removal or skip reports; older merged worktrees are untouched.
+`ORIG_HEAD` is missing. Merge commits are proven by ancestry. Squash merges are
+proven by a merged pull request whose head SHA exactly matches the local branch
+tip and whose merge commit is an ancestor of the integration branch. Only
+selected branches receive removal or skip reports; older merged worktrees are
+untouched.
 
 ```sh
 hook="$(git rev-parse --git-path hooks)/post-merge"; source="$(git rev-parse --show-toplevel)/scripts/hooks/post-merge"; if [ -e "$hook" ] || [ -L "$hook" ]; then printf '%s\n' 'post-merge hook already exists; inspect it' >&2; else ln -s "$source" "$hook"; fi
@@ -212,18 +215,18 @@ commit, ancestry is the gate:
 git -C <primary-root> merge-base --is-ancestor <merged-branch> <integration-branch>
 ```
 
-For a squash merge, ancestry cannot hold. The pull request must report
-`MERGED` with the expected refs and the scoped content diff must be empty:
+For a squash merge, the pull request must be merged, its head SHA must equal the
+local branch tip, and its merge commit must be in the integration branch:
 
 ```sh
-gh pr view <n> --json state,headRefName,baseRefName
-git -C <primary-root> diff <integration-branch> <merged-branch> -- <paths the branch touched>
+gh pr list --state merged --head <merged-branch> --json number,headRefOid,mergeCommit
+git -C <primary-root> merge-base --is-ancestor <merge-commit-oid> <integration-branch>
 ```
 
 Only after the applicable proof passes, prune that branch's artefacts. The
-helper removes the clean worktree and uses `git branch -d` only when the
-branch is merged into the checked-out integration branch. Force deleting an
-unmerged branch remains separately gated:
+helper removes the clean worktree and deletes the local branch after either
+ancestry or squash proof. Force deleting any unproven branch remains separately
+gated:
 
 ```sh
 scripts/worktree remove <name> --repo <primary-root>

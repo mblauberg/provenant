@@ -337,7 +337,8 @@ def _indexed_run_ids(index: Path) -> dict[str, set[str]]:
 
 
 def _worktree_verdict(root: Path, path: Path, open_heads: set[str],
-                      registered: set[Path], *, integration_ref: str | None = None) -> str:
+                      registered: set[Path], *, integration_ref: str | None = None,
+                      prune_merged: bool = False, since_revision: str | None = None) -> str:
     if path.resolve() not in registered:
         return "triage:unregistered"
     agent = path / ".agent-run"
@@ -360,8 +361,19 @@ def _worktree_verdict(root: Path, path: Path, open_heads: set[str],
     dirty = _command("git", "status", "--porcelain=v1", "--untracked-files=all", cwd=path)
     if dirty.returncode != 0:
         return "triage:git-error"
+    squash_reason = None
     merged = (_merged_by_ancestry(root, branch, integration_ref) if integration_ref is not None
               else _merged(root, branch))
+    if prune_merged and merged and since_revision is not None and _command(
+            "git", "merge-base", "--is-ancestor", f"refs/heads/{branch}", since_revision,
+            cwd=root).returncode != 1:
+        # Only a definite "not an ancestor" (1) selects the branch; a git error refuses.
+        merged, squash_reason = False, "before-merged-since"
+    if prune_merged and not merged and squash_reason is None and integration_ref is not None:
+        tip = _command("git", "rev-parse", f"refs/heads/{branch}", cwd=root)
+        merged, squash_reason = _squash_merge_proof(
+            root, branch, tip.stdout.strip() if tip.returncode == 0 else "",
+            integration_ref, since_revision)
     if dirty.stdout:
         return "triage:merged-dirty" if merged else "keep:dirty"
     if merged:
@@ -380,7 +392,7 @@ def _worktree_verdict(root: Path, path: Path, open_heads: set[str],
         if liveness.returncode not in {0, 1} or liveness.stderr.strip():
             return "keep:liveness-unknown"
         return "delete"
-    return "keep:unmerged"
+    return f"keep:{squash_reason}" if squash_reason else "keep:unmerged"
 
 
 def _integration_ref(root: Path, *, required: bool = False) -> str:
@@ -401,6 +413,39 @@ def _integration_ref(root: Path, *, required: bool = False) -> str:
 def _merged_by_ancestry(root: Path, branch: str, integration_ref: str | None = None) -> bool:
     return _command("git", "merge-base", "--is-ancestor", f"refs/heads/{branch}",
                     integration_ref or _integration_ref(root), cwd=root).returncode == 0
+
+
+def _squash_merge_proof(root: Path, branch: str, branch_tip: str,
+                        integration_ref: str, since_revision: str | None = None) -> tuple[bool, str | None]:
+    """Prove a squash merge from exact PR head identity and integration ancestry."""
+    if not branch_tip:
+        return False, "gh-head-unavailable"
+    try:
+        result = _command("gh", "pr", "list", "--state", "merged", "--head", branch,
+                          "--json", "number,headRefOid,mergeCommit", cwd=root)
+        prs = json.loads(result.stdout) if result.returncode == 0 else None
+    except (OSError, subprocess.TimeoutExpired, ValueError):
+        prs = None
+    if not isinstance(prs, list):
+        return False, "gh-unavailable-ancestry-only"
+    candidates = [pr for pr in prs if isinstance(pr, dict) and pr.get("headRefOid") == branch_tip]
+    if not candidates:
+        return False, "gh-no-matching-merged-pr"
+    failure_reason = "gh-merge-commit-missing"
+    for pr in candidates:
+        merge = pr.get("mergeCommit")
+        oid = merge.get("oid") if isinstance(merge, dict) else None
+        if not isinstance(oid, str) or not oid:
+            continue
+        if _command("git", "merge-base", "--is-ancestor", oid, integration_ref, cwd=root).returncode != 0:
+            failure_reason = "gh-merge-not-integration"
+            continue
+        if since_revision is not None and _command(
+                "git", "merge-base", "--is-ancestor", oid, since_revision, cwd=root).returncode != 1:
+            failure_reason = "before-merged-since"
+            continue
+        return True, None
+    return False, failure_reason
 
 
 def _branch_at_integration_tip(root: Path, branch: str, integration_ref: str) -> bool:
@@ -464,7 +509,7 @@ def plan(repo: Path, *, include: frozenset[str] = DEFAULT_INCLUDE, older_than: f
                         integration_ref, cwd=root).returncode != 0:
                 raise CleanError("merge starting revision is not an ancestor of the integration branch")
     if prune_merged:
-        pr_bodies, open_heads = [], set()
+        pr_bodies, open_heads = _open_prs(root)
     elif pr_bodies is None:
         pr_bodies, open_heads = _open_prs(root)
     else:
@@ -546,15 +591,18 @@ def plan(repo: Path, *, include: frozenset[str] = DEFAULT_INCLUDE, older_than: f
                 if branches:
                     if branch not in branches:
                         continue
-                elif (not _merged_by_ancestry(root, branch, integration_ref)
-                      or _command("git", "merge-base", "--is-ancestor", f"refs/heads/{branch}",
-                                  since_revision, cwd=root).returncode != 1):
-                    continue
+                elif merged_since is not None:
+                    if (_merged_by_ancestry(root, branch, integration_ref)
+                            and _command("git", "merge-base", "--is-ancestor", f"refs/heads/{branch}",
+                                         since_revision, cwd=root).returncode != 1):
+                        continue
             if path.is_symlink() or not path.is_dir():
                 verdict = "triage:unregistered"
             else:
                 verdict = _worktree_verdict(root, path, open_heads, registered,
-                                            integration_ref=integration_ref)
+                                            integration_ref=integration_ref,
+                                            prune_merged=prune_merged,
+                                            since_revision=since_revision)
             if "worktrees" not in include and verdict == "delete":
                 verdict = "keep:excluded"
             elif verdict == "delete" and older_than is not None and _age(path, now) < older_than:
@@ -581,7 +629,8 @@ def plan(repo: Path, *, include: frozenset[str] = DEFAULT_INCLUDE, older_than: f
     result: dict[str, Any] = {"root": str(root), "rows": rows, "reclaimable_bytes": total, "plan_sha256": digest,
                               "approval": digest_data,
                               "_context": {"refs": refs, "pr_unknown": pr_unknown, "open_heads": open_heads,
-                                           "integration_ref": integration_ref, "older_than": older_than},
+                                           "integration_ref": integration_ref, "older_than": older_than,
+                                           "prune_merged": prune_merged, "since_revision": since_revision},
                               "warnings": (["GitHub PR state unavailable; run deletion held, merged worktrees use Git proof"]
                                            if pr_bodies is None else [])}
     if integration_ref is not None:
@@ -662,7 +711,9 @@ def _reclassify(root: Path, row: dict[str, Any], context: dict[str, Any]) -> tup
                                 older_than, indexed, now))
     elif kind == "worktree":
         verdict = _worktree_verdict(root, path, context["open_heads"], _registered_worktrees(root),
-                                    integration_ref=context["integration_ref"])
+                                    integration_ref=context["integration_ref"],
+                                    prune_merged=context.get("prune_merged", False),
+                                    since_revision=context.get("since_revision"))
         if verdict == "delete" and older_than is not None and _age(path, now) < older_than:
             verdict = "keep:retention"
     elif kind == "scratch":
@@ -708,14 +759,20 @@ def _apply_plan(current: dict[str, Any], approved: dict[str, Any]) -> tuple[list
             path = root / row["path"]
             branch = _command("git", "symbolic-ref", "--quiet", "--short", "HEAD", cwd=path)
             if (branch.returncode != 0 or path.name != branch.stdout.strip().replace("/", "-")
-                    or not _merged_by_ancestry(root, branch.stdout.strip(), integration_ref)):
+                    or not (_merged_by_ancestry(root, branch.stdout.strip(), integration_ref)
+                            or _squash_merge_proof(
+                                root, branch.stdout.strip(),
+                                _command("git", "rev-parse", f"refs/heads/{branch.stdout.strip()}", cwd=root).stdout.strip(),
+                                integration_ref, approved.get("merged_since_revision"))[0])):
                 raise CleanError(f"merged worktree changed since the pruning plan: {path}")
             if approved.get("branches") and branch.stdout.strip() not in approved["branches"]:
                 raise CleanError(f"pruning branch changed since the plan: {path}")
             since_revision = approved.get("merged_since_revision")
-            if since_revision and _command("git", "merge-base", "--is-ancestor", f"refs/heads/{branch.stdout.strip()}",
-                                           since_revision, cwd=root).returncode != 1:
-                raise CleanError(f"merge starting revision already contains branch: {path}")
+            if since_revision and _worktree_verdict(
+                    root, path, current["_context"]["open_heads"], _registered_worktrees(root),
+                    integration_ref=integration_ref, prune_merged=True,
+                    since_revision=since_revision) != "delete":
+                raise CleanError(f"merge starting revision or squash proof changed: {path}")
     removed: list[str] = []
     for row in rows:
         path = root / row["path"]
@@ -741,13 +798,38 @@ def _apply_plan(current: dict[str, Any], approved: dict[str, Any]) -> tuple[list
             temporary.replace(receipt_path)
             continue
         if row["kind"] == "worktree":
+            branch_result = _command("git", "symbolic-ref", "--quiet", "--short", "HEAD", cwd=path)
+            branch = branch_result.stdout.strip() if branch_result.returncode == 0 else None
+            squash_tip = None
+            squash_proven = False
+            if branch and not _merged_by_ancestry(root, branch, current["_context"]["integration_ref"]):
+                tip = _command("git", "rev-parse", f"refs/heads/{branch}", cwd=root)
+                squash_tip = tip.stdout.strip() if tip.returncode == 0 else None
+                squash_proven = bool(squash_tip and _squash_merge_proof(
+                    root, branch, squash_tip, current["_context"]["integration_ref"],
+                    current["_context"].get("since_revision"))[0])
             command = [sys.executable, str(Path(__file__).with_name("worktree.py")), "remove", path.name,
                        "--repo", str(root)]
             result = subprocess.run(command, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                     timeout=120, check=False)
             if result.returncode != 0:
                 raise CleanError(f"worktree removal failed for {path}: {result.stderr.strip()}")
-            if result.stderr:
+            if squash_proven and branch:
+                # worktree remove only deletes ancestry-merged branches. This branch was
+                # independently proven by the merged PR head and merge commit above.
+                tip = _command("git", "rev-parse", f"refs/heads/{branch}", cwd=root)
+                still_proven = (tip.returncode == 0 and tip.stdout.strip() == squash_tip
+                                and _squash_merge_proof(
+                                    root, branch, squash_tip or "", current["_context"]["integration_ref"],
+                                    current["_context"].get("since_revision"))[0])
+                if not still_proven:
+                    raise CleanError(f"worktree removed but squash proof changed; kept branch {branch}")
+                # Delete only if the ref still holds the proven tip (atomic compare-and-delete).
+                deleted = _command("git", "update-ref", "-d", f"refs/heads/{branch}", squash_tip, cwd=root)
+                if deleted.returncode != 0:
+                    raise CleanError(f"worktree removed but proven merged branch could not be deleted: {branch}")
+                removed.append(f"branch {branch}")
+            elif result.stderr:
                 print(result.stderr, end="", file=sys.stderr)
         elif row["kind"] == "attempt-bulk":
             # Same never-follow rule as plan: refuse when any parent below root became a link.
@@ -817,7 +899,7 @@ def main(argv: list[str] | None = None) -> int:
             proposal = plan(args.repo, include=worktrees, prune_merged=True,
                             branches=tuple(args.branch), merged_since=args.merged_since)
             removed, _ = _apply_plan(proposal, proposal["approval"])
-            report = {"removed": removed, "skipped": [
+            report = {"removed": removed, "warnings": proposal.get("warnings", []), "skipped": [
                 {"path": row["path"], "reason": row["verdict"]}
                 for row in proposal["rows"] if row["kind"] == "worktree" and row["verdict"] != "delete"
             ]}
@@ -836,6 +918,8 @@ def main(argv: list[str] | None = None) -> int:
                            for row in report["rows"]]} if not (args.apply or args.prune_merged) else report
         print(json.dumps(public, indent=2, sort_keys=True))
     elif args.prune_merged:
+        for warning in report.get("warnings", []):
+            print(f"warning: {warning}", file=sys.stderr)
         for path in report["removed"]:
             print(f"removed {path}")
         for row in report["skipped"]:
