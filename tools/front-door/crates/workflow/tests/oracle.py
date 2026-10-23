@@ -12,9 +12,9 @@ if unit == "idle_pause":
     source = root / "skills/autopilot/scripts/validate_idle_pause.py"
 if unit in {"preflight_contract", "preflight_wire", "preflight_decode"}:
     source = root / "skills/orchestrate/scripts/dispatch_preflight.py"
-if unit == "lane_exit_contract":
+if unit in {"lane_exit_contract", "lane_exit_raw"}:
     source = root / "skills/orchestrate/scripts/lane_exit.py"
-if unit == "lane_launch_contract":
+if unit in {"lane_launch_contract", "lane_duration", "lane_batch"}:
     source = root / "skills/orchestrate/scripts/lane_launch.py"
 if unit in {"observer_contract", "observer_contract_wire"}:
     source = root / "skills/orchestrate/scripts/provider_observer.py"
@@ -97,12 +97,37 @@ for case in cases:
         observer = module.LiveObserver(case["plan"])
         for line in case["lines"]:
             observer.feed_stdout((json.dumps(line) + "\n").encode())
+        for line in case.get("raw_lines", []):
+            observer.feed_stdout((line + "\n").encode())
+        for chunk in case.get("diagnostics", []):
+            observer.feed_stderr(chunk["text"].encode(), chunk["stream"])
         summary = observer.result()
         results.append({"wire": json.dumps(summary, ensure_ascii=False, separators=(",", ":")), "failure_keys": list(summary["semantic_failures"])} if unit == "observer_contract_wire" else summary)
     elif unit == "lane_launch_contract":
         directory = Path(case["root"])
         plan = {"adapter":"claude","model":"m","cwd":str(directory),"run_dir":str(directory),"mode":case["mode"],"timeout_seconds":1.125,"startup_seconds":0.025,"grace_seconds":0.050,"silence_seconds":0.125,"_lineage_token":"token","batch_id":"batch-001","attempt_identity":{"run_dir":str(directory / "run")}}
-        results.append(module.build_spec(plan, {"PATH":"/bin","SECRET_REFERENCE":"synthetic-value"}, argv=["/bin/claude","-p"], stdin_path=directory / "prompt.md" if case["stdin"] else None, events_path=directory / "events.jsonl", stderr_path=directory / "stderr.log", max_bytes=2048))
+        built = module.build_spec(plan, {"PATH":"/bin","SECRET_REFERENCE":"synthetic-value"}, argv=["/bin/claude","-p"], stdin_path=directory / "prompt.md" if case["stdin"] else None, events_path=directory / "events.jsonl", stderr_path=directory / "stderr.log", max_bytes=2048)
+        results.append(json.dumps(built, ensure_ascii=False, separators=(",", ":")))
+    elif unit == "lane_duration":
+        try:
+            results.append({"wire": str(module.milliseconds(json.loads(case["raw"])))})
+        except ValueError as error:
+            results.append({"error": str(error)})
+    elif unit == "lane_batch":
+        import tempfile
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory)
+            plan = {"adapter":"claude","model":"m","cwd":directory,"run_dir":directory,"mode":"read_only","timeout_seconds":1,"grace_seconds":1,"batch_id":case["batch_id"]}
+            try:
+                module.build_spec(plan, {}, argv=["fixture"], stdin_path=None, events_path=path/"e", stderr_path=path/"s", max_bytes=1)
+                results.append(None)
+            except ValueError as error:
+                results.append(str(error))
+    elif unit == "lane_exit_raw":
+        try:
+            results.append({"wire": json.dumps(module.receipt_fields(json.loads(case["raw"])), ensure_ascii=False, separators=(",", ":"))})
+        except ValueError as error:
+            results.append({"error": str(error)})
     elif unit == "lane_exit_contract":
         results.append(json.dumps(module.receipt_fields(case), ensure_ascii=False, separators=(",", ":")))
     elif unit == "preflight_decode":

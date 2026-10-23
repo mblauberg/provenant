@@ -183,10 +183,11 @@ mod tests {
         }
         cases.push(json!({"plan":{"adapter":"claude","model":"fixture"},"lines":[{"type":"system","subtype":"init","session_id":"session-1","model":"fixture"},{"type":"assistant","message":{"model":"answered","content":[{"type":"text","text":"DONE"}],"usage":{"input_tokens":4,"output_tokens":2}}},{"type":"result","result":"DONE","is_error":false}]}));
         cases.push(json!({"plan":{"adapter":"codex","model":"fixture"},"lines":[{"type":"turn.completed","usage":{"input_tokens":9007199254740993_u64,"output_tokens":2,"cached_input_tokens":0}}]}));
-        if let Some(expected) = crate::test_support::oracle("observer_contract", &json!(cases)) {
+        if let Some(expected) = crate::test_support::oracle("observer_contract_wire", &json!(cases)) {
             for raw in expected.as_array().unwrap() {
-                let typed: ObserverSummary = serde_json::from_value(raw.clone()).unwrap();
-                assert_eq!(serde_json::to_value(typed).unwrap(), *raw);
+                let wire = raw["wire"].as_str().unwrap();
+                let typed = ObserverSummary::from_json(wire.as_bytes()).unwrap();
+                assert_eq!(serde_json::to_string(&typed).unwrap(), wire);
             }
         }
         for raw in [json!({"terminal":true}), json!({"stop":"usage_limited"})] {
@@ -224,6 +225,36 @@ mod tests {
         }
     }
 
+    #[test]
+    fn stderr_retry_and_huge_integer_summaries_match_source_wire() {
+        let cases = json!([
+            {"plan":{"adapter":"opencode","model":"m"},"lines":[],"diagnostics":[{"stream":"stderr","text":"retrying: weekly usage limit reached\n"}]},
+            {"plan":{"adapter":"kiro","model":"m"},"lines":[],"diagnostics":[{"stream":"stderr","text":"Opening browser…\n"}]},
+            {"plan":{"adapter":"claude","model":"m"},"lines":[{"type":"api_retry","error":{"message":"rate limit 429"}}]},
+            {"plan":{"adapter":"codex","model":"m"},"lines":[{"type":"error","message":"Reconnecting... 1/5"}]},
+            {"plan":{"adapter":"codex","model":"m"},"lines":[{"type":"error","message":"Reconnecting... 1/5"},{"type":"turn.completed"}]},
+            {"plan":{"adapter":"claude","model":"m"},"lines":[{"type":"api_retry","error":{"message":"rate limit 429"}},{"type":"result","is_error":false,"result":"DONE","num_turns":1}]},
+            {"plan":{"adapter":"kiro","model":"m"},"lines":[{"type":"metadata","data":{"contextUsagePercentage":42.0}}]}
+        ]);
+        if let Some(outputs) = crate::test_support::oracle("observer_contract_wire", &cases) {
+            for (i, raw) in outputs.as_array().unwrap().iter().enumerate() {
+                let wire = raw["wire"].as_str().unwrap();
+                let typed = ObserverSummary::from_json(wire.as_bytes()).unwrap();
+                assert_eq!(serde_json::to_string(&typed).unwrap(), wire);
+                if i < 2 { assert!(typed.live_failure.is_some()); }
+                if i == 2 { assert!(typed.retry_failure.is_some()); }
+                if i == 4 || i == 5 { assert!(typed.retry_failure.is_none()); }
+            }
+        }
+        // The source retains 2**70 exactly; R4 deliberately refuses it.
+        // Keep the large integer as source text rather than passing it through Value.
+        let cases = json!([{"plan":{"adapter":"codex","model":"m"},"lines":[],"raw_lines":["{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":1180591620717411303424}}"]}]);
+        if let Some(outputs) = crate::test_support::oracle("observer_contract_wire", &cases) {
+            let wire = outputs[0]["wire"].as_str().unwrap();
+            assert!(wire.contains("1180591620717411303424"));
+            assert!(matches!(ObserverSummary::from_json(wire.as_bytes()), Err(provenant_records::checked_json::DecodeError::NumberOutOfRange(_))));
+        }
+    }
     #[test]
     fn observer_notifications_cannot_invent_terminal_false_or_a_silence_stop() {
         for raw in [

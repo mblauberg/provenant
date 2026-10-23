@@ -173,8 +173,9 @@ mod tests {
         }
         if let Some(outputs) = crate::test_support::oracle("lane_launch_contract", &json!(cases)) {
             for raw in outputs.as_array().unwrap() {
-                let typed: LaunchSpec = serde_json::from_value(raw.clone()).unwrap();
-                assert_eq!(serde_json::to_value(&typed).unwrap(), *raw);
+                let wire = raw.as_str().unwrap();
+                let typed: LaunchSpec = serde_json::from_str(wire).unwrap();
+                assert_eq!(serde_json::to_string(&typed).unwrap(), wire);
                 assert_eq!(typed.timeouts_ms.wall.get(), 1125);
                 assert_eq!(typed.timeouts_ms.startup.get(), 25);
                 assert_eq!(typed.silence_observation_ms.get(), 125);
@@ -210,6 +211,19 @@ mod tests {
     fn launch_wire_rejects_zero_limits_and_deadlines() {
         assert!(serde_json::from_str::<CaptureSpec>(r#"{"events":"e","stderr":"s","max_bytes":0}"#).is_err());
         assert!(serde_json::from_str::<Timeouts>(r#"{"startup":0,"wall":1,"settle":1,"child_grace":1,"root_flush":1}"#).is_err());
+    }
+    #[test]
+    fn source_duration_and_batch_failures_match() {
+        let cases = json!([{"raw":"true"},{"raw":"NaN"},{"raw":"0"},{"raw":"-1"},{"raw":"0.0001"},{"raw":"1.0001"}]);
+        let actual: Vec<_> = cases.as_array().unwrap().iter().map(|c| {
+            let result = if c["raw"] == "NaN" { Milliseconds::from_float_seconds(f64::NAN) }
+                else { Milliseconds::from_seconds(&serde_json::from_str::<Value>(c["raw"].as_str().unwrap()).unwrap()) };
+            match result { Ok(ms) => json!({"wire":ms.get().to_string()}), Err(e) => json!({"error":e.to_string()}) }
+        }).collect();
+        if let Some(expected) = crate::test_support::oracle("lane_duration", &cases) { assert_eq!(json!(actual), expected); }
+        let cases = json!([{"batch_id":true},{"batch_id":"batch-"},{"batch_id":"batch-no"},{"batch_id":"../batch-123"},{"batch_id":"batch-²"},{"batch_id":"batch-123"}]);
+        let actual: Vec<_> = cases.as_array().unwrap().iter().map(|c| match batch_cancel_identity(&c["batch_id"]) { Ok(_) => Value::Null, Err(e) => json!(e.to_string()) }).collect();
+        if let Some(expected) = crate::test_support::oracle("lane_batch", &cases) { assert_eq!(json!(actual), expected); }
     }
     #[test]
     fn stdin_builder_contract_has_no_null_path_variant() {

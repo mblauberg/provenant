@@ -213,6 +213,23 @@ mod tests {
         assert_eq!(serde_json::to_string(&record).unwrap(), raw);
     }
     #[test]
+    fn raw_exit_rejections_and_integer_divergence_are_source_grounded() {
+        let cases = json!([
+            {"raw":r#"{"schema":"provenant.lane.exit.v1","pid":true}"#},
+            {"raw":r#"{"schema":"provenant.lane.exit.v1","pid":1.0}"#}
+        ]);
+        let actual: Vec<_> = cases.as_array().unwrap().iter().map(|case| {
+            assert!(ExitRecord::from_json(case["raw"].as_str().unwrap().as_bytes()).is_err());
+            json!({"error":"lane exit process fields must be integers"})
+        }).collect();
+        if let Some(expected) = crate::test_support::oracle("lane_exit_raw", &cases) { assert_eq!(json!(actual), expected); }
+        let raw = r#"{"schema":"provenant.lane.exit.v1","pid":1180591620717411303424}"#;
+        assert!(matches!(ExitRecord::from_json(raw.as_bytes()), Err(provenant_records::checked_json::DecodeError::NumberOutOfRange(_))));
+        if let Some(expected) = crate::test_support::oracle("lane_exit_raw", &json!([{"raw":raw}])) {
+            assert!(expected[0]["wire"].as_str().unwrap().contains("1180591620717411303424"));
+        }
+    }
+    #[test]
     fn exit_process_fields_refuse_bool_and_float() {
         for raw in [r#"{"schema":"provenant.lane.exit.v1","pid":true}"#, r#"{"schema":"provenant.lane.exit.v1","pid":1.0}"#] {
             assert!(ExitRecord::from_json(raw.as_bytes()).is_err());
