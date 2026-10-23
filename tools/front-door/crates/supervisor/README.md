@@ -135,3 +135,21 @@ All supervisor Python differentials now use `-I`, an explicit allowlisted
 environment and bounded utility waits; Node uses the same shared helper and
 requires version 24. Missing/old interpreters print `skip:` and fail when
 `PROVENANT_PORT_DIFF_REQUIRED=1`.
+
+`worker_liveness` continues `worker_liveness.py#unit-01` with typed process,
+worker, exit and terminal-report records; terminal evidence/live-writer fences;
+positive output growth; advisory liveness; explicit-clock deadline rearming;
+Python-compatible duration parsing; POSIX command cwd extraction; and ordered,
+cycle-safe wrapper collapse. The inspection precondition rejects a missing
+observed PID set before any worktree inspection can occur. Differential cases
+cover invalid durations/commands, Unicode digits/whitespace, float bit patterns,
+terminal error precedence and exact error text.
+
+This unit remains partial: live cwd/lsof observation, canonical path expansion,
+recursive session discovery/checked JSON, git status/repository adapters and
+filesystem timestamp metadata are not ported here. Core has no public Python
+float/shlex/repr compatibility API yet, so the minimal pure helpers remain in
+`pending` with their core-owner marks. This does not add a private timestamp or
+JSON codec; records already owns checked JSON and core owns future datetime
+conversion. Integration must wire those shared owners before these OS adapters
+are completed.

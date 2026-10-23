@@ -368,3 +368,133 @@ pub(crate) fn divmod_decimal(digits: &str, divisor: u32) -> (String, u32) {
 pub(crate) fn python_strip(text: &str) -> &str {
     text.trim_matches(|c: char| c.is_whitespace() || matches!(c, '\u{1c}'..='\u{1f}'))
 }
+
+// port: belongs in provenant-core
+/// Python float(str): Unicode decimal digits/whitespace and digit underscores.
+pub(crate) fn python_float(text: &str) -> Option<f64> {
+    let text = text.trim_matches(char::is_whitespace);
+    let chars: Vec<_> = text.chars().collect();
+    let mut normalized = String::new();
+    for (index, &ch) in chars.iter().enumerate() {
+        if ch == '_' {
+            if index == 0
+                || chars
+                    .get(index - 1)
+                    .and_then(|&c| decimal_digit(c))
+                    .is_none()
+                || chars
+                    .get(index + 1)
+                    .and_then(|&c| decimal_digit(c))
+                    .is_none()
+            {
+                return None;
+            }
+        } else if let Some(digit) = decimal_digit(ch) {
+            normalized.push(char::from(b'0' + digit));
+        } else if ch.is_ascii() {
+            normalized.push(ch);
+        } else {
+            return None;
+        }
+    }
+    let lower = normalized.to_ascii_lowercase();
+    let (negative, body) = match lower.strip_prefix('-') {
+        Some(body) => (true, body),
+        None => (false, lower.strip_prefix('+').unwrap_or(&lower)),
+    };
+    match body {
+        "nan" => Some(if negative { -f64::NAN } else { f64::NAN }),
+        "inf" | "infinity" => Some(if negative {
+            f64::NEG_INFINITY
+        } else {
+            f64::INFINITY
+        }),
+        _ => normalized.parse().ok(),
+    }
+}
+
+// port: belongs in provenant-core
+pub(crate) fn python_repr(text: &str) -> String {
+    let quote = if text.contains('\'') && !text.contains('"') {
+        '"'
+    } else {
+        '\''
+    };
+    let mut out = String::from(quote);
+    for ch in text.chars() {
+        match ch {
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if c == quote => {
+                out.push('\\');
+                out.push(c);
+            }
+            c if !printable(c) => {
+                let code = c as u32;
+                if code < 256 {
+                    out.push_str(&format!("\\x{code:02x}"));
+                } else if code <= 0xffff {
+                    out.push_str(&format!("\\u{code:04x}"));
+                } else {
+                    out.push_str(&format!("\\U{code:08x}"));
+                }
+            }
+            c => out.push(c),
+        }
+    }
+    out.push(quote);
+    out
+}
+
+// port: belongs in provenant-core
+/// POSIX shlex.split(comments=False), including its double-quote escape rules.
+pub(crate) fn shell_split(text: &str) -> Option<Vec<String>> {
+    let mut chars = text.chars();
+    let mut result = Vec::new();
+    let mut word = String::new();
+    let mut started = false;
+    let mut quote = None;
+    while let Some(ch) = chars.next() {
+        match quote {
+            Some('\'') if ch != '\'' => word.push(ch),
+            Some('"') if ch == '\\' => {
+                let next = chars.next()?;
+                if next != '\\' && next != '"' {
+                    word.push('\\');
+                }
+                word.push(next);
+            }
+            Some(q) if ch == q => quote = None,
+            Some(_) => word.push(ch),
+            None => match ch {
+                ' ' | '\t' | '\r' | '\n' => {
+                    if started {
+                        result.push(std::mem::take(&mut word));
+                        started = false;
+                    }
+                }
+                '\'' | '"' => {
+                    quote = Some(ch);
+                    started = true;
+                }
+                '\\' => {
+                    word.push(chars.next()?);
+                    started = true;
+                }
+                c => {
+                    word.push(c);
+                    started = true;
+                }
+            },
+        }
+    }
+    if quote.is_some() {
+        return None;
+    }
+    if started {
+        result.push(word);
+    }
+    Some(result)
+}
