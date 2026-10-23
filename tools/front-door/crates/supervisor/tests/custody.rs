@@ -904,6 +904,13 @@ fn guardian_signal_requests_provider_stop(root: &Path, signal: i32, label: &str)
             libc::SIGKILL
         )))
     );
+    let status =
+        fixture::guardian_exit_status(u32::try_from(guardian.pid)?, Duration::from_secs(5))?;
+    assert_eq!(
+        status.code(),
+        Some(0),
+        "guardian exited abnormally: {status}"
+    );
     wait_for_identity_absence(&guardian)?;
     Ok(())
 }

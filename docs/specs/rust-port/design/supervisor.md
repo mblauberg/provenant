@@ -127,14 +127,17 @@ PID/ppid/group/status/session and start time; failed or racing reads remain
 unknown and make the snapshot incomplete. Both must contain no other
 process in the provider's session or process group and no surviving identity
 or descendant (ppid edges checked against native start-time identity) from the
-guardian's recorded census history. The guardian retains that bounded history
-throughout the run; overflow or incomplete proof keeps the attempt fenced.
+guardian's recorded census history. Each tick prunes identities proved absent
+or replaced; overflow or incomplete proof keeps the attempt fenced.
 The provider inherits the writer lease's open file description. After the
 requester closes its copy on acknowledged handoff, the guardian closes its own
-copy without unlocking and attempts a fresh nonblocking writer lock. Success
-proves no surviving descendant retains the inherited lease description; the
-new guard remains held through terminal publication. Failure keeps the durable
-reservation fenced. The exit's `settlement_evidence` records
+copy without unlocking and attempts a fresh nonblocking writer lock on the
+original device/inode. Success proves no surviving descendant retains the
+inherited lease description; the new guard remains held through terminal
+publication. Failure keeps the durable reservation fenced.
+A concurrent `acquire_recovery`/`acquire_writer` waiter can win the
+drop-to-`try_lock` gap, conservatively fencing an otherwise clean run.
+The exit's `settlement_evidence` records
 `darwin_census_and_writer_lease`, `linux_kernel_children`, `never_spawned` or
 `unresolved`. Linux requires two identical complete per-thread kernel children
 snapshots, including stable thread membership, before cleanup settlement.

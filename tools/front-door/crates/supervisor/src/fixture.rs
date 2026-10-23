@@ -148,6 +148,23 @@ pub fn signal_recorded_process(
     }
 }
 
+/// Observe the exit status collected by the guardian's owning reaper.
+pub fn guardian_exit_status(
+    pid: u32,
+    timeout: std::time::Duration,
+) -> io::Result<std::process::ExitStatus> {
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        if let Some(status) = crate::sys::reaper::take_exit_status(pid) {
+            return Ok(status);
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err(io::ErrorKind::TimedOut.into());
+        }
+        crate::sys::wait_pause(std::time::Duration::from_millis(5));
+    }
+}
+
 fn process_identity_is_live(identity: &crate::census::ProcessIdentity) -> bool {
     matches!(
         RecordedBootObserver.observe(identity.pid),

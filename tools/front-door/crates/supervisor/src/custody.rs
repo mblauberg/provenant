@@ -235,11 +235,6 @@ impl WriterLease {
     pub fn scope(&self) -> Scope {
         self.reservation.scope
     }
-    /// Confinement supplies a private generated directory excluded from the
-    /// provider sandbox. The caller keeps Run exclusion through settlement.
-    pub fn scratch(directory: Directory) -> Result<crate::scratch::Scratch> {
-        Ok(crate::scratch::Scratch::new(directory)?)
-    }
     fn ensure_lease(&mut self) -> Result<()> {
         if self.lease.is_none() {
             let clock = crate::clock::SystemClock::new();
@@ -1025,11 +1020,6 @@ pub enum RecoveryState {
     Unknown,
 }
 impl Recovery {
-    /// As for WriterLease::scratch, confinement must exclude this generated
-    /// directory from provider access and Run retains its own exclusion.
-    pub fn scratch(directory: Directory) -> Result<crate::scratch::Scratch> {
-        Ok(crate::scratch::Scratch::new(directory)?)
-    }
     pub fn scope(&self) -> Scope {
         self.reservation.scope
     }

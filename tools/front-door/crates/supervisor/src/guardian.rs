@@ -312,6 +312,9 @@ pub fn supervise(args: &[OsString], hooks: GuardianHooks<'_>) -> Result<()> {
     let exit_publisher = hooks.exit_publisher;
     #[cfg(not(feature = "fixture"))]
     let exit_publisher = None;
+    #[cfg(target_os = "macos")]
+    let writer_identity =
+        crate::fs::Metadata::from_std(inherited.writer.handoff_file().metadata()?);
     // Both locks and the durable pre-spawn reservation are held before ACK.
     crate::sys::handoff::send(
         &mut inherited.channel,
@@ -339,6 +342,8 @@ pub fn supervise(args: &[OsString], hooks: GuardianHooks<'_>) -> Result<()> {
         writer_dir: inherited.writer_directory,
         reservation,
         writer: Some(inherited.writer),
+        #[cfg(target_os = "macos")]
+        writer_identity,
         _custody: inherited.custody,
         guardian,
         requester: message.requester,
@@ -348,10 +353,9 @@ pub fn supervise(args: &[OsString], hooks: GuardianHooks<'_>) -> Result<()> {
         exit_publisher,
     };
     let result = driver.run(&argv, &env, &cwd, &message.stdin, message.capture, hooks);
+    #[cfg(target_os = "linux")]
     if result.is_ok() {
-        #[cfg(target_os = "linux")]
         subreaper.restore()?;
-        driver.reactor.restore()?;
     }
     result
 }
@@ -361,6 +365,8 @@ struct Driver<'a> {
     writer_dir: Directory,
     reservation: Reservation,
     writer: Option<crate::fs::LockGuard>,
+    #[cfg(target_os = "macos")]
+    writer_identity: crate::fs::Metadata,
     _custody: crate::fs::LockGuard,
     guardian: ProcessIdentity,
     requester: provenant_core::ActorId,
@@ -1082,6 +1088,8 @@ impl Driver<'_> {
                 census.mark_truncated();
             }
         }
+        self.history
+            .retain(|identity| identity_still_possible(&census, identity));
         child.record_census(&census);
         self.spared.refresh(&census);
         let mut registry_unknown = self.registry.is_none();
@@ -1187,10 +1195,7 @@ impl Driver<'_> {
         // Close, never LOCK_UN: descendants share this open file description.
         // A fresh nonblocking flock succeeds only after every inheritor closes.
         drop(self.writer.take());
-        match self
-            .writer_dir
-            .try_lock(OsStr::new("writer.lock"), crate::fs::LockMode::Exclusive)
-        {
+        match try_writer_lease(&self.writer_dir, self.writer_identity) {
             Ok(lease) => {
                 self.writer = Some(lease);
                 self.settlement_evidence = SettlementEvidence::DarwinCensusAndWriterLease;
@@ -1428,6 +1433,19 @@ fn snapshot_executable(path: &OsStr) -> io::Result<ExecutableSnapshot> {
     })
 }
 
+#[cfg(any(target_os = "macos", test))]
+fn try_writer_lease(
+    directory: &Directory,
+    expected: crate::fs::Metadata,
+) -> Result<crate::fs::LockGuard> {
+    let lease = directory.try_lock(OsStr::new("writer.lock"), crate::fs::LockMode::Exclusive)?;
+    let actual = crate::fs::Metadata::from_std(lease.handoff_file().metadata()?);
+    if !expected.same_identity(&actual) {
+        return Err(CustodyError::InvalidRecord);
+    }
+    Ok(lease)
+}
+
 fn identity_still_possible(census: &crate::census::Census, identity: &ProcessIdentity) -> bool {
     match census.process(identity.pid) {
         crate::census::ProcessLookup::Absent => false,
@@ -1554,6 +1572,36 @@ mod tests {
             .collect();
         Census::from_observations(facts, [], absent, complete, false, 100).unwrap()
     }
+    #[test]
+    fn fresh_writer_lease_refuses_a_replaced_or_unlinked_original() {
+        for unlink in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let directory = Directory::open_anchor(root.path()).unwrap();
+            let lease = directory
+                .try_lock(OsStr::new("writer.lock"), crate::fs::LockMode::Exclusive)
+                .unwrap();
+            let inherited = lease.handoff_file().try_clone().unwrap();
+            let expected = crate::fs::Metadata::from_std(inherited.metadata().unwrap());
+            if unlink {
+                std::fs::remove_file(root.path().join("writer.lock")).unwrap();
+            } else {
+                std::fs::rename(root.path().join("writer.lock"), root.path().join("held")).unwrap();
+            }
+            drop(lease);
+            assert!(try_writer_lease(&directory, expected).is_err());
+            drop(inherited);
+        }
+        let root = tempfile::tempdir().unwrap();
+        let directory = Directory::open_anchor(root.path()).unwrap();
+        let lease = directory
+            .try_lock(OsStr::new("writer.lock"), crate::fs::LockMode::Exclusive)
+            .unwrap();
+        let expected = crate::fs::Metadata::from_std(lease.handoff_file().metadata().unwrap());
+        assert!(try_writer_lease(&directory, expected).is_err());
+        drop(lease);
+        assert!(try_writer_lease(&directory, expected).is_ok());
+    }
+
     #[test]
     fn darwin_settlement_requires_complete_absence_of_members_and_recorded_escapes() {
         let guardian = identity(10, 1, 10, 10);

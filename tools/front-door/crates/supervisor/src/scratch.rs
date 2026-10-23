@@ -16,7 +16,9 @@ pub struct Scratch {
     classified: BTreeMap<OsString, Metadata>,
 }
 impl Scratch {
-    pub(crate) fn new(directory: Directory) -> Result<Self, FsError> {
+    /// Confinement must exclude this generated directory from the provider sandbox;
+    /// the caller retains Run exclusion through settlement.
+    pub fn new(directory: Directory) -> Result<Self, FsError> {
         let identity = directory.metadata()?;
         if identity.mode & 0o077 != 0 || identity.uid != crate::sys::fs::effective_uid() {
             return Err(FsError::RaceRefused {

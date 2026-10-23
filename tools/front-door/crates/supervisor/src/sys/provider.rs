@@ -70,8 +70,9 @@ pub(crate) struct ReactorEvent {
 }
 
 /// Guardian-only signal/event source. Install before spawning a provider.
-/// Signals are blocked on the guardian thread and consumed through signalfd on
-/// Linux or kqueue on macOS; no handler or process-global mutable fd is used.
+/// Signals stay blocked through guardian exit and are consumed through signalfd
+/// on Linux or reported through kqueue on macOS; no handler or process-global
+/// mutable fd is used.
 pub(crate) struct GuardianReactor {
     #[cfg(target_os = "linux")]
     signal_fd: std::fs::File,
@@ -136,10 +137,6 @@ impl GuardianReactor {
             }
             Ok(Self { queue, _mask: mask })
         }
-    }
-
-    pub(crate) fn restore(mut self) -> io::Result<()> {
-        self._mask.restore()
     }
 
     /// Waits for at most the requested duration, capped to one second per
@@ -319,8 +316,6 @@ fn guardian_signals() -> [i32; 4] {
 
 struct SignalMask {
     set: libc::sigset_t,
-    previous: libc::sigset_t,
-    active: bool,
 }
 impl SignalMask {
     fn block() -> io::Result<Self> {
@@ -339,39 +334,16 @@ impl SignalMask {
                 return Err(io::Error::last_os_error());
             }
         }
-        let mut previous = std::mem::MaybeUninit::<libc::sigset_t>::zeroed();
-        // SAFETY: set is a live signal set; previous is writable storage for
-        // the prior mask. The guardian is dedicated and single-threaded here.
-        if unsafe { libc::sigprocmask(libc::SIG_BLOCK, &set, previous.as_mut_ptr()) } != 0 {
+        // SAFETY: set is a live signal set borrowed only during this call.
+        // sigprocmask changes the calling thread's mask and retains no pointer;
+        // other threads neither share the storage nor have their masks changed.
+        if unsafe { libc::sigprocmask(libc::SIG_BLOCK, &set, std::ptr::null_mut()) } != 0 {
             return Err(io::Error::last_os_error());
         }
-        // SAFETY: successful sigprocmask initialised the previous mask.
-        let previous = unsafe { previous.assume_init() };
-        Ok(Self {
-            set,
-            previous,
-            active: true,
-        })
-    }
-
-    fn restore(&mut self) -> io::Result<()> {
-        if !self.active {
-            return Ok(());
-        }
-        // SAFETY: previous is a live mask captured from sigprocmask; restoring
-        // it changes only this guardian thread and retains no pointer.
-        if unsafe { libc::sigprocmask(libc::SIG_SETMASK, &self.previous, std::ptr::null_mut()) }
-            != 0
-        {
-            return Err(io::Error::last_os_error());
-        }
-        self.active = false;
-        Ok(())
-    }
-}
-impl Drop for SignalMask {
-    fn drop(&mut self) {
-        let _ = self.restore();
+        // This dedicated guardian exits after settlement, including on errors.
+        // Keep its mask blocked through exit: kqueue reports blocked signals
+        // without consuming them, so restoring would re-deliver handled stops.
+        Ok(Self { set })
     }
 }
 

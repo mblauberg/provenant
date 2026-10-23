@@ -393,6 +393,9 @@ pub(crate) fn observe_with_boot(pid: i64, boot: &str) -> ProcessObservation {
         };
         match linux_process(pid, boot, ticks) {
             LinuxRead::Present(fact) => ProcessObservation::Present(fact),
+            LinuxRead::OutsideProcessGroups => {
+                ProcessObservation::Unknown(ObservationIssue::Unsupported)
+            }
             LinuxRead::Absent => ProcessObservation::Absent,
             LinuxRead::Unknown(issue) => ProcessObservation::Unknown(issue),
         }
@@ -466,6 +469,7 @@ pub(crate) fn census_with_boot(max_entries: usize, boot: &str) -> Result<Census,
         };
         match linux_process(pid_i32, boot, ticks) {
             LinuxRead::Present(fact) => facts.push(fact),
+            LinuxRead::OutsideProcessGroups => {}
             LinuxRead::Absent => {
                 absent.insert(pid);
             }
@@ -522,6 +526,7 @@ pub(crate) fn census_with_boot(_max_entries: usize, _boot: &str) -> Result<Censu
 #[derive(Debug)]
 enum LinuxRead {
     Present(ProcessFact),
+    OutsideProcessGroups,
     Absent,
     Unknown(ObservationIssue),
 }
@@ -557,18 +562,13 @@ fn linux_process(pid: i32, boot: &str, ticks_per_second: u64) -> LinuxRead {
         return LinuxRead::Unknown(ObservationIssue::Malformed);
     }
     match parse_linux_stat(pid, boot, ticks_per_second, &bytes) {
-        Some(fact) => LinuxRead::Present(fact),
+        Some(result) => result,
         None => LinuxRead::Unknown(ObservationIssue::Malformed),
     }
 }
 
 #[cfg(target_os = "linux")]
-fn parse_linux_stat(
-    pid: i32,
-    boot: &str,
-    ticks_per_second: u64,
-    raw: &[u8],
-) -> Option<ProcessFact> {
+fn parse_linux_stat(pid: i32, boot: &str, ticks_per_second: u64, raw: &[u8]) -> Option<LinuxRead> {
     let open = raw.iter().position(|byte| *byte == b'(')?;
     let close = raw.windows(2).rposition(|pair| pair == b") ")?;
     if close <= open {
@@ -606,15 +606,23 @@ fn parse_linux_stat(
     let user_ticks = parse_u64(11)?;
     let system_ticks = parse_u64(12)?;
     let start_ticks = parse_u64(19)?;
-    if parent_pid < 0 || group_id <= 0 || session_id <= 0 || ticks_per_second == 0 {
+    if parent_pid < 0 || group_id < 0 || session_id < 0 || ticks_per_second == 0 {
         return None;
     }
     let cpu_micros = ticks_to_micros(user_ticks.checked_add(system_ticks)?, ticks_per_second)?;
+    // Kernel tasks and namespace ancestors can expose a zero group or session.
+    // A provider with positive IDs cannot create such a descendant: fork
+    // inherits membership, and setsid/setpgid assign positive IDs. Exclude
+    // these unrelated tasks only from the global custody census; a direct
+    // observation of their PID remains unknown, never absent.
+    if group_id == 0 || session_id == 0 {
+        return Some(LinuxRead::OutsideProcessGroups);
+    }
     let command = String::from_utf8_lossy(raw.get(open.checked_add(1)?..close)?)
         .chars()
         .take(128)
         .collect();
-    Some(ProcessFact {
+    Some(LinuxRead::Present(ProcessFact {
         identity: ProcessIdentity {
             boot: boot.to_owned(),
             pid: i64::from(pid),
@@ -626,7 +634,7 @@ fn parse_linux_stat(
         zombie: state == b"Z",
         cpu_micros: Some(cpu_micros),
         command: Some(command),
-    })
+    }))
 }
 
 #[cfg(target_os = "linux")]
@@ -1091,6 +1099,27 @@ mod native_tests {
             classify_darwin_zero_probe(0, None),
             ProcessObservation::Unknown(ObservationIssue::Malformed)
         );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_tasks_outside_provider_membership_do_not_poison_the_census() {
+        for raw in [
+            b"2 (kthreadd) S 0 0 0 0 -1 2129984 0 0 0 0 0 0 0 0 20 0 1 0 1\n".as_slice(),
+            b"2 (task) S 1 0 2 0 -1 0 0 0 0 0 0 0 0 0 20 0 1 0 1",
+            b"2 (containerd-shim) S 1 2 0 0 -1 0 0 0 0 0 0 0 0 0 20 0 1 0 1",
+        ] {
+            assert!(matches!(
+                parse_linux_stat(2, "boot", 100, raw),
+                Some(LinuxRead::OutsideProcessGroups)
+            ));
+        }
+        for raw in [
+            b"2 (task) S 1 -2 -2 0 -1 0 0 0 0 0 0 0 0 0 20 0 1 0 1".as_slice(),
+            b"2 (task) S 0 0 0",
+        ] {
+            assert!(parse_linux_stat(2, "boot", 100, raw).is_none());
+        }
     }
 
     #[cfg(target_os = "linux")]

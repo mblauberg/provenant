@@ -446,21 +446,13 @@ impl Directory {
         cancel: &CancelToken,
         clock: &dyn Clock,
     ) -> Result<LockGuard> {
-        let name = component(name)?;
-        if !name.as_bytes().ends_with(b".lock") {
-            return Err(FsError::InvalidLockName { name: name.into() });
-        }
-        let path = self.path.join(name);
-        if cancel.is_cancelled() {
-            return Err(FsError::Cancelled { path });
-        }
         let remaining = budget.remaining(clock.mono_now());
         let timeout = Duration::from_micros(remaining.as_micros());
         self.lock_with_timeout(name, mode, timeout, cancel)
     }
 
     /// Attempt one nonblocking acquisition with the same verified inode checks.
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", test))]
     pub(crate) fn try_lock(&self, name: &OsStr, mode: LockMode) -> Result<LockGuard> {
         self.lock_with_timeout(name, mode, Duration::ZERO, &CancelToken::new())
     }
