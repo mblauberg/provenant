@@ -5,8 +5,8 @@ pub mod codex;
 pub mod command;
 
 pub mod front_door;
-pub mod manifest;
 pub mod instance;
+pub mod manifest;
 mod pending;
 pub mod workflows;
 
@@ -19,6 +19,27 @@ pub enum Error {
         path: std::path::PathBuf,
         #[source]
         source: std::io::Error,
+    },
+    #[error("provenant command collision={path}; {reason}")]
+    Collision {
+        path: std::path::PathBuf,
+        reason: &'static str,
+    },
+    #[error("record codec integration is pending: {feature}")]
+    PendingRecord { feature: &'static str },
+    #[error("{context}: {path}: {source}")]
+    Read {
+        context: &'static str,
+        path: std::path::PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("{context}: {source}")]
+    Json {
+        context: &'static str,
+        path: std::path::PathBuf,
+        #[source]
+        source: serde_json::Error,
     },
     #[error("Codex config is invalid TOML: {0}")]
     Toml(#[from] toml_edit::TomlError),

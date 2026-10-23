@@ -46,3 +46,29 @@ They form the current baseline; they are not newly discovered port mismatches.
 - Follow-up: carry the identical input set to the active builder and checker
   before linking a library into the installed front door. Build, smoke and
   select execution remain partial until supervisor's safe runner exists.
+
+## RP-config-2 — record codec integration remains partial
+
+- Units: `scripts/install-workflows#unit-01`,
+  `scripts/managed_installation_manifest.py#unit-01`; rulebook version 2.
+- Class: `library`; unresolved, blocks claiming either unit fully ported or
+  activating the new persistence APIs. This is not an approved behaviour change.
+- Compared revisions: Python oracle `5c48d4e5`; Rust branch `port/config-1`;
+  fixtures live in `pending::tests` in the config crate.
+- Reproducer: load an opaque receipt field containing integer
+  `18446744073709551616`, a non-finite number, or a lone surrogate; or construct
+  a receipt for a Unix path containing non-UTF-8 bytes.
+- Expected / actual: Python preserves arbitrary integers, non-finite JSON
+  values and surrogate-escaped filesystem strings; the workspace's default
+  serde_json model cannot retain all of them. Rust explicitly refuses
+  out-of-range integer input and non-UTF-8 path conversion instead of silently
+  rounding or replacing bytes. Non-finite/lone-surrogate JSON fails parsing.
+- Evidence: `lossless_integer_boundary_is_explicit` and
+  `non_utf8_paths_never_silently_change_the_receipt` pin the integration gap;
+  ordinary receipts, opaque history, Unicode, float thresholds, ASCII escaping
+  and sorted canonical JSON have Python differential tests.
+- Disposition: open; affected units are partial. No dependency feature expansion
+  is requested or applied by this lane.
+- Follow-up: records owner supplies a lossless wire codec under the allowlist,
+  and J2 supplies the currently absent installation schemas. The chair owns
+  that boundary decision; no command cut-over is included here.

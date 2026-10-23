@@ -125,7 +125,7 @@ pub fn empty_manifest(target: &Path, now: &str) -> Result<Manifest> {
     Ok(Manifest {
         schema_version: Value::from(1),
         owner: "agent-harness".into(),
-        target_root: pending::resolve(target)?.to_string_lossy().into(),
+        target_root: pending::path_text(&pending::resolve(target)?)?,
         managed: BTreeMap::new(),
         custom: BTreeMap::new(),
         extra: BTreeMap::from([("updated_at".into(), now.into())]),
@@ -142,7 +142,9 @@ pub fn validate_manifest(mut value: Value, target: &Path) -> Result<Manifest> {
             "installation manifest is invalid or not owned by agent-harness",
         ));
     }
-    if value["target_root"].as_str() != Some(pending::resolve(target)?.to_string_lossy().as_ref()) {
+    if value["target_root"].as_str()
+        != Some(pending::path_text(&pending::resolve(target)?)?.as_str())
+    {
         return Err(invalid(
             "installation manifest belongs to a different target root",
         ));
@@ -236,14 +238,7 @@ pub fn load_manifest(target: &Path, now: &str) -> Result<Manifest> {
     if !path.exists() {
         return empty_manifest(target, now);
     }
-    let bytes = fs::read(&path).map_err(|e| {
-        invalid(format!(
-            "installation manifest is unreadable: {}",
-            io(&path, e)
-        ))
-    })?;
-    let value = serde_json::from_slice(&bytes)
-        .map_err(|e| invalid(format!("installation manifest is unreadable: {e}")))?;
+    let value = pending::read_json(&path, "installation manifest is unreadable")?;
     validate_manifest(value, target)
 }
 
@@ -259,7 +254,7 @@ pub fn write_manifest(target: &Path, manifest: &mut Manifest, now: &str) -> Resu
 pub fn entry(source: &Path, history: Vec<Value>, now: &str) -> Result<Entry> {
     Ok(Entry {
         owner: "agent-harness".into(),
-        source_target: source.to_string_lossy().into(),
+        source_target: pending::path_text(source)?,
         source_sha256: sha_skill(source)?,
         installed_at: now.into(),
         history,
