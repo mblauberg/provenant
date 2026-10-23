@@ -46,7 +46,7 @@ pub enum Error {
 }
 
 pub fn is_sqlite_contention(error: &Error) -> bool {
-    matches!(error, Error::Sqlite(rusqlite::Error::SqliteFailure(e, _)) if matches!(e.code, rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked))
+    matches!(error, Error::Sqlite(rusqlite::Error::SqliteFailure(e, _)) if matches!(e.extended_code, 5 | 6))
 }
 
 pub use pending::{IdSource, Identity};

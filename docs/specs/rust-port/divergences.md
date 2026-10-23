@@ -1342,3 +1342,24 @@ then passed after repair. Extended JSON/native-path reader gaps remain partial.
   The seven-scenario differential suite includes exact ISO output/errors at
   both bounds, year 0, year 10000, negative milliseconds and a leap date.
 - Fixed by adapting the formatter; no widened dependency or behaviour change.
+
+## RP-FS3-001: bounded invalid landing waits (improvement)
+
+- Review repair 2, rulebook v4, source `c80d6a7c90c240a6272fdcea1ec4fdc6ce88c74a`.
+- `wait_landing` refuses NaN, infinities and seconds whose milliseconds exceed
+  i64 with `NumberOutOfRange`. TypeScript's NaN/positive-infinite deadlines
+  can poll forever. Rust retains this deliberate bounded-wait refusal.
+
+## RP-FS3-002: SQLite contention classification (bug, fixed)
+
+- Review repair 2. Match extended SQLite codes 5 and 6 exactly, as
+  better-sqlite3's `SQLITE_BUSY`/`SQLITE_LOCKED` strings do. Extended codes
+  such as `SQLITE_BUSY_SNAPSHOT` must not trigger bootstrap retries.
+
+## RP-FS3-003: SQLite binding diagnostics (library)
+
+- Review repair 2. SQLite engine messages are preserved from rusqlite's
+  `SqliteFailure` cause. Binding-specific conversion, parameter and connection
+  errors use rusqlite diagnostics rather than better-sqlite3's JavaScript
+  diagnostics. Engine failure fixtures compare exact text; binding-only
+  errors remain a cut-over compatibility gap, not a claim of byte parity.

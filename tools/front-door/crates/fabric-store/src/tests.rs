@@ -417,3 +417,12 @@ fn diagnostic_incomplete_claim_schema_and_foreign_keys_are_reported() {
         "missing columns: recipient_id, claim_id, claimed_at, expires_at"
     );
 }
+
+#[test]
+fn only_plain_busy_and_locked_are_retryable() {
+    for (code, expected) in [(5, true), (6, true), (517, false), (262, false)] {
+        let error = Error::Sqlite(rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(code), None));
+        assert_eq!(is_sqlite_contention(&error), expected);
+    }
+}
