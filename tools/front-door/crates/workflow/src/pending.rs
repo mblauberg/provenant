@@ -635,16 +635,3 @@ impl serde::Serialize for PythonDictionary {
         map.end()
     }
 }
-
-// port: belongs in provenant-core
-pub(crate) fn equals_one(value: &serde_json::Value) -> bool {
-    use serde_json::Value;
-    match value {
-        Value::Bool(value) => *value,
-        Value::Number(number) => {
-            number.as_i64() == Some(1) || (number.is_f64() && number.as_f64() == Some(1.0))
-        }
-        _ => false,
-    }
-}
-

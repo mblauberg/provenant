@@ -46,7 +46,7 @@ pub fn validate_header(metadata: &Value) -> Result<bool, PolicyError> {
                     .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
         })
     };
-    if !crate::pending::equals_one(&m["schema_version"])
+    if !provenant_core::py::python_json_eq(&m["schema_version"], &Value::from(1))
         || m["record_type"] != "provenant-git-evidence"
         || !m["repository"].is_string()
         || !m["git_root"].is_string()
@@ -173,7 +173,11 @@ mod tests {
             }
             json!({"metadata":scanner.finish(),"status":scanner.has_status(),"diff":scanner.has_diff()})
         }).collect();
-        if let Some(expected) = crate::test_support::oracle("git_evidence_packet", &json!(cases)) {
+        if let Some(expected) = crate::test_support::oracle_script(
+            "oracle_writer.py",
+            "git_evidence_packet",
+            &json!(cases),
+        ) {
             assert_eq!(json!(actual), expected);
         }
     }
@@ -213,7 +217,11 @@ mod tests {
                 Err(e) => panic!("{e}"),
             })
             .collect();
-        if let Some(expected) = crate::test_support::oracle("git_evidence_header", &json!(cases)) {
+        if let Some(expected) = crate::test_support::oracle_script(
+            "oracle_writer.py",
+            "git_evidence_header",
+            &json!(cases),
+        ) {
             assert_eq!(json!(actual), expected);
         }
     }
