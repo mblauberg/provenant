@@ -553,7 +553,7 @@ jobs:
         run: cargo fmt --all --check
       - name: Lint
         working-directory: tools/front-door
-        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+        run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
       - name: Install nextest
         uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2.87.30
         with:
@@ -561,6 +561,9 @@ jobs:
       - name: Run workspace tests
         working-directory: tools/front-door
         run: cargo nextest run --profile ci --workspace --locked
+      - name: Run fault-injection tests
+        working-directory: tools/front-door
+        run: cargo nextest run --profile ci -p provenant --features fault-injection --locked
       - name: Run documentation tests
         working-directory: tools/front-door
         run: cargo test --doc --workspace --locked
