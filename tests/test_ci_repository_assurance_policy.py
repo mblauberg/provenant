@@ -69,6 +69,7 @@ JOB_PERMISSIONS = {
     "fabric": {"contents": "read"},
     "split-root": {"contents": "read"},
     "rust": {"contents": "read"},
+    "rust-macos-release": {"contents": "read"},
     "zizmor": {"contents": "read"},
     "ci-status": {},
 }
@@ -343,6 +344,21 @@ def test_lane_conformance_runs_serially_on_linux_and_macos_for_lane_changes() ->
                         ".venv/bin/python -m pytest tests/lane_conformance -q"]
     shards = "\n".join(str(step.get("run", "")) for step in _steps(_job(document, "python-tests")))
     assert "--ignore=tests/lane_conformance" in shards
+
+
+def test_macos_smoke_builds_the_release_front_door_with_the_rust_filter() -> None:
+    document = _workflow()
+    job = _job(document, "rust-macos-release")
+    assert job["needs"] == "detect-changes"
+    assert job["if"] == _job(document, "rust")["if"]
+    assert job["runs-on"] == "macos-latest"
+    patterns = _flatten_patterns(_change_filters(document)["rust"])
+    assert any(_matches_filter("tools/front-door/crates/cli/src/lib.rs", p) for p in patterns)
+    builds = [step for step in _steps(job) if "cargo build" in str(step.get("run", ""))]
+    assert len(builds) == 1
+    assert builds[0]["working-directory"] == "tools/front-door"
+    assert "cargo build --release --locked -p provenant --bin provenant" in builds[0]["run"]
+    assert not any("cargo test" in str(step.get("run", "")) for step in _steps(job))
 
 
 def test_ci_status_depends_on_every_other_job_and_fails_closed() -> None:

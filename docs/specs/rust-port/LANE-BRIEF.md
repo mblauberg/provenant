@@ -15,7 +15,7 @@ You are in your own worktree on branch `BRANCH`, started from `origin/main`.
 If main moves while you work, merge `origin/main` in; never rebase.
 
 Read first, in full: `docs/adr/0028-rust-port-dependencies.md` and
-`docs/specs/rust-port/PORTING.md` (version 4, the rulebook). Skim
+`docs/specs/rust-port/PORTING.md` (version 5, the rulebook). Skim
 `docs/specs/rust-port/README.md` and the graph entries for your units in
 `docs/specs/rust-port/graph.json`. Read the crate's current `src/` and
 `README.md` or `PORT_STATUS.md`: partial units from batch 1 continue from there.
@@ -101,7 +101,16 @@ Self-check before review:
   externally tagged wrappers.
 - Differential tests cover failure and edge cases, not only the happy path.
 - macOS: `/var` is a symlink to `/private/var`. Compare canonicalised tempdir
-  paths. CI runs Rust on Linux only and will not catch this, and a sandboxed
-  `TMPDIR` can hide it locally.
+  paths. The full Rust test job runs on Linux; the macOS release-build smoke
+  job does not run tests. A sandboxed `TMPDIR` can hide this locally.
+- Repo-file fixtures use `include_str!(concat!(env!("CARGO_MANIFEST_DIR"),
+  "/..."))`. Deep relative `include_str!` paths can resolve through the
+  primary checkout because worktrees nest under `.worktrees/`, then fail in CI.
+- Regex classes differ: Rust `\s` excludes U+001C to U+001F, which Python's
+  `\s` matches, and Rust `\w` differs from Python's on combining marks. Port
+  Python patterns with explicit classes from `provenant_core::py`.
+- Fractional-second UTC offsets differ across CPython point releases. Use
+  the core `py` fromisoformat helper, which probes the interpreter, rather
+  than fixed oracle fixtures.
 - CI runs a static security check: no `exec`/`eval` of source text in Python
   fixture generators; import modules instead.

@@ -1,7 +1,7 @@
 {
-  "version": 1,
-  "rulebook_version": 1,
-  "source_digest": "9e2a5b6654d4af4cf415d93f8f7b16ec85ff6aef303c9a840889ecff44305d2c",
+  "version": 5,
+  "rulebook_version": 5,
+  "source_digest": "2c2d7759d2f7023ed64c110da44fa99aa15ce11d8c63be597ff85961a0f75264",
   "scope": "Git-tracked Python (including shebang entry points), TypeScript and imported production ps.mjs; tests inventory-only; planning scripts excluded",
   "gate_definitions": {
     "unit": "Target crate's unit tests, fmt and clippy; CI once the crate exists",
@@ -14,85 +14,32 @@
   },
   "nodes": [
     {
-      "id": "integrate:31b9fba25e70",
+      "id": "cli:rust-test-date-lint",
       "kind": "integration",
-      "source_files": [
-        "scripts/check-provenant-install.py",
-        "scripts/clean.py",
-        "scripts/fabric_git.py",
-        "scripts/fabric_hosts.py",
-        "scripts/fabric_lanes.py",
-        "scripts/instance_installation.py",
-        "scripts/lib/stale_checkout.py",
-        "scripts/model_route.py",
-        "scripts/model_route_live.py",
-        "scripts/provider_quota.py",
-        "scripts/telemetry.py",
-        "scripts/telemetry_hosts.py",
-        "scripts/worktree.py",
-        "skills/orchestrate/scripts/agy_home.py",
-        "skills/orchestrate/scripts/cf_dispatch.py",
-        "skills/orchestrate/scripts/dispatch_preflight.py",
-        "skills/orchestrate/scripts/exec_routing.py",
-        "skills/orchestrate/scripts/fabric_records.py",
-        "skills/orchestrate/scripts/instruction_quarantine.py",
-        "skills/orchestrate/scripts/lane_exit.py",
-        "skills/orchestrate/scripts/lane_launch.py",
-        "skills/orchestrate/scripts/lane_protection.py",
-        "skills/orchestrate/scripts/layout.py",
-        "skills/orchestrate/scripts/provider_exec.py",
-        "skills/orchestrate/scripts/provider_observer.py",
-        "skills/orchestrate/scripts/provider_output.py",
-        "skills/orchestrate/scripts/run_lineage.py"
+      "source_globs": [
+        "tools/front-door/crates/cli/src/timebomb.rs",
+        "scripts/lint-timebomb-fixtures.py"
       ],
-      "target_crate": "cross-crate",
+      "source_files": [
+        "scripts/lint-timebomb-fixtures.py",
+        "tools/front-door/crates/cli/src/timebomb.rs"
+      ],
+      "target_crate": "cli",
       "depends_on": [
-        "prerequisite:J1",
-        "prerequisite:J2",
-        "prerequisite:J3",
-        "prerequisite:adr",
-        "scripts/check-provenant-install.py#unit-01",
-        "scripts/clean.py#unit-03",
-        "scripts/fabric_git.py#unit-04",
-        "scripts/fabric_hosts.py#unit-03",
-        "scripts/fabric_lanes.py#unit-04",
-        "scripts/instance_installation.py#unit-03",
-        "scripts/lib/stale_checkout.py#unit-01",
-        "scripts/model_route.py#unit-05",
-        "scripts/model_route_live.py#unit-02",
-        "scripts/provider_quota.py#unit-05",
-        "scripts/telemetry.py#unit-04",
-        "scripts/telemetry_hosts.py#unit-01",
-        "scripts/worktree.py#unit-03",
-        "skills/orchestrate/scripts/agy_home.py#unit-01",
-        "skills/orchestrate/scripts/cf_dispatch.py#unit-03",
-        "skills/orchestrate/scripts/dispatch_preflight.py#unit-02",
-        "skills/orchestrate/scripts/exec_routing.py#unit-02",
-        "skills/orchestrate/scripts/fabric_records.py#unit-02",
-        "skills/orchestrate/scripts/instruction_quarantine.py#unit-01",
-        "skills/orchestrate/scripts/lane_exit.py#unit-01",
-        "skills/orchestrate/scripts/lane_launch.py#unit-01",
-        "skills/orchestrate/scripts/lane_protection.py#unit-01",
-        "skills/orchestrate/scripts/layout.py#unit-01",
-        "skills/orchestrate/scripts/provider_exec.py#unit-12",
-        "skills/orchestrate/scripts/provider_observer.py#unit-01",
-        "skills/orchestrate/scripts/provider_output.py#unit-02",
-        "skills/orchestrate/scripts/run_lineage.py#unit-02",
         "workspace:manifest-and-digest"
       ],
-      "risk": "high",
-      "recommended_model_tier": "principal",
+      "risk": "medium",
+      "recommended_model_tier": "senior",
+      "review_model_tier": "principal",
       "gates": [
         "unit",
         "J1",
         "J2",
-        "J3",
-        "lane",
-        "front-door",
         "differential"
       ],
       "lane_days": 0.5,
-      "action": "redesigned"
+      "action": "redesigned",
+      "description": "Retarget date lint to Rust #[test] sources using provenant-cli's existing textual date engine; cover discovery, changed-test context, traversal, diagnostics and CI binding without Python AST analysis"
     },
     {
       "id": "integrate:496bc5e66c6b",
@@ -140,6 +87,93 @@
         "prerequisite:adr",
         "runtime/fabric/src/process-identity.ts#unit-02",
         "runtime/fabric/src/run-registry.ts#unit-01",
+        "workspace:manifest-and-digest"
+      ],
+      "risk": "high",
+      "recommended_model_tier": "principal",
+      "gates": [
+        "unit",
+        "J1",
+        "J2",
+        "J3",
+        "lane",
+        "front-door",
+        "differential"
+      ],
+      "lane_days": 0.5,
+      "action": "redesigned"
+    },
+    {
+      "id": "integrate:d1f72d80b395",
+      "kind": "integration",
+      "source_files": [
+        "scripts/check-provenant-install.py",
+        "scripts/clean.py",
+        "scripts/fabric_git.py",
+        "scripts/fabric_hosts.py",
+        "scripts/fabric_lanes.py",
+        "scripts/instance_installation.py",
+        "scripts/lib/stale_checkout.py",
+        "scripts/model_route.py",
+        "scripts/model_route_live.py",
+        "scripts/provider_quota.py",
+        "scripts/task_classifier.py",
+        "scripts/telemetry.py",
+        "scripts/telemetry_hosts.py",
+        "scripts/utility.py",
+        "scripts/worktree.py",
+        "skills/orchestrate/scripts/agy_home.py",
+        "skills/orchestrate/scripts/cf_dispatch.py",
+        "skills/orchestrate/scripts/dispatch_preflight.py",
+        "skills/orchestrate/scripts/exec_routing.py",
+        "skills/orchestrate/scripts/fabric_records.py",
+        "skills/orchestrate/scripts/instruction_quarantine.py",
+        "skills/orchestrate/scripts/lane_exit.py",
+        "skills/orchestrate/scripts/lane_launch.py",
+        "skills/orchestrate/scripts/lane_protection.py",
+        "skills/orchestrate/scripts/layout.py",
+        "skills/orchestrate/scripts/provider_confinement.py",
+        "skills/orchestrate/scripts/provider_exec.py",
+        "skills/orchestrate/scripts/provider_observer.py",
+        "skills/orchestrate/scripts/provider_output.py",
+        "skills/orchestrate/scripts/run_lineage.py"
+      ],
+      "target_crate": "cross-crate",
+      "depends_on": [
+        "prerequisite:J1",
+        "prerequisite:J2",
+        "prerequisite:J3",
+        "prerequisite:adr",
+        "scripts/check-provenant-install.py#unit-01",
+        "scripts/clean.py#unit-03",
+        "scripts/fabric_git.py#unit-04",
+        "scripts/fabric_hosts.py#unit-03",
+        "scripts/fabric_lanes.py#unit-04",
+        "scripts/instance_installation.py#unit-03",
+        "scripts/lib/stale_checkout.py#unit-01",
+        "scripts/model_route.py#unit-05",
+        "scripts/model_route_live.py#unit-02",
+        "scripts/provider_quota.py#unit-05",
+        "scripts/task_classifier.py#unit-01",
+        "scripts/telemetry.py#unit-04",
+        "scripts/telemetry_hosts.py#unit-01",
+        "scripts/utility.py#unit-01",
+        "scripts/worktree.py#unit-03",
+        "skills/orchestrate/scripts/agy_home.py#unit-01",
+        "skills/orchestrate/scripts/cf_dispatch.py#unit-03",
+        "skills/orchestrate/scripts/dispatch_preflight.py#unit-02",
+        "skills/orchestrate/scripts/exec_routing.py#unit-02",
+        "skills/orchestrate/scripts/fabric_records.py#unit-02",
+        "skills/orchestrate/scripts/instruction_quarantine.py#unit-01",
+        "skills/orchestrate/scripts/lane_exit.py#unit-01",
+        "skills/orchestrate/scripts/lane_launch.py#unit-01",
+        "skills/orchestrate/scripts/lane_protection.py#unit-01",
+        "skills/orchestrate/scripts/layout.py#unit-01",
+        "skills/orchestrate/scripts/provider_confinement.py#unit-04",
+        "skills/orchestrate/scripts/provider_exec.py#unit-09",
+        "skills/orchestrate/scripts/provider_observer.py#unit-01",
+        "skills/orchestrate/scripts/provider_output.py#unit-02",
+        "skills/orchestrate/scripts/run_lineage.py#unit-02",
         "workspace:manifest-and-digest"
       ],
       "risk": "high",
@@ -233,6 +267,183 @@
       "action": "redesigned",
       "description": "feat/s2-lane-run; integrate accepted S2, do not duplicate it",
       "dispatchable": false
+    },
+    {
+      "id": "records:external-yaml-subset",
+      "kind": "integration",
+      "source_globs": [
+        ".github/ISSUE_TEMPLATE/*.yml",
+        ".github/ISSUE_TEMPLATE/*.yaml",
+        "skills/setup-repo/templates/*.yml",
+        "skills/setup-repo/templates/*.yaml",
+        "*/agents/openai.yaml",
+        "SKILL.md",
+        "*/SKILL.md"
+      ],
+      "source_files": [
+        ".github/ISSUE_TEMPLATE/bug.yml",
+        ".github/ISSUE_TEMPLATE/config.yml",
+        ".github/ISSUE_TEMPLATE/feature.yml",
+        ".github/ISSUE_TEMPLATE/skill-proposal.yml",
+        ".github/ISSUE_TEMPLATE/work-item.yml",
+        "library/playwright/SKILL.md",
+        "library/react-performance/SKILL.md",
+        "library/tanstack-query/SKILL.md",
+        "library/tanstack-query/agents/openai.yaml",
+        "library/typescript-clean-code/SKILL.md",
+        "skills/autopilot/SKILL.md",
+        "skills/code-review/SKILL.md",
+        "skills/d2-diagrams/SKILL.md",
+        "skills/deliver/SKILL.md",
+        "skills/diagnose/SKILL.md",
+        "skills/engineering-docs/SKILL.md",
+        "skills/engineering-writing/SKILL.md",
+        "skills/engineering-writing/agents/openai.yaml",
+        "skills/evaluate/SKILL.md",
+        "skills/grill-me/SKILL.md",
+        "skills/implement/SKILL.md",
+        "skills/legal-writing/SKILL.md",
+        "skills/legal-writing/agents/openai.yaml",
+        "skills/natural-writing/SKILL.md",
+        "skills/natural-writing/agents/openai.yaml",
+        "skills/orchestrate/SKILL.md",
+        "skills/prototype/SKILL.md",
+        "skills/refactor/SKILL.md",
+        "skills/refactor/agents/openai.yaml",
+        "skills/release/SKILL.md",
+        "skills/retrospect/SKILL.md",
+        "skills/retrospect/agents/openai.yaml",
+        "skills/scope/SKILL.md",
+        "skills/session/SKILL.md",
+        "skills/setup-repo/SKILL.md",
+        "skills/setup-repo/templates/ISSUE_TEMPLATE/bug.yml",
+        "skills/setup-repo/templates/ISSUE_TEMPLATE/config.yml",
+        "skills/setup-repo/templates/ISSUE_TEMPLATE/feature.yml",
+        "skills/setup-repo/templates/ISSUE_TEMPLATE/work-item.yml",
+        "skills/setup-repo/templates/ci-status-aggregate.yml",
+        "skills/setup-repo/templates/dependabot.yml",
+        "skills/setup-repo/templates/labels.yml",
+        "skills/setup-repo/templates/workflows-labels.yml",
+        "skills/skill-craft/SKILL.md",
+        "skills/tdd/SKILL.md",
+        "skills/tracker/SKILL.md",
+        "skills/ui-ux-design/SKILL.md",
+        "skills/ui-ux-design/agents/openai.yaml",
+        "skills/work-map/SKILL.md"
+      ],
+      "target_crate": "records",
+      "depends_on": [
+        "workspace:manifest-and-digest"
+      ],
+      "risk": "medium",
+      "recommended_model_tier": "senior",
+      "review_model_tier": "principal",
+      "gates": [
+        "unit",
+        "J1",
+        "J2",
+        "differential"
+      ],
+      "lane_days": 0.5,
+      "action": "redesigned",
+      "description": "Implement ADR 0028 decision 5's fail-closed YAML subset; CI parses every tracked external-group file and, while Python exists, differentially compares accepted values with PyYAML; refusals name construct and line, ambiguous plain scalars say quote this"
+    },
+    {
+      "id": "records:yaml-data-to-json",
+      "kind": "integration",
+      "source_globs": [
+        "skills/*/evals/*.yaml",
+        "library/*/evals/*.yaml",
+        "evals/*.yaml",
+        "docs/evals/*.yaml",
+        "config/adapter-compatibility.yaml",
+        "runtime/*/provenance_components.yaml",
+        "tests/fixtures/*.yaml"
+      ],
+      "source_files": [
+        "config/adapter-compatibility.yaml",
+        "docs/evals/skill-portfolio-2026/predecessor/routing-holdout-20260714.yaml",
+        "docs/evals/skill-portfolio-2026/routing-holdout.yaml",
+        "evals/delivery-profile-scenarios.yaml",
+        "evals/lifecycle-routing.yaml",
+        "library/playwright/evals/trigger_cases.yaml",
+        "library/react-performance/evals/trigger_cases.yaml",
+        "library/tanstack-query/evals/trigger_cases.yaml",
+        "library/typescript-clean-code/evals/trigger_cases.yaml",
+        "runtime/ui-evidence/provenance_components.yaml",
+        "runtime/ui-live/provenance_components.yaml",
+        "skills/autopilot/evals/regression_cases.yaml",
+        "skills/autopilot/evals/trigger_cases.yaml",
+        "skills/code-review/evals/discipline_cases.yaml",
+        "skills/code-review/evals/regression_cases.yaml",
+        "skills/code-review/evals/trigger_cases.yaml",
+        "skills/d2-diagrams/evals/trigger_cases.yaml",
+        "skills/deliver/evals/lifecycle_cases.yaml",
+        "skills/deliver/evals/trigger_cases.yaml",
+        "skills/diagnose/evals/trigger_cases.yaml",
+        "skills/engineering-docs/evals/trigger_cases.yaml",
+        "skills/engineering-writing/evals/trigger_cases.yaml",
+        "skills/evaluate/evals/trigger_cases.yaml",
+        "skills/grill-me/evals/lifecycle_cases.yaml",
+        "skills/grill-me/evals/trigger_cases.yaml",
+        "skills/implement/evals/lifecycle_cases.yaml",
+        "skills/implement/evals/trigger_cases.yaml",
+        "skills/legal-writing/evals/regression_cases.yaml",
+        "skills/legal-writing/evals/trigger_cases.yaml",
+        "skills/natural-writing/evals/trigger_cases.yaml",
+        "skills/orchestrate/evals/contract_cases.yaml",
+        "skills/orchestrate/evals/discipline_cases.yaml",
+        "skills/orchestrate/evals/lifecycle_cases.yaml",
+        "skills/orchestrate/evals/regression_cases.yaml",
+        "skills/orchestrate/evals/topology_value_cases.yaml",
+        "skills/orchestrate/evals/trigger_cases.yaml",
+        "skills/prototype/evals/trigger_cases.yaml",
+        "skills/refactor/evals/trigger_cases.yaml",
+        "skills/release/evals/lifecycle_cases.yaml",
+        "skills/release/evals/trigger_cases.yaml",
+        "skills/retrospect/evals/lifecycle_cases.yaml",
+        "skills/retrospect/evals/trigger_cases.yaml",
+        "skills/scope/evals/lifecycle_cases.yaml",
+        "skills/scope/evals/trigger_cases.yaml",
+        "skills/session/evals/lifecycle_cases.yaml",
+        "skills/session/evals/regression_cases.yaml",
+        "skills/session/evals/trigger_cases.yaml",
+        "skills/setup-repo/evals/trigger_cases.yaml",
+        "skills/skill-craft/evals/boundary_trace_cases.yaml",
+        "skills/skill-craft/evals/regression_cases.yaml",
+        "skills/skill-craft/evals/trigger_cases.yaml",
+        "skills/tdd/evals/regression_cases.yaml",
+        "skills/tdd/evals/trigger_cases.yaml",
+        "skills/tracker/evals/placement_cases.yaml",
+        "skills/tracker/evals/regression_cases.yaml",
+        "skills/tracker/evals/trigger_cases.yaml",
+        "skills/ui-ux-design/evals/boundary_cases.yaml",
+        "skills/ui-ux-design/evals/craft_quality.yaml",
+        "skills/ui-ux-design/evals/provenance_components.yaml",
+        "skills/ui-ux-design/evals/reference_disposition.yaml",
+        "skills/ui-ux-design/evals/regression_cases.yaml",
+        "skills/ui-ux-design/evals/trigger_cases.yaml",
+        "skills/work-map/evals/lifecycle_cases.yaml",
+        "skills/work-map/evals/trigger_cases.yaml",
+        "tests/fixtures/disclosure-migration.yaml",
+        "tests/fixtures/runtime-architecture.yaml"
+      ],
+      "target_crate": "records",
+      "depends_on": [
+        "workspace:manifest-and-digest"
+      ],
+      "risk": "medium",
+      "recommended_model_tier": "senior",
+      "review_model_tier": "principal",
+      "gates": [
+        "unit",
+        "J1",
+        "J2",
+        "differential"
+      ],
+      "lane_days": 0.5,
+      "action": "redesigned",
+      "description": "Migrate Provenant-owned YAML to JSON with all readers, callers and fixtures, including scripts/model_route.py's runtime adapter compatibility input; preserve values and validate consumers"
     },
     {
       "id": "runtime/fabric/src/batch-execution.ts#interface",
@@ -460,9 +671,9 @@
       ],
       "target_crate": "cli",
       "depends_on": [
-        "integrate:31b9fba25e70",
         "integrate:496bc5e66c6b",
         "integrate:5ef42cbe0051",
+        "integrate:d1f72d80b395",
         "prerequisite:J1",
         "prerequisite:J2",
         "prerequisite:J3",
@@ -639,9 +850,9 @@
       ],
       "target_crate": "cli",
       "depends_on": [
-        "integrate:31b9fba25e70",
         "integrate:496bc5e66c6b",
         "integrate:5ef42cbe0051",
+        "integrate:d1f72d80b395",
         "prerequisite:J1",
         "prerequisite:J2",
         "prerequisite:J3",
@@ -794,9 +1005,9 @@
       ],
       "target_crate": "cli",
       "depends_on": [
-        "integrate:31b9fba25e70",
         "integrate:496bc5e66c6b",
         "integrate:5ef42cbe0051",
+        "integrate:d1f72d80b395",
         "prerequisite:J1",
         "prerequisite:J2",
         "prerequisite:J3",
@@ -4667,6 +4878,8 @@
         "prerequisite:J1",
         "prerequisite:J2",
         "prerequisite:adr",
+        "records:external-yaml-subset",
+        "records:yaml-data-to-json",
         "workspace:manifest-and-digest"
       ],
       "risk": "medium",
@@ -4702,6 +4915,8 @@
         "prerequisite:J1",
         "prerequisite:J2",
         "prerequisite:adr",
+        "records:external-yaml-subset",
+        "records:yaml-data-to-json",
         "scripts/check_harness.py#unit-01",
         "workspace:manifest-and-digest"
       ],
@@ -4734,7 +4949,7 @@
       ],
       "target_crate": "cli",
       "depends_on": [
-        "integrate:31b9fba25e70",
+        "integrate:d1f72d80b395",
         "prerequisite:J1",
         "prerequisite:J2",
         "prerequisite:adr",
@@ -4876,11 +5091,12 @@
       "source_spans": [
         {
           "start": 339,
-          "end": 679,
+          "end": 682,
           "symbols": [
             "_worktree_verdict",
             "_integration_ref",
             "_merged_by_ancestry",
+            "_squash_merge_proof",
             "_branch_at_integration_tip",
             "_merged",
             "plan",
@@ -4888,9 +5104,7 @@
             "_digest",
             "save_plan",
             "_load_plan",
-            "Assign",
-            "_bulk_verdict",
-            "_reclassify"
+            "Assign"
           ]
         }
       ],
@@ -4927,9 +5141,11 @@
       ],
       "source_spans": [
         {
-          "start": 680,
-          "end": 869,
+          "start": 683,
+          "end": 953,
           "symbols": [
+            "_bulk_verdict",
+            "_reclassify",
             "_apply_plan",
             "apply",
             "_duration",
@@ -4972,7 +5188,7 @@
       "source_spans": [
         {
           "start": 1,
-          "end": 116,
+          "end": 134,
           "symbols": [
             "configure-claude-hooks"
           ]
@@ -4984,6 +5200,7 @@
         "prerequisite:J2",
         "prerequisite:adr",
         "scripts/lane_safety_guard.py#unit-02",
+        "scripts/routing_context_hook.py#unit-01",
         "scripts/utility_output_hook.py#unit-01",
         "workspace:manifest-and-digest"
       ],
@@ -6399,7 +6616,7 @@
       "source_spans": [
         {
           "start": 1,
-          "end": 215,
+          "end": 249,
           "symbols": [
             "front_door_build"
           ]
@@ -6621,7 +6838,7 @@
     },
     {
       "id": "scripts/lint-timebomb-fixtures.py#unit-01",
-      "kind": "port",
+      "kind": "retirement",
       "source_files": [
         "scripts/lint-timebomb-fixtures.py"
       ],
@@ -6635,23 +6852,15 @@
         }
       ],
       "target_crate": "cli",
-      "depends_on": [
-        "prerequisite:J1",
-        "prerequisite:J2",
-        "prerequisite:adr",
-        "workspace:manifest-and-digest"
-      ],
+      "depends_on": [],
       "risk": "medium",
       "recommended_model_tier": "junior",
       "review_model_tier": "principal",
-      "gates": [
-        "unit",
-        "J1",
-        "J2",
-        "differential"
-      ],
-      "lane_days": 0.5,
-      "action": "ported"
+      "gates": [],
+      "lane_days": 0,
+      "action": "retired",
+      "deletion_criterion": "no tests/*.py and no *.test.ts remain",
+      "dispatchable": false
     },
     {
       "id": "scripts/manage_installation.py#unit-01",
@@ -6886,7 +7095,7 @@
       "source_spans": [
         {
           "start": 1,
-          "end": 291,
+          "end": 279,
           "symbols": [
             "module",
             "Expr",
@@ -6917,6 +7126,7 @@
             "Assign",
             "Assign",
             "Assign",
+            "AnnAssign",
             "AnnAssign",
             "Assign",
             "Assign",
@@ -6968,6 +7178,7 @@
         "scripts/model_route_pools.py#unit-03",
         "scripts/model_route_preferences.py#unit-02",
         "scripts/model_route_probe.py#unit-02",
+        "scripts/task_classifier.py#interface",
         "skills/_shared/harness_profile.py#unit-02",
         "skills/_shared/roots.py#unit-01",
         "skills/orchestrate/scripts/fabric_records.py#interface",
@@ -6993,8 +7204,8 @@
       ],
       "source_spans": [
         {
-          "start": 292,
-          "end": 632,
+          "start": 280,
+          "end": 620,
           "symbols": [
             "catalogue_snapshot",
             "load_catalog",
@@ -7021,6 +7232,7 @@
         "scripts/model_route_pools.py#unit-03",
         "scripts/model_route_preferences.py#unit-02",
         "scripts/model_route_probe.py#unit-02",
+        "scripts/task_classifier.py#interface",
         "skills/_shared/harness_profile.py#unit-02",
         "skills/_shared/roots.py#unit-01",
         "skills/orchestrate/scripts/fabric_records.py#interface",
@@ -7046,8 +7258,8 @@
       ],
       "source_spans": [
         {
-          "start": 633,
-          "end": 982,
+          "start": 621,
+          "end": 961,
           "symbols": [
             "load_adapter_compatibility",
             "check_adapter_compatibility",
@@ -7069,8 +7281,7 @@
             "resolve.Assign",
             "resolve.If",
             "resolve.Assign",
-            "resolve.If",
-            "resolve.Assign"
+            "resolve.If"
           ]
         }
       ],
@@ -7089,6 +7300,7 @@
         "scripts/model_route_pools.py#unit-03",
         "scripts/model_route_preferences.py#unit-02",
         "scripts/model_route_probe.py#unit-02",
+        "scripts/task_classifier.py#interface",
         "skills/_shared/harness_profile.py#unit-02",
         "skills/_shared/roots.py#unit-01",
         "skills/orchestrate/scripts/fabric_records.py#interface",
@@ -7114,9 +7326,10 @@
       ],
       "source_spans": [
         {
-          "start": 983,
-          "end": 1332,
+          "start": 962,
+          "end": 1309,
           "symbols": [
+            "resolve.Assign",
             "resolve.If",
             "resolve.If",
             "resolve.Assign",
@@ -7141,7 +7354,6 @@
             "resolve.Assign",
             "resolve.Assign",
             "resolve.If",
-            "resolve.Assign",
             "resolve.Assign"
           ]
         }
@@ -7161,6 +7373,7 @@
         "scripts/model_route_pools.py#unit-03",
         "scripts/model_route_preferences.py#unit-02",
         "scripts/model_route_probe.py#unit-02",
+        "scripts/task_classifier.py#interface",
         "skills/_shared/harness_profile.py#unit-02",
         "skills/_shared/roots.py#unit-01",
         "skills/orchestrate/scripts/fabric_records.py#interface",
@@ -7186,9 +7399,10 @@
       ],
       "source_spans": [
         {
-          "start": 1333,
-          "end": 1624,
+          "start": 1310,
+          "end": 1614,
           "symbols": [
+            "resolve.Assign",
             "resolve.Assign",
             "resolve.If",
             "resolve.Assign",
@@ -7248,6 +7462,7 @@
         "scripts/model_route_pools.py#unit-03",
         "scripts/model_route_preferences.py#unit-02",
         "scripts/model_route_probe.py#unit-02",
+        "scripts/task_classifier.py#interface",
         "skills/_shared/harness_profile.py#unit-02",
         "skills/_shared/roots.py#unit-01",
         "skills/orchestrate/scripts/fabric_records.py#interface",
@@ -7308,7 +7523,7 @@
       "source_spans": [
         {
           "start": 1,
-          "end": 194,
+          "end": 341,
           "symbols": [
             "Expr",
             "ImportFrom",
@@ -7343,7 +7558,39 @@
             "_main.Assign",
             "_main.Assign",
             "_main.If",
-            "_main.Assign"
+            "_main.Assign",
+            "_main.If",
+            "_main.If.Assign",
+            "_main.If.If",
+            "_main.If.Assign",
+            "_main.If.Assign",
+            "_main.If.If",
+            "_main.If.If",
+            "_main.If.Assign",
+            "_main.If.If",
+            "_main.If.Assign",
+            "_main.If.Assign",
+            "_main.If.Assign",
+            "_main.If.Assign",
+            "_main.If.Assign",
+            "_main.If.Assign",
+            "_main.If.If",
+            "_main.If.Assign",
+            "_main.If.If",
+            "_main.If.reject",
+            "_main.If.Assign",
+            "_main.If.Assign",
+            "_main.If.Assign",
+            "_main.If.Assign",
+            "_main.If.Assign",
+            "_main.If.If",
+            "_main.If.Assign",
+            "_main.If.If",
+            "_main.If.Assign",
+            "_main.If.Assign",
+            "_main.If.If",
+            "_main.If.If",
+            "_main.If.If"
           ]
         }
       ],
@@ -7374,10 +7621,17 @@
       ],
       "source_spans": [
         {
-          "start": 195,
-          "end": 428,
+          "start": 342,
+          "end": 471,
           "symbols": [
-            "_main.If",
+            "_main.If.If",
+            "_main.If.If",
+            "_main.If.If",
+            "_main.If.If",
+            "_main.If.If",
+            "_main.If.If",
+            "_main.If.If",
+            "_main.If.Return",
             "_main.Return"
           ]
         }
@@ -7546,7 +7800,7 @@
       "source_spans": [
         {
           "start": 1,
-          "end": 312,
+          "end": 322,
           "symbols": [
             "Expr",
             "ImportFrom",
@@ -7612,8 +7866,8 @@
       ],
       "source_spans": [
         {
-          "start": 313,
-          "end": 660,
+          "start": 323,
+          "end": 670,
           "symbols": [
             "Availability",
             "pool",
@@ -7656,8 +7910,8 @@
       ],
       "source_spans": [
         {
-          "start": 661,
-          "end": 692,
+          "start": 671,
+          "end": 702,
           "symbols": [
             "render"
           ]
@@ -7692,7 +7946,7 @@
       "source_spans": [
         {
           "start": 1,
-          "end": 327,
+          "end": 328,
           "symbols": [
             "Expr",
             "ImportFrom",
@@ -7749,8 +8003,8 @@
       ],
       "source_spans": [
         {
-          "start": 328,
-          "end": 566,
+          "start": 329,
+          "end": 567,
           "symbols": [
             "_preference_receipt",
             "_load_spread_state",
@@ -7878,40 +8132,6 @@
       "action": "ported"
     },
     {
-      "id": "scripts/movecheck.py#unit-01",
-      "kind": "port",
-      "source_files": [
-        "scripts/movecheck.py"
-      ],
-      "source_spans": [
-        {
-          "start": 1,
-          "end": 92,
-          "symbols": [
-            "movecheck"
-          ]
-        }
-      ],
-      "target_crate": "cli",
-      "depends_on": [
-        "prerequisite:J1",
-        "prerequisite:J2",
-        "prerequisite:adr",
-        "workspace:manifest-and-digest"
-      ],
-      "risk": "medium",
-      "recommended_model_tier": "junior",
-      "review_model_tier": "principal",
-      "gates": [
-        "unit",
-        "J1",
-        "J2",
-        "differential"
-      ],
-      "lane_days": 0.5,
-      "action": "ported"
-    },
-    {
       "id": "scripts/node-workspace-provision.py#unit-01",
       "kind": "port",
       "source_files": [
@@ -7928,7 +8148,7 @@
       ],
       "target_crate": "cli",
       "depends_on": [
-        "integrate:31b9fba25e70",
+        "integrate:d1f72d80b395",
         "prerequisite:J1",
         "prerequisite:J2",
         "prerequisite:adr",
@@ -8964,8 +9184,42 @@
       "action": "ported"
     },
     {
-      "id": "scripts/static-security-check.py#unit-01",
+      "id": "scripts/routing_context_hook.py#unit-01",
       "kind": "port",
+      "source_files": [
+        "scripts/routing_context_hook.py"
+      ],
+      "source_spans": [
+        {
+          "start": 1,
+          "end": 85,
+          "symbols": [
+            "routing_context_hook"
+          ]
+        }
+      ],
+      "target_crate": "cli",
+      "depends_on": [
+        "prerequisite:J1",
+        "prerequisite:J2",
+        "prerequisite:adr",
+        "workspace:manifest-and-digest"
+      ],
+      "risk": "medium",
+      "recommended_model_tier": "junior",
+      "review_model_tier": "principal",
+      "gates": [
+        "unit",
+        "J1",
+        "J2",
+        "differential"
+      ],
+      "lane_days": 0.5,
+      "action": "ported"
+    },
+    {
+      "id": "scripts/static-security-check.py#unit-01",
+      "kind": "retirement",
       "source_files": [
         "scripts/static-security-check.py"
       ],
@@ -9022,27 +9276,19 @@
         }
       ],
       "target_crate": "cli",
-      "depends_on": [
-        "prerequisite:J1",
-        "prerequisite:J2",
-        "prerequisite:adr",
-        "workspace:manifest-and-digest"
-      ],
+      "depends_on": [],
       "risk": "medium",
       "recommended_model_tier": "junior",
       "review_model_tier": "principal",
-      "gates": [
-        "unit",
-        "J1",
-        "J2",
-        "differential"
-      ],
-      "lane_days": 0.5,
-      "action": "ported"
+      "gates": [],
+      "lane_days": 0,
+      "action": "retired",
+      "deletion_criterion": "no tracked Python sources remain",
+      "dispatchable": false
     },
     {
       "id": "scripts/static-security-check.py#unit-02",
-      "kind": "port",
+      "kind": "retirement",
       "source_files": [
         "scripts/static-security-check.py"
       ],
@@ -9067,11 +9313,59 @@
         }
       ],
       "target_crate": "cli",
+      "depends_on": [],
+      "risk": "medium",
+      "recommended_model_tier": "junior",
+      "review_model_tier": "principal",
+      "gates": [],
+      "lane_days": 0,
+      "action": "retired",
+      "deletion_criterion": "no tracked Python sources remain",
+      "dispatchable": false
+    },
+    {
+      "id": "scripts/task_classifier.py#interface",
+      "kind": "interface",
+      "source_files": [
+        "scripts/task_classifier.py"
+      ],
+      "target_crate": "cli",
+      "depends_on": [
+        "prerequisite:J2",
+        "prerequisite:adr",
+        "workspace:manifest-and-digest"
+      ],
+      "risk": "medium",
+      "recommended_model_tier": "principal",
+      "gates": [
+        "J2",
+        "unit"
+      ],
+      "lane_days": 0.25,
+      "action": "redesigned"
+    },
+    {
+      "id": "scripts/task_classifier.py#unit-01",
+      "kind": "port",
+      "source_files": [
+        "scripts/task_classifier.py"
+      ],
+      "source_spans": [
+        {
+          "start": 1,
+          "end": 190,
+          "symbols": [
+            "task_classifier"
+          ]
+        }
+      ],
+      "target_crate": "cli",
       "depends_on": [
         "prerequisite:J1",
         "prerequisite:J2",
         "prerequisite:adr",
-        "scripts/static-security-check.py#unit-01",
+        "scripts/task_classifier.py#interface",
+        "scripts/utility.py#interface",
         "workspace:manifest-and-digest"
       ],
       "risk": "medium",
@@ -9116,7 +9410,7 @@
       "source_spans": [
         {
           "start": 1,
-          "end": 330,
+          "end": 336,
           "symbols": [
             "module",
             "Expr",
@@ -9205,8 +9499,8 @@
       ],
       "source_spans": [
         {
-          "start": 331,
-          "end": 667,
+          "start": 337,
+          "end": 673,
           "symbols": [
             "load_hosts",
             "record_host",
@@ -9277,8 +9571,8 @@
       ],
       "source_spans": [
         {
-          "start": 668,
-          "end": 944,
+          "start": 674,
+          "end": 950,
           "symbols": [
             "native_paths",
             "first_files",
@@ -9346,8 +9640,8 @@
       ],
       "source_spans": [
         {
-          "start": 945,
-          "end": 1021,
+          "start": 951,
+          "end": 1027,
           "symbols": [
             "main",
             "If"
@@ -9692,7 +9986,7 @@
       "source_spans": [
         {
           "start": 258,
-          "end": 471,
+          "end": 476,
           "symbols": [
             "ingest_document",
             "Assign",
@@ -9810,6 +10104,27 @@
       "action": "ported"
     },
     {
+      "id": "scripts/utility.py#interface",
+      "kind": "interface",
+      "source_files": [
+        "scripts/utility.py"
+      ],
+      "target_crate": "cli",
+      "depends_on": [
+        "prerequisite:J2",
+        "prerequisite:adr",
+        "workspace:manifest-and-digest"
+      ],
+      "risk": "medium",
+      "recommended_model_tier": "principal",
+      "gates": [
+        "J2",
+        "unit"
+      ],
+      "lane_days": 0.25,
+      "action": "redesigned"
+    },
+    {
       "id": "scripts/utility.py#unit-01",
       "kind": "port",
       "source_files": [
@@ -9826,10 +10141,13 @@
       ],
       "target_crate": "cli",
       "depends_on": [
-        "integrate:31b9fba25e70",
         "prerequisite:J1",
         "prerequisite:J2",
         "prerequisite:adr",
+        "scripts/model_route.py#interface",
+        "scripts/telemetry.py#interface",
+        "scripts/utility.py#interface",
+        "skills/orchestrate/scripts/cf_dispatch.py#interface",
         "workspace:manifest-and-digest"
       ],
       "risk": "medium",
@@ -9861,10 +10179,10 @@
       ],
       "target_crate": "cli",
       "depends_on": [
+        "integrate:d1f72d80b395",
         "prerequisite:J1",
         "prerequisite:J2",
         "prerequisite:adr",
-        "scripts/utility.py#unit-01",
         "workspace:manifest-and-digest"
       ],
       "risk": "medium",
@@ -12739,7 +13057,7 @@
       ],
       "target_crate": "run",
       "depends_on": [
-        "integrate:31b9fba25e70",
+        "integrate:d1f72d80b395",
         "prerequisite:J1",
         "prerequisite:J2",
         "prerequisite:adr",
@@ -12792,7 +13110,7 @@
       ],
       "target_crate": "run",
       "depends_on": [
-        "integrate:31b9fba25e70",
+        "integrate:d1f72d80b395",
         "prerequisite:J1",
         "prerequisite:J2",
         "prerequisite:adr",
@@ -12841,7 +13159,7 @@
       ],
       "target_crate": "run",
       "depends_on": [
-        "integrate:31b9fba25e70",
+        "integrate:d1f72d80b395",
         "prerequisite:J1",
         "prerequisite:J2",
         "prerequisite:adr",
@@ -13598,7 +13916,7 @@
       ],
       "target_crate": "run",
       "depends_on": [
-        "integrate:31b9fba25e70",
+        "integrate:d1f72d80b395",
         "prerequisite:J1",
         "prerequisite:J2",
         "prerequisite:adr",
@@ -13660,7 +13978,7 @@
       ],
       "target_crate": "run",
       "depends_on": [
-        "integrate:31b9fba25e70",
+        "integrate:d1f72d80b395",
         "prerequisite:J1",
         "prerequisite:J2",
         "prerequisite:adr",
@@ -13718,7 +14036,7 @@
       ],
       "target_crate": "run",
       "depends_on": [
-        "integrate:31b9fba25e70",
+        "integrate:d1f72d80b395",
         "prerequisite:J1",
         "prerequisite:J2",
         "prerequisite:adr",
@@ -13831,7 +14149,7 @@
       ],
       "target_crate": "run",
       "depends_on": [
-        "integrate:31b9fba25e70",
+        "integrate:d1f72d80b395",
         "prerequisite:J1",
         "prerequisite:J2",
         "prerequisite:adr",
@@ -13920,7 +14238,7 @@
       ],
       "target_crate": "run",
       "depends_on": [
-        "integrate:31b9fba25e70",
+        "integrate:d1f72d80b395",
         "prerequisite:J1",
         "prerequisite:J2",
         "prerequisite:adr",
@@ -13971,7 +14289,7 @@
       ],
       "target_crate": "run",
       "depends_on": [
-        "integrate:31b9fba25e70",
+        "integrate:d1f72d80b395",
         "prerequisite:J1",
         "prerequisite:J2",
         "prerequisite:adr",
@@ -14025,7 +14343,7 @@
       ],
       "target_crate": "run",
       "depends_on": [
-        "integrate:31b9fba25e70",
+        "integrate:d1f72d80b395",
         "prerequisite:J1",
         "prerequisite:J2",
         "prerequisite:adr",
@@ -14079,7 +14397,7 @@
       ],
       "target_crate": "run",
       "depends_on": [
-        "integrate:31b9fba25e70",
+        "integrate:d1f72d80b395",
         "prerequisite:J1",
         "prerequisite:J2",
         "prerequisite:adr",
@@ -14995,6 +15313,283 @@
       "action": "ported"
     },
     {
+      "id": "skills/orchestrate/scripts/provider_confinement.py#interface",
+      "kind": "interface",
+      "source_files": [
+        "skills/orchestrate/scripts/provider_confinement.py"
+      ],
+      "target_crate": "workflow",
+      "depends_on": [
+        "prerequisite:J2",
+        "prerequisite:adr",
+        "workspace:manifest-and-digest"
+      ],
+      "risk": "medium",
+      "recommended_model_tier": "principal",
+      "gates": [
+        "J2",
+        "unit"
+      ],
+      "lane_days": 0.25,
+      "action": "redesigned"
+    },
+    {
+      "id": "skills/orchestrate/scripts/provider_confinement.py#unit-01",
+      "kind": "port",
+      "source_files": [
+        "skills/orchestrate/scripts/provider_confinement.py"
+      ],
+      "source_spans": [
+        {
+          "start": 1,
+          "end": 344,
+          "symbols": [
+            "module",
+            "Expr",
+            "ImportFrom",
+            "Import",
+            "Import",
+            "Import",
+            "Import",
+            "Import",
+            "ImportFrom",
+            "Import",
+            "Import",
+            "Import",
+            "Import",
+            "Import",
+            "Import",
+            "Expr",
+            "Expr",
+            "ImportFrom",
+            "ImportFrom",
+            "Import",
+            "ImportFrom",
+            "Assign",
+            "Assign",
+            "Assign",
+            "Assign",
+            "Assign",
+            "Assign",
+            "Assign",
+            "Assign",
+            "Assign",
+            "Assign",
+            "Assign",
+            "Assign",
+            "_opencode_discovery_grantable",
+            "_fabric_hosts_owner",
+            "_jsonc_loads",
+            "_opencode_configured_instructions",
+            "credential_path",
+            "_sandbox_exec_path",
+            "_sandbox_exec_usable",
+            "_sbpl_string",
+            "_sbpl_quote",
+            "_sbpl_filter",
+            "_sbpl_expand_counts",
+            "_sbpl_regex_escape",
+            "_sbpl_rule",
+            "_sbpl_named_rule",
+            "_sbpl_unix_socket_allow",
+            "_git_toplevel"
+          ]
+        }
+      ],
+      "target_crate": "workflow",
+      "depends_on": [
+        "prerequisite:J1",
+        "prerequisite:J2",
+        "prerequisite:adr",
+        "scripts/fabric_hosts.py#interface",
+        "scripts/lib/jsonc.py#unit-01",
+        "skills/orchestrate/scripts/adapters/__init__.py#unit-01",
+        "skills/orchestrate/scripts/adapters/claude.py#unit-01",
+        "skills/orchestrate/scripts/layout.py#interface",
+        "skills/orchestrate/scripts/provider_confinement.py#interface",
+        "skills/orchestrate/scripts/trusted_git.py#unit-01",
+        "workspace:manifest-and-digest"
+      ],
+      "risk": "medium",
+      "recommended_model_tier": "junior",
+      "review_model_tier": "principal",
+      "gates": [
+        "unit",
+        "J1",
+        "J2",
+        "differential"
+      ],
+      "lane_days": 0.5,
+      "action": "ported"
+    },
+    {
+      "id": "skills/orchestrate/scripts/provider_confinement.py#unit-02",
+      "kind": "port",
+      "source_files": [
+        "skills/orchestrate/scripts/provider_confinement.py"
+      ],
+      "source_spans": [
+        {
+          "start": 345,
+          "end": 686,
+          "symbols": [
+            "protected_paths",
+            "check_protected_inputs",
+            "_real_dir_chain",
+            "codex_writer_shared_paths",
+            "os_confinement_profile",
+            "_claude_account_denies",
+            "_provider_state",
+            "_state_paths",
+            "_state_read_paths",
+            "_provider_config_write_denies",
+            "_state_write_grants",
+            "_state_write_guards"
+          ]
+        }
+      ],
+      "target_crate": "workflow",
+      "depends_on": [
+        "prerequisite:J1",
+        "prerequisite:J2",
+        "prerequisite:adr",
+        "scripts/fabric_hosts.py#interface",
+        "scripts/lib/jsonc.py#unit-01",
+        "skills/orchestrate/scripts/adapters/__init__.py#unit-01",
+        "skills/orchestrate/scripts/adapters/claude.py#unit-01",
+        "skills/orchestrate/scripts/layout.py#interface",
+        "skills/orchestrate/scripts/provider_confinement.py#interface",
+        "skills/orchestrate/scripts/provider_confinement.py#unit-01",
+        "skills/orchestrate/scripts/trusted_git.py#unit-01",
+        "workspace:manifest-and-digest"
+      ],
+      "risk": "medium",
+      "recommended_model_tier": "junior",
+      "review_model_tier": "principal",
+      "gates": [
+        "unit",
+        "J1",
+        "J2",
+        "differential"
+      ],
+      "lane_days": 0.5,
+      "action": "ported"
+    },
+    {
+      "id": "skills/orchestrate/scripts/provider_confinement.py#unit-03",
+      "kind": "port",
+      "source_files": [
+        "skills/orchestrate/scripts/provider_confinement.py"
+      ],
+      "source_spans": [
+        {
+          "start": 687,
+          "end": 1036,
+          "symbols": [
+            "_claude_project_dir",
+            "Assign",
+            "_claude_session_reads",
+            "_uses_api_key",
+            "Assign",
+            "_project_config_reads",
+            "Assign",
+            "Assign",
+            "_executable_file",
+            "Assign",
+            "Assign",
+            "Assign",
+            "_toolchain_grant",
+            "_runtime_component",
+            "Assign",
+            "Assign",
+            "Assign",
+            "_opencode_version_error",
+            "_pyenv_version_dir",
+            "_pyenv_shim",
+            "_toolchain_reads",
+            "_plain_file",
+            "_adapter_binary_reads",
+            "Assign",
+            "_open_canonical_dir",
+            "_private_dir",
+            "_write_new",
+            "_unlinked_file",
+            "_open_attempt_tmp"
+          ]
+        }
+      ],
+      "target_crate": "workflow",
+      "depends_on": [
+        "prerequisite:J1",
+        "prerequisite:J2",
+        "prerequisite:adr",
+        "scripts/fabric_hosts.py#interface",
+        "scripts/lib/jsonc.py#unit-01",
+        "skills/orchestrate/scripts/adapters/__init__.py#unit-01",
+        "skills/orchestrate/scripts/adapters/claude.py#unit-01",
+        "skills/orchestrate/scripts/layout.py#interface",
+        "skills/orchestrate/scripts/provider_confinement.py#interface",
+        "skills/orchestrate/scripts/provider_confinement.py#unit-02",
+        "skills/orchestrate/scripts/trusted_git.py#unit-01",
+        "workspace:manifest-and-digest"
+      ],
+      "risk": "medium",
+      "recommended_model_tier": "junior",
+      "review_model_tier": "principal",
+      "gates": [
+        "unit",
+        "J1",
+        "J2",
+        "differential"
+      ],
+      "lane_days": 0.5,
+      "action": "ported"
+    },
+    {
+      "id": "skills/orchestrate/scripts/provider_confinement.py#unit-04",
+      "kind": "port",
+      "source_files": [
+        "skills/orchestrate/scripts/provider_confinement.py"
+      ],
+      "source_spans": [
+        {
+          "start": 1037,
+          "end": 1085,
+          "symbols": [
+            "_prepare_state_directories",
+            "confinement_command",
+            "read_boundary"
+          ]
+        }
+      ],
+      "target_crate": "workflow",
+      "depends_on": [
+        "prerequisite:J1",
+        "prerequisite:J2",
+        "prerequisite:adr",
+        "scripts/fabric_hosts.py#interface",
+        "scripts/lib/jsonc.py#unit-01",
+        "skills/orchestrate/scripts/adapters/__init__.py#unit-01",
+        "skills/orchestrate/scripts/adapters/claude.py#unit-01",
+        "skills/orchestrate/scripts/layout.py#interface",
+        "skills/orchestrate/scripts/provider_confinement.py#interface",
+        "skills/orchestrate/scripts/provider_confinement.py#unit-03",
+        "skills/orchestrate/scripts/trusted_git.py#unit-01",
+        "workspace:manifest-and-digest"
+      ],
+      "risk": "medium",
+      "recommended_model_tier": "junior",
+      "review_model_tier": "principal",
+      "gates": [
+        "unit",
+        "J1",
+        "J2",
+        "differential"
+      ],
+      "lane_days": 0.5,
+      "action": "ported"
+    },
+    {
       "id": "skills/orchestrate/scripts/provider_exec.py#interface",
       "kind": "interface",
       "source_files": [
@@ -15024,7 +15619,7 @@
       "source_spans": [
         {
           "start": 1,
-          "end": 347,
+          "end": 348,
           "symbols": [
             "module",
             "Expr",
@@ -15069,6 +15664,7 @@
             "Import",
             "Import",
             "Import",
+            "Import",
             "Try",
             "Assign",
             "Assign",
@@ -15080,36 +15676,32 @@
             "Assign",
             "Assign",
             "Assign",
-            "Assign",
-            "Assign",
-            "Assign",
-            "Assign",
-            "Assign",
-            "Assign",
-            "Assign",
-            "Assign",
-            "Assign",
-            "Assign",
             "now",
             "harness_revision",
-            "Assign",
-            "Assign",
-            "_opencode_discovery_grantable",
-            "_fabric_hosts_owner",
-            "_jsonc_loads",
-            "_opencode_configured_instructions",
-            "credential_path",
-            "_sandbox_exec_path"
+            "CapabilityError",
+            "capability_values",
+            "parse_capabilities_argument",
+            "validate_capabilities",
+            "_ensure_locks_dir",
+            "_require_kiro_engine",
+            "build_plan",
+            "build_plan.Assign",
+            "build_plan.Assign",
+            "build_plan.Assign",
+            "build_plan.Assign",
+            "build_plan.Assign",
+            "build_plan.Assign",
+            "build_plan.Assign",
+            "build_plan.If",
+            "build_plan.If"
           ]
         }
       ],
-      "target_crate": "providers",
+      "target_crate": "confinement",
       "depends_on": [
         "prerequisite:J1",
         "prerequisite:J2",
         "prerequisite:adr",
-        "scripts/fabric_hosts.py#interface",
-        "scripts/lib/jsonc.py#unit-01",
         "scripts/provider_quota.py#interface",
         "skills/_shared/harness_profile.py#unit-02",
         "skills/orchestrate/scripts/adapters/__init__.py#unit-01",
@@ -15125,6 +15717,7 @@
         "skills/orchestrate/scripts/layout.py#interface",
         "skills/orchestrate/scripts/output_custody.py#unit-01",
         "skills/orchestrate/scripts/process_info.py#unit-02",
+        "skills/orchestrate/scripts/provider_confinement.py#interface",
         "skills/orchestrate/scripts/provider_exec.py#interface",
         "skills/orchestrate/scripts/provider_observer.py#interface",
         "skills/orchestrate/scripts/provider_output.py#interface",
@@ -15134,8 +15727,8 @@
         "skills/orchestrate/scripts/writer_lease.py#unit-01",
         "workspace:manifest-and-digest"
       ],
-      "risk": "medium",
-      "recommended_model_tier": "junior",
+      "risk": "high",
+      "recommended_model_tier": "senior",
       "review_model_tier": "principal",
       "gates": [
         "unit",
@@ -15155,254 +15748,9 @@
       ],
       "source_spans": [
         {
-          "start": 348,
-          "end": 574,
+          "start": 349,
+          "end": 681,
           "symbols": [
-            "_sandbox_exec_usable",
-            "CapabilityError",
-            "capability_values",
-            "parse_capabilities_argument",
-            "validate_capabilities",
-            "_sbpl_string",
-            "_sbpl_quote",
-            "_sbpl_filter",
-            "_sbpl_expand_counts",
-            "_sbpl_regex_escape",
-            "_sbpl_rule",
-            "_sbpl_named_rule",
-            "_sbpl_unix_socket_allow",
-            "_git_toplevel",
-            "protected_paths",
-            "check_protected_inputs",
-            "_real_dir_chain",
-            "_ensure_locks_dir",
-            "codex_writer_shared_paths"
-          ]
-        }
-      ],
-      "target_crate": "providers",
-      "depends_on": [
-        "prerequisite:J1",
-        "prerequisite:J2",
-        "prerequisite:adr",
-        "scripts/fabric_hosts.py#interface",
-        "scripts/lib/jsonc.py#unit-01",
-        "scripts/provider_quota.py#interface",
-        "skills/_shared/harness_profile.py#unit-02",
-        "skills/orchestrate/scripts/adapters/__init__.py#unit-01",
-        "skills/orchestrate/scripts/adapters/claude.py#unit-01",
-        "skills/orchestrate/scripts/agy_home.py#interface",
-        "skills/orchestrate/scripts/attempt_storage.py#unit-01",
-        "skills/orchestrate/scripts/context_usage.py#unit-02",
-        "skills/orchestrate/scripts/exec_routing.py#interface",
-        "skills/orchestrate/scripts/fabric_policy.py#unit-01",
-        "skills/orchestrate/scripts/instruction_quarantine.py#interface",
-        "skills/orchestrate/scripts/lane_exit.py#interface",
-        "skills/orchestrate/scripts/lane_launch.py#interface",
-        "skills/orchestrate/scripts/layout.py#interface",
-        "skills/orchestrate/scripts/output_custody.py#unit-01",
-        "skills/orchestrate/scripts/process_info.py#unit-02",
-        "skills/orchestrate/scripts/provider_exec.py#interface",
-        "skills/orchestrate/scripts/provider_exec.py#unit-01",
-        "skills/orchestrate/scripts/provider_observer.py#interface",
-        "skills/orchestrate/scripts/provider_output.py#interface",
-        "skills/orchestrate/scripts/run_lineage.py#interface",
-        "skills/orchestrate/scripts/stall_watchdog.py#unit-01",
-        "skills/orchestrate/scripts/trusted_git.py#unit-01",
-        "skills/orchestrate/scripts/writer_lease.py#unit-01",
-        "workspace:manifest-and-digest"
-      ],
-      "risk": "medium",
-      "recommended_model_tier": "junior",
-      "review_model_tier": "principal",
-      "gates": [
-        "unit",
-        "J1",
-        "J2",
-        "differential",
-        "lane"
-      ],
-      "lane_days": 0.5,
-      "action": "redesigned"
-    },
-    {
-      "id": "skills/orchestrate/scripts/provider_exec.py#unit-03",
-      "kind": "port",
-      "source_files": [
-        "skills/orchestrate/scripts/provider_exec.py"
-      ],
-      "source_spans": [
-        {
-          "start": 575,
-          "end": 922,
-          "symbols": [
-            "os_confinement_profile",
-            "_claude_account_denies",
-            "_provider_state",
-            "_state_paths",
-            "_state_read_paths",
-            "_provider_config_write_denies",
-            "_state_write_grants",
-            "_state_write_guards",
-            "_claude_project_dir",
-            "Assign",
-            "_claude_session_reads",
-            "_uses_api_key",
-            "Assign",
-            "_project_config_reads",
-            "Assign",
-            "Assign",
-            "_executable_file",
-            "Assign",
-            "Assign",
-            "Assign"
-          ]
-        }
-      ],
-      "target_crate": "providers",
-      "depends_on": [
-        "prerequisite:J1",
-        "prerequisite:J2",
-        "prerequisite:adr",
-        "scripts/fabric_hosts.py#interface",
-        "scripts/lib/jsonc.py#unit-01",
-        "scripts/provider_quota.py#interface",
-        "skills/_shared/harness_profile.py#unit-02",
-        "skills/orchestrate/scripts/adapters/__init__.py#unit-01",
-        "skills/orchestrate/scripts/adapters/claude.py#unit-01",
-        "skills/orchestrate/scripts/agy_home.py#interface",
-        "skills/orchestrate/scripts/attempt_storage.py#unit-01",
-        "skills/orchestrate/scripts/context_usage.py#unit-02",
-        "skills/orchestrate/scripts/exec_routing.py#interface",
-        "skills/orchestrate/scripts/fabric_policy.py#unit-01",
-        "skills/orchestrate/scripts/instruction_quarantine.py#interface",
-        "skills/orchestrate/scripts/lane_exit.py#interface",
-        "skills/orchestrate/scripts/lane_launch.py#interface",
-        "skills/orchestrate/scripts/layout.py#interface",
-        "skills/orchestrate/scripts/output_custody.py#unit-01",
-        "skills/orchestrate/scripts/process_info.py#unit-02",
-        "skills/orchestrate/scripts/provider_exec.py#interface",
-        "skills/orchestrate/scripts/provider_exec.py#unit-02",
-        "skills/orchestrate/scripts/provider_observer.py#interface",
-        "skills/orchestrate/scripts/provider_output.py#interface",
-        "skills/orchestrate/scripts/run_lineage.py#interface",
-        "skills/orchestrate/scripts/stall_watchdog.py#unit-01",
-        "skills/orchestrate/scripts/trusted_git.py#unit-01",
-        "skills/orchestrate/scripts/writer_lease.py#unit-01",
-        "workspace:manifest-and-digest"
-      ],
-      "risk": "medium",
-      "recommended_model_tier": "junior",
-      "review_model_tier": "principal",
-      "gates": [
-        "unit",
-        "J1",
-        "J2",
-        "differential",
-        "lane"
-      ],
-      "lane_days": 0.5,
-      "action": "redesigned"
-    },
-    {
-      "id": "skills/orchestrate/scripts/provider_exec.py#unit-04",
-      "kind": "port",
-      "source_files": [
-        "skills/orchestrate/scripts/provider_exec.py"
-      ],
-      "source_spans": [
-        {
-          "start": 923,
-          "end": 1261,
-          "symbols": [
-            "_toolchain_grant",
-            "_runtime_component",
-            "Assign",
-            "_opencode_version_error",
-            "_pyenv_version_dir",
-            "_pyenv_shim",
-            "_toolchain_reads",
-            "_plain_file",
-            "_adapter_binary_reads",
-            "Assign",
-            "_open_canonical_dir",
-            "_private_dir",
-            "_write_new",
-            "_unlinked_file",
-            "_open_attempt_tmp",
-            "_prepare_state_directories",
-            "confinement_command",
-            "read_boundary"
-          ]
-        }
-      ],
-      "target_crate": "providers",
-      "depends_on": [
-        "prerequisite:J1",
-        "prerequisite:J2",
-        "prerequisite:adr",
-        "scripts/fabric_hosts.py#interface",
-        "scripts/lib/jsonc.py#unit-01",
-        "scripts/provider_quota.py#interface",
-        "skills/_shared/harness_profile.py#unit-02",
-        "skills/orchestrate/scripts/adapters/__init__.py#unit-01",
-        "skills/orchestrate/scripts/adapters/claude.py#unit-01",
-        "skills/orchestrate/scripts/agy_home.py#interface",
-        "skills/orchestrate/scripts/attempt_storage.py#unit-01",
-        "skills/orchestrate/scripts/context_usage.py#unit-02",
-        "skills/orchestrate/scripts/exec_routing.py#interface",
-        "skills/orchestrate/scripts/fabric_policy.py#unit-01",
-        "skills/orchestrate/scripts/instruction_quarantine.py#interface",
-        "skills/orchestrate/scripts/lane_exit.py#interface",
-        "skills/orchestrate/scripts/lane_launch.py#interface",
-        "skills/orchestrate/scripts/layout.py#interface",
-        "skills/orchestrate/scripts/output_custody.py#unit-01",
-        "skills/orchestrate/scripts/process_info.py#unit-02",
-        "skills/orchestrate/scripts/provider_exec.py#interface",
-        "skills/orchestrate/scripts/provider_exec.py#unit-03",
-        "skills/orchestrate/scripts/provider_observer.py#interface",
-        "skills/orchestrate/scripts/provider_output.py#interface",
-        "skills/orchestrate/scripts/run_lineage.py#interface",
-        "skills/orchestrate/scripts/stall_watchdog.py#unit-01",
-        "skills/orchestrate/scripts/trusted_git.py#unit-01",
-        "skills/orchestrate/scripts/writer_lease.py#unit-01",
-        "workspace:manifest-and-digest"
-      ],
-      "risk": "medium",
-      "recommended_model_tier": "junior",
-      "review_model_tier": "principal",
-      "gates": [
-        "unit",
-        "J1",
-        "J2",
-        "differential",
-        "lane"
-      ],
-      "lane_days": 0.5,
-      "action": "redesigned"
-    },
-    {
-      "id": "skills/orchestrate/scripts/provider_exec.py#unit-05",
-      "kind": "port",
-      "source_files": [
-        "skills/orchestrate/scripts/provider_exec.py"
-      ],
-      "source_spans": [
-        {
-          "start": 1262,
-          "end": 1593,
-          "symbols": [
-            "_require_kiro_engine",
-            "build_plan",
-            "build_plan.Assign",
-            "build_plan.Assign",
-            "build_plan.Assign",
-            "build_plan.Assign",
-            "build_plan.Assign",
-            "build_plan.Assign",
-            "build_plan.Assign",
-            "build_plan.If",
-            "build_plan.If",
             "build_plan.If",
             "build_plan.Assign",
             "build_plan.If",
@@ -15469,7 +15817,14 @@
             "build_plan.If",
             "build_plan.Assign",
             "build_plan.Assign",
-            "build_plan.Assign"
+            "build_plan.Assign",
+            "build_plan.Assign",
+            "build_plan.If",
+            "build_plan.Expr",
+            "build_plan.If",
+            "build_plan.Assign",
+            "build_plan.If",
+            "build_plan.Return"
           ]
         }
       ],
@@ -15478,8 +15833,6 @@
         "prerequisite:J1",
         "prerequisite:J2",
         "prerequisite:adr",
-        "scripts/fabric_hosts.py#interface",
-        "scripts/lib/jsonc.py#unit-01",
         "scripts/provider_quota.py#interface",
         "skills/_shared/harness_profile.py#unit-02",
         "skills/orchestrate/scripts/adapters/__init__.py#unit-01",
@@ -15495,6 +15848,226 @@
         "skills/orchestrate/scripts/layout.py#interface",
         "skills/orchestrate/scripts/output_custody.py#unit-01",
         "skills/orchestrate/scripts/process_info.py#unit-02",
+        "skills/orchestrate/scripts/provider_confinement.py#interface",
+        "skills/orchestrate/scripts/provider_exec.py#interface",
+        "skills/orchestrate/scripts/provider_exec.py#unit-01",
+        "skills/orchestrate/scripts/provider_observer.py#interface",
+        "skills/orchestrate/scripts/provider_output.py#interface",
+        "skills/orchestrate/scripts/run_lineage.py#interface",
+        "skills/orchestrate/scripts/stall_watchdog.py#unit-01",
+        "skills/orchestrate/scripts/trusted_git.py#unit-01",
+        "skills/orchestrate/scripts/writer_lease.py#unit-01",
+        "workspace:manifest-and-digest"
+      ],
+      "risk": "high",
+      "recommended_model_tier": "senior",
+      "review_model_tier": "principal",
+      "gates": [
+        "unit",
+        "J1",
+        "J2",
+        "differential",
+        "lane"
+      ],
+      "lane_days": 0.5,
+      "action": "redesigned"
+    },
+    {
+      "id": "skills/orchestrate/scripts/provider_exec.py#unit-03",
+      "kind": "port",
+      "source_files": [
+        "skills/orchestrate/scripts/provider_exec.py"
+      ],
+      "source_spans": [
+        {
+          "start": 682,
+          "end": 1025,
+          "symbols": [
+            "BoundedCapture",
+            "ImportFrom",
+            "_process_snapshot",
+            "_process_snapshot_unchecked",
+            "_process_environment",
+            "_has_attempt_marker",
+            "Assign",
+            "_recorded_start_time",
+            "_ps_start_time",
+            "_pid_exists",
+            "_signal_name",
+            "termination_request_matches",
+            "_termination_request",
+            "_nested_fabric_owner_token",
+            "_Descendants",
+            "_Descendants.__init__",
+            "_Descendants.sample",
+            "_Descendants._sample"
+          ]
+        }
+      ],
+      "target_crate": "providers",
+      "depends_on": [
+        "prerequisite:J1",
+        "prerequisite:J2",
+        "prerequisite:adr",
+        "scripts/provider_quota.py#interface",
+        "skills/_shared/harness_profile.py#unit-02",
+        "skills/orchestrate/scripts/adapters/__init__.py#unit-01",
+        "skills/orchestrate/scripts/adapters/claude.py#unit-01",
+        "skills/orchestrate/scripts/agy_home.py#interface",
+        "skills/orchestrate/scripts/attempt_storage.py#unit-01",
+        "skills/orchestrate/scripts/context_usage.py#unit-02",
+        "skills/orchestrate/scripts/exec_routing.py#interface",
+        "skills/orchestrate/scripts/fabric_policy.py#unit-01",
+        "skills/orchestrate/scripts/instruction_quarantine.py#interface",
+        "skills/orchestrate/scripts/lane_exit.py#interface",
+        "skills/orchestrate/scripts/lane_launch.py#interface",
+        "skills/orchestrate/scripts/layout.py#interface",
+        "skills/orchestrate/scripts/output_custody.py#unit-01",
+        "skills/orchestrate/scripts/process_info.py#unit-02",
+        "skills/orchestrate/scripts/provider_confinement.py#interface",
+        "skills/orchestrate/scripts/provider_exec.py#interface",
+        "skills/orchestrate/scripts/provider_exec.py#unit-02",
+        "skills/orchestrate/scripts/provider_observer.py#interface",
+        "skills/orchestrate/scripts/provider_output.py#interface",
+        "skills/orchestrate/scripts/run_lineage.py#interface",
+        "skills/orchestrate/scripts/stall_watchdog.py#unit-01",
+        "skills/orchestrate/scripts/trusted_git.py#unit-01",
+        "skills/orchestrate/scripts/writer_lease.py#unit-01",
+        "workspace:manifest-and-digest"
+      ],
+      "risk": "high",
+      "recommended_model_tier": "senior",
+      "review_model_tier": "principal",
+      "gates": [
+        "unit",
+        "J1",
+        "J2",
+        "differential",
+        "lane"
+      ],
+      "lane_days": 0.5,
+      "action": "redesigned"
+    },
+    {
+      "id": "skills/orchestrate/scripts/provider_exec.py#unit-04",
+      "kind": "port",
+      "source_files": [
+        "skills/orchestrate/scripts/provider_exec.py"
+      ],
+      "source_spans": [
+        {
+          "start": 1026,
+          "end": 1369,
+          "symbols": [
+            "_Descendants._refresh_spared",
+            "_Descendants.live",
+            "_Descendants.live_spared",
+            "_Descendants.signal",
+            "_Descendants.stop",
+            "Assign",
+            "Assign",
+            "_prctl",
+            "_enable_subreaper",
+            "_release_subreaper",
+            "WorkspaceProgress",
+            "_cpu_stamp",
+            "_prepare_codex_state_dir"
+          ]
+        }
+      ],
+      "target_crate": "providers",
+      "depends_on": [
+        "prerequisite:J1",
+        "prerequisite:J2",
+        "prerequisite:adr",
+        "scripts/provider_quota.py#interface",
+        "skills/_shared/harness_profile.py#unit-02",
+        "skills/orchestrate/scripts/adapters/__init__.py#unit-01",
+        "skills/orchestrate/scripts/adapters/claude.py#unit-01",
+        "skills/orchestrate/scripts/agy_home.py#interface",
+        "skills/orchestrate/scripts/attempt_storage.py#unit-01",
+        "skills/orchestrate/scripts/context_usage.py#unit-02",
+        "skills/orchestrate/scripts/exec_routing.py#interface",
+        "skills/orchestrate/scripts/fabric_policy.py#unit-01",
+        "skills/orchestrate/scripts/instruction_quarantine.py#interface",
+        "skills/orchestrate/scripts/lane_exit.py#interface",
+        "skills/orchestrate/scripts/lane_launch.py#interface",
+        "skills/orchestrate/scripts/layout.py#interface",
+        "skills/orchestrate/scripts/output_custody.py#unit-01",
+        "skills/orchestrate/scripts/process_info.py#unit-02",
+        "skills/orchestrate/scripts/provider_confinement.py#interface",
+        "skills/orchestrate/scripts/provider_exec.py#interface",
+        "skills/orchestrate/scripts/provider_exec.py#unit-03",
+        "skills/orchestrate/scripts/provider_observer.py#interface",
+        "skills/orchestrate/scripts/provider_output.py#interface",
+        "skills/orchestrate/scripts/run_lineage.py#interface",
+        "skills/orchestrate/scripts/stall_watchdog.py#unit-01",
+        "skills/orchestrate/scripts/trusted_git.py#unit-01",
+        "skills/orchestrate/scripts/writer_lease.py#unit-01",
+        "workspace:manifest-and-digest"
+      ],
+      "risk": "high",
+      "recommended_model_tier": "senior",
+      "review_model_tier": "principal",
+      "gates": [
+        "unit",
+        "J1",
+        "J2",
+        "differential",
+        "lane"
+      ],
+      "lane_days": 0.5,
+      "action": "redesigned"
+    },
+    {
+      "id": "skills/orchestrate/scripts/provider_exec.py#unit-05",
+      "kind": "port",
+      "source_files": [
+        "skills/orchestrate/scripts/provider_exec.py"
+      ],
+      "source_spans": [
+        {
+          "start": 1370,
+          "end": 1691,
+          "symbols": [
+            "_prepare_codex_capability_home",
+            "_git_output",
+            "instructions_writable",
+            "_instruction_path",
+            "_instruction_entries",
+            "instruction_disk_state",
+            "instruction_snapshot",
+            "_integration_refs",
+            "authored_instruction_changes",
+            "tool_cache_environment",
+            "_check_model",
+            "execute",
+            "Assign",
+            "_preflight_opencode_mcp"
+          ]
+        }
+      ],
+      "target_crate": "providers",
+      "depends_on": [
+        "prerequisite:J1",
+        "prerequisite:J2",
+        "prerequisite:adr",
+        "scripts/provider_quota.py#interface",
+        "skills/_shared/harness_profile.py#unit-02",
+        "skills/orchestrate/scripts/adapters/__init__.py#unit-01",
+        "skills/orchestrate/scripts/adapters/claude.py#unit-01",
+        "skills/orchestrate/scripts/agy_home.py#interface",
+        "skills/orchestrate/scripts/attempt_storage.py#unit-01",
+        "skills/orchestrate/scripts/context_usage.py#unit-02",
+        "skills/orchestrate/scripts/exec_routing.py#interface",
+        "skills/orchestrate/scripts/fabric_policy.py#unit-01",
+        "skills/orchestrate/scripts/instruction_quarantine.py#interface",
+        "skills/orchestrate/scripts/lane_exit.py#interface",
+        "skills/orchestrate/scripts/lane_launch.py#interface",
+        "skills/orchestrate/scripts/layout.py#interface",
+        "skills/orchestrate/scripts/output_custody.py#unit-01",
+        "skills/orchestrate/scripts/process_info.py#unit-02",
+        "skills/orchestrate/scripts/provider_confinement.py#interface",
         "skills/orchestrate/scripts/provider_exec.py#interface",
         "skills/orchestrate/scripts/provider_exec.py#unit-04",
         "skills/orchestrate/scripts/provider_observer.py#interface",
@@ -15526,238 +16099,9 @@
       ],
       "source_spans": [
         {
-          "start": 1594,
-          "end": 1927,
+          "start": 1692,
+          "end": 1904,
           "symbols": [
-            "build_plan.Assign",
-            "build_plan.If",
-            "build_plan.Expr",
-            "build_plan.If",
-            "build_plan.Assign",
-            "build_plan.If",
-            "build_plan.Return",
-            "BoundedCapture",
-            "ImportFrom",
-            "_process_snapshot",
-            "_process_snapshot_unchecked",
-            "_process_environment",
-            "_has_attempt_marker",
-            "Assign",
-            "_recorded_start_time",
-            "_ps_start_time",
-            "_pid_exists",
-            "_signal_name",
-            "termination_request_matches",
-            "_termination_request"
-          ]
-        }
-      ],
-      "target_crate": "confinement",
-      "depends_on": [
-        "prerequisite:J1",
-        "prerequisite:J2",
-        "prerequisite:adr",
-        "scripts/fabric_hosts.py#interface",
-        "scripts/lib/jsonc.py#unit-01",
-        "scripts/provider_quota.py#interface",
-        "skills/_shared/harness_profile.py#unit-02",
-        "skills/orchestrate/scripts/adapters/__init__.py#unit-01",
-        "skills/orchestrate/scripts/adapters/claude.py#unit-01",
-        "skills/orchestrate/scripts/agy_home.py#interface",
-        "skills/orchestrate/scripts/attempt_storage.py#unit-01",
-        "skills/orchestrate/scripts/context_usage.py#unit-02",
-        "skills/orchestrate/scripts/exec_routing.py#interface",
-        "skills/orchestrate/scripts/fabric_policy.py#unit-01",
-        "skills/orchestrate/scripts/instruction_quarantine.py#interface",
-        "skills/orchestrate/scripts/lane_exit.py#interface",
-        "skills/orchestrate/scripts/lane_launch.py#interface",
-        "skills/orchestrate/scripts/layout.py#interface",
-        "skills/orchestrate/scripts/output_custody.py#unit-01",
-        "skills/orchestrate/scripts/process_info.py#unit-02",
-        "skills/orchestrate/scripts/provider_exec.py#interface",
-        "skills/orchestrate/scripts/provider_exec.py#unit-05",
-        "skills/orchestrate/scripts/provider_observer.py#interface",
-        "skills/orchestrate/scripts/provider_output.py#interface",
-        "skills/orchestrate/scripts/run_lineage.py#interface",
-        "skills/orchestrate/scripts/stall_watchdog.py#unit-01",
-        "skills/orchestrate/scripts/trusted_git.py#unit-01",
-        "skills/orchestrate/scripts/writer_lease.py#unit-01",
-        "workspace:manifest-and-digest"
-      ],
-      "risk": "high",
-      "recommended_model_tier": "senior",
-      "review_model_tier": "principal",
-      "gates": [
-        "unit",
-        "J1",
-        "J2",
-        "differential",
-        "lane"
-      ],
-      "lane_days": 0.5,
-      "action": "redesigned"
-    },
-    {
-      "id": "skills/orchestrate/scripts/provider_exec.py#unit-07",
-      "kind": "port",
-      "source_files": [
-        "skills/orchestrate/scripts/provider_exec.py"
-      ],
-      "source_spans": [
-        {
-          "start": 1928,
-          "end": 2274,
-          "symbols": [
-            "_nested_fabric_owner_token",
-            "_Descendants",
-            "_Descendants.__init__",
-            "_Descendants.sample",
-            "_Descendants._sample",
-            "_Descendants._refresh_spared",
-            "_Descendants.live",
-            "_Descendants.live_spared",
-            "_Descendants.signal",
-            "_Descendants.stop",
-            "Assign",
-            "Assign",
-            "_prctl",
-            "_enable_subreaper",
-            "_release_subreaper"
-          ]
-        }
-      ],
-      "target_crate": "providers",
-      "depends_on": [
-        "prerequisite:J1",
-        "prerequisite:J2",
-        "prerequisite:adr",
-        "scripts/fabric_hosts.py#interface",
-        "scripts/lib/jsonc.py#unit-01",
-        "scripts/provider_quota.py#interface",
-        "skills/_shared/harness_profile.py#unit-02",
-        "skills/orchestrate/scripts/adapters/__init__.py#unit-01",
-        "skills/orchestrate/scripts/adapters/claude.py#unit-01",
-        "skills/orchestrate/scripts/agy_home.py#interface",
-        "skills/orchestrate/scripts/attempt_storage.py#unit-01",
-        "skills/orchestrate/scripts/context_usage.py#unit-02",
-        "skills/orchestrate/scripts/exec_routing.py#interface",
-        "skills/orchestrate/scripts/fabric_policy.py#unit-01",
-        "skills/orchestrate/scripts/instruction_quarantine.py#interface",
-        "skills/orchestrate/scripts/lane_exit.py#interface",
-        "skills/orchestrate/scripts/lane_launch.py#interface",
-        "skills/orchestrate/scripts/layout.py#interface",
-        "skills/orchestrate/scripts/output_custody.py#unit-01",
-        "skills/orchestrate/scripts/process_info.py#unit-02",
-        "skills/orchestrate/scripts/provider_exec.py#interface",
-        "skills/orchestrate/scripts/provider_exec.py#unit-06",
-        "skills/orchestrate/scripts/provider_observer.py#interface",
-        "skills/orchestrate/scripts/provider_output.py#interface",
-        "skills/orchestrate/scripts/run_lineage.py#interface",
-        "skills/orchestrate/scripts/stall_watchdog.py#unit-01",
-        "skills/orchestrate/scripts/trusted_git.py#unit-01",
-        "skills/orchestrate/scripts/writer_lease.py#unit-01",
-        "workspace:manifest-and-digest"
-      ],
-      "risk": "high",
-      "recommended_model_tier": "senior",
-      "review_model_tier": "principal",
-      "gates": [
-        "unit",
-        "J1",
-        "J2",
-        "differential",
-        "lane"
-      ],
-      "lane_days": 0.5,
-      "action": "redesigned"
-    },
-    {
-      "id": "skills/orchestrate/scripts/provider_exec.py#unit-08",
-      "kind": "port",
-      "source_files": [
-        "skills/orchestrate/scripts/provider_exec.py"
-      ],
-      "source_spans": [
-        {
-          "start": 2275,
-          "end": 2604,
-          "symbols": [
-            "WorkspaceProgress",
-            "_cpu_stamp",
-            "_prepare_codex_state_dir",
-            "_prepare_codex_capability_home",
-            "_git_output",
-            "instructions_writable",
-            "_instruction_path",
-            "_instruction_entries",
-            "instruction_disk_state",
-            "instruction_snapshot",
-            "_integration_refs",
-            "authored_instruction_changes",
-            "tool_cache_environment"
-          ]
-        }
-      ],
-      "target_crate": "providers",
-      "depends_on": [
-        "prerequisite:J1",
-        "prerequisite:J2",
-        "prerequisite:adr",
-        "scripts/fabric_hosts.py#interface",
-        "scripts/lib/jsonc.py#unit-01",
-        "scripts/provider_quota.py#interface",
-        "skills/_shared/harness_profile.py#unit-02",
-        "skills/orchestrate/scripts/adapters/__init__.py#unit-01",
-        "skills/orchestrate/scripts/adapters/claude.py#unit-01",
-        "skills/orchestrate/scripts/agy_home.py#interface",
-        "skills/orchestrate/scripts/attempt_storage.py#unit-01",
-        "skills/orchestrate/scripts/context_usage.py#unit-02",
-        "skills/orchestrate/scripts/exec_routing.py#interface",
-        "skills/orchestrate/scripts/fabric_policy.py#unit-01",
-        "skills/orchestrate/scripts/instruction_quarantine.py#interface",
-        "skills/orchestrate/scripts/lane_exit.py#interface",
-        "skills/orchestrate/scripts/lane_launch.py#interface",
-        "skills/orchestrate/scripts/layout.py#interface",
-        "skills/orchestrate/scripts/output_custody.py#unit-01",
-        "skills/orchestrate/scripts/process_info.py#unit-02",
-        "skills/orchestrate/scripts/provider_exec.py#interface",
-        "skills/orchestrate/scripts/provider_exec.py#unit-07",
-        "skills/orchestrate/scripts/provider_observer.py#interface",
-        "skills/orchestrate/scripts/provider_output.py#interface",
-        "skills/orchestrate/scripts/run_lineage.py#interface",
-        "skills/orchestrate/scripts/stall_watchdog.py#unit-01",
-        "skills/orchestrate/scripts/trusted_git.py#unit-01",
-        "skills/orchestrate/scripts/writer_lease.py#unit-01",
-        "workspace:manifest-and-digest"
-      ],
-      "risk": "high",
-      "recommended_model_tier": "senior",
-      "review_model_tier": "principal",
-      "gates": [
-        "unit",
-        "J1",
-        "J2",
-        "differential",
-        "lane"
-      ],
-      "lane_days": 0.5,
-      "action": "redesigned"
-    },
-    {
-      "id": "skills/orchestrate/scripts/provider_exec.py#unit-09",
-      "kind": "port",
-      "source_files": [
-        "skills/orchestrate/scripts/provider_exec.py"
-      ],
-      "source_spans": [
-        {
-          "start": 2605,
-          "end": 2907,
-          "symbols": [
-            "_check_model",
-            "execute",
-            "Assign",
-            "_preflight_opencode_mcp",
             "attempt_environment",
             "_run_attempt",
             "_run_attempt.Expr",
@@ -15850,8 +16194,6 @@
         "prerequisite:J2",
         "prerequisite:adr",
         "prerequisite:s2",
-        "scripts/fabric_hosts.py#interface",
-        "scripts/lib/jsonc.py#unit-01",
         "scripts/provider_quota.py#interface",
         "skills/_shared/harness_profile.py#unit-02",
         "skills/orchestrate/scripts/adapters/__init__.py#unit-01",
@@ -15867,8 +16209,9 @@
         "skills/orchestrate/scripts/layout.py#interface",
         "skills/orchestrate/scripts/output_custody.py#unit-01",
         "skills/orchestrate/scripts/process_info.py#unit-02",
+        "skills/orchestrate/scripts/provider_confinement.py#interface",
         "skills/orchestrate/scripts/provider_exec.py#interface",
-        "skills/orchestrate/scripts/provider_exec.py#unit-08",
+        "skills/orchestrate/scripts/provider_exec.py#unit-05",
         "skills/orchestrate/scripts/provider_observer.py#interface",
         "skills/orchestrate/scripts/provider_output.py#interface",
         "skills/orchestrate/scripts/run_lineage.py#interface",
@@ -15891,15 +16234,15 @@
       "action": "redesigned"
     },
     {
-      "id": "skills/orchestrate/scripts/provider_exec.py#unit-10",
+      "id": "skills/orchestrate/scripts/provider_exec.py#unit-07",
       "kind": "port",
       "source_files": [
         "skills/orchestrate/scripts/provider_exec.py"
       ],
       "source_spans": [
         {
-          "start": 2908,
-          "end": 3257,
+          "start": 1905,
+          "end": 2254,
           "symbols": [
             "_run_attempt.Try.If",
             "_run_attempt.Try.handlers.exc",
@@ -15946,8 +16289,6 @@
         "prerequisite:J2",
         "prerequisite:adr",
         "prerequisite:s2",
-        "scripts/fabric_hosts.py#interface",
-        "scripts/lib/jsonc.py#unit-01",
         "scripts/provider_quota.py#interface",
         "skills/_shared/harness_profile.py#unit-02",
         "skills/orchestrate/scripts/adapters/__init__.py#unit-01",
@@ -15963,8 +16304,9 @@
         "skills/orchestrate/scripts/layout.py#interface",
         "skills/orchestrate/scripts/output_custody.py#unit-01",
         "skills/orchestrate/scripts/process_info.py#unit-02",
+        "skills/orchestrate/scripts/provider_confinement.py#interface",
         "skills/orchestrate/scripts/provider_exec.py#interface",
-        "skills/orchestrate/scripts/provider_exec.py#unit-09",
+        "skills/orchestrate/scripts/provider_exec.py#unit-06",
         "skills/orchestrate/scripts/provider_observer.py#interface",
         "skills/orchestrate/scripts/provider_output.py#interface",
         "skills/orchestrate/scripts/run_lineage.py#interface",
@@ -15987,15 +16329,15 @@
       "action": "redesigned"
     },
     {
-      "id": "skills/orchestrate/scripts/provider_exec.py#unit-11",
+      "id": "skills/orchestrate/scripts/provider_exec.py#unit-08",
       "kind": "port",
       "source_files": [
         "skills/orchestrate/scripts/provider_exec.py"
       ],
       "source_spans": [
         {
-          "start": 3258,
-          "end": 3583,
+          "start": 2255,
+          "end": 2580,
           "symbols": [
             "_run_attempt.If",
             "_run_attempt.Assign",
@@ -16040,8 +16382,6 @@
         "prerequisite:J2",
         "prerequisite:adr",
         "prerequisite:s2",
-        "scripts/fabric_hosts.py#interface",
-        "scripts/lib/jsonc.py#unit-01",
         "scripts/provider_quota.py#interface",
         "skills/_shared/harness_profile.py#unit-02",
         "skills/orchestrate/scripts/adapters/__init__.py#unit-01",
@@ -16057,8 +16397,9 @@
         "skills/orchestrate/scripts/layout.py#interface",
         "skills/orchestrate/scripts/output_custody.py#unit-01",
         "skills/orchestrate/scripts/process_info.py#unit-02",
+        "skills/orchestrate/scripts/provider_confinement.py#interface",
         "skills/orchestrate/scripts/provider_exec.py#interface",
-        "skills/orchestrate/scripts/provider_exec.py#unit-10",
+        "skills/orchestrate/scripts/provider_exec.py#unit-07",
         "skills/orchestrate/scripts/provider_observer.py#interface",
         "skills/orchestrate/scripts/provider_output.py#interface",
         "skills/orchestrate/scripts/run_lineage.py#interface",
@@ -16081,15 +16422,15 @@
       "action": "redesigned"
     },
     {
-      "id": "skills/orchestrate/scripts/provider_exec.py#unit-12",
+      "id": "skills/orchestrate/scripts/provider_exec.py#unit-09",
       "kind": "port",
       "source_files": [
         "skills/orchestrate/scripts/provider_exec.py"
       ],
       "source_spans": [
         {
-          "start": 3584,
-          "end": 3763,
+          "start": 2581,
+          "end": 2760,
           "symbols": [
             "observe_main",
             "parser",
@@ -16103,8 +16444,6 @@
         "prerequisite:J1",
         "prerequisite:J2",
         "prerequisite:adr",
-        "scripts/fabric_hosts.py#interface",
-        "scripts/lib/jsonc.py#unit-01",
         "scripts/provider_quota.py#interface",
         "skills/_shared/harness_profile.py#unit-02",
         "skills/orchestrate/scripts/adapters/__init__.py#unit-01",
@@ -16120,8 +16459,9 @@
         "skills/orchestrate/scripts/layout.py#interface",
         "skills/orchestrate/scripts/output_custody.py#unit-01",
         "skills/orchestrate/scripts/process_info.py#unit-02",
+        "skills/orchestrate/scripts/provider_confinement.py#interface",
         "skills/orchestrate/scripts/provider_exec.py#interface",
-        "skills/orchestrate/scripts/provider_exec.py#unit-11",
+        "skills/orchestrate/scripts/provider_exec.py#unit-08",
         "skills/orchestrate/scripts/provider_observer.py#interface",
         "skills/orchestrate/scripts/provider_output.py#interface",
         "skills/orchestrate/scripts/run_lineage.py#interface",
@@ -16417,7 +16757,7 @@
       ],
       "target_crate": "run",
       "depends_on": [
-        "integrate:31b9fba25e70",
+        "integrate:d1f72d80b395",
         "prerequisite:J1",
         "prerequisite:J2",
         "prerequisite:adr",
@@ -16468,7 +16808,7 @@
       ],
       "target_crate": "run",
       "depends_on": [
-        "integrate:31b9fba25e70",
+        "integrate:d1f72d80b395",
         "prerequisite:J1",
         "prerequisite:J2",
         "prerequisite:adr",
@@ -16518,7 +16858,7 @@
       ],
       "target_crate": "run",
       "depends_on": [
-        "integrate:31b9fba25e70",
+        "integrate:d1f72d80b395",
         "prerequisite:J1",
         "prerequisite:J2",
         "prerequisite:adr",
@@ -16566,7 +16906,7 @@
       ],
       "target_crate": "run",
       "depends_on": [
-        "integrate:31b9fba25e70",
+        "integrate:d1f72d80b395",
         "prerequisite:J1",
         "prerequisite:J2",
         "prerequisite:adr",
@@ -17552,6 +17892,366 @@
       "action": "ported"
     },
     {
+      "id": "tools/front-door/crates/cli/src/pending/generate_unicode.py#unit-01",
+      "kind": "port",
+      "source_files": [
+        "tools/front-door/crates/cli/src/pending/generate_unicode.py"
+      ],
+      "source_spans": [
+        {
+          "start": 1,
+          "end": 24,
+          "symbols": [
+            "generate_unicode"
+          ]
+        }
+      ],
+      "target_crate": "cli",
+      "depends_on": [
+        "prerequisite:J1",
+        "prerequisite:J2",
+        "prerequisite:adr",
+        "workspace:manifest-and-digest"
+      ],
+      "risk": "medium",
+      "recommended_model_tier": "junior",
+      "review_model_tier": "principal",
+      "gates": [
+        "unit",
+        "J1",
+        "J2",
+        "differential"
+      ],
+      "lane_days": 0.5,
+      "action": "ported"
+    },
+    {
+      "id": "tools/front-door/crates/core/scripts/generate_unicode.py#unit-01",
+      "kind": "port",
+      "source_files": [
+        "tools/front-door/crates/core/scripts/generate_unicode.py"
+      ],
+      "source_spans": [
+        {
+          "start": 1,
+          "end": 29,
+          "symbols": [
+            "generate_unicode"
+          ]
+        }
+      ],
+      "target_crate": "core",
+      "depends_on": [
+        "prerequisite:J1",
+        "prerequisite:J2",
+        "prerequisite:adr",
+        "workspace:manifest-and-digest"
+      ],
+      "risk": "medium",
+      "recommended_model_tier": "junior",
+      "review_model_tier": "principal",
+      "gates": [
+        "unit",
+        "J1",
+        "J2",
+        "differential"
+      ],
+      "lane_days": 0.5,
+      "action": "ported"
+    },
+    {
+      "id": "tools/front-door/crates/telemetry/src/pending/python/generate_unicode.py#unit-01",
+      "kind": "port",
+      "source_files": [
+        "tools/front-door/crates/telemetry/src/pending/python/generate_unicode.py"
+      ],
+      "source_spans": [
+        {
+          "start": 1,
+          "end": 29,
+          "symbols": [
+            "generate_unicode"
+          ]
+        }
+      ],
+      "target_crate": "telemetry",
+      "depends_on": [
+        "prerequisite:J1",
+        "prerequisite:J2",
+        "prerequisite:adr",
+        "workspace:manifest-and-digest"
+      ],
+      "risk": "medium",
+      "recommended_model_tier": "junior",
+      "review_model_tier": "principal",
+      "gates": [
+        "unit",
+        "J1",
+        "J2",
+        "differential"
+      ],
+      "lane_days": 0.5,
+      "action": "ported"
+    },
+    {
+      "id": "workspace:command-construction-lint",
+      "kind": "integration",
+      "source_globs": [
+        "tools/front-door/clippy.toml",
+        "tools/front-door/src/*.rs",
+        "tools/front-door/crates/*/src/*.rs",
+        "tools/front-door/tests/*.rs",
+        "tools/front-door/crates/*/tests/*.rs"
+      ],
+      "source_files": [
+        "tools/front-door/crates/cli/src/clean.rs",
+        "tools/front-door/crates/cli/src/git_evidence.rs",
+        "tools/front-door/crates/cli/src/harness.rs",
+        "tools/front-door/crates/cli/src/install.rs",
+        "tools/front-door/crates/cli/src/lane_safety.rs",
+        "tools/front-door/crates/cli/src/lib.rs",
+        "tools/front-door/crates/cli/src/oracle.rs",
+        "tools/front-door/crates/cli/src/pending.rs",
+        "tools/front-door/crates/cli/src/pending/python_unicode.rs",
+        "tools/front-door/crates/cli/src/pr_checks.rs",
+        "tools/front-door/crates/cli/src/projection.rs",
+        "tools/front-door/crates/cli/src/public_release.rs",
+        "tools/front-door/crates/cli/src/reap.rs",
+        "tools/front-door/crates/cli/src/retry_install.rs",
+        "tools/front-door/crates/cli/src/stale_checkout.rs",
+        "tools/front-door/crates/cli/src/timebomb.rs",
+        "tools/front-door/crates/cli/src/worktree.rs",
+        "tools/front-door/crates/config/src/codex.rs",
+        "tools/front-door/crates/config/src/command.rs",
+        "tools/front-door/crates/config/src/front_door.rs",
+        "tools/front-door/crates/config/src/instance.rs",
+        "tools/front-door/crates/config/src/lib.rs",
+        "tools/front-door/crates/config/src/managed_skills.rs",
+        "tools/front-door/crates/config/src/manifest.rs",
+        "tools/front-door/crates/config/src/oracle.rs",
+        "tools/front-door/crates/config/src/pending.rs",
+        "tools/front-door/crates/config/src/python_unicode.rs",
+        "tools/front-door/crates/config/src/workflows.rs",
+        "tools/front-door/crates/confinement/src/agy_home.rs",
+        "tools/front-door/crates/confinement/src/agy_home/unit_01.rs",
+        "tools/front-door/crates/confinement/src/instruction_quarantine.rs",
+        "tools/front-door/crates/confinement/src/lane_protection.rs",
+        "tools/front-door/crates/confinement/src/lane_protection/unit_01.rs",
+        "tools/front-door/crates/confinement/src/lib.rs",
+        "tools/front-door/crates/confinement/src/output_custody.rs",
+        "tools/front-door/crates/confinement/src/output_custody/policy_tests.rs",
+        "tools/front-door/crates/confinement/src/pending.rs",
+        "tools/front-door/crates/confinement/src/pending/python_unicode.rs",
+        "tools/front-door/crates/confinement/src/python.rs",
+        "tools/front-door/crates/confinement/src/trusted_git.rs",
+        "tools/front-door/crates/core/src/bytes.rs",
+        "tools/front-door/crates/core/src/excludes.rs",
+        "tools/front-door/crates/core/src/host_identity.rs",
+        "tools/front-door/crates/core/src/js.rs",
+        "tools/front-door/crates/core/src/json_support.rs",
+        "tools/front-door/crates/core/src/jsonc.rs",
+        "tools/front-door/crates/core/src/lib.rs",
+        "tools/front-door/crates/core/src/paths.rs",
+        "tools/front-door/crates/core/src/pending.rs",
+        "tools/front-door/crates/core/src/product_root_resolver.rs",
+        "tools/front-door/crates/core/src/py/datetime.rs",
+        "tools/front-door/crates/core/src/py/mod.rs",
+        "tools/front-door/crates/core/src/py/numbers.rs",
+        "tools/front-door/crates/core/src/py/unicode.rs",
+        "tools/front-door/crates/core/src/py/unicode_data.rs",
+        "tools/front-door/crates/core/src/roots.rs",
+        "tools/front-door/crates/core/src/test_support.rs",
+        "tools/front-door/crates/core/src/workspace_paths.rs",
+        "tools/front-door/crates/fabric-mcp/src/lib.rs",
+        "tools/front-door/crates/fabric-runtime/src/batch_execution.rs",
+        "tools/front-door/crates/fabric-runtime/src/execution.rs",
+        "tools/front-door/crates/fabric-runtime/src/fabric_policy.rs",
+        "tools/front-door/crates/fabric-runtime/src/field.rs",
+        "tools/front-door/crates/fabric-runtime/src/gates.rs",
+        "tools/front-door/crates/fabric-runtime/src/hosts.rs",
+        "tools/front-door/crates/fabric-runtime/src/identity.rs",
+        "tools/front-door/crates/fabric-runtime/src/identity/tests.rs",
+        "tools/front-door/crates/fabric-runtime/src/json_subprocess.rs",
+        "tools/front-door/crates/fabric-runtime/src/lane_watch.rs",
+        "tools/front-door/crates/fabric-runtime/src/lib.rs",
+        "tools/front-door/crates/fabric-runtime/src/pending.rs",
+        "tools/front-door/crates/fabric-runtime/src/run_registry.rs",
+        "tools/front-door/crates/fabric-runtime/src/run_root.rs",
+        "tools/front-door/crates/fabric-runtime/src/success_status.rs",
+        "tools/front-door/crates/fabric-store/src/diagnostics.rs",
+        "tools/front-door/crates/fabric-store/src/differential.rs",
+        "tools/front-door/crates/fabric-store/src/landing.rs",
+        "tools/front-door/crates/fabric-store/src/lib.rs",
+        "tools/front-door/crates/fabric-store/src/messages.rs",
+        "tools/front-door/crates/fabric-store/src/oracle.rs",
+        "tools/front-door/crates/fabric-store/src/pending.rs",
+        "tools/front-door/crates/fabric-store/src/sessions.rs",
+        "tools/front-door/crates/fabric-store/src/tasks.rs",
+        "tools/front-door/crates/fabric-store/src/tests.rs",
+        "tools/front-door/crates/providers/src/adapters/agy.rs",
+        "tools/front-door/crates/providers/src/adapters/claude.rs",
+        "tools/front-door/crates/providers/src/adapters/codex.rs",
+        "tools/front-door/crates/providers/src/adapters/copilot.rs",
+        "tools/front-door/crates/providers/src/adapters/cursor.rs",
+        "tools/front-door/crates/providers/src/adapters/kiro.rs",
+        "tools/front-door/crates/providers/src/adapters/mod.rs",
+        "tools/front-door/crates/providers/src/adapters/opencode.rs",
+        "tools/front-door/crates/providers/src/dispatch_contract.rs",
+        "tools/front-door/crates/providers/src/exec_contract.rs",
+        "tools/front-door/crates/providers/src/failure_rules.rs",
+        "tools/front-door/crates/providers/src/lib.rs",
+        "tools/front-door/crates/providers/src/oracle.rs",
+        "tools/front-door/crates/providers/src/ordered_json.rs",
+        "tools/front-door/crates/providers/src/output.rs",
+        "tools/front-door/crates/providers/src/output_contract.rs",
+        "tools/front-door/crates/providers/src/output_policy.rs",
+        "tools/front-door/crates/providers/src/pending.rs",
+        "tools/front-door/crates/quota/src/display.rs",
+        "tools/front-door/crates/quota/src/lib.rs",
+        "tools/front-door/crates/quota/src/oracle.rs",
+        "tools/front-door/crates/quota/src/pending.rs",
+        "tools/front-door/crates/quota/src/pending/python_unicode.rs",
+        "tools/front-door/crates/quota/src/policy_tests.rs",
+        "tools/front-door/crates/quota/src/schedule.rs",
+        "tools/front-door/crates/quota/src/time.rs",
+        "tools/front-door/crates/records/src/attempt_evidence.rs",
+        "tools/front-door/crates/records/src/attempt_evidence/tests.rs",
+        "tools/front-door/crates/records/src/attempt_storage.rs",
+        "tools/front-door/crates/records/src/attempt_storage/tests.rs",
+        "tools/front-door/crates/records/src/checked_json.rs",
+        "tools/front-door/crates/records/src/delivery_run_shape.rs",
+        "tools/front-door/crates/records/src/delivery_run_shape/tests.rs",
+        "tools/front-door/crates/records/src/fabric_records.rs",
+        "tools/front-door/crates/records/src/fabric_records/tests.rs",
+        "tools/front-door/crates/records/src/layout.rs",
+        "tools/front-door/crates/records/src/layout/tests.rs",
+        "tools/front-door/crates/records/src/lib.rs",
+        "tools/front-door/crates/records/src/oracle.rs",
+        "tools/front-door/crates/records/src/pending.rs",
+        "tools/front-door/crates/routing/src/capability.rs",
+        "tools/front-door/crates/routing/src/capability/tests.rs",
+        "tools/front-door/crates/routing/src/casefold.rs",
+        "tools/front-door/crates/routing/src/catalog.rs",
+        "tools/front-door/crates/routing/src/cli.rs",
+        "tools/front-door/crates/routing/src/discovery.rs",
+        "tools/front-door/crates/routing/src/discovery/tests.rs",
+        "tools/front-door/crates/routing/src/exec_routing.rs",
+        "tools/front-door/crates/routing/src/lib.rs",
+        "tools/front-door/crates/routing/src/live.rs",
+        "tools/front-door/crates/routing/src/matching.rs",
+        "tools/front-door/crates/routing/src/matching/tests.rs",
+        "tools/front-door/crates/routing/src/model_route.rs",
+        "tools/front-door/crates/routing/src/oracle.rs",
+        "tools/front-door/crates/routing/src/ordered_json.rs",
+        "tools/front-door/crates/routing/src/pending.rs",
+        "tools/front-door/crates/routing/src/pools.rs",
+        "tools/front-door/crates/routing/src/preferences.rs",
+        "tools/front-door/crates/routing/src/probe.rs",
+        "tools/front-door/crates/routing/src/probe/tests.rs",
+        "tools/front-door/crates/routing/src/render.rs",
+        "tools/front-door/crates/run/src/detached.rs",
+        "tools/front-door/crates/run/src/detached_tests.rs",
+        "tools/front-door/crates/run/src/lease.rs",
+        "tools/front-door/crates/run/src/lib.rs",
+        "tools/front-door/crates/run/src/lineage.rs",
+        "tools/front-door/crates/run/src/pending.rs",
+        "tools/front-door/crates/run/src/python_unicode.rs",
+        "tools/front-door/crates/supervisor/src/bounded.rs",
+        "tools/front-door/crates/supervisor/src/capture.rs",
+        "tools/front-door/crates/supervisor/src/fabric_ps.rs",
+        "tools/front-door/crates/supervisor/src/fs.rs",
+        "tools/front-door/crates/supervisor/src/fs/tests.rs",
+        "tools/front-door/crates/supervisor/src/fs/traits.rs",
+        "tools/front-door/crates/supervisor/src/identity.rs",
+        "tools/front-door/crates/supervisor/src/lib.rs",
+        "tools/front-door/crates/supervisor/src/pending.rs",
+        "tools/front-door/crates/supervisor/src/process_info.rs",
+        "tools/front-door/crates/supervisor/src/ps.rs",
+        "tools/front-door/crates/supervisor/src/sys.rs",
+        "tools/front-door/crates/supervisor/src/sys/child.rs",
+        "tools/front-door/crates/supervisor/src/sys/fs.rs",
+        "tools/front-door/crates/supervisor/src/sys/process.rs",
+        "tools/front-door/crates/supervisor/src/sys/process/darwin.rs",
+        "tools/front-door/crates/supervisor/src/test_support.rs",
+        "tools/front-door/crates/supervisor/src/worker_liveness.rs",
+        "tools/front-door/crates/supervisor/src/worker_liveness/edge.rs",
+        "tools/front-door/crates/supervisor/src/worker_liveness/observe.rs",
+        "tools/front-door/crates/supervisor/src/worker_liveness/observe_tests.rs",
+        "tools/front-door/crates/supervisor/src/worker_liveness/tests.rs",
+        "tools/front-door/crates/telemetry/src/changes.rs",
+        "tools/front-door/crates/telemetry/src/costs.rs",
+        "tools/front-door/crates/telemetry/src/delivery.rs",
+        "tools/front-door/crates/telemetry/src/differential.rs",
+        "tools/front-door/crates/telemetry/src/hosts.rs",
+        "tools/front-door/crates/telemetry/src/ingest.rs",
+        "tools/front-door/crates/telemetry/src/lib.rs",
+        "tools/front-door/crates/telemetry/src/pending.rs",
+        "tools/front-door/crates/telemetry/src/pending/decode.rs",
+        "tools/front-door/crates/telemetry/src/pending/numeric.rs",
+        "tools/front-door/crates/telemetry/src/pending/python.rs",
+        "tools/front-door/crates/telemetry/src/pending/python/python_unicode.rs",
+        "tools/front-door/crates/telemetry/src/report.rs",
+        "tools/front-door/crates/workflow/src/authority_mapping.rs",
+        "tools/front-door/crates/workflow/src/bootstrap.rs",
+        "tools/front-door/crates/workflow/src/compact_reinject.rs",
+        "tools/front-door/crates/workflow/src/custody.rs",
+        "tools/front-door/crates/workflow/src/dispatch_preflight.rs",
+        "tools/front-door/crates/workflow/src/git_evidence_packet.rs",
+        "tools/front-door/crates/workflow/src/idle_pause.rs",
+        "tools/front-door/crates/workflow/src/lane_exit.rs",
+        "tools/front-door/crates/workflow/src/lane_launch.rs",
+        "tools/front-door/crates/workflow/src/lib.rs",
+        "tools/front-door/crates/workflow/src/pending.rs",
+        "tools/front-door/crates/workflow/src/pending/python_word.rs",
+        "tools/front-door/crates/workflow/src/policy.rs",
+        "tools/front-door/crates/workflow/src/portable_workflow.rs",
+        "tools/front-door/crates/workflow/src/provider_observer.rs",
+        "tools/front-door/crates/workflow/src/review_ladder.rs",
+        "tools/front-door/crates/workflow/src/review_panel.rs",
+        "tools/front-door/crates/workflow/src/review_terminal.rs",
+        "tools/front-door/crates/workflow/src/run_gates.rs",
+        "tools/front-door/crates/workflow/src/style_lint.rs",
+        "tools/front-door/crates/workflow/src/test_support.rs",
+        "tools/front-door/crates/workflow/src/writer_lease.rs",
+        "tools/front-door/src/check.rs",
+        "tools/front-door/src/exec.rs",
+        "tools/front-door/src/help.rs",
+        "tools/front-door/src/json.rs",
+        "tools/front-door/src/lane/files.rs",
+        "tools/front-door/src/lane/group.rs",
+        "tools/front-door/src/lane/mod.rs",
+        "tools/front-door/src/lane/observer.rs",
+        "tools/front-door/src/lane/platform.rs",
+        "tools/front-door/src/lane/progress.rs",
+        "tools/front-door/src/lane/spec.rs",
+        "tools/front-door/src/lane/state.rs",
+        "tools/front-door/src/main.rs",
+        "tools/front-door/src/resolve.rs",
+        "tools/front-door/src/stale.rs",
+        "tools/front-door/tests/common/mod.rs",
+        "tools/front-door/tests/front_door.rs",
+        "tools/front-door/tests/lane_run.rs"
+      ],
+      "target_crate": "supervisor",
+      "depends_on": [
+        "workspace:manifest-and-digest"
+      ],
+      "risk": "high",
+      "recommended_model_tier": "senior",
+      "review_model_tier": "principal",
+      "gates": [
+        "unit",
+        "J1",
+        "J2",
+        "differential",
+        "lane",
+        "front-door"
+      ],
+      "lane_days": 0.5,
+      "action": "redesigned",
+      "description": "Add workspace clippy.toml disallowed-methods for std::process::Command::new outside supervisor; migrate production callers to supervisor custody APIs and review narrowly scoped test-oracle allowances before denying the lint"
+    },
+    {
       "id": "workspace:front-door-syscalls",
       "kind": "port",
       "source_files": [
@@ -17576,6 +18276,45 @@
       "lane_days": 0.5,
       "action": "redesigned",
       "description": "Move existing execve/access/getpwuid unsafe into supervisor::sys and retain root/exec behaviour"
+    },
+    {
+      "id": "workspace:front-door-unsafe-guard",
+      "kind": "integration",
+      "source_globs": [
+        "tools/front-door/src/lane/*.rs",
+        "tools/front-door/src/main.rs"
+      ],
+      "source_files": [
+        "tools/front-door/src/lane/files.rs",
+        "tools/front-door/src/lane/group.rs",
+        "tools/front-door/src/lane/mod.rs",
+        "tools/front-door/src/lane/observer.rs",
+        "tools/front-door/src/lane/platform.rs",
+        "tools/front-door/src/lane/progress.rs",
+        "tools/front-door/src/lane/spec.rs",
+        "tools/front-door/src/lane/state.rs",
+        "tools/front-door/src/main.rs"
+      ],
+      "target_crate": "supervisor",
+      "depends_on": [
+        "prerequisite:s2",
+        "workspace:front-door-syscalls",
+        "workspace:manifest-and-digest"
+      ],
+      "risk": "high",
+      "recommended_model_tier": "senior",
+      "review_model_tier": "principal",
+      "gates": [
+        "unit",
+        "J1",
+        "J2",
+        "differential",
+        "lane",
+        "front-door"
+      ],
+      "lane_days": 0.5,
+      "action": "redesigned",
+      "description": "Move remaining front-door lane unsafe into supervisor::sys through safe APIs, then add #![forbid(unsafe_code)] to the binary; every non-supervisor library already forbids unsafe"
     },
     {
       "id": "workspace:manifest-and-digest",
@@ -17613,12 +18352,18 @@
       "prerequisite:J2",
       "prerequisite:J3",
       "prerequisite:adr",
-      "prerequisite:s2"
+      "prerequisite:s2",
+      "scripts/lint-timebomb-fixtures.py#unit-01",
+      "scripts/static-security-check.py#unit-01",
+      "scripts/static-security-check.py#unit-02"
     ],
     [
       "workspace:manifest-and-digest"
     ],
     [
+      "cli:rust-test-date-lint",
+      "records:external-yaml-subset",
+      "records:yaml-data-to-json",
       "runtime/fabric/src/batch-execution.ts#interface",
       "runtime/fabric/src/execution.ts#interface",
       "runtime/fabric/src/graph/gates.ts#unit-01",
@@ -17632,7 +18377,6 @@
       "runtime/fabric/src/run-root.ts#unit-01",
       "runtime/fabric/src/success-status.ts#unit-01",
       "scripts/check-provenant-install.py#interface",
-      "scripts/check_harness.py#unit-01",
       "scripts/clean.py#interface",
       "scripts/configure-codex-skill-overrides.py#unit-01",
       "scripts/fabric_git.py#interface",
@@ -17649,7 +18393,6 @@
       "scripts/lib/product_root_resolver.py#unit-01",
       "scripts/lib/projection.py#unit-01",
       "scripts/lib/stale_checkout.py#interface",
-      "scripts/lint-timebomb-fixtures.py#unit-01",
       "scripts/managed_installation_manifest.py#unit-01",
       "scripts/model_route.py#interface",
       "scripts/model_route_catalog.py#unit-01",
@@ -17657,14 +18400,14 @@
       "scripts/model_route_live.py#interface",
       "scripts/model_route_pools.py#unit-01",
       "scripts/model_route_preferences.py#unit-01",
-      "scripts/movecheck.py#unit-01",
       "scripts/provenant_pr.py#unit-01",
       "scripts/provider_quota.py#interface",
       "scripts/quota_display.py#unit-01",
       "scripts/quota_schedule.py#unit-01",
       "scripts/reap.py#unit-01",
       "scripts/retry-npm-install.py#unit-01",
-      "scripts/static-security-check.py#unit-01",
+      "scripts/routing_context_hook.py#unit-01",
+      "scripts/task_classifier.py#interface",
       "scripts/telemetry.py#interface",
       "scripts/telemetry_changes.py#unit-01",
       "scripts/telemetry_costs.py#unit-01",
@@ -17672,6 +18415,7 @@
       "scripts/telemetry_hosts.py#interface",
       "scripts/telemetry_ingest.py#unit-01",
       "scripts/telemetry_report.py#unit-01",
+      "scripts/utility.py#interface",
       "scripts/worktree.py#interface",
       "skills/_shared/bounded_process.py#unit-01",
       "skills/_shared/custody.py#unit-01",
@@ -17715,6 +18459,7 @@
       "skills/orchestrate/scripts/lease.py#unit-01",
       "skills/orchestrate/scripts/output_custody.py#unit-01",
       "skills/orchestrate/scripts/process_info.py#unit-01",
+      "skills/orchestrate/scripts/provider_confinement.py#interface",
       "skills/orchestrate/scripts/provider_exec.py#interface",
       "skills/orchestrate/scripts/provider_observer.py#interface",
       "skills/orchestrate/scripts/provider_output.py#interface",
@@ -17726,6 +18471,10 @@
       "skills/session/scripts/context_audit.py#unit-01",
       "skills/setup-repo/templates/claude-tracker-hook.py#unit-01",
       "skills/tracker/scripts/steward.py#unit-01",
+      "tools/front-door/crates/cli/src/pending/generate_unicode.py#unit-01",
+      "tools/front-door/crates/core/scripts/generate_unicode.py#unit-01",
+      "tools/front-door/crates/telemetry/src/pending/python/generate_unicode.py#unit-01",
+      "workspace:command-construction-lint",
       "workspace:front-door-syscalls"
     ],
     [
@@ -17733,7 +18482,7 @@
       "runtime/fabric/src/run-registry.ts#unit-01",
       "runtime/fabric/src/store.ts#unit-01",
       "scripts/check-provenant-install.py#unit-01",
-      "scripts/check_harness.py#unit-02",
+      "scripts/check_harness.py#unit-01",
       "scripts/configure-fabric-mcp.py#unit-01",
       "scripts/fabric_git.py#unit-01",
       "scripts/fabric_lanes.py#unit-01",
@@ -17750,10 +18499,11 @@
       "scripts/provider_identity.py#unit-01",
       "scripts/public_release_check.py#unit-01",
       "scripts/quota_display.py#unit-02",
-      "scripts/static-security-check.py#unit-02",
+      "scripts/task_classifier.py#unit-01",
       "scripts/telemetry_changes.py#unit-02",
       "scripts/telemetry_ingest.py#unit-02",
       "scripts/telemetry_report.py#unit-02",
+      "scripts/utility.py#unit-01",
       "scripts/worktree.py#unit-01",
       "scripts/write-product-root-pointer.py#unit-01",
       "skills/_shared/delivery_run_invariants.py#unit-01",
@@ -17775,11 +18525,13 @@
       "skills/orchestrate/scripts/process_info.py#unit-02",
       "skills/orchestrate/scripts/run_records.py#unit-01",
       "skills/orchestrate/scripts/secret_scan.py#unit-01",
-      "skills/session/scripts/state_check.py#unit-01"
+      "skills/session/scripts/state_check.py#unit-01",
+      "workspace:front-door-unsafe-guard"
     ],
     [
       "runtime/fabric/src/catalogue.ts#unit-01",
       "runtime/fabric/src/store.ts#unit-02",
+      "scripts/check_harness.py#unit-02",
       "scripts/configure-fabric-mcp.py#unit-02",
       "scripts/fabric_git.py#unit-02",
       "scripts/fabric_hosts.py#unit-01",
@@ -17815,6 +18567,7 @@
       "skills/orchestrate/scripts/layout.py#unit-01",
       "skills/orchestrate/scripts/log_reducer.py#unit-01",
       "skills/orchestrate/scripts/memory_admission.py#unit-01",
+      "skills/orchestrate/scripts/provider_confinement.py#unit-01",
       "skills/orchestrate/scripts/provider_observer.py#unit-01",
       "skills/orchestrate/scripts/provider_output.py#unit-01",
       "skills/orchestrate/scripts/run_lineage.py#unit-01",
@@ -17842,6 +18595,7 @@
       "skills/orchestrate/scripts/cf_dispatch.py#unit-03",
       "skills/orchestrate/scripts/fabric_records.py#unit-02",
       "skills/orchestrate/scripts/lane_launch.py#unit-01",
+      "skills/orchestrate/scripts/provider_confinement.py#unit-02",
       "skills/orchestrate/scripts/provider_output.py#unit-02",
       "skills/orchestrate/scripts/run_lineage.py#unit-02",
       "skills/orchestrate/scripts/worker_liveness.py#unit-02"
@@ -17858,6 +18612,7 @@
       "scripts/telemetry.py#unit-03",
       "skills/deliver/scripts/delivery_validation_common.py#unit-01",
       "skills/orchestrate/scripts/dispatch_preflight.py#unit-01",
+      "skills/orchestrate/scripts/provider_confinement.py#unit-03",
       "skills/orchestrate/scripts/provider_exec.py#unit-01"
     ],
     [
@@ -17877,6 +18632,7 @@
       "skills/deliver/scripts/delivery_validation_security.py#unit-01",
       "skills/deliver/scripts/delivery_validation_shape.py#unit-01",
       "skills/orchestrate/scripts/dispatch_preflight.py#unit-02",
+      "skills/orchestrate/scripts/provider_confinement.py#unit-04",
       "skills/orchestrate/scripts/provider_exec.py#unit-02"
     ],
     [
@@ -17920,29 +18676,19 @@
       "skills/orchestrate/scripts/provider_exec.py#unit-09"
     ],
     [
-      "skills/orchestrate/scripts/provider_exec.py#unit-10"
-    ],
-    [
-      "skills/orchestrate/scripts/provider_exec.py#unit-11"
-    ],
-    [
-      "skills/orchestrate/scripts/provider_exec.py#unit-12"
-    ],
-    [
-      "integrate:31b9fba25e70"
+      "integrate:d1f72d80b395"
     ],
     [
       "scripts/check_target.py#unit-01",
       "scripts/node-workspace-provision.py#unit-01",
-      "scripts/utility.py#unit-01",
+      "scripts/utility_output_hook.py#unit-01",
       "skills/orchestrate/scripts/dispatch_run.py#unit-01"
     ],
     [
-      "scripts/utility_output_hook.py#unit-01",
+      "scripts/configure-claude-hooks.py#unit-01",
       "skills/orchestrate/scripts/dispatch_run.py#unit-02"
     ],
     [
-      "scripts/configure-claude-hooks.py#unit-01",
       "skills/orchestrate/scripts/dispatch_run.py#unit-03"
     ],
     [
@@ -18032,22 +18778,22 @@
     ]
   ],
   "estimated_lane_days_by_crate": {
-    "cli": 17.5,
+    "cli": 18.0,
     "config": 9.75,
     "confinement": 4.75,
-    "core": 3.5,
+    "core": 4.0,
     "cross-crate": 1.5,
     "fabric-mcp": 2.0,
     "fabric-runtime": 25.5,
     "fabric-store": 3.0,
-    "providers": 11.25,
+    "providers": 9.75,
     "quota": 6.75,
-    "records": 4.5,
+    "records": 5.5,
     "routing": 11.25,
     "run": 12.25,
-    "supervisor": 7.25,
-    "telemetry": 8.0,
-    "workflow": 29.0
+    "supervisor": 8.25,
+    "telemetry": 8.5,
+    "workflow": 31.25
   },
   "source_imports": {
     "apps/quota-menubar/Fixtures/make_fixtures.py": [
@@ -18569,6 +19315,7 @@
     ],
     "scripts/configure-claude-hooks.py": [
       "scripts/lane_safety_guard.py",
+      "scripts/routing_context_hook.py",
       "scripts/utility_output_hook.py"
     ],
     "scripts/configure-codex-skill-overrides.py": [],
@@ -18636,6 +19383,7 @@
       "scripts/model_route_pools.py",
       "scripts/model_route_preferences.py",
       "scripts/model_route_probe.py",
+      "scripts/task_classifier.py",
       "skills/_shared/harness_profile.py",
       "skills/_shared/roots.py",
       "skills/orchestrate/scripts/fabric_records.py"
@@ -18650,7 +19398,6 @@
     "scripts/model_route_probe.py": [
       "scripts/model_route_catalog.py"
     ],
-    "scripts/movecheck.py": [],
     "scripts/node-workspace-provision.py": [
       "scripts/retry-npm-install.py",
       "scripts/worktree.py"
@@ -18696,7 +19443,11 @@
     "scripts/quota_schedule.py": [],
     "scripts/reap.py": [],
     "scripts/retry-npm-install.py": [],
+    "scripts/routing_context_hook.py": [],
     "scripts/static-security-check.py": [],
+    "scripts/task_classifier.py": [
+      "scripts/utility.py"
+    ],
     "scripts/telemetry.py": [
       "scripts/host_identity.py",
       "scripts/provider_identity.py",
@@ -18986,9 +19737,15 @@
     ],
     "skills/orchestrate/scripts/output_custody.py": [],
     "skills/orchestrate/scripts/process_info.py": [],
-    "skills/orchestrate/scripts/provider_exec.py": [
+    "skills/orchestrate/scripts/provider_confinement.py": [
       "scripts/fabric_hosts.py",
       "scripts/lib/jsonc.py",
+      "skills/orchestrate/scripts/adapters/__init__.py",
+      "skills/orchestrate/scripts/adapters/claude.py",
+      "skills/orchestrate/scripts/layout.py",
+      "skills/orchestrate/scripts/trusted_git.py"
+    ],
+    "skills/orchestrate/scripts/provider_exec.py": [
       "scripts/provider_quota.py",
       "skills/_shared/harness_profile.py",
       "skills/orchestrate/scripts/adapters/__init__.py",
@@ -19004,6 +19761,7 @@
       "skills/orchestrate/scripts/layout.py",
       "skills/orchestrate/scripts/output_custody.py",
       "skills/orchestrate/scripts/process_info.py",
+      "skills/orchestrate/scripts/provider_confinement.py",
       "skills/orchestrate/scripts/provider_observer.py",
       "skills/orchestrate/scripts/provider_output.py",
       "skills/orchestrate/scripts/run_lineage.py",
@@ -19084,6 +19842,19 @@
       "tests/fixtures/current-routing-eval/provider_fixture.py"
     ],
     "tests/fixtures/current-routing-eval/provider_fixture.py": [],
+    "tests/golden/diff.py": [
+      "tests/golden/run.py"
+    ],
+    "tests/golden/run.py": [],
+    "tests/golden/test_diff.py": [
+      "tests/golden/diff.py",
+      "tests/golden/run.py",
+      "tests/support/modules.py"
+    ],
+    "tests/golden/test_golden_cli.py": [
+      "tests/golden/run.py",
+      "tests/support/modules.py"
+    ],
     "tests/lane_conformance/__init__.py": [],
     "tests/lane_conformance/conftest.py": [
       "tests/lane_conformance/support.py",
@@ -19094,7 +19865,20 @@
       "skills/orchestrate/scripts/run_controls.py",
       "tests/lane_conformance/fake_provider.py",
       "tests/support/dispatch.py",
+      "tests/support/fake_cli.py",
       "tests/support/git.py",
+      "tests/support/proc.py",
+      "tests/support/runs.py"
+    ],
+    "tests/lane_conformance/test_s2_capture.py": [
+      "tests/lane_conformance/support.py"
+    ],
+    "tests/lane_conformance/test_s2_lifecycle.py": [
+      "tests/lane_conformance/support.py",
+      "tests/support/proc.py"
+    ],
+    "tests/lane_conformance/test_s2_rust_faults.py": [
+      "tests/lane_conformance/support.py",
       "tests/support/proc.py"
     ],
     "tests/lane_conformance/test_seed.py": [
@@ -19110,6 +19894,9 @@
       "tests/mcp_judge/client.py"
     ],
     "tests/support/__init__.py": [],
+    "tests/support/confinement.py": [
+      "skills/orchestrate/scripts/provider_confinement.py"
+    ],
     "tests/support/dispatch.py": [
       "skills/orchestrate/scripts/dispatch_run.py",
       "tests/support/fake_cli.py",
@@ -19273,6 +20060,7 @@
       "skills/orchestrate/scripts/run_controls.py",
       "skills/orchestrate/scripts/run_dir_finalize.py",
       "skills/orchestrate/scripts/secret_scan.py",
+      "tests/support/confinement.py",
       "tests/support/dispatch.py",
       "tests/support/fake_cli.py",
       "tests/support/runs.py"
@@ -19441,10 +20229,6 @@
       "skills/orchestrate/scripts/exec_routing.py",
       "tests/support/front_door.py"
     ],
-    "tests/test_movecheck.py": [
-      "scripts/movecheck.py",
-      "tests/support/modules.py"
-    ],
     "tests/test_node_workspace_preflight.py": [],
     "tests/test_node_workspace_provision.py": [
       "scripts/node-workspace-provision.py",
@@ -19488,6 +20272,7 @@
       "skills/orchestrate/scripts/process_info.py",
       "skills/orchestrate/scripts/provider_exec.py",
       "skills/orchestrate/scripts/provider_output.py",
+      "tests/support/confinement.py",
       "tests/support/git.py"
     ],
     "tests/test_provider_observer.py": [
@@ -19533,6 +20318,20 @@
       "scripts/quota_schedule.py",
       "tests/support/modules.py"
     ],
+    "tests/test_record_schemas.py": [
+      "scripts/provider_quota.py",
+      "scripts/telemetry.py",
+      "skills/orchestrate/scripts/batch_run.py",
+      "skills/orchestrate/scripts/dispatch_run.py",
+      "skills/orchestrate/scripts/provider_exec.py",
+      "skills/orchestrate/scripts/stall_watchdog.py",
+      "tests/support/dispatch.py",
+      "tests/support/fake_cli.py",
+      "tests/support/git.py",
+      "tests/support/modules.py",
+      "tests/support/quota.py",
+      "tests/support/runs.py"
+    ],
     "tests/test_retry_npm_install.py": [
       "scripts/retry-npm-install.py"
     ],
@@ -19574,6 +20373,13 @@
       "tests/support/modules.py"
     ],
     "tests/test_runtime_architecture.py": [],
+    "tests/test_rust_port_graph.py": [
+      "scripts/check_harness.py",
+      "scripts/lint-timebomb-fixtures.py",
+      "scripts/static-security-check.py",
+      "tests/support/modules.py"
+    ],
+    "tests/test_rust_port_layering.py": [],
     "tests/test_security_evidence_selection.py": [
       "skills/deliver/scripts/select_security_evidence.py",
       "tests/support/modules.py"
@@ -19627,6 +20433,12 @@
       "tests/support/fake_cli.py",
       "tests/support/proc.py"
     ],
+    "tests/test_task_classifier.py": [
+      "scripts/configure-claude-hooks.py",
+      "scripts/routing_context_hook.py",
+      "scripts/task_classifier.py",
+      "tests/support/modules.py"
+    ],
     "tests/test_telemetry.py": [
       "scripts/host_identity.py",
       "scripts/telemetry.py",
@@ -19669,6 +20481,30 @@
     ],
     "tests/ui_ux_live_test_support.py": [
       "tests/support/proc.py"
+    ],
+    "tools/front-door/crates/cli/src/pending/generate_unicode.py": [],
+    "tools/front-door/crates/core/scripts/generate_unicode.py": [],
+    "tools/front-door/crates/quota/src/tests/oracle.py": [
+      "scripts/provider_quota.py",
+      "scripts/quota_display.py",
+      "scripts/quota_schedule.py",
+      "scripts/telemetry_report.py"
+    ],
+    "tools/front-door/crates/telemetry/src/pending/python/generate_unicode.py": [],
+    "tools/front-door/crates/workflow/tests/generate_policy_fixtures.py": [],
+    "tools/front-door/crates/workflow/tests/oracle.py": [
+      "skills/_shared/review_panel.py",
+      "skills/autopilot/scripts/bootstrap-autopilot.py",
+      "skills/autopilot/scripts/validate_idle_pause.py",
+      "skills/deliver/scripts/authority_mapping.py",
+      "skills/natural-writing/scripts/style_lint.py",
+      "skills/orchestrate/scripts/dispatch_preflight.py",
+      "skills/orchestrate/scripts/git_evidence_packet.py",
+      "skills/orchestrate/scripts/lane_exit.py",
+      "skills/orchestrate/scripts/lane_launch.py",
+      "skills/orchestrate/scripts/provider_observer.py",
+      "skills/orchestrate/scripts/writer_lease.py",
+      "skills/session/scripts/compact_reinject.py"
     ]
   },
   "cyclic_source_groups": [
@@ -19691,8 +20527,10 @@
       "scripts/model_route.py",
       "scripts/model_route_live.py",
       "scripts/provider_quota.py",
+      "scripts/task_classifier.py",
       "scripts/telemetry.py",
       "scripts/telemetry_hosts.py",
+      "scripts/utility.py",
       "scripts/worktree.py",
       "skills/orchestrate/scripts/agy_home.py",
       "skills/orchestrate/scripts/cf_dispatch.py",
@@ -19704,6 +20542,7 @@
       "skills/orchestrate/scripts/lane_launch.py",
       "skills/orchestrate/scripts/lane_protection.py",
       "skills/orchestrate/scripts/layout.py",
+      "skills/orchestrate/scripts/provider_confinement.py",
       "skills/orchestrate/scripts/provider_exec.py",
       "skills/orchestrate/scripts/provider_observer.py",
       "skills/orchestrate/scripts/provider_output.py",
@@ -19797,13 +20636,13 @@
     },
     {
       "source": "scripts/model_route.py",
-      "line": 105,
+      "line": 93,
       "kind": "dynamic-loader-review",
       "expression": "importlib.util.spec_from_file_location('provenant_harness_profile', Path(__file__).resolve().parents[1] / 'skills/_shared/harness_profile.py')"
     },
     {
       "source": "scripts/model_route.py",
-      "line": 1585,
+      "line": 1575,
       "kind": "dynamic-loader-review",
       "expression": "importlib.util.spec_from_file_location('provenant_fabric_records', path, submodule_search_locations=[str(path.parent)])"
     },
@@ -19862,6 +20701,12 @@
       "expression": "importlib.util.spec_from_file_location('quota_schedule', Path(__file__).resolve().parents[1] / 'quota_schedule.py')"
     },
     {
+      "source": "scripts/task_classifier.py",
+      "line": 75,
+      "kind": "dynamic-loader-review",
+      "expression": "importlib.util.spec_from_file_location('provenant_task_classifier_utility', ROOT / 'scripts/utility.py')"
+    },
+    {
       "source": "scripts/telemetry.py",
       "line": 57,
       "kind": "dynamic-loader-review",
@@ -19869,49 +20714,49 @@
     },
     {
       "source": "scripts/telemetry.py",
-      "line": 613,
+      "line": 619,
       "kind": "dynamic-loader-review",
       "expression": "importlib.util.spec_from_file_location('provenant_telemetry_identity', Path(__file__).with_name('provider_identity.py'))"
     },
     {
       "source": "scripts/telemetry.py",
-      "line": 745,
+      "line": 751,
       "kind": "dynamic-loader-review",
       "expression": "importlib.util.spec_from_file_location('provenant_telemetry_ingest', Path(__file__).with_name('telemetry_ingest.py'))"
     },
     {
       "source": "scripts/telemetry.py",
-      "line": 754,
+      "line": 760,
       "kind": "dynamic-loader-review",
       "expression": "importlib.util.spec_from_file_location('provenant_telemetry_delivery', Path(__file__).with_name('telemetry_delivery.py'))"
     },
     {
       "source": "scripts/telemetry.py",
-      "line": 762,
+      "line": 768,
       "kind": "dynamic-loader-review",
       "expression": "importlib.util.spec_from_file_location('provenant_telemetry_costs', Path(__file__).with_name('telemetry_costs.py'))"
     },
     {
       "source": "scripts/telemetry.py",
-      "line": 770,
+      "line": 776,
       "kind": "dynamic-loader-review",
       "expression": "importlib.util.spec_from_file_location('provenant_telemetry_report', Path(__file__).with_name('telemetry_report.py'))"
     },
     {
       "source": "scripts/telemetry.py",
-      "line": 810,
+      "line": 816,
       "kind": "dynamic-loader-review",
       "expression": "importlib.util.spec_from_file_location('provenant_telemetry_quota', Path(__file__).with_name('provider_quota.py'))"
     },
     {
       "source": "scripts/telemetry.py",
-      "line": 817,
+      "line": 823,
       "kind": "dynamic-loader-review",
       "expression": "importlib.util.spec_from_file_location('provenant_telemetry_hosts', Path(__file__).with_name('telemetry_hosts.py'))"
     },
     {
       "source": "scripts/telemetry.py",
-      "line": 824,
+      "line": 830,
       "kind": "dynamic-loader-review",
       "expression": "importlib.util.spec_from_file_location('provenant_telemetry_changes', Path(__file__).with_name('telemetry_changes.py'))"
     },
@@ -20144,20 +20989,20 @@
       "expression": "importlib.util.spec_from_file_location('provider_identity', product / 'scripts/provider_identity.py')"
     },
     {
-      "source": "skills/orchestrate/scripts/provider_exec.py",
-      "line": 260,
+      "source": "skills/orchestrate/scripts/provider_confinement.py",
+      "line": 200,
       "kind": "dynamic-loader-review",
       "expression": "importlib.util.spec_from_file_location(name, Path(__file__).resolve().parents[3] / 'scripts/fabric_hosts.py')"
     },
     {
-      "source": "skills/orchestrate/scripts/provider_exec.py",
-      "line": 270,
+      "source": "skills/orchestrate/scripts/provider_confinement.py",
+      "line": 209,
       "kind": "dynamic-loader-review",
       "expression": "importlib.util.spec_from_file_location('provenant_jsonc', Path(__file__).resolve().parents[3] / 'scripts/lib/jsonc.py')"
     },
     {
       "source": "skills/orchestrate/scripts/provider_exec.py",
-      "line": 1316,
+      "line": 313,
       "kind": "dynamic-loader-review",
       "expression": "importlib.util.spec_from_file_location('provenant_lane_quota', Path(__file__).resolve().parents[3] / 'scripts/provider_quota.py')"
     },
@@ -20192,6 +21037,12 @@
       "expression": "importlib.util.spec_from_file_location('dispatch_run', ROOT / 'skills' / 'orchestrate' / 'scripts' / 'dispatch_run.py')"
     },
     {
+      "source": "tests/golden/test_diff.py",
+      "line": 135,
+      "kind": "dynamic-loader-review",
+      "expression": "importlib.util.spec_from_file_location('golden_diff', HERE / 'diff.py')"
+    },
+    {
       "source": "tests/support/modules.py",
       "line": 19,
       "kind": "dynamic-loader-review",
@@ -20205,19 +21056,19 @@
     },
     {
       "source": "tests/test_dispatch_run.py",
-      "line": 138,
+      "line": 140,
       "kind": "dynamic-loader-review",
       "expression": "importlib.util.spec_from_file_location('dispatch_run_under_test', SCRIPT)"
     },
     {
       "source": "tests/test_dispatch_run.py",
-      "line": 4556,
+      "line": 4558,
       "kind": "dynamic-loader-review",
       "expression": "importlib.util.spec_from_file_location('cf_dispatch_under_test', path)"
     },
     {
       "source": "tests/test_dispatch_run.py",
-      "line": 6956,
+      "line": 6958,
       "kind": "dynamic-loader-review",
       "expression": "importlib.util.spec_from_file_location('telemetry_retry_test', ROOT / 'scripts/telemetry.py')"
     },
@@ -20262,6 +21113,18 @@
       "line": 13,
       "kind": "dynamic-loader-review",
       "expression": "importlib.util.spec_from_file_location('worker_liveness', SCRIPT)"
+    },
+    {
+      "source": "tools/front-door/crates/workflow/tests/generate_policy_fixtures.py",
+      "line": 29,
+      "kind": "dynamic-loader-review",
+      "expression": "importlib.util.spec_from_file_location(f'policy_{unit}', source)"
+    },
+    {
+      "source": "tools/front-door/crates/workflow/tests/oracle.py",
+      "line": 29,
+      "kind": "dynamic-loader-review",
+      "expression": "importlib.util.spec_from_file_location('oracle', source)"
     }
   ]
 }
