@@ -299,6 +299,10 @@ def ingest_document(telemetry, db, source, path):
                       usage_source=usage.get('usage_source') or row.get('usage_source') or usage.get('source'),
                       status=row.get('status') or row.get('state'), error_class=telemetry.receipt_error_class(row),
                       task_class=row.get('task_class') or requested_route.get('task_class') or None,
+                      classified_by=row.get('classified_by') or requested_route.get('classified_by'),
+                      classifier_confidence=telemetry.number(row.get('classifier_confidence', requested_route.get('classifier_confidence'))),
+                      shadow_answers=(json.dumps(row.get('shadow_answers', requested_route.get('shadow_answers')), sort_keys=True)
+                                      if row.get('shadow_answers', requested_route.get('shadow_answers')) is not None else None),
                       route=requested_route.get('alias') or None,
                       duration_ms=round(ended - started) if started is not None and ended is not None and ended >= started else None,
                       provider_ms=round(provider_ms) if provider_ms is not None else None)
@@ -316,7 +320,8 @@ def ingest_document(telemetry, db, source, path):
             telemetry.put_event(db, 'lane.attempt', fields['timestamp'], str(path), refresh=True,
                       # A receipt without a profile ran the default (balanced) harness profile.
                       attrs={**{key: fields[key] for key in ('adapter', 'effort', 'attempt', 'status', 'error_class',
-                                                             'task_class', 'route', 'duration_ms')},
+                                                             'task_class', 'route', 'duration_ms', 'classified_by',
+                                                             'classifier_confidence', 'shadow_answers')},
                              'profile': profile.get('preset'), 'profile_digest': profile.get('digest'),
                              'risk_tier': profile.get('risk_tier'), 'floored': profile.get('floored'),
                              'empty_patch': row.get('empty_patch'), 'retry_of': retry_of,

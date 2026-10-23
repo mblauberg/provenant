@@ -1,8 +1,11 @@
 from pathlib import Path
 import json
 import os
+import shutil
 import subprocess
 
+
+from tests.support.front_door import front_door_binary
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -11,7 +14,6 @@ def test_documented_fresh_checkout_sequence_produces_runnable_fabric(tmp_path):
     checkout = tmp_path / "fresh-checkout"
     scripts = checkout / "scripts"
     scripts.mkdir(parents=True)
-    (scripts / "provenant").symlink_to(ROOT / "scripts" / "provenant")
     (scripts / "lib").symlink_to(ROOT / "scripts" / "lib", target_is_directory=True)
     runtime = checkout / "runtime"
     runtime.mkdir()
@@ -33,7 +35,7 @@ def test_documented_fresh_checkout_sequence_produces_runnable_fabric(tmp_path):
 
     installed_bin = tmp_path / "installed-bin"
     installed_bin.mkdir()
-    (installed_bin / "provenant").symlink_to(scripts / "provenant")
+    shutil.copy2(front_door_binary(), installed_bin / "provenant")
     caller_cwd = tmp_path / "project"
     caller_cwd.mkdir()
     fabric = subprocess.run(

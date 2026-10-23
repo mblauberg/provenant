@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 """Check the pointer-owned installed Provenant front door.
 
-The installed command is either the byte-identical Python template or a binary
-built from `tools/front-door/` (ADR 0027) whose embedded source digest equals
-the digest of the sources in this checkout.
+The installed command is a binary built from `tools/front-door/` (ADR 0027).
+Its embedded source digest must equal the sources in this checkout.
 """
 
 from __future__ import annotations
@@ -24,7 +23,6 @@ from instance_installation import InstallError, routing_drift
 
 
 ROOT = Path(__file__).resolve().parents[1]
-TEMPLATE = ROOT / "scripts/provenant.template"
 
 
 def provider_registration_status(home: Path) -> dict[str, dict[str, bool]]:
@@ -126,31 +124,28 @@ def main() -> int:
             file=sys.stderr,
         )
         return 1
-    front_door = "python"
-    if command.read_bytes() != TEMPLATE.read_bytes():
-        stamped = embedded_digest(command)
-        if stamped is None:
-            print(
-                "FAIL: installed stub differs from scripts/provenant.template; "
-                "re-run install-harness",
-                file=sys.stderr,
-            )
-            return 1
-        try:
-            current = source_digest(ROOT / CRATE_RELATIVE)
-        except FileNotFoundError:
-            current = None
-        if stamped != current:
-            print(
-                f"FAIL: installed front door was built from different sources than {CRATE_RELATIVE} "
-                f"(embeds {stamped}, checkout is {current}); "
-                "rebuild: re-run install-harness",
-                file=sys.stderr,
-            )
-            return 1
-        front_door = "rust"
+    stamped = embedded_digest(command)
+    if stamped is None:
+        print(
+            "FAIL: installed front door has no Rust source identity; "
+            "re-run install-harness",
+            file=sys.stderr,
+        )
+        return 1
+    try:
+        current = source_digest(ROOT / CRATE_RELATIVE)
+    except FileNotFoundError:
+        current = None
+    if stamped != current:
+        print(
+            f"FAIL: installed front door was built from different sources than {CRATE_RELATIVE} "
+            f"(embeds {stamped}, checkout is {current}); "
+            "rebuild: re-run install-harness",
+            file=sys.stderr,
+        )
+        return 1
     print(f"provenant installed stub=ok path={command}")
-    print(f"front-door={front_door}")
+    print("front-door=rust")
     provider_lines, provider_missing = _provider_lines(Path.home())
     for line in provider_lines:
         print(line)

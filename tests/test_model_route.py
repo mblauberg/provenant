@@ -100,6 +100,48 @@ def test_claude_sonnet_is_the_senior_default_and_opus_remains_principal():
     assert route["resolved_model"] == "sonnet"
 
 
+def test_task_classification_is_advisory_and_role_is_only_a_label():
+    with patch.dict(os.environ, {"PROVENANT_TASK_BRIEF": ""}):
+        result, route = resolve("--adapter", "claude", "--task-class", "review", "--role", "worker")
+    assert route["status"] != "task_class_role_mismatch"
+    assert route["role"] == "worker" and route["task_class"] == "review"
+    with patch.dict(os.environ, {"PROVENANT_TASK_BRIEF": ""}):
+        result, route = resolve("--adapter", "claude", "--task-class", "review")
+    assert route["status"] != "task_class_role_mismatch"
+    assert route["role"] == "worker" and any("missing role" in item for item in route["warnings"])
+
+
+def test_task_classification_uses_configured_rules_from_brief(monkeypatch):
+    router = load_router()
+    monkeypatch.setattr(router.task_classifier, "_run_model", lambda *a, **k: None)
+    with patch.dict(os.environ, {"PROVENANT_TASK_BRIEF": "audit this repository", "PROVENANT_TASK_MODE": "read_only"}):
+        result, route = resolve("--adapter", "claude", "--role", "worker")
+    assert route["status"] != "task_class_role_mismatch"
+    assert route["task_class"] == "review" and route["classified_by"] == "rules"
+
+
+def test_advisory_classification_keeps_an_explicit_alias_route(monkeypatch, capsys):
+    router = load_router()
+    monkeypatch.setattr(router.task_classifier, "_run_model", lambda *a, **k: None)
+    with patch.dict(os.environ, {"PROVENANT_TASK_BRIEF": "audit this", "PROVENANT_TASK_MODE": "read_only"}):
+        code = router.main(["resolve", "--adapter", "claude", "--alias", "senior", "--role", "worker"])
+    route = json.loads(capsys.readouterr().out)
+    assert code == 0 and route["status"] == "ok"
+    assert route["alias"] == "senior" and route["task_class"] == "review"
+    assert route["classified_by"] == "rules"
+
+
+def test_task_size_can_raise_the_configured_class_tier(monkeypatch, tmp_path, capsys):
+    router = load_router()
+    catalog = product_catalog()
+    catalog_path = use_catalog(router, monkeypatch, tmp_path, catalog)
+    monkeypatch.setenv("PROVENANT_TASK_SIZE_FILES", "30")
+    code = router.main(["resolve", "--adapter", "claude", "--task-class", "mechanical", "--role", "worker"])
+    route = json.loads(capsys.readouterr().out)
+    assert route["alias"] == "principal" and route["requested_effort"] == "high"
+    assert route["size_tier"] == "large" and code in (0, 1)
+
+
 def test_fallback_inherits_adapter_training_flag_without_false_default():
     module = load_script(ROOT / "scripts/model_route.py", "route_under_test")
     catalog = {"adapters": {"fixture": {"trains_on_prompts": True,
@@ -1301,6 +1343,7 @@ def select_route(
     *,
     state_name="spread-state.json",
     candidates_name="candidates.json",
+    catalog=None,
 ):
     candidates_path = tmp_path / candidates_name
     preferences_path = tmp_path / f"{candidates_name}.preferences.json"
@@ -1323,12 +1366,26 @@ def select_route(
             str(preferences_path),
             "--spread-state-file",
             str(state_path),
+            *(["--catalog", str(catalog)] if catalog else []),
         ],
         text=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
     )
     return result, json.loads(result.stdout) if result.stdout else None, state_path
+
+
+@pytest.mark.parametrize("effort", ["medium", "high"])
+def test_selector_uses_configured_task_class_tier(tmp_path, effort):
+    catalog = product_catalog()
+    catalog['task_class_routes']['critical-review'].update(
+        alias='senior', effort=effort, minimum_effort='medium')
+    path = tmp_path / 'catalog.json'
+    path.write_text(json.dumps(catalog))
+    candidate = principal('anthropic', alias='senior', effort='medium')
+    result, selection, _ = select_route(tmp_path, [candidate], {}, catalog=path)
+    assert result.returncode == 0, result.stderr
+    assert selection['chosen_candidate_id'] == candidate['candidate_id']
 
 
 def test_critical_review_preference_cannot_lower_tier_or_effort(tmp_path):
@@ -2970,12 +3027,11 @@ def test_task_class_without_trusted_capability_evidence_fails_closed():
     assert route["status"] == "no_candidate_available"
 
 
-def test_critical_review_task_class_rejects_worker_role_before_model_resolution():
+def test_critical_review_task_class_keeps_worker_role_as_a_label():
     result, route = resolve(
         "--adapter", "claude", "--task-class", "critical-review", "--role", "worker"
     )
-    assert result.returncode == 2
-    assert route["status"] == "task_class_role_mismatch"
+    assert route["status"] != "task_class_role_mismatch"
     assert route["role"] == "worker"
     assert route["task_class"] == "critical-review"
 
@@ -3038,25 +3094,75 @@ def test_task_class_rejects_effective_effort_below_policy_floor(tmp_path):
     assert route["effort"] == ""
 
 
-@pytest.mark.parametrize("field,value,role,empty_effort", [
-    pytest.param("effort", "hgh", "critical-review", True, id="invalid-effort-vocabulary"),
-    pytest.param("role", "worker", "worker", False, id="worker-role"),
-    pytest.param("alias", "junior", "critical-review", False, id="tier-downgrade"),
-    pytest.param("effort", "low", "critical-review", False, id="effort-downgrade"),
-])
-def test_task_class_policy_rejects_invalid_overlay(tmp_path, monkeypatch, capsys, field, value, role, empty_effort):
+@pytest.mark.parametrize("field", ["effort", "minimum_effort"])
+def test_invalid_task_class_effort_vocabulary_fails_closed(tmp_path, monkeypatch, capsys, field):
+    router = load_router()
+    catalog = product_catalog()
+    catalog["task_class_routes"]["critical-review"][field] = "hgh"
+    catalog_path = use_catalog(router, monkeypatch, tmp_path, catalog)
+
+    result = router.main([
+        "resolve", "--adapter", "claude", "--task-class", "critical-review",
+        "--role", "critical-review",
+    ])
+
+    route = json.loads(capsys.readouterr().out)
+    assert route["status"] == "task_class_config_invalid"
+    assert result == 2
+    assert route["effort"] == ""
+
+
+def test_task_class_effort_below_configured_minimum_fails_closed(tmp_path, monkeypatch, capsys):
+    router = load_router()
+    catalog = product_catalog()
+    catalog['task_class_routes']['research']['minimum_effort'] = 'high'
+    use_catalog(router, monkeypatch, tmp_path, catalog)
+    result = router.main(['resolve', '--adapter', 'codex', '--task-class', 'research', '--role', 'worker'])
+    route = json.loads(capsys.readouterr().out)
+    assert result == 2
+    assert route['status'] == 'task_class_config_invalid'
+    assert route['effort'] == ''
+
+
+def test_task_class_role_label_does_not_change_class_tier(tmp_path, monkeypatch, capsys):
+    router = load_router()
+    catalog = product_catalog()
+    catalog["task_class_routes"]["critical-review"]["role"] = "worker"
+    catalog_path = use_catalog(router, monkeypatch, tmp_path, catalog)
+
+    result = router.main([
+        "resolve", "--adapter", "claude", "--task-class", "critical-review",
+        "--role", "worker",
+    ])
+
+    route = json.loads(capsys.readouterr().out)
+    assert route["status"] != "task_class_config_invalid"
+    assert result in (0, 1)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (("alias", "junior"), ("effort", "low")),
+)
+def test_task_class_route_tier_is_configurable(
+    tmp_path, monkeypatch, capsys, field, value
+):
     router = load_router()
     catalog = product_catalog()
     catalog["task_class_routes"]["critical-review"][field] = value
-    use_catalog(router, monkeypatch, tmp_path, catalog)
+    if field == "effort":
+        catalog["task_class_routes"]["critical-review"]["minimum_effort"] = value
+        catalog["task_class_routes"]["critical-review"]["models"]["claude"] = ["claude-haiku-5-5"]
+    catalog_path = use_catalog(router, monkeypatch, tmp_path, catalog)
+
     result = router.main([
-        "resolve", "--adapter", "claude", "--task-class", "critical-review", "--role", role,
+        "resolve", "--adapter", "claude", "--task-class", "critical-review", "--role", "critical-review",
     ])
     route = json.loads(capsys.readouterr().out)
-    assert result == 2
-    assert route["status"] == "task_class_config_invalid"
-    if empty_effort:
-        assert route["effort"] == ""
+    assert route["status"] != "task_class_config_invalid"
+    assert result == 1
+    assert route["alias"] == ("junior" if field == "alias" else "principal")
+    assert route["requested_effort"] == ("low" if field == "effort" else "high")
 
 
 def test_task_class_effort_overlay_may_raise_effort_above_policy_floor(

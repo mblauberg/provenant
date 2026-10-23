@@ -13,6 +13,8 @@ import sys
 import pytest
 
 
+from tests.support.front_door import front_door_binary
+
 ROOT = Path(__file__).resolve().parents[1]
 SEED = json.loads((ROOT / "config" / "model-routing.json").read_text())
 # The selection tests pin their own senior and design pools, so reweighting the seed never moves their arithmetic.
@@ -439,7 +441,7 @@ def test_routes_prints_each_pool_with_live_availability(tmp_path):
     assert any("codex/gpt-6-luna" in line and "cooling until" in line for line in lines)
     assert any("codex/gpt-6-astra" in line and line.rstrip().endswith("available") for line in lines)
     assert "[free, trains-on-prompts]" in all_run.stdout
-    provenant = subprocess.run([sys.executable, str(ROOT / "scripts" / "provenant"), "routes", "--json"],
+    provenant = subprocess.run([str(front_door_binary()), "routes", "--json"],
                                text=True, capture_output=True, check=False,
                                env={**env, "PATH": os.environ["PATH"]})
     assert provenant.returncode == 0, provenant.stderr
@@ -548,10 +550,10 @@ def test_confidential_filters_every_fallback_even_under_fallback_any():
 
 def test_confidential_refuses_a_resolved_route_that_trains_and_names_the_fix():
     dispatch_run = load("pools_dispatch_confidential_under_test", ROOT / "skills/orchestrate/scripts/dispatch_run.py")
-    refusal = dispatch_run.confidential_refusal("opencode", "opencode/mimo-v2.6-flash-free", {})
+    refusal = dispatch_run.dispatch_preflight.confidential_refusal("opencode", "opencode/mimo-v2.6-flash-free", {})
     assert refusal.startswith("opencode/opencode/mimo-v2.6-flash-free is a free tier")
     assert "fix:" in refusal
-    assert dispatch_run.confidential_refusal("codex", "gpt-6-luna", {"trains_on_prompts": False}) is None
+    assert dispatch_run.dispatch_preflight.confidential_refusal("codex", "gpt-6-luna", {"trains_on_prompts": False}) is None
     args = dispatch_run.parser().parse_args(["--run-dir", "/tmp/run", "--prompt-file", "p.md", "--adapter", "codex",
                                              "--confidential"])
     assert args.confidential is True
@@ -589,12 +591,12 @@ def test_confidential_preflight_uses_a_mixed_alias_and_refuses_only_when_nothing
     monkeypatch.chdir(tmp_path)
     dispatch_run = load("pools_dispatch_mixed_alias_under_test", ROOT / "skills/orchestrate/scripts/dispatch_run.py")
     task = {"id": "t", "adapter": "opencode", "alias": "junior", "prompt": "hi"}
-    ordinary = dispatch_run.preflight_tasks([task], tmp_path)
+    ordinary = dispatch_run.dispatch_preflight.preflight_tasks([task], tmp_path)
     assert ordinary.get("routes", [{}])[0].get("resolved_model") == "opencode/mimo-v2.6-flash-free", ordinary
-    private = dispatch_run.preflight_tasks([{**task, "confidential": True}], tmp_path)
+    private = dispatch_run.dispatch_preflight.preflight_tasks([{**task, "confidential": True}], tmp_path)
     assert private["status"] == "validated", private
     assert private["routes"][0]["resolved_model"] == "opencode-go/deepseek-v4.1-flash"
-    refused = dispatch_run.preflight_tasks([{**task, "alias": None, "model": "opencode/mimo-v2.6-flash-free",
+    refused = dispatch_run.dispatch_preflight.preflight_tasks([{**task, "alias": None, "model": "opencode/mimo-v2.6-flash-free",
                                              "confidential": True}], tmp_path)
     assert refused["error"] == "confidential_route" and "fix:" in refused["fix"]
 
@@ -605,7 +607,7 @@ def test_routes_health_and_help_routes_print_the_same_view(tmp_path):
     assert plain.returncode == 0, plain.stderr
     document = json.loads(plain.stdout)
     assert {"routes", "health"} <= set(document)
-    helped = subprocess.run([sys.executable, str(ROOT / "scripts" / "provenant"), "help", "routes"],
+    helped = subprocess.run([str(front_door_binary()), "help", "routes"],
                             text=True, capture_output=True, check=False, env=env)
     assert helped.returncode == 0, helped.stderr
     assert "senior" in helped.stdout and "route health --json" in helped.stdout

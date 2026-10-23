@@ -36,10 +36,10 @@ sys.path.insert(0, str(SCRIPT_ROOT.parents[1]))
 sys.path.insert(0, str(SCRIPT_ROOT))
 from _shared.bounded_process import BudgetArgumentParser, stop_process_group
 from _shared import harness_profile
+from dispatch_preflight import ACCESS_MODES
 from layout import contains_run
 from dispatch_run import (
     close_mcp_run,
-    ACCESS_MODES,
     ATTEMPT_ID_RE,
     ESCALATION_REASONS,
 )

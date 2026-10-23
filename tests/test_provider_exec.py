@@ -565,7 +565,7 @@ def test_non_git_workspace_discovers_child_repo_policy_and_linked_worktree(monke
     for root in (repo, linked):
         task = {"id": "one", "adapter": "opencode", "model": "opencode/mimo-v2.6-flash-free",
                 "prompt_file": str(root / "secret/prompt.md"), "cwd": str(workspace)}
-        result = importlib.import_module("skills.orchestrate.scripts.dispatch_run").preflight_tasks([task])
+        result = importlib.import_module("skills.orchestrate.scripts.dispatch_preflight").preflight_tasks([task])
         assert result["status"] == "rejected"
         assert "secret" in result["fix"] and "non-training route" in result["fix"]
 
@@ -616,7 +616,7 @@ def test_protected_preflight_refuses_training_inputs(monkeypatch, tmp_path, fiel
         task[field] = [str(repo / "private")]
     else:
         task[field] = str(repo / "private")
-    result = importlib.import_module("skills.orchestrate.scripts.dispatch_run").preflight_tasks([task])
+    result = importlib.import_module("skills.orchestrate.scripts.dispatch_preflight").preflight_tasks([task])
     assert result["status"] == "rejected"
     assert "private" in result["fix"] and "non-training route" in result["fix"]
 
@@ -637,7 +637,7 @@ def test_relative_protected_inputs_anchor_to_workspace(monkeypatch, tmp_path, fi
         task[field] = "private/prompt.md"
     else:
         task[field] = ["private"]
-    result = importlib.import_module("skills.orchestrate.scripts.dispatch_run").preflight_tasks([task], repo)
+    result = importlib.import_module("skills.orchestrate.scripts.dispatch_preflight").preflight_tasks([task], repo)
     assert result["status"] == "rejected"
     assert "protected path" in result["fix"]
 
@@ -655,12 +655,11 @@ def test_protected_preflight_rejects_unavailable_sandbox(monkeypatch, tmp_path):
     monkeypatch.chdir(repo)
     monkeypatch.setenv("AGENT_FABRIC_PRODUCT_ROOT", str(ROOT))
     monkeypatch.setenv("AGENT_FABRIC_INSTANCE_ROOT", str(ROOT))
-    dispatch_run = importlib.import_module("skills.orchestrate.scripts.dispatch_run")
-    # dispatch_run imports provider_exec by its script name; patch that module object.
+    preflight = importlib.import_module("skills.orchestrate.scripts.dispatch_preflight")
     force_sandbox(monkeypatch, None)
     task = {"id": "one", "adapter": "opencode", "model": "opencode/mimo-v2.6-flash-free",
             "prompt": "hello", "cwd": str(repo / "safe")}
-    result = dispatch_run.preflight_tasks([task])
+    result = preflight.preflight_tasks([task])
     assert result["status"] == "rejected"
     assert "sandbox-exec" in result["fix"]
 
@@ -1579,7 +1578,7 @@ print(json.dumps({"type": "turn.completed"}), flush=True)
 def test_effort_retry_never_writes_through_links_the_first_lane_planted(monkeypatch, tmp_path):
     """A lane forges an unsupported-effort diagnostic, so the same attempt runs again in its tmp."""
     mod = supervisor()
-    dispatch_run = importlib.import_module("skills.orchestrate.scripts.dispatch_run")
+    preflight = importlib.import_module("skills.orchestrate.scripts.dispatch_preflight")
     monkeypatch.setattr(mod.agy_home, "needs_ps_shim", lambda plan: True)
     victim = tmp_path / "live-bin"
     victim.mkdir(mode=0o755)
@@ -1591,7 +1590,7 @@ def test_effort_retry_never_writes_through_links_the_first_lane_planted(monkeypa
     plan["route"]["supported_efforts"] = ["low", "high"]
 
     record = mod.execute(plan, attempt / "result.md")
-    retry = dispatch_run.effort_retry_plan(plan, record)
+    retry = preflight.effort_retry_plan(plan, record)
     assert retry is not None, record
     retry["argv"] = plan["argv"]
     mod.execute(retry, attempt / "result.md")
@@ -6821,7 +6820,7 @@ def test_fallback_uses_router_candidates_and_parses_explicit_routes():
 
 @pytest.mark.parametrize('policy', ['yes', 'codex/gpt-6.1-sol', 3, {}, [''], [3], [{'adapter': [], 'model': 'sol'}]])
 def test_invalid_fallback_rejected_during_preflight(tmp_path, monkeypatch, policy):
-    mod = importlib.import_module('skills.orchestrate.scripts.dispatch_run')
+    mod = importlib.import_module('skills.orchestrate.scripts.dispatch_preflight')
     monkeypatch.chdir(tmp_path)
     result = mod.preflight_tasks([{'id':'one','adapter':'claude','model':'opus','prompt':'hello','fallback':policy}])
     assert result['status'] == 'rejected'
@@ -6972,7 +6971,7 @@ for i in range(1000): print(json.dumps({'type':'telemetry','data':'x'*100}))
 
 
 def test_explicit_route_fallback_policy_reaches_router(tmp_path, monkeypatch):
-    mod = importlib.import_module('skills.orchestrate.scripts.dispatch_run')
+    mod = importlib.import_module('skills.orchestrate.scripts.dispatch_preflight')
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv('AGENT_FABRIC_PRODUCT_ROOT', str(ROOT))
     monkeypatch.setenv('AGENT_FABRIC_INSTANCE_ROOT', str(ROOT))

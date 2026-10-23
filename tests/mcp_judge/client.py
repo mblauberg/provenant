@@ -12,6 +12,8 @@ import subprocess
 import time
 from typing import Any
 
+from tests.support.front_door import front_door_binary
+
 
 ROOT = Path(__file__).resolve().parents[2]
 ENVIRONMENT_KEYS = (
@@ -22,7 +24,7 @@ ENVIRONMENT_KEYS = (
 
 def server_command() -> list[str]:
     override = os.environ.get("PROVENANT_MCP_SERVER_CMD")
-    return shlex.split(override) if override else [str(ROOT / "scripts/provenant")]
+    return shlex.split(override) if override else [str(front_door_binary())]
 
 
 class McpProcess:

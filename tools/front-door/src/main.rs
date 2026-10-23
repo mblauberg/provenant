@@ -5,6 +5,7 @@ mod check;
 mod exec;
 mod help;
 mod json;
+mod lane;
 mod resolve;
 mod stale;
 
@@ -88,6 +89,7 @@ enum Route {
         status: u8,
     },
     Root,
+    Lane(Vec<OsString>),
     Mcp,
     Check(Vec<OsString>),
     Owner {
@@ -158,6 +160,9 @@ fn route(args: &[OsString], seat: bool) -> Route {
             status: 0,
         });
     }
+    if command == "lane" {
+        return Route::Lane(rest);
+    }
     if command == "root" {
         return if rest.is_empty() {
             Route::Root
@@ -215,10 +220,11 @@ fn launch(program: &Path, args: &[OsString], root: Option<&Path>, stale_checked:
 }
 
 fn run(args: &[OsString]) -> u8 {
-    let settings = Settings::from_process();
-    if std::env::var_os("PROVENANT_FRONT_DOOR").is_some_and(|mode| mode == "python") {
-        return run_python(args, &settings);
+    // The supervisor is built in even during the front-door Python trial.
+    if args.first().is_some_and(|v| v == "lane") {
+        return lane::run(&args[1..]);
     }
+    let settings = Settings::from_process();
     match route(args, std::env::var_os("AGENT_FABRIC_SEAT").is_some()) {
         Route::Print {
             text,
@@ -228,6 +234,7 @@ fn run(args: &[OsString]) -> u8 {
             print(&text, stderr);
             status
         }
+        Route::Lane(rest) => lane::run(&rest),
         Route::Root => match resolve::product_root(&settings) {
             Ok(root) => {
                 let mut line = root.as_os_str().as_bytes().to_vec();
@@ -288,46 +295,6 @@ fn run(args: &[OsString]) -> u8 {
             Err(message) => fail(&message),
         },
     }
-}
-
-/// Rollback switch: run the preserved Python dispatcher directly. The
-/// stable template would exec `scripts/provenant`, which is this binary when
-/// Rust is installed there, and loop back here.
-fn run_python(args: &[OsString], settings: &Settings) -> u8 {
-    let root = match resolve::product_root(settings) {
-        Ok(root) => root,
-        Err(message) => return fail(&message),
-    };
-    let preserved = root.join("scripts/provenant.py");
-    let dispatcher = if is_file(&preserved) {
-        preserved
-    } else {
-        root.join("scripts/provenant")
-    };
-    if !starts_with_shebang(&dispatcher) {
-        return fail(&format!(
-            "no Python dispatcher at {}; {}",
-            dispatcher.display(),
-            exec::REPAIR
-        ));
-    }
-    let mut forwarded = vec![dispatcher.into_os_string()];
-    forwarded.extend_from_slice(args);
-    launch(
-        Path::new("/usr/bin/env"),
-        &[&[OsString::from("python3")][..], &forwarded].concat(),
-        Some(&root),
-        false,
-    )
-}
-
-fn starts_with_shebang(path: &Path) -> bool {
-    use std::io::Read;
-    let mut head = [0u8; 2];
-    std::fs::File::open(path)
-        .and_then(|mut file| file.read_exact(&mut head))
-        .is_ok()
-        && &head == b"#!"
 }
 
 fn main() -> ExitCode {

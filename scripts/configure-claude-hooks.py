@@ -13,14 +13,15 @@ import tempfile
 
 GUARD_NAME = "lane_safety_guard.py"
 DIGEST_NAME = "utility_output_hook.py"
+ROUTING_NAME = "routing_context_hook.py"
 
 
 class ConfigError(ValueError):
     pass
 
 
-def hook_command(guard: Path, interpreter: str = "python3") -> str:
-    return f"{shlex.quote(interpreter)} {shlex.quote(str(guard))}"
+def hook_command(guard: Path, interpreter: str = "python3", args: tuple[str, ...] = ()) -> str:
+    return " ".join((shlex.quote(interpreter), shlex.quote(str(guard)), *(shlex.quote(arg) for arg in args)))
 
 
 def _managed(entry: object, name: str = GUARD_NAME) -> bool:
@@ -31,7 +32,8 @@ def _managed(entry: object, name: str = GUARD_NAME) -> bool:
     )
 
 
-def merged(settings: dict, guard: Path | None, *, event="PreToolUse", name=GUARD_NAME) -> dict:
+def merged(settings: dict, guard: Path | None, *, event="PreToolUse", name=GUARD_NAME, matcher="Bash",
+           command_args: tuple[str, ...] = ()) -> dict:
     """Settings with the managed entry replaced by one for guard, or removed."""
     hooks = settings.get("hooks", {})
     if not isinstance(hooks, dict):
@@ -42,9 +44,9 @@ def merged(settings: dict, guard: Path | None, *, event="PreToolUse", name=GUARD
     entries = [entry for entry in entries if not _managed(entry, name)]
     if guard is not None:
         entries.append({
-            "matcher": "Bash",
+            **({"matcher": matcher} if matcher else {}),
             "hooks": [{"type": "command", "command": hook_command(guard, sys.executable), "timeout": 30}]
-                     if name == DIGEST_NAME else [{"type": "command", "command": hook_command(guard)}],
+                     if name == DIGEST_NAME else [{"type": "command", "command": hook_command(guard, args=command_args)}],
         })
     result = {**settings, "hooks": {**hooks, event: entries}}
     if not entries:
@@ -54,7 +56,8 @@ def merged(settings: dict, guard: Path | None, *, event="PreToolUse", name=GUARD
     return result
 
 
-def apply(settings_path: Path, guard: Path | None, *, event="PreToolUse", name=GUARD_NAME) -> str:
+def apply(settings_path: Path, guard: Path | None, *, event="PreToolUse", name=GUARD_NAME, matcher="Bash",
+          command_args: tuple[str, ...] = ()) -> str:
     target = Path(os.path.realpath(settings_path))
     try:
         text = target.read_text() if target.exists() else ""
@@ -63,7 +66,7 @@ def apply(settings_path: Path, guard: Path | None, *, event="PreToolUse", name=G
         raise ConfigError(f"cannot read settings {target}: {exc}") from exc
     if not isinstance(settings, dict):
         raise ConfigError(f"settings {target} must be a JSON object")
-    updated = merged(settings, guard, event=event, name=name)
+    updated = merged(settings, guard, event=event, name=name, matcher=matcher, command_args=command_args)
     if updated == settings:
         return "unchanged"
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -88,7 +91,22 @@ def main(arguments: list[str]) -> int:
     parser.add_argument("--remove", action="store_true")
     parser.add_argument("--digest-hook", type=Path, help="install the optional Bash PostToolUse hook")
     parser.add_argument("--remove-digest", action="store_true")
+    parser.add_argument("--routing-hook", type=Path, help="install advisory routing context and roster hooks")
+    parser.add_argument("--remove-routing-hook", action="store_true")
     options = parser.parse_args(arguments)
+    if options.routing_hook is not None or options.remove_routing_hook:
+        if options.guard or options.remove or options.digest_hook or options.remove_digest or (options.routing_hook and options.remove_routing_hook):
+            parser.error("--routing-hook is independent of other hook changes")
+        script = options.routing_hook.resolve() if options.routing_hook else None
+        try:
+            apply(options.settings, script, event="SessionStart", name=ROUTING_NAME, matcher="startup|resume|clear|compact")
+            state = apply(options.settings, script, event="PreToolUse", name=ROUTING_NAME,
+                          matcher="Agent|.*fabric_dispatch", command_args=("--pre-tool",))
+        except ConfigError as exc:
+            print(f"configure-claude-hooks: {exc}", file=sys.stderr)
+            return 3
+        print(f"routing hooks {state}={options.settings}")
+        return 0
     if options.digest_hook is not None or options.remove_digest:
         if options.guard or options.remove or (options.digest_hook and options.remove_digest):
             parser.error("--digest-hook is independent of the lane-safety hook")
