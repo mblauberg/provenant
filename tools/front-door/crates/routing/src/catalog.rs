@@ -1,12 +1,16 @@
 //! Catalogue family inference and risk-tier override validation.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::BTreeSet;
 
 use regex::Regex;
 use serde_json::{Map, Value};
 use thiserror::Error;
 
-use crate::casefold::fold;
+use crate::{
+    casefold::fold,
+    ordered_json::{OrderedObject, OrderedValue},
+    pending::python_strip,
+};
 
 const BROKER_PREFIXES: [&str; 3] = ["opencode/", "opencode-go/", "openrouter/"];
 const EFFORTS: [&str; 5] = ["low", "medium", "high", "xhigh", "ultra"];
@@ -24,7 +28,7 @@ pub enum CatalogError {
 
 /// Strip repeated broker prefixes and leading OpenRouter shorthand.
 pub fn model_slug_for_family(model: &str) -> String {
-    let mut slug = model.trim().to_lowercase();
+    let mut slug = python_strip(model).to_lowercase();
     while let Some(rest) = slug.strip_prefix('~') {
         slug = rest.to_owned();
     }
@@ -46,13 +50,16 @@ pub fn infer_family(model: &str, catalog: &Value) -> Result<Option<String>, Cata
 }
 
 pub fn matching_model_families(model: &str, catalog: &Value) -> Result<Vec<String>, CatalogError> {
-    let patterns = catalog
-        .get("model_patterns")
-        .and_then(Value::as_array)
-        .ok_or(CatalogError::InvalidPatterns)?;
-    let candidates = [model_slug_for_family(model), model.trim().to_lowercase()];
+    let candidates = [
+        model_slug_for_family(model),
+        python_strip(model).to_lowercase(),
+    ];
     let mut matches = Vec::new();
     for candidate in candidates.into_iter().filter(|item| !item.is_empty()) {
+        let patterns = catalog
+            .get("model_patterns")
+            .and_then(Value::as_array)
+            .ok_or(CatalogError::InvalidPatterns)?;
         for item in patterns {
             let pattern = item
                 .get("pattern")
@@ -85,7 +92,7 @@ pub fn attribute_model_family(
     if let Some(family) = infer_family(model, catalog)? {
         return Ok((Some(family), "slug-inferred".into()));
     }
-    let lowered = model.trim().to_lowercase();
+    let lowered = python_strip(model).to_lowercase();
     if BROKER_PREFIXES
         .iter()
         .any(|prefix| lowered.starts_with(prefix))
@@ -157,8 +164,9 @@ pub fn ultra_eligible_roles_are_valid(family_config: &Value) -> bool {
         .is_none_or(|roles| {
             roles.as_array().is_some_and(|roles| {
                 roles.iter().all(|role| {
-                    role.as_str()
-                        .is_some_and(|name| !name.trim().is_empty() && name == name.trim())
+                    role.as_str().is_some_and(|name| {
+                        !python_strip(name).is_empty() && name == python_strip(name)
+                    })
                 })
             })
         })
@@ -194,11 +202,11 @@ pub fn risk_tier_override_is_well_formed(override_value: &Value) -> bool {
         && role_names.as_ref().is_some_and(|names| {
             names
                 .iter()
-                .all(|name| !name.trim().is_empty() && *name == name.trim())
+                .all(|name| !python_strip(name).is_empty() && *name == python_strip(name))
                 && names[0] != names[1]
         })
         && models.len() == 1
-        && model.is_some_and(|name| !name.trim().is_empty() && name == name.trim())
+        && model.is_some_and(|name| !python_strip(name).is_empty() && name == python_strip(name))
 }
 
 pub fn family_alias_candidates(
@@ -281,27 +289,28 @@ pub fn risk_tier_overrides_are_valid(family: &str, family_config: &Value, catalo
     true
 }
 
-pub fn override_scan_families(model: &str, catalog: &Value) -> HashMap<String, Value> {
-    let Some(families) = catalog.get("families").and_then(Value::as_object) else {
-        return HashMap::new();
+/// Preserve catalogue dictionary order at the wire boundary and in the scan result.
+pub fn override_scan_families(
+    model: &str,
+    catalog: &OrderedValue,
+) -> Result<OrderedObject, CatalogError> {
+    let Some(families) = catalog.get("families").and_then(OrderedValue::as_object) else {
+        return Ok(OrderedObject::default());
     };
     let family = if model.is_empty() {
         None
     } else {
-        infer_family(model, catalog).ok().flatten()
+        infer_family(model, &catalog.to_value())?
     };
     if let Some(name) = family {
         if let Some(config) = families
             .get(&name)
-            .filter(|value| value.as_object().is_some_and(|map| !map.is_empty()))
+            .filter(|value| value.as_object().is_some_and(|object| !object.0.is_empty()))
         {
-            return HashMap::from([(name, config.clone())]);
+            return Ok(OrderedObject(vec![(name, config.clone())]));
         }
     }
-    families
-        .iter()
-        .map(|(name, value)| (name.clone(), value.clone()))
-        .collect()
+    Ok(families.clone())
 }
 
 #[cfg(test)]
@@ -314,6 +323,30 @@ mod tests {
         risk_tier_override_is_well_formed, risk_tier_override_reserves_model,
         ultra_eligible_roles_are_valid,
     };
+
+    #[test]
+    fn override_scan_keeps_family_order_and_propagates_malformed_patterns() {
+        let catalog = crate::pending::from_json(r#"{"families":{"z":{"a":1},"a":{},"m":{}},"model_patterns":[{"pattern":"x","family":"z"}]}"#).unwrap();
+        let all = super::override_scan_families("missing", &catalog).unwrap();
+        assert_eq!(
+            serde_json::to_string(&all).unwrap(),
+            r#"{"z":{"a":1},"a":{},"m":{}}"#
+        );
+        let one = super::override_scan_families("x", &catalog).unwrap();
+        assert_eq!(serde_json::to_string(&one).unwrap(), r#"{"z":{"a":1}}"#);
+        let broken = crate::pending::from_json(r#"{"families":{"z":{}}}"#).unwrap();
+        assert!(super::override_scan_families("", &broken).is_ok());
+        assert!(super::override_scan_families("x", &broken).is_err());
+    }
+
+    #[test]
+    fn empty_models_do_not_read_model_patterns() {
+        for model in ["", " ", "\u{1c}\u{1f}"] {
+            assert!(matching_model_families(model, &json!({}))
+                .unwrap()
+                .is_empty());
+        }
+    }
 
     #[test]
     fn nested_broker_slugs_infer_the_vendor_family() {
@@ -405,40 +438,46 @@ mod tests {
 
     #[test]
     fn family_matching_matches_the_python_oracle_when_available() {
-        use std::path::Path;
-        use std::process::Command;
-
-        let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
-        let source = manifest.join("../../../../scripts/model_route_catalog.py");
-        let fixture = json!({"catalog":{"model_patterns":[
-            {"pattern":"deepseek","family":"deepseek"},
-            {"pattern":"kimi","family":"moonshot"}
-        ]},"models":["opencode/deepseek-v3","openrouter/moonshotai/kimi-k2","openrouter/stealth/model"]});
-        let code = "import importlib.util,json,sys; p=sys.argv[1]; s=importlib.util.spec_from_file_location('model_route_catalog',p); m=importlib.util.module_from_spec(s); s.loader.exec_module(m); d=json.loads(sys.argv[2]); print(json.dumps([list(m.matching_model_families(x,d['catalog'])) for x in d['models']]))";
-        let output = match Command::new("python3")
-            .args([
-                "-c",
-                code,
-                source.to_str().unwrap_or_default(),
-                &fixture.to_string(),
-            ])
-            .output()
-        {
-            Ok(output) => output,
-            Err(_) => return,
-        };
-        assert!(
-            output.status.success(),
-            "python oracle failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        let expected: Vec<Vec<String>> = serde_json::from_slice(&output.stdout).unwrap();
-        let catalog = &fixture["catalog"];
-        let actual: Vec<Vec<String>> = fixture["models"]
-            .as_array()
-            .unwrap()
+        let catalogs = vec![
+            json!({"model_patterns":[{"pattern":"deepseek","family":"deepseek"},{"pattern":"kimi","family":"moonshot"},{"pattern":"stealth","family":"generic-open"}]}),
+            json!({"model_patterns":[{"pattern":"^gpt","family":"openai"},{"pattern":"claude","family":"anthropic"},{"pattern":"gpt|claude","family":"overlap"},{"pattern":"gpt","family":"openai"}]}),
+            json!({"model_patterns":[]}),
+            json!({}),
+        ];
+        let models = vec![
+            "",
+            " ",
+            "\u{1c}\u{1f}",
+            "gpt-6.1-sol",
+            " GPT-6.1-SOL ",
+            "claude-sonnet-5",
+            "opencode/deepseek-v3",
+            "openrouter/moonshotai/kimi-k2",
+            "openrouter/stealth/model",
+            "~openrouter/gpt-6",
+            "opencode/openrouter/~~gpt-6",
+            "opencode-go/opencode/deepseek-v3",
+            "unknown",
+            "\u{1c}GPT-6\u{1f}",
+        ];
+        let mut fixtures = Vec::new();
+        for catalog in catalogs {
+            for model in &models {
+                // A missing patterns key is only valid when no candidate is visited.
+                if catalog.get("model_patterns").is_some()
+                    || crate::pending::python_strip(model).is_empty()
+                {
+                    fixtures.push(json!({"model":model,"catalog":catalog}));
+                }
+            }
+        }
+        let fixture = json!(fixtures);
+        let Some(expected): Option<Vec<Vec<String>>> = crate::oracle::python(
+            "import importlib.util,json,pathlib,sys; p=pathlib.Path('scripts/model_route_catalog.py').resolve(); s=importlib.util.spec_from_file_location('catalog',p); m=importlib.util.module_from_spec(s); s.loader.exec_module(m); data=json.load(sys.stdin); print(json.dumps([m.matching_model_families(d['model'],d['catalog']) for d in data]))", &fixture
+        ) else { return; };
+        let actual: Vec<Vec<String>> = fixtures
             .iter()
-            .map(|model| matching_model_families(model.as_str().unwrap(), catalog).unwrap())
+            .map(|d| matching_model_families(d["model"].as_str().unwrap(), &d["catalog"]).unwrap())
             .collect();
         assert_eq!(actual, expected);
     }

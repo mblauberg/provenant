@@ -4,15 +4,11 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::path::Path;
 
-use serde_json::{Map, Value};
+use crate::{casefold::fold, pending::python_strip};
+use serde_json::{Map, Number, Value};
 use thiserror::Error;
 
-const WEIGHTS: [(&str, f64); 4] = [
-    ("high", 8.0),
-    ("normal", 4.0),
-    ("sparing", 1.0),
-    ("off", 0.0),
-];
+const WEIGHTS: [(&str, u64); 4] = [("high", 8), ("normal", 4), ("sparing", 1), ("off", 0)];
 const RENAMED_TIERS: [(&str, &str); 6] = [
     ("scout", "junior"),
     ("bulk", "junior"),
@@ -47,15 +43,23 @@ pub struct RenamedNameError(pub String);
 #[error("{0}")]
 pub struct MigrationConflict(pub String);
 
-pub fn weight_value(raw: &Value) -> Option<f64> {
+/// Preserve numeric kind and integer precision (PORTING v4 R4).
+pub fn weight_value(raw: &Value) -> Option<Number> {
     match raw {
-        Value::Null => Some(4.0),
+        Value::Null => Some(Number::from(4)),
         Value::Bool(_) => None,
-        Value::Number(number) => number.as_f64().filter(|value| *value >= 0.0),
+        Value::Number(number) => {
+            let nonnegative = if number.is_f64() {
+                number.as_f64().is_some_and(|value| value >= 0.0)
+            } else {
+                number.as_u64().is_some()
+            };
+            nonnegative.then(|| number.clone())
+        }
         Value::String(name) => WEIGHTS
             .iter()
-            .find(|(key, _)| *key == name.trim().to_lowercase())
-            .map(|(_, value)| *value),
+            .find(|(key, _)| *key == fold(python_strip(name)))
+            .map(|(_, value)| Number::from(*value)),
         _ => None,
     }
 }
@@ -165,13 +169,13 @@ pub fn renamed_message(kind: &str, name: &str) -> Option<String> {
     renamed_target(name).map(|target| {
         format!(
             "{kind} '{}' was renamed to '{target}'; fix: use the new name",
-            name.trim()
+            python_strip(name)
         )
     })
 }
 
 fn renamed_target(name: &str) -> Option<&'static str> {
-    let folded = name.trim().to_lowercase();
+    let folded = fold(python_strip(name));
     RENAMED_TIERS
         .iter()
         .find(|(old, _)| *old == folded)
@@ -437,11 +441,11 @@ fn rename_alias(holder: &mut Value, path: &str, notes: &mut Vec<String>) {
 
 pub fn route_name(catalog: &Value, name: &str) -> Result<String, PoolError> {
     let routes = catalog.get("routes").and_then(Value::as_object);
-    let key = name.trim().to_lowercase();
+    let key = fold(python_strip(name));
     if routes.is_some_and(|routes| routes.contains_key(&key)) {
         return Ok(key);
     }
-    if let Some(message) = renamed_message("route", name.trim()) {
+    if let Some(message) = renamed_message("route", python_strip(name)) {
         return Err(PoolError::new("route_renamed", &message));
     }
     if let Some(target) = catalog
@@ -507,8 +511,30 @@ mod tests {
     };
 
     #[test]
+    fn integer_weights_retain_exact_integer_wire_form() {
+        for wire in ["9007199254740993", "18446744073709551615", "0", "8"] {
+            let raw = crate::pending::from_json(wire).unwrap();
+            assert_eq!(
+                serde_json::to_string(&weight_value(&raw).unwrap()).unwrap(),
+                wire
+            );
+        }
+        assert_eq!(
+            serde_json::to_string(&weight_value(&json!("high")).unwrap()).unwrap(),
+            "8"
+        );
+        assert_eq!(
+            serde_json::to_string(&weight_value(&json!(4.5)).unwrap()).unwrap(),
+            "4.5"
+        );
+    }
+
+    #[test]
     fn pool_weights_and_effort_bands_reject_invalid_values() {
-        assert_eq!(weight_value(&json!(" HIGH ")), Some(8.0));
+        assert_eq!(
+            weight_value(&json!(" HIGH ")),
+            Some(serde_json::Number::from(8))
+        );
         assert_eq!(weight_value(&json!(true)), None);
         assert_eq!(weight_value(&json!(-0.5)), None);
         let order = BTreeMap::from([("low".into(), 0), ("medium".into(), 1), ("high".into(), 2)]);

@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
-use crate::casefold::is_printable;
+use crate::pending::python_string;
 
 const AFFINITIES: [(&str, &str, &str); 3] = [
     ("family_affinity", "model_family", "unknown_family"),
@@ -200,12 +200,12 @@ fn parse_availability(value: Option<&Value>) -> Option<Availability> {
 }
 
 fn python_one(value: Option<&Value>) -> bool {
-    value.is_some_and(|value| {
-        value.as_bool() == Some(true)
-            || value.as_i64() == Some(1)
-            || value.as_u64() == Some(1)
-            || value.as_f64() == Some(1.0)
-    })
+    match value {
+        Some(Value::Bool(value)) => *value,
+        Some(Value::Number(number)) if number.is_f64() => matches!(number.as_f64(), Some(1.0)),
+        Some(Value::Number(number)) => number.as_i64() == Some(1) || number.as_u64() == Some(1),
+        _ => false,
+    }
 }
 
 fn route_model(route: &Map<String, Value>) -> String {
@@ -314,88 +314,6 @@ pub fn configuration_ignored(preferences: &Value, task_class: &str, role: &str) 
         }
     }
     ignored
-}
-
-fn python_string(value: &Value) -> String {
-    match value {
-        Value::Null => "None".into(),
-        Value::Bool(true) => "True".into(),
-        Value::Bool(false) => "False".into(),
-        Value::Number(number) => {
-            let rendered = number.to_string();
-            if let Some(value) = number.as_f64().filter(|value| {
-                number.is_f64() && *value != 0.0 && (value.abs() < 1e-4 || value.abs() >= 1e16)
-            }) {
-                let shortest = format!("{value:?}");
-                if let Some((mantissa, exponent)) = shortest.split_once('e') {
-                    if let Ok(exponent) = exponent.parse::<i32>() {
-                        return format!(
-                            "{mantissa}e{}{:02}",
-                            if exponent < 0 { '-' } else { '+' },
-                            exponent.unsigned_abs()
-                        );
-                    }
-                }
-            }
-            rendered
-        }
-        Value::String(text) => text.clone(),
-        Value::Array(items) => format!(
-            "[{}]",
-            items.iter().map(python_repr).collect::<Vec<_>>().join(", ")
-        ),
-        Value::Object(items) => format!(
-            "{{{}}}",
-            items
-                .iter()
-                .map(|(key, value)| format!(
-                    "{}: {}",
-                    python_repr(&Value::String(key.clone())),
-                    python_repr(value)
-                ))
-                .collect::<Vec<_>>()
-                .join(", ")
-        ),
-    }
-}
-
-fn python_repr(value: &Value) -> String {
-    match value {
-        Value::String(text) => {
-            let quote = if text.contains('\'') && !text.contains('"') {
-                '"'
-            } else {
-                '\''
-            };
-            let mut result = String::from(quote);
-            for character in text.chars() {
-                match character {
-                    '\\' => result.push_str("\\\\"),
-                    '\n' => result.push_str("\\n"),
-                    '\r' => result.push_str("\\r"),
-                    '\t' => result.push_str("\\t"),
-                    value if value == quote => {
-                        result.push('\\');
-                        result.push(value);
-                    }
-                    value if !is_printable(value) => {
-                        let codepoint = u32::from(value);
-                        if codepoint <= 0xff {
-                            result.push_str(&format!("\\x{codepoint:02x}"));
-                        } else if codepoint <= 0xffff {
-                            result.push_str(&format!("\\u{codepoint:04x}"));
-                        } else {
-                            result.push_str(&format!("\\U{codepoint:08x}"));
-                        }
-                    }
-                    value => result.push(value),
-                }
-            }
-            result.push(quote);
-            result
-        }
-        _ => python_string(value),
-    }
 }
 
 fn ignored_item(kind: &str, scope: &str, value: &str, reason: &str) -> Value {
