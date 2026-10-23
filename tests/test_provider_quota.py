@@ -2070,6 +2070,14 @@ def test_choose_claude_account_releases_exhaustion_after_reset(quota):
     assert quota.choose_claude_account(values, NOW) == 'reset'
 
 
+@pytest.mark.parametrize('reset_in', [timedelta(0), -timedelta(hours=1)])
+def test_reset_weekly_allowance_ranks_above_an_alphabetically_earlier_unknown(quota, reset_in):
+    values = {'aaa': None, 'zreset': {'status': 'ok', 'windows': [
+        window(10, 300, timedelta(hours=2), 'five_hour'), window(80, WEEK, reset_in)]}}
+    assert quota.pace(window(0, WEEK, reset_in), NOW)['state'] == 'not_started'
+    assert quota.choose_claude_account(values, NOW) == 'zreset'
+
+
 def test_choose_claude_account_partial_reading_still_excludes_known_exhaustion(quota):
     values = {'spent': {'status': 'ok', 'windows': [
         window(100, 300, timedelta(hours=2), 'five_hour'),
@@ -2114,6 +2122,17 @@ def test_ahead_of_pace_clears_an_older_refusal_cooldown(quota):
     assert quota.apply_to_cooldowns(cooldown('usage_limited', NOW - timedelta(hours=1)), NOW) == {}
 
 
+@pytest.mark.parametrize('used', [0, 30])
+@pytest.mark.parametrize('observed_in', [-timedelta(hours=1), timedelta(0)])
+def test_fresh_lapsed_window_leaves_cooldown_recovery_to_current_allowance(quota, used, observed_in):
+    snapshot(quota, 'codex', [window(used, 300, -timedelta(hours=1), 'primary'),
+                              window(10, WEEK, timedelta(days=3.5), 'secondary')], observed=NOW + observed_in)
+    state = quota.route_states(NOW)['codex']
+    assert state['state'] == 'reserve' and state['has_headroom'] is True
+    assert state['summary'].startswith('secondary:')
+    assert quota.apply_to_cooldowns(cooldown('usage_limited', NOW - timedelta(hours=2)), NOW) == {}
+
+
 def test_route_summary_includes_manually_banked_resets(quota):
     snapshot(quota, 'codex', [window(33, WEEK, timedelta(hours=159), 'primary')])
     quota.change_credits('codex', 'default', 1)
@@ -2127,6 +2146,18 @@ def test_weekly_shortage_ranks_below_unknown_unless_credit_runway_is_known(quota
               'windows': [window(10, 300, timedelta(hours=2), 'five_hour'),
                           window(95, WEEK, timedelta(days=3))]}}
     assert quota.choose_claude_account(values, NOW) == expected
+
+
+@pytest.mark.parametrize('refused', [False, True])
+@pytest.mark.parametrize('balance', [60000, 100000])
+def test_finite_credit_runway_requires_current_draw_and_enough_balance(quota, refused, balance):
+    values = {'aaa': None, 'zcovered': {
+        'status': 'ok', 'observed_at': iso(NOW),
+        'allowance': {'ordinary_usage_allowed': not refused},
+        'usage_credits': [{'balance': balance, 'unit': 'credits'}],
+        'credit_anchor': {'balance': balance + 1000, 'observed_at': iso(NOW - timedelta(hours=1))},
+        'windows': [window(10, 300, timedelta(hours=2), 'five_hour'), window(95, WEEK, timedelta(days=3))]}}
+    assert quota.choose_claude_account(values, NOW) == ('zcovered' if refused and balance == 100000 else 'aaa')
 
 
 @pytest.mark.parametrize('used,reset_in,clears', [(94, timedelta(days=3), True),

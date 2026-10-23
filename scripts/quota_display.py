@@ -191,19 +191,25 @@ def refusal_reset(quota, value, rows):
 
 def describe(quota, value, banked, now, entries=None, alert=None):
     labels, name = window_labels(quota), value.get('provider')
-    rows = []
+    rows, stale = [], False
     observed = quota['parse_time'](value.get('observed_at'))
+    allowance = value.get('allowance') or {}
+    reached = allowance.get('limit_reached_type')
     extras = optional_credits(quota, value, banked)
     for row in value.get('windows') or []:
         pool = pool_of(quota, name, row)
+        passed = quota['reset_passed'](row, now)
+        outdated = bool(observed and passed and observed < quota['parse_time'](row.get('reset_at')))
+        stale = stale or outdated and quota['sets_state'](row)
+        refused = reached in (row['name'], row.get('raw_kind')) if reached else allowance.get('ordinary_usage_allowed') is False
+        # A fresh lapsed window binds only while exhausted or refused.
+        inactive = outdated or bool(observed and passed and row['used_percent'] < 100 and not refused)
         row = {**row, 'pace': quota['pace'](row, now), **({'pool': pool, 'pool_label': f'{title_case(pool)} models'} if pool else {}),
-               **({'reset_passed': True} if observed and quota['reset_passed'](row, now)
-                  and observed < quota['parse_time'](row.get('reset_at')) else {})}
+               **({'reset_passed': True} if inactive else {})}
         rows.append({**row, 'label': window_label(row, labels)})
     # A restated window would show twice and count twice; the report keeps the named one.
     rows = [row for row in rows if not repeats(quota, row, rows)]
     # A refusal belongs to its reading's windows; after a reset it needs fresh evidence.
-    stale = any(row.get('reset_passed') and quota['sets_state'](row) for row in rows)
     allowance = {**value, 'allowance': {}} if refusal_reset(quota, value, rows) else value
     worst = quota['binding']([row for row in rows if not row.get('reset_passed')])
     if worst is None and (allowance.get('allowance') or {}).get('ordinary_usage_allowed') is False:
@@ -213,7 +219,7 @@ def describe(quota, value, banked, now, entries=None, alert=None):
     rate = quota['burn_rate'](value, drawing) if drawing else None
     reserves = runway(quota, value, extras, drawing)
     for row in rows:
-        if row['pace']['state'] == 'ahead_of_pace' and row['pace'].get('will_last_to_reset') is False and reserves:
+        if row['pace']['state'] == 'ahead_of_pace' and reserves:
             row['pace']['summary'] += '; ' + reserves
     unreported = list(value.get('unreported') or [])
     dated = [row for row in rows if row.get('reset_at') and row.get('window_minutes')]

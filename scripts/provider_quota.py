@@ -1088,11 +1088,11 @@ def pace(window, now):
     if actual >= 100:
         return {**result, 'state': 'exhausted', 'will_last_to_reset': False, 'runs_out_at': iso(now),
                 'summary': 'exhausted' + (f'; resets in {duration(remaining)}' if remaining and remaining > 0 else '')}
-    if remaining is not None and remaining <= 0:
-        return {**result, 'summary': f'reset passed at {iso(reset)}; awaiting a fresh reading'}
     if actual == 0 and (reset is None or remaining <= 0 or
                         minutes and remaining > minutes * 60 + CLOCK_SKEW_SECONDS):
         return {**result, 'state': 'not_started', 'summary': 'window starts on first use'}
+    if remaining is not None and remaining <= 0:
+        return {**result, 'summary': f'reset passed at {iso(reset)}; awaiting a fresh reading'}
     if reset is None:
         return {**result, 'summary': 'reset time unreported; pace unknown'}
     if not minutes:

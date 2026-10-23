@@ -546,6 +546,30 @@ def test_fresh_post_reset_refusal_remains_exhausted(quota, used, reset_in):
     assert 'stale' not in account['summary']
 
 
+@pytest.mark.parametrize('used', [0, 30])
+@pytest.mark.parametrize('observed_in', [-timedelta(hours=1), timedelta(0)])
+def test_fresh_non_exhausted_lapsed_window_does_not_bind_the_account(quota, used, observed_in):
+    reading = value(quota, 'codex', 'default', [window(used, 300, -timedelta(hours=1), 'primary'),
+                                              window(10, WEEK, timedelta(days=3.5), 'secondary')],
+                    observed=NOW + observed_in)
+    account = row(quota, reading)
+    assert account['state'] == 'reserve' and account['status'] == 'ok'
+    assert account['summary'].startswith('secondary:')
+    assert account['display_window'] == 'secondary'
+
+
+@pytest.mark.parametrize('used,reached', [(100, None), (30, 'primary'), (30, 'five_hour'), (30, None)])
+def test_fresh_exhaustion_or_refusal_still_binds_a_lapsed_window(quota, used, reached):
+    reading = value(quota, 'codex', 'default', [window(used, 300, -timedelta(hours=1), 'primary', raw_kind='five_hour'),
+                                              window(10, WEEK, timedelta(days=3.5), 'secondary')],
+                    **({'allowance': {'ordinary_usage_allowed': False,
+                                     **({'limit_reached_type': reached} if reached else {})}}
+                       if used < 100 else {}))
+    account = row(quota, reading)
+    assert account['state'] == 'exhausted' and account['status'] == 'ok'
+    assert account['summary'].startswith('primary:')
+
+
 @pytest.mark.parametrize('reached,all_reset,spend_cap,unreported,exhausted', [
     ('primary', False, False, [], False),
     ('primary', False, False, ['unrelated_window'], False),
@@ -575,12 +599,3 @@ def test_credit_runway_uses_the_anchor_while_credits_are_being_drawn(quota):
     account = row(quota, reading)
     assert account['state'] == 'credit_only'
     assert 'then about 26h on credits' in account['windows'][0]['pace']['summary']
-
-
-def test_allowance_lasting_to_reset_does_not_append_credit_runway(quota):
-    reading = value(quota, 'codex', 'default', [window(90, WEEK, timedelta(hours=1), 'primary')],
-                    usage_credits=[{'balance': 26000, 'unit': 'credits'}])
-    account = row(quota, reading)
-    assert account['windows'][0]['pace']['will_last_to_reset'] is True
-    assert 'allowance lasts until reset' in account['summary']
-    assert 'then' not in account['summary'] and 'credit runway' not in account['summary']
