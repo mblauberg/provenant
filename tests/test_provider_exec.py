@@ -8954,3 +8954,66 @@ def test_cancelled_attempt_stops_nested_children_even_when_cleanup_fails(tmp_pat
         if child.poll() is None:
             child.kill()
         child.wait(timeout=5)
+
+
+@pytest.mark.parametrize("model,listing_status,listing,expected", [
+    ("gemini-valid", 0, "gemini-valid", "passed"),
+    ("gemini-vlaid", 0, "gemini-valid", "invalid"),
+    ("gemini-valid", 1, "gemini-valid", "unavailable"),
+    ("gemini-valid", 0, "", "unavailable"),
+])
+def test_dispatch_checks_live_adapter_listing(tmp_path, monkeypatch, model, listing_status, listing, expected):
+    monkeypatch.setenv("AGENT_FABRIC_STATE_ROOT", str(tmp_path / "state"))
+    monkeypatch.setenv("AGENT_FABRIC_PRODUCT_ROOT", str(ROOT))
+    launched = tmp_path / "launched"
+    adapter = tmp_path / "agy-stub"
+    adapter.write_text(
+        f"#!{sys.executable}\n"
+        "import json, pathlib, sys\n"
+        "if sys.argv[1:] == ['--version']: print('stub 1')\n"
+        "elif sys.argv[1:] == ['--help']: print('--model')\n"
+        "elif sys.argv[1:] == ['models']:\n"
+        f"    print({listing!r}); sys.exit({listing_status})\n"
+        "else:\n"
+        f"    pathlib.Path({str(launched)!r}).touch()\n"
+        "    print(json.dumps({'event':'result', 'result':{'status':'SUCCESS', 'response':'DONE'}}))\n"
+    )
+    adapter.chmod(0o755)
+    state = tmp_path / "state"
+    state.mkdir()
+    (state / "capabilities.json").write_text(json.dumps({"agy": {
+        "version": "stub 1", "executable": str(adapter.resolve()),
+        "observed_at": "2999-01-01T00:00:00+00:00", "models": ["gemini-vlaid"],
+    }}))
+    plan = fixture_plan(tmp_path, "", "agy", requested_model=model)
+    plan["model"] = model
+    plan["argv"] = [str(adapter), "--model", model]
+    record = supervisor().execute(plan, tmp_path / "result.md")
+    assert record["model_check"] == expected
+    if expected == "invalid":
+        assert record["status"] == "model_unavailable"
+        assert "gemini-vlaid" in record["fix"] and "gemini-valid" in record["fix"]
+        assert not launched.exists()
+    else:
+        assert record["status"] == "ok"
+        assert launched.exists()
+
+
+@pytest.mark.parametrize("adapter", ["agy", "claude"])
+def test_receipt_keeps_model_changes_when_provider_switches_back(tmp_path, adapter):
+    models = ["gemini-valid", "gemini-cheap", "gemini-valid"]
+    if adapter == "claude":
+        events = [{"type": "assistant", "message": {"model": model, "content": []}}
+                  for model in models]
+        events.append({"type": "result", "result": "DONE", "is_error": False})
+    else:
+        events = [{"event": "init", "init": {"model": model}} for model in models]
+        events.append({"event": "result", "result": {"status": "SUCCESS", "response": "DONE"}})
+    plan = fixture_plan(tmp_path, f"import json; events={events!r}; [print(json.dumps(e)) for e in events]", adapter)
+    plan["model"] = models[0]
+    record = supervisor().execute(plan, tmp_path / "result.md")
+    assert record["provenance"]["observed_model"] == models[0]
+    assert record["model_changes"] == [
+        {"from": models[0], "to": models[1]},
+        {"from": models[1], "to": models[2]},
+    ]

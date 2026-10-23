@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 from collections import deque, namedtuple
 import ctypes
+import difflib
 import fcntl
 import functools
 import hashlib
@@ -1927,6 +1928,10 @@ def parse_output(adapter, stdout, stderr="", exit_code=0, *, at=None):
                 for item in _objects(event):
                     if isinstance(item.get("model"), str):
                         result["observed_model"] = item["model"]
+        if adapter == "claude" and kind == "assistant":
+            message = event.get("message")
+            if isinstance(message, dict) and isinstance(message.get("model"), str):
+                result["observed_model"] = message["model"]
         error_event = kind in {
             "error",
             "turn.failed",
@@ -3527,6 +3532,31 @@ def stage_ps_shim(tmp_fd, private_tmp):
     return Path(private_tmp) / "provenant-shim" / "bin"
 
 
+def _check_model(plan):
+    """Validate the slug sent to the CLI against a fresh adapter listing."""
+    try:
+        try:
+            from . import exec_routing
+        except ImportError:
+            import exec_routing
+        listing, code = exec_routing._model_route_module().probe_capabilities(
+            plan["adapter"], plan["argv"][0], listing_only=True, refresh=True,
+            deadline=time.monotonic() + min(20, plan["timeout_seconds"]),
+        )
+    except (OSError, ValueError, subprocess.SubprocessError) as exc:
+        return "unavailable", f"Model list unavailable: {type(exc).__name__}"
+    models = [model for model in listing.get("models", []) if isinstance(model, str) and model]
+    if code or listing.get("refresh_failed") or not models:
+        return "unavailable", listing.get("message") or "Model list unavailable"
+    if plan["model"] in models:
+        return "passed", ""
+    # `auto` delegates selection to the provider and does not pin a model slug.
+    if not plan["model"] or plan["model"] == "auto":
+        return "unavailable", "Provider chooses the model; no pinned slug to check"
+    nearest = difflib.get_close_matches(plan["model"], models, n=3, cutoff=0)
+    return "invalid", f"Unknown model {plan['model']!r}; nearest valid models: {', '.join(nearest)}"
+
+
 def execute(plan, output_path, **options):
     """Run exactly one attempt. The caller owns fallback, resume, and run publication."""
     tmp_fd = _open_attempt_tmp(plan["run_dir"])
@@ -3724,6 +3754,7 @@ def _run_attempt(
     stopped = False
     forced, terminal_at, cancel_signal = None, None, None
     preflight_error = None
+    model_check, model_check_detail = "unavailable", "Provider not launched"
     provider_exit_before_cleanup = None
     terminal_grace_break = False
     pending = b""
@@ -3738,6 +3769,15 @@ def _run_attempt(
     text_truncated = False
     old_handlers = {}
     meter = context_usage.Meter(plan["adapter"])
+    model_changes = []
+    last_model = plan["model"]
+
+    def observe_model(model):
+        nonlocal last_model
+        if model:
+            if not _same_model(plan["adapter"], last_model, model):
+                model_changes.append({"from": last_model, "to": model})
+            last_model = model
 
     def consume_diagnostic(data, stream):
         nonlocal live_failure
@@ -3786,6 +3826,7 @@ def _run_attempt(
                 text_size = 0
                 terminal_at = None
             parsed_line = parse_output(plan["adapter"], line.decode(errors="replace"))
+            observe_model(parsed_line.get("observed_model"))
             for key in ("session_id", "observed_model", "reset_at", "retry_after"):
                 if parsed_line.get(key) is not None:
                     semantic[key] = parsed_line[key]
@@ -3886,11 +3927,14 @@ def _run_attempt(
             forced = "rejected"
             diagnostics.write(b"copilot requires CF_DISPATCH_ENABLE_COPILOT=1\n")
         else:
-            _preflight_opencode_mcp(plan, environment, tmp_fd)
             command = list(plan["argv"])
             command[0] = (
                 shutil.which(command[0], path=environment.get("PATH")) or command[0]
             )
+            model_check, model_check_detail = _check_model({**plan, "argv": command})
+            if model_check == "invalid":
+                raise CapabilityError("model_unavailable", model_check_detail)
+            _preflight_opencode_mcp(plan, environment, tmp_fd)
             command = confinement_command(plan, command, environment.get("PATH"))
             subreaper = _enable_subreaper()
             process = subprocess.Popen(
@@ -4013,7 +4057,7 @@ def _run_attempt(
         forced = "tool_missing"
         diagnostics.write(str(exc).encode())
     except ValueError as exc:
-        forced = "rejected"
+        forced = "model_unavailable" if model_check == "invalid" else "rejected"
         if isinstance(exc, CapabilityError):
             preflight_error = exc.code
         diagnostics.write(str(exc).encode())
@@ -4179,6 +4223,8 @@ def _run_attempt(
     parsed["session_id"] = session
     observed, source = _observed_model(plan, parsed, environment)
     warnings = [*plan["warnings"], *agy_home_warnings, *browser_tmp_warnings]
+    if model_check == "unavailable":
+        warnings.append(model_check_detail)
     if parsed["signature"] == "exit_after_output":
         warnings.append(parsed["excerpt"])
     reported = {}
@@ -4204,6 +4250,7 @@ def _run_attempt(
         if parsed["status"] in {"ok", "input_required"}:
             parsed.update(status="partial", question=None, signature="output_truncated")
     notes = list(route.get("notes") or [])
+    observe_model(observed)
     substituted = bool(observed) and not _same_model(plan["adapter"], plan["model"], observed)
     if substituted:
         notes.append("mismatch: resolved " + plan["model"] + "; observed " + observed)
@@ -4384,7 +4431,7 @@ def _run_attempt(
             parsed.get("failure_text", stderr),
             re.I,
         )
-        else _model_unavailable_fix(plan)
+        else model_check_detail if model_check == "invalid" else _model_unavailable_fix(plan)
         if status == "model_unavailable"
         else {
             "auth_required": "authenticate the provider CLI",
@@ -4429,6 +4476,9 @@ def _run_attempt(
         "model": plan["model"],
         "requested_model": plan.get("requested_model") or plan["model"],
         "resolved_model": plan["model"],
+        "model_check": model_check,
+        "model_check_detail": model_check_detail,
+        "model_changes": model_changes,
         "effort": plan["effort"],
         "status": status,
         **({"result_partial": True} if status not in {"ok", "input_required", "quarantined"} and not valid_terminal and parsed["text"].strip() else {}),
