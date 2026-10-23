@@ -144,8 +144,8 @@ outside the `i64`/`u64` range are refused with a typed `NumberOutOfRange`
 error, never rounded through `f64`; this is a recorded `improvement`
 divergence. Do not enable `serde_json`'s `arbitrary_precision`: Cargo unifies
 it across the workspace and it breaks untagged, flattened and internally
-tagged enums. Until `provenant-records` owns the checked codec, use a
-`pending` copy. Float-second timestamps convert to datetimes through one
+tagged enums. `provenant-records` owns the checked codec; add a missing piece to
+that crate in the slice that needs it. Float-second timestamps convert to datetimes through one
 shared helper (owner `provenant-core`) that reproduces CPython's
 `datetime.fromtimestamp` rounding (`modf`, then round-half-even to
 microseconds); `(s * 1e6).round()` differs by 1 µs on a large share of stamps.
@@ -283,12 +283,12 @@ release gates. Preserve them after the old implementation is removed.
 S1 parity tests can retire only when their cases have moved to surviving Rust
 tests, including stale advisory and root-resolution cases. Existing Python/TS
 tests that assert policy remain evidence to translate; internal seam tests
-retire only under the named deletion criteria. Do not count deleted tests as
+retire only under the named deletion criteria or R0 pruning. Do not count deleted tests as
 passing tests. Each judge must pass against old code and reject relevant
 mutants such as a changed exit code, missing record field, reordered terminal
 publication, weakened tool schema or a silence-triggered kill.
 
-Differential and record comparisons are exact, including number spelling;
+When a differential is used, it and record comparisons are exact, including number spelling;
 no epsilon or `f64` equality in test helpers. Each crate runs its oracles
 through one helper that takes the interpreter from `PROVENANT_PORT_PYTHON`
 (default `python3`, at least 3.12) or `PROVENANT_PORT_NODE` (default `node`,
@@ -360,7 +360,7 @@ change alters CLI output on purpose, and list the change in `divergences.md`.
 
 Escalate to the chair for an uncovered boundary, ambiguous dynamic dependency,
 missing judge runner at cut-over, survived mutant, source cycle without an
-agreed API (a `pending` module is the agreed API for inert crates),
+agreed API (add a small owner API in the slice, otherwise stop the slice),
 unit exceeding its half-day scope, repeated repair, or overlap with S2.
 Escalate immediately for confinement/custody weakening, a healthy process
 signalled, lost terminal publication, unverifiable rollback or a live database

@@ -21,7 +21,9 @@ Redesign the implementation freely inside this boundary. The current Rust
 front door, rather than the retired Python stub's accidental differences,
 owns the accepted [ADR 0027](../../adr/0027-rust-front-door.md) behaviour.
 Its D1–D3 divergences remain intentional. For commands still delegated, the
-pinned old Python/TypeScript implementation is the oracle. Record exact
+pinned old Python/TypeScript implementation is the oracle; differential runs
+are optional scaffolding (PORTING.md R0) and language-neutral judges are the
+proof. The chair owns any contract surface this table does not list. Record exact
 oracle revision, binary digest, configuration digest and judge revision in
 each comparison. Never compare two installations whose roots resolve to the
 same changing worktree.
@@ -82,7 +84,7 @@ Retirement is evidence-led:
   Preserve `fabric_dispatch` with `tasks[]`, named sessions and bounded graphs.
 - The [supervisor deletion list](../harness/rust-supervisor.md#deletable-tests)
   and [test-by-test inventory](../harness/rust-supervisor-tests.md) govern S1–S4
-  removals. They are conditional, not permission to delete entire mixed files.
+  removals. They are conditional, not permission to delete entire mixed files; conditions are met slice by slice and the slice PR deletes.
   Keep `test_stale.py`, install drift checks, policy mapping, provider output
   semantics, batch custody and conformance until their replacements prove the
   same boundary. Keep direct-CLI liveness while that supported path exists.
@@ -107,8 +109,8 @@ tests through a separate unit. Retired units are excluded by `ready.py`.
 |---|---|---|
 | Judge first | J1 owns `tests/golden/`, J2 owns `schemas/`, J3 owns MCP transcript record/replay. Reuse `tests/lane_conformance/`; S2 rows are in flight. This lane builds none of them. | Each relevant judge passes on the pinned old implementation and fails on deliberate mutants, before the replacement is visible to its author. Save mutant definitions and failures. |
 | Port leaves | Agree interfaces, then port dependency leaves in small units using the rulebook. Integrate accepted `feat/s2-lane-run` rather than reimplementing it. | Unit tests and relevant judges pass; principal diff-only review, assuming the implementation is wrong; dependency and divergence records regenerated. |
-| Differential | Run isolated old/new commands, MCP transcripts, record readers/writers and process scenarios with identical fixture inputs. Repeat across all supported adapters and both platforms. | All mismatches classified and resolved or explicitly approved in [divergences.md](divergences.md); no unexplained output or state differences; old→new and new→old retained-state reads demonstrated. |
-| Cut-over | Change installer/default execution only after the whole boundary is covered. Rehearse install and rollback of the complete Rust install on both Macs. | Exact-head CI green, install and rollback rehearsed, no unexplained divergence in the differential runs, external callers migrated, runtime Python/TS removed and required judge suites retained. |
+| Differential | Run isolated old/new commands, MCP transcripts, record readers/writers and process scenarios with identical fixture inputs. Repeat across all supported adapters and both platforms. | All contract-visible mismatches classified and resolved or recorded in [divergences.md](divergences.md) (chair decides); old→new and new→old retained-state reads demonstrated. |
+| Cut-over | Switch each slice when its contract is covered and its judges pass; the installer default flips with the last slice. Rehearse install and rollback of the complete Rust install on both Macs. | Exact-head CI green, install and rollback rehearsed, no unexplained divergence in the differential runs, external callers migrated, runtime Python/TS removed and required judge suites retained. |
 
 J1–J3 completion is an input gate, not an assumption that their paths already
 exist on this branch. Their owners supply the runner commands and coverage
@@ -244,7 +246,7 @@ units; import-cycle contracts and uncovered callers can change these figures.
 |---|---|
 | Swarm edits the harness running itself | Chair verifies pinned stable roots and candidate isolation every wave |
 | False parity through shared fixtures or normalisation | Judge owners prove old-pass/mutant-fail and review every normaliser |
-| Python/JS numeric, Unicode, path or error differences | Lane adds adversarial cases; divergence reviewer settles each mismatch |
+| Python/JS numeric, Unicode, path or error differences | Lane adds adversarial cases; divergence reviewer settles each contract-visible mismatch |
 | SQLite or publication races | Store/run owners prove concurrency and crash recovery across old/new readers |
 | Crate cycles and oversized units | Integration owner settles interfaces before parallel writers and revises graph |
 | Review or CI bottleneck | Small diffs, deterministic mapping, bounded repair; heavy checks only in CI |
