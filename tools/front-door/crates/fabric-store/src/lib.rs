@@ -73,9 +73,6 @@ pub enum Error {
     Json(#[from] serde_json::Error),
     #[error("identifier source failed: {0}")]
     IdSource(String),
-    #[cfg(test)]
-    #[error("{0}")]
-    Callback(String),
     #[error("{STALE_LANDING}")]
     StaleLanding,
     #[error("landing lease held by {holder} until {until}")]
@@ -282,10 +279,6 @@ impl Store {
         }
         Ok(())
     }
-}
-#[cfg(test)]
-fn invalid(message: impl Into<String>) -> Error {
-    Error::Callback(message.into())
 }
 fn validate_timeout(ms: u64) -> Result<()> {
     if !(1..=5000).contains(&ms) {

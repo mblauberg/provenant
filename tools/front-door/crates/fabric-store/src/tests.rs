@@ -221,7 +221,7 @@ fn message_log_failure_rolls_back_message_and_all_deliveries() {
     struct NoEntropy;
     impl pending::IdSource for NoEntropy {
         fn uuid(&self) -> Result<String> {
-            Err(invalid("entropy failed"))
+            Err(Error::IdSource("entropy failed".into()))
         }
     }
     let dir = tempfile::tempdir().unwrap();
@@ -615,4 +615,30 @@ fn diagnostics_use_private_wal_snapshot_and_remove_every_temporary_file() {
     );
     assert_eq!(report.status, DiagnosticStatus::Error);
     assert_eq!(std::fs::read_dir(scratch.path()).unwrap().count(), 0);
+}
+
+#[test]
+fn push_callback_preserves_a_callers_error_and_clears_the_hold() {
+    #[derive(Debug, thiserror::Error, PartialEq)]
+    #[error("git push failed with status {0}")]
+    struct GitError(u8);
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(&dir.path().join("db"), 5000, Fixed(1000)).unwrap();
+    let who = Identity {
+        project: "p".into(),
+        agent_id: "a".into(),
+        provider: "codex".into(),
+    };
+    let sha = "a".repeat(40);
+    store.acquire_landing(&who, "s", &sha, 60, 1000).unwrap();
+    let error = store
+        .with_landing_push(&who, "s", 1, &sha, || Err::<(), _>(GitError(17)))
+        .unwrap_err();
+    assert!(matches!(error, PushError::Callback(GitError(17))));
+    assert!(store
+        .landing_lease("p", 1000)
+        .unwrap()
+        .unwrap()
+        .pushing_until_ms
+        .is_none());
 }

@@ -32,6 +32,12 @@ fn b() -> Identity {
     }
 }
 fn capture<T: Serialize>(out: &mut Vec<Value>, result: Result<T>) {
+    capture_error(out, result)
+}
+fn capture_error<T: Serialize, E: std::fmt::Display>(
+    out: &mut Vec<Value>,
+    result: std::result::Result<T, E>,
+) {
     #[derive(Serialize)]
     struct OkWire<T> {
         ok: T,
@@ -158,17 +164,17 @@ fn landing_database_and_failure_differential() {
     let failed = other.with_landing_push(&b, "b", 2, &sha, || -> Result<()> {
         store.note(&a, "write during push")?;
         capture(&mut out, store.try_release_landing(&b, "b", 2, Some(2000)));
-        capture(
+        capture_error(
             &mut out,
-            store.with_landing_push(&b, "b", 2, &sha, || Ok("forbidden")),
+            store.with_landing_push(&b, "b", 2, &sha, || Ok::<_, Error>("forbidden")),
         );
-        Err(invalid("push failed"))
+        Err(Error::Io(std::io::Error::other("push failed")))
     });
-    capture(&mut out, failed);
+    capture_error(&mut out, failed);
     capture(&mut out, other.landing_lease("p", 2000));
-    capture(
+    capture_error(
         &mut out,
-        other.with_landing_push(&b, "b", 2, &sha, || Ok("pushed")),
+        other.with_landing_push(&b, "b", 2, &sha, || Ok::<_, Error>("pushed")),
     );
     capture(&mut out, other.landing_lease("p", 2000));
     capture(&mut out, store.acquire_landing(&a, "c", &sha, 1, 2000));
@@ -190,7 +196,7 @@ fn landing_database_and_failure_differential() {
     capture(&mut out, store.renew_landing(&a, "c", 3, 60, 2000));
     store.db.execute_batch("DROP TRIGGER fail_log").unwrap();
     let raw = Connection::open(&path).unwrap();
-    capture(&mut out,store.with_landing_push(&a,"c",3,&sha,|| { raw.execute_batch("CREATE TRIGGER fail_release BEFORE UPDATE OF released_at ON landing_leases BEGIN SELECT RAISE(ABORT, 'release blocked'); END")?;Ok("pushed") }));
+    capture_error(&mut out,store.with_landing_push(&a,"c",3,&sha,|| { raw.execute_batch("CREATE TRIGGER fail_release BEFORE UPDATE OF released_at ON landing_leases BEGIN SELECT RAISE(ABORT, 'release blocked'); END")?;Ok::<_, Error>("pushed") }));
     raw.execute_batch("DROP TRIGGER fail_release").unwrap();
     compare("leases", snapshot(&store, out));
 }

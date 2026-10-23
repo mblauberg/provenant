@@ -44,6 +44,20 @@ impl LandingRelease {
         matches!(self, Self::Released { released: true })
     }
 }
+/// Store failures and caller failures stay distinct, including failed cleanup.
+#[derive(Debug, thiserror::Error)]
+pub enum PushError<E> {
+    #[error(transparent)]
+    Store(#[from] Error),
+    #[error("{0}")]
+    Callback(#[source] E),
+    #[error("{cleanup}")]
+    Cleanup {
+        callback: E,
+        #[source]
+        cleanup: Error,
+    },
+}
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PushOutcome<T> {
@@ -188,14 +202,14 @@ impl Store {
                 .ok_or(Error::StaleLanding)
         })
     }
-    pub fn with_landing_push<T>(
+    pub fn with_landing_push<T, E>(
         &self,
         who: &Identity,
         session: &str,
         generation: i64,
         expected_sha: &str,
-        push: impl FnOnce() -> Result<T>,
-    ) -> Result<PushOutcome<T>> {
+        push: impl FnOnce() -> std::result::Result<T, E>,
+    ) -> std::result::Result<PushOutcome<T>, PushError<E>> {
         let owner = holder(who, session)?;
         self.transaction(true, || {
             self.verify_landing(who, session, generation, expected_sha, self.now())?;
@@ -216,8 +230,13 @@ impl Store {
             Err(error) => {
                 let cleared = hold.clear();
                 hold.armed = false;
-                cleared?;
-                return Err(error);
+                return Err(match cleared {
+                    Ok(()) => PushError::Callback(error),
+                    Err(cleanup) => PushError::Cleanup {
+                        callback: error,
+                        cleanup,
+                    },
+                });
             }
         };
         // A release failure intentionally retains the bounded hold, as in TypeScript.
