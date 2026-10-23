@@ -24,7 +24,7 @@ session checkpoint is only a bounded resume aid.
 ## Retention
 
 Run scratch is settled by the run guardian; prune merged worktrees with
-`provenant worktree remove --merged`. Remove only the exact paths covered by
+`provenant worktree remove --merged --integration refs/heads/<integration> --branch <merged-branch>`. Remove only the exact paths covered by
 explicit authority. Never delete unknown, user-owned,
 pre-existing, or old-root state, and do not treat a temporary path as disposable
 without proving its ownership. A failed or unavailable review leg stays visible

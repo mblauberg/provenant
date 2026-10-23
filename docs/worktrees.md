@@ -159,8 +159,9 @@ verified and pushed, or where the project's landing tool already prunes after
 the push: the hook would fire on the local merge, before verification and push.
 To opt in, run this command in the primary checkout; it refuses to overwrite
 any existing hook. The hook passes
-`ORIG_HEAD` to `provenant clean --prune-merged --merged-since ORIG_HEAD`, so it
-prunes only branches the merge brought in. It quietly skips cleanup if
+the pinned commit OID from `ORIG_HEAD` to
+`provenant --project <primary-root> worktree remove --merged --integration refs/heads/<integration> --since <OID>`,
+so it prunes only branches the merge brought in. It quietly skips cleanup if
 `ORIG_HEAD` is missing. Merge commits are proven by ancestry. Squash merges are
 proven by a merged pull request whose head SHA exactly matches the local branch
 tip and whose merge commit is an ancestor of the integration branch. Only
@@ -188,11 +189,13 @@ never replace an existing hook.
 For a manual prune after one merge, name each branch that merge brought in:
 
 ```sh
-provenant clean --prune-merged --branch <merged-branch> --repo <primary-root>
+provenant --project <primary-root> worktree remove --merged --integration refs/heads/<integration> --branch <merged-branch>
 ```
 
-`--prune-merged` requires `--branch` (repeatable) or `--merged-since`; it refuses
-an unscoped sweep.
+`--merged` requires `--integration` and either `--branch` (repeatable) or
+`--since` with a pinned commit OID; it refuses an unscoped sweep. Squash proof
+requires an explicit repository identity binding from the command owner; until
+that binding is available, the native command retains squash-only candidates.
 
 Prune immediately after the merge, in this order:
 
