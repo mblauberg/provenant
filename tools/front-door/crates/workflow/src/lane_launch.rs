@@ -1,5 +1,5 @@
 //! Source launch-builder wire shapes. Execution remains with the supervisor.
-use crate::lane_exit::{ExitRecord, Member, ProcessInteger, ReceiptFields};
+use crate::lane_exit::{Member, ProcessInteger, ReceiptFields};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::num::NonZeroU64;
@@ -164,7 +164,7 @@ pub struct LaunchNotificationFields {
 /// Provider identity is observation only, without an OS process handle.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ProviderIdentity {
-    pub pid: ProcessInteger,
+    pub pid: crate::pending::OrderedValue,
     pub returncode: Option<ProcessInteger>,
 }
 /// This is a native return value, not a JSON enum with an invented wire tag.
@@ -174,10 +174,10 @@ pub enum LaunchOutcome {
         warning: String,
     },
     Supported {
-        record: Box<ExitRecord>,
+        record: crate::pending::OrderedMap<crate::pending::OrderedValue>,
         fields: Box<ReceiptFields>,
         provider: Option<ProviderIdentity>,
-        started_at: Value,
+        started_at: crate::pending::OrderedValue,
         warning: String,
     },
 }
@@ -295,5 +295,322 @@ mod tests {
         assert!(serde_json::from_value::<StdinSpec>(json!({"path":null})).is_err());
         assert!(serde_json::from_value::<StdinSpec>(json!({"path":""})).is_err());
         assert!(serde_json::from_value::<StdinSpec>(json!({})).is_ok());
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum ProtocolError {
+    #[error("launch notification is missing {0}")]
+    MissingMember(&'static str),
+    #[error("Python integer is outside the i64/u64 range")]
+    NumberOutOfRange,
+    #[error("lane run exited {returncode} without a valid exit record: {tail}")]
+    MissingExit { returncode: i32, tail: String },
+    #[error(transparent)]
+    Exit(#[from] crate::lane_exit::ExitError),
+}
+
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+#[error("provider is still held by lane run")]
+pub struct ProviderStillHeld;
+impl ProviderIdentity {
+    pub fn new(pid: crate::pending::OrderedValue) -> Self {
+        Self {
+            pid,
+            returncode: None,
+        }
+    }
+    pub fn poll(&self) -> Option<&ProcessInteger> {
+        self.returncode.as_ref()
+    }
+    pub fn wait(&self) -> Result<&ProcessInteger, ProviderStillHeld> {
+        self.returncode.as_ref().ok_or(ProviderStillHeld)
+    }
+}
+
+/// Bookkeeping failures only produce warnings. This seam has no process or
+/// signalling handle and cannot grant authority to stop a provider.
+pub trait LaunchCallbacks {
+    fn has_progress_callback(&self) -> bool;
+    fn on_start(&mut self, provider: &ProviderIdentity) -> std::io::Result<()>;
+    fn on_progress(&mut self, at: &crate::pending::OrderedValue) -> std::io::Result<()>;
+    fn warning(&mut self, message: String);
+}
+
+/// Synchronous stdout protocol reducer. The OS owner supplies bounded reads and
+/// owns waiting, cancellation markers and signals. No subprocess is started here.
+#[derive(Debug)]
+pub struct LaunchProtocol {
+    pending: Vec<u8>,
+    pub provider: Option<ProviderIdentity>,
+    pub started_at: crate::pending::OrderedValue,
+    terminal_record: Option<crate::pending::OrderedMap<crate::pending::OrderedValue>>,
+}
+impl LaunchProtocol {
+    pub fn feed(
+        &mut self,
+        data: &[u8],
+        callbacks: &mut impl LaunchCallbacks,
+    ) -> Result<(), ProtocolError> {
+        use crate::pending::{OrderedMap, OrderedValue as V};
+        // The source reads <=65536 bytes at a time. Split arbitrary transport
+        // chunks at that same bound before applying its pending-buffer policy.
+        for chunk in data.chunks(65536) {
+            self.pending.extend_from_slice(chunk);
+            while let Some(end) = self.pending.iter().position(|&byte| byte == b'\n') {
+                let line: Vec<_> = self.pending.drain(..=end).collect();
+                if end > 65536 {
+                    continue;
+                }
+                let event: OrderedMap<V> =
+                    match crate::pending::checked_ordered_decode(&line[..end]) {
+                        Ok(event) => event,
+                        Err(provenant_records::checked_json::DecodeError::NumberOutOfRange(_)) => {
+                            return Err(ProtocolError::NumberOutOfRange);
+                        }
+                        Err(_) => continue,
+                    };
+                let kind = event
+                    .get("event")
+                    .or_else(|| event.get("type"))
+                    .and_then(V::as_str);
+                if kind == Some("started") && self.provider.is_none() {
+                    let pid = event
+                        .get("pid")
+                        .ok_or(ProtocolError::MissingMember("pid"))?
+                        .clone();
+                    self.provider = Some(ProviderIdentity::new(pid));
+                    self.started_at = event.get("started_at").cloned().unwrap_or(V::Null);
+                    if let Some(provider) = &self.provider {
+                        if let Err(error) = callbacks.on_start(provider) {
+                            callbacks.warning(format!(
+                                "provider start bookkeeping unavailable: {error}"
+                            ));
+                        }
+                    }
+                } else if kind == Some("progress") && callbacks.has_progress_callback() {
+                    let at = event
+                        .get("last_progress_at")
+                        .ok_or(ProtocolError::MissingMember("last_progress_at"))?;
+                    if let Err(error) = callbacks.on_progress(at) {
+                        callbacks.warning(format!(
+                            "provider progress bookkeeping unavailable: {error}"
+                        ));
+                    }
+                } else if event.get("schema").and_then(V::as_str) == Some("provenant.lane.exit.v1")
+                {
+                    self.terminal_record = Some(event);
+                }
+            }
+            if self.pending.len() > 65536 {
+                self.pending.clear();
+            }
+        }
+        Ok(())
+    }
+
+    /// The caller passes None only when the bounded no-follow file reader raised
+    /// OSError/ValueError. A malformed receipt object is not a read failure and
+    /// must be translated, rather than silently replaced by the stdout record.
+    pub fn settle(
+        mut self,
+        returncode: i32,
+        published_record: Option<crate::pending::OrderedMap<crate::pending::OrderedValue>>,
+        stderr: &[u8],
+        cancelled_request: bool,
+    ) -> Result<LaunchOutcome, ProtocolError> {
+        use crate::pending::OrderedValue as V;
+        let warning = String::from_utf8_lossy(&stderr[..stderr.len().min(65536)]).into_owned();
+        if returncode == 64 && self.provider.is_none() {
+            return Ok(LaunchOutcome::Unsupported { warning });
+        }
+        let record = published_record.or(self.terminal_record).ok_or_else(|| {
+            let chars = warning.chars().count();
+            ProtocolError::MissingExit {
+                returncode,
+                tail: warning.chars().skip(chars.saturating_sub(300)).collect(),
+            }
+        })?;
+        let mut fields = crate::lane_exit::receipt_from_object(&record)?;
+        if cancelled_request && fields.forced.as_str() == Some("interrupted") {
+            fields.forced = V::String("cancelled".into());
+        }
+        if self.provider.is_none() {
+            let pid = match &fields.pid {
+                Some(ProcessInteger::Signed(pid)) if *pid != 0 => Some(V::Number((*pid).into())),
+                Some(ProcessInteger::Unsigned(pid)) if *pid != 0 => Some(V::Number((*pid).into())),
+                _ => None,
+            };
+            self.provider = pid.map(ProviderIdentity::new);
+        }
+        if let Some(provider) = &mut self.provider {
+            provider.returncode = fields.exit.clone();
+        }
+        Ok(LaunchOutcome::Supported {
+            record,
+            fields: Box::new(fields),
+            provider: self.provider,
+            started_at: self.started_at,
+            warning,
+        })
+    }
+}
+
+impl Default for LaunchProtocol {
+    fn default() -> Self {
+        Self {
+            pending: Vec::new(),
+            provider: None,
+            started_at: crate::pending::OrderedValue::Null,
+            terminal_record: None,
+        }
+    }
+}
+
+#[cfg(test)]
+mod protocol_tests {
+    use super::*;
+    use crate::pending::OrderedValue as V;
+    use serde_json::json;
+
+    #[derive(Default)]
+    struct Callbacks {
+        progress: bool,
+        fail: bool,
+        calls: Vec<serde_json::Value>,
+        warnings: Vec<String>,
+    }
+    impl LaunchCallbacks for Callbacks {
+        fn has_progress_callback(&self) -> bool {
+            self.progress
+        }
+        fn on_start(&mut self, provider: &ProviderIdentity) -> std::io::Result<()> {
+            self.calls.push(json!(["started", provider.pid]));
+            if self.fail {
+                Err(std::io::Error::other("full"))
+            } else {
+                Ok(())
+            }
+        }
+        fn on_progress(&mut self, at: &V) -> std::io::Result<()> {
+            self.calls.push(json!(["progress", at]));
+            if self.fail {
+                Err(std::io::Error::other("full"))
+            } else {
+                Ok(())
+            }
+        }
+        fn warning(&mut self, message: String) {
+            self.warnings.push(message);
+        }
+    }
+    #[test]
+    fn unsupported_publication_loss_and_bookkeeping_match_real_source_run() {
+        let record =
+            r#"{"schema":"provenant.lane.exit.v1","pid":123,"exit":0,"capture":{"z":1,"a":2}}"#;
+        let started = "{\"type\":\"started\",\"pid\":123,\"started_at\":\"stamp\"}\n";
+        let cases = json!([
+            {"stdout":"","stderr":"unsupported\n","returncode":64},
+            {"stdout":format!("{record}\n"),"stderr":"publication unavailable\n","returncode":75},
+            {"stdout":format!("{started}{record}\n"),"returncode":64},
+            {"stdout":format!("{started}{{\"event\":\"progress\",\"last_progress_at\":{{\"z\":1,\"a\":2}}}}\n"),"published":record,"bookkeeping_error":true},
+            {"stdout":"{\"event\":null,\"type\":\"started\",\"pid\":5}\n","published":record},
+            {"stdout":format!("{record}\n"),"published":r#"{"schema":"bad"}"#},
+            {"stdout":"garbage\n[]\n{}\n","stderr":"é🙂","returncode":1},
+            {"stdout":"{\"event\":\"started\",\"pid\":null}\n","published":record},
+            {"stdout":"{\"event\":\"progress\"}\n","published":record,"progress":false}
+        ]);
+        let actual: Vec<_> = cases
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|case| {
+                let mut callbacks = Callbacks {
+                    progress: case["progress"].as_bool().unwrap_or(true),
+                    fail: case["bookkeeping_error"].as_bool().unwrap_or(false),
+                    ..Callbacks::default()
+                };
+                let mut protocol = LaunchProtocol::default();
+                protocol
+                    .feed(case["stdout"].as_str().unwrap().as_bytes(), &mut callbacks)
+                    .unwrap();
+                let published = case["published"]
+                    .as_str()
+                    .map(|s| serde_json::from_str(s).unwrap());
+                let result = protocol.settle(
+                    case["returncode"].as_i64().unwrap_or(0) as i32,
+                    published,
+                    case["stderr"].as_str().unwrap_or("").as_bytes(),
+                    false,
+                );
+                let output = match result {
+                    Ok(outcome) => outcome.python_wire().unwrap(),
+                    Err(error) => {
+                        return json!({"error":error.to_string(),"callbacks":callbacks.calls})
+                    }
+                };
+                json!({"wire":output,"callbacks":callbacks.calls})
+            })
+            .collect();
+        if let Some(expected) =
+            crate::test_support::oracle_script("oracle_lane.py", "launch", &cases)
+        {
+            assert_eq!(json!(actual), expected);
+        }
+    }
+
+    #[test]
+    fn cancellation_mapping_has_no_signal_authority_and_does_not_change_other_reasons() {
+        for (forced, expected) in [
+            ("supervisor_signal", "cancelled"),
+            ("wall_timeout", "timed_out"),
+        ] {
+            let record =
+                serde_json::from_value(json!({"schema":"provenant.lane.exit.v1","forced":forced}))
+                    .unwrap();
+            let outcome = LaunchProtocol::default()
+                .settle(0, Some(record), b"", true)
+                .unwrap();
+            let LaunchOutcome::Supported { fields, .. } = outcome else {
+                panic!("supported expected")
+            };
+            assert_eq!(fields.forced.as_str(), Some(expected));
+        }
+        let identity = ProviderIdentity::new(V::Null);
+        assert!(identity.wait().is_err());
+        assert!(identity.poll().is_none());
+    }
+}
+
+impl LaunchOutcome {
+    /// Render the source namespace's retained fields in construction order.
+    /// Explicit Python encoding is required for finite exponent spelling.
+    pub fn python_wire(&self) -> Result<String, serde_json::Error> {
+        #[derive(Serialize)]
+        struct Provider<'a> {
+            pid: &'a crate::pending::OrderedValue,
+            returncode: &'a Option<ProcessInteger>,
+        }
+        match self {
+            Self::Unsupported { warning } => Ok(format!(
+                "{{\"unsupported\":true,\"warning\":{}}}",
+                crate::pending::python_wire(warning)?
+            )),
+            Self::Supported {
+                record,
+                fields,
+                provider,
+                started_at,
+                warning,
+            } => {
+                let provider = provider.as_ref().map(|p| Provider {
+                    pid: &p.pid,
+                    returncode: &p.returncode,
+                });
+                Ok(format!("{{\"unsupported\":false,\"record\":{},\"fields\":{},\"provider\":{},\"started_at\":{},\"warning\":{}}}",
+                    crate::pending::python_wire(record)?, crate::pending::python_wire(fields)?,
+                    crate::pending::python_wire(&provider)?, started_at.python_wire(), crate::pending::python_wire(warning)?))
+            }
+        }
     }
 }
