@@ -141,7 +141,7 @@ export function readGraphPromptFile(path: string, identity: Identity, env: NodeJ
   const script = `import base64,json,sys
 from pathlib import Path
 sys.path.insert(0,sys.argv[1])
-from dispatch_run import read_prompt_input,PreflightError
+from dispatch_preflight import read_prompt_input,PreflightError
 try:
  data=read_prompt_input(Path(sys.argv[2]),Path(sys.argv[3]),Path(sys.argv[3]),json.loads(sys.argv[4]))
  print(json.dumps({"prompt":base64.b64encode(data).decode()}))

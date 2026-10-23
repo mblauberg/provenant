@@ -118,7 +118,7 @@ def test_prompt_is_read_from_bound_inode_once(tmp_path: Path, monkeypatch) -> No
     module = load(DISPATCH, "dispatch_issue_697")
     prompt = tmp_path / "prompt.md"
     prompt.write_bytes(b"original\n")
-    real_open = module.open_contained_regular
+    real_open = module.dispatch_preflight.open_contained_regular
 
     def open_then_swap(root, value, flags, **kwargs):
         fd, relative, target = real_open(root, value, flags, **kwargs)
@@ -126,8 +126,8 @@ def test_prompt_is_read_from_bound_inode_once(tmp_path: Path, monkeypatch) -> No
         target.write_bytes(b"attacker\n")
         return fd, relative, target
 
-    monkeypatch.setattr(module, "open_contained_regular", open_then_swap)
-    assert module._read_prompt_once(tmp_path, prompt) == b"original\n"
+    monkeypatch.setattr(module.dispatch_preflight, "open_contained_regular", open_then_swap)
+    assert module.dispatch_preflight._read_prompt_once(tmp_path, prompt) == b"original\n"
 
 
 def test_finalizer_rejects_symlinked_scaffold(tmp_path: Path) -> None:

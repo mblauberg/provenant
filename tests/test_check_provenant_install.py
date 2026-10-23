@@ -10,7 +10,10 @@ from tests.support.modules import load_script
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts/check-provenant-install.py"
-TEMPLATE = ROOT / "scripts/provenant.template"
+
+
+def installed_identity() -> bytes:
+    return f"{MARKER}\nprovenant-front-door source-sha256={current_digest(ROOT)}\n".encode()
 
 
 def run_check(tmp_path: Path, *arguments: str, **extra_env: str) -> subprocess.CompletedProcess[str]:
@@ -44,22 +47,10 @@ def provider_state(result: subprocess.CompletedProcess[str], provider: str) -> d
     }
 
 
-def test_check_accepts_an_installed_stub_matching_the_template(tmp_path: Path) -> None:
-    command = tmp_path / "bin/provenant"
-    command.parent.mkdir()
-    shutil.copy2(TEMPLATE, command)
-    command.chmod(0o755)
-
-    result = run_check(tmp_path)
-
-    assert result.returncode == 0, result.stderr
-    assert "provenant installed stub=ok" in result.stdout
-
-
 def test_check_names_routing_drift_and_refresh_repair(tmp_path: Path) -> None:
     command = tmp_path / "bin/provenant"
     command.parent.mkdir()
-    shutil.copy2(TEMPLATE, command)
+    command.write_bytes(installed_identity())
     command.chmod(0o755)
     catalogue = tmp_path / "instance/config/model-routing.json"
     catalogue.parent.mkdir(parents=True)
@@ -77,7 +68,7 @@ def test_check_names_routing_drift_and_refresh_repair(tmp_path: Path) -> None:
 def test_check_names_repair_for_present_provider_without_install(tmp_path: Path) -> None:
     command = tmp_path / "bin/provenant"
     command.parent.mkdir()
-    shutil.copy2(TEMPLATE, command)
+    command.write_bytes(installed_identity())
     command.chmod(0o755)
     (tmp_path / "home/.config/opencode").mkdir(parents=True)
 
@@ -93,7 +84,7 @@ def test_check_names_repair_for_present_provider_without_install(tmp_path: Path)
 def test_check_reports_invalid_provider_config_without_a_traceback(tmp_path: Path) -> None:
     command = tmp_path / "bin/provenant"
     command.parent.mkdir()
-    shutil.copy2(TEMPLATE, command)
+    command.write_bytes(installed_identity())
     command.chmod(0o755)
     config = tmp_path / "home/.config/opencode/opencode.jsonc"
     config.parent.mkdir(parents=True)
@@ -111,7 +102,7 @@ def test_check_reports_invalid_provider_config_without_a_traceback(tmp_path: Pat
 def test_check_accepts_commented_opencode_jsonc_registration(tmp_path: Path) -> None:
     command = tmp_path / "bin/provenant"
     command.parent.mkdir()
-    shutil.copy2(TEMPLATE, command)
+    command.write_bytes(installed_identity())
     command.chmod(0o755)
     root = tmp_path / "home/.config/opencode"
     skill = root / "skills/orchestrate/SKILL.md"
@@ -130,7 +121,7 @@ def test_check_accepts_commented_opencode_jsonc_registration(tmp_path: Path) -> 
 def test_check_does_not_detect_agy_from_gemini_directory_alone(tmp_path: Path) -> None:
     command = tmp_path / "bin/provenant"
     command.parent.mkdir()
-    shutil.copy2(TEMPLATE, command)
+    command.write_bytes(installed_identity())
     command.chmod(0o755)
     (tmp_path / "home/.gemini").mkdir(parents=True)
 
@@ -143,7 +134,7 @@ def test_check_does_not_detect_agy_from_gemini_directory_alone(tmp_path: Path) -
 def test_check_uses_the_installer_mcp_config_override(tmp_path: Path) -> None:
     command = tmp_path / "bin/provenant"
     command.parent.mkdir()
-    shutil.copy2(TEMPLATE, command)
+    command.write_bytes(installed_identity())
     command.chmod(0o755)
     skill = tmp_path / "home/.cursor/skills/orchestrate/SKILL.md"
     skill.parent.mkdir(parents=True)
@@ -159,22 +150,10 @@ def test_check_uses_the_installer_mcp_config_override(tmp_path: Path) -> None:
     }
 
 
-def test_check_rejects_installed_stub_drift(tmp_path: Path) -> None:
-    command = tmp_path / "bin/provenant"
-    command.parent.mkdir()
-    command.write_text("# managed but stale\n")
-    command.chmod(0o755)
-
-    result = run_check(tmp_path)
-
-    assert result.returncode == 1
-    assert "installed stub differs" in result.stderr
-
-
 def test_check_rejects_a_symlink_instead_of_a_managed_copy(tmp_path: Path) -> None:
     command = tmp_path / "bin/provenant"
     command.parent.mkdir()
-    command.symlink_to(TEMPLATE)
+    command.symlink_to(SCRIPT)
 
     result = run_check(tmp_path)
 
@@ -210,7 +189,7 @@ def test_check_treats_empty_root_variables_as_unset(tmp_path: Path) -> None:
     pointer.write_text(f'{{"schema_version": 1, "product_root": "{ROOT}"}}\n')
     command = home / ".local/bin/provenant"
     command.parent.mkdir(parents=True)
-    shutil.copy2(TEMPLATE, command)
+    command.write_bytes(installed_identity())
     command.chmod(0o755)
 
     result = subprocess.run(
@@ -347,27 +326,4 @@ def test_check_rejects_a_managed_file_with_no_identity_at_all(
     result = run_check_in(crate_product, tmp_path)
 
     assert result.returncode == 1
-    assert "installed stub differs" in result.stderr
-
-
-def test_check_still_accepts_the_template_when_a_crate_exists(
-    tmp_path: Path, crate_product: Path
-) -> None:
-    command = tmp_path / "bin/provenant"
-    command.parent.mkdir()
-    shutil.copy2(TEMPLATE, command)
-    command.chmod(0o755)
-
-    result = run_check_in(crate_product, tmp_path)
-
-    assert result.returncode == 0, result.stderr
-    assert "front-door=python" in result.stdout.splitlines()
-
-
-def test_check_names_the_python_front_door_for_the_template(tmp_path: Path) -> None:
-    command = tmp_path / "bin/provenant"
-    command.parent.mkdir()
-    shutil.copy2(TEMPLATE, command)
-    command.chmod(0o755)
-
-    assert "front-door=python" in run_check(tmp_path).stdout.splitlines()
+    assert "has no Rust source identity" in result.stderr

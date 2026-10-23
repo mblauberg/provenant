@@ -11,10 +11,11 @@ from datetime import date, datetime, timedelta, timezone
 import pytest
 from tests.support.proc import run_cli
 
+from tests.support.front_door import front_door_binary
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts" / "install-harness"
-PROVENANT_TEMPLATE = ROOT / "scripts" / "provenant.template"
+PROVENANT_BINARY = front_door_binary()
 WORKFLOW_SCRIPT = ROOT / "scripts" / "install-workflows"
 WORKFLOW_NAMES = {
     "codebase-polish.js",
@@ -135,9 +136,8 @@ def run(platform: str, home: Path, *arguments: str, bash=None, **extra_env):
     # test independent of any caller-provided instance selection.
     env["AGENT_FABRIC_INSTANCE_ROOT"] = str(instance_root_for(home))
     env["PROVENANT_ALLOW_LINKED_WORKTREE_INSTALL"] = "1"
-    # These tests are about the template path; the Rust front door has its own
-    # cases below, so a toolchain on the host must not change what they build.
-    env["PROVENANT_FRONT_DOOR"] = "python"
+    # General install cases use the real binary; build failures have focused cases.
+    env["PROVENANT_FRONT_DOOR_BINARY"] = str(PROVENANT_BINARY)
     env.update(extra_env)
     return run_cli(
         [*([bash] if bash else []), SCRIPT, "--platform", platform, *arguments],
@@ -170,7 +170,7 @@ def copy_product(template: Path, destination: Path) -> Path:
 
 
 def run_product(product: Path, platform: str, home: Path, *arguments: str, **extra_env):
-    use_front_door_default = extra_env.pop("_front_door_default", False)
+    build_front_door = extra_env.pop("_build_front_door", False)
     environment = os.environ.copy()
     environment.pop("AGENT_FABRIC_STATE_DIRECTORY", None)
     # Resolve the copied product through the pointer written by this install,
@@ -185,12 +185,12 @@ def run_product(product: Path, platform: str, home: Path, *arguments: str, **ext
             "CLAUDE_CONFIG_DIR": str(home / "claude"),
             "CODEX_HOME": str(home / "codex"),
             "PATH": f"{home / 'bin'}{os.pathsep}{os.environ['PATH']}",
-            "PROVENANT_FRONT_DOOR": "python",
+            "PROVENANT_FRONT_DOOR_BINARY": str(PROVENANT_BINARY),
         }
     )
+    if build_front_door:
+        environment.pop("PROVENANT_FRONT_DOOR_BINARY", None)
     environment.update(extra_env)
-    if use_front_door_default:
-        environment.pop("PROVENANT_FRONT_DOOR", None)
     return run_cli(
         [product / "scripts/install-harness", "--platform", platform, *arguments],
         cwd=product,
@@ -259,7 +259,7 @@ def test_installs_claude_skills_and_global_instructions_idempotently(tmp_path):
     command = bin_dir / "provenant"
     assert command.is_file()
     assert not command.is_symlink()
-    assert command.read_bytes() == PROVENANT_TEMPLATE.read_bytes()
+    assert command.read_bytes() == PROVENANT_BINARY.read_bytes()
     assert json.loads((tmp_path / ".agents/.agent-fabric/product-root.json").read_text()) == {
         "product_root": str(ROOT),
         "schema_version": 1,
@@ -1504,7 +1504,7 @@ def test_rejects_a_relative_provenant_bin_directory_before_mutation(tmp_path):
 
 def test_rejects_a_provenant_bin_directory_inside_the_product(tmp_path, product_template):
     product = copy_product(product_template, tmp_path / "product")
-    source = product / "scripts/provenant"
+    source = product / "scripts/install-harness"
     original = source.read_bytes()
 
     result = run_product(
@@ -1541,31 +1541,12 @@ def test_rejects_a_missing_bin_directory_under_a_symlinked_product_parent(
     assert not (tmp_path / "instance/.agent-fabric/product-root.json").exists()
 
 
-def test_updates_a_managed_provenant_file_to_the_current_template(tmp_path):
-    bin_dir = tmp_path / "custom-bin"
-    bin_dir.mkdir()
-    command = bin_dir / "provenant"
-    command.write_bytes(PROVENANT_TEMPLATE.read_bytes() + b"\n# stale managed copy\n")
-
-    result = run(
-        "codex",
-        tmp_path,
-        PROVENANT_BIN_DIR=str(bin_dir),
-    )
-
-    assert result.returncode == 0, result.stderr
-    assert command.is_file()
-    assert not command.is_symlink()
-    assert command.read_bytes() == PROVENANT_TEMPLATE.read_bytes()
-    assert f"command updated={command}" in result.stdout
-
-
 def test_rejects_a_byte_identical_foreign_symlink_without_clobbering_it(tmp_path):
     bin_dir = tmp_path / ".local/bin"
     bin_dir.mkdir(parents=True)
     foreign = tmp_path / "foreign/provenant"
     foreign.parent.mkdir()
-    shutil.copy2(PROVENANT_TEMPLATE, foreign)
+    shutil.copy2(PROVENANT_BINARY, foreign)
     command = bin_dir / "provenant"
     command.symlink_to(foreign)
     original_target = command.readlink()
@@ -1576,7 +1557,7 @@ def test_rejects_a_byte_identical_foreign_symlink_without_clobbering_it(tmp_path
     assert "collision" in result.stderr
     assert command.is_symlink()
     assert command.readlink() == original_target
-    assert foreign.read_bytes() == PROVENANT_TEMPLATE.read_bytes()
+    assert foreign.read_bytes() == PROVENANT_BINARY.read_bytes()
 
 
 def test_warns_when_provenant_bin_directory_is_outside_path(tmp_path):
@@ -1596,7 +1577,7 @@ def test_warns_when_provenant_bin_directory_is_outside_path(tmp_path):
     command = bin_dir / "provenant"
     assert command.is_file()
     assert not command.is_symlink()
-    assert command.read_bytes() == PROVENANT_TEMPLATE.read_bytes()
+    assert command.read_bytes() == PROVENANT_BINARY.read_bytes()
     assert not (tmp_path / ".zshrc").exists()
     assert not (tmp_path / ".bashrc").exists()
 
@@ -2238,7 +2219,7 @@ def rust_product(tmp_path, product_template):
 
 def rust_env(tmp_path: Path, **extra: str) -> dict[str, str]:
     fake_bin = tmp_path / "fake-bin"
-    return {"PATH": f"{fake_bin}{os.pathsep}{os.environ['PATH']}", **extra}
+    return {"_build_front_door": True, "PATH": f"{fake_bin}{os.pathsep}{os.environ['PATH']}", **extra}
 
 
 def test_rust_mode_builds_stamps_and_installs_the_binary(tmp_path, rust_product):
@@ -2266,7 +2247,7 @@ def test_default_builds_rust_into_configured_persistent_target_directory(tmp_pat
     log = install_fake_cargo(tmp_path / "fake-bin")
     target = tmp_path / "cargo-target"
 
-    result = run_product(rust_product, "codex", tmp_path, _front_door_default=True,
+    result = run_product(rust_product, "codex", tmp_path,
                          **rust_env(tmp_path, CARGO_TARGET_DIR=str(target)))
 
     assert result.returncode == 0, result.stderr
@@ -2284,33 +2265,6 @@ def test_reinstalling_the_same_binary_is_idempotent(tmp_path, rust_product):
     assert f"command existing={tmp_path / 'bin/provenant'}" in second.stdout
 
 
-def test_python_mode_rolls_an_installed_binary_back_to_the_template(tmp_path, rust_product):
-    install_fake_cargo(tmp_path / "fake-bin")
-    run_product(rust_product, "codex", tmp_path, **rust_env(tmp_path, PROVENANT_FRONT_DOOR="rust"))
-
-    result = run_product(
-        rust_product, "codex", tmp_path, **rust_env(tmp_path, PROVENANT_FRONT_DOOR="python")
-    )
-
-    assert result.returncode == 0, result.stderr
-    assert f"command updated={tmp_path / 'bin/provenant'}" in result.stdout
-    assert "front-door=python" in result.stdout.splitlines()
-    assert (tmp_path / "bin/provenant").read_bytes() == (rust_product / "scripts/provenant.template").read_bytes()
-
-
-def test_default_auto_mode_falls_back_to_the_template_when_the_build_fails(tmp_path, rust_product):
-    install_fake_cargo(tmp_path / "fake-bin", fail=True)
-
-    result = run_product(
-        rust_product, "codex", tmp_path, _front_door_default=True, **rust_env(tmp_path)
-    )
-
-    assert result.returncode == 0, result.stderr
-    assert (tmp_path / "bin/provenant").read_bytes() == (rust_product / "scripts/provenant.template").read_bytes()
-    assert "front-door=python" in result.stdout.splitlines()
-    assert "falls back to the Python template" in result.stderr
-
-
 def test_rust_mode_fails_without_installing_when_the_build_fails(tmp_path, rust_product):
     install_fake_cargo(tmp_path / "fake-bin", fail=True)
 
@@ -2321,17 +2275,6 @@ def test_rust_mode_fails_without_installing_when_the_build_fails(tmp_path, rust_
     assert result.returncode == 3
     assert "cargo build failed" in result.stderr
     assert not (tmp_path / "bin/provenant").exists()
-
-
-def test_auto_mode_without_a_crate_installs_the_template_quietly(tmp_path, product_template):
-    product = copy_product(product_template, tmp_path / "product")
-    shutil.rmtree(product / "tools/front-door", ignore_errors=True)
-
-    result = run_product(product, "codex", tmp_path, PROVENANT_FRONT_DOOR="auto")
-
-    assert result.returncode == 0, result.stderr
-    assert "front-door=python" in result.stdout.splitlines()
-    assert "falls back" not in result.stderr
 
 
 def test_prebuilt_binary_with_matching_sources_is_installed_without_cargo(tmp_path, rust_product):
@@ -2355,7 +2298,7 @@ def test_prebuilt_binary_with_matching_sources_is_installed_without_cargo(tmp_pa
     assert not (tmp_path / "fake-bin/cargo.log").exists()
 
 
-def test_prebuilt_binary_from_other_sources_is_refused_in_rust_mode_and_skipped_in_auto(
+def test_prebuilt_binary_from_other_sources_is_refused(
     tmp_path, rust_product
 ):
     prebuilt = tmp_path / "prebuilt/provenant"
@@ -2371,18 +2314,12 @@ def test_prebuilt_binary_from_other_sources_is_refused_in_rust_mode_and_skipped_
     assert "built from different sources" in strict.stderr
     assert not (tmp_path / "bin/provenant").exists()
 
-    lenient = run_product(
-        rust_product, "codex", tmp_path, **rust_env(tmp_path, PROVENANT_FRONT_DOOR="auto", **environment)
-    )
-    assert lenient.returncode == 0, lenient.stderr
-    assert "front-door=python" in lenient.stdout.splitlines()
-
 
 def test_unknown_front_door_mode_is_refused_before_any_mutation(tmp_path, rust_product):
     result = run_product(rust_product, "codex", tmp_path, PROVENANT_FRONT_DOOR="fast")
 
     assert result.returncode == 3
-    assert "PROVENANT_FRONT_DOOR must be auto, rust or python" in result.stderr
+    assert "PROVENANT_FRONT_DOOR must be rust" in result.stderr
     assert not (tmp_path / "bin/provenant").exists()
 
 
@@ -2445,3 +2382,16 @@ def test_rust_install_uses_private_snapshot_after_classification(tmp_path, rust_
     source = Path((tmp_path / "selected-source").read_text())
     assert source != target / "release/provenant"
     assert not source.parent.exists()  # the install's EXIT trap removes its private snapshot
+
+
+def test_missing_cargo_exits_three_with_rustup_fix_before_installing(tmp_path, rust_product):
+    result = run_product(
+        rust_product, "codex", tmp_path,
+        PATH="/usr/bin:/bin", PROVENANT_FRONT_DOOR_BINARY="", _build_front_door=True,
+    )
+
+    assert result.returncode == 3
+    assert "cargo is not on PATH" in result.stderr
+    assert "fix: curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh" in result.stderr.splitlines()
+    assert not (tmp_path / "bin/provenant").exists()
+    assert not (tmp_path / "instance/.agent-fabric/product-root.json").exists()
