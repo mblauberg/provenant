@@ -419,7 +419,7 @@ def test_claude_tool_not_found_keeps_diagnostic_instead_of_retrying_fallback(tmp
             *(
                 entry
                 for entry in env["PATH"].split(os.pathsep)
-                if entry and not (Path(entry) / "claude").exists()
+                if not (Path(entry) / "claude").exists()
             ),
         ]
     )
