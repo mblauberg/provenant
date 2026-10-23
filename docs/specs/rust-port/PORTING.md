@@ -70,9 +70,9 @@ which `tests/test_rust_port_layering.py` reads, in the same PR.
 | quota | Windows, reset schedules, cooldowns and provider quota probes | core, records, config |
 | telemetry | Ingest, usage/cost attribution, summaries and reports | core, records, config |
 | routing | Catalogue, preferences, live probes and route decisions | core, records, config, quota, providers |
-| run | Dispatch, attempts, admission, batch, retry and publication orchestration | core, records, config, supervisor, confinement, providers, quota, routing, telemetry |
+| run | Dispatch, admission, the run registry and status, attempts, batch, retry and publication orchestration | core, records, config, supervisor, confinement, providers, quota, routing, telemetry |
 | fabric-store | SQLite schema/migrations, messages, claims, sessions and graph persistence | core, records, supervisor's safe lock API |
-| fabric-runtime | Identity, run registry/status, execution facade, federation and bounded graph owner | core, records, config, supervisor, run, fabric-store |
+| fabric-runtime | Agent identity, federation routing of run queries and the execution facade over run | core, records, config, supervisor, run, fabric-store |
 | fabric-mcp | MCP registration, transport lifecycle and result rendering | core, records, fabric-runtime |
 | workflow | Delivery/review validators, session, tracker and writing tools | core, records, config, confinement |
 | cli | Argument parsing and output/exit rendering for all commands | Libraries above as needed; no library imports cli |
@@ -201,7 +201,10 @@ The user has delegated rewrite decisions to the chairs (2026-10-23): design,
 feature pruning and deletion are chair decisions, with a cross-family council
 for hard calls. Return to the user only for a dependency or ADR amendment
 outside R6, or anything that would touch the old state roots, credentials or
-the stable install. Escalate to the chair at once for weakened confinement
+the stable install. Each Mac's installed root is its primary checkout, and
+harness skills, workflows, hooks and MCP entries link into it: never pull,
+check out or reinstall there until cut-over. All work happens in worktrees
+from `origin/main`. Escalate to the chair at once for weakened confinement
 or custody, a healthy process signalled, or lost terminal publication. No
 lane may lower a gate, invent approval, read credentials or modify the stable
 install to get a green result.
