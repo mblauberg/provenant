@@ -272,3 +272,123 @@ pub(crate) fn ascii_json(value: &impl serde::Serialize) -> Result<String, serde_
     Ok(output)
 }
 
+// port: belongs in provenant-records
+// Only required until the shared checked codec can expose ordered objects.
+// Validation with checked_json precedes deserializing this representation.
+#[derive(Debug)]
+pub(crate) enum OrderedValue {
+    Scalar(serde_json::Value),
+    Array(Vec<OrderedValue>),
+    Object(Vec<(String, OrderedValue)>),
+}
+impl OrderedValue {
+    pub(crate) fn checked(raw: &str) -> Result<Self, provenant_records::DecodeError> {
+        let checked = provenant_records::checked_json::from_str(raw)?;
+        let mut ordered: Self = serde_json::from_str(raw)?;
+        fn align(ordered: &mut OrderedValue, checked: &serde_json::Value) {
+            match ordered {
+                OrderedValue::Scalar(value) => *value = checked.clone(),
+                OrderedValue::Array(items) => {
+                    if let Some(values) = checked.as_array() {
+                        for (item, value) in items.iter_mut().zip(values) {
+                            align(item, value);
+                        }
+                    }
+                }
+                OrderedValue::Object(items) => {
+                    for (key, item) in items {
+                        if let Some(value) = checked.get(key.as_str()) {
+                            align(item, value);
+                        }
+                    }
+                }
+            }
+        }
+        align(&mut ordered, &checked);
+        Ok(ordered)
+    }
+    pub(crate) fn value(&self) -> serde_json::Value {
+        match self {
+            Self::Scalar(v) => v.clone(),
+            Self::Array(v) => serde_json::Value::Array(v.iter().map(Self::value).collect()),
+            Self::Object(v) => {
+                serde_json::Value::Object(v.iter().map(|(k, v)| (k.clone(), v.value())).collect())
+            }
+        }
+    }
+    pub(crate) fn python_str(&self) -> String {
+        match self {
+            Self::Scalar(v) => provenant_core::py::python_str(v),
+            _ => self.repr(),
+        }
+    }
+    fn repr(&self) -> String {
+        match self {
+            Self::Scalar(v) => provenant_core::py::python_value_repr(v),
+            Self::Array(v) => format!(
+                "[{}]",
+                v.iter().map(Self::repr).collect::<Vec<_>>().join(", ")
+            ),
+            Self::Object(v) => {
+                let entries: Vec<_> = v.iter().map(|(k, v)| (k.as_str(), v.repr())).collect();
+                provenant_core::py::python_dict_repr(entries.iter().map(|(k, v)| (*k, v.as_str())))
+            }
+        }
+    }
+}
+impl<'de> serde::Deserialize<'de> for OrderedValue {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        struct Visitor;
+        impl<'de> serde::de::Visitor<'de> for Visitor {
+            type Value = OrderedValue;
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("JSON value")
+            }
+            fn visit_unit<E: serde::de::Error>(self) -> Result<Self::Value, E> {
+                Ok(OrderedValue::Scalar(serde_json::Value::Null))
+            }
+            fn visit_bool<E: serde::de::Error>(self, v: bool) -> Result<Self::Value, E> {
+                Ok(OrderedValue::Scalar(v.into()))
+            }
+            fn visit_i64<E: serde::de::Error>(self, v: i64) -> Result<Self::Value, E> {
+                Ok(OrderedValue::Scalar(v.into()))
+            }
+            fn visit_u64<E: serde::de::Error>(self, v: u64) -> Result<Self::Value, E> {
+                Ok(OrderedValue::Scalar(v.into()))
+            }
+            fn visit_f64<E: serde::de::Error>(self, v: f64) -> Result<Self::Value, E> {
+                let number = serde_json::Number::from_f64(v)
+                    .ok_or_else(|| E::custom("non-finite JSON number"))?;
+                Ok(OrderedValue::Scalar(serde_json::Value::Number(number)))
+            }
+            fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<Self::Value, E> {
+                Ok(OrderedValue::Scalar(v.into()))
+            }
+            fn visit_seq<A: serde::de::SeqAccess<'de>>(
+                self,
+                mut a: A,
+            ) -> Result<Self::Value, A::Error> {
+                let mut v = Vec::new();
+                while let Some(item) = a.next_element()? {
+                    v.push(item);
+                }
+                Ok(OrderedValue::Array(v))
+            }
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                mut a: A,
+            ) -> Result<Self::Value, A::Error> {
+                let mut v: Vec<(String, OrderedValue)> = Vec::new();
+                while let Some((key, value)) = a.next_entry::<String, OrderedValue>()? {
+                    if let Some((_, previous)) = v.iter_mut().find(|(k, _)| *k == key) {
+                        *previous = value;
+                    } else {
+                        v.push((key, value));
+                    }
+                }
+                Ok(OrderedValue::Object(v))
+            }
+        }
+        d.deserialize_any(Visitor)
+    }
+}
