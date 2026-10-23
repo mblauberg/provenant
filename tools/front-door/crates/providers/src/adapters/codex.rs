@@ -388,6 +388,39 @@ pub fn read_only_writable_dirs<'a>(cwd: &str, dirs: &'a [String]) -> Vec<&'a str
         .collect()
 }
 
+/// Presence matters: a missing profile defaults to endpoint, a present null
+/// or empty value suppresses the name override.
+#[derive(Clone, Debug, Default)]
+pub enum EndpointProfile {
+    #[default]
+    Missing,
+    Present(Value),
+}
+impl EndpointProfile {
+    fn is_missing(&self) -> bool {
+        matches!(self, Self::Missing)
+    }
+    fn value(&self) -> Value {
+        match self {
+            Self::Missing => Value::String("endpoint".into()),
+            Self::Present(v) => v.clone(),
+        }
+    }
+}
+impl Serialize for EndpointProfile {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        match self {
+            Self::Missing => s.serialize_unit(),
+            Self::Present(v) => v.serialize(s),
+        }
+    }
+}
+impl<'de> Deserialize<'de> for EndpointProfile {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        Ok(Self::Present(Value::deserialize(d)?))
+    }
+}
+
 /// Execution facts that require OS custody remain outside this pure builder.
 /// The host supplies a cached decision, validated state grant and unique profile.
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -402,7 +435,8 @@ pub struct BuildInputs {
     pub filesystem: Vec<(String, Value)>,
     pub worktree: Option<String>,
     pub endpoint_token_env: Option<String>,
-    pub endpoint_profile: Option<String>,
+    #[serde(default, skip_serializing_if = "EndpointProfile::is_missing")]
+    pub endpoint_profile: EndpointProfile,
     pub endpoint_wire_api: Option<String>,
 }
 
@@ -499,15 +533,7 @@ pub fn codex(plan: &Plan, inputs: &BuildInputs) -> Result<AdapterProfile, BuildE
         .filter(|s| !s.is_empty());
     if let (Some(endpoint), Some(token)) = (endpoint, token) {
         for (key, value) in [
-            (
-                "name",
-                Value::String(
-                    inputs
-                        .endpoint_profile
-                        .clone()
-                        .unwrap_or_else(|| "endpoint".into()),
-                ),
-            ),
+            ("name", inputs.endpoint_profile.value()),
             ("base_url", endpoint.clone()),
             ("env_key", Value::String(token.into())),
             (
@@ -687,6 +713,7 @@ for sandbox in ['read-only','workspace-write','full','other']:
    for endpoint in [False,True]:
     for context in [None,-3.5,'12']:
      p=dict(mode='worktree_write' if sandbox=='workspace-write' else 'read_only',prompt='do it',boundary_prompt='Read only',timeout_seconds=30,agy_sandbox=False,resume_session=resume,model='model-x',effort='high',session_id='session-1',cwd='/workspace/fixture',workspace_root='/workspace/fixture',worktree='/workspace/fixture' if sandbox=='workspace-write' else None,protected_paths=[],context_ceiling=context,route={'endpoint_base_url':'https://example.invalid','endpoint_token_env':'ENDPOINT_TOKEN','endpoint_wire_api':'responses'} if endpoint else {},applied=dict(sandbox=sandbox,network=False,capabilities=capabilities,add_dirs=['/shared'],write_boundary=dict(profile='provenant-fixture',filesystem={'/shared':'read',':tmpdir':'write'})),_mcp_inventory={})
+     if endpoint and resume is not None: p['route']['endpoint_profile']={None:None,-3.5:'','12':'custom'}[context]
      decision=m.config_decision(p)
      state,note=m.provenant_state_dir(p)
      argv=m.argv(p)
@@ -726,7 +753,11 @@ print(json.dumps(cases))
                     .get("endpoint_token_env")
                     .and_then(Value::as_str)
                     .map(str::to_owned),
-                endpoint_profile: None,
+                endpoint_profile: p["route"]
+                    .get("endpoint_profile")
+                    .cloned()
+                    .map(EndpointProfile::Present)
+                    .unwrap_or_default(),
                 endpoint_wire_api: p["route"]
                     .get("endpoint_wire_api")
                     .and_then(Value::as_str)
