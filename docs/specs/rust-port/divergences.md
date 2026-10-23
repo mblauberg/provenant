@@ -1728,3 +1728,21 @@ matching Node for the reported exponent fixture. The differential proves
 parity for that case and exact inequality for integral floats and nested order.
 The earlier `1e21` Rust-output statement is superseded; the shared-codec gap
 and withdrawn claims remain.
+
+### RP-FR3-006: tools decision projection and retained values
+
+- Class: `bug` for decision/grammar failures, repaired; `library` for returned
+  representation, unresolved. Same rulebook and source baseline as RP-FR3-005.
+- `{"tools":{"default_branch":"dev","x":1e999}}` and an equivalent
+  out-of-u64 extension now retain `dev` with no warning. Nested lint extensions
+  cannot poison areas/boolean settings. Differential tests compare all consumed
+  decisions and warnings with actual Python, including non-finite constants.
+- Grammar masking now requires whole-token boundaries; `1NaN`, `-NaN` and
+  `NaN1` produce the source unreadable warning. Selected non-finite constants
+  are no longer converted to zero.
+- The raw-member projection isolates decisions, but returned `Value` objects
+  still sort insertion-ordered tools/lint keys and cannot retain opaque exotic
+  extensions (currently represented as null). No complete output parity is
+  claimed. Raw retention and ordered serialisation await p3-rrc's shared
+  lossless codec, absent on main `b527d675`; no new codec is built here.
+- The fabric-policy unit remains absent from the ledger and Units line.

@@ -16,6 +16,19 @@ fn grammar(text: &str) -> String {
         let token = ["-Infinity", "Infinity", "NaN"]
             .into_iter()
             .find(|token| text.as_bytes()[index..].starts_with(token.as_bytes()));
+        let delimiter = |byte: u8| {
+            matches!(
+                byte,
+                b' ' | b'\t' | b'\r' | b'\n' | b',' | b'[' | b']' | b'{' | b'}' | b':'
+            )
+        };
+        let token = token.filter(|token| {
+            (index == 0 || delimiter(text.as_bytes()[index - 1]))
+                && text
+                    .as_bytes()
+                    .get(index + token.len())
+                    .is_none_or(|b| delimiter(*b))
+        });
         if let Some(token) = token {
             result[index] = b'0';
             result[index + 1..index + token.len()].fill(b' ');
@@ -84,45 +97,54 @@ pub(crate) fn field(
     selected: &str,
 ) -> Result<Option<Map<String, Value>>, serde_json::Error> {
     serde_json::from_str::<IgnoredAny>(&grammar(text))?;
-    let bytes = text.as_bytes();
-    let mut index = 0;
-    whitespace(bytes, &mut index);
-    if bytes.get(index) != Some(&b'{') {
+    let Some(fields) = object_fields(text) else {
         return Ok(None);
-    }
-    index += 1;
+    };
     let mut result = Map::new();
-    loop {
-        whitespace(bytes, &mut index);
-        if bytes.get(index) == Some(&b'}') {
-            break;
-        }
-        let end = string_end(bytes, index);
-        // A surrogate key is legal in Python but can never equal a selected
-        // ASCII policy key. Leave it opaque rather than rejecting the file.
-        let key = serde_json::from_str::<String>(&text[index..end]).ok();
-        index = end;
-        whitespace(bytes, &mut index);
-        index += 1; // Colon, proved by the grammar validation above.
-        whitespace(bytes, &mut index);
-        let end = value_end(bytes, index);
-        if key.as_deref() == Some(selected) {
-            // The selected field is interpreted separately. Unsupported scalar
-            // encodings count as an invalid value here, never a file failure.
-            let raw = &text[index..end];
-            let value =
-                provenant_records::checked_json::from_str(&grammar(raw)).unwrap_or(Value::Null);
-            result.insert(selected.into(), value);
-        }
-        index = end;
-        whitespace(bytes, &mut index);
-        if bytes.get(index) == Some(&b',') {
-            index += 1;
+    if let Some(raw) = fields.get(selected) {
+        let value = if selected == "tools" {
+            tools_projection(raw)
         } else {
-            break;
-        }
+            decoded(raw)
+        };
+        result.insert(selected.into(), value);
     }
     Ok(Some(result))
+}
+
+fn decoded(raw: &str) -> Value {
+    // Unsupported selected values remain an explicit partial representation
+    // boundary. Never turn a non-finite Python constant into numeric zero.
+    provenant_records::checked_json::from_str(raw).unwrap_or(Value::Null)
+}
+
+fn tools_projection(raw: &str) -> Value {
+    let Some(fields) = object_fields(raw) else {
+        return decoded(raw);
+    };
+    let mut result = Map::new();
+    for (key, raw) in fields.0 {
+        // Decode each policy field independently. Opaque extension bytes must
+        // not poison the branch or lint decisions when not representable.
+        let value = if key == "lint" {
+            if let Some(lint) = object_fields(raw) {
+                Value::Object(
+                    lint.0
+                        .into_iter()
+                        .map(|(key, raw)| (key, decoded(raw)))
+                        .collect(),
+                )
+            } else {
+                decoded(raw)
+            }
+        } else {
+            decoded(raw)
+        };
+        result.insert(key, value);
+    }
+    // This Value output cannot retain opaque extensions or object order.
+    // Completion awaits records' lossless ordered owner (RP-FR3-006).
+    Value::Object(result)
 }
 
 /// JavaScript grammar validation with opaque, ordered top-level values.
@@ -131,11 +153,16 @@ pub(crate) fn js_fields(
     text: &str,
 ) -> Result<Option<crate::pending::OrderedMap<&str>>, serde_json::Error> {
     serde_json::from_str::<IgnoredAny>(text)?;
+    Ok(object_fields(text))
+}
+
+/// Extract raw object members only after the caller validates the grammar.
+fn object_fields(text: &str) -> Option<crate::pending::OrderedMap<&str>> {
     let bytes = text.as_bytes();
     let mut index = 0;
     whitespace(bytes, &mut index);
     if bytes.get(index) != Some(&b'{') {
-        return Ok(None);
+        return None;
     }
     index += 1;
     let mut result = crate::pending::OrderedMap::default();
@@ -162,5 +189,5 @@ pub(crate) fn js_fields(
             break;
         }
     }
-    Ok(Some(result))
+    Some(result)
 }

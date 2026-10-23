@@ -121,3 +121,13 @@ order. The exact differential records both mismatches and verifies that the
 locked serde_json already spells `1e21` as `1e+21`, matching Node.
 The finite-number helper alone cannot restore order lost during decoding.
 RP-FR3-005 tracks this gap; run-registry unit and interface remain partial.
+
+Item 3: tools and lint decisions now decode individual members, so unread
+`1e999`, out-of-range integers, NaN and Infinity in extensions cannot replace
+valid branch/lint configuration with defaults. Python constants are masked only
+as complete grammar tokens: `1NaN`, `-NaN` and `NaN1` are unreadable, as in
+Python. Constants are not decoded as zero. The returned `Value` maps still sort
+keys and substitute null for unsupported extension representations. Preserving
+raw extensions, non-finite values and insertion order in that output needs the
+absent p3-rrc codec (RP-FR3-006). These output gaps keep fabric-policy partial;
+the repaired decision projection is not a complete value decoder.

@@ -322,6 +322,45 @@ print(json.dumps(m.instruction_changes(pathlib.Path(sys.argv[2]))))"#,
         }
     }
     #[test]
+    fn tools_decisions_ignore_exotic_extension_values_and_reject_malformed_tokens() {
+        let root = tempfile::tempdir().unwrap();
+        let source = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../../../skills/orchestrate/scripts/fabric_policy.py"
+        );
+        for raw in [
+            r#"{"tools":{"default_branch":"dev","x":1e999}}"#,
+            r#"{"tools":{"default_branch":"dev","x":18446744073709551616}}"#,
+            r#"{"tools":{"default_branch":"dev","lint":{"areas":["api"],"x":1e999}}}"#,
+            r#"{"tools":{"default_branch":"dev","x":NaN,"lint":{"forbid_attribution":Infinity}}}"#,
+            r#"{"tools":{"default_branch":"dev"},"a":1NaN}"#,
+            r#"{"tools":{"default_branch":"dev"},"a":-NaN}"#,
+            r#"{"tools":{"default_branch":"dev"},"a":NaN1}"#,
+        ] {
+            write_policy(root.path(), raw);
+            let Some(expected) = crate::test_support::python(
+                r#"import importlib.util,json,pathlib,sys
+spec=importlib.util.spec_from_file_location('fabric_policy',sys.argv[1]); m=importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+t,w=m.tools_policy(pathlib.Path(sys.argv[2])); print(json.dumps([t['default_branch'],t['lint']['areas'],t['lint']['forbid_attribution'],w]))"#,
+                &[source.into(), root.path().to_str().unwrap().into()],
+            ) else {
+                return;
+            };
+            let (tools, warnings) = tools_policy(root.path());
+            assert_eq!(
+                serde_json::json!([
+                    tools["default_branch"],
+                    tools["lint"]["areas"],
+                    tools["lint"]["forbid_attribution"],
+                    warnings
+                ]),
+                expected,
+                "{raw}"
+            );
+        }
+    }
+
+    #[test]
     fn shared_repr_covers_quotes_controls_nonprintable_and_exponents() {
         let values = serde_json::json!([
             "../it's",
