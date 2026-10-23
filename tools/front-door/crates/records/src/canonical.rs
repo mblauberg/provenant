@@ -33,16 +33,30 @@ impl ser::Error for CanonicalError {
     }
 }
 
+/// Canonical bytes produced by the encoder and accepted by record digesting.
+/// The private field prevents callers from blessing arbitrary byte strings.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CanonicalBytes(Vec<u8>);
+
+impl CanonicalBytes {
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.0
+    }
+}
+
 /// The stable, versioned byte form used for Provenant record digests.
 pub struct CanonicalV1;
 
 impl CanonicalV1 {
     /// Encode compact JSON with recursively byte-sorted keys and no final LF.
-    pub fn bytes<T: Serialize>(value: &T) -> Result<Vec<u8>, CanonicalError> {
-        let value = value.serialize(ValueSerializer { depth: 0 })?;
+    pub fn bytes<T: Serialize>(value: &T) -> Result<CanonicalBytes, CanonicalError> {
+        let value = value.serialize(ValueSerializer {
+            depth: 0,
+            mode: SerializerMode::Canonical,
+        })?;
         let mut output = Vec::new();
         write_value(&value, &mut output);
-        Ok(output)
+        Ok(CanonicalBytes(output))
     }
 
     /// Hash a record with an explicit kind and schema-version domain.
@@ -69,7 +83,7 @@ impl CanonicalV1 {
 pub fn record_digest(
     kind: &str,
     schema_version: u64,
-    canonical_bytes: &[u8],
+    canonical_bytes: &CanonicalBytes,
 ) -> Result<provenant_core::Digest, CanonicalError> {
     if kind.is_empty() || kind.as_bytes().contains(&0) {
         return Err(CanonicalError::InvalidKind);
@@ -80,9 +94,19 @@ pub fn record_digest(
     digest.update(b"\0");
     digest.update(schema_version.to_string().as_bytes());
     digest.update(b"\0");
-    digest.update(canonical_bytes);
+    digest.update(canonical_bytes.as_bytes());
     let bytes: [u8; 32] = digest.finalize().into();
     Ok(provenant_core::Digest::from_bytes(bytes))
+}
+
+/// Check values before JSON encoding so serde_json cannot turn a non-finite
+/// float into `null`. Finite floats remain valid in ordinary JSON records.
+pub(crate) fn check_finite<T: Serialize>(value: &T) -> Result<(), CanonicalError> {
+    value.serialize(ValueSerializer {
+        depth: 0,
+        mode: SerializerMode::FiniteCheck,
+    })?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -92,8 +116,9 @@ mod tests {
 
     #[test]
     fn record_digest_uses_exact_domain_framing_and_canonical_input_bytes() {
-        let canonical = br#"{"a":1}"#;
-        let digest = record_digest("attempt", 1, canonical).expect("record digest");
+        let canonical = CanonicalV1::bytes(&json!({"a": 1})).expect("canonical bytes");
+        assert_eq!(canonical.as_bytes(), br#"{"a":1}"#);
+        let digest = record_digest("attempt", 1, &canonical).expect("record digest");
         assert_eq!(
             digest.to_string(),
             "sha256:90932cf36a28f4b07774b6fd79c078f609f79933354730c18ae02aba0cd81f09"
@@ -102,8 +127,17 @@ mod tests {
             CanonicalV1::record_digest("attempt", 1, &json!({"a": 1})).expect("typed digest"),
             digest
         );
-        assert!(record_digest("", 1, canonical).is_err());
-        assert!(record_digest("attempt\0extra", 1, canonical).is_err());
+        assert!(record_digest("", 1, &canonical).is_err());
+        assert!(record_digest("attempt\0extra", 1, &canonical).is_err());
+    }
+
+    #[test]
+    fn finite_check_accepts_finite_floats_and_rejects_non_finite_values() {
+        assert!(super::check_finite(&serde_json::json!({"ratio": 1.5})).is_ok());
+        assert!(matches!(
+            super::check_finite(&f64::INFINITY),
+            Err(super::CanonicalError::Float)
+        ));
     }
 }
 
@@ -118,6 +152,11 @@ impl FileDigest {
     pub const fn bytes(&self) -> &[u8; 32] {
         &self.0
     }
+
+    pub fn parse(text: &str) -> Result<Self, provenant_core::DigestError> {
+        let digest = provenant_core::Digest::parse(text)?;
+        Ok(Self(*digest.as_bytes()))
+    }
 }
 
 impl serde::Serialize for FileDigest {
@@ -129,13 +168,19 @@ impl serde::Serialize for FileDigest {
     }
 }
 
+impl<'de> serde::Deserialize<'de> for FileDigest {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let text = <String as serde::Deserialize>::deserialize(deserializer)?;
+        Self::parse(&text).map_err(serde::de::Error::custom)
+    }
+}
+
 impl std::fmt::Display for FileDigest {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str("sha256:")?;
-        for byte in self.0 {
-            write!(formatter, "{byte:02x}")?;
-        }
-        Ok(())
+        write!(formatter, "sha256:{}", provenant_core::hex(&self.0))
     }
 }
 
@@ -152,6 +197,13 @@ enum CanonicalValue {
 #[derive(Clone, Copy)]
 struct ValueSerializer {
     depth: usize,
+    mode: SerializerMode,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SerializerMode {
+    Canonical,
+    FiniteCheck,
 }
 
 impl ValueSerializer {
@@ -167,6 +219,7 @@ impl ValueSerializer {
         self.check_depth()?;
         Ok(SequenceBuilder {
             depth: self.depth,
+            mode: self.mode,
             values: Vec::new(),
         })
     }
@@ -175,6 +228,7 @@ impl ValueSerializer {
         self.check_depth()?;
         Ok(MappingBuilder {
             depth: self.depth,
+            mode: self.mode,
             values: BTreeMap::new(),
             pending_key: None,
         })
@@ -215,6 +269,10 @@ impl Serializer for ValueSerializer {
     }
 
     fn serialize_i128(self, value: i128) -> Result<Self::Ok, Self::Error> {
+        if self.mode == SerializerMode::FiniteCheck {
+            self.check_depth()?;
+            return Ok(CanonicalValue::Integer(value.to_string()));
+        }
         let value = i64::try_from(value).map_err(|_| CanonicalError::IntegerOutOfRange)?;
         self.serialize_i64(value)
     }
@@ -237,16 +295,36 @@ impl Serializer for ValueSerializer {
     }
 
     fn serialize_u128(self, value: u128) -> Result<Self::Ok, Self::Error> {
+        if self.mode == SerializerMode::FiniteCheck {
+            self.check_depth()?;
+            return Ok(CanonicalValue::Integer(value.to_string()));
+        }
         let value = u64::try_from(value).map_err(|_| CanonicalError::IntegerOutOfRange)?;
         self.serialize_u64(value)
     }
 
-    fn serialize_f32(self, _value: f32) -> Result<Self::Ok, Self::Error> {
-        Err(CanonicalError::Float)
+    fn serialize_f32(self, value: f32) -> Result<Self::Ok, Self::Error> {
+        if !value.is_finite() {
+            return Err(CanonicalError::Float);
+        }
+        if self.mode == SerializerMode::FiniteCheck {
+            self.check_depth()?;
+            Ok(CanonicalValue::Null)
+        } else {
+            Err(CanonicalError::Float)
+        }
     }
 
-    fn serialize_f64(self, _value: f64) -> Result<Self::Ok, Self::Error> {
-        Err(CanonicalError::Float)
+    fn serialize_f64(self, value: f64) -> Result<Self::Ok, Self::Error> {
+        if !value.is_finite() {
+            return Err(CanonicalError::Float);
+        }
+        if self.mode == SerializerMode::FiniteCheck {
+            self.check_depth()?;
+            Ok(CanonicalValue::Null)
+        } else {
+            Err(CanonicalError::Float)
+        }
     }
 
     fn serialize_char(self, value: char) -> Result<Self::Ok, Self::Error> {
@@ -349,6 +427,7 @@ impl Serializer for ValueSerializer {
             variant: variant.to_owned(),
             sequence: SequenceBuilder {
                 depth: self.depth.saturating_add(1),
+                mode: self.mode,
                 values: Vec::new(),
             },
         })
@@ -378,6 +457,7 @@ impl Serializer for ValueSerializer {
             variant: variant.to_owned(),
             mapping: MappingBuilder {
                 depth: self.depth.saturating_add(1),
+                mode: self.mode,
                 values: BTreeMap::new(),
                 pending_key: None,
             },
@@ -387,14 +467,17 @@ impl Serializer for ValueSerializer {
 
 struct SequenceBuilder {
     depth: usize,
+    mode: SerializerMode,
     values: Vec<CanonicalValue>,
 }
 
 impl SequenceBuilder {
     fn push<T: ?Sized + Serialize>(&mut self, value: &T) -> Result<(), CanonicalError> {
         let depth = self.depth.saturating_add(1);
-        self.values
-            .push(value.serialize(ValueSerializer { depth })?);
+        self.values.push(value.serialize(ValueSerializer {
+            depth,
+            mode: self.mode,
+        })?);
         Ok(())
     }
 
@@ -464,6 +547,7 @@ impl SerializeTupleVariant for TupleVariantBuilder {
 
 struct MappingBuilder {
     depth: usize,
+    mode: SerializerMode,
     values: BTreeMap<String, CanonicalValue>,
     pending_key: Option<String>,
 }
@@ -475,7 +559,10 @@ impl MappingBuilder {
         value: &T,
     ) -> Result<(), CanonicalError> {
         let depth = self.depth.saturating_add(1);
-        let value = value.serialize(ValueSerializer { depth })?;
+        let value = value.serialize(ValueSerializer {
+            depth,
+            mode: self.mode,
+        })?;
         if self.values.insert(key, value).is_some() {
             return Err(CanonicalError::DuplicateKey);
         }

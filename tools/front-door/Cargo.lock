@@ -536,7 +536,6 @@ dependencies = [
 name = "provenant-records"
 version = "0.1.0"
 dependencies = [
- "jiff",
  "provenant-core",
  "serde",
  "serde_json",

@@ -195,6 +195,7 @@ where
 
 /// Encode one typed record as compact UTF-8 JSON without a final newline.
 pub fn encode<T: Serialize>(value: &T) -> Result<Vec<u8>, EncodeError> {
+    crate::canonical::check_finite(value).map_err(|_| EncodeError)?;
     serde_json::to_vec(value).map_err(|_| EncodeError)
 }
 
