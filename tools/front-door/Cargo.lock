@@ -419,6 +419,7 @@ name = "provenant"
 version = "0.1.0"
 dependencies = [
  "libc",
+ "provenant-supervisor",
 ]
 
 [[package]]
@@ -557,7 +558,10 @@ dependencies = [
 name = "provenant-supervisor"
 version = "0.1.0"
 dependencies = [
+ "jiff",
  "libc",
+ "provenant-core",
+ "provenant-records",
  "serde",
  "serde_json",
  "tempfile",

@@ -2,7 +2,7 @@
 //! translate metadata records, never descriptors or held paths.
 use super::*;
 
-pub trait SafeFile: Read + Write + Seek {
+pub trait SafeFile: Read + Write + Seek + Send + Sync {
     fn metadata(&self) -> io::Result<Metadata>;
     /// Retains the shared offset, like dup (not a reopen).
     fn duplicate(&self) -> io::Result<Box<dyn SafeFile>>;
@@ -15,7 +15,7 @@ pub trait SafeFile: Read + Write + Seek {
 /// directory authority, preserve OS errors, and never follow final links unless
 /// explicitly requested. Same-directory publication keeps this trait object-safe;
 /// concrete Directory also supports publication between held directories.
-pub trait SafeDir {
+pub trait SafeDir: Send + Sync {
     fn metadata(&self) -> io::Result<Metadata>;
     fn metadata_at(&self, name: &OsStr, follow: bool) -> io::Result<Metadata>;
     fn open_directory(&self, name: &OsStr, follow: bool) -> io::Result<Box<dyn SafeDir>>;
@@ -44,7 +44,7 @@ pub trait SafeDir {
 
 /// Initial trusted-path access and entropy are injectable too, so consumer
 /// adapters can exercise their complete policy without a live filesystem.
-pub trait SafeFs {
+pub trait SafeFs: Send + Sync {
     fn root(&self, absolute: bool) -> io::Result<Box<dyn SafeDir>>;
     fn open_anchor(&self, path: &Path) -> io::Result<Box<dyn SafeDir>>;
     fn open_source(&self, path: &Path) -> io::Result<Box<dyn SafeFile>>;

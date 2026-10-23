@@ -20,9 +20,9 @@ custody, receipt publication and registry integration stay with their owners.
 | --- | --- | --- |
 | `runtime/fabric/src/process-identity.ts#interface` | Typed Serde identity/group/outcome records, observation/effect types and closed stop reasons | Types and API surface only; executable policy belongs to `process-identity.ts#unit-01` below |
 | `runtime/fabric/src/process-identity.ts#unit-01` | Pure identity matching, conservative liveness, group attribution, owner deduplication and a group termination reducer with signal-error fencing | Partial: Fabric registry, run control, publication, reaper and S2 effect adapters remain with the source owners |
-| `skills/_shared/bounded_process.py#unit-01` | File-backed merged/separated capture, independent stream bounds, timeout and post-exit group cleanup, public `stop_process_group` over `UtilityChild`, strict spawn/PATH/ordered-environment/pass-fd handling, negative signal status and `argument_error` rendering | Library behavior is implemented; `BudgetArgumentParser` stderr writes and exit(2) belong to the CLI edge. Unrestricted process-group conformance remains required |
+| `skills/_shared/bounded_process.py#unit-01` | File-backed merged/separated capture, independent stream bounds, timeout and post-exit group cleanup, public `stop_process_group` over `UtilityChild`, strict spawn/PATH/ordered-environment/pass-fd handling, negative signal status and `argument_error` rendering | Complete; fallible parser stderr writes return exit status 2. Native descendant cleanup fixtures cover timeout and successful parent exit |
 | `skills/orchestrate/scripts/process_info.py#unit-01` | Process records, Linux stat/task-tree/boot observations, Darwin libproc/sysctl/Mach observations, tty names, OS argv, shell quoting, canonical local dates and Python finite-float duration formatting | Private pure compatibility helpers await the core integration pass; retained JSON encoding of surrogate-containing OS text is deliberately not claimed |
-| `workspace:front-door-syscalls` | Safe strict execve, real-ID access and reentrant passwd lookup, with process fixtures | Partial: root binary still contains its original unsafe calls. Source edits are authorised, but the required root Cargo.toml dependency/link is outside this lane's write scope |
+| `workspace:front-door-syscalls` | Safe strict execve, real-ID access and reentrant passwd lookup, with process fixtures | Complete in batch 3: root binary links and calls the safe wrappers |
 | `skills/orchestrate/scripts/process_info.py#unit-02` | Native process/census/start-time observation with explicit clocks; bounded system-ps fallbacks, required identity, process disappearance and census failures | Partial: fallback output has a 1 MiB bound and typed timeout/I/O errors; exact Python fallback refusal/exception rendering needs integration (RP-1302) |
 | `skills/orchestrate/scripts/bin/ps#unit-01` | BSD/POSIX option forms and integer parsing, selection/deduplication/sort, layouts/headers, tty filtering, unreadable/sysctl rows, Unicode visibility, locale/padding, stderr/exit values and quiet broken-pipe writing | CLI owns locale input and SIGPIPE disposition; process-census error rendering inherits the partial observation adapter. No executable is added |
 
@@ -261,3 +261,70 @@ Local repair evidence: `cargo fmt --all`, supervisor clippy with warnings denied
 and the required supervisor differential test command. The installed Rust
 targets omit `x86_64-unknown-linux-gnu`; Linux compilation and execution remain
 CI gates. No graph unit or consumer cut-over is newly claimed.
+
+## Batch 3: shared owners, front-door syscalls and observation adapters
+
+Rulebook **v4**, author route **`codex/gpt-6.1-sol@high`**. Source/oracle and
+judge checkout: `7021182d535f6c730c29713e77d5bca76893fd06` (all Python/TS
+sources remain unchanged). Pinned Rust 1.94.1; local Python 3.14.8 and Node
+24.21.0. This section supersedes the earlier workspace-link blockers.
+
+Fully ported in this batch:
+
+- `skills/_shared/bounded_process.py#unit-01`: the parser error effect now
+  writes stderr fallibly and returns status 2 for the embedding CLI to exit.
+  New handshake/EOF fixtures prove same-group, SIGTERM-ignoring descendants
+  are cleaned after both timeout and normal parent exit. No sleep is an
+  assertion; the native parent intentionally abandons its child for this test.
+- `workspace:front-door-syscalls`: root `exec.rs`/`resolve.rs` now call the
+  supervisor's safe wrappers. Strict ENOEXEC refusal, OS byte strings,
+  environment and argv forwarding, root precedence and passwd fallback retain
+  their existing behavior. Root-package tests cover the actual linked binary.
+
+The crate now depends on the shared `provenant_core::py` and
+`provenant_records::checked_json` owners. Duplicate whitespace, strip and repr
+implementations were deleted. Pending core helpers still needed are decimal
+classification, printable classification, checked PID tokens, finite-float
+integer/division formatting, float parsing and POSIX shlex splitting; main has
+no equivalent public APIs. The new fixed-record JSON edge needs two small
+pending records helpers for Python ASCII escaping and float spellings because
+records has no public Python-compatible JSON encoder. They use core for
+finite-float spelling and keep integer fields exact.
+
+Partial/skipped scope, with no completion-ledger claim:
+
+| Unit | This batch | Remaining scope |
+| --- | --- | --- |
+| `process_info.py#unit-02` | Typed command seam; exact spawn/timeout census diagnostics and failure differentials | RP-1302: 1 MiB fallback capture refusal still differs from unbounded Python output |
+| `scripts/bin/ps#unit-01` | Source/policy audit; existing parser/render/OS tests retained | Skipped implementation changes; its census errors inherit RP-1302, so it remains partial |
+| `worker_liveness.py#unit-01` | Filesystem/command/census traits; canonical cwd, lsof, git identity/status, recursive session logs, explicit-clock metadata and file size | Main lacks Python surrogateescape string/path support; typed command refusal preserves non-UTF-8 argv. Extended JSON (NaN, lone surrogates), bounded input/command domains and non-strict symlink-loop resolution remain open parity work |
+| `worker_liveness.py#unit-02` | OS collection adapter, typed main requests, terminal-report/error branches, exact ordered worker JSON and table output | Raw argparse/default/help edge belongs to CLI and is not implemented; underlying unit-01 observation limits remain |
+| `runtime/fabric/src/ps.mjs#unit-01` | Node differential for platform-specific signal names | RP-SUP-PS-BUFFER: hard pipe cap and exact Node overflow capture still missing |
+
+No command switches to a new owner, and no source is removed. Diagnostic
+subprocesses have a 15-second deadline and 16 MiB stream bound; session first
+lines have a 64 MiB bound. These source-domain differences are recorded as
+open library mismatches, not approved behavior changes. Integer-range refusal
+uses the already accepted v4 improvement and the records owner. Native reviews
+check syscall effects/custody and liveness/source parity; cross-family review,
+J1/J2/J3 and unrestricted Linux/macOS conformance remain chair-owned gates.
+
+Filesystem review repairs additionally retain both rename paths in typed
+errors and require `Send + Sync` for boxed safe filesystem capabilities.
+
+Batch-3 final local evidence: 130 supervisor tests passed with
+`PROVENANT_PORT_DIFF_REQUIRED=1`; all 102 root-package tests passed; supervisor
+clippy with warnings denied and workspace fmt passed. Both layering policy
+functions passed under isolated Python (pytest is absent locally). Two native
+read-only reviews covered syscall/custody and source/record parity. Repairs
+preserve a rotated first session-log path, root-before-nested glob ordering,
+directory-link exclusion, refusal of truncated diagnostic paths, and the
+source's missing/empty-home behavior. The missing-home/rotation regressions
+were observed failing before their repairs and passing afterwards.
+
+The syscall review found no introduced defects. It noted the existing
+source-compatible utility policy can reap its leader before group cleanup,
+leaving a theoretical process-group ID reuse race; this batch does not change
+that implementation or S2 provider custody. Treat it as a cut-over design
+question, not proof of provider custody. The chair still owns cross-family
+review and exact-head CI/acceptance; no auto-merge is armed.
