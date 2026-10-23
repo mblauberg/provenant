@@ -104,7 +104,7 @@ as a compatibility wrapper.
 | Herdr CLI markdown/help contract checker | Cut* | Workflow no longer invokes Herdr; the external integration owner tests any retained transport itself. |
 | JS implement-run, cross-verify and codebase-polish engines | Cut* | Existing skills plus Fabric already conduct these sequences; no replacement generic workflow interpreter. |
 | Shared root, exclude, config-loading, bounded process and custody helpers | Merge | Core/config/confinement/supervisor own these services; no workflow copies. |
-| Writing, academic and legal linters | Merge* | One small matcher; top-level `provenant lint` is pending CLI freeze. Rules are JSON beside the owning SKILL.md, outside policy/config/records. |
+| Writing, academic and legal linters | Merge* | One small matcher behind `provenant check writing PATHS` (decisions table, Checks and hooks). Rules are JSON beside the owning SKILL.md, outside policy/config/records. |
 | Delivery telemetry, cost per accepted outcome and retrospective inputs | Simplify | No ledger or summary ingestion. `telemetry stats` reduces terminal run records with prices; receipts retain decisions and run records carry `DeliveryId`. Preserve missingness. |
 | UI detector, live server and browser overlays | Cut/replace* | Component decisions below remove all UI runtime ownership from workflow. |
 
@@ -309,9 +309,9 @@ no threads or subprocesses and never cancels another owner's attempt/lease.
 
 The [CLI design in PR #1359](https://github.com/mblauberg/provenant/pull/1359)
 owns the command envelope and verb tree. Its `workflow` subtree is reserved;
-the following leaves are proposed. **Top-level `provenant lint` remains pending**:
-CLI's proposal omits it and proposes internalising lint policy. Resolve that
-placement before lane D lands; it is not frozen by this document.
+the following leaves are proposed. Writing checks use the shared `check` verb
+(decisions table, Checks and hooks): `check writing PATHS` runs workflow's
+writing rules as data and exits 1 on findings.
 
 ```text
 provenant workflow review --request <file|-> [--json]
@@ -320,7 +320,7 @@ provenant workflow receipt save <id> --expected-revision <n> --request <file|->
 provenant workflow session save <session-id> --file <markdown|->
 provenant workflow session show <session-id> [--json]
 provenant hook claude pre-compact|compact
-provenant lint <paths...> --rules general|academic|legal [--json]  # pending
+provenant check writing <paths...> [--rules general|academic|legal] [--json]
 ```
 
 `review` is the pure coverage check. A new receipt uses expected revision zero;
@@ -363,8 +363,8 @@ MCP; named sessions retire in favour of run `resume`. The table overrides
 CLI's older `fabric.lanes` examples; CLI freezes exact run flags. Workflow
 adds no execution verbs and never calls old orchestrate scripts.
 
-Hooks use CLI's `hook claude pre-compact` and `hook claude compact` leaves,
-with host-native stdout/exit contracts rather than the CLI envelope. They read
+Hooks are rows in cli's `HookSpec` table, invoked as `hook claude pre-compact`
+and `hook claude compact`, with host-native stdout/exit contracts rather than the CLI envelope. They read
 at most 1 MiB host JSON stdin and emit at most 8 KiB context. Advisory callbacks
 exit 0 even for missing/invalid state, with a bounded diagnostic. SessionStart
 obtains the actual session ID from the host event and injects the validated key
@@ -760,8 +760,8 @@ the same lane that retires their target, without compatibility wrappers.
 | `tracker/SKILL.md:61-64`; `tracker/references/steward.md:29` | Delete replay queue/outcome writer; reconcile current issues/tasks with `gh` reads before retrying an authorised write. | H |
 | `setup-repo/SKILL.md:77-78` | Delete tracker denying-hook/settings-template instructions and both templates; retain repository tracker routing guidance. | H |
 | `tests/test_herdr_cli_contract.py:13`; `tests/test_herdr_orchestrate_contract.py:1` | Delete retired Herdr CLI contract checker/tests; any retained external transport belongs to that integration owner. No workflow Herdr gate. | H |
-| `legal-writing/SKILL.md:73`; `legal-writing/references/validation-checklists.md:206,214,218`; `legal-writing/references/forbidden-patterns.md:9-14`; `legal-writing/references/australian-english-house-style.md:53-54` | Pending CLI freeze, propose `provenant lint <paths> --rules legal`, with quoted-example/exclusion rules in skill data. Preserve filing-blocker failure severity and warnings as review prompts. | D |
-| `natural-writing/references/academic-prose.md:310`; `natural-writing/scripts/check_academic_style.py:18`; `legal-writing/scripts/lint_legal_style.py:24` | Pending CLI freeze, propose `provenant lint <paths> --rules academic`; delete Python engine imports. General/academic/legal rules move to skill-owned JSON. | D |
+| `legal-writing/SKILL.md:73`; `legal-writing/references/validation-checklists.md:206,214,218`; `legal-writing/references/forbidden-patterns.md:9-14`; `legal-writing/references/australian-english-house-style.md:53-54` | Use `provenant check writing <paths> --rules legal`, with quoted-example/exclusion rules in skill data. Preserve filing-blocker failure severity and warnings as review prompts. | D |
+| `natural-writing/references/academic-prose.md:310`; `natural-writing/scripts/check_academic_style.py:18`; `legal-writing/scripts/lint_legal_style.py:24` | Use `provenant check writing <paths> --rules academic`; delete Python engine imports. General/academic/legal rules move to skill-owned JSON. | D |
 | `ui-ux-design/SKILL.md:3,22-23`; `ui-ux-design/references/review.md:25`; `ui-ux-design/references/visual-qa.md:25`; `ui-ux-design/references/live.md:10-22,38` | Remove live-iteration/detector promises and every live command. “Read-only UI review by default; pair source changes with implement and use external browser evidence with app-owned preview.” | H |
 | `ui-ux-design/evals/boundary_cases.yaml:95-103`; `ui-ux-design/evals/regression_cases.yaml:79-85`; `ui-ux-design/evals/reference_disposition.yaml:26`; `ui-ux-design/evals/provenance_components.yaml:24` | Replace live/detector expectations and runtime dispositions with external-browser review cases. Preserve read-only authority and retained skill provenance. | H |
 | `docs/runbooks/github-workflow.md:202,309-321,349` | Replace receipt-directory/binder/validator requirements with PR evidence and exact-head CI. Replace primary-checkout sync at merge with the frozen-install rule until cut-over. | G; J final install wording |
@@ -802,7 +802,7 @@ caller deletions integrate only in the dependency order below.
 | J. Closure and final install | 1.5 | H/I, all product owners | Own final retired-name CI grep gate, mixed docs/tests and package closure; clean-state native gates and final link rewrite/install on both Macs. |
 | **Total** | **11.5** | Shared owner effort excluded | Integration waits never justify compatibility layers or pulling the frozen primary. |
 
-At J, use the table's `install [--dry-run]`, `check` and `remove` commands,
+At J, use the table's `install [--dry-run]`, `check install` and `uninstall` commands,
 with `--legacy-checkout ABS`. Re-applying `install` is recovery; rollback
 reinstalls `pre-rust-rewrite`. The compiled cut-over link/command inventory
 belongs in [state.md's installer section](https://github.com/mblauberg/provenant/blob/docs/rewrite-state/docs/specs/rust-port/design/state.md#proposed-commands-and-installer-behaviour),
@@ -830,7 +830,6 @@ cut-over authority; this conform pass does not perform a live install.
 | Binding topic | Proposed table/owner change | Current design constraint |
 |---|---|---|
 | Layout | Add workflow's subtree: `workflow/projects/<ProjectId>/deliveries/<DeliveryId>/receipt.{json,lock}` and `sessions/<SessionId>/checkpoint.{md,lock}`. | A subtree of the single host-global root, not a per-project root; no alternate root pending acceptance. |
-| Command tree | Resolve top-level `provenant lint` and its `--rules` selector in CLI's freeze; current CLI proposal internalises lint and omits the verb. | Marked pending throughout; writing matcher remains skill-owned and legal blockers survive. |
 
 ## Cross-crate asks for the other chair
 
@@ -842,14 +841,14 @@ workflow. No cross-crate private-constructor or reverse-dependency guarantee.
 |---|---|
 | core | `ProjectId`, `DeliveryId`, `SessionId`, `AttemptId`, `ActorId`, `RepoId`, `GitOid` (SHA-1/SHA-256), `Digest`, `UtcMicros`, `Deadline`, `CancelToken`, `RelPath::parse`; production `CommitClock` via `jiff`. No `WorkScope` ask after cutting idle validation. |
 | records | Bounded decode, canonical encode (sorted keys/final LF), digest; minimal receipt, subject, risk/review policy and request records; `RouteProvenance`/`ReviewEligibility` with Observed/ChairAttested/Unknown. Facts serialise but do not deserialise. No checkpoint or writing-rule schema. |
-| config/state | Typed risk/review settings and bounds from one root-owned `config.toml` plus compiled defaults, with optional `profile =`; no layers/project overlays/per-knob env or mutation verbs. Root `~/.local/share/provenant/v1`, `--state-dir` over `PROVENANT_STATE_DIR`; accept workflow subtree row. Own `install [--dry-run]`, `check`, `remove`, `--legacy-checkout` inventory and authorised instruction updates; preserve unrelated/user-owned entries. Writing data stays with skills. |
+| config/state | Typed risk/review settings and bounds from one root-owned `config.toml` plus compiled defaults, with optional `profile =`; no layers/project overlays/per-knob env or mutation verbs. Root `~/.local/share/provenant/v1`, `--state-dir` over `PROVENANT_STATE_DIR`; accept workflow subtree row. Own `install [--dry-run]`, `check install`, `uninstall`, `--legacy-checkout` inventory and authorised instruction updates; preserve unrelated/user-owned entries. Writing data stays with skills. |
 | supervisor | Safe FS: stable lock inode, no-follow open, atomic replace/no-replace, file/directory sync; expose bounded `FileHandle::lock(LockOptions)` polling non-blocking `flock` through confinement, with cancellation. `run_utility` for fixed git/gh reads. Test-only fixture launch/kill support. |
 | confinement | Own `Grant`, `Workspace`, `RepoHandle`; `open_workflow_store`, `open_artifact`, `narrow`, safe `git_facts` with replacement objects off/alternates ignored. `StoreRoot::lock(..., Deadline, CancelToken)` returns a held record for bounded `read`/atomic `publish`; ordinary path/phase/cause I/O diagnostics, no workflow uncertain-commit protocol. |
 | run | `RunStore::completed_attempt(AttemptId) -> AttemptFact`: terminal state/exit, subject, output ref/digest, route and reviewer. Terminal records carry `DeliveryId` for stats. Own top-level `dispatch`, `lanes`, `output`, `cancel`, `resume`, `reconcile`, git-evidence helper and entire run-directory deletion contract; remove finaliser before C deletes its import. No work-snapshot/frontier ask. |
 | providers | `validate_provenance(&RouteProvenance) -> VerifiedLineage`; keep adapter, endpoint and model family separate. ChairAttested never fills cross-family coverage. Workflow consumes edge-built facts, without a providers dependency. |
 | routing | `review_availability(&RoutingSnapshot, &ReviewDemand) -> ReviewAvailability`: tiers, all author families, expiry and quota/config/capability/family-slot blockers. No probes under the receipt lock. Quota feeds routing, with no workflow call. |
 | telemetry | No workflow write/report API or ledger. `telemetry stats` reads terminal run records with prices; receipt plus run records remain the record. Keep old ledger on disk without import/deletion; retire OTel at cut-over. |
-| cli/binary | Parse proposed workflow leaves and `hook claude pre-compact\|compact`; resolve pending top-level lint. Binary composes typed owner requests and gathers subject/attempt/actor/routing facts; no MergeFact or library-to-cli edge. Render CLI envelope, 1 MiB cap and exits 0/1/2/3/124/130; partial/input-required in data. Run verbs stay top level under run. |
+| cli/binary | Parse proposed workflow leaves and `hook claude pre-compact\|compact`; route `check writing` to workflow's matcher; register workflow's pre-compact and session-start handlers in cli's `HookSpec` table, which the installer also reads. Binary composes typed owner requests and gathers subject/attempt/actor/routing facts; no MergeFact or library-to-cli edge. Render CLI envelope, 1 MiB cap and exits 0/1/2/3/124/130; partial/input-required in data. Run verbs stay top level under run. |
 | fabric-store / fabric-runtime | Own the only read-only one-shot cut-over import: open/blocked tasks plus unacknowledged requests from the last 14 days. Map project/identity without importing authority; workflow points agents to it. Product identity env is `PROVENANT_AGENT_LABEL`, replacing `AGENT_FABRIC_LABEL`. |
 | fabric-mcp | No workflow asks, tools or dependency edge. CLI JSON, top-level run `lanes` and Fabric tasks suffice. |
 | Native host | Supply session ID in hook events; SessionStart injects actual key/save command. Retain observed launch identity when available, otherwise explicit ChairAttested native provenance under the limits above. |
