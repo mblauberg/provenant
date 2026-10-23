@@ -151,5 +151,15 @@ pub fn signal_name(signal: u32) -> Option<&'static str> {
     ];
     names
         .into_iter()
+        .chain(platform_signals())
         .find_map(|(value, name)| (value as u32 == signal).then_some(name))
+}
+
+#[cfg(target_os = "macos")]
+fn platform_signals() -> impl IntoIterator<Item = (i32, &'static str)> {
+    [(libc::SIGINFO, "SIGINFO")]
+}
+#[cfg(target_os = "linux")]
+fn platform_signals() -> impl IntoIterator<Item = (i32, &'static str)> {
+    [(libc::SIGSTKFLT, "SIGSTKFLT"), (libc::SIGPWR, "SIGPWR")]
 }

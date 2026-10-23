@@ -541,3 +541,24 @@ fn verified_regular_reads_clear_nonblocking_status() {
     let source = FileHandle::open_source(&temp.path().join("file")).unwrap();
     assert!(!os::tests::is_nonblocking(&source.file));
 }
+
+#[test]
+fn rename_errors_retain_both_paths_and_errno() {
+    let temp = tempfile::tempdir().unwrap();
+    let dir = Directory::open_anchor(temp.path()).unwrap();
+    let error = dir
+        .replace(OsStr::new("missing"), &dir, OsStr::new("destination"))
+        .unwrap_err();
+    assert!(error.is_not_found());
+    assert!(
+        matches!(&error, FsError::Rename { from_path, to_path, .. } if from_path.ends_with("missing") && to_path.ends_with("destination"))
+    );
+    assert_eq!(io::Error::from(error).raw_os_error(), Some(errno::ENOENT));
+}
+#[test]
+fn boxed_filesystem_capabilities_support_threads() {
+    fn check<T: Send + Sync + ?Sized>() {}
+    check::<dyn SafeFs>();
+    check::<dyn SafeDir>();
+    check::<dyn SafeFile>();
+}
