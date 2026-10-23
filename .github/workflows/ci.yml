@@ -280,9 +280,6 @@ jobs:
     # The slow Fabric host file is pinned to shard 1; path hashes split the
     # remaining files across shards 2 and 3.
     timeout-minutes: 20
-    env:
-      TMPDIR: ${{ runner.temp }}
-      CARGO_TARGET_DIR: ${{ github.workspace }}/tools/front-door/target
     permissions:
       contents: read
     needs: detect-changes
@@ -506,6 +503,8 @@ jobs:
     name: Rust front door
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/tools/front-door/target
     permissions:
       contents: read
     needs: detect-changes
@@ -517,6 +516,10 @@ jobs:
           persist-credentials: false
       # The runner image ships rustup; the toolchain is pinned here and in
       # tools/front-door/rust-toolchain.toml (ADR 0027).
+      - name: Set Rust temporary directory
+        env:
+          TMPDIR: ${{ runner.temp }}
+        run: printf 'TMPDIR=%s\n' "$TMPDIR" >> "$GITHUB_ENV"
       - name: Install pinned Rust toolchain
         run: rustup toolchain install 1.99.1 --profile minimal --component rustfmt --component clippy
       - name: Cache Rust build artefacts
@@ -575,6 +578,36 @@ jobs:
         run: PROVENANT_FRONT_DOOR_BIN="$CARGO_TARGET_DIR/release/provenant" .venv/bin/python -m pytest tests/test_stale.py -q
       - name: Run the golden CLI suite
         run: PROVENANT_GOLDEN_REQUIRED=1 PROVENANT_GOLDEN_BIN="$CARGO_TARGET_DIR/release/provenant" .venv/bin/python -m pytest tests/golden -q
+
+  rust-dependencies:
+    name: Rust dependency policy
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    needs: detect-changes
+    if: needs.detect-changes.outputs.rust == 'true'
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set Rust temporary directory
+        env:
+          TMPDIR: ${{ runner.temp }}
+        run: printf 'TMPDIR=%s\n' "$TMPDIR" >> "$GITHUB_ENV"
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install 1.99.1 --profile minimal
+      - name: Install dependency tools
+        uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2.87.30
+        with:
+          tool: cargo-deny@0.20.2,cargo-shear@1.14.0
+      - name: Check advisories, licences and dependency allowlist
+        working-directory: tools/front-door
+        run: cargo deny check
+      - name: Check for unused dependencies
+        working-directory: tools/front-door
+        run: cargo shear
 
   # #1339: stripping proc-macro dylibs broke macOS release builds at install
   # time. Share the Rust path filter and exercise the front door's release build.
@@ -642,6 +675,7 @@ jobs:
       - split-root
       - rust
       - rust-macos-release
+      - rust-dependencies
       - zizmor
     if: always()
     steps:
