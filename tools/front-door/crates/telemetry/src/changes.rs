@@ -192,7 +192,7 @@ pub struct Attention {
     pub sessions_started: u64,
     pub user_prompts: Option<u64>,
     pub tool_decisions: Option<u64>,
-    pub active_time_s: Option<BTreeMap<String, f64>>,
+    pub active_time_s: Option<BTreeMap<String, crate::Numeric>>,
 }
 /// Attention proxies only use metadata already retained by the ledger.
 pub fn attention(db: &rusqlite::Connection, since: &str) -> Result<Attention> {
@@ -241,9 +241,13 @@ pub fn attention(db: &rusqlite::Connection, since: &str) -> Result<Attention> {
     for ((_, kind), seconds) in active {
         *totals.entry(kind).or_default() += seconds;
     }
-    for value in totals.values_mut() {
-        *value = value.round_ties_even();
-    }
+    let totals = totals.into_iter().map(|(kind, seconds)| {
+        let value = seconds.round_ties_even();
+        if !value.is_finite() || !(-9_223_372_036_854_775_808.0..18_446_744_073_709_551_616.0).contains(&value) {
+            return Err(Error::NumberOutOfRange);
+        }
+        Ok((kind, crate::Numeric::Integer(value as i128)))
+    }).collect::<Result<BTreeMap<_, _>>>()?;
     Ok(Attention {
         sessions_started: counts.get("session.start").copied().unwrap_or(0),
         user_prompts: counts.get("otel.user_prompt").copied(),
@@ -320,4 +324,15 @@ mod tests {
             assert!(window(bad).is_err());
         }
     }
+    #[test]
+    fn review_regression_active_time_is_an_integer() {
+        let db = rusqlite::Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE events(kind TEXT, ts TEXT, session TEXT, attrs TEXT);").unwrap();
+        for (session, seconds) in [("a",6.25),("b",6.25)] {
+            db.execute("INSERT INTO events VALUES ('otel.metric','2026-01-01',?,?)", rusqlite::params![session,serde_json::json!({"name":"claude_code.active_time.total","value":seconds}).to_string()]).unwrap();
+        }
+        let report = attention(&db, "2026-01-01").unwrap();
+        assert_eq!(serde_json::to_value(report).unwrap()["active_time_s"]["total"].to_string(), "12");
+    }
+
 }
