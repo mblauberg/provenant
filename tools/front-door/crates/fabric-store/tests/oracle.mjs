@@ -2,12 +2,24 @@
 import crypto from 'node:crypto';
 import { syncBuiltinESMExports, createRequire } from 'node:module';
 import { pathToFileURL } from 'node:url';
-import { writeFileSync } from 'node:fs';
+import fs, { writeFileSync } from 'node:fs';
 const [source, database, scenario] = process.argv.slice(2);
 let now = 1000, serial = 0;
 Date.now = () => now;
 crypto.randomUUID = () => `fixture-${++serial}`;
 syncBuiltinESMExports();
+let snapshotMutation='none', copyCount=0;
+if(scenario==='snapshot-races') {
+  const copy=fs.copyFileSync;
+  fs.copyFileSync=(from,to,...rest)=>{
+    if(from===database && snapshotMutation!=='none') {
+      copyCount++;
+      if(snapshotMutation==='always' || copyCount===1) fs.utimesSync(database,0,100+copyCount);
+    }
+    return copy(from,to,...rest);
+  };
+  syncBuiltinESMExports();
+}
 const { Store, inspectDatabase, laneTaskId } = await import(pathToFileURL(source).href);
 const Database = createRequire(pathToFileURL(source))('better-sqlite3');
 const a = { project: 'p', agentId: 'alice', provider: 'codex' };
@@ -15,7 +27,7 @@ const b = { ...a, agentId: 'bob' };
 const out = [];
 const capture = (f) => {
   let entry; try { entry = {ok: f() ?? null}; } catch (e) { entry = {error: e.message}; }
-  if (entry.ok?.database) entry.ok.database = '<fixture-db>';
+  if (entry.ok?.database) { entry.ok.database = '<fixture-db>'; if(entry.ok.error) entry.ok.error=entry.ok.error.replaceAll(database,'<fixture-db>'); }
   out.push({...entry, wire: JSON.stringify(entry)});
 };
 if (scenario === 'legacy') {
@@ -29,7 +41,25 @@ if (scenario === 'legacy') {
 const store = new Store(database);
 const other = new Store(database);
 const raw = new Database(database);
-if (scenario === 'legacy-rows') {
+if(scenario==='diagnostic-paths') {
+  store.announce(a);store.note(a,'in WAL');
+  capture(()=>inspectDatabase(database,'p','status'));
+  capture(()=>inspectDatabase(database,'p','doctor'));
+  capture(()=>inspectDatabase(database+'.absent/deep','p','status'));
+  writeFileSync(database+'.bad','not sqlite');
+  capture(()=>inspectDatabase(database+'.bad','p','doctor'));
+  capture(()=>inspectDatabase(database+'.bad/deep','p','status'));
+  capture(()=>fs.readdirSync(process.env.TMPDIR).filter(name=>name.startsWith('fabric-inspect-')).length);
+} else if(scenario==='snapshot-races') {
+  store.announce(a);
+  snapshotMutation='once';
+  capture(()=>inspectDatabase(database,'p','doctor'));
+  capture(()=>copyCount);
+  copyCount=0;snapshotMutation='always';
+  capture(()=>inspectDatabase(database,'p','doctor'));
+  capture(()=>copyCount);
+  capture(()=>fs.readdirSync(process.env.TMPDIR).filter(name=>name.startsWith('fabric-inspect-')).length);
+} else if (scenario === 'legacy-rows') {
   const rows=[{}, {run_id:null,task_id:'',attempt_count:'2'}, {run_id:42,task_id:0,attempt:null,attempt_count:true},
     {run_id:['r',null,['x']],task_id:[],attempt:[]}, {run_id:{},task_id:'t',attempt:'2.5'},
     {run_id:'r',task_id:'t',attempt:'0x10000000000000001'}, {run_id:'r',attempt:'invalid'},

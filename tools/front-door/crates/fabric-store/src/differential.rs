@@ -1,5 +1,5 @@
-use crate::tests::TimeCell;
 use crate::pending::IdSource;
+use crate::tests::TimeCell;
 use crate::*;
 use serde_json::{json, Value};
 use std::{cell::Cell, sync::Arc};
@@ -125,10 +125,8 @@ fn compare(scenario: &str, result: Value) {
             serde_json::to_vec_pretty(&expected).unwrap(),
         )
         .unwrap();
-        assert_eq!(
-            result,
-            expected,
-            "{scenario}: actual {}, expected {}",
+        panic!(
+            "{scenario}: differential mismatch; actual {}, expected {}",
             path.display(),
             expected_path.display()
         );
@@ -210,11 +208,25 @@ fn session_database_differential() {
     let mut out = Vec::new();
     capture(
         &mut out,
-        store.claim_session_turn_with_id(&a, "Review", None, SessionTurnKind::Start, 123, "fixture-1"),
+        store.claim_session_turn_with_id(
+            &a,
+            "Review",
+            None,
+            SessionTurnKind::Start,
+            123,
+            "fixture-1",
+        ),
     );
     capture(
         &mut out,
-        store.claim_session_turn_with_id(&b, "Review", None, SessionTurnKind::Start, 124, "fixture-2"),
+        store.claim_session_turn_with_id(
+            &b,
+            "Review",
+            None,
+            SessionTurnKind::Start,
+            124,
+            "fixture-2",
+        ),
     );
     let turn = SessionLaunch {
         run_id: "r".into(),
@@ -727,150 +739,702 @@ fn javascript_date_range_and_signed_year_differential() {
 #[test]
 fn review_routing_announce_failures_and_push_takeover_differential() {
     let dir = tempfile::tempdir().unwrap();
-    let path=dir.path().join("db");
-    let store=Store::open(&path,5000,FixtureClock(Arc::new(TimeCell::new(1000)))).unwrap();
-    let other=Store::open(&path,5000,FixtureClock(Arc::new(TimeCell::new(1000)))).unwrap();
-    let ids=FixtureIds::default(); let mut out=Vec::new();
+    let path = dir.path().join("db");
+    let store = Store::open(&path, 5000, FixtureClock(Arc::new(TimeCell::new(1000)))).unwrap();
+    let other = Store::open(&path, 5000, FixtureClock(Arc::new(TimeCell::new(1000)))).unwrap();
+    let ids = FixtureIds::default();
+    let mut out = Vec::new();
     store.announce(&a()).unwrap();
-    capture(&mut out,store.announce(&Identity {provider:"claude".into(),..a()}));
-    capture(&mut out,store.create_team(&a(),"future",&["alice".into()]));
-    capture(&mut out,store.announce(&Identity {agent_id:"future".into(),..a()}));
-    capture(&mut out,store.announce(&Identity {agent_id:"all".into(),..a()}));
-    for seat in ["chair","leader","parent-seat"] {store.announce(&Identity {agent_id:seat.into(),..a()}).unwrap();}
-    for alias in ["chair","parent","root","/root"] {
-        capture(&mut out,store.send(&a(),alias,"question",SendOptions::default(),RecipientContext {chair:Some("leader"),parent:Some("parent-seat")},&ids));
+    capture(
+        &mut out,
+        store.announce(&Identity {
+            provider: "claude".into(),
+            ..a()
+        }),
+    );
+    capture(
+        &mut out,
+        store.create_team(&a(), "future", &["alice".into()]),
+    );
+    capture(
+        &mut out,
+        store.announce(&Identity {
+            agent_id: "future".into(),
+            ..a()
+        }),
+    );
+    capture(
+        &mut out,
+        store.announce(&Identity {
+            agent_id: "all".into(),
+            ..a()
+        }),
+    );
+    for seat in ["chair", "leader", "parent-seat"] {
+        store
+            .announce(&Identity {
+                agent_id: seat.into(),
+                ..a()
+            })
+            .unwrap();
     }
-    capture(&mut out,store.send(&a(),"parent","fallback",SendOptions::default(),RecipientContext {chair:Some("missing"),parent:Some("missing")},&ids));
-    let sha="a".repeat(40);
-    capture(&mut out,store.acquire_landing(&a(),"s",&sha,1,1000));
-    store.db.execute_batch("UPDATE landing_leases SET pushing_until=151000").unwrap();
-    capture(&mut out,other.acquire_landing(&b(),"s",&sha,60,2001));
-    capture(&mut out,store.try_release_landing(&a(),"s",1,Some(2001)));
-    capture(&mut out,other.acquire_landing(&b(),"s",&sha,60,151000));
-    compare("review",snapshot(&store,out));
+    for alias in ["chair", "parent", "root", "/root"] {
+        capture(
+            &mut out,
+            store.send(
+                &a(),
+                alias,
+                "question",
+                SendOptions::default(),
+                RecipientContext {
+                    chair: Some("leader"),
+                    parent: Some("parent-seat"),
+                },
+                &ids,
+            ),
+        );
+    }
+    capture(
+        &mut out,
+        store.send(
+            &a(),
+            "parent",
+            "fallback",
+            SendOptions::default(),
+            RecipientContext {
+                chair: Some("missing"),
+                parent: Some("missing"),
+            },
+            &ids,
+        ),
+    );
+    let sha = "a".repeat(40);
+    capture(&mut out, store.acquire_landing(&a(), "s", &sha, 1, 1000));
+    store
+        .db
+        .execute_batch("UPDATE landing_leases SET pushing_until=151000")
+        .unwrap();
+    capture(&mut out, other.acquire_landing(&b(), "s", &sha, 60, 2001));
+    capture(
+        &mut out,
+        store.try_release_landing(&a(), "s", 1, Some(2001)),
+    );
+    capture(&mut out, other.acquire_landing(&b(), "s", &sha, 60, 151000));
+    compare("review", snapshot(&store, out));
 }
 
 #[test]
 fn landing_wait_change_timeout_abort_expiry_and_generation_differential() {
-    let dir=tempfile::tempdir().unwrap();let path=dir.path().join("db");
-    let clock=FixtureClock(Arc::new(TimeCell::new(1000)));
-    let store=Store::open(&path,5000,clock.clone()).unwrap();
-    let raw=Connection::open(&path).unwrap();let mut out=Vec::new();
-    capture(&mut out,store.wait_landing("p",0.003,1,||false,|d|clock.0.set(clock.0.get()+d.as_millis() as i64)));
-    capture(&mut out,store.wait_landing("p",1.0,1,||true,|_|panic!("aborted")));
-    clock.0.set(1000);store.acquire_landing(&a(),"s",&"a".repeat(40),60,1000).unwrap();
-    let mut polls=0;
-    capture(&mut out,store.wait_landing("p",1.0,1,||false,|d|{
-        clock.0.set(clock.0.get()+d.as_millis() as i64);polls+=1;
-        raw.execute_batch(if polls==1 {"UPDATE landing_leases SET pushing_until=151000"} else {"UPDATE landing_leases SET released_at=1002"}).unwrap();
-    }));
-    store.acquire_landing(&a(),"s",&"a".repeat(40),1,clock.0.get()).unwrap();
-    capture(&mut out,store.wait_landing("p",2.0,500,||false,|d|clock.0.set(clock.0.get()+d.as_millis() as i64)));
-    store.acquire_landing(&a(),"s",&"a".repeat(40),60,clock.0.get()).unwrap();
-    capture(&mut out,store.wait_landing("p",1.0,1,||false,|d|{
-        clock.0.set(clock.0.get()+d.as_millis() as i64);raw.execute_batch("UPDATE landing_leases SET generation=generation+1").unwrap();
-    }));
-    compare("waits",snapshot(&store,out));
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("db");
+    let clock = FixtureClock(Arc::new(TimeCell::new(1000)));
+    let store = Store::open(&path, 5000, clock.clone()).unwrap();
+    let raw = Connection::open(&path).unwrap();
+    let mut out = Vec::new();
+    capture(
+        &mut out,
+        store.wait_landing(
+            "p",
+            0.003,
+            1,
+            || false,
+            |d| clock.0.set(clock.0.get() + d.as_millis() as i64),
+        ),
+    );
+    capture(
+        &mut out,
+        store.wait_landing("p", 1.0, 1, || true, |_| panic!("aborted")),
+    );
+    clock.0.set(1000);
+    store
+        .acquire_landing(&a(), "s", &"a".repeat(40), 60, 1000)
+        .unwrap();
+    let mut polls = 0;
+    capture(
+        &mut out,
+        store.wait_landing(
+            "p",
+            1.0,
+            1,
+            || false,
+            |d| {
+                clock.0.set(clock.0.get() + d.as_millis() as i64);
+                polls += 1;
+                raw.execute_batch(if polls == 1 {
+                    "UPDATE landing_leases SET pushing_until=151000"
+                } else {
+                    "UPDATE landing_leases SET released_at=1002"
+                })
+                .unwrap();
+            },
+        ),
+    );
+    store
+        .acquire_landing(&a(), "s", &"a".repeat(40), 1, clock.0.get())
+        .unwrap();
+    capture(
+        &mut out,
+        store.wait_landing(
+            "p",
+            2.0,
+            500,
+            || false,
+            |d| clock.0.set(clock.0.get() + d.as_millis() as i64),
+        ),
+    );
+    store
+        .acquire_landing(&a(), "s", &"a".repeat(40), 60, clock.0.get())
+        .unwrap();
+    capture(
+        &mut out,
+        store.wait_landing(
+            "p",
+            1.0,
+            1,
+            || false,
+            |d| {
+                clock.0.set(clock.0.get() + d.as_millis() as i64);
+                raw.execute_batch("UPDATE landing_leases SET generation=generation+1")
+                    .unwrap();
+            },
+        ),
+    );
+    compare("waits", snapshot(&store, out));
 }
 
 #[test]
 fn cross_thread_sqlite_contention_differential() {
     use std::sync::mpsc;
-    let dir=tempfile::tempdir().unwrap();let path=dir.path().join("db");
-    let store=Store::open(&path,5000,FixtureClock(Arc::new(TimeCell::new(1000)))).unwrap();
-    let ids=FixtureIds::default();let mut out=Vec::new();
-    store.announce(&a()).unwrap();store.announce(&b()).unwrap();
-    store.send(&a(),"bob","claim me",SendOptions::default(),RecipientContext::default(),&ids).unwrap();
-    let (locked_tx,locked_rx)=mpsc::channel();let (release_tx,release_rx)=mpsc::channel();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("db");
+    let store = Store::open(&path, 5000, FixtureClock(Arc::new(TimeCell::new(1000)))).unwrap();
+    let ids = FixtureIds::default();
+    let mut out = Vec::new();
+    store.announce(&a()).unwrap();
+    store.announce(&b()).unwrap();
+    store
+        .send(
+            &a(),
+            "bob",
+            "claim me",
+            SendOptions::default(),
+            RecipientContext::default(),
+            &ids,
+        )
+        .unwrap();
+    let (locked_tx, locked_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
     std::thread::scope(|scope| {
-        let writer=scope.spawn(move ||{
-            let raw=Connection::open(&path).unwrap();raw.execute_batch("BEGIN IMMEDIATE").unwrap();
-            locked_tx.send(()).unwrap();release_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        let writer = scope.spawn(move || {
+            let raw = Connection::open(&path).unwrap();
+            raw.execute_batch("BEGIN IMMEDIATE").unwrap();
+            locked_tx.send(()).unwrap();
+            release_rx.recv_timeout(Duration::from_secs(5)).unwrap();
             raw.execute_batch("ROLLBACK").unwrap();
         });
         locked_rx.recv_timeout(Duration::from_secs(5)).unwrap();
-        capture(&mut out,store.inbox(&b(),InboxOptions {busy_timeout_ms:1,..Default::default()},&ids));
-        capture(&mut out,store.acknowledge_terminal(&b(),"r","t",1,Some("/r"),1));
-        release_tx.send(()).unwrap();writer.join().unwrap();
+        capture(
+            &mut out,
+            store.inbox(
+                &b(),
+                InboxOptions {
+                    busy_timeout_ms: 1,
+                    ..Default::default()
+                },
+                &ids,
+            ),
+        );
+        capture(
+            &mut out,
+            store.acknowledge_terminal(&b(), "r", "t", 1, Some("/r"), 1),
+        );
+        release_tx.send(()).unwrap();
+        writer.join().unwrap();
     });
-    capture(&mut out,store.inbox(&b(),InboxOptions::default(),&ids));
-    compare("thread-contention",snapshot(&store,out));
+    capture(&mut out, store.inbox(&b(), InboxOptions::default(), &ids));
+    compare("thread-contention", snapshot(&store, out));
 }
 
 #[test]
 fn work_claim_fencing_paths_errors_and_rollback_differential() {
-    let dir=tempfile::tempdir().unwrap();let path=dir.path().join("db");
-    let store=Store::open(&path,5000,FixtureClock(Arc::new(TimeCell::new(1000)))).unwrap();
-    let other=Store::open(&path,5000,FixtureClock(Arc::new(TimeCell::new(1000)))).unwrap();
-    let ids=FixtureIds::default();let mut out=Vec::new();
-    store.announce(&a()).unwrap();store.announce(&b()).unwrap();store.announce(&Identity {project:"z".into(),..a()}).unwrap();
-    capture(&mut out,store.agents("p"));capture(&mut out,store.projects());
-    capture(&mut out,store.acquire_work(&a(),"s",WorkScope {issue:Some(" #869 "),paths:&["Runtime\\Fabric/".into(),"runtime/fabric".into()]},1,1000,&ids));
-    capture(&mut out,store.verify_work(&a(),"s","fixture-1",1,1000));
-    capture(&mut out,other.acquire_work(&b(),"s",WorkScope {issue:Some("869"),..Default::default()},60,1000,&ids));
-    capture(&mut out,other.acquire_work(&b(),"s",WorkScope {paths:&["RUNTIME/FABRIC/SRC".into()],..Default::default()},60,1000,&ids));
-    capture(&mut out,store.renew_work(&a(),"wrong","fixture-1",1,60,1000));
-    capture(&mut out,store.renew_work(&a(),"s","fixture-1",1,1,1000));
-    capture(&mut out,other.acquire_work(&b(),"s",WorkScope {paths:&["runtime/fabric/src".into()],..Default::default()},60,2000,&ids));
-    capture(&mut out,store.renew_work(&a(),"s","fixture-1",1,60,2000));
-    capture(&mut out,store.verify_work(&a(),"s","fixture-1",1,2000));
-    capture(&mut out,store.release_work(&a(),"s","fixture-1",1,2000));
-    capture(&mut out,store.work_claims("p",2000));
-    capture(&mut out,other.release_work(&b(),"s","fixture-4",2,2000));
-    for path in ["","/","a//b","a/../b","./a","a//"] {
-        capture(&mut out,store.acquire_work(&a(),"s",WorkScope {paths:&[path.into()],..Default::default()},60,2000,&ids));
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("db");
+    let store = Store::open(&path, 5000, FixtureClock(Arc::new(TimeCell::new(1000)))).unwrap();
+    let other = Store::open(&path, 5000, FixtureClock(Arc::new(TimeCell::new(1000)))).unwrap();
+    let ids = FixtureIds::default();
+    let mut out = Vec::new();
+    store.announce(&a()).unwrap();
+    store.announce(&b()).unwrap();
+    store
+        .announce(&Identity {
+            project: "z".into(),
+            ..a()
+        })
+        .unwrap();
+    capture(&mut out, store.agents("p"));
+    capture(&mut out, store.projects());
+    capture(
+        &mut out,
+        store.acquire_work(
+            &a(),
+            "s",
+            WorkScope {
+                issue: Some(" #869 "),
+                paths: &["Runtime\\Fabric/".into(), "runtime/fabric".into()],
+            },
+            1,
+            1000,
+            &ids,
+        ),
+    );
+    capture(&mut out, store.verify_work(&a(), "s", "fixture-1", 1, 1000));
+    capture(
+        &mut out,
+        other.acquire_work(
+            &b(),
+            "s",
+            WorkScope {
+                issue: Some("869"),
+                ..Default::default()
+            },
+            60,
+            1000,
+            &ids,
+        ),
+    );
+    capture(
+        &mut out,
+        other.acquire_work(
+            &b(),
+            "s",
+            WorkScope {
+                paths: &["RUNTIME/FABRIC/SRC".into()],
+                ..Default::default()
+            },
+            60,
+            1000,
+            &ids,
+        ),
+    );
+    capture(
+        &mut out,
+        store.renew_work(&a(), "wrong", "fixture-1", 1, 60, 1000),
+    );
+    capture(
+        &mut out,
+        store.renew_work(&a(), "s", "fixture-1", 1, 1, 1000),
+    );
+    capture(
+        &mut out,
+        other.acquire_work(
+            &b(),
+            "s",
+            WorkScope {
+                paths: &["runtime/fabric/src".into()],
+                ..Default::default()
+            },
+            60,
+            2000,
+            &ids,
+        ),
+    );
+    capture(
+        &mut out,
+        store.renew_work(&a(), "s", "fixture-1", 1, 60, 2000),
+    );
+    capture(&mut out, store.verify_work(&a(), "s", "fixture-1", 1, 2000));
+    capture(
+        &mut out,
+        store.release_work(&a(), "s", "fixture-1", 1, 2000),
+    );
+    capture(&mut out, store.work_claims("p", 2000));
+    capture(
+        &mut out,
+        other.release_work(&b(), "s", "fixture-4", 2, 2000),
+    );
+    for path in ["", "/", "a//b", "a/../b", "./a", "a//"] {
+        capture(
+            &mut out,
+            store.acquire_work(
+                &a(),
+                "s",
+                WorkScope {
+                    paths: &[path.into()],
+                    ..Default::default()
+                },
+                60,
+                2000,
+                &ids,
+            ),
+        );
     }
-    capture(&mut out,store.acquire_work(&a(),"s",WorkScope {issue:Some("#"),..Default::default()},60,2000,&ids));
-    capture(&mut out,store.acquire_work(&a(),"s",WorkScope {paths:&vec!["a".into();101],..Default::default()},60,2000,&ids));
-    capture(&mut out,store.acquire_work(&a(),"bad/session",WorkScope {issue:Some("x"),..Default::default()},60,2000,&ids));
-    capture(&mut out,store.acquire_work(&a(),"s",WorkScope {issue:Some("x"),..Default::default()},0,2000,&ids));
+    capture(
+        &mut out,
+        store.acquire_work(
+            &a(),
+            "s",
+            WorkScope {
+                issue: Some("#"),
+                ..Default::default()
+            },
+            60,
+            2000,
+            &ids,
+        ),
+    );
+    capture(
+        &mut out,
+        store.acquire_work(
+            &a(),
+            "s",
+            WorkScope {
+                paths: &vec!["a".into(); 101],
+                ..Default::default()
+            },
+            60,
+            2000,
+            &ids,
+        ),
+    );
+    capture(
+        &mut out,
+        store.acquire_work(
+            &a(),
+            "bad/session",
+            WorkScope {
+                issue: Some("x"),
+                ..Default::default()
+            },
+            60,
+            2000,
+            &ids,
+        ),
+    );
+    capture(
+        &mut out,
+        store.acquire_work(
+            &a(),
+            "s",
+            WorkScope {
+                issue: Some("x"),
+                ..Default::default()
+            },
+            0,
+            2000,
+            &ids,
+        ),
+    );
     store.db.execute_batch("CREATE TRIGGER fail_log BEFORE INSERT ON activity BEGIN SELECT RAISE(ABORT,'log blocked'); END").unwrap();
-    capture(&mut out,store.acquire_work(&a(),"s",WorkScope {paths:&["different".into()],..Default::default()},60,2000,&ids));
+    capture(
+        &mut out,
+        store.acquire_work(
+            &a(),
+            "s",
+            WorkScope {
+                paths: &["different".into()],
+                ..Default::default()
+            },
+            60,
+            2000,
+            &ids,
+        ),
+    );
     store.db.execute_batch("DROP TRIGGER fail_log").unwrap();
-    capture(&mut out,store.work_claims("p",2000));
-    compare("work",snapshot(&store,out));
-    store.close().unwrap();other.close().unwrap();
+    capture(&mut out, store.work_claims("p", 2000));
+    compare("work", snapshot(&store, out));
+    store.close().unwrap();
+    other.close().unwrap();
 }
 
 #[test]
 fn entropy_defaults_and_failure_order_differential() {
-    let dir=tempfile::tempdir().unwrap();
-    let store=Store::open(&dir.path().join("db"),5000,FixtureClock(Arc::new(TimeCell::new(1000)))).unwrap();
-    let ids=FixtureIds::default();let mut out=Vec::new();
-    store.announce(&a()).unwrap();store.announce(&b()).unwrap();
-    capture(&mut out,store.send(&a(),"bob","empty task",SendOptions {task_id:Some(""),..Default::default()},RecipientContext::default(),&ids));
-    capture(&mut out,store.send(&a(),"bob","empty output",SendOptions {output_path:Some(""),..Default::default()},RecipientContext::default(),&ids));
-    capture(&mut out,store.send(&a(),"missing","failed recipient",SendOptions::default(),RecipientContext::default(),&ids));
-    capture(&mut out,store.claim_session_turn(&a(),"name",None,SessionTurnKind::Start,123,&ids));
-    capture(&mut out,store.claim_session_turn(&a(),"name",None,SessionTurnKind::Start,124,&ids));
-    capture(&mut out,store.create_task(&a(),"generated",CreateTaskOptions::default(),&ids));
-    capture(&mut out,store.create_task(&a(),"empty",CreateTaskOptions {task_id:Some(""),..Default::default()},&ids));
-    capture(&mut out,store.send(&a(),"bob","generated",SendOptions::default(),RecipientContext::default(),&ids));
-    capture(&mut out,store.inbox(&b(),InboxOptions::default(),&ids));
-    compare("ids",snapshot(&store,out));
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(
+        &dir.path().join("db"),
+        5000,
+        FixtureClock(Arc::new(TimeCell::new(1000))),
+    )
+    .unwrap();
+    let ids = FixtureIds::default();
+    let mut out = Vec::new();
+    store.announce(&a()).unwrap();
+    store.announce(&b()).unwrap();
+    capture(
+        &mut out,
+        store.send(
+            &a(),
+            "bob",
+            "empty task",
+            SendOptions {
+                task_id: Some(""),
+                ..Default::default()
+            },
+            RecipientContext::default(),
+            &ids,
+        ),
+    );
+    capture(
+        &mut out,
+        store.send(
+            &a(),
+            "bob",
+            "empty output",
+            SendOptions {
+                output_path: Some(""),
+                ..Default::default()
+            },
+            RecipientContext::default(),
+            &ids,
+        ),
+    );
+    capture(
+        &mut out,
+        store.send(
+            &a(),
+            "missing",
+            "failed recipient",
+            SendOptions::default(),
+            RecipientContext::default(),
+            &ids,
+        ),
+    );
+    capture(
+        &mut out,
+        store.claim_session_turn(&a(), "name", None, SessionTurnKind::Start, 123, &ids),
+    );
+    capture(
+        &mut out,
+        store.claim_session_turn(&a(), "name", None, SessionTurnKind::Start, 124, &ids),
+    );
+    capture(
+        &mut out,
+        store.create_task(&a(), "generated", CreateTaskOptions::default(), &ids),
+    );
+    capture(
+        &mut out,
+        store.create_task(
+            &a(),
+            "empty",
+            CreateTaskOptions {
+                task_id: Some(""),
+                ..Default::default()
+            },
+            &ids,
+        ),
+    );
+    capture(
+        &mut out,
+        store.send(
+            &a(),
+            "bob",
+            "generated",
+            SendOptions::default(),
+            RecipientContext::default(),
+            &ids,
+        ),
+    );
+    capture(&mut out, store.inbox(&b(), InboxOptions::default(), &ids));
+    compare("ids", snapshot(&store, out));
 }
 
 #[test]
 fn legacy_terminal_rows_preserve_missing_null_coercion_and_binding_errors() {
-    let dir=tempfile::tempdir().unwrap();
-    let store=Store::open(&dir.path().join("db"),5000,FixtureClock(Arc::new(TimeCell::new(1000)))).unwrap();
-    let mut out=Vec::new();
-    for text in [r#"{}"#,r#"{"run_id":null,"task_id":"","attempt_count":"2"}"#,r#"{"run_id":42,"task_id":0,"attempt":null,"attempt_count":true}"#,
-        r#"{"run_id":["r",null,["x"]],"task_id":[],"attempt":[]}"#,r#"{"run_id":{},"task_id":"t","attempt":"2.5"}"#,
-        r#"{"run_id":"r","task_id":"t","attempt":"0x10000000000000001"}"#,r#"{"run_id":"r","attempt":"invalid"}"#,
-        r#"{"run_id":"r","attempt":"Infinity"}"#,r#"{"run_id":"r","attempt":"-Infinity"}"#,
-        r#"{"run_id":{"toString":null},"attempt":1}"#,r#"{"run_id":"r","attempt":1,"run_dir":false}"#,
-        r#"{"run_id":"r","attempt":null}"#,r#"{"run_id":"r","attempt":"","run_dir":null}"#,
-        r#"{"run_id":1e21,"attempt":1}"#,r#"{"run_id":1e-7,"attempt":1}"#,r#"{"run_id":1e20,"attempt":1}"#,
-        r#"{"run_id":true,"attempt":["3"]}"#,r#"{"run_id":1e-6,"attempt":1}"#] {
-        let row=TerminalRow::from_json(text).unwrap();
-        capture(&mut out,lane_task_id(&row));
-        capture(&mut out,store.acknowledge_terminal_row(&b(),&row,1));
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(
+        &dir.path().join("db"),
+        5000,
+        FixtureClock(Arc::new(TimeCell::new(1000))),
+    )
+    .unwrap();
+    let mut out = Vec::new();
+    for text in [
+        r#"{}"#,
+        r#"{"run_id":null,"task_id":"","attempt_count":"2"}"#,
+        r#"{"run_id":42,"task_id":0,"attempt":null,"attempt_count":true}"#,
+        r#"{"run_id":["r",null,["x"]],"task_id":[],"attempt":[]}"#,
+        r#"{"run_id":{},"task_id":"t","attempt":"2.5"}"#,
+        r#"{"run_id":"r","task_id":"t","attempt":"0x10000000000000001"}"#,
+        r#"{"run_id":"r","attempt":"invalid"}"#,
+        r#"{"run_id":"r","attempt":"Infinity"}"#,
+        r#"{"run_id":"r","attempt":"-Infinity"}"#,
+        r#"{"run_id":{"toString":null},"attempt":1}"#,
+        r#"{"run_id":"r","attempt":1,"run_dir":false}"#,
+        r#"{"run_id":"r","attempt":null}"#,
+        r#"{"run_id":"r","attempt":"","run_dir":null}"#,
+        r#"{"run_id":1e21,"attempt":1}"#,
+        r#"{"run_id":1e-7,"attempt":1}"#,
+        r#"{"run_id":1e20,"attempt":1}"#,
+        r#"{"run_id":true,"attempt":["3"]}"#,
+        r#"{"run_id":1e-6,"attempt":1}"#,
+    ] {
+        let row = TerminalRow::from_json(text).unwrap();
+        capture(&mut out, lane_task_id(&row));
+        capture(&mut out, store.acknowledge_terminal_row(&b(), &row, 1));
     }
-    let lanes=vec![LaneAttempt {run_id:"r".into(),task_id:"t".into(),attempt:3.into()},LaneAttempt {run_id:"r".into(),task_id:"t".into(),attempt:serde_json::Number::from_f64(2.5).unwrap()},LaneAttempt {run_id:"zero".into(),task_id:"t".into(),attempt:0.into()}];
-    capture(&mut out,store.unseen_lanes(&b(),&lanes));capture(&mut out,store.mark_lanes_seen(&b(),&lanes));
-    capture(&mut out,store.unseen_lanes(&b(),&lanes));
-    store.announce(&a()).unwrap();store.announce(&b()).unwrap();
-    capture(&mut out,store.send(&a(),"bob","fraction seen",SendOptions {kind:Some("run_terminal"),output_path:Some("r:t:2.5"),..Default::default()},RecipientContext::default(),&FixtureIds::default()));
-    compare("legacy-rows",snapshot(&store,out));
+    let lanes = vec![
+        LaneAttempt {
+            run_id: "r".into(),
+            task_id: "t".into(),
+            attempt: 3.into(),
+        },
+        LaneAttempt {
+            run_id: "r".into(),
+            task_id: "t".into(),
+            attempt: serde_json::Number::from_f64(2.5).unwrap(),
+        },
+        LaneAttempt {
+            run_id: "zero".into(),
+            task_id: "t".into(),
+            attempt: 0.into(),
+        },
+    ];
+    capture(&mut out, store.unseen_lanes(&b(), &lanes));
+    capture(&mut out, store.mark_lanes_seen(&b(), &lanes));
+    capture(&mut out, store.unseen_lanes(&b(), &lanes));
+    store.announce(&a()).unwrap();
+    store.announce(&b()).unwrap();
+    capture(
+        &mut out,
+        store.send(
+            &a(),
+            "bob",
+            "fraction seen",
+            SendOptions {
+                kind: Some("run_terminal"),
+                output_path: Some("r:t:2.5"),
+                ..Default::default()
+            },
+            RecipientContext::default(),
+            &FixtureIds::default(),
+        ),
+    );
+    compare("legacy-rows", snapshot(&store, out));
+}
+
+fn capture_report(out: &mut Vec<Value>, mut report: DatabaseDiagnostic, base: &std::path::Path) {
+    report.database = "<fixture-db>".into();
+    report.error = report
+        .error
+        .map(|e| e.replace(base.to_string_lossy().as_ref(), "<fixture-db>"));
+    capture(out, Ok(report));
+}
+#[test]
+fn diagnostic_absence_stat_errors_invalid_db_and_wal_snapshot_differential() {
+    let dir = tempfile::tempdir().unwrap();
+    let scratch = tempfile::tempdir().unwrap();
+    let path = dir.path().join("db");
+    let store = Store::open(&path, 5000, FixtureClock(Arc::new(TimeCell::new(1000)))).unwrap();
+    store.announce(&a()).unwrap();
+    store.note(&a(), "in WAL").unwrap();
+    let mut out = Vec::new();
+    for (file, mode) in [
+        (&path, DiagnosticMode::Status),
+        (&path, DiagnosticMode::Doctor),
+        (&dir.path().join("db.absent/deep"), DiagnosticMode::Status),
+    ] {
+        capture_report(
+            &mut out,
+            inspect_database_with_filesystem(
+                file,
+                "p",
+                mode,
+                &provenant_supervisor::fs::LocalFs,
+                scratch.path(),
+            ),
+            &path,
+        );
+    }
+    std::fs::write(dir.path().join("db.bad"), b"not sqlite").unwrap();
+    for (file, mode) in [
+        (dir.path().join("db.bad"), DiagnosticMode::Doctor),
+        (dir.path().join("db.bad/deep"), DiagnosticMode::Status),
+    ] {
+        capture_report(
+            &mut out,
+            inspect_database_with_filesystem(
+                &file,
+                "p",
+                mode,
+                &provenant_supervisor::fs::LocalFs,
+                scratch.path(),
+            ),
+            &path,
+        );
+    }
+    capture(
+        &mut out,
+        Ok(std::fs::read_dir(scratch.path()).unwrap().count()),
+    );
+    compare("diagnostic-paths", snapshot(&store, out));
+}
+
+struct MutatingFs {
+    source: std::path::PathBuf,
+    copies: Cell<u64>,
+    always: bool,
+}
+impl provenant_supervisor::fs::SafeFs for MutatingFs {
+    fn root(&self, absolute: bool) -> std::io::Result<Box<dyn provenant_supervisor::fs::SafeDir>> {
+        provenant_supervisor::fs::LocalFs.root(absolute)
+    }
+    fn open_anchor(
+        &self,
+        path: &std::path::Path,
+    ) -> std::io::Result<Box<dyn provenant_supervisor::fs::SafeDir>> {
+        provenant_supervisor::fs::LocalFs.open_anchor(path)
+    }
+    fn temporary_name(&self) -> std::io::Result<std::ffi::OsString> {
+        provenant_supervisor::fs::LocalFs.temporary_name()
+    }
+    fn open_source(
+        &self,
+        path: &std::path::Path,
+    ) -> std::io::Result<Box<dyn provenant_supervisor::fs::SafeFile>> {
+        let file = provenant_supervisor::fs::LocalFs.open_source(path)?;
+        if path == self.source {
+            self.copies.set(self.copies.get() + 1);
+            if self.always || self.copies.get() == 1 {
+                std::fs::OpenOptions::new()
+                    .write(true)
+                    .open(path)?
+                    .set_times(std::fs::FileTimes::new().set_modified(
+                        std::time::UNIX_EPOCH + Duration::from_secs(100 + self.copies.get()),
+                    ))?;
+            }
+        }
+        Ok(file)
+    }
+}
+#[test]
+fn diagnostic_snapshot_retries_version_changes_and_has_a_three_attempt_bound() {
+    let dir = tempfile::tempdir().unwrap();
+    let scratch = tempfile::tempdir().unwrap();
+    let path = dir.path().join("db");
+    let store = Store::open(&path, 5000, FixtureClock(Arc::new(TimeCell::new(1000)))).unwrap();
+    store.announce(&a()).unwrap();
+    let mut out = Vec::new();
+    for always in [false, true] {
+        let fs = MutatingFs {
+            source: path.clone(),
+            copies: Cell::new(0),
+            always,
+        };
+        capture_report(
+            &mut out,
+            inspect_database_with_filesystem(
+                &path,
+                "p",
+                DiagnosticMode::Doctor,
+                &fs,
+                scratch.path(),
+            ),
+            &path,
+        );
+        capture(&mut out, Ok(fs.copies.get()));
+    }
+    capture(
+        &mut out,
+        Ok(std::fs::read_dir(scratch.path()).unwrap().count()),
+    );
+    compare("snapshot-races", snapshot(&store, out));
 }

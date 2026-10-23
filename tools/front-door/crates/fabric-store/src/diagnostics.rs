@@ -26,7 +26,11 @@ const REQUIRED_CLAIM_COLUMNS: &[&str] = &[
 ];
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
-pub enum DiagnosticStatus { Absent, Ok, Error }
+pub enum DiagnosticStatus {
+    Absent,
+    Ok,
+    Error,
+}
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DatabaseDiagnostic {
@@ -223,4 +227,242 @@ fn inspect_policy(
         },
     ];
     Ok((counts, Some(checks)))
+}
+
+/// Inspect through a private version-checked main/WAL pair. No SQLite connection
+/// ever opens the live path. Final source symlinks currently remain a port gap:
+/// the supervisor exposes no read-open operation that follows those links.
+pub fn inspect_database(path: &Path, project: &str, mode: DiagnosticMode) -> DatabaseDiagnostic {
+    inspect_database_with_filesystem(
+        path,
+        project,
+        mode,
+        &provenant_supervisor::fs::LocalFs,
+        &std::env::temp_dir(),
+    )
+}
+pub fn inspect_database_with_filesystem(
+    path: &Path,
+    project: &str,
+    mode: DiagnosticMode,
+    fs: &dyn provenant_supervisor::fs::SafeFs,
+    temp_root: &Path,
+) -> DatabaseDiagnostic {
+    let database = path.to_string_lossy().into_owned();
+    let failure = |error: Error| DatabaseDiagnostic {
+        status: DiagnosticStatus::Error,
+        exists: true,
+        read_only: true,
+        database: database.clone(),
+        project: project.into(),
+        counts: None,
+        checks: None,
+        error: Some(error.to_string()),
+    };
+    match file_version(fs, path) {
+        Ok(None) => {
+            return DatabaseDiagnostic {
+                status: DiagnosticStatus::Absent,
+                exists: false,
+                read_only: true,
+                database,
+                project: project.into(),
+                counts: None,
+                checks: None,
+                error: None,
+            }
+        }
+        Err(error) => return failure(error),
+        Ok(Some(_)) => {}
+    }
+    let mut snapshot = match PrivateSnapshot::create(fs, temp_root) {
+        Ok(s) => s,
+        Err(e) => return failure(e),
+    };
+    let mut report = match copy_consistent_snapshot(fs, path, &snapshot).and_then(|()| {
+        let db = Connection::open_with_flags(
+            snapshot.path.join("fabric.sqlite3"),
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE,
+        )?;
+        let report = inspect_snapshot(&db, &database, project, mode);
+        db.close().map_err(|(_, e)| Error::from(e))?;
+        Ok(report)
+    }) {
+        Ok(report) => report,
+        Err(error) => failure(error),
+    };
+    if let Err(error) = snapshot.cleanup() {
+        report = failure(error);
+    }
+    report
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct FileVersion {
+    device: u64,
+    inode: u64,
+    size: u64,
+    modified_ns: i128,
+}
+fn file_version(
+    fs: &dyn provenant_supervisor::fs::SafeFs,
+    path: &Path,
+) -> Result<Option<FileVersion>> {
+    let stat = || -> std::io::Result<provenant_supervisor::fs::Metadata> {
+        if let Some(name) = path.file_name() {
+            let (parent, _) = filesystem::parent_and_name(path);
+            filesystem::directory(fs, parent, false)?.metadata_at(name, true)
+        } else {
+            filesystem::directory(fs, path, false)?.metadata()
+        }
+    };
+    match stat() {
+        Ok(m) => Ok(Some(FileVersion {
+            device: m.device,
+            inode: m.inode,
+            size: m.size,
+            modified_ns: m.modified_ns,
+        })),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(FilesystemError::new("stat", path, e).into()),
+    }
+}
+fn copy_consistent_snapshot(
+    fs: &dyn provenant_supervisor::fs::SafeFs,
+    path: &Path,
+    snapshot: &PrivateSnapshot,
+) -> Result<()> {
+    let mut wal = path.as_os_str().to_os_string();
+    wal.push("-wal");
+    let wal = std::path::PathBuf::from(wal);
+    for attempt in 0..3 {
+        let before_main = file_version(fs, path)?;
+        let before_wal = file_version(fs, &wal)?;
+        let copied = (|| {
+            copy_file(
+                fs,
+                path,
+                &*snapshot.dir,
+                std::ffi::OsStr::new("fabric.sqlite3"),
+            )?;
+            if before_wal.is_some() {
+                copy_file(
+                    fs,
+                    &wal,
+                    &*snapshot.dir,
+                    std::ffi::OsStr::new("fabric.sqlite3-wal"),
+                )?;
+            } else {
+                remove_if_present(&*snapshot.dir, std::ffi::OsStr::new("fabric.sqlite3-wal"))?;
+            }
+            Ok(())
+        })();
+        if let Err(error) = copied {
+            remove_pair(&*snapshot.dir)?;
+            if attempt == 2 {
+                return Err(error);
+            }
+            continue;
+        }
+        if before_main == file_version(fs, path)? && before_wal == file_version(fs, &wal)? {
+            return Ok(());
+        }
+        remove_pair(&*snapshot.dir)?;
+    }
+    Err(Error::SnapshotChanged)
+}
+fn copy_file(
+    fs: &dyn provenant_supervisor::fs::SafeFs,
+    path: &Path,
+    destination: &dyn provenant_supervisor::fs::SafeDir,
+    name: &std::ffi::OsStr,
+) -> Result<()> {
+    use std::io::Read;
+    let source = fs
+        .open_source(path)
+        .map_err(|e| FilesystemError::new("copyfile", path, e))?;
+    // The version recheck detects growth/shrinkage; cap this read at the opened
+    // source length so a concurrent appender cannot prolong a copy forever.
+    let size = source.metadata()?.size;
+    let mut source = source.take(size);
+    let mut target = destination.create_new(name)?;
+    std::io::copy(&mut source, &mut target)?;
+    Ok(())
+}
+fn remove_if_present(
+    dir: &dyn provenant_supervisor::fs::SafeDir,
+    name: &std::ffi::OsStr,
+) -> Result<()> {
+    match dir.unlink(name) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e.into()),
+    }
+}
+fn remove_pair(dir: &dyn provenant_supervisor::fs::SafeDir) -> Result<()> {
+    remove_if_present(dir, std::ffi::OsStr::new("fabric.sqlite3"))?;
+    remove_if_present(dir, std::ffi::OsStr::new("fabric.sqlite3-wal"))
+}
+struct PrivateSnapshot {
+    parent: Box<dyn provenant_supervisor::fs::SafeDir>,
+    dir: Box<dyn provenant_supervisor::fs::SafeDir>,
+    name: std::ffi::OsString,
+    path: std::path::PathBuf,
+    armed: bool,
+}
+impl PrivateSnapshot {
+    fn create(fs: &dyn provenant_supervisor::fs::SafeFs, temp_root: &Path) -> Result<Self> {
+        let parent = filesystem::directory(fs, temp_root, false)?;
+        for _ in 0..128 {
+            let mut name = std::ffi::OsString::from("fabric-inspect-");
+            name.push(fs.temporary_name()?);
+            match parent.mkdir(&name, 0o700) {
+                Ok(()) => {
+                    let dir = parent.open_verified_directory(&name)?;
+                    return Ok(Self {
+                        parent,
+                        dir,
+                        path: temp_root.join(&name),
+                        name,
+                        armed: true,
+                    });
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(e) => return Err(e.into()),
+            }
+        }
+        Err(Error::SnapshotNameExhausted)
+    }
+    fn cleanup(&mut self) -> Result<()> {
+        if !self.armed {
+            return Ok(());
+        }
+        // Only this exclusively created, mode-0700 namespace is traversed.
+        remove_contents(&*self.dir)?;
+        self.parent.rmdir(&self.name)?;
+        self.armed = false;
+        Ok(())
+    }
+}
+fn remove_contents(dir: &dyn provenant_supervisor::fs::SafeDir) -> Result<()> {
+    for name in dir.entries()? {
+        let name = name?;
+        let metadata = dir.metadata_at(&name, false)?;
+        if metadata.kind == provenant_supervisor::fs::FileKind::Directory {
+            let child = dir.open_verified_directory(&name)?;
+            remove_contents(&*child)?;
+            dir.rmdir(&name)?;
+        } else {
+            dir.unlink(&name)?;
+        }
+    }
+    Ok(())
+}
+impl Drop for PrivateSnapshot {
+    fn drop(&mut self) {
+        if self.armed {
+            if let Err(e) = self.cleanup() {
+                eprintln!("diagnostic snapshot cleanup failed: {e}");
+            }
+        }
+    }
 }

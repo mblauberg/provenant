@@ -84,7 +84,6 @@ impl Store {
         // Independent of the injected clock and wait callback. This also bounds
         // frozen/backwards clocks and callbacks which return without waiting.
         let budget_ms = (seconds * 1000.0).clamp(0.0, 3_600_000.0).ceil() as u64;
-        let wall_deadline = Instant::now() + Duration::from_millis(budget_ms);
         let mut waited_ms = 0_u64;
         loop {
             let lease = self.landing_lease(project, self.now())?;
@@ -95,13 +94,16 @@ impl Store {
                 });
             }
             let remaining = deadline - self.now() as f64;
-            if remaining <= 0.0 || aborted() || waited_ms >= budget_ms || Instant::now() >= wall_deadline {
+            if remaining <= 0.0 || aborted() || waited_ms >= budget_ms {
                 return Ok(LandingWait {
                     changed: false,
                     lease,
                 });
             }
-            let delay = poll_ms.max(1).min(remaining.max(1.0) as u64).min(budget_ms - waited_ms);
+            let delay = poll_ms
+                .max(1)
+                .min(remaining.max(1.0) as u64)
+                .min(budget_ms - waited_ms);
             waited_ms += delay;
             wait(Duration::from_millis(delay));
         }
@@ -202,7 +204,13 @@ impl Store {
             let changed = self.db.execute("UPDATE landing_leases SET pushing_until = ? WHERE project = ? AND generation = ? AND (pushing_until IS NULL OR pushing_until <= ?)", params![until, who.project, generation, now])?;
             if changed != 1 { return Err(Error::PushInProgress); } Ok(())
         })?;
-        let mut hold = PushHold { store: self, project: &who.project, owner: &owner, generation, armed: true };
+        let mut hold = PushHold {
+            store: self,
+            project: &who.project,
+            owner: &owner,
+            generation,
+            armed: true,
+        };
         let result = match push() {
             Ok(result) => result,
             Err(error) => {

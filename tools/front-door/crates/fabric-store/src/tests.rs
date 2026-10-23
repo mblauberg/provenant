@@ -38,11 +38,25 @@ fn sessions_fence_active_turns_and_keep_last_clean_pointer() {
         provider: "codex".into(),
     };
     assert!(matches!(
-        store.claim_session_turn_with_id(&who, "Review", None, SessionTurnKind::Start, 123, "claim-a"),
+        store.claim_session_turn_with_id(
+            &who,
+            "Review",
+            None,
+            SessionTurnKind::Start,
+            123,
+            "claim-a"
+        ),
         Ok(SessionClaim::Claim { .. })
     ));
     assert!(matches!(
-        store.claim_session_turn_with_id(&who, "Review", None, SessionTurnKind::Start, 124, "claim-b"),
+        store.claim_session_turn_with_id(
+            &who,
+            "Review",
+            None,
+            SessionTurnKind::Start,
+            124,
+            "claim-b"
+        ),
         Ok(SessionClaim::Conflict { .. })
     ));
     store
@@ -422,7 +436,9 @@ fn diagnostic_incomplete_claim_schema_and_foreign_keys_are_reported() {
 fn only_plain_busy_and_locked_are_retryable() {
     for (code, expected) in [(5, true), (6, true), (517, false), (262, false)] {
         let error = Error::Sqlite(rusqlite::Error::SqliteFailure(
-            rusqlite::ffi::Error::new(code), None));
+            rusqlite::ffi::Error::new(code),
+            None,
+        ));
         assert_eq!(is_sqlite_contention(&error), expected);
     }
 }
@@ -441,15 +457,29 @@ fn landing_release_refusals_round_trip_without_losing_reason() {
 fn panicking_push_clears_its_hold_and_preserves_the_lease() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(&dir.path().join("db"), 5000, Fixed(1000)).unwrap();
-    let who = Identity { project: "p".into(), agent_id: "a".into(), provider: "codex".into() };
+    let who = Identity {
+        project: "p".into(),
+        agent_id: "a".into(),
+        provider: "codex".into(),
+    };
     let sha = "a".repeat(40);
     store.acquire_landing(&who, "s", &sha, 60, 1000).unwrap();
     let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        store.with_landing_push(&who, "s", 1, &sha, || -> Result<()> { panic!("push panicked") })
+        store.with_landing_push(&who, "s", 1, &sha, || -> Result<()> {
+            panic!("push panicked")
+        })
     }));
     assert!(panic.is_err());
-    assert!(store.landing_lease("p", 1000).unwrap().unwrap().pushing_until_ms.is_none());
-    assert!(store.try_release_landing(&who, "s", 1, Some(1000)).unwrap().released());
+    assert!(store
+        .landing_lease("p", 1000)
+        .unwrap()
+        .unwrap()
+        .pushing_until_ms
+        .is_none());
+    assert!(store
+        .try_release_landing(&who, "s", 1, Some(1000))
+        .unwrap()
+        .released());
 }
 
 #[test]
@@ -457,27 +487,132 @@ fn landing_wait_is_bounded_when_the_clock_is_frozen() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(&dir.path().join("db"), 5000, Fixed(1000)).unwrap();
     let mut polls = 0;
-    let result = store.wait_landing("p", 0.005, 1, || false, |_| { polls += 1; }).unwrap();
+    let result = store
+        .wait_landing(
+            "p",
+            0.005,
+            1,
+            || false,
+            |_| {
+                polls += 1;
+            },
+        )
+        .unwrap();
     assert!(!result.changed);
     assert!(polls <= 5);
     for seconds in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, f64::MAX] {
-        assert!(matches!(store.wait_landing("p", seconds, 1, || false, |_| {}), Err(Error::NumberOutOfRange)));
+        assert!(matches!(
+            store.wait_landing("p", seconds, 1, || false, |_| {}),
+            Err(Error::NumberOutOfRange)
+        ));
     }
 }
 
 // Thread-safe fixture time is an explicit clock boundary, not global state.
 pub(super) struct TimeCell(std::sync::atomic::AtomicI64);
 impl TimeCell {
-    pub(super) fn new(ms: i64) -> Self { Self(std::sync::atomic::AtomicI64::new(ms)) }
-    pub(super) fn get(&self) -> i64 { self.0.load(std::sync::atomic::Ordering::SeqCst) }
-    pub(super) fn set(&self, ms: i64) { self.0.store(ms, std::sync::atomic::Ordering::SeqCst); }
+    pub(super) fn new(ms: i64) -> Self {
+        Self(std::sync::atomic::AtomicI64::new(ms))
+    }
+    pub(super) fn get(&self) -> i64 {
+        self.0.load(std::sync::atomic::Ordering::SeqCst)
+    }
+    pub(super) fn set(&self, ms: i64) {
+        self.0.store(ms, std::sync::atomic::Ordering::SeqCst);
+    }
 }
 
 #[test]
 fn connection_can_transfer_to_its_only_worker_owner() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(&dir.path().join("db"), 5000, Fixed(1000)).unwrap();
-    std::thread::spawn(move || store.note(&Identity {
-        project: "p".into(), agent_id: "worker".into(), provider: "codex".into(),
-    }, "one owner")).join().unwrap().unwrap();
+    std::thread::spawn(move || {
+        store.note(
+            &Identity {
+                project: "p".into(),
+                agent_id: "worker".into(),
+                provider: "codex".into(),
+            },
+            "one owner",
+        )
+    })
+    .join()
+    .unwrap()
+    .unwrap();
+}
+
+#[test]
+fn store_creates_private_parents_and_follows_directory_links() {
+    use std::os::unix::fs::{symlink, PermissionsExt};
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("one/two/db");
+    Store::open(&path, 5000, Fixed(1000))
+        .unwrap()
+        .close()
+        .unwrap();
+    assert_eq!(
+        std::fs::metadata(path.parent().unwrap())
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o700
+    );
+    symlink(temp.path().join("one"), temp.path().join("link")).unwrap();
+    Store::open(&temp.path().join("link/three/db"), 5000, Fixed(1000))
+        .unwrap()
+        .close()
+        .unwrap();
+    assert!(temp.path().join("one/three/db").exists());
+}
+
+#[test]
+fn diagnostics_use_private_wal_snapshot_and_remove_every_temporary_file() {
+    let temp = tempfile::tempdir().unwrap();
+    let scratch = tempfile::tempdir().unwrap();
+    let path = temp.path().join("db");
+    let store = Store::open(&path, 5000, Fixed(1000)).unwrap();
+    let who = Identity {
+        project: "p".into(),
+        agent_id: "a".into(),
+        provider: "codex".into(),
+    };
+    store.announce(&who).unwrap();
+    store.note(&who, "in WAL").unwrap();
+    let before_main = std::fs::read(&path).unwrap();
+    let before_wal = std::fs::read(temp.path().join("db-wal")).unwrap();
+    let report = inspect_database_with_filesystem(
+        &path,
+        "p",
+        DiagnosticMode::Doctor,
+        &provenant_supervisor::fs::LocalFs,
+        scratch.path(),
+    );
+    assert_eq!(report.status, DiagnosticStatus::Ok);
+    assert_eq!(report.counts.unwrap().activity, 1);
+    assert_eq!(std::fs::read(&path).unwrap(), before_main);
+    assert_eq!(
+        std::fs::read(temp.path().join("db-wal")).unwrap(),
+        before_wal
+    );
+    assert_eq!(std::fs::read_dir(scratch.path()).unwrap().count(), 0);
+    let report = inspect_database_with_filesystem(
+        &temp.path().join("absent/never"),
+        "p",
+        DiagnosticMode::Status,
+        &provenant_supervisor::fs::LocalFs,
+        scratch.path(),
+    );
+    assert_eq!(report.status, DiagnosticStatus::Absent);
+    assert!(!temp.path().join("absent").exists());
+    std::fs::write(temp.path().join("bad"), b"not sqlite").unwrap();
+    let report = inspect_database_with_filesystem(
+        &temp.path().join("bad"),
+        "p",
+        DiagnosticMode::Doctor,
+        &provenant_supervisor::fs::LocalFs,
+        scratch.path(),
+    );
+    assert_eq!(report.status, DiagnosticStatus::Error);
+    assert_eq!(std::fs::read_dir(scratch.path()).unwrap().count(), 0);
 }

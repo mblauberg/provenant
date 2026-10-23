@@ -1410,3 +1410,22 @@ then passed after repair. Extended JSON/native-path reader gaps remain partial.
   fields remain serde integers. The legacy-row differential compares failures,
   absent/null fallbacks, arrays, booleans, radix strings, decimal/scientific
   String spellings, fractional cursor reads and all database rows.
+
+### RP-FS3-005 deterministic-clock refinement
+
+- The final implementation uses the cumulative poll budget as an iteration
+  ceiling (at most 3,600,000 one-millisecond polls). It does not use a real-time
+  deadline to shorten virtual-clock fixtures. This still bounds frozen or
+  backwards clocks and preserves deterministic finite-clock results.
+
+## RP-FS3-006: safe diagnostic copies and filesystem diagnostics (library, partial)
+
+- Unit-04 adopts supervisor's safe filesystem API from main at `7021182d`.
+  Stat errors for common errno values retain Node wording; snapshot version
+  checks exclude ctime and retries/cleanup match source policy.
+- The API can stat a final symlink with follow=true but its regular-file
+  read-open always uses O_NOFOLLOW. TypeScript copyFileSync follows the final
+  symlink. Unit-04 stays partial until supervisor exposes an explicitly
+  link-following regular-file read. Source/binding-only copy errors (including
+  destination-path text) also remain a cut-over gap. This is not an approved
+  symlink refusal or a claim of full error-text parity.

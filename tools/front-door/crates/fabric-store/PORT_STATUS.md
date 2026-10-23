@@ -1,83 +1,90 @@
 # Fabric store port status
 
-Rulebook: **PORTING.md version 4**. Batch: `port/fabric-store-2`.
-Source/oracle revision: `600dec09bcda3b6a86272e391420e89d38777953`.
-`runtime/fabric/src/store.ts` last changed at
-`c80d6a7c90c240a6272fdcea1ec4fdc6ce88c74a`. The oracle imports that tracked
-TypeScript module unchanged and the schema is included directly from
-`runtime/fabric/schema.sql`. This crate was an empty scaffold at batch start;
-there was no batch-1 status or implementation on main.
+Rulebook: **PORTING.md version 4**. Batch: `port/fabric-store-3`.
+Author route: `codex/gpt-6.1-sol@high`.
+Source/oracle: `runtime/fabric/src/store.ts` last changed at
+`c80d6a7c90c240a6272fdcea1ec4fdc6ce88c74a`; unchanged by this lane.
+Schema: included directly from `runtime/fabric/schema.sql`.
+Main's supervisor safe filesystem owner was adopted after merging
+`7021182d535f6c730c29713e77d5bca76893fd06`. No rebase or cut-over.
 
 ## Unit status
 
-- `runtime/fabric/src/store.ts#unit-01`: **partial**. Agent/project listing,
-  explicit close, issue/path work claims, renewal, verification and release are
-  implemented with generation fencing, rollback and checked JSON from records.
-  Remaining: safe recursive parent creation in `Store::open`, awaiting the
-  supervisor API. `laneTaskId` is now covered by unit-03's dynamic row boundary.
+- `runtime/fabric/src/store.ts#unit-01`: **ported**. Constructor bootstrap,
+  safe mode-0700 parent creation, close, announcements, seat/project listing,
+  issue/path work claims and generation-fenced renew/verify/release are
+  implemented. `lane_task_id` is shared with the legacy terminal boundary.
 - `runtime/fabric/src/store.ts#unit-02`: **ported**. Landing leases, bounded
   waits, push cleanup, named sessions, send and inbox policy are implemented.
-  UUID generation is an injected `IdSource`, consumed at the source's system
-  boundary, including failed sends and session conflicts. Native entropy stays
-  with the supervisor; no unsafe implementation is copied into the store.
+  UUID generation takes an injected `IdSource` at the source's system boundary,
+  including failed sends and session conflicts.
 - `runtime/fabric/src/store.ts#unit-03`: **ported**. Claim completion, digest,
   acknowledgements, observations, teams, cooperative tasks and activity are
-  implemented. `TerminalRow` retains absent versus null fields, `lane_task_id`
-  applies the source fallback, and terminal acknowledgement performs ECMAScript
-  String/Number coercion before SQLite binding. Generated task IDs take the
-  injected UUID prefix. Checked JSON uses the shared records owner.
-- `runtime/fabric/src/store.ts#unit-04`: **partial**. Nullable message-link
-  migrations, recipient aliases/teams/broadcast policy and diagnostic status/
-  doctor queries are implemented. The private main/WAL snapshot, inode/mtime
-  version checks, bounded three-attempt copy, absent/error filesystem paths
-  and cleanup await the supervisor safe filesystem API. `inspect_snapshot`
-  accepts an already isolated snapshot; it does not substitute a live open.
+  implemented. `TerminalRow` retains absent versus null fields, task fallback,
+  ECMAScript String/Number coercion and SQLite failure ordering. Generated
+  task IDs take the injected UUID prefix. Checked JSON uses the records owner.
+- `runtime/fabric/src/store.ts#unit-04`: **partial**. Migration tolerance,
+  routing, diagnostic counts/checks, absent/stat-error paths, private main/WAL
+  snapshots, exact dev/inode/size/mtime version checks, three-attempt copying,
+  query-only inspection and cleanup are implemented. The supervisor's safe
+  read-open API refuses final symlinks; TypeScript's copyFileSync follows
+  them. Full main/WAL symlink parity needs a safe read-open variant that follows
+  the final link and verifies a regular file. No local unsafe or raw OS copy
+  substitutes for that missing API. Filesystem binding-only error wording is
+  also a compatibility gap (RP-FS3-003 and RP-FS3-006).
 
-The crate is inert. No command calls it. Tests open temporary databases only.
-Opening a database whose parent is missing awaits safe directory creation;
-`Store::open` currently requires an existing parent. Work-claim operations,
-agent/project listing and a default connection constructor from unit-01 are
-outside this batch.
+No units were skipped. Only complete unit IDs are in `ported.txt`.
+The crate is inert; no command calls it. Tests open temporary databases only.
+Each connection has one owning thread at a time; Store is Send and not Sync.
+No transaction spans a wait or a push callback.
 
 ## Pending shared owners
 
 - `pending::Identity`: minimal project/seat/provider view of the runtime
-  caller. Main has the broader `fabric-runtime::identity::Identity`, but
-  importing that crate here would reverse R2's dependency direction and form
-  a cycle. Keep the private-module view until a lower-layer shared contract
-  exists; the runtime integration must convert its owned identity explicitly.
-- `pending::IdSource`: UUID entropy contract owned by `provenant-supervisor`;
-  no unsafe or ad hoc entropy implementation is supplied.
-- `pending` ECMAScript trim, numeric-key and UTF-16 slicing helpers belong in
-  `provenant-core`, including `pending::js_iso` for full-range `Date.toISOString`. They are
-  JavaScript compatibility, not Python copies. The `provenant-core::py`
-  helpers landed on main at `2420674b`; their Python trim, slicing, numeric
-  and datetime rules do not replace these ECMAScript contracts.
+  caller. Importing fabric-runtime would reverse R2 and form a cycle; runtime
+  integration converts its own identity explicitly.
+- `pending::IdSource`: injected UUID contract, owned by supervisor. Its safe
+  filesystem API has temporary-name entropy, but no UUID API. Generation timing
+  and UUID-prefix policy are ported; the store does not implement OS entropy.
+- `pending` ECMAScript whitespace, numeric parsing/stringification, UTF-16
+  slicing and full-range Date ISO formatting belong in core. These are
+  JavaScript contracts; `provenant_core::py` has different Python semantics and
+  does not replace them. No private Python compatibility or checked-JSON codec
+  is retained; production decoding uses `provenant_records::checked_json`.
+- Unit-04 final-link copying awaits supervisor's explicit link-following
+  regular-file read capability. The rest uses `provenant_supervisor::fs`
+  (`SafeFs`, `SafeDir`, `SafeFile`); no private syscall/lock implementation.
+
+## Review repairs
+
+1. `a71d4cf9` records unit-01's partial scope; subsequent unit commits add its
+   remaining policy and adopt safe parent creation.
+2. `81fbe0d6` fixes exact extended contention codes and records invalid-wait
+   refusals plus binding diagnostics.
+3. `eb9f4d31` decodes refusal records first, preserving `reason`.
+4. `b658bd09` records the deliberate ECMAScript Number exception.
+5. `c7469881` makes absent loaders/spawn errors skip in optional mode and adds
+   the required-mode missing-Node self-test.
+6. `d8bf48fa` clears push holds on unwinding; explicit cleanup errors propagate.
+   Abort/SIGKILL still rely on the persisted bounded fence.
+7. `af0c6fad` adds typed errors, diagnostic status, message/task traits, injected
+   ID defaults and Send without Sync. Clocks and safe filesystem handles are
+   explicit seams too.
+8. `34bedbeb` bounds landing polling independently of the injected clock.
+9. `3d11bcea` adds Node edge/failure differentials, including cross-thread locks.
 
 ## Evidence and cut-over gaps
 
-Targeted Rust policy tests and TypeScript differentials compare returned
-records/errors and every database row plus `sqlite_master` schema. Fixtures
-inject time and UUID entropy at those system boundaries only. Node runs with
-an explicit environment, a 30-second child deadline and bounded output.
-`PROVENANT_PORT_DIFF_REQUIRED=1` refuses absent or old Node interpreters.
-J1/J2/J3, platform conformance and live command cut-over remain with their
-owners. CI gates the PR; local results do not establish command acceptance.
+Tests compare JSON result bytes, every database row, sqlite_master and pragmas
+against the unchanged TypeScript Store. New fixtures cover work fencing,
+rollback, default ID failure order, dynamic terminal records, routing and seat
+errors, live push holds, deterministic wait changes, cross-thread contention,
+private WAL snapshots, absent/invalid/stat-error paths, retry bounds and cleanup.
+Only explicit fixture paths and the Node loader's unrelated cache directory are
+normalised/excluded; retained data and record numbers compare exactly.
 
-## Batch verification
-
-- `cargo fmt --all`: passed.
-- `cargo clippy -p provenant-fabric-store --all-targets -- -D warnings`: passed.
-- `PROVENANT_PORT_DIFF_REQUIRED=1 cargo test -p provenant-fabric-store`:
-  15 tests passed, including seven TypeScript differentials; zero doc tests.
-- Oracle: Node v24.15.0, better-sqlite3 13.0.3, SQLite 3.53.4. Differential
-  fixtures compare each typed result's serialised JSON bytes as well as
-  semantic results, schema and all rows. Covered failures include logging
-  rollback, push failure/release warning, stale/expired claims and write-lock
-  contention; the Date fixture covers both TimeClip limits and signed years.
-- Independent native source review found diagnostic count-key ordering. The
-  typed ordered counts record and serialised-record comparisons fix it.
-  The same review also confirmed the specific session lookup must filter
-  before decoding unrelated rows; that repair is included.
-- No unit is fully ported, so `ported.txt` is unchanged. No units were skipped.
-  No intentional behaviour divergence or command cut-over is accepted here.
+Node uses an explicit environment, isolated TMPDIR, a 30-second deadline and
+bounded captured output. Optional missing/old interpreters or missing loaders
+print `skip:`; required mode fails. Node is v24.15.0, better-sqlite3 13.0.3.
+J1/J2/J3 and platform cut-over conformance remain with their owners. CI gates
+this PR. The chair owns the cross-family review and auto-merge decision.

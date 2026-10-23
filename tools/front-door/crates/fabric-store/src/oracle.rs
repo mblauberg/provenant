@@ -86,14 +86,19 @@ fn node_with(scenario: &str, interpreter: &std::ffi::OsStr, required: bool) -> O
     let source = root.join("runtime/fabric/src/store.ts");
     let loader = root.join("node_modules/tsx/dist/loader.mjs");
     if !loader.exists() {
-        return unavailable("oracle requires the checkout's installed tsx dependency", required);
+        return unavailable(
+            "oracle requires the checkout's installed tsx dependency",
+            required,
+        );
     }
     let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/oracle.mjs");
+    std::fs::create_dir(directory.path().join("scratch")).unwrap();
     let mut command = Command::new(interpreter);
     command
         .env_clear()
         .env("PATH", std::env::var_os("PATH").unwrap_or_default())
         .env("NODE_NO_WARNINGS", "1")
+        .env("TMPDIR", directory.path().join("scratch"))
         .arg("--import")
         .arg(loader)
         .arg(fixture)

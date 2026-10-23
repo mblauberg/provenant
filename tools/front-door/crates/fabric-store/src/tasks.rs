@@ -64,7 +64,10 @@ impl Store {
                     .optional()?
                     .is_some()
             {
-                return Err(Error::TeamAgentCollision { team: team_id.into(), project: who.project.clone() });
+                return Err(Error::TeamAgentCollision {
+                    team: team_id.into(),
+                    project: who.project.clone(),
+                });
             }
             self.db.execute(
                 "INSERT OR IGNORE INTO teams(project, team_id, created_at) VALUES (?, ?, ?)",
@@ -87,11 +90,20 @@ impl Store {
             members: effective,
         })
     }
-    pub fn create_task(&self, who: &Identity, objective: &str, options: CreateTaskOptions<'_>, ids: &dyn IdSource) -> Result<Task> {
+    pub fn create_task(
+        &self,
+        who: &Identity,
+        objective: &str,
+        options: CreateTaskOptions<'_>,
+        ids: &dyn IdSource,
+    ) -> Result<Task> {
         let generated;
         let task = match options.task_id {
             Some(id) => id,
-            None => { generated = pending::js_slice(&ids.uuid()?, 8); &generated }
+            None => {
+                generated = pending::js_slice(&ids.uuid()?, 8);
+                &generated
+            }
         };
         self.create_task_with_id(who, objective, task, options.owner, options.depends_on)
     }
@@ -137,7 +149,10 @@ impl Store {
                 params![state, self.now(), who.project, task_id],
             )? == 0
             {
-                return Err(Error::TaskMissing { task: task_id.into(), project: who.project.clone() });
+                return Err(Error::TaskMissing {
+                    task: task_id.into(),
+                    project: who.project.clone(),
+                });
             }
             self.log(
                 who,
@@ -180,7 +195,9 @@ impl Store {
         self.tasks(project, None)?
             .into_iter()
             .find(|t| t.task_id == task_id)
-            .ok_or_else(|| Error::TaskVanished { task: task_id.into() })
+            .ok_or_else(|| Error::TaskVanished {
+                task: task_id.into(),
+            })
     }
     pub fn note(&self, who: &Identity, detail: &str) -> Result<()> {
         self.log(who, "note", detail)

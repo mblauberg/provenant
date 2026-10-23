@@ -487,6 +487,7 @@ version = "0.1.0"
 dependencies = [
  "jiff",
  "provenant-records",
+ "provenant-supervisor",
  "rusqlite",
  "serde",
  "serde_json",

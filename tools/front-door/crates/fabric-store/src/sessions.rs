@@ -89,8 +89,13 @@ impl Store {
             .collect()
     }
     pub fn claim_session_turn(
-        &self, who: &Identity, name: &str, observed_claim: Option<&str>,
-        kind: SessionTurnKind, pid: i64, ids: &dyn IdSource,
+        &self,
+        who: &Identity,
+        name: &str,
+        observed_claim: Option<&str>,
+        kind: SessionTurnKind,
+        pid: i64,
+        ids: &dyn IdSource,
     ) -> Result<SessionClaim> {
         let claim = ids.uuid()?;
         self.claim_session_turn_with_id(who, name, observed_claim, kind, pid, &claim)

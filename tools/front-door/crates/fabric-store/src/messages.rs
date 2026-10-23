@@ -88,11 +88,20 @@ pub struct LaneAttempt {
 
 impl Store {
     pub fn send(
-        &self, who: &Identity, to: &str, body: &str, options: SendOptions<'_>,
-        context: RecipientContext<'_>, ids: &dyn IdSource,
+        &self,
+        who: &Identity,
+        to: &str,
+        body: &str,
+        options: SendOptions<'_>,
+        context: RecipientContext<'_>,
+        ids: &dyn IdSource,
     ) -> Result<Sent> {
-        if options.task_id == Some("") { return Err(Error::EmptyTaskId); }
-        if options.output_path == Some("") { return Err(Error::EmptyOutputPath); }
+        if options.task_id == Some("") {
+            return Err(Error::EmptyTaskId);
+        }
+        if options.output_path == Some("") {
+            return Err(Error::EmptyOutputPath);
+        }
         let id = ids.uuid()?;
         self.send_with_id(who, to, body, options, context, &id)
     }
@@ -193,11 +202,7 @@ impl Store {
         options: &InboxOptions<'_>,
         now: i64,
     ) -> Result<Vec<(Message, Option<i64>)>> {
-        let ids = options
-            .ids
-            .map(serde_json::to_string)
-            .transpose()
-            ?;
+        let ids = options.ids.map(serde_json::to_string).transpose()?;
         let rows = self.db.prepare("SELECT m.message_id, m.sender_id, m.body, m.kind, m.conversation_id, m.reply_to, m.task_id, m.output_path, m.created_at, c.expires_at
             FROM deliveries d JOIN messages m ON m.message_id = d.message_id LEFT JOIN delivery_claims c ON c.message_id = d.message_id AND c.recipient_id = d.recipient_id
             WHERE d.project = ? AND d.recipient_id = ? AND d.read_at IS NULL AND m.created_at >= ?
@@ -260,7 +265,9 @@ impl Store {
             let attempt = row.attempt.as_f64().ok_or(Error::NumberOutOfRange)?;
             if row.run_id.is_empty()
                 || row.task_id.is_empty()
-                || attempt < 0.0 || attempt > MAX_SAFE_INTEGER as f64 || attempt.fract() != 0.0
+                || attempt < 0.0
+                || attempt > MAX_SAFE_INTEGER as f64
+                || attempt.fract() != 0.0
             {
                 continue;
             }
@@ -274,7 +281,12 @@ impl Store {
     pub fn mark_lanes_seen(&self, who: &Identity, rows: &[LaneAttempt]) -> Result<()> {
         self.transaction(true, || {
             for row in rows {
-                self.record_observation(who, &row.run_id, &row.task_id, row.attempt.as_f64().ok_or(Error::NumberOutOfRange)?)?;
+                self.record_observation(
+                    who,
+                    &row.run_id,
+                    &row.task_id,
+                    row.attempt.as_f64().ok_or(Error::NumberOutOfRange)?,
+                )?;
             }
             Ok(())
         })
@@ -341,7 +353,11 @@ impl Store {
         let mut agents = self.agent_ids(&who.project)?;
         agents.sort_by_cached_key(|a| a.encode_utf16().collect::<Vec<_>>());
         let teams = self.db.prepare("SELECT DISTINCT team_id FROM team_members WHERE project = ? AND agent_id != ? ORDER BY team_id")?.query_map(params![who.project, who.agent_id], |r| r.get::<_, String>(0))?.collect::<std::result::Result<Vec<_>, _>>()?;
-        Ok(Error::UnboundRecipient { to: to.into(), agents, teams })
+        Ok(Error::UnboundRecipient {
+            to: to.into(),
+            agents,
+            teams,
+        })
     }
     fn resolve_recipients(
         &self,
@@ -364,9 +380,7 @@ impl Store {
                     .filter(|p| !p.is_empty() && contains(p))
                     .or(chair)
             };
-            seat.ok_or_else(|| {
-                self.recipient_fix(who, to).unwrap_or_else(|e| e)
-            })?
+            seat.ok_or_else(|| self.recipient_fix(who, to).unwrap_or_else(|e| e))?
         } else {
             to
         };

@@ -2,11 +2,13 @@
 #![forbid(unsafe_code)]
 
 mod diagnostics;
+mod filesystem;
 mod landing;
 mod messages;
 mod pending;
 mod sessions;
 mod tasks;
+pub use filesystem::FilesystemError;
 mod legacy;
 pub use legacy::*;
 mod work;
@@ -33,6 +35,12 @@ pub type Result<T> = std::result::Result<T, Error>;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
+    #[error("database changed while creating a diagnostic snapshot")]
+    SnapshotChanged,
+    #[error("could not reserve a private diagnostic snapshot directory")]
+    SnapshotNameExhausted,
+    #[error(transparent)]
+    Filesystem(#[from] FilesystemError),
     #[error("Cannot convert object to primitive value")]
     PrimitiveConversion,
     #[error("SQLite3 can only bind numbers, strings, bigints, buffers, and null")]
@@ -46,9 +54,9 @@ pub enum Error {
     #[error("at most 100 paths may be claimed")]
     TooManyPaths,
     #[error("invalid repository-relative path: {path}")]
-    InvalidWorkPath {path:String},
+    InvalidWorkPath { path: String },
     #[error("work already claimed by {holder} until {until}")]
-    WorkHeld {holder:String,until:String},
+    WorkHeld { holder: String, until: String },
     #[error(transparent)]
     Sqlite(#[from] rusqlite::Error),
     #[error(transparent)]
@@ -107,7 +115,11 @@ pub enum Error {
     #[error("task {task} does not exist in project {project}")]
     LinkedTaskMissing { task: String, project: String },
     #[error("no delivery {message} for {agent} in {project}")]
-    DeliveryMissing { message: String, agent: String, project: String },
+    DeliveryMissing {
+        message: String,
+        agent: String,
+        project: String,
+    },
     #[error("claim {claim} does not own delivery {message}")]
     DeliveryNotOwned { claim: String, message: String },
     #[error("claim {claim} for delivery {message} has expired")]
@@ -115,7 +127,12 @@ pub enum Error {
     #[error("agent label {agent} collides with an existing team id in {project}")]
     AgentTeamCollision { agent: String, project: String },
     #[error("agent label {agent} in {project} already belongs to client seat {existing}; refusing seat {refused}")]
-    SeatMismatch { agent: String, project: String, existing: String, refused: String },
+    SeatMismatch {
+        agent: String,
+        project: String,
+        existing: String,
+        refused: String,
+    },
     #[error("team id {team} collides with an agent label in {project}")]
     TeamAgentCollision { team: String, project: String },
     #[error("no task {task} in {project}")]
@@ -127,10 +144,18 @@ pub enum Error {
     #[error("task {task} vanished during update")]
     TaskVanished { task: String },
     #[error("unbound recipient \"{to}\"; fix: pass to:<seat> from these valid recipients: labels/seats: {}; teams: {}; all", recipient_list(.agents), recipient_list(.teams))]
-    UnboundRecipient { to: String, agents: Vec<String>, teams: Vec<String> },
+    UnboundRecipient {
+        to: String,
+        agents: Vec<String>,
+        teams: Vec<String>,
+    },
 }
 fn recipient_list(values: &[String]) -> String {
-    if values.is_empty() { "none".into() } else { values.join(", ") }
+    if values.is_empty() {
+        "none".into()
+    } else {
+        values.join(", ")
+    }
 }
 
 pub fn is_sqlite_contention(error: &Error) -> bool {
@@ -155,9 +180,25 @@ pub struct Store {
     clock: Box<dyn Clock>,
 }
 impl Store {
-    /// The runtime owns directory creation. This opens exactly the supplied path.
+    /// Create missing parents with mode 0700, then bootstrap exactly this path.
     pub fn open(path: &Path, busy_timeout_ms: u64, clock: impl Clock + 'static) -> Result<Self> {
+        Self::open_with_filesystem(
+            path,
+            busy_timeout_ms,
+            clock,
+            &provenant_supervisor::fs::LocalFs,
+        )
+    }
+    pub fn open_with_filesystem(
+        path: &Path,
+        busy_timeout_ms: u64,
+        clock: impl Clock + 'static,
+        fs: &dyn provenant_supervisor::fs::SafeFs,
+    ) -> Result<Self> {
         validate_timeout(busy_timeout_ms)?;
+        let parent = filesystem::parent_and_name(path).0;
+        filesystem::directory(fs, parent, true)
+            .map_err(|e| FilesystemError::new("mkdir", parent, e))?;
         let db = Connection::open(path)?;
         db.busy_timeout(Duration::from_millis(busy_timeout_ms))?;
         let store = Self {
