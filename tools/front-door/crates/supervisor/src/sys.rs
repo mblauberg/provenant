@@ -57,38 +57,55 @@ pub fn account(account: Account<'_>) -> Result<Option<AccountInfo>, SysError> {
     loop {
         let mut entry = std::mem::MaybeUninit::<libc::passwd>::uninit();
         let mut result = std::ptr::null_mut();
-        // SAFETY: entry, result and the writable buffer are disjoint live
-        // allocations of the required sizes. Named input is NUL-terminated.
-        // The _r calls borrow the buffers, return an errno (not errno global),
-        // and put any returned string pointers inside buffer. No static passwd
-        // storage or owning handles escape; concurrent calls are independent.
-        let status = unsafe {
-            match account {
-                Account::Current => libc::getpwuid_r(
-                    libc::getuid(),
-                    entry.as_mut_ptr(),
-                    buffer.as_mut_ptr().cast(),
-                    buffer.len(),
-                    &mut result,
-                ),
-                Account::Uid(uid) => libc::getpwuid_r(
-                    uid,
-                    entry.as_mut_ptr(),
-                    buffer.as_mut_ptr().cast(),
-                    buffer.len(),
-                    &mut result,
-                ),
-                Account::Named(_) => match &name {
-                    Some(name) => libc::getpwnam_r(
-                        name.as_ptr(),
+        let status = match account {
+            Account::Current => {
+                // SAFETY: getuid reads only the current real UID and retains
+                // no pointers or mutable process state.
+                let uid = unsafe { libc::getuid() };
+                // SAFETY: entry, result and buffer are disjoint live
+                // allocations of the required sizes. The _r call borrows the
+                // buffers and places returned strings inside our buffer.
+                unsafe {
+                    libc::getpwuid_r(
+                        uid,
                         entry.as_mut_ptr(),
                         buffer.as_mut_ptr().cast(),
                         buffer.len(),
                         &mut result,
-                    ),
-                    None => return Err(failure(io::Error::from_raw_os_error(libc::EINVAL))),
-                },
+                    )
+                }
             }
+            Account::Uid(uid) => {
+                // SAFETY: entry, result and buffer are disjoint live
+                // allocations of the required sizes. The _r call borrows the
+                // buffers and places returned strings inside our buffer.
+                unsafe {
+                    libc::getpwuid_r(
+                        uid,
+                        entry.as_mut_ptr(),
+                        buffer.as_mut_ptr().cast(),
+                        buffer.len(),
+                        &mut result,
+                    )
+                }
+            }
+            Account::Named(_) => match &name {
+                Some(name) => {
+                    // SAFETY: named input is NUL-terminated; entry, result
+                    // and buffer are disjoint live allocations of the
+                    // required sizes. Returned strings point into buffer.
+                    unsafe {
+                        libc::getpwnam_r(
+                            name.as_ptr(),
+                            entry.as_mut_ptr(),
+                            buffer.as_mut_ptr().cast(),
+                            buffer.len(),
+                            &mut result,
+                        )
+                    }
+                }
+                None => return Err(failure(io::Error::from_raw_os_error(libc::EINVAL))),
+            },
         };
         if status == libc::EINTR {
             continue;
@@ -106,24 +123,22 @@ pub fn account(account: Account<'_>) -> Result<Option<AccountInfo>, SysError> {
         if result.is_null() {
             return Ok(None);
         }
-        // SAFETY: success with non-null result initialises entry. Both string
-        // pointers refer to NUL-terminated strings in our live buffer; copy
-        // them before the next call or buffer drop. Null fields are refused.
-        // Nothing is shared with other threads or transferred to libc.
-        unsafe {
-            let entry = entry.assume_init();
-            if entry.pw_dir.is_null() {
-                return Ok(None);
-            }
-            return Ok(Some(AccountInfo {
-                name: if entry.pw_name.is_null() {
-                    OsString::new()
-                } else {
-                    OsString::from_vec(CStr::from_ptr(entry.pw_name).to_bytes().to_vec())
-                },
-                home: OsString::from_vec(CStr::from_ptr(entry.pw_dir).to_bytes().to_vec()),
-            }));
+        // SAFETY: success with non-null result means getpw*_r initialised entry.
+        let entry = unsafe { entry.assume_init() };
+        if entry.pw_dir.is_null() {
+            return Ok(None);
         }
+        let name = if entry.pw_name.is_null() {
+            OsString::new()
+        } else {
+            // SAFETY: the successful _r call returned a NUL-terminated name
+            // pointer into our live buffer; it is copied before the next call.
+            OsString::from_vec(unsafe { CStr::from_ptr(entry.pw_name) }.to_bytes().to_vec())
+        };
+        // SAFETY: the successful _r call returned a NUL-terminated home
+        // pointer into our live buffer; it is copied before the next call.
+        let home = OsString::from_vec(unsafe { CStr::from_ptr(entry.pw_dir) }.to_bytes().to_vec());
+        return Ok(Some(AccountInfo { name, home }));
     }
 }
 
@@ -406,16 +421,17 @@ pub(crate) fn fixture_wait_policy(mode: &str) -> io::Result<()> {
         "wait-policy-no-wait" => action.sa_flags = libc::SA_NOCLDWAIT,
         "wait-policy-handler" => action.sa_sigaction = handler as *const () as usize,
         "wait-policy-blocked" => {
-            // SAFETY: the fixture exclusively owns this thread's signal mask.
-            // Both calls borrow live mask storage and retain no pointer. Blocking
-            // SIGCHLD does not discard wait status; child pre-exec resets masks.
-            unsafe {
-                if libc::sigaddset(&mut action.sa_mask, libc::SIGCHLD) != 0
-                    || libc::sigprocmask(libc::SIG_BLOCK, &action.sa_mask, std::ptr::null_mut())
-                        != 0
-                {
-                    return Err(io::Error::last_os_error());
-                }
+            // SAFETY: the fixture owns the live mask storage; sigaddset
+            // mutates only that object and retains no pointer.
+            if unsafe { libc::sigaddset(&mut action.sa_mask, libc::SIGCHLD) } != 0 {
+                return Err(io::Error::last_os_error());
+            }
+            // SAFETY: this dedicated fixture changes only its own thread mask;
+            // the pointer is borrowed for the call and is not retained.
+            if unsafe { libc::sigprocmask(libc::SIG_BLOCK, &action.sa_mask, std::ptr::null_mut()) }
+                != 0
+            {
+                return Err(io::Error::last_os_error());
             }
             return Ok(());
         }

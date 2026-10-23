@@ -1,6 +1,6 @@
 use provenant_core::{AttemptId, CancelToken, RunId, WaitBudget};
 use provenant_supervisor::{
-    ChildRegistry, GuardianHooks, RegisteredChild,
+    ChildRegistry, ExitPublisher, GuardianHooks, RegisteredChild,
     census::{Census, CensusError, ProcessIdentity, ProcessObservation, ProcessObserver},
     clock::SystemClock,
     custody::*,
@@ -11,7 +11,7 @@ use provenant_supervisor::{
 use std::error::Error;
 use std::ffi::OsStr;
 use std::ffi::OsString;
-use std::io;
+use std::io::{self, Read};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -154,6 +154,8 @@ fn start(
         resolved_route: "fixture/provider".into(),
         permission_plan_digest: provenant_core::Digest::from_bytes([0; 32]),
         task: provenant_core::TaskId::from_bytes([3; 16]),
+        protected_commands: fixture::protected_commands(),
+        config_environment: fixture::config_environment(),
         argv: fixture::argv_with_args(scenario, extra)?,
         environment: fixture::environment(root),
         cwd: root.into(),
@@ -296,6 +298,17 @@ fn normal_exit_and_terminal_beyond_capture_cap(root: &Path) -> Result<()> {
         Some(provenant_supervisor::exec::Termination::Exit(0))
     );
     assert!(exit.terminal_observed);
+    assert!(!exit.unresolved_cleanup);
+    #[cfg(target_os = "macos")]
+    {
+        let record: serde_json::Value = serde_json::from_slice(&std::fs::read(
+            root.join("normal-attempt/process-exit.json"),
+        )?)?;
+        assert_eq!(
+            record["settlement_evidence"],
+            "darwin_census_and_writer_lease"
+        );
+    }
     assert_eq!(exit.stdout.bytes, 14);
     assert_eq!(
         std::fs::read(root.join("normal-attempt/stdout.log"))?,
@@ -439,6 +452,8 @@ fn never_spawned_cancel_is_published_and_the_fence_can_advance(root: &Path) -> R
         resolved_route: "fixture/provider".into(),
         permission_plan_digest: provenant_core::Digest::from_bytes([0; 32]),
         task: provenant_core::TaskId::from_bytes([3; 16]),
+        protected_commands: fixture::protected_commands(),
+        config_environment: fixture::config_environment(),
         argv: fixture::argv("exit")?,
         environment: fixture::environment(root),
         cwd: root.into(),
@@ -499,6 +514,8 @@ fn terminal_frame_closes_provider_stdin(root: &Path) -> Result<()> {
         resolved_route: "fixture/provider".into(),
         permission_plan_digest: provenant_core::Digest::from_bytes([0; 32]),
         task: provenant_core::TaskId::from_bytes([3; 16]),
+        protected_commands: fixture::protected_commands(),
+        config_environment: fixture::config_environment(),
         argv: fixture::argv("terminal-stdin")?,
         environment: fixture::environment(root),
         cwd: root.into(),
@@ -573,7 +590,10 @@ fn setsid_descendant_is_tracked_before_exit_and_cleanup_is_conservative(root: &P
     #[cfg(target_os = "linux")]
     assert!(!exit.unresolved_cleanup);
     #[cfg(target_os = "macos")]
-    assert!(exit.unresolved_cleanup);
+    assert!(
+        exit.unresolved_cleanup,
+        "a live setsid descendant still holds custody"
+    );
     drop(descendant_stream);
     wait_for_identity_absence(&descendant)?;
     Ok(())
@@ -756,6 +776,203 @@ fn stale_complete_census_does_not_signal_a_late_shared_group_owner(root: &Path) 
     Ok(())
 }
 
+fn reservation_identity(writer_path: &Path, field: &str) -> Result<ProcessIdentity> {
+    let value: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(writer_path.join("reservation.json"))?)?;
+    serde_json::from_value(
+        value
+            .get(field)
+            .filter(|identity| !identity.is_null())
+            .cloned()
+            .ok_or_else(|| io::Error::other(format!("reservation omitted {field} identity")))?,
+    )
+    .map_err(Into::into)
+}
+
+fn assert_peer_open(stream: &mut UnixStream) -> Result<()> {
+    stream.set_nonblocking(true)?;
+    let mut byte = [0];
+    let result = stream.read(&mut byte);
+    stream.set_nonblocking(false)?;
+    match result {
+        Err(error) if error.kind() == io::ErrorKind::WouldBlock => Ok(()),
+        Ok(0) => Err(io::Error::other("provider closed its control socket").into()),
+        Ok(_) => Err(io::Error::other("provider wrote unexpected control data").into()),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn checkpoint_enospc_setup(root: &Path) -> Result<PathBuf> {
+    let state_dir = root.join("PROVENANT_STATE_DIR");
+    std::fs::create_dir_all(&state_dir)?;
+    std::fs::write(
+        state_dir.join(fixture::S2_EXIT_PUBLICATION_CONFIG),
+        b"enospc-post-link-sync-v1\n",
+    )?;
+    std::fs::write(
+        state_dir.join(fixture::S2_PROCESS_CHECKPOINT_ENOSPC),
+        b"inject checkpoint ENOSPC",
+    )?;
+    Ok(state_dir)
+}
+
+fn checkpoint_failure_preserves_terminal_publication(root: &Path) -> Result<()> {
+    let state_dir = checkpoint_enospc_setup(root)?;
+    let socket = root.join("terminal-checkpoint.sock");
+    let listener = UnixListener::bind(&socket)?;
+    let (_writer, handle) = start(
+        root,
+        "terminal-checkpoint",
+        "terminal-blocked",
+        &[socket.into_os_string()],
+        CapturePlan::default(),
+    )?;
+    let mut held = fixture::fixture_accept(&listener, Duration::from_secs(5))?;
+    byte(&mut held, b'R')?;
+    wait_for_file(&state_dir.join(fixture::S2_PROCESS_CHECKPOINT_FAILED))?;
+    assert_peer_open(&mut held)?;
+    drop(held);
+
+    let exit = exited(&handle)?;
+    assert!(
+        exit.terminal_observed,
+        "terminal frame must survive checkpoint failure"
+    );
+    assert_eq!(exit.stop_reason, None);
+    assert!(exit.delivered_signals.is_empty());
+    assert_eq!(
+        exit.termination,
+        Some(provenant_supervisor::exec::Termination::Exit(0))
+    );
+    assert!(
+        root.join("terminal-checkpoint-attempt/process-exit.json")
+            .is_file()
+    );
+    Ok(())
+}
+
+fn checkpoint_enospc_while_provider_lives_never_signals_it(root: &Path) -> Result<()> {
+    let state_dir = checkpoint_enospc_setup(root)?;
+    let socket = root.join("checkpoint-live.sock");
+    let listener = UnixListener::bind(&socket)?;
+    let (_writer, handle) = start(
+        root,
+        "checkpoint-live",
+        "wait-on-socket",
+        &[socket.into_os_string()],
+        CapturePlan::default(),
+    )?;
+    let mut held = fixture::fixture_accept(&listener, Duration::from_secs(5))?;
+    byte(&mut held, b'R')?;
+    wait_for_file(&state_dir.join(fixture::S2_PROCESS_CHECKPOINT_FAILED))?;
+    assert_peer_open(&mut held)?;
+    drop(held);
+
+    let exit = exited(&handle)?;
+    assert_eq!(exit.stop_reason, None);
+    assert!(exit.delivered_signals.is_empty());
+    assert_eq!(
+        exit.termination,
+        Some(provenant_supervisor::exec::Termination::Exit(0))
+    );
+    Ok(())
+}
+
+fn guardian_signal_requests_provider_stop(root: &Path, signal: i32, label: &str) -> Result<()> {
+    let socket = root.join(format!("guardian-{label}.sock"));
+    let listener = UnixListener::bind(&socket)?;
+    let name = format!("guardian-{label}");
+    let (_writer, handle) = start(
+        root,
+        &name,
+        "socket-blocked",
+        &[socket.into_os_string()],
+        CapturePlan::default(),
+    )?;
+    let mut held = fixture::fixture_accept(&listener, Duration::from_secs(5))?;
+    byte(&mut held, b'R')?;
+    let writer = root.join(format!("{name}-writer"));
+    let guardian = reservation_identity(&writer, "guardian")?;
+    fixture::signal_recorded_process(&guardian, signal)?;
+
+    let exit = exited(&handle)?;
+    assert_eq!(exit.stop_reason, Some(StopReason::SupervisorSignal));
+    assert!(exit.delivered_signals.contains(&i64::from(libc::SIGTERM)));
+    assert_eq!(
+        exit.termination,
+        Some(provenant_supervisor::exec::Termination::Signal(i64::from(
+            libc::SIGKILL
+        )))
+    );
+    wait_for_identity_absence(&guardian)?;
+    Ok(())
+}
+
+fn guardian_sigterm_uses_supervisor_signal_path(root: &Path) -> Result<()> {
+    guardian_signal_requests_provider_stop(root, libc::SIGTERM, "term")
+}
+fn guardian_sigint_uses_supervisor_signal_path(root: &Path) -> Result<()> {
+    guardian_signal_requests_provider_stop(root, libc::SIGINT, "int")
+}
+fn guardian_sighup_uses_supervisor_signal_path(root: &Path) -> Result<()> {
+    guardian_signal_requests_provider_stop(root, libc::SIGHUP, "hup")
+}
+
+fn wait_for_zombie(identity: &ProcessIdentity) -> Result<()> {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        match fixture::RecordedBootObserver.observe(identity.pid) {
+            ProcessObservation::Present(fact) if fact.identity == *identity && fact.zombie => {
+                return Ok(());
+            }
+            ProcessObservation::Absent => return Ok(()),
+            _ if Instant::now() < deadline => std::thread::yield_now(),
+            other => {
+                return Err(io::Error::other(format!("provider did not exit: {other:?}")).into());
+            }
+        }
+    }
+}
+
+fn natural_exit_races_cancel(root: &Path) -> Result<()> {
+    let state_dir = root.join("PROVENANT_STATE_DIR");
+    std::fs::create_dir_all(&state_dir)?;
+    std::fs::write(state_dir.join(S2_CENSUS_GATE_ONCE), b"hold guardian census")?;
+    let socket = root.join("natural-cancel-race.sock");
+    let listener = UnixListener::bind(&socket)?;
+    let (_writer, handle) = start(
+        root,
+        "natural-cancel-race",
+        "wait-on-socket",
+        &[socket.into_os_string()],
+        CapturePlan::default(),
+    )?;
+    let mut held = fixture::fixture_accept(&listener, Duration::from_secs(5))?;
+    byte(&mut held, b'R')?;
+    wait_for_file(&state_dir.join(S2_CENSUS_PAUSED))?;
+
+    let provider = reservation_identity(&root.join("natural-cancel-race-writer"), "provider")?;
+    assert_eq!(
+        stop(&handle, StopReason::ExplicitCancellation)?,
+        StopReceipt::Requested
+    );
+    drop(held);
+    wait_for_zombie(&provider)?;
+    std::fs::write(
+        state_dir.join(S2_CENSUS_RELEASE),
+        b"resume after natural exit",
+    )?;
+
+    let exit = exited(&handle)?;
+    assert_eq!(
+        exit.termination,
+        Some(provenant_supervisor::exec::Termination::Exit(0))
+    );
+    assert_eq!(exit.stop_reason, None);
+    assert!(exit.delivered_signals.is_empty());
+    Ok(())
+}
+
 fn bounded_reap(child: &mut std::process::Child) -> Result<()> {
     let end = Instant::now() + Duration::from_secs(5);
     loop {
@@ -771,7 +988,7 @@ fn bounded_reap(child: &mut std::process::Child) -> Result<()> {
 fn owner_death_keeps_guardian_and_writer_live(root: &Path) -> Result<()> {
     let listener = UnixListener::bind(root.join("orphan.sock"))?;
     let owner_listener = UnixListener::bind(root.join("owner-ready.sock"))?;
-    let mut owner = fixture::command("s2-owner", root)?.spawn()?;
+    let mut owner = fixture::ChildGuard::new(fixture::command("s2-owner", root)?.spawn()?);
     let mut held = fixture::fixture_accept(&listener, Duration::from_secs(5))?;
     byte(&mut held, b'R')?;
     let mut ready = fixture::fixture_accept(&owner_listener, Duration::from_secs(5))?;
@@ -787,7 +1004,10 @@ fn owner_death_keeps_guardian_and_writer_live(root: &Path) -> Result<()> {
         &CancelToken::new(),
         &clock,
     );
-    assert!(lock.is_err());
+    assert!(matches!(
+        lock,
+        Err(provenant_supervisor::fs::FsError::LockTimeout { .. })
+    ));
     assert!(!root.join("orphan-attempt/process-exit.json").exists());
     drop(held);
     let handle = reattach(
@@ -798,6 +1018,8 @@ fn owner_death_keeps_guardian_and_writer_live(root: &Path) -> Result<()> {
         exited(&handle)?.termination,
         Some(provenant_supervisor::exec::Termination::Exit(0))
     );
+    let guardian = reservation_identity(&root.join("orphan-writer"), "guardian")?;
+    wait_for_identity_absence(&guardian)?;
     assert!(matches!(
         fixture::acquire_writer(
             Directory::open_anchor(&root.join("orphan-writer"))?,
@@ -806,8 +1028,7 @@ fn owner_death_keeps_guardian_and_writer_live(root: &Path) -> Result<()> {
             &CancelToken::new(),
             &clock
         ),
-        Err(CustodyError::Fenced
-            | CustodyError::Filesystem(provenant_supervisor::fs::FsError::LockTimeout { .. }))
+        Err(CustodyError::Fenced)
     ));
     Ok(())
 }
@@ -825,6 +1046,18 @@ fn guardian_loss_never_invents_exit_or_releases_the_reservation(root: &Path) -> 
     byte(&mut held, b'R')?;
     drop(writer);
     let clock = SystemClock::new();
+    // The live provider retains the inherited lease after guardian loss.
+    let writer_path = root.join("crash-writer");
+    let provider = reservation_identity(&writer_path, "provider")?;
+    let locked = acquire_recovery(
+        Directory::open_anchor(&writer_path)?,
+        WaitBudget::cli(provenant_core::MonoTime::from_micros(0), 1)?,
+        &CancelToken::new(), &clock,
+    );
+    assert!(matches!(locked, Err(CustodyError::Filesystem(provenant_supervisor::fs::FsError::LockTimeout { .. }))));
+    assert!(!root.join("crash-attempt/process-exit.json").exists());
+    drop(held);
+    wait_for_identity_absence(&provider)?;
     let recovery = acquire_recovery(
         Directory::open_anchor(&root.join("crash-writer"))?,
         budget(&clock)?,
@@ -842,7 +1075,6 @@ fn guardian_loss_never_invents_exit_or_releases_the_reservation(root: &Path) -> 
             .verify_settlement(&Directory::open_anchor(unrelated.path())?)
             .is_err()
     );
-    drop(held);
     drop(recovery);
     assert!(root.join("crash-writer/reservation.json").exists());
     Ok(())
@@ -895,6 +1127,113 @@ fn wall_deadline_is_the_execution_bound(root: &Path) -> Result<()> {
     Ok(())
 }
 
+const TESTS: &[&str] = &[
+    "writer_is_fenced_after_every_descriptor_closes",
+    "normal_exit_and_terminal_beyond_capture_cap",
+    "cancelled_reader_preserves_healthy_custody_and_cancel_escalates",
+    "publication_failure_retains_the_lease_and_retries_without_overwrite",
+    "never_spawned_cancel_is_published_and_the_fence_can_advance",
+    "terminal_frame_closes_provider_stdin",
+    "owner_death_keeps_guardian_and_writer_live",
+    "guardian_loss_never_invents_exit_or_releases_the_reservation",
+    "capture_failure_never_requests_a_stop",
+    "wall_deadline_is_the_execution_bound",
+    "setsid_descendant_is_tracked_before_exit_and_cleanup_is_conservative",
+    "nested_owner_stays_protected_when_native_custody_proof_is_uncertain",
+    "stale_complete_census_does_not_signal_a_late_shared_group_owner",
+    "guardian_sigterm_uses_supervisor_signal_path",
+    "guardian_sigint_uses_supervisor_signal_path",
+    "guardian_sighup_uses_supervisor_signal_path",
+    "checkpoint_failure_preserves_terminal_publication",
+    "checkpoint_enospc_while_provider_lives_never_signals_it",
+    "natural_exit_races_cancel",
+];
+
+fn settle_writers(root: &Path) -> Result<()> {
+    for entry in std::fs::read_dir(root)? {
+        let entry = entry?;
+        if entry
+            .file_name()
+            .to_str()
+            .is_some_and(|name| name.ends_with("-writer"))
+        {
+            let clock = SystemClock::new();
+            let _settled = Directory::open_anchor(&entry.path())?.lock(
+                OsStr::new("writer.lock"),
+                LockMode::Exclusive,
+                budget(&clock)?,
+                &CancelToken::new(),
+                &clock,
+            )?;
+        }
+    }
+    Ok(())
+}
+
+fn run_case(name: &str) -> Result<()> {
+    let root = tempfile::Builder::new().prefix("s2-").tempdir_in("/tmp")?;
+    let cleanup = fixture::ProcessCleanupGuard::new(root.path());
+    let result = match name {
+        "writer_is_fenced_after_every_descriptor_closes" => {
+            writer_is_fenced_after_every_descriptor_closes(root.path())
+        }
+        "normal_exit_and_terminal_beyond_capture_cap" => {
+            normal_exit_and_terminal_beyond_capture_cap(root.path())
+        }
+        "cancelled_reader_preserves_healthy_custody_and_cancel_escalates" => {
+            cancelled_reader_preserves_healthy_custody_and_cancel_escalates(root.path())
+        }
+        "publication_failure_retains_the_lease_and_retries_without_overwrite" => {
+            publication_failure_retains_the_lease_and_retries_without_overwrite(root.path())
+        }
+        "never_spawned_cancel_is_published_and_the_fence_can_advance" => {
+            never_spawned_cancel_is_published_and_the_fence_can_advance(root.path())
+        }
+        "terminal_frame_closes_provider_stdin" => terminal_frame_closes_provider_stdin(root.path()),
+        "owner_death_keeps_guardian_and_writer_live" => {
+            owner_death_keeps_guardian_and_writer_live(root.path())
+        }
+        "guardian_loss_never_invents_exit_or_releases_the_reservation" => {
+            guardian_loss_never_invents_exit_or_releases_the_reservation(root.path())
+        }
+        "capture_failure_never_requests_a_stop" => {
+            capture_failure_never_requests_a_stop(root.path())
+        }
+        "wall_deadline_is_the_execution_bound" => wall_deadline_is_the_execution_bound(root.path()),
+        "setsid_descendant_is_tracked_before_exit_and_cleanup_is_conservative" => {
+            setsid_descendant_is_tracked_before_exit_and_cleanup_is_conservative(root.path())
+        }
+        "nested_owner_stays_protected_when_native_custody_proof_is_uncertain" => {
+            nested_owner_stays_protected_when_native_custody_proof_is_uncertain(root.path())
+        }
+        "stale_complete_census_does_not_signal_a_late_shared_group_owner" => {
+            stale_complete_census_does_not_signal_a_late_shared_group_owner(root.path())
+        }
+        "guardian_sigterm_uses_supervisor_signal_path" => {
+            guardian_sigterm_uses_supervisor_signal_path(root.path())
+        }
+        "guardian_sigint_uses_supervisor_signal_path" => {
+            guardian_sigint_uses_supervisor_signal_path(root.path())
+        }
+        "guardian_sighup_uses_supervisor_signal_path" => {
+            guardian_sighup_uses_supervisor_signal_path(root.path())
+        }
+        "checkpoint_failure_preserves_terminal_publication" => {
+            checkpoint_failure_preserves_terminal_publication(root.path())
+        }
+        "checkpoint_enospc_while_provider_lives_never_signals_it" => {
+            checkpoint_enospc_while_provider_lives_never_signals_it(root.path())
+        }
+        "natural_exit_races_cancel" => natural_exit_races_cancel(root.path()),
+        _ => return Err(io::Error::new(io::ErrorKind::NotFound, "unknown custody test").into()),
+    };
+    if result.is_ok() {
+        settle_writers(root.path())?;
+        cleanup.disarm();
+    }
+    result
+}
+
 fn main() -> Result<()> {
     let args: Vec<_> = std::env::args_os().skip(1).collect();
     if args.first().is_some_and(|a| a == "internal")
@@ -905,11 +1244,16 @@ fn main() -> Result<()> {
             .ok_or_else(|| io::Error::from(io::ErrorKind::NotFound))?;
         let registry = FileChildRegistry { home };
         let observer = CensusGateObserver;
+        let publisher = match std::env::var_os("PROVENANT_STATE_DIR") {
+            Some(path) => fixture::ExitPublicationFaults::from_state_dir(&PathBuf::from(path))?,
+            None => None,
+        };
         provenant_supervisor::supervise(
             &args[2..],
             GuardianHooks {
                 children: Some(&registry),
                 observer: Some(&observer),
+                exit_publisher: publisher.as_ref().map(|item| item as &dyn ExitPublisher),
                 stdout_decoder: Some(&Decoder),
                 ..Default::default()
             },
@@ -924,36 +1268,8 @@ fn main() -> Result<()> {
     if fixture::dispatch()? {
         return Ok(());
     }
-    let root = tempfile::Builder::new().prefix("s2-").tempdir_in("/tmp")?;
-    writer_is_fenced_after_every_descriptor_closes(root.path())?;
-    normal_exit_and_terminal_beyond_capture_cap(root.path())?;
-    cancelled_reader_preserves_healthy_custody_and_cancel_escalates(root.path())?;
-    publication_failure_retains_the_lease_and_retries_without_overwrite(root.path())?;
-    never_spawned_cancel_is_published_and_the_fence_can_advance(root.path())?;
-    terminal_frame_closes_provider_stdin(root.path())?;
-    owner_death_keeps_guardian_and_writer_live(root.path())?;
-    guardian_loss_never_invents_exit_or_releases_the_reservation(root.path())?;
-    capture_failure_never_requests_a_stop(root.path())?;
-    wall_deadline_is_the_execution_bound(root.path())?;
-    setsid_descendant_is_tracked_before_exit_and_cleanup_is_conservative(root.path())?;
-    nested_owner_stays_protected_when_native_custody_proof_is_uncertain(root.path())?;
-    stale_complete_census_does_not_signal_a_late_shared_group_owner(root.path())?;
-    for entry in std::fs::read_dir(root.path())? {
-        let entry = entry?;
-        if entry
-            .file_name()
-            .to_str()
-            .is_some_and(|name| name.ends_with("-writer"))
-        {
-            let clock = SystemClock::new();
-            let _settled = Directory::open_anchor(&entry.path())?.lock(
-                OsStr::new("writer.lock"),
-                provenant_supervisor::fs::LockMode::Exclusive,
-                budget(&clock)?,
-                &CancelToken::new(),
-                &clock,
-            )?;
-        }
-    }
+    fixture::run_libtest(&args, TESTS, |name| {
+        run_case(name).map_err(|error| io::Error::other(error.to_string()))
+    })?;
     Ok(())
 }

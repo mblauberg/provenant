@@ -39,6 +39,7 @@ struct LaunchMessage {
     requester: provenant_core::ActorId,
     binding: StoredWriterBinding,
     executable_snapshot: ExecutableSnapshot,
+    protected_commands: Vec<String>,
     argv: Vec<Vec<u8>>,
     environment: Vec<(Vec<u8>, Vec<u8>)>,
     cwd: Vec<u8>,
@@ -50,7 +51,15 @@ pub(crate) fn handoff(
     capture: CapturePlan,
     publication: &PublicationReservation,
 ) -> Result<()> {
-    if !valid_resolved_route(&owned.command.resolved_route) {
+    if owned.command.protected_commands.len() > 128
+        || owned
+            .command
+            .protected_commands
+            .iter()
+            .any(|name| name.is_empty() || name.len() > 512)
+        || owned.command.config_environment.len() > 128
+        || !valid_resolved_route(&owned.command.resolved_route)
+    {
         return Err(CustodyError::InvalidRecord);
     }
     let executable_snapshot = snapshot_executable(
@@ -70,6 +79,7 @@ pub(crate) fn handoff(
         requester: owned.command.requester,
         binding: owned.writer.reservation.binding.clone(),
         executable_snapshot,
+        protected_commands: owned.command.protected_commands,
         argv: owned
             .command
             .argv
@@ -96,9 +106,10 @@ pub(crate) fn handoff(
     crate::sys::handoff::spawn(
         &owned.writer.directory,
         &publication.directory,
-        &owned.writer.lease,
+        owned.writer.lease.as_ref().ok_or(CustodyError::Fenced)?,
         &publication.custody,
         &owned.command.environment,
+        &owned.command.config_environment,
         &payload,
         Duration::from_micros(
             owned
@@ -107,7 +118,11 @@ pub(crate) fn handoff(
                 .as_micros(),
         ),
         owned.cancel,
-    )
+    )?;
+    // The guardian owns custody after ACK. Retaining this duplicate would make
+    // the descendant lease-absence proof depend on requester lifetime.
+    drop(owned.writer.lease.take());
+    Ok(())
 }
 
 /// Composition seam for Run's bounded provider decoder and confinement filter.
@@ -131,6 +146,15 @@ pub trait ExitPublisher {
         Ok(directory.atomic_write(
             OsStr::new("reservation.json"),
             ".reservation-",
+            bytes,
+            PublishMode::Replace,
+        )?)
+    }
+
+    fn checkpoint(&self, directory: &Directory, bytes: &[u8]) -> Result<Publication> {
+        Ok(directory.atomic_write(
+            OsStr::new("process.json"),
+            ".checkpoint-",
             bytes,
             PublishMode::Replace,
         )?)
@@ -299,6 +323,10 @@ pub fn supervise(args: &[OsString], hooks: GuardianHooks<'_>) -> Result<()> {
     let mut driver = Driver {
         spared: crate::census::SparingTracker::default(),
         tracked: std::collections::BTreeSet::new(),
+        history: std::collections::BTreeSet::new(),
+        history_complete: true,
+        protected_commands: message.protected_commands,
+        settlement_evidence: SettlementEvidence::Unresolved,
         reaped: Vec::new(),
         omitted_reaped: 0,
         delivered_signals: Vec::new(),
@@ -310,7 +338,7 @@ pub fn supervise(args: &[OsString], hooks: GuardianHooks<'_>) -> Result<()> {
         attempt: inherited.attempt_directory,
         writer_dir: inherited.writer_directory,
         reservation,
-        _writer: inherited.writer,
+        writer: Some(inherited.writer),
         _custody: inherited.custody,
         guardian,
         requester: message.requester,
@@ -332,7 +360,7 @@ struct Driver<'a> {
     attempt: Directory,
     writer_dir: Directory,
     reservation: Reservation,
-    _writer: crate::fs::LockGuard,
+    writer: Option<crate::fs::LockGuard>,
     _custody: crate::fs::LockGuard,
     guardian: ProcessIdentity,
     requester: provenant_core::ActorId,
@@ -342,6 +370,10 @@ struct Driver<'a> {
     exit_publisher: Option<&'a dyn ExitPublisher>,
     spared: crate::census::SparingTracker,
     tracked: std::collections::BTreeSet<ProcessIdentity>,
+    history: std::collections::BTreeSet<ProcessIdentity>,
+    history_complete: bool,
+    protected_commands: Vec<String>,
+    settlement_evidence: SettlementEvidence,
     reaped: Vec<ProcessIdentity>,
     omitted_reaped: u64,
     delivered_signals: Vec<i64>,
@@ -405,6 +437,7 @@ impl Driver<'_> {
                         !input.is_empty(),
                         plan.stdout.piped(),
                         plan.stderr.piped(),
+                        self.writer.as_ref().ok_or(CustodyError::Fenced)?,
                     )
                 }
                 Ok(_) => Err(io::Error::new(
@@ -447,6 +480,7 @@ impl Driver<'_> {
                     omitted_failed_deliveries: 0,
                     terminal_observed: false,
                     unresolved_cleanup: false,
+                    settlement_evidence: SettlementEvidence::NeverSpawned,
                     stdout: CaptureTotals::default(),
                     stderr: CaptureTotals::default(),
                     warnings: vec![
@@ -686,7 +720,7 @@ impl Driver<'_> {
                     Effect::DeliverStop(reason) if exit.is_none() => {
                         stop_reason.get_or_insert(reason);
                         stop_at.get_or_insert(now);
-                        let outcome = stop_delivery_outcome(child.stop(reason, false));
+                        let outcome = stop_delivery_outcome(child.stop(false));
                         self.record_delivery(
                             self.reservation.provider.clone(),
                             reason,
@@ -717,7 +751,7 @@ impl Driver<'_> {
                 && now >= at.saturating_add(plan.root_flush_ms.max(plan.descendant_grace_ms))
             {
                 let reason = stop_reason.unwrap_or(machine::StopReason::PostTerminalCleanup);
-                let outcome = stop_delivery_outcome(child.stop(reason, true));
+                let outcome = stop_delivery_outcome(child.stop(true));
                 self.record_delivery(
                     self.reservation.provider.clone(),
                     reason,
@@ -815,14 +849,15 @@ impl Driver<'_> {
                     last_cpu_progress_ms,
                     publication_pending: false,
                 };
-                if write_record(
-                    &self.attempt,
-                    "process.json",
-                    &observed,
-                    PublishMode::Replace,
-                )
-                .and_then(require_durable)
-                .is_err()
+                let system_publisher = SystemExitPublisher;
+                let checkpoint =
+                    serde_json::to_vec(&observed).map_err(|_| CustodyError::InvalidRecord)?;
+                if self
+                    .exit_publisher
+                    .unwrap_or(&system_publisher)
+                    .checkpoint(&self.attempt, &checkpoint)
+                    .and_then(require_durable)
+                    .is_err()
                 {
                     warn(
                         &mut warnings,
@@ -908,6 +943,7 @@ impl Driver<'_> {
             omitted_failed_deliveries: self.omitted_failed_deliveries,
             terminal_observed: terminal,
             unresolved_cleanup: unresolved,
+            settlement_evidence: self.settlement_evidence,
             stdout: totals.next().unwrap_or_default(),
             stderr: totals.next().unwrap_or_default(),
             warnings: warnings.clone(),
@@ -1019,6 +1055,7 @@ impl Driver<'_> {
         };
         let mut known_pids = std::collections::BTreeSet::from([root.pid, child.id()]);
         known_pids.extend(self.tracked.iter().map(|identity| identity.pid));
+        known_pids.extend(self.history.iter().map(|identity| identity.pid));
         known_pids.extend(self.protected.iter().map(|identity| identity.pid));
         known_pids.extend(self.spared.spared_identities().map(|identity| identity.pid));
         known_pids.extend(
@@ -1090,23 +1127,79 @@ impl Driver<'_> {
             if census.ancestry(&fact.identity, root) == crate::census::Ancestry::Yes
                 || fact.parent_pid == child.id()
                 || fact.identity.group_id == child.id()
+                || self.history.iter().any(|ancestor| {
+                    census.ancestry(&fact.identity, ancestor) == crate::census::Ancestry::Yes
+                })
             {
                 self.tracked.insert(fact.identity.clone());
+                if self.history.len() < crate::census::MAX_CENSUS_ENTRIES {
+                    self.history.insert(fact.identity.clone());
+                } else if !self.history.contains(&fact.identity) {
+                    self.history_complete = false;
+                }
             }
-            if matches!(
-                fact.command.as_deref(),
-                Some("codex-code-mode-host" | "codex-code-mode")
-            ) && (self.tracked.contains(&fact.identity) || fact.identity.group_id == child.id())
+            if fact
+                .command
+                .as_ref()
+                .is_some_and(|name| self.protected_commands.contains(name))
+                && (self.tracked.contains(&fact.identity) || fact.identity.group_id == child.id())
             {
                 self.protected.insert(fact.identity.clone());
             }
         }
-        self.tracked.retain(|identity|!matches!(census.process(identity.pid),crate::census::ProcessLookup::Absent) && !matches!(census.process(identity.pid),crate::census::ProcessLookup::Present(fact) if fact.identity!=*identity));
-        self.protected.retain(|identity|!matches!(census.process(identity.pid),crate::census::ProcessLookup::Absent) && !matches!(census.process(identity.pid),crate::census::ProcessLookup::Present(fact) if fact.identity!=*identity));
+        self.tracked
+            .retain(|identity| identity_still_possible(&census, identity));
+        self.protected
+            .retain(|identity| identity_still_possible(&census, identity));
         self.descendant_stop_allowed = !registry_unknown;
         self.reservation.census_incomplete = !census.is_complete();
         Some(census)
     }
+    #[cfg(target_os = "macos")]
+    fn darwin_quiescent(
+        &mut self,
+        child: &mut crate::sys::provider::ProviderGroup,
+        first: &crate::census::Census,
+    ) -> Result<bool> {
+        let Some(provider) = self.reservation.provider.clone() else {
+            return Ok(false);
+        };
+        if !self.history_complete
+            || !darwin_census_clear(first, &provider, &self.guardian, &self.history)
+        {
+            return Ok(false);
+        }
+        // Darwin lacks Linux's subreaper child list. Consume the dead direct
+        // provider only here, retaining attempt custody and the persistent fence.
+        let _ = child.cleanup(true)?;
+        if !child.quiescent_children()? {
+            return Ok(false);
+        }
+        crate::sys::wait_pause(Duration::from_millis(20));
+        let Some(second) = self.refresh_census(child) else {
+            return Ok(false);
+        };
+        if !self.history_complete
+            || !darwin_census_clear(&second, &provider, &self.guardian, &self.history)
+        {
+            return Ok(false);
+        }
+        // Close, never LOCK_UN: descendants share this open file description.
+        // A fresh nonblocking flock succeeds only after every inheritor closes.
+        drop(self.writer.take());
+        match self
+            .writer_dir
+            .try_lock(OsStr::new("writer.lock"), crate::fs::LockMode::Exclusive)
+        {
+            Ok(lease) => {
+                self.writer = Some(lease);
+                self.settlement_evidence = SettlementEvidence::DarwinCensusAndWriterLease;
+                Ok(true)
+            }
+            Err(_) => Ok(false),
+        }
+    }
+
     fn cleanup(
         &mut self,
         child: &mut crate::sys::provider::ProviderGroup,
@@ -1121,6 +1214,10 @@ impl Driver<'_> {
                     .saturating_add(100),
             );
         let began = Instant::now();
+        #[cfg(target_os = "macos")]
+        {
+            let _ = child.cleanup(true)?;
+        }
         loop {
             let Some(census) = self.refresh_census(child) else {
                 return Ok(false);
@@ -1154,11 +1251,18 @@ impl Driver<'_> {
                         }
                         crate::census::ProcessLookup::Unknown => true,
                     });
-            let complete = census.is_complete()
-                && !reaped.unresolved
-                && !outstanding
-                && child.quiescent_children().unwrap_or(false);
+            let census_clear = census.is_complete() && !reaped.unresolved && !outstanding;
+            #[cfg(target_os = "linux")]
+            let complete = census_clear && child.quiescent_children().unwrap_or(false);
+            #[cfg(target_os = "macos")]
+            let complete = census_clear && self.darwin_quiescent(child, &census)?;
+            #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+            let complete = false;
             if complete {
+                #[cfg(target_os = "linux")]
+                {
+                    self.settlement_evidence = SettlementEvidence::LinuxKernelChildren;
+                }
                 let _ = child.cleanup(true)?;
                 self.persist_tracking();
                 return Ok(true);
@@ -1172,14 +1276,14 @@ impl Driver<'_> {
             } else {
                 libc::SIGTERM
             };
-            let outcome = stop_delivery_outcome(child.stop(reason, escalation));
+            let outcome = stop_delivery_outcome(child.stop(escalation));
             self.record_delivery(self.reservation.provider.clone(), reason, signal, outcome);
             if outcome != DeliveryOutcome::Delivered {
                 push_warning(warnings, omitted, "post-terminal provider signal failed");
             }
             #[cfg(target_os = "linux")]
             if self.descendant_stop_allowed {
-                match child.stop_adopted(reason, escalation, &census, &spared) {
+                match child.stop_adopted(escalation, &census, &spared) {
                     Ok(deliveries) => {
                         for delivery in deliveries {
                             self.record_delivery(
@@ -1324,6 +1428,48 @@ fn snapshot_executable(path: &OsStr) -> io::Result<ExecutableSnapshot> {
     })
 }
 
+fn identity_still_possible(census: &crate::census::Census, identity: &ProcessIdentity) -> bool {
+    match census.process(identity.pid) {
+        crate::census::ProcessLookup::Absent => false,
+        crate::census::ProcessLookup::Present(fact) => fact.identity == *identity,
+        crate::census::ProcessLookup::Unknown => true,
+    }
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn darwin_census_clear(
+    census: &crate::census::Census,
+    provider: &ProcessIdentity,
+    guardian: &ProcessIdentity,
+    history: &std::collections::BTreeSet<ProcessIdentity>,
+) -> bool {
+    if !census.is_complete()
+        || identity_still_possible(census, provider)
+        || history
+            .iter()
+            .any(|identity| identity_still_possible(census, identity))
+    {
+        return false;
+    }
+    census.facts().all(|fact| {
+        // The guardian itself necessarily remains in the provider's session.
+        if fact.identity == *guardian {
+            return true;
+        }
+        if fact.identity == *provider
+            || fact.identity.group_id == provider.group_id
+            || fact.identity.session_id == provider.session_id
+            || history.contains(&fact.identity)
+        {
+            return false;
+        }
+        // Parent edges are useful only between current, start-stamped identities.
+        !history.iter().any(|ancestor| {
+            census.ancestry(&fact.identity, ancestor) != crate::census::Ancestry::No
+        })
+    })
+}
+
 fn valid_resolved_route(route: &str) -> bool {
     !route.is_empty() && route.len() <= 512 && !route.bytes().any(|byte| byte.is_ascii_control())
 }
@@ -1347,10 +1493,7 @@ fn stop_delivery_outcome(result: io::Result<bool>) -> DeliveryOutcome {
     }
 }
 
-pub(crate) fn session_absence(
-    reservation: &Reservation,
-    _observer: &dyn ProcessObserver,
-) -> RecoveryState {
+pub(crate) fn session_absence(reservation: &Reservation) -> RecoveryState {
     if reservation.unresolved_cleanup {
         RecoveryState::Unknown
     } else {
@@ -1377,5 +1520,90 @@ fn stream_policy(
             limit: limit as usize,
             sink: sink.unwrap_or(&ClosedTee),
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::census::{Census, ProcessFact};
+    use std::collections::BTreeSet;
+
+    fn identity(pid: i64, start: u64, group: i64, session: i64) -> ProcessIdentity {
+        ProcessIdentity {
+            boot: "darwin:test".into(),
+            pid,
+            native_start: start,
+            group_id: group,
+            session_id: session,
+        }
+    }
+    fn fact(identity: ProcessIdentity, parent_pid: i64) -> ProcessFact {
+        ProcessFact {
+            identity,
+            parent_pid,
+            zombie: false,
+            cpu_micros: None,
+            command: None,
+        }
+    }
+    fn census(facts: Vec<ProcessFact>, complete: bool) -> Census {
+        let absent: Vec<_> = [20, 30]
+            .into_iter()
+            .filter(|pid| !facts.iter().any(|fact| fact.identity.pid == *pid))
+            .collect();
+        Census::from_observations(facts, [], absent, complete, false, 100).unwrap()
+    }
+    #[test]
+    fn darwin_settlement_requires_complete_absence_of_members_and_recorded_escapes() {
+        let guardian = identity(10, 1, 10, 10);
+        let provider = identity(20, 2, 20, 10);
+        let escaped = identity(30, 3, 30, 30);
+        let history = BTreeSet::from([escaped.clone()]);
+        let clear = vec![fact(guardian.clone(), 1)];
+        assert!(darwin_census_clear(
+            &census(clear.clone(), true),
+            &provider,
+            &guardian,
+            &history
+        ));
+        assert!(!darwin_census_clear(
+            &census(clear.clone(), false),
+            &provider,
+            &guardian,
+            &history
+        ));
+        for survivor in [
+            provider.clone(),
+            identity(21, 4, 20, 99),
+            identity(22, 4, 99, 10),
+            escaped.clone(),
+        ] {
+            let mut facts = clear.clone();
+            facts.push(fact(survivor, 1));
+            assert!(!darwin_census_clear(
+                &census(facts, true),
+                &provider,
+                &guardian,
+                &history
+            ));
+        }
+        // Complete enumeration alone does not prove a known PID's absence.
+        let unknown_history = BTreeSet::from([identity(40, 3, 40, 40)]);
+        assert!(!darwin_census_clear(
+            &census(clear.clone(), true),
+            &provider,
+            &guardian,
+            &unknown_history
+        ));
+        // Reused PID with a different start stamp is not the recorded daemon.
+        let mut facts = clear;
+        facts.push(fact(identity(30, 40, 30, 30), 1));
+        assert!(darwin_census_clear(
+            &census(facts, true),
+            &provider,
+            &guardian,
+            &history
+        ));
     }
 }

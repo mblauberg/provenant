@@ -1,8 +1,285 @@
 //! Dev-only fixtures: dispatch scenario arguments before the test suite.
+use crate::census::ProcessObserver;
 use std::ffi::OsString;
 use std::io::{self, Read, Write};
+use std::ops::{Deref, DerefMut};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Child, Command};
+
+/// A process recorded by the guardian is terminated if its owning test fails.
+/// Successful tests disarm the guard after proving normal settlement.
+pub struct ProcessCleanupGuard {
+    root: PathBuf,
+    armed: bool,
+}
+impl ProcessCleanupGuard {
+    pub fn new(root: &Path) -> Self {
+        Self {
+            root: root.to_path_buf(),
+            armed: true,
+        }
+    }
+
+    pub fn disarm(mut self) {
+        self.armed = false;
+    }
+}
+impl Drop for ProcessCleanupGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            kill_recorded_processes(&self.root);
+        }
+    }
+}
+
+fn kill_recorded_processes(root: &Path) {
+    let mut custodians = std::collections::BTreeSet::new();
+    let mut dependents = std::collections::BTreeSet::new();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    loop {
+        collect_recorded_processes(root, &mut custodians, &mut dependents);
+        for identity in &dependents {
+            if process_identity_is_live(identity) {
+                let _ = signal_recorded_process(identity, libc::SIGKILL);
+            }
+        }
+        if dependents
+            .iter()
+            .all(|identity| !process_identity_is_live(identity))
+            || std::time::Instant::now() >= deadline
+        {
+            break;
+        }
+        std::thread::park_timeout(std::time::Duration::from_millis(25));
+    }
+    collect_recorded_processes(root, &mut custodians, &mut dependents);
+    for identity in custodians.iter().chain(dependents.iter()) {
+        if process_identity_is_live(identity) {
+            let _ = signal_recorded_process(identity, libc::SIGKILL);
+        }
+    }
+    let reap_deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    while std::time::Instant::now() < reap_deadline
+        && custodians
+            .iter()
+            .chain(dependents.iter())
+            .any(process_identity_is_live)
+    {
+        std::thread::park_timeout(std::time::Duration::from_millis(10));
+    }
+}
+
+fn collect_recorded_processes(
+    directory: &Path,
+    custodians: &mut std::collections::BTreeSet<crate::census::ProcessIdentity>,
+    dependents: &mut std::collections::BTreeSet<crate::census::ProcessIdentity>,
+) {
+    let Ok(entries) = std::fs::read_dir(directory) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Ok(metadata) = std::fs::symlink_metadata(&path) else {
+            continue;
+        };
+        if metadata.file_type().is_symlink() {
+            continue;
+        }
+        if metadata.is_dir() {
+            collect_recorded_processes(&path, custodians, dependents);
+            continue;
+        }
+        if !matches!(
+            entry.file_name().to_str(),
+            Some("reservation.json" | "process.json")
+        ) {
+            continue;
+        }
+        let Ok(bytes) = std::fs::read(&path) else {
+            continue;
+        };
+        let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+            continue;
+        };
+        if let Some(identity) = value.get("guardian").and_then(parse_identity) {
+            custodians.insert(identity);
+        }
+        if let Some(identity) = value.get("provider").and_then(parse_identity) {
+            dependents.insert(identity);
+        }
+        if let Some(descendants) = value
+            .get("descendants")
+            .and_then(serde_json::Value::as_array)
+        {
+            dependents.extend(descendants.iter().filter_map(parse_identity));
+        }
+    }
+}
+
+fn parse_identity(value: &serde_json::Value) -> Option<crate::census::ProcessIdentity> {
+    serde_json::from_value(value.clone()).ok()
+}
+
+#[allow(clippy::disallowed_methods)]
+pub fn signal_recorded_process(
+    identity: &crate::census::ProcessIdentity,
+    signal: i32,
+) -> io::Result<()> {
+    if !process_identity_is_live(identity) {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            "recorded process identity is absent",
+        ));
+    }
+    let pid = i32::try_from(identity.pid).map_err(|_| io::ErrorKind::InvalidInput)?;
+    let child = Command::new("/bin/kill")
+        .arg(format!("-{signal}"))
+        .arg(pid.to_string())
+        .spawn()?;
+    let mut child = ChildGuard::new(child);
+    let status = child.wait()?;
+    child.detach();
+    if status.success() {
+        Ok(())
+    } else {
+        Err(io::Error::other(
+            "kill command rejected the recorded process",
+        ))
+    }
+}
+
+fn process_identity_is_live(identity: &crate::census::ProcessIdentity) -> bool {
+    matches!(
+        RecordedBootObserver.observe(identity.pid),
+        crate::census::ProcessObservation::Present(fact) if fact.identity == *identity
+    )
+}
+
+/// Test fixture wrapper that kills and waits for an owned child during unwind.
+pub struct ChildGuard {
+    child: Child,
+    armed: bool,
+}
+impl ChildGuard {
+    pub fn new(child: Child) -> Self {
+        Self { child, armed: true }
+    }
+
+    /// Leave a deliberately detached fixture process alive after its setup succeeds.
+    pub fn detach(&mut self) {
+        self.armed = false;
+    }
+}
+impl Deref for ChildGuard {
+    type Target = Child;
+
+    fn deref(&self) -> &Self::Target {
+        &self.child
+    }
+}
+impl DerefMut for ChildGuard {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.child
+    }
+}
+impl Drop for ChildGuard {
+    fn drop(&mut self) {
+        if self.armed && !matches!(self.child.try_wait(), Ok(Some(_))) {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+        }
+    }
+}
+
+/// Minimal libtest command protocol for `harness = false` executables.
+pub fn run_libtest(
+    args: &[OsString],
+    test_names: &[&str],
+    mut run: impl FnMut(&str) -> io::Result<()>,
+) -> io::Result<()> {
+    let mut list = false;
+    let mut ignored = false;
+    let mut exact = None;
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].to_str() {
+            Some("--list") => list = true,
+            Some("--ignored") => ignored = true,
+            Some("--exact") => {
+                index += 1;
+                exact = Some(
+                    args.get(index)
+                        .and_then(|arg| arg.to_str())
+                        .ok_or(io::ErrorKind::InvalidInput)?,
+                );
+            }
+            Some("--format") => {
+                index += 1;
+                if args.get(index).and_then(|arg| arg.to_str()) != Some("terse") {
+                    return Err(io::ErrorKind::InvalidInput.into());
+                }
+            }
+            Some("--nocapture" | "--show-output" | "--quiet") => {}
+            Some("--test-threads") => index += 1,
+            Some(argument) if argument.starts_with("--test-threads=") => {}
+            Some(argument) if argument.starts_with("--color=") => {}
+            _ => return Err(io::ErrorKind::InvalidInput.into()),
+        }
+        index += 1;
+    }
+    if ignored {
+        return Ok(());
+    }
+    let selected: Vec<&str> = if let Some(name) = exact {
+        if !test_names.contains(&name) {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                "unknown exact test name",
+            ));
+        }
+        vec![name]
+    } else {
+        test_names.to_vec()
+    };
+    if list {
+        let mut stdout = io::stdout().lock();
+        for name in selected {
+            stdout.write_all(format!("{name}: test\n").as_bytes())?;
+        }
+        return Ok(());
+    }
+    for name in selected {
+        io::stdout().lock().write_all(format!("test {name} ... ").as_bytes())?;
+        run(name)?;
+        io::stdout().lock().write_all(b"ok\n")?;
+    }
+    Ok(())
+}
+
+pub fn config_environment() -> Vec<OsString> {
+    [
+        "HOME",
+        "PROVENANT_STATE_DIR",
+        "XDG_CONFIG_HOME",
+        "GIT_CONFIG_GLOBAL",
+        "GIT_CONFIG_NOSYSTEM",
+        "CLAUDE_CONFIG_DIR",
+        "CODEX_HOME",
+        "CURSOR_CONFIG_DIR",
+        "AGY_HOME",
+        "OPENCODE_CONFIG_DIR",
+    ]
+    .into_iter()
+    .map(OsString::from)
+    .collect()
+}
+
+pub fn protected_commands() -> Vec<String> {
+    ["codex-code-mode-host", "codex-code-mode"]
+        .into_iter()
+        .map(str::to_owned)
+        .collect()
+}
 
 pub fn environment(root: &Path) -> Vec<(OsString, OsString)> {
     let mut env = vec![
@@ -130,6 +407,8 @@ pub const S2_EXIT_PUBLICATION_CONFIG: &str = "s2-exit-publication.config";
 pub const S2_EXIT_PUBLICATION_ENOSPC_ONCE: &str = "s2-exit-publication.enospc-once";
 pub const S2_EXIT_PUBLICATION_SYNC_BLOCKED: &str = "s2-exit-publication.sync-blocked";
 pub const S2_EXIT_PUBLICATION_DURABLE: &str = "s2-exit-publication.durable";
+pub const S2_PROCESS_CHECKPOINT_ENOSPC: &str = "s2-process-checkpoint.enospc";
+pub const S2_PROCESS_CHECKPOINT_FAILED: &str = "s2-process-checkpoint.failed";
 pub const S2_RESERVATION_SYNC_BLOCKED: &str = "s2-reservation-sync-blocked";
 pub const S2_RESERVATION_SYNC_PENDING: &str = "s2-reservation-sync-pending";
 
@@ -153,6 +432,40 @@ impl ExitPublicationFaults {
     }
 }
 impl crate::ExitPublisher for ExitPublicationFaults {
+    fn checkpoint(
+        &self,
+        directory: &crate::fs::Directory,
+        bytes: &[u8],
+    ) -> crate::custody::Result<crate::fs::Publication> {
+        let fail = self.marker(S2_PROCESS_CHECKPOINT_ENOSPC);
+        match marker_present(&fail) {
+            Ok(true) => {
+                std::fs::write(
+                    self.marker(S2_PROCESS_CHECKPOINT_FAILED),
+                    b"ENOSPC injected",
+                )?;
+                Err(injected_fs_error(
+                    "fixture process checkpoint",
+                    PathBuf::from("process.json"),
+                    libc::ENOSPC,
+                )
+                .into())
+            }
+            Ok(false) => Ok(directory.atomic_write(
+                std::ffi::OsStr::new("process.json"),
+                ".process-",
+                bytes,
+                crate::fs::PublishMode::Replace,
+            )?),
+            Err(source) => Err(crate::fs::FsError::Io {
+                operation: "read fixture checkpoint marker",
+                path: fail,
+                source,
+            }
+            .into()),
+        }
+    }
+
     fn publish(
         &self,
         directory: &crate::fs::Directory,
@@ -291,13 +604,15 @@ pub fn dispatch() -> io::Result<bool> {
                 }
                 crate::sys::fixture_check_inherited_state(raw, true)?;
             } else {
-                let mut child = command_with_args(
-                    "inheritance-probe",
-                    &[raw.to_string().into()],
-                    &root,
-                    false,
-                )?
-                .spawn()?;
+                let mut child = ChildGuard::new(
+                    command_with_args(
+                        "inheritance-probe",
+                        &[raw.to_string().into()],
+                        &root,
+                        false,
+                    )?
+                    .spawn()?,
+                );
                 if !child.wait()?.success() {
                     return Err(io::Error::other(
                         "child inherited parent descriptors or signals",
@@ -357,10 +672,11 @@ pub fn dispatch() -> io::Result<bool> {
             let socket = fixture_path(&args, 3)?.into_os_string();
             let exit_socket = fixture_path(&args, 4)?.into_os_string();
             let root = std::env::current_dir()?;
-            let mut child = command_with_args("hold-stdout", &[socket], &root, true)?;
-            let _ = child.spawn()?;
+            let mut child =
+                ChildGuard::new(command_with_args("hold-stdout", &[socket], &root, true)?.spawn()?);
             let mut exiting = std::os::unix::net::UnixStream::connect(exit_socket)?;
             exiting.write_all(b"E")?;
+            child.detach();
         }
         "s2-setsid-descendant" => {
             crate::sys::fixture_ignore_term()?;
@@ -374,12 +690,13 @@ pub fn dispatch() -> io::Result<bool> {
             let ready_socket = fixture_path(&args, 3)?.into_os_string();
             let gate_socket = fixture_path(&args, 4)?;
             let root = std::env::current_dir()?;
-            let mut descendant =
-                command_with_args("s2-setsid-descendant", &[ready_socket], &root, true)?;
-            let _ = descendant.spawn()?;
+            let mut descendant = ChildGuard::new(
+                command_with_args("s2-setsid-descendant", &[ready_socket], &root, true)?.spawn()?,
+            );
             let mut gate = std::os::unix::net::UnixStream::connect(gate_socket)?;
             gate.write_all(b"R")?;
             wait_for_eof(&mut gate)?;
+            descendant.detach();
         }
         "s2-registered-owner" => {
             let home = std::env::var_os("HOME")
@@ -420,12 +737,13 @@ pub fn dispatch() -> io::Result<bool> {
             let ready_socket = fixture_path(&args, 3)?.into_os_string();
             let gate_socket = fixture_path(&args, 4)?;
             let root = std::env::current_dir()?;
-            let mut owner =
-                command_with_args("s2-registered-owner", &[ready_socket], &root, false)?;
-            let _ = owner.spawn()?;
+            let mut owner = ChildGuard::new(
+                command_with_args("s2-registered-owner", &[ready_socket], &root, false)?.spawn()?,
+            );
             let mut gate = std::os::unix::net::UnixStream::connect(gate_socket)?;
             gate.write_all(b"R")?;
             wait_for_eof(&mut gate)?;
+            owner.detach();
         }
         "s2-late-registered-provider" => {
             let ready_socket = fixture_path(&args, 3)?.into_os_string();
@@ -435,12 +753,13 @@ pub fn dispatch() -> io::Result<bool> {
             let mut gate = std::os::unix::net::UnixStream::connect(launch_gate)?;
             gate.write_all(b"R")?;
             wait_for_eof(&mut gate)?;
-            let mut owner =
-                command_with_args("s2-registered-owner", &[ready_socket], &root, false)?;
-            let _ = owner.spawn()?;
+            let mut owner = ChildGuard::new(
+                command_with_args("s2-registered-owner", &[ready_socket], &root, false)?.spawn()?,
+            );
             let mut gate = std::os::unix::net::UnixStream::connect(hold_gate)?;
             gate.write_all(b"R")?;
             wait_for_eof(&mut gate)?;
+            owner.detach();
         }
         "wait-on-socket" => {
             let path = fixture_path(&args, 3)?;
@@ -453,6 +772,12 @@ pub fn dispatch() -> io::Result<bool> {
             let mut input = Vec::new();
             io::stdin().take(2 * 1024 * 1024).read_to_end(&mut input)?;
             io::stdout().write_all(b"EOF\n")?;
+        }
+        "terminal-blocked" => {
+            io::stdout().write_all(b"terminal\n")?;
+            let mut stream = std::os::unix::net::UnixStream::connect(fixture_path(&args, 3)?)?;
+            stream.write_all(b"R")?;
+            wait_for_eof(&mut stream)?;
         }
         "crash-guardian-provider" => {
             let mut stream = std::os::unix::net::UnixStream::connect(fixture_path(&args, 3)?)?;

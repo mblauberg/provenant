@@ -23,22 +23,35 @@ pub(crate) fn configure_command(
     // through spawn. Rust's exec-error pipe is already CLOEXEC. Failures
     // return errno through that pipe and std reaps the failed child.
     unsafe {
-        command.pre_exec(move || {
-            reset_signals()?;
-            if new_session && libc::setsid() < 0 {
-                return Err(io::Error::last_os_error());
-            }
-            cloexec_descriptors()?;
-            for &fd in &pass {
-                let flags = libc::fcntl(fd, libc::F_GETFD);
-                if flags < 0 || libc::fcntl(fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) < 0 {
-                    return Err(io::Error::last_os_error());
-                }
-            }
-            Err(spec.exec())
-        });
+        command.pre_exec(move || run_pre_exec(&pass, new_session, &spec));
     }
     Ok(())
+}
+
+fn run_pre_exec(pass: &[i32], new_session: bool, spec: &ExecSpec) -> io::Result<()> {
+    reset_signals()?;
+    if new_session {
+        // SAFETY: called only in the forked child before exec; setsid reads no
+        // pointers and changes only that child process's session.
+        if unsafe { libc::setsid() } < 0 {
+            return Err(io::Error::last_os_error());
+        }
+    }
+    cloexec_descriptors()?;
+    for &fd in pass {
+        // SAFETY: fd came from a live borrowed descriptor retained through
+        // spawn; F_GETFD only reads its close-on-exec flag in the child.
+        let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+        if flags < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: fd is the same inherited descriptor; F_SETFD only updates
+        // its descriptor flags and retains no pointer.
+        if unsafe { libc::fcntl(fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) } < 0 {
+            return Err(io::Error::last_os_error());
+        }
+    }
+    Err(spec.exec())
 }
 
 /// Attempt exec in the current process without running the post-fork reset.
@@ -257,17 +270,16 @@ fn mark_directory_fds(directory: i32) -> io::Result<()> {
                 .ok_or_else(|| io::Error::from_raw_os_error(libc::EIO))?;
             if let Some(fd) = descriptor_number(&name[..end]).filter(|&fd| fd > 2) {
                 // SAFETY: fcntl acts only on the forked child's integral fd;
-                // setting CLOEXEC retains ownership and cannot close std's
-                // exec-error pipe before it reports a failed pre_exec hook.
-                unsafe {
-                    let flags = libc::fcntl(fd, libc::F_GETFD);
-                    if flags >= 0 {
-                        if libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC) < 0 {
-                            return Err(io::Error::last_os_error());
-                        }
-                    } else if io::Error::last_os_error().raw_os_error() != Some(libc::EBADF) {
+                // F_GETFD reads its flags and retains no pointer.
+                let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+                if flags >= 0 {
+                    // SAFETY: this updates only the forked child's descriptor
+                    // flags. The fd is not std's CLOEXEC exec-error pipe.
+                    if unsafe { libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC) } < 0 {
                         return Err(io::Error::last_os_error());
                     }
+                } else if io::Error::last_os_error().raw_os_error() != Some(libc::EBADF) {
+                    return Err(io::Error::last_os_error());
                 }
             }
             offset += length;
@@ -289,34 +301,37 @@ fn descriptor_number(name: &[u8]) -> Option<i32> {
 
 /// Reset inherited dispositions and the calling child's signal mask before exec.
 fn reset_signals() -> io::Result<()> {
-    // SAFETY: invoked only after fork. Stack signal records are live, exclusive,
-    // fully initialised before use; sigaction/procmask retain no pointer. Only
-    // async-signal-safe calls run, with no parent/global mutation or allocation.
-    unsafe {
-        let mut action: libc::sigaction = std::mem::zeroed();
-        action.sa_sigaction = libc::SIG_DFL;
-        if libc::sigemptyset(&mut action.sa_mask) < 0 {
-            return Err(io::Error::last_os_error());
+    // SAFETY: all-zero storage is a valid initial sigaction record on the
+    // supported POSIX targets; fields are set before libc uses it.
+    let mut action: libc::sigaction = unsafe { std::mem::zeroed() };
+    action.sa_sigaction = libc::SIG_DFL;
+    // SAFETY: action owns writable, aligned mask storage; libc initialises it
+    // and retains no pointer.
+    if unsafe { libc::sigemptyset(&mut action.sa_mask) } < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    #[cfg(target_os = "linux")]
+    let maximum = 64;
+    #[cfg(target_os = "macos")]
+    let maximum = 31;
+    for signal in 1..=maximum {
+        if signal == libc::SIGKILL || signal == libc::SIGSTOP {
+            continue;
         }
-        #[cfg(target_os = "linux")]
-        let maximum = 64;
-        #[cfg(target_os = "macos")]
-        let maximum = 31;
-        for signal in 1..=maximum {
-            if signal == libc::SIGKILL || signal == libc::SIGSTOP {
-                continue;
+        // SAFETY: invoked only in the forked child; action is live, fully
+        // initialised, and libc retains no pointer to it.
+        if unsafe { libc::sigaction(signal, &action, std::ptr::null_mut()) } < 0 {
+            let error = io::Error::last_os_error();
+            // Linux reserves libc's internal realtime signals 32 and 33.
+            if error.raw_os_error() != Some(libc::EINVAL) {
+                return Err(error);
             }
-            if libc::sigaction(signal, &action, std::ptr::null_mut()) < 0 {
-                let error = io::Error::last_os_error();
-                // Linux reserves libc's internal realtime signals 32 and 33.
-                if error.raw_os_error() != Some(libc::EINVAL) {
-                    return Err(error);
-                }
-            }
         }
-        if libc::sigprocmask(libc::SIG_SETMASK, &action.sa_mask, std::ptr::null_mut()) < 0 {
-            return Err(io::Error::last_os_error());
-        }
+    }
+    // SAFETY: action owns a live initialised signal mask; this resets only the
+    // forked child's mask and retains no pointer.
+    if unsafe { libc::sigprocmask(libc::SIG_SETMASK, &action.sa_mask, std::ptr::null_mut()) } < 0 {
+        return Err(io::Error::last_os_error());
     }
     Ok(())
 }

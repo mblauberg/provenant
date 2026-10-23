@@ -9,11 +9,7 @@ pub mod fs;
 mod identity;
 pub mod pid;
 // This is the sole syscall boundary, including nonblocking child/lock waits.
-#[allow(
-    unsafe_code,
-    clippy::disallowed_methods,
-    clippy::multiple_unsafe_ops_per_block
-)]
+#[allow(unsafe_code, clippy::disallowed_methods)]
 pub mod sys;
 
 pub mod capture;
@@ -26,4 +22,6 @@ pub mod machine;
 pub mod scratch;
 pub mod utility;
 
-pub use guardian::{ChildRegistry, ExitPublisher, GuardianHooks, RegisteredChild, supervise};
+#[cfg(feature = "fixture")]
+pub use guardian::ExitPublisher;
+pub use guardian::{ChildRegistry, GuardianHooks, RegisteredChild, supervise};

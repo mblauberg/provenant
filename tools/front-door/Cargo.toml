@@ -93,7 +93,6 @@ publish = false
 license.workspace = true
 
 [features]
-fault-injection = ["provenant-supervisor/fault-injection"]
 
 [dependencies]
 serde_json = { workspace = true }

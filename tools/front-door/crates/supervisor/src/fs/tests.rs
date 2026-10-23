@@ -920,6 +920,17 @@ fn reanchor_rebinds_device_policy_without_reopening_the_directory() {
 }
 
 #[test]
+fn a_handle_received_through_guardian_handoff_never_reanchors() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = Directory::open_anchor(temp.path()).unwrap();
+    let handoff = Directory::from_handoff(root.handoff_file().try_clone().unwrap()).unwrap();
+    assert!(matches!(
+        handoff.into_anchor(),
+        Err(FsError::Symlink { .. })
+    ));
+}
+
+#[test]
 fn a_handle_reached_through_a_followed_link_never_reanchors() {
     let temp = tempfile::tempdir().unwrap();
     let root = Directory::open_anchor(temp.path()).unwrap();

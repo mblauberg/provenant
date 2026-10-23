@@ -461,9 +461,6 @@ jobs:
       - name: Run workspace tests
         working-directory: tools/front-door
         run: cargo nextest run --profile ci --workspace --locked
-      - name: Run fault-injection tests
-        working-directory: tools/front-door
-        run: cargo nextest run --profile ci -p provenant --features fault-injection --locked
       - name: Run documentation tests
         working-directory: tools/front-door
         run: cargo test --doc --workspace --locked
@@ -535,6 +532,9 @@ jobs:
         run: printf 'TMPDIR=%s\n' "$TMPDIR" >> "$GITHUB_ENV"
       - name: Install pinned Rust toolchain
         run: rustup toolchain install 1.99.1 --profile minimal
+      - name: Run macOS supervisor custody tests
+        working-directory: tools/front-door
+        run: cargo test -p provenant-supervisor --locked
       # No target cache: install builds from a clean target, and cached
       # proc-macro dylibs would hide the failure this job exists to catch.
       - name: Build release front door

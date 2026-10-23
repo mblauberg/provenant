@@ -227,7 +227,7 @@ impl Reservation {
 #[derive(Debug)]
 pub struct WriterLease {
     pub(crate) directory: Directory,
-    pub(crate) lease: LockGuard,
+    pub(crate) lease: Option<LockGuard>,
     pub(crate) reservation: Reservation,
     launched: bool,
 }
@@ -237,16 +237,31 @@ impl WriterLease {
     }
     /// Confinement supplies a private generated directory excluded from the
     /// provider sandbox. The caller keeps Run exclusion through settlement.
-    pub fn scratch(&mut self, directory: Directory) -> Result<crate::scratch::Scratch> {
+    pub fn scratch(directory: Directory) -> Result<crate::scratch::Scratch> {
         Ok(crate::scratch::Scratch::new(directory)?)
     }
-    pub fn into_recovery(self) -> Result<Recovery> {
+    fn ensure_lease(&mut self) -> Result<()> {
+        if self.lease.is_none() {
+            let clock = crate::clock::SystemClock::new();
+            self.lease = Some(self.directory.lock(
+                OsStr::new("writer.lock"),
+                LockMode::Exclusive,
+                WaitBudget::cli(clock.mono_now(), 5).map_err(|_| CustodyError::InvalidRecord)?,
+                &CancelToken::new(),
+                &clock,
+            )?);
+        }
+        Ok(())
+    }
+    /// Reacquire writer exclusion after a completed guardian handoff (up to 5 s).
+    pub fn into_recovery(mut self) -> Result<Recovery> {
+        self.ensure_lease()?;
         let reservation: Reservation =
             read_record(&self.directory, "reservation.json", RECORD_LIMIT)?;
         validate_anchor(&self.directory, &reservation)?;
         Ok(Recovery {
             directory: self.directory,
-            lease: self.lease,
+            lease: self.lease.ok_or(CustodyError::Fenced)?,
             reservation,
         })
     }
@@ -354,7 +369,7 @@ pub(crate) fn acquire_writer_with_observer(
     )?)?;
     Ok(WriterLease {
         directory,
-        lease,
+        lease: Some(lease),
         reservation,
         launched: false,
     })
@@ -437,6 +452,10 @@ pub struct ProviderCommand {
     pub permission_plan_digest: Digest,
     pub task: provenant_core::TaskId,
     pub requester: ActorId,
+    /// Native diagnostic command names that must be spared during cleanup.
+    pub protected_commands: Vec<String>,
+    /// Caller-owned config variables passed to the same-binary guardian.
+    pub config_environment: Vec<OsString>,
     pub argv: Vec<OsString>,
     pub environment: Vec<(OsString, OsString)>,
     pub cwd: PathBuf,
@@ -633,6 +652,7 @@ pub fn launch(
             omitted_failed_deliveries: 0,
             terminal_observed: false,
             unresolved_cleanup: false,
+            settlement_evidence: SettlementEvidence::NeverSpawned,
             stdout: CaptureTotals::default(),
             stderr: CaptureTotals::default(),
             warnings: vec![],
@@ -742,6 +762,16 @@ pub struct FailedSignalDelivery {
     pub signal: i64,
     pub failure: crate::machine::DeliveryFailure,
 }
+/// The observation that permitted cleanup settlement, never a signal authority.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SettlementEvidence {
+    #[default]
+    Unresolved,
+    NeverSpawned,
+    LinuxKernelChildren,
+    DarwinCensusAndWriterLease,
+}
 /// Bounded, immutable OS facts. No field certifies its own publication durability.
 #[derive(Clone, Debug, Serialize)]
 pub struct ProcessExit {
@@ -759,6 +789,7 @@ pub struct ProcessExit {
     pub omitted_failed_deliveries: u64,
     pub terminal_observed: bool,
     pub unresolved_cleanup: bool,
+    pub settlement_evidence: SettlementEvidence,
     pub stdout: CaptureTotals,
     pub stderr: CaptureTotals,
     pub warnings: Vec<String>,
@@ -824,6 +855,8 @@ struct StoredExit {
     omitted_warnings: u64,
     terminal_observed: bool,
     unresolved_cleanup: bool,
+    #[serde(default)]
+    settlement_evidence: SettlementEvidence,
     stdout: CaptureTotals,
     stderr: CaptureTotals,
 }
@@ -843,6 +876,7 @@ pub struct ExitObservation {
     pub omitted_warnings: u64,
     pub terminal_observed: bool,
     pub unresolved_cleanup: bool,
+    pub settlement_evidence: SettlementEvidence,
     pub stdout: CaptureTotals,
     pub stderr: CaptureTotals,
 }
@@ -904,6 +938,7 @@ pub fn observe(
                     omitted_warnings: record.omitted_warnings,
                     terminal_observed: record.terminal_observed,
                     unresolved_cleanup: record.unresolved_cleanup,
+                    settlement_evidence: record.settlement_evidence,
                     stdout: record.stdout,
                     stderr: record.stderr,
                 })));
@@ -913,11 +948,7 @@ pub fn observe(
             Err(error) => return Err(error),
         }
         if Instant::now() >= deadline {
-            return match read_record::<StoredObservation>(&handle.directory,"process.json",RECORD_LIMIT) {
-                Ok(observation) if observation.scope==handle.scope && observation.publication_pending=>Ok(Observation::PublicationPending),
-                Ok(observation) if observation.scope==handle.scope && observation.guardian.as_ref().is_some_and(|guardian|matches!(SystemProcessObserver.observe(guardian.pid),ProcessObservation::Present(fact) if fact.identity==*guardian&&!fact.zombie))=>Ok(Observation::Live),
-                _=>Ok(Observation::Unknown),
-            };
+            return observe_checkpoint(&handle.directory, handle.scope);
         }
         crate::sys::wait_pause(
             deadline
@@ -925,6 +956,28 @@ pub fn observe(
                 .min(Duration::from_millis(5)),
         );
     }
+}
+
+fn observe_checkpoint(directory: &Directory, scope: Scope) -> Result<Observation> {
+    let Ok(observation) = read_record::<StoredObservation>(directory, "process.json", RECORD_LIMIT)
+    else {
+        return Ok(Observation::Unknown);
+    };
+    if observation.scope != scope {
+        return Ok(Observation::Unknown);
+    }
+    if observation.publication_pending {
+        return Ok(Observation::PublicationPending);
+    }
+    let live = observation.guardian.as_ref().is_some_and(|guardian| {
+        matches!(SystemProcessObserver.observe(guardian.pid), ProcessObservation::Present(fact)
+            if fact.identity == *guardian && !fact.zombie)
+    });
+    Ok(if live {
+        Observation::Live
+    } else {
+        Observation::Unknown
+    })
 }
 
 /// Recovery holds the same writer exclusion; no decision relies on free flock.
@@ -974,7 +1027,7 @@ pub enum RecoveryState {
 impl Recovery {
     /// As for WriterLease::scratch, confinement must exclude this generated
     /// directory from provider access and Run retains its own exclusion.
-    pub fn scratch(&mut self, directory: Directory) -> Result<crate::scratch::Scratch> {
+    pub fn scratch(directory: Directory) -> Result<crate::scratch::Scratch> {
         Ok(crate::scratch::Scratch::new(directory)?)
     }
     pub fn scope(&self) -> Scope {
@@ -1022,7 +1075,7 @@ fn classify_reservation(
         }
         // A durable unresolved fence survives guardian death in this boot.
         ProcessObservation::Unknown(_) => RecoveryState::Unknown,
-        _ => crate::guardian::session_absence(reservation, observer),
+        _ => crate::guardian::session_absence(reservation),
     }
 }
 
@@ -1156,6 +1209,7 @@ impl WriterLease {
         next: Scope,
         observer: &dyn ProcessObserver,
     ) -> Result<()> {
+        self.ensure_lease()?;
         let previous: Reservation = read_record(&self.directory, "reservation.json", RECORD_LIMIT)?;
         previous.validate()?;
         if previous.scope.run != next.run

@@ -310,7 +310,10 @@ def test_macos_smoke_builds_the_release_front_door_with_the_rust_filter() -> Non
     assert len(builds) == 1
     assert builds[0]["working-directory"] == "tools/front-door"
     assert "cargo build --release --locked -p provenant --bin provenant" in builds[0]["run"]
-    assert not any("cargo test" in str(step.get("run", "")) for step in _steps(job))
+    custody_tests = [step for step in _steps(job) if "cargo test" in str(step.get("run", ""))]
+    assert len(custody_tests) == 1
+    assert custody_tests[0]["working-directory"] == "tools/front-door"
+    assert custody_tests[0]["run"] == "cargo test -p provenant-supervisor --locked"
 
 
 def test_ci_status_depends_on_every_other_job_and_fails_closed() -> None:

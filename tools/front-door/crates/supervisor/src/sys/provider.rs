@@ -13,7 +13,6 @@ use crate::machine::{DeliveryFailure, DeliveryOutcome};
 use crate::{
     census::{Ancestry, Census, MAX_CENSUS_ENTRIES, ProcessIdentity, ProcessLookup},
     exec::Termination,
-    machine::StopReason,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
@@ -325,30 +324,34 @@ struct SignalMask {
 }
 impl SignalMask {
     fn block() -> io::Result<Self> {
-        // SAFETY: sigemptyset initialises set, sigaddset mutates only that
-        // live object, and sigprocmask writes the prior mask to live storage.
-        // The guardian is a dedicated single-thread process at installation.
-        unsafe {
-            let mut set = std::mem::MaybeUninit::<libc::sigset_t>::zeroed();
-            if libc::sigemptyset(set.as_mut_ptr()) != 0 {
-                return Err(io::Error::last_os_error());
-            }
-            let mut set = set.assume_init();
-            for signal in [libc::SIGTERM, libc::SIGINT, libc::SIGHUP, libc::SIGCHLD] {
-                if libc::sigaddset(&mut set, signal) != 0 {
-                    return Err(io::Error::last_os_error());
-                }
-            }
-            let mut previous = std::mem::MaybeUninit::<libc::sigset_t>::zeroed();
-            if libc::sigprocmask(libc::SIG_BLOCK, &set, previous.as_mut_ptr()) != 0 {
-                return Err(io::Error::last_os_error());
-            }
-            Ok(Self {
-                set,
-                previous: previous.assume_init(),
-                active: true,
-            })
+        let mut set = std::mem::MaybeUninit::<libc::sigset_t>::zeroed();
+        // SAFETY: sigemptyset initialises writable, aligned storage and keeps
+        // no pointer after returning.
+        if unsafe { libc::sigemptyset(set.as_mut_ptr()) } != 0 {
+            return Err(io::Error::last_os_error());
         }
+        // SAFETY: successful sigemptyset fully initialised the signal set.
+        let mut set = unsafe { set.assume_init() };
+        for signal in [libc::SIGTERM, libc::SIGINT, libc::SIGHUP, libc::SIGCHLD] {
+            // SAFETY: set is a live signal set exclusively owned here;
+            // sigaddset mutates it and retains no pointer.
+            if unsafe { libc::sigaddset(&mut set, signal) } != 0 {
+                return Err(io::Error::last_os_error());
+            }
+        }
+        let mut previous = std::mem::MaybeUninit::<libc::sigset_t>::zeroed();
+        // SAFETY: set is a live signal set; previous is writable storage for
+        // the prior mask. The guardian is dedicated and single-threaded here.
+        if unsafe { libc::sigprocmask(libc::SIG_BLOCK, &set, previous.as_mut_ptr()) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: successful sigprocmask initialised the previous mask.
+        let previous = unsafe { previous.assume_init() };
+        Ok(Self {
+            set,
+            previous,
+            active: true,
+        })
     }
 
     fn restore(&mut self) -> io::Result<()> {
@@ -447,6 +450,7 @@ impl ProviderGroup {
         input: bool,
         out: bool,
         err: bool,
+        lease: &crate::fs::LockGuard,
     ) -> io::Result<Self> {
         let (program, args) = argv
             .split_first()
@@ -468,7 +472,12 @@ impl ProviderGroup {
             .stdin(if input { Stdio::piped() } else { Stdio::null() })
             .stdout(if out { Stdio::piped() } else { Stdio::null() })
             .stderr(if err { Stdio::piped() } else { Stdio::null() });
-        child::configure_command(&mut command, &[], Some(env), false)?;
+        child::configure_command(
+            &mut command,
+            &[lease.handoff_file().as_fd()],
+            Some(env),
+            false,
+        )?;
         let child = command.spawn()?;
         let pid = match i32::try_from(child.id()) {
             Ok(pid) if pid > 0 => pid,
@@ -543,7 +552,7 @@ impl ProviderGroup {
 
     /// The sole provider-signalling API. `escalation` selects KILL after the
     /// caller's bounded TERM grace. A failed observation refuses to signal.
-    pub(crate) fn stop(&mut self, _reason: StopReason, escalation: bool) -> io::Result<bool> {
+    pub(crate) fn stop(&mut self, escalation: bool) -> io::Result<bool> {
         if self.child.is_none() || self.observe()?.is_some() {
             return Ok(false);
         }
@@ -733,7 +742,6 @@ impl ProviderGroup {
     #[cfg(target_os = "linux")]
     pub(crate) fn stop_adopted(
         &mut self,
-        _reason: StopReason,
         escalation: bool,
         census: &Census,
         spared: &BTreeSet<ProcessIdentity>,
@@ -804,8 +812,8 @@ impl ProviderGroup {
     /// itself is terminal. Linux's per-thread children lists cover direct
     /// children created by every guardian thread; with the provider reaped only
     /// by this guardian, any surviving descendant branch must have a direct
-    /// guardian child. macOS has no equivalent complete kernel list, so it
-    /// cannot make this proof.
+    /// guardian child. On Darwin, the caller combines reaping with two complete
+    /// censuses and an independently acquired writer lease.
     pub(crate) fn quiescent_children(&self) -> io::Result<bool> {
         #[cfg(target_os = "linux")]
         {
@@ -814,7 +822,11 @@ impl ProviderGroup {
             }
             linux_quiescent_children(self.pid)
         }
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(target_os = "macos")]
+        {
+            Ok(self.child.is_none() && self.observed.is_some())
+        }
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         {
             Ok(false)
         }
@@ -855,6 +867,9 @@ impl ProviderGroup {
             Ok(None) => return Err(Box::new((self, io::ErrorKind::WouldBlock.into()))),
             Err(error) => return Err(Box::new((self, error))),
         };
+        if self.child.is_none() {
+            return Ok(observed);
+        }
         match wait_exit(self.pid, false) {
             Ok(Some(status)) if status == observed => {
                 self.child.take();
@@ -943,27 +958,46 @@ fn linux_provider_ancestry(
 
 #[cfg(target_os = "linux")]
 fn linux_quiescent_children(provider_pid: i32) -> io::Result<bool> {
-    let before = linux_task_ids()?;
-    for tid in &before {
+    let first = linux_children_snapshot()?;
+    std::thread::sleep(Duration::from_millis(20));
+    let second = linux_children_snapshot()?;
+    if first != second {
+        return Err(io::Error::new(
+            io::ErrorKind::WouldBlock,
+            "guardian child census changed between snapshots",
+        ));
+    }
+    Ok(first.values().all(|children| {
+        children
+            .iter()
+            .all(|child_pid| *child_pid == i64::from(provider_pid))
+    }))
+}
+
+#[cfg(target_os = "linux")]
+fn linux_children_snapshot() -> io::Result<BTreeMap<i64, BTreeSet<i64>>> {
+    let tids = linux_task_ids()?;
+    let mut snapshot = BTreeMap::new();
+    for tid in &tids {
         let path = std::path::Path::new("/proc/self/task")
             .join(tid.to_string())
             .join("children");
         let contents = read_proc_file_bounded(&path, MAX_CHILD_LIST_BYTES)?;
-        if parse_child_ids(&contents)?
-            .into_iter()
-            .any(|child_pid| child_pid != i64::from(provider_pid))
-        {
-            return Ok(false);
+        if snapshot.insert(*tid, parse_child_ids(&contents)?).is_some() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "duplicate guardian thread ID in child census",
+            ));
         }
     }
     let after = linux_task_ids()?;
-    if before != after {
+    if tids != after {
         return Err(io::Error::new(
             io::ErrorKind::WouldBlock,
             "guardian thread list changed during child census",
         ));
     }
-    Ok(true)
+    Ok(snapshot)
 }
 
 #[cfg(target_os = "linux")]

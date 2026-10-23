@@ -104,6 +104,7 @@ pub(crate) fn spawn(
     writer: &LockGuard,
     custody: &LockGuard,
     environment: &[(OsString, OsString)],
+    config_environment: &[OsString],
     payload: &[u8],
     timeout: Duration,
     cancel: &CancelToken,
@@ -130,23 +131,7 @@ pub(crate) fn spawn(
     }
     let guardian_environment: Vec<_> = environment
         .iter()
-        .filter(|(name, _)| {
-            matches!(
-                name.to_str(),
-                Some(
-                    "HOME"
-                        | "PROVENANT_STATE_DIR"
-                        | "XDG_CONFIG_HOME"
-                        | "GIT_CONFIG_GLOBAL"
-                        | "GIT_CONFIG_NOSYSTEM"
-                        | "CLAUDE_CONFIG_DIR"
-                        | "CODEX_HOME"
-                        | "CURSOR_CONFIG_DIR"
-                        | "AGY_HOME"
-                        | "OPENCODE_CONFIG_DIR"
-                )
-            )
-        })
+        .filter(|(name, _)| config_environment.contains(name))
         .cloned()
         .collect();
     command

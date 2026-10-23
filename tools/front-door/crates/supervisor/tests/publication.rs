@@ -45,6 +45,8 @@ fn start(root: &Path, name: &str, scenario: &str) -> Result<(WriterLease, Custod
         resolved_route: "fixture/provider".into(),
         permission_plan_digest: provenant_core::Digest::from_bytes([0; 32]),
         task: provenant_core::TaskId::from_bytes([13; 16]),
+        protected_commands: fixture::protected_commands(),
+        config_environment: fixture::config_environment(),
         argv: fixture::argv(scenario)?,
         environment: fixture::environment(root),
         cwd: root.into(),
@@ -262,6 +264,33 @@ fn final_reservation_sync_failure_blocks_exit_until_durable(root: &Path) -> Resu
     Ok(())
 }
 
+const TESTS: &[&str] = &[
+    "exit_publication_enospc_and_visible_sync_retry_keeps_one_snapshot",
+    "final_reservation_sync_failure_blocks_exit_until_durable",
+];
+
+fn run_case(name: &str) -> Result<()> {
+    let root = tempfile::Builder::new()
+        .prefix("s2-publication-")
+        .tempdir_in("/tmp")?;
+    let cleanup = fixture::ProcessCleanupGuard::new(root.path());
+    let result = match name {
+        "exit_publication_enospc_and_visible_sync_retry_keeps_one_snapshot" => {
+            exit_publication_enospc_and_visible_sync_retry_keeps_one_snapshot(root.path())
+        }
+        "final_reservation_sync_failure_blocks_exit_until_durable" => {
+            final_reservation_sync_failure_blocks_exit_until_durable(root.path())
+        }
+        _ => {
+            return Err(io::Error::new(io::ErrorKind::NotFound, "unknown publication test").into());
+        }
+    };
+    if result.is_ok() {
+        cleanup.disarm();
+    }
+    result
+}
+
 fn main() -> Result<()> {
     let args: Vec<_> = std::env::args_os().skip(1).collect();
     if args.first().is_some_and(|arg| arg == "internal")
@@ -284,10 +313,8 @@ fn main() -> Result<()> {
     if fixture::dispatch()? {
         return Ok(());
     }
-    let root = tempfile::Builder::new()
-        .prefix("s2-publication-")
-        .tempdir_in("/tmp")?;
-    exit_publication_enospc_and_visible_sync_retry_keeps_one_snapshot(root.path())?;
-    final_reservation_sync_failure_blocks_exit_until_durable(root.path())?;
+    fixture::run_libtest(&args, TESTS, |name| {
+        run_case(name).map_err(|error| io::Error::other(error.to_string()))
+    })?;
     Ok(())
 }

@@ -21,7 +21,6 @@ tempfile = { workspace = true }
 
 [features]
 fixture = []
-fault-injection = []
 test-fixtures = ["fixture"]
 
 [[test]]

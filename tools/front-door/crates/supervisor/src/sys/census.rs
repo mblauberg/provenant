@@ -685,13 +685,19 @@ fn darwin_process_ids(max_entries: usize) -> Result<(Vec<i32>, bool), CensusErro
 fn darwin_zero_probe_session(pid: i32) -> (i32, Option<i32>) {
     // SAFETY: __error returns this thread's live errno slot; writing zero
     // ensures a failed getsid result cannot inherit stale errno.
-    unsafe { *libc::__error() = 0 };
+    let errno_slot = unsafe { libc::__error() };
+    // SAFETY: errno_slot is the live thread-local slot returned immediately
+    // above; writing it cannot affect another thread.
+    unsafe { *errno_slot = 0 };
     // SAFETY: getsid reads only the scalar PID, retains no pointer, and reports
     // failure through this thread's errno slot.
     let session = unsafe { libc::getsid(pid) };
     // SAFETY: __error returns the same live thread-local slot after the call;
     // only the integer errno value is copied out.
-    let errno = unsafe { *libc::__error() };
+    let errno_slot = unsafe { libc::__error() };
+    // SAFETY: errno_slot is the live thread-local slot returned immediately
+    // above; only its integer value is read.
+    let errno = unsafe { *errno_slot };
     (session, (errno != 0).then_some(errno))
 }
 
@@ -735,6 +741,12 @@ fn darwin_process(pid: i32, boot: &str) -> ProcessObservation {
         )
     };
     if read == 0 {
+        if matches!(
+            io::Error::last_os_error().raw_os_error(),
+            Some(libc::EACCES | libc::EPERM)
+        ) {
+            return darwin_short_process(pid, boot);
+        }
         let (session, errno) = darwin_zero_probe_session(pid);
         return classify_darwin_zero_probe(session, errno);
     }
@@ -835,6 +847,145 @@ fn darwin_process(pid: i32, boot: &str) -> ProcessObservation {
     })
 }
 
+// libproc denies full BSD records for foreign-UID services on Darwin. Its
+// short record is public, but lacks start time. Supplement only that missing
+// field from the public sysctl kinfo_proc prefix; never invent an identity.
+#[cfg(target_os = "macos")]
+fn darwin_short_process(pid: i32, boot: &str) -> ProcessObservation {
+    let read = || -> Option<ProcessFact> {
+        let first_start = darwin_start_stamp(pid)?;
+        let first = darwin_short_info(pid)?;
+        // SAFETY: getsid accepts a scalar PID and retains no pointers.
+        let session = unsafe { libc::getsid(pid) };
+        let second = darwin_short_info(pid)?;
+        let second_start = darwin_start_stamp(pid)?;
+        // SAFETY: getsid again accepts a scalar PID and retains no pointers.
+        let second_session = unsafe { libc::getsid(pid) };
+        if first_start != second_start
+            || session <= 0
+            || session != second_session
+            || first.pbsi_pid != u32::try_from(pid).ok()?
+            || first.pbsi_pid != second.pbsi_pid
+            || first.pbsi_ppid != second.pbsi_ppid
+            || first.pbsi_pgid == 0
+            || first.pbsi_pgid != second.pbsi_pgid
+            || first.pbsi_status != second.pbsi_status
+        {
+            return None;
+        }
+        let command: Vec<_> = first
+            .pbsi_comm
+            .iter()
+            .take_while(|byte| **byte != 0)
+            .map(|byte| *byte as u8)
+            .collect();
+        Some(ProcessFact {
+            identity: ProcessIdentity {
+                boot: boot.to_owned(),
+                pid: i64::from(pid),
+                native_start: first_start.0,
+                group_id: i64::from(first.pbsi_pgid),
+                session_id: i64::from(session),
+            },
+            parent_pid: i64::from(first.pbsi_ppid),
+            zombie: first.pbsi_status == 5,
+            cpu_micros: None,
+            command: Some(String::from_utf8_lossy(&command).into_owned()),
+        })
+    };
+    match read() {
+        Some(fact) => ProcessObservation::Present(fact),
+        None => {
+            let (session, errno) = darwin_zero_probe_session(pid);
+            classify_darwin_zero_probe(session, errno)
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn darwin_short_info(pid: i32) -> Option<libc::proc_bsdshortinfo> {
+    let requested = i32::try_from(std::mem::size_of::<libc::proc_bsdshortinfo>()).ok()?;
+    let mut info = std::mem::MaybeUninit::<libc::proc_bsdshortinfo>::uninit();
+    // SAFETY: info is aligned writable storage of the exact short BSD ABI size;
+    // libproc borrows it for this call and retains no pointer.
+    let read = unsafe {
+        libc::proc_pidinfo(
+            pid,
+            libc::PROC_PIDT_SHORTBSDINFO,
+            0,
+            info.as_mut_ptr().cast(),
+            requested,
+        )
+    };
+    if read != requested {
+        return None;
+    }
+    // SAFETY: the exact-size successful read initialized the complete record.
+    Some(unsafe { info.assume_init() })
+}
+
+#[cfg(target_os = "macos")]
+fn darwin_start_stamp(pid: i32) -> Option<(u64, usize)> {
+    // Public Darwin SDK: sys/sysctl.h kinfo_proc begins with kp_proc;
+    // sys/proc.h extern_proc begins with the p_starttime timeval union.
+    // Only this prefix is interpreted. The opaque tail is bounded, not a
+    // hand-maintained copy of the architecture-dependent kinfo_proc layout.
+    #[repr(C)]
+    struct KinfoPrefix {
+        start: libc::timeval,
+        opaque: [u8; 4096],
+    }
+    let mut mib = [libc::CTL_KERN, libc::KERN_PROC, libc::KERN_PROC_PID, pid];
+    let mut size = 0;
+    // SAFETY: the four-element MIB is live; null output requests the record size.
+    let status = unsafe {
+        libc::sysctl(
+            mib.as_mut_ptr(),
+            4,
+            std::ptr::null_mut(),
+            &mut size,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if status != 0 || size < std::mem::size_of::<libc::timeval>() || size > 4096 {
+        return None;
+    }
+    let expected = size;
+    let mut prefix = KinfoPrefix {
+        start: libc::timeval {
+            tv_sec: 0,
+            tv_usec: 0,
+        },
+        opaque: [0; 4096],
+    };
+    // SAFETY: prefix is aligned initialized storage larger than the checked
+    // requested record. The public ABI places a timeval at offset zero; all
+    // remaining bytes stay opaque. sysctl borrows both buffers for this call.
+    let status = unsafe {
+        libc::sysctl(
+            mib.as_mut_ptr(),
+            4,
+            std::ptr::from_mut(&mut prefix).cast(),
+            &mut size,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    // KERN_PROC sizing includes kernel headroom (currently six records for
+    // this one-PID query). Validate the actual prefix and bound; the caller
+    // requires the actual record length to agree across both identity reads.
+    if status != 0 || size < std::mem::size_of::<libc::timeval>() || size > expected {
+        return None;
+    }
+    let seconds = u64::try_from(prefix.start.tv_sec).ok()?;
+    let micros = u64::try_from(prefix.start.tv_usec).ok()?;
+    if micros >= 1_000_000 {
+        return None;
+    }
+    Some((seconds.checked_mul(1_000_000)?.checked_add(micros)?, size))
+}
+
 #[cfg(target_os = "macos")]
 fn darwin_cpu_micros(pid: i32) -> Option<u64> {
     use std::mem::{MaybeUninit, size_of};
@@ -886,6 +1037,23 @@ fn darwin_cpu_micros_from_values(ticks: Option<u64>, timebase: Option<(u32, u32)
 #[cfg(test)]
 mod native_tests {
     use super::*;
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn darwin_short_record_and_sysctl_start_match_the_full_native_identity() {
+        let pid = i32::try_from(std::process::id()).unwrap();
+        let full = darwin_process(pid, "recorded-boot");
+        let fallback = darwin_short_process(pid, "recorded-boot");
+        match (full, fallback) {
+            (ProcessObservation::Present(full), ProcessObservation::Present(fallback)) => {
+                assert_eq!(full.identity, fallback.identity);
+                assert_eq!(full.identity.group_id, fallback.identity.group_id);
+                assert_eq!(full.identity.session_id, fallback.identity.session_id);
+                assert_eq!(full.parent_pid, fallback.parent_pid);
+            }
+            other => panic!("native identity unavailable: {other:?}"),
+        }
+    }
 
     #[test]
     #[cfg(target_os = "macos")]
