@@ -458,6 +458,222 @@ pub fn parse(text: &str) -> (Vec<ShellCommand>, Vec<String>) {
     )
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum Error {
+    #[error(transparent)]
+    Integer(#[from] crate::pending::IntegerError),
+    #[error(transparent)]
+    Pattern(#[from] regex::Error),
+}
+
+fn word_character(c: char) -> bool {
+    c.is_alphanumeric() || c == '_'
+}
+
+struct Guard {
+    raw: regex::Regex,
+    wrappers: regex::Regex,
+    wrapped: regex::Regex,
+    heredoc: regex::Regex,
+}
+impl Guard {
+    fn new() -> Result<Self, Error> {
+        Ok(Self {
+            raw: regex::Regex::new(
+                r"(?:^|[;&|({`\n]|\$\()[\s\x1c-\x1f]*(?:[^\s\x1c-\x1f]*/)?(?:pkill|killall)",
+            )?,
+            wrappers: regex::Regex::new(
+                r"sudo|doas|env|xargs|nice|timeout|nohup|exec|command|time|setsid|stdbuf",
+            )?,
+            wrapped: regex::Regex::new(
+                r"[^;&|\n]*?[\s\x1c-\x1f](?:[^\s\x1c-\x1f]*/)?(?:pkill|killall)",
+            )?,
+            heredoc: regex::Regex::new(
+                r#"<<-?[\s\x1c-\x1f]*(['"])([\p{L}\p{N}_]+)(['"])[^\n]*\n"#,
+            )?,
+        })
+    }
+    fn raw_match(&self, text: &str) -> bool {
+        // Python \b uses letters/numbers/underscore, not Rust regex's broader
+        // Unicode word class (which additionally includes combining marks).
+        if self.raw.find_iter(text).any(|m| {
+            text[m.end()..]
+                .chars()
+                .next()
+                .is_none_or(|c| !word_character(c))
+        }) {
+            return true;
+        }
+        for m in self.wrappers.find_iter(text) {
+            if text[..m.start()]
+                .chars()
+                .next_back()
+                .is_some_and(word_character)
+                || text[m.end()..].chars().next().is_some_and(word_character)
+            {
+                continue;
+            }
+            if self.wrapped.find_iter(&text[m.end()..]).any(|rest| {
+                text[m.end() + rest.end()..]
+                    .chars()
+                    .next()
+                    .is_none_or(|c| !word_character(c))
+            }) {
+                return true;
+            }
+        }
+        false
+    }
+    fn remove_quoted_heredocs(&self, command: &str) -> Result<String, Error> {
+        let (mut result, mut at) = (String::new(), 0);
+        for captures in self.heredoc.captures_iter(command) {
+            let Some(full) = captures.get(0) else {
+                continue;
+            };
+            if full.start() < at
+                || captures.get(1).map(|m| m.as_str()) != captures.get(3).map(|m| m.as_str())
+            {
+                continue;
+            }
+            let Some(delimiter) = captures.get(2) else {
+                continue;
+            };
+            let closing = regex::Regex::new(&format!(
+                r"\n[\s\x1c-\x1f]*{}(?:\n|$)",
+                regex::escape(delimiter.as_str())
+            ))?;
+            let Some(end) = closing.find(&command[full.end()..]) else {
+                continue;
+            };
+            result.push_str(&command[at..full.start()]);
+            at = full.end() + end.end();
+        }
+        result.push_str(&command[at..]);
+        Ok(result)
+    }
+    fn executable_text(&self, command: &str) -> Result<String, Error> {
+        let text: Vec<char> = self.remove_quoted_heredocs(command)?.chars().collect();
+        let (mut out, mut i) = (String::new(), 0);
+        while let Some(&c) = text.get(i) {
+            if c == '\\' {
+                out.push_str(&fragment(&text, i, i + 2));
+                i += 2;
+            } else if c == '\'' {
+                i = (i + 1..text.len())
+                    .find(|&j| text[j] == '\'')
+                    .map_or(text.len(), |j| j + 1);
+                out.push(' ');
+            } else if c == '"' {
+                let mut j = i + 1;
+                while j < text.len() && text[j] != '"' {
+                    j += if text[j] == '\\' { 2 } else { 1 };
+                }
+                for inner in substitutions(&fragment(&text, i + 1, j), true) {
+                    out.push('\n');
+                    out.push_str(&self.executable_text(&inner)?);
+                    out.push('\n');
+                }
+                out.push(' ');
+                i = j + 1;
+            } else {
+                out.push(c);
+                i += 1;
+            }
+        }
+        Ok(out)
+    }
+    fn command_reason(
+        &self,
+        command: &ShellCommand,
+        depth: usize,
+    ) -> Result<Option<String>, Error> {
+        let (words, via_xargs) = unwrap_command(&command.words);
+        let Some(first) = words.first() else {
+            return Ok(None);
+        };
+        let name = first.rsplit('/').next().unwrap_or("");
+        let args = &words[1..];
+        if ["pkill", "killall", "killall5", "skill"].contains(&name) {
+            return Ok(Some(format!("{name} signals processes by name")));
+        }
+        if name == "kill" {
+            return if via_xargs {
+                Ok(Some("xargs kill takes its targets from a pipe".into()))
+            } else {
+                Ok(kill_reason(args)?)
+            };
+        }
+        if ["sh", "bash", "zsh", "dash", "ksh"].contains(&name) {
+            for (index, arg) in args.iter().enumerate() {
+                if arg.starts_with('-') && !arg.starts_with("--") && arg[1..].contains('c') {
+                    if let Some(next) = args.get(index + 1) {
+                        return self.deny_reason(next, depth + 1);
+                    }
+                    break;
+                }
+                if !arg.starts_with('-') {
+                    break;
+                }
+            }
+            for body in &command.bodies {
+                if let Some(reason) = self.deny_reason(body, depth + 1)? {
+                    return Ok(Some(reason));
+                }
+            }
+        }
+        if name == "eval" {
+            return self.deny_reason(&args.join(" "), depth + 1);
+        }
+        if name == "." {
+            return Ok(None);
+        }
+        if ["find", "fd"].contains(&name) {
+            for (index, arg) in args.iter().enumerate() {
+                if ["-exec", "-execdir", "-ok", "-okdir", "-x", "--exec"].contains(&arg.as_str()) {
+                    let inner = ShellCommand {
+                        words: args[index + 1..]
+                            .iter()
+                            .take_while(|s| ![";", "+"].contains(&s.as_str()))
+                            .cloned()
+                            .collect(),
+                        bodies: vec![],
+                    };
+                    if let Some(reason) = self.command_reason(&inner, depth + 1)? {
+                        return Ok(Some(reason));
+                    }
+                }
+            }
+        }
+        Ok(None)
+    }
+    fn deny_reason(&self, command: &str, depth: usize) -> Result<Option<String>, Error> {
+        if depth > 8 {
+            return Ok(Some("command nesting is too deep to check".into()));
+        }
+        if self.raw_match(&self.executable_text(command)?) {
+            return Ok(Some("pkill or killall signals processes by name".into()));
+        }
+        let (commands, nested) = parse(command);
+        for item in &commands {
+            if let Some(reason) = self.command_reason(item, depth)? {
+                return Ok(Some(reason));
+            }
+        }
+        for text in nested {
+            if let Some(reason) = self.deny_reason(&text, depth + 1)? {
+                return Ok(Some(reason));
+            }
+        }
+        Ok(None)
+    }
+}
+
+pub fn executable_text(command: &str) -> Result<String, Error> {
+    Guard::new()?.executable_text(command)
+}
+pub fn deny_reason(command: &str) -> Result<Option<String>, Error> {
+    Guard::new()?.deny_reason(command, 0)
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -499,14 +715,24 @@ print(json.dumps([(s,([{'words':c.words,'bodies':c.bodies} for c in parse(s)[0]]
         ) else {
             return;
         };
-        for (text, parsed, _reason, _executable) in cases {
+        let guard = Guard::new().unwrap();
+        for (text, parsed, reason, executable) in cases {
             let (commands, nested) = parse(&text);
             assert_eq!(
                 serde_json::json!([commands, nested]),
                 parsed,
                 "parse {text:?}"
             );
-
+            assert_eq!(
+                guard.executable_text(&text).unwrap(),
+                executable,
+                "executable {text:?}"
+            );
+            assert_eq!(
+                guard.deny_reason(&text, 0).unwrap(),
+                reason,
+                "deny {text:?}"
+            );
         }
     }
 
