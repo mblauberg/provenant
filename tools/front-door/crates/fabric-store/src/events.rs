@@ -42,20 +42,19 @@ pub(crate) fn append(
         text(key, "dedup key")?;
     }
     let bytes = encode(record)?;
-    if let Some(key) = dedup {
-        if let Some((seq, previous)) = tx
+    if let Some(key) = dedup
+        && let Some((seq, previous)) = tx
             .query_row(
                 "SELECT seq,substr(record,1,262145) FROM events WHERE project=? AND dedup=?",
                 params![record.project.to_string(), key],
                 |r| Ok((r.get::<_, i64>(0)?, r.get::<_, Vec<u8>>(1)?)),
             )
             .optional()?
-        {
-            if previous != bytes {
-                return Err(Error::Conflict);
-            }
-            return Ok(seq);
+    {
+        if previous != bytes {
+            return Err(Error::Conflict);
         }
+        return Ok(seq);
     }
     tx.execute(
         "INSERT INTO events(project,dedup,record) VALUES(?,?,?)",
