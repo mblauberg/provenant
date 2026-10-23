@@ -5,7 +5,7 @@ PyYAML gate and migration lane, and 7's transition retention are superseded
 by [ADR 0029](0029-rust-rewrite-in-one-pass.md).
 
 **Amends:** [ADR 0027](0027-rust-front-door.md), decision 1 ("no crate
-dependencies"). Plan and rulebook: [Whole-project Rust port](../specs/rust-port/README.md),
+dependencies"). Plan and rulebook: [Rust rewrite](../specs/rust-port/README.md),
 [PORTING.md](../specs/rust-port/PORTING.md).
 
 ## Context
