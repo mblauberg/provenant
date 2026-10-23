@@ -243,15 +243,77 @@ fn escaped_child_helper() {
         .unwrap();
     std::process::exit(status.code().unwrap_or(1));
 }
+struct EscapeCleanup(std::path::PathBuf);
+impl Drop for EscapeCleanup {
+    fn drop(&mut self) {
+        if let Ok(pid) = fs::read_to_string(self.0.join("escaped.pid"))
+            .unwrap_or_default()
+            .parse::<i32>()
+        {
+            unsafe {
+                libc::kill(-pid, libc::SIGKILL);
+            }
+        }
+    }
+}
 #[test]
 fn new_session_grandchild_is_cleaned_up() {
-    let mut f=Fixture::new("lane-escaped","S2_ESCAPE=1 \"$S2_HELPER\" --exact escaped_child_helper --nocapture & while [ ! -f escaped.pid ]; do :; done; printf ready; /bin/sleep 0.15; exit 0");
-    f.wall = 1500;
-    let record = f.run();
-    let pid = fs::read_to_string(f.sandbox.dir.join("escaped.pid"))
-        .unwrap()
-        .parse::<i32>()
+    use std::os::unix::fs::OpenOptionsExt;
+    let mut f=Fixture::new("lane-escaped","S2_ESCAPE=1 \"$S2_HELPER\" --exact escaped_child_helper --nocapture & while [ ! -f escaped.pid ]; do :; done; printf ready; read release < finish.fifo; exit 0");
+    f.wall = 5000;
+    let fifo = f.sandbox.dir.join("finish.fifo");
+    let name = std::ffi::CString::new(fifo.to_string_lossy().as_bytes()).unwrap();
+    assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+    let _cleanup = EscapeCleanup(f.sandbox.dir.clone());
+    let mut child = Command::new(BINARY)
+        .args(["lane", "run"])
+        .env_remove("PROVENANT_FRONT_DOOR")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
         .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(format!("{}\n", f.spec()).as_bytes())
+        .unwrap();
+    let began = std::time::Instant::now();
+    let mut observed = false;
+    let mut pid = 0;
+    while began.elapsed() < std::time::Duration::from_secs(3) {
+        if let Ok(n) = fs::read_to_string(f.sandbox.dir.join("escaped.pid"))
+            .unwrap_or_default()
+            .parse::<i32>()
+        {
+            pid = n;
+            let census =
+                fs::read_to_string(f.sandbox.dir.join("supervisor.json")).unwrap_or_default();
+            if census.contains(&format!("\"pid\":{pid},")) {
+                observed = true;
+                break;
+            }
+        }
+        unsafe {
+            libc::poll(std::ptr::null_mut(), 0, 10);
+        }
+    }
+    fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .custom_flags(libc::O_NONBLOCK)
+        .open(&fifo)
+        .unwrap()
+        .write_all(b"finish\n")
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert!(output.status.success(), "{}", common::stderr(&output));
+    assert!(
+        observed,
+        "descendant was not observed before the FIFO release"
+    );
+    let record = fs::read_to_string(f.sandbox.dir.join("supervisor.exit.json")).unwrap();
     assert!(record.contains(&format!("\"pid\":{pid}")), "{record}");
     let exists = unsafe { libc::kill(pid, 0) } == 0;
     #[cfg(target_os = "macos")]

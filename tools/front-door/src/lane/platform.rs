@@ -627,6 +627,24 @@ impl EventOutput {
             self.flush();
         }
     }
+    pub fn finish(&mut self, budget: std::time::Duration) {
+        let started = std::time::Instant::now();
+        while !self.pending.is_empty() && !self.broken && started.elapsed() < budget {
+            self.flush();
+            if self.pending.is_empty() || self.broken {
+                break;
+            }
+            let mut fd = libc::pollfd {
+                fd: self.fd,
+                events: libc::POLLOUT,
+                revents: 0,
+            };
+            let millis = budget.saturating_sub(started.elapsed()).as_millis().min(20) as i32;
+            unsafe {
+                libc::poll(&mut fd, 1, millis);
+            }
+        }
+    }
     pub fn flush(&mut self) {
         for _ in 0..4 {
             if self.pending.is_empty() || self.broken {
@@ -666,6 +684,40 @@ impl EventOutput {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn socket_output_finishes_a_short_line_before_close() {
+        use std::io::Read;
+        use std::os::unix::net::UnixStream;
+        let (writer, mut reader) = UnixStream::pair().unwrap();
+        let size = 1024i32;
+        unsafe {
+            assert_eq!(
+                libc::setsockopt(
+                    writer.as_raw_fd(),
+                    libc::SOL_SOCKET,
+                    libc::SO_SNDBUF,
+                    (&size as *const i32).cast(),
+                    4
+                ),
+                0
+            );
+        }
+        nonblocking(writer.as_raw_fd()).unwrap();
+        let line = format!(
+            "{{\"event\":\"exited\",\"data\":\"{}\"}}\n",
+            "x".repeat(15000)
+        );
+        let mut output = EventOutput::new(writer.as_raw_fd());
+        output.emit(line.as_bytes());
+        let receive = std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            reader.read_to_end(&mut bytes).unwrap();
+            bytes
+        });
+        output.finish(std::time::Duration::from_millis(500));
+        drop(writer);
+        assert_eq!(receive.join().unwrap(), line.as_bytes());
+    }
     #[test]
     fn backpressure_drops_a_large_event_without_partial_json() {
         unsafe {

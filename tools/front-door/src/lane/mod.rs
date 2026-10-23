@@ -30,11 +30,11 @@ struct Lane<S> {
 }
 impl Lane<Exited> {
     /// The terminal state is consumed; an error returns custody for retry/report.
-    fn publish(self) -> Result<(), (Self, io::Error)> {
+    fn publish(self) -> Result<(), (Box<Self>, io::Error)> {
         let data = self.record.encode();
         match self.files.publish(data.as_bytes()) {
             Ok(()) => Ok(()),
-            Err(e) => Err((self, e)),
+            Err(e) => Err((Box::new(self), e)),
         }
     }
 }
@@ -373,7 +373,7 @@ pub fn run(args: &[OsString]) -> u8 {
                             record.progress = files::timestamp();
                         }
                         cpu = new_cpu;
-                        let live=format!("{{\"schema\":\"provenant.lane.supervisor.v1\",\"pid\":{},\"pgid\":{},\"started_at\":{},\"last_progress_at\":{},\"run_token\":{}}}\n",group.pid,group.pid,files::quote(&started),files::quote(&record.progress),files::quote(&spec.token));
+                        let live=format!("{{\"schema\":\"provenant.lane.supervisor.v1\",\"pid\":{},\"pgid\":{},\"started_at\":{},\"last_progress_at\":{},\"run_token\":{},\"descendants\":{},\"descendants_truncated\":{}}}\n",group.pid,group.pid,files::quote(&started),files::quote(&record.progress),files::quote(&spec.token),group.census_json(),group.census_omitted());
                         io.result(
                             "supervisor",
                             attempt.atomic("supervisor.json", live.as_bytes(), false),
@@ -476,6 +476,6 @@ pub fn run(args: &[OsString]) -> u8 {
         }
     };
     emit(&mut output, "exited", &encoded);
-    output.flush();
+    output.finish(Duration::from_millis(50));
     status
 }

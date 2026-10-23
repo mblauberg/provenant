@@ -158,7 +158,7 @@ impl ProviderGroup {
             {
                 return Err(io::Error::last_os_error());
             }
-            return Ok(old);
+            Ok(old)
         }
         #[cfg(not(target_os = "linux"))]
         Ok(0)
@@ -342,6 +342,18 @@ impl ProviderGroup {
                 *row = new.clone();
             }
         }
+    }
+    pub fn census_json(&self) -> String {
+        files::array(self.tracked.keys().take(128).map(|id| {
+            format!(
+                "{{\"pid\":{},\"start_time\":{}}}",
+                id.pid,
+                files::quote(&id.start.to_string())
+            )
+        }))
+    }
+    pub fn census_omitted(&self) -> usize {
+        self.tracked.len().saturating_sub(128)
     }
     pub fn cpu_stamp(&self) -> Vec<(Identity, u64)> {
         self.root
