@@ -1317,3 +1317,96 @@ load APIs now return `Result<Option<PathBuf>, PathError>` and preserve that erro
 malformed/missing pointers still return `Ok(None)`. No callers outside core use
 these inert APIs. The regression failed with `null` versus the source error,
 then passed after repair. Extended JSON/native-path reader gaps remain partial.
+
+
+## RP-WF2-001: authority budget diagnostic ordering (open)
+
+- Unit: `skills/deliver/scripts/authority_mapping.py#unit-01`, rulebook v4;
+  class `library`. The unit stays partial; no exception or cut-over is claimed.
+- Compared source/oracle: `600dec09bcda3b6a86272e391420e89d38777953`, unchanged
+  through main `d0027d7cd8de987b15c2f7c855691ca3ddf488aa`; candidate is the
+  workflow batch 2 PR head, pinned Rust 1.94.1 / CPython 3.14.3.
+- Reproducer: a valid authority record with budget
+  `{"turns":-1,"provider_calls":-1}`. Python reports the `turns` amount first;
+  serde_json's sorted `Value` object reports `provider_calls` first.
+- Expected/actual: rejection and authority bounds agree, but the first-invalid
+  field in the diagnostic differs. This is not an accepted behaviour change.
+- Evidence: source `budget` insertion-order iteration versus the explicitly
+  marked sorted-map iteration in `authority_mapping::budget`; policy tests
+  cover rejection and each single-field error, not parity for this ordering gap.
+- Follow-up: accept the shared ordered decoder at this boundary, retain raw
+  fixture order and add the multi-invalid-budget differential before completion.
+  RP-1003's non-finite/lone-surrogate JSON gap also applies to this raw boundary.
+
+## RP-WF2-002: actual cycle records versus draft schemas (open)
+
+- Units: lane launch/exit/observer interfaces; rulebook v4, class `library`.
+- Compared source/oracle: batch 2 revision above; draft schemas on merged main
+  above; Rust candidate is this PR head. Disposition: typed contracts follow
+  source records; schema integration remains open under J2.
+- Reproducer: the real launch builder returns `env` as an object and can return
+  `stdin: {}` and `progress: {}`. The draft launch schema uses an environment
+  array and requires inner stdin/progress members. Source supervisor exit
+  records can contain row arrays in `reaped` and `spared`; the draft schema
+  describes bool/count forms. Receipt mapping consumes further optional fields.
+- Expected/actual: real source records pass the translated Rust contracts;
+  stale schemas can refuse those records. No invented record fields or tagged
+  enum wrappers are added to make the schema appear green.
+- Evidence: `lane_launch` source-builder differentials, `lane_exit` receipt-field
+  differentials and `provider_observer` source summary differentials. Missing
+  members and explicit nulls have separate fixtures. No independent J2 mutant
+  receipt is claimed for these draft-schema discrepancies.
+- Follow-up: schema owner reconciles the actual producer/consumer contract and
+  supplies canonical-byte mutants before command cut-over. This lane changes
+  no schema or runtime owner.
+
+## RP-WF2-003: Python value and notification repairs (fixed)
+
+- Units: workflow batch 2 policy modules and cycle interfaces; rulebook v4,
+  class `bug`. Source/oracle is batch 2 revision above; repaired candidate is
+  this PR head. No intentional contract change is accepted.
+- Counterexamples: failure keys `usage_limited` then `auth_required` were sorted;
+  explicit route extension order was lost; absent nullable members became
+  null; false terminal notifications and a `stalled` semantic stop were admitted;
+  empty/null stdin paths were admitted. Native source review found these forms.
+- Unicode counterexamples: Python word boundaries do not treat U+0345 as a
+  word character, while Rust's default derived Alphabetic class does. Python
+  `re.I` additionally folds dotted/dotless I, long s and Kelvin sign. Built-in
+  phrase and negative-lookahead rules now use the Python predicate/folding.
+- Numeric counterexample: integer JSON `-0` decoded as floating negative zero,
+  and overflow could be rounded by an unchecked serde conversion. The copied
+  main checked codec normalises integer zero and returns typed range refusals.
+- Evidence: required raw-wire order tests, route duplicate/range/refusal
+  differentials, literal reply and stdin tests, required-nullable panel and
+  process tests, and Unicode style differentials. The final required suite has
+  52 passing tests with real source imports and no missing-interpreter skips.
+  The bounded oracle helper uses an explicit PATH even during version probing;
+  intermediate runs that selected an older system Python were rerun in required
+  mode and are not claimed as parity evidence.
+- Disposition: fixed within the implemented domains. Unknown non-finite JSON
+  and lone surrogates remain RP-1003, including the preflight companion decoder;
+  `dispatch_preflight.py#interface` remains partial. Out-of-range integers keep
+  rulebook v4's existing typed-refusal improvement (RP-1005), never f64 rounding.
+- Follow-up: remove pending compatibility/codec copies when workspace aliases
+  expose the landed core and records owners; extend core with the word predicate.
+
+## RP-WF2-004: arbitrary Python regex overlays (open)
+
+- Unit: `skills/natural-writing/scripts/style_lint.py#unit-01`, rulebook v4;
+  class `library`. Disposition: partial, excluded from the completed-unit ledger.
+- Source/oracle: batch 2 revision above; candidate is this PR head. Shared
+  vocabulary, built-in lookaround rules and Markdown/LaTeX spans have translated
+  matchers and passing source differentials. No default pattern is silently
+  passed to the Rust regex parser with incompatible Python syntax.
+- Reproducer: a caller overlay compiled with Python `re.compile(r"(?<=x)y")`
+  is accepted by the source scan operation. `PatternRule::regex` documents Rust
+  syntax and refuses that lookbehind through a typed `StyleError::Regex`.
+  Arbitrary overlay Unicode classes and regex flags can also differ.
+- Expected/actual: source accepts a compiled Python matcher; the current Rust
+  overlay constructor accepts only Rust regex syntax. This restriction is not
+  an approved contract change, despite default and simple overlay parity.
+- Evidence: source scan's arbitrary `re.Pattern` argument, the documented Rust
+  overlay constructor, and existing ordered/replacement overlay fixtures.
+- Follow-up: domain overlay owners supply equivalent typed matchers and retained
+  policy differentials, or agree an exact compatibility adapter, before this
+  unit is declared complete. `run_cli` is outside this assigned source unit.

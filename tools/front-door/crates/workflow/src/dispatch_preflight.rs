@@ -174,10 +174,10 @@ impl FastRoute {
                 "endpoint_provider",
                 "identity_source",
             ] {
-                if !value
+                if value
                     .get(key)
                     .and_then(serde_json::Value::as_str)
-                    .is_some_and(|s| !crate::pending::python_strip(s).is_empty())
+                    .is_none_or(|s| crate::pending::python_strip(s).is_empty())
                 {
                     return Err(RouteDecodeError::InvalidField(format!(
                         "successful route requires non-empty {key}"
@@ -210,7 +210,7 @@ impl FastRoute {
             "endpoint_wire_api",
         ] {
             if let Some(member) = value.get(key).filter(|v| !v.is_null()) {
-                if !member.as_str().is_some_and(|s| !s.contains('\0')) {
+                if member.as_str().is_none_or(|s| s.contains('\0')) {
                     return Err(RouteDecodeError::InvalidField(format!(
                         "route field {key} must be a NUL-free string"
                     )));
