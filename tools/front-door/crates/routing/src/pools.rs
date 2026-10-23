@@ -1,23 +1,12 @@
 //! Validation, migration and model-name helpers for weighted route pools.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::env;
-use std::path::Path;
 
 use crate::{casefold::fold, pending::python_strip};
-use serde_json::{Map, Number, Value};
+use serde_json::{Number, Value};
 use thiserror::Error;
 
 const WEIGHTS: [(&str, u64); 4] = [("high", 8), ("normal", 4), ("sparing", 1), ("off", 0)];
-const RENAMED_TIERS: [(&str, &str); 6] = [
-    ("scout", "junior"),
-    ("bulk", "junior"),
-    ("workhorse", "senior"),
-    ("strong", "senior"),
-    ("review", "senior"),
-    ("flagship", "principal"),
-];
-const TIER_ROUTES: [&str; 4] = ["utility", "junior", "senior", "principal"];
 
 #[derive(Clone, Debug, Error, Eq, PartialEq)]
 #[error("{fix}")]
@@ -105,338 +94,33 @@ pub fn merge_route(
     path: &str,
     drift: &mut Vec<String>,
     effort_order: &BTreeMap<String, usize>,
-) -> Vec<Value> {
-    let mut by_model = BTreeMap::new();
-    for entry in base {
-        if let (Some(model), Some(object)) = (
-            entry.get("model").and_then(Value::as_str),
-            entry.as_object(),
-        ) {
-            by_model.insert(model.to_owned(), object.clone());
-        }
-    }
-    let mut merged: Vec<Value> = Vec::new();
-    for (index, item) in overlay.iter().enumerate() {
-        let candidate = if let Some(object) = item.as_object() {
-            let model = object
-                .get("model")
-                .and_then(Value::as_str)
-                .unwrap_or_default();
-            let mut combined = by_model.get(model).cloned().unwrap_or_default();
-            for (key, value) in object {
-                combined.insert(key.clone(), value.clone());
-            }
-            Value::Object(combined)
-        } else {
-            item.clone()
-        };
-        if !entry_is_valid(&candidate, effort_order) {
-            drift.push(format!("{path}[{index}]: malformed overlay entry dropped; fix: use model adapter/id, weight high|normal|sparing|off or a number, optional effort band"));
-            continue;
-        }
-        let model = candidate
-            .get("model")
-            .and_then(Value::as_str)
-            .unwrap_or_default();
-        merged.retain(|entry| entry.get("model").and_then(Value::as_str) != Some(model));
-        merged.push(candidate);
-    }
-    let listed: BTreeSet<String> = merged
-        .iter()
-        .filter_map(|entry| {
-            entry
-                .get("model")
-                .and_then(Value::as_str)
-                .map(str::to_owned)
-        })
-        .collect();
-    merged.extend(
-        base.iter()
-            .filter(|entry| {
-                entry.as_object().is_some_and(|object| {
-                    object
-                        .get("model")
-                        .and_then(Value::as_str)
-                        .is_some_and(|model| !listed.contains(model))
-                })
-            })
-            .cloned(),
-    );
-    merged
-}
-
-pub fn renamed_message(kind: &str, name: &str) -> Option<String> {
-    renamed_target(name).map(|target| {
-        format!(
-            "{kind} '{}' was renamed to '{target}'; fix: use the new name",
-            python_strip(name)
-        )
+) -> Result<Vec<Value>, MergeRouteError> {
+    let base: Vec<_> = base.iter().cloned().map(Into::into).collect();
+    let overlay: Vec<_> = overlay.iter().cloned().map(Into::into).collect();
+    merge_route_ordered(&base, &overlay, path, drift, effort_order).map(|values| {
+        values
+            .iter()
+            .map(crate::ordered_json::OrderedValue::to_value)
+            .collect()
     })
 }
 
-fn renamed_target(name: &str) -> Option<&'static str> {
-    let folded = fold(python_strip(name));
-    RENAMED_TIERS
-        .iter()
-        .find(|(old, _)| *old == folded)
-        .map(|(_, target)| *target)
-}
+pub use crate::pool_migration::renamed_message;
+pub use crate::pool_migration::{
+    merge_route_ordered, migrate_renamed as migrate_renamed_ordered,
+    reject_renamed as reject_renamed_ordered, MergeRouteError,
+};
 
-fn renamed(name: &Value) -> Option<&str> {
-    name.as_str()
-        .filter(|value| renamed_target(value).is_some())
-}
-
+/// Value callers have already supplied canonical key order. Ordered text ingress
+/// uses migrate_renamed_ordered directly and retains the source dictionary order.
 pub fn reject_renamed(overlay: &Value, label: &str) -> Result<Value, RenamedNameError> {
-    let Some(object) = overlay.as_object() else {
-        return Ok(overlay.clone());
-    };
-    if let Some(routes) = object.get("routes").and_then(Value::as_object) {
-        for name in routes.keys() {
-            if let Some(message) = renamed_message("route", name) {
-                return Err(RenamedNameError(format!("{label} {message}")));
-            }
-        }
-    }
-    if let Some(synonyms) = object.get("route_synonyms").and_then(Value::as_object) {
-        for target in synonyms.values() {
-            if let Some(name) = renamed(target) {
-                return Err(RenamedNameError(format!(
-                    "{label} {}",
-                    renamed_message("route_synonyms target", name).unwrap_or_default()
-                )));
-            }
-        }
-    }
-    if let Some(tasks) = object.get("task_class_routes").and_then(Value::as_object) {
-        for route in tasks.values() {
-            if let Some(alias) = route.get("alias").and_then(renamed) {
-                return Err(RenamedNameError(format!(
-                    "{label} {}",
-                    renamed_message("alias", alias).unwrap_or_default()
-                )));
-            }
-        }
-    }
-    for section in ["families", "adapters"] {
-        if let Some(entries) = object.get(section).and_then(Value::as_object) {
-            for entry in entries.values().filter_map(Value::as_object) {
-                let mut mappings = Vec::new();
-                mappings.push(entry.get("aliases"));
-                for field in ["role_overrides", "role_effort_defaults"] {
-                    if let Some(roles) = entry.get(field).and_then(Value::as_object) {
-                        mappings.extend(roles.values().map(Some));
-                    }
-                }
-                for mapping in mappings.into_iter().flatten().filter_map(Value::as_object) {
-                    for name in mapping.keys() {
-                        if let Some(message) = renamed_message("alias", name) {
-                            return Err(RenamedNameError(format!("{label} {message}")));
-                        }
-                    }
-                }
-                if let Some(tiers) = entry.get("risk_tier_overrides").and_then(Value::as_object) {
-                    for value in tiers.values() {
-                        if let Some(alias) = value.get("alias").and_then(renamed) {
-                            return Err(RenamedNameError(format!(
-                                "{label} {}",
-                                renamed_message("alias", alias).unwrap_or_default()
-                            )));
-                        }
-                    }
-                }
-            }
-        }
-    }
-    let mut result = overlay.clone();
-    if let Some(synonyms) = result
-        .get("route_synonyms")
-        .and_then(Value::as_object)
-        .cloned()
-    {
-        let kept: Map<String, Value> = synonyms
-            .into_iter()
-            .filter(|(name, _)| {
-                !TIER_ROUTES.contains(&name.as_str()) && name != "design" && name != "writing"
-            })
-            .collect();
-        result["route_synonyms"] = Value::Object(kept);
-    }
-    Ok(result)
+    crate::pool_migration::reject_renamed(&overlay.clone().into(), label).map(|v| v.to_value())
 }
-
 pub fn migrate_renamed(
     document: &Value,
 ) -> Result<(Value, Vec<String>, Vec<String>), MigrationConflict> {
-    let Some(_) = document.as_object() else {
-        return Ok((document.clone(), Vec::new(), Vec::new()));
-    };
-    let mut result = document.clone();
-    let mut notes = Vec::new();
-    let mut moved = Vec::new();
-    if let Some(routes) = result.get("routes").and_then(Value::as_object).cloned() {
-        if routes.keys().any(|name| renamed_target(name).is_some()) {
-            let mut merged: Map<String, Value> = routes
-                .iter()
-                .filter(|(name, _)| renamed_target(name).is_none())
-                .map(|(name, value)| (name.clone(), value.clone()))
-                .collect();
-            for (name, value) in routes
-                .iter()
-                .filter(|(name, _)| renamed_target(name).is_some())
-            {
-                let target = renamed_target(name).unwrap_or_default();
-                let old_path = format!("routes.{name}");
-                let new_path = format!("routes.{target}");
-                settle(&mut merged, target, value, &old_path, &new_path)?;
-                notes.push(format!("{old_path} -> {target}"));
-                moved.push(new_path);
-            }
-            result["routes"] = Value::Object(merged);
-        }
-    }
-    if let Some(synonyms) = result
-        .get("route_synonyms")
-        .and_then(Value::as_object)
-        .cloned()
-    {
-        let mut kept = Map::new();
-        for (name, mut target) in synonyms {
-            if renamed_target(&name).is_some() {
-                notes.push(format!(
-                    "route_synonyms.{name} dropped (the product maps task classes)"
-                ));
-                continue;
-            }
-            if let Some(old) = target.as_str().and_then(renamed_target) {
-                notes.push(format!(
-                    "route_synonyms.{name} {} -> {old}",
-                    target.as_str().unwrap_or_default()
-                ));
-                target = Value::String(old.into());
-            }
-            kept.insert(name, target);
-        }
-        result["route_synonyms"] = Value::Object(kept);
-    }
-    rename_nested(&mut result, &mut notes, &mut moved)?;
-    Ok((result, notes, moved))
-}
-
-fn settle(
-    target: &mut Map<String, Value>,
-    name: &str,
-    value: &Value,
-    old_path: &str,
-    new_path: &str,
-) -> Result<(), MigrationConflict> {
-    if target.get(name).is_some_and(|current| current != value) {
-        let current = target.get(name).map(Value::to_string).unwrap_or_default();
-        return Err(MigrationConflict(format!("{old_path} = {value} conflicts with {new_path} = {current}; keep one, delete the other, then refresh again")));
-    }
-    target
-        .entry(name.to_owned())
-        .or_insert_with(|| value.clone());
-    Ok(())
-}
-
-fn rename_nested(
-    document: &mut Value,
-    notes: &mut Vec<String>,
-    moved: &mut Vec<String>,
-) -> Result<(), MigrationConflict> {
-    if let Some(defaults) = document
-        .pointer_mut("/task_classification/role_defaults")
-        .and_then(Value::as_object_mut)
-    {
-        rename_map(defaults, "task_classification.role_defaults", notes, moved)?;
-        for (role, alias) in defaults.iter_mut() {
-            if let Some(old) = alias.as_str().and_then(renamed_target) {
-                notes.push(format!(
-                    "task_classification.role_defaults.{role} {} -> {old}",
-                    alias.as_str().unwrap_or_default()
-                ));
-                moved.push(format!("task_classification.role_defaults.{role}"));
-                *alias = Value::String(old.into());
-            }
-        }
-    }
-    if let Some(tasks) = document
-        .get_mut("task_class_routes")
-        .and_then(Value::as_object_mut)
-    {
-        for (name, route) in tasks {
-            rename_alias(route, &format!("task_class_routes.{name}"), notes);
-        }
-    }
-    for section in ["families", "adapters"] {
-        if let Some(entries) = document.get_mut(section).and_then(Value::as_object_mut) {
-            for (name, entry) in entries {
-                let Some(entry) = entry.as_object_mut() else {
-                    continue;
-                };
-                let base = format!("{section}.{name}");
-                if let Some(aliases) = entry.get_mut("aliases").and_then(Value::as_object_mut) {
-                    rename_map(aliases, &format!("{base}.aliases"), notes, moved)?;
-                }
-                for field in ["role_overrides", "role_effort_defaults"] {
-                    if let Some(roles) = entry.get_mut(field).and_then(Value::as_object_mut) {
-                        for (role, map) in roles {
-                            if let Some(map) = map.as_object_mut() {
-                                rename_map(map, &format!("{base}.{field}.{role}"), notes, moved)?;
-                            }
-                        }
-                    }
-                }
-                if let Some(tiers) = entry
-                    .get_mut("risk_tier_overrides")
-                    .and_then(Value::as_object_mut)
-                {
-                    for (tier, value) in tiers {
-                        rename_alias(value, &format!("{base}.risk_tier_overrides.{tier}"), notes);
-                    }
-                }
-            }
-        }
-    }
-    Ok(())
-}
-
-fn rename_map(
-    mapping: &mut Map<String, Value>,
-    path: &str,
-    notes: &mut Vec<String>,
-    moved: &mut Vec<String>,
-) -> Result<(), MigrationConflict> {
-    if !mapping.keys().any(|key| renamed_target(key).is_some()) {
-        return Ok(());
-    }
-    let old = std::mem::take(mapping);
-    for (key, value) in &old {
-        if renamed_target(key).is_none() {
-            mapping.insert(key.clone(), value.clone());
-        }
-    }
-    for (key, value) in old.iter().filter(|(key, _)| renamed_target(key).is_some()) {
-        let target = renamed_target(key).unwrap_or_default();
-        let new_path = format!("{path}.{target}");
-        settle(mapping, target, value, &format!("{path}.{key}"), &new_path)?;
-        notes.push(format!("{path}.{key} -> {target}"));
-        moved.push(new_path);
-    }
-    Ok(())
-}
-
-fn rename_alias(holder: &mut Value, path: &str, notes: &mut Vec<String>) {
-    if let Some(alias) = holder
-        .get("alias")
-        .and_then(Value::as_str)
-        .filter(|value| renamed_target(value).is_some())
-    {
-        let target = renamed_target(alias).unwrap_or_default();
-        notes.push(format!("{path}.alias {alias} -> {target}"));
-        holder["alias"] = Value::String(target.into());
-    }
+    let (value, notes, moved) = crate::pool_migration::migrate_renamed(&document.clone().into())?;
+    Ok((value.to_value(), notes, moved))
 }
 
 pub fn route_name(catalog: &Value, name: &str) -> Result<String, PoolError> {
@@ -473,31 +157,20 @@ pub fn known_provider_path(text: &str) -> bool {
         .any(|prefix| text.starts_with(prefix))
 }
 
-pub fn default_installed(adapter: &str) -> bool {
-    let command = match adapter {
-        "cursor" => "cursor-agent",
-        "kiro" => "kiro-cli",
-        _ => adapter,
-    };
-    env::var_os("PATH").is_some_and(|paths| {
-        env::split_paths(&paths).any(|directory| executable_in(&directory.join(command)))
-    })
+/// Executable resolution belongs to the composing OS owner. In particular it
+/// must use the host access check and Python's default PATH when PATH is absent;
+/// inspecting permission bits here cannot reproduce shutil.which.
+pub trait BinaryLocator {
+    fn which(&self, command: &str) -> Option<std::path::PathBuf>;
 }
-
-fn executable_in(path: &Path) -> bool {
-    if !path.is_file() {
-        return false;
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        path.metadata()
-            .is_ok_and(|metadata| metadata.permissions().mode() & 0o111 != 0)
-    }
-    #[cfg(not(unix))]
-    {
-        true
-    }
+pub const BINARIES: &[(&str, &str)] = &[("cursor", "cursor-agent"), ("kiro", "kiro-cli")];
+pub fn default_installed(adapter: &str, locator: &dyn BinaryLocator) -> bool {
+    let command = BINARIES
+        .iter()
+        .find(|(name, _)| *name == adapter)
+        .map(|(_, binary)| *binary)
+        .unwrap_or(adapter);
+    locator.which(command).is_some()
 }
 
 pub use crate::render::{render, RenderError};
@@ -688,7 +361,7 @@ mod tests {
         ];
         let mut drift = Vec::new();
         let order = BTreeMap::from([("high".into(), 2), ("xhigh".into(), 3)]);
-        let merged = merge_route(&base, &overlay, "routes.senior", &mut drift, &order);
+        let merged = merge_route(&base, &overlay, "routes.senior", &mut drift, &order).unwrap();
         assert_eq!(merged[0]["weight"], "high");
         assert_eq!(merged[0]["effort"], json!(["high", "high"]));
         assert_eq!(merged[1]["model"], "claude/b");

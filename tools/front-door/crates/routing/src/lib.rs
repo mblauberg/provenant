@@ -7,6 +7,7 @@ mod casefold;
 mod render;
 
 pub mod selection;
+pub mod pool_migration;
 pub mod capability;
 pub mod catalog;
 pub mod cli;
