@@ -243,8 +243,14 @@ fn run(args: &[OsString]) -> u8 {
         },
         Route::Check(rest) => match check::select(&settings) {
             Ok(selection) => {
-                if let Ok(product_root) = resolve::product_root(&settings) {
-                    stale::warn(&product_root);
+                match resolve::product_root(&settings) {
+                    Ok(product_root) => stale::warn(&product_root),
+                    Err(message)
+                        if std::env::var_os("PROVENANT_DEBUG").is_some_and(|v| !v.is_empty()) =>
+                    {
+                        eprintln!("provenant: stale-checkout check failed: {message}")
+                    }
+                    Err(_) => {}
                 }
                 replace_process(&Launch {
                     program: &selection.checker,

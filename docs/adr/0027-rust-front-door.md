@@ -33,9 +33,8 @@ about 120 ms, against a fork-and-exec floor of about 6 ms
 4. **Python stays the fallback and the oracle during the trial.**
    `scripts/provenant.template` and `scripts/provenant` remain while both Macs
    run the Rust path for seven days. `install-harness` defaults to
-   `PROVENANT_FRONT_DOOR=rust`; `PROVENANT_FRONT_DOOR=python` selects the
-   rollback path during the trial. `auto` remains available for the existing
-   lenient fallback behaviour.
+   `PROVENANT_FRONT_DOOR=auto`; the trial selects `PROVENANT_FRONT_DOOR=rust`
+   explicitly, and `PROVENANT_FRONT_DOOR=python` is the rollback path.
 5. **Identity is the source digest.** The binary embeds the managed-file marker
    and `provenant-front-door source-sha256=<hex>` as lines of their own. The
    digest covers `Cargo.toml`, `Cargo.lock`, `rust-toolchain.toml` and `src/**`.
