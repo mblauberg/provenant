@@ -58,7 +58,7 @@ provider.
 | Spawn provider in its own session and group | `provider_exec._run_attempt` | Rust `lane run` | S2 |
 | Read loop, bounded byte capture of stdout and stderr | `_run_attempt`, `BoundedCapture` | Rust | S2 |
 | Live reading of output: terminal events, Claude preamble, reopened turns, retry supersession, stderr failure rules, semantic retention | `consume`, `consume_diagnostic` in `_run_attempt` | The same Python code, run as the observer coprocess | S2 |
-| Startup, idle and wall watchdogs; CPU and writer-tree progress | `_run_attempt`, `WorkspaceProgress` | Rust | S2 |
+| Startup and wall deadlines; silence observations; CPU and writer-tree progress | `_run_attempt`, `WorkspaceProgress` | Rust | S2 |
 | Descendant census, sparing, staged SIGTERM and SIGKILL, subreaper | `_Descendants`, `_enable_subreaper` | Rust | S2 |
 | Signalling a provider on cancel | TS `signalRecordedRun` signals owner and provider (`run-registry.ts:330-345`); Python owner | Only `lane run`; TS signals the owner group alone | S2 |
 | Process exit record | Adapter receipt fields `pgid`, `evidence.exit`, `reaped`, `spared` | `supervisor.exit.json`, mapped by Python | S2 |
@@ -114,13 +114,27 @@ daemon or second lifecycle engine" still holds.
  "stdin": {"path": "/abs/run/tasks/t/attempt-001/prompt.md"},
  "attempt_dir": "/abs/run/tasks/t/attempt-001", "run_token": "...",
  "capture": {"events": "events.jsonl", "stderr": "stderr.log", "max_bytes": 8388608},
- "timeouts_ms": {"startup": 300000, "idle": 900000, "wall": 3600000,
+ "silence_observation_ms": 300000,
+ "timeouts_ms": {"startup": 300000, "wall": 3600000,
                  "settle": 1500, "child_grace": 500, "root_flush": 2000},
  "progress": {"writer_tree": {"root": "/abs/worktree", "exclude": [".git", "node_modules"]}},
  "cancel_markers": ["cancel.request", "../../batches/b1/cancel.request"],
  "observer": {"argv": ["/abs/python3", "/abs/provider_exec.py", "observe", "--adapter", "claude", "..."]},
  "spare": {"code_mode_host": true}}
 ```
+
+**Silence.** `silence_observation_ms` comes from `lanes.silence_seconds`.
+After that interval without stdout or stderr, Rust samples liveness, output
+timestamps and writer-tree progress and writes `watchdog.json` beside the
+capture files. Silence never reaches `ProviderGroup::stop`; it cannot become
+a forced reason, even when the writer tree is unchanged. Startup and wall
+deadlines remain separate stop reasons. The retired `stalled` forced reason
+is rejected, including in observer requests. After proven process death, Python
+builds `wip-checkpoint.json` from retained events and a bounded Git summary;
+Rust commits those bytes for the owner from S3 and the reaper from S4.
+Checkpoint failures add a warning and never
+block terminal publication. The reaper skips Git for read-only lanes and
+shares a one-second Git budget across all dead writers in a pass.
 
 **Observer.** Live reading stays in Python, in the code that does it today.
 `lane run` starts the observer and writes it every captured line as
@@ -147,7 +161,7 @@ fractional field it needs. Rust never re-serialises a document Python wrote.
 
 `supervisor.exit.json` (`provenant.lane.exit.v1`) holds `pid`, `pgid`,
 `started_at`, `ended_at`, `last_progress_at`, `exit`, `signal`, `forced`
-(`null`, `cancelled`, `startup_timeout`, `stalled`, `wall_timeout`,
+(`null`, `cancelled`, `startup_timeout`, `wall_timeout`,
 `supervisor_signal`, or an observer `stop` reason), `terminal_event_seen`,
 `reaped`, `spared`, `census_warnings`, capture byte counts with `truncated`,
 `observer_lost` and `io_errors`. It is bounded at 16 KiB: lists are truncated
@@ -250,6 +264,8 @@ synthesis from absence (`provider_lost`, `reap_attempts`).
 | File | Writer today | Writer after | Change |
 |---|---|---|---|
 | `events.jsonl`, `stderr.log`, `pgid` | Python | Rust (S2) | None |
+| `watchdog.json` | Python supervisor or reaper | Rust supervisor (S2); Python reaper until S4 | Silence observation only; never a stop request |
+| `wip-checkpoint.json` | Python owner or reaper after proven death | Python content; Rust commit for owner (S3), reaper (S4) | Best effort before terminal publication |
 | `supervisor.lock`, `supervisor.json`, `supervisor.exit.json`, `launch.json`, `observer.json` | none | Rust and the observer (S2) | New, versioned |
 | Both `attempt.json` records, sidecars, adapter receipt, `result.md`, manifest, `RUN_RECEIPT.json` | Python | Python bytes, Rust commit (S3) | None |
 | `dispatch-owner.json` | Python | Rust (S3) | Same fields |
@@ -264,7 +280,7 @@ afterwards it fails with `fix: scripts/install-harness`.
 
 | Guarantee | Mechanism | Bug class it removes |
 |---|---|---|
-| Bookkeeping cannot reach a kill | Only `ProviderGroup::stop(StopReason)` signals. `StopReason` is a closed enum (cancel, watchdogs, observer `stop`, supervisor signal, post-exit cleanup); I/O errors are a separate type with no conversion into it, and the writer module never receives the group handle. From S2 no Python process holds a provider | #1204: ENOSPC in `publish_contract`, then `finally: descendants.stop()` |
+| Bookkeeping cannot reach a kill | Only `ProviderGroup::stop(StopReason)` signals. `StopReason` is a closed enum (cancel, startup or wall deadline, observer `stop`, supervisor signal, post-exit cleanup); silence and I/O errors have no conversion into it, and the writer module never receives the group handle. From S2 no Python process holds a provider | #1204: ENOSPC in `publish_contract`, then `finally: descendants.stop()` |
 | PID and PGID cannot be reused under a signal | `lane run` is the provider's parent. It observes exit with `waitid(P_PID, pid, WEXITED \| WNOHANG \| WNOWAIT)`, never `Child::try_wait`, which reaps. Group cleanup runs while the zombie leader still reserves its PID and therefore its group ID; reaping, by consuming the handle, is the last act | PID reuse in reaping and cancellation; start-time string matching |
 | No missed fast exit | `SIGCHLD` is registered with the event loop before spawn. `EVFILT_PROC` is registered after spawn and fails with `ESRCH` if the child has already exited; both paths end at the same `WNOWAIT` check | Exit lost between spawn and watch |
 | Signal dispositions are known | At start `lane run` resets `SIGCHLD` to default (an inherited `SIG_IGN` makes the kernel reap the leader and free its group ID) and ignores `SIGPIPE`; `SIGTERM`, `SIGINT` and `SIGHUP` arrive as loop events. The provider gets an empty mask and default dispositions before exec | Inherited ignored signals; handler re-entrancy |
@@ -299,7 +315,7 @@ switches its default:
 
 | Slice | Rows added |
 |---|---|
-| S2 | Idle versus writer-tree progress; wall deadline; cancel before launch, during run and after natural exit; provider ignoring SIGTERM; new-session grandchild; terminal event with stdin open; capture over the cap; fast exit before watch; ENOSPC on capture, progress and the exit record (fault-injection build); observer death; per-adapter transcript replay through the observer |
+| S2 | Silence observations with and without writer-tree progress, without signalling; per-adapter wall deadlines; checkpoint write failure preserves terminal publication; cancel before launch, during run and after natural exit; provider ignoring SIGTERM; new-session grandchild; terminal event with stdin open; capture over the cap; fast exit before watch; ENOSPC on capture, progress and the exit record (fault-injection build); observer death; per-adapter transcript replay through the observer |
 | S3 | Owner SIGKILLed mid-attempt (provider finishes, reaper settles from the exit record, second writer refused meanwhile); two reapers and a late supervisor; child registering during publication; admission lock held through spawn settle; batch child under inherited custody |
 | S4 | `lane status` on live, finished and SIGKILLed runs; `lane cancel` through TS; orphan reap with a live host |
 

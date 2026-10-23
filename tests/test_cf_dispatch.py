@@ -2562,19 +2562,6 @@ def test_opencode_provider_exit_with_text_is_not_watchdog_error(provider_exit, t
     assert "provider detail" in out.read_text()
 
 
-def test_invalid_opencode_idle_limit_is_refused_before_provider_launch(tmp_path):
-    tmp = tmp_path
-    bin_dir = fake_bin(tmp)
-    invoked = tmp / "invoked"
-    write_executable(bin_dir / "opencode", f"#!/usr/bin/env bash\ntouch '{invoked}'\n")
-    env = fabric_free_env()
-    env["CF_DISPATCH_IDLE_SECONDS"] = "oops"
-    result = run_cli([str(SCRIPT), '--intent', 'ordinary', '--tool', 'opencode', '--prompt', 'Reply OK', '--out', str(tmp / 'out.txt')], cwd=tmp, env=env, path=[bin_dir, PRODUCT_ROOT / "scripts"])
-    assert result.returncode == 2
-    assert "CF_DISPATCH_IDLE_SECONDS must be a positive integer" in result.stderr
-    assert not invoked.exists()
-
-
 def test_opencode_silence_observation_keeps_provider_alive():
     with tempfile.TemporaryDirectory() as td:
         tmp = Path(td)
@@ -2583,7 +2570,7 @@ def test_opencode_silence_observation_keeps_provider_alive():
         write_executable(bin_dir / "opencode", '#!/usr/bin/env bash\n[ "$1" = "--version" ] && { echo 2.0.30; exit 0; }\n[ "$1" = "models" ] && exit 1\necho started\nsleep 2\necho finished\n')
         env = fabric_free_env()
         env["PATH"] = f"{bin_dir}:{PRODUCT_ROOT / 'scripts'}:{env['PATH']}"
-        env["CF_DISPATCH_IDLE_SECONDS"] = "1"
+        env["CF_DISPATCH_IDLE_SECONDS"] = "oops"  # Retired; ignored even when invalid.
         env["PROVENANT_KNOB_LANES_SILENCE_SECONDS"] = "1"
         out = tmp / "out.txt"
         result = run_bounded(
@@ -2592,7 +2579,10 @@ def test_opencode_silence_observation_keeps_provider_alive():
             cwd=tmp, env=env, timeout_seconds=5, output_limit_bytes=1_048_576,
         )
         record = json.loads(result.output.splitlines()[-1])
-        assert record["status"] != "stalled"
+        assert record["status"] == "ok"
+        observation = json.loads((tmp / 'watchdog.json').read_text())
+        assert observation['process_alive'] is True
+        assert observation['silent_seconds'] >= 1
         assert "finished" in out.read_text()
 
 
@@ -2610,7 +2600,7 @@ def test_opencode_stderr_progress_keeps_writer_alive():
         """)
         env = fabric_free_env()
         env["PATH"] = f"{bin_dir}:{PRODUCT_ROOT / 'scripts'}:{env['PATH']}"
-        env["CF_DISPATCH_IDLE_SECONDS"] = "1"
+        env["PROVENANT_KNOB_LANES_SILENCE_SECONDS"] = "1"
         out = tmp / "out.txt"
         worktree = make_worktree(tmp)
         result = subprocess.run(
@@ -2622,6 +2612,7 @@ def test_opencode_stderr_progress_keeps_writer_alive():
         assert result.returncode == 0, result.stderr + result.stdout
         assert json.loads(result.stdout)["status"] == "ok"
         assert out.read_text() == "tests passed"
+        assert not (tmp / 'watchdog.json').exists()
 
 
 def test_opencode_dispatch_group_signal_terminates_provider_and_grandchild():

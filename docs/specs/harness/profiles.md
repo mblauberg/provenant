@@ -154,6 +154,10 @@ explicit `--knob` are strict and exit with an error instead.
   of the configured and shifted effort.
 - `lanes.max_concurrency` (`batch_run.py`): caps the requested concurrency for
   both `provenant batch` and Fabric batches; it never raises it.
+- `lanes.silence_seconds` (`dispatch_run.py`, `provider_exec.py`): interval
+  without stdout or stderr before retaining `watchdog.json`; default 300,
+  range 1–3600. The reaper and status readers use the attempt's saved knob.
+  Silence never signals a provider; startup and wall deadlines still apply.
 - `context.ceiling_tokens` (`dispatch_run.py`): the ceiling for a dispatch that
   passes no `--context-ceiling`. An explicit flag and a resumed run's ceiling
   still win.

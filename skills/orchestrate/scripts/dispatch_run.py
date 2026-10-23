@@ -694,6 +694,7 @@ def reap_attempts(run_dir: Path) -> list[str]:
     """Finalise dead attempts under custody, preserving deliberate termination."""
     run_dir = Path(run_dir)
     reaped = []
+    git_deadline = time.monotonic() + 1  # Shared by every dead writer in this pass.
     try:
         custody = acquire_run_custody(run_dir)
     except (OSError, OwnedFileError):
@@ -749,8 +750,13 @@ def reap_attempts(run_dir: Path) -> list[str]:
                         status = reap_stop_status(run_dir, path, row)
                         if status is None:
                             continue
-                        stall_watchdog.checkpoint(evidence_dir, row.get("worktree") or row.get("cwd") or run_workspace(run_dir), pgid)
-                        row.setdefault("paths", {})["checkpoint"] = relative_path(run_dir, evidence_dir / "wip-checkpoint.json")
+                        try:
+                            stall_watchdog.checkpoint(evidence_dir, row.get("worktree") or row.get("cwd") or run_workspace(run_dir), pgid,
+                                include_git=row.get("mode") == "worktree_write", git_deadline=git_deadline)
+                        except (OSError, ValueError) as exc:
+                            row.setdefault("warnings", []).append("checkpoint unavailable: " + str(exc))
+                        else:
+                            row.setdefault("paths", {})["checkpoint"] = relative_path(run_dir, evidence_dir / "wip-checkpoint.json")
                         row.update(identity)
                         disk_error, space_hint = reap_disk_full(run_dir, row)
                         if disk_error and status == "lost":
@@ -1169,7 +1175,7 @@ def incomplete_provider_turn(attempt: dict) -> bool:
 
 
 FAST_PLAN_SHELL_ENV_READS = {
-    "CF_DISPATCH_IDLE_SECONDS", "CF_DISPATCH_AGY_ADD_DIR", "CF_DISPATCH_ENABLE_KIRO",
+    "CF_DISPATCH_AGY_ADD_DIR", "CF_DISPATCH_ENABLE_KIRO",
     "CF_DISPATCH_ENABLE_COPILOT", "CF_DISPATCH_CURSOR_MODEL", "CF_DISPATCH_KIRO_MODEL",
     "CF_DISPATCH_COPILOT_MODEL", "CF_DISPATCH_OPENCODE_MODEL", "CF_DISPATCH_ENDPOINT",
     "CF_DISPATCH_CODEX_NETWORK", "CF_DISPATCH_AGY_SANDBOX",
@@ -1258,7 +1264,8 @@ def fast_fabric_plan(args, prompt_path: Path, result_path: Path, workspace: Path
     """Plan a simple explicit route in the owner process using the same router and supervisor."""
     if (not args.model or args.tool not in {"claude", "codex"}
             or any(str(value).startswith("-") for value in (args.model, args.effort, args.role) if value)
-            or any(value for key, value in os.environ.items() if key.startswith("CF_DISPATCH_"))
+            or any(value for key, value in os.environ.items()
+                   if key.startswith("CF_DISPATCH_") and key != "CF_DISPATCH_IDLE_SECONDS")
             or not Path(os.environ.get("TMPDIR") or "/tmp").is_dir()
             or args.access_mode != "read_only"
             or args.task_class or args.alias or args.resume or getattr(args, "resume_session", None) or args.worktree
@@ -1992,7 +1999,8 @@ def contract_row(args,run_dir,number,attempt_dir,plan,started_at):
                        "finding_names":getattr(getattr(args,"_secret_scan",None),"names",lambda:[])()},
         "timing":{"phases":getattr(args,"_phase_timings",{}).copy()},
         "paths":{"result":relative_path(run_dir,attempt_dir/"result.md"),"stderr":relative_path(run_dir,attempt_dir/"stderr.log"),
-                 "events":relative_path(run_dir,attempt_dir/"events.jsonl"),"receipt":f"tasks/{args.task_id}/attempt-{number:03d}/attempt.json"},"digest":""}
+                 "events":relative_path(run_dir,attempt_dir/"events.jsonl"),"watchdog":relative_path(run_dir,attempt_dir/"watchdog.json"),
+                 "receipt":f"tasks/{args.task_id}/attempt-{number:03d}/attempt.json"},"digest":""}
 
 
 def publish_contract(run_dir,row):
@@ -3174,8 +3182,14 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
         record["question"] = question
     if process_error:
         record["process_error"] = process_error
+    checkpoint_written = False
     if record["status"] == "failed" and process is not None and process.poll() is not None:
-        stall_watchdog.checkpoint(attempt_dir, getattr(args, "worktree", None) or workspace, process.pid)
+        try:
+            stall_watchdog.checkpoint(attempt_dir, getattr(args, "worktree", None) or workspace, process.pid)
+        except (OSError, ValueError) as exc:
+            args._bookkeeping_warnings.append("checkpoint unavailable: " + str(exc))
+        else:
+            checkpoint_written = True
     attempt_path = attempt_dir / "attempt.json"
     record["attempt_path"] = relative_path(run_dir, attempt_path)
     digest_path = attempt_dir / "attempt.sha256"
@@ -3203,7 +3217,7 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
     for sig, handler in old_handlers.items():
         signal.signal(sig, handler)
     row = terminal_contract(args,run_dir,record,adapter,attempt_number,attempt_dir,active)
-    if (attempt_dir / "wip-checkpoint.json").is_file():
+    if checkpoint_written:
         row["paths"]["checkpoint"] = relative_path(run_dir, attempt_dir / "wip-checkpoint.json")
     def prune_tmp():
         left=attempt_storage.prune_private_tmp(run_dir,attempt_dir,row["status"])[1]

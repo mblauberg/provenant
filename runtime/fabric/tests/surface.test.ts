@@ -17,6 +17,13 @@ import { scratchRoot } from "./helpers/temp-root.js";
 
 const fixturePidLogs = new Set<string>();
 const fixtureRoots = new Set<string>();
+it("renders a retained watchdog once through terminal brief and aggregate digests", async () => {
+  const { digest, runView } = await import("../src/surface.js");
+  const view = runView({ runs: [{ state: "terminal", status: "failed", id: "silent",
+    watchdog: { silent_seconds: 301, process_alive: true, checked_at: "2026-10-23T00:00:00Z" } }] });
+  expect(digest(view).match(/watchdog: silent 301s; alive/gu)).toHaveLength(1);
+});
+
 it("accepts delivery_run_id in dispatch and batch schemas and the CLI flag", () => {
   const root = scratchRoot("fabric-delivery-link-");
   fixtureRoots.add(root);

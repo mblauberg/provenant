@@ -1283,7 +1283,6 @@ def build_plan(
     add_dirs=(),
     capabilities=None,
     timeout_seconds=None,
-    idle_seconds=None,
     startup_seconds=None,
     preface=True,
     run_id="",
@@ -1568,17 +1567,12 @@ def build_plan(
     if sandbox == "full" and adapter != "codex":
         warnings.append("sandbox control unsupported by " + adapter)
     timeout = float(timeout_seconds or (10800 if mode == "worktree_write" else 3600))
-    idle = float(
-        idle_seconds
-        or os.environ.get("CF_DISPATCH_IDLE_SECONDS")
-        or (config.IDLE_WRITE if mode == "worktree_write" else config.IDLE_READ)
-    )
     startup = float(
         startup_seconds
         or os.environ.get("CF_DISPATCH_STARTUP_SECONDS")
         or STARTUP_SECONDS
     )
-    if not all(math.isfinite(value) and value > 0 for value in (timeout, idle, startup)):
+    if not all(math.isfinite(value) and value > 0 for value in (timeout, startup)):
         raise ValueError("timeouts must be finite positive numbers")
     boundary = f"Workspace root: {cwd}\nResolve relative paths against this root. " + (
         "Write, run commands and commit only inside this owned worktree. Do not push or change other checkouts. "
@@ -1606,7 +1600,6 @@ def build_plan(
         "run_dir": str(attempt_dir),
         "original_prompt_file": original_path,
         "timeout_seconds": timeout,
-        "idle_seconds": idle,
         "startup_seconds": startup,
         "grace_seconds": 5.0,
         "session_id": session_id
@@ -2725,15 +2718,12 @@ class WorkspaceProgress:
         self.started_wall_ns = time.time_ns() - 20_000_000
         self.known = {}
         self.initial_pass_complete = False
-        self.completed_pass_started_at = None
         self.last_visited = 0
         self._stack = []
         self._seen = set()
-        self._pass_started_at = None
 
     def _start_pass(self):
         self._seen = set()
-        self._pass_started_at = time.monotonic()
         try:
             self._stack = [os.scandir(self.cwd)]
         except OSError:
@@ -2786,7 +2776,6 @@ class WorkspaceProgress:
                     for path in missing:
                         del self.known[path]
             self.initial_pass_complete = True
-            self.completed_pass_started_at = self._pass_started_at
         return changed
 
     def close(self):
@@ -3777,7 +3766,6 @@ def _run_attempt(
         stderr_path = stderr_path.with_name(stderr_path.name + "." + suffix)
     raw = BoundedCapture(events_path)
     diagnostics = BoundedCapture(stderr_path)
-    stall_watchdog.register_capture(output_path.parent, events_path, stderr_path)
     started_at, started = now(), time.monotonic()
     last_progress, last_progress_at = started, started_at
     resolution, _ = harness_profile.lenient(cwd=Path(plan["cwd"]), environ=control_environment)
@@ -3941,6 +3929,7 @@ def _run_attempt(
     browser_tmp, browser_tmp_identity, browser_tmp_warnings = None, None, []
     selector = selectors.DefaultSelector()
     try:
+        stall_watchdog.register_capture(output_path.parent, events_path, stderr_path)
         if "browser" in plan["applied"].get("capabilities", []):
             browser_tmp = _fabric_hosts_owner().browser_temporary_directory(plan["run_dir"], create=True)
             browser_tmp_identity = browser_tmp.lstat()
@@ -4170,11 +4159,7 @@ def _run_attempt(
     if pending:
         consume(b"\n")
     consume_diagnostic(b"\n", "stderr")
-    if forced == "stalled":
-        diagnostics.write(
-            f"idle for {plan['idle_seconds']:g}s; try another model\n".encode()
-        )
-    elif forced == "timed_out":
+    if forced == "timed_out":
         diagnostics.write(b"wall clock deadline exceeded\n")
     elif forced == "startup_timeout":
         diagnostics.write(
@@ -4236,7 +4221,6 @@ def _run_attempt(
     if forced:
         parsed["status"] = forced
         parsed["signature"] = {
-            "stalled": "idle_watchdog",
             "startup_timeout": "startup_watchdog",
             "timed_out": "wall_clock",
             "cancelled": "cancel_requested",

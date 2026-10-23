@@ -9,8 +9,6 @@ MIN_MAJOR = 2
 PROMPT_TRANSPORT = "argv"
 STDIN = "null"
 OUTPUT_FORMAT = "jsonl"
-IDLE_READ = 600
-IDLE_WRITE = 1800
 # v2 has no --variant flag: effort travels as `provider/model#variant` in --model.
 EFFORT_FLAG = "#variant"
 SESSION_KEYS = ("sessionID", "session_id")

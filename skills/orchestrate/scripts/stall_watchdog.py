@@ -123,17 +123,21 @@ def redact(text):
     return data.decode('utf-8', 'replace')
 
 
-def git_summary(cwd):
+def git_summary(cwd, *, deadline=None):
+    deadline = time.monotonic() + 5 if deadline is None else deadline
     environment = {key: value for key, value in os.environ.items() if not key.startswith('GIT_')}
     environment.update(GIT_OPTIONAL_LOCKS='0', GIT_NO_LAZY_FETCH='1')
     results = []
     for args in [('diff', '--stat', '--no-ext-diff', '--no-textconv', '--ignore-submodules', 'HEAD'),
                  ('status', '--short', '--untracked-files=normal', '--ignore-submodules')]:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return 'unavailable: reaper Git time budget exhausted'
         try:
             with tempfile.TemporaryFile() as output:
                 result = subprocess.run(['git', '-C', str(cwd), '-c', 'core.fsmonitor=false',
                                          '-c', 'protocol.allow=never', *args],
-                                        env=environment, stdout=output, stderr=subprocess.DEVNULL, timeout=5)
+                                        env=environment, stdout=output, stderr=subprocess.DEVNULL, timeout=min(5, remaining))
                 if result.returncode:
                     return 'unavailable: worktree Git summary could not be read'
                 output.seek(0)
@@ -169,11 +173,12 @@ def last_tool_call(data):
     return None
 
 
-def checkpoint(attempt_dir, cwd, pid):
+def checkpoint(attempt_dir, cwd, pid, *, include_git=True, git_deadline=None):
     """The caller proves death and holds publication custody before entering."""
     record = observation(attempt_dir, cwd, pid, False)
     data, _ = event_tail(attempt_dir, 'events.jsonl')
-    record.update(schema='fabric.wip.v1', diff_summary=git_summary(cwd),
+    summary = git_summary(cwd, deadline=git_deadline) if include_git else 'Skipped: read_only lane.'
+    record.update(schema='fabric.wip.v1', diff_summary=summary,
                   last_tool_call=last_tool_call(data),
                   last_tool_call_scope='last 64 KiB of retained events; null means unavailable',
                   next_step='Review the worktree diff and retained events/result, then resume or re-dispatch this attempt.')

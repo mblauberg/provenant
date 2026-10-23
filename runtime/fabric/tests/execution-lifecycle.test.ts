@@ -2094,7 +2094,7 @@ describe("status liveness", () => {
     } finally { probe.mockRestore(); }
   });
 
-  it("marks silence only beyond the mode timeout threshold", async () => {
+  it("marks silence from the saved observation interval independently of the wall timeout", async () => {
     const dir = join(workspace, ".agent-run", "runs", "20260801-1200-dispatch-silent-abcdef");
     mkdirSync(dir, { recursive: true });
     const started = new Date(Date.now() - 1_000_000).toISOString();
@@ -2102,10 +2102,11 @@ describe("status liveness", () => {
       run_dir: dir, workspace, run_token: "test", owner_pid: process.pid, owner_pgid: process.pid,
       owner_started_at: processStartedAt(process.pid), started_at: started, task_id: "silent" }));
     const statusPath = join(dir, "dispatch-status.json");
-    const record = { id: "silent", status: "running", started_at: started, timeout_seconds: 3600 };
+    const record = { id: "silent", status: "running", started_at: started, timeout_seconds: 10800,
+      profile: { knobs: { "lanes.silence_seconds": 300 } } };
     writeFileSync(statusPath, JSON.stringify(record));
     expect(await fabricStatus(workspace, "silent")).toMatchObject({ status: "running", stalled: true });
-    writeFileSync(statusPath, JSON.stringify({ ...record, timeout_seconds: 10800 }));
+    writeFileSync(statusPath, JSON.stringify({ ...record, profile: { knobs: { "lanes.silence_seconds": 3600 } } }));
     expect(await fabricStatus(workspace, "silent")).toMatchObject({ status: "running", stalled: false });
     writeFileSync(statusPath, JSON.stringify(record));
     const scratch = join(temporaryDirectory, "fabric-provider-fixture");

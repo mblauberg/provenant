@@ -37,7 +37,30 @@ function createAttempt(workspace: string, taskId: string, state: string, status:
   if (extra) Object.assign(row, extra);
   writeFileSync(join(dir, "attempt.json"), JSON.stringify(row));
   writeFileSync(join(dir, "result.md"), "result");
+  return dir;
 }
+
+it("shows retained silence observations in lanes and their digest", async () => {
+  const repo = join(root, "repo-watchdog");
+  mkdirSync(repo, { recursive: true });
+  spawnSync("git", ["init", "-q", repo]);
+  const dir = createAttempt(repo, "silent", "running", null, new Date().toISOString(), {
+    paths: { watchdog: "dispatch/tasks/silent/attempt-001/watchdog.json" },
+  });
+  const observation = { schema: "fabric.watchdog.v1", checked_at: new Date().toISOString(),
+    process_alive: true, silent_seconds: 301, last_event_at: null, last_worktree_write_at: null };
+  const capture = join(dir, "../../../dispatch/tasks/silent/attempt-001");
+  mkdirSync(capture, { recursive: true });
+  writeFileSync(join(capture, "watchdog.json"), JSON.stringify(observation));
+  const listing = lanes(repo);
+  expect(listing.code).toBe(0);
+  expect(listing.out).toContain("watchdog: silent 301s; alive");
+  const json = JSON.parse(lanes(repo, "--json").out);
+  expect(json.runs[0].watchdog).toMatchObject(observation);
+  const { digest, lanesDigest } = await import("../src/surface.js");
+  expect(digest(json.runs[0])).toContain("watchdog: silent 301s; alive");
+  expect(lanesDigest(json)).toContain("watchdog: silent 301s; alive");
+});
 
 it("says which project an empty lane listing resolved to, and accepts --project", () => {
   const repo = join(root, "repo");

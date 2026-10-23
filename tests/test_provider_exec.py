@@ -3919,7 +3919,6 @@ else:
         tmp_path,
         code,
         timeout_seconds=3 if stop == "timed_out" else 8,
-        idle_seconds=8,
     )
     if stop == "normal":
         plan["warnings"].append("route warning " + "x" * 240)
@@ -4237,7 +4236,7 @@ if {terminal_event!r}:
     child.stdin.close()
     time.sleep(30)
 """
-    plan = fixture_plan(tmp_path, code, timeout_seconds=8, idle_seconds=8)
+    plan = fixture_plan(tmp_path, code, timeout_seconds=8)
     try:
         record = supervisor().execute(plan, tmp_path / "result.md")
         assert record["status"] == "ok"
@@ -4982,7 +4981,7 @@ if {stop!r} == 'normal':
 else:
     time.sleep(60)
 """
-    plan = fixture_plan(tmp_path, outer, timeout_seconds=8, idle_seconds=8)
+    plan = fixture_plan(tmp_path, outer, timeout_seconds=8)
     recorded = []
 
     def record_owner(_timestamp):
@@ -5062,9 +5061,37 @@ time.sleep(60)
 @pytest.mark.parametrize(
     "adapter", ["claude", "codex", "opencode", "cursor", "agy", "kiro", "copilot"]
 )
+def test_all_adapters_wall_deadline_terminates_silent_provider(tmp_path, adapter):
+    plan = fixture_plan(tmp_path, 'import time; time.sleep(60)', adapter,
+                        timeout_seconds=0.2, startup_seconds=30)
+    record = supervisor().execute(plan, tmp_path / 'result.md',
+                                  env={**os.environ, 'CF_DISPATCH_ENABLE_COPILOT': '1'})
+    assert record['status'] == 'timed_out'
+    assert record['exit'] is not None
+    assert record['evidence']['signature'] == 'wall_clock'
+
+
+@pytest.mark.parametrize('error_kind,expected', [('os', 'failed'), ('owned', 'rejected')])
+def test_capture_registration_failure_returns_typed_receipt(tmp_path, monkeypatch, error_kind, expected):
+    module = supervisor()
+    plan = fixture_plan(tmp_path, 'print("DONE")')
+    def unavailable(*args):
+        raise (OSError('capture registration failed') if error_kind == 'os'
+               else module.stall_watchdog.OwnedFileError('unsafe capture registration'))
+    monkeypatch.setattr(module.stall_watchdog, 'register_capture', unavailable)
+    record = module.execute(plan, tmp_path / 'result.md')
+    assert record['adapter'] == 'codex'
+    assert record['execution_intent'] == 'ordinary'
+    assert record['status'] == expected
+    assert record['error_class'] != 'none'
+
+
+@pytest.mark.parametrize(
+    "adapter", ["claude", "codex", "opencode", "cursor", "agy", "kiro", "copilot"]
+)
 def test_all_adapters_observe_silence_without_killing_live_provider(tmp_path, adapter):
     code = "import time; print('started', flush=True); time.sleep(1.4); print('finished', flush=True)"
-    plan = fixture_plan(tmp_path, code, adapter, idle_seconds=0.2, timeout_seconds=3)
+    plan = fixture_plan(tmp_path, code, adapter, timeout_seconds=3)
     record = supervisor().execute(
         plan, tmp_path / "result.md",
         env={**os.environ, "CF_DISPATCH_ENABLE_COPILOT": "1",
@@ -5075,7 +5102,7 @@ def test_all_adapters_observe_silence_without_killing_live_provider(tmp_path, ad
     assert observation["last_event_at"] is not None
     assert observation["last_worktree_write_at"] is not None
     assert observation["silent_seconds"] >= 1
-    assert record["status"] != "stalled"
+    assert record["status"] == "ok"
     assert record["exit"] == 0
 
 
@@ -5110,7 +5137,7 @@ pathlib.Path({str(child_pid)!r}).write_text(str(child.pid))
 print('opencode banner', file=sys.stderr, flush=True)
 time.sleep(60)
 """
-    plan = fixture_plan(tmp_path, code, "opencode", startup_seconds=0.6, idle_seconds=30, timeout_seconds=30)
+    plan = fixture_plan(tmp_path, code, "opencode", startup_seconds=0.6, timeout_seconds=30)
     started = time.monotonic()
     record = supervisor().execute(plan, tmp_path / "result.md")
     assert time.monotonic() - started < 10
@@ -5144,7 +5171,7 @@ sys.{ 'stdout' if stream == 'error_event' else 'stderr' }.write({(payload[25:] +
 sys.{ 'stdout' if stream == 'error_event' else 'stderr' }.flush()
 time.sleep(30)
 """
-    plan = fixture_plan(tmp_path, code, "opencode", startup_seconds=0.6, idle_seconds=0.6, timeout_seconds=3)
+    plan = fixture_plan(tmp_path, code, "opencode", startup_seconds=0.6, timeout_seconds=3)
     plan["model"] = "opencode-go/glm-5"
     record = supervisor().execute(plan, tmp_path / "result.md")
     assert record["status"] == "usage_limited"
@@ -5184,7 +5211,7 @@ sys.{stream}.write('ser...\\n')
 sys.{stream}.flush()
 time.sleep(30)
 """
-    plan = fixture_plan(tmp_path, code, "kiro", startup_seconds=0.6, idle_seconds=0.6, timeout_seconds=3)
+    plan = fixture_plan(tmp_path, code, "kiro", startup_seconds=0.6, timeout_seconds=3)
     record = supervisor().execute(plan, tmp_path / "result.md")
     assert record["status"] == "auth_required"
     assert record["evidence"]["signature"] == "auth_expired"
@@ -5222,7 +5249,7 @@ while not pathlib.Path({str(ready)!r}).exists():
 print(json.dumps({{'type':'item.completed','item':{{'type':'agent_message','text':'DONE'}}}}), flush=True)
 print(json.dumps({{'type':'turn.completed'}}), flush=True)
 """
-    plan = fixture_plan(tmp_path, code, startup_seconds=0.6, idle_seconds=30, timeout_seconds=30)
+    plan = fixture_plan(tmp_path, code, startup_seconds=0.6, timeout_seconds=30)
     record = supervisor().execute(plan, tmp_path / "result.md", on_progress=progress, cancelled=release)
     assert record["status"] == "ok"
     assert (tmp_path / "result.md").read_text() == "DONE"
@@ -5246,7 +5273,7 @@ print(json.dumps({'type':'system','subtype':'init','model':'grok','session_id':'
 print(json.dumps({'type':'result','result':'DONE','is_error':False}))
 time.sleep(30)
 """
-    plan = fixture_plan(tmp_path, code, "cursor", timeout_seconds=2, idle_seconds=1)
+    plan = fixture_plan(tmp_path, code, "cursor", timeout_seconds=2)
     record = supervisor().execute(plan, tmp_path / "result.md")
     assert record["status"] == "ok"
     assert (tmp_path / "result.md").read_text() == "DONE"
@@ -5267,7 +5294,7 @@ emit({'type':'system','subtype':'init','model':'claude-opus-5-5','session_id':'s
 emit({'type':'assistant','message':{'content':[{'type':'text','text':'working'}]}})
 emit({'type':'result','subtype':'success','result':'DONE','is_error':False,'num_turns':3})
 """
-    plan = fixture_plan(tmp_path, code, "claude", timeout_seconds=10, idle_seconds=5)
+    plan = fixture_plan(tmp_path, code, "claude", timeout_seconds=10)
     record = supervisor().execute(plan, tmp_path / "result.md")
     assert record["status"] == "ok"
     assert (tmp_path / "result.md").read_text() == "DONE"
@@ -5298,16 +5325,16 @@ emit({{'type':'system','subtype':'init','model':'claude-opus-5-5','session_id':'
 emit({{'type':'assistant','message':{{'content':[{{'type':'text','text':'working'}}]}}}})
 emit({{'type':'result','subtype':'success','result':'DONE','is_error':False,'num_turns':3}})
 """
-    plan = fixture_plan(tmp_path, code, "claude", timeout_seconds=10, idle_seconds=5)
+    plan = fixture_plan(tmp_path, code, "claude", timeout_seconds=10)
     plan["grace_seconds"] = 0.3
     record = supervisor().execute(plan, tmp_path / "result.md", on_progress=progress)
     assert record["status"] == "ok"
     assert (tmp_path / "result.md").read_text() == "DONE"
 
 
-def test_wall_timeout_is_distinct_from_idle(tmp_path):
+def test_wall_timeout_terminates_without_output(tmp_path):
     plan = fixture_plan(
-        tmp_path, "import time; time.sleep(30)", idle_seconds=3, timeout_seconds=0.2
+        tmp_path, "import time; time.sleep(30)", timeout_seconds=0.2
     )
     assert supervisor().execute(plan, tmp_path / "result.md")["status"] == "timed_out"
 
@@ -6638,7 +6665,6 @@ def test_writer_watchdog_observation_does_not_reset_silence(tmp_path):
         tmp_path,
         "import time; time.sleep(30)",
         mode="worktree_write",
-        idle_seconds=1.2,
         timeout_seconds=3.5,
     )
     plan["silence_seconds"] = 1
@@ -6810,14 +6836,13 @@ def test_writer_progress_probe_is_bounded_and_reaches_late_files(tmp_path):
     while not scanner.initial_pass_complete:
         scanner.probe()
         assert scanner.last_visited <= 2000
-    first_pass = scanner.completed_pass_started_at
     last = list(os.walk(directory))[0][2][-1]
     (directory / last).write_text('changed')
     # A slow host may need many probes; one full later pass is the real bound.
     for _ in range(60001):
         changed = scanner.probe()
         assert scanner.last_visited <= 2000
-        if changed or scanner.completed_pass_started_at != first_pass:
+        if changed:
             break
     assert changed
 
@@ -6857,9 +6882,9 @@ def test_writer_progress_tolerates_coarse_creation_clock(tmp_path, monkeypatch):
     assert scanner.probe()
 
 
-def test_writer_stall_waits_for_full_idle_interval_scan(tmp_path):
+def test_writer_wall_deadline_does_not_wait_for_silence_interval(tmp_path):
     plan = fixture_plan(tmp_path, 'import time; time.sleep(30)',
-                        mode='worktree_write', idle_seconds=1.2, timeout_seconds=1.6)
+                        mode='worktree_write', timeout_seconds=1.6)
     record = supervisor().execute(plan, tmp_path / 'result.md')
     assert record['status'] == 'timed_out'
 
@@ -8112,7 +8137,7 @@ def _stderr_run(tmp_path, lines, delays=0.05):
     code = "import sys,time\n" + "".join(
         f"sys.stderr.write({line + chr(10)!r});sys.stderr.flush();time.sleep({delays})\n" for line in lines
     ) + "time.sleep(30)\n"
-    plan = fixture_plan(tmp_path, code, "opencode", startup_seconds=0.6, idle_seconds=0.6, timeout_seconds=3)
+    plan = fixture_plan(tmp_path, code, "opencode", startup_seconds=0.6, timeout_seconds=3)
     plan["model"] = "opencode-go/glm-5"
     return supervisor().execute(plan, tmp_path / "result.md")
 

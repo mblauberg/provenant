@@ -4568,7 +4568,7 @@ def test_fabric_fast_plan_delegates_shell_environment_knobs(tmp_path, monkeypatc
     args = mod.parser().parse_args(command[2:])
     args.timeout_seconds = mod.DEFAULT_TIMEOUT_SECONDS
     for name in (
-        'CF_DISPATCH_IDLE_SECONDS', 'CF_DISPATCH_AGY_ADD_DIR', 'CF_DISPATCH_ENABLE_KIRO',
+        'CF_DISPATCH_AGY_ADD_DIR', 'CF_DISPATCH_ENABLE_KIRO',
         'CF_DISPATCH_ENABLE_COPILOT', 'CF_DISPATCH_CURSOR_MODEL', 'CF_DISPATCH_KIRO_MODEL',
         'CF_DISPATCH_COPILOT_MODEL', 'CF_DISPATCH_OPENCODE_MODEL', 'CF_DISPATCH_ENDPOINT',
         'CF_DISPATCH_CODEX_NETWORK', 'CF_DISPATCH_AGY_SANDBOX',
@@ -4673,10 +4673,11 @@ def test_fabric_fast_plan_delegates_import_and_router_failures(tmp_path, monkeyp
 
 
 @pytest.mark.parametrize('adapter, idle', [('agy', None), ('claude', '0.5')])
-def test_fabric_fast_plan_delegates_routes_needing_shell_checks(tmp_path, monkeypatch, adapter, idle):
+def test_fabric_fast_plan_delegates_only_active_shell_checks(tmp_path, monkeypatch, adapter, idle):
     run, prompt, command = real_owner_fixture(
         tmp_path, monkeypatch, 'import sys\nsys.stdin.read()\n',
     )
+    isolate_fabric_plan_env(monkeypatch, tmp_path)
     monkeypatch.chdir(tmp_path)
     if idle is not None:
         monkeypatch.setenv('CF_DISPATCH_IDLE_SECONDS', idle)
@@ -4684,7 +4685,8 @@ def test_fabric_fast_plan_delegates_routes_needing_shell_checks(tmp_path, monkey
     args = mod.parser().parse_args(command[2:])
     args.tool = adapter
     args.timeout_seconds = mod.DEFAULT_TIMEOUT_SECONDS
-    assert mod.fast_fabric_plan(args, prompt, run / 'result.md', tmp_path) is None
+    plan = mod.fast_fabric_plan(args, prompt, run / 'result.md', tmp_path)
+    assert (plan is None) is (adapter == 'agy')
 
 
 def test_fabric_fast_plan_rejects_invalid_git_context(tmp_path, monkeypatch):
@@ -5856,7 +5858,7 @@ else:
         plan = mod.provider_exec.build_plan('codex', {'resolved_model': 'fixture', 'model_family': 'openai',
             'endpoint_provider': 'openai', 'effort': 'high'}, 'hello', cwd=tmp_path,
             workspace_root=tmp_path, run_dir=parent_dir / 'dispatch/tasks/writer/attempt-001',
-            timeout_seconds=12, idle_seconds=12)
+            timeout_seconds=12)
     finally:
         if old is None:
             os.environ.pop('PROVENANT_NO_OS_CONFINEMENT', None)
@@ -6199,7 +6201,7 @@ time.sleep(60)
     plan = provider.build_plan('claude', {'resolved_model': 'fixture', 'model_family': 'anthropic',
         'endpoint_provider': 'anthropic', 'effort': 'high'}, 'hello', cwd=tmp_path,
         workspace_root=tmp_path, run_dir=parent_dir / 'dispatch/tasks/writer/attempt-001',
-        timeout_seconds=10, idle_seconds=10)
+        timeout_seconds=10)
     plan.update(argv=[sys.executable, '-u', '-c', code], grace_seconds=.1,
                 attempt_identity={'run_id': 'mcp-parent', 'run_dir': str(parent_dir),
                                   'task_id': 'writer', 'attempt': 1})
@@ -7057,7 +7059,8 @@ print(json.dumps({{"type":"result", "result":"DONE"}}))
     assert 'escalated_from' not in rows[2]
 
 
-def test_provider_death_checkpoints_partial_work_before_failure(tmp_path, monkeypatch):
+@pytest.mark.parametrize('checkpoint_error', [None, PermissionError('checkpoint denied'), ValueError('unsafe checkpoint')])
+def test_provider_death_checkpoints_partial_work_before_failure(tmp_path, monkeypatch, checkpoint_error):
     subprocess.run(['git', 'init', '-q', str(tmp_path)], check=True)
     subprocess.run(['git', '-C', str(tmp_path), '-c', 'user.name=Fixture',
                     '-c', 'user.email=fixture@example.com', 'commit', '--allow-empty', '-qm', 'initial'], check=True)
@@ -7072,9 +7075,20 @@ def test_provider_death_checkpoints_partial_work_before_failure(tmp_path, monkey
     isolate_fabric_plan_env(monkeypatch, tmp_path)
     monkeypatch.chdir(tmp_path)
     mod = load_dispatch_module()
+    if checkpoint_error:
+        def unavailable(*args, **kwargs):
+            raise checkpoint_error
+        monkeypatch.setattr(mod.stall_watchdog, 'checkpoint', unavailable)
     args = mod.parser().parse_args(command[2:])
     assert mod.dispatch(args) != 0
     path = next(run.glob('tasks/*/attempt-001/attempt.json'))
+    row = json.loads(path.read_text())
+    assert row['state'] == 'terminal'
+    assert row['status'] == 'failed'
+    if checkpoint_error:
+        assert 'checkpoint' not in row['paths']
+        assert any('checkpoint unavailable' in warning for warning in row['warnings'])
+        return
     checkpoint_path = run / json.loads(path.read_text())['paths']['checkpoint']
     checkpoint = json.loads(checkpoint_path.read_text())
     assert checkpoint['process_alive'] is False
@@ -7082,6 +7096,32 @@ def test_provider_death_checkpoints_partial_work_before_failure(tmp_path, monkey
     assert 'write partial.txt' in checkpoint['last_tool_call']
     assert checkpoint_path.stat().st_mtime_ns <= path.stat().st_mtime_ns
     assert json.loads(path.read_text())['status'] == 'failed'
+
+
+@pytest.mark.parametrize('checkpoint_error', [PermissionError('checkpoint denied'), OSError(28, 'disk full'), ValueError('unsafe checkpoint')])
+@pytest.mark.parametrize('disk_full', [False, True])
+def test_reaper_checkpoint_failure_still_publishes_terminal(tmp_path, monkeypatch, checkpoint_error, disk_full):
+    mod = load_dispatch_module()
+    run = make_run(tmp_path, 'checkpoint-error')
+    path = run / 'tasks/task-1/attempt-001/attempt.json'
+    path.parent.mkdir(parents=True)
+    row = json.loads((ROOT / 'tests/fixtures/fabric-v1/attempt.json').read_text())
+    row.update(state='running', status=None, pgid=123456, pgid_started_at='recorded')
+    path.write_text(json.dumps(row))
+    (path.parent / 'stderr.log').write_text('ENOSPC' if disk_full else '')
+    def gone(*args):
+        raise ProcessLookupError()
+    def unavailable(*args, **kwargs):
+        raise checkpoint_error
+    monkeypatch.setattr(mod.os, 'killpg', gone)
+    monkeypatch.setattr(mod.stall_watchdog, 'checkpoint', unavailable)
+    assert mod.reap_attempts(run) == [str(path)]
+    terminal = json.loads(path.read_text())
+    assert terminal['state'] == 'terminal'
+    assert terminal['status'] == ('failed' if disk_full else 'lost')
+    assert terminal['evidence']['signature'] == ('host_disk_full' if disk_full else 'pgid_gone')
+    assert 'checkpoint' not in terminal['paths']
+    assert any('checkpoint unavailable' in warning for warning in terminal['warnings'])
 
 
 @pytest.mark.parametrize("threshold,observed", [(1, True), (3600, False)])
@@ -7115,6 +7155,43 @@ def test_reaper_observes_silent_live_lane_with_stamped_knob(tmp_path, monkeypatc
     assert not (path.parent / 'wip-checkpoint.json').exists()
 
 
+@pytest.mark.parametrize('mode', ['read_only', 'worktree_write'])
+def test_reaper_git_summaries_share_one_pass_budget(tmp_path, monkeypatch, mode):
+    mod = load_dispatch_module()
+    run = make_run(tmp_path, 'git-budget')
+    for task in ('one', 'two', 'three'):
+        path = run / f'tasks/{task}/attempt-001/attempt.json'
+        path.parent.mkdir(parents=True)
+        row = json.loads((ROOT / 'tests/fixtures/fabric-v1/attempt.json').read_text())
+        row.update(task_id=task, state='running', status=None, mode=mode,
+                   cwd=str(tmp_path), worktree=str(tmp_path) if mode == 'worktree_write' else None,
+                   pgid=123456, pgid_started_at='recorded')
+        row['paths'] = {'events': str(path.parent.relative_to(run) / 'events.jsonl')}
+        path.write_text(json.dumps(row))
+    clock = [100.0]
+    timeouts = []
+    def gone(*args):
+        raise ProcessLookupError()
+    def slow_git(argv, **kwargs):
+        timeouts.append(kwargs['timeout'])
+        clock[0] += kwargs['timeout']
+        raise subprocess.TimeoutExpired(argv, kwargs['timeout'])
+    monkeypatch.setattr(mod.os, 'killpg', gone)
+    monkeypatch.setattr(mod.time, 'monotonic', lambda: clock[0])
+    monkeypatch.setattr(mod.stall_watchdog.subprocess, 'run', slow_git)
+    assert len(mod.reap_attempts(run)) == 3
+    if mode == 'read_only':
+        assert timeouts == []
+    else:
+        assert len(timeouts) == 1
+        assert sum(timeouts) <= 1
+    for path in run.glob('tasks/*/attempt-001/attempt.json'):
+        row = json.loads(path.read_text())
+        assert row['state'] == 'terminal'
+        checkpoint = json.loads((run / row['paths']['checkpoint']).read_text())
+        assert ('read_only' if mode == 'read_only' else 'unavailable') in checkpoint['diff_summary']
+
+
 @pytest.mark.parametrize("check", ["passed", "invalid", "unavailable"])
 def test_terminal_receipt_persists_model_check_and_changes(tmp_path, check):
     module = load_dispatch_module()
@@ -7132,5 +7209,6 @@ def test_terminal_receipt_persists_model_check_and_changes(tmp_path, check):
                                    run / "tasks/task-1/attempt-001")
     module.publish_contract(run, row)
     saved = json.loads((run / row["paths"]["receipt"]).read_text())
+    assert saved['paths']['watchdog'] == 'tasks/task-1/attempt-001/watchdog.json'
     for key, value in fields.items():
         assert saved[key] == value
