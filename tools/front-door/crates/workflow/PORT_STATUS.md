@@ -45,3 +45,11 @@ remains an integration gap. Differential cases also cover every adapter.
 Nested gate approval, release approval and the approved-release plus settled
 observation closed-run invariant are ported. Unknown and malformed fields do
 not grant approval. No receipt fields are rewritten.
+
+## Bootstrap unit 01
+
+Only lines 1-262 are assigned: constants, exact help/default text, arguments,
+diagnostics, Git query, safe read, replace helper and fenced knob parsing.
+`main` (mission resolution, creation, substitution, environment checks and
+receipt) belongs to later units and is not implemented here. Exact source
+help and fallback text are retained as assets, rather than executable Python.
