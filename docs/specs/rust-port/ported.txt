@@ -22,10 +22,12 @@ scripts/telemetry_hosts.py#interface
 scripts/telemetry_report.py#unit-02
 skills/_shared/excludes.py#unit-01
 skills/_shared/review_ladder.py#unit-01
+skills/_shared/review_panel.py#unit-01
 skills/_shared/roots.py#unit-01
 skills/_shared/run_gates.py#unit-01
 skills/_shared/workspace_paths.py#unit-01
 skills/autopilot/scripts/bootstrap-autopilot.py#unit-01
+skills/deliver/scripts/authority_mapping.py#unit-02
 skills/deliver/scripts/delivery_run_shape.py#unit-01
 skills/orchestrate/scripts/adapters/copilot.py#unit-01
 skills/orchestrate/scripts/adapters/cursor.py#unit-01
