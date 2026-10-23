@@ -1,6 +1,8 @@
 # ADR 0028 - Port the whole project to Rust with a small crate allowlist
 
-**Status:** Accepted 2026-10-23 (user direction in session)
+**Status:** Accepted 2026-10-23 (user direction in session). Decisions 1, 5's
+PyYAML gate and migration lane, and 7's transition retention are superseded
+by [ADR 0029](0029-rust-rewrite-in-one-pass.md).
 
 **Amends:** [ADR 0027](0027-rust-front-door.md), decision 1 ("no crate
 dependencies"). Plan and rulebook: [Whole-project Rust port](../specs/rust-port/README.md),
