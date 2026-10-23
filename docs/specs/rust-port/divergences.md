@@ -1510,3 +1510,80 @@ then passed after repair. Extended JSON/native-path reader gaps remain partial.
   adapters for the pending confinement/records/config/core contracts. Consumers
   remain unchanged; no graph unit or full conformance claim is added. README
   maps the remaining pending run and UUID contracts explicitly.
+
+
+## RP-RRC3-001: retained lease input bound (open before cut-over)
+
+- Class: `improvement`, inert partial implementation; boundary decision pending.
+  Rulebook: PORTING.md v4. Source baseline:
+  `7021182d535f6c730c29713e77d5bca76893fd06`. Author route:
+  `codex/gpt-6.1-sol@high` via Fabric.
+- Python lease state and handoff JSON reads are unbounded. The Rust adapter reads
+  at most 1 MiB plus a sentinel byte and returns typed `InputTooLarge` for a
+  larger input. This satisfies the bounded-input implementation constraint but
+  intentionally changes the source's behavior on oversized records. Explicit
+  limit-plus-one fixtures cover both read paths. This limit is not an accepted
+  command cut-over change; lease remains partial and off `ported.txt`.
+- The lane also fixes observed Rust port bugs without changing source behavior:
+  microsecond timestamps retain all six digits; invalid UTF-8 handoff evidence
+  is ignored like Python ValueError; generation mismatch renders True correctly;
+  holder object diagnostics retain insertion order; option-looking CLI tokens
+  cannot become holder values; detached evidence respects refusal/read order,
+  Python Unicode digit policy and float-epoch grace arithmetic. Regression and
+  required Python differentials cover these repairs.
+- Storage remains partial on the legal shared storage capability owner and
+  RP-records-003; detached execution lacks the supervisor's safe session-worker
+  API; lease lacks the source-compatible blocking lock and complete dynamic
+  Python JSON/CLI boundaries. No behavior change is accepted for these gaps.
+
+
+## RP-RRC3-002: strict JSON non-finite boundary (open, library)
+
+- Class: `library`; same rulebook, source baseline and author route as
+  RP-RRC3-001. `checked_json` and `ordered_json` represent numbers with
+  serde_json::Number and reject NaN, Infinity, -Infinity and floating overflow
+  such as `1e400`. CPython's default decoder accepts these as non-finite floats.
+  This existing strict boundary is now explicit in the shared owner API; it is
+  not a complete replacement for Python's dynamic JSON value model.
+- No normalization to null is implied: that behavior belongs to the Fabric
+  runtime's JavaScript adapter. Source-compatible preservation requires a
+  dynamic number representation and error policy not yet exposed by the owner.
+  Rejection fixtures cover this boundary; the encoder separately supports
+  Python's non-finite output spellings. RP-records-006 covers lone surrogates.
+- Lease remains partial; the existing lineage typed interface claim does not
+  claim full implementation parity for ignored non-finite fields or ordered
+  object diagnostics. Consumer migration must review these boundaries before
+  cut-over. No source behavior divergence is accepted here.
+
+
+## RP-RRC3-003: sorted NaN map keys (open, library)
+
+- Class: `library`; same rulebook, baseline and author route as RP-RRC3-001.
+  The new generic serializer returns typed `EncodeError::NaNKey` when sorting
+  object keys containing NaN. CPython accepts these keys and its non-total
+  sorting can produce a different order from Rust's stable sort. Returning an
+  explicit error avoids silently emitting different sorted bytes or relying on
+  a non-total comparator. Unsorted keys and non-finite values remain supported.
+- Differential fixture: keys `[3.0, 2.0, NaN, 1.0]` sort in CPython as
+  `[2.0, NaN, 1.0, 3.0]`. The test retains this counterexample and asserts the
+  explicit Rust boundary. Inventoried owner copies use string object keys;
+  consumer migration requiring NaN-key sorting must first provide the source
+  sorting contract. No source cut-over behavior change is accepted here.
+
+
+## RP-RRC3-004: custody special-file opens (open before cut-over)
+
+- Class: `improvement`, proposed; same rulebook, baseline and author route as
+  RP-RRC3-001. The supervisor safe filesystem owner opens read handles with
+  O_NONBLOCK, verifies regular files, then clears that flag. A FIFO is refused
+  immediately. Python output custody opens O_RDONLY first and can wait for a
+  peer before refusing the non-regular file after fstat. Both source input and
+  verify destination can encounter this difference.
+- Adopting the required shared owner therefore changes this wait behavior. No
+  path-based or unsafe fallback is introduced. A source-compatible raw/special
+  file open capability, or an explicit boundary decision approving immediate
+  refusal, is still missing on main. Output custody remains partial and absent
+  from `ported.txt`; no cut-over or acceptance is claimed.
+- Real-filesystem FIFO fixtures cover immediate safe refusal and compare the
+  source's refusal once a peer is held, using a bounded Python oracle. Ordinary
+  file publication, identity, byte and error paths retain their differentials.
