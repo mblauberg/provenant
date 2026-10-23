@@ -2,14 +2,14 @@
 //!
 //! The caller supplies the bundled shim's installed absolute path. This library
 //! remains inert; no command ownership or installed path is changed here.
-use crate::bounded::{run_bounded_limited, BoundedError, Options};
+use crate::exec::{ExecError, ExecOptions, Executor, SystemExecutor, Termination};
 use std::ffi::OsString;
 use std::path::Path;
 use thiserror::Error;
 
 /// Child error evidence, keeping normal exit and signal termination separate.
-/// The bounded spool can truncate stdout on overflow; exact Node maxBuffer
-/// failure bytes and a pipe-based hard cap remain unported.
+/// The raw owner enforces a hard retained prefix cap. Exact Node maxBuffer
+/// overflow-read bytes remain unported; see PORT.md.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PsFailure {
     pub code: Option<&'static str>,
@@ -22,7 +22,7 @@ pub struct PsFailure {
 #[derive(Debug, Error)]
 pub enum PsError {
     #[error("ps could not start or be observed")]
-    Execution(#[from] BoundedError),
+    Execution(#[from] ExecError),
     #[error("ps child failed: {0:?}")]
     Child(PsFailure),
 }
@@ -40,7 +40,7 @@ impl PsPrograms<'_> {
         env: &[(OsString, OsString)],
     ) -> Result<String, PsError> {
         match execute(self.system, args, env) {
-            Err(PsError::Execution(BoundedError::Io {
+            Err(PsError::Execution(ExecError::Io {
                 operation: "spawn",
                 source,
             })) if matches!(
@@ -83,31 +83,38 @@ fn execute(
     let command: Vec<_> = std::iter::once(program.as_os_str().to_owned())
         .chain(args.iter().cloned())
         .collect();
-    let mut options = Options::new(Path::new("."), 5.0);
+    let mut options = ExecOptions::new(&command, Path::new("."), std::time::Duration::from_secs(5));
     options.env = Some(env);
-    options.merge_stderr = false;
-    options.null_stdin = true;
-    let result = run_bounded_limited(&command, options)?;
+    options.discard_stderr = true;
+    options.stop_on_output_limit = true;
+    let result = SystemExecutor.execute(options)?;
     let code = if result.timed_out {
         Some("ETIMEDOUT")
-    } else if result.output_truncated {
+    } else if result.stdout.truncated {
         Some("ENOBUFS")
     } else {
         None
     };
-    if code.is_some() || result.returncode != 0 {
+    let stdout = String::from_utf8_lossy(&result.stdout.bytes).into_owned();
+    if code.is_some() || result.termination != Termination::Exit(0) {
         return Err(PsError::Child(PsFailure {
             code,
-            status: (result.returncode >= 0).then_some(result.returncode),
-            signal: result
-                .terminating_signal()
-                .and_then(crate::sys::process::signal_name),
-            stdout: result.output,
-            stdout_bytes: result.output_bytes,
-            stdout_truncated: result.output_truncated,
+            status: match result.termination {
+                Termination::Exit(code) => Some(code),
+                _ => None,
+            },
+            signal: match result.termination {
+                Termination::Signal(signal) => u32::try_from(signal)
+                    .ok()
+                    .and_then(crate::sys::process::signal_name),
+                _ => None,
+            },
+            stdout,
+            stdout_bytes: result.stdout.total_bytes,
+            stdout_truncated: result.stdout.truncated,
         }));
     }
-    Ok(result.output)
+    Ok(stdout)
 }
 
 #[cfg(test)]
