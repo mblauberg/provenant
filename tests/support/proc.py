@@ -8,7 +8,7 @@ import subprocess
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 
-from cf_dispatch_support import SCRIPT, fabric_free_env
+from tests.cf_dispatch_support import SCRIPT, fabric_free_env
 
 
 def run_cli(
