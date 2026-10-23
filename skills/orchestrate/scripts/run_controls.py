@@ -34,6 +34,7 @@ SCRIPT_ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(SCRIPT_ROOT))
 sys.path.insert(0, str(SCRIPT_ROOT.parents[1]))
 import run_records
+import git_evidence_packet
 from attempt_evidence import AttemptEvidenceError, canonical_success_status, is_success_status, validate_successful_attempt
 import layout
 from _shared.custody import OwnedFileError, open_contained_regular, read_contained_regular
@@ -350,67 +351,20 @@ def _validate_git_evidence(
     except (OSError, OwnedFileError) as exc:
         raise ControlError(f"Git evidence path is outside or unavailable: {rel}") from exc
     hasher = hashlib.sha256()
-    header = bytearray()
-    metadata: Any = None
-    status_prefix = b"--- status ---\n"
-    body_prefix = bytearray()
-    marker = b"\n--- diff ---\n"
-    tail = b""
+    scanner = git_evidence_packet.PacketScanner(ControlError, MAX_GIT_EVIDENCE_HEADER_BYTES)
     try:
         while chunk := os.read(fd, 1024 * 1024):
             hasher.update(chunk)
-            remaining = chunk
-            if metadata is None:
-                header.extend(remaining)
-                if len(header) > MAX_GIT_EVIDENCE_HEADER_BYTES and b"\n" not in header:
-                    raise ControlError("Git evidence packet header exceeds its 64 KiB limit")
-                separator = header.find(b"\n")
-                if separator < 0:
-                    continue
-                if separator > MAX_GIT_EVIDENCE_HEADER_BYTES:
-                    raise ControlError("Git evidence packet header exceeds its 64 KiB limit")
-                try:
-                    metadata = json.loads(bytes(header[:separator]).decode("utf-8"))
-                except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-                    raise ControlError("Git evidence packet header is invalid") from exc
-                remaining = bytes(header[separator + 1:])
-            body_prefix.extend(remaining[: len(status_prefix) - len(body_prefix)])
-            if len(body_prefix) >= len(status_prefix) and bytes(body_prefix) != status_prefix:
-                raise ControlError("Git evidence packet is missing its status section")
-            combined = tail + remaining
-            if marker in combined:
-                tail = marker
-            else:
-                tail = combined[-(len(marker) - 1):]
+            try:
+                scanner.feed(chunk)
+            except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                raise ControlError("Git evidence packet header is invalid") from exc
     finally:
         os.close(fd)
     if claim.get("digest") != f"sha256:{hasher.hexdigest()}":
         raise ControlError(f"Git evidence digest does not match retained evidence: {rel}")
-    required = {
-        "schema_version", "record_type", "repository", "git_root", "head",
-        "diff_base", "working_tree", "diff_from", "paths", "encoding",
-    }
-    if (
-        not isinstance(metadata, dict)
-        or set(metadata) != required
-        or metadata.get("schema_version") != 1
-        or metadata.get("record_type") != "provenant-git-evidence"
-        or not isinstance(metadata.get("repository"), str)
-        or not isinstance(metadata.get("git_root"), str)
-        or not isinstance(metadata.get("head"), str)
-        or re.fullmatch(r"[0-9a-f]{40,64}", metadata["head"]) is None
-        or not isinstance(metadata.get("diff_base"), str)
-        or re.fullmatch(r"[0-9a-f]{40,64}", metadata["diff_base"]) is None
-        or metadata.get("working_tree") not in {"clean", "dirty"}
-        or not isinstance(metadata.get("diff_from"), str)
-        or not metadata["diff_from"]
-        or metadata.get("encoding") != "utf-8-replacement"
-        or not isinstance(metadata.get("paths"), list)
-        or any(not isinstance(path, str) for path in metadata["paths"])
-        or len(body_prefix) < len(status_prefix)
-        or bytes(body_prefix) != status_prefix
-        or marker not in tail
-    ):
+    metadata = scanner.finish()
+    if not git_evidence_packet.validate_header(metadata) or not scanner.has_status or not scanner.has_diff:
         raise ControlError("Git evidence packet is invalid")
     if claim["checkout"] != metadata:
         raise ControlError("Git evidence checkout identity disagrees with packet")

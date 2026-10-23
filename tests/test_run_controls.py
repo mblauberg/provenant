@@ -1193,3 +1193,156 @@ def test_show_does_not_follow_symlinks_out_of_the_run(tmp_path: Path) -> None:
     (run_dir / "dispatch/tasks/task-2/attempt-001").symlink_to(outside)
     shown = invoke("run", "show", "task-1", "--task-id", "task-2", cwd=tmp_path)
     assert "TOPSECRET" not in shown.stdout and "TOPSECRET" not in shown.stderr
+
+
+def _packet_metadata():
+    return {
+        "schema_version": 1, "record_type": "provenant-git-evidence",
+        "repository": "/fixture", "git_root": "/fixture", "head": "a" * 40,
+        "diff_base": "b" * 40, "working_tree": "clean", "diff_from": "HEAD",
+        "paths": [], "encoding": "utf-8-replacement",
+    }
+
+
+_PACKET_HEADER_MUTATIONS = [
+    ("schema_version", 2), ("record_type", "other"), ("repository", None),
+    ("git_root", None), ("head", None), ("head", "A" * 40),
+    ("head", "a" * 39), ("head", "a" * 65), ("diff_base", None),
+    ("diff_base", "G" * 40), ("diff_base", "b" * 39), ("diff_base", "b" * 65),
+    ("working_tree", "unknown"), ("working_tree", []), ("diff_from", None), ("diff_from", ""),
+    ("paths", None), ("paths", [1]), ("encoding", "utf-8"),
+]
+
+
+def _packet_bytes(case):
+    metadata = _packet_metadata()
+    body = b"--- status ---\n--- diff ---\n"
+    if case == "empty": return b""
+    if case == "no-newline": return json.dumps(metadata).encode()
+    if case == "oversize-no-newline": return b"x" * (65536 + 1)
+    if case == "oversize-newline": return b"x" * (65536 + 1) + b"\n" + body
+    if case == "bad-json": return b"{\n" + body
+    if case == "bad-utf8": return b"\xff\n" + body
+    if case == "null": return b"null\n" + body
+    if case == "non-object": return b"[]\n" + body
+    if case == "missing-key": del metadata["head"]
+    if case == "extra-key": metadata["extra"] = True
+    if case == "wrong-status": body = b"--- wrong ----\n--- diff ---\n"
+    if case == "short-status": body = b"--- status"
+    if case == "no-body": body = b""
+    if case == "missing-diff": body = b"--- status ---\nno diff\n"
+    if case == "late-diff": body = b"--- status ---\n" + b"x" * 100 + b"\n--- diff ---\n" + b"x" * 100
+    if case == "header-at-limit":
+        header = json.dumps(metadata).encode()
+        return header + b" " * (65536 - len(header)) + b"\n" + body
+    return json.dumps(metadata).encode() + b"\n" + body
+
+
+def _retained_packet(tmp_path, payload):
+    root = Path("dispatch/tasks/task-1/attempt-001")
+    packet = tmp_path / root / "evidence/git-evidence.md"
+    packet.parent.mkdir(parents=True)
+    packet.write_bytes(payload)
+    return root, {"path": packet.relative_to(tmp_path).as_posix(),
+                  "digest": file_digest(packet), "checkout": _packet_metadata()}
+
+
+@pytest.mark.parametrize("field,value", _PACKET_HEADER_MUTATIONS)
+def test_git_evidence_retained_rejects_each_header_field(tmp_path, field, value):
+    module = load_script(SCRIPT, "retained_packet_fields")
+    metadata = _packet_metadata()
+    metadata[field] = value
+    root, claim = _retained_packet(tmp_path, json.dumps(metadata).encode() + b"\n--- status ---\n--- diff ---\n")
+    if field == "working_tree" and isinstance(value, list):
+        with pytest.raises(TypeError, match="unhashable type"):
+            module._validate_git_evidence(tmp_path, root, claim)
+    else:
+        with pytest.raises(module.ControlError) as error:
+            module._validate_git_evidence(tmp_path, root, claim)
+        assert str(error.value) == "Git evidence packet is invalid"
+
+
+@pytest.mark.parametrize("case,message", [
+    ("empty", "is invalid"), ("no-newline", "is invalid"),
+    ("oversize-no-newline", "header exceeds its 64 KiB limit"),
+    ("oversize-newline", "header exceeds its 64 KiB limit"),
+    ("bad-json", "header is invalid"), ("bad-utf8", "header is invalid"),
+    ("null", "is invalid"), ("non-object", "is invalid"),
+    ("missing-key", "is invalid"), ("extra-key", "is invalid"),
+    ("wrong-status", "is missing its status section"),
+    ("short-status", "is invalid"), ("no-body", "is invalid"), ("missing-diff", "is invalid"),
+])
+def test_git_evidence_retained_rejection_messages(tmp_path, case, message):
+    module = load_script(SCRIPT, "retained_packet_cases")
+    root, claim = _retained_packet(tmp_path, _packet_bytes(case))
+    with pytest.raises(module.ControlError) as error:
+        module._validate_git_evidence(tmp_path, root, claim)
+    assert str(error.value) == "Git evidence packet " + message
+
+
+@pytest.mark.parametrize("case,chunk_size", [("late-diff", 1), ("late-diff", 7), ("late-diff", 64), ("header-at-limit", 1048576)])
+def test_git_evidence_retained_stream_boundaries(tmp_path, monkeypatch, case, chunk_size):
+    module = load_script(SCRIPT, "retained_packet_chunks")
+    root, claim = _retained_packet(tmp_path, _packet_bytes(case))
+    read = module.os.read
+    monkeypatch.setattr(module.os, "read", lambda fd, size: read(fd, min(size, chunk_size)))
+    assert module._validate_git_evidence(tmp_path, root, claim) == claim["path"]
+
+
+@pytest.mark.parametrize("claim,message", [
+    (None, "Git evidence receipt is malformed"),
+    ({}, "Git evidence receipt is malformed"),
+    ({"path": None, "digest": "", "checkout": {}}, "Git evidence path is missing"),
+    ({"path": "", "digest": "", "checkout": {}}, "Git evidence path is missing"),
+    ({"path": "/outside", "digest": "", "checkout": {}}, "Git evidence path escapes the run: /outside"),
+    ({"path": "../outside", "digest": "", "checkout": {}}, "Git evidence path escapes the run: ../outside"),
+    ({"path": ".", "digest": "", "checkout": {}}, "Git evidence path escapes the run: ."),
+    ({"path": "a/../b", "digest": "", "checkout": {}}, "Git evidence path escapes the run: a/../b"),
+    ({"path": "x", "digest": "", "checkout": {}, "extra": True}, "Git evidence receipt is malformed"),
+    ({"path": "other", "digest": "", "checkout": {}}, "Git evidence path does not match its attempt: other"),
+])
+def test_git_evidence_retained_rejects_claims(tmp_path, claim, message):
+    module = load_script(SCRIPT, "retained_packet_claims")
+    with pytest.raises(module.ControlError) as error:
+        module._validate_git_evidence(tmp_path, Path("attempt"), claim)
+    assert str(error.value) == message
+
+
+def test_git_evidence_retained_checkout_must_match(tmp_path):
+    module = load_script(SCRIPT, "retained_packet_checkout")
+    root, claim = _retained_packet(tmp_path, _packet_bytes("late-diff"))
+    claim["checkout"] = {}
+    with pytest.raises(module.ControlError) as error:
+        module._validate_git_evidence(tmp_path, root, claim)
+    assert str(error.value) == "Git evidence checkout identity disagrees with packet"
+
+
+@pytest.mark.parametrize("case", ["empty", "missing-key", "short-status", "missing-diff"])
+def test_git_evidence_retained_digest_precedes_deferred_structure(tmp_path, case):
+    module = load_script(SCRIPT, "retained_packet_precedence")
+    root, claim = _retained_packet(tmp_path, _packet_bytes(case))
+    claim["digest"] = "sha256:wrong"
+    with pytest.raises(module.ControlError) as error:
+        module._validate_git_evidence(tmp_path, root, claim)
+    assert str(error.value) == "Git evidence digest does not match retained evidence: " + claim["path"]
+
+
+def test_git_evidence_retained_status_precedes_metadata_and_digest(tmp_path):
+    module = load_script(SCRIPT, "retained_packet_status_precedence")
+    root, claim = _retained_packet(tmp_path, b"[]\n--- wrong ----\n")
+    claim["digest"] = "sha256:wrong"
+    with pytest.raises(module.ControlError) as error:
+        module._validate_git_evidence(tmp_path, root, claim)
+    assert str(error.value) == "Git evidence packet is missing its status section"
+
+
+def test_git_evidence_retained_rejects_symlink(tmp_path):
+    module = load_script(SCRIPT, "retained_packet_symlink")
+    root, claim = _retained_packet(tmp_path, _packet_bytes("late-diff"))
+    packet = tmp_path / claim["path"]
+    outside = tmp_path / "other"
+    packet.rename(outside)
+    packet.symlink_to(outside)
+    with pytest.raises(module.ControlError) as error:
+        module._validate_git_evidence(tmp_path, root, claim)
+    assert str(error.value) == "Git evidence path is outside or unavailable: " + claim["path"]
