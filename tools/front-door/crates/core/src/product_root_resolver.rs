@@ -1,7 +1,6 @@
 //! Partial port: RP-1003 records the remaining Python compatibility work.
 //! Machine-local product-root pointers. Loading a stale path supports relocation.
 use crate::paths::{expand_user, resolve, Homes, PathError};
-use crate::pending::atomic_write;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io;
@@ -68,10 +67,19 @@ pub fn load_pointer_file(
     Ok(load_pointer_path(instance_root, homes)?.filter(|v| v.exists()))
 }
 
+/// Safe publication seam. Supervisor's directory handles implement this at the
+/// composition edge; core cannot import supervisor under PORTING.md R2.
+/// Implementations must fsync staged bytes, set mode 0600, atomically replace
+/// the destination (without following a destination symlink), and clean up.
+pub trait PointerWriter {
+    fn atomic_write(&self, destination: &Path, content: &[u8], prefix: &str) -> io::Result<()>;
+}
+
 pub fn write_pointer_file(
     instance_root: &Path,
     product_root: &Path,
     homes: &Homes,
+    writer: &impl PointerWriter,
 ) -> Result<(), PointerError> {
     let product = expand_user(product_root, homes)?;
     let product = fs::canonicalize(&product).map_err(|source| PointerError::Io {
@@ -103,21 +111,38 @@ pub fn write_pointer_file(
         });
     }
     let ignore = parent.join(".gitignore");
-    atomic_write(&ignore, b"*\n", ".gitignore.").map_err(|source| PointerError::Io {
-        path: ignore,
-        source,
-    })?;
+    writer
+        .atomic_write(&ignore, b"*\n", ".gitignore.")
+        .map_err(|source| PointerError::Io {
+            path: ignore,
+            source,
+        })?;
     // Python's native path boundary uses surrogateescape on Unix, then an
     // explicit ASCII JSON encoder. No lossy UTF-8 conversion is permitted.
     let escaped = crate::pending::path_json(&product).map_err(|_| PointerError::Encoding)?;
     let content = format!("{{\"product_root\": {escaped}, \"schema_version\": 1}}\n");
     let pointer = parent.join("product-root.json");
-    atomic_write(&pointer, content.as_bytes(), ".product-root.").map_err(|source| {
-        PointerError::Io {
+    writer
+        .atomic_write(&pointer, content.as_bytes(), ".product-root.")
+        .map_err(|source| PointerError::Io {
             path: pointer,
             source,
+        })
+}
+
+#[cfg(test)]
+fn write_fixture_pointer(
+    instance: &Path,
+    product: &Path,
+    homes: &Homes,
+) -> Result<(), PointerError> {
+    struct Writer;
+    impl PointerWriter for Writer {
+        fn atomic_write(&self, destination: &Path, content: &[u8], prefix: &str) -> io::Result<()> {
+            crate::pending::atomic_write(destination, content, prefix)
         }
-    })
+    }
+    write_pointer_file(instance, product, homes, &Writer)
 }
 
 #[cfg(test)]
@@ -129,7 +154,7 @@ mod tests {
         let instance = dir.path().join("instance");
         let product = dir.path().join("prød😀");
         fs::create_dir(&product).unwrap();
-        write_pointer_file(&instance, &product, &Homes::default()).unwrap();
+        write_fixture_pointer(&instance, &product, &Homes::default()).unwrap();
         assert_eq!(
             load_pointer_file(&instance, &Homes::default()).unwrap(),
             Some(fs::canonicalize(&product).unwrap())
@@ -201,7 +226,7 @@ mod tests {
             let threads: Vec<_> = products
                 .iter()
                 .map(|product| {
-                    s.spawn(|| write_pointer_file(&instance, product, &Homes::default()))
+                    s.spawn(|| write_fixture_pointer(&instance, product, &Homes::default()))
                 })
                 .collect();
             for thread in threads {
@@ -231,14 +256,14 @@ mod tests {
         fs::create_dir(&outside).unwrap();
         symlink(&outside, instance.join(".agent-fabric")).unwrap();
         assert!(matches!(
-            write_pointer_file(&instance, dir.path(), &Homes::default()),
+            write_fixture_pointer(&instance, dir.path(), &Homes::default()),
             Err(PointerError::Escape { .. })
         ));
         assert_eq!(fs::read_dir(&outside).unwrap().count(), 0);
         fs::remove_file(instance.join(".agent-fabric")).unwrap();
         symlink(&instance, instance.join(".agent-fabric")).unwrap();
         assert!(matches!(
-            write_pointer_file(&instance, dir.path(), &Homes::default()),
+            write_fixture_pointer(&instance, dir.path(), &Homes::default()),
             Err(PointerError::Symlink)
         ));
         fs::remove_file(instance.join(".agent-fabric")).unwrap();
@@ -247,7 +272,7 @@ mod tests {
         fs::write(&external, "keep me\n").unwrap();
         symlink(&external, instance.join(".agent-fabric/.gitignore")).unwrap();
         symlink(&external, instance.join(POINTER_RELATIVE_PATH)).unwrap();
-        write_pointer_file(&instance, dir.path(), &Homes::default()).unwrap();
+        write_fixture_pointer(&instance, dir.path(), &Homes::default()).unwrap();
         assert_eq!(fs::read_to_string(external).unwrap(), "keep me\n");
         assert!(!instance.join(".agent-fabric/.gitignore").is_symlink());
         assert!(!instance.join(POINTER_RELATIVE_PATH).is_symlink());
@@ -274,7 +299,7 @@ print(json.dumps((p/m.POINTER_RELATIVE_PATH).read_text()))
         ) else {
             return;
         };
-        write_pointer_file(&instance, &product, &Homes::default()).unwrap();
+        write_fixture_pointer(&instance, &product, &Homes::default()).unwrap();
         assert_eq!(
             serde_json::json!(fs::read_to_string(instance.join(POINTER_RELATIVE_PATH)).unwrap()),
             expected
@@ -285,10 +310,9 @@ print(json.dumps((p/m.POINTER_RELATIVE_PATH).read_text()))
 #[cfg(all(test, unix))]
 mod remaining_parity {
     use super::*;
-    use std::os::unix::ffi::OsStrExt;
     #[test]
-    #[ignore = "RP-1003: Python surrogateescape paths and extended JSON members"]
-    fn python_extended_pointer_json_and_non_utf8_paths() {
+    #[ignore = "RP-1003: records has no extended-value JSON decoder on main"]
+    fn python_extended_pointer_json() {
         let dir = tempfile::tempdir().unwrap();
         let instance = dir.path().join("instance");
         let Some(expected) = crate::test_support::python(
@@ -302,47 +326,9 @@ print(json.dumps(str(m.load_pointer_file(p))))
         ) else {
             return;
         };
-        let numeric_matches =
-            serde_json::json!(load_pointer_file(&instance, &Homes::default()).unwrap()) == expected;
-        let product = dir
-            .path()
-            .join(std::ffi::OsStr::from_bytes(b"product-\xff"));
-        let mut path_matches = true;
-        match fs::create_dir(&product) {
-            Err(error)
-                if matches!(
-                    error.kind(),
-                    io::ErrorKind::PermissionDenied | io::ErrorKind::InvalidInput
-                ) =>
-            {
-                eprintln!("SKIP non-UTF-8 pointer fixture: filesystem refuses filename");
-            }
-            Err(error) => panic!("cannot create pointer fixture: {error}"),
-            Ok(()) => {
-                let Some(expected) = crate::test_support::python(
-                    "scripts/lib/product_root_resolver.py",
-                    r#"
-p,product=map(pathlib.Path,sys.argv[3:5])
-m.write_pointer_file(p,product)
-print(json.dumps(list((p/m.POINTER_RELATIVE_PATH).read_bytes())))
-"#,
-                    &[&instance, &product],
-                ) else {
-                    return;
-                };
-                path_matches = write_pointer_file(&instance, &product, &Homes::default()).is_ok();
-                if path_matches {
-                    path_matches =
-                        serde_json::json!(fs::read(instance.join(POINTER_RELATIVE_PATH)).unwrap())
-                            == expected
-                            && load_pointer_file(&instance, &Homes::default()).unwrap()
-                                == Some(fs::canonicalize(&product).unwrap());
-                }
-            }
-        }
-        assert!(
-            numeric_matches && path_matches,
-            "numeric parity: {numeric_matches}; non-UTF-8 parity when supported: {path_matches}"
+        assert_eq!(
+            serde_json::json!(load_pointer_file(&instance, &Homes::default()).unwrap()),
+            expected
         );
     }
 }
@@ -382,36 +368,52 @@ print(json.dumps([json.dumps(os.fsdecode(bytes(v))) for v in values]))
         let product = dir
             .path()
             .join(std::ffi::OsStr::from_bytes(b"product-\xff"));
-        match fs::create_dir(&product) {
-            Ok(()) => {}
-            Err(e)
-                if matches!(
-                    e.kind(),
-                    io::ErrorKind::PermissionDenied | io::ErrorKind::InvalidInput
-                ) =>
-            {
-                eprintln!("skip: filesystem refuses non-UTF-8 filenames; path codec differential still runs");
+        #[cfg(target_os = "macos")]
+        {
+            // APFS rejects invalid UTF-8 names with EPERM. This is an asserted
+            // platform result, not a skipped test. The byte codec oracle above
+            // always covers the surrogateescape wire form without file creation.
+            let error = fs::create_dir(&product).unwrap_err();
+            assert_eq!(
+                error.raw_os_error(),
+                Some(1),
+                "APFS invalid UTF-8 filename refusal"
+            );
+            let Some(expected) = crate::test_support::python(
+                "",
+                r#"
+p=os.fsencode(sys.argv[3])+b'/python-product-\xff'
+try: os.mkdir(p); print(json.dumps({'created':True}))
+except OSError as e: print(json.dumps({'errno':e.errno}))
+"#,
+                &[dir.path()],
+            ) else {
                 return;
-            }
-            Err(e) => panic!("cannot create native-path fixture: {e}"),
+            };
+            assert_eq!(expected, serde_json::json!({"errno":1}));
         }
-        let instance = dir.path().join("instance");
-        let Some(expected) = crate::test_support::python(
-            "scripts/lib/product_root_resolver.py",
-            r#"
+        #[cfg(not(target_os = "macos"))]
+        fs::create_dir(&product).unwrap();
+        #[cfg(not(target_os = "macos"))]
+        {
+            let instance = dir.path().join("instance");
+            let Some(expected) = crate::test_support::python(
+                "scripts/lib/product_root_resolver.py",
+                r#"
 p,product=map(pathlib.Path,sys.argv[3:5])
 m.write_pointer_file(p,product)
 print(json.dumps(list((p/m.POINTER_RELATIVE_PATH).read_bytes())))
 "#,
-            &[&instance, &product],
-        ) else {
-            return;
-        };
-        write_pointer_file(&instance, &product, &Homes::default()).unwrap();
-        assert_eq!(
-            serde_json::json!(fs::read(instance.join(POINTER_RELATIVE_PATH)).unwrap()),
-            expected
-        );
+                &[&instance, &product],
+            ) else {
+                return;
+            };
+            write_fixture_pointer(&instance, &product, &Homes::default()).unwrap();
+            assert_eq!(
+                serde_json::json!(fs::read(instance.join(POINTER_RELATIVE_PATH)).unwrap()),
+                expected
+            );
+        }
     }
 }
 

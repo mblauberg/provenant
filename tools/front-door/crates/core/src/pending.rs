@@ -1,10 +1,14 @@
-//! Private safe OS operations until the supervisor crate exposes them.
+//! Private path codec awaiting records, and a test-only atomic publication backend.
+#[cfg(test)]
 use std::fs::{self, OpenOptions};
+#[cfg(test)]
 use std::io::{self, Write};
 use std::path::Path;
+#[cfg(test)]
 use std::time::{SystemTime, UNIX_EPOCH};
 
-// port: belongs in provenant-supervisor
+// Test fixture backend only. Production composes PointerWriter with supervisor.
+#[cfg(test)]
 pub(crate) fn atomic_write(destination: &Path, content: &[u8], prefix: &str) -> io::Result<()> {
     let parent = destination
         .parent()
