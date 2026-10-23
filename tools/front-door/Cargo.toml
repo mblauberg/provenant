@@ -40,6 +40,24 @@ provenant-fabric-mcp = { path = "crates/fabric-mcp" }
 provenant-workflow = { path = "crates/workflow" }
 provenant-cli = { path = "crates/cli" }
 
+# Rewrite lanes land inert (ADR 0028). Keep their shared path declarations
+# until cutover gives each a consumer; remove its ignore at that point.
+[workspace.metadata.cargo-shear]
+ignored = [
+  "provenant-cli",
+  "provenant-config",
+  "provenant-confinement",
+  "provenant-fabric-mcp",
+  "provenant-fabric-runtime",
+  "provenant-fabric-store",
+  "provenant-providers",
+  "provenant-quota",
+  "provenant-routing",
+  "provenant-run",
+  "provenant-telemetry",
+  "provenant-workflow",
+]
+
 [workspace.lints.rust]
 unsafe_code = "forbid"
 unsafe_op_in_unsafe_fn = "deny"

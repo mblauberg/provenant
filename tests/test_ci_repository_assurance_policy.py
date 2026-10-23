@@ -52,14 +52,14 @@ import yaml
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = ROOT / ".github" / "workflows" / "ci.yml"
 SETUP_ACTION = ROOT / ".github" / "actions" / "setup-node-workspace" / "action.yml"
-SETUP_ACTION_USES = "$/.github/actions/setup-node-workspace"
+SETUP_ACTION_USES = "./.github/actions/setup-node-workspace"
 ROOT_PACKAGE = ROOT / "package.json"
 ROOT_LOCK = ROOT / "package-lock.json"
 FABRIC_PACKAGE = ROOT / "runtime" / "fabric" / "package.json"
 IMMUTABLE_ACTION = re.compile(r"^[^@\s]+@[0-9a-f]{40}$")
 # Local composite actions are pinned by the commit under review itself; only
 # repository-local paths are exempt from the 40-hex SHA pin.
-LOCAL_ACTION = re.compile(r"^\$/\.github/actions/[a-z0-9-]+$")
+LOCAL_ACTION = re.compile(r"^\./\.github/actions/[a-z0-9-]+$")
 JOB_PERMISSIONS = {
     "detect-changes": {"actions": "read", "contents": "read", "pull-requests": "read"},
     "harness-checks": {"contents": "read"},
@@ -70,6 +70,8 @@ JOB_PERMISSIONS = {
     "split-root": {"contents": "read"},
     "rust": {"contents": "read"},
     "rust-macos-release": {"contents": "read"},
+    "rust-dependencies": {"contents": "read"},
+    "generic-checks": {"contents": "read"},
     "zizmor": {"contents": "read"},
     "ci-status": {},
 }
@@ -108,7 +110,7 @@ def _assert_no_continue_on_error(
     # continue-on-error on any required job or step would neutralise failure
     # propagation invisibly, so no job and no step may set it. This also
     # covers the shared composite action (setup-node-workspace) that every
-    # workspace job runs through via `uses: $/...` -- a continue-on-error
+    # workspace job runs through via `uses: ./...` -- a continue-on-error
     # planted there is exactly as invisible to the ci-status aggregate as
     # one planted directly in ci.yml, and prior to this check it was outside
     # this guard's reach entirely, parsed and asserted on nowhere in this
@@ -351,7 +353,7 @@ def test_macos_smoke_builds_the_release_front_door_with_the_rust_filter() -> Non
     job = _job(document, "rust-macos-release")
     assert job["needs"] == "detect-changes"
     assert job["if"] == _job(document, "rust")["if"]
-    assert job["runs-on"] == "macos-latest"
+    assert job["runs-on"] == "macos-15"
     patterns = _flatten_patterns(_change_filters(document)["rust"])
     assert any(_matches_filter("tools/front-door/crates/cli/src/lib.rs", p) for p in patterns)
     builds = [step for step in _steps(job) if "cargo build" in str(step.get("run", ""))]

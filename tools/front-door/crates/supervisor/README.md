@@ -7,7 +7,7 @@ these sources are unchanged in integrated main
 `6aa0097083aa0e9f2f69d2d60fe9f8023dcae594`.
 Differential interpreter: `PROVENANT_PORT_PYTHON` (default `python3`, >=3.12);
 local evidence uses Python 3.14.8, Unicode 16.0.0.
-Toolchain: pinned Rust 1.94.1.
+Toolchain: pinned Rust 1.99.1.
 
 The crate is inert. Existing Python, TypeScript and front-door callers retain
 command ownership. The utility runner is separate from S2 provider supervision;
