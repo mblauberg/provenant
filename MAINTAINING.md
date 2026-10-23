@@ -220,9 +220,6 @@ For a pull request branch, run only the tests covering changed files; the hosted
 ```sh
 scripts/check-harness
 npm run check
-npm run test:package-install --workspace @local/fabric
-node runtime/fabric/mcp-smoke.mjs
-npm audit --workspace=@local/fabric --omit=dev --audit-level=high
 scripts/static-security-check.py
 scripts/public-release-check
 git diff --check

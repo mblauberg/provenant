@@ -9,7 +9,7 @@ the server path and protocol version are internal and may change. The verbs,
 flags, JSON fields and exit codes below are the contract. The verbs share one
 store with the `fabric_landing_lease` MCP tool, so a chair's MCP lease and a
 script's lease serialise against each other. The [Fabric
-README](../../runtime/fabric/README.md#work-claims-and-landing) owns the
+Rust design](../specs/rust-port/design/fabric.md) owns the
 semantics.
 
 ## Call shapes

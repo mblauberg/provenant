@@ -9,8 +9,8 @@ behaviour. GitHub issues and their Project Status fields own current delivery
 state, owner, dependencies and user gates.
 
 The Agent Fabric and Console specifications went with the runtime they
-described. Fabric is now small enough to be its own documentation: see
-[`runtime/fabric/README.md`](../../runtime/fabric/README.md) and the
+described. The accepted Rust replacement is described in
+[Fabric Rust design](rust-port/design/fabric.md) and the
 [MCP registration runbook](../runbooks/fabric-mcp-registration.md).
 
 ## Fabric

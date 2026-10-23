@@ -53,9 +53,7 @@ rerun both against the new head.
 | gate | command or artifact | result | head SHA | N/A reason |
 | --- | --- | --- | --- | --- |
 | Harness style | `scripts/check-harness` | | | |
-| Fabric typecheck, tests, build | `npm run check` | | | |
-| Fabric package-install smoke | `npm run test:package-install --workspace @local/fabric` | | | `N/A` if package installation is unaffected |
-| Fabric MCP smoke | `node runtime/fabric/mcp-smoke.mjs` | | | `N/A` if MCP/runtime behaviour is unaffected |
+| Node dependency preflight | `npm run check` | | | |
 | Production dependency audit | `npm run audit` | | | |
 | Contract and cutover | | | | |
 | Security and operations | | | | |

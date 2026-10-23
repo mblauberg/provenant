@@ -43,46 +43,6 @@ def provider_home(monkeypatch, tmp_path, *, home=None, config_dir=None, state_ro
     return Path(home) if home is not None else None
 
 
-def test_plan_only_resolves_without_launch(tmp_path):
-    provider = tmp_path / "claude"
-    provider.write_text('#!/bin/sh\ntouch "' + str(tmp_path / "launched") + '"\n')
-    provider.chmod(0o755)
-    env = {
-        **os.environ,
-        "PATH": str(tmp_path) + ":" + os.environ["PATH"],
-        "AGENT_FABRIC_PRODUCT_ROOT": str(ROOT),
-        "AGENT_FABRIC_INSTANCE_ROOT": str(ROOT),
-    }
-    result = subprocess.run(
-        [
-            str(SCRIPTS / "cf_dispatch.py"),
-            "--intent",
-            "ordinary",
-            "--tool",
-            "claude",
-            "--alias",
-            "senior",
-            "--prompt",
-            "Hello",
-            "--plan-only",
-        ],
-        cwd=tmp_path,
-        env=env,
-        capture_output=True,
-        text=True,
-    )
-    assert result.returncode == 0, result.stderr + result.stdout
-    plan = json.loads(result.stdout)
-    assert plan["schema"] == "fabric.exec-plan.v1"
-    assert Path(plan["run_dir"]) != Path(plan["output_path"]).parent
-    assert "--bare" not in plan["argv"]
-    assert "--no-session-persistence" not in plan["argv"]
-    assert "--session-id" in plan["argv"]
-    assert "--permission-prompts" in plan["argv"]
-    assert "stream-json" in plan["argv"]
-    assert not (tmp_path / "launched").exists()
-
-
 def test_read_only_os_confinement_profile_and_argv(monkeypatch, tmp_path):
     supervisor = importlib.import_module("skills.orchestrate.scripts.provider_exec")
     root = tmp_path / "workspace"
@@ -3798,64 +3758,6 @@ def test_opencode_disables_fabric_mcp_only_in_sandboxed_lanes(tmp_path, monkeypa
     assert config["permission"]["edit"]["*"] == "deny"
 
 
-@pytest.mark.parametrize("sandboxed", [False, True], ids=["shim", "sandbox-exec"])
-@pytest.mark.parametrize("failure", [None, "missing", "denied", "bad_handshake", "timeout", "sandbox_missing"])
-def test_opencode_writer_preflights_the_configured_fabric_command(tmp_path, monkeypatch, failure, sandboxed):
-    mod = supervisor()
-    native_sandbox = mod.provider_confinement._sandbox_exec_path() if sandboxed else None
-    if sandboxed and not native_sandbox:
-        pytest.skip("sandbox-exec unavailable or nested sandbox refused")
-    adapter = mod.profile("opencode")
-    product = tmp_path / "product"
-    wrapper = product / "runtime/fabric/bin/fabric-mcp"
-    wrapper.parent.mkdir(parents=True)
-    wrapper.write_text(
-        "#!" + sys.executable + "\nimport json, os, sys, time\nassert os.environ.get('AGENT_FABRIC_SEAT') == 'opencode'\n"
-        + ("time.sleep(5)\n" if failure == "timeout" else "")
-        + "request = json.loads(sys.stdin.readline())\n"
-        + ("print('tsx loader not found', file=sys.stderr)\n" if failure == "bad_handshake" else "")
-        + "print(json.dumps({'jsonrpc': '2.0', 'id': request['id'], 'result': "
-        + ("{}" if failure == "bad_handshake" else
-           "{'protocolVersion': '2024-11-05', 'capabilities': {}, 'serverInfo': {'name': 'fabric', 'version': 'test'}}")
-        + "}), flush=True)\n"
-    )
-    wrapper.chmod(0o644 if failure == "denied" else 0o755)
-    if failure == "missing":
-        wrapper.unlink()
-    monkeypatch.setattr(adapter, "FABRIC_MCP", wrapper, raising=False)
-    monkeypatch.setattr(mod, "MCP_PREFLIGHT_SECONDS", 0.5, raising=False)
-    provider_started = tmp_path / "provider-started"
-    code = ("import json; from pathlib import Path; Path(" + repr(str(provider_started))
-            + ").touch(); print(json.dumps({'type':'result','result':'done'}))")
-    plan = fixture_plan(tmp_path, code, "opencode")
-    plan["mode"] = "worktree_write"
-    # Model and MCP processes both go through this same sandbox boundary.
-    sandbox_log = tmp_path / "sandbox-commands"
-    sandbox = tmp_path / "sandbox-exec"
-    sandbox.write_text('#!/bin/sh\nprintf "%s\\n" "$3" >> ' + shlex.quote(str(sandbox_log))
-                       + '\nshift 2\nexec "$@"\n')
-    sandbox.chmod(0o755)
-    force_sandbox(monkeypatch, None if failure == "sandbox_missing" else native_sandbox or str(sandbox))
-    plan["applied"]["confinement"] = "sandbox-exec"
-    record = mod.execute(plan, tmp_path / "result.md")
-    config = json.loads(adapter.environment(plan)["OPENCODE_CONFIG_CONTENT"])
-    fabric = config["mcp"]["servers"]["fabric"]
-    assert fabric["command"] == [str(wrapper)]
-    assert fabric["disabled"] is False
-    assert fabric["environment"] == {"AGENT_FABRIC_SEAT": "opencode"}
-    assert record["status"] == ("rejected" if failure else "ok")
-    assert provider_started.exists() is (failure is None)
-    assert record["error_class"] == ("fabric_mcp_unavailable" if failure else "none")
-    if not sandboxed and failure != "sandbox_missing":
-        assert sandbox_log.read_text().splitlines()[0] == str(wrapper)
-    if failure:
-        assert record["error"] == "fabric_mcp_unavailable"
-        assert record["retryable"] is False
-        assert "Node" in record["fix"]
-    if failure == "bad_handshake":
-        assert "tsx loader not found" in json.dumps(record)
-
-
 @pytest.mark.parametrize("shape", ["stderr", "long_stderr", "structured"])
 def test_opencode_free_tier_refusal_is_model_unavailable(tmp_path, shape):
     message = "403 FreeTierError: OpenCode's free tier can only be used from within OpenCode"
@@ -5473,122 +5375,6 @@ def test_preface_env_and_credential_path_controls(tmp_path):
         fixture_plan(tmp_path, "", sandbox="workspace-write")
 
 
-@pytest.mark.parametrize("adapter", ["claude", "codex"])
-def test_owner_contract_and_resume_keeps_same_run(tmp_path, adapter):
-    bindir = tmp_path / "bin"
-    bindir.mkdir()
-    executable = bindir / adapter
-    executable.write_text("""#!/usr/bin/env python3
-import json,sys
-if sys.argv[1:3]==['debug','models']:
- print(json.dumps({'models':[{'slug':'gpt-6-luna','supported_reasoning_levels':[{'effort':'high'}]}]}));sys.exit()
-prompt=sys.stdin.read()
-if 'claude' in sys.argv[0]:
- print(json.dumps({'type':'system','subtype':'init','model':'claude-sonnet-4-6','session_id':'fixture-session'}))
- print(json.dumps({'type':'result','result':'DONE' if '--resume' in sys.argv else '```\\nQUESTION: Which branch?\\n```','is_error':False}))
-else:
- print(json.dumps({'type':'thread.started','thread_id':'fixture-session'}))
- print(json.dumps({'type':'item.completed','item':{'type':'agent_message','text':'DONE' if 'resume' in sys.argv else '```\\nQUESTION: Which branch?\\n```'}}))
- print(json.dumps({'type':'turn.completed'}))
-""")
-    executable.chmod(0o755)
-    env = {
-        **os.environ,
-        "PATH": str(bindir) + ":" + os.environ["PATH"],
-        "AGENT_FABRIC_PRODUCT_ROOT": str(ROOT),
-        "AGENT_FABRIC_INSTANCE_ROOT": str(ROOT),
-        "FABRIC_COOLDOWNS_PATH": str(tmp_path / "cooldowns.json"),
-    }
-    run = Path(
-        subprocess.check_output(
-            [
-                str(SCRIPTS / "run_dir_init.sh"),
-                "--kind",
-                "dispatch",
-                "--slug",
-                "resume",
-            ],
-            cwd=tmp_path,
-            text=True,
-        ).strip()
-    )
-    prompt = tmp_path / "prompt.md"
-    prompt.write_text("Choose a branch")
-    first = subprocess.run(
-        [
-            sys.executable,
-            str(SCRIPTS / "dispatch_run.py"),
-            "--run-dir",
-            str(run),
-            "--task-id",
-            "task-1",
-            "--tool",
-            adapter,
-            "--alias",
-            "senior",
-            "--role",
-            "worker",
-            "--prompt-file",
-            str(prompt),
-        ],
-        cwd=tmp_path,
-        env=env,
-        capture_output=True,
-        text=True,
-        timeout=15,
-    )
-    path = run / "tasks/task-1/attempt-001/attempt.json"
-    assert path.exists(), first.stdout + first.stderr
-    row = json.loads(path.read_text())
-    assert row["schema"] == "fabric.attempt.v1"
-    assert row["status"] == "input_required"
-    assert row["session_id"] == "fixture-session"
-    prompt.write_text("main")
-    second = subprocess.run(
-        [
-            sys.executable,
-            str(SCRIPTS / "dispatch_run.py"),
-            "--run-dir",
-            str(run),
-            "--resume",
-            row["run_id"],
-            "--prompt-file",
-            str(prompt),
-        ],
-        cwd=tmp_path,
-        env=env,
-        capture_output=True,
-        text=True,
-        timeout=15,
-    )
-    assert second.returncode == 0, second.stdout + second.stderr
-    row2 = json.loads((run / "tasks/task-1/attempt-002/attempt.json").read_text())
-    assert row2["status"] == "ok"
-    assert row2["run_id"] == row["run_id"]
-    assert row2["session_id"] == "fixture-session"
-    third = subprocess.run(
-        [
-            sys.executable,
-            str(SCRIPTS / "dispatch_run.py"),
-            "--run-dir",
-            str(run),
-            "--resume",
-            row["run_id"],
-            "--prompt-file",
-            str(prompt),
-        ],
-        cwd=tmp_path,
-        env=env,
-        capture_output=True,
-        text=True,
-        timeout=15,
-    )
-    assert third.returncode == 0, third.stdout + third.stderr
-    row3 = json.loads((run / "tasks/task-1/attempt-003/attempt.json").read_text())
-    assert row3["status"] == "ok" and row3["session_id"] == row2["session_id"]
-    assert len((tmp_path / ".agent-run/runs/index.jsonl").read_text().splitlines()) == 3
-
-
 def test_fallback_training_requires_explicit_opt_in(tmp_path):
     mod = importlib.import_module("skills.orchestrate.scripts.exec_routing")
     plan = fixture_plan(tmp_path, "")
@@ -5605,82 +5391,6 @@ def test_fallback_training_requires_explicit_opt_in(tmp_path):
         "free-free",
     ]
     assert mod.candidates(plan, False, catalogue) == []
-
-
-@pytest.mark.parametrize("explicit", [False, True])
-def test_usage_limit_falls_back_as_attempt_two(tmp_path, explicit):
-    # This checks routing, independently of the host's memory probe.
-    policy = tmp_path / ".agents/fabric-policy.json"
-    policy.parent.mkdir(parents=True, exist_ok=True)
-    policy.write_text(json.dumps({"memory_floor_percent": {"read_only": 0}}))
-    bindir = tmp_path / "bin"
-    bindir.mkdir()
-    cli = bindir / "claude"
-    initial_model = "opus" if explicit else "sonnet"
-    cli.write_text("""#!/usr/bin/env python3
-import json,sys
-sys.stdin.read()
-model=sys.argv[sys.argv.index('--model')+1]
-print(json.dumps({'type':'result','is_error':'TARGET_MODEL' in model,'result':"You've hit your usage limit" if 'TARGET_MODEL' in model else 'DONE'}))
-sys.exit(1 if 'TARGET_MODEL' in model else 0)
-""".replace("TARGET_MODEL", initial_model))
-    cli.chmod(0o755)
-    fallback_cli = bindir / 'opencode'
-    fallback_cli.write_text("#!/usr/bin/env python3\nimport json\nprint(json.dumps({'type':'text','part':{'text':'DONE'}}))\n")
-    fallback_cli.chmod(0o755)
-    env = {
-        **os.environ,
-        "PROVENANT_NO_OS_CONFINEMENT": "1",
-        "PATH": str(bindir) + ":" + os.environ["PATH"],
-        "AGENT_FABRIC_PRODUCT_ROOT": str(ROOT),
-        "AGENT_FABRIC_INSTANCE_ROOT": str(ROOT),
-        "FABRIC_COOLDOWNS_PATH": str(tmp_path / "cooldowns.json"),
-    }
-    run = Path(
-        subprocess.check_output(
-            [str(SCRIPTS / "run_dir_init.sh"), "--kind", "dispatch"],
-            cwd=tmp_path,
-            text=True,
-        ).strip()
-    )
-    prompt = tmp_path / "prompt.md"
-    prompt.write_text("Reply DONE")
-    result = subprocess.run(
-        [
-            sys.executable,
-            str(SCRIPTS / "dispatch_run.py"),
-            "--run-dir",
-            str(run),
-            "--tool",
-            "claude",
-            "--model" if explicit else "--alias",
-            "opus" if explicit else "senior",
-            "--fallback", "true",
-            "--prompt-file",
-            str(prompt),
-        ],
-        cwd=tmp_path,
-        env=env,
-        capture_output=True,
-        text=True,
-        timeout=15,
-    )
-    assert result.returncode == 0, result.stdout + result.stderr
-    rows = [
-        json.loads(path.read_text())
-        for path in sorted((run / "tasks").glob("*/attempt-*/attempt.json"))
-    ]
-    assert [row["status"] for row in rows] == ["usage_limited", "ok"]
-    assert len({row["run_id"] for row in rows}) == 1
-    assert rows[1]["provenance"]["fallback_from"]["status"] == "usage_limited"
-    assert rows[0]["provenance"]["resolved_model"] != rows[1]["provenance"]["resolved_model"]
-    assert json.loads((run / "RUN_RECEIPT.json").read_text())["status"] == "ok"
-    cooldowns = json.loads((tmp_path / "cooldowns.json").read_text())["cooldowns"]
-    (key, cooldown), = cooldowns.items()
-    assert json.loads(key) == ["claude", rows[0]["account"], rows[0]["host"], "*"]
-    assert (cooldown["account"], cooldown["host"]) == (rows[0]["account"], rows[0]["host"])
-    assert cooldown["status"] == "usage_limited"
-    assert cooldown["source_run"] == rows[0]["run_id"]
 
 
 def test_codex_observed_model_comes_from_rollout_turn_context(tmp_path):
@@ -6441,40 +6151,6 @@ def test_instruction_check_runs_no_repository_hooks(tmp_path):
         "open(common + '/refs/heads/main', 'w').write('1' * 40 + '\\n')\n"))
     assert record["status"] == "ok", record
     assert not marker.exists()
-
-
-def test_plan_only_honors_read_only_cwd_inside_workspace(tmp_path):
-    child = tmp_path / "nested"
-    child.mkdir()
-    cli = tmp_path / "claude"
-    cli.write_text("#!/bin/sh\nexit 99\n")
-    cli.chmod(0o755)
-    env = {
-        **os.environ,
-        "PATH": str(tmp_path) + ":" + os.environ["PATH"],
-        "AGENT_FABRIC_PRODUCT_ROOT": str(ROOT),
-        "AGENT_FABRIC_INSTANCE_ROOT": str(ROOT),
-    }
-    result = subprocess.run(
-        [
-            str(SCRIPTS / "cf_dispatch.py"),
-            "--tool",
-            "claude",
-            "--intent",
-            "ordinary",
-            "--prompt",
-            "hello",
-            "--cwd",
-            str(child),
-            "--plan-only",
-        ],
-        cwd=tmp_path,
-        env=env,
-        capture_output=True,
-        text=True,
-    )
-    assert result.returncode == 0, result.stderr + result.stdout
-    assert json.loads(result.stdout)["cwd"] == str(child)
 
 
 def test_opencode_v2_argv_is_standalone_and_has_no_v1_flags(tmp_path):
@@ -8195,34 +7871,6 @@ def test_opencode_reset_hint_on_a_separate_earlier_line_is_kept(tmp_path):
 def test_opencode_explicit_period_limit_phrase_is_fatal_without_error_prefix(tmp_path):
     record = _stderr_run(tmp_path, ["retrying: weekly usage limit reached"])
     assert record["status"] == "usage_limited"
-
-
-def test_explicit_model_runs_despite_a_cooldown_with_a_warning(tmp_path):
-    bindir = tmp_path / "bin"
-    bindir.mkdir()
-    cli = bindir / "claude"
-    cli.write_text("#!/usr/bin/env python3\nimport json,sys\nsys.stdin.read()\n"
-                   "print(json.dumps({'type':'result','is_error':False,'result':'DONE'}))\n")
-    cli.chmod(0o755)
-    until = (datetime.now(UTC) + timedelta(hours=2)).strftime("%Y-%m-%dT%H:%M:%SZ")
-    (tmp_path / "cooldowns.json").write_text(json.dumps({"schema": "fabric.cooldowns.v1", "cooldowns": {
-        "claude/*": {"adapter": "claude", "model": "*", "account": None, "status": "usage_limited",
-                     "cooling_until": until, "source_run": "r", "recorded_at": until, "signature": "quota_exhausted"}}}))
-    # An account-less cooldown belongs to the default identity, so the lane must not select another one.
-    env = {**{k: v for k, v in os.environ.items() if k != "CLAUDE_CONFIG_DIR"},
-           "PROVENANT_NO_OS_CONFINEMENT": "1", "PATH": str(bindir) + ":" + os.environ["PATH"],
-           "AGENT_FABRIC_PRODUCT_ROOT": str(ROOT), "AGENT_FABRIC_INSTANCE_ROOT": str(ROOT),
-           "FABRIC_COOLDOWNS_PATH": str(tmp_path / "cooldowns.json")}
-    run = Path(subprocess.check_output([str(SCRIPTS / "run_dir_init.sh"), "--kind", "dispatch"],
-                                       cwd=tmp_path, text=True).strip())
-    (tmp_path / "prompt.md").write_text("Reply DONE")
-    result = subprocess.run([sys.executable, str(SCRIPTS / "dispatch_run.py"), "--run-dir", str(run), "--tool", "claude",
-                             "--model", "opus", "--prompt-file", str(tmp_path / "prompt.md")],
-                            cwd=tmp_path, env=env, capture_output=True, text=True, timeout=15)
-    assert result.returncode == 0, result.stdout + result.stderr
-    row = json.loads(next((run / "tasks").glob("*/attempt-*/attempt.json")).read_text())
-    assert row["status"] == "ok"
-    assert any("explicit model is cooling" in warning for warning in row.get("warnings", []))
 
 
 def test_opencode_v2_structured_error_log_lines_are_fatal_and_info_is_not():

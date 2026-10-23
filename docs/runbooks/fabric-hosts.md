@@ -452,56 +452,7 @@ classes or methods, one test process at a time. Heavy suites run in GitHub Actio
 
 ```sh
 PYTHONPATH=scripts python3 -m unittest tests.test_fabric_hosts.<TouchedClassOrMethod>
-(cd runtime/fabric && npx vitest run tests/hosts.test.ts --maxWorkers=2)
-npm --prefix runtime/fabric run typecheck
 ```
 
-MCP tests exercise diagnostics, lanes, status, bounded output, cancel and
-placement rejection for Codex, agy and Claude seats. Loopback peers use
-separate homes, instance roots and project repositories. They verify detached
-launch, response loss, reconciliation, qualified selectors, fallback, stale
-snapshots and bounded waits without an sshd or live model. Existing suites
-whose scratch directories assume no enclosing checkout need a temporary
-directory outside the checkout when the sandbox permits it.
-
-Slice 2 covers criteria 2–5 and 7, the lane portion of 10, placement checks
-in 14 and lane-tool parity in 17. Criteria 13 and 16 retain the slice 1
-contracts. Real-host sleep/connection-loss acceptance remains for the chair;
-loopback evidence cannot establish sleep behaviour. Slice 3 covers criterion 6 and writer dispatch/fetch parity in criterion 17
-with loopback peers, including unpublished input, dirty chair files, batches,
-continuations and interrupted transfers. Criteria 8–9, 11–12 and the remaining
-record/tool portions of 10 and 17 belong to slices 4–5. Two-host writer and
-forced-command acceptance remain for the owner’s spare Mac.
-
-The real-sshd test is opt-in through `PROVENANT_SSHD_TESTS=1`. Run it outside a
-sandbox that prevents sshd from starting, with `/usr/sbin/sshd` available, to
-verify the documented `command=` restriction. A skipped test leaves that
-acceptance criterion pending; the loopback shim does not prove it.
-
-
-## Telemetry summaries
-
-`provenant stats --hosts all` or `--hosts <host…>` reads local and peer usage
-aggregates through the existing SSH transport. The read-only `telemetry.stats`
-verb takes `params: {"schema_version": 1, "since": "2026-10-21"}`; `since` is
-optional. Its result uses `provenant.telemetry.summary.v1` and contains aggregate
-session/model/day groups, never raw ledger events or credentials. Peers must
-have an ingested schema-4 ledger; the read never creates or migrates it. Request
-and response bounds and configured SSH deadlines apply. Older, offline or
-malformed peers produce typed partial host rows without failing stats. With no
-peers, the command stays local.
-
-Ledger rows and quota snapshots carry the same local host id as fabric
-(`scripts/host_identity.py`). Rows and snapshots that an earlier build stored
-under the raw hostname or `local` are read as this host; they are not
-rewritten. A `local_host` rename never rewrites the ledger either: it records
-each id it was written under and reads them all as this host, even an id a
-peer now carries, because only this machine writes its ledger. Otherwise a name
-configured as a peer is never read as this host, even when it matches the
-hostname. Cooldowns stored under an earlier id are rekeyed to
-the current id when the cooldown store is next written, so a success clears
-them and a repeat limit doubles their backoff. Quota is account-scoped and already includes
-use from every host. When peers report the same provider/account label, stats
-uses its freshest cached quota observation. It never sums quota percentages or
-writes peer snapshots into the local route state. See [telemetry](telemetry.md)
-for account configuration, credential handling, routing and coverage limits.
+The TS loopback/MCP tests were retired with the runtime. Rust integration
+coverage belongs to the Fabric runtime and MCP build steps.

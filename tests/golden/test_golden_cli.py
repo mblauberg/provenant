@@ -80,15 +80,6 @@ def test_help_structure_command_boundaries(text, commands):
     assert help_structure(text, verb="graph" if "graph run" in text else "hosts")["subcommands"] == commands
 
 
-def test_fabric_help_subcommands():
-    from run import comparison_fields
-    here = Path(__file__).resolve().parent
-    graph = json.loads((here / "cases/graph/graph-case-01.json").read_text())
-    assert comparison_fields(graph)["help"]["subcommands"] == ["cancel", "resume", "run", "status"]
-    fabric = json.loads((here / "cases/fabric/fabric-case-01.json").read_text())
-    assert {"graph", "events"} <= set(comparison_fields(fabric)["help"]["subcommands"])
-    events = json.loads((here / "cases/events/events-case-01.json").read_text())
-    assert comparison_fields(events)["help"]["subcommands"] == []
 
 
 def test_manifest_pins_only_the_python_minor(monkeypatch, tmp_path):
@@ -139,12 +130,6 @@ def test_selector_env_allowlist(name):
         run_case("/does-not-run", Case("test", "root", ["root"], "machine"), {name: "outside"})
 
 
-def test_fabric_requires_node(monkeypatch):
-    import run
-    which = run.shutil.which
-    monkeypatch.setattr(run.shutil, "which", lambda name: None if name == "node" else which(name))
-    with pytest.raises(RuntimeError, match="require node"):
-        run.run_case("/does-not-run", run.Case("test", "fabric", ["fabric", "--help"], "help"))
 
 
 def test_checkout_guard_includes_ignored_and_agent_run(monkeypatch, tmp_path):
