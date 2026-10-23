@@ -3,7 +3,14 @@
 #![forbid(unsafe_code)]
 
 pub mod adapters;
+pub mod dispatch_contract;
+pub mod exec_contract;
+pub mod output;
+mod output_contract;
+mod output_policy;
 
+mod ordered_json;
+pub use ordered_json::ContextCeiling;
 mod pending;
 pub use pending::IntegerError;
 
@@ -22,16 +29,17 @@ pub enum DecodeError {
 /// Decode dynamic provider input without rounding Python integers to floats.
 /// Use this boundary for `Plan` and JSON routes passed to the adapter builders.
 pub fn decode_json<T: serde::de::DeserializeOwned>(input: &[u8]) -> Result<T, DecodeError> {
-    let value =
-        provenant_records::checked_json::from_slice(input).map_err(|error| match error {
-            provenant_records::checked_json::DecodeError::NumberOutOfRange(_) => {
-                DecodeError::NumberOutOfRange
-            }
-            provenant_records::checked_json::DecodeError::Json(error) => {
-                DecodeError::InvalidJson(error)
-            }
-        })?;
-    Ok(serde_json::from_value(value)?)
+    provenant_records::checked_json::from_slice(input).map_err(|error| match error {
+        provenant_records::checked_json::DecodeError::NumberOutOfRange(_) => {
+            DecodeError::NumberOutOfRange
+        }
+        provenant_records::checked_json::DecodeError::Json(error) => {
+            DecodeError::InvalidJson(error)
+        }
+    })?;
+    Ok(serde_json::from_slice(&pending::normalize_negative_zero(
+        input,
+    ))?)
 }
 
 #[cfg(test)]
