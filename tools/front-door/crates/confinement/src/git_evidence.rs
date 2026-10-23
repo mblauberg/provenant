@@ -8,11 +8,10 @@ use provenant_core::CancelToken;
 use provenant_core::{GitOid, RelativePath};
 use provenant_records::{CanonicalV1, FileDigest, PathWire};
 use provenant_supervisor::exec::{ExecOutcome, Executor, Termination};
-use provenant_supervisor::fs::{FileKind, FsError, Metadata, SafeDir};
+use provenant_supervisor::fs::{FsError, Metadata, SafeDir};
 use serde::Serialize;
 use sha2::{Digest as _, Sha256};
 use std::ffi::{OsStr, OsString};
-use std::io::{Read, Seek, SeekFrom};
 use std::ops::Deref;
 use std::os::unix::ffi::OsStrExt;
 use std::path::Component;
@@ -114,26 +113,11 @@ impl<'a> Git<'a> {
         base: GitOid,
         selected: &[RepoPath],
     ) -> Result<GitEvidence, GitEvidenceError> {
-        collect_git_evidence(
-            self.executor,
-            self.repo,
-            self.runtime,
-            self.budget,
-            self.cancel,
-            base,
-            selected,
-        )
+        self.collect_git_evidence(base, selected)
     }
 
     pub fn verify_tip(&self, expected: GitOid) -> Result<GitOid, GitEvidenceError> {
-        verify_tip(
-            self.executor,
-            self.repo,
-            self.runtime,
-            self.budget,
-            self.cancel,
-            expected,
-        )
+        self.verify_expected_tip(expected)
     }
 }
 
@@ -154,167 +138,183 @@ pub(crate) struct FileSnapshot {
     pub fingerprint: TrackedFingerprint,
 }
 
-/// Collect pinned HEAD/base diffs, the raw NUL status stream, and selected file
-/// fingerprints. Any timeout, truncation, index race, HEAD movement, unsafe
-/// path, or content drift refuses to certify complete evidence.
-fn collect_git_evidence(
-    executor: &dyn Executor,
-    repo: &VerifiedRepo,
-    runtime: &UtilityRuntime,
-    budget: UtilityBudget,
-    cancel: &CancelToken,
-    base: GitOid,
-    selected: &[RepoPath],
-) -> Result<GitEvidence, GitEvidenceError> {
-    repo.revalidate()
-        .map_err(|_| GitEvidenceError::RepositoryChanged)?;
-    let head = read_head(executor, repo, runtime, budget, cancel)?;
-    let selected_paths = canonical_paths(selected)?;
-    if selected_paths.is_empty() || selected_paths.len() > MAX_DISCLOSURE_FILES {
-        return Err(GitEvidenceError::TooLarge);
-    }
-    let index_before = read_index_fingerprint(repo.private_dir())?;
-    refuse_index_lock(repo.private_dir())?;
-    prove_selected_tracked(executor, repo, runtime, budget, cancel, &selected_paths)?;
-    let mut total = 0_u64;
-    let mut before = Vec::with_capacity(selected_paths.len());
-    for path in &selected_paths {
-        let snapshot = read_optional_file(repo.root_dir(), path, MAX_DISCLOSURE_BYTES)?;
-        let bytes_len = snapshot.as_ref().map_or(0, |file| file.bytes.len() as u64);
-        total = total
-            .checked_add(bytes_len)
-            .ok_or(GitEvidenceError::TooLarge)?;
-        if total > MAX_DISCLOSURE_BYTES {
+impl<'a> Git<'a> {
+    /// Collect pinned HEAD/base diffs, the raw NUL status stream, and selected file
+    /// fingerprints. Any timeout, truncation, index race, HEAD movement, unsafe
+    /// path, or content drift refuses to certify complete evidence.
+    fn collect_git_evidence(
+        &self,
+        base: GitOid,
+        selected: &[RepoPath],
+    ) -> Result<GitEvidence, GitEvidenceError> {
+        self.repo
+            .revalidate()
+            .map_err(|_| GitEvidenceError::RepositoryChanged)?;
+        let head = self.head()?;
+        let selected_paths = canonical_paths(selected)?;
+        if selected_paths.is_empty() || selected_paths.len() > MAX_DISCLOSURE_FILES {
             return Err(GitEvidenceError::TooLarge);
         }
-        before.push(match snapshot {
-            Some(file) => file.fingerprint,
-            None => absent_fingerprint(path)?,
-        });
-    }
+        let index_before = read_index_fingerprint(self.repo.private_dir())?;
+        refuse_index_lock(self.repo.private_dir())?;
+        self.prove_selected_tracked(&selected_paths)?;
+        let mut total = 0_u64;
+        let mut before = Vec::with_capacity(selected_paths.len());
+        for path in &selected_paths {
+            let snapshot = read_optional_file(self.repo.root_dir(), path, MAX_DISCLOSURE_BYTES)?;
+            let bytes_len = snapshot.as_ref().map_or(0, |file| file.bytes.len() as u64);
+            total = total
+                .checked_add(bytes_len)
+                .ok_or(GitEvidenceError::TooLarge)?;
+            if total > MAX_DISCLOSURE_BYTES {
+                return Err(GitEvidenceError::TooLarge);
+            }
+            before.push(match snapshot {
+                Some(file) => file.fingerprint,
+                None => absent_fingerprint(path)?,
+            });
+        }
 
-    let status = read_git(executor, repo, runtime, budget, cancel, GitRead::Status)?;
-    let status_paths = parse_porcelain_v2_z(&status.stdout.bytes)?;
-    let selected_bytes = selected_paths
-        .iter()
-        .map(|path| path.as_os_str().as_bytes().to_vec())
-        .collect::<Vec<_>>();
-    if status_paths.iter().any(|record| {
-        record.kind == StatusKind::Untracked
-            && selected_bytes.iter().any(|path| path == &record.path)
-    }) {
-        return Err(GitEvidenceError::SelectedUntracked);
-    }
-    if status_paths.iter().any(|record| {
-        matches!(record.kind, StatusKind::Conflict | StatusKind::RenameOrCopy)
-            && (selected_bytes.iter().any(|path| path == &record.path)
+        let status = self.read(GitRead::Status)?;
+        let status_paths = parse_porcelain_v2_z(&status.stdout.bytes)?;
+        let selected_bytes = selected_paths
+            .iter()
+            .map(|path| path.as_os_str().as_bytes().to_vec())
+            .collect::<Vec<_>>();
+        if status_paths.iter().any(|record| {
+            record.kind == StatusKind::Untracked
+                && selected_bytes.iter().any(|path| path == &record.path)
+        }) {
+            return Err(GitEvidenceError::SelectedUntracked);
+        }
+        if status_paths.iter().any(|record| {
+            matches!(
+                record.kind,
+                StatusKind::Conflict | StatusKind::RenameOrCopy | StatusKind::Unknown
+            ) && (selected_bytes.iter().any(|path| path == &record.path)
                 || record
                     .original_path
                     .as_ref()
                     .is_some_and(|original| selected_bytes.iter().any(|path| path == original)))
-    }) {
-        return Err(GitEvidenceError::Incomplete);
-    }
+        }) {
+            return Err(GitEvidenceError::Incomplete);
+        }
 
-    let commit_diff = read_git(
-        executor,
-        repo,
-        runtime,
-        budget,
-        cancel,
-        GitRead::Diff {
+        let commit_diff = self
+            .read(GitRead::Diff {
+                base,
+                head,
+                paths: selected_paths.clone(),
+            })?
+            .stdout
+            .bytes;
+        let index_diff = self
+            .read(GitRead::DiffIndex {
+                paths: selected_paths.clone(),
+            })?
+            .stdout
+            .bytes;
+        let worktree_diff = self
+            .read(GitRead::DiffWorktree {
+                paths: selected_paths.clone(),
+            })?
+            .stdout
+            .bytes;
+
+        let mut after = Vec::with_capacity(selected_paths.len());
+        for path in &selected_paths {
+            let snapshot = read_optional_file(self.repo.root_dir(), path, MAX_DISCLOSURE_BYTES)?;
+            after.push(match snapshot {
+                Some(file) => file.fingerprint,
+                None => absent_fingerprint(path)?,
+            });
+        }
+        if before != after {
+            return Err(GitEvidenceError::ConcurrentChange);
+        }
+        refuse_index_lock(self.repo.private_dir())?;
+        let index_after = read_index_fingerprint(self.repo.private_dir())?;
+        let head_after = self.head()?;
+        let status_after = self.read(GitRead::Status)?;
+        if index_before != index_after
+            || head != head_after
+            || status.stdout.bytes != status_after.stdout.bytes
+        {
+            return Err(GitEvidenceError::ConcurrentChange);
+        }
+        self.repo
+            .revalidate()
+            .map_err(|_| GitEvidenceError::RepositoryChanged)?;
+        let diff_digest = digest_diff_parts(&commit_diff, &index_diff, &worktree_diff);
+        Ok(GitEvidence {
             base,
             head,
-            paths: selected_paths.clone(),
-        },
-    )?
-    .stdout
-    .bytes;
-    let index_diff = read_git(
-        executor,
-        repo,
-        runtime,
-        budget,
-        cancel,
-        GitRead::DiffIndex {
-            paths: selected_paths.clone(),
-        },
-    )?
-    .stdout
-    .bytes;
-    let worktree_diff = read_git(
-        executor,
-        repo,
-        runtime,
-        budget,
-        cancel,
-        GitRead::DiffWorktree {
-            paths: selected_paths.clone(),
-        },
-    )?
-    .stdout
-    .bytes;
+            status_z: status.stdout.bytes,
+            selected_paths,
+            commit_diff,
+            index_diff,
+            worktree_diff,
+            before,
+            after,
+            diff_digest,
+        })
+    }
 
-    let mut after = Vec::with_capacity(selected_paths.len());
-    for path in &selected_paths {
-        let snapshot = read_optional_file(repo.root_dir(), path, MAX_DISCLOSURE_BYTES)?;
-        after.push(match snapshot {
-            Some(file) => file.fingerprint,
-            None => absent_fingerprint(path)?,
-        });
-    }
-    if before != after {
-        return Err(GitEvidenceError::ConcurrentChange);
-    }
-    refuse_index_lock(repo.private_dir())?;
-    let index_after = read_index_fingerprint(repo.private_dir())?;
-    let head_after = read_head(executor, repo, runtime, budget, cancel)?;
-    let status_after = read_git(executor, repo, runtime, budget, cancel, GitRead::Status)?;
-    if index_before != index_after
-        || head != head_after
-        || status.stdout.bytes != status_after.stdout.bytes
-    {
-        return Err(GitEvidenceError::ConcurrentChange);
-    }
-    repo.revalidate()
-        .map_err(|_| GitEvidenceError::RepositoryChanged)?;
-    let diff_digest = digest_diff_parts(&commit_diff, &index_diff, &worktree_diff);
-    Ok(GitEvidence {
-        base,
-        head,
-        status_z: status.stdout.bytes,
-        selected_paths,
-        commit_diff,
-        index_diff,
-        worktree_diff,
-        before,
-        after,
-        diff_digest,
-    })
-}
-
-fn prove_selected_tracked(
-    executor: &dyn Executor,
-    repo: &VerifiedRepo,
-    runtime: &UtilityRuntime,
-    budget: UtilityBudget,
-    cancel: &CancelToken,
-    paths: &[RepoPath],
-) -> Result<(), GitEvidenceError> {
-    let index = read_git(
-        executor,
-        repo,
-        runtime,
-        budget,
-        cancel,
-        GitRead::IndexEntries {
+    fn prove_selected_tracked(&self, paths: &[RepoPath]) -> Result<(), GitEvidenceError> {
+        let index = self.read(GitRead::IndexEntries {
             paths: paths.to_vec(),
-        },
-    )?;
-    if !index_has_stage_zero_regular(&index.stdout.bytes, paths)? {
-        return Err(GitEvidenceError::UntrackedOrUnsupportedPath);
+        })?;
+        if !index_has_stage_zero_regular(&index.stdout.bytes, paths)? {
+            return Err(GitEvidenceError::UntrackedOrUnsupportedPath);
+        }
+        Ok(())
     }
-    Ok(())
+
+    fn verify_expected_tip(&self, expected: GitOid) -> Result<GitOid, GitEvidenceError> {
+        self.repo
+            .revalidate()
+            .map_err(|_| GitEvidenceError::RepositoryChanged)?;
+        let actual = self.head()?;
+        self.repo
+            .revalidate()
+            .map_err(|_| GitEvidenceError::RepositoryChanged)?;
+        if actual != expected {
+            return Err(GitEvidenceError::ConcurrentChange);
+        }
+        Ok(actual)
+    }
+
+    pub(crate) fn head(&self) -> Result<GitOid, GitEvidenceError> {
+        let output = self.read(GitRead::RevParseHead)?;
+        let bytes = output
+            .stdout
+            .bytes
+            .strip_suffix(b"\n")
+            .ok_or(GitEvidenceError::Incomplete)?;
+        if bytes.contains(&b'\n') || bytes.contains(&b'\r') {
+            return Err(GitEvidenceError::Incomplete);
+        }
+        GitOid::parse(std::str::from_utf8(bytes).map_err(|_| GitEvidenceError::Incomplete)?)
+            .map_err(|_| GitEvidenceError::Incomplete)
+    }
+
+    pub(crate) fn read(&self, read: GitRead) -> Result<ExecOutcome, GitEvidenceError> {
+        let output = run_utility(
+            self.executor,
+            UtilityRead::Git(read),
+            self.repo,
+            self.runtime,
+            self.budget,
+            self.cancel,
+        )?;
+        if output.termination != Termination::Exit(0) {
+            return Err(GitEvidenceError::GitFailed);
+        }
+        if output.stdout.bytes.len() as u64 > MAX_GIT_RECORD_BYTES {
+            return Err(GitEvidenceError::TooLarge);
+        }
+        Ok(output)
+    }
 }
 
 fn index_has_stage_zero_regular(raw: &[u8], paths: &[RepoPath]) -> Result<bool, GitEvidenceError> {
@@ -355,107 +355,6 @@ fn index_has_stage_zero_regular(raw: &[u8], paths: &[RepoPath]) -> Result<bool, 
         *slot = true;
     }
     Ok(found.into_iter().all(|value| value))
-}
-
-/// Verify a protected tip at the repository boundary. The result is the exact
-/// SHA read from Git; this grants no authority to merge or release it.
-fn verify_tip(
-    executor: &dyn Executor,
-    repo: &VerifiedRepo,
-    runtime: &UtilityRuntime,
-    budget: UtilityBudget,
-    cancel: &CancelToken,
-    expected: GitOid,
-) -> Result<GitOid, GitEvidenceError> {
-    repo.revalidate()
-        .map_err(|_| GitEvidenceError::RepositoryChanged)?;
-    let actual = read_head(executor, repo, runtime, budget, cancel)?;
-    repo.revalidate()
-        .map_err(|_| GitEvidenceError::RepositoryChanged)?;
-    if actual != expected {
-        return Err(GitEvidenceError::ConcurrentChange);
-    }
-    Ok(actual)
-}
-
-pub(crate) fn read_head(
-    executor: &dyn Executor,
-    repo: &VerifiedRepo,
-    runtime: &UtilityRuntime,
-    budget: UtilityBudget,
-    cancel: &CancelToken,
-) -> Result<GitOid, GitEvidenceError> {
-    let output = read_git(
-        executor,
-        repo,
-        runtime,
-        budget,
-        cancel,
-        GitRead::RevParseHead,
-    )?;
-    let bytes = output
-        .stdout
-        .bytes
-        .strip_suffix(b"\n")
-        .ok_or(GitEvidenceError::Incomplete)?;
-    if bytes.contains(&b'\n') || bytes.contains(&b'\r') {
-        return Err(GitEvidenceError::Incomplete);
-    }
-    let text = std::str::from_utf8(bytes).map_err(|_| GitEvidenceError::Incomplete)?;
-    GitOid::parse(text).map_err(|_| GitEvidenceError::Incomplete)
-}
-
-pub(crate) fn read_git(
-    executor: &dyn Executor,
-    repo: &VerifiedRepo,
-    runtime: &UtilityRuntime,
-    budget: UtilityBudget,
-    cancel: &CancelToken,
-    read: GitRead,
-) -> Result<ExecOutcome, GitEvidenceError> {
-    let output = run_utility(
-        executor,
-        UtilityRead::Git(read),
-        repo,
-        runtime,
-        budget,
-        cancel,
-    )?;
-    ensure_complete(&output)?;
-    if output.termination != Termination::Exit(0) {
-        return Err(GitEvidenceError::GitFailed);
-    }
-    if output.stdout.bytes.len() as u64 > MAX_GIT_RECORD_BYTES {
-        return Err(GitEvidenceError::TooLarge);
-    }
-    Ok(output)
-}
-
-fn ensure_complete(output: &ExecOutcome) -> Result<(), GitEvidenceError> {
-    let out = &output.stdout;
-    let err = &output.stderr;
-    if output.timed_out
-        || output.drain_truncated
-        || output.overflow_stopped
-        || output.cancelled
-        || out.truncated
-        || err.truncated
-        || out.sink_failed
-        || err.sink_failed
-        || out.sink_lost_bytes != 0
-        || err.sink_lost_bytes != 0
-        || out.oversized_frames != 0
-        || err.oversized_frames != 0
-        || out.decoder_lost_frames != 0
-        || err.decoder_lost_frames != 0
-        || out.read_failed
-        || err.read_failed
-        || out.filter_failed
-        || err.filter_failed
-    {
-        return Err(GitEvidenceError::Incomplete);
-    }
-    Ok(())
 }
 
 pub(crate) fn canonical_paths(paths: &[RepoPath]) -> Result<Vec<RepoPath>, GitEvidenceError> {
@@ -529,41 +428,24 @@ pub(crate) fn read_tracked_file(
     limit: u64,
 ) -> Result<FileSnapshot, GitEvidenceError> {
     let (parent, leaf) = open_parent(root, path)?;
-    let entry = match parent.metadata_at(&leaf, false) {
-        Ok(metadata) => metadata,
-        Err(error) if error.is_not_found() => {
-            return Err(GitEvidenceError::UntrackedOrUnsupportedPath);
-        }
-        Err(error) => return Err(error.into()),
-    };
-    if entry.kind != FileKind::Regular || entry.links != 1 || entry.size > limit {
-        return Err(if entry.size > limit {
-            GitEvidenceError::TooLarge
-        } else {
-            GitEvidenceError::UntrackedOrUnsupportedPath
-        });
-    }
-    let mut file = parent.open_read(&leaf)?;
-    let before = file.metadata()?;
-    if before.kind != FileKind::Regular || before.links != 1 || !entry.same_identity(&before) {
-        return Err(GitEvidenceError::ConcurrentChange);
-    }
-    file.seek(SeekFrom::Start(0))
-        .map_err(|_| GitEvidenceError::Incomplete)?;
-    let mut bytes = Vec::new();
-    (&mut *file)
-        .take(limit.saturating_add(1))
-        .read_to_end(&mut bytes)
-        .map_err(|_| GitEvidenceError::Incomplete)?;
-    if bytes.len() as u64 > limit {
-        return Err(GitEvidenceError::TooLarge);
-    }
-    let after = file.metadata()?;
-    if !same_fingerprint(&before, &after) || after.size != bytes.len() as u64 {
-        return Err(GitEvidenceError::ConcurrentChange);
-    }
+    let (bytes, after) =
+        crate::stable_read::read_regular(&*parent, &leaf, limit).map_err(map_stable_read_error)?;
     let fingerprint = fingerprint(path, &bytes, after)?;
     Ok(FileSnapshot { bytes, fingerprint })
+}
+
+fn map_stable_read_error(error: crate::stable_read::ReadError) -> GitEvidenceError {
+    use crate::stable_read::ReadError;
+    match error {
+        ReadError::Unsupported => GitEvidenceError::UntrackedOrUnsupportedPath,
+        ReadError::TooLarge => GitEvidenceError::TooLarge,
+        ReadError::Changed => GitEvidenceError::ConcurrentChange,
+        ReadError::Filesystem(error) if error.is_not_found() => {
+            GitEvidenceError::UntrackedOrUnsupportedPath
+        }
+        ReadError::Filesystem(error) => GitEvidenceError::Filesystem(error),
+        ReadError::Io(_) => GitEvidenceError::Incomplete,
+    }
 }
 
 pub(crate) fn read_optional_file(
@@ -583,7 +465,7 @@ pub(crate) fn read_optional_file(
     }
 }
 
-fn open_parent<'a>(
+pub(crate) fn open_parent<'a>(
     root: &'a dyn SafeDir,
     path: &RepoPath,
 ) -> Result<(HeldDir<'a>, OsString), GitEvidenceError> {
@@ -606,7 +488,7 @@ fn open_parent<'a>(
     Ok((parent, leaf))
 }
 
-enum HeldDir<'a> {
+pub(crate) enum HeldDir<'a> {
     Borrowed(&'a dyn SafeDir),
     Owned(Box<dyn SafeDir>),
 }
@@ -631,23 +513,17 @@ fn split_tab(bytes: &[u8]) -> Option<(&[u8], &[u8])> {
 pub(crate) fn read_index_fingerprint(
     directory: &dyn SafeDir,
 ) -> Result<IndexFingerprint, GitEvidenceError> {
-    let mut file = directory.open_read(OsStr::new("index"))?;
-    let before = file.metadata()?;
-    if before.kind != FileKind::Regular || before.links != 1 || before.size > MAX_GIT_RECORD_BYTES {
-        return Err(GitEvidenceError::Incomplete);
-    }
-    let mut bytes = Vec::new();
-    (&mut *file)
-        .take(MAX_GIT_RECORD_BYTES.saturating_add(1))
-        .read_to_end(&mut bytes)
-        .map_err(|_| GitEvidenceError::Incomplete)?;
-    let after = file.metadata()?;
-    if bytes.len() as u64 > MAX_GIT_RECORD_BYTES
-        || after.size != bytes.len() as u64
-        || !same_fingerprint(&before, &after)
-    {
-        return Err(GitEvidenceError::ConcurrentChange);
-    }
+    let (bytes, after) =
+        crate::stable_read::read_regular(directory, OsStr::new("index"), MAX_GIT_RECORD_BYTES)
+            .map_err(|error| match error {
+                crate::stable_read::ReadError::TooLarge => GitEvidenceError::TooLarge,
+                crate::stable_read::ReadError::Changed => GitEvidenceError::ConcurrentChange,
+                crate::stable_read::ReadError::Filesystem(error) => {
+                    GitEvidenceError::Filesystem(error)
+                }
+                crate::stable_read::ReadError::Unsupported
+                | crate::stable_read::ReadError::Io(_) => GitEvidenceError::Incomplete,
+            })?;
     Ok(IndexFingerprint {
         device: after.device,
         inode: after.inode,
@@ -664,17 +540,6 @@ pub(crate) fn refuse_index_lock(directory: &dyn SafeDir) -> Result<(), GitEviden
         Err(error) if error.is_not_found() => Ok(()),
         Err(error) => Err(error.into()),
     }
-}
-
-fn same_fingerprint(left: &Metadata, right: &Metadata) -> bool {
-    left.kind == right.kind
-        && left.device == right.device
-        && left.inode == right.inode
-        && left.links == right.links
-        && left.size == right.size
-        && left.modified_ns == right.modified_ns
-        && left.mode == right.mode
-        && left.uid == right.uid
 }
 
 fn digest_diff_parts(commit: &[u8], index: &[u8], worktree: &[u8]) -> FileDigest {

@@ -936,9 +936,14 @@ impl Seek for FileHandle {
     }
 }
 
+/// Supply host-local identity entropy from the operating system.
+pub fn entropy_128() -> Result<[u8; 16]> {
+    os::entropy::<16>().map_err(error("getentropy", Path::new("<identity entropy>")))
+}
+
 /// OS entropy, no global counter or clock; callers use exclusive creation too.
 pub fn temporary_name() -> Result<OsString> {
-    let bytes = os::entropy().map_err(error("getentropy", Path::new("<temporary name>")))?;
+    let bytes = os::entropy::<12>().map_err(error("getentropy", Path::new("<temporary name>")))?;
     let mut name = String::from(".provenant-staging.");
     for byte in bytes {
         name.push_str(&format!("{byte:02x}"));

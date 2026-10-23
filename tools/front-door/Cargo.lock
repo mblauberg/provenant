@@ -418,15 +418,11 @@ dependencies = [
 name = "provenant"
 version = "0.1.0"
 dependencies = [
- "clap",
  "provenant-config",
- "provenant-confinement",
  "provenant-core",
  "provenant-records",
  "provenant-supervisor",
- "serde",
  "serde_json",
- "sha2",
  "tempfile",
  "toml_edit",
 ]
@@ -453,6 +449,7 @@ dependencies = [
 name = "provenant-confinement"
 version = "0.1.0"
 dependencies = [
+ "provenant-config",
  "provenant-core",
  "provenant-records",
  "provenant-supervisor",

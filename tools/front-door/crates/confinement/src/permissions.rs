@@ -1,17 +1,15 @@
 //! Typed permission plans and the fail-closed macOS SBPL backend.
 //!
-//! A provider profile is usable only after its checked fixture records the
-//! relevant allow and deny observations. The current tree has no sandbox
-//! operation recordings, so callers cannot construct a supported real-provider
-//! profile yet. Linux deliberately exposes an unavailable backend.
+//! Provider-owned profile data and observations are checked against every
+//! requested permission. Linux deliberately exposes an unavailable backend.
 use std::collections::BTreeMap;
 #[cfg(target_os = "macos")]
 use std::collections::BTreeSet;
 use std::ffi::OsStr;
 #[cfg(target_os = "macos")]
 use std::ffi::OsString;
+#[cfg(target_os = "macos")]
 use std::io::Read;
-use std::net::IpAddr;
 use std::path::{Component, Path, PathBuf};
 #[cfg(target_os = "macos")]
 use std::time::Duration;
@@ -22,16 +20,19 @@ use provenant_supervisor::exec::Executor;
 use provenant_supervisor::exec::{ExecOptions, ExecOutcome, StreamPolicy, Termination};
 #[cfg(target_os = "macos")]
 use provenant_supervisor::fs::Metadata;
-use provenant_supervisor::fs::{FileKind, SafeDir, SafeFs};
+#[cfg(target_os = "macos")]
+use provenant_supervisor::fs::SafeDir;
+use provenant_supervisor::fs::{FileKind, SafeFs};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
-use crate::repo::VerifiedWorktree;
+use crate::repo::{GitRefName, VerifiedWorktree};
 
-const FIXTURE_LIMIT: u64 = 1024 * 1024;
 const MAX_PATH_BYTES: usize = 4096;
+#[cfg(any(target_os = "macos", test))]
 const MAX_PATH_GRANTS: usize = 128;
+#[cfg(any(target_os = "macos", test))]
 const MAX_NETWORK_GRANTS: usize = 128;
 #[cfg(target_os = "macos")]
 const MAX_GIT_HEAD_BYTES: u64 = 1024;
@@ -50,13 +51,6 @@ const CLEANUP_TIMEOUT: Duration = Duration::from_millis(250);
 #[serde(rename_all = "snake_case")]
 pub enum BackendKind {
     MacOsSbpl,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum HostPlatform {
-    MacOs,
-    Linux,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -89,12 +83,8 @@ pub enum PermissionError {
     NonUtf8Path,
     #[error("profile or fixture record is malformed")]
     InvalidFixture,
-    #[error("permission fixture is missing required allow/deny observations")]
+    #[error("provider profile lacks required permission observations")]
     FixtureInsufficient,
-    #[error("permission fixture does not match the requested provider profile")]
-    FixtureMismatch,
-    #[error("no recorded permission fixture is available for this profile")]
-    MissingFixture,
     #[error("requested permission is not present in the fixture-backed profile")]
     PermissionNotRecorded,
     #[error("provider process execution policy is missing")]
@@ -152,7 +142,7 @@ impl PathGrant {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct NetworkEndpoint {
-    pub address: IpAddr,
+    pub address: String,
     pub port: u64,
 }
 
@@ -192,7 +182,6 @@ pub struct AuthenticationProfile {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProviderProfileSpec {
-    pub profile_id: String,
     /// Exact provider/runtime executables observed in this profile's recording.
     #[serde(default)]
     pub process_executables: Vec<PathGrant>,
@@ -215,22 +204,6 @@ pub struct ProviderProfileSpec {
     pub native_controls: Vec<String>,
 }
 
-impl ProviderProfileSpec {
-    /// Stable digest of the complete serde wire form used to bind evidence to
-    /// every path, endpoint, capability, and native control in this spec.
-    pub fn canonical_digest(&self) -> Result<String, PermissionError> {
-        validate_profile_spec(self)?;
-        let bytes = serde_json::to_vec(self).map_err(|_| PermissionError::InvalidFixture)?;
-        let digest = Sha256::digest(bytes);
-        let mut text = String::with_capacity(64);
-        for byte in digest {
-            use std::fmt::Write as _;
-            write!(&mut text, "{byte:02x}").map_err(|_| PermissionError::InvalidFixture)?;
-        }
-        Ok(text)
-    }
-}
-
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "authority", rename_all = "snake_case")]
 pub enum AccessMode {
@@ -238,25 +211,104 @@ pub enum AccessMode {
     WorktreeWrite(Box<WorktreeWriteAuthority>),
 }
 
-/// Serialized requested scope only. It becomes write authority only when
-/// matched to the opaque, revalidated `VerifiedWorktree` in `Anchors`.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct GitWriteAuthority {
-    pub private_git_dir: PathGrant,
-    pub common_git_dir: PathGrant,
-    pub index: Vec<PathGrant>,
-    pub head: Vec<PathGrant>,
-    pub objects: Vec<PathGrant>,
-    pub selected_ref: Vec<PathGrant>,
-}
-
+/// A digest binds the plan to Git grants derived at the verified worktree edge.
+/// Neither the selected ref nor concrete Git paths enter the record.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WorktreeWriteAuthority {
-    pub worktree: PathGrant,
-    pub git: GitWriteAuthority,
-    pub selected_branch: String,
+    pub git_grants_digest: [u8; 32],
+}
+
+impl WorktreeWriteAuthority {
+    pub fn for_worktree(
+        worktree: &VerifiedWorktree,
+        selected_ref: &GitRefName,
+    ) -> Result<Self, PermissionError> {
+        worktree.repo().revalidate()?;
+        let grants = WorktreeWriteGrants::derive(worktree, selected_ref);
+        grants.validate()?;
+        Ok(Self {
+            git_grants_digest: grants.digest(),
+        })
+    }
+}
+
+struct WorktreeWriteGrants {
+    worktree: PathGrant,
+    private_git_dir: PathGrant,
+    common_git_dir: PathGrant,
+    index: [PathGrant; 2],
+    head: [PathGrant; 4],
+    objects: PathGrant,
+    selected_ref: [PathGrant; 4],
+}
+
+impl WorktreeWriteGrants {
+    fn derive(worktree: &VerifiedWorktree, selected_ref: &GitRefName) -> Self {
+        let repo = worktree.repo();
+        let private = repo.private_git_dir();
+        let common = repo.common_git_dir();
+        let exact = |path: PathBuf| PathGrant {
+            path,
+            scope: PathScope::Exact,
+        };
+        let subtree = |path: PathBuf| PathGrant {
+            path,
+            scope: PathScope::Subtree,
+        };
+        let branch = selected_ref.short_name();
+        Self {
+            worktree: subtree(worktree.path().to_owned()),
+            private_git_dir: subtree(private.to_owned()),
+            common_git_dir: subtree(common.to_owned()),
+            index: ["index", "index.lock"].map(|name| exact(private.join(name))),
+            head: ["HEAD", "HEAD.lock", "logs/HEAD", "logs/HEAD.lock"]
+                .map(|name| exact(private.join(name))),
+            objects: subtree(common.join("objects")),
+            selected_ref: [
+                format!("refs/heads/{branch}"),
+                format!("refs/heads/{branch}.lock"),
+                format!("logs/refs/heads/{branch}"),
+                format!("logs/refs/heads/{branch}.lock"),
+            ]
+            .map(|relative| exact(common.join(relative))),
+        }
+    }
+
+    fn digest(&self) -> [u8; 32] {
+        let mut digest = Sha256::new();
+        digest.update(b"provenant-worktree-git-grants-v1\0");
+        for grant in std::iter::once(&self.worktree)
+            .chain([&self.private_git_dir, &self.common_git_dir])
+            .chain(self.index.iter())
+            .chain(self.head.iter())
+            .chain(std::iter::once(&self.objects))
+            .chain(self.selected_ref.iter())
+        {
+            let bytes = grant.path.as_os_str().as_encoded_bytes();
+            digest.update((bytes.len() as u64).to_be_bytes());
+            digest.update(bytes);
+            digest.update([match grant.scope {
+                PathScope::Exact => 0,
+                PathScope::Subtree => 1,
+            }]);
+        }
+        digest.finalize().into()
+    }
+
+    fn validate(&self) -> Result<(), PermissionError> {
+        self.worktree.validate()?;
+        for grant in std::iter::once(&self.private_git_dir)
+            .chain([&self.common_git_dir])
+            .chain(self.index.iter())
+            .chain(self.head.iter())
+            .chain(std::iter::once(&self.objects))
+            .chain(self.selected_ref.iter())
+        {
+            validate_noncredential_grant(grant)?;
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -316,125 +368,11 @@ pub enum FixtureOperation {
     PostgresIpc,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct FixtureObservation {
-    pub operation: FixtureOperation,
-    pub outcome: FixtureOutcome,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct PermissionFixture {
-    pub schema_version: u64,
-    pub profile_id: String,
-    pub spec_digest: String,
-    pub platform: HostPlatform,
-    pub backend: BackendKind,
-    pub observations: Vec<FixtureObservation>,
-}
-
-/// An immutable profile carries proof that its fixture bytes came from a
-/// bounded SafeDir read. Its fields are private to prevent unverified profiles
-/// from being assembled by ordinary callers.
+/// Typed provider policy consumed by the permission compiler. Providers own
+/// fixture loading and construct this value after their own checks.
 pub struct ProviderProfile {
-    spec: ProviderProfileSpec,
-    fixture_digest: [u8; 32],
-    #[cfg(target_os = "macos")]
-    observations: BTreeMap<FixtureOperation, FixtureOutcome>,
-}
-
-impl ProviderProfile {
-    pub fn load(
-        safe_fs: &dyn SafeFs,
-        fixture_root: &Path,
-        fixture_path: &Path,
-        spec: ProviderProfileSpec,
-    ) -> Result<Self, PermissionError> {
-        validate_profile_spec(&spec)?;
-        let root = safe_fs
-            .open_anchor(fixture_root)
-            .map_err(PermissionError::Filesystem)?;
-        let bytes = read_relative(root.as_ref(), fixture_path)?;
-        let fixture: PermissionFixture =
-            serde_json::from_slice(&bytes).map_err(|_| PermissionError::InvalidFixture)?;
-        let expected_spec_digest = spec.canonical_digest()?;
-        if fixture.schema_version != 1
-            || fixture.profile_id != spec.profile_id
-            || fixture.spec_digest != expected_spec_digest
-            || fixture.platform != HostPlatform::MacOs
-            || fixture.backend != BackendKind::MacOsSbpl
-        {
-            return Err(PermissionError::FixtureMismatch);
-        }
-        let mut observations = BTreeMap::new();
-        for observation in fixture.observations {
-            if observations
-                .insert(observation.operation, observation.outcome)
-                .is_some()
-            {
-                return Err(PermissionError::InvalidFixture);
-            }
-        }
-        require_observation(
-            &observations,
-            FixtureOperation::UndeclaredRead,
-            FixtureOutcome::Denied,
-        )?;
-        require_observation(
-            &observations,
-            FixtureOperation::UndeclaredWrite,
-            FixtureOutcome::Denied,
-        )?;
-        require_observation(
-            &observations,
-            FixtureOperation::SecretRead,
-            FixtureOutcome::Denied,
-        )?;
-        require_observation(
-            &observations,
-            FixtureOperation::ProtectedWrite,
-            FixtureOutcome::Denied,
-        )?;
-        require_observation(
-            &observations,
-            FixtureOperation::OtherNetwork,
-            FixtureOutcome::Denied,
-        )?;
-        require_observation(
-            &observations,
-            FixtureOperation::DeclaredProcessExec,
-            FixtureOutcome::Allowed,
-        )?;
-        require_observation(
-            &observations,
-            FixtureOperation::UndeclaredProcessExec,
-            FixtureOutcome::Denied,
-        )?;
-        require_observation(
-            &observations,
-            FixtureOperation::ProcessFork,
-            if spec.allow_process_fork {
-                FixtureOutcome::Allowed
-            } else {
-                FixtureOutcome::Denied
-            },
-        )?;
-        Ok(Self {
-            spec,
-            fixture_digest: Sha256::digest(&bytes).into(),
-            #[cfg(target_os = "macos")]
-            observations,
-        })
-    }
-
-    pub fn profile_id(&self) -> &str {
-        &self.spec.profile_id
-    }
-
-    pub fn fixture_digest(&self) -> [u8; 32] {
-        self.fixture_digest
-    }
+    pub spec: ProviderProfileSpec,
+    pub observations: BTreeMap<FixtureOperation, FixtureOutcome>,
 }
 
 pub struct AnchoredDirectory {
@@ -508,9 +446,8 @@ impl AnchoredDirectory {
 pub struct Anchors<'a> {
     pub directories: &'a [AnchoredDirectory],
     pub safe_fs: &'a dyn SafeFs,
-    /// Opaque registration proof for WorktreeWrite; path records alone never
-    /// authorize Git mutations.
-    pub worktree: Option<&'a VerifiedWorktree>,
+    /// Linked tree and selected branch derive Git paths at the authority edge.
+    pub worktree: Option<(&'a VerifiedWorktree, &'a GitRefName)>,
 }
 
 #[cfg(target_os = "macos")]
@@ -522,8 +459,7 @@ impl Anchors<'_> {
         Ok(())
     }
 
-    fn verify_grant(&self, grant: &PathGrant) -> Result<(), PermissionError> {
-        grant.validate()?;
+    fn verify_grant_held(&self, grant: &PathGrant) -> Result<(), PermissionError> {
         match grant.scope {
             PathScope::Subtree => {
                 let anchor = self
@@ -543,7 +479,7 @@ impl Anchors<'_> {
                     .ok_or(PermissionError::AnchorMismatch)?;
                 anchor.verify(self.safe_fs)?;
                 match anchor.directory.metadata_at(name, false) {
-                    Ok(metadata) if metadata.kind == FileKind::Regular => {}
+                    Ok(metadata) if metadata.kind == FileKind::Regular && metadata.links == 1 => {}
                     Ok(_) => return Err(PermissionError::AnchorMismatch),
                     Err(error) if error.is_not_found() => {}
                     Err(error) => return Err(PermissionError::Filesystem(error)),
@@ -557,7 +493,6 @@ impl Anchors<'_> {
         if grant.scope != PathScope::Exact {
             return Err(PermissionError::InvalidPath);
         }
-        self.verify_grant(grant)?;
         let parent = grant.path.parent().ok_or(PermissionError::InvalidPath)?;
         let name = grant.path.file_name().ok_or(PermissionError::InvalidPath)?;
         let anchor = self
@@ -565,6 +500,7 @@ impl Anchors<'_> {
             .iter()
             .find(|anchor| anchor.path == parent)
             .ok_or(PermissionError::AnchorMismatch)?;
+        anchor.verify(self.safe_fs)?;
         match anchor.directory.metadata_at(name, false) {
             Ok(metadata) if metadata.kind == FileKind::Regular => Ok(()),
             Ok(_) => Err(PermissionError::AnchorMismatch),
@@ -773,18 +709,22 @@ fn compile_sbpl(
     }
     validate_profile_spec(&profile.spec)?;
     verify_requested_evidence(plan, profile)?;
-    if profile.spec.process_executables.is_empty() {
-        return Err(PermissionError::ProcessPolicyMissing);
+    for grant in plan.read_roots.iter().chain(&plan.protected_roots) {
+        validate_noncredential_grant(grant)?;
     }
-
+    let worktree_grants = match &plan.mode {
+        AccessMode::ReadOnly => None,
+        AccessMode::WorktreeWrite(authority) => {
+            Some(verify_worktree_authority(authority, anchors)?)
+        }
+    };
     let mut read_grants = plan.read_roots.clone();
-    if let AccessMode::WorktreeWrite(authority) = &plan.mode {
-        read_grants.push(authority.worktree.clone());
+    if let Some(grants) = &worktree_grants {
+        read_grants.push(grants.worktree.clone());
     }
     read_grants.extend(plan.protected_roots.iter().cloned());
     read_grants.extend(profile.spec.runtime_reads.iter().cloned());
     read_grants.extend(profile.spec.process_executables.iter().cloned());
-    let mut selected_authentication_roots = Vec::new();
     if let Some(mechanism) = &plan.selected_authentication {
         let selected = profile
             .spec
@@ -793,8 +733,6 @@ fn compile_sbpl(
             .find(|item| &item.mechanism == mechanism)
             .ok_or(PermissionError::PermissionNotRecorded)?;
         for grant in &selected.roots {
-            grant.validate()?;
-            selected_authentication_roots.push(grant.clone());
             read_grants.push(grant.clone());
         }
     }
@@ -816,24 +754,16 @@ fn compile_sbpl(
         return Err(PermissionError::PermissionNotRecorded);
     }
     for grant in &read_grants {
-        if selected_authentication_roots.contains(grant) {
-            grant.validate()?;
-        } else {
-            validate_noncredential_grant(grant)?;
-        }
-        anchors.verify_grant(grant)?;
+        anchors.verify_grant_held(grant)?;
     }
     for executable in &profile.spec.process_executables {
         anchors.verify_executable(executable)?;
     }
-    plan.scratch.validate()?;
-    if is_credential_root(&plan.scratch.path) {
-        return Err(PermissionError::CredentialRoot);
-    }
     if plan.scratch.scope != PathScope::Subtree {
         return Err(PermissionError::InvalidPath);
     }
-    anchors.verify_grant(&plan.scratch)?;
+    validate_noncredential_grant(&plan.scratch)?;
+    anchors.verify_grant_held(&plan.scratch)?;
     let mut scratch_exclusions: Vec<&PathGrant> = read_grants
         .iter()
         .chain(&plan.protected_roots)
@@ -861,14 +791,14 @@ fn compile_sbpl(
             .filter(|grant| plan.capabilities.contains(&grant.capability))
             .flat_map(|grant| &grant.unix_socket_roots),
     );
-    if let AccessMode::WorktreeWrite(authority) = &plan.mode {
+    if let Some(grants) = &worktree_grants {
         scratch_exclusions.extend([
-            &authority.worktree,
-            &authority.git.private_git_dir,
-            &authority.git.common_git_dir,
+            &grants.worktree,
+            &grants.private_git_dir,
+            &grants.common_git_dir,
         ]);
     }
-    if let Some(verified) = anchors.worktree {
+    if let Some((verified, _)) = anchors.worktree {
         for path in [
             verified.path(),
             verified.repo().private_git_dir(),
@@ -880,29 +810,20 @@ fn compile_sbpl(
         }
     }
     verify_private_scratch(&plan.scratch, &scratch_exclusions, anchors)?;
-    for endpoint in &profile.spec.provider_api {
-        validate_endpoint(endpoint)?;
-    }
-    for grant in plan.network.iter().chain(&profile.spec.network) {
-        validate_network_grant(grant)?;
-    }
     for grant in &plan.network {
-        if !profile.spec.network.contains(grant) {
-            return Err(PermissionError::PermissionNotRecorded);
-        }
         verify_network_anchor(grant, anchors)?;
     }
     for capability in &profile.spec.capabilities {
         if selected_capabilities.contains(&capability.capability) {
             for root in &capability.unix_socket_roots {
-                anchors.verify_grant(root)?;
+                anchors.verify_grant_held(root)?;
             }
         }
     }
 
     for secret in &plan.secret_roots {
         secret.validate()?;
-        anchors.verify_grant(secret)?;
+        anchors.verify_grant_held(secret)?;
     }
     for read in &read_grants {
         if plan.secret_roots.iter().any(|secret| read.overlaps(secret)) {
@@ -917,22 +838,20 @@ fn compile_sbpl(
     {
         return Err(PermissionError::ProtectedOverlap);
     }
-    if let AccessMode::WorktreeWrite(authority) = &plan.mode {
-        verify_worktree_authority(authority, anchors)?;
-        if plan
-            .protected_roots
+    let worktree_protected_overlap = worktree_grants.as_ref().is_some_and(|grants| {
+        plan.protected_roots
             .iter()
             .chain(&plan.secret_roots)
             .any(|protected| {
-                authority.worktree.path.starts_with(&protected.path)
-                    && authority.worktree.path != protected.path
+                grants.worktree.path.starts_with(&protected.path)
+                    && grants.worktree.path != protected.path
             })
-        {
-            return Err(PermissionError::ProtectedOverlap);
-        }
+    });
+    if worktree_protected_overlap {
+        return Err(PermissionError::ProtectedOverlap);
     }
 
-    let mut profile_bytes = render_profile(plan, profile, &read_grants)?;
+    let mut profile_bytes = render_profile(plan, profile, &read_grants, worktree_grants.as_ref())?;
     if profile_bytes.len() > PROFILE_LIMIT {
         return Err(PermissionError::ProfileTooLarge);
     }
@@ -987,6 +906,7 @@ fn render_profile(
     plan: &PlanPermissions,
     profile: &ProviderProfile,
     reads: &[PathGrant],
+    worktree_grants: Option<&WorktreeWriteGrants>,
 ) -> Result<Vec<u8>, PermissionError> {
     let mut source = String::from("(version 1)\n(deny default)\n");
     // These are operating-system runtime roots; provider state and user paths
@@ -1037,9 +957,11 @@ fn render_profile(
         PathScope::Subtree,
     )?;
 
-    if let AccessMode::WorktreeWrite(authority) = &plan.mode {
-        validate_git_authority(authority)?;
-        push_worktree_rule(&mut source, authority)?;
+    if matches!(plan.mode, AccessMode::WorktreeWrite(_)) {
+        push_worktree_rule(
+            &mut source,
+            worktree_grants.ok_or(PermissionError::GitWriteAuthorityMissing)?,
+        )?;
     }
 
     for endpoint in &profile.spec.provider_api {
@@ -1099,8 +1021,8 @@ fn render_profile(
     for grant in &plan.protected_roots {
         push_rule(&mut source, "deny", "file-write*", &grant.path, grant.scope)?;
     }
-    if let AccessMode::WorktreeWrite(authority) = &plan.mode {
-        let git_marker = authority.worktree.path.join(".git");
+    if let Some(grants) = worktree_grants {
+        let git_marker = grants.worktree.path.join(".git");
         push_rule(
             &mut source,
             "deny",
@@ -1118,181 +1040,57 @@ fn render_profile(
 #[cfg(target_os = "macos")]
 fn push_worktree_rule(
     source: &mut String,
-    authority: &WorktreeWriteAuthority,
+    grants: &WorktreeWriteGrants,
 ) -> Result<(), PermissionError> {
-    let worktree = sbpl_path(&authority.worktree.path)?;
-    let git_dir = sbpl_path(&authority.git.private_git_dir.path)?;
-    let common_dir = sbpl_path(&authority.git.common_git_dir.path)?;
+    let worktree = sbpl_path(&grants.worktree.path)?;
+    let git_dir = sbpl_path(&grants.private_git_dir.path)?;
+    let common_dir = sbpl_path(&grants.common_git_dir.path)?;
     source.push_str(&format!(
         "(allow file-write* (require-all (subpath \"{worktree}\") (require-not (subpath \"{git_dir}\")) (require-not (subpath \"{common_dir}\"))))\n"
     ));
-    for grant in authority
-        .git
+    for grant in grants
         .index
         .iter()
-        .chain(&authority.git.head)
-        .chain(&authority.git.selected_ref)
+        .chain(&grants.head)
+        .chain(&grants.selected_ref)
     {
         push_rule(source, "allow", "file-write*", &grant.path, grant.scope)?;
     }
-    for grant in &authority.git.objects {
-        let path = sbpl_path(&grant.path)?;
-        source.push_str(&format!(
-            "(allow file-write* (require-all (subpath \"{path}\") (require-not (subpath \"{path}/info\"))))\n"
-        ));
-    }
+    let path = sbpl_path(&grants.objects.path)?;
+    source.push_str(&format!(
+        "(allow file-write* (require-all (subpath \"{path}\") (require-not (subpath \"{path}/info\"))))\n"
+    ));
     Ok(())
-}
-
-#[cfg(target_os = "macos")]
-fn validate_git_authority(authority: &WorktreeWriteAuthority) -> Result<(), PermissionError> {
-    authority.worktree.validate()?;
-    validate_noncredential_grant(&authority.git.private_git_dir)?;
-    validate_noncredential_grant(&authority.git.common_git_dir)?;
-    if authority.worktree.scope != PathScope::Subtree
-        || authority.git.private_git_dir.scope != PathScope::Subtree
-        || authority.git.common_git_dir.scope != PathScope::Subtree
-        || path_overlaps(
-            &authority.worktree.path,
-            &authority.git.private_git_dir.path,
-        ) && authority.git.private_git_dir.path != authority.worktree.path.join(".git")
-        || (authority.git.private_git_dir.path == authority.git.common_git_dir.path
-            && authority.git.private_git_dir.path != authority.worktree.path.join(".git"))
-        || (authority.git.private_git_dir.path != authority.git.common_git_dir.path
-            && !is_registered_worktree_git_dir(
-                &authority.git.common_git_dir.path,
-                &authority.git.private_git_dir.path,
-            ))
-        || authority.git.index.is_empty()
-        || authority.git.head.is_empty()
-        || authority.git.objects.len() != 1
-        || authority.git.selected_ref.len() != 4
-        || !valid_branch(&authority.selected_branch)
-    {
-        return Err(PermissionError::GitWriteAuthorityMissing);
-    }
-    for grant in authority.git.index.iter().chain(&authority.git.head) {
-        grant.validate()?;
-        if !grant.path.starts_with(&authority.git.private_git_dir.path) {
-            return Err(PermissionError::GitWriteAuthorityMissing);
-        }
-    }
-    for grant in authority
-        .git
-        .objects
-        .iter()
-        .chain(&authority.git.selected_ref)
-    {
-        grant.validate()?;
-        if !grant.path.starts_with(&authority.git.common_git_dir.path) {
-            return Err(PermissionError::GitWriteAuthorityMissing);
-        }
-    }
-    let index_paths =
-        ["index", "index.lock"].map(|name| authority.git.private_git_dir.path.join(name));
-    if !exact_grant_paths(&authority.git.index, &index_paths) {
-        return Err(PermissionError::GitWriteAuthorityMissing);
-    }
-    let head_paths = ["HEAD", "HEAD.lock", "logs/HEAD", "logs/HEAD.lock"]
-        .map(|name| authority.git.private_git_dir.path.join(name));
-    if !exact_grant_paths(&authority.git.head, &head_paths) {
-        return Err(PermissionError::GitWriteAuthorityMissing);
-    }
-    for grant in &authority.git.objects {
-        if grant.scope != PathScope::Subtree
-            || grant.path != authority.git.common_git_dir.path.join("objects")
-        {
-            return Err(PermissionError::GitWriteAuthorityMissing);
-        }
-    }
-    let branch = &authority.selected_branch;
-    let selected_paths = [
-        format!("refs/heads/{branch}"),
-        format!("refs/heads/{branch}.lock"),
-        format!("logs/refs/heads/{branch}"),
-        format!("logs/refs/heads/{branch}.lock"),
-    ]
-    .map(|relative| authority.git.common_git_dir.path.join(relative));
-    if !exact_grant_paths(&authority.git.selected_ref, &selected_paths) {
-        return Err(PermissionError::GitWriteAuthorityMissing);
-    }
-    Ok(())
-}
-
-#[cfg(target_os = "macos")]
-fn is_registered_worktree_git_dir(common: &Path, private: &Path) -> bool {
-    private
-        .strip_prefix(common.join("worktrees"))
-        .is_ok_and(|suffix| suffix.components().count() == 1)
-}
-
-#[cfg(target_os = "macos")]
-fn exact_grant_paths<const N: usize>(grants: &[PathGrant], paths: &[PathBuf; N]) -> bool {
-    grants.len() == N
-        && grants
-            .iter()
-            .all(|grant| grant.scope == PathScope::Exact && paths.contains(&grant.path))
-        && paths
-            .iter()
-            .all(|path| grants.iter().any(|grant| &grant.path == path))
-}
-
-#[cfg(target_os = "macos")]
-fn valid_branch(branch: &str) -> bool {
-    !branch.is_empty()
-        && branch.len() <= 255
-        && !branch.starts_with('/')
-        && !branch.ends_with('/')
-        && !branch.ends_with('.')
-        && !branch.contains("..")
-        && !branch.contains("@{")
-        && branch.split('/').all(|part| {
-            !part.is_empty()
-                && !part.starts_with('.')
-                && !part.ends_with(".lock")
-                && !part.ends_with('.')
-                && part != "@"
-                && !part.bytes().any(|byte| {
-                    byte.is_ascii_control()
-                        || byte.is_ascii_whitespace()
-                        || b"~^:?*[]\\".contains(&byte)
-                })
-        })
 }
 
 #[cfg(target_os = "macos")]
 fn verify_worktree_authority(
     authority: &WorktreeWriteAuthority,
     anchors: &Anchors<'_>,
-) -> Result<(), PermissionError> {
-    validate_git_authority(authority)?;
-    let verified = anchors
+) -> Result<WorktreeWriteGrants, PermissionError> {
+    let (verified, selected_ref) = anchors
         .worktree
         .ok_or(PermissionError::GitWriteAuthorityMissing)?;
-    let repo = verified.repo();
-    repo.revalidate()?;
-    if verified.path() != authority.worktree.path.as_path()
-        || repo.private_git_dir() != authority.git.private_git_dir.path.as_path()
-        || repo.common_git_dir() != authority.git.common_git_dir.path.as_path()
-        || !verified.identity().same_identity(&repo.root_identity())
-    {
+    verified.repo().revalidate()?;
+    if verified.repo().private_git_dir() == verified.repo().common_git_dir() {
         return Err(PermissionError::GitWriteAuthorityMissing);
     }
-    verify_selected_head(verified, &authority.selected_branch)?;
-    anchors.verify_grant(&authority.worktree)?;
-    anchors.verify_grant(&authority.git.private_git_dir)?;
-    anchors.verify_grant(&authority.git.common_git_dir)?;
-    for grant in authority
-        .git
-        .index
-        .iter()
-        .chain(&authority.git.head)
-        .chain(&authority.git.objects)
-        .chain(&authority.git.selected_ref)
-    {
-        anchors.verify_grant(grant)?;
+    let grants = WorktreeWriteGrants::derive(verified, selected_ref);
+    grants.validate()?;
+    if grants.digest() != authority.git_grants_digest {
+        return Err(PermissionError::GitWriteAuthorityMissing);
     }
-    Ok(())
+    verify_selected_head(verified, selected_ref.short_name())?;
+    for grant in std::iter::once(&grants.worktree)
+        .chain([&grants.private_git_dir, &grants.common_git_dir])
+        .chain(grants.index.iter())
+        .chain(grants.head.iter())
+        .chain(std::iter::once(&grants.objects))
+        .chain(grants.selected_ref.iter())
+    {
+        anchors.verify_grant_held(grant)?;
+    }
+    Ok(grants)
 }
 
 #[cfg(target_os = "macos")]
@@ -1343,93 +1141,67 @@ fn verify_requested_evidence(
     plan: &PlanPermissions,
     profile: &ProviderProfile,
 ) -> Result<(), PermissionError> {
-    for (operation, outcome) in [
-        (FixtureOperation::DeclaredRead, FixtureOutcome::Allowed),
-        (FixtureOperation::UndeclaredRead, FixtureOutcome::Denied),
-        (FixtureOperation::UndeclaredWrite, FixtureOutcome::Denied),
-        (FixtureOperation::SecretRead, FixtureOutcome::Denied),
-        (FixtureOperation::ProtectedWrite, FixtureOutcome::Denied),
-        (FixtureOperation::OtherNetwork, FixtureOutcome::Denied),
-    ] {
-        require_observation(&profile.observations, operation, outcome)?;
-    }
+    let denied = FixtureOutcome::Denied;
+    let allowed = FixtureOutcome::Allowed;
+    let mut required = vec![
+        (FixtureOperation::DeclaredRead, allowed),
+        (FixtureOperation::UndeclaredRead, denied),
+        (FixtureOperation::UndeclaredWrite, denied),
+        (FixtureOperation::SecretRead, denied),
+        (FixtureOperation::ProtectedWrite, denied),
+        (FixtureOperation::OtherNetwork, denied),
+        (FixtureOperation::DeclaredProcessExec, allowed),
+        (FixtureOperation::UndeclaredProcessExec, denied),
+        (
+            FixtureOperation::ProcessFork,
+            if profile.spec.allow_process_fork {
+                allowed
+            } else {
+                denied
+            },
+        ),
+    ];
     if !profile.spec.runtime_reads.is_empty() {
-        require_observation(
-            &profile.observations,
-            FixtureOperation::RuntimeRead,
-            FixtureOutcome::Allowed,
-        )?;
+        required.push((FixtureOperation::RuntimeRead, allowed));
     }
     if plan.selected_authentication.is_some() {
-        require_observation(
-            &profile.observations,
-            FixtureOperation::AuthenticationRead,
-            FixtureOutcome::Allowed,
-        )?;
+        required.push((FixtureOperation::AuthenticationRead, allowed));
     }
     if plan.include_continuation {
-        require_observation(
-            &profile.observations,
-            FixtureOperation::ContinuationRead,
-            FixtureOutcome::Allowed,
-        )?;
+        required.push((FixtureOperation::ContinuationRead, allowed));
     }
     if !plan.protected_roots.is_empty() {
-        require_observation(
-            &profile.observations,
-            FixtureOperation::ProtectedInstructionRead,
-            FixtureOutcome::Allowed,
-        )?;
+        required.push((FixtureOperation::ProtectedInstructionRead, allowed));
     }
-    if !plan.secret_roots.is_empty() {
-        require_observation(
-            &profile.observations,
-            FixtureOperation::SecretRead,
-            FixtureOutcome::Denied,
-        )?;
+    if !plan.network.is_empty() || !profile.spec.provider_api.is_empty() {
+        required.push((FixtureOperation::ProviderEndpoint, allowed));
     }
-    if !plan.network.is_empty() {
-        require_observation(
-            &profile.observations,
-            FixtureOperation::ProviderEndpoint,
-            FixtureOutcome::Allowed,
-        )?;
-    }
-    if !profile.spec.provider_api.is_empty() {
-        require_observation(
-            &profile.observations,
-            FixtureOperation::ProviderEndpoint,
-            FixtureOutcome::Allowed,
-        )?;
-    }
-    for capability in &plan.capabilities {
+    required.extend(plan.capabilities.iter().map(|capability| {
         let operation = match capability {
             Capability::BrowserIpc => FixtureOperation::BrowserIpc,
             Capability::PostgresIpc => FixtureOperation::PostgresIpc,
         };
-        require_observation(&profile.observations, operation, FixtureOutcome::Allowed)?;
-    }
+        (operation, allowed)
+    }));
     if matches!(plan.mode, AccessMode::WorktreeWrite(_)) {
-        for operation in [
-            FixtureOperation::WorktreeWrite,
-            FixtureOperation::GitIndexWrite,
-            FixtureOperation::GitHeadWrite,
-            FixtureOperation::GitObjectsWrite,
-            FixtureOperation::SelectedRefWrite,
-        ] {
-            require_observation(&profile.observations, operation, FixtureOutcome::Allowed)?;
-        }
-        for operation in [
-            FixtureOperation::GitConfigWrite,
-            FixtureOperation::OtherRefWrite,
-            FixtureOperation::ProtectedWrite,
-        ] {
-            require_observation(&profile.observations, operation, FixtureOutcome::Denied)?;
-        }
+        required.extend([
+            (FixtureOperation::WorktreeWrite, allowed),
+            (FixtureOperation::GitIndexWrite, allowed),
+            (FixtureOperation::GitHeadWrite, allowed),
+            (FixtureOperation::GitObjectsWrite, allowed),
+            (FixtureOperation::SelectedRefWrite, allowed),
+            (FixtureOperation::GitConfigWrite, denied),
+            (FixtureOperation::OtherRefWrite, denied),
+            (FixtureOperation::ProtectedWrite, denied),
+        ]);
+    }
+    for (operation, outcome) in required {
+        require_observation(&profile.observations, operation, outcome)?;
     }
     Ok(())
 }
 
+#[cfg(target_os = "macos")]
 fn require_observation(
     observations: &BTreeMap<FixtureOperation, FixtureOutcome>,
     operation: FixtureOperation,
@@ -1441,14 +1213,9 @@ fn require_observation(
     }
 }
 
+#[cfg(any(target_os = "macos", test))]
 fn validate_profile_spec(spec: &ProviderProfileSpec) -> Result<(), PermissionError> {
-    if spec.profile_id.is_empty()
-        || spec.profile_id.len() > 128
-        || spec
-            .profile_id
-            .bytes()
-            .any(|byte| !(byte.is_ascii_alphanumeric() || b"._-".contains(&byte)))
-        || spec.process_executables.len() > MAX_PATH_GRANTS
+    if spec.process_executables.len() > MAX_PATH_GRANTS
         || spec.runtime_reads.len() > MAX_PATH_GRANTS
         || spec.authentication.len() > 16
         || spec.continuation_reads.len() > MAX_PATH_GRANTS
@@ -1626,13 +1393,18 @@ fn is_network_subset(requested: &[NetworkGrant], allowed: &[NetworkGrant]) -> bo
     requested.iter().all(|item| allowed.contains(item))
 }
 
+#[cfg(any(target_os = "macos", test))]
 fn validate_endpoint(endpoint: &NetworkEndpoint) -> Result<(), PermissionError> {
-    if endpoint.port == 0 || endpoint.port > u64::from(u16::MAX) {
+    if endpoint.port == 0
+        || endpoint.port > u64::from(u16::MAX)
+        || !matches!(endpoint.address.as_str(), "*" | "localhost")
+    {
         return Err(PermissionError::InvalidFixture);
     }
     Ok(())
 }
 
+#[cfg(any(target_os = "macos", test))]
 fn validate_network_grant(grant: &NetworkGrant) -> Result<(), PermissionError> {
     match grant {
         NetworkGrant::Tcp { endpoint } => validate_endpoint(endpoint),
@@ -1653,7 +1425,7 @@ fn verify_network_anchor(
 ) -> Result<(), PermissionError> {
     match grant {
         NetworkGrant::Tcp { .. } => Ok(()),
-        NetworkGrant::UnixSocket { root } => anchors.verify_grant(root),
+        NetworkGrant::UnixSocket { root } => anchors.verify_grant_held(root),
     }
 }
 
@@ -1662,14 +1434,10 @@ fn push_network_endpoint(
     source: &mut String,
     endpoint: &NetworkEndpoint,
 ) -> Result<(), PermissionError> {
-    validate_endpoint(endpoint)?;
     let port = u16::try_from(endpoint.port).map_err(|_| PermissionError::InvalidFixture)?;
-    let address = match endpoint.address {
-        IpAddr::V4(ip) => ip.to_string(),
-        IpAddr::V6(ip) => format!("[{ip}]"),
-    };
     source.push_str(&format!(
-        "(allow network-outbound (remote tcp \"{address}:{port}\"))\n"
+        "(allow network-outbound (remote tcp \"{}:{port}\"))\n",
+        endpoint.address
     ));
     Ok(())
 }
@@ -1709,58 +1477,9 @@ fn sbpl_path(path: &Path) -> Result<String, PermissionError> {
     Ok(escaped)
 }
 
-fn read_relative(root: &dyn SafeDir, path: &Path) -> Result<Vec<u8>, PermissionError> {
-    let relative =
-        provenant_core::RelativePath::parse(path).map_err(|_| PermissionError::InvalidFixture)?;
-    let parts: Vec<&OsStr> = relative
-        .as_path()
-        .components()
-        .filter_map(|part| match part {
-            Component::Normal(value) => Some(value),
-            _ => None,
-        })
-        .collect();
-    if parts.is_empty() || parts.len() > 32 || path.as_os_str().as_encoded_bytes().len() > 4096 {
-        return Err(PermissionError::InvalidFixture);
-    }
-    let mut parents: Vec<Box<dyn SafeDir>> = Vec::with_capacity(parts.len().saturating_sub(1));
-    for part in parts.iter().take(parts.len().saturating_sub(1)) {
-        let current = parents.last().map_or(root, |directory| directory.as_ref());
-        let next = current
-            .open_verified_directory(part)
-            .map_err(PermissionError::Filesystem)?;
-        parents.push(next);
-    }
-    let leaf = parts.last().ok_or(PermissionError::InvalidFixture)?;
-    let current = parents.last().map_or(root, |directory| directory.as_ref());
-    let mut file = current
-        .open_read(leaf)
-        .map_err(PermissionError::Filesystem)?;
-    let before = file.metadata().map_err(PermissionError::Filesystem)?;
-    if before.kind != FileKind::Regular || before.size > FIXTURE_LIMIT {
-        return Err(PermissionError::InvalidFixture);
-    }
-    let capacity = usize::try_from(before.size).map_err(|_| PermissionError::InvalidFixture)?;
-    let mut bytes = Vec::with_capacity(capacity);
-    (&mut file)
-        .take(FIXTURE_LIMIT + 1)
-        .read_to_end(&mut bytes)
-        .map_err(|_| PermissionError::InvalidFixture)?;
-    let after = file.metadata().map_err(PermissionError::Filesystem)?;
-    if u64::try_from(bytes.len()).map_err(|_| PermissionError::InvalidFixture)? != before.size
-        || after.size != before.size
-        || !after.same_identity(&before)
-    {
-        return Err(PermissionError::InvalidFixture);
-    }
-    Ok(bytes)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[cfg(target_os = "macos")]
-    use crate::repo::GitRefName;
     use provenant_supervisor::exec::SystemExecutor;
     use provenant_supervisor::fs::LocalFs;
 
@@ -1849,7 +1568,6 @@ mod tests {
     #[test]
     fn provider_profile_without_a_declared_executable_is_refused() {
         let spec = ProviderProfileSpec {
-            profile_id: "test-profile".into(),
             process_executables: Vec::new(),
             allow_process_fork: false,
             runtime_reads: Vec::new(),
@@ -1866,221 +1584,11 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn fixture_allowing_secret_reads_does_not_construct_a_provider_profile() {
-        let temp = tempfile::tempdir_in("/tmp").expect("temporary fixture root");
-        let temporary_fixture_root = temp.path().join("fixtures");
-        std::fs::create_dir(&temporary_fixture_root).expect("fixture directory");
-        let spec = ProviderProfileSpec {
-            profile_id: "test-profile".into(),
-            process_executables: vec![PathGrant {
-                path: PathBuf::from("/usr/bin/true"),
-                scope: PathScope::Exact,
-            }],
-            allow_process_fork: false,
-            runtime_reads: Vec::new(),
-            authentication: Vec::new(),
-            continuation_reads: Vec::new(),
-            provider_api: Vec::new(),
-            network: Vec::new(),
-            capabilities: Vec::new(),
-            native_controls: Vec::new(),
-        };
-        let fixture = serde_json::json!({
-            "schema_version": 1,
-            "profile_id": "test-profile",
-            "spec_digest": spec.canonical_digest().expect("spec digest"),
-            "platform": "mac_os",
-            "backend": "mac_os_sbpl",
-            "observations": [
-                {"operation":"undeclared_read","outcome":"denied"},
-                {"operation":"undeclared_write","outcome":"denied"},
-                {"operation":"secret_read","outcome":"allowed"},
-                {"operation":"protected_write","outcome":"denied"},
-                {"operation":"other_network","outcome":"denied"},
-                {"operation":"declared_process_exec","outcome":"allowed"},
-                {"operation":"undeclared_process_exec","outcome":"denied"},
-                {"operation":"process_fork","outcome":"denied"}
-            ]
-        });
-        std::fs::write(
-            temporary_fixture_root.join("permission.json"),
-            serde_json::to_vec(&fixture).expect("fixture JSON"),
-        )
-        .expect("fixture write");
-        let fixture_root = provenant_supervisor::fs::canonicalize(&temporary_fixture_root)
-            .expect("canonical temporary fixture root");
-        let safe_fs = LocalFs;
-        assert!(matches!(
-            ProviderProfile::load(&safe_fs, &fixture_root, Path::new("permission.json"), spec),
-            Err(PermissionError::FixtureInsufficient)
-        ));
-    }
-
-    #[test]
-    fn permission_fixture_is_bound_to_the_complete_provider_spec() {
-        let temp = tempfile::tempdir_in("/tmp").expect("temporary fixture root");
-        let fixture_root = temp.path().join("fixtures");
-        std::fs::create_dir(&fixture_root).expect("fixture directory");
-        let spec = ProviderProfileSpec {
-            profile_id: "recorded-test-profile".into(),
-            process_executables: vec![PathGrant {
-                path: PathBuf::from("/usr/bin/true"),
-                scope: PathScope::Exact,
-            }],
-            allow_process_fork: false,
-            runtime_reads: vec![PathGrant {
-                path: PathBuf::from("/usr/lib"),
-                scope: PathScope::Subtree,
-            }],
-            authentication: Vec::new(),
-            continuation_reads: Vec::new(),
-            provider_api: vec![NetworkEndpoint {
-                address: IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
-                port: 443,
-            }],
-            network: Vec::new(),
-            capabilities: vec![CapabilityGrant {
-                capability: Capability::BrowserIpc,
-                mach_services: vec!["com.example.browser".into()],
-                unix_socket_roots: Vec::new(),
-            }],
-            native_controls: vec!["network_filter".into()],
-        };
-        let fixture = PermissionFixture {
-            schema_version: 1,
-            profile_id: spec.profile_id.clone(),
-            spec_digest: spec.canonical_digest().expect("profile spec digest"),
-            platform: HostPlatform::MacOs,
-            backend: BackendKind::MacOsSbpl,
-            observations: vec![
-                FixtureObservation {
-                    operation: FixtureOperation::UndeclaredRead,
-                    outcome: FixtureOutcome::Denied,
-                },
-                FixtureObservation {
-                    operation: FixtureOperation::UndeclaredWrite,
-                    outcome: FixtureOutcome::Denied,
-                },
-                FixtureObservation {
-                    operation: FixtureOperation::SecretRead,
-                    outcome: FixtureOutcome::Denied,
-                },
-                FixtureObservation {
-                    operation: FixtureOperation::ProtectedWrite,
-                    outcome: FixtureOutcome::Denied,
-                },
-                FixtureObservation {
-                    operation: FixtureOperation::OtherNetwork,
-                    outcome: FixtureOutcome::Denied,
-                },
-                FixtureObservation {
-                    operation: FixtureOperation::DeclaredProcessExec,
-                    outcome: FixtureOutcome::Allowed,
-                },
-                FixtureObservation {
-                    operation: FixtureOperation::UndeclaredProcessExec,
-                    outcome: FixtureOutcome::Denied,
-                },
-                FixtureObservation {
-                    operation: FixtureOperation::ProcessFork,
-                    outcome: FixtureOutcome::Denied,
-                },
-            ],
-        };
-        std::fs::write(
-            fixture_root.join("permission.json"),
-            serde_json::to_vec(&fixture).expect("fixture JSON"),
-        )
-        .expect("fixture write");
-        let fixture_root =
-            provenant_supervisor::fs::canonicalize(&fixture_root).expect("canonical fixture root");
-        let safe_fs = LocalFs;
-        assert!(
-            ProviderProfile::load(
-                &safe_fs,
-                &fixture_root,
-                Path::new("permission.json"),
-                spec.clone(),
-            )
-            .is_ok()
-        );
-
-        let mut changed = spec;
-        changed.runtime_reads.push(PathGrant {
-            path: PathBuf::from("/usr/share"),
-            scope: PathScope::Subtree,
-        });
-        changed.provider_api.push(NetworkEndpoint {
-            address: IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
-            port: 8443,
-        });
-        changed.capabilities.push(CapabilityGrant {
-            capability: Capability::PostgresIpc,
-            mach_services: Vec::new(),
-            unix_socket_roots: Vec::new(),
-        });
-        changed.native_controls.push("dns_filter".into());
-        assert!(matches!(
-            ProviderProfile::load(
-                &safe_fs,
-                &fixture_root,
-                Path::new("permission.json"),
-                changed,
-            ),
-            Err(PermissionError::FixtureMismatch)
-        ));
-    }
-
     #[cfg(target_os = "macos")]
     #[test]
-    fn worktree_path_records_without_verified_registration_are_not_authority() {
-        let worktree = PathBuf::from("/tmp/linked");
-        let common = PathBuf::from("/tmp/repo/.git");
-        let private = common.join("worktrees/linked");
+    fn serialised_digest_cannot_authorise_without_a_verified_worktree() {
         let authority = WorktreeWriteAuthority {
-            worktree: PathGrant {
-                path: worktree,
-                scope: PathScope::Subtree,
-            },
-            git: GitWriteAuthority {
-                private_git_dir: PathGrant {
-                    path: private.clone(),
-                    scope: PathScope::Subtree,
-                },
-                common_git_dir: PathGrant {
-                    path: common.clone(),
-                    scope: PathScope::Subtree,
-                },
-                index: ["index", "index.lock"]
-                    .map(|name| PathGrant {
-                        path: private.join(name),
-                        scope: PathScope::Exact,
-                    })
-                    .to_vec(),
-                head: ["HEAD", "HEAD.lock", "logs/HEAD", "logs/HEAD.lock"]
-                    .map(|name| PathGrant {
-                        path: private.join(name),
-                        scope: PathScope::Exact,
-                    })
-                    .to_vec(),
-                objects: vec![PathGrant {
-                    path: common.join("objects"),
-                    scope: PathScope::Subtree,
-                }],
-                selected_ref: [
-                    "refs/heads/s3/authority",
-                    "refs/heads/s3/authority.lock",
-                    "logs/refs/heads/s3/authority",
-                    "logs/refs/heads/s3/authority.lock",
-                ]
-                .map(|relative| PathGrant {
-                    path: common.join(relative),
-                    scope: PathScope::Exact,
-                })
-                .to_vec(),
-            },
-            selected_branch: "s3/authority".into(),
+            git_grants_digest: [0; 32],
         };
         let safe_fs = LocalFs;
         let directories = [];
@@ -2097,21 +1605,21 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[test]
-    fn linked_worktree_git_authority_uses_common_objects_and_refs()
+    fn linked_worktree_grants_derive_from_verified_git_paths_and_ref()
     -> Result<(), Box<dyn std::error::Error>> {
         use crate::repo::verify_worktree;
         use crate::utility::{GitMutation, execute_git_mutation};
 
-        let fixture = crate::utility::tests::Fixture::new()?;
+        let fixture = crate::test_support::Fixture::new()?;
         let head = fixture.head()?;
-        let branch = GitRefName::branch("s3/authority")?;
+        let selected_ref = GitRefName::branch("s3/authority")?;
         let worktree_path = fixture._temp.path().join("linked");
         let added = execute_git_mutation(
             &fixture.executor,
             &fixture.repo,
             &fixture.runtime,
             GitMutation::WorktreeAdd {
-                branch,
+                branch: selected_ref.clone(),
                 base: Some(head),
                 path: worktree_path.clone(),
                 create_branch: true,
@@ -2124,60 +1632,17 @@ mod tests {
         let private = linked.repo().private_git_dir().to_owned();
         let common = linked.repo().common_git_dir().to_owned();
         assert_ne!(private, common);
-        let authority = WorktreeWriteAuthority {
-            worktree: PathGrant {
-                path: linked.repo().root_path().to_owned(),
-                scope: PathScope::Subtree,
-            },
-            git: GitWriteAuthority {
-                private_git_dir: PathGrant {
-                    path: private.clone(),
-                    scope: PathScope::Subtree,
-                },
-                common_git_dir: PathGrant {
-                    path: common.clone(),
-                    scope: PathScope::Subtree,
-                },
-                index: ["index", "index.lock"]
-                    .map(|name| PathGrant {
-                        path: private.join(name),
-                        scope: PathScope::Exact,
-                    })
-                    .to_vec(),
-                head: ["HEAD", "HEAD.lock", "logs/HEAD", "logs/HEAD.lock"]
-                    .map(|name| PathGrant {
-                        path: private.join(name),
-                        scope: PathScope::Exact,
-                    })
-                    .to_vec(),
-                objects: vec![PathGrant {
-                    path: common.join("objects"),
-                    scope: PathScope::Subtree,
-                }],
-                selected_ref: [
-                    "refs/heads/s3/authority",
-                    "refs/heads/s3/authority.lock",
-                    "logs/refs/heads/s3/authority",
-                    "logs/refs/heads/s3/authority.lock",
-                ]
-                .map(|relative| PathGrant {
-                    path: common.join(relative),
-                    scope: PathScope::Exact,
-                })
-                .to_vec(),
-            },
-            selected_branch: "s3/authority".into(),
-        };
-        validate_git_authority(&authority)?;
-        assert_eq!(authority.git.objects[0].path, common.join("objects"));
+
+        let authority = WorktreeWriteAuthority::for_worktree(&linked, &selected_ref)?;
+        let grants = WorktreeWriteGrants::derive(&linked, &selected_ref);
+        assert_eq!(authority.git_grants_digest, grants.digest());
+        assert_eq!(grants.objects.path, common.join("objects"));
         assert!(
-            authority
-                .git
+            grants
                 .selected_ref
                 .iter()
                 .all(|grant| grant.path.starts_with(&common))
         );
-        verify_selected_head(&linked, "s3/authority")?;
 
         let common_heads = common.join("refs/heads/s3");
         let common_logs = common.join("logs/refs/heads/s3");
@@ -2186,11 +1651,11 @@ mod tests {
             std::fs::create_dir_all(directory)?;
         }
         let anchor_paths = [
-            linked.repo().root_path().to_owned(),
+            linked.path().to_owned(),
             private.clone(),
             common.clone(),
             common.join("objects"),
-            private_logs,
+            private_logs.clone(),
             common_heads,
             common_logs,
         ];
@@ -2202,18 +1667,54 @@ mod tests {
         let anchors = Anchors {
             directories: &directories,
             safe_fs: &safe_fs,
-            worktree: Some(&linked),
+            worktree: Some((&linked, &selected_ref)),
         };
-        verify_worktree_authority(&authority, &anchors)?;
+        let verified_grants = verify_worktree_authority(&authority, &anchors)?;
+        let mut source = String::new();
+        push_worktree_rule(&mut source, &verified_grants)?;
+        assert!(source.contains("(require-not (subpath "));
+        assert!(source.contains(&format!("{}/objects/info", common.display())));
+
+        let other_ref = GitRefName::branch("s3/other")?;
+        let mismatched = Anchors {
+            directories: &directories,
+            safe_fs: &safe_fs,
+            worktree: Some((&linked, &other_ref)),
+        };
+        assert!(matches!(
+            verify_worktree_authority(&authority, &mismatched),
+            Err(PermissionError::GitWriteAuthorityMissing)
+        ));
+
+        let private_head_log = private_logs.join("HEAD");
+        let hardlink_alias = fixture._temp.path().join("hardlinked-private-log");
+        std::fs::write(&private_head_log, b"ref: refs/heads/s3/authority\n")?;
+        std::fs::hard_link(&private_head_log, &hardlink_alias)?;
+        assert!(matches!(
+            verify_worktree_authority(&authority, &anchors),
+            Err(PermissionError::AnchorMismatch)
+        ));
+        std::fs::remove_file(&hardlink_alias)?;
+        std::fs::remove_file(&private_head_log)?;
+
+        let mut tampered = authority.clone();
+        tampered.git_grants_digest[0] ^= 1;
+        assert!(matches!(
+            verify_worktree_authority(&tampered, &anchors),
+            Err(PermissionError::GitWriteAuthorityMissing)
+        ));
 
         let original_head = std::fs::read(private.join("HEAD"))?;
         std::fs::write(private.join("HEAD"), b"ref: refs/heads/s3/other\n")?;
         assert!(matches!(
-            verify_selected_head(&linked, "s3/authority"),
+            verify_worktree_authority(
+                &WorktreeWriteAuthority::for_worktree(&linked, &selected_ref)?,
+                &anchors
+            ),
             Err(PermissionError::GitWriteAuthorityMissing)
         ));
         std::fs::write(private.join("HEAD"), original_head)?;
-        verify_selected_head(&linked, "s3/authority")?;
+        verify_worktree_authority(&authority, &anchors)?;
         Ok(())
     }
 
@@ -2265,172 +1766,65 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[test]
-    fn worktree_and_git_write_rules_require_all_filters() {
-        let worktree = PathBuf::from("/tmp/linked");
-        let common = PathBuf::from("/tmp/repo/.git");
-        let private = common.join("worktrees/linked");
-        let authority = WorktreeWriteAuthority {
-            worktree: PathGrant {
-                path: worktree.clone(),
-                scope: PathScope::Subtree,
-            },
-            git: GitWriteAuthority {
-                private_git_dir: PathGrant {
-                    path: private.clone(),
-                    scope: PathScope::Subtree,
-                },
-                common_git_dir: PathGrant {
-                    path: common.clone(),
-                    scope: PathScope::Subtree,
-                },
-                index: ["index", "index.lock"]
-                    .map(|name| PathGrant {
-                        path: private.join(name),
-                        scope: PathScope::Exact,
-                    })
-                    .to_vec(),
-                head: ["HEAD", "HEAD.lock", "logs/HEAD", "logs/HEAD.lock"]
-                    .map(|name| PathGrant {
-                        path: private.join(name),
-                        scope: PathScope::Exact,
-                    })
-                    .to_vec(),
-                objects: vec![PathGrant {
-                    path: common.join("objects"),
-                    scope: PathScope::Subtree,
-                }],
-                selected_ref: [
-                    "refs/heads/s3/authority",
-                    "refs/heads/s3/authority.lock",
-                    "logs/refs/heads/s3/authority",
-                    "logs/refs/heads/s3/authority.lock",
-                ]
-                .map(|relative| PathGrant {
-                    path: common.join(relative),
-                    scope: PathScope::Exact,
-                })
-                .to_vec(),
-            },
-            selected_branch: "s3/authority".into(),
-        };
-        let profile = ProviderProfile {
-            spec: ProviderProfileSpec {
-                profile_id: "test".into(),
-                process_executables: vec![PathGrant {
-                    path: PathBuf::from("/usr/bin/true"),
-                    scope: PathScope::Exact,
-                }],
-                allow_process_fork: false,
-                runtime_reads: Vec::new(),
-                authentication: Vec::new(),
-                continuation_reads: Vec::new(),
-                provider_api: Vec::new(),
-                network: Vec::new(),
-                capabilities: Vec::new(),
-                native_controls: Vec::new(),
-            },
-            fixture_digest: [0; 32],
-            observations: BTreeMap::new(),
-        };
-        let plan = PlanPermissions {
-            mode: AccessMode::WorktreeWrite(Box::new(authority)),
-            scratch: PathGrant {
-                path: PathBuf::from("/tmp/scratch"),
-                scope: PathScope::Subtree,
-            },
-            read_roots: Vec::new(),
-            protected_roots: Vec::new(),
-            secret_roots: Vec::new(),
-            selected_authentication: None,
-            include_continuation: false,
-            network: Vec::new(),
-            capabilities: Vec::new(),
-            nested_confinement: false,
-        };
-        let rendered = String::from_utf8(render_profile(&plan, &profile, &[]).expect("SBPL"))
-            .expect("UTF-8 SBPL");
-        assert!(rendered.contains(
-            "(allow file-write* (require-all (subpath \"/tmp/linked\") (require-not (subpath \"/tmp/repo/.git/worktrees/linked\")) (require-not (subpath \"/tmp/repo/.git\"))))"
-        ));
-        assert!(rendered.contains(
-            "(allow file-write* (require-all (subpath \"/tmp/repo/.git/objects\") (require-not (subpath \"/tmp/repo/.git/objects/info\"))))"
-        ));
-    }
+    fn native_sandbox_blocks_path_escape_probes() -> Result<(), Box<dyn std::error::Error>> {
+        use crate::repo::{GitRefName, verify_worktree};
+        use crate::utility::{GitMutation, execute_git_mutation};
+        use std::os::unix::fs::symlink;
 
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn native_sandbox_allows_only_paths_inside_the_selected_worktree() {
-        let temp = tempfile::tempdir_in("/tmp").expect("temporary sandbox root");
-        let root = provenant_supervisor::fs::canonicalize(temp.path())
-            .expect("canonical temporary sandbox root");
+        let fixture = crate::test_support::Fixture::new()?;
+        let root = provenant_supervisor::fs::canonicalize(fixture._temp.path())?;
         let home = root.join("home");
         let state = root.join("state");
         let xdg = root.join("xdg");
         for path in [&home, &state, &xdg] {
-            std::fs::create_dir_all(path).expect("isolated process directory");
+            std::fs::create_dir_all(path)?;
         }
-        let worktree = root.join("worktree");
-        let git_dir = worktree.join(".git");
+        let head = fixture.head()?;
+        let selected_ref = GitRefName::branch("s3/native")?;
+        let worktree_path = root.join("linked");
+        let added = execute_git_mutation(
+            &fixture.executor,
+            &fixture.repo,
+            &fixture.runtime,
+            GitMutation::WorktreeAdd {
+                branch: selected_ref.clone(),
+                base: Some(head),
+                path: worktree_path.clone(),
+                create_branch: true,
+            },
+            fixture.budget()?,
+            &CancelToken::new(),
+        )?;
+        assert_eq!(added.termination, Termination::Exit(0));
+        let linked = verify_worktree(&fixture.repo, &worktree_path)?;
+        let authority = WorktreeWriteAuthority::for_worktree(&linked, &selected_ref)?;
+        let grants = WorktreeWriteGrants::derive(&linked, &selected_ref);
+
         let scratch = root.join("scratch");
-        std::fs::create_dir_all(&git_dir).expect("worktree Git directory");
-        std::fs::create_dir_all(&scratch).expect("scratch directory");
-        let outside_file = root.join("outside.txt");
-        let inside_file = worktree.join("inside.txt");
-        let git_config = git_dir.join("config");
-        let objects = git_dir.join("objects");
-        std::fs::create_dir_all(&objects).expect("Git objects directory");
-        let private = git_dir.clone();
-        let authority = WorktreeWriteAuthority {
-            worktree: PathGrant {
-                path: worktree.clone(),
-                scope: PathScope::Subtree,
-            },
-            git: GitWriteAuthority {
-                private_git_dir: PathGrant {
-                    path: private.clone(),
-                    scope: PathScope::Subtree,
-                },
-                common_git_dir: PathGrant {
-                    path: git_dir.clone(),
-                    scope: PathScope::Subtree,
-                },
-                index: ["index", "index.lock"]
-                    .map(|name| PathGrant {
-                        path: private.join(name),
-                        scope: PathScope::Exact,
-                    })
-                    .to_vec(),
-                head: ["HEAD", "HEAD.lock", "logs/HEAD", "logs/HEAD.lock"]
-                    .map(|name| PathGrant {
-                        path: private.join(name),
-                        scope: PathScope::Exact,
-                    })
-                    .to_vec(),
-                objects: vec![PathGrant {
-                    path: objects.clone(),
-                    scope: PathScope::Subtree,
-                }],
-                selected_ref: [
-                    "refs/heads/s3/native",
-                    "refs/heads/s3/native.lock",
-                    "logs/refs/heads/s3/native",
-                    "logs/refs/heads/s3/native.lock",
-                ]
-                .map(|relative| PathGrant {
-                    path: private.join(relative),
-                    scope: PathScope::Exact,
-                })
-                .to_vec(),
-            },
-            selected_branch: "s3/native".into(),
-        };
-        let provider = ProviderProfile {
+        std::fs::create_dir(&scratch)?;
+        let protected_parent = root.join("protected-parent");
+        let protected = protected_parent.join("protected");
+        std::fs::create_dir_all(&protected)?;
+        let protected_file = protected.join("secret");
+        std::fs::write(&protected_file, b"protected")?;
+        let nested_git = linked.path().join("sub/.git");
+        std::fs::create_dir_all(&nested_git)?;
+        std::fs::write(nested_git.join("config"), b"nested")?;
+        let inside = linked.path().join("inside");
+        std::fs::write(&inside, b"")?;
+        let symlink_path = linked.path().join("symlink");
+        symlink(&protected_file, &symlink_path)?;
+        let hardlink_path = linked.path().join("hardlink");
+        std::fs::hard_link(&protected_file, &hardlink_path)?;
+
+        let profile = ProviderProfile {
             spec: ProviderProfileSpec {
-                profile_id: "native-sandbox-test".into(),
-                process_executables: vec![PathGrant {
-                    path: PathBuf::from("/usr/bin/touch"),
-                    scope: PathScope::Exact,
-                }],
+                process_executables: ["/usr/bin/touch", "/usr/bin/mv"]
+                    .map(|path| PathGrant {
+                        path: PathBuf::from(path),
+                        scope: PathScope::Exact,
+                    })
+                    .to_vec(),
                 allow_process_fork: false,
                 runtime_reads: Vec::new(),
                 authentication: Vec::new(),
@@ -2440,7 +1834,6 @@ mod tests {
                 capabilities: Vec::new(),
                 native_controls: Vec::new(),
             },
-            fixture_digest: [0; 32],
             observations: BTreeMap::new(),
         };
         let plan = PlanPermissions {
@@ -2453,7 +1846,12 @@ mod tests {
                 path: root.clone(),
                 scope: PathScope::Subtree,
             }],
-            protected_roots: Vec::new(),
+            protected_roots: [protected.clone(), nested_git.clone()]
+                .map(|path| PathGrant {
+                    path,
+                    scope: PathScope::Subtree,
+                })
+                .to_vec(),
             secret_roots: Vec::new(),
             selected_authentication: None,
             include_continuation: false,
@@ -2461,59 +1859,90 @@ mod tests {
             capabilities: Vec::new(),
             nested_confinement: false,
         };
-        let sbpl = render_profile(&plan, &provider, &plan.read_roots).expect("SBPL policy");
-        let safe_fs = LocalFs;
-        let executor = SystemExecutor::new(2).expect("bounded sandbox executor");
+        let sbpl = String::from_utf8(render_profile(
+            &plan,
+            &profile,
+            &plan.read_roots,
+            Some(&grants),
+        )?)?;
+        let executor = SystemExecutor::new(2)?;
         let cancel = CancelToken::new();
         let env = [
             ("HOME".into(), home.into_os_string()),
             ("PROVENANT_STATE_DIR".into(), state.into_os_string()),
             ("XDG_CONFIG_HOME".into(), xdg.into_os_string()),
             ("GIT_CONFIG_NOSYSTEM".into(), "1".into()),
-            (
-                "GIT_CONFIG_GLOBAL".into(),
-                git_config.as_os_str().to_owned(),
-            ),
             ("GIT_TERMINAL_PROMPT".into(), "0".into()),
         ];
-        let context = BackendContext {
-            safe_fs: &safe_fs,
-            executor: &executor,
-            cancel: &cancel,
+        let baseline = probe_sandbox(&BackendContext {
+            safe_fs: &LocalFs,
+            executor: &fixture.executor,
+            cancel: &CancelToken::new(),
             env: &env,
-        };
-        match system_backend(&context) {
-            Ok(_) => {}
-            Err(PermissionError::BackendNotAvailable(_)) => return,
-            Err(error) => panic!("sandbox availability probe failed unexpectedly: {error}"),
+        })?;
+        if !matches!(baseline, Availability::Available { .. }) {
+            assert_ne!(
+                std::env::var("PROVENANT_CONFINEMENT_REQUIRED").as_deref(),
+                Ok("1"),
+                "the required native sandbox baseline is unavailable: {baseline:?}"
+            );
+            return Ok(());
         }
-
-        let run_touch = |target: &Path| {
-            let argv = [
+        let run = |program: &str, args: &[&Path]| {
+            let mut argv = vec![
                 OsString::from(SANDBOX_EXEC),
                 OsString::from("-p"),
-                OsString::from(String::from_utf8(sbpl.clone()).expect("SBPL UTF-8")),
-                OsString::from("/usr/bin/touch"),
-                target.as_os_str().to_owned(),
+                OsString::from(&sbpl),
+                OsString::from(program),
             ];
+            argv.extend(args.iter().map(|path| path.as_os_str().to_owned()));
             let mut options = ExecOptions::new(&argv, Path::new("/"), Duration::from_secs(3));
             options.env = Some(&env);
             options.cancel = Some(&cancel);
-            options.stdout = StreamPolicy::Discard;
-            options.stderr = StreamPolicy::Discard;
+            options.stdout = StreamPolicy::Capture { limit: 1024 };
+            options.stderr = StreamPolicy::Capture { limit: 1024 };
             options.terminate_grace = CLEANUP_TIMEOUT;
             options.reap_timeout = CLEANUP_TIMEOUT;
             executor.execute(options).expect("bounded sandbox child")
         };
-        let allowed = run_touch(&inside_file);
-        assert!(successful_probe(&allowed), "worktree write must be allowed");
-        let denied = run_touch(&outside_file);
-        assert!(denied_probe(&denied), "outside write must be denied");
-        let git_config_write = run_touch(&git_config);
+
+        let inside_outcome = run("/usr/bin/touch", &[&inside]);
         assert!(
-            denied_probe(&git_config_write),
-            "Git configuration must remain immutable"
+            successful_probe(&inside_outcome),
+            "worktree write failed: {:?}; stderr={}",
+            inside_outcome.termination,
+            String::from_utf8_lossy(&inside_outcome.stderr.bytes)
         );
+        assert!(denied_probe(&run("/usr/bin/touch", &[&protected_file])));
+        assert!(denied_probe(&run("/usr/bin/touch", &[&symlink_path])));
+        assert!(denied_probe(&run("/usr/bin/touch", &[&hardlink_path])));
+        assert!(denied_probe(&run(
+            "/usr/bin/touch",
+            &[&nested_git.join("config")],
+        )));
+        let moved_protected_parent = root.join("protected-parent-moved");
+        assert!(denied_probe(&run(
+            "/usr/bin/mv",
+            &[&protected_parent, &moved_protected_parent]
+        )));
+        let moved_worktree = root.join("linked-moved");
+        assert!(denied_probe(&run(
+            "/usr/bin/mv",
+            &[&worktree_path, &moved_worktree]
+        )));
+        assert!(protected_parent.exists() && worktree_path.exists());
+
+        // Simulate a root swap in the gap between compiling the pathname
+        // policy and starting its child: the authorised worktree spelling now
+        // resolves to the protected directory.
+        std::fs::rename(&worktree_path, &moved_worktree)?;
+        symlink(&protected, &worktree_path)?;
+        let swapped_probe = worktree_path.join("root-swap-probe");
+        assert!(denied_probe(&run("/usr/bin/touch", &[&swapped_probe])));
+        assert!(!protected.join("root-swap-probe").exists());
+        std::fs::remove_file(&worktree_path)?;
+        std::fs::rename(&moved_worktree, &worktree_path)?;
+        Ok(())
     }
 
     #[cfg(target_os = "macos")]
@@ -2524,7 +1953,6 @@ mod tests {
             scope: PathScope::Exact,
         };
         let mut spec = ProviderProfileSpec {
-            profile_id: "recorded-test-profile".into(),
             process_executables: vec![executable],
             allow_process_fork: true,
             runtime_reads: Vec::new(),
@@ -2537,7 +1965,6 @@ mod tests {
         };
         let profile = ProviderProfile {
             spec: spec.clone(),
-            fixture_digest: [0; 32],
             observations: BTreeMap::new(),
         };
         let plan = PlanPermissions {
@@ -2555,7 +1982,7 @@ mod tests {
             capabilities: Vec::new(),
             nested_confinement: false,
         };
-        let rendered = String::from_utf8(render_profile(&plan, &profile, &[]).expect("SBPL"))
+        let rendered = String::from_utf8(render_profile(&plan, &profile, &[], None).expect("SBPL"))
             .expect("UTF-8 SBPL");
         assert!(rendered.contains("(allow process-exec (literal \"/usr/bin/true\"))"));
         assert!(rendered.contains("(allow process-fork)"));
@@ -2563,10 +1990,9 @@ mod tests {
         spec.allow_process_fork = false;
         let profile = ProviderProfile {
             spec,
-            fixture_digest: [0; 32],
             observations: BTreeMap::new(),
         };
-        let rendered = String::from_utf8(render_profile(&plan, &profile, &[]).expect("SBPL"))
+        let rendered = String::from_utf8(render_profile(&plan, &profile, &[], None).expect("SBPL"))
             .expect("UTF-8 SBPL");
         assert!(!rendered.contains("(allow process-fork)"));
     }
@@ -2637,16 +2063,29 @@ mod tests {
     }
 
     #[test]
-    fn network_ports_use_checked_u64_record_values() {
-        let valid = NetworkEndpoint {
-            address: IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
-            port: 443,
-        };
-        assert!(validate_endpoint(&valid).is_ok());
+    fn network_endpoints_accept_only_sbpl_hosts_and_checked_ports() {
+        for address in ["*", "localhost"] {
+            assert!(
+                validate_endpoint(&NetworkEndpoint {
+                    address: address.into(),
+                    port: 443,
+                })
+                .is_ok()
+            );
+        }
+        for address in ["127.0.0.1", "::1", "example.test"] {
+            assert!(
+                validate_endpoint(&NetworkEndpoint {
+                    address: address.into(),
+                    port: 443,
+                })
+                .is_err()
+            );
+        }
         for port in [0, u64::from(u16::MAX) + 1] {
             assert!(
                 validate_endpoint(&NetworkEndpoint {
-                    address: valid.address,
+                    address: "localhost".into(),
                     port,
                 })
                 .is_err()

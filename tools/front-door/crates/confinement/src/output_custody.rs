@@ -1,10 +1,9 @@
 //! Held-parent installation and verification for a single retained output file.
 use provenant_core::RelativePath;
 use provenant_records::{CanonicalV1, FileDigest, PathWire};
-use provenant_supervisor::fs::{FileKind, FsError, Metadata, Publication, PublishMode, SafeDir};
+use provenant_supervisor::fs::{FsError, Metadata, Publication, PublishMode, SafeDir};
 use serde::Serialize;
 use std::ffi::OsStr;
-use std::io::{Read, Seek, SeekFrom};
 use std::path::{Component, Path};
 use thiserror::Error;
 
@@ -70,7 +69,7 @@ impl OutputCustody {
         limit: u64,
     ) -> Result<InstalledOutput, OutputCustodyError> {
         let name = wire_name(destination_name)?;
-        let (bytes, source_identity) = read_regular(source_parent, source_name, limit)?;
+        let (bytes, _) = read_regular(source_parent, source_name, limit)?;
         let digest = CanonicalV1::file_digest(&bytes);
         let parent = destination_parent.metadata()?;
         let publication = destination_parent.atomic_write(
@@ -94,9 +93,6 @@ impl OutputCustody {
             || installed.links != 1
         {
             return Err(OutputCustodyError::IdentityMismatch);
-        }
-        if source_identity.kind != FileKind::Regular || source_identity.links != 1 {
-            return Err(OutputCustodyError::UnsupportedFile);
         }
         Ok(InstalledOutput {
             name,
@@ -136,7 +132,9 @@ impl OutputCustody {
         // inode, but only the held parent can say whether the name still points
         // to that same object.
         let final_metadata = destination_parent.metadata_at(destination_name, false)?;
-        if !same_identity(&metadata, &final_metadata) || final_metadata.links != 1 {
+        if !crate::stable_read::same_metadata(&metadata, &final_metadata)
+            || final_metadata.links != 1
+        {
             return Err(OutputCustodyError::Changed);
         }
         Ok(())
@@ -158,49 +156,13 @@ fn read_regular(
     name: &OsStr,
     limit: u64,
 ) -> Result<(Vec<u8>, Metadata), OutputCustodyError> {
-    let entry = parent.metadata_at(name, false)?;
-    if entry.kind != FileKind::Regular || entry.links != 1 {
-        return Err(OutputCustodyError::UnsupportedFile);
-    }
-    if entry.size > limit {
-        return Err(OutputCustodyError::TooLarge);
-    }
-    let mut file = parent.open_read(name)?;
-    let before = file.metadata()?;
-    if !same_metadata(&entry, &before) {
-        return Err(OutputCustodyError::Changed);
-    }
-    file.seek(SeekFrom::Start(0))?;
-    let mut bytes = Vec::new();
-    (&mut *file)
-        .take(limit.saturating_add(1))
-        .read_to_end(&mut bytes)?;
-    if bytes.len() as u64 > limit {
-        return Err(OutputCustodyError::TooLarge);
-    }
-    let after = file.metadata()?;
-    if !same_metadata(&before, &after) || after.size != bytes.len() as u64 {
-        return Err(OutputCustodyError::Changed);
-    }
-    let named_after_read = parent.metadata_at(name, false)?;
-    if !same_metadata(&after, &named_after_read) {
-        return Err(OutputCustodyError::Changed);
-    }
-    Ok((bytes, after))
-}
-
-fn same_metadata(left: &Metadata, right: &Metadata) -> bool {
-    left.kind == right.kind
-        && left.device == right.device
-        && left.inode == right.inode
-        && left.links == right.links
-        && left.size == right.size
-        && left.modified_ns == right.modified_ns
-        && left.mode == right.mode
-        && left.uid == right.uid
-}
-fn same_identity(left: &Metadata, right: &Metadata) -> bool {
-    left.kind == right.kind && left.device == right.device && left.inode == right.inode
+    crate::stable_read::read_regular(parent, name, limit).map_err(|error| match error {
+        crate::stable_read::ReadError::Unsupported => OutputCustodyError::UnsupportedFile,
+        crate::stable_read::ReadError::TooLarge => OutputCustodyError::TooLarge,
+        crate::stable_read::ReadError::Changed => OutputCustodyError::Changed,
+        crate::stable_read::ReadError::Filesystem(error) => OutputCustodyError::Filesystem(error),
+        crate::stable_read::ReadError::Io(error) => OutputCustodyError::Io(error),
+    })
 }
 
 #[cfg(test)]

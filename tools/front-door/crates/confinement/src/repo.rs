@@ -6,8 +6,8 @@
 use provenant_supervisor::fs::{
     FileKind, FsError, Metadata, SafeDir, SafeFs, canonicalize, effective_uid,
 };
+use sha2::{Digest as _, Sha256};
 use std::ffi::{OsStr, OsString};
-use std::io::Read;
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
@@ -16,6 +16,7 @@ use thiserror::Error;
 const GIT_MARKER: &str = ".git";
 const GITFILE_LIMIT: u64 = 4096;
 const ALTERNATES_LIMIT: u64 = 1024 * 1024;
+const CONFIG_LIMIT: u64 = 1024 * 1024;
 
 #[derive(Debug, Error)]
 pub enum RepoError {
@@ -35,8 +36,24 @@ pub enum RepoError {
     IdentityChanged,
     #[error("Git metadata file exceeds its bound")]
     MetadataTooLarge,
+    #[error("repository has not passed its open-time Git probes")]
+    Unprobed,
     #[error(transparent)]
     Fs(#[from] FsError),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RepoObjectFormat {
+    Sha1,
+    Sha256,
+}
+
+/// Eagerly verified Git properties cached on an opened repository. Utility
+/// operations reuse this snapshot instead of probing mutable Git config again.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct RepoProbeData {
+    pub object_format: RepoObjectFormat,
+    pub attribute_source: String,
 }
 
 /// A repository-relative, byte-preserving path. The value cannot name an
@@ -87,6 +104,15 @@ pub struct GitRefName(String);
 #[error("Git ref must be a valid local branch name")]
 pub struct GitRefError;
 
+/// User-selected Git revision syntax, passed only as one `rev-parse` argument
+/// after `--end-of-options` and resolved to a full commit OID before use.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct GitRevision(String);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Error)]
+#[error("Git revision must be bounded printable text and cannot start with `-`")]
+pub struct GitRevisionError;
+
 impl GitRefName {
     pub fn new(value: impl AsRef<str>) -> Result<Self, GitRefError> {
         let value = value.as_ref();
@@ -113,6 +139,24 @@ impl GitRefName {
 
     pub fn short_name(&self) -> &str {
         self.0.strip_prefix("refs/heads/").unwrap_or_default()
+    }
+}
+
+impl GitRevision {
+    pub fn new(value: impl AsRef<str>) -> Result<Self, GitRevisionError> {
+        let value = value.as_ref();
+        if value.is_empty()
+            || value.len() > 1024
+            || value.starts_with('-')
+            || !value.bytes().all(|byte| byte.is_ascii_graphic())
+        {
+            return Err(GitRevisionError);
+        }
+        Ok(Self(value.to_owned()))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
     }
 }
 
@@ -155,10 +199,12 @@ pub struct VerifiedRepo {
     marker_bytes: Option<Vec<u8>>,
     commondir_bytes: Option<Vec<u8>>,
     gitdir_backlink_bytes: Option<Vec<u8>>,
+    probe_data: Option<RepoProbeData>,
+    config_digest: Option<[u8; 32]>,
 }
 
 impl VerifiedRepo {
-    pub fn open(fs: Arc<dyn SafeFs>, path: impl AsRef<Path>) -> Result<Self, RepoError> {
+    fn open_structure(fs: Arc<dyn SafeFs>, path: impl AsRef<Path>) -> Result<Self, RepoError> {
         let (root_path, root) = open_canonical_anchor(fs.as_ref(), path.as_ref(), false)?;
         let root_identity = root.metadata()?;
         if root_identity.kind != FileKind::Directory
@@ -274,7 +320,30 @@ impl VerifiedRepo {
             marker_bytes,
             commondir_bytes,
             gitdir_backlink_bytes,
+            probe_data: None,
+            config_digest: None,
         })
+    }
+
+    /// Open and structurally verify the repository, then perform the supplied
+    /// fixed Git safety probes before exposing it to callers.
+    pub(crate) fn open<E>(
+        fs: Arc<dyn SafeFs>,
+        path: impl AsRef<Path>,
+        probe: impl FnOnce(&VerifiedRepo) -> Result<RepoProbeData, E>,
+    ) -> Result<Self, E>
+    where
+        E: From<RepoError>,
+    {
+        let mut repo = Self::open_structure(fs, path).map_err(E::from)?;
+        let config_before = repo.configuration_digest().map_err(E::from)?;
+        repo.probe_data = Some(probe(&repo)?);
+        let config_after = repo.configuration_digest().map_err(E::from)?;
+        if config_before != config_after {
+            return Err(E::from(RepoError::IdentityChanged));
+        }
+        repo.config_digest = Some(config_after);
+        Ok(repo)
     }
 
     pub fn root_path(&self) -> &Path {
@@ -313,8 +382,34 @@ impl VerifiedRepo {
         self.common_identity
     }
 
+    pub(crate) fn probe_data(&self) -> Option<&RepoProbeData> {
+        self.probe_data.as_ref()
+    }
+
+    fn configuration_digest(&self) -> Result<[u8; 32], RepoError> {
+        let mut digest = Sha256::new();
+        for (marker, directory) in [(b'P', &*self.private), (b'C', &*self.common)] {
+            for name in [OsStr::new("config"), OsStr::new("config.worktree")] {
+                digest.update([marker]);
+                digest.update(name.as_bytes());
+                match read_optional_bounded(directory, name, CONFIG_LIMIT)? {
+                    Some(bytes) => {
+                        digest.update([1]);
+                        digest.update((bytes.len() as u64).to_be_bytes());
+                        digest.update(bytes);
+                    }
+                    None => digest.update([0]),
+                }
+            }
+        }
+        Ok(digest.finalize().into())
+    }
+
     pub fn revalidate(&self) -> Result<(), RepoError> {
-        let current = Self::open(self.fs.clone(), &self.root_path)?;
+        let current = Self::open_structure(self.fs.clone(), &self.root_path)?;
+        let Some(config_digest) = self.config_digest else {
+            return Err(RepoError::Unprobed);
+        };
         if !self.root_identity.same_identity(&current.root_identity)
             || !self
                 .private_identity
@@ -326,6 +421,7 @@ impl VerifiedRepo {
             || self.gitdir_backlink_bytes != current.gitdir_backlink_bytes
             || self.private_path != current.private_path
             || self.common_path != current.common_path
+            || config_digest != current.configuration_digest()?
         {
             return Err(RepoError::IdentityChanged);
         }
@@ -358,7 +454,10 @@ pub fn verify_worktree(
     path: impl AsRef<Path>,
 ) -> Result<VerifiedWorktree, RepoError> {
     repo.revalidate()?;
-    let worktree = VerifiedRepo::open(repo.fs.clone(), path)?;
+    let mut worktree = VerifiedRepo::open_structure(repo.fs.clone(), path)?;
+    if repo.probe_data.is_none() || repo.config_digest.is_none() {
+        return Err(RepoError::Unprobed);
+    }
     if !worktree
         .common_identity
         .same_identity(&repo.common_identity)
@@ -368,10 +467,11 @@ pub fn verify_worktree(
     if worktree
         .private_identity
         .same_identity(&worktree.common_identity)
-        && !worktree.root_identity.same_identity(&repo.root_identity)
     {
         return Err(RepoError::InvalidRegistration);
     }
+    worktree.probe_data = repo.probe_data.clone();
+    worktree.config_digest = Some(worktree.configuration_digest()?);
     worktree.revalidate()?;
     Ok(VerifiedWorktree { repo: worktree })
 }
@@ -418,34 +518,19 @@ fn read_optional_bounded(
 }
 
 fn read_bounded(directory: &dyn SafeDir, name: &OsStr, limit: u64) -> Result<Vec<u8>, RepoError> {
-    let before = directory.metadata_at(name, false)?;
-    if before.kind != FileKind::Regular {
-        return Err(RepoError::InvalidGitDirectory);
-    }
-    let mut file = directory.open_read(name)?;
-    let opened = file.metadata()?;
-    if !before.same_identity(&opened) {
-        return Err(RepoError::IdentityChanged);
-    }
-    let mut bytes = Vec::new();
-    (&mut file)
-        .take(limit.saturating_add(1))
-        .read_to_end(&mut bytes)
-        .map_err(|source| {
-            RepoError::Fs(FsError::Io {
+    crate::stable_read::read_regular(directory, name, limit)
+        .map(|(bytes, _)| bytes)
+        .map_err(|error| match error {
+            crate::stable_read::ReadError::Unsupported => RepoError::InvalidGitDirectory,
+            crate::stable_read::ReadError::TooLarge => RepoError::MetadataTooLarge,
+            crate::stable_read::ReadError::Changed => RepoError::IdentityChanged,
+            crate::stable_read::ReadError::Filesystem(error) => RepoError::Fs(error),
+            crate::stable_read::ReadError::Io(source) => RepoError::Fs(FsError::Io {
                 operation: "read Git metadata",
                 path: PathBuf::from(name),
                 source,
-            })
-        })?;
-    if bytes.len() as u64 > limit {
-        return Err(RepoError::MetadataTooLarge);
-    }
-    let after = directory.metadata_at(name, false)?;
-    if !opened.same_identity(&after) {
-        return Err(RepoError::IdentityChanged);
-    }
-    Ok(bytes)
+            }),
+        })
 }
 
 /// A Git path file contains exactly one `gitdir: ` line, or a one-line path in
@@ -474,10 +559,10 @@ fn resolve_git_path(base: &Path, target: &Path) -> Result<PathBuf, RepoError> {
     } else {
         base.join(target)
     };
-    normalize_absolute(&joined, true)
+    normalise_absolute(&joined, true)
 }
 
-fn normalize_absolute(path: &Path, allow_parent: bool) -> Result<PathBuf, RepoError> {
+fn normalise_absolute(path: &Path, allow_parent: bool) -> Result<PathBuf, RepoError> {
     if !path.is_absolute() || path.as_os_str().as_bytes().contains(&0) {
         return Err(RepoError::InvalidPath);
     }
@@ -518,7 +603,7 @@ fn open_canonical_anchor(
     path: &Path,
     allow_parent: bool,
 ) -> Result<(PathBuf, Box<dyn SafeDir>), RepoError> {
-    let candidate = normalize_absolute(path, allow_parent)?;
+    let candidate = normalise_absolute(path, allow_parent)?;
     let initial = fs.open_anchor(&candidate)?;
     let before = initial.metadata()?;
     if before.kind != FileKind::Directory {
@@ -531,4 +616,72 @@ fn open_canonical_anchor(
         return Err(RepoError::IdentityChanged);
     }
     Ok((canonical, held))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        GitRevision, GitRevisionError, RepoError, RepoObjectFormat, RepoProbeData, VerifiedRepo,
+        verify_worktree,
+    };
+    use provenant_supervisor::fs::LocalFs;
+    use std::fs;
+    use std::sync::Arc;
+
+    #[test]
+    fn verify_worktree_refuses_the_primary_checkout() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::create_dir(temp.path().join(".git")).unwrap();
+        let repo = VerifiedRepo::open(Arc::new(LocalFs), temp.path(), |_| {
+            Ok::<_, RepoError>(RepoProbeData {
+                object_format: RepoObjectFormat::Sha1,
+                attribute_source: String::new(),
+            })
+        })
+        .unwrap();
+
+        assert!(matches!(
+            verify_worktree(&repo, temp.path()),
+            Err(RepoError::InvalidRegistration)
+        ));
+    }
+
+    #[test]
+    fn git_revision_accepts_frozen_base_refs_and_refuses_option_injection() {
+        assert_eq!(
+            GitRevision::new("origin/main").unwrap().as_str(),
+            "origin/main"
+        );
+        assert_eq!(GitRevision::new("HEAD~2").unwrap().as_str(), "HEAD~2");
+        assert!(matches!(
+            GitRevision::new("--upload-pack=evil"),
+            Err(GitRevisionError)
+        ));
+        assert!(matches!(
+            GitRevision::new("origin/main\nHEAD"),
+            Err(GitRevisionError)
+        ));
+    }
+
+    #[test]
+    fn repo_revalidation_detects_config_changes_without_a_second_git_probe() {
+        let temp = tempfile::tempdir().unwrap();
+        let git = temp.path().join(".git");
+        fs::create_dir(&git).unwrap();
+        fs::write(git.join("config"), b"[core]\nrepositoryformatversion = 0\n").unwrap();
+        let repo = VerifiedRepo::open(Arc::new(LocalFs), temp.path(), |_| {
+            Ok::<_, RepoError>(RepoProbeData {
+                object_format: RepoObjectFormat::Sha1,
+                attribute_source: String::new(),
+            })
+        })
+        .unwrap();
+        fs::write(
+            git.join("config"),
+            b"[filter.poison]\nclean = touch /tmp/pwned\n",
+        )
+        .unwrap();
+
+        assert!(matches!(repo.revalidate(), Err(RepoError::IdentityChanged)));
+    }
 }

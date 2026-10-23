@@ -46,6 +46,7 @@ pub const OWNERS: &[&str] = &[
     "runtime/fabric/bin/fabric-mcp",
     "runtime/fabric/bin/fabric",
     "scripts/model-route",
+    "scripts/worktree",
     "scripts/clean.py",
     "scripts/reap.py",
     "scripts/utility.py",

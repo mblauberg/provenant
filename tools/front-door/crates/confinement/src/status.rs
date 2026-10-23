@@ -18,6 +18,7 @@ pub enum StatusKind {
     Ignored,
     RenameOrCopy,
     Conflict,
+    Unknown,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -63,9 +64,18 @@ pub fn parse_porcelain_v2_z(raw: &[u8]) -> Result<Vec<StatusPath>, StatusError> 
                 if pieces.len() != 9 || pieces.first() != Some(&&b"1"[..]) || path.is_empty() {
                     return Err(StatusError::Malformed);
                 }
+                let kind = if pieces.get(2) != Some(&&b"N..."[..])
+                    || pieces
+                        .get(3..6)
+                        .is_some_and(|modes| modes.contains(&&b"160000"[..]))
+                {
+                    StatusKind::Unknown
+                } else {
+                    StatusKind::Changed
+                };
                 paths.push(StatusPath {
                     path: path.to_vec(),
-                    kind: StatusKind::Changed,
+                    kind,
                     original_path: None,
                 });
             }
@@ -79,9 +89,18 @@ pub fn parse_porcelain_v2_z(raw: &[u8]) -> Result<Vec<StatusPath>, StatusError> 
                 if original.is_empty() {
                     return Err(StatusError::Malformed);
                 }
+                let kind = if pieces.get(2) != Some(&&b"N..."[..])
+                    || pieces
+                        .get(3..6)
+                        .is_some_and(|modes| modes.contains(&&b"160000"[..]))
+                {
+                    StatusKind::Unknown
+                } else {
+                    StatusKind::RenameOrCopy
+                };
                 paths.push(StatusPath {
                     path: path.to_vec(),
-                    kind: StatusKind::RenameOrCopy,
+                    kind,
                     original_path: Some(original.to_vec()),
                 });
             }
@@ -155,6 +174,15 @@ mod tests {
         assert_eq!(
             parse_porcelain_v2_z(conflict).map(|records| records.first().map(|row| row.kind)),
             Ok(Some(StatusKind::Conflict))
+        );
+    }
+
+    #[test]
+    fn gitlink_status_records_are_unknown_and_require_review() {
+        let raw = b"1 A. N... 000000 160000 160000 0000000000000000000000000000000000000000 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa sub\0";
+        assert_eq!(
+            parse_porcelain_v2_z(raw).map(|records| records.first().map(|row| row.kind)),
+            Ok(Some(StatusKind::Unknown))
         );
     }
 }

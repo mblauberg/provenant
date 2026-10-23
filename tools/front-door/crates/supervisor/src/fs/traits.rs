@@ -91,6 +91,9 @@ pub trait SafeFs: Send + Sync {
     fn open_anchor(&self, path: &Path) -> Result<Box<dyn SafeDir>>;
     fn open_source(&self, path: &Path) -> Result<Box<dyn SafeFile>>;
     fn temporary_name(&self) -> Result<OsString>;
+    fn entropy_128(&self) -> Result<[u8; 16]> {
+        super::entropy_128()
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default)]

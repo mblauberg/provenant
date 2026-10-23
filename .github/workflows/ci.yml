@@ -430,6 +430,8 @@ jobs:
         run: rustup toolchain install 1.99.1 --profile minimal
       - name: Run macOS supervisor custody tests
         working-directory: tools/front-door
+        env:
+          PROVENANT_CONFINEMENT_REQUIRED: "1"
         run: cargo test -p provenant-supervisor -p provenant-confinement --locked
       # No target cache: install builds from a clean target, and cached
       # proc-macro dylibs would hide the failure this job exists to catch.

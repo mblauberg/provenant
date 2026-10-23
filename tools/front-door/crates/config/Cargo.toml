@@ -7,10 +7,10 @@ license.workspace = true
 publish = false
 
 [features]
-test-support = ["dep:serde_json"]
+test-support = []
 
 [dependencies]
-serde_json = { workspace = true, optional = true }
+serde_json = { workspace = true }
 provenant-core = { workspace = true }
 provenant-records = { workspace = true }
 provenant-supervisor = { workspace = true }

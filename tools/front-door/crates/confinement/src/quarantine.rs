@@ -1,11 +1,11 @@
 //! Protected instruction snapshots and post-quiescence quarantine.
 use crate::git_evidence::{
     FileSnapshot, Git, GitEvidenceError, IndexFingerprint, MAX_DISCLOSURE_BYTES,
-    MAX_DISCLOSURE_FILES, TrackedFingerprint, canonical_paths, read_git, read_head,
-    read_index_fingerprint, read_optional_file, read_tracked_file, refuse_index_lock,
+    MAX_DISCLOSURE_FILES, TrackedFingerprint, canonical_paths, open_parent, read_index_fingerprint,
+    read_optional_file, read_tracked_file, refuse_index_lock,
 };
 use crate::repo::RepoPath;
-use crate::status::{StatusError, StatusKind, parse_porcelain_v2_z};
+use crate::status::{StatusError, StatusKind, StatusPath, parse_porcelain_v2_z};
 use crate::utility::GitRead;
 use provenant_core::{GitOid, RelativePath};
 use provenant_records::{CanonicalV1, FileDigest, PathWire};
@@ -187,7 +187,6 @@ struct EvidenceManifest {
     commit_diff_digest: FileDigest,
     index_diff_digest: FileDigest,
     worktree_diff_digest: FileDigest,
-    diff_digest: FileDigest,
     paths: Vec<ArchivedPath>,
     unaccounted_paths: Vec<ArchivedUnaccountedPath>,
     review_required: bool,
@@ -216,11 +215,7 @@ fn capture_instruction_snapshot(
     // rename has no atomic preservation primitive; refuse rather than copy/unlink.
     let archive_identity = quarantine_dir.metadata()?;
     validate_archive(git.repo.root_identity().device, &archive_identity)?;
-    let executor = git.executor;
     let repo = git.repo;
-    let runtime = git.runtime;
-    let budget = git.budget;
-    let cancel = git.cancel;
     if protected.is_empty() || protected.len() > MAX_DISCLOSURE_FILES {
         return Err(QuarantineError::Incomplete);
     }
@@ -233,24 +228,18 @@ fn capture_instruction_snapshot(
     }) {
         return Err(QuarantineError::InvalidPath);
     }
-    let head = read_head(executor, repo, runtime, budget, cancel)?;
+    let head = git.head()?;
     refuse_index_lock(repo.private_dir())?;
     let index = read_index_fingerprint(repo.private_dir())?;
     let mut tree = Vec::new();
     for item in &protected {
-        let tree_raw = read_git(
-            executor,
-            repo,
-            runtime,
-            budget,
-            cancel,
-            GitRead::TreeEntries {
+        let tree_raw = git
+            .read(GitRead::TreeEntries {
                 oid: head,
                 prefix: item.path.clone(),
-            },
-        )?
-        .stdout
-        .bytes;
+            })?
+            .stdout
+            .bytes;
         tree.extend(parse_tree_entries(&tree_raw)?);
         if tree.len() > MAX_DISCLOSURE_FILES {
             return Err(QuarantineError::Incomplete);
@@ -260,18 +249,12 @@ fn capture_instruction_snapshot(
         .iter()
         .map(|item| item.path.clone())
         .collect::<Vec<_>>();
-    let index_records = read_git(
-        executor,
-        repo,
-        runtime,
-        budget,
-        cancel,
-        GitRead::IndexEntries {
+    let index_records = git
+        .read(GitRead::IndexEntries {
             paths: paths.clone(),
-        },
-    )?
-    .stdout
-    .bytes;
+        })?
+        .stdout
+        .bytes;
     let index_by_path = parse_index_entries(&index_records)?;
     let mut total = 0_u64;
     let mut files = Vec::with_capacity(protected.len());
@@ -314,7 +297,7 @@ fn capture_instruction_snapshot(
     }
     let index_after = read_index_fingerprint(repo.private_dir())?;
     refuse_index_lock(repo.private_dir())?;
-    let head_after = read_head(executor, repo, runtime, budget, cancel)?;
+    let head_after = git.head()?;
     repo.revalidate()
         .map_err(|_| QuarantineError::ConcurrentChange)?;
     if head != head_after || index != index_after {
@@ -350,11 +333,7 @@ fn quarantine_instruction_changes(
     snapshot: &InstructionSnapshot,
     quarantine_dir: &dyn SafeDir,
 ) -> Result<QuarantineOutcome, QuarantineError> {
-    let executor = git.executor;
     let repo = git.repo;
-    let runtime = git.runtime;
-    let budget = git.budget;
-    let cancel = git.cancel;
     let archive_identity = quarantine_dir.metadata()?;
     validate_archive(repo.root_identity().device, &archive_identity)?;
     if !snapshot.archive_identity.same_identity(&archive_identity) {
@@ -367,17 +346,29 @@ fn quarantine_instruction_changes(
         .map_err(|_| QuarantineError::ConcurrentChange)?;
     refuse_index_lock(repo.private_dir())?;
     let index_before = read_index_fingerprint(repo.private_dir())?;
-    let head_before = read_head(executor, repo, runtime, budget, cancel)?;
-    let status = read_git(executor, repo, runtime, budget, cancel, GitRead::Status)?;
-    let status_paths = parse_porcelain_v2_z(&status.stdout.bytes)?;
+    let head_before = git.head()?;
+    let status = git.read(GitRead::StatusIncludingIgnored)?;
+    let mut status_paths = parse_porcelain_v2_z(&status.stdout.bytes)?;
+    for entry in parse_index_entries(
+        &git.read(GitRead::IndexEntries { paths: Vec::new() })?
+            .stdout
+            .bytes,
+    )? {
+        if entry.mode == 0o160000
+            && is_protected_evidence_path(&entry.path)
+            && !status_paths.iter().any(|record| record.path == entry.path)
+        {
+            status_paths.push(StatusPath {
+                path: entry.path,
+                kind: StatusKind::Unknown,
+                original_path: None,
+            });
+        }
+    }
     let selected = snapshot
         .files
         .iter()
         .map(|file| file.protected.path.clone())
-        .collect::<Vec<_>>();
-    let selected_names = selected
-        .iter()
-        .map(|path| path_bytes(path).to_vec())
         .collect::<Vec<_>>();
     let mut evidence_paths = selected.clone();
     for record in &status_paths {
@@ -393,44 +384,26 @@ fn quarantine_instruction_changes(
     if evidence_paths.len() > MAX_DISCLOSURE_FILES {
         return Err(QuarantineError::Incomplete);
     }
-    let commit_diff = read_git(
-        executor,
-        repo,
-        runtime,
-        budget,
-        cancel,
-        GitRead::Diff {
+    let commit_diff = git
+        .read(GitRead::Diff {
             base: snapshot.head,
             head: head_before,
             paths: evidence_paths.clone(),
-        },
-    )?
-    .stdout
-    .bytes;
-    let index_diff = read_git(
-        executor,
-        repo,
-        runtime,
-        budget,
-        cancel,
-        GitRead::DiffIndex {
+        })?
+        .stdout
+        .bytes;
+    let index_diff = git
+        .read(GitRead::DiffIndex {
             paths: evidence_paths.clone(),
-        },
-    )?
-    .stdout
-    .bytes;
-    let worktree_diff = read_git(
-        executor,
-        repo,
-        runtime,
-        budget,
-        cancel,
-        GitRead::DiffWorktree {
+        })?
+        .stdout
+        .bytes;
+    let worktree_diff = git
+        .read(GitRead::DiffWorktree {
             paths: evidence_paths.clone(),
-        },
-    )?
-    .stdout
-    .bytes;
+        })?
+        .stdout
+        .bytes;
     let mut review = head_before != snapshot.head || index_before != snapshot.index;
     let mut current = Vec::with_capacity(snapshot.files.len());
     let mut current_unreadable = Vec::with_capacity(snapshot.files.len());
@@ -483,9 +456,9 @@ fn quarantine_instruction_changes(
             if !is_protected_evidence_path(raw_path) {
                 continue;
             }
-            let selected_path = selected_names
+            let selected_path = selected
                 .iter()
-                .any(|path| path.as_slice() == raw_path.as_slice());
+                .any(|path| path_bytes(path) == raw_path.as_slice());
             if !selected_path {
                 review = true;
                 let path = RepoPath::new(PathBuf::from(OsString::from_vec(raw_path.clone())))
@@ -514,26 +487,23 @@ fn quarantine_instruction_changes(
                 });
             }
         }
-        if matches!(record.kind, StatusKind::Conflict | StatusKind::RenameOrCopy) {
+        if matches!(
+            record.kind,
+            StatusKind::Conflict | StatusKind::RenameOrCopy | StatusKind::Unknown
+        ) {
             review = true;
         }
     }
-    let index_records_after = read_git(
-        executor,
-        repo,
-        runtime,
-        budget,
-        cancel,
-        GitRead::IndexEntries {
+    let index_records_after = git
+        .read(GitRead::IndexEntries {
             paths: selected.clone(),
-        },
-    )?
-    .stdout
-    .bytes;
+        })?
+        .stdout
+        .bytes;
     let index_after_observation = read_index_fingerprint(repo.private_dir())?;
     refuse_index_lock(repo.private_dir())?;
-    let head_after_observation = read_head(executor, repo, runtime, budget, cancel)?;
-    let status_after = read_git(executor, repo, runtime, budget, cancel, GitRead::Status)?;
+    let head_after_observation = git.head()?;
+    let status_after = git.read(GitRead::StatusIncludingIgnored)?;
     if index_before != index_after_observation
         || head_before != head_after_observation
         || status.stdout.bytes != status_after.stdout.bytes
@@ -548,31 +518,30 @@ fn quarantine_instruction_changes(
 
     let mut manifest_paths = Vec::new();
     let mut manifest_unaccounted = Vec::new();
-    let mut archive_bytes = status.stdout.bytes.len() as u64;
-    archive_bytes = archive_bytes
-        .checked_add(commit_diff.len() as u64)
-        .and_then(|value| value.checked_add(index_diff.len() as u64))
-        .and_then(|value| value.checked_add(worktree_diff.len() as u64))
-        .ok_or(QuarantineError::Incomplete)?;
-    put(
+    let mut archive_bytes = 0;
+    put_bounded(
         quarantine_dir,
         OsStr::new("git-status.z"),
         &status.stdout.bytes,
+        &mut archive_bytes,
     )?;
-    put(
+    put_bounded(
         quarantine_dir,
         OsStr::new("protected.head.patch"),
         &commit_diff,
+        &mut archive_bytes,
     )?;
-    put(
+    put_bounded(
         quarantine_dir,
         OsStr::new("protected.index.patch"),
         &index_diff,
+        &mut archive_bytes,
     )?;
-    put(
+    put_bounded(
         quarantine_dir,
         OsStr::new("protected.disk.patch"),
         &worktree_diff,
+        &mut archive_bytes,
     )?;
     quarantine_dir.mkdir(OsStr::new("blobs"), 0o700)?;
     let blobs = quarantine_dir.open_verified_directory(OsStr::new("blobs"))?;
@@ -580,16 +549,20 @@ fn quarantine_instruction_changes(
         let prefix = format!("{index:08}");
         let before_name = format!("{prefix}.before");
         let after_name = format!("{prefix}.after");
-        archive_bytes = archive_bytes
-            .checked_add(file.bytes.len() as u64)
-            .ok_or(QuarantineError::Incomplete)?;
-        put(blobs.as_ref(), OsStr::new(&before_name), &file.bytes)?;
+        put_bounded(
+            blobs.as_ref(),
+            OsStr::new(&before_name),
+            &file.bytes,
+            &mut archive_bytes,
+        )?;
         let observed = current.get(index).and_then(Option::as_ref);
         if let Some(observed) = observed {
-            archive_bytes = archive_bytes
-                .checked_add(observed.bytes.len() as u64)
-                .ok_or(QuarantineError::Incomplete)?;
-            put(blobs.as_ref(), OsStr::new(&after_name), &observed.bytes)?;
+            put_bounded(
+                blobs.as_ref(),
+                OsStr::new(&after_name),
+                &observed.bytes,
+                &mut archive_bytes,
+            )?;
         }
         let relative = RelativePath::parse(file.protected.path.as_path())
             .map_err(|_| QuarantineError::InvalidPath)?;
@@ -626,10 +599,12 @@ fn quarantine_instruction_changes(
     for (index, item) in unaccounted_snapshots.iter().enumerate() {
         let current_blob = if let Some(current) = item.current.as_ref() {
             let blob_name = format!("unaccounted-{index:08}.current");
-            archive_bytes = archive_bytes
-                .checked_add(current.bytes.len() as u64)
-                .ok_or(QuarantineError::Incomplete)?;
-            put(blobs.as_ref(), OsStr::new(&blob_name), &current.bytes)?;
+            put_bounded(
+                blobs.as_ref(),
+                OsStr::new(&blob_name),
+                &current.bytes,
+                &mut archive_bytes,
+            )?;
             Some(blob_name)
         } else {
             None
@@ -647,10 +622,6 @@ fn quarantine_instruction_changes(
             unreadable: item.unreadable,
         });
     }
-    if archive_bytes > MAX_DISCLOSURE_BYTES.saturating_mul(3) {
-        return Err(QuarantineError::Incomplete);
-    }
-    let digest_diff = digest_parts(&commit_diff, &index_diff, &worktree_diff);
     let evidence = EvidenceManifest {
         schema_version: 1,
         scope: snapshot.scope,
@@ -663,7 +634,6 @@ fn quarantine_instruction_changes(
         commit_diff_digest: CanonicalV1::file_digest(&commit_diff),
         index_diff_digest: CanonicalV1::file_digest(&index_diff),
         worktree_diff_digest: CanonicalV1::file_digest(&worktree_diff),
-        diff_digest: digest_diff,
         paths: manifest_paths,
         unaccounted_paths: manifest_unaccounted,
         review_required: review,
@@ -776,6 +746,19 @@ fn put(directory: &dyn SafeDir, name: &OsStr, bytes: &[u8]) -> Result<(), Quaran
     }
 }
 
+fn put_bounded(
+    directory: &dyn SafeDir,
+    name: &OsStr,
+    bytes: &[u8],
+    total: &mut u64,
+) -> Result<(), QuarantineError> {
+    *total = (*total)
+        .checked_add(u64::try_from(bytes.len()).map_err(|_| QuarantineError::Incomplete)?)
+        .filter(|size| *size <= MAX_DISCLOSURE_BYTES.saturating_mul(3))
+        .ok_or(QuarantineError::Incomplete)?;
+    put(directory, name, bytes)
+}
+
 /// Preserve the old inode in quarantine before publishing a baseline. No
 /// operation replaces a concurrently created destination. The retained name is
 /// recorded before mutation and never unlinked: an open writer can still use it.
@@ -792,7 +775,11 @@ fn restore_file(
     archive: &dyn SafeDir,
     retained: &OsStr,
 ) -> Result<(), QuarantineError> {
-    let (parent, leaf) = open_parent(root, path)?;
+    let (parent, leaf) = open_parent(root, path).map_err(|error| match error {
+        GitEvidenceError::InvalidPath => QuarantineError::InvalidPath,
+        GitEvidenceError::Filesystem(error) => QuarantineError::Filesystem(error),
+        error => QuarantineError::Git(error),
+    })?;
     if let Some(observed) = observed {
         parent.rename_noreplace_to(&leaf, archive, retained)?;
         let source_sync = parent.sync();
@@ -838,43 +825,6 @@ fn restore_file(
             Err(QuarantineError::DurabilityUnconfirmed)
         }
     }
-}
-
-enum HeldDir<'a> {
-    Borrowed(&'a dyn SafeDir),
-    Owned(Box<dyn SafeDir>),
-}
-impl<'a> std::ops::Deref for HeldDir<'a> {
-    type Target = dyn SafeDir + 'a;
-    fn deref(&self) -> &Self::Target {
-        match self {
-            Self::Borrowed(directory) => *directory,
-            Self::Owned(directory) => directory.as_ref(),
-        }
-    }
-}
-fn open_parent<'a>(
-    root: &'a dyn SafeDir,
-    path: &RepoPath,
-) -> Result<(HeldDir<'a>, OsString), QuarantineError> {
-    let mut parts = Vec::new();
-    for component in path.as_path().components() {
-        if let Component::Normal(name) = component {
-            parts.push(name.to_os_string());
-        } else {
-            return Err(QuarantineError::InvalidPath);
-        }
-    }
-    if parts.is_empty() {
-        return Err(QuarantineError::InvalidPath);
-    }
-    let leaf = parts.pop().ok_or(QuarantineError::InvalidPath)?;
-    let mut parent = HeldDir::Borrowed(root);
-    for component in parts {
-        let next = parent.open_verified_directory(&component)?;
-        parent = HeldDir::Owned(next);
-    }
-    Ok((parent, leaf))
 }
 
 fn parse_tree_entries(raw: &[u8]) -> Result<Vec<TreeRecord>, QuarantineError> {
@@ -964,26 +914,6 @@ fn parse_index_entries(raw: &[u8]) -> Result<Vec<IndexRecord>, QuarantineError> 
 fn split_once(bytes: &[u8], separator: u8) -> Option<(&[u8], &[u8])> {
     let index = bytes.iter().position(|byte| *byte == separator)?;
     Some((bytes.get(..index)?, bytes.get(index.saturating_add(1)..)?))
-}
-
-fn digest_parts(head: &[u8], index: &[u8], disk: &[u8]) -> FileDigest {
-    let mut bytes = Vec::with_capacity(
-        head.len()
-            .saturating_add(index.len())
-            .saturating_add(disk.len())
-            .saturating_add(32),
-    );
-    for (label, value) in [
-        (b"head".as_slice(), head),
-        (b"index".as_slice(), index),
-        (b"disk".as_slice(), disk),
-    ] {
-        bytes.extend_from_slice(&(label.len() as u64).to_le_bytes());
-        bytes.extend_from_slice(label);
-        bytes.extend_from_slice(&(value.len() as u64).to_le_bytes());
-        bytes.extend_from_slice(value);
-    }
-    CanonicalV1::file_digest(&bytes)
 }
 
 fn path_bytes(path: &RepoPath) -> &[u8] {
@@ -1190,9 +1120,9 @@ mod restore_race_tests {
 #[cfg(test)]
 mod custody_integration_tests {
     use crate::git_evidence::{Git, GitEvidenceError};
-    use crate::quarantine::{InstructionClass, ProtectedPath, QuarantineOutcome};
+    use crate::quarantine::{ProtectedPath, QuarantineOutcome};
     use crate::repo::RepoPath;
-    use crate::utility::tests::Fixture;
+    use crate::test_support::{Fixture, run_fixture_git};
     use provenant_core::{AttemptId, CancelToken, Clock, RunId, WaitBudget};
     use provenant_supervisor::clock::SystemClock;
     use provenant_supervisor::custody::{Recovery, RecoveryState, Scope, WriterBinding};
@@ -1200,6 +1130,7 @@ mod custody_integration_tests {
     use std::error::Error;
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
+    use std::path::Path;
 
     fn seed_protected(fixture: &Fixture) -> Result<(), Box<dyn Error>> {
         fs::create_dir(fixture.root.join(".agents"))?;
@@ -1208,6 +1139,43 @@ mod custody_integration_tests {
         fs::write(fixture.root.join("unrelated.txt"), b"baseline unrelated\n")?;
         fixture.run(&["add", "--", ".agents/a.md", "AGENTS.md", "unrelated.txt"])?;
         fixture.run(&["commit", "-m", "protected baseline"])?;
+        Ok(())
+    }
+
+    fn nested_git(fixture: &Fixture, path: &Path, args: &[&str]) -> Result<(), Box<dyn Error>> {
+        let env = vec![
+            ("HOME".into(), fixture.home.as_os_str().to_owned()),
+            ("GIT_CONFIG_NOSYSTEM".into(), "1".into()),
+            ("GIT_CONFIG_SYSTEM".into(), "/dev/null".into()),
+            ("GIT_CONFIG_GLOBAL".into(), "/dev/null".into()),
+            ("GIT_ATTR_NOSYSTEM".into(), "1".into()),
+            ("GIT_TERMINAL_PROMPT".into(), "0".into()),
+        ];
+        run_fixture_git(&fixture.executor, &fixture.git, path, &env, args)?;
+        Ok(())
+    }
+
+    fn seed_embedded_gitlink(fixture: &Fixture) -> Result<(), Box<dyn Error>> {
+        let nested = fixture.root.join(".agents/sub");
+        fs::create_dir_all(&nested)?;
+        nested_git(fixture, &nested, &["init", "--quiet"])?;
+        nested_git(fixture, &nested, &["config", "user.name", "Fixture"])?;
+        nested_git(
+            fixture,
+            &nested,
+            &["config", "user.email", "fixture@example.invalid"],
+        )?;
+        nested_git(fixture, &nested, &["config", "filter.poison.clean", "cat"])?;
+        fs::write(nested.join(".gitattributes"), "tracked.txt filter=poison\n")?;
+        fs::write(nested.join("tracked.txt"), "nested baseline\n")?;
+        nested_git(fixture, &nested, &["add", "."])?;
+        nested_git(fixture, &nested, &["commit", "-m", "embedded baseline"])?;
+        fs::write(
+            fixture.root.join(".gitmodules"),
+            "[submodule \"embedded\"]\n\tpath = .agents/sub\n\turl = ../embedded\n",
+        )?;
+        fixture.run(&["add", "--", ".gitmodules", ".agents/sub"])?;
+        fixture.run(&["commit", "-m", "embedded gitlink"])?;
         Ok(())
     }
 
@@ -1263,6 +1231,19 @@ mod custody_integration_tests {
         ])
     }
 
+    fn evidence_git<'a>(
+        fixture: &'a Fixture,
+        token: &'a CancelToken,
+    ) -> Result<Git<'a>, Box<dyn Error>> {
+        Ok(Git::new(
+            &fixture.executor,
+            &fixture.repo,
+            &fixture.runtime,
+            fixture.budget()?,
+            token,
+        ))
+    }
+
     #[test]
     fn quarantine_archives_then_restores_only_attributable_ordinary_edit()
     -> Result<(), Box<dyn Error>> {
@@ -1270,14 +1251,7 @@ mod custody_integration_tests {
         seed_protected(&fixture)?;
         let base = fixture.head()?;
         let token = CancelToken::new();
-        let budget = fixture.budget()?;
-        let git = Git::new(
-            &fixture.executor,
-            &fixture.repo,
-            &fixture.runtime,
-            budget,
-            &token,
-        );
+        let git = evidence_git(&fixture, &token)?;
         let scope = scope();
         let archive = archive_dir(&fixture, "ordinary-archive")?;
         let snapshot = git.snapshot_instructions(scope, &protected()?, &archive)?;
@@ -1328,13 +1302,7 @@ mod custody_integration_tests {
         seed_protected(&fixture)?;
         let base = fixture.head()?;
         let token = CancelToken::new();
-        let git = Git::new(
-            &fixture.executor,
-            &fixture.repo,
-            &fixture.runtime,
-            fixture.budget()?,
-            &token,
-        );
+        let git = evidence_git(&fixture, &token)?;
         let scope = scope();
         let archive = archive_dir(&fixture, "staged-archive")?;
         let snapshot = git.snapshot_instructions(scope, &protected()?, &archive)?;
@@ -1371,13 +1339,7 @@ mod custody_integration_tests {
         seed_protected(&fixture)?;
         let base = fixture.head()?;
         let token = CancelToken::new();
-        let git = Git::new(
-            &fixture.executor,
-            &fixture.repo,
-            &fixture.runtime,
-            fixture.budget()?,
-            &token,
-        );
+        let git = evidence_git(&fixture, &token)?;
         let scope = scope();
         let archive = archive_dir(&fixture, "policy-archive")?;
         let snapshot = git.snapshot_instructions(scope, &protected()?, &archive)?;
@@ -1414,13 +1376,7 @@ mod custody_integration_tests {
         seed_protected(&fixture)?;
         let base = fixture.head()?;
         let token = CancelToken::new();
-        let git = Git::new(
-            &fixture.executor,
-            &fixture.repo,
-            &fixture.runtime,
-            fixture.budget()?,
-            &token,
-        );
+        let git = evidence_git(&fixture, &token)?;
         let scope = scope();
         let archive = archive_dir(&fixture, "failed-archive")?;
         let snapshot = git.snapshot_instructions(scope, &protected()?, &archive)?;
@@ -1452,13 +1408,7 @@ mod custody_integration_tests {
         seed_protected(&fixture)?;
         let base = fixture.head()?;
         let token = CancelToken::new();
-        let git = Git::new(
-            &fixture.executor,
-            &fixture.repo,
-            &fixture.runtime,
-            fixture.budget()?,
-            &token,
-        );
+        let git = evidence_git(&fixture, &token)?;
         let selected = RepoPath::new(".agents/a.md")?;
         fs::write(fixture.root.join(".agents/a.md"), b"tracked disk change\n")?;
         let evidence = git.evidence(base, std::slice::from_ref(&selected))?;
@@ -1486,30 +1436,76 @@ mod custody_integration_tests {
     }
 
     #[test]
-    fn ordinary_and_control_classification_is_explicit_in_the_real_snapshot()
+    fn quarantine_sees_ignored_protected_files_and_does_not_read_embedded_repos()
     -> Result<(), Box<dyn Error>> {
         let fixture = Fixture::new()?;
         seed_protected(&fixture)?;
+        seed_embedded_gitlink(&fixture)?;
         let base = fixture.head()?;
+        fixture.run(&["config", "submodule.recurse", "true"])?;
         let token = CancelToken::new();
+        let repo = fixture.runtime.open_repo(
+            &fixture.executor,
+            &fixture.root,
+            fixture.budget()?,
+            &token,
+        )?;
         let git = Git::new(
             &fixture.executor,
-            &fixture.repo,
+            &repo,
             &fixture.runtime,
             fixture.budget()?,
             &token,
         );
-        let archive = archive_dir(&fixture, "classification-archive")?;
-        let snapshot = git.snapshot_instructions(scope(), &protected()?, &archive)?;
-        assert_eq!(snapshot.scope().generation, 1);
-        assert_eq!(snapshot.head(), base);
-        assert_eq!(
-            ProtectedPath::ordinary(".agents/a.md")?.class(),
-            InstructionClass::OrdinaryInstruction
+        let scope = scope();
+        let archive = archive_dir(&fixture, "protected-archive")?;
+        let snapshot = git.snapshot_instructions(scope, &protected()?, &archive)?;
+        let recovery = acquire_absent_recovery(&fixture, scope, base)?;
+
+        let nested = fixture.root.join(".agents/sub");
+        fs::write(nested.join("tracked.txt"), "nested second commit\n")?;
+        nested_git(&fixture, &nested, &["add", "tracked.txt"])?;
+        nested_git(
+            &fixture,
+            &nested,
+            &["commit", "-m", "advance embedded commit"],
+        )?;
+        fixture.run(&["add", "--", ".agents/sub"])?;
+        let marker = fixture._temp.path().join("embedded-filter-ran");
+        let clean_filter = format!("touch {}; cat", marker.display());
+        nested_git(
+            &fixture,
+            &nested,
+            &["config", "filter.poison.clean", clean_filter.as_str()],
+        )?;
+        fs::write(nested.join("tracked.txt"), "nested dirty worktree\n")?;
+
+        fs::write(fixture.root.join(".agents/.gitignore"), "/hidden.md\n")?;
+        fs::write(fixture.root.join(".agents/hidden.md"), "protected hidden\n")?;
+        let selected = RepoPath::new(".agents/a.md")?;
+        let _evidence = git.evidence(base, std::slice::from_ref(&selected))?;
+        assert!(!marker.exists(), "evidence reads ran a nested clean filter");
+
+        let outcome = git.quarantine_instructions(&recovery, &snapshot, &archive)?;
+        assert!(matches!(outcome, QuarantineOutcome::ReviewRequired { .. }));
+        assert!(
+            !marker.exists(),
+            "quarantine reads ran a nested clean filter"
+        );
+        let manifest = fs::read(fixture._temp.path().join("protected-archive/evidence.json"))?;
+        assert!(
+            manifest
+                .windows(b"hidden.md".len())
+                .any(|part| part == b"hidden.md")
+        );
+        assert!(
+            manifest
+                .windows(b"unknown".len())
+                .any(|part| part == b"unknown")
         );
         assert_eq!(
-            ProtectedPath::policy_control("AGENTS.md")?.class(),
-            InstructionClass::PolicyControl
+            fs::read(fixture.root.join(".agents/hidden.md"))?,
+            b"protected hidden\n"
         );
         Ok(())
     }

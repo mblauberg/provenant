@@ -1,6 +1,8 @@
-//! Closed, bounded Git and GitHub CLI reads plus separately typed Git custody
-//! mutations. Callers cannot provide argv, shell text, field names, or verbs.
-use crate::repo::{GitRefName, RepoError, RepoPath, RepoPathError, VerifiedRepo};
+//! Closed, bounded Git reads and separately typed Git custody mutations.
+use crate::repo::{
+    GitRefName, GitRevision, RepoError, RepoObjectFormat, RepoPath, RepoPathError, RepoProbeData,
+    VerifiedRepo,
+};
 use provenant_core::{CancelToken, GitOid};
 use provenant_supervisor::exec::{
     ExecError, ExecOptions, ExecOutcome, Executor, StreamPolicy, Termination,
@@ -23,7 +25,15 @@ const MAX_CLEANUP_BUDGET: Duration = Duration::from_secs(2);
 const MAX_GIT_LOG: u64 = 1000;
 const EMPTY_TREE_SHA1: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 const EMPTY_TREE_SHA256: &str = "6ef19b41225c5369f1c104d45d8d85efa9b057b53b14b4b9b939dd74decc5321";
-const GIT_COMMON: &[&str] = &["--no-pager", "--no-optional-locks", "--literal-pathspecs"];
+const GIT_COMMON: &[&str] = &[
+    "--no-pager",
+    "--no-optional-locks",
+    "--literal-pathspecs",
+    "-c",
+    "submodule.recurse=false",
+    "-c",
+    "diff.ignoreSubmodules=all",
+];
 const GIT_CONFIG_OVERRIDES: [(&str, &str); 13] = [
     ("core.hooksPath", "/dev/null"),
     ("core.fsmonitor", "false"),
@@ -35,15 +45,10 @@ const GIT_CONFIG_OVERRIDES: [(&str, &str); 13] = [
     ("diff.trustExitCode", "false"),
     ("credential.helper", ""),
     ("credential.interactive", "false"),
-    ("extensions.worktreeConfig", "false"),
+    ("extensions.worktreeConfig", "true"),
     ("core.bare", "false"),
     ("core.fsmonitorHookVersion", "0"),
 ];
-const PR_FIELDS: &str = "number,title,state,baseRefName,baseRefOid,headRefName,headRefOid,mergeCommit,mergedAt,url,reviewDecision,isDraft";
-const ISSUE_FIELDS: &str = "number,title,state,url,labels,assignees,milestone";
-const CHECK_FIELDS: &str = "name,state,link,workflow,startedAt,completedAt";
-const MERGED_PR_FIELDS: &str =
-    "number,state,headRefName,headRefOid,mergeCommit,mergedAt,baseRefName,baseRefOid";
 
 #[derive(Debug, Error)]
 pub enum UtilityError {
@@ -57,14 +62,14 @@ pub enum UtilityError {
     InvalidBudget,
     #[error("utility operation has an invalid or unsupported value")]
     InvalidOperationValue,
-    #[error("GitHub repository identity is bound to another Git common directory")]
-    RepositoryBindingMismatch,
     #[error("repository Git filters or config includes are not permitted")]
     UnsafeGitConfiguration,
     #[error("repository info/attributes is not permitted")]
     RepositoryAttributes,
     #[error("pinned Git does not support a verified attribute source")]
     AttributeSourceUnsupported,
+    #[error("verified repository was not opened with its required Git probes")]
+    UnprobedRepository,
     #[error("utility {stream} exceeded its capture limit; output cannot be used as evidence")]
     Truncated { stream: &'static str },
     #[error("utility read timed out; output cannot be used as evidence")]
@@ -147,34 +152,16 @@ impl UtilityBudget {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct PullRequestNumber(u64);
-
-impl PullRequestNumber {
-    pub fn new(value: u64) -> Result<Self, UtilityError> {
-        (value > 0)
-            .then_some(Self(value))
-            .ok_or(UtilityError::InvalidOperationValue)
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct IssueNumber(u64);
-
-impl IssueNumber {
-    pub fn new(value: u64) -> Result<Self, UtilityError> {
-        (value > 0)
-            .then_some(Self(value))
-            .ok_or(UtilityError::InvalidOperationValue)
-    }
-}
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum GitRead {
     Status,
+    StatusIncludingIgnored,
     RevParseHead,
     ResolveRef {
         name: GitRefName,
+    },
+    ResolveRevision {
+        revision: GitRevision,
     },
     Diff {
         base: GitOid,
@@ -192,13 +179,11 @@ pub enum GitRead {
         head: GitOid,
         limit: u64,
     },
-    MergeCommits {
-        since: GitOid,
-        tip: GitOid,
-        limit: u64,
-    },
     WorktreeList,
     BranchTips,
+    FirstParentHistory {
+        tip: GitOid,
+    },
     MergeBase {
         left: GitOid,
         right: GitOid,
@@ -225,115 +210,9 @@ pub enum GitRead {
     },
 }
 
-/// Explicit GitHub repository identity. Read operations never infer a target
-/// from mutable Git remotes or GitHub CLI configuration.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct GitHubRepository {
-    owner: String,
-    name: String,
-}
-
-impl GitHubRepository {
-    pub fn new(owner: impl AsRef<str>, name: impl AsRef<str>) -> Result<Self, UtilityError> {
-        let owner = owner.as_ref();
-        let name = name.as_ref();
-        if !valid_github_owner(owner) || !valid_github_repo_name(name) {
-            return Err(UtilityError::InvalidOperationValue);
-        }
-        Ok(Self {
-            owner: owner.to_owned(),
-            name: name.to_owned(),
-        })
-    }
-
-    pub fn owner(&self) -> &str {
-        &self.owner
-    }
-
-    pub fn name(&self) -> &str {
-        &self.name
-    }
-
-    pub fn qualified_name(&self) -> String {
-        format!("{}/{}", self.owner, self.name)
-    }
-}
-
-fn valid_github_owner(owner: &str) -> bool {
-    !owner.is_empty()
-        && owner.len() <= 39
-        && !owner.starts_with('-')
-        && !owner.ends_with('-')
-        && owner
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
-}
-
-fn valid_github_repo_name(name: &str) -> bool {
-    !name.is_empty()
-        && name.len() <= 100
-        && name != "."
-        && name != ".."
-        && name
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || b"._-".contains(&byte))
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct GitHubRepositoryBinding {
-    repository: GitHubRepository,
-    common_identity: Metadata,
-}
-
-impl GitHubRepositoryBinding {
-    pub fn repository(&self) -> &GitHubRepository {
-        &self.repository
-    }
-
-    fn qualified_name(&self) -> String {
-        self.repository.qualified_name()
-    }
-}
-
-/// Bind an explicit, trusted caller repository identity to the held common
-/// Git directory. The identity is an authority assertion by the caller; this
-/// function never infers it from a mutable Git remote or CLI configuration.
-pub fn bind_github_repository(
-    repo: &VerifiedRepo,
-    repository: GitHubRepository,
-) -> Result<GitHubRepositoryBinding, UtilityError> {
-    repo.revalidate()?;
-    Ok(GitHubRepositoryBinding {
-        repository,
-        common_identity: repo.common_identity(),
-    })
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum GitHubRead {
-    PullRequest {
-        repository: GitHubRepositoryBinding,
-        number: PullRequestNumber,
-    },
-    Issue {
-        repository: GitHubRepositoryBinding,
-        number: IssueNumber,
-    },
-    Checks {
-        repository: GitHubRepositoryBinding,
-        pull_request: PullRequestNumber,
-    },
-    PullRequestsMerged {
-        repository: GitHubRepositoryBinding,
-        head: GitRefName,
-        limit: u64,
-    },
-}
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum UtilityRead {
     Git(GitRead),
-    GitHub(GitHubRead),
 }
 
 /// A closed mutation set. It is crate-private: callers receive only the
@@ -360,7 +239,6 @@ pub(crate) enum GitMutation {
 pub struct UtilityRuntime {
     fs: Arc<dyn SafeFs>,
     git: ExecutablePin,
-    gh: Option<ExecutablePin>,
     home: PrivateHome,
 }
 
@@ -368,44 +246,49 @@ impl UtilityRuntime {
     pub fn new(
         fs: Arc<dyn SafeFs>,
         git: impl AsRef<Path>,
-        gh: Option<impl AsRef<Path>>,
         home: impl AsRef<Path>,
     ) -> Result<Self, UtilityError> {
         Ok(Self {
             git: ExecutablePin::new(fs.as_ref(), git.as_ref(), "git")?,
-            gh: gh
-                .map(|path| ExecutablePin::new(fs.as_ref(), path.as_ref(), "gh"))
-                .transpose()?,
             home: PrivateHome::new(fs.as_ref(), home.as_ref())?,
             fs,
         })
     }
 
-    pub fn git_only(
-        fs: Arc<dyn SafeFs>,
-        git: impl AsRef<Path>,
-        home: impl AsRef<Path>,
-    ) -> Result<Self, UtilityError> {
-        Self::new(fs, git, None::<&Path>, home)
-    }
-
-    pub fn open_repo(&self, path: impl AsRef<Path>) -> Result<VerifiedRepo, UtilityError> {
-        Ok(VerifiedRepo::open(self.fs.clone(), path)?)
+    pub fn open_repo(
+        &self,
+        executor: &dyn Executor,
+        path: impl AsRef<Path>,
+        budget: UtilityBudget,
+        cancel: &CancelToken,
+    ) -> Result<VerifiedRepo, UtilityError> {
+        if cancel.is_cancelled() {
+            return Err(UtilityError::Cancelled);
+        }
+        let budget = budget.validate()?;
+        self.revalidate()?;
+        VerifiedRepo::open(self.fs.clone(), path, |repo| {
+            verify_repo_binding(self, repo)?;
+            verify_local_git_configuration(executor, repo, self, budget, cancel)?;
+            let attribute_source = empty_attribute_source(executor, repo, self, budget, cancel)?;
+            let object_format = match attribute_source.len() {
+                40 => RepoObjectFormat::Sha1,
+                64 => RepoObjectFormat::Sha256,
+                _ => return Err(UtilityError::AttributeSourceUnsupported),
+            };
+            Ok(RepoProbeData {
+                object_format,
+                attribute_source,
+            })
+        })
     }
 
     pub fn git_program_path(&self) -> &Path {
         &self.git.path
     }
 
-    pub fn gh_program_path(&self) -> Option<&Path> {
-        self.gh.as_ref().map(|program| program.path.as_path())
-    }
-
     fn revalidate(&self) -> Result<(), UtilityError> {
         self.git.verify(self.fs.as_ref())?;
-        if let Some(gh) = &self.gh {
-            gh.verify(self.fs.as_ref())?;
-        }
         self.home.verify(self.fs.as_ref())?;
         Ok(())
     }
@@ -415,7 +298,6 @@ struct ExecutablePin {
     path: PathBuf,
     parent_path: PathBuf,
     name: OsString,
-    parent: Box<dyn SafeDir>,
     parent_identity: Metadata,
     identity: Metadata,
     tool: &'static str,
@@ -446,7 +328,6 @@ impl ExecutablePin {
             path: parent_path.join(&name),
             parent_path,
             name,
-            parent,
             parent_identity,
             identity,
             tool,
@@ -454,10 +335,6 @@ impl ExecutablePin {
     }
 
     fn verify(&self, fs: &dyn SafeFs) -> Result<(), UtilityError> {
-        let held = self
-            .parent
-            .metadata()
-            .map_err(|_| UtilityError::ExecutableChanged { tool: self.tool })?;
         let fresh = fs
             .open_anchor(&self.parent_path)
             .map_err(|_| UtilityError::ExecutableChanged { tool: self.tool })?;
@@ -465,8 +342,7 @@ impl ExecutablePin {
             .metadata()
             .map_err(|_| UtilityError::ExecutableChanged { tool: self.tool })?;
         let current = verify_executable_at(fresh.as_ref(), &self.name, self.tool)?;
-        if !self.parent_identity.same_identity(&held)
-            || !self.parent_identity.same_identity(&fresh_identity)
+        if !self.parent_identity.same_identity(&fresh_identity)
             || !self.identity.same_identity(&current)
             || self.identity.mode != current.mode
             || self.identity.uid != current.uid
@@ -510,7 +386,6 @@ fn verify_executable_at(
 
 struct PrivateHome {
     path: PathBuf,
-    anchor: Box<dyn SafeDir>,
     identity: Metadata,
 }
 
@@ -535,18 +410,10 @@ impl PrivateHome {
         {
             return Err(UtilityError::InvalidHome);
         }
-        Ok(Self {
-            path,
-            anchor,
-            identity,
-        })
+        Ok(Self { path, identity })
     }
 
     fn verify(&self, fs: &dyn SafeFs) -> Result<(), UtilityError> {
-        let held = self
-            .anchor
-            .metadata()
-            .map_err(|_| UtilityError::InvalidHome)?;
         let fresh = fs
             .open_anchor(&self.path)
             .map_err(|_| UtilityError::InvalidHome)?;
@@ -554,7 +421,6 @@ impl PrivateHome {
         if identity.kind != FileKind::Directory
             || identity.uid != effective_uid()
             || identity.mode & 0o077 != 0
-            || !self.identity.same_identity(&held)
             || !self.identity.same_identity(&identity)
             || self.identity.uid != identity.uid
         {
@@ -576,64 +442,30 @@ pub fn run_utility(
         return Err(UtilityError::Cancelled);
     }
     let budget = budget.validate()?;
-    if let UtilityRead::GitHub(read) = &operation {
-        let binding = match read {
-            GitHubRead::PullRequest { repository, .. }
-            | GitHubRead::Issue { repository, .. }
-            | GitHubRead::Checks { repository, .. }
-            | GitHubRead::PullRequestsMerged { repository, .. } => repository,
-        };
-        if !binding
-            .common_identity
-            .same_identity(&repo.common_identity())
-        {
-            return Err(UtilityError::RepositoryBindingMismatch);
-        }
-    }
-    runtime.revalidate()?;
+    runtime.home.verify(runtime.fs.as_ref())?;
     repo.revalidate()?;
     verify_repo_binding(runtime, repo)?;
-    verify_local_git_configuration(executor, repo, runtime, budget, cancel)?;
     reject_info_attributes(repo)?;
-    let attribute_source = empty_attribute_source(executor, repo, runtime, budget, cancel)?;
-    let (program, args, github) = match operation {
-        UtilityRead::Git(read) => (
-            &runtime.git,
-            git_args(read, repo, &attribute_source)?,
-            false,
-        ),
-        UtilityRead::GitHub(read) => (
-            runtime
-                .gh
-                .as_ref()
-                .ok_or(UtilityError::InvalidExecutable { tool: "gh" })?,
-            gh_args(read)?,
-            true,
-        ),
-    };
-    program.verify(runtime.fs.as_ref())?;
+    let attribute_source = repo
+        .probe_data()
+        .ok_or(UtilityError::UnprobedRepository)?
+        .attribute_source
+        .as_str();
+    let UtilityRead::Git(read) = operation;
+    let program = &runtime.git;
+    let args = git_args(read, repo, attribute_source)?;
     let mut argv = Vec::with_capacity(args.len() + 1);
     argv.push(program.path.as_os_str().to_owned());
     argv.extend(args);
-    let mut env = environment(runtime, repo, github);
+    let mut env = environment(runtime, repo);
     env.push(("GIT_ATTR_SOURCE".into(), attribute_source.into()));
-    let mut options = ExecOptions::new(&argv, repo.root_path(), budget.timeout);
-    options.env = Some(&env);
-    options.stop_on_output_limit = true;
-    options.stdout = StreamPolicy::Capture {
-        limit: budget.stdout_limit,
-    };
-    options.stderr = StreamPolicy::Capture {
-        limit: budget.stderr_limit,
-    };
-    options.terminate_grace = budget.terminate_grace;
-    options.reap_timeout = budget.reap_timeout;
-    options.cancel = Some(cancel);
+    program.verify(runtime.fs.as_ref())?;
+    let options = exec_options(&argv, repo.root_path(), budget, &env, None, Some(cancel));
     let outcome = executor.execute(options)?;
     validate_outcome(outcome)
 }
 
-fn validate_outcome(outcome: ExecOutcome) -> Result<ExecOutcome, UtilityError> {
+pub(crate) fn validate_outcome(outcome: ExecOutcome) -> Result<ExecOutcome, UtilityError> {
     if outcome.timed_out {
         return Err(UtilityError::TimedOut);
     }
@@ -671,6 +503,30 @@ fn validate_outcome(outcome: ExecOutcome) -> Result<ExecOutcome, UtilityError> {
     Ok(outcome)
 }
 
+pub(crate) fn exec_options<'a>(
+    argv: &'a [OsString],
+    cwd: &'a Path,
+    budget: UtilityBudget,
+    env: &'a [(OsString, OsString)],
+    stdin: Option<&'a [u8]>,
+    cancel: Option<&'a CancelToken>,
+) -> ExecOptions<'a> {
+    let mut options = ExecOptions::new(argv, cwd, budget.timeout);
+    options.env = Some(env);
+    options.stdin = stdin;
+    options.stop_on_output_limit = true;
+    options.stdout = StreamPolicy::Capture {
+        limit: budget.stdout_limit,
+    };
+    options.stderr = StreamPolicy::Capture {
+        limit: budget.stderr_limit,
+    };
+    options.terminate_grace = budget.terminate_grace;
+    options.reap_timeout = budget.reap_timeout;
+    options.cancel = cancel;
+    options
+}
+
 fn git_args(
     operation: GitRead,
     repo: &VerifiedRepo,
@@ -690,7 +546,16 @@ fn git_args(
             "--porcelain=v2".into(),
             "-z".into(),
             "--branch".into(),
-            "--ignore-submodules=none".into(),
+            "--ignore-submodules=all".into(),
+        ],
+        GitRead::StatusIncludingIgnored => vec![
+            "status".into(),
+            "--porcelain=v2".into(),
+            "-z".into(),
+            "--branch".into(),
+            "--ignore-submodules=all".into(),
+            "--ignored=matching".into(),
+            "--untracked-files=all".into(),
         ],
         GitRead::RevParseHead => vec![
             "rev-parse".into(),
@@ -704,6 +569,12 @@ fn git_args(
             "--end-of-options".into(),
             format!("{}^{{commit}}", name.as_str()).into(),
         ],
+        GitRead::ResolveRevision { revision } => vec![
+            "rev-parse".into(),
+            "--verify".into(),
+            "--end-of-options".into(),
+            format!("{}^{{commit}}", revision.as_str()).into(),
+        ],
         GitRead::Diff { base, head, paths } => {
             let mut args = vec![
                 "diff".into(),
@@ -712,6 +583,7 @@ fn git_args(
                 "--no-renames".into(),
                 "--no-color".into(),
                 "--binary".into(),
+                "--ignore-submodules=all".into(),
                 base.to_string().into(),
                 head.to_string().into(),
                 "--".into(),
@@ -728,6 +600,7 @@ fn git_args(
                 "--no-renames".into(),
                 "--no-color".into(),
                 "--binary".into(),
+                "--ignore-submodules=all".into(),
                 "--".into(),
             ];
             append_paths(&mut args, &paths);
@@ -741,6 +614,7 @@ fn git_args(
                 "--no-renames".into(),
                 "--no-color".into(),
                 "--binary".into(),
+                "--ignore-submodules=all".into(),
                 "--".into(),
             ];
             append_paths(&mut args, &paths);
@@ -758,20 +632,12 @@ fn git_args(
                 "--".into(),
             ]
         }
-        GitRead::MergeCommits { since, tip, limit } => {
-            validate_limit(limit)?;
-            vec![
-                "log".into(),
-                "--merges".into(),
-                "--ancestry-path".into(),
-                "--no-decorate".into(),
-                "--no-color".into(),
-                "--format=%H%x00%P%x00".into(),
-                format!("--max-count={limit}").into(),
-                format!("{since}..{tip}").into(),
-                "--".into(),
-            ]
-        }
+        GitRead::FirstParentHistory { tip } => vec![
+            "rev-list".into(),
+            "--first-parent".into(),
+            tip.to_string().into(),
+            "--".into(),
+        ],
         GitRead::WorktreeList => vec![
             "worktree".into(),
             "list".into(),
@@ -846,88 +712,13 @@ fn validate_limit(limit: u64) -> Result<(), UtilityError> {
     }
 }
 
-fn gh_args(operation: GitHubRead) -> Result<Vec<OsString>, UtilityError> {
-    match operation {
-        GitHubRead::PullRequest { repository, number } => Ok(vec![
-            "pr".into(),
-            "view".into(),
-            number.0.to_string().into(),
-            "--repo".into(),
-            repository.qualified_name().into(),
-            "--json".into(),
-            PR_FIELDS.into(),
-        ]),
-        GitHubRead::Issue { repository, number } => Ok(vec![
-            "issue".into(),
-            "view".into(),
-            number.0.to_string().into(),
-            "--repo".into(),
-            repository.qualified_name().into(),
-            "--json".into(),
-            ISSUE_FIELDS.into(),
-        ]),
-        GitHubRead::Checks {
-            repository,
-            pull_request,
-        } => Ok(vec![
-            "pr".into(),
-            "checks".into(),
-            pull_request.0.to_string().into(),
-            "--repo".into(),
-            repository.qualified_name().into(),
-            "--json".into(),
-            CHECK_FIELDS.into(),
-        ]),
-        GitHubRead::PullRequestsMerged {
-            repository,
-            head,
-            limit,
-        } => {
-            if !(1..=MAX_GIT_LOG).contains(&limit) {
-                return Err(UtilityError::InvalidOperationValue);
-            }
-            Ok(vec![
-                "pr".into(),
-                "list".into(),
-                "--repo".into(),
-                repository.qualified_name().into(),
-                "--state".into(),
-                "merged".into(),
-                "--head".into(),
-                head.short_name().into(),
-                "--limit".into(),
-                limit.to_string().into(),
-                "--json".into(),
-                MERGED_PR_FIELDS.into(),
-            ])
-        }
-    }
-}
-
-fn environment(
+pub(crate) fn environment(
     runtime: &UtilityRuntime,
     repo: &VerifiedRepo,
-    github: bool,
 ) -> Vec<(OsString, OsString)> {
     let mut env = vec![
         ("HOME".into(), runtime.home.path.as_os_str().to_owned()),
         ("TMPDIR".into(), runtime.home.path.as_os_str().to_owned()),
-        (
-            "PROVENANT_STATE_DIR".into(),
-            runtime.home.path.join(".state").into_os_string(),
-        ),
-        (
-            "XDG_CONFIG_HOME".into(),
-            runtime.home.path.join(".config").into_os_string(),
-        ),
-        (
-            "CLAUDE_CONFIG_DIR".into(),
-            runtime.home.path.join(".claude").into_os_string(),
-        ),
-        (
-            "CODEX_HOME".into(),
-            runtime.home.path.join(".codex").into_os_string(),
-        ),
         ("LANG".into(), "C".into()),
         ("LC_ALL".into(), "C".into()),
         ("GIT_CONFIG_NOSYSTEM".into(), "1".into()),
@@ -961,25 +752,6 @@ fn environment(
         env.push((format!("GIT_CONFIG_KEY_{index}").into(), (*key).into()));
         env.push((format!("GIT_CONFIG_VALUE_{index}").into(), (*value).into()));
     }
-    if github {
-        if let Some(git_parent) = runtime.git.path.parent() {
-            let mut path = git_parent.as_os_str().to_owned();
-            if let Some(gh_parent) = runtime.gh.as_ref().and_then(|gh| gh.path.parent()) {
-                path.push(":");
-                path.push(gh_parent.as_os_str());
-            }
-            env.push(("PATH".into(), path));
-        }
-        env.extend([
-            (
-                "GH_CONFIG_DIR".into(),
-                runtime.home.path.join(".config/gh").into_os_string(),
-            ),
-            ("GH_PROMPT_DISABLED".into(), "1".into()),
-            ("GH_PAGER".into(), "cat".into()),
-            ("GH_NO_UPDATE_NOTIFIER".into(), "1".into()),
-        ]);
-    }
     env
 }
 
@@ -1010,32 +782,31 @@ pub(crate) fn execute_git_mutation(
         return Err(UtilityError::Cancelled);
     }
     let budget = budget.validate()?;
-    runtime.revalidate()?;
+    runtime.home.verify(runtime.fs.as_ref())?;
     repo.revalidate()?;
     verify_repo_binding(runtime, repo)?;
-    verify_local_git_configuration(executor, repo, runtime, budget, cancel)?;
     reject_info_attributes(repo)?;
-    let attribute_source = empty_attribute_source(executor, repo, runtime, budget, cancel)?;
+    let attribute_source = repo
+        .probe_data()
+        .ok_or(UtilityError::UnprobedRepository)?
+        .attribute_source
+        .as_str();
     let (args, stdin) = mutation_args(mutation)?;
     let mut argv = Vec::with_capacity(args.len() + 2);
     argv.push(runtime.git.path.as_os_str().to_owned());
     argv.push(format!("--attr-source={attribute_source}").into());
     argv.extend(args);
-    let mut env = environment(runtime, repo, false);
+    let mut env = environment(runtime, repo);
     env.push(("GIT_ATTR_SOURCE".into(), attribute_source.into()));
-    let mut options = ExecOptions::new(&argv, repo.root_path(), budget.timeout);
-    options.env = Some(&env);
-    options.stdin = stdin.as_deref();
-    options.stdout = StreamPolicy::Capture {
-        limit: budget.stdout_limit,
-    };
-    options.stderr = StreamPolicy::Capture {
-        limit: budget.stderr_limit,
-    };
-    options.stop_on_output_limit = true;
-    options.terminate_grace = budget.terminate_grace;
-    options.reap_timeout = budget.reap_timeout;
-    options.cancel = Some(cancel);
+    runtime.git.verify(runtime.fs.as_ref())?;
+    let options = exec_options(
+        &argv,
+        repo.root_path(),
+        budget,
+        &env,
+        stdin.as_deref(),
+        Some(cancel),
+    );
     let outcome = executor.execute(options)?;
     validate_outcome(outcome)
 }
@@ -1067,19 +838,8 @@ fn verify_local_git_configuration(
         OsString::from("--null"),
         OsString::from("--list"),
     ]);
-    let env = environment(runtime, repo, false);
-    let mut options = ExecOptions::new(&argv, repo.root_path(), budget.timeout);
-    options.env = Some(&env);
-    options.stdout = StreamPolicy::Capture {
-        limit: budget.stdout_limit,
-    };
-    options.stderr = StreamPolicy::Capture {
-        limit: budget.stderr_limit,
-    };
-    options.stop_on_output_limit = true;
-    options.terminate_grace = budget.terminate_grace;
-    options.reap_timeout = budget.reap_timeout;
-    options.cancel = Some(cancel);
+    let env = environment(runtime, repo);
+    let options = exec_options(&argv, repo.root_path(), budget, &env, None, Some(cancel));
     let outcome = validate_outcome(executor.execute(options)?)?;
     if outcome.termination != Termination::Exit(0)
         || (!outcome.stdout.bytes.is_empty() && !outcome.stdout.bytes.ends_with(&[0]))
@@ -1130,9 +890,9 @@ fn is_not_found(error: &FsError) -> bool {
     matches!(error, FsError::Io { source, .. } if source.kind() == std::io::ErrorKind::NotFound)
 }
 
-/// Resolve the repository object format without writing an object, then
-/// preflight the global attribute-source option. The canonical empty tree is a
-/// valid attribute source even when it is not present in the object database.
+/// Resolve the repository object format once without writing an object, then
+/// preflight the global attribute-source option on a submodule-safe status
+/// read. The canonical empty tree need not exist in the object database.
 fn empty_attribute_source(
     executor: &dyn Executor,
     repo: &VerifiedRepo,
@@ -1159,16 +919,14 @@ fn empty_attribute_source(
     let source_option: OsString = format!("--attr-source={source}").into();
     let preflight_args = [
         source_option,
-        OsString::from("rev-parse"),
-        OsString::from("--show-object-format"),
+        OsString::from("status"),
+        OsString::from("--porcelain=v2"),
+        OsString::from("-z"),
+        OsString::from("--ignore-submodules=all"),
+        OsString::from("--untracked-files=no"),
     ];
     let preflight = run_git_probe(executor, repo, runtime, budget, cancel, &preflight_args)?;
-    if preflight.termination != Termination::Exit(0)
-        || std::str::from_utf8(&preflight.stdout.bytes)
-            .map(str::trim)
-            .ok()
-            != Some(format)
-    {
+    if preflight.termination != Termination::Exit(0) {
         return Err(UtilityError::AttributeSourceUnsupported);
     }
     Ok(source.to_owned())
@@ -1192,19 +950,8 @@ fn run_git_probe(
     ];
     argv.extend(GIT_COMMON.iter().map(OsString::from));
     argv.extend(command.iter().cloned());
-    let env = environment(runtime, repo, false);
-    let mut options = ExecOptions::new(&argv, repo.root_path(), budget.timeout);
-    options.env = Some(&env);
-    options.stdout = StreamPolicy::Capture {
-        limit: budget.stdout_limit,
-    };
-    options.stderr = StreamPolicy::Capture {
-        limit: budget.stderr_limit,
-    };
-    options.stop_on_output_limit = true;
-    options.terminate_grace = budget.terminate_grace;
-    options.reap_timeout = budget.reap_timeout;
-    options.cancel = Some(cancel);
+    let env = environment(runtime, repo);
+    let options = exec_options(&argv, repo.root_path(), budget, &env, None, Some(cancel));
     validate_outcome(executor.execute(options)?)
 }
 
@@ -1228,7 +975,7 @@ fn mutation_args(mutation: GitMutation) -> Result<(Vec<OsString>, Option<Vec<u8>
             if let Some(base) = base {
                 args.push(base.to_string().into());
             } else if !create_branch {
-                args.push(branch.as_str().into());
+                args.push(branch.short_name().into());
             }
             None
         }
@@ -1274,185 +1021,10 @@ fn validate_absolute_mutation_path(path: &Path) -> Result<PathBuf, UtilityError>
 pub(crate) mod tests {
     use super::*;
     use crate::repo::verify_worktree;
-    use provenant_supervisor::exec::{DEFAULT_CAPTURE_LIMIT, SystemExecutor};
-    use provenant_supervisor::fs::LocalFs;
+    use crate::test_support::{Fixture, run_fixture_git};
     use std::error::Error;
     use std::fs;
-    use std::io;
-    use std::os::unix::fs::PermissionsExt;
     use std::time::Duration;
-
-    pub(crate) struct Fixture {
-        pub(crate) _temp: tempfile::TempDir,
-        pub(crate) root: PathBuf,
-        pub(crate) git: PathBuf,
-        pub(crate) home: PathBuf,
-        pub(crate) executor: SystemExecutor,
-        pub(crate) runtime: UtilityRuntime,
-        pub(crate) repo: VerifiedRepo,
-    }
-
-    impl Fixture {
-        pub(crate) fn new() -> Result<Self, Box<dyn Error>> {
-            let git = PathBuf::from("/usr/bin/git");
-            if !git.is_file() {
-                return Err(io::Error::new(
-                    io::ErrorKind::NotFound,
-                    "system Git fixture is unavailable",
-                )
-                .into());
-            }
-            let temp = tempfile::tempdir_in("/tmp")?;
-            let root = temp.path().join("repo");
-            let home = temp.path().join("home");
-            let state = temp.path().join("state");
-            let config = temp.path().join("config");
-            let claude = temp.path().join("claude");
-            let codex = temp.path().join("codex");
-            fs::create_dir(&root)?;
-            fs::create_dir(&home)?;
-            fs::create_dir(&state)?;
-            fs::create_dir(&config)?;
-            fs::create_dir(&claude)?;
-            fs::create_dir(&codex)?;
-            fs::set_permissions(&home, fs::Permissions::from_mode(0o700))?;
-            let executor = SystemExecutor::new(4)?;
-            let env = vec![
-                ("HOME".into(), home.as_os_str().to_owned()),
-                ("TMPDIR".into(), temp.path().as_os_str().to_owned()),
-                ("PROVENANT_STATE_DIR".into(), state.into_os_string()),
-                ("XDG_CONFIG_HOME".into(), config.into_os_string()),
-                ("CLAUDE_CONFIG_DIR".into(), claude.into_os_string()),
-                ("CODEX_HOME".into(), codex.into_os_string()),
-                ("GIT_CONFIG_NOSYSTEM".into(), "1".into()),
-                ("GIT_CONFIG_SYSTEM".into(), "/dev/null".into()),
-                ("GIT_CONFIG_GLOBAL".into(), "/dev/null".into()),
-                ("GIT_CONFIG_COUNT".into(), "0".into()),
-                ("GIT_TERMINAL_PROMPT".into(), "0".into()),
-                ("GIT_PAGER".into(), "cat".into()),
-                ("PAGER".into(), "cat".into()),
-                ("LANG".into(), "C".into()),
-                ("LC_ALL".into(), "C".into()),
-            ];
-            run_fixture_git(
-                &executor,
-                &git,
-                temp.path(),
-                &env,
-                &[
-                    "init",
-                    "--quiet",
-                    root.to_str().ok_or("non-UTF8 test root")?,
-                ],
-            )?;
-            run_fixture_git(
-                &executor,
-                &git,
-                temp.path(),
-                &env,
-                &[
-                    "-C",
-                    root.to_str().ok_or("non-UTF8 test root")?,
-                    "config",
-                    "user.name",
-                    "Fixture",
-                ],
-            )?;
-            run_fixture_git(
-                &executor,
-                &git,
-                temp.path(),
-                &env,
-                &[
-                    "-C",
-                    root.to_str().ok_or("non-UTF8 test root")?,
-                    "config",
-                    "user.email",
-                    "fixture@example.invalid",
-                ],
-            )?;
-            run_fixture_git(
-                &executor,
-                &git,
-                temp.path(),
-                &env,
-                &[
-                    "-C",
-                    root.to_str().ok_or("non-UTF8 test root")?,
-                    "commit",
-                    "--allow-empty",
-                    "-m",
-                    "fixture",
-                ],
-            )?;
-            let fs: Arc<dyn SafeFs> = Arc::new(LocalFs);
-            let runtime = UtilityRuntime::git_only(fs.clone(), &git, &home)?;
-            let repo = runtime.open_repo(&root)?;
-            Ok(Self {
-                _temp: temp,
-                root,
-                git,
-                home,
-                executor,
-                runtime,
-                repo,
-            })
-        }
-
-        pub(crate) fn run(&self, args: &[&str]) -> Result<ExecOutcome, Box<dyn Error>> {
-            let env = environment(&self.runtime, &self.repo, false);
-            run_fixture_git(&self.executor, &self.git, self.repo.root_path(), &env, args)
-        }
-
-        pub(crate) fn budget(&self) -> Result<UtilityBudget, UtilityError> {
-            UtilityBudget::new(
-                Duration::from_secs(10),
-                Duration::from_millis(250),
-                Duration::from_secs(2),
-                DEFAULT_CAPTURE_LIMIT,
-                DEFAULT_CAPTURE_LIMIT,
-            )
-        }
-
-        pub(crate) fn head(&self) -> Result<GitOid, Box<dyn Error>> {
-            let outcome = run_utility(
-                &self.executor,
-                UtilityRead::Git(GitRead::RevParseHead),
-                &self.repo,
-                &self.runtime,
-                self.budget()?,
-                &CancelToken::new(),
-            )?;
-            let text = std::str::from_utf8(&outcome.stdout.bytes)?;
-            Ok(GitOid::parse(text.trim())?)
-        }
-    }
-
-    pub(crate) fn run_fixture_git(
-        executor: &SystemExecutor,
-        git: &Path,
-        cwd: &Path,
-        env: &[(OsString, OsString)],
-        args: &[&str],
-    ) -> Result<ExecOutcome, Box<dyn Error>> {
-        let mut argv = vec![git.as_os_str().to_owned()];
-        argv.extend(args.iter().map(OsString::from));
-        let mut options = ExecOptions::new(&argv, cwd, Duration::from_secs(10));
-        options.env = Some(env);
-        options.stdout = StreamPolicy::Capture {
-            limit: DEFAULT_CAPTURE_LIMIT,
-        };
-        options.stderr = StreamPolicy::Capture {
-            limit: DEFAULT_CAPTURE_LIMIT,
-        };
-        options.terminate_grace = Duration::from_millis(250);
-        options.reap_timeout = Duration::from_secs(2);
-        let outcome = executor.execute(options)?;
-        if outcome.termination != Termination::Exit(0) || outcome.timed_out || outcome.cancelled {
-            return Err(io::Error::other("bounded Git fixture setup failed").into());
-        }
-        Ok(outcome)
-    }
 
     #[test]
     fn utility_reads_status_and_head_through_the_executor() -> Result<(), Box<dyn Error>> {
@@ -1497,6 +1069,143 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn embedded_gitlink_filters_do_not_run_during_status_diff_or_evidence_reads()
+    -> Result<(), Box<dyn Error>> {
+        use crate::git_evidence::Git;
+        use crate::repo::RepoPath;
+        use std::fs;
+
+        let fixture = Fixture::new()?;
+        let safe_file = fixture.root.join("safe.txt");
+        fs::write(&safe_file, "safe\n")?;
+        fs::write(
+            fixture.root.join(".gitmodules"),
+            "[submodule \"sub\"]\n\tpath = sub\n\turl = https://example.invalid/sub\n",
+        )?;
+        fixture.run(&["add", "--", ".gitmodules", "safe.txt"])?;
+        fixture.run(&["commit", "-m", "outer fixtures"])?;
+        let outer_head = fixture.head()?;
+
+        let sub = fixture.root.join("sub");
+        fs::create_dir(&sub)?;
+        let nested_env = vec![
+            ("HOME".into(), fixture.home.as_os_str().to_owned()),
+            ("TMPDIR".into(), fixture._temp.path().as_os_str().to_owned()),
+            ("GIT_CONFIG_NOSYSTEM".into(), "1".into()),
+            ("GIT_CONFIG_SYSTEM".into(), "/dev/null".into()),
+            ("GIT_CONFIG_GLOBAL".into(), "/dev/null".into()),
+            ("GIT_TERMINAL_PROMPT".into(), "0".into()),
+            ("LANG".into(), "C".into()),
+            ("LC_ALL".into(), "C".into()),
+        ];
+        let sub_path = sub.to_str().ok_or("non-UTF8 nested repo path")?;
+        run_fixture_git(
+            &fixture.executor,
+            &fixture.git,
+            &fixture.root,
+            &nested_env,
+            &["-C", sub_path, "init", "--quiet"],
+        )?;
+        for (key, value) in [
+            ("user.name", "Nested"),
+            ("user.email", "nested@example.invalid"),
+        ] {
+            run_fixture_git(
+                &fixture.executor,
+                &fixture.git,
+                &fixture.root,
+                &nested_env,
+                &["-C", sub_path, "config", key, value],
+            )?;
+        }
+        fs::write(sub.join("tracked.txt"), "baseline\n")?;
+        fs::write(sub.join(".gitattributes"), "")?;
+        run_fixture_git(
+            &fixture.executor,
+            &fixture.git,
+            &fixture.root,
+            &nested_env,
+            &["-C", sub_path, "add", "--", ".gitattributes", "tracked.txt"],
+        )?;
+        run_fixture_git(
+            &fixture.executor,
+            &fixture.git,
+            &fixture.root,
+            &nested_env,
+            &["-C", sub_path, "commit", "-m", "nested fixture"],
+        )?;
+        let nested_head = run_fixture_git(
+            &fixture.executor,
+            &fixture.git,
+            &fixture.root,
+            &nested_env,
+            &["-C", sub_path, "rev-parse", "HEAD"],
+        )?;
+        let nested_oid = std::str::from_utf8(&nested_head.stdout.bytes)?.trim();
+        let marker = fixture._temp.path().join("nested-filter-ran");
+        let filter = format!("touch {}; cat", marker.display());
+        run_fixture_git(
+            &fixture.executor,
+            &fixture.git,
+            &fixture.root,
+            &nested_env,
+            &[
+                "-C",
+                sub_path,
+                "config",
+                "filter.poison.clean",
+                filter.as_str(),
+            ],
+        )?;
+        fs::write(sub.join(".gitattributes"), "tracked.txt filter=poison\n")?;
+        fs::write(sub.join("tracked.txt"), "changed\n")?;
+        let cacheinfo = format!("160000,{nested_oid},sub");
+        fixture.run(&["update-index", "--add", "--cacheinfo", cacheinfo.as_str()])?;
+
+        let status = run_utility(
+            &fixture.executor,
+            UtilityRead::Git(GitRead::Status),
+            &fixture.repo,
+            &fixture.runtime,
+            fixture.budget()?,
+            &CancelToken::new(),
+        )?;
+        assert_eq!(status.termination, Termination::Exit(0));
+        assert!(!marker.exists());
+        for operation in [
+            GitRead::DiffIndex {
+                paths: vec![RepoPath::new("sub")?],
+            },
+            GitRead::DiffWorktree {
+                paths: vec![RepoPath::new("sub")?],
+            },
+        ] {
+            let output = run_utility(
+                &fixture.executor,
+                UtilityRead::Git(operation),
+                &fixture.repo,
+                &fixture.runtime,
+                fixture.budget()?,
+                &CancelToken::new(),
+            )?;
+            assert_eq!(output.termination, Termination::Exit(0));
+            assert!(!marker.exists());
+        }
+        let selected = RepoPath::new("safe.txt")?;
+        let evidence = Git::new(
+            &fixture.executor,
+            &fixture.repo,
+            &fixture.runtime,
+            fixture.budget()?,
+            &CancelToken::new(),
+        )
+        .evidence(outer_head, std::slice::from_ref(&selected))?;
+        assert_eq!(evidence.head, outer_head);
+        assert!(!marker.exists());
+        Ok(())
+    }
+
+    #[test]
     fn filter_config_is_refused_and_empty_tree_source_suppresses_worktree_attributes()
     -> Result<(), Box<dyn Error>> {
         let fixture = Fixture::new()?;
@@ -1514,13 +1223,11 @@ pub(crate) mod tests {
         )?;
         fs::write(&tracked, "modified\n")?;
 
-        let source = empty_attribute_source(
-            &fixture.executor,
-            &fixture.repo,
-            &fixture.runtime,
-            fixture.budget()?,
-            &CancelToken::new(),
-        )?;
+        let source = &fixture
+            .repo
+            .probe_data()
+            .ok_or("missing eagerly-probed repository data")?
+            .attribute_source;
         let source_option = format!("--attr-source={source}");
         let raw = fixture.run(&[source_option.as_str(), "status", "--porcelain=v2", "-z"])?;
         assert_eq!(raw.termination, Termination::Exit(0));
@@ -1534,8 +1241,20 @@ pub(crate) mod tests {
             fixture.budget()?,
             &CancelToken::new(),
         );
-        assert!(matches!(result, Err(UtilityError::UnsafeGitConfiguration)));
+        assert!(matches!(
+            result,
+            Err(UtilityError::Repo(RepoError::IdentityChanged))
+        ));
         assert!(!marker.exists());
+        assert!(matches!(
+            fixture.runtime.open_repo(
+                &fixture.executor,
+                &fixture.root,
+                fixture.budget()?,
+                &CancelToken::new(),
+            ),
+            Err(UtilityError::UnsafeGitConfiguration)
+        ));
         fixture.run(&["config", "--unset", "filter.poison.clean"])?;
         fixture.run(&["config", "extensions.worktreeConfig", "true"])?;
         fixture.run(&[
@@ -1545,6 +1264,16 @@ pub(crate) mod tests {
             filter.as_str(),
         ])?;
         assert!(matches!(
+            fixture.runtime.open_repo(
+                &fixture.executor,
+                &fixture.root,
+                fixture.budget()?,
+                &CancelToken::new(),
+            ),
+            Err(UtilityError::UnsafeGitConfiguration)
+        ));
+        assert!(!marker.exists());
+        assert!(matches!(
             run_utility(
                 &fixture.executor,
                 UtilityRead::Git(GitRead::Status),
@@ -1553,7 +1282,7 @@ pub(crate) mod tests {
                 fixture.budget()?,
                 &CancelToken::new()
             ),
-            Err(UtilityError::UnsafeGitConfiguration)
+            Err(UtilityError::Repo(RepoError::IdentityChanged))
         ));
         assert!(!marker.exists());
         Ok(())
@@ -1714,7 +1443,5 @@ pub(crate) mod tests {
         assert!(RepoPath::new("a//b").is_err());
         assert!(GitRefName::branch("../bad").is_err());
         assert!(GitRefName::new("refs/remotes/origin/main").is_err());
-        assert!(GitHubRepository::new("owner/name", "repo").is_err());
-        assert!(GitHubRepository::new("owner", "repo --help").is_err());
     }
 }

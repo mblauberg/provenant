@@ -326,11 +326,10 @@ impl Scanner {
                 break;
             }
             let input = &buffer[..count];
-            let filtered = self
-                .redactor
+            self.redactor
                 .filter(input)
                 .map_err(|_| DisclosureError::SecretMatch)?;
-            if filtered != input {
+            if self.redactor.has_redaction() {
                 return Err(DisclosureError::SecretMatch);
             }
             let count = u64::try_from(count).map_err(|_| DisclosureError::BudgetExceeded)?;
@@ -342,6 +341,12 @@ impl Scanner {
                 .checked_add(count)
                 .ok_or(DisclosureError::BudgetExceeded)?;
             self.digest.update(input);
+        }
+        self.redactor
+            .finish()
+            .map_err(|_| DisclosureError::SecretMatch)?;
+        if self.redactor.has_redaction() {
+            return Err(DisclosureError::SecretMatch);
         }
         let after = file.metadata().map_err(DisclosureError::Filesystem)?;
         if !after.same_identity(&opened) || after.size != opened.size || file_bytes != opened.size {
@@ -489,6 +494,33 @@ mod tests {
             &request(&prompt_path, &cwd, &[], &[], &[b"token-abc-123".to_vec()]),
         );
         assert!(matches!(result, Err(DisclosureError::SecretMatch)));
+    }
+
+    #[test]
+    fn nonempty_secret_set_allows_files_with_ordinary_urls() {
+        let temp = tempfile::tempdir_in("/tmp").expect("temporary disclosure root");
+        let temporary_root = temp.path().join("work");
+        fs::create_dir(&temporary_root).expect("work directory");
+        fs::write(
+            temporary_root.join("notes.txt"),
+            b"read https://example.invalid/docs for details",
+        )
+        .expect("file write");
+        let prompt_path = temp.path().join("prompt.txt");
+        fs::write(&prompt_path, b"prompt").expect("prompt file");
+        let prompt_path =
+            provenant_supervisor::fs::canonicalize(&prompt_path).expect("canonical prompt file");
+        let root = provenant_supervisor::fs::canonicalize(&temporary_root)
+            .expect("canonical temporary root");
+        let cwd = PathGrant {
+            path: root,
+            scope: PathScope::Subtree,
+        };
+        let result = scan_disclosure(
+            &LocalFs,
+            &request(&prompt_path, &cwd, &[], &[], &[b"secret-123".to_vec()]),
+        );
+        assert!(result.is_ok());
     }
 
     #[test]

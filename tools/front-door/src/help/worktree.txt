@@ -1,8 +1,4 @@
-usage: provenant worktree create BRANCH [--base REV]
-       provenant worktree list
-       provenant worktree remove NAME
-       provenant worktree remove --merged --integration REF (--branch NAME… | --since OID)
+usage: provenant worktree ...
 
-Global options: --project PATH, --state-dir ABS, --json, --help.
-Creates linked trees under .worktrees/ without dependency provisioning.
-Removal refuses primary, dirty, live or unknown writers. Merged pruning is scoped.
+Delegates to scripts/worktree ...
+Create, list and remove managed Git worktrees.

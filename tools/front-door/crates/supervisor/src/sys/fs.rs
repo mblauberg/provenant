@@ -302,8 +302,8 @@ pub(crate) fn symlink(target: &Path, dir: &File, name: &OsStr) -> io::Result<()>
     // target bytes, retains no pointers and reports thread-local errno.
     status(unsafe { libc::symlinkat(target.as_ptr(), dir.as_raw_fd(), name.as_ptr()) })
 }
-pub(crate) fn entropy() -> io::Result<[u8; 12]> {
-    let mut bytes = [0; 12];
+pub(crate) fn entropy<const N: usize>() -> io::Result<[u8; N]> {
+    let mut bytes = [0; N];
     // SAFETY: exclusive writable buffer is live and below getentropy's 256-byte
     // bound. It retains no pointer; concurrent calls share no Rust state.
     status(unsafe { libc::getentropy(bytes.as_mut_ptr().cast(), bytes.len()) })?;

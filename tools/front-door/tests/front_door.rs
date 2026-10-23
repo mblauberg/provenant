@@ -91,7 +91,13 @@ fn installed_release_python_routes_are_unavailable_without_an_owner() {
     assert!(!installed_release.join(".venv").exists());
     assert!(!installed_release.join(".git").exists());
 
-    let cases: &[&[&str]] = &[&["digest"], &["mcp"], &["lease", "acquire", "seat-1"], &[]];
+    let cases: &[&[&str]] = &[
+        &["digest"],
+        &["worktree"],
+        &["mcp"],
+        &["lease", "acquire", "seat-1"],
+        &[],
+    ];
     for (index, arguments) in cases.iter().enumerate() {
         let mut route = command(&binary, &sandbox.home());
         route.args(*arguments);

@@ -1,9 +1,7 @@
 //! Streaming redaction for bytes retained by supervisor capture.
 //!
-//! The filter has no EOF callback, so it masks a possible secret prefix as
-//! soon as it sees one and carries only the small matcher state between calls.
-//! A false-positive prefix is redacted too; no buffered tail is lost and no
-//! later chunk can expose bytes that completed a secret from an earlier chunk.
+//! Exact literal prefixes and incomplete token markers stay buffered across
+//! chunks. The capture filter's EOF hook releases any unmatched tail.
 use std::collections::{BTreeMap, VecDeque};
 use thiserror::Error;
 
@@ -30,13 +28,16 @@ pub enum RedactorError {
 struct Node {
     edges: BTreeMap<u8, usize>,
     failure: usize,
-    terminal: bool,
+    output_length: usize,
 }
 
 struct LiteralAutomaton {
     nodes: Vec<Node>,
     state: usize,
+    pending: VecDeque<(u8, bool)>,
+    max_secret_length: usize,
     redaction_run: bool,
+    matched: bool,
 }
 
 impl LiteralAutomaton {
@@ -55,7 +56,7 @@ impl LiteralAutomaton {
                 };
                 state = next;
             }
-            nodes[state].terminal = true;
+            nodes[state].output_length = secret.len();
         }
 
         let mut queue = VecDeque::new();
@@ -75,7 +76,8 @@ impl LiteralAutomaton {
                 }
                 let failure = nodes[fallback].edges.get(&byte).copied().unwrap_or(0);
                 nodes[child].failure = failure;
-                nodes[child].terminal |= nodes[failure].terminal;
+                nodes[child].output_length =
+                    nodes[child].output_length.max(nodes[failure].output_length);
                 queue.push_back(child);
             }
         }
@@ -83,7 +85,10 @@ impl LiteralAutomaton {
         Self {
             nodes,
             state: 0,
+            pending: VecDeque::new(),
+            max_secret_length: secrets.iter().map(Vec::len).max().unwrap_or(0),
             redaction_run: false,
+            matched: false,
         }
     }
 
@@ -93,20 +98,42 @@ impl LiteralAutomaton {
                 self.state = self.nodes[self.state].failure;
             }
             self.state = self.nodes[self.state].edges.get(byte).copied().unwrap_or(0);
+            self.pending.push_back((*byte, false));
 
-            // Every non-root trie state is a suffix that could complete a
-            // configured secret. Mask it immediately to make chunk boundaries
-            // safe even though CaptureFilter has no finish callback.
-            let possibly_secret = self.state != 0 || self.nodes[self.state].terminal;
-            if possibly_secret {
-                if !self.redaction_run {
-                    output.extend_from_slice(REDACTED);
+            let matched_length = self.nodes[self.state].output_length;
+            if matched_length > 0 {
+                for (_, masked) in self.pending.iter_mut().rev().take(matched_length) {
+                    *masked = true;
                 }
-                self.redaction_run = true;
-            } else {
-                output.push(*byte);
-                self.redaction_run = false;
+                self.matched = true;
             }
+            let keep = self.max_secret_length.saturating_sub(1);
+            while self.pending.len() > keep {
+                self.emit_front(output);
+            }
+        }
+    }
+
+    fn finish(&mut self, output: &mut Vec<u8>) {
+        while !self.pending.is_empty() {
+            self.emit_front(output);
+        }
+        self.state = 0;
+        self.redaction_run = false;
+    }
+
+    fn emit_front(&mut self, output: &mut Vec<u8>) {
+        let Some((byte, masked)) = self.pending.pop_front() else {
+            return;
+        };
+        if masked {
+            if !self.redaction_run {
+                output.extend_from_slice(REDACTED);
+            }
+            self.redaction_run = true;
+        } else {
+            output.push(byte);
+            self.redaction_run = false;
         }
     }
 }
@@ -116,7 +143,6 @@ enum TokenKind {
     Bearer,
     Generic,
     AwsAccessKey,
-    UrlAuthority,
 }
 
 const TOKEN_MARKERS: &[(&[u8], TokenKind)] = &[
@@ -129,13 +155,15 @@ const TOKEN_MARKERS: &[(&[u8], TokenKind)] = &[
     (b"github_pat_", TokenKind::Generic),
     (b"sk-", TokenKind::Generic),
     (b"AKIA", TokenKind::AwsAccessKey),
-    (b"://", TokenKind::UrlAuthority),
 ];
 const MAX_MARKER_LENGTH: usize = 11;
 
 struct TokenScanner {
     active: Option<(TokenKind, bool)>,
     tail: Vec<u8>,
+    last_byte: Option<u8>,
+    url_authority: Option<Vec<u8>>,
+    matched: bool,
 }
 
 impl Default for TokenScanner {
@@ -143,60 +171,134 @@ impl Default for TokenScanner {
         Self {
             active: None,
             tail: Vec::with_capacity(MAX_MARKER_LENGTH - 1),
+            last_byte: None,
+            url_authority: None,
+            matched: false,
         }
     }
 }
 
 impl TokenScanner {
-    fn filter(&mut self, bytes: &[u8], output: &mut Vec<u8>) {
-        let tail_len = self.tail.len();
-        let mut combined = Vec::with_capacity(tail_len + bytes.len());
-        combined.extend_from_slice(&self.tail);
+    fn filter(&mut self, bytes: &[u8], output: &mut Vec<u8>) -> Result<(), FilterError> {
+        let mut combined = std::mem::take(&mut self.tail);
         combined.extend_from_slice(bytes);
+        self.process(&combined, false, output)
+    }
 
-        for index in 0..=bytes.len() {
-            let boundary = tail_len + index;
-            if boundary > tail_len
-                && self.active.is_none()
-                && let Some(kind) = marker_ending_at(&combined, boundary)
-            {
-                self.active = Some((kind, false));
-            }
-            if index == bytes.len() {
-                break;
+    fn finish(&mut self, output: &mut Vec<u8>) -> Result<(), FilterError> {
+        let tail = std::mem::take(&mut self.tail);
+        self.process(&tail, true, output)?;
+        if let Some(authority) = self.url_authority.take() {
+            self.finish_authority(authority, output);
+        }
+        self.last_byte = None;
+        self.active = None;
+        Ok(())
+    }
+
+    fn process(
+        &mut self,
+        input: &[u8],
+        eof: bool,
+        output: &mut Vec<u8>,
+    ) -> Result<(), FilterError> {
+        let mut index = 0;
+        while index < input.len() {
+            if self.url_authority.is_some() {
+                let mut authority = self.url_authority.take().unwrap_or_default();
+                while index < input.len() && !url_delimiter(input[index]) {
+                    authority.push(input[index]);
+                    if authority.len() > FRAME_LIMIT {
+                        return Err(FilterError);
+                    }
+                    self.last_byte = Some(input[index]);
+                    index += 1;
+                }
+                if index < input.len() {
+                    self.finish_authority(authority, output);
+                } else {
+                    self.url_authority = Some(authority);
+                    return Ok(());
+                }
+                continue;
             }
 
-            let byte = bytes[index];
             if let Some((kind, emitted)) = self.active {
+                let byte = input[index];
                 if token_byte(kind, byte) {
                     if !emitted {
                         output.extend_from_slice(REDACTED);
+                        self.matched = true;
                     }
                     self.active = Some((kind, true));
+                    self.last_byte = Some(byte);
+                    index += 1;
                     continue;
                 }
                 self.active = None;
+                continue;
             }
+
+            if input[index..].starts_with(b"://") {
+                output.extend_from_slice(b"://");
+                self.last_byte = Some(b'/');
+                self.url_authority = Some(Vec::new());
+                index += 3;
+                continue;
+            }
+            if !eof && b"://".starts_with(&input[index..]) {
+                self.tail.extend_from_slice(&input[index..]);
+                return Ok(());
+            }
+
+            let preceding = if index == 0 {
+                self.last_byte
+            } else {
+                Some(input[index - 1])
+            };
+            let at_word_boundary = preceding.is_none_or(|byte| !word_byte(byte));
+            if at_word_boundary {
+                if let Some((marker, kind)) = token_marker_at(&input[index..]) {
+                    match kind {
+                        TokenKind::Bearer => {
+                            output.extend_from_slice(marker);
+                            self.last_byte = marker.last().copied();
+                            self.active = Some((kind, false));
+                        }
+                        TokenKind::Generic | TokenKind::AwsAccessKey => {
+                            output.extend_from_slice(REDACTED);
+                            self.last_byte = marker.last().copied();
+                            self.active = Some((kind, true));
+                            self.matched = true;
+                        }
+                    }
+                    index += marker.len();
+                    continue;
+                }
+                if !eof && token_marker_prefix(&input[index..]) {
+                    self.tail.extend_from_slice(&input[index..]);
+                    return Ok(());
+                }
+            }
+
+            let byte = input[index];
             output.push(byte);
+            self.last_byte = Some(byte);
+            index += 1;
         }
-
-        let keep = (MAX_MARKER_LENGTH - 1).min(combined.len());
-        self.tail.clear();
-        self.tail
-            .extend_from_slice(&combined[combined.len().saturating_sub(keep)..]);
+        Ok(())
     }
-}
 
-fn marker_ending_at(bytes: &[u8], end: usize) -> Option<TokenKind> {
-    TOKEN_MARKERS.iter().find_map(|(marker, kind)| {
-        let start = end.checked_sub(marker.len())?;
-        let candidate = bytes.get(start..end)?;
-        candidate
-            .iter()
-            .zip(marker.iter())
-            .all(|(left, right)| left.eq_ignore_ascii_case(right))
-            .then_some(*kind)
-    })
+    fn finish_authority(&mut self, authority: Vec<u8>, output: &mut Vec<u8>) {
+        if let Some(userinfo_end) = authority.iter().rposition(|byte| *byte == b'@') {
+            output.extend_from_slice(REDACTED);
+            output.extend_from_slice(&authority[userinfo_end..]);
+            self.matched = true;
+        } else {
+            output.extend_from_slice(&authority);
+        }
+        self.last_byte = authority.last().copied().or(self.last_byte);
+    }
 }
 
 fn token_byte(kind: TokenKind, byte: u8) -> bool {
@@ -205,8 +307,39 @@ fn token_byte(kind: TokenKind, byte: u8) -> bool {
             byte.is_ascii_alphanumeric() || b"._~+/-=_".contains(&byte)
         }
         TokenKind::AwsAccessKey => byte.is_ascii_uppercase() || byte.is_ascii_digit(),
-        TokenKind::UrlAuthority => !byte.is_ascii_whitespace() && !b"/?#\"'<>`".contains(&byte),
     }
+}
+
+fn token_marker_at(bytes: &[u8]) -> Option<(&'static [u8], TokenKind)> {
+    TOKEN_MARKERS.iter().find_map(|(marker, kind)| {
+        bytes
+            .get(..marker.len())
+            .filter(|candidate| {
+                candidate
+                    .iter()
+                    .zip(marker.iter())
+                    .all(|(left, right)| left.eq_ignore_ascii_case(right))
+            })
+            .map(|_| (*marker, *kind))
+    })
+}
+
+fn token_marker_prefix(bytes: &[u8]) -> bool {
+    TOKEN_MARKERS.iter().any(|(marker, _)| {
+        bytes.len() < marker.len()
+            && marker[..bytes.len()]
+                .iter()
+                .zip(bytes.iter())
+                .all(|(left, right)| left.eq_ignore_ascii_case(right))
+    })
+}
+
+fn word_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || byte == b'_'
+}
+
+fn url_delimiter(byte: u8) -> bool {
+    byte.is_ascii_whitespace() || b"/?#\"'<>`\\".contains(&byte)
 }
 
 /// Stateful filter used directly by supervisor capture. Values are never
@@ -248,6 +381,10 @@ impl Redactor {
         })
     }
 
+    pub fn has_redaction(&self) -> bool {
+        self.literals.matched || self.tokens.matched
+    }
+
     fn filter_bounded(&mut self, bytes: &[u8]) -> Result<Vec<u8>, FilterError> {
         if self.failed || bytes.len() > FRAME_LIMIT {
             self.failed = true;
@@ -260,7 +397,32 @@ impl Redactor {
             return Err(FilterError);
         }
         let mut filtered = Vec::with_capacity(literals.len());
-        self.tokens.filter(&literals, &mut filtered);
+        self.tokens.filter(&literals, &mut filtered).map_err(|_| {
+            self.failed = true;
+            FilterError
+        })?;
+        if filtered.len() > FRAME_LIMIT {
+            self.failed = true;
+            return Err(FilterError);
+        }
+        Ok(filtered)
+    }
+
+    fn finish_bounded(&mut self) -> Result<Vec<u8>, FilterError> {
+        if self.failed {
+            return Err(FilterError);
+        }
+        let mut literals = Vec::new();
+        self.literals.finish(&mut literals);
+        let mut filtered = Vec::new();
+        self.tokens.filter(&literals, &mut filtered).map_err(|_| {
+            self.failed = true;
+            FilterError
+        })?;
+        self.tokens.finish(&mut filtered).map_err(|_| {
+            self.failed = true;
+            FilterError
+        })?;
         if filtered.len() > FRAME_LIMIT {
             self.failed = true;
             return Err(FilterError);
@@ -273,6 +435,10 @@ impl CaptureFilter for Redactor {
     fn filter(&mut self, bytes: &[u8]) -> Result<Vec<u8>, FilterError> {
         self.filter_bounded(bytes)
     }
+
+    fn finish(&mut self) -> Result<Vec<u8>, FilterError> {
+        self.finish_bounded()
+    }
 }
 
 #[cfg(test)]
@@ -284,6 +450,7 @@ mod tests {
         for chunk in chunks {
             output.extend(redactor.filter(chunk).expect("bounded input"));
         }
+        output.extend(redactor.finish().expect("bounded finish"));
         output
     }
 
@@ -306,13 +473,62 @@ mod tests {
     }
 
     #[test]
+    fn nested_literal_matches_mask_the_longer_secret_across_chunks() {
+        let whole: [&[u8]; 1] = [b"abcde"];
+        let split: [&[u8]; 3] = [b"ab", b"cd", b"e"];
+        for chunks in [&whole[..], &split[..]] {
+            let mut redactor =
+                Redactor::new([b"abcde".to_vec(), b"cd".to_vec()]).expect("valid secrets");
+            assert_eq!(joined(&mut redactor, chunks), REDACTED);
+        }
+    }
+
+    #[test]
+    fn incomplete_literal_prefix_is_preserved_after_mismatch_across_chunks() {
+        let mut redactor = Redactor::new([b"secret-value".to_vec()]).expect("valid secret");
+        let output = joined(&mut redactor, &[b"ordinary secr", b"etx and done"]);
+        assert_eq!(output, b"ordinary secretx and done");
+    }
+
+    #[test]
+    fn eof_flushes_unmatched_literal_tail() {
+        let mut redactor = Redactor::new([b"secret-value".to_vec()]).expect("valid secret");
+        let mut output = redactor.filter(b"ordinary secret-").expect("bounded input");
+        output.extend(redactor.finish().expect("bounded finish"));
+        assert_eq!(output, b"ordinary secret-");
+    }
+
+    #[test]
+    fn ordinary_urls_and_embedded_token_markers_are_preserved() {
+        let mut redactor = Redactor::new([]).expect("empty secret set");
+        let output = joined(
+            &mut redactor,
+            &[
+                b"https://example.invalid/path xsk-embedded-value and ",
+                b"https://user:pass@example.invalid/path",
+            ],
+        );
+        assert_eq!(
+            output,
+            b"https://example.invalid/path xsk-embedded-value and https://[REDACTED]@example.invalid/path"
+        );
+    }
+
+    #[test]
+    fn token_markers_split_across_chunks_redact_only_at_word_boundaries() {
+        let mut redactor = Redactor::new([]).expect("empty secret set");
+        let output = joined(&mut redactor, &[b"xsk-embedded sk", b"-secret-value"]);
+        assert_eq!(output, b"xsk-embedded [REDACTED]");
+    }
+
+    #[test]
     fn bearer_and_credential_url_values_split_across_chunks_are_hidden() {
         let mut redactor = Redactor::new([]).expect("empty secret set");
         let output = joined(
             &mut redactor,
             &[
-                b"Authorization: Bear",
-                b"er abc.def_123\nfetch https:",
+                b"Bearer ",
+                b"abc.def_123\nfetch https:",
                 b"//alice:password@example.invalid/path",
             ],
         );

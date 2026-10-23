@@ -110,6 +110,8 @@ impl<'a, 'f> StreamCapture<'a, 'f> {
             return;
         }
         self.frames.finish_delivery(self.decoder, &mut self.outcome);
+        self.frames
+            .finish_filter(&self.policy, &mut self.filter, &mut self.outcome);
         self.finished = true;
     }
 
@@ -156,6 +158,8 @@ impl<'a, 'f> StreamCapture<'a, 'f> {
         if !self.finished {
             self.frames
                 .discard_partial_frame(self.decoder, &mut self.outcome);
+            self.frames
+                .finish_filter(&self.policy, &mut self.filter, &mut self.outcome);
         }
         self.outcome
     }
@@ -247,6 +251,34 @@ impl Frames {
             chunk
         };
 
+        self.retain_filtered(policy, bytes, out);
+    }
+
+    fn finish_filter(
+        &mut self,
+        policy: &StreamPolicy<'_>,
+        filter: &mut Option<&mut dyn CaptureFilter>,
+        out: &mut CapturedStream,
+    ) {
+        if self.filter_disabled {
+            return;
+        }
+        let Some(filter) = filter.as_deref_mut() else {
+            return;
+        };
+        match filter.finish() {
+            Ok(bytes) if bytes.len() <= FRAME_LIMIT => self.retain_filtered(policy, &bytes, out),
+            Err(_) | Ok(_) => {
+                self.filter_disabled = true;
+                out.filter_failed = true;
+            }
+        }
+    }
+
+    fn retain_filtered(&self, policy: &StreamPolicy<'_>, bytes: &[u8], out: &mut CapturedStream) {
+        if bytes.is_empty() {
+            return;
+        }
         if let StreamPolicy::Tee { sink, .. } = policy
             && let Err(loss) = sink.try_send(bytes)
         {
@@ -292,6 +324,8 @@ impl Pump<'_> {
             Ok(0) => {
                 self.frames
                     .finish_delivery(self.decoder.map(FrameDelivery::Raw), out);
+                self.frames
+                    .finish_filter(&self.policy, &mut self.filter, out);
                 *pipe = None;
             }
             Ok(count) => {
@@ -377,6 +411,20 @@ mod tests {
     impl CaptureFilter for FailingFilter {
         fn filter(&mut self, _bytes: &[u8]) -> Result<Vec<u8>, FilterError> {
             Err(FilterError)
+        }
+    }
+
+    struct FinishingFilter {
+        pending: Vec<u8>,
+    }
+    impl CaptureFilter for FinishingFilter {
+        fn filter(&mut self, bytes: &[u8]) -> Result<Vec<u8>, FilterError> {
+            self.pending.extend_from_slice(bytes);
+            Ok(Vec::new())
+        }
+
+        fn finish(&mut self) -> Result<Vec<u8>, FilterError> {
+            Ok(std::mem::take(&mut self.pending))
         }
     }
 
@@ -541,6 +589,24 @@ mod tests {
         assert!(capture.push(b"secret").is_ok());
         assert!(capture.outcome().filter_failed);
         assert!(capture.outcome().bytes.is_empty());
+    }
+
+    #[test]
+    fn eof_flushes_filter_tail_through_normal_retention() {
+        let mut filter = FinishingFilter {
+            pending: Vec::new(),
+        };
+        let capture =
+            StreamCapture::new(StreamPolicy::Capture { limit: 16 }, None, Some(&mut filter));
+        assert!(capture.is_ok());
+        let Ok(mut capture) = capture else {
+            return;
+        };
+        assert!(capture.push(b"tail").is_ok());
+        assert!(capture.outcome().bytes.is_empty());
+        capture.finish();
+        assert_eq!(capture.outcome().bytes, b"tail");
+        assert!(!capture.outcome().filter_failed);
     }
 
     #[test]

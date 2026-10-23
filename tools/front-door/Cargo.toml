@@ -52,6 +52,7 @@ ignored-paths = [
   "crates/run/src/lib.rs",
 ]
 ignored = [
+  "provenant-confinement",
   "provenant-cli",
   "provenant-fabric-mcp",
   "provenant-fabric-runtime",
@@ -89,12 +90,6 @@ publish = false
 license.workspace = true
 
 [dependencies]
-clap = { workspace = true }
-serde = { workspace = true }
-serde_json = { workspace = true }
-sha2 = { workspace = true }
-provenant-core = { workspace = true }
-provenant-confinement = { workspace = true }
 provenant-records = { workspace = true }
 provenant-config = { workspace = true }
 provenant-supervisor = { workspace = true }
