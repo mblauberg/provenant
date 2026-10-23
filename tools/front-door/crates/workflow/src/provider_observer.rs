@@ -1,13 +1,12 @@
 //! Observer-cycle messages and retained summary. No process control is exposed.
 use crate::lane_exit::Member;
-pub use crate::pending::OrderedMap;
+pub use crate::pending::{OrderedMap, OrderedValue};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ObserverPlan {
     pub adapter: String,
-    pub model: String,
+    pub model: OrderedValue,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ObserverStream {
@@ -108,8 +107,8 @@ pub struct ModelUsage {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ModelChange {
     #[serde(deserialize_with = "crate::pending::required_option")]
-    pub from: Option<String>,
-    pub to: String,
+    pub from: Option<OrderedValue>,
+    pub to: OrderedValue,
 }
 pub type SemanticFailure = crate::pending::OrderedRecord<SemanticFailureFields>;
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -117,8 +116,8 @@ pub struct SemanticFailureFields {
     pub status: String,
     pub signature: String,
     pub excerpt: String,
-    pub reset_at: Value,
-    pub retry_after: Value,
+    pub reset_at: OrderedValue,
+    pub retry_after: OrderedValue,
     #[serde(flatten)]
     pub extra: crate::pending::OrderedMap<crate::pending::OrderedValue>,
 }
@@ -126,13 +125,13 @@ pub type ObserverSummary = crate::pending::OrderedRecord<ObserverSummaryFields>;
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ObserverSummaryFields {
     #[serde(default, skip_serializing_if = "Member::is_absent")]
-    pub session_id: Member<Value>,
+    pub session_id: Member<OrderedValue>,
     #[serde(default, skip_serializing_if = "Member::is_absent")]
-    pub observed_model: Member<Value>,
+    pub observed_model: Member<OrderedValue>,
     #[serde(default, skip_serializing_if = "Member::is_absent")]
-    pub reset_at: Member<Value>,
+    pub reset_at: Member<OrderedValue>,
     #[serde(default, skip_serializing_if = "Member::is_absent")]
-    pub retry_after: Member<Value>,
+    pub retry_after: Member<OrderedValue>,
     pub terminal_event_seen: bool,
     #[serde(deserialize_with = "crate::pending::required_option")]
     pub live_failure: Option<SemanticFailure>,
@@ -145,7 +144,7 @@ pub struct ObserverSummaryFields {
     pub text_truncated: bool,
     pub model_changes: Vec<ModelChange>,
     #[serde(deserialize_with = "crate::pending::required_option")]
-    pub last_model: Option<String>,
+    pub last_model: Option<OrderedValue>,
     pub context: ContextUsage,
     pub models: ModelUsage,
 }
@@ -153,6 +152,11 @@ pub struct ObserverSummaryFields {
 impl ObserverSummary {
     pub fn from_json(raw: &[u8]) -> Result<Self, provenant_records::checked_json::DecodeError> {
         Self::decode(raw)
+    }
+
+    /// Render the compact JSON wire form used by Python's observer interface.
+    pub fn python_wire(&self) -> Result<String, serde_json::Error> {
+        crate::pending::python_wire(self)
     }
 }
 
@@ -197,7 +201,7 @@ mod tests {
             for raw in expected.as_array().unwrap() {
                 let wire = raw["wire"].as_str().unwrap();
                 let typed = ObserverSummary::from_json(wire.as_bytes()).unwrap();
-                assert_eq!(serde_json::to_string(&typed).unwrap(), wire);
+                assert_eq!(typed.python_wire().unwrap(), wire);
             }
         }
         for raw in [json!({"terminal":true}), json!({"stop":"usage_limited"})] {
@@ -228,7 +232,7 @@ mod tests {
                 .collect();
             assert_eq!(json!(keys), outputs[0]["failure_keys"]);
             assert_eq!(keys, vec!["usage_limited", "auth_required"]);
-            let serialised = serde_json::to_string(&typed).unwrap();
+            let serialised = typed.python_wire().unwrap();
             assert_eq!(serialised, wire);
             let again: ObserverSummary = serde_json::from_str(&serialised).unwrap();
             assert_eq!(again.semantic_failures, typed.semantic_failures);
@@ -250,7 +254,7 @@ mod tests {
             for (i, raw) in outputs.as_array().unwrap().iter().enumerate() {
                 let wire = raw["wire"].as_str().unwrap();
                 let typed = ObserverSummary::from_json(wire.as_bytes()).unwrap();
-                assert_eq!(serde_json::to_string(&typed).unwrap(), wire);
+                assert_eq!(typed.python_wire().unwrap(), wire);
                 if i < 2 {
                     assert!(typed.live_failure.is_some());
                 }
@@ -274,6 +278,107 @@ mod tests {
             ));
         }
     }
+
+    #[test]
+    fn plan_models_keep_dynamic_values_and_nested_source_order() {
+        let cases = json!([
+            {
+                "plan_raw":r#"{"adapter":"claude","model":{"label":"initial","meta":{"z":2,"a":1}}}"#,
+                "lines":[{"type":"system","subtype":"init","session_id":"session-1","model":"answered"}]
+            },
+            {"plan_raw":r#"{"adapter":"claude","model":[null,2,true]}"#,"lines":[]}
+        ]);
+        let Some(expected) = crate::test_support::oracle_script(
+            "oracle_interfaces.py",
+            "observer_live_wire",
+            &cases,
+        ) else {
+            return;
+        };
+        for (index, raw) in expected.as_array().unwrap().iter().enumerate() {
+            let wire = raw["wire"].as_str().unwrap();
+            let typed = ObserverSummary::from_json(wire.as_bytes()).unwrap();
+            assert_eq!(typed.python_wire().unwrap(), wire);
+            if index == 0 {
+                assert!(wire.contains(r#""meta":{"z":2,"a":1}"#));
+            }
+        }
+        let plan_raw = r#"{"adapter":"claude","model":{"label":"initial","meta":{"z":2,"a":1}}}"#;
+        let plan: ObserverPlan = serde_json::from_str(plan_raw).unwrap();
+        assert_eq!(serde_json::to_string(&plan).unwrap(), plan_raw);
+    }
+
+    #[test]
+    fn live_observer_semantic_wire_matches_python_with_boolean_retry_value() {
+        let cases = json!([{
+            "plan":{"adapter":"claude","model":"fixture"},
+            "lines":[
+                {"type":"system","subtype":"init","session_id":"session-1","model":"fixture"},
+                {"type":"api_retry","retry_after":true,"error":{"message":"rate limit 429"}},
+                {"type":"result","result":"DONE","is_error":false}
+            ]
+        }]);
+        let Some(expected) = crate::test_support::oracle_script(
+            "oracle_interfaces.py",
+            "observer_live_wire",
+            &cases,
+        ) else {
+            return;
+        };
+        let wire = expected[0]["wire"].as_str().unwrap();
+        let typed = ObserverSummary::from_json(wire.as_bytes()).unwrap();
+        assert_eq!(typed.retry_after, Member::Present(OrderedValue::Bool(true)));
+        assert_eq!(typed.python_wire().unwrap(), wire);
+    }
+
+    #[test]
+    fn source_non_finite_and_surrogate_wires_are_recorded_partial_edges() {
+        let cases = json!([
+            {
+                "plan":{"adapter":"claude","model":"fixture"},
+                "raw_lines":["{\"type\":\"api_retry\",\"retry_after\":NaN,\"error\":{\"message\":\"rate limit\"}}"]
+            },
+            {
+                "plan":{"adapter":"claude","model":"fixture"},
+                "raw_lines":["{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"\\ud800\",\"model\":\"fixture\"}"]
+            }
+        ]);
+        let Some(expected) = crate::test_support::oracle_script(
+            "oracle_interfaces.py",
+            "observer_live_wire",
+            &cases,
+        ) else {
+            return;
+        };
+        let non_finite_wire = expected[0]["wire"].as_str().unwrap();
+        assert!(non_finite_wire.contains("\"retry_after\":NaN"));
+        assert!(expected[1].get("surrogatepass_hex").is_some());
+        assert!(ObserverSummary::from_json(non_finite_wire.as_bytes()).is_err());
+        assert!(ObserverSummary::from_json(br#"{"session_id":"\ud800"}"#).is_err());
+    }
+
+    #[test]
+    fn observer_python_wire_matches_source_float_notation() {
+        let cases = json!([{
+            "plan_raw":r#"{"adapter":"claude","model":{"small":1e-7,"large":1e20,"negative_zero":-0.0}}"#,
+            "lines":[]
+        }]);
+        let Some(expected) = crate::test_support::oracle_script(
+            "oracle_interfaces.py",
+            "observer_live_wire",
+            &cases,
+        ) else {
+            return;
+        };
+        let wire = expected[0]["wire"].as_str().unwrap();
+        let summary = ObserverSummary::from_json(wire.as_bytes()).unwrap();
+        let rendered = summary.python_wire().unwrap();
+        assert_eq!(rendered, wire);
+        assert!(rendered.contains(r#""small":1e-07"#));
+        assert!(rendered.contains(r#""large":1e+20"#));
+        assert!(rendered.contains(r#""negative_zero":-0.0"#));
+    }
+
     #[test]
     fn observer_notifications_cannot_invent_terminal_false_or_a_silence_stop() {
         for raw in [
