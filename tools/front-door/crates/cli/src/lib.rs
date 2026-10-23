@@ -27,3 +27,5 @@ pub mod stale_checkout;
 
 #[cfg(test)]
 mod oracle;
+
+pub mod pr_checks;
