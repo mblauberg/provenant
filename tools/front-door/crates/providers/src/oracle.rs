@@ -2,8 +2,9 @@
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 use std::{
-    io::Write,
+    io::{Read, Write},
     process::{Command, Stdio},
+    time::{Duration, Instant},
 };
 
 fn unavailable(reason: &str) -> Option<Command> {
@@ -24,7 +25,7 @@ fn command() -> Option<Command> {
         if let Some(path) = std::env::var_os("PATH") {
             command.env("PATH", path);
         }
-        command.arg("-B");
+        command.args(["-I", "-B"]);
         command
     };
     let output = match make()
@@ -66,7 +67,10 @@ pub(crate) fn python<T: DeserializeOwned>(
         .nth(4)
         .unwrap();
     let mut child = command
-        .args(["-c", code])
+        .args([
+            "-c",
+            &format!("import os,sys; sys.path.insert(0, os.getcwd()); {code}"),
+        ])
         .current_dir(root)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -79,11 +83,38 @@ pub(crate) fn python<T: DeserializeOwned>(
         .unwrap()
         .write_all(&serde_json::to_vec(input).unwrap())
         .unwrap();
-    let output = child.wait_with_output().unwrap();
+    let mut stdout = child.stdout.take().unwrap();
+    let mut stderr = child.stderr.take().unwrap();
+    let stdout_reader = std::thread::spawn(move || {
+        let mut output = Vec::new();
+        stdout.read_to_end(&mut output).map(|_| output)
+    });
+    let stderr_reader = std::thread::spawn(move || {
+        let mut output = Vec::new();
+        stderr.read_to_end(&mut output).map(|_| output)
+    });
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) if Instant::now() < deadline => std::thread::yield_now(),
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = stdout_reader.join();
+                let _ = stderr_reader.join();
+                panic!("Python oracle exceeded 60 second deadline");
+            }
+            Err(error) => panic!("could not observe Python oracle: {error}"),
+        }
+    }
+    let status = child.wait().unwrap();
+    let stdout = stdout_reader.join().unwrap().unwrap();
+    let stderr = stderr_reader.join().unwrap().unwrap();
     assert!(
-        output.status.success(),
+        status.success(),
         "Python oracle failed: {}",
-        String::from_utf8_lossy(&output.stderr)
+        String::from_utf8_lossy(&stderr)
     );
-    Some(crate::decode_json(&output.stdout).unwrap())
+    Some(crate::decode_json(&stdout).unwrap())
 }
