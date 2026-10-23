@@ -55,10 +55,11 @@ pub enum ProcessParseError {
 }
 
 fn integer_field(text: &str, field: &'static str) -> Result<i64, ProcessParseError> {
-    let integer = crate::pending::Integer::parse(text).ok_or(ProcessParseError::Field(field))?;
+    let integer =
+        provenant_core::py::Integer::parse(text).ok_or(ProcessParseError::Field(field))?;
     integer
         .as_i64()
-        .ok_or(ProcessParseError::NumberOutOfRange(field))
+        .map_err(|_| ProcessParseError::NumberOutOfRange(field))
 }
 
 fn pid_field(text: &str, field: &'static str) -> Result<i32, ProcessParseError> {
@@ -156,15 +157,18 @@ pub fn shell_join_os<'a>(args: impl IntoIterator<Item = &'a OsStr>) -> OsString 
 }
 
 pub fn duration(seconds: f64, elapsed: bool, darwin: bool) -> Result<String, ProcessParseError> {
-    use crate::pending::{divmod_decimal, float_whole};
+    use provenant_core::py::{divmod_decimal, float_whole};
     let seconds = seconds.max(0.0);
     if !seconds.is_finite() {
         return Err(ProcessParseError::Duration);
     }
-    let whole = float_whole(seconds);
-    let (total_minutes, secs) = divmod_decimal(&whole, 60);
-    let (total_hours, minutes) = divmod_decimal(&total_minutes, 60);
-    let (days, hours) = divmod_decimal(&total_hours, 24);
+    let whole = float_whole(seconds).map_err(|_| ProcessParseError::Duration)?;
+    let (total_minutes, secs) =
+        divmod_decimal(&whole, 60).map_err(|_| ProcessParseError::Duration)?;
+    let (total_hours, minutes) =
+        divmod_decimal(&total_minutes, 60).map_err(|_| ProcessParseError::Duration)?;
+    let (days, hours) =
+        divmod_decimal(&total_hours, 24).map_err(|_| ProcessParseError::Duration)?;
     if !elapsed {
         let hundredths = (((seconds - seconds.trunc()) * 100.0 + 0.5) as u32).min(99);
         return Ok(if darwin {
@@ -987,11 +991,51 @@ impl PsRunner for SystemPsRunner {
         timeout: f64,
         output_limit_bytes: i64,
     ) -> Result<crate::capture::BoundedProcessResult, crate::bounded::BoundedError> {
-        let mut options = crate::bounded::Options::new(std::path::Path::new("."), timeout);
+        use crate::exec::{ExecOptions, Executor, SystemExecutor, Termination};
+        let started = std::time::Instant::now();
+        let mut options = ExecOptions::new(
+            command,
+            std::path::Path::new("."),
+            std::time::Duration::from_secs_f64(timeout),
+        );
         options.env = Some(env);
-        options.merge_stderr = false;
-        options.output_limit_bytes = output_limit_bytes;
-        crate::bounded::run_bounded_text(command, options)
+        options.stdout_limit = usize::try_from(output_limit_bytes.max(0)).unwrap_or(usize::MAX);
+        options.stderr_limit = options.stdout_limit;
+        let result = SystemExecutor
+            .execute(options)
+            .map_err(|error| match error {
+                crate::exec::ExecError::Io { operation, source } => {
+                    crate::bounded::BoundedError::Io { operation, source }
+                }
+                error => crate::bounded::BoundedError::Io {
+                    operation: "raw exec",
+                    source: std::io::Error::other(error),
+                },
+            })?;
+        let text = |bytes| {
+            String::from_utf8(bytes)
+                .map(|text| text.replace("\r\n", "\n").replace('\r', "\n"))
+                .map_err(crate::capture::CaptureError::Decode)
+        };
+        let stdout = text(result.stdout.bytes)?;
+        let stderr = text(result.stderr.bytes)?;
+        Ok(crate::capture::BoundedProcessResult {
+            returncode: match result.termination {
+                Termination::Exit(code) => code,
+                Termination::Signal(signal) => -signal,
+            },
+            output: stdout.clone(),
+            output_bytes: result.stdout.total_bytes,
+            output_truncated: result.stdout.truncated,
+            timed_out: result.timed_out,
+            elapsed_seconds: started.elapsed().as_secs_f64(),
+            stdout: Some(stdout),
+            stderr: Some(stderr),
+            stdout_bytes: Some(result.stdout.total_bytes),
+            stderr_bytes: Some(result.stderr.total_bytes),
+            stdout_truncated: Some(result.stdout.truncated),
+            stderr_truncated: Some(result.stderr.truncated),
+        })
     }
 }
 
@@ -1105,7 +1149,7 @@ pub fn linux_census_pids(
         if !name.is_empty()
             && name
                 .chars()
-                .all(|ch| crate::pending::decimal_digit(ch).is_some())
+                .all(|ch| provenant_core::py::decimal_digit(ch).is_some())
         {
             pids.push(pid_field(name, "pid")?);
         }
@@ -1162,7 +1206,7 @@ fn ps_processes_with(runner: &mut impl PsRunner) -> Result<Vec<ProcessInfo>, Pro
             !value.is_empty()
                 && value
                     .chars()
-                    .all(|ch| crate::pending::decimal_digit(ch).is_some())
+                    .all(|ch| provenant_core::py::decimal_digit(ch).is_some())
         })
         .map(|value| pid_field(value, "pid"))
         .collect::<Result<_, _>>()?;

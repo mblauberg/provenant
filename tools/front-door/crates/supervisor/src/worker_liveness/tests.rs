@@ -4,7 +4,7 @@ use std::path::Path;
 #[test]
 fn terminal_reports_require_an_observed_owned_exit() {
     for classification in TERMINAL_CLASSIFICATIONS {
-        let report = terminal_report(
+        let report = terminal_report::<i64>(
             classification,
             81,
             false,
@@ -19,11 +19,11 @@ fn terminal_reports_require_an_observed_owned_exit() {
         assert_eq!(report.classification, classification);
     }
     assert_eq!(
-        terminal_report("complete", 81, false, None),
+        terminal_report::<i64>("complete", 81, false, None),
         Err(LivenessError::MissingExit)
     );
     assert_eq!(
-        terminal_report(
+        terminal_report::<i64>(
             "complete",
             81,
             false,
@@ -35,11 +35,11 @@ fn terminal_reports_require_an_observed_owned_exit() {
         Err(LivenessError::MissingExit)
     );
     assert!(matches!(
-        terminal_report("complete", 81, true, None),
+        terminal_report::<i64>("complete", 81, true, None),
         Err(LivenessError::LiveWriter { .. })
     ));
     assert!(matches!(
-        terminal_report("other", 81, true, None),
+        terminal_report::<i64>("other", 81, true, None),
         Err(LivenessError::Classification(_))
     ));
 }
@@ -197,7 +197,7 @@ print(json.dumps({{'duration':[bits(m.parse_duration(x)) for x in {durations}], 
     ]
     .into_iter()
     .map(|(c, live, pid)| {
-        match terminal_report(
+        match terminal_report::<i64>(
             c,
             81,
             live,

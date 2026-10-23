@@ -573,6 +573,7 @@ dependencies = [
 name = "provenant-supervisor"
 version = "0.1.0"
 dependencies = [
+ "clap",
  "jiff",
  "libc",
  "provenant-core",

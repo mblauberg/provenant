@@ -200,8 +200,8 @@ pub fn parse(argv: &[String]) -> Result<PsOptions, PsParseError> {
         if option == "p" {
             for item in value.split(',') {
                 let value =
-                    crate::pending::Integer::parse(item).ok_or(PsParseError::NumericPids)?;
-                if value.as_i64().is_none() && value.as_u64().is_none() {
+                    provenant_core::py::Integer::parse(item).ok_or(PsParseError::NumericPids)?;
+                if value.as_i64().is_err() && value.as_u64().is_err() {
                     return Err(PsParseError::NumberOutOfRange);
                 }
                 result.selected.push(Pid(value));
@@ -332,7 +332,7 @@ print(json.dumps(out))
                     value
                         .selected
                         .iter()
-                        .map(|pid| pid.0.as_i64())
+                        .map(|pid| pid.0.as_i64().ok())
                         .collect::<Vec<_>>(),
                     value.fields,
                     value.all_processes,
@@ -347,10 +347,10 @@ print(json.dumps(out))
 
 /// Parsed PID tokens retain Python's integer domain until the OS boundary.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub struct Pid(crate::pending::Integer);
+pub struct Pid(provenant_core::py::Integer);
 impl Pid {
     pub fn as_os_pid(&self) -> Option<i32> {
-        self.0.as_i32()
+        self.0.as_i32().ok()
     }
 }
 impl std::fmt::Display for Pid {
@@ -360,7 +360,7 @@ impl std::fmt::Display for Pid {
 }
 impl PartialEq<i64> for Pid {
     fn eq(&self, other: &i64) -> bool {
-        self.0.as_i64() == Some(*other)
+        self.0.as_i64() == Ok(*other)
     }
 }
 
@@ -438,7 +438,7 @@ pub fn error_output(message: &str) -> Output {
 /// Invalid OS bytes become \udcXX, rather than U+FFFD or lossy UTF-8 output.
 pub fn visible(text: &OsStr) -> String {
     fn push_char(out: &mut String, ch: char) {
-        if crate::pending::printable(ch) {
+        if provenant_core::py::printable(ch) {
             out.push(ch);
             return;
         }

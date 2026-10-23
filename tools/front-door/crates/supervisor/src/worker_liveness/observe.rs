@@ -5,7 +5,7 @@
 //! command and filesystem traits keep those effects fixture-driven in tests.
 
 use super::{LivenessError, Process, require_inspection_quiescent};
-use crate::bounded::{BoundedError, Options, run_bounded_text};
+use crate::exec::{ExecOptions, SystemExecutor, Termination, TextError, run_text};
 use crate::sys::{self, Account};
 use jiff::tz::TimeZone;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
@@ -43,6 +43,8 @@ pub enum ObserveError {
     },
     #[error("Could not determine home directory.")]
     HomeDirectory { path: PathBuf },
+    #[error("observed cwd is not valid UTF-8: {path:?}")]
+    NonUtf8Path { path: PathBuf },
     #[error("process command is not valid UTF-8")]
     NonUtf8Command { command: OsString },
     #[error("could not decode UTF-8 output from {source_name}")]
@@ -64,7 +66,7 @@ pub enum ObserveError {
     #[error("diagnostic command output exceeds {limit} bytes: {program}")]
     CommandOutputLimit { program: String, limit: i64 },
     #[error(transparent)]
-    Command(#[from] BoundedError),
+    Command(#[from] TextError),
     #[error("cannot inspect processes: {0}")]
     ProcessCensus(#[source] crate::process_info::ProcessError),
     #[error(transparent)]
@@ -99,6 +101,10 @@ pub struct ObservedMetadata {
 pub trait ObservationFs: Send + Sync {
     fn current_dir(&self) -> io::Result<PathBuf>;
     fn is_linux(&self) -> bool;
+    /// Unsupported by default so filesystem fixtures can retain lsof inputs.
+    fn pid_cwd(&self, _pid: i64) -> Result<crate::pid::CwdObservation, crate::pid::PidError> {
+        Ok(crate::pid::CwdObservation::Unsupported)
+    }
     fn exists(&self, path: &Path) -> bool;
     fn resolve_non_strict(&self, path: &Path) -> io::Result<PathBuf>;
     fn lookup_home(&self, user: Option<&OsStr>) -> io::Result<Option<PathBuf>>;
@@ -118,6 +124,10 @@ impl ObservationFs for SystemObservationFs {
 
     fn is_linux(&self) -> bool {
         cfg!(target_os = "linux")
+    }
+
+    fn pid_cwd(&self, pid: i64) -> Result<crate::pid::CwdObservation, crate::pid::PidError> {
+        crate::pid::CwdObserver::cwd(&crate::pid::SystemCwdObserver, pid)
     }
 
     fn exists(&self, path: &Path) -> bool {
@@ -292,10 +302,11 @@ impl Default for SystemCommandRunner {
 impl CommandRunner for SystemCommandRunner {
     fn run(&self, args: &[OsString]) -> Result<CommandOutput, ObserveError> {
         let current_dir = Path::new(".");
-        let mut options = Options::new(current_dir, self.timeout.as_secs_f64());
-        options.merge_stderr = false;
-        options.output_limit_bytes = self.output_limit_bytes;
-        let result = run_bounded_text(args, options)?;
+        let mut options = ExecOptions::new(args, current_dir, self.timeout);
+        options.stdout_limit =
+            usize::try_from(self.output_limit_bytes.max(0)).unwrap_or(usize::MAX);
+        options.stderr_limit = options.stdout_limit;
+        let result = run_text(&SystemExecutor, options)?;
         let program = args
             .first()
             .map(|arg| arg.to_string_lossy().into_owned())
@@ -303,15 +314,18 @@ impl CommandRunner for SystemCommandRunner {
         if result.timed_out {
             return Err(ObserveError::TimedOut { program });
         }
-        if result.output_truncated || result.stderr_truncated == Some(true) {
+        if result.stdout_truncated || result.stderr_truncated {
             return Err(ObserveError::CommandOutputLimit {
                 program,
                 limit: self.output_limit_bytes,
             });
         }
         Ok(CommandOutput {
-            returncode: result.returncode,
-            stdout: result.stdout.unwrap_or_default(),
+            returncode: match result.termination {
+                Termination::Exit(code) => code,
+                Termination::Signal(signal) => -signal,
+            },
+            stdout: result.stdout.replace("\r\n", "\n").replace('\r', "\n"),
         })
     }
 }
@@ -364,6 +378,13 @@ pub fn process_cwd(
     pid: i64,
 ) -> Result<String, ObserveError> {
     if fs.is_linux() {
+        if let Ok(crate::pid::CwdObservation::Path(path)) = fs.pid_cwd(pid) {
+            return path
+                .clone()
+                .into_os_string()
+                .into_string()
+                .map_err(|_| ObserveError::NonUtf8Path { path });
+        }
         let proc_link = PathBuf::from(format!("/proc/{pid}/cwd"));
         if fs.exists(&proc_link) {
             if let Ok(path) = fs.resolve_non_strict(&proc_link) {
@@ -381,38 +402,12 @@ pub fn process_cwd(
         OsString::from("-Fn"),
     ];
     let result = runner.run(&args)?;
-    for line in python_splitlines(&result.stdout) {
+    for line in provenant_core::py::python_splitlines(&result.stdout) {
         if let Some(path) = line.strip_prefix('n') {
             return Ok(path.into());
         }
     }
     Ok("?".into())
-}
-
-fn python_splitlines(value: &str) -> Vec<&str> {
-    let mut lines = Vec::new();
-    let mut start = 0;
-    let mut chars = value.char_indices().peekable();
-    while let Some((index, ch)) = chars.next() {
-        if !matches!(
-            ch,
-            '\n' | '\r' | '\u{b}' | '\x0c' | '\u{1c}'
-                ..='\u{1e}' | '\u{85}' | '\u{2028}' | '\u{2029}'
-        ) {
-            continue;
-        }
-        lines.push(&value[start..index]);
-        start = index + ch.len_utf8();
-        if ch == '\r' && chars.peek().is_some_and(|(_, next)| *next == '\n') {
-            if let Some((index, next)) = chars.next() {
-                start = index + next.len_utf8();
-            }
-        }
-    }
-    if start < value.len() {
-        lines.push(&value[start..]);
-    }
-    lines
 }
 
 pub fn worker_cwd(

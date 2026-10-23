@@ -11,6 +11,7 @@ fault-injection = []
 test-fixtures = []
 
 [dependencies]
+clap = { workspace = true }
 provenant-core = { workspace = true }
 provenant-records = { workspace = true }
 jiff = { workspace = true }

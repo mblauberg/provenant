@@ -2079,6 +2079,28 @@ helpers equivalent to `json_bytes`, `json_string`, `path_text`, `schema_one` and
   forever. Rust refuses NaN with `BoundedError::InvalidTimeout` before
   spawning. An infinite timeout keeps Python's behaviour: no deadline.
 
+### RP-SUP4-OWNER-DOMAINS — raw-owner integration retains partial boundaries
+
+Class: `library` (open, not accepted). Author route: `codex/gpt-6.1-sol@high`.
+Rulebook v4; intake source/oracle `ad64bd688ad6517ae883b43cc6bcde3c700d0796`.
+Batch 4 supplies hard byte-prefix capture, strict text, owned-child PID signals,
+native cwd, Python a+ append/flock, durable marker and following-read APIs.
+These are inert owner contracts, not a command cut-over.
+
+The process-info fallback's existing 1 MiB refusal (RP-1302) remains. Worker
+commands retain the existing 15-second/16-MiB budgets and session first-line
+64-MiB bound; Python has no such bounds. Main still lacks extended Python JSON
+and surrogateescape/lone-surrogate path owners. Native non-UTF-8 Linux cwd
+observations now return an explicit typed refusal rather than replacement text.
+Darwin worker cwd preserves the source lsof route; the separately exported
+native proc_pidinfo observer is available for later callers.
+
+Fabric ps now uses hard pipe capture rather than a sampled unbounded spool.
+RP-SUP-PS-BUFFER remains open: exact prefix truncation differs from Node's
+retained overflow read. A TERM-ignoring Node execFileSync child can wait without
+bound; the owner escalates to KILL after grace. This bounded utility behavior is
+not evidence of Node failure-path parity. No graph unit is added to ported.txt
+and none of these library differences is accepted by this entry.
 
 ## RP-RRC3-005: custody help-width boundary (open, library)
 

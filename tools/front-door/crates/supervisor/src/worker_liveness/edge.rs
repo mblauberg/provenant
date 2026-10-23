@@ -11,9 +11,9 @@ pub enum Request {
         json: bool,
     },
     TerminalReport {
-        pid: i64,
+        pid: CommandInteger,
         classification: String,
-        exit_status: Option<i64>,
+        exit_status: Option<CommandInteger>,
     },
 }
 #[derive(Debug, Error)]
@@ -134,7 +134,9 @@ pub fn execute_request(
             terminal_report(
                 classification,
                 *pid,
-                processes.iter().any(|p| p.pid == *pid),
+                processes
+                    .iter()
+                    .any(|p| CommandInteger::from(p.pid) == *pid),
                 exit_status.map(|exit_status| WorkerExit {
                     pid: *pid,
                     exit_status,
@@ -184,7 +186,7 @@ pub fn execute_request(
     }
 }
 
-pub fn terminal_json(report: &TerminalReport) -> String {
+pub fn terminal_json(report: &TerminalReport<impl ReportInteger>) -> String {
     format!(
         "{{\"classification\": {}, \"exit_status\": {}, \"observed_exit\": {}, \"pid\": {}}}",
         crate::pending::json_ascii(&report.classification),
@@ -237,6 +239,134 @@ pub fn workers_json(workers: &[Worker]) -> String {
     format!("[\n{}\n]", rows.join(",\n"))
 }
 
+/// Values observed once by the command boundary, injectable without HOME/cwd
+/// mutation. Resolve these before parsing, as Python builds its defaults first.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MainDefaults {
+    pub home: PathBuf,
+    pub current_directory: PathBuf,
+}
+#[derive(Debug, Error)]
+pub enum ArgumentError {
+    #[error(transparent)]
+    Syntax(#[from] clap::Error),
+    #[error("invalid integer: {value}")]
+    Integer { value: String },
+    #[error("integer outside i64/u64 range: {value}")]
+    NumberOutOfRange { value: String },
+}
+#[derive(clap::Parser)]
+#[command(
+    args_override_self = true,
+    infer_long_args = true,
+    name = "worker-liveness",
+    about = "Report live codex exec workers and non-mutating liveness signals."
+)]
+struct Arguments {
+    #[arg(long)]
+    sessions_root: Option<PathBuf>,
+    #[arg(
+        long = "repo",
+        help = "Show workers from this repository (default: current repository)"
+    )]
+    repository: Option<PathBuf>,
+    #[arg(long)]
+    json: bool,
+    #[command(subcommand)]
+    command: Option<Command>,
+}
+#[derive(clap::Subcommand)]
+enum Command {
+    #[command(
+        args_override_self = true,
+        infer_long_args = true,
+        about = "Report a terminal classification after worker exit"
+    )]
+    TerminalReport {
+        #[arg(long, required = true, allow_hyphen_values = true)]
+        pid: String,
+        #[arg(long, required = true, value_parser = ["blocked", "complete", "failed", "question", "unavailable"])]
+        classification: String,
+        #[arg(long, allow_hyphen_values = true)]
+        exit_status: Option<String>,
+    },
+}
+/// Exact Python integer at the command/record edge; no tagged JSON wrapper.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum CommandInteger {
+    Signed(i64),
+    Unsigned(u64),
+}
+impl PartialEq for CommandInteger {
+    fn eq(&self, other: &Self) -> bool {
+        let value = |integer: &Self| match *integer {
+            Self::Signed(v) => i128::from(v),
+            Self::Unsigned(v) => i128::from(v),
+        };
+        value(self) == value(other)
+    }
+}
+impl Eq for CommandInteger {}
+impl From<i64> for CommandInteger {
+    fn from(value: i64) -> Self {
+        Self::Signed(value)
+    }
+}
+impl std::fmt::Display for CommandInteger {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Signed(v) => v.fmt(f),
+            Self::Unsigned(v) => v.fmt(f),
+        }
+    }
+}
+fn argument_integer(value: String) -> Result<CommandInteger, ArgumentError> {
+    let integer =
+        provenant_core::py::Integer::parse(&value).ok_or_else(|| ArgumentError::Integer {
+            value: value.clone(),
+        })?;
+    if let Ok(value) = integer.as_i64() {
+        return Ok(CommandInteger::Signed(value));
+    }
+    integer
+        .as_u64()
+        .map(CommandInteger::Unsigned)
+        .map_err(|_| ArgumentError::NumberOutOfRange { value })
+}
+/// Parse argv excluding argv[0]. Help/errors are typed for the CLI renderer;
+/// flags, choices, negative/Unicode integers and repeat-last options follow the
+/// Python entry point. No executable or global environment owner is installed.
+pub fn parse_request(
+    argv: &[std::ffi::OsString],
+    defaults: &MainDefaults,
+) -> Result<Request, ArgumentError> {
+    use clap::Parser;
+    let args = Arguments::try_parse_from(
+        std::iter::once(std::ffi::OsString::from("worker-liveness")).chain(argv.iter().cloned()),
+    )?;
+    Ok(match args.command {
+        Some(Command::TerminalReport {
+            pid,
+            classification,
+            exit_status,
+        }) => Request::TerminalReport {
+            pid: argument_integer(pid)?,
+            classification,
+            exit_status: exit_status.map(argument_integer).transpose()?,
+        },
+        None => Request::Collect {
+            sessions_root: args
+                .sessions_root
+                .unwrap_or_else(|| defaults.home.join(".codex/sessions")),
+            repository: args
+                .repository
+                .unwrap_or_else(|| defaults.current_directory.clone()),
+            json: args.json,
+        },
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -271,9 +401,9 @@ mod tests {
             let out = execute_request(
                 &Source { live },
                 &Request::TerminalReport {
-                    pid: 83,
+                    pid: 83_i64.into(),
                     classification: "complete".into(),
-                    exit_status,
+                    exit_status: exit_status.map(CommandInteger::from),
                 },
             )
             .unwrap();
@@ -489,5 +619,179 @@ mod collection_tests {
                 .iter()
                 .all(|worker| worker.output_size.is_none() && !worker.stalled)
         );
+    }
+}
+
+#[cfg(test)]
+mod argument_tests {
+    use super::*;
+    fn args(values: &[&str]) -> Vec<std::ffi::OsString> {
+        values.iter().map(Into::into).collect()
+    }
+    fn defaults() -> MainDefaults {
+        MainDefaults {
+            home: "/home/fixture".into(),
+            current_directory: "/repo".into(),
+        }
+    }
+    #[test]
+    fn defaults_paths_and_repeat_last_options_match_argparse() {
+        assert!(
+            matches!(parse_request(&args(&["--sessions", "/logs"]), &defaults()).unwrap(), Request::Collect { sessions_root, .. } if sessions_root == Path::new("/logs"))
+        );
+        assert_eq!(
+            parse_request(&[], &defaults()).unwrap(),
+            Request::Collect {
+                sessions_root: "/home/fixture/.codex/sessions".into(),
+                repository: "/repo".into(),
+                json: false,
+            }
+        );
+        assert_eq!(
+            parse_request(
+                &args(&[
+                    "--repo",
+                    "/old",
+                    "--repo",
+                    "/new",
+                    "--sessions-root",
+                    "/logs",
+                    "--json"
+                ]),
+                &defaults()
+            )
+            .unwrap(),
+            Request::Collect {
+                sessions_root: "/logs".into(),
+                repository: "/new".into(),
+                json: true
+            }
+        );
+    }
+    #[test]
+    fn terminal_flags_validate_evidence_integer_domain_and_classification() {
+        assert_eq!(
+            parse_request(
+                &args(&[
+                    "terminal-report",
+                    "--pid",
+                    "-٢",
+                    "--classification",
+                    "complete",
+                    "--exit-status",
+                    "+٣_٠"
+                ]),
+                &defaults()
+            )
+            .unwrap(),
+            Request::TerminalReport {
+                pid: (-2_i64).into(),
+                classification: "complete".into(),
+                exit_status: Some(30_i64.into())
+            }
+        );
+        for values in [
+            vec!["terminal-report"],
+            vec![
+                "terminal-report",
+                "--pid",
+                "4",
+                "--classification",
+                "invalid",
+            ],
+            vec!["--repo"],
+        ] {
+            assert!(matches!(
+                parse_request(&args(&values), &defaults()),
+                Err(ArgumentError::Syntax(_))
+            ));
+        }
+        assert!(matches!(
+            parse_request(
+                &args(&[
+                    "terminal-report",
+                    "--pid",
+                    "18446744073709551616",
+                    "--classification",
+                    "complete"
+                ]),
+                &defaults()
+            ),
+            Err(ArgumentError::NumberOutOfRange { .. })
+        ));
+        let ArgumentError::Syntax(help) =
+            parse_request(&args(&["--help"]), &defaults()).unwrap_err()
+        else {
+            panic!("expected help")
+        };
+        assert_eq!(help.kind(), clap::error::ErrorKind::DisplayHelp);
+    }
+    #[test]
+    fn differential_terminal_main_parses_unicode_numbers_and_prints_source_json() {
+        struct Empty;
+        impl LivenessSource for Empty {
+            fn live(&self) -> Result<Vec<Process>, MainError> {
+                Ok(Vec::new())
+            }
+            fn workers(&self, _: &Path, _: &Path) -> Result<Vec<Worker>, MainError> {
+                Ok(Vec::new())
+            }
+        }
+        let cases = [
+            vec![
+                "terminal-report",
+                "--pid",
+                "-٢",
+                "--classification",
+                "complete",
+                "--exit-status",
+                "+٣_٠",
+            ],
+            vec![
+                "terminal-report",
+                "--pid",
+                "-4",
+                "--classification",
+                "blocked",
+            ],
+        ];
+        let mut cases = cases.to_vec();
+        cases.push(vec![
+            "terminal-report",
+            "--p",
+            "9223372036854775808",
+            "--class",
+            "complete",
+            "--exit",
+            "18446744073709551615",
+        ]);
+        let source_cases = serde_json::to_string(&cases).unwrap();
+        let script = format!(
+            r#"
+import contextlib, io, json, sys
+from pathlib import Path
+sys.path.insert(0, str(Path.cwd() / 'skills/orchestrate/scripts'))
+import worker_liveness as worker
+results=[]
+for args in {source_cases}:
+    out,err=io.StringIO(),io.StringIO()
+    with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err): code=worker.main(args)
+    results.append([code,out.getvalue(),err.getvalue()])
+print(json.dumps(results))
+"#
+        );
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../..");
+        let Some(expected) = crate::test_support::python(&root, &script) else {
+            return;
+        };
+        let actual: Vec<_> = cases
+            .into_iter()
+            .map(|values| {
+                let request = parse_request(&args(&values), &defaults()).unwrap();
+                let result = execute_request(&Empty, &request).unwrap();
+                serde_json::json!([result.exit_code, result.stdout, result.stderr])
+            })
+            .collect();
+        assert_eq!(serde_json::json!(actual), expected);
     }
 }
