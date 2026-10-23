@@ -437,3 +437,29 @@ pub(crate) mod ordered_pairs {
         super::OrderedMap::<String>::deserialize(deserializer).map(|map| map.0)
     }
 }
+
+impl<T> Default for OrderedMap<T> {
+    fn default() -> Self { Self(Vec::new()) }
+}
+impl OrderedValue {
+    pub fn as_str(&self) -> Option<&str> {
+        match self { Self::String(value) => Some(value), _ => None }
+    }
+    pub fn truthy(&self) -> bool {
+        match self {
+            Self::Null => false, Self::Bool(b) => *b,
+            Self::Number(n) => provenant_core::py::python_truth(&serde_json::Value::Number(n.clone())),
+            Self::String(s) => !s.is_empty(), Self::Array(a) => !a.is_empty(), Self::Object(o) => !o.0.is_empty(),
+        }
+    }
+    /// Python json.dumps defaults, retaining dict order and float spelling.
+    pub fn python_json(&self) -> String {
+        match self {
+            Self::Array(values) => format!("[{}]", values.iter().map(Self::python_json).collect::<Vec<_>>().join(", ")),
+            Self::Object(values) => format!("{{{}}}", values.entries().map(|(key, value)| format!("{}: {}", python_json(&serde_json::Value::String(key.into())), value.python_json())).collect::<Vec<_>>().join(", ")),
+            Self::Number(n) if n.is_f64() => provenant_core::py::python_str(&serde_json::Value::Number(n.clone())),
+            Self::String(s) => python_json(&serde_json::Value::String(s.clone())),
+            Self::Number(n) => n.to_string(), Self::Bool(b) => b.to_string(), Self::Null => "null".into(),
+        }
+    }
+}

@@ -1,6 +1,6 @@
 //! Exit-cycle contracts. This module grants no process or filesystem authority.
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use crate::pending::{OrderedMap, OrderedValue as Value};
 
 /// A source member can be absent or present with null. Option alone loses this
 /// distinction when a record is decoded and retained again.
@@ -134,7 +134,7 @@ impl ExitRecord {
     }
 
     pub fn receipt_fields(&self) -> Result<ReceiptFields, ExitError> {
-        use provenant_core::py::python_truth;
+        fn python_truth(value: &Value) -> bool { value.truthy() }
         fn value(member: &Member<Value>) -> Value {
             match member { Member::Absent => Value::Null, Member::Present(v) => v.clone() }
         }
@@ -146,26 +146,27 @@ impl ExitRecord {
                 Member::Absent => Ok(vec![]),
                 Member::Present(Value::Array(v)) => Ok(v.clone()),
                 Member::Present(Value::String(v)) => Ok(v.chars().map(|c| Value::String(c.to_string())).collect()),
-                Member::Present(Value::Object(v)) => Ok(v.keys().cloned().map(Value::String).collect()),
+                Member::Present(Value::Object(v)) => Ok(v.entries().map(|(k, _)| Value::String(k.to_owned())).collect()),
                 _ => Err(ExitError::InvalidCollection),
             }
         }
         if self.schema != "provenant.lane.exit.v1" { return Err(ExitError::Schema); }
         let forced = value(&self.forced);
-        if forced == "stalled" { return Err(ExitError::Silence); }
+        if forced.as_str() == Some("stalled") { return Err(ExitError::Silence); }
         let exit = match process(&self.signal) {
-            Some(ProcessInteger::Signed(n)) if n != 0 => Some(ProcessInteger::Signed(n.checked_neg().ok_or(ExitError::NumberOutOfRange)?)),
+            Some(ProcessInteger::Signed(i64::MIN)) => Some(ProcessInteger::Unsigned(1 << 63)),
+            Some(ProcessInteger::Signed(n)) if n != 0 => Some(ProcessInteger::Signed(-n)),
             Some(ProcessInteger::Unsigned(n)) if n != 0 => Some(ProcessInteger::Signed(i64::try_from(-(i128::from(n))).map_err(|_| ExitError::NumberOutOfRange)?)),
             _ => process(&self.exit),
         };
         let spared = value(&self.spared);
-        let spared = if !python_truth(&spared) { Value::from(0) } else {
+        let spared = if !python_truth(&spared) { Value::Number(0.into()) } else {
             match spared {
                 Value::Bool(_) => spared,
                 Value::Number(ref n) if !n.is_f64() => spared,
-                Value::Array(ref v) => Value::from(v.len()),
-                Value::Object(ref v) => Value::from(v.len()),
-                Value::String(ref v) => Value::from(v.chars().count()),
+                Value::Array(ref v) => Value::Number((v.len() as u64).into()),
+                Value::Object(ref v) => Value::Number((v.entries().count() as u64).into()),
+                Value::String(ref v) => Value::Number((v.chars().count() as u64).into()),
                 _ => return Err(ExitError::InvalidCollection),
             }
         };
@@ -175,11 +176,11 @@ impl ExitRecord {
         let capture = value(&self.capture);
         Ok(ReceiptFields {
             pid: process(&self.pid), pgid: process(&self.pgid), exit,
-            forced: match forced.as_str() { Some("wall_timeout") => Value::from("timed_out"), Some("supervisor_signal") => Value::from("interrupted"), _ => forced },
+            forced: match forced.as_str() { Some("wall_timeout") => Value::String("timed_out".into()), Some("supervisor_signal") => Value::String("interrupted".into()), _ => forced },
             terminal_event_seen: python_truth(&value(&self.terminal_event_seen)),
-            reaped: if python_truth(&reaped) { reaped } else { serde_json::json!([]) }, spared,
-            capture: if python_truth(&capture) { capture } else { serde_json::json!({}) },
-            warnings: warnings.iter().map(|v| v.as_str().map(str::to_owned).unwrap_or_else(|| crate::pending::python_json(v))).collect(),
+            reaped: if python_truth(&reaped) { reaped } else { Value::Array(vec![]) }, spared,
+            capture: if python_truth(&capture) { capture } else { Value::Object(OrderedMap::default()) },
+            warnings: warnings.iter().map(|v| v.as_str().map(str::to_owned).unwrap_or_else(|| v.python_json())).collect(),
             started_at: value(&self.started_at), ended_at: value(&self.ended_at), last_progress_at: value(&self.last_progress_at),
         })
     }
@@ -228,6 +229,19 @@ mod tests {
         if let Some(expected) = crate::test_support::oracle("lane_exit_raw", &json!([{"raw":raw}])) {
             assert!(expected[0]["wire"].as_str().unwrap().contains("1180591620717411303424"));
         }
+    }
+    #[test]
+    fn receipt_translation_preserves_raw_collections_and_full_signal_range() {
+        let cases = json!([
+            {"raw":r#"{"schema":"provenant.lane.exit.v1","census_warnings":{"z":0,"a":0},"io_errors":[{"z":1,"a":2}]}"#},
+            {"raw":r#"{"schema":"provenant.lane.exit.v1","reaped":[{"pid":124,"start_time":"123","command":"child"}],"capture":{"z":1,"a":2}}"#},
+            {"raw":r#"{"schema":"provenant.lane.exit.v1","signal":-9223372036854775808}"#}
+        ]);
+        let actual: Vec<_> = cases.as_array().unwrap().iter().map(|case| {
+            let record = ExitRecord::from_json(case["raw"].as_str().unwrap().as_bytes()).unwrap();
+            json!({"wire":serde_json::to_string(&record.receipt_fields().unwrap()).unwrap()})
+        }).collect();
+        if let Some(expected) = crate::test_support::oracle("lane_exit_raw", &cases) { assert_eq!(json!(actual), expected); }
     }
     #[test]
     fn exit_process_fields_refuse_bool_and_float() {
