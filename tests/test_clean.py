@@ -950,9 +950,129 @@ def test_prune_merged_reports_unproven_squash_candidate(tmp_path):
                             env=environment, text=True, capture_output=True, check=False)
 
     assert result.returncode == 0, result.stderr
-    assert "skipped .worktrees/lane-squashed: keep:unmerged" in result.stdout
+    assert "skipped .worktrees/lane-squashed: keep:gh-no-matching-merged-pr" in result.stdout
     assert target.exists()
-    assert not marker.exists()
+    assert marker.exists()
+
+
+def squash_fixture(root: Path, name: str = "lane/squashed") -> tuple[Path, str, str]:
+    subprocess.run(["git", "-C", str(root), "branch", "-M", "main"], check=True)
+    target = root / ".worktrees" / name.replace("/", "-")
+    target.parent.mkdir(exist_ok=True)
+    subprocess.run(["git", "-C", str(root), "worktree", "add", "-q", "-b", name, str(target)], check=True)
+    (target / "work.txt").write_text("work\n")
+    subprocess.run(["git", "-C", str(target), "add", "work.txt"], check=True)
+    subprocess.run(["git", "-C", str(target), "commit", "-qm", "work"], check=True)
+    head = subprocess.run(["git", "-C", str(root), "rev-parse", name], text=True,
+                          capture_output=True, check=True).stdout.strip()
+    subprocess.run(["git", "-C", str(root), "merge", "--squash", name], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(root), "commit", "-qm", "squash"], check=True)
+    merge = subprocess.run(["git", "-C", str(root), "rev-parse", "HEAD"], text=True,
+                           capture_output=True, check=True).stdout.strip()
+    return target, head, merge
+
+
+def fake_gh(tmp_path: Path, head: str, merge: str, *, failure: bool = False) -> dict[str, str]:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir(exist_ok=True)
+    gh = bin_dir / "gh"
+    gh.write_text("#!/bin/sh\n"
+                  + ('if [ "$4" = "open" ]; then echo "[]"; exit 0; fi\nexit 1\n' if failure else
+                     'if [ "$4" = "open" ]; then echo "[]"; exit 0; fi\n'
+                     f"echo '[{{\"number\":42,\"headRefOid\":\"{head}\",\"mergeCommit\":{{\"oid\":\"{merge}\"}}}}]'\n"))
+    gh.chmod(0o755)
+    return {**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}"}
+
+
+def test_prune_squash_merged_removes_worktree_and_branch(tmp_path):
+    root = repo(tmp_path)
+    target, head, merge = squash_fixture(root)
+
+    result = subprocess.run(["python3", str(SCRIPT), "--prune-merged", "--branch", "lane/squashed",
+                             "--repo", str(root)], env=fake_gh(tmp_path, head, merge),
+                            text=True, capture_output=True, check=False)
+
+    assert result.returncode == 0, result.stderr
+    assert "removed .worktrees/lane-squashed" in result.stdout
+    assert "removed branch lane/squashed" in result.stdout
+    assert not target.exists()
+    assert subprocess.run(["git", "-C", str(root), "show-ref", "--verify", "--quiet",
+                           "refs/heads/lane/squashed"], check=False).returncode != 0
+
+
+def test_prune_squash_merged_keeps_branch_with_later_local_commit(tmp_path):
+    root = repo(tmp_path)
+    target, head, merge = squash_fixture(root)
+    (target / "later.txt").write_text("later\n")
+    subprocess.run(["git", "-C", str(target), "add", "later.txt"], check=True)
+    subprocess.run(["git", "-C", str(target), "commit", "-qm", "later"], check=True)
+
+    result = subprocess.run(["python3", str(SCRIPT), "--prune-merged", "--branch", "lane/squashed",
+                             "--repo", str(root)], env=fake_gh(tmp_path, head, merge),
+                            text=True, capture_output=True, check=False)
+
+    assert result.returncode == 0, result.stderr
+    assert "skipped .worktrees/lane-squashed: keep:gh-no-matching-merged-pr" in result.stdout
+    assert target.exists()
+    assert subprocess.run(["git", "-C", str(root), "show-ref", "--verify", "--quiet",
+                           "refs/heads/lane/squashed"], check=False).returncode == 0
+
+
+def test_prune_squash_merged_since_keeps_merge_already_present(tmp_path):
+    root = repo(tmp_path)
+    target, head, merge = squash_fixture(root)
+    before_current = subprocess.run(["git", "-C", str(root), "rev-parse", "HEAD"], text=True,
+                                    capture_output=True, check=True).stdout.strip()
+    result = subprocess.run(["python3", str(SCRIPT), "--prune-merged", "--merged-since", before_current,
+                             "--repo", str(root)], env=fake_gh(tmp_path, head, merge),
+                            text=True, capture_output=True, check=False)
+
+    assert result.returncode == 0, result.stderr
+    assert "skipped .worktrees/lane-squashed: keep:before-merged-since" in result.stdout
+    assert target.exists()
+
+
+def test_prune_squash_merged_gh_failure_uses_ancestry_only(tmp_path):
+    root = repo(tmp_path)
+    subprocess.run(["git", "-C", str(root), "remote", "add", "origin", "https://example.invalid/repo.git"], check=True)
+    subprocess.run(["git", "-C", str(root), "branch", "-M", "main"], check=True)
+    target = root / ".worktrees" / "lane-ancestry"
+    target.parent.mkdir()
+    subprocess.run(["git", "-C", str(root), "worktree", "add", "-q", "-b", "lane/ancestry", str(target)], check=True)
+    (target / "done.txt").write_text("done\n")
+    subprocess.run(["git", "-C", str(target), "add", "done.txt"], check=True)
+    subprocess.run(["git", "-C", str(target), "commit", "-qm", "done"], check=True)
+    subprocess.run(["git", "-C", str(root), "merge", "--no-ff", "-qm", "merge done", "lane/ancestry"], check=True)
+    candidate = root / ".worktrees" / "lane-candidate"
+    subprocess.run(["git", "-C", str(root), "worktree", "add", "-q", "-b", "lane/candidate", str(candidate)], check=True)
+    (candidate / "pending.txt").write_text("pending\n")
+    subprocess.run(["git", "-C", str(candidate), "add", "pending.txt"], check=True)
+    subprocess.run(["git", "-C", str(candidate), "commit", "-qm", "pending"], check=True)
+
+    result = subprocess.run(["python3", str(SCRIPT), "--prune-merged", "--branch", "lane/ancestry",
+                             "--branch", "lane/candidate",
+                             "--repo", str(root)], env=fake_gh(tmp_path, "", "", failure=True),
+                            text=True, capture_output=True, check=False)
+
+    assert result.returncode == 0, result.stderr
+    assert "removed .worktrees/lane-ancestry" in result.stdout
+    assert "skipped .worktrees/lane-candidate: keep:gh-unavailable-ancestry-only" in result.stdout
+    assert not target.exists()
+    assert candidate.exists()
+
+
+def test_prune_squash_merged_keeps_dirty_worktree(tmp_path):
+    root = repo(tmp_path)
+    target, head, merge = squash_fixture(root)
+    (target / "untracked.txt").write_text("preserve\n")
+
+    result = subprocess.run(["python3", str(SCRIPT), "--prune-merged", "--branch", "lane/squashed",
+                             "--repo", str(root)], env=fake_gh(tmp_path, head, merge),
+                            text=True, capture_output=True, check=False)
+
+    assert result.returncode == 0, result.stderr
+    assert "skipped .worktrees/lane-squashed: triage:merged-dirty" in result.stdout
+    assert target.exists() and (target / "untracked.txt").read_text() == "preserve\n"
 
 
 def test_prune_merged_fails_closed_without_integration_branch(tmp_path):
@@ -992,7 +1112,7 @@ def test_prune_merged_uses_local_master_instead_of_feature_head(tmp_path):
                             text=True, capture_output=True, check=False)
 
     assert result.returncode == 0, result.stderr
-    assert "skipped .worktrees/lane-done: keep:unmerged" in result.stdout
+    assert "skipped .worktrees/lane-done: keep:gh-unavailable-ancestry-only" in result.stdout
     assert target.exists()
 
 
