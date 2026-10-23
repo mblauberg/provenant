@@ -256,37 +256,41 @@ fn collect_string_arrays(table: &Map<String, Value>, out: &mut BTreeSet<String>)
     }
 }
 
-pub fn risk_tier_overrides_are_valid(family: &str, family_config: &Value, catalog: &Value) -> bool {
+pub fn risk_tier_overrides_are_valid(
+    family: &str,
+    family_config: &Value,
+    catalog: &Value,
+) -> Result<bool, CatalogError> {
     let Some(config) = family_config.as_object() else {
-        return false;
+        return Ok(false);
     };
     let Some(overrides) = config.get("risk_tier_overrides") else {
-        return true;
+        return Ok(true);
     };
     let Some(overrides) = overrides.as_object() else {
-        return false;
+        return Ok(false);
     };
     if overrides.is_empty() {
-        return true;
+        return Ok(true);
     }
     let candidates = family_alias_candidates(family_config, catalog, family);
     for override_value in overrides.values() {
         if !risk_tier_override_is_well_formed(override_value) {
-            return false;
+            return Ok(false);
         }
         let occupant = override_value["models"][0].as_str().unwrap_or_default();
         if ALIASES.contains(&occupant)
-            || infer_family(occupant, catalog).ok().flatten().is_none()
+            || infer_family(occupant, catalog)?.is_none()
             || candidates.iter().any(|candidate| {
                 model_has_alias(candidate, occupant)
                     || model_has_alias(occupant, candidate)
                     || risk_tier_override_reserves_model(candidate, occupant)
             })
         {
-            return false;
+            return Ok(false);
         }
     }
-    true
+    Ok(true)
 }
 
 /// Preserve catalogue dictionary order at the wire boundary and in the scan result.
@@ -480,5 +484,91 @@ mod tests {
             .map(|d| matching_model_families(d["model"].as_str().unwrap(), &d["catalog"]).unwrap())
             .collect();
         assert_eq!(actual, expected);
+    }
+}
+
+#[cfg(test)]
+mod policy_differential {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn validators_and_reservations_match_python_on_malformed_and_valid_records() {
+        let catalog = json!({"model_patterns":[{"pattern":"claude|sonnet|opus","family":"anthropic"}],"adapters":{"claude":{"fixed_model_family":"anthropic"}}});
+        let valid = json!({"alias":"principal","default_effort":"high","maximum_effort":"ultra","roles":["lead","orchestrator"],"models":["claude-mythos-5"]});
+        let mut overrides = vec![json!(null), json!([]), json!({}), valid.clone()];
+        for (key, values) in [
+            ("alias", vec![json!(1), json!("strong"), json!(null)]),
+            (
+                "roles",
+                vec![
+                    json!(["lead", "lead"]),
+                    json!(["lead"]),
+                    json!([" lead", "worker"]),
+                    json!(["\u{1c}", "worker"]),
+                    json!(null),
+                ],
+            ),
+            (
+                "models",
+                vec![json!([]), json!(["x", "y"]), json!([1]), json!([" x"])],
+            ),
+            (
+                "default_effort",
+                vec![json!("unknown"), json!(true), json!("ultra")],
+            ),
+            ("maximum_effort", vec![json!("low"), json!(null)]),
+        ] {
+            for value in values {
+                let mut item = valid.clone();
+                item[key] = value;
+                overrides.push(item);
+            }
+        }
+        let families = vec![
+            json!(null),
+            json!([]),
+            json!({}),
+            json!({"risk_tier_overrides":null}),
+            json!({"risk_tier_overrides":[]}),
+            json!({"ultra_eligible_roles":null}),
+            json!({"ultra_eligible_roles":["lead"]}),
+            json!({"ultra_eligible_roles":["lead "]}),
+            json!({"aliases":{"senior":["sonnet",3]},"role_overrides":{"review":{"principal":["opus"]}},"risk_tier_overrides":{"crucial":valid}}),
+        ];
+        let fixture = json!({"catalog":catalog,"overrides":overrides,"families":families});
+        let Some(expected): Option<Value> = crate::oracle::python(
+            r#"
+import importlib.util,json,pathlib,sys
+s=importlib.util.spec_from_file_location('catalog',pathlib.Path('scripts/model_route_catalog.py')); m=importlib.util.module_from_spec(s); s.loader.exec_module(m)
+d=json.load(sys.stdin); c=d['catalog']
+print(json.dumps({'overrides':[m.risk_tier_override_is_well_formed(x) for x in d['overrides']], 'roles':[m.ultra_eligible_roles_are_valid(x) for x in d['families']], 'families':[m.risk_tier_overrides_are_valid('anthropic',x,c) for x in d['families']]}))
+"#,
+            &fixture,
+        ) else {
+            return;
+        };
+        assert_eq!(
+            json!({"overrides":overrides.iter().map(risk_tier_override_is_well_formed).collect::<Vec<_>>(),"roles":families.iter().map(ultra_eligible_roles_are_valid).collect::<Vec<_>>(),"families":families.iter().map(|x|risk_tier_overrides_are_valid("anthropic",x,&catalog).unwrap()).collect::<Vec<_>>()}),
+            expected
+        );
+    }
+}
+
+#[cfg(test)]
+mod error_tests {
+    use super::*;
+    use serde_json::json;
+    #[test]
+    fn malformed_pattern_remains_an_error_during_override_validation() {
+        let config = json!({"risk_tier_overrides":{"crucial":{"alias":"principal","default_effort":"high","maximum_effort":"ultra","roles":["lead","orchestrator"],"models":["occupant"]}}});
+        assert!(matches!(
+            risk_tier_overrides_are_valid(
+                "family",
+                &config,
+                &json!({"model_patterns":[{"pattern":"[","family":"family"}]})
+            ),
+            Err(CatalogError::InvalidRegex(_))
+        ));
     }
 }

@@ -31,3 +31,29 @@ mod oracle;
 pub mod pr_checks;
 
 pub mod retry_install;
+
+/// Executable output bytes; preserves Unix filesystem paths at Python's
+/// surrogateescape text boundary without admitting invalid Rust strings.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct CommandBytes {
+    pub stdout: Vec<u8>,
+    pub stderr: Vec<u8>,
+    pub exit_code: u8,
+}
+impl From<CommandOutput> for CommandBytes {
+    fn from(output: CommandOutput) -> Self {
+        Self {
+            stdout: output.stdout.into_bytes(),
+            stderr: output.stderr.into_bytes(),
+            exit_code: output.exit_code,
+        }
+    }
+}
+
+pub mod public_release;
+
+pub mod worktree;
+
+pub mod reap;
+
+pub mod timebomb;

@@ -1195,6 +1195,32 @@ The source revision above is unchanged; CLI rendering remains an edge task.
   until the `provenant-records` ordered Python-value codec and
   `provenant-core` repr helper are available to this crate.
 
+## RP-ROUTING-2: continued routing parity and remaining boundaries
+
+- Rulebook v4; source/policy oracle revision
+  `7475ff01e437ec51c760b852516c21a5281cf9c6`; author route
+  `codex/gpt-6.1-sol@high`. Candidate: the port/routing-2 PR head.
+- Class: `bug` (fixed): batch-1 preference normalization converted truthy
+  non-string route statuses to `hard_route_rejected`; Python uses `str(status)`.
+  The candidate differentials cover booleans, integers, lists, empty values,
+  duplicate candidate IDs, availability observations and hard-admissibility.
+- Class: `bug` (fixed): batch-1 catalogue override validation swallowed invalid
+  model-pattern regex errors and returned false. The library now propagates a
+  typed CatalogError, with a dedicated malformed-pattern regression.
+- No new intentional divergence. RP-130402 remains open: both the catalogue
+  and capability loader remain partial for multi-adapter family aliases.
+  Partial preference ingress and pool migration still need Python dictionary
+  order/equality work; live suffix-level ingestion must preserve source order
+  when suffixes are shared. These are not accepted behavior changes.
+- Exact listing-byte differentials cover Unicode padding, null effort,
+  cooling ordering, hidden counts, synonym ordering and quota caveats. Live
+  identity, inherited privacy, fallback consent, capability/listing failures,
+  ISO offsets/microseconds and close-match decisions compare against imported
+  Python modules with isolated state and explicit clocks. No source-text exec
+  or eval is used in fixture generators.
+- The crate stays inert. PORT_STATUS.md lists full, partial/skipped units,
+  pending core/records helpers and integration-only judge gaps. No unit with
+  an acknowledged remaining behavior is listed as fully ported.
 ## RP-CLI2-01: typed cleanup and PID integer bounds
 
 - Class: `improvement`, authorised by PORTING.md v4 R4's i64/u64 rule.
@@ -1405,6 +1431,131 @@ then passed after repair. Extended JSON/native-path reader gaps remain partial.
   both bounds, year 0, year 10000, negative milliseconds and a leap date.
 - Fixed by adapting the formatter; no widened dependency or behaviour change.
 
+## RP-WF2-001: authority budget diagnostic ordering (open)
+
+- Unit: `skills/deliver/scripts/authority_mapping.py#unit-01`, rulebook v4;
+  class `library`. The unit stays partial; no exception or cut-over is claimed.
+- Compared source/oracle: `600dec09bcda3b6a86272e391420e89d38777953`, unchanged
+  through main `d0027d7cd8de987b15c2f7c855691ca3ddf488aa`; candidate is the
+  workflow batch 2 PR head, pinned Rust 1.94.1 / CPython 3.14.3.
+- Reproducer: a valid authority record with budget
+  `{"turns":-1,"provider_calls":-1}`. Python reports the `turns` amount first;
+  serde_json's sorted `Value` object reports `provider_calls` first.
+- Expected/actual: rejection and authority bounds agree, but the first-invalid
+  field in the diagnostic differs. This is not an accepted behaviour change.
+- Evidence: source `budget` insertion-order iteration versus the explicitly
+  marked sorted-map iteration in `authority_mapping::budget`; policy tests
+  cover rejection and each single-field error, not parity for this ordering gap.
+- Follow-up: accept the shared ordered decoder at this boundary, retain raw
+  fixture order and add the multi-invalid-budget differential before completion.
+  RP-1003's non-finite/lone-surrogate JSON gap also applies to this raw boundary.
+
+## RP-WF2-002: actual cycle records versus draft schemas (open)
+
+- Units: lane launch/exit/observer interfaces; rulebook v4, class `library`.
+- Compared source/oracle: batch 2 revision above; draft schemas on merged main
+  above; Rust candidate is this PR head. Disposition: typed contracts follow
+  source records; schema integration remains open under J2.
+- Reproducer: the real launch builder returns `env` as an object and can return
+  `stdin: {}` and `progress: {}`. The draft launch schema uses an environment
+  array and requires inner stdin/progress members. Source supervisor exit
+  records can contain row arrays in `reaped` and `spared`; the draft schema
+  describes bool/count forms. Receipt mapping consumes further optional fields.
+- Expected/actual: real source records pass the translated Rust contracts;
+  stale schemas can refuse those records. No invented record fields or tagged
+  enum wrappers are added to make the schema appear green.
+- Evidence: `lane_launch` source-builder differentials, `lane_exit` receipt-field
+  differentials and `provider_observer` source summary differentials. Missing
+  members and explicit nulls have separate fixtures. No independent J2 mutant
+  receipt is claimed for these draft-schema discrepancies.
+- Follow-up: schema owner reconciles the actual producer/consumer contract and
+  supplies canonical-byte mutants before command cut-over. This lane changes
+  no schema or runtime owner.
+
+## RP-WF2-003: Python value and notification repairs (fixed)
+
+- Units: workflow batch 2 policy modules and cycle interfaces; rulebook v4,
+  class `bug`. Source/oracle is batch 2 revision above; repaired candidate is
+  this PR head. No intentional contract change is accepted.
+- Counterexamples: failure keys `usage_limited` then `auth_required` were sorted;
+  explicit route extension order was lost; absent nullable members became
+  null; false terminal notifications and a `stalled` semantic stop were admitted;
+  empty/null stdin paths were admitted. Native source review found these forms.
+- Unicode counterexamples: Python word boundaries do not treat U+0345 as a
+  word character, while Rust's default derived Alphabetic class does. Python
+  `re.I` additionally folds dotted/dotless I, long s and Kelvin sign. Built-in
+  phrase and negative-lookahead rules now use the Python predicate/folding.
+- Numeric counterexample: integer JSON `-0` decoded as floating negative zero,
+  and overflow could be rounded by an unchecked serde conversion. The copied
+  main checked codec normalises integer zero and returns typed range refusals.
+- Evidence: required raw-wire order tests, route duplicate/range/refusal
+  differentials, literal reply and stdin tests, required-nullable panel and
+  process tests, and Unicode style differentials. The final required suite has
+  52 passing tests with real source imports and no missing-interpreter skips.
+  The bounded oracle helper uses an explicit PATH even during version probing;
+  intermediate runs that selected an older system Python were rerun in required
+  mode and are not claimed as parity evidence.
+- Disposition: fixed within the implemented domains. Unknown non-finite JSON
+  and lone surrogates remain RP-1003, including the preflight companion decoder;
+  `dispatch_preflight.py#interface` remains partial. Out-of-range integers keep
+  rulebook v4's existing typed-refusal improvement (RP-1005), never f64 rounding.
+- Follow-up: remove pending compatibility/codec copies when workspace aliases
+  expose the landed core and records owners; extend core with the word predicate.
+
+## RP-WF2-004: arbitrary Python regex overlays (open)
+
+- Unit: `skills/natural-writing/scripts/style_lint.py#unit-01`, rulebook v4;
+  class `library`. Disposition: partial, excluded from the completed-unit ledger.
+- Source/oracle: batch 2 revision above; candidate is this PR head. Shared
+  vocabulary, built-in lookaround rules and Markdown/LaTeX spans have translated
+  matchers and passing source differentials. No default pattern is silently
+  passed to the Rust regex parser with incompatible Python syntax.
+- Reproducer: a caller overlay compiled with Python `re.compile(r"(?<=x)y")`
+  is accepted by the source scan operation. `PatternRule::regex` documents Rust
+  syntax and refuses that lookbehind through a typed `StyleError::Regex`.
+  Arbitrary overlay Unicode classes and regex flags can also differ.
+- Expected/actual: source accepts a compiled Python matcher; the current Rust
+  overlay constructor accepts only Rust regex syntax. This restriction is not
+  an approved contract change, despite default and simple overlay parity.
+- Evidence: source scan's arbitrary `re.Pattern` argument, the documented Rust
+  overlay constructor, and existing ordered/replacement overlay fixtures.
+- Follow-up: domain overlay owners supply equivalent typed matchers and retained
+  policy differentials, or agree an exact compatibility adapter, before this
+  unit is declared complete. `run_cli` is outside this assigned source unit.
+
+## RP-WF2-005: observer token integer boundary (improvement)
+
+`context_usage._int` emits non-negative Python ints without a size limit.
+Workflow `ContextUsage::from_json` checks every integer with the shared records
+codec and returns typed `NumberOutOfRange` above u64 (including
+1180591620717411303424), rather than rounding through f64. Token fields are
+`Option<u64>`; negative, bool and fractional retained tokens are rejected because
+Python never emits them. Only `context_percent` is floating point. This follows
+PORTING.md v4 R4; the Python source remains unchanged.
+
+## RP-WF2-006: supervisor rows and legacy receipt acceptance (bug, repaired)
+
+`src/lane/files.rs:367-403` emits `reaped` and `spared` as lists of rows
+(`pid`, `start_time`, `command`), plus numeric `observer_dropped` and
+`*_truncated` counts. `schemas/supervisor-exit.schema.json` instead declares
+boolean `reaped` and non-negative integer `spared`. The schema is unchanged.
+The workflow models real descendant rows separately from open legacy receipt
+inputs. Raw-input differentials preserve `spared: true`, negative counts,
+string length, string reaped evidence and character-wise warning iteration.
+The old output-fed-back oracle was removed. Observer restore/replay effects
+remain partial; `lane_exit.py#interface` will not be claimed complete.
+
+## RP-WF2-007: review-panel integer range (improvement)
+
+Python accepts `minimum_members = 10**30` and returns that exact minimum and
+shortfall. `PanelSpec::from_json` now returns the shared typed
+`DecodeError::NumberOutOfRange` before conversion/validation, instead of
+rounding it to f64 and reporting an invalid positive integer. The differential
+runs Python validation and public `panel_shortfall` on the raw integer and
+checks its exact output spelling. Rust `panel_shortfall` is public and supports
+all positive u64 minima. Already-decoded values cannot recover integers lost
+by an unchecked caller; raw input must use the checked boundary. This is the
+PORTING.md v4 R4 improvement; Python's unbounded integer domain is unchanged.
 ## RP-CLI2-05: wrapper command boundaries and large literal PIDs
 
 - Class: `bug`; fixed in Rust. Same rulebook/oracle/route as RP-CLI2-01.
@@ -1587,3 +1738,131 @@ then passed after repair. Extended JSON/native-path reader gaps remain partial.
 - Real-filesystem FIFO fixtures cover immediate safe refusal and compare the
   source's refusal once a peer is held, using a bounded Python oracle. Ordinary
   file publication, identity, byte and error paths retain their differentials.
+
+### RP-WF2-006 repair evidence and claim correction
+
+Independent repair review found two further bugs, now fixed with raw-wire
+Python comparisons: receipt warning dictionaries and nested reaped/capture
+objects retain insertion order; `signal: -9223372036854775808` negates to the
+valid unsigned integer 9223372036854775808. The checked ordered decoder also
+applies the shared owner's integer `-0` normalisation without sorting objects.
+The review-panel and authority-mapping unit claims hold. All three cycle
+interfaces are deliberately partial: observer.json restoration/replay,
+supervisor return codes 64 and 75, and the full dynamic observer record domain
+are not yet proved exact. Their IDs are removed from the completion ledger.
+
+### RP-CLI3-01: shared checked JSON and numeric bounds (inert partial scope)
+
+- Class: `improvement`, under PORTING.md v4 R4's existing integer-range rule.
+  Author route: `codex/gpt-6.1-sol@high`. Source/oracle:
+  `1884954ef414e60cc6b160c636fe1add9f7784dd`; merged main `b527d675`.
+- PR-check parsing and decoded hook events now use the records owner's checked
+  codec. An unused hook field containing `18446744073709551616` is a typed
+  NumberOutOfRange, while Python accepts and ignores that field. Reap's pure
+  PID/age helpers also refuse integers outside i64/u64 rather than round them.
+  No command is switched; raw JSON non-finite/surrogate handling and complete
+  process boundaries remain partial. The private ordered representation reuses
+  checked scalars, including integer -0, and retains duplicate-key positions.
+
+### RP-CLI3-02: exact text/JSON boundary repairs
+
+- Class: `bug`, fixed before delivery. Same source/oracle as RP-CLI3-01.
+- Path::display loses invalid Unix bytes. Installation's byte output boundary
+  now writes raw OS bytes and accepts byte advisories. Embedded path newlines
+  are covered by whole-output comparisons, including provider rows.
+- Rust regex case folding misses Python IGNORECASE's dotted/dotless I. The
+  publication personal-email classifier explicitly folds Python's four special
+  ASCII-case equivalents; source differentials include the dotted-I case.
+- Packet metadata is typed and encoded with sorted keys, compact separators,
+  ensure_ascii and exact status/diff framing. Hook output has its source's
+  field order, separators and ensure_ascii. The latter remains partial under
+  RP-CLI2-03: malformed/raw surrogate JSON is an explicit decoder error here,
+  while source main catches malformed JSON and accepts escaped surrogates.
+  New fixtures keep those gaps visible; neither hook unit-02 nor Git packet
+  materialisation is declared complete.
+
+### RP-CLI3-03: publication file growth at the bounded read (open)
+
+- Class: `library`; not accepted as a command behavior change. Same source/oracle
+  as RP-CLI3-01. Both public-release units remain absent from `ported.txt`.
+- Source checks a path's size and then reads its entire text. A replacement or
+  growth between stat/open can make that text exceed 5 MiB. Rust's initial
+  bounded read silently omitted the tail, potentially missing a finding; native
+  review caught this. The repaired adapter detects max+1 bytes and returns a
+  typed ChangedDuringRead refusal before decoding, rather than accepting a
+  prefix or mistaking a split UTF-8 character for an unreadable file.
+- Evidence: growth_between_stat_and_open_is_an_explicit_partial_scope_refusal
+  supplies a small stat target and a larger opened safe file without racing.
+  Source-compatible complete streaming text classification is still needed;
+  the inert library refusal is explicit, not approval to change publication
+  behavior at cut-over. No live command uses this adapter.
+### RP-SUP3-CENSUS: fallback failure rendering (bug, fixed; bound still open)
+
+- Source/oracle: `7021182d535f6c730c29713e77d5bca76893fd06`, Python 3.14.8,
+  rulebook v4. Author route: `codex/gpt-6.1-sol@high`.
+- Unit: `skills/orchestrate/scripts/process_info.py#unit-02` (partial).
+  The command adapter now preserves spawn errno/program and the timeout's
+  command/budget. Census rendering matches Python's OSError/TimeoutExpired
+  text; per-PID lookup and start-time still collapse these failures to absence.
+- Three injected command policy tests include a Python differential for spawn,
+  timeout, nonzero, empty census and unreadable PID failures. RP-1302's 1 MiB
+  stdout/stderr refusal remains open and blocks a full unit/ps-shim claim.
+
+### RP-SUP3-LIVENESS: diagnostic observation domain (library, open partial scope)
+
+- Same source/oracle and rulebook as RP-SUP3-CENSUS. Units:
+  `worker_liveness.py#unit-01` and `#unit-02`, both partial.
+- The read-only adapter uses bounded subprocess waits (15 seconds), bounded
+  output (16 MiB per stream), and a bounded session first line (64 MiB).
+  Python's corresponding waits/reads are unbounded. Oversize/timeout is a
+  typed refusal; this is not an accepted command behavior change.
+- `provenant_records::checked_json` owns JSON integer-range refusal, including
+  unknown fields, as the rulebook's approved `NumberOutOfRange` improvement.
+  Its missing extended JSON support (NaN and lone surrogate strings), and
+  core's missing surrogateescape string/path representation, prevent a full
+  claim. Native census refuses non-UTF-8 commands with a typed error retaining
+  the original OS string; it never silently changes command cwd extraction.
+  Native path rendering and exact non-strict symlink-loop behavior remain
+  partial too. Nothing calls this library yet.
+- Recursive glob does not follow directory links, retains root-before-nested
+  ordering for equal-mtime selection, and follows file links for reads.
+  A Python differential pins these behaviors. The typed main edge preserves
+  ordered/ASCII-escaped JSON, including CPython float spellings and non-finite
+  extensions, but raw argv/default/help parsing remains with the CLI owner.
+- Disposition: partial, absent from `Units:` and `ported.txt`; no divergence
+  approval is inferred. Shared-owner APIs and exact error/extended-input
+  fixtures are required before completing the affected domains.
+
+### RP-SUP3-REPAIR: rename endpoints and platform signal names (bug, fixed)
+
+- Same baseline and author route. Rename errors now retain source and
+  destination plus the OS cause; errno conversion remains unchanged. Boxed
+  safe filesystem traits require Send + Sync and have compile-time fixtures.
+- Node's platform-specific named signals now match the public Node constants
+  (SIGINFO on macOS; SIGSTKFLT/SIGPWR on Linux). A Node differential checks the
+  mapping. RP-SUP-PS-BUFFER's overflow contract remains open; this repair does
+  not complete the Fabric ps unit.
+
+### RP-SUP3-LIVENESS review repairs (bug, fixed)
+
+- Native review found an extra stat before selecting the first session log.
+  Python short-circuits that stat; if rotation removes the log after its read,
+  it still retains the selected path. The regression first failed with an
+  absent path and now passes with the retained path and missing metadata.
+- The typed main edge now catches failed home expansion as Python's
+  RuntimeError, emits `worker-liveness: Could not determine home directory.`
+  and returns 2. Its source differential first failed on an escaping error.
+  Empty HOME expands bare `~` to `/`, also confirmed by a failing-then-passing
+  regression. No source behavior changes are accepted by these repairs.
+- Final local evidence: 130 required-differential supervisor tests, 102
+  root-package tests and 2 layering policy checks passed; fmt and clippy with
+  warnings denied passed. Native syscall and source-parity review repairs are
+  complete. The partial domains above and chair-owned cross-family/CI gates
+  remain unchanged.
+
+### RP-SUP3-NAN-TIMEOUT: NaN bounded timeout (safety, open)
+
+- Unit: `skills/_shared/bounded_process.py#unit-01`. Source lines 167-170.
+- Python's `process.wait(timeout=nan)` never expires, so a NaN budget waits
+  forever. Rust refuses NaN with `BoundedError::InvalidTimeout` before
+  spawning. An infinite timeout keeps Python's behaviour: no deadline.
