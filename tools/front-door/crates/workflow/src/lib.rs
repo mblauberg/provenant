@@ -20,6 +20,7 @@ pub mod compact_reinject;
 pub mod context_audit;
 pub mod delivery_receipt_commands;
 pub mod delivery_receipt_process;
+pub mod delivery_run_invariants;
 pub mod dispatch_preflight;
 pub mod git_evidence_packet;
 pub mod idle_pause;
