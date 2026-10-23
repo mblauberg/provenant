@@ -3,7 +3,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
-use serde_json::{Map, Value};
+use serde_json::Value;
 
 use crate::pending::python_string;
 
@@ -50,7 +50,7 @@ pub struct Candidate {
     pub adapter: String,
     pub model_family: String,
     pub model: String,
-    pub route: Value,
+    pub route: crate::ordered_json::OrderedValue,
     pub availability: Availability,
     pub admissible: bool,
     pub selected: bool,
@@ -64,6 +64,152 @@ pub struct PreferenceItem {
     pub value: String,
 }
 
+#[derive(Clone, Debug, thiserror::Error, serde::Serialize)]
+pub enum CandidateError {
+    #[error("candidate_set_invalid")]
+    #[serde(rename = "candidate_set_invalid")]
+    InvalidSet,
+    #[error("unhashable type: '{0}'")]
+    Unhashable(&'static str),
+    #[error("missing candidate policy field: {0}")]
+    MissingPolicy(&'static str),
+}
+
+/// Ordered ingress keeps raw route records and Python status repr intact.
+pub fn normalise_candidates_ordered(
+    raw: &crate::ordered_json::OrderedValue,
+    task_class: &str,
+    role: &str,
+    policy: &BTreeMap<String, String>,
+    alias_order: &BTreeMap<String, usize>,
+    effort_order: &BTreeMap<String, usize>,
+) -> Result<Vec<Candidate>, CandidateError> {
+    use crate::ordered_json::OrderedValue;
+    fn hashable(value: Option<&OrderedValue>) -> Result<(), CandidateError> {
+        match value {
+            Some(OrderedValue::Array(_)) => Err(CandidateError::Unhashable("list")),
+            Some(OrderedValue::Object(_)) => Err(CandidateError::Unhashable("dict")),
+            _ => Ok(()),
+        }
+    }
+    if !raw
+        .get("schema_version")
+        .is_some_and(|v| provenant_core::py::python_json_eq(&v.to_value(), &Value::from(1)))
+    {
+        return Err(CandidateError::InvalidSet);
+    }
+    let Some(OrderedValue::Array(items)) = raw.get("candidates") else {
+        return Err(CandidateError::InvalidSet);
+    };
+    let mut identifiers = BTreeSet::new();
+    let mut candidates = Vec::with_capacity(items.len());
+    for item in items {
+        let Some(id) = item
+            .get("candidate_id")
+            .and_then(OrderedValue::as_str)
+            .filter(|s| !s.is_empty())
+        else {
+            return Err(CandidateError::InvalidSet);
+        };
+        let Some(route) = item.get("route").filter(|r| r.as_object().is_some()) else {
+            return Err(CandidateError::InvalidSet);
+        };
+        if !identifiers.insert(id) {
+            return Err(CandidateError::InvalidSet);
+        }
+        let availability = item.get("availability");
+        if availability
+            .and_then(|v| v.get("observation"))
+            .and_then(OrderedValue::as_str)
+            == Some("Observed")
+        {
+            hashable(availability.and_then(|v| v.get("value")))?;
+        }
+        let availability_value = availability.map(OrderedValue::to_value);
+        let availability =
+            parse_availability(availability_value.as_ref()).ok_or(CandidateError::InvalidSet)?;
+        let text = |key| route.get(key).and_then(OrderedValue::as_str);
+        let mut hard = route
+            .get("schema_version")
+            .is_some_and(|v| provenant_core::py::python_json_eq(&v.to_value(), &Value::from(1)))
+            && text("status") == Some("ok")
+            && text("task_class") == Some(task_class)
+            && text("route_source") == Some("task-class")
+            && text("role") == Some(role);
+        if hard {
+            hard = policy
+                .get("role")
+                .ok_or(CandidateError::MissingPolicy("role"))?
+                == role;
+        }
+        if hard {
+            hashable(route.get("alias"))?;
+            hard = match text("alias").and_then(|a| alias_order.get(a)) {
+                Some(actual) => {
+                    let minimum = policy
+                        .get("minimum_alias")
+                        .ok_or(CandidateError::MissingPolicy("minimum_alias"))?;
+                    actual
+                        >= alias_order
+                            .get(minimum)
+                            .ok_or(CandidateError::MissingPolicy("minimum_alias"))?
+                }
+                None => false,
+            };
+        }
+        if hard {
+            hashable(route.get("requested_effort"))?;
+            hard = text("requested_effort").is_some_and(|e| effort_order.contains_key(e));
+        }
+        if hard {
+            hashable(route.get("effort"))?;
+            hard = text("effort").is_some_and(|e| effort_order.contains_key(e));
+        }
+        if hard {
+            let minimum = policy
+                .get("minimum_effort")
+                .ok_or(CandidateError::MissingPolicy("minimum_effort"))?;
+            let floor = effort_order
+                .get(minimum)
+                .ok_or(CandidateError::MissingPolicy("minimum_effort"))?;
+            hard = text("requested_effort")
+                .and_then(|e| effort_order.get(e))
+                .is_some_and(|e| e >= floor)
+                && text("effort")
+                    .and_then(|e| effort_order.get(e))
+                    .is_some_and(|e| e >= floor);
+        }
+        let disposition = if text("status") != Some("ok") {
+            route
+                .get("status")
+                .filter(|v| crate::pending::truthy(v))
+                .map(crate::pending::ordered_string)
+                .unwrap_or_else(|| "hard_route_rejected".into())
+        } else if !hard {
+            "hard_policy_mismatch".into()
+        } else if matches!(availability,Availability::Observed{ref value} if value=="unavailable") {
+            "observed_unavailable".into()
+        } else {
+            "admissible".into()
+        };
+        candidates.push(Candidate {
+            candidate_id: id.into(),
+            adapter: text("adapter").unwrap_or_default().into(),
+            model_family: text("model_family").unwrap_or_default().into(),
+            model: text("catalog_model")
+                .filter(|s| !s.is_empty())
+                .or_else(|| text("resolved_model"))
+                .unwrap_or_default()
+                .into(),
+            route: route.clone(),
+            availability,
+            admissible: disposition == "admissible",
+            selected: false,
+            disposition,
+        });
+    }
+    Ok(candidates)
+}
 pub fn normalise_candidates(
     raw: &Value,
     task_class: &str,
@@ -71,108 +217,15 @@ pub fn normalise_candidates(
     policy: &BTreeMap<String, String>,
     alias_order: &BTreeMap<String, usize>,
     effort_order: &BTreeMap<String, usize>,
-) -> Result<Vec<Candidate>, String> {
-    if !python_one(raw.get("schema_version")) {
-        return Err("candidate_set_invalid".into());
-    }
-    let Some(candidates) = raw.get("candidates").and_then(Value::as_array) else {
-        return Err("candidate_set_invalid".into());
-    };
-    let mut identifiers = BTreeSet::new();
-    let mut normalised = Vec::with_capacity(candidates.len());
-    for candidate in candidates {
-        let Some(candidate) = candidate.as_object() else {
-            return Err("candidate_set_invalid".into());
-        };
-        let Some(candidate_id) = candidate
-            .get("candidate_id")
-            .and_then(Value::as_str)
-            .filter(|id| !id.is_empty())
-        else {
-            return Err("candidate_set_invalid".into());
-        };
-        let Some(route) = candidate.get("route").and_then(Value::as_object) else {
-            return Err("candidate_set_invalid".into());
-        };
-        if !identifiers.insert(candidate_id.to_owned()) {
-            return Err("candidate_set_invalid".into());
-        }
-        let availability = parse_availability(candidate.get("availability"))
-            .ok_or_else(|| "candidate_set_invalid".to_owned())?;
-        let route_value = Value::Object(route.clone());
-        let alias = route
-            .get("alias")
-            .and_then(Value::as_str)
-            .unwrap_or_default();
-        let requested_effort = route
-            .get("requested_effort")
-            .and_then(Value::as_str)
-            .unwrap_or_default();
-        let effort = route
-            .get("effort")
-            .and_then(Value::as_str)
-            .unwrap_or_default();
-        let route_role = route
-            .get("role")
-            .and_then(Value::as_str)
-            .unwrap_or_default();
-        let minimum_alias = policy
-            .get("minimum_alias")
-            .map(String::as_str)
-            .unwrap_or_default();
-        let minimum_effort = policy
-            .get("minimum_effort")
-            .map(String::as_str)
-            .unwrap_or_default();
-        let policy_role = policy.get("role").map(String::as_str).unwrap_or_default();
-        let hard_policy_match = python_one(route.get("schema_version"))
-            && route.get("status").and_then(Value::as_str) == Some("ok")
-            && route.get("task_class").and_then(Value::as_str) == Some(task_class)
-            && route.get("route_source").and_then(Value::as_str) == Some("task-class")
-            && route_role == role
-            && role == policy_role
-            && matches!(alias_order.get(alias), Some(actual) if matches!(alias_order.get(minimum_alias), Some(floor) if actual >= floor))
-            && matches!(effort_order.get(requested_effort), Some(actual) if matches!(effort_order.get(minimum_effort), Some(floor) if actual >= floor))
-            && matches!(effort_order.get(effort), Some(actual) if matches!(effort_order.get(minimum_effort), Some(floor) if actual >= floor));
-        let status = route.get("status").and_then(Value::as_str);
-        let disposition = if status != Some("ok") {
-            route
-                .get("status")
-                .filter(|value| crate::pending::value_truthy(value))
-                .map(python_string)
-                .unwrap_or_else(|| "hard_route_rejected".into())
-        } else if !hard_policy_match {
-            "hard_policy_mismatch".into()
-        } else if matches!(availability, Availability::Observed { ref value } if value == "unavailable")
-        {
-            "observed_unavailable".into()
-        } else {
-            "admissible".into()
-        };
-        let adapter = route
-            .get("adapter")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_owned();
-        let model_family = route
-            .get("model_family")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_owned();
-        let model = route_model(route);
-        normalised.push(Candidate {
-            candidate_id: candidate_id.to_owned(),
-            adapter,
-            model_family,
-            model,
-            route: route_value,
-            availability,
-            admissible: disposition == "admissible",
-            selected: false,
-            disposition,
-        });
-    }
-    Ok(normalised)
+) -> Result<Vec<Candidate>, CandidateError> {
+    normalise_candidates_ordered(
+        &raw.clone().into(),
+        task_class,
+        role,
+        policy,
+        alias_order,
+        effort_order,
+    )
 }
 
 fn parse_availability(value: Option<&Value>) -> Option<Availability> {
@@ -198,25 +251,6 @@ fn parse_availability(value: Option<&Value>) -> Option<Availability> {
             reason: "AvailabilityNotObserved".into(),
         }),
     }
-}
-
-fn python_one(value: Option<&Value>) -> bool {
-    match value {
-        Some(Value::Bool(value)) => *value,
-        Some(Value::Number(number)) if number.is_f64() => matches!(number.as_f64(), Some(1.0)),
-        Some(Value::Number(number)) => number.as_i64() == Some(1) || number.as_u64() == Some(1),
-        _ => false,
-    }
-}
-
-fn route_model(route: &Map<String, Value>) -> String {
-    route
-        .get("catalog_model")
-        .and_then(Value::as_str)
-        .filter(|value| !value.is_empty())
-        .or_else(|| route.get("resolved_model").and_then(Value::as_str))
-        .unwrap_or_default()
-        .to_owned()
 }
 
 pub fn preference_items(preferences: &Value, task_class: &str, role: &str) -> Vec<PreferenceItem> {
@@ -478,7 +512,7 @@ pub fn load_preferences(
         Err(PreferenceReadError::Io { .. }) => {
             (OrderedObject::default(), PreferenceStatus::Unavailable)
         }
-        Err(PreferenceReadError::Json(crate::pending::JsonError::Invalid(_))) => {
+        Err(PreferenceReadError::Json(crate::pending::JsonError::Json(_))) => {
             (OrderedObject::default(), PreferenceStatus::Corrupt)
         }
         Err(error) => return Err(error),
@@ -728,5 +762,28 @@ mod tests {
         let ignored =
             configuration_ignored(&json!({"spreading":{"policy":1e-5}}), "work", "worker");
         assert_eq!(ignored[0]["value"], "1e-05");
+    }
+}
+
+#[cfg(test)]
+mod ordered_candidate_tests {
+    use super::*;
+    #[test]
+    fn nested_status_disposition_keeps_dictionary_insertion_order() {
+        let raw = crate::pending::from_json(r#"{"schema_version":1,"candidates":[{"candidate_id":"a","route":{"status":{"z":true,"a":null}}}]}"#).unwrap();
+        let candidates = normalise_candidates_ordered(
+            &raw,
+            "work",
+            "worker",
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+        )
+        .unwrap();
+        assert_eq!(candidates[0].disposition, "{'z': True, 'a': None}");
+        assert_eq!(
+            serde_json::to_string(&candidates[0].route).unwrap(),
+            r#"{"status":{"z":true,"a":null}}"#
+        );
     }
 }

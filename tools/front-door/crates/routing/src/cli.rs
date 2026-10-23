@@ -1,6 +1,6 @@
 //! Typed argument surface for the `model-route` compatibility command.
 
-use std::ffi::OsString;
+use std::{ffi::OsString, path::PathBuf};
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use serde::{Deserialize, Serialize};
@@ -240,4 +240,44 @@ mod tests {
         assert_eq!(record["routes"], json!({}));
         assert_eq!(record["task_class_routes"]["build"]["alias"], "senior");
     }
+}
+
+#[derive(Clone, Debug)]
+pub struct CliDefaults {
+    pub instance_root: PathBuf,
+    pub compatibility_path: PathBuf,
+}
+impl CliDefaults {
+    pub fn apply(&self, command: &mut RouteCommand) {
+        match command {
+            RouteCommand::Select(args) if args.preferences_file.is_none() => {
+                args.preferences_file = Some(
+                    self.instance_root
+                        .join("config/model-preferences.json")
+                        .to_string_lossy()
+                        .into_owned(),
+                )
+            }
+            RouteCommand::Resolve(args) if args.adapter_compatibility.is_none() => {
+                args.adapter_compatibility =
+                    Some(self.compatibility_path.to_string_lossy().into_owned())
+            }
+            _ => {}
+        }
+    }
+}
+
+pub fn parse_command_with_defaults<I, S>(
+    args: I,
+    defaults: &CliDefaults,
+) -> Result<ParsedCommand, clap::Error>
+where
+    I: IntoIterator<Item = S>,
+    S: Into<OsString> + Clone,
+{
+    let mut parsed = parse_command(args)?;
+    if let ParsedCommand::Command(command) = &mut parsed {
+        defaults.apply(command);
+    }
+    Ok(parsed)
 }
