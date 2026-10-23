@@ -159,7 +159,7 @@ operator to run `npm ci`; it never installs or borrows another checkout's tree.
 ```text
 <PRODUCT_ROOT>/                product checkout
   HARNESS.md                      product constitution
-  runtime/  skills/  workflows/
+  runtime/  skills/
   scripts/  config/
           |
           | scripts/install-harness
@@ -171,7 +171,7 @@ operator to run `npm ci`; it never installs or borrows another checkout's tree.
 
 ~/.claude/skills/                 managed links
 ~/.codex/skills/                  managed links
-~/.claude/workflows/              managed links
+~/.claude/workflows/              retired links, removed at final cut-over
 ~/.local/bin/provenant            managed command
 ```
 

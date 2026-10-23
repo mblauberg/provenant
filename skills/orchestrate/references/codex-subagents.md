@@ -91,9 +91,8 @@ which findings are supported; do not majority-vote weak claims into truth.
 
 This is the Codex/Cursor adapter to the substrate-neutral stage/gate/recovery
 graph in `orchestration-contract.md`: express a workflow as phases, receipts,
-gates and recovery transitions first. Claude may bind that graph to
-`Workflow()` JavaScript (`dynamic-workflows.md`). Codex Ultra/native
-multi-agent may choose and coordinate subagents adaptively; explicit waves keep
+gates and recovery transitions first. Native agents may coordinate adaptively;
+explicit waves keep
 the same graph available at lower efforts:
 
 - **Small feature**: scout -> implement -> section review/docs -> verify.

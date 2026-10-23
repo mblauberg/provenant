@@ -58,6 +58,7 @@ removal. Confinement and custody requirements do not depend on CLI usage.
 | Stable command | `<bin-dir>/provenant`; default bin directory `~/.local/bin` |
 | Project binding | `<state>/projects/<ProjectId>/project.json`; host-local identity only |
 | Runs | `<state>/runs/<RunId>/`; run owns its top-level registry store and this subtree |
+| Worktree custody | `<state>/worktrees/<ProjectId>/`; supervisor/confinement own repository locks, writer leases and reservations |
 | Fabric | `<state>/fabric/`; fabric-store owns its database and companions |
 | Other owners | `<state>/projects/<ProjectId>/workflow/`, `<state>/quota/`, `<state>/routing/`; owners define retention and record bodies |
 | Scratch | `<state>/tmp/`; operation-scoped, never a whole-root purge |

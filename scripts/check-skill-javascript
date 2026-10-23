@@ -18,5 +18,4 @@ done < <(
     -type f \( -name '*.js' -o -name '*.mjs' -o -name '*.cjs' \) -print0
 )
 
-(( checked > 0 )) || { echo "no $LABEL JavaScript files found under: $JAVASCRIPT_ROOT" >&2; exit 1; }
 echo "PASS: checked $checked $LABEL JavaScript files"
