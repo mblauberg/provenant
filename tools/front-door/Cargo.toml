@@ -54,6 +54,7 @@ fault-injection = []
 
 [dependencies]
 libc.workspace = true
+provenant-supervisor = { workspace = true }
 
 [profile.release]
 opt-level = "z"

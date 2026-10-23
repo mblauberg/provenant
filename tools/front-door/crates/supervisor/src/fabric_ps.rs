@@ -337,3 +337,31 @@ console.log(JSON.stringify(results));
         assert_eq!(serde_json::json!(actual), expected);
     }
 }
+
+#[cfg(test)]
+mod platform_signal_tests {
+    #[test]
+    fn platform_signal_names_match_nodes_public_signal_constants() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../..");
+        let Some(expected) = crate::test_support::node(
+            &root,
+            r#"
+import { constants } from 'node:os';
+const names = process.platform === 'darwin' ? ['SIGINFO'] : ['SIGSTKFLT','SIGPWR'];
+console.log(JSON.stringify(names.map(name => [constants.signals[name],name])));
+"#,
+        ) else {
+            return;
+        };
+        let actual: Vec<_> = expected
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|row| {
+                let signal = u32::try_from(row[0].as_u64().unwrap()).unwrap();
+                serde_json::json!([signal, crate::sys::process::signal_name(signal)])
+            })
+            .collect();
+        assert_eq!(serde_json::json!(actual), expected);
+    }
+}
