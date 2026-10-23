@@ -6682,9 +6682,7 @@ def test_writer_watchdog_observation_does_not_reset_silence(tmp_path):
     assert observation["silent_seconds"] >= 2
 
 @pytest.mark.parametrize('api_key', [False, True])
-@pytest.mark.parametrize('confined', [False, True])
-def test_claude_plan_isolates_settings_and_mcp(tmp_path, monkeypatch, api_key, confined):
-    monkeypatch.setattr(supervisor(), '_sandbox_exec_path', lambda: '/usr/bin/sandbox-exec' if confined else None)
+def test_claude_plan_isolates_settings_and_mcp(tmp_path, monkeypatch, api_key):
     monkeypatch.delenv('ANTHROPIC_BASE_URL', raising=False)
     monkeypatch.delenv('ANTHROPIC_AUTH_TOKEN', raising=False)
     monkeypatch.delenv('ANTHROPIC_API_KEY', raising=False)
@@ -6696,29 +6694,13 @@ def test_claude_plan_isolates_settings_and_mcp(tmp_path, monkeypatch, api_key, c
     assert '--strict-mcp-config' in plan['argv']
     assert plan['argv'][plan['argv'].index('--permission-mode') + 1] == 'default'
     assert plan['argv'][plan['argv'].index('--permission-prompts') + 1] == 'none'
-    assert plan['argv'][plan['argv'].index('--tools') + 1] == ('Read,Grep,Glob,Bash' if confined else 'Read,Grep,Glob')
+    assert plan['argv'][plan['argv'].index('--tools') + 1] == 'Read,Grep,Glob,Bash'
+    assert plan['argv'][plan['argv'].index('--allowedTools') + 1] == 'Bash'
     boundary = plan['argv'][plan['argv'].index('--system-prompt') + 1]
     assert 'Do not modify files or run commands that mutate state.' in boundary
-    if confined:
-        assert plan['argv'][plan['argv'].index('--allowedTools') + 1] == 'Bash'
-        assert 'Read-only shell commands' in boundary
-        assert 'Use file-reading tools only.' not in boundary
-    else:
-        assert '--allowedTools' not in plan['argv']
-        assert 'Use file-reading tools only.' in boundary
+    assert 'Shell commands that do not modify files are allowed.' in boundary
+    assert 'Use file-reading tools only.' not in boundary
     assert 'fixture-key' not in ' '.join(plan['argv'])
-
-
-@pytest.mark.parametrize('guarantee', [None, 'best_effort', 'prompt_only'])
-def test_claude_read_only_shell_requires_an_enforced_guarantee(tmp_path, monkeypatch, guarantee):
-    mod = supervisor()
-    monkeypatch.setattr(mod, '_sandbox_exec_path', lambda: '/usr/bin/sandbox-exec')
-    plan = mod.build_plan('claude', {}, 'hello', cwd=tmp_path, workspace_root=tmp_path)
-    plan['applied']['guarantee'] = guarantee
-    argv = importlib.import_module('skills.orchestrate.scripts.adapters.claude').argv(plan)
-    assert argv[argv.index('--tools') + 1] == 'Read,Grep,Glob'
-    assert '--allowedTools' not in argv
-    assert 'Use file-reading tools only.' in argv[argv.index('--system-prompt') + 1]
 
 
 def test_question_example_in_middle_of_answer_does_not_suspend():
