@@ -2,7 +2,7 @@
 
 Rulebook: PORTING.md version 4. Batch 3 source/oracle revision:
 `b527d675d15c50ee51701bb15db6439c95277918`. The assigned Python files remain
-unchanged through the main revision merged into this branch. Batch 2 oracle:
+unchanged through merged main `ad64bd688ad6517ae883b43cc6bcde3c700d0796`. Batch 2 oracle:
 `600dec09bcda3b6a86272e391420e89d38777953`; batch 1 oracle:
 `e897b10d58b27a46544969594eed08a5ed64c72c`.
 
@@ -53,13 +53,13 @@ Every assigned unit has a coherent implementation. None is silently skipped.
 ## Shared owners and pending copies
 
 Workflow uses workspace `provenant-core` and `provenant-records` directly.
-Python strip, whitespace, repr/str, equality, float encoding/timestamps and
+Python strip, whitespace, repr/str, equality, Unicode predicates, splitlines,
+float encoding/timestamps and
 checked JSON use those owners. Matching local helpers and the unused config
 object reader are removed. No supervisor dependency is added.
 
 The retained `pending` items have no equivalent allowed owner API on this main:
 
-- `provenant-core`: Unicode decimal/digit/word predicates and splitlines.
 - `provenant-records`: Python JSON encoders, insertion-ordered maps/values and
   retained records, required-nullable serde hook, checked ordered adapters and
   Python scalar dictionary key identity/encoding.
@@ -92,7 +92,10 @@ Git worktree discovery before effectful bootstrap cases is refused.
 Local gates: `cargo fmt --all`,
 `cargo clippy -p provenant-workflow --all-targets -- -D warnings`, and
 `PROVENANT_PORT_DIFF_REQUIRED=1 cargo test -p provenant-workflow`.
-The final summary is recorded in the PR. Heavy repository checks and Linux
+Final required run: 138 passed, 0 failed, 0 ignored, 0 measured, 0 filtered
+out; zero doctests. Formatting, clippy and both R2 layering checks pass.
+The resolver leaves Cargo.lock unchanged from merged main.
+Heavy repository checks and Linux
 coverage run in PR CI. J1/J2/J3 integration and cut-over gates remain separate.
 
 Native adversarial source review covered every work partition. Repairs include

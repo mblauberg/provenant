@@ -57,7 +57,7 @@ pub fn batch_cancel_identity(value: &Value) -> Result<Option<&str>, LaunchError>
         .strip_prefix("batch-")
         .filter(|s| !s.is_empty())
         .ok_or(LaunchError::BatchIdentity)?;
-    if !suffix.chars().all(crate::pending::python_digit) {
+    if !suffix.chars().all(provenant_core::py::python_digit) {
         return Err(LaunchError::BatchIdentity);
     }
     Ok(Some(text))

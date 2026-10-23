@@ -255,7 +255,10 @@ fn load_events_inner(path: &Path, store: &impl QueueStore) -> Result<Vec<QueueEv
         detail: error.to_string(),
     })?;
     let mut events = Vec::new();
-    for (line_index, raw) in crate::pending::splitlines(&content).into_iter().enumerate() {
+    for (line_index, raw) in provenant_core::py::python_splitlines(&content)
+        .into_iter()
+        .enumerate()
+    {
         let line_number = line_index + 1;
         let line = provenant_core::py::python_strip(raw);
         if line.is_empty() {

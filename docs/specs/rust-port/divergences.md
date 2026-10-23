@@ -1929,3 +1929,14 @@ are not yet proved exact. Their IDs are removed from the completion ledger.
   receipt unit 02's review argument descriptor is not the complete source
   build_parser. Named-user home expansion remains unimplemented for compact
   reinjection. PORT_STATUS.md lists each affected unit and missing boundary.
+
+### RP-WF3-004: shared Unicode owner after merging main
+
+- Class: `bug`; fixed duplicate ownership under rulebook v4. Merged main
+  `ad64bd688ad6517ae883b43cc6bcde3c700d0796` exposes core Python Unicode
+  decimal/digit/word predicates and splitlines. Workflow now calls those APIs
+  directly and removes its matching pending functions and generated word table,
+  together with the duplicate writer splitlines helper. No local core pending
+  copy remains. Existing source differentials exercise the shared owner.
+- Confinement still does not expose the safe filesystem API on this revision;
+  no custody or publication completion claim is added.

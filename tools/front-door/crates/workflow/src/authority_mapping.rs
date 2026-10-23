@@ -423,7 +423,7 @@ fn disclosure(value: &Value) -> Result<Disclosure, AuthorityMappingError> {
 }
 
 fn ascii_or_unicode_digit(value: char) -> Option<u32> {
-    crate::pending::decimal_digit(value).map(u32::from)
+    provenant_core::py::decimal_digit(value).map(u32::from)
 }
 
 fn decimal(chars: &[char]) -> Option<u32> {

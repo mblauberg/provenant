@@ -791,7 +791,7 @@ pub fn audit(
                 Ok(text) => text,
                 Err(_) => continue,
             };
-            let lines = crate::pending::splitlines(&text);
+            let lines = provenant_core::py::python_splitlines(&text);
             if i128::try_from(lines.len()).unwrap_or(i128::MAX)
                 > i128::from(options.max_state_lines)
             {

@@ -465,7 +465,7 @@ fn adjacent_chars(text: &str, byte: usize) -> (Option<char>, Option<char>) {
 }
 
 fn python_word(c: char) -> bool {
-    crate::pending::python_word(c)
+    provenant_core::py::python_word(c)
 }
 
 fn python_word_boundary(text: &str, byte: usize) -> bool {
@@ -1305,7 +1305,7 @@ fn is_negative_number_argument(text: &str) -> bool {
         .unwrap_or(number)
         .chars()
         .next()
-        .is_some_and(|character| crate::pending::decimal_digit(character).is_some())
+        .is_some_and(|character| provenant_core::py::decimal_digit(character).is_some())
 }
 
 #[cfg(test)]

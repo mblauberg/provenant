@@ -133,7 +133,7 @@ pub fn workspace_identity(
         Ok(_) | Err(GitObservationError::Host(_)) => return Ok(identity),
         Err(error) => return Err(error),
     };
-    let lines = python_splitlines(&base);
+    let lines = provenant_core::py::python_splitlines(&base);
     if lines.len() != 2
         || lines[1].len() < 40
         || lines[1].len() > 64
@@ -160,36 +160,6 @@ pub fn workspace_identity(
     identity.base_revision = Some(lines[1].to_ascii_lowercase());
     identity.working_tree = if status.is_empty() { "clean" } else { "dirty" }.into();
     Ok(identity)
-}
-
-fn python_splitlines(text: &str) -> Vec<&str> {
-    let mut lines = Vec::new();
-    let mut start = 0;
-    let mut chars = text.char_indices().peekable();
-    while let Some((index, character)) = chars.next() {
-        let width = character.len_utf8();
-        let separator = matches!(
-            character,
-            '\n' | '\r' | '\u{000b}' | '\u{000c}' | '\u{001c}'
-                ..='\u{001e}' | '\u{0085}' | '\u{2028}' | '\u{2029}'
-        );
-        if separator {
-            lines.push(&text[start..index]);
-            let next = match (character, chars.peek()) {
-                ('\r', Some((_, '\n'))) => chars
-                    .next()
-                    .map_or(index + width, |(next_index, next_char)| {
-                        next_index + next_char.len_utf8()
-                    }),
-                _ => index + width,
-            };
-            start = next;
-        }
-    }
-    if start < text.len() {
-        lines.push(&text[start..]);
-    }
-    lines
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]

@@ -30,7 +30,7 @@ fn field(text: &str, name: &str, prefix: &str) -> Result<String, regex::Error> {
         .find(tail)
         .map_or(tail.len(), |m| m.start());
     let section = strip(&tail[..end]);
-    for line in crate::pending::splitlines(section) {
+    for line in provenant_core::py::python_splitlines(section) {
         let value = strip(line);
         if value.is_empty() || value.starts_with("<!--") || value.starts_with("-->") {
             continue;
@@ -54,7 +54,7 @@ pub fn queue_has_active_rows(text: &str) -> Result<(bool, Option<String>), regex
         ));
     }
     let separator = re(r"\A:?-{3,}:?\z")?;
-    for line in crate::pending::splitlines(text) {
+    for line in provenant_core::py::python_splitlines(text) {
         let value = strip(line);
         if !value.starts_with('|') || !value.ends_with('|') {
             continue;

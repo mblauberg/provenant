@@ -1,5 +1,5 @@
-# Partial units are not listed; ready.py treats every line here as done.
 # Units fully ported to Rust and merged on main, one id per line.
+# Partial units are not listed; ready.py treats every line here as done.
 runtime/fabric/src/batch-execution.ts#interface
 runtime/fabric/src/execution.ts#interface
 runtime/fabric/src/identity.ts#unit-01
