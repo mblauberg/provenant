@@ -579,7 +579,7 @@ def test_harness_python_test_dependencies_install_locked_and_cached() -> None:
         re.split(r"[<>=~!\[; ]", requirement, maxsplit=1)[0]
         for requirement in pyproject["dependency-groups"]["test"]
     }
-    assert declared == {"pytest", "pytest-xdist", "pyyaml"}
+    assert declared == {"jsonschema", "pytest", "pytest-xdist", "pyyaml", "rfc3339-validator"}
 
     lock_text = (ROOT / "uv.lock").read_text(encoding="utf-8")
     locked = set(re.findall(r'(?m)^name = "([^"]+)"$', lock_text))
