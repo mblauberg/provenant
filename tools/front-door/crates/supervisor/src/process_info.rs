@@ -458,7 +458,85 @@ pub enum ProcessError {
     #[error("{0}")]
     Census(String),
     #[error(transparent)]
+    PsCommand(#[from] PsCommandError),
+    #[error(transparent)]
     Bounded(#[from] crate::bounded::BoundedError),
+}
+
+/// Failures at the system-ps boundary retain enough context for the ps edge to
+/// render Python's OSError/TimeoutExpired wording without losing the cause.
+#[derive(Debug)]
+pub enum PsCommandError {
+    Spawn {
+        program: OsString,
+        source: std::io::Error,
+    },
+    Timeout {
+        command: Vec<OsString>,
+        timeout_seconds: f64,
+    },
+    OutputLimit,
+}
+
+impl std::fmt::Display for PsCommandError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Spawn { program, source } => {
+                let path = program.to_string_lossy();
+                if let Some(errno) = source.raw_os_error() {
+                    let os_error = std::io::Error::from_raw_os_error(errno).to_string();
+                    let suffix = format!(" (os error {errno})");
+                    let message = os_error.strip_suffix(&suffix).unwrap_or(&os_error);
+                    write!(
+                        f,
+                        "[Errno {errno}] {message}: '{}'",
+                        path.replace('\'', "\\'")
+                    )
+                } else {
+                    write!(f, "{source}: '{}'", path.replace('\'', "\\'"))
+                }
+            }
+            Self::Timeout {
+                command,
+                timeout_seconds,
+            } => write!(
+                f,
+                "ps census failed: Command '{}' timed out after {} seconds",
+                python_command_repr(command),
+                python_timeout_repr(*timeout_seconds),
+            ),
+            Self::OutputLimit => f.write_str("ps census output exceeds observation bound"),
+        }
+    }
+}
+
+impl std::error::Error for PsCommandError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Spawn { source, .. } => Some(source),
+            Self::Timeout { .. } | Self::OutputLimit => None,
+        }
+    }
+}
+
+fn python_command_repr(command: &[OsString]) -> String {
+    let args = command
+        .iter()
+        .map(|arg| {
+            let text = arg.to_string_lossy();
+            format!("'{}'", text.replace('\\', "\\\\").replace('\'', "\\'"))
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("[{args}]")
+}
+
+fn python_timeout_repr(timeout_seconds: f64) -> String {
+    if timeout_seconds.is_finite() && timeout_seconds.fract() == 0.0 {
+        format!("{timeout_seconds:.0}")
+    } else {
+        timeout_seconds.to_string()
+    }
 }
 
 fn read_error(path: &std::path::Path) -> impl FnOnce(std::io::Error) -> ProcessError + '_ {
@@ -885,7 +963,36 @@ pub fn process_at(pid: i32, now: f64) -> Result<Option<ProcessInfo>, ProcessErro
     }
 }
 
-fn ps_command(
+trait PsRunner {
+    fn run(
+        &mut self,
+        command: &[OsString],
+        env: &[(OsString, OsString)],
+        timeout: f64,
+        output_limit_bytes: i64,
+    ) -> Result<crate::capture::BoundedProcessResult, crate::bounded::BoundedError>;
+}
+
+struct SystemPsRunner;
+
+impl PsRunner for SystemPsRunner {
+    fn run(
+        &mut self,
+        command: &[OsString],
+        env: &[(OsString, OsString)],
+        timeout: f64,
+        output_limit_bytes: i64,
+    ) -> Result<crate::capture::BoundedProcessResult, crate::bounded::BoundedError> {
+        let mut options = crate::bounded::Options::new(std::path::Path::new("."), timeout);
+        options.env = Some(env);
+        options.merge_stderr = false;
+        options.output_limit_bytes = output_limit_bytes;
+        crate::bounded::run_bounded_text(command, options)
+    }
+}
+
+fn ps_command_with(
+    runner: &mut impl PsRunner,
     args: &[&str],
     timeout: f64,
     canonical: bool,
@@ -900,36 +1007,56 @@ fn ps_command(
             }
         }
     }
-    let mut options = crate::bounded::Options::new(std::path::Path::new("."), timeout);
-    options.env = Some(&env);
-    options.merge_stderr = false;
     let command: Vec<_> = std::iter::once("/bin/ps")
         .chain(args.iter().copied())
         .map(OsString::from)
         .collect();
-    let result = crate::bounded::run_bounded_text(&command, options)?;
+    let result = runner
+        .run(&command, &env, timeout, 1_048_576)
+        .map_err(|error| match error {
+            crate::bounded::BoundedError::Io {
+                operation: "spawn",
+                source,
+            } => ProcessError::PsCommand(PsCommandError::Spawn {
+                program: command[0].clone(),
+                source,
+            }),
+            error => ProcessError::Bounded(error),
+        })?;
     if result.timed_out {
-        return Err(ProcessError::Census(
-            "ps census failed: process timed out".into(),
-        ));
+        return Err(PsCommandError::Timeout {
+            command,
+            timeout_seconds: timeout,
+        }
+        .into());
     }
     if result.output_truncated || result.stderr_truncated == Some(true) {
-        return Err(ProcessError::Census(
-            "ps census output exceeds observation bound".into(),
-        ));
+        return Err(PsCommandError::OutputLimit.into());
     }
     Ok(result)
 }
 
 pub fn ps_start_time(pid: i32, canonical: bool) -> Option<String> {
+    ps_start_time_with(&mut SystemPsRunner, pid, canonical)
+}
+
+fn ps_start_time_with(runner: &mut impl PsRunner, pid: i32, canonical: bool) -> Option<String> {
     let pid = pid.to_string();
-    let result = ps_command(&["-o", "lstart=", "-p", &pid], 2.0, canonical).ok()?;
+    let result = ps_command_with(runner, &["-o", "lstart=", "-p", &pid], 2.0, canonical).ok()?;
     (result.returncode == 0).then(|| provenant_core::py::python_strip(&result.output).to_string())
 }
 
 pub fn ps_process(pid: i32) -> Result<Option<ProcessInfo>, ProcessError> {
+    ps_process_with(&mut SystemPsRunner, pid)
+}
+
+fn ps_process_with(
+    runner: &mut impl PsRunner,
+    pid: i32,
+) -> Result<Option<ProcessInfo>, ProcessError> {
     let pid_arg = pid.to_string();
-    let result = match ps_command(
+    let result = match ps_command_with(
+        runner,
         &[
             "-o",
             "pid=,ppid=,pgid=,etime=,time=,stat=,rss=,command=",
@@ -945,7 +1072,7 @@ pub fn ps_process(pid: i32) -> Result<Option<ProcessInfo>, ProcessError> {
     if result.returncode != 0 {
         return Ok(None);
     }
-    let Some(lstart) = ps_start_time(pid, true) else {
+    let Some(lstart) = ps_start_time_with(runner, pid, true) else {
         return Ok(None);
     };
     #[cfg(target_os = "macos")]
@@ -1008,7 +1135,11 @@ pub fn processes() -> Result<Vec<ProcessInfo>, ProcessError> {
 }
 
 pub fn ps_processes() -> Result<Vec<ProcessInfo>, ProcessError> {
-    let result = ps_command(&["-axo", "pid="], 5.0, false)?;
+    ps_processes_with(&mut SystemPsRunner)
+}
+
+fn ps_processes_with(runner: &mut impl PsRunner) -> Result<Vec<ProcessInfo>, ProcessError> {
+    let result = ps_command_with(runner, &["-axo", "pid="], 5.0, false)?;
     if result.returncode != 0 {
         return Err(ProcessError::Census(
             result
@@ -1036,7 +1167,7 @@ pub fn ps_processes() -> Result<Vec<ProcessInfo>, ProcessError> {
     }
     let mut rows = Vec::new();
     for pid in pids {
-        if let Some(row) = ps_process(pid)? {
+        if let Some(row) = ps_process_with(runner, pid)? {
             rows.push(row);
         }
     }
@@ -1217,5 +1348,182 @@ print(json.dumps(out))
             }
         }
         assert_eq!(serde_json::to_value(actual).unwrap(), expected);
+    }
+}
+
+#[cfg(test)]
+mod fallback_adapter_tests {
+    use super::*;
+    use std::collections::VecDeque;
+
+    struct FixturePsRunner {
+        outcomes:
+            VecDeque<Result<crate::capture::BoundedProcessResult, crate::bounded::BoundedError>>,
+        commands: Vec<Vec<OsString>>,
+    }
+
+    impl FixturePsRunner {
+        fn new(
+            outcomes: impl IntoIterator<
+                Item = Result<crate::capture::BoundedProcessResult, crate::bounded::BoundedError>,
+            >,
+        ) -> Self {
+            Self {
+                outcomes: outcomes.into_iter().collect(),
+                commands: Vec::new(),
+            }
+        }
+    }
+
+    impl PsRunner for FixturePsRunner {
+        fn run(
+            &mut self,
+            command: &[OsString],
+            _env: &[(OsString, OsString)],
+            _timeout: f64,
+            output_limit_bytes: i64,
+        ) -> Result<crate::capture::BoundedProcessResult, crate::bounded::BoundedError> {
+            assert_eq!(output_limit_bytes, 1_048_576);
+            self.commands.push(command.to_vec());
+            self.outcomes
+                .pop_front()
+                .expect("fixture has one outcome per ps invocation")
+        }
+    }
+
+    fn ps_result(
+        stdout: &str,
+        stderr: &str,
+        returncode: i32,
+    ) -> crate::capture::BoundedProcessResult {
+        crate::capture::BoundedProcessResult {
+            returncode,
+            output: stdout.into(),
+            output_bytes: stdout.len() as u64,
+            output_truncated: false,
+            timed_out: false,
+            elapsed_seconds: 0.0,
+            stdout: Some(stdout.into()),
+            stderr: Some(stderr.into()),
+            stdout_bytes: Some(stdout.len() as u64),
+            stderr_bytes: Some(stderr.len() as u64),
+            stdout_truncated: Some(false),
+            stderr_truncated: Some(false),
+        }
+    }
+
+    fn census_error(
+        outcomes: impl IntoIterator<
+            Item = Result<crate::capture::BoundedProcessResult, crate::bounded::BoundedError>,
+        >,
+    ) -> String {
+        let mut runner = FixturePsRunner::new(outcomes);
+        let error = ps_processes_with(&mut runner).unwrap_err();
+        format!("ps: cannot inspect processes: {error}\n")
+    }
+
+    #[test]
+    fn fallback_census_decodes_process_rows_through_the_injected_runner() {
+        let mut runner = FixturePsRunner::new([
+            Ok(ps_result("42\n", "", 0)),
+            Ok(ps_result(
+                "42 2 3 00:10 0:00.01 S 123 /bin/tool  two words\n",
+                "",
+                0,
+            )),
+            Ok(ps_result("Mon Jan  1 00:00:00 2024\n", "", 0)),
+        ]);
+        let rows = ps_processes_with(&mut runner).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].pid, 42);
+        assert_eq!(rows[0].command, "/bin/tool  two words");
+        assert_eq!(rows[0].comm, "tool");
+        assert_eq!(
+            runner.commands,
+            vec![
+                ["/bin/ps", "-axo", "pid="].map(OsString::from).to_vec(),
+                [
+                    "/bin/ps",
+                    "-o",
+                    "pid=,ppid=,pgid=,etime=,time=,stat=,rss=,command=",
+                    "-p",
+                    "42"
+                ]
+                .map(OsString::from)
+                .to_vec(),
+                ["/bin/ps", "-o", "lstart=", "-p", "42"]
+                    .map(OsString::from)
+                    .to_vec(),
+            ]
+        );
+    }
+
+    #[test]
+    fn fallback_census_refusals_keep_the_bounded_output_limit() {
+        let mut oversized = ps_result("", "", 0);
+        oversized.output_truncated = true;
+        let message = census_error([Ok(oversized)]);
+        assert_eq!(
+            message,
+            "ps: cannot inspect processes: ps census output exceeds observation bound\n"
+        );
+    }
+
+    #[test]
+    fn fallback_error_display_matches_python_spawn_timeout_and_census_paths() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../..");
+        let Some(expected) = crate::test_support::python(
+            &root,
+            r#"
+import json, os, subprocess
+from types import SimpleNamespace
+from unittest.mock import patch
+from skills.orchestrate.scripts import process_info as p
+
+def error_for(kind):
+    calls = 0
+    def fake_run(command, **kwargs):
+        nonlocal calls
+        calls += 1
+        if kind == 'spawn':
+            raise FileNotFoundError(2, os.strerror(2), command[0])
+        if kind == 'timeout':
+            raise subprocess.TimeoutExpired(command, kwargs['timeout'])
+        if kind == 'nonzero':
+            return SimpleNamespace(returncode=1, stdout='', stderr='denied\n')
+        if kind == 'empty':
+            return SimpleNamespace(returncode=0, stdout='', stderr='')
+        if kind == 'no_rows':
+            if calls == 1:
+                return SimpleNamespace(returncode=0, stdout='42\n', stderr='')
+            return SimpleNamespace(returncode=1, stdout='', stderr='')
+        raise AssertionError(kind)
+    with patch.object(p.subprocess, 'run', side_effect=fake_run):
+        try:
+            p._ps_processes()
+        except OSError as error:
+            return 'ps: cannot inspect processes: ' + str(error) + '\n'
+        raise AssertionError('census unexpectedly succeeded')
+
+print(json.dumps([error_for(kind) for kind in ['spawn', 'timeout', 'nonzero', 'empty', 'no_rows']]))
+"#,
+        ) else {
+            return;
+        };
+
+        let spawn = census_error([Err(crate::bounded::BoundedError::Io {
+            operation: "spawn",
+            source: std::io::Error::from_raw_os_error(2),
+        })]);
+        let mut timed_out = ps_result("", "", -15);
+        timed_out.timed_out = true;
+        let timeout = census_error([Ok(timed_out)]);
+        let nonzero = census_error([Ok(ps_result("", "denied\n", 1))]);
+        let empty = census_error([Ok(ps_result("", "", 0))]);
+        let no_rows = census_error([Ok(ps_result("42\n", "", 0)), Ok(ps_result("", "", 1))]);
+        assert_eq!(
+            serde_json::to_value([spawn, timeout, nonzero, empty, no_rows]).unwrap(),
+            expected
+        );
     }
 }
