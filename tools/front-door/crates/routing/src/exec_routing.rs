@@ -5,11 +5,75 @@ use crate::{
     pending::python_strip,
 };
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use serde_json::Value;
+use std::{
+    collections::BTreeMap,
+    ffi::OsString,
+    path::{Path, PathBuf},
+    time::Duration,
+};
 use thiserror::Error;
 
-const ADAPTERS: [&str; 7] = [
-    "claude", "codex", "opencode", "cursor", "agy", "kiro", "copilot",
+/// Adapter-specific fallback behavior is a table so routing policy does not grow
+/// a central adapter-name match as providers are added.
+pub trait AdapterRoutingPolicy {
+    fn adapter(&self) -> &'static str;
+    fn add_opencode_candidates(&self) -> bool;
+}
+
+#[derive(Clone, Copy)]
+struct BuiltinAdapterPolicy {
+    adapter: &'static str,
+    add_opencode_candidates: bool,
+}
+
+impl AdapterRoutingPolicy for BuiltinAdapterPolicy {
+    fn adapter(&self) -> &'static str {
+        self.adapter
+    }
+
+    fn add_opencode_candidates(&self) -> bool {
+        self.add_opencode_candidates
+    }
+}
+
+static ADAPTER_POLICIES: [BuiltinAdapterPolicy; 7] = [
+    BuiltinAdapterPolicy {
+        adapter: "claude",
+        add_opencode_candidates: true,
+    },
+    BuiltinAdapterPolicy {
+        adapter: "codex",
+        add_opencode_candidates: true,
+    },
+    BuiltinAdapterPolicy {
+        adapter: "opencode",
+        add_opencode_candidates: false,
+    },
+    BuiltinAdapterPolicy {
+        adapter: "cursor",
+        add_opencode_candidates: true,
+    },
+    BuiltinAdapterPolicy {
+        adapter: "agy",
+        add_opencode_candidates: true,
+    },
+    BuiltinAdapterPolicy {
+        adapter: "kiro",
+        add_opencode_candidates: true,
+    },
+    BuiltinAdapterPolicy {
+        adapter: "copilot",
+        add_opencode_candidates: true,
+    },
 ];
+
+fn adapter_policy(adapter: &str) -> Option<&'static dyn AdapterRoutingPolicy> {
+    ADAPTER_POLICIES
+        .iter()
+        .find(|policy| policy.adapter() == adapter)
+        .map(|policy| policy as &dyn AdapterRoutingPolicy)
+}
 
 /// A validated candidate retains every raw field, including nulls and dictionary order.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -56,7 +120,7 @@ impl Serialize for FallbackPolicy {
 impl<'de> Deserialize<'de> for FallbackPolicy {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let raw = OrderedValue::deserialize(deserializer)?;
-        validate_policy_value(&raw).map_err(serde::de::Error::custom)
+        validate_policy(&raw).map_err(serde::de::Error::custom)
     }
 }
 
@@ -86,7 +150,7 @@ pub fn parse_candidate(
             };
             let mut adapter = default_adapter;
             if let Some((prefix, rest)) = model.split_once('/') {
-                if ADAPTERS.contains(&prefix) {
+                if adapter_policy(prefix).is_some() {
                     adapter = prefix;
                     model = rest;
                 }
@@ -116,7 +180,7 @@ pub fn parse_candidate(
         Some(_) => return Err(FallbackError::MissingModel),
         None => default_adapter,
     };
-    if !ADAPTERS.contains(&adapter) {
+    if adapter_policy(adapter).is_none() {
         return Err(FallbackError::MissingModel);
     }
     if !matches!(
@@ -137,8 +201,8 @@ pub fn validate_policy(raw: &OrderedValue) -> Result<FallbackPolicy, FallbackErr
             return Ok(FallbackPolicy::Any);
         }
         let parsed = crate::pending::from_json(text).map_err(|error| match error {
-            crate::pending::JsonError::NumberOutOfRange => FallbackError::NumberOutOfRange,
-            crate::pending::JsonError::Invalid(_) => FallbackError::InvalidPolicy,
+            crate::pending::JsonError::NumberOutOfRange(_) => FallbackError::NumberOutOfRange,
+            crate::pending::JsonError::Json(_) => FallbackError::InvalidPolicy,
         })?;
         return validate_policy_value(&parsed);
     }
@@ -165,21 +229,768 @@ fn validate_policy_value(raw: &OrderedValue) -> Result<FallbackPolicy, FallbackE
 pub struct ExecutionCandidate {
     pub adapter: String,
     pub model: String,
-    pub effort: Option<String>,
+    /// Python returns `effort_applied` verbatim when present, so this is any JSON value.
+    pub effort: OrderedValue,
 }
 
 /// Input plan consumed by candidates(); confidentiality and policy are separate arguments.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ExecutionRoutePlan {
     #[serde(default)]
-    pub requested_model: Option<String>,
+    pub requested_model: Option<OrderedValue>,
     pub route: OrderedObject,
     pub adapter: String,
     pub model: String,
     #[serde(default)]
-    pub effort: Option<String>,
+    pub effort: Option<OrderedValue>,
     #[serde(flatten)]
     pub extra: OrderedObject,
+}
+
+/// External router process boundary. Implementations must enforce the supplied deadline.
+pub trait RouterHost {
+    fn product_root(&self) -> PathBuf;
+    fn python_executable(&self) -> OsString;
+    fn is_executable(&self, path: &Path) -> bool;
+    fn run_bounded(&self, argv: &[OsString], timeout: Duration)
+        -> Result<Vec<u8>, RouterHostError>;
+    fn load_catalog(&self, product: &Path) -> Result<Value, RouterHostError>;
+    fn host_id(&self) -> String;
+    fn warning(&self, message: &str);
+}
+
+#[derive(Debug, Error)]
+pub enum RouterHostError {
+    #[error("router process is unavailable")]
+    Process,
+    #[error("router catalogue is unavailable")]
+    Catalog,
+}
+
+/// Provider quota is advisory to route selection. The quota crate currently owns
+/// quota records and pure display policy; this seam keeps account operations injected.
+// port: belongs in provenant-quota (account routing/advice API is not on main).
+pub trait ProviderQuota {
+    fn claude_account_needs_reselection(
+        &self,
+        account: &str,
+        now: jiff::Timestamp,
+    ) -> Result<bool, QuotaUnavailable>;
+    fn reselect_claude_account(
+        &self,
+        now: jiff::Timestamp,
+    ) -> Result<Option<String>, QuotaUnavailable>;
+    fn label_is_valid(&self, account: &str) -> bool;
+    fn pinned_account_state(
+        &self,
+        adapter: &str,
+        account: &str,
+    ) -> Result<Option<String>, QuotaUnavailable>;
+    fn apply_to_cooldowns(
+        &self,
+        records: &provenant_records::fabric_records::CooldownRows,
+        selected_account: Option<(&str, &str)>,
+        include_exhausted: bool,
+        now: jiff::Timestamp,
+    ) -> Result<provenant_records::fabric_records::CooldownRows, QuotaUnavailable>;
+}
+
+#[derive(Clone, Copy, Debug, Error)]
+#[error("provider quota advice is unavailable")]
+pub struct QuotaUnavailable;
+
+/// The record owner performs scoped, lock-safe cooldown reads.
+pub trait ExecutionCooldownStore {
+    fn read_cooldowns(
+        &self,
+        scopes: Option<&BTreeMap<String, provenant_records::fabric_records::Scope>>,
+    ) -> Result<
+        provenant_records::fabric_records::CooldownRows,
+        provenant_records::fabric_records::RecordError,
+    >;
+}
+
+impl<T: provenant_records::fabric_records::FabricRecordStore> ExecutionCooldownStore for T {
+    fn read_cooldowns(
+        &self,
+        scopes: Option<&BTreeMap<String, provenant_records::fabric_records::Scope>>,
+    ) -> Result<
+        provenant_records::fabric_records::CooldownRows,
+        provenant_records::fabric_records::RecordError,
+    > {
+        provenant_records::fabric_records::FabricRecordStore::read_cooldowns(
+            self, None, None, scopes,
+        )
+    }
+}
+
+#[derive(Debug, Error)]
+pub enum ExecutionRoutingError {
+    #[error(transparent)]
+    Fallback(#[from] FallbackError),
+    #[error("execution route plan is malformed: {0}")]
+    InvalidPlan(&'static str),
+    #[error("cooldown record has an invalid timestamp")]
+    InvalidCoolingTimestamp,
+    #[error("cooldown record is missing cooling_until")]
+    MissingCoolingTimestamp,
+    #[error("cannot compare timezone-aware and timezone-naive cooling timestamps")]
+    IncompatibleCoolingTimestamps,
+    #[error(transparent)]
+    Store(#[from] provenant_records::fabric_records::RecordError),
+}
+
+/// Explicit runtime dependencies used by execution-facing routing policy.
+pub struct ExecutionRouting<'a> {
+    pub host: &'a dyn RouterHost,
+    pub store: &'a dyn ExecutionCooldownStore,
+    pub quota: Option<&'a dyn ProviderQuota>,
+    pub now: jiff::Timestamp,
+}
+
+const SNAPSHOT_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// Build the same wrapper-or-interpreter command selected by the Python runtime.
+pub fn route_command(host: &dyn RouterHost, product: &Path) -> Vec<OsString> {
+    let wrapper = product.join("scripts/model-route");
+    if host.is_executable(&wrapper) {
+        vec![wrapper.into_os_string()]
+    } else {
+        vec![
+            host.python_executable(),
+            product.join("scripts/model_route.py").into_os_string(),
+        ]
+    }
+}
+
+/// Snapshot errors, malformed JSON, and a wrong schema all fall back to an empty catalogue.
+pub fn snapshot(host: &dyn RouterHost) -> Value {
+    let product = host.product_root();
+    let mut argv = route_command(host, &product);
+    argv.extend([OsString::from("snapshot"), OsString::from("--json")]);
+    host.run_bounded(&argv, SNAPSHOT_TIMEOUT)
+        .ok()
+        .and_then(|bytes| provenant_records::checked_json::from_slice(&bytes).ok())
+        .filter(|data| {
+            data.is_object()
+                && data.get("schema").and_then(Value::as_str) == Some("fabric.catalogue.v1")
+        })
+        .unwrap_or_else(|| serde_json::json!({}))
+}
+
+/// Cooldown identity uses the router's registered id, without an effort selector.
+pub fn registered_model(
+    host: &dyn RouterHost,
+    adapter: &str,
+    model: &str,
+    catalogue: Option<&Value>,
+    warnings: Option<&mut Vec<String>>,
+) -> String {
+    let model = model.split_once('@').map_or(model, |(head, _)| head);
+    if model == "*" {
+        return model.to_owned();
+    }
+    let raw_catalogue = catalogue.cloned().unwrap_or_else(|| snapshot(host));
+    let catalogue = match prepare_registered_catalogue(&raw_catalogue, adapter) {
+        Ok(Some(catalogue)) => catalogue,
+        Ok(None) => return model.to_owned(),
+        Err(kind) => {
+            report_registered_model_warning(host, adapter, model, warnings, kind);
+            return model.to_owned();
+        }
+    };
+    let cached = BTreeMap::new();
+    let resolver = crate::matching::ModelCatalog {
+        catalog: &catalogue,
+        cached: &cached,
+    };
+    match resolver.registered_match(adapter, model) {
+        Ok((Some(entry), _)) => entry
+            .get("id")
+            .and_then(Value::as_str)
+            .unwrap_or(model)
+            .to_owned(),
+        Ok((None, _)) => model.to_owned(),
+        Err(error) => {
+            report_registered_model_warning(
+                host,
+                adapter,
+                model,
+                warnings,
+                match_error_class(&error),
+            );
+            model.to_owned()
+        }
+    }
+}
+
+/// Return every configured catalogue-pattern family, preserving ambiguity and source order.
+pub fn model_families(
+    host: &dyn RouterHost,
+    model: &str,
+    catalogue: Option<&Value>,
+) -> Vec<String> {
+    let mut raw = catalogue
+        .filter(|value| value.is_object())
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!({}));
+    if let Some(nested) = raw
+        .get("catalogue")
+        .filter(|value| value.is_object())
+        .cloned()
+    {
+        raw = nested;
+    }
+    if raw.get("model_patterns").is_none() {
+        let Ok(loaded) = host.load_catalog(&host.product_root()) else {
+            return vec![];
+        };
+        raw = loaded;
+    }
+    crate::catalog::matching_model_families(model, &raw).unwrap_or_default()
+}
+
+/// Check the Python access/iteration shapes used by `_registered_match` and
+/// normalize the few iterable forms accepted there but not by the Rust matcher.
+fn prepare_registered_catalogue(
+    catalogue: &Value,
+    adapter: &str,
+) -> Result<Option<Value>, &'static str> {
+    let root = catalogue.as_object().ok_or("AttributeError")?;
+    let Some(adapters) = root.get("adapters") else {
+        return Ok(None);
+    };
+    let adapter_entry = match adapters {
+        Value::Object(adapters) => {
+            let Some(entry) = adapters.get(adapter) else {
+                return Ok(None);
+            };
+            entry
+        }
+        // Python's initial `adapter in adapters` accepts lists and strings,
+        // then `_registered_match` attempts to index them with a string.
+        Value::Array(adapters) => {
+            return if adapters.iter().any(|value| value.as_str() == Some(adapter)) {
+                Err("TypeError")
+            } else {
+                Ok(None)
+            };
+        }
+        Value::String(adapters) => {
+            return if adapters.contains(adapter) {
+                Err("TypeError")
+            } else {
+                Ok(None)
+            };
+        }
+        _ => return Err("TypeError"),
+    };
+    let adapter_entry = adapter_entry.as_object().ok_or("AttributeError")?;
+    let mut normalized = catalogue.clone();
+    let normalized_adapter = normalized
+        .get_mut("adapters")
+        .and_then(|value| value.get_mut(adapter))
+        .and_then(Value::as_object_mut)
+        .ok_or("AttributeError")?;
+    let Some(models) = adapter_entry.get("models") else {
+        return Ok(Some(normalized));
+    };
+    match models {
+        Value::Array(models) => {
+            for model in models {
+                let Some(fields) = model.as_object() else {
+                    return Err("TypeError");
+                };
+                let Some(id) = fields.get("id") else {
+                    return Err("KeyError");
+                };
+                if !id.is_string() {
+                    return Err("AttributeError");
+                }
+            }
+            let mut normalized_models = models.clone();
+            for model in &mut normalized_models {
+                let fields = model.as_object_mut().ok_or("TypeError")?;
+                if let Some(names) = fields.get("names").cloned() {
+                    let names = match names {
+                        Value::Array(names) => {
+                            if names.iter().any(|name| !name.is_string()) {
+                                return Err("AttributeError");
+                            }
+                            names
+                        }
+                        Value::String(names) => names
+                            .chars()
+                            .map(|name| Value::String(name.to_string()))
+                            .collect(),
+                        Value::Object(names) => names.keys().cloned().map(Value::String).collect(),
+                        _ => return Err("TypeError"),
+                    };
+                    fields.insert("names".into(), Value::Array(names));
+                }
+            }
+            for model in &normalized_models {
+                let fields = model.as_object().ok_or("TypeError")?;
+                if fields.get("effort_transport").and_then(Value::as_str) == Some("model-suffix") {
+                    match fields.get("suffix") {
+                        None => {}
+                        Some(Value::Object(suffixes)) => {
+                            if suffixes.values().any(|suffix| !suffix.is_string()) {
+                                return Err("TypeError");
+                            }
+                        }
+                        Some(_) => return Err("AttributeError"),
+                    }
+                }
+            }
+            normalized_adapter.insert("models".into(), Value::Array(normalized_models));
+        }
+        Value::Object(models) if models.is_empty() => {
+            normalized_adapter.insert("models".into(), Value::Array(vec![]));
+        }
+        Value::String(models) if models.is_empty() => {
+            normalized_adapter.insert("models".into(), Value::Array(vec![]));
+        }
+        Value::Object(_) | Value::String(_) | Value::Null | Value::Number(_) | Value::Bool(_) => {
+            return Err("TypeError");
+        }
+    }
+    Ok(Some(normalized))
+}
+
+fn match_error_class(error: &crate::matching::MatchError) -> &'static str {
+    match error {
+        crate::matching::MatchError::Catalog("adapter") => "AttributeError",
+        crate::matching::MatchError::Catalog("model list")
+        | crate::matching::MatchError::Catalog("model entry") => "TypeError",
+        crate::matching::MatchError::Catalog("model id") => "KeyError",
+        crate::matching::MatchError::Catalog("model string list")
+        | crate::matching::MatchError::Catalog("effort suffix map") => "AttributeError",
+        crate::matching::MatchError::Catalog("effort suffix") => "TypeError",
+        crate::matching::MatchError::Catalog(_) => "ValueError",
+        crate::matching::MatchError::NumberOutOfRange => "ValueError",
+        crate::matching::MatchError::Regex(_) => "error",
+    }
+}
+
+fn report_registered_model_warning(
+    host: &dyn RouterHost,
+    adapter: &str,
+    model: &str,
+    warnings: Option<&mut Vec<String>>,
+    kind: &str,
+) {
+    let warning = format!("catalogue malformed for {adapter}/{model}; using raw model ({kind})");
+    if let Some(target) = warnings {
+        target.push(warning);
+    } else {
+        host.warning(&warning);
+    }
+}
+
+fn catalog_for_policy(host: &dyn RouterHost) -> Option<Value> {
+    host.load_catalog(&host.product_root()).ok()
+}
+
+fn configured_traits(host: &dyn RouterHost, adapter: &str, model: &str) -> Vec<String> {
+    let Some(catalogue) = catalog_for_policy(host) else {
+        return vec![];
+    };
+    let cached = BTreeMap::new();
+    let resolver = crate::matching::ModelCatalog {
+        catalog: &catalogue,
+        cached: &cached,
+    };
+    crate::pools::model_traits(&resolver, adapter, model).unwrap_or_default()
+}
+
+fn registered_training(
+    host: &dyn RouterHost,
+    adapter: &str,
+    model: &str,
+    meta: &OrderedObject,
+) -> Option<bool> {
+    if let Some(OrderedValue::Bool(value)) = meta.get("trains_on_prompts") {
+        return Some(*value);
+    }
+    let catalogue = catalog_for_policy(host)?;
+    let cached = BTreeMap::new();
+    let resolver = crate::matching::ModelCatalog {
+        catalog: &catalogue,
+        cached: &cached,
+    };
+    let registered = resolver.registered_match(adapter, model).ok()?.0?;
+    registered.get("trains_on_prompts").and_then(Value::as_bool)
+}
+
+fn py_equal_zero(value: Option<&OrderedValue>) -> bool {
+    match value {
+        Some(OrderedValue::Bool(false)) => true,
+        Some(OrderedValue::Number(number)) if number.is_f64() => number.as_f64() == Some(0.0),
+        Some(OrderedValue::Number(number)) => {
+            number.as_i64() == Some(0) || number.as_u64() == Some(0)
+        }
+        _ => false,
+    }
+}
+
+fn is_free_model(model: &str, meta: &OrderedObject) -> bool {
+    py_equal_zero(meta.get("plan_cap_usd"))
+        || model.ends_with("-free")
+        || model.ends_with(":free")
+        || model.starts_with("opencode/")
+}
+
+/// Why a route may retain or train on prompts, or `None` when safe.
+pub fn disclosure_risk(
+    host: &dyn RouterHost,
+    adapter: &str,
+    model: &str,
+    meta: Option<&OrderedObject>,
+) -> Option<&'static str> {
+    let empty = OrderedObject::default();
+    let meta = meta.unwrap_or(&empty);
+    let free = is_free_model(model, meta);
+    if meta.get("trains_on_prompts") == Some(&OrderedValue::Bool(true)) {
+        return Some("trains on prompts");
+    }
+    if configured_traits(host, adapter, model)
+        .iter()
+        .any(|value| value == "trains-on-prompts")
+    {
+        return Some(if free {
+            "is a free tier that may train on prompts"
+        } else {
+            "may train on prompts (model_traits)"
+        });
+    }
+    if registered_training(host, adapter, model, meta) == Some(false) {
+        return None;
+    }
+    free.then_some("is a free tier that may train on prompts")
+}
+
+/// Ordered safe members of an alias, excluding the current and cooling models.
+pub fn confidential_alternatives(
+    runtime: &ExecutionRouting<'_>,
+    adapter: &str,
+    model: &str,
+    alias: Option<&str>,
+    catalogue: Option<&Value>,
+) -> Result<Vec<String>, ExecutionRoutingError> {
+    let catalogue = catalogue
+        .cloned()
+        .or_else(|| catalog_for_policy(runtime.host));
+    let Some(catalogue) = catalogue else {
+        return Ok(vec![]);
+    };
+    let entry = catalogue
+        .get("adapters")
+        .and_then(|value| value.get(adapter));
+    let mut aliases = entry.and_then(|value| value.get("aliases"));
+    let aliases_empty = aliases.is_none_or(|value| !provenant_core::py::python_truth(value));
+    if aliases_empty {
+        if let Some(family) = entry
+            .and_then(|value| value.get("fixed_model_family"))
+            .and_then(Value::as_str)
+        {
+            aliases = catalogue
+                .get("families")
+                .and_then(|value| value.get(family))
+                .and_then(|value| value.get("aliases"));
+        }
+    }
+    let alias = alias.filter(|value| !value.is_empty()).unwrap_or("senior");
+    let Some(members) = aliases
+        .and_then(|value| value.get(alias))
+        .and_then(Value::as_array)
+    else {
+        return Ok(vec![]);
+    };
+    let mut answer = Vec::new();
+    for member in members.iter().filter_map(Value::as_str) {
+        if member == model || disclosure_risk(runtime.host, adapter, member, None).is_some() {
+            continue;
+        }
+        if runtime
+            .cooling(adapter, member, None, None, false)?
+            .is_some()
+        {
+            continue;
+        }
+        answer.push(member.to_owned());
+    }
+    Ok(answer)
+}
+
+fn adapter_name(entry: &Value) -> Option<&str> {
+    let fields = entry.as_object()?;
+    fields
+        .get("name")
+        .or_else(|| fields.get("adapter"))
+        .or_else(|| fields.get("id"))
+        .and_then(Value::as_str)
+}
+
+fn find_adapter<'a>(catalogue: &'a Value, name: &str) -> Option<&'a Value> {
+    match catalogue.get("adapters")? {
+        Value::Object(adapters) => adapters.get(name),
+        // Python's `{item.get("name", item.get("adapter", item.get("id"))): item}`
+        // keeps the final matching dictionary and ignores non-dictionary entries.
+        Value::Array(adapters) => adapters
+            .iter()
+            .rev()
+            .find(|entry| adapter_name(entry) == Some(name)),
+        _ => None,
+    }
+}
+
+fn route_values(value: Option<&OrderedValue>) -> Result<Vec<OrderedValue>, ExecutionRoutingError> {
+    if value.is_some_and(|value| !crate::pending::truthy(value)) {
+        return Ok(vec![]);
+    }
+    match value {
+        None => Ok(vec![]),
+        Some(OrderedValue::Array(values)) => Ok(values.clone()),
+        Some(OrderedValue::Object(object)) => Ok(object
+            .0
+            .iter()
+            .map(|(key, _)| OrderedValue::String(key.clone()))
+            .collect()),
+        Some(OrderedValue::String(text)) => Ok(text
+            .chars()
+            .map(|ch| OrderedValue::String(ch.to_string()))
+            .collect()),
+        Some(_) => Err(ExecutionRoutingError::InvalidPlan(
+            "route candidates must be iterable",
+        )),
+    }
+}
+
+fn route_json_values(value: Option<&Value>) -> Result<Vec<OrderedValue>, ExecutionRoutingError> {
+    let Some(value) = value else {
+        return Ok(vec![]);
+    };
+    route_values(Some(&OrderedValue::from(value.clone())))
+}
+
+fn catalog_models(catalogue: &Value, model: &str) -> OrderedObject {
+    match catalogue.get("models") {
+        Some(Value::Object(models)) => models
+            .get(model)
+            .and_then(Value::as_object)
+            .map(|value| {
+                OrderedObject(
+                    value
+                        .iter()
+                        .map(|(key, value)| (key.clone(), OrderedValue::from(value.clone())))
+                        .collect(),
+                )
+            })
+            .unwrap_or_default(),
+        Some(Value::Array(models)) => models
+            .iter()
+            .rfind(|entry| entry.get("id").and_then(Value::as_str) == Some(model))
+            .and_then(Value::as_object)
+            .map(|value| {
+                OrderedObject(
+                    value
+                        .iter()
+                        .map(|(key, value)| (key.clone(), OrderedValue::from(value.clone())))
+                        .collect(),
+                )
+            })
+            .unwrap_or_default(),
+        _ => OrderedObject::default(),
+    }
+}
+
+/// Return ordered retry route requests with Python's policy and truthiness rules.
+pub fn candidates(
+    runtime: &ExecutionRouting<'_>,
+    plan: &ExecutionRoutePlan,
+    policy: Option<&OrderedValue>,
+    catalogue: Option<&Value>,
+    confidential: bool,
+) -> Result<Vec<ExecutionCandidate>, ExecutionRoutingError> {
+    let mut policy = policy.map(validate_policy).transpose()?;
+    if policy.is_none() {
+        policy = Some(
+            if plan
+                .requested_model
+                .as_ref()
+                .is_some_and(crate::pending::truthy)
+            {
+                FallbackPolicy::Disabled
+            } else {
+                FallbackPolicy::Enabled
+            },
+        );
+    }
+    let policy = policy.unwrap_or_default();
+    if policy == FallbackPolicy::Disabled {
+        return Ok(vec![]);
+    }
+    let catalogue = catalogue.cloned().unwrap_or_else(|| snapshot(runtime.host));
+    let route = &plan.route;
+    let alias_value = route
+        .get("alias")
+        .filter(|value| crate::pending::truthy(value));
+    let alias = alias_value.and_then(OrderedValue::as_str);
+    let adapter_alias = if alias_value.is_some() {
+        alias
+    } else {
+        Some("senior")
+    };
+    let explicit = matches!(policy, FallbackPolicy::Explicit(_));
+    let mut raw = match &policy {
+        FallbackPolicy::Explicit(items) => items.clone(),
+        _ if route.get("fallback_candidates").is_some() => match route.get("fallback_candidates") {
+            Some(OrderedValue::Array(items)) => items.clone(),
+            _ => vec![],
+        },
+        _ => {
+            let mut items = route_values(route.get("candidates"))?;
+            if let Some(value) = route
+                .get("fallback_model")
+                .filter(|value| crate::pending::truthy(value))
+            {
+                items.push(value.clone());
+            }
+            let adapter_config = find_adapter(&catalogue, &plan.adapter);
+            let alias_items = adapter_alias.and_then(|alias| {
+                adapter_config
+                    .and_then(|entry| entry.get("aliases"))
+                    .and_then(|aliases| aliases.get(alias))
+            });
+            items.extend(route_json_values(alias_items)?);
+            if adapter_policy(&plan.adapter).is_some_and(|policy| policy.add_opencode_candidates())
+            {
+                if let Some(cross) = find_adapter(&catalogue, "opencode") {
+                    let aliases = cross.get("aliases");
+                    let cross_members = alias
+                        .and_then(|alias| aliases.and_then(|value| value.get(alias)))
+                        .filter(|value| crate::pending::value_truthy(value))
+                        .or_else(|| {
+                            aliases
+                                .and_then(|value| value.get("senior"))
+                                .filter(|value| crate::pending::value_truthy(value))
+                        });
+                    let members = match cross_members {
+                        Some(value) => route_values(Some(&OrderedValue::from(value.clone())))?,
+                        None => cross
+                            .get("default_model")
+                            .filter(|value| !value.is_null())
+                            .map(|value| vec![OrderedValue::from(value.clone())])
+                            .unwrap_or_default(),
+                    };
+                    for member in members.into_iter().filter(crate::pending::truthy) {
+                        let mut object = OrderedObject::default();
+                        object.insert("adapter".into(), OrderedValue::String("opencode".into()));
+                        object.insert("model".into(), member);
+                        items.push(OrderedValue::Object(object));
+                    }
+                }
+            }
+            items
+        }
+    };
+    let mut seen = vec![(plan.adapter.as_str().to_owned(), plan.model.clone())];
+    let mut answer = Vec::new();
+    for value in raw.drain(..) {
+        let candidate = match parse_candidate(&value, &plan.adapter) {
+            Ok(candidate) => candidate,
+            Err(error) if explicit => return Err(error.into()),
+            Err(_) => continue,
+        };
+        let adapter = candidate.adapter().to_owned();
+        let model = candidate.model().to_owned();
+        if model.is_empty()
+            || adapter_policy(&adapter).is_none()
+            || seen.iter().any(|(a, m)| a == &adapter && m == &model)
+        {
+            continue;
+        }
+        seen.push((adapter.clone(), model.clone()));
+        let meta = catalog_models(&catalogue, &model);
+        let training = candidate
+            .fields
+            .get("trains_on_prompts")
+            .or_else(|| meta.get("trains_on_prompts"));
+        let mut merged = meta.clone();
+        for (key, value) in &candidate.fields.0 {
+            merged.insert(key.clone(), value.clone());
+        }
+        let free = py_equal_zero(
+            candidate
+                .fields
+                .get("plan_cap_usd")
+                .or_else(|| meta.get("plan_cap_usd")),
+        ) || model.ends_with("-free")
+            || model.ends_with(":free")
+            || model.starts_with("opencode/");
+        if confidential {
+            if disclosure_risk(runtime.host, &adapter, &model, Some(&merged)).is_some() {
+                continue;
+            }
+        } else if !explicit
+            && policy != FallbackPolicy::Any
+            && (training == Some(&OrderedValue::Bool(true))
+                || (free
+                    && registered_training(runtime.host, &adapter, &model, &merged) != Some(false)))
+        {
+            continue;
+        }
+        let effort = candidate
+            .fields
+            .get("effort_applied")
+            .or_else(|| candidate.fields.get("effort"))
+            .or(plan.effort.as_ref())
+            .cloned()
+            .unwrap_or(OrderedValue::Null);
+        answer.push(ExecutionCandidate {
+            adapter,
+            model,
+            effort,
+        });
+    }
+    Ok(answer)
+}
+
+impl ExecutionRouting<'_> {
+    pub fn claude_account_needs_reselection(&self, account: Option<&str>) -> bool {
+        let (Some(quota), Some(account)) = (self.quota, account) else {
+            return false;
+        };
+        quota
+            .claude_account_needs_reselection(account, self.now)
+            .unwrap_or(true)
+    }
+
+    pub fn reselect_claude_account(&self) -> Option<String> {
+        self.quota?.reselect_claude_account(self.now).ok().flatten()
+    }
+
+    pub fn pinned_account_warning(&self, adapter: &str, account: Option<&str>) -> Option<String> {
+        let quota = self.quota?;
+        let account = account?;
+        if !quota.label_is_valid(account) {
+            return None;
+        }
+        let state = quota
+            .pinned_account_state(adapter, account)
+            .ok()
+            .flatten()?;
+        if state == "credit_only" || state == "exhausted" {
+            Some(format!(
+                "account {account} is out of quota ({state}): launching because it was pinned explicitly"
+            ))
+        } else {
+            None
+        }
+    }
+
+
 }
 
 #[cfg(test)]
@@ -226,8 +1037,11 @@ mod tests {
             r#""\u001c\u001f""#,
         ];
         let Some(expected): Option<Vec<Vec<String>>> = crate::oracle::python(
-            "import json,pathlib,sys; sys.path.insert(0,str(pathlib.Path('skills/orchestrate/scripts').resolve())); import exec_routing as m\nanswer=[]\nfor wire in json.load(sys.stdin):\n row=[]\n for fn in (m.validate_policy,lambda value:m.parse_candidate(value,'codex')):\n  try: row.append(json.dumps(fn(json.loads(wire)),ensure_ascii=False,separators=(',',':')))\n  except ValueError as error: row.append('error:'+str(error))\n answer.append(row)\nprint(json.dumps(answer))", &serde_json::json!(wires)
-        ) else { return; };
+            "import json,pathlib,sys; sys.path.insert(0,str(pathlib.Path('skills/orchestrate/scripts').resolve())); import exec_routing as m\nanswer=[]\nfor wire in json.load(sys.stdin):\n row=[]\n for fn in (m.validate_policy,lambda value:m.parse_candidate(value,'codex')):\n  try: row.append(json.dumps(fn(json.loads(wire)),ensure_ascii=False,separators=(',',':')))\n  except ValueError as error: row.append('error:'+str(error))\n answer.append(row)\nprint(json.dumps(answer))",
+            &serde_json::json!(wires),
+        ) else {
+            return;
+        };
         let actual: Vec<Vec<String>> = wires
             .iter()
             .map(|wire| {
@@ -290,7 +1104,12 @@ mod tests {
     fn execution_interfaces_match_plan_inputs_and_route_request_outputs() {
         let wire = r#"{"requested_model":"gpt-6.1-sol","route":{"alias":"senior","fallback_candidates":["claude/sonnet"]},"adapter":"codex","model":"gpt-6.1-sol","effort":"high","task":"work"}"#;
         let plan: super::ExecutionRoutePlan = crate::pending::from_json(wire).unwrap();
-        assert_eq!(plan.requested_model.as_deref(), Some("gpt-6.1-sol"));
+        assert_eq!(
+            plan.requested_model
+                .as_ref()
+                .and_then(crate::ordered_json::OrderedValue::as_str),
+            Some("gpt-6.1-sol")
+        );
         assert_eq!(
             plan.route
                 .get("alias")
