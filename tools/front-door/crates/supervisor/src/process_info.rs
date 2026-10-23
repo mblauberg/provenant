@@ -961,27 +961,38 @@ pub fn start_time(pid: i32) -> Result<Option<String>, ProcessError> {
         .or_else(|| ps_start_time(pid, true)))
 }
 
+/// Decode observed /proc directory names, preserving iteration errors.
+pub fn linux_census_pids(
+    entries: impl IntoIterator<Item = std::io::Result<OsString>>,
+) -> Result<Vec<i32>, ProcessError> {
+    let mut pids = Vec::new();
+    for entry in entries {
+        let name = entry.map_err(read_error(std::path::Path::new("/proc")))?;
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        if !name.is_empty()
+            && name
+                .chars()
+                .all(|ch| crate::pending::decimal_digit(ch).is_some())
+        {
+            pids.push(pid_field(name, "pid")?);
+        }
+    }
+    Ok(pids)
+}
+
 pub fn processes() -> Result<Vec<ProcessInfo>, ProcessError> {
     #[cfg(target_os = "macos")]
     let candidates = crate::sys::process::darwin_pids()
         .ok()
-        .map(Ok::<_, ProcessParseError>);
+        .map(Ok::<_, ProcessError>);
     #[cfg(target_os = "linux")]
     let candidates = std::fs::read_dir("/proc").ok().map(|entries| {
-        entries
-            .flatten()
-            .filter_map(|entry| entry.file_name().into_string().ok())
-            .filter(|name| {
-                !name.is_empty()
-                    && name
-                        .chars()
-                        .all(|ch| crate::pending::decimal_digit(ch).is_some())
-            })
-            .map(|name| pid_field(&name, "pid"))
-            .collect::<Result<Vec<i32>, _>>()
+        linux_census_pids(entries.map(|entry| entry.map(|entry| entry.file_name())))
     });
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-    let candidates: Option<Result<Vec<i32>, ProcessParseError>> = None;
+    let candidates: Option<Result<Vec<i32>, ProcessError>> = None;
     match candidates {
         Some(pids) => {
             let mut rows = Vec::new();
@@ -1041,6 +1052,18 @@ pub fn ps_processes() -> Result<Vec<ProcessInfo>, ProcessError> {
 mod process_tests {
     use super::*;
     use std::path::Path;
+
+    #[test]
+    fn linux_census_preserves_directory_iteration_failure() {
+        let result = linux_census_pids([
+            Ok("42".into()),
+            Err(std::io::Error::from_raw_os_error(crate::sys::errno::EACCES)),
+        ]);
+        assert!(
+            result.is_err(),
+            "an incomplete census must not look successful"
+        );
+    }
 
     #[test]
     fn linux_fixture_computes_cpu_rss_arguments_and_clock_fields() {
