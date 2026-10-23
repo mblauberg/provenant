@@ -11,9 +11,11 @@ import pytest
 
 from tests.support.modules import load_script
 
+from tests.support.front_door import front_door_binary
+
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts" / "configure-fabric-mcp.py"
-PROVENANT_TEMPLATE = ROOT / "scripts" / "provenant.template"
+PROVENANT_BINARY = front_door_binary()
 
 
 @pytest.fixture(autouse=True)
@@ -27,7 +29,7 @@ def stable_shim(tmp_path: Path) -> Path:
     shim = tmp_path / "bin/provenant"
     shim.parent.mkdir(exist_ok=True)
     if not shim.exists():
-        shutil.copy2(PROVENANT_TEMPLATE, shim)
+        shutil.copy2(PROVENANT_BINARY, shim)
         shim.chmod(0o755)
     return shim
 

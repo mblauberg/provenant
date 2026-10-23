@@ -1,35 +1,44 @@
 # Front door runbook
 
 How the `provenant` command is built, installed, checked and rolled back. The
-decision is [ADR 0027](../adr/0027-rust-front-door.md).
+decision is [ADR 0027](../adr/0027-rust-front-door.md), amended 2026-10-23.
 
-## Choose what gets installed
+## Install
 
-`scripts/install-harness` reads `PROVENANT_FRONT_DOOR`:
+`scripts/install-harness --platform <platform>` builds and installs the Rust
+binary. Cargo uses `CARGO_TARGET_DIR`, defaulting to
+`~/.cache/provenant/cargo-target`, so subsequent installs build incrementally.
+The installer prints `front-door=rust`. `PROVENANT_FRONT_DOOR` may be unset or
+`rust`; other values exit 3 before installation.
 
-| Value | Effect |
-|---|---|
-| `auto` (default) | Build the Rust binary if the crate and `cargo` are present and the smoke run passes; otherwise install the Python stub and say why on stderr. |
-| `rust` | Require the binary. Exit 3 if it cannot be produced. |
-| `python` | Install `scripts/provenant.template`. |
+Without `cargo` (on `PATH` or in `~/.cargo/bin`), installation exits 3 and prints:
 
-Any other value exits 3 before anything changes. The installer prints
-`front-door=rust` or `front-door=python` after the command line.
-
-## Roll back to the Python stub
-
-```sh
-PROVENANT_FRONT_DOOR=python scripts/install-harness
+```text
+fix: curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 ```
 
-The installer treats the old binary as a managed file (it carries the marker
-line) and replaces it atomically, mode 0755.
+The Python front door has been deleted. Rollback is a git revert of the slice,
+then a reinstall from the reverted checkout.
+
+## Run from a checkout
+
+Use the installed binary from the agent's checkout:
+
+```sh
+provenant fabric dispatch --help
+```
+
+The binary resolves the product checkout through `AGENT_FABRIC_PRODUCT_ROOT`,
+the instance's product-root pointer, or `AGENTS_HOME`, in that order. It keeps
+the caller's working directory, so Fabric resolves the caller's project,
+including a registered linked worktree, as before. `provenant root` reports
+the selected product checkout.
 
 ## Rebuild after a source change
 
 Changing anything under `tools/front-door/` makes the installed binary stale.
 `scripts/check-provenant-install.py` fails with "built from different sources".
-Re-run `scripts/install-harness` (with `PROVENANT_FRONT_DOOR=rust` to insist).
+Re-run `scripts/install-harness --platform <platform>`.
 
 ## Supply a prebuilt binary
 
@@ -45,7 +54,7 @@ Copy `target/release/provenant` to the host as an absolute path, then on that
 host:
 
 ```sh
-PROVENANT_FRONT_DOOR=rust PROVENANT_FRONT_DOOR_BINARY=/abs/path/provenant scripts/install-harness
+PROVENANT_FRONT_DOOR_BINARY=/abs/path/provenant scripts/install-harness --platform <platform>
 ```
 
 The installer accepts it only if it is a regular file (not a symlink), embeds
@@ -53,25 +62,17 @@ the digest of the checkout it is installing from, and prints usage from
 `provenant help`. The workshop host is not touched by agents; the user runs
 these steps there.
 
-## Run the parity suite
+## Verify
+
+The crate owns routing, resolution and exec coverage. The stale-checkout
+advisory remains covered against the binary in `tests/test_stale.py`:
 
 ```sh
-.venv/bin/python -m pytest tests/front_door_parity -q                 # Python reference
-PROVENANT_PARITY_IMPL=rust .venv/bin/python -m pytest tests/front_door_parity -q
+cargo test --manifest-path tools/front-door/Cargo.toml
+TMPDIR=/tmp .venv/bin/python -m pytest tests/test_stale.py -q
 ```
 
-`PROVENANT_FRONT_DOOR_BIN` overrides the binary path
-(default `tools/front-door/target/release/provenant`).
-`PROVENANT_PARITY_REFERENCE_ROOT` names a tree whose Python dispatcher is the
-byte reference for help text. All command cases, including `lint` and `lease`,
-run unconditionally. Help and usage must match that reference byte for byte.
-
-## Compare start-up time
-
-```sh
-.venv/bin/python tests/front_door_parity/bench_front_door.py --impl python --out python.json
-.venv/bin/python tests/front_door_parity/bench_front_door.py --impl rust --out rust.json
-.venv/bin/python tests/front_door_parity/bench_front_door.py --compare python.json rust.json
-```
-
-This reports medians; it is not a pass or fail gate.
+Python integration tests build through the existing front-door build helper
+unless `PROVENANT_FRONT_DOOR_BIN` names a binary to use. CI supplies its stamped
+release build. The Python parity oracle and its benchmark have been deleted;
+git history retains them.

@@ -2130,7 +2130,7 @@ def test_external_task_cancel_reaps_only_owned_provider_group(tmp_path: Path) ->
     assert provider_pid_path.exists()
 
     cancelled = subprocess.run(
-        [str(ROOT / "scripts/provenant"), "run", "cancel", "--run-dir", str(run_dir),
+        [str(ROOT / "skills/orchestrate/scripts/run_controls.py"), "cancel", "--run-dir", str(run_dir),
          "--task-id", "cancel-me", "--attempt-id", "attempt-001", "--wait-seconds", "5"],
         cwd=tmp_path, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
     )

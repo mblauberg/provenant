@@ -19,11 +19,13 @@ from tests.support.fake_cli import fake_bin, fake_codex
 from tests.support.modules import load_script
 from tests.support.runs import file_digest, make_run, write_attempt
 
+from tests.support.front_door import front_door_binary
+
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "skills/orchestrate/scripts/run_controls.py"
 FINALIZE = ROOT / "skills/orchestrate/scripts/run_dir_finalize.py"
 INIT = ROOT / "skills/orchestrate/scripts/run_dir_init.sh"
-CLI = ROOT / "scripts/provenant"
+CLI = front_door_binary()
 
 
 def test_retained_legacy_success_is_valid_and_cannot_be_retried(tmp_path: Path) -> None:

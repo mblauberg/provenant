@@ -21,6 +21,8 @@ import quota_display
 from tests.support.quota import NOW, configure, quota, snapshot as build_snapshot, window
 
 
+from tests.support.front_door import front_door_binary
+
 ROOT = Path(__file__).resolve().parents[1]
 WEEK = 7 * 24 * 60
 TOKEN = 'SECRET-TOKEN-VALUE'
@@ -1188,7 +1190,7 @@ def test_quota_cli_reports_config_accounts_from_cache_without_fetching(tmp_path)
     env = {**os.environ, 'HOME': str(home), 'AGENT_FABRIC_STATE_ROOT': str(state),
            'AGENT_FABRIC_INSTANCE_ROOT': str(home / '.agents'), 'CODEX_HOME': str(home / '.codex'),
            'CLAUDE_CONFIG_DIR': str(home / '.claude'), 'PATH': os.pathsep.join(tools), 'PROVENANT_QUOTA': '0'}
-    result = subprocess.run([str(ROOT / 'scripts/provenant'), 'quota', '--json'], env=env, capture_output=True, text=True, check=False)
+    result = subprocess.run([str(front_door_binary()), 'quota', '--json'], env=env, capture_output=True, text=True, check=False)
     assert result.returncode == 0, result.stderr
     report = json.loads(result.stdout)
     assert report['schema'] == 'provenant.quota.report.v1' and report['enabled'] is False
@@ -1198,7 +1200,7 @@ def test_quota_cli_reports_config_accounts_from_cache_without_fetching(tmp_path)
     assert (codex['plan'], codex['host'], codex['state']) == ('pro', 'studio', 'on_pace')
     assert rows[('claude', 'max-b')]['status'] == 'disabled' and rows[('claude', 'max-b')]['plan'] == 'Max'
     assert rows[('agy', 'work')]['status'] == 'disabled'
-    table = subprocess.run([str(ROOT / 'scripts/provenant'), 'quota'], env=env, capture_output=True, text=True, check=False)
+    table = subprocess.run([str(front_door_binary()), 'quota'], env=env, capture_output=True, text=True, check=False)
     assert table.returncode == 0 and 'codex' in table.stdout and 'max-b' in table.stdout
 
 
@@ -1997,7 +1999,7 @@ def test_uncached_multiple_claude_accounts_match_the_dispatch_help(quota, readin
     assert quota.choose_claude_account(values, NOW) == 'default'
     values.pop('default')
     assert quota.choose_claude_account(values, NOW) == 'max'
-    help_text = subprocess.check_output([str(ROOT / 'scripts/provenant'), 'help', 'dispatch'], text=True)
+    help_text = subprocess.check_output([str(front_door_binary()), 'help', 'dispatch'], text=True)
     assert 'When all eligible accounts lack usable cached quota,' in help_text
     assert 'labels sort alphabetically.' in help_text
 

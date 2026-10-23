@@ -6,6 +6,8 @@ import sqlite3
 import pytest
 
 
+from tests.support.front_door import front_door_binary
+
 def test_utility_retries_then_escalates_without_downgrading_privacy(tmp_path, monkeypatch):
     import utility
     monkeypatch.setenv('AGENT_FABRIC_STATE_ROOT', str(tmp_path / 'state'))
@@ -61,12 +63,12 @@ def test_cli_plain_code_contracts_and_help(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv('AGENT_FABRIC_STATE_ROOT', str(tmp_path / 'state'))
     items = tmp_path / 'items.txt'
     items.write_text('yes\nno\n')
-    done = subprocess.run([sys.executable, str(root / 'scripts/provenant'), 'classify', '--labels', 'yes,no', str(items)],
+    done = subprocess.run([str(front_door_binary()), 'classify', '--labels', 'yes,no', str(items)],
                           capture_output=True, text=True, env=os.environ)
     assert done.returncode == 0, done.stderr
     assert json.loads(done.stdout) == ['yes', 'no']
     for verb in ('digest', 'classify', 'extract'):
-        done = subprocess.run([sys.executable, str(root / 'scripts/provenant'), 'help', verb], capture_output=True, text=True)
+        done = subprocess.run([str(front_door_binary()), 'help', verb], capture_output=True, text=True)
         assert done.returncode == 0
         assert done.stdout == (root / f'tools/front-door/src/help/{verb}.txt').read_text()
 

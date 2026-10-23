@@ -790,7 +790,7 @@ def test_external_batch_marker_cancels_active_child_and_skips_queued_provider(tm
     assert provider_pid.exists()
 
     cancelled = subprocess.run([
-        str(ROOT / 'scripts/provenant'), 'run', 'cancel', '--run-dir', str(run_dir),
+        str(ROOT / 'skills/orchestrate/scripts/run_controls.py'), 'cancel', '--run-dir', str(run_dir),
         '--batch-id', 'batch-001', '--wait-seconds', '5',
     ], cwd=tmp_path, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     worker.join(8)
