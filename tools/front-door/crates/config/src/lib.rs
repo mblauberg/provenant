@@ -5,6 +5,7 @@ pub mod codex;
 pub mod command;
 
 pub mod workflows;
+pub mod instance;
 mod pending;
 
 #[derive(Debug, thiserror::Error)]
