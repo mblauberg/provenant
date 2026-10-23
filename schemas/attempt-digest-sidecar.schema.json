@@ -3,18 +3,19 @@
   "$id": "https://provenant.dev/schemas/attempt-digest-sidecar.schema.json",
   "title": "Attempt Digest Sidecar",
   "type": "object",
-  "required": [
-    "digest",
-    "filename"
-  ],
   "properties": {
     "digest": {
       "type": "string",
       "pattern": "^sha256:[0-9a-f]{64}$"
     },
     "filename": {
+      "type": "string",
       "const": "attempt.json"
     }
   },
+  "required": [
+    "digest",
+    "filename"
+  ],
   "additionalProperties": false
 }

@@ -3,23 +3,44 @@
   "$id": "https://provenant.dev/schemas/worker-terminal-envelope.schema.json",
   "title": "Worker Terminal Envelope",
   "type": "object",
+  "properties": {
+    "schema_version": {
+      "const": 1,
+      "type": "integer"
+    },
+    "record_type": {
+      "type": "string",
+      "const": "provenant-worker-terminal"
+    },
+    "classification": {
+      "type": "string",
+      "const": "question"
+    },
+    "question": {
+      "type": "object",
+      "properties": {
+        "code": {
+          "type": "string",
+          "const": "needs_input"
+        },
+        "prompt": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        }
+      },
+      "required": [
+        "code",
+        "prompt"
+      ],
+      "additionalProperties": false
+    }
+  },
   "required": [
     "schema_version",
     "record_type",
     "classification",
     "question"
   ],
-  "properties": {
-    "schema_version": {
-      "const": 1
-    },
-    "record_type": {
-      "const": "provenant-worker-terminal"
-    },
-    "classification": {
-      "const": "question"
-    },
-    "question": {}
-  },
-  "additionalProperties": true
+  "additionalProperties": false
 }

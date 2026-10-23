@@ -3,6 +3,44 @@
   "$id": "https://provenant.dev/schemas/manifest-row.schema.json",
   "title": "Manifest Row",
   "type": "object",
+  "properties": {
+    "id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "path": {
+      "type": "string",
+      "minLength": 1
+    },
+    "topic": {
+      "type": "string",
+      "minLength": 1
+    },
+    "produced_by": {
+      "type": "string",
+      "minLength": 1
+    },
+    "date": {
+      "type": "string",
+      "format": "date"
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "draft",
+        "verified",
+        "superseded",
+        "retired"
+      ]
+    },
+    "retention": {
+      "type": "string",
+      "minLength": 1
+    },
+    "supersedes": {
+      "type": "string"
+    }
+  },
   "required": [
     "id",
     "path",
@@ -13,22 +51,5 @@
     "retention",
     "supersedes"
   ],
-  "properties": {
-    "id": {},
-    "path": {},
-    "topic": {},
-    "produced_by": {},
-    "date": {},
-    "status": {
-      "enum": [
-        "draft",
-        "verified",
-        "superseded",
-        "retired"
-      ]
-    },
-    "retention": {},
-    "supersedes": {}
-  },
   "additionalProperties": false
 }

@@ -2,8 +2,11 @@
 
 These files are language independent JSON Schema Draft 2020-12 contracts.
 `test_record_schemas.py` validates the checked-in config examples and records
-written by hermetic dispatch, batch, quota, and telemetry flows. Test cases are
-the actual JSON values paired with the schema selected by the record path or
+written by isolated dispatch, batch, watchdog, quota, and telemetry flows.
+Dispatch cases cover success, provider failure, timeout, quota exhaustion and
+questions. Each subprocess has a fresh home, instance root, state root and
+Codex home. Telemetry checks validate every row in primary-key order. Test
+cases are the actual JSON values paired with the schema selected by the record path or
 its `schema` / `record_type` discriminator. Markdown manifest rows and the
 plain text digest sidecar are converted to their documented column values
 before validation.
@@ -21,7 +24,7 @@ before validation.
 | `manifest-row.schema.json` | One eight-column row in `MANIFEST.md`; `manifest_rows` and `append_manifest_to` in `run_records.py`, plus batch indexing in `batch_run.py`. |
 | `dispatch-status.schema.json` | `dispatch-status.json`; initial write in `runtime/fabric/src/execution.ts`, terminal update in `dispatch_run.py`. |
 | `dispatch-owner.schema.json` | `dispatch-owner.json`; `record_owner` and `ensure_nested_owner` in `run_lineage.py`. |
-| `run-receipt.schema.json` | `RUN_RECEIPT.json`; initial writer `run_dir_init.sh`, close/update writers in `dispatch_run.py` and `run_dir_finalize.py`. |
+| `run-receipt.schema.json` | `RUN_RECEIPT.json`; initial writer `run_dir_init.sh`, review/pair/pane updates in `review_plan.py` and `run_dir_finalize.py`, plus dispatch close updates. |
 | `supervisor-state.schema.json` | Future `supervisor.json` state record, as specified in `docs/specs/harness/rust-supervisor.md`. |
 | `supervisor-exit.schema.json` | Future `supervisor.exit.json` terminal record (`provenant.lane.exit.v1`), as specified in `rust-supervisor.md`. |
 | `launch-spec.schema.json` | Future `launch.json` record of the `provenant.lane.launch.v1` launch spec, as specified in `rust-supervisor.md`. |
@@ -35,33 +38,75 @@ before validation.
 | `telemetry-quota-event-row.schema.json` | `quota_events` ledger rows; quota transition ingestion in `scripts/telemetry.py`. |
 | `model-routing.schema.json` | `config/model-routing.json`; read by `scripts/model_route.py` and `scripts/telemetry_costs.py`. |
 | `model-preferences.schema.json` | `config/model-preferences.json`; read and updated by `scripts/model_route_preferences.py`. |
+| `graph-reservation.schema.json` | Git worktree reservation; `reserve` in `runtime/fabric/src/graph/store.ts`. |
+| `graph-node-receipt.schema.json` | Graph node attempt `receipt.json`; `#receipt` in `runtime/fabric/src/graph/owner.ts`. |
+| `route-health.schema.json` | Route health store; `write_route_health` in `skills/orchestrate/scripts/fabric_records.py`. |
+| `cooldowns.schema.json` | Cooldown store; `_store_cooldowns` in `fabric_records.py`. |
+| `log-reduction.schema.json` | Optional log reduction receipt; `main` in `log_reducer.py`. |
 | `delivery-profiles.schema.json` | `config/delivery-profiles.json`; loaded by delivery profile handling in `skills/deliver/scripts/delivery_contract.py`. |
 
-## Deliberately open records and gaps
+## Writer disagreements
 
-Dynamic records keep `additionalProperties: true`, including adapter output,
-attempts, routing configuration, and telemetry rows whose values may be null.
-The manifest row's eight columns and the digest-sidecar representation have
-`additionalProperties: false`; those shapes are fixed today. Config maps remain
-open because route names, roles, profiles, and profile extensions are data.
+- Canonical `attempt.json` uses `schema: fabric.attempt.v1`, integer `attempt`,
+  `state` and a question prompt string. The compatibility record uses
+  `schema_version`, `record_type: dispatch-attempt`, `attempt_id` and a structured
+  question. Their status/outcome vocabularies also differ. Canonical `digest`
+  is the rendered lane status/provenance text; file and sidecar digests are
+  `sha256:` values.
+- TypeScript writes the initial `dispatch-status.json`; Python adds terminal
+  fields. Both stages share one schema with optional terminal fields.
+- `record_owner` writes the minimal `dispatch-owner.json` custody identity;
+  TypeScript and nested launchers can add workspace, wall-clock start and log paths.
+- Process identity fields such as `owner_started_at`, `host_started_at` and
+  `pgid_started_at` contain platform `ps lstart` text. Wall-clock timestamps use
+  RFC3339; process identity strings cannot use `format: date-time`.
+- Normal adapter receipts and error receipts with `status`/`fix` have different
+  required fields. Failed outputs may have an empty output digest. The dispatch
+  exception fallback can write `{}`; the contract deliberately rejects it as
+  missing evidence.
+- `fabric.route-health.v1` identifies both the persisted `routes` map and a CLI
+  report with `task_class_routes`. The persisted contract is checked here; the
+  report remains a presentation surface.
+- SQLite nullable columns permit null, including token counts and percentages.
+  JSON records with fixed writer shapes are closed; genuinely extensible maps
+  use typed values.
 
-The two `attempt.json` files intentionally have different contracts: the
-canonical live record uses `schema: fabric.attempt.v1`; the compatibility
-envelope uses `schema_version` and `record_type: dispatch-attempt`. The
-TypeScript launcher creates `dispatch-status.json` before spawn and Python
-adds terminal fields when it closes, so its schema accepts the union. Adapter
-receipts also vary by provider and execution result, so only their shared
-writer fields are required. `dispatch-owner.json` has two current forms:
-`record_owner` emits the minimal custody identity, while a launcher-stamped
-owner can also carry workspace, start, and log-path fields; those additions
-remain optional.
+## Future records and fixtures
 
-The supervisor state, exit, launch, and observer formats are future records
-from the Rust supervisor specification; no current writer exists to produce
-them. The spec does not name fields for `supervisor.json`, so its schema stays
-an open object; it does enumerate the exit and launch fields. `supervisor.lock`
-is an operating-system lock file, not JSON, and has no JSON Schema. Telemetry
-rows live in SQLite rather than JSON files; the test validates ingested and
-quota-produced rows read back from the ledger. The attempt, status,
-adapter-receipt, and owner writer differences above are the writer
-disagreements found in this inventory.
+`launch-spec`, `supervisor-exit`, `observer-record` and `supervisor-state` have
+valid and invalid examples under `fixtures/`, derived from
+[`rust-supervisor.md`](../docs/specs/harness/rust-supervisor.md). They describe
+future Rust records, not records emitted by the current Python flows. The
+launch fixture models the draft persisted form: `env` contains variable names
+only, rather than the values carried by the stdin launch protocol.
+`supervisor-state` is a draft: the spec names an atomically replaced running
+state file but defines no fields, so the contract is a minimal typed object.
+`observer-record` is also a minimal typed draft because the spec describes
+its concepts without fixing field names. The exit contract remains provisional
+where the spec does not freeze the capture representation. `supervisor.lock` is
+an OS lock file and has no JSON Schema.
+
+Writer-derived fixtures cover persisted inventory additions and the launcher
+status shape. Tests pair each `NAME.valid.json` with `NAME.invalid.json`.
+The inventory scans Python, TypeScript and shell source throughout `scripts/`,
+`skills/` and `runtime/fabric/src` in both directions. CLI and report identifiers
+have individual reasons in `NON_RECORD_SCHEMAS` in the test, including the
+transient execution plan; future version IDs are explicitly separated from
+current writers.
+
+## Updating
+
+Run from the repository root:
+
+```sh
+uv run --group test pytest tests/test_record_schemas.py
+```
+
+When a writer changes, edit its schema in `schemas/`, the matching writer map
+and disagreements above, and its flow or valid/invalid fixtures in
+`tests/test_record_schemas.py` and `schemas/fixtures/`. Add new persisted version
+identifiers to a schema and exercise them with a writer flow or paired fixtures.
+For a new CLI/report identifier, add an explicit reason to
+`NON_RECORD_SCHEMAS`. Keep both inventory directions passing. Date and date-time
+formats are enforced by `FormatChecker`; the test dependency group includes
+`rfc3339-validator` for date-time checks.

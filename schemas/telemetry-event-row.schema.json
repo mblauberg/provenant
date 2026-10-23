@@ -3,6 +3,92 @@
   "$id": "https://provenant.dev/schemas/telemetry-event-row.schema.json",
   "title": "Telemetry Event Row",
   "type": "object",
+  "properties": {
+    "event_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "host": {
+      "type": "string",
+      "minLength": 1
+    },
+    "kind": {
+      "type": "string",
+      "minLength": 1
+    },
+    "ts": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "format": "date-time"
+    },
+    "session": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "run_id": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "lane": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "task_id": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "pr": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 0
+    },
+    "provider": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "account": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "model": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "harness_rev": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "attrs": {
+      "type": "string",
+      "minLength": 1
+    },
+    "source_ref": {
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  },
   "required": [
     "event_id",
     "host",
@@ -20,22 +106,5 @@
     "attrs",
     "source_ref"
   ],
-  "properties": {
-    "event_id": {},
-    "host": {},
-    "kind": {},
-    "ts": {},
-    "session": {},
-    "run_id": {},
-    "lane": {},
-    "task_id": {},
-    "pr": {},
-    "provider": {},
-    "account": {},
-    "model": {},
-    "harness_rev": {},
-    "attrs": {},
-    "source_ref": {}
-  },
-  "additionalProperties": true
+  "additionalProperties": false
 }
