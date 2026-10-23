@@ -415,6 +415,69 @@ They form the current baseline; they are not newly discovered port mismatches.
 - Follow-up: move the checked JSON token preflight from `pending` to
   `provenant-records` when its codec lands; use `decode_json` or
   `read_only_guarantee_json` at dynamic input boundaries.
+## RP-130401 - Routing wire shapes, order and numeric precision
+
+- Units: `skills/orchestrate/scripts/exec_routing.py#interface`,
+  `scripts/model_route_catalog.py#unit-01`, and partial pools/preferences/live
+  units; rulebook version 4 (PR #1297).
+- Class: `bug` (fixed by the PR #1304 repair; no live cut-over).
+- Compared revisions: Python source at `6aa0097083aa0e9f2f69d2d60fe9f8023dcae594`,
+  Rust before repair at `914996a4`; repaired Rust and judges are in PR #1304.
+- Reproducer: `cargo test -p provenant-routing -j 2` in `tools/front-door`,
+  macOS arm64, using the configured Python >=3.12 with `-I`. No path-valued
+  fixtures or live providers are involved.
+- Expected / actual: fallback policy null was `"default"`; lists were tagged
+  and normalized; parsed candidates dropped null effort and dictionary order;
+  execution plan fields did not match `candidates()` inputs; family scans used
+  unordered maps; empty models read missing patterns; cache snapshots used
+  caller-supplied age rather than `observed_at`.
+- Evidence: null-policy, empty-pattern and integer-weight regressions failed
+  before repair. Exact wire round trips, source differentials, ordered scans,
+  integer boundaries and the 86400-second freshness boundary survive as tests.
+  Native repair review also caught integer `-0` becoming float `-0.0` and
+  range errors in JSON-string policies losing their type; both now have
+  witnessed failing regressions and repairs.
+- Disposition: fixed; J1/J2/J3 remain cut-over gates. Compatibility primitives
+  are private pending copies, marked with their future core/records owner.
+- Follow-up: integrate checked integer JSON ingress and Python compatibility
+  helpers into the owning crates. `pending::from_json` rejects integers outside
+  i64/u64 with typed `NumberOutOfRange`, as required by v4; callers must use it
+  rather than an unchecked `serde_json` decoder at JSON ingress.
+
+## RP-130402 - Lazy alias re-expansion across adapters sharing a family
+
+- Unit: `scripts/model_route_catalog.py#unit-01`, rulebook version 4.
+- Class: `bug` (open Rust mismatch; catalog unit remains partial).
+- Compared revisions: Python source at `6aa0097083aa0e9f2f69d2d60fe9f8023dcae594`,
+  Rust in PR #1304.
+- Reproducer: family aliases `{"senior":["sonnet"]}` with adapters `a` and `b`
+  both declaring that fixed family. Python's lazy generator snapshots the
+  expanding candidate set once per adapter, in set iteration order.
+- Expected / actual: Python can include `b-a-sonnet` (or `a-b-sonnet`), whereas
+  Rust expands only the original names and returns `sonnet`, `a-sonnet`,
+  `b-sonnet`. This can change override reservation validation.
+- Evidence: source comparison of `family_alias_candidates`; no parity claim
+  is made for this multi-adapter case.
+- Disposition: open, recorded at the repair request's direction. Matching
+  Python's set-order-dependent expansion needs a dedicated policy decision;
+  no exception or live cut-over is authorised here.
+- Follow-up: retain this counterexample for the remaining catalogue unit work.
+
+## RP-130403 - Exact pool weight numbers under v4
+
+- Unit: partial `scripts/model_route_pools.py#unit-01`, rulebook version 4.
+- Class: `improvement` (explicitly requested in PR #1304's repair instructions).
+- Compared revisions: Python source at `6aa0097083aa0e9f2f69d2d60fe9f8023dcae594`,
+  Rust repair in PR #1304.
+- Reproducer: `integer_weights_retain_exact_integer_wire_form`; input integer
+  `9007199254740993` formerly became `9007199254740992.0`.
+- Expected / actual: v4 preserves integer inputs and named integer weights as
+  integers; float inputs remain floats. Python's `weight_value` explicitly
+  coerces weights to floats, so exact integer preservation deliberately follows
+  the repair request and R4 rather than that coercion.
+- Disposition: implemented within the user's explicit numeric repair scope;
+  out-of-range integers are refused rather than rounded. No provider routing
+  is switched to Rust by this inert crate.
 ### RP-RUN-1 — lease compatibility limits (open)
 
 - Unit: `skills/orchestrate/scripts/lease.py#unit-01`; rulebook v2 with
