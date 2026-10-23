@@ -322,7 +322,7 @@ fn all_route_identity_fields_are_nonempty_strings() {
         for value in [Value::Null, json!(false), json!(0), json!([]), json!("")] {
             let mut bad = adapter.clone();
             bad[field] = value;
-            assert_eq!(
+            assert!(matches!(
                 successful_adapter_error(
                     &bad,
                     &json!("codex"),
@@ -331,7 +331,7 @@ fn all_route_identity_fields_are_nonempty_strings() {
                     &digest_bytes(b"result\n")
                 ),
                 Some(AttemptEvidenceError::RouteIdentity)
-            );
+            ));
         }
     }
 }
@@ -348,10 +348,7 @@ fn assurance_execution_can_be_certification_eligible() {
         "adapter_receipt".into(),
         serde_json::to_vec(&adapter).unwrap(),
     );
-    assert_eq!(
-        validate_successful_attempt(run.path(), &record, &payloads),
-        Ok(())
-    );
+    assert!(validate_successful_attempt(run.path(), &record, &payloads).is_ok());
 }
 
 #[test]
@@ -365,10 +362,10 @@ fn each_route_field_must_agree() {
     ] {
         let (mut record, payloads, _) = fixture(run.path());
         record["route"][field] = json!("other");
-        assert_eq!(
+        assert!(matches!(
             validate_successful_attempt(run.path(), &record, &payloads),
-            Err(AttemptEvidenceError::RouteDisagreement(field))
-        );
+            Err(AttemptEvidenceError::RouteDisagreement(actual)) if actual == field
+        ));
     }
 }
 
@@ -401,16 +398,14 @@ fn output_paths_resolve_links_and_missing_components() {
     symlink("real", run.path().join("link")).unwrap();
     let (_, _, mut adapter) = fixture(run.path());
     adapter["output_path"] = json!(run.path().join("missing/../link/result.md"));
-    assert_eq!(
-        successful_adapter_error(
-            &adapter,
-            &json!("codex"),
-            &json!("ordinary"),
-            &run.path().join("real/result.md"),
-            &digest_bytes(b"result\n")
-        ),
-        None
-    );
+    assert!(successful_adapter_error(
+        &adapter,
+        &json!("codex"),
+        &json!("ordinary"),
+        &run.path().join("real/result.md"),
+        &digest_bytes(b"result\n")
+    )
+    .is_none());
 }
 
 #[test]
@@ -521,4 +516,71 @@ else: print(json.dumps([str(Path(p).resolve()) for p in sys.argv[1:]]))
     } else {
         eprintln!("skipped: non-strict loop semantics require Python >=3.13");
     }
+}
+
+#[test]
+fn decode_failures_retain_typed_causes() {
+    use std::error::Error;
+    let run = tempfile::tempdir().unwrap();
+    let (record, mut payloads, _) = fixture(run.path());
+    for bytes in [vec![255], b"{".to_vec()] {
+        payloads.insert("adapter_receipt".into(), bytes.clone());
+        let error = validate_successful_attempt(run.path(), &record, &payloads).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "successful adapter receipt is not valid JSON"
+        );
+        assert!(error.source().and_then(Error::source).is_some());
+        assert!(
+            matches!(error, AttemptEvidenceError::AdapterJson(JsonCause::Utf8(_)))
+                == (bytes == [255])
+        );
+    }
+}
+
+#[test]
+fn differential_python_record_numeric_spelling() {
+    let run = tempfile::tempdir().unwrap();
+    let (record, payloads, _) = fixture(run.path());
+    let json = serde_json::to_string(&record).unwrap();
+    let mut cases = Vec::new();
+    let mut answers = Vec::new();
+    for number in ["0","-0","0.0","-0.0","1e400","false","999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999"] {
+        let raw=json.replace("\"exit_code\":0",&format!("\"exit_code\":{number}"));
+        answers.push(validate_successful_attempt_json(run.path(),raw.as_bytes(),&payloads).err().map(|error|error.to_string()));
+        cases.push(json!({"run":run.path(),"record_json":raw,"payloads":payloads}));
+    }
+    assert!(answers[0].is_none() && answers[1].is_none());
+    assert!(answers[2..].iter().all(Option::is_some));
+    let oracle =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../../skills/orchestrate/scripts");
+    let mut child=match Command::new("python3").args(["-c",r#"
+import json,sys
+from pathlib import Path
+sys.path.insert(0,sys.argv[1]);import attempt_evidence as m
+answers=[]
+for case in json.load(sys.stdin):
+ try:
+  m.validate_successful_attempt(Path(case['run']),json.loads(case['record_json']),{k:bytes(v) for k,v in case['payloads'].items()});answers.append(None)
+ except m.AttemptEvidenceError as e: answers.append(str(e))
+print(json.dumps(answers))
+"#]).arg(oracle).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn() {
+        Ok(child)=>child,
+        Err(error) if error.kind()==std::io::ErrorKind::NotFound=>{eprintln!("skipped: python3 is absent");return;},
+        Err(error)=>panic!("cannot run Python oracle: {error}"),
+    };
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(&serde_json::to_vec(&cases).unwrap())
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let old: Vec<Option<String>> = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(answers, old);
 }

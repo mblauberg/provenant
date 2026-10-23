@@ -46,10 +46,12 @@ ASCII JSON bytes, including surrogate pairs for supplementary characters.
 ## Evidence and remaining gates
 
 Rust unit tests translate retained-attempt policy, storage accounting/removal
-policy, Fabric wire/index identity and layout fixtures. Five Python
+policy, Fabric wire/index identity and layout fixtures. Six Python
 differentials cover the success refusal matrix, actual allocated block
 metadata/pruning, scoped keys/statuses and slug/non-Git workspace selection and non-strict symlink resolution.
-They skip with a diagnostic when `python3` is unavailable. Clocks and entropy
+The raw-record validation API preserves Python integer `-0` semantics without
+returning a lossy projection for persistence. Decode errors retain typed UTF-8
+or JSON causes behind stable policy messages. Differentials skip with a diagnostic when `python3` is unavailable. Clocks and entropy
 are explicit; there are no sleep assertions.
 
 Before cut-over, J1 still needs direct-command help/output/exit coverage; J2

@@ -10,7 +10,7 @@ use thiserror::Error;
 
 use crate::{digest_bytes, pending};
 
-#[derive(Debug, Error, PartialEq, Eq)]
+#[derive(Debug, Error)]
 pub enum AttemptEvidenceError {
     #[error("successful attempt status is invalid")]
     Status,
@@ -27,7 +27,9 @@ pub enum AttemptEvidenceError {
     #[error("successful attempt has no adapter receipt")]
     MissingAdapter,
     #[error("successful adapter receipt is not valid JSON")]
-    AdapterJson,
+    AdapterJson(#[source] JsonCause),
+    #[error("attempt record is not valid JSON")]
+    RecordJson(#[source] JsonCause),
     #[error("successful adapter receipt is invalid")]
     Adapter,
     #[error("successful attempt route is invalid")]
@@ -48,6 +50,29 @@ pub enum AttemptEvidenceError {
     OrdinaryCertification,
     #[error("successful attempt route disagrees with adapter receipt: {0}")]
     RouteDisagreement(&'static str),
+}
+
+#[derive(Debug, Error)]
+pub enum JsonCause {
+    #[error("invalid UTF-8")]
+    Utf8(#[source] std::str::Utf8Error),
+    #[error("invalid JSON syntax")]
+    Json(#[source] serde_json::Error),
+}
+
+/// Validate original record JSON without losing Python's integer `-0` spelling.
+/// The temporary policy projection must never be used to rewrite retained bytes.
+/// Callers already holding a correctly decoded value may use the value API.
+pub fn validate_successful_attempt_json(
+    run_dir: &Path,
+    record_bytes: &[u8],
+    payloads: &BTreeMap<String, Vec<u8>>,
+) -> Result<(), AttemptEvidenceError> {
+    let text = std::str::from_utf8(record_bytes)
+        .map_err(|source| AttemptEvidenceError::RecordJson(JsonCause::Utf8(source)))?;
+    let record = decode_validation_json(text)
+        .map_err(|source| AttemptEvidenceError::RecordJson(JsonCause::Json(source)))?;
+    validate_successful_attempt(run_dir, &record, payloads)
 }
 
 /// Preserve all statuses except the retained pre-upgrade success alias.
@@ -123,7 +148,7 @@ pub fn successful_adapter_error(
 // Python json.loads accepts nonfinite constants and numeric magnitudes beyond
 // f64. These can never satisfy any numeric success field; retain their shape as
 // null for validation, without rewriting retained evidence bytes.
-fn decode_adapter(line: &str) -> Result<Value, serde_json::Error> {
+fn decode_validation_json(line: &str) -> Result<Value, serde_json::Error> {
     if let Ok(value) = serde_json::from_str(line) {
         if !line.contains("-0") {
             return Ok(value);
@@ -204,7 +229,8 @@ pub fn validate_successful_attempt(
         return Err(ResultDigest);
     }
     let adapter_bytes = payloads.get("adapter_receipt").ok_or(MissingAdapter)?;
-    let text = std::str::from_utf8(adapter_bytes).map_err(|_| AdapterJson)?;
+    let text = std::str::from_utf8(adapter_bytes)
+        .map_err(|source| AdapterJson(JsonCause::Utf8(source)))?;
     // Python str.splitlines includes VT, FF, separators and NEL as well as CR/LF.
     let last = text
         .split([
@@ -217,7 +243,9 @@ pub fn validate_successful_attempt(
                 .is_empty()
         });
     let adapter: Value = match last {
-        Some(line) => decode_adapter(line).map_err(|_| AdapterJson)?,
+        Some(line) => {
+            decode_validation_json(line).map_err(|source| AdapterJson(JsonCause::Json(source)))?
+        }
         None => Value::Null,
     };
     if !adapter.is_object() || adapter["status"] != "ok" {

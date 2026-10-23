@@ -80,7 +80,7 @@ They form the current baseline; they are not newly discovered port mismatches.
 - Class: `library` (numeric parsing) and `bug` (blank-line classification).
 - Reproducer: crate test `differential_python_success_matrix`, cases
   `nonfinite_unknown`, `overflow_unknown`, `negative_zero_adapter_exit`,
-  `python_blank_tail`; macOS arm64,
+  `python_blank_tail`, plus `differential_python_record_numeric_spelling`; macOS arm64,
   isolated temporary run directory, no environment/config normalisation.
 - Compared revisions: Python oracle `9797088841644372af432f64b6dd3918bbdd5c19`;
   Rust before repair `3f471de7`; J2 baseline `d9fcebd4`. No independent mutant
@@ -134,3 +134,19 @@ They form the current baseline; they are not newly discovered port mismatches.
   correction awaiting explicit boundary authority before cut-over.
 - Follow-up: settle the compatibility decision, integrate supervisor's safe OS
   binding, and run descriptor-based adversarial conformance on both platforms.
+
+## RP-records-004 — Decode error causes
+
+- Unit: `skills/orchestrate/scripts/attempt_evidence.py#unit-01`; rulebook v3.
+- Class: `bug`.
+- Reproducer: `decode_failures_retain_typed_causes`, invalid UTF-8 and malformed
+  JSON adapter receipts.
+- Compared revisions: Python oracle `9797088841644372af432f64b6dd3918bbdd5c19`;
+  Rust before repair `45c46d22`; native repair review identified the gap.
+- Expected / actual: Python chains the decode exception; Rust initially kept
+  only the stable policy message, losing the underlying failure category.
+- Evidence: native review and crate source-chain assertions; no independent
+  mutant proof claimed.
+- Disposition: fixed in this batch with typed UTF-8/serde causes and unchanged
+  policy display text. The raw-record API also retains its decode causes.
+- Follow-up: preserve source-chain coverage at the future record-reader edge.
