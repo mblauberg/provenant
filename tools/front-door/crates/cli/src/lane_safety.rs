@@ -137,20 +137,20 @@ fn digits(word: &str) -> bool {
     !word.is_empty() && word.chars().all(crate::pending::python_digit)
 }
 
-pub fn kill_reason(args: &[String]) -> Result<Option<String>, crate::IntegerError> {
+pub fn kill_reason(args: &[String]) -> Option<String> {
     let mut targets = Vec::new();
     let (mut options_done, mut signalled, mut i) = (false, false, 0);
     while let Some(word) = args.get(i) {
         if !options_done && word == "--" {
             options_done = true;
         } else if !options_done && matches!(word.as_str(), "-l" | "-L" | "-t") {
-            return Ok(None);
+            return None;
         } else if !options_done && matches!(word.as_str(), "-s" | "-n" | "--signal") {
             signalled = true;
             i += 1;
         } else if !options_done && word.starts_with('-') && word.len() > 1 {
             if signalled && digits(&word[1..]) {
-                return Ok(Some("kill of a process group".into()));
+                return Some("kill of a process group".into());
             }
             signalled = true;
         } else {
@@ -160,22 +160,22 @@ pub fn kill_reason(args: &[String]) -> Result<Option<String>, crate::IntegerErro
     }
     for target in targets {
         if target.starts_with('-') {
-            return Ok(Some("kill of a process group".into()));
+            return Some("kill of a process group".into());
         }
         if !decimal(target) {
-            return Ok(Some(format!(
+            return Some(format!(
                 "kill target {} is not a literal PID",
                 provenant_core::py::python_repr(target)
-            )));
+            ));
         }
         if target
             .chars()
             .all(|c| crate::pending::decimal_digit(c) == Some(0))
         {
-            return Ok(Some("kill 0 signals the caller's process group".into()));
+            return Some("kill 0 signals the caller's process group".into());
         }
     }
-    Ok(None)
+    None
 }
 
 /// A shell simple command; bodies are here-strings and here-documents.
@@ -464,8 +464,6 @@ pub fn parse(text: &str) -> (Vec<ShellCommand>, Vec<String>) {
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error(transparent)]
-    Integer(#[from] crate::IntegerError),
-    #[error(transparent)]
     Pattern(#[from] regex::Error),
 }
 
@@ -612,7 +610,7 @@ impl Guard {
             return if via_xargs {
                 Ok(Some("xargs kill takes its targets from a pipe".into()))
             } else {
-                Ok(kill_reason(args)?)
+                Ok(kill_reason(args))
             };
         }
         if ["sh", "bash", "zsh", "dash", "ksh"].contains(&name) {
@@ -777,11 +775,11 @@ print(json.dumps([(s,([{'words':c.words,'bodies':c.bodies} for c in parse(s)[0]]
             "7".repeat(4301),
             format!("{}١", "٠".repeat(4301)),
         ] {
-            assert_eq!(kill_reason(&[target]).unwrap(), None);
+            assert_eq!(kill_reason(&[target]), None);
         }
         for target in ["0".repeat(4300), "٠".repeat(4301)] {
             assert_eq!(
-                kill_reason(&[target]).unwrap(),
+                kill_reason(&[target]),
                 Some("kill 0 signals the caller's process group".into())
             );
         }
@@ -808,9 +806,9 @@ print(json.dumps(errors))
             return;
         };
         assert_eq!(errors, ["ValueError", "ValueError"]);
-        assert_eq!(kill_reason(&targets[..1]).unwrap(), None);
+        assert_eq!(kill_reason(&targets[..1]), None);
         assert_eq!(
-            kill_reason(&targets[1..]).unwrap().as_deref(),
+            kill_reason(&targets[1..]).as_deref(),
             Some("kill 0 signals the caller's process group")
         );
     }
@@ -849,7 +847,7 @@ print(json.dumps(errors))
             "-t",
             "٩٩",
         ] {
-            assert_eq!(kill_reason(&words(command)).unwrap(), None, "{command}");
+            assert_eq!(kill_reason(&words(command)), None, "{command}");
         }
     }
 
@@ -857,19 +855,19 @@ print(json.dumps(errors))
     fn group_and_expansion_refusals() {
         for command in ["0", "-9 0", "٠٠"] {
             assert_eq!(
-                kill_reason(&words(command)).unwrap().as_deref(),
+                kill_reason(&words(command)).as_deref(),
                 Some("kill 0 signals the caller's process group")
             );
         }
         for command in ["-- -42", "-9 -42", "-s TERM -42", "-TERM -42 -43", "-9 -²"] {
             assert_eq!(
-                kill_reason(&words(command)).unwrap().as_deref(),
+                kill_reason(&words(command)).as_deref(),
                 Some("kill of a process group")
             );
         }
         for target in ["$PID", "${PID}", "%1", "abc", "$(…)"] {
             assert_eq!(
-                kill_reason(&[target.into()]).unwrap(),
+                kill_reason(&[target.into()]),
                 Some(format!("kill target '{target}' is not a literal PID"))
             );
         }
@@ -921,7 +919,7 @@ print(json.dumps(errors))
             "import json,sys; from scripts.lane_safety_guard import _kill_reason; print(json.dumps([_kill_reason(a) for a in json.load(sys.stdin)]))", &json!(cases)
         ) else { return; };
         for (argv, expected) in cases.iter().zip(expected) {
-            assert_eq!(kill_reason(argv).unwrap(), expected, "{argv:?}");
+            assert_eq!(kill_reason(argv), expected, "{argv:?}");
         }
     }
 }
