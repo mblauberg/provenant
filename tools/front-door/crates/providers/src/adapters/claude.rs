@@ -9,7 +9,7 @@ pub fn uses_api_key(route: &serde_json::Value, anthropic_api_key: Option<&str>) 
             .is_some_and(provenant_core::py::python_truth)
 }
 
-pub fn claude(plan: &Plan, anthropic_api_key: Option<&str>) -> AdapterProfile {
+pub fn claude(plan: &Plan, anthropic_api_key: Option<&str>) -> Result<AdapterProfile, BuildError> {
     let mut argv = vec![
         "-p".into(),
         if uses_api_key(
@@ -72,15 +72,8 @@ pub fn claude(plan: &Plan, anthropic_api_key: Option<&str>) -> AdapterProfile {
     if let Some(effort) = plan.effort.as_ref().filter(|value| !value.is_empty()) {
         argv.extend(["--effort".into(), effort.clone()]);
     }
-    if let Some(ceiling) = plan
-        .context_ceiling
-        .as_ref()
-        .filter(|value| provenant_core::py::python_truth(value))
-    {
-        argv.extend([
-            "--autocompact".into(),
-            provenant_core::py::python_str(ceiling),
-        ]);
+    if let Some(ceiling) = plan.context_ceiling.as_ref().filter(|value| value.truth()) {
+        argv.extend(["--autocompact".into(), ceiling.python_str()]);
     }
     profile("claude", argv)
 }
@@ -119,13 +112,13 @@ mod tests {
     fn claude_read_only_rewrites_boundary_and_writer_uses_edit_permissions() {
         let mut read_plan = plan(Mode::ReadOnly);
         read_plan.boundary_prompt = "Use file-reading tools only.".into();
-        let read = claude(&read_plan, None);
+        let read = claude(&read_plan, None).unwrap();
         assert!(read.argv.windows(2).any(|args| args
             == [
                 "--system-prompt",
                 "Shell commands that do not modify files are allowed."
             ]));
-        let writer = claude(&plan(Mode::WorktreeWrite), None);
+        let writer = claude(&plan(Mode::WorktreeWrite), None).unwrap();
         assert!(writer.argv.contains(&"acceptEdits".into()));
         assert!(writer.argv.contains(&"/repo".into()));
     }
@@ -134,7 +127,7 @@ mod tests {
     fn empty_endpoint_does_not_select_api_key_mode() {
         let mut p = plan(Mode::ReadOnly);
         p.endpoint_base_url = Some(serde_json::json!(""));
-        let profile = claude(&p, None);
+        let profile = claude(&p, None).unwrap();
         assert!(profile.argv.contains(&"--safe-mode".into()));
         assert!(!profile.argv.contains(&"--bare".into()));
     }
@@ -145,13 +138,20 @@ mod coercion_tests {
     use super::*;
     #[test]
     fn context_ceiling_preserves_python_truth_and_string_coercions() {
-        let values = serde_json::json!([null,false,true,0,-1,1.5,"", "300",[],[true],{}, {"x":null}]);
-        let actual: Vec<_> = values.as_array().unwrap().iter().map(|value| {
-            let mut p = super::tests::plan(Mode::ReadOnly);
-            p.context_ceiling = Some(value.clone());
-            claude(&p, None).argv
-        }).collect();
-        let Some(expected): Option<Vec<Vec<String>>> = crate::oracle::python(r#"
+        let values =
+            serde_json::json!([null,false,true,0,-1,1.5,"", "300",[],[true],{}, {"x":null}]);
+        let actual: Vec<_> = values
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|value| {
+                let mut p = crate::adapters::agy::tests::plan(Mode::ReadOnly);
+                p.context_ceiling = Some(value.clone().into());
+                claude(&p, None).unwrap().argv
+            })
+            .collect();
+        let Some(expected): Option<Vec<Vec<String>>> = crate::oracle::python(
+            r#"
 import json,sys
 from skills.orchestrate.scripts.adapters.claude import argv
 out=[]
@@ -159,7 +159,32 @@ for v in json.load(sys.stdin):
     p=dict(context_ceiling=v,route={},mode='read_only',resume_session=None,session_id='session-1',cwd='/repo',model='model-x',effort='high',applied={'add_dirs':['/shared']},boundary_prompt='Read only',prompt='do it')
     out.append(argv(p))
 print(json.dumps(out))
-"#, &values, None) else { return; };
+"#,
+            &values,
+            None,
+        ) else {
+            return;
+        };
         assert_eq!(actual, expected);
+    }
+}
+
+#[cfg(test)]
+mod ordered_context_tests {
+    use super::*;
+    #[test]
+    fn raw_context_dictionary_order_and_python_integer_zero_survive_decode() {
+        let p = crate::adapters::agy::tests::plan(Mode::ReadOnly);
+        let raw = serde_json::to_string(&p).unwrap().replace(
+            "\"context_ceiling\":1000",
+            r#""context_ceiling":{"z":-0,"a":-0.0,"nested":{"y":true,"b":null}}"#,
+        );
+        let p: Plan = crate::decode_json(raw.as_bytes()).unwrap();
+        let actual = claude(&p, None).unwrap();
+        assert!(actual.argv.windows(2).any(|v| v
+            == [
+                "--autocompact",
+                "{'z': 0, 'a': -0.0, 'nested': {'y': True, 'b': None}}"
+            ]));
     }
 }

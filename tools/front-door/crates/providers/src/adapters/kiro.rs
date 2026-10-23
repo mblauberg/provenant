@@ -1,6 +1,6 @@
 use super::*;
 
-pub fn kiro(plan: &Plan) -> AdapterProfile {
+pub fn kiro(plan: &Plan) -> Result<AdapterProfile, BuildError> {
     let mut argv = vec![
         "chat".into(),
         "--no-interactive".into(),
@@ -187,7 +187,7 @@ print(json.dumps([now.isoformat(), routes, [read_only_guarantee(r) for r in rout
     fn kiro_uses_v3_and_omits_explicit_auto_model() {
         let mut p = plan(Mode::ReadOnly);
         p.model = Some("auto".into());
-        let adapter = kiro(&p);
+        let adapter = kiro(&p).unwrap();
         assert!(adapter
             .argv
             .windows(2)
