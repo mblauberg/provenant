@@ -233,6 +233,88 @@ They form the current baseline; they are not newly discovered port mismatches.
 - Disposition: fixed in `a79987fe`; native repair review is clean. Independent
   J1 acceptance remains pending. No intentional exception is requested.
 
+## RP-1301 — supervisor partial numeric decoders
+
+- **Unit / rules:** `skills/orchestrate/scripts/bin/ps#unit-01` and
+  `skills/orchestrate/scripts/process_info.py#unit-01`; rulebook v2.
+- **Class:** `library` (Rust integer representation versus Python integers).
+- **Reproducer:** Python's ps `parse(['-p', '9223372036854775808'])` retains
+  the integer; Rust `ps::parse` returns `PsParseError::PidRange`. Python also
+  accepts Unicode decimal PID digits, while this partial Rust parser accepts
+  ASCII digits. Python `_duration(1e20)` formats a finite value; the partial
+  Rust decoder returns `ProcessParseError::Duration` at/above `i64::MAX`.
+- **Compared revisions:** Python/TS source and original tests at
+  `5c48d4e5567c4801b072bbf88203e88822079ab1`; Rust slice introduced by
+  `73d532b2` and `9763fa64`. Source units remain unchanged in integrated main
+  `e897b10d58b27a46544969594eed08a5ed64c72c`. No command/binary comparison is
+  claimed: these APIs have no command callers. There is no normaliser.
+- **Expected / actual:** See reproducer; this is an incomplete domain, not an
+  accepted refusal at the command boundary. No effect or output is switched.
+- **Evidence:** Existing Python policy tests and inline differential fixtures
+  cover the implemented domain. Independent old-pass/mutant-fail numeric-domain
+  evidence remains with the judge owner; none is claimed by this slice.
+- **Disposition:** Open; blocks full acceptance of both affected units. No
+  intentional behavior change or exception is requested or approved.
+- **Follow-up:** Extend integer/Unicode decoding and duration representation,
+  and include these cases in independent J1 fixtures before cut-over. Scope
+  and other remaining portions are in the supervisor crate's README.
+
+### RP-1301 resolution
+
+The supervisor entry was numbered RP-1001 on its unlanded branch; merge with
+main assigned RP-1301 to avoid the already landed refusal-escaping entry.
+Fixed by `a70c4d82` (finite float durations, NaN/negative-infinity clamp) and
+`037176dc` (large PID integers and Unicode decimal digits). The numeric
+fixtures now compare the former counterexamples against Python 3.14.8,
+including `f64::MAX`, without normalising any result. The open numeric-domain
+limitation above is superseded by this repair. Independent judge coverage
+remains a cut-over requirement under rulebook v3.
+
+## RP-1302 - Bounded supervisor ps fallback and typed failures
+
+- **Unit / rules:** `skills/orchestrate/scripts/process_info.py#unit-02`;
+  rulebook v3. The dependent ps port retains this partial error domain.
+- **Class:** `library`; incomplete refusal/exception compatibility, not an
+  accepted command change.
+- **Reproducer:** The Python `_ps_processes` subprocess capture is unbounded.
+  The inert Rust observation adapter refuses stdout or stderr over 1 MiB,
+  and returns typed timeout/I/O/decode errors. In particular, its timeout
+  display is currently `ps census failed: process timed out`, rather than
+  Python's `TimeoutExpired` command/timeout detail. No normaliser is used.
+- **Compared revisions:** Unchanged Python source at
+  `e897b10d58b27a46544969594eed08a5ed64c72c`, integrated main
+  `50972eb5c1d8e208a28c0ef6d11ab0dd5e522814`; adapter introduced in
+  `6f150b1c`. No command imports the Rust crate, so no binary equivalence
+  or external refusal change is claimed.
+- **Expected / actual:** Outputs within the implemented domain are decoded
+  strictly with universal newline handling. Oversize output and timeout
+  errors differ as above; generic serde process text also refuses surrogate
+  bytes rather than inventing a UTF-8 value. Native OS/ps text preserves those
+  bytes separately up to its explicit record edge.
+- **Evidence:** Translated Rust policy tests, pure fixture differentials and
+  native identity comparisons cover the implemented path. The local sandbox
+  denies setuid system ps execution, so full fallback conformance is deferred.
+- **Disposition:** Open for the affected observation/error boundary; full
+  unit-02 parity is not claimed. No improvement or Python-bug exception has
+  been approved. Other inert units proceed under R10.3/R11 v3.
+- **Follow-up:** Agree the bounded refusal and complete edge error/OS-text
+  encoding with the CLI/record owners before cut-over; add independent J1/J2
+  failure cases and unrestricted Linux/macOS subprocess conformance.
+
+### RP-1301 v4 integer bounds
+
+Under rulebook v4 R4, PID selection is bounded to i64/u64. For example Python
+accepts `18446744073709551616`; Rust now refuses it with typed
+`PsParseError::NumberOutOfRange`, rather than representing an arbitrary Python
+integer. At the i32 OS PID/record boundary, `2147483648` is likewise a typed
+`NumberOutOfRange` (never rounded through f64 or silently dropped by the
+text decoder). Darwin task tick addition refuses u64 overflow with
+`ProcessParseError::NumberOutOfRange` before converting the duration to float.
+This is the rulebook's recorded **improvement**, not command cut-over authority.
+Rust Unicode/range and integer-addition fixtures cover these cases. Lookup
+and census APIs propagate the typed range errors rather than dropping rows;
+the filesystem fixture checks both ppid and pgid overflow and disappearance.
+The source revision above is unchanged; CLI rendering remains an edge task.
 ## RP-1014: telemetry Python value and Unicode semantics
 
 - Units: `scripts/telemetry_changes.py#unit-01`,

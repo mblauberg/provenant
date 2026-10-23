@@ -382,6 +382,13 @@ version = "0.1.0"
 [[package]]
 name = "provenant-supervisor"
 version = "0.1.0"
+dependencies = [
+ "libc",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+]
 
 [[package]]
 name = "provenant-telemetry"
