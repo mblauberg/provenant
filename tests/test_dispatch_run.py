@@ -7120,3 +7120,134 @@ def test_terminal_receipt_persists_model_check_and_changes(tmp_path, check):
     if check == "invalid":
         assert saved["model_check"] == "invalid"
         assert saved["model_check_detail"] == "listing evidence"
+
+
+def _packet_metadata():
+    return {
+        "schema_version": 1, "record_type": "provenant-git-evidence",
+        "repository": "/fixture", "git_root": "/fixture", "head": "a" * 40,
+        "diff_base": "b" * 40, "working_tree": "clean", "diff_from": "HEAD",
+        "paths": [], "encoding": "utf-8-replacement",
+    }
+
+
+_PACKET_HEADER_MUTATIONS = [
+    ("schema_version", 2), ("record_type", "other"), ("repository", None),
+    ("git_root", None), ("head", None), ("head", "A" * 40),
+    ("head", "a" * 39), ("head", "a" * 65), ("diff_base", None),
+    ("diff_base", "G" * 40), ("diff_base", "b" * 39), ("diff_base", "b" * 65),
+    ("working_tree", "unknown"), ("working_tree", []), ("diff_from", None), ("diff_from", ""),
+    ("paths", None), ("paths", [1]), ("encoding", "utf-8"),
+]
+
+
+def _packet_bytes(case):
+    metadata = _packet_metadata()
+    body = b"--- status ---\n--- diff ---\n"
+    if case == "empty": return b""
+    if case == "no-newline": return json.dumps(metadata).encode()
+    if case == "oversize-no-newline": return b"x" * (65536 + 1)
+    if case == "oversize-newline": return b"x" * (65536 + 1) + b"\n" + body
+    if case == "bad-json": return b"{\n" + body
+    if case == "bad-utf8": return b"\xff\n" + body
+    if case == "null": return b"null\n" + body
+    if case == "non-object": return b"[]\n" + body
+    if case == "missing-key": del metadata["head"]
+    if case == "extra-key": metadata["extra"] = True
+    if case == "wrong-status": body = b"--- wrong ----\n--- diff ---\n"
+    if case == "short-status": body = b"--- status"
+    if case == "no-body": body = b""
+    if case == "missing-diff": body = b"--- status ---\nno diff\n"
+    if case == "late-diff": body = b"--- status ---\n" + b"x" * 100 + b"\n--- diff ---\n" + b"x" * 100
+    if case == "header-at-limit":
+        header = json.dumps(metadata).encode()
+        return header + b" " * (65536 - len(header)) + b"\n" + body
+    return json.dumps(metadata).encode() + b"\n" + body
+
+
+@pytest.mark.parametrize("field,value", _PACKET_HEADER_MUTATIONS)
+def test_git_evidence_copy_rejects_each_header_field(tmp_path, field, value):
+    module = load_dispatch_module()
+    metadata = _packet_metadata()
+    metadata[field] = value
+    source, destination = tmp_path / "source", tmp_path / "destination"
+    source.write_bytes(json.dumps(metadata).encode() + b"\n--- status ---\n--- diff ---\n")
+    with pytest.raises(module.run_records.AttemptEvidenceError) as error:
+        module._copy_git_evidence(tmp_path, tmp_path, source, destination)
+    assert str(error.value) == "Git evidence packet header is invalid"
+    assert not destination.exists()
+
+
+@pytest.mark.parametrize("case,message", [
+    ("empty", "has no JSON header"), ("no-newline", "has no JSON header"),
+    ("oversize-no-newline", "header exceeds its 64 KiB limit"),
+    ("oversize-newline", "header exceeds its 64 KiB limit"),
+    ("bad-json", "has an invalid JSON header"), ("bad-utf8", "has an invalid JSON header"),
+    ("null", "header is invalid"), ("non-object", "header is invalid"),
+    ("missing-key", "header is invalid"), ("extra-key", "header is invalid"),
+    ("wrong-status", "is missing its status section"),
+    ("short-status", "is missing its status section"), ("no-body", "is missing its status section"),
+    ("missing-diff", "is missing its diff section"),
+])
+def test_git_evidence_copy_rejection_messages_and_cleanup(tmp_path, case, message):
+    module = load_dispatch_module()
+    source, destination = tmp_path / "source", tmp_path / "destination"
+    source.write_bytes(_packet_bytes(case))
+    with pytest.raises(module.run_records.AttemptEvidenceError) as error:
+        module._copy_git_evidence(tmp_path, tmp_path, source, destination)
+    assert str(error.value) == "Git evidence packet " + message
+    assert not destination.exists()
+
+
+@pytest.mark.parametrize("case,chunk_size", [("late-diff", 1), ("late-diff", 7), ("late-diff", 64), ("header-at-limit", 1048576)])
+def test_git_evidence_copy_stream_boundaries(tmp_path, monkeypatch, case, chunk_size):
+    module = load_dispatch_module()
+    source, destination = tmp_path / "source", tmp_path / "destination"
+    payload = _packet_bytes(case)
+    source.write_bytes(payload)
+    read = module.os.read
+    monkeypatch.setattr(module.os, "read", lambda fd, size: read(fd, min(size, chunk_size)))
+    metadata, digest = module._copy_git_evidence(tmp_path, tmp_path, source, destination)
+    assert metadata == _packet_metadata()
+    assert digest == "sha256:" + hashlib.sha256(payload).hexdigest()
+    assert destination.read_bytes() == payload
+
+
+@pytest.mark.parametrize("outside", ["source", "destination"])
+def test_git_evidence_copy_rejects_paths_outside_run(tmp_path, outside):
+    module = load_dispatch_module()
+    root = tmp_path / "run"
+    root.mkdir()
+    source = (tmp_path if outside == "source" else root) / "source"
+    destination = (tmp_path if outside == "destination" else root) / "destination"
+    source.write_bytes(_packet_bytes("late-diff"))
+    with pytest.raises(module.run_records.AttemptEvidenceError) as error:
+        module._copy_git_evidence(tmp_path, root, source, destination)
+    assert str(error.value) == "Git evidence must be materialised inside the run directory"
+    assert not destination.exists()
+
+
+@pytest.mark.parametrize("target", ["source", "destination"])
+def test_git_evidence_copy_containment_errors_preserve_message(tmp_path, monkeypatch, target):
+    module = load_dispatch_module()
+    source, destination = tmp_path / "source", tmp_path / "destination"
+    source.write_bytes(_packet_bytes("late-diff"))
+    open_regular = module.open_contained_regular
+    def refuse(root, relative, flags, **kwargs):
+        if relative == Path(target):
+            raise module.OwnedLinkError("fixture containment rejection")
+        return open_regular(root, relative, flags, **kwargs)
+    monkeypatch.setattr(module, "open_contained_regular", refuse)
+    with pytest.raises(module.run_records.AttemptEvidenceError) as error:
+        module._copy_git_evidence(tmp_path, tmp_path, source, destination)
+    assert str(error.value) == "fixture containment rejection"
+    assert not destination.exists()
+
+
+def test_git_evidence_copy_invalid_metadata_precedes_status(tmp_path):
+    module = load_dispatch_module()
+    source, destination = tmp_path / "source", tmp_path / "destination"
+    source.write_bytes(b"[]\n--- wrong ----\n")
+    with pytest.raises(module.run_records.AttemptEvidenceError) as error:
+        module._copy_git_evidence(tmp_path, tmp_path, source, destination)
+    assert str(error.value) == "Git evidence packet header is invalid"
