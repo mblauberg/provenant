@@ -366,7 +366,8 @@ def _worktree_verdict(root: Path, path: Path, open_heads: set[str],
               else _merged(root, branch))
     if prune_merged and merged and since_revision is not None and _command(
             "git", "merge-base", "--is-ancestor", f"refs/heads/{branch}", since_revision,
-            cwd=root).returncode == 0:
+            cwd=root).returncode != 1:
+        # Only a definite "not an ancestor" (1) selects the branch; a git error refuses.
         merged, squash_reason = False, "before-merged-since"
     if prune_merged and not merged and squash_reason is None and integration_ref is not None:
         tip = _command("git", "rev-parse", f"refs/heads/{branch}", cwd=root)
@@ -440,7 +441,7 @@ def _squash_merge_proof(root: Path, branch: str, branch_tip: str,
             failure_reason = "gh-merge-not-integration"
             continue
         if since_revision is not None and _command(
-                "git", "merge-base", "--is-ancestor", oid, since_revision, cwd=root).returncode == 0:
+                "git", "merge-base", "--is-ancestor", oid, since_revision, cwd=root).returncode != 1:
             failure_reason = "before-merged-since"
             continue
         return True, None
@@ -593,7 +594,7 @@ def plan(repo: Path, *, include: frozenset[str] = DEFAULT_INCLUDE, older_than: f
                 elif merged_since is not None:
                     if (_merged_by_ancestry(root, branch, integration_ref)
                             and _command("git", "merge-base", "--is-ancestor", f"refs/heads/{branch}",
-                                         since_revision, cwd=root).returncode == 0):
+                                         since_revision, cwd=root).returncode != 1):
                         continue
             if path.is_symlink() or not path.is_dir():
                 verdict = "triage:unregistered"
@@ -823,7 +824,8 @@ def _apply_plan(current: dict[str, Any], approved: dict[str, Any]) -> tuple[list
                                     current["_context"].get("since_revision"))[0])
                 if not still_proven:
                     raise CleanError(f"worktree removed but squash proof changed; kept branch {branch}")
-                deleted = _command("git", "branch", "-D", "--", branch, cwd=root)
+                # Delete only if the ref still holds the proven tip (atomic compare-and-delete).
+                deleted = _command("git", "update-ref", "-d", f"refs/heads/{branch}", squash_tip, cwd=root)
                 if deleted.returncode != 0:
                     raise CleanError(f"worktree removed but proven merged branch could not be deleted: {branch}")
                 removed.append(f"branch {branch}")

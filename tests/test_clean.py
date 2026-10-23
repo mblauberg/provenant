@@ -1018,6 +1018,38 @@ def test_prune_squash_merged_keeps_branch_with_later_local_commit(tmp_path):
                            "refs/heads/lane/squashed"], check=False).returncode == 0
 
 
+def test_prune_squash_merged_ignores_old_pr_with_same_head_name(tmp_path):
+    root = repo(tmp_path)
+    target, _head, merge = squash_fixture(root)
+
+    result = subprocess.run(["python3", str(SCRIPT), "--prune-merged", "--branch", "lane/squashed",
+                             "--repo", str(root)], env=fake_gh(tmp_path, "0" * 40, merge),
+                            text=True, capture_output=True, check=False)
+
+    assert result.returncode == 0, result.stderr
+    assert "keep:gh-no-matching-merged-pr" in result.stdout
+    assert target.exists()
+
+
+def test_prune_squash_merged_garbage_gh_output_keeps_worktree(tmp_path):
+    root = repo(tmp_path)
+    target, _head, _merge = squash_fixture(root)
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    gh = bin_dir / "gh"
+    gh.write_text('#!/bin/sh\nif [ "$4" = "open" ]; then echo "[]"; exit 0; fi\necho "not json"\n')
+    gh.chmod(0o755)
+    environment = {**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}"}
+
+    result = subprocess.run(["python3", str(SCRIPT), "--prune-merged", "--branch", "lane/squashed",
+                             "--repo", str(root)], env=environment,
+                            text=True, capture_output=True, check=False)
+
+    assert result.returncode == 0, result.stderr
+    assert "removed .worktrees/lane-squashed" not in result.stdout
+    assert target.exists()
+
+
 def test_prune_squash_merged_since_keeps_merge_already_present(tmp_path):
     root = repo(tmp_path)
     target, head, merge = squash_fixture(root)
