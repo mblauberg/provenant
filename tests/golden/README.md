@@ -24,9 +24,10 @@ metadata are excluded; worktree `.git` pointer files are included. SQLite
 snapshots contain sorted `sqlite_master` schema SQL and rows ordered by every
 column, rather than `iterdump()` output.
 
-`manifest.json` pins Python major.minor and the SQLite major for machine cases
-only; schema snapshots store SQL text, which SQLite minor releases leave unchanged. CI
-selects Python 3.12 through uv and invokes the suite with its `.venv/bin/python`; a runtime
+`manifest.json` pins Python major.minor for machine cases only, because argparse
+help and error text change between Python releases. SQLite is not pinned: schema
+snapshots store SQL text, which SQLite releases leave unchanged. CI
+selects Python 3.14 through uv and invokes the suite with its `.venv/bin/python`; a runtime
 mismatch fails comparisons containing machine cases with a re-record instruction.
 Help-only comparisons and partial recordings do not require that runtime.
 `PROVENANT_GOLDEN_BIN` selects the binary. `run.py` otherwise accepts only the
@@ -60,7 +61,7 @@ boundaries and formats.
 Re-record all cases using CI's interpreter (append `--verb route` for one verb):
 
 ```sh
-uv run --python 3.12 --group test python tests/golden/run.py --record
+uv run --python 3.14 --group test python tests/golden/run.py --record
 ```
 
 Recording prunes orphan case files. Partial updates require the existing
@@ -70,7 +71,7 @@ help command/flag sets and manifest versions. Then compare:
 
 ```sh
 PROVENANT_GOLDEN_BIN=tools/front-door/target/release/provenant \
-  uv run --python 3.12 --group test python -m pytest tests/golden -q
+  uv run --python 3.14 --group test python -m pytest tests/golden -q
 ```
 
 ## Differential runs
@@ -78,14 +79,14 @@ PROVENANT_GOLDEN_BIN=tools/front-door/target/release/provenant \
 Compare two implementations without rewriting the goldens:
 
 ```sh
-uv run --python 3.12 --group test python tests/golden/diff.py --a /absolute/python-front-door --b /absolute/rust-front-door
+uv run --python 3.14 --group test python tests/golden/diff.py --a /absolute/python-front-door --b /absolute/rust-front-door
 ```
 
 `PROVENANT_A` and `PROVENANT_B` can supply the binaries instead. To compare
 implementation lanes in one binary (defaults to the J1 binary selection):
 
 ```sh
-uv run --python 3.12 --group test python tests/golden/diff.py --a /absolute/provenant --impl-env PROVENANT_LANE_IMPL=python,rust
+uv run --python 3.14 --group test python tests/golden/diff.py --a /absolute/provenant --impl-env PROVENANT_LANE_IMPL=python,rust
 ```
 
 Each side gets its own fresh fixture and the same normalisation and per-class
@@ -130,7 +131,7 @@ allowlisted change, constrained matching, stale entries, parallel cases and
 implementation-env mode:
 
 ```sh
-uv run --python 3.12 --group test python -m pytest tests/golden/test_diff.py -q
+uv run --python 3.14 --group test python -m pytest tests/golden/test_diff.py -q
 ```
 
 This smoke test skips when no J1 binary is available unless
