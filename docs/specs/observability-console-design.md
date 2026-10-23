@@ -772,9 +772,12 @@ Each category row is itself a `DisclosureGroup`; there are no separate
   `.quaternary`, progress stroke with round caps, width `max(size / 8, 2)`.
   Sizes: 56 pt console card, 40 pt panel headline, 22 pt panel row, 10 pt
   inline window row.
-- Ring tint is status: on pace and reserve `green`, deficit `orange`,
+- Ring tint is status: on pace and reserve `green`, ahead of pace (`ahead_of_pace`) `orange`,
   exhausted `red`, drawing on credits `blue`, unknown or signed out
-  `secondary`. Status text and symbol sit beside it, always. These four hues
+  `secondary`. Legacy `deficit` receipts retain their orange tint. Ahead of pace
+  means allowance remains; show the allowance estimate, credit runway (or unknown)
+  and banked resets together. Expired windows show stale, never allowance spent.
+  Status text and symbol sit beside it, always. These four hues
   are **reserved for status** and never used as context categories.
 - The percentage sits inside rings 40 pt and larger in `.semibold`
   `.monospacedDigit()`; smaller rings put it in the trailing column.

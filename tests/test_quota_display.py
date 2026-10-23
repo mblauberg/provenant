@@ -1,63 +1,30 @@
 """Quota display vocabulary, pools, the display rule, the menu bar headline and signed-out accounts."""
 
-from datetime import UTC, datetime, timedelta
-import importlib.util
+from datetime import timedelta
 import io
 import json
 from pathlib import Path
+import shutil
+import subprocess
+import sys
 
 import pytest
 
 import quota_display
+from tests.support.quota import NOW, configure, quota, snapshot, window
 
 
 ROOT = Path(__file__).resolve().parents[1]
-NOW = datetime(2026, 10, 22, 12, 0, tzinfo=UTC)
 WEEK = 7 * 24 * 60
 ANESE, MICHAEL = 'anese@example.com', 'michael@example.com'
-
-
-@pytest.fixture
-def quota(tmp_path, monkeypatch):
-    home = tmp_path / 'home'
-    home.mkdir()
-    monkeypatch.setenv('HOME', str(home))
-    monkeypatch.setenv('AGENT_FABRIC_STATE_ROOT', str(tmp_path / 'state'))
-    monkeypatch.setenv('AGENT_FABRIC_INSTANCE_ROOT', str(home / '.agents'))
-    for name in ('PROVENANT_QUOTA', 'CLAUDE_CONFIG_DIR', 'CODEX_HOME', 'XDG_DATA_HOME'):
-        monkeypatch.delenv(name, raising=False)
-    spec = importlib.util.spec_from_file_location('provider_quota_display_under_test', ROOT / 'scripts/provider_quota.py')
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-
-    def refuse(*args, **kwargs):
-        raise AssertionError('tests never reach a real provider, CLI or credential store')
-    for name in ('run_process', 'open_process', 'urlopen', 'executable'):
-        monkeypatch.setattr(module, name, refuse)
-    monkeypatch.setattr(module, 'telemetry_host', lambda: 'studio')
-    return module
-
-
-def configure(tmp_path, value):
-    path = tmp_path / 'home/.agents/config/telemetry.json'
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(value))
 
 
 def iso(moment):
     return moment.isoformat().replace('+00:00', 'Z')
 
 
-def window(used, minutes, reset_in=None, name='seven_day', **extra):
-    return {'name': name, 'raw_kind': name, 'used_percent': used, 'window_minutes': minutes,
-            'reset_at': iso(NOW + reset_in) if reset_in is not None else None, **extra}
-
-
 def value(quota, provider, account, windows, observed=NOW, **extra):
-    return {'schema': quota.SCHEMA, 'provider': provider, 'account': account, 'plan': None, 'host': 'studio',
-            'active': True, 'priority': None, 'observed_at': iso(observed), 'attempted_at': iso(observed),
-            'source': 'test', 'status': 'ok', 'error': None, 'unreported': [], 'credits': None,
-            'windows': [quota.normalise_window(row) for row in windows], **extra}
+    return snapshot(quota, provider, windows, observed, account, **extra)
 
 
 def row(quota, *values, **settings):
@@ -131,7 +98,7 @@ def test_the_alert_threshold_is_a_quota_setting(quota, tmp_path):
 
 def test_a_window_whose_reset_passed_is_never_shown_as_current(quota):
     claude = row(quota, value(quota, 'claude', 'anese', [window(95, 300, timedelta(minutes=-5), 'five_hour'),
-                                                          window(30, WEEK, timedelta(days=2))]))
+                                                          window(30, WEEK, timedelta(days=2))], observed=NOW - timedelta(minutes=10)))
     passed = next(item for item in claude['windows'] if item['name'] == 'five_hour')
     assert passed['reset_passed'] is True and claude['display_window'] == 'seven_day'
     only = row(quota, value(quota, 'claude', 'anese', [window(40, WEEK, timedelta(minutes=-5))]))
@@ -376,7 +343,7 @@ def test_local_activity_never_credits_a_signed_out_account(quota, monkeypatch, t
 
 def test_an_expired_exhausted_window_never_makes_the_account_exhausted(quota):
     reading = value(quota, 'claude', 'anese', [window(100, WEEK, timedelta(hours=-1)),
-                                                window(20, 300, timedelta(hours=2), 'five_hour')])
+                                                window(20, 300, timedelta(hours=2), 'five_hour')], observed=NOW - timedelta(hours=2))
     report = quota_display.report(vars(quota), [reading], NOW, activity={})
     claude = report['accounts'][0]
     assert claude['state'] != 'exhausted' and claude['back_at'] is None
@@ -416,27 +383,24 @@ def test_an_alias_on_a_shared_store_keeps_its_own_account_when_another_signs_in(
     assert accounts['work'].active and accounts[anese].signed_out and michael not in accounts
 
 
-def test_a_shared_store_reading_for_another_account_is_refused_under_a_bound_alias(quota, monkeypatch, tmp_path):
-    agy = Agy(quota, monkeypatch, tmp_path)
-    configure(tmp_path, {'accounts': {'agy': {'work': {}}}})
-    agy.sign_in(MICHAEL, agy_usage(0))
-    agy.tick(NOW - timedelta(hours=1))
-    work = agy.accounts()['work']
-    agy.email, agy.payload = ANESE, agy_usage()  # the sign-in changed after accounts were listed
-    value = quota.refresh(work, NOW, force=True)
-    assert value['status'] == 'stale' and value['windows'][1]['used_percent'] == 100
-
-
-def test_a_shared_store_reading_with_no_identity_is_refused_under_a_bound_alias(quota, monkeypatch, tmp_path):
+@pytest.mark.parametrize('email, expected_error, expect_fingerprint', [
+    (ANESE, None, False), (None, 'auth', True)],
+    ids=['another-account', 'no-account-identity'])
+def test_a_shared_store_reading_without_its_bound_account_is_refused(quota, monkeypatch, tmp_path,
+                                                                    email, expected_error, expect_fingerprint):
     agy = Agy(quota, monkeypatch, tmp_path)
     configure(tmp_path, {'accounts': {'agy': {'work': {}}}})
     michael = agy.sign_in(MICHAEL, agy_usage(0))
     agy.tick(NOW - timedelta(hours=1))
     work = agy.accounts()['work']
-    agy.email, agy.payload = None, agy_usage()  # whoever answered, the log does not say
+    agy.email, agy.payload = email, agy_usage()  # the sign-in changed after accounts were listed
     value = quota.refresh(work, NOW, force=True)
-    assert value['status'] == 'stale' and value['fetch']['error_kind'] == 'auth'
-    assert value['windows'][1]['used_percent'] == 100 and value['fingerprint'] == michael
+    assert value['status'] == 'stale'
+    if expected_error:
+        assert value['fetch']['error_kind'] == expected_error
+    assert value['windows'][1]['used_percent'] == 100
+    if expect_fingerprint:
+        assert value['fingerprint'] == michael
 
 
 def test_concurrent_refreshes_of_an_unbound_alias_bind_it_to_the_first_reading(quota, monkeypatch, tmp_path):
@@ -462,3 +426,154 @@ def test_a_fingerprint_in_the_alias_entry_rebinds_it_deliberately(quota, monkeyp
     value = quota.refresh(agy.accounts()['work'], NOW, force=True)
     assert value['status'] == 'ok' and value['fingerprint'] == anese
     assert value['windows'][1]['used_percent'] == pytest.approx(7)
+
+
+@pytest.mark.parametrize('measured', [True, False])
+def test_post_reset_burst_summary_includes_credit_and_banked_reset_runway(quota, measured):
+    reading = value(quota, 'codex', 'default', [window(33, WEEK, timedelta(hours=159), 'primary')],
+                    usage_credits=[{'balance': 26000, 'unit': 'credits'}],
+                    credits={'reset_credits': 1, 'source': 'provider'},
+                    credit_anchor={'balance': 27000, 'observed_at': iso(NOW - timedelta(hours=1))} if measured else {})
+    account = row(quota, reading)
+    assert account['state'] == 'ahead_of_pace'
+    summary = account['summary']
+    assert 'ahead of pace; allowance lasts about 18h' in summary
+    assert 'credit runway unknown' in summary
+    assert '26h on credits' not in summary
+    assert '1 banked reset' in summary
+    assert 'deficit' not in summary and 'runs out' not in summary
+    assert account['windows'][0]['pace']['summary'] in summary
+
+
+@pytest.mark.parametrize('reset_in', [timedelta(0), timedelta(hours=-1)])
+@pytest.mark.parametrize('current', [False, True])
+def test_pre_reset_refusal_is_stale_and_never_claims_allowance_spent(quota, reset_in, current):
+    windows = [window(100, WEEK, reset_in, 'primary')]
+    if current:
+        windows.append(window(20, 300, timedelta(hours=2), 'secondary'))
+    reading = value(quota, 'codex', 'default', windows, observed=NOW - timedelta(hours=2),
+                    usage_credits=[{'balance': 26000, 'unit': 'credits'}],
+                    allowance={'ordinary_usage_allowed': False, 'limit_reached_type': 'primary'})
+    account = row(quota, reading)
+    assert account['status'] == 'stale'
+    assert account['state'] not in ('credit_only', 'exhausted')
+    assert 'stale' in account['summary'] and 'allowance spent' not in account['summary']
+    assert not account.get('drawing_credits')
+    assert account['display_window'] == ('secondary' if current else None)
+
+
+@pytest.fixture(scope='module')
+def swift_projection(tmp_path_factory):
+    if sys.platform != 'darwin' or not shutil.which('swiftc'):
+        pytest.skip('menu bar formatter requires macOS Swift')
+    root = tmp_path_factory.mktemp('quota-swift')
+    main = root / 'main.swift'
+    main.write_text('import Foundation\nlet report = try QuotaReport.decode(Data(contentsOf: URL(fileURLWithPath: CommandLine.arguments[1])))\nlet now = try Date(CommandLine.arguments[2], strategy: .iso8601)\nprint(Fmt.projection(report.accounts[0].windows[0], now: now) ?? "")\n')
+    binary = root / 'projection'
+    result = subprocess.run(['swiftc', '-module-cache-path', str(root / 'cache'),
+                             str(ROOT / 'apps/quota-menubar/Sources/QuotaMenuBar/Report.swift'), str(main),
+                             '-o', str(binary)], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr[-4000:]
+    return binary
+
+
+@pytest.mark.parametrize('legacy', [False, True])
+def test_menu_bar_projection_names_allowance_and_keeps_reserve_runway(quota, tmp_path, swift_projection, legacy):
+    reading = value(quota, 'codex', 'default', [window(33, WEEK, timedelta(hours=159), 'primary')],
+                    usage_credits=[{'balance': 26000, 'unit': 'credits'}], credits={'reset_credits': 1})
+    account = row(quota, reading)
+    pace = account['windows'][0]['pace']
+    if legacy:
+        pace.pop('summary')
+        pace['state'] = 'deficit'
+    path = tmp_path / 'report.json'
+    path.write_text(json.dumps({'schema': quota.REPORT_SCHEMA, 'enabled': True, 'accounts': [account]}))
+    result = subprocess.run([str(swift_projection), str(path), iso(NOW)], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr[-1000:]
+    assert 'allowance' in result.stdout.lower() and 'empty' not in result.stdout.lower()
+    if not legacy:
+        assert pace['summary'].lower() in result.stdout.lower()
+        assert '26,000 credits' in result.stdout and '1 banked reset' in result.stdout
+
+
+@pytest.mark.parametrize('used', [60, 100])
+@pytest.mark.parametrize('reset_in', [timedelta(0), timedelta(hours=-1)])
+def test_fresh_post_reset_refusal_remains_exhausted(quota, used, reset_in):
+    reading = value(quota, 'codex', 'default', [window(used, WEEK, reset_in, 'primary')],
+                    allowance={'ordinary_usage_allowed': False})
+    account = row(quota, reading)
+    assert account['state'] == 'exhausted'
+    assert account['status'] == 'ok'
+    assert 'stale' not in account['summary']
+
+
+@pytest.mark.parametrize('used', [0, 30])
+@pytest.mark.parametrize('observed_in', [-timedelta(hours=1), timedelta(0)])
+def test_fresh_non_exhausted_lapsed_window_does_not_bind_the_account(quota, used, observed_in):
+    reading = value(quota, 'codex', 'default', [window(used, 300, -timedelta(hours=1), 'primary'),
+                                              window(10, WEEK, timedelta(days=3.5), 'secondary')],
+                    observed=NOW + observed_in)
+    account = row(quota, reading)
+    assert account['state'] == 'reserve' and account['status'] == 'ok'
+    assert account['summary'].startswith('secondary:')
+    assert account['display_window'] == 'secondary'
+
+
+def test_fresh_reading_whose_windows_all_reset_is_unknown_not_unreported(quota):
+    reading = value(quota, 'codex', 'default', [window(30, 300, -timedelta(hours=1), 'primary'),
+                                              window(40, WEEK, -timedelta(hours=1), 'secondary')])
+    account = row(quota, reading)
+    assert account['state'] == 'unknown'
+    assert account['summary'] == 'reset passed; awaiting a fresh reading'
+
+
+@pytest.mark.parametrize('used,reached', [(100, None), (30, 'primary'), (30, 'five_hour'), (30, None)])
+def test_fresh_exhaustion_or_refusal_still_binds_a_lapsed_window(quota, used, reached):
+    reading = value(quota, 'codex', 'default', [window(used, 300, -timedelta(hours=1), 'primary', raw_kind='five_hour'),
+                                              window(10, WEEK, timedelta(days=3.5), 'secondary')],
+                    **({'allowance': {'ordinary_usage_allowed': False,
+                                     **({'limit_reached_type': reached} if reached else {})}}
+                       if used < 100 else {}))
+    account = row(quota, reading)
+    assert account['state'] == 'exhausted' and account['status'] == 'ok'
+    assert account['summary'].startswith('primary:')
+
+
+@pytest.mark.parametrize('reached,all_reset,spend_cap,unreported,exhausted', [
+    ('primary', False, False, [], False),
+    ('primary', False, False, ['unrelated_window'], False),
+    ('secondary', False, False, [], True),
+    ('unreported_window', True, False, ['unreported_window'], True),
+    (None, False, False, [], True),
+    (None, True, False, [], False),
+    (None, True, False, ['missing'], True),
+    ('primary', True, True, [], True),
+    ('workspace_member_credits_depleted', True, False, [], True),
+])
+def test_reset_only_drops_the_refusal_for_its_own_window(quota, reached, all_reset, spend_cap, unreported, exhausted):
+    reading = value(quota, 'codex', 'default', [
+        window(60, WEEK, timedelta(hours=-1), 'primary'),
+        window(20, 300, timedelta(hours=-1) if all_reset else timedelta(hours=2), 'secondary')],
+        observed=NOW - timedelta(hours=2), unreported=unreported,
+        allowance={'ordinary_usage_allowed': False, 'spend_control_reached': spend_cap,
+                   **({'limit_reached_type': reached} if reached else {})})
+    account = row(quota, reading)
+    assert (account['state'] == 'exhausted') is exhausted
+
+
+def test_credit_runway_uses_the_anchor_while_credits_are_being_drawn(quota):
+    reading = value(quota, 'codex', 'default', [window(64.2, WEEK, timedelta(hours=135.7), 'primary')],
+                    allowance={'ordinary_usage_allowed': False}, usage_credits=[{'balance': 26000, 'unit': 'credits'}],
+                    credit_anchor={'balance': 27000, 'observed_at': iso(NOW - timedelta(hours=1))})
+    account = row(quota, reading)
+    assert account['state'] == 'credit_only'
+    assert 'then about 26h on credits' in account['windows'][0]['pace']['summary']
+
+
+def test_allowance_lasting_to_reset_does_not_append_credit_runway(quota):
+    reading = value(quota, 'codex', 'default', [window(90, WEEK, timedelta(hours=1), 'primary')],
+                    usage_credits=[{'balance': 26000, 'unit': 'credits'}])
+    account = row(quota, reading)
+    assert account['windows'][0]['pace']['will_last_to_reset'] is True
+    assert 'allowance lasts until reset' in account['summary']
+    assert 'then' not in account['summary'] and 'credit runway' not in account['summary']

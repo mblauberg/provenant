@@ -41,6 +41,13 @@ import context_usage
 import process_info
 import run_lineage
 import provider_output
+try:
+    from . import instruction_quarantine, agy_home
+except ImportError:
+    import instruction_quarantine
+    import agy_home
+instruction_quarantine.provider_exec = sys.modules[__name__]
+agy_home.provider_exec = sys.modules[__name__]
 import stall_watchdog
 from _shared import harness_profile
 from trusted_git import owner_location, prepare_writer_ref, writer_git_writes, writer_read_only
@@ -2533,7 +2540,7 @@ def instruction_snapshot(cwd):
     # Store starting files Git does not already hold, so a quarantine can put them back.
     known = {entry[1] for view in ("tree", "index") for entry in snapshot[view].values()}
     for path, entry in snapshot["disk"].items():
-        if entry[1] not in known and _store_blob(cwd, path) != entry:
+        if entry[1] not in known and instruction_quarantine._store_blob(cwd, path) != entry:
             raise ValueError(f"{path} changed during the check")
     return snapshot
 
@@ -2574,199 +2581,10 @@ def authored_instruction_changes(cwd, start):
                    if key not in views[2])
     # A path the lane took in from an integration branch must keep that branch's version, so a
     # merge that discards it (git merge -s ours) is caught too.
-    restore = _restore_views(cwd, start)
+    restore = instruction_quarantine._restore_views(cwd, start)
     for name, view in zip(("head", "index", "disk"), views):
         changed.update(key for key in restore["integrated"] if view.get(key) != restore[name].get(key))
     return sorted(key + (" (unresolved conflict)" if key in conflicts else "") for key in changed | conflicts)
-
-
-QUARANTINE_IDENTITY = {"GIT_AUTHOR_NAME": "Provenant Fabric", "GIT_AUTHOR_EMAIL": "fabric@provenant.invalid",
-                       "GIT_COMMITTER_NAME": "Provenant Fabric", "GIT_COMMITTER_EMAIL": "fabric@provenant.invalid"}
-
-
-def _git_bytes(cwd, *args, input=None, env=None):
-    """_git_output for object writes: raw bytes in and out, and no hook or signing command either."""
-    environment = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
-    result = subprocess.run(
-        ["git", "-C", str(cwd), "-c", "core.fsmonitor=false", "-c", "protocol.allow=never",
-         "-c", "core.hooksPath=/dev/null", "-c", "commit.gpgSign=false", *args],
-        input=input, capture_output=True, timeout=30,
-        env={**environment, "GIT_NO_LAZY_FETCH": "1", **(env or {})},
-    )
-    if result.returncode != 0:
-        raise ValueError(os.fsdecode(result.stderr).strip() or f"git {args[0]} failed")
-    return result.stdout
-
-
-def quarantinable(changes):
-    """Ordinary paths below .agents/ the owner can archive and restore safely."""
-    return all(change.startswith(INSTRUCTION_DIR + "/") and not change.endswith(" (unresolved conflict)")
-               for change in changes)
-
-
-def _is_ancestor(cwd, ancestor, descendant):
-    try:
-        _git_bytes(cwd, "merge-base", "--is-ancestor", ancestor, descendant)
-    except ValueError:
-        return False
-    return True
-
-
-def _quarantine_target(cwd, start_head):
-    """The .agents entries a quarantined path returns to.
-
-    That is the start commit's, or an integration ref's the lane has since merged or rebased onto,
-    taking each path from whichever side changed it since their merge base.
-    """
-    def tree(rev):
-        return _instruction_entries(cwd, ("ls-tree", "-r", "-z", "--full-tree", rev))[0]
-
-    target = tree(start_head)
-    for ref in _integration_refs(cwd):
-        if not _is_ancestor(cwd, ref, "HEAD") or _is_ancestor(cwd, ref, start_head):
-            continue
-        incoming = tree(ref)
-        if _is_ancestor(cwd, start_head, ref):
-            target = incoming
-            continue
-        base = tree(_git_output(cwd, "merge-base", start_head, ref).strip())
-        target = {path: entry for path in set(target) | set(incoming)
-                  if (entry := (incoming if target.get(path) == base.get(path) else target).get(path))}
-    return target
-
-
-def _restore_views(cwd, start):
-    """What each view of a quarantined .agents path returns to.
-
-    HEAD returns to the quarantine target. The index and files return to their starting content,
-    except a path an integration branch the lane took in changed, which takes that branch's version.
-    """
-    target = _quarantine_target(cwd, start["head"])
-    integrated = {path for path in set(target) | set(start["tree"]) if target.get(path) != start["tree"].get(path)}
-
-    def view(entries):
-        return {path: entry for path in set(entries) | integrated
-                if (entry := (target if path in integrated else entries).get(path))}
-
-    return {"head": target, "index": view(start["index"]), "disk": view(start["disk"]), "integrated": integrated}
-
-
-def _store_blob(cwd, path):
-    """Write the file or link at a worktree path to the object store without filters; None when absent."""
-    file = Path(cwd).resolve() / path
-    # A path under a link or a replaced directory is not the lane's file at that path.
-    if file.parent.resolve() != file.parent or not os.path.lexists(file):
-        return None
-    status = file.lstat()
-    if stat.S_ISLNK(status.st_mode):
-        mode, data = "120000", os.fsencode(os.readlink(file))
-    elif stat.S_ISREG(status.st_mode):
-        mode = "100755" if status.st_mode & 0o100 else "100644"
-        with open(os.open(file, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK), "rb") as handle:
-            data = handle.read()
-    else:
-        raise ValueError(f"{path} is not a file or link")
-    return mode, os.fsdecode(_git_bytes(cwd, "hash-object", "-w", "--no-filters", "--stdin", input=data)).strip()
-
-
-def _index_info(entries, paths, zero):
-    """update-index -z --index-info input setting each path to its entry, removals first."""
-    removals = [f"0 {zero}\t{path}\0" for path in paths if path not in entries]
-    updates = [f"{entries[path][0]} {entries[path][1]}\t{path}\0" for path in paths if path in entries]
-    return os.fsencode("".join(removals + updates))
-
-
-QUARANTINE_PATCHES = (("disk", "protected.patch"), ("index", "protected.index.patch"),
-                      ("head", "protected.head.patch"))
-
-
-def quarantine_instruction_changes(cwd, start, changes, attempt_dir, *, restore_changes=True, published=None):
-    """Move a lane's authored .agents changes out of its worktree into patches the chair applies.
-
-    Each of the lane's files, index and HEAD is archived as a patch from the view's restore point
-    (protected.patch for files; index and HEAD patches only when they hold something else). A commit,
-    the index and the files then return to their restore points. Blobs are hashed and written
-    without filters, so no command the repository configures runs. With restore_changes=False,
-    archive only. Returns the patches written; protected.patch may be empty for an index-only edit.
-    """
-    root = Path(cwd).resolve()
-    paths = sorted(changes)
-    restore = _restore_views(cwd, start)
-    zero = "0" * (64 if start["object_format"] == "sha256" else 40)
-    head = os.fsdecode(_git_bytes(cwd, "rev-parse", "--verify", "HEAD^{commit}")).strip()
-    lane = {"head": _instruction_entries(cwd, ("ls-tree", "-r", "-z", "--full-tree", head))[0],
-            "index": _instruction_entries(cwd, ("ls-files", "--stage", "-z"), index=True)[0],
-            "disk": {path: entry for path in paths if (entry := _store_blob(cwd, path))}}
-    if published is None:
-        published = []
-    # Scratch files stay out of the attempt directory, which a lane may be able to write.
-    with tempfile.TemporaryDirectory() as private:
-        scratch_index = Path(private, "index")
-
-        def tree_of(entries, base=None):
-            scratch_index.unlink(missing_ok=True)
-            environment = {"GIT_INDEX_FILE": str(scratch_index)}
-            if base is not None:
-                _git_bytes(cwd, "read-tree", base, env=environment)
-            _git_bytes(cwd, "update-index", "-z", "--index-info", input=_index_info(entries, paths, zero),
-                       env=environment)
-            return os.fsdecode(_git_bytes(cwd, "write-tree", env=environment)).strip()
-
-        written = set()
-        for view, name in QUARANTINE_PATCHES:
-            patch = _git_bytes(cwd, "diff", "--binary", "--full-index", "--no-renames", "--no-ext-diff",
-                               "--no-textconv", "--no-color", "--src-prefix=a/", "--dst-prefix=b/",
-                               tree_of(restore[view]), tree_of(lane[view]))
-            if name == "protected.patch" or (patch and patch not in written):
-                written.add(patch)
-                Path(private, name).write_bytes(patch)
-                # Replace, never follow, whatever the lane left at the destination.
-                install(str(Path(private, name)), str(Path(attempt_dir, name)))
-                published.append(Path(attempt_dir, name))
-        if not restore_changes:
-            return published
-        tree = tree_of(restore["head"], base=head)
-        if tree != os.fsdecode(_git_bytes(cwd, "rev-parse", head + "^{tree}")).strip():
-            message = (f"fabric: quarantine protected {INSTRUCTION_DIR}/ changes\n\n"
-                       f"Saved to {', '.join(map(str, published))}.\n")
-            commit = os.fsdecode(_git_bytes(cwd, "commit-tree", tree, "-p", head, "-m", message,
-                                            env=QUARANTINE_IDENTITY)).strip()
-            _git_bytes(cwd, "update-ref", "-m", "fabric: quarantine", "HEAD", commit, head)
-    _git_bytes(cwd, "update-index", "-z", "--index-info", input=_index_info(restore["index"], paths, zero))
-    for path in paths:
-        file = root / path
-        if file.parent.resolve() == file.parent and os.path.lexists(file):
-            if file.is_dir() and not file.is_symlink():
-                raise ValueError(f"{path} is a directory")
-            file.unlink()
-    for path in paths:
-        if path not in restore["disk"] or restore["disk"][path][0] == "160000":
-            continue
-        file = root / path
-        if file.is_dir() and not file.is_symlink():
-            file.rmdir()  # A directory the lane put where the start had a file; its files went above.
-        file.parent.mkdir(parents=True, exist_ok=True)
-        if file.parent.resolve() != file.parent:
-            raise ValueError(f"{path} lies below a link")
-        mode, oid = restore["disk"][path]
-        data = _git_bytes(cwd, "cat-file", "blob", oid)
-        if mode == "120000":
-            os.symlink(os.fsdecode(data), file)
-            continue
-        descriptor = os.open(file, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
-                             0o755 if mode == "100755" else 0o644)
-        with open(descriptor, "wb") as handle:
-            handle.write(data)
-    instructions = root / INSTRUCTION_DIR
-    for path in paths:  # Tidy directories the lane added and quarantine emptied.
-        parent = (root / path).parent
-        while parent != instructions and parent.is_relative_to(instructions) and parent.is_dir():
-            try:
-                parent.rmdir()
-            except OSError:
-                break
-            parent = parent.parent
-    return published
 
 
 def tool_cache_environment(plan, cache, inherited):
@@ -2785,260 +2603,6 @@ def tool_cache_environment(plan, cache, inherited):
             MYPY_CACHE_DIR=str(cache / "mypy"),
         )
     return environment
-
-
-# agy rewrites its bin/agentapi shim before running a command and puts bin/ on that command's
-# PATH, so a later unconfined agy session or sidecar would run whatever a lane left there (#1055).
-# A confined lane gets a HOME of links to the real entries, with its own antigravity-cli/bin; the
-# sandbox still judges every access through a link at the real path, and the live bin/ stays
-# read-only. agy signs in from the login Keychain, so its token files are neither linked nor
-# copied back: a refresh renamed over a link would land in the overlay.
-AGY_PRIVATE_BIN = Path(".gemini/antigravity-cli/bin")
-AGY_UNLINKED = ("agentapi", "antigravity-oauth-token", "mcp_oauth_tokens.json", "oauth_creds.json")
-# Granted top-level state agy rewrites by temp-and-rename, which replaces the overlay's link rather
-# than the real file. SQLite resolves its link and keeps its journals beside the real database.
-AGY_RENAMED_STATE = ("history.jsonl", "jetbox_summaries_proto.pb", "jetski_state.pbtxt",
-                     "last_check.timestamp", "installation_id")
-AGY_STATE_COPY_MAX = 64 * 1024 * 1024
-AGY_DATABASE = "conversation_summaries.db"
-AGY_COPY_BACK_LOCK = ".provenant-copy-back.lock"
-AGY_COPY_BACK_WAIT = 10
-
-
-# The staged overlay: its path for HOME, its name in the attempt tmp, and the identity of each
-# real renamed-state file at staging, so copy-back never overwrites another session's update.
-AgyHome = namedtuple("AgyHome", "path name before")
-
-
-def _identity(directory_fd, name):
-    try:
-        found = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
-    except FileNotFoundError:
-        return None
-    return found.st_dev, found.st_ino, found.st_size, found.st_mtime_ns
-
-
-def _link_overlay(fd, source, source_fd, parts):
-    """Link source's entries into the open directory fd, descending into a real copy of parts[0].
-
-    source_fd is the real directory opened without following links, or None when it is missing.
-    """
-    part = parts[0] if parts else None
-    for name in sorted(os.listdir(source_fd)) if source_fd is not None else ():
-        if name != part and not name.startswith(AGY_UNLINKED):
-            os.symlink(source / name, name, dir_fd=fd)
-    if part is None:
-        return
-    os.mkdir(part, 0o700, dir_fd=fd)
-    child = os.open(part, DIRECTORY_FLAGS, dir_fd=fd)
-    child_source = None
-    try:
-        try:
-            child_source = os.open(part, DIRECTORY_FLAGS, dir_fd=source_fd) if source_fd is not None else None
-        except FileNotFoundError:
-            pass
-        _link_overlay(child, source / part, child_source, parts[1:])
-    finally:
-        for descriptor in (child, child_source):
-            if descriptor is not None:
-                os.close(descriptor)
-
-
-def stage_agy_home(plan, tmp_fd, private_tmp):
-    """The confined agy lane's HOME: a fresh overlay of links per attempt in the open attempt tmp,
-    made after its state directories so each of them is a link too."""
-    if plan["adapter"] != "agy" or plan["applied"].get("confinement") != "sandbox-exec":
-        return None
-    _prepare_state_directories(plan)
-    real_fd = _open_canonical_dir(_provider_state(plan)["resolved_home"] / "antigravity-cli")
-    try:
-        # SQLite resolves a link to its database; with no database to link, it would make one in
-        # the overlay that cleanup then discards. An empty file is a valid empty database.
-        try:
-            os.close(os.open(AGY_DATABASE, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600,
-                             dir_fd=real_fd))
-        except FileExistsError:
-            pass
-        before = {name: _identity(real_fd, name) for name in AGY_RENAMED_STATE}
-    finally:
-        os.close(real_fd)
-    name = "agy-home-" + uuid.uuid4().hex[:12]
-    os.mkdir(name, 0o700, dir_fd=tmp_fd)
-    home = _open_canonical_dir(Path.home().resolve())
-    overlay = None
-    try:
-        overlay = os.open(name, DIRECTORY_FLAGS, dir_fd=tmp_fd)
-        _link_overlay(overlay, Path.home(), home, AGY_PRIVATE_BIN.parts)
-    except BaseException:
-        attempt_storage.remove_at(tmp_fd, name)
-        raise
-    finally:
-        for descriptor in (home, overlay):
-            if descriptor is not None:
-                os.close(descriptor)
-    return AgyHome(Path(private_tmp) / name, name, before)
-
-
-def _read_overlay_state(lane_fd, name):
-    """A renamed state file's bytes, or (None, problem); never follows a link."""
-    try:
-        fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=lane_fd)
-    except FileNotFoundError:
-        return None, None
-    except OSError as exc:
-        linked = stat.S_ISLNK(os.stat(name, dir_fd=lane_fd, follow_symlinks=False).st_mode)
-        return None, None if linked else f"{name}: {exc}"
-    try:
-        found = os.fstat(fd)
-        if not stat.S_ISREG(found.st_mode):
-            return None, f"{name}: not a regular file"
-        if found.st_nlink != 1:  # a hard link would copy back another file's bytes
-            return None, f"{name}: not a single-link regular file"
-        chunks, size = [], 0
-        while size <= AGY_STATE_COPY_MAX and (chunk := os.read(fd, 1024 * 1024)):
-            chunks.append(chunk)
-            size += len(chunk)
-        if max(size, found.st_size) > AGY_STATE_COPY_MAX:
-            return None, f"{name}: larger than {AGY_STATE_COPY_MAX} bytes"
-        if size != found.st_size:
-            return None, f"{name}: changed while being read"
-        return b"".join(chunks), None
-    finally:
-        os.close(fd)
-
-
-def _install_state(directory, name, data):
-    """Replace name in the open real directory by a staged file renamed over it."""
-    staged = f".{name}.provenant-{uuid.uuid4().hex}"
-    try:
-        current = os.stat(name, dir_fd=directory, follow_symlinks=False)
-        mode = stat.S_IMODE(current.st_mode) & 0o666 if stat.S_ISREG(current.st_mode) else 0o600
-    except FileNotFoundError:
-        mode = 0o600
-    try:
-        _write_new(directory, staged, data, mode)
-        os.replace(staged, name, src_dir_fd=directory, dst_dir_fd=directory)
-    except OSError:
-        try:
-            os.unlink(staged, dir_fd=directory)
-        except OSError:
-            pass
-        raise
-
-
-def _append_history(directory, data, before):
-    """Append only the lines the lane added to history.jsonl since staging; others may append too."""
-    flags = os.O_RDWR | os.O_APPEND | os.O_NOFOLLOW | (os.O_CREAT if before is None else 0)
-    try:
-        fd = os.open("history.jsonl", flags, 0o600, dir_fd=directory)
-    except FileNotFoundError:
-        return "history.jsonl: removed since staging"
-    try:
-        found = os.fstat(fd)
-        start = 0 if before is None else before[2]
-        if not stat.S_ISREG(found.st_mode) or found.st_nlink != 1:
-            return "history.jsonl: not a single-link regular file"
-        if before is not None and ((found.st_dev, found.st_ino) != before[:2] or found.st_size < start):
-            return "history.jsonl: replaced since staging"
-        if start > len(data):  # never read a staged size the copy itself does not reach
-            return "history.jsonl: shorter than at staging"
-        for offset in range(0, start, 1024 * 1024):
-            chunk = data[offset:min(start, offset + 1024 * 1024)]
-            if os.pread(fd, len(chunk), offset) != chunk:
-                return "history.jsonl: rewritten rather than appended"
-        view = memoryview(data)[start:]
-        while view:
-            view = view[os.write(fd, view):]
-        return None
-    finally:
-        os.close(fd)
-
-
-def finish_agy_home(plan, tmp_fd, home):
-    """Copy renamed state back to the real home, then remove the overlay. Returns warnings.
-
-    Every step starts from the attempt tmp held open since before staging or from a directory
-    opened from / without following a link, so a lane that swapped tmp, the overlay or an
-    ancestor cannot redirect a read, write or delete. A real file another session changed since
-    staging is kept, with a warning.
-    """
-    problems = []
-    fds = []
-    try:
-        fds.append(os.open(home.name, DIRECTORY_FLAGS, dir_fd=tmp_fd))
-        for part in AGY_PRIVATE_BIN.parts[:-1]:
-            fds.append(os.open(part, DIRECTORY_FLAGS, dir_fd=fds[-1]))
-        fds.append(_open_canonical_dir(_provider_state(plan)["resolved_home"] / "antigravity-cli"))
-        lane_fd, real_fd = fds[-2], fds[-1]
-        # Concurrent finishers take turns, so each compares and installs against the last install.
-        # A confined lane may read, and so lock, the file too: wait a bounded time, never forever.
-        fds.append(os.open(AGY_COPY_BACK_LOCK, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600, dir_fd=real_fd))
-        deadline = time.monotonic() + AGY_COPY_BACK_WAIT
-        while True:
-            try:
-                fcntl.flock(fds[-1], fcntl.LOCK_EX | fcntl.LOCK_NB)
-                break
-            except BlockingIOError:
-                if time.monotonic() > deadline:
-                    raise OSError(f"{AGY_COPY_BACK_LOCK} stayed locked for {AGY_COPY_BACK_WAIT}s") from None
-                time.sleep(0.05)
-        for name in AGY_RENAMED_STATE:
-            try:
-                data, problem = _read_overlay_state(lane_fd, name)
-                if data is None:
-                    pass
-                elif name == "history.jsonl":
-                    problem = _append_history(real_fd, data, home.before[name])
-                elif _identity(real_fd, name) != home.before[name]:
-                    problem = f"{name}: changed by another session since staging; kept it"
-                else:
-                    _install_state(real_fd, name, data)
-            except OSError as exc:
-                problem = f"{name}: {exc}"
-            if problem:
-                problems.append("agy state not copied back: " + problem)
-    except OSError as exc:
-        problems.append(f"agy state not copied back: {exc}")
-    finally:
-        for fd in fds:
-            os.close(fd)
-    left = attempt_storage.remove_at(tmp_fd, home.name)
-    if left:
-        problems.append("agy home overlay not removed: " + ", ".join(left))
-    return problems
-
-
-def needs_ps_shim(plan):
-    """macOS refuses to exec the setuid /bin/ps inside any sandbox, native or sandbox-exec."""
-    return sys.platform == "darwin" and (
-        (plan["adapter"] == "codex" and plan["applied"]["sandbox"] != "full")
-        or plan["applied"].get("confinement") == "sandbox-exec")
-
-
-def stage_ps_shim(tmp_fd, private_tmp):
-    """Copy the ps shim into the attempt's temp, which every sandbox lets the lane read.
-
-    The product checkout may sit below a denied home or outside a read-only lane's cwd. A retry
-    reuses the attempt tmp, so whatever the earlier lane left at the shim is removed, never
-    written through.
-    """
-    source = Path(__file__).resolve().parent
-    left = attempt_storage.remove_at(tmp_fd, "provenant-shim")
-    if left:
-        raise OSError(f"ps shim left by an earlier try was not removed: {', '.join(left)}")
-    os.mkdir("provenant-shim", 0o700, dir_fd=tmp_fd)
-    stage = os.open("provenant-shim", DIRECTORY_FLAGS, dir_fd=tmp_fd)
-    try:
-        _write_new(stage, "process_info.py", (source / "process_info.py").read_bytes(), 0o644)
-        os.mkdir("bin", 0o700, dir_fd=stage)
-        shim_bin = os.open("bin", DIRECTORY_FLAGS, dir_fd=stage)
-        try:
-            _write_new(shim_bin, "ps", (source / "bin" / "ps").read_bytes(), 0o755)
-        finally:
-            os.close(shim_bin)
-    finally:
-        os.close(stage)
-    return Path(private_tmp) / "provenant-shim" / "bin"
 
 
 def _check_model(plan, env):
@@ -3228,8 +2792,8 @@ def _run_attempt(
         for index, (key, value) in enumerate(WRITER_GIT_CONFIG):
             environment[f"GIT_CONFIG_KEY_{index}"] = key
             environment[f"GIT_CONFIG_VALUE_{index}"] = value
-    if needs_ps_shim(plan):
-        shim_dir = str(stage_ps_shim(tmp_fd, private_tmp))
+    if agy_home.needs_ps_shim(plan):
+        shim_dir = str(agy_home.stage_ps_shim(tmp_fd, private_tmp))
         environment["PATH"] = shim_dir + os.pathsep + environment.get("PATH", os.defpath)
     if plan["adapter"] == "claude":
         private_claude_tmp = private_tmp / "claude"
@@ -3419,7 +2983,7 @@ def _run_attempt(
             signal.signal(sig, handle_signal)
     input_file = None
     workspace = None
-    agy_home, agy_home_warnings = None, []
+    agy_staged_home, agy_home_warnings = None, []
     browser_tmp, browser_tmp_identity, browser_tmp_warnings = None, None, []
     selector = selectors.DefaultSelector()
     try:
@@ -3430,9 +2994,9 @@ def _run_attempt(
             plan["applied"]["browser_tmpdir"] = str(browser_tmp)
         _prepare_codex_capability_home(plan, environment)
         _prepare_codex_state_dir(plan)
-        agy_home = stage_agy_home(plan, tmp_fd, private_tmp)
-        if agy_home:
-            environment["HOME"] = str(agy_home.path)
+        agy_staged_home = agy_home.stage_agy_home(plan, tmp_fd, private_tmp)
+        if agy_staged_home:
+            environment["HOME"] = str(agy_staged_home.path)
         if plan["adapter"] != "codex" and "browser" in plan["applied"].get("capabilities", []):
             environment["MAC_CHROMIUM_TMPDIR"] = str(browser_tmp)
         if plan["stdin_policy"] == "prompt":
@@ -3620,8 +3184,8 @@ def _run_attempt(
                 try:
                     if subreaper:
                         _release_subreaper()
-                    if agy_home:
-                        agy_home_warnings = finish_agy_home(plan, tmp_fd, agy_home)
+                    if agy_staged_home:
+                        agy_home_warnings = agy_home.finish_agy_home(plan, tmp_fd, agy_staged_home)
                 finally:
                     if browser_tmp is not None and browser_tmp_identity is not None:
                         # Cleanup trouble must not discard the lane's result; report it instead.
@@ -3848,7 +3412,7 @@ def _run_attempt(
                           (status == "cancelled" and termination_request)
                           else plan.get("instruction_policy", "quarantine"))
     # Assurance failure blocks landing, independently of a usable provider result.
-    if instruction_changes and instruction_policy == "allow" and quarantinable(instruction_changes):
+    if instruction_changes and instruction_policy == "allow" and instruction_quarantine.quarantinable(instruction_changes):
         warnings.append("lane changed " + INSTRUCTION_DIR + "/ (allowed by policy): " + ", ".join(instruction_changes))
         instruction_changes = []
     if instruction_changes:
@@ -3865,9 +3429,9 @@ def _run_attempt(
                 marker.write_text("# Instruction diff unavailable: " + quarantine["reason"] + "\n")
                 install(str(marker), str(patch))
             quarantine["patches"] = [str(patch)]
-            if not quarantinable(instruction_changes) or not isinstance(instruction_start, dict):
+            if not instruction_quarantine.quarantinable(instruction_changes) or not isinstance(instruction_start, dict):
                 raise ValueError("no safe instruction diff can be captured; inspect the retained worktree")
-            patches = quarantine_instruction_changes(
+            patches = instruction_quarantine.quarantine_instruction_changes(
                 plan["cwd"], instruction_start, instruction_changes, Path(plan["run_dir"]),
                 restore_changes=instruction_policy == "quarantine", published=patches)
             quarantine["patches"] = list(map(str, patches))

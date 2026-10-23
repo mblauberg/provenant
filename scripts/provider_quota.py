@@ -78,7 +78,7 @@ WAIT_HOURS = 6
 # How routing treats an account whose allowance is spent but whose credits keep it usable (`quota.credits_policy`).
 CREDITS_POLICIES = ('last_resort', 'normal', 'never')
 UNKNOWN_RESET_SECONDS = 3600  # How long a refused allowance cools when no reset time is known.
-SEVERITY = ('exhausted', 'unknown', 'unreported', 'deficit', 'on_pace', 'reserve', 'early', 'not_started')
+SEVERITY = ('exhausted', 'unknown', 'unreported', 'deficit', 'ahead_of_pace', 'on_pace', 'reserve', 'early', 'not_started')
 _identity_spec = importlib.util.spec_from_file_location('provider_identity', HERE / 'provider_identity.py')
 identity = sys.modules.get('provider_identity')
 if identity is None:
@@ -652,13 +652,40 @@ def claude_account_exhausted(value, now):
                for row in (value or {}).get('windows', []))
 
 
-def choose_claude_account(snapshots, now):
-    """Use cached windows: reserve first, then unknown readings, then least deficit.
+def allowance_runway_covered(value, window, budget, now, banked=None):
+    """Whether allowance and usable reserves cover the estimate through the natural reset."""
+    if budget.get('will_last_to_reset') is True:
+        return True
+    reset, runs_out = parse_time(window.get('reset_at')), parse_time(budget.get('runs_out_at'))
+    headroom = budget.get('headroom_percent') or 0
+    if not reset or not runs_out or runs_out <= now or not headroom:
+        return False
+    counted = value.get('credits') or banked or {}
+    resets = normalise_resets(value.get('resets')) or normalise_resets({'available': counted.get('reset_credits')})
+    extra = (runs_out - now).total_seconds() * 100 / headroom * (resets['available'] if resets else 0)
+    gap = (reset - runs_out).total_seconds() - extra
+    if gap <= 0:
+        return True
+    credit = credit_draw(value, True)
+    if not credit or (parse_time(credit.get('expires_at')) or reset) < reset:
+        return False
+    if credit['unlimited']:
+        return True
+    drawing = credit_draw(value, allowance_spent(value, {'pace': budget}))
+    rate = burn_rate(value, credit) if drawing else None
+    floor = number(setting('credit_floor')) or 0
+    return bool(rate and (credit['balance'] - floor) / rate * 3600 >= gap)
 
-    Exhausted accounts cannot launch. Spend projected weekly waste first among
-    healthy accounts, preferring Pro on ties, then use labels for stable ordering.
+
+def choose_claude_account(snapshots, now):
+    """Prefer covered weekly runway, then unknown readings, then the smallest shortage.
+
+    Exhausted accounts cannot launch. Among covered accounts, spend projected
+    weekly waste first, then prefer Pro, then labels. Shortages sort by pace delta,
+    then labels; unknown readings sort by labels.
     """
     ranked = []
+    banked = credits()
     for label, value in snapshots.items():
         windows = {row.get('name'): row for row in (value or {}).get('windows', [])}
         short, weekly = windows.get('five_hour'), windows.get('seven_day')
@@ -671,10 +698,10 @@ def choose_claude_account(snapshots, now):
             continue
         weekly = {**weekly, 'used_percent': 0} if reset_passed(weekly, now) else weekly
         budget = pace(weekly, now)
-        deficit = budget['state'] == 'deficit' or budget.get('will_last_to_reset') is False
         if budget['state'] in ('unknown', 'unreported'):
             score = (1, 0, 0, label)
-        elif deficit:
+        elif budget.get('will_last_to_reset') is False and not allowance_runway_covered(
+                value, weekly, budget, now, banked.get(('claude', label, telemetry_host()))):
             score = (2, max(0, budget.get('delta_percent') or 0), 0, label)
         else:
             score = (0, -budget.get('expiring_headroom_percent', 0), value.get('plan') != 'pro', label)
@@ -1064,10 +1091,10 @@ def pace(window, now):
     if actual == 0 and (reset is None or remaining <= 0 or
                         minutes and remaining > minutes * 60 + CLOCK_SKEW_SECONDS):
         return {**result, 'state': 'not_started', 'summary': 'window starts on first use'}
+    if remaining is not None and remaining <= 0:
+        return {**result, 'summary': f'reset passed at {iso(reset)}; awaiting a fresh reading'}
     if reset is None:
         return {**result, 'summary': 'reset time unreported; pace unknown'}
-    if remaining <= 0:
-        return {**result, 'summary': f'reset passed at {iso(reset)}; awaiting a fresh reading'}
     if not minutes:
         return {**result, 'summary': f'resets in {duration(remaining)}; window length unreported'}
     if remaining > minutes * 60 + CLOCK_SKEW_SECONDS:
@@ -1076,8 +1103,8 @@ def pace(window, now):
     elapsed = minutes * 60 - remaining
     expected = elapsed / (minutes * 60) * 100
     delta = actual - expected
-    state = 'deficit' if delta > PACE_TOLERANCE else 'reserve' if delta < -PACE_TOLERANCE else 'on_pace'
-    lead = f'{abs(delta):.0f}% in {state}' if state != 'on_pace' else 'on pace'
+    state = 'ahead_of_pace' if delta > PACE_TOLERANCE else 'reserve' if delta < -PACE_TOLERANCE else 'on_pace'
+    lead = 'ahead of pace' if state == 'ahead_of_pace' else f'{abs(delta):.0f}% in reserve' if state == 'reserve' else 'on pace'
     rate = actual / elapsed if elapsed > 0 else 0
     run_out = (100 - actual) / rate if rate > 0 else None
     lasts = run_out is None or run_out >= remaining
@@ -1087,7 +1114,7 @@ def pace(window, now):
                   expiring_headroom_percent=round(100 - projected, 1) if lasts else 0)
     if elapsed / (minutes * 60) < EARLY_SHARE:
         return {**result, 'state': 'early', 'summary': f'window just started; resets in {duration(remaining)}'}
-    tail = 'lasts until reset' if lasts else f'runs out in {duration(run_out)}'
+    tail = 'allowance lasts until reset' if lasts else f'allowance lasts about {duration(run_out)} at this rate'
     return {**result, 'state': state, 'summary': f'{lead}; {tail}'}
 
 
@@ -1367,14 +1394,19 @@ def route_states(now=None, *, selected_accounts=None):
         if not active or not value or value.get('status') not in ('ok', 'stale'):
             continue
         module = provider(name)
-        row = quota_display.describe(globals(), value, None, now)
+        banked = credits().get((name, label, telemetry_host()))
+        row = quota_display.describe(globals(), value, banked, now)
         current = [window for window in row['windows'] if not window.get('reset_passed')]
+        worst = binding(current)
+        headroom = bool(worst and (worst['pace'].get('will_last_to_reset') is True
+                                  or worst['used_percent'] < NEAR_EXHAUSTED))
         exhausted = [window['reset_at'] for window in current
                      if window['pace']['state'] == 'exhausted' and sets_state(window)]
-        if row['state'] == 'exhausted' and not exhausted:
+        if row['state'] == 'exhausted' and (not exhausted or
+                all(exhausted) and max(parse_time(reset) for reset in exhausted) <= now):
             exhausted = [refused_until(binding(current) or binding(row['windows']), value, now)]
         states[name] = {'adapter': getattr(module, 'ADAPTER', None), 'covers': list(getattr(module, 'COVERS', ())),
-                        'account': label, 'host': telemetry_host(), 'state': row['state'],
+                        'account': label, 'host': telemetry_host(), 'state': row['state'], 'has_headroom': headroom,
                         'summary': row['summary'], 'observed_at': value.get('observed_at'),
                         'cooling_until': max(exhausted) if exhausted and all(exhausted) else None,
                         # Pools pick a last-resort adapter only when nothing with allowance qualifies.
@@ -1400,7 +1432,8 @@ def apply_to_cooldowns(records, now=None, *, selected_accounts=None, include_exh
         # An account drawing on credits adds no cooldown and clears only the ones quota set. A real
         # refusal stays until it expires or a reading shows allowance again: credits may be switched off.
         drawing = state['state'] == 'credit_only'
-        if observed and (drawing or state['state'] in ('reserve', 'on_pace', 'early', 'not_started')):
+        if observed and (drawing or state['has_headroom'] and
+                         state['state'] in ('ahead_of_pace', 'reserve', 'on_pace', 'early', 'not_started')):
             for key, record in records.items():
                 recorded = parse_time((record or {}).get('recorded_at'))
                 if (identity.matches(record, state) and str(key).split('/', 1)[0] == adapter and record.get('status') in ('usage_limited', 'quota_exhausted')

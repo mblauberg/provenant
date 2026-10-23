@@ -89,10 +89,11 @@ struct QuotaReport: Decodable {
         func isExpired(_ now: Date) -> Bool { resetAt.map { $0 <= now } ?? false }
     }
 
-    /// exhausted | unknown | unreported | deficit | on_pace | reserve | early | not_started
+    /// exhausted | unknown | unreported | ahead_of_pace | deficit (legacy) | on_pace | reserve | early | not_started
     struct Pace: Decodable {
         let state: String
         let runsOutAt: Date?
+        let summary: String?
     }
 
     static func decode(_ data: Data) throws -> QuotaReport {
@@ -355,13 +356,14 @@ enum Fmt {
         return date.timeIntervalSince(now) < 86_400 ? "back in \(until(date, now: now)!)" : "back \(moment(date, now: now))"
     }
 
-    /// An estimate, labelled as one, and only when the window would run out before it resets.
+    /// The allowance estimate and reserve runway, only when allowance would be spent before reset.
     static func projection(_ window: QuotaReport.Window, now: Date) -> String? {
         guard window.pace.state != "exhausted", let out = window.pace.runsOutAt, out > now,
               window.resetAt.map({ out < $0 }) ?? true else { return nil }
-        if out.timeIntervalSince(now) < 86_400 { return "At this pace, empty in \(until(out, now: now)!)" }
+        if window.pace.state == "ahead_of_pace", let summary = window.pace.summary { return sentence(summary) }
+        if out.timeIntervalSince(now) < 86_400 { return "At this pace, allowance lasts about \(until(out, now: now)!)" }
         let day = abs(out.timeIntervalSince(now)) < 6.5 * 86_400 ? weekday(out) : date(out)
-        return "At this pace, empty by \(day)"
+        return "At this pace, allowance lasts until \(day)"
     }
 
     /// "Gemini back Mon 9 am", for an exhausted pool that does not bind the account.

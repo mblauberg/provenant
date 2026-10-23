@@ -2013,10 +2013,9 @@ def test_claude_read_only_route_remains_the_default():
     assert record["worktree"] == ""
     assert record["read_only_guarantee"] == "enforced"
     assert "--permission-mode\ndefault" in recorded
-    assert "--tools\nRead,Grep,Glob" in recorded
+    assert "--tools\nRead,Grep,Glob,Bash\n" in recorded
+    assert "--allowedTools\nBash\n" in recorded
     assert "acceptEdits" not in recorded
-    assert "--allowedTools" not in recorded
-    assert "Bash" not in recorded
 
 
 def test_codex_worktree_writer_route_uses_the_workspace_write_sandbox():

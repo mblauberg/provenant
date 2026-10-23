@@ -18,10 +18,10 @@ from types import SimpleNamespace
 import pytest
 
 import quota_display
+from tests.support.quota import NOW, configure, quota, snapshot as build_snapshot, window
 
 
 ROOT = Path(__file__).resolve().parents[1]
-NOW = datetime(2026, 10, 22, 12, 0, tzinfo=UTC)
 WEEK = 7 * 24 * 60
 TOKEN = 'SECRET-TOKEN-VALUE'
 
@@ -33,45 +33,12 @@ def load(name, path):
     return module
 
 
-@pytest.fixture
-def quota(tmp_path, monkeypatch):
-    home = tmp_path / 'home'
-    home.mkdir()
-    monkeypatch.setenv('HOME', str(home))
-    monkeypatch.setenv('AGENT_FABRIC_STATE_ROOT', str(tmp_path / 'state'))
-    monkeypatch.setenv('AGENT_FABRIC_INSTANCE_ROOT', str(home / '.agents'))
-    for name in ('PROVENANT_QUOTA', 'CLAUDE_CONFIG_DIR', 'CODEX_HOME', 'XDG_DATA_HOME'):
-        monkeypatch.delenv(name, raising=False)
-    module = load('provider_quota_under_test', ROOT / 'scripts/provider_quota.py')
-
-    def refuse(*args, **kwargs):
-        raise AssertionError('tests never reach a real provider, CLI or credential store')
-    for name in ('run_process', 'open_process', 'urlopen', 'executable'):
-        monkeypatch.setattr(module, name, refuse)
-    monkeypatch.setattr(module, 'telemetry_host', lambda: 'studio')
-    return module
-
-
-def configure(tmp_path, value):
-    path = tmp_path / 'home/.agents/config/telemetry.json'
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(value))
-
-
 def iso(moment):
     return moment.isoformat().replace('+00:00', 'Z')
 
 
-def window(used, minutes, reset_in=None, name='seven_day'):
-    return {'name': name, 'raw_kind': name, 'used_percent': used, 'window_minutes': minutes,
-            'reset_at': iso(NOW + reset_in) if reset_in is not None else None}
-
-
 def snapshot(quota, provider='codex', windows=(), observed=NOW, account='default', host='studio', **extra):
-    value = {'schema': quota.SCHEMA, 'provider': provider, 'account': account, 'plan': None, 'host': host,
-             'active': True, 'priority': None, 'observed_at': iso(observed), 'attempted_at': iso(observed),
-             'source': 'test', 'status': 'ok', 'error': None, 'unreported': [], 'credits': None,
-             'windows': [quota.normalise_window(row) for row in windows], **extra}
+    value = build_snapshot(quota, provider, windows, observed, account, host, **extra)
     if account == 'default' and quota.provider(provider):
         quota.provider(provider).default_identity().mkdir(parents=True, exist_ok=True)
     configured = next((row for row in quota.accounts() if (row.provider, row.label) == (provider, account)), None)
@@ -82,14 +49,16 @@ def snapshot(quota, provider='codex', windows=(), observed=NOW, account='default
 
 # Pace ---------------------------------------------------------------------------------------
 
-def test_codex_45_percent_over_pace_is_a_deficit_that_runs_out_in_about_18_hours(quota):
+def test_above_even_pace_with_allowance_left_is_ahead_of_pace(quota):
     pace = quota.pace(window(64.2, WEEK, timedelta(hours=135.7)), NOW)
-    assert pace['state'] == 'deficit'
+    assert pace['state'] == 'ahead_of_pace'
     assert pace['delta_percent'] == pytest.approx(45, abs=0.5)
     assert pace['will_last_to_reset'] is False
     runs_out = quota.parse_time(pace['runs_out_at'])
     assert (runs_out - NOW).total_seconds() / 3600 == pytest.approx(18, abs=0.5)
     assert pace['expiring_headroom_percent'] == 0
+    assert 'ahead of pace' in pace['summary'] and 'allowance lasts about' in pace['summary']
+    assert 'runs out' not in pace['summary'] and 'deficit' not in pace['summary']
 
 
 def test_reserve_on_pace_exhausted_and_not_started_states(quota):
@@ -330,20 +299,24 @@ def claude_limit(kind, group, percent, resets_at, active=True, scope=None):
 
 
 def test_claude_limits_take_the_length_of_the_named_window_they_repeat(quota, monkeypatch):
-    # The live anese and pro shapes from 2026-10-22: `limits` repeat named windows without a length.
-    budget = {'utilization': 54.51754, 'resets_at': '2026-11-05T07:59:00+00:00', 'limit_dollars': 250,
+    # Live anese and pro shapes: `limits` repeat named windows without a length.
+    session_reset, weekly_reset, budget_reset, pro_reset = (iso(NOW + timedelta(hours=3)),
+                                                              iso(NOW + timedelta(days=6)),
+                                                              iso(NOW + timedelta(days=14)),
+                                                              iso(NOW + timedelta(days=3)))
+    budget = {'utilization': 54.51754, 'resets_at': budget_reset, 'limit_dollars': 250,
               'used_dollars': 136.29385, 'remaining_dollars': 113.70615}
-    anese = {'five_hour': {'utilization': 10.0, 'resets_at': '2026-10-22T15:00:00.280268+00:00'},
-             'seven_day': {'utilization': 3.0, 'resets_at': '2026-10-28T10:00:00.280288+00:00'},
+    anese = {'five_hour': {'utilization': 10.0, 'resets_at': session_reset},
+             'seven_day': {'utilization': 3.0, 'resets_at': weekly_reset},
              'iguana_necktie': budget, 'seven_day_opus': None,
-             'limits': [claude_limit('session', 'session', 10, '2026-10-22T15:00:00.280268+00:00'),
-                        claude_limit('weekly_all', 'weekly', 3, '2026-10-28T10:00:00.280288+00:00', active=False),
-                        claude_limit('weekly_scoped', 'weekly', 0, '2026-10-28T10:00:00+00:00', active=False,
+             'limits': [claude_limit('session', 'session', 10, session_reset),
+                        claude_limit('weekly_all', 'weekly', 3, weekly_reset, active=False),
+                        claude_limit('weekly_scoped', 'weekly', 0, weekly_reset, active=False,
                                      scope={'model': {'id': 'fable', 'display_name': 'Fable'}, 'surface': None})]}
     pro = {'five_hour': {'utilization': 0.0, 'resets_at': None},
-           'seven_day': {'utilization': 48.0, 'resets_at': '2026-10-25T19:59:59.866880+00:00'},
+           'seven_day': {'utilization': 48.0, 'resets_at': pro_reset},
            'limits': [claude_limit('session', 'session', 0, None, active=False),
-                      claude_limit('weekly_all', 'weekly', 48, '2026-10-25T19:59:59.866880+00:00')]}
+                      claude_limit('weekly_all', 'weekly', 48, pro_reset)]}
     claude = quota.provider('claude')
     lengths = {name: {row['name']: row['window_minutes'] for row in claude.parse(payload)['windows']}
                for name, payload in (('anese', anese), ('pro', pro))}
@@ -356,7 +329,7 @@ def test_claude_limits_take_the_length_of_the_named_window_they_repeat(quota, mo
     states = {row['account']: row['state'] for row in quota_display.report(vars(quota), values, NOW)['accounts']}
     assert states == {'anese': 'reserve', 'pro': 'reserve'}
     # An entry that repeats no named window keeps no length, is shown, and never sets state.
-    unmatched = {**pro, 'limits': [claude_limit('weekly_all', 'weekly', 90, '2026-10-26T00:00:00+00:00')]}
+    unmatched = {**pro, 'limits': [claude_limit('weekly_all', 'weekly', 90, iso(NOW + timedelta(days=4)))]}
     row = next(row for row in claude.parse(unmatched)['windows'] if row['name'] == 'weekly_all:1')
     assert row['window_minutes'] is None and row['advisory'] is True
     replies['pro'] = unmatched
@@ -609,15 +582,15 @@ AGY_USAGE = {'conversation_id': '', 'status': 'SUCCESS', 'response': '...', 'com
     'description': 'Within each group, models share a weekly limit and a 5-hour limit.',
     'groups': [{'name': 'Gemini Models', 'description': 'Models within this group: Gemini Flash, Gemini Pro', 'buckets': [
                    {'id': 'gemini-weekly', 'name': 'Weekly Limit Remaining', 'window': 'weekly',
-                    'remaining_fraction': 0, 'reset_time': '2026-10-24T04:01:07Z'},
+                    'remaining_fraction': 0, 'reset_time': iso(NOW + timedelta(days=2))},
                    {'id': 'gemini-5h', 'name': 'Five Hour Limit Remaining', 'window': '5h', 'disabled': True,
                     'remaining_fraction': 1}]},
                {'name': 'Claude and GPT models', 'description': 'Models within this group: Claude Opus, Claude Sonnet, GPT-OSS',
                 'buckets': [
                    {'id': '3p-weekly', 'name': 'Weekly Limit Remaining', 'window': 'weekly',
-                    'remaining_fraction': 0.9330692291259766, 'reset_time': '2026-10-28T15:50:17Z'},
+                    'remaining_fraction': 0.9330692291259766, 'reset_time': iso(NOW + timedelta(days=6))},
                    {'id': '3p-5h', 'name': 'Five Hour Limit Remaining', 'window': '5h',
-                    'remaining_fraction': 0.8661383986473083, 'reset_time': '2026-10-22T13:40:59Z'}]}]}}}
+                    'remaining_fraction': 0.8661383986473083, 'reset_time': iso(NOW + timedelta(hours=2))}]}]}}}
 AGY_EMAIL = 'second.account@example.com'
 
 
@@ -660,14 +633,15 @@ def test_agy_usage_reports_each_pool_window_and_skips_disabled_buckets(quota):
     assert [(row['name'], row['raw_kind'], row['used_percent'], row['window_minutes']) for row in rows] == [
         ('gemini.weekly', 'gemini-weekly', 100, WEEK), ('claude.weekly', '3p-weekly', 6.69, WEEK),
         ('claude.5h', '3p-5h', 13.39, 300)]
-    assert rows[0]['reset_at'] == '2026-10-24T04:01:07Z'
+    assert rows[0]['reset_at'] == iso(NOW + timedelta(days=2))
     assert parsed['unreported'] == ['gemini.5h']
 
 
 @pytest.mark.parametrize('fraction', [True, False, -0.1, 1.5, 10 ** 400, float('nan'), '0.5', None])
 def test_agy_invalid_remaining_fractions_are_unreported_never_0_or_100_percent(quota, fraction):
     payload = {'command': {'data': {'groups': [{'name': 'Claude and GPT models', 'buckets': [
-        {'id': '3p-weekly', 'window': 'weekly', 'remaining_fraction': fraction, 'reset_time': '2026-10-28T15:50:17Z'}]}]}}}
+        {'id': '3p-weekly', 'window': 'weekly', 'remaining_fraction': fraction,
+         'reset_time': iso(NOW + timedelta(days=6))}]}]}}}
     assert quota.provider('agy').parse(payload, NOW) == {'windows': [], 'unreported': ['claude.weekly']}
 
 
@@ -992,9 +966,11 @@ def test_peer_readings_of_one_account_keep_the_freshest(quota):
 
 def test_reserve_snapshot_lifts_a_stale_claude_usage_cooldown(quota):
     cooldowns = {'claude/*': {'account': 'default', 'host': 'studio', 'adapter': 'claude', 'model': '*', 'status': 'usage_limited',
-                              'recorded_at': iso(NOW - timedelta(hours=1)), 'cooling_until': '2026-10-22T22:00:00Z'},
+                              'recorded_at': iso(NOW - timedelta(hours=1)),
+                              'cooling_until': iso(NOW + timedelta(hours=10))},
                  'claude/opus': {'account': 'default', 'host': 'studio', 'adapter': 'claude', 'model': 'opus', 'status': 'rate_limited',
-                                 'recorded_at': iso(NOW - timedelta(hours=1)), 'cooling_until': '2026-10-22T22:00:00Z'}}
+                                 'recorded_at': iso(NOW - timedelta(hours=1)),
+                                 'cooling_until': iso(NOW + timedelta(hours=10))}}
     snapshot(quota, 'claude', [window(3, 300, timedelta(hours=2), 'five_hour'), window(20, WEEK, timedelta(days=4))],
              observed=NOW - timedelta(minutes=5))
     assert quota.route_states(NOW)['claude']['state'] == 'reserve'
@@ -1032,7 +1008,7 @@ def test_exhausted_opencode_go_window_cools_only_go_models_not_free_zen_models(q
 
 
 def test_both_claude_accounts_exhausted_block_routing_until_reset_then_lift(quota, tmp_path):
-    reset = datetime(2026, 10, 28, 22, 0, tzinfo=UTC)  # Thursday 08:00 AEST
+    reset = NOW + timedelta(days=6, hours=10)
     configure(tmp_path, {'accounts': {'claude': {'max-a': {'identity_dir': '~/.claude'},
                                                  'max-b': {'identity_dir': '~/.claude-b'}}}})
     for label, active in (('max-a', True), ('max-b', False)):
@@ -1045,7 +1021,7 @@ def test_both_claude_accounts_exhausted_block_routing_until_reset_then_lift(quot
     assert quota.apply_to_cooldowns({}, reset + timedelta(minutes=1)) == {}
 
 
-def test_exhausted_window_cools_the_provider_until_reset_and_deficit_is_report_only(quota):
+def test_exhausted_window_cools_the_provider_until_reset_and_ahead_of_pace_is_report_only(quota):
     snapshot(quota, 'codex', [window(100, 300, timedelta(hours=3), 'primary')])
     cooled = quota.apply_to_cooldowns({}, NOW)
     assert cooled['codex/*']['cooling_until'] == iso(NOW + timedelta(hours=3))
@@ -1053,7 +1029,7 @@ def test_exhausted_window_cools_the_provider_until_reset_and_deficit_is_report_o
     snapshot(quota, 'codex', [window(64.2, WEEK, timedelta(hours=135.7), 'secondary')])
     assert quota.apply_to_cooldowns({}, NOW) == {}
     state = quota.route_states(NOW)['codex']
-    assert state['state'] == 'deficit' and 'runs out' in state['summary']
+    assert state['state'] == 'ahead_of_pace' and 'allowance lasts about' in state['summary']
 
 
 CREDITS = [{'kind': 'credits', 'balance': 27406.21, 'unlimited': False, 'currency': None, 'unit': 'credits',
@@ -1122,6 +1098,7 @@ def test_a_refused_allowance_with_no_future_reset_cools_for_a_bounded_wait(quota
     configure(tmp_path, {'quota': {'unknown_reset_cooldown_seconds': configured} if configured else {}})
     snapshot(quota, 'codex', [window(60, WEEK, reset_in, 'primary')], usage_credits=None,
              allowance={'ordinary_usage_allowed': False})
+    assert quota.route_states(NOW)['codex']['state'] == 'exhausted'
     until = iso(NOW + timedelta(seconds=configured or 3600))
     assert quota.route_states(NOW)['codex']['cooling_until'] == until
     assert quota.apply_to_cooldowns({}, NOW)['codex/*']['cooling_until'] == until
@@ -1243,7 +1220,7 @@ def test_provider_reset_overrides_later_usage_cooldown_and_identity_switch_reche
     assert quota.apply_to_cooldowns(cooldown, NOW) == cooldown  # account a is retained after switching to b
 
 
-@pytest.mark.parametrize('reset_in', [None, timedelta(hours=8), timedelta(hours=-1)])
+@pytest.mark.parametrize('reset_in', [None, -timedelta(hours=1), timedelta(hours=8)])
 def test_exhaustion_takes_precedence_over_missing_or_inconsistent_timing(quota, reset_in):
     state = quota.pace(window(100, 300, reset_in), NOW)
     assert state['state'] == 'exhausted' and state['headroom_percent'] == 0
@@ -1427,13 +1404,13 @@ def test_main_json_flag_emits_valid_report_contract(quota, capsys, monkeypatch):
     assert payload['schema'] == quota.REPORT_SCHEMA == 'provenant.quota.report.v1'
     assert payload['host'] == 'studio' and payload['enabled'] is True
     codex = next(row for row in payload['accounts'] if row['provider'] == 'codex')
-    assert codex['account'] == 'default' and codex['state'] == 'deficit'
+    assert codex['account'] == 'default' and codex['state'] == 'ahead_of_pace'
     assert codex['status'] == 'ok' and codex['active'] is True and codex['error'] is None
     assert codex['plan'] is None and codex['unreported'] == [] and codex['observed_at'] == iso(NOW)
     [win] = codex['windows']
     assert win['name'] == 'seven_day' and win['used_percent'] == pytest.approx(64.2)
     assert win['window_minutes'] == WEEK and win['reset_at'] == iso(NOW + timedelta(hours=135.7))
-    assert win['pace']['state'] == 'deficit'
+    assert win['pace']['state'] == 'ahead_of_pace'
     assert {'state', 'summary', 'delta_percent', 'runs_out_at', 'headroom_percent'} <= set(win['pace'])
 
 
@@ -1529,7 +1506,7 @@ def test_report_schema_is_unchanged_apart_from_optional_schedule_fields(quota, m
         assert payload['schema'] == 'provenant.quota.report.v1' and payload['refreshing'] == []
         codex, = payload['accounts']
         assert set(codex) == ROW_KEYS | {'schedule'}
-        assert (codex['state'], codex['status'], codex['observed_at']) == ('deficit', 'ok', iso(NOW))
+        assert (codex['state'], codex['status'], codex['observed_at']) == ('ahead_of_pace', 'ok', iso(NOW))
         assert set(codex['schedule']) == SCHEDULE_KEYS
         assert codex['schedule']['error_kind'] is None and codex['schedule']['source_kind'] == 'fetch'
         assert payload['next_due_at'] == codex['schedule']['next_due_at']
@@ -1952,7 +1929,7 @@ def test_codex_reports_its_usage_credit_balance_for_the_series(quota):
 
 @pytest.mark.parametrize('scale', [1, 1000])
 def test_claude_limit_with_a_numeric_reset_still_matches_the_window_it_repeats(quota, scale):
-    reset = datetime(2026, 10, 28, 10, tzinfo=UTC)
+    reset = NOW + timedelta(days=5)
     payload = {'seven_day': {'utilization': 3.0, 'resets_at': reset.isoformat()},
                'limits': [claude_limit('weekly_all', 'unlisted', 3, reset.timestamp() * scale)]}
     rows = {row['name']: row for row in quota.provider('claude').parse(payload)['windows']}
@@ -1969,7 +1946,7 @@ def test_claude_parse_loads_quota_schedule_itself_when_it_is_not_registered(monk
     monkeypatch.delitem(sys.modules, 'quota_schedule', raising=False)
     try:
         claude = load('claude_alone', ROOT / 'scripts/quota_providers/claude.py')
-        reset = datetime(2026, 10, 28, 10, tzinfo=UTC)
+        reset = NOW + timedelta(days=5)
         payload = {'seven_day': {'utilization': 3.0, 'resets_at': reset.isoformat()},
                    'limits': [claude_limit('weekly_all', 'unlisted', 3, reset.timestamp())]}
         rows = {row['name']: row for row in claude.parse(payload)['windows']}
@@ -1981,11 +1958,11 @@ def test_claude_parse_loads_quota_schedule_itself_when_it_is_not_registered(monk
 @pytest.mark.parametrize('short,weekly,expected', [
     ((10, 20), (10, 35), 'pro'),  # More allowance would expire unused on Pro.
     ((100, 20), (10, 35), 'max'),  # An exhausted short window excludes weekly reserve.
-    ((10, 20), (70, 35), 'max'),  # A weekly deficit is skipped.
+    ((10, 20), (70, 35), 'max'),  # Spend projected unused allowance first.
     ((10, 20), (100, 35), 'max'),
     ((10, 100), (70, 35), 'pro'),  # An exhausted short window is never chosen.
-    ((10, 20), (70, 80), 'pro'),  # Among deficits, choose the least deficit.
-    ((10, 10), (60, 90), 'pro'),  # Label order cannot outweigh deficit size.
+    ((10, 20), (70, 80), 'pro'),  # Among ahead-of-pace windows, prefer the slower burn.
+    ((10, 10), (60, 90), 'pro'),  # Label order cannot outweigh projected burn.
     ((10, 10), (10, 10), 'max'),  # Stable label tie-break, independent of input order.
 ])
 def test_choose_claude_account_from_cached_windows(quota, short, weekly, expected):
@@ -2040,7 +2017,7 @@ def test_choose_claude_account_refuses_all_exhausted(quota, five, seven):
 
 @pytest.mark.parametrize('used,expected', [(10, 'known'), (70, 'unknown'), (100, 'unknown')])
 @pytest.mark.parametrize('unknown', [None, {'status': 'error'}, {'status': 'ok', 'windows': []}])
-def test_choose_claude_account_places_unknown_between_reserve_and_deficit(quota, used, expected, unknown):
+def test_choose_claude_account_places_unknown_below_usable_allowance(quota, used, expected, unknown):
     values = {'unknown': unknown, 'known': {'status': 'ok', 'windows': [
         window(10, 300, timedelta(hours=2), 'five_hour'),
         window(used, WEEK, timedelta(days=3.5)),
@@ -2067,6 +2044,14 @@ def test_choose_claude_account_releases_exhaustion_after_reset(quota):
     assert quota.choose_claude_account(values, NOW) == 'reset'
 
 
+@pytest.mark.parametrize('reset_in', [timedelta(0), -timedelta(hours=1)])
+def test_reset_weekly_allowance_ranks_above_an_alphabetically_earlier_unknown(quota, reset_in):
+    values = {'aaa': None, 'zreset': {'status': 'ok', 'windows': [
+        window(10, 300, timedelta(hours=2), 'five_hour'), window(80, WEEK, reset_in)]}}
+    assert quota.pace(window(0, WEEK, reset_in), NOW)['state'] == 'not_started'
+    assert quota.choose_claude_account(values, NOW) == 'zreset'
+
+
 def test_choose_claude_account_partial_reading_still_excludes_known_exhaustion(quota):
     values = {'spent': {'status': 'ok', 'windows': [
         window(100, 300, timedelta(hours=2), 'five_hour'),
@@ -2086,3 +2071,80 @@ def test_choose_claude_account_incomplete_weekly_pace_ranks_as_unknown(quota, mi
         window(used, WEEK, timedelta(days=3.5)),
     ]}}
     assert quota.choose_claude_account(values, NOW) == expected
+
+
+@pytest.mark.parametrize('reset_in', [timedelta(0), timedelta(hours=-1)])
+def test_fresh_exhausted_reading_at_reset_remains_exhausted(quota, reset_in):
+    snapshot(quota, 'codex', [window(100, WEEK, reset_in, 'primary')])
+    result = quota.route_states(NOW)['codex']
+    assert result['state'] == 'exhausted'
+    assert 'stale' not in result['summary']
+    assert quota.apply_to_cooldowns({}, NOW)['codex/*']['cooling_until'] == iso(NOW + timedelta(hours=1))
+
+
+@pytest.mark.parametrize('resets,expected', [(0, 'unknown'), (1, 'unknown'), (6, 'burst')])
+def test_ahead_of_pace_with_allowance_ranks_above_unknown_cache(quota, resets, expected):
+    values = {'unknown': None, 'burst': {'status': 'ok', 'credits': {'reset_credits': resets}, 'windows': [
+        window(10, 300, timedelta(hours=2), 'five_hour'),
+        window(33, WEEK, timedelta(hours=159)),
+    ]}}
+    assert quota.choose_claude_account(values, NOW) == expected
+
+
+def test_ahead_of_pace_clears_an_older_refusal_cooldown(quota):
+    snapshot(quota, 'codex', [window(33, WEEK, timedelta(hours=159), 'primary')], usage_credits=CREDITS)
+    assert quota.apply_to_cooldowns(cooldown('usage_limited', NOW - timedelta(hours=1)), NOW) == {}
+
+
+@pytest.mark.parametrize('used', [0, 30])
+@pytest.mark.parametrize('observed_in', [-timedelta(hours=1), timedelta(0)])
+def test_fresh_lapsed_window_leaves_cooldown_recovery_to_current_allowance(quota, used, observed_in):
+    snapshot(quota, 'codex', [window(used, 300, -timedelta(hours=1), 'primary'),
+                              window(10, WEEK, timedelta(days=3.5), 'secondary')], observed=NOW + observed_in)
+    state = quota.route_states(NOW)['codex']
+    assert state['state'] == 'reserve' and state['has_headroom'] is True
+    assert state['summary'].startswith('secondary:')
+    assert quota.apply_to_cooldowns(cooldown('usage_limited', NOW - timedelta(hours=2)), NOW) == {}
+
+
+def test_route_summary_includes_manually_banked_resets(quota):
+    snapshot(quota, 'codex', [window(33, WEEK, timedelta(hours=159), 'primary')])
+    quota.change_credits('codex', 'default', 1)
+    assert '1 banked reset' in quota.route_states(NOW)['codex']['summary']
+
+
+@pytest.mark.parametrize('credit,expected', [(None, 'unknown'), ({'balance': 26000}, 'unknown'),
+                                            ({'unlimited': True}, 'shortage')])
+def test_weekly_shortage_ranks_below_unknown_unless_credit_runway_is_known(quota, credit, expected):
+    values = {'unknown': None, 'shortage': {'status': 'ok', 'usage_credits': [credit] if credit else None,
+              'windows': [window(10, 300, timedelta(hours=2), 'five_hour'),
+                          window(95, WEEK, timedelta(days=3))]}}
+    assert quota.choose_claude_account(values, NOW) == expected
+
+
+@pytest.mark.parametrize('refused', [False, True])
+@pytest.mark.parametrize('balance', [60000, 100000])
+def test_finite_credit_runway_requires_current_draw_and_enough_balance(quota, refused, balance):
+    values = {'aaa': None, 'zcovered': {
+        'status': 'ok', 'observed_at': iso(NOW),
+        'allowance': {'ordinary_usage_allowed': not refused},
+        'usage_credits': [{'balance': balance, 'unit': 'credits'}],
+        'credit_anchor': {'balance': balance + 1000, 'observed_at': iso(NOW - timedelta(hours=1))},
+        'windows': [window(10, 300, timedelta(hours=2), 'five_hour'), window(95, WEEK, timedelta(days=3))]}}
+    assert quota.choose_claude_account(values, NOW) == ('zcovered' if refused and balance == 100000 else 'aaa')
+
+
+@pytest.mark.parametrize('used,reset_in,clears', [(94, timedelta(days=3), True),
+                                                (95, timedelta(days=3), False),
+                                                (97, timedelta(days=3), False),
+                                                (97, timedelta(hours=1), True)])
+def test_usage_refusal_needs_headroom_or_allowance_through_reset(quota, used, reset_in, clears):
+    snapshot(quota, 'codex', [window(used, WEEK, reset_in, 'primary')])
+    refused = cooldown('usage_limited', NOW - timedelta(minutes=10))
+    assert quota.apply_to_cooldowns(refused, NOW) == ({} if clears else refused)
+
+
+def test_unstarted_weekly_allowance_still_ranks_above_unknown(quota):
+    values = {'unknown': None, 'unstarted': {'status': 'ok', 'windows': [
+        window(10, 300, timedelta(hours=2), 'five_hour'), window(0, WEEK)]}}
+    assert quota.choose_claude_account(values, NOW) == 'unstarted'

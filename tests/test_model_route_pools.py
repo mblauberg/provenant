@@ -816,7 +816,7 @@ def test_every_free_sign_keeps_an_adapter_wide_false_from_clearing_an_unknown_mo
             router, {**SEED, "adapters": {**SEED["adapters"], "opencode": adapter}}, "opencode", model), model
 
 
-def _quota_reading(quota, provider, windows, observed, account="default"):
+def _quota_reading(quota, provider, windows, observed, account="default", **extra):
     """A cached provider quota reading, as `provenant quota` leaves it (#1030)."""
     stamp = observed.isoformat().replace("+00:00", "Z")
     quota.save_snapshot({
@@ -825,11 +825,11 @@ def _quota_reading(quota, provider, windows, observed, account="default"):
         "status": "ok", "error": None, "unreported": [], "credits": None,
         "windows": [{"name": name, "raw_kind": name, "used_percent": used, "window_minutes": minutes,
                      "reset_at": (observed + reset_in).isoformat().replace("+00:00", "Z"), "window_start": None}
-                    for name, used, minutes, reset_in in windows]}, quota.provider(provider).default_identity())
+                    for name, used, minutes, reset_in in windows], **extra}, quota.provider(provider).default_identity())
 
 
-def test_routes_follow_provider_quota_over_stale_cooldowns_and_report_deficit(tmp_path, monkeypatch, capsys):
-    """Claude at 3% must not stay cooling on a stale usage cooldown; Codex 45% over pace stays available."""
+def test_routes_preserve_weights_for_burst_with_reserves_and_block_real_shortage(tmp_path, monkeypatch, capsys):
+    """Claude at 3% must not stay cooling on a stale usage cooldown; a Codex burst with reserves stays available."""
     env = overlay_environment(tmp_path, {})
     home, state = tmp_path / "home", tmp_path / "state"
     env.update(HOME=str(home), CLAUDE_CONFIG_DIR=str(home / ".claude"), CODEX_HOME=str(home / ".codex"),
@@ -841,7 +841,7 @@ def test_routes_follow_provider_quota_over_stale_cooldowns_and_report_deficit(tm
     hosts.parent.mkdir(parents=True, exist_ok=True)
     hosts.write_text(json.dumps({'schema_version': 1, 'local_host': 'studio'}))
     state.mkdir()
-    now = datetime(2026, 10, 22, 12, tzinfo=timezone.utc)
+    now = datetime.now(timezone.utc)
 
     class FixedDatetime(datetime):
         @classmethod
@@ -879,7 +879,9 @@ def test_routes_follow_provider_quota_over_stale_cooldowns_and_report_deficit(tm
     assert exec_routing.cooling("claude", "claude-opus-5-5")["cooling_until"] == later
     _quota_reading(quota, "claude", [("five_hour", 3, 300, timedelta(hours=2)),
                                      ("seven_day", 20, 10080, timedelta(days=4))], now - timedelta(minutes=5))
-    _quota_reading(quota, "codex", [("secondary", 64.2, 10080, timedelta(hours=135.7))], now - timedelta(minutes=5))
+    before = json.loads(routes("--json"))
+    _quota_reading(quota, "codex", [("secondary", 33, 10080, timedelta(hours=159))], now,
+                   usage_credits=[{"balance": 26000, "unit": "credits"}], credits={"reset_credits": 1})
     document = json.loads(routes("--json"))
     entries = [entry for pool_entries in document["routes"].values() for entry in pool_entries]
     claude = [entry for entry in entries if entry["model"].startswith("claude/")]
@@ -887,9 +889,13 @@ def test_routes_follow_provider_quota_over_stale_cooldowns_and_report_deficit(tm
     assert claude and all(entry["availability"] == "available" for entry in claude)
     assert claude[0]["quota"]["state"] == "reserve"
     assert codex and all(entry["availability"] == "available" for entry in codex)
-    assert codex[0]["quota"]["state"] == "deficit" and "runs out in 18h" in codex[0]["quota"]["summary"]
+    assert codex[0]["quota"]["state"] == "ahead_of_pace"
+    assert "allowance lasts about 18h" in codex[0]["quota"]["summary"]
+    assert "26,000 credits" in codex[0]["quota"]["summary"] and "1 banked reset" in codex[0]["quota"]["summary"]
+    assert {name: [(entry["model"], entry["weight"]) for entry in pool] for name, pool in document["routes"].items()} == {
+        name: [(entry["model"], entry["weight"]) for entry in pool] for name, pool in before["routes"].items()}
     text = routes()
-    assert any(line.lstrip().startswith("codex/") and "[quota secondary: 45% in deficit" in line for line in text.splitlines())
+    assert any(line.lstrip().startswith("codex/") and "[quota secondary: ahead of pace" in line for line in text.splitlines())
 
     # An exhausted window cools the provider until its reset, in routes and in dispatch's cooldown check.
     reset = now + timedelta(hours=3)
