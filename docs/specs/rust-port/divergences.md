@@ -1095,3 +1095,23 @@ The source revision above is unchanged; CLI rendering remains an edge task.
   repair and passes afterwards; it runs on macOS as well as Linux.
 - No intentional source behavior change. The wider RP-1302 fallback error and
   size-bound differences remain open; this does not complete the unit.
+
+### RP-SUP-PS-BUFFER: Fabric ps maxBuffer capture (open partial scope)
+
+- Class: `library`; not accepted. Source/oracle baseline:
+  `7475ff01e437ec51c760b852516c21a5281cf9c6`, Node 24.21.0, rulebook v4.
+- Node `execFileSync` uses a pipe and exposes overflow-buffer bytes plus
+  `code`, `status`, `signal` and `stdout` on ENOBUFS. A 1,048,577-byte fixture
+  exposed status 0 and 1,048,577 captured bytes. The Rust utility runner uses
+  a file-backed spool, polls its size and retains a capped head/tail view.
+  It can overshoot the threshold on disk between polls and does not reproduce
+  Node's exact overflow stdout or associated termination observation.
+- Native review reproduced the mismatch and blocked a full claim for
+  `runtime/fabric/src/ps.mjs#unit-01`. Typed child errors now retain code,
+  exit status separately from signal, stdout size and truncation evidence;
+  signal/timeout fixtures compare directly against Node. This does not fix
+  the remaining maxBuffer mismatch.
+- Disposition: keep the unit partial and absent from `ported.txt`/PR `Units:`.
+  No command uses the crate. Completing the unit requires a bounded pipe
+  adapter and exact overflow/failure differentials before cut-over; no
+  behavior change is accepted here.

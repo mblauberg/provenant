@@ -22,7 +22,7 @@ custody, receipt publication and registry integration stay with their owners.
 | `runtime/fabric/src/process-identity.ts#unit-01` | Pure identity matching, conservative liveness, group attribution, owner deduplication and a group termination reducer with signal-error fencing | Partial: Fabric registry, run control, publication, reaper and S2 effect adapters remain with the source owners |
 | `skills/_shared/bounded_process.py#unit-01` | File-backed merged/separated capture, independent stream bounds, timeout and post-exit group cleanup, public `stop_process_group` over `UtilityChild`, strict spawn/PATH/ordered-environment/pass-fd handling, negative signal status and `argument_error` rendering | Library behavior is implemented; `BudgetArgumentParser` stderr writes and exit(2) belong to the CLI edge. Unrestricted process-group conformance remains required |
 | `skills/orchestrate/scripts/process_info.py#unit-01` | Process records, Linux stat/task-tree/boot observations, Darwin libproc/sysctl/Mach observations, tty names, OS argv, shell quoting, canonical local dates and Python finite-float duration formatting | Private pure compatibility helpers await the core integration pass; retained JSON encoding of surrogate-containing OS text is deliberately not claimed |
-| `workspace:front-door-syscalls` | Safe strict execve, real-ID access and reentrant passwd lookup, with process fixtures | Partial: root binary still contains its original unsafe calls. Replacing/removing those calls is outside this lane's write scope and would be integration/cut-over |
+| `workspace:front-door-syscalls` | Safe strict execve, real-ID access and reentrant passwd lookup, with process fixtures | Partial: root binary still contains its original unsafe calls. Source edits are authorised, but the required root Cargo.toml dependency/link is outside this lane's write scope |
 | `skills/orchestrate/scripts/process_info.py#unit-02` | Native process/census/start-time observation with explicit clocks; bounded system-ps fallbacks, required identity, process disappearance and census failures | Partial: fallback output has a 1 MiB bound and typed timeout/I/O errors; exact Python fallback refusal/exception rendering needs integration (RP-1302) |
 | `skills/orchestrate/scripts/bin/ps#unit-01` | BSD/POSIX option forms and integer parsing, selection/deduplication/sort, layouts/headers, tty filtering, unreadable/sysctl rows, Unicode visibility, locale/padding, stderr/exit values and quiet broken-pipe writing | CLI owns locale input and SIGPIPE disposition; process-census error rendering inherits the partial observation adapter. No executable is added |
 
@@ -106,8 +106,8 @@ offset duplication, bounded reads, file/directory fsync, nonblocking locks,
 OS-entropy temporary names, symlink creation and atomic replacement. No-replace
 and exchange use Linux renameat2 and Darwin renameatx_np with EXCL/SWAP flags;
 unsupported filesystems return the OS error, without an unsafe fallback.
-Verified directory opens compare before/opened/after identity and the parent's
-device. Explicit final-link following is a separate opt-in directory operation.
+Verified directory opens compare before/opened/after identity and the original
+anchor device. Explicit final-link following is a separate opt-in directory operation.
 
 These primitives satisfy the pending confinement custody and records storage
 contracts without changing their crates. Policy adapters, recursive traversal,
@@ -122,14 +122,21 @@ metadata, duplicate offsets, bounded reads, FIFO refusal and lock contention.
 Invalid UTF-8 names are passed unchanged to the OS; when macOS refuses one,
 the fixture verifies the same refusal from direct standard-library creation.
 
-`fabric_ps` ports `runtime/fabric/src/ps.mjs#unit-01`: system ps first, retry
+`fabric_ps` partially ports `runtime/fabric/src/ps.mjs#unit-01`: system ps first, retry
 only spawn EPERM/EACCES/ENOENT while the bundled shim exists, and fallback-only
 PATH defaulting. It retains the five-second deadline, ignored stdin/stderr,
-Node UTF-8 replacement, nonzero/signal failures, raw newlines and the default
-1 MiB stdout failure. The utility loop has an opt-in spool-size stop so overflow
+Node UTF-8 replacement, raw newlines and typed child failures carrying code,
+status, signal and captured stdout. Signal/timeout error evidence has a direct
+Node differential. The utility loop has an opt-in spool-size stop so overflow
 followed by a running process reports output-limit failure instead of waiting
 for the timeout. The Python bounded runner keeps its existing defaults.
 The caller provides its installed shim path; no runtime caller switches here.
+The unit remains partial: Node's precise maxBuffer overflow capture and a hard
+pipe-based cap are not ported. The spool is sampled for overflow; it can grow
+beyond the threshold between observations, and retained failure stdout uses
+head/tail truncation rather than Node's overflow buffer. This is an open library
+mismatch, not an accepted divergence. It blocks completion/cut-over, and no
+runtime ps unit is added to the completion ledger.
 
 All supervisor Python differentials now use `-I`, an explicit allowlisted
 environment and bounded utility waits; Node uses the same shared helper and
@@ -170,3 +177,11 @@ not source changes. Rulebook v4; author route `codex/gpt-6.1-sol@high`.
 The root syscall unit remains partial: exec.rs/resolve.rs are authorised, but
 linking the existing supervisor wrappers requires a root Cargo.toml dependency
 change outside this lane's write scope. No command is switched here.
+
+Native adversarial batch-2 reviews covered the filesystem custody/syscall
+contract and source parity. Review repairs made enumeration a lazy owning
+iterator, fixed final-symlink refusal for slash-suffixed anchors, and added
+explicit identity-replacement/cross-device refusal fixtures. The filesystem
+review is clean. Source-parity review keeps the graph units partial and the
+Node maxBuffer mismatch open; the ungraphed filesystem foundation is complete.
+The chair remains responsible for cross-family assurance and cut-over judges.
