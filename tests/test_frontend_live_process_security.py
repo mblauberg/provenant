@@ -1,12 +1,19 @@
 import json
 import os
 from pathlib import Path
-import subprocess
 import time
 
-from test_frontend_live_server_security import LiveServer, _request
-from test_frontend_source_security import _run_inject
-from ui_ux_live_test_support import LIVE, ROOT, SERVER, SCRIPTS, TOKEN, write_live_config
+from ui_ux_live_test_support import (
+    LIVE,
+    ROOT,
+    SERVER,
+    TOKEN,
+    LiveServer,
+    http_request,
+    run_inject,
+    run_node,
+    write_live_config,
+)
 
 
 _write_config = write_live_config
@@ -28,7 +35,7 @@ def test_live_inject_preflights_every_anchor_before_changing_any_file(tmp_path: 
     bad.write_text(bad_original)
     _write_config(tmp_path, ["good.html", "bad.html"])
 
-    result = _run_inject(tmp_path, "--port", "8400", "--token", TOKEN)
+    result = run_inject(tmp_path, "--port", "8400", "--token", TOKEN)
 
     assert result.returncode != 0
     assert json.loads(result.stderr)["error"] == "mutation_preflight_failed"
@@ -41,15 +48,7 @@ def test_live_entrypoint_injects_private_server_token_without_logging_it(tmp_pat
     page.write_text("<html><body>safe</body></html>\n")
     _write_config(tmp_path, ["index.html"])
     try:
-        result = subprocess.run(
-            ["node", str(LIVE)],
-            cwd=tmp_path,
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=15,
-            env=_runtime_env(),
-        )
+        result = run_node(LIVE, cwd=tmp_path, timeout=15, env=_runtime_env())
         assert result.returncode == 0, result.stderr
         payload = json.loads(result.stdout)
         assert payload["ok"] is True
@@ -68,15 +67,7 @@ def test_live_entrypoint_injects_private_server_token_without_logging_it(tmp_pat
         assert agent_token not in result.stdout
         assert agent_token not in result.stderr
     finally:
-        subprocess.run(
-            ["node", str(SERVER), "stop"],
-            cwd=tmp_path,
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=10,
-            env=_runtime_env(),
-        )
+        run_node(SERVER, "stop", cwd=tmp_path, timeout=10, env=_runtime_env())
 
 
 def test_live_entrypoint_emits_bounded_context_metadata_without_document_bodies(
@@ -90,15 +81,7 @@ def test_live_entrypoint_emits_bounded_context_metadata_without_document_bodies(
     (tmp_path / "PRODUCT.md").write_text(f"# Product\n\n{product_sentinel}\n## Users\n")
     (tmp_path / "DESIGN.md").write_text(f"# Design\n\n{design_sentinel}\n## Components\n")
     try:
-        result = subprocess.run(
-            ["node", str(LIVE)],
-            cwd=tmp_path,
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=15,
-            env=_runtime_env(),
-        )
+        result = run_node(LIVE, cwd=tmp_path, timeout=15, env=_runtime_env())
 
         assert result.returncode == 0, result.stderr
         assert product_sentinel not in result.stdout
@@ -122,15 +105,7 @@ def test_live_entrypoint_emits_bounded_context_metadata_without_document_bodies(
         assert payload["metadataTruncation"]["productHeadings"]["total"] == 2
         assert payload["metadataTruncation"]["designHeadings"]["total"] == 2
     finally:
-        subprocess.run(
-            ["node", str(SERVER), "stop"],
-            cwd=tmp_path,
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=10,
-            env=_runtime_env(),
-        )
+        run_node(SERVER, "stop", cwd=tmp_path, timeout=10, env=_runtime_env())
 
 
 def test_live_entrypoint_stops_only_the_server_it_started_when_injection_fails(
@@ -142,15 +117,7 @@ def test_live_entrypoint_stops_only_the_server_it_started_when_injection_fails(
     bad.write_text("<html><main>bad anchor</main></html>\n")
     _write_config(tmp_path, ["good.html", "bad.html"])
 
-    result = subprocess.run(
-        ["node", str(LIVE)],
-        cwd=tmp_path,
-        check=False,
-        capture_output=True,
-        text=True,
-        timeout=15,
-        env=_runtime_env(),
-    )
+    result = run_node(LIVE, cwd=tmp_path, timeout=15, env=_runtime_env())
 
     assert result.returncode != 0
     payload = json.loads(result.stdout)
@@ -172,19 +139,11 @@ def test_live_entrypoint_does_not_stop_a_preexisting_server_when_injection_fails
     _write_config(tmp_path, ["index.html"])
 
     with LiveServer(tmp_path) as server:
-        result = subprocess.run(
-            ["node", str(LIVE)],
-            cwd=tmp_path,
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=15,
-            env=_runtime_env(),
-        )
+        result = run_node(LIVE, cwd=tmp_path, timeout=15, env=_runtime_env())
         assert result.returncode != 0
         payload = json.loads(result.stdout)
         assert payload["serverCleanup"] == "not-owned"
-        assert _request(f"{server.base_url}/health")[0] == 200
+        assert http_request(f"{server.base_url}/health")[0] == 200
 
 
 def test_live_server_foreground_logs_never_expose_its_bearer_token(tmp_path: Path) -> None:
