@@ -41,8 +41,8 @@ Crate tests translate policy assertions from `tests/test_provider_exec.py`
 the trusted_git policy exercised by provider confinement. Tests use explicit
 identities, fixture clocks and bytes. No assertion sleeps or patched globals.
 
-Four optional Python differential tests compare interface decisions, trusted
-Git records/grants, non-UTF-8 quarantine index framing, and custody publication
+Five optional Python differential tests compare interface decisions, trusted
+Git records/grants, non-UTF-8 quarantine index framing and caller order, and custody publication
 bytes/digest/tamper refusal. They
 skip when `python3` is absent. The custody differential deliberately compares
 only digest, bytes, retained symlink target bytes and refusal; virtual and real

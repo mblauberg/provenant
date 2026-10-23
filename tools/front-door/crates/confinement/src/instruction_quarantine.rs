@@ -89,8 +89,10 @@ pub fn restore_views(start: &InstructionSnapshot, target: Entries) -> RestoreVie
     }
 }
 
-/// Removals precede updates. BTree collections make unspecified set order deterministic.
-pub fn index_info(entries: &Entries, paths: &BTreeSet<OsString>, object_format: &str) -> Vec<u8> {
+/// Removals precede updates, preserving caller order within each group. The
+/// quarantine runtime supplies Python-sorted changes; raw-byte sorting differs
+/// from surrogateescaped string sorting for mixed UTF-8/non-UTF-8 names.
+pub fn index_info(entries: &Entries, paths: &[OsString], object_format: &str) -> Vec<u8> {
     let zero = "0".repeat(if object_format == "sha256" { 64 } else { 40 });
     let mut result = Vec::new();
     for path in paths.iter().filter(|path| !entries.contains_key(*path)) {
@@ -164,7 +166,7 @@ mod tests {
 
     #[test]
     fn index_info_removes_before_updates_and_preserves_nul_framing() {
-        let paths = BTreeSet::from(["a\t雪".into(), "z".into()]);
+        let paths = ["a\t雪".into(), "z".into()];
         let entries = entries(&[("a\t雪", "abc")]);
         for (format, size) in [("sha1", 40), ("sha256", 64)] {
             assert_eq!(
@@ -204,7 +206,7 @@ mod tests {
         assert!(quarantinable([&path]));
         assert_eq!(restored.disk, target);
         assert_eq!(restored.integrated, BTreeSet::from([deleted.clone()]));
-        let framed = index_info(&restored.index, &BTreeSet::from([path, deleted]), "sha1");
+        let framed = index_info(&restored.index, &[deleted, path], "sha1");
         let Some(expected) = crate::python::oracle(
             r#"
 import instruction_quarantine, os
@@ -218,5 +220,41 @@ print(json.dumps(list(instruction_quarantine._index_info(entries, sorted([path, 
             return;
         };
         assert_eq!(serde_json::to_value(framed).unwrap(), expected);
+    }
+    #[test]
+    fn index_framing_preserves_python_caller_order_for_mixed_names() {
+        use std::os::unix::ffi::OsStringExt;
+        // U+0080 precedes surrogateescaped U+DC80 in Python's sorted(changes).
+        // Unix raw bytes would sort the invalid 80 byte first instead.
+        let paths = [
+            OsString::from(".agents/\u{80}"),
+            OsString::from_vec(b".agents/\x80".to_vec()),
+        ];
+        let entries: Entries = paths
+            .iter()
+            .cloned()
+            .map(|path| (path, Entry("100644".into(), "a".repeat(40))))
+            .collect();
+        let Some(expected) = crate::python::oracle(
+            r#"
+import instruction_quarantine, os
+paths=sorted([os.fsdecode(b'.agents/\x80'), '.agents/\u0080'])
+entries={p: ('100644', 'a'*40) for p in paths}
+print(json.dumps(list(instruction_quarantine._index_info(entries, paths, '0'*40))))
+"#,
+            &serde_json::json!({}),
+        ) else {
+            return;
+        };
+        assert_eq!(
+            serde_json::to_value(index_info(&entries, &paths, "sha1")).unwrap(),
+            expected
+        );
+        // The interface also retains an explicitly supplied non-sorted order.
+        let reversed = [paths[1].clone(), paths[0].clone()];
+        assert_ne!(
+            index_info(&entries, &paths, "sha1"),
+            index_info(&entries, &reversed, "sha1")
+        );
     }
 }

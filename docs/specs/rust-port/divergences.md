@@ -97,3 +97,17 @@ They form the current baseline; they are not newly discovered port mismatches.
   is integrated. No replacement JSON encoding is introduced.
 - Follow-up: retain the differential regression. Independent J2 schema and
   mutant evidence remains a cut-over gate; this lane does not claim it.
+
+### RP-2001 follow-up - Preserve index caller order
+
+- Repair review found a second framing mismatch: `BTreeSet<OsString>` sorted
+  raw bytes, while the Python runtime sorts surrogateescaped strings. Valid
+  U+0080 sorts before surrogateescaped byte `80` in Python; raw byte order
+  reverses them. Both produce the same Git index, but different input bytes.
+- Class: `bug` (fixed). Faulty repair: `c8eaafd0`; oracle unchanged from RP-2001.
+- Disposition: `index_info` now takes an ordered slice, preserving its caller's
+  order exactly as Python `_index_info` does. The later quarantine runtime
+  supplies Python-sorted changes; the interface does not silently sort them.
+- Evidence: `index_framing_preserves_python_caller_order_for_mixed_names`
+  compares the mixed-name framing with Python and checks caller order is
+  retained. This supplements the original invalid-byte regression.
