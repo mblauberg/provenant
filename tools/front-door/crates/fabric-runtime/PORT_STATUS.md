@@ -88,7 +88,7 @@ start). The crate remains inert.
 | `runtime/fabric/src/json-subprocess.ts#unit-01` | batch-1 bounded capture, failure precedence and response parsing | spawn/stdin transport, explicit deadlines and pre-spawn abort; arbitrary AbortSignal reasons and nullish defaults |
 | `runtime/fabric/src/lane-watch.ts#unit-01` | batch-1 relevant-file filter and explicit-clock wake/debounce policy | recursive watch registration, recovery, root refresh, cleanup and bounded wait transport |
 | `runtime/fabric/src/run-root.ts#unit-01` | canonical product root and fixture temp/scratch containment policy | executable-owner `X_OK` check and exact error behaviour |
-| `skills/orchestrate/scripts/fabric_policy.py#unit-01` | policy defaults/validation, exclusion containment, warning generation, and Python non-finite constants on typed policy fields | Python dict insertion order, exact `repr()` formatting, and non-finite values in generic/unknown fields; see RP-FR2-001 |
+| `skills/orchestrate/scripts/fabric_policy.py#unit-01` | policy defaults/validation, exclusion containment, warning generation, and Python non-finite constants on typed string policy fields | Python dict insertion order; exact `repr()` quote/control escaping; `nan`/infinity formatting in exclusions and generic values; see RP-FR2-001 |
 | `runtime/fabric/src/run-registry.ts#unit-01` | record contract is complete above | safe record reads/writes, process identity/liveness, cleanup and signal effects |
 
 The crate carries marked `pending` copies of core path resolution,

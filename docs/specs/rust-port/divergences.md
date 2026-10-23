@@ -1099,9 +1099,18 @@ The source revision above is unchanged; CLI rendering remains an edge task.
   adapter maps them to `null` so the source-compatible typed `default_branch`
   warning is preserved, but that changes unknown-field values and is not a
   general Python JSON number representation.
+- Non-finite values in `secret_scan_exclude` also remain different: for
+  `secret_scan_exclude: [NaN]`, Python warns with `nan`, while the Rust warning
+  currently renders `None` after the adapter maps the value to null.
+- Exact `repr()` parity also remains open for quote selection and control
+  escapes. For example, Python uses double quotes for a value containing an
+  apostrophe when that avoids escaping, and renders U+0001 as `\x01`; the
+  pending helper always uses single quotes and does not encode all control
+  characters this way.
 - Evidence: policy differential tests cover defaults, invalid scalar entries,
   containment, warning text and `NaN` on the typed `default_branch` field, but
-  do not exercise the above ordered/repr cases or non-finite unknown values.
+  do not exercise the above ordered/repr cases, non-finite exclusion entries
+  or non-finite unknown values.
   The difference is visible in returned tool settings and warnings.
 - Disposition: open; no behaviour change is accepted. Keep the unit partial
   until the `provenant-records` ordered Python-value codec and
