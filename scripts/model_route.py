@@ -717,18 +717,25 @@ def _listed_models(raw: str, adapter: str | None = None) -> list[str]:
     if adapter in {"codex", "kiro"}:
         return []  # These commands promise structured JSON.
     listed: list[str] = []
+    gap = False
     for line in raw.splitlines():
         line = line.strip()
-        if (not line or line in {"Fetching available models...", "Available models", "Available models:", "Models:"}
-                or line.startswith("Tip: use --model ")):
+        if not line:
+            gap = bool(listed)
+            continue
+        if line in {"Fetching available models...", "Available models", "Available models:", "Models:"} or line.startswith("Tip: use --model "):
             continue
         # IDs alone, or an ID followed by a display-name column.
-        match = re.fullmatch(r"(?:[-*]\s+)?([A-Za-z][A-Za-z0-9._/~-]*(?::[A-Za-z0-9._~-]+)*)(?:(?:\t| {2,}| - )\S.*)?", line)
+        match = re.fullmatch(r"(?:[-*]\s+)?([A-Za-z](?:[A-Za-z0-9._/~-]*[A-Za-z0-9])?(?::[A-Za-z0-9._~-]+)*)(?:(?:\t| {2,}| - )\S.*)?", line)
         if not match or (match[1] != "auto" and not re.search(r"[-/.\d]", match[1])):
-            continue
+            # Prose after the IDs and a blank line is a footer; anywhere else it is an error or notice.
+            if gap:
+                break
+            return []
         if adapter == "opencode" and "/" not in match[1]:
             return []
         listed.append(match[1])
+        gap = False
     return list(dict.fromkeys(listed))
 
 

@@ -5054,6 +5054,11 @@ def test_failed_opencode_refresh_keeps_the_last_good_listing(tmp_path, monkeypat
     assert code == 0 and cached["cache_hit"] and cached["models"] == ["a/one", "a/two"]
 
 
+@pytest.mark.parametrize("raw", ["Error.\n", "Loading...\nDone.\n", "auto - Auto\nError: sign in again\n", "auto - Auto\n\ngpt-5 - G\nError: sign in again\n"])
+def test_cursor_plain_text_probe_rejects_prose_without_a_listing(raw):
+    assert load_router()._listed_models(raw, "cursor") == []
+
+
 def test_opencode_resolve_caches_a_timed_out_refresh(tmp_path, monkeypatch):
     router = load_router()
     monkeypatch.setenv("AGENT_FABRIC_STATE_ROOT", str(tmp_path))
